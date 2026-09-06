@@ -464,8 +464,8 @@ mod probe_bound_tests {
     /// "answered non-zero" path and proving nothing about the bound.
     #[test]
     fn a_candidate_that_never_answers_is_given_up_on() {
-        let script = std::env::temp_dir()
-            .join(format!("marspot-probe-hang-{}", std::process::id()));
+        let script =
+            std::env::temp_dir().join(format!("marspot-probe-hang-{}", std::process::id()));
         std::fs::write(&script, b"#!/bin/sh\nsleep 60\n").unwrap();
         std::fs::set_permissions(
             &script,
@@ -479,7 +479,10 @@ mod probe_bound_tests {
         let took = t0.elapsed();
         std::fs::remove_file(&script).ok();
 
-        assert!(!verdict, "a candidate that does not answer is not startable");
+        assert!(
+            !verdict,
+            "a candidate that does not answer is not startable"
+        );
         assert!(
             took < budget * 8,
             "gave up after {took:?} against a {budget:?} budget — not a bound"

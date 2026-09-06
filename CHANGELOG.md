@@ -2934,7 +2934,24 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.180**
+Current: **0.12.181**
+
+### 0.12.181
+
+The same prediction deadline in the two panes L2 owns directly.
+
+L3 owns the pane the user is normally typing in, but core keeps its
+own sessions on the non-L3 path and mcli is its own binary — both call
+`predict_byte`, so both had the hole L3 0.11.74 describes: a program
+that echoes nothing leaves the guesses painted.
+
+Neither loop could simply poll for it.  Core folds the deadline into
+the `recv_timeout` it already computes, so it wakes on a 10 ms tick
+only while a guess is outstanding and keeps its one-second idle
+timeout otherwise.  mcli has no loop of its own — it is driven by
+AppKit — so a predicted keystroke arms exactly one wake-up through the
+event proxy.  CPU at rest, a hard project constraint, is unchanged in
+both: with nothing predicted there is nothing to wake for.
 
 ### 0.12.180
 
@@ -5679,7 +5696,82 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.71**
+Current: **0.11.74**
+
+### 0.11.74
+
+A guess nobody answers now comes back off the screen on its own.
+
+Local echo paints a keystroke ahead of the PTY and waits for the byte
+to come back: matching confirms it, anything else rolls it back.  Both
+verdicts need a byte, and a program can send none.  `sudo` is exactly
+that shape — echo off, and not one byte until Enter — so every
+character of a password stayed painted where it was typed.  Found while
+verifying 0.11.73 against a `stty -echo; cat > /dev/null` stand-in: ten
+keystrokes, ten strays, no confirmation and no rollback.
+
+A prediction now carries the moment it was made and expires unanswered.
+Expiry deliberately does not decide anything: the byte moves to a
+shadow queue, and what arrives next settles it.  Arriving late and
+matching means the program does echo, just slower than we waited —
+that is not a miss, and it widens the window rather than shutting
+prediction off.  Anything else means the echo was never coming, which
+is the miss 0.11.73 counts, so three characters into a password prompt
+the pane stops guessing entirely.
+
+The window is measured, not assumed: an EWMA of observed round trips,
+floored at 50 ms and capped at 1 s.  Against a real pty (2026-09-07) a
+zsh echo takes p50 0.16 ms / max 1.12 ms idle, and 0.16 ms / 8.18 ms
+with the shell flooding the pipe at the same time — the floor is six
+times the worst of that.  The cap is what a slow ssh link is allowed to
+grow the window to, and also what bounds how long an unechoed keystroke
+can linger.
+
+Nothing waits on a byte that may never come: L3 wakes on a 10 ms tick
+while a guess is outstanding and sleeps its full second otherwise, and
+mcli arms exactly one wake-up per predicted keystroke.  Idle cost is
+unchanged.
+
+Two tests drive a real pty: the silent program leaves nothing on
+screen, and an echoing one keeps its local echo with nothing taken
+back.  The first version of the second test was green and proved
+nothing — `stty -echo` alone leaves ICANON on, so `cat` echoed nothing
+until Enter and the "echoing" stand-in was not echoing.
+
+### 0.11.73
+
+Prediction reads this pane's own tally instead of guessing what is
+running.
+
+Local echo was on for everything that was not the alt screen, which is
+right for a shell and wrong for codex: codex draws its own input line
+somewhere other than the cursor, so every predicted character landed in
+the wrong place and was wiped by the next repaint — the input the user
+watched get overwritten.
+
+The first fix proposed was a termios gate (`ICANON|ECHO`), straight
+from the code's own comment.  Measured and refuted: a zsh prompt is
+`-icanon -echo` exactly like codex, because ZLE draws its own line too.
+The difference is only WHERE, and termios cannot see it.
+
+So the terminal stopped guessing the kind of program and started
+reading what happened to its last few guesses.  Three misses in a row
+turns prediction off for that pane; one keystroke in 128 is let through
+afterwards to find out whether the program changed underneath — the
+pane a program was quit in becomes a shell again, and nothing else
+announces that.
+
+Measured on the real thing: at a zsh prompt 16 keystrokes gave 15 hits
+and 1 miss; inside codex, 23 keystrokes gave 0 hits and 23 misses.
+
+### 0.11.72
+
+The prediction tally is written down.
+
+The hit and miss counters existed and were never reported, so "does
+local echo help in this pane" had no answer.  `L3_PREDICT_TALLY` now
+logs the 60 s deltas.  It is what produced the 15/1 and 0/23 numbers
+above; before it, the codex behaviour was a report and a guess.
 
 ### 0.11.71
 

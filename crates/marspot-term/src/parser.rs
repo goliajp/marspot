@@ -394,8 +394,15 @@ mod tests {
     enum Event {
         Print(char),
         Execute(u8),
-        Esc { intermediates: Vec<u8>, byte: u8 },
-        Csi { params: Vec<u16>, intermediates: Vec<u8>, byte: u8 },
+        Esc {
+            intermediates: Vec<u8>,
+            byte: u8,
+        },
+        Csi {
+            params: Vec<u16>,
+            intermediates: Vec<u8>,
+            byte: u8,
+        },
         Osc(Vec<u8>),
     }
 
@@ -490,7 +497,10 @@ mod tests {
         // ESC c — RIS, full reset.  We just emit the dispatch event.
         assert_eq!(
             parse(b"\x1Bc"),
-            vec![Event::Esc { intermediates: vec![], byte: b'c' }]
+            vec![Event::Esc {
+                intermediates: vec![],
+                byte: b'c'
+            }]
         );
     }
 
@@ -499,7 +509,10 @@ mod tests {
         // ESC ( B — designate G0 charset as USASCII.
         assert_eq!(
             parse(b"\x1B(B"),
-            vec![Event::Esc { intermediates: vec![b'('], byte: b'B' }]
+            vec![Event::Esc {
+                intermediates: vec![b'('],
+                byte: b'B'
+            }]
         );
     }
 
@@ -508,7 +521,11 @@ mod tests {
         // ESC [ A — cursor up by 1 (default).
         assert_eq!(
             parse(b"\x1B[A"),
-            vec![Event::Csi { params: vec![], intermediates: vec![], byte: b'A' }]
+            vec![Event::Csi {
+                params: vec![],
+                intermediates: vec![],
+                byte: b'A'
+            }]
         );
     }
 
@@ -517,7 +534,11 @@ mod tests {
         // ESC [ 5 A — cursor up by 5.
         assert_eq!(
             parse(b"\x1B[5A"),
-            vec![Event::Csi { params: vec![5], intermediates: vec![], byte: b'A' }]
+            vec![Event::Csi {
+                params: vec![5],
+                intermediates: vec![],
+                byte: b'A'
+            }]
         );
     }
 
@@ -526,7 +547,11 @@ mod tests {
         // ESC [ 1;2;3 H — cursor position with extra params.
         assert_eq!(
             parse(b"\x1B[1;2;3H"),
-            vec![Event::Csi { params: vec![1, 2, 3], intermediates: vec![], byte: b'H' }]
+            vec![Event::Csi {
+                params: vec![1, 2, 3],
+                intermediates: vec![],
+                byte: b'H'
+            }]
         );
     }
 
@@ -536,7 +561,11 @@ mod tests {
         // Higher layer will treat 0 as "default" (= 1 for cursor moves).
         assert_eq!(
             parse(b"\x1B[;5H"),
-            vec![Event::Csi { params: vec![0, 5], intermediates: vec![], byte: b'H' }]
+            vec![Event::Csi {
+                params: vec![0, 5],
+                intermediates: vec![],
+                byte: b'H'
+            }]
         );
     }
 
@@ -545,7 +574,11 @@ mod tests {
         // ESC [ ? 25 h — DECSET show cursor.
         assert_eq!(
             parse(b"\x1B[?25h"),
-            vec![Event::Csi { params: vec![25], intermediates: vec![b'?'], byte: b'h' }]
+            vec![Event::Csi {
+                params: vec![25],
+                intermediates: vec![b'?'],
+                byte: b'h'
+            }]
         );
     }
 
@@ -574,7 +607,12 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, Event::Csi { .. }))
             .collect();
-        assert_eq!(csi_events.len(), 1, "expected exactly one CSI dispatch, got {:?}", r.events);
+        assert_eq!(
+            csi_events.len(),
+            1,
+            "expected exactly one CSI dispatch, got {:?}",
+            r.events
+        );
         assert!(matches!(
             csi_events[0],
             Event::Csi { params, intermediates, byte: b'A' }

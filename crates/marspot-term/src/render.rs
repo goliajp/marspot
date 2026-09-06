@@ -312,7 +312,11 @@ pub fn grid_selection_text(
             (top_col.min(bot_col), top_col.max(bot_col))
         } else {
             let lo = if abs == top_abs { top_col } else { 0 };
-            let hi = if abs == bot_abs { bot_col } else { cols.saturating_sub(1) };
+            let hi = if abs == bot_abs {
+                bot_col
+            } else {
+                cols.saturating_sub(1)
+            };
             (lo, hi)
         };
         let mut row_text = String::new();
@@ -346,8 +350,7 @@ pub fn grid_selection_text(
         // of a multi-line selection routinely stops mid-row, so the
         // wrap merge silently fell through to `\n + trim_end`,
         // dropping the prev tail and inserting a fake newline).
-        let current_is_continuation =
-            !blockwise && grid.wrapped_at_view(abs as u16, last_view_row);
+        let current_is_continuation = !blockwise && grid.wrapped_at_view(abs as u16, last_view_row);
         if let Some(prev) = prev_text.take() {
             if current_is_continuation {
                 // Preserve every cell of prev — its last column was
@@ -371,11 +374,7 @@ pub fn grid_selection_text(
     if let Some(prev) = prev_text {
         out.push_str(prev.trim_end());
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 #[cfg(test)]
@@ -385,7 +384,14 @@ mod selection_tests {
 
     fn write_row(grid: &mut Grid, row: u16, s: &str) {
         for (c, ch) in s.chars().enumerate() {
-            grid.set_cell(c as u16, row, Cell { ch, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                row,
+                Cell {
+                    ch,
+                    ..Default::default()
+                },
+            );
         }
     }
 
@@ -514,12 +520,7 @@ mod selection_tests {
         // Whole visible viewport: (col 0, abs rows-1) → (cols-1, abs 0).
         let top_abs = (rows - 1) as u32;
         let bot_abs = 0u32;
-        grid_selection_text(
-            grid,
-            (0, top_abs),
-            (cols - 1, bot_abs),
-            false,
-        )
+        grid_selection_text(grid, (0, top_abs), (cols - 1, bot_abs), false)
     }
 
     #[test]
@@ -530,8 +531,7 @@ mod selection_tests {
         // the first overflow.  Whole-viewport copy must produce a
         // contiguous run of 'a's with no `\n` interrupting it.
         let bytes = "a".repeat(200);
-        let out = select_text_via_parser(20, 3, bytes.as_bytes())
-            .expect("non-empty selection");
+        let out = select_text_via_parser(20, 3, bytes.as_bytes()).expect("non-empty selection");
         assert!(!out.contains('\n'), "phantom \\n in: {out:?}");
         assert!(out.chars().all(|c| c == 'a'), "non-'a' char in: {out:?}");
     }
@@ -544,8 +544,7 @@ mod selection_tests {
         // case so we don't accidentally swallow real newlines along
         // with the soft-wrap fix.
         let bytes = b"abc\r\ndef\r\nghi";
-        let out = select_text_via_parser(20, 3, bytes)
-            .expect("non-empty selection");
+        let out = select_text_via_parser(20, 3, bytes).expect("non-empty selection");
         assert_eq!(out, "abc\ndef\nghi");
     }
 
@@ -556,8 +555,7 @@ mod selection_tests {
         // links uses to detect the multi-row LinkRange.
         let cols = 20u16;
         let url = "https://example.com/some/very/long/path/that/wraps?q=value";
-        let out = select_text_via_parser(cols, 5, url.as_bytes())
-            .expect("non-empty selection");
+        let out = select_text_via_parser(cols, 5, url.as_bytes()).expect("non-empty selection");
         let normalised: String = out.chars().filter(|c| !c.is_whitespace()).collect();
         assert_eq!(normalised, url, "URL mangled by wrap: {out:?}");
     }
@@ -623,10 +621,10 @@ pub fn box_drawing_arms(ch: char) -> Option<u8> {
         '\u{252C}'..='\u{2533}' => ARM_W | ARM_E | ARM_S, // ┬ variants
         '\u{2534}'..='\u{253B}' => ARM_W | ARM_E | ARM_N, // ┴ variants
         '\u{253C}'..='\u{254B}' => ARM_W | ARM_E | ARM_N | ARM_S, // ┼ variants
-        '\u{256D}' => ARM_E | ARM_S, // ╭ rounded top-left  ≡ ┌
-        '\u{256E}' => ARM_W | ARM_S, // ╮ rounded top-right ≡ ┐
-        '\u{256F}' => ARM_W | ARM_N, // ╯ rounded bot-right ≡ ┘
-        '\u{2570}' => ARM_E | ARM_N, // ╰ rounded bot-left  ≡ └
+        '\u{256D}' => ARM_E | ARM_S,              // ╭ rounded top-left  ≡ ┌
+        '\u{256E}' => ARM_W | ARM_S,              // ╮ rounded top-right ≡ ┐
+        '\u{256F}' => ARM_W | ARM_N,              // ╯ rounded bot-right ≡ ┘
+        '\u{2570}' => ARM_E | ARM_N,              // ╰ rounded bot-left  ≡ └
         _ => return None,
     })
 }
@@ -739,38 +737,38 @@ const fn shaded(alpha: f64) -> BlockShape {
 /// span the cell so we paint them directly like box-drawing chars.
 pub fn block_element_rects(ch: char) -> Option<BlockShape> {
     Some(match ch {
-        '\u{2580}' => one(r(0, 4, 8, 8)),                 // ▀ upper half
-        '\u{2581}' => one(r(0, 0, 8, 1)),                 // ▁ lower 1/8
-        '\u{2582}' => one(r(0, 0, 8, 2)),                 // ▂ lower 2/8
-        '\u{2583}' => one(r(0, 0, 8, 3)),                 // ▃
-        '\u{2584}' => one(r(0, 0, 8, 4)),                 // ▄ lower half
-        '\u{2585}' => one(r(0, 0, 8, 5)),                 // ▅
-        '\u{2586}' => one(r(0, 0, 8, 6)),                 // ▆
-        '\u{2587}' => one(r(0, 0, 8, 7)),                 // ▇
-        '\u{2588}' => one(r(0, 0, 8, 8)),                 // █ full
-        '\u{2589}' => one(r(0, 0, 7, 8)),                 // ▉ left 7/8
-        '\u{258A}' => one(r(0, 0, 6, 8)),                 // ▊
-        '\u{258B}' => one(r(0, 0, 5, 8)),                 // ▋
-        '\u{258C}' => one(r(0, 0, 4, 8)),                 // ▌ left half
-        '\u{258D}' => one(r(0, 0, 3, 8)),                 // ▍
-        '\u{258E}' => one(r(0, 0, 2, 8)),                 // ▎
-        '\u{258F}' => one(r(0, 0, 1, 8)),                 // ▏
-        '\u{2590}' => one(r(4, 0, 8, 8)),                 // ▐ right half
-        '\u{2591}' => shaded(0.25),                       // ░ light shade
-        '\u{2592}' => shaded(0.50),                       // ▒ medium shade
-        '\u{2593}' => shaded(0.75),                       // ▓ dark shade
-        '\u{2594}' => one(r(0, 7, 8, 8)),                 // ▔ upper 1/8
-        '\u{2595}' => one(r(7, 0, 8, 8)),                 // ▕ right 1/8
-        '\u{2596}' => one(r(0, 0, 4, 4)),                 // ▖ lower-left quadrant
-        '\u{2597}' => one(r(4, 0, 8, 4)),                 // ▗ lower-right
-        '\u{2598}' => one(r(0, 4, 4, 8)),                 // ▘ upper-left
-        '\u{2599}' => two(r(0, 4, 4, 8), r(0, 0, 8, 4)),  // ▙ UL + lower half
-        '\u{259A}' => two(r(0, 4, 4, 8), r(4, 0, 8, 4)),  // ▚ UL + LR
-        '\u{259B}' => two(r(0, 4, 8, 8), r(0, 0, 4, 4)),  // ▛ upper half + LL
-        '\u{259C}' => two(r(0, 4, 8, 8), r(4, 0, 8, 4)),  // ▜ upper half + LR
-        '\u{259D}' => one(r(4, 4, 8, 8)),                 // ▝ upper-right
-        '\u{259E}' => two(r(4, 4, 8, 8), r(0, 0, 4, 4)),  // ▞ UR + LL
-        '\u{259F}' => two(r(4, 4, 8, 8), r(0, 0, 8, 4)),  // ▟ UR + lower half
+        '\u{2580}' => one(r(0, 4, 8, 8)),                // ▀ upper half
+        '\u{2581}' => one(r(0, 0, 8, 1)),                // ▁ lower 1/8
+        '\u{2582}' => one(r(0, 0, 8, 2)),                // ▂ lower 2/8
+        '\u{2583}' => one(r(0, 0, 8, 3)),                // ▃
+        '\u{2584}' => one(r(0, 0, 8, 4)),                // ▄ lower half
+        '\u{2585}' => one(r(0, 0, 8, 5)),                // ▅
+        '\u{2586}' => one(r(0, 0, 8, 6)),                // ▆
+        '\u{2587}' => one(r(0, 0, 8, 7)),                // ▇
+        '\u{2588}' => one(r(0, 0, 8, 8)),                // █ full
+        '\u{2589}' => one(r(0, 0, 7, 8)),                // ▉ left 7/8
+        '\u{258A}' => one(r(0, 0, 6, 8)),                // ▊
+        '\u{258B}' => one(r(0, 0, 5, 8)),                // ▋
+        '\u{258C}' => one(r(0, 0, 4, 8)),                // ▌ left half
+        '\u{258D}' => one(r(0, 0, 3, 8)),                // ▍
+        '\u{258E}' => one(r(0, 0, 2, 8)),                // ▎
+        '\u{258F}' => one(r(0, 0, 1, 8)),                // ▏
+        '\u{2590}' => one(r(4, 0, 8, 8)),                // ▐ right half
+        '\u{2591}' => shaded(0.25),                      // ░ light shade
+        '\u{2592}' => shaded(0.50),                      // ▒ medium shade
+        '\u{2593}' => shaded(0.75),                      // ▓ dark shade
+        '\u{2594}' => one(r(0, 7, 8, 8)),                // ▔ upper 1/8
+        '\u{2595}' => one(r(7, 0, 8, 8)),                // ▕ right 1/8
+        '\u{2596}' => one(r(0, 0, 4, 4)),                // ▖ lower-left quadrant
+        '\u{2597}' => one(r(4, 0, 8, 4)),                // ▗ lower-right
+        '\u{2598}' => one(r(0, 4, 4, 8)),                // ▘ upper-left
+        '\u{2599}' => two(r(0, 4, 4, 8), r(0, 0, 8, 4)), // ▙ UL + lower half
+        '\u{259A}' => two(r(0, 4, 4, 8), r(4, 0, 8, 4)), // ▚ UL + LR
+        '\u{259B}' => two(r(0, 4, 8, 8), r(0, 0, 4, 4)), // ▛ upper half + LL
+        '\u{259C}' => two(r(0, 4, 8, 8), r(4, 0, 8, 4)), // ▜ upper half + LR
+        '\u{259D}' => one(r(4, 4, 8, 8)),                // ▝ upper-right
+        '\u{259E}' => two(r(4, 4, 8, 8), r(0, 0, 4, 4)), // ▞ UR + LL
+        '\u{259F}' => two(r(4, 4, 8, 8), r(0, 0, 8, 4)), // ▟ UR + lower half
         _ => return None,
     })
 }

@@ -1699,7 +1699,14 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         // the content it wiped, forever.  Both gates release inside
         // their own cap, so waking a little sooner than the shorter
         // one is enough.
-        let wait = if sync_gate.owes_a_frame() || blank_gate.owes_a_frame() {
+        // A local-echo guess that nothing answers has to be taken
+        // back on a timer, not on the next byte — a `sudo` password
+        // prompt sends no bytes at all until Enter, and the guesses
+        // would otherwise sit on screen showing what was typed.
+        let wait = if sync_gate.owes_a_frame()
+            || blank_gate.owes_a_frame()
+            || session.terminal().predictions_pending()
+        {
             Duration::from_millis(10)
         } else {
             Duration::from_secs(5)
@@ -1765,7 +1772,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         // Drain the burst: handle every queued key now, coalesce wakes
         // into the single pump below, and collapse a flurry of resizes to
         // the final dims (intermediate sizes never need a reflow).
-        let mut predicted = false;
+        let mut predicted = session.terminal_mut().expire_predictions();
         // A mode the terminal drops without any PTY byte arriving.
         // The publish at the bottom keys off "did the PTY do
         // something", and mouse reporting is the one thing that stops

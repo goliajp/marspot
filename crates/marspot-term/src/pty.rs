@@ -20,7 +20,12 @@ pub struct TerminalSize {
 
 impl Default for TerminalSize {
     fn default() -> Self {
-        Self { cols: 80, rows: 24, pixel_width: 0, pixel_height: 0 }
+        Self {
+            cols: 80,
+            rows: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
     }
 }
 
@@ -72,8 +77,9 @@ impl Pty {
         // Pre-allocate everything we'll need post-fork. The window between
         // fork and execv must only call async-signal-safe functions, so no
         // allocations after forkpty() returns in the child.
-        let program = CString::new(config.program.as_bytes())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "program path contains NUL"))?;
+        let program = CString::new(config.program.as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "program path contains NUL")
+        })?;
         let argv0 = match config.argv0.as_ref() {
             Some(s) => CString::new(s.as_bytes())
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argv0 contains NUL"))?,
@@ -87,9 +93,8 @@ impl Pty {
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argument contains NUL"))?;
         let cwd_cstring: Option<CString> = match config.cwd.as_ref() {
             Some(p) => Some(
-                CString::new(p.as_bytes()).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "cwd contains NUL")
-                })?,
+                CString::new(p.as_bytes())
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "cwd contains NUL"))?,
             ),
             None => None,
         };
@@ -137,8 +142,7 @@ impl Pty {
                         Err(_) => continue,
                     }
                 }
-                let mut ptrs: Vec<*const c_char> =
-                    kept.iter().map(|c| c.as_ptr()).collect();
+                let mut ptrs: Vec<*const c_char> = kept.iter().map(|c| c.as_ptr()).collect();
                 ptrs.push(ptr::null());
                 Some((kept, ptrs))
             };
@@ -195,7 +199,10 @@ impl Pty {
             }
         }
 
-        Ok(Pty { master: master_fd, child: pid })
+        Ok(Pty {
+            master: master_fd,
+            child: pid,
+        })
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -216,7 +223,11 @@ impl Pty {
     pub fn read_shared(&self, buf: &mut [u8]) -> io::Result<usize> {
         // SAFETY: master is a valid fd as long as `self` is alive (Drop closes it).
         let n = unsafe {
-            libc::read(self.master, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+            libc::read(
+                self.master,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+            )
         };
         if n < 0 {
             return Err(io::Error::last_os_error());
@@ -226,9 +237,7 @@ impl Pty {
 
     pub fn write_shared(&self, buf: &[u8]) -> io::Result<usize> {
         // SAFETY: master is a valid fd as long as `self` is alive.
-        let n = unsafe {
-            libc::write(self.master, buf.as_ptr() as *const libc::c_void, buf.len())
-        };
+        let n = unsafe { libc::write(self.master, buf.as_ptr() as *const libc::c_void, buf.len()) };
         if n < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -488,7 +497,11 @@ mod tests {
 
         let output = drain_until_eof_or_timeout(&mut pty, Duration::from_secs(2));
         let s = String::from_utf8_lossy(&output);
-        assert!(s.contains("hello marspot"), "expected 'hello marspot' in output, got: {:?}", s);
+        assert!(
+            s.contains("hello marspot"),
+            "expected 'hello marspot' in output, got: {:?}",
+            s
+        );
     }
 
     /// env_remove_prefixes strips matching vars from the child while
@@ -520,11 +533,23 @@ mod tests {
         .expect("spawn /bin/sh");
         let output = drain_until_eof_or_timeout(&mut pty, Duration::from_secs(2));
         let s = String::from_utf8_lossy(&output);
-        assert!(s.contains("L=UNSET"), "prefixed var must be stripped, got: {s:?}");
-        assert!(s.contains("K=kept"), "non-matching var must survive, got: {s:?}");
-        assert!(s.contains("P=SET"), "PATH must survive the filter, got: {s:?}");
+        assert!(
+            s.contains("L=UNSET"),
+            "prefixed var must be stripped, got: {s:?}"
+        );
+        assert!(
+            s.contains("K=kept"),
+            "non-matching var must survive, got: {s:?}"
+        );
+        assert!(
+            s.contains("P=SET"),
+            "PATH must survive the filter, got: {s:?}"
+        );
         // Parent env is untouched — only the child snapshot is filtered.
-        assert_eq!(std::env::var("MARSPOT_TEST_LEAK_PROBE").as_deref(), Ok("leaked"));
+        assert_eq!(
+            std::env::var("MARSPOT_TEST_LEAK_PROBE").as_deref(),
+            Ok("leaked")
+        );
     }
 
     #[test]
@@ -571,7 +596,12 @@ mod tests {
         let mut pty = Pty::spawn(PtyConfig {
             program: "/bin/sleep".into(),
             args: vec!["60".into()],
-            size: TerminalSize { cols: 80, rows: 24, pixel_width: 0, pixel_height: 0 },
+            size: TerminalSize {
+                cols: 80,
+                rows: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
             argv0: None,
             cwd: None,
             ..Default::default()
@@ -620,7 +650,11 @@ mod tests {
 
         let acc = read_until(&mut pty, b"ping", Duration::from_secs(2));
         let s = String::from_utf8_lossy(&acc);
-        assert!(s.contains("ping"), "expected 'ping' to round-trip via /bin/cat, got: {:?}", s);
+        assert!(
+            s.contains("ping"),
+            "expected 'ping' to round-trip via /bin/cat, got: {:?}",
+            s
+        );
 
         force_cleanup(&mut pty);
     }
@@ -831,8 +865,8 @@ mod tests {
                 program: "/bin/sleep".into(),
                 args: vec!["60".into()],
                 size: TerminalSize::default(),
-            argv0: None,
-            cwd: None,
+                argv0: None,
+                cwd: None,
                 ..Default::default()
             })
             .expect("spawn /bin/sleep");
@@ -841,8 +875,17 @@ mod tests {
             master_fd = pty.raw_master();
 
             // Pre-condition: child is alive and fd is valid.
-            assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "child {} should be alive", pid);
-            assert_ne!(unsafe { libc::fcntl(master_fd, libc::F_GETFD) }, -1, "fd should be open");
+            assert_eq!(
+                unsafe { libc::kill(pid, 0) },
+                0,
+                "child {} should be alive",
+                pid
+            );
+            assert_ne!(
+                unsafe { libc::fcntl(master_fd, libc::F_GETFD) },
+                -1,
+                "fd should be open"
+            );
         } // Drop runs here
 
         // Give the kernel a beat to finish reaping.  100ms is generous; SIGHUP

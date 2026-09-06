@@ -37,21 +37,13 @@ pub enum Event {
     WindowPaneChanged { window_id: u32, pane_id: u32 },
     /// Beginning of a command response.  Pair with a later End/Error
     /// having the same `cmd_number`.
-    Begin {
-        cmd_number: u32,
-    },
+    Begin { cmd_number: u32 },
     /// End of a command response.  `output` accumulates everything
     /// between `%begin` and `%end` for this `cmd_number`.
-    End {
-        cmd_number: u32,
-        output: Vec<u8>,
-    },
+    End { cmd_number: u32, output: Vec<u8> },
     /// Command failed.  `output` is whatever lines tmux wrote between
     /// `%begin` and `%error`.
-    CommandError {
-        cmd_number: u32,
-        output: Vec<u8>,
-    },
+    CommandError { cmd_number: u32, output: Vec<u8> },
     /// tmux is detaching the control client (server is exiting, or
     /// the user did `detach-client`).  Front-end should tear down.
     Exit { reason: Option<String> },
@@ -105,9 +97,10 @@ impl Parser {
                 // block-state untouched so we can keep parsing once
                 // the wedge clears.
                 if self.line_buf.len() > PARSE_BUF_MAX {
-                    out.push(Event::Unknown(
-                        format!("line dropped: exceeded {} bytes without LF", PARSE_BUF_MAX),
-                    ));
+                    out.push(Event::Unknown(format!(
+                        "line dropped: exceeded {} bytes without LF",
+                        PARSE_BUF_MAX
+                    )));
                     self.line_buf.clear();
                 }
             }
@@ -121,8 +114,10 @@ impl Parser {
                 cmd_number: cmd,
                 output: format!(
                     "block dropped: exceeded {} bytes without %end ({} bytes captured)",
-                    PARSE_BUF_MAX, dropped.len()
-                ).into_bytes(),
+                    PARSE_BUF_MAX,
+                    dropped.len()
+                )
+                .into_bytes(),
             });
             self.block = None;
         }
@@ -192,18 +187,14 @@ impl Parser {
                     self.block_buf.clear();
                     out.push(Event::Begin { cmd_number: cmd });
                 } else {
-                    out.push(Event::Unknown(
-                        String::from_utf8_lossy(&line).into_owned(),
-                    ));
+                    out.push(Event::Unknown(String::from_utf8_lossy(&line).into_owned()));
                 }
             }
             b"%output" => {
                 if let Some(ev) = parse_output(rest) {
                     out.push(ev);
                 } else {
-                    out.push(Event::Unknown(
-                        String::from_utf8_lossy(&line).into_owned(),
-                    ));
+                    out.push(Event::Unknown(String::from_utf8_lossy(&line).into_owned()));
                 }
             }
             b"%window-add" => {
@@ -250,9 +241,7 @@ impl Parser {
                 out.push(Event::Exit { reason });
             }
             _ => {
-                out.push(Event::Unknown(
-                    String::from_utf8_lossy(&line).into_owned(),
-                ));
+                out.push(Event::Unknown(String::from_utf8_lossy(&line).into_owned()));
             }
         }
     }
@@ -435,9 +424,7 @@ mod tests {
     #[test]
     fn begin_end_wraps_command_output() {
         let mut p = Parser::new();
-        let evts = p.feed(
-            b"%begin 1700000000 7 0\nwindow 1\nwindow 2\n%end 1700000000 7 0\n",
-        );
+        let evts = p.feed(b"%begin 1700000000 7 0\nwindow 1\nwindow 2\n%end 1700000000 7 0\n");
         assert_eq!(evts.len(), 2);
         assert_eq!(evts[0], Event::Begin { cmd_number: 7 });
         let Event::End { cmd_number, output } = &evts[1] else {
@@ -450,8 +437,7 @@ mod tests {
     #[test]
     fn begin_error_signals_command_failure() {
         let mut p = Parser::new();
-        let evts = p
-            .feed(b"%begin 1700000000 9 0\nbad command\n%error 1700000000 9 0\n");
+        let evts = p.feed(b"%begin 1700000000 9 0\nbad command\n%error 1700000000 9 0\n");
         assert_eq!(evts.len(), 2);
         assert!(matches!(evts[0], Event::Begin { cmd_number: 9 }));
         assert!(matches!(
@@ -507,9 +493,7 @@ mod tests {
         // %begin block.  (In practice tmux doesn't produce nested
         // notifications mid-block, but we should at least not panic.)
         let mut p = Parser::new();
-        let evts = p.feed(
-            b"%begin 1700 1 0\nplain content\n%window-add @99\n%end 1700 1 0\n",
-        );
+        let evts = p.feed(b"%begin 1700 1 0\nplain content\n%window-add @99\n%end 1700 1 0\n");
         // Our impl currently treats %window-add inside the block as
         // part of the command output (no nested dispatch).  That
         // matches tmux's actual behaviour.

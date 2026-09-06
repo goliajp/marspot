@@ -140,9 +140,8 @@ fn main() {
     // end-of-bytelog is usually the recoverable payload.
     if let Some(path) = dump_text_path {
         use std::io::Write;
-        let mut out = std::io::BufWriter::new(
-            std::fs::File::create(&path).expect("create dump-text file"),
-        );
+        let mut out =
+            std::io::BufWriter::new(std::fs::File::create(&path).expect("create dump-text file"));
         writeln!(out, "# session {session_id} — bytelog replay dump").unwrap();
         writeln!(out, "# scrollback: {lines} lines").unwrap();
         for i in 0..lines {

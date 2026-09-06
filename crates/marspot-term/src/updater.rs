@@ -34,8 +34,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -49,8 +49,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Default GitHub Releases endpoint.  Overridable via
 /// `MARSPOT_UPDATE_FEED` for dev / staging — the env var should
 /// point at a URL with the same JSON shape.
-const DEFAULT_FEED: &str =
-    "https://api.github.com/repos/goliajp/marspot/releases/latest";
+const DEFAULT_FEED: &str = "https://api.github.com/repos/goliajp/marspot/releases/latest";
 
 /// Set when the background poller has staged a binary that the
 /// foreground process should pick up on next focus loss.  Toggled
@@ -94,7 +93,9 @@ fn updater_loop(version: String, flag: UpdateFlag) {
 fn pending_already_staged() -> bool {
     // Any one of the three binaries having a pending entry counts —
     // the shell will pick them up next focus-loss / SIGUSR1.
-    STAGED_BINARIES.iter().any(|b| pending_binary_path(b).exists())
+    STAGED_BINARIES
+        .iter()
+        .any(|b| pending_binary_path(b).exists())
 }
 
 fn cache_dir() -> PathBuf {
@@ -132,19 +133,15 @@ fn feed_url() -> String {
 fn check_and_stage(running_version: &str) -> Result<bool, String> {
     let json = http_get(&feed_url(), 8 * 1024 * 1024)?;
     let body = std::str::from_utf8(&json).map_err(|e| format!("non-utf8 feed: {}", e))?;
-    let tag = scrape_string(body, "\"tag_name\"")
-        .ok_or_else(|| "feed missing tag_name".to_string())?;
+    let tag =
+        scrape_string(body, "\"tag_name\"").ok_or_else(|| "feed missing tag_name".to_string())?;
     let normalized = tag.trim_start_matches('v').to_string();
     if !is_newer_than(&normalized, running_version) {
         return Ok(false);
     }
     let asset_name = asset_filename();
-    let asset_url = scrape_asset_url(body, &asset_name).ok_or_else(|| {
-        format!(
-            "feed has no asset named {} for tag {}",
-            asset_name, tag
-        )
-    })?;
+    let asset_url = scrape_asset_url(body, &asset_name)
+        .ok_or_else(|| format!("feed has no asset named {} for tag {}", asset_name, tag))?;
     let sig_name = format!("{}.sig", asset_name);
     let sig_url = scrape_asset_url(body, &sig_name).ok_or_else(|| {
         format!(
@@ -332,8 +329,7 @@ fn verify_signature(file: &Path, sig: &Path) -> Result<(), String> {
     if let Some(parent) = pubkey.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir pubkey dir: {}", e))?;
     }
-    std::fs::write(&pubkey, UPDATE_PUBKEY_PEM)
-        .map_err(|e| format!("write pubkey: {}", e))?;
+    std::fs::write(&pubkey, UPDATE_PUBKEY_PEM).map_err(|e| format!("write pubkey: {}", e))?;
     verify_signature_with(&pubkey, file, sig)
 }
 
@@ -475,9 +471,8 @@ fn extract_binary(archive: &Path, bin_name: &str, dst: &Path) -> Result<(), Stri
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let bin = find_named_file(&extract_dir, bin_name).ok_or_else(|| {
-        format!("extracted tar contained no '{}' binary", bin_name)
-    })?;
+    let bin = find_named_file(&extract_dir, bin_name)
+        .ok_or_else(|| format!("extracted tar contained no '{}' binary", bin_name))?;
     std::fs::rename(&bin, dst)
         .or_else(|_| std::fs::copy(&bin, dst).map(|_| ()))
         .map_err(|e| format!("stage extracted binary: {}", e))?;
@@ -522,10 +517,7 @@ mod tests {
 
     #[test]
     fn promote_pending_session_moves_into_current_and_is_idempotent() {
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-promote-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("marspot-promote-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let pend = dir.join("binaries/pending");
         std::fs::create_dir_all(&pend).unwrap();
@@ -559,7 +551,11 @@ mod tests {
     #[test]
     fn embedded_pubkey_is_pem() {
         assert!(UPDATE_PUBKEY_PEM.starts_with("-----BEGIN PUBLIC KEY-----"));
-        assert!(UPDATE_PUBKEY_PEM.trim_end().ends_with("-----END PUBLIC KEY-----"));
+        assert!(
+            UPDATE_PUBKEY_PEM
+                .trim_end()
+                .ends_with("-----END PUBLIC KEY-----")
+        );
     }
 
     /// Round-trip against a throwaway P-256 keypair: a good
@@ -567,10 +563,7 @@ mod tests {
     /// exact openssl invocation production uses.
     #[test]
     fn signature_verify_roundtrip() {
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-sigtest-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("marspot-sigtest-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let sec = dir.join("test.sec");
         let pubk = dir.join("test.pub");
@@ -578,7 +571,14 @@ mod tests {
         let sig = dir.join("payload.bin.sig");
 
         let genkey = Command::new("/usr/bin/openssl")
-            .args(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out"])
+            .args([
+                "ecparam",
+                "-genkey",
+                "-name",
+                "prime256v1",
+                "-noout",
+                "-out",
+            ])
             .arg(&sec)
             .output()
             .unwrap();

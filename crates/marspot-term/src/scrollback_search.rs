@@ -134,7 +134,10 @@ impl SearchSource for InMemorySource {
         self.rows.get(idx as usize).map(|(c, _)| c.clone())
     }
     fn wrapped(&self, idx: u64) -> bool {
-        self.rows.get(idx as usize).map(|(_, w)| *w).unwrap_or(false)
+        self.rows
+            .get(idx as usize)
+            .map(|(_, w)| *w)
+            .unwrap_or(false)
     }
 }
 
@@ -165,8 +168,8 @@ pub fn search_scrollback<S: SearchSource>(
 
 pub struct SearchIter<S: SearchSource> {
     source: S,
-    query_lower: String,           // pre-lowercased for case-insensitive scan
-    query_chars: Vec<char>,         // length-cached
+    query_lower: String,    // pre-lowercased for case-insensitive scan
+    query_chars: Vec<char>, // length-cached
     opts: SearchOpts,
     /// Next physical row to consider (walks downward from
     /// line_count - 1 towards 0; matches the "newest-first" rule).
@@ -194,7 +197,11 @@ impl<S: SearchSource> SearchIter<S> {
         // assign logical_line_idx = line_count - 1 to the very newest
         // logical line, decrementing for each older one.  This gives
         // stable, predictable indices a caller can sort by.
-        let next_logical_idx = if line_count > 0 { (line_count - 1) as u64 } else { 0 };
+        let next_logical_idx = if line_count > 0 {
+            (line_count - 1) as u64
+        } else {
+            0
+        };
         Self {
             source,
             query_lower,
@@ -242,10 +249,11 @@ impl<S: SearchSource> SearchIter<S> {
         let mut norm_text = String::new();
         let mut norm_to_phys: Vec<(u64, u16)> = Vec::new();
         for r in first..=last {
-            let Some(cells) = self.source.line(r) else { continue; };
-            let prev_was_cc_cont = r > first
-                && !self.source.wrapped(r)
-                && self.is_cc_hard_wrap(r - 1, r);
+            let Some(cells) = self.source.line(r) else {
+                continue;
+            };
+            let prev_was_cc_cont =
+                r > first && !self.source.wrapped(r) && self.is_cc_hard_wrap(r - 1, r);
             let leading_skip = if prev_was_cc_cont {
                 count_leading_ws_cells(&cells).min(4)
             } else if r > first && self.source.wrapped(r) {
@@ -313,8 +321,12 @@ impl<S: SearchSource> SearchIter<S> {
     /// as `grid_links::is_cc_hard_wrap_continuation` but operating
     /// against the search source instead of a live grid.
     fn is_cc_hard_wrap(&self, upper_idx: u64, lower_idx: u64) -> bool {
-        let Some(upper) = self.source.line(upper_idx) else { return false; };
-        let Some(lower) = self.source.line(lower_idx) else { return false; };
+        let Some(upper) = self.source.line(upper_idx) else {
+            return false;
+        };
+        let Some(lower) = self.source.line(lower_idx) else {
+            return false;
+        };
         if upper.is_empty() || lower.is_empty() {
             return false;
         }
@@ -810,7 +822,12 @@ mod tests {
     use crate::grid::Cell;
 
     fn cells(s: &str) -> Vec<Cell> {
-        s.chars().map(|c| Cell { ch: c, attrs: Default::default() }).collect()
+        s.chars()
+            .map(|c| Cell {
+                ch: c,
+                attrs: Default::default(),
+            })
+            .collect()
     }
 
     fn src(rows: Vec<(&str, bool)>) -> InMemorySource {
@@ -822,7 +839,10 @@ mod tests {
     #[test]
     fn search_ascii_substring_finds_three_hits_in_one_line() {
         let s = src(vec![("foo bar foo baz foo qux", false)]);
-        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 64,
+        };
         let hits: Vec<SearchHit> = search_scrollback(s, "foo".into(), opts).collect();
         assert_eq!(hits.len(), 3, "expected 3 hits, got {hits:#?}");
         // Char offsets: positions of 'foo' substring in the line.
@@ -833,7 +853,10 @@ mod tests {
     #[test]
     fn search_case_insensitive_matches_mixed_case() {
         let s = src(vec![("Hello WORLD", false)]);
-        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 64,
+        };
         let hits: Vec<SearchHit> = search_scrollback(s, "world".into(), opts).collect();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].char_offset, 6);
@@ -843,7 +866,10 @@ mod tests {
     #[test]
     fn search_case_sensitive_does_not_match_other_case() {
         let s = src(vec![("Hello WORLD", false)]);
-        let opts = SearchOpts { case_sensitive: true, max_total: 64 };
+        let opts = SearchOpts {
+            case_sensitive: true,
+            max_total: 64,
+        };
         let hits: Vec<SearchHit> = search_scrollback(s, "world".into(), opts).collect();
         assert_eq!(hits.len(), 0);
     }
@@ -851,7 +877,10 @@ mod tests {
     #[test]
     fn search_cjk_clean_match() {
         let s = src(vec![("中文 你好 中文 测试", false)]);
-        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 64,
+        };
         let hits: Vec<SearchHit> = search_scrollback(s, "你好".into(), opts).collect();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].char_offset, 3);
@@ -865,7 +894,10 @@ mod tests {
             ("https://example.com/", false),
             ("path/to/file.html", true),
         ]);
-        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 64,
+        };
         let hits: Vec<SearchHit> = search_scrollback(s, "example.com/path".into(), opts).collect();
         assert_eq!(hits.len(), 1, "expected 1 hit across wrap; got {hits:#?}");
         assert!(
@@ -880,18 +912,28 @@ mod tests {
         // 20-col rows; upper ends with URL-class at col 19, lower starts
         // with 2-space hanging indent.
         let s = src(vec![
-            ("https://example.com/", false),  // 20 chars, last = '/'
-            ("  path/to/file.html ", false),  // 2 leading spaces; not wrapped
+            ("https://example.com/", false), // 20 chars, last = '/'
+            ("  path/to/file.html ", false), // 2 leading spaces; not wrapped
         ]);
-        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 64,
+        };
         let hits: Vec<SearchHit> = search_scrollback(s, "example.com/path".into(), opts).collect();
-        assert_eq!(hits.len(), 1, "cc-hard-wrap continuation should be merged; got {hits:#?}");
+        assert_eq!(
+            hits.len(),
+            1,
+            "cc-hard-wrap continuation should be merged; got {hits:#?}"
+        );
     }
 
     #[test]
     fn search_snippet_short_line_clipped_to_boundaries() {
         let s = src(vec![("hi foo", false)]);
-        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 64,
+        };
         let hits: Vec<SearchHit> = search_scrollback(s, "foo".into(), opts).collect();
         assert_eq!(hits.len(), 1);
         // Match is at position 3 with whole line being 6 chars; snippet
@@ -906,18 +948,31 @@ mod tests {
         let line: String = "abcdefghij ".repeat(20) + "FOOBAR " + &"klmnop ".repeat(20);
         // Match starts somewhere in the middle.
         let s = src(vec![(&line, false)]);
-        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 64,
+        };
         let hits: Vec<SearchHit> = search_scrollback(s, "foobar".into(), opts).collect();
         assert_eq!(hits.len(), 1);
         let snippet = &hits[0].snippet;
-        assert!(snippet.len() <= 100, "snippet should be ~80 chars, got {} chars", snippet.chars().count());
-        assert!(snippet.to_lowercase().contains("foobar"), "snippet must contain match");
+        assert!(
+            snippet.len() <= 100,
+            "snippet should be ~80 chars, got {} chars",
+            snippet.chars().count()
+        );
+        assert!(
+            snippet.to_lowercase().contains("foobar"),
+            "snippet must contain match"
+        );
     }
 
     #[test]
     fn search_no_results_returns_empty_iter() {
         let s = src(vec![("hello world", false)]);
-        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 64,
+        };
         let hits: Vec<SearchHit> = search_scrollback(s, "xyzzy".into(), opts).collect();
         assert!(hits.is_empty());
     }
@@ -930,7 +985,10 @@ mod tests {
             .iter()
             .map(|(line, w)| (line.as_str(), *w))
             .collect());
-        let opts = SearchOpts { case_sensitive: false, max_total: 10000 };
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 10000,
+        };
         let mut iter = search_scrollback(s, "foo".into(), opts);
         let _first = iter.next();
         // Drop without exhausting — must not panic / leak.
@@ -945,7 +1003,10 @@ mod tests {
             .iter()
             .map(|(line, w)| (line.as_str(), *w))
             .collect());
-        let opts = SearchOpts { case_sensitive: false, max_total: 50 };
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 50,
+        };
         let hits: Vec<SearchHit> = search_scrollback(s, "foo".into(), opts).collect();
         assert_eq!(hits.len(), 50);
     }
@@ -955,7 +1016,10 @@ mod tests {
         // 3 lines, search emits in reverse order — logical_line_idx
         // should be assigned highest to most-recent.
         let s = src(vec![("a foo", false), ("b foo", false), ("c foo", false)]);
-        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 64,
+        };
         let hits: Vec<SearchHit> = search_scrollback(s, "foo".into(), opts).collect();
         assert_eq!(hits.len(), 3);
         // Hits walk newest → oldest.  logical_line_idx 2 first, then 1,
@@ -1001,7 +1065,10 @@ mod tests {
         let live_len = live.rows.len();
         let merged = MergedLiveFileSource::new(EmptyFileSource, live);
         let file_total = merged.file_total;
-        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 64,
+        };
         let mut hits = Vec::new();
         for h in search_scrollback(merged, "needle".into(), opts) {
             hits.push(remap_to_wire(h, file_total));
@@ -1050,7 +1117,10 @@ mod tests {
         let live_len = live.rows.len() as u64;
         let file_total = file.line_count();
         let merged = MergedLiveFileSource::new(file, live);
-        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 64,
+        };
         let mut hits = Vec::new();
         for h in search_scrollback(merged, "needle".into(), opts) {
             hits.push(remap_to_wire(h, file_total));
@@ -1107,7 +1177,10 @@ mod tests {
         let src = InMemorySource {
             rows: rows.iter().map(|(s, w)| (cells(s), *w)).collect(),
         };
-        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 64,
+        };
         let start = std::time::Instant::now();
         let hits: Vec<SearchHit> = search_scrollback(src, "foo".into(), opts).collect();
         let elapsed = start.elapsed();

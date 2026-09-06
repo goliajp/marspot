@@ -54,9 +54,19 @@ fn main() {
                 }
                 println!("  recent {sample_n}-line scroll-up blanks = {blank_count}/{sample_n}");
                 // Print the first 5 visible non-blank chars
-                for li in [sample_first, n.saturating_sub(50), n.saturating_sub(200), n.saturating_sub(1000), n.saturating_sub(5000)] {
+                for li in [
+                    sample_first,
+                    n.saturating_sub(50),
+                    n.saturating_sub(200),
+                    n.saturating_sub(1000),
+                    n.saturating_sub(5000),
+                ] {
                     if let Some(line) = sb.read_line(li) {
-                        let txt: String = line.iter().take(60).map(|c| if c.ch == '\0' { '·' } else { c.ch }).collect();
+                        let txt: String = line
+                            .iter()
+                            .take(60)
+                            .map(|c| if c.ch == '\0' { '·' } else { c.ch })
+                            .collect();
                         println!("  line[{li}] = {:?}", txt.trim_end());
                     }
                 }

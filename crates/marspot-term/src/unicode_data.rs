@@ -1740,9 +1740,13 @@ fn unpack_incb(bits: u8) -> InCB {
 /// search.  The segmenter hot path.
 pub fn cluster_props(cp: u32) -> ClusterProps {
     match CLUSTER_PROPS_RANGES.binary_search_by(|&(start, end, _)| {
-        if cp < start { std::cmp::Ordering::Greater }
-        else if cp > end { std::cmp::Ordering::Less }
-        else { std::cmp::Ordering::Equal }
+        if cp < start {
+            std::cmp::Ordering::Greater
+        } else if cp > end {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Equal
+        }
     }) {
         Ok(i) => {
             let bits = CLUSTER_PROPS_RANGES[i].2;
@@ -1783,12 +1787,12 @@ mod tests {
     fn known_gbp_lookups() {
         assert_eq!(gbp(b'\r' as u32), GBP::CR);
         assert_eq!(gbp(b'\n' as u32), GBP::LF);
-        assert_eq!(gbp(0x200D),       GBP::ZWJ);
-        assert_eq!(gbp(0x1F1E6),      GBP::RegionalIndicator);
-        assert_eq!(gbp(0x1100),       GBP::L);
-        assert_eq!(gbp(0xAC00),       GBP::LV);
-        assert_eq!(gbp(0xAC01),       GBP::LVT);
-        assert_eq!(gbp(b'A' as u32),  GBP::Other);
+        assert_eq!(gbp(0x200D), GBP::ZWJ);
+        assert_eq!(gbp(0x1F1E6), GBP::RegionalIndicator);
+        assert_eq!(gbp(0x1100), GBP::L);
+        assert_eq!(gbp(0xAC00), GBP::LV);
+        assert_eq!(gbp(0xAC01), GBP::LVT);
+        assert_eq!(gbp(b'A' as u32), GBP::Other);
     }
     #[test]
     fn known_extp_lookups() {
@@ -1807,7 +1811,9 @@ mod tests {
         let mut prev = 0u32;
         for (i, &(s, e, _)) in CLUSTER_PROPS_RANGES.iter().enumerate() {
             assert!(s <= e);
-            if i > 0 { assert!(prev < s, "range[{}] overlaps", i); }
+            if i > 0 {
+                assert!(prev < s, "range[{}] overlaps", i);
+            }
             prev = e;
         }
     }

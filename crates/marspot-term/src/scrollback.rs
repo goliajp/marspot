@@ -234,8 +234,8 @@ impl Scrollback {
         }
         let avail = (len - line_start).min(count);
         // Internal index 0 = oldest, len-1 = newest.
-        let newest = len - 1 - line_start;       // newest line in the window
-        let oldest = newest + 1 - avail;         // oldest line in the window
+        let newest = len - 1 - line_start; // newest line in the window
+        let oldest = newest + 1 - avail; // oldest line in the window
         let mut out = Vec::with_capacity(avail);
         for i in oldest..=newest {
             if let Some(v) = self.line_to_vec(i) {
@@ -293,11 +293,16 @@ impl Scrollback {
                 // fails so the session keeps running).
                 let _ = (|| -> std::io::Result<()> {
                     let bin_fd = std::fs::OpenOptions::new()
-                        .read(true).write(true).open(&bin_path)?;
+                        .read(true)
+                        .write(true)
+                        .open(&bin_path)?;
                     bin_fd.set_len(FILE_HEADER_BYTES)?;
                     drop(bin_fd);
                     let idx_fd = std::fs::OpenOptions::new()
-                        .read(true).write(true).truncate(true).open(&idx_path)?;
+                        .read(true)
+                        .write(true)
+                        .truncate(true)
+                        .open(&idx_path)?;
                     drop(idx_fd);
                     Ok(())
                 })();
@@ -642,19 +647,24 @@ impl FileScrollback {
             std::fs::create_dir_all(parent)?;
         }
 
-        let bin_existed = bin_path.exists()
-            && bin_path.metadata().map(|m| m.len() > 0).unwrap_or(false);
+        let bin_existed =
+            bin_path.exists() && bin_path.metadata().map(|m| m.len() > 0).unwrap_or(false);
 
         let bin_w = std::fs::OpenOptions::new()
-            .read(true).append(true).create(true).open(&bin_path)?;
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(&bin_path)?;
 
         if bin_existed {
             let cur_len = bin_w.metadata()?.len();
             if cur_len < FILE_HEADER_BYTES {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("scrollback bin {} bytes < {} header",
-                        cur_len, FILE_HEADER_BYTES),
+                    format!(
+                        "scrollback bin {} bytes < {} header",
+                        cur_len, FILE_HEADER_BYTES
+                    ),
                 ));
             }
             let mut hdr = [0u8; FILE_HEADER_BYTES as usize];
@@ -670,14 +680,19 @@ impl FileScrollback {
             if version < FILE_MIN_COMPAT || version > FILE_VERSION {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("scrollback bin version {version} outside [{FILE_MIN_COMPAT}, {FILE_VERSION}]"),
+                    format!(
+                        "scrollback bin version {version} outside [{FILE_MIN_COMPAT}, {FILE_VERSION}]"
+                    ),
                 ));
             }
             let cell_abi = u32::from_le_bytes(hdr[8..12].try_into().unwrap());
             if cell_abi != crate::terminal::CELL_BYTES_PUB as u32 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("scrollback bin cell_abi {cell_abi} != {}", crate::terminal::CELL_BYTES_PUB),
+                    format!(
+                        "scrollback bin cell_abi {cell_abi} != {}",
+                        crate::terminal::CELL_BYTES_PUB
+                    ),
                 ));
             }
         }
@@ -692,7 +707,11 @@ impl FileScrollback {
         let bin_eof = bin_for_read.metadata()?.len();
 
         let idx_w = std::fs::OpenOptions::new()
-            .read(true).write(true).append(true).create(true).open(&idx_path)?;
+            .read(true)
+            .write(true)
+            .append(true)
+            .create(true)
+            .open(&idx_path)?;
         let idx_size = idx_w.metadata()?.len();
         if idx_size % 8 != 0 {
             return Err(std::io::Error::new(
@@ -745,7 +764,9 @@ impl FileScrollback {
         let new_idx_size = total_lines * 8;
         if new_idx_size != idx_size {
             let trim_fd = std::fs::OpenOptions::new()
-                .read(true).write(true).open(&idx_path)?;
+                .read(true)
+                .write(true)
+                .open(&idx_path)?;
             trim_fd.set_len(new_idx_size)?;
         }
         let idx = idx_w;
@@ -838,7 +859,11 @@ impl FileScrollback {
             cols,
             ram_capacity,
             bin: std::cell::RefCell::new(bin),
-            idx: std::cell::RefCell::new(crate::async_writer::AsyncWriter::new(idx, IDX_BUF_BYTES, 4)),
+            idx: std::cell::RefCell::new(crate::async_writer::AsyncWriter::new(
+                idx,
+                IDX_BUF_BYTES,
+                4,
+            )),
             bin_for_read,
             idx_for_read,
             bin_mmap_ptr: std::cell::Cell::new(std::ptr::null_mut()),
@@ -853,7 +878,9 @@ impl FileScrollback {
             ram_len: load_n,
             total_lines,
             bin_tail_offset,
-            scratch: Vec::with_capacity(FILE_REC_HEADER_BYTES + cols.saturating_mul(crate::terminal::CELL_BYTES_PUB)),
+            scratch: Vec::with_capacity(
+                FILE_REC_HEADER_BYTES + cols.saturating_mul(crate::terminal::CELL_BYTES_PUB),
+            ),
             cold_bin_path,
             cold_idx_path,
             cold_bin_for_read,
@@ -880,7 +907,6 @@ impl FileScrollback {
         bin.write(&hdr);
         Ok(())
     }
-
 
     #[allow(dead_code)]
     fn trim_trailing_partial(
@@ -1011,8 +1037,12 @@ impl FileScrollback {
             .create(true)
             .open(&self.idx_path)?;
         // 6) Reinstall read fds for hot.
-        let bin_for_read = std::fs::OpenOptions::new().read(true).open(&self.bin_path)?;
-        let idx_for_read = std::fs::OpenOptions::new().read(true).open(&self.idx_path)?;
+        let bin_for_read = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&self.bin_path)?;
+        let idx_for_read = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&self.idx_path)?;
         *self.bin.borrow_mut() = bin;
         *self.idx.borrow_mut() = crate::async_writer::AsyncWriter::new(idx_w, IDX_BUF_BYTES, 4);
         self.bin_for_read = bin_for_read;
@@ -1075,7 +1105,10 @@ impl FileScrollback {
         self.scratch[4] = wrapped as u8;
         self.scratch[5..7].copy_from_slice(&cols_u16.to_le_bytes());
         let body = &mut self.scratch[7..];
-        for (slot, c) in body.chunks_exact_mut(crate::terminal::CELL_BYTES_PUB).zip(line) {
+        for (slot, c) in body
+            .chunks_exact_mut(crate::terminal::CELL_BYTES_PUB)
+            .zip(line)
+        {
             slot[0..4].copy_from_slice(&(c.ch as u32).to_le_bytes());
             slot[4..].copy_from_slice(&crate::terminal::serialize_attrs_pub(c.attrs));
         }
@@ -1157,7 +1190,9 @@ impl FileScrollback {
         // Unmap old if any.
         let old_ptr = self.bin_mmap_ptr.get();
         if !old_ptr.is_null() && cur_len > 0 {
-            unsafe { libc::munmap(old_ptr as *mut libc::c_void, cur_len); }
+            unsafe {
+                libc::munmap(old_ptr as *mut libc::c_void, cur_len);
+            }
         }
         // Map new.
         let ptr = unsafe {
@@ -1191,7 +1226,9 @@ impl FileScrollback {
         }
         let old_ptr = self.idx_mmap_ptr.get();
         if !old_ptr.is_null() && cur_len > 0 {
-            unsafe { libc::munmap(old_ptr as *mut libc::c_void, cur_len); }
+            unsafe {
+                libc::munmap(old_ptr as *mut libc::c_void, cur_len);
+            }
         }
         let ptr = unsafe {
             libc::mmap(
@@ -1221,9 +1258,7 @@ impl FileScrollback {
         let mmap_ptr = self.idx_mmap_ptr.get();
         let mmap_len = self.idx_mmap_len.get();
         if !mmap_ptr.is_null() && (off_in_idx as usize) + 8 <= mmap_len {
-            let buf = unsafe {
-                std::slice::from_raw_parts(mmap_ptr.add(off_in_idx as usize), 8)
-            };
+            let buf = unsafe { std::slice::from_raw_parts(mmap_ptr.add(off_in_idx as usize), 8) };
             return Ok(u64::from_le_bytes(buf.try_into().unwrap()));
         }
         // Fallback (rare): pread.
@@ -1245,8 +1280,10 @@ impl FileScrollback {
             self.ram_cells.extend_from_slice(&line[..take]);
             // The slot still has to BE `cols` wide for the indexing
             // arithmetic; it just does not have to be written twice.
-            self.ram_cells
-                .resize(self.ram_cells.len() + (cols - take), crate::grid::Cell::default());
+            self.ram_cells.resize(
+                self.ram_cells.len() + (cols - take),
+                crate::grid::Cell::default(),
+            );
             self.ram_lens.push(take as u16);
             self.ram_wrapped.push(wrapped);
             self.ram_len += 1;
@@ -1347,7 +1384,11 @@ impl FileScrollback {
     /// the caller can pick the column it wanted.  Returning the
     /// whole `Vec<Cell>` keeps the API simple; v1's cold-read
     /// budget already absorbs the per-line decode cost.
-    fn read_record_via_mmap(&self, offset: u64, _col_filter: Option<usize>) -> Option<(Vec<crate::grid::Cell>, bool)> {
+    fn read_record_via_mmap(
+        &self,
+        offset: u64,
+        _col_filter: Option<usize>,
+    ) -> Option<(Vec<crate::grid::Cell>, bool)> {
         // Ensure mmap covers at least the rec_len header.
         self.ensure_bin_mmap_covers(offset + 4).ok()?;
         let mmap_ptr = self.bin_mmap_ptr.get();
@@ -1355,22 +1396,20 @@ impl FileScrollback {
         if mmap_ptr.is_null() || (offset as usize) + 4 > mmap_len {
             return None;
         }
-        let len_slice = unsafe {
-            std::slice::from_raw_parts(mmap_ptr.add(offset as usize), 4)
-        };
+        let len_slice = unsafe { std::slice::from_raw_parts(mmap_ptr.add(offset as usize), 4) };
         let rec_len = u32::from_le_bytes(len_slice.try_into().unwrap()) as usize;
         // Extend mmap if record's body lives past current end.
         if (offset as usize) + 4 + rec_len > mmap_len {
-            self.ensure_bin_mmap_covers(offset + 4 + rec_len as u64).ok()?;
+            self.ensure_bin_mmap_covers(offset + 4 + rec_len as u64)
+                .ok()?;
         }
         let mmap_ptr = self.bin_mmap_ptr.get();
         let mmap_len = self.bin_mmap_len.get();
         if (offset as usize) + 4 + rec_len > mmap_len {
             return None;
         }
-        let body = unsafe {
-            std::slice::from_raw_parts(mmap_ptr.add(offset as usize + 4), rec_len)
-        };
+        let body =
+            unsafe { std::slice::from_raw_parts(mmap_ptr.add(offset as usize + 4), rec_len) };
         if body.len() < 3 {
             return None;
         }
@@ -1446,20 +1485,32 @@ impl FileScrollback {
             if (idx as u64) < self.cold_first_line {
                 return false;
             }
-            let Some(cold_idx_fd) = self.cold_idx_for_read.as_ref() else { return false; };
-            let Some(cold_bin_fd) = self.cold_bin_for_read.as_ref() else { return false; };
+            let Some(cold_idx_fd) = self.cold_idx_for_read.as_ref() else {
+                return false;
+            };
+            let Some(cold_bin_fd) = self.cold_bin_for_read.as_ref() else {
+                return false;
+            };
             let cold_local = (idx as u64) - self.cold_first_line;
-            let Ok(off) = read_idx_at(cold_idx_fd, cold_local) else { return false; };
-            let Ok((_, wrapped)) = read_record_at(cold_bin_fd, off) else { return false; };
+            let Ok(off) = read_idx_at(cold_idx_fd, cold_local) else {
+                return false;
+            };
+            let Ok((_, wrapped)) = read_record_at(cold_bin_fd, off) else {
+                return false;
+            };
             return wrapped;
         }
         self.ensure_flushed();
         let hot_local = (idx as u64) - self.hot_first_line;
-        let Some(off) = self.read_idx_via_mmap(hot_local).ok() else { return false; };
+        let Some(off) = self.read_idx_via_mmap(hot_local).ok() else {
+            return false;
+        };
         if let Some((_, w)) = self.read_record_via_mmap(off, None) {
             return w;
         }
-        let Some((_cells, wrapped)) = read_record_at(&self.bin_for_read, off).ok() else { return false; };
+        let Some((_cells, wrapped)) = read_record_at(&self.bin_for_read, off).ok() else {
+            return false;
+        };
         wrapped
     }
 
@@ -1535,12 +1586,16 @@ impl Drop for FileScrollback {
         let bp = self.bin_mmap_ptr.get();
         let bl = self.bin_mmap_len.get();
         if !bp.is_null() && bl > 0 {
-            unsafe { libc::munmap(bp as *mut libc::c_void, bl); }
+            unsafe {
+                libc::munmap(bp as *mut libc::c_void, bl);
+            }
         }
         let ip = self.idx_mmap_ptr.get();
         let il = self.idx_mmap_len.get();
         if !ip.is_null() && il > 0 {
-            unsafe { libc::munmap(ip as *mut libc::c_void, il); }
+            unsafe {
+                libc::munmap(ip as *mut libc::c_void, il);
+            }
         }
         let _ = self.bin_for_read.seek(SeekFrom::Start(0));
         let _ = self.idx_for_read.seek(SeekFrom::Start(0));
@@ -1619,8 +1674,12 @@ impl FileScrollback {
     pub fn snapshot_for_search(&self) -> std::io::Result<FileSnapshot> {
         self.bin.borrow_mut().flush();
         self.idx.borrow_mut().flush();
-        let bin = std::fs::OpenOptions::new().read(true).open(&self.bin_path)?;
-        let idx = std::fs::OpenOptions::new().read(true).open(&self.idx_path)?;
+        let bin = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&self.bin_path)?;
+        let idx = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&self.idx_path)?;
         Ok(FileSnapshot {
             bin,
             idx,
@@ -1711,7 +1770,10 @@ mod tests {
         for i in 0..n {
             let ch = (b'a' + (i as u8)) as char;
             let line: Vec<Cell> = (0..cols)
-                .map(|_| Cell { ch, ..Default::default() })
+                .map(|_| Cell {
+                    ch,
+                    ..Default::default()
+                })
                 .collect();
             sb.push_line(&line);
         }
@@ -1723,10 +1785,8 @@ mod tests {
     /// place: persistence continues, the bad bytes stay on disk.
     #[test]
     fn corrupt_pair_is_quarantined_and_reopened_fresh() {
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-sb-quarantine-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("marspot-sb-quarantine-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("scrollback.bin");
         let idx = dir.join("scrollback.idx");
@@ -1746,11 +1806,15 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert!(
-            entries.iter().any(|n| n.starts_with("scrollback.bin.corrupt-")),
+            entries
+                .iter()
+                .any(|n| n.starts_with("scrollback.bin.corrupt-")),
             "bin not quarantined: {entries:?}"
         );
         assert!(
-            entries.iter().any(|n| n.starts_with("scrollback.idx.corrupt-")),
+            entries
+                .iter()
+                .any(|n| n.starts_with("scrollback.idx.corrupt-")),
             "idx not quarantined: {entries:?}"
         );
         assert_eq!(
@@ -1767,15 +1831,11 @@ mod tests {
     /// sees zero history, and pushes after clear persist normally.
     #[test]
     fn clear_truncates_persistent_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-sb-clear-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("marspot-sb-clear-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("scrollback.bin");
         let idx = dir.join("scrollback.idx");
-        let mut sb = Scrollback::file(bin.clone(), idx.clone(), 4, 8)
-            .expect("open");
+        let mut sb = Scrollback::file(bin.clone(), idx.clone(), 4, 8).expect("open");
         for i in 0..20u32 {
             sb.push_line_with_wrapped(&fill(b'a' + (i % 26) as u8, 4), false);
         }
@@ -1906,7 +1966,6 @@ mod tests {
         assert!(sb.is_empty());
     }
 
-
     // ─── A1: FileScrollback unit tests ──────────────────────────
 
     /// Temp dir scoped to this test — unique per-call, cleaned on
@@ -1920,13 +1979,16 @@ mod tests {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
             let pid = std::process::id();
-            let dir = std::env::temp_dir()
-                .join(format!("marspot-scrollback-{label}-{pid}-{n}"));
+            let dir = std::env::temp_dir().join(format!("marspot-scrollback-{label}-{pid}-{n}"));
             std::fs::create_dir_all(&dir).expect("tmpdir create");
             Self { path: dir }
         }
-        fn bin(&self) -> std::path::PathBuf { self.path.join("scrollback.bin") }
-        fn idx(&self) -> std::path::PathBuf { self.path.join("scrollback.idx") }
+        fn bin(&self) -> std::path::PathBuf {
+            self.path.join("scrollback.bin")
+        }
+        fn idx(&self) -> std::path::PathBuf {
+            self.path.join("scrollback.idx")
+        }
     }
     impl Drop for TmpDir {
         fn drop(&mut self) {
@@ -1938,8 +2000,7 @@ mod tests {
     fn file_create_then_roundtrip_one_line() {
         let tmp = TmpDir::new("one-line");
         let cols = 8usize;
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 16)
-            .expect("create");
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 16).expect("create");
         let line = fill(b'a', cols);
         sb.push_line(&line, false);
         assert_eq!(sb.len(), 1);
@@ -1965,13 +2026,15 @@ mod tests {
         let prefix_len = 30usize;
         let mut row = Vec::with_capacity(cols);
         for i in 0..prefix_len {
-            row.push(Cell { ch: (b'a' + (i % 26) as u8) as char, ..Default::default() });
+            row.push(Cell {
+                ch: (b'a' + (i % 26) as u8) as char,
+                ..Default::default()
+            });
         }
         for _ in prefix_len..cols {
             row.push(Cell::default());
         }
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4)
-            .expect("create");
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("create");
         sb.push_line(&row, false);
         for _ in 0..6 {
             sb.push_line(&fill(b'.', cols), false);
@@ -1988,8 +2051,7 @@ mod tests {
             "first record should hold ONLY the prefix (trim default \
              tail); got rec_len={rec_len}, expected={expected_trimmed}"
         );
-        let sb2 = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4)
-            .expect("reopen");
+        let sb2 = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("reopen");
         for c in 0..prefix_len {
             let want = (b'a' + (c % 26) as u8) as char;
             assert_eq!(sb2.cell_at(0, c).unwrap().ch, want, "prefix col {c}");
@@ -2030,8 +2092,7 @@ mod tests {
         // SAFETY: test/example code, single-threaded at this point (state-dir
         // mutations additionally serialized by the suite's state-dir lock).
         unsafe { std::env::set_var("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1") };
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4)
-            .expect("create");
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("create");
         // 1 MB / ~111 B = ~9450 rows before rotation.  Push 12 000
         // distinct rows so at least one rotation happens.  Each row's
         // first cell encodes its sequence number (mod 26) so we can
@@ -2039,9 +2100,15 @@ mod tests {
         let total_push = 12_000usize;
         for i in 0..total_push {
             let mut row: Vec<Cell> = Vec::with_capacity(cols);
-            row.push(Cell { ch: (b'A' + (i % 26) as u8) as char, ..Default::default() });
+            row.push(Cell {
+                ch: (b'A' + (i % 26) as u8) as char,
+                ..Default::default()
+            });
             for _ in 1..cols {
-                row.push(Cell { ch: '.', ..Default::default() });
+                row.push(Cell {
+                    ch: '.',
+                    ..Default::default()
+                });
             }
             sb.push_line(&row, false);
         }
@@ -2062,11 +2129,13 @@ mod tests {
         assert!(cold_idx.exists(), "cold .idx missing at {:?}", cold_idx);
         let _ = cold_idx_p; // silence unused name
         // (a) Earliest row (idx 0) should still resolve — comes from cold.
-        let got0 = sb.cell_at(0, 0)
+        let got0 = sb
+            .cell_at(0, 0)
             .expect("cell_at(0, 0) returned None — early row should be in cold");
         assert_eq!(got0.ch, 'A', "cold row 0 first cell mismatch");
         // (b) Latest row (idx total-1) should resolve — comes from hot.
-        let got_last = sb.cell_at(total_push - 1, 0)
+        let got_last = sb
+            .cell_at(total_push - 1, 0)
             .expect("cell_at(last, 0) None — should be in hot");
         let want_last = (b'A' + ((total_push - 1) % 26) as u8) as char;
         assert_eq!(got_last.ch, want_last, "hot tail row mismatch");
@@ -2074,7 +2143,8 @@ mod tests {
         // tail or hot's head depending on rotation point).  We just
         // require it round-trips correctly.
         let mid = total_push / 2;
-        let got_mid = sb.cell_at(mid, 0)
+        let got_mid = sb
+            .cell_at(mid, 0)
             .expect("cell_at(mid, 0) None — mid row should be reachable in hot or cold");
         let want_mid = (b'A' + (mid % 26) as u8) as char;
         assert_eq!(got_mid.ch, want_mid, "mid row mismatch");
@@ -2098,8 +2168,7 @@ mod tests {
         let tmp = TmpDir::new("off-ring-col");
         let cols = 8usize;
         let ram_cap = 4usize; // tiny so eviction is easy
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, ram_cap)
-            .expect("create");
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, ram_cap).expect("create");
         // Build a row whose first char != other chars so the bug
         // (return cell 0 for every col) is observable.
         let mut row0: Vec<Cell> = Vec::with_capacity(cols);
@@ -2117,7 +2186,8 @@ mod tests {
         // Row 0 now lives only on disk; cell_at(0, col) must take the
         // mmap path.  Assert each column returns its own letter.
         for c in 0..cols {
-            let got = sb.cell_at(0, c)
+            let got = sb
+                .cell_at(0, c)
                 .unwrap_or_else(|| panic!("cell_at(0, {}) returned None", c));
             let want = (b'A' + c as u8) as char;
             assert_eq!(
@@ -2134,10 +2204,9 @@ mod tests {
         let tmp = TmpDir::new("many-reopen");
         let cols = 8usize;
         {
-            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 16)
-                .expect("create");
+            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 16).expect("create");
             for i in 0..5000 {
-                let ch = ((b'a' + (i % 26) as u8)) as u8;
+                let ch = (b'a' + (i % 26) as u8) as u8;
                 sb.push_line(&fill(ch, cols), false);
             }
             assert_eq!(sb.len(), 5000);
@@ -2145,13 +2214,18 @@ mod tests {
         // Reopen: drop above flushes BufWriters + writes idx
         // sentinel.  New instance walks the file headers and
         // populates the RAM ring with the latest 16 lines.
-        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 16)
-            .expect("reopen");
+        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 16).expect("reopen");
         assert_eq!(sb.len(), 5000);
         // Sample at multiple depths: tail (RAM hit), middle
         // (file pread), head (file pread).
-        assert_eq!(sb.cell_at(4999, 0).unwrap().ch, ((b'a' + (4999 % 26) as u8)) as char);
-        assert_eq!(sb.cell_at(2500, 0).unwrap().ch, ((b'a' + (2500 % 26) as u8)) as char);
+        assert_eq!(
+            sb.cell_at(4999, 0).unwrap().ch,
+            (b'a' + (4999 % 26) as u8) as char
+        );
+        assert_eq!(
+            sb.cell_at(2500, 0).unwrap().ch,
+            (b'a' + (2500 % 26) as u8) as char
+        );
         assert_eq!(sb.cell_at(0, 0).unwrap().ch, 'a');
     }
 
@@ -2185,8 +2259,7 @@ mod tests {
         let tmp = TmpDir::new("idx-misaligned");
         let cols = 4usize;
         {
-            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8)
-                .expect("create");
+            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8).expect("create");
             for _ in 0..5 {
                 sb.push_line(&fill(b'a', cols), false);
             }
@@ -2207,15 +2280,13 @@ mod tests {
         let tmp = TmpDir::new("wrapped");
         let cols = 4usize;
         {
-            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8)
-                .expect("create");
+            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8).expect("create");
             sb.push_line(&fill(b'p', cols), false);
             sb.push_line(&fill(b'q', cols), true);
             sb.push_line(&fill(b'r', cols), false);
             sb.push_line(&fill(b's', cols), true);
         }
-        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8)
-            .expect("reopen");
+        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8).expect("reopen");
         assert_eq!(sb.len(), 4);
         assert!(!sb.wrapped_at(0));
         assert!(sb.wrapped_at(1));
@@ -2233,27 +2304,27 @@ mod tests {
     #[test]
     fn file_a2_cold_read_triggers_flush_and_mmap() {
         let tmp = TmpDir::new("a2-cold");
-        let cols = 4usize;  // ~59 bytes/record -> ~1100 fit in 64 KiB
-        let ram_capacity = 16;  // tiny ring
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, ram_capacity)
-            .expect("create");
+        let cols = 4usize; // ~59 bytes/record -> ~1100 fit in 64 KiB
+        let ram_capacity = 16; // tiny ring
+        let mut sb =
+            FileScrollback::open(tmp.bin(), tmp.idx(), cols, ram_capacity).expect("create");
         // Push enough lines so the ring has rolled many times but
         // the BufWriter still has not auto-flushed.
-        let n = 200usize;  // 200 * 59 = 11.8 KiB < 64 KiB buffer
+        let n = 200usize; // 200 * 59 = 11.8 KiB < 64 KiB buffer
         for i in 0..n {
-            let ch = ((b'a' + (i % 26) as u8)) as u8;
+            let ch = (b'a' + (i % 26) as u8) as u8;
             sb.push_line(&fill(ch, cols), false);
         }
         assert_eq!(sb.len(), n);
         // Recent lines: should be in RAM ring, no IO needed.
         let recent_idx = n - 1;
-        let ch_recent = ((b'a' + (recent_idx % 26) as u8)) as char;
+        let ch_recent = (b'a' + (recent_idx % 26) as u8) as char;
         assert_eq!(sb.cell_at(recent_idx, 0).unwrap().ch, ch_recent);
         // Old line: must have aged out of the ring.  Bytes are
         // still in the BufWriter buffer.  cell_at must flush + read
         // correctly.
         let old_idx = 5;
-        let ch_old = ((b'a' + (old_idx % 26) as u8)) as char;
+        let ch_old = (b'a' + (old_idx % 26) as u8) as char;
         assert_eq!(
             sb.cell_at(old_idx, 0).expect("old cell").ch,
             ch_old,
@@ -2275,8 +2346,8 @@ mod tests {
         let tmp = TmpDir::new("a2-remap");
         let cols = 4usize;
         let ram_capacity = 4;
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, ram_capacity)
-            .expect("create");
+        let mut sb =
+            FileScrollback::open(tmp.bin(), tmp.idx(), cols, ram_capacity).expect("create");
         // First batch: push 20 lines, cold-read to mmap them.
         for i in 0..20 {
             sb.push_line(&fill((b'a' + (i % 26) as u8) as u8, cols), false);
@@ -2293,9 +2364,11 @@ mod tests {
         // Cold-read a line that landed in the second batch (now
         // aged out of ring of 4).
         let cold_after_growth = 30usize;
-        let want_ch = ((b'a' + (cold_after_growth % 26) as u8)) as char;
+        let want_ch = (b'a' + (cold_after_growth % 26) as u8) as char;
         assert_eq!(
-            sb.cell_at(cold_after_growth, 0).expect("cell after growth").ch,
+            sb.cell_at(cold_after_growth, 0)
+                .expect("cell after growth")
+                .ch,
             want_ch,
             "remap on growth should let us read freshly-cold lines"
         );
@@ -2448,8 +2521,7 @@ mod tests {
         let tmp = TmpDir::new("partial");
         let cols = 4usize;
         {
-            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8)
-                .expect("create");
+            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8).expect("create");
             for _ in 0..5 {
                 sb.push_line(&fill(b'k', cols), false);
             }
@@ -2471,13 +2543,14 @@ mod tests {
             .append(true)
             .open(tmp.idx())
             .unwrap();
-        idx_f.write_all(&bin_len_before_garbage.to_le_bytes()).unwrap();
+        idx_f
+            .write_all(&bin_len_before_garbage.to_le_bytes())
+            .unwrap();
         drop(f);
         drop(idx_f);
         // Reopen: trailing partial record is detected via the
         // rec_len bounds check; len falls back to the last good record.
-        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8)
-            .expect("recover");
+        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8).expect("recover");
         // 5 good records + 1 partial → recover to 5.
         assert!(
             sb.len() == 5 || sb.len() == 6,
@@ -2512,8 +2585,7 @@ mod tests {
         // forget — 1000 × 8 cells writes ~100 KB to bin, well past
         // the 64 KB BufWriter auto-flush boundary so several
         // chunks have already hit disk and some tail is unflushed.
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 256)
-            .expect("create");
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 256).expect("create");
         for i in 0..1000u32 {
             let ch = b'a' + (i % 26) as u8;
             sb.push_line(&fill(ch, cols), false);
@@ -2543,8 +2615,8 @@ mod tests {
         // Reopen.  Post-F3+10c, every surfaced row must decode to
         // its expected character — no blank-by-tolerant-load rows
         // leaking through.
-        let sb2 = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 256)
-            .expect("reopen after torn close");
+        let sb2 =
+            FileScrollback::open(tmp.bin(), tmp.idx(), cols, 256).expect("reopen after torn close");
         let total = sb2.len();
         assert!(total <= pushed, "reopen total {total} > pushed {pushed}");
         // BufWriter auto-flush ensures a substantial prefix survived.
@@ -2575,8 +2647,7 @@ mod tests {
         let cols = 4usize;
         // Seed file with 50 rows.
         {
-            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 16)
-                .expect("create");
+            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 16).expect("create");
             for i in 0..50u32 {
                 sb.push_line(&fill(b'a' + (i % 26) as u8, cols), false);
             }
@@ -2584,13 +2655,13 @@ mod tests {
         }
         // Drive through the Scrollback enum since that's the call
         // surface Grid::reflow uses.
-        let mut sb = Scrollback::file(tmp.bin(), tmp.idx(), cols, 16)
-            .expect("reopen as enum");
+        let mut sb = Scrollback::file(tmp.bin(), tmp.idx(), cols, 16).expect("reopen as enum");
         assert_eq!(sb.len(), 50, "reopen should see seeded rows");
         // Restart at new_cols = 8 (the reflow trigger).
         sb.restart(8);
         assert_eq!(
-            sb.len(), 0,
+            sb.len(),
+            0,
             "restart() must clear the file for File variant — \
              leaving content causes the 错位 visible after a window resize"
         );
@@ -2599,7 +2670,8 @@ mod tests {
             sb.push_line_with_wrapped(&fill(b'a' + (i % 26) as u8, 8), false);
         }
         assert_eq!(
-            sb.len(), 50,
+            sb.len(),
+            50,
             "post-restart push count should be 50, not 100 \
              (100 = restart didn't truncate, file had old + new)"
         );
@@ -2615,8 +2687,7 @@ mod tests {
         let tmp = TmpDir::new("past-eof-tail");
         let cols = 4usize;
         {
-            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8)
-                .expect("create");
+            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8).expect("create");
             for _ in 0..10 {
                 sb.push_line(&fill(b'x', cols), false);
             }
@@ -2637,12 +2708,13 @@ mod tests {
                 idx.write_all(&bogus.to_le_bytes()).unwrap();
             }
         }
-        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8)
-            .expect("reopen");
+        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8).expect("reopen");
         assert_eq!(
-            sb.len(), 10,
+            sb.len(),
+            10,
             "Pass A should drop the 5 past-EOF entries; reopen total \
-             was {} (expected 10)", sb.len()
+             was {} (expected 10)",
+            sb.len()
         );
     }
 
@@ -2655,14 +2727,12 @@ mod tests {
         let tmp = TmpDir::new("clean-roundtrip");
         let cols = 8usize;
         {
-            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 32)
-                .expect("create");
+            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 32).expect("create");
             for i in 0..500u32 {
                 sb.push_line(&fill(b'a' + (i % 26) as u8, cols), false);
             }
         } // <- clean Drop runs flush_for_handoff equivalent
-        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 32)
-            .expect("reopen");
+        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 32).expect("reopen");
         assert_eq!(sb.len(), 500);
         for i in 0..500 {
             let line = sb.read_line(i).expect("row decodes");

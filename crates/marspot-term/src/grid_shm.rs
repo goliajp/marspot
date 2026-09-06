@@ -37,7 +37,7 @@
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 
 use crate::grid::{Cell, Grid};
 
@@ -175,9 +175,7 @@ impl GridSnapshot {
 /// checks against the (fixed) mapping size — the actual mapping is
 /// always [`capacity_bytes()`].
 fn region_len(cols: u16, rows: u16) -> usize {
-    HEADER_BYTES
-        + cols as usize * rows as usize * std::mem::size_of::<Cell>()
-        + rows as usize
+    HEADER_BYTES + cols as usize * rows as usize * std::mem::size_of::<Cell>() + rows as usize
 }
 
 /// Fixed offset from `base` to the per-row wrapped-flag array.  Sits
@@ -225,11 +223,7 @@ pub fn session_shm_name(session_id: u64) -> std::ffi::CString {
 /// session id baked in the name; a post-silent-update L2 can find a
 /// surviving L3 by scanning `sessions/<id>/entry.toml` and re-opening
 /// the region.
-pub fn create_region_named(
-    cols: u16,
-    rows: u16,
-    name: &std::ffi::CStr,
-) -> io::Result<OwnedFd> {
+pub fn create_region_named(cols: u16, rows: u16, name: &std::ffi::CStr) -> io::Result<OwnedFd> {
     assert!(cols > 0 && rows > 0, "grid_shm: zero dimension");
     assert!(
         fits_capacity(cols, rows),
@@ -319,9 +313,7 @@ pub fn delete_region(name: &std::ffi::CStr) {
 ///      header.version).  After this everyone sees v3.
 ///
 /// Returns `(base, len, cols, rows)` on success.
-fn attach_and_maybe_upgrade(
-    fd: RawFd,
-) -> io::Result<(*mut u8, usize, u16, u16)> {
+fn attach_and_maybe_upgrade(fd: RawFd) -> io::Result<(*mut u8, usize, u16, u16)> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(fd, &mut st) } != 0 {
         return Err(io::Error::last_os_error());
@@ -373,7 +365,9 @@ fn attach_and_maybe_upgrade(
         || cell_size != std::mem::size_of::<Cell>() as u32
         || region_len(cols as u16, rows as u16) > len;
     if bad {
-        unsafe { libc::munmap(base as *mut libc::c_void, len); }
+        unsafe {
+            libc::munmap(base as *mut libc::c_void, len);
+        }
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "grid_shm: incompatible region (magic/version/cell-size/dims)",
@@ -553,17 +547,17 @@ impl GridShmWriter {
     }
 
     #[inline]
-    unsafe fn cells_ptr(&self) -> *mut Cell { unsafe {
-        self.base.add(HEADER_BYTES) as *mut Cell
-    }}
+    unsafe fn cells_ptr(&self) -> *mut Cell {
+        unsafe { self.base.add(HEADER_BYTES) as *mut Cell }
+    }
 
     /// Per-row wrapped-flag array — one byte per viewport row, fixed
     /// offset after the cell capacity.  Reader and writer agree by
     /// construction (same const), independent of live dims.
     #[inline]
-    unsafe fn wrapped_ptr(&self) -> *mut u8 { unsafe {
-        self.base.add(wrapped_offset())
-    }}
+    unsafe fn wrapped_ptr(&self) -> *mut u8 {
+        unsafe { self.base.add(wrapped_offset()) }
+    }
 
     /// Hash-dedupe wrapper around [`publish`].  Computes an FNV-1a
     /// digest of every byte that the next `publish()` would write
@@ -585,12 +579,7 @@ impl GridShmWriter {
     /// despite "nothing" happening visually).  After dedupe, only
     /// the publishes that actually change a cell survive, and the
     /// idle baseline drops toward zero.
-    pub fn publish_if_changed(
-        &mut self,
-        grid: &Grid,
-        view_offset: u16,
-        flags: u32,
-    ) -> bool {
+    pub fn publish_if_changed(&mut self, grid: &Grid, view_offset: u16, flags: u32) -> bool {
         let h = compute_publish_hash(grid, view_offset, flags);
         if h == self.last_publish_hash {
             return false;
@@ -602,12 +591,7 @@ impl GridShmWriter {
 
     /// Publish the grid's in-view window (`view_offset` rows up from the
     /// live tail) plus cursor + mode flags. Single-writer seqlock.
-    pub fn publish(
-        &mut self,
-        grid: &Grid,
-        view_offset: u16,
-        flags: u32,
-    ) {
+    pub fn publish(&mut self, grid: &Grid, view_offset: u16, flags: u32) {
         let cols = grid.cols();
         let rows = grid.rows();
         // Hard assert (not debug): writing more cells than the mapping
@@ -809,16 +793,16 @@ impl GridShmReader {
     }
 
     #[inline]
-    unsafe fn cells_ptr(&self) -> *const Cell { unsafe {
-        self.base.add(HEADER_BYTES) as *const Cell
-    }}
+    unsafe fn cells_ptr(&self) -> *const Cell {
+        unsafe { self.base.add(HEADER_BYTES) as *const Cell }
+    }
 
     /// Per-row wrapped-flag array (read view) — mirrors the writer
     /// layout at the fixed offset after the cell capacity.
     #[inline]
-    unsafe fn wrapped_ptr(&self) -> *const u8 { unsafe {
-        self.base.add(wrapped_offset())
-    }}
+    unsafe fn wrapped_ptr(&self) -> *const u8 {
+        unsafe { self.base.add(wrapped_offset()) }
+    }
 
     /// Read the latest published frame into `cells_out` + `wrapped_out`
     /// (both resized to the frame's `cols*rows` and `rows`),  retrying
@@ -948,11 +932,16 @@ mod tests {
         // Reader before any publish → None.
         let reader = GridShmReader::from_fd(dup_fd(writer.fd())).expect("reader");
         let mut buf = Vec::new();
-        assert!(reader.read(&mut buf, &mut Vec::new()).is_none(), "no frame before publish");
+        assert!(
+            reader.read(&mut buf, &mut Vec::new()).is_none(),
+            "no frame before publish"
+        );
 
         writer.publish(&grid, 0, FLAG_CURSOR_VISIBLE);
 
-        let snap = reader.read(&mut buf, &mut Vec::new()).expect("frame after publish");
+        let snap = reader
+            .read(&mut buf, &mut Vec::new())
+            .expect("frame after publish");
         assert_eq!(snap.cols, cols);
         assert_eq!(snap.rows, rows);
         assert_eq!((snap.cursor_col, snap.cursor_row), (5, 0));
@@ -1031,7 +1020,11 @@ mod tests {
             let snap = reader.read(&mut buf, &mut Vec::new()).expect("frame");
             assert_eq!((snap.cols, snap.rows), (cols, rows), "dims track resize");
             assert_eq!(buf.len(), cols as usize * rows as usize);
-            assert_eq!(buf[buf.len() - 1].ch, 'X', "far corner copied at {cols}x{rows}");
+            assert_eq!(
+                buf[buf.len() - 1].ch,
+                'X',
+                "far corner copied at {cols}x{rows}"
+            );
             assert_eq!((snap.cursor_col, snap.cursor_row), (cols - 1, rows - 1));
         }
     }
@@ -1043,8 +1036,8 @@ mod tests {
         // char and a cell count matching its own reported dims — a torn
         // dims/cells pairing (or an OOB copy from garbage dims) would trip
         // one of these.
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let dims = [(64u16, 24u16), (120, 50), (16, 8), (200, 60)];
         let mut writer = GridShmWriter::create(dims[0].0, dims[0].1).expect("create");
@@ -1104,7 +1097,10 @@ mod tests {
         let reader = GridShmReader::from_fd(dup_fd(region.as_raw_fd())).expect("reader");
         assert_eq!((reader.cols(), reader.rows()), (cols, rows));
         let mut buf = Vec::new();
-        assert!(reader.read(&mut buf, &mut Vec::new()).is_none(), "no frame before publish");
+        assert!(
+            reader.read(&mut buf, &mut Vec::new()).is_none(),
+            "no frame before publish"
+        );
 
         // Writer takes the region itself.
         let mut writer = GridShmWriter::from_fd(region).expect("writer from_fd");
@@ -1113,7 +1109,9 @@ mod tests {
         grid.set_cursor(1, 2);
         writer.publish(&grid, 0, FLAG_CURSOR_VISIBLE);
 
-        let snap = reader.read(&mut buf, &mut Vec::new()).expect("frame after publish");
+        let snap = reader
+            .read(&mut buf, &mut Vec::new())
+            .expect("frame after publish");
         assert_eq!((snap.cols, snap.rows), (cols, rows));
         assert_eq!((snap.cursor_col, snap.cursor_row), (1, 2));
         assert!(snap.cursor_visible());
@@ -1137,8 +1135,8 @@ mod tests {
         // char) as fast as it can; the reader must only ever see a
         // frame where ALL cells agree — a torn read would mix two
         // rounds' chars. Catches a broken seqlock.
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let cols = 64u16;
         let rows = 24u16;

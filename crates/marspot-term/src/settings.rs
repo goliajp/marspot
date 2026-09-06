@@ -295,7 +295,9 @@ fn split_kv(line: &str) -> Option<(&str, &str)> {
 pub fn parse(body: &str) -> Settings {
     let mut s = Settings::default();
     for line in body.lines() {
-        let Some((k, v)) = split_kv(line) else { continue };
+        let Some((k, v)) = split_kv(line) else {
+            continue;
+        };
         match k {
             "reclaim.enabled" => s.reclaim_enabled = parse_bool(v, s.reclaim_enabled),
             "reclaim.idle_minutes" => {
@@ -305,15 +307,9 @@ pub fn parse(body: &str) -> Settings {
             "appearance.circled_wide" => {
                 s.appearance_circled_wide = parse_bool(v, s.appearance_circled_wide)
             }
-            "appearance.render_u_tags" => {
-                s.render_u_tags = parse_bool(v, s.render_u_tags)
-            }
-            "appearance.dim_scale" => {
-                s.dim_scale = parse_f32(v, s.dim_scale, 0.0, 2.0)
-            }
-            "input.scroll_factor" => {
-                s.scroll_factor = parse_f32(v, s.scroll_factor, 0.1, 8.0)
-            }
+            "appearance.render_u_tags" => s.render_u_tags = parse_bool(v, s.render_u_tags),
+            "appearance.dim_scale" => s.dim_scale = parse_f32(v, s.dim_scale, 0.0, 2.0),
+            "input.scroll_factor" => s.scroll_factor = parse_f32(v, s.scroll_factor, 0.1, 8.0),
             "claudecode.statusline_hook" => {
                 s.cc_statusline_hook = parse_bool(v, s.cc_statusline_hook)
             }
@@ -344,7 +340,11 @@ fn parse_f32(v: &str, fallback: f32, lo: f32, hi: f32) -> f32 {
 fn fmt_f32(f: f32) -> String {
     let s = format!("{f:.2}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s.is_empty() { "0".to_string() } else { s.to_string() }
+    if s.is_empty() {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 fn parse_bool(v: &str, fallback: bool) -> bool {
@@ -428,7 +428,11 @@ mod tests {
     /// hand-editable, so a rewrite must not quietly round it.
     #[test]
     fn floats_survive_the_round_trip_and_a_hand_edited_one_is_kept() {
-        let s = Settings { dim_scale: 0.6, scroll_factor: 2.5, ..Settings::default() };
+        let s = Settings {
+            dim_scale: 0.6,
+            scroll_factor: 2.5,
+            ..Settings::default()
+        };
         let back = parse(&render(&s, ""));
         assert_eq!(back, s, "round trip");
         // 1.0 writes without a trailing `.00`.
@@ -454,7 +458,11 @@ mod tests {
             "appearance.dim_scale = -0.5",
         ] {
             let s = parse(body);
-            assert_eq!(s, Settings::default(), "{body:?} must leave the defaults alone");
+            assert_eq!(
+                s,
+                Settings::default(),
+                "{body:?} must leave the defaults alone"
+            );
         }
     }
 
@@ -538,11 +546,17 @@ reclaim.enabled = true
     /// width and lays out with another.
     #[test]
     fn the_per_byte_mirror_tracks_the_snapshot() {
-        set_for_test(Settings { appearance_circled_wide: true, ..Settings::default() });
+        set_for_test(Settings {
+            appearance_circled_wide: true,
+            ..Settings::default()
+        });
         assert!(circled_wide());
         assert_eq!(circled_wide(), get().appearance_circled_wide);
 
-        set_for_test(Settings { appearance_circled_wide: false, ..Settings::default() });
+        set_for_test(Settings {
+            appearance_circled_wide: false,
+            ..Settings::default()
+        });
         assert!(!circled_wide());
         assert_eq!(circled_wide(), get().appearance_circled_wide);
     }

@@ -234,8 +234,7 @@ impl LoopWatch {
                     let elapsed = Duration::from_nanos(now_nanos.saturating_sub(started));
                     if elapsed >= threshold {
                         warned_for = iter_gen;
-                        let phase =
-                            *shared.phase.lock().unwrap_or_else(|p| p.into_inner());
+                        let phase = *shared.phase.lock().unwrap_or_else(|p| p.into_inner());
                         on_stall(elapsed, phase);
                     }
                 }
@@ -397,7 +396,10 @@ mod tests {
         while rx.try_recv().is_ok() {
             n += 1;
         }
-        assert_eq!(n, 1, "expected exactly one report for one stalled iteration");
+        assert_eq!(
+            n, 1,
+            "expected exactly one report for one stalled iteration"
+        );
     }
 
     /// A loop parked waiting for work is not a stall.

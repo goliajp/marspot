@@ -617,7 +617,10 @@ pub fn encode_inject_input(session_id: u64, bytes: &[u8]) -> Vec<u8> {
 
 pub fn decode_inject_input(payload: &[u8]) -> io::Result<(u64, Vec<u8>)> {
     if payload.len() < 12 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "InjectInput too short"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "InjectInput too short",
+        ));
     }
     let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
     let len = u32::from_le_bytes(payload[8..12].try_into().unwrap()) as usize;
@@ -653,7 +656,10 @@ pub fn encode_search_scrollback(
 
 pub fn decode_search_scrollback(payload: &[u8]) -> io::Result<(u32, bool, u32, String)> {
     if payload.len() < 4 + 1 + 4 + 4 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "SearchScrollback header truncated"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SearchScrollback header truncated",
+        ));
     }
     let qid = u32::from_le_bytes(payload[0..4].try_into().unwrap());
     let case = payload[4] != 0;
@@ -662,11 +668,19 @@ pub fn decode_search_scrollback(payload: &[u8]) -> io::Result<(u32, bool, u32, S
     if payload.len() != 13 + q_len {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("SearchScrollback q_len {q_len} but payload total {}", payload.len()),
+            format!(
+                "SearchScrollback q_len {q_len} but payload total {}",
+                payload.len()
+            ),
         ));
     }
     let query = std::str::from_utf8(&payload[13..])
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "SearchScrollback query not utf-8"))?
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SearchScrollback query not utf-8",
+            )
+        })?
         .to_string();
     Ok((qid, case, max_total, query))
 }
@@ -723,9 +737,7 @@ pub fn encode_search_results(
     v
 }
 
-pub fn decode_search_results(
-    payload: &[u8],
-) -> io::Result<(u32, bool, u32, Vec<WireSearchHit>)> {
+pub fn decode_search_results(payload: &[u8]) -> io::Result<(u32, bool, u32, Vec<WireSearchHit>)> {
     let mut p = 0;
     fn need<'a>(payload: &'a [u8], p: usize, n: usize, what: &str) -> io::Result<&'a [u8]> {
         if p + n > payload.len() {
@@ -742,37 +754,54 @@ pub fn decode_search_results(
     p += 1;
     let total_seen = u32::from_le_bytes(need(payload, p, 4, "total_seen")?.try_into().unwrap());
     p += 4;
-    let hit_count = u32::from_le_bytes(need(payload, p, 4, "hit_count")?.try_into().unwrap()) as usize;
+    let hit_count =
+        u32::from_le_bytes(need(payload, p, 4, "hit_count")?.try_into().unwrap()) as usize;
     p += 4;
     let mut hits = Vec::with_capacity(hit_count);
     for _ in 0..hit_count {
         let logical_line_idx = u64::from_le_bytes(need(payload, p, 8, "lli")?.try_into().unwrap());
         p += 8;
-        let char_offset = u32::from_le_bytes(need(payload, p, 4, "char_offset")?.try_into().unwrap());
+        let char_offset =
+            u32::from_le_bytes(need(payload, p, 4, "char_offset")?.try_into().unwrap());
         p += 4;
         let char_len = u32::from_le_bytes(need(payload, p, 4, "char_len")?.try_into().unwrap());
         p += 4;
-        let snippet_match_start = u16::from_le_bytes(need(payload, p, 2, "sm_start")?.try_into().unwrap());
+        let snippet_match_start =
+            u16::from_le_bytes(need(payload, p, 2, "sm_start")?.try_into().unwrap());
         p += 2;
-        let snippet_match_end = u16::from_le_bytes(need(payload, p, 2, "sm_end")?.try_into().unwrap());
+        let snippet_match_end =
+            u16::from_le_bytes(need(payload, p, 2, "sm_end")?.try_into().unwrap());
         p += 2;
-        let snippet_byte_len = u32::from_le_bytes(need(payload, p, 4, "snip_len")?.try_into().unwrap()) as usize;
+        let snippet_byte_len =
+            u32::from_le_bytes(need(payload, p, 4, "snip_len")?.try_into().unwrap()) as usize;
         p += 4;
         let snippet = std::str::from_utf8(need(payload, p, snippet_byte_len, "snippet")?)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "SearchResults snippet not utf-8"))?
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "SearchResults snippet not utf-8",
+                )
+            })?
             .to_string();
         p += snippet_byte_len;
-        let span_count = u16::from_le_bytes(need(payload, p, 2, "span_count")?.try_into().unwrap()) as usize;
+        let span_count =
+            u16::from_le_bytes(need(payload, p, 2, "span_count")?.try_into().unwrap()) as usize;
         p += 2;
         let mut spans = Vec::with_capacity(span_count);
         for _ in 0..span_count {
             let phys_row_idx = u64::from_le_bytes(need(payload, p, 8, "phys")?.try_into().unwrap());
             p += 8;
-            let col_start = u16::from_le_bytes(need(payload, p, 2, "col_start")?.try_into().unwrap());
+            let col_start =
+                u16::from_le_bytes(need(payload, p, 2, "col_start")?.try_into().unwrap());
             p += 2;
-            let col_end_inclusive = u16::from_le_bytes(need(payload, p, 2, "col_end")?.try_into().unwrap());
+            let col_end_inclusive =
+                u16::from_le_bytes(need(payload, p, 2, "col_end")?.try_into().unwrap());
             p += 2;
-            spans.push(WirePhysicalSpan { phys_row_idx, col_start, col_end_inclusive });
+            spans.push(WirePhysicalSpan {
+                phys_row_idx,
+                col_start,
+                col_end_inclusive,
+            });
         }
         hits.push(WireSearchHit {
             logical_line_idx,
@@ -787,7 +816,10 @@ pub fn decode_search_results(
     if p != payload.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("SearchResults trailing bytes: parsed {p} of {}", payload.len()),
+            format!(
+                "SearchResults trailing bytes: parsed {p} of {}",
+                payload.len()
+            ),
         ));
     }
     Ok((qid, has_more, total_seen, hits))
@@ -921,7 +953,10 @@ fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<ReadEnd> 
                 if off == 0 {
                     return Ok(ReadEnd::Eof);
                 }
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF mid-frame"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "EOF mid-frame",
+                ));
             }
             Ok(n) => off += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -1119,7 +1154,7 @@ pub fn decode_key_event(payload: &[u8]) -> io::Result<(WireKeyEvent, u32)> {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("KeyEvent bad state {v}"),
-            ))
+            ));
         }
     };
     let mods = payload[1];
@@ -1131,7 +1166,7 @@ pub fn decode_key_event(payload: &[u8]) -> io::Result<(WireKeyEvent, u32)> {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("KeyEvent bad kind {v}"),
-            ))
+            ));
         }
     };
     let key_data = u32::from_le_bytes(payload[4..8].try_into().unwrap());
@@ -1330,9 +1365,7 @@ pub fn encode_surface_attach(
     v
 }
 
-pub fn decode_surface_attach(
-    payload: &[u8],
-) -> io::Result<(u32, u32, f64, f64, f64)> {
+pub fn decode_surface_attach(payload: &[u8]) -> io::Result<(u32, u32, f64, f64, f64)> {
     if payload.len() != 32 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1403,12 +1436,16 @@ pub fn decode_surface_attach_window(
         ));
     }
     let (front, back, w, h, scale) = decode_surface_attach(&payload[..32])?;
-    let frame_index = (payload.len() >= 40)
-        .then(|| u32::from_le_bytes(payload[36..40].try_into().unwrap()));
-    let lights_right = (payload.len() >= 48)
-        .then(|| f64::from_le_bytes(payload[40..48].try_into().unwrap()));
+    let frame_index =
+        (payload.len() >= 40).then(|| u32::from_le_bytes(payload[36..40].try_into().unwrap()));
+    let lights_right =
+        (payload.len() >= 48).then(|| f64::from_le_bytes(payload[40..48].try_into().unwrap()));
     Ok((
-        front, back, w, h, scale,
+        front,
+        back,
+        w,
+        h,
+        scale,
         trailing_window_id(payload, 32),
         frame_index,
         lights_right,
@@ -1611,8 +1648,7 @@ pub fn encode_pane_wheel_keys(
     down: &[u8],
     marker: &[u8],
 ) -> Vec<u8> {
-    let mut out =
-        Vec::with_capacity(8 + 8 + enter.len() + up.len() + down.len() + marker.len());
+    let mut out = Vec::with_capacity(8 + 8 + enter.len() + up.len() + down.len() + marker.len());
     out.extend_from_slice(&session_id.to_le_bytes());
     for part in [enter, up, down, marker] {
         let n = part.len().min(u16::MAX as usize);
@@ -1814,7 +1850,10 @@ pub fn decode_pane_inject_paste(payload: &[u8]) -> io::Result<(u64, String)> {
             "PaneInjectPaste payload truncated before body",
         ));
     }
-    Ok((sid, String::from_utf8_lossy(&payload[12..12 + n]).into_owned()))
+    Ok((
+        sid,
+        String::from_utf8_lossy(&payload[12..12 + n]).into_owned(),
+    ))
 }
 
 /// CliSendText payload: `target len u32 + utf8, text len u32 + utf8`.
@@ -1871,7 +1910,10 @@ pub fn decode_cli_result(payload: &[u8]) -> io::Result<(bool, String)> {
             "CliResult payload truncated before body",
         ));
     }
-    Ok((payload[0] != 0, String::from_utf8_lossy(&payload[5..5 + n]).into_owned()))
+    Ok((
+        payload[0] != 0,
+        String::from_utf8_lossy(&payload[5..5 + n]).into_owned(),
+    ))
 }
 
 /// CliPaneList payload: `count u32`, then per pane
@@ -1992,7 +2034,10 @@ pub fn encode_cli_text(text: &str) -> Vec<u8> {
 
 pub fn decode_cli_text(payload: &[u8]) -> io::Result<String> {
     if payload.len() < 4 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "CliText payload too short"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "CliText payload too short",
+        ));
     }
     let n = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
     if payload.len() < 4 + n {
@@ -2125,8 +2170,7 @@ pub fn decode_pane_badge_menu(
             ));
         }
         let tag = u32::from_le_bytes(payload[off..off + 4].try_into().unwrap());
-        let len =
-            u16::from_le_bytes(payload[off + 4..off + 6].try_into().unwrap()) as usize;
+        let len = u16::from_le_bytes(payload[off + 4..off + 6].try_into().unwrap()) as usize;
         if len > PANE_BADGE_MENU_LABEL_MAX_LEN as usize {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2190,7 +2234,10 @@ pub fn decode_pane_session_begin(payload: &[u8]) -> io::Result<(u64, u32)> {
     if payload.len() != 12 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("pane_session_begin payload != 12 bytes (got {})", payload.len()),
+            format!(
+                "pane_session_begin payload != 12 bytes (got {})",
+                payload.len()
+            ),
         ));
     }
     let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
@@ -2448,9 +2495,7 @@ pub fn encode_caret_rect(rect: Option<(f64, f64, f64, f64)>, window_id: u32) -> 
     out
 }
 
-pub fn decode_caret_rect(
-    payload: &[u8],
-) -> io::Result<(Option<(f64, f64, f64, f64)>, u32)> {
+pub fn decode_caret_rect(payload: &[u8]) -> io::Result<(Option<(f64, f64, f64, f64)>, u32)> {
     if payload.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -2732,7 +2777,10 @@ mod tests {
     fn cli_read_frames_round_trip() {
         let (t, n) = decode_cli_read_pane(&encode_cli_read_pane("spg#2", 40)).unwrap();
         assert_eq!((t.as_str(), n), ("spg#2", 40));
-        assert_eq!(decode_cli_text(&encode_cli_text("hello\nworld")).unwrap(), "hello\nworld");
+        assert_eq!(
+            decode_cli_text(&encode_cli_text("hello\nworld")).unwrap(),
+            "hello\nworld"
+        );
         let mut short = encode_cli_read_pane("spg", 1);
         short.truncate(5);
         assert!(decode_cli_read_pane(&short).is_err());
@@ -2744,7 +2792,10 @@ mod tests {
             (390u64, "/w/goliajp/spg".to_string(), "spg".to_string()),
             (412, "/w/stables/spg".to_string(), String::new()),
         ];
-        assert_eq!(decode_cli_pane_list(&encode_cli_pane_list(&panes)).unwrap(), panes);
+        assert_eq!(
+            decode_cli_pane_list(&encode_cli_pane_list(&panes)).unwrap(),
+            panes
+        );
         let mut short = encode_cli_pane_list(&panes);
         short.truncate(20);
         assert!(decode_cli_pane_list(&short).is_err());
@@ -2780,7 +2831,10 @@ mod tests {
             let (sid, got) = decode_pane_hold_grid(&encode_pane_hold_grid(9_001, on)).unwrap();
             assert_eq!((sid, got), (9_001, on));
         }
-        assert!(decode_pane_hold_grid(&[0u8; 8]).is_err(), "truncated payload is an error");
+        assert!(
+            decode_pane_hold_grid(&[0u8; 8]).is_err(),
+            "truncated payload is an error"
+        );
     }
 
     use super::*;
@@ -2809,8 +2863,14 @@ mod tests {
     #[test]
     fn pane_badge_menu_roundtrip() {
         let items = vec![
-            PaneBadgeMenuItem { tag: 1, label: "switch to P1".into() },
-            PaneBadgeMenuItem { tag: 3, label: "switch to P3".into() },
+            PaneBadgeMenuItem {
+                tag: 1,
+                label: "switch to P1".into(),
+            },
+            PaneBadgeMenuItem {
+                tag: 3,
+                label: "switch to P3".into(),
+            },
         ];
         let payload = encode_pane_badge_menu(7, 10.0, 20.0, &items);
         let (sid, x, y, decoded) = decode_pane_badge_menu(&payload).unwrap();
@@ -2829,7 +2889,10 @@ mod tests {
 
     #[test]
     fn pane_badge_menu_truncated_errors() {
-        let items = vec![PaneBadgeMenuItem { tag: 1, label: "switch to P1".into() }];
+        let items = vec![PaneBadgeMenuItem {
+            tag: 1,
+            label: "switch to P1".into(),
+        }];
         let payload = encode_pane_badge_menu(7, 0.0, 0.0, &items);
         let err = decode_pane_badge_menu(&payload[..payload.len() - 1]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -2874,13 +2937,14 @@ mod tests {
         buf.extend_from_slice(&header);
         buf.extend_from_slice(&[0xAAu8, 0xBB, 0xCC]); // junk payload
         // followed by a known frame
-        Frame::new(MsgType::Ping, encode_ping(7)).write_to(&mut buf).unwrap();
+        Frame::new(MsgType::Ping, encode_ping(7))
+            .write_to(&mut buf)
+            .unwrap();
         let mut cur = Cursor::new(buf);
         let read = Frame::read_from(&mut cur).unwrap().unwrap();
         assert_eq!(read.msg_type, MsgType::Ping);
         assert_eq!(decode_ping(&read.payload).unwrap(), 7);
     }
-
 
     #[test]
     fn hello_roundtrip() {
@@ -3006,7 +3070,10 @@ mod tests {
         // truncated frame — clearing a declaration sends all-empty.
         let q = encode_pane_wheel_keys(1, b"", b"", b"", b"");
         let (sid2, e2, u2, d2, m2) = decode_pane_wheel_keys(&q).unwrap();
-        assert_eq!((sid2, e2.len(), u2.len(), d2.len(), m2.len()), (1, 0, 0, 0, 0));
+        assert_eq!(
+            (sid2, e2.len(), u2.len(), d2.len(), m2.len()),
+            (1, 0, 0, 0, 0)
+        );
     }
 
     /// A short or truncated payload is an error, not a panic: this
@@ -3067,9 +3134,8 @@ mod tests {
 
     #[test]
     fn pane_session_begin_carries_caps() {
-        let caps = PANE_SESSION_CAP_INPUT
-            | PANE_SESSION_CAP_LOCK_KEYS
-            | PANE_SESSION_CAP_FREEZE_GRID;
+        let caps =
+            PANE_SESSION_CAP_INPUT | PANE_SESSION_CAP_LOCK_KEYS | PANE_SESSION_CAP_FREEZE_GRID;
         let p = encode_pane_session_begin(11, caps);
         assert_eq!(decode_pane_session_begin(&p).unwrap(), (11, caps));
         assert_eq!(MsgType::from_u32(43), Some(MsgType::PaneSessionBegin));
@@ -3140,7 +3206,10 @@ mod tests {
         assert_eq!(MsgType::from_u32(37), Some(MsgType::GetSelectionText));
 
         let r = encode_selection_text(7, "hello\n世界");
-        assert_eq!(decode_selection_text(&r).unwrap(), (7, "hello\n世界".to_string()));
+        assert_eq!(
+            decode_selection_text(&r).unwrap(),
+            (7, "hello\n世界".to_string())
+        );
         assert_eq!(
             decode_selection_text(&encode_selection_text(9, "")).unwrap(),
             (9, String::new())
@@ -3242,9 +3311,11 @@ mod tests {
                 snippet_match_start: 5,
                 snippet_match_end: 8,
                 snippet: "abcde foo xyz".into(),
-                spans: vec![
-                    WirePhysicalSpan { phys_row_idx: 1234, col_start: 5, col_end_inclusive: 7 },
-                ],
+                spans: vec![WirePhysicalSpan {
+                    phys_row_idx: 1234,
+                    col_start: 5,
+                    col_end_inclusive: 7,
+                }],
             },
             WireSearchHit {
                 logical_line_idx: 5000,
@@ -3254,8 +3325,16 @@ mod tests {
                 snippet_match_end: 6,
                 snippet: "foobar 中文".into(),
                 spans: vec![
-                    WirePhysicalSpan { phys_row_idx: 4999, col_start: 80, col_end_inclusive: 99 },
-                    WirePhysicalSpan { phys_row_idx: 5000, col_start: 0, col_end_inclusive: 5 },
+                    WirePhysicalSpan {
+                        phys_row_idx: 4999,
+                        col_start: 80,
+                        col_end_inclusive: 99,
+                    },
+                    WirePhysicalSpan {
+                        phys_row_idx: 5000,
+                        col_start: 0,
+                        col_end_inclusive: 5,
+                    },
                 ],
             },
         ];
@@ -3417,8 +3496,7 @@ mod tests {
             "the strict legacy decoder rejects the longer body — which \
              is exactly why this needed its own msg type"
         );
-        let (f, b, w, h, sc, win, slot, lights) =
-            decode_surface_attach_window(&p).unwrap();
+        let (f, b, w, h, sc, win, slot, lights) = decode_surface_attach_window(&p).unwrap();
         assert_eq!((f, b, w, h, sc, win), (11, 22, 800.0, 600.0, 2.0, 5));
         assert_eq!(slot, Some(3));
         assert_eq!(lights, Some(138.0));
@@ -3428,14 +3506,12 @@ mod tests {
         // to keep reading both — during a swap the two sides are
         // different builds by definition, and each missing field has to
         // come back absent rather than as garbage read off the end.
-        let (.., win, slot, lights) =
-            decode_surface_attach_window(&p[..36]).unwrap();
+        let (.., win, slot, lights) = decode_surface_attach_window(&p[..36]).unwrap();
         assert_eq!(win, 5, "the window id still decodes");
         assert_eq!(slot, None, "and the missing slot is absent, not garbage");
         assert_eq!(lights, None);
 
-        let (.., win, slot, lights) =
-            decode_surface_attach_window(&p[..40]).unwrap();
+        let (.., win, slot, lights) = decode_surface_attach_window(&p[..40]).unwrap();
         assert_eq!((win, slot), (5, Some(3)));
         assert_eq!(lights, None, "a shell that predates the field says nothing");
     }
@@ -3445,10 +3521,7 @@ mod tests {
     /// as a stream error.
     #[test]
     fn window_lifecycle_frames_round_trip() {
-        assert_eq!(
-            decode_window_closed(&encode_window_closed(9)).unwrap(),
-            9
-        );
+        assert_eq!(decode_window_closed(&encode_window_closed(9)).unwrap(), 9);
         assert_eq!(decode_window_focus(&encode_window_focus(3)).unwrap(), 3);
         assert_eq!(MsgType::from_u32(61), Some(MsgType::SurfaceAttachWindow));
         assert_eq!(MsgType::from_u32(62), Some(MsgType::WindowClosed));
@@ -3470,7 +3543,10 @@ mod tests {
         assert_eq!(p.len(), 12, "12 bytes: a u32 and an f64");
         assert_eq!(decode_window_chrome(&p).unwrap(), (7, 138.0));
         // Zero is a real answer (full screen), not a missing one.
-        assert_eq!(decode_window_chrome(&encode_window_chrome(1, 0.0)).unwrap(), (1, 0.0));
+        assert_eq!(
+            decode_window_chrome(&encode_window_chrome(1, 0.0)).unwrap(),
+            (1, 0.0)
+        );
         // Short payloads are refused rather than read off the end.
         assert!(decode_window_chrome(&p[..11]).is_err());
         assert!(decode_window_chrome(&[]).is_err());

@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::session_registry::{read_session_entry, session_entry_path};
-use crate::shell_proto::{decode_hello_ack, encode_hello, Frame, MsgType, PROTO_VERSION};
+use crate::shell_proto::{Frame, MsgType, PROTO_VERSION, decode_hello_ack, encode_hello};
 
 const CONNECT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const ENTRY_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -38,10 +38,7 @@ pub fn connect_with_handshake(socket_path: &Path) -> io::Result<UnixStream> {
 /// for the whole 5 s regardless — so a caller asking for 2 s could still
 /// wait 5.  `wait_and_connect`'s promise that "the deadline bounds every
 /// retry" was only true of the retry loop, not of the attempt inside it.
-pub fn connect_with_handshake_by(
-    socket_path: &Path,
-    deadline: Instant,
-) -> io::Result<UnixStream> {
+pub fn connect_with_handshake_by(socket_path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     let mut stream = UnixStream::connect(socket_path)?;
     let remaining = deadline
         .saturating_duration_since(Instant::now())
@@ -249,7 +246,10 @@ mod deadline_tests {
         let r = wait_and_connect(u64::MAX, timeout);
         let elapsed = t0.elapsed();
 
-        assert!(r.is_err(), "a session that never registers must not connect");
+        assert!(
+            r.is_err(),
+            "a session that never registers must not connect"
+        );
         assert!(
             elapsed < timeout * 2,
             "took {elapsed:?} against a {timeout:?} budget — the two halves \

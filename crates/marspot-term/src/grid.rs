@@ -20,13 +20,19 @@ pub struct Cell {
 
 impl Default for Cell {
     fn default() -> Self {
-        Cell { ch: ' ', attrs: CellAttrs::default() }
+        Cell {
+            ch: ' ',
+            attrs: CellAttrs::default(),
+        }
     }
 }
 
 impl From<char> for Cell {
     fn from(ch: char) -> Self {
-        Cell { ch, attrs: CellAttrs::default() }
+        Cell {
+            ch,
+            attrs: CellAttrs::default(),
+        }
     }
 }
 
@@ -300,10 +306,7 @@ pub fn char_width(ch: char) -> u8 {
         AmbiguousWide::Circled => is_enclosed_alphanumeric(cp),
         AmbiguousWide::All => is_ambiguous_width(ch) || is_enclosed_alphanumeric(cp),
     };
-    if east_asian_wide
-        || ambiguous_wide
-        || crate::emoji_presentation::has_emoji_presentation(cp)
-    {
+    if east_asian_wide || ambiguous_wide || crate::emoji_presentation::has_emoji_presentation(cp) {
         2
     } else {
         1
@@ -374,7 +377,11 @@ mod char_width_tests {
     fn the_circled_set_covers_the_whole_family() {
         use super::is_enclosed_alphanumeric as f;
         for c in ['①', '⑳', 'Ⓐ', 'ⓐ', '⓪', '⓿', '❶', '➓'] {
-            assert!(f(c as u32), "{c} U+{:04X} must be in the circled set", c as u32);
+            assert!(
+                f(c as u32),
+                "{c} U+{:04X} must be in the circled set",
+                c as u32
+            );
         }
         // Neighbours that are NOT: the arrow below the block, the
         // geometric shapes above it, and the box drawing that must
@@ -553,9 +560,15 @@ impl Grid {
         }
     }
 
-    pub fn cols(&self) -> u16 { self.cols }
-    pub fn rows(&self) -> u16 { self.rows }
-    pub fn cursor(&self) -> (u16, u16) { (self.cursor_col, self.cursor_row) }
+    pub fn cols(&self) -> u16 {
+        self.cols
+    }
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
+    pub fn cursor(&self) -> (u16, u16) {
+        (self.cursor_col, self.cursor_row)
+    }
 
     /// Approximate resident bytes for the live grid (cell storage
     /// only — scalar fields are negligible).  Per-MARSPOT_PROFILE_RSS
@@ -620,7 +633,10 @@ impl Grid {
     pub fn set_row_run_ascii(&mut self, col: u16, row: u16, attrs: CellAttrs, bytes: &[u8]) {
         let run = self.row_cells_mut(col, row, bytes.len());
         for (cell, &b) in run.iter_mut().zip(bytes) {
-            *cell = Cell { ch: b as char, attrs };
+            *cell = Cell {
+                ch: b as char,
+                attrs,
+            };
         }
     }
 
@@ -702,10 +718,8 @@ impl Grid {
             // like claudecode is a known trade-off; user can wipe
             // scrollback when it gets unwieldy.  We won't make a
             // policy guess that can't be undone at read time.
-            self.scrollback.push_line_with_wrapped(
-                &self.cells[start..start + cols],
-                self.wrapped[pr],
-            );
+            self.scrollback
+                .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
             self.sb_wrapped.push_back(self.wrapped[pr]);
             self.wrapped[pr] = false;
             for c in &mut self.cells[start..start + cols] {
@@ -726,7 +740,9 @@ impl Grid {
 
     /// Monotonic count of lines pushed into scrollback over this
     /// grid's lifetime.  See the field comment for the contract.
-    pub fn scroll_push_count(&self) -> u64 { self.scroll_push_count }
+    pub fn scroll_push_count(&self) -> u64 {
+        self.scroll_push_count
+    }
 
     /// Region-bounded scroll up: shift rows in `top..=bot` upward by
     /// `lines`; new rows at the bottom of the region are blanked with
@@ -825,14 +841,18 @@ impl Grid {
         Cell::default()
     }
 
-    pub fn scrollback_len(&self) -> usize { self.scrollback.len() }
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
     /// F3+10 — flush File-variant BufWriter tail to kernel page
     /// cache before execv.  Memory / Disk no-op.  See
     /// `Scrollback::flush_for_handoff` for the rationale.
     pub fn scrollback_flush_for_handoff(&self) {
         self.scrollback.flush_for_handoff();
     }
-    pub fn scrollback_capacity(&self) -> usize { self.scrollback.capacity() }
+    pub fn scrollback_capacity(&self) -> usize {
+        self.scrollback.capacity()
+    }
     /// B3 — hand back an off-thread search snapshot of the File-backed
     /// scrollback (returns None for Memory/Disk variants).  Used by
     /// the L3 main loop on `SearchScrollback` to feed an isolated
@@ -885,11 +905,7 @@ impl Grid {
     /// `Grid::resize` reflow can't tell logical lines from
     /// hard-wrapped ones and ends up truncating wide content to
     /// the narrowest width the grid ever saw.
-    pub fn scrollback_read_page(
-        &self,
-        start: usize,
-        count: usize,
-    ) -> Vec<(Vec<Cell>, bool)> {
+    pub fn scrollback_read_page(&self, start: usize, count: usize) -> Vec<(Vec<Cell>, bool)> {
         let cells = self.scrollback.read_lines(start, count);
         let sb_len = self.scrollback.len();
         cells
@@ -993,10 +1009,7 @@ impl Grid {
         // lost and the cursor stays on screen.
         let mut need = (self.rows - rows) as usize;
         let mut last_keep = self.rows - 1; // drop blank rows from the bottom
-        while need > 0
-            && last_keep > self.cursor_row
-            && self.row_is_blank(last_keep)
-        {
+        while need > 0 && last_keep > self.cursor_row && self.row_is_blank(last_keep) {
             last_keep -= 1;
             need -= 1;
         }
@@ -1052,8 +1065,7 @@ impl Grid {
                     // wide lead.  (A legit trail NUL always directly
                     // follows a width-2 char.)
                     while prev.last().is_some_and(|c| c.ch == '\0')
-                        && !(prev.len() >= 2
-                            && char_width(prev[prev.len() - 2].ch) == 2)
+                        && !(prev.len() >= 2 && char_width(prev[prev.len() - 2].ch) == 2)
                     {
                         prev.pop();
                     }
@@ -1073,8 +1085,7 @@ impl Grid {
                 absorb(row, wrapped, &mut lines);
                 if r == self.cursor_row {
                     cursor_line = lines.len() - 1;
-                    cursor_off = lines.last().unwrap().len() - old_cols
-                        + self.cursor_col as usize;
+                    cursor_off = lines.last().unwrap().len() - old_cols + self.cursor_col as usize;
                 }
             }
         }
@@ -1086,9 +1097,7 @@ impl Grid {
                 l.pop();
             }
         }
-        while lines.len() > cursor_line + 1
-            && lines.last().is_some_and(|l| l.is_empty())
-        {
+        while lines.len() > cursor_line + 1 && lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
         }
         cursor_off = cursor_off.min(lines.get(cursor_line).map_or(0, |l| l.len()));
@@ -1109,10 +1118,7 @@ impl Grid {
                 // would land at the start of the next segment.  Pull
                 // the lead over instead (its column renders blank,
                 // exactly like the emulator's deferred-wrap print).
-                if take > 0
-                    && take < remaining
-                    && line[start + take].ch == '\0'
-                {
+                if take > 0 && take < remaining && line[start + take].ch == '\0' {
                     take -= 1;
                 }
                 // Degenerate 1-column grid with a wide pair: splitting
@@ -1121,8 +1127,9 @@ impl Grid {
                     take = 1;
                 }
                 let end = start + take;
-                if li == cursor_line && cursor_off >= start && (cursor_off < end
-                    || (cursor_off == end && remaining <= new_cols))
+                if li == cursor_line
+                    && cursor_off >= start
+                    && (cursor_off < end || (cursor_off == end && remaining <= new_cols))
                 {
                     cursor_seg = segs.len();
                     cursor_col_new = cursor_off - start;
@@ -1150,7 +1157,10 @@ impl Grid {
         // instead of treating them as spaces.
         let pad_cell = |i: usize, segs: &[(Vec<Cell>, bool)]| -> Cell {
             if i + 1 < segs.len() && segs[i + 1].1 {
-                Cell { ch: '\0', attrs: CellAttrs::default() }
+                Cell {
+                    ch: '\0',
+                    attrs: CellAttrs::default(),
+                }
             } else {
                 Cell::default()
             }
@@ -1207,7 +1217,6 @@ impl Grid {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1260,7 +1269,10 @@ mod tests {
         let mut g = Grid::new(3, 3);
         let blank = Cell {
             ch: ' ',
-            attrs: CellAttrs { bg: Color::Indexed(1), ..CellAttrs::default() },
+            attrs: CellAttrs {
+                bg: Color::Indexed(1),
+                ..CellAttrs::default()
+            },
         };
         g.scroll_up(2, blank);
         for c in 0..3 {

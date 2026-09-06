@@ -21,8 +21,8 @@
 
 use std::cell::RefCell;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::SystemTime;
 
 pub mod gc;
@@ -203,12 +203,7 @@ fn install_panic_hook() {
 /// Append one event. Cheap; never panics; level-filtered.
 /// `fields` is a slice of `(key, &dyn Display)` — keys are tiny snake_case
 /// literals, values are caller-formatted.
-pub fn event(
-    level: Level,
-    tag: &str,
-    msg: &str,
-    fields: &[(&str, &dyn fmt::Display)],
-) {
+pub fn event(level: Level, tag: &str, msg: &str, fields: &[(&str, &dyn fmt::Display)]) {
     if !should_log(level) {
         return;
     }
@@ -314,7 +309,11 @@ fn iso8601_ms(epoch_ms: u64) -> String {
 
 fn days_from_epoch_to_ymd(days: i32) -> (i32, u32, u32) {
     let z = days + 719468;
-    let era = if z >= 0 { z / 146097 } else { (z - 146096) / 146097 };
+    let era = if z >= 0 {
+        z / 146097
+    } else {
+        (z - 146096) / 146097
+    };
     let doe = (z - era * 146097) as u32;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe as i32 + era * 400;
@@ -454,12 +453,12 @@ mod tests {
     fn sample_tick_emits_every_nth_starting_at_first() {
         let counter = AtomicU64::new(0);
         // every_n = 4 → emit on calls 0, 4, 8, 12, ...
-        let pattern: Vec<bool> = (0..10)
-            .map(|_| sample_tick(&counter, 4))
-            .collect();
+        let pattern: Vec<bool> = (0..10).map(|_| sample_tick(&counter, 4)).collect();
         assert_eq!(
             pattern,
-            vec![true, false, false, false, true, false, false, false, true, false]
+            vec![
+                true, false, false, false, true, false, false, false, true, false
+            ]
         );
     }
 
@@ -538,13 +537,7 @@ mod tests {
     fn format_line_replaces_tabs_and_newlines_in_msg() {
         let _ = COMPONENT.set("test");
         let mut buf = String::new();
-        format_line(
-            &mut buf,
-            Level::Info,
-            "tag",
-            "first\tsecond\nthird",
-            &[],
-        );
+        format_line(&mut buf, Level::Info, "tag", "first\tsecond\nthird", &[]);
         // Tabs in msg get replaced so column count stays constant.
         let count = buf.matches('\t').count();
         // Expected separators: ISO/unix/lvl/comp/pid/tid/tag = 7 separators before msg + 0 after for empty fields.

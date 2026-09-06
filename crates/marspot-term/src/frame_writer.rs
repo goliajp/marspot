@@ -27,9 +27,9 @@
 //! poke, one reply, or one redraw.
 
 use std::io::Write;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
 use std::thread;
 
 use crate::shell_proto::Frame;
@@ -128,7 +128,12 @@ impl<T: Queued> BoundedWriter<T> {
                 }
             })
             .expect("spawn frame-writer thread");
-        Self { tx: Some(tx), pending, dropped, cap_bytes }
+        Self {
+            tx: Some(tx),
+            pending,
+            dropped,
+            cap_bytes,
+        }
     }
 
     /// Queue `frame`.  Never blocks.
@@ -235,9 +240,8 @@ mod tests {
         // wrong.
         let mut got = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(2);
-        let all_present = |bytes: &[u8]| {
-            (0u8..4).all(|i| bytes.windows(8).any(|win| win == [i; 8]))
-        };
+        let all_present =
+            |bytes: &[u8]| (0u8..4).all(|i| bytes.windows(8).any(|win| win == [i; 8]));
         while Instant::now() < deadline && !all_present(&got) {
             let mut buf = [0u8; 512];
             match b.read(&mut buf) {

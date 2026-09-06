@@ -281,11 +281,7 @@ fn fkey14_seq(letter: u8, mods: Modifiers) -> Cow<'static, [u8]> {
     }
 }
 
-fn encode_named_key(
-    n: NamedKey,
-    mods: Modifiers,
-    cursor_key_app_mode: bool,
-) -> Cow<'static, [u8]> {
+fn encode_named_key(n: NamedKey, mods: Modifiers, cursor_key_app_mode: bool) -> Cow<'static, [u8]> {
     use NamedKey::*;
     match n {
         // Enter / Tab / Backspace / Escape — classic control bytes.
@@ -444,16 +440,31 @@ mod tests {
         let down = pressed(LogicalKey::Named(NamedKey::ArrowDown), None);
         let left = pressed(LogicalKey::Named(NamedKey::ArrowLeft), None);
         let right = pressed(LogicalKey::Named(NamedKey::ArrowRight), None);
-        assert_eq!(&*key_event_to_bytes(&up, Modifiers::default(), false, false, || None).unwrap(), b"\x1b[A");
-        assert_eq!(&*key_event_to_bytes(&down, Modifiers::default(), false, false, || None).unwrap(), b"\x1b[B");
-        assert_eq!(&*key_event_to_bytes(&left, Modifiers::default(), false, false, || None).unwrap(), b"\x1b[D");
-        assert_eq!(&*key_event_to_bytes(&right, Modifiers::default(), false, false, || None).unwrap(), b"\x1b[C");
+        assert_eq!(
+            &*key_event_to_bytes(&up, Modifiers::default(), false, false, || None).unwrap(),
+            b"\x1b[A"
+        );
+        assert_eq!(
+            &*key_event_to_bytes(&down, Modifiers::default(), false, false, || None).unwrap(),
+            b"\x1b[B"
+        );
+        assert_eq!(
+            &*key_event_to_bytes(&left, Modifiers::default(), false, false, || None).unwrap(),
+            b"\x1b[D"
+        );
+        assert_eq!(
+            &*key_event_to_bytes(&right, Modifiers::default(), false, false, || None).unwrap(),
+            b"\x1b[C"
+        );
     }
 
     #[test]
     fn enter_returns_cr() {
         let ev = pressed(LogicalKey::Named(NamedKey::Enter), None);
-        assert_eq!(&*key_event_to_bytes(&ev, Modifiers::default(), false, false, || None).unwrap(), b"\r");
+        assert_eq!(
+            &*key_event_to_bytes(&ev, Modifiers::default(), false, false, || None).unwrap(),
+            b"\r"
+        );
     }
 
     #[test]
@@ -500,7 +511,10 @@ mod tests {
         // editors that watch for selection-extend still work.
         let h = pressed(LogicalKey::Named(NamedKey::Home), None);
         let e = pressed(LogicalKey::Named(NamedKey::End), None);
-        let shift = Modifiers { shift: true, ..Modifiers::default() };
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
         assert_eq!(
             &*key_event_to_bytes(&h, shift, false, false, || None).unwrap(),
             b"\x1b[1;2H"
@@ -544,8 +558,7 @@ mod tests {
         ];
         for (k, want) in cases {
             let ev = pressed(LogicalKey::Named(k), None);
-            let got =
-                key_event_to_bytes(&ev, Modifiers::default(), false, false, || None).unwrap();
+            let got = key_event_to_bytes(&ev, Modifiers::default(), false, false, || None).unwrap();
             assert_eq!(&*got, want, "key {:?}", k);
         }
     }
@@ -618,12 +631,10 @@ mod tests {
             ..Default::default()
         };
         // Plain paste (no bracketed mode) returns the clipboard bytes.
-        let out =
-            key_event_to_bytes(&ev, mods, false, false, || Some("hi".to_string())).unwrap();
+        let out = key_event_to_bytes(&ev, mods, false, false, || Some("hi".to_string())).unwrap();
         assert_eq!(&*out, b"hi");
         // Bracketed-paste mode wraps in \e[200~ ... \e[201~.
-        let out =
-            key_event_to_bytes(&ev, mods, false, true, || Some("hi".to_string())).unwrap();
+        let out = key_event_to_bytes(&ev, mods, false, true, || Some("hi".to_string())).unwrap();
         assert_eq!(&*out, b"\x1b[200~hi\x1b[201~");
     }
 

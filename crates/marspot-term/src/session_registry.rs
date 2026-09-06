@@ -171,13 +171,8 @@ pub fn pid_is_live_session(pid: i32) -> bool {
         return false;
     }
     let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-    let n = unsafe {
-        libc::proc_pidpath(
-            pid,
-            buf.as_mut_ptr() as *mut libc::c_void,
-            buf.len() as u32,
-        )
-    };
+    let n =
+        unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
     if n <= 0 {
         return false;
     }
@@ -337,24 +332,38 @@ pub fn parse_session_entry_text(contents: &str) -> io::Result<SessionEntry> {
         fields.insert(key, val);
     }
     let req_str = |k: &str| -> io::Result<String> {
-        let raw = fields.get(k).ok_or_else(|| invalid(format!("missing {k}")))?;
+        let raw = fields
+            .get(k)
+            .ok_or_else(|| invalid(format!("missing {k}")))?;
         unquote(raw).ok_or_else(|| invalid(format!("{k} not quoted")))
     };
     let req_num = |k: &str| -> io::Result<u64> {
-        let raw = fields.get(k).ok_or_else(|| invalid(format!("missing {k}")))?;
-        raw.parse::<u64>().map_err(|e| invalid(format!("bad {k}: {e}")))
+        let raw = fields
+            .get(k)
+            .ok_or_else(|| invalid(format!("missing {k}")))?;
+        raw.parse::<u64>()
+            .map_err(|e| invalid(format!("bad {k}: {e}")))
     };
     let req_i32 = |k: &str| -> io::Result<i32> {
-        let raw = fields.get(k).ok_or_else(|| invalid(format!("missing {k}")))?;
-        raw.parse::<i32>().map_err(|e| invalid(format!("bad {k}: {e}")))
+        let raw = fields
+            .get(k)
+            .ok_or_else(|| invalid(format!("missing {k}")))?;
+        raw.parse::<i32>()
+            .map_err(|e| invalid(format!("bad {k}: {e}")))
     };
     let req_u16 = |k: &str| -> io::Result<u16> {
-        let raw = fields.get(k).ok_or_else(|| invalid(format!("missing {k}")))?;
-        raw.parse::<u16>().map_err(|e| invalid(format!("bad {k}: {e}")))
+        let raw = fields
+            .get(k)
+            .ok_or_else(|| invalid(format!("missing {k}")))?;
+        raw.parse::<u16>()
+            .map_err(|e| invalid(format!("bad {k}: {e}")))
     };
     let req_u32 = |k: &str| -> io::Result<u32> {
-        let raw = fields.get(k).ok_or_else(|| invalid(format!("missing {k}")))?;
-        raw.parse::<u32>().map_err(|e| invalid(format!("bad {k}: {e}")))
+        let raw = fields
+            .get(k)
+            .ok_or_else(|| invalid(format!("missing {k}")))?;
+        raw.parse::<u32>()
+            .map_err(|e| invalid(format!("bad {k}: {e}")))
     };
     // Optional field for back-compat with entries written before
     // Amendment 7 added shm_name.  Missing / unquoted = "".
@@ -443,7 +452,9 @@ pub fn purge_expired_retired() -> usize {
     for entry in read_dir.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some((_, ts)) = name.rsplit_once('-') else { continue };
+        let Some((_, ts)) = name.rsplit_once('-') else {
+            continue;
+        };
         let Ok(ts) = ts.parse::<u64>() else { continue };
         if now.saturating_sub(ts) > RETIRED_TTL_SECS
             && std::fs::remove_dir_all(entry.path()).is_ok()
@@ -479,8 +490,12 @@ pub fn list_session_entries() -> Vec<SessionEntry> {
         if !is_session_dir(&path) {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
-        let Ok(id) = name.parse::<u64>() else { continue };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(id) = name.parse::<u64>() else {
+            continue;
+        };
         if let Ok(e) = read_session_entry(id) {
             out.push(e);
         }
@@ -557,7 +572,11 @@ mod tests {
             // SAFETY: test/example code, single-threaded at this point (state-dir
             // mutations additionally serialized by the suite's state-dir lock).
             unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
-            Self { prev, _lock: lock, _dir: dir }
+            Self {
+                prev,
+                _lock: lock,
+                _dir: dir,
+            }
         }
     }
     impl Drop for StateDirGuard {

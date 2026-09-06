@@ -32,7 +32,7 @@
 //!   writer thread to acknowledge everything queued ahead of it.
 
 use std::io::Write;
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::JoinHandle;
 
 enum Msg {
@@ -105,7 +105,13 @@ impl AsyncWriter {
                 }
             })
             .expect("spawn async writer");
-        Self { tx, free_rx, buf: Vec::with_capacity(cap), cap, handle: Some(handle) }
+        Self {
+            tx,
+            free_rx,
+            buf: Vec::with_capacity(cap),
+            cap,
+            handle: Some(handle),
+        }
     }
 
     fn take_empty(&mut self) -> Vec<u8> {
@@ -192,14 +198,21 @@ mod tests {
     #[test]
     fn everything_written_is_readable_after_flush() {
         let path = tmp("flush");
-        let f = std::fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
         let mut w = AsyncWriter::new(f, 64, 4);
         for i in 0..1000u32 {
             w.write(&i.to_le_bytes());
         }
         w.flush();
         let mut s = Vec::new();
-        std::fs::File::open(&path).unwrap().read_to_end(&mut s).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_to_end(&mut s)
+            .unwrap();
         assert_eq!(s.len(), 4000, "flush must be a barrier, not a hint");
         for i in 0..1000u32 {
             assert_eq!(&s[i as usize * 4..i as usize * 4 + 4], &i.to_le_bytes());
@@ -213,17 +226,31 @@ mod tests {
     fn a_swap_does_not_reorder_across_files() {
         let a = tmp("swap-a");
         let b = tmp("swap-b");
-        let fa = std::fs::OpenOptions::new().create(true).append(true).open(&a).unwrap();
+        let fa = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&a)
+            .unwrap();
         let mut w = AsyncWriter::new(fa, 1024, 4);
         w.write(b"old");
-        let fb = std::fs::OpenOptions::new().create(true).append(true).open(&b).unwrap();
+        let fb = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&b)
+            .unwrap();
         w.swap_file(fb);
         w.write(b"new");
         w.flush();
         let mut sa = String::new();
-        std::fs::File::open(&a).unwrap().read_to_string(&mut sa).unwrap();
+        std::fs::File::open(&a)
+            .unwrap()
+            .read_to_string(&mut sa)
+            .unwrap();
         let mut sb = String::new();
-        std::fs::File::open(&b).unwrap().read_to_string(&mut sb).unwrap();
+        std::fs::File::open(&b)
+            .unwrap()
+            .read_to_string(&mut sb)
+            .unwrap();
         assert_eq!(sa, "old");
         assert_eq!(sb, "new");
         let _ = std::fs::remove_file(&a);
@@ -235,7 +262,11 @@ mod tests {
     #[test]
     fn drop_flushes() {
         let path = tmp("drop");
-        let f = std::fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
         {
             let mut w = AsyncWriter::new(f, 4096, 4);
             w.write(&[7u8; 100]);

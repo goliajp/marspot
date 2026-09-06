@@ -102,9 +102,13 @@ pub const EMOJI_PRESENTATION_RANGES: &[(u32, u32)] = &[
 pub fn has_emoji_presentation(cp: u32) -> bool {
     EMOJI_PRESENTATION_RANGES
         .binary_search_by(|&(start, end)| {
-            if cp < start { std::cmp::Ordering::Greater }
-            else if cp > end { std::cmp::Ordering::Less }
-            else { std::cmp::Ordering::Equal }
+            if cp < start {
+                std::cmp::Ordering::Greater
+            } else if cp > end {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
         })
         .is_ok()
 }
@@ -128,7 +132,9 @@ mod tests {
         let mut prev_end = 0u32;
         for (i, &(s, e)) in EMOJI_PRESENTATION_RANGES.iter().enumerate() {
             assert!(s <= e, "range[{}] start > end", i);
-            if i > 0 { assert!(prev_end < s, "range[{}] overlaps", i); }
+            if i > 0 {
+                assert!(prev_end < s, "range[{}] overlaps", i);
+            }
             prev_end = e;
         }
     }

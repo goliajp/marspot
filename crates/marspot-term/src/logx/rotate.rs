@@ -16,7 +16,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
-use super::sink::{Sink, ROTATE_AGE};
+use super::sink::{ROTATE_AGE, Sink};
 
 const DEFAULT_KEEP: usize = 10;
 
@@ -126,8 +126,8 @@ fn rotate_now(sink: &mut Sink) -> io::Result<()> {
 
 #[cfg(feature = "compress")]
 fn compress_to_gz(src: &Path) -> io::Result<()> {
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::fs::File;
     use std::io::{Read, Write};
 
@@ -281,7 +281,12 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .filter(|n| n.starts_with("marspot."))
             .collect();
-        assert_eq!(remaining.len(), 2, "expected 2 to survive, got {:?}", remaining);
+        assert_eq!(
+            remaining.len(),
+            2,
+            "expected 2 to survive, got {:?}",
+            remaining
+        );
     }
 
     fn wait_for_rotated(dir: &std::path::Path) {

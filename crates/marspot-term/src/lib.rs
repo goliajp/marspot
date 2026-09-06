@@ -17,14 +17,14 @@ pub mod binary_tree;
 pub mod bytelog;
 pub mod emoji_presentation;
 pub mod fast_hash;
-pub mod unicode_data;
+pub mod frame_writer;
 pub mod grapheme;
 pub mod grid;
 pub mod grid_links;
-pub mod frame_writer;
 pub mod logx;
 pub mod loop_watch;
 pub mod scrollback_search;
+pub mod unicode_data;
 
 /// Fingerprint embedded into the binary's rodata so `install-local.sh`
 /// can extract the git sha + build timestamp via `strings BIN | grep
@@ -68,11 +68,11 @@ pub mod parser;
 pub mod paths;
 pub mod pty;
 pub mod render;
-pub mod settings;
 pub mod scrollback;
 pub mod session;
 pub mod session_registry;
 pub mod session_state;
+pub mod settings;
 pub mod shell_proto;
 pub mod terminal;
 pub mod tmux;

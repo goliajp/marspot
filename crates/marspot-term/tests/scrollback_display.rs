@@ -54,11 +54,14 @@ impl ScenarioState {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id();
-        let dir = std::env::temp_dir()
-            .join(format!("marspot-scrollback-display-{label}-{pid}-{n}"));
+        let dir =
+            std::env::temp_dir().join(format!("marspot-scrollback-display-{label}-{pid}-{n}"));
         let session_dir = dir.join("sessions").join(sid.to_string());
         std::fs::create_dir_all(&session_dir).expect("create session dir");
-        ScenarioState { state_dir: dir, sid }
+        ScenarioState {
+            state_dir: dir,
+            sid,
+        }
     }
     fn apply_env(&self) {
         unsafe {
@@ -144,7 +147,8 @@ fn scenario1_scroll_down_content_visible() {
             }
             assert!(
                 !row_is_blank(&v[r]),
-                "view_offset={vo} row={r} unexpectedly blank: {:?}", v[r]
+                "view_offset={vo} row={r} unexpectedly blank: {:?}",
+                v[r]
             );
         }
     }
@@ -188,7 +192,8 @@ fn scenario2_scroll_cap_matches_pushes() {
     assert!(
         row_is_blank(&past_cap[0]),
         "view_offset=cap+5 top row should be blank (= past start of \
-         history); got: {:?}", past_cap[0]
+         history); got: {:?}",
+        past_cap[0]
     );
 }
 

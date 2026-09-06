@@ -19,7 +19,7 @@
 //! Conformance: see `grapheme_break_test_conformance` test, which
 //! exercises every entry in the official `GraphemeBreakTest.txt`.
 
-use crate::unicode_data::{cluster_props, ClusterProps, GBP, InCB};
+use crate::unicode_data::{ClusterProps, GBP, InCB, cluster_props};
 
 /// Boundary decision state.  UAX #29 expresses GB11 ("Emoji Extend*
 /// ZWJ × Emoji") and GB9c (Indic Conjunct Break) as patterns that
@@ -452,10 +452,7 @@ mod tests {
         assert_eq!(collect(s), vec![s]);
         // Two flags back to back stay as separate clusters.
         let s = "\u{1F1EF}\u{1F1F5}\u{1F1FA}\u{1F1F8}";
-        assert_eq!(
-            collect(s),
-            vec!["\u{1F1EF}\u{1F1F5}", "\u{1F1FA}\u{1F1F8}"]
-        );
+        assert_eq!(collect(s), vec!["\u{1F1EF}\u{1F1F5}", "\u{1F1FA}\u{1F1F8}"]);
         // A trailing solo RI is its own cluster.
         let s = "\u{1F1EF}\u{1F1F5}\u{1F1FA}";
         assert_eq!(collect(s), vec!["\u{1F1EF}\u{1F1F5}", "\u{1F1FA}"]);
@@ -616,10 +613,7 @@ mod tests {
     fn grapheme_break_test_conformance() {
         let path = std::env::var("MARSPOT_GBT_PATH").unwrap_or_else(|_| {
             // Default: vendored copy committed with this crate.
-            format!(
-                "{}/tests/GraphemeBreakTest.txt",
-                env!("CARGO_MANIFEST_DIR")
-            )
+            format!("{}/tests/GraphemeBreakTest.txt", env!("CARGO_MANIFEST_DIR"))
         });
         let contents = match std::fs::read_to_string(&path) {
             Ok(s) => s,
@@ -654,21 +648,16 @@ mod tests {
                 match delim {
                     "÷" => expected_boundaries.push(byte_pos),
                     "×" => {}
-                    other => panic!(
-                        "line {}: unexpected delimiter {:?}",
-                        lineno, other
-                    ),
+                    other => panic!("line {}: unexpected delimiter {:?}", lineno, other),
                 }
                 let cp_hex = match tokens.next() {
                     Some(t) => t,
                     None => break,
                 };
-                let cp = u32::from_str_radix(cp_hex, 16).unwrap_or_else(|_| {
-                    panic!("line {}: bad hex {:?}", lineno, cp_hex)
-                });
-                let ch = char::from_u32(cp).unwrap_or_else(|| {
-                    panic!("line {}: invalid codepoint U+{:04X}", lineno, cp)
-                });
+                let cp = u32::from_str_radix(cp_hex, 16)
+                    .unwrap_or_else(|_| panic!("line {}: bad hex {:?}", lineno, cp_hex));
+                let ch = char::from_u32(cp)
+                    .unwrap_or_else(|| panic!("line {}: invalid codepoint U+{:04X}", lineno, cp));
                 string.push(ch);
                 byte_pos += ch.len_utf8();
             }

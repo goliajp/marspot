@@ -75,7 +75,9 @@ pub fn scan_visible_links_with(
 ) -> Vec<LinkRange> {
     marspot_linkify::scan_visible_links_with(
         &GridSource { grid, view_offset },
-        marspot_linkify::ScanOpts { tui_mode: opts.cc_mode },
+        marspot_linkify::ScanOpts {
+            tui_mode: opts.cc_mode,
+        },
         oracle,
     )
 }
@@ -84,7 +86,6 @@ pub fn scan_visible_links_with(
 mod grid_tests {
     use super::*;
     use crate::grid::{Cell, Grid};
-
 
     // End-to-end test through the REAL VT parser: feed a long URL +
     // newline to a Terminal and check that DECAWM-wrap flag really
@@ -99,8 +100,8 @@ mod grid_tests {
     #[test]
     fn a_wrapped_path_at_the_caret_survives_cc_mode() {
         use crate::terminal::Terminal;
-        let root = std::env::temp_dir()
-            .join(format!("marspot-gridlinks-caret-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("marspot-gridlinks-caret-{}", std::process::id()));
         let deep = root.join(".claude").join("notes");
         std::fs::create_dir_all(&deep).unwrap();
         let file = deep.join("probe.sh");
@@ -138,8 +139,8 @@ mod grid_tests {
     #[test]
     fn field_report_paths_survive_a_caret_at_the_bottom() {
         use crate::terminal::Terminal;
-        let root = std::env::temp_dir()
-            .join(format!("marspot-gridlinks-shapes-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("marspot-gridlinks-shapes-{}", std::process::id()));
         let deep = root.join(".claude").join("notes");
         std::fs::create_dir_all(&deep).unwrap();
         let file = deep.join("provenance-probe.sh");
@@ -167,7 +168,11 @@ mod grid_tests {
             }
         }
         std::fs::remove_dir_all(&root).ok();
-        assert!(misses.is_empty(), "link lost or truncated:\n  {}", misses.join("\n  "));
+        assert!(
+            misses.is_empty(),
+            "link lost or truncated:\n  {}",
+            misses.join("\n  ")
+        );
     }
 
     #[test]
@@ -206,7 +211,6 @@ mod grid_tests {
         assert_eq!(links[1].row, 1);
     }
 
-
     // End-to-end test that mirrors how the production renderer drives
     // scan_visible_links: we build a real Grid, fill DECAWM-wrap-style
     // rows with a long URL filling the right edge + continuation on
@@ -227,12 +231,26 @@ mod grid_tests {
         assert_eq!(url_chars.len(), 33);
         // Row 0: cols 0..=29 = url chars 0..=29 (fills row entirely).
         for (c, &ch) in url_chars.iter().take(COLS as usize).enumerate() {
-            grid.set_cell(c as u16, 0, Cell { ch, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                0,
+                Cell {
+                    ch,
+                    ..Default::default()
+                },
+            );
         }
         // Row 1: cols 0..=2 = url chars 30..=32 (3 chars).  Remaining
         // cols stay default (blank).
         for (c, &ch) in url_chars.iter().skip(COLS as usize).enumerate() {
-            grid.set_cell(c as u16, 1, Cell { ch, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                1,
+                Cell {
+                    ch,
+                    ..Default::default()
+                },
+            );
         }
         // Mark row 1 as the wrap continuation of row 0.
         grid.set_row_wrapped(1, true);
@@ -259,7 +277,6 @@ mod grid_tests {
         assert_eq!(links[1].col_end, 2);
     }
 
-
     /// End-to-end: feed real bytes through the VT parser and scan
     /// the resulting grid for links.  Mirrors the live L2 path
     /// (PTY → Terminal::feed → mirror grid → scan_visible_links →
@@ -284,13 +301,27 @@ mod grid_tests {
         // last char at col 19 is '/'.
         let row0 = b"https://example.com/";
         for (c, &b) in row0.iter().enumerate() {
-            grid.set_cell(c as u16, 0, Cell { ch: b as char, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                0,
+                Cell {
+                    ch: b as char,
+                    ..Default::default()
+                },
+            );
         }
         // Row 1: "  path/to/file.html" — 2-space hanging indent then
         // the URL continuation.  Note: NO wrap flag set.
         let row1 = b"  path/to/file.html";
         for (c, &b) in row1.iter().enumerate() {
-            grid.set_cell(c as u16, 1, Cell { ch: b as char, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                1,
+                Cell {
+                    ch: b as char,
+                    ..Default::default()
+                },
+            );
         }
         // Without cc_mode: row 0's URL terminates at the row edge; the
         // regex doesn't reach row 1.  scan_until_link_terminator only
@@ -327,7 +358,6 @@ mod grid_tests {
         );
     }
 
-
     /// cc-mode does NOT fire when the prev row's last char isn't
     /// URL/path-class — protects against accidentally merging two
     /// unrelated paragraphs.
@@ -340,12 +370,26 @@ mod grid_tests {
         // Row 0 ends with a period (sentence end), not URL/path char.
         let row0 = b"finished the request.";
         for (c, &b) in row0.iter().take(COLS as usize).enumerate() {
-            grid.set_cell(c as u16, 0, Cell { ch: b as char, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                0,
+                Cell {
+                    ch: b as char,
+                    ..Default::default()
+                },
+            );
         }
         // Row 1 has indent + URL-looking content.
         let row1 = b"  /some/path.rs";
         for (c, &b) in row1.iter().enumerate() {
-            grid.set_cell(c as u16, 1, Cell { ch: b as char, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                1,
+                Cell {
+                    ch: b as char,
+                    ..Default::default()
+                },
+            );
         }
         let with_cc = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
         // Heuristic must reject the pair → no merge → row 0 + row 1
@@ -361,7 +405,6 @@ mod grid_tests {
             );
         }
     }
-
 
     #[test]
     fn e2e_scan_links_via_parser_finds_url_across_soft_wrap() {
@@ -390,7 +433,6 @@ mod grid_tests {
             links.len()
         );
     }
-
 
     /// Wide-char (CJK) trail-halves used to push as ' ' into the
     /// scan buffer, causing `scan_until_link_terminator` to cut a
@@ -458,10 +500,7 @@ mod grid_tests {
     #[test]
     fn zero_indent_char_wrap_paths_all_link() {
         use crate::grid::{Cell, Grid};
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-lnk0-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("marspot-lnk0-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mk = |name: &str| {
             let p = dir.join(name);
@@ -476,14 +515,27 @@ mod grid_tests {
         let mut grid = Grid::new(cols, 8);
         let mut put = |row: u16, text: &str| {
             for (c, ch) in text.chars().enumerate() {
-                grid.set_cell(c as u16, row, Cell { ch, ..Default::default() });
+                grid.set_cell(
+                    c as u16,
+                    row,
+                    Cell {
+                        ch,
+                        ..Default::default()
+                    },
+                );
             }
         };
         let (a2, b2) = p2.split_at(
-            p2.char_indices().nth(cols as usize).map(|(i, _)| i).unwrap(),
+            p2.char_indices()
+                .nth(cols as usize)
+                .map(|(i, _)| i)
+                .unwrap(),
         );
         let (a3, b3) = p3.split_at(
-            p3.char_indices().nth(cols as usize).map(|(i, _)| i).unwrap(),
+            p3.char_indices()
+                .nth(cols as usize)
+                .map(|(i, _)| i)
+                .unwrap(),
         );
         put(0, &p1);
         put(1, a2);
@@ -497,22 +549,15 @@ mod grid_tests {
                 .iter()
                 .filter(|l| l.kind == LinkKind::File && l.text == **f)
                 .collect();
-            assert!(
-                !hits.is_empty(),
-                "path {f} must be detected; got {links:?}"
-            );
+            assert!(!hits.is_empty(), "path {f} must be detected; got {links:?}");
         }
-        let texts: std::collections::HashSet<_> =
-            links.iter().map(|l| l.text.clone()).collect();
+        let texts: std::collections::HashSet<_> = links.iter().map(|l| l.text.clone()).collect();
         assert_eq!(texts.len(), 3, "exactly the three paths: {links:?}");
         for p in [p1, p2, p3] {
-            let _ = std::fs::remove_file(dir.join(
-                std::path::Path::new(&p).file_name().unwrap(),
-            ));
+            let _ = std::fs::remove_file(dir.join(std::path::Path::new(&p).file_name().unwrap()));
         }
         let _ = std::fs::remove_dir(&dir);
     }
-
 
     /// 2026-07-13 report: a wrapped path immediately followed by
     /// `(Ask 12:…` prose lost its link.
@@ -527,10 +572,7 @@ mod grid_tests {
     #[test]
     fn path_terminates_at_paren_and_cjk_punct() {
         // Single-row cases through the scan_line path.
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-lnkp-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("marspot-lnkp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("plan.md");
         std::fs::write(&p, b"x").unwrap();
@@ -540,8 +582,7 @@ mod grid_tests {
             // exercise the new hard terminators.
             let line = format!("看 {}{} 即可", ps, suffix);
             let out = marspot_linkify::scan_text_line(&line, 0);
-            let files: Vec<_> =
-                out.iter().filter(|l| l.kind == LinkKind::File).collect();
+            let files: Vec<_> = out.iter().filter(|l| l.kind == LinkKind::File).collect();
             assert_eq!(files.len(), 1, "suffix {suffix:?}: {out:?}");
             assert_eq!(files[0].text, ps, "suffix {suffix:?}");
         }
@@ -560,14 +601,27 @@ mod grid_tests {
             .unwrap();
         let (a, b) = ps.split_at(split_byte);
         for (c, ch) in a.chars().enumerate() {
-            grid.set_cell(c as u16, 0, Cell { ch, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                0,
+                Cell {
+                    ch,
+                    ..Default::default()
+                },
+            );
         }
         for (c, ch) in format!("{}(Ask 12", b).chars().enumerate() {
-            grid.set_cell(c as u16, 1, Cell { ch, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                1,
+                Cell {
+                    ch,
+                    ..Default::default()
+                },
+            );
         }
         let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
-        let files: Vec<_> =
-            links.iter().filter(|l| l.kind == LinkKind::File).collect();
+        let files: Vec<_> = links.iter().filter(|l| l.kind == LinkKind::File).collect();
         assert!(
             files.iter().any(|l| l.text == ps),
             "wrapped path + glued paren must link: {links:?}"
@@ -575,7 +629,6 @@ mod grid_tests {
         let _ = std::fs::remove_file(&p);
         let _ = std::fs::remove_dir(&dir);
     }
-
 
     /// The zero-indent merge must NOT let a flush-ending URL absorb
     /// the next prose row (URLs have no existence oracle).
@@ -587,10 +640,24 @@ mod grid_tests {
         assert_eq!(url.chars().count(), COLS as usize);
         let mut grid = Grid::new(COLS, 4);
         for (c, ch) in url.chars().enumerate() {
-            grid.set_cell(c as u16, 0, Cell { ch, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                0,
+                Cell {
+                    ch,
+                    ..Default::default()
+                },
+            );
         }
         for (c, ch) in "and more prose".chars().enumerate() {
-            grid.set_cell(c as u16, 1, Cell { ch, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                1,
+                Cell {
+                    ch,
+                    ..Default::default()
+                },
+            );
         }
         let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
         assert_eq!(links.len(), 1, "{links:?}");
@@ -598,7 +665,6 @@ mod grid_tests {
         assert_eq!(links[0].text, url, "URL must stop at the row edge");
         assert_eq!(links[0].row, 0);
     }
-
 
     /// 2026-07-12 regression: a real path that ends flush at the
     /// right edge, followed by a prose row starting with a
@@ -610,10 +676,7 @@ mod grid_tests {
     fn flush_right_path_followed_by_prose_still_links() {
         // A REAL file; the grid is sized so the path exactly fills
         // row 0 (flush right = what trips the cc merge heuristic).
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-lnk-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("marspot-lnk-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("feedback.md");
         std::fs::write(&path, b"x").unwrap();
@@ -622,11 +685,25 @@ mod grid_tests {
 
         let mut grid = Grid::new(cols, 4);
         for (c, ch) in path_s.chars().enumerate() {
-            grid.set_cell(c as u16, 0, Cell { ch, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                0,
+                Cell {
+                    ch,
+                    ..Default::default()
+                },
+            );
         }
         // Continuation-looking prose row: 1-space indent + alnum word.
         for (c, ch) in " fullpath done".chars().enumerate() {
-            grid.set_cell(c as u16, 1, Cell { ch, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                1,
+                Cell {
+                    ch,
+                    ..Default::default()
+                },
+            );
         }
 
         let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
@@ -642,8 +719,6 @@ mod grid_tests {
         assert_eq!(links[0].row, 0);
     }
 
-
-
     /// 2026-07-18 field report #2 — a path hard-wrapped inside a
     /// claudecode `⎿ ` indent block (first row ends in `/` a few
     /// cols short of the pane edge, continuation indented 3) must
@@ -654,10 +729,7 @@ mod grid_tests {
     #[test]
     fn cc_wrapped_path_with_uuid_component_links_whole() {
         use crate::grid::{Cell, Grid};
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-lnk-uuid-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("marspot-lnk-uuid-{}", std::process::id()));
         let uuid_dir = dir.join("3dbde79c-ab6e-43bd-8143-c448617e1d69/scratchpad");
         std::fs::create_dir_all(&uuid_dir).unwrap();
         let png = uuid_dir.join("env_now3_small.png");
@@ -672,7 +744,14 @@ mod grid_tests {
         let put = |grid: &mut Grid, row: u16, text: &str| {
             for (c, ch) in text.chars().enumerate() {
                 if (c as u16) < cols {
-                    grid.set_cell(c as u16, row, Cell { ch, ..Default::default() });
+                    grid.set_cell(
+                        c as u16,
+                        row,
+                        Cell {
+                            ch,
+                            ..Default::default()
+                        },
+                    );
                 }
             }
         };
@@ -681,7 +760,9 @@ mod grid_tests {
         let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
-            links.iter().any(|l| l.kind == LinkKind::File && l.text == full),
+            links
+                .iter()
+                .any(|l| l.kind == LinkKind::File && l.text == full),
             "wrapped path must link whole: {links:?}"
         );
         assert!(
@@ -689,7 +770,6 @@ mod grid_tests {
             "uuid path component must not become a Uuid link: {links:?}"
         );
     }
-
 
     /// 2026-07-18 field regression — claudecode v2.1.212 dropped the
     /// composer's rounded box, so the bottom-most `╭…╰` box on screen
@@ -706,16 +786,35 @@ mod grid_tests {
         let put = |grid: &mut Grid, row: u16, text: &str| {
             for (c, ch) in text.chars().enumerate() {
                 if (c as u16) < COLS {
-                    grid.set_cell(c as u16, row, Cell { ch, ..Default::default() });
+                    grid.set_cell(
+                        c as u16,
+                        row,
+                        Cell {
+                            ch,
+                            ..Default::default()
+                        },
+                    );
                 }
             }
         };
         put(&mut grid, 0, " ╭──────────────────────────────╮  Tips for");
         put(&mut grid, 1, " │  Welcome back!               │  Run /init");
-        put(&mut grid, 2, " │  takagi@golia.jp's Org       │  What's new");
-        put(&mut grid, 3, " │  ~/workspace                 │  Added fork");
+        put(
+            &mut grid,
+            2,
+            " │  takagi@golia.jp's Org       │  What's new",
+        );
+        put(
+            &mut grid,
+            3,
+            " │  ~/workspace                 │  Added fork",
+        );
         put(&mut grid, 4, " ╰──────────────────────────────╯");
-        put(&mut grid, 7, " > bare composer, no box (claudecode v2.1.212)");
+        put(
+            &mut grid,
+            7,
+            " > bare composer, no box (claudecode v2.1.212)",
+        );
         grid.set_cursor(3, 7);
         let with_cc = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
         let texts: Vec<&str> = with_cc.iter().map(|l| l.text.as_str()).collect();
@@ -741,7 +840,6 @@ mod grid_tests {
         assert_eq!(links[0].text, "https://example.com/docs");
     }
 
-
     /// cc-mode input-box exemption: URL / IP / UUID inside the
     /// bottom-most `╭…╮` / `╰…╯` box (the claudecode composer) must
     /// NOT be detected — mid-typing text shouldn't flash underlined
@@ -756,29 +854,92 @@ mod grid_tests {
         // Row 0-1: chat scrollback with a URL — must detect.
         let history = "see https://example.com/page for docs";
         for (c, ch) in history.chars().enumerate() {
-            grid.set_cell(c as u16, 0, Cell { ch, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                0,
+                Cell {
+                    ch,
+                    ..Default::default()
+                },
+            );
         }
         // Row 3: box top border ╭─────╮
-        grid.set_cell(0, 3, Cell { ch: '╭', ..Default::default() });
+        grid.set_cell(
+            0,
+            3,
+            Cell {
+                ch: '╭',
+                ..Default::default()
+            },
+        );
         for c in 1..(COLS - 1) {
-            grid.set_cell(c, 3, Cell { ch: '─', ..Default::default() });
+            grid.set_cell(
+                c,
+                3,
+                Cell {
+                    ch: '─',
+                    ..Default::default()
+                },
+            );
         }
-        grid.set_cell(COLS - 1, 3, Cell { ch: '╮', ..Default::default() });
+        grid.set_cell(
+            COLS - 1,
+            3,
+            Cell {
+                ch: '╮',
+                ..Default::default()
+            },
+        );
         // Row 4-5: box interior with a URL user is typing — must NOT detect.
         let typing = "│ > try https://foo.com/bar          │";
         for (c, ch) in typing.chars().enumerate() {
-            grid.set_cell(c as u16, 4, Cell { ch, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                4,
+                Cell {
+                    ch,
+                    ..Default::default()
+                },
+            );
         }
         let typing2 = "│   47.96.114.231 also             │";
         for (c, ch) in typing2.chars().enumerate() {
-            grid.set_cell(c as u16, 5, Cell { ch, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                5,
+                Cell {
+                    ch,
+                    ..Default::default()
+                },
+            );
         }
         // Row 6: box bottom border
-        grid.set_cell(0, 6, Cell { ch: '╰', ..Default::default() });
+        grid.set_cell(
+            0,
+            6,
+            Cell {
+                ch: '╰',
+                ..Default::default()
+            },
+        );
         for c in 1..(COLS - 1) {
-            grid.set_cell(c, 6, Cell { ch: '─', ..Default::default() });
+            grid.set_cell(
+                c,
+                6,
+                Cell {
+                    ch: '─',
+                    ..Default::default()
+                },
+            );
         }
-        grid.set_cell(COLS - 1, 6, Cell { ch: '╯', ..Default::default() });
+        grid.set_cell(
+            COLS - 1,
+            6,
+            Cell {
+                ch: '╯',
+                ..Default::default()
+            },
+        );
 
         let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
         // Exactly one link, from row 0 (the scrollback URL).
@@ -796,7 +957,6 @@ mod grid_tests {
         );
     }
 
-
     /// A grid with `╰` at the very last row and no `╭` above (a
     /// pathological / truncated frame) must NOT trip the exemption —
     /// we'd rather scan a few false positives than silently swallow
@@ -808,12 +968,33 @@ mod grid_tests {
         const ROWS: u16 = 4;
         let mut grid = Grid::new(COLS, ROWS);
         // Only a bottom border, no top.
-        grid.set_cell(0, ROWS - 1, Cell { ch: '╰', ..Default::default() });
-        grid.set_cell(COLS - 1, ROWS - 1, Cell { ch: '╯', ..Default::default() });
+        grid.set_cell(
+            0,
+            ROWS - 1,
+            Cell {
+                ch: '╰',
+                ..Default::default()
+            },
+        );
+        grid.set_cell(
+            COLS - 1,
+            ROWS - 1,
+            Cell {
+                ch: '╯',
+                ..Default::default()
+            },
+        );
         // A URL earlier in the grid.
         let url = "goto https://example.com/x";
         for (c, ch) in url.chars().enumerate() {
-            grid.set_cell(c as u16, 1, Cell { ch, ..Default::default() });
+            grid.set_cell(
+                c as u16,
+                1,
+                Cell {
+                    ch,
+                    ..Default::default()
+                },
+            );
         }
         let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
         assert_eq!(links.len(), 1, "{links:?}");

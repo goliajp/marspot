@@ -327,6 +327,12 @@ impl MarspotApp for Marspot {
 
     fn user_event(&mut self, ctx: &MarspotAppCtx) {
         self.prof.user_events += 1;
+        // A guess nothing answered in time comes back off the screen.
+        for p in self.panes.iter_mut() {
+            if p.session_mut().terminal_mut().expire_predictions() {
+                ctx.request_redraw();
+            }
+        }
         let drain_t0 = std::time::Instant::now();
         let total_bytes = if self.tmux.is_some() {
             self.pump_tmux_session()
@@ -491,6 +497,17 @@ impl MarspotApp for Marspot {
             }
             if predicted {
                 ctx.request_redraw();
+                // Bytes are what normally settle a guess, and a
+                // program can send none at all: a `sudo` password
+                // prompt echoes nothing until Enter, and the guesses
+                // would stay painted, showing what was typed.  One
+                // wake-up per predicted keystroke, none at rest.
+                let deadline = session.terminal().predict_deadline();
+                let proxy = self.event_proxy.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(deadline);
+                    proxy.wake();
+                });
             }
         }
     }

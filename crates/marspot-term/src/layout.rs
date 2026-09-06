@@ -35,7 +35,12 @@ impl Rect {
     pub fn contains(&self, px: f64, py: f64) -> bool {
         px >= self.x && px < self.x + self.w && py >= self.y_top && py < self.y_top + self.h
     }
-    pub const ZERO: Rect = Rect { x: 0.0, y_top: 0.0, w: 0.0, h: 0.0 };
+    pub const ZERO: Rect = Rect {
+        x: 0.0,
+        y_top: 0.0,
+        w: 0.0,
+        h: 0.0,
+    };
 
     /// F3+3.4 — uniform inset on all four sides.  `padding > 0`
     /// shrinks the rect inward; negative input clamps to 0.  When
@@ -56,7 +61,12 @@ impl Rect {
                 h: 0.0,
             };
         }
-        Rect { x: self.x + p, y_top: self.y_top + p, w, h }
+        Rect {
+            x: self.x + p,
+            y_top: self.y_top + p,
+            w,
+            h,
+        }
     }
 
     /// F3+3.4 — anchor a `(w, h)`-sized child inside this rect at
@@ -85,9 +95,15 @@ impl Rect {
 /// | BottomLeft  | BottomCenter | BottomRight  |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Alignment {
-    TopLeft, TopCenter, TopRight,
-    CenterLeft, Center, CenterRight,
-    BottomLeft, BottomCenter, BottomRight,
+    TopLeft,
+    TopCenter,
+    TopRight,
+    CenterLeft,
+    Center,
+    CenterRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
 }
 
 impl Alignment {
@@ -291,7 +307,11 @@ impl Layout {
         // single sea of identical-looking shells.  2 px = 1 logical
         // point at 2× retina; iTerm2-style hairline.  Skipped when
         // the grid is 1×1 (single session, nothing to divide).
-        let gutter = if grid_cols > 1 || grid_rows > 1 { 1.0 } else { 0.0 };
+        let gutter = if grid_cols > 1 || grid_rows > 1 {
+            1.0
+        } else {
+            0.0
+        };
         // Inner padding (physical px) — breathing room between the
         // cell rect's edge and the first/last terminal column / row.
         // Without this, "Last login: ..." crowds the very top-left
@@ -318,8 +338,7 @@ impl Layout {
         // at the outer size — the title strip and BG fill cover
         // the whole cell so the padding zone reads as terminal-bg.
         let cell_inner_w = (cell_phys_w - 2.0 * padding).max(1.0);
-        let cell_inner_h =
-            (cell_phys_h - cell_title_h - 2.0 * padding).max(1.0);
+        let cell_inner_h = (cell_phys_h - cell_title_h - 2.0 * padding).max(1.0);
 
         let mut cells = Vec::with_capacity(grid_cols * grid_rows);
         for r in 0..grid_rows {
@@ -485,13 +504,10 @@ impl Layout {
         if self.sidebar_w > 0.0 && n_sessions > 0 {
             let mut rects = Vec::with_capacity(n_sessions);
             let close_size = SIDEBAR_CLOSE_PHYS_SIZE;
-            let close_x = self.sidebar_w
-                - SIDEBAR_CLOSE_PHYS_MARGIN_RIGHT
-                - close_size;
+            let close_x = self.sidebar_w - SIDEBAR_CLOSE_PHYS_MARGIN_RIGHT - close_size;
             for i in 0..n_sessions {
-                let row_top = self.top_inset
-                    + self.sidebar_top_pad_phys
-                    + i as f64 * SIDEBAR_ROW_H_PHYS;
+                let row_top =
+                    self.top_inset + self.sidebar_top_pad_phys + i as f64 * SIDEBAR_ROW_H_PHYS;
                 let close_y = row_top + (SIDEBAR_ROW_H_PHYS - close_size) / 2.0;
                 rects.push(Rect {
                     x: close_x,
@@ -694,11 +710,7 @@ impl Layout {
             return None;
         }
         for (i, c) in self.cells.iter().enumerate() {
-            if px >= c.x
-                && px < c.x + c.w
-                && py >= c.y_top
-                && py < c.y_top + self.cell_title_h
-            {
+            if px >= c.x && px < c.x + c.w && py >= c.y_top && py < c.y_top + self.cell_title_h {
                 return Some(i);
             }
         }
@@ -744,11 +756,7 @@ impl Layout {
             return None;
         }
         let idx = ((py - top_pad) / row_height_phys).floor() as usize;
-        if idx >= rows {
-            None
-        } else {
-            Some(idx)
-        }
+        if idx >= rows { None } else { Some(idx) }
     }
 }
 
@@ -767,8 +775,11 @@ mod tests {
     fn every_toolbar_button_is_laid_out_and_listed() {
         // `with_chrome` is what lays the toolbar out; `build` alone
         // makes the chrome-less layout the bench and snapshot paths use.
-        let l = Layout::build(1400.0, 900.0, 0.0, 40.0, 20.0, 2, 2, 8.0, 16.0)
-            .with_chrome(2.0, 2, Some(138.0));
+        let l = Layout::build(1400.0, 900.0, 0.0, 40.0, 20.0, 2, 2, 8.0, 16.0).with_chrome(
+            2.0,
+            2,
+            Some(138.0),
+        );
         let btns = l.toolbar_buttons();
         assert_eq!(btns.len(), 6, "add the icon too, or it will not be painted");
         for (i, b) in btns.iter().enumerate() {
@@ -780,10 +791,7 @@ mod tests {
             );
             if i > 0 {
                 let prev = btns[i - 1];
-                assert!(
-                    b.x >= prev.x + prev.w,
-                    "button {i} overlaps its neighbour"
-                );
+                assert!(b.x >= prev.x + prev.w, "button {i} overlaps its neighbour");
             }
         }
         // Each one's own hit-test agrees with its rect in the list.
@@ -815,16 +823,9 @@ mod tests {
         let avail_w = 1440.0 - 200.0 - sidebar_seam;
         let cell_w = (avail_w - 2.0 * gutter) / 3.0;
         // Third column at sidebar_w + seam + 2 * (cell_w + gutter).
-        assert!(
-            (l.cells[2].x
-                - (200.0 + sidebar_seam + 2.0 * (cell_w + gutter)))
-                .abs()
-                < 1e-6
-        );
+        assert!((l.cells[2].x - (200.0 + sidebar_seam + 2.0 * (cell_w + gutter))).abs() < 1e-6);
         // Last cell's right edge flush against the window's right.
-        assert!(
-            ((l.cells[2].x + l.cells[2].w) - 1440.0).abs() < 1e-6
-        );
+        assert!(((l.cells[2].x + l.cells[2].w) - 1440.0).abs() < 1e-6);
 
         // Inner content area (where cols/rows are counted) is the
         // cell rect shrunk by 2 * padding.
@@ -878,14 +879,20 @@ mod tests {
     /// right of a hole (2026-08-11 report).
     #[test]
     fn the_toolbar_follows_the_window_buttons() {
-        let windowed = Layout::build(1600.0, 900.0, 0.0, 40.0, 0.0, 1, 1, 8.0, 16.0)
-            .with_chrome(2.0, 1, Some(138.0));
-        let full = Layout::build(1600.0, 900.0, 0.0, 40.0, 0.0, 1, 1, 8.0, 16.0)
-            .with_chrome(2.0, 1, Some(0.0));
+        let windowed = Layout::build(1600.0, 900.0, 0.0, 40.0, 0.0, 1, 1, 8.0, 16.0).with_chrome(
+            2.0,
+            1,
+            Some(138.0),
+        );
+        let full = Layout::build(1600.0, 900.0, 0.0, 40.0, 0.0, 1, 1, 8.0, 16.0).with_chrome(
+            2.0,
+            1,
+            Some(0.0),
+        );
         // Not measured yet is its own answer: keep clear of where the
         // buttons normally are, rather than assuming they are gone.
-        let unknown = Layout::build(1600.0, 900.0, 0.0, 40.0, 0.0, 1, 1, 8.0, 16.0)
-            .with_chrome(2.0, 1, None);
+        let unknown =
+            Layout::build(1600.0, 900.0, 0.0, 40.0, 0.0, 1, 1, 8.0, 16.0).with_chrome(2.0, 1, None);
         assert!(
             unknown.toolbar_buttons()[0].x >= 84.0 * 2.0 - 1e-6,
             "an unmeasured window must not put its toolbar on the OS's buttons",
@@ -901,7 +908,8 @@ mod tests {
             f0.x < w0.x,
             "full screen: the toolbar moves left into the freed space \
              ({:.0} should be left of {:.0})",
-            f0.x, w0.x,
+            f0.x,
+            w0.x,
         );
         assert!(f0.x > 0.0, "…but keeps a margin off the window edge");
         // Everything shifts together — the group keeps its shape.
@@ -922,12 +930,8 @@ mod tests {
         let l = Layout::build(900.0, 600.0, 0.0, 0.0, 0.0, 3, 1, 8.0, 16.0);
         assert!(l.cells[0].x.abs() < 1e-6);
         let cell_w = (900.0 - 2.0 * gutter) / 3.0;
-        assert!(
-            (l.cells[2].x - 2.0 * (cell_w + gutter)).abs() < 1e-6
-        );
+        assert!((l.cells[2].x - 2.0 * (cell_w + gutter)).abs() < 1e-6);
         // Last cell's right edge flush against window_w.
-        assert!(
-            ((l.cells[2].x + l.cells[2].w) - 900.0).abs() < 1e-6
-        );
+        assert!(((l.cells[2].x + l.cells[2].w) - 900.0).abs() < 1e-6);
     }
 }

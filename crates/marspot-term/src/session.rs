@@ -16,10 +16,10 @@
 use std::io;
 use std::os::raw::c_int;
 use std::os::unix::io::RawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -98,12 +98,7 @@ PROMPT_EOL_MARK=""
     // value is missing or obviously wrong; standard terminfo names
     // (xterm-*, screen-*, tmux-*, vt100, etc.) pass through.
     let term_ok = std::env::var("TERM")
-        .map(|t| {
-            !t.is_empty()
-                && t != "network"
-                && t != "dumb"
-                && t != "unknown"
-        })
+        .map(|t| !t.is_empty() && t != "network" && t != "dumb" && t != "unknown")
         .unwrap_or(false);
     if !term_ok {
         unsafe { std::env::set_var("TERM", "xterm-256color") };
@@ -234,9 +229,7 @@ impl Session {
                     .and_then(|n| n.to_str())
                     .unwrap_or("sh")
             );
-            return Self::spawn_with_config(
-                &custom_shell, &[], Some(argv0), cols, rows, wake,
-            );
+            return Self::spawn_with_config(&custom_shell, &[], Some(argv0), cols, rows, wake);
         }
         // Real interactive use: wrap via /usr/bin/login -fpl so
         // "Last login: ..." is printed (terminating in \r\n) before
@@ -338,13 +331,7 @@ impl Session {
             libc::fcntl(shutdown_r, libc::F_SETFD, libc::FD_CLOEXEC);
             libc::fcntl(shutdown_w, libc::F_SETFD, libc::FD_CLOEXEC);
         }
-        let reader_handle = spawn_reader(
-            pty.raw_master(),
-            shutdown_r,
-            tx,
-            exited.clone(),
-            wake,
-        );
+        let reader_handle = spawn_reader(pty.raw_master(), shutdown_r, tx, exited.clone(), wake);
         Ok(Self {
             terminal: Terminal::new(cols, rows),
             pty,
@@ -499,7 +486,9 @@ where
                     }
                     break;
                 }
-                if pfds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                if pfds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)
+                    != 0
+                {
                     // Shutdown signaled; exit before touching
                     // master_fd in case it's already on its way to
                     // being closed.
@@ -517,11 +506,7 @@ where
                 }
 
                 let n = unsafe {
-                    libc::read(
-                        master_fd,
-                        buf.as_mut_ptr() as *mut libc::c_void,
-                        buf.len(),
-                    )
+                    libc::read(master_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
                 };
                 #[cfg(feature = "bench-pty")]
                 {
@@ -616,9 +601,7 @@ impl Drop for Session {
         // unblocks; the pipe write is what makes poll unblock without
         // touching master_fd.
         self.exited.store(true, Ordering::Release);
-        let _ = unsafe {
-            libc::write(self.shutdown_pipe_w, b"x".as_ptr() as *const _, 1)
-        };
+        let _ = unsafe { libc::write(self.shutdown_pipe_w, b"x".as_ptr() as *const _, 1) };
         if let Some(handle) = self.reader_handle.take() {
             // join() blocks until the reader's thread function
             // returns.  Rust drops fields in declaration order AFTER
@@ -687,15 +670,9 @@ mod tests {
         // EOF, sets the exited flag, and fires the wake callback.
         let woke = Arc::new(AtomicUsize::new(0));
         let woke_clone = woke.clone();
-        let mut s = Session::spawn_with(
-            "/bin/sh",
-            &["-c", "true"],
-            40,
-            10,
-            move || {
-                woke_clone.fetch_add(1, Ordering::Relaxed);
-            },
-        )
+        let mut s = Session::spawn_with("/bin/sh", &["-c", "true"], 40, 10, move || {
+            woke_clone.fetch_add(1, Ordering::Relaxed);
+        })
         .expect("spawn");
 
         spin_until(&mut s, 1000, |s| s.is_exited());
@@ -706,14 +683,8 @@ mod tests {
 
     #[test]
     fn pump_feeds_bytes_into_terminal_grid() {
-        let mut s = Session::spawn_with(
-            "/bin/sh",
-            &["-c", "printf hello && exit"],
-            40,
-            10,
-            || {},
-        )
-        .expect("spawn");
+        let mut s = Session::spawn_with("/bin/sh", &["-c", "printf hello && exit"], 40, 10, || {})
+            .expect("spawn");
 
         spin_until(&mut s, 1000, |s| first_row(s).starts_with("hello"));
         assert!(first_row(&s).starts_with("hello"));
@@ -743,8 +714,8 @@ mod tests {
     #[test]
     fn pump_returns_zero_when_no_data_pending() {
         // Use `sleep` so the child stays alive but never writes.
-        let mut s = Session::spawn_with("/bin/sh", &["-c", "sleep 5"], 40, 10, || {})
-            .expect("spawn");
+        let mut s =
+            Session::spawn_with("/bin/sh", &["-c", "sleep 5"], 40, 10, || {}).expect("spawn");
 
         // Give the reader thread a moment to settle, then pump should
         // find nothing in the channel.
@@ -758,8 +729,8 @@ mod tests {
 
     #[test]
     fn resize_propagates_to_terminal_grid() {
-        let mut s = Session::spawn_with("/bin/sh", &["-c", "sleep 5"], 40, 10, || {})
-            .expect("spawn");
+        let mut s =
+            Session::spawn_with("/bin/sh", &["-c", "sleep 5"], 40, 10, || {}).expect("spawn");
         assert_eq!(s.terminal.grid().cols(), 40);
         assert_eq!(s.terminal.grid().rows(), 10);
         s.resize(60, 20);

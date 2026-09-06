@@ -49,10 +49,7 @@ impl Sink {
     pub fn open_at_dir(dir: PathBuf, max_bytes: u64) -> std::io::Result<Self> {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("marspot.log");
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let meta = file.metadata()?;
         Ok(Self {
             dir,
@@ -177,8 +174,8 @@ mod tests {
     /// case was handled; the missing-parent case was not.
     #[test]
     fn writing_after_the_log_directory_is_deleted_recreates_it() {
-        let dir: PathBuf = std::env::temp_dir()
-            .join(format!("marspot-logx-{}", std::process::id()));
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("marspot-logx-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         // SAFETY: nextest gives each test its own process, and the sink
         // singleton below is initialised from this value.
@@ -198,7 +195,10 @@ mod tests {
             crate::lx_info!("logx.test", "after the cleaner", i = i as u64);
         }
 
-        assert!(path.exists(), "the sink should have re-created its directory");
+        assert!(
+            path.exists(),
+            "the sink should have re-created its directory"
+        );
         let body = std::fs::read_to_string(&path).expect("read the new log");
         assert!(
             body.contains("after the cleaner"),

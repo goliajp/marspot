@@ -3907,6 +3907,31 @@ impl CoreApp {
     /// forward via the existing control channel.
     /// Plugin-injected bytes for one session.  Sid-keyed, so it looks
     /// in every window — the plugin knows nothing about windows and
+    /// Take back any local-echo guess that has gone unanswered past
+    /// its deadline.  Bytes are what normally settle a prediction, and
+    /// a program can send none at all — a `sudo` password prompt
+    /// echoes nothing until Enter, and the guesses would otherwise
+    /// stay painted, showing what was typed.
+    fn expire_stale_predictions(&mut self) {
+        for w in self.windows.iter_mut() {
+            for pane in w.panes.iter_mut() {
+                if pane.session_mut().terminal_mut().expire_predictions() {
+                    w.needs_render = true;
+                }
+            }
+        }
+    }
+
+    /// True while any pane is still showing an unconfirmed guess —
+    /// the loop's cue to wake on a timer rather than sleep for a
+    /// second waiting for a byte that may never come.
+    fn any_prediction_pending(&self) -> bool {
+        self.windows
+            .iter()
+            .flat_map(|w| w.panes.iter())
+            .any(|p| p.session().terminal().predictions_pending())
+    }
+
     /// the pane may well be in one that is not focused.
     fn inject_input(&mut self, shelld_session_id: u64, bytes: &[u8]) {
         for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
@@ -9747,6 +9772,11 @@ fn main() {
                 )
                 .min()
                 .unwrap_or(Duration::from_secs(1));
+            let recv_timeout = if app.any_prediction_pending() {
+                recv_timeout.min(Duration::from_millis(10))
+            } else {
+                recv_timeout
+            };
             match event_rx.recv_timeout(recv_timeout) {
                 Ok(ev) => Some(ev),
                 Err(RecvTimeoutError::Timeout) => None,
@@ -9768,6 +9798,7 @@ fn main() {
         // cannot click the pane's [×], and "closing the last pane
         // closes the window / quits the app" is otherwise untestable.
         // Unset in the installed app.
+        app.expire_stale_predictions();
         app.dev_drive_close_panes();
         // Dev seam (`MARSPOT_DEV_OPEN_SETTINGS=1`): open the settings
         // panel once, shortly after boot, so a sandbox run can be

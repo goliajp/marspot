@@ -179,11 +179,7 @@ fn other_marspot_processes_alive() -> bool {
             continue;
         }
         let len = unsafe {
-            libc::proc_pidpath(
-                pid,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len() as u32,
-            )
+            libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
         };
         if len <= 0 {
             continue;
@@ -208,9 +204,7 @@ mod tests {
     #[test]
     fn default_root_is_under_application_support() {
         if std::env::var_os("MARSPOT_STATE_DIR").is_none() {
-            assert!(
-                state_root().ends_with("Library/Application Support/marspot")
-            );
+            assert!(state_root().ends_with("Library/Application Support/marspot"));
             assert!(log_dir().ends_with("Library/Logs/Marspot"));
         }
     }
@@ -220,10 +214,8 @@ mod tests {
     /// Uses a fake $HOME (nextest = process-per-test; safe to set).
     #[test]
     fn migrate_legacy_root_renames_and_symlinks() {
-        let fake_home = std::env::temp_dir().join(format!(
-            "marspot-d1-home-{}",
-            std::process::id()
-        ));
+        let fake_home =
+            std::env::temp_dir().join(format!("marspot-d1-home-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&fake_home);
         let old = fake_home.join("Library/Caches/marspot");
         std::fs::create_dir_all(old.join("sessions/7")).unwrap();

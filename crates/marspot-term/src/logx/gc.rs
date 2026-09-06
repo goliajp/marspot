@@ -244,8 +244,14 @@ mod tests {
             .as_secs() as i64;
         let target = now - secs_ago;
         let tvs = [
-            libc::timeval { tv_sec: target as libc::time_t, tv_usec: 0 },
-            libc::timeval { tv_sec: target as libc::time_t, tv_usec: 0 },
+            libc::timeval {
+                tv_sec: target as libc::time_t,
+                tv_usec: 0,
+            },
+            libc::timeval {
+                tv_sec: target as libc::time_t,
+                tv_usec: 0,
+            },
         ];
         let r = unsafe { libc::utimes(cstr.as_ptr(), tvs.as_ptr()) };
         assert_eq!(r, 0, "utimes failed");
@@ -296,7 +302,10 @@ mod tests {
         sweep_orphan_bytelogs_at(&dir, &live);
         assert!(dir.join("42").exists(), "live session preserved");
         assert!(!dir.join("99").exists(), "cold orphan removed");
-        assert!(dir.join("100").exists(), "recent orphan within grace preserved");
+        assert!(
+            dir.join("100").exists(),
+            "recent orphan within grace preserved"
+        );
     }
 
     #[test]
@@ -320,7 +329,11 @@ mod tests {
             "expected trim ≤2 MiB, got {}",
             after.len()
         );
-        assert!(after.len() >= 512 * 1024, "expected trim ≥512 KiB, got {}", after.len());
+        assert!(
+            after.len() >= 512 * 1024,
+            "expected trim ≥512 KiB, got {}",
+            after.len()
+        );
         // First byte = post-newline (we snapped).
         assert_ne!(after[0], b'\n');
         // Last byte = newline (records are line-terminated).

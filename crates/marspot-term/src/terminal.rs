@@ -12,13 +12,13 @@
 //!
 //! Phase 1.1.3+ will layer in erase, SGR attributes, scrolling, and more.
 
-use crate::grid::{Cell, CellAttrs, Color, Grid, DEFAULT_SCROLLBACK_LINES};
+use crate::grid::{Cell, CellAttrs, Color, DEFAULT_SCROLLBACK_LINES, Grid};
 use crate::parser::{Parser, ParserCallbacks};
 use crate::scrollback::Scrollback;
 use crate::{lx_debug, lx_debug_sampled, lx_info, lx_warn};
 use std::collections::VecDeque;
 use std::io;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// F2 — file-backed scrollback is on whenever a session id is present
 /// (L3 `marspot-session` process).  mcli / `--snapshot` / tests don't
@@ -41,7 +41,10 @@ fn file_scrollback_session_id() -> Option<u64> {
     if cfg!(test) && std::env::var_os("MARSPOT_STATE_DIR").is_none() {
         return None;
     }
-    std::env::var("MARSPOT_SESSION_ID").ok()?.parse::<u64>().ok()
+    std::env::var("MARSPOT_SESSION_ID")
+        .ok()?
+        .parse::<u64>()
+        .ok()
 }
 
 /// In-RAM ring size used as the front-line cache by `FileScrollback`.
@@ -67,6 +70,11 @@ struct Prediction {
     /// Cursor before this prediction.  Rolling back N predictions
     /// in reverse restores the original cursor exactly.
     saved_cursor: (u16, u16),
+    /// When the guess was made.  A prediction nothing ever answers
+    /// has to expire on its own, or it stays painted forever — the
+    /// shape of a `sudo` password prompt, which echoes nothing at
+    /// all until Enter.
+    at: std::time::Instant,
 }
 
 /// DEC mode 1000/1002/1003 — app-level mouse reporting.  `Off` 时
@@ -236,6 +244,17 @@ pub struct Terminal {
     /// rolls back the whole queue (restores cells + cursor in reverse
     /// order) and falls through to the parser.
     predictions: VecDeque<Prediction>,
+    /// Predictions that timed out, still owed an answer.  Their cells
+    /// are already restored; the bytes stay here so that a late echo
+    /// is recognised for what it is — evidence the program echoes
+    /// after all, just slowly (ssh over a real link), rather than
+    /// counted as a miss and used to switch prediction off on
+    /// exactly the connection where it helps most.
+    shadow: VecDeque<(u8, std::time::Instant)>,
+    /// Smoothed round trip from keystroke to its echo.  Seeds the
+    /// expiry deadline, so a slow link widens its own window instead
+    /// of losing local echo entirely.
+    echo_srtt: Duration,
     /// In-progress grapheme cluster (UAX #29).  The VT/xterm parser
     /// emits one codepoint at a time, but a "character the user sees"
     /// can span several — `é = e + ́`, `⚠️ = ⚠ + VS16`, `👨‍👩‍👧‍👦 = 4×
@@ -270,6 +289,10 @@ pub struct Terminal {
     /// Diagnostics — predictions rolled back on mismatch (or alt-screen
     /// invalidation).
     pub predictions_miss: u64,
+    /// Diagnostics — predictions rolled back because nothing answered
+    /// them in time.  Distinct from a miss: the program may still be
+    /// about to echo.
+    pub predictions_expired: u64,
     /// RFC-002 snapshot version vector.  Bumped at the end of every
     /// `feed()` that consumed bytes.  The shelld snapshot slot keeps
     /// last-write-wins by this number; the client end uses it to
@@ -352,11 +375,14 @@ impl Terminal {
             predict_misses: 0,
             predict_declined: 0,
             predictions: VecDeque::new(),
+            shadow: VecDeque::new(),
+            echo_srtt: Self::ECHO_SRTT_SEED,
             cluster_buf: String::new(),
             grapheme_cursor: crate::grapheme::GraphemeCursor::new(),
             seg_synced: true,
             predictions_hit: 0,
             predictions_miss: 0,
+            predictions_expired: 0,
             generation: 0,
         }
     }
@@ -524,7 +550,6 @@ impl Terminal {
         std::mem::take(&mut self.pending_response)
     }
 
-
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.grid.resize(cols, rows);
         // Reset DECSTBM scroll region to full grid on resize — apps
@@ -559,6 +584,66 @@ impl Terminal {
     /// nothing else announces that.  Rare enough that the stray
     /// character is not the thing anyone notices.
     const PREDICT_PROBE_EVERY: u32 = 128;
+
+    /// Starting guess for the echo round trip.  Measured 2026-09-07
+    /// against a real zsh on a pty: idle p50 0.16 ms / max 1.12 ms,
+    /// and 0.16 ms / 8.18 ms with the shell flooding the pipe at the
+    /// same time.  10 ms is comfortably above all of it and is only
+    /// a seed — `echo_srtt` moves to whatever the link actually is.
+    const ECHO_SRTT_SEED: Duration = Duration::from_millis(10);
+    /// A prediction is abandoned after this long unanswered.  Four
+    /// round trips, floored well above local pty latency and capped
+    /// so that even a very slow link cannot leave a character from
+    /// an unechoed password sitting on screen for a whole second.
+    const PREDICT_DEADLINE_MIN: Duration = Duration::from_millis(50);
+    const PREDICT_DEADLINE_MAX: Duration = Duration::from_millis(1000);
+
+    /// How long an unanswered prediction is given before it is taken
+    /// back off the screen.
+    pub fn predict_deadline(&self) -> Duration {
+        (self.echo_srtt * 4).clamp(Self::PREDICT_DEADLINE_MIN, Self::PREDICT_DEADLINE_MAX)
+    }
+
+    /// True while at least one guess is still on screen unconfirmed —
+    /// the caller's cue to come back and check the deadline rather
+    /// than sleep until the next byte, which may never come.
+    pub fn predictions_pending(&self) -> bool {
+        !self.predictions.is_empty()
+    }
+
+    /// Take back every prediction that has gone unanswered past the
+    /// deadline.  Their bytes move to the shadow queue: whether the
+    /// program was slow or is simply never going to echo is decided
+    /// by what arrives next, not here.  Returns true iff the grid
+    /// changed (caller should redraw).
+    pub fn expire_predictions_at(&mut self, now: Instant) -> bool {
+        let deadline = self.predict_deadline();
+        match self.predictions.front() {
+            Some(p) if now.duration_since(p.at) >= deadline => {}
+            _ => return false,
+        }
+        const SHADOW_MAX: usize = 64;
+        for p in &self.predictions {
+            if self.shadow.len() >= SHADOW_MAX {
+                self.shadow.pop_front();
+            }
+            self.shadow.push_back((p.byte, p.at));
+        }
+        self.predictions_expired += self.predictions.len() as u64;
+        self.rollback_predictions_inner(false);
+        true
+    }
+
+    /// Wall-clock wrapper over [`Self::expire_predictions_at`].
+    pub fn expire_predictions(&mut self) -> bool {
+        self.expire_predictions_at(Instant::now())
+    }
+
+    /// Fold one observed keystroke-to-echo round trip into the
+    /// smoothed estimate (the usual 7/8 EWMA).
+    fn note_echo_rtt(&mut self, sample: Duration) {
+        self.echo_srtt = (self.echo_srtt * 7 + sample) / 8;
+    }
 
     /// True iff local-echo prediction is currently worth making.
     ///
@@ -604,8 +689,14 @@ impl Terminal {
         }
         let saved_cell = self.grid.cell(col, row);
         let saved_cursor = (col, row);
-        self.grid
-            .set_cell(col, row, Cell { ch: byte as char, attrs: self.attrs });
+        self.grid.set_cell(
+            col,
+            row,
+            Cell {
+                ch: byte as char,
+                attrs: self.attrs,
+            },
+        );
         if col + 1 < cols {
             self.grid.set_cursor(col + 1, row);
         }
@@ -621,6 +712,7 @@ impl Terminal {
             byte,
             saved_cell,
             saved_cursor,
+            at: Instant::now(),
         });
         true
     }
@@ -629,11 +721,20 @@ impl Terminal {
     /// cell + cursor.  After this, the grid is back to whatever it
     /// looked like before the first un-confirmed prediction.
     fn rollback_predictions(&mut self) {
+        self.rollback_predictions_inner(true);
+    }
+
+    /// The unpainting itself.  `count_miss` separates "the program
+    /// echoed something else" (a miss) from "nothing came back yet"
+    /// (an expiry) — same pixels restored, different verdict.
+    fn rollback_predictions_inner(&mut self, count_miss: bool) {
         while let Some(p) = self.predictions.pop_back() {
             self.grid
                 .set_cell(p.saved_cursor.0, p.saved_cursor.1, p.saved_cell);
             self.grid.set_cursor(p.saved_cursor.0, p.saved_cursor.1);
-            self.predictions_miss += 1;
+            if count_miss {
+                self.predictions_miss += 1;
+            }
         }
     }
 
@@ -660,19 +761,47 @@ impl Terminal {
         self.generation = self.generation.saturating_add(1);
         let mut i = 0;
         while i < bytes.len() {
-            // Validate against pending predictions before the parser
-            // sees the byte.
-            if let Some(p) = self.predictions.front() {
-                if bytes[i] == p.byte {
-                    self.predictions.pop_front();
-                    self.predictions_hit += 1;
-                    // The program echoes at the cursor after all.
-                    self.predict_misses = 0;
-                    i += 1;
-                    continue;
+            // Bulk program output has neither queue populated — the
+            // overwhelmingly common case on this per-byte path, and
+            // one test is what it costs.
+            if !(self.predictions.is_empty() && self.shadow.is_empty()) {
+                // A byte owed to an expired prediction settles the
+                // question that expiry deliberately left open.  Matching
+                // means the program does echo, just later than we waited
+                // — widen the window and keep predicting.  Anything else
+                // means it was never going to, which is a real miss.  The
+                // byte itself is fed normally either way: its cell was
+                // unpainted when the prediction expired.
+                let mut owed = false;
+                if let Some(&(b, at)) = self.shadow.front() {
+                    if bytes[i] == b {
+                        self.shadow.pop_front();
+                        self.note_echo_rtt(Instant::now().duration_since(at));
+                        self.predict_misses = 0;
+                        owed = true;
+                    } else {
+                        self.predict_misses = self.predict_misses.saturating_add(1);
+                        self.shadow.clear();
+                    }
                 }
-                self.predict_misses = self.predict_misses.saturating_add(1);
-                self.rollback_predictions();
+                // Validate against pending predictions before the parser
+                // sees the byte.
+                if let Some(p) = self.predictions.front() {
+                    if !owed && bytes[i] == p.byte {
+                        let at = p.at;
+                        self.predictions.pop_front();
+                        self.predictions_hit += 1;
+                        self.note_echo_rtt(Instant::now().duration_since(at));
+                        // The program echoes at the cursor after all.
+                        self.predict_misses = 0;
+                        i += 1;
+                        continue;
+                    }
+                    if !owed {
+                        self.predict_misses = self.predict_misses.saturating_add(1);
+                        self.rollback_predictions();
+                    }
+                }
             }
             // Normal feed.
             let parser = &mut self.parser;
@@ -700,8 +829,12 @@ impl Terminal {
             let grapheme_cursor = &mut self.grapheme_cursor;
             let seg_synced = &mut self.seg_synced;
             let mut handler = Handler {
-                grid, saved_main, attrs, saved_cursor,
-                scroll_top, scroll_bot,
+                grid,
+                saved_main,
+                attrs,
+                saved_cursor,
+                scroll_top,
+                scroll_bot,
                 pending_response,
                 response_window,
                 response_burst_last_warn,
@@ -736,73 +869,73 @@ impl Terminal {
                 // it takes this path twice per glyph.
                 let b0 = bytes[i];
                 if (0x20..=0x7E).contains(&b0) {
-                // ASCII lane: longest 0x20..=0x7E run.
-                let run_len = bytes[i..]
-                    .iter()
-                    .position(|&b| !(0x20..=0x7E).contains(&b))
-                    .unwrap_or(bytes.len() - i);
-                if run_len >= 2 {
-                    handler.print_ascii_run(&bytes[i..i + run_len]);
-                    i += run_len;
-                    continue;
-                }
-                // A lone printable — the shape emoji prose takes, where
-                // every glyph is separated by exactly one space, so the
-                // run lane never applies and each space fell through to
-                // the per-byte state machine.  In plain Ground with no
-                // predictions pending, a byte in 0x20..=0x7E dispatches
-                // to `print` and nothing else, so calling it directly
-                // is the same work minus the dispatch.
-                if run_len == 1 {
-                    handler.print(b0 as char);
-                    i += 1;
-                    continue;
-                }
-                } else if (0xE0..=0xEF).contains(&b0) {
-                // Wide lane: longest run of 3-byte UTF-8 sequences
-                // decoding to boring width-2 chars (CJK / kana /
-                // fullwidth).  Scan and commit each decode once —
-                // three shifts, far cheaper than the 3× per-byte
-                // state-machine dispatch they replace.
-                let wide_len = wide_boring_run_len(&bytes[i..]);
-                if wide_len >= 6 {
-                    handler.print_wide_run(&bytes[i..i + wide_len]);
-                    i += wide_len;
-                    continue;
-                }
-                } else if (0xF0..=0xF4).contains(&b0) {
-                // Decode lane: a run of structurally-valid 4-byte
-                // UTF-8 sequences (emoji plane).  Unlike the lanes
-                // above this commits NOTHING early — `print` sees
-                // the exact same codepoint stream the per-byte state
-                // machine would deliver (including the same
-                // replacement-char behaviour), so cluster semantics
-                // are untouched; only the 4× per-byte dispatch is
-                // skipped.
-                // Threshold is one sequence, not two.  Emoji prose is
-                // `🚀 ✨ 🎉` — a 4-byte scalar between single spaces,
-                // so a run of two never occurs and this lane sat idle
-                // on the one workload it was built for, leaving four
-                // per-byte state-machine dispatches per glyph (37 % of
-                // parse time, 2026-08-18 sample).  One sequence is
-                // already worth decoding directly: the lane commits
-                // nothing early, so the trade is 4 dispatches for 1
-                // decode with the codepoint stream unchanged.
-                let quad_len = quad_run_len(&bytes[i..]);
-                if quad_len >= 4 {
-                    for chunk in bytes[i..i + quad_len].chunks_exact(4) {
-                        let cp = (((chunk[0] & 0x07) as u32) << 18)
-                            | (((chunk[1] & 0x3F) as u32) << 12)
-                            | (((chunk[2] & 0x3F) as u32) << 6)
-                            | (chunk[3] & 0x3F) as u32;
-                        match char::from_u32(cp) {
-                            Some(c) => handler.print(c),
-                            None => handler.print(crate::parser::REPLACEMENT_CHAR),
-                        }
+                    // ASCII lane: longest 0x20..=0x7E run.
+                    let run_len = bytes[i..]
+                        .iter()
+                        .position(|&b| !(0x20..=0x7E).contains(&b))
+                        .unwrap_or(bytes.len() - i);
+                    if run_len >= 2 {
+                        handler.print_ascii_run(&bytes[i..i + run_len]);
+                        i += run_len;
+                        continue;
                     }
-                    i += quad_len;
-                    continue;
-                }
+                    // A lone printable — the shape emoji prose takes, where
+                    // every glyph is separated by exactly one space, so the
+                    // run lane never applies and each space fell through to
+                    // the per-byte state machine.  In plain Ground with no
+                    // predictions pending, a byte in 0x20..=0x7E dispatches
+                    // to `print` and nothing else, so calling it directly
+                    // is the same work minus the dispatch.
+                    if run_len == 1 {
+                        handler.print(b0 as char);
+                        i += 1;
+                        continue;
+                    }
+                } else if (0xE0..=0xEF).contains(&b0) {
+                    // Wide lane: longest run of 3-byte UTF-8 sequences
+                    // decoding to boring width-2 chars (CJK / kana /
+                    // fullwidth).  Scan and commit each decode once —
+                    // three shifts, far cheaper than the 3× per-byte
+                    // state-machine dispatch they replace.
+                    let wide_len = wide_boring_run_len(&bytes[i..]);
+                    if wide_len >= 6 {
+                        handler.print_wide_run(&bytes[i..i + wide_len]);
+                        i += wide_len;
+                        continue;
+                    }
+                } else if (0xF0..=0xF4).contains(&b0) {
+                    // Decode lane: a run of structurally-valid 4-byte
+                    // UTF-8 sequences (emoji plane).  Unlike the lanes
+                    // above this commits NOTHING early — `print` sees
+                    // the exact same codepoint stream the per-byte state
+                    // machine would deliver (including the same
+                    // replacement-char behaviour), so cluster semantics
+                    // are untouched; only the 4× per-byte dispatch is
+                    // skipped.
+                    // Threshold is one sequence, not two.  Emoji prose is
+                    // `🚀 ✨ 🎉` — a 4-byte scalar between single spaces,
+                    // so a run of two never occurs and this lane sat idle
+                    // on the one workload it was built for, leaving four
+                    // per-byte state-machine dispatches per glyph (37 % of
+                    // parse time, 2026-08-18 sample).  One sequence is
+                    // already worth decoding directly: the lane commits
+                    // nothing early, so the trade is 4 dispatches for 1
+                    // decode with the codepoint stream unchanged.
+                    let quad_len = quad_run_len(&bytes[i..]);
+                    if quad_len >= 4 {
+                        for chunk in bytes[i..i + quad_len].chunks_exact(4) {
+                            let cp = (((chunk[0] & 0x07) as u32) << 18)
+                                | (((chunk[1] & 0x3F) as u32) << 12)
+                                | (((chunk[2] & 0x3F) as u32) << 6)
+                                | (chunk[3] & 0x3F) as u32;
+                            match char::from_u32(cp) {
+                                Some(c) => handler.print(c),
+                                None => handler.print(crate::parser::REPLACEMENT_CHAR),
+                            }
+                        }
+                        i += quad_len;
+                        continue;
+                    }
                 }
             }
             parser.advance(&mut handler, bytes[i]);
@@ -814,6 +947,7 @@ impl Terminal {
             if !self.predictions.is_empty() && self.saved_main.is_some() {
                 let n = self.predictions.len();
                 self.predictions.clear();
+                self.shadow.clear();
                 self.predictions_miss += n as u64;
             }
         }
@@ -852,8 +986,12 @@ impl Terminal {
             let grapheme_cursor = &mut self.grapheme_cursor;
             let seg_synced = &mut self.seg_synced;
             let mut handler = Handler {
-                grid, saved_main, attrs, saved_cursor,
-                scroll_top, scroll_bot,
+                grid,
+                saved_main,
+                attrs,
+                saved_cursor,
+                scroll_top,
+                scroll_bot,
                 pending_response,
                 response_window,
                 response_burst_last_warn,
@@ -985,11 +1123,21 @@ impl Terminal {
         out.extend_from_slice(&st.to_le_bytes());
         out.extend_from_slice(&sb.to_le_bytes());
         let mut modes: u32 = 0;
-        if self.cursor_key_application_mode { modes |= 1 << 0; }
-        if self.bracketed_paste_mode        { modes |= 1 << 1; }
-        if self.cursor_visible              { modes |= 1 << 2; }
-        if self.pending_wrap                { modes |= 1 << 3; }
-        if self.saved_main.is_some()        { modes |= 1 << 4; }
+        if self.cursor_key_application_mode {
+            modes |= 1 << 0;
+        }
+        if self.bracketed_paste_mode {
+            modes |= 1 << 1;
+        }
+        if self.cursor_visible {
+            modes |= 1 << 2;
+        }
+        if self.pending_wrap {
+            modes |= 1 << 3;
+        }
+        if self.saved_main.is_some() {
+            modes |= 1 << 4;
+        }
         // bits 5-6 = mouse_tracking_mode(0/1/2/3),bit 7 = SGR.
         // 0.6.66 起加,跨 execv 保留 DECSET 1000/1002/1003/1006 状态.
         // 之前老 image 跨 execv 不带这些 bits → 新 image 默认 Off,
@@ -1003,7 +1151,9 @@ impl Terminal {
             MouseTrackingMode::AnyEvent => 3,
         };
         modes |= mtm_bits << 5;
-        if self.mouse_sgr_encoding         { modes |= 1 << 7; }
+        if self.mouse_sgr_encoding {
+            modes |= 1 << 7;
+        }
         // bit 8 = alt_scroll (DEC 1007).  Carried for the same reason
         // the mouse bits are: the program set it once, on entering a
         // view it is still in, and will not say it again.  An image
@@ -1011,7 +1161,9 @@ impl Terminal {
         // a pane whose plugin sends a TOGGLE to enter — press that
         // toggle on a view already open, shutting it.  An older reader
         // simply does not know the bit and gets the old default.
-        if self.alt_scroll                 { modes |= 1 << 8; }
+        if self.alt_scroll {
+            modes |= 1 << 8;
+        }
         out.extend_from_slice(&modes.to_le_bytes());
         out.extend_from_slice(&self.generation.to_le_bytes());
         out.extend_from_slice(&serialize_attrs(self.attrs));
@@ -1252,7 +1404,11 @@ impl Terminal {
             let col = read_u16(&mut cur)?;
             let row = read_u16(&mut cur)?;
             let sc_attrs = read_attrs(&mut cur)?;
-            Some(SavedCursor { col, row, attrs: sc_attrs })
+            Some(SavedCursor {
+                col,
+                row,
+                attrs: sc_attrs,
+            })
         } else {
             None
         };
@@ -1262,7 +1418,10 @@ impl Terminal {
             let ch_u = read_u32(&mut cur)?;
             let cell_attrs = read_attrs(&mut cur)?;
             let ch = char::from_u32(ch_u).unwrap_or(' ');
-            cells.push(Cell { ch, attrs: cell_attrs });
+            cells.push(Cell {
+                ch,
+                attrs: cell_attrs,
+            });
         }
         // v2 trailing scrollback section: parsed *before* committing
         // anything to live state so a corrupt scrollback rejects the
@@ -1315,7 +1474,10 @@ impl Terminal {
                     let ch_u = read_u32(&mut cur)?;
                     let cell_attrs = read_attrs(&mut cur)?;
                     let ch = char::from_u32(ch_u).unwrap_or(' ');
-                    line.push(Cell { ch, attrs: cell_attrs });
+                    line.push(Cell {
+                        ch,
+                        attrs: cell_attrs,
+                    });
                 }
                 out.push((line, wrapped));
             }
@@ -1347,9 +1509,7 @@ impl Terminal {
                 let a_st = read_u16(&mut cur)?;
                 let a_sb = read_u16(&mut cur)?;
                 let ring_n = read_u32(&mut cur)? as usize;
-                if ring_n > MAX_SCROLLBACK_LINES_DESER
-                    || (a_cols as usize) > MAX_LINE_COLS_DESER
-                {
+                if ring_n > MAX_SCROLLBACK_LINES_DESER || (a_cols as usize) > MAX_LINE_COLS_DESER {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "snapshot alt-live section exceeds caps",
@@ -1425,7 +1585,10 @@ impl Terminal {
                         let ch_u = read_u32(&mut cur)?;
                         let cell_attrs = read_attrs(&mut cur)?;
                         let ch = char::from_u32(ch_u).unwrap_or(' ');
-                        line.push(Cell { ch, attrs: cell_attrs });
+                        line.push(Cell {
+                            ch,
+                            attrs: cell_attrs,
+                        });
                     }
                     out.push((line, wrapped));
                 }
@@ -1448,9 +1611,9 @@ impl Terminal {
         self.scroll_top = scroll_top;
         self.scroll_bot = scroll_bot;
         self.cursor_key_application_mode = (modes & (1 << 0)) != 0;
-        self.bracketed_paste_mode        = (modes & (1 << 1)) != 0;
-        self.cursor_visible              = (modes & (1 << 2)) != 0;
-        self.pending_wrap                = (modes & (1 << 3)) != 0;
+        self.bracketed_paste_mode = (modes & (1 << 1)) != 0;
+        self.cursor_visible = (modes & (1 << 2)) != 0;
+        self.pending_wrap = (modes & (1 << 3)) != 0;
         // bits 5-6 = mouse_tracking_mode,bit 7 = SGR(0.6.66 起加).
         // 老 snapshot 不会有这些 bit → 自然 Off,跟老语义一致.
         self.mouse_tracking_mode = match (modes >> 5) & 0b11 {
@@ -1459,8 +1622,8 @@ impl Terminal {
             3 => MouseTrackingMode::AnyEvent,
             _ => MouseTrackingMode::Off,
         };
-        self.mouse_sgr_encoding          = (modes & (1 << 7)) != 0;
-        self.alt_scroll                  = (modes & (1 << 8)) != 0;
+        self.mouse_sgr_encoding = (modes & (1 << 7)) != 0;
+        self.alt_scroll = (modes & (1 << 8)) != 0;
         // Bit 4 (in_alt_screen) is informational for the wire format
         // but not actionable here — apply_snapshot replaces the
         // current grid; alt-mode save state is regenerated on the
@@ -1473,6 +1636,7 @@ impl Terminal {
         // Reset transient state so a half-feed cluster / prediction
         // queue / response buffer doesn't bleed across the snapshot.
         self.predictions.clear();
+        self.shadow.clear();
         self.cluster_buf.clear();
         self.grapheme_cursor = crate::grapheme::GraphemeCursor::new();
         self.seg_synced = true;
@@ -1523,8 +1687,7 @@ impl Terminal {
         // still-running TUI's incremental repaints then land on the
         // same base they left.
         if let Some(live) = alt_live {
-            let mut alt =
-                Grid::with_scrollback(live.cols, live.rows, DEFAULT_SCROLLBACK_LINES);
+            let mut alt = Grid::with_scrollback(live.cols, live.rows, DEFAULT_SCROLLBACK_LINES);
             for (line, wrapped) in &live.ring {
                 alt.push_historic_scrollback_line(line, *wrapped);
             }
@@ -1574,15 +1737,10 @@ impl Terminal {
     /// reflow can't tell hard newlines from autowrap continuations,
     /// and long lines stay chopped at the narrowest width the grid
     /// ever saw.
-    pub fn serialize_scrollback_page(
-        &self,
-        line_start: u32,
-        count: u32,
-    ) -> (u32, Vec<u8>) {
-        let lines = self.grid.scrollback_read_page(
-            line_start as usize,
-            count as usize,
-        );
+    pub fn serialize_scrollback_page(&self, line_start: u32, count: u32) -> (u32, Vec<u8>) {
+        let lines = self
+            .grid
+            .scrollback_read_page(line_start as usize, count as usize);
         let line_count = lines.len() as u32;
         let body_bytes: usize = lines
             .iter()
@@ -1659,10 +1817,7 @@ fn decode_with_wrapped(
     Ok((out, cur.position() as usize))
 }
 
-fn decode_legacy_no_wrapped(
-    line_count: u32,
-    body: &[u8],
-) -> io::Result<Vec<(Vec<Cell>, bool)>> {
+fn decode_legacy_no_wrapped(line_count: u32, body: &[u8]) -> io::Result<Vec<(Vec<Cell>, bool)>> {
     let mut cur = Cursor::new(body);
     let mut out = Vec::with_capacity(line_count as usize);
     for _ in 0..line_count {
@@ -1763,18 +1918,21 @@ pub fn serialize_attrs_pub(a: CellAttrs) -> [u8; ATTRS_BYTES] {
 }
 
 pub fn deserialize_attrs_pub(buf: &[u8]) -> CellAttrs {
-    debug_assert!(buf.len() >= ATTRS_BYTES, "attrs slice shorter than ATTRS_BYTES");
+    debug_assert!(
+        buf.len() >= ATTRS_BYTES,
+        "attrs slice shorter than ATTRS_BYTES"
+    );
     let flags = buf[0];
     let fg_kind = buf[1];
     let fg_payload = [buf[2], buf[3], buf[4]];
     let bg_kind = buf[5];
     let bg_payload = [buf[6], buf[7], buf[8]];
     CellAttrs {
-        bold:      (flags & (1 << 0)) != 0,
-        italic:    (flags & (1 << 1)) != 0,
+        bold: (flags & (1 << 0)) != 0,
+        italic: (flags & (1 << 1)) != 0,
         underline: (flags & (1 << 2)) != 0,
-        reverse:   (flags & (1 << 3)) != 0,
-        dim:       (flags & (1 << 4)) != 0,
+        reverse: (flags & (1 << 3)) != 0,
+        dim: (flags & (1 << 4)) != 0,
         fg: decode_color(fg_kind, fg_payload).unwrap_or(Color::Default),
         bg: decode_color(bg_kind, bg_payload).unwrap_or(Color::Default),
     }
@@ -1782,11 +1940,21 @@ pub fn deserialize_attrs_pub(buf: &[u8]) -> CellAttrs {
 
 fn serialize_attrs(a: CellAttrs) -> [u8; ATTRS_BYTES] {
     let mut flags = 0u8;
-    if a.bold      { flags |= 1 << 0; }
-    if a.italic    { flags |= 1 << 1; }
-    if a.underline { flags |= 1 << 2; }
-    if a.reverse   { flags |= 1 << 3; }
-    if a.dim       { flags |= 1 << 4; }
+    if a.bold {
+        flags |= 1 << 0;
+    }
+    if a.italic {
+        flags |= 1 << 1;
+    }
+    if a.underline {
+        flags |= 1 << 2;
+    }
+    if a.reverse {
+        flags |= 1 << 3;
+    }
+    if a.dim {
+        flags |= 1 << 4;
+    }
     let (fg_kind, fg_payload) = encode_color(a.fg);
     let (bg_kind, bg_payload) = encode_color(a.bg);
     let mut out = [0u8; ATTRS_BYTES];
@@ -1830,11 +1998,11 @@ fn read_attrs(cur: &mut Cursor<&[u8]>) -> io::Result<CellAttrs> {
     let bg_kind = buf[5];
     let bg_payload = [buf[6], buf[7], buf[8]];
     Ok(CellAttrs {
-        bold:      (flags & (1 << 0)) != 0,
-        italic:    (flags & (1 << 1)) != 0,
+        bold: (flags & (1 << 0)) != 0,
+        italic: (flags & (1 << 1)) != 0,
         underline: (flags & (1 << 2)) != 0,
-        reverse:   (flags & (1 << 3)) != 0,
-        dim:       (flags & (1 << 4)) != 0,
+        reverse: (flags & (1 << 3)) != 0,
+        dim: (flags & (1 << 4)) != 0,
         fg: decode_color(fg_kind, fg_payload)?,
         bg: decode_color(bg_kind, bg_payload)?,
     })
@@ -1965,14 +2133,14 @@ fn decode3_cp(b: &[u8]) -> u32 {
 #[inline(always)]
 fn boring_width(ch: char) -> Option<u8> {
     match ch as u32 {
-        0x20..=0x7E => Some(1),            // ASCII printable
-        0x4E00..=0x9FFF => Some(2),        // CJK Unified Ideographs
-        0x3041..=0x3096 => Some(2),        // hiragana (sans 3099/309A marks)
-        0x30A1..=0x30FA => Some(2),        // katakana
-        0x30FC..=0x30FE => Some(2),        // ー ヽ ヾ (sans 30FF)
-        0x3001..=0x3029 => Some(2),        // CJK punctuation 、。「」等
-        0xFF01..=0xFF60 => Some(2),        // fullwidth forms
-        0x3400..=0x4DBF => Some(2),        // CJK Extension A
+        0x20..=0x7E => Some(1),     // ASCII printable
+        0x4E00..=0x9FFF => Some(2), // CJK Unified Ideographs
+        0x3041..=0x3096 => Some(2), // hiragana (sans 3099/309A marks)
+        0x30A1..=0x30FA => Some(2), // katakana
+        0x30FC..=0x30FE => Some(2), // ー ヽ ヾ (sans 30FF)
+        0x3001..=0x3029 => Some(2), // CJK punctuation 、。「」等
+        0xFF01..=0xFF60 => Some(2), // fullwidth forms
+        0x3400..=0x4DBF => Some(2), // CJK Extension A
         _ => None,
     }
 }
@@ -2044,7 +2212,8 @@ fn fast_pict_width(ch: char) -> Option<u8> {
     // that adds a third one fails the build instead of silently
     // splitting a cluster.
     if (0x1F1E6..=0x1F1FF).contains(&cp)     // regional indicator — GB12/13 pairs it
-        || (0x1F3FB..=0x1F3FF).contains(&cp) // skin-tone modifier — GBP=Extend
+        || (0x1F3FB..=0x1F3FF).contains(&cp)
+    // skin-tone modifier — GBP=Extend
     {
         return None;
     }
@@ -2112,11 +2281,7 @@ impl<'a> Handler<'a> {
             return;
         }
         let w = crate::grapheme::cluster_width(self.cluster_buf);
-        let base = self
-            .cluster_buf
-            .chars()
-            .next()
-            .expect("non-empty buffer");
+        let base = self.cluster_buf.chars().next().expect("non-empty buffer");
         self.cluster_buf.clear();
         if w > 0 {
             self.write_glyph(base, w);
@@ -2199,15 +2364,13 @@ impl<'a> Handler<'a> {
             self.flush_cluster_keep_cursor();
             return true;
         }
-        use crate::unicode_data::{gbp, GBP};
+        use crate::unicode_data::{GBP, gbp};
         let last = self.cluster_buf.chars().next_back().expect("non-empty");
         let lp = gbp(last as u32);
         if lp == GBP::Prepend {
             return false; // GB9b: Prepend × any joins
         }
-        if head_is_hangul
-            && matches!(lp, GBP::L | GBP::V | GBP::T | GBP::LV | GBP::LVT)
-        {
+        if head_is_hangul && matches!(lp, GBP::L | GBP::V | GBP::T | GBP::LV | GBP::LVT) {
             return false; // GB6-8: jamo / syllable can conjoin a syllable
         }
         self.flush_cluster_keep_cursor();
@@ -2268,8 +2431,8 @@ impl<'a> Handler<'a> {
                 self.print_glyph(c);
             }
         }
-        let head = char::from_u32(decode3_cp(&run[..3]))
-            .expect("scan admitted only fast-class scalars");
+        let head =
+            char::from_u32(decode3_cp(&run[..3])).expect("scan admitted only fast-class scalars");
         let head_is_hangul = matches!(head as u32, 0xAC00..=0xD7A3);
         if !self.batch_prologue_flush(head_is_hangul) {
             for chunk in run.chunks_exact(3) {
@@ -2310,7 +2473,10 @@ impl<'a> Handler<'a> {
                     self.grid.set_cell(
                         cols - 1,
                         row,
-                        Cell { ch: '\0', attrs: *self.attrs },
+                        Cell {
+                            ch: '\0',
+                            attrs: *self.attrs,
+                        },
                     );
                 }
                 self.wrap_to_next_row(row, rows);
@@ -2396,7 +2562,10 @@ impl<'a> Handler<'a> {
                 self.grid.set_cell(
                     cols - 1,
                     row,
-                    Cell { ch: '\0', attrs: *self.attrs },
+                    Cell {
+                        ch: '\0',
+                        attrs: *self.attrs,
+                    },
                 );
             }
             let bot = *self.scroll_bot;
@@ -2419,9 +2588,23 @@ impl<'a> Handler<'a> {
         // skips drawing its glyph (NUL is treated as blank), and the
         // lead glyph extends visually across both cells via its natural
         // advance width.
-        self.grid.set_cell(col, row, Cell { ch, attrs: *self.attrs });
+        self.grid.set_cell(
+            col,
+            row,
+            Cell {
+                ch,
+                attrs: *self.attrs,
+            },
+        );
         if w == 2 {
-            self.grid.set_cell(col + 1, row, Cell { ch: '\0', attrs: *self.attrs });
+            self.grid.set_cell(
+                col + 1,
+                row,
+                Cell {
+                    ch: '\0',
+                    attrs: *self.attrs,
+                },
+            );
         }
 
         let next_col = col + w as u16;
@@ -2449,14 +2632,16 @@ impl<'a> Handler<'a> {
         if top == 0 && bot + 1 >= rows {
             self.grid.scroll_up(lines, blank_with(*self.attrs));
         } else {
-            self.grid.scroll_up_region(top, bot, lines, blank_with(*self.attrs));
+            self.grid
+                .scroll_up_region(top, bot, lines, blank_with(*self.attrs));
         }
     }
 
     fn region_scroll_down(&mut self, lines: u16) {
         let top = *self.scroll_top;
         let bot = *self.scroll_bot;
-        self.grid.scroll_down_region(top, bot, lines, blank_with(*self.attrs));
+        self.grid
+            .scroll_down_region(top, bot, lines, blank_with(*self.attrs));
     }
 
     /// Consume the DECAWM "deferred wrap" flag (set by print at the
@@ -2554,9 +2739,27 @@ impl<'a> Handler<'a> {
             // marspot 收到 wheel/click 后 encode 成 escape sequence 写
             // 回 PTY.之前(commit 176e4f4 extract 起)全部 stub 成
             // no-op,wheel 在 claudecode 内永远滚不动是这个根因.
-            1000 => *self.mouse_tracking_mode = if set { MouseTrackingMode::X11 } else { MouseTrackingMode::Off },
-            1002 => *self.mouse_tracking_mode = if set { MouseTrackingMode::ButtonEvent } else { MouseTrackingMode::Off },
-            1003 => *self.mouse_tracking_mode = if set { MouseTrackingMode::AnyEvent } else { MouseTrackingMode::Off },
+            1000 => {
+                *self.mouse_tracking_mode = if set {
+                    MouseTrackingMode::X11
+                } else {
+                    MouseTrackingMode::Off
+                }
+            }
+            1002 => {
+                *self.mouse_tracking_mode = if set {
+                    MouseTrackingMode::ButtonEvent
+                } else {
+                    MouseTrackingMode::Off
+                }
+            }
+            1003 => {
+                *self.mouse_tracking_mode = if set {
+                    MouseTrackingMode::AnyEvent
+                } else {
+                    MouseTrackingMode::Off
+                }
+            }
             1006 => *self.mouse_sgr_encoding = set,
             // DEC 1007 — alternate scroll: the wheel is the arrow
             // keys on this screen.  See `Terminal::alt_scroll`.
@@ -2656,7 +2859,11 @@ impl<'a> ParserCallbacks for Handler<'a> {
             // DECSC — save cursor (position + SGR attrs).
             b'7' => {
                 let (col, row) = self.grid.cursor();
-                *self.saved_cursor = Some(SavedCursor { col, row, attrs: *self.attrs });
+                *self.saved_cursor = Some(SavedCursor {
+                    col,
+                    row,
+                    attrs: *self.attrs,
+                });
             }
             // DECRC — restore cursor. xterm-style no-op when no save exists.
             b'8' => {
@@ -2744,12 +2951,14 @@ impl<'a> ParserCallbacks for Handler<'a> {
             b'B' => {
                 // CUD: cursor down by N.  set_cursor clamps at rows-1.
                 let n = param(params, 0, 1);
-                self.grid.set_cursor(col, row.saturating_add(n).min(rows - 1));
+                self.grid
+                    .set_cursor(col, row.saturating_add(n).min(rows - 1));
             }
             b'C' => {
                 // CUF: cursor forward (right).
                 let n = param(params, 0, 1);
-                self.grid.set_cursor(col.saturating_add(n).min(cols - 1), row);
+                self.grid
+                    .set_cursor(col.saturating_add(n).min(cols - 1), row);
             }
             b'E' => {
                 // CNL: cursor next line — down N, column 0.
@@ -2795,7 +3004,8 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // 3           — entire scrollback (xterm extension)
                 let mode = param_raw(params, 0, 0);
                 lx_debug_sampled!(
-                    "term.edit.ED", 4,
+                    "term.edit.ED",
+                    4,
                     "erase in display",
                     mode = mode,
                     cur_col = col,
@@ -2823,7 +3033,8 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // 2           — entire line
                 let mode = param_raw(params, 0, 0);
                 lx_debug_sampled!(
-                    "term.edit.EL", 4,
+                    "term.edit.EL",
+                    4,
                     "erase in line",
                     mode = mode,
                     cur_col = col,
@@ -2839,7 +3050,11 @@ impl<'a> ParserCallbacks for Handler<'a> {
             b's' => {
                 // SCO save cursor.  Same semantics as DECSC (ESC 7).
                 let (col, row) = self.grid.cursor();
-                *self.saved_cursor = Some(SavedCursor { col, row, attrs: *self.attrs });
+                *self.saved_cursor = Some(SavedCursor {
+                    col,
+                    row,
+                    attrs: *self.attrs,
+                });
             }
             b'u' => {
                 // SCO restore cursor.  Same semantics as DECRC (ESC 8).
@@ -2884,7 +3099,8 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 );
                 if row >= *self.scroll_top && row <= *self.scroll_bot {
                     // Use a sub-region [row..=scroll_bot] for the shift.
-                    self.grid.scroll_down_region(row, *self.scroll_bot, n, blank_with(*self.attrs));
+                    self.grid
+                        .scroll_down_region(row, *self.scroll_bot, n, blank_with(*self.attrs));
                     self.grid.set_cursor(0, row);
                 }
             }
@@ -2902,7 +3118,8 @@ impl<'a> ParserCallbacks for Handler<'a> {
                     scroll_bot = *self.scroll_bot
                 );
                 if row >= *self.scroll_top && row <= *self.scroll_bot {
-                    self.grid.scroll_up_region(row, *self.scroll_bot, n, blank_with(*self.attrs));
+                    self.grid
+                        .scroll_up_region(row, *self.scroll_bot, n, blank_with(*self.attrs));
                     self.grid.set_cursor(0, row);
                 }
             }
@@ -3039,7 +3256,8 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 //   DCS > | marspot ESC \
                 // Apps that recognise this fingerprint can tune their
                 // behaviour; apps that don't ignore it.
-                self.pending_response.extend_from_slice(b"\x1bP>|marspot\x1b\\");
+                self.pending_response
+                    .extend_from_slice(b"\x1bP>|marspot\x1b\\");
                 self.record_response("XTQVERSION");
             }
             _ => {
@@ -3070,15 +3288,10 @@ impl<'a> ParserCallbacks for Handler<'a> {
             "term.osc.dispatch",
             "OSC payload (handler not implemented yet)",
             bytes = data.len(),
-            head = data
-                .first()
-                .copied()
-                .map(|b| b as char)
-                .unwrap_or('?')
+            head = data.first().copied().map(|b| b as char).unwrap_or('?')
         );
     }
 }
-
 
 /// How much text a `<u>` may hold before we give up on its close.
 ///
@@ -3114,8 +3327,7 @@ impl<'a> Handler<'a> {
             // just accumulates until it does or the cap says stop.
             self.u_buf.push(ch);
             if self.u_buf.ends_with("</u>") {
-                let span: String =
-                    self.u_buf[..self.u_buf.len() - "</u>".len()].to_string();
+                let span: String = self.u_buf[..self.u_buf.len() - "</u>".len()].to_string();
                 self.u_buf.clear();
                 *self.u_open = false;
                 // The text before the tag keeps the attributes it
@@ -3231,7 +3443,6 @@ impl<'a> Handler<'a> {
     }
 }
 
-
 /// Look up a CSI parameter, treating `0` and "missing" both as the supplied
 /// default — this matches the standard convention where omitted params and
 /// explicit `0` are equivalent for cursor movement and most other CSIs.
@@ -3261,12 +3472,14 @@ fn trace_seq(kind: &str, intermediates: &[u8], params: &[u16], byte: u8) {
     use std::sync::{Mutex, OnceLock};
     static FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
     let file = FILE.get_or_init(|| {
-        std::env::var("MARSPOT_TRACE_ESC")
-            .ok()
-            .and_then(|p| std::fs::OpenOptions::new()
-                .create(true).append(true).open(&p)
+        std::env::var("MARSPOT_TRACE_ESC").ok().and_then(|p| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&p)
                 .ok()
-                .map(Mutex::new))
+                .map(Mutex::new)
+        })
     });
     let Some(file) = file.as_ref() else { return };
     let mut s = String::with_capacity(64);
@@ -3307,7 +3520,10 @@ fn blank_with(attrs: CellAttrs) -> Cell {
     // fg-coloured block no real terminal shows on clear.
     Cell {
         ch: ' ',
-        attrs: CellAttrs { bg: attrs.bg, ..CellAttrs::default() },
+        attrs: CellAttrs {
+            bg: attrs.bg,
+            ..CellAttrs::default()
+        },
     }
 }
 
@@ -3422,7 +3638,10 @@ fn apply_sgr(attrs: &mut CellAttrs, params: &[u16]) {
             // SGR 22 is "normal intensity" — clears BOTH bold and dim
             // per ECMA-48, not just bold. TUIs (claudecode dim spans)
             // emit `2 ... 22` pairs and expect 22 to fully restore.
-            22 => { attrs.bold = false; attrs.dim = false; }
+            22 => {
+                attrs.bold = false;
+                attrs.dim = false;
+            }
             23 => attrs.italic = false,
             24 => attrs.underline = false,
             27 => attrs.reverse = false,
@@ -3470,7 +3689,10 @@ fn parse_extended_color(rest: &[u16]) -> Option<(Color, usize)> {
             let r = rest.get(1).copied()?;
             let g = rest.get(2).copied()?;
             let b = rest.get(3).copied()?;
-            Some((Color::Rgb(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8), 4))
+            Some((
+                Color::Rgb(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8),
+                4,
+            ))
         }
         _ => None,
     }
@@ -3492,10 +3714,14 @@ mod tests {
     /// that; this can.
     #[test]
     fn the_fast_pictograph_class_never_outruns_the_tables() {
-        use crate::unicode_data::{gbp, GBP};
+        use crate::unicode_data::{GBP, gbp};
         for cp in 0..0x11_0000u32 {
-            let Some(ch) = char::from_u32(cp) else { continue };
-            let Some(w) = super::fast_pict_width(ch) else { continue };
+            let Some(ch) = char::from_u32(cp) else {
+                continue;
+            };
+            let Some(w) = super::fast_pict_width(ch) else {
+                continue;
+            };
             assert_eq!(
                 gbp(cp),
                 GBP::Other,
@@ -3531,9 +3757,11 @@ mod tests {
     /// member fails here before the fast path can mis-render.
     #[test]
     fn fast_path_class_is_sound() {
-        use crate::unicode_data::{gbp, incb, is_extended_pictographic, GBP, InCB};
+        use crate::unicode_data::{GBP, InCB, gbp, incb, is_extended_pictographic};
         for cp in 0x20u32..=0xFFFF {
-            let Some(ch) = char::from_u32(cp) else { continue };
+            let Some(ch) = char::from_u32(cp) else {
+                continue;
+            };
             let Some(w) = boring_width(ch) else { continue };
             assert_eq!(gbp(cp), GBP::Other, "U+{cp:04X} gbp");
             assert!(!is_extended_pictographic(cp), "U+{cp:04X} pictographic");
@@ -3751,13 +3979,22 @@ mod tests {
         assert_eq!(ga.cursor(), gb.cursor(), "cursor mismatch");
         assert_eq!(a.scroll_top, b.scroll_top, "scroll_top");
         assert_eq!(a.scroll_bot, b.scroll_bot, "scroll_bot");
-        assert_eq!(a.cursor_key_application_mode, b.cursor_key_application_mode, "DECCKM");
-        assert_eq!(a.bracketed_paste_mode, b.bracketed_paste_mode, "bracketed paste");
+        assert_eq!(
+            a.cursor_key_application_mode, b.cursor_key_application_mode,
+            "DECCKM"
+        );
+        assert_eq!(
+            a.bracketed_paste_mode, b.bracketed_paste_mode,
+            "bracketed paste"
+        );
         assert_eq!(a.cursor_visible, b.cursor_visible, "cursor visible");
         assert_eq!(a.pending_wrap, b.pending_wrap, "pending_wrap");
         assert_eq!(a.attrs, b.attrs, "current SGR attrs");
-        assert_eq!(a.saved_cursor.map(|s| (s.col, s.row, s.attrs)),
-                   b.saved_cursor.map(|s| (s.col, s.row, s.attrs)), "saved cursor");
+        assert_eq!(
+            a.saved_cursor.map(|s| (s.col, s.row, s.attrs)),
+            b.saved_cursor.map(|s| (s.col, s.row, s.attrs)),
+            "saved cursor"
+        );
         assert_eq!(a.generation, b.generation, "generation");
         for r in 0..ga.rows() {
             for c in 0..ga.cols() {
@@ -3790,7 +4027,11 @@ mod tests {
         assert_terms_equivalent(&src, &dst);
         // And the wire form is non-trivial — at least the header +
         // 5 rows × 20 cols × 13 = 1300 cells + ~50 bytes header.
-        assert!(bytes.len() > 1000, "wire form suspiciously small: {}", bytes.len());
+        assert!(
+            bytes.len() > 1000,
+            "wire form suspiciously small: {}",
+            bytes.len()
+        );
     }
 
     #[test]
@@ -3809,10 +4050,7 @@ mod tests {
     fn snapshot_roundtrip_preserves_rgb_and_indexed_colors() {
         // SGR 38;2;r;g;b (RGB) + SGR 38;5;n (indexed) + default —
         // exercises all three Color variants in the per-cell attrs.
-        let src = term_with(
-            30, 3,
-            b"\x1b[38;2;200;100;50mRGB\x1b[38;5;82mIDX\x1b[0mDEF",
-        );
+        let src = term_with(30, 3, b"\x1b[38;2;200;100;50mRGB\x1b[38;5;82mIDX\x1b[0mDEF");
         let bytes = src.serialize_snapshot();
         let mut dst = Terminal::new(30, 3);
         dst.apply_snapshot(&bytes).unwrap();
@@ -3824,10 +4062,7 @@ mod tests {
         // DECSC (ESC 7) saves cursor + attrs; DECSET ?1, ?2004, ?25
         // exercise the mode bitset path.  After roundtrip the
         // SavedCursor option + modes must survive.
-        let src = term_with(
-            20, 5,
-            b"\x1b[31mAB\x1b 7\x1b[?1h\x1b[?2004h\x1b[?25l",
-        );
+        let src = term_with(20, 5, b"\x1b[31mAB\x1b 7\x1b[?1h\x1b[?2004h\x1b[?25l");
         let bytes = src.serialize_snapshot();
         let mut dst = Terminal::new(20, 5);
         dst.apply_snapshot(&bytes).unwrap();
@@ -3950,15 +4185,19 @@ mod tests {
         // lines; a prefix-only assertion never noticed).
         for idx in 0..dst_post {
             let line = dst.grid().scrollback_line(idx).expect("line");
-            let txt: String =
-                line.iter().take(8).map(|c| c.ch).collect::<String>().trim_end().to_string();
+            let txt: String = line
+                .iter()
+                .take(8)
+                .map(|c| c.ch)
+                .collect::<String>()
+                .trim_end()
+                .to_string();
             assert_eq!(
                 txt, canonical[idx],
                 "scrollback line {idx} content mismatch after gap fill"
             );
         }
     }
-
 
     /// RFC-004 C.1 (v4) — alt-screen fold.  A terminal inside
     /// `?1049h` (claudecode-shaped) serializes the MAIN layer as the
@@ -4056,9 +4295,7 @@ mod tests {
         let mut dst = Terminal::new(COLS, ROWS);
         dst.apply_snapshot(&bytes).unwrap();
         // Current screen is the ALT screen, verbatim.
-        let last_row: String = (0..COLS)
-            .map(|c| dst.grid().cell(c, acr).ch)
-            .collect();
+        let last_row: String = (0..COLS).map(|c| dst.grid().cell(c, acr).ch).collect();
         assert!(
             last_row.starts_with("INPUT BOX ROW"),
             "alt screen must be the visible grid: {last_row:?}"
@@ -4149,8 +4386,10 @@ mod tests {
         let _ = bytes.drain(off..off + 8);
 
         let mut dst = Terminal::new(COLS, ROWS);
-        assert!(dst.apply_snapshot(&bytes).is_ok(),
-            "synthetic v2 payload must remain apply-able at a v3 receiver");
+        assert!(
+            dst.apply_snapshot(&bytes).is_ok(),
+            "synthetic v2 payload must remain apply-able at a v3 receiver"
+        );
     }
 
     /// v2 wrapped flag survival: feed a URL that overflows the row
@@ -4171,8 +4410,8 @@ mod tests {
         }
         // There should be at least one scrollback row with wrapped=true
         // by now (the row that took the second half of the URL).
-        let any_wrapped_pre = (0..src.grid().scrollback_len())
-            .any(|i| src.grid().scrollback_wrapped(i));
+        let any_wrapped_pre =
+            (0..src.grid().scrollback_len()).any(|i| src.grid().scrollback_wrapped(i));
         assert!(
             any_wrapped_pre,
             "test setup expected a wrapped row in scrollback"
@@ -4182,8 +4421,8 @@ mod tests {
         let mut dst = Terminal::new(COLS, ROWS);
         dst.apply_snapshot(&bytes).unwrap();
 
-        let any_wrapped_post = (0..dst.grid().scrollback_len())
-            .any(|i| dst.grid().scrollback_wrapped(i));
+        let any_wrapped_post =
+            (0..dst.grid().scrollback_len()).any(|i| dst.grid().scrollback_wrapped(i));
         assert!(
             any_wrapped_post,
             "wrapped flag should survive snapshot roundtrip (lost after execv would break link scans)"
@@ -4331,9 +4570,7 @@ mod tests {
         // and a subsequent live-data scroll-up appends after them.
         let mut t = Terminal::new(8, 2);
         let attrs = CellAttrs::default();
-        let mkline = |ch: char| -> Vec<Cell> {
-            (0..8).map(|_| Cell { ch, attrs }).collect()
-        };
+        let mkline = |ch: char| -> Vec<Cell> { (0..8).map(|_| Cell { ch, attrs }).collect() };
         t.push_historic_line(&mkline('H'), false);
         t.push_historic_line(&mkline('I'), false);
         t.push_historic_line(&mkline('J'), false);
@@ -4424,30 +4661,46 @@ mod tests {
         // 3 with distinctive markers; verify after LF at row 2 the
         // row 3 content is intact (didn't scroll with region).
         let mut t = Terminal::new(10, 5);
-        t.feed(b"\x1b[1;3r");          // region [0..=2]
-        t.feed(b"\x1b[1;1HAA\r\n");   // row 0 "AA"
-        t.feed(b"BB\r\n");             // row 1 "BB"
-        t.feed(b"CC\r\n");             // row 2 "CC", then LF triggers region scroll
-        t.feed(b"DD");                 // ???
+        t.feed(b"\x1b[1;3r"); // region [0..=2]
+        t.feed(b"\x1b[1;1HAA\r\n"); // row 0 "AA"
+        t.feed(b"BB\r\n"); // row 1 "BB"
+        t.feed(b"CC\r\n"); // row 2 "CC", then LF triggers region scroll
+        t.feed(b"DD"); // ???
         // After the LF after writing "CC", cursor was at row 2 (scroll_bot),
         // region scrolls up. Row 0 "AA" pushed off the region (NOT into
         // scrollback because region != full grid). Row 1 "BB" → row 0,
         // row 2 "CC" → row 1, row 2 blanked. Then "DD" written at row 2.
-        assert_eq!(t.grid().cell(0, 0).ch, 'B', "row 0 should be BB after scroll");
-        assert_eq!(t.grid().cell(0, 1).ch, 'C', "row 1 should be CC after scroll");
-        assert_eq!(t.grid().cell(0, 2).ch, 'D', "row 2 should be DD (new content)");
+        assert_eq!(
+            t.grid().cell(0, 0).ch,
+            'B',
+            "row 0 should be BB after scroll"
+        );
+        assert_eq!(
+            t.grid().cell(0, 1).ch,
+            'C',
+            "row 1 should be CC after scroll"
+        );
+        assert_eq!(
+            t.grid().cell(0, 2).ch,
+            'D',
+            "row 2 should be DD (new content)"
+        );
         // Row 3 (outside region) should be unchanged from initial (blank).
-        assert_eq!(t.grid().cell(0, 3).ch, ' ', "row 3 is outside region, unchanged");
+        assert_eq!(
+            t.grid().cell(0, 3).ch,
+            ' ',
+            "row 3 is outside region, unchanged"
+        );
     }
 
     #[test]
     fn il_inserts_blank_lines_at_cursor() {
         let mut t = Terminal::new(10, 5);
-        t.feed(b"\x1b[1;1HAA\r\n");   // row 0
-        t.feed(b"BB\r\n");             // row 1
-        t.feed(b"CC\r\n");             // row 2
-        t.feed(b"\x1b[2;1H");          // cursor to row 1
-        t.feed(b"\x1b[L");             // IL: insert 1 line at row 1
+        t.feed(b"\x1b[1;1HAA\r\n"); // row 0
+        t.feed(b"BB\r\n"); // row 1
+        t.feed(b"CC\r\n"); // row 2
+        t.feed(b"\x1b[2;1H"); // cursor to row 1
+        t.feed(b"\x1b[L"); // IL: insert 1 line at row 1
         // Row 0 unchanged. Row 1 blank. Row 2 used to be BB → now is BB
         // (shifted down). Row 3 used to be CC → now CC.
         assert_eq!(t.grid().cell(0, 0).ch, 'A');
@@ -4460,8 +4713,8 @@ mod tests {
     fn dl_deletes_lines_at_cursor() {
         let mut t = Terminal::new(10, 5);
         t.feed(b"AA\r\nBB\r\nCC\r\nDD\r\n");
-        t.feed(b"\x1b[2;1H");          // cursor to row 1
-        t.feed(b"\x1b[M");             // DL: delete 1 line at row 1
+        t.feed(b"\x1b[2;1H"); // cursor to row 1
+        t.feed(b"\x1b[M"); // DL: delete 1 line at row 1
         assert_eq!(t.grid().cell(0, 0).ch, 'A');
         assert_eq!(t.grid().cell(0, 1).ch, 'C', "row 2 (CC) shifted up");
         assert_eq!(t.grid().cell(0, 2).ch, 'D', "row 3 (DD) shifted up");
@@ -4514,7 +4767,11 @@ mod tests {
         t.feed("中".as_bytes());
         t.feed(b"\x1b[1;5H");
         t.feed(b"\x1b[1K");
-        assert_eq!(t.grid().cell(4, 0).ch, ' ', "wide-lead under cursor not cleared");
+        assert_eq!(
+            t.grid().cell(4, 0).ch,
+            ' ',
+            "wide-lead under cursor not cleared"
+        );
         assert_eq!(t.grid().cell(5, 0).ch, ' ', "wide-trail orphan not cleared");
     }
 
@@ -4526,10 +4783,10 @@ mod tests {
     #[test]
     fn dsr_reports_cursor_position_and_status() {
         let mut t = Terminal::new(20, 5);
-        t.feed(b"abc");                       // cursor now col 3, row 0
+        t.feed(b"abc"); // cursor now col 3, row 0
         t.feed(b"\x1b[6n");
         assert_eq!(t.take_response(), b"\x1b[1;4R".to_vec());
-        t.feed(b"\x1b[2;7H\x1b[6n");          // move, then ask again
+        t.feed(b"\x1b[2;7H\x1b[6n"); // move, then ask again
         assert_eq!(t.take_response(), b"\x1b[2;7R".to_vec());
         t.feed(b"\x1b[5n");
         assert_eq!(t.take_response(), b"\x1b[0n".to_vec());
@@ -4577,7 +4834,7 @@ mod tests {
         let mut t = Terminal::new(10, 3);
         t.feed(b"ABCDEFG");
         // ICH 2 at col 2 — insert 2 blanks at col 2.
-        t.feed(b"\x1b[1;3H");          // cursor (col=2, row=0)
+        t.feed(b"\x1b[1;3H"); // cursor (col=2, row=0)
         t.feed(b"\x1b[2@");
         // Was "ABCDEFG"; after ICH 2 at col 2: "AB  CDEF" (G falls off rhs)
         assert_eq!(t.grid().cell(0, 0).ch, 'A');
@@ -4606,13 +4863,13 @@ mod tests {
         // attrs at save time, even after later SGR changes. Verified
         // by colouring a glyph after restore and reading the cell back.
         let mut t = Terminal::new(20, 5);
-        t.feed(b"\x1b[31m");      // red foreground
-        t.feed(b"\x1b[2;2H");     // cursor (1, 1)
-        t.feed(b"\x1b7");         // save (cursor + attrs)
-        t.feed(b"\x1b[34m");      // change to blue
-        t.feed(b"\x1b[5;5HX");    // write X in blue at (4, 4)
-        t.feed(b"\x1b8");         // restore (cursor → (1,1), attrs → red)
-        t.feed(b"Y");             // write Y at (1, 1) in red
+        t.feed(b"\x1b[31m"); // red foreground
+        t.feed(b"\x1b[2;2H"); // cursor (1, 1)
+        t.feed(b"\x1b7"); // save (cursor + attrs)
+        t.feed(b"\x1b[34m"); // change to blue
+        t.feed(b"\x1b[5;5HX"); // write X in blue at (4, 4)
+        t.feed(b"\x1b8"); // restore (cursor → (1,1), attrs → red)
+        t.feed(b"Y"); // write Y at (1, 1) in red
         let y = t.grid().cell(1, 1);
         let x = t.grid().cell(4, 4);
         assert_eq!(y.ch, 'Y');
@@ -4743,7 +5000,14 @@ mod tests {
         // through Terminal::feed.
         for r in 0..rows {
             for c in 0..cols {
-                t.grid.set_cell(c, r, Cell { ch: marker, ..Default::default() });
+                t.grid.set_cell(
+                    c,
+                    r,
+                    Cell {
+                        ch: marker,
+                        ..Default::default()
+                    },
+                );
             }
         }
         t.grid.set_cursor(cur_col, cur_row);
@@ -4895,7 +5159,13 @@ mod tests {
         for (code, idx) in (30u16..=37).zip(0u8..=7) {
             let mut t = Terminal::new(10, 5);
             t.feed(format!("\x1B[{}m", code).as_bytes());
-            assert_eq!(t.current_attrs().fg, Color::Indexed(idx), "code {} -> idx {}", code, idx);
+            assert_eq!(
+                t.current_attrs().fg,
+                Color::Indexed(idx),
+                "code {} -> idx {}",
+                code,
+                idx
+            );
         }
     }
 
@@ -4904,7 +5174,13 @@ mod tests {
         for (code, idx) in (40u16..=47).zip(0u8..=7) {
             let mut t = Terminal::new(10, 5);
             t.feed(format!("\x1B[{}m", code).as_bytes());
-            assert_eq!(t.current_attrs().bg, Color::Indexed(idx), "code {} -> idx {}", code, idx);
+            assert_eq!(
+                t.current_attrs().bg,
+                Color::Indexed(idx),
+                "code {} -> idx {}",
+                code,
+                idx
+            );
         }
     }
 
@@ -5009,12 +5285,18 @@ mod tests {
         // Row 1 is the wrapped continuation: "KLM" + fill blanks.
         for c in 3..g.cols() {
             let cell = g.cell(c, 1);
-            assert!(!cell.attrs.underline, "fill blank at col {c} must not be underlined");
+            assert!(
+                !cell.attrs.underline,
+                "fill blank at col {c} must not be underlined"
+            );
             assert!(!cell.attrs.bold && !cell.attrs.reverse && !cell.attrs.dim);
             assert_eq!(cell.attrs.bg, Color::Indexed(1), "…but BCE keeps the bg");
         }
         // The printed glyphs DO keep their underline.
-        assert!(g.cell(0, 1).attrs.underline, "the K is genuinely underlined");
+        assert!(
+            g.cell(0, 1).attrs.underline,
+            "the K is genuinely underlined"
+        );
 
         // Erase path (EL) mid-underline: same contract.
         let mut t = Terminal::new(10, 2);
@@ -5023,7 +5305,10 @@ mod tests {
         assert!(g.cell(0, 0).attrs.underline && g.cell(1, 0).attrs.underline);
         for c in 2..10 {
             let cell = g.cell(c, 0);
-            assert!(!cell.attrs.underline, "EL blank at col {c} must not be underlined");
+            assert!(
+                !cell.attrs.underline,
+                "EL blank at col {c} must not be underlined"
+            );
             assert_eq!(cell.attrs.bg, Color::Indexed(2));
         }
     }
@@ -5240,7 +5525,6 @@ mod tests {
         );
     }
 
-
     // ----- alt screen (?1049) ---------------------------------------------
 
     fn first_row_text(t: &Terminal) -> String {
@@ -5356,6 +5640,87 @@ mod tests {
         assert_eq!(t.grid().cursor(), (1, 0));
         assert_eq!(t.predictions_hit, 0);
         assert_eq!(t.predictions_miss, 2);
+    }
+
+    #[test]
+    fn silent_program_gives_the_screen_back_on_its_own() {
+        // A `sudo` password prompt: echo off, and not one byte comes
+        // back until Enter.  Without a deadline the guesses stay
+        // painted — the password, in clear, on screen.
+        let mut t = Terminal::new(20, 5);
+        for b in b"hunter22" {
+            assert!(t.predict_byte(*b));
+        }
+        assert_eq!(&first_row_text(&t)[..8], "hunter22");
+        assert!(t.predictions_pending());
+
+        let deadline = t.predict_deadline();
+        assert!(!t.expire_predictions_at(Instant::now()), "not yet");
+        assert!(t.expire_predictions_at(Instant::now() + deadline));
+
+        assert_eq!(first_row_text(&t).trim_end(), "");
+        assert_eq!(t.grid.cursor(), (0, 0));
+        assert_eq!(t.predictions_expired, 8);
+        // Nothing arrived, so nothing is decided yet: expiry alone is
+        // not evidence the program refuses to echo.
+        assert_eq!(t.predict_misses, 0);
+    }
+
+    #[test]
+    fn late_echo_widens_the_window_instead_of_counting_against_it() {
+        // A real link: the echo is slower than the deadline but it
+        // does come.  Losing local echo on exactly the connection it
+        // was built for would be the wrong lesson to draw.
+        let mut t = Terminal::new(20, 5);
+        t.predict_byte(b'a');
+        let deadline = t.predict_deadline();
+        assert!(t.expire_predictions_at(Instant::now() + deadline));
+        assert_eq!(first_row_text(&t).trim_end(), "");
+
+        // The echo lands after the guess was taken back.
+        t.feed(b"a");
+        assert_eq!(&first_row_text(&t)[..1], "a");
+        assert_eq!(t.predict_misses, 0, "a late echo is not a miss");
+        assert!(t.can_predict(), "the link stays worth predicting on");
+    }
+
+    #[test]
+    fn the_window_is_learned_from_the_link_not_assumed() {
+        // Whatever the round trip turns out to be, the deadline
+        // follows it — the floor protects a local pty, the ceiling
+        // keeps an unechoed keystroke from lingering.
+        let mut t = Terminal::new(20, 5);
+        assert_eq!(t.predict_deadline(), Terminal::PREDICT_DEADLINE_MIN);
+        for _ in 0..40 {
+            t.note_echo_rtt(Duration::from_millis(300));
+        }
+        assert!(t.predict_deadline() > Duration::from_millis(900));
+        for _ in 0..200 {
+            t.note_echo_rtt(Duration::from_millis(5000));
+        }
+        assert_eq!(t.predict_deadline(), Terminal::PREDICT_DEADLINE_MAX);
+        for _ in 0..400 {
+            t.note_echo_rtt(Duration::from_micros(160));
+        }
+        assert_eq!(t.predict_deadline(), Terminal::PREDICT_DEADLINE_MIN);
+    }
+
+    #[test]
+    fn expired_then_something_else_is_a_real_miss() {
+        // The password prompt again, now past Enter: what finally
+        // arrives is sudo's own output, not the typed bytes.  Three
+        // of those and the pane stops guessing.
+        let mut t = Terminal::new(20, 5);
+        for _ in 0..3 {
+            assert!(t.predict_byte(b'x'));
+            let deadline = t.predict_deadline();
+            assert!(t.expire_predictions_at(Instant::now() + deadline));
+            t.feed(b"\r\n");
+        }
+        assert_eq!(t.predict_misses, 3);
+        assert!(!t.can_predict());
+        assert!(!t.predict_byte(b'x'));
+        assert_eq!(first_row_text(&t).trim_end(), "");
     }
 
     #[test]
@@ -5548,7 +5913,11 @@ mod tests {
         t.resize(13, 24);
         t.resize(200, 50);
         t.resize(80, 24);
-        assert_eq!(logical_text(&t), before, "wild resize chain must be lossless");
+        assert_eq!(
+            logical_text(&t),
+            before,
+            "wild resize chain must be lossless"
+        );
     }
 
     #[test]
@@ -5635,7 +6004,10 @@ mod sync_output_tests {
         t.feed(b"\x1b[?2026h");
         assert!(t.sync_output_active());
         t.feed(b"hello");
-        assert!(t.sync_output_active(), "content inside the batch keeps it open");
+        assert!(
+            t.sync_output_active(),
+            "content inside the batch keeps it open"
+        );
         t.feed(b"\x1b[?2026l");
         assert!(!t.sync_output_active());
     }
@@ -5680,7 +6052,10 @@ mod alt_scroll_tests {
         t.feed(b"\x1b[?1049h\x1b[?1007h");
         assert!(t.alt_scroll_mode());
         t.feed(b"\x1b[?1049l");
-        assert!(!t.alt_scroll_mode(), "no alternate screen, no claim on the wheel");
+        assert!(
+            !t.alt_scroll_mode(),
+            "no alternate screen, no claim on the wheel"
+        );
     }
 
     /// It has to survive an image swap.  The program said it once, on
@@ -5732,7 +6107,9 @@ mod alt_screen_across_execv_tests {
         assert!(before.in_alt_screen());
 
         let mut after = Terminal::new(20, 4);
-        after.apply_snapshot(&before.serialize_snapshot_live()).unwrap();
+        after
+            .apply_snapshot(&before.serialize_snapshot_live())
+            .unwrap();
         assert!(
             after.in_alt_screen(),
             "the program is still in its own screen; the swap was ours, not its"
@@ -5745,7 +6122,9 @@ mod alt_screen_across_execv_tests {
         let mut before = Terminal::new(20, 4);
         before.feed(b"$ ls");
         let mut after = Terminal::new(20, 4);
-        after.apply_snapshot(&before.serialize_snapshot_live()).unwrap();
+        after
+            .apply_snapshot(&before.serialize_snapshot_live())
+            .unwrap();
         assert!(!after.in_alt_screen());
     }
 
@@ -5758,10 +6137,15 @@ mod alt_screen_across_execv_tests {
         let mut before = Terminal::new(20, 4);
         before.feed(b"\x1b[?1049hTUI PAINTED THIS");
         let mut after = Terminal::new(20, 4);
-        after.apply_snapshot(&before.serialize_snapshot_live()).unwrap();
+        after
+            .apply_snapshot(&before.serialize_snapshot_live())
+            .unwrap();
 
         let painted: String = (0..20).map(|c| after.grid().cell(c, 0).ch).collect();
-        assert!(painted.contains("TUI"), "the alternate screen is what we restored");
+        assert!(
+            painted.contains("TUI"),
+            "the alternate screen is what we restored"
+        );
 
         after.feed(b"\x1b[?1049l");
         assert!(!after.in_alt_screen());
@@ -5787,7 +6171,9 @@ mod u_tag_tests {
     }
 
     fn row(t: &Terminal, r: u16) -> String {
-        (0..t.grid().cols()).map(|c| t.grid().cell(c, r).ch).collect()
+        (0..t.grid().cols())
+            .map(|c| t.grid().cell(c, r).ch)
+            .collect()
     }
     fn under(t: &Terminal, c: u16) -> bool {
         t.grid().cell(c, 0).attrs.underline
@@ -5798,7 +6184,11 @@ mod u_tag_tests {
     fn a_matched_pair_underlines_what_it_wraps() {
         let mut t = declared(20, 2);
         t.feed(b"a<u>bc</u>d");
-        assert_eq!(row(&t, 0).trim_end(), "abcd", "the tags are styling, not text");
+        assert_eq!(
+            row(&t, 0).trim_end(),
+            "abcd",
+            "the tags are styling, not text"
+        );
         assert!(!under(&t, 0), "before");
         assert!(under(&t, 1) && under(&t, 2), "inside");
         assert!(!under(&t, 3), "after");
@@ -6004,6 +6394,9 @@ mod predict_learning_tests {
             t.predict_byte(b'b'); // the last of these is the probe
         }
         t.feed(b"X"); // the probe missed too
-        assert!(!t.predict_byte(b'c'), "the next keystroke is not another probe");
+        assert!(
+            !t.predict_byte(b'c'),
+            "the next keystroke is not another probe"
+        );
     }
 }
