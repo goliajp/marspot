@@ -36,6 +36,7 @@ use objc2_app_kit::{NSView, NSViewLayerContentsPlacement};
 use objc2_foundation::{NSSize, NSString};
 use objc2_metal::{
     MTLBlendFactor, MTLBlendOperation, MTLBlitCommandEncoder, MTLClearColor, MTLCommandBuffer,
+    MTLCommandBufferStatus,
     MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary,
     MTLLoadAction, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder,
     MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
@@ -356,6 +357,32 @@ pub struct WindowRender {
     /// this window still owe a clear", and one window's resize must
     /// not discharge another's.
     clear_bg_required: bool,
+    /// The frame this window has on the GPU, if any.
+    ///
+    /// The live path used to end each frame in `waitUntilCompleted`,
+    /// on the main loop.  That is one thread for input, PTY pumping,
+    /// every pane and the GPU round-trip, so a slow round-trip stops
+    /// the whole terminal: measured across 166 stalls on a working
+    /// machine, the average wait was **374 ms against 3.3 ms of actual
+    /// GPU execution**, the worst 3.6 s — all of it with keystrokes
+    /// queueing up behind it (2026-09-06, "在我们这开 codex，输入有时
+    /// 候都会卡，在 iTerm2 很流畅").  The GPU was not busy; we were
+    /// queued behind a loaded machine's other work and chose to block.
+    ///
+    /// So the frame is committed and left running.  Its buffer is kept
+    /// here and polled — `settled()` — and only when it reports
+    /// `Completed` does the surface flip and `SurfaceReady` go out, so
+    /// the shell still only ever samples a finished surface.  A window
+    /// with a frame in flight simply does not start another; the loop
+    /// goes back to reading input, which is the whole point.
+    ///
+    /// One frame in flight, never two: that keeps every existing
+    /// invariant intact — the instance pool is still refilled in place
+    /// (nothing reads it once the frame completes) and the two
+    /// surfaces still alternate with a full frame between reuses.
+    in_flight: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
+    /// The GPU's own account of the last completed frame.
+    last_gpu_exec_us: u64,
 }
 
 impl Default for WindowRender {
@@ -368,7 +395,46 @@ impl WindowRender {
     pub fn new() -> Self {
         // Starts true: a window has never been painted, so its first
         // frame owes a full clear.
-        Self { pane_caches: Vec::new(), clear_bg_required: true }
+        Self {
+            pane_caches: Vec::new(),
+            clear_bg_required: true,
+            in_flight: None,
+            last_gpu_exec_us: 0,
+        }
+    }
+
+    /// Is a frame still on the GPU for this window?
+    ///
+    /// A caller that sees `true` must not start another frame — it
+    /// would overwrite the instance buffers the GPU is reading.
+    pub fn frame_in_flight(&self) -> bool {
+        self.in_flight.is_some()
+    }
+
+    /// Has the in-flight frame finished?  Reaps it if so.
+    ///
+    /// Returns `true` exactly once per frame, on the poll that finds it
+    /// complete — that is the moment the surface is safe to show.
+    pub fn settled(&mut self) -> bool {
+        let Some(cmd) = self.in_flight.as_ref() else {
+            return false;
+        };
+        // `Error` counts as settled: the surface will not improve by
+        // waiting, and leaving the window stuck with a frame that will
+        // never complete would freeze it forever.
+        let st = cmd.status();
+        if st != MTLCommandBufferStatus::Completed && st != MTLCommandBufferStatus::Error {
+            return false;
+        }
+        let (s, e) = (cmd.GPUStartTime(), cmd.GPUEndTime());
+        self.last_gpu_exec_us = ((e - s).max(0.0) * 1e6) as u64;
+        self.in_flight = None;
+        true
+    }
+
+    /// GPU time of the last completed frame, in microseconds.
+    pub fn last_gpu_exec_us(&self) -> u64 {
+        self.last_gpu_exec_us
     }
 
     /// The next frame for this window must clear rather than load.
@@ -1718,6 +1784,37 @@ impl MetalRenderer {
         sidebar: &[SidebarEntry],
         focused_idx: usize,
     ) {
+        self.render_layout_to_texture_inner(wr, target, layout, views, sidebar, focused_idx, true)
+    }
+
+    /// The live variant: commit and leave the frame running.
+    ///
+    /// The caller polls `WindowRender::settled()` and only then flips
+    /// the surface — see `WindowRender::in_flight` for why blocking
+    /// here was costing the terminal its input responsiveness.
+    pub fn render_layout_to_texture_async(
+        &mut self,
+        wr: &mut WindowRender,
+        target: &ProtocolObject<dyn MTLTexture>,
+        layout: &Layout,
+        views: &[SessionView],
+        sidebar: &[SidebarEntry],
+        focused_idx: usize,
+    ) {
+        self.render_layout_to_texture_inner(wr, target, layout, views, sidebar, focused_idx, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_layout_to_texture_inner(
+        &mut self,
+        wr: &mut WindowRender,
+        target: &ProtocolObject<dyn MTLTexture>,
+        layout: &Layout,
+        views: &[SessionView],
+        sidebar: &[SidebarEntry],
+        focused_idx: usize,
+        block: bool,
+    ) {
         let width_px = target.width() as f64;
         let height_px = target.height() as f64;
         if width_px < 1.0 || height_px < 1.0 {
@@ -1908,15 +2005,19 @@ impl MetalRenderer {
         let (instbuf_us, instbuf_bytes) = take_instance_buffer_cost();
         cmd.commit();
         let t_gpu0 = std::time::Instant::now();
-        { cmd.waitUntilCompleted() };
-        let t_end = std::time::Instant::now();
-        // The GPU's own account of the frame, for comparison with the
-        // wall-clock wait above.  Both are only valid after the buffer
-        // has completed, which is why they are read here.
-        let gpu_exec_us = {
+        // Blocking is for the bench harness, which wants the whole
+        // round-trip in one number.  The live path hands the frame to
+        // `wr` and returns — see `WindowRender::in_flight`.
+        let gpu_exec_us = if block {
+            { cmd.waitUntilCompleted() };
             let (s, e) = (cmd.GPUStartTime(), cmd.GPUEndTime());
             ((e - s).max(0.0) * 1e6) as u64
+        } else {
+            wr.in_flight = Some(cmd.clone());
+            // Not known yet; the poll that reaps the frame fills it in.
+            wr.last_gpu_exec_us
         };
+        let t_end = std::time::Instant::now();
         // Bracketing is sound here even though sub-microsecond timers
         // can be defeated by reordering: `commit` and
         // `waitUntilCompleted` are opaque calls with side effects, and

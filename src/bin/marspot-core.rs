@@ -3447,6 +3447,11 @@ struct WindowState {
     /// gate a quiet one's repaint, which is exactly the coupling the
     /// peer model forbids.
     last_render_at: Option<Instant>,
+    /// The caret of a frame that is committed but not yet settled.
+    ///
+    /// It travels with the frame: announcing it before the surface is
+    /// shown would point the IME at a position the user cannot see yet.
+    pending_caret: Option<(f64, f64, f64, f64)>,
     /// Has this window ever completed a frame?  Drives one INFO line
     /// per window — "did this window ever paint" is the first question
     /// asked of a black window, and the per-frame log is sampled 1-in-8
@@ -3584,6 +3589,7 @@ impl WindowState {
             frame_index: 0,
             surfaces: None,
             last_render_at: None,
+            pending_caret: None,
             painted_once: false,
             render: marspot::render_metal::WindowRender::new(),
             layout: Layout::build(
@@ -8466,10 +8472,37 @@ impl CoreApp {
         self.renderer.last_render_split()
     }
 
+    /// Commit a frame and return; the caller presents it once
+    /// `WindowRender::settled()` says the GPU is done.
     fn render(
         &mut self,
         wi: usize,
         target_tex: &objc2::rc::Retained<ProtocolObject<dyn MTLTexture>>,
+    ) -> Option<(f64, f64, f64, f64)> {
+        self.render_inner(wi, target_tex, false)
+    }
+
+    /// Render and wait, for the one caller that announces the surface
+    /// in the same breath.
+    ///
+    /// Attach installs a fresh pair and acks `SurfaceReady` right
+    /// away, so the frame must genuinely be finished — an unfinished
+    /// surface announced here is a black window until the next frame.
+    /// It happens once per attach and nobody is typing into it, so the
+    /// wait costs nothing worth reclaiming.
+    fn render_blocking(
+        &mut self,
+        wi: usize,
+        target_tex: &objc2::rc::Retained<ProtocolObject<dyn MTLTexture>>,
+    ) -> Option<(f64, f64, f64, f64)> {
+        self.render_inner(wi, target_tex, true)
+    }
+
+    fn render_inner(
+        &mut self,
+        wi: usize,
+        target_tex: &objc2::rc::Retained<ProtocolObject<dyn MTLTexture>>,
+        block: bool,
     ) -> Option<(f64, f64, f64, f64)> {
         let focused = win!(self, wi).focused_idx;
         // Everything below borrows the window — the pane grids, the
@@ -8718,14 +8751,25 @@ impl CoreApp {
             })
             .collect();
         let (cell_w, cell_h) = self.renderer.cell_dims();
-        self.renderer.render_layout_to_texture(
-            &mut wr,
-            target_tex,
-            &win!(self, wi).layout,
-            &views,
-            &entries,
-            focused,
-        );
+        if block {
+            self.renderer.render_layout_to_texture(
+                &mut wr,
+                target_tex,
+                &win!(self, wi).layout,
+                &views,
+                &entries,
+                focused,
+            );
+        } else {
+            self.renderer.render_layout_to_texture_async(
+                &mut wr,
+                target_tex,
+                &win!(self, wi).layout,
+                &views,
+                &entries,
+                focused,
+            );
+        }
         win!(self, wi).render = wr;
         // Cleared here, then set again if a dim is still on its way:
         // the order matters, because this reset runs after the frame
@@ -9622,10 +9666,29 @@ fn main() {
             // idle timeout so CPU at rest stays near zero.  The
             // deadline is the soonest across the dirty windows — one
             // window's cap must not delay another's frame.
+            // A frame on the GPU has to be reaped by a poll — nothing
+            // sends us an event when it lands — so while one is in
+            // flight the loop wakes often enough to present it
+            // promptly.  This costs nothing at rest: with no frame
+            // committed there is nothing to poll, and the idle timeout
+            // stays a full second, which is what keeps CPU at rest
+            // near zero (a hard project constraint).
+            const SETTLE_POLL: Duration = Duration::from_millis(1);
             let recv_timeout = app
                 .windows
                 .iter()
-                .filter(|w| w.needs_render)
+                .filter(|w| w.needs_render || w.render.frame_in_flight())
+                .map(|w| {
+                    if w.render.frame_in_flight() {
+                        SETTLE_POLL
+                    } else {
+                        Duration::MAX
+                    }
+                })
+                .chain(
+                    app.windows
+                        .iter()
+                        .filter(|w| w.needs_render)
                 // One reading of the clock, not two.  The first cut
                 // asked `t.elapsed()` in the guard and again in the
                 // body, and time passes between them: an elapsed that
@@ -9634,10 +9697,11 @@ fn main() {
                 // panics on underflow.  It took twelve hours of logs
                 // to hit once — `overflow when subtracting durations`,
                 // straight through `main`, taking the window with it.
-                .map(|w| match w.last_render_at {
-                    Some(t) => frame_min_interval.saturating_sub(t.elapsed()),
-                    None => Duration::ZERO,
-                })
+                        .map(|w| match w.last_render_at {
+                            Some(t) => frame_min_interval.saturating_sub(t.elapsed()),
+                            None => Duration::ZERO,
+                        }),
+                )
                 .min()
                 .unwrap_or(Duration::from_secs(1));
             match event_rx.recv_timeout(recv_timeout) {
@@ -10134,7 +10198,7 @@ fn main() {
                 .as_ref()
                 .map(|s| s.writing_tex())
                 .expect("attach just installed a pair");
-            let _ = app.render(wi, &tex);
+            let _ = app.render_blocking(wi, &tex);
             watch.phase("attach-post");
             if let Some(s) = win!(app, wi).surfaces.as_mut() {
                 let ack = Frame::new(
@@ -10183,23 +10247,47 @@ fn main() {
             if gated {
                 continue;
             }
+            // Its last frame is still on the GPU.  Starting another
+            // would overwrite the instance buffers that frame is
+            // reading, and the whole reason we no longer wait is to
+            // spend this time on input instead.  `needs_render` stays
+            // set, so the frame goes out as soon as the GPU is done.
+            if win!(app, wi).render.frame_in_flight() {
+                continue;
+            }
             // A window with no paint target (stale ids at attach) is
             // skipped, not fatal: its peers keep painting and the next
             // attach gives it one.
             let Some(tex) = win!(app, wi).surfaces.as_ref().map(|s| s.writing_tex()) else {
                 continue;
             };
-            // Double-buffer: render into the back slot.
-            // `render_layout_to_texture` calls `waitUntilCompleted`, so
-            // the moment we return here the surface bytes are settled
-            // and safe for the shell to sample — that's what makes
-            // `SurfaceReady` the dual-buffer race fix: we only ever
-            // flip to a slot the GPU has already finished.
+            // Double-buffer: render into the back slot.  The frame is
+            // committed and left running; the pass below flips only
+            // once the GPU reports it complete, so `SurfaceReady`
+            // still names a slot the shell can safely sample — that
+            // property is what makes it the dual-buffer race fix, and
+            // it survives the move off the blocking wait.
             let render_t0 = Instant::now();
             win!(app, wi).last_render_at = Some(render_t0);
             watch.phase("render");
             let caret = app.render(wi, &tex);
             watch.phase("post-render");
+            // The frame is on the GPU, not finished.  Hold the caret
+            // and let the poll below flip and announce it — the shell
+            // must still only ever be pointed at a settled surface.
+            win!(app, wi).pending_caret = caret;
+            continue;
+        }
+
+        // Frames that finished since the last pass: flip to them and
+        // tell the shell.  This is the half of the old blocking render
+        // that had to stay synchronous — it just no longer costs the
+        // main loop the GPU's queueing time.
+        for wi in 0..app.windows.len() {
+            if !win!(app, wi).render.settled() {
+                continue;
+            }
+            let caret = win!(app, wi).pending_caret.take();
             let (surface_id, writing_idx) = {
                 let Some(s) = win!(app, wi).surfaces.as_mut() else { continue };
                 let ids = (s.writing_surface_id(), s.writing_idx);
@@ -10221,7 +10309,10 @@ fn main() {
                 window_id = win!(app, wi).window_id,
                 writing_idx = writing_idx,
                 surface_id = surface_id,
-                dur_us = render_t0.elapsed().as_micros() as u64,
+                dur_us = win!(app, wi)
+                    .last_render_at
+                    .map(|t| t.elapsed().as_micros() as u64)
+                    .unwrap_or(0),
                 n_panes = win!(app, wi).panes.len(),
                 focused_idx = win!(app, wi).focused_idx
             );
