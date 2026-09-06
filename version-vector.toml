@@ -29,4 +29,4 @@
 
 shell   = "0.7.137"  # codex badge 右键切 reasoning effort,resume 同一会话;详见 CHANGELOG.md
 core    = "0.12.182"  # 修:到期检查对 L3 pane 取进程内 Terminal 直接 panic,开机即崩;详见 CHANGELOG.md
-session = "0.11.75"  # 一批字节只喂到程序声明屏幕一致的那一点，不再把画到一半的重绘发上屏；详见 CHANGELOG.md
+session = "0.11.76"  # 回答颜色查询；带中间字符的 CSI 不再在应答之前就被丢掉；详见 CHANGELOG.md

@@ -65,6 +65,7 @@ pub mod grid_shm;
 pub mod input_core;
 pub mod layout;
 pub mod parser;
+pub mod palette;
 pub mod paths;
 pub mod pty;
 pub mod render;

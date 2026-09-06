@@ -208,6 +208,14 @@ pub struct Terminal {
     /// a program that never closes its update must not freeze the pane,
     /// so the publisher holds frames under a timeout.
     sync_output: bool,
+    /// DECSCUSR shape the program last asked for: 0 = the terminal's
+    /// own default, 1/2 block, 3/4 underline, 5/6 bar, even = blinking.
+    /// Nothing draws it yet — see the DECSCUSR arm for why.
+    cursor_shape: u8,
+    /// The last title the program set via OSC 0 / OSC 2.  Stored so it
+    /// is available to whatever decides to show it; nothing displays
+    /// it today (see `osc_dispatch`).
+    osc_title: String,
     /// Sticky: this program has used DEC 2026 at least once.  Callers
     /// that must cut a byte stream at a consistent screen ask this
     /// first, so a pane that never synchronises (a shell, vim) never
@@ -374,6 +382,8 @@ impl Terminal {
             alt_scroll: false,
             sync_output: false,
             uses_sync_output: false,
+            osc_title: String::new(),
+            cursor_shape: 0,
             cursor_visible: true,
             mouse_tracking_mode: MouseTrackingMode::Off,
             mouse_sgr_encoding: false,
@@ -483,6 +493,17 @@ impl Terminal {
     /// what it opened.
     /// Has this program ever opened a synchronized update?  Sticky —
     /// see [`Self::uses_sync_output`].
+    /// The cursor shape the program asked for — see `cursor_shape`.
+    pub fn cursor_shape(&self) -> u8 {
+        self.cursor_shape
+    }
+
+    /// What the program last called itself (OSC 0 / OSC 2), empty if
+    /// it never said.
+    pub fn osc_title(&self) -> &str {
+        &self.osc_title
+    }
+
     pub fn uses_sync_output(&self) -> bool {
         self.uses_sync_output
     }
@@ -830,6 +851,8 @@ impl Terminal {
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let sync_output = &mut self.sync_output;
             let uses_sync_output = &mut self.uses_sync_output;
+            let osc_title = &mut self.osc_title;
+            let cursor_shape = &mut self.cursor_shape;
             let alt_scroll = &mut self.alt_scroll;
             let u_tags = self.u_tags;
             let u_buf = &mut self.u_buf;
@@ -855,6 +878,8 @@ impl Terminal {
                 bracketed_paste,
                 sync_output,
                 uses_sync_output,
+                osc_title,
+                cursor_shape,
                 alt_scroll,
                 u_tags,
                 u_buf,
@@ -989,6 +1014,8 @@ impl Terminal {
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let sync_output = &mut self.sync_output;
             let uses_sync_output = &mut self.uses_sync_output;
+            let osc_title = &mut self.osc_title;
+            let cursor_shape = &mut self.cursor_shape;
             let alt_scroll = &mut self.alt_scroll;
             let u_tags = self.u_tags;
             let u_buf = &mut self.u_buf;
@@ -1014,6 +1041,8 @@ impl Terminal {
                 bracketed_paste,
                 sync_output,
                 uses_sync_output,
+                osc_title,
+                cursor_shape,
                 alt_scroll,
                 u_tags,
                 u_buf,
@@ -2068,6 +2097,10 @@ struct Handler<'a> {
     sync_output: &'a mut bool,
     /// Sticky companion to `sync_output` — see `Terminal::uses_sync_output`.
     uses_sync_output: &'a mut bool,
+    /// See `Terminal::osc_title`.
+    osc_title: &'a mut String,
+    /// See `Terminal::cursor_shape`.
+    cursor_shape: &'a mut u8,
     /// DEC 1007 — see `Terminal::alt_scroll`.
     alt_scroll: &'a mut bool,
     /// `appearance.render_u_tags` — see `Terminal::u_tags`.
@@ -2953,13 +2986,40 @@ impl<'a> ParserCallbacks for Handler<'a> {
             return;
         }
         if !intermediates.is_empty() {
-            // Other private-marker sequences not implemented yet.
-            lx_debug!(
-                "term.csi.unsupported",
-                "CSI with non-? intermediate",
-                final_byte = byte as char,
-                int_count = intermediates.len()
-            );
+            // Sequences that carry an intermediate have to be answered
+            // HERE.  The arms further down are matched after this
+            // early return, so anything written there for a `CSI <int>
+            // ... <final>` is dead — XTQVERSION was, for as long as the
+            // comment next to it claimed otherwise (measured 2026-09-07:
+            // `CSI > 0 q` returned zero bytes).
+            match (intermediates, byte) {
+                // DECSCUSR — cursor shape.  0 and 1 are block, 3
+                // underline, 5 bar; even values blink.  Recorded, not
+                // yet drawn: measured on a 22 MB codex session, all
+                // 119,812 of its DECSCUSR calls ask for shape 0, which
+                // means "whatever this terminal's default is" — so
+                // teaching the renderer the other shapes would change
+                // nothing for the program that sends it most.
+                (b" ", b'q') => *self.cursor_shape = param(params, 0, 0).min(6) as u8,
+                // XTQVERSION — `CSI > 0 q`.  App wants the terminal's
+                // name+version string.  Respond with a DCS reply:
+                //   DCS > | marspot ESC \
+                // Apps that recognise this fingerprint can tune their
+                // behaviour; apps that don't ignore it.
+                (b">", b'q') => {
+                    self.pending_response
+                        .extend_from_slice(b"\x1bP>|marspot\x1b\\");
+                    self.record_response("XTQVERSION");
+                }
+                _ => {
+                    lx_debug!(
+                        "term.csi.unsupported",
+                        "CSI with non-? intermediate",
+                        final_byte = byte as char,
+                        int_count = intermediates.len()
+                    );
+                }
+            }
             return;
         }
         let (col, row) = self.grid.cursor();
@@ -3273,16 +3333,6 @@ impl<'a> ParserCallbacks for Handler<'a> {
                     _ => {}
                 }
             }
-            b'q' if intermediates == b">" => {
-                // XTQVERSION — `CSI > 0 q`. App wants the terminal's
-                // name+version string. Respond with a DCS reply:
-                //   DCS > | marspot ESC \
-                // Apps that recognise this fingerprint can tune their
-                // behaviour; apps that don't ignore it.
-                self.pending_response
-                    .extend_from_slice(b"\x1bP>|marspot\x1b\\");
-                self.record_response("XTQVERSION");
-            }
             _ => {
                 // remaining CSI commands arrive in later phases —
                 // surface them at DEBUG so we know what apps are
@@ -3305,14 +3355,53 @@ impl<'a> ParserCallbacks for Handler<'a> {
         // F3+3.6 — OSC 7 push-based cwd reporting removed; the
         // LayoutModal now pull-fetches cwd via `proc_pidinfo` only
         // when the user opens it (one syscall per pane, not on the
-        // hot path).  Other OSC sequences (window title, hyperlinks,
-        // palette) remain TODO.
-        lx_debug!(
-            "term.osc.dispatch",
-            "OSC payload (handler not implemented yet)",
-            bytes = data.len(),
-            head = data.first().copied().map(|b| b as char).unwrap_or('?')
-        );
+        // hot path).
+        let (num, rest) = match data.iter().position(|&b| b == b';') {
+            Some(i) => (&data[..i], &data[i + 1..]),
+            None => (data, &data[data.len()..]),
+        };
+        let num = std::str::from_utf8(num).ok().and_then(|s| s.parse::<u16>().ok());
+        match num {
+            // 0 = icon name + window title, 2 = window title.  Stored,
+            // not displayed: a pane's label in marspot is DERIVED (its
+            // directory), deliberately, so that there is no second
+            // source of truth about which pane is which.  Wiring this
+            // into the title strip is a product decision, not a
+            // protocol one — but a program that says what it is
+            // shouldn't have that thrown away in the parser.
+            Some(0) | Some(2) => {
+                if let Ok(t) = std::str::from_utf8(rest) {
+                    if self.osc_title != t {
+                        self.osc_title.clear();
+                        // Bounded: a title is a label, and a program
+                        // that sends a megabyte of one is not going to
+                        // get a megabyte of storage for it.
+                        self.osc_title.extend(t.chars().take(256));
+                    }
+                }
+            }
+            // 10 = default foreground, 11 = default background, and
+            // `?` as the value makes it a QUERY.  An unanswered query
+            // is how a TUI ends up guessing whether it is on a dark or
+            // light terminal — the same shape as the DA1 stall that
+            // produced blank rows and misaligned chrome.  Answer in
+            // xterm's own form, and echo the OSC number back so a
+            // batched query is unambiguous.
+            Some(n @ (10 | 11)) if rest.starts_with(b"?") => {
+                let c = if n == 10 { crate::palette::FG } else { crate::palette::BG };
+                let reply = format!("\x1b]{n};{}\x07", crate::palette::xterm_rgb(c));
+                self.pending_response.extend_from_slice(reply.as_bytes());
+                self.record_response("OSC-COLOR");
+            }
+            _ => {
+                lx_debug!(
+                    "term.osc.unsupported",
+                    "OSC payload with no handler",
+                    bytes = data.len(),
+                    num = num.unwrap_or(u16::MAX) as u64
+                );
+            }
+        }
     }
 }
 
@@ -6010,6 +6099,88 @@ mod tests {
         t.resize(9, 8);
         t.resize(20, 8);
         assert_eq!(logical_text(&t), before);
+    }
+}
+
+#[cfg(test)]
+mod osc_tests {
+    use super::*;
+
+    #[test]
+    fn the_shape_a_program_asks_for_is_recorded_not_dropped() {
+        let mut t = Terminal::new(20, 5);
+        assert_eq!(t.cursor_shape(), 0);
+        t.feed(b"\x1b[5 q");
+        assert_eq!(t.cursor_shape(), 5, "bar");
+        // What codex actually sends, 119,812 times in one session:
+        // shape 0 = "this terminal's default".
+        t.feed(b"\x1b[0 q");
+        assert_eq!(t.cursor_shape(), 0);
+        // `CSI > 0 q` is XTQVERSION, a different sequence that happens
+        // to end in the same letter — it must still answer.
+        t.feed(b"\x1b[>0q");
+        assert!(!t.take_response().is_empty());
+        assert_eq!(t.cursor_shape(), 0, "XTQVERSION is not a shape");
+    }
+
+    #[test]
+    fn a_sequence_with_an_intermediate_is_still_answered() {
+        // csi_dispatch returns early for any CSI carrying an
+        // intermediate, so an arm written below that point never runs.
+        // XTQVERSION sat there dead while the comment beside it said it
+        // replied; this is the test that would have caught it.
+        let mut t = Terminal::new(20, 5);
+        t.feed(b"\x1b[>0q");
+        assert_eq!(
+            String::from_utf8(t.take_response()).unwrap(),
+            "\x1bP>|marspot\x1b\\",
+            "XTQVERSION must answer"
+        );
+    }
+
+    #[test]
+    fn a_color_query_gets_an_answer() {
+        // An unanswered one is how a TUI ends up guessing whether it
+        // is drawing on a dark terminal.
+        let mut t = Terminal::new(20, 5);
+        t.feed(b"\x1b]11;?\x07");
+        let r = String::from_utf8(t.take_response()).unwrap();
+        assert_eq!(r, format!("\x1b]11;{}\x07", crate::palette::xterm_rgb(crate::palette::BG)));
+
+        t.feed(b"\x1b]10;?\x07");
+        let r = String::from_utf8(t.take_response()).unwrap();
+        assert!(r.starts_with("\x1b]10;rgb:"), "the number asked is the number answered: {r:?}");
+    }
+
+    #[test]
+    fn setting_a_color_is_not_a_query_and_gets_no_reply() {
+        let mut t = Terminal::new(20, 5);
+        t.feed(b"\x1b]11;rgb:0000/0000/0000\x07");
+        assert!(t.take_response().is_empty());
+    }
+
+    #[test]
+    fn a_program_that_says_what_it_is_is_not_thrown_away() {
+        let mut t = Terminal::new(20, 5);
+        assert_eq!(t.osc_title(), "");
+        t.feed(b"\x1b]0;codex \xe2\xa0\x99 building\x07");
+        assert_eq!(t.osc_title(), "codex ⠙ building");
+        // OSC 2 is the same title by another number.
+        t.feed(b"\x1b]2;second\x07");
+        assert_eq!(t.osc_title(), "second");
+        // None of it reaches the screen.
+        let row: String = (0..20).map(|c| t.grid().cell(c, 0).ch).collect();
+        assert_eq!(row.trim_end_matches('\0').trim(), "");
+    }
+
+    #[test]
+    fn a_title_is_a_label_not_a_buffer() {
+        let mut t = Terminal::new(20, 5);
+        let mut b = b"\x1b]0;".to_vec();
+        b.extend(std::iter::repeat(b'x').take(10_000));
+        b.push(0x07);
+        t.feed(&b);
+        assert_eq!(t.osc_title().chars().count(), 256);
     }
 }
 

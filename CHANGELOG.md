@@ -5713,7 +5713,55 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.75**
+Current: **0.11.76**
+
+### 0.11.76
+
+A round of codex work, and the census that decided what was in it.
+
+Rather than guess what codex needs, `examples/escape_census.rs` counts
+every escape sequence in a real 22 MB session.  The tally is what
+picked these three, and — as much to the point — what kept two other
+ideas out.
+
+**A color query now gets an answer.**  `OSC 10 ; ? BEL` / `OSC 11 ; ?`
+is how a TUI finds out whether it is drawing on a dark terminal.
+`osc_dispatch` was an empty stub that logged and returned, so the
+question went unanswered — the same shape as the DA1 stall this
+codebase already learned from, where a missing reply produced extra
+blank rows and misaligned chrome.  The default colors moved to
+`marspot_term::palette` so the emulator can reach them and the renderer
+keeps reading the same two constants; there is still one copy.
+
+**A CSI carrying an intermediate is answered before the early return,
+not after.**  `csi_dispatch` returns early for any non-`?`
+intermediate, which makes every arm below that point dead for those
+sequences — and XTQVERSION was written below it, with a comment saying
+it replied.  Measured: `CSI > 0 q` returned zero bytes.  It replies
+now, and a test pins the trap rather than the one sequence.
+
+**DECSCUSR is recognised.**  `CSI <n> SP q`, 119,823 of them in one
+session, all landing in "not implemented".  The shape is recorded and
+deliberately not drawn: all 119,812 of codex's own calls ask for shape
+0, which means "this terminal's default", so teaching the renderer bar
+and underline cursors would change nothing for the program that sends
+it most.  Building that would have been inventing a gap the data does
+not show.
+
+**Not done, on purpose.**  OSC 0 / OSC 2 arrive 47,738 times and are
+now stored (`Terminal::osc_title`) but nothing displays them: a pane's
+label in marspot is DERIVED from its directory, deliberately, so that
+nothing can disagree about which pane is which.  Putting a
+program-supplied title into that chain is a product decision, not a
+protocol one.  Focus reporting (`?1004`) and theme-change notification
+(`?2031`) are accepted and no-op'd; both are real gaps, both need an
+L2→L3 event that does not exist yet.
+
+**Also measured, and not attacked.**  The real codex stream parses at
+185 MB/s (versus 406 for synthetic `cat-ascii` — escapes cost about
+2.2x per byte).  codex peaks around 100 KB/s, so parsing its entire
+22 MB session takes 119 ms.  Throughput is not codex's problem, and
+the numbers do not support pretending otherwise.
 
 ### 0.11.75
 

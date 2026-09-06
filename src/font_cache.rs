@@ -52,16 +52,21 @@ pub const UI_FONT_NAMES: &[&str] = &[
 ];
 pub const UI_FONT_POINT: f64 = 13.0;
 
-/// Background color for the terminal.  Near-pure-black with a
+/// Background color for the terminal.  The values live in
+/// `marspot_term::palette` because a program can ask for them
+/// (`OSC 11 ; ? BEL`) and the emulator has to be able to answer;
+/// these aliases keep the renderer's call sites unchanged.
+///
+/// Near-pure-black with a
 /// near-imperceptible navy tint — the user's preferred direction
 /// after seeing iTerm2's #14191e default felt too grey in marspot's
 /// 9-grid layout.  Both renderers paint with this constant so the
 /// BG matches across the AppKit / Metal switch.
-pub const BG: (CGFloat, CGFloat, CGFloat) = (0.006, 0.008, 0.014);
+pub const BG: (CGFloat, CGFloat, CGFloat) = marspot_term::palette::BG;
 /// Default foreground.  Matches iTerm2's "Foreground Color (Dark)"
 /// — slightly off-white (`#dbdbdb`), softer than pure 0.92 grey on
 /// the eyes for long-running sessions.
-pub const FG: (CGFloat, CGFloat, CGFloat) = (0.8620, 0.8620, 0.8620);
+pub const FG: (CGFloat, CGFloat, CGFloat) = marspot_term::palette::FG;
 
 /// ANSI 16-colour palette — punchier than iTerm2's stock Dark.  iTerm2
 /// Dark's bright-red (#dc7974) and bright-magenta (#e07de0) lean
