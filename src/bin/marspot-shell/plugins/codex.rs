@@ -15,10 +15,11 @@
 //! kill the user's agent mid-task.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PermissionSet,
             PLUGIN_API_VERSION};
-use crate::plugins::pidtree;
+use crate::plugins::{pidtree, pty_op};
 
 /// How the wheel reaches codex.  Verified by injecting into a real
 /// pty: `Ctrl+T` opens the transcript, and from there codex takes both
@@ -285,6 +286,65 @@ fn last_turn_cwd(tail: &str) -> Option<String> {
         .and_then(|l| json_str_field(l, "cwd"))
 }
 
+/// The reasoning efforts codex accepts.
+///
+/// Read out of the binary rather than assumed: its serde variant table
+/// carries `low`/`medium`/`high` adjacently, and the only `minimal` in
+/// there belongs to filesystem paths.
+const EFFORTS: [&str; 3] = ["low", "medium", "high"];
+
+/// What the pane is running, remembered so a menu pick knows what it
+/// is changing and what to leave alone.
+#[derive(Clone)]
+pub(crate) struct PaneCodex {
+    pub codex_pid: i32,
+    pub shell_pid: i32,
+    pub effort: Option<String>,
+}
+
+/// Take codex down and bring the SAME session back at another effort.
+///
+/// `resume --last` and not a session id: codex filters the picker by
+/// working directory, so within a pane's own cwd the most recent
+/// session is that pane's.  A `-c` override rather than an edit to
+/// `~/.codex/config.toml` — the config is what a FRESH codex starts
+/// with, and one pane's choice has no business changing that for every
+/// other.
+///
+/// SIGTERM to the pid rather than a `/quit` typed through the PTY, for
+/// claudecode's reason: a signal echoes nothing into the grid.
+fn effort_switch_op(pane: &PaneCodex, effort: &str) -> Option<pty_op::PtyOp> {
+    let line = pty_op::PtyCommand::new("codex")
+        .arg("resume")
+        .arg("--last")
+        .arg("-c")
+        // No quotes: the command line rejects them outright (it
+        // rejects the class rather than escaping it), and codex parses
+        // a `-c` value as TOML and falls back to the raw string when
+        // that fails — which is exactly what a bare `high` is.
+        .arg(format!("model_reasoning_effort={effort}"))
+        .clear_screen_first(true)
+        .to_bytes()?;
+    Some(
+        pty_op::PtyOp::new("codex.effort_switch")
+            .hold_screen(true)
+            .badge(format!("→ {effort}"))
+            .step(pty_op::Step::settle(Duration::from_millis(250)).named("hold_settle"))
+            .step(
+                pty_op::Step::terminate(pane.codex_pid, libc::SIGTERM)
+                    .escalate_after(Duration::from_secs(3), libc::SIGKILL),
+            )
+            .step(pty_op::Step::send(line).named("resume"))
+            // Wait for the new codex to draw rather than settling for a
+            // flat delay: a long session takes a while to paint, and
+            // unfreezing early shows the shell underneath.
+            .step(
+                pty_op::Step::await_process(pane.shell_pid, looks_like_codex)
+                    .timeout(Duration::from_secs(20)),
+            ),
+    )
+}
+
 /// `gpt-6-astra·high` — the shape claudecode's badge already uses for
 /// its own model and effort, so the two read as one system.
 fn badge_text(model: Option<&str>, effort: Option<&str>) -> String {
@@ -305,6 +365,8 @@ pub struct CodexPlugin {
     /// does not re-send the same declaration every two seconds.
     declared: std::collections::HashSet<u64>,
     rollouts: RolloutIndex,
+    /// What each codex pane is running, for the badge menu.
+    panes: std::collections::HashMap<u64, PaneCodex>,
 }
 
 impl CodexPlugin {
@@ -314,6 +376,7 @@ impl CodexPlugin {
             last_badge: std::collections::HashMap::new(),
             declared: std::collections::HashSet::new(),
             rollouts: RolloutIndex::default(),
+            panes: std::collections::HashMap::new(),
         }
     }
 }
@@ -344,6 +407,73 @@ impl Plugin for CodexPlugin {
     fn init(&mut self, _host: &dyn PluginHost) -> Result<(), PluginError> {
         self.initialised = true;
         Ok(())
+    }
+
+    /// Right-click on the badge: pick the reasoning effort.
+    ///
+    /// The pane is the unit — one pane's choice must not move the
+    /// global config every other pane starts from.
+    fn pane_badge_menu(
+        &mut self,
+        host: &dyn PluginHost,
+        shelld_session_id: u64,
+    ) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
+        let Some(pane) = self.panes.get(&shelld_session_id) else {
+            // A badge with nothing behind it: say so rather than open
+            // an empty menu, which is indistinguishable from a click
+            // that missed.
+            host.log(
+                LogLevel::Warn,
+                "badge_menu.no_codex",
+                &format!("shelld_session={shelld_session_id} has a badge but no codex"),
+            );
+            return Vec::new();
+        };
+        let current = pane.effort.clone();
+        EFFORTS
+            .iter()
+            .enumerate()
+            .map(|(i, e)| marspot::shell_proto::PaneBadgeMenuItem {
+                tag: i as u32,
+                label: if current.as_deref() == Some(*e) {
+                    format!("● {e}")
+                } else {
+                    format!("   {e}")
+                },
+            })
+            .collect()
+    }
+
+    fn on_pane_badge_menu_action(
+        &mut self,
+        host: &dyn PluginHost,
+        shelld_session_id: u64,
+        tag: u32,
+    ) {
+        let Some(effort) = EFFORTS.get(tag as usize).copied() else {
+            return; // another plugin's row
+        };
+        let Some(pane) = self.panes.get(&shelld_session_id).cloned() else {
+            host.log(
+                LogLevel::Warn,
+                "cycle.menu_no_codex",
+                &format!("menu pick on shelld_session={shelld_session_id} with no codex"),
+            );
+            return;
+        };
+        if pane.effort.as_deref() == Some(effort) {
+            return; // already there; a stale menu is not a request
+        }
+        let Some(op) = effort_switch_op(&pane, effort) else {
+            return;
+        };
+        if let Err(e) = host.submit_pty_op(shelld_session_id, op) {
+            host.log(
+                LogLevel::Warn,
+                "cycle.submit_failed",
+                &format!("shelld_session={shelld_session_id}: {e}"),
+            );
+        }
     }
 
     fn tick(&mut self, host: &dyn PluginHost) {
@@ -386,6 +516,14 @@ impl Plugin for CodexPlugin {
                 None => (cfg_model.clone(), cfg_effort.clone()),
             };
             let text = badge_text(model.as_deref(), effort.as_deref());
+            if let Some(pid) = codex_pid {
+                self.panes.insert(
+                    sid,
+                    PaneCodex { codex_pid: pid, shell_pid: shell, effort: effort.clone() },
+                );
+            } else {
+                self.panes.remove(&sid);
+            }
             if has_codex {
                 // Declare how the wheel reaches codex.  Verified by
                 // injecting into a real pty: `PageUp` alone changes
@@ -608,5 +746,62 @@ mod session_facts_tests {
         let tail = format!("ext\":\"payload\":{{\"cwd\":\"/w/a\",\"model\":\"WRONG\"\n{whole}");
         let got = facts_from_tail(&tail, "/w/a").expect("the whole record is there");
         assert_eq!(got.model.as_deref(), Some("gpt-6-astra"));
+    }
+}
+
+#[cfg(test)]
+mod effort_menu_tests {
+    use super::{effort_switch_op, PaneCodex, EFFORTS};
+
+    fn pane(effort: &str) -> PaneCodex {
+        PaneCodex { codex_pid: 4242, shell_pid: 4200, effort: Some(effort.into()) }
+    }
+
+    /// The three codex accepts, taken from its own variant table.
+    #[test]
+    fn the_offered_efforts_are_the_ones_codex_takes() {
+        assert_eq!(EFFORTS, ["low", "medium", "high"]);
+    }
+
+    /// The switch must resume the SAME session, not start a new one —
+    /// starting fresh would drop the conversation the user is looking
+    /// at — and must override the effort for this invocation only.
+    #[test]
+    fn the_switch_resumes_and_overrides_only_this_invocation() {
+        let op = effort_switch_op(&pane("medium"), "high").expect("op builds");
+        let sent: String = op
+            .steps
+            .iter()
+            .filter_map(|s| match &s.kind {
+                super::pty_op::StepKind::Send(b) => {
+                    Some(String::from_utf8_lossy(b).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(sent.contains("resume"), "{sent:?}");
+        assert!(sent.contains("--last"), "the pane's own session: {sent:?}");
+        assert!(
+            sent.contains("model_reasoning_effort=high"),
+            "the new effort, as an override: {sent:?}"
+        );
+        assert!(
+            !sent.contains("config.toml"),
+            "one pane's choice must not rewrite what every other pane starts from"
+        );
+    }
+
+    /// codex is taken down by a signal, never by typing at it: a
+    /// signal echoes nothing into the grid.
+    #[test]
+    fn codex_is_signalled_not_typed_at() {
+        let op = effort_switch_op(&pane("low"), "high").expect("op builds");
+        assert!(
+            op.steps.iter().any(|s| matches!(
+                &s.kind,
+                super::pty_op::StepKind::Terminate { pid: 4242, .. }
+            )),
+            "the running codex is signalled by pid"
+        );
     }
 }

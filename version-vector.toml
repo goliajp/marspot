@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.136"  # rollout 索引按 cwd 缓存,稳态每 pane 一次 stat;详见 CHANGELOG.md
+shell   = "0.7.137"  # codex badge 右键切 reasoning effort,resume 同一会话;详见 CHANGELOG.md
 core    = "0.12.180"  # 转发 PaneRenderMarkup 到对应 L3;详见 CHANGELOG.md
 session = "0.11.71"  # 换代探测有界,卡住的探测能重试 —— 否则一格会静默永久停在旧镜像;详见 CHANGELOG.md
