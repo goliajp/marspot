@@ -35,7 +35,8 @@ use std::time::{Duration, Instant};
 
 use marspot_term::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
 use marspot_term::grid_shm::{
-    GridShmWriter, ENV_SHM_FD, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
+    GridShmWriter, ENV_SHM_FD, FLAG_ALT_SCROLL, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE,
+    FLAG_CURSOR_VISIBLE,
     FLAG_ALT_SCREEN, FLAG_MOUSE_SGR, FLAG_MOUSE_TRACKING,
 };
 use marspot_term::input_core::{MarspotKeyEvent, Modifiers};
@@ -697,6 +698,12 @@ fn publish(shm: &mut GridShmWriter, session: &SessionImpl, view_offset: u16) -> 
     }
     if term.in_alt_screen() {
         flags |= FLAG_ALT_SCREEN;
+    }
+    // The program's own statement that the wheel is the arrow keys
+    // here — see `Terminal::alt_scroll`.  Published so L2 routes on
+    // what it was told, not on what it can infer from the picture.
+    if term.alt_scroll_mode() {
+        flags |= FLAG_ALT_SCROLL;
     }
     // Clamp here too: L2 clamps against the scrollback_len it last saw, but
     // scrollback can shrink (alt-screen enter / reset) between L2's request

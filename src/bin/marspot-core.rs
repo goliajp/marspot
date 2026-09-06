@@ -8307,8 +8307,12 @@ impl CoreApp {
                 // Read the state, do not remember it — see `WheelKeys`.
                 let open = {
                     let k = &self.pane_wheel_keys[&sid];
+                    // The program's own answer, when it gave one.
+                    let alt_scroll =
+                        win!(self, wi).panes[idx].session().l3_alt_scroll_active();
                     let grid = win!(self, wi).panes[idx].session().grid();
                     marspot::wheel_marker::view_is_open(
+                        alt_scroll,
                         grid.cols(),
                         grid.rows(),
                         |col, row| grid.cell(col, row).ch,

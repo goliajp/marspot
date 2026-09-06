@@ -61,7 +61,15 @@ pub fn shows_marker(
 
 /// Should the wheel treat the scroll view as already open?
 ///
-/// A plugin that declares no marker gets `true`: without a way to read
+/// `alt_scroll` is the program's own answer — DEC mode 1007, "on this
+/// screen the wheel is the arrow keys", which codex sets the instant
+/// its transcript opens and clears on the way out.  When a program
+/// says it, nothing else gets a vote: a heading read off the screen is
+/// an inference, and it lost three times before it was made to work
+/// (letter-spacing), while this is a statement.
+///
+/// The marker stays for programs that never learned to say it.  A
+/// plugin that declares no marker gets `true`: without a way to read
 /// the state, the only safe answer is "do not send the enter key",
 /// since that key is typically a toggle and a blind press would close
 /// whatever the user is reading.
@@ -69,12 +77,13 @@ pub fn shows_marker(
 /// This is the whole rule, kept in one place so a probe replaying it
 /// against a live session replays what L2 actually decides.
 pub fn view_is_open(
+    alt_scroll: bool,
     cols: u16,
     rows: u16,
     cell: impl Fn(u16, u16) -> char,
     marker: &[u8],
 ) -> bool {
-    marker.is_empty() || shows_marker(cols, rows, cell, marker)
+    alt_scroll || marker.is_empty() || shows_marker(cols, rows, cell, marker)
 }
 
 /// Does this wheel tick belong to the plugin's scroll view?
@@ -165,7 +174,23 @@ mod tests {
     fn an_undeclared_marker_never_sends_a_blind_toggle() {
         let rows = ["$ cargo test"];
         assert!(!shows_marker(40, 1, screen(&rows), b""));
-        assert!(view_is_open(40, 1, screen(&rows), b""));
+        assert!(view_is_open(false, 40, 1, screen(&rows), b""));
+    }
+
+    /// A program that says "the wheel is the arrow keys here" is
+    /// believed, whatever is on the screen.  This is the answer the
+    /// marker was always approximating.
+    #[test]
+    fn the_programs_own_statement_outranks_the_screen() {
+        let rows = ["nothing that looks like a transcript"];
+        assert!(
+            view_is_open(true, 40, 1, screen(&rows), b"/TRANSCRIPT/"),
+            "DEC 1007 means the view is open"
+        );
+        assert!(
+            !view_is_open(false, 40, 1, screen(&rows), b"/TRANSCRIPT/"),
+            "and without it we are back to reading the screen"
+        );
     }
 
     /// A plugin that declares nothing (or blanks, or non-UTF-8) must

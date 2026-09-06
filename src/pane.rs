@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use crate::grid::{Cell, Grid};
 use crate::grid_shm::{
     GridShmReader, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
-    FLAG_ALT_SCREEN, FLAG_MOUSE_SGR, FLAG_MOUSE_TRACKING,
+    FLAG_ALT_SCREEN, FLAG_ALT_SCROLL, FLAG_MOUSE_SGR, FLAG_MOUSE_TRACKING,
 };
 use crate::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use crate::render::SessionView;
@@ -403,6 +403,14 @@ impl PaneBackend {
         }
     }
 
+    /// Did the program ask for the wheel to arrive as arrow keys?
+    pub fn l3_alt_scroll_active(&self) -> bool {
+        match self {
+            PaneBackend::L3(c) => c.alt_scroll_active,
+            _ => false,
+        }
+    }
+
     /// Send `n` arrow-key presses to the child.
     ///
     /// For a full-screen TUI that does NOT ask for mouse reporting,
@@ -743,6 +751,10 @@ pub struct L3Conn {
     /// 机会触发.
     mouse_tracking_active: bool,
     alt_screen_active: bool,
+    /// DEC 1007 — the program asked for the wheel as arrow keys here.
+    /// Authoritative where reading the screen for a heading is a
+    /// guess; see `Terminal::alt_scroll`.
+    alt_scroll_active: bool,
     /// Mouse SGR encoding(DECSET 1006).L2 mouse-on 时按这个选 SGR
     /// 字节格式 vs X11 legacy.
     mouse_sgr_active: bool,
@@ -810,6 +822,7 @@ impl L3Conn {
             app_cursor_keys: false,
             mouse_tracking_active: false,
             alt_screen_active: false,
+            alt_scroll_active: false,
             mouse_sgr_active: false,
             bracketed_paste: false,
             last_seq: 0,
@@ -842,6 +855,7 @@ impl L3Conn {
             app_cursor_keys: false,
             mouse_tracking_active: false,
             alt_screen_active: false,
+            alt_scroll_active: false,
             mouse_sgr_active: false,
             bracketed_paste: false,
             last_seq: 0,
@@ -986,6 +1000,7 @@ impl L3Conn {
         self.mouse_tracking_active = snap.flags & FLAG_MOUSE_TRACKING != 0;
         self.mouse_sgr_active = snap.flags & FLAG_MOUSE_SGR != 0;
         self.alt_screen_active = snap.flags & FLAG_ALT_SCREEN != 0;
+        self.alt_scroll_active = snap.flags & FLAG_ALT_SCROLL != 0;
         self.snap_scrollback_len = snap.scrollback_len;
         // Re-read the seq after the copy: if L3 republished mid-fill,
         // leave it stale so the next poll re-reads rather than missing a

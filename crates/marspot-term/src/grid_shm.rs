@@ -113,6 +113,10 @@ pub const FLAG_MOUSE_SGR: u32 = 1 << 4;
 /// did, and an older L3 never sets it, which reads as "not alt" — the
 /// pre-existing path.
 pub const FLAG_ALT_SCREEN: u32 = 1 << 5;
+/// DEC 1007 — the program asked for the wheel to arrive as arrow keys
+/// on this screen.  Published so L2 can route the wheel on the
+/// program's own statement rather than on a guess about its output.
+pub const FLAG_ALT_SCROLL: u32 = 1 << 6;
 
 /// Shared-region header. `#[repr(C)]` for a stable cross-process
 /// layout. `seq` is first and accessed only atomically (the seqlock);
@@ -157,6 +161,9 @@ impl GridSnapshot {
     }
     pub fn bracketed_paste(&self) -> bool {
         self.flags & FLAG_BRACKETED_PASTE != 0
+    }
+    pub fn alt_scroll(&self) -> bool {
+        self.flags & FLAG_ALT_SCROLL != 0
     }
     pub fn alt_screen(&self) -> bool {
         self.flags & FLAG_ALT_SCREEN != 0

@@ -143,6 +143,21 @@ pub struct Terminal {
     /// auto-inserts spaces between CJK characters — the "粘贴中文都
     /// 多了空格" symptom.
     bracketed_paste_mode: bool,
+    /// DEC mode 1007 — alternate scroll mode.
+    ///
+    /// The program's own statement that, on this screen, the wheel
+    /// means the arrow keys.  xterm made it up for exactly the case
+    /// marspot was solving by hand: a full-screen view with history
+    /// the terminal cannot move, so the wheel has to reach the program
+    /// as keys instead.
+    ///
+    /// codex sets it the moment its transcript opens
+    /// (`?1049h · ?1007h · …`) and clears it on the way out — so it
+    /// answers "is the scroll view open" outright, where scanning the
+    /// screen for a heading only guesses.  And it is not codex's
+    /// alone: `less`, `man` and any pager that asks gets the same
+    /// wheel for free, with no plugin that has to recognise them.
+    alt_scroll: bool,
     /// DEC mode 2026 — synchronized output.
     ///
     /// A program brackets a whole repaint with `CSI ? 2026 h` … `l` to
@@ -284,6 +299,7 @@ impl Terminal {
             response_burst_last_warn: None,
             cursor_key_application_mode: false,
             bracketed_paste_mode: false,
+            alt_scroll: false,
             sync_output: false,
             cursor_visible: true,
             mouse_tracking_mode: MouseTrackingMode::Off,
@@ -349,6 +365,17 @@ impl Terminal {
         self.bracketed_paste_mode
     }
 
+    /// Did the program ask for the wheel to arrive as arrow keys?
+    ///
+    /// See `Terminal::alt_scroll`.  Only meaningful together with the
+    /// alternate screen: that is the shape the mode was defined for,
+    /// and a program that leaves it set on the main screen would
+    /// otherwise take the wheel away from the terminal's own
+    /// scrollback, which the user can actually see.
+    pub fn alt_scroll_mode(&self) -> bool {
+        self.alt_scroll && self.in_alt_screen()
+    }
+
     /// Is a synchronized update open (`CSI ? 2026 h` with no `l` yet)?
     ///
     /// The presenter should hold the frame while this is true — under
@@ -380,6 +407,9 @@ impl Terminal {
         // A dead program cannot close its update; leaving this set
         // would hold the next program's first frame hostage.
         self.sync_output = false;
+        // Likewise: the wheel goes back to the terminal's scrollback
+        // when whoever claimed it is gone.
+        self.alt_scroll = false;
         self.cursor_key_application_mode = false;
         // A new shell starts with a visible cursor; a TUI that hid it
         // is gone.
@@ -555,6 +585,7 @@ impl Terminal {
             let cursor_key_app_mode = &mut self.cursor_key_application_mode;
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let sync_output = &mut self.sync_output;
+            let alt_scroll = &mut self.alt_scroll;
             let cursor_visible = &mut self.cursor_visible;
             let mouse_tracking_mode = &mut self.mouse_tracking_mode;
             let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
@@ -571,6 +602,7 @@ impl Terminal {
                 cursor_key_app_mode,
                 bracketed_paste,
                 sync_output,
+                alt_scroll,
                 cursor_visible,
                 mouse_tracking_mode,
                 mouse_sgr_encoding,
@@ -699,6 +731,7 @@ impl Terminal {
             let cursor_key_app_mode = &mut self.cursor_key_application_mode;
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let sync_output = &mut self.sync_output;
+            let alt_scroll = &mut self.alt_scroll;
             let cursor_visible = &mut self.cursor_visible;
             let mouse_tracking_mode = &mut self.mouse_tracking_mode;
             let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
@@ -715,6 +748,7 @@ impl Terminal {
                 cursor_key_app_mode,
                 bracketed_paste,
                 sync_output,
+                alt_scroll,
                 cursor_visible,
                 mouse_tracking_mode,
                 mouse_sgr_encoding,
@@ -855,6 +889,14 @@ impl Terminal {
         };
         modes |= mtm_bits << 5;
         if self.mouse_sgr_encoding         { modes |= 1 << 7; }
+        // bit 8 = alt_scroll (DEC 1007).  Carried for the same reason
+        // the mouse bits are: the program set it once, on entering a
+        // view it is still in, and will not say it again.  An image
+        // that came up without it would take the wheel back and — for
+        // a pane whose plugin sends a TOGGLE to enter — press that
+        // toggle on a view already open, shutting it.  An older reader
+        // simply does not know the bit and gets the old default.
+        if self.alt_scroll                 { modes |= 1 << 8; }
         out.extend_from_slice(&modes.to_le_bytes());
         out.extend_from_slice(&self.generation.to_le_bytes());
         out.extend_from_slice(&serialize_attrs(self.attrs));
@@ -1303,10 +1345,13 @@ impl Terminal {
             _ => MouseTrackingMode::Off,
         };
         self.mouse_sgr_encoding          = (modes & (1 << 7)) != 0;
+        self.alt_scroll                  = (modes & (1 << 8)) != 0;
         // Bit 4 (in_alt_screen) is informational for the wire format
         // but not actionable here — apply_snapshot replaces the
         // current grid; alt-mode save state is regenerated on the
-        // next `?1049h` toggle from the PTY stream.
+        // next `?1049h` toggle from the PTY stream.  The EXECV path
+        // does not rely on it: `serialize_snapshot_live` carries the
+        // alt screen verbatim and rebuilds `saved_main` underneath.
         self.attrs = attrs;
         self.saved_cursor = saved_cursor;
         self.generation = generation;
@@ -1722,6 +1767,8 @@ struct Handler<'a> {
     bracketed_paste: &'a mut bool,
     /// DEC 2026 — see `Terminal::sync_output`.
     sync_output: &'a mut bool,
+    /// DEC 1007 — see `Terminal::alt_scroll`.
+    alt_scroll: &'a mut bool,
     cursor_visible: &'a mut bool,
     mouse_tracking_mode: &'a mut MouseTrackingMode,
     mouse_sgr_encoding: &'a mut bool,
@@ -2361,6 +2408,9 @@ impl<'a> Handler<'a> {
             1002 => *self.mouse_tracking_mode = if set { MouseTrackingMode::ButtonEvent } else { MouseTrackingMode::Off },
             1003 => *self.mouse_tracking_mode = if set { MouseTrackingMode::AnyEvent } else { MouseTrackingMode::Off },
             1006 => *self.mouse_sgr_encoding = set,
+            // DEC 1007 — alternate scroll: the wheel is the arrow
+            // keys on this screen.  See `Terminal::alt_scroll`.
+            1007 => *self.alt_scroll = set,
             // DEC 2026 — synchronized output.  `h` opens a batch, `l`
             // closes it; the presenter holds frames in between so a
             // half-drawn screen is never shown.  See
@@ -5318,5 +5368,126 @@ mod sync_output_tests {
         assert!(t.sync_output_active());
         t.reset_process_owned_modes();
         assert!(!t.sync_output_active());
+    }
+}
+
+#[cfg(test)]
+mod alt_scroll_tests {
+    use super::Terminal;
+
+    /// codex opens its transcript with `?1049h · ?1007h` and closes it
+    /// with `?1007l · ?1049l`.  That pair is the program stating, in
+    /// the standard way, that the wheel is the arrow keys here — the
+    /// thing three rounds of reading its headings off the screen were
+    /// trying to work out.
+    #[test]
+    fn the_transcript_sequence_turns_the_wheel_into_arrow_keys() {
+        let mut t = Terminal::new(20, 4);
+        assert!(!t.alt_scroll_mode());
+        t.feed(b"\x1b[?1049h\x1b[?1007h");
+        assert!(t.alt_scroll_mode());
+        t.feed(b"\x1b[?1007l\x1b[?1049l");
+        assert!(!t.alt_scroll_mode());
+    }
+
+    /// The mode belongs to a full-screen view.  A program that set it
+    /// and left the alternate screen without clearing it must not keep
+    /// the wheel away from the scrollback the user can actually see.
+    #[test]
+    fn it_does_not_apply_on_the_main_screen() {
+        let mut t = Terminal::new(20, 4);
+        t.feed(b"\x1b[?1049h\x1b[?1007h");
+        assert!(t.alt_scroll_mode());
+        t.feed(b"\x1b[?1049l");
+        assert!(!t.alt_scroll_mode(), "no alternate screen, no claim on the wheel");
+    }
+
+    /// It has to survive an image swap.  The program said it once, on
+    /// entering a view it is still in, and will not say it again — and
+    /// a pane whose plugin enters with a TOGGLE would then press that
+    /// toggle on an open view and shut it.
+    #[test]
+    fn it_survives_an_execv() {
+        let mut before = Terminal::new(20, 4);
+        before.feed(b"\x1b[?1049h\x1b[?1007h");
+        assert!(before.in_alt_screen() && before.alt_scroll_mode());
+        let snap = before.serialize_snapshot_live();
+        let mut after = Terminal::new(20, 4);
+        after.apply_snapshot(&snap).expect("snapshot applies");
+        assert!(
+            after.alt_scroll_mode(),
+            "the wheel must still reach the program after the swap"
+        );
+    }
+
+    /// A dead program's claim on the wheel dies with it.
+    #[test]
+    fn a_process_handover_gives_the_wheel_back() {
+        let mut t = Terminal::new(20, 4);
+        t.feed(b"\x1b[?1049h\x1b[?1007h");
+        t.reset_process_owned_modes();
+        assert!(!t.alt_scroll_mode());
+    }
+}
+
+#[cfg(test)]
+mod alt_screen_across_execv_tests {
+    use super::Terminal;
+
+    /// A pane inside a full-screen program must still know it is
+    /// there after an image swap.
+    ///
+    /// Two snapshot forms exist and only one is right here: the fold
+    /// form deliberately folds an alt screen into main (it is for
+    /// persistence, where the shell's history is what matters), while
+    /// `serialize_snapshot_live` is the execv handoff and carries the
+    /// alt screen verbatim.  Reading the wrong one reports the state
+    /// as lost, which is how it nearly got "fixed" — everything keyed
+    /// on `FLAG_ALT_SCREEN` would then be keyed on an artefact.
+    #[test]
+    fn the_alternate_screen_survives_a_snapshot() {
+        let mut before = Terminal::new(20, 4);
+        before.feed(b"\x1b[?1049hinside the TUI");
+        assert!(before.in_alt_screen());
+
+        let mut after = Terminal::new(20, 4);
+        after.apply_snapshot(&before.serialize_snapshot_live()).unwrap();
+        assert!(
+            after.in_alt_screen(),
+            "the program is still in its own screen; the swap was ours, not its"
+        );
+    }
+
+    /// A pane that was NOT in one must not be told it was.
+    #[test]
+    fn an_ordinary_pane_is_not_moved_into_one() {
+        let mut before = Terminal::new(20, 4);
+        before.feed(b"$ ls");
+        let mut after = Terminal::new(20, 4);
+        after.apply_snapshot(&before.serialize_snapshot_live()).unwrap();
+        assert!(!after.in_alt_screen());
+    }
+
+    /// Leaving works, and lands on a blank main screen — the honest
+    /// outcome, since the main grid was never in the snapshot.  The
+    /// alternative, staying put, leaves the program's own painting
+    /// behind as the shell's history.
+    #[test]
+    fn leaving_after_a_swap_does_not_keep_the_programs_painting() {
+        let mut before = Terminal::new(20, 4);
+        before.feed(b"\x1b[?1049hTUI PAINTED THIS");
+        let mut after = Terminal::new(20, 4);
+        after.apply_snapshot(&before.serialize_snapshot_live()).unwrap();
+
+        let painted: String = (0..20).map(|c| after.grid().cell(c, 0).ch).collect();
+        assert!(painted.contains("TUI"), "the alternate screen is what we restored");
+
+        after.feed(b"\x1b[?1049l");
+        assert!(!after.in_alt_screen());
+        let main: String = (0..20).map(|c| after.grid().cell(c, 0).ch).collect();
+        assert!(
+            !main.contains("TUI"),
+            "the program's screen must not become the shell's: {main:?}"
+        );
     }
 }

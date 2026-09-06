@@ -39,7 +39,7 @@ fn unescape(s: &str) -> Vec<u8> {
 }
 
 /// The cells the session is publishing right now, as (cols, rows, chars).
-fn snapshot(dir: &str) -> (u16, u16, Vec<char>) {
+fn snapshot(dir: &str) -> (u16, u16, Vec<char>, bool) {
     let toml = std::fs::read_to_string(format!("{dir}/entry.toml")).unwrap();
     let name = toml
         .lines()
@@ -56,7 +56,7 @@ fn snapshot(dir: &str) -> (u16, u16, Vec<char>) {
     .expect("reader");
     let (mut cells, mut wrapped) = (Vec::new(), Vec::new());
     let s = r.read(&mut cells, &mut wrapped).expect("no snapshot published");
-    (s.cols, s.rows, cells.iter().map(|c| c.ch).collect())
+    (s.cols, s.rows, cells.iter().map(|c| c.ch).collect(), s.alt_scroll())
 }
 
 fn main() {
@@ -96,8 +96,9 @@ fn main() {
     let mut entered = 0usize;
     let mut prev: Option<Vec<char>> = None;
     for tick in 1..=ticks {
-        let (cols, rows, cells) = snapshot(&dir);
+        let (cols, rows, cells, alt_scroll) = snapshot(&dir);
         let open = marspot::wheel_marker::view_is_open(
+            alt_scroll,
             cols,
             rows,
             |col, row| cells[row as usize * cols as usize + col as usize],
@@ -112,7 +113,7 @@ fn main() {
             }
             send(&key);
         }
-        let (_, _, after) = snapshot(&dir);
+        let (_, _, after, _) = snapshot(&dir);
         let moved = prev.as_ref().map(|p| *p != after).unwrap_or(true);
         println!(
             "tick {tick}: open_before={open}  ours={ours}  sent_enter={}  content_moved={moved}",
@@ -121,8 +122,9 @@ fn main() {
         prev = Some(after);
     }
 
-    let (cols, rows, cells) = snapshot(&dir);
+    let (cols, rows, cells, alt_scroll_end) = snapshot(&dir);
     let open_end = marspot::wheel_marker::view_is_open(
+        alt_scroll_end,
         cols,
         rows,
         |col, row| cells[row as usize * cols as usize + col as usize],
