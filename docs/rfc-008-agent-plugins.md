@@ -209,6 +209,42 @@ dead program is the same debt as a mode it left set), and
 `PaneResetAttrs` (msg 81) gives a stuck pen a way back that does not
 cost the user their session.
 
+## Slice 4 — the badge tells the truth, and answers a right-click
+
+Two things that had to happen in that order.
+
+**The badge was reading the wrong file.**  `~/.codex/config.toml` says
+what a FRESH codex starts with, not what the one in this pane is
+doing: two panes on different efforts both showed the global value.
+codex writes a `turn_context` per turn carrying `cwd`, `model` and
+`effort` together, so the last one in a session's rollout is the
+answer, matched to a pane by the codex process's own working
+directory.  Bounded — rollouts reach 63 MB, so only the last 256 KiB
+is read, the cwd→file mapping is cached and rescanned every 20 s, and
+the content is re-read only when that file's mtime moves.  A record
+that cannot be found leaves the badge on the global fallback rather
+than on a wrong value.
+
+**Then the menu could mean something.**  Right-click offers
+`low`/`medium`/`high` with the current one marked, and a pick takes
+codex down and brings the SAME session back at the new effort.
+
+This was the RFC's headline "not done", deferred because codex's
+resume semantics were unknown and guessing puts a plugin in a position
+to kill a running agent.  Measured instead:
+
+- `codex resume --last` filters by working directory, so inside a
+  pane's own cwd the most recent session is that pane's.
+- a `-c` value is parsed as TOML and falls back to the raw string, so
+  `-c model_reasoning_effort=high` needs no quotes — which matters,
+  because `pty_op`'s command line rejects quotes as a class.
+- the three efforts come from codex's own serde variant table.
+
+And on killing a running agent: claudecode's profile-cycle does
+exactly this today.  The click is the authorisation; what it blocks is
+a session held by another process, not an agent that happens to be
+busy.
+
 ## What chasing codex exposed in the update pipeline
 
 Half a day was spent on "the declaration does not work" that turned out
@@ -259,42 +295,6 @@ CHANGELOG.md.
   taking the answered-non-zero path.  Three tests passed in 0.03 s
   having never entered the branch under test.  Replaced with a script
   that genuinely hangs, against an injected deadline.
-
-## Slice 4 — the badge tells the truth, and answers a right-click
-
-Two things that had to happen in that order.
-
-**The badge was reading the wrong file.**  `~/.codex/config.toml` says
-what a FRESH codex starts with, not what the one in this pane is
-doing: two panes on different efforts both showed the global value.
-codex writes a `turn_context` per turn carrying `cwd`, `model` and
-`effort` together, so the last one in a session's rollout is the
-answer, matched to a pane by the codex process's own working
-directory.  Bounded — rollouts reach 63 MB, so only the last 256 KiB
-is read, the cwd→file mapping is cached and rescanned every 20 s, and
-the content is re-read only when that file's mtime moves.  A record
-that cannot be found leaves the badge on the global fallback rather
-than on a wrong value.
-
-**Then the menu could mean something.**  Right-click offers
-`low`/`medium`/`high` with the current one marked, and a pick takes
-codex down and brings the SAME session back at the new effort.
-
-This was the RFC's headline "not done", deferred because codex's
-resume semantics were unknown and guessing puts a plugin in a position
-to kill a running agent.  Measured instead:
-
-- `codex resume --last` filters by working directory, so inside a
-  pane's own cwd the most recent session is that pane's.
-- a `-c` value is parsed as TOML and falls back to the raw string, so
-  `-c model_reasoning_effort=high` needs no quotes — which matters,
-  because `pty_op`'s command line rejects quotes as a class.
-- the three efforts come from codex's own serde variant table.
-
-And on killing a running agent: claudecode's profile-cycle does
-exactly this today.  The click is the authorisation; what it blocks is
-a session held by another process, not an agent that happens to be
-busy.
 
 ## Not done
 - **A program with no on-screen marker.** The scan needs something to
