@@ -220,6 +220,17 @@ pub struct Terminal {
     /// `\r\n` advances TWO rows instead of one — visible as extra blank
     /// rows between every row of TUI content (claudecode welcome box).
     pending_wrap: bool,
+    /// Rollbacks in a row.  A program that draws its own input
+    /// somewhere else — codex, and any full-screen TUI that skips the
+    /// alternate screen — never confirms a prediction, so the guess
+    /// lands at the terminal cursor, moves it, and is wiped by the
+    /// next repaint.  Measured 2026-09-07: at a zsh prompt 16
+    /// keystrokes gave 15 hits and 1 miss; inside codex, 23 keystrokes
+    /// gave 0 hits and 23 misses.  Not a judgement call — a tally.
+    predict_misses: u32,
+    /// Keystrokes declined since giving up, so one can be let through
+    /// to find out whether the program changed underneath.
+    predict_declined: u32,
     /// Local-echo predictions awaiting PTY confirmation.  Each matching
     /// byte from `feed()` pops the front; the first mismatching byte
     /// rolls back the whole queue (restores cells + cursor in reverse
@@ -338,6 +349,8 @@ impl Terminal {
             mouse_tracking_mode: MouseTrackingMode::Off,
             mouse_sgr_encoding: false,
             pending_wrap: false,
+            predict_misses: 0,
+            predict_declined: 0,
             predictions: VecDeque::new(),
             cluster_buf: String::new(),
             grapheme_cursor: crate::grapheme::GraphemeCursor::new(),
@@ -538,12 +551,28 @@ impl Terminal {
         self.attrs
     }
 
-    /// True iff local-echo prediction is currently safe.  Heuristic:
-    /// not in alt-screen mode (vim / less / htop don't echo keys
-    /// verbatim).  Future: also peek at termios `ICANON|ECHO` via
-    /// PTY ioctl when the bookkeeping cost is worth it.
+    /// Three wasted keystrokes is a small, bounded amount of flicker
+    /// to pay to find out that a program does not echo.
+    const PREDICT_GIVE_UP_AFTER: u32 = 3;
+    /// And one every so often to find out whether it has changed —
+    /// the pane a program was quit in becomes a shell again, and
+    /// nothing else announces that.  Rare enough that the stray
+    /// character is not the thing anyone notices.
+    const PREDICT_PROBE_EVERY: u32 = 128;
+
+    /// True iff local-echo prediction is currently worth making.
+    ///
+    /// Alt screen is refused outright: vim / less / htop do not echo
+    /// keys verbatim.  Beyond that the terminal does not guess what
+    /// KIND of program is on the other end — it reads what happened
+    /// to the last few guesses.  termios cannot answer this: a zsh
+    /// prompt is `-icanon -echo` exactly like codex, because ZLE
+    /// draws its own line too.  The difference is only WHERE, and the
+    /// tally is the only thing that sees it.
     pub fn can_predict(&self) -> bool {
         self.saved_main.is_none()
+            && (self.predict_misses < Self::PREDICT_GIVE_UP_AFTER
+                || self.predict_declined >= Self::PREDICT_PROBE_EVERY)
     }
 
     /// Try to local-echo `byte`: if it's printable ASCII and we're
@@ -558,8 +587,11 @@ impl Terminal {
     /// completion, Ctrl-* delivers signals, etc.
     pub fn predict_byte(&mut self, byte: u8) -> bool {
         if !self.can_predict() {
+            self.predict_declined = self.predict_declined.saturating_add(1);
             return false;
         }
+        // Taking the probe: whatever it teaches, it is spent.
+        self.predict_declined = 0;
         if !(0x20..=0x7E).contains(&byte) {
             return false;
         }
@@ -634,9 +666,12 @@ impl Terminal {
                 if bytes[i] == p.byte {
                     self.predictions.pop_front();
                     self.predictions_hit += 1;
+                    // The program echoes at the cursor after all.
+                    self.predict_misses = 0;
                     i += 1;
                     continue;
                 }
+                self.predict_misses = self.predict_misses.saturating_add(1);
                 self.rollback_predictions();
             }
             // Normal feed.
@@ -5896,5 +5931,79 @@ mod attrs_handover_tests {
             !t.grid().cell(0, 1).attrs.underline,
             "the new shell's prompt wears its own look"
         );
+    }
+}
+
+#[cfg(test)]
+mod predict_learning_tests {
+    use super::Terminal;
+
+    /// A program that echoes at the cursor keeps the feature.
+    /// Measured at a real zsh prompt: 16 keystrokes, 15 hits.
+    #[test]
+    fn a_program_that_echoes_keeps_predicting() {
+        let mut t = Terminal::new(40, 4);
+        for c in b"echo hi" {
+            assert!(t.predict_byte(*c), "prediction offered");
+            t.feed(&[*c]); // the echo confirms it
+        }
+        assert!(t.can_predict(), "nothing here has gone wrong");
+        assert_eq!(t.predictions_miss, 0);
+    }
+
+    /// A program that draws its own input somewhere else never
+    /// confirms, and the terminal stops guessing rather than putting a
+    /// character where the user is not looking.  Measured inside
+    /// codex: 23 keystrokes, 0 hits.
+    #[test]
+    fn a_program_that_never_echoes_is_given_up_on() {
+        let mut t = Terminal::new(40, 4);
+        for _ in 0..Terminal::PREDICT_GIVE_UP_AFTER {
+            assert!(t.can_predict());
+            assert!(t.predict_byte(b'a'));
+            t.feed(b"X"); // a repaint, not an echo
+        }
+        assert!(
+            !t.can_predict(),
+            "three wasted keystrokes is the whole budget for finding this out"
+        );
+    }
+
+    /// Giving up is not forever: the pane a program was quit in
+    /// becomes a shell again, and nothing announces that.
+    #[test]
+    fn one_keystroke_in_a_while_asks_again() {
+        let mut t = Terminal::new(40, 4);
+        for _ in 0..Terminal::PREDICT_GIVE_UP_AFTER {
+            t.predict_byte(b'a');
+            t.feed(b"X");
+        }
+        assert!(!t.can_predict());
+        // Each declined keystroke counts toward the next probe, and
+        // the one that takes the count TO the threshold is itself
+        // declined — the probe is the keystroke after it.
+        for _ in 0..Terminal::PREDICT_PROBE_EVERY {
+            assert!(!t.predict_byte(b'b'), "still declined");
+        }
+        assert!(t.predict_byte(b'b'), "one probe is let through");
+        t.feed(b"b"); // this program echoes now
+        assert!(t.can_predict(), "and a hit hands the feature back");
+    }
+
+    /// The probe is spent whether or not it teaches anything, so a
+    /// program that still does not echo costs one stray character per
+    /// PREDICT_PROBE_EVERY keystrokes and not one per keystroke.
+    #[test]
+    fn a_spent_probe_does_not_repeat_immediately() {
+        let mut t = Terminal::new(40, 4);
+        for _ in 0..Terminal::PREDICT_GIVE_UP_AFTER {
+            t.predict_byte(b'a');
+            t.feed(b"X");
+        }
+        for _ in 0..=Terminal::PREDICT_PROBE_EVERY {
+            t.predict_byte(b'b'); // the last of these is the probe
+        }
+        t.feed(b"X"); // the probe missed too
+        assert!(!t.predict_byte(b'c'), "the next keystroke is not another probe");
     }
 }

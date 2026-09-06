@@ -29,4 +29,4 @@
 
 shell   = "0.7.137"  # codex badge 右键切 reasoning effort,resume 同一会话;详见 CHANGELOG.md
 core    = "0.12.180"  # 转发 PaneRenderMarkup 到对应 L3;详见 CHANGELOG.md
-session = "0.11.72"  # 本地预测的命中/回滚终于记账 —— 写了这么久从没报告过;详见 CHANGELOG.md
+session = "0.11.73"  # 预测改为看这一格自己的命中率,不再猜程序是哪一类;详见 CHANGELOG.md
