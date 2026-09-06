@@ -56,8 +56,27 @@ pub fn can_start(bin: &Path) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
     {
-        Ok(st) => st.success(),
-        Err(_) => false,
+        Ok(st) if st.success() => true,
+        // A verdict with no reason is what made this expensive to
+        // chase: every L3 refused to adopt a perfectly good image for
+        // half an hour and all the log said was "could not start"
+        // (2026-09-06).  The two cases are not alike — a non-zero exit
+        // is the binary answering, a spawn error is the system
+        // refusing — and only one of them means the binary is bad.
+        Ok(st) => {
+            crate::lx_warn!(
+                "binary_tree.can_start.exited",
+                &format!("{} answered {st}", bin.display())
+            );
+            false
+        }
+        Err(e) => {
+            crate::lx_warn!(
+                "binary_tree.can_start.spawn_failed",
+                &format!("{}: {e}", bin.display())
+            );
+            false
+        }
     }
 }
 

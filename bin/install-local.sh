@@ -574,6 +574,9 @@ if (( STAGED )) \
   install -m 0755 "$TREE/pending/marspot-session" "$TREE/current/marspot-session"
   xattr -c "$TREE/current/marspot-session" 2>/dev/null || true
   rm -f "$TREE/pending/marspot-session"
+  # Same cold-inode warm-up as the silent-update path below.
+  MARSPOT_NO_REDIRECT=1 "$TREE/current/marspot-session" --version >/dev/null 2>&1 \
+    || echo "    WARN: current/marspot-session did not start; L3s will refuse it" >&2
   signalled=0
   for pid in $(pgrep -f marspot-session 2>/dev/null); do
     if kill -TERM "$pid" 2>/dev/null; then
@@ -634,7 +637,21 @@ if (( STAGED )); then
   # lossless: each L3 compares its own fingerprint against current/
   # and either execv's into the new image carrying its PTY across, or
   # clean-exits for L2 to respawn.  No PTY is restarted either way.
+  # Warm the freshly-promoted image before asking anyone to adopt it.
+  #
+  # Each L3 probes the candidate by running it once, and refuses to
+  # execv if that fails.  A just-installed binary is a NEW inode, so
+  # the first exec pays a cold Gatekeeper verdict — and thirteen panes
+  # probing a cold one at the same instant all got a failure back
+  # within 144 ms, refused, and then sat on their old image while four
+  # consecutive installs reported success (2026-09-06; measured, and
+  # confirmed by a single manual SIGTERM succeeding once the verdict
+  # had been warmed by hand).
+  #
+  # One exec here pays that once, for everyone.
   if (( SESSION_CHANGED )); then
+    MARSPOT_NO_REDIRECT=1 "$TREE/current/marspot-session" --version >/dev/null 2>&1 \
+      || echo "    WARN: current/marspot-session did not start; L3s will refuse it" >&2
     signalled=0
     for pid in $(pgrep -f marspot-session 2>/dev/null); do
       kill -TERM "$pid" 2>/dev/null && signalled=$((signalled+1))

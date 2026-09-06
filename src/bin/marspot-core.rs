@@ -3951,6 +3951,15 @@ impl CoreApp {
                 return;
             }
         }
+        // Named a pane this core does not have.  Worth a line: the
+        // declaration is re-sent every tick, so a steady stream of
+        // these means the sid the plugin uses and the one the pane
+        // answers to have drifted apart.
+        lx_debug!(
+            "core.pane_render_markup.no_pane",
+            "declaration named a session with no pane here",
+            session_id = shelld_session_id
+        );
     }
 
     /// Tell the pane's L3 that whatever had the foreground is gone.
