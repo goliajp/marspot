@@ -208,6 +208,11 @@ pub struct Terminal {
     /// a program that never closes its update must not freeze the pane,
     /// so the publisher holds frames under a timeout.
     sync_output: bool,
+    /// Sticky: this program has used DEC 2026 at least once.  Callers
+    /// that must cut a byte stream at a consistent screen ask this
+    /// first, so a pane that never synchronises (a shell, vim) never
+    /// pays for the scan.
+    uses_sync_output: bool,
     /// DEC mode 25 (DECTCEM) — when false, the renderer hides the cursor.
     cursor_visible: bool,
     /// DEC mode 1000 (X11) / 1002 (button-event) / 1003 (any-event) —
@@ -368,6 +373,7 @@ impl Terminal {
             u_buf: String::new(),
             alt_scroll: false,
             sync_output: false,
+            uses_sync_output: false,
             cursor_visible: true,
             mouse_tracking_mode: MouseTrackingMode::Off,
             mouse_sgr_encoding: false,
@@ -475,6 +481,12 @@ impl Terminal {
     /// The presenter should hold the frame while this is true — under
     /// its own timeout, since the terminal cannot make a program close
     /// what it opened.
+    /// Has this program ever opened a synchronized update?  Sticky —
+    /// see [`Self::uses_sync_output`].
+    pub fn uses_sync_output(&self) -> bool {
+        self.uses_sync_output
+    }
+
     pub fn sync_output_active(&self) -> bool {
         self.sync_output
     }
@@ -817,6 +829,7 @@ impl Terminal {
             let cursor_key_app_mode = &mut self.cursor_key_application_mode;
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let sync_output = &mut self.sync_output;
+            let uses_sync_output = &mut self.uses_sync_output;
             let alt_scroll = &mut self.alt_scroll;
             let u_tags = self.u_tags;
             let u_buf = &mut self.u_buf;
@@ -841,6 +854,7 @@ impl Terminal {
                 cursor_key_app_mode,
                 bracketed_paste,
                 sync_output,
+                uses_sync_output,
                 alt_scroll,
                 u_tags,
                 u_buf,
@@ -974,6 +988,7 @@ impl Terminal {
             let cursor_key_app_mode = &mut self.cursor_key_application_mode;
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let sync_output = &mut self.sync_output;
+            let uses_sync_output = &mut self.uses_sync_output;
             let alt_scroll = &mut self.alt_scroll;
             let u_tags = self.u_tags;
             let u_buf = &mut self.u_buf;
@@ -998,6 +1013,7 @@ impl Terminal {
                 cursor_key_app_mode,
                 bracketed_paste,
                 sync_output,
+                uses_sync_output,
                 alt_scroll,
                 u_tags,
                 u_buf,
@@ -2050,6 +2066,8 @@ struct Handler<'a> {
     bracketed_paste: &'a mut bool,
     /// DEC 2026 — see `Terminal::sync_output`.
     sync_output: &'a mut bool,
+    /// Sticky companion to `sync_output` — see `Terminal::uses_sync_output`.
+    uses_sync_output: &'a mut bool,
     /// DEC 1007 — see `Terminal::alt_scroll`.
     alt_scroll: &'a mut bool,
     /// `appearance.render_u_tags` — see `Terminal::u_tags`.
@@ -2768,7 +2786,12 @@ impl<'a> Handler<'a> {
             // closes it; the presenter holds frames in between so a
             // half-drawn screen is never shown.  See
             // `Terminal::sync_output`.
-            2026 => *self.sync_output = set,
+            2026 => {
+                *self.sync_output = set;
+                if set {
+                    *self.uses_sync_output = true;
+                }
+            }
             // 1015 / 1004 / 2031 — silently accept but no-op.
             1015 | 1004 | 2031 => {}
             _ => {} // unhandled DEC private mode — silently skip

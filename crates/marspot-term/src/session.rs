@@ -186,6 +186,14 @@ pub struct Session {
     pub terminal: Terminal,
     pty: Pty,
     rx: Receiver<Vec<u8>>,
+    /// Bytes drained from the PTY that would leave the screen halfway
+    /// through a synchronized update, kept back until the update
+    /// closes.  See [`Self::pump`].
+    partial_update: Vec<u8>,
+    /// When `partial_update` first had something in it.  A program
+    /// that opens DEC 2026 and never closes it must not freeze the
+    /// pane, so the buffer is flushed anyway once this is old enough.
+    partial_since: Option<Instant>,
     exited: Arc<AtomicBool>,
     /// Wall-clock instant of the most recent byte fed to the terminal.
     /// Drives "recently active" indicators in any UI built on top.
@@ -337,22 +345,92 @@ impl Session {
             pty,
             rx,
             exited,
+            partial_update: Vec::new(),
+            partial_since: None,
             last_output: None,
             reader_handle: Some(reader_handle),
             shutdown_pipe_w: shutdown_w,
         })
     }
 
+    /// A synchronized update that never closes must not freeze the
+    /// pane.  Generous next to a repaint and still under the ~200 ms
+    /// where a stall stops reading as "fast".
+    const PARTIAL_UPDATE_MAX_HOLD: std::time::Duration = std::time::Duration::from_millis(150);
+    /// And a size bound, so a program that streams megabytes inside
+    /// one update cannot grow the buffer without limit.
+    const PARTIAL_UPDATE_MAX_BYTES: usize = 1 << 20;
+
+    /// Index just past the last `CSI ? 2026 l` in `buf`, i.e. the last
+    /// point at which the program declared its screen coherent.
+    /// `None` when the batch contains no such point.
+    fn end_of_last_sync_update(buf: &[u8]) -> Option<usize> {
+        const ESU: &[u8] = b"\x1b[?2026l";
+        buf.windows(ESU.len())
+            .rposition(|w| w == ESU)
+            .map(|i| i + ESU.len())
+    }
+
     /// Drain whatever bytes the reader thread has queued into this
     /// session's terminal.  Returns the total bytes fed.  Caller should
     /// trigger a redraw when the return value is non-zero.
     pub fn pump(&mut self) -> usize {
-        let mut total = 0;
+        // Bytes held back from last time go first — they are the head
+        // of the update this pump may be able to complete.
+        let mut buf = std::mem::take(&mut self.partial_update);
         while let Ok(chunk) = self.rx.try_recv() {
-            total += chunk.len();
-            self.terminal.feed(&chunk);
+            buf.extend_from_slice(&chunk);
         }
-        if total > 0 {
+        if buf.is_empty() {
+            return 0;
+        }
+        // A program using synchronized output (DEC 2026) is telling us
+        // which moments its screen is coherent in.  Feeding a whole
+        // PTY batch and then asking "are we mid-update?" cannot see
+        // those moments: codex closes and re-opens the mode within a
+        // few bytes, so the answer is almost always yes and the frame
+        // that goes out is a repaint caught halfway — new text painted
+        // over old text that has not been erased yet.  Measured on a
+        // real 22 MB codex bytelog: 35-46 % of published frames.
+        //
+        // So the cut is made where the program said it was safe: feed
+        // up to and including the last close in this batch, and carry
+        // the rest to the next pump.
+        let split = if self.terminal.uses_sync_output() {
+            Self::end_of_last_sync_update(&buf)
+        } else {
+            Some(buf.len())
+        };
+        let split = match split {
+            Some(n) => {
+                self.partial_since = None;
+                n
+            }
+            // Nothing closed in this batch.  Hold — unless holding has
+            // gone on long enough that a frozen pane is the worse
+            // outcome, in which case show what there is.
+            None => {
+                let now = Instant::now();
+                let since = *self.partial_since.get_or_insert(now);
+                if now.duration_since(since) >= Self::PARTIAL_UPDATE_MAX_HOLD
+                    || buf.len() >= Self::PARTIAL_UPDATE_MAX_BYTES
+                {
+                    self.partial_since = None;
+                    buf.len()
+                } else {
+                    0
+                }
+            }
+        };
+        self.terminal.feed(&buf[..split]);
+        self.partial_update.clear();
+        self.partial_update.extend_from_slice(&buf[split..]);
+        // What was fed this round, carried-over bytes included: the
+        // caller reads it as "is there anything new to show", and the
+        // batch that finally completes a held update has to say yes
+        // even when every one of its bytes arrived earlier.
+        let total = split;
+        if split > 0 {
             self.last_output = Some(Instant::now());
         }
         // Forward any capability-query responses (DA, XTQVERSION, etc.)
@@ -679,6 +757,72 @@ mod tests {
         assert!(s.is_exited());
         // EOF wake always fires; reader-thread chunks may add more.
         assert!(woke.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[test]
+    fn a_batch_is_cut_where_the_program_said_its_screen_was_coherent() {
+        assert_eq!(Session::end_of_last_sync_update(b"no markers here"), None);
+        // Just past the close, not at it.
+        assert_eq!(
+            Session::end_of_last_sync_update(b"\x1b[?2026habc\x1b[?2026l"),
+            Some(19)
+        );
+        // The LAST one — a batch may carry several updates.
+        let b = b"\x1b[?2026hA\x1b[?2026l\x1b[?2026hB\x1b[?2026l\x1b[?2026hC";
+        let n = Session::end_of_last_sync_update(b).expect("a close");
+        assert_eq!(&b[n..], b"\x1b[?2026hC");
+        // An update still open contributes no cut point.
+        assert_eq!(Session::end_of_last_sync_update(b"\x1b[?2026hhalf"), None);
+    }
+
+    #[test]
+    fn half_a_repaint_waits_for_the_rest_instead_of_reaching_the_screen() {
+        // The shape codex draws in: open, erase the line, write the new
+        // text, close.  Fed as two batches split mid-update, the screen
+        // must never show the erase without the text that replaces it.
+        let mut s = Session::spawn_with("/bin/sh", &["-c", "sleep 5"], 40, 10, || {}).expect("spawn");
+        s.feed_terminal(b"\x1b[?2026hOLD CONTENT\x1b[?2026l");
+        assert!(first_row(&s).starts_with("OLD CONTENT"));
+
+        // Batch 1 opens an update and wipes the row — on its own this
+        // is the torn frame.
+        s.partial_update.extend_from_slice(b"\x1b[?2026h\r\x1b[K");
+        let fed = s.pump();
+        assert_eq!(fed, 0, "nothing coherent to show yet");
+        assert!(
+            first_row(&s).starts_with("OLD CONTENT"),
+            "the wipe must not reach the grid on its own"
+        );
+
+        // Batch 2 completes it.
+        s.partial_update.extend_from_slice(b"NEW\x1b[?2026l");
+        s.pump();
+        assert!(first_row(&s).starts_with("NEW"));
+    }
+
+    #[test]
+    fn an_update_that_never_closes_still_reaches_the_screen() {
+        // A program can open DEC 2026 and stop.  Holding forever would
+        // freeze the pane, which is worse than showing a partial frame.
+        let mut s = Session::spawn_with("/bin/sh", &["-c", "sleep 5"], 40, 10, || {}).expect("spawn");
+        s.feed_terminal(b"\x1b[?2026h\x1b[?2026l");
+        s.partial_update.extend_from_slice(b"\x1b[?2026hSTUCK");
+        assert_eq!(s.pump(), 0, "held at first");
+        assert!(!first_row(&s).starts_with("STUCK"));
+
+        s.partial_since = Some(Instant::now() - Session::PARTIAL_UPDATE_MAX_HOLD);
+        s.pump();
+        assert!(first_row(&s).starts_with("STUCK"));
+    }
+
+    #[test]
+    fn a_pane_that_never_synchronises_is_not_buffered_at_all() {
+        let mut s = Session::spawn_with("/bin/sh", &["-c", "sleep 5"], 40, 10, || {}).expect("spawn");
+        assert!(!s.terminal.uses_sync_output());
+        s.partial_update.extend_from_slice(b"plain output");
+        assert_eq!(s.pump(), 12);
+        assert!(first_row(&s).starts_with("plain output"));
+        assert!(s.partial_update.is_empty());
     }
 
     #[test]

@@ -29,4 +29,4 @@
 
 shell   = "0.7.137"  # codex badge 右键切 reasoning effort,resume 同一会话;详见 CHANGELOG.md
 core    = "0.12.182"  # 修:到期检查对 L3 pane 取进程内 Terminal 直接 panic,开机即崩;详见 CHANGELOG.md
-session = "0.11.74"  # 没人回答的预测自己到期,不再把没回显的密码留在屏幕上;详见 CHANGELOG.md
+session = "0.11.75"  # 一批字节只喂到程序声明屏幕一致的那一点，不再把画到一半的重绘发上屏；详见 CHANGELOG.md

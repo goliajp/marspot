@@ -5713,7 +5713,45 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.74**
+Current: **0.11.75**
+
+### 0.11.75
+
+A batch is cut where the program said its screen was coherent.
+
+Reported as: in codex, a `Working (…)` line appears merged into text
+that was already there — `● Working` followed by the tail of a
+different row, unerased.  iTerm2 does not do it.
+
+codex draws with DEC 2026: open a synchronized update, erase the parts
+that changed, write the new text, close.  Between "erase" and "write"
+the screen is meaningless, and the mode is how a program says so.  The
+gate that was supposed to honour that asked the terminal "are we
+mid-update?" AFTER feeding a whole PTY batch — and codex closes and
+re-opens the mode within a few bytes (measured p50 gap: 8 bytes, 87.7 %
+of the stream inside an update), so the coherent moments live in the
+middle of a batch where that question cannot see them.  The answer was
+almost always "yes", the 150 ms cap fired, and what went out was a
+repaint caught halfway.
+
+Measured on the user's own 22 MB codex bytelog, replayed at five batch
+sizes: **35-46 % of published frames were mid-update**.  After the fix,
+0.0 % at every size — and MORE frames are published, because none are
+withheld any more.
+
+The fix is where the cut is made, not in the gate: `pump` feeds up to
+and including the last close in the batch and carries the rest to the
+next one, so what reaches the grid is always a screen the program
+declared finished.  A pane that never uses DEC 2026 — a shell, vim —
+takes an unchanged path behind one sticky bool, and an update that
+never closes is flushed anyway after 150 ms or 1 MB, because a frozen
+pane is worse than a partial frame.
+
+Two things this ruled out on the way, both by replaying the real
+bytelog rather than reasoning: marspot's emulation is faithful (a full
+replay reproduces the correct screen), and the stray line under codex's
+`… +3 lines` marker is in codex's own output, not something marspot
+failed to erase.
 
 ### 0.11.74
 
