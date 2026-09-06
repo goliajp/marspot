@@ -3915,7 +3915,13 @@ impl CoreApp {
     fn expire_stale_predictions(&mut self) {
         for w in self.windows.iter_mut() {
             for pane in w.panes.iter_mut() {
-                if pane.session_mut().terminal_mut().expire_predictions() {
+                // L3 panes keep their terminal in the session
+                // process — only a pane that has one in this address
+                // space can be swept here.
+                let Some(t) = pane.session_mut().terminal_mut_opt() else {
+                    continue;
+                };
+                if t.expire_predictions() {
                     w.needs_render = true;
                 }
             }
@@ -3929,7 +3935,11 @@ impl CoreApp {
         self.windows
             .iter()
             .flat_map(|w| w.panes.iter())
-            .any(|p| p.session().terminal().predictions_pending())
+            .any(|p| {
+                p.session()
+                    .terminal_opt()
+                    .is_some_and(|t| t.predictions_pending())
+            })
     }
 
     /// the pane may well be in one that is not focused.

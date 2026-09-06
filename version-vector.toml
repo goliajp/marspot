@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.137"  # codex badge 右键切 reasoning effort,resume 同一会话;详见 CHANGELOG.md
-core    = "0.12.181"  # 本地预测的到期期限也覆盖 L2 自持的 pane 与 mcli;详见 CHANGELOG.md
+core    = "0.12.182"  # 修:到期检查对 L3 pane 取进程内 Terminal 直接 panic,开机即崩;详见 CHANGELOG.md
 session = "0.11.74"  # 没人回答的预测自己到期,不再把没回显的密码留在屏幕上;详见 CHANGELOG.md

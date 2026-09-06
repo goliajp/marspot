@@ -216,6 +216,24 @@ impl PaneBackend {
         }
     }
 
+    /// The in-process terminal when this backend has one.  An L3
+    /// pane's terminal lives in its session process, so any sweep
+    /// that runs over ALL panes has to ask this way rather than
+    /// `terminal()`, which panics by design.
+    pub fn terminal_opt(&self) -> Option<&Terminal> {
+        match self {
+            PaneBackend::Local(s) => Some(s.terminal()),
+            PaneBackend::L3(_) | PaneBackend::Vacant(_) => None,
+        }
+    }
+
+    pub fn terminal_mut_opt(&mut self) -> Option<&mut Terminal> {
+        match self {
+            PaneBackend::Local(s) => Some(&mut s.terminal),
+            PaneBackend::L3(_) | PaneBackend::Vacant(_) => None,
+        }
+    }
+
     /// Visible grid for the renderer.  Local/shelld read their own
     /// terminal; L3 reads the synthetic mirror last filled from shm.
     pub fn grid(&self) -> &Grid {

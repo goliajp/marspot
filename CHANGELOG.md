@@ -2934,7 +2934,24 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.181**
+Current: **0.12.182**
+
+### 0.12.182
+
+Fix: the prediction sweep 0.12.181 added crashed the app at startup.
+
+`expire_stale_predictions` walked every pane and asked each one for its
+in-process `Terminal`.  An L3 pane has none — its terminal lives in the
+session process, and `PaneBackend::terminal()` says so by panicking.
+L3 is the default, so the first pane hit it: `internal error: entered
+unreachable code: L3/Vacant pane has no in-process Terminal`, before
+logx is up, which is why the logs were empty and nothing was left
+behind but a missing window.
+
+`terminal_opt` / `terminal_mut_opt` return `None` for the backends that
+have no terminal here, and both sweeps skip those panes.  The panes L2
+owns directly are the only ones that ever needed the sweep; L3 runs its
+own, which is where the live path was tested and why this got through.
 
 ### 0.12.181
 
