@@ -174,6 +174,66 @@ never sees this path.  The generic arrow-key route added in core
 can move but cannot receive a wheel (`less`, `man`, a mouse-less
 `vim`).
 
+## Slice 3 — markup a program does not render (`PaneRenderMarkup`, msg 80)
+
+codex does not render HTML, so a model that writes `<u>…</u>` has its
+markup arrive on screen as text.  Asked for on 2026-09-06: *"`<u></u>`
+是下划线，你就渲染就好了"*.
+
+It took three attempts, and the third correction is the one worth
+keeping:
+
+1. **Semantics.**  Turning underline on at the opening tag underlines
+   everything after an unmatched one — and text that merely MENTIONS
+   the tag is most of any conversation about this feature.  Only a
+   matched pair styles anything; the span is withheld until `</u>`
+   arrives, and if it never does the tag is printed exactly as it came.
+   The failure mode is then the behaviour from before the feature
+   existed.
+2. **Scope.**  Shipped as a global setting, it ate the tags out of the
+   conversation SPECIFYING it, including the user's own words coming
+   back on screen.  Whose output is markup is not a property of the
+   terminal — a terminal is where people talk about markup.  It belongs
+   to the pane, and only the plugin driving a program knows the program
+   does not render its own HTML.
+3. **Persistence.**  The one that cost the most.  A feature that should
+   affect a span of text was writing TERMINAL STATE: the underline
+   attribute survives in the pen, is inherited by every later cell, and
+   rides across snapshots and execv.  A full-screen program can run for
+   hours without emitting `CSI 0 m`, so nothing takes it back.  One
+   pane stayed underlined through six image swaps.
+
+The last one produced two lasting fixes beyond this feature:
+`reset_process_owned_modes` now clears the pen (a style left on by a
+dead program is the same debt as a mode it left set), and
+`PaneResetAttrs` (msg 81) gives a stuck pen a way back that does not
+cost the user their session.
+
+## What chasing codex exposed in the update pipeline
+
+Half a day was spent on "the declaration does not work" that turned out
+not to be about declarations at all.  Every one of these reported
+success while doing nothing.
+
+- **A silent update swapped L1 and L2 but not the running L3s.**  Only
+  panes spawned afterwards got the new session image; existing ones
+  kept theirs for as long as they lived.  Two session-layer fixes had
+  never once run on the machine they were installed on.
+- **A freshly-installed binary is a cold inode.**  Thirteen panes
+  probing it at the same instant all got a failure back within 144 ms
+  and refused to adopt it — correctly, by their own rule — while four
+  consecutive installs said they had succeeded.  The installer now
+  runs it once itself before asking anyone else to.
+- **The probe had no deadline, and "probe outstanding" means "already
+  handled".**  One check that never answered retired a pane's
+  self-update permanently and silently.
+- **The installer reported signals SENT.**  That is not the same claim
+  as "they took it".  It now compares each pane's mapped inode against
+  the installed one and names the stragglers.
+
+The shape they share: a protection that is right, whose failure is
+silent and permanent, behind a report that says success.
+
 ## What chasing codex exposed in the terminal itself
 
 None of these are plugin work — they are places where marspot was
@@ -192,6 +252,13 @@ CHANGELOG.md.
   Across 166 stalls: mean wait 374.5 ms against 3.3 ms of GPU
   execution, worst 3.6 s — with input queued behind all of it.  The
   frame is now committed and polled.
+
+- **A first test that was green and proved nothing.**  Written for the
+  probe deadline, it used `/bin/sleep --version` as "a candidate that
+  never answers" — but that rejects the argument and exits at once,
+  taking the answered-non-zero path.  Three tests passed in 0.03 s
+  having never entered the branch under test.  Replaced with a script
+  that genuinely hangs, against an injected deadline.
 
 ## Not done
 
