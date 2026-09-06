@@ -2846,7 +2846,45 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.176**
+Current: **0.12.177**
+
+### 0.12.177
+
+A frame no longer blocks the main loop.
+
+Every frame ended in a synchronous `waitUntilCompleted()` on the loop
+that also handles input, forwards keys to L3, and paints every window.
+So however long the GPU queue took, the terminal was deaf for exactly
+that long.  Measured across 166 stalls on a working machine:
+
+    mean wait 374.5ms    mean GPU execution 3.3ms    worst 3644.8ms
+
+We waited 113× longer than the GPU worked, once for three and a half
+seconds.  The GPU was not busy — we were queued behind a loaded
+machine's other work and chose to stand there ("在我们这开 codex，输入
+有时候都会卡，在 iTerm2 很流畅").
+
+The frame is now committed and left running; its command buffer hangs
+off `WindowRender` and each pass polls `status()`.  Only `Completed`
+flips the surface and sends `SurfaceReady`, so the contract that the
+shell only ever samples a finished surface is untouched — it just no
+longer costs the loop the GPU's queueing time.
+
+One frame in flight, never two, which keeps every existing invariant:
+the instance pool is still refilled in place (nothing reads it once the
+frame completes) and the two surfaces still alternate a full frame
+apart.  A window with a frame in flight starts no new one and keeps
+`needs_render`, so it paints the moment the GPU frees up.
+
+Attach keeps the blocking render: it acks `SurfaceReady` in the same
+breath, and announcing an unfinished surface there is a black window.
+It happens once per attach with nobody typing.
+
+Idle CPU is a hard constraint and holds: the 1 ms poll exists only
+while a frame is in flight, and at rest there is none — the idle
+timeout is still a second.  Sandbox measured shell 0.1% / core 0.0%.
+
+Gate on mini: 11/11 pass.
 
 ### 0.12.176
 
