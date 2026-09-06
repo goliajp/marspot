@@ -77,6 +77,19 @@ pub fn view_is_open(
     marker.is_empty() || shows_marker(cols, rows, cell, marker)
 }
 
+/// Does this wheel tick belong to the plugin's scroll view?
+///
+/// An open view takes both directions — paging back down inside it is
+/// how the user returns to the newest line.  A CLOSED view is only
+/// ever opened by an UPWARD tick: reaching for history is an upward
+/// gesture, while a downward tick at rest means "show me what is
+/// below", and answering that by opening a history view is a surprise
+/// (asked for 2026-09-06).  A downward tick on a closed view is not
+/// ours at all — the pane routes it itself.
+pub fn wheel_is_ours(view_open: bool, scrolling_up: bool) -> bool {
+    view_open || scrolling_up
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +139,23 @@ mod tests {
     fn ordinary_output_does_not_match() {
         let rows = ["run tests / start / integration", "$ cargo test", ""];
         assert!(!shows_marker(40, 3, screen(&rows), b"/TRANSCRIPT/"));
+    }
+
+    /// The wheel opens the view only upward, and once open serves
+    /// both directions — otherwise the user could page back up but
+    /// never back down.
+    #[test]
+    fn a_closed_view_is_opened_only_by_scrolling_up() {
+        assert!(wheel_is_ours(false, true), "up on a closed view opens it");
+        assert!(
+            !wheel_is_ours(false, false),
+            "down on a closed view is the pane's own scroll, not ours"
+        );
+        assert!(wheel_is_ours(true, true));
+        assert!(
+            wheel_is_ours(true, false),
+            "an open view must still page down, or there is no way back"
+        );
     }
 
     /// An undeclared marker must never be read as a match — but the

@@ -2833,7 +2833,26 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.175**
+Current: **0.12.176**
+
+### 0.12.176
+
+Only an upward tick opens a plugin's scroll view.
+
+Reaching for history is an upward gesture.  A downward tick with the
+view closed means "I am at the newest, show me what is below" — and
+answering that by opening a history view is a surprise (asked for
+2026-09-06).  Such a tick is now not ours at all: it falls through to
+the pane's own routing untouched, rather than being swallowed.
+
+An OPEN view still takes both directions, or there would be no way to
+page back down to where the user came from.
+
+Checked against a live codex, all three cases:
+
+    closed + down  → nothing sent, view stays closed
+    closed + up    → entered once, stayed open, content moving
+    open   + down  → paged back, toggle never pressed
 
 ### 0.12.175
 

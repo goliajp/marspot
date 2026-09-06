@@ -8283,6 +8283,13 @@ impl CoreApp {
         //
         // Nothing here sends a key to LEAVE the view: a stray tick at
         // the bottom would otherwise close what the user was reading.
+        //
+        // And only an UPWARD tick may OPEN it.  Reaching for history is
+        // an upward gesture; a downward one at rest means "I am already
+        // at the newest, show me what is below" — answering that by
+        // opening a history view is a surprise.  A closed view plus a
+        // downward tick is therefore not ours: it falls through to the
+        // pane's own routing untouched.
         if let Some(sid) = win!(self, wi).panes[idx].session().shelld_session_id() {
             if self.pane_wheel_keys.contains_key(&sid) && lines != 0 {
                 let mut buf: Vec<u8> = Vec::new();
@@ -8300,13 +8307,16 @@ impl CoreApp {
                         &k.marker,
                     )
                 };
-                if let Some(k) = self.pane_wheel_keys.get(&sid) {
-                    if !open && !k.enter.is_empty() {
-                        buf.extend_from_slice(&k.enter);
-                    }
-                    let key = if lines > 0 { &k.up } else { &k.down };
-                    for _ in 0..ticks {
-                        buf.extend_from_slice(key);
+                let up = lines > 0;
+                if marspot::wheel_marker::wheel_is_ours(open, up) {
+                    if let Some(k) = self.pane_wheel_keys.get(&sid) {
+                        if !open && !k.enter.is_empty() {
+                            buf.extend_from_slice(&k.enter);
+                        }
+                        let key = if up { &k.up } else { &k.down };
+                        for _ in 0..ticks {
+                            buf.extend_from_slice(key);
+                        }
                     }
                 }
                 // One line per change of state, not per event: a
@@ -8314,18 +8324,18 @@ impl CoreApp {
                 // seeing is whether the view opened and stayed open.
                 // Silence here is what made three wrong fixes all look
                 // right (2026-09-06).
-                if self.pane_wheel_open.get(&sid) != Some(&open) {
-                    lx_info!(
-                        "core.pane_wheel.state",
-                        &format!("sid={sid} open={open} sent_enter={}", !open)
-                    );
-                    self.pane_wheel_open.insert(sid, open);
-                }
                 if !buf.is_empty() {
+                    if self.pane_wheel_open.get(&sid) != Some(&open) {
+                        lx_info!(
+                            "core.pane_wheel.state",
+                            &format!("sid={sid} open={open} up={up} sent_enter={}", !open)
+                        );
+                        self.pane_wheel_open.insert(sid, open);
+                    }
                     win!(self, wi).panes[idx].session_mut().forward_inject_input(&buf);
                     win!(self, wi).needs_render = true;
+                    return;
                 }
-                return;
             }
         }
         let tui_scroll = win!(self, wi).panes[idx].session().is_l3()

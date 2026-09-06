@@ -62,12 +62,18 @@ fn snapshot(dir: &str) -> (u16, u16, Vec<char>) {
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     if a.len() < 5 {
-        eprintln!("usage: wheel_replay <session-dir> <sid> <marker> <enter> <up> [ticks]");
+        eprintln!(
+            "usage: wheel_replay <session-dir> <sid> <marker> <enter> <key> [ticks]\n\
+             set WHEEL_DOWN=1 to replay a downward turn"
+        );
         std::process::exit(2);
     }
     let (dir, sid) = (a[0].clone(), a[1].parse::<u64>().expect("sid"));
-    let (marker, enter, up) = (unescape(&a[2]), unescape(&a[3]), unescape(&a[4]));
+    let (marker, enter, key) = (unescape(&a[2]), unescape(&a[3]), unescape(&a[4]));
     let ticks: usize = a.get(5).map(|s| s.parse().unwrap()).unwrap_or(6);
+    // Which way the wheel is being turned; a closed view is only ours
+    // when that is up.
+    let up = std::env::var("WHEEL_DOWN").is_err();
 
     // The registry is keyed off MARSPOT_STATE_DIR; without it the
     // sandbox session looks like it was never registered.
@@ -98,16 +104,19 @@ fn main() {
             &marker,
         );
         // Exactly what L2 does per wheel event.
-        if !open && !enter.is_empty() {
-            send(&enter);
-            entered += 1;
+        let ours = marspot::wheel_marker::wheel_is_ours(open, up);
+        if ours {
+            if !open && !enter.is_empty() {
+                send(&enter);
+                entered += 1;
+            }
+            send(&key);
         }
-        send(&up);
         let (_, _, after) = snapshot(&dir);
         let moved = prev.as_ref().map(|p| *p != after).unwrap_or(true);
         println!(
-            "tick {tick}: open_before={open}  sent_enter={}  content_moved={moved}",
-            !open && !enter.is_empty()
+            "tick {tick}: open_before={open}  ours={ours}  sent_enter={}  content_moved={moved}",
+            ours && !open && !enter.is_empty()
         );
         prev = Some(after);
     }
@@ -124,12 +133,17 @@ fn main() {
         println!("FAIL: entered {entered}x — the toggle is being re-sent");
         std::process::exit(1);
     }
-    if !open_end {
+    if up && !open_end {
         println!("FAIL: view is not open at the end");
         std::process::exit(1);
     }
-    match entered {
-        0 => println!("PASS: was already open, never pressed the toggle"),
+    if !up && entered > 0 {
+        println!("FAIL: a downward turn opened the view");
+        std::process::exit(1);
+    }
+    match (entered, open_end) {
+        (0, false) => println!("PASS: left the pane alone, view stayed closed"),
+        (0, true) => println!("PASS: was already open, never pressed the toggle"),
         _ => println!("PASS: entered once, stayed open"),
     }
 }
