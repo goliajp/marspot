@@ -149,6 +149,21 @@ pub struct Terminal {
     /// a global behind a lock, and `print` is the hottest loop in the
     /// terminal.
     u_tags: bool,
+    /// Are we inside an unclosed `<u>`, collecting what it wraps?
+    ///
+    /// Only a MATCHED pair styles anything.  Turning underline on at
+    /// the opening tag underlines everything after an unmatched one —
+    /// which is any text that merely mentions the tag, and that is
+    /// most of a conversation about this feature; reported against my
+    /// own output within minutes of shipping it (2026-09-06).
+    ///
+    /// So the span is withheld until `</u>` arrives.  If it does not —
+    /// a line feed, an escape sequence, or more text than
+    /// `U_SPAN_CAP` — the opening tag and everything after it are
+    /// printed exactly as they came.  The failure is then the
+    /// behaviour from before the feature existed, which is the only
+    /// safe thing for it to fall back to.
+    u_open: bool,
     /// Characters held back while `<`… might turn out to be a tag.
     ///
     /// At most four (`</u>`).  Anything that stops being a prefix is
@@ -311,6 +326,7 @@ impl Terminal {
             cursor_key_application_mode: false,
             bracketed_paste_mode: false,
             u_tags: false,
+            u_open: false,
             u_buf: String::new(),
             alt_scroll: false,
             sync_output: false,
@@ -603,6 +619,7 @@ impl Terminal {
             let alt_scroll = &mut self.alt_scroll;
             let u_tags = self.u_tags;
             let u_buf = &mut self.u_buf;
+            let u_open = &mut self.u_open;
             let cursor_visible = &mut self.cursor_visible;
             let mouse_tracking_mode = &mut self.mouse_tracking_mode;
             let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
@@ -622,6 +639,7 @@ impl Terminal {
                 alt_scroll,
                 u_tags,
                 u_buf,
+                u_open,
                 cursor_visible,
                 mouse_tracking_mode,
                 mouse_sgr_encoding,
@@ -753,6 +771,7 @@ impl Terminal {
             let alt_scroll = &mut self.alt_scroll;
             let u_tags = self.u_tags;
             let u_buf = &mut self.u_buf;
+            let u_open = &mut self.u_open;
             let cursor_visible = &mut self.cursor_visible;
             let mouse_tracking_mode = &mut self.mouse_tracking_mode;
             let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
@@ -772,6 +791,7 @@ impl Terminal {
                 alt_scroll,
                 u_tags,
                 u_buf,
+                u_open,
                 cursor_visible,
                 mouse_tracking_mode,
                 mouse_sgr_encoding,
@@ -1795,6 +1815,8 @@ struct Handler<'a> {
     /// `appearance.render_u_tags` — see `Terminal::u_tags`.
     u_tags: bool,
     u_buf: &'a mut String,
+    /// See `Terminal::u_open`.
+    u_open: &'a mut bool,
     cursor_visible: &'a mut bool,
     mouse_tracking_mode: &'a mut MouseTrackingMode,
     mouse_sgr_encoding: &'a mut bool,
@@ -2481,40 +2503,20 @@ impl<'a> Handler<'a> {
 
 impl<'a> ParserCallbacks for Handler<'a> {
     fn print(&mut self, ch: char) {
-        // `<u>` / `</u>` become underline on / off.  Recognised HERE
-        // and not over the byte stream, because a byte pass cannot
-        // tell text from the inside of an escape sequence — `CSI < u`
-        // (the kitty-keyboard pop codex sends at startup) carries the
-        // same characters.  By this point the parser has already
-        // separated the two.
+        // `<u>…</u>` becomes underline — but only as a MATCHED pair.
         //
-        // Two predictable branches on the hot path when the setting is
-        // on, none when it is off; the buffer only ever fills after a
-        // literal `<`.
-        if self.u_tags && (ch == '<' || !self.u_buf.is_empty()) {
-            self.u_buf.push(ch);
-            match u_tag_verdict(self.u_buf) {
-                UTag::Underline(on) => {
-                    self.u_buf.clear();
-                    // Whatever is still buffered was printed BEFORE
-                    // the tag and keeps the attributes it arrived
-                    // with; changing them first would reach back and
-                    // underline it.
-                    self.flush_cluster_for_break();
-                    self.attrs.underline = on;
-                    return;
-                }
-                UTag::Maybe => return,
-                UTag::No => {
-                    // Not a tag after all: print what was held back,
-                    // in order and unchanged.
-                    let held = std::mem::take(self.u_buf);
-                    for c in held.chars() {
-                        self.print_glyph(c);
-                    }
-                    return;
-                }
-            }
+        // Recognised HERE and not over the byte stream, because a byte
+        // pass cannot tell text from the inside of an escape sequence:
+        // `CSI < u`, the kitty-keyboard pop codex sends at startup,
+        // carries the same characters.  By this point the parser has
+        // already separated the two.
+        //
+        // One predictable branch on the hot path when the setting is
+        // off, two when it is on; nothing is buffered until a literal
+        // `<` actually arrives.
+        if self.u_tags && (*self.u_open || ch == '<' || !self.u_buf.is_empty()) {
+            self.u_step(ch);
+            return;
         }
         self.print_glyph(ch);
     }
@@ -3006,10 +3008,17 @@ impl<'a> ParserCallbacks for Handler<'a> {
 }
 
 
+/// How much text a `<u>` may hold before we give up on its close.
+///
+/// A sentence is far short of this; a span that runs longer has almost
+/// certainly lost its closing tag, and holding output hostage waiting
+/// for one is worse than printing the tag.
+const U_SPAN_CAP: usize = 1024;
+
 /// What a buffer starting with `<` has turned out to be.
 enum UTag {
-    /// `<u>` or `</u>`.
-    Underline(bool),
+    /// `<u>` — start collecting what it wraps.
+    Open,
     /// Still a prefix of one of them.
     Maybe,
     /// It is not, and never will be.
@@ -3018,19 +3027,80 @@ enum UTag {
 
 fn u_tag_verdict(buf: &str) -> UTag {
     match buf {
-        "<u>" => UTag::Underline(true),
-        "</u>" => UTag::Underline(false),
-        "<" | "<u" | "</" | "</u" => UTag::Maybe,
+        "<u>" => UTag::Open,
+        "<" | "<u" => UTag::Maybe,
+        // A closing tag with nothing open is just text.
         _ => UTag::No,
     }
 }
 
 impl<'a> Handler<'a> {
+    /// One character, while a `<u>` is being recognised or collected.
+    fn u_step(&mut self, ch: char) {
+        if *self.u_open {
+            // Collecting the span.  `</u>` closes it; anything else
+            // just accumulates until it does or the cap says stop.
+            self.u_buf.push(ch);
+            if self.u_buf.ends_with("</u>") {
+                let span: String =
+                    self.u_buf[..self.u_buf.len() - "</u>".len()].to_string();
+                self.u_buf.clear();
+                *self.u_open = false;
+                // The text before the tag keeps the attributes it
+                // arrived with; flush it before changing them.
+                self.flush_cluster_for_break();
+                let was = self.attrs.underline;
+                self.attrs.underline = true;
+                for c in span.chars() {
+                    self.print_glyph(c);
+                }
+                self.flush_cluster_for_break();
+                self.attrs.underline = was;
+                return;
+            }
+            if self.u_buf.len() > U_SPAN_CAP {
+                self.u_bail();
+            }
+            return;
+        }
+        self.u_buf.push(ch);
+        match u_tag_verdict(self.u_buf) {
+            UTag::Open => {
+                self.u_buf.clear();
+                *self.u_open = true;
+            }
+            UTag::Maybe => {}
+            UTag::No => {
+                let held = std::mem::take(self.u_buf);
+                for c in held.chars() {
+                    self.print_glyph(c);
+                }
+            }
+        }
+    }
+
+    /// Give up on a span: print the opening tag and everything after
+    /// it exactly as it arrived.
+    fn u_bail(&mut self) {
+        *self.u_open = false;
+        let held = std::mem::take(self.u_buf);
+        for c in "<u>".chars() {
+            self.print_glyph(c);
+        }
+        for c in held.chars() {
+            self.print_glyph(c);
+        }
+    }
+
     /// Print anything still held as a possible `<u>`, unchanged.
     ///
     /// Called wherever the run of printable text ends — a control
     /// byte, an escape sequence — because a tag cannot span one.
     fn flush_u_buf(&mut self) {
+        if *self.u_open {
+            self.u_bail();
+            return;
+        }
         if self.u_buf.is_empty() {
             return;
         }
@@ -5638,34 +5708,85 @@ mod u_tag_tests {
     fn row(t: &Terminal, r: u16) -> String {
         (0..t.grid().cols()).map(|c| t.grid().cell(c, r).ch).collect()
     }
+    fn under(t: &Terminal, c: u16) -> bool {
+        t.grid().cell(c, 0).attrs.underline
+    }
 
-    /// The models on the other end emit `<u>` and codex prints it
-    /// literally, so the sentence arrives wearing its markup.  Draw it
-    /// (2026-09-06: "<u></u> 是下划线，你就渲染就好了").
+    /// A matched pair styles what it wraps and nothing else.
     #[test]
-    fn a_u_tag_underlines_what_it_wraps() {
+    fn a_matched_pair_underlines_what_it_wraps() {
         let mut t = Terminal::new(20, 2);
         t.feed(b"a<u>bc</u>d");
         assert_eq!(row(&t, 0).trim_end(), "abcd", "the tags are styling, not text");
-        assert!(!t.grid().cell(0, 0).attrs.underline, "before the tag");
-        assert!(t.grid().cell(1, 0).attrs.underline, "inside");
-        assert!(t.grid().cell(2, 0).attrs.underline, "inside");
-        assert!(!t.grid().cell(3, 0).attrs.underline, "after the closing tag");
+        assert!(!under(&t, 0), "before");
+        assert!(under(&t, 1) && under(&t, 2), "inside");
+        assert!(!under(&t, 3), "after");
     }
 
-    /// A tag split across two PTY reads is still one tag: the buffer
-    /// is terminal state, not per-chunk state.
+    /// An UNMATCHED opening tag styles nothing.  It is printed, and so
+    /// is everything after it — text that merely mentions the tag is
+    /// most of any conversation about this feature, and underlining
+    /// the rest of the pane on account of one was the regression this
+    /// pins (2026-09-06).
+    #[test]
+    fn an_unmatched_open_tag_is_just_text() {
+        let mut t = Terminal::new(40, 2);
+        t.feed(b"see <u> in the docs");
+        t.feed(b"\r\n");
+        assert_eq!(row(&t, 0).trim_end(), "see <u> in the docs");
+        for c in 0..20 {
+            assert!(!under(&t, c), "column {c} must not be underlined");
+        }
+    }
+
+    /// The tags take no width once matched: they are markup, and a
+    /// terminal that left seven blank cells behind would push the
+    /// rest of the line out of the place the program laid it out for.
+    #[test]
+    fn matched_tags_occupy_no_cells() {
+        let mut t = Terminal::new(20, 2);
+        t.feed(b"<u>ab</u>!");
+        assert_eq!(row(&t, 0).trim_end(), "ab!");
+        assert_eq!(t.grid().cursor().0, 3, "cursor sits right after the text");
+        for c in 3..20 {
+            assert_eq!(t.grid().cell(c, 0).ch, ' ', "column {c} must be untouched");
+        }
+    }
+
+    /// A closing tag with nothing open is text too.
+    #[test]
+    fn a_stray_closing_tag_is_just_text() {
+        let mut t = Terminal::new(30, 2);
+        t.feed(b"a</u>b");
+        assert_eq!(row(&t, 0).trim_end(), "a</u>b");
+        assert!(!under(&t, 0) && !under(&t, 5));
+    }
+
+    /// A span cannot cross a line: the newline ends it, and the tag
+    /// comes back as text.
+    #[test]
+    fn a_span_broken_by_a_newline_is_not_styled() {
+        let mut t = Terminal::new(30, 3);
+        t.feed(b"x<u>abc\r\ndef</u>");
+        assert_eq!(row(&t, 0).trim_end(), "x<u>abc");
+        for c in 0..7 {
+            assert!(!under(&t, c), "column {c}");
+        }
+    }
+
+    /// A tag split across two PTY reads is still one tag: the state is
+    /// the terminal's, not the chunk's.
     #[test]
     fn a_tag_split_across_reads_still_counts() {
         let mut t = Terminal::new(20, 2);
         t.feed(b"a<");
         t.feed(b"u>b");
-        assert_eq!(row(&t, 0).trim_end(), "ab");
-        assert!(t.grid().cell(1, 0).attrs.underline);
+        t.feed(b"</u>c");
+        assert_eq!(row(&t, 0).trim_end(), "abc");
+        assert!(under(&t, 1) && !under(&t, 2));
     }
 
-    /// Text that merely starts with `<` must come out untouched — in
-    /// order, every character.
+    /// Text that merely starts with `<` comes out untouched.
     #[test]
     fn text_that_is_not_a_tag_is_printed_verbatim() {
         for text in ["a<b>c", "a<ub>c", "a</x>c", "a<uu>c", "if a<b then"] {
@@ -5675,13 +5796,23 @@ mod u_tag_tests {
         }
     }
 
-    /// A dangling `<` at the end of the stream must still appear —
-    /// otherwise a prompt ending in one would swallow it forever.
+    /// A dangling `<` at the end of a line must still appear.
     #[test]
     fn a_dangling_open_bracket_is_not_eaten() {
         let mut t = Terminal::new(20, 2);
         t.feed(b"a<");
         t.feed(b"\r\n");
         assert!(row(&t, 0).starts_with("a<"), "got {:?}", row(&t, 0));
+    }
+
+    /// An escape sequence inside a span ends it — the span's text is
+    /// printed with its tag, which is what the pane showed before the
+    /// feature existed.
+    #[test]
+    fn an_escape_sequence_inside_a_span_falls_back_to_text() {
+        let mut t = Terminal::new(40, 2);
+        t.feed(b"<u>ab\x1b[31mcd</u>");
+        assert!(row(&t, 0).starts_with("<u>ab"), "got {:?}", row(&t, 0));
+        assert!(!under(&t, 3));
     }
 }

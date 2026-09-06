@@ -3837,6 +3837,7 @@ mod tests {
              made the pane's mode the whole ballgame: {off:?}"
         );
     }
+
 }
 
 
