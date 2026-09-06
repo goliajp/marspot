@@ -108,8 +108,59 @@ go stale because there is no flag.
 
 Nothing automates leaving that view.  The user's ruling: *"滚轮主动进
 但不主动退出"* — one stray tick at the bottom would otherwise close
-what they were reading.  A real `Esc` keypress is what clears
-`entered`, tracked where keys are forwarded rather than guessed.
+what they were reading.  Leaving stays the user's `Esc`, and since
+there is no flag, nothing has to notice that they pressed it.
+
+And only an UPWARD tick may open it (*"滚动鼠标向下的时候我不想触发
+ctrl+t 要向上才触发"*).  Reaching for history is an upward gesture; a
+downward tick with the view closed means "I am at the newest, show me
+what is below", and answering that by opening a history view is a
+surprise.  Such a tick is not ours at all — it falls through to the
+pane's own routing rather than being swallowed.  An OPEN view still
+takes both directions, or there is no way back down.
+
+The marker is compared with whitespace squeezed out of both sides.  A
+program draws headings for humans, not for matchers: codex
+letter-spaces its rule, so the cells read `/ T R A N S C R I P T /`
+while the plugin sensibly declares `/TRANSCRIPT/`.  Matching literally
+never succeeded, and since `enter` is a toggle, every tick then opened
+and shut the view — the "一动就闪" report, and the third wrong fix in
+a row.  Squeezing cannot invent a match: a marker is a distinctive run
+a plugin picked because ordinary output does not contain it.
+
+The wheel maps to the program's LINE keys, not its page keys.  The
+caller already turns a trackpad's pixels and a mouse's notches into an
+accelerated line count; spending a whole screen on one flick of a
+finger was the gap against iTerm2 (*"鼠标滚动也是一行行带加速，我们
+一下就滚一屏"*).
+
+### The declaration has to survive a core swap
+
+A badge is re-issued by its plugin every tick, so a frame dropped
+while no core is attached costs one tick.  A wheel declaration is
+issued ONCE per pane — the plugin says how the wheel reaches it and
+has nothing to repeat — and the drain dropped it silently when no core
+was attached.
+
+That is not a rare window; it is exactly the gap a core swap opens,
+and it is where codex landed: L1 re-execed, the plugin declared a
+second later, the core was still booting, and the pane had no wheel
+keys for the rest of its life.  The shell now keeps the mapping and
+replays it on every handshake.
+
+### The declaration is the honest "an agent paints this pane"
+
+Link scanning has to merge a path a program broke across lines itself
+(no DECAWM flag, because the program wrapped it, not the terminal).
+That merge was gated on "the plugin badge is non-empty" — and codex's
+badge is built from a model and an effort read off disk, so a read
+that comes back empty leaves the badge empty and the pane silently
+stops merging wrapped links (2026-09-06 field report: a path
+underlined only as far as `…/lab36-continus/`).
+
+A wheel declaration is the durable assertion instead: a plugin only
+makes it about a program it is driving, and it now survives a core
+swap.  `SessionView::agent_tui` carries it.
 
 Keys are bytes on the wire, not a named enum: what a program answers
 to is its own business, and the protocol should not need a new variant
@@ -122,6 +173,25 @@ never sees this path.  The generic arrow-key route added in core
 0.12.169 also remains, for programs that DO have history the terminal
 can move but cannot receive a wheel (`less`, `man`, a mouse-less
 `vim`).
+
+## What chasing codex exposed in the terminal itself
+
+None of these are plugin work — they are places where marspot was
+wrong and only an agent TUI happened to stand on them.  Detail in
+CHANGELOG.md.
+
+- **DEC 2026 (synchronized output) was on the accept-and-ignore
+  list.**  codex brackets every frame with it — 8,493 pairs in one
+  session's byte log.
+- **A screen wiped between two PTY reads reached the display.**  codex
+  clears OUTSIDE its synchronized batch (`… 2026l · CSI J · 2026h ·
+  paint …`), so the empty grid in between was published: the black
+  flash on opening its transcript, measured as a `38% → 0% → 44%` fill
+  sequence.  A completely blank screen now waits 50 ms.
+- **Every frame blocked the main loop on `waitUntilCompleted`.**
+  Across 166 stalls: mean wait 374.5 ms against 3.3 ms of GPU
+  execution, worst 3.6 s — with input queued behind all of it.  The
+  frame is now committed and polled.
 
 ## Not done
 
