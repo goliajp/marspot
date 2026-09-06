@@ -1575,6 +1575,14 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let mut last_snapshot_generation: u64 = session.terminal().generation();
     let mut last_snapshot_at = Instant::now();
     let mut periodic_snapshot_seen = false;
+    // Local-echo prediction has kept a hit/miss tally since it was
+    // written and has never reported it, so nobody knows whether it
+    // has ever helped — or, in a program that draws its own input
+    // somewhere else, how often the user sees a character land in the
+    // wrong place and vanish (2026-09-07 report, in codex).
+    let mut predict_seen: (u64, u64) = (0, 0);
+    let mut last_predict_report = Instant::now();
+    const PREDICT_REPORT_EVERY: Duration = Duration::from_secs(60);
     // RFC-003 §6 Amendment 11 (debug-3): generation tag for control
     // readers.  Increments on each NewClient adoption; CoreGone events
     // carry the generation of the reader that died, so a stale EOF
@@ -2346,6 +2354,22 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         }
 
         frame += 1;
+        if last_predict_report.elapsed() >= PREDICT_REPORT_EVERY {
+            last_predict_report = Instant::now();
+            let t = session.terminal();
+            let now = (t.predictions_hit, t.predictions_miss);
+            if now != predict_seen {
+                lx_event!(
+                    "L3_PREDICT_TALLY",
+                    "local-echo predictions since the last report",
+                    session_id = session.id(),
+                    hit = now.0 - predict_seen.0,
+                    miss = now.1 - predict_seen.1
+                );
+                predict_seen = now;
+            }
+        }
+
         // RFC-004 C.1 (B4+B13) — periodic crash-safe snapshot.  Hard
         // death (power loss / kernel panic / SIGKILL) never runs the
         // SIGTERM writer, so pre-C.1 the visible grid + the whole
