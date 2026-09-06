@@ -1594,7 +1594,18 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let mut execv_verdict: Option<bool> = None;
     // One probe per lifetime — a second SIGTERM while the first is
     // still exec'ing must not stack another thread.
-    let mut execv_probe_started = false;
+    // When the outstanding probe started, if there is one.  A bare
+    // bool cannot say "this one has been running too long", and the
+    // SIGTERM path treats an outstanding probe as "already handled" —
+    // so a probe that never answers retires this pane's self-update
+    // for good, without a word.  One pane sat two images behind that
+    // way while four installs reported success (2026-09-06).
+    let mut execv_probe_at: Option<Instant> = None;
+    /// A probe that has not answered in this long is not going to.
+    /// Longer than the probe's own timeout, so the normal path always
+    /// wins the race and this only fires when something is truly
+    /// wedged.
+    const EXECV_PROBE_STUCK_AFTER: Duration = Duration::from_secs(45);
     // B3 — in-flight scrollback search worker, or None.  At most one
     // worker per L3 at any time (last-write-wins, D15): a new
     // `SearchRequest` drops this Option, which sets the old worker's
@@ -1915,11 +1926,20 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     // image starts.  Retiring first and discovering
                     // that afterwards is what froze twenty panes for
                     // 114 s on 2026-07-29.
-                    if execv_probe_started {
+                    let probe_stuck = execv_probe_at
+                        .is_some_and(|t| t.elapsed() >= EXECV_PROBE_STUCK_AFTER);
+                    if execv_probe_at.is_some() && !probe_stuck {
                         // Probe already running; this SIGTERM is a
                         // repeat.  Nothing to do but keep serving.
                     } else if should_execv_on_sigterm() {
-                        execv_probe_started = true;
+                        if probe_stuck {
+                            lx_warn!(
+                                "l3.execv.probe_stuck",
+                                "the last probe never answered; trying again",
+                                session_id = session.id()
+                            );
+                        }
+                        execv_probe_at = Some(Instant::now());
                         let target = marspot_term::binary_tree::BinaryTree::default_for(
                             "marspot-session",
                         )
@@ -1969,7 +1989,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                             "current/marspot-session could not start — staying on the running image",
                             session_id = session.id()
                         );
-                        execv_probe_started = false;
+                        execv_probe_at = None;
                     }
                 }
                 SessionEvent::SearchRequest {

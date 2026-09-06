@@ -47,29 +47,73 @@ use std::process::Command;
 /// `current/`: the whole point is to test *this* file.
 ///
 /// Callers must run this off whatever thread is keeping the UI alive.
+/// How long the candidate gets to answer `--version`.
+///
+/// It is a print and an exit; anything longer is the system taking its
+/// time (a cold Gatekeeper verdict) or not answering at all.  Waiting
+/// forever is the worse failure: the caller treats "probe outstanding"
+/// as "do not probe again", so one hung check retires that pane's
+/// self-update permanently and says nothing (2026-09-06).
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 pub fn can_start(bin: &Path) -> bool {
+    can_start_within(bin, PROBE_TIMEOUT)
+}
+
+/// [`can_start`] with the deadline spelled out, so a test can prove the
+/// bound exists without waiting for it.
+pub fn can_start_within(bin: &Path, timeout: std::time::Duration) -> bool {
     match Command::new(bin)
         .arg("--version")
         .env("MARSPOT_NO_REDIRECT", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
+        .spawn()
     {
-        Ok(st) if st.success() => true,
+        Ok(mut child) => {
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(st)) if st.success() => return true,
+                    Ok(Some(st)) => {
+                        crate::lx_warn!(
+                            "binary_tree.can_start.exited",
+                            &format!("{} answered {st}", bin.display())
+                        );
+                        return false;
+                    }
+                    Ok(None) => {
+                        if std::time::Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            crate::lx_warn!(
+                                "binary_tree.can_start.timed_out",
+                                &format!(
+                                    "{} did not answer --version in {timeout:?}",
+                                    bin.display()
+                                )
+                            );
+                            return false;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(e) => {
+                        crate::lx_warn!(
+                            "binary_tree.can_start.wait_failed",
+                            &format!("{}: {e}", bin.display())
+                        );
+                        return false;
+                    }
+                }
+            }
+        }
         // A verdict with no reason is what made this expensive to
         // chase: every L3 refused to adopt a perfectly good image for
         // half an hour and all the log said was "could not start"
         // (2026-09-06).  The two cases are not alike — a non-zero exit
         // is the binary answering, a spawn error is the system
         // refusing — and only one of them means the binary is bad.
-        Ok(st) => {
-            crate::lx_warn!(
-                "binary_tree.can_start.exited",
-                &format!("{} answered {st}", bin.display())
-            );
-            false
-        }
         Err(e) => {
             crate::lx_warn!(
                 "binary_tree.can_start.spawn_failed",
@@ -402,5 +446,59 @@ mod tempdir_lite {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+}
+
+#[cfg(test)]
+mod probe_bound_tests {
+    use super::can_start;
+
+    /// A candidate that never answers must not hold the caller.
+    ///
+    /// The caller reads "probe outstanding" as "already handled", so an
+    /// unbounded wait here does not merely delay one check — it retires
+    /// that pane's self-update for the life of the process, silently.
+    ///
+    /// The candidate has to genuinely hang.  `/bin/sleep --version`
+    /// does not: it rejects the argument and exits at once, taking the
+    /// "answered non-zero" path and proving nothing about the bound.
+    #[test]
+    fn a_candidate_that_never_answers_is_given_up_on() {
+        let script = std::env::temp_dir()
+            .join(format!("marspot-probe-hang-{}", std::process::id()));
+        std::fs::write(&script, b"#!/bin/sh\nsleep 60\n").unwrap();
+        std::fs::set_permissions(
+            &script,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+
+        let budget = std::time::Duration::from_millis(300);
+        let t0 = std::time::Instant::now();
+        let verdict = super::can_start_within(&script, budget);
+        let took = t0.elapsed();
+        std::fs::remove_file(&script).ok();
+
+        assert!(!verdict, "a candidate that does not answer is not startable");
+        assert!(
+            took < budget * 8,
+            "gave up after {took:?} against a {budget:?} budget — not a bound"
+        );
+    }
+
+    /// A candidate that answers non-zero is rejected at once, not
+    /// waited out.
+    #[test]
+    fn a_candidate_that_refuses_is_rejected_immediately() {
+        let t0 = std::time::Instant::now();
+        assert!(!can_start(std::path::Path::new("/usr/bin/false")));
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    /// And a real binary still passes — the bound must not have turned
+    /// the check into "always no".
+    #[test]
+    fn a_working_binary_still_passes() {
+        assert!(can_start(std::path::Path::new("/usr/bin/true")));
     }
 }
