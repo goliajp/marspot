@@ -329,6 +329,14 @@ impl PaneBackend {
         }
     }
 
+    /// Tell the pane's L3 that its program prints unrendered markup.
+    /// The terminal that would draw it lives there.
+    pub fn forward_pane_render_markup(&mut self, on: bool) {
+        if let PaneBackend::L3(c) = self {
+            c.forward_pane_render_markup(on);
+        }
+    }
+
     /// Tell the pane's L3 that L1 took its foreground program down, so
     /// the terminal there should stop reporting mouse tracking as on.
     /// No-op on non-L3 backends: their terminal is in this process and
@@ -1073,6 +1081,14 @@ impl L3Conn {
         let frame = Frame::new(
             MsgType::PaneHoldGrid,
             crate::shell_proto::encode_pane_hold_grid(self.session_id, on),
+        );
+        let _ = self.control.send(frame);
+    }
+
+    fn forward_pane_render_markup(&mut self, on: bool) {
+        let frame = Frame::new(
+            MsgType::PaneRenderMarkup,
+            crate::shell_proto::encode_pane_render_markup(self.session_id, on),
         );
         let _ = self.control.send(frame);
     }

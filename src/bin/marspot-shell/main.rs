@@ -1185,6 +1185,11 @@ struct ShellApp {
     /// mid-boot, the wheel then did nothing at all).  So the shell
     /// keeps the mapping and replays it on every handshake.
     pane_wheel_keys: std::collections::HashMap<u64, plugins::host::PaneWheelKeysUpdate>,
+    pane_render_markup_rx:
+        std::sync::mpsc::Receiver<plugins::host::PaneRenderMarkupUpdate>,
+    /// The markup declarations in force, replayed on every handshake
+    /// for the same reason the wheel ones are: a plugin says it once.
+    pane_render_markup: std::collections::HashMap<u64, bool>,
     /// Same shape as `pane_badge_rx` but for plugin-set pane titles.
     pane_title_rx: std::sync::mpsc::Receiver<plugins::host::PaneTitleUpdate>,
     /// Receiver for `begin_pane_session` requests.
@@ -1595,6 +1600,7 @@ impl ShellApp {
             .expect("HOME must be set to manage binary slots");
         let (pane_badge_tx, pane_badge_rx) = std::sync::mpsc::channel();
         let (pane_wheel_keys_tx, pane_wheel_keys_rx) = std::sync::mpsc::channel();
+        let (pane_render_markup_tx, pane_render_markup_rx) = std::sync::mpsc::channel();
         let pane_badge_tx_clone = pane_badge_tx.clone();
         let (pane_title_tx, pane_title_rx) = std::sync::mpsc::channel();
         let pane_title_tx_clone = pane_title_tx.clone();
@@ -1648,6 +1654,7 @@ impl ShellApp {
                 let h = ShellPluginHost::new();
                 h.attach_pane_badge_tx(pane_badge_tx);
                 h.attach_pane_wheel_keys_tx(pane_wheel_keys_tx);
+                h.attach_pane_render_markup_tx(pane_render_markup_tx);
                 h.attach_pane_title_tx(pane_title_tx);
                 h.attach_pane_session_begin_tx(pane_session_begin_tx);
                 h.attach_pty_op_tx(pty_op_tx);
@@ -1682,6 +1689,8 @@ impl ShellApp {
             pane_badge_rx,
             pane_wheel_keys_rx,
             pane_wheel_keys: std::collections::HashMap::new(),
+            pane_render_markup_rx,
+            pane_render_markup: std::collections::HashMap::new(),
             pane_title_rx,
             pane_session_begin_rx,
             pty_op_rx,
@@ -1717,6 +1726,16 @@ impl ShellApp {
     /// shell closed it — but why?".  The 2026-06-15 incident debugging
     /// loop made this hole obvious: six core boots in three minutes
     /// and no log entry telling us which path was firing them.
+    fn send_pane_render_markup(&self, sid: u64, on: bool) {
+        let Some(conn) = self.active.as_ref() else {
+            return;
+        };
+        conn.send(
+            MsgType::PaneRenderMarkup,
+            marspot::shell_proto::encode_pane_render_markup(sid, on),
+        );
+    }
+
     fn send_pane_wheel_keys(&self, upd: &plugins::host::PaneWheelKeysUpdate) {
         let Some(conn) = self.active.as_ref() else {
             return;
@@ -1747,6 +1766,9 @@ impl ShellApp {
         );
         for upd in self.pane_wheel_keys.values() {
             self.send_pane_wheel_keys(upd);
+        }
+        for (sid, on) in &self.pane_render_markup {
+            self.send_pane_render_markup(*sid, *on);
         }
     }
 
@@ -2810,6 +2832,19 @@ impl ShellApp {
         // during a crash gap) → just drop the update; the next tick
         // will push the current mapping again (plugins re-issue every
         // transition, not just once).
+        while let Ok(upd) = self.pane_render_markup_rx.try_recv() {
+            let sid = upd.shelld_session_id;
+            lx_info!(
+                "shell.pane_render_markup.declared",
+                &format!("sid={sid} on={}", upd.on)
+            );
+            if upd.on {
+                self.pane_render_markup.insert(sid, true);
+            } else {
+                self.pane_render_markup.remove(&sid);
+            }
+            self.send_pane_render_markup(sid, upd.on);
+        }
         while let Ok(upd) = self.pane_wheel_keys_rx.try_recv() {
             let sid = upd.shelld_session_id;
             let cleared = upd.up.is_empty() && upd.down.is_empty();

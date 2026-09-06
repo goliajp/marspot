@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.132"  # codex 滚轮改用逐行方向键,一格不再翻一屏;详见 CHANGELOG.md
-core    = "0.12.179"  # 滚轮判定改信程序自己的 DEC 1007 声明,不再靠读屏幕猜;详见 CHANGELOG.md
-session = "0.11.65"  # <u> 渲染默认关闭 —— 全局开会吃掉谈论标签的文本;详见 CHANGELOG.md
+shell   = "0.7.133"  # codex 插件按 pane 声明"这个程序打印未渲染的标记";详见 CHANGELOG.md
+core    = "0.12.180"  # 转发 PaneRenderMarkup 到对应 L3;详见 CHANGELOG.md
+session = "0.11.66"  # <u> 渲染改为按 pane 由插件声明开启;详见 CHANGELOG.md

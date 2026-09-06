@@ -324,6 +324,21 @@ pub trait PluginHost: Send + Sync {
     /// `up`/`down` clears the declaration.
     ///
     /// Requires `SET_STATUS_LINE`.  Default no-op for test hosts.
+    /// Say that this pane's program prints markup it does not render,
+    /// so the terminal should draw it.
+    ///
+    /// Per pane, because a terminal is where people TALK about markup:
+    /// as a global setting it ate `<u>` out of the conversation that
+    /// specified the feature (2026-09-06).  Only the plugin driving a
+    /// program knows the program does not render its own HTML.
+    fn set_pane_render_markup(
+        &self,
+        _shelld_session_id: u64,
+        _on: bool,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+
     fn set_pane_wheel_keys(
         &self,
         _shelld_session_id: u64,

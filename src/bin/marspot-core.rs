@@ -2605,6 +2605,8 @@ enum CoreEvent {
     /// straight to the pane's L3 — the hold lives there so it survives
     /// this process being replaced by a silent update.
     PaneHoldGrid(u64, bool),
+    /// A plugin says this pane's program prints unrendered markup.
+    PaneRenderMarkup(u64, bool),
     /// L1 asks a pane to receive text as a paste.  Forwarded to the
     /// pane's L3, which is the only layer that knows whether the
     /// program in it has bracketed paste on.
@@ -2825,6 +2827,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::PaneHoldGrid => marspot::shell_proto::decode_pane_hold_grid(&f.payload)
             .ok()
             .map(|(sid, on)| CoreEvent::PaneHoldGrid(sid, on)),
+        MsgType::PaneRenderMarkup => marspot::shell_proto::decode_pane_render_markup(&f.payload)
+            .ok()
+            .map(|(sid, on)| CoreEvent::PaneRenderMarkup(sid, on)),
         MsgType::PaneResetMouseReporting => {
             marspot::shell_proto::decode_pane_reset_mouse_reporting(&f.payload)
                 .ok()
@@ -3930,6 +3935,19 @@ impl CoreApp {
         for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
             if pane.session().l3_session_id() == Some(shelld_session_id) {
                 pane.session_mut().forward_pane_hold_grid(on);
+                return;
+            }
+        }
+    }
+
+    /// Pass a plugin's markup declaration down to the pane's L3.
+    ///
+    /// L2 does not act on it: the terminal that would draw the markup
+    /// lives in L3, and L2's grid is a mirror of what L3 publishes.
+    fn forward_pane_render_markup(&mut self, shelld_session_id: u64, on: bool) {
+        for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
+            if pane.session().l3_session_id() == Some(shelld_session_id) {
+                pane.session_mut().forward_pane_render_markup(on);
                 return;
             }
         }
@@ -10121,6 +10139,9 @@ fn main() {
                 }
                 CoreEvent::PaneHoldGrid(sid, on) => {
                     app.forward_pane_hold_grid(sid, on);
+                }
+                CoreEvent::PaneRenderMarkup(sid, on) => {
+                    app.forward_pane_render_markup(sid, on);
                 }
                 CoreEvent::PaneInjectPaste(sid, text) => {
                     app.forward_pane_paste(sid, &text);

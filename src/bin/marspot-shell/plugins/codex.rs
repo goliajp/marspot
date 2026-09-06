@@ -196,6 +196,13 @@ impl Plugin for CodexPlugin {
                 // instead of opening it (2026-09-06: after leaving the
                 // view, scrolling could not get back in).
                 if !self.declared.contains(&sid) {
+                    // codex does not render HTML, so a model that
+                    // writes `<u>…</u>` has its markup land on screen
+                    // as text.  Declared per pane, never globally: a
+                    // terminal is where people TALK about markup, and
+                    // switched on everywhere it ate the tags out of
+                    // the conversation specifying this (2026-09-06).
+                    let _ = host.set_pane_render_markup(sid, true);
                     if host
                         .set_pane_wheel_keys(
                             sid,
@@ -222,6 +229,9 @@ impl Plugin for CodexPlugin {
             } else if self.last_badge.remove(&sid).is_some() {
                 if self.declared.remove(&sid) {
                     let _ = host.set_pane_wheel_keys(sid, b"", b"", b"", b"");
+                    // codex is gone; the pane is a shell again, and a
+                    // shell's `<u>` is somebody's text.
+                    let _ = host.set_pane_render_markup(sid, false);
                 }
                 // codex left this pane: clear the badge we set, and
                 // only the one we set — another plugin may own it now.

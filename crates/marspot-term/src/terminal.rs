@@ -149,6 +149,9 @@ pub struct Terminal {
     /// a global behind a lock, and `print` is the hottest loop in the
     /// terminal.
     u_tags: bool,
+    /// Did a plugin say this pane's program prints markup it does not
+    /// render?  See `MsgType::PaneRenderMarkup`.
+    render_markup: bool,
     /// Are we inside an unclosed `<u>`, collecting what it wraps?
     ///
     /// Only a MATCHED pair styles anything.  Turning underline on at
@@ -325,6 +328,7 @@ impl Terminal {
             response_burst_last_warn: None,
             cursor_key_application_mode: false,
             bracketed_paste_mode: false,
+            render_markup: false,
             u_tags: false,
             u_open: false,
             u_buf: String::new(),
@@ -403,6 +407,11 @@ impl Terminal {
     /// scrollback, which the user can actually see.
     pub fn alt_scroll_mode(&self) -> bool {
         self.alt_scroll && self.in_alt_screen()
+    }
+
+    /// Tell this terminal whether its program prints unrendered markup.
+    pub fn set_render_markup(&mut self, on: bool) {
+        self.render_markup = on;
     }
 
     /// Is a synchronized update open (`CSI ? 2026 h` with no `l` yet)?
@@ -579,8 +588,10 @@ impl Terminal {
         if bytes.is_empty() {
             return;
         }
-        // Once per chunk, not once per character.
-        self.u_tags = crate::settings::get().render_u_tags;
+        // Once per chunk, not once per character.  The pane's own
+        // declaration is the normal route; the setting is a manual
+        // override for someone who wants it everywhere.
+        self.u_tags = self.render_markup || crate::settings::get().render_u_tags;
         // RFC-002: bump the generation vector once per non-empty feed
         // batch.  Coarse but sufficient — the snapshot pump (step 6)
         // compares against `last_pushed_generation` to decide whether
@@ -5705,6 +5716,15 @@ mod alt_screen_across_execv_tests {
 mod u_tag_tests {
     use super::Terminal;
 
+    /// A pane whose plugin has said its program prints markup it does
+    /// not render.  That declaration is the only thing that turns this
+    /// on — see `MsgType::PaneRenderMarkup`.
+    fn declared(cols: u16, rows: u16) -> Terminal {
+        let mut t = Terminal::new(cols, rows);
+        t.set_render_markup(true);
+        t
+    }
+
     fn row(t: &Terminal, r: u16) -> String {
         (0..t.grid().cols()).map(|c| t.grid().cell(c, r).ch).collect()
     }
@@ -5715,7 +5735,7 @@ mod u_tag_tests {
     /// A matched pair styles what it wraps and nothing else.
     #[test]
     fn a_matched_pair_underlines_what_it_wraps() {
-        let mut t = Terminal::new(20, 2);
+        let mut t = declared(20, 2);
         t.feed(b"a<u>bc</u>d");
         assert_eq!(row(&t, 0).trim_end(), "abcd", "the tags are styling, not text");
         assert!(!under(&t, 0), "before");
@@ -5730,7 +5750,7 @@ mod u_tag_tests {
     /// pins (2026-09-06).
     #[test]
     fn an_unmatched_open_tag_is_just_text() {
-        let mut t = Terminal::new(40, 2);
+        let mut t = declared(40, 2);
         t.feed(b"see <u> in the docs");
         t.feed(b"\r\n");
         assert_eq!(row(&t, 0).trim_end(), "see <u> in the docs");
@@ -5744,7 +5764,7 @@ mod u_tag_tests {
     /// rest of the line out of the place the program laid it out for.
     #[test]
     fn matched_tags_occupy_no_cells() {
-        let mut t = Terminal::new(20, 2);
+        let mut t = declared(20, 2);
         t.feed(b"<u>ab</u>!");
         assert_eq!(row(&t, 0).trim_end(), "ab!");
         assert_eq!(t.grid().cursor().0, 3, "cursor sits right after the text");
@@ -5756,7 +5776,7 @@ mod u_tag_tests {
     /// A closing tag with nothing open is text too.
     #[test]
     fn a_stray_closing_tag_is_just_text() {
-        let mut t = Terminal::new(30, 2);
+        let mut t = declared(30, 2);
         t.feed(b"a</u>b");
         assert_eq!(row(&t, 0).trim_end(), "a</u>b");
         assert!(!under(&t, 0) && !under(&t, 5));
@@ -5766,7 +5786,7 @@ mod u_tag_tests {
     /// comes back as text.
     #[test]
     fn a_span_broken_by_a_newline_is_not_styled() {
-        let mut t = Terminal::new(30, 3);
+        let mut t = declared(30, 3);
         t.feed(b"x<u>abc\r\ndef</u>");
         assert_eq!(row(&t, 0).trim_end(), "x<u>abc");
         for c in 0..7 {
@@ -5778,7 +5798,7 @@ mod u_tag_tests {
     /// the terminal's, not the chunk's.
     #[test]
     fn a_tag_split_across_reads_still_counts() {
-        let mut t = Terminal::new(20, 2);
+        let mut t = declared(20, 2);
         t.feed(b"a<");
         t.feed(b"u>b");
         t.feed(b"</u>c");
@@ -5790,7 +5810,7 @@ mod u_tag_tests {
     #[test]
     fn text_that_is_not_a_tag_is_printed_verbatim() {
         for text in ["a<b>c", "a<ub>c", "a</x>c", "a<uu>c", "if a<b then"] {
-            let mut t = Terminal::new(30, 2);
+            let mut t = declared(30, 2);
             t.feed(text.as_bytes());
             assert_eq!(row(&t, 0).trim_end(), text, "{text:?} was altered");
         }
@@ -5799,7 +5819,7 @@ mod u_tag_tests {
     /// A dangling `<` at the end of a line must still appear.
     #[test]
     fn a_dangling_open_bracket_is_not_eaten() {
-        let mut t = Terminal::new(20, 2);
+        let mut t = declared(20, 2);
         t.feed(b"a<");
         t.feed(b"\r\n");
         assert!(row(&t, 0).starts_with("a<"), "got {:?}", row(&t, 0));
@@ -5810,9 +5830,21 @@ mod u_tag_tests {
     /// feature existed.
     #[test]
     fn an_escape_sequence_inside_a_span_falls_back_to_text() {
-        let mut t = Terminal::new(40, 2);
+        let mut t = declared(40, 2);
         t.feed(b"<u>ab\x1b[31mcd</u>");
         assert!(row(&t, 0).starts_with("<u>ab"), "got {:?}", row(&t, 0));
         assert!(!under(&t, 3));
+    }
+
+    /// An UNDECLARED pane leaves the characters alone.  This is the
+    /// default, and it is what makes the feature safe to have at all:
+    /// the panes where people discuss markup are not the panes a
+    /// plugin declared.
+    #[test]
+    fn an_undeclared_pane_shows_the_tags() {
+        let mut t = Terminal::new(30, 2);
+        t.feed(b"a<u>bc</u>d");
+        assert_eq!(row(&t, 0).trim_end(), "a<u>bc</u>d");
+        assert!(!under(&t, 1));
     }
 }

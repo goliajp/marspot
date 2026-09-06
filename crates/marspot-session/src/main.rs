@@ -161,6 +161,9 @@ enum SessionEvent {
     /// L1 (through L2) asks this pane to hold its picture where it is,
     /// or to let it go.  See `LocalSession::hold_grid`.
     HoldGrid(bool),
+    /// A plugin says this pane's program prints markup it does not
+    /// render — see `MsgType::PaneRenderMarkup`.
+    RenderMarkup(bool),
     Key(MarspotKeyEvent, Modifiers),
     /// L2 forwarded a cell-grid resize (window/layout changed). L3 resizes
     /// its Terminal + ioctl's the PTY (via shelld) + reflows, then
@@ -881,6 +884,15 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
                         marspot_term::shell_proto::decode_pane_hold_grid(&f.payload)
                     {
                         if tx.send(SessionEvent::HoldGrid(on)).is_err() {
+                            break;
+                        }
+                    }
+                }
+                MsgType::PaneRenderMarkup => {
+                    if let Ok((_sid, on)) =
+                        marspot_term::shell_proto::decode_pane_render_markup(&f.payload)
+                    {
+                        if tx.send(SessionEvent::RenderMarkup(on)).is_err() {
                             break;
                         }
                     }
@@ -1756,6 +1768,15 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                         session.hold_grid(false);
                     }
                     predicted |= handle_key(&mut session, e, m)
+                }
+                SessionEvent::RenderMarkup(on) => {
+                    lx_event!(
+                        "L3_RENDER_MARKUP",
+                        "a plugin declared this pane's program prints unrendered markup",
+                        session_id = session.id(),
+                        on = on as u32
+                    );
+                    session.terminal_mut().set_render_markup(on);
                 }
                 SessionEvent::HoldGrid(on) => {
                     if session.is_holding() != on {

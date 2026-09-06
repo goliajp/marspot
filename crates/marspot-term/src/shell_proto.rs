@@ -507,6 +507,16 @@ pub enum MsgType {
     /// measured, a second `Ctrl+T` closes codex's transcript, so a
     /// stale flag does not merely fail to open the view, it shuts it.
     PaneWheelKeys = 79,
+    /// A plugin's statement that THIS pane's program prints markup it
+    /// does not render, so the terminal should.
+    ///
+    /// Per pane and not a global setting, because a terminal is where
+    /// people TALK about markup: switched on everywhere it ate `<u>`
+    /// out of the conversation specifying the feature, including the
+    /// user's own words coming back on screen (2026-09-06).  Only the
+    /// plugin driving a program knows the program does not render its
+    /// own HTML.
+    PaneRenderMarkup = 80,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -575,6 +585,7 @@ impl MsgType {
             77 => MsgType::WindowChrome,
             78 => MsgType::PaneResetMouseReporting,
             79 => MsgType::PaneWheelKeys,
+            80 => MsgType::PaneRenderMarkup,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1727,6 +1738,25 @@ pub fn decode_pane_hold_grid(payload: &[u8]) -> io::Result<(u64, bool)> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "PaneHoldGrid payload too short",
+        ));
+    }
+    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    Ok((sid, payload[8] != 0))
+}
+
+/// PaneRenderMarkup payload: `session_id u64 LE, on u8`.
+pub fn encode_pane_render_markup(session_id: u64, on: bool) -> Vec<u8> {
+    let mut v = Vec::with_capacity(9);
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.push(on as u8);
+    v
+}
+
+pub fn decode_pane_render_markup(payload: &[u8]) -> io::Result<(u64, bool)> {
+    if payload.len() < 9 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PaneRenderMarkup payload too short",
         ));
     }
     let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
@@ -3448,5 +3478,24 @@ mod tests {
         // not.
         assert!(decode_file_drop(&payload[..10]).is_err());
         assert!(decode_file_drop(&payload[..payload.len() - 8]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod render_markup_tests {
+    use super::*;
+
+    #[test]
+    fn pane_render_markup_round_trips() {
+        for on in [true, false] {
+            let (sid, got) =
+                decode_pane_render_markup(&encode_pane_render_markup(4_242, on)).unwrap();
+            assert_eq!((sid, got), (4_242, on));
+        }
+    }
+
+    #[test]
+    fn a_truncated_payload_is_an_error_not_a_guess() {
+        assert!(decode_pane_render_markup(&[0u8; 8]).is_err());
     }
 }
