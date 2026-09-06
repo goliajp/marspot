@@ -3788,6 +3788,55 @@ mod tests {
             "{v2:?}"
         );
     }
+
+    /// 2026-09-06 field report, inside codex: the path came out
+    /// underlined only as far as `…/lab36-continus/`, dropping the
+    /// `.tmp/…` tail and the wrapped remainder.
+    ///
+    /// The geometry is taken off the pane it happened in — 73 columns,
+    /// codex's `›` prompt glyph, and codex's own line break with a
+    /// two-space hanging indent (no DECAWM flag, because codex wrapped
+    /// it, not the terminal).  The scanner handles this shape; what
+    /// failed was `tui_mode` being off for that pane, which is fixed
+    /// on the marspot side.  Held here because the shape is the thing
+    /// that has to keep working.
+    #[test]
+    fn a_codex_wrapped_path_with_a_dot_directory_survives() {
+        let root = std::env::temp_dir()
+            .join(format!("marspot-linkify-codexwrap-{}", std::process::id()));
+        let deep = root.join(".tmp");
+        std::fs::create_dir_all(&deep).unwrap();
+        let file = deep.join("20260906-claude-to-gpt6-guard-scope.md");
+        std::fs::write(&file, b"x").unwrap();
+        let full = file.display().to_string();
+
+        // Break it where codex would: leaving the tail on the next row
+        // behind a hanging indent.
+        let cut = full.len() - "gpt6-guard-scope.md".len();
+        let head = format!("\u{203a} {}", &full[..cut]);
+        let tail = format!("  {}", &full[cut..]);
+        // The real row sat two columns short of the pane edge (71 of
+        // 73); keep that slack, since "ends flush" is a signal the
+        // continuation test reads.
+        let cols = head.chars().count() as u16 + 2;
+        let mut src = StrSource::new(&[&head, &tail], cols);
+        src.soft_wrapped[1] = false; // codex wrapped it, not the terminal
+
+        let on = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let off = scan_visible_links(&src, ScanOpts { tui_mode: false });
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(
+            on.iter().all(|l| l.text == full),
+            "an agent TUI's own wrap must merge: {on:?}"
+        );
+        assert!(!on.is_empty(), "the path vanished entirely");
+        assert!(
+            off.iter().all(|l| l.text != full),
+            "without tui_mode the merge is not attempted — this is what \
+             made the pane's mode the whole ballgame: {off:?}"
+        );
+    }
 }
 
 

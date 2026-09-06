@@ -162,6 +162,20 @@ pub struct SessionView<'a> {
     /// plugins can surface per-pane metadata without overloading the
     /// main title.  Empty = nothing drawn.  See `MsgType::PaneBadge`.
     pub right_badge: &'a str,
+    /// Is this pane painted by an agent TUI that wraps its own lines?
+    ///
+    /// Such a program renders a URL or path to a fixed inner width and
+    /// starts the remainder on a new line with a hanging indent — no
+    /// DECAWM wrap flag, because it never let the terminal wrap.  The
+    /// link scanner has to be told, or every such path is cut at the
+    /// break (2026-09-06 field report, inside codex).
+    ///
+    /// It used to be inferred from "the badge is non-empty", which is
+    /// the wrong fact: a plugin whose badge text momentarily comes out
+    /// empty still owns the pane, and the links would silently start
+    /// truncating.  A wheel-key declaration is the durable assertion —
+    /// a plugin only makes it about a program it is driving.
+    pub agent_tui: bool,
     /// C1 — total cell-rows reserved below the title strip for
     /// `ToolSlot::TopFixed` tools.  Sum of each TopFixed tool's
     /// `fixed_height_rows()`.  The renderer shifts the grid inner

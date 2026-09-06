@@ -5370,12 +5370,12 @@ fn push_session(
     // for cells inside a link span (paint the text the same cyan as
     // the underline, the standard "this is clickable" cue) and the
     // underline pass below can reuse the same list.
-    // cc-mode: a non-empty plugin badge identifies a claudecode pane;
-    // tell the link scanner so it merges the hanging-indent
-    // continuation rows into one logical URL/path token.  Inert on
-    // non-cc panes (badge is empty).  See `ScanOpts::cc_mode`.
+    // An agent TUI wraps its own lines, so tell the link scanner to
+    // merge the hanging-indent continuation into one logical URL /
+    // path token.  Inert on ordinary panes.  See `SessionView::
+    // agent_tui` for why this is no longer inferred from the badge.
     let link_opts = marspot_term::grid_links::ScanOpts {
-        cc_mode: !view.right_badge.is_empty(),
+        cc_mode: view.agent_tui,
     };
     // The oracle is what keeps this call off the filesystem: on the
     // render thread a single `lstat` under a network mount or the
@@ -8551,7 +8551,7 @@ mod tests {
                 dormant: false,
                 recede: 0,
                 scrim: 0.0,
-                right_badge: "",
+                right_badge: "", agent_tui: false,
                 top_fixed_h_cells: 0,
                 bot_fixed_h_cells: 0,
                 highlight_spans: &[],
@@ -8832,7 +8832,7 @@ mod tests {
         let view = SessionView {
             grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
             title: "", selection: None, ime_preedit: "", update_pending: false,
-            right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
+            right_badge: "", agent_tui: false, top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[], search_overlay: None, seq: 0,
             dormant: false, recede: 0, scrim: 0.0,
         };
@@ -9032,7 +9032,7 @@ mod tests {
         let mk = |focused: bool, dormant: bool, recede: u32| SessionView {
             grid: &grid, view_offset: 0, cursor_visible: false, focused,
             title: "", selection: None, ime_preedit: "", update_pending: false,
-            right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
+            right_badge: "", agent_tui: false, top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[], search_overlay: None, seq: 0,
             dormant, recede, scrim: attention_scrim(focused, recede),
         };
@@ -9131,7 +9131,7 @@ mod tests {
             dormant: false,
             recede: 0,
             scrim,
-            right_badge: "",
+            right_badge: "", agent_tui: false,
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
@@ -9225,7 +9225,7 @@ mod tests {
             dormant: false,
             recede: 0,
             scrim: 0.0,
-            right_badge: "",
+            right_badge: "", agent_tui: false,
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
@@ -9335,7 +9335,7 @@ mod tests {
             dormant: false,
             recede: 0,
             scrim: 0.0,
-            right_badge: "",
+            right_badge: "", agent_tui: false,
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
@@ -9418,7 +9418,7 @@ mod tests {
             dormant: false,
             recede: 0,
             scrim: 0.0,
-            right_badge: "",
+            right_badge: "", agent_tui: false,
             top_fixed_h_cells: top_fixed,
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
@@ -9525,7 +9525,7 @@ mod tests {
             dormant: false,
             recede: 0,
             scrim: 0.0,
-            right_badge: "",
+            right_badge: "", agent_tui: false,
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
             highlight_spans: &spans,
@@ -9545,7 +9545,7 @@ mod tests {
             dormant: false,
             recede: 0,
             scrim: 0.0,
-            right_badge: view.right_badge,
+            right_badge: view.right_badge, agent_tui: view.agent_tui,
             top_fixed_h_cells: view.top_fixed_h_cells,
             bot_fixed_h_cells: view.bot_fixed_h_cells,
             highlight_spans: &[],
@@ -9654,7 +9654,7 @@ mod tests {
             dormant: false,
             recede: 0,
             scrim: 0.0,
-            right_badge: "",
+            right_badge: "", agent_tui: false,
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
             highlight_spans: &spans,
@@ -9727,7 +9727,7 @@ mod tests {
             title: "", selection: None, ime_preedit: "", update_pending: false, dormant: false,
                                                                                 recede: 0,
                 scrim: 0.0,
-            right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
+            right_badge: "", agent_tui: false, top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
             seq: 0,
@@ -9737,7 +9737,7 @@ mod tests {
             title: "", selection: None, ime_preedit: "", update_pending: false, dormant: false,
                                                                                 recede: 0,
                 scrim: 0.0,
-            right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 2,
+            right_badge: "", agent_tui: false, top_fixed_h_cells: 0, bot_fixed_h_cells: 2,
             highlight_spans: &[],
             search_overlay: None,
             seq: 0,

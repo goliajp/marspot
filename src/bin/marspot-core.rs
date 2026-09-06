@@ -6558,11 +6558,13 @@ impl CoreApp {
         // width and hard-newlines with a hanging indent.  Tell the
         // link scanner so it merges the continuation into one
         // logical token.  See `grid_links::ScanOpts::cc_mode`.
-        let cc_mode = pane
-            .shelld_session_id()
-            .and_then(|sid| self.pane_badges.get(&sid))
-            .map(|b| !b.is_empty())
-            .unwrap_or(false);
+        // Same answer the render pass uses — see the `agent_tui`
+        // comment there.  A hit-test that disagreed with what was
+        // drawn would underline one span and click another.
+        let cc_mode = pane.shelld_session_id().is_some_and(|sid| {
+            self.pane_wheel_keys.contains_key(&sid)
+                || self.pane_badges.get(&sid).is_some_and(|b| !b.is_empty())
+        });
         let opts = marspot::grid_links::ScanOpts { cc_mode };
         // The same non-blocking oracle the render pass uses, for two
         // reasons.  The obvious one: this runs on the main loop's
@@ -8727,10 +8729,20 @@ impl CoreApp {
                     .shelld_session_id()
                     .and_then(|sid| self.pane_badges.get(&sid).map(|s| s.as_str()))
                     .unwrap_or("");
+                // A plugin only declares wheel keys about a program
+                // it is actually driving, and the declaration survives
+                // a core swap — so it is the durable answer to "does
+                // an agent TUI paint this pane", where a badge that
+                // can momentarily read empty is not.
+                let agent_tui = p
+                    .shelld_session_id()
+                    .is_some_and(|sid| self.pane_wheel_keys.contains_key(&sid))
+                    || !badge.is_empty();
                 let mut v = p.view(
                     i == focused,
                     titles.get(i).map(|s| s.as_str()).unwrap_or(""),
                     badge,
+                    agent_tui,
                 );
                 if i == focused && p.view_offset() == 0 {
                     v.ime_preedit = win!(self, wi).ime_preedit.as_str();

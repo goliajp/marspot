@@ -2846,7 +2846,38 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.177**
+Current: **0.12.178**
+
+### 0.12.178
+
+"Does an agent TUI paint this pane" stops being read off the badge.
+
+A path printed by codex came out underlined only as far as
+`…/lab36-continus/`, losing the `.tmp/…` tail and everything after the
+line break (2026-09-06 field report).  Bisected against the real row —
+73 columns, codex's `›` glyph, codex's own break with a two-space
+hanging indent:
+
+    one line, any mode        → whole path
+    codex's own wrap, tui on  → whole path
+    codex's own wrap, tui off → truncated at `…/lab36-continus/`
+
+So the shape was handled; the pane was in the wrong mode.  The mode
+came from "the plugin badge is non-empty", and codex's badge is built
+from a model and an effort read off disk — a read that comes back
+empty leaves the badge empty, and with it the pane silently stops
+merging wrapped links.  Coupling link scanning to whether a plugin
+managed to render a caption is the actual defect.
+
+The declaration of wheel keys is the durable fact instead: a plugin
+only makes it about a program it is driving, and it survives a core
+swap.  `SessionView::agent_tui` carries it, and the hit-test reads the
+same answer as the render pass — the two disagreeing would underline
+one span and open another.
+
+(A DECAWM wrap whose continuation begins with a space is still not
+merged, and should not be: there the space is the next character, so
+the path really does end.)
 
 ### 0.12.177
 

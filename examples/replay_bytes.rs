@@ -21,6 +21,10 @@ fn main() {
             .map(|c| g.cell(c, row).ch)
             .filter(|c| *c != '\0')
             .collect();
-        println!("{row:>3} |{}|", line.trim_end());
+        // The wrap flag is the datum that decides whether the row
+        // above continues into this one — a path broken across it is
+        // merged only when the terminal says it wrapped.
+        let w = if g.wrapped_at_view(0, row) { "↩" } else { " " };
+        println!("{row:>3}{w}|{}|", line.trim_end());
     }
 }
