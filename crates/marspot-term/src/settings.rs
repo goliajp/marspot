@@ -76,10 +76,15 @@ pub struct Settings {
     /// model meant to underline arrives wearing its markup (reported
     /// 2026-09-06, with the ruling: "<u></u> 是下划线，你就渲染就好了").
     ///
-    /// The cost is real and is why this is a setting: a program that
-    /// legitimately prints those three characters — `cat` of an HTML
-    /// or JSX file — loses them to the styling.  Turn it off and the
-    /// tags come back.
+    /// OFF, and the reason is the cost, which turned out to be much
+    /// larger than "someone cats an HTML file": a terminal is where
+    /// people TALK about markup.  Switched on globally it ate the tags
+    /// out of the conversation that was specifying the feature —
+    /// including the user's own words as they came back on screen
+    /// (2026-09-06).  Whose output should be treated as markup is not
+    /// a property of the terminal; it belongs to the pane, and only
+    /// the plugin driving a program knows the program does not render
+    /// its own HTML.
     pub render_u_tags: bool,
     /// How far a pane that is not the one you are in steps back,
     /// as a multiplier on the attention ladder.
@@ -121,7 +126,7 @@ impl Default for Settings {
             reclaim_idle_minutes: 30,
             reclaim_prefetch: true,
             appearance_circled_wide: false,
-            render_u_tags: true,
+            render_u_tags: false,
             dim_scale: 1.0,
             scroll_factor: 1.0,
             cc_statusline_hook: false,
