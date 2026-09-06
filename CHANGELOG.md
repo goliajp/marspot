@@ -28,7 +28,66 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.134**
+Current: **0.7.137**
+
+### 0.7.137
+
+Right-click on a codex badge picks the reasoning effort.
+
+The item RFC-008 listed as not done, deferred on the grounds that
+codex's resume semantics were unknown and guessing puts a plugin in a
+position to kill a running agent.  Measured instead of guessed:
+
+- `codex resume --last` filters the picker by WORKING DIRECTORY, so
+  inside a pane's own cwd the most recent session is that pane's.
+- a `-c` value is parsed as TOML and falls back to the raw string, so
+  `-c model_reasoning_effort=high` needs no quotes — which matters,
+  because the command line rejects quotes as a class rather than
+  escaping them.
+- `low`/`medium`/`high` come from codex's own serde variant table; the
+  only `minimal` in that binary belongs to filesystem paths.
+
+On killing a running agent: claudecode's profile-cycle does exactly
+this today, and the click is the authorisation.  What it blocks is a
+session held by another process, not an agent that happens to be busy.
+
+The effort goes through `-c`, not an edit to `~/.codex/config.toml`:
+the config says what a FRESH codex starts with, and one pane's choice
+has no business deciding that for every other.
+
+### 0.7.136
+
+The rollout index is cached by working directory.
+
+0.7.135 looked at the twelve newest session files, and the directory
+holds thirty: of three codex panes only one found its own record and
+the other two fell back to the global config.  Falling back is safe by
+design, but a third of the panes is not "done".
+
+The fix changed the shape as well as the bound: WHICH file belongs to a
+cwd barely changes (rescanned every 20 s), while that file's CONTENT
+changes constantly (re-read only when its mtime moves).  Steady state
+is one `stat` per codex pane.
+
+### 0.7.135
+
+The codex badge reads what THIS pane's session is running.
+
+It read `~/.codex/config.toml`, which says what a fresh codex would
+start with — not what the one in this pane is doing.  Two panes on
+different efforts both showed the global value.
+
+codex writes a `turn_context` per turn carrying `cwd`, `model` and
+`effort` together, so the last one in a session's rollout is the
+answer, matched to a pane by the codex process's own working
+directory.  Bounded: rollouts reach 63 MB in the field, so only the
+last 256 KiB is read, and a record that cannot be found leaves the
+badge on the global fallback rather than on a wrong value.  Parsed by
+field rather than as JSON, so a format change degrades to "no facts"
+instead of to a wrong badge.
+
+Measured on the machine it shipped to: two codex panes that had both
+read `medium` came back `high` and `medium`.
 
 ### 0.7.134
 
