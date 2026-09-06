@@ -209,15 +209,80 @@ fn tail_of(path: &std::path::Path) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// What the codex in `cwd` is running, or None if its record cannot be
-/// found — in which case the caller keeps whatever it had.
-fn facts_for_cwd(codex_home: &std::path::Path, cwd: &str) -> Option<SessionFacts> {
-    for path in recent_rollouts(codex_home).into_iter().take(12) {
-        if let Some(f) = tail_of(&path).and_then(|t| facts_from_tail(&t, cwd)) {
-            return Some(f);
+/// Which rollout belongs to which working directory, and what it last
+/// said.
+///
+/// Finding a pane's rollout means opening files until one claims its
+/// cwd, and there are dozens.  Doing that per pane per tick is the
+/// wrong shape: the mapping barely changes, while the CONTENT of one
+/// file changes constantly.  So the mapping is rebuilt on a slow
+/// cadence and the content is re-read only when that file's mtime
+/// moves — steady state is one `stat` per codex pane.
+#[derive(Default)]
+pub(crate) struct RolloutIndex {
+    by_cwd: std::collections::HashMap<String, PathBuf>,
+    facts: std::collections::HashMap<String, (std::time::SystemTime, SessionFacts)>,
+    scanned_at: Option<std::time::Instant>,
+}
+
+impl RolloutIndex {
+    /// A new session's first turn should show up quickly; a rescan is
+    /// a directory walk plus a bounded number of tail reads, so it is
+    /// not something to do every tick.
+    const RESCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
+
+    fn rescan_if_due(&mut self, codex_home: &std::path::Path) {
+        if self
+            .scanned_at
+            .is_some_and(|t| t.elapsed() < Self::RESCAN_EVERY)
+        {
+            return;
+        }
+        self.scanned_at = Some(std::time::Instant::now());
+        self.by_cwd.clear();
+        // Newest first, so the freshest session wins a cwd two
+        // sessions have shared.
+        for path in recent_rollouts(codex_home).into_iter().take(40) {
+            let Some(tail) = tail_of(&path) else { continue };
+            let Some(cwd) = last_turn_cwd(&tail) else { continue };
+            self.by_cwd.entry(cwd).or_insert(path);
         }
     }
-    None
+
+    /// What the codex in `cwd` is running, or None when its record
+    /// cannot be found — in which case the caller keeps what it had.
+    fn facts_for_cwd(
+        &mut self,
+        codex_home: &std::path::Path,
+        cwd: &str,
+    ) -> Option<SessionFacts> {
+        self.rescan_if_due(codex_home);
+        let path = self.by_cwd.get(cwd)?.clone();
+        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+        if let Some((seen, f)) = self.facts.get(cwd) {
+            if *seen == mtime {
+                return Some(SessionFacts {
+                    model: f.model.clone(),
+                    effort: f.effort.clone(),
+                });
+            }
+        }
+        let facts = tail_of(&path).and_then(|t| facts_from_tail(&t, cwd))?;
+        let copy = SessionFacts {
+            model: facts.model.clone(),
+            effort: facts.effort.clone(),
+        };
+        self.facts.insert(cwd.to_string(), (mtime, facts));
+        Some(copy)
+    }
+}
+
+/// The cwd of the last `turn_context` in a tail, whatever it is.
+fn last_turn_cwd(tail: &str) -> Option<String> {
+    tail.lines()
+        .rev()
+        .find(|l| l.contains("\"turn_context\""))
+        .and_then(|l| json_str_field(l, "cwd"))
 }
 
 /// `gpt-6-astra·high` — the shape claudecode's badge already uses for
@@ -239,6 +304,7 @@ pub struct CodexPlugin {
     /// Sessions we have already told L2 about, so an unchanged scan
     /// does not re-send the same declaration every two seconds.
     declared: std::collections::HashSet<u64>,
+    rollouts: RolloutIndex,
 }
 
 impl CodexPlugin {
@@ -247,6 +313,7 @@ impl CodexPlugin {
             initialised: false,
             last_badge: std::collections::HashMap::new(),
             declared: std::collections::HashSet::new(),
+            rollouts: RolloutIndex::default(),
         }
     }
 }
@@ -310,7 +377,7 @@ impl Plugin for CodexPlugin {
             // found (a session that has not written a turn yet).
             let facts = codex_pid
                 .and_then(pidtree::proc_cwd)
-                .and_then(|cwd| facts_for_cwd(&home, &cwd.to_string_lossy()));
+                .and_then(|cwd| self.rollouts.facts_for_cwd(&home, &cwd.to_string_lossy()));
             let (model, effort) = match facts {
                 Some(f) => (
                     f.model.or_else(|| cfg_model.clone()),
