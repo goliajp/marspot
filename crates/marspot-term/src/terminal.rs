@@ -143,6 +143,17 @@ pub struct Terminal {
     /// auto-inserts spaces between CJK characters — the "粘贴中文都
     /// 多了空格" symptom.
     bracketed_paste_mode: bool,
+    /// Draw `<u>…</u>` as underline — `appearance.render_u_tags`.
+    ///
+    /// Cached per feed rather than read per character: the setting is
+    /// a global behind a lock, and `print` is the hottest loop in the
+    /// terminal.
+    u_tags: bool,
+    /// Characters held back while `<`… might turn out to be a tag.
+    ///
+    /// At most four (`</u>`).  Anything that stops being a prefix is
+    /// printed, in order, exactly as it arrived.
+    u_buf: String,
     /// DEC mode 1007 — alternate scroll mode.
     ///
     /// The program's own statement that, on this screen, the wheel
@@ -299,6 +310,8 @@ impl Terminal {
             response_burst_last_warn: None,
             cursor_key_application_mode: false,
             bracketed_paste_mode: false,
+            u_tags: false,
+            u_buf: String::new(),
             alt_scroll: false,
             sync_output: false,
             cursor_visible: true,
@@ -550,6 +563,8 @@ impl Terminal {
         if bytes.is_empty() {
             return;
         }
+        // Once per chunk, not once per character.
+        self.u_tags = crate::settings::get().render_u_tags;
         // RFC-002: bump the generation vector once per non-empty feed
         // batch.  Coarse but sufficient — the snapshot pump (step 6)
         // compares against `last_pushed_generation` to decide whether
@@ -586,6 +601,8 @@ impl Terminal {
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let sync_output = &mut self.sync_output;
             let alt_scroll = &mut self.alt_scroll;
+            let u_tags = self.u_tags;
+            let u_buf = &mut self.u_buf;
             let cursor_visible = &mut self.cursor_visible;
             let mouse_tracking_mode = &mut self.mouse_tracking_mode;
             let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
@@ -603,6 +620,8 @@ impl Terminal {
                 bracketed_paste,
                 sync_output,
                 alt_scroll,
+                u_tags,
+                u_buf,
                 cursor_visible,
                 mouse_tracking_mode,
                 mouse_sgr_encoding,
@@ -732,6 +751,8 @@ impl Terminal {
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let sync_output = &mut self.sync_output;
             let alt_scroll = &mut self.alt_scroll;
+            let u_tags = self.u_tags;
+            let u_buf = &mut self.u_buf;
             let cursor_visible = &mut self.cursor_visible;
             let mouse_tracking_mode = &mut self.mouse_tracking_mode;
             let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
@@ -749,6 +770,8 @@ impl Terminal {
                 bracketed_paste,
                 sync_output,
                 alt_scroll,
+                u_tags,
+                u_buf,
                 cursor_visible,
                 mouse_tracking_mode,
                 mouse_sgr_encoding,
@@ -1769,6 +1792,9 @@ struct Handler<'a> {
     sync_output: &'a mut bool,
     /// DEC 1007 — see `Terminal::alt_scroll`.
     alt_scroll: &'a mut bool,
+    /// `appearance.render_u_tags` — see `Terminal::u_tags`.
+    u_tags: bool,
+    u_buf: &'a mut String,
     cursor_visible: &'a mut bool,
     mouse_tracking_mode: &'a mut MouseTrackingMode,
     mouse_sgr_encoding: &'a mut bool,
@@ -2028,6 +2054,26 @@ impl<'a> Handler<'a> {
     /// combining mark must still see it as the open cluster).
     fn print_ascii_run(&mut self, run: &[u8]) {
         debug_assert!(run.iter().all(|&b| (0x20..=0x7E).contains(&b)));
+        // This lane exists to skip the per-character path, which is
+        // exactly where `<u>` is recognised.  A run holding no `<`
+        // keeps the whole optimisation; one that does gives up only
+        // from the `<` onward.  A tag left half-matched by the
+        // previous chunk has the same claim on this run's head.
+        if self.u_tags && (!self.u_buf.is_empty() || run.contains(&b'<')) {
+            let split = if self.u_buf.is_empty() {
+                run.iter().position(|b| *b == b'<').unwrap_or(0)
+            } else {
+                0
+            };
+            let (head, tail) = run.split_at(split);
+            if !head.is_empty() {
+                self.print_ascii_run(head);
+            }
+            for &b in tail {
+                self.print(b as char);
+            }
+            return;
+        }
         if !self.batch_prologue_flush(false) {
             for &b in run {
                 self.print(b as char);
@@ -2118,6 +2164,16 @@ impl<'a> Handler<'a> {
     /// sees an open cluster.
     fn print_wide_run(&mut self, run: &[u8]) {
         debug_assert!(run.len() % 3 == 0 && run.len() >= 6);
+        // A `<` held from the previous chunk cannot be a tag once a
+        // wide character follows; print it before the bulk write, or
+        // it would sit in the buffer and attach itself to whatever
+        // ASCII comes next.
+        if !self.u_buf.is_empty() {
+            let held = std::mem::take(self.u_buf);
+            for c in held.chars() {
+                self.print_glyph(c);
+            }
+        }
         let head = char::from_u32(decode3_cp(&run[..3]))
             .expect("scan admitted only fast-class scalars");
         let head_is_hangul = matches!(head as u32, 0xAC00..=0xD7A3);
@@ -2425,54 +2481,49 @@ impl<'a> Handler<'a> {
 
 impl<'a> ParserCallbacks for Handler<'a> {
     fn print(&mut self, ch: char) {
-        // FAST PATH — a `boring_width` char (ASCII / CJK / kana / …)
-        // arriving while the buffer holds nothing or one boring char.
-        // UAX #29 has no rule joining Other+Other, so the boundary is
-        // unconditional and the segmenter can be skipped entirely;
-        // width comes from the same range match.  This is what keeps
-        // `cat` of plain text / CJK prose from paying 3× gbp + incb
-        // + pictographic table walks per printable (measured ~84 % /
-        // ~55 % of parse time respectively, 2026-07-11 samply).
-        if fast_width(ch).is_some() {
-            if self.cluster_buf.is_empty() {
-                self.cluster_buf.push(ch);
-                *self.seg_synced = false;
-                return;
-            }
-            let mut it = self.cluster_buf.chars();
-            let first = it.next().expect("non-empty buffer");
-            if it.next().is_none() {
-                if let Some(prev_w) = fast_width(first) {
-                    self.cluster_buf.clear();
-                    self.write_glyph(first, prev_w);
-                    self.cluster_buf.push(ch);
-                    *self.seg_synced = false;
+        // `<u>` / `</u>` become underline on / off.  Recognised HERE
+        // and not over the byte stream, because a byte pass cannot
+        // tell text from the inside of an escape sequence — `CSI < u`
+        // (the kitty-keyboard pop codex sends at startup) carries the
+        // same characters.  By this point the parser has already
+        // separated the two.
+        //
+        // Two predictable branches on the hot path when the setting is
+        // on, none when it is off; the buffer only ever fills after a
+        // literal `<`.
+        if self.u_tags && (ch == '<' || !self.u_buf.is_empty()) {
+            self.u_buf.push(ch);
+            match u_tag_verdict(self.u_buf) {
+                UTag::Underline(on) => {
+                    self.u_buf.clear();
+                    // Whatever is still buffered was printed BEFORE
+                    // the tag and keeps the attributes it arrived
+                    // with; changing them first would reach back and
+                    // underline it.
+                    self.flush_cluster_for_break();
+                    self.attrs.underline = on;
+                    return;
+                }
+                UTag::Maybe => return,
+                UTag::No => {
+                    // Not a tag after all: print what was held back,
+                    // in order and unchanged.
+                    let held = std::mem::take(self.u_buf);
+                    for c in held.chars() {
+                        self.print_glyph(c);
+                    }
                     return;
                 }
             }
         }
-        // SLOW PATH — UAX #29 cluster aware: the VT parser feeds us
-        // one codepoint at a time, but a single user-perceived
-        // "character" can span several (é = e + ́, ⚠️ = ⚠ + VS16,
-        // 👨‍👩‍👧‍👦 = 4 emoji + 3 ZWJ, क्क = क + virama + क …).  We
-        // buffer codepoints, ask the segmenter whether a boundary
-        // falls before each one, and commit a single cluster to the
-        // grid when the next codepoint starts a new one.  This is
-        // what makes ⭐ ✅ ❌ land in 2 cells (cluster_width=2)
-        // instead of being half-clipped in a 1-cell slot when the
-        // EAW table alone gave them 1.
-        self.resync_segmenter();
-        if self.grapheme_cursor.step(ch) {
-            // step has already advanced cursor state to track `ch` as
-            // the first codepoint of a new cluster — flush_cluster
-            // therefore must NOT reset the cursor, or the run state
-            // would lose its head.
-            self.flush_cluster_keep_cursor();
-        }
-        self.cluster_buf.push(ch);
+        self.print_glyph(ch);
     }
 
     fn execute(&mut self, byte: u8) {
+        // A control code ends the text run, so a `<` still waiting to
+        // become a tag never will.  Without this, a line ending in one
+        // swallows it until the next printable character.
+        self.flush_u_buf();
         // Any pending grapheme cluster ends here: a C0 control byte
         // can never extend a cluster, so commit it now.
         self.flush_cluster_for_break();
@@ -2523,6 +2574,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], byte: u8) {
+        self.flush_u_buf();
         self.flush_cluster_for_break();
         trace_seq("ESC", intermediates, &[], byte);
         *self.pending_wrap = false;
@@ -2553,6 +2605,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
     }
 
     fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], byte: u8) {
+        self.flush_u_buf();
         self.flush_cluster_for_break();
         trace_seq("CSI", intermediates, params, byte);
         // Every CSI through the parser lands a sampled DEBUG line.
@@ -2932,6 +2985,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
     }
 
     fn osc_dispatch(&mut self, data: &[u8]) {
+        self.flush_u_buf();
         self.flush_cluster_for_break();
         // F3+3.6 — OSC 7 push-based cwd reporting removed; the
         // LayoutModal now pull-fetches cwd via `proc_pidinfo` only
@@ -2950,6 +3004,91 @@ impl<'a> ParserCallbacks for Handler<'a> {
         );
     }
 }
+
+
+/// What a buffer starting with `<` has turned out to be.
+enum UTag {
+    /// `<u>` or `</u>`.
+    Underline(bool),
+    /// Still a prefix of one of them.
+    Maybe,
+    /// It is not, and never will be.
+    No,
+}
+
+fn u_tag_verdict(buf: &str) -> UTag {
+    match buf {
+        "<u>" => UTag::Underline(true),
+        "</u>" => UTag::Underline(false),
+        "<" | "<u" | "</" | "</u" => UTag::Maybe,
+        _ => UTag::No,
+    }
+}
+
+impl<'a> Handler<'a> {
+    /// Print anything still held as a possible `<u>`, unchanged.
+    ///
+    /// Called wherever the run of printable text ends — a control
+    /// byte, an escape sequence — because a tag cannot span one.
+    fn flush_u_buf(&mut self) {
+        if self.u_buf.is_empty() {
+            return;
+        }
+        let held = std::mem::take(self.u_buf);
+        for c in held.chars() {
+            self.print_glyph(c);
+        }
+    }
+
+    fn print_glyph(&mut self, ch: char) {
+        // FAST PATH — a `boring_width` char (ASCII / CJK / kana / …)
+        // arriving while the buffer holds nothing or one boring char.
+        // UAX #29 has no rule joining Other+Other, so the boundary is
+        // unconditional and the segmenter can be skipped entirely;
+        // width comes from the same range match.  This is what keeps
+        // `cat` of plain text / CJK prose from paying 3× gbp + incb
+        // + pictographic table walks per printable (measured ~84 % /
+        // ~55 % of parse time respectively, 2026-07-11 samply).
+        if fast_width(ch).is_some() {
+            if self.cluster_buf.is_empty() {
+                self.cluster_buf.push(ch);
+                *self.seg_synced = false;
+                return;
+            }
+            let mut it = self.cluster_buf.chars();
+            let first = it.next().expect("non-empty buffer");
+            if it.next().is_none() {
+                if let Some(prev_w) = fast_width(first) {
+                    self.cluster_buf.clear();
+                    self.write_glyph(first, prev_w);
+                    self.cluster_buf.push(ch);
+                    *self.seg_synced = false;
+                    return;
+                }
+            }
+        }
+        // SLOW PATH — UAX #29 cluster aware: the VT parser feeds us
+        // one codepoint at a time, but a single user-perceived
+        // "character" can span several (é = e + ́, ⚠️ = ⚠ + VS16,
+        // 👨‍👩‍👧‍👦 = 4 emoji + 3 ZWJ, क्क = क + virama + क …).  We
+        // buffer codepoints, ask the segmenter whether a boundary
+        // falls before each one, and commit a single cluster to the
+        // grid when the next codepoint starts a new one.  This is
+        // what makes ⭐ ✅ ❌ land in 2 cells (cluster_width=2)
+        // instead of being half-clipped in a 1-cell slot when the
+        // EAW table alone gave them 1.
+        self.resync_segmenter();
+        if self.grapheme_cursor.step(ch) {
+            // step has already advanced cursor state to track `ch` as
+            // the first codepoint of a new cluster — flush_cluster
+            // therefore must NOT reset the cursor, or the run state
+            // would lose its head.
+            self.flush_cluster_keep_cursor();
+        }
+        self.cluster_buf.push(ch);
+    }
+}
+
 
 /// Look up a CSI parameter, treating `0` and "missing" both as the supplied
 /// default — this matches the standard convention where omitted params and
@@ -5489,5 +5628,60 @@ mod alt_screen_across_execv_tests {
             !main.contains("TUI"),
             "the program's screen must not become the shell's: {main:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod u_tag_tests {
+    use super::Terminal;
+
+    fn row(t: &Terminal, r: u16) -> String {
+        (0..t.grid().cols()).map(|c| t.grid().cell(c, r).ch).collect()
+    }
+
+    /// The models on the other end emit `<u>` and codex prints it
+    /// literally, so the sentence arrives wearing its markup.  Draw it
+    /// (2026-09-06: "<u></u> 是下划线，你就渲染就好了").
+    #[test]
+    fn a_u_tag_underlines_what_it_wraps() {
+        let mut t = Terminal::new(20, 2);
+        t.feed(b"a<u>bc</u>d");
+        assert_eq!(row(&t, 0).trim_end(), "abcd", "the tags are styling, not text");
+        assert!(!t.grid().cell(0, 0).attrs.underline, "before the tag");
+        assert!(t.grid().cell(1, 0).attrs.underline, "inside");
+        assert!(t.grid().cell(2, 0).attrs.underline, "inside");
+        assert!(!t.grid().cell(3, 0).attrs.underline, "after the closing tag");
+    }
+
+    /// A tag split across two PTY reads is still one tag: the buffer
+    /// is terminal state, not per-chunk state.
+    #[test]
+    fn a_tag_split_across_reads_still_counts() {
+        let mut t = Terminal::new(20, 2);
+        t.feed(b"a<");
+        t.feed(b"u>b");
+        assert_eq!(row(&t, 0).trim_end(), "ab");
+        assert!(t.grid().cell(1, 0).attrs.underline);
+    }
+
+    /// Text that merely starts with `<` must come out untouched — in
+    /// order, every character.
+    #[test]
+    fn text_that_is_not_a_tag_is_printed_verbatim() {
+        for text in ["a<b>c", "a<ub>c", "a</x>c", "a<uu>c", "if a<b then"] {
+            let mut t = Terminal::new(30, 2);
+            t.feed(text.as_bytes());
+            assert_eq!(row(&t, 0).trim_end(), text, "{text:?} was altered");
+        }
+    }
+
+    /// A dangling `<` at the end of the stream must still appear —
+    /// otherwise a prompt ending in one would swallow it forever.
+    #[test]
+    fn a_dangling_open_bracket_is_not_eaten() {
+        let mut t = Terminal::new(20, 2);
+        t.feed(b"a<");
+        t.feed(b"\r\n");
+        assert!(row(&t, 0).starts_with("a<"), "got {:?}", row(&t, 0));
     }
 }

@@ -29,4 +29,4 @@
 
 shell   = "0.7.132"  # codex 滚轮改用逐行方向键,一格不再翻一屏;详见 CHANGELOG.md
 core    = "0.12.179"  # 滚轮判定改信程序自己的 DEC 1007 声明,不再靠读屏幕猜;详见 CHANGELOG.md
-session = "0.11.62"  # 实现 DEC 1007 alternate scroll 并发布给 L2;详见 CHANGELOG.md
+session = "0.11.63"  # <u></u> 渲染成下划线(appearance.render_u_tags,可关);详见 CHANGELOG.md
