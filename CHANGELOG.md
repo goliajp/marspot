@@ -3022,6 +3022,19 @@ to get there.  Lower case throughout: the label is now one string the
 card and the timeline both print verbatim.  Section headings stay in
 caps — they are headings, not data.
 
+Unexpectedly, this is also what put the binary back under its ceiling.
+0.12.187 tripped both size ceilings by ~18 KB and was relocked for it;
+with the labels lower-cased `__TEXT` returns to 1327104 — unchanged
+from before the whole Codex feature — leaving it at `__text` +112 B and
+`__cstring` −132 B, comfortably under the ORIGINAL ceilings on both
+mini and the dev box.  So the relock was reverted.  Why the upper-case
+form cost ~8.6 KB of text and const is not established — `to_uppercase`
+is linked in all three builds via the status chip — and it is recorded
+in `bench/baseline.json` as an observation rather than an explanation.
+The part that generalises: an 18 KB ceiling trip can be one page of
+alignment around a few hundred bytes, and relocking before reading the
+section table would have left both ceilings 34 KB above what ships.
+
 ### 0.12.187
 
 The usage panel is `AGENT ACCOUNTS`, and Codex is in it.
@@ -3055,6 +3068,7 @@ row and draws no bar — there is no extent to draw.
 
 Binary +18 KB, of which the section table says 4.6 KB is code and the
 rest is one 16 KiB page of alignment; ceilings relocked accordingly.
+(0.12.188 took that back — see below.)
 
 ### 0.12.186
 
