@@ -5854,7 +5854,36 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.81**
+Current: **0.11.82**
+
+### 0.11.82
+
+The wrap check stops being a function call.
+
+`take_pending_wrap` runs once per printable character and does work
+once per row.  Both halves lived in one function, so the check — a
+single bool — was reached through a call two million times in an 8 MB
+emoji corpus.  A leaf profile showed it as its own **5.1 %** symbol,
+which is what a function that should have been a branch looks like.
+
+Split: an `#[inline(always)]` test with the rare half `#[cold]` and
+`#[inline(never)]` behind it.  The same shape the CJK scanner work
+used, for the same reason — a hot loop should not carry the code its
+uncommon case needs.
+
+mini, interleaved A/B, seven trials each and two rounds: `cat-cjk`
+289 → 302 (**+4.5 %**), `cat-emoji` 187 → 194 (**+3.7 %**).  `cat-ascii`
+gained too (429 → 442 on the dev box); a single earlier reading had
+shown it losing 2 %, which two rounds of interleaving showed to be
+noise.
+
+Two things measured on the way and NOT taken, recorded so they are not
+tried again blind: deferring `cluster_buf` materialisation to the rare
+path (a String clear plus a UTF-8 encode per glyph — worth nothing,
+because `String::push` keeps its allocation and the clear is a length
+store), and encoding scrollback records straight into the writer's
+buffer (slower: `Vec::resize` zero-fills before the closure overwrites,
+so two passes replaced one).
 
 ### 0.11.81
 

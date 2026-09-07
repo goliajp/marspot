@@ -2755,10 +2755,21 @@ impl<'a> Handler<'a> {
     /// path the immediate-wrap branch used to take. Called at the top
     /// of `print` before drawing the next glyph; cleared without
     /// advancing by any non-print operation.
+    /// The check runs once per printable character; the work runs once
+    /// per row.  Keeping them in one function made the whole thing a
+    /// call on the hot path — it showed up as its own 5.1 % symbol in
+    /// a leaf profile, which is what a function that should have been
+    /// a branch looks like.  The rare half is pushed out of line.
+    #[inline(always)]
     fn take_pending_wrap(&mut self) {
-        if !*self.pending_wrap {
-            return;
+        if *self.pending_wrap {
+            self.do_pending_wrap();
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn do_pending_wrap(&mut self) {
         *self.pending_wrap = false;
         let (_col, row) = self.grid.cursor();
         let rows = self.grid.rows();
