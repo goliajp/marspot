@@ -28,6 +28,38 @@ RESULTS_DIR="$ROOT/bench/results"
 source "$ROOT/bin/_lib.sh"
 mkdir -p "$RESULTS_DIR"
 
+# This measurement saturates the machine it runs on: it pushes 32 MB
+# into each terminal, four scenarios, three trials.  On the dev box
+# that means disturbing whatever the user is doing AND contaminating
+# the numbers — run on the studio 2026-09-07 with nine live panes, the
+# marspot cat-ascii trials came back 380 / 1710 / 1890 ms and the
+# median took a disturbed one, producing a "0.21x vs best other" that
+# was pure interference.
+#
+# The bench host is mini (see .claude/rules/perf-attack.md).  Driving
+# GUI terminals needs a GUI session, which ssh does not have, so the
+# route is `bin/remote-measure-others.sh` — it health-checks for
+# exactly that and prints the Screen-Sharing steps.
+#
+# Set MARSPOT_MEASURE_ANYWHERE=1 to override, deliberately.
+if [[ -z "${MARSPOT_MEASURE_ANYWHERE:-}" && "$(hostname -s)" != "mini" ]]; then
+  cat >&2 <<'WARN'
+This saturates the machine it runs on, and this is not the bench host.
+
+  * numbers taken here are contaminated by whatever else is running
+  * it opens terminal windows over the user's work
+
+Run it on mini instead — bin/remote-measure-others.sh explains how
+(a GUI session is required; ssh cannot dispatch AppleEvents).
+
+MARSPOT_MEASURE_ANYWHERE=1 overrides this, for when a rough local
+reading is genuinely what you want.
+WARN
+  exit 2
+fi
+
+
+
 SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji)
 # terminal.app is the OS-vendor reference floor — ships with macOS, no
 # downloads, defines the bar marspot needs to clear. iterm2 / warp /
@@ -103,6 +135,29 @@ build_command() {
 # Deliberately narrow: `write text` into a NEW window, nothing else.
 # The failure mode is a marker that never appears, which the existing
 # wait already handles by timing out.
+# Close a window this script opened.  Whatever it opens, it closes —
+# the numbers are gone the moment the marker is written, and leaving
+# windows over someone's work is the same defect as leaving a dev
+# marspot running.
+close_driven_window() {
+  case "$1" in
+    iterm)
+      osascript >/dev/null 2>&1 <<'OSA'
+tell application "iTerm2"
+  if (count of windows) > 0 then close (first window)
+end tell
+OSA
+      ;;
+    terminal)
+      osascript >/dev/null 2>&1 <<'OSA'
+tell application "Terminal"
+  if (count of windows) > 0 then close (first window) saving no
+end tell
+OSA
+      ;;
+  esac
+}
+
 drive_terminal() {
   local term=$1 cmd=$2
   case "$term" in
@@ -260,12 +315,15 @@ for t in "${OTHER_TERMINALS[@]}"; do
     continue
   fi
   build_command "$marker" >/dev/null
+  DROVE=""
   if drive_terminal "$t" "bash $LAST_BUILT_SCRIPT"; then
     echo "==> $t driven automatically"
+    DROVE=1
   fi
   echo "==> waiting on $marker"
   if wait_for_marker "$marker" 600; then
     echo "    done"
+    [[ -n "${DROVE:-}" ]] && close_driven_window "$t"
     [[ $first -eq 0 ]] && echo "," >> "$OUT_JSON"
     first=0
     printf '  "%s": {' "$t" >> "$OUT_JSON"
