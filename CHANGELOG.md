@@ -28,7 +28,54 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.139**
+Current: **0.7.140**
+
+### 0.7.140
+
+The codex badge's right-click switches the account profile.
+
+It switched reasoning effort before.  Effort is one `-c` override away
+and codex has its own key for it; which ACCOUNT a pane talks to is the
+thing a terminal is in a position to know and the user has no other
+one-click way to change.  So the menu is replaced, not extended, and
+the effort path is deleted rather than left behind a test.
+
+There are two different things called a codex "profile" and they are
+not related:
+
+* `codex -p <name>` layers `$CODEX_HOME/<name>.config.toml` — a named
+  set of CONFIG values (model, approvals, sandbox).
+* A `CODEX_HOME` directory is a whole account: its own login, history
+  and config.  `~/.codex-profile-N`, selected by pointing the variable
+  at it, aliased `codexN`.
+
+This is the second one, and it is the exact analogue of
+`CLAUDE_CONFIG_DIR` that the claudecode plugin next door has cycled for
+a year — so it reuses that shape: discover `~/.codex-profile-N`, read
+the CURRENT one off the live process, and switch by taking codex down
+with a signal and bringing the same session back with the variable set.
+
+Details that are decisions, not accidents:
+
+* The profile is read from the process with `proc_env_value`
+  (`KERN_PROCARGS2`), not reconstructed from the alias.  An alias lives
+  in the user's rc file and only in an interactive shell; the variable
+  it expands to is a fact about the process that is running.
+* `~/.codex` is followed through symlinks — on this machine it points
+  at `.codex-profile-1`, and the default and the profile it resolves to
+  must not appear as two entries that do the same thing.
+* The menu tag IS the profile number, not a row index, so a menu built
+  from one directory listing and clicked against another cannot pick
+  the wrong profile.
+* A profile that disappears between the menu opening and the click is
+  logged and refused.  Silently doing nothing is the failure shape this
+  codebase keeps having to dig back out.
+* History lives inside the profile directory, so resuming under a
+  different profile finds THAT profile's most recent session in this
+  cwd.  That is what switching accounts means, not a bug to paper over.
+
+Only `.codex-profile-1` exists today, so the menu shows one entry —
+which is what was asked for.
 
 ### 0.7.139
 
