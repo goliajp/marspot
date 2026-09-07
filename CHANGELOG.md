@@ -3009,7 +3009,18 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.187**
+Current: **0.12.188**
+
+### 0.12.188
+
+Window labels are lower case.
+
+The card's label column was set in caps (`5H`, `FABLE`, `SPARK`) while
+the timeline's tag beside the same bar lower-cased it, so one window
+was printed two ways in one panel and the tag needed a `to_lowercase`
+to get there.  Lower case throughout: the label is now one string the
+card and the timeline both print verbatim.  Section headings stay in
+caps — they are headings, not data.
 
 ### 0.12.187
 

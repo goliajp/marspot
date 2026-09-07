@@ -2216,10 +2216,10 @@ fn demo_cc_usage(rect: marspot_term::layout::Rect) -> marspot::render_metal::CcU
             status_severity: sev,
             reset_label: "reset: 01/02 06:00".to_string(),
             windows: vec![
-                win("5H", a, now + 3 * 3600, "06:00", 5 * 3600),
-                win("7D", b, now + 4 * 24 * 3600, "01/06", 7 * 86_400),
-                win("OPUS", a, now + 4 * 24 * 3600, "01/06", 7 * 86_400),
-                win("SONNET", b * 0.5, now + 4 * 24 * 3600, "01/06", 7 * 86_400),
+                win("5h", a, now + 3 * 3600, "06:00", 5 * 3600),
+                win("7d", b, now + 4 * 24 * 3600, "01/06", 7 * 86_400),
+                win("opus", a, now + 4 * 24 * 3600, "01/06", 7 * 86_400),
+                win("sonnet", b * 0.5, now + 4 * 24 * 3600, "01/06", 7 * 86_400),
             ],
         }
     };

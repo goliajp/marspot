@@ -441,7 +441,9 @@ pub fn snap_range_to_local_days(t0: f64, t1: f64) -> (f64, f64) {
 /// fields would have had to lie about which window it was drawing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CcWindow {
-    /// Row label, already in the panel's all-caps style.
+    /// Row label as the panel prints it, lower case — `5h`, `fable`,
+    /// `spark`.  One form, so the card's column and the timeline's tag
+    /// are the same string rather than two casings of one name.
     pub label: String,
     /// 0.0 ..= 1.0 utilization of this window.
     pub util: f64,
@@ -461,20 +463,20 @@ impl CcAccount {
     pub fn windows(&self) -> Vec<CcWindow> {
         let mut out = vec![
             CcWindow {
-                label: "5H".into(),
+                label: "5h".into(),
                 util: self.util_5h,
                 reset: (self.reset_5h > 0).then_some(self.reset_5h),
                 span_secs: 5 * 3_600,
             },
             CcWindow {
-                label: "7D".into(),
+                label: "7d".into(),
                 util: self.util_7d,
                 reset: (self.reset_7d > 0).then_some(self.reset_7d),
                 span_secs: WEEK_SECS,
             },
         ];
         out.extend(self.model_limits.iter().map(|m| CcWindow {
-            label: m.label.to_uppercase(),
+            label: m.label.to_lowercase(),
             util: m.util,
             reset: m.reset,
             span_secs: WEEK_SECS,
@@ -520,22 +522,22 @@ pub struct CodexUsage {
 
 /// A bucket's model codename, without the window span.
 ///
-/// `GPT-5.3-Codex-Spark` -> `SPARK`, `gpt-reserve` -> `RESERVE`.  A
+/// `GPT-5.3-Codex-Spark` -> `spark`, `gpt-reserve` -> `reserve`.  A
 /// bucket metering two windows carries the span after a space
 /// (`GPT-5.3-Codex-Spark 7d`) — the span is not part of the model's
 /// name, and leaving it in produces a row nothing can be looked up by.
 fn codex_model_name(label: &str) -> String {
     let name = label.split_whitespace().next().unwrap_or(label);
-    name.rsplit('-').next().unwrap_or(name).to_uppercase()
+    name.rsplit('-').next().unwrap_or(name).to_lowercase()
 }
 
 /// The four rows of one Codex account, in reading order:
 ///
-///   5H       the only sub-day allowance Codex meters, and it
+///   5h       the only sub-day allowance Codex meters, and it
 ///            constrains Spark alone
-///   SPARK    Spark's weekly
-///   ASTRA    the account-wide weekly — what the default model draws on
-///   RESERVE  gpt-reserve's own weekly
+///   spark    Spark's weekly
+///   astra    the account-wide weekly — what the default model draws on
+///   reserve  gpt-reserve's own weekly
 ///
 /// The point of per-model metering is knowing where there is headroom,
 /// so every bucket gets a row; showing only the busiest hides the ones
@@ -574,27 +576,27 @@ fn codex_windows(obj: &str) -> Vec<CcWindow> {
 
     let mut out = Vec::new();
     if let Some(b) = buckets.iter().find(is_sub_day) {
-        out.push(row("5H", b));
+        out.push(row("5h", b));
     }
-    if let Some(b) = weekly_named("SPARK") {
-        out.push(row("SPARK", b));
+    if let Some(b) = weekly_named("spark") {
+        out.push(row("spark", b));
     }
     // The account-wide weekly has no name of its own in the feed; on
     // this account it is what the default model spends, which is Astra.
     let reset_7d = num_field(obj, "reset_7d").map(|t| t as i64);
     out.push(CcWindow {
-        label: "ASTRA".into(),
+        label: "astra".into(),
         util: num_field(obj, "utilization_7d").unwrap_or(0.0),
         reset: reset_7d,
         span_secs: WEEK_SECS,
     });
-    if let Some(b) = weekly_named("RESERVE") {
-        out.push(row("RESERVE", b));
+    if let Some(b) = weekly_named("reserve") {
+        out.push(row("reserve", b));
     }
     out.extend(
         buckets
             .iter()
-            .filter(|b| !is_sub_day(&b) && b.name != "SPARK" && b.name != "RESERVE")
+            .filter(|b| !is_sub_day(&b) && b.name != "spark" && b.name != "reserve")
             .map(|b| row(&b.name, b)),
     );
     out
@@ -683,7 +685,7 @@ mod tests {
         assert_eq!(a.name, "Codex 1");
         assert_eq!(a.status, "allowed");
         let labels: Vec<&str> = a.windows.iter().map(|w| w.label.as_str()).collect();
-        assert_eq!(labels, ["5H", "SPARK", "ASTRA", "RESERVE"]);
+        assert_eq!(labels, ["5h", "spark", "astra", "reserve"]);
         let utils: Vec<f64> = a.windows.iter().map(|w| w.util).collect();
         assert_eq!(utils, [0.11, 0.5, 0.43, 0.02]);
         // Each window keeps its OWN reset and its own length — the 5h
@@ -700,10 +702,10 @@ mod tests {
     /// lookup for `SPARK` missed and pushed it to the end of the card.
     #[test]
     fn a_window_span_is_not_part_of_the_model_name() {
-        assert_eq!(codex_model_name("GPT-5.3-Codex-Spark"), "SPARK");
-        assert_eq!(codex_model_name("GPT-5.3-Codex-Spark 5h"), "SPARK");
-        assert_eq!(codex_model_name("GPT-5.3-Codex-Spark 7d"), "SPARK");
-        assert_eq!(codex_model_name("gpt-reserve"), "RESERVE");
+        assert_eq!(codex_model_name("GPT-5.3-Codex-Spark"), "spark");
+        assert_eq!(codex_model_name("GPT-5.3-Codex-Spark 5h"), "spark");
+        assert_eq!(codex_model_name("GPT-5.3-Codex-Spark 7d"), "spark");
+        assert_eq!(codex_model_name("gpt-reserve"), "reserve");
         assert_eq!(codex_model_name("GPT-5.5"), "5.5");
     }
 
@@ -717,7 +719,7 @@ mod tests {
         );
         let u = parse_codex(&feed).expect("still parses");
         let labels: Vec<&str> = u.accounts[0].windows.iter().map(|w| w.label.as_str()).collect();
-        assert_eq!(labels, ["5H", "SPARK", "ASTRA", "COMET"]);
+        assert_eq!(labels, ["5h", "spark", "astra", "comet"]);
     }
 
     /// An account with no per-model buckets is still an account: it has
@@ -731,7 +733,7 @@ mod tests {
         let u = parse_codex(feed).expect("parses");
         let w = &u.accounts[0].windows;
         assert_eq!(w.len(), 1);
-        assert_eq!(w[0].label, "ASTRA");
+        assert_eq!(w[0].label, "astra");
         assert_eq!(w[0].util, 0.07);
     }
 
@@ -741,12 +743,12 @@ mod tests {
     fn a_claude_account_reduces_to_the_same_window_shape() {
         let u = parse(NESTED_FEED).expect("the claude fixture parses");
         let w = u.accounts[1].windows();
-        assert_eq!(w[0].label, "5H");
+        assert_eq!(w[0].label, "5h");
         assert_eq!(w[0].span_secs, 5 * 3_600);
-        assert_eq!(w[1].label, "7D");
+        assert_eq!(w[1].label, "7d");
         assert_eq!(w[1].span_secs, WEEK_SECS);
         assert!(w.len() > 2, "the model caps follow the account's own");
-        assert_eq!(w[2].label, w[2].label.to_uppercase(), "panel labels are caps");
+        assert_eq!(w[2].label, w[2].label.to_lowercase(), "panel labels are lower case");
     }
 
     use super::*;

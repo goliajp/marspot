@@ -600,7 +600,7 @@ pub struct CcUsageAccountRender {
 /// cc — one metered window of an account card.
 #[derive(Debug, Clone)]
 pub struct CcUsageWindowRender {
-    /// Row label in the panel's all-caps style ("5H", "FABLE", "SPARK").
+    /// Row label as printed, lower case ("5h", "fable", "spark").
     pub label: String,
     /// 0.0 ..= 1.0 utilization of this window.
     pub util: f32,
@@ -3653,12 +3653,8 @@ fn cc_util_color(util: f32) -> [f32; 4] {
 }
 
 /// A timeline bar's tag: `7d 100% 12:00`.
-///
-/// Lower-cased because the tag is read as prose beside the bar, while
-/// the card's label column is a heading — the same word plays two roles
-/// and the panel already set that convention with `5h` / `7d`.
 fn cc_window_tag(w: &CcUsageWindowRender) -> String {
-    format!("{} {:.0}% {}", w.label.to_lowercase(), w.util * 100.0, w.reset_hm)
+    format!("{} {:.0}% {}", w.label, w.util * 100.0, w.reset_hm)
 }
 
 /// Height of `n` stacked timeline bars including the gaps between them.
