@@ -393,10 +393,10 @@ fn is_hard_wrap_continuation_in<S: CellSource>(
     if !is_url_path_class(last_nb_ch) {
         return false;
     }
-    // Current row leading whitespace must be 0..=4 cells, followed
-    // by a URL/path-class char.  Zero indent is the weakest signal
-    // (flush prose looks the same) — only accept it when the prev
-    // row is COMPLETELY full, as a mid-word char wrap must be.
+    // Current row leading whitespace, followed by a URL/path-class
+    // char.  Zero indent is the weakest signal (flush prose looks the
+    // same) — only accept it when the prev row is COMPLETELY full, as
+    // a mid-word char wrap must be.
     let mut lead = left;
     while lead < right {
         let ch = src.char_at(lead, curr_row);
@@ -406,7 +406,31 @@ fn is_hard_wrap_continuation_in<S: CellSource>(
             break;
         }
     }
-    if lead - left > 4 {
+    // How far the continuation may hang.
+    //
+    // 4 was measured off claudecode's prose blocks.  Its `⎿` result
+    // blocks hang at FIVE (`  ⎿  ` is two spaces, the glyph, two
+    // spaces), and every path they wrapped was missed by exactly one
+    // cell — the link stopped at the last directory that happened to
+    // exist, `…/lab36-continus/` again (2026-09-08 field report, the
+    // third time that same directory has been the visible symptom).
+    //
+    // Counted off five live sessions' bytelogs, over every wrap whose
+    // previous row ends inside a path token (`\r ESC[nC ESC[1B`,
+    // n = 17,991): indent 0 → 43.9 %, 2 → 20.1 %, **5 → 27.8 %**,
+    // 7 → 2.5 %, 4 → 2.1 %, 6 → 1.4 %, 8 → 0.2 %.  Through 8 that is
+    // 98.2 % of them; what is left starts at 9 and is dominated by 37,
+    // which is column alignment inside a two-column block, not a
+    // hanging wrap.
+    //
+    // Widened only for a path-carrying tail — the same trade
+    // `flush_slack` above already makes.  A wrong join costs a File
+    // match nothing: the merged span fails `stat` and the seam is
+    // offered as a candidate end, while `cc_zero_indent` keeps URL and
+    // Email matches from crossing the join at all.  Prose keeps 4,
+    // where a wrong join has no `stat` to arbitrate it.
+    let max_indent: u16 = if trailing_is_path { 8 } else { 4 };
+    if lead - left > max_indent {
         return false;
     }
     // Zero indent is the weakest signal — flush prose looks identical —
@@ -2651,6 +2675,41 @@ mod tests {
         assert!(
             links.iter().any(|l| l.text == "/etc/hosts"),
             "seamless join broken: {links:?}",
+        );
+    }
+
+    /// claudecode's `⎿` result block hangs its wrapped continuation at
+    /// FIVE cells (`  ⎿  `), one past the indent bound that was
+    /// measured off its prose blocks.  Every path those blocks wrapped
+    /// lost its tail: the link stopped at the last directory that
+    /// happened to exist on disk.  Reproduced from session 384's
+    /// bytelog, which breaks the line with `\r ESC[5C ESC[1B` —
+    /// geometrically a five-cell hanging indent.
+    #[test]
+    fn a_path_wrapped_into_a_five_cell_hanging_indent_still_joins() {
+        // Five leading cells stand in for `  ⎿  `, so the test does not
+        // also depend on that glyph's width.
+        let rows = ["     /etc/ho", "     sts"];
+        let src = StrSource::new(&rows, 12);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        assert!(
+            links.iter().any(|l| l.text == "/etc/hosts"),
+            "five-cell hanging indent did not join: {links:?}",
+        );
+    }
+
+    /// The bound only widens for a tail that carries a separator.  A
+    /// prose row has no `stat` to arbitrate a wrong join, so a line
+    /// five cells in is still its own line — and the path that starts
+    /// it keeps its link instead of being glued onto the word above.
+    #[test]
+    fn a_prose_tail_does_not_swallow_the_next_line_at_five_cells() {
+        let rows = ["     plain wor", "     /etc/hosts"];
+        let src = StrSource::new(&rows, 15);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        assert!(
+            links.iter().any(|l| l.text == "/etc/hosts"),
+            "prose row was joined and swallowed the path below it: {links:?}",
         );
     }
 

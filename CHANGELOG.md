@@ -3009,7 +3009,36 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.189**
+Current: **0.12.190**
+
+### 0.12.190
+
+A path wrapped inside claudecode's `⎿` block keeps its tail.
+
+The link stopped at `…/lab36-continus/` — the third field report where
+that same directory is the visible symptom, and the second where the
+cause is one cell of geometry.  A continuation row was accepted as a
+wrapped line only if it hung 0..=4 cells in; `⎿` result blocks hang at
+**five** (`  ⎿  ` is two spaces, the glyph, two spaces).  So the merge
+never happened, the first row's token `…/.tmp/20260908-claude-` failed
+`stat`, and the arbitration backed off through the `.` of `.tmp` to the
+longest prefix that did exist: the directory.
+
+Counted rather than guessed at this time.  Over five live sessions'
+bytelogs, every wrap whose previous row ends inside a path token
+(`\r ESC[nC ESC[1B`, n = 17,991): indent 0 → 43.9 %, 2 → 20.1 %,
+**5 → 27.8 %**, 7 → 2.5 %, 4 → 2.1 %, 6 → 1.4 %, 8 → 0.2 %.  So more
+than a quarter of all wrapped paths were being missed, and a bound of 8
+covers 98.2 % of them; the remainder starts at 9 and is dominated by
+37, which is column alignment in a two-column block rather than a
+hanging wrap.
+
+The bound widens only for a tail that carries a separator — the same
+trade `flush_slack` already makes one line above.  A wrong join costs a
+File match nothing (the merged span fails `stat`, and the seam is
+offered as a candidate end), while `cc_zero_indent` keeps URL and Email
+matches from crossing the join at all.  Prose keeps 4, where a wrong
+join has no `stat` to arbitrate it.
 
 ### 0.12.189
 
