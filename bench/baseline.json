@@ -27,7 +27,9 @@
       "mars_vs_best_other_min": 1.0,
       "mars_l3_MBps_min": 132.8,
       "_l3_note": "mars_l3_MBps_min: the SHIPPED path (core -> L3, file-backed scrollback), measured by bin/measure-l3.sh and gated by --full since 2026-08-19.  The probe reports the MINIMUM of its trials, not the median: load can only add time, so the fastest trial is the least-contaminated one.  That change is what made this metric usable on a host with a permanent tenant - one batch read 28.7 / 72.3 / 160.0 MiB/s for the same scenario, where a median reports the tenant and the minimum reports marspot.  Floors are min-of-3 x0.90 taken at load1 4.5: 132.8 / 151.0 / 152.9 / 111.9.  Idle best for reference: 194.5 / 167.8 / 172.1 / 125.4 - three of the four are within noise of the loaded reading, which is the point.  ascii is the exception (147.5 loaded vs 194.5 idle): its trial pushes 134 MB and is the likeliest to catch interference in all three tries.",
-      "_live_note": "mars_vs_best_other_min compares the SHIPPED path (L3) against the best other terminal measured, and is set to 1.0 flat: the requirement is that the product is faster, and a requirement does not get a tolerance band.  That makes this the one floor in the file that can go red from load alone - it divides a number that swings with the host (L3 ascii read 194.5 idle and 134.2 at load1 5.3) by a competitor figure frozen in the snapshot.  Treat a failure here the way bin/bench-remote.sh's load gate says to: valid when idle, re-measure otherwise.  The job of catching a real regression belongs to mars_l3_MBps_min, which carries the margin.  Idle headroom as of 2026-08-19: ascii 1.91x, mixed 1.65x, cjk 1.14x, emoji 1.06x - emoji is the thin one and the next thing worth widening."
+      "_live_note": "mars_vs_best_other_min compares the SHIPPED path (L3) against the best other terminal measured, and is set to 1.0 flat: the requirement is that the product is faster, and a requirement does not get a tolerance band.  That makes this the one floor in the file that can go red from load alone - it divides a number that swings with the host (L3 ascii read 194.5 idle and 134.2 at load1 5.3) by a competitor figure frozen in the snapshot.  Treat a failure here the way bin/bench-remote.sh's load gate says to: valid when idle, re-measure otherwise.  The job of catching a real regression belongs to mars_l3_MBps_min, which carries the margin.  Idle headroom as of 2026-08-19: ascii 1.91x, mixed 1.65x, cjk 1.14x, emoji 1.06x - emoji is the thin one and the next thing worth widening.",
+      "mars_parse_file_MBps_min": 113,
+      "_parse_file_note": "mars_parse_file_MBps_min: the SAME headless parse with the scrollback a real pane has. `--bench parse` builds a Terminal with no MARSPOT_SESSION_ID and gets the in-RAM scrollback; every L3 pane sets it and gets the file-backed one, which trims, encodes and writes every scrolled line and keeps a RAM ring besides. Measured on mini 2026-09-07, median of 5: RAM 371.7 / 240.7 / 263.8 / 174.1 against file-backed 126.8 / 121.3 / 122.4 / 113.2 - the write dominates so completely that it flattens four very different corpora into 113-127. The fast gate had only ever shown the RAM number, so a whole afternoon of comparing against Alacritty was done against a path no user runs. (mars_l3_MBps_min covers the shipped path end to end but only under --full; this one isolates parse+scrollback without the L3 IPC.) Floors are min-of-5 x0.95 - this metric's spread is wide (ascii 119.6-155.6 in one batch) and its job is catching a regression, not holding a line."
     },
     {
       "id": "cat-mixed",
@@ -35,7 +37,8 @@
       "mars_parse_MBps_min": 167,
       "mars_live_MBps_min": 92,
       "mars_vs_best_other_min": 1.0,
-      "mars_l3_MBps_min": 151.0
+      "mars_l3_MBps_min": 151.0,
+      "mars_parse_file_MBps_min": 96
     },
     {
       "id": "cat-cjk",
@@ -43,7 +46,8 @@
       "mars_parse_MBps_min": 208,
       "mars_live_MBps_min": 92,
       "mars_vs_best_other_min": 1.0,
-      "mars_l3_MBps_min": 152.9
+      "mars_l3_MBps_min": 152.9,
+      "mars_parse_file_MBps_min": 110
     },
     {
       "id": "cat-emoji",
@@ -52,7 +56,8 @@
       "mars_live_MBps_min": 84,
       "mars_vs_best_other_min": 1.0,
       "_note": "Relocked 2026-08-18 after the emoji fast-path attack: floor = 135.  Two mini runs an hour apart gave 153.2 (idle) and 145.0 (load1 4.3); 135 is the loaded run x 0.93, so the gate reports a real regression rather than whoever else happens to be compiling on the bench host.  This REPLACES the 2026-07-11 note, whose reasoning was disproved rather than merely outgrown.  That note read: 'pictographic codepoints cannot take the batch lanes (a following VS16/ZWJ changes width), so they pay the segmenter... the honest ceiling is ~66 MB/s'.  The premise is right and the conclusion does not follow: the fast class already guarantees that a batch commit leaves the LAST character buffered, so a following VS16 / ZWJ / skin-tone modifier still meets an OPEN cluster on the slow path and re-decides its width there.  What genuinely cannot be admitted is a character whose boundary depends on a neighbour - regional indicators (GB12/13) and skin-tone modifiers (GBP=Extend) - and those are two ranges, pinned against the tables by `the_fast_pictograph_class_never_outruns_the_tables` over the whole codepoint space.  Measured 61 -> 153.2 MB/s = 2.15x, with ascii / mixed / cjk unchanged or better.  Full decomposition and the per-change prices are in docs/perf.md.  mars_live_MBps_min / vs_best_other for this scenario are STILL stale (locked against the wrong-width parser) - re-measure on the next --full run before trusting.",
-      "mars_l3_MBps_min": 111.9
+      "mars_l3_MBps_min": 111.9,
+      "mars_parse_file_MBps_min": 97
     }
   ],
   "render_full_repaint": {

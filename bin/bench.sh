@@ -196,6 +196,33 @@ for s in cat-ascii cat-mixed cat-cjk cat-emoji; do
   done
 done
 
+# The SAME parse, with the scrollback a real pane actually has.
+#
+# `--bench parse` builds a Terminal with no MARSPOT_SESSION_ID, which
+# selects the in-RAM scrollback.  Every L3 pane sets that variable and
+# gets the file-backed one instead — which trims, encodes and writes
+# every scrolled line, and keeps a RAM ring besides.  Measured
+# 2026-09-07 on cat-emoji: **192 MB/s in RAM, 105 MB/s file-backed**.
+# The gate was reporting a number no user has, and every comparison
+# made against it — including a whole afternoon of chasing Alacritty —
+# was against the wrong path.
+#
+# Recorded alongside the RAM numbers rather than replacing them: the
+# existing series stays comparable, and a regression that only shows
+# in one of the two is worth seeing as exactly that.
+echo "==> headless parse, file-backed scrollback (5 trials, taking median)"
+PARSE_FILE_DIR="$(mktemp -d)"
+for s in cat-ascii cat-mixed cat-cjk cat-emoji; do
+  : > "$CUR_DIR/parsefile-$s.samples"
+  rm -rf "$PARSE_FILE_DIR/sessions"; mkdir -p "$PARSE_FILE_DIR/sessions/1"
+  MARSPOT_STATE_DIR="$PARSE_FILE_DIR" MARSPOT_SESSION_ID=1     "$(marspot_bin marspot)" --bench "parse:$SCENARIOS_DIR/$s.bin" >/dev/null
+  for i in 1 2 3 4 5; do
+    rm -rf "$PARSE_FILE_DIR/sessions"; mkdir -p "$PARSE_FILE_DIR/sessions/1"
+    MARSPOT_STATE_DIR="$PARSE_FILE_DIR" MARSPOT_SESSION_ID=1       "$(marspot_bin marspot)" --bench "parse:$SCENARIOS_DIR/$s.bin"       | python3 -c "import sys,json; print(json.load(sys.stdin)['bytes_per_sec'])"       >> "$CUR_DIR/parsefile-$s.samples"
+  done
+done
+rm -rf "$PARSE_FILE_DIR"
+
 echo "==> headless render (3 trials, taking median p99)"
 : > "$CUR_DIR/render.samples"
 "$(marspot_bin marspot)" --bench render:1000 >/dev/null
@@ -318,6 +345,15 @@ do_update = update_str == "1"
 
 baseline = json.load(open(baseline_path))
 results = {"pass": [], "fail": [], "current": {}}
+
+def load_parse_file(scenario):
+    """The same parse with the scrollback a real pane has — see the
+    `parsefile` section above for why this is measured separately."""
+    p = os.path.join(cur_dir, f"parsefile-{scenario}.samples")
+    if not os.path.exists(p): return None
+    samples = sorted(int(x) for x in open(p).read().split() if x.strip())
+    if not samples: return None
+    return samples[len(samples) // 2] / 1024 / 1024
 
 def load_parse(scenario):
     p = os.path.join(cur_dir, f"parse-{scenario}.samples")
@@ -508,6 +544,9 @@ for entry in baseline["scenarios"]:
     sid = entry["id"]
     cur_parse = load_parse(sid)
     check(f"parse {sid:10}", cur_parse, entry["mars_parse_MBps_min"])
+    floor_file = entry.get("mars_parse_file_MBps_min")
+    if floor_file is not None:
+        check(f"parse-file {sid:10}", load_parse_file(sid), floor_file)
 
     if mode == "full":
         cur_live = load_live(sid)
