@@ -476,7 +476,7 @@ impl CcAccount {
             },
         ];
         out.extend(self.model_limits.iter().map(|m| CcWindow {
-            label: m.label.to_lowercase(),
+            label: m.label.to_ascii_lowercase(),
             util: m.util,
             reset: m.reset,
             span_secs: WEEK_SECS,
@@ -528,7 +528,7 @@ pub struct CodexUsage {
 /// name, and leaving it in produces a row nothing can be looked up by.
 fn codex_model_name(label: &str) -> String {
     let name = label.split_whitespace().next().unwrap_or(label);
-    name.rsplit('-').next().unwrap_or(name).to_lowercase()
+    name.rsplit('-').next().unwrap_or(name).to_ascii_lowercase()
 }
 
 /// The four rows of one Codex account, in reading order:

@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.140"  # codex badge 右键改为切账号 profile（CODEX_HOME），不再是 effort；详见 CHANGELOG.md
-core    = "0.12.188"  # 账号面板的窗口标签统一小写，跟面板别处一致；详见 CHANGELOG.md
+core    = "0.12.189"  # ASCII 数据不再用 Unicode 折叠大小写：marspot-core -17776 B；详见 CHANGELOG.md
 session = "0.11.82"  # 每字符一次的 wrap 判断不再是一次函数调用；emoji +3.7% cjk +4.5%；详见 CHANGELOG.md

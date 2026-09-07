@@ -3009,7 +3009,46 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.188**
+Current: **0.12.189**
+
+### 0.12.189
+
+ASCII data stops being case-folded with the Unicode rules.
+`marspot-core` −17,776 B.
+
+0.12.188 recorded an unexplained 8.6 KB that appeared and vanished with
+the panel's label casing.  A symbol-level diff of two unstripped builds
+names it: `alloc::str::to_lowercase`, 3,348 B of code that pulls in the
+**Final_Sigma** rule — a Greek capital sigma lower-cases to `ς` at the
+end of a word, and deciding "end of a word" needs the `Cased` and
+`Case_Ignorable` properties, hence the `case_ignorable`, `lowercase`,
+`uppercase` and `lt` bitsets: 2,270 + 1,712 + 919 + 456 + 352 + 320 +
+304 + 268 B, every one of them present only in the build that called it.
+`str::to_uppercase` has no context-sensitive rule and costs nothing
+comparable — which is why the same panel's status chip never showed up
+in the accounting.
+
+The 8.6 KB moved because of *where* the call sat, not what case it
+produced: the upper-case cut lower-cased each label inside the
+**painter**, which every binary reaches, while the lower-case cut left
+the only calls in `cc_usage`, which is dead code in `marspot` and
+`mcli`.  It was never dead in `marspot-core` — the binary that actually
+draws the panel, and not one the size ceiling watches — so that binary
+carried the whole 8.6 KB the entire time, unnoticed.
+
+Both feed-label conversions now use `to_ascii_lowercase`: these are
+model names out of a JSON feed (`Fable`, `GPT-5.3-Codex-Spark`), ASCII
+by construction, compared against ASCII literals.  Folding them with
+the Unicode rules bought exactly one thing — the sigma case — and paid
+9 KB for it.  The status chip's `to_uppercase` went ASCII too, for the
+same reason (−192 B; the `uppercase` bitset stays, something else in
+the binary still wants it).
+
+Rule of thumb worth carrying: `str::to_lowercase` costs ~9 KB the first
+time a binary reaches it, `to_ascii_lowercase` costs nothing, and the
+difference only ever matters for text that is genuinely Unicode.  The
+search path in `scrollback_search` and the pane-name matcher keep the
+Unicode form — that text is user content, not our labels.
 
 ### 0.12.188
 

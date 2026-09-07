@@ -3768,7 +3768,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         // that reads as sloppy.  So: right-align the text at
         // `row_right`, then draw the pill around it, letting the pill
         // spill into the card's padding rather than moving the text.
-        let chip_text = a.status_label.to_uppercase();
+        let chip_text = a.status_label.to_ascii_uppercase();
         let chip_pad = cw as f64 * metric::CHIP_PAD;
         let chip_text_x = row_right - text_w(&chip_text);
         // Centre the pill on the label's INK, not on its baseline box.
