@@ -74,14 +74,70 @@ build_command() {
   # proves only that the bytes reached the PTY, and a terminal that
   # drops under pressure finishes early and "wins".
   local marker=$1
-  local script="/tmp/marspot-live-matrix-$$.sh"
+  # Per terminal, not per process: all four used to share one path, so
+  # writing the block for the next terminal overwrote the script the
+  # previous one was told to run — every block ended up pointing at
+  # whichever marker was generated last.  Pasting them one at a time by
+  # hand hid it; driving them does not.
+  local script="/tmp/marspot-live-matrix-$$-$(basename "$marker" .txt).sh"
   local paths=()
   local s
   for s in "${SCENARIOS[@]}"; do
     paths+=("$SCENARIOS_DIR/$s.bin")
   done
   write_live_matrix_script "$script" "$marker" "$TRIALS" "${paths[@]}"
+  LAST_BUILT_SCRIPT="$script"
   echo "bash $script"
+}
+
+
+# Drive a terminal instead of asking a human to paste.
+#
+# The header above says AppleScript-driven benching is "too fragile";
+# that verdict predates checking, and it was checked on 2026-09-07:
+# a fresh iTerm2 window created, a command written into it and the
+# whole buffer read back with select-all all worked first time.  So a
+# terminal that can be driven is driven, and only one that cannot
+# falls back to the paste block.
+#
+# Deliberately narrow: `write text` into a NEW window, nothing else.
+# The failure mode is a marker that never appears, which the existing
+# wait already handles by timing out.
+drive_terminal() {
+  local term=$1 cmd=$2
+  case "$term" in
+    iterm)
+      osascript >/dev/null 2>&1 <<OSA || return 1
+tell application "iTerm2"
+  activate
+  set w to (create window with default profile)
+  tell current session of w to write text "$cmd"
+end tell
+OSA
+      ;;
+    terminal)
+      osascript >/dev/null 2>&1 <<OSA || return 1
+tell application "Terminal"
+  activate
+  do script "$cmd"
+end tell
+OSA
+      ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+# Is this terminal installed at all?  Measuring one that is not wastes
+# the whole 600 s wait on a marker nobody will ever write.
+terminal_installed() {
+  case "$1" in
+    iterm)    [[ -d /Applications/iTerm.app ]] ;;
+    terminal) [[ -d /System/Applications/Utilities/Terminal.app || -d /Applications/Utilities/Terminal.app ]] ;;
+    warp)     [[ -d /Applications/Warp.app ]] ;;
+    ghostty)  [[ -d /Applications/Ghostty.app ]] ;;
+    *) return 1 ;;
+  esac
 }
 
 print_paste_block() {
@@ -199,6 +255,14 @@ echo "{" > "$OUT_JSON"
 first=1
 for t in "${OTHER_TERMINALS[@]}"; do
   marker="/tmp/measure-${t}-all.txt"
+  if ! terminal_installed "$t"; then
+    echo "==> $t is not installed — skipped"
+    continue
+  fi
+  build_command "$marker" >/dev/null
+  if drive_terminal "$t" "bash $LAST_BUILT_SCRIPT"; then
+    echo "==> $t driven automatically"
+  fi
   echo "==> waiting on $marker"
   if wait_for_marker "$marker" 600; then
     echo "    done"
