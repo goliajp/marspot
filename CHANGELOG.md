@@ -3009,7 +3009,41 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.186**
+Current: **0.12.187**
+
+### 0.12.187
+
+The usage panel is `AGENT ACCOUNTS`, and Codex is in it.
+
+It read one feed (`claude-usage.json`) and drew every account as a
+fixed 5H + 7D pair plus whatever model caps followed.  That is
+Anthropic's shape, not a general one: OpenAI meters **no** account-wide
+5h window at all — its only sub-day allowance belongs to one model —
+so a Codex account had nowhere to go and simply was not shown.  The
+panel named itself after the one provider it could draw, which is how
+a reader concludes the other has no data rather than no code.
+
+Both feeds are now read (`codex-usage.json` alongside), and both
+reduce to the same thing: a list of named windows, each with its own
+utilization, its own reset and its own length.  The card draws one bar
+per window and the timeline draws one band per window, so a provider
+that meters something new needs no new field and no second way to read
+a bar.  A Codex account comes out as `5H / SPARK / ASTRA / RESERVE`
+— its sub-day allowance, Spark's week, the account week the default
+model spends, and gpt-reserve's own — and a bucket nobody named still
+gets a row instead of disappearing.
+
+Claude accounts gain from the same change: their per-model cap (Fable)
+was already on the card but never on the timeline, and it is routinely
+the window that actually stops the work.
+
+The panel's stamp is now the **older** of the two feeds: a stamp is a
+promise about how stale the whole panel is, and the newer feed cannot
+vouch for the other's numbers.  A window with no reset keeps its card
+row and draws no bar — there is no extent to draw.
+
+Binary +18 KB, of which the section table says 4.6 KB is code and the
+rest is one 16 KiB page of alignment; ceilings relocked accordingly.
 
 ### 0.12.186
 

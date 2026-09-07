@@ -1,11 +1,17 @@
-//! cc — Claude profile usage feed for the toolbar `Cc` modal.
+//! cc — agent usage feeds for the toolbar `Cc` modal.
 //!
-//! The devops side drops a small JSON snapshot at
-//! `~/.local/state/devops/claude-usage.json` (one object per Claude
-//! account: rolling 5-hour and 7-day window utilization + the unix
-//! reset instants).  This module reads + parses that file with a
+//! The devops side drops a small JSON snapshot per provider —
+//! `~/.local/state/devops/claude-usage.json` and `codex-usage.json`
+//! (one object per account: rolling window utilization + the unix
+//! reset instants).  This module reads + parses them with a
 //! purpose-built scanner — the schema is fixed and tiny, a JSON
 //! crate would be a dependency for one file (self-build principle).
+//!
+//! The two feeds share a schema but not a shape: Anthropic meters one
+//! account-wide 5h and 7d window, OpenAI meters no account-wide 5h at
+//! all and puts every allowance on a model.  Both are reduced here to
+//! the same thing — a list of named windows — so the panel has one way
+//! to draw a bar rather than one per provider.
 //!
 //! Everything here is read-only and cold-path: the file is touched
 //! only while the modal is open (open + 5 s refresh), never on the
@@ -425,8 +431,324 @@ pub fn snap_range_to_local_days(t0: f64, t1: f64) -> (f64, f64) {
     (lo as f64, hi as f64)
 }
 
+/// One metered window, reduced to what a card row and a timeline bar
+/// need.  Both providers land here.
+///
+/// The panel used to hard-code "an account has a 5h and a 7d, plus
+/// some model caps".  That is Anthropic's shape, not a general one:
+/// OpenAI meters no account-wide 5h at all — its only sub-day window
+/// belongs to one model — so a Codex account rendered through those
+/// fields would have had to lie about which window it was drawing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CcWindow {
+    /// Row label, already in the panel's all-caps style.
+    pub label: String,
+    /// 0.0 ..= 1.0 utilization of this window.
+    pub util: f64,
+    /// Unix seconds when it resets. `None` = nothing used yet / not
+    /// reported; the card still draws the row, the timeline draws no
+    /// bar (there is no extent to draw).
+    pub reset: Option<i64>,
+    /// How long the window is. The bar runs `[reset - span, reset]`.
+    pub span_secs: i64,
+}
+
+const WEEK_SECS: i64 = 7 * 86_400;
+
+impl CcAccount {
+    /// The account's windows in reading order: its own two, then one
+    /// per model cap.  A model cap is weekly on this provider.
+    pub fn windows(&self) -> Vec<CcWindow> {
+        let mut out = vec![
+            CcWindow {
+                label: "5H".into(),
+                util: self.util_5h,
+                reset: (self.reset_5h > 0).then_some(self.reset_5h),
+                span_secs: 5 * 3_600,
+            },
+            CcWindow {
+                label: "7D".into(),
+                util: self.util_7d,
+                reset: (self.reset_7d > 0).then_some(self.reset_7d),
+                span_secs: WEEK_SECS,
+            },
+        ];
+        out.extend(self.model_limits.iter().map(|m| CcWindow {
+            label: m.label.to_uppercase(),
+            util: m.util,
+            reset: m.reset,
+            span_secs: WEEK_SECS,
+        }));
+        out
+    }
+}
+
+/// One Codex account, already reduced to its windows.
+///
+/// Unlike [`CcAccount`] the raw fields are not kept: on this provider
+/// the account-level 5h is always absent and the account-level 7d is
+/// one row among four, so there is nothing a caller could do with them
+/// that `windows` does not already say.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CxAccount {
+    pub name: String,
+    pub email: String,
+    pub status: String,
+    pub windows: Vec<CcWindow>,
+}
+
+/// Codex feed location. `$HOME/.local/state/devops/codex-usage.json`.
+pub fn codex_feed_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".local/state/devops/codex-usage.json")
+}
+
+/// Read + parse the Codex feed. `None` on missing file / parse failure.
+pub fn read_codex() -> Option<CodexUsage> {
+    let body = std::fs::read_to_string(codex_feed_path()).ok()?;
+    parse_codex(&body)
+}
+
+/// The Codex feed, parsed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexUsage {
+    pub generated_at: i64,
+    pub accounts: Vec<CxAccount>,
+}
+
+/// A bucket's model codename, without the window span.
+///
+/// `GPT-5.3-Codex-Spark` -> `SPARK`, `gpt-reserve` -> `RESERVE`.  A
+/// bucket metering two windows carries the span after a space
+/// (`GPT-5.3-Codex-Spark 7d`) — the span is not part of the model's
+/// name, and leaving it in produces a row nothing can be looked up by.
+fn codex_model_name(label: &str) -> String {
+    let name = label.split_whitespace().next().unwrap_or(label);
+    name.rsplit('-').next().unwrap_or(name).to_uppercase()
+}
+
+/// The four rows of one Codex account, in reading order:
+///
+///   5H       the only sub-day allowance Codex meters, and it
+///            constrains Spark alone
+///   SPARK    Spark's weekly
+///   ASTRA    the account-wide weekly — what the default model draws on
+///   RESERVE  gpt-reserve's own weekly
+///
+/// The point of per-model metering is knowing where there is headroom,
+/// so every bucket gets a row; showing only the busiest hides the ones
+/// worth switching to.  A bucket nobody named here still gets a row
+/// rather than disappearing.
+fn codex_windows(obj: &str) -> Vec<CcWindow> {
+    struct Bucket {
+        name: String,
+        util: f64,
+        reset: Option<i64>,
+        span: i64,
+    }
+    let buckets: Vec<Bucket> = match top_level_value(obj, "model_limits") {
+        None => Vec::new(),
+        Some(arr) => objects_in_array(arr)
+            .into_iter()
+            .map(|m| {
+                let minutes = num_field(m, "window_minutes").unwrap_or(0.0) as i64;
+                Bucket {
+                    name: codex_model_name(&str_field(m, "label").unwrap_or_default()),
+                    util: num_field(m, "utilization").unwrap_or(0.0),
+                    reset: num_field(m, "reset").map(|t| t as i64),
+                    span: minutes * 60,
+                }
+            })
+            .collect(),
+    };
+    let is_sub_day = |b: &&Bucket| b.span > 0 && b.span <= 86_400;
+    let row = |label: &str, b: &Bucket| CcWindow {
+        label: label.to_string(),
+        util: b.util,
+        reset: b.reset,
+        span_secs: if b.span > 0 { b.span } else { WEEK_SECS },
+    };
+    let weekly_named = |n: &str| buckets.iter().find(|b| !is_sub_day(&b) && b.name == n);
+
+    let mut out = Vec::new();
+    if let Some(b) = buckets.iter().find(is_sub_day) {
+        out.push(row("5H", b));
+    }
+    if let Some(b) = weekly_named("SPARK") {
+        out.push(row("SPARK", b));
+    }
+    // The account-wide weekly has no name of its own in the feed; on
+    // this account it is what the default model spends, which is Astra.
+    let reset_7d = num_field(obj, "reset_7d").map(|t| t as i64);
+    out.push(CcWindow {
+        label: "ASTRA".into(),
+        util: num_field(obj, "utilization_7d").unwrap_or(0.0),
+        reset: reset_7d,
+        span_secs: WEEK_SECS,
+    });
+    if let Some(b) = weekly_named("RESERVE") {
+        out.push(row("RESERVE", b));
+    }
+    out.extend(
+        buckets
+            .iter()
+            .filter(|b| !is_sub_day(&b) && b.name != "SPARK" && b.name != "RESERVE")
+            .map(|b| row(&b.name, b)),
+    );
+    out
+}
+
+/// Parse the Codex feed.  Same scanner as the Claude one — the schema
+/// is the same shape, the reduction to windows is what differs.
+pub fn parse_codex(body: &str) -> Option<CodexUsage> {
+    let generated_at = str_field(body, "generated_at")
+        .and_then(parse_iso_utc)
+        .unwrap_or(0);
+    let accounts_start = body.find("\"accounts\"")?;
+    let arr_start = body[accounts_start..].find('[')? + accounts_start;
+    let mut accounts: Vec<CxAccount> = objects_in_array(&body[arr_start..])
+        .into_iter()
+        .map(|obj| CxAccount {
+            name: str_field(obj, "name").unwrap_or_default(),
+            email: str_field(obj, "email").unwrap_or_default(),
+            status: str_field(obj, "status").unwrap_or_default(),
+            windows: codex_windows(obj),
+        })
+        .collect();
+    if accounts.is_empty() {
+        return None;
+    }
+    accounts.sort_by(|a, b| natural_cmp(&a.name, &b.name).then_with(|| a.email.cmp(&b.email)));
+    Some(CodexUsage { generated_at, accounts })
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// Verbatim shape of `codex-usage.json` on 2026-09-08: no
+    /// account-wide 5h at all (`null`, not 0), one bucket metering a
+    /// 5h AND a weekly with the span appended to its label, and a
+    /// second bucket metering only a weekly.
+    const CODEX_FEED: &str = r#"{
+  "generated_at": "2026-09-07T15:33:21.739714+00:00",
+  "accounts": [
+    {
+      "name": "Codex 1",
+      "email": "lihao@golia.jp",
+      "status": "allowed",
+      "utilization_5h": null,
+      "utilization_7d": 0.43,
+      "reset_5h": null,
+      "reset_7d": 1789219017,
+      "model_limits": [
+        {
+          "label": "gpt-reserve",
+          "utilization": 0.02,
+          "reset": 1789219014,
+          "window_minutes": 10080,
+          "severity": "normal",
+          "is_active": false
+        },
+        {
+          "label": "GPT-5.3-Codex-Spark 5h",
+          "utilization": 0.11,
+          "reset": 1788813201,
+          "window_minutes": 300,
+          "severity": "normal",
+          "is_active": false
+        },
+        {
+          "label": "GPT-5.3-Codex-Spark 7d",
+          "utilization": 0.5,
+          "reset": 1789219014,
+          "window_minutes": 10080,
+          "severity": "normal",
+          "is_active": false
+        }
+      ],
+      "credits": { "enabled": false, "unlimited": false, "balance": "0", "reset_credits": 2 },
+      "tier": "pro",
+      "collected_at": "2026-09-07T15:33:21.738697+00:00"
+    }
+  ]
+}"#;
+
+    #[test]
+    fn the_codex_feed_reduces_to_four_rows_in_reading_order() {
+        let u = parse_codex(CODEX_FEED).expect("a feed with one account parses");
+        assert_eq!(u.accounts.len(), 1);
+        let a = &u.accounts[0];
+        assert_eq!(a.name, "Codex 1");
+        assert_eq!(a.status, "allowed");
+        let labels: Vec<&str> = a.windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(labels, ["5H", "SPARK", "ASTRA", "RESERVE"]);
+        let utils: Vec<f64> = a.windows.iter().map(|w| w.util).collect();
+        assert_eq!(utils, [0.11, 0.5, 0.43, 0.02]);
+        // Each window keeps its OWN reset and its own length — the 5h
+        // row is not the weekly's bar drawn short.
+        assert_eq!(a.windows[0].reset, Some(1788813201));
+        assert_eq!(a.windows[0].span_secs, 300 * 60);
+        assert_eq!(a.windows[1].reset, Some(1789219014));
+        assert_eq!(a.windows[1].span_secs, WEEK_SECS);
+        assert_eq!(a.windows[2].reset, Some(1789219017), "the account's own weekly");
+    }
+
+    /// The span a two-window bucket carries is not part of its name.
+    /// It once was, and the row came out called `SPARK 7D` while the
+    /// lookup for `SPARK` missed and pushed it to the end of the card.
+    #[test]
+    fn a_window_span_is_not_part_of_the_model_name() {
+        assert_eq!(codex_model_name("GPT-5.3-Codex-Spark"), "SPARK");
+        assert_eq!(codex_model_name("GPT-5.3-Codex-Spark 5h"), "SPARK");
+        assert_eq!(codex_model_name("GPT-5.3-Codex-Spark 7d"), "SPARK");
+        assert_eq!(codex_model_name("gpt-reserve"), "RESERVE");
+        assert_eq!(codex_model_name("GPT-5.5"), "5.5");
+    }
+
+    /// A bucket nobody named still gets a row. Silently dropping it is
+    /// how a new model's allowance would go unnoticed until it bit.
+    #[test]
+    fn an_unnamed_bucket_keeps_a_row_of_its_own() {
+        let feed = CODEX_FEED.replace(
+            "\"label\": \"gpt-reserve\"",
+            "\"label\": \"GPT-6-Comet\"",
+        );
+        let u = parse_codex(&feed).expect("still parses");
+        let labels: Vec<&str> = u.accounts[0].windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(labels, ["5H", "SPARK", "ASTRA", "COMET"]);
+    }
+
+    /// An account with no per-model buckets is still an account: it has
+    /// its own weekly, and that row must survive on its own.
+    #[test]
+    fn an_account_with_no_buckets_still_has_its_weekly() {
+        let feed = r#"{"generated_at":"2026-09-07T15:33:21+00:00","accounts":[
+          {"name":"Codex 9","email":"x@y.z","status":"allowed",
+           "utilization_5h":null,"utilization_7d":0.07,
+           "reset_5h":null,"reset_7d":1789219017,"model_limits":[]}]}"#;
+        let u = parse_codex(feed).expect("parses");
+        let w = &u.accounts[0].windows;
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].label, "ASTRA");
+        assert_eq!(w[0].util, 0.07);
+    }
+
+    /// The Claude side reduces to the same shape, so the panel has one
+    /// way to draw a bar: its own two windows, then one row per model.
+    #[test]
+    fn a_claude_account_reduces_to_the_same_window_shape() {
+        let u = parse(NESTED_FEED).expect("the claude fixture parses");
+        let w = u.accounts[1].windows();
+        assert_eq!(w[0].label, "5H");
+        assert_eq!(w[0].span_secs, 5 * 3_600);
+        assert_eq!(w[1].label, "7D");
+        assert_eq!(w[1].span_secs, WEEK_SECS);
+        assert!(w.len() > 2, "the model caps follow the account's own");
+        assert_eq!(w[2].label, w[2].label.to_uppercase(), "panel labels are caps");
+    }
+
     use super::*;
 
     /// Both ends land on a local midnight, and the data stays inside.

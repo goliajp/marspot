@@ -585,21 +585,34 @@ pub struct CcUsageAccountRender {
     pub status_label: String,
     /// 0 = ok, 1 = warn, 2 = limited/unknown-bad.
     pub status_severity: u8,
-    /// 0.0 ..= 1.0 window utilizations.
-    pub util_5h: f32,
-    pub util_7d: f32,
-    /// Unix reset instants (drive the timeline bars).
-    pub reset_5h_unix: i64,
-    pub reset_7d_unix: i64,
     /// "reset 5h: 7/19 11:50" — local time, formatted by L2.
     pub reset_label: String,
-    /// "11:50" / "14:00" — timeline bar end labels.
-    pub reset_5h_hm: String,
-    pub reset_7d_hm: String,
-    /// Per-model caps: (label, utilization).  One row each, under the
-    /// account's own windows — an account can sit at 7 % of its week
-    /// and still be shut out of a model, and the 7D bar cannot say so.
-    pub model_rows: Vec<(String, f32)>,
+    /// Every window this account is metered on, in reading order.
+    ///
+    /// Not a fixed 5h/7d pair plus extras: that is Anthropic's shape,
+    /// and a Codex account has no account-wide 5h at all — its only
+    /// sub-day allowance belongs to one model.  One list means the card
+    /// and the timeline draw the same rows, and a provider that meters
+    /// something new needs no new field.
+    pub windows: Vec<CcUsageWindowRender>,
+}
+
+/// cc — one metered window of an account card.
+#[derive(Debug, Clone)]
+pub struct CcUsageWindowRender {
+    /// Row label in the panel's all-caps style ("5H", "FABLE", "SPARK").
+    pub label: String,
+    /// 0.0 ..= 1.0 utilization of this window.
+    pub util: f32,
+    /// Unix reset instant.  `None` = nothing used yet / not reported:
+    /// the card still draws the row, the timeline draws no bar, because
+    /// there is no extent to draw.
+    pub reset_unix: Option<i64>,
+    /// Window length in seconds; the timeline bar runs
+    /// `[reset - span, reset]`.
+    pub span_secs: i64,
+    /// "11:50" — the bar's end label.
+    pub reset_hm: String,
 }
 
 /// cc — full data for one render of the `Cc` (Claude usage) modal.
@@ -3639,6 +3652,29 @@ fn cc_util_color(util: f32) -> [f32; 4] {
     }
 }
 
+/// A timeline bar's tag: `7d 100% 12:00`.
+///
+/// Lower-cased because the tag is read as prose beside the bar, while
+/// the card's label column is a heading — the same word plays two roles
+/// and the panel already set that convention with `5h` / `7d`.
+fn cc_window_tag(w: &CcUsageWindowRender) -> String {
+    format!("{} {:.0}% {}", w.label.to_lowercase(), w.util * 100.0, w.reset_hm)
+}
+
+/// Height of `n` stacked timeline bars including the gaps between them.
+fn cc_bars_height(bar_h: f64, bar_gap: f64, n: usize) -> f64 {
+    let n = n.max(1) as f64;
+    bar_h * n + bar_gap * (n - 1.0)
+}
+
+/// Height of one timeline band: its bars, plus the room the account
+/// name and the gap to the next band need.
+fn timeline_row_height(cell_h: f64, line_h: f64, bars: usize) -> f64 {
+    use crate::ui::components::cc_usage_modal::metric;
+    cc_bars_height(cell_h * metric::BAR_H, cell_h * metric::TIMELINE_BAR_GAP, bars)
+        + line_h * metric::TIMELINE_ROW_EXTRA
+}
+
 fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::ViewPainter) {
     let cw = p.cell_w;
     let ch = p.cell_h;
@@ -3665,7 +3701,10 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     // vertically centred against the taller heading line.
     let head_top = r.y_top + pad;
     let ui_line = p.ui_line_h() as f64;
-    let title = format!("CLAUDE ACCOUNTS  {}", cc.accounts.len());
+    // "AGENT", not "CLAUDE": the panel carries every provider whose
+    // feed is on disk, and naming it after one of them is how a reader
+    // concludes the other is missing rather than absent.
+    let title = format!("AGENT ACCOUNTS  {}", cc.accounts.len());
     // Same role, same code path as every other panel's title — the
     // point of the ladder is that "title" means one size app-wide.
     let title_role = crate::ui::theme::PanelText::Title;
@@ -3683,7 +3722,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
 
     if cc.feed_missing {
         y += lh;
-        text(p, inner_x, y, "no usage feed at ~/.local/state/devops/claude-usage.json", panel_palette::fg_sec());
+        text(p, inner_x, y, "no usage feed at ~/.local/state/devops/{claude,codex}-usage.json", panel_palette::fg_sec());
         return;
     }
 
@@ -3707,13 +3746,13 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     // last row's descent, then pad again.  `ch - ascent` is the
     // descent — the painter reports cell height and ascent, and a
     // monospace cell is exactly the two stacked.
-    let extra_bar_rows = cc
+    let window_rows = cc
         .accounts
         .iter()
-        .map(|a| a.model_rows.len())
+        .map(|a| a.windows.len())
         .max()
         .unwrap_or(0);
-    let card_h = card_height(ch as f64, ascent as f64, extra_bar_rows);
+    let card_h = card_height(ch as f64, ascent as f64, window_rows);
     let card_top = y;
     for (i, a) in cc.accounts.iter().enumerate() {
         let cx = inner_x + i as f64 * (card_w + gap);
@@ -3772,10 +3811,8 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         // model rows are the same shape on purpose: a reader should
         // not have to learn a second way to read a bar halfway down
         // the card.
-        let rows: Vec<(String, f32)> = [("5H".to_string(), a.util_5h), ("7D".to_string(), a.util_7d)]
-            .into_iter()
-            .chain(a.model_rows.iter().cloned())
-            .collect();
+        let rows: Vec<(String, f32)> =
+            a.windows.iter().map(|w| (w.label.clone(), w.util)).collect();
         // Labels are no longer all two characters, so the bars start
         // after the widest one rather than at a fixed column.
         let label_cols = rows
@@ -3843,12 +3880,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let tag_gutter = cc
         .accounts
         .iter()
-        .flat_map(|a| {
-            [
-                format!("5h {:.0}% {}", a.util_5h * 100.0, a.reset_5h_hm),
-                format!("7d {:.0}% {}", a.util_7d * 100.0, a.reset_7d_hm),
-            ]
-        })
+        .flat_map(|a| a.windows.iter().map(cc_window_tag))
         .map(|t| text_w(&t))
         .fold(0.0f64, f64::max)
         + cw as f64 * 1.2;
@@ -3860,12 +3892,8 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let extents: Vec<(i64, i64)> = cc
         .accounts
         .iter()
-        .flat_map(|a| {
-            [
-                (a.reset_5h_unix - 5 * 3_600, a.reset_5h_unix),
-                (a.reset_7d_unix - 7 * 86_400, a.reset_7d_unix),
-            ]
-        })
+        .flat_map(|a| a.windows.iter())
+        .filter_map(|w| w.reset_unix.map(|r| (r - w.span_secs, r)))
         .collect();
     let (t0, t1) = timeline_range(cc.now_unix, &extents);
     // Snap the range outward to local day boundaries.
@@ -3882,7 +3910,11 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let x_of = |t: f64| -> f64 { tl_x + ((t - t0) / span_s).clamp(0.0, 1.0) * tl_w };
     let bar_h = ch as f64 * metric::BAR_H;
     let bar_gap = ch as f64 * metric::TIMELINE_BAR_GAP;
-    let row_h = bar_h * 2.0 + bar_gap + lh * metric::TIMELINE_ROW_EXTRA;
+    // One band per account, tall enough for that account's bars. Sized
+    // off the widest account so every row is the same height — rows of
+    // different heights read as different kinds of thing.
+    let max_bars = cc.accounts.iter().map(|a| a.windows.len()).max().unwrap_or(2);
+    let row_h = timeline_row_height(ch as f64, lh, max_bars);
     let rows_top = y;
     let rows_bottom = rows_top + cc.accounts.len() as f64 * row_h;
     // Day grid, drawn first so the bars read as sitting on top of it.
@@ -3926,15 +3958,16 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     }
     for (i, a) in cc.accounts.iter().enumerate() {
         let ry = rows_top + i as f64 * row_h;
-        let name_baseline = ry + bar_h + bar_gap / 2.0 + ascent as f64 * 0.5;
+        // Centred on this account's whole stack of bars, whatever its
+        // height — the two-bar form of this was `bar_h + bar_gap / 2`.
+        let bars_h = cc_bars_height(bar_h, bar_gap, a.windows.len());
+        let name_baseline = ry + bars_h / 2.0 + ascent as f64 * 0.5;
         text(p, inner_x, name_baseline, &a.name, panel_palette::fg());
-        for (idx, (span, reset, util, hm)) in [
-            (5.0 * 3_600.0, a.reset_5h_unix as f64, a.util_5h, &a.reset_5h_hm),
-            (7.0 * 86_400.0, a.reset_7d_unix as f64, a.util_7d, &a.reset_7d_hm),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for (idx, w) in a.windows.iter().enumerate() {
+            // No reset means no extent — the card still names the
+            // window, but there is nothing here to draw it against.
+            let Some(reset_unix) = w.reset_unix else { continue };
+            let (span, reset, util) = (w.span_secs as f64, reset_unix as f64, w.util);
             let by = ry + idx as f64 * (bar_h + bar_gap);
             // Track = the rolling window's extent [reset - span,
             // reset]; the coloured fill covers only the USED portion
@@ -3957,7 +3990,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
             }
             // Tag sits right of the window, vertically centered on
             // the bar (baseline = bar centre + half the ascent).
-            let tag = format!("{} {:.0}% {}", if idx == 0 { "5h" } else { "7d" }, util * 100.0, hm);
+            let tag = cc_window_tag(w);
             // The gutter guarantees room, so this clamp is only a
             // backstop against a pathologically long reset label.
             // Strictly right of where the bar ends — never pulled back

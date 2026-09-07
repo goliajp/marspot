@@ -2081,7 +2081,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
         }
         Some("cc") => {
             let rect = marspot::ui::components::cc_usage_modal::panel_rect(
-                2, 2, phys_w as f64, phys_h as f64, cell_w, cell_h, layout.top_inset,
+                2, 4, phys_w as f64, phys_h as f64, cell_w, cell_h, layout.top_inset,
             );
             renderer.set_cc_usage(Some(demo_cc_usage(rect)));
         }
@@ -2199,22 +2199,27 @@ fn demo_cc_usage(rect: marspot_term::layout::Rect) -> marspot::render_metal::CcU
     // A fixed instant, so the timeline lands in the same place every
     // run: 2026-01-02 03:00:00 UTC.
     let now = 1_767_322_800i64;
+    let win = |label: &str, util: f32, reset: i64, hm: &str, span: i64| {
+        marspot::render_metal::CcUsageWindowRender {
+            label: label.to_string(),
+            util,
+            reset_unix: Some(reset),
+            span_secs: span,
+            reset_hm: hm.to_string(),
+        }
+    };
     let account = |name: &str, email: &str, status: &str, sev: u8, a: f32, b: f32| {
         CcUsageAccountRender {
             name: name.to_string(),
             email: email.to_string(),
             status_label: status.to_string(),
             status_severity: sev,
-            util_5h: a,
-            util_7d: b,
-            reset_5h_unix: now + 3 * 3600,
-            reset_7d_unix: now + 4 * 24 * 3600,
-            reset_label: "resets 06:00".to_string(),
-            reset_5h_hm: "06:00".to_string(),
-            reset_7d_hm: "01/06".to_string(),
-            model_rows: vec![
-                ("opus".to_string(), a),
-                ("sonnet".to_string(), b * 0.5),
+            reset_label: "reset: 01/02 06:00".to_string(),
+            windows: vec![
+                win("5H", a, now + 3 * 3600, "06:00", 5 * 3600),
+                win("7D", b, now + 4 * 24 * 3600, "01/06", 7 * 86_400),
+                win("OPUS", a, now + 4 * 24 * 3600, "01/06", 7 * 86_400),
+                win("SONNET", b * 0.5, now + 4 * 24 * 3600, "01/06", 7 * 86_400),
             ],
         }
     };

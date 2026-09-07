@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.140"  # codex badge 右键改为切账号 profile（CODEX_HOME），不再是 effort；详见 CHANGELOG.md
-core    = "0.12.186"  # agent TUI 以声明为准，不再从 badge/滚轮键推断；详见 CHANGELOG.md
+core    = "0.12.187"  # 账号面板改叫 AGENT ACCOUNTS，并列出 Codex 的四条额度；详见 CHANGELOG.md
 session = "0.11.82"  # 每字符一次的 wrap 判断不再是一次函数调用；emoji +3.7% cjk +4.5%；详见 CHANGELOG.md

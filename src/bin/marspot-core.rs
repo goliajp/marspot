@@ -2430,6 +2430,7 @@ struct CcUsageModalState {
     /// Parsed feed; `None` = file missing/unreadable (modal shows a
     /// placeholder instead of closing).
     data: Option<marspot::cc_usage::CcUsage>,
+    codex: Option<marspot::cc_usage::CodexUsage>,
     loaded_at: Instant,
 }
 
@@ -6859,6 +6860,7 @@ impl CoreApp {
             Some(_) => None,
             None => Some(CcUsageModalState {
                 data: marspot::cc_usage::read(),
+                codex: marspot::cc_usage::read_codex(),
                 loaded_at: Instant::now(),
             }),
         };
@@ -6956,24 +6958,29 @@ impl CoreApp {
     }
 
     fn cc_usage_modal_rect(&self, wi: usize) -> marspot_term::layout::Rect {
-        let n = win!(self, wi)
-            .cc_usage_modal
-            .as_ref()
-            .and_then(|m| m.data.as_ref())
-            .map(|d| d.accounts.len())
-            .unwrap_or(1);
-        let extra_bar_rows = win!(self, wi)
-            .cc_usage_modal
-            .as_ref()
-            .and_then(|m| m.data.as_ref())
-            .and_then(|d| d.accounts.iter().map(|a| a.model_limits.len()).max())
-            .unwrap_or(0);
+        // Both feeds share the panel, so both feed its geometry.
+        let modal = win!(self, wi).cc_usage_modal.as_ref();
+        let claude = modal.and_then(|m| m.data.as_ref());
+        let codex = modal.and_then(|m| m.codex.as_ref());
+        let n = (claude.map_or(0, |d| d.accounts.len())
+            + codex.map_or(0, |d| d.accounts.len()))
+            .max(1);
+        let window_rows = claude
+            .into_iter()
+            .flat_map(|d| d.accounts.iter().map(|a| a.windows().len()))
+            .chain(
+                codex
+                    .into_iter()
+                    .flat_map(|d| d.accounts.iter().map(|a| a.windows.len())),
+            )
+            .max()
+            .unwrap_or(2);
         let (cell_w, cell_h) = self.renderer.cell_dims();
         // Geometry lives with the rest of the modal's metrics so the
         // painter and this rect can't disagree about how tall a card is.
         marspot::ui::components::cc_usage_modal::panel_rect(
             n,
-            extra_bar_rows,
+            window_rows,
             win!(self, wi).w_phys,
             win!(self, wi).h_phys,
             cell_w as f64,
@@ -6989,11 +6996,11 @@ impl CoreApp {
         let modal = win!(self, wi).cc_usage_modal.as_mut()?;
         if modal.loaded_at.elapsed() > std::time::Duration::from_secs(5) {
             modal.data = marspot::cc_usage::read();
+            modal.codex = marspot::cc_usage::read_codex();
             modal.loaded_at = Instant::now();
             win!(self, wi).needs_render = true;
         }
         let rect = self.cc_usage_modal_rect(wi);
-        let modal = win!(self, wi).cc_usage_modal.as_ref()?;
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -7006,48 +7013,83 @@ impl CoreApp {
             let (_, _, h, mi) = marspot::cc_usage::local_mdhm(unix);
             format!("{h:02}:{mi:02}")
         };
-        match modal.data.as_ref() {
-            None => Some(CcUsageRender {
+        // Windows carry their own reset, so the bar-end labels are
+        // formatted per window rather than per account.
+        let window = |w: &marspot::cc_usage::CcWindow| marspot::render_metal::CcUsageWindowRender {
+            label: w.label.clone(),
+            util: w.util as f32,
+            reset_unix: w.reset,
+            span_secs: w.span_secs,
+            reset_hm: w.reset.map(fmt_hm).unwrap_or_default(),
+        };
+        // The card's footer names one reset, and the useful one is the
+        // window that turns over first — that is when the account can
+        // be used again.
+        let soonest_reset = |ws: &[marspot::cc_usage::CcWindow]| -> String {
+            match ws.iter().filter_map(|w| w.reset).min() {
+                Some(t) => format!("reset: {}", fmt_md_hm(t)),
+                None => String::new(),
+            }
+        };
+        let severity = |status: &str| match marspot::cc_usage::CcStatusKind::classify(status) {
+            marspot::cc_usage::CcStatusKind::Ok => 0,
+            marspot::cc_usage::CcStatusKind::Warn => 1,
+            _ => 2,
+        };
+
+        let modal = win!(self, wi).cc_usage_modal.as_ref()?;
+        let mut accounts: Vec<CcUsageAccountRender> = Vec::new();
+        if let Some(d) = modal.data.as_ref() {
+            accounts.extend(d.accounts.iter().map(|a| {
+                let ws = a.windows();
+                CcUsageAccountRender {
+                    name: a.name.clone(),
+                    email: a.email.clone(),
+                    status_label: marspot::cc_usage::CcStatusKind::classify(&a.status)
+                        .label(&a.status),
+                    status_severity: severity(&a.status),
+                    reset_label: soonest_reset(&ws),
+                    windows: ws.iter().map(window).collect(),
+                }
+            }));
+        }
+        if let Some(d) = modal.codex.as_ref() {
+            accounts.extend(d.accounts.iter().map(|a| CcUsageAccountRender {
+                name: a.name.clone(),
+                email: a.email.clone(),
+                status_label: marspot::cc_usage::CcStatusKind::classify(&a.status).label(&a.status),
+                status_severity: severity(&a.status),
+                reset_label: soonest_reset(&a.windows),
+                windows: a.windows.iter().map(window).collect(),
+            }));
+        }
+        if accounts.is_empty() {
+            return Some(CcUsageRender {
                 rect,
                 updated_label: String::new(),
-                accounts: Vec::new(),
+                accounts,
                 now_unix,
                 feed_missing: true,
-            }),
-            Some(d) => Some(CcUsageRender {
-                rect,
-                updated_label: format!("updated {}", fmt_md_hm(d.generated_at)),
-                now_unix,
-                feed_missing: false,
-                accounts: d
-                    .accounts
-                    .iter()
-                    .map(|a| CcUsageAccountRender {
-                        name: a.name.clone(),
-                        email: a.email.clone(),
-                        status_label: marspot::cc_usage::CcStatusKind::classify(&a.status)
-                            .label(&a.status),
-                        status_severity: match marspot::cc_usage::CcStatusKind::classify(&a.status) {
-                            marspot::cc_usage::CcStatusKind::Ok => 0,
-                            marspot::cc_usage::CcStatusKind::Warn => 1,
-                            _ => 2,
-                        },
-                        util_5h: a.util_5h as f32,
-                        util_7d: a.util_7d as f32,
-                        reset_5h_unix: a.reset_5h,
-                        reset_7d_unix: a.reset_7d,
-                        reset_label: format!("reset 5h: {}", fmt_md_hm(a.reset_5h)),
-                        reset_5h_hm: fmt_hm(a.reset_5h),
-                        reset_7d_hm: fmt_hm(a.reset_7d),
-                        model_rows: a
-                            .model_limits
-                            .iter()
-                            .map(|m| (m.label.to_uppercase(), m.util as f32))
-                            .collect(),
-                    })
-                    .collect(),
-            }),
+            });
         }
+        // Two feeds, two generation stamps. The panel shows the older
+        // one: a stamp is a promise about how stale the WHOLE panel is,
+        // and the newer feed cannot vouch for the other's numbers.
+        let generated_at = [
+            modal.data.as_ref().map(|d| d.generated_at),
+            modal.codex.as_ref().map(|d| d.generated_at),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(0);
+        Some(CcUsageRender {
+            rect,
+            updated_label: format!("updated {}", fmt_md_hm(generated_at)),
+            now_unix,
+            feed_missing: false,
+            accounts,
+        })
     }
 
     /// F3+1.5 — build the centered Process Monitor modal data via the

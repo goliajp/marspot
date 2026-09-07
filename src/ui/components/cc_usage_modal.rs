@@ -116,15 +116,20 @@ pub fn timeline_range(now: i64, extents: &[(i64, i64)]) -> (f64, f64) {
 /// ascent` is the descent — a monospace cell is exactly the two
 /// stacked.  Writing this as a literal is how the bottom padding got
 /// lost the first time.
-pub fn card_height(cell_h: f64, ascent: f64, extra_bar_rows: usize) -> f64 {
+/// `window_rows` is how many bar rows the tallest card draws — every
+/// window the account is metered on, not just the extras.  One number
+/// instead of "two, plus however many more": the providers disagree
+/// about what the first two are, and a caller that has to subtract
+/// before calling is a caller that will one day subtract wrong.
+pub fn card_height(cell_h: f64, ascent: f64, window_rows: usize) -> f64 {
     let lh = cell_h * metric::LINE_ADVANCE;
     let pad = cell_h * metric::CARD_PAD;
     let rows: f64 = metric::CARD_ROW_ADVANCES.iter().map(|m| lh * m).sum();
-    // Each per-model cap adds one more bar row, on the same advance the
-    // 5H→7D step uses.  Derived rather than a second literal: a card
-    // whose height and whose painter disagree is the bug this module
-    // exists to prevent.
-    let extra = lh * metric::CARD_ROW_ADVANCES[2] * extra_bar_rows as f64;
+    // The four advances above already cover two bar rows; each further
+    // one steps by the same amount the second→third step uses.  Derived
+    // rather than a second literal: a card whose height and whose
+    // painter disagree is the bug this module exists to prevent.
+    let extra = lh * metric::CARD_ROW_ADVANCES[2] * window_rows.saturating_sub(2) as f64;
     pad * 2.0 + ascent + rows + extra + (cell_h - ascent)
 }
 
@@ -134,8 +139,15 @@ pub fn card_height(cell_h: f64, ascent: f64, extra_bar_rows: usize) -> f64 {
 /// margins.  The caller adds one band per timeline row plus the date
 /// axis.
 pub const PANEL_CHROME_LINES: f64 = 16.8;
-/// One timeline row's band, in line advances.
-pub const TIMELINE_ROW_LINES: f64 = 2.6;
+/// One timeline band, in line advances, for an account drawing `bars`
+/// windows.  The painter derives its own row height from the same
+/// metrics; this is that height expressed in the unit `panel_rect`
+/// budgets in, so the panel cannot come up short of what it draws.
+pub fn timeline_row_lines(bars: usize) -> f64 {
+    let n = bars.max(1) as f64;
+    let bars_h = metric::BAR_H * n + metric::TIMELINE_BAR_GAP * (n - 1.0);
+    bars_h / metric::LINE_ADVANCE + metric::TIMELINE_ROW_EXTRA
+}
 /// Date axis plus bottom margin, in line advances.
 pub const AXIS_LINES: f64 = 4.0;
 
@@ -146,7 +158,7 @@ pub const AXIS_LINES: f64 = 4.0;
 /// 94 % of the window; height is the chrome plus one band per account.
 pub fn panel_rect(
     n_accounts: usize,
-    extra_bar_rows: usize,
+    window_rows: usize,
     w_phys: f64,
     h_phys: f64,
     cell_w: f64,
@@ -159,11 +171,14 @@ pub fn panel_rect(
         .min(n * 52.0 * cell_w + 8.0 * cell_w)
         .max(64.0 * cell_w)
         .min(w_phys - 24.0);
-    // The chrome figure covers a card with the two account windows;
-    // per-model rows make every card taller by the same step the
-    // painter uses.
-    let cards_extra = lh * metric::CARD_ROW_ADVANCES[2] * extra_bar_rows as f64;
-    let h = (lh * PANEL_CHROME_LINES + cards_extra + n * lh * TIMELINE_ROW_LINES + lh * AXIS_LINES)
+    // The chrome figure covers a card with two bar rows; every further
+    // window makes each card taller by the same step the painter uses,
+    // and makes each timeline band taller by one more bar.
+    let cards_extra = lh * metric::CARD_ROW_ADVANCES[2] * window_rows.saturating_sub(2) as f64;
+    let h = (lh * PANEL_CHROME_LINES
+        + cards_extra
+        + n * lh * timeline_row_lines(window_rows)
+        + lh * AXIS_LINES)
         .min(h_phys * 0.9);
     marspot_term::layout::Rect {
         x: (w_phys - w) / 2.0,
@@ -223,19 +238,43 @@ mod tests {
         let pad = cell_h * metric::CARD_PAD;
         let rows: f64 = metric::CARD_ROW_ADVANCES.iter().map(|m| lh * m).sum();
 
-        // Checked with and without per-model rows: the extra rows are
-        // exactly the reason a card can outgrow its own box.
-        for extra in [0usize, 1, 3] {
-            let h = card_height(cell_h, ascent, extra);
+        // Two windows is the smallest card; the rows beyond them are
+        // exactly the reason a card can outgrow its own box, and a
+        // Codex account draws four.
+        for window_rows in [2usize, 3, 4, 5] {
+            let h = card_height(cell_h, ascent, window_rows);
             // Where the last row's baseline lands, measured from the top.
-            let last_baseline =
-                pad + ascent + rows + lh * metric::CARD_ROW_ADVANCES[2] * extra as f64;
+            let last_baseline = pad
+                + ascent
+                + rows
+                + lh * metric::CARD_ROW_ADVANCES[2] * window_rows.saturating_sub(2) as f64;
             let below = h - last_baseline;
             let descent = cell_h - ascent;
             assert!(
                 below >= descent + pad - 0.001,
-                "extra={extra}: only {below} px below the last baseline; \
+                "window_rows={window_rows}: only {below} px below the last baseline; \
                  needs descent ({descent}) + padding ({pad})"
+            );
+        }
+    }
+
+    /// The panel budgets one band per account in line advances while
+    /// the painter measures the same band in cell heights.  Two units,
+    /// one number — so they are checked against each other here rather
+    /// than trusted to stay in step.
+    #[test]
+    fn a_timeline_band_is_budgeted_for_every_bar_it_draws() {
+        let cell_h = 20.0;
+        let lh = cell_h * metric::LINE_ADVANCE;
+        for bars in 1..=6usize {
+            let n = bars as f64;
+            let painter = cell_h * metric::BAR_H * n
+                + cell_h * metric::TIMELINE_BAR_GAP * (n - 1.0)
+                + lh * metric::TIMELINE_ROW_EXTRA;
+            let budget = lh * timeline_row_lines(bars);
+            assert!(
+                budget >= painter - 0.001,
+                "bars={bars}: budgeted {budget} px for a band the painter draws at {painter}"
             );
         }
     }
@@ -245,7 +284,7 @@ mod tests {
     fn card_padding_is_symmetric() {
         let (cell_h, ascent) = (20.0, 15.0);
         let pad = cell_h * metric::CARD_PAD;
-        let h = card_height(cell_h, ascent, 0);
+        let h = card_height(cell_h, ascent, 2);
         let lh = cell_h * metric::LINE_ADVANCE;
         let rows: f64 = metric::CARD_ROW_ADVANCES.iter().map(|m| lh * m).sum();
         let top_gap = pad;
@@ -260,7 +299,7 @@ mod tests {
     #[test]
     fn panel_rect_stays_inside_the_window() {
         for n in 1..=8 {
-            let r = panel_rect(n, 1, 1600.0, 1000.0, 8.0, 18.0, 60.0);
+            let r = panel_rect(n, 3, 1600.0, 1000.0, 8.0, 18.0, 60.0);
             assert!(r.x >= 0.0, "n={n} x={}", r.x);
             assert!(r.x + r.w <= 1600.0 + 0.001, "n={n} overflows width");
             assert!(r.y_top >= 60.0, "n={n} must clear the top inset");
