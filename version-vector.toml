@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.137"  # codex badge 右键切 reasoning effort,resume 同一会话;详见 CHANGELOG.md
-core    = "0.12.182"  # 修:到期检查对 L3 pane 取进程内 Terminal 直接 panic,开机即崩;详见 CHANGELOG.md
-session = "0.11.76"  # 回答颜色查询；带中间字符的 CSI 不再在应答之前就被丢掉；详见 CHANGELOG.md
+core    = "0.12.183"  # 刚发过 ctrl+T 就不再重发，修滚轮进 history 一次滑动开关好几遍；详见 CHANGELOG.md
+session = "0.11.77"  # emoji 宽度查表从二分查找换成编译期位图，mini 上 +8.8%；详见 CHANGELOG.md

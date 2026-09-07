@@ -99,7 +99,59 @@ pub const EMOJI_PRESENTATION_RANGES: &[(u32, u32)] = &[
 ];
 
 /// `true` iff `cp` is an Emoji_Presentation=Yes codepoint per UTS #51.
+// The ranges above are the source of truth; these bitmaps are built
+// from them at compile time so there is still only one table to
+// regenerate.  The lookup they replace was a binary search over 81
+// ranges — ~7 unpredictable branches for every emoji that reaches the
+// width fast path, on a path where one added branch per character
+// measurably moves throughput.  1219 codepoints are set across two
+// spans, which fit in 615 bytes of rodata.
+const BMP_LO: u32 = 0x231A;
+const BMP_HI: u32 = 0x2B55;
+const SMP_LO: u32 = 0x1F004;
+const SMP_HI: u32 = 0x1FAF8;
+const BMP_BYTES: usize = (BMP_HI - BMP_LO) as usize / 8 + 1;
+const SMP_BYTES: usize = (SMP_HI - SMP_LO) as usize / 8 + 1;
+
+const fn bitmap<const N: usize>(lo: u32, hi: u32) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut i = 0;
+    while i < EMOJI_PRESENTATION_RANGES.len() {
+        let (start, end) = EMOJI_PRESENTATION_RANGES[i];
+        let mut cp = if start < lo { lo } else { start };
+        let last = if end > hi { hi } else { end };
+        while cp <= last {
+            let off = (cp - lo) as usize;
+            out[off / 8] |= 1 << (off % 8);
+            cp += 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+static BMP: [u8; BMP_BYTES] = bitmap::<BMP_BYTES>(BMP_LO, BMP_HI);
+static SMP: [u8; SMP_BYTES] = bitmap::<SMP_BYTES>(SMP_LO, SMP_HI);
+
+#[inline]
+fn bit(map: &[u8], lo: u32, cp: u32) -> bool {
+    let off = (cp - lo) as usize;
+    map[off / 8] & (1 << (off % 8)) != 0
+}
+
 pub fn has_emoji_presentation(cp: u32) -> bool {
+    if cp >= SMP_LO {
+        cp <= SMP_HI && bit(&SMP, SMP_LO, cp)
+    } else {
+        cp >= BMP_LO && cp <= BMP_HI && bit(&BMP, BMP_LO, cp)
+    }
+}
+
+/// The binary search the bitmaps replaced.  Kept as the reference the
+/// equivalence test checks against — a table regeneration that widens
+/// a span past the bitmap bounds has to fail a test, not silently
+/// start answering `false`.
+fn has_emoji_presentation_by_search(cp: u32) -> bool {
     EMOJI_PRESENTATION_RANGES
         .binary_search_by(|&(start, end)| {
             if cp < start {
@@ -116,6 +168,20 @@ pub fn has_emoji_presentation(cp: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_bitmap_answers_exactly_what_the_ranges_say() {
+        // Every codepoint, not a sample: the bitmaps are bounded by
+        // hand-written spans, and a regenerated table that grows past
+        // one of them would otherwise answer `false` in silence.
+        for cp in 0..=0x10FFFFu32 {
+            assert_eq!(
+                has_emoji_presentation(cp),
+                has_emoji_presentation_by_search(cp),
+                "U+{cp:04X}"
+            );
+        }
+    }
+
     #[test]
     fn known_presentation_emoji_match_spec() {
         assert!(has_emoji_presentation(0x2705), "check mark");

@@ -203,3 +203,73 @@ mod tests {
         assert!(!shows_marker(60, 1, screen(&rows), &[0xff, 0xfe]));
     }
 }
+
+/// How long to wait for a just-sent `enter` to show up on screen
+/// before concluding it did not take.
+///
+/// Measured from the user's own log (2026-09-07): sending the key and
+/// seeing the program's marker appear was 59 ms apart in the best case
+/// observed.  A trackpad delivers wheel events at 60–120 Hz, so during
+/// that window four to seven more of them arrive — and each one, seeing
+/// a view that still reads closed, sent the toggle AGAIN.  The
+/// transcript opened and closed several times inside one flick, which
+/// is what "scrolling into history is very choppy" was.
+///
+/// The state-change log could not see it: it records the OBSERVED
+/// open flag, and a flap that resolves before the next publish never
+/// changes it.
+pub const ENTER_SETTLE_MS: u64 = 400;
+
+/// Should this tick send the `enter` key?
+///
+/// Deliberately not a remembered "it is open now" bool — the program
+/// leaves that view on its own as well as by the user's key, and a
+/// stale flag makes the next tick CLOSE what the user is reading (this
+/// was tried, and that is what it did).  This asks a narrower question:
+/// has enough time passed since we last asked for the answer to be
+/// visible?
+pub fn should_send_enter(view_open: bool, since_last_enter_ms: Option<u64>) -> bool {
+    if view_open {
+        return false;
+    }
+    match since_last_enter_ms {
+        Some(ms) => ms >= ENTER_SETTLE_MS,
+        None => true,
+    }
+}
+
+#[cfg(test)]
+mod enter_settle_tests {
+    use super::*;
+
+    #[test]
+    fn an_open_view_is_never_asked_to_open_again() {
+        assert!(!should_send_enter(true, None));
+        assert!(!should_send_enter(true, Some(10_000)));
+    }
+
+    #[test]
+    fn the_first_tick_of_a_gesture_asks() {
+        assert!(should_send_enter(false, None));
+    }
+
+    #[test]
+    fn the_ticks_that_arrive_while_it_is_still_answering_do_not() {
+        // The flick that produced the report: seven more events inside
+        // the window where the marker has not appeared yet.
+        for ms in [0, 8, 16, 33, 59, 100, 399] {
+            assert!(
+                !should_send_enter(false, Some(ms)),
+                "{ms} ms after asking, the answer may still be in flight"
+            );
+        }
+    }
+
+    #[test]
+    fn a_view_still_closed_long_after_is_asked_again() {
+        // The key genuinely did not take — say the program was busy.
+        // Waiting forever would leave the wheel dead.
+        assert!(should_send_enter(false, Some(ENTER_SETTLE_MS)));
+        assert!(should_send_enter(false, Some(5_000)));
+    }
+}

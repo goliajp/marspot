@@ -2934,7 +2934,36 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.182**
+Current: **0.12.183**
+
+### 0.12.183
+
+Scrolling into codex's transcript stopped toggling it shut again.
+
+Reported as: reaching history with the wheel is very choppy, and iTerm2
+and Terminal are not.
+
+The wheel sends the plugin's `enter` key (codex: ctrl-T) whenever the
+program's on-screen marker says the view is closed.  That marker cannot
+appear until codex has repainted and the frame has been published and
+read — **59 ms apart in the best case in the user's own log**.  A
+trackpad delivers ticks at 60–120 Hz, so four to seven more of them
+arrived inside that window, each seeing a view that still read closed,
+and each sending the toggle again.  The transcript opened and shut
+several times inside one flick.
+
+The state log could not see it, because it records the OBSERVED open
+flag and a flap that resolves before the next publish never changes it
+— the same silence the comment beside it already warns about.  There is
+now a sampled line for the suppressed case, so the next report of this
+shape has evidence instead of a guess.
+
+The fix is not a remembered "it is open" bool: that was tried, and
+because the program leaves the view on its own too, a stale flag made
+the next tick close what the user was reading.  It asks a narrower
+question — has enough time passed since we last asked for the answer to
+be visible (`wheel_marker::should_send_enter`, 400 ms) — and the
+scroll keys keep flowing throughout either way.
 
 ### 0.12.182
 
@@ -5713,7 +5742,47 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.76**
+Current: **0.11.77**
+
+### 0.11.77
+
+Emoji width is a table lookup again, not a binary search.
+
+Alacritty is the reference the project's perf rules name for pure parse
+throughput — same language, same platform, so a gap there is ours.
+Measured head to head on identical bytes into an identical grid, with
+the two final screens compared cell by cell first: on `cat-emoji`,
+**both produce exactly the same screen and marspot was 1.58x slower**.
+The floor for that scenario was relaxed on 2026-07-11 as "the cost of
+cluster correctness"; that reason does not survive contact with an
+implementation that is correct and faster.
+
+A leaf-symbol profile put 38 % of emoji parse in the per-character
+path, against 1.6 % for ASCII, which has a batch lane.  Two hypotheses
+died there, both measured rather than argued: the fast path classified
+each character twice (once on arrival, once after decoding it back out
+of the String next time round) — carrying the width forward instead was
+NEUTRAL; and ablating the one-character lookahead pipeline entirely,
+the structural difference from Alacritty, was also neutral (159.6 vs
+161.0 MB/s).  The ablation's first cut read an env var per character
+and reported 43 MB/s, which is its own lesson about how tight this loop
+is.
+
+What was left was `has_emoji_presentation`, a binary search over 81
+ranges — about seven unpredictable branches for every emoji.  The
+ranges cover 1219 codepoints across two spans, so the bitmap that
+replaces the search is 615 bytes, built from the same generated table
+by a `const fn`: there is still one table to regenerate.  A test
+compares the two answers across **all 1,114,112 codepoints**, so a
+regenerated table that grows past a span boundary fails a test instead
+of silently answering "no".
+
+Interleaved A/B on mini, same binary rebuilt between runs:
+`cat-emoji` 134.4 → 146.2 MB/s (**+8.8 %**), and `cat-cjk`, which
+shares the path, 215.1 → 220.6 (+2.5 %).  Against Alacritty the ratio
+moves 0.63x → 0.71x with the screens still identical.  Still behind;
+the remaining categories are `feed` 23.8 %, `print_glyph` 15.8 %,
+`scroll_up` 15.2 %, `write_glyph` 14.6 %.
 
 ### 0.11.76
 

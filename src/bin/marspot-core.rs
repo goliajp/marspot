@@ -780,6 +780,7 @@ mod window_state_tests {
             renderer: MetalRenderer::new_headless().expect("headless renderer"),
             pane_badges: std::collections::HashMap::new(),
             pane_wheel_keys: std::collections::HashMap::new(),
+            pane_wheel_enter_at: std::collections::HashMap::new(),
             pane_wheel_open: std::collections::HashMap::new(),
             pane_titles: std::collections::HashMap::new(),
             pane_cwds: std::collections::HashMap::new(),
@@ -3701,6 +3702,13 @@ struct CoreApp {
     /// never remembered.  Nothing here ever closes it: the user asked
     /// for the wheel to take them in but never to throw them out.
     pane_wheel_keys: std::collections::HashMap<u64, WheelKeys>,
+    /// When this pane was last sent the plugin's `enter` key.  The
+    /// marker that says the view opened takes a repaint to appear —
+    /// 59 ms in the best case measured — and a trackpad delivers ticks
+    /// far faster than that, so without this every tick inside the
+    /// window sent the toggle again and closed what the one before it
+    /// opened.  See `wheel_marker::should_send_enter`.
+    pane_wheel_enter_at: std::collections::HashMap<u64, std::time::Instant>,
     /// Last observed open/closed state per pane, so the log carries one
     /// line per transition instead of one per wheel event.
     pane_wheel_open: std::collections::HashMap<u64, bool>,
@@ -8382,16 +8390,39 @@ impl CoreApp {
                     )
                 };
                 let up = lines > 0;
+                let since_enter = self
+                    .pane_wheel_enter_at
+                    .get(&sid)
+                    .map(|t| t.elapsed().as_millis() as u64);
+                let ask = marspot::wheel_marker::should_send_enter(open, since_enter);
+                let mut suppressed = false;
                 if marspot::wheel_marker::wheel_is_ours(open, up) {
                     if let Some(k) = self.pane_wheel_keys.get(&sid) {
-                        if !open && !k.enter.is_empty() {
+                        if ask && !k.enter.is_empty() {
                             buf.extend_from_slice(&k.enter);
+                        } else if !open && !k.enter.is_empty() {
+                            suppressed = true;
                         }
                         let key = if up { &k.up } else { &k.down };
                         for _ in 0..ticks {
                             buf.extend_from_slice(key);
                         }
                     }
+                }
+                if ask && !buf.is_empty() {
+                    self.pane_wheel_enter_at.insert(sid, std::time::Instant::now());
+                }
+                if suppressed {
+                    // The thing the state log could not see.  A run of
+                    // these is the flick that used to toggle the view
+                    // open and shut several times over.
+                    lx_debug_sampled!(
+                        "core.pane_wheel.enter_held",
+                        8,
+                        "tick arrived while the last enter was still in flight",
+                        session = sid,
+                        since_ms = since_enter.unwrap_or(0)
+                    );
                 }
                 // One line per change of state, not per event: a
                 // momentum scroll is many events, and the thing worth
@@ -9545,6 +9576,7 @@ fn main() {
         renderer,
         pane_badges: std::collections::HashMap::new(),
         pane_wheel_keys: std::collections::HashMap::new(),
+        pane_wheel_enter_at: std::collections::HashMap::new(),
         pane_wheel_open: std::collections::HashMap::new(),
         pane_titles: std::collections::HashMap::new(),
         pane_cwds: std::collections::HashMap::new(),

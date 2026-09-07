@@ -285,6 +285,19 @@ pub struct Terminal {
     /// full compound-emoji glyphs are deferred to the cluster-pool
     /// + renderer-shaping work tracked under task #5.
     cluster_buf: String,
+    /// The buffered codepoint's fast-path width, when there is exactly
+    /// one and it had one.  `fast_width` is a table lookup — the
+    /// comment on `fast_pict_width` records it at 23 % of emoji parse
+    /// time — and the old fast path paid it TWICE per glyph: once to
+    /// classify the incoming char, and again next time round to
+    /// re-classify the same char after decoding it back out of the
+    /// String.  Carrying the answer forward costs a `u8`.
+    ///
+    /// Invariant: `Some((c, w))` iff `cluster_buf` holds exactly `c`
+    /// and `fast_width(c) == Some(w)`.  Every site that touches
+    /// `cluster_buf` maintains it; `debug_assert`s in the fast path
+    /// hold it to that.
+    cluster_fast: Option<(char, u8)>,
     grapheme_cursor: crate::grapheme::GraphemeCursor,
     /// Whether `grapheme_cursor`'s run state currently reflects
     /// `cluster_buf`.  The ASCII fast path in `Handler::print` skips
@@ -394,6 +407,7 @@ impl Terminal {
             shadow: VecDeque::new(),
             echo_srtt: Self::ECHO_SRTT_SEED,
             cluster_buf: String::new(),
+            cluster_fast: None,
             grapheme_cursor: crate::grapheme::GraphemeCursor::new(),
             seg_synced: true,
             predictions_hit: 0,
@@ -862,6 +876,7 @@ impl Terminal {
             let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
             let pending_wrap = &mut self.pending_wrap;
             let cluster_buf = &mut self.cluster_buf;
+            let cluster_fast = &mut self.cluster_fast;
             let grapheme_cursor = &mut self.grapheme_cursor;
             let seg_synced = &mut self.seg_synced;
             let mut handler = Handler {
@@ -889,6 +904,7 @@ impl Terminal {
                 mouse_sgr_encoding,
                 pending_wrap,
                 cluster_buf,
+                cluster_fast,
                 grapheme_cursor,
                 seg_synced,
             };
@@ -1025,6 +1041,7 @@ impl Terminal {
             let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
             let pending_wrap = &mut self.pending_wrap;
             let cluster_buf = &mut self.cluster_buf;
+            let cluster_fast = &mut self.cluster_fast;
             let grapheme_cursor = &mut self.grapheme_cursor;
             let seg_synced = &mut self.seg_synced;
             let mut handler = Handler {
@@ -1052,6 +1069,7 @@ impl Terminal {
                 mouse_sgr_encoding,
                 pending_wrap,
                 cluster_buf,
+                cluster_fast,
                 grapheme_cursor,
                 seg_synced,
             };
@@ -1683,6 +1701,7 @@ impl Terminal {
         self.predictions.clear();
         self.shadow.clear();
         self.cluster_buf.clear();
+        self.cluster_fast = None;
         self.grapheme_cursor = crate::grapheme::GraphemeCursor::new();
         self.seg_synced = true;
         self.pending_response.clear();
@@ -2113,6 +2132,8 @@ struct Handler<'a> {
     mouse_sgr_encoding: &'a mut bool,
     pending_wrap: &'a mut bool,
     cluster_buf: &'a mut String,
+    /// See `Terminal::cluster_fast`.
+    cluster_fast: &'a mut Option<(char, u8)>,
     grapheme_cursor: &'a mut crate::grapheme::GraphemeCursor,
     seg_synced: &'a mut bool,
 }
@@ -2334,6 +2355,7 @@ impl<'a> Handler<'a> {
         let w = crate::grapheme::cluster_width(self.cluster_buf);
         let base = self.cluster_buf.chars().next().expect("non-empty buffer");
         self.cluster_buf.clear();
+        *self.cluster_fast = None;
         if w > 0 {
             self.write_glyph(base, w);
         }
@@ -2393,6 +2415,7 @@ impl<'a> Handler<'a> {
         let (last, body) = run.split_last().expect("run_len >= 2");
         self.write_ascii_body(body);
         self.cluster_buf.push(*last as char);
+        *self.cluster_fast = Some((*last as char, 1));
         *self.seg_synced = false;
     }
 
@@ -2498,6 +2521,7 @@ impl<'a> Handler<'a> {
         let last = char::from_u32(decode3_cp(&run[run.len() - 3..]))
             .expect("scan admitted only fast-class scalars");
         self.cluster_buf.push(last);
+        *self.cluster_fast = Some((last, 2));
         *self.seg_synced = false;
     }
 
@@ -3515,22 +3539,30 @@ impl<'a> Handler<'a> {
         // `cat` of plain text / CJK prose from paying 3× gbp + incb
         // + pictographic table walks per printable (measured ~84 % /
         // ~55 % of parse time respectively, 2026-07-11 samply).
-        if fast_width(ch).is_some() {
+        if let Some(w) = fast_width(ch) {
             if self.cluster_buf.is_empty() {
+                debug_assert!(self.cluster_fast.is_none());
                 self.cluster_buf.push(ch);
+                *self.cluster_fast = Some((ch, w));
                 *self.seg_synced = false;
                 return;
             }
-            let mut it = self.cluster_buf.chars();
-            let first = it.next().expect("non-empty buffer");
-            if it.next().is_none() {
-                if let Some(prev_w) = fast_width(first) {
-                    self.cluster_buf.clear();
-                    self.write_glyph(first, prev_w);
-                    self.cluster_buf.push(ch);
-                    *self.seg_synced = false;
-                    return;
-                }
+            // What is buffered was classified when it was buffered.
+            // Asking `fast_width` about it a second time — after
+            // decoding it back out of the String — was the fast path's
+            // largest single cost on emoji.
+            if let Some((prev, prev_w)) = *self.cluster_fast {
+                debug_assert_eq!(
+                    self.cluster_buf.chars().collect::<Vec<_>>(),
+                    vec![prev],
+                    "cluster_fast must describe exactly what is buffered"
+                );
+                self.cluster_buf.clear();
+                self.write_glyph(prev, prev_w);
+                self.cluster_buf.push(ch);
+                *self.cluster_fast = Some((ch, w));
+                *self.seg_synced = false;
+                return;
             }
         }
         // SLOW PATH — UAX #29 cluster aware: the VT parser feeds us
@@ -3543,6 +3575,7 @@ impl<'a> Handler<'a> {
         // what makes ⭐ ✅ ❌ land in 2 cells (cluster_width=2)
         // instead of being half-clipped in a 1-cell slot when the
         // EAW table alone gave them 1.
+        *self.cluster_fast = None;
         self.resync_segmenter();
         if self.grapheme_cursor.step(ch) {
             // step has already advanced cursor state to track `ch` as
