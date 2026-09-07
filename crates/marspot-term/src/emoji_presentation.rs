@@ -151,6 +151,7 @@ pub fn has_emoji_presentation(cp: u32) -> bool {
 /// equivalence test checks against — a table regeneration that widens
 /// a span past the bitmap bounds has to fail a test, not silently
 /// start answering `false`.
+#[cfg(test)]
 fn has_emoji_presentation_by_search(cp: u32) -> bool {
     EMOJI_PRESENTATION_RANGES
         .binary_search_by(|&(start, end)| {

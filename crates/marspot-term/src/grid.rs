@@ -746,9 +746,28 @@ impl Grid {
 
     /// Region-bounded scroll up: shift rows in `top..=bot` upward by
     /// `lines`; new rows at the bottom of the region are blanked with
-    /// `fill`. Unlike `scroll_up` this does NOT push scrollback —
-    /// region scrolls are window-internal (think TUI footer / status
-    /// bar). Caller is responsible for keeping `top <= bot < rows`.
+    /// `fill`. Caller is responsible for keeping `top <= bot < rows`.
+    ///
+    /// Scrollback is fed **iff the region starts at row 0**.  A region
+    /// below a header is a window-internal shuffle and its rows go
+    /// nowhere; a region anchored at the top of the screen is one that
+    /// reserves rows at the BOTTOM (a TUI's input box and status line),
+    /// and content leaving row 0 is leaving the screen upward — the
+    /// same event `scroll_up` records.
+    ///
+    /// This is not a guess.  codex reserves its bottom rows exactly
+    /// that way (`CSI 1;56 r`, `CSI 1;58 r`, `CSI 1;53 r` — 582 of
+    /// them in one session, with 137 `CSI S`), and dropping those rows
+    /// left its panes with **zero** scrollback: the only way back
+    /// through the session was codex's own transcript key, which is
+    /// slow, jumps, and shows raw uncollapsed output.  claudecode uses
+    /// no scroll region at all, which is why the same pane in the same
+    /// terminal felt completely different.
+    ///
+    /// Measured against the reference (2026-09-07): the same sequence
+    /// in iTerm2 — region `1..rows-8`, 120 lines scrolled through it —
+    /// leaves all 120 reachable in iTerm2's buffer, lines 001 through
+    /// 120.  So this matches what the terminal we are chasing does.
     pub fn scroll_up_region(&mut self, top: u16, bot: u16, lines: u16, fill: Cell) {
         if lines == 0 || top > bot || bot >= self.rows {
             return;
@@ -762,7 +781,19 @@ impl Grid {
             let pr = self.phys_row(r);
             self.wrapped[pr] = false;
         }
+        // See the doc comment: a region anchored at row 0 scrolls
+        // content off the top of the SCREEN, not merely off the top of
+        // a band inside it.
+        let feeds_scrollback = top == 0;
         for _ in 0..lines {
+            if feeds_scrollback {
+                let pr = self.phys_row(top);
+                let start = pr * cols;
+                self.scrollback
+                    .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
+                self.sb_wrapped.push_back(self.wrapped[pr]);
+                self.scroll_push_count = self.scroll_push_count.saturating_add(1);
+            }
             // Shift rows [top+1..=bot] up by one logical row.
             for r in top..bot {
                 // Copy cells[phys_row(r+1)] → cells[phys_row(r)].
@@ -781,6 +812,11 @@ impl Grid {
             for c in &mut self.cells[bot_phys * cols..bot_phys * cols + cols] {
                 *c = fill;
             }
+        }
+        // Mirror ring eviction, exactly as `scroll_up` does: the flags
+        // deque must never outgrow what the ring retains.
+        while self.sb_wrapped.len() > self.scrollback.len() {
+            self.sb_wrapped.pop_front();
         }
     }
 
@@ -1214,6 +1250,66 @@ impl Grid {
             self.cursor_row = 0;
             self.cursor_col = 0;
         }
+    }
+}
+
+#[cfg(test)]
+mod region_scrollback_tests {
+    use super::*;
+
+    /// The shape a TUI uses to reserve its input box: a region
+    /// anchored at row 0 with rows held back at the bottom.
+    fn scroll_through_region(rows: u16, reserved: u16, n: u32) -> Grid {
+        let mut g = Grid::new(20, rows);
+        let bot = rows - reserved - 1;
+        for i in 1..=n {
+            // Write at the region's last row, then scroll the region.
+            g.set_cursor(0, bot);
+            for (c, ch) in format!("LINE-{i:03}").chars().enumerate() {
+                g.set_cell(c as u16, bot, Cell { ch, ..Default::default() });
+            }
+            g.scroll_up_region(0, bot, 1, Cell::default());
+        }
+        g
+    }
+
+    #[test]
+    fn a_region_anchored_at_the_top_feeds_scrollback() {
+        // Measured in iTerm2 with the identical sequence: all 120
+        // lines stay reachable.  Dropping them is what left codex
+        // panes with no history at all.
+        let g = scroll_through_region(40, 8, 120);
+        assert_eq!(g.scroll_push_count(), 120);
+        let sb: Vec<String> = (0..g.scrollback_len())
+            .filter_map(|i| g.scrollback_line(i))
+            .map(|row| row.iter().map(|c| c.ch).collect::<String>())
+            .collect();
+        assert!(
+            sb.iter().any(|l| l.starts_with("LINE-001")),
+            "the oldest line must still be reachable"
+        );
+        // The newest line is still ON SCREEN, not in scrollback —
+        // scrollback is where things go when they leave.
+        let on_screen: Vec<String> = (0..40u16)
+            .map(|r| (0..20u16).map(|c| g.cell(c, r).ch).collect::<String>())
+            .collect();
+        assert!(on_screen.iter().any(|l| l.starts_with("LINE-120")));
+        assert!(
+            !sb.iter().any(|l| l.starts_with("LINE-120")),
+            "a line still on screen must not also be in history"
+        );
+    }
+
+    #[test]
+    fn a_region_below_a_header_does_not() {
+        // A band inside the screen — a pager's body under a title.
+        // Its rows go nowhere, exactly as before.
+        let mut g = Grid::new(20, 40);
+        for _ in 0..50 {
+            g.scroll_up_region(3, 30, 1, Cell::default());
+        }
+        assert_eq!(g.scroll_push_count(), 0);
+        assert_eq!(g.scrollback_len(), 0);
     }
 }
 

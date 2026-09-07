@@ -28,7 +28,27 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.137**
+Current: **0.7.138**
+
+### 0.7.138
+
+The codex pane stops claiming the wheel, and stops claiming `<u>`.
+
+**The wheel.**  It was routed into codex's transcript key because a
+codex pane had no history of its own (see L3 0.11.79).  It has one
+now, so the wheel does what it does everywhere else — which is what
+claudecode already did, and what this was asked to match.  Ctrl-T
+remains codex's own key for anyone who wants its transcript.
+
+**`<u>`.**  Declared per-pane because codex printed its own `<u>`
+markup as text.  Measured across 102 MB of real codex traffic since:
+`<u>` appears **twice**, `</u>` eight times — not even paired — while
+`<h2>` and `<p>` appear 529 times, because the model prints HTML
+documents into the pane.  Eating a real document's tags is now 250x
+more likely than fixing codex's own.  `render_u_tags` in settings.toml
+still turns it on for anyone who wants it everywhere.
+
+### 0.7.137
 
 ### 0.7.137
 
@@ -2934,7 +2954,29 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.183**
+Current: **0.12.184**
+
+### 0.12.184
+
+Focus events reach the program, and opening a history view no longer
+travels in it.
+
+**Focus.**  codex turns on DEC 1004 and leaves it on — 12 sets, 16
+resets, ON at the end of a real 22 MB session — and marspot accepted
+the mode and then never sent a single event.  The terminal now tracks
+it, reports `CSI I` / `CSI O` on change, and carries the mode across
+the L3 execv handoff (modes bit 9) so an image swap does not stop
+answering a question the program is still asking.  DEC 2031
+(colour-scheme change) stays accepted and unreported on purpose:
+marspot has one palette that never changes, so there is no event, and
+the real session never queried the scheme either.
+
+**Opening.**  The tick that opened a plugin's history view also sent
+that tick's whole scroll distance in the same buffer.  A flick is one
+wheel event carrying tens of lines, so reaching for history opened it
+and immediately threw the user into the middle of it — landing inside
+whatever the program had printed there rather than at the edge they
+reached for.  Opening is one gesture; moving inside is the next one.
 
 ### 0.12.183
 
@@ -5742,7 +5784,42 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.78**
+Current: **0.11.79**
+
+### 0.11.79
+
+A scroll region anchored at row 0 feeds scrollback, because that is
+what the content is doing.
+
+Asked for as: make codex's history behave like claudecode's — ordinary
+page scrolling, not a special mode.
+
+The two panes behaved completely differently in the same terminal, and
+the bytes say why.  codex reserves its input box with `DECSTBM`
+anchored at the top — `CSI 1;56 r`, `CSI 1;58 r`, `CSI 1;53 r`, 582 of
+them in one session, with 137 `CSI S` — and `scroll_up_region`
+deliberately dropped what left the region, on the reasoning that a
+region is a window-internal shuffle.  claudecode uses **no scroll
+region at all** (zero `DECSTBM`, zero `CSI S`), so its output went
+through `scroll_up` and into scrollback like anything else.
+
+The result was a codex pane with `scrollback_len = 0` — nothing to
+scroll back through — so the wheel had to be routed into codex's own
+transcript key instead, which is slow, jumps, and shows raw
+uncollapsed tool output.  Every complaint about "history" was
+downstream of this.
+
+The reasoning was right for a region BELOW a header: those rows go
+nowhere.  It is wrong for a region anchored at row 0, which is the
+shape used to reserve rows at the BOTTOM — content leaving row 0 is
+leaving the screen upward, the same event `scroll_up` records.
+
+Measured against the reference rather than argued: the identical
+sequence driven into iTerm2 (region `1..rows-8`, 120 lines scrolled
+through it, read back with select-all) leaves **all 120 lines**
+reachable, `LINE-001` through `LINE-120`.  So iTerm2 keeps them, and
+now so does marspot.  A region below a header still keeps its old
+behaviour, and there is a test for each.
 
 ### 0.11.78
 

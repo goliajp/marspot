@@ -8398,14 +8398,28 @@ impl CoreApp {
                 let mut suppressed = false;
                 if marspot::wheel_marker::wheel_is_ours(open, up) {
                     if let Some(k) = self.pane_wheel_keys.get(&sid) {
+                        let mut opening = false;
                         if ask && !k.enter.is_empty() {
                             buf.extend_from_slice(&k.enter);
+                            opening = true;
                         } else if !open && !k.enter.is_empty() {
                             suppressed = true;
                         }
-                        let key = if up { &k.up } else { &k.down };
-                        for _ in 0..ticks {
-                            buf.extend_from_slice(key);
+                        // The tick that OPENS the view does not also
+                        // travel in it.  A flick is one wheel event
+                        // carrying many lines, so sending the enter key
+                        // and that whole distance together opened the
+                        // history and immediately threw the user tens
+                        // of lines into it — landing in the middle of
+                        // whatever the program had printed there rather
+                        // than at the edge they were reaching for.
+                        // Reaching for history is one gesture; moving
+                        // inside it is the next one.
+                        if !opening {
+                            let key = if up { &k.up } else { &k.down };
+                            for _ in 0..ticks {
+                                buf.extend_from_slice(key);
+                            }
                         }
                     }
                 }

@@ -558,20 +558,35 @@ impl Plugin for CodexPlugin {
                 // were swapped, and no pane ever heard it.  Repeating
                 // costs one small frame every two seconds and makes
                 // the restart window cost a tick instead of forever.
-                let _ = host.set_pane_render_markup(sid, true);
-                if !self.declared.contains(&sid) {
-                    if host
-                        .set_pane_wheel_keys(
-                            sid,
-                            WHEEL_ENTER,
-                            WHEEL_UP,
-                            WHEEL_DOWN,
-                            WHEEL_MARKER,
-                        )
-                        .is_ok()
-                    {
-                        self.declared.insert(sid);
-                    }
+                // `<u>` rendering is NOT declared any more.  It was
+                // added because codex printed its own `<u>` markup as
+                // text; measured across 102 MB of real codex traffic
+                // since, `<u>` appears TWICE (and `</u>` eight times —
+                // not even paired), while `<h2>` and `<p>` appear 529
+                // times because the model prints HTML documents into
+                // the pane.  Swallowing a real document's tags is now
+                // 250x more likely than fixing codex's own, so the
+                // feature is net-negative here.  `render_u_tags` in
+                // settings.toml still turns it on for anyone who wants
+                // it everywhere.
+                let _ = host.set_pane_render_markup(sid, false);
+                // The wheel is NOT routed into codex's transcript any
+                // more.  It was, because a codex pane had no history
+                // of its own to scroll: codex reserves its input box
+                // with a scroll region anchored at row 1, and rows
+                // leaving the top of a region used to be dropped
+                // rather than kept — so the pane's scrollback was
+                // empty and the transcript key was the only way back.
+                //
+                // Grid::scroll_up_region now keeps them, which is what
+                // iTerm2 does (measured 2026-09-07 with the identical
+                // sequence: all 120 lines stayed reachable).  So the
+                // wheel does what it does in every other pane, and
+                // what it already did in claudecode — which is the
+                // experience this was asked to match.  Ctrl+T is still
+                // codex's own key for anyone who wants its transcript.
+                if self.declared.remove(&sid) {
+                    let _ = host.set_pane_wheel_keys(sid, b"", b"", b"", b"");
                 }
                 if self.last_badge.get(&sid).map(String::as_str) != Some(text.as_str()) {
                     if host.set_pane_badge(sid, &text).is_ok() {

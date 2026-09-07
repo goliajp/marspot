@@ -208,6 +208,15 @@ pub struct Terminal {
     /// a program that never closes its update must not freeze the pane,
     /// so the publisher holds frames under a timeout.
     sync_output: bool,
+    /// DEC 1004 — the program asked to be told when this pane gains or
+    /// loses focus.  It is a request, and until now it was accepted
+    /// and then never answered: codex turns it on and leaves it on
+    /// (measured on a real session — 12 sets, 16 resets, ON at the end
+    /// of the stream), so it has been waiting the whole time.
+    focus_reporting: bool,
+    /// Last focus state actually reported, so a repeated notification
+    /// from L2 does not become a repeated escape into the program.
+    focus_reported: Option<bool>,
     /// DECSCUSR shape the program last asked for: 0 = the terminal's
     /// own default, 1/2 block, 3/4 underline, 5/6 bar, even = blinking.
     /// Nothing draws it yet — see the DECSCUSR arm for why.
@@ -394,6 +403,8 @@ impl Terminal {
             u_buf: String::new(),
             alt_scroll: false,
             sync_output: false,
+            focus_reporting: false,
+            focus_reported: None,
             uses_sync_output: false,
             osc_title: String::new(),
             cursor_shape: 0,
@@ -505,6 +516,30 @@ impl Terminal {
     /// The presenter should hold the frame while this is true — under
     /// its own timeout, since the terminal cannot make a program close
     /// what it opened.
+    /// Does the program want focus in/out events (DEC 1004)?
+    pub fn focus_reporting(&self) -> bool {
+        self.focus_reporting
+    }
+
+    /// Tell the program the pane gained or lost focus, if it asked.
+    ///
+    /// `CSI I` / `CSI O`, xterm's focus-in / focus-out.  Queued on the
+    /// same path as a capability reply, so it reaches the PTY through
+    /// the caller's normal response flush.  A repeat of the state
+    /// already reported sends nothing: L2 recomputes focus on more
+    /// occasions than it changes.
+    pub fn report_focus(&mut self, focused: bool) {
+        if !self.focus_reporting || self.focus_reported == Some(focused) {
+            return;
+        }
+        self.focus_reported = Some(focused);
+        // Not routed through `record_response`: that guards against a
+        // capability-query echo loop, and this is not a reply to the
+        // program — nothing it sends can make us send more of these.
+        self.pending_response
+            .extend_from_slice(if focused { b"\x1b[I" } else { b"\x1b[O" });
+    }
+
     /// Has this program ever opened a synchronized update?  Sticky —
     /// see [`Self::uses_sync_output`].
     /// The cursor shape the program asked for — see `cursor_shape`.
@@ -552,6 +587,9 @@ impl Terminal {
         // when whoever claimed it is gone.
         self.alt_scroll = false;
         self.cursor_key_application_mode = false;
+        // A dead program is not waiting to hear about focus.
+        self.focus_reporting = false;
+        self.focus_reported = None;
         // A new shell starts with a visible cursor; a TUI that hid it
         // is gone.
         self.cursor_visible = true;
@@ -865,6 +903,8 @@ impl Terminal {
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let sync_output = &mut self.sync_output;
             let uses_sync_output = &mut self.uses_sync_output;
+            let focus_reporting = &mut self.focus_reporting;
+            let focus_reported = &mut self.focus_reported;
             let osc_title = &mut self.osc_title;
             let cursor_shape = &mut self.cursor_shape;
             let alt_scroll = &mut self.alt_scroll;
@@ -893,6 +933,8 @@ impl Terminal {
                 bracketed_paste,
                 sync_output,
                 uses_sync_output,
+                focus_reporting,
+                focus_reported,
                 osc_title,
                 cursor_shape,
                 alt_scroll,
@@ -1030,6 +1072,8 @@ impl Terminal {
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let sync_output = &mut self.sync_output;
             let uses_sync_output = &mut self.uses_sync_output;
+            let focus_reporting = &mut self.focus_reporting;
+            let focus_reported = &mut self.focus_reported;
             let osc_title = &mut self.osc_title;
             let cursor_shape = &mut self.cursor_shape;
             let alt_scroll = &mut self.alt_scroll;
@@ -1058,6 +1102,8 @@ impl Terminal {
                 bracketed_paste,
                 sync_output,
                 uses_sync_output,
+                focus_reporting,
+                focus_reported,
                 osc_title,
                 cursor_shape,
                 alt_scroll,
@@ -1226,6 +1272,13 @@ impl Terminal {
         // simply does not know the bit and gets the old default.
         if self.alt_scroll {
             modes |= 1 << 8;
+        }
+        // bit 9 = focus reporting (DEC 1004).  Same reason as the bits
+        // above: the program set it once and will not say it again, so
+        // an image that came up without it would stop answering a
+        // question the program is still asking.
+        if self.focus_reporting {
+            modes |= 1 << 9;
         }
         out.extend_from_slice(&modes.to_le_bytes());
         out.extend_from_slice(&self.generation.to_le_bytes());
@@ -1687,6 +1740,7 @@ impl Terminal {
         };
         self.mouse_sgr_encoding = (modes & (1 << 7)) != 0;
         self.alt_scroll = (modes & (1 << 8)) != 0;
+        self.focus_reporting = (modes & (1 << 9)) != 0;
         // Bit 4 (in_alt_screen) is informational for the wire format
         // but not actionable here — apply_snapshot replaces the
         // current grid; alt-mode save state is regenerated on the
@@ -2116,6 +2170,9 @@ struct Handler<'a> {
     sync_output: &'a mut bool,
     /// Sticky companion to `sync_output` — see `Terminal::uses_sync_output`.
     uses_sync_output: &'a mut bool,
+    /// See `Terminal::focus_reporting`.
+    focus_reporting: &'a mut bool,
+    focus_reported: &'a mut Option<bool>,
     /// See `Terminal::osc_title`.
     osc_title: &'a mut String,
     /// See `Terminal::cursor_shape`.
@@ -2802,6 +2859,16 @@ impl<'a> Handler<'a> {
             // can distinguish paste from interactive typing. Read via
             // `Terminal::bracketed_paste_mode()`.
             2004 => *self.bracketed_paste = set,
+            // DECSET ?1004 — focus reporting.  Turning it OFF also
+            // forgets what was last reported, so a program that turns
+            // it back on is told the current state rather than being
+            // held to a stale one.
+            1004 => {
+                *self.focus_reporting = set;
+                if !set {
+                    *self.focus_reported = None;
+                }
+            }
             // Accept silently — these modes have no rendering side
             // effect we model, but apps want them to "succeed" rather
             // than no-op silently. Listed explicitly so future audits
@@ -2850,7 +2917,13 @@ impl<'a> Handler<'a> {
                 }
             }
             // 1015 / 1004 / 2031 — silently accept but no-op.
-            1015 | 1004 | 2031 => {}
+            // 2031 (colour-scheme change notification) is accepted and
+            // not reported on: marspot has one palette and it never
+            // changes, so there is no event to send.  A reporting path
+            // with nothing to report would be invented work — and the
+            // real session never queried the scheme either (one `CSI 6
+            // n` in 22 MB, which is a cursor-position request).
+            1015 | 2031 => {}
             _ => {} // unhandled DEC private mode — silently skip
         }
     }
