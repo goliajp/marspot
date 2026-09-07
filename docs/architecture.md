@@ -452,6 +452,61 @@ format.
   ordering made every cache *hit* an O(cap) scan of `String` keys, the
   one place in the tree that literally got slower the longer it ran.
 
+
+## Architecture review — 2026-09-07 (40 commits)
+
+The cadence above says "proactively every ~10 commits"; this covers a
+day that ran to forty and changed the print path, the scroll/scrollback
+contract and the plugin wire.  Answered against the checklist below.
+
+**Did it make the architecture better, neutral, or worse?**  Better in
+two places, and one of them by deletion.
+
+* The print path lost its one-codepoint lookahead.  A glyph is now
+  committed as soon as its width is known and a later zero-width
+  codepoint amends the cell it landed in — which is both what the
+  reference implementation does and one fewer piece of state to be
+  wrong.  The end-of-feed flush that existed only to drain that
+  lookahead is gone.
+* `scroll_up_region` now feeds scrollback when the region is anchored
+  at row 0.  That is not a new mechanism; it is the same "content left
+  the screen upward" event `scroll_up` already recorded, applied where
+  it was being dropped.
+* `MsgType::PaneAgentTui` replaces INFERRING a pane's kind from two
+  proxies (a wheel-key declaration, a non-empty badge).  A declaration
+  is a smaller thing to reason about than two coincidences, and the
+  old inference stays only as the compatibility fallback.
+
+**Hot-path delta.**  Per-byte: one branch REMOVED from the common path
+(the lookahead's buffer dance) and none added; the fast class still
+skips the segmenter, now with an explicit guard for the case where the
+open cluster is not fast (after a ZWJ).  Per-scrolled-line: one row
+copy ADDED for top-anchored regions — that is the scrollback push,
+which is the point of the change, and it is bounded by the same ring.
+Per-frame: nothing.  No new allocation, lock or syscall on any of them.
+
+**Did it leave headroom or close it?**  Left it, and measured where the
+remaining headroom is: on the SHIPPED path `FileScrollback::push_line`
+is 26.3 % of parse self-time, split `push_into_ring` +12.1 % and the
+two writer calls +17.1 %.  The next step there is a storage-format
+change (make the record the Cell's memory layout so the encode becomes
+a memcpy) and is deliberately not taken yet — it moves users' history.
+
+**TODOs piling up?**  One, named: the format change above.  It is
+written down in `docs/perf.md` with its price rather than left as a
+comment.
+
+**The uncomfortable one.**  Three defects this day introduced were
+mine, and all three shipped because a change was reasoned about rather
+than run: a sweep that asked every pane for an in-process terminal an
+L3 pane does not have (crash on launch), an update that killed five
+panes while its own check reported success, and a relaunch that handed
+panes the launcher's agent-session environment.  Each now has a test
+that would have caught it — real process, real pty, real signal.  The
+checklist below is about code shape; the thing that actually failed was
+the step where a change gets exercised, and "it compiles" was allowed
+to stand in for it.
+
 ## Architecture-review checklist
 
 Run before each merge to develop:

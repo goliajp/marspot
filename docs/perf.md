@@ -559,6 +559,85 @@ uncertified, mixed-byte-count protocol.  One console run of
 
 ---
 
+
+## Parse path, decomposed and priced (2026-09-07)
+
+Where the parse time on `cat-emoji` goes, each item measured by
+ablation rather than argued, on the dev box unless noted.
+
+| item | worth |
+|---|---:|
+| one-codepoint lookahead in `print_glyph` | **+22.6 %** |
+| the row copy into scrollback (RAM variant) | +11.0 % |
+| all remaining width machinery (`fast_width` chain + bitmap) | +5.1 % |
+| `sb_wrapped` bookkeeping | ~0 |
+
+The first was taken (see L3 0.11.81): a glyph is committed as soon as
+its width is known and a later zero-width codepoint amends the cell it
+landed in.  mini, interleaved A/B: emoji 157.9 → 183–193, cjk 242 →
+288–295.
+
+### Two measurements that were wrong, and how
+
+**"Removing the lookahead is neutral."**  Reported earlier the same
+day at 159.6 vs 161.0.  The ablation short-circuited only when
+`cluster_buf.is_empty()`, which after the first character it never is
+— the branch it was measuring almost never ran.  A measurement device
+that fails looks exactly like data (methodology §9); this one had no
+independent witness.  Redone properly: +22.6 %.
+
+**The whole comparison was against a path no user runs.**  `--bench
+parse` builds a `Terminal` with no `MARSPOT_SESSION_ID` and gets the
+in-RAM scrollback; every L3 pane sets it and gets the file-backed one.
+On mini, median of 5:
+
+| scenario | RAM | file-backed (shipped) |
+|---|---:|---:|
+| cat-ascii | 371.7 | 126.8 |
+| cat-mixed | 240.7 | 121.3 |
+| cat-cjk | 263.8 | 122.4 |
+| cat-emoji | 174.1 | 113.2 |
+
+The write dominates so completely that it flattens four very different
+corpora into 113–127.  `mars_l3_MBps_min` has gated the shipped path
+end to end since 2026-08-19, but only under `--full`; the fast gate had
+only ever shown the RAM number.  `parse-file` rows now sit beside the
+RAM ones in the default gate (15 checks) so this cannot go unseen
+again.
+
+### Against Alacritty (headless, same bytes, same grid)
+
+The project's perf rules name Alacritty for pure parse throughput —
+same language, same platform, so a gap is ours.  Screens compared cell
+by cell before timing; `cat-cjk` and `cat-emoji` are identical, the
+other two differ in ways that make their timings less trustworthy.
+
+| scenario | before | after | Alacritty |
+|---|---:|---:|---:|
+| cat-emoji | 0.63x | **0.79x** | — |
+| cat-cjk | 0.96x | **1.10x** | ahead |
+
+### Next attack surface, priced
+
+On the SHIPPED path, `FileScrollback::push_line` is **26.3 %** of parse
+self-time.  Split by ablation: `push_into_ring` +12.1 %, the two
+`AsyncWriter` calls +17.1 %.
+
+One attempt is already recorded as a failure: encoding directly into
+the writer's buffer (`write_in_place`) was **slower** — `Vec::resize`
+zero-fills before the closure overwrites, so two passes replaced one.
+Reverted.
+
+The real step is to make the on-disk record the Cell's memory layout,
+which turns the encode into a memcpy.  That is a STORAGE FORMAT change
+touching history users already have, and it is not taken lightly or at
+the end of a long day.
+
+The reference avoids the copy entirely by letting the grid and the
+history share one ring — which marspot cannot copy: 10,000 lines x 122
+cells x 20 bytes is 24 MB per pane, against an L3 whose whole point is
+a 3–5 MB resident floor with thirteen of them running.
+
 ## Gaps & fixability triage
 
 Filled in as `bin/measure.sh` results land. Each row gets:
