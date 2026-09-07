@@ -637,7 +637,13 @@ fn do_l3_execv_swap(
     // listener fd open for the new image).
     std::mem::drop(listener);
 
+    // Held across the exec and released by the new image once its own
+    // handler is armed — see `set_sigterm_blocked`.
+    marspot_term::signals::set_sigterm_blocked(true);
     unsafe { libc::execv(target_c.as_ptr(), argv.as_ptr()); }
+    // Only reached when execv failed; this process keeps running, so
+    // it must be able to receive SIGTERM again.
+    marspot_term::signals::set_sigterm_blocked(false);
     let err = std::io::Error::last_os_error();
     lx_error!("l3.execv.failed", &format!("{err}"), target = target.display());
     unsafe { std::env::remove_var(ENV_HANDOFF_MANIFEST); }
@@ -1500,7 +1506,14 @@ fn main() {
     // the persist-state-then-exit path.  Best-effort: if install
     // fails the L3 still runs but silent updates degrade to "just
     // gets SIGKILL'd and loses state.bin".
-    if let Err(e) = install_sigterm_handler(ev_tx.clone()) {
+    let armed = install_sigterm_handler(ev_tx.clone());
+    // Whatever happened, stop blocking: the mask was inherited from the
+    // process that execv'd into this image, and leaving it set would
+    // make this pane deaf to every future update.  Unblocking after the
+    // handler is armed is what turns a signal that arrived mid-execv
+    // from a kill into a delivery.
+    marspot_term::signals::set_sigterm_blocked(false);
+    if let Err(e) = armed {
         lx_warn!(
             "l3.sigterm.install_failed",
             &format!("{e}; silent shutdown disabled for this L3")

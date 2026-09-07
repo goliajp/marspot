@@ -24,6 +24,7 @@ pub mod grid_links;
 pub mod logx;
 pub mod loop_watch;
 pub mod scrollback_search;
+pub mod signals;
 pub mod unicode_data;
 
 /// Fingerprint embedded into the binary's rodata so `install-local.sh`

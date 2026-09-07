@@ -29,4 +29,4 @@
 
 shell   = "0.7.137"  # codex badge 右键切 reasoning effort,resume 同一会话;详见 CHANGELOG.md
 core    = "0.12.183"  # 刚发过 ctrl+T 就不再重发，修滚轮进 history 一次滑动开关好几遍；详见 CHANGELOG.md
-session = "0.11.77"  # emoji 宽度查表从二分查找换成编译期位图，mini 上 +8.8%；详见 CHANGELOG.md
+session = "0.11.78"  # execv 期间挡住 SIGTERM，修「装机杀死 pane」；详见 CHANGELOG.md

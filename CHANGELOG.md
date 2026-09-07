@@ -5742,7 +5742,47 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.77**
+Current: **0.11.78**
+
+### 0.11.78
+
+SIGTERM is blocked across the execv handoff, because an install killed
+five panes with it.
+
+Found while checking an install's health, not reported: sessions 383,
+390, 391, 392 and 414 were gone, L2 had failed all three reconnect
+attempts to each ("pane stays on its dead stream"), and 14 L3s had
+become 8.
+
+What happened, from the log:
+
+* **41.127** L1 promotes pending → current; **41.141** the new L2 starts.
+* **~41.19** the new L2 fans SIGTERM out to every reattached L3 —
+  `marspot-core` does this on the way up so stale images swap.
+* **41.513–41.540** the L3s finish probing and execv, one after another.
+* **~41.54** `install-local.sh` fans SIGTERM out AGAIN.  It has no idea
+  L2 already did.
+
+Between `execv` and the new image arming its handler there are about
+four milliseconds with no handler installed, and the default action for
+SIGTERM is to terminate.  **The five panes that died are exactly the
+five that execv'd last** (pids 1738, 1601, 1574, 1661, 1963 at
+.537–.540) — the only ones whose unarmed window overlapped the second
+fan-out.  No log line, no crash report: the process was killed before
+its new image could write anything.
+
+The fix is not to deduplicate the fan-outs; that has to be redone the
+next time someone adds a third sender.  A signal mask survives `execv`,
+and a signal raised while blocked stays PENDING — so SIGTERM is blocked
+before the exec and unblocked by the new image once its handler is
+armed.  A second signal mid-swap becomes a delivery instead of a kill.
+
+`crates/marspot-term/tests/sigterm_across_execv.rs` re-execs the test
+binary with a SIGTERM raised at itself first, and pins both directions:
+unblocked it dies by signal with the new image never reaching its exit,
+blocked it comes up AND finds the signal still masked.  The assertion
+is an exit code, not a printed marker — the harness captures `println!`
+from inside a test, so a message would have proved nothing.
 
 ### 0.11.77
 
