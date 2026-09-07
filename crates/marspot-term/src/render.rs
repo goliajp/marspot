@@ -176,6 +176,11 @@ pub struct SessionView<'a> {
     /// truncating.  A wheel-key declaration is the durable assertion —
     /// a plugin only makes it about a program it is driving.
     pub agent_tui: bool,
+    /// The pane's working directory, when known.  A relative path on
+    /// screen (`src/main.rs`) only becomes a link when there is a
+    /// directory to resolve it against; Open and Copy then act on the
+    /// full path while the underline stays over what is drawn.
+    pub cwd: &'a str,
     /// C1 — total cell-rows reserved below the title strip for
     /// `ToolSlot::TopFixed` tools.  Sum of each TopFixed tool's
     /// `fixed_height_rows()`.  The renderer shifts the grid inner

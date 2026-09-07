@@ -102,7 +102,7 @@ impl MarspotApp for Mcli {
         let cols = ((phys_w / cell_w).floor() as u16).max(1);
         let rows = ((usable_h / cell_h).floor() as u16).max(1);
         self.pane.resize(cols, rows);
-        r.render(&mut self.window_render, self.pane.view(true, "", "", false));
+        r.render(&mut self.window_render, self.pane.view(true, "", "", false, ""));
     }
 
     fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool) {
@@ -118,7 +118,7 @@ impl MarspotApp for Mcli {
 
     fn redraw(&mut self, ctx: &MarspotAppCtx) {
         let Some(r) = self.renderer.as_mut() else { return };
-        let view = self.pane.view(true, "", "", false);
+        let view = self.pane.view(true, "", "", false, "");
         let caret = r.focused_caret_view_phys_rect(&view);
         r.render(&mut self.window_render, view);
         ctx.set_caret_rect_phys(caret);

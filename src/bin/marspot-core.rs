@@ -542,7 +542,19 @@ impl ContextMenuAction {
 #[derive(Debug, Clone)]
 struct LinkContext {
     text: String,
+    /// What the span NAMES, when that is not what it shows — a
+    /// relative path is drawn `src/main.rs` and means
+    /// `<cwd>/src/main.rs`.  Open and Copy act on this; the label and
+    /// the underline stay with the text.
+    target: Option<String>,
     kind: marspot::grid_links::LinkKind,
+}
+
+impl LinkContext {
+    /// The string Open and Copy operate on.
+    fn actionable(&self) -> &str {
+        self.target.as_deref().unwrap_or(&self.text)
+    }
 }
 
 /// Build the right-click menu items shown when the user clicks (left
@@ -2313,7 +2325,7 @@ mod link_menu_tests {
     use marspot::grid_links::LinkKind;
 
     fn ctx(kind: LinkKind) -> LinkContext {
-        LinkContext { text: "https://example.com".into(), kind }
+        LinkContext { text: "https://example.com".into(), target: None, kind }
     }
 
     #[test]
@@ -5244,7 +5256,7 @@ impl CoreApp {
             }
             ContextMenuAction::OpenLink => {
                 if let Some(link) = link_snapshot.as_ref() {
-                    let arg = open_arg_for(link.kind, &link.text);
+                    let arg = open_arg_for(link.kind, link.actionable());
                     if let Some(a) = arg {
                         spawn_open(&a);
                     }
@@ -5252,7 +5264,10 @@ impl CoreApp {
             }
             ContextMenuAction::CopyLink => {
                 if let Some(link) = link_snapshot.as_ref() {
-                    let _ = marspot::input::write_clipboard_text(&link.text);
+                    // The full path, not the four characters on
+                    // screen: a relative path pasted elsewhere has to
+                    // still name the same file.
+                    let _ = marspot::input::write_clipboard_text(link.actionable());
                 }
             }
         }
@@ -6635,7 +6650,15 @@ impl CoreApp {
             self.pane_wheel_keys.contains_key(&sid)
                 || self.pane_badges.get(&sid).is_some_and(|b| !b.is_empty())
         });
-        let opts = marspot::grid_links::ScanOpts { cc_mode };
+        // The same cwd the render pass resolved relative paths
+        // against.  A hit-test with a different one underlines a span
+        // and then clicks nothing.
+        let cwd = pane
+            .shelld_session_id()
+            .and_then(|sid| self.pane_cwds.get(&sid))
+            .map(String::as_str)
+            .filter(|c| !c.is_empty());
+        let opts = marspot::grid_links::ScanOpts { cc_mode, cwd };
         // The same non-blocking oracle the render pass uses, for two
         // reasons.  The obvious one: this runs on the main loop's
         // `events` phase, and the blocking default turns one click
@@ -6679,6 +6702,7 @@ impl CoreApp {
         let link = self.hit_test_pane_link(wi, idx, col, row)?;
         Some(LinkContext {
             text: link.text,
+            target: link.target,
             kind: link.kind,
         })
     }
@@ -8849,11 +8873,17 @@ impl CoreApp {
                     .shelld_session_id()
                     .is_some_and(|sid| self.pane_wheel_keys.contains_key(&sid))
                     || !badge.is_empty();
+                let pane_cwd = p
+                    .shelld_session_id()
+                    .and_then(|sid| self.pane_cwds.get(&sid))
+                    .map(String::as_str)
+                    .unwrap_or("");
                 let mut v = p.view(
                     i == focused,
                     titles.get(i).map(|s| s.as_str()).unwrap_or(""),
                     badge,
                     agent_tui,
+                    pane_cwd,
                 );
                 if i == focused && p.view_offset() == 0 {
                     v.ime_preedit = win!(self, wi).ime_preedit.as_str();

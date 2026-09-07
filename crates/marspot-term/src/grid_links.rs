@@ -26,7 +26,10 @@ pub use marspot_linkify::{FsOracle, LinkKind, LinkRange, NoFsOracle, PathOracle,
 /// Options that tune `scan_visible_links` for the calling pane.  All
 /// fields default to off so the existing call path stays opt-in.
 #[derive(Default, Clone, Copy, Debug)]
-pub struct ScanOpts {
+pub struct ScanOpts<'a> {
+    /// The pane's working directory.  Relative paths are only matched
+    /// when it is known — `src/main.rs` names nothing on its own.
+    pub cwd: Option<&'a str>,
     /// claudecode-shaped pane: enable the stone's `tui_mode`
     /// (fixed-width hard-wrap merge + input-box exemption).
     pub cc_mode: bool,
@@ -60,7 +63,7 @@ impl CellSource for GridSource<'_> {
 
 /// Walk the visible grid and return every detected span.  See the
 /// stone crate's `scan_visible_links` for the full semantics.
-pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<LinkRange> {
+pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts<'_>) -> Vec<LinkRange> {
     scan_visible_links_with(grid, view_offset, opts, &FsOracle)
 }
 
@@ -70,13 +73,14 @@ pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<
 pub fn scan_visible_links_with(
     grid: &Grid,
     view_offset: u16,
-    opts: ScanOpts,
+    opts: ScanOpts<'_>,
     oracle: &dyn PathOracle,
 ) -> Vec<LinkRange> {
     marspot_linkify::scan_visible_links_with(
         &GridSource { grid, view_offset },
         marspot_linkify::ScanOpts {
             tui_mode: opts.cc_mode,
+            cwd: opts.cwd,
         },
         oracle,
     )
@@ -122,7 +126,7 @@ mod grid_tests {
             t.feed(b"\r\n");
         }
         t.feed(full.as_bytes());
-        let links = scan_visible_links(t.grid(), 0, super::ScanOpts { cc_mode: true });
+        let links = scan_visible_links(t.grid(), 0, super::ScanOpts { cc_mode: true, ..Default::default() });
         let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
         std::fs::remove_dir_all(&root).ok();
 
@@ -160,7 +164,7 @@ mod grid_tests {
                     t.feed(b"\r\n");
                 }
                 t.feed(line.as_bytes());
-                let links = scan_visible_links(t.grid(), 0, super::ScanOpts { cc_mode: true });
+                let links = scan_visible_links(t.grid(), 0, super::ScanOpts { cc_mode: true, ..Default::default() });
                 if !links.iter().any(|l| l.text == p) {
                     let got: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
                     misses.push(format!("cols={cols} {label}: {got:?}"));
@@ -337,7 +341,7 @@ mod grid_tests {
         // '/', row 1 has 2 leading spaces then 'p' alphanum).  Indent
         // stripped → logical line is "https://example.com/path/to/file.html"
         // → URL regex matches whole token → LinkRange fans out.
-        let opts = ScanOpts { cc_mode: true };
+        let opts = ScanOpts { cc_mode: true, ..Default::default() };
         let with_cc = scan_visible_links(&grid, 0, opts);
         assert!(
             with_cc.len() >= 2,
@@ -391,7 +395,7 @@ mod grid_tests {
                 },
             );
         }
-        let with_cc = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        let with_cc = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true, ..Default::default() });
         // Heuristic must reject the pair → no merge → row 0 + row 1
         // are scanned independently; path on row 1 has 2-space indent
         // before it but the path itself starts at col 2 — that's fine
@@ -543,7 +547,7 @@ mod grid_tests {
         put(3, a3);
         put(4, b3);
 
-        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true, ..Default::default() });
         for f in [&p1, &p2, &p3] {
             let hits: Vec<_> = links
                 .iter()
@@ -620,7 +624,7 @@ mod grid_tests {
                 },
             );
         }
-        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true, ..Default::default() });
         let files: Vec<_> = links.iter().filter(|l| l.kind == LinkKind::File).collect();
         assert!(
             files.iter().any(|l| l.text == ps),
@@ -659,7 +663,7 @@ mod grid_tests {
                 },
             );
         }
-        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true, ..Default::default() });
         assert_eq!(links.len(), 1, "{links:?}");
         assert_eq!(links[0].kind, LinkKind::Url);
         assert_eq!(links[0].text, url, "URL must stop at the row edge");
@@ -706,7 +710,7 @@ mod grid_tests {
             );
         }
 
-        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true, ..Default::default() });
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
         assert_eq!(
@@ -757,7 +761,7 @@ mod grid_tests {
         };
         put(&mut grid, 0, row1_body);
         put(&mut grid, 1, &format!("   {row2_body}"));
-        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true, ..Default::default() });
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
             links
@@ -816,7 +820,7 @@ mod grid_tests {
             " > bare composer, no box (claudecode v2.1.212)",
         );
         grid.set_cursor(3, 7);
-        let with_cc = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        let with_cc = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true, ..Default::default() });
         let texts: Vec<&str> = with_cc.iter().map(|l| l.text.as_str()).collect();
         assert!(
             texts.contains(&"takagi@golia.jp"),
@@ -835,7 +839,7 @@ mod grid_tests {
         put(&mut grid2, 9, " │ > typing https://foo.com/bar │");
         put(&mut grid2, 10, " ╰──────────────────────────────╯");
         grid2.set_cursor(30, 9);
-        let links = scan_visible_links(&grid2, 0, ScanOpts { cc_mode: true });
+        let links = scan_visible_links(&grid2, 0, ScanOpts { cc_mode: true, ..Default::default() });
         assert_eq!(links.len(), 1, "{links:?}");
         assert_eq!(links[0].text, "https://example.com/docs");
     }
@@ -941,7 +945,7 @@ mod grid_tests {
             },
         );
 
-        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true, ..Default::default() });
         // Exactly one link, from row 0 (the scrollback URL).
         assert_eq!(links.len(), 1, "{links:?}");
         assert_eq!(links[0].kind, LinkKind::Url);
@@ -996,7 +1000,7 @@ mod grid_tests {
                 },
             );
         }
-        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true, ..Default::default() });
         assert_eq!(links.len(), 1, "{links:?}");
         assert_eq!(links[0].text, "https://example.com/x");
     }

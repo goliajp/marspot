@@ -47,7 +47,7 @@ fn main() {
         println!("  row{r:>3} |{}| wrapped={}", line.trim_end(), grid.row_wrapped(r));
     }
     for cc in [true, false] {
-        let links = grid_links::scan_visible_links(grid, 0, ScanOpts { cc_mode: cc });
+        let links = grid_links::scan_visible_links(grid, 0, ScanOpts { cc_mode: cc, ..Default::default() });
         println!("--- cc_mode={cc}: {} links ---", links.len());
         let mut seen: Vec<(u16, &str)> = links.iter().map(|l| (l.row, l.text.as_str())).collect();
         seen.sort();

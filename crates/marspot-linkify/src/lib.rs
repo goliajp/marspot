@@ -65,12 +65,23 @@ pub struct LinkRange {
     /// The raw text covered by the span — saved here so the click
     /// dispatcher doesn't have to re-scan the grid.  Owned.
     pub text: String,
+    /// What the span actually names, when that is not what is drawn.
+    ///
+    /// A relative path is written `src/main.rs` and means
+    /// `<cwd>/src/main.rs`; the underline has to cover the four
+    /// characters the user can see, and Open / Copy have to act on the
+    /// file.  `None` when the two are the same.
+    pub target: Option<String>,
 }
 
 /// Options that tune `scan_visible_links` for the calling pane.  All
 /// fields default to off so the existing call path stays opt-in.
 #[derive(Default, Clone, Copy, Debug)]
-pub struct ScanOpts {
+pub struct ScanOpts<'a> {
+    /// The pane's working directory, when it is known.  Without it a
+    /// relative path cannot be resolved and none are matched — a bare
+    /// `src/main.rs` names nothing on its own.
+    pub cwd: Option<&'a str>,
     /// Fixed-width TUIs (claude code and friends) render to a fixed
     /// inner width and hard-newline long URLs / paths with a small
     /// hanging indent on the next row.  When set, the line builder
@@ -180,7 +191,7 @@ pub fn scan_visible_links_with<S: CellSource>(
         if let Some((lo, hi)) = exempt_range {
             if r >= lo && r <= hi {
                 if !segments.is_empty() {
-                    scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle);
+                    scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle, opts.cwd);
                     chars.clear();
                     col_map.clear();
                     segments.clear();
@@ -196,7 +207,7 @@ pub fn scan_visible_links_with<S: CellSource>(
             && is_hard_wrap_continuation(src, r - 1, r, cols);
         let is_continuation = decawm_cont || cc_cont;
         if !is_continuation && !segments.is_empty() {
-            scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle);
+            scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle, opts.cwd);
             chars.clear();
             col_map.clear();
             segments.clear();
@@ -245,11 +256,11 @@ pub fn scan_visible_links_with<S: CellSource>(
         char_offset = chars.len();
     }
     if !segments.is_empty() {
-        scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle);
+        scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle, opts.cwd);
     }
     if opts.tui_mode && rule_cols.len() >= 4 {
         let before = out.len();
-        scan_table_cells(src, cols, &rule_cols, &mut out, oracle);
+        scan_table_cells(src, cols, &rule_cols, &mut out, oracle, opts.cwd);
         // Nothing crossed a cell boundary — leave the row pass's
         // output exactly as it was, sort and all.
         if out.len() != before {
@@ -551,6 +562,7 @@ fn scan_table_cells<S: CellSource>(
     rule_cols: &[(u16, u16)],
     out: &mut Vec<LinkRange>,
     oracle: &dyn PathOracle,
+    cwd: Option<&str>,
 ) {
     if rule_cols.len() < 4 {
         return;
@@ -585,7 +597,7 @@ fn scan_table_cells<S: CellSource>(
         }
         // This row does not extend the block — close what we have.
         if block_rows.len() >= 2 && shared.len() >= 2 {
-            scan_table_block(src, &block_rows, &shared, cols, out, oracle);
+            scan_table_block(src, &block_rows, &shared, cols, out, oracle, cwd);
         }
         block_rows.clear();
         shared.clear();
@@ -594,7 +606,7 @@ fn scan_table_cells<S: CellSource>(
         row_start = row_end;
     }
     if block_rows.len() >= 2 && shared.len() >= 2 {
-        scan_table_block(src, &block_rows, &shared, cols, out, oracle);
+        scan_table_block(src, &block_rows, &shared, cols, out, oracle, cwd);
     }
 }
 
@@ -606,6 +618,7 @@ fn scan_table_block<S: CellSource>(
     cols: u16,
     out: &mut Vec<LinkRange>,
     oracle: &dyn PathOracle,
+    cwd: Option<&str>,
 ) {
     let mut chars: Vec<char> = Vec::new();
     let mut col_map: Vec<u16> = Vec::new();
@@ -623,7 +636,7 @@ fn scan_table_block<S: CellSource>(
             if is_rule_row(src, r, left, right) {
                 // A separator between table rows: whatever follows is
                 // a different cell, so nothing crosses it.
-                flush_table_line(&chars, &col_map, &segments, cols, out, oracle);
+                flush_table_line(&chars, &col_map, &segments, cols, out, oracle, cwd);
                 chars.clear();
                 col_map.clear();
                 segments.clear();
@@ -635,7 +648,7 @@ fn scan_table_block<S: CellSource>(
                     && !starts_new_scheme(src, r, left, right)
             });
             if !joins {
-                flush_table_line(&chars, &col_map, &segments, cols, out, oracle);
+                flush_table_line(&chars, &col_map, &segments, cols, out, oracle, cwd);
                 chars.clear();
                 col_map.clear();
                 segments.clear();
@@ -678,7 +691,7 @@ fn scan_table_block<S: CellSource>(
             }
             prev_row = Some(r);
         }
-        flush_table_line(&chars, &col_map, &segments, cols, out, oracle);
+        flush_table_line(&chars, &col_map, &segments, cols, out, oracle, cwd);
     }
 }
 
@@ -691,12 +704,13 @@ fn flush_table_line(
     cols: u16,
     out: &mut Vec<LinkRange>,
     oracle: &dyn PathOracle,
+    cwd: Option<&str>,
 ) {
     if segments.len() < 2 {
         return;
     }
     let before = out.len();
-    scan_logical_line(chars, col_map, segments, cols as usize, out, oracle);
+    scan_logical_line(chars, col_map, segments, cols as usize, out, oracle, cwd);
     // A match confined to one row is one the row pass already had.
     let mut i = before;
     while i < out.len() {
@@ -995,6 +1009,7 @@ fn scan_logical_line(
     cols_per_row: usize,
     out: &mut Vec<LinkRange>,
     oracle: &dyn PathOracle,
+    cwd: Option<&str>,
 ) {
     if segments.is_empty() {
         return;
@@ -1004,7 +1019,7 @@ fn scan_logical_line(
     // showed up as ~250 samples in the input-lag profile (15 s, 9
     // panes typing).  emit_match is the only producer, append-only,
     // so passing `out` straight through is safe and saves the alloc.
-    scan_line_into_matches(chars, col_map, out, segments, cols_per_row, oracle);
+    scan_line_into_matches(chars, col_map, out, segments, cols_per_row, oracle, cwd);
 }
 
 /// Original pattern scanner, but the per-row emit step now consults
@@ -1019,6 +1034,7 @@ fn scan_line_into_matches(
     segments: &[LineSegment],
     cols_per_row: usize,
     oracle: &dyn PathOracle,
+    cwd: Option<&str>,
 ) {
     if segments.is_empty() {
         return;
@@ -1239,6 +1255,32 @@ fn scan_line_into_matches(
             }
         }
 
+        // Relative paths, LAST — every other kind gets first refusal,
+        // so a URL, an address, an IP or a UUID is never re-read as a
+        // filename.  Only reachable when the pane's directory is
+        // known: `src/main.rs` names nothing on its own.
+        if let Some(cwd) = cwd {
+            if (c.is_alphanumeric() || c == '.' || c == '_')
+                && (at_seg_start || !is_left_boundary_pathish(&chars, i))
+            {
+                let end = scan_path_candidate(&chars, i);
+                if end > i && looks_like_relative_path(&chars[i..end]) {
+                    if let Some(b) =
+                        resolve_path_end_from(&chars, i, end, segments, oracle, Some(cwd))
+                    {
+                        let text = unquote_path(&chars[i..b].iter().collect::<String>());
+                        let full = join_cwd(cwd, &text);
+                        emit_match_to(
+                            out, segments, col_map, cols_per_row, i, b,
+                            LinkKind::File, text, Some(full),
+                        );
+                        i = b.max(i + 1);
+                        continue;
+                    }
+                }
+            }
+        }
+
         i += 1;
     }
 }
@@ -1255,6 +1297,65 @@ fn scan_line_into_matches(
 /// disk is the real token.  Returns the char-pos to truncate at.
 /// (URL candidates have no existence oracle, so they keep the plain
 /// merged behaviour.)
+
+/// Does this span look like it could name something relative to a
+/// working directory?
+///
+/// The filesystem is the arbiter — a candidate only becomes a link if
+/// it resolves — but the filesystem must not be ASKED about every word
+/// on screen, and a word that happens to match a file in `~` (`Music`,
+/// `Public`) should not light up in prose.  So a candidate has to
+/// carry some evidence of being a path before it is worth resolving:
+///
+///   * an explicit relative marker — `./x`, `../x`
+///   * a separator — `src/main.rs`, `bin/run.sh`
+///   * a file extension — `Cargo.toml`, `README.md`
+///
+/// The extension rule is what keeps numbers out: it must be 1..=8
+/// characters, alphanumeric, and START with a letter, so `1.5`,
+/// `2026.09` and `v1.2.3` are not candidates, while `a.c` is.  The
+/// stem must contain a letter for the same reason.
+fn looks_like_relative_path(span: &[char]) -> bool {
+    if span.is_empty() || span[0] == '/' || span[0] == '~' {
+        return false;
+    }
+    let s: String = span.iter().collect();
+    if s.starts_with("./") || s.starts_with("../") {
+        return true;
+    }
+    // A separator, but not a leading or trailing one.
+    if let Some(p) = s.find('/') {
+        return p > 0 && p + 1 < s.len();
+    }
+    let Some(dot) = s.rfind('.') else { return false };
+    if dot == 0 || dot + 1 >= s.len() {
+        return false;
+    }
+    let (stem, ext) = (&s[..dot], &s[dot + 1..]);
+    if !stem.chars().any(|c| c.is_alphabetic()) {
+        return false;
+    }
+    let n = ext.chars().count();
+    n <= 8
+        && ext.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// `<cwd>/<rel>`, with a leading `./` folded away.  `..` is left for
+/// the filesystem to resolve — it is the one that knows about symlinks.
+fn join_cwd(cwd: &str, rel: &str) -> String {
+    let rel = rel.strip_prefix("./").unwrap_or(rel);
+    format!("{}/{}", cwd.trim_end_matches('/'), rel)
+}
+
+/// Is the character before `i` one that would make this the middle of
+/// a larger token rather than the start of one?
+fn is_left_boundary_pathish(chars: &[char], i: usize) -> bool {
+    i > 0
+        && (chars[i - 1].is_alphanumeric()
+            || matches!(chars[i - 1], '/' | '.' | '-' | '_' | '~' | '@' | ':'))
+}
+
 /// Strip a trailing `:line(:col)?` suffix (compiler / panic output
 /// like `/…/file.rs:120:5`) from a path span so the stat check sees
 /// the bare path.  Returns the new end; unchanged when no such
@@ -1328,6 +1429,23 @@ fn emit_match(
     kind: LinkKind,
     text: String,
 ) {
+    emit_match_to(out, segments, col_map, cols_per_row, char_lo, char_hi_exclusive, kind, text, None)
+}
+
+/// [`emit_match`] carrying an explicit target — what the span NAMES,
+/// when that differs from what it shows.  See `LinkRange::target`.
+#[allow(clippy::too_many_arguments)]
+fn emit_match_to(
+    out: &mut Vec<LinkRange>,
+    segments: &[LineSegment],
+    col_map: &[u16],
+    cols_per_row: usize,
+    char_lo: usize,
+    char_hi_exclusive: usize,
+    kind: LinkKind,
+    text: String,
+    target: Option<String>,
+) {
     if char_lo >= char_hi_exclusive || segments.is_empty() {
         return;
     }
@@ -1367,6 +1485,7 @@ fn emit_match(
         }
         let c1 = c1.min(cols_per_row.saturating_sub(1) as u16);
         out.push(LinkRange {
+            target: target.clone(),
             row: seg.phys_row,
             col_start: c0,
             col_end: c1,
@@ -1406,7 +1525,7 @@ fn scan_line(line: &str, row: u16, out: &mut Vec<LinkRange>) {
         cc_zero_indent: false,
         cc_seam: false,
     }];
-    scan_line_into_matches(&chars, &col_map, out, &segments, cols, &FsOracle);
+    scan_line_into_matches(&chars, &col_map, out, &segments, cols, &FsOracle, None);
 }
 
 /// True when `chars[start..]` begins with `prefix`.  All known
@@ -1971,6 +2090,21 @@ fn resolve_path_end(
     segments: &[LineSegment],
     oracle: &dyn PathOracle,
 ) -> Option<usize> {
+    resolve_path_end_from(chars, lo, hi, segments, oracle, None)
+}
+
+/// [`resolve_path_end`] with an optional base directory.  When `base`
+/// is set the candidate is RELATIVE: every trimming step is the same,
+/// but what gets asked of the filesystem is `<base>/<candidate>`, so
+/// the returned end still indexes the text as drawn.
+fn resolve_path_end_from(
+    chars: &[char],
+    lo: usize,
+    hi: usize,
+    segments: &[LineSegment],
+    oracle: &dyn PathOracle,
+    base: Option<&str>,
+) -> Option<usize> {
     let mut tried = 0usize;
     let mut last: Option<usize> = None;
     let consider = |end: usize, tried: &mut usize, last: &mut Option<usize>| -> bool {
@@ -1980,11 +2114,22 @@ fn resolve_path_end(
         *last = Some(end);
         *tried += 1;
         let span = &chars[lo..end];
-        if !looks_like_path(span) {
-            return false;
-        }
         let text: String = span.iter().collect();
-        is_real_path(oracle, &unquote_path(&text))
+        let unquoted = unquote_path(&text);
+        match base {
+            None => {
+                if !looks_like_path(span) {
+                    return false;
+                }
+                is_real_path(oracle, &unquoted)
+            }
+            Some(cwd) => {
+                if !looks_like_relative_path(span) {
+                    return false;
+                }
+                is_real_path(oracle, &join_cwd(cwd, &unquoted))
+            }
+        }
     };
     // The whole token, then the whole token minus its sentence tail.
     if consider(hi, &mut tried, &mut last) {
@@ -2372,7 +2517,7 @@ mod tests {
             let cols = width + gap;
             let mut src = StrSource::new(&[r0.as_str(), r1.as_str(), ""], cols);
             src.cursor = (0, 2);
-            let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+            let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
             assert!(
                 links.iter().any(|l| l.text == full),
                 "gap {gap}: the two halves must rejoin into {full:?}, got {:?}",
@@ -2410,7 +2555,7 @@ mod tests {
         ];
         let mut src = StrSource::new(&rows, 46);
         src.cursor = (10, 6); // caret in the prompt row
-        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
         assert!(
             links.iter().all(|l| l.row != 2),
             "the composer must not be scanned: {links:?}",
@@ -2439,7 +2584,7 @@ mod tests {
         let mut src = StrSource::new(&rows, 12);
         src.soft_wrapped = vec![false, true];
         src.cursor = (7, 1); // caret parked on the continuation
-        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
         assert!(
             links.iter().any(|l| l.text == "/etc/hosts"),
             "the wrapped tail was swallowed by a phantom composer: {links:?}",
@@ -2479,7 +2624,7 @@ mod tests {
         let cols = first.chars().count() as u16;
         let mut src = StrSource::new(&rows, cols);
         src.cursor = (6, 1);
-        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
         let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
         let root_s = format!("{}/", root.display());
         std::fs::remove_dir_all(&root).ok();
@@ -2502,7 +2647,7 @@ mod tests {
         let rows = ["  /etc/hos", "  ts"];
         let mut src = StrSource::new(&rows, 10);
         src.cursor = (4, 1);
-        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
         assert!(
             links.iter().any(|l| l.text == "/etc/hosts"),
             "seamless join broken: {links:?}",
@@ -2522,7 +2667,7 @@ mod tests {
         let rows = ["first line", "see /etc/hosts here"];
         let mut src = StrSource::new(&rows, 24);
         src.cursor = (19, 1); // caret where output left it
-        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
         assert!(
             links.iter().any(|l| l.text == "/etc/hosts"),
             "output row blanked by a phantom composer: {links:?}",
@@ -2560,7 +2705,7 @@ mod tests {
         let rows = [a, b];
         let mut src = StrSource::new(&rows, short_of_edge);
         src.cursor = (0, 1);
-        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
         let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
         let dir_only = format!("{}/", root.display());
         std::fs::remove_dir_all(&root).ok();
@@ -2628,7 +2773,7 @@ mod tests {
         ];
         let mut src = StrSource::new(&rows, 40);
         src.cursor = (10, 2);
-        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
         assert!(links.iter().all(|l| l.row != 2), "caret row exempt: {links:?}");
         assert!(
             links.iter().filter(|l| l.row == 0 || l.row == 1).count() >= 2,
@@ -2652,7 +2797,7 @@ mod tests {
         ];
         let mut src = StrSource::new(&rows, 30);
         src.cursor = (0, 1); // top of the view, nowhere near a composer
-        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
         for r in 1..=5u16 {
             assert!(
                 links.iter().any(|l| l.row == r),
@@ -2742,7 +2887,7 @@ mod tests {
             ],
             47,
         );
-        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
         let full = "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/a8b69ccc/detect.caffemodel";
         let url_rows: Vec<u16> = links
             .iter()
@@ -2794,7 +2939,7 @@ mod tests {
             ],
             40,
         );
-        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
         let mut texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
         texts.sort_unstable();
         texts.dedup();
@@ -2823,7 +2968,7 @@ mod tests {
         );
         src.soft_wrapped[1] = true;
         src.cursor = (4, 4);
-        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
         assert_eq!(links.len(), 2, "{links:?}"); // one URL fanned over 2 rows
         assert!(links.iter().all(|l| l.text == "https://example.com/long/path"));
         assert_eq!((links[0].row, links[1].row), (0, 1));
@@ -2849,7 +2994,7 @@ mod tests {
             "  2. room -> http://a.example/x",
         ] {
             let src = StrSource::new(&[head, next], cols);
-            let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+            let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
             assert!(
                 links.iter().any(|l| l.text
                     == "http://192.168.50.20:6031/index.html?page=pages/village/index"),
@@ -2865,7 +3010,7 @@ mod tests {
         let head = "- 村子 → http://192.168.50.20:6031/index.html?page=pages/village/index";
         let cols = head.chars().count() as u16;
         let src = StrSource::new(&[head, "  -more/parts here"], cols);
-        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
         assert!(
             links.iter().any(|l| l.text
                 == "http://192.168.50.20:6031/index.html?page=pages/village/index-more/parts"),
@@ -2910,7 +3055,7 @@ mod tests {
         let refs: Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
         let src = StrSource::new(&refs, cols);
 
-        let mut texts: Vec<String> = scan_visible_links(&src, ScanOpts { tui_mode: true })
+        let mut texts: Vec<String> = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() })
             .into_iter()
             .map(|l| l.text)
             .collect();
@@ -3317,7 +3462,7 @@ mod tests {
         let cols = head.chars().count() as u16;
         let tail = format!("  {};memory noted", &text[split..]);
         let src = StrSource::new(&[&head, &tail], cols);
-        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
         let files: Vec<&LinkRange> = links.iter().filter(|l| l.kind == LinkKind::File).collect();
         assert!(!files.is_empty(), "wrapped path found no link at all");
         assert!(
@@ -3380,7 +3525,7 @@ mod tests {
             text.chars().skip(split).collect::<String>()
         );
         let src = StrSource::new(&[&head, &tail], cols);
-        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
         let files: Vec<&LinkRange> = links.iter().filter(|l| l.kind == LinkKind::File).collect();
         assert!(!files.is_empty(), "wrapped path found no link at all");
         assert!(
@@ -3524,7 +3669,7 @@ mod tests {
         // col_map: chars 0..9 → row-0 cols 0..9; chars 10..12 → row-1 cols 0..2.
         let col_map: Vec<u16> = (0..10).chain(0..3).collect();
         let chars: Vec<char> = line.chars().collect();
-        super::scan_line_into_matches(&chars, &col_map, &mut out, &segments, 10, &super::FsOracle);
+        super::scan_line_into_matches(&chars, &col_map, &mut out, &segments, 10, &super::FsOracle, None);
         // One match, fanned into 2 LinkRanges (one per physical row).
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].kind, LinkKind::Url);
@@ -3561,6 +3706,7 @@ mod tests {
             &segments,
             chars.len(),
             &super::FsOracle,
+            None,
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].row, 7);
@@ -3822,8 +3968,8 @@ mod tests {
         let mut src = StrSource::new(&[&head, &tail], cols);
         src.soft_wrapped[1] = false; // codex wrapped it, not the terminal
 
-        let on = scan_visible_links(&src, ScanOpts { tui_mode: true });
-        let off = scan_visible_links(&src, ScanOpts { tui_mode: false });
+        let on = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let off = scan_visible_links(&src, ScanOpts { tui_mode: false, ..Default::default() });
         std::fs::remove_dir_all(&root).ok();
 
         assert!(
@@ -3841,3 +3987,146 @@ mod tests {
 }
 
 
+
+#[cfg(test)]
+mod relative_path_tests {
+    use super::*;
+
+    /// An oracle that knows exactly one directory's contents, so a
+    /// test states what exists instead of touching a real filesystem.
+    struct Fake(&'static [&'static str]);
+    impl PathOracle for Fake {
+        fn probe(&self, path: &str) -> PathVerdict {
+            if self.0.contains(&path) {
+                PathVerdict::Exists
+            } else {
+                PathVerdict::Missing
+            }
+        }
+    }
+
+    struct Line(String);
+    impl CellSource for Line {
+        fn cols(&self) -> u16 {
+            120
+        }
+        fn rows(&self) -> u16 {
+            1
+        }
+        fn char_at(&self, col: u16, _row: u16) -> char {
+            self.0.chars().nth(col as usize).unwrap_or(' ')
+        }
+        fn is_soft_wrap_continuation(&self, _row: u16) -> bool {
+            false
+        }
+        fn cursor(&self) -> (u16, u16) {
+            (0, 0)
+        }
+        fn is_wide(&self, _ch: char) -> bool {
+            false
+        }
+    }
+
+    fn scan(text: &str, cwd: Option<&str>, exists: &'static [&'static str]) -> Vec<LinkRange> {
+        scan_visible_links_with(
+            &Line(text.to_string()),
+            ScanOpts { cwd, ..Default::default() },
+            &Fake(exists),
+        )
+    }
+
+    #[test]
+    fn a_relative_path_that_resolves_is_a_link_to_the_full_path() {
+        let v = scan(
+            "edit src/main.rs then run it",
+            Some("/w/proj"),
+            &["/w/proj/src/main.rs"],
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].kind, LinkKind::File);
+        // The underline covers what is drawn …
+        assert_eq!(v[0].text, "src/main.rs");
+        // … and Open / Copy get the file.
+        assert_eq!(v[0].target.as_deref(), Some("/w/proj/src/main.rs"));
+    }
+
+    #[test]
+    fn one_that_does_not_resolve_is_not_a_link() {
+        let v = scan("edit src/main.rs", Some("/w/proj"), &[]);
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
+    fn without_a_working_directory_nothing_relative_matches() {
+        // `src/main.rs` names nothing on its own.
+        let v = scan("edit src/main.rs", None, &["/w/proj/src/main.rs"]);
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
+    fn dot_forms_resolve_and_the_dot_slash_is_folded_away() {
+        let v = scan("see ./notes.md", Some("/w/proj"), &["/w/proj/notes.md"]);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, "./notes.md");
+        assert_eq!(v[0].target.as_deref(), Some("/w/proj/notes.md"));
+
+        let up = scan("see ../sib/x.rs", Some("/w/proj"), &["/w/proj/../sib/x.rs"]);
+        assert_eq!(up.len(), 1, "{up:?}");
+        assert_eq!(up[0].target.as_deref(), Some("/w/proj/../sib/x.rs"));
+    }
+
+    #[test]
+    fn a_bare_filename_needs_an_extension_not_just_a_match() {
+        // A word that happens to name a directory must not light up in
+        // prose — `~` is full of them (Music, Public, Downloads).
+        let bare = scan("play some Music now", Some("/home/u"), &["/home/u/Music"]);
+        assert!(bare.is_empty(), "a bare word is not a path: {bare:?}");
+        // With an extension it is worth asking about.
+        let named = scan("open Cargo.toml", Some("/w/p"), &["/w/p/Cargo.toml"]);
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert_eq!(named[0].target.as_deref(), Some("/w/p/Cargo.toml"));
+    }
+
+    #[test]
+    fn numbers_are_never_candidates() {
+        // Even if a file with that name existed, `1.5` in prose is a
+        // number.  The extension must start with a letter and the stem
+        // must contain one.
+        for (text, exists) in [
+            ("took 1.5 seconds", "/w/p/1.5"),
+            ("version v1.2.3 shipped", "/w/p/v1.2.3"),
+            ("built 2026.09 release", "/w/p/2026.09"),
+        ] {
+            let v = scan(text, Some("/w/p"), &[]);
+            assert!(v.is_empty(), "{text}: {v:?}");
+            let _ = exists;
+        }
+    }
+
+    #[test]
+    fn absolute_and_url_forms_still_win() {
+        // The relative branch runs last; nothing it could match is
+        // allowed to re-read something another kind already claimed.
+        let v = scan("go to https://x.dev/a.rs", Some("/w/p"), &[]);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].kind, LinkKind::Url);
+        assert_eq!(v[0].target, None, "a URL is what it shows");
+
+        let m = scan("mail a.b@c.dev now", Some("/w/p"), &[]);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].kind, LinkKind::Email);
+    }
+
+    #[test]
+    fn a_line_col_suffix_is_trimmed_the_same_way() {
+        // rustc output: `src/main.rs:120:5`.
+        let v = scan(
+            "error at src/main.rs:120:5 here",
+            Some("/w/p"),
+            &["/w/p/src/main.rs"],
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, "src/main.rs");
+        assert_eq!(v[0].target.as_deref(), Some("/w/p/src/main.rs"));
+    }
+}

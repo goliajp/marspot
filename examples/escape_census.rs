@@ -61,7 +61,7 @@ fn main() {
             }
         }
     }
-    let mut show = |title: &str, m: &BTreeMap<String, u64>| {
+    let show = |title: &str, m: &BTreeMap<String, u64>| {
         println!("\n{title}");
         let mut v: Vec<_> = m.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1));

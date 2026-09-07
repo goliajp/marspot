@@ -1666,6 +1666,9 @@ impl Marspot {
                     // The standalone binary hosts no plugins, so no
                     // pane is claimed by an agent TUI.
                     false,
+                    // …and it does not track per-pane cwds, so a
+                    // relative path has nothing to resolve against.
+                    "",
                 );
                 // Preedit only applies to the focused, live pane —
                 // scrolled-back views don't have a live cursor to
@@ -2047,7 +2050,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
         update_pending: false,
         dormant: false,
         right_badge: "",
-        agent_tui: false,
+        agent_tui: false, cwd: "",
         top_fixed_h_cells: 0,
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
@@ -3015,7 +3018,7 @@ fn bench_first_frame(arg: &str) {
             update_pending: false,
             dormant: false,
             right_badge: "",
-            agent_tui: false,
+            agent_tui: false, cwd: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
@@ -3130,7 +3133,7 @@ fn bench_metal_render(arg: &str) {
         update_pending: false,
         dormant: false,
         right_badge: "",
-        agent_tui: false,
+        agent_tui: false, cwd: "",
         top_fixed_h_cells: 0,
         bot_fixed_h_cells: 0,
         highlight_spans: &[],

@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.138"  # codex pane 不再劫持滚轮、不再声明 <u>；详见 CHANGELOG.md
-core    = "0.12.184"  # 开记录视图的那一次不再同时往里翻；焦点上报转发；详见 CHANGELOG.md
+core    = "0.12.185"  # 相对路径按 pane 的 cwd 解析成链接，open/copy 用全路径；详见 CHANGELOG.md
 session = "0.11.79"  # 顶边在第一行的滚动区，滚出去的行进滚动历史（对齐 iTerm2 实测）；详见 CHANGELOG.md

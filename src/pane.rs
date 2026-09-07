@@ -1966,6 +1966,7 @@ impl Pane {
         title: &'a str,
         right_badge: &'a str,
         agent_tui: bool,
+        cwd: &'a str,
     ) -> SessionView<'a> {
         // An L3 mirror is *already* the window L3 published at the requested
         // scroll offset (and holds no scrollback to offset into), so it
@@ -2029,6 +2030,7 @@ impl Pane {
             scrim: self.scrim.value(std::time::Instant::now()),
             right_badge,
             agent_tui,
+            cwd,
             top_fixed_h_cells,
             bot_fixed_h_cells,
             highlight_spans: self

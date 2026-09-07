@@ -2954,7 +2954,40 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.184**
+Current: **0.12.185**
+
+### 0.12.185
+
+A relative path is a link, resolved against the pane's own directory.
+
+`src/main.rs`, `./notes.md`, `Cargo.toml` — written the way people
+actually write them, and until now inert, because the scanner only
+recognised what it could resolve on its own: absolute (`/…`) and
+home-relative (`~/…`).
+
+The filesystem stays the arbiter, exactly as it is for an absolute
+path: a candidate becomes a link only when `<cwd>/<candidate>` exists.
+But it must not be ASKED about every word on screen, and a word that
+happens to name something in `~` (`Music`, `Public`) must not light up
+in prose.  So a candidate needs evidence of being a path before it is
+worth resolving — an explicit `./` or `../`, a separator, or a file
+extension of 1..8 alphanumerics starting with a LETTER.  That last rule
+is what keeps `1.5`, `v1.2.3` and `2026.09` out while letting `a.c` in.
+
+What is drawn and what is meant are separate: the underline covers the
+eleven characters of `src/main.rs`, and Open and Copy act on
+`/w/proj/src/main.rs`.  `LinkRange` carries that as `target`, the same
+split the `file://` handling already used for its scheme.
+
+Two things this change deliberately does NOT do.  It issues no
+filesystem calls of its own — resolution goes through the same
+non-blocking oracle as everything else, where a single `lstat` under a
+network mount has been measured at six seconds on the render thread.
+And the relative branch runs LAST, after URL, email, IP and UUID, so
+nothing another kind already claimed can be re-read as a filename.
+
+The hit-test resolves against the same cwd the render pass did.  A
+different one would underline a span and then click nothing.
 
 ### 0.12.184
 

@@ -80,7 +80,7 @@ fn read_geometry(dir: &Path) -> (u16, u16) {
 fn synthetic(text: &str, scans: usize) {
     let mut term = Terminal::new(120, 30);
     term.feed(format!("see {text} for details\r\n").as_bytes());
-    let opts = ScanOpts { cc_mode: false };
+    let opts = ScanOpts { cc_mode: false, ..Default::default() };
 
     marspot::link_probe::install();
     for (label, oracle) in [
@@ -144,7 +144,7 @@ fn main() {
     // merges hanging-indent continuation rows into one logical line,
     // which is what makes tokens (and their candidate sets) long.
     // Measuring without it would understate the real cost.
-    let opts = ScanOpts { cc_mode: true };
+    let opts = ScanOpts { cc_mode: true, ..Default::default() };
 
     for (label, oracle) in [
         ("FsOracle (blocking, pre-2026-08-23)", &FsOracle as &dyn PathOracle),
