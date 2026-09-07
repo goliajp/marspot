@@ -98,52 +98,24 @@ fn a_cluster_occupies_the_cells_it_should() {
     }
 }
 
-/// Which feed boundaries a cluster currently does NOT survive.
+/// A cluster survives being split between two reads.
 ///
-/// The terminal commits whatever is buffered at the end of a feed, so
-/// that a keystroke lands on the read it arrived in rather than the
-/// next one.  The comment beside that flush says a cluster split
-/// across feeds "still resolves via the segmenter's saved prev-state";
-/// it does not — the flush has already written the base and moved the
-/// cursor, so the codepoint that would have extended it starts a
-/// cluster of its own and takes a cell.
+/// A pty ends its reads wherever the kernel had a break, so a cluster
+/// arrives with its base in one and its modifier in the next as a
+/// matter of course.  This used to come apart: the terminal committed
+/// whatever was buffered at the end of a feed, so the base was drawn
+/// and the cursor moved before the codepoint that would have extended
+/// it arrived — `a⚠️b` split after `⚠` put the VS16 in a cell of its
+/// own (measured 2026-09-07, along with the ZWJ family, the flag, the
+/// hangul syllable and the virama conjunct).
 ///
-/// A pty hands over whatever the kernel had, so this is not exotic:
-/// any read ending between two codepoints of one cluster does it.
-///
-/// This is a CHARACTERIZATION test, not an endorsement.  It states the
-/// exact set of splits that are wrong today so the bug is written
-/// down, bounded, and impossible to widen unnoticed — and so that
-/// whoever fixes it is told by a failing test to come and delete this.
-///
-/// The fix is the same restructuring that removes the one-codepoint
-/// lookahead (measured worth +22.6 % on emoji parse): write the glyph
-/// as soon as its width is known, and let a following zero-width
-/// codepoint amend the cell it landed in, which is what the reference
-/// implementation does.
+/// A glyph is now committed as soon as its width is known and a later
+/// codepoint amends the cell it landed in, so there is nothing to
+/// flush at a feed boundary and nothing to lose.
 #[test]
-fn where_a_cluster_split_between_feeds_is_currently_lost() {
-    let known_bad: &[(&str, &[usize])] = &[
-        ("ascii", &[]),
-        ("cjk", &[]),
-        ("combining mark joins its base", &[]),
-        ("VS16 widens a text-presentation symbol", &[4]),
-        ("emoji-presentation symbol is wide on its own", &[]),
-        ("ZWJ family is one cluster", &[5, 8, 12, 15, 19, 22]),
-        ("regional indicator pair is one flag", &[5]),
-        ("skin tone modifier joins its base", &[]),
-        ("hangul syllable then trailing jamo", &[4]),
-        ("devanagari virama conjunct", &[4, 7]),
-        ("plain emoji run", &[]),
-    ];
+fn a_cluster_survives_being_split_between_reads() {
     for case in CASES {
-        let expected_bad = known_bad
-            .iter()
-            .find(|(n, _)| *n == case.name)
-            .map(|(_, s)| *s)
-            .unwrap_or_else(|| panic!("no known-bad entry for {}", case.name));
         let b = case.input.as_bytes();
-        let mut bad = Vec::new();
         for split in 1..b.len() {
             if std::str::from_utf8(&b[..split]).is_err() {
                 continue;
@@ -151,16 +123,29 @@ fn where_a_cluster_split_between_feeds_is_currently_lost() {
             let mut t = Terminal::new(20, 4);
             t.feed(&b[..split]);
             t.feed(&b[split..]);
-            if row0(&t, case.cells.len()) != case.cells.to_vec() {
-                bad.push(split);
-            }
+            assert_eq!(
+                row0(&t, case.cells.len()),
+                case.cells.to_vec(),
+                "{} split at byte {split}",
+                case.name
+            );
         }
-        assert_eq!(
-            bad, expected_bad,
-            "{}: the set of feed splits a cluster does not survive has CHANGED. \
-             Fewer is the fix landing — delete this test and turn the table above \
-             into the split-feed assertion. More is a regression.",
-            case.name
-        );
+    }
+}
+
+/// And in whatever pieces the reads happen to come in.
+#[test]
+fn a_cluster_survives_any_chunking() {
+    for case in CASES {
+        for chunk in [1usize, 2, 3, 5] {
+            let mut t = Terminal::new(20, 4);
+            feed_in(&mut t, case.input, chunk);
+            assert_eq!(
+                row0(&t, case.cells.len()),
+                case.cells.to_vec(),
+                "{} in {chunk}-byte chunks",
+                case.name
+            );
+        }
     }
 }

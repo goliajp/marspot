@@ -5854,7 +5854,69 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.80**
+Current: **0.11.81**
+
+### 0.11.81
+
+A glyph is committed as soon as its width is known.
+
+The terminal used to hold each codepoint back for one round, so that a
+variation selector, a ZWJ or a combining mark arriving next could join
+it before anything was drawn.  That is one round of latency per
+character, and it is not how the reference implementation does it:
+Alacritty's `Term::input` looks the width up once and writes, and a
+zero-width codepoint amends the cell the previous one landed in
+(`push_zerowidth`) — no lookahead at all.
+
+Priced before it was built, by ablation on `cat-emoji`: removing the
+lookahead was worth **+22.6 %**, three times the entire remaining width
+machinery (+5.1 %) and twice the scrollback row copy (+11.0 %).
+
+An earlier ablation had reported this as NEUTRAL and that was wrong —
+it only short-circuited when the buffer was empty, which after the
+first character it never is, so the branch it was measuring almost
+never ran.  A measurement device that fails looks exactly like data
+(methodology §9); this one had no independent witness and should not
+have been believed.
+
+**It also fixes a correctness bug, which is how it was found.**  The
+new cluster table (see the commit before this) showed that a cluster
+split between two pty reads came apart: the end-of-feed flush wrote
+the base and moved the cursor, so the codepoint that would have
+extended it took a cell of its own — `a⚠️b` split after `⚠` produced
+`['a', '⚠', VS16, pad]`.  The comment beside that flush claimed the
+segmenter's saved state resolved it; it did not, and a pty ends its
+reads wherever the kernel had a break.  With nothing held back there
+is nothing to flush and nothing to lose, so the flush is gone and the
+cluster survives the boundary.
+
+The fast class still skips the segmenter — the boundary before one of
+those is unconditional — but only while the cluster already open is
+itself of that class.  After a ZWJ it is not: GB11 joins ZWJ to the
+pictograph after it, so `👨 ZWJ 👩` reaches the segmenter even though
+`👩` qualifies alone.  Getting that wrong split the family, and the
+table caught it in the first build.
+
+Widening is the other half: `⚠` is one cell and `⚠️` is two, so a
+codepoint that grows its cluster claims the cell after the anchor and
+pushes the cursor along.  A glyph already at the right edge has
+nowhere to grow and keeps the width it was drawn at.
+
+Measured on mini, interleaved A/B with a rebuild between runs and the
+two final screens compared cell by cell first:
+
+| scenario | before | after | |
+|---|---:|---:|---|
+| cat-emoji | 157.9 | 183–193 | **+16–22 %** |
+| cat-cjk | 242.0 | 288–295 | **+19 %** |
+| cat-mixed | 252.8 | 272.4 | +7.8 % |
+| cat-ascii | 423.6 | 436.9 | +3.1 % |
+
+Against Alacritty on identical bytes into an identical grid, screens
+verified identical: `cat-emoji` 0.71x → **0.79x**, `cat-cjk` 0.96x →
+**1.10x** — ahead.  Emoji is still behind; the priced item left is the
+2,440-byte row copy into scrollback, which the reference avoids by
+letting the grid and the history share one ring.
 
 ### 0.11.80
 

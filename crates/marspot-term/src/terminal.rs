@@ -307,6 +307,23 @@ pub struct Terminal {
     /// `cluster_buf` maintains it; `debug_assert`s in the fast path
     /// hold it to that.
     cluster_fast: Option<(char, u8)>,
+    /// Where the cluster now being built was written, and how wide it
+    /// is.  A glyph is committed as soon as its width is known; a
+    /// codepoint that arrives afterwards and belongs to the same
+    /// cluster amends THIS cell instead of taking one of its own.
+    ///
+    /// The terminal used to hold a codepoint back for one round
+    /// instead, so a variation selector or ZWJ arriving next could
+    /// join before anything was drawn.  That cost 22.6 % of emoji
+    /// parse (measured by ablation), and it did not even work across
+    /// a feed boundary: the end-of-feed flush wrote the base and moved
+    /// the cursor, so `a⚠️b` split after `⚠` put the VS16 in a cell of
+    /// its own.  A pty ends its reads wherever the kernel had a break,
+    /// so that was not exotic.
+    ///
+    /// `None` means there is no cluster to extend — the start of a
+    /// feed, or after anything that moved the cursor.
+    cluster_anchor: Option<(u16, u16, u8)>,
     grapheme_cursor: crate::grapheme::GraphemeCursor,
     /// Whether `grapheme_cursor`'s run state currently reflects
     /// `cluster_buf`.  The ASCII fast path in `Handler::print` skips
@@ -419,6 +436,7 @@ impl Terminal {
             echo_srtt: Self::ECHO_SRTT_SEED,
             cluster_buf: String::new(),
             cluster_fast: None,
+            cluster_anchor: None,
             grapheme_cursor: crate::grapheme::GraphemeCursor::new(),
             seg_synced: true,
             predictions_hit: 0,
@@ -917,6 +935,7 @@ impl Terminal {
             let pending_wrap = &mut self.pending_wrap;
             let cluster_buf = &mut self.cluster_buf;
             let cluster_fast = &mut self.cluster_fast;
+            let cluster_anchor = &mut self.cluster_anchor;
             let grapheme_cursor = &mut self.grapheme_cursor;
             let seg_synced = &mut self.seg_synced;
             let mut handler = Handler {
@@ -947,6 +966,7 @@ impl Terminal {
                 pending_wrap,
                 cluster_buf,
                 cluster_fast,
+                cluster_anchor,
                 grapheme_cursor,
                 seg_synced,
             };
@@ -1048,79 +1068,26 @@ impl Terminal {
                 self.predictions_miss += n as u64;
             }
         }
-        // End-of-feed flush: a trailing print(ch) leaves the cluster
-        // in the buffer pending the next codepoint's break decision.
-        // For interactive terminals each PTY write is its own feed
-        // and the user expects the keystroke to land NOW, not on the
-        // next read.  We don't reset the segmenter — a cluster split
-        // across feed boundaries (rare; would need a partial UTF-8
-        // run) still resolves via the segmenter's saved prev-state.
+        // NOTHING is flushed at the end of a feed any more, and that
+        // is the point.
+        //
+        // A glyph is committed the moment its width is known, so there
+        // has never been anything pending here since that change — the
+        // keystroke has already landed.  What this block used to do
+        // besides write was CLEAR the open cluster, and that is what
+        // made a cluster split across two reads come apart: the base
+        // was drawn and the cursor moved, so the codepoint that would
+        // have extended it took a cell of its own.  The comment here
+        // used to claim the segmenter's saved state resolved that; it
+        // did not, and a pty ends its reads wherever the kernel had a
+        // break, so it was not rare either (measured 2026-09-07:
+        // `a⚠️b` split after `⚠`).
+        //
+        // The cluster and its anchor now survive the boundary, which
+        // is what lets the next read finish the cluster.
         //
         // Build a one-off handler so the flush method can do its work
         // through the same borrows as the per-byte handler.
-        if !self.cluster_buf.is_empty() {
-            let grid = &mut self.grid;
-            let saved_main = &mut self.saved_main;
-            let attrs = &mut self.attrs;
-            let saved_cursor = &mut self.saved_cursor;
-            let scroll_top = &mut self.scroll_top;
-            let scroll_bot = &mut self.scroll_bot;
-            let pending_response = &mut self.pending_response;
-            let response_window = &mut self.response_window;
-            let response_burst_last_warn = &mut self.response_burst_last_warn;
-            let cursor_key_app_mode = &mut self.cursor_key_application_mode;
-            let bracketed_paste = &mut self.bracketed_paste_mode;
-            let sync_output = &mut self.sync_output;
-            let uses_sync_output = &mut self.uses_sync_output;
-            let focus_reporting = &mut self.focus_reporting;
-            let focus_reported = &mut self.focus_reported;
-            let osc_title = &mut self.osc_title;
-            let cursor_shape = &mut self.cursor_shape;
-            let alt_scroll = &mut self.alt_scroll;
-            let u_tags = self.u_tags;
-            let u_buf = &mut self.u_buf;
-            let u_open = &mut self.u_open;
-            let cursor_visible = &mut self.cursor_visible;
-            let mouse_tracking_mode = &mut self.mouse_tracking_mode;
-            let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
-            let pending_wrap = &mut self.pending_wrap;
-            let cluster_buf = &mut self.cluster_buf;
-            let cluster_fast = &mut self.cluster_fast;
-            let grapheme_cursor = &mut self.grapheme_cursor;
-            let seg_synced = &mut self.seg_synced;
-            let mut handler = Handler {
-                grid,
-                saved_main,
-                attrs,
-                saved_cursor,
-                scroll_top,
-                scroll_bot,
-                pending_response,
-                response_window,
-                response_burst_last_warn,
-                cursor_key_app_mode,
-                bracketed_paste,
-                sync_output,
-                uses_sync_output,
-                focus_reporting,
-                focus_reported,
-                osc_title,
-                cursor_shape,
-                alt_scroll,
-                u_tags,
-                u_buf,
-                u_open,
-                cursor_visible,
-                mouse_tracking_mode,
-                mouse_sgr_encoding,
-                pending_wrap,
-                cluster_buf,
-                cluster_fast,
-                grapheme_cursor,
-                seg_synced,
-            };
-            handler.flush_cluster_keep_cursor();
-        }
     }
 
     /// Current snapshot generation.  Bumped at the end of every non-
@@ -2191,6 +2158,8 @@ struct Handler<'a> {
     cluster_buf: &'a mut String,
     /// See `Terminal::cluster_fast`.
     cluster_fast: &'a mut Option<(char, u8)>,
+    /// See `Terminal::cluster_anchor`.
+    cluster_anchor: &'a mut Option<(u16, u16, u8)>,
     grapheme_cursor: &'a mut crate::grapheme::GraphemeCursor,
     seg_synced: &'a mut bool,
 }
@@ -2405,17 +2374,17 @@ impl<'a> Handler<'a> {
     /// the cell.  Full-cluster glyph rendering (compound emoji,
     /// combining marks) lands when we move cluster storage into a
     /// Grid-side pool (task #5 follow-up).
+    /// End the cluster being built.
+    ///
+    /// Nothing is written here any more: a glyph is committed the
+    /// moment its width is known, and this only says that whatever
+    /// arrives next cannot join it.  The name is kept because every
+    /// caller means exactly that — a cursor move, an erase, a control
+    /// code, the end of a batch.
     fn flush_cluster_keep_cursor(&mut self) {
-        if self.cluster_buf.is_empty() {
-            return;
-        }
-        let w = crate::grapheme::cluster_width(self.cluster_buf);
-        let base = self.cluster_buf.chars().next().expect("non-empty buffer");
         self.cluster_buf.clear();
         *self.cluster_fast = None;
-        if w > 0 {
-            self.write_glyph(base, w);
-        }
+        *self.cluster_anchor = None;
     }
 
     /// Same as [`flush_cluster_keep_cursor`] but also resets the
@@ -2471,9 +2440,10 @@ impl<'a> Handler<'a> {
         }
         let (last, body) = run.split_last().expect("run_len >= 2");
         self.write_ascii_body(body);
-        self.cluster_buf.push(*last as char);
-        *self.cluster_fast = Some((*last as char, 1));
-        *self.seg_synced = false;
+        // The batch used to leave its last byte buffered so a mark
+        // arriving next could join it.  It is committed now, and the
+        // anchor is what a mark joins.
+        self.commit_cluster_head(*last as char, 1, true);
     }
 
     /// Flush the pending cluster ahead of a batch run IF a boundary
@@ -2577,9 +2547,7 @@ impl<'a> Handler<'a> {
         self.write_wide_body(body);
         let last = char::from_u32(decode3_cp(&run[run.len() - 3..]))
             .expect("scan admitted only fast-class scalars");
-        self.cluster_buf.push(last);
-        *self.cluster_fast = Some((last, 2));
-        *self.seg_synced = false;
+        self.commit_cluster_head(last, 2, true);
     }
 
     /// Row-sliced bulk write of width-2 glyphs (lead cell + NUL trail
@@ -2671,7 +2639,11 @@ impl<'a> Handler<'a> {
     /// wide-char wrap edge cases.  Body extracted from the old
     /// per-codepoint `print` so the cluster flush path and any future
     /// non-parser writer can share the same cursor-advance logic.
-    fn write_glyph(&mut self, ch: char, w: u8) {
+    /// Commit one glyph and return the cell it landed in, so the
+    /// caller can anchor to it — a codepoint that arrives later and
+    /// belongs to the same cluster amends that cell rather than
+    /// starting a new one.
+    fn write_glyph(&mut self, ch: char, w: u8) -> (u16, u16) {
         // DECAWM deferred wrap: the previous glyph landed in the last
         // column and set `pending_wrap`. The wrap was deliberately
         // deferred so that a trailing `\r\n` (or any cursor move)
@@ -2750,6 +2722,7 @@ impl<'a> Handler<'a> {
             self.grid.set_cursor(cols - 1, row);
             *self.pending_wrap = true;
         }
+        (col, row)
     }
 
     /// Scroll the grid up by 1 line, honouring DECSTBM. When the
@@ -3604,60 +3577,95 @@ impl<'a> Handler<'a> {
     }
 
     fn print_glyph(&mut self, ch: char) {
-        // FAST PATH — a `boring_width` char (ASCII / CJK / kana / …)
-        // arriving while the buffer holds nothing or one boring char.
-        // UAX #29 has no rule joining Other+Other, so the boundary is
-        // unconditional and the segmenter can be skipped entirely;
-        // width comes from the same range match.  This is what keeps
-        // `cat` of plain text / CJK prose from paying 3× gbp + incb
-        // + pictographic table walks per printable (measured ~84 % /
-        // ~55 % of parse time respectively, 2026-07-11 samply).
+        // FAST CLASS — the boundary BEFORE one of these is
+        // unconditional (UAX #29 has no rule joining Other+Other, and
+        // the class is chosen so LV/LVT and emoji-presentation
+        // pictographs behave the same way), so no segmenter is needed
+        // to know this starts a new cluster.  Commit it now.
+        // …but only while the cluster currently open is itself of
+        // that class, or none is.  After a ZWJ or any other extender
+        // the boundary is NOT unconditional — GB11 joins ZWJ to the
+        // pictograph after it — so `👨 ZWJ 👩` has to reach the
+        // segmenter even though `👩` is fast class on its own.
         if let Some(w) = fast_width(ch) {
-            if self.cluster_buf.is_empty() {
-                debug_assert!(self.cluster_fast.is_none());
-                self.cluster_buf.push(ch);
-                *self.cluster_fast = Some((ch, w));
-                *self.seg_synced = false;
-                return;
-            }
-            // What is buffered was classified when it was buffered.
-            // Asking `fast_width` about it a second time — after
-            // decoding it back out of the String — was the fast path's
-            // largest single cost on emoji.
-            if let Some((prev, prev_w)) = *self.cluster_fast {
-                debug_assert_eq!(
-                    self.cluster_buf.chars().collect::<Vec<_>>(),
-                    vec![prev],
-                    "cluster_fast must describe exactly what is buffered"
-                );
-                self.cluster_buf.clear();
-                self.write_glyph(prev, prev_w);
-                self.cluster_buf.push(ch);
-                *self.cluster_fast = Some((ch, w));
-                *self.seg_synced = false;
+            if self.cluster_buf.is_empty() || self.cluster_fast.is_some() {
+                self.commit_cluster_head(ch, w, true);
                 return;
             }
         }
-        // SLOW PATH — UAX #29 cluster aware: the VT parser feeds us
-        // one codepoint at a time, but a single user-perceived
-        // "character" can span several (é = e + ́, ⚠️ = ⚠ + VS16,
-        // 👨‍👩‍👧‍👦 = 4 emoji + 3 ZWJ, क्क = क + virama + क …).  We
-        // buffer codepoints, ask the segmenter whether a boundary
-        // falls before each one, and commit a single cluster to the
-        // grid when the next codepoint starts a new one.  This is
-        // what makes ⭐ ✅ ❌ land in 2 cells (cluster_width=2)
-        // instead of being half-clipped in a 1-cell slot when the
-        // EAW table alone gave them 1.
-        *self.cluster_fast = None;
+        // SLOW PATH — this codepoint may EXTEND what was just drawn
+        // (`e` + ́ , ⚠ + VS16, 👨 + ZWJ + 👩, LV + jamo, क + virama),
+        // and only the segmenter knows.
         self.resync_segmenter();
         if self.grapheme_cursor.step(ch) {
-            // step has already advanced cursor state to track `ch` as
-            // the first codepoint of a new cluster — flush_cluster
-            // therefore must NOT reset the cursor, or the run state
-            // would lose its head.
-            self.flush_cluster_keep_cursor();
+            // A boundary: its own cluster, committed at its own width.
+            // Anything that widens it arrives later and amends it.
+            let w = crate::grapheme::cluster_width(ch.encode_utf8(&mut [0u8; 4]));
+            if w > 0 {
+                self.commit_cluster_head(ch, w as u8, false);
+            } else {
+                // A zero-width codepoint with a boundary before it has
+                // nothing to attach to — it is not drawn, but it does
+                // open a cluster the next codepoint may extend.
+                self.cluster_buf.clear();
+                self.cluster_buf.push(ch);
+                *self.cluster_fast = None;
+                *self.cluster_anchor = None;
+            }
+            return;
         }
+        // No boundary: `ch` belongs to the cluster already on screen.
         self.cluster_buf.push(ch);
+        *self.cluster_fast = None;
+        let w = crate::grapheme::cluster_width(self.cluster_buf);
+        self.widen_anchor(w as u8);
+    }
+
+    /// Draw `ch` as the first codepoint of a new cluster and remember
+    /// where it went.
+    /// `fast` says the head is of the class whose successors need no
+    /// segmenter.  A head that reached here through the segmenter is
+    /// NOT that, even when it would have qualified alone: what follows
+    /// it may still join.
+    fn commit_cluster_head(&mut self, ch: char, w: u8, fast: bool) {
+        let at = self.write_glyph(ch, w);
+        self.cluster_buf.clear();
+        self.cluster_buf.push(ch);
+        *self.cluster_fast = if fast { Some((ch, w)) } else { None };
+        *self.cluster_anchor = Some((at.0, at.1, w));
+        *self.seg_synced = false;
+    }
+
+    /// The cluster turned out to be wider than its first codepoint —
+    /// `⚠` is one cell, `⚠️` is two.  Claim the cell after it and push
+    /// the cursor along, but only when the glyph is still where it was
+    /// left: anything that moved the cursor clears the anchor, and a
+    /// glyph already at the right edge has nowhere to grow into (it
+    /// keeps the width it was drawn at, which is what it looked like
+    /// before this codepoint arrived).
+    fn widen_anchor(&mut self, w: u8) {
+        let Some((col, row, cur)) = *self.cluster_anchor else {
+            return;
+        };
+        if w <= cur || w != 2 {
+            return;
+        }
+        let cols = self.grid.cols();
+        if col + 1 >= cols {
+            return;
+        }
+        self.grid.set_cell(
+            col + 1,
+            row,
+            Cell {
+                ch: '\0',
+                attrs: *self.attrs,
+            },
+        );
+        if self.grid.cursor() == (col + 1, row) {
+            self.grid.set_cursor(col + 2, row);
+        }
+        *self.cluster_anchor = Some((col, row, w));
     }
 }
 

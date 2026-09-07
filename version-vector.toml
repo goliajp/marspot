@@ -29,4 +29,4 @@
 
 shell   = "0.7.139"  # 插件显式声明 agent TUI，每 tick 重发；详见 CHANGELOG.md
 core    = "0.12.186"  # agent TUI 以声明为准，不再从 badge/滚轮键推断；详见 CHANGELOG.md
-session = "0.11.80"  # pane 的 shell 不再继承启动者的 agent 会话身份；详见 CHANGELOG.md
+session = "0.11.81"  # 字形宽度一确定就写出去，零宽码点回头并入；emoji/CJK +19~22%，并修跨 read 的簇断裂；详见 CHANGELOG.md
