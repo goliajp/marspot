@@ -319,7 +319,10 @@ impl Session {
             // Marspot's process-plumbing env (MARSPOT_SESSION_ID,
             // shm/surface ids, …) must not leak into the user's
             // shell — see PtyConfig::env_remove_prefixes.
-            env_remove_prefixes: vec!["MARSPOT_".into()],
+            env_remove_prefixes: crate::pty::SESSION_ENV_PREFIXES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
         })?;
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(PTY_CHANNEL_CAPACITY);
         let exited = Arc::new(AtomicBool::new(false));

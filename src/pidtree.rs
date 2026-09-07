@@ -976,7 +976,10 @@ mod tests {
             size: TerminalSize { cols: 80, rows: 24, pixel_width: 0, pixel_height: 0 },
             argv0: None,
             cwd: Some("/".into()),
-            env_remove_prefixes: vec!["MARSPOT_".into()],
+            env_remove_prefixes: marspot_term::pty::SESSION_ENV_PREFIXES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
         })
         .expect("spawn zsh on a pty");
         let shell_pid = pty.child_pid();

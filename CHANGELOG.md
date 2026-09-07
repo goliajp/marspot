@@ -5817,7 +5817,42 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.79**
+Current: **0.11.80**
+
+### 0.11.80
+
+A pane's shell gets the user's environment, never the launcher's
+session identity.
+
+Reported as: four panes' claudecode exited without a word, and
+restarting it warned `Transcript saving is off — inherited
+CLAUDE_CODE_CHILD_SESSION`.
+
+Caused by this session.  After an install that had to relaunch the app,
+`install-local.sh` ran `open "$APP"` **from inside a claudecode pane**,
+and `open(1)` forwards the caller's environment — verified with a
+canary variable, which arrived intact in the launched app.  So L1 came
+up carrying `CLAUDE_CODE_CHILD_SESSION=1`, that session's
+`CLAUDE_CODE_SESSION_ID`, and its `CLAUDE_CODE_MESSAGING_SOCKET` and
+token.  Only `MARSPOT_` was stripped on the way to a pane's shell, so
+every pane opened afterwards inherited all of it, and agents started
+in those panes believed they were children of a session that was never
+theirs — pointing at one messaging socket that belonged to someone
+else.
+
+This is the 2026-07-03 scrollback incident from the other direction:
+that one was marspot's own `MARSPOT_SESSION_ID` leaking DOWN into a
+pane, and the fix was `env_remove_prefixes`.  The same list now names
+the agent families too (`pty::SESSION_ENV_PREFIXES`), and
+`install-local.sh` strips them before `open` as well, so the two do
+not have to agree in order to be safe.
+
+An agent the user starts INSIDE a pane still sets its own variables
+for its own children; that happens below this boundary and is
+untouched.  `crates/marspot-term/tests/pane_env_isolation.rs` drives a
+real pty and pins both directions — that they are inherited by
+default, and that the list stops them while an ordinary variable still
+arrives.
 
 ### 0.11.79
 

@@ -652,8 +652,32 @@ if (( ! RUNNING )); then
       xattr -c "$TREE/current/$b" 2>/dev/null || true
     done
   fi
+# Launch the app WITHOUT handing it this shell's session identity.
+#
+# `open(1)` forwards the caller's environment — verified 2026-09-07
+# with a canary variable, which arrived intact in the launched app.
+# So running this script from inside an agent pane made every pane the
+# new app opened carry that agent's `CLAUDE_CODE_CHILD_SESSION`, its
+# session id, and its messaging socket and token.  Agents started in
+# those panes believed they were children of a session that was never
+# theirs: four of them turned transcript saving off and exited without
+# a word (2026-09-07).
+#
+# `marspot_term::pty::SESSION_ENV_PREFIXES` strips the same families
+# when a pane spawns its shell; this keeps them out of the app to
+# begin with, so the two do not have to agree to be safe.
+launch_app_clean() {
+  local unset_args=() name
+  while IFS='=' read -r name _; do
+    case "$name" in
+      MARSPOT_*|CLAUDE_CODE_*|CLAUDECODE|CODEX_*) unset_args+=(-u "$name") ;;
+    esac
+  done < <(env)
+  env "${unset_args[@]}" open "$@"
+}
+
   echo "==> no running app — launching"
-  open "$APP"
+  launch_app_clean "$APP"
   echo "==> done.  Marspot started from $APP"
   exit 0
 fi

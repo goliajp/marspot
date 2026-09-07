@@ -62,6 +62,29 @@ pub struct PtyConfig {
     pub env_remove_prefixes: Vec<String>,
 }
 
+/// Environment prefixes a pane's shell must never inherit.
+///
+/// Two families, one reason.  `MARSPOT_` is this terminal's own
+/// process plumbing (session id, shm and surface ids): a `cargo test`
+/// run inside a pane once picked up `MARSPOT_SESSION_ID` and
+/// overwrote that session's on-disk scrollback (2026-07-03).
+///
+/// The agent families are the same defect from the other direction.
+/// A terminal inherits the environment of whatever launched it, and
+/// if that was an agent session — `install-local.sh` run from inside
+/// a claudecode pane, say — then every pane it opens carries that
+/// session's identity: `CLAUDE_CODE_CHILD_SESSION`, its session id,
+/// and its messaging socket and token.  Agents started in those panes
+/// then believe they are children of that session: measured
+/// 2026-09-07, four of them disabled transcript saving and exited
+/// without a word, all pointing at one socket that was never theirs.
+///
+/// A pane gets the user's environment, never the launcher's session.
+/// An agent the user starts INSIDE a pane still sets its own vars for
+/// its own children — that happens below this boundary and is
+/// untouched.
+pub const SESSION_ENV_PREFIXES: &[&str] = &["MARSPOT_", "CLAUDE_CODE_", "CLAUDECODE", "CODEX_"];
+
 /// Owned handle to a spawned child process attached to a pseudo-terminal.
 ///
 /// Drop sends SIGHUP, then SIGKILL after a short wait, and waits for the

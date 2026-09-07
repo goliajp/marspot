@@ -217,7 +217,10 @@ impl LocalSession {
             // MARSPOT_SESSION_ID and overwrote that session's on-disk
             // scrollback (2026-07-03).  L3's own env is untouched, so
             // the self-execv update path still reads them.
-            env_remove_prefixes: vec!["MARSPOT_".into()],
+            env_remove_prefixes: marspot_term::pty::SESSION_ENV_PREFIXES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
         })?;
         let child_pid = pty.child_pid();
         let pty = Arc::new(pty);
