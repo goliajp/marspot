@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.138"  # codex pane 不再劫持滚轮、不再声明 <u>；详见 CHANGELOG.md
-core    = "0.12.185"  # 相对路径按 pane 的 cwd 解析成链接，open/copy 用全路径；详见 CHANGELOG.md
+shell   = "0.7.139"  # 插件显式声明 agent TUI，每 tick 重发；详见 CHANGELOG.md
+core    = "0.12.186"  # agent TUI 以声明为准，不再从 badge/滚轮键推断；详见 CHANGELOG.md
 session = "0.11.80"  # pane 的 shell 不再继承启动者的 agent 会话身份；详见 CHANGELOG.md

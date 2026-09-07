@@ -42,6 +42,13 @@ pub struct PaneWheelKeysUpdate {
     pub marker: Vec<u8>,
 }
 
+/// Channel message for `PaneAgentTui` — see the trait method.
+#[derive(Debug, Clone, Copy)]
+pub struct PaneAgentTuiUpdate {
+    pub shelld_session_id: u64,
+    pub on: bool,
+}
+
 /// Channel message for `PaneRenderMarkup` — see the trait method.
 #[derive(Clone)]
 pub struct PaneRenderMarkupUpdate {
@@ -99,6 +106,7 @@ pub struct ShellPluginHost {
     pane_badge_tx: Mutex<Option<Sender<PaneBadgeUpdate>>>,
     pane_wheel_keys_tx: Mutex<Option<Sender<PaneWheelKeysUpdate>>>,
     pane_render_markup_tx: Mutex<Option<Sender<PaneRenderMarkupUpdate>>>,
+    pane_agent_tui_tx: Mutex<Option<Sender<PaneAgentTuiUpdate>>>,
     pane_title_tx: Mutex<Option<Sender<PaneTitleUpdate>>>,
     /// PaneSession take-over requests bound for the main loop.
     pane_session_begin_tx: Mutex<Option<Sender<PaneSessionBeginRequest>>>,
@@ -211,6 +219,7 @@ impl ShellPluginHost {
             active_plugin: Arc::new(Mutex::new(None)),
             pane_badge_tx: Mutex::new(None),
             pane_wheel_keys_tx: Mutex::new(None),
+            pane_agent_tui_tx: Mutex::new(None),
             pane_render_markup_tx: Mutex::new(None),
             pane_title_tx: Mutex::new(None),
             pane_session_begin_tx: Mutex::new(None),
@@ -236,6 +245,10 @@ impl ShellPluginHost {
     }
 
     /// Same, for wheel-key declarations.
+    pub fn attach_pane_agent_tui_tx(&self, tx: Sender<PaneAgentTuiUpdate>) {
+        *self.pane_agent_tui_tx.lock().unwrap() = Some(tx);
+    }
+
     pub fn attach_pane_render_markup_tx(&self, tx: Sender<PaneRenderMarkupUpdate>) {
         *self.pane_render_markup_tx.lock().unwrap() = Some(tx);
     }
@@ -455,6 +468,19 @@ impl PluginHost for ShellPluginHost {
             return Ok(());
         };
         let _ = tx.send(PaneRenderMarkupUpdate { shelld_session_id, on });
+        Ok(())
+    }
+
+    fn set_pane_agent_tui(
+        &self,
+        shelld_session_id: u64,
+        on: bool,
+    ) -> Result<(), PluginError> {
+        self.require(PermissionSet::SET_STATUS_LINE)?;
+        let Some(tx) = self.pane_agent_tui_tx.lock().unwrap().clone() else {
+            return Ok(());
+        };
+        let _ = tx.send(PaneAgentTuiUpdate { shelld_session_id, on });
         Ok(())
     }
 

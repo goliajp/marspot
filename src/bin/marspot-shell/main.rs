@@ -1185,10 +1185,14 @@ struct ShellApp {
     /// mid-boot, the wheel then did nothing at all).  So the shell
     /// keeps the mapping and replays it on every handshake.
     pane_wheel_keys: std::collections::HashMap<u64, plugins::host::PaneWheelKeysUpdate>,
+    pane_agent_tui_rx: std::sync::mpsc::Receiver<plugins::host::PaneAgentTuiUpdate>,
     pane_render_markup_rx:
         std::sync::mpsc::Receiver<plugins::host::PaneRenderMarkupUpdate>,
     /// The markup declarations in force, replayed on every handshake
     /// for the same reason the wheel ones are: a plugin says it once.
+    /// Last agent-TUI declaration per pane, so the heartbeat is
+    /// only logged when it changes.
+    pane_agent_tui: std::collections::HashMap<u64, bool>,
     pane_render_markup: std::collections::HashMap<u64, bool>,
     /// Same shape as `pane_badge_rx` but for plugin-set pane titles.
     pane_title_rx: std::sync::mpsc::Receiver<plugins::host::PaneTitleUpdate>,
@@ -1600,6 +1604,7 @@ impl ShellApp {
             .expect("HOME must be set to manage binary slots");
         let (pane_badge_tx, pane_badge_rx) = std::sync::mpsc::channel();
         let (pane_wheel_keys_tx, pane_wheel_keys_rx) = std::sync::mpsc::channel();
+        let (pane_agent_tui_tx, pane_agent_tui_rx) = std::sync::mpsc::channel();
         let (pane_render_markup_tx, pane_render_markup_rx) = std::sync::mpsc::channel();
         let pane_badge_tx_clone = pane_badge_tx.clone();
         let (pane_title_tx, pane_title_rx) = std::sync::mpsc::channel();
@@ -1654,6 +1659,7 @@ impl ShellApp {
                 let h = ShellPluginHost::new();
                 h.attach_pane_badge_tx(pane_badge_tx);
                 h.attach_pane_wheel_keys_tx(pane_wheel_keys_tx);
+                h.attach_pane_agent_tui_tx(pane_agent_tui_tx);
                 h.attach_pane_render_markup_tx(pane_render_markup_tx);
                 h.attach_pane_title_tx(pane_title_tx);
                 h.attach_pane_session_begin_tx(pane_session_begin_tx);
@@ -1689,7 +1695,9 @@ impl ShellApp {
             pane_badge_rx,
             pane_wheel_keys_rx,
             pane_wheel_keys: std::collections::HashMap::new(),
+            pane_agent_tui_rx,
             pane_render_markup_rx,
+            pane_agent_tui: std::collections::HashMap::new(),
             pane_render_markup: std::collections::HashMap::new(),
             pane_title_rx,
             pane_session_begin_rx,
@@ -1726,6 +1734,16 @@ impl ShellApp {
     /// shell closed it — but why?".  The 2026-06-15 incident debugging
     /// loop made this hole obvious: six core boots in three minutes
     /// and no log entry telling us which path was firing them.
+    fn send_pane_agent_tui(&self, sid: u64, on: bool) {
+        let Some(conn) = self.active.as_ref() else {
+            return;
+        };
+        conn.send(
+            MsgType::PaneAgentTui,
+            marspot::shell_proto::encode_pane_agent_tui(sid, on),
+        );
+    }
+
     fn send_pane_render_markup(&self, sid: u64, on: bool) {
         let Some(conn) = self.active.as_ref() else {
             return;
@@ -2832,6 +2850,21 @@ impl ShellApp {
         // during a crash gap) → just drop the update; the next tick
         // will push the current mapping again (plugins re-issue every
         // transition, not just once).
+        // Re-issued every tick by design, so a core swap costs one
+        // tick instead of leaving the pane's TUI-shaped link scanning
+        // off until something else happens to change.  Logged only on
+        // CHANGE — the heartbeat is not news.
+        while let Ok(upd) = self.pane_agent_tui_rx.try_recv() {
+            let sid = upd.shelld_session_id;
+            if self.pane_agent_tui.get(&sid) != Some(&upd.on) {
+                lx_info!(
+                    "shell.pane_agent_tui.declared",
+                    &format!("sid={sid} on={}", upd.on)
+                );
+                self.pane_agent_tui.insert(sid, upd.on);
+            }
+            self.send_pane_agent_tui(sid, upd.on);
+        }
         while let Ok(upd) = self.pane_render_markup_rx.try_recv() {
             let sid = upd.shelld_session_id;
             lx_info!(

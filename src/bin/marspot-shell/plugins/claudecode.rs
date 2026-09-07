@@ -1302,6 +1302,7 @@ impl ClaudecodePlugin {
                 &format!("shelld_session={} (was sid={})", sh_sid, cc_sid),
             );
             let _ = host.set_pane_badge(*sh_sid, "");
+            let _ = host.set_pane_agent_tui(*sh_sid, false);
             let _ = host.set_pane_title(*sh_sid, "");
         }
         // Held panes wear the badge and title they were frozen with.
@@ -1310,6 +1311,7 @@ impl ClaudecodePlugin {
                 continue;
             }
             let _ = host.set_pane_badge(*sh_sid, &look.badge);
+            let _ = host.set_pane_agent_tui(*sh_sid, true);
             if !look.title.is_empty() {
                 let _ = host.set_pane_title(*sh_sid, &look.title);
             }
@@ -1335,6 +1337,10 @@ impl ClaudecodePlugin {
                     ),
                 );
             }
+            // Re-issued every tick: a core swap starts L2 with an
+            // empty map, and this is what tells it to merge the hard
+            // wraps a fixed-width TUI puts in the middle of a path.
+            let _ = host.set_pane_agent_tui(*sh_sid, true);
             if let Err(e) = host.set_pane_badge(*sh_sid, cc_sid) {
                 host.log(LogLevel::Warn, "pane_badge.set_failed", &format!("{e}"));
             }

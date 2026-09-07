@@ -569,6 +569,12 @@ impl Plugin for CodexPlugin {
                 // feature is net-negative here.  `render_u_tags` in
                 // settings.toml still turns it on for anyone who wants
                 // it everywhere.
+                // Re-issued every tick on purpose: a core swap starts
+                // L2 with an empty map, and a declaration sent once
+                // never reaches it.  That is how a codex pane lost its
+                // hard-wrap link merging on 2026-09-07 while the three
+                // unwrapped paths beside it still worked.
+                let _ = host.set_pane_agent_tui(sid, true);
                 let _ = host.set_pane_render_markup(sid, false);
                 // The wheel is NOT routed into codex's transcript any
                 // more.  It was, because a codex pane had no history
@@ -599,6 +605,7 @@ impl Plugin for CodexPlugin {
                     }
                 }
             } else if self.last_badge.remove(&sid).is_some() {
+                let _ = host.set_pane_agent_tui(sid, false);
                 if self.declared.remove(&sid) {
                     let _ = host.set_pane_wheel_keys(sid, b"", b"", b"", b"");
                     // codex is gone; the pane is a shell again, and a

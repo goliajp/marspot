@@ -517,6 +517,16 @@ pub enum MsgType {
     /// plugin driving a program knows the program does not render its
     /// own HTML.
     PaneRenderMarkup = 80,
+    /// A plugin declaring that an agent TUI paints this pane.
+    ///
+    /// L2 used to INFER this from two proxies — a wheel-key
+    /// declaration, or a non-empty badge — and both are "sent once, or
+    /// when the text changes", so a core swap left the new L2 with
+    /// neither and the pane silently lost its TUI-shaped link scanning
+    /// (2026-09-07: a path broken at a hard wrap stopped being a link,
+    /// while the three unwrapped ones beside it still were).  Named
+    /// directly and re-issued every tick, a swap costs one tick.
+    PaneAgentTui = 82,
     /// Put this pane's pen back to plain — what `reset` does, for a
     /// pane whose program is never going to send one.
     ///
@@ -1808,6 +1818,14 @@ pub fn decode_pane_reset_attrs(payload: &[u8]) -> io::Result<u64> {
 }
 
 /// PaneRenderMarkup payload: `session_id u64 LE, on u8`.
+pub fn encode_pane_agent_tui(session_id: u64, on: bool) -> Vec<u8> {
+    encode_pane_render_markup(session_id, on)
+}
+
+pub fn decode_pane_agent_tui(payload: &[u8]) -> io::Result<(u64, bool)> {
+    decode_pane_render_markup(payload)
+}
+
 pub fn encode_pane_render_markup(session_id: u64, on: bool) -> Vec<u8> {
     let mut v = Vec::with_capacity(9);
     v.extend_from_slice(&session_id.to_le_bytes());

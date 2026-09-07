@@ -792,6 +792,7 @@ mod window_state_tests {
             renderer: MetalRenderer::new_headless().expect("headless renderer"),
             pane_badges: std::collections::HashMap::new(),
             pane_wheel_keys: std::collections::HashMap::new(),
+            pane_agent_tui: std::collections::HashMap::new(),
             pane_wheel_enter_at: std::collections::HashMap::new(),
             pane_wheel_open: std::collections::HashMap::new(),
             pane_titles: std::collections::HashMap::new(),
@@ -2620,6 +2621,7 @@ enum CoreEvent {
     PaneHoldGrid(u64, bool),
     /// A plugin says this pane's program prints unrendered markup.
     PaneRenderMarkup(u64, bool),
+    PaneAgentTui(u64, bool),
     /// L1 asks a pane to receive text as a paste.  Forwarded to the
     /// pane's L3, which is the only layer that knows whether the
     /// program in it has bracketed paste on.
@@ -2840,6 +2842,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::PaneHoldGrid => marspot::shell_proto::decode_pane_hold_grid(&f.payload)
             .ok()
             .map(|(sid, on)| CoreEvent::PaneHoldGrid(sid, on)),
+        MsgType::PaneAgentTui => marspot::shell_proto::decode_pane_agent_tui(&f.payload)
+            .ok()
+            .map(|(sid, on)| CoreEvent::PaneAgentTui(sid, on)),
         MsgType::PaneRenderMarkup => marspot::shell_proto::decode_pane_render_markup(&f.payload)
             .ok()
             .map(|(sid, on)| CoreEvent::PaneRenderMarkup(sid, on)),
@@ -3714,6 +3719,15 @@ struct CoreApp {
     /// never remembered.  Nothing here ever closes it: the user asked
     /// for the wheel to take them in but never to throw them out.
     pane_wheel_keys: std::collections::HashMap<u64, WheelKeys>,
+    /// A plugin's explicit "an agent TUI paints this pane" declaration
+    /// (`MsgType::PaneAgentTui`), re-issued every tick.  Replaces
+    /// inferring it from a wheel-key declaration or a non-empty badge:
+    /// both are sent once or only on change, so a core swap left the
+    /// new L2 with neither and the pane lost its TUI-shaped link
+    /// scanning until something happened to change.  Absent means an
+    /// L1 that does not send it yet — the old inference is the
+    /// fallback, so a mixed-version pair still behaves.
+    pane_agent_tui: std::collections::HashMap<u64, bool>,
     /// When this pane was last sent the plugin's `enter` key.  The
     /// marker that says the view opened takes a repaint to appear —
     /// 59 ms in the best case measured — and a trackpad delivers ticks
@@ -6646,10 +6660,17 @@ impl CoreApp {
         // Same answer the render pass uses — see the `agent_tui`
         // comment there.  A hit-test that disagreed with what was
         // drawn would underline one span and click another.
-        let cc_mode = pane.shelld_session_id().is_some_and(|sid| {
-            self.pane_wheel_keys.contains_key(&sid)
-                || self.pane_badges.get(&sid).is_some_and(|b| !b.is_empty())
-        });
+        // Same answer the render pass reaches — see there.
+        let cc_mode = match pane
+            .shelld_session_id()
+            .and_then(|sid| self.pane_agent_tui.get(&sid))
+        {
+            Some(&on) => on,
+            None => pane.shelld_session_id().is_some_and(|sid| {
+                self.pane_wheel_keys.contains_key(&sid)
+                    || self.pane_badges.get(&sid).is_some_and(|b| !b.is_empty())
+            }),
+        };
         // The same cwd the render pass resolved relative paths
         // against.  A hit-test with a different one underlines a span
         // and then clicks nothing.
@@ -8869,10 +8890,20 @@ impl CoreApp {
                 // a core swap — so it is the durable answer to "does
                 // an agent TUI paint this pane", where a badge that
                 // can momentarily read empty is not.
-                let agent_tui = p
+                // The plugin's own declaration when there is one; the
+                // old inference only as a fallback for an L1 that does
+                // not send it yet.
+                let agent_tui = match p
                     .shelld_session_id()
-                    .is_some_and(|sid| self.pane_wheel_keys.contains_key(&sid))
-                    || !badge.is_empty();
+                    .and_then(|sid| self.pane_agent_tui.get(&sid))
+                {
+                    Some(&on) => on,
+                    None => {
+                        p.shelld_session_id()
+                            .is_some_and(|sid| self.pane_wheel_keys.contains_key(&sid))
+                            || !badge.is_empty()
+                    }
+                };
                 let pane_cwd = p
                     .shelld_session_id()
                     .and_then(|sid| self.pane_cwds.get(&sid))
@@ -9620,6 +9651,7 @@ fn main() {
         renderer,
         pane_badges: std::collections::HashMap::new(),
         pane_wheel_keys: std::collections::HashMap::new(),
+        pane_agent_tui: std::collections::HashMap::new(),
         pane_wheel_enter_at: std::collections::HashMap::new(),
         pane_wheel_open: std::collections::HashMap::new(),
         pane_titles: std::collections::HashMap::new(),
@@ -10265,6 +10297,16 @@ fn main() {
                 }
                 CoreEvent::PaneHoldGrid(sid, on) => {
                     app.forward_pane_hold_grid(sid, on);
+                }
+                CoreEvent::PaneAgentTui(sid, on) => {
+                    // Re-issued every tick; only a change is worth a
+                    // repaint.
+                    if app.pane_agent_tui.get(&sid) != Some(&on) {
+                        app.pane_agent_tui.insert(sid, on);
+                        for w in app.windows.iter_mut() {
+                            w.needs_render = true;
+                        }
+                    }
                 }
                 CoreEvent::PaneRenderMarkup(sid, on) => {
                     app.forward_pane_render_markup(sid, on);

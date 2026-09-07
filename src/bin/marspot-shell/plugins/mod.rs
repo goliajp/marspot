@@ -339,6 +339,28 @@ pub trait PluginHost: Send + Sync {
         Ok(())
     }
 
+    /// Requires `SET_STATUS_LINE`.  Default no-op for test hosts.
+    /// Say that an agent TUI paints this pane.
+    ///
+    /// L2 needs to know because such a program renders to its own
+    /// fixed inner width and hard-wraps long tokens with a hanging
+    /// indent — the link scanner has to merge those rows or a wrapped
+    /// path stops being a link.
+    ///
+    /// Declared, not inferred, and re-issued every tick.  It used to
+    /// be read off two proxies — a wheel-key declaration or a
+    /// non-empty badge — and both are sent once or only when they
+    /// change, so a core swap left the new L2 with neither: on
+    /// 2026-09-07 a path broken at a hard wrap stopped being a link
+    /// while the three unwrapped ones beside it still were.
+    fn set_pane_agent_tui(
+        &self,
+        _shelld_session_id: u64,
+        _on: bool,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+
     fn set_pane_wheel_keys(
         &self,
         _shelld_session_id: u64,

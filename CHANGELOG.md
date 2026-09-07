@@ -28,7 +28,15 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.138**
+Current: **0.7.139**
+
+### 0.7.139
+
+Both agent plugins declare the pane they are driving, every tick.
+
+`set_pane_agent_tui` — see L2 0.12.186 for what it fixes.  Re-issued
+on the heartbeat rather than on change, because a declaration sent
+once never reaches a core that was swapped after it.
 
 ### 0.7.138
 
@@ -2954,7 +2962,36 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.185**
+Current: **0.12.186**
+
+### 0.12.186
+
+"An agent TUI paints this pane" is declared, not inferred.
+
+Reported as: three relative paths in one block became links and the
+fourth did not.  The fourth was the only one broken across two rows.
+
+Replayed from the pane's own bytelog, the answer is exact: with the
+pane's TUI flag on, the scanner merges the hard wrap and finds all
+five spans; with it off, it finds three and the wrapped one is missing.
+So the path logic was right and the flag was wrong.
+
+L2 inferred that flag from two proxies — a plugin's wheel-key
+declaration, or a non-empty badge.  Both are sent once, or only when
+they change.  A core swap starts the new L2 with empty maps, and after
+the 03:29 swap neither ever arrived again: codex's wheel keys were
+declared once at 02:01, and its badge (`gpt-6-astra medium`) had not
+changed since.  The pane silently lost its TUI-shaped link scanning.
+
+This is the same defect `<u>` had, and the same fix it got:
+`MsgType::PaneAgentTui`, re-issued every tick, so a swap costs one
+tick instead of lasting until something happens to change.  Naming it
+also removes the inference, whose own comment already admitted a badge
+"can momentarily read empty".
+
+The old inference stays as the fallback for a pane no declaration has
+arrived for, so an L2 running ahead of its L1 still behaves — the wire
+rule this repo learned the hard way.
 
 ### 0.12.185
 

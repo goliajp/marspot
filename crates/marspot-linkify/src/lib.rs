@@ -4117,6 +4117,71 @@ mod relative_path_tests {
         assert_eq!(m[0].kind, LinkKind::Email);
     }
 
+    /// Two rows, as a fixed-width TUI actually draws them.
+    struct Rows(Vec<String>, u16);
+    impl CellSource for Rows {
+        fn cols(&self) -> u16 {
+            self.1
+        }
+        fn rows(&self) -> u16 {
+            self.0.len() as u16
+        }
+        fn char_at(&self, col: u16, row: u16) -> char {
+            // Columns, not chars: a CJK glyph occupies two.
+            let mut c = 0u16;
+            for ch in self.0.get(row as usize).map(|s| s.chars()).into_iter().flatten() {
+                let w = if self.is_wide(ch) { 2 } else { 1 };
+                if col < c + w {
+                    return if col == c { ch } else { '\0' };
+                }
+                c += w;
+            }
+            ' '
+        }
+        fn is_soft_wrap_continuation(&self, _r: u16) -> bool {
+            false
+        }
+        fn cursor(&self) -> (u16, u16) {
+            (0, 0)
+        }
+        fn is_wide(&self, ch: char) -> bool {
+            matches!(ch as u32, 0x2E80..=0xA4CF | 0xAC00..=0xD7A3 | 0xFF00..=0xFF60)
+        }
+    }
+
+    #[test]
+    fn a_relative_path_broken_at_a_tui_hard_wrap_is_still_one_link() {
+        // The 2026-09-07 field report, at the geometry it actually
+        // happened in: a 73-column pane, the path running to column
+        // 69, and the remainder on the next row after four spaces.
+        // Three unwrapped paths in the same block were recognised and
+        // this one was not — because the pane's agent-TUI flag had
+        // been lost across a core swap, so the rows were never merged.
+        let rows = vec![
+            "  - 可交给 Claude 的纯实验请求 (.tmp/20260907-maintenance-experiment-".to_string(),
+            "    priorities.md)".to_string(),
+        ];
+        let exists: &'static [&'static str] =
+            &["/w/lab/.tmp/20260907-maintenance-experiment-priorities.md"];
+        let v = scan_visible_links_with(
+            &Rows(rows.clone(), 73),
+            ScanOpts { cwd: Some("/w/lab"), tui_mode: true },
+            &Fake(exists),
+        );
+        assert!(!v.is_empty(), "the wrapped path was not recognised");
+        assert_eq!(v[0].target.as_deref(), Some(exists[0]), "{v:?}");
+
+        // Without the TUI flag the rows are two lines and neither half
+        // names anything — which is correct, and is why the flag has
+        // to survive a core swap.
+        let off = scan_visible_links_with(
+            &Rows(rows, 73),
+            ScanOpts { cwd: Some("/w/lab"), tui_mode: false },
+            &Fake(exists),
+        );
+        assert!(off.is_empty(), "{off:?}");
+    }
+
     #[test]
     fn a_line_col_suffix_is_trimmed_the_same_way() {
         // rustc output: `src/main.rs:120:5`.
@@ -4130,3 +4195,4 @@ mod relative_path_tests {
         assert_eq!(v[0].target.as_deref(), Some("/w/p/src/main.rs"));
     }
 }
+
