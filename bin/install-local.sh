@@ -665,21 +665,45 @@ fi
 # said "SIGTERM'd 13 L3 pids" while every pane went on serving the
 # image it already had (2026-09-06).  A signal is a request; the
 # only honest report is what is running afterwards.
+# The pids that were running before the fanout, recorded so the check
+# afterwards can tell "adopted" from "gone".
+BEFORE_L3_PIDS=""
+snapshot_l3_pids() { BEFORE_L3_PIDS="$(pgrep -f marspot-session 2>/dev/null | sort | tr '\n' ' ')"; }
+
 verify_l3_adoption() {
-  local want stale=0 total=0 ino p
+  local want stale=0 total=0 gone=0 ino p
   want=$(stat -f %i "$TREE/current/marspot-session" 2>/dev/null) || return 0
   sleep 3
+  local now
+  now="$(pgrep -f marspot-session 2>/dev/null | sort | tr '\n' ' ')"
+  # A pane that DIED is not in `now` at all, so counting only what is
+  # still running answers "are the survivors up to date" and calls that
+  # success.  On 2026-09-07 that printed "all 8 panes are on this
+  # image" directly after five of them had been killed mid-execv.  The
+  # set that was there before the signal is the only honest denominator.
+  for p in $BEFORE_L3_PIDS; do
+    case " $now " in
+      *" $p "*) ;;
+      *) gone=$((gone+1)); echo "    LOST: pid $p did not come back" >&2 ;;
+    esac
+  done
   for p in $(pgrep -f "$TREE/current/marspot-session" 2>/dev/null); do
     total=$((total+1))
     ino=$(lsof -p "$p" -a -d txt -Fi 2>/dev/null | grep '^i' | tr -d 'i' | head -1)
     [ "$ino" = "$want" ] || stale=$((stale+1))
   done
+  if (( gone > 0 )); then
+    echo "    FAILED: $gone pane(s) died across the update; $total still running" >&2
+    echo "            (their content is in sessions/<id>/bytelog — see" >&2
+    echo "             examples/rebuild_scrollback_from_bytelog)" >&2
+    return 1
+  fi
   if (( stale > 0 )); then
     echo "    WARN: $stale/$total panes are still on the previous image" >&2
     echo "          (a pane whose probe is wedged retries on the next" >&2
     echo "           signal; see l3.execv.probe_stuck in the log)" >&2
   else
-    echo "    all $total panes are on this image"
+    echo "    all $total panes are on this image, none lost"
   fi
 }
 
@@ -703,6 +727,7 @@ if (( STAGED )) \
   # Same cold-inode warm-up as the silent-update path below.
   MARSPOT_NO_REDIRECT=1 "$TREE/current/marspot-session" --version >/dev/null 2>&1 \
     || echo "    WARN: current/marspot-session did not start; L3s will refuse it" >&2
+  snapshot_l3_pids
   signalled=0
   for pid in $(pgrep -f marspot-session 2>/dev/null); do
     if kill -TERM "$pid" 2>/dev/null; then
@@ -779,6 +804,7 @@ if (( STAGED )); then
   if (( SESSION_CHANGED )); then
     MARSPOT_NO_REDIRECT=1 "$TREE/current/marspot-session" --version >/dev/null 2>&1 \
       || echo "    WARN: current/marspot-session did not start; L3s will refuse it" >&2
+    snapshot_l3_pids
     signalled=0
     for pid in $(pgrep -f marspot-session 2>/dev/null); do
       kill -TERM "$pid" 2>/dev/null && signalled=$((signalled+1))
