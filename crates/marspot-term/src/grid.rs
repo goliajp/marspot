@@ -656,7 +656,23 @@ impl Grid {
 
     /// Continuation flag for scrollback line `idx` (same indexing as
     /// `scrollback_line`: 0 = oldest).
+    ///
+    /// The file-backed variant stores the flag beside the line, and
+    /// that copy is the one to believe: `sb_wrapped` only holds what
+    /// THIS process pushed, while the file holds everything the
+    /// session ever wrote.  An L3 that re-execs itself starts a fresh
+    /// mirror against a scrollback that is already thousands of lines
+    /// long, so every index lands past the mirror's end and every row
+    /// in the history answers "not a continuation".  Measured: the
+    /// same row of the same `scrollback.bin` reads `true` from the
+    /// process that wrote it and `false` from the one that reattached
+    /// — after which a soft-wrapped URL in history stops merging, its
+    /// first row keeps a truncated link and its second row has none
+    /// (2026-09-08 field report).
     pub fn scrollback_wrapped(&self, idx: usize) -> bool {
+        if self.scrollback.keeps_wrapped_flags() {
+            return self.scrollback.wrapped_at(idx);
+        }
         self.sb_wrapped.get(idx).copied().unwrap_or(false)
     }
 
@@ -1315,6 +1331,51 @@ mod region_scrollback_tests {
 
 #[cfg(test)]
 mod tests {
+
+    /// A soft-wrap flag has to survive the process that wrote it.
+    ///
+    /// `sb_wrapped` only holds what THIS process pushed; the file
+    /// holds everything the session ever wrote.  An L3 that re-execs
+    /// itself — which every silent update does — starts a fresh mirror
+    /// against a scrollback already thousands of lines long, so every
+    /// index lands past the mirror's end and all of history answers
+    /// "not a continuation".  The visible cost was a URL that wrapped
+    /// in history: its first row kept a truncated link and its second
+    /// row had none.
+    #[test]
+    fn a_wrapped_flag_in_the_file_survives_the_process_that_wrote_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-grid-wrapped-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let bin = dir.join("scrollback.bin");
+        let idx = dir.join("scrollback.idx");
+        let (cols, rows) = (8u16, 3u16);
+
+        let pushed = {
+            let sb = crate::scrollback::Scrollback::file(bin.clone(), idx.clone(), cols as usize, 8)
+                .expect("open");
+            let mut g = Grid::with_scrollback_kind(cols, rows, sb);
+            // Row 1 is a continuation of row 0; scroll both out.
+            g.set_row_wrapped(1, true);
+            g.scroll_up(3, Cell::default());
+            assert!(g.scrollback_wrapped(1), "the writer sees its own flag");
+            g.scrollback_len()
+        };
+
+        let sb = crate::scrollback::Scrollback::file(bin, idx, cols as usize, 8).expect("reopen");
+        let g = Grid::with_scrollback_kind(cols, rows, sb);
+        assert_eq!(g.scrollback_len(), pushed, "the file kept the lines");
+        assert!(
+            g.scrollback_wrapped(1),
+            "a process that reattached to the same scrollback must read the same flag",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]

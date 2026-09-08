@@ -198,8 +198,19 @@ impl Scrollback {
         }
     }
 
+    /// Does this variant store the wrapped flag beside the line?
+    ///
+    /// Only the File one does, and only it survives the process: a
+    /// caller that keeps its own mirror has to know whose copy to
+    /// believe after an L3 re-exec, when the file outlives the mirror
+    /// and the mirror comes back empty.
+    pub fn keeps_wrapped_flags(&self) -> bool {
+        matches!(self, Self::File(_))
+    }
+
     /// File variant only: per-line wrapped flag.  Memory returns
-    /// false (Grid's `sb_wrapped` is the truth there).
+    /// false (Grid's `sb_wrapped` is the truth there) — ask
+    /// [`Self::keeps_wrapped_flags`] before believing a `false`.
     pub fn wrapped_at(&self, idx: usize) -> bool {
         match self {
             Self::Memory(_) => false,

@@ -420,9 +420,6 @@ pub struct CodexPlugin {
     /// Last badge published per session, so an unchanged scan does not
     /// republish — a badge write invalidates the pane's render cache.
     last_badge: std::collections::HashMap<u64, String>,
-    /// Sessions we have already told L2 about, so an unchanged scan
-    /// does not re-send the same declaration every two seconds.
-    declared: std::collections::HashSet<u64>,
     rollouts: RolloutIndex,
     /// What each codex pane is running, for the badge menu.
     panes: std::collections::HashMap<u64, PaneCodex>,
@@ -433,7 +430,6 @@ impl CodexPlugin {
         Self {
             initialised: false,
             last_badge: std::collections::HashMap::new(),
-            declared: std::collections::HashSet::new(),
             rollouts: RolloutIndex::default(),
             panes: std::collections::HashMap::new(),
         }
@@ -683,9 +679,18 @@ impl Plugin for CodexPlugin {
                 // what it already did in claudecode — which is the
                 // experience this was asked to match.  Ctrl+T is still
                 // codex's own key for anyone who wants its transcript.
-                if self.declared.remove(&sid) {
-                    let _ = host.set_pane_wheel_keys(sid, b"", b"", b"", b"");
-                }
+                // Re-issued every tick, for the same reason the agent-TUI
+                // declaration above is: L2's state can outlive L1's.  A
+                // one-shot clear kept in `self.declared` only fires for a
+                // pane THIS L1 process declared for, so after an L1
+                // restart — a silent update, or the cold launch after a
+                // reboot — the set is empty, the clear is never sent, and
+                // the wheel keys L2 is still holding stay held.  The
+                // symptom is codex's Ctrl+T transcript opening on a wheel
+                // scroll again, months after that was removed (2026-09-08
+                // field report).  L2 drops a repeat clear silently, so the
+                // heartbeat costs one small frame per tick per codex pane.
+                let _ = host.set_pane_wheel_keys(sid, b"", b"", b"", b"");
                 if self.last_badge.get(&sid).map(String::as_str) != Some(text.as_str()) {
                     if host.set_pane_badge(sid, &text).is_ok() {
                         host.log(
@@ -698,12 +703,10 @@ impl Plugin for CodexPlugin {
                 }
             } else if self.last_badge.remove(&sid).is_some() {
                 let _ = host.set_pane_agent_tui(sid, false);
-                if self.declared.remove(&sid) {
-                    let _ = host.set_pane_wheel_keys(sid, b"", b"", b"", b"");
-                    // codex is gone; the pane is a shell again, and a
-                    // shell's `<u>` is somebody's text.
-                    let _ = host.set_pane_render_markup(sid, false);
-                }
+                let _ = host.set_pane_wheel_keys(sid, b"", b"", b"", b"");
+                // codex is gone; the pane is a shell again, and a
+                // shell's `<u>` is somebody's text.
+                let _ = host.set_pane_render_markup(sid, false);
                 // codex left this pane: clear the badge we set, and
                 // only the one we set — another plugin may own it now.
                 let _ = host.set_pane_badge(sid, "");

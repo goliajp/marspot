@@ -28,7 +28,26 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.140**
+Current: **0.7.141**
+
+### 0.7.141
+
+Clearing codex's wheel keys is a heartbeat, not a one-shot.
+
+Scrolling a codex pane opened its Ctrl+T transcript again, months
+after that was removed.  The removal works by TELLING L2 to forget the
+wheel keys — and that tell was guarded by a `declared` set, so it only
+ever fired for a pane this L1 process had itself declared for.  L2's
+state outlives L1: after a silent update, or the cold launch that
+follows a reboot, the set comes back empty, the clear is never sent,
+and the keys L2 is still holding stay held.
+
+Same shape as the agent-TUI declaration two lines above, which is
+re-issued every tick for exactly this reason — the wheel clear was
+left behind when that lesson was learned.  It is now sent on every
+tick too; L2 drops a repeat clear without a word, so the heartbeat
+costs one small frame per tick per codex pane.  The `declared` set had
+no other reader and is gone.
 
 ### 0.7.140
 
@@ -6083,7 +6102,34 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.84**
+Current: **0.11.85**
+
+### 0.11.85
+
+A soft-wrap flag has to outlive the process that wrote it.
+
+Reported: a URL that wrapped in history keeps a link on its first row
+and none on its second.  The wrap flag for a scrollback line was read
+out of `sb_wrapped`, a `VecDeque<bool>` mirror that only holds what
+THIS process pushed — while the index it is read with counts from the
+oldest line of the WHOLE scrollback, which for the file-backed variant
+includes everything the session ever wrote.  An L3 that re-execs
+itself, which every silent update makes it do, starts a fresh mirror
+against a scrollback already thousands of lines long: every index
+lands past the mirror's end and all of history answers "not a
+continuation".
+
+The flag was never lost — `push_line_with_wrapped` writes it beside
+the line and `Scrollback::wrapped_at` reads it back — that path was
+simply never called.  It is now, whenever the scrollback keeps flags
+of its own; the deque stays the truth only for the in-RAM variant,
+which does not store them.  Measured before and after on the same
+`scrollback.bin`: the row read `true` from the process that wrote it
+and `false` from the one that reattached, and now reads `true` from
+both.  Red-green checked.
+
+Everything downstream of the flag was wrong for that history, not just
+links: selection copy across a soft wrap, and resize reflow.
 
 ### 0.11.84
 
