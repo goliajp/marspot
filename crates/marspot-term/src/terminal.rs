@@ -368,6 +368,11 @@ struct SavedCursor {
     col: u16,
     row: u16,
     attrs: CellAttrs,
+    /// The DECAWM deferred wrap in force when the cursor was saved.
+    /// Restoring a cursor that sat in the last column has to restore
+    /// the wrap it had armed, or the glyph after the restore lands on
+    /// top of that column instead of on the next row.
+    pending_wrap: bool,
 }
 
 impl Terminal {
@@ -1491,6 +1496,12 @@ impl Terminal {
                 col,
                 row,
                 attrs: sc_attrs,
+                // Deliberately not on the wire.  The deferred wrap of a
+                // SAVED cursor is a transient bit that only matters
+                // between a DECSC and its DECRC; carrying it would cost
+                // a snapshot format bump, and every reader older than
+                // that bump would have to be taught to skip it.
+                pending_wrap: false,
             })
         } else {
             None
@@ -2947,10 +2958,16 @@ impl<'a> ParserCallbacks for Handler<'a> {
         if matches!(byte, 0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0D) {
             trace_seq("C0", &[], &[], byte);
         }
-        // Any C0 control cancels DECAWM deferred wrap without advancing.
-        *self.pending_wrap = false;
+        // The deferred wrap is cancelled per control, not by all of
+        // them.  Blanket-clearing here is the same defect the CSI
+        // dispatch had (see `csi_dispatch`): a control that does not
+        // move the cursor has no business dropping a wrap the last
+        // printed glyph armed.  ghostty clears in `carriageReturn`,
+        // `index` and (via `cursorLeft`) `backspace`, and nowhere else
+        // — `horizontalTab` notably keeps it.
         match byte {
             0x08 => {
+                *self.pending_wrap = false;
                 // BS: cursor left one column, clamped at column 0.  Does
                 // not erase the cell.
                 let (col, row) = self.grid.cursor();
@@ -2959,6 +2976,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 }
             }
             0x0A | 0x0B | 0x0C => {
+                *self.pending_wrap = false;
                 // LF / VT / FF: cursor down one row, scrolling at the
                 // bottom of the scroll region.  Does not change column
                 // (LNM mode unset).
@@ -2977,6 +2995,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // xterm-style: cursor caps, no scroll.
             }
             0x0D => {
+                *self.pending_wrap = false;
                 // CR: cursor to column 0 of current row.
                 let (_col, row) = self.grid.cursor();
                 self.grid.set_cursor(0, row);
@@ -2990,16 +3009,17 @@ impl<'a> ParserCallbacks for Handler<'a> {
     fn esc_dispatch(&mut self, intermediates: &[u8], byte: u8) {
         self.flush_u_buf();
         self.flush_cluster_for_break();
-        trace_seq("ESC", intermediates, &[], byte);
-        *self.pending_wrap = false;
+        // No blanket clear of the deferred wrap here: an escape that
+        // does not move the cursor must not drop it (see `csi_dispatch`).
         match byte {
-            // DECSC — save cursor (position + SGR attrs).
+            // DECSC — save cursor (position + SGR attrs + deferred wrap).
             b'7' => {
                 let (col, row) = self.grid.cursor();
                 *self.saved_cursor = Some(SavedCursor {
                     col,
                     row,
                     attrs: *self.attrs,
+                    pending_wrap: *self.pending_wrap,
                 });
             }
             // DECRC — restore cursor. xterm-style no-op when no save exists.
@@ -3007,6 +3027,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 if let Some(s) = *self.saved_cursor {
                     self.grid.set_cursor(s.col, s.row);
                     *self.attrs = s.attrs;
+                    *self.pending_wrap = s.pending_wrap;
                 }
             }
             // DECKPAM (=) / DECKPNM (>) — application / normal keypad
@@ -3040,7 +3061,22 @@ impl<'a> ParserCallbacks for Handler<'a> {
             intermediates_len = intermediates.len(),
             param0 = params.first().copied().unwrap_or(0)
         );
-        *self.pending_wrap = false;
+        // The DECAWM deferred wrap is cancelled per OPERATION, not by
+        // every CSI that goes past.  Clearing it here meant an SGR
+        // between the glyph that filled the last column and the next
+        // glyph dropped the wrap, and that next glyph then overwrote
+        // the last column instead of starting the next row — so a
+        // coloured shell prompt wider than the pane lost its tail and
+        // the cursor stuck at the right edge (2026-09-08 field report:
+        // an oh-my-zsh prompt with a long branch name, `) ✗ ` gone).
+        //
+        // ghostty (references/ghostty, `src/terminal/Terminal.zig`)
+        // clears in exactly these: print-that-wraps, carriageReturn,
+        // cursorUp/Down/Right/Left, setCursorPos, index, restoreCursor,
+        // insertLines, deleteLines, insertBlanks, eraseLine,
+        // eraseDisplay — and explicitly PRESERVES it across scrollUp /
+        // scrollDown, horizontalTab, deleteChars and eraseChars.  SGR,
+        // mode set/reset, device queries and OSC never touch it.
         if intermediates == b"?" {
             // DEC private mode set/reset.  Each param is a separate mode.
             match byte {
@@ -3108,28 +3144,33 @@ impl<'a> ParserCallbacks for Handler<'a> {
         let rows = self.grid.rows();
         match byte {
             b'A' => {
+                *self.pending_wrap = false;
                 // CUU: cursor up by N (default 1).
                 let n = param(params, 0, 1);
                 self.grid.set_cursor(col, row.saturating_sub(n));
             }
             b'B' => {
+                *self.pending_wrap = false;
                 // CUD: cursor down by N.  set_cursor clamps at rows-1.
                 let n = param(params, 0, 1);
                 self.grid
                     .set_cursor(col, row.saturating_add(n).min(rows - 1));
             }
             b'C' => {
+                *self.pending_wrap = false;
                 // CUF: cursor forward (right).
                 let n = param(params, 0, 1);
                 self.grid
                     .set_cursor(col.saturating_add(n).min(cols - 1), row);
             }
             b'E' => {
+                *self.pending_wrap = false;
                 // CNL: cursor next line — down N, column 0.
                 let n = param(params, 0, 1);
                 self.grid.set_cursor(0, row.saturating_add(n).min(rows - 1));
             }
             b'F' => {
+                *self.pending_wrap = false;
                 // CPL: cursor previous line — up N, column 0.  Homebrew's
                 // concurrent-download display redraws itself with
                 // `\033[{n}F` (Tty.move_cursor_up_beginning); with this
@@ -3140,27 +3181,32 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 self.grid.set_cursor(0, row.saturating_sub(n));
             }
             b'D' => {
+                *self.pending_wrap = false;
                 // CUB: cursor back (left).
                 let n = param(params, 0, 1);
                 self.grid.set_cursor(col.saturating_sub(n), row);
             }
             b'H' | b'f' => {
+                *self.pending_wrap = false;
                 // CUP / HVP: cursor position (1-indexed row;col → 0-indexed).
                 let r = param(params, 0, 1).saturating_sub(1);
                 let c = param(params, 1, 1).saturating_sub(1);
                 self.grid.set_cursor(c, r);
             }
             b'G' => {
+                *self.pending_wrap = false;
                 // HPA: horizontal position absolute (1-indexed).
                 let c = param(params, 0, 1).saturating_sub(1);
                 self.grid.set_cursor(c, row);
             }
             b'd' => {
+                *self.pending_wrap = false;
                 // VPA: vertical position absolute (1-indexed).
                 let r = param(params, 0, 1).saturating_sub(1);
                 self.grid.set_cursor(col, r);
             }
             b'J' => {
+                *self.pending_wrap = false;
                 // ED: erase in display.  Cursor is not moved.
                 // 0 (default) — from cursor (inclusive) to end of screen
                 // 1           — from start of screen to cursor (inclusive)
@@ -3191,6 +3237,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 }
             }
             b'K' => {
+                *self.pending_wrap = false;
                 // EL: erase in line.  Cursor not moved.
                 // 0 (default) — from cursor (inclusive) to end of line
                 // 1           — from start of line to cursor (inclusive)
@@ -3218,6 +3265,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                     col,
                     row,
                     attrs: *self.attrs,
+                    pending_wrap: *self.pending_wrap,
                 });
             }
             b'u' => {
@@ -3225,9 +3273,11 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 if let Some(s) = *self.saved_cursor {
                     self.grid.set_cursor(s.col, s.row);
                     *self.attrs = s.attrs;
+                    *self.pending_wrap = s.pending_wrap;
                 }
             }
             b'r' => {
+                *self.pending_wrap = false;
                 // DECSTBM: set top + bottom margins of the scroll region.
                 // Params are 1-indexed inclusive. Default is full grid.
                 // Cursor moves to (0, 0) (xterm behavior).
@@ -3249,6 +3299,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 self.grid.set_cursor(0, 0);
             }
             b'L' => {
+                *self.pending_wrap = false;
                 // IL: insert N blank lines at cursor row, within scroll
                 // region. Rows below shift down; rows past scroll_bot
                 // stay put. Cursor moves to col 0 of the same row.
@@ -3269,6 +3320,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 }
             }
             b'M' => {
+                *self.pending_wrap = false;
                 // DL: delete N lines at cursor row, within scroll
                 // region. Rows below shift up; rows past scroll_bot
                 // stay put. Cursor moves to col 0 of the same row.
@@ -3288,6 +3340,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 }
             }
             b'@' => {
+                *self.pending_wrap = false;
                 // ICH: insert N blank chars at cursor — shift cells
                 // [col..cols-n] right to [col+n..cols], blank [col..col+n].
                 let n = param(params, 0, 1).min(cols.saturating_sub(col));
@@ -6091,6 +6144,77 @@ mod tests {
             lines.pop();
         }
         lines.join("\n")
+    }
+
+    /// A coloured prompt wider than the pane used to lose its tail.
+    ///
+    /// Verbatim from session 387's bytelog: oh-my-zsh in a 73-column
+    /// pane, with a branch name long enough that `) ✗ ` falls past the
+    /// right edge.  The SGR between the glyph that filled the last
+    /// column and the next glyph cleared the deferred wrap, so `✗` and
+    /// the space after it overwrote column 72 and vanished, leaving the
+    /// cursor stuck at the edge with nowhere to type.
+    #[test]
+    fn an_sgr_does_not_drop_the_deferred_wrap() {
+        let t = term_with(
+            73,
+            6,
+            b"\x1b[01;31m\xe2\x9e\x9c  \x1b[36minsight\x1b[00m \x1b[01;34mgit:(\
+\x1b[31mfeature/QIP-90-asking-for-the-wall-clears-the-step-past\x1b[34m) \
+\x1b[33m\xe2\x9c\x97\x1b[00m ",
+        );
+        assert_eq!(
+            row_text(&t, 0),
+            "\u{279c}  insight git:(feature/QIP-90-asking-for-the-wall-clears-the-step-past)"
+        );
+        assert_eq!(row_text(&t, 1), "\u{2717}", "the tail wrapped instead of being lost");
+        assert_eq!(t.grid().cursor(), (2, 1));
+    }
+
+    /// The deferred wrap is cancelled per OPERATION, and the list is
+    /// ghostty's (`references/ghostty`, `src/terminal/Terminal.zig`):
+    /// cursor movement, the erases and the line/blank inserts clear it;
+    /// SGR, mode set/reset, device queries, OSC and save/restore keep
+    /// it.  Blanket-clearing on every CSI is what lost the prompt tail
+    /// above; blanket-KEEPING would wrap a glyph that a `CUP` had just
+    /// moved away from the edge.
+    #[test]
+    fn the_deferred_wrap_is_cancelled_per_operation() {
+        // Fills the row exactly, arming the wrap; then the sequence
+        // under test; then one more glyph.
+        let probe = |seq: &[u8]| -> bool {
+            let mut input = vec![b'x'; 20];
+            input.extend_from_slice(seq);
+            input.push(b'Z');
+            let t = term_with(20, 4, &input);
+            row_text(&t, 1).starts_with('Z')
+        };
+        for (name, seq) in [
+            ("SGR", &b"\x1b[31m"[..]),
+            ("SGR reset", b"\x1b[0m"),
+            ("DECSET 2004", b"\x1b[?2004h"),
+            ("DECRST 2004", b"\x1b[?2004l"),
+            ("DA", b"\x1b[c"),
+            ("OSC 133", b"\x1b]133;B\x07"),
+            ("DECSC + DECRC", b"\x1b7\x1b8"),
+            ("SU", b"\x1b[S"),
+            ("BEL", b"\x07"),
+        ] {
+            assert!(probe(seq), "{name} must not cancel the deferred wrap");
+        }
+        for (name, seq) in [
+            ("CR", &b"\r"[..]),
+            ("LF", b"\n"),
+            ("BS", b"\x08"),
+            ("CUF", b"\x1b[C"),
+            ("CUP", b"\x1b[1;1H"),
+            ("EL", b"\x1b[K"),
+            ("ED", b"\x1b[J"),
+            ("IL", b"\x1b[L"),
+            ("ICH", b"\x1b[@"),
+        ] {
+            assert!(!probe(seq), "{name} must cancel the deferred wrap");
+        }
     }
 
     #[test]

@@ -6028,7 +6028,39 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.82**
+Current: **0.11.83**
+
+### 0.11.83
+
+The DECAWM deferred wrap is cancelled per operation, not by every
+escape that goes past.
+
+A shell prompt wider than the pane lost its tail.  oh-my-zsh in a
+73-column pane with a long branch name emits
+`…step-past ESC[34m ) SP ESC[33m ✗ ESC[00m SP` — the `)` fills the last
+column and arms the deferred wrap, and the SGR that follows dropped it,
+so `✗` overwrote column 72 and the cursor stuck at the right edge with
+nowhere to type.  Reproduced verbatim from session 387's bytelog: with
+the escapes the tail is lost, with the same text and no escapes it
+wraps correctly.
+
+The cause was three blanket clears — one in the C0 handler, one in
+`esc_dispatch`, one at the top of `csi_dispatch` — each cancelling the
+wrap for every sequence that passed through.  ghostty
+(`references/ghostty`, `src/terminal/Terminal.zig`) clears it in
+exactly fourteen places: the print that wraps, `carriageReturn`,
+`cursorUp/Down/Right/Left`, `setCursorPos`, `index`, `restoreCursor`,
+`insertLines`, `deleteLines`, `insertBlanks`, `eraseLine`,
+`eraseDisplay` — and explicitly PRESERVES it across `scrollUp` /
+`scrollDown`, `horizontalTab`, `deleteChars` and `eraseChars`.  Marspot
+now clears in the same places and nowhere else, so SGR, mode set/reset,
+device queries and OSC leave it alone.
+
+`DECSC`/`DECRC` (and their SCO `CSI s` / `CSI u` twins) now carry the
+flag through the save, as ghostty's do.  It is deliberately NOT added
+to the snapshot wire format: a transient bit that only matters between
+a save and its restore is not worth a format bump every older reader
+would have to learn to skip.
 
 ### 0.11.82
 
