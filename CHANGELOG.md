@@ -3039,7 +3039,32 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.193**
+Current: **0.12.194**
+
+### 0.12.194
+
+A wheel tick during a drag no longer throws the selection away.
+
+On a mouse-tracking pane the tick is injected into the app, which
+repaints in place; the selection being drawn then covers different
+bytes, so it is cleared — taking the half-finished drag with it.  On a
+trackpad that tick is usually an accident of the very gesture doing
+the dragging.
+
+While the button is down the tick is now swallowed: the picture does
+not move, so the selection stays valid and the drag survives.  Letting
+go and then scrolling still scrolls and still clears — that is a
+deliberate scroll, and a selection cannot follow an app-driven
+repaint.
+
+This does not make cross-screen selection work in claudecode, and
+nothing at this layer can.  Measured on the live panes: claudecode
+sets mouse tracking (1000/1002/1003/1006, 93 times in one session) and
+is sitting in the alternate screen, where there is no scrollback by
+contract — so there is no history for a selection to extend into.
+codex sets no mouse tracking at all and scrolls through a top-anchored
+region, which feeds marspot's own scrollback; that is the whole reason
+one works and the other does not.
 
 ### 0.12.193
 

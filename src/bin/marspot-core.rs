@@ -8610,6 +8610,26 @@ impl CoreApp {
         }
         let tui_scroll = win!(self, wi).panes[idx].session().is_l3()
             && win!(self, wi).panes[idx].session().l3_mouse_tracking_active();
+        // A wheel tick DURING a drag is not a scroll request.
+        //
+        // On a mouse-tracking pane the tick is injected into the app,
+        // which repaints in place; the selection the user is still
+        // drawing then covers different bytes, so it is thrown away —
+        // and the drag they were halfway through goes with it.  On a
+        // trackpad that tick is usually an accident of the same
+        // gesture that is doing the dragging.
+        //
+        // While the button is down, swallow it.  The picture does not
+        // move, so the selection stays valid and the drag survives.
+        // Letting go and then scrolling still scrolls, and still
+        // clears: that is a deliberate scroll, and a selection cannot
+        // follow an app-driven repaint.
+        if tui_scroll
+            && win!(self, wi).selection_dragging
+            && win!(self, wi).selection.is_some_and(|s| s.session_idx == idx)
+        {
+            return;
+        }
         if win!(self, wi).panes[idx].apply_scroll_lines(lines) {
             if tui_scroll {
                 if let Some(sel) = win!(self, wi).selection {
