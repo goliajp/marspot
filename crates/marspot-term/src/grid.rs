@@ -791,12 +791,6 @@ impl Grid {
         let region_h = bot - top + 1;
         let lines = lines.min(region_h);
         let cols = self.cols as usize;
-        // Region scrolls are TUI-internal row shuffles — continuation
-        // flags stop being meaningful for the affected band.
-        for r in top..=bot {
-            let pr = self.phys_row(r);
-            self.wrapped[pr] = false;
-        }
         // See the doc comment: a region anchored at row 0 scrolls
         // content off the top of the SCREEN, not merely off the top of
         // a band inside it.
@@ -823,8 +817,38 @@ impl Grid {
                 let row_data: Vec<Cell> = self.cells[src_start..src_start + cols].to_vec();
                 self.cells[dst_start..dst_start + cols].copy_from_slice(&row_data);
             }
+            // Continuation flags travel with their rows.
+            //
+            // They used to be wiped across the whole band before the
+            // shift, on the reading that a region scroll is a
+            // TUI-internal shuffle where they stop meaning anything.
+            // That was written when a region scroll fed no scrollback.
+            // Once `feeds_scrollback` arrived, the wipe was running
+            // BEFORE the push — so every line a top-anchored region
+            // scrolled into history was recorded as "not a
+            // continuation", which is all of a codex pane's history.
+            // Measured on a live `scrollback.bin`: 1024 lines, zero
+            // flags.  A URL that wrapped up there then had a link on
+            // its first row and none on its second (2026-09-08 field
+            // report).
+            for r in top..bot {
+                let src = self.phys_row(r + 1);
+                let dst = self.phys_row(r);
+                self.wrapped[dst] = self.wrapped[src];
+            }
+            // The row that arrives at the region's top keeps its flag
+            // only when the row it continued went to scrollback — then
+            // the line above it is still there, one place further
+            // back.  In a band below row 0 that predecessor is simply
+            // discarded and the row above becomes an unrelated one
+            // outside the region, so the flag would be a lie.
+            if top > 0 {
+                let top_phys = self.phys_row(top);
+                self.wrapped[top_phys] = false;
+            }
             // Blank the new bottom-of-region row.
             let bot_phys = self.phys_row(bot);
+            self.wrapped[bot_phys] = false;
             for c in &mut self.cells[bot_phys * cols..bot_phys * cols + cols] {
                 *c = fill;
             }
@@ -1272,6 +1296,63 @@ impl Grid {
 #[cfg(test)]
 mod region_scrollback_tests {
     use super::*;
+
+    /// A soft-wrap flag has to survive the scroll that files the row.
+    ///
+    /// The band's flags were wiped before the push, so every line a
+    /// top-anchored region scrolled into history was recorded as "not
+    /// a continuation" — all of a codex pane's history, measured at
+    /// 1024 lines and zero flags on a live `scrollback.bin`.
+    #[test]
+    fn a_region_scroll_files_the_continuation_flag_it_was_given() {
+        let mut g = Grid::new(20, 6);
+        // Row 1 continues row 0; row 3 continues row 2.
+        g.set_row_wrapped(1, true);
+        g.set_row_wrapped(3, true);
+        // codex's shape: a region anchored at row 0 with the bottom
+        // rows reserved.  Scroll four rows out of it.
+        g.scroll_up_region(0, 4, 4, Cell::default());
+        assert_eq!(g.scrollback_len(), 4);
+        let flags: Vec<bool> = (0..4).map(|i| g.scrollback_wrapped(i)).collect();
+        assert_eq!(
+            flags,
+            [false, true, false, true],
+            "each filed line keeps the flag its row carried",
+        );
+    }
+
+    /// The row that arrives at the top of the band keeps its flag only
+    /// when the row it continued went to scrollback.  In a band below
+    /// row 0 that predecessor is discarded, so the flag would claim a
+    /// continuation of whatever unrelated row sits above the region.
+    #[test]
+    fn a_band_below_row_zero_drops_the_flag_at_its_top() {
+        let mut g = Grid::new(20, 6);
+        g.set_row_wrapped(3, true);
+        g.scroll_up_region(2, 5, 1, Cell::default());
+        assert_eq!(g.scrollback_len(), 0, "a band below row 0 files nothing");
+        assert!(
+            !g.row_wrapped(2),
+            "the row that moved up to the band's top continued a row that is gone",
+        );
+
+        // ...but the same shift one row further down keeps it: its
+        // predecessor is still inside the band, one row above.
+        let mut g = Grid::new(20, 6);
+        g.set_row_wrapped(4, true);
+        g.scroll_up_region(2, 5, 1, Cell::default());
+        assert!(g.row_wrapped(3), "the flag travelled with its row");
+    }
+
+    /// The row blanked at the bottom of the band is new content, not a
+    /// continuation of anything.
+    #[test]
+    fn the_blanked_bottom_row_is_not_a_continuation() {
+        let mut g = Grid::new(20, 6);
+        g.set_row_wrapped(5, true);
+        g.scroll_up_region(0, 5, 1, Cell::default());
+        assert!(!g.row_wrapped(5), "the blank row carries no flag");
+    }
 
     /// The shape a TUI uses to reserve its input box: a region
     /// anchored at row 0 with rows held back at the bottom.

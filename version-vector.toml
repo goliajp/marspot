@@ -29,4 +29,4 @@
 
 shell   = "0.7.142"  # 滚轮键声明只在变化时记日志，心跳不是新闻；详见 CHANGELOG.md
 core    = "0.12.192"  # 右键落空但那行画着链接时留一条 core.link_hit_miss；详见 CHANGELOG.md
-session = "0.11.85"  # 软换行标记改从 scrollback 文件读，L3 重启后历史不再整片失效；详见 CHANGELOG.md
+session = "0.11.86"  # 区域滚动不再在归档前抹掉软换行标记 —— 历史里折行的链接终于成立；详见 CHANGELOG.md

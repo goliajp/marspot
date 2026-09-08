@@ -6113,7 +6113,34 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.85**
+Current: **0.11.86**
+
+### 0.11.86
+
+A region scroll no longer wipes the flag it is about to file.
+
+0.11.85 made the reader take the flag from the file instead of a
+per-process mirror, which was necessary and not sufficient: measured
+on a live `scrollback.bin` right after it shipped — **1024 lines, zero
+flags**.  Nothing had ever written one.
+
+`scroll_up_region` cleared the continuation flags across the whole
+band before doing anything else, on the reading that a region scroll
+is a TUI-internal shuffle where they stop meaning anything.  That was
+true when a region scroll fed no scrollback.  When `feeds_scrollback`
+arrived — a region anchored at row 0 IS content leaving the screen,
+which is how codex reserves its input box — the wipe kept running, now
+one step ahead of the push.  Every line a codex pane ever filed was
+recorded as "not a continuation".
+
+Flags now travel with their rows.  The row arriving at the band's top
+keeps its flag only when the row it continued went to scrollback (a
+band below row 0 discards that predecessor, so the flag would claim a
+continuation of an unrelated row above the region), and the blanked
+bottom row carries none.
+
+Both halves were needed: the writer had to record it and the reader
+had to look at what was recorded.  Neither alone moves a single link.
 
 ### 0.11.85
 
