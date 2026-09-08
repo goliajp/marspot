@@ -4564,6 +4564,18 @@ impl CoreApp {
         // gets a link-specific menu (Open / Copy) instead of the
         // generic pane menu.  Email is recognised but inert.
         let link = self.hit_test_link_at_xy(wi, x_phys, y_phys);
+        if link.is_none() {
+            // The same trap `core.badge_hit_miss` sets one screen up:
+            // a link you can SEE and cannot click means the hit-test
+            // and the render pass disagreed, and until now the only
+            // symptom was a generic menu where a link menu belonged.
+            // Says where the click landed, what the hit-test scanned,
+            // and what it found on that row — enough to tell a column
+            // mismatch from a scan that saw nothing at all.
+            if let Some(r) = self.link_miss_report(wi, x_phys, y_phys) {
+                lx_info!("core.link_hit_miss", &r);
+            }
+        }
         let region = self.resolve_context_region(wi, x_phys, y_phys);
         let items = match &link {
             Some(l) => self.build_link_menu_items(l),
@@ -6704,6 +6716,54 @@ impl CoreApp {
         links.into_iter().find(|link| {
             link.row == row && col >= link.col_start && col <= link.col_end
         })
+    }
+
+    /// Why a right-click that landed on painted link text produced no
+    /// link menu — or `None` when the click was not on a pane cell.
+    ///
+    /// The scan the renderer runs and the one the hit-test runs take
+    /// the same grid, the same view offset, the same options and the
+    /// same oracle, and nothing checks that they agree.  When they
+    /// drift the user sees an underline that does nothing.
+    fn link_miss_report(&self, wi: usize, x_phys: f64, y_phys: f64) -> Option<String> {
+        let (cw, ch) = self.renderer.cell_dims();
+        let (idx, col, row) = win!(self, wi).layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)?;
+        let pane = win!(self, wi).panes.get(idx)?;
+        let view_offset = pane.view_offset();
+        let sid = pane.shelld_session_id();
+        let declared = sid.and_then(|s| self.pane_agent_tui.get(&s)).copied();
+        let links = {
+            let grid = pane.session().grid();
+            let cc_mode = match declared {
+                Some(on) => on,
+                None => sid.is_some_and(|s| {
+                    self.pane_wheel_keys.contains_key(&s)
+                        || self.pane_badges.get(&s).is_some_and(|b| !b.is_empty())
+                }),
+            };
+            let cwd = sid
+                .and_then(|s| self.pane_cwds.get(&s))
+                .map(String::as_str)
+                .filter(|c| !c.is_empty());
+            marspot::grid_links::scan_visible_links_with(
+                grid,
+                view_offset,
+                marspot::grid_links::ScanOpts { cc_mode, cwd },
+                marspot::link_probe::oracle(),
+            )
+        };
+        let on_row: Vec<String> = links
+            .iter()
+            .filter(|l| l.row == row)
+            .map(|l| format!("{}..{}:{:?}", l.col_start, l.col_end, l.text))
+            .collect();
+        Some(format!(
+            "pane={idx} click=({col},{row}) view_offset={view_offset} \
+             declared={declared:?} links_total={} on_this_row={}{}",
+            links.len(),
+            on_row.len(),
+            if on_row.is_empty() { String::new() } else { format!(" {on_row:?}") }
+        ))
     }
 
     /// Top-level link hit-test from physical pixel coordinates.

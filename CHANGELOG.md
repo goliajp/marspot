@@ -3009,7 +3009,37 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.191**
+Current: **0.12.192**
+
+### 0.12.192
+
+`core.link_hit_miss` — why a link you can see did not open.
+
+Reported: in scrolled-back history every link keeps the style that says
+"this is a link" and neither Open nor Copy does anything.  The scan the
+renderer runs and the one the hit-test runs take the same grid, the
+same view offset, the same options and the same oracle — and nothing
+checked that they agree.  This is the same trap `core.badge_hit_miss`
+already sets one screen up, for the same class of defect: something you
+can see and cannot click.
+
+A right-click that finds no link now logs where the click landed, the
+pane's view offset, whether the agent-TUI declaration was present, and
+every link the hit-test's own scan did find on that row.  That
+separates a column mismatch from a scan that saw nothing at all, which
+is the fork the next attempt needs and could not get from a screenshot.
+
+Two hypotheses were tested first and both are refuted, so they need not
+be tried again:
+
+- The composer exemption reading a stale caret.  `GridSource::cursor`
+  returns the LIVE cursor with no view-offset applied, so a scrolled
+  view could plausibly exempt a band of history.  Swept all 406 scroll
+  offsets of a real codex pane: agent mode never returned fewer links
+  than plain mode.  Not it.
+- A scan that cannot see scrollback.  `GridSource::char_at` goes
+  through `cell_at_view`, which reads the ring; the same sweep found
+  links at offsets deep in history.  Not it either.
 
 ### 0.12.191
 

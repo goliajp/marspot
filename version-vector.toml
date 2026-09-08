@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.140"  # codex badge 右键改为切账号 profile（CODEX_HOME），不再是 effort；详见 CHANGELOG.md
-core    = "0.12.191"  # agent TUI 声明的 msg_type 82 一直没进解码表，L2 把每一帧都丢了；详见 CHANGELOG.md
+core    = "0.12.192"  # 右键落空但那行画着链接时留一条 core.link_hit_miss；详见 CHANGELOG.md
 session = "0.11.84"  # 同步输出兜底放行半帧时留一条日志；详见 CHANGELOG.md
