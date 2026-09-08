@@ -402,6 +402,14 @@ impl Session {
         let split = if self.terminal.uses_sync_output() {
             Self::end_of_last_sync_update(&buf)
         } else {
+            // The flag is sticky and starts false, so a program's first
+            // batch is fed whole.  Checked with a temporary detector on
+            // 2026-09-08 across an L3 execv of 13 panes: not once did a
+            // batch containing a sync marker get fed uncut, so the
+            // window is not where a torn frame comes from.  The check
+            // itself was a per-byte scan of every batch on every pane
+            // that never synchronises — too expensive to leave in for
+            // a window it just showed to be empty.
             Some(buf.len())
         };
         let split = match split {
@@ -415,9 +423,24 @@ impl Session {
             None => {
                 let now = Instant::now();
                 let since = *self.partial_since.get_or_insert(now);
-                if now.duration_since(since) >= Self::PARTIAL_UPDATE_MAX_HOLD
+                let held = now.duration_since(since);
+                if held >= Self::PARTIAL_UPDATE_MAX_HOLD
                     || buf.len() >= Self::PARTIAL_UPDATE_MAX_BYTES
                 {
+                    // Publishing a frame the program has not finished
+                    // drawing is the one thing this cut exists to
+                    // avoid, so the times we do it anyway are worth a
+                    // line.  If this shows up in a bug report about a
+                    // half-painted pane, it IS the bug report.
+                    crate::lx_info!(
+                        "term.sync.partial_published",
+                        &format!(
+                            "held_ms={} bytes={} reason={}",
+                            held.as_millis(),
+                            buf.len(),
+                            if held >= Self::PARTIAL_UPDATE_MAX_HOLD { "hold" } else { "bytes" }
+                        )
+                    );
                     self.partial_since = None;
                     buf.len()
                 } else {

@@ -6053,7 +6053,44 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.83**
+Current: **0.11.84**
+
+### 0.11.84
+
+The synchronized-output escape hatch now says when it fires.
+
+A pane that draws inside DEC 2026 is only cut where the program said
+its screen was coherent — unless the update never closes, in which
+case a 150 ms hold expires and marspot shows what it has rather than
+freeze the pane.  Publishing a frame the program has not finished
+drawing is the one thing that cut exists to avoid, so the times it
+happens anyway are worth a line: `term.sync.partial_published` carries
+how long it held and how many bytes it was holding.
+
+Written while chasing a torn codex composer, and it did NOT catch it:
+over a minute of a codex pane drawing 131 KB / 30 s the hatch never
+fired.  What else was ruled out, so the next attempt starts further
+along:
+
+- Not the emulator.  Replaying that pane's whole 47 MB bytelog through
+  0.11.82 and 0.11.83 gives a byte-identical grid, and replaying it at
+  the pane's real 73x63 gives a clean screen — the transcript, the
+  `• Working (3h 20m …)` line and the `› Ask Codex` composer all
+  coherent.  (Replaying at a made-up 110x56 produces spectacular
+  corruption that looks exactly like the bug report.  It is an artifact
+  of the wrong width, and it is why the real dimensions get read out of
+  the registry first.)
+- Not the shm.  The grid is published under a seqlock; a reader that
+  races the writer discards the read rather than rendering half of it.
+- Not the sticky `uses_sync_output` flag starting false after an L3
+  re-exec.  A temporary detector across an execv of 13 panes never once
+  saw a batch with a sync marker fed uncut.  It was removed again: the
+  check is a per-byte scan of every batch on every pane that never
+  synchronises, which is too much to carry for a window it just showed
+  to be empty.
+
+So the cause is still open, and it is timing-shaped.  The log line is
+the trap left set for it.
 
 ### 0.11.83
 
