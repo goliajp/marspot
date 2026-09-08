@@ -2753,6 +2753,35 @@ impl<'a> Handler<'a> {
         }
     }
 
+    /// IND — cursor down one row, scrolling the region up when it is
+    /// already at the bottom margin.  `LF` is this with no carriage
+    /// return, and `NEL` is this with one, so all three share it.
+    fn index(&mut self) {
+        let (col, row) = self.grid.cursor();
+        let rows = self.grid.rows();
+        let bot = *self.scroll_bot;
+        if row == bot {
+            // At scroll-region bottom — scroll within region.
+            self.region_scroll_up(1);
+            // Cursor stays at the now-blank last row.
+        } else if row + 1 < rows {
+            self.grid.set_cursor(col, row + 1);
+        }
+        // If row+1 == rows but row != bot (cursor outside region),
+        // xterm-style: cursor caps, no scroll.
+    }
+
+    /// RI — cursor UP one row, scrolling the region DOWN when it is
+    /// already at the top margin.  The mirror of [`Self::index`].
+    fn reverse_index(&mut self) {
+        let (col, row) = self.grid.cursor();
+        if row == *self.scroll_top {
+            self.region_scroll_down(1);
+        } else if row > 0 {
+            self.grid.set_cursor(col, row - 1);
+        }
+    }
+
     fn region_scroll_down(&mut self, lines: u16) {
         let top = *self.scroll_top;
         let bot = *self.scroll_bot;
@@ -2977,22 +3006,8 @@ impl<'a> ParserCallbacks for Handler<'a> {
             }
             0x0A | 0x0B | 0x0C => {
                 *self.pending_wrap = false;
-                // LF / VT / FF: cursor down one row, scrolling at the
-                // bottom of the scroll region.  Does not change column
-                // (LNM mode unset).
-                let (col, row) = self.grid.cursor();
-                let rows = self.grid.rows();
-                let bot = *self.scroll_bot;
-                if row == bot {
-                    // At scroll-region bottom — scroll within region.
-                    self.region_scroll_up(1);
-                    // Cursor stays at the now-blank last row.
-                } else if row + 1 < rows {
-                    // Anywhere else: move cursor down.
-                    self.grid.set_cursor(col, row + 1);
-                }
-                // If row+1 == rows but row != bot (cursor outside region),
-                // xterm-style: cursor caps, no scroll.
+                // LF / VT / FF are IND with no carriage return.
+                self.index();
             }
             0x0D => {
                 *self.pending_wrap = false;
@@ -3029,6 +3044,34 @@ impl<'a> ParserCallbacks for Handler<'a> {
                     *self.attrs = s.attrs;
                     *self.pending_wrap = s.pending_wrap;
                 }
+            }
+            // IND (ESC D) — index.  NEL (ESC E) — index with a
+            // carriage return.  RI (ESC M) — reverse index.
+            //
+            // All three were falling through to the catch-all and being
+            // discarded, which is invisible until a program uses one to
+            // move its own screen.  codex does: it emits five `ESC M`
+            // to open room at the top of its scroll region, then paints
+            // everything below at absolute rows.  With the five ignored
+            // its layout sat five rows lower in marspot than in the
+            // program's own model, so its next partial repaint wrote
+            // the status line over a row that still held `tab to queue
+            // message` — the "`• Workingqu21e message`" report of
+            // 2026-09-08.  Cross-checked against tmux on the identical
+            // byte stream: same bytes, clean status row there.
+            b'D' => {
+                *self.pending_wrap = false;
+                self.index();
+            }
+            b'E' => {
+                *self.pending_wrap = false;
+                let (_, row) = self.grid.cursor();
+                self.grid.set_cursor(0, row);
+                self.index();
+            }
+            b'M' => {
+                *self.pending_wrap = false;
+                self.reverse_index();
             }
             // DECKPAM (=) / DECKPNM (>) — application / normal keypad
             // mode. Same input-encoding category as DECCKM; accept
@@ -6215,6 +6258,67 @@ mod tests {
         ] {
             assert!(!probe(seq), "{name} must cancel the deferred wrap");
         }
+    }
+
+    /// `ESC D` / `ESC E` / `ESC M` were falling through to the
+    /// catch-all, which is invisible until a program uses one to move
+    /// its own screen.  codex emits five `ESC M` to open room at the
+    /// top of its scroll region and then paints everything below at
+    /// absolute rows; with the five discarded its layout sat five rows
+    /// lower here than in its own model, and the next partial repaint
+    /// wrote the status line across a row that still held the old text
+    /// (`• Workingqu21e message`, 2026-09-08).
+    #[test]
+    fn reverse_index_scrolls_the_region_down_at_its_top() {
+        // Region is the whole screen; cursor at the top row.
+        let mut t = term_with(10, 4, b"a\r\nb\r\nc\r\nd\x1b[1;1H");
+        assert_eq!(row_text(&t, 0), "a");
+        t.feed(b"\x1bM");
+        assert_eq!(row_text(&t, 0), "", "a blank row is opened at the top");
+        assert_eq!(row_text(&t, 1), "a");
+        assert_eq!(row_text(&t, 2), "b");
+        assert_eq!(t.grid().cursor(), (0, 0), "the cursor stays at the top");
+    }
+
+    #[test]
+    fn reverse_index_below_the_top_just_moves_the_cursor() {
+        let mut t = term_with(10, 4, b"a\r\nb\r\nc\x1b[3;2H");
+        assert_eq!(t.grid().cursor(), (1, 2));
+        t.feed(b"\x1bM");
+        assert_eq!(t.grid().cursor(), (1, 1), "up one row, no scroll");
+        assert_eq!(row_text(&t, 0), "a", "nothing moved");
+    }
+
+    #[test]
+    fn index_matches_a_line_feed_and_next_line_adds_the_return() {
+        // IND at the bottom scrolls, exactly as LF does.
+        let mut a = term_with(10, 3, b"1\r\n2\r\n3");
+        let mut b = term_with(10, 3, b"1\r\n2\r\n3");
+        a.feed(b"\n");
+        b.feed(b"\x1bD");
+        assert_eq!(row_text(&a, 0), row_text(&b, 0));
+        assert_eq!(row_text(&a, 1), row_text(&b, 1));
+        assert_eq!(a.grid().cursor(), b.grid().cursor(), "IND is LF without the CR");
+
+        // NEL is IND plus the carriage return.
+        let mut c = term_with(10, 4, b"1\r\n2\x1b[2;5H");
+        assert_eq!(c.grid().cursor(), (4, 1));
+        c.feed(b"\x1bE");
+        assert_eq!(c.grid().cursor(), (0, 2), "column 0 of the next row");
+    }
+
+    /// The shape codex actually sends: a run of RIs against a region
+    /// that does not start at the screen top.
+    #[test]
+    fn reverse_index_respects_the_scroll_region() {
+        // Region rows 2..4 (1-based), cursor parked at its top.
+        let mut t = term_with(10, 5, b"a\r\nb\r\nc\r\nd\r\ne\x1b[2;4r\x1b[2;1H");
+        t.feed(b"\x1bM");
+        assert_eq!(row_text(&t, 0), "a", "the row above the region is untouched");
+        assert_eq!(row_text(&t, 1), "", "a blank opens at the region's top");
+        assert_eq!(row_text(&t, 2), "b");
+        assert_eq!(row_text(&t, 3), "c");
+        assert_eq!(row_text(&t, 4), "e", "the row below the region is untouched");
     }
 
     #[test]

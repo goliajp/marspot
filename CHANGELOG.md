@@ -6164,7 +6164,43 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.86**
+Current: **0.11.87**
+
+### 0.11.87
+
+`ESC D`, `ESC E` and `ESC M` were being discarded.
+
+IND, NEL and RI — three of the oldest sequences in the standard — fell
+through `esc_dispatch`'s catch-all and did nothing.  That is invisible
+until a program uses one to move its own screen, and codex does: it
+emits five `ESC M` to open room at the top of its scroll region, then
+paints everything below at absolute rows.  With the five ignored its
+layout sat five rows lower here than in its own model, so the next
+partial repaint wrote the status line across a row that still held the
+old text — `• Workingqu21e message`, the torn composer reported since
+2026-09-07.
+
+Found by replaying the pane's own bytelog frame by frame, cutting where
+L3 cuts (the last `CSI ? 2026 l` in each batch) and flagging any frame
+whose `Working` row carried something else.  16 of 366 frames were
+torn, including the exact string from the report.  Cross-checked
+against tmux on the identical byte stream: same bytes, clean status
+row there — so the divergence was ours, and the byte range between a
+clean frame and a torn one held five `ESC M`, matching the five-row
+displacement measured on screen.
+
+`LF` now goes through the same `index()` as IND, so a line feed and an
+index cannot drift apart, and RI is its mirror: cursor up, or scroll
+the region down when already at the top margin.  All three clear the
+deferred wrap, as the reference does.  Re-scanned after the fix: 0
+torn frames.
+
+Three earlier theories, all measured and all wrong, recorded so nobody
+re-runs them: the 150 ms synchronized-output escape hatch (never fired
+— `term.sync.partial_published` stayed at zero through the report),
+the shm publish (a seqlock; a raced read is discarded, not rendered),
+and the sticky `uses_sync_output` flag after an L3 re-exec (a detector
+across 13 panes never saw an uncut synchronized batch).
 
 ### 0.11.86
 
