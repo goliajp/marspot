@@ -3009,7 +3009,32 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.190**
+Current: **0.12.191**
+
+### 0.12.191
+
+The "this pane is an agent TUI" declaration never arrived.
+
+`MsgType::PaneAgentTui = 82` was added to the enum and never to
+`from_u32`.  A frame reader is required to skip an unknown message type
+silently — that is what makes the wire forward-compatible — so L1 sent
+the declaration every tick, for every agent pane, and L2 dropped every
+one of them without a word in any log.
+
+It stayed hidden because the consumer has a fallback: with no
+declaration, a pane counts as an agent TUI when it has wheel keys or a
+non-empty badge.  That is right most of the time, and wrong exactly
+when the badge is momentarily empty — which is when a link scan then
+runs without hard-wrap merging and a wrapped path loses its tail.  A
+temporary diagnostic in the render path made it visible in one line:
+every pane read `declared=None`, and `effective` was riding on the
+badge alone.
+
+Fixed by adding the arm, and by a test that reads BOTH the enum and
+`from_u32` out of the source file and asserts every discriminant
+decodes back to its own variant.  A hand-kept list of variants is the
+same kind of thing that drifted in the first place; this one cannot.
+Red-green checked: deleting the arm fails the test.
 
 ### 0.12.190
 

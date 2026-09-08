@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.140"  # codex badge 右键改为切账号 profile（CODEX_HOME），不再是 effort；详见 CHANGELOG.md
-core    = "0.12.190"  # claudecode ⎿ 块的 5 格悬挂缩进也算折行续行，路径链接不再断在目录上；详见 CHANGELOG.md
+core    = "0.12.191"  # agent TUI 声明的 msg_type 82 一直没进解码表，L2 把每一帧都丢了；详见 CHANGELOG.md
 session = "0.11.83"  # DECAWM 待换行改为逐操作取消，SGR 不再吃掉行尾；详见 CHANGELOG.md
