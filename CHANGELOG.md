@@ -3039,7 +3039,33 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.192**
+Current: **0.12.193**
+
+### 0.12.193
+
+A link went dead the moment it left the live rows.
+
+One wheel tick was enough: the text still painted as a link, and
+clicking it opened the pane's generic menu.  Not history, not old
+archived content — one row.
+
+The renderer and the hit-test scan the same grid with the same
+options and the same oracle, but they were passing different view
+offsets.  An L3 mirror is *already* the window L3 published at the
+requested scroll offset and holds no scrollback to offset into, so
+`Pane::view` renders it at 0 — while the hit-test asked for the pane's
+LOGICAL offset and scanned that mirror at it.  One tick, and the scan
+was reading a screen shifted a row off the one on display: link rows
+stopped matching the row the click landed on.  Every pane is L3 by
+default, so this was every pane.
+
+The rule now lives once, in `Pane::render_view_offset`, and both
+`Pane::view` and the hit-test ask it.
+
+Selection is deliberately NOT changed: it stores an absolute line
+number (`view_offset + rows - 1 - row`) and resolves the text against
+L3's real grid, which is why copying from scrolled-back content has
+worked the whole time while links did not.
 
 ### 0.12.192
 

@@ -6663,8 +6663,11 @@ impl CoreApp {
         col: u16,
         row: u16,
     ) -> Option<marspot::grid_links::LinkRange> {
+        let focused = win!(self, wi).focused_idx == idx;
         let pane = win!(self, wi).panes.get(idx)?;
-        let view_offset = pane.view_offset();
+        // The offset the RENDERER used, not the pane's logical one —
+        // see `Pane::render_view_offset`.
+        let view_offset = pane.render_view_offset(focused);
         let grid = pane.session().grid();
         // cc-mode: claudecode renders URLs / paths to a fixed inner
         // width and hard-newlines with a hanging indent.  Tell the
@@ -6728,8 +6731,9 @@ impl CoreApp {
     fn link_miss_report(&self, wi: usize, x_phys: f64, y_phys: f64) -> Option<String> {
         let (cw, ch) = self.renderer.cell_dims();
         let (idx, col, row) = win!(self, wi).layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)?;
+        let focused = win!(self, wi).focused_idx == idx;
         let pane = win!(self, wi).panes.get(idx)?;
-        let view_offset = pane.view_offset();
+        let view_offset = pane.render_view_offset(focused);
         let sid = pane.shelld_session_id();
         let declared = sid.and_then(|s| self.pane_agent_tui.get(&s)).copied();
         let links = {

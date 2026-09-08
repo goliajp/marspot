@@ -1716,6 +1716,31 @@ impl Pane {
         self.view_offset
     }
 
+    /// The offset the RENDERER draws this pane at.
+    ///
+    /// An L3 mirror is *already* the window L3 published at the
+    /// requested scroll offset, and holds no scrollback to offset
+    /// into, so it always renders at 0.  In-process panes offset into
+    /// their own grid: the focused pane shows its scrollback, others
+    /// stay live.
+    ///
+    /// Anything that maps a click back to what is on screen has to ask
+    /// this, not [`Self::view_offset`].  The link hit-test asked for
+    /// the logical offset and scanned an L3 mirror at it — a grid with
+    /// no scrollback — so one wheel tick was enough to make it scan a
+    /// different screen than the one being painted, and every link
+    /// went dead the moment it left the live rows (2026-09-08 field
+    /// report: "只要出了屏幕马上就不能 link 了").
+    pub fn render_view_offset(&self, focused: bool) -> u16 {
+        if self.session.is_l3() {
+            0
+        } else if focused {
+            self.view_offset
+        } else {
+            0
+        }
+    }
+
     /// A deferred silent update is staged for this (focused) pane — the
     /// renderer shows a refresh affordance; a click triggers the swap.
     pub fn update_pending(&self) -> bool {
@@ -1968,17 +1993,7 @@ impl Pane {
         agent_tui: bool,
         cwd: &'a str,
     ) -> SessionView<'a> {
-        // An L3 mirror is *already* the window L3 published at the requested
-        // scroll offset (and holds no scrollback to offset into), so it
-        // always renders at 0. In-process panes offset into their own grid:
-        // the focused pane shows its scrollback, others stay live.
-        let view_offset = if self.session.is_l3() {
-            0
-        } else if focused {
-            self.view_offset
-        } else {
-            0
-        };
+        let view_offset = self.render_view_offset(focused);
         let (top_fixed_h_cells, bot_fixed_h_cells) = self.tool_fixed_height_sums();
         let seq = self.grid_seq();
         let search_overlay = self.search.as_ref().map(|s| {
