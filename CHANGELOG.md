@@ -28,7 +28,18 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.141**
+Current: **0.7.142**
+
+### 0.7.142
+
+The wheel-key declaration is logged only on change.
+
+0.7.141 made the codex clear a per-tick heartbeat, which at INFO was
+36 lines a minute per codex pane — measured on the live log right
+after it shipped.  The agent-TUI declaration beside it already carries
+the rule and the comment ("the heartbeat is not news"); this one now
+follows it.  `PaneWheelKeysUpdate` derives `PartialEq` so "same as
+last time" is a comparison rather than a guess.
 
 ### 0.7.141
 

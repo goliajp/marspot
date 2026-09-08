@@ -2881,17 +2881,24 @@ impl ShellApp {
         while let Ok(upd) = self.pane_wheel_keys_rx.try_recv() {
             let sid = upd.shelld_session_id;
             let cleared = upd.up.is_empty() && upd.down.is_empty();
-            lx_info!(
-                "shell.pane_wheel_keys.declared",
-                &format!(
-                    "sid={sid} enter={:?} up={:?} down={:?} marker={:?} cleared={cleared}",
-                    upd.enter, upd.up, upd.down, upd.marker
-                )
-            );
-            if cleared {
-                self.pane_wheel_keys.remove(&sid);
+            // Logged only on CHANGE — the heartbeat is not news, the
+            // same rule the agent-TUI declaration above follows.  The
+            // codex plugin re-asserts its clear every tick (L2's state
+            // outlives L1's, so a one-shot clear is not enough), which
+            // at INFO was 36 lines a minute per codex pane.
+            let changed = if cleared {
+                self.pane_wheel_keys.remove(&sid).is_some()
             } else {
-                self.pane_wheel_keys.insert(sid, upd.clone());
+                self.pane_wheel_keys.insert(sid, upd.clone()).as_ref() != Some(&upd)
+            };
+            if changed {
+                lx_info!(
+                    "shell.pane_wheel_keys.declared",
+                    &format!(
+                        "sid={sid} enter={:?} up={:?} down={:?} marker={:?} cleared={cleared}",
+                        upd.enter, upd.up, upd.down, upd.marker
+                    )
+                );
             }
             self.send_pane_wheel_keys(&upd);
         }

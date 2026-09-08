@@ -32,7 +32,7 @@ pub struct PaneBadgeUpdate {
 /// Channel message for `PaneWheelKeys`.  A plugin declares how the
 /// wheel reaches the program it understands; empty `up`/`down` clears
 /// the declaration (the pane goes back to the terminal's own routing).
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct PaneWheelKeysUpdate {
     pub shelld_session_id: u64,
     pub enter: Vec<u8>,
