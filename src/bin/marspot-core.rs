@@ -3501,6 +3501,22 @@ struct WindowState {
     /// `selection` in `sync_selection_tape`, not to the fourteen
     /// places that clear a selection.
     selection_tape: Option<marspot::selection_tape::SelectionTape>,
+    /// While a tape is following a pane, the wheel is forwarded one
+    /// step at a time: the next step waits until the tape has read the
+    /// last one off a frame, or until this instant passes.
+    ///
+    /// Open-loop forwarding was the defect behind "稍微快一丁点就整个
+    /// 选择区都没有了": a momentum scroll delivers events far faster
+    /// than frames are folded, so several steps landed between two
+    /// folds and their combined distance left no overlap to align on.
+    /// Capping one event's distance could not fix that — the cap is
+    /// per event and the problem is per frame.
+    ///
+    /// The deadline is the backstop for a step that moves nothing (the
+    /// program is already at the end of its own history, so no frame
+    /// arrives to clear the gate) — without it the pane would stop
+    /// scrolling for good.
+    tape_scroll_gate: Option<std::time::Instant>,
     selection_dragging: bool,
     /// F3+3.0 — grid shape (cols × rows) is now an arbitrary
     /// pair rather than a 7-variant enum.  Cell total = cols×rows;
@@ -3641,6 +3657,7 @@ impl WindowState {
             selection: None,
             selection_dragging: false,
             selection_tape: None,
+            tape_scroll_gate: None,
             grid_cols,
             grid_rows,
             layout_modal_open: false,
@@ -8352,10 +8369,30 @@ impl CoreApp {
         // for the rate-limit rationale).
         let max_row = cell.rows.saturating_sub(1) as i64;
         let raw_row = ((y_phys - inner_y) / ch).floor() as i64;
-        if raw_row < 0 {
-            win!(self, wi).panes[target_idx].apply_scroll_lines(1);
-        } else if raw_row > max_row {
-            win!(self, wi).panes[target_idx].apply_scroll_lines(-1);
+        if raw_row < 0 || raw_row > max_row {
+            // Same one-step-at-a-time gate as the wheel: a drag past
+            // the edge delivers a mouse-moved event per frame of the
+            // user's hand, which on a taped pane is far faster than
+            // the tape folds — and steps that pile up between two
+            // folds are exactly what leaves nothing to align on.
+            let may_step = match win!(self, wi).selection_tape.as_ref() {
+                Some(t) if t.pane_idx() == target_idx && !t.broken => {
+                    let now = std::time::Instant::now();
+                    let open = win!(self, wi)
+                        .tape_scroll_gate
+                        .is_none_or(|until| now >= until);
+                    if open {
+                        win!(self, wi).tape_scroll_gate =
+                            Some(now + std::time::Duration::from_millis(120));
+                    }
+                    open
+                }
+                _ => true,
+            };
+            if may_step {
+                let up = raw_row < 0;
+                win!(self, wi).panes[target_idx].apply_scroll_lines(if up { 1 } else { -1 });
+            }
         }
 
         let dx = (x_phys - inner_x).max(0.0);
@@ -8711,21 +8748,41 @@ impl CoreApp {
             }
             return;
         }
-        // While a tape is following this pane, keep each step short
-        // enough that the next frame still overlaps the one before it.
-        // Measured on a live claudecode pane: a step of 16 rows leaves
-        // 39 of the 47 rows that could match doing so, and the tape
-        // reads it exactly; a flick of 40 rows in one frame leaves 9
-        // and nothing can be read from it.  The momentum stream keeps
-        // delivering events, so capping the step costs no reachable
-        // distance — only the size of the jump between two frames.
-        let lines = match win!(self, wi).selection_tape.as_ref() {
-            Some(t) if t.pane_idx() == idx && !t.broken => {
-                let rows = win!(self, wi).panes[idx].session().grid().rows() as i32;
-                let cap = (rows / 8).max(1);
-                lines.clamp(-cap, cap)
+        // While a tape is following this pane, the picture may only
+        // move as fast as the tape can read it.
+        //
+        // Two limits, and both are needed.  ONE STEP AT A TIME: the
+        // next tick waits for the tape to have read the last one off a
+        // frame (or for the gate's deadline, so a step that moves
+        // nothing cannot wedge the pane).  A momentum scroll delivers
+        // events far faster than frames are folded, and open-loop
+        // forwarding let several land between two folds — their
+        // combined distance left nothing to align on, which is what
+        // "稍微快一丁点就整个选择区都没有了" was.
+        //
+        // AND A SHORT STEP: measured on a live pane, a step of 16 rows
+        // leaves 39 of the 47 rows that could still match doing so and
+        // reads exactly; a jump of 40 rows leaves 9 and reads as
+        // nothing.  The momentum stream keeps coming, so a short step
+        // costs no reachable distance — only the size of the jump
+        // between two frames.
+        let taped_here = win!(self, wi)
+            .selection_tape
+            .as_ref()
+            .is_some_and(|t| t.pane_idx() == idx && !t.broken);
+        let lines = if taped_here {
+            let now = std::time::Instant::now();
+            match win!(self, wi).tape_scroll_gate {
+                Some(until) if now < until => return,
+                _ => {}
             }
-            _ => lines,
+            win!(self, wi).tape_scroll_gate =
+                Some(now + std::time::Duration::from_millis(120));
+            let rows = win!(self, wi).panes[idx].session().grid().rows() as i32;
+            let cap = (rows / 8).max(1);
+            lines.clamp(-cap, cap)
+        } else {
+            lines
         };
         if win!(self, wi).panes[idx].apply_scroll_lines(lines) {
             // The program just repainted at a new position.  A tape
@@ -8799,6 +8856,8 @@ impl CoreApp {
         }
         sel.anchor.1 = tape.abs(tape.anchor.1, grid_rows);
         sel.focus.1 = tape.abs(tape.focus.1, grid_rows);
+        // The step has been read; the next one may go.
+        w.tape_scroll_gate = None;
         w.needs_render = true;
     }
 

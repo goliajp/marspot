@@ -43,6 +43,16 @@ const MIN_ALIGN_DEN: usize = 2;
 /// Two matching rows out of three is a coincidence, not a scroll.
 const MIN_ALIGN_ROWS: usize = 4;
 
+/// Frames in a row that may fail to align before the tape gives up.
+///
+/// One unreadable frame is usually not a redraw: a program that does
+/// not bracket its repaints in synchronized output (`CSI ?2026h`) can
+/// have a half-painted screen published, and half a screen looks
+/// exactly like an unrelated one.  The frame after it is whole again
+/// and aligns against the last frame that WAS whole, so a miss keeps
+/// the reference rather than replacing it.
+const MAX_CONSECUTIVE_MISSES: u8 = 3;
+
 pub struct SelectionTape {
     pane_idx: usize,
     /// Virtual line number of screen row 0 in the newest frame.
@@ -60,6 +70,8 @@ pub struct SelectionTape {
     /// tape can no longer say where its lines went.  Folding stops;
     /// what was captured stays captured.
     pub broken: bool,
+    /// Frames in a row that did not align.  Reset by any that does.
+    misses: u8,
 }
 
 fn hash_row(s: &str) -> u64 {
@@ -125,6 +137,7 @@ impl SelectionTape {
             anchor: (anchor_col, anchor_row as i64),
             focus: (anchor_col, anchor_row as i64),
             broken: false,
+            misses: 0,
         };
         t.write_frame(rows);
         t
@@ -148,9 +161,16 @@ impl SelectionTape {
         }
         let blank = hash_row("");
         let Some(shift) = best_shift(&self.prev, &cur, blank) else {
-            self.broken = true;
+            // Keep the last frame that DID align as the reference: a
+            // half-painted frame must not become the thing the next
+            // one is measured against.
+            self.misses += 1;
+            if self.misses >= MAX_CONSECUTIVE_MISSES {
+                self.broken = true;
+            }
             return None;
         };
+        self.misses = 0;
         self.base += shift;
         self.prev = cur;
         self.write_frame(rows);
@@ -248,7 +268,18 @@ impl SelectionTape {
         while virt >= self.origin + self.lines.len() as i64 {
             self.lines.push_back(String::new());
         }
-        self.lines[(virt - self.origin) as usize] = text.to_string();
+        let slot = &mut self.lines[(virt - self.origin) as usize];
+        // A blank row never erases text the tape already holds.  A
+        // program without synchronized output can publish a frame it
+        // is halfway through painting, and its not-yet-painted rows
+        // arrive as blanks — which read as a zero shift (the painted
+        // half still lines up) and would otherwise punch holes in
+        // exactly the lines a copy is about to be taken from.  What
+        // the user saw is the thing worth keeping.
+        if text.is_empty() && !slot.is_empty() {
+            return;
+        }
+        *slot = text.to_string();
     }
 
     /// Bounded growth: drop from whichever end is further from the
@@ -317,9 +348,56 @@ mod tests {
         let mut t = SelectionTape::new(0, &f0, 0, 0);
         let unrelated: Vec<String> =
             (0..10).map(|i| format!("something else {i}")).collect();
-        assert_eq!(t.fold(&unrelated), None);
+        for _ in 0..MAX_CONSECUTIVE_MISSES {
+            assert_eq!(t.fold(&unrelated), None);
+        }
         assert!(t.broken);
         assert_eq!(t.fold(&frame(1, 10)), None, "and stays broken");
+    }
+
+    #[test]
+    fn one_unreadable_frame_is_ridden_out_against_the_last_good_one() {
+        let f0 = frame(0, 10);
+        let mut t = SelectionTape::new(0, &f0, 0, 3);
+        let anchored = t.anchor.1;
+        // A frame published mid-repaint with nothing recognisable in
+        // it at all.
+        let garbage: Vec<String> = (0..10).map(|i| format!("~{i}~")).collect();
+        assert_eq!(t.fold(&garbage), None);
+        assert!(!t.broken, "one bad frame is not a redraw");
+        // The next whole frame is measured against the last whole one,
+        // not against the half — so the shift is still right.
+        let mut shifted = vec!["older".to_string()];
+        shifted.extend(frame(0, 9));
+        assert_eq!(t.fold(&shifted), Some(-1));
+        assert_eq!(t.line(anchored).map(String::as_str), Some("line 3"));
+    }
+
+    #[test]
+    fn a_blank_screen_still_breaks_it_if_it_keeps_coming() {
+        let f0 = frame(0, 10);
+        let mut t = SelectionTape::new(0, &f0, 0, 0);
+        let blanks: Vec<String> = (0..10).map(|_| String::new()).collect();
+        for _ in 0..MAX_CONSECUTIVE_MISSES {
+            t.fold(&blanks);
+        }
+        assert!(t.broken);
+    }
+
+    #[test]
+    fn a_half_painted_frame_does_not_punch_holes_in_what_was_captured() {
+        let f0 = frame(0, 10);
+        let mut t = SelectionTape::new(0, &f0, 0, 0);
+        // The top half is painted, the bottom half has not been yet.
+        let half: Vec<String> = (0..10)
+            .map(|i| if i < 5 { format!("line {i}") } else { String::new() })
+            .collect();
+        assert_eq!(t.fold(&half), Some(0), "the painted half still lines up");
+        assert_eq!(
+            t.line(7).map(String::as_str),
+            Some("line 7"),
+            "and the rows it had not reached yet keep their text"
+        );
     }
 
     #[test]
@@ -335,8 +413,7 @@ mod tests {
         let f0 = frame(0, 10);
         let mut t = SelectionTape::new(0, &f0, 0, 0);
         let blanks: Vec<String> = (0..10).map(|_| String::new()).collect();
-        assert_eq!(t.fold(&blanks), None);
-        assert!(t.broken);
+        assert_eq!(t.fold(&blanks), None, "no shift is readable from it");
     }
 
     #[test]
