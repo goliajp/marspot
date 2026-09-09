@@ -25,6 +25,8 @@ fn main() {
         let (cols, rows) = (snap.cols as usize, snap.rows as usize);
         let mut run = 0usize;
         let mut best = (0usize, 0usize);
+        let mut top_blank = 0usize;
+        let mut seen_content = false;
         let mut lines: Vec<String> = Vec::with_capacity(rows);
         for r0 in 0..rows {
             let line: String = (0..cols)
@@ -33,20 +35,24 @@ fn main() {
             if line.trim().is_empty() {
                 run += 1;
                 if run > best.1 { best = (r0 + 1 - run, run); }
-            } else { run = 0; }
+                if !seen_content { top_blank = run; }
+            } else { run = 0; seen_content = true; }
             lines.push(line.trim_end().to_string());
         }
-        let interesting = !watch || best.1 >= 15;
+        // The reported shape: a black band ABOVE the content.  The
+        // startup / resume picker is the opposite (content on top,
+        // blank below) and would otherwise burn the catch budget.
+        let interesting = !watch || (top_blank >= 20 && seen_content);
         if interesting && r.seq() != last_seq {
             last_seq = r.seq();
             caught += 1;
             println!(
                 "--- session {id} {cols}x{rows} view_offset={} scrollback_len={} \
-                 longest_blank_run={} at r{}",
-                snap.view_offset, snap.scrollback_len, best.1, best.0
+                 top_blank={} longest_blank_run={} at r{}",
+                snap.view_offset, snap.scrollback_len, top_blank, best.1, best.0
             );
             for (i, l) in lines.iter().enumerate() { println!("r{i:>2}|{l}|"); }
-            if !watch || caught >= 3 { return; }
+            if !watch || caught >= 6 { return; }
         }
         if !watch { return; }
         std::thread::sleep(std::time::Duration::from_millis(120));
