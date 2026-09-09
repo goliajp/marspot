@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.142"  # 滚轮键声明只在变化时记日志，心跳不是新闻；详见 CHANGELOG.md
-core    = "0.12.195"  # 拖拽期间滚轮改滚自己的视图，选区起点不动、滚动只是追加；详见 CHANGELOG.md
+core    = "0.12.196"  # 滚轮遇到活选区时走了哪条路，日志一次一变化；详见 CHANGELOG.md
 session = "0.11.89"  # TUI 空内容区滚动不再往历史里灌整屏空白 —— 黑带的根因；详见 CHANGELOG.md

@@ -39,10 +39,17 @@ fn main() {
             } else { run = 0; seen_content = true; }
             lines.push(line.trim_end().to_string());
         }
-        // The reported shape: a black band ABOVE the content.  The
-        // startup / resume picker is the opposite (content on top,
-        // blank below) and would otherwise burn the catch budget.
-        let interesting = !watch || (top_blank >= 20 && seen_content);
+        // The reported shape: a black BAND with content below it —
+        // whether the band starts at the top of the pane or sits in
+        // the middle.  What that excludes is the startup screen and
+        // the resume picker, where the blanks run to the bottom with
+        // nothing under them; those burned an earlier catch budget.
+        let content_below_band = lines
+            .iter()
+            .skip(best.0 + best.1)
+            .any(|l| !l.trim().is_empty());
+        let interesting = !watch || (best.1 >= 20 && content_below_band);
+        let _ = top_blank;
         if interesting && r.seq() != last_seq {
             last_seq = r.seq();
             caught += 1;

@@ -795,6 +795,7 @@ mod window_state_tests {
             pane_agent_tui: std::collections::HashMap::new(),
             pane_wheel_enter_at: std::collections::HashMap::new(),
             pane_wheel_open: std::collections::HashMap::new(),
+            wheel_sel_path: None,
             pane_titles: std::collections::HashMap::new(),
             pane_cwds: std::collections::HashMap::new(),
             pending_to_shell: Vec::new(),
@@ -3739,6 +3740,13 @@ struct CoreApp {
     /// Last observed open/closed state per pane, so the log carries one
     /// line per transition instead of one per wheel event.
     pane_wheel_open: std::collections::HashMap<u64, bool>,
+    /// Dev-cycle only — which wheel path a pane with a live selection
+    /// took, logged once per change rather than once per tick (a
+    /// momentum scroll is hundreds of ticks).  Here because the report
+    /// "选择框不会变动，内容滚动就选了不同的文字" matches none of the
+    /// three paths as written: the drag path moves nothing on an
+    /// alt-screen pane and the release path drops the selection.
+    wheel_sel_path: Option<String>,
     /// Per-shelld-session plugin-set title, set via `MsgType::PaneTitle`.
     /// Inserts into the title resolution chain ABOVE cwd basename,
     /// BELOW user-set custom title.  Empty payload removes the entry.
@@ -8629,6 +8637,29 @@ impl CoreApp {
         // Outside a drag the wheel still belongs to the program: that
         // is how a TUI's own scrolling works, and it is what happens in
         // every other terminal.
+        // Dev-cycle only — one line per change of the situation, never
+        // per tick (a momentum scroll is hundreds).  The report
+        // "选择框不会变动，内容滚动就选了不同的文字" fits none of the
+        // three paths below as written: on an alt-screen pane the drag
+        // path moves nothing and swallows the tick, and the path after
+        // the drag drops the selection outright.  So the branch that
+        // really fires has to be read, not reasoned about.
+        if let Some(sel) = win!(self, wi).selection {
+            let here = format!(
+                "sel_pane={} wheel_pane={} dragging={} tui={} alt={} sb_len={} vo={}",
+                sel.session_idx,
+                idx,
+                win!(self, wi).selection_dragging,
+                tui_scroll,
+                win!(self, wi).panes[idx].session().l3_alt_screen_active(),
+                win!(self, wi).panes[idx].session().l3_scrollback_len(),
+                win!(self, wi).panes[idx].view_offset(),
+            );
+            if self.wheel_sel_path.as_deref() != Some(here.as_str()) {
+                lx_info!("core.wheel.selection", &here);
+                self.wheel_sel_path = Some(here);
+            }
+        }
         if win!(self, wi).selection_dragging
             && win!(self, wi).selection.is_some_and(|s| s.session_idx == idx)
         {
@@ -9794,6 +9825,7 @@ fn main() {
         pane_agent_tui: std::collections::HashMap::new(),
         pane_wheel_enter_at: std::collections::HashMap::new(),
         pane_wheel_open: std::collections::HashMap::new(),
+        wheel_sel_path: None,
         pane_titles: std::collections::HashMap::new(),
         pane_cwds: std::collections::HashMap::new(),
         pending_to_shell: Vec::new(),
