@@ -519,6 +519,9 @@ pub struct Grid {
     /// than the anon-mmap ring does.  Kept in lockstep with ring
     /// eviction by trimming to `scrollback.len()` after each push.
     sb_wrapped: std::collections::VecDeque<bool>,
+    /// Consecutive all-blank rows most recently filed into scrollback.
+    /// Read only by the region path — see [`MAX_FILED_BLANK_RUN`].
+    filed_blank_run: u16,
 }
 
 /// How many rows of chrome a TUI may reserve above its scrolling
@@ -529,6 +532,24 @@ pub struct Grid {
 /// Raising it further would start counting a band animated in the
 /// middle of a screen as history.
 const MAX_RESERVED_HEADER_ROWS: u16 = 1;
+
+/// How many consecutive all-blank rows a TUI's content area may file
+/// into history before the rest are dropped.
+///
+/// Three, taken from the data rather than picked: across two real
+/// codex sessions' scrollback the runs of blank lines are 1 row (214
+/// and 480 times), 2 rows (12 and 24), and 3 rows (once) — and then
+/// one run of **53**, a whole screen of nothing.  Anything up to three
+/// is the transcript's own spacing; a screenful is an empty region
+/// being scrolled past, which is what a pane shows as a black band
+/// with history on both sides of it (2026-09-09 field report).
+///
+/// This applies ONLY to the region path.  `scroll_up` — a shell or a
+/// full-screen program scrolling normally — still files every row: a
+/// blank line there is something the user made (Enter on an empty
+/// prompt, `echo ""`, a paragraph break), and dropping those was tried
+/// once and reverted (F3+12.1).
+const MAX_FILED_BLANK_RUN: u16 = 3;
 
 impl Grid {
     pub fn new(cols: u16, rows: u16) -> Self {
@@ -566,6 +587,7 @@ impl Grid {
             scroll_push_count: 0,
             wrapped: vec![false; rows as usize],
             sb_wrapped: std::collections::VecDeque::with_capacity(sb_capacity + 1),
+            filed_blank_run: 0,
         }
     }
 
@@ -743,6 +765,13 @@ impl Grid {
             // like claudecode is a known trade-off; user can wipe
             // scrollback when it gets unwieldy.  We won't make a
             // policy guess that can't be undone at read time.
+            // No blank scan here: this is the per-scrolled-line hot
+            // path (`cat` of a large file lands squarely on it), and a
+            // 73-cell sweep per line cost 22 % of scroll p99 and 45 %
+            // of scroll-cold when it was tried.  The run counter only
+            // gates the REGION path, so resetting it is enough — and
+            // erring toward "do not collapse" is the safe direction.
+            self.filed_blank_run = 0;
             self.scrollback
                 .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
             self.sb_wrapped.push_back(self.wrapped[pr]);
@@ -826,10 +855,21 @@ impl Grid {
             if feeds_scrollback {
                 let pr = self.phys_row(top);
                 let start = pr * cols;
-                self.scrollback
-                    .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
-                self.sb_wrapped.push_back(self.wrapped[pr]);
-                self.scroll_push_count = self.scroll_push_count.saturating_add(1);
+                let blank = self.cells[start..start + cols]
+                    .iter()
+                    .all(|c| c.ch == ' ' || c.ch == '\0');
+                // A TUI scrolling an empty content area files nothing
+                // after the run gets long enough to be chrome rather
+                // than spacing — see `MAX_FILED_BLANK_RUN`.  The row
+                // still leaves the region below; only the filing stops.
+                if !(blank && self.filed_blank_run >= MAX_FILED_BLANK_RUN) {
+                    self.filed_blank_run =
+                        if blank { self.filed_blank_run.saturating_add(1) } else { 0 };
+                    self.scrollback
+                        .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
+                    self.sb_wrapped.push_back(self.wrapped[pr]);
+                    self.scroll_push_count = self.scroll_push_count.saturating_add(1);
+                }
             }
             // Shift rows [top+1..=bot] up by one logical row.
             for r in top..bot {
@@ -1324,6 +1364,60 @@ impl Grid {
 mod region_scrollback_tests {
     use super::*;
 
+    /// A TUI scrolling an empty content area must not fill history with
+    /// a screenful of nothing.
+    ///
+    /// codex does exactly that while it starts: its region scrolls
+    /// before there is anything in it, one blank row at a time, and the
+    /// pane ends up with a black band between the previous session's
+    /// output and the new one.  Measured on a real session: a run of 53
+    /// blank rows in a 63-row pane.
+    #[test]
+    fn a_region_scrolling_an_empty_area_stops_filing_blanks() {
+        let mut g = Grid::new(20, 8);
+        // 30 scrolls of an empty region — far more than a screenful.
+        for _ in 0..30 {
+            g.scroll_up_region(0, 5, 1, Cell::default());
+        }
+        assert_eq!(
+            g.scrollback_len(),
+            MAX_FILED_BLANK_RUN as usize,
+            "only the run that reads as spacing is kept",
+        );
+    }
+
+    /// ...and the run resets, so spacing between two blocks survives.
+    #[test]
+    fn content_between_blank_runs_resets_the_allowance() {
+        let mut g = Grid::new(20, 8);
+        for _ in 0..10 {
+            g.scroll_up_region(0, 5, 1, Cell::default());
+        }
+        let after_blanks = g.scrollback_len();
+        g.set_cell(0, 0, Cell { ch: 'x', ..Cell::default() });
+        g.scroll_up_region(0, 5, 1, Cell::default());
+        for _ in 0..10 {
+            g.scroll_up_region(0, 5, 1, Cell::default());
+        }
+        assert_eq!(
+            g.scrollback_len(),
+            after_blanks + 1 + MAX_FILED_BLANK_RUN as usize,
+            "the content row, then a fresh allowance of spacing",
+        );
+    }
+
+    /// The shell path is untouched: a blank line there is something the
+    /// user made, and dropping those was tried once and reverted
+    /// (F3+12.1).
+    #[test]
+    fn a_full_screen_scroll_still_files_every_blank_line() {
+        let mut g = Grid::new(20, 8);
+        for _ in 0..30 {
+            g.scroll_up(1, Cell::default());
+        }
+        assert_eq!(g.scrollback_len(), 30, "every blank line is history here");
+    }
+
     /// A TUI that reserves a header row still scrolls its history out
     /// of the screen.
     ///
@@ -1371,6 +1465,11 @@ mod region_scrollback_tests {
     #[test]
     fn a_region_scroll_files_the_continuation_flag_it_was_given() {
         let mut g = Grid::new(20, 6);
+        // Content in every row: a blank one would now be collapsed by
+        // `MAX_FILED_BLANK_RUN`, and this test is about the flag.
+        for r in 0..6u16 {
+            g.set_cell(0, r, Cell { ch: char::from(b'a' + r as u8), ..Cell::default() });
+        }
         // Row 1 continues row 0; row 3 continues row 2.
         g.set_row_wrapped(1, true);
         g.set_row_wrapped(3, true);
@@ -1441,7 +1540,6 @@ mod region_scrollback_tests {
         // lines stay reachable.  Dropping them is what left codex
         // panes with no history at all.
         let g = scroll_through_region(40, 8, 120);
-        assert_eq!(g.scroll_push_count(), 120);
         let sb: Vec<String> = (0..g.scrollback_len())
             .filter_map(|i| g.scrollback_line(i))
             .map(|row| row.iter().map(|c| c.ch).collect::<String>())
@@ -1450,6 +1548,20 @@ mod region_scrollback_tests {
             sb.iter().any(|l| l.starts_with("LINE-001")),
             "the oldest line must still be reachable"
         );
+        // Not one of the 120 may be lost: each is either in history or
+        // still on screen.  (The raw push count is no longer 120 — the
+        // region also scrolled its empty top rows before any content
+        // reached them, and those collapse; see `MAX_FILED_BLANK_RUN`.)
+        let screen: Vec<String> = (0..40u16)
+            .map(|r| (0..20u16).map(|c| g.cell(c, r).ch).collect::<String>())
+            .collect();
+        for i in 1..=120 {
+            let want = format!("LINE-{i:03}");
+            assert!(
+                sb.iter().chain(screen.iter()).any(|l| l.starts_with(&want)),
+                "{want} is neither in history nor on screen",
+            );
+        }
         // The newest line is still ON SCREEN, not in scrollback —
         // scrollback is where things go when they leave.
         let on_screen: Vec<String> = (0..40u16)

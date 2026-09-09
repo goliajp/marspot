@@ -6196,7 +6196,50 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.88**
+Current: **0.11.89**
+
+### 0.11.89
+
+A TUI scrolling an empty content area no longer files a screenful of
+nothing.
+
+The black band, finally named.  Replaying a codex pane's own bytelog
+and watching its scrollback grow: the run of blank lines goes 16 → 22
+→ 31 → 41 → 47 → 55, and at every one of those points the run IS the
+whole scrollback — every line filed so far is blank.  codex scrolls its
+region while its screen is still empty, one blank row per scroll, so
+the history starts with a screenful of nothing; restart codex in a pane
+that already has history and the same screenful lands in the middle of
+it.  That is the band, with older content above and newer below —
+exactly as reported.
+
+Where the cut-off comes from, rather than a guess: across two real
+sessions' scrollback the blank runs are 1 row (214 and 480 times), 2
+rows (12 and 24), 3 rows (once) — and then one run of **53**.  Three is
+the transcript's own spacing; a screenful is chrome.  So the region
+path files at most `MAX_FILED_BLANK_RUN = 3` consecutive blank rows,
+and the run resets the moment a row with content goes by.
+
+`scroll_up` — a shell or a full-screen program scrolling normally — is
+untouched.  A blank line there is something the user made (Enter on an
+empty prompt, `echo ""`, a paragraph break); dropping those was tried
+once and reverted (F3+12.1), and that decision stands.
+
+Two things this cost, both caught rather than shipped:
+
+- The first cut scanned each row for blankness in `scroll_up` too, to
+  keep the run counter honest.  That is the per-scrolled-line hot path,
+  and mini measured scroll p99 4.9 µs against a 4.0 floor and
+  scroll-cold 5.8 — 22 % and 45 % over.  The counter only gates the
+  region path, so that path now just resets it: no scan, and 3.0 / 3.0
+  on the re-run.
+- An existing test asserted a raw push count of 120 through a region
+  that scrolls its empty top rows first.  Those now collapse, so the
+  assertion was rewritten to the thing it actually meant: not one of
+  the 120 lines may be lost — each is either in history or on screen.
+
+Old bands already written into a pane's scrollback stay there; this
+stops new ones.
 
 ### 0.11.88
 
