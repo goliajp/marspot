@@ -8610,24 +8610,38 @@ impl CoreApp {
         }
         let tui_scroll = win!(self, wi).panes[idx].session().is_l3()
             && win!(self, wi).panes[idx].session().l3_mouse_tracking_active();
-        // A wheel tick DURING a drag is not a scroll request.
+        // A wheel tick DURING a drag scrolls OUR viewport, never the
+        // program's.
         //
-        // On a mouse-tracking pane the tick is injected into the app,
-        // which repaints in place; the selection the user is still
-        // drawing then covers different bytes, so it is thrown away —
-        // and the drag they were halfway through goes with it.  On a
-        // trackpad that tick is usually an accident of the same
-        // gesture that is doing the dragging.
+        // Handing it to the program is what made the selection box look
+        // pinned to the glass: the program repaints in place, marspot's
+        // `view_offset` never moves, and the anchor — an absolute line
+        // number — keeps resolving to the same screen rows while the
+        // content under them changes.  Which is exactly the report:
+        // "选择框本身会相对定在画面上，滚动屏幕会选中不同的内容".
         //
-        // While the button is down, swallow it.  The picture does not
-        // move, so the selection stays valid and the drag survives.
-        // Letting go and then scrolling still scrolls, and still
-        // clears: that is a deliberate scroll, and a selection cannot
-        // follow an app-driven repaint.
-        if tui_scroll
-            && win!(self, wi).selection_dragging
+        // Scrolling our own viewport instead gives the behaviour that
+        // was asked for: the anchor stays on the line it was put on,
+        // and the far end follows the viewport, so a scroll appends.
+        // This only became possible once these panes had a history to
+        // scroll — see `MAX_RESERVED_HEADER_ROWS` in `grid.rs`.
+        //
+        // Outside a drag the wheel still belongs to the program: that
+        // is how a TUI's own scrolling works, and it is what happens in
+        // every other terminal.
+        if win!(self, wi).selection_dragging
             && win!(self, wi).selection.is_some_and(|s| s.session_idx == idx)
         {
+            let moved = win!(self, wi).panes[idx].scroll_own_view(lines);
+            if moved != 0 {
+                // The far end travels with the viewport; the anchor does
+                // not.  Both are absolute line numbers counted back from
+                // the newest line, so scrolling into history raises them.
+                if let Some(sel) = win!(self, wi).selection.as_mut() {
+                    sel.focus.1 = sel.focus.1.saturating_add_signed(moved);
+                }
+                win!(self, wi).needs_render = true;
+            }
             return;
         }
         if win!(self, wi).panes[idx].apply_scroll_lines(lines) {

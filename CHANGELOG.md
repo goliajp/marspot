@@ -3039,7 +3039,39 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.194**
+Current: **0.12.195**
+
+### 0.12.195
+
+A wheel tick during a drag scrolls OUR viewport, never the program's.
+
+Reported, precisely: "选择框本身会相对定在画面上，滚动屏幕会选中不同
+的内容，正确的行为应该是选择器开头或结尾是不变的，滚动只是追加".
+
+The projection was never the problem — `selection_view_for_pane` maps
+an absolute line number through the pane's view offset, so a selection
+tracks its content as the viewport moves.  What was wrong is that the
+viewport never moved: on a mouse-tracking pane the tick was injected
+into the program, which repaints in place, leaving `view_offset` at 0
+and the anchor resolving to the same screen rows over changed content.
+The box looked pinned to the glass because, in marspot's coordinates,
+it was.
+
+During a drag the wheel now moves this pane's own viewport, and the
+far end of the selection travels with it — so the anchor stays on the
+line it was put on and scrolling appends.  Outside a drag the wheel
+still belongs to the program: that is how a TUI's own scrolling works
+and what every other terminal does.
+
+This only became possible one version ago: until these panes had a
+history to scroll (`MAX_RESERVED_HEADER_ROWS`, L3 0.11.88) there was
+nothing for the viewport to move over.  0.12.194 swallowed the tick
+instead, which stopped the selection being destroyed but left the two
+unable to work together — the report above.
+
+codex panes gain the same thing: their wheel already moved the
+viewport during a drag, but the selection's far end stayed put, so
+scrolling shifted the highlight without extending it.
 
 ### 0.12.194
 

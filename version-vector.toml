@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.142"  # 滚轮键声明只在变化时记日志，心跳不是新闻；详见 CHANGELOG.md
-core    = "0.12.194"  # 拖拽选区期间的滚轮不再销毁选区；详见 CHANGELOG.md
+core    = "0.12.195"  # 拖拽期间滚轮改滚自己的视图，选区起点不动、滚动只是追加；详见 CHANGELOG.md
 session = "0.11.88"  # 预留一行 header 的滚动区域也算内容离屏 —— claudecode 终于有历史可滚可选；详见 CHANGELOG.md

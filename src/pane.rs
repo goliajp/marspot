@@ -1870,9 +1870,19 @@ impl Pane {
             }
             return true;
         }
-        // L3 owns its scrollback; L2 has only the visible-window mirror, so
-        // it clamps against the depth the snapshot reported and asks L3 to
-        // publish the new window. In-process backends scroll their own grid.
+        self.scroll_own_view(delta) != 0
+    }
+
+    /// Move THIS pane's viewport, skipping every route that hands the
+    /// wheel to the program.  Returns how many lines the viewport
+    /// actually moved (positive = further back in history), which is
+    /// what a caller extending a selection needs: the wheel may be
+    /// clamped by the depth of the scrollback.
+    ///
+    /// L3 owns its scrollback; L2 has only the visible-window mirror, so
+    /// it clamps against the depth the snapshot reported and asks L3 to
+    /// publish the new window. In-process backends scroll their own grid.
+    pub fn scroll_own_view(&mut self, delta: i32) -> i32 {
         let max = if self.session.is_l3() {
             self.session.l3_scrollback_len() as i32
         } else {
@@ -1880,11 +1890,12 @@ impl Pane {
         };
         let new = (self.view_offset as i32 + delta).clamp(0, max) as u16;
         if new == self.view_offset {
-            return false;
+            return 0;
         }
+        let moved = new as i32 - self.view_offset as i32;
         self.view_offset = new;
         self.session.forward_scroll(new); // no-op for in-process backends
-        true
+        moved
     }
 
     /// Auto-pin the viewport when a row scrolls into scrollback while
