@@ -6164,7 +6164,44 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.87**
+Current: **0.11.88**
+
+### 0.11.88
+
+A scroll region that reserves one header row still files history.
+
+Reported: in claudecode, selection and the wheel cannot work together;
+in codex they can.  The whole difference is one row.
+
+Both agents scroll their transcript the same way — set a scroll region,
+`CSI <n> S`, reset it.  codex sets `CSI 1;56 r`; claudecode sets
+`CSI 2;57 r`, one row lower because it keeps a title line.  The rule
+for "did this content leave the screen, or is it a window-internal
+shuffle?" was a strict `top == 0`, so claudecode's transcript went
+nowhere: the pane had no history, the wheel had nothing to move, and a
+selection had nothing to extend into.
+
+Measured on that session's own 37 MB bytelog: 1242 region scrolls
+inside the alternate screen, and the pane's scrollback peaked at **one
+line**.  With a one-row tolerance it peaks at **3523**.
+
+ghostty and xterm use the strict form, and it is right for them: they
+keep no scrollback in the alternate screen at all, so the question
+never comes up.  Marspot deliberately does keep it (`enter_alt_screen`
+has said so since it was written — iTerm2 / Kitty / Alacritty all let
+the wheel browse a TUI's history).  With that decision already made,
+one row of chrome should not be what decides whether a session can be
+scrolled and copied.
+
+The tolerance is named (`MAX_RESERVED_HEADER_ROWS = 1`) and stops
+there: a band two rows down is still a shuffle, and a test pins each
+side of that line.
+
+Cost, stated plainly: a claudecode pane now fills the alternate
+screen's scrollback ring it was already allocated — bounded by
+`DEFAULT_SCROLLBACK_LINES`, in RAM, and dropped wholesale when the app
+leaves the alternate screen.  Nothing in the bench gate exercises this
+path, so the idle-RSS number does not cover it.
 
 ### 0.11.87
 

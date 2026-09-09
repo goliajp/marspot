@@ -521,6 +521,15 @@ pub struct Grid {
     sb_wrapped: std::collections::VecDeque<bool>,
 }
 
+/// How many rows of chrome a TUI may reserve above its scrolling
+/// content before rows leaving that content stop counting as history.
+///
+/// One: the shape every agent TUI measured so far uses (a title or
+/// status line, then the transcript, then an input box at the bottom).
+/// Raising it further would start counting a band animated in the
+/// middle of a screen as history.
+const MAX_RESERVED_HEADER_ROWS: u16 = 1;
+
 impl Grid {
     pub fn new(cols: u16, rows: u16) -> Self {
         Self::with_scrollback(cols, rows, DEFAULT_SCROLLBACK_LINES)
@@ -791,10 +800,28 @@ impl Grid {
         let region_h = bot - top + 1;
         let lines = lines.min(region_h);
         let cols = self.cols as usize;
-        // See the doc comment: a region anchored at row 0 scrolls
+        // See the doc comment: a region anchored at the top scrolls
         // content off the top of the SCREEN, not merely off the top of
         // a band inside it.
-        let feeds_scrollback = top == 0;
+        //
+        // "At the top" tolerates a reserved header row.  Strict
+        // `top == 0` is what ghostty and xterm use, and it is right for
+        // them — they keep no scrollback in the alternate screen at
+        // all, so the question never arises there.  We deliberately DO
+        // (see `enter_alt_screen`: iTerm2 / Kitty / Alacritty all let
+        // the wheel browse a TUI's history), and with that decision
+        // already made, one row of chrome should not be what decides
+        // whether a session is scrollable.
+        //
+        // Measured on a real claudecode session (383, 37 MB): it scrolls
+        // its transcript with `CSI 2;57 r` + `CSI <n> S` — a region one
+        // row down, because it reserves a header line — 1242 times.
+        // Under `top == 0` that pane's scrollback peaked at **1 line**;
+        // under this rule, at **3523**.  codex uses `CSI 1;56 r` and
+        // was always kept.  That single row is the whole reason one
+        // agent pane could be scrolled and selected across and the
+        // other could not (2026-09-09 field report).
+        let feeds_scrollback = top <= MAX_RESERVED_HEADER_ROWS;
         for _ in 0..lines {
             if feeds_scrollback {
                 let pr = self.phys_row(top);
@@ -1296,6 +1323,44 @@ impl Grid {
 #[cfg(test)]
 mod region_scrollback_tests {
     use super::*;
+
+    /// A TUI that reserves a header row still scrolls its history out
+    /// of the screen.
+    ///
+    /// claudecode drives `CSI 2;57 r` + `CSI <n> S` — the same shape as
+    /// codex's `CSI 1;56 r`, one row lower because it keeps a title
+    /// line.  Under a strict `top == 0` its transcript went nowhere,
+    /// which is why one agent pane could be scrolled and selected
+    /// across and the other could not.
+    #[test]
+    fn a_region_one_row_below_the_top_still_files_history() {
+        let mut g = Grid::new(20, 8);
+        for r in 0..8u16 {
+            for (i, ch) in format!("row{r}").chars().enumerate() {
+                g.set_cell(i as u16, r, Cell { ch, ..Cell::default() });
+            }
+        }
+        // A header at row 0, content in 1..=5, chrome below.
+        g.scroll_up_region(1, 5, 2, Cell::default());
+        assert_eq!(g.scrollback_len(), 2, "the rows that left the band are history");
+        let filed: Vec<String> = (0..2)
+            .map(|i| {
+                g.scrollback_line(i)
+                    .map(|cs| cs.iter().map(|c| c.ch).collect::<String>().trim_end().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(filed, ["row1", "row2"]);
+    }
+
+    /// ...but a band further down is a window-internal shuffle, and its
+    /// rows are not history.  This is the line the tolerance stops at.
+    #[test]
+    fn a_band_two_rows_below_the_top_files_nothing() {
+        let mut g = Grid::new(20, 8);
+        g.scroll_up_region(2, 5, 2, Cell::default());
+        assert_eq!(g.scrollback_len(), 0);
+    }
 
     /// A soft-wrap flag has to survive the scroll that files the row.
     ///
