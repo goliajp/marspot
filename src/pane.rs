@@ -1873,6 +1873,42 @@ impl Pane {
         self.scroll_own_view(delta) != 0
     }
 
+    /// True when the wheel belongs to the program rather than to our
+    /// viewport.  A full-screen program on the alt screen scrolls by
+    /// repainting: marspot files none of it into scrollback, so there
+    /// is nothing here for `scroll_own_view` to move and a selection
+    /// on such a pane needs a `SelectionTape` to follow the picture.
+    pub fn program_owns_scroll(&self) -> bool {
+        wheel_route(
+            self.session.is_l3(),
+            self.session.l3_alt_screen_active(),
+            self.session.l3_mouse_tracking_active(),
+        ) != WheelRoute::Scrollback
+    }
+
+    /// The visible picture as one string per row, top to bottom —
+    /// what a `SelectionTape` folds to find the program's scroll.
+    /// NUL is the wide-glyph trail half and is skipped, as it is when
+    /// a selection is serialised, so a CJK row hashes the same both
+    /// ways.
+    pub fn screen_rows(&self) -> Vec<String> {
+        let g = self.session.grid();
+        let (cols, rows) = (g.cols(), g.rows());
+        (0..rows)
+            .map(|r| {
+                let mut line = String::with_capacity(cols as usize);
+                for c in 0..cols {
+                    let ch = g.cell_at_view(0, c, r).ch;
+                    if ch != '\0' {
+                        line.push(ch);
+                    }
+                }
+                line.truncate(line.trim_end().len());
+                line
+            })
+            .collect()
+    }
+
     /// Move THIS pane's viewport, skipping every route that hands the
     /// wheel to the program.  Returns how many lines the viewport
     /// actually moved (positive = further back in history), which is

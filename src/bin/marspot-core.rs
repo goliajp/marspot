@@ -3493,6 +3493,14 @@ struct WindowState {
     panes: Vec<Pane>,
     focused_idx: usize,
     selection: Option<Selection>,
+    /// Set while a selection stands on a pane whose picture the
+    /// *program* owns (a full-screen program on the alt screen).  Such
+    /// a pane files nothing into marspot's scrollback and scrolls by
+    /// repainting, so the tape reads the shift off each frame and
+    /// keeps the selection on its text.  Lifetime is tied to
+    /// `selection` in `sync_selection_tape`, not to the fourteen
+    /// places that clear a selection.
+    selection_tape: Option<marspot::selection_tape::SelectionTape>,
     selection_dragging: bool,
     /// F3+3.0 — grid shape (cols × rows) is now an arbitrary
     /// pair rather than a 7-variant enum.  Cell total = cols×rows;
@@ -3632,6 +3640,7 @@ impl WindowState {
             focused_idx,
             selection: None,
             selection_dragging: false,
+            selection_tape: None,
             grid_cols,
             grid_rows,
             layout_modal_open: false,
@@ -6304,9 +6313,20 @@ impl CoreApp {
         // read it locally.  The round-trip is made reliable by a per-request
         // sequence id (see `request_selection_text`) so a late reply from a
         // timed-out request can't alias the next copy.
+        // A taped pane is read off the tape, not off the pane: the
+        // program owns the picture there, and rows the selection covers
+        // may have scrolled out of the frame the pane can still show.
+        // The tape kept them.
+        let blockwise = sel.mode == marspot::ui::SelectionMode::Blockwise;
+        let taped = win!(self, wi)
+            .selection_tape
+            .as_ref()
+            .filter(|t| t.pane_idx() == idx && !t.broken)
+            .and_then(|t| t.text(blockwise));
         let is_l3 = win!(self, wi).panes.get(idx).is_some_and(|p| p.is_l3());
-        let text = if is_l3 {
-            let blockwise = sel.mode == marspot::ui::SelectionMode::Blockwise;
+        let text = if taped.is_some() {
+            taped
+        } else if is_l3 {
             win!(self, wi).panes
                 .get_mut(idx)
                 .and_then(|p| p.session_mut().request_selection_text(sel.anchor, sel.focus, blockwise))
@@ -8161,6 +8181,19 @@ impl CoreApp {
                 let rows = pane.session().grid().rows() as u32;
                 let vo = pane.view_offset() as u32;
                 let abs = vo + rows.saturating_sub(1).saturating_sub(row as u32);
+                // A pane whose picture the program owns gets a tape:
+                // its scroll is a repaint marspot files nothing from,
+                // so without one the selection would sit still on the
+                // glass while the text moved under it.  Built here,
+                // while the pane is still borrowed for `abs`.
+                let tape = pane.program_owns_scroll().then(|| {
+                    marspot::selection_tape::SelectionTape::new(
+                        idx,
+                        &pane.screen_rows(),
+                        col,
+                        row,
+                    )
+                });
                 win!(self, wi).selection = Some(Selection {
                     session_idx: idx,
                     anchor: (col, abs),
@@ -8172,6 +8205,7 @@ impl CoreApp {
                     },
                 });
                 win!(self, wi).selection_dragging = true;
+                win!(self, wi).selection_tape = tape;
                 if idx != win!(self, wi).focused_idx {
                     self.resolve_pending_on_defocus(wi, idx);
                     win!(self, wi).focused_idx = idx;
@@ -8348,6 +8382,17 @@ impl CoreApp {
         let vo = pane.view_offset() as u32;
         let abs = vo + rows.saturating_sub(1).saturating_sub(row as u32);
 
+        // On a taped pane the far end is recorded as a virtual line, so
+        // the next repaint moves it with the text rather than leaving
+        // it on the same row of glass.  `abs` is then whatever that
+        // virtual line currently resolves to on screen.
+        let abs = match win!(self, wi).selection_tape.as_mut() {
+            Some(tape) if tape.pane_idx() == target_idx => {
+                tape.set_focus(col as u16, row as u16);
+                tape.abs(tape.focus.1, rows as u16)
+            }
+            _ => abs,
+        };
         let Some(sel) = win!(self, wi).selection.as_mut() else { return };
         sel.focus = (col as u16, abs);
         win!(self, wi).needs_render = true;
@@ -8618,25 +8663,15 @@ impl CoreApp {
         }
         let tui_scroll = win!(self, wi).panes[idx].session().is_l3()
             && win!(self, wi).panes[idx].session().l3_mouse_tracking_active();
-        // A wheel tick DURING a drag scrolls OUR viewport, never the
-        // program's.
+        // A wheel tick during a drag moves OUR viewport — on a pane
+        // that has one.  The anchor is an absolute line number, so it
+        // stays on the line it was put on while the far end follows
+        // the view: the scroll appends, which is what was asked for.
         //
-        // Handing it to the program is what made the selection box look
-        // pinned to the glass: the program repaints in place, marspot's
-        // `view_offset` never moves, and the anchor — an absolute line
-        // number — keeps resolving to the same screen rows while the
-        // content under them changes.  Which is exactly the report:
-        // "选择框本身会相对定在画面上，滚动屏幕会选中不同的内容".
-        //
-        // Scrolling our own viewport instead gives the behaviour that
-        // was asked for: the anchor stays on the line it was put on,
-        // and the far end follows the viewport, so a scroll appends.
-        // This only became possible once these panes had a history to
-        // scroll — see `MAX_RESERVED_HEADER_ROWS` in `grid.rs`.
-        //
-        // Outside a drag the wheel still belongs to the program: that
-        // is how a TUI's own scrolling works, and it is what happens in
-        // every other terminal.
+        // A pane whose picture the program owns has no viewport of
+        // ours to move (the alt screen files nothing into scrollback),
+        // so the tick goes to the program and the `SelectionTape`
+        // carries the selection across the repaint instead.
         // Dev-cycle only — one line per change of the situation, never
         // per tick (a momentum scroll is hundreds).  The report
         // "选择框不会变动，内容滚动就选了不同的文字" fits none of the
@@ -8662,6 +8697,7 @@ impl CoreApp {
         }
         if win!(self, wi).selection_dragging
             && win!(self, wi).selection.is_some_and(|s| s.session_idx == idx)
+            && !win!(self, wi).panes[idx].program_owns_scroll()
         {
             let moved = win!(self, wi).panes[idx].scroll_own_view(lines);
             if moved != 0 {
@@ -8675,8 +8711,33 @@ impl CoreApp {
             }
             return;
         }
+        // While a tape is following this pane, keep each step short
+        // enough that the next frame still overlaps the one before it.
+        // Measured on a live claudecode pane: a step of 16 rows leaves
+        // 39 of the 47 rows that could match doing so, and the tape
+        // reads it exactly; a flick of 40 rows in one frame leaves 9
+        // and nothing can be read from it.  The momentum stream keeps
+        // delivering events, so capping the step costs no reachable
+        // distance — only the size of the jump between two frames.
+        let lines = match win!(self, wi).selection_tape.as_ref() {
+            Some(t) if t.pane_idx() == idx && !t.broken => {
+                let rows = win!(self, wi).panes[idx].session().grid().rows() as i32;
+                let cap = (rows / 8).max(1);
+                lines.clamp(-cap, cap)
+            }
+            _ => lines,
+        };
         if win!(self, wi).panes[idx].apply_scroll_lines(lines) {
-            if tui_scroll {
+            // The program just repainted at a new position.  A tape
+            // following this pane reads the shift off the next frame
+            // and carries the selection with it; without one there is
+            // nothing to re-anchor to, and a box left standing would
+            // then cover text the user never picked.
+            let taped = win!(self, wi)
+                .selection_tape
+                .as_ref()
+                .is_some_and(|t| t.pane_idx() == idx && !t.broken);
+            if tui_scroll && !taped {
                 if let Some(sel) = win!(self, wi).selection {
                     if sel.session_idx == idx {
                         win!(self, wi).selection = None;
@@ -8693,6 +8754,52 @@ impl CoreApp {
             win!(self, wi).ime_preedit = text;
             win!(self, wi).needs_render = true;
         }
+    }
+
+    /// Keep the selection tape in step with the picture, and the
+    /// selection in step with the tape.
+    ///
+    /// Called once per pump.  The tape's lifetime hangs off `selection`
+    /// here rather than off the many places that clear one: a tape
+    /// whose selection is gone, or whose pane the selection has moved
+    /// away from, is dropped on the spot.
+    ///
+    /// While it lives, each frame is folded in (a shift, or a break if
+    /// the program redrew rather than scrolled) and the selection's
+    /// ends are re-expressed in the coordinates the renderer uses.  An
+    /// end that has scrolled off an edge saturates there, which the
+    /// renderer already draws as "carries on past this edge".
+    fn sync_selection_tape(&mut self, wi: usize) {
+        let w = &mut win!(self, wi);
+        let Some(tape) = w.selection_tape.as_mut() else { return };
+        let idx = tape.pane_idx();
+        let Some(sel) = w.selection.as_mut().filter(|s| s.session_idx == idx) else {
+            w.selection_tape = None;
+            return;
+        };
+        let Some(pane) = w.panes.get(idx) else {
+            w.selection_tape = None;
+            return;
+        };
+        let grid_rows = pane.session().grid().rows();
+        if tape.fold(&pane.screen_rows()).is_none() && tape.broken {
+            // The program redrew rather than scrolled, so where the
+            // selected lines went is not knowable.  Leaving the box
+            // standing would put it over text nobody picked — the
+            // whole defect this tape exists to end — so it goes.
+            lx_info!(
+                "core.selection_tape.broken",
+                "a frame was not a shift of the one before it; the selection is dropped"
+            );
+            w.selection = None;
+            w.selection_dragging = false;
+            w.selection_tape = None;
+            w.needs_render = true;
+            return;
+        }
+        sel.anchor.1 = tape.abs(tape.anchor.1, grid_rows);
+        sel.focus.1 = tape.abs(tape.focus.1, grid_rows);
+        w.needs_render = true;
     }
 
     /// Drain pending shelld DATA into every pane's grid, keeping
@@ -8774,6 +8881,9 @@ impl CoreApp {
                 w.needs_render = true;
             }
             total += window_total;
+            if window_total > 0 {
+                self.sync_selection_tape(wi);
+            }
         }
         // The app exits when every pane of every window has exited —
         // one window still holding a live shell keeps marspot up.
