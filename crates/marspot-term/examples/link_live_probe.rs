@@ -60,7 +60,7 @@ fn main() {
         );
         println!("tui_mode={tui_mode} cwd={cwd:?} -> {} hits", hits.len());
         for h in &hits {
-            println!("    r{} {:?} {:?} target={:?}", h.row, h.kind, h.text, h.target);
+            println!("    r{} cols {}..={} {:?} target={:?}", h.row, h.col_start, h.col_end, h.text, h.target);
         }
     }
 }
