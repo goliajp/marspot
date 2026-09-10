@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.142"  # 滚轮键声明只在变化时记日志，心跳不是新闻；详见 CHANGELOG.md
-core    = "0.12.199"  # 闸只在画面真动过时才放行，判据改按能对上的行算；详见 CHANGELOG.md
+core    = "0.12.200"  # 带上冒号那条路径识别修复（扫描在 L2 的渲染与命中判定里跑）；详见 CHANGELOG.md
 session = "0.11.90"  # 冒号不再被当成路径 token 的内部字符 —— 相对路径识别不了的根因；详见 CHANGELOG.md

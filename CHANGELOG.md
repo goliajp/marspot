@@ -3039,7 +3039,14 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.199**
+Current: **0.12.200**
+
+### 0.12.200
+
+带上 L3 0.11.90 的冒号修复。链接扫描有两个调用方都在 L2 —— 渲染时画下划线的
+那一次，和点击时的命中判定 —— 所以只 bump session 的话，装机脚本会按
+version-vector 声明的意图跳过 L2，屏幕上的链接不会变。改动本身在
+marspot-linkify 里，见 L3 0.11.90。
 
 ### 0.12.199
 
