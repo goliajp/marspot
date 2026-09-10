@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.142"  # 滚轮键声明只在变化时记日志，心跳不是新闻；详见 CHANGELOG.md
-core    = "0.12.198"  # 选区磁带改反馈驱动：一步一帧，且容忍偶发读不出的帧；详见 CHANGELOG.md
+core    = "0.12.199"  # 闸只在画面真动过时才放行，判据改按能对上的行算；详见 CHANGELOG.md
 session = "0.11.89"  # TUI 空内容区滚动不再往历史里灌整屏空白 —— 黑带的根因；详见 CHANGELOG.md

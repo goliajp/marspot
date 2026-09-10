@@ -8839,14 +8839,20 @@ impl CoreApp {
             return;
         };
         let grid_rows = pane.session().grid().rows();
-        if tape.fold(&pane.screen_rows()).is_none() && tape.broken {
+        let shift = tape.fold(&pane.screen_rows());
+        if shift.is_none() && tape.broken {
             // The program redrew rather than scrolled, so where the
             // selected lines went is not knowable.  Leaving the box
             // standing would put it over text nobody picked — the
             // whole defect this tape exists to end — so it goes.
+            let a = tape.last_alignment();
             lx_info!(
                 "core.selection_tape.broken",
-                "a frame was not a shift of the one before it; the selection is dropped"
+                &format!(
+                    "three frames running were not a shift of the last readable one; \
+                     selection dropped (last: shift={} matched={} could={} rows={grid_rows})",
+                    a.shift, a.matched, a.could
+                )
             );
             w.selection = None;
             w.selection_dragging = false;
@@ -8856,8 +8862,17 @@ impl CoreApp {
         }
         sel.anchor.1 = tape.abs(tape.anchor.1, grid_rows);
         sel.focus.1 = tape.abs(tape.focus.1, grid_rows);
-        // The step has been read; the next one may go.
-        w.tape_scroll_gate = None;
+        // The gate opens when the step is SEEN TO LAND — a frame that
+        // moved.  An unchanged frame must not open it: this runs on
+        // every pump, and a window of busy panes pumps within a
+        // millisecond of the tick being sent, so treating "a frame
+        // arrived" as "the step landed" opened the gate again before
+        // the program had repainted at all, and the whole rate limit
+        // was a no-op.  A step that genuinely moves nothing is what
+        // the gate's deadline is for.
+        if shift.is_some_and(|s| s != 0) {
+            w.tape_scroll_gate = None;
+        }
         w.needs_render = true;
     }
 

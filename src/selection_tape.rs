@@ -72,6 +72,8 @@ pub struct SelectionTape {
     pub broken: bool,
     /// Frames in a row that did not align.  Reset by any that does.
     misses: u8,
+    /// How the last frame read, kept so a break can say why.
+    last: Alignment,
 }
 
 fn hash_row(s: &str) -> u64 {
@@ -86,15 +88,31 @@ fn hash_row(s: &str) -> u64 {
     h
 }
 
-/// The vertical shift that best explains `cur` as `prev` moved, or
-/// `None` when no shift explains enough of the screen.  `cur[r]` is
-/// taken to be `prev[r + shift]`, so a positive shift means the
-/// content moved UP (newer text arriving at the bottom) and a negative
-/// one means it moved DOWN (older text uncovered at the top).
-fn best_shift(prev: &[u64], cur: &[u64], blank: u64) -> Option<i64> {
+/// How well one frame reads as another one moved: the shift, how many
+/// rows lined up under it, and how many COULD have.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Alignment {
+    pub shift: i64,
+    pub matched: usize,
+    pub could: usize,
+}
+
+impl Alignment {
+    /// Enough of what could line up did.
+    fn is_a_scroll(&self) -> bool {
+        self.matched >= MIN_ALIGN_ROWS
+            && self.matched * MIN_ALIGN_DEN >= self.could * MIN_ALIGN_NUM
+    }
+}
+
+/// The vertical shift that best explains `cur` as `prev` moved.
+/// `cur[r]` is taken to be `prev[r + shift]`, so a positive shift means
+/// the content moved UP (newer text arriving at the bottom) and a
+/// negative one means it moved DOWN (older text uncovered at the top).
+fn best_shift(prev: &[u64], cur: &[u64], blank: u64) -> Alignment {
     let n = prev.len() as i64;
     if n == 0 || cur.len() as i64 != n {
-        return None;
+        return Alignment::default();
     }
     let mut best = (0i64, 0usize);
     for s in -(n - 1)..n {
@@ -117,11 +135,19 @@ fn best_shift(prev: &[u64], cur: &[u64], blank: u64) -> Option<i64> {
         }
     }
     let (shift, matched) = best;
-    let overlap = (n - shift.abs()).max(0) as usize;
-    if matched < MIN_ALIGN_ROWS || matched * MIN_ALIGN_DEN < overlap * MIN_ALIGN_NUM {
-        return None;
-    }
-    Some(shift)
+    // Measure against the rows that COULD match — the non-blank rows of
+    // the old frame that are still inside the screen after the shift —
+    // not against the height of the overlap.  A screen is mostly blank
+    // between one program's messages, and counting those blanks as
+    // rows that ought to have matched made a perfectly readable scroll
+    // fail an arithmetic it could never pass.
+    let could = (0..n)
+        .filter(|p| {
+            let dst = p - shift;
+            dst >= 0 && dst < n && prev[*p as usize] != blank
+        })
+        .count();
+    Alignment { shift, matched, could }
 }
 
 impl SelectionTape {
@@ -138,6 +164,7 @@ impl SelectionTape {
             focus: (anchor_col, anchor_row as i64),
             broken: false,
             misses: 0,
+            last: Alignment::default(),
         };
         t.write_frame(rows);
         t
@@ -145,6 +172,11 @@ impl SelectionTape {
 
     pub fn pane_idx(&self) -> usize {
         self.pane_idx
+    }
+
+    /// How the last frame read against the one before it.
+    pub fn last_alignment(&self) -> Alignment {
+        self.last
     }
 
     /// Fold a new frame in, returning the shift it was read as.  A
@@ -160,7 +192,9 @@ impl SelectionTape {
             return Some(0);
         }
         let blank = hash_row("");
-        let Some(shift) = best_shift(&self.prev, &cur, blank) else {
+        let a = best_shift(&self.prev, &cur, blank);
+        self.last = a;
+        if !a.is_a_scroll() {
             // Keep the last frame that DID align as the reference: a
             // half-painted frame must not become the thing the next
             // one is measured against.
@@ -169,12 +203,12 @@ impl SelectionTape {
                 self.broken = true;
             }
             return None;
-        };
+        }
         self.misses = 0;
-        self.base += shift;
+        self.base += a.shift;
         self.prev = cur;
         self.write_frame(rows);
-        Some(shift)
+        Some(a.shift)
     }
 
     /// Point the far end at a screen row of the newest frame.
@@ -397,6 +431,32 @@ mod tests {
             t.line(7).map(String::as_str),
             Some("line 7"),
             "and the rows it had not reached yet keep their text"
+        );
+    }
+
+    #[test]
+    fn a_mostly_blank_screen_still_reads_its_own_scroll() {
+        // Eight lines of text in a 40-row screen, the shape of a
+        // conversation with space between its messages.
+        let sparse = |first: usize| -> Vec<String> {
+            (0..40)
+                .map(|r| {
+                    if r % 5 == 0 {
+                        format!("line {}", first + r / 5)
+                    } else {
+                        String::new()
+                    }
+                })
+                .collect()
+        };
+        let mut t = SelectionTape::new(0, &sparse(0), 0, 0);
+        // Scroll by five rows: seven of the eight lines are still there.
+        let mut moved: Vec<String> = sparse(0)[5..].to_vec();
+        moved.extend((0..5).map(|_| String::new()));
+        assert_eq!(
+            t.fold(&moved),
+            Some(5),
+            "the blank rows are not rows that failed to match"
         );
     }
 
