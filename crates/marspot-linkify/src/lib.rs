@@ -1377,7 +1377,21 @@ fn join_cwd(cwd: &str, rel: &str) -> String {
 fn is_left_boundary_pathish(chars: &[char], i: usize) -> bool {
     i > 0
         && (chars[i - 1].is_alphanumeric()
-            || matches!(chars[i - 1], '/' | '.' | '-' | '_' | '~' | '@' | ':'))
+            // A colon is NOT in this set.  It reads as "inside a
+            // token" almost nowhere and as a separator almost
+            // everywhere a program writes one: `wrote:path`,
+            // `Note:path`, `写好了:.claude/notes/x.md`.  Counting it
+            // as inside cost the whole rest of the line, because a
+            // candidate that starts too early and fails to resolve
+            // also blocks every start position it covered — the run
+            // from `写` swallowed the colon, the path and the `(442`
+            // after it, resolved to nothing, and the path could never
+            // be tried on its own (2026-09-11 report).
+            //
+            // Nothing that needs one loses it: `src/main.rs:42` starts
+            // before the colon, and a URL is matched whole before any
+            // path candidate is considered.
+            || matches!(chars[i - 1], '/' | '.' | '-' | '_' | '~' | '@'))
 }
 
 /// Strip a trailing `:line(:col)?` suffix (compiler / panic output
@@ -4106,6 +4120,53 @@ mod relative_path_tests {
         // The underline covers what is drawn …
         assert_eq!(v[0].text, "src/main.rs");
         // … and Open / Copy get the file.
+        assert_eq!(v[0].target.as_deref(), Some("/w/proj/src/main.rs"));
+    }
+
+    #[test]
+    fn a_colon_ends_the_word_before_a_path_rather_than_joining_it() {
+        // Reported 2026-09-11.  The line on screen was
+        // `⏺ 写好了:.claude/notes/sentori-ack-v8.0.1.md(442 行,六部分)。`
+        // and the path drew as ordinary text.  The candidate started
+        // at `写` — a colon counted as "inside a token", so it did not
+        // start at the path — ran to the next space, resolved to
+        // nothing, and blocked every start position it had covered.
+        let v = scan(
+            "⏺ 写好了:.claude/notes/sentori-ack-v8.0.1.md(442 行,六部分)。",
+            Some("/w/proj"),
+            &["/w/proj/.claude/notes/sentori-ack-v8.0.1.md"],
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, ".claude/notes/sentori-ack-v8.0.1.md");
+        assert_eq!(
+            v[0].target.as_deref(),
+            Some("/w/proj/.claude/notes/sentori-ack-v8.0.1.md")
+        );
+    }
+
+    #[test]
+    fn the_same_holds_for_an_ascii_word_and_for_a_tui_pane() {
+        let v = scan("wrote:docs/notes/x.md", Some("/w/proj"), &["/w/proj/docs/notes/x.md"]);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, "docs/notes/x.md");
+
+        let v = scan_visible_links_with(
+            &Line("⏺ 写好了:.claude/notes/x.md(442 行)。".to_string()),
+            ScanOpts { cwd: Some("/w/proj"), tui_mode: true },
+            &Fake(&["/w/proj/.claude/notes/x.md"]),
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, ".claude/notes/x.md");
+    }
+
+    #[test]
+    fn a_colon_after_a_path_is_still_the_line_number_rule() {
+        // The colon INSIDE a span is arbitrated where it always was,
+        // by the line/col suffix rule — not by where a candidate is
+        // allowed to start.  The span stops at the file.
+        let v = scan("at src/main.rs:42 it failed", Some("/w/proj"), &["/w/proj/src/main.rs"]);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, "src/main.rs");
         assert_eq!(v[0].target.as_deref(), Some("/w/proj/src/main.rs"));
     }
 
