@@ -2054,10 +2054,22 @@ fn unquote_path(s: &str) -> String {
 /// change is about: the greedy scan exists so that punctuation stops
 /// **terminating** names, not so that every mark becomes a place to
 /// chop one.
+///
+/// ASCII `.` is out for a sharper reason: inside a token it is not
+/// prose, it is the extension separator.  Cutting there turns a file
+/// that does NOT exist into its prefix that does — and the prefix is
+/// typically the directory the file is about to be written into.
+/// Reported 2026-09-11: `.claude/exprtool.html` had not been
+/// generated yet, `.claude/exprtool/` beside it had, and the line
+/// drew a link to the directory with `.html` left as plain text.
+/// Nothing is lost by leaving it out — a `.` that really does end a
+/// sentence sits at the end of the token, where
+/// [`trim_sentence_tail`] already takes it off, and the CJK stops
+/// (`。`, `，`, `——`) that end a Chinese clause are still here.
 fn is_prose_cut_point(c: char) -> bool {
     matches!(
         c,
-        ',' | '.' | ';' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}'
+        ',' | ';' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}'
             // A quote both opens a name-with-spaces and closes one, so
             // it is also where a name can end and prose resume.  The
             // greedy scan pairs them; this is what lets the arbitration
@@ -4157,6 +4169,46 @@ mod relative_path_tests {
         );
         assert_eq!(v.len(), 1, "{v:?}");
         assert_eq!(v[0].text, ".claude/notes/x.md");
+    }
+
+    #[test]
+    fn a_name_that_is_not_there_yet_does_not_become_the_directory_beside_it() {
+        // Reported 2026-09-11.  `.claude/exprtool.html` was being
+        // described before it was generated; `.claude/exprtool/`, the
+        // directory it is generated FROM, was already there.  The
+        // screen underlined `.claude/exprtool` and left `.html` as
+        // plain text — a link to a directory the line never named.
+        //
+        // A file that does not exist is not a link.  Backing off to a
+        // prefix that does is how a missing name turns into a wrong
+        // one, and a `.` inside a token is an extension separator,
+        // never prose.
+        let v = scan(
+            ".claude/exprtool.html, 由 harness/scripts/make.py 生成",
+            Some("/w/p"),
+            &["/w/p/.claude/exprtool"],
+        );
+        assert!(v.is_empty(), "{v:?}");
+
+        // Once it exists, it is the link — whole, extension included.
+        let v = scan(
+            ".claude/exprtool.html, 由 harness/scripts/make.py 生成",
+            Some("/w/p"),
+            &["/w/p/.claude/exprtool", "/w/p/.claude/exprtool.html"],
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, ".claude/exprtool.html");
+        assert_eq!(v[0].target.as_deref(), Some("/w/p/.claude/exprtool.html"));
+    }
+
+    #[test]
+    fn a_period_that_really_does_end_the_sentence_is_still_taken_off() {
+        // The counterpart: dropping `.` as a cut point must not cost
+        // the trailing-period case, which is arbitrated one step
+        // earlier by `trim_sentence_tail`.
+        let v = scan("wrote docs/a.md.", Some("/w/p"), &["/w/p/docs/a.md"]);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, "docs/a.md");
     }
 
     #[test]

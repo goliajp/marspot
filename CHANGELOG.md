@@ -3039,7 +3039,13 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.200**
+Current: **0.12.201**
+
+### 0.12.201
+
+带上 L3 0.11.91 的扩展名修复。链接扫描的两个调用方都在 L2 —— 渲染时画下划线的
+那一次，和点击时的命中判定 —— 只 bump session 的话，屏幕上的链接不会变。改动本身
+在 marspot-linkify 里，见 L3 0.11.91。
 
 ### 0.12.200
 
@@ -6264,7 +6270,31 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.90**
+Current: **0.11.91**
+
+### 0.11.91
+
+`.claude/exprtool.html` 还没生成，旁边的 `.claude/exprtool/` 已经在了 —— 屏幕上
+画出来的链接指向那个目录，`.html` 留成了普通文字。
+
+扫描是贪婪的：候选交给磁盘，最长的先问；都不存在时，它退到「散文可能从这里开始」
+的每一个标点再切一次。ASCII 的 `.` 在那张标点表里，可 token 内部的点不是散文，
+是扩展名分隔符。在那里切，等于把一个**不存在**的文件名换成它存在的前缀 —— 而那个
+前缀通常正是这个文件将要被写进去的目录。
+
+去掉它没有代价：真正断句的那个点落在 token 末尾，前一步的 `trim_sentence_tail`
+已经把它取走；中文断句的 `。`、`，`、`——` 也都还在表里。
+
+在真实数据上核的，不是在编出来的一行上：14 个 pane 的 bytelog 全量重放，链接集合
+5379 → 5333，**只减不增**。46 条全是被切掉后缀之后剩下的那个存在前缀 ——
+`num_width.rs` 与 `num_width/*.rs` 退成 `num_width/`、`path-integrity.ts` 退成
+`path-integrity/`、`spg/.claude/notes/…` 退成 `spg/`、`../../.claude-shared/…`
+退成 `../../`。没有一条真链接受影响。
+
+做这个对照的 `link_set_probe` 留下 —— 「改一条仲裁规则之后，真实屏幕上的链接集合
+变成了什么」以前没有办法问。它第一次报的是 48 条，多出来的两条是两次运行之间
+`/tmp` 里冒出来的文件：量具自己也得冻住，bytelog 先拷出来（pane 还在写），
+文件系统的答案存进 `MARSPOT_LINK_SNAP` 让两边读同一张表。
 
 ### 0.11.90
 
