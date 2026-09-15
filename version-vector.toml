@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.142"  # 滚轮键声明只在变化时记日志，心跳不是新闻；详见 CHANGELOG.md
-core    = "0.12.201"  # 带上扩展名那条路径识别修复（扫描在 L2 的渲染与命中判定里跑）；详见 CHANGELOG.md
-session = "0.11.91"  # token 内部的点是扩展名分隔符，不是散文切点 —— 不存在的文件不再退成存在的前缀；详见 CHANGELOG.md
+core    = "0.12.202"  # 带上接缝那条路径识别修复（扫描在 L2 的渲染与命中判定里跑）；详见 CHANGELOG.md
+session = "0.11.92"  # 折行接缝不再抢在更长的、存在的终点前面 —— 路径不再停在上一行的目录；详见 CHANGELOG.md

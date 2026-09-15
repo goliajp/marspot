@@ -2194,25 +2194,28 @@ fn resolve_path_end_from(
     if stripped < hi && consider(stripped, &mut tried, &mut last) {
         return Some(stripped);
     }
-    // A seam claudecode broke the line at, longest first.  When it
-    // broke at a space the space survives nowhere, so the merged text
-    // has two tokens run together; the seam is exactly where they
-    // part.  Tried before punctuation because it is structure, not a
-    // guess — and only ever ADDS a candidate: a name that really does
-    // span the seam was already offered whole, above.
-    for seg in segments.iter().rev() {
-        if !seg.cc_seam {
-            continue;
-        }
-        let end = seg.char_offset;
-        if end > lo && end < hi && consider(end, &mut tried, &mut last) {
-            return Some(end);
-        }
-    }
-    // Then every point prose could have started, longest first.
+    // Then the seams claudecode broke the line at, and every point
+    // prose could have started — one pass, longest first.
+    //
+    // A seam matters when the line broke at a space: the space
+    // survives nowhere, so the merged text has two tokens run
+    // together and the seam is exactly where they part.  But it is
+    // one candidate end among the others, not a rule that outranks
+    // them.  It used to be tried first, and a path broken right
+    // before a `/` then stopped at the directory on the upper row
+    // even when the full file name, ended by the `。` glued to it,
+    // existed too (2026-09-16:
+    // `…/buwanren/.claude/rfcs` ⏎ `/20260916-handoff.md。按项目…`).
+    // Longest-first is the rule everywhere else in this function —
+    // when a file and the directory above it both exist, the line is
+    // pointing at the file.
     for cut in (lo + 1..hi).rev() {
         if tried >= MAX_PATH_CANDIDATES {
             break;
+        }
+        let is_seam = segments.iter().any(|seg| seg.cc_seam && seg.char_offset == cut);
+        if is_seam && consider(cut, &mut tried, &mut last) {
+            return Some(cut);
         }
         if !is_prose_cut_point(chars[cut]) {
             continue;
@@ -2687,6 +2690,39 @@ mod tests {
             !texts.iter().any(|t| *t == root_s),
             "fell back past the seam to a bare directory: {texts:?}",
         );
+    }
+
+    /// Reported 2026-09-16.  claudecode broke an absolute path right
+    /// before a `/`, and the file name on the next row had Chinese
+    /// glued to it with no space:
+    ///
+    ///   `交接文档写好了：/Users/…/buwanren/.claude/rfcs`
+    ///   `  /20260916-handoff.md。按项目规矩写在 …`
+    ///
+    /// The link stopped at `…/rfcs` — a directory the line never
+    /// named.  The seam and the `。` are both candidate ends and both
+    /// exist on disk; the file is the longer one and has to win.
+    #[test]
+    fn a_seam_does_not_outrank_a_longer_end_that_exists() {
+        let root = std::env::temp_dir().join(format!("marspot-seam-cjk-{}", std::process::id()));
+        let dir = root.join(".claude").join("rfcs");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("handoff.md"), b"x").unwrap();
+        let d = dir.display().to_string();
+
+        let first = format!("  {d}");
+        let second = "  /handoff.md。按项目规矩写在";
+        let rows = [first.as_str(), second];
+        let cols = first.chars().count() as u16;
+        let mut src = StrSource::new(&rows, cols);
+        src.cursor = (0, 1);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        std::fs::remove_dir_all(&root).ok();
+
+        let want = format!("{d}/handoff.md");
+        assert!(texts.iter().any(|t| *t == want), "got {texts:?}");
+        assert!(!texts.iter().any(|t| *t == d), "stopped at the seam: {texts:?}");
     }
 
     /// The counter-case that keeps the seam a candidate rather than a
