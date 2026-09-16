@@ -410,6 +410,13 @@ struct BindMeta {
     /// for eleven hours never once accumulated thirty quiet minutes.
     /// Chrome does not touch the transcript.
     transcript_at: SystemTime,
+    /// Whether claude has written this session's transcript yet.
+    ///
+    /// False is not a gap — it is the defining fact about a session
+    /// that has not taken a turn: there is nothing to `--resume`, so
+    /// the profile cycle starts claude plain instead.  See
+    /// [`profile_cycle_op`].
+    has_transcript: bool,
 }
 
 
@@ -1631,6 +1638,7 @@ impl ClaudecodePlugin {
         }
         let Some(op) = profile_cycle_op(
             &meta.uuid,
+            meta.has_transcript,
             next_profile,
             meta.claude_pid,
             shell_pid_for(shelld_sid),
@@ -1653,7 +1661,8 @@ impl ClaudecodePlugin {
             LogLevel::Info,
             "cycle.resuming",
             &format!(
-                "pane {shelld_sid} → P{next_profile} resuming uuid={}",
+                "pane {shelld_sid} → P{next_profile} {} uuid={}",
+                if meta.has_transcript { "resuming" } else { "starting fresh," },
                 meta.uuid
             ),
         );
@@ -1856,24 +1865,36 @@ fn cycle_blocked_op() -> pty_op::PtyOp {
 /// without depending on that file still defining it.
 fn profile_cycle_op(
     uuid: &str,
+    has_transcript: bool,
     next_profile: u8,
     claude_pid: i32,
     shell_pid: i32,
 ) -> Option<pty_op::PtyOp> {
-    // No uuid, no cycle.  A pane whose session file has not appeared
-    // yet is badged from its profile alone (see `scan_once`); there is
-    // nothing to `--resume`, and resuming *nothing* would drop the
-    // conversation the user is looking at.
+    // No uuid, no cycle: without a name for the session there is no
+    // way to tell "nothing to resume" from "a conversation we failed
+    // to find", and resuming *nothing* in the second case would drop
+    // what the user is looking at.
     if uuid.is_empty() {
         return None;
     }
     let home = std::env::var("HOME").ok()?;
-    let line = pty_op::PtyCommand::new("claude")
+    let mut cmd = pty_op::PtyCommand::new("claude")
         .env("CLAUDE_CONFIG_DIR", format!("{home}/.claude-profile-{next_profile}"))
-        .arg("--resume")
-        .arg(uuid)
-        .clear_screen_first(true)
-        .to_bytes()?;
+        .clear_screen_first(true);
+    // A session with no transcript has taken no turn — there is
+    // nothing to carry across, and `--resume` on a uuid claude never
+    // wrote fails.  Start claude plain instead.
+    //
+    // This is the whole of the reported bug's second half: entering
+    // cc and immediately clicking the badge did nothing at all, twice,
+    // and went on doing nothing until the session had answered
+    // something — 8.8 hours, on the pane this was found on.  The
+    // window where a user is most likely to notice they are on the
+    // wrong account is exactly the window where switching was refused.
+    if has_transcript {
+        cmd = cmd.arg("--resume").arg(uuid);
+    }
+    let line = cmd.to_bytes()?;
     Some(
         pty_op::PtyOp::new("cc.profile_cycle")
             .hold_screen(true)
@@ -2249,7 +2270,27 @@ pub fn statusline_ingest() -> i32 {
     // a record written before this field existed simply has two
     // lines, and reads back as "no effort said".
     let effort = badge.effort.clone().unwrap_or_default();
-    if fs::write(&tmp, format!("{}\n{transcript}\n{effort}\n", badge.model)).is_ok() {
+    // Line 4 names the claude that asked for this status line, as the
+    // chain of pids from this hook up to it.
+    //
+    // The record is filed under the session uuid, which is the
+    // transcript's stem — so the badge side can only find it once it
+    // knows which transcript belongs to the pane.  For a session that
+    // has taken no turn there is no transcript to know, and claude
+    // writes one on the first turn: the record sits unread for as long
+    // as the user has not sent anything.  Measured on this machine,
+    // that window ran 8.8 hours on one pane, and the model half of the
+    // badge was missing for all of it (2026-09-16).
+    //
+    // The pid chain is the key that does not need the transcript.  The
+    // scanner already knows each pane's claude pid; this says which
+    // claude ran the hook, so the two meet without the file.
+    let chain = ancestor_pids(8)
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    if fs::write(&tmp, format!("{}\n{transcript}\n{effort}\npids={chain}\n", badge.model)).is_ok() {
         let _ = fs::rename(&tmp, dir.join(&sid));
     }
     prune_model_pushes(&dir);
@@ -2795,6 +2836,90 @@ fn pushed_model(jsonl: &std::path::Path) -> Option<(ModelBadge, EffortSaid)> {
         None => (EffortSaid::No, None),
     };
     Some((ModelBadge::new(model.to_string(), effort), said))
+}
+
+/// This process's ancestors, nearest first, at most `max` of them.
+///
+/// Stops at the first pid it cannot read (pid 1, or a parent that
+/// exited mid-walk) — a short chain is a smaller key, never a wrong
+/// one.
+fn ancestor_pids(max: usize) -> Vec<i32> {
+    let mut out = Vec::new();
+    let mut pid = unsafe { libc::getppid() };
+    while out.len() < max && pid > 1 {
+        out.push(pid);
+        match pidtree::proc_row(pid) {
+            Some(row) => pid = row.ppid,
+            None => break,
+        }
+    }
+    out
+}
+
+/// What the status-line hook last said about the session running
+/// under `claude_pid` — the route to the model (and the session uuid)
+/// that does not wait for a transcript.
+///
+/// Matched on the pid chain the hook recorded, so two panes cwd'd
+/// into the same project under the same profile cannot be confused
+/// for one another; a record with no chain (written before 0.7.143)
+/// is skipped rather than guessed at.
+///
+/// Ranked by how far up the chain the match sits, nearest first.  A
+/// claude that spawns another claude — a subagent, or one started by
+/// hand inside a pane — puts the outer one in the inner one's chain
+/// too, and both records then name this pid; the nearer match is the
+/// hook that ran closer to it.  Newest record breaks a tie: claude
+/// re-runs the hook on every redraw, so the freshest is the one
+/// describing what is on screen now.
+fn pushed_session_for_pid(claude_pid: i32) -> Option<(String, PathBuf, ModelBadge)> {
+    // (distance up the chain, written at) — smaller distance wins,
+    // newer breaks the tie.
+    let mut best: Option<((usize, SystemTime), String, PathBuf, ModelBadge)> = None;
+    for entry in fs::read_dir(model_push_dir()).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // `.uuid.tmp` — a record being written right now.
+        if name.starts_with('.') {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(entry.path()) else { continue };
+        let mut lines = raw.lines();
+        let (Some(model), Some(transcript)) = (lines.next(), lines.next()) else {
+            continue;
+        };
+        let effort = lines.next().and_then(short_effort);
+        let Some(chain) = lines.next().and_then(|l| l.strip_prefix("pids=")) else {
+            continue;
+        };
+        let Some(distance) = chain
+            .split(',')
+            .position(|p| p.parse::<i32>() == Ok(claude_pid))
+        else {
+            continue;
+        };
+        let model = model.trim();
+        if model.is_empty() {
+            continue;
+        }
+        let at = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let rank = (distance, at);
+        if best
+            .as_ref()
+            .map(|(b, ..)| (rank.0, std::cmp::Reverse(rank.1)) < (b.0, std::cmp::Reverse(b.1)))
+            .unwrap_or(true)
+        {
+            best = Some((
+                rank,
+                name,
+                PathBuf::from(transcript),
+                ModelBadge::new(model.to_string(), effort),
+            ));
+        }
+    }
+    best.map(|(_, uuid, transcript, badge)| (uuid, transcript, badge))
 }
 
 /// Whether a pushed record stated an effort at all — including
@@ -3847,6 +3972,9 @@ impl WorkerCtx {
         let mut claimed: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut bound: Vec<(usize, String, Option<PathBuf>)> = Vec::new();
+        // Models that came from the hook rather than from a transcript
+        // — see pass 3.
+        let mut pushed_model_by_pane: HashMap<usize, ModelBadge> = HashMap::new();
         for (i, f) in facts.iter().enumerate() {
             let Some(argv_uuid) = &f.argv_uuid else { continue };
             // argv says where this process *started*.  Inside the
@@ -3873,6 +4001,33 @@ impl WorkerCtx {
                 claimed.insert(uuid.clone());
                 bound.push((i, uuid, Some(path)));
             }
+        }
+
+        // Pass 3 — the sessions with no file yet, named by the hook.
+        //
+        // Passes 1 and 2 both end at a transcript, and claude writes
+        // one on the first turn; a session sitting at its prompt has
+        // none, so neither pass can name it.  Its status-line hook has
+        // already run, though, and said which session it is — that is
+        // the only channel that speaks before the first turn.
+        for (i, f) in facts.iter().enumerate() {
+            if bound.iter().any(|(j, _, _)| *j == i) {
+                continue;
+            }
+            let Some((uuid, transcript, badge)) = pushed_session_for_pid(f.claude_pid)
+            else {
+                continue;
+            };
+            if !claimed.insert(uuid.clone()) {
+                continue;
+            }
+            // The path only rides along once it exists: everything
+            // downstream of it (idle clock, model tail, activity)
+            // reads the file, and a path to a file that is not there
+            // is not a better answer than none.
+            let path = transcript.is_file().then_some(transcript);
+            pushed_model_by_pane.insert(i, badge);
+            bound.push((i, uuid, path));
         }
 
         // Every pane running claude gets an entry, bound or not.
@@ -3915,9 +4070,13 @@ impl WorkerCtx {
             // scanned has no path — badge without the model half.
             let model = match jsonl_path.as_ref() {
                 Some(p) => self.model_for(p, f.claude_pid, f.shelld_sid),
-                // Named by argv but not yet scanned, so there is no
-                // transcript to consult.  Its own screen already says.
-                None => self.model_from_banner(f.shelld_sid),
+                // No transcript to consult.  The hook's own words
+                // first (pass 3 found them by pid), then the banner,
+                // which is only on screen until claude scrolls it off.
+                None => pushed_model_by_pane
+                    .get(&i)
+                    .cloned()
+                    .or_else(|| self.model_from_banner(f.shelld_sid)),
             };
             // The session uuid used to ride along here.  It is 36
             // characters of hex that no one can act on — it names the
@@ -4002,6 +4161,7 @@ impl WorkerCtx {
                         .and_then(|p| p.metadata().ok())
                         .and_then(|m| m.modified().ok())
                         .unwrap_or(SystemTime::UNIX_EPOCH),
+                    has_transcript: jsonl_path.is_some(),
                 },
             );
             // No log line here on purpose — `session.bound` is
@@ -4419,6 +4579,7 @@ mod tests {
             claude_pid: i32::MAX,
             project_basename: String::new(),
             transcript_at: SystemTime::now(),
+            has_transcript: true,
         };
 
         plugin.start_profile_cycle_to(&host, 7, meta, 2);
@@ -4533,6 +4694,7 @@ mod tests {
             claude_pid: i32::MAX,
             project_basename: String::new(),
             transcript_at: SystemTime::now(),
+            has_transcript: true,
         };
 
         plugin.start_profile_cycle_to(&host, 7, meta, 2);
@@ -6295,6 +6457,7 @@ mod tests {
                 // Long enough ago that the transcript clock is not what
                 // any of these tests are about.
                 transcript_at: SystemTime::now() - Duration::from_secs(7200),
+                has_transcript: true,
             },
         );
         let mut new_cpu = HashMap::new();
@@ -6327,13 +6490,117 @@ mod tests {
             "no uuid ⇒ no resume line ⇒ claude must not be taken down"
         );
         assert!(
-            profile_cycle_op("", 3, 4242, 4200).is_none(),
+            profile_cycle_op("", false, 3, 4242, 4200).is_none(),
             "…and the badge-click cycle refuses for the same reason"
         );
         // The same call with a uuid is the normal path, so the guard
         // above is the only thing being tested here.
         assert!(reclaim_op("u-1", None, 4242, 4200).is_some());
-        assert!(profile_cycle_op("u-1", 3, 4242, 4200).is_some());
+        assert!(profile_cycle_op("u-1", true, 3, 4242, 4200).is_some());
+    }
+
+    /// The record the hook leaves is found by the pid of the claude
+    /// that ran it — the key that works before there is a transcript.
+    #[test]
+    fn the_hooks_record_is_found_by_which_claude_asked_for_it() {
+        let state = std::env::temp_dir().join(format!("marspot-push-{}", std::process::id()));
+        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &state) };
+        let dir = model_push_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let write = |uuid: &str, body: &str| fs::write(dir.join(uuid), body).unwrap();
+
+        write("u-mine", "opus-5\n/t/u-mine.jsonl\nhigh\npids=9001,4242,1\n");
+        write("u-theirs", "fable-5\n/t/u-theirs.jsonl\nhigh\npids=9002,7777,1\n");
+        // Written before the hook recorded a chain: skipped, because a
+        // record that cannot say which claude it belongs to must not
+        // be guessed onto one.
+        write("u-old", "sonnet-4.5\n/t/u-old.jsonl\nhigh\n");
+
+        let got = pushed_session_for_pid(4242).expect("the claude that ran the hook");
+        assert_eq!(got.0, "u-mine");
+        assert_eq!(got.2.render(), "opus-5\u{b7}high");
+        assert_eq!(got.1, PathBuf::from("/t/u-mine.jsonl"));
+
+        assert!(
+            pushed_session_for_pid(4243).is_none(),
+            "a pid in no chain matches nothing",
+        );
+        fs::remove_dir_all(&state).ok();
+        unsafe { std::env::remove_var("MARSPOT_STATE_DIR") };
+    }
+
+    /// A claude inside a claude: both records name the outer pid, and
+    /// the outer pane must take the one whose hook ran nearest to it.
+    #[test]
+    fn the_nearer_claude_in_the_chain_wins() {
+        let state = std::env::temp_dir().join(format!("marspot-push-near-{}", std::process::id()));
+        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &state) };
+        let dir = model_push_dir();
+        fs::create_dir_all(&dir).unwrap();
+        // The outer claude is 4242.  Its own hook sits one hop from
+        // it; a subagent's hook sits three, through its own claude.
+        fs::write(dir.join("u-outer"), "opus-5\n/t/u-outer.jsonl\nhigh\npids=5000,4242,1\n")
+            .unwrap();
+        fs::write(dir.join("u-inner"), "fable-5\n/t/u-inner.jsonl\nhigh\npids=6000,5900,4242,1\n")
+            .unwrap();
+
+        let got = pushed_session_for_pid(4242).expect("matched");
+        assert_eq!(got.0, "u-outer", "the nearer hook is this pane's own");
+        fs::remove_dir_all(&state).ok();
+        unsafe { std::env::remove_var("MARSPOT_STATE_DIR") };
+    }
+
+    /// The chain the hook writes starts at its own parent and walks
+    /// up — claude is somewhere above it, however many shells deep it
+    /// is invoked.
+    #[test]
+    fn the_recorded_chain_starts_at_this_process_parent() {
+        let chain = ancestor_pids(8);
+        assert!(!chain.is_empty(), "a process always has a parent");
+        assert_eq!(chain[0], unsafe { libc::getppid() });
+        assert!(chain.iter().all(|&p| p > 1), "{chain:?}");
+        assert!(chain.len() <= 8, "{chain:?}");
+    }
+
+    /// Everything a `PtyOp` types into the pane, joined.
+    fn sent_text(op: &pty_op::PtyOp) -> String {
+        op.steps
+            .iter()
+            .filter_map(|s| match &s.kind {
+                pty_op::StepKind::Send(b) => Some(String::from_utf8_lossy(b).into_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    /// A session the hook has named but claude has not written a
+    /// transcript for: nothing to resume, so the cycle starts claude
+    /// plain rather than refusing.
+    ///
+    /// Reported 2026-09-16 — entering cc and clicking the badge did
+    /// nothing, twice, and kept doing nothing until the session had
+    /// answered something.
+    #[test]
+    fn a_session_with_no_turn_yet_cycles_by_starting_fresh() {
+        let op = profile_cycle_op("u-1", false, 3, 4242, 4200)
+            .expect("a named session with no transcript can still cycle");
+        let sent = sent_text(&op);
+        assert!(
+            sent.contains(".claude-profile-3"),
+            "must still switch profile: {sent:?}"
+        );
+        assert!(
+            !sent.contains("--resume"),
+            "nothing to resume, and --resume on a uuid claude never wrote fails: {sent:?}"
+        );
+
+        // The counter-case: once the transcript exists, the session
+        // travels with the switch.
+        let op = profile_cycle_op("u-1", true, 3, 4242, 4200).expect("normal path");
+        let sent = sent_text(&op);
+        assert!(sent.contains("--resume"), "{sent:?}");
+        assert!(sent.contains("u-1"), "{sent:?}");
     }
 
     /// …and the idle policy stops before signalling such a pane, with

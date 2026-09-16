@@ -28,7 +28,33 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.142**
+Current: **0.7.143**
+
+### 0.7.143
+
+刚进 cc 的那段时间，badge 只有 `P6` 没有 model，而且这时候点 badge 切 profile
+毫无反应 —— 要先 `/model` 把 model 读出来，切换才肯动。两件事，同一个根。
+
+绑定是从 transcript 认出来的，而 claude 要到**第一轮对话**才写这个文件。在那之前
+pane 是未绑定的：没有 uuid，也就没有 model，切 profile 的 `--resume` 也无从写起，
+于是点击被静默丢弃。日志里这段窗口在 pane 383 上持续了 **8.8 小时**，其间两次点击
+「切到 P1」都只留下一行 `uuid=` 的记录，什么也没发生；第三次点成功，是因为绑定
+在那一秒刚建立。
+
+model 其实一直在盘上。状态栏 hook 在 claude 启动时就跑了一次，把 model 和
+session uuid 写进了 `plugins/claudecode/model/`——现在就有 3 条这样的记录，它们的
+transcript 还不存在。问题是记录按 uuid 命名，而未绑定的 pane 没有 uuid，要找的东西
+就躺在旁边读不到。
+
+所以 hook 多写一行：从它自己往上数的祖先 pid 链。扫描本来就知道每个 pane 的 claude
+pid，这行让两边不经过文件就能对上。链上位置近的优先——claude 会派生 claude
+（subagent），外层那个也在内层的链里，取近的才是这个 pane 自己的 hook。没有这一行的
+旧记录直接跳过，不猜。
+
+第二层跟着就成立了：拿到 uuid 之后，还要分清「没有对话可带走」和「有对话但我们没
+找到」。前者（uuid 有、transcript 没有）切 profile 改成直接起一个干净的 claude，
+不带 `--resume`——本来就没有东西可 resume，而 `--resume` 一个 claude 从没写过的
+uuid 只会失败。后者（连 uuid 都没有）仍然拒绝：分不清的时候，宁可不动。
 
 ### 0.7.142
 
