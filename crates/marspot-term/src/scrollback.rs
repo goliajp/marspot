@@ -473,8 +473,28 @@ const FILE_MAGIC: u32 = 0x5350_5301;
 // persistence.  Future scrollback shape changes (e.g. adding a
 // record-level field) only need VERSION++ without touching
 // MIN_COMPAT, preserving back-compat.
-const FILE_VERSION: u32 = 2;
+//
+// v3 (2026-09-17) — a cell is stored as its own 20 in-memory bytes
+// (`grid::Cell::slice_as_bytes`) instead of being encoded to 13, which
+// took the encode loop off the parse thread: +13–21 % file-backed
+// parse throughput, measured on mini against the 13-byte encoder.
+//
+// A v2 file is NOT rewritten.  Every record already states its body
+// length and its column count, so the width of its cells is
+// `(rec_len - 3) / cols` — 13 or 20, and the two only coincide at
+// cols = 0, where there are no cells to read.  Opening a v2 file
+// rewrites its header in place (version and cell_abi, eight bytes)
+// and appends 20-byte records after the 13-byte ones; the reader
+// decodes each record at its own width.  Nothing is copied, nothing
+// is lost, and startup costs one small write.
+//
+// The one direction this does not cover is rollback: a binary from
+// before v3 sees version 3 and quarantines the pair (renamed, not
+// deleted — see `Scrollback::file`).
+const FILE_VERSION: u32 = 3;
 const FILE_MIN_COMPAT: u32 = 2;
+/// Cell width of the records a v2 file holds.
+const V2_CELL_BYTES: usize = 13;
 const FILE_HEADER_BYTES: u64 = 32;
 const FILE_REC_HEADER_BYTES: usize = 4 + 1 + 2; // rec_len + wrapped + cols
 
@@ -697,14 +717,15 @@ impl FileScrollback {
                 ));
             }
             let cell_abi = u32::from_le_bytes(hdr[8..12].try_into().unwrap());
-            if cell_abi != crate::terminal::CELL_BYTES_PUB as u32 {
+            let expected_abi = if version == 2 { V2_CELL_BYTES } else { crate::grid::CELL_MEM_BYTES };
+            if cell_abi != expected_abi as u32 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!(
-                        "scrollback bin cell_abi {cell_abi} != {}",
-                        crate::terminal::CELL_BYTES_PUB
-                    ),
+                    format!("scrollback bin v{version} cell_abi {cell_abi} != {expected_abi}"),
                 ));
+            }
+            if version == 2 {
+                upgrade_v2_header_in_place(&bin_path)?;
             }
         }
 
@@ -890,7 +911,7 @@ impl FileScrollback {
             total_lines,
             bin_tail_offset,
             scratch: Vec::with_capacity(
-                FILE_REC_HEADER_BYTES + cols.saturating_mul(crate::terminal::CELL_BYTES_PUB),
+                FILE_REC_HEADER_BYTES + cols.saturating_mul(crate::grid::CELL_MEM_BYTES),
             ),
             cold_bin_path,
             cold_idx_path,
@@ -907,7 +928,7 @@ impl FileScrollback {
         let mut hdr = [0u8; FILE_HEADER_BYTES as usize];
         hdr[0..4].copy_from_slice(&FILE_MAGIC.to_le_bytes());
         hdr[4..8].copy_from_slice(&FILE_VERSION.to_le_bytes());
-        hdr[8..12].copy_from_slice(&(crate::terminal::CELL_BYTES_PUB as u32).to_le_bytes());
+        hdr[8..12].copy_from_slice(&(crate::grid::CELL_MEM_BYTES as u32).to_le_bytes());
         hdr[12..16].copy_from_slice(&0u32.to_le_bytes()); // header_flags
         let now_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1101,28 +1122,20 @@ impl FileScrollback {
             .unwrap_or(0);
         let line = &line[..trimmed_len];
         let cols_u16 = line.len() as u16;
-        let rec_len = (1 + 2 + line.len() * crate::terminal::CELL_BYTES_PUB) as u32;
+        let cell_bytes = crate::grid::Cell::slice_as_bytes(line);
+        let rec_len = (1 + 2 + cell_bytes.len()) as u32;
         let total_bytes = 4 + rec_len as usize;
-        // Size the record once, then fill it in place.  The obvious
-        // spelling — two `extend_from_slice` per cell — re-checks
-        // capacity and updates the length 2x per cell, and this is the
-        // single hottest thing the parse thread does once the disk
-        // writes moved off it (32 % of its samples).  A 122-column row
-        // is 244 of those calls; this is one `resize` and a flat loop
-        // over a slice the compiler knows the length of.
+        // The record is the header plus the row's own memory.  This was
+        // an encode loop — 13 bytes per cell, a match per colour — and
+        // it was the hottest thing the parse thread did once the disk
+        // writes moved off it; replacing it with this copy measured
+        // +13–21 % on file-backed parse.  See FILE_VERSION for how v2
+        // files keep reading.
         self.scratch.clear();
-        self.scratch.resize(total_bytes, 0);
-        self.scratch[0..4].copy_from_slice(&rec_len.to_le_bytes());
-        self.scratch[4] = wrapped as u8;
-        self.scratch[5..7].copy_from_slice(&cols_u16.to_le_bytes());
-        let body = &mut self.scratch[7..];
-        for (slot, c) in body
-            .chunks_exact_mut(crate::terminal::CELL_BYTES_PUB)
-            .zip(line)
-        {
-            slot[0..4].copy_from_slice(&(c.ch as u32).to_le_bytes());
-            slot[4..].copy_from_slice(&crate::terminal::serialize_attrs_pub(c.attrs));
-        }
+        self.scratch.extend_from_slice(&rec_len.to_le_bytes());
+        self.scratch.push(wrapped as u8);
+        self.scratch.extend_from_slice(&cols_u16.to_le_bytes());
+        self.scratch.extend_from_slice(cell_bytes);
 
         // F2+5 — hot → cold rotation when the next record would
         // overflow the cap.  Failure to rotate is a real I/O error
@@ -1426,21 +1439,7 @@ impl FileScrollback {
         }
         let wrapped = body[0] != 0;
         let cols = u16::from_le_bytes([body[1], body[2]]) as usize;
-        let want_cells_bytes = cols * crate::terminal::CELL_BYTES_PUB;
-        if body.len() < 3 + want_cells_bytes {
-            return None;
-        }
-        let mut cells = Vec::with_capacity(cols);
-        let mut p = 3;
-        for _ in 0..cols {
-            let ch_u = u32::from_le_bytes(body[p..p + 4].try_into().unwrap());
-            let attrs = crate::terminal::deserialize_attrs_pub(
-                &body[p + 4..p + 4 + crate::terminal::ATTRS_BYTES_PUB],
-            );
-            let ch = char::from_u32(ch_u).unwrap_or(' ');
-            cells.push(crate::grid::Cell { ch, attrs });
-            p += crate::terminal::CELL_BYTES_PUB;
-        }
+        let cells = decode_record_cells(&body[3..], cols)?;
         Some((cells, wrapped))
     }
 
@@ -1583,7 +1582,7 @@ impl FileScrollback {
     pub fn approx_bytes(&self) -> usize {
         // RAM ring resident bytes (matches Memory/Disk approx_bytes
         // semantics — what we hold in process, not what's on disk).
-        self.ram_len * self.cols * crate::terminal::CELL_BYTES_PUB
+        self.ram_len * self.cols * crate::grid::CELL_MEM_BYTES
     }
 }
 
@@ -1728,23 +1727,69 @@ fn read_record_at(
     }
     let wrapped = body[0] != 0;
     let cols = u16::from_le_bytes([body[1], body[2]]) as usize;
-    let want_cells = cols * crate::terminal::CELL_BYTES_PUB;
-    if body.len() < 3 + want_cells {
-        return Err(std::io::Error::new(
+    let cells = decode_record_cells(&body[3..], cols).ok_or_else(|| {
+        std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "scrollback rec cells truncated",
-        ));
-    }
-    let mut cells = Vec::with_capacity(cols);
-    let mut p = 3;
-    for _ in 0..cols {
-        let ch_u = u32::from_le_bytes(body[p..p + 4].try_into().unwrap());
-        let attrs = crate::terminal::deserialize_attrs_pub(&body[p + 4..p + 4 + 9]);
-        let ch = char::from_u32(ch_u).unwrap_or(' ');
-        cells.push(crate::grid::Cell { ch, attrs });
-        p += crate::terminal::CELL_BYTES_PUB;
-    }
+            format!(
+                "scrollback rec at {offset}: {} cell bytes for {cols} cols is neither {V2_CELL_BYTES} nor {} per cell",
+                body.len() - 3,
+                crate::grid::CELL_MEM_BYTES
+            ),
+        )
+    })?;
     Ok((cells, wrapped))
+}
+
+/// A record's cells, at whatever width the record was written.
+///
+/// The width is not stored; it is what the body length says it is.
+/// 20 bytes per cell since v3, 13 before it, and the two only agree at
+/// `cols == 0`, where there are no cells.  A body that is neither is
+/// not a record this code wrote — `None`, never a guess.
+fn decode_record_cells(cell_bytes: &[u8], cols: usize) -> Option<Vec<crate::grid::Cell>> {
+    let mut cells = Vec::with_capacity(cols);
+    if cols == 0 {
+        return (cell_bytes.is_empty()).then_some(cells);
+    }
+    if cell_bytes.len() == cols * crate::grid::CELL_MEM_BYTES {
+        for chunk in cell_bytes.chunks_exact(crate::grid::CELL_MEM_BYTES) {
+            cells.push(crate::grid::Cell::from_mem_bytes(chunk.try_into().ok()?));
+        }
+        return Some(cells);
+    }
+    if cell_bytes.len() == cols * V2_CELL_BYTES {
+        for chunk in cell_bytes.chunks_exact(V2_CELL_BYTES) {
+            let ch = char::from_u32(u32::from_le_bytes(chunk[0..4].try_into().ok()?))
+                .unwrap_or(' ');
+            let attrs = crate::terminal::deserialize_attrs_pub(&chunk[4..]);
+            cells.push(crate::grid::Cell { ch, attrs });
+        }
+        return Some(cells);
+    }
+    None
+}
+
+/// Move a v2 file's header to v3 without touching a single record.
+///
+/// Eight bytes: version and cell_abi.  Written through its own
+/// non-append descriptor — a positional write on an `O_APPEND` fd is
+/// not guaranteed to land at the position asked for — and synced,
+/// because the next record appended is 20 bytes per cell and a v2
+/// header in front of it would be a lie on the next open.
+fn upgrade_v2_header_in_place(bin_path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    let f = std::fs::OpenOptions::new().write(true).open(bin_path)?;
+    let mut patch = [0u8; 8];
+    patch[0..4].copy_from_slice(&FILE_VERSION.to_le_bytes());
+    patch[4..8].copy_from_slice(&(crate::grid::CELL_MEM_BYTES as u32).to_le_bytes());
+    f.write_all_at(&patch, 4)?;
+    f.sync_data()?;
+    crate::lx_info!(
+        "scrollback.upgraded_v2",
+        "header moved to v3 in place; existing 13-byte records stay as written",
+        bin = bin_path.display()
+    );
+    Ok(())
 }
 
 fn pad_or_clip(line: &[crate::grid::Cell], cols: usize) -> Vec<crate::grid::Cell> {
@@ -2007,6 +2052,155 @@ mod tests {
         }
     }
 
+    /// A row whose cells exercise every attribute and every colour kind,
+    /// so a width or byte-order slip shows up as a wrong cell rather
+    /// than slipping past on spaces.
+    fn rich_row(seed: u32, cols: usize) -> Vec<Cell> {
+        use crate::grid::{CellAttrs, Color};
+        (0..cols)
+            .map(|i| {
+                let k = seed.wrapping_mul(31).wrapping_add(i as u32);
+                let ch = ['a', 'Z', '中', '😀', 'é', '─'][(k % 6) as usize];
+                let color = |n: u32| match n % 3 {
+                    0 => Color::DEFAULT,
+                    1 => Color::indexed((n % 256) as u8),
+                    _ => Color::rgb((n % 251) as u8, (n % 241) as u8, (n % 239) as u8),
+                };
+                Cell {
+                    ch,
+                    attrs: CellAttrs {
+                        fg: color(k),
+                        bg: color(k / 3),
+                        bold: k % 2 == 0,
+                        italic: k % 3 == 0,
+                        underline: k % 5 == 0,
+                        reverse: k % 7 == 0,
+                        dim: k % 11 == 0,
+                        ..Default::default()
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// Write a scrollback pair exactly as a v2 build did: 13-byte cells,
+    /// header version 2, cell_abi 13.  Independent of the v3 writer on
+    /// purpose — a compatibility test that produced its "old" file with
+    /// the new code would be asserting what it had just set.
+    fn write_v2_pair(bin: &std::path::Path, idx: &std::path::Path, rows: &[(Vec<Cell>, bool)]) {
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(&FILE_MAGIC.to_le_bytes());
+        b.extend_from_slice(&2u32.to_le_bytes());
+        b.extend_from_slice(&13u32.to_le_bytes());
+        b.extend_from_slice(&[0u8; 20]);
+        let mut offs: Vec<u64> = Vec::new();
+        for (row, wrapped) in rows {
+            offs.push(b.len() as u64);
+            let trimmed = row
+                .iter()
+                .rposition(|c| *c != Cell::default())
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            let rec_len = (3 + trimmed * 13) as u32;
+            b.extend_from_slice(&rec_len.to_le_bytes());
+            b.push(*wrapped as u8);
+            b.extend_from_slice(&(trimmed as u16).to_le_bytes());
+            for c in &row[..trimmed] {
+                b.extend_from_slice(&(c.ch as u32).to_le_bytes());
+                b.extend_from_slice(&crate::terminal::serialize_attrs_pub(c.attrs));
+            }
+        }
+        offs.push(b.len() as u64);
+        std::fs::write(bin, &b).unwrap();
+        let ib: Vec<u8> = offs.iter().flat_map(|o| o.to_le_bytes()).collect();
+        std::fs::write(idx, ib).unwrap();
+    }
+
+    fn header_version_and_abi(bin: &std::path::Path) -> (u32, u32) {
+        let b = std::fs::read(bin).unwrap();
+        (
+            u32::from_le_bytes(b[4..8].try_into().unwrap()),
+            u32::from_le_bytes(b[8..12].try_into().unwrap()),
+        )
+    }
+
+    /// The history a user already has is written in v2.  Opening it
+    /// must read every old line exactly, keep appending, and leave a
+    /// file whose old and new lines both read back — without rewriting
+    /// a single old record.
+    #[test]
+    fn a_v2_file_keeps_its_history_and_takes_new_lines() {
+        let tmp = TmpDir::new("v2-upgrade");
+        let cols = 24;
+        let old: Vec<(Vec<Cell>, bool)> =
+            (0..40).map(|i| (rich_row(i, cols), i % 4 == 0)).collect();
+        write_v2_pair(&tmp.bin(), &tmp.idx(), &old);
+        let old_len = std::fs::metadata(tmp.bin()).unwrap().len();
+
+        // A tiny RAM ring, so most reads go through the file.
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("open v2");
+        assert_eq!(header_version_and_abi(&tmp.bin()), (3, 20), "header moved on");
+        let old_bytes = std::fs::read(tmp.bin()).unwrap();
+        assert_eq!(old_bytes.len() as u64, old_len, "no record rewritten");
+
+        let new: Vec<(Vec<Cell>, bool)> =
+            (100..130).map(|i| (rich_row(i, cols), i % 3 == 0)).collect();
+        for (row, w) in &new {
+            sb.push_line(row, *w);
+        }
+        drop(sb);
+
+        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("reopen");
+        let all: Vec<_> = old.iter().chain(new.iter()).collect();
+        assert_eq!(sb.len(), all.len());
+        for (i, (row, _)) in all.iter().enumerate() {
+            let got = sb.read_line(i).expect("line reads");
+            assert_eq!(&got[..], &row[..], "line {i}");
+        }
+        // The first 12 bytes of every v2 record are untouched too —
+        // compare the whole old region past the 32-byte header.
+        let now = std::fs::read(tmp.bin()).unwrap();
+        assert_eq!(&now[32..old_len as usize], &old_bytes[32..old_len as usize]);
+    }
+
+    /// Both cold read paths — the mmap one behind `cell_at` and the
+    /// pread one behind `read_line` — decode a file whose records are a
+    /// mix of both widths.
+    #[test]
+    fn both_read_paths_decode_a_file_of_mixed_widths() {
+        let tmp = TmpDir::new("mixed-widths");
+        let cols = 10;
+        let old: Vec<(Vec<Cell>, bool)> = (0..8).map(|i| (rich_row(i, cols), false)).collect();
+        write_v2_pair(&tmp.bin(), &tmp.idx(), &old);
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 2).expect("open");
+        let new: Vec<(Vec<Cell>, bool)> = (50..58).map(|i| (rich_row(i, cols), false)).collect();
+        for (row, w) in &new {
+            sb.push_line(row, *w);
+        }
+        let all: Vec<_> = old.iter().chain(new.iter()).collect();
+        // Everything but the last two lines is off the RAM ring.
+        for (i, (row, _)) in all.iter().enumerate().take(all.len() - 2) {
+            for (c, want) in row.iter().enumerate() {
+                assert_eq!(sb.cell_at(i, c).as_ref(), Some(want), "cell_at line {i} col {c}");
+            }
+            assert_eq!(&sb.read_line(i).unwrap()[..], &row[..], "read_line {i}");
+        }
+    }
+
+    /// A body whose length fits neither width is not a record this code
+    /// wrote, and is refused rather than decoded at a guessed width.
+    #[test]
+    fn a_record_of_neither_width_is_refused() {
+        let body_20 = vec![0u8; 3 * crate::grid::CELL_MEM_BYTES];
+        assert_eq!(decode_record_cells(&body_20, 3).map(|v| v.len()), Some(3));
+        let body_13 = vec![0u8; 3 * V2_CELL_BYTES];
+        assert_eq!(decode_record_cells(&body_13, 3).map(|v| v.len()), Some(3));
+        assert!(decode_record_cells(&vec![0u8; 50], 3).is_none());
+        assert!(decode_record_cells(&[], 3).is_none());
+        assert_eq!(decode_record_cells(&[], 0).map(|v| v.len()), Some(0));
+        assert!(decode_record_cells(&[0u8; 20], 0).is_none());
+    }
+
     #[test]
     fn file_create_then_roundtrip_one_line() {
         let tmp = TmpDir::new("one-line");
@@ -2056,7 +2250,7 @@ mod tests {
         let mut rec_len_buf = [0u8; 4];
         f.read_exact(&mut rec_len_buf).unwrap();
         let rec_len = u32::from_le_bytes(rec_len_buf) as usize;
-        let expected_trimmed = 1 + 2 + prefix_len * crate::terminal::CELL_BYTES_PUB;
+        let expected_trimmed = 1 + 2 + prefix_len * crate::grid::CELL_MEM_BYTES;
         assert_eq!(
             rec_len, expected_trimmed,
             "first record should hold ONLY the prefix (trim default \

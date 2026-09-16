@@ -210,9 +210,9 @@ Header (32 bytes, fixed):
 ```text
 offset  size  field          value
 0       4     magic          0x5350_5301  ('S','S','P',0x01) LE
-4       4     version        u32 LE, current = 1, min_compat = 1
-8       4     cell_abi       u32 LE = CELL_BYTES (= 13 in this build)
-12      4     header_flags   u32 LE, all zero in v1, reserved
+4       4     version        u32 LE, current = 3, min_compat = 2
+8       4     cell_abi       u32 LE — v3: 20 (grid::CELL_MEM_BYTES); v2: 13
+12      4     header_flags   u32 LE, all zero, reserved
 16      8     created_ns     u64 LE = SystemTime::UNIX_EPOCH nanos at create
 24      8     reserved       0
 ```
@@ -221,16 +221,40 @@ After header, one or more line records appended in arrival order:
 
 ```text
 offset  size       field
-+0      4          rec_len u32 LE  = 1 + 2 + cols * CELL_BYTES
++0      4          rec_len u32 LE  = 1 + 2 + cols * W
 +4      1          wrapped u8      (0 = hard newline, 1 = DECAWM continuation of previous line)
-+5      2          cols    u16 LE  (cell count in this line)
-+7      cols*13    cells           (each = 4 ch + 9 attrs, same as serialize_snapshot)
++5      2          cols    u16 LE  (cell count in this line, trailing default cells trimmed)
++7      cols*W     cells
 ```
+
+`W` is the width of one stored cell, and it is **not stored**: it is
+`(rec_len - 3) / cols`.
+
+- **W = 20** (every record written since v3): the cell's own memory —
+  `grid::Cell` is `repr(C)`, 20 bytes, no padding, every byte
+  initialised.  `char` u32 native-endian at +0; `fg` at +4 and `bg` at
+  +8 as `[tag, a, b, c]` (tag 0 default / 1 indexed `a` / 2 rgb `a,b,c`,
+  unused bytes zero); `bold italic underline reverse dim` one byte each
+  at +12..+16; three zero bytes at +17.  Written with one copy per line
+  (`Cell::slice_as_bytes`), read back field by field
+  (`Cell::from_mem_bytes`) — never transmuted, because the bytes come
+  from a file.
+- **W = 13** (records written by a v2 build): 4 `ch` + 9 attrs, the
+  `serialize_snapshot` encoding.
+
+The two widths only coincide at `cols = 0`, where there are no cells.
+A body whose length is neither `cols*20` nor `cols*13` is refused.
 
 `rec_len` is the byte count **after the rec_len field itself**.
 Reader validates `pos + 4 + rec_len <= file_len` before parsing
 cells.  A truncated trailing record (crash mid-write) is
 discardable by this check.
+
+**v2 → v3 migration** is in place and copies nothing.  Opening a v2
+file rewrites eight header bytes (version 3, cell_abi 20, synced) and
+appends 20-byte records after the 13-byte ones; each record reads at
+its own width.  A pre-v3 build that later opens the file sees version
+3 and quarantines the pair (renamed `.corrupt-<ts>`, not deleted).
 
 ### §3.3  `scrollback.idx` byte layout
 
@@ -245,7 +269,7 @@ Where `entry_k` = byte offset in `.bin` of the start of the
 `rec_len` field for line k.  Invariants:
 
 - `entry_0 = 32` (header bytes count)
-- `entry_k+1 = entry_k + 4 (rec_len) + 1 (wrapped) + 2 (cols) + cols * CELL_BYTES`
+- `entry_k+1 = entry_k + 4 + rec_len_k` (record widths may differ within one file)
 - `len(idx) = N + 1` where N = lines in `.bin`
 - The sentinel lets `len(idx) - 1` work as the line-count getter
 
