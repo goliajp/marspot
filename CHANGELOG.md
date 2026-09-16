@@ -3079,7 +3079,18 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.203**
+Current: **0.12.204**
+
+### 0.12.204
+
+新增 dev seam `MARSPOT_DEV_DRAG=split-right|new-window`：窗口就位后，按真实鼠标事件的同一条
+路由（`focus_window` → `mouse_down` → 越过 slop 的 `mouse_drag` → 悬停到目标的 `mouse_drag`
+→ `mouse_up`）完成一次 pane 拖拽。安装版不设置，行为不变。
+
+用途是补上 RFC-006 §8 第 6 步一直欠着的 E2E：`bin/test-multi-window.sh` 第五阶段，三种结局
+都从 app 自己写出的 `shell-state.bin` 读回断言——2×1 拖出一个到 1×1 右侧带（源窗原位留
+dormant、目标变 1×2）、1×1 的最后一个活 pane 拖走（源窗关闭）、拖到所有窗口之外（新开 1×1
+窗、源窗留占位）。本机沙箱五阶段全过。
 
 ### 0.12.203
 

@@ -820,6 +820,7 @@ mod window_state_tests {
             dev_close_panes: 0,
             dev_close_panes_at: None,
             dev_open_settings_at: None,
+            dev_drag: None,
             layout_discarded: false,
             windows,
             key_window: 0,
@@ -2675,6 +2676,28 @@ struct PaneDrag {
     active: bool,
 }
 
+/// The drag endings the `MARSPOT_DEV_DRAG` seam can play (RFC-006 §8
+/// step 6).  Which *result* each one produces also depends on the
+/// layout the script seeds — `SplitRight` from a 2×1 window leaves a
+/// dormant placeholder behind, from a 1×1 window closes it.
+#[derive(Clone, Copy, Debug)]
+enum DevDrag {
+    /// Window 0's first pane onto window 1's first pane, right band.
+    SplitRight,
+    /// Window 0's first pane released outside every marspot window.
+    NewWindow,
+}
+
+impl DevDrag {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "split-right" => Some(Self::SplitRight),
+            "new-window" => Some(Self::NewWindow),
+            _ => None,
+        }
+    }
+}
+
 /// How far (physical px) the pointer must travel from the press
 /// before a title-bar hold becomes a pane drag.  Generous enough
 /// that an ordinary click never trips it on a shaky hand.
@@ -3894,6 +3917,9 @@ struct CoreApp {
     /// settings panel, cleared once it has.  See
     /// `dev_drive_open_settings`.
     dev_open_settings_at: Option<Instant>,
+    /// Dev seam only (`MARSPOT_DEV_DRAG`): one scripted pane drag, and
+    /// the earliest moment to perform it.
+    dev_drag: Option<(DevDrag, Instant)>,
     /// Set once the user closed the last pane of the last window.  The
     /// saved layout has been deleted at that point and the app is on
     /// its way out; any later save would resurrect what they just
@@ -4359,6 +4385,78 @@ impl CoreApp {
                 &format!("{e}; saved state not persisted this tick")
             );
         }
+    }
+
+    /// Dev seam (`MARSPOT_DEV_DRAG`) — see the call site.
+    ///
+    /// Waits until the windows the ending needs have panes laid out
+    /// (restored panes land off-loop, seconds after boot), then plays
+    /// the event sequence L1 would send for a real drag, in the order
+    /// the event loop routes it: press on the title of window 0's first
+    /// pane, move past the slop, move over the target, release.  Nothing
+    /// below `mouse_down` / `mouse_drag` / `mouse_up` is bypassed — the
+    /// ghost, the drop resolution and the landing are the production
+    /// ones.
+    fn dev_drive_drag(&mut self) {
+        let Some((ending, at)) = self.dev_drag else { return };
+        if Instant::now() < at {
+            return;
+        }
+        let needed = match ending {
+            DevDrag::SplitRight => 2,
+            DevDrag::NewWindow => 1,
+        };
+        let laid_out = |app: &Self, wi: usize| {
+            !win!(app, wi).panes.is_empty() && !win!(app, wi).layout.cells.is_empty()
+        };
+        if self.windows.len() < needed || !(0..needed).all(|wi| laid_out(self, wi)) {
+            return;
+        }
+        self.dev_drag = None;
+
+        let src = win!(self, 0).layout.cells[0].clone();
+        let press = (src.x + src.w / 2.0, src.y_top + win!(self, 0).layout.cell_title_h / 2.0);
+        let from_id = win!(self, 0).window_id;
+        let (drop_id, drop) = match ending {
+            DevDrag::SplitRight => {
+                let dst = win!(self, 1).layout.cells[0].clone();
+                // Inside the right band, clear of the window edge.
+                (win!(self, 1).window_id, (dst.x + dst.w - 8.0, dst.y_top + dst.h / 2.0))
+            }
+            // Window id 0 is "no marspot window under the pointer"; the
+            // point is in screen space, where the new window is placed.
+            DevDrag::NewWindow => (0, (640.0, 480.0)),
+        };
+        lx_event!(
+            "DEV_DRAG",
+            "driving a pane drag (dev seam)",
+            ending = format!("{ending:?}"),
+            from_window = from_id,
+            drop_window = drop_id,
+            windows_before = self.windows.len() as u32
+        );
+
+        let Some(wi) = self.focus_window(from_id) else { return };
+        self.drag_window = Some(from_id);
+        self.mouse_down(wi, press.0, press.1, Modifiers::default());
+        let past_slop = press.0 + 2.0 * PANE_DRAG_SLOP_PHYS;
+        self.mouse_drag(wi, past_slop, press.1, from_id, past_slop, press.1);
+        self.mouse_drag(wi, drop.0, drop.1, drop_id, drop.0, drop.1);
+        lx_event!(
+            "DEV_DRAG_HOVER",
+            "ghost resolved before release",
+            target = format!("{:?}", self.drop_target),
+            drag_active = self.pane_drag.is_some_and(|d| d.active) as u32
+        );
+        if let Some(wi) = self.drag_target(from_id) {
+            self.mouse_up(wi, drop_id, drop.0, drop.1);
+        }
+        self.drag_window = None;
+        lx_event!(
+            "DEV_DRAG_DONE",
+            "pane drag released (dev seam)",
+            windows_after = self.windows.len() as u32
+        );
     }
 
     /// Dev seam (`MARSPOT_DEV_OPEN_SETTINGS`) — see the call site.
@@ -10042,6 +10140,10 @@ fn main() {
         dev_open_settings_at: std::env::var("MARSPOT_DEV_OPEN_SETTINGS")
             .is_ok()
             .then(|| Instant::now() + Duration::from_secs(2)),
+        dev_drag: std::env::var("MARSPOT_DEV_DRAG")
+            .ok()
+            .and_then(|v| DevDrag::parse(&v))
+            .map(|d| (d, Instant::now() + Duration::from_secs(3))),
         layout_discarded: false,
         windows: vec![{
             let mut w = WindowState::new(
@@ -10281,6 +10383,12 @@ fn main() {
         // script needs accessibility permission the sandbox has not
         // got.  Unset in the installed app.
         app.dev_drive_open_settings();
+        // Dev seam (`MARSPOT_DEV_DRAG=split-right|new-window`): one pane
+        // drag through the same handlers the mouse drives.  A script
+        // cannot move the pointer in the sandbox app, and RFC-006's
+        // endings were otherwise pinned only by unit tests that build
+        // their own windows.  Unset in the installed app.
+        app.dev_drive_drag();
         for wi in 0..app.windows.len() {
             app.tick_process_panel_kills(wi);
             let due = win!(app, wi)

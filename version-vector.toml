@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.144"  # 闲置回收的阈值由调用方传入 —— 测试不再读跑测试那台机器的设置；详见 CHANGELOG.md
-core    = "0.12.203"  # Color 改 4 字节值类型、Cell 钉 repr(C) 无填充 —— 行为不变，为 scrollback 整行拷贝铺路；详见 CHANGELOG.md
+core    = "0.12.204"  # MARSPOT_DEV_DRAG 拖拽 seam（安装版不设），补 RFC-006 E2E；详见 CHANGELOG.md
 session = "0.11.94"  # scrollback 磁盘记录 = Cell 内存（一行一次拷贝），v2 文件就地升级不重写；详见 CHANGELOG.md
