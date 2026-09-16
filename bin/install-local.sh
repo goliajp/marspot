@@ -502,8 +502,15 @@ for b in marspot-shell marspot-core marspot-session; do
     # once this one has exited and a later install can write it.
     # Until then the app keeps its Gatekeeper exemption but runs the
     # older shell.
-    if [[ "$b" == "marspot-shell" ]] && (( SHELL_CHANGED )); then
-      echo "       ↳ L1 changed: arming a one-shot lander for the next full quit."
+    #
+    # The test is whether the BUNDLE is behind this build, not whether
+    # this install changed L1.  Those differ exactly when an earlier
+    # install already staged the new L1 and armed a lander: this install
+    # sees an unchanged L1, and on 2026-09-17 took that as "the bundle is
+    # current" and disarmed the lander — deleting the only copy that
+    # would ever have landed 0.7.144 in a bundle still running 0.7.137.
+    if [[ "$b" == "marspot-shell" ]] && ! cmp -s "$MACOS/$b" "$TARGET/$b"; then
+      echo "       ↳ bundle L1 is behind this build: arming a one-shot lander for the next full quit."
       ARM_LANDER=1
     fi
   else
@@ -608,8 +615,9 @@ PLIST
   launchctl bootout "gui/$(id -u)/com.marspot.land-bundle" >/dev/null 2>&1 || true
   launchctl bootstrap "gui/$(id -u)" "$LANDER_PLIST" >/dev/null 2>&1 || true
 elif [[ -d "$LANDER_DIR" ]]; then
-  # This install wrote the bundle itself, so anything staged earlier is
-  # by definition older than what is now on disk.
+  # Nothing was left behind: every bundle binary is either freshly
+  # written or already identical to this build, so anything staged
+  # earlier is by definition older than what is now on disk.
   echo "==> disarming a previously-armed lander (this install landed directly)"
   launchctl bootout "gui/$(id -u)/com.marspot.land-bundle" >/dev/null 2>&1 || true
   rm -f "$LANDER_PLIST" "$LANDER_DIR"/marspot-*
