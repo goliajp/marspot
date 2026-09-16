@@ -179,11 +179,18 @@ and is invisible to `cargo test`.
 
 ### Tests + profiling
 
-`bin/test.sh` runs the lib suite via `cargo nextest run --lib`.
-nextest's per-test process isolation makes individual failures
-visible by name (vs. `cargo test`'s long combined output where one
-panic can get lost among hundreds of pass lines), and parallel
-scheduling cuts wall clock at ~140 tests.
+`bin/test.sh` runs the whole workspace — every target (lib, bins,
+integration tests) with every feature — via `cargo nextest run`,
+capped at 6 jobs.  nextest's per-test process isolation makes
+individual failures visible by name (vs. `cargo test`'s long combined
+output where one panic can get lost among hundreds of pass lines).
+The script also pins `MARSPOT_STATE_DIR` to a sandbox, so a test
+cannot read the user's real settings or write a real pane's
+scrollback; running nextest directly skips that, which is how a test
+that read the host's settings once failed only on one machine.
+`bin/test-remote.sh` runs the same script on mini (own remote dir,
+args pass through to nextest) — the default place to run the full
+suite, so the terminal being worked in is not the one under load.
 
 `bin/profile-samply.sh` records a flamegraph-friendly profile via
 samply (Speedscope / Firefox-profiler JSON) — the visual complement

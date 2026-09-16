@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bin/test.sh — run the lib test suite via cargo-nextest.
+# bin/test.sh — run the workspace test suite (all targets) via cargo-nextest.
 #
 # Why nextest over `cargo test`: per-test process isolation surfaces
 # panics with their owning test name, parallel scheduling cuts wall
