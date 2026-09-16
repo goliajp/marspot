@@ -1038,6 +1038,25 @@ impl ClaudecodePlugin {
         let Some(threshold) = hibernate_after() else {
             return;
         };
+        self.run_idle_policy_at(host, result, threshold);
+    }
+
+    /// [`run_idle_policy`] with the threshold handed in.
+    ///
+    /// The threshold is the user's setting, and the policy used to read
+    /// it for itself — so every test of the policy ran against whatever
+    /// the machine running it had configured.  On a machine with
+    /// reclamation switched off, three tests failed and two more passed
+    /// for the wrong reason ("nothing was reclaimed" holds trivially when
+    /// nothing is allowed to be), while the same suite was green on the
+    /// bench host, which has no settings file.  The decision takes the
+    /// number; where the number comes from is the caller's business.
+    fn run_idle_policy_at(
+        &mut self,
+        host: &dyn PluginHost,
+        result: &ScanResult,
+        threshold: Duration,
+    ) {
         // Not wired to a shelld yet: nothing to reclaim into.
         if self.shelld.is_none() {
             return;
@@ -4513,6 +4532,11 @@ fn parse_session_id(path: &PathBuf) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The policy threshold every idle test runs at: the shipped
+    /// default, stated here rather than read off the machine running
+    /// the suite — see `run_idle_policy_at`.
+    const TEST_THRESHOLD: Duration = Duration::from_secs(30 * 60);
     use std::io::Write;
 
     fn tmpfile(content: &str) -> PathBuf {
@@ -6082,7 +6106,7 @@ mod tests {
                 SystemTime::now() - Duration::from_secs(120),
             ),
         );
-        plugin.run_idle_policy(&host, &first);
+        plugin.run_idle_policy_at(&host, &first, TEST_THRESHOLD);
         assert!(plugin.dormant.is_empty(), "one sample decides nothing");
 
         let mut second = ScanResult {
@@ -6102,7 +6126,7 @@ mod tests {
                 SystemTime::now(),
             ),
         );
-        plugin.run_idle_policy(&host, &second);
+        plugin.run_idle_policy_at(&host, &second, TEST_THRESHOLD);
         assert_eq!(plugin.dormant.len(), 1, "the pane should now be dormant");
         assert_eq!(
             plugin.dormant[0].config_dir.as_deref(),
@@ -6624,9 +6648,9 @@ mod tests {
         // Two passes — the second is the one that would decide.
         let mut scan = scan_with(7, pid, "");
         scan.new_cpu.insert(7, (1_000, SystemTime::now() - Duration::from_secs(120)));
-        plugin.run_idle_policy(&host, &scan);
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
         let scan = scan_with(7, pid, "");
-        plugin.run_idle_policy(&host, &scan);
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
         host.pump_ops();
 
         assert!(host.begun.lock().unwrap().is_empty(), "nothing was reclaimed");
@@ -6731,7 +6755,7 @@ mod tests {
         // Pass 1: no previous CPU sample, so nothing may be decided.
         let mut scan = scan_with(7, pid, uuid);
         scan.new_cpu.insert(7, (1_000, SystemTime::now() - Duration::from_secs(120)));
-        plugin.run_idle_policy(&host, &scan);
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
         assert!(
             host.begun.lock().unwrap().is_empty(),
             "the first CPU sample cannot decide anything"
@@ -6740,7 +6764,7 @@ mod tests {
 
         // Pass 2: same CPU total, sample window wide enough.
         let scan = scan_with(7, pid, uuid);
-        plugin.run_idle_policy(&host, &scan);
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
         assert!(
             host.begun.lock().unwrap().is_empty(),
             "the decision queues the op; starting it is the service's job"
@@ -6818,13 +6842,13 @@ mod tests {
         };
         let mut scan = recent(scan_with(7, std::process::id() as i32, "u"));
         scan.new_cpu.insert(7, (1_000, t0));
-        plugin.run_idle_policy(&host, &scan);
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
         assert_eq!(plugin.cpu_samples.get(&7).map(|(c, _)| *c), Some(1_000));
 
         // A scan two seconds later must NOT move the baseline.
         let mut scan = recent(scan_with(7, std::process::id() as i32, "u"));
         scan.new_cpu.insert(7, (2_000, t0 + Duration::from_secs(2)));
-        plugin.run_idle_policy(&host, &scan);
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
         assert_eq!(
             plugin.cpu_samples.get(&7).map(|(c, _)| *c),
             Some(1_000),
@@ -6834,7 +6858,7 @@ mod tests {
         // Past the window, it rolls forward.
         let mut scan = recent(scan_with(7, std::process::id() as i32, "u"));
         scan.new_cpu.insert(7, (3_000, t0 + CPU_BASELINE_WINDOW + Duration::from_secs(1)));
-        plugin.run_idle_policy(&host, &scan);
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
         assert_eq!(
             plugin.cpu_samples.get(&7).map(|(c, _)| *c),
             Some(3_000),
@@ -6864,9 +6888,9 @@ mod tests {
 
         let mut scan = scan_with(7, me, "uuid-1");
         scan.new_cpu.insert(7, (1_000, SystemTime::now() - Duration::from_secs(120)));
-        plugin.run_idle_policy(&host, &scan);
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
         let scan = scan_with(7, me, "uuid-1");
-        plugin.run_idle_policy(&host, &scan);
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
 
         assert!(
             host.begun.lock().unwrap().is_empty(),
@@ -7473,10 +7497,10 @@ mod tests {
         let mut scan = scan_with(7, claude_like, "uuid-1");
         scan.new_meta.get_mut(&7).unwrap().profile_num = PROFILE_UNKNOWN;
         scan.new_cpu.insert(7, (1_000, SystemTime::now() - Duration::from_secs(120)));
-        plugin.run_idle_policy(&host, &scan);
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
         let mut scan = scan_with(7, claude_like, "uuid-1");
         scan.new_meta.get_mut(&7).unwrap().profile_num = PROFILE_UNKNOWN;
-        plugin.run_idle_policy(&host, &scan);
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
 
         assert!(
             host.begun.lock().unwrap().is_empty(),

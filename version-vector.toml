@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.143"  # 状态栏 hook 记下是哪个 claude 问的 —— 第一轮对话之前也能认出会话、也能切 profile；详见 CHANGELOG.md
+shell   = "0.7.144"  # 闲置回收的阈值由调用方传入 —— 测试不再读跑测试那台机器的设置；详见 CHANGELOG.md
 core    = "0.12.202"  # 带上接缝那条路径识别修复（扫描在 L2 的渲染与命中判定里跑）；详见 CHANGELOG.md
 session = "0.11.92"  # 折行接缝不再抢在更长的、存在的终点前面 —— 路径不再停在上一行的目录；详见 CHANGELOG.md

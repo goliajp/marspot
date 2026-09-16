@@ -28,7 +28,21 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.143**
+Current: **0.7.144**
+
+### 0.7.144
+
+闲置回收的决策不再自己读阈值，由调用方传入；测试写明自己用的阈值（出厂默认 30 分钟）。
+
+行为不变，改的是**测试说的是谁的状态**。策略原来自己去读用户设置，于是每个针对它的
+测试，跑的都是「跑测试那台机器上的配置」。这台开发机把回收关掉了
+（`reclaim.enabled = false`）：直接跑 nextest 时 3 个测试失败，另外 2 个——
+`idle_policy_refuses_to_signal_a_pid_that_is_no_longer_claude`、
+`an_unreadable_profile_blocks_reclamation`——**因为错误的理由通过**：什么都不许回收时，
+「什么都没回收」天然成立。mini 没有设置文件，同一套全绿。
+
+`bin/test.sh` 把状态目录钉在沙箱，所以闸门里一直是绿的；这条改动让测试不再依赖外层
+脚本才正确。
 
 ### 0.7.143
 
