@@ -48,4 +48,13 @@ if ! rustup component list --toolchain nightly --installed 2>/dev/null | grep -q
 fi
 
 # shellcheck disable=SC2086
+# `char_width` consults the user's settings (`appearance.circled_wide`),
+# so the first grid test that measures a character opens a file.  Under
+# Miri's default isolation that aborts the whole run — silently turning
+# this gate into "the tests before the first char_width call" from the
+# day that setting landed until 2026-09-17, when it was noticed.
+# Isolation off, and the state dir pinned to a throwaway sandbox so the
+# file it opens is never the user's (same rule as bin/test.sh).
+export MARSPOT_STATE_DIR="$(mktemp -d -t marspot-miri)"
+export MIRIFLAGS="${MIRIFLAGS:-} -Zmiri-disable-isolation"
 exec cargo +nightly miri test -p marspot-term --lib -- $MIRI_MODULES
