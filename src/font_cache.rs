@@ -12,7 +12,7 @@
 //! fallback selection, or palette values — important during the A/B
 //! integration phase where pixels need to match.
 
-use crate::grid::{CellAttrs, Color};
+use crate::grid::{CellAttrs, Color, ColorKind};
 use core_foundation::base::TCFType;
 use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::base::CGFloat;
@@ -119,10 +119,10 @@ pub fn resolve_color(
     c: Color,
     default_rgb: (CGFloat, CGFloat, CGFloat),
 ) -> (CGFloat, CGFloat, CGFloat) {
-    match c {
-        Color::Default => default_rgb,
-        Color::Indexed(i) => palette_color(i),
-        Color::Rgb(r, g, b) => (
+    match c.kind() {
+        ColorKind::Default => default_rgb,
+        ColorKind::Indexed(i) => palette_color(i),
+        ColorKind::Rgb(r, g, b) => (
             r as f64 / 255.0,
             g as f64 / 255.0,
             b as f64 / 255.0,

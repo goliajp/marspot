@@ -12,7 +12,7 @@
 //!
 //! Phase 1.1.3+ will layer in erase, SGR attributes, scrolling, and more.
 
-use crate::grid::{Cell, CellAttrs, Color, DEFAULT_SCROLLBACK_LINES, Grid};
+use crate::grid::{Cell, CellAttrs, Color, ColorKind, DEFAULT_SCROLLBACK_LINES, Grid};
 use crate::parser::{Parser, ParserCallbacks};
 use crate::scrollback::Scrollback;
 use crate::{lx_debug, lx_debug_sampled, lx_info, lx_warn};
@@ -2029,8 +2029,9 @@ pub fn deserialize_attrs_pub(buf: &[u8]) -> CellAttrs {
         underline: (flags & (1 << 2)) != 0,
         reverse: (flags & (1 << 3)) != 0,
         dim: (flags & (1 << 4)) != 0,
-        fg: decode_color(fg_kind, fg_payload).unwrap_or(Color::Default),
-        bg: decode_color(bg_kind, bg_payload).unwrap_or(Color::Default),
+        fg: decode_color(fg_kind, fg_payload).unwrap_or(Color::DEFAULT),
+        bg: decode_color(bg_kind, bg_payload).unwrap_or(Color::DEFAULT),
+        _pad: [0; 3],
     }
 }
 
@@ -2063,18 +2064,18 @@ fn serialize_attrs(a: CellAttrs) -> [u8; ATTRS_BYTES] {
 }
 
 fn encode_color(c: Color) -> (u8, [u8; 3]) {
-    match c {
-        Color::Default => (0, [0, 0, 0]),
-        Color::Indexed(i) => (1, [i, 0, 0]),
-        Color::Rgb(r, g, b) => (2, [r, g, b]),
+    match c.kind() {
+        ColorKind::Default => (0, [0, 0, 0]),
+        ColorKind::Indexed(i) => (1, [i, 0, 0]),
+        ColorKind::Rgb(r, g, b) => (2, [r, g, b]),
     }
 }
 
 fn decode_color(kind: u8, payload: [u8; 3]) -> io::Result<Color> {
     Ok(match kind {
-        0 => Color::Default,
-        1 => Color::Indexed(payload[0]),
-        2 => Color::Rgb(payload[0], payload[1], payload[2]),
+        0 => Color::DEFAULT,
+        1 => Color::indexed(payload[0]),
+        2 => Color::rgb(payload[0], payload[1], payload[2]),
         other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2101,6 +2102,7 @@ fn read_attrs(cur: &mut Cursor<&[u8]>) -> io::Result<CellAttrs> {
         dim: (flags & (1 << 4)) != 0,
         fg: decode_color(fg_kind, fg_payload)?,
         bg: decode_color(bg_kind, bg_payload)?,
+        _pad: [0; 3],
     })
 }
 
@@ -3979,7 +3981,7 @@ fn apply_sgr(attrs: &mut CellAttrs, params: &[u16]) {
             24 => attrs.underline = false,
             27 => attrs.reverse = false,
             // Standard 8-color foreground.
-            n @ 30..=37 => attrs.fg = Color::Indexed((n - 30) as u8),
+            n @ 30..=37 => attrs.fg = Color::indexed((n - 30) as u8),
             // Extended foreground: 38;5;n (256-color) or 38;2;r;g;b (RGB).
             38 => {
                 if let Some((color, consumed)) = parse_extended_color(&params[i + 1..]) {
@@ -3987,18 +3989,18 @@ fn apply_sgr(attrs: &mut CellAttrs, params: &[u16]) {
                     i += consumed;
                 }
             }
-            39 => attrs.fg = Color::Default,
-            n @ 40..=47 => attrs.bg = Color::Indexed((n - 40) as u8),
+            39 => attrs.fg = Color::DEFAULT,
+            n @ 40..=47 => attrs.bg = Color::indexed((n - 40) as u8),
             48 => {
                 if let Some((color, consumed)) = parse_extended_color(&params[i + 1..]) {
                     attrs.bg = color;
                     i += consumed;
                 }
             }
-            49 => attrs.bg = Color::Default,
+            49 => attrs.bg = Color::DEFAULT,
             // Bright foreground (8–15).
-            n @ 90..=97 => attrs.fg = Color::Indexed(8 + (n - 90) as u8),
-            n @ 100..=107 => attrs.bg = Color::Indexed(8 + (n - 100) as u8),
+            n @ 90..=97 => attrs.fg = Color::indexed(8 + (n - 90) as u8),
+            n @ 100..=107 => attrs.bg = Color::indexed(8 + (n - 100) as u8),
             _ => {} // unknown / unimplemented SGR code: silently skip
         }
         i += 1;
@@ -4016,14 +4018,14 @@ fn parse_extended_color(rest: &[u16]) -> Option<(Color, usize)> {
     match rest.first().copied()? {
         5 => {
             let n = rest.get(1).copied()?;
-            Some((Color::Indexed(n.min(255) as u8), 2))
+            Some((Color::indexed(n.min(255) as u8), 2))
         }
         2 => {
             let r = rest.get(1).copied()?;
             let g = rest.get(2).copied()?;
             let b = rest.get(3).copied()?;
             Some((
-                Color::Rgb(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8),
+                Color::rgb(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8),
                 4,
             ))
         }
@@ -4853,7 +4855,7 @@ mod tests {
         assert_eq!(lines[0].0[0].ch, 'A');
         assert_eq!(lines[3].0[0].ch, 'D');
         // Foreground colour survives the wire format.
-        assert!(matches!(lines[0].0[0].attrs.fg, Color::Indexed(1)));
+        assert_eq!(lines[0].0[0].attrs.fg, Color::indexed(1));
         // Each line padded to grid width.
         assert_eq!(lines[0].0.len(), 8);
         // Hard newlines, not autowrap continuations.
@@ -5452,7 +5454,7 @@ mod tests {
         let mut t = Terminal::new(10, 5);
         t.feed(b"\x1B[1;31;42m");
         assert!(t.current_attrs().bold);
-        assert_eq!(t.current_attrs().fg, Color::Indexed(1));
+        assert_eq!(t.current_attrs().fg, Color::indexed(1));
         t.feed(b"\x1B[m");
         assert_eq!(t.current_attrs(), CellAttrs::default());
     }
@@ -5470,10 +5472,10 @@ mod tests {
         let mut t = Terminal::new(10, 5);
         t.feed(b"\x1B[31m\x1B[1m");
         assert!(t.current_attrs().bold);
-        assert_eq!(t.current_attrs().fg, Color::Indexed(1));
+        assert_eq!(t.current_attrs().fg, Color::indexed(1));
         t.feed(b"\x1B[22m"); // un-bold; fg stays
         assert!(!t.current_attrs().bold);
-        assert_eq!(t.current_attrs().fg, Color::Indexed(1));
+        assert_eq!(t.current_attrs().fg, Color::indexed(1));
     }
 
     #[test]
@@ -5494,7 +5496,7 @@ mod tests {
             t.feed(format!("\x1B[{}m", code).as_bytes());
             assert_eq!(
                 t.current_attrs().fg,
-                Color::Indexed(idx),
+                Color::indexed(idx),
                 "code {} -> idx {}",
                 code,
                 idx
@@ -5509,7 +5511,7 @@ mod tests {
             t.feed(format!("\x1B[{}m", code).as_bytes());
             assert_eq!(
                 t.current_attrs().bg,
-                Color::Indexed(idx),
+                Color::indexed(idx),
                 "code {} -> idx {}",
                 code,
                 idx
@@ -5522,45 +5524,45 @@ mod tests {
         // 90–97 → indices 8–15 (bright fg); 100–107 → bright bg.
         let mut t = Terminal::new(10, 5);
         t.feed(b"\x1B[91m"); // bright red fg
-        assert_eq!(t.current_attrs().fg, Color::Indexed(9));
+        assert_eq!(t.current_attrs().fg, Color::indexed(9));
         t.feed(b"\x1B[105m"); // bright magenta bg
-        assert_eq!(t.current_attrs().bg, Color::Indexed(13));
+        assert_eq!(t.current_attrs().bg, Color::indexed(13));
     }
 
     #[test]
     fn sgr_default_fg_and_bg() {
         let mut t = Terminal::new(10, 5);
         t.feed(b"\x1B[31;41m\x1B[39;49m");
-        assert_eq!(t.current_attrs().fg, Color::Default);
-        assert_eq!(t.current_attrs().bg, Color::Default);
+        assert_eq!(t.current_attrs().fg, Color::DEFAULT);
+        assert_eq!(t.current_attrs().bg, Color::DEFAULT);
     }
 
     #[test]
     fn sgr_256_color_fg() {
         let mut t = Terminal::new(10, 5);
         t.feed(b"\x1B[38;5;208m");
-        assert_eq!(t.current_attrs().fg, Color::Indexed(208));
+        assert_eq!(t.current_attrs().fg, Color::indexed(208));
     }
 
     #[test]
     fn sgr_256_color_bg() {
         let mut t = Terminal::new(10, 5);
         t.feed(b"\x1B[48;5;42m");
-        assert_eq!(t.current_attrs().bg, Color::Indexed(42));
+        assert_eq!(t.current_attrs().bg, Color::indexed(42));
     }
 
     #[test]
     fn sgr_truecolor_fg() {
         let mut t = Terminal::new(10, 5);
         t.feed(b"\x1B[38;2;100;200;50m");
-        assert_eq!(t.current_attrs().fg, Color::Rgb(100, 200, 50));
+        assert_eq!(t.current_attrs().fg, Color::rgb(100, 200, 50));
     }
 
     #[test]
     fn sgr_truecolor_bg() {
         let mut t = Terminal::new(10, 5);
         t.feed(b"\x1B[48;2;10;20;30m");
-        assert_eq!(t.current_attrs().bg, Color::Rgb(10, 20, 30));
+        assert_eq!(t.current_attrs().bg, Color::rgb(10, 20, 30));
     }
 
     #[test]
@@ -5569,8 +5571,8 @@ mod tests {
         t.feed(b"\x1B[1;31;42m");
         let a = t.current_attrs();
         assert!(a.bold);
-        assert_eq!(a.fg, Color::Indexed(1));
-        assert_eq!(a.bg, Color::Indexed(2));
+        assert_eq!(a.fg, Color::indexed(1));
+        assert_eq!(a.bg, Color::indexed(2));
     }
 
     #[test]
@@ -5579,7 +5581,7 @@ mod tests {
         t.feed(b"\x1B[1;999;31m"); // 999 unknown
         let a = t.current_attrs();
         assert!(a.bold);
-        assert_eq!(a.fg, Color::Indexed(1)); // 31 still applied after 999 skipped
+        assert_eq!(a.fg, Color::indexed(1)); // 31 still applied after 999 skipped
     }
 
     #[test]
@@ -5589,7 +5591,7 @@ mod tests {
         let cell = t.grid().cell(0, 0);
         assert_eq!(cell.ch, 'A');
         assert!(cell.attrs.bold);
-        assert_eq!(cell.attrs.fg, Color::Indexed(1));
+        assert_eq!(cell.attrs.fg, Color::indexed(1));
     }
 
     #[test]
@@ -5597,9 +5599,9 @@ mod tests {
         let mut t = Terminal::new(10, 5);
         t.feed(b"A\x1B[31mB");
         // 'A' was printed before SGR — must keep default attrs.
-        assert_eq!(t.grid().cell(0, 0).attrs.fg, Color::Default);
+        assert_eq!(t.grid().cell(0, 0).attrs.fg, Color::DEFAULT);
         // 'B' was printed after — must have red fg.
-        assert_eq!(t.grid().cell(1, 0).attrs.fg, Color::Indexed(1));
+        assert_eq!(t.grid().cell(1, 0).attrs.fg, Color::indexed(1));
     }
 
     /// 2026-07-29 field report — the omz update banner grew stray
@@ -5623,7 +5625,7 @@ mod tests {
                 "fill blank at col {c} must not be underlined"
             );
             assert!(!cell.attrs.bold && !cell.attrs.reverse && !cell.attrs.dim);
-            assert_eq!(cell.attrs.bg, Color::Indexed(1), "…but BCE keeps the bg");
+            assert_eq!(cell.attrs.bg, Color::indexed(1), "…but BCE keeps the bg");
         }
         // The printed glyphs DO keep their underline.
         assert!(
@@ -5642,7 +5644,7 @@ mod tests {
                 !cell.attrs.underline,
                 "EL blank at col {c} must not be underlined"
             );
-            assert_eq!(cell.attrs.bg, Color::Indexed(2));
+            assert_eq!(cell.attrs.bg, Color::indexed(2));
         }
     }
 
@@ -5657,7 +5659,7 @@ mod tests {
             for c in 0..10 {
                 let cell = t.grid().cell(c, r);
                 assert_eq!(cell.ch, ' ');
-                assert_eq!(cell.attrs.bg, Color::Indexed(1), "cell ({},{}) bg", c, r);
+                assert_eq!(cell.attrs.bg, Color::indexed(1), "cell ({},{}) bg", c, r);
             }
         }
     }
@@ -5667,10 +5669,10 @@ mod tests {
         let mut t = Terminal::new(10, 3);
         t.feed(b"\x1B[42m\x1B[K"); // bg green + EL 0
         for c in 0..10 {
-            assert_eq!(t.grid().cell(c, 0).attrs.bg, Color::Indexed(2));
+            assert_eq!(t.grid().cell(c, 0).attrs.bg, Color::indexed(2));
         }
         // Other rows untouched.
-        assert_eq!(t.grid().cell(0, 1).attrs.bg, Color::Default);
+        assert_eq!(t.grid().cell(0, 1).attrs.bg, Color::DEFAULT);
     }
 
     // ----- print path: wrap and BS -----
@@ -5751,7 +5753,7 @@ mod tests {
         for c in 0..3 {
             let cell = t.grid().cell(c, 1);
             assert_eq!(cell.ch, ' ');
-            assert_eq!(cell.attrs.bg, Color::Indexed(1));
+            assert_eq!(cell.attrs.bg, Color::indexed(1));
         }
     }
 

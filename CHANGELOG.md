@@ -3079,7 +3079,19 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.202**
+Current: **0.12.203**
+
+### 0.12.203
+
+`Color` 从枚举改成 4 字节的值类型，`Cell` / `CellAttrs` 钉成 `repr(C)` 且没有隐式填充。
+行为不变；L2 这边受影响的是渲染取色（`resolve_color` 改走 `.kind()`），mini 交替 A/B：
+render p99 293.3 → 292.0 µs，持平。
+
+为什么要改表示：带数据的枚举，没用满字节的变体（`Default`、`Indexed(u8)`）会留下
+**未初始化**的字节，于是一个 `Cell` 没法当成字节整块写出去。这是下一步 scrollback 改成
+「一行一次拷贝」的前提，见 L3 0.11.94。现在构造函数把没用到的字节清零，相等的颜色逐字节
+相等；匹配走 `Color::kind()`，返回的 `ColorKind` 仍是穷尽枚举。布局由编译期断言钉死，
+改字段会直接编译失败，不会悄悄改变写盘的内容。
 
 ### 0.12.202
 
@@ -6315,7 +6327,12 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.92**
+Current: **0.11.93**
+
+### 0.11.93
+
+同 L2 0.12.203：`Color` 改成 4 字节值类型，`Cell` 钉布局、消掉隐式填充。SGR 解析和
+grid 存取跟着改构造方式，行为不变。
 
 ### 0.11.92
 

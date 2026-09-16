@@ -718,12 +718,12 @@ fn hash_cell_attrs(a: &crate::grid::CellAttrs) -> u64 {
 
 #[inline(always)]
 fn hash_color(c: &crate::grid::Color) -> u64 {
-    use crate::grid::Color;
-    match c {
-        Color::Default => 0,
-        Color::Indexed(i) => 0x100 | (*i as u64),
-        Color::Rgb(r, g, b) => {
-            0x1_0000_0000 | ((*r as u64) << 16) | ((*g as u64) << 8) | (*b as u64)
+    use crate::grid::ColorKind;
+    match c.kind() {
+        ColorKind::Default => 0,
+        ColorKind::Indexed(i) => 0x100 | (i as u64),
+        ColorKind::Rgb(r, g, b) => {
+            0x1_0000_0000 | ((r as u64) << 16) | ((g as u64) << 8) | (b as u64)
         }
     }
 }
