@@ -79,5 +79,31 @@ BEFORE="$(cat "$MACOS/marspot-shell")"
 [[ "$(cat "$MACOS/marspot-shell")" == "$BEFORE" ]] \
   && ok "the bundle is unchanged" || bad "a second run changed the bundle"
 
+PENDING="$MARSPOT_STATE_DIR/binaries/pending"
+
+# launchd runs the lander the moment install-local loads it, and that is
+# BEFORE the same install's trigger promotes pending/ into current/.  A
+# check against current/ alone therefore called every fresh stage stale
+# and discarded it — from 2026-09-08 until this was found on 09-17, the
+# bundle never took a single new L1.
+echo "== 4. a stage the arming install has not promoted yet still lands =="
+seed NEWEST OLDER-CURRENT OLD-BUNDLE
+mkdir -p "$PENDING"
+for b in marspot-shell marspot-core marspot-session; do printf 'NEWEST' > "$PENDING/$b"; done
+"$SB/land.sh" >/dev/null 2>&1
+[[ "$(cat "$MACOS/marspot-shell")" == NEWEST ]] \
+  && ok "the bundle was updated from a stage that matches pending/" \
+  || bad "a stage matching pending/ was discarded ($(tail -1 "$STAGE/land.log" 2>/dev/null))"
+
+echo "== 5. a stage matching neither current nor pending is superseded =="
+seed MIDDLE OLDER-CURRENT OLD-BUNDLE
+mkdir -p "$PENDING"
+for b in marspot-shell marspot-core marspot-session; do printf 'NEWEST' > "$PENDING/$b"; done
+"$SB/land.sh" >/dev/null 2>&1
+[[ "$(cat "$MACOS/marspot-shell")" == OLD-BUNDLE ]] \
+  && ok "the bundle was left alone" || bad "a superseded stage landed"
+grep -q "stale" "$STAGE/land.log" 2>/dev/null \
+  && ok "it said why" || bad "no reason recorded"
+
 if (( fail )); then echo "FAIL"; exit 1; fi
 echo "PASS"

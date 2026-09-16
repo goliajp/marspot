@@ -546,7 +546,16 @@ if (( ${ARM_LANDER:-0} )); then
   echo "==> arming one-shot bundle lander (lands on next full quit)"
   mkdir -p "$LANDER_DIR"
   for b in marspot-shell marspot-core marspot-session; do
-    install -m 0755 "$TARGET/$b" "$LANDER_DIR/$b"
+    # Stage what binaries/current/ WILL hold once this install's
+    # trigger promotes pending/, not this build's output.  A rebuild of
+    # the same commit embeds a new build time, so $TARGET differs byte
+    # for byte from the copy an earlier install promoted — and the
+    # lander, which refuses any stage that does not match current/,
+    # discarded every stage it was given from 2026-09-08 on.  L1 never
+    # landed once in that time.
+    src="$TREE/pending/$b"
+    [[ -f "$src" ]] || src="$TREE/current/$b"
+    install -m 0755 "$src" "$LANDER_DIR/$b"
   done
   cat > "$LANDER_DIR/land.sh" <<'LANDER'
 #!/bin/sh
@@ -558,7 +567,7 @@ if (( ${ARM_LANDER:-0} )); then
 # nobody could test.
 APP="${MARSPOT_APP:-$HOME/.local/Marspot.app}"; MACOS="$APP/Contents/MacOS"
 STATE="${MARSPOT_STATE_DIR:-$HOME/Library/Application Support/marspot}"
-STAGE="$STATE/pending-bundle"; CURRENT="$STATE/binaries/current"
+STAGE="$STATE/pending-bundle"; CURRENT="$STATE/binaries/current"; PENDING="$STATE/binaries/pending"
 PLIST="${MARSPOT_LANDER_PLIST:-$HOME/Library/LaunchAgents/com.marspot.land-bundle.plist}"
 WAIT_FOR="${MARSPOT_LANDER_PROCESS:-marspot-shell}"
 LOG="$STAGE/land.log"
@@ -566,10 +575,12 @@ exec >>"$LOG" 2>&1
 disarm() { rm -f "$PLIST" "$STAGE"/marspot-* ; }
 echo "=== $(date) land.sh ==="
 # Never move the app backwards.  binaries/current/ is refreshed by
-# every install; a stage that no longer matches it was superseded.
+# every install; a stage that matches neither it nor pending/ (what the
+# install that armed this is about to promote — launchd runs this the
+# moment it is loaded, before that promote) was superseded.
 for b in marspot-shell marspot-core marspot-session; do
-  if ! cmp -s "$STAGE/$b" "$CURRENT/$b"; then
-    echo "stage is stale ($b differs from binaries/current) — discarding, not landing"
+  if ! cmp -s "$STAGE/$b" "$CURRENT/$b" && ! cmp -s "$STAGE/$b" "$PENDING/$b"; then
+    echo "stage is stale ($b matches neither binaries/current nor pending) — discarding, not landing"
     disarm; exit 0
   fi
 done
