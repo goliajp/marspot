@@ -28,7 +28,29 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.144**
+Current: **0.7.145**
+
+### 0.7.145
+
+**两个 pane 一直切不了 profile**（torajs、insight-mono），CLI 给的理由是
+`Session … is running as a background session (…)`。两处改动。
+
+**绑定改用 CLI 自己的记录。** 原来靠猜：pane 里 claude 启动之后，同项目目录里最新在写的
+transcript 就算它的当前会话。可后台任务（定时任务、转到后台的对话）也写在同一个目录，而且
+写得更勤，两个 pane 就这样被绑到了后台任务的会话上：insight-mono 的 claude 明明在 `bcdc11f1`，
+却被绑成了从它分叉出去的后台任务 `52e33087`。每个活着的 claude 都会在
+`<config>/sessions/<pid>.json` 写明自己**此刻**在哪个会话（跟随 `/clear`、`/resume`：一个以
+`--session-id 85ece795` 启动的后台进程，记录一天后写的是 `fb55e303`）。现在按 pane 的 claude pid
+先读这份记录；读不到才走原来的猜测，并且猜测时把所有被后台任务占着的会话排除掉。
+
+**切换遇到后台任务占着会话时，先停掉它再 resume** —— CLI 自己的建议（「claude stop <job>
+first to resume it here」），也是用户的要求：「尽可能 switch 完成以后要能恢复」。停的方式和切换
+一直以来停 pane 里 claude 的方式相同（SIGTERM，3 秒后升级），放在 resume 之前，因为
+`claude --resume` 启动那一刻就检查持有者。**只停 idle 的后台任务**；busy 的照旧拒绝——停掉会
+打断它正在做的事。
+
+正常路径顺带核实过：09-17 那两次切换（383→P4、393→P5）结局记为 `TimedOut await_quiet`，
+但进程确实是在新 profile 下 `--resume` 原会话，对话恢复了；超时只是切完后屏幕一直有 spinner。
 
 ### 0.7.144
 
