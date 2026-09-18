@@ -30,6 +30,29 @@ the regression — the entry belongs in this file.
 
 Current: **0.7.145**
 
+### 0.7.147
+
+**codex 换 profile 第一次被端到端验过。** 之前每块都有测试（菜单是单测建的、op runner 是
+自己那套假 host 跑的），但整条链从没跑过：真 pty、真被认成 codex 的进程、真 SIGTERM、真把
+resume 那行敲回同一个 shell。handoff 里记的是「命令形状正确，端到端未证」。
+
+`bin/test-codex-profile-switch.sh`：自带 `HOME`（`~/.codex-profile-N` 和 `~/.codex` 软链都
+读 `$HOME`，换掉才碰不到用户真账号）+ 一个编译出来的 codex 替身（**不能用脚本** —— 插件按
+argv[0] 的 basename 认人，而 `#!` 脚本是 `/bin/sh <path>` 起的，argv[0] 会是 `sh`）。断言三
+件事：原来那个被结束、新的那个拿到 profile 2 的 `CODEX_HOME`、并且是 `resume --last` 而不是
+开新会话（用户当时的要求是「switch 完成以后要能恢复」）。三个变异分别验过能红。
+
+codex 本身不在链里 —— 真跑它会登录用户账号、结束用户会话。`-c <key=value>` 和
+`model_reasoning_effort` 这两个形状另外对着装着的 `codex resume --help`（0.154.0）和用户自己
+的 `~/.codex/config.toml` 核过。
+
+**新增 dev seam `MARSPOT_DEV_BADGE_MENU=<path>`**：往那个文件写 `<sid> <tag>` 就等于点了菜单
+里那一项，走的是鼠标那条 dispatch。用文件而不是环境变量，因为这一下只有在 pane 里的 agent
+起来之后才有意义 —— 那是启动之后好几十秒的事。安装版不设这个变量。
+**seam 自己也修了一个真缺陷**：`echo > file` 是先建后写，tick 正好落在中间就会读到空文件、
+然后把请求删掉（实测丢过一次，只留下一行 `unparsed` 警告）。现在空内容按「还没写完」处理、
+不消费；测试那边也改成先写临时文件再 `mv` 过去。
+
 ### 0.7.146
 
 **bundle 里的 L1 从 09-07 起就没换过**，中间装了八次。`install-local.sh` 不能在

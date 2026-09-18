@@ -1128,6 +1128,13 @@ struct ShellApp {
     /// actually close windows in a given order and quit.  Unset in the
     /// installed app.
     dev_close_sequence: std::collections::VecDeque<u32>,
+    /// Dev seam (`MARSPOT_DEV_BADGE_MENU=<path>`): a file a test drops
+    /// `<sid> <tag>` into to pick one badge-menu entry, as if the
+    /// pointer had.  A file rather than an env value because the pick
+    /// only means anything once the pane's agent is up, which is
+    /// minutes of shell activity after boot — and a script cannot move
+    /// the pointer in the sandbox app.  Unset in the installed app.
+    dev_badge_menu_file: Option<std::path::PathBuf>,
     /// When the next entry of `dev_close_sequence` is due.  `None`
     /// until every window named in it is up.
     dev_close_next_at: Option<Instant>,
@@ -1644,6 +1651,8 @@ impl ShellApp {
                 .ok()
                 .map(|s| s.split(',').filter_map(|p| p.trim().parse().ok()).collect())
                 .unwrap_or_default(),
+            dev_badge_menu_file: std::env::var_os("MARSPOT_DEV_BADGE_MENU")
+                .map(std::path::PathBuf::from),
             dev_close_next_at: None,
             core_generation: 0,
             sup_state: SupervisorState::Idle,
@@ -2760,6 +2769,7 @@ impl ShellApp {
         }
         self.sweep_pane_status();
         self.sweep_autorun();
+        self.dev_drive_badge_menu();
         self.dev_drive_close_sequence();
         self.drive_wake_queue();
         self.last_plugin_tick = Instant::now();
@@ -3465,6 +3475,53 @@ impl ShellApp {
     /// one red button every couple of seconds, starting once every
     /// window named in it has painted.  The last entry is the last
     /// window, so the sequence ends in a real quit.
+    /// Dev seam — one badge-menu pick, through the same dispatch the
+    /// pointer drives.
+    ///
+    /// `<sid> <tag>` in the file `MARSPOT_DEV_BADGE_MENU` names; the
+    /// file is removed before the pick, so a test that wants two picks
+    /// writes it twice and each one happens once.  A malformed line is
+    /// dropped with a warning rather than retried — a test that wrote
+    /// nonsense should fail on its assertion, not spin here.
+    fn dev_drive_badge_menu(&mut self) {
+        let Some(path) = self.dev_badge_menu_file.clone() else {
+            return;
+        };
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        // Empty means not ready, not malformed: a plain `>` redirect
+        // creates the file before it writes, and this tick can land in
+        // between.  Deleting it there threw the pick away and the only
+        // trace was one `unparsed` warning.  A writer that wants to be
+        // read in one piece renames the file into place; either way,
+        // nothing is consumed until it parses.
+        if body.trim().is_empty() {
+            return;
+        }
+        let _ = std::fs::remove_file(&path);
+        let mut it = body.split_whitespace();
+        let parsed = it
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
+            .zip(it.next().and_then(|s| s.parse::<u32>().ok()));
+        let Some((sid, tag)) = parsed else {
+            lx_warn!(
+                "shell.dev.badge_menu_unparsed",
+                &format!("{path:?} is not `<sid> <tag>`: {body:?}")
+            );
+            return;
+        };
+        lx_event!(
+            "DEV_BADGE_MENU",
+            "picking a badge menu entry (dev seam)",
+            sid = sid,
+            tag = tag
+        );
+        self.plugin_registry
+            .dispatch_pane_badge_menu_action(&self.plugin_host, sid, tag);
+    }
+
     fn dev_drive_close_sequence(&mut self) {
         if self.dev_close_sequence.is_empty() {
             return;
