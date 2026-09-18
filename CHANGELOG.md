@@ -30,6 +30,28 @@ the regression — the entry belongs in this file.
 
 Current: **0.7.145**
 
+### 0.7.146
+
+**bundle 里的 L1 从 09-07 起就没换过**，中间装了八次。`install-local.sh` 不能在
+`Marspot.app/Contents/MacOS/` 的二进制正被运行时覆盖它 —— 磁盘上的 CDHash 一变 AMFI 就杀
+进程（06-16 九个 pane 就是这么白的），而 L1 不再转发之后，跑着的那个进程就是 bundle 二进制
+本身。所以新的 L1 只能先放到一边，等一个「没人在跑它」的时刻。
+
+问题是这个时刻由登录时的 LaunchAgent 去等：app 是用户一天里最先打开的东西，lander 起来一看
+还在跑，等满半小时就放弃（`land.log` 里两行「still running after 1800s」）。09-17 修掉的三个
+bug 都是关于 stage 取哪份字节的，等的时机没动 —— 所以 bundle 还是 0.7.137，每次冷启动都回到
+09-07 那个二进制，L1 的修复要等到下一次装机把新的 pending 塞进来才短暂生效。
+
+**改成退出时由 L1 自己启动 lander**，把自己的 pid 交给它（`BUNDLE_LANDER_START`）。lander
+盯着那个 pid，一秒左右就落地；进程组独立，紧跟着的退出不会把它带走；失败只记一行 warning ——
+退出这件事不能依赖更新成功。登录时的 LaunchAgent 留作兜底。
+
+两处新行为都有测试，且都做了变异验证：`bin/test-bundle-lander.sh` 新增「等到那个 pid 消失才
+落地」和「app 在落地前又被打开就保持待命」（后者用脚本当 bundle 二进制 —— 第一版拷 `/bin/sleep`
+进去，AMFI 一秒内就以签名不符把它杀了，于是那条断言是为错误的理由绿的）；
+`bin/test-window-close-order.sh` 在真退出之后断言 lander 被启动、并且是等 shell 没了才动手。
+relaunch 也加了可替换的钩子：沙箱里 `open -n` 本来就失败，直接断言它的结果等于什么都没测。
+
 ### 0.7.145
 
 **两个 pane 一直切不了 profile**（torajs、insight-mono），CLI 给的理由是

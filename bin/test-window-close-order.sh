@@ -112,6 +112,18 @@ frames += struct.pack('<Idddd', 0, 1050.0, 400.0, 700.0, 500.0)
 (d / 'window-state.bin').write_bytes(frames)
 PY
 
+  # An armed bundle lander, which the quit below must start and hand
+  # its own pid.  Landing a bundle needs a moment when nothing is
+  # running it, and the exit is the only one there is — the LaunchAgent
+  # that used to be the sole trigger runs at login, finds the app up
+  # again and gives up, which left the real bundle on a 2026-09-07 L1
+  # through eight installs.
+  mkdir -p "$MARSPOT_STATE_DIR/pending-bundle"
+  rm -f "$MARSPOT_STATE_DIR/landed.txt"
+  printf '#!/bin/sh\nwhile kill -0 "$1" 2>/dev/null; do sleep 0.2; done\necho "landed after $1" > "%s/landed.txt"\n' \
+    "$MARSPOT_STATE_DIR" > "$MARSPOT_STATE_DIR/pending-bundle/land.sh"
+  chmod +x "$MARSPOT_STATE_DIR/pending-bundle/land.sh"
+
   echo "==> launching (will close windows in the order: $sequence)"
   MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
     MARSPOT_DEV_CLOSE_SEQUENCE="$sequence" \
@@ -135,6 +147,21 @@ PY
   sleep 2
 
   pgrep -f "$SHELL_BIN" >/dev/null && fail "[$label] the shell is still running"
+
+  # The lander was started, waited for the shell to be gone, and only
+  # then did its work — a landing under a running app is the AMFI kill
+  # the staging exists to avoid.
+  local lander_pid
+  lander_pid="$(grep -o 'waits_for=[0-9]*' "$APPLOG" | tail -1)"
+  [[ -n "$lander_pid" ]] \
+    || fail "[$label] the quit did not start the armed bundle lander"
+  local waited=0
+  while (( waited < 50 )) && [[ ! -e "$MARSPOT_STATE_DIR/landed.txt" ]]; do
+    sleep 0.2; waited=$((waited+1))
+  done
+  [[ -e "$MARSPOT_STATE_DIR/landed.txt" ]] \
+    || fail "[$label] the lander never got past waiting for the shell"
+  echo "==> the lander landed after the shell was gone ($lander_pid)"
 
   # 1 + 2 — nothing was killed on the way out.
   local pair pid dead=""

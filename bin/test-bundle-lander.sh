@@ -34,6 +34,11 @@ export MARSPOT_LANDER_PLIST="$SB/agent.plist"
 # The real app is running while this test runs; point the "wait for it
 # to quit" check at a name that is definitely not.
 export MARSPOT_LANDER_PROCESS="marspot-lander-test-no-such-process"
+# `open -n` on a bundle with no Info.plist fails in a sandbox, so
+# asserting on its success proves nothing — this records the attempt.
+export MARSPOT_LANDER_OPEN="$SB/fake-open"
+printf '#!/bin/sh\necho "$@" >> "%s/opened.txt"\n' "$SB" > "$SB/fake-open"
+chmod +x "$SB/fake-open"
 STAGE="$MARSPOT_STATE_DIR/pending-bundle"
 CURRENT="$MARSPOT_STATE_DIR/binaries/current"
 MACOS="$MARSPOT_APP/Contents/MacOS"
@@ -72,6 +77,10 @@ seed NEWEST NEWEST OLD-BUNDLE
   && ok "the stage cleared itself after landing" || bad "the stage would land again"
 [[ ! -e "$MARSPOT_LANDER_PLIST" ]] \
   && ok "the LaunchAgent was removed" || bad "the LaunchAgent would fire again"
+# Started by the LaunchAgent, nothing is running and nobody asked for
+# the app to close — so it opens what it just landed.
+[[ -e "$SB/opened.txt" ]] \
+  && ok "it reopened the app" || bad "a login-time landing left the app closed"
 
 echo "== 3. running it a second time is a no-op, not a regression =="
 BEFORE="$(cat "$MACOS/marspot-shell")"
@@ -104,6 +113,47 @@ for b in marspot-shell marspot-core marspot-session; do printf 'NEWEST' > "$PEND
   && ok "the bundle was left alone" || bad "a superseded stage landed"
 grep -q "stale" "$STAGE/land.log" 2>/dev/null \
   && ok "it said why" || bad "no reason recorded"
+
+# The waiting is the part that never worked, and until now the test
+# mocked it out entirely (`MARSPOT_LANDER_PROCESS` pointed at a name
+# nothing runs under).  These two drive it for real.
+echo "== 6. started by the exiting shell, it waits for that pid and then lands =="
+seed NEWEST NEWEST OLD-BUNDLE
+rm -f "$SB/opened.txt"
+sleep 4 & WAITED=$!
+START=$(date +%s)
+"$SB/land.sh" "$WAITED" >/dev/null 2>&1
+ELAPSED=$(( $(date +%s) - START ))
+[[ "$(cat "$MACOS/marspot-shell")" == NEWEST ]] \
+  && ok "the bundle was updated" || bad "it did not land ($(tail -1 "$STAGE/land.log" 2>/dev/null))"
+(( ELAPSED >= 3 )) \
+  && ok "it waited for the pid (${ELAPSED}s)" || bad "it landed without waiting (${ELAPSED}s)"
+grep -q "waiting for pid $WAITED" "$STAGE/land.log" \
+  && ok "it said whose exit it waited for" || bad "no pid recorded in land.log"
+[[ ! -e "$SB/opened.txt" ]] \
+  && ok "it did not reopen the app" || bad "it reopened an app the user just quit"
+
+echo "== 7. an app that came back before landing leaves the stage armed =="
+seed NEWEST NEWEST OLD-BUNDLE
+# A process whose ps line holds the bundle path — what a user who quit
+# and reopened in one gesture leaves behind.  It has to be the bundle
+# binary itself, so the guard cannot be passed by a paraphrase of the
+# path, and it has to be a script: a copy of a system binary is killed
+# by AMFI within a second for the signature it no longer matches, which
+# is how the first version of this case passed for the wrong reason.
+printf '#!/bin/sh\nsleep 25\n' > "$MACOS/marspot-shell"; chmod 0755 "$MACOS/marspot-shell"
+"$MACOS/marspot-shell" & REOPENED=$!
+sleep 4 & GONE=$!
+"$SB/land.sh" "$GONE" >/dev/null 2>&1
+grep -q "sleep 25" "$MACOS/marspot-shell" \
+  && ok "the bundle was left alone" || bad "it landed under a running app"
+[[ -e "$STAGE/marspot-shell" ]] \
+  && ok "the stage is still armed for the next quit" || bad "the stage disarmed itself"
+[[ -e "$MARSPOT_LANDER_PLIST" ]] \
+  && ok "the LaunchAgent is still installed" || bad "the backstop was removed"
+grep -q "running from the bundle again" "$STAGE/land.log" \
+  && ok "it said why" || bad "no reason recorded"
+kill "$REOPENED" 2>/dev/null
 
 if (( fail )); then echo "FAIL"; exit 1; fi
 echo "PASS"

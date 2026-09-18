@@ -3341,7 +3341,61 @@ impl ShellApp {
                 stale.release();
             }
         }
+        // Last thing before the process goes: this is the only moment
+        // the bundle's own copy of L1 can be replaced.
+        self.land_staged_bundle_on_exit();
         ctx.exit();
+    }
+
+    /// Start the armed bundle lander, if there is one, and hand it the
+    /// one moment it can work in.
+    ///
+    /// `install-local.sh` cannot write `Marspot.app/Contents/MacOS/`
+    /// while a process is running that binary — AMFI kills it when the
+    /// on-disk CDHash stops matching, which is how nine panes went
+    /// blank on 2026-06-16 — and since L1 stopped redirecting, the
+    /// process that runs IS the bundle binary.  So a changed L1 is
+    /// staged instead, behind a one-shot `land.sh`.
+    ///
+    /// Its LaunchAgent runs at login, and that never wins: the app is
+    /// what the user opens at the start of the day, so the lander finds
+    /// it running, waits its half hour and gives up.  The bundle stood
+    /// on 0.7.137 from 2026-09-07 to 09-18 — eight installs, none of
+    /// them landed, and every cold launch went back to the 09-07
+    /// binary.  Started from here it waits for this pid instead, which
+    /// is about to be gone, and lands in about a second.
+    ///
+    /// Detached into its own process group so the exit happening right
+    /// after this does not take it along.  Every failure is silent on
+    /// purpose: nothing about quitting may depend on an update landing.
+    fn land_staged_bundle_on_exit(&self) {
+        use std::os::unix::process::CommandExt;
+        let script = marspot_term::paths::state_root()
+            .join("pending-bundle")
+            .join("land.sh");
+        if !script.exists() {
+            return;
+        }
+        let pid = std::process::id();
+        let spawned = std::process::Command::new(&script)
+            .arg(pid.to_string())
+            .process_group(0)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(child) => lx_event!(
+                "BUNDLE_LANDER_START",
+                "handed the armed bundle lander this exit to land in",
+                lander_pid = child.id(),
+                waits_for = pid
+            ),
+            Err(e) => lx_warn!(
+                "shell.quit.lander_spawn_failed",
+                &format!("{e} — the stage stays armed for the login backstop")
+            ),
+        }
     }
 
     /// Close ONE window: tell the core, drop our side, ask AppKit.

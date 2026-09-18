@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.145"  # 绑定按 CLI 的 sessions/<pid>.json；切换遇 idle 后台任务先停再 resume；详见 CHANGELOG.md
+shell   = "0.7.146"  # 退出时亲手启动 bundle lander 并交给它自己的 pid，不再指望登录时的 LaunchAgent；详见 CHANGELOG.md
 core    = "0.12.204"  # MARSPOT_DEV_DRAG 拖拽 seam（安装版不设），补 RFC-006 E2E；详见 CHANGELOG.md
 session = "0.11.94"  # scrollback 磁盘记录 = Cell 内存（一行一次拷贝），v2 文件就地升级不重写；详见 CHANGELOG.md
