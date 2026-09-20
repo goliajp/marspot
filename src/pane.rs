@@ -1786,10 +1786,9 @@ impl Pane {
         // arrow keys encode correctly for TUI apps in application
         // cursor key mode, and Cmd-V paste is wrapped in `\e[200~ /
         // \e[201~` when the app has opted in.
-        let app_mode = self.session.cursor_key_application_mode();
-        let bracketed = self.session.bracketed_paste_mode();
+        let modes = self.session.terminal().input_modes();
         let Some(bytes) =
-            key_event_to_bytes(event, mods, app_mode, bracketed, crate::input::read_clipboard_text)
+            key_event_to_bytes(event, mods, modes, crate::input::read_clipboard_text)
         else {
             return false;
         };

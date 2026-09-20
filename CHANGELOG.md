@@ -3146,7 +3146,13 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.204**
+Current: **0.12.205**
+
+### 0.12.205
+
+**键编码的参数收进 `TermModes`。** L2 这边只是跟着改调用点(`src/main.rs`、`src/pane.rs`、
+`src/bin/marspot-core.rs` 各一处,`term.input_modes()` 一行取代分别取两个 bool)。协议本身在 L3,
+见 L3 0.11.97。
 
 ### 0.12.204
 
@@ -6405,7 +6411,37 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.96**
+Current: **0.11.97**
+
+### 0.11.97
+
+**kitty 键盘协议（disambiguate）。** 传统编码里 `enter`、`shift+enter`、`ctrl+enter`、`alt+enter`
+是同一个字节 `\r`。想让其中一个换行、另一个发送的程序没有任何办法区分 —— 所以每个接多行输入的
+CLI 都有一套自己的绕法，marspot 自己也有一套（`shift+enter` 发 `\n`，那是在猜程序想要什么）。
+协议开着的时候它们是 `CSI 13;2u` / `CSI 13;5u` / `CSI 13;3u`，谁也不用猜。同样解决的还有
+`ctrl+i` 和 `tab`、`ctrl+m` 和 `enter`，以及 `esc` —— 它不再是一个要靠超时去赌的前缀，而是
+`CSI 27u`。
+
+只声明 **bit 0（disambiguate）**。协议的设计前提就是终端如实报告自己做什么：程序设完 flags 读
+`CSI ? u`，按读到的结果编码。所以声明一个不兑现的位比一个都不声明更糟。另外四个（事件类型、
+备用键、全部按键、关联文本）各自都还要输入侧的活，没做就不报。写入栈的三条路径全部先 mask，
+query 回的永远是真实能力。
+
+不变的部分同样重要：协议开着时普通打字、IME、输入法合成原样通过 —— shift 产生了字符就不再作为
+修饰键上报（`shift+a` 就是 `A`）。`enter` / `tab` / `backspace` 无修饰时保持传统字节，这是规范
+特意留的：程序带着协议崩掉之后，用户还得能敲 `reset`。Cmd 仍然归窗口层，不进协议 —— 把 Cmd-T /
+Cmd-W 交给程序等于把快捷键从用户手里拿走。
+
+flags 栈按 ghostty 的模型(`references/ghostty/src/terminal/kitty/key.zig`)：8 槽固定、环绕、
+push 挤掉最老的、pop 超过长度直接重置。栈由程序的字节驱动，不设界等于让程序随意要内存。每块屏
+各有各的栈：TUI 在备用屏抬起协议然后死掉，不能让它退回去的 shell 继续按协议编码。
+
+编码器的参数收进 `TermModes`（DECCKM + 括号粘贴 + kitty flags）—— 第三个模式是调用点开始读不懂
+的位置，再加第四个就要把所有调用点重改一遍。
+
+已知缺口:协议要的是**未按 shift 的**码点，而 AppKit 的 `charactersIgnoringModifiers` 保留
+shift，所以 `shift+1` 报的是 `!` 而不是规范要的 `1`。ASCII 字母在编码时折回小写（覆盖
+`ctrl+shift+a`）；标点要正确还原得走键盘布局（`UCKeyTranslate`），没有就不猜。
 
 ### 0.11.96
 

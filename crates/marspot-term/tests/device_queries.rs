@@ -128,11 +128,13 @@ const PROBES: &[(&str, &[u8], Expect)] = &[
     ("DECRQM, a mode we don't", b"\x1b[?9$p", Expect::Exact(b"\x1b[?9;0$y")),
     ("OSC 10 foreground", b"\x1b]10;?\x1b\\", Expect::Prefix(b"\x1b]10;rgb:")),
     ("OSC 11 background", b"\x1b]11;?\x1b\\", Expect::Prefix(b"\x1b]11;rgb:")),
-    // No sixel, no kitty graphics, no kitty keyboard, no window ops,
-    // no palette reporting, and no reading the clipboard back to a
-    // program that asks (that one is a refusal, not a gap).
+    // The kitty keyboard reply is the flags actually in force, which
+    // with nothing pushed is none of them.
+    ("kitty keyboard query", b"\x1b[?u", Expect::Exact(b"\x1b[?0u")),
+    // No sixel, no kitty graphics, no window ops, no palette
+    // reporting, and no reading the clipboard back to a program that
+    // asks (that one is a refusal, not a gap).
     ("DA3", b"\x1b[=c", Expect::Silent),
-    ("kitty keyboard query", b"\x1b[?u", Expect::Silent),
     ("XTWINOPS text size", b"\x1b[18t", Expect::Silent),
     ("XTWINOPS pixel size", b"\x1b[14t", Expect::Silent),
     ("XTWINOPS cell size", b"\x1b[16t", Expect::Silent),

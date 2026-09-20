@@ -6748,13 +6748,11 @@ impl CoreApp {
             return;
         }
 
-        let app_mode = pane.session().cursor_key_application_mode();
-        let bracketed = pane.session().bracketed_paste_mode();
+        let modes = pane.session().terminal().input_modes();
         if let Some(bytes) = key_event_to_bytes(
             &event,
             modifiers,
-            app_mode,
-            bracketed,
+            modes,
             marspot::input::read_clipboard_text,
         ) {
             // Typing snaps the focused pane's view back to live.

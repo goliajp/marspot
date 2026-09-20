@@ -732,12 +732,9 @@ fn publish(shm: &mut GridShmWriter, session: &SessionImpl, view_offset: u16) -> 
 /// L2 as already-resolved text in a later step, not pulled from the
 /// pasteboard by the GUI-free L3.
 fn handle_key(session: &mut SessionImpl, event: MarspotKeyEvent, mods: Modifiers) -> bool {
-    let (app_mode, bracketed) = {
-        let t = session.terminal();
-        (t.cursor_key_application_mode(), t.bracketed_paste_mode())
-    };
+    let modes = session.terminal().input_modes();
     let Some(bytes) =
-        marspot_term::input_core::key_event_to_bytes(&event, mods, app_mode, bracketed, || None)
+        marspot_term::input_core::key_event_to_bytes(&event, mods, modes, || None)
     else {
         return false;
     };

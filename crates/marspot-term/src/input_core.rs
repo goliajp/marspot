@@ -105,14 +105,32 @@ impl Modifiers {
     }
 }
 
+/// Everything about the terminal's state that changes how a key is
+/// encoded.  Read off a `Terminal` with `Terminal::input_modes`.
+///
+/// One struct rather than one parameter each: the encoder already
+/// took two of these and the kitty protocol made it three, which is
+/// the point where the call sites stop being readable and a fourth
+/// mode means touching all of them again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TermModes {
+    /// DECCKM (`?1`): arrow keys encode as `ESC O X` instead of
+    /// `ESC [ X`.  TUI apps that bind cursor keys distinctly from
+    /// PgUp/PgDn navigation depend on it.
+    pub cursor_key_app: bool,
+    /// DECSET `?2004`: Cmd-V paste is wrapped in `ESC [ 200~` /
+    /// `ESC [ 201~` so the app can tell paste from typing.
+    pub bracketed_paste: bool,
+    /// Kitty keyboard flags in force — see
+    /// `marspot_term::terminal::KittyKeyboardStack`.  Zero means the
+    /// legacy encoding, which is the default and what every program
+    /// that never asks for the protocol gets.
+    pub kitty_keyboard: u8,
+}
+
 /// Map a key press to the byte sequence we send the PTY.  Returns
 /// `None` for events we don't translate (releases, modifier-only, Cmd
 /// combos that the OS handles, etc.).
-///
-/// `cursor_key_app_mode` is the terminal's DECCKM state: when true,
-/// arrow keys encode as `ESC O X` (application sequence) instead of
-/// `ESC [ X`. TUI apps that bind cursor keys distinctly from
-/// PgUp/PgDn navigation depend on this.
 ///
 /// `read_clipboard` is called lazily only on Cmd-V so this module
 /// needs no window-system dependency; the AppKit implementation is
@@ -120,8 +138,7 @@ impl Modifiers {
 pub fn key_event_to_bytes(
     event: &MarspotKeyEvent,
     modifiers: Modifiers,
-    cursor_key_app_mode: bool,
-    bracketed_paste_mode: bool,
+    modes: TermModes,
     read_clipboard: impl FnOnce() -> Option<String>,
 ) -> Option<Cow<'static, [u8]>> {
     if event.state != KeyState::Pressed {
@@ -145,7 +162,7 @@ pub fn key_event_to_bytes(
                     // dump could otherwise inject an end-of-paste
                     // marker and exit bracketed mode early).
                     let body = text.into_bytes();
-                    if bracketed_paste_mode {
+                    if modes.bracketed_paste {
                         // Naive concat (no end-marker stripping). xterm
                         // spec recommends defending against pasted
                         // `\e[201~` injecting an early end-of-paste,
@@ -164,6 +181,15 @@ pub fn key_event_to_bytes(
             }
         }
         return None;
+    }
+
+    // The kitty keyboard protocol, when the program asked for it.
+    // Sits after the Cmd short-circuit above on purpose: Cmd is the
+    // window layer's (Cmd-T, Cmd-W, Cmd-V), and handing it to the
+    // program would take the shortcuts away from the user in every
+    // app that raises the protocol.
+    if modes.kitty_keyboard != 0 {
+        return kitty_key_bytes(event, modifiers);
     }
 
     // Ctrl + letter → ASCII control code (Ctrl-A = 0x01 ... Ctrl-Z = 0x1A).
@@ -190,7 +216,7 @@ pub fn key_event_to_bytes(
     }
 
     if let LogicalKey::Named(n) = &event.logical {
-        return Some(encode_named_key(*n, modifiers, cursor_key_app_mode));
+        return Some(encode_named_key(*n, modifiers, modes.cursor_key_app));
     }
 
     // Option / ⌥ on macOS = Meta prefix.  zsh in emacs mode, readline,
@@ -214,6 +240,147 @@ pub fn key_event_to_bytes(
         .text
         .as_ref()
         .map(|t| Cow::Owned(t.as_bytes().to_vec()))
+}
+
+/// The kitty keyboard code and final byte for a named key.
+///
+/// Taken from the kitty protocol's functional-key table, cross-read
+/// against ghostty's copy of it
+/// (`references/ghostty/src/input/kitty.zig`).  Keys with a legacy
+/// CSI form keep their final byte (`A`-`D`, `H`, `F`, `P`-`S`, `~`)
+/// so a program that only half-implements the protocol still reads
+/// them; everything else is `u`.  F3 is `13~` rather than an `R`
+/// final — a genuine irregularity in the table, not a typo here.
+fn kitty_entry(n: NamedKey) -> (u32, u8) {
+    use NamedKey::*;
+    match n {
+        Escape => (27, b'u'),
+        Enter => (13, b'u'),
+        Tab => (9, b'u'),
+        Backspace => (127, b'u'),
+        Insert => (2, b'~'),
+        Delete => (3, b'~'),
+        ArrowUp => (1, b'A'),
+        ArrowDown => (1, b'B'),
+        ArrowRight => (1, b'C'),
+        ArrowLeft => (1, b'D'),
+        PageUp => (5, b'~'),
+        PageDown => (6, b'~'),
+        Home => (1, b'H'),
+        End => (1, b'F'),
+        F1 => (1, b'P'),
+        F2 => (1, b'Q'),
+        F3 => (13, b'~'),
+        F4 => (1, b'S'),
+        F5 => (15, b'~'),
+        F6 => (17, b'~'),
+        F7 => (18, b'~'),
+        F8 => (19, b'~'),
+        F9 => (20, b'~'),
+        F10 => (21, b'~'),
+        F11 => (23, b'~'),
+        F12 => (24, b'~'),
+    }
+}
+
+/// True when `text` is something the user meant to type, rather than
+/// the control byte a modifier produced.  `ctrl+a` arrives with a
+/// `text` of `0x01`, and that is not text.
+fn is_typed_text(text: Option<&String>) -> bool {
+    text.is_some_and(|t| !t.is_empty() && !t.chars().any(|c| c.is_control()))
+}
+
+/// Encode one key under the kitty keyboard protocol's "disambiguate
+/// escape codes" flag — the only flag marspot claims (see
+/// `KITTY_KEYBOARD_SUPPORTED`).
+///
+/// What the flag buys, and why it is worth having: `shift+enter`,
+/// `ctrl+enter` and `alt+enter` are one byte apart from plain `enter`
+/// in the legacy encoding — which is to say they are the same byte —
+/// so a program that wants "newline" on one and "send" on the other
+/// has no way to tell.  Here they are `CSI 13;2u`, `CSI 13;5u` and
+/// `CSI 13;3u`.  The same goes for `ctrl+i` against `tab` and
+/// `ctrl+m` against `enter`, and for `esc`, which stops being a
+/// prefix a program has to time out on and becomes `CSI 27u`.
+///
+/// Three keys keep their legacy bytes when unmodified, as the spec
+/// requires: Enter, Tab and Backspace.  That is what lets a user type
+/// `reset` at a shell after a program died with the protocol still
+/// raised.
+///
+/// Known gap: the protocol wants the UNSHIFTED codepoint, and AppKit's
+/// `charactersIgnoringModifiers` keeps shift applied, so `shift+1`
+/// reports `!` where the spec asks for `1`.  ASCII letters are folded
+/// back to lowercase here, which covers `ctrl+shift+a`; punctuation
+/// would need the keyboard layout (`UCKeyTranslate`) to undo properly
+/// and is left alone rather than guessed at.
+fn kitty_key_bytes(
+    event: &MarspotKeyEvent,
+    mods: Modifiers,
+) -> Option<Cow<'static, [u8]>> {
+    let typed = is_typed_text(event.text.as_ref());
+    // Shift is spent once it has produced text: `shift+a` is the
+    // letter `A`, not a modified `a`.  Ctrl, Alt and Cmd are never
+    // spent this way.
+    let effective = Modifiers {
+        shift: mods.shift && !typed,
+        ..mods
+    };
+    let bare = !effective.shift && !effective.control && !effective.alt && !effective.super_;
+
+    let (code, final_byte) = match &event.logical {
+        LogicalKey::Named(n) => {
+            if bare {
+                match n {
+                    NamedKey::Enter => return Some(Cow::Borrowed(b"\r")),
+                    NamedKey::Tab => return Some(Cow::Borrowed(b"\t")),
+                    NamedKey::Backspace => return Some(Cow::Borrowed(b"\x7f")),
+                    _ => {}
+                }
+            }
+            kitty_entry(*n)
+        }
+        LogicalKey::Char(c) => (c.to_ascii_lowercase() as u32, b'u'),
+        // A key we have no identity for is only ever worth the text it
+        // produced — dead keys and IME output arrive this way.
+        LogicalKey::Other => {
+            return event
+                .text
+                .as_ref()
+                .filter(|t| !t.is_empty())
+                .map(|t| Cow::Owned(t.as_bytes().to_vec()))
+        }
+    };
+
+    // Unmodified printable text goes through untouched.  This is what
+    // keeps the protocol out of the way of ordinary typing and of the
+    // IME: raising it must not change what `a` sends.
+    if bare && typed {
+        let text = event.text.as_ref().expect("is_typed_text implies Some");
+        return Some(Cow::Owned(text.as_bytes().to_vec()));
+    }
+
+    let m = encode_mods(effective);
+    let out = match final_byte {
+        // `CSI <code>[;<mods>] u|~`
+        b'u' | b'~' => {
+            if m == 1 {
+                format!("\x1b[{}{}", code, final_byte as char)
+            } else {
+                format!("\x1b[{};{}{}", code, m, final_byte as char)
+            }
+        }
+        // Legacy-final keys: the code is not written, the fixed `1`
+        // takes its place when there are modifiers to carry.
+        _ => {
+            if m == 1 {
+                format!("\x1b[{}", final_byte as char)
+            } else {
+                format!("\x1b[1;{}{}", m, final_byte as char)
+            }
+        }
+    };
+    Some(Cow::Owned(out.into_bytes()))
 }
 
 /// Encode an xterm modifier parameter (1+bitmask, per ctlseqs).
@@ -402,13 +569,13 @@ mod tests {
             logical: LogicalKey::Char('a'),
             text: Some("a".into()),
         };
-        assert!(key_event_to_bytes(&ev, Modifiers::default(), false, false, || None).is_none());
+        assert!(key_event_to_bytes(&ev, Modifiers::default(), TermModes::default(), || None).is_none());
     }
 
     #[test]
     fn plain_char_falls_through_to_text() {
         let ev = pressed(LogicalKey::Char('a'), Some("a"));
-        let out = key_event_to_bytes(&ev, Modifiers::default(), false, false, || None).unwrap();
+        let out = key_event_to_bytes(&ev, Modifiers::default(), TermModes::default(), || None).unwrap();
         assert_eq!(&*out, b"a");
     }
 
@@ -419,7 +586,7 @@ mod tests {
             control: true,
             ..Default::default()
         };
-        let out = key_event_to_bytes(&ev, mods, false, false, || None).unwrap();
+        let out = key_event_to_bytes(&ev, mods, TermModes::default(), || None).unwrap();
         assert_eq!(&*out, &[0x03]);
     }
 
@@ -430,7 +597,7 @@ mod tests {
             control: true,
             ..Default::default()
         };
-        let out = key_event_to_bytes(&ev, mods, false, false, || None).unwrap();
+        let out = key_event_to_bytes(&ev, mods, TermModes::default(), || None).unwrap();
         assert_eq!(&*out, &[0x1b]);
     }
 
@@ -441,19 +608,19 @@ mod tests {
         let left = pressed(LogicalKey::Named(NamedKey::ArrowLeft), None);
         let right = pressed(LogicalKey::Named(NamedKey::ArrowRight), None);
         assert_eq!(
-            &*key_event_to_bytes(&up, Modifiers::default(), false, false, || None).unwrap(),
+            &*key_event_to_bytes(&up, Modifiers::default(), TermModes::default(), || None).unwrap(),
             b"\x1b[A"
         );
         assert_eq!(
-            &*key_event_to_bytes(&down, Modifiers::default(), false, false, || None).unwrap(),
+            &*key_event_to_bytes(&down, Modifiers::default(), TermModes::default(), || None).unwrap(),
             b"\x1b[B"
         );
         assert_eq!(
-            &*key_event_to_bytes(&left, Modifiers::default(), false, false, || None).unwrap(),
+            &*key_event_to_bytes(&left, Modifiers::default(), TermModes::default(), || None).unwrap(),
             b"\x1b[D"
         );
         assert_eq!(
-            &*key_event_to_bytes(&right, Modifiers::default(), false, false, || None).unwrap(),
+            &*key_event_to_bytes(&right, Modifiers::default(), TermModes::default(), || None).unwrap(),
             b"\x1b[C"
         );
     }
@@ -462,7 +629,7 @@ mod tests {
     fn enter_returns_cr() {
         let ev = pressed(LogicalKey::Named(NamedKey::Enter), None);
         assert_eq!(
-            &*key_event_to_bytes(&ev, Modifiers::default(), false, false, || None).unwrap(),
+            &*key_event_to_bytes(&ev, Modifiers::default(), TermModes::default(), || None).unwrap(),
             b"\r"
         );
     }
@@ -474,7 +641,7 @@ mod tests {
             super_: true,
             ..Default::default()
         };
-        assert!(key_event_to_bytes(&ev, mods, false, false, || None).is_none());
+        assert!(key_event_to_bytes(&ev, mods, TermModes::default(), || None).is_none());
     }
 
     #[test]
@@ -482,11 +649,11 @@ mod tests {
         let pu = pressed(LogicalKey::Named(NamedKey::PageUp), None);
         let pd = pressed(LogicalKey::Named(NamedKey::PageDown), None);
         assert_eq!(
-            &*key_event_to_bytes(&pu, Modifiers::default(), false, false, || None).unwrap(),
+            &*key_event_to_bytes(&pu, Modifiers::default(), TermModes::default(), || None).unwrap(),
             b"\x1b[5~"
         );
         assert_eq!(
-            &*key_event_to_bytes(&pd, Modifiers::default(), false, false, || None).unwrap(),
+            &*key_event_to_bytes(&pd, Modifiers::default(), TermModes::default(), || None).unwrap(),
             b"\x1b[6~"
         );
     }
@@ -496,11 +663,11 @@ mod tests {
         let h = pressed(LogicalKey::Named(NamedKey::Home), None);
         let e = pressed(LogicalKey::Named(NamedKey::End), None);
         assert_eq!(
-            &*key_event_to_bytes(&h, Modifiers::default(), false, false, || None).unwrap(),
+            &*key_event_to_bytes(&h, Modifiers::default(), TermModes::default(), || None).unwrap(),
             b"\x01"
         );
         assert_eq!(
-            &*key_event_to_bytes(&e, Modifiers::default(), false, false, || None).unwrap(),
+            &*key_event_to_bytes(&e, Modifiers::default(), TermModes::default(), || None).unwrap(),
             b"\x05"
         );
     }
@@ -516,11 +683,11 @@ mod tests {
             ..Modifiers::default()
         };
         assert_eq!(
-            &*key_event_to_bytes(&h, shift, false, false, || None).unwrap(),
+            &*key_event_to_bytes(&h, shift, TermModes::default(), || None).unwrap(),
             b"\x1b[1;2H"
         );
         assert_eq!(
-            &*key_event_to_bytes(&e, shift, false, false, || None).unwrap(),
+            &*key_event_to_bytes(&e, shift, TermModes::default(), || None).unwrap(),
             b"\x1b[1;2F"
         );
     }
@@ -530,11 +697,11 @@ mod tests {
         let i = pressed(LogicalKey::Named(NamedKey::Insert), None);
         let d = pressed(LogicalKey::Named(NamedKey::Delete), None);
         assert_eq!(
-            &*key_event_to_bytes(&i, Modifiers::default(), false, false, || None).unwrap(),
+            &*key_event_to_bytes(&i, Modifiers::default(), TermModes::default(), || None).unwrap(),
             b"\x1b[2~"
         );
         assert_eq!(
-            &*key_event_to_bytes(&d, Modifiers::default(), false, false, || None).unwrap(),
+            &*key_event_to_bytes(&d, Modifiers::default(), TermModes::default(), || None).unwrap(),
             b"\x1b[3~"
         );
     }
@@ -558,7 +725,7 @@ mod tests {
         ];
         for (k, want) in cases {
             let ev = pressed(LogicalKey::Named(k), None);
-            let got = key_event_to_bytes(&ev, Modifiers::default(), false, false, || None).unwrap();
+            let got = key_event_to_bytes(&ev, Modifiers::default(), TermModes::default(), || None).unwrap();
             assert_eq!(&*got, want, "key {:?}", k);
         }
     }
@@ -570,7 +737,7 @@ mod tests {
             shift: true,
             ..Default::default()
         };
-        let got = key_event_to_bytes(&up, mods, false, false, || None).unwrap();
+        let got = key_event_to_bytes(&up, mods, TermModes::default(), || None).unwrap();
         assert_eq!(&*got, b"\x1b[1;2A");
     }
 
@@ -583,7 +750,7 @@ mod tests {
         };
         // Ctrl modifier param = 5 (1 + 4).  DECCKM doesn't affect
         // modifier-bearing form — always CSI.
-        let got = key_event_to_bytes(&right, mods, true, false, || None).unwrap();
+        let got = key_event_to_bytes(&right, mods, TermModes { cursor_key_app: true, ..TermModes::default() }, || None).unwrap();
         assert_eq!(&*got, b"\x1b[1;5C");
     }
 
@@ -594,7 +761,7 @@ mod tests {
             shift: true,
             ..Default::default()
         };
-        let got = key_event_to_bytes(&pu, mods, false, false, || None).unwrap();
+        let got = key_event_to_bytes(&pu, mods, TermModes::default(), || None).unwrap();
         assert_eq!(&*got, b"\x1b[5;2~");
     }
 
@@ -605,7 +772,7 @@ mod tests {
             shift: true,
             ..Default::default()
         };
-        let got = key_event_to_bytes(&t, mods, false, false, || None).unwrap();
+        let got = key_event_to_bytes(&t, mods, TermModes::default(), || None).unwrap();
         assert_eq!(&*got, b"\x1b[Z");
     }
 
@@ -619,7 +786,7 @@ mod tests {
             alt: true,
             ..Default::default()
         };
-        let got = key_event_to_bytes(&ev, mods, false, false, || None).unwrap();
+        let got = key_event_to_bytes(&ev, mods, TermModes::default(), || None).unwrap();
         assert_eq!(&*got, &[0x1b, b'b']);
     }
 
@@ -631,10 +798,10 @@ mod tests {
             ..Default::default()
         };
         // Plain paste (no bracketed mode) returns the clipboard bytes.
-        let out = key_event_to_bytes(&ev, mods, false, false, || Some("hi".to_string())).unwrap();
+        let out = key_event_to_bytes(&ev, mods, TermModes::default(), || Some("hi".to_string())).unwrap();
         assert_eq!(&*out, b"hi");
         // Bracketed-paste mode wraps in \e[200~ ... \e[201~.
-        let out = key_event_to_bytes(&ev, mods, false, true, || Some("hi".to_string())).unwrap();
+        let out = key_event_to_bytes(&ev, mods, TermModes { bracketed_paste: true, ..TermModes::default() }, || Some("hi".to_string())).unwrap();
         assert_eq!(&*out, b"\x1b[200~hi\x1b[201~");
     }
 

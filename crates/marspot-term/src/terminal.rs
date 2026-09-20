@@ -105,6 +105,9 @@ pub struct Terminal {
     /// normal mode and `grid` is the only buffer.  When we exit alt mode
     /// the saved cursor goes with this Grid.
     saved_main: Option<SavedMain>,
+    /// See [`KittyKeyboardStack`].  This is the ACTIVE screen's stack;
+    /// the inactive one rides in `saved_main`.
+    kitty_keyboard: KittyKeyboardStack,
     parser: Parser,
     /// Current SGR state — every printed glyph (and every BCE-erased cell)
     /// is stamped with this snapshot.  Persists across `feed` calls.
@@ -363,6 +366,80 @@ pub struct Terminal {
 struct SavedMain {
     grid: Grid,
     cursor: (u16, u16),
+    /// The main screen's own keyboard stack.  See
+    /// [`KittyKeyboardStack`] — the protocol gives each screen buffer
+    /// its own, so a TUI that raises the protocol on entering the alt
+    /// screen cannot leave it raised over the shell it returns to.
+    kitty_keyboard: KittyKeyboardStack,
+}
+
+/// The kitty keyboard protocol flags marspot implements: bit 0,
+/// "disambiguate escape codes", and nothing else.
+///
+/// The protocol is built around a terminal reporting what it actually
+/// does — a program sets flags, reads `CSI ? u` back, and encodes for
+/// what it finds — so claiming a bit we do not honour is worse than
+/// claiming none.  The other four (report event types, alternate
+/// keys, report all keys, associated text) each need input-side work
+/// that has not been done; `input_core::kitty_key_bytes` is where it
+/// would go.
+pub const KITTY_KEYBOARD_SUPPORTED: u8 = 0b0_0001;
+
+/// Per-screen stack of kitty keyboard flags: `CSI > u` pushes,
+/// `CSI < u` pops, `CSI = u` sets in place, `CSI ? u` reports.
+///
+/// Eight entries, fixed and wrapping, following ghostty
+/// (`references/ghostty/src/terminal/kitty/key.zig`): a push past the
+/// end evicts the oldest rather than growing, and a pop of more than
+/// it holds resets it.  Both are deliberate.  The stack is driven
+/// entirely by what a program sends, and an unbounded one is a
+/// program's way of asking for unbounded memory — the same reason
+/// this terminal caps every other input-sized structure.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KittyKeyboardStack {
+    flags: [u8; Self::LEN],
+    idx: usize,
+}
+
+impl KittyKeyboardStack {
+    const LEN: usize = 8;
+
+    /// What is in force right now — what `CSI ? u` answers and what
+    /// the key encoder reads.
+    pub fn current(self) -> u8 {
+        self.flags[self.idx]
+    }
+
+    /// `CSI = flags ; mode u`.  Mode 1 replaces, 2 sets the given
+    /// bits, 3 clears them.
+    fn set(&mut self, mode: u16, v: u8) {
+        let v = v & KITTY_KEYBOARD_SUPPORTED;
+        let cur = self.flags[self.idx];
+        self.flags[self.idx] = match mode {
+            2 => cur | v,
+            3 => cur & !v,
+            // 1, and anything else: replace.  An unknown mode is far
+            // likelier to be a miscount of the spec's three than a
+            // request to do nothing.
+            _ => v,
+        };
+    }
+
+    fn push(&mut self, v: u8) {
+        self.idx = (self.idx + 1) % Self::LEN;
+        self.flags[self.idx] = v & KITTY_KEYBOARD_SUPPORTED;
+    }
+
+    fn pop(&mut self, n: usize) {
+        if n >= Self::LEN {
+            *self = Self::default();
+            return;
+        }
+        for _ in 0..n {
+            self.flags[self.idx] = 0;
+            self.idx = (self.idx + Self::LEN - 1) % Self::LEN;
+        }
+    }
 }
 
 /// Snapshot captured by ESC 7 (DECSC) / CSI s (SCO save), restored by
@@ -416,6 +493,7 @@ impl Terminal {
         Self {
             grid: Grid::with_scrollback_kind(cols, rows, scrollback),
             saved_main: None,
+            kitty_keyboard: KittyKeyboardStack::default(),
             parser: Parser::new(),
             attrs: CellAttrs::default(),
             saved_cursor: None,
@@ -473,6 +551,23 @@ impl Terminal {
 
     pub fn cursor_visible(&self) -> bool {
         self.cursor_visible
+    }
+
+    /// Kitty keyboard flags in force on the active screen — what the
+    /// key encoder needs to know.  See [`KittyKeyboardStack`].
+    pub fn kitty_keyboard_flags(&self) -> u8 {
+        self.kitty_keyboard.current()
+    }
+
+    /// Everything the key encoder reads off the terminal, in one
+    /// value.  Collected here so a new mode reaches the encoder by
+    /// growing this struct rather than every call site's signature.
+    pub fn input_modes(&self) -> crate::input_core::TermModes {
+        crate::input_core::TermModes {
+            cursor_key_app: self.cursor_key_application_mode,
+            bracketed_paste: self.bracketed_paste_mode,
+            kitty_keyboard: self.kitty_keyboard.current(),
+        }
     }
 
     /// DEC mode 1000/1002/1003 — app-level mouse reporting state.
@@ -942,6 +1037,7 @@ impl Terminal {
             let u_buf = &mut self.u_buf;
             let u_open = &mut self.u_open;
             let cursor_visible = &mut self.cursor_visible;
+            let kitty_keyboard = &mut self.kitty_keyboard;
             let mouse_tracking_mode = &mut self.mouse_tracking_mode;
             let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
             let pending_wrap = &mut self.pending_wrap;
@@ -973,6 +1069,7 @@ impl Terminal {
                 u_buf,
                 u_open,
                 cursor_visible,
+                kitty_keyboard,
                 mouse_tracking_mode,
                 mouse_sgr_encoding,
                 pending_wrap,
@@ -1805,6 +1902,11 @@ impl Terminal {
             self.saved_main = Some(SavedMain {
                 grid: main,
                 cursor: (cursor_col, cursor_row),
+                // A snapshot carries screen contents, not modes.  The
+                // kitty stack rebuilds itself the same way DECCKM and
+                // bracketed paste do: from the program's own bytes as
+                // the bytelog replays.
+                kitty_keyboard: KittyKeyboardStack::default(),
             });
             self.scroll_top = live.scroll_top;
             self.scroll_bot = live.scroll_bot;
@@ -2172,6 +2274,8 @@ struct Handler<'a> {
     /// See `Terminal::u_open`.
     u_open: &'a mut bool,
     cursor_visible: &'a mut bool,
+    /// See [`KittyKeyboardStack`].
+    kitty_keyboard: &'a mut KittyKeyboardStack,
     mouse_tracking_mode: &'a mut MouseTrackingMode,
     mouse_sgr_encoding: &'a mut bool,
     pending_wrap: &'a mut bool,
@@ -2859,7 +2963,16 @@ impl<'a> Handler<'a> {
         // 个 grid 替换回 saved_main).
         let alt = Grid::with_scrollback(cols, rows, DEFAULT_SCROLLBACK_LINES);
         let main = std::mem::replace(self.grid, alt);
-        *self.saved_main = Some(SavedMain { grid: main, cursor });
+        // The alt screen starts with the protocol off, and the main
+        // screen's stack is put away with its grid.  A TUI that raises
+        // the protocol and then dies cannot leave the shell it drops
+        // back to encoding keys the shell does not read.
+        let kitty_keyboard = std::mem::take(self.kitty_keyboard);
+        *self.saved_main = Some(SavedMain {
+            grid: main,
+            cursor,
+            kitty_keyboard,
+        });
     }
 
     /// `?1049l` — restore the saved main grid + cursor.  No-op if not
@@ -2868,6 +2981,7 @@ impl<'a> Handler<'a> {
         if let Some(saved) = self.saved_main.take() {
             *self.grid = saved.grid;
             self.grid.set_cursor(saved.cursor.0, saved.cursor.1);
+            *self.kitty_keyboard = saved.kitty_keyboard;
         }
     }
 
@@ -3183,6 +3297,22 @@ impl<'a> ParserCallbacks for Handler<'a> {
                         self.dec_mode(p, false);
                     }
                 }
+                // `CSI ? u` — what kitty keyboard flags are in force?
+                // The answer is what we actually honour, which is why
+                // everything that writes the stack masks first: a
+                // program encodes for what this reply says.
+                b'u' => {
+                    let flags = self.kitty_keyboard.current();
+                    let mut buf = [0u8; 16];
+                    let n = {
+                        use std::io::Write;
+                        let mut w = &mut buf[..];
+                        let _ = write!(w, "\x1b[?{flags}u");
+                        16 - w.len()
+                    };
+                    self.pending_response.extend_from_slice(&buf[..n]);
+                    self.record_response("KITTY-KBD-QUERY");
+                }
                 // DECXCPR — `CSI ? 6 n`, the DEC-private twin of CPR.
                 // Same reading of the cursor, `?`-prefixed, with the
                 // page number xterm always reports as 1.  A program
@@ -3267,6 +3397,17 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // asking about several modes in a row at startup is what
                 // a correct client does, and an instrument that warns on
                 // correct behaviour is a broken instrument.
+                // `CSI > flags u` — push.  `CSI < n u` — pop n (1 by
+                // default).  `CSI = flags ; mode u` — set in place.
+                // See `KittyKeyboardStack`; none of the three answers,
+                // a program reads the result back with `CSI ? u`.
+                (b">", b'u') => self.kitty_keyboard.push(param(params, 0, 0) as u8),
+                (b"<", b'u') => self.kitty_keyboard.pop(param(params, 0, 1) as usize),
+                (b"=", b'u') => {
+                    let flags = param(params, 0, 0) as u8;
+                    let mode = param(params, 1, 1);
+                    self.kitty_keyboard.set(mode, flags);
+                }
                 (b"?$", b'p') => {
                     let mode = param(params, 0, 0);
                     let state = self.dec_mode_report(mode);

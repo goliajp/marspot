@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.147"  # badge 菜单 dev seam，codex 换 profile 有了端到端；详见 CHANGELOG.md
-core    = "0.12.204"  # MARSPOT_DEV_DRAG 拖拽 seam（安装版不设），补 RFC-006 E2E；详见 CHANGELOG.md
-session = "0.11.96"  # DA2 死代码修复，补 DECID/DECXCPR/DECRQM，探测回复做成断言表；详见 CHANGELOG.md
+core    = "0.12.205"  # 键编码参数收进 TermModes（协议在 L3）；详见 CHANGELOG.md
+session = "0.11.97"  # kitty 键盘协议 disambiguate：shift/ctrl/alt+enter 终于各不相同；详见 CHANGELOG.md
