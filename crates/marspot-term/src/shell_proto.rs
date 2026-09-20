@@ -3194,6 +3194,100 @@ mod tests {
     }
 
     #[test]
+    fn a_key_frame_carries_repeat_and_position_both_ways() {
+        let ev = WireKeyEvent {
+            state: WireKeyState::Pressed,
+            mods: mods_to_byte(true, false, false, false),
+            kind: WireLogicalKind::Char,
+            key_data: 'w' as u32,
+            text: "W".to_string(),
+            repeat: true,
+            base_layout: 'z' as u32,
+        };
+        let p = encode_key_event(&ev, 9);
+        let (got, win) = decode_key_event(&p).unwrap();
+        assert_eq!(win, 9);
+        assert!(got.repeat);
+        assert_eq!(got.base_layout, 'z' as u32);
+        assert_eq!(got.key_data, 'w' as u32);
+        assert_eq!(got.text, "W");
+    }
+
+    /// A frame from a writer that predates the two fields.
+    ///
+    /// This is the shape that has bitten this codebase before: a
+    /// reader that treats an older frame as malformed takes the whole
+    /// channel down mid-update.  Built here by hand rather than by
+    /// calling the encoder, because the encoder can only produce the
+    /// current shape and a test that asks it to is testing nothing.
+    fn old_style_key_frame(text: &str, window_id: u32) -> Vec<u8> {
+        let t = text.as_bytes();
+        let mut out = Vec::new();
+        out.push(WireKeyState::Pressed as u8);
+        out.push(0);
+        out.push(WireLogicalKind::Char as u8);
+        out.push(0); // padding, before it meant anything
+        out.extend_from_slice(&('a' as u32).to_le_bytes());
+        out.extend_from_slice(&(t.len() as u16).to_le_bytes());
+        out.extend_from_slice(t);
+        out.extend_from_slice(&window_id.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn a_frame_from_before_the_new_fields_still_decodes() {
+        let p = old_style_key_frame("a", 3);
+        let (got, win) = decode_key_event(&p).unwrap();
+        assert_eq!(win, 3, "the window id is still where it was");
+        assert!(!got.repeat, "old padding reads as 'not a repeat'");
+        assert_eq!(got.base_layout, 0, "and as 'position unknown'");
+        assert_eq!(got.text, "a");
+    }
+
+    #[test]
+    fn a_reader_from_before_the_new_fields_still_finds_the_window_id() {
+        // The other direction, which no current code path can check
+        // for itself: a peer running the older image reads the window
+        // id from a fixed offset and stops.  Appending after it has
+        // to leave that offset holding the same four bytes.
+        let ev = WireKeyEvent {
+            kind: WireLogicalKind::Char,
+            key_data: 'a' as u32,
+            text: "a".to_string(),
+            base_layout: 'z' as u32,
+            ..Default::default()
+        };
+        let new = encode_key_event(&ev, 11);
+        let old = old_style_key_frame("a", 11);
+        assert_eq!(
+            &new[..old.len()],
+            &old[..],
+            "everything an older reader looks at is byte-identical"
+        );
+        // And what an older reader would compute for the window id.
+        let text_len = u16::from_le_bytes(new[8..10].try_into().unwrap()) as usize;
+        let at = 10 + text_len;
+        assert_eq!(u32::from_le_bytes(new[at..at + 4].try_into().unwrap()), 11);
+    }
+
+    #[test]
+    fn the_event_conversion_keeps_both_fields() {
+        let ev = MarspotKeyEvent {
+            state: KeyState::Pressed,
+            logical: LogicalKey::Char('w'),
+            text: Some("W".into()),
+            repeat: true,
+            base_layout: Some('z'),
+        };
+        let mods = Modifiers { shift: true, ..Default::default() };
+        let (back, back_mods) = wire_to_event(event_to_wire(&ev, mods));
+        assert_eq!(back.repeat, ev.repeat);
+        assert_eq!(back.base_layout, ev.base_layout);
+        assert_eq!(back.logical, ev.logical);
+        assert_eq!(back_mods, mods);
+    }
+
+    #[test]
     fn pane_session_end_roundtrip() {
         let p = encode_pane_session_end(42);
         assert_eq!(decode_pane_session_end(&p).unwrap(), 42);
