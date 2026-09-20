@@ -29,4 +29,4 @@
 
 shell   = "0.7.147"  # badge 菜单 dev seam，codex 换 profile 有了端到端；详见 CHANGELOG.md
 core    = "0.12.204"  # MARSPOT_DEV_DRAG 拖拽 seam（安装版不设），补 RFC-006 E2E；详见 CHANGELOG.md
-session = "0.11.94"  # scrollback 磁盘记录 = Cell 内存（一行一次拷贝），v2 文件就地升级不重写；详见 CHANGELOG.md
+session = "0.11.95"  # APC/DCS 载荷不再当正文打印，OSC 认 ESC \ 结尾；详见 CHANGELOG.md

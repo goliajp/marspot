@@ -6405,7 +6405,28 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.94**
+Current: **0.11.95**
+
+### 0.11.95
+
+**APC / DCS / SOS / PM 的载荷会被当正文打印出来。** parser 的状态机按 Williams 的图实现，
+但这四个引入符（`ESC P` / `ESC X` / `ESC ^` / `ESC _`）当初是直接回 Ground 的 —— 注释里写着
+「现代 shell 很少用，等真有负载再接」。真有负载了：Claude Code 起手要探终端支不支持 kitty
+图形，发的是
+
+    ESC _ Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA ESC \
+
+回 Ground 之后这一整串就是普通文本，于是它自己的信任提示上出现了
+`v=1, a=q, t=d, f=24; AAAA`，还把那两行选项挤错了位。
+
+补上 Williams 的 SOS_PM_APC_STRING：一个吞字节的状态，直到 ST。ESC 由 anywhere 转移带走，
+结尾的 `\` 落在 Escape 里是空操作。我们仍然不解释这四种序列的内容 —— 不支持 kitty 图形，
+正确的回应就是不回应 —— 但载荷必须吃掉。
+
+同一处还有第二个 bug：OSC 只认 BEL 结尾。ESC 走 anywhere 转移会清掉缓冲，所以 `ESC \` 结尾的
+OSC 载荷全被丢掉（源码注释自陈「for now: only BEL terminates OSC」）。而 ST 正是 OSC 8 超链接
+和 OSC 52 剪贴板写惯用的形式，OSC 10/11 的深浅色查询也常用它 —— 查询收不到就答不了，TUI 只能
+猜自己在深色还是浅色终端上。改成 OSC_STRING 的退出动作投递载荷，两种结尾都成立。
 
 ### 0.11.94
 

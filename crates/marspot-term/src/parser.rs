@@ -9,9 +9,10 @@
 //! The state machine follows Paul Williams' published DEC/ANSI parser
 //! diagram (https://vt100.net/emu/dec_ansi_parser): GROUND, ESCAPE,
 //! ESCAPE_INTERMEDIATE, CSI_ENTRY, CSI_PARAM, CSI_INTERMEDIATE,
-//! CSI_IGNORE, OSC_STRING.  We currently stub out DCS / SOS / PM / APC —
-//! they're rare in modern shells and will be added when a real workload
-//! demands them.
+//! CSI_IGNORE, OSC_STRING, plus one string-consuming state shared by
+//! SOS / PM / APC / DCS.  We do not *interpret* those payloads, but we do
+//! consume them to the string terminator: a parser that drops straight
+//! back to GROUND on `ESC _` prints the payload as text.
 //!
 //! UTF-8 handling sits inside GROUND: when a high byte starts a multi-byte
 //! sequence we accumulate continuation bytes and emit a single `print(char)`
@@ -44,6 +45,10 @@ enum State {
     CsiIntermediate,
     CsiIgnore,
     OscString,
+    /// SOS / PM / APC / DCS payload.  Bytes are consumed and discarded
+    /// until the string terminator; ESC leaves via the anywhere
+    /// transition, exactly as Williams' SOS_PM_APC_STRING does.
+    StringIgnore,
 }
 
 pub struct Parser {
@@ -100,6 +105,14 @@ impl Parser {
                 return;
             }
             0x1B => {
+                // OSC_STRING's exit action delivers the payload, so
+                // `ESC ] … ESC \` terminates an OSC exactly like BEL
+                // does.  Without it the ST form dropped every payload on
+                // the floor — and ST is the form OSC 8 hyperlinks and
+                // OSC 52 clipboard writes are written with.
+                if self.state == State::OscString {
+                    cb.osc_dispatch(&self.osc_buffer);
+                }
                 self.reset_seq();
                 self.state = State::Escape;
                 return;
@@ -116,6 +129,10 @@ impl Parser {
             State::CsiIntermediate => self.csi_intermediate(cb, byte),
             State::CsiIgnore => self.csi_ignore(byte),
             State::OscString => self.osc_string(cb, byte),
+            // Williams' SOS_PM_APC_STRING: every byte is ignored.  ESC is
+            // taken by the anywhere transition above, so the trailing `\`
+            // of the ST lands in Escape, where it is a no-op.
+            State::StringIgnore => {}
         }
     }
 
@@ -204,10 +221,14 @@ impl Parser {
                 self.state = State::OscString;
             }
             0x50 | 0x58 | 0x5E | 0x5F => {
-                // DCS / SOS / PM / APC — not implemented yet; consume
-                // until ST and discard.  For now we fall back to Ground;
-                // a real terminfo workload will force us to wire these.
-                self.state = State::Ground;
+                // DCS / SOS / PM / APC.  None of them are interpreted,
+                // but the payload still has to be consumed: falling to
+                // Ground here printed it as text.  Claude Code probes for
+                // kitty graphics support with
+                // `ESC _ Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA ESC \`, and the
+                // probe surfaced on its own trust prompt as
+                // `v=1, a=q, t=d, f=24; AAAA`.
+                self.state = State::StringIgnore;
             }
             0x7F => {} // ignore
             // 0x18 / 0x1A / 0x1B handled by anywhere transitions.
@@ -317,19 +338,10 @@ impl Parser {
                 cb.osc_dispatch(&self.osc_buffer);
                 self.state = State::Ground;
             }
-            // ST (string terminator) is ESC \ — but ESC is handled by the
-            // anywhere transition above which puts us back into Escape.
-            // The Escape state will see '\\' (0x5C) and dispatch as
-            // esc_dispatch — we want it as OSC terminator instead.  To do
-            // that we treat 0x5C arriving in Escape state from OSC as the
-            // closing ST.  Implemented in `escape()` already (esc_dispatch
-            // 0x5C is innocuous).  For test-coverage simplicity we keep
-            // both BEL and the ESC \ path working.
-            //
-            // Above, we don't actually deliver osc_dispatch on ESC \ yet
-            // because the anywhere ESC transition resets the sequence and
-            // we lose the buffer.  So for now: only BEL terminates OSC.
-            // (Phase 1.1.x will revisit if real workloads need ESC \.)
+            // ST (`ESC \`) is handled by the anywhere ESC transition in
+            // `advance`, which runs this state's exit action before
+            // entering Escape.  The trailing `\` then reaches
+            // esc_dispatch, where it is a no-op.
             _ => {
                 if self.osc_buffer.len() < MAX_OSC_LEN {
                     self.osc_buffer.push(byte);
@@ -589,6 +601,59 @@ mod tests {
             parse(b"\x1B]0;hello\x07"),
             vec![Event::Osc(b"0;hello".to_vec())]
         );
+    }
+
+    #[test]
+    fn osc_with_st_terminator() {
+        // ESC ] 0;hello ESC \ — the ST form.  The payload must arrive
+        // just as it does with BEL; the trailing `\` is an inert
+        // esc_dispatch.
+        assert_eq!(
+            parse(b"\x1B]0;hello\x1B\\"),
+            vec![
+                Event::Osc(b"0;hello".to_vec()),
+                Event::Esc {
+                    intermediates: vec![],
+                    byte: b'\\'
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn apc_payload_is_consumed_not_printed() {
+        // Claude Code's kitty-graphics probe.  Every byte between `ESC _`
+        // and the ST is payload: nothing may be printed.
+        assert_eq!(
+            parse(b"\x1B_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1B\\"),
+            vec![Event::Esc {
+                intermediates: vec![],
+                byte: b'\\'
+            }]
+        );
+    }
+
+    #[test]
+    fn dcs_sos_pm_payloads_are_consumed_and_ground_resumes() {
+        // DCS (ESC P), SOS (ESC X) and PM (ESC ^) share the state.  Each
+        // swallows its payload, and ordinary text after the ST prints.
+        for intro in [b'P', b'X', b'^'] {
+            let mut bytes = vec![0x1B, intro];
+            bytes.extend_from_slice(b"junk;1;2\x1B\\ok");
+            assert_eq!(
+                parse(&bytes),
+                vec![
+                    Event::Esc {
+                        intermediates: vec![],
+                        byte: b'\\'
+                    },
+                    Event::Print('o'),
+                    Event::Print('k'),
+                ],
+                "intro {:?}",
+                intro as char
+            );
+        }
     }
 
     #[test]
