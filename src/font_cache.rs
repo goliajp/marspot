@@ -68,51 +68,14 @@ pub const BG: (CGFloat, CGFloat, CGFloat) = marspot_term::palette::BG;
 /// the eyes for long-running sessions.
 pub const FG: (CGFloat, CGFloat, CGFloat) = marspot_term::palette::FG;
 
-/// ANSI 16-colour palette — punchier than iTerm2's stock Dark.  iTerm2
-/// Dark's bright-red (#dc7974) and bright-magenta (#e07de0) lean
-/// pink-salmon, and bright-blue (#a6aaf1) is lavender; the user
-/// flagged these as "red looks pink, everything looks grey".  This
-/// table keeps the dark variants similar (they're already grounded)
-/// but bumps the bright row to saturated values — closer to macOS
-/// Terminal.app's defaults and the One Dark / Tomorrow Night family.
-pub const ANSI_16: [(CGFloat, CGFloat, CGFloat); 16] = [
-    (0.0784, 0.0980, 0.1176), //  0 black           #14191e
-    (0.7726, 0.2354, 0.1568), //  1 red             #c53c28
-    (0.1875, 0.7813, 0.3398), //  2 green           #30c757
-    (0.8125, 0.6172, 0.1602), //  3 yellow          #cf9e29
-    (0.3320, 0.5391, 0.9023), //  4 blue            #5489e6
-    (0.7344, 0.3672, 0.8125), //  5 magenta         #bb5ecf
-    (0.1602, 0.7188, 0.7461), //  6 cyan            #29b7be
-    (0.7810, 0.7811, 0.7810), //  7 white           #c7c7c7
-    (0.4078, 0.4078, 0.4078), //  8 bright black    #676767
-    (1.0000, 0.3711, 0.3398), //  9 bright red      #ff5f57 (was pink)
-    (0.3203, 0.8633, 0.4297), // 10 bright green    #51dc6e
-    (1.0000, 0.7656, 0.2148), // 11 bright yellow   #ffc337
-    (0.3984, 0.6328, 1.0000), // 12 bright blue     #66a1ff
-    (1.0000, 0.4453, 0.7813), // 13 bright magenta  #ff72c8 (was lavender)
-    (0.3984, 0.9219, 0.9492), // 14 bright cyan     #66ebf2
-    (1.0000, 1.0000, 1.0000), // 15 bright white    #feffff
-];
+/// ANSI 16-colour palette and the 256-colour table.  Both live in
+/// `marspot_term::palette` — a program can ASK for these with
+/// `OSC 4 ; n ; ? ST`, and a colour that can be asked about cannot
+/// have a second copy for the renderer.
+pub use marspot_term::palette::ANSI_16;
 
 pub fn palette_color(idx: u8) -> (CGFloat, CGFloat, CGFloat) {
-    if (idx as usize) < ANSI_16.len() {
-        return ANSI_16[idx as usize];
-    }
-    if idx < 232 {
-        const RAMP: [u8; 6] = [0, 95, 135, 175, 215, 255];
-        let n = idx - 16;
-        let r = RAMP[(n / 36) as usize];
-        let g = RAMP[((n / 6) % 6) as usize];
-        let b = RAMP[(n % 6) as usize];
-        return (
-            r as f64 / 255.0,
-            g as f64 / 255.0,
-            b as f64 / 255.0,
-        );
-    }
-    let v = 8 + (idx - 232) as i32 * 10;
-    let f = v as f64 / 255.0;
-    (f, f, f)
+    marspot_term::palette::indexed(idx)
 }
 
 pub fn resolve_color(

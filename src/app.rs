@@ -966,6 +966,10 @@ define_class!(
                 state: KeyState::Pressed,
                 logical: LogicalKey::Other,
                 text: Some(s),
+                // Committed IME text has no physical key behind it —
+                // it is the result of several, and reporting any one
+                // of them would be a guess.
+                ..Default::default()
             };
             let mods = self.ivars().last_modifiers.get();
             dispatch_event_for(self.ivars().window_id.get(), EventKind::Key(ev, mods));
@@ -1000,6 +1004,9 @@ define_class!(
                 state: KeyState::Pressed,
                 logical: LogicalKey::Named(named),
                 text: None,
+                // The IME handed us a COMMAND, not a key press; the
+                // original event and its repeat flag are its own.
+                ..Default::default()
             };
             let mods = self.ivars().last_modifiers.get();
             dispatch_event_for(self.ivars().window_id.get(), EventKind::Key(ev, mods));
@@ -1987,13 +1994,23 @@ fn nsevent_to_mars_key(event: &NSEvent, state: KeyState) -> Option<MarspotKeyEve
         0x67 => LogicalKey::Named(NamedKey::F11),
         0x6F => LogicalKey::Named(NamedKey::F12),
         _ => {
-            // Modifier-independent character.  charactersIgnoringModifiers
-            // gives "a" for both `a` and `shift+a`.
-            let s_opt = { event.charactersIgnoringModifiers() };
-            match s_opt.and_then(|s| s.to_string().chars().next()) {
-                Some(c) => LogicalKey::Char(c),
-                None => LogicalKey::Other,
-            }
+            // What this key types with NO modifiers.
+            //
+            // `charactersIgnoringModifiers` is not that, whatever the
+            // name suggests: Apple's documentation says it ignores
+            // every modifier "except for Shift", so `shift+1` comes
+            // back as `!`.  Ask the layout instead, and keep the
+            // AppKit string only for the keys the layout has no
+            // printable answer for.
+            crate::keyboard_layout::unshifted_char(key_code)
+                .map(LogicalKey::Char)
+                .unwrap_or_else(|| {
+                    let s_opt = { event.charactersIgnoringModifiers() };
+                    match s_opt.and_then(|s| s.to_string().chars().next()) {
+                        Some(c) => LogicalKey::Char(c),
+                        None => LogicalKey::Other,
+                    }
+                })
         }
     };
 
@@ -2006,10 +2023,16 @@ fn nsevent_to_mars_key(event: &NSEvent, state: KeyState) -> Option<MarspotKeyEve
         { event.characters() }.map(|s| s.to_string())
     };
 
+    // Auto-repeat is only a thing for presses; AppKit reports it as
+    // false on key-up regardless.
+    let repeat = state == KeyState::Pressed && { event.isARepeat() };
+
     Some(MarspotKeyEvent {
         state,
         logical,
         text,
+        repeat,
+        base_layout: crate::keyboard_layout::us_layout_char(key_code),
     })
 }
 

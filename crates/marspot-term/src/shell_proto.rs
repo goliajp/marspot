@@ -1037,16 +1037,18 @@ pub fn decode_pong(payload: &[u8]) -> io::Result<u32> {
 //   text_len : u16
 //   text     : text_len bytes UTF-8
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum WireKeyState {
+    #[default]
     Pressed = 0,
     Released = 1,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum WireLogicalKind {
     Char = 0,
     Named = 1,
+    #[default]
     Other = 2,
 }
 
@@ -1115,13 +1117,21 @@ impl WireNamedKey {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct WireKeyEvent {
     pub state: WireKeyState,
     pub mods: u8,
     pub kind: WireLogicalKind,
     pub key_data: u32,
     pub text: String,
+    /// Auto-repeat.  Rides in a byte that was padding, so a reader
+    /// from before this field existed sees the padding it expected.
+    pub repeat: bool,
+    /// US-layout position of the key, 0 when unknown.  Appended after
+    /// the window id — the one place a field can be added without
+    /// moving anything an older reader looks at, since that reader
+    /// takes the window id from a fixed offset and stops.
+    pub base_layout: u32,
 }
 
 pub fn mods_to_byte(shift: bool, ctrl: bool, alt: bool, super_: bool) -> u8 {
@@ -1137,17 +1147,24 @@ pub fn mods_from_byte(b: u8) -> (bool, bool, bool, bool) {
     )
 }
 
+/// Bit 0 of the byte at offset 3, which was padding until auto-repeat
+/// needed somewhere to live.  A reader from before this wrote a zero
+/// there and ignored it, so an old writer's frames decode as "not a
+/// repeat" — which is the truth, since it had no way to know.
+const KEY_FLAG_REPEAT: u8 = 0b0000_0001;
+
 pub fn encode_key_event(ev: &WireKeyEvent, window_id: u32) -> Vec<u8> {
     let text_bytes = ev.text.as_bytes();
-    let mut out = Vec::with_capacity(10 + text_bytes.len() + 4);
+    let mut out = Vec::with_capacity(14 + text_bytes.len() + 4);
     out.push(ev.state as u8);
     out.push(ev.mods);
     out.push(ev.kind as u8);
-    out.push(0); // pad
+    out.push(if ev.repeat { KEY_FLAG_REPEAT } else { 0 });
     out.extend_from_slice(&ev.key_data.to_le_bytes());
     out.extend_from_slice(&(text_bytes.len() as u16).to_le_bytes());
     out.extend_from_slice(text_bytes);
     out.extend_from_slice(&window_id.to_le_bytes());
+    out.extend_from_slice(&ev.base_layout.to_le_bytes());
     out
 }
 
@@ -1191,6 +1208,14 @@ pub fn decode_key_event(payload: &[u8]) -> io::Result<(WireKeyEvent, u32)> {
     let text = std::str::from_utf8(&payload[10..10 + text_len])
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?
         .to_string();
+    let repeat = payload[3] & KEY_FLAG_REPEAT != 0;
+    // Absent from a writer that predates it, which is not an error:
+    // zero means "no idea where this key sits", and every reader of
+    // it already has to handle that.
+    let base_layout = payload
+        .get(10 + text_len + 4..10 + text_len + 8)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        .unwrap_or(0);
     Ok((
         WireKeyEvent {
             state,
@@ -1198,6 +1223,8 @@ pub fn decode_key_event(payload: &[u8]) -> io::Result<(WireKeyEvent, u32)> {
             kind,
             key_data,
             text,
+            repeat,
+            base_layout,
         },
         trailing_window_id(payload, 10 + text_len),
     ))
@@ -2685,6 +2712,8 @@ pub fn event_to_wire(ev: &MarspotKeyEvent, mods: Modifiers) -> WireKeyEvent {
         kind,
         key_data,
         text: ev.text.clone().unwrap_or_default(),
+        repeat: ev.repeat,
+        base_layout: ev.base_layout.map_or(0, |c| c as u32),
     }
 }
 
@@ -2711,6 +2740,8 @@ pub fn wire_to_event(w: WireKeyEvent) -> (MarspotKeyEvent, Modifiers) {
         state,
         logical,
         text,
+        repeat: w.repeat,
+        base_layout: char::from_u32(w.base_layout).filter(|c| *c != '\0'),
     };
     (ev, mods_to_struct(w.mods))
 }
@@ -2993,6 +3024,7 @@ mod tests {
             kind: WireLogicalKind::Char,
             key_data: 'a' as u32,
             text: "a".to_string(),
+            ..Default::default()
         };
         let p = encode_key_event(&ev, 7);
         let (back, win) = decode_key_event(&p).unwrap();
@@ -3012,6 +3044,7 @@ mod tests {
             kind: WireLogicalKind::Named,
             key_data: WireNamedKey::ArrowUp as u32,
             text: String::new(),
+            ..Default::default()
         };
         let p = encode_key_event(&ev, FIRST_WINDOW_ID);
         let (back, _win) = decode_key_event(&p).unwrap();
@@ -3175,6 +3208,7 @@ mod tests {
             kind: WireLogicalKind::Char,
             key_data: '\r' as u32,
             text: "\r".to_string(),
+            ..Default::default()
         };
         let p = encode_pane_session_key(7, &ev);
         let (sid, decoded) = decode_pane_session_key(&p).unwrap();

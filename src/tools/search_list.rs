@@ -349,6 +349,7 @@ mod tests {
             state: KeyState::Pressed,
             logical: LogicalKey::Named(n),
             text: None,
+            ..Default::default()
         }
     }
 

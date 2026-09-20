@@ -128,22 +128,42 @@ const PROBES: &[(&str, &[u8], Expect)] = &[
     ("DECRQM, a mode we don't", b"\x1b[?9$p", Expect::Exact(b"\x1b[?9;0$y")),
     ("OSC 10 foreground", b"\x1b]10;?\x1b\\", Expect::Prefix(b"\x1b]10;rgb:")),
     ("OSC 11 background", b"\x1b]11;?\x1b\\", Expect::Prefix(b"\x1b]11;rgb:")),
+    ("OSC 12 cursor colour", b"\x1b]12;?\x1b\\", Expect::Prefix(b"\x1b]12;rgb:")),
+    ("OSC 4 palette entry", b"\x1b]4;1;?\x1b\\", Expect::Prefix(b"\x1b]4;1;rgb:")),
+    ("XTWINOPS text size", b"\x1b[18t", Expect::Exact(b"\x1b[8;4;40t")),
     // The kitty keyboard reply is the flags actually in force, which
     // with nothing pushed is none of them.
     ("kitty keyboard query", b"\x1b[?u", Expect::Exact(b"\x1b[?0u")),
-    // No sixel, no kitty graphics, no window ops, no palette
-    // reporting, and no reading the clipboard back to a program that
-    // asks (that one is a refusal, not a gap).
+    // The silences below are refusals, each with a reason:
+    //
+    // DA3 — xterm answers with a "terminal unit id", a number this
+    //   terminal does not have and would have to invent.
+    // XTWINOPS 14/16 — the same area and one cell in PIXELS.  Those
+    //   numbers live in the renderer, two processes from the
+    //   emulator, and the only reason to ask is to place an image,
+    //   which marspot does not display.
+    // XTWINOPS 1-13, 15, 17, 19-24 — raise, move, resize, iconify,
+    //   read the title back.  A program does not get to move this
+    //   window or read text out of it; xterm disables most of these
+    //   by default for the same reason.
+    // XTSMGRAPHICS, kitty graphics — image protocols.  marspot draws
+    //   text.  The protocols are built so that silence means no.
+    // XTGETTCAP, DECRQSS — a capability database and a "what is the
+    //   current SGR" readback.  Both have an answer already in reach
+    //   of the program: terminfo for the first, its own bookkeeping
+    //   for the second, which is why nothing asks.  Measured with a
+    //   pty probe: claude, codex and vim send neither.
+    // OSC 52 read — handing a program the user's clipboard because
+    //   it asked.  That one is a refusal on purpose and stays one.
     ("DA3", b"\x1b[=c", Expect::Silent),
-    ("XTWINOPS text size", b"\x1b[18t", Expect::Silent),
     ("XTWINOPS pixel size", b"\x1b[14t", Expect::Silent),
     ("XTWINOPS cell size", b"\x1b[16t", Expect::Silent),
+    ("XTWINOPS move window", b"\x1b[3;0;0t", Expect::Silent),
+    ("XTWINOPS report title", b"\x1b[21t", Expect::Silent),
     ("XTSMGRAPHICS", b"\x1b[?1;1;0S", Expect::Silent),
     ("XTGETTCAP", b"\x1bP+q544e\x1b\\", Expect::Silent),
     ("DECRQSS", b"\x1bP$qm\x1b\\", Expect::Silent),
     ("kitty graphics", KITTY_PROBE, Expect::Silent),
-    ("OSC 4 palette entry", b"\x1b]4;1;?\x1b\\", Expect::Silent),
-    ("OSC 12 cursor colour", b"\x1b]12;?\x1b\\", Expect::Silent),
     ("OSC 52 clipboard read", b"\x1b]52;c;?\x1b\\", Expect::Silent),
 ];
 

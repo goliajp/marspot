@@ -28,7 +28,11 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.145**
+Current: **0.7.148**
+
+### 0.7.148
+
+跟着 `WireKeyEvent` 长了两个字段(重复位、US 位置)改构造点。协议在 L3,见 L3 0.11.98。
 
 ### 0.7.147
 
@@ -3146,7 +3150,17 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.205**
+Current: **0.12.206**
+
+### 0.12.206
+
+**`keyboard_layout` —— 物理键是哪个键,和它打出什么无关。** Carbon 的 `UCKeyTranslate` 取当前
+布局下无修饰的码点,`kVK_ANSI_*` 表(从 SDK 头文件读的)给 US 位置。两者都是 kitty 协议要而
+AppKit 不给的。Carbon 调用串行化:并发调会 abort 进程,实测。
+
+渲染层的 `ANSI_16` / `palette_color` / 光标色改为从 `marspot_term::palette` 读 —— 程序能用
+`OSC 4` / `OSC 12` 问这些颜色,能问的东西不能有第二份。光标的 alpha 留在渲染层:块画得多实是
+画法,不是答案的一部分。
 
 ### 0.12.205
 
@@ -6411,7 +6425,52 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.97**
+Current: **0.11.98**
+
+### 0.11.98
+
+**剩下的探测,要么答要么明确拒绝 —— 不留待办。**
+
+kitty 键盘协议从 1 个 flag 补到 **3 个**(disambiguate + 事件类型 + 备用键 = `0b111`)。这不是
+凑数:pty 探针实测 Claude Code 要 `CSI > 5 u`(1|4)、codex 要 `CSI > 7 u`(1|2|4) —— 现在两个
+都拿到**它们要的那一套**,不用降级。
+
+- **bit 1 事件类型** —— 按下 / 重复 / 松开各自成序列(`;mods:1` / `:2` / `:3`)。没有它,按住方向键
+  和按四十次没区别,松开完全不可见。松开事件本来就到得了 L3(wire 早有 `Released`),缺的是
+  重复位 —— 走 AppKit 的 `isARepeat`。
+- **bit 2 备用键** —— 同时报「按 shift 会打出什么」和「这个键在 US 键盘上的位置」。后者是
+  AZERTY 上 `ctrl+z` 还能落在左下角那个键的原因。
+
+顺带修掉上一版自己写下的缺口:协议要未按 shift 的码点,AppKit 的
+`charactersIgnoringModifiers` 保留 shift(文档原话是除 Shift 外都忽略),所以 `shift+1` 报 `!`。
+新的 `keyboard_layout` 模块走 Carbon 的 `UCKeyTranslate` 拿当前布局下无修饰的值,US 位置表
+直接从 SDK 的 `<HIToolbox/Events.h>` 读 `kVK_ANSI_*` 常量抄下来(那套编号既不按字母也不按位置,
+凭记忆写必错)。Carbon 调用上了锁 —— 两个线程同时调会 abort 进程,是跑这个模块自己的测试时
+实测到的。
+
+**明确拒绝的两个 flag**,理由写在 `KITTY_KEYBOARD_SUPPORTED` 上:bit 3(所有键都走 escape)
+会把输入法合成中的按键也变成序列,而合成出来的「中」没有物理键可报 —— 没有诚实的序列可发,
+而且没人要(claude 5 / codex 7 都不含它);bit 4(关联文本)是给 bit 3 变成序列的那些键补文本的,
+bit 3 拒了它就没东西可捎。
+
+其余探测同样收口:
+
+- **OSC 4 调色板** / **OSC 12 光标色** —— 答。顺带把 `ANSI_16` 和 256 色表从渲染层搬进
+  `palette`,和 `FG`/`BG` 放一起 —— 那个文件开头就写着「程序能问的颜色不能有第二份」,而
+  调色板正是能问的。
+- **XTWINOPS `CSI 18t`**(文本区有多少字符)—— 答,我们本来就知道。
+- **XTWINOPS 14t/16t**(像素尺寸)—— 拒绝:数字在渲染层,隔着两个进程,而问它的唯一用途是摆
+  图片,marspot 不显示图片。为一个没用处的答案铺跨进程通道,是在造一个不存在的功能里更难的
+  那一半。
+- **XTWINOPS 其余**(移动/缩放/抬起/最小化/读回标题)—— 拒绝:程序不能搬这个窗口,也不能把
+  窗口里的文字读走。xterm 默认也关掉大部分,同一个理由。
+- **DA3** —— 拒绝:xterm 答一个「终端单元 ID」,我们没有,编一个出来不比不答好。
+- **XTGETTCAP / DECRQSS** —— 拒绝:两者的答案程序本来就够得着(前者 terminfo,后者它自己的
+  记账),所以谁也不问 —— 探针实测 claude / codex / vim 都不发。
+- **OSC 52 读剪贴板** —— 拒绝,而且是故意的:程序开口就把用户剪贴板给它,这条永远不答。
+
+25 行的断言表(`tests/device_queries.rs`)现在每一行都是一个决定,沉默的那些在表里写明为什么
+沉默。
 
 ### 0.11.97
 

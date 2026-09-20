@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.147"  # badge 菜单 dev seam，codex 换 profile 有了端到端；详见 CHANGELOG.md
-core    = "0.12.205"  # 键编码参数收进 TermModes（协议在 L3）；详见 CHANGELOG.md
-session = "0.11.97"  # kitty 键盘协议 disambiguate：shift/ctrl/alt+enter 终于各不相同；详见 CHANGELOG.md
+shell   = "0.7.148"  # 跟 WireKeyEvent 新字段改构造点；详见 CHANGELOG.md
+core    = "0.12.206"  # keyboard_layout（UCKeyTranslate + US 位置表）；调色板归 palette 一份；详见 CHANGELOG.md
+session = "0.11.98"  # 探测全部收口：kitty 补到 3 flag，OSC 4/12 + 18t 答，其余写明拒绝；详见 CHANGELOG.md

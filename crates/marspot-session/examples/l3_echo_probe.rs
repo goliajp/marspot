@@ -116,6 +116,7 @@ fn main() {
         state: KeyState::Pressed,
         logical: LogicalKey::Char(TYPED),
         text: Some(TYPED.to_string()),
+        ..Default::default()
     };
     let frame = Frame::new(
         MsgType::KeyEvent,

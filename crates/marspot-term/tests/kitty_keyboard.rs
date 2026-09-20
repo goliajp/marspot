@@ -25,7 +25,31 @@ fn press(logical: LogicalKey, text: Option<&str>) -> MarspotKeyEvent {
         state: KeyState::Pressed,
         logical,
         text: text.map(str::to_owned),
+        ..Default::default()
     }
+}
+
+/// The same key with a US-layout position attached — what AppKit
+/// gives us for any key in the ANSI block.
+fn press_at(logical: LogicalKey, text: Option<&str>, base: char) -> MarspotKeyEvent {
+    MarspotKeyEvent {
+        base_layout: Some(base),
+        ..press(logical, text)
+    }
+}
+
+fn release(logical: LogicalKey) -> MarspotKeyEvent {
+    MarspotKeyEvent {
+        state: KeyState::Released,
+        logical,
+        ..Default::default()
+    }
+}
+
+/// Encode with a chosen set of flags raised.
+fn with_flags(ev: &MarspotKeyEvent, m: Modifiers, flags: u8) -> Option<String> {
+    let modes = TermModes { kitty_keyboard: flags, ..TermModes::default() };
+    key_event_to_bytes(ev, m, modes, || None).map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 fn named(n: NamedKey) -> MarspotKeyEvent {
@@ -113,10 +137,11 @@ fn keys_that_were_indistinguishable_become_distinct() {
 
 #[test]
 fn the_shift_of_a_letter_is_reported_when_it_is_not_spent() {
-    // ctrl+shift+a produces no text, so shift IS a modifier here —
-    // and the codepoint is the unshifted one even though AppKit hands
-    // us the capital.
-    let ev = press(LogicalKey::Char('A'), None);
+    // ctrl+shift+a produces no text, so shift IS a modifier here.
+    // The codepoint is the unshifted one — `keyboard_layout` resolves
+    // that before the event ever reaches this encoder, which is the
+    // contract `LogicalKey::Char` documents.
+    let ev = press(LogicalKey::Char('a'), None);
     assert_eq!(kitty(&ev, mods("cs")).as_deref(), Some("\x1b[97;6u"));
 }
 
@@ -174,15 +199,107 @@ fn set_replaces_ors_and_clears() {
 }
 
 #[test]
-fn only_the_flag_we_honour_is_ever_reported() {
-    // A program that asks for all five gets told it has one.  The
+fn only_the_flags_we_honour_are_ever_reported() {
+    // A program that asks for all five gets told it has three.  The
     // protocol is built on the terminal reporting what it does, and a
     // program encodes for the reply — claiming `report all keys`
-    // without implementing it would send it keys we never send.
+    // without implementing it would promise sequences for keys that
+    // have none, composed IME text among them.
     let mut t = Terminal::new(40, 4);
     t.feed(b"\x1b[>31u\x1b[?u");
-    assert_eq!(t.take_response(), b"\x1b[?1u");
-    assert_eq!(t.kitty_keyboard_flags(), 1);
+    assert_eq!(t.take_response(), b"\x1b[?7u");
+    assert_eq!(t.kitty_keyboard_flags(), 7);
+}
+
+#[test]
+fn the_two_programs_that_ask_get_what_they_asked_for() {
+    // Measured with a pty probe: Claude Code sends `CSI > 5 u` and
+    // codex sends `CSI > 7 u`, each right after reading `CSI ? u`.
+    // Both are subsets of what is implemented, so both are answered
+    // with exactly what they requested and neither has to fall back.
+    for (who, ask, want) in [("claude", &b"\x1b[>5u"[..], &b"\x1b[?5u"[..]),
+                             ("codex", &b"\x1b[>7u"[..], &b"\x1b[?7u"[..])] {
+        let mut t = Terminal::new(40, 4);
+        t.feed(ask);
+        t.feed(b"\x1b[?u");
+        assert_eq!(t.take_response(), want, "{who}");
+    }
+}
+
+#[test]
+fn event_types_name_press_repeat_and_release() {
+    // Flag 2.  Without it a held arrow key is indistinguishable from
+    // someone pressing it forty times, and a key-up is invisible.
+    const F: u8 = 1 | 2;
+    let down = named(NamedKey::ArrowUp);
+    assert_eq!(with_flags(&down, mods(""), F).as_deref(), Some("\x1b[1;1:1A"));
+
+    let held = MarspotKeyEvent { repeat: true, ..named(NamedKey::ArrowUp) };
+    assert_eq!(with_flags(&held, mods(""), F).as_deref(), Some("\x1b[1;1:2A"));
+
+    let up = release(LogicalKey::Named(NamedKey::ArrowUp));
+    assert_eq!(with_flags(&up, mods(""), F).as_deref(), Some("\x1b[1;1:3A"));
+
+    // A letter, where the code is written out.
+    let a = press(LogicalKey::Char('a'), Some("a"));
+    assert_eq!(with_flags(&a, mods("c"), F).as_deref(), Some("\x1b[97;5:1u"));
+}
+
+#[test]
+fn without_the_event_flag_a_release_is_silent() {
+    // And silent is what every program that never asked expects: the
+    // legacy encoding has no way to say "key up" at all.
+    let up = release(LogicalKey::Named(NamedKey::ArrowUp));
+    assert_eq!(with_flags(&up, mods(""), 1), None);
+    assert_eq!(legacy(&up, mods("")), None);
+}
+
+#[test]
+fn the_three_legacy_keys_never_report_a_release() {
+    // They have no legacy sequence to carry one, and the spec keeps
+    // them on legacy bytes.  Reporting a release for them would send
+    // a program a sequence it has no press to pair with.
+    const F: u8 = 1 | 2;
+    for n in [NamedKey::Enter, NamedKey::Tab, NamedKey::Backspace] {
+        assert_eq!(with_flags(&release(LogicalKey::Named(n)), mods(""), F), None, "{n:?}");
+    }
+}
+
+#[test]
+fn alternate_keys_carry_the_shifted_value_and_the_us_position() {
+    // Flag 4.  `ctrl+shift+1` on a US layout: the key is `1`, the
+    // shifted value is `!`, and the position is `1` — same as the
+    // key, so it is not repeated.
+    const F: u8 = 1 | 4;
+    let one = press_at(LogicalKey::Char('1'), Some("!"), '1');
+    assert_eq!(with_flags(&one, mods("cs"), F).as_deref(), Some("[49:33;6u"));
+
+    // Without the flag, the same press is just the key.
+    assert_eq!(with_flags(&one, mods("cs"), 1).as_deref(), Some("[49;6u"));
+}
+
+#[test]
+fn alternate_keys_keep_a_binding_on_the_physical_key() {
+    // The reason the base-layout slot exists.  On AZERTY the key
+    // where US has `z` types `w`; a program binding ctrl+z to undo
+    // reads the second alternate and stays on the same finger.
+    const F: u8 = 1 | 4;
+    let azerty_w = press_at(LogicalKey::Char('w'), None, 'z');
+    // Empty shifted slot, so two colons before the base.
+    assert_eq!(with_flags(&azerty_w, mods("c"), F).as_deref(), Some("[119::122;5u"));
+
+    // On US the two agree and nothing extra is written.
+    let us_z = press_at(LogicalKey::Char('z'), None, 'z');
+    assert_eq!(with_flags(&us_z, mods("c"), F).as_deref(), Some("[122;5u"));
+}
+
+#[test]
+fn all_three_flags_at_once_read_as_one_sequence() {
+    // What codex actually gets.  Key, shifted alternate, US
+    // position, modifiers, event type — in that order, which is the
+    // order the spec fixes.
+    let ev = press_at(LogicalKey::Char('w'), Some("W"), 'z');
+    assert_eq!(with_flags(&ev, mods("cs"), 7).as_deref(), Some("[119:87:122;6:1u"));
 }
 
 #[test]

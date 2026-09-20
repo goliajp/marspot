@@ -19,34 +19,52 @@ use std::borrow::Cow;
 
 /// Marspot's portable key event.  Window backends (AppKit-direct)
 /// translate their native events into this.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MarspotKeyEvent {
     pub state: KeyState,
     /// Modifier-independent identifier of the pressed key.
     /// `Char('a')` for `a` and `shift+a` alike; the resolved text
     /// lives in `text`.
+    ///
+    /// For a character key this is what the key types with NO
+    /// modifiers under the current layout, which is not what AppKit
+    /// hands over — see `marspot::keyboard_layout::unshifted_char`.
     pub logical: LogicalKey,
     /// What the keystroke would type with current modifiers applied
     /// (e.g. `"A"` for shift+a, `" "` for space).  `None` for
     /// navigation keys / pure modifier presses / dead keys.
     pub text: Option<String>,
+    /// Where this key sits on a US ANSI keyboard, when it is one of
+    /// those positions.  Lets a program keep a binding on a key
+    /// POSITION rather than on what that position types, so `ctrl+z`
+    /// stays bottom-row-left on AZERTY.  Reported to programs that
+    /// ask for the kitty protocol's alternate keys; nothing else
+    /// reads it.
+    pub base_layout: Option<char>,
+    /// True when the keyboard's auto-repeat produced this press
+    /// rather than a finger.  Reported to programs that ask for the
+    /// kitty protocol's event types, which is how a TUI can hold a
+    /// key to scroll without treating each repeat as a fresh press.
+    pub repeat: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KeyState {
+    #[default]
     Pressed,
     Released,
 }
 
 /// Logical-key identity, modifier-independent.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum LogicalKey {
     /// Single character (`a`, `1`, `=`, …).  Modifier-independent —
-    /// shift+a still reports `Char('a')`.
+    /// `shift+a` and `shift+1` report `Char('a')` and `Char('1')`.
     Char(char),
     /// One of the named navigation / control keys we explicitly handle.
     Named(NamedKey),
     /// Anything else — caller falls back to `text` if present.
+    #[default]
     Other,
 }
 
@@ -112,6 +130,13 @@ impl Modifiers {
 /// took two of these and the kitty protocol made it three, which is
 /// the point where the call sites stop being readable and a fourth
 /// mode means touching all of them again.
+/// `CSI = 2 u` — report press, repeat and release rather than press
+/// alone.  See `marspot_term::terminal::KITTY_KEYBOARD_SUPPORTED`.
+pub const KITTY_REPORT_EVENTS: u8 = 0b0_0010;
+/// `CSI = 4 u` — report the shifted codepoint and the US-layout
+/// position alongside the key.
+pub const KITTY_REPORT_ALTERNATES: u8 = 0b0_0100;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TermModes {
     /// DECCKM (`?1`): arrow keys encode as `ESC O X` instead of
@@ -141,7 +166,9 @@ pub fn key_event_to_bytes(
     modes: TermModes,
     read_clipboard: impl FnOnce() -> Option<String>,
 ) -> Option<Cow<'static, [u8]>> {
-    if event.state != KeyState::Pressed {
+    if event.state != KeyState::Pressed && modes.kitty_keyboard & KITTY_REPORT_EVENTS == 0 {
+        // Nobody asked to hear about key-up, and the legacy encoding
+        // has no way to say it.
         return None;
     }
 
@@ -189,7 +216,10 @@ pub fn key_event_to_bytes(
     // program would take the shortcuts away from the user in every
     // app that raises the protocol.
     if modes.kitty_keyboard != 0 {
-        return kitty_key_bytes(event, modifiers);
+        return kitty_key_bytes(event, modifiers, modes.kitty_keyboard);
+    }
+    if event.state != KeyState::Pressed {
+        return None;
     }
 
     // Ctrl + letter → ASCII control code (Ctrl-A = 0x01 ... Ctrl-Z = 0x1A).
@@ -317,13 +347,35 @@ fn is_typed_text(text: Option<&String>) -> bool {
 fn kitty_key_bytes(
     event: &MarspotKeyEvent,
     mods: Modifiers,
+    flags: u8,
 ) -> Option<Cow<'static, [u8]>> {
-    let typed = is_typed_text(event.text.as_ref());
+    let released = event.state != KeyState::Pressed;
+    if released
+        && matches!(
+            event.logical,
+            // The three keys the spec keeps on legacy bytes have no
+            // legacy way to say "released", so they don't say it.
+            LogicalKey::Named(NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace)
+                // And a release inserts nothing, so a key we know
+                // only by the text it typed has nothing to report.
+                | LogicalKey::Other
+        )
+    {
+        return None;
+    }
+    let typed = is_typed_text(event.text.as_ref()) && !released;
     // Shift is spent once it has produced text: `shift+a` is the
-    // letter `A`, not a modified `a`.  Ctrl, Alt and Cmd are never
-    // spent this way.
+    // letter `A`, not a modified `a`, so it is not reported.
+    //
+    // Only when shift is the ONLY modifier, though.  Ctrl, Alt and
+    // Cmd stop a key from being ordinary text, so whatever `text`
+    // holds for `ctrl+shift+1` is not shift's doing and shift is
+    // still a modifier the program needs to see.  Deciding this from
+    // the modifiers rather than from the text also means it does not
+    // depend on which of `!` or `\x11` AppKit chose to put there.
+    let text_is_the_point = !mods.control && !mods.alt && !mods.super_;
     let effective = Modifiers {
-        shift: mods.shift && !typed,
+        shift: mods.shift && !(typed && text_is_the_point),
         ..mods
     };
     let bare = !effective.shift && !effective.control && !effective.alt && !effective.super_;
@@ -340,7 +392,7 @@ fn kitty_key_bytes(
             }
             kitty_entry(*n)
         }
-        LogicalKey::Char(c) => (c.to_ascii_lowercase() as u32, b'u'),
+        LogicalKey::Char(c) => (*c as u32, b'u'),
         // A key we have no identity for is only ever worth the text it
         // produced — dead keys and IME output arrive this way.
         LogicalKey::Other => {
@@ -361,26 +413,83 @@ fn kitty_key_bytes(
     }
 
     let m = encode_mods(effective);
-    let out = match final_byte {
-        // `CSI <code>[;<mods>] u|~`
-        b'u' | b'~' => {
-            if m == 1 {
-                format!("\x1b[{}{}", code, final_byte as char)
-            } else {
-                format!("\x1b[{};{}{}", code, m, final_byte as char)
-            }
-        }
-        // Legacy-final keys: the code is not written, the fixed `1`
-        // takes its place when there are modifiers to carry.
-        _ => {
-            if m == 1 {
-                format!("\x1b[{}", final_byte as char)
-            } else {
-                format!("\x1b[1;{}{}", m, final_byte as char)
-            }
-        }
+    // `1` press, `2` repeat, `3` release.  Written only when the
+    // program asked for event types; kitty omits `:1` for a press,
+    // but other terminals include it and a parser that can read the
+    // field can read the common case too.
+    let event_type = if flags & KITTY_REPORT_EVENTS != 0 {
+        Some(if released {
+            3
+        } else if event.repeat {
+            2
+        } else {
+            1
+        })
+    } else {
+        None
     };
+
+    use std::fmt::Write as _;
+    // `CSI code[:shifted[:base]][;mods[:event]] final`
+    let mut out = String::with_capacity(24);
+    out.push_str("\x1b[");
+    if final_byte == b'u' || final_byte == b'~' {
+        let _ = write!(out, "{code}");
+        if flags & KITTY_REPORT_ALTERNATES != 0 {
+            match (
+                alternate_shifted(event, effective, code),
+                alternate_base(event, code),
+            ) {
+                (Some(sh), Some(b)) => {
+                    let _ = write!(out, ":{sh}:{b}");
+                }
+                (Some(sh), None) => {
+                    let _ = write!(out, ":{sh}");
+                }
+                // Two colons: the shifted slot is empty, the base one
+                // is not.
+                (None, Some(b)) => {
+                    let _ = write!(out, "::{b}");
+                }
+                (None, None) => {}
+            }
+        }
+    } else if m > 1 || event_type.is_some() {
+        // Legacy-final keys carry no code; the fixed `1` stands in
+        // when there is a modifier or an event type to attach.
+        out.push('1');
+    }
+    match event_type {
+        Some(e) => {
+            let _ = write!(out, ";{m}:{e}");
+        }
+        None if m > 1 => {
+            let _ = write!(out, ";{m}");
+        }
+        None => {}
+    }
+    out.push(final_byte as char);
     Some(Cow::Owned(out.into_bytes()))
+}
+
+/// The codepoint this key produces WITH shift — reported only when
+/// shift is being held as a modifier and it differs from the key
+/// itself.  Lets a program bind `ctrl+shift+1` knowing it is `!`
+/// without modelling the layout.
+fn alternate_shifted(event: &MarspotKeyEvent, effective: Modifiers, code: u32) -> Option<u32> {
+    if !effective.shift {
+        return None;
+    }
+    let cp = event.text.as_ref()?.chars().next()?;
+    (cp as u32 != code && !cp.is_control()).then_some(cp as u32)
+}
+
+/// Where the key sits on a US keyboard, when that is somewhere other
+/// than what it types.  This is what keeps a binding on a key
+/// POSITION across layouts.
+fn alternate_base(event: &MarspotKeyEvent, code: u32) -> Option<u32> {
+    let base = event.base_layout? as u32;
+    (base != code).then_some(base)
 }
 
 /// Encode an xterm modifier parameter (1+bitmask, per ctlseqs).
@@ -559,6 +668,7 @@ mod tests {
             state: KeyState::Pressed,
             logical,
             text: text.map(|s| s.to_string()),
+            ..Default::default()
         }
     }
 
@@ -568,6 +678,7 @@ mod tests {
             state: KeyState::Released,
             logical: LogicalKey::Char('a'),
             text: Some("a".into()),
+            ..Default::default()
         };
         assert!(key_event_to_bytes(&ev, Modifiers::default(), TermModes::default(), || None).is_none());
     }

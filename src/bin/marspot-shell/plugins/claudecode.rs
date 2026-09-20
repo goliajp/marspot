@@ -6436,6 +6436,7 @@ mod tests {
                 kind: marspot::shell_proto::WireLogicalKind::Char,
                 key_data: 'x' as u32,
                 text: "x".into(),
+                ..Default::default()
             },
         );
         assert!(

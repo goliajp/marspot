@@ -8058,7 +8058,12 @@ mod tests {
         // Cursor cell — block at end of last log line (focused/live).
         let cursor_row = lines.len() - 1;
         let cursor_col = lines[cursor_row].len();
-        let cursor_color = Color::rgba(220, 224, 235, 0.90);
+        // The colour is `palette::CURSOR` because `OSC 12 ; ? ST`
+        // asks for it; the alpha stays here, because how solid the
+        // block looks is a drawing decision and not part of the
+        // answer.
+        let (cr, cg, cb) = marspot_term::palette::CURSOR;
+        let cursor_color = Color::rgba(cr, cg, cb, 0.90);
         canvas
             .rect()
             .at(

@@ -1679,6 +1679,7 @@ mod tests {
             kind: marspot::shell_proto::WireLogicalKind::Named,
             key_data: marspot::shell_proto::WireNamedKey::Escape as u32,
             text: String::new(),
+            ..Default::default()
         };
         assert!(matches!(r.on_user_key(&host, &esc), KeyHandling::EndSession));
         r.on_end(&host, EndReason::UserEscape);

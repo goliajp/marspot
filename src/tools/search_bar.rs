@@ -384,6 +384,7 @@ mod tests {
             state: KeyState::Pressed,
             logical: LogicalKey::Char(c),
             text: Some(c.to_string()),
+            ..Default::default()
         }
     }
 
@@ -392,6 +393,7 @@ mod tests {
             state: KeyState::Pressed,
             logical: LogicalKey::Named(n),
             text: None,
+            ..Default::default()
         }
     }
 
@@ -510,6 +512,7 @@ mod tests {
             state: KeyState::Pressed,
             logical: LogicalKey::Char('x'),
             text: Some("\0\u{1b}x".to_string()),
+            ..Default::default()
         };
         b.handle_key(&ev, Modifiers::default(), t);
         // NUL becomes ' '; ESC dropped; 'x' kept → " x".
@@ -526,6 +529,7 @@ mod tests {
             state: KeyState::Pressed,
             logical: LogicalKey::Char('a'),
             text: Some(big),
+            ..Default::default()
         };
         b.handle_key(&ev, Modifiers::default(), t);
         assert_eq!(b.query.len(), QUERY_MAX_CHARS);

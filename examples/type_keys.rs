@@ -32,6 +32,7 @@ fn main() {
             logical: LogicalKey::Char(ch),
             state: KeyState::Pressed,
             text: Some(ch.to_string()),
+            ..Default::default()
         };
         let wire = event_to_wire(&ev, Modifiers::default());
         Frame::new(MsgType::KeyEvent, encode_key_event(&wire, 0))

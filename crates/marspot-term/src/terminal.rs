@@ -373,17 +373,34 @@ struct SavedMain {
     kitty_keyboard: KittyKeyboardStack,
 }
 
-/// The kitty keyboard protocol flags marspot implements: bit 0,
-/// "disambiguate escape codes", and nothing else.
+/// The kitty keyboard protocol flags marspot implements: bits 0, 1
+/// and 2 — disambiguate escape codes, report event types, report
+/// alternate keys.  Between them that is what Claude Code asks for
+/// (`CSI > 5 u` = 1|4) and what codex asks for (`CSI > 7 u` = 1|2|4).
 ///
 /// The protocol is built around a terminal reporting what it actually
 /// does — a program sets flags, reads `CSI ? u` back, and encodes for
 /// what it finds — so claiming a bit we do not honour is worse than
-/// claiming none.  The other four (report event types, alternate
-/// keys, report all keys, associated text) each need input-side work
-/// that has not been done; `input_core::kitty_key_bytes` is where it
-/// would go.
-pub const KITTY_KEYBOARD_SUPPORTED: u8 = 0b0_0001;
+/// claiming none.  Every write to the stack masks with this constant.
+///
+/// The two not implemented, and why they are refusals rather than
+/// gaps:
+///
+/// - **bit 3, report all keys as escape codes.**  Every keystroke
+///   would become a CSI sequence, including the ones an input method
+///   is mid-composition on.  marspot routes IME text through the same
+///   key path (`app.rs` `insertText:`), and a composed 中 arrives as
+///   text with no physical key behind it — there is no honest
+///   sequence to send for it.  Nothing asks for the bit: neither
+///   Claude Code nor codex sets it, and a terminal that offers it
+///   without an answer for composition would break CJK input for the
+///   feature nobody requested.
+/// - **bit 4, report associated text.**  It exists to carry the text
+///   of keys that bit 3 turned into escape codes.  With bit 3
+///   refused it has nothing to carry: the keys that produce text
+///   already send that text, unchanged, which is the same
+///   information by a shorter route.
+pub const KITTY_KEYBOARD_SUPPORTED: u8 = 0b0_0111;
 
 /// Per-screen stack of kitty keyboard flags: `CSI > u` pushes,
 /// `CSI < u` pops, `CSI = u` sets in place, `CSI ? u` reports.
@@ -3713,6 +3730,51 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 self.pending_response.extend_from_slice(DA1_REPLY);
                 self.record_response("DA1");
             }
+            b't' if intermediates.is_empty() => {
+                // XTWINOPS.  Two kinds of thing share this final byte:
+                // questions about the window, and orders to move,
+                // resize, raise or iconify it.  Only one question is
+                // answered and every order is refused.
+                match params.first().copied().unwrap_or(0) {
+                    // 18 — how big is the text area, in characters?
+                    // `CSI 8 ; rows ; cols t`.  We know this exactly,
+                    // and a program that asks and hears nothing goes
+                    // on using whatever it last assumed.
+                    18 => {
+                        let mut buf = [0u8; 32];
+                        let n = {
+                            use std::io::Write;
+                            let mut w = &mut buf[..];
+                            let _ =
+                                write!(w, "\x1b[8;{};{}t", self.grid.rows(), self.grid.cols());
+                            32 - w.len()
+                        };
+                        self.pending_response.extend_from_slice(&buf[..n]);
+                        self.record_response("XTWINOPS-SIZE");
+                    }
+                    // 14 / 16 — the same area and one cell, in PIXELS.
+                    // Refused rather than unimplemented: the numbers
+                    // live in the renderer, two processes away from
+                    // here, and the only reason to ask is to place an
+                    // image — which marspot does not display.  Wiring
+                    // a cross-process pixel feed for a question whose
+                    // answer has no use would be building the harder
+                    // half of a feature that does not exist.
+                    //
+                    // 1-13, 15, 17, 19-24 — raise, lower, move,
+                    // resize, iconify, and read back the title.  A
+                    // program does not get to move this window or to
+                    // read text out of it; xterm disables most of
+                    // these by default for the same reason.
+                    _ => {
+                        lx_debug!(
+                            "term.csi.unsupported",
+                            "XTWINOPS declined",
+                            param0 = params.first().copied().unwrap_or(0)
+                        );
+                    }
+                }
+            }
             b'n' if intermediates.is_empty() => {
                 // DSR — Device Status Report.  `CSI 5 n` asks whether
                 // the terminal is alive; `CSI 6 n` (CPR) asks where the
@@ -3810,6 +3872,42 @@ impl<'a> ParserCallbacks for Handler<'a> {
             Some(n @ (10 | 11)) if rest.starts_with(b"?") => {
                 let c = if n == 10 { crate::palette::FG } else { crate::palette::BG };
                 let reply = format!("\x1b]{n};{}\x07", crate::palette::xterm_rgb(c));
+                self.pending_response.extend_from_slice(reply.as_bytes());
+                self.record_response("OSC-COLOR");
+            }
+            // OSC 4 — one or more palette entries: `4 ; n ; ? ; n ; ?`.
+            // vim and tmux read these to decide what they can draw
+            // with, and a terminal that stays quiet is read as one
+            // with no palette to speak of.  Answered per pair, in the
+            // same order asked, so a batched query is unambiguous.
+            Some(4) => {
+                let mut reply = String::new();
+                let mut fields = rest.split(|&b| b == b';');
+                while let (Some(idx), Some(val)) = (fields.next(), fields.next()) {
+                    if val != b"?" {
+                        // Setting a palette entry, not asking about
+                        // one.  marspot's palette is fixed, so this
+                        // is declined by not answering it — see
+                        // `palette::ANSI_16`.
+                        continue;
+                    }
+                    let Some(i) = std::str::from_utf8(idx).ok().and_then(|s| s.parse::<u8>().ok())
+                    else {
+                        continue;
+                    };
+                    let c = crate::palette::indexed(i);
+                    reply.push_str(&format!("\x1b]4;{i};{}\x07", crate::palette::xterm_rgb(c)));
+                }
+                if !reply.is_empty() {
+                    self.pending_response.extend_from_slice(reply.as_bytes());
+                    self.record_response("OSC-PALETTE");
+                }
+            }
+            // OSC 12 — the cursor's colour.  Same shape as 10 and 11,
+            // and asked by the same programs for the same reason.
+            Some(12) if rest.starts_with(b"?") => {
+                let c = crate::palette::unit(crate::palette::CURSOR);
+                let reply = format!("\x1b]12;{}\x07", crate::palette::xterm_rgb(c));
                 self.pending_response.extend_from_slice(reply.as_bytes());
                 self.record_response("OSC-COLOR");
             }
