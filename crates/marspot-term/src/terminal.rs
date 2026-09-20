@@ -91,6 +91,13 @@ pub enum MouseTrackingMode {
     AnyEvent,
 }
 
+/// What marspot answers DA1 (and DECID) with: VT220-class with
+/// selective attributes — 1 = 132-column mode, 6 = selective erase,
+/// 22 = colour text, the same shape xterm reports.  A program that
+/// gets no answer stalls on its capability probe and then falls back
+/// to a degraded rendering path.
+const DA1_REPLY: &[u8] = b"\x1b[?62;1;6;22c";
+
 pub struct Terminal {
     grid: Grid,
     /// Saved main grid while the terminal is in alt-screen mode (`?1049h`).
@@ -2864,6 +2871,38 @@ impl<'a> Handler<'a> {
         }
     }
 
+    /// What DECRQM reports for `mode`: 0 not recognised, 1 set,
+    /// 2 reset, 3 permanently set, 4 permanently reset.
+    ///
+    /// Mirrors `dec_mode` arm for arm — a mode this terminal acts on
+    /// answers with its real state, and one it does not answers 0 so
+    /// the program stays on whatever it does without us.  The two
+    /// permanent answers are the honest ones for the two modes marspot
+    /// has no switch for: wrap is always on, origin mode is always off.
+    fn dec_mode_report(&self, mode: u16) -> u16 {
+        let on = |b: bool| if b { 1 } else { 2 };
+        match mode {
+            1 => on(*self.cursor_key_app_mode),
+            // DECOM — marspot has no origin mode to be relative to
+            // (see the CPR arm); absolute is the only reading it has.
+            6 => 4,
+            // DECAWM — always on: there is no code path that stops a
+            // glyph in the last column from wrapping.
+            7 => 3,
+            25 => on(*self.cursor_visible),
+            47 | 1047 | 1049 => on(self.saved_main.is_some()),
+            1000 => on(*self.mouse_tracking_mode == MouseTrackingMode::X11),
+            1002 => on(*self.mouse_tracking_mode == MouseTrackingMode::ButtonEvent),
+            1003 => on(*self.mouse_tracking_mode == MouseTrackingMode::AnyEvent),
+            1004 => on(*self.focus_reporting),
+            1006 => on(*self.mouse_sgr_encoding),
+            1007 => on(*self.alt_scroll),
+            2004 => on(*self.bracketed_paste),
+            2026 => on(*self.sync_output),
+            _ => 0,
+        }
+    }
+
     fn dec_mode(&mut self, mode: u16, set: bool) {
         match mode {
             // DECCKM — cursor keys send `ESC O X` in app mode, `ESC [ X`
@@ -3075,6 +3114,13 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 *self.pending_wrap = false;
                 self.reverse_index();
             }
+            // DECID (ESC Z) — the pre-DA1 way of asking the same
+            // question, still sent by older curses builds.  xterm
+            // answers it with the DA1 string, so we do too.
+            b'Z' => {
+                self.pending_response.extend_from_slice(DA1_REPLY);
+                self.record_response("DECID");
+            }
             // DECKPAM (=) / DECKPNM (>) — application / normal keypad
             // mode. Same input-encoding category as DECCKM; accept
             // silently for now (the keypad-specific keys we encode
@@ -3137,6 +3183,24 @@ impl<'a> ParserCallbacks for Handler<'a> {
                         self.dec_mode(p, false);
                     }
                 }
+                // DECXCPR — `CSI ? 6 n`, the DEC-private twin of CPR.
+                // Same reading of the cursor, `?`-prefixed, with the
+                // page number xterm always reports as 1.  A program
+                // that asks this way and gets nothing waits exactly as
+                // long as one that asked with `CSI 6 n`.
+                b'n' if params.first().copied() == Some(6) => {
+                    let (c0, r0) = self.grid.cursor();
+                    let (row, col) = (r0 + 1, c0 + 1);
+                    let mut buf = [0u8; 32];
+                    let n = {
+                        use std::io::Write;
+                        let mut w = &mut buf[..];
+                        let _ = write!(w, "\x1b[?{row};{col};1R");
+                        32 - w.len()
+                    };
+                    self.pending_response.extend_from_slice(&buf[..n]);
+                    self.record_response("DECXCPR");
+                }
                 other => {
                     lx_debug!(
                         "term.csi.unsupported",
@@ -3172,6 +3236,49 @@ impl<'a> ParserCallbacks for Handler<'a> {
                     self.pending_response
                         .extend_from_slice(b"\x1bP>|marspot\x1b\\");
                     self.record_response("XTQVERSION");
+                }
+                // DA2 (Secondary DA) — `CSI > c`.  App wants the
+                // firmware version; xterm answers `CSI > 41;330;0 c`
+                // (type 41 = VT420, version 330, ROM 0) and we mimic it.
+                //
+                // This arm used to sit below with the other `c` handling,
+                // where the early return made it dead — exactly the way
+                // XTQVERSION was dead, with a comment next to it
+                // describing a reply it was not sending.  Measured
+                // 2026-09-20: `CSI > c` returned zero bytes.  The note
+                // above was already there; what was missing was a test
+                // that could see it, which `probe_replies` now is.
+                (b">", b'c') => {
+                    self.pending_response.extend_from_slice(b"\x1b[>41;330;0c");
+                    self.record_response("DA2");
+                }
+                // DECRQM — `CSI ? Ps $ p` asks whether a DEC private
+                // mode is set; the answer is `CSI ? Ps ; Pm $ y`.
+                //
+                // Worth answering because we have something to say: a
+                // program that cannot confirm ?2026 does not use
+                // synchronized output, and marspot implements it — so
+                // silence here costs a feature already built and paid
+                // for.  Modes we don't implement report 0, which is the
+                // spec's "never heard of it" and leaves the program on
+                // its fallback.
+                //
+                // Deliberately NOT routed through `record_response`:
+                // asking about several modes in a row at startup is what
+                // a correct client does, and an instrument that warns on
+                // correct behaviour is a broken instrument.
+                (b"?$", b'p') => {
+                    let mode = param(params, 0, 0);
+                    let state = self.dec_mode_report(mode);
+                    let mut buf = [0u8; 32];
+                    let n = {
+                        use std::io::Write;
+                        let mut w = &mut buf[..];
+                        let _ = write!(w, "\x1b[?{mode};{state}$y");
+                        32 - w.len()
+                    };
+                    self.pending_response.extend_from_slice(&buf[..n]);
+                    lx_debug!("term.respond", "DECRQM", mode = mode, state = state);
                 }
                 _ => {
                     lx_debug!(
@@ -3462,15 +3569,8 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // text — picks up the same shape xterm reports.
                 // Without this response apps stall on capability probe
                 // and fall back to degraded rendering paths.
-                self.pending_response.extend_from_slice(b"\x1b[?62;1;6;22c");
+                self.pending_response.extend_from_slice(DA1_REPLY);
                 self.record_response("DA1");
-            }
-            b'c' if intermediates == b">" => {
-                // DA2 (Secondary DA) — `CSI > 0 c`. App wants firmware
-                // version. xterm responds `CSI > 41;330;0 c` (terminal
-                // type 41 = VT420, version 330, ROM 0). We mimic.
-                self.pending_response.extend_from_slice(b"\x1b[>41;330;0c");
-                self.record_response("DA2");
             }
             b'n' if intermediates.is_empty() => {
                 // DSR — Device Status Report.  `CSI 5 n` asks whether
