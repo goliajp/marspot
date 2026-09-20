@@ -217,3 +217,27 @@ fn a_tui_cannot_leave_the_protocol_raised_over_the_shell() {
     t.feed(b"\x1b[?1049l");
     assert_eq!(t.kitty_keyboard_flags(), 1, "main screen kept its own");
 }
+
+#[test]
+fn the_terminal_hands_the_encoder_what_the_program_asked_for() {
+    // The join between the two halves: flags arrive as bytes from the
+    // pty, and `input_modes` is what carries them to the encoder.
+    // Tested here because each half passing on its own says nothing
+    // about the wire between them.
+    let mut t = Terminal::new(40, 4);
+    let ev = named(NamedKey::Enter);
+    let m = mods("s");
+
+    // Before: marspot's own guess at what shift+enter meant.  Kept on
+    // purpose — it is what a program that never asks still gets.
+    let before = key_event_to_bytes(&ev, m, t.input_modes(), || None).unwrap();
+    assert_eq!(&*before, b"\n");
+
+    t.feed(b"\x1b[>1u");
+    let after = key_event_to_bytes(&ev, m, t.input_modes(), || None).unwrap();
+    assert_eq!(&*after, b"\x1b[13;2u");
+
+    t.feed(b"\x1b[<u");
+    let popped = key_event_to_bytes(&ev, m, t.input_modes(), || None).unwrap();
+    assert_eq!(&*popped, b"\n");
+}
