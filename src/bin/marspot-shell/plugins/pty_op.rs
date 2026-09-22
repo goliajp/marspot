@@ -127,7 +127,53 @@ pub enum StepKind {
     /// screen it just cleared: **the black flash**.  A first frame is
     /// tens of kilobytes; startup noise is a few hundred bytes.
     AwaitQuiet { still: Duration, min_bytes: u64 },
+    /// Wait for work running on another thread, and fail the run with
+    /// its error if it fails.
+    ///
+    /// For anything too slow for the tick — reading a gigabyte of
+    /// history, say — that a later step depends on.  Putting it BEFORE
+    /// the destructive steps is the point: a script that would kill a
+    /// program and replace it can find out it has nothing to replace
+    /// it with while the program is still there.
+    AwaitJob(Arc<Job>),
+    /// Paste the text an earlier job produced.  A job that produced
+    /// none ends the run here, successfully: there was nothing to say,
+    /// so the steps that would have said it are skipped.
+    PasteJob(Arc<Job>),
+    /// Run a quick effect, failing the run with its error.  For
+    /// committing a decision only once the steps before it worked.
+    Call(CallFn),
 }
+
+/// The far end of an [`StepKind::AwaitJob`]: whoever does the work
+/// calls [`finish`](Self::finish) once, from any thread, optionally
+/// with text for a later [`StepKind::PasteJob`] to deliver.
+#[derive(Default)]
+pub struct Job {
+    result: std::sync::Mutex<Option<Result<Option<String>, String>>>,
+}
+
+impl Job {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+    /// Report the outcome.  Only the first report counts.
+    pub fn finish(&self, r: Result<Option<String>, String>) {
+        let mut slot = self.result.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(r);
+        }
+    }
+    fn poll(&self) -> Option<Result<(), String>> {
+        self.result.lock().unwrap().as_ref().map(|r| r.as_ref().map(|_| ()).map_err(Clone::clone))
+    }
+    fn text(&self) -> Option<String> {
+        self.result.lock().unwrap().as_ref().and_then(|r| r.as_ref().ok().cloned().flatten())
+    }
+}
+
+/// A quick effect run on the tick — see [`StepKind::Call`].
+pub type CallFn = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 /// One step: what to do, how long it may take, and what to call it in
 /// the log.
@@ -173,6 +219,15 @@ impl Step {
             timeout: Some(Duration::from_secs(30)),
             label: "await_process",
         }
+    }
+    pub fn await_job(job: Arc<Job>) -> Self {
+        Self { kind: StepKind::AwaitJob(job), timeout: Some(Duration::from_secs(30)), label: "await_job" }
+    }
+    pub fn paste_job(job: Arc<Job>) -> Self {
+        Self { kind: StepKind::PasteJob(job), timeout: Some(Duration::from_secs(5)), label: "paste_job" }
+    }
+    pub fn call(f: CallFn) -> Self {
+        Self { kind: StepKind::Call(f), timeout: Some(Duration::from_secs(5)), label: "call" }
     }
     pub fn await_user() -> Self {
         Self { kind: StepKind::AwaitUser, timeout: None, label: "await_user" }
@@ -510,29 +565,35 @@ impl OpRunner {
                 true
             }
             StepKind::AwaitUser => false, // only `wake()` moves this on
-            StepKind::Paste(text) => {
-                if text.len() > MAX_PAYLOAD {
-                    self.finish(
-                        host,
-                        OpOutcome::Failed {
-                            step: self.at,
-                            label: step.label,
-                            err: format!("{} B exceeds the {MAX_PAYLOAD} B cap", text.len()),
-                        },
+            StepKind::AwaitJob(job) => match job.poll() {
+                None => false,
+                Some(Ok(())) => true,
+                Some(Err(err)) => {
+                    self.finish(host, OpOutcome::Failed { step: self.at, label: step.label, err });
+                    true
+                }
+            },
+            StepKind::Call(f) => {
+                if let Err(err) = f() {
+                    self.finish(host, OpOutcome::Failed { step: self.at, label: step.label, err });
+                }
+                true
+            }
+            StepKind::PasteJob(job) => {
+                let Some(text) = job.text() else {
+                    host.log(
+                        LogLevel::Info,
+                        &format!("{}.nothing_to_paste", self.op.name),
+                        &format!("pane {sid}: the job produced no text; done"),
                     );
+                    self.finish(host, OpOutcome::Done);
                     return true;
-                }
-                host.log(
-                    LogLevel::Info,
-                    &format!("{}.paste", self.op.name),
-                    &format!("sid={sid} bytes={}", text.len()),
-                );
-                if let Err(e) = self.env.io().paste(sid, &text) {
-                    self.finish(
-                        host,
-                        OpOutcome::Failed { step: self.at, label: step.label, err: e.to_string() },
-                    );
-                }
+                };
+                self.deliver(host, step.label, &text);
+                true
+            }
+            StepKind::Paste(text) => {
+                self.deliver(host, step.label, &text);
                 true
             }
             StepKind::Send(bytes) => {
@@ -570,6 +631,30 @@ impl OpRunner {
                 let drawn = self.seen_len.saturating_sub(self.entered_len);
                 self.drew && drawn >= min_bytes && quiet >= still
             }
+        }
+    }
+
+    /// Paste `text`, refusing anything over the cap.
+    fn deliver(&mut self, host: &dyn PaneSessionHost, label: &'static str, text: &str) {
+        let sid = host.shelld_session_id();
+        if text.len() > MAX_PAYLOAD {
+            self.finish(
+                host,
+                OpOutcome::Failed {
+                    step: self.at,
+                    label,
+                    err: format!("{} B exceeds the {MAX_PAYLOAD} B cap", text.len()),
+                },
+            );
+            return;
+        }
+        host.log(
+            LogLevel::Info,
+            &format!("{}.paste", self.op.name),
+            &format!("sid={sid} bytes={}", text.len()),
+        );
+        if let Err(e) = self.env.io().paste(sid, text) {
+            self.finish(host, OpOutcome::Failed { step: self.at, label, err: e.to_string() });
         }
     }
 
@@ -1195,6 +1280,84 @@ mod tests {
             matches!(finished.lock().unwrap().as_ref(), Some(OpOutcome::Failed { .. })),
             "and the caller is told why"
         );
+    }
+
+    /// A failed job ends the run before the steps after it — which is
+    /// what lets a script put a kill after it safely.
+    #[test]
+    fn a_failed_job_stops_the_run_before_the_kill() {
+        let (state, env, host) = setup();
+        state.alive.lock().unwrap().push(4242);
+        let job = Job::new();
+        let finished: Arc<Mutex<Option<OpOutcome>>> = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&finished);
+        let op = PtyOp::new("test.job")
+            .step(Step::await_job(Arc::clone(&job)))
+            .step(Step::terminate(4242, libc::SIGTERM));
+        let mut r = OpRunner::new(op, env).on_finish(move |_, o| *sink.lock().unwrap() = Some(o.clone()));
+        run(&mut r, &host, &state, 500);
+        assert!(state.signals.lock().unwrap().is_empty(), "nothing is killed while the job runs");
+        job.finish(Err("no history".into()));
+        job.finish(Ok(None)); // a second report must not overwrite the first
+        run(&mut r, &host, &state, 500);
+        r.on_end(&host, EndReason::PluginRequested);
+        assert!(state.signals.lock().unwrap().is_empty(), "and nothing after it fails");
+        assert!(matches!(
+            finished.lock().unwrap().as_ref(),
+            Some(OpOutcome::Failed { label: "await_job", err, .. }) if err == "no history"
+        ));
+    }
+
+    /// A job that succeeds lets the run go on.
+    #[test]
+    fn a_finished_job_lets_the_run_continue() {
+        let (state, env, host) = setup();
+        state.alive.lock().unwrap().push(4242);
+        let job = Job::new();
+        job.finish(Ok(None));
+        let op = PtyOp::new("test.job")
+            .step(Step::await_job(job))
+            .step(Step::terminate(4242, libc::SIGTERM));
+        let mut r = OpRunner::new(op, env);
+        run(&mut r, &host, &state, 100);
+        assert_eq!(state.signals.lock().unwrap().first(), Some(&(4242, libc::SIGTERM)));
+    }
+
+    /// A job's text is pasted; no text ends the run there, so nothing
+    /// after it (the Enter that would submit it) is sent.
+    #[test]
+    fn a_job_s_text_is_pasted_and_no_text_stops_the_run() {
+        let (state, env, host) = setup();
+        let job = Job::new();
+        job.finish(Ok(Some("the message".into())));
+        let op = PtyOp::new("test.pj").step(Step::paste_job(job)).step(Step::send(b"\r".to_vec()));
+        run(&mut OpRunner::new(op, env), &host, &state, 100);
+        assert_eq!(*state.pasted.lock().unwrap(), vec!["the message".to_string()]);
+        assert_eq!(state.sent.lock().unwrap().len(), 1);
+
+        let (state, env, host) = setup();
+        let job = Job::new();
+        job.finish(Ok(None));
+        let op = PtyOp::new("test.pj").step(Step::paste_job(job)).step(Step::send(b"\r".to_vec()));
+        run(&mut OpRunner::new(op, env), &host, &state, 100);
+        assert!(state.pasted.lock().unwrap().is_empty());
+        assert!(state.sent.lock().unwrap().is_empty(), "the Enter is not sent either");
+    }
+
+    /// A call's error fails the run.
+    #[test]
+    fn a_failing_call_fails_the_run() {
+        let (state, env, host) = setup();
+        let finished: Arc<Mutex<Option<OpOutcome>>> = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&finished);
+        let op = PtyOp::new("test.call")
+            .step(Step::call(Arc::new(|| Err("disk full".into()))))
+            .step(Step::send(b"x".to_vec()));
+        let mut r = OpRunner::new(op, env).on_finish(move |_, o| *sink.lock().unwrap() = Some(o.clone()));
+        run(&mut r, &host, &state, 100);
+        r.on_end(&host, EndReason::PluginRequested);
+        assert!(state.sent.lock().unwrap().is_empty());
+        assert!(matches!(finished.lock().unwrap().as_ref(), Some(OpOutcome::Failed { err, .. }) if err == "disk full"));
     }
 
     /// Records which pane got a session, in order.  The op's name is

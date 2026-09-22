@@ -28,7 +28,13 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.148**
+Current: **0.7.149**
+
+### 0.7.149
+
+`pty_op` 新增三个通用步骤：`AwaitJob`（等另一个线程的工作，失败就结束——放在破坏性步骤之前，
+读不出来就什么都不杀）、`PasteJob`（paste 任务产出的文本，没有文本就提前结束，后面的回车也不发）、
+`Call`（在 tick 上做一个快速提交，失败就结束）。给 RFC-009 的交接用。
 
 ### 0.7.148
 
