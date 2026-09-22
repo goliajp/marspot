@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PermissionSet,
             PLUGIN_API_VERSION};
-use crate::plugins::{pidtree, pty_op};
+use crate::plugins::{handoff, pidtree, pty_op};
 
 /// How the wheel reaches codex.  Verified by injecting into a real
 /// pty: `Ctrl+T` opens the transcript, and from there codex takes both
@@ -286,6 +286,34 @@ fn last_turn_cwd(tail: &str) -> Option<String> {
         .and_then(|l| json_str_field(l, "cwd"))
 }
 
+/// The newest rollout whose last turn ran in `cwd` — the same rule
+/// codex's own `resume --last` uses.  Reads up to 40 file tails, so it
+/// belongs on a worker thread, not in a hook.
+pub(crate) fn newest_rollout_for_cwd(codex_home: &std::path::Path, cwd: &str) -> Option<PathBuf> {
+    recent_rollouts(codex_home)
+        .into_iter()
+        .take(40)
+        .find(|p| tail_of(p).and_then(|t| last_turn_cwd(&t)).as_deref() == Some(cwd))
+}
+
+/// The thread a codex process was started to resume, from its argv
+/// (`codex resume <uuid>`).  None for a fresh one, or `--last`.
+pub(crate) fn argv_thread_id(codex_pid: i32) -> Option<String> {
+    let line = pidtree::proc_cmdline(codex_pid)?;
+    let mut it = line.split(' ');
+    it.by_ref().find(|w| *w == "resume")?;
+    it.find(|w| !w.starts_with('-'))
+        .filter(|w| w.len() == 36 && w.chars().filter(|c| *c == '-').count() == 4)
+        .map(str::to_string)
+}
+
+/// The home a live codex runs under: its `CODEX_HOME`, or `~/.codex`.
+pub(crate) fn home_of(codex_pid: i32) -> Option<PathBuf> {
+    marspot::pidtree::proc_env_value(codex_pid, "CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
+}
+
 /// The reasoning efforts codex accepts.
 ///
 /// Read out of the binary rather than assumed: its serde variant table
@@ -307,7 +335,7 @@ fn last_turn_cwd(tail: &str) -> Option<String> {
 const CODEX_PROFILE_PREFIX: &str = ".codex-profile-";
 
 /// Which profile a directory is: `None` for the default `~/.codex`.
-fn profile_dirs() -> Vec<(u8, std::path::PathBuf)> {
+pub(crate) fn profile_dirs() -> Vec<(u8, std::path::PathBuf)> {
     let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
         return Vec::new();
     };
@@ -436,6 +464,37 @@ impl CodexPlugin {
     }
 }
 
+impl CodexPlugin {
+    /// Move this pane's conversation to claude profile `n` (RFC-009).
+    fn hand_off(&mut self, host: &dyn PluginHost, sid: u64, n: u8) {
+        let Some(pane) = self.panes.get(&sid).cloned() else {
+            host.log(LogLevel::Warn, "handoff.no_codex", &format!("pane {sid}: no codex to hand off from"));
+            return;
+        };
+        let Some((_, dir)) = handoff::profiles(handoff::Agent::Claude).into_iter().find(|(p, _)| *p == n) else {
+            host.log(LogLevel::Warn, "handoff.profile_gone", &format!("claude profile {n} no longer exists"));
+            return;
+        };
+        let Some(home) = home_of(pane.codex_pid) else { return };
+        let leaving = handoff::Leaving {
+            agent: handoff::Agent::Codex,
+            pid: pane.codex_pid,
+            shell_pid: pane.shell_pid,
+            home,
+            session_id: argv_thread_id(pane.codex_pid),
+            cwd: pidtree::proc_cwd(pane.codex_pid).map(|c| c.to_string_lossy().into_owned()),
+        };
+        host.log(LogLevel::Info, "handoff.start", &format!("pane {sid} codex → claude P{n}: {leaving:?}"));
+        let Some(op) = handoff::switch_op(sid, leaving, handoff::Agent::Claude, n, dir) else {
+            host.log(LogLevel::Warn, "handoff.no_command", &format!("pane {sid}: cannot build the claude line"));
+            return;
+        };
+        if let Err(e) = host.submit_pty_op(sid, op) {
+            host.log(LogLevel::Warn, "handoff.submit_failed", &format!("pane {sid}: {e}"));
+        }
+    }
+}
+
 impl Default for CodexPlugin {
     fn default() -> Self {
         Self::new()
@@ -500,7 +559,7 @@ impl Plugin for CodexPlugin {
             return Vec::new();
         }
         let current = pane.profile;
-        dirs.iter()
+        let mut rows: Vec<_> = dirs.iter()
             .map(|(n, _)| marspot::shell_proto::PaneBadgeMenuItem {
                 // The tag IS the profile number, so a menu built from
                 // one directory listing and acted on against another
@@ -513,7 +572,9 @@ impl Plugin for CodexPlugin {
                     format!("   profile {n}")
                 },
             })
-            .collect()
+            .collect();
+        rows.extend(handoff::menu_rows(handoff::Agent::Codex));
+        rows
     }
 
     fn on_pane_badge_menu_action(
@@ -522,6 +583,12 @@ impl Plugin for CodexPlugin {
         shelld_session_id: u64,
         tag: u32,
     ) {
+        if let Some((to, n)) = handoff::parse_tag(tag) {
+            if to == handoff::Agent::Claude {
+                self.hand_off(host, shelld_session_id, n);
+            }
+            return;
+        }
         let Ok(profile) = u8::try_from(tag) else {
             return; // another plugin's row
         };

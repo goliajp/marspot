@@ -66,6 +66,7 @@ reset_state; run test-multi-window.sh  "RFC-005: two windows, own pairs, layout 
 reset_state; run test-window-close-order.sh "closing order does not change what survives"
 reset_state; run test-close-last-pane.sh    "last pane closes its window; last window quits"
 reset_state; run test-codex-profile-switch.sh "a badge-menu pick moves a live codex pane to another profile"
+reset_state; run test-agent-handoff.sh "RFC-009: a pane moves between claude and codex and back without piling up"
 reset_state; run test-crash-guard.sh   "2026-07-28: crash-loop brake + session reaping + registry deadman"
 reset_state; run test-update-flow.sh   "silent update happy path"
 reset_state; run test-rollback.sh      "silent update rollback (broken binary)"

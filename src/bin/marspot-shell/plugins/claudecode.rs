@@ -1717,6 +1717,37 @@ impl ClaudecodePlugin {
 }
 
 
+impl ClaudecodePlugin {
+    /// Move this pane's conversation to codex profile `n` (RFC-009).
+    fn hand_off(&mut self, host: &dyn PluginHost, sid: u64, n: u8) {
+        use crate::plugins::handoff;
+        let Some(meta) = self.last_meta.get(&sid).cloned() else {
+            host.log(LogLevel::Warn, "handoff.no_bind", &format!("pane {sid}: no claude to hand off from"));
+            return;
+        };
+        let Some((_, dir)) = handoff::profiles(handoff::Agent::Codex).into_iter().find(|(p, _)| *p == n) else {
+            host.log(LogLevel::Warn, "handoff.profile_gone", &format!("codex profile {n} no longer exists"));
+            return;
+        };
+        let leaving = handoff::Leaving {
+            agent: handoff::Agent::Claude,
+            pid: meta.claude_pid,
+            shell_pid: shell_pid_for(sid),
+            home: config_dir_or_default(meta.config_dir.as_deref()),
+            session_id: Some(meta.uuid.clone()),
+            cwd: None,
+        };
+        host.log(LogLevel::Info, "handoff.start", &format!("pane {sid} claude → codex P{n}: {leaving:?}"));
+        let Some(op) = handoff::switch_op(sid, leaving, handoff::Agent::Codex, n, dir) else {
+            host.log(LogLevel::Warn, "handoff.no_command", &format!("pane {sid}: cannot build the codex line"));
+            return;
+        };
+        if let Err(e) = host.submit_pty_op(sid, op) {
+            host.log(LogLevel::Warn, "handoff.submit_failed", &format!("pane {sid}: {e}"));
+        }
+    }
+}
+
 /// The reclamation script: hold the picture, take claude down, park
 /// until the user comes back, then put it back the way it was.
 ///
@@ -1931,7 +1962,7 @@ fn background_held_sessions(config_dir: &std::path::Path) -> Vec<String> {
 }
 
 /// `CLAUDE_CONFIG_DIR` as a path, or the CLI's default when unset.
-fn config_dir_or_default(config_dir: Option<&str>) -> PathBuf {
+pub(crate) fn config_dir_or_default(config_dir: Option<&str>) -> PathBuf {
     match config_dir {
         Some(d) => PathBuf::from(d),
         None => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude"),
@@ -2041,7 +2072,7 @@ fn profile_cycle_op(
 /// its `claude5` shell alias) and the cycle picks it up on the next
 /// click, no code change.  The default `.claude` (P0) is deliberately
 /// not part of the cycle, matching the previous hardcoded 1→2→3 loop.
-fn discover_profiles() -> Vec<u8> {
+pub(crate) fn discover_profiles() -> Vec<u8> {
     let Some(home) = std::env::var_os("HOME") else {
         return Vec::new();
     };
@@ -3106,7 +3137,7 @@ fn encode_project_dir(cwd: &std::path::Path) -> String {
 /// real claudecode process.  argv[0] survives the rename (it's the
 /// original exec path), so cmdline → split → check argv[0]'s
 /// basename equals "claude" is the reliable signal.
-fn looks_like_claudecode(d: &pidtree::ProcRow) -> bool {
+pub(crate) fn looks_like_claudecode(d: &pidtree::ProcRow) -> bool {
     let line = match pidtree::proc_cmdline(d.pid) {
         Some(l) => l,
         None => return false,
@@ -3382,7 +3413,8 @@ impl Plugin for ClaudecodePlugin {
             return Vec::new();
         };
         let profiles = discover_profiles();
-        let items = badge_menu_for(meta.profile_num, &profiles);
+        let mut items = badge_menu_for(meta.profile_num, &profiles);
+        items.extend(crate::plugins::handoff::menu_rows(crate::plugins::handoff::Agent::Claude));
         if items.is_empty() {
             host.log(
                 LogLevel::Warn,
@@ -3402,6 +3434,12 @@ impl Plugin for ClaudecodePlugin {
         shelld_session_id: u64,
         tag: u32,
     ) {
+        if let Some((to, n)) = crate::plugins::handoff::parse_tag(tag) {
+            if to == crate::plugins::handoff::Agent::Codex {
+                self.hand_off(host, shelld_session_id, n);
+            }
+            return;
+        }
         // Tags this plugin assigns are profile numbers (fit in u8);
         // anything else belongs to another plugin's rows.
         let Ok(target) = u8::try_from(tag) else {

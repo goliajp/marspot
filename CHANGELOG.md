@@ -28,7 +28,26 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.149**
+Current: **0.7.150**
+
+### 0.7.150
+
+**claude 和 codex 之间可以互相交接同一个 pane 的对话（RFC-009）。** badge 右键菜单多了
+「hand off to codex Pn」/「hand off to claude Pn」。选了以后：后台线程先把原 agent 最近三轮
+的原话和最终回复写成一份交接文档（写不出来就什么都不杀），然后停掉原 agent、启动对方、等首帧、
+送一行带 `[marspot handoff]` 标记的消息，让对方复述现状后等用户指示。
+
+- 不伪造对方的 history 文件：两边格式私有且常变，推理内容一边签名一边加密，本来也带不过去。
+- 交接内容刻意很少：做了什么以仓库为准（git status / log），只带仓库里没有的对话。
+- 来回切不产生垃圾：每个 pane 记住它在两边各自的会话和已交接到的字节偏移，第二次起一律
+  resume 原会话、只交增量；带标记的轮次读取时跳过，交接不会嵌套；每个 pane 只有一份 ledger
+  和一份文档，每次覆盖，pane 关掉后下次切换时清掉。
+- 首帧等待改成从敲命令那一刻开始计字节：一个在「进程出现」之前就画完的 agent，原来会让这一步
+  等到超时。
+- 真实文件实测：1.1 GB 的 codex rollout 从最后一次压缩开始读，82 ms；生成的文档 claude 约
+  8 KB、codex 约 1 KB。
+- 新增 `bin/test-agent-handoff.sh`（真 pty + 两个替身二进制，来回切三次），已进 `test-all.sh`，
+  变异验过能红。
 
 ### 0.7.149
 
