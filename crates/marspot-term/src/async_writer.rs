@@ -30,9 +30,17 @@
 //!   read the file back (cold scrollback reads, handoff before
 //!   `execv`) need the bytes to be *there*, so `flush` waits for the
 //!   writer thread to acknowledge everything queued ahead of it.
+//! * **The file keeps up with a quiet producer.**  A partial buffer is
+//!   handed over at the end of each burst ([`AsyncWriter::hand_off`]),
+//!   so the file's size tracks what was produced within one burst.
+//!   Readers depend on that: the size of a pane's bytelog is how L1
+//!   tells a pane that is talking from one that is silent, and how a
+//!   scripted op sees the first frame arrive.  Waiting for 64 KiB made
+//!   a claude spinner (≈60 bytes a second) look silent for twenty
+//!   minutes and a small first frame never arrive at all (2026-09-22).
 
 use std::io::Write;
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
 
 enum Msg {
@@ -53,6 +61,9 @@ pub struct AsyncWriter {
     tx: SyncSender<Msg>,
     free_rx: Receiver<Vec<u8>>,
     buf: Vec<u8>,
+    /// An empty buffer a refused `hand_off` got back, kept for the next
+    /// swap rather than freed — see [`AsyncWriter::hand_off`].
+    spare: Option<Vec<u8>>,
     cap: usize,
     handle: Option<JoinHandle<()>>,
 }
@@ -109,12 +120,16 @@ impl AsyncWriter {
             tx,
             free_rx,
             buf: Vec::with_capacity(cap),
+            spare: None,
             cap,
             handle: Some(handle),
         }
     }
 
     fn take_empty(&mut self) -> Vec<u8> {
+        if let Some(b) = self.spare.take() {
+            return b;
+        }
         match self.free_rx.try_recv() {
             Ok(mut b) => {
                 b.clear();
@@ -130,6 +145,34 @@ impl AsyncWriter {
             let empty = self.take_empty();
             let full = std::mem::replace(&mut self.buf, empty);
             let _ = self.tx.send(Msg::Data(full));
+        }
+    }
+
+    /// Hand over what is buffered now, if the writer can take it without
+    /// the producer waiting.  Called at the end of a burst.
+    ///
+    /// Never blocks and never allocates, because it runs on the parse
+    /// thread after every read.  It only goes ahead when the writer has
+    /// returned a buffer to swap in — which is to say, when it is not
+    /// busy — and a queue that is full anyway hands the buffer back.
+    /// Either refusal costs nothing: the bytes go with the next full
+    /// buffer, which during the heavy output that makes the writer busy
+    /// is moments away.
+    pub fn hand_off(&mut self) {
+        if self.buf.is_empty() {
+            return;
+        }
+        let Some(mut empty) = self.spare.take().or_else(|| self.free_rx.try_recv().ok()) else {
+            return;
+        };
+        empty.clear();
+        let pending = std::mem::replace(&mut self.buf, empty);
+        if let Err(e) = self.tx.try_send(Msg::Data(pending)) {
+            let (TrySendError::Full(Msg::Data(back)) | TrySendError::Disconnected(Msg::Data(back))) = e
+            else {
+                return; // only `Data` is ever sent from here
+            };
+            self.spare = Some(std::mem::replace(&mut self.buf, back));
         }
     }
 
@@ -255,6 +298,53 @@ mod tests {
         assert_eq!(sb, "new");
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
+    }
+
+    /// A burst smaller than the buffer reaches the file without a flush
+    /// — the file's size is what tells a reader the producer spoke.
+    #[test]
+    fn a_small_burst_reaches_the_file_after_hand_off() {
+        let path = tmp("handoff");
+        let f = std::fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+        let mut w = AsyncWriter::new(f, 64 * 1024, 4);
+        w.write(&[1u8; 700]);
+        w.hand_off();
+        w.write(&[2u8; 300]);
+        w.hand_off();
+        let mut len = 0;
+        for _ in 0..200 {
+            len = std::fs::metadata(&path).unwrap().len();
+            if len == 1000 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(len, 1000, "handed-off bytes must land without anyone flushing");
+        assert_eq!(w.pending(), 0);
+        drop(w);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A writer that cannot keep up refuses the hand-off; nothing is
+    /// lost or reordered, it just goes with a later buffer.
+    #[test]
+    fn a_refused_hand_off_loses_nothing() {
+        let path = tmp("handoff-busy");
+        let f = std::fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+        let mut w = AsyncWriter::new(f, 16, 1);
+        let mut want = Vec::new();
+        for i in 0..5000u32 {
+            let b = i.to_le_bytes();
+            w.write(&b[..(i % 4 + 1) as usize]);
+            want.extend_from_slice(&b[..(i % 4 + 1) as usize]);
+            w.hand_off();
+        }
+        w.flush();
+        let mut got = Vec::new();
+        std::fs::File::open(&path).unwrap().read_to_end(&mut got).unwrap();
+        assert_eq!(got, want);
+        drop(w);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Drop is a flush too — an L3 that goes away mid-burst still

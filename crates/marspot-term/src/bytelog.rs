@@ -104,6 +104,12 @@ impl ByteLog {
         Ok(())
     }
 
+    /// End of a burst: let the file catch up with what was appended.
+    /// See [`AsyncWriter::hand_off`](crate::async_writer::AsyncWriter::hand_off).
+    pub fn hand_off(&mut self) {
+        self.file.hand_off();
+    }
+
     /// The log's segments, oldest first.  Concatenating these in order
     /// reproduces the retained byte stream.  Missing files are omitted,
     /// so a log that has never rotated yields just the live segment.

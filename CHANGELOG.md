@@ -6425,7 +6425,16 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.98**
+Current: **0.11.99**
+
+### 0.11.99
+
+**bytelog 的大小重新跟得上 pane 的输出。** 08-19 把 bytelog 挪到 `AsyncWriter` 之后，写入要攒满
+64 KiB 才交给写线程，文件大小每 64 KiB 才动一次。依赖这个大小的两处都悄悄坏了：
+`pane_status::pty_quiet` 会把一个每秒写几十字节的 spinner 当成安静 pane（约二十分钟才动一次）；
+`pty_op` 的首帧等待在首帧不到 64 KiB 时永远等不到，只能超时——idle 回收的 wake 也走这条路。
+现在每次 `pump` 读到东西后调 `ByteLog::hand_off`：写线程已经还回空缓冲时才交出当前的不满缓冲，
+否则留给下一个满缓冲，解析线程上不阻塞、不分配。单测验过去掉这个调用会红。
 
 ### 0.11.98
 

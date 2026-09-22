@@ -29,4 +29,4 @@
 
 shell   = "0.7.148"  # 跟 WireKeyEvent 新字段改构造点；详见 CHANGELOG.md
 core    = "0.12.206"  # keyboard_layout（UCKeyTranslate + US 位置表）；调色板归 palette 一份；详见 CHANGELOG.md
-session = "0.11.98"  # 探测全部收口：kitty 补到 3 flag，OSC 4/12 + 18t 答，其余写明拒绝；详见 CHANGELOG.md
+session = "0.11.99"  # bytelog 每批输出后就交给写线程，大小重新跟得上 pane；详见 CHANGELOG.md

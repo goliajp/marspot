@@ -366,6 +366,12 @@ impl LocalSession {
         }
         if total > 0 {
             self.last_output = Some(Instant::now());
+            // The bytelog's size is what L1 reads to tell whether this
+            // pane is talking; a burst must not wait in a buffer for
+            // 64 KiB of company to become visible.
+            if let Some(b) = self.bytelog.as_mut() {
+                b.hand_off();
+            }
         }
         self.flush_capability_responses();
         total
