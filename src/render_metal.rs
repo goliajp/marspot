@@ -5168,6 +5168,62 @@ fn push_text_run_ui_shaped(
     let _ = fallback_ascent;
 }
 
+/// Where an IME preedit's clusters land: `(row, col, width, cluster)`,
+/// in draw order.
+///
+/// Pure, and the ONE answer to "which cells does the composition
+/// occupy".  Both the mask that hides the cells underneath and the
+/// drawing itself read it, because the two disagreeing is exactly the
+/// bug this was extracted for: BG and FG are separate passes, so a
+/// preedit that paints an opaque background still has the terminal's
+/// own glyphs drawn over it afterwards unless those glyphs are left
+/// out.  That is the same failure the search overlay's mask fixed
+/// (F1++) — the composition never got one, so a claudecode
+/// placeholder showed through the pinyin being typed over it
+/// (2026-09-23).
+///
+/// Clusters, not chars (UAX #29), so a CJK syllable plus its tone
+/// mark or an emoji ZWJ sequence takes its real cell footprint.
+/// Wraps at the right edge like iTerm2 / Alacritty rather than
+/// truncating, and stops at the bottom row — the IME's own candidate
+/// window remains the source of truth for a composition that long.
+fn preedit_placements<'a>(
+    preedit: &'a str,
+    cursor: (u16, u16),
+    cols: u16,
+    rows: u16,
+) -> Vec<(u16, u16, u16, &'a str)> {
+    let (col, row) = cursor;
+    let mut out = Vec::new();
+    if cols == 0 || rows == 0 {
+        return out;
+    }
+    let (mut c, mut r) = (col as u32, row as u32);
+    for cluster in crate::grapheme::graphemes(preedit) {
+        // Newlines from an IME's structured composition: advance to
+        // the next row at col 0, with no glyph of their own.
+        if cluster == "\n" || cluster == "\r" || cluster == "\r\n" {
+            c = 0;
+            r = r.saturating_add(1);
+            if r >= rows as u32 {
+                break;
+            }
+            continue;
+        }
+        let n_cells = crate::grapheme::cluster_width(cluster).max(1) as u32;
+        if c + n_cells > cols as u32 {
+            c = 0;
+            r = r.saturating_add(1);
+            if r >= rows as u32 {
+                break;
+            }
+        }
+        out.push((r as u16, c as u16, n_cells as u16, cluster));
+        c += n_cells;
+    }
+    out
+}
+
 fn push_session(
     rect: &CellRect,
     view: &SessionView,
@@ -5385,6 +5441,28 @@ fn push_session(
     // per-cell call.  Keeps `under_overlay` a tight inline check on
     // the per-row / per-cell hot path.
     let overlay_active = overlay_mask.is_some();
+    // The same masking, for the cells an IME composition covers.
+    // Computed here because the per-cell loops below run before the
+    // preedit is drawn, and they are what must leave those cells
+    // empty; the drawing reads the same placements.
+    let preedit_cells: Vec<(u16, u16, u16, &str)> = if view.view_offset == 0
+        && view.focused
+        && window_focused
+        && !view.ime_preedit.is_empty()
+    {
+        preedit_placements(view.ime_preedit, grid.cursor(), grid.cols(), grid.rows())
+    } else {
+        Vec::new()
+    };
+    // Same fast path as `overlay_active`: nothing composing is the
+    // common case, and this is a per-cell call.
+    let preedit_active = !preedit_cells.is_empty();
+    let under_preedit = |row: u16, col: u16| -> bool {
+        preedit_active
+            && preedit_cells
+                .iter()
+                .any(|&(r, c, w, _)| r == row && col >= c && col < c + w)
+    };
     let under_overlay = |row: u16, col: u16| -> bool {
         if !overlay_active {
             return false;
@@ -5496,7 +5574,7 @@ fn push_session(
             // chrome (BG / FG run in separate passes so without this
             // mask, the underlying terminal text bleeds through the
             // opaque overlay).
-            if under_overlay(r, c as u16) {
+            if under_overlay(r, c as u16) || under_preedit(r, c as u16) {
                 continue;
             }
             let cell = grid.cell_at_view(view.view_offset, c as u16, r);
@@ -5692,7 +5770,7 @@ fn push_session(
         let (col, row) = grid.cursor();
         // F1++ — skip cursor glyph re-emit when the cursor lands
         // under the overlay (would bleed through the BG pass).
-        if !under_overlay(row, col) {
+        if !under_overlay(row, col) && !under_preedit(row, col) {
         let cell = grid.cell_at_view(0, col, row);
         if cell.ch != ' ' && cell.ch != '\0' {
             let metrics = SlotMetrics {
@@ -5750,64 +5828,26 @@ fn push_session(
 
     // IME preedit overlay — paint the in-flight composition at the
     // cursor position so the user sees pinyin / hiragana before the
-    // IME commits.  Only when the pane is focused, live, and the
-    // host window has focus; otherwise the cursor anchor isn't
-    // visible / interactive.
+    // IME commits.  Only when the pane is focused, live, and the host
+    // window has focus; otherwise the cursor anchor isn't visible /
+    // interactive.
     //
-    // Walks the preedit as UAX #29 grapheme clusters (not raw chars),
-    // so a composed CJK char + tone mark or an emoji ZWJ sequence
-    // takes its real visual cell footprint.  Wraps to the next row
-    // when the cluster would spill past the right edge — matches
-    // iTerm2 / Alacritty behaviour rather than silently truncating
-    // long preedit strings.  Covers each cluster with a contiguous
-    // BG quad first so already-rendered text (e.g. zsh autosuggest,
-    // a prior CJK cell) doesn't bleed through.
-    if view.view_offset == 0
-        && view.focused
-        && window_focused
-        && !view.ime_preedit.is_empty()
-    {
-        let (col, row) = grid.cursor();
-        let cells_per_row = grid.cols();
-        let rows_total = grid.rows();
-        let mut c = col as u32;
-        let mut r = row as u32;
+    // Where each cluster goes was decided before the loops above ran
+    // (`preedit_cells`), and those loops left the covered cells empty
+    // — without that, the BG quad here hides the cells' BACKGROUND
+    // and the FG pass then draws the terminal's own glyphs back on
+    // top of the composition.
+    if preedit_active {
         let metrics = SlotMetrics {
             cell_w: cell_w.round() as u32,
             cell_h: cell_h.round() as u32,
             baseline_from_top: ascent.round() as u32,
         };
-        let mut clusters_drawn: usize = 0;
-        for cluster in crate::grapheme::graphemes(&view.ime_preedit) {
-            // Newlines from an IME's structured composition: advance
-            // to the next row at col=0, don't draw a glyph for them.
-            if cluster == "\n" || cluster == "\r" || cluster == "\r\n" {
-                c = 0;
-                r = r.saturating_add(1);
-                if r >= rows_total as u32 {
-                    break;
-                }
-                continue;
-            }
-            let n_cells = crate::grapheme::cluster_width(cluster).max(1) as u32;
-            // Wrap when this cluster would overflow the current row.
-            if c + n_cells > cells_per_row as u32 {
-                c = 0;
-                r = r.saturating_add(1);
-                if r >= rows_total as u32 {
-                    // Out of vertical room — stop drawing further
-                    // clusters.  The IME candidate window still shows
-                    // the full string; this inline preview is a hint,
-                    // not the source of truth.
-                    break;
-                }
-            }
+        for &(r, c, n_cells, cluster) in &preedit_cells {
             let dest_x = (inner_x + c as f32 * cell_w).round();
             let dest_y = (inner_y + r as f32 * cell_h).round();
             let slot_w = n_cells as f32 * cell_w;
-            // BG quad — fully opaque cover so the in-cell text below
-            // (zsh autosuggestion, ghost completion, residual cursor
-            // block) is hidden.  Width spans the whole cluster.
+            // BG quad — opaque, spanning the whole cluster.
             cells.push(CellInstance {
                 origin: [dest_x, dest_y],
                 size: [slot_w, cell_h],
@@ -5821,9 +5861,7 @@ fn push_session(
             // first-cut, the candidate window is the source of truth
             // anyway).
             if let Some(lead) = cluster.chars().next() {
-                if let Some(entry) =
-                    resolve_cell_glyph(atlas, font, lead, false, false, metrics)
-                {
+                if let Some(entry) = resolve_cell_glyph(atlas, font, lead, false, false, metrics) {
                     // Phase 1.1 bearing formula (IME preedit).
                     let baseline_y = dest_y + metrics.baseline_from_top as f32;
                     let (origin, size) = entry.quad(dest_x, baseline_y);
@@ -5846,10 +5884,7 @@ fn push_session(
                 size: [slot_w, underline_h],
                 color: [IME_PREEDIT_FG.0, IME_PREEDIT_FG.1, IME_PREEDIT_FG.2, 1.0],
             });
-            c += n_cells;
-            clusters_drawn += 1;
         }
-        let _ = clusters_drawn; // reserved for future dev-only log
     }
 
     // No darken overlay.  No FOCUS_OUTLINE blue frame.  The focus
@@ -9122,6 +9157,116 @@ mod tests {
     /// The focus ring survives the neighbours' scrims.
     ///
     /// The ring is painted in the BG pass at the seam, and the seam on
+    /// Where the composition lands: clusters, widths, wrapping, and
+    /// the bottom edge.
+    #[test]
+    fn a_composition_wraps_and_stops_at_the_last_row() {
+        // Plain, from the cursor.
+        assert_eq!(
+            preedit_placements("abc", (2, 0), 10, 4),
+            vec![(0, 2, 1, "a"), (0, 3, 1, "b"), (0, 4, 1, "c")]
+        );
+        // A wide cluster takes two cells and wraps whole rather than
+        // being split across the edge.
+        assert_eq!(
+            preedit_placements("中文", (9, 0), 10, 4),
+            vec![(1, 0, 2, "中"), (1, 2, 2, "文")]
+        );
+        // A structured composition's newline goes to the next row.
+        assert_eq!(
+            preedit_placements("a\nb", (0, 0), 10, 4),
+            vec![(0, 0, 1, "a"), (1, 0, 1, "b")]
+        );
+        // Out of vertical room: what fits is placed, the rest is the
+        // candidate window's job.
+        assert_eq!(preedit_placements("ab", (9, 3), 10, 4), vec![(3, 9, 1, "a")]);
+        assert!(preedit_placements("a", (0, 0), 0, 0).is_empty());
+    }
+
+    /// The cells a composition covers must be left empty by the grid
+    /// loops.
+    ///
+    /// BG and FG are separate passes, so the preedit's opaque
+    /// background covers only the cells' BACKGROUND; the terminal's
+    /// own glyphs are drawn afterwards and land back on top of the
+    /// composition.  Reported against a claudecode placeholder
+    /// ("press up to edit queued messages") that stayed legible
+    /// underneath the pinyin being typed over it (2026-09-23).
+    #[test]
+    fn a_composition_hides_the_cells_it_covers() {
+        use crate::grid::{Cell, Grid};
+        use crate::layout::Layout;
+
+        let device = match system_default_device() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let mut font = FontCache::build().expect("font");
+        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
+        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+
+        // Six columns of text under a three-cell composition typed at
+        // the start of the row — the placeholder's own shape.
+        let mut grid = Grid::new(10, 4);
+        for (i, ch) in "abcdef".chars().enumerate() {
+            grid.set_cell(i as u16, 0, Cell { ch, attrs: Default::default() });
+        }
+        let layout = Layout::build(
+            font.cell_w * 10.0,
+            font.cell_h * 4.0,
+            0.0, 0.0, 0.0, 1, 1,
+            font.cell_w,
+            font.cell_h,
+        );
+        let mk = |preedit: &'static str| SessionView {
+            grid: &grid,
+            view_offset: 0,
+            // Off, so the cursor's own glyph re-emit is not what this
+            // measures.
+            cursor_visible: false,
+            focused: true,
+            title: "",
+            selection: None,
+            ime_preedit: preedit,
+            update_pending: false,
+            dormant: false,
+            recede: 0,
+            scrim: 0.0,
+            right_badge: "", agent_tui: false, cwd: "",
+            top_fixed_h_cells: 0,
+            bot_fixed_h_cells: 0,
+            highlight_spans: &[],
+            search_overlay: None,
+            seq: 0,
+        };
+        let mut run = |v: &SessionView| -> Vec<GlyphInstance> {
+            let mut glyphs: Vec<GlyphInstance> = Vec::new();
+            build_instances(
+                &layout, std::slice::from_ref(v), &[], 0, true,
+                None, None, None, None, None, None, None, None,
+                &mut font, &mut atlas, &mut color_atlas,
+                &mut Vec::new(), &mut glyphs, &mut Vec::new(), &mut Vec::new(),
+                &mut Vec::new(), &mut Vec::new(),
+                &mut Vec::new(), &mut Vec::new(), &mut Vec::new(),
+            );
+            glyphs
+        };
+        let plain = run(&mk(""));
+        let composing = run(&mk("tfg"));
+        assert_eq!(plain.len(), 6, "six letters, six glyphs");
+        assert_eq!(
+            composing.len(),
+            6,
+            "three letters left + three composed: the covered cells must emit nothing, \
+             or the text underneath is drawn over the composition"
+        );
+        // And the three that remain are the ones to the RIGHT of the
+        // composition: everything at x < 3 cells belongs to it.
+        let under = 3.0 * font.cell_w as f32;
+        let over_composition = composing.iter().filter(|g| g.origin[0] < under).count();
+        assert_eq!(over_composition, 3, "one glyph per composed cell, none from the grid");
+    }
+
     /// the right/bottom sides lies inside the NEIGHBOURING cells'
     /// rects.  Every unfocused pane covers its whole rect with a scrim
     /// in the overlay pass — which runs later — so those two sides

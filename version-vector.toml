@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.150"  # claude ⇄ codex 交接（RFC-009）；详见 CHANGELOG.md
-core    = "0.12.206"  # keyboard_layout（UCKeyTranslate + US 位置表）；调色板归 palette 一份；详见 CHANGELOG.md
+core    = "0.12.207"  # 组字期间盖住底下的字；详见 CHANGELOG.md
 session = "0.11.99"  # bytelog 每批输出后就交给写线程，大小重新跟得上 pane；详见 CHANGELOG.md
