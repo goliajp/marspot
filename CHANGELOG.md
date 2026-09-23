@@ -28,7 +28,24 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.150**
+Current: **0.7.151**
+
+### 0.7.151
+
+**新开的 claudecode pane，badge 一进去就是完整的 profile / model / effort，而且不再闪。**
+
+两件事是同一个根：claude 的会话文件要等第一轮对话才写出来，所以刚开的 pane 没有 transcript 可读。
+- 这时 model 只能去扫首屏 banner，而扫 banner 有 3 秒节流、scan 是 2 秒一跳 —— 一个 tick 读到、
+  一个 tick 读不到，badge 就在 `P7` 和 `P7@opus-5-5` 之间来回跳（实测日志里一串 20 次交替）。
+- banner 那行只有模型名（`Opus 5.5 (1M context) · Claude Max`），本来就不带 effort，所以 effort 一直空着。
+
+改成：没有会话文件时，按已绑定的 uuid 直接读 status-line hook 写下的那条记录（一次文件读，
+model 和 effort 都在里面，实测在 claude 启动后约 2 秒就写好了）；同时每个 pane 记住上一次读到的
+model，某个 tick 什么都读不到就沿用，badge 不再因为读取节流而变空。两个 per-pane 的表都跟着
+pane 清理。
+
+测试两条：没有会话文件的 pane 能拿到 model + effort；读不到的那个 tick 不会把 badge 清空。
+两条去掉对应改动都验过能红。
 
 ### 0.7.150
 

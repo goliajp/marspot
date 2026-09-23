@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.150"  # claude ⇄ codex 交接（RFC-009）；详见 CHANGELOG.md
+shell   = "0.7.151"  # 新开的 claudecode pane 一进去就有 profile/model/effort，badge 不再闪；详见 CHANGELOG.md
 core    = "0.12.207"  # 组字期间盖住底下的字；详见 CHANGELOG.md
 session = "0.11.99"  # bytelog 每批输出后就交给写线程，大小重新跟得上 pane；详见 CHANGELOG.md

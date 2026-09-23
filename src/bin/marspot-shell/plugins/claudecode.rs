@@ -3019,6 +3019,18 @@ fn ancestor_pids(max: usize) -> Vec<i32> {
 /// hook that ran closer to it.  Newest record breaks a tie: claude
 /// re-runs the hook on every redraw, so the freshest is the one
 /// describing what is on screen now.
+/// The hook's record for the session named by `uuid`.
+///
+/// One file read.  `pushed_session_for_pid` walks the directory
+/// because it is answering "which session is this process on"; here
+/// the session is already known.
+fn pushed_by_uuid(uuid: &str) -> Option<ModelBadge> {
+    if uuid.is_empty() {
+        return None;
+    }
+    pushed_model(&PathBuf::from(format!("{uuid}.jsonl"))).map(|(m, _)| m)
+}
+
 fn pushed_session_for_pid(claude_pid: i32) -> Option<(String, PathBuf, ModelBadge)> {
     // (distance up the chain, written at) — smaller distance wins,
     // newer breaks the tie.
@@ -3227,6 +3239,7 @@ impl Plugin for ClaudecodePlugin {
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
+            last_model_by_pane: HashMap::new(),
         };
         let handle = std::thread::Builder::new()
             .name("claudecode-scan".into())
@@ -3695,6 +3708,15 @@ struct WorkerCtx {
     /// the same question as "what is this session running".  See
     /// `model_for`.
     last_model: HashMap<PathBuf, ModelBadge>,
+    /// Per pane: the last model half its badge carried.
+    ///
+    /// Keyed by pane, not by file, because the pane that needs it has
+    /// no file yet.  Its sources answer None on some ticks and Some on
+    /// others — the banner read is rate-limited, the hook has not
+    /// necessarily run — and a badge that follows that blinks between
+    /// `P7` and `P7@opus-5-5` twice a second (2026-09-23 report).
+    /// What was true a moment ago is the better answer.
+    last_model_by_pane: HashMap<u64, ModelBadge>,
 }
 
 /// How many of a project's session files stay in `seen`.
@@ -3934,6 +3956,44 @@ impl WorkerCtx {
             return Some(m);
         }
         self.last_model.get(path).cloned()
+    }
+
+    /// The badge's model half for one pane.
+    ///
+    /// `model_for` answers it from a session FILE; this is the rest of
+    /// the question, for the window where claude is running and that
+    /// file does not exist yet — which is exactly when the user is
+    /// looking at a pane they just opened.  In that window the hook's
+    /// own record is the only source that carries the effort as well
+    /// (the banner line prints the model and, unless it is the
+    /// default, nothing else), and it lands a couple of seconds after
+    /// claude starts.
+    fn model_for_pane(
+        &mut self,
+        path: Option<&std::path::Path>,
+        uuid: &str,
+        hook_said: Option<ModelBadge>,
+        claude_pid: i32,
+        sid: u64,
+    ) -> Option<ModelBadge> {
+        let found = match path {
+            Some(p) => self.model_for(p, claude_pid, sid),
+            // Whoever already found the hook's record for this pane
+            // first, then the record for the session it is bound to —
+            // one file read, keyed by the uuid, where the by-pid form
+            // walks the directory.  The banner last: it is on screen
+            // only until claude scrolls it off, and it has no effort.
+            None => hook_said
+                .or_else(|| pushed_by_uuid(uuid))
+                .or_else(|| self.model_from_banner(sid)),
+        };
+        match found {
+            Some(m) => {
+                self.last_model_by_pane.insert(sid, m.clone());
+                Some(m)
+            }
+            None => self.last_model_by_pane.get(&sid).cloned(),
+        }
     }
 
     /// The model a **freshly started** pane is on, read off its own
@@ -4261,16 +4321,13 @@ impl WorkerCtx {
             // when the fence has nothing readable behind it (see
             // `model_for`).  A session named by argv but not yet
             // scanned has no path — badge without the model half.
-            let model = match jsonl_path.as_ref() {
-                Some(p) => self.model_for(p, f.claude_pid, f.shelld_sid),
-                // No transcript to consult.  The hook's own words
-                // first (pass 3 found them by pid), then the banner,
-                // which is only on screen until claude scrolls it off.
-                None => pushed_model_by_pane
-                    .get(&i)
-                    .cloned()
-                    .or_else(|| self.model_from_banner(f.shelld_sid)),
-            };
+            let model = self.model_for_pane(
+                jsonl_path.as_deref(),
+                &sid_uuid,
+                pushed_model_by_pane.get(&i).cloned(),
+                f.claude_pid,
+                f.shelld_sid,
+            );
             // The session uuid used to ride along here.  It is 36
             // characters of hex that no one can act on — it names the
             // session for a *machine*, and every machine that needs it
@@ -4364,6 +4421,9 @@ impl WorkerCtx {
             // state and drown the file.
         }
 
+        // Bounded growth: both per-pane maps follow the panes.
+        self.last_model_by_pane.retain(|sid, _| sessions_seen.contains(sid));
+        self.banner_tried.retain(|sid, _| sessions_seen.contains(sid));
         ScanResult { new_mapping, new_meta, new_activity, new_cpu, new_vetoes, scanned_at, sessions_seen, log_lines }
     }
 
@@ -4712,6 +4772,20 @@ mod tests {
     /// the suite — see `run_idle_policy_at`.
     const TEST_THRESHOLD: Duration = Duration::from_secs(30 * 60);
     use std::io::Write;
+
+    /// A `WorkerCtx` with nothing cached, for the model-half tests.
+    fn ctx_for_test(projects_root: PathBuf) -> WorkerCtx {
+        WorkerCtx {
+            projects_root,
+            shelld: Arc::new(ShelldClient::new(None)),
+            statusline_state: None,
+            seen: HashMap::new(),
+            model_cutoff: HashMap::new(),
+            banner_tried: HashMap::new(),
+            last_model: HashMap::new(),
+            last_model_by_pane: HashMap::new(),
+        }
+    }
 
     fn tmpfile(content: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -5221,6 +5295,76 @@ mod tests {
     /// to Fable, which claude knows and the transcript will not
     /// record until the session answers again.  Before the hook the
     /// badge read `opus-5` and stayed there; now claude's own report
+    /// A pane whose session file does not exist yet still shows all
+    /// three halves — profile, model, effort.
+    ///
+    /// claude writes that file on its first turn, so for the whole
+    /// window in which the user is looking at a pane they just opened
+    /// there is nothing to tail.  The status-line hook has run by then
+    /// (measured: ~2 s after start), and its record is the only source
+    /// that carries the effort as well — the banner line prints
+    /// `Opus 5.5 (1M context) · Claude Max`, model and no more.
+    #[test]
+    fn a_pane_with_no_session_file_yet_still_shows_model_and_effort() {
+        let root = std::env::temp_dir().join("cc-fresh-pane-badge-test");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &root) };
+        let uuid = "d794e66f-bc9b-48e8-a114-70c5fc996678";
+        let push = model_push_dir();
+        fs::create_dir_all(&push).unwrap();
+        // The shape the hook writes: model, transcript, effort, pids.
+        fs::write(
+            push.join(uuid),
+            format!("opus-5-5\n{}/projects/x/{uuid}.jsonl\nmedium\npids=20809,1492\n", root.display()),
+        )
+        .unwrap();
+
+        let mut ctx = ctx_for_test(root.join("projects"));
+        assert_eq!(
+            rendered(ctx.model_for_pane(None, uuid, None, 20809, 436)).as_deref(),
+            Some("opus-5-5\u{b7}medium"),
+            "the hook's record carries the effort the banner cannot"
+        );
+    }
+
+    /// The model half must not blink.
+    ///
+    /// Its sources answer None on some ticks — the banner read is
+    /// rate-limited to once every 3 s and the scan runs every 2 — so a
+    /// badge that takes None at face value alternates between `P7` and
+    /// `P7@opus-5-5` for as long as the pane has no session file
+    /// (2026-09-23 report, 20 badge changes in one log tail).
+    #[test]
+    fn the_model_half_survives_a_tick_that_could_not_read_it() {
+        let root = std::env::temp_dir().join("cc-badge-blink-test");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &root) };
+        let uuid = "d794e66f-bc9b-48e8-a114-70c5fc996678";
+        let mut ctx = ctx_for_test(root.join("projects"));
+
+        // Tick 1: the hook's record was found.
+        let first = rendered(ctx.model_for_pane(
+            None,
+            uuid,
+            Some(ModelBadge::new("opus-5-5".into(), Some("medium".into()))),
+            20809,
+            436,
+        ));
+        assert_eq!(first.as_deref(), Some("opus-5-5\u{b7}medium"));
+
+        // Tick 2: nothing readable — no record on disk, no banner
+        // (no pane registry in a test), and the pane is the same one.
+        assert_eq!(
+            rendered(ctx.model_for_pane(None, uuid, None, 20809, 436)).as_deref(),
+            Some("opus-5-5\u{b7}medium"),
+            "a tick that could not read it must not blank the badge"
+        );
+        // A different pane borrows nothing.
+        assert_eq!(rendered(ctx.model_for_pane(None, "", None, 1, 999)), None);
+    }
+
     /// is what the badge shows.
     #[test]
     fn claudes_own_report_beats_the_transcripts_last_word() {
@@ -5248,6 +5392,7 @@ mod tests {
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
+            last_model_by_pane: HashMap::new(),
         };
         assert_eq!(rendered(ctx.model_for(&path, 111, 0)).as_deref(), Some("opus-5"));
 
@@ -5521,6 +5666,7 @@ mod tests {
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
+            last_model_by_pane: HashMap::new(),
         };
 
         // The old two-line shape.
@@ -5604,6 +5750,7 @@ mod tests {
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
+            last_model_by_pane: HashMap::new(),
         };
         // First sighting: the transcript is this process's own.
         assert_eq!(rendered(ctx.model_for(&path, 111, sid)).as_deref(), Some("opus-5"));
@@ -5738,6 +5885,7 @@ mod tests {
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
+            last_model_by_pane: HashMap::new(),
         }
     }
 
@@ -5826,6 +5974,7 @@ mod tests {
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
+            last_model_by_pane: HashMap::new(),
         };
         let mut logs = Vec::new();
         // Two panes in alpha: the project is walked once, not twice.
@@ -5903,6 +6052,7 @@ mod tests {
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
+            last_model_by_pane: HashMap::new(),
         };
 
         // First sighting: nothing is fenced — those records belong to
@@ -5947,6 +6097,7 @@ mod tests {
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
+            last_model_by_pane: HashMap::new(),
         };
         assert_eq!(rendered(ctx.model_for(&path, 111, 0)).as_deref(), Some("fable-5"));
 
@@ -6284,6 +6435,7 @@ mod tests {
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
+            last_model_by_pane: HashMap::new(),
         };
         let mut scan = worker.scan_once();
         poll_until("the scan to bind the pane", || {
@@ -7930,6 +8082,7 @@ mod tests {
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
+            last_model_by_pane: HashMap::new(),
         };
         // argv's session, and the one `/clear` started after it.
         ctx.seen.insert(PathBuf::from("/tmp/argv.jsonl"), mk("argv-uuid", 10));
@@ -8014,6 +8167,7 @@ mod tests {
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
+            last_model_by_pane: HashMap::new(),
         };
         let mut logs = Vec::new();
         // The default root alone sees only the default profile's file.
