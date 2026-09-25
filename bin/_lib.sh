@@ -7,7 +7,7 @@
 #  - All marker files go under /tmp with a known prefix so we can clean
 #    them between trials without fighting old runs
 #
-# The whole bench mechanism is documented in docs/bench.md.  Read that
+# The whole bench mechanism is documented in .claude/docs-archive/docs/bench.md.  Read that
 # before adding to this file.
 
 # Resolve $ROOT to the marspot repo root from wherever we're sourced.

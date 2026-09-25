@@ -22,7 +22,7 @@
 #
 # Usage:
 #   bin/scenarios/multi-session-9x.sh <terminal> <out-json>
-# Exit codes per docs/bench.md.
+# Exit codes per .claude/docs-archive/docs/bench.md.
 
 set -euo pipefail
 

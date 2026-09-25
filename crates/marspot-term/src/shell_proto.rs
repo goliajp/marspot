@@ -174,7 +174,7 @@ pub enum MsgType {
     /// grid snapshot into shared memory; come read it."  Empty payload —
     /// a pure wake so L2 stays event-driven (idle CPU ~0) instead of
     /// polling the shm seq every frame.  L2 coalesces a burst of these
-    /// into a single re-read + render.  See `docs/per-session-l3.md`.
+    /// into a single re-read + render.  See `.claude/docs-archive/docs/per-session-l3.md`.
     GridReady = 34,
     /// L2 (`marspot-core`) → L3 (`marspot-session`): "resize your session
     /// to these cell dims."  Payload: `cols: u16 LE, rows: u16 LE`.  L3
@@ -187,7 +187,7 @@ pub enum MsgType {
     /// this scrollback view offset (rows up from the live tail)."  Payload:
     /// `view_offset: u16 LE`.  L3 owns the scrollback, so L2 can't scroll
     /// its own mirror (which holds only the visible window) — it asks L3
-    /// which window to publish.  See `docs/per-session-l3.md`.
+    /// which window to publish.  See `.claude/docs-archive/docs/per-session-l3.md`.
     GridScroll = 36,
     /// L2 → L3: "give me the clipboard text under this selection."  L3
     /// owns the grid + scrollback (L2's mirror is window-only), so Cmd-C
@@ -270,7 +270,7 @@ pub enum MsgType {
     /// frame; L3's main loop writes the bytes straight to the PTY.
     InjectInput = 48,
     // ── search (50..=53) — pane upgrade B2; see
-    //    docs/scrollback-search.md §5
+    //    .claude/docs-archive/docs/scrollback-search.md §5
     /// L2 → L3: "start (or restart) a substring search on the
     /// focused pane's scrollback + live grid".  Payload:
     ///   query_id        u32 LE   — monotonic on L2; L3 stamps it

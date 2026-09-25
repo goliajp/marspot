@@ -11,7 +11,7 @@
 #                          develop or when chasing a perf fix.
 #
 #   bin/bench.sh --ssim    add Phase 9 visual-regression SSIM gate
-#                          (per docs/font-rendering-design.md §9).
+#                          (per .claude/docs-archive/docs/font-rendering-design.md §9).
 #                          Implied by --full;  pass standalone to
 #                          run only the SSIM gate after a fast perf
 #                          run.

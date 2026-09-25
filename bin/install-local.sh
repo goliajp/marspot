@@ -450,8 +450,8 @@ if (( RUNNING )); then
   echo "==> staging changed binaries into the running app"
   # L1 (marspot-shell) update path: `apply_pending_update` →
   # `try_apply_shell_self_update` → libc::execv, which tears down +
-  # recreates the NSWindow (~100 ms visible flash, see docs/silent-
-  # update.md). Sessions survive via L3 reattach + bytelog replay —
+  # recreates the NSWindow (~100 ms visible flash, see
+  # .claude/docs-archive/docs/silent-update.md). Sessions survive via L3 reattach + bytelog replay —
   # the flash is the *only* user-visible cost, and it's the agreed
   # design (a long-lived "skip L1" path silently strands new shell
   # binaries on disk and is worse than the flash).

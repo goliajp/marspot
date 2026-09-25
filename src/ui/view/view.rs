@@ -1,6 +1,6 @@
 //! `View` enum — the declarative tree node.
 //!
-//! See `docs/ui-system-model.md` §5.1.  immediate-mode: every
+//! See `.claude/docs-archive/docs/ui-system-model.md` §5.1.  immediate-mode: every
 //! frame builds a fresh tree; nothing is retained between frames
 //! (compared to SwiftUI / Compose).  Stable identity attaches via
 //! `Modifier::Id(ViewId)` for the few views that need state

@@ -7,7 +7,7 @@
 //!
 //! Three theme palettes: `Dark` (default constants), `light::*`,
 //! `hc::*` (high-contrast).  `themed::*` closures dispatch by
-//! `super::current()`.  See `docs/ui-component-library.md` §3.
+//! `super::current()`.  See `.claude/docs-archive/docs/ui-component-library.md` §3.
 
 use crate::ui::core::{Color, Length};
 

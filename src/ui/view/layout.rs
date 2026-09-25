@@ -1,7 +1,7 @@
 //! Layout pass — `View` tree → `LaidOut` tree.
 //!
 //! Two-pass constraints algorithm, parent-down + child-up.  See
-//! `docs/ui-system-model.md` §6 for the canonical algorithm.
+//! `.claude/docs-archive/docs/ui-system-model.md` §6 for the canonical algorithm.
 //!
 //! All values here are physical pixels.  Logical-pt → phys
 //! resolution happens at `Length::resolve_*` boundaries; once a

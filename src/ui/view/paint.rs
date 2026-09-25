@@ -5,7 +5,7 @@
 //! parent decoration first, then children, so children paint
 //! on top — matches `display: block` parent-then-children CSS).
 //!
-//! See `docs/ui-system-model.md` §13.
+//! See `.claude/docs-archive/docs/ui-system-model.md` §13.
 
 use crate::ui::core::{Canvas, Color, Length};
 use super::layout::{Decoration, LaidOut, LayoutCtx};

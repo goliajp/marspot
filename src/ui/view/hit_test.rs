@@ -5,7 +5,7 @@
 //! later-submitted views win when overlapping.  Matches submission
 //! order = z order at paint time.
 //!
-//! See `docs/ui-system-model.md` §8.
+//! See `.claude/docs-archive/docs/ui-system-model.md` §8.
 
 use super::layout::LaidOut;
 use super::types::{ActionId, HoverId, ScrollWheelId, DragId};

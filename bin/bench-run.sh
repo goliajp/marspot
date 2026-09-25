@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/bench-run.sh — orchestrator for the persistent bench mechanism.
 #
-# Walks the matrix declared in docs/bench.md (scenario × terminal),
+# Walks the matrix declared in .claude/docs-archive/docs/bench.md (scenario × terminal),
 # dispatches each cell via bin/scenarios/<id>.sh, merges the results
 # into one snapshot file per run, and appends a row to the
 # time-series log.

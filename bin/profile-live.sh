@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/profile-live.sh — sampling profile of marspot during a workload.
 #
-# Why this exists: docs/perf.md notes a 2.4× live-vs-headless gap on
+# Why this exists: .claude/docs-archive/docs/perf.md notes a 2.4× live-vs-headless gap on
 # cat-ascii (89 MiB/s live, 215 MiB/s headless --bench parse).  The
 # remaining gap is inside the live pipeline — PTY syscall, reader
 # thread, parser, render — and we want a function-level breakdown
@@ -10,7 +10,7 @@
 # This is a *diagnostic* tool, not a recurring bench scenario.  Run
 # it manually when you want to know "where is marspot spending time
 # during a sustained burst?"  Output is a one-shot text report; the
-# top hot frames go into docs/perf.md § Gaps as quoted findings.
+# top hot frames go into .claude/docs-archive/docs/perf.md § Gaps as quoted findings.
 #
 # Method:
 #   1. Launch mcli with MARSPOT_SHELL pointing at a script that runs
@@ -164,5 +164,5 @@ for sym, count in ranked[:top_n]:
 PY
 
 echo
-echo "(Full report: $SAMPLE_OUT — keep until you've fed the findings into docs/perf.md)"
+echo "(Full report: $SAMPLE_OUT — keep until you've fed the findings into .claude/docs-archive/docs/perf.md)"
 exit 0

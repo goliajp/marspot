@@ -232,7 +232,7 @@ pub fn session_socket_path(id: u64) -> PathBuf {
 }
 
 /// Persistent scrollback data file (A1 of pane upgrade — see
-/// `docs/scrollback-search.md`).  Append-only Cell records prefixed
+/// `.claude/docs-archive/docs/scrollback-search.md`).  Append-only Cell records prefixed
 /// with `rec_len` for crash-safe trailing-record trim.
 pub fn scrollback_bin_path(id: u64) -> PathBuf {
     session_dir(id).join("scrollback.bin")

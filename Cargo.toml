@@ -45,7 +45,7 @@ bench-pty = ["marspot-term/bench-pty"]
 # Extracted (target #4) so a light, Metal-free per-session process (L3)
 # can link it without dragging in AppKit/Metal/CoreText. The marspot
 # lib re-exports it (`pub use marspot_term::*`) so existing
-# `marspot::grid::...` paths keep resolving — see docs/per-session-l3.md.
+# `marspot::grid::...` paths keep resolving — see .claude/docs-archive/docs/per-session-l3.md.
 marspot-term = { path = "crates/marspot-term" }
 libc = "0.2"
 objc2 = "0.6"

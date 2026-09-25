@@ -1,7 +1,7 @@
 //! Phase 10 — `Rasteriser` trait + macOS impls + a no-Metal `MockRasteriser`
 //! for headless tests.
 //!
-//! Spec — docs/font-rendering-design.md §14 + §16 Phase 10.  The
+//! Spec — .claude/docs-archive/docs/font-rendering-design.md §14 + §16 Phase 10.  The
 //! atlas wants to be platform-agnostic at the natural-bbox path:
 //! Linux/Windows would substitute their own glyph rasteriser (rustybuzz +
 //! ab_glyph or DirectWrite) while reusing the marspot shelf packer,

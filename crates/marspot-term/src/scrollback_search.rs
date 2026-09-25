@@ -1,6 +1,6 @@
 //! Wrap-aware, cancellable substring search over a persistent
 //! `scrollback.bin` (or any `Scrollback`).  B1 of the pane upgrade
-//! rollout — see `docs/scrollback-search.md` §4.
+//! rollout — see `.claude/docs-archive/docs/scrollback-search.md` §4.
 //!
 //! The engine owns the *algorithm*; B3 wires it into the L3 wire
 //! handler.  Pure-function shape (one entry point, an iterator out)
@@ -538,7 +538,7 @@ impl Drop for SearchWorker {
 }
 
 /// Convert a fully-built `SearchHit` into the wire shape used by the
-/// `SearchResults` frame (§5.3 of `docs/scrollback-search.md`).
+/// `SearchResults` frame (§5.3 of `.claude/docs-archive/docs/scrollback-search.md`).
 pub fn to_wire_hit(h: SearchHit) -> crate::shell_proto::WireSearchHit {
     let spans = h
         .physical_rows

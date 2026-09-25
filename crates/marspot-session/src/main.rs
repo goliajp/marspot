@@ -7,7 +7,7 @@
 //! CoreText — so it floors at ~3–5 MB resident.  The renderer (L2,
 //! `marspot-core`) will read this process's grid over shared memory and
 //! composite it; that, plus the L2↔L3 control channel and per-session
-//! silent update, land in later steps.  See `docs/per-session-l3.md`.
+//! silent update, land in later steps.  See `.claude/docs-archive/docs/per-session-l3.md`.
 //!
 //! Step 1 proved the floor (boot, attach shelld, pump bytes → grid).
 //! Step 3a makes L3 a real session backend: it takes the grid-shm
@@ -2555,7 +2555,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     }
 }
 
-// B3 integration tests — per `docs/scrollback-search.md` §7.2 +
+// B3 integration tests — per `.claude/docs-archive/docs/scrollback-search.md` §7.2 +
 // §12.B3.  These exercise the L3-side surface of the search rollout:
 // `FileScrollback::snapshot_for_search()` + `spawn_search` worker +
 // the last-write-wins dispatch contract.  They don't boot the full

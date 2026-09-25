@@ -27,7 +27,7 @@ use crate::session::SessionState;
 /// C1 — where a `PaneTool` claims pane real estate.  TopFixed /
 /// BottomFixed tools each subtract their `fixed_height_rows()` worth
 /// of cell-rows from the grid's inner rect; Overlay tools float and
-/// do not affect grid layout.  See `docs/scrollback-search.md` §6.1.
+/// do not affect grid layout.  See `.claude/docs-archive/docs/scrollback-search.md` §6.1.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ToolSlot {
     TopFixed,

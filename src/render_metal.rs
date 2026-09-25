@@ -28,7 +28,7 @@
 //! pads each glyph by 1 px (no neighbour bleed), and exact-pixel
 //! sampling with `MTLSamplerMinMagFilter::Nearest` for the BG pass
 //! and `Linear` only for the glyph pass.  Full design notes go into
-//! `docs/architecture.md` once phase 4 lands.
+//! `.claude/docs-archive/docs/architecture.md` once phase 4 lands.
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -6512,7 +6512,7 @@ pub(crate) fn system_default_device() -> Result<Retained<ProtocolObject<dyn MTLD
 
 // ───────────────────────────────────────────────────────────────────
 // Canvas flush — submission-order = z-order multi-encoder path.
-// (P2b of the UI system RFC.  See docs/ui-system-rfc.md.)
+// (P2b of the UI system RFC.  See .claude/docs-archive/docs/ui-system-rfc.md.)
 // ───────────────────────────────────────────────────────────────────
 
 /// Convert a `RectPrim` to a `UiRectInstance` for the ui_rects
@@ -6958,7 +6958,7 @@ mod tests {
     /// (`k1 = 0.01`, `k2 = 0.03`, `L = 255`).  Luma per pixel uses
     /// BT.709 weights (`0.2126 R + 0.7152 G + 0.0722 B`).  Returns
     /// the unweighted mean SSIM across every window — 1.0 = identical,
-    /// `< 0.98` (per `docs/font-rendering-design.md` §9) is the
+    /// `< 0.98` (per `.claude/docs-archive/docs/font-rendering-design.md` §9) is the
     /// project's visual-regression gate.
     ///
     /// Input bytes are RGBA (the snapshot harness already does the
@@ -7046,7 +7046,7 @@ mod tests {
         Some(buf)
     }
 
-    /// Phase 9 — SSIM gate per `docs/font-rendering-design.md` §9.
+    /// Phase 9 — SSIM gate per `.claude/docs-archive/docs/font-rendering-design.md` §9.
     /// Snapshot tests call this after producing fresh RGBA bytes:
     ///   - if `MARSPOT_FONT_SNAPSHOT=check` and a baseline exists,
     ///     compute SSIM and `assert! > 0.98` — failing means a real
@@ -7205,7 +7205,7 @@ mod tests {
     ///   MARSPOT_FONT_SNAPSHOT=1 cargo nextest run -p marspot --lib \
     ///     font_v5_mono_grid_snapshot
     ///
-    /// SSIM > 0.98 gate per `docs/font-rendering-design.md` §9 lives
+    /// SSIM > 0.98 gate per `.claude/docs-archive/docs/font-rendering-design.md` §9 lives
     /// in a follow-up — this commit only fixes the rendered bytes.
     #[test]
     fn font_v5_mono_grid_snapshot() {
