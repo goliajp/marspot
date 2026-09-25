@@ -33,3 +33,5 @@ bench/remote-runs/
 
 # Local credentials — never committed.
 .env.local
+
+.claude/
