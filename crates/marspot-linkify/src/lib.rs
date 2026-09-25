@@ -1073,9 +1073,9 @@ fn scan_line_into_matches(
             let mut end = scan_until_link_terminator(&chars, i);
             // A zero-indent cc join is the weakest merge guess (flush
             // prose looks identical), and URLs have no existence
-            // oracle to arbitrate — never let a URL cross one, or a
-            // flush-ending URL absorbs the next row's first word.
-            if let Some(b) = first_zero_indent_boundary(segments, i, end) {
+            // oracle to arbitrate — so a URL stops at one, unless the
+            // break was forced (see `url_stop_boundary`).
+            if let Some(b) = url_stop_boundary(chars, col_map, segments, cols_per_row, i, end) {
                 end = b;
                 while end > i
                     && matches!(
@@ -1426,6 +1426,73 @@ fn first_zero_indent_boundary(
         .filter(|s| s.cc_zero_indent)
         .map(|s| s.char_offset)
         .find(|&b| b > lo && b < hi)
+}
+
+/// The first zero-indent cc boundary inside `(lo, hi)` that a URL has
+/// to stop at.
+///
+/// The default is to stop: a flush join is the weakest signal there
+/// is, and a URL has no `stat` to arbitrate a wrong one.  The
+/// exception is a break the renderer had no choice about — if the
+/// first word of the row below would not have fitted in what was left
+/// of the row above, the break is a wrap and the URL runs through it.
+///
+/// codex wraps every continuation flush at column 0, so without this
+/// its URLs are cut at the seam: `https://` alone stops being a link
+/// at all, and `https://chatgpt.com/backend-` keeps being one —
+/// pointing somewhere other than the
+/// `https://chatgpt.com/backend-api/codex/responses` on screen
+/// (2026-09-26 report).
+fn url_stop_boundary(
+    chars: &[char],
+    col_map: &[u16],
+    segments: &[LineSegment],
+    cols_per_row: usize,
+    lo: usize,
+    hi: usize,
+) -> Option<usize> {
+    segments
+        .iter()
+        .filter(|s| s.cc_zero_indent)
+        .map(|s| s.char_offset)
+        .filter(|&b| b > lo && b < hi)
+        .find(|&b| !wrap_was_forced(chars, col_map, cols_per_row, b))
+}
+
+/// Did the row above the seam at `b` break because the next word did
+/// not fit on it?
+///
+/// This is the measurement the renderer itself made, read back off the
+/// screen — it assumes nothing about where a TUI's content width sits,
+/// which is what every geometric guess in this file has had to be
+/// widened for in turn.  When the word WOULD have fitted, the break is
+/// one the program meant, and joining the rows would invent a link
+/// that is on neither of them.
+///
+/// A row with no column left over answers nothing: a line can end
+/// exactly at the edge by coincidence as easily as by wrapping, and
+/// there is no room to say which.  The evidence is space the renderer
+/// left unused — it would have used it if the next word had fitted.
+///
+/// Counts chars, not columns: a wide char is two columns, so a word
+/// carrying one is measured short and the seam is treated as a real
+/// newline.  That is the safe direction — a URL with a CJK char in its
+/// first wrapped word loses nothing it had before this.
+fn wrap_was_forced(chars: &[char], col_map: &[u16], cols_per_row: usize, b: usize) -> bool {
+    if b == 0 || b >= chars.len() || b > col_map.len() {
+        return false;
+    }
+    // Trailing blanks are popped at the seam, so this is the last
+    // content column of the row above.
+    let last_col = col_map[b - 1] as usize;
+    if last_col + 1 >= cols_per_row {
+        return false;
+    }
+    let word = chars[b..]
+        .iter()
+        .position(|c| *c == ' ')
+        .unwrap_or(chars.len() - b);
+    last_col + 1 + word > cols_per_row
 }
 
 fn retry_file_at_segment_boundaries(
@@ -2543,6 +2610,88 @@ mod tests {
     ///
     /// Swept across the gap widths a real pane produces, because a
     /// fixture at one width only proves that width.
+    /// codex wraps flush at column 0, and its URLs were cut at the
+    /// wrap.
+    ///
+    /// The three rows are copied off pane 435 at 73 columns
+    /// (2026-09-26): a 401 body whose two URLs each break mid-token,
+    /// once right after the scheme and once inside the path.  What the
+    /// user saw: the first URL not underlined at all, and the second
+    /// underlined as `https://chatgpt.com/backend-` — a URL that
+    /// exists and goes somewhere else.
+    #[test]
+    fn a_url_wrapped_flush_at_column_zero_is_still_one_url() {
+        let rows = [
+            "**************fvMA. You can find your API key at https://",
+            "platform.openai.com/account/api-keys., url: https://chatgpt.com/backend-",
+            "api/codex/responses, cf-ray: a40db52ee9100dce-NRT, request id: 3acb2d64-",
+            "504d-49d5-9030-a179087f4bce",
+            "",
+        ];
+        let mut src = StrSource::new(&rows, 73);
+        src.cursor = (0, 4);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        assert!(
+            texts.contains(&"https://platform.openai.com/account/api-keys"),
+            "the URL broken after its scheme must rejoin, got {texts:?}"
+        );
+        assert!(
+            texts.contains(&"https://chatgpt.com/backend-api/codex/responses"),
+            "the URL broken inside its path must rejoin, got {texts:?}"
+        );
+        assert!(
+            !texts.contains(&"https://chatgpt.com/backend-"),
+            "and must never be offered as the half that fits, got {texts:?}"
+        );
+    }
+
+    /// A row with nothing left over is not evidence of anything.
+    ///
+    /// It can end at the edge because it wrapped or because it fitted;
+    /// the screen cannot say which, so the flush seam keeps stopping
+    /// the URL.  `marspot-term`'s own `zero_indent_does_not_glue_urls`
+    /// watches the same line from the grid side — this is the case the
+    /// first cut of the forced-break test got wrong, because with no
+    /// room left every word looks like it did not fit.
+    #[test]
+    fn a_full_row_is_not_evidence_of_a_wrap() {
+        let url = format!("https://example.com/{}", "a".repeat(10)); // 30 chars
+        let rows = [url.as_str(), "and more prose", ""];
+        let mut src = StrSource::new(&rows, 30);
+        src.cursor = (0, 2);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, vec![url.as_str()], "the URL must stop at the row edge");
+    }
+
+    /// A break the renderer did not have to make is a real newline.
+    ///
+    /// Same shape — a URL ending a row, a flush row under it opening
+    /// with path characters — but the word below had room on the row
+    /// above.  Joining those would invent a URL that is on neither
+    /// row, and nothing would arbitrate it.
+    #[test]
+    fn a_flush_row_that_had_room_is_not_a_wrap() {
+        let rows = [
+            "see https://example.com",
+            "api/codex/responses is the endpoint",
+            "",
+        ];
+        let mut src = StrSource::new(&rows, 73);
+        src.cursor = (0, 2);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        assert!(
+            texts.contains(&"https://example.com"),
+            "the URL that is actually there, got {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("example.comapi")),
+            "nothing may be glued across a break that was not forced, got {texts:?}"
+        );
+    }
+
     #[test]
     fn a_path_wrapped_mid_token_is_still_one_path() {
         let dir = std::env::temp_dir().join("marspot-linkify-wrap-test");
