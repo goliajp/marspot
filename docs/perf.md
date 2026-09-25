@@ -529,7 +529,7 @@ work — it only runs under `--full`, and nobody was running `--full`.
 The parser is now 2.17× faster on emoji and within noise of the June
 build everywhere else, and headless parse runs 2.3–3.9× faster than
 the live pipeline delivers.  **That ratio is the target.**  Per
-`.claude/rules/perf-attack.md` the shape of the work is fixed:
+`.claude/runbooks/perf-attack.md` the shape of the work is fixed:
 
 1. **Phase A, read-only.**  Split one `cat` of a corpus into 18+ stages
    from `read()` on the PTY to the frame on screen, side by side with

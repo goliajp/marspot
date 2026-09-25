@@ -116,7 +116,7 @@ under that load.
 
 ## Pre-Phase-B gate — not yet passed
 
-Per `.claude/rules/perf-attack.md` §11, an attack needs its target
+Per `.claude/runbooks/perf-attack.md` §11, an attack needs its target
 verified at double-digit pp of the *real* workload's cost.  `build`
 being 96–99 % of a *synthetic* cold frame does not discharge that.
 The instrumented core reports `render_split` on every stall, so the
