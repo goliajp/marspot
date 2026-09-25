@@ -58,7 +58,7 @@ trap cleanup EXIT
 
 # --- 0. Build ONE pristine (unsigned) tarball + a throwaway wrong key --
 [[ -f "$ROOT/keys/marspot-update.sec" ]] \
-  || fail "no keys/marspot-update.sec — generate it before running (see .claude/docs-archive/docs/silent-update.md)"
+  || fail "no keys/marspot-update.sec — generate it before running"
 PROD_KEY="$ROOT/keys/marspot-update.sec"
 WRONG_KEY="$SERVE_DIR/wrong.sec"
 openssl ecparam -genkey -name prime256v1 -noout -out "$WRONG_KEY" 2>/dev/null \

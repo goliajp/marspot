@@ -9,7 +9,7 @@
 # terminal binaries).
 #
 # Output: one JSON object per (terminal, scenario) run, plus a
-# Markdown comparison table that gets folded into .claude/docs-archive/docs/perf.md.
+# Markdown comparison table that gets folded into the perf notes.
 
 set -euo pipefail
 
@@ -257,7 +257,7 @@ echo
 echo "---"
 echo "Cross-terminal comparison: paste these in iTerm2 / Warp / Terminal.app"
 echo "and capture each /tmp/<terminal>-<scenario>.txt as a marker file."
-echo "(See .claude/docs-archive/docs/perf.md for how to fold the numbers in.)"
+echo "(The perf notes say how to fold the numbers in.)"
 for s in "${SCENARIOS[@]}"; do
   spath="$SCENARIOS_DIR/$s.bin"
   reps=$(live_repeat "$spath")

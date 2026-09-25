@@ -1,6 +1,5 @@
 //! Layout / modifier type primitives.
 //!
-//! See `.claude/docs-archive/docs/ui-system-model.md` §5.4 for the canonical defs.
 
 use crate::ui::core::{Color, Length};
 

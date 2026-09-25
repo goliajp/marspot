@@ -138,7 +138,7 @@ for scenario in scenarios_str.split():
     total_bytes = int(open(by_path).read().strip())
     # MINIMUM, not median.  Load can only ADD time, so the fastest
     # trial is the least-contaminated one, while a median still carries
-    # whatever else the host was doing.  .claude/docs-archive/docs/bench.md §2b argues this
+    # whatever else the host was doing.  The bench notes argue this
     # for A/B comparisons; it matters at least as much here, because
     # this host has a permanent tenant — the same build read 194.5 and
     # 106.5 MB/s on ascii within one afternoon, and a median of three

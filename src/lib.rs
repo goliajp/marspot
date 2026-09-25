@@ -5,8 +5,8 @@
 //! The terminal engine — parser, grid, terminal, PTY, shelld client +
 //! protocols, layout, updater, render data types, and the pure
 //! key→bytes mapping — lives in the `marspot-term` crate so a light,
-//! Metal-free per-session process can link it (target #4 L3; see
-//! `.claude/docs-archive/docs/per-session-l3.md`).  It is re-exported below so existing
+//! Metal-free per-session process can link it (target #4 L3).  It is
+//! re-exported below so existing
 //! `marspot::grid::Grid` / `marspot::terminal::Terminal` paths keep
 //! resolving and the bins need no churn.
 

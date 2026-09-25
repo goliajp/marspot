@@ -36,7 +36,7 @@ mkdir -p "$RESULTS_DIR"
 # median took a disturbed one, producing a "0.21x vs best other" that
 # was pure interference.
 #
-# The bench host is mini (see .claude/rules/perf-attack.md).  Driving
+# The bench host is mini.  Driving
 # GUI terminals needs a GUI session, which ssh does not have, so the
 # route is `bin/remote-measure-others.sh` — it health-checks for
 # exactly that and prints the Screen-Sharing steps.

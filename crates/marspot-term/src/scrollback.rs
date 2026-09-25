@@ -36,8 +36,8 @@ pub const LINES_PER_PAGE: usize = 256;
 /// the enum lets the compiler inline through the match.
 pub enum Scrollback {
     Memory(MemoryScrollback),
-    /// Persistent file-backed scrollback (A1 of pane upgrade — see
-    /// `.claude/docs-archive/docs/scrollback-search.md`).  Survives L3 self-execv via
+    /// Persistent file-backed scrollback (A1 of the pane upgrade).
+    /// Survives L3 self-execv via
     /// path-based reopen.  Append-only `.bin` + sidecar `.idx`;
     /// hot read served from RAM ring, cold reads `pread()` the
     /// file.  Wrapped flag per line stored in the record (Grid's
@@ -439,7 +439,7 @@ impl MemoryScrollback {
 //
 // Per-session persistent file pair living at
 // `paths::scrollback_bin_path(id) / scrollback_idx_path(id)`.  Format
-// is documented byte-for-byte in `.claude/docs-archive/docs/scrollback-search.md` §3.2–§3.3.
+// is documented byte-for-byte below.
 //
 // Invariants:
 //   - `.bin` starts with a 32-byte header (magic / version / cell_abi

@@ -4,8 +4,7 @@
 //! every binary (shelld, shell, core, session, gui). Each line is
 //! independently parseable — ISO-ms / unix-ms / level / component / pid /
 //! tid / tag / msg / k=v — bounded by size + age rotation, gzipped on
-//! rotate, and cold-data GC'd in the background. See `.claude/docs-archive/docs/logx.md` for
-//! the operator runbook.
+//! rotate, and cold-data GC'd in the background.
 //!
 //! Why TSV (not JSON): hot paths can't afford an allocation per event to
 //! escape JSON; `grep` / `cut` / `awk` are right there in the same

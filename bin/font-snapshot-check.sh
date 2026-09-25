@@ -4,7 +4,7 @@
 # Renders each font-v5 snapshot fresh, computes SSIM vs the committed
 # PNG baseline under `bench/font-rendering/snapshots/`, and fails when
 # any snapshot's SSIM drops below the project-wide 0.98 threshold
-# (per .claude/docs-archive/docs/font-rendering-design.md §9).
+# (the font-rendering acceptance bound).
 #
 # Workflow:
 #   bin/font-snapshot.sh            # update / lock baselines (write mode)

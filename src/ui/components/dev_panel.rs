@@ -1175,7 +1175,6 @@ fn build_model_view() -> crate::ui::view::View {
 
     // ── Footer — link to doc ─────────────────────────────────
     let footer = vstack(vec![
-        hint(".claude/docs-archive/docs/ui-system-model.md — 完整设计 v3"),
         hint("18 章 + 完整 LOC roadmap + SOTA self-assessment"),
     ]).vstack_gap(Length::Pt(2.0));
 

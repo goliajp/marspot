@@ -9,7 +9,7 @@
 # cost 0.00 s.  Everything else pays every time.  Notarisation is the
 # only difference left standing after provenance, Hardened Runtime,
 # cs.* entitlements, install location, DeveloperTool grants and spawn
-# disclaim were each ruled out — see .claude/docs-archive/docs/rfc-007-clean-exec-chain.md.
+# disclaim were each ruled out.
 #
 # Credentials never appear here.  Store them once:
 #

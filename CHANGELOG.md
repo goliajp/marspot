@@ -1065,7 +1065,7 @@ run 再唤醒一次,等于往当前画面上打字。
 于是日志看起来像「策略在没有理由的情况下开火」。现在印的是**真正决定的
 那个时钟**(会话记录年龄),`held` 留在括号里作参考。
 
-完整的亮度 / 回收规则表在 `.claude/docs-archive/docs/pane-attention.md`。
+完整的亮度 / 回收规则表在开发笔记里。
 
 ### 0.7.97
 
@@ -2688,7 +2688,7 @@ shell 0.6.25 → 0.6.26;core unchanged.
 
 **Component Library v4 — P0 第一步:Token v4 全 land.**
 
-按 `.claude/docs-archive/docs/ui-component-library.md` §3 起手,token.rs 从 233 行扩到 ~580 行.
+按组件库设计起手,token.rs 从 233 行扩到 ~580 行.
 
 `color::*` 扩(每条都有 Dark + light::* + hc::* 三套):
 - `FG_INVERSE / FG_LINK`(已有 FG/FG_MUTED/FG_DISABLED)
@@ -3040,7 +3040,7 @@ v2 doc 自查发现 SOTA framework 的常用 primitive 缺了不少:
 - TextStyle 形式化(代替散的 size+weight+color)
 - `TextWeight::Dim = alpha × 0.6` / `ZIndex` modifier 不读 等 v2 hack 该明确
 
-`.claude/docs-archive/docs/ui-system-model.md` 重写为 v3(18 章 + 完整 implementation roadmap P3a-v + 11 个 component 迁移 + SOTA self-assessment).写明哪些 ✓ / v1 待补 / v2+,以及为什么.
+UI 系统模型文档重写为 v3(18 章 + 完整 implementation roadmap P3a-v + 11 个 component 迁移 + SOTA self-assessment).写明哪些 ✓ / v1 待补 / v2+,以及为什么.
 
 DevPanel.Model section 同步:每条 model 加状态标 `[✓]`(绿)/ `[v1 待补]`(黄)/ `[v2+]`(灰).新增 L6 "Cross-cutting" 列 Lifecycle / Accessibility / Animation / Theme / i18n.footer 指向 doc.
 
@@ -3084,7 +3084,7 @@ shell 0.6.12 → 0.6.13.9/9 dev_panel tests PASS,zero 编译回归.
 
 ### 0.6.12
 
-UI 系统 v2 framework 落定(`.claude/docs-archive/docs/ui-system-model.md` 的 P3a → P3h + P3k).新增 ~1500 LOC,无组件迁移(留 P3i),零回归,213/213 lib tests PASS.
+UI 系统 v2 framework 落定(P3a → P3h + P3k).新增 ~1500 LOC,无组件迁移(留 P3i),零回归,213/213 lib tests PASS.
 
 落地的(实际可用):
 - **P3a** `src/ui/theme/token.rs`:18 色 token + 6 space 档 + 4 radius 档 + PILL
@@ -3097,7 +3097,7 @@ UI 系统 v2 framework 落定(`.claude/docs-archive/docs/ui-system-model.md` 的
 
 留 P3i 的(下次):各组件(ContextMenu / LayoutModal / DevPanel / Table / Sidebar)从手算 canvas builder 迁到 View 树。P3j(ViewPainter 退役)= P3i 完成的副产品。
 
-参考 `.claude/docs-archive/docs/ui-system-model.md` 全 doc 看完整设计。
+完整设计见 UI 系统模型文档。
 
 shell 0.6.11 → 0.6.12.27 个新 view-tree tests + 全部 213 lib tests PASS.
 
@@ -3196,7 +3196,7 @@ Current: **0.12.210**
 
 ### 0.12.210
 
-开发过程材料移出公开仓库（`docs/` 与 `bench/rfc-003-*` → `.claude/docs-archive/`，保持原路径）。
+开发过程材料移出公开仓库（`docs/` 与 `bench/rfc-003-*`，保持原路径搬到仓库外）。
 代码这边只有 dev panel 上那一行文档提示跟着改了位置，其余都是注释和脚本提示文字。
 
 ### 0.12.209
@@ -4114,8 +4114,8 @@ stapled ticket) log **zero** `performScan` and cost 0.00 s; everything
 else scans every time.  Provenance, Hardened Runtime, `cs.*`
 entitlements, install location, `DeveloperTool` TCC grants and
 `posix_spawn` disclaim were each ruled out with their own control —
-see `.claude/docs-archive/docs/rfc-007-clean-exec-chain.md`, kept as the record so the
-search space is not re-explored.
+the record is kept outside this repository so the search space is not
+re-explored.
 
 Keeping an unused `launchd` dependency on the pane spawn path is
 failure surface for no gain; it had already leaked 26 jobs in its
@@ -4744,7 +4744,7 @@ READ_BUF(64KB),`pump` 每块调一次 `feed`。批量车道是对连续切片的
 **pty-raw ≈ pty-drain** —— 我们的 gather 架构(线程/channel/Vec/探测 poll)几乎不
 花钱,那 5.7 基本是内核与 `cat` 的共通成本,ghostty 同样要付。而 ghostty 的**全程**
 是 6.85 ms/MB,低于我们光 gather 的开销 —— 它只可能是把 parse 藏进了 gather 的
-影子里,而我们实测是两者相加。这是下一轮的靶,写在 .claude/docs-archive/docs/perf.md。
+影子里,而我们实测是两者相加。这是下一轮的靶,写在 perf 笔记里。
 
 顺带一个关于计量的教训:这些计数器第一版直接编在 release 里,每次 read 三个原子加。
 8.4MB 语料 = 8360 次 read,gate 上 cjk/emoji 各掉 0.5% —— **贴着地板 FAIL**。移到
@@ -4872,7 +4872,7 @@ token 中间断开的续行(哪怕它以 `-` 开头,比如 `-more/parts`)照旧�
 **一条挺常规的路径,只有前半段是链接。**
 
 ```
-● Write(~/workspace/labs/lab36-continus/.claude/reports/2026-08-16-e18-ve
+● Write(~/workspace/labs/lab36-continus/notes/reports/2026-08-16-e18-ve
   rdict.md)
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 只有这一截有下划线
 ```
@@ -5060,7 +5060,7 @@ the app"横幅的上游。
 0.0 ms,不在这次的攻击面里,而且它的缓冲是按切片循环出来的,槽位不固定。
 
 完整拆解 + 三次被实测否掉的假设(GPU 管线 / 冷字形图集 / `commandBuffer()` 阻塞)
-见 `.claude/docs-archive/docs/PERF-2026-08-12-first-frame-decomposition.md`。
+见首帧分解笔记。
 
 ### 0.12.127
 
@@ -5131,7 +5131,7 @@ the app"横幅的上游。
 
 **没有实施任何优化。** 按 perf-attack 的 Pre-Phase-B 闸门,攻击目标要在真实
 负载上验到双位数 pp;合成最坏情况不算数。仪器已装,下一次真实卡顿会自己报数。
-完整拆解见 `.claude/docs-archive/docs/PERF-2026-08-12-first-frame-decomposition.md`,含一次测量装置
+完整拆解见首帧分解笔记,含一次测量装置
 自身失效的记录(码点走出 CJK 区跑进 emoji,把单字成本报高 5 倍,看起来完全像
 个结论)。
 
@@ -6678,7 +6678,7 @@ grid 存取跟着改构造方式，行为不变。
 
 ### 0.11.92
 
-`交接文档写好了：/Users/…/buwanren/.claude/rfcs` ⏎ `/20260916-handoff.md。按项目规矩…`
+`交接文档写好了：/Users/…/buwanren/notes/rfcs` ⏎ `/20260916-handoff.md。按项目规矩…`
 —— 链接停在了 `…/rfcs`，下一行的文件名成了普通文字。
 
 claudecode 在 `/` 前面折了行，文件名后面又直接粘着中文，没有空格。扫描能拿到两个
@@ -6697,7 +6697,7 @@ claudecode 在 `/` 前面折了行，文件名后面又直接粘着中文，没�
 
 ### 0.11.91
 
-`.claude/exprtool.html` 还没生成，旁边的 `.claude/exprtool/` 已经在了 —— 屏幕上
+`.notes/exprtool.html` 还没生成，旁边的 `.notes/exprtool/` 已经在了 —— 屏幕上
 画出来的链接指向那个目录，`.html` 留成了普通文字。
 
 扫描是贪婪的：候选交给磁盘，最长的先问；都不存在时，它退到「散文可能从这里开始」
@@ -6711,7 +6711,7 @@ claudecode 在 `/` 前面折了行，文件名后面又直接粘着中文，没�
 在真实数据上核的，不是在编出来的一行上：14 个 pane 的 bytelog 全量重放，链接集合
 5379 → 5333，**只减不增**。46 条全是被切掉后缀之后剩下的那个存在前缀 ——
 `num_width.rs` 与 `num_width/*.rs` 退成 `num_width/`、`path-integrity.ts` 退成
-`path-integrity/`、`spg/.claude/notes/…` 退成 `spg/`、`../../.claude-shared/…`
+`path-integrity/`、`spg/.notes/…` 退成 `spg/`、`../../shared/…`
 退成 `../../`。没有一条真链接受影响。
 
 做这个对照的 `link_set_probe` 留下 —— 「改一条仲裁规则之后，真实屏幕上的链接集合
@@ -6721,10 +6721,10 @@ claudecode 在 `/` 前面折了行，文件名后面又直接粘着中文，没�
 
 ### 0.11.90
 
-`⏺ 写好了:.claude/notes/sentori-ack-v8.0.1.md(442 行,六部分)。` 里的相对路径
+`⏺ 写好了:.notes/sentori-ack-v8.0.1.md(442 行,六部分)。` 里的相对路径
 画成了普通文字。根因不在点开头的目录，也不在中日文：**冒号被算作路径 token
 的内部字符**。于是候选从 `写` 起头（CJK 也算 alphanumeric），一路吞到下一个
-空白，得到 `写好了:.claude/notes/sentori-ack-v8.0.1.md(442` —— 这东西不存在，
+空白，得到 `写好了:.notes/sentori-ack-v8.0.1.md(442` —— 这东西不存在，
 解析失败；而失败的候选**会把它覆盖过的每个起点一起挡掉**，路径再没机会被
 单独试一次。
 

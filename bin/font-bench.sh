@@ -6,7 +6,7 @@
 #
 #   bin/font-bench.sh | grep 'font v5'
 #
-# Acceptance bounds (.claude/docs-archive/docs/font-rendering-design.md §16 Phase 9):
+# Acceptance bounds (font rendering, phase 9):
 #   - cold raster < 500 µs / glyph
 #   - warm cache lookup < 100 ns / glyph
 #   - shape per frame < 1 ms

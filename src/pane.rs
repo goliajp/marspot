@@ -649,8 +649,7 @@ impl PaneBackend {
 ///
 /// Step 3 keeps this minimal — fixed geometry, no scrollback mirror, a
 /// full re-fill per changed frame.  Efficiency (incremental fill, dirty
-/// rows) and resize/scroll forwarding land in later steps; see
-/// `.claude/docs-archive/docs/per-session-l3.md`.
+/// rows) and resize/scroll forwarding land in later steps.
 /// The freshly-spawned pieces of one L3 process, assembled by the
 /// container (it owns the process-launch + reader-thread glue) and handed
 /// to `L3Conn` either at birth ([`L3Conn::new`]) or as a silent-update
@@ -1344,7 +1343,6 @@ pub struct Pane {
     /// result list in C3, …).  Default empty; layout math sums their
     /// `fixed_height_rows()` on each frame via `tool_fixed_height_sums`
     /// so an empty `tools` Vec is byte-identical to pre-C1 behaviour.
-    /// See `.claude/docs-archive/docs/scrollback-search.md` §6.1.
     pub tools: Vec<Box<dyn marspot_term::render::PaneTool>>,
     /// C4 — active search highlight, set by C5's main loop when the
     /// user navigates to a hit.  `None` = no highlight (renderer

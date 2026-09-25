@@ -1,7 +1,6 @@
 //! C3 — search result list overlay.  Pairs with `SearchBar` (C2):
 //! the bar collects the query, this struct collects + presents the
-//! hits.  Spec: `.claude/docs-archive/docs/scrollback-search.md` §6.5 + §6.6.5 + §6.7 +
-//! §6.8 + §6.9 + §12.C3.
+//! hits.
 //!
 //! Same C2 spirit — data + behaviour FSM, no rendering yet.  C5
 //! wires the actual frame consumption (L2 receives `SearchResults`

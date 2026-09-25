@@ -1,6 +1,5 @@
 //! `View` — declarative UI tree.
 //!
-//! See `.claude/docs-archive/docs/ui-system-model.md` §5+ for the full design.
 //!
 //! Three top-level concepts:
 //! - `View` (`view.rs`): the tree node enum

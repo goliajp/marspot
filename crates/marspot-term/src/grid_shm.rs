@@ -4,7 +4,7 @@
 //! into a shared region after each pump; L2 (`marspot-core`) maps the
 //! same region and reads it to render. The published snapshot is the
 //! *visible* window only (`rows × cols` cells, ~40 KiB at 80×24), so
-//! L2 never holds L3's scrollback — see `.claude/docs-archive/docs/per-session-l3.md`.
+//! L2 never holds L3's scrollback.
 //!
 //! ## Sharing primitive
 //!

@@ -1380,7 +1380,7 @@ fn is_left_boundary_pathish(chars: &[char], i: usize) -> bool {
             // A colon is NOT in this set.  It reads as "inside a
             // token" almost nowhere and as a separator almost
             // everywhere a program writes one: `wrote:path`,
-            // `Note:path`, `写好了:.claude/notes/x.md`.  Counting it
+            // `Note:path`, `写好了:.notes/x.md`.  Counting it
             // as inside cost the whole rest of the line, because a
             // candidate that starts too early and fails to resolve
             // also blocks every start position it covered — the run
@@ -2126,8 +2126,8 @@ fn unquote_path(s: &str) -> String {
 /// prose, it is the extension separator.  Cutting there turns a file
 /// that does NOT exist into its prefix that does — and the prefix is
 /// typically the directory the file is about to be written into.
-/// Reported 2026-09-11: `.claude/exprtool.html` had not been
-/// generated yet, `.claude/exprtool/` beside it had, and the line
+/// Reported 2026-09-11: `.notes/exprtool.html` had not been
+/// generated yet, `.notes/exprtool/` beside it had, and the line
 /// drew a link to the directory with `.html` left as plain text.
 /// Nothing is lost by leaving it out — a `.` that really does end a
 /// sentence sits at the end of the token, where
@@ -2272,7 +2272,7 @@ fn resolve_path_end_from(
     // before a `/` then stopped at the directory on the upper row
     // even when the full file name, ended by the `。` glued to it,
     // existed too (2026-09-16:
-    // `…/buwanren/.claude/rfcs` ⏎ `/20260916-handoff.md。按项目…`).
+    // `…/buwanren/notes/rfcs` ⏎ `/20260916-handoff.md。按项目…`).
     // Longest-first is the rule everywhere else in this function —
     // when a file and the directory above it both exist, the line is
     // pointing at the file.
@@ -2845,7 +2845,7 @@ mod tests {
     /// before a `/`, and the file name on the next row had Chinese
     /// glued to it with no space:
     ///
-    ///   `交接文档写好了：/Users/…/buwanren/.claude/rfcs`
+    ///   `交接文档写好了：/Users/…/buwanren/notes/rfcs`
     ///   `  /20260916-handoff.md。按项目规矩写在 …`
     ///
     /// The link stopped at `…/rfcs` — a directory the line never
@@ -2854,7 +2854,7 @@ mod tests {
     #[test]
     fn a_seam_does_not_outrank_a_longer_end_that_exists() {
         let root = std::env::temp_dir().join(format!("marspot-seam-cjk-{}", std::process::id()));
-        let dir = root.join(".claude").join("rfcs");
+        let dir = root.join("notes").join("rfcs");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("handoff.md"), b"x").unwrap();
         let d = dir.display().to_string();
@@ -3419,8 +3419,8 @@ mod tests {
     /// The scanner turned out to be innocent (the cause was upstream,
     /// see `a_caret_resting_on_a_wrapped_tail_is_not_a_composer`), but
     /// a dotted component IS the point a wrong answer backs off to, so
-    /// the boundary is worth holding: `.claude`, `.config`, `.git`,
-    /// `.local` are where a developer's own files live.
+    /// the boundary is worth holding: `.config`, `.git`, `.local` are
+    /// where a developer's own files live.
     #[test]
     fn a_dotted_directory_component_does_not_truncate_the_path() {
         let root = std::env::temp_dir()
@@ -3773,9 +3773,9 @@ mod tests {
     /// The field report's full shape: the same gloss, but the path
     /// also hard-wrapped mid-token at the pane edge, so the row merge
     /// and the dash cut both have to land for the link to come out
-    /// whole.  A dot-directory (`.claude`) sits in the middle — the
-    /// break fell inside it (`/.c` + `laude/`), which is what made the
-    /// truncated link look like a plausible one.
+    /// whole.  A dot-directory sits in the middle — the break fell
+    /// inside it (`/.n` + `otes/`), which is what made the truncated
+    /// link look like a plausible one.
     #[test]
     fn a_wrapped_path_with_an_em_dash_gloss_is_one_link() {
         let dir = std::env::temp_dir()
@@ -4323,21 +4323,21 @@ mod relative_path_tests {
     #[test]
     fn a_colon_ends_the_word_before_a_path_rather_than_joining_it() {
         // Reported 2026-09-11.  The line on screen was
-        // `⏺ 写好了:.claude/notes/sentori-ack-v8.0.1.md(442 行,六部分)。`
+        // `⏺ 写好了:.notes/sentori-ack-v8.0.1.md(442 行,六部分)。`
         // and the path drew as ordinary text.  The candidate started
         // at `写` — a colon counted as "inside a token", so it did not
         // start at the path — ran to the next space, resolved to
         // nothing, and blocked every start position it had covered.
         let v = scan(
-            "⏺ 写好了:.claude/notes/sentori-ack-v8.0.1.md(442 行,六部分)。",
+            "⏺ 写好了:.notes/sentori-ack-v8.0.1.md(442 行,六部分)。",
             Some("/w/proj"),
-            &["/w/proj/.claude/notes/sentori-ack-v8.0.1.md"],
+            &["/w/proj/.notes/sentori-ack-v8.0.1.md"],
         );
         assert_eq!(v.len(), 1, "{v:?}");
-        assert_eq!(v[0].text, ".claude/notes/sentori-ack-v8.0.1.md");
+        assert_eq!(v[0].text, ".notes/sentori-ack-v8.0.1.md");
         assert_eq!(
             v[0].target.as_deref(),
-            Some("/w/proj/.claude/notes/sentori-ack-v8.0.1.md")
+            Some("/w/proj/.notes/sentori-ack-v8.0.1.md")
         );
     }
 
@@ -4348,20 +4348,20 @@ mod relative_path_tests {
         assert_eq!(v[0].text, "docs/notes/x.md");
 
         let v = scan_visible_links_with(
-            &Line("⏺ 写好了:.claude/notes/x.md(442 行)。".to_string()),
+            &Line("⏺ 写好了:.notes/x.md(442 行)。".to_string()),
             ScanOpts { cwd: Some("/w/proj"), tui_mode: true },
-            &Fake(&["/w/proj/.claude/notes/x.md"]),
+            &Fake(&["/w/proj/.notes/x.md"]),
         );
         assert_eq!(v.len(), 1, "{v:?}");
-        assert_eq!(v[0].text, ".claude/notes/x.md");
+        assert_eq!(v[0].text, ".notes/x.md");
     }
 
     #[test]
     fn a_name_that_is_not_there_yet_does_not_become_the_directory_beside_it() {
-        // Reported 2026-09-11.  `.claude/exprtool.html` was being
-        // described before it was generated; `.claude/exprtool/`, the
+        // Reported 2026-09-11.  `.notes/exprtool.html` was being
+        // described before it was generated; `.notes/exprtool/`, the
         // directory it is generated FROM, was already there.  The
-        // screen underlined `.claude/exprtool` and left `.html` as
+        // screen underlined `.notes/exprtool` and left `.html` as
         // plain text — a link to a directory the line never named.
         //
         // A file that does not exist is not a link.  Backing off to a
@@ -4369,21 +4369,21 @@ mod relative_path_tests {
         // one, and a `.` inside a token is an extension separator,
         // never prose.
         let v = scan(
-            ".claude/exprtool.html, 由 harness/scripts/make.py 生成",
+            ".notes/exprtool.html, 由 harness/scripts/make.py 生成",
             Some("/w/p"),
-            &["/w/p/.claude/exprtool"],
+            &["/w/p/.notes/exprtool"],
         );
         assert!(v.is_empty(), "{v:?}");
 
         // Once it exists, it is the link — whole, extension included.
         let v = scan(
-            ".claude/exprtool.html, 由 harness/scripts/make.py 生成",
+            ".notes/exprtool.html, 由 harness/scripts/make.py 生成",
             Some("/w/p"),
-            &["/w/p/.claude/exprtool", "/w/p/.claude/exprtool.html"],
+            &["/w/p/.notes/exprtool", "/w/p/.notes/exprtool.html"],
         );
         assert_eq!(v.len(), 1, "{v:?}");
-        assert_eq!(v[0].text, ".claude/exprtool.html");
-        assert_eq!(v[0].target.as_deref(), Some("/w/p/.claude/exprtool.html"));
+        assert_eq!(v[0].text, ".notes/exprtool.html");
+        assert_eq!(v[0].target.as_deref(), Some("/w/p/.notes/exprtool.html"));
     }
 
     #[test]

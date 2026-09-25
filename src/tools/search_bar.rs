@@ -10,9 +10,6 @@
 //! the keybinding glue); keeping them separate here lets C2's tests
 //! exercise input handling in isolation and lets C3 evolve the list
 //! shape independently.
-//!
-//! Spec: `.claude/docs-archive/docs/scrollback-search.md` §6.4 + §6.6.5 + §6.7 + §6.8 +
-//! §12.C2.
 
 use std::time::{Duration, Instant};
 

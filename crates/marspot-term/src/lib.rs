@@ -10,7 +10,7 @@
 //! a light per-session process (target #4's L3) links it at a ~3–5 MB
 //! resident floor.  The GUI crate (`marspot`) re-exports this whole
 //! surface (`pub use marspot_term::*`) so existing `marspot::grid::...`
-//! paths keep resolving.  See `.claude/docs-archive/docs/per-session-l3.md`.
+//! paths keep resolving.
 
 pub mod async_writer;
 pub mod binary_tree;

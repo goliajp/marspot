@@ -16,8 +16,7 @@
 # success.
 #
 # Port 6024 is this project's allocation in the global port
-# registry (~/.claude/port-registry-data.md) — don't change it
-# without re-registering.
+# registry — don't change it without re-registering.
 
 set -uo pipefail
 
@@ -50,7 +49,7 @@ trap cleanup EXIT
 
 # --- 0. Build signed tarball + fake feed ----------------------------
 [[ -f "$ROOT/keys/marspot-update.sec" ]] \
-  || fail "no keys/marspot-update.sec — generate it before running (see .claude/docs-archive/docs/silent-update.md)"
+  || fail "no keys/marspot-update.sec — generate it before running"
 "$ROOT/bin/build-release-tarball.sh" --output "$SERVE_DIR/$ASSET" --sign >/dev/null \
   || fail "build-release-tarball.sh --sign failed"
 # That step ran `cargo build --release`, so the binaries this test is

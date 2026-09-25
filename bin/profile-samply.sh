@@ -2,7 +2,7 @@
 # bin/profile-samply.sh — sampling profile with flamegraph UI.
 #
 # Complements bin/profile-live.sh: that one uses macOS `sample` and
-# emits a textual report suitable for quoting into .claude/docs-archive/docs/perf.md.
+# emits a textual report suitable for quoting into the perf notes.
 # This one uses samply, which writes a Speedscope/Firefox-profiler
 # JSON and opens it in a browser — navigating wide flat profiles is
 # far easier graphically.

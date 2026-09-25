@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/scenarios/typing-latency.sh — input → pixel latency, marspot-only.
 #
-# Why this scenario exists: .claude/docs-archive/docs/bench.md records typing-latency as a
+# Why this scenario exists: the bench notes record typing-latency as a
 # marspot-internal metric.  No way to measure the same property in iTerm2
 # / Warp / Terminal.app without external screen capture or hardware
 # camera, so this is purely longitudinal marspot-vs-marspot regression.

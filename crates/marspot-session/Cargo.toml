@@ -11,7 +11,7 @@ publish = false
 # Metal/AppKit/CoreText. Depends ONLY on the zero-GUI marspot-term
 # engine so it links no GUI frameworks and floors at ~3–5 MB resident.
 # Skeleton today (boot + attach shelld + pump → grid); shm grid publish
-# + L2↔L3 control channel land in later steps. See .claude/docs-archive/docs/per-session-l3.md.
+# + L2↔L3 control channel land in later steps.
 
 [[bin]]
 name = "marspot-session"

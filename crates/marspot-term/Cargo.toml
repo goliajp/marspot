@@ -11,8 +11,7 @@ publish = false
 # scrollback, terminal emulator, PTY, shelld client/protocol, and the
 # pure key→bytes input mapping. Deliberately depends on NOTHING that
 # links AppKit/Metal/CoreText, so a light per-session process (target
-# #4's L3) can link it at a ~3–5 MB resident floor. See
-# .claude/docs-archive/docs/per-session-l3.md.
+# #4's L3) can link it at a ~3–5 MB resident floor.
 [dependencies]
 libc = "0.2"
 # Stone: clickable-span detection (URL/path/email/IP/UUID).  Split
@@ -30,7 +29,7 @@ marspot-linkify = { path = "../marspot-linkify" }
 # whole point. Session opts out via `default-features = false` in its
 # own Cargo.toml; its rotated files stay `.log` (~10× the disk, but a
 # single per-pid file rolling under the same cap → bounded all the same,
-# and GC still expires them by age). See .claude/docs-archive/docs/per-session-l3.md.
+# and GC still expires them by age).
 flate2 = { version = "1.1", optional = true }
 
 [features]

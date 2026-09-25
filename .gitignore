@@ -25,13 +25,6 @@ bench/scenarios/
 bench/results/
 bench/remote-runs/
 
-# Per-session handoff snapshot (managed by /handoff skill, not source).
-.claude/handoff.md
-
-# Per-user Claude Code permission profile — not source.
-.claude/settings.json
-
 # Local credentials — never committed.
 .env.local
 
-.claude/
