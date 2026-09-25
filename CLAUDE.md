@@ -15,7 +15,7 @@ Three layers: L1 `marspot-shell` (`src/bin/marspot-shell/`, window owner + super
 
 ## Sandbox vs installed app — red line
 
-- **Installed app** `~/.local/Marspot.app` is the terminal the user lives in (state `~/Library/Caches/marspot`). Ship into it only with `bin/install-local.sh`: it builds, installs and silent-updates the running app; sessions survive via L3 reattach.
+- **Installed app** `~/.local/Marspot.app` is the terminal the user works in every day (state `~/Library/Caches/marspot`). Ship into it only with `bin/install-local.sh`: it builds, installs and silent-updates the running app; sessions survive via L3 reattach.
 - **Sandbox**: `bin/run.sh`, `bin/test*.sh`, `bin/soak-*.sh` source `bin/_dev-sandbox.sh` (own `MARSPOT_STATE_DIR`, default `/tmp/marspot-dev`). Build, kill, wipe and crash-loop only there. Never hand-roll `pkill marspot` or `rm -rf ~/Library/Caches/marspot`.
 - After a change that affects the app (anything in `src/` or `crates/`, `Cargo.toml` / `Cargo.lock`, shaders, assets), `./bin/run.sh` must pass before calling it done (full log: `build/last-build.log`; perf testing: `--release`).
 
@@ -28,7 +28,7 @@ Three layers: L1 `marspot-shell` (`src/bin/marspot-shell/`, window owner + super
 
 ## Working with the user
 
-No multiple-choice menus at decision points. Once a plan is agreed, keep executing it; at a pause say "next is X, continuing" and do it. If genuinely blocked, say what blocks and stop.
+No multiple-choice menus at decision points. Once a plan is agreed, keep executing it; at a pause say "next is X, continuing" and do it. If blocked, say what blocks and stop.
 
 ## Git
 
@@ -46,11 +46,11 @@ Every commit title is `<scope>: <subject>` with exactly one of:
 
 One commit, one scope — split changes that span two. When ambiguous, prefer the deeper layer (framework → `basic`, business glue → `cc`). An optional `RFC-NNN` tag goes after the scope: `infra: RFC-002 step 8d — ATTACH carries cols/rows`.
 
-## 按需手册(`.claude/runbooks/`)
+## 按需手册（`.claude/runbooks/`）
 
 | 文件 | 什么时候读 |
 |---|---|
-| `gates.md` | 跑或改 bench / fuzz / miri / test / lint-deps;架构评审节奏;沙箱与安装版的完整说明 |
-| `perf-attack.md` | 任何性能攻坚之前(对照对象、mini 才算数、红线优先级;门槛数值读 `bench/baseline.json`) |
+| `gates.md` | 跑或改 bench / fuzz / miri / test / lint-deps；架构评审节奏；沙箱与安装版的完整说明 |
+| `perf-attack.md` | 任何性能优化之前（对照对象、mini 才算数、红线优先级；门槛数值读 `bench/baseline.json`）|
 | `crate-extraction.md` | 想把子系统拆成独立 crate |
-| `architecture-history.md` | 旧架构草图的遗留说明(disk scrollback 开关) |
+| `architecture-history.md` | 旧架构草图的遗留说明（disk scrollback 开关）|
