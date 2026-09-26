@@ -15,8 +15,8 @@ version = 2
 # OR MIT distribution. Trimmed to exactly what current deps need —
 # cargo deny warns on unmatched entries, so this list is also a
 # tripwire when a new dep introduces something unfamiliar (review
-# both that it is OK and that the dep is necessary per CLAUDE.md
-# "Self-build over libraries", then add the license here).
+# both that it is OK and that the dep is necessary under the
+# build-over-depend rule, then add the license here).
 allow = [
   "Apache-2.0",
   "MIT",

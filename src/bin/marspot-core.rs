@@ -396,8 +396,8 @@ const KILL_ESCALATION_GRACE: Duration = Duration::from_secs(2);
 /// Queue one frame for L1, logging if it had to be dropped.
 ///
 /// Six call sites used to inline this `if !send { lx_error!(…) }` block
-/// verbatim, which is three past the point where CLAUDE.md says to
-/// extract.  `which` discriminates them in the log — one event name to
+/// verbatim, which is three past the point where the same pattern
+/// gets extracted.  `which` discriminates them in the log — one event name to
 /// grep for, a field to tell them apart, rather than six near-identical
 /// names.
 fn send_to_shell(

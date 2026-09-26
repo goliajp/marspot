@@ -25,7 +25,7 @@
 //!   producer blocks on `send` and the backpressure propagates the way
 //!   it always did (through the pty's own queue to the child).  A pane
 //!   that writes faster than its disk forever is slower, never fatter —
-//!   the "cannot get slower the longer it runs" rule in CLAUDE.md.
+//!   the "cannot get slower the longer it runs" rule.
 //! * **`flush()` is a barrier, not a hint.**  Callers that are about to
 //!   read the file back (cold scrollback reads, handoff before
 //!   `execv`) need the bytes to be *there*, so `flush` waits for the

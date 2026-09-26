@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # bin/scenarios/idle-9x.sh — 9 idle sessions, sustained sampling.
 #
-# Why this scenario exists: CLAUDE.md's #3 architectural commitment is
-# "cannot get slower the longer it runs."  For multi-session
+# Why this scenario exists: the project cannot get slower the longer
+# it runs.  For multi-session
 # Claude-Code work the user keeps 9 terminals open all day; if RSS
 # creeps, CPU at idle isn't 0, or disk grows without bound, the
 # product fails its core promise.
@@ -11,7 +11,7 @@
 # the configured duration (default 5 min, --extended for 30 min).
 # Pass / fail derived from the slope.
 #
-# Hard rules from CLAUDE.md:
+# Hard rules:
 #   - idle CPU must be ~0 % (no animation timers, no busy waits)
 #   - RSS at end must not exceed RSS at start × 1.10
 #   - disk usage must not grow (or, where disk is intentional like
@@ -207,7 +207,7 @@ first_mean = statistics.mean(first_q) if first_q else 0
 last_mean  = statistics.mean(last_q) if last_q else 0
 drift_ratio = (last_mean / first_mean) if first_mean > 0 else None
 
-idle_cpu_pass = max(cpu) < 5.0  # CLAUDE.md says ~0 %; allow 5 % as tolerance
+idle_cpu_pass = max(cpu) < 5.0  # the bar is ~0 %; allow 5 % as tolerance
 no_drift_pass = drift_ratio is None or drift_ratio <= 1.10
 
 result = {

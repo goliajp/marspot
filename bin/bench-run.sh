@@ -21,8 +21,8 @@
 #     Pre-release / nightly soak.  idle-9x runs 30 min instead of
 #     5 min (catches CPU / RSS drift that only shows past the
 #     5 min sample window).  Run before declaring a release or as
-#     a scheduled nightly to keep CLAUDE.md's "cannot get slower
-#     the longer it runs" honest at the timescale that matters.
+#     a scheduled nightly to keep "cannot get slower the longer it
+#     runs" honest at the timescale that matters.
 #
 # Outputs:
 #   bench/results/<runid>.json       full snapshot of this run

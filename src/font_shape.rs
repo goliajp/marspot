@@ -243,7 +243,7 @@ struct ShapeEntry {
 ///
 /// `cap = 1024` covers a few hundred unique chrome strings per
 /// session × ~3 size+font combinations, with headroom; bounded
-/// forever per CLAUDE.md.  On overflow the least-recently-used entry
+/// forever.  On overflow the least-recently-used entry
 /// goes; re-shape happens transparently on next access.
 ///
 /// Recency is a counter stamp on each entry, not a `VecDeque<key>`

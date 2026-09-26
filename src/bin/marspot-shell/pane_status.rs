@@ -99,7 +99,7 @@ type ByteFile = HashMap<u64, u64>;
 /// Bounded by construction: every sweep drops machines for sessions
 /// the registry no longer lists, so a closed pane is forgotten on the
 /// next tick rather than accumulating for the life of the shell
-/// (CLAUDE.md §3).
+/// (bounded growth).
 pub struct PaneStateTracker {
     machines: HashMap<u64, PaneMachine>,
     /// `sid → (bytelog size, when it last changed)`.  The pane's own

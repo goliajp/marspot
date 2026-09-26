@@ -126,7 +126,7 @@ pub struct LocalSession {
 /// frame.  That is tens to hundreds of kilobytes, several times over.
 ///
 /// So the cap is sized for the wake, not the park: it is here to stop
-/// unbounded growth (CLAUDE.md §3: every queue is bounded), not to
+/// unbounded growth (every queue is bounded), not to
 /// second-guess a repaint.  Tripping it drops the freeze mid-paint,
 /// which is exactly the flash the freeze exists to prevent — hence the
 /// headroom, and hence the log line when it happens.

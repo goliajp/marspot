@@ -1013,7 +1013,7 @@ impl<T: crate::plugins::PluginHost + ?Sized> OpHost for T {
 /// A pane is a single-threaded thing — one program, one keyboard — so
 /// the queue exists to serialise, not to buffer.  Anything past this is
 /// a caller in a loop, and dropping the newest with a loud line is a
-/// better failure than growing forever (CLAUDE.md §3).
+/// better failure than growing forever.
 const MAX_QUEUED_PER_PANE: usize = 8;
 
 /// The entry point for "do something to a pane".
@@ -1623,7 +1623,7 @@ mod tests {
     /// `on_tick` rides the redraw pump — 16 ms while anything is
     /// drawing — and the step that waits for the user can hold for
     /// hours.  A wire frame per pane per tick for a pane that is doing
-    /// nothing is the definition of background creep (CLAUDE.md §3);
+    /// nothing is the definition of background creep;
     /// the hand-written version this replaced had an 8-second throttle
     /// for exactly this reason, and the move to scripts lost it.
     #[test]

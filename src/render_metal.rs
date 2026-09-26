@@ -12,7 +12,7 @@
 //!    render pass.  Proves the Metal pipeline runs end-to-end inside
 //!    marspot without disturbing the AppKit renderer.
 //! 2. **Glyph atlas** — CoreText-rasterise glyphs into an MTLTexture,
-//!    LRU-evict per CLAUDE.md "bounded growth".
+//!    LRU-evict to keep growth bounded.
 //! 3. **BG pass** — instanced coloured quads, one per cell.
 //! 4. **FG pass** — textured glyph quads sampling the atlas.
 //! 5. **Integration** — wire to the terminal grid; A/B against
@@ -5927,7 +5927,7 @@ fn push_session(
 ///
 /// Every pass allocates a *fresh* `MTLBuffer` for its instances on
 /// every frame — several megabytes a frame across the passes — which
-/// is exactly what `CLAUDE.md` says a per-frame hot path must not do.
+/// is exactly what a per-frame hot path must not do.
 /// Whether that is what the real machine's 100–220 ms `encode` is
 /// made of, though, is a question for a number, not for a reading of
 /// the code: these two counters are that number.
@@ -5959,7 +5959,7 @@ pub fn take_instance_buffer_cost() -> (u64, u64) {
 /// `StorageModeShared` means `contents()` is CPU-writable, and the
 /// capacity only ever grows — rounded up to a power of two so growth
 /// stops happening after the first few frames.  Steady state performs
-/// no allocation at all, which is what `CLAUDE.md` asks of a
+/// no allocation at all, which is what is asked of a
 /// per-frame path in the first place.
 ///
 /// **Safety contract**: refilling in place is only sound if the GPU

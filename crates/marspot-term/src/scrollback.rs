@@ -1296,7 +1296,7 @@ impl FileScrollback {
         // Straight into the ring.  This used to go through
         // `pad_or_clip`, which returns a `Vec` — one allocation and one
         // extra copy of the row, per pushed line, on the parse thread.
-        // CLAUDE.md's rule for hot paths is zero allocations; a bulk
+        // The rule for hot paths is zero allocations; a bulk
         // `cat` pushes a quarter of a million lines through here.
         let cols = self.cols;
         let take = line.len().min(cols);

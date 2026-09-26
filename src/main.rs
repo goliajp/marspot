@@ -2346,7 +2346,7 @@ fn demo_process_panel(
 // libc 0.2 deprecates its mach bindings (both `mach_task_self()` the
 // function and `mach_task_self_` the static) in favour of the `mach2`
 // crate.  Adding a new FFI dep just to silence the warning would
-// violate CLAUDE.md's self-build principle for a static that is
+// violate the build-over-depend principle for a static that is
 // still fully functional — accept the deprecation locally instead.
 #[allow(deprecated)]
 fn read_self_rss_kib() -> usize {

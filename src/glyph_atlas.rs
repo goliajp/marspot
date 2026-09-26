@@ -24,7 +24,7 @@
 //! printable ASCII fit in <100 KiB of atlas.  Shelves are simpler to
 //! reason about.
 //!
-//! ## Eviction (CLAUDE.md "bounded growth")
+//! ## Eviction (bounded growth)
 //!
 //! When `place()` can't fit a new glyph, `get_or_rasterize` does an
 //! **atomic rebuild**: drops every shelf + clears the cache, then

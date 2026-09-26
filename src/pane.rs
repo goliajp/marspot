@@ -1360,7 +1360,7 @@ pub struct Pane {
 /// clock, sampled when a frame is being built anyway, and it *ends* —
 /// once the target is reached nothing here asks for another frame, and
 /// the window goes back to drawing only when something changes
-/// (CLAUDE.md: idle CPU must be ~0 %, no animation timers).
+/// (idle CPU must be ~0 %, no animation timers).
 #[derive(Debug, Clone, Copy)]
 pub struct ScrimFade {
     from: f32,
@@ -1453,9 +1453,9 @@ mod scrim_fade_tests {
         assert_eq!(f.value(t0 + SCRIM_FADE * 3), 0.5, "and stays");
     }
 
-    /// **The animation has to end.**  Idle CPU is a hard constraint
-    /// (CLAUDE.md §2): a fade that kept reporting "still moving" would
-    /// hold the render loop awake for the life of the process.
+    /// **The animation has to end.**  Idle CPU is a hard constraint: a
+    /// fade that kept reporting "still moving" would hold the render
+    /// loop awake for the life of the process.
     #[test]
     fn a_fade_stops_asking_for_frames() {
         let t0 = Instant::now();
