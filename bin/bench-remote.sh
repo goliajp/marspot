@@ -121,7 +121,7 @@ rsync -a --delete --quiet \
   --exclude '/bench/results/' \
   --exclude '/bench/scenarios/*.bin' \
   --exclude '.DS_Store' \
-  --exclude '/.claude/settings.json' \
+  --exclude-from="$HOME/.config/git/ignore" \
   "$ROOT/" "$HOST:$REMOTE_DIR/"
 
 # ---- run -------------------------------------------------------------

@@ -48,7 +48,7 @@ const MAGIC: u32 = 0x4d_53_47_31; // "MSG1"
 // saw `wrapped = false`, breaking cross-row URL/path detection.
 //
 // Forward-compat upgrade path (added 2026-06-17 after Amendment 16
-// install fallout — see CLAUDE memory "wire upgrade silent + lossless"):
+// install fallout):
 // `from_fd` accepts both v2 and v3 regions.  A v2 region is upgraded
 // in place — ftruncate to v3 capacity, zero the wrapped area, then
 // atomic-bump header.version to 3.  After upgrade every subsequent

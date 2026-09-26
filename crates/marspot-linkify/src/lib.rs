@@ -2815,7 +2815,7 @@ mod tests {
         // the wrong reason.  A dotted directory supplies exactly that
         // — which is why the report ended at `…/spg/`.
         let root = std::env::temp_dir().join(format!("marspot-seam-{}", std::process::id()));
-        let deep = root.join(".claude").join("notes");
+        let deep = root.join(".notes").join("docs");
         std::fs::create_dir_all(&deep).unwrap();
         let file = deep.join("probe.sh");
         std::fs::write(&file, b"x").unwrap();
@@ -2997,7 +2997,7 @@ mod tests {
     #[test]
     fn a_file_url_is_one_link_including_its_scheme() {
         let root = std::env::temp_dir().join(format!("marspot-fileurl-{}", std::process::id()));
-        let deep = root.join(".claude");
+        let deep = root.join(".notes");
         std::fs::create_dir_all(&deep).unwrap();
         let f = deep.join("paper1-discovers.html");
         std::fs::write(&f, b"x").unwrap();
@@ -3425,7 +3425,7 @@ mod tests {
     fn a_dotted_directory_component_does_not_truncate_the_path() {
         let root = std::env::temp_dir()
             .join(format!("marspot-linkify-dotdir-{}", std::process::id()));
-        let deep = root.join(".claude").join("notes");
+        let deep = root.join(".notes").join("docs");
         std::fs::create_dir_all(&deep).unwrap();
         let file = deep.join("provenance-exec-tax-2026-09-04.md");
         std::fs::write(&file, b"x").unwrap();
@@ -3780,7 +3780,7 @@ mod tests {
     fn a_wrapped_path_with_an_em_dash_gloss_is_one_link() {
         let dir = std::env::temp_dir()
             .join(format!("marspot-linkify-emdash-wrap-{}", std::process::id()))
-            .join(".claude");
+            .join(".notes");
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("paper1-discovers.html");
         std::fs::write(&p, b"x").unwrap();

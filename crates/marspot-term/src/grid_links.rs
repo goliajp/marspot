@@ -106,7 +106,7 @@ mod grid_tests {
         use crate::terminal::Terminal;
         let root =
             std::env::temp_dir().join(format!("marspot-gridlinks-caret-{}", std::process::id()));
-        let deep = root.join(".claude").join("notes");
+        let deep = root.join(".notes").join("docs");
         std::fs::create_dir_all(&deep).unwrap();
         let file = deep.join("probe.sh");
         std::fs::write(&file, b"x").unwrap();
@@ -145,7 +145,7 @@ mod grid_tests {
         use crate::terminal::Terminal;
         let root =
             std::env::temp_dir().join(format!("marspot-gridlinks-shapes-{}", std::process::id()));
-        let deep = root.join(".claude").join("notes");
+        let deep = root.join(".notes").join("docs");
         std::fs::create_dir_all(&deep).unwrap();
         let file = deep.join("provenance-probe.sh");
         std::fs::write(&file, b"x").unwrap();
