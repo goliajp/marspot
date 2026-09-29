@@ -1,0 +1,4729 @@
+//! marspot-linkify — clickable-span detection over a terminal cell
+//! surface (stone tier; see the crate manifest for scope).
+//!
+//! Input comes exclusively through [`CellSource`]; output is
+//! [`LinkRange`]s in viewport coordinates.  Detection is
+//! deliberately conservative — false negatives beat false positives
+//! (a wrongly-underlined `cargo/Cargo.toml` is a daily annoyance; a
+//! missed link costs one manual copy).  For `File` spans a `stat()`
+//! (with a small TTL cache) arbitrates; URLs are structurally
+//! validated instead.
+
+use std::path::PathBuf;
+
+/// The cell surface a scan reads.  Coordinates are viewport-local
+/// (`0..cols() × 0..rows()`).  Implementors decide what a "row" is —
+/// marspot hands in its grid at a scrollback view offset; a test
+/// hands in a `Vec` of strings.
+pub trait CellSource {
+    fn cols(&self) -> u16;
+    fn rows(&self) -> u16;
+    /// Character at (col, row).  `'\0'` marks both genuinely empty
+    /// cells and the trailing filler cell of a wide (2-column)
+    /// character; [`CellSource::is_wide`] on the PRECEDING char
+    /// disambiguates.
+    fn char_at(&self, col: u16, row: u16) -> char;
+    /// Is `row` a soft-wrap (DECAWM) continuation of the row above?
+    fn is_soft_wrap_continuation(&self, row: u16) -> bool;
+    /// Cursor position `(col, row)` — anchors the input-box
+    /// exemption (a box containing the caret is an active composer).
+    fn cursor(&self) -> (u16, u16);
+    /// Does `ch` occupy two columns on this surface?
+    fn is_wide(&self, ch: char) -> bool;
+}
+
+/// Five flavours the scanner recognises.  Render attaches a colour
+/// per kind; the click handler dispatches per kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkKind {
+    /// `http://` or `https://` URL.
+    Url,
+    /// Absolute path (`/...`) or home-relative path (`~/...`).
+    File,
+    /// `name@host.tld` — Cmd-click sends `mailto:` to `open(1)`.
+    Email,
+    /// Bare IPv4 or IPv6 (with optional `:port` / `/path` for IPv4,
+    /// or bracketed form for IPv6).  Cmd-click prepends `http://`
+    /// (defaults to port 80).  Primary intent is copy-friendly
+    /// identification — a URL with `http://` prefix always wins over
+    /// this because the URL scanner runs first.
+    Ip,
+    /// Canonical UUID `8-4-4-4-12` hex.  Copy-only in the menu — a
+    /// UUID isn't openable, but it's the token you most often want
+    /// off a log line.
+    Uuid,
+}
+
+/// One detected span on a viewport row.  Coordinates are
+/// **viewport-local** (0..rows × 0..cols), col_end is **inclusive**.
+#[derive(Clone, Debug)]
+pub struct LinkRange {
+    pub row: u16,
+    pub col_start: u16,
+    pub col_end: u16,
+    pub kind: LinkKind,
+    /// The raw text covered by the span — saved here so the click
+    /// dispatcher doesn't have to re-scan the grid.  Owned.
+    pub text: String,
+    /// What the span actually names, when that is not what is drawn.
+    ///
+    /// A relative path is written `src/main.rs` and means
+    /// `<cwd>/src/main.rs`; the underline has to cover the four
+    /// characters the user can see, and Open / Copy have to act on the
+    /// file.  `None` when the two are the same.
+    pub target: Option<String>,
+}
+
+/// Options that tune `scan_visible_links` for the calling pane.  All
+/// fields default to off so the existing call path stays opt-in.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct ScanOpts<'a> {
+    /// The pane's working directory, when it is known.  Without it a
+    /// relative path cannot be resolved and none are matched — a bare
+    /// `src/main.rs` names nothing on its own.
+    pub cwd: Option<&'a str>,
+    /// Fixed-width TUIs (claude code and friends) render to a fixed
+    /// inner width and hard-newline long URLs / paths with a small
+    /// hanging indent on the next row.  When set, the line builder
+    /// detects that pattern (prev row ends at/near the right edge
+    /// with a URL/path-class char; this row starts after ≤ 4 leading
+    /// spaces with a URL/path-class char) and treats it as a
+    /// soft-wrap continuation — the leading indent is stripped so
+    /// the pattern scan sees one contiguous token.  Also enables the
+    /// input-box exemption (rows inside the bottom-most rounded box
+    /// that looks like an active composer are not scanned).
+    pub tui_mode: bool,
+}
+
+/// Walk the visible grid and return every detected span.  Empty grid
+/// → empty Vec.  Allocations: one Vec, one per-row scratch String
+/// (reused).
+///
+/// DECAWM soft-wrap handling: consecutive rows where `wrapped_at_view`
+/// flags the lower one as a continuation are joined into one
+/// **logical line** before pattern scanning, so a URL or path that
+/// overflowed the right edge is matched as a single token instead of
+/// being silently truncated at the wrap.  Matches that span multiple
+/// physical rows are emitted as separate `LinkRange`s (one per row
+/// segment) carrying the SAME `text` — the click dispatcher fires the
+/// same action regardless of which segment received the click, and
+/// the renderer underlines each segment in place.
+///
+/// cc-mode hard-wrap merge: when `opts.tui_mode` is set, an additional
+/// row-pair heuristic catches claudecode's fixed-width hard newlines
+/// (see `ScanOpts::cc_mode`).  Continuation rows have their leading
+/// hanging-indent cells stripped from the logical line so the URL /
+/// path regex isn't broken by the indent's whitespace.
+///
+/// cc-mode input-box exemption: also when `opts.tui_mode` is set, rows
+/// belonging to claudecode's bottom-most rounded box (`╭…╮` / `╰…╯`,
+/// inclusive) are excluded from scanning entirely.  Mid-typing text
+/// in the composer shouldn't flash underlined as the user types a
+/// partial URL / path, and right-clicks in the composer shouldn't
+/// hit a link menu.  The exemption is structural (based on grid
+/// content), so it's inert on non-claudecode grids.
+pub fn scan_visible_links<S: CellSource>(src: &S, opts: ScanOpts) -> Vec<LinkRange> {
+    scan_visible_links_with(src, opts, &FsOracle)
+}
+
+/// [`scan_visible_links`] with an explicit path oracle.  The render
+/// loop uses this with an async, cached oracle so the scan never
+/// blocks on the filesystem; everything else can keep the blocking
+/// default.
+pub fn scan_visible_links_with<S: CellSource>(
+    src: &S,
+    opts: ScanOpts,
+    oracle: &dyn PathOracle,
+) -> Vec<LinkRange> {
+    let mut out = Vec::new();
+    let rows = src.rows();
+    let cols = src.cols();
+    if rows == 0 || cols == 0 {
+        return out;
+    }
+    let exempt_range: Option<(u16, u16)> = if opts.tui_mode {
+        find_input_box_rows(src, rows, cols)
+    } else {
+        None
+    };
+    // Per-frame allocation hot-path note: `scan_visible_links` is
+    // called once per pane per render frame.  An earlier version
+    // built a per-line `String` and `Vec<char>::from_iter`'d it
+    // inside `scan_line_into_matches` — profiling on a 9-pane setup
+    // (samply 15 s while typing) showed ~95 % of the main-thread
+    // non-idle time inside `Vec::<char>::from_iter → realloc`
+    // chains from that path, manifesting as input latency.  The
+    // current shape allocates one `chars` buffer up front and
+    // reuses it across every logical-line scan within this call —
+    // amortised allocs per frame ≈ 1 vs O(logical-lines × panes).
+    //
+    // Wide-char (CJK / fullwidth / emoji) trail-half cells carry
+    // NUL as a sentinel.  We DROP them entirely from `chars` (the
+    // lead cell already contributes the codepoint) — otherwise the
+    // terminator scan would hit the trail's NUL-as-space and cut
+    // every link the moment it crossed a wide char (e.g. paths like
+    // `~/Downloads/決算明細_2025-2026.xlsx`).  A parallel `col_map`
+    // tracks each kept char's physical column so `locate()` can
+    // still project char_pos → (phys_row, col) for hit-test +
+    // multi-row emit.  Empty cells (genuine blanks, never a wide
+    // lead's trailer) still push as ' ' — they're terminators.
+    // In cc-mode a continuation row may contribute fewer than `cols`
+    // chars when its leading hanging-indent is stripped — segment
+    // bookkeeping tracks the stripped col count so `emit_match()`
+    // still picks the right starting col for multi-row spans.
+    let line_cap = cols as usize * rows as usize;
+    let mut chars: Vec<char> = Vec::with_capacity(line_cap);
+    let mut col_map: Vec<u16> = Vec::with_capacity(line_cap);
+    let mut segments: Vec<LineSegment> = Vec::with_capacity(8);
+    let mut char_offset: usize = 0;
+    // Vertical rules seen while walking, for the table-cell pass
+    // below.  Collected here rather than in a sweep of its own: this
+    // loop already reads every cell once, and a second full pass over
+    // the grid per pane per frame is exactly the kind of cost this
+    // scanner has been profiled to avoid.  Empty on prose.
+    let mut rule_cols: Vec<(u16, u16)> = Vec::new();
+    for r in 0..rows {
+        // Rows inside the claudecode composer box are hard-skipped:
+        // flush any in-flight logical line above, then jump past this
+        // row without contributing any chars.  The `chars`/`col_map`/
+        // `segments` buffers are cleared so the row after the box
+        // starts a fresh line, not a phantom continuation.
+        if let Some((lo, hi)) = exempt_range {
+            if r >= lo && r <= hi {
+                if !segments.is_empty() {
+                    scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle, opts.cwd);
+                    chars.clear();
+                    col_map.clear();
+                    segments.clear();
+                    char_offset = 0;
+                }
+                continue;
+            }
+        }
+        let decawm_cont = r > 0 && src.is_soft_wrap_continuation(r);
+        let cc_cont = !decawm_cont
+            && r > 0
+            && opts.tui_mode
+            && is_hard_wrap_continuation(src, r - 1, r, cols);
+        let is_continuation = decawm_cont || cc_cont;
+        if !is_continuation && !segments.is_empty() {
+            scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle, opts.cwd);
+            chars.clear();
+            col_map.clear();
+            segments.clear();
+            char_offset = 0;
+        }
+        // A cc hard-wrap continuation glues to the PREVIOUS row's
+        // last content cell — the trailing blank cells between that
+        // cell and the pane edge are rendering padding, not text.
+        // Left in the buffer they terminate the merged token at the
+        // seam (the whole point of merging was to cross it).
+        if cc_cont {
+            while chars.last() == Some(&' ') {
+                chars.pop();
+                col_map.pop();
+            }
+            char_offset = chars.len();
+        }
+        let col_skip = if cc_cont {
+            count_leading_ws(src, r, cols)
+        } else {
+            0
+        };
+        segments.push(LineSegment {
+            phys_row: r,
+            char_offset,
+            cc_zero_indent: cc_cont && col_skip == 0,
+            cc_seam: cc_cont,
+        });
+        let mut prev_was_wide = false;
+        for c in col_skip..cols {
+            let ch = src.char_at(c, r);
+            if prev_was_wide && ch == '\0' {
+                // Trail half of the previous wide char — already
+                // represented by the lead's codepoint; skip.
+                prev_was_wide = false;
+                continue;
+            }
+            let pushed = if ch == '\0' || ch == ' ' { ' ' } else { ch };
+            if opts.tui_mode && is_vertical_rule(pushed) {
+                rule_cols.push((r, c));
+            }
+            chars.push(pushed);
+            col_map.push(c);
+            prev_was_wide = ch != '\0' && src.is_wide(ch);
+        }
+        char_offset = chars.len();
+    }
+    if !segments.is_empty() {
+        scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle, opts.cwd);
+    }
+    if opts.tui_mode && rule_cols.len() >= 4 {
+        let before = out.len();
+        scan_table_cells(src, cols, &rule_cols, &mut out, oracle, opts.cwd);
+        // Nothing crossed a cell boundary — leave the row pass's
+        // output exactly as it was, sort and all.
+        if out.len() != before {
+            drop_shadowed_ranges(&mut out);
+        }
+    }
+    out
+}
+
+/// cc hard-wrap heuristic: does `r` look like a continuation of the
+/// URL/path that the previous row was rendering?  A false negative
+/// leaves the URL split as today.  A false positive is USUALLY
+/// harmless (the pattern scan just won't match) — except for
+/// filesystem paths, where the glued next-row word breaks the stat
+/// check on an otherwise-valid single-row path;
+/// `retry_file_at_segment_boundaries` recovers that case at emit
+/// time.
+///
+///   - previous row's last non-blank cell column ≥ cols - 2 (touches
+///     or near the right edge — claudecode hard-wraps flush right)
+///   - that last non-blank cell's char is URL/path-class
+///   - current row has 0..=4 leading whitespace cells; ZERO indent
+///     (claudecode's input box char-wraps long tokens mid-word with
+///     no hanging indent) additionally requires the previous row to
+///     be COMPLETELY full — a mid-word char wrap always occupies the
+///     last column
+///   - current row's first non-blank cell's char is URL/path-class
+fn is_hard_wrap_continuation<S: CellSource>(
+    src: &S,
+    prev_row: u16,
+    curr_row: u16,
+    cols: u16,
+) -> bool {
+    // The whole row is the band: content spans 0..cols.
+    is_hard_wrap_continuation_in(src, prev_row, curr_row, 0, cols)
+}
+
+/// The same heuristic over an arbitrary column band `left..right`.
+///
+/// A table cell is a band whose edges are the cell's borders rather
+/// than the pane's, and everything the heuristic asks — "did the
+/// previous row run out of room?", "does this row take up where it
+/// left off?" — is asked of those edges instead.  The full-row form
+/// above is the `0..cols` case of exactly this.
+fn is_hard_wrap_continuation_in<S: CellSource>(
+    src: &S,
+    prev_row: u16,
+    curr_row: u16,
+    left: u16,
+    right: u16,
+) -> bool {
+    if right < left + 2 {
+        return false;
+    }
+    let cols = right;
+    let mut last_nb_col: Option<u16> = None;
+    let mut last_nb_ch = ' ';
+    for c in (left..right).rev() {
+        let ch = src.char_at(c, prev_row);
+        if ch != '\0' && ch != ' ' {
+            last_nb_col = Some(c);
+            last_nb_ch = ch;
+            break;
+        }
+    }
+    let last_nb_col = match last_nb_col {
+        Some(c) => c,
+        None => return false,
+    };
+    // Flush requirement: within 2 cols of the right edge — except a
+    // `/`-ending row, which relaxes to 8 cols.  claudecode's `⎿ `
+    // indent blocks wrap paths at a fixed CONTENT width a few cells
+    // short of the pane edge, so a wrapped path's first row never
+    // passed the strict test and the path stayed split (2026-07-18
+    // field report).  A prose row ending in `/` is rare enough that
+    // the wider window stays conservative; File candidates keep the
+    // stat + boundary-retry arbitration either way.
+    // Does the row end in the middle of a *path*?  Walk back over the
+    // trailing url/path-class run and look for a separator: a token
+    // carrying `/` that runs to the end of the row is a path the
+    // renderer cut, not a word that happened to finish there.
+    //
+    // This is the same observation the `/`-ending case above was
+    // built on, generalised.  That one only caught a break landing
+    // exactly on a separator; a break one character later — inside
+    // `…-e18-ve` / `rdict.md` — fell back to 2 cells of slack, missed
+    // by one, and the link stopped at the last directory that
+    // happened to exist on disk (2026-08-16 field report).  Which
+    // character the wrap lands on is not something the path controls.
+    let trailing_is_path = {
+        let mut c = last_nb_col;
+        let mut has_sep = false;
+        loop {
+            let ch = src.char_at(c, prev_row);
+            if !is_url_path_class(ch) {
+                break;
+            }
+            if ch == '/' {
+                has_sep = true;
+                break;
+            }
+            if c == left {
+                break;
+            }
+            c -= 1;
+        }
+        has_sep
+    };
+    // How far short of the edge the previous row may stop.
+    //
+    // claudecode does not wrap at the pane edge: it wraps at its own
+    // CONTENT width, which sits an indent inside and differs per block
+    // (`⏺`, `⎿ `, plain prose).  A fixed 8 was measured off one block
+    // and lands exactly on the boundary for another — a 73-col pane
+    // wrapping a path at column 65 missed by ONE cell, and the link
+    // stopped at `…/lab36-continus/` (2026-09-06 field report).
+    //
+    // Stop guessing at the geometry.  A trailing token that carries a
+    // `/` is a strong signal on its own, and a File match still has to
+    // survive `stat`, with the seam offered as a candidate end if the
+    // join was wrong.  Prose keeps the tight bound.
+    let flush_slack: u16 = if last_nb_ch == '/' || trailing_is_path {
+        cols / 3
+    } else {
+        2
+    };
+    if last_nb_col < cols.saturating_sub(flush_slack) {
+        return false;
+    }
+    if !is_url_path_class(last_nb_ch) {
+        return false;
+    }
+    // Current row leading whitespace, followed by a URL/path-class
+    // char.  Zero indent is the weakest signal (flush prose looks the
+    // same) — only accept it when the prev row is COMPLETELY full, as
+    // a mid-word char wrap must be.
+    let mut lead = left;
+    while lead < right {
+        let ch = src.char_at(lead, curr_row);
+        if ch == ' ' || ch == '\0' {
+            lead += 1;
+        } else {
+            break;
+        }
+    }
+    // How far the continuation may hang.
+    //
+    // 4 was measured off claudecode's prose blocks.  Its `⎿` result
+    // blocks hang at FIVE (`  ⎿  ` is two spaces, the glyph, two
+    // spaces), and every path they wrapped was missed by exactly one
+    // cell — the link stopped at the last directory that happened to
+    // exist, `…/lab36-continus/` again (2026-09-08 field report, the
+    // third time that same directory has been the visible symptom).
+    //
+    // Counted off five live sessions' bytelogs, over every wrap whose
+    // previous row ends inside a path token (`\r ESC[nC ESC[1B`,
+    // n = 17,991): indent 0 → 43.9 %, 2 → 20.1 %, **5 → 27.8 %**,
+    // 7 → 2.5 %, 4 → 2.1 %, 6 → 1.4 %, 8 → 0.2 %.  Through 8 that is
+    // 98.2 % of them; what is left starts at 9 and is dominated by 37,
+    // which is column alignment inside a two-column block, not a
+    // hanging wrap.
+    //
+    // Widened only for a path-carrying tail — the same trade
+    // `flush_slack` above already makes.  A wrong join costs a File
+    // match nothing: the merged span fails `stat` and the seam is
+    // offered as a candidate end, while `cc_zero_indent` keeps URL and
+    // Email matches from crossing the join at all.  Prose keeps 4,
+    // where a wrong join has no `stat` to arbitrate it.
+    let max_indent: u16 = if trailing_is_path { 8 } else { 4 };
+    if lead - left > max_indent {
+        return false;
+    }
+    // Zero indent is the weakest signal — flush prose looks identical —
+    // so it used to demand the previous row be COMPLETELY full, as a
+    // mid-word character wrap would be.  claudecode's zero-indent
+    // continuations are mid-word wraps at its content width, not the
+    // pane edge, so that demand never held for them.  Require the same
+    // path-carrying tail instead: `cc_zero_indent` already forbids URL
+    // and Email matches from crossing this join, leaving File matches,
+    // which `stat` arbitrates.
+    if lead == left && last_nb_col != right - 1 && !trailing_is_path {
+        return false;
+    }
+    if lead >= right {
+        return false;
+    }
+    // A wrap cuts a token in half, so the row below opens with the
+    // REST of that token.  A lone `-` / `*` / `1.` followed by a
+    // blank is not a token tail — it is a list marker the renderer
+    // put there.  Geometry cannot see the difference (a nested list
+    // item carries the same 1..=4 cell indent a hanging wrap does,
+    // and the item above can end flush at the edge on a path char),
+    // and joining a marker can only ever bolt one punctuation char
+    // onto the row above: the 2026-08-18 field report was a bullet's
+    // URL coming out as `…/village/index-`, having swallowed the `-`
+    // that opened the NEXT bullet.
+    if starts_list_marker(src, curr_row, lead, right) {
+        return false;
+    }
+    let first = src.char_at(lead, curr_row);
+    is_url_path_class(first)
+}
+
+/// Does `row` open a list item at `from` — a bullet (`-`, `*`, `+`,
+/// `>`, …) or an ordered marker (`1.`, `2)`) standing alone before a
+/// blank?  Anything longer than a marker, or not followed by a
+/// blank, is ordinary text: a wrapped token resumes as one run of
+/// characters, it does not spell a one-character word.
+fn starts_list_marker<S: CellSource>(src: &S, row: u16, from: u16, right: u16) -> bool {
+    let mut tok = ['\0'; 6];
+    let mut n = 0usize;
+    let mut c = from;
+    while c < right && n < tok.len() {
+        let ch = src.char_at(c, row);
+        if ch == ' ' || ch == '\0' {
+            break;
+        }
+        tok[n] = ch;
+        n += 1;
+        c += 1;
+    }
+    // Ran to the buffer's end without hitting a blank — too long to
+    // be a marker, and the cell after `c` was never examined.
+    if n == 0 || n == tok.len() {
+        return false;
+    }
+    if n == 1 {
+        return !tok[0].is_alphanumeric();
+    }
+    tok[..n - 1].iter().all(|c| c.is_ascii_digit()) && matches!(tok[n - 1], '.' | ')')
+}
+
+/// The horizontal rules a table draws between its rows.  A row made
+/// only of these (plus the junctions and blanks) separates two table
+/// rows, so text above it and text below it belong to different cells
+/// however aligned they look.
+fn is_horizontal_rule(c: char) -> bool {
+    matches!(c, '\u{2500}' | '\u{2501}' | '\u{2550}' | '\u{253C}' | '\u{254B}'
+                | '\u{252C}' | '\u{2534}' | '\u{251C}' | '\u{2524}' | '\u{256A}'
+                | '\u{256C}' | '\u{2566}' | '\u{2569}' | '\u{2560}' | '\u{2563}'
+                | '\u{250C}' | '\u{2510}' | '\u{2514}' | '\u{2518}'
+                | '\u{256D}' | '\u{256E}' | '\u{256F}' | '\u{2570}' | '-' | '=')
+        || is_vertical_rule(c)
+}
+
+/// Is this row a separator between two table rows?
+fn is_rule_row<S: CellSource>(src: &S, row: u16, left: u16, right: u16) -> bool {
+    let mut saw_rule = false;
+    for c in left..right {
+        let ch = src.char_at(c, row);
+        if ch == ' ' || ch == '\0' {
+            continue;
+        }
+        if !is_horizontal_rule(ch) {
+            return false;
+        }
+        saw_rule = true;
+    }
+    saw_rule
+}
+
+/// Does this row's cell start a fresh link rather than continue one?
+///
+/// The geometry test cannot tell "the cell wrapped mid-token" from
+/// "the next table row's cell happens to be flush too" — a column
+/// sized by its longest URL makes every row look full.  A scheme
+/// (`https://`, `file://`, …) at the start of the continuation is the
+/// giveaway: wrapped text resumes mid-token, it does not begin a new
+/// address.
+fn starts_new_scheme<S: CellSource>(src: &S, row: u16, from: u16, right: u16) -> bool {
+    let mut seen = 0usize;
+    let mut buf = ['\0'; 10];
+    let mut c = from;
+    while c < right && seen < buf.len() {
+        let ch = src.char_at(c, row);
+        if ch == '\0' || (ch == ' ' && seen == 0) {
+            c += 1;
+            continue;
+        }
+        buf[seen] = ch;
+        seen += 1;
+        c += 1;
+    }
+    let head: String = buf[..seen].iter().collect();
+    let Some(pos) = head.find("://") else { return false };
+    pos > 0 && head[..pos].chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '.' || c == '-')
+}
+
+/// Vertical rules a table draws between its cells.  Box-drawing light
+/// / heavy / double, plus the ASCII pipe that markdown renderers and
+/// `column -t` emit.
+fn is_vertical_rule(c: char) -> bool {
+    matches!(c, '\u{2502}' | '\u{2503}' | '\u{2506}' | '\u{2507}'
+                | '\u{250A}' | '\u{250B}' | '\u{2551}' | '|')
+}
+
+/// Table-cell pass: a URL (or path) that a table wrapped across
+/// several rows of ONE cell.
+///
+/// The row-level merge cannot see this.  It asks whether the previous
+/// row ran out of room at the PANE's right edge, and a table cell runs
+/// out of room at its own border — several columns short, with the
+/// border glyph itself sitting where the heuristic looks for the last
+/// character of the token.  So a URL in a table stayed cut at the cell
+/// boundary, and the visible link was whatever prefix fit in the first
+/// row (2026-07-28 field report).
+///
+/// What this does instead: find blocks of consecutive rows that share
+/// at least two vertical rules (that is what makes them a table), and
+/// scan each column band between two rules as its own logical line,
+/// joined across rows by the same continuation test measured against
+/// the BAND's edges.
+///
+/// Only multi-row matches are emitted.  A band that produced a single
+/// row's worth of match adds nothing the row pass did not already
+/// find, and emitting it again would be a duplicate the hit-test has
+/// to arbitrate.  Whatever the row pass found on those same cells —
+/// necessarily the truncated prefix — is dropped by
+/// `drop_shadowed_ranges` in favour of the whole thing.
+fn scan_table_cells<S: CellSource>(
+    src: &S,
+    cols: u16,
+    rule_cols: &[(u16, u16)],
+    out: &mut Vec<LinkRange>,
+    oracle: &dyn PathOracle,
+    cwd: Option<&str>,
+) {
+    if rule_cols.len() < 4 {
+        return;
+    }
+    // rule_cols is (row, col), pushed in row-major order by the scan.
+    let mut row_start = 0usize;
+    let mut block_rows: Vec<u16> = Vec::new();
+    let mut shared: Vec<u16> = Vec::new();
+    let mut scratch: Vec<u16> = Vec::new();
+    while row_start < rule_cols.len() {
+        let row = rule_cols[row_start].0;
+        let mut row_end = row_start;
+        while row_end < rule_cols.len() && rule_cols[row_end].0 == row {
+            row_end += 1;
+        }
+        let this_row: &[(u16, u16)] = &rule_cols[row_start..row_end];
+        let contiguous = block_rows.last().is_some_and(|r| r + 1 == row);
+        if contiguous {
+            scratch.clear();
+            scratch.extend(
+                shared
+                    .iter()
+                    .copied()
+                    .filter(|c| this_row.iter().any(|(_, rc)| rc == c)),
+            );
+            if scratch.len() >= 2 {
+                std::mem::swap(&mut shared, &mut scratch);
+                block_rows.push(row);
+                row_start = row_end;
+                continue;
+            }
+        }
+        // This row does not extend the block — close what we have.
+        if block_rows.len() >= 2 && shared.len() >= 2 {
+            scan_table_block(src, &block_rows, &shared, cols, out, oracle, cwd);
+        }
+        block_rows.clear();
+        shared.clear();
+        block_rows.push(row);
+        shared.extend(this_row.iter().map(|(_, c)| *c));
+        row_start = row_end;
+    }
+    if block_rows.len() >= 2 && shared.len() >= 2 {
+        scan_table_block(src, &block_rows, &shared, cols, out, oracle, cwd);
+    }
+}
+
+/// One table block: scan every column band between adjacent rules.
+fn scan_table_block<S: CellSource>(
+    src: &S,
+    block_rows: &[u16],
+    rules: &[u16],
+    cols: u16,
+    out: &mut Vec<LinkRange>,
+    oracle: &dyn PathOracle,
+    cwd: Option<&str>,
+) {
+    let mut chars: Vec<char> = Vec::new();
+    let mut col_map: Vec<u16> = Vec::new();
+    let mut segments: Vec<LineSegment> = Vec::new();
+    for w in rules.windows(2) {
+        let (left, right) = (w[0] + 1, w[1]);
+        if right <= left + 1 {
+            continue;
+        }
+        chars.clear();
+        col_map.clear();
+        segments.clear();
+        let mut prev_row: Option<u16> = None;
+        for &r in block_rows {
+            if is_rule_row(src, r, left, right) {
+                // A separator between table rows: whatever follows is
+                // a different cell, so nothing crosses it.
+                flush_table_line(&chars, &col_map, &segments, cols, out, oracle, cwd);
+                chars.clear();
+                col_map.clear();
+                segments.clear();
+                prev_row = None;
+                continue;
+            }
+            let joins = prev_row.is_some_and(|p| {
+                is_hard_wrap_continuation_in(src, p, r, left, right)
+                    && !starts_new_scheme(src, r, left, right)
+            });
+            if !joins {
+                flush_table_line(&chars, &col_map, &segments, cols, out, oracle, cwd);
+                chars.clear();
+                col_map.clear();
+                segments.clear();
+            } else {
+                // The cell pads its content out to the border; those
+                // blanks are layout, not text, and would terminate the
+                // token at the very seam we are crossing.
+                while chars.last() == Some(&' ') {
+                    chars.pop();
+                    col_map.pop();
+                }
+            }
+            let mut col_skip = left;
+            if joins {
+                while col_skip < right {
+                    let ch = src.char_at(col_skip, r);
+                    if ch == ' ' || ch == '\0' {
+                        col_skip += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            segments.push(LineSegment {
+                phys_row: r,
+                char_offset: chars.len(),
+                cc_zero_indent: false,
+                cc_seam: false,
+            });
+            let mut prev_was_wide = false;
+            for c in col_skip..right {
+                let ch = src.char_at(c, r);
+                if prev_was_wide && ch == '\0' {
+                    prev_was_wide = false;
+                    continue;
+                }
+                chars.push(if ch == '\0' || ch == ' ' { ' ' } else { ch });
+                col_map.push(c);
+                prev_was_wide = ch != '\0' && src.is_wide(ch);
+            }
+            prev_row = Some(r);
+        }
+        flush_table_line(&chars, &col_map, &segments, cols, out, oracle, cwd);
+    }
+}
+
+/// Scan a band's logical line, but keep only matches that actually
+/// crossed a row boundary — see `scan_table_cells`.
+fn flush_table_line(
+    chars: &[char],
+    col_map: &[u16],
+    segments: &[LineSegment],
+    cols: u16,
+    out: &mut Vec<LinkRange>,
+    oracle: &dyn PathOracle,
+    cwd: Option<&str>,
+) {
+    if segments.len() < 2 {
+        return;
+    }
+    let before = out.len();
+    scan_logical_line(chars, col_map, segments, cols as usize, out, oracle, cwd);
+    // A match confined to one row is one the row pass already had.
+    let mut i = before;
+    while i < out.len() {
+        let same_text_rows = out[before..]
+            .iter()
+            .filter(|l| l.text == out[i].text)
+            .count();
+        if same_text_rows < 2 {
+            out.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Two ranges on one row that cover overlapping cells are the same
+/// link seen twice — the row pass's truncated prefix and the table
+/// pass's whole token.  Keep the longer text; it is the one the click
+/// should open.
+fn drop_shadowed_ranges(out: &mut Vec<LinkRange>) {
+    // In place, no second Vec: this runs inside the per-frame scan,
+    // where the module's whole allocation budget is one reused
+    // buffer.  Sorted by (row, col_start, longest first), a range is
+    // shadowed exactly when it starts at or before the furthest
+    // column any kept range on that row already reaches.
+    out.sort_by(|a, b| {
+        a.row
+            .cmp(&b.row)
+            .then(a.col_start.cmp(&b.col_start))
+            .then(b.text.len().cmp(&a.text.len()))
+    });
+    let mut row = u16::MAX;
+    let mut reach = 0u16;
+    out.retain(|l| {
+        if l.row != row {
+            row = l.row;
+            reach = l.col_end;
+            return true;
+        }
+        if l.col_start <= reach {
+            return false;
+        }
+        reach = reach.max(l.col_end);
+        true
+    });
+}
+
+/// Locate claudecode's composer in the visible grid, as an inclusive
+/// `(top_row, bottom_row)` range to exclude from link scanning.
+///
+/// **This used to look for a rounded box** (`╭…╮` / `╰…╯`) and return
+/// `None` when it found none.  That has now failed twice, for the
+/// same reason both times: the thing it keyed on was *decoration*,
+/// and claudecode redecorates.  v2.1.212 dropped the box, which made
+/// the bottom-most box the welcome banner (fixed then by requiring
+/// the caret or a bottom-hugging position).  The current version
+/// draws no box at all — two grey `─` rules with the prompt between
+/// them — so corner detection finds nothing, the exemption never
+/// fires, and the composer gets scanned like body text: a path
+/// underlines itself while you are still typing it.
+///
+/// So the anchor is the **caret**.  A caret is protocol, not
+/// styling; no redesign can remove it, and in a claudecode pane it
+/// lives in the composer.  The composer is bottom-anchored in every
+/// version we have seen, so:
+///
+///   - the caret must sit in the bottom third of the view — higher
+///     than that and it is somewhere in the output, not the input,
+///     and exempting downward from it would swallow real text;
+///   - the range runs from the caret's row to the last row: below
+///     the composer there is only claudecode's own footer;
+///   - it widens *upward* to the nearest separator row (a run of box
+///     horizontals, which covers both the `─` rules of today and the
+///     `╭` of the old box) so a multi-line prompt is covered whole,
+///     not just the line the caret happens to be on.  The search is
+///     bounded, and finding nothing simply means the caret's row
+///     alone — under-exempting is recoverable, swallowing output is
+///     not.
+///
+/// The legacy corner scan is kept as a fallback for the one case the
+/// caret cannot speak for: a scrolled-back view, where the caret is
+/// outside the window entirely.
+fn find_input_box_rows<S: CellSource>(
+    src: &S,
+    rows: u16,
+    cols: u16,
+) -> Option<(u16, u16)> {
+    let (_, caret_row) = src.cursor();
+    if caret_row < rows {
+        // "Near the bottom", expressed as a distance rather than a
+        // fraction: the composer is at most `MAX_COMPOSER_ROWS` tall,
+        // and never more than half the view — a fraction alone
+        // degenerates on short panes, where a third of ten rows is
+        // three and the composer is half the screen.
+        let reach = MAX_COMPOSER_ROWS.min(rows / 2);
+        if caret_row + reach >= rows {
+            let mut r = caret_row;
+            let mut walked = 0u16;
+            while r > 0 && walked < MAX_COMPOSER_ROWS {
+                r -= 1;
+                walked += 1;
+                if is_separator_row(src, r, cols) {
+                    return Some((r, rows - 1));
+                }
+            }
+            // No rule above the caret: this is the chromeless
+            // composer (claudecode v2.1.212 ships one), so the
+            // caret's own row is the exemption — UNLESS that row is
+            // a soft-wrap continuation.  A composer's first row is
+            // never one: it is a prompt the app drew, not the tail
+            // of a line the terminal wrapped.
+            //
+            // Exempting it anyway truncated links in the 2026-09-04
+            // report.  A path wrapped across the last two rows had
+            // its continuation swallowed by the phantom box, so the
+            // scan saw only `…/notes/provenance-probe` — not a real
+            // path — and backed off to the longest prefix that was,
+            // `…/spg/`.  The link stopped four segments short of the
+            // file it pointed at.
+            if !src.is_soft_wrap_continuation(caret_row)
+                && looks_like_prompt_row(src, caret_row, cols)
+            {
+                return Some((caret_row, rows - 1));
+            }
+        }
+    }
+    find_rounded_box_rows(src, rows, cols)
+}
+
+/// How far above the caret to look for the composer's opening rule.
+/// Generous enough for a multi-line prompt, short enough that a
+/// missing separator cannot eat a screenful of output.
+const MAX_COMPOSER_ROWS: u16 = 12;
+
+/// Does this row look like a prompt the app drew, rather than a line
+/// of output the caret happens to be resting on?
+///
+/// This is the whole basis for exempting a chromeless composer.  The
+/// caret sits at the end of the last output line for most of a pane's
+/// life, so "the caret is here" identifies nothing — taking it as the
+/// composer blanked the links on ordinary output (2026-09-04).  What
+/// actually marks the composer is its prompt glyph.
+///
+/// Deliberately asymmetric: guessing wrong here costs one spurious
+/// link inside a composer, while guessing wrong the other way silently
+/// drops every link near the bottom of the pane.
+fn looks_like_prompt_row<S: CellSource>(src: &S, row: u16, cols: u16) -> bool {
+    for c in 0..cols {
+        match src.char_at(c, row) {
+            ' ' | '\0' => continue,
+            '❯' | '>' | '›' | '⟩' | '»' | '$' | '%' => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// A row that is drawn rule, not text: box horizontals and corners
+/// with nothing else on it.  Both claudecode chromes qualify — the
+/// old `╭────╮` and the current bare `────`.
+fn is_separator_row<S: CellSource>(src: &S, row: u16, cols: u16) -> bool {
+    let mut rule = 0u16;
+    let mut other = 0u16;
+    for c in 0..cols {
+        match src.char_at(c, row) {
+            ' ' | '\0' => {}
+            '─' | '━' | '═' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘' | '│' | '├' | '┤'
+            | '┬' | '┴' | '┼' => rule += 1,
+            _ => other += 1,
+        }
+    }
+    // Half the width of rule glyphs and nothing else: the composer's
+    // divider spans most of the pane, while a table row of the same
+    // glyphs carries text between them.
+    other == 0 && rule >= cols / 2
+}
+
+/// The pre-2026-08 detection, kept for the scrolled-back case where
+/// the caret is not in view.  Returns the bottom-most rounded box.
+fn find_rounded_box_rows<S: CellSource>(
+    src: &S,
+    rows: u16,
+    cols: u16,
+) -> Option<(u16, u16)> {
+    let mut bottom: Option<u16> = None;
+    for r in (0..rows).rev() {
+        if row_contains_any(src, r, cols, &['╰', '╯']) {
+            bottom = Some(r);
+            break;
+        }
+    }
+    let bottom = bottom?;
+    if bottom == 0 {
+        return None;
+    }
+    let mut top: Option<u16> = None;
+    for r in (0..bottom).rev() {
+        if row_contains_any(src, r, cols, &['╭', '╮']) {
+            top = Some(r);
+            break;
+        }
+    }
+    let top = top?;
+    // 2026-07-18 field regression — the bottom-most rounded box is
+    // only the COMPOSER when it looks like an active input area:
+    // it either contains the cursor row (the user's caret lives in
+    // the composer) or hugs the bottom of the viewport.  claudecode
+    // v2.1.212 dropped the composer's box entirely, which made the
+    // bottom-most box the WELCOME BANNER at the top of the screen —
+    // exempting it swallowed the banner's email/path links.
+    let (_, cursor_row) = src.cursor();
+    let has_cursor = cursor_row >= top && cursor_row <= bottom;
+    let hugs_bottom = bottom + 4 >= rows;
+    if !has_cursor && !hugs_bottom {
+        return None;
+    }
+    Some((top, bottom))
+}
+
+fn row_contains_any<S: CellSource>(
+    src: &S,
+    row: u16,
+    cols: u16,
+    targets: &[char],
+) -> bool {
+    for c in 0..cols {
+        let ch = src.char_at(c, row);
+        if targets.contains(&ch) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Char class that we consider "could be part of a URL or path
+/// continuation".  Used by the cc hard-wrap heuristic to gate the
+/// merge; the actual pattern scan still validates structure.
+fn is_url_path_class(c: char) -> bool {
+    c.is_alphanumeric()
+        || matches!(
+            c,
+            '/' | '.' | '-' | '_' | '~' | '?' | '&' | '=' | '#' | '%' | ':' | '+' | '@' | ','
+        )
+}
+
+fn count_leading_ws<S: CellSource>(src: &S, row: u16, cols: u16) -> u16 {
+    let mut n = 0u16;
+    while n < cols {
+        let ch = src.char_at(n, row);
+        if ch == ' ' || ch == '\0' {
+            n += 1;
+        } else {
+            break;
+        }
+    }
+    n
+}
+
+/// One physical row's contribution to a logical (post-soft-wrap-merge)
+/// line.  `phys_row` is the viewport row the chars came from;
+/// `char_offset` is where in the merged `chars` buffer this row's
+/// pushed chars start.  May be smaller than `cols` when the row
+/// contains wide-char trail halves (skipped) or has a stripped
+/// cc-mode hanging indent.  Physical column for a given char_pos is
+/// recovered via the parallel `col_map` slice, NOT linear arithmetic.
+struct LineSegment {
+    phys_row: u16,
+    char_offset: usize,
+    /// This segment was joined by the cc heuristic's WEAKEST form —
+    /// zero-indent continuation (prev row completely full, this row
+    /// starts at col 0).  That shape also matches ordinary flush
+    /// prose, so matches without an existence oracle (URL, Email)
+    /// are not allowed to cross this boundary; File matches may
+    /// (stat + segment-boundary retry arbitrate).
+    cc_zero_indent: bool,
+    /// This segment was joined by the cc hard-wrap heuristic, so its
+    /// `char_offset` is a SEAM: a point where claudecode broke one
+    /// logical line in two.  When it broke at a space, that space is
+    /// gone from both rows (the previous row's trailing blanks are
+    /// popped, this row's hanging indent is skipped), so the merged
+    /// text reads `…probe.sh-n 5` for what was `…probe.sh -n 5`.
+    /// The seam is therefore a candidate end for a path, and a far
+    /// better one than any punctuation guess — see `resolve_path_end`.
+    cc_seam: bool,
+}
+
+/// Scan a logical (possibly multi-row-merged) line and emit
+/// `LinkRange`s, one per **physical row** the match touches.  Single-
+/// segment matches collapse to one LinkRange; multi-segment matches
+/// fan out (same `text`, different `phys_row`/col_start/col_end),
+/// preserving the per-row hit-test + per-row underline model.
+fn scan_logical_line(
+    chars: &[char],
+    col_map: &[u16],
+    segments: &[LineSegment],
+    cols_per_row: usize,
+    out: &mut Vec<LinkRange>,
+    oracle: &dyn PathOracle,
+    cwd: Option<&str>,
+) {
+    if segments.is_empty() {
+        return;
+    }
+    // Pattern scan emits matches directly into `out` — the previous
+    // intermediate `row_matches` Vec was a per-call allocation that
+    // showed up as ~250 samples in the input-lag profile (15 s, 9
+    // panes typing).  emit_match is the only producer, append-only,
+    // so passing `out` straight through is safe and saves the alloc.
+    scan_line_into_matches(chars, col_map, out, segments, cols_per_row, oracle, cwd);
+}
+
+/// Original pattern scanner, but the per-row emit step now consults
+/// `segments` to fan a multi-row match out into one LinkRange per
+/// physical row it covers.  Each per-row LinkRange carries the FULL
+/// matched `text` (so click dispatch + hover tooltip are identical
+/// across segments).
+fn scan_line_into_matches(
+    chars: &[char],
+    col_map: &[u16],
+    out: &mut Vec<LinkRange>,
+    segments: &[LineSegment],
+    cols_per_row: usize,
+    oracle: &dyn PathOracle,
+    cwd: Option<&str>,
+) {
+    if segments.is_empty() {
+        return;
+    }
+    let n = chars.len();
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+
+        // URL: http:// or https://
+        if matches_prefix(&chars, i, "http://") || matches_prefix(&chars, i, "https://") {
+            let mut end = scan_until_link_terminator(&chars, i);
+            // A zero-indent cc join is the weakest merge guess (flush
+            // prose looks identical), and URLs have no existence
+            // oracle to arbitrate — so a URL stops at one, unless the
+            // break was forced (see `url_stop_boundary`).
+            if let Some(b) = url_stop_boundary(chars, col_map, segments, cols_per_row, i, end) {
+                end = b;
+                while end > i
+                    && matches!(
+                        chars[end - 1],
+                        ',' | '.' | ';' | ':' | ')' | ']' | '}' | '!' | '?'
+                    )
+                {
+                    end -= 1;
+                }
+            }
+            let span = &chars[i..end];
+            if looks_like_url(span) {
+                let text: String = span.iter().collect();
+                emit_match(out, segments, col_map, cols_per_row, i, end, LinkKind::Url, text);
+                i = end;
+                continue;
+            }
+        }
+
+        // A segment start is a text boundary even when the merged
+        // buffer glues it to the previous row's last char — without
+        // this, a path emitted via the boundary retry leaves the
+        // NEXT row's own `/Users/...` with an alnum left neighbour
+        // and it would be skipped as a mid-word slash.
+        let at_seg_start = segments.iter().any(|s| s.char_offset == i);
+
+        // `file://` — what claudecode emits when it points at a file
+        // it just wrote.  Matched BEFORE the bare-path branch so the
+        // scheme joins the link instead of being left dangling beside
+        // it (the path after it matched on its own, so the link worked
+        // but the selection started four characters late).
+        //
+        // Emitted as `File`, not `Url`: this names something on disk,
+        // so it should face the same `stat` the bare path does — a URL
+        // has no such arbiter and would underline a file that is not
+        // there.  It also must NOT be a `Url`, because the click path
+        // prefixes anything that is not `http(s)://` with `http://`,
+        // which would open `http://file:///…`.
+        if matches_prefix(&chars, i, "file://") {
+            let end = scan_path_candidate(&chars, i);
+            // Arbitrate on the PATH the scheme names, while the link's
+            // span stays over what is drawn — the user selects and
+            // sees `file://…`, and the click resolves the file.
+            let path_start = i + "file://".len();
+            // A `#fragment` / `?query` is URL syntax, not part of the
+            // name on disk, so it is cut off before the filesystem is
+            // asked and put back for the span: the browser is the one
+            // that reads it, and `open` passes it through.
+            //
+            // Asking with it attached made the whole span fail, and the
+            // arbitration then walked back to the next candidate that
+            // does exist — across a wrapped line that is the directory
+            // on the row above, so the link stopped at the seam and the
+            // rest of the URL was left plain (2026-09-27 report:
+            // `file:///…/goliajp/` ⏎ `vis/brand-dist/index-ja.html#principles`).
+            let frag = (path_start..end).find(|&j| chars[j] == '#' || chars[j] == '?');
+            let stat_end = frag.unwrap_or(end);
+            if path_start < stat_end {
+                if let Some(b) = resolve_path_end(&chars, path_start, stat_end, segments, oracle) {
+                    // The fragment belongs to the link only when the
+                    // whole path it hangs off resolved; a shorter
+                    // arbitrated end means the rest is not this link's.
+                    let span_end = if b == stat_end { end } else { b };
+                    let text: String = chars[i..span_end].iter().collect();
+                    emit_match(
+                        out, segments, col_map, cols_per_row, i, span_end, LinkKind::File, text,
+                    );
+                    i = span_end.max(i + 1);
+                    continue;
+                }
+            }
+        }
+
+        if c == '/' && i + 1 < n && (at_seg_start || !is_left_boundary_alnum(&chars, i)) {
+            let end = scan_path_candidate(&chars, i);
+            // Greedy scan, filesystem arbitration — `resolve_path_end`
+            // is the whole decision.  The seam retry stays separate:
+            // its candidates are cc hard-wrap boundaries, not prose
+            // marks, and a seam prefix that happens to be a real
+            // *directory* must not win over the file the line points
+            // at, so it is tried only after every prose cut has.
+            if let Some(b) = resolve_path_end(&chars, i, end, segments, oracle) {
+                let text = unquote_path(&chars[i..b].iter().collect::<String>());
+                emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                i = b.max(i + 1);
+                continue;
+            }
+            // No `looks_like_path` guard on the whole span here.  The
+            // span NOT looking like a path is precisely the case this
+            // retry exists for: rows merged at a wrap seam produce
+            // things like `…/join-bugs.sql/Users/…/describe/` — one
+            // real path with another glued to its tail — and asking
+            // whether the concatenation looks like a path answers no,
+            // which is right and which is why the answer must not
+            // gate the retry.  `retry_file_at_segment_boundaries`
+            // applies `looks_like_path` to each candidate PREFIX,
+            // where the question is the one worth asking.
+            //
+            // 2026-08-19 field report: three consecutive absolute
+            // paths, each ending within the 8-column slack of the
+            // right edge, merged into one logical line; the retry had
+            // the correct answer at every step and never got asked.
+            {
+                if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end, oracle) {
+                    let text = unquote_path(&chars[i..b].iter().collect::<String>());
+                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                    i = b;
+                    continue;
+                }
+            }
+        }
+
+        if c == '~'
+            && i + 1 < n
+            && chars[i + 1] == '/'
+            && (at_seg_start || !is_left_boundary_alnum(&chars, i))
+        {
+            let end = scan_path_candidate(&chars, i);
+            if end - i >= 3 {
+                if let Some(b) = resolve_path_end(&chars, i, end, segments, oracle) {
+                    let text = unquote_path(&chars[i..b].iter().collect::<String>());
+                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                    i = b.max(i + 1);
+                    continue;
+                }
+                if looks_like_path(&chars[i..end]) {
+                    if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end, oracle) {
+                        let text = unquote_path(&chars[i..b].iter().collect::<String>());
+                        emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                        i = b;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Bare IPv4 (optionally :port and /path).  Emitted as `Ip` so
+        // the click dispatcher's OpenLink arm prepends `http://` and
+        // hands off to `/usr/bin/open`; Copy keeps the raw displayed
+        // text.  Reject rules kill version strings (`v1.2.3.4`,
+        // `1.2.3.4.5`, `1.2.3.4-rc1`), IPs inside longer identifiers,
+        // and IPs already inside an `http://…` URL (prev char is `/`).
+        if c.is_ascii_digit() {
+            if let Some(end) = try_scan_ipv4_url(chars, i) {
+                let text: String = chars[i..end].iter().collect();
+                emit_match(
+                    out, segments, col_map, cols_per_row, i, end,
+                    LinkKind::Ip, text,
+                );
+                i = end;
+                continue;
+            }
+        }
+
+        // IPv6 — bracketed form (`[::1]:8080/foo`) triggers on `[`;
+        // bare form (`2001:db8::1`, `::1`, or full 8-group) triggers
+        // on hex or `:`.  `::` OR exactly 8 groups is required for
+        // bare form so time strings (`12:34:56`) don't match.
+        if c == '[' {
+            if let Some(end) = try_scan_ipv6(chars, i) {
+                let text: String = chars[i..end].iter().collect();
+                emit_match(
+                    out, segments, col_map, cols_per_row, i, end,
+                    LinkKind::Ip, text,
+                );
+                i = end;
+                continue;
+            }
+        }
+        if c.is_ascii_hexdigit() || c == ':' {
+            if let Some(end) = try_scan_ipv6(chars, i) {
+                let text: String = chars[i..end].iter().collect();
+                emit_match(
+                    out, segments, col_map, cols_per_row, i, end,
+                    LinkKind::Ip, text,
+                );
+                i = end;
+                continue;
+            }
+        }
+
+        // UUID — canonical `8-4-4-4-12` hex.  Triggers on hex digit;
+        // the shape is rigid enough that false-positive risk is
+        // negligible without further gating.
+        if c.is_ascii_hexdigit() {
+            if let Some(end) = try_scan_uuid(chars, i) {
+                let text: String = chars[i..end].iter().collect();
+                emit_match(
+                    out, segments, col_map, cols_per_row, i, end,
+                    LinkKind::Uuid, text,
+                );
+                i = end;
+                continue;
+            }
+        }
+
+        if c == '@' && i > 0 && i + 1 < n {
+            let local_start = scan_back_local(&chars, i);
+            let host_end = scan_forward_host(&chars, i + 1);
+            if local_start < i
+                && host_end > i + 1
+                && is_email_host(&chars[i + 1..host_end])
+                // Same weak-guess rule as URLs: an address glued out
+                // of two flush prose rows is not an address.
+                && first_zero_indent_boundary(segments, local_start, host_end).is_none()
+            {
+                let text: String = chars[local_start..host_end].iter().collect();
+                emit_match(
+                    out,
+                    segments,
+                    col_map,
+                    cols_per_row,
+                    local_start,
+                    host_end,
+                    LinkKind::Email,
+                    text,
+                );
+                i = host_end;
+                continue;
+            }
+        }
+
+        // Relative paths, LAST — every other kind gets first refusal,
+        // so a URL, an address, an IP or a UUID is never re-read as a
+        // filename.  Only reachable when the pane's directory is
+        // known: `src/main.rs` names nothing on its own.
+        if let Some(cwd) = cwd {
+            if (c.is_alphanumeric() || c == '.' || c == '_')
+                && (at_seg_start || !is_left_boundary_pathish(&chars, i))
+            {
+                let end = scan_path_candidate(&chars, i);
+                if end > i && looks_like_relative_path(&chars[i..end]) {
+                    if let Some(b) =
+                        resolve_path_end_from(&chars, i, end, segments, oracle, Some(cwd))
+                    {
+                        let text = unquote_path(&chars[i..b].iter().collect::<String>());
+                        let full = join_cwd(cwd, &text);
+                        emit_match_to(
+                            out, segments, col_map, cols_per_row, i, b,
+                            LinkKind::File, text, Some(full),
+                        );
+                        i = b.max(i + 1);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        i += 1;
+    }
+}
+
+/// The cc hard-wrap merge is a heuristic guess.  When a merged
+/// filesystem-path candidate doesn't stat, the glue may have absorbed
+/// the FOLLOWING row's first word: the path ended flush at the right
+/// edge (which looks exactly like a claudecode hard wrap) and the
+/// next row's opening word happens to be path-class — e.g.
+/// `.../feedback.md` + next row `fullpath 已交` merges into
+/// `.../feedback.mdfullpath`, and the real, existing single-row path
+/// is silently lost.  Retry the prefixes that end exactly at a
+/// segment boundary, longest first; the first one that exists on
+/// disk is the real token.  Returns the char-pos to truncate at.
+/// (URL candidates have no existence oracle, so they keep the plain
+/// merged behaviour.)
+
+/// Does this span look like it could name something relative to a
+/// working directory?
+///
+/// The filesystem is the arbiter — a candidate only becomes a link if
+/// it resolves — but the filesystem must not be ASKED about every word
+/// on screen, and a word that happens to match a file in `~` (`Music`,
+/// `Public`) should not light up in prose.  So a candidate has to
+/// carry some evidence of being a path before it is worth resolving:
+///
+///   * an explicit relative marker — `./x`, `../x`
+///   * a separator — `src/main.rs`, `bin/run.sh`
+///   * a file extension — `Cargo.toml`, `README.md`
+///
+/// The extension rule is what keeps numbers out: it must be 1..=8
+/// characters, alphanumeric, and START with a letter, so `1.5`,
+/// `2026.09` and `v1.2.3` are not candidates, while `a.c` is.  The
+/// stem must contain a letter for the same reason.
+fn looks_like_relative_path(span: &[char]) -> bool {
+    if span.is_empty() || span[0] == '/' || span[0] == '~' {
+        return false;
+    }
+    let s: String = span.iter().collect();
+    if s.starts_with("./") || s.starts_with("../") {
+        return true;
+    }
+    // A separator, but not a leading or trailing one.
+    if let Some(p) = s.find('/') {
+        return p > 0 && p + 1 < s.len();
+    }
+    let Some(dot) = s.rfind('.') else { return false };
+    if dot == 0 || dot + 1 >= s.len() {
+        return false;
+    }
+    let (stem, ext) = (&s[..dot], &s[dot + 1..]);
+    if !stem.chars().any(|c| c.is_alphabetic()) {
+        return false;
+    }
+    let n = ext.chars().count();
+    n <= 8
+        && ext.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// `<cwd>/<rel>`, with a leading `./` folded away.  `..` is left for
+/// the filesystem to resolve — it is the one that knows about symlinks.
+fn join_cwd(cwd: &str, rel: &str) -> String {
+    let rel = rel.strip_prefix("./").unwrap_or(rel);
+    format!("{}/{}", cwd.trim_end_matches('/'), rel)
+}
+
+/// Is the character before `i` one that would make this the middle of
+/// a larger token rather than the start of one?
+fn is_left_boundary_pathish(chars: &[char], i: usize) -> bool {
+    i > 0
+        && (chars[i - 1].is_alphanumeric()
+            // A colon is NOT in this set.  It reads as "inside a
+            // token" almost nowhere and as a separator almost
+            // everywhere a program writes one: `wrote:path`,
+            // `Note:path`, `写好了:.notes/x.md`.  Counting it
+            // as inside cost the whole rest of the line, because a
+            // candidate that starts too early and fails to resolve
+            // also blocks every start position it covered — the run
+            // from `写` swallowed the colon, the path and the `(442`
+            // after it, resolved to nothing, and the path could never
+            // be tried on its own (2026-09-11 report).
+            //
+            // Nothing that needs one loses it: `src/main.rs:42` starts
+            // before the colon, and a URL is matched whole before any
+            // path candidate is considered.
+            || matches!(chars[i - 1], '/' | '.' | '-' | '_' | '~' | '@'))
+}
+
+/// Strip a trailing `:line(:col)?` suffix (compiler / panic output
+/// like `/…/file.rs:120:5`) from a path span so the stat check sees
+/// the bare path.  Returns the new end; unchanged when no such
+/// suffix exists.  At most two `:digits` groups are stripped.
+fn strip_line_col_suffix(chars: &[char], start: usize, end: usize) -> usize {
+    let mut e = end;
+    for _ in 0..2 {
+        let mut j = e;
+        while j > start && chars[j - 1].is_ascii_digit() {
+            j -= 1;
+        }
+        if j < e && j > start && chars[j - 1] == ':' {
+            e = j - 1;
+        } else {
+            break;
+        }
+    }
+    e
+}
+
+/// First zero-indent cc boundary strictly inside `(lo, hi)`, if
+/// any.  Segments are ascending, so this returns the earliest one.
+fn first_zero_indent_boundary(
+    segments: &[LineSegment],
+    lo: usize,
+    hi: usize,
+) -> Option<usize> {
+    segments
+        .iter()
+        .filter(|s| s.cc_zero_indent)
+        .map(|s| s.char_offset)
+        .find(|&b| b > lo && b < hi)
+}
+
+/// The first zero-indent cc boundary inside `(lo, hi)` that a URL has
+/// to stop at.
+///
+/// The default is to stop: a flush join is the weakest signal there
+/// is, and a URL has no `stat` to arbitrate a wrong one.  The
+/// exception is a break the renderer had no choice about — if the
+/// first word of the row below would not have fitted in what was left
+/// of the row above, the break is a wrap and the URL runs through it.
+///
+/// codex wraps every continuation flush at column 0, so without this
+/// its URLs are cut at the seam: `https://` alone stops being a link
+/// at all, and `https://chatgpt.com/backend-` keeps being one —
+/// pointing somewhere other than the
+/// `https://chatgpt.com/backend-api/codex/responses` on screen
+/// (2026-09-26 report).
+fn url_stop_boundary(
+    chars: &[char],
+    col_map: &[u16],
+    segments: &[LineSegment],
+    cols_per_row: usize,
+    lo: usize,
+    hi: usize,
+) -> Option<usize> {
+    segments
+        .iter()
+        .filter(|s| s.cc_zero_indent)
+        .map(|s| s.char_offset)
+        .filter(|&b| b > lo && b < hi)
+        .find(|&b| !wrap_was_forced(chars, col_map, cols_per_row, b))
+}
+
+/// Did the row above the seam at `b` break because the next word did
+/// not fit on it?
+///
+/// This is the measurement the renderer itself made, read back off the
+/// screen — it assumes nothing about where a TUI's content width sits,
+/// which is what every geometric guess in this file has had to be
+/// widened for in turn.  When the word WOULD have fitted, the break is
+/// one the program meant, and joining the rows would invent a link
+/// that is on neither of them.
+///
+/// A row with no column left over answers nothing: a line can end
+/// exactly at the edge by coincidence as easily as by wrapping, and
+/// there is no room to say which.  The evidence is space the renderer
+/// left unused — it would have used it if the next word had fitted.
+///
+/// Counts chars, not columns: a wide char is two columns, so a word
+/// carrying one is measured short and the seam is treated as a real
+/// newline.  That is the safe direction — a URL with a CJK char in its
+/// first wrapped word loses nothing it had before this.
+fn wrap_was_forced(chars: &[char], col_map: &[u16], cols_per_row: usize, b: usize) -> bool {
+    if b == 0 || b >= chars.len() || b > col_map.len() {
+        return false;
+    }
+    // Trailing blanks are popped at the seam, so this is the last
+    // content column of the row above.
+    let last_col = col_map[b - 1] as usize;
+    if last_col + 1 >= cols_per_row {
+        return false;
+    }
+    let word = chars[b..]
+        .iter()
+        .position(|c| *c == ' ')
+        .unwrap_or(chars.len() - b);
+    last_col + 1 + word > cols_per_row
+}
+
+/// A seam that cuts a name in half rather than ending one.
+///
+/// The row above stops at a `/` — a name does not end on a separator,
+/// that is where one continues — and the row below opens with more
+/// name.  Taking the seam as the end then draws a link over half of
+/// what is on screen, pointing at a directory the line never named:
+/// the 2026-09-27 report is `file:///…/goliajp/` on one row and
+/// `vis/brand-dist/index-ja.html#principles` on the next, linked as
+/// far as `goliajp/`.
+///
+/// Half a name is worse than none — 「现在的问题是识别一半，你要么完全
+/// 不识别也好」— so the candidate is refused, and with nothing longer
+/// on disk nothing is emitted at all.
+///
+/// Both ends of the seam have to say so, which is what keeps this from
+/// swallowing the seam's real job:
+///
+/// * a row ending in a complete name with a separate token below it
+///   (`…/docs/probe.sh` ⏎ `-n 5`) ends on `h`, not on a separator;
+/// * a row below that opens with `/` starts an absolute path of its
+///   own — a listing of directories, one per row (`…/bb/` ⏎
+///   `/Users/…/ccc/`), is three complete names, not one broken one.
+fn seam_cuts_a_name(chars: &[char], cut: usize) -> bool {
+    cut > 0
+        && cut < chars.len()
+        && chars[cut - 1] == '/'
+        && chars[cut] != '/'
+        && is_url_path_class(chars[cut])
+}
+
+fn retry_file_at_segment_boundaries(
+    chars: &[char],
+    segments: &[LineSegment],
+    lo: usize,
+    hi: usize,
+    oracle: &dyn PathOracle,
+) -> Option<usize> {
+    for seg in segments.iter().rev() {
+        let b = seg.char_offset;
+        if b <= lo || b >= hi {
+            continue;
+        }
+        if seam_cuts_a_name(chars, b) {
+            continue;
+        }
+        let prefix = &chars[lo..b];
+        if !looks_like_path(prefix) {
+            continue;
+        }
+        let text: String = prefix.iter().collect();
+        if is_real_path(oracle, &text) {
+            return Some(b);
+        }
+    }
+    None
+}
+
+/// Project one `[char_lo, char_hi)` match onto the physical rows it
+/// touches and push one `LinkRange` per row.  Single-row matches turn
+/// into one LinkRange (unchanged from the legacy per-row scanner);
+/// matches spanning N rows turn into N LinkRanges with the same
+/// `text` and matching per-row col spans.
+fn emit_match(
+    out: &mut Vec<LinkRange>,
+    segments: &[LineSegment],
+    col_map: &[u16],
+    cols_per_row: usize,
+    char_lo: usize,
+    char_hi_exclusive: usize,
+    kind: LinkKind,
+    text: String,
+) {
+    emit_match_to(out, segments, col_map, cols_per_row, char_lo, char_hi_exclusive, kind, text, None)
+}
+
+/// [`emit_match`] carrying an explicit target — what the span NAMES,
+/// when that differs from what it shows.  See `LinkRange::target`.
+#[allow(clippy::too_many_arguments)]
+fn emit_match_to(
+    out: &mut Vec<LinkRange>,
+    segments: &[LineSegment],
+    col_map: &[u16],
+    cols_per_row: usize,
+    char_lo: usize,
+    char_hi_exclusive: usize,
+    kind: LinkKind,
+    text: String,
+    target: Option<String>,
+) {
+    if char_lo >= char_hi_exclusive || segments.is_empty() {
+        return;
+    }
+    // One LinkRange per physical row the match touches, and each
+    // row's span is the cells it ACTUALLY covers — read back from
+    // `col_map`, the same projection `locate()` uses.
+    //
+    // The earlier shape ran every row but the last out to the pane's
+    // right edge, on the reasoning that a wrapped line fills its row.
+    // That holds for a DECAWM soft wrap and nothing else: a cc-mode
+    // hard wrap stops a few columns short, and a table cell stops at
+    // its border — where the underline then ran on through the border
+    // and out the far side of the table (2026-07-28, visible the
+    // moment table cells started merging).  Reading the columns back
+    // is both simpler and right in all three cases; for the soft wrap
+    // it produces the identical answer, because there the last char
+    // really is in the last column.
+    //
+    // `cols_per_row` still bounds the projection: a column at or past
+    // the row width is not a cell anyone can click.
+    for (i, seg) in segments.iter().enumerate() {
+        let seg_lo = seg.char_offset;
+        let seg_hi = segments
+            .get(i + 1)
+            .map(|s| s.char_offset)
+            .unwrap_or(col_map.len());
+        let lo = seg_lo.max(char_lo);
+        let hi = seg_hi.min(char_hi_exclusive);
+        if lo >= hi {
+            continue;
+        }
+        let (Some(&c0), Some(&c1)) = (col_map.get(lo), col_map.get(hi - 1)) else {
+            continue;
+        };
+        if c0 as usize >= cols_per_row || c1 < c0 {
+            continue;
+        }
+        let c1 = c1.min(cols_per_row.saturating_sub(1) as u16);
+        out.push(LinkRange {
+            target: target.clone(),
+            row: seg.phys_row,
+            col_start: c0,
+            col_end: c1,
+            kind,
+            // Every segment carries the FULL text, so click dispatch
+            // is the same wherever the user hit it.
+            text: text.clone(),
+        });
+    }
+}
+
+/// Scan one already-joined line of text.  The public single-line
+/// entry point for callers without a cell surface (log viewers,
+/// notification text, tests); the full-surface path is
+/// [`scan_visible_links`].
+pub fn scan_text_line(line: &str, row: u16) -> Vec<LinkRange> {
+    let mut out = Vec::new();
+    scan_line(line, row, &mut out);
+    out
+}
+
+/// Legacy single-row scanner.  Kept for tests + callers that already
+/// produce a single-row joined `line`; new code paths go through
+/// `scan_line_into_matches` to benefit from soft-wrap merge.
+fn scan_line(line: &str, row: u16, out: &mut Vec<LinkRange>) {
+    // Single-segment delegation to the production scanner — the
+    // legacy duplicate body drifted from `scan_line_into_matches`
+    // (it lacked the boundary retry and the line-col suffix strip),
+    // which let tests pass against semantics production didn't have.
+    // One scanner, zero drift.
+    let chars: Vec<char> = line.chars().collect();
+    let col_map: Vec<u16> = (0..chars.len() as u16).collect();
+    let cols = chars.len().max(1);
+    let segments = [LineSegment {
+        phys_row: row,
+        char_offset: 0,
+        cc_zero_indent: false,
+        cc_seam: false,
+    }];
+    scan_line_into_matches(&chars, &col_map, out, &segments, cols, &FsOracle, None);
+}
+
+/// True when `chars[start..]` begins with `prefix`.  All known
+/// callers pass ASCII-only literals (`http://`, `https://`), so we
+/// compare per byte without first re-collecting `prefix` into a
+/// `Vec<char>` — that re-collect was the next hot spot after the
+/// per-line `chars: Vec<char>` fix (samply showed ~6 × 10⁶ small
+/// allocs/sec from this one function with `prefix.chars().collect()`,
+/// realloc churn dominating render).
+fn matches_prefix(chars: &[char], start: usize, prefix: &str) -> bool {
+    let pbytes = prefix.as_bytes();
+    if start + pbytes.len() > chars.len() {
+        return false;
+    }
+    debug_assert!(
+        prefix.is_ascii(),
+        "matches_prefix fast path assumes ASCII prefix: {prefix:?}"
+    );
+    for (i, &pb) in pbytes.iter().enumerate() {
+        if chars[start + i] as u32 != pb as u32 {
+            return false;
+        }
+    }
+    true
+}
+
+/// True iff the char immediately before `pos` is alphanumeric.  Used
+/// to keep `/` / `~/` mid-word from being mistaken for a path start.
+/// Position 0 has no neighbour → treated as a clean boundary.
+fn is_left_boundary_alnum(chars: &[char], pos: usize) -> bool {
+    if pos == 0 {
+        return false;
+    }
+    chars[pos - 1].is_alphanumeric()
+}
+
+/// URL-flavoured terminator scan.  URLs on the wire are pure ASCII
+/// — IDN hostnames arrive as `xn--` punycode, UTF-8 path bytes as
+/// `%XX` — so ANY non-ASCII char terminates.  The permissive char
+/// set inside the ASCII range follows RFC 3986 (unreserved +
+/// reserved), minus a small "prose delimiter" blacklist:
+///
+///   - `<` `>` `"` `'` `` ` `` `|` — quotes / markup / pipes
+///
+/// Parens are kept inside the scan so Wikipedia's
+/// `Rust_(programming_language)` reaches the end intact; the trim
+/// stage below then arbitrates balanced vs prose-wrapping parens by
+/// counting `(` vs `)` — unbalanced trailing paren = prose, stripped;
+/// balanced = URL content, kept.
+///
+/// The old "everything non-whitespace goes" behaviour swallowed CJK
+/// prose that abutted a URL — the 2026-07-15 field report was
+/// `…/calendar(刷新一下)。` becoming the URL text, since neither `(`
+/// nor CJK chars broke the scan.  The strict char class fixes it at
+/// the source: `刷` is non-ASCII → scan stops at `(`, then the trim
+/// strips the dangling `(`.
+fn scan_until_link_terminator(chars: &[char], start: usize) -> usize {
+    let mut i = start;
+    while i < chars.len() {
+        if !is_url_char(chars[i]) {
+            break;
+        }
+        i += 1;
+    }
+    // Balanced-paren arbitration + prose punctuation trim.  Repeat
+    // until nothing fires — sentences end with `link).`, `link!`,
+    // `link.`, etc.
+    loop {
+        if i <= start {
+            break;
+        }
+        let last = chars[i - 1];
+        if last == ')' {
+            let (opens, closes) = count_parens(&chars[start..i]);
+            if closes > opens {
+                i -= 1;
+                continue;
+            }
+            break;
+        }
+        if last == '(' {
+            let (opens, closes) = count_parens(&chars[start..i]);
+            if opens > closes {
+                i -= 1;
+                continue;
+            }
+            break;
+        }
+        if matches!(last, ',' | '.' | ';' | ':' | ']' | '}' | '!' | '?') {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+fn count_parens(span: &[char]) -> (usize, usize) {
+    let mut opens = 0usize;
+    let mut closes = 0usize;
+    for &c in span {
+        if c == '(' {
+            opens += 1;
+        } else if c == ')' {
+            closes += 1;
+        }
+    }
+    (opens, closes)
+}
+
+fn is_url_char(c: char) -> bool {
+    if !c.is_ascii() {
+        return false;
+    }
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '-' | '.' | '_' | '~' | ':' | '/' | '?' | '#' | '[' | ']'
+                | '@' | '!' | '$' | '&' | '(' | ')' | '*' | '+'
+                | ',' | ';' | '=' | '%'
+        )
+}
+
+/// Try to parse `chars[start..]` as a bare IPv4 address, optionally
+/// followed by `:port` and/or `/path`.  Returns the exclusive end
+/// index on success.  Conservative — the goal is to catch things a
+/// user could Cmd-click to open in a browser (`47.96.114.231`,
+/// `192.168.1.1:8080`, `10.0.0.1/status`) without also underlining
+/// version strings.
+///
+/// Reject rules:
+///   - preceded by alnum / `.` / `-` / `_` / `@` / `/` / `:` — that
+///     shape is a version, hostname component, or already-matched URL
+///     tail, not a fresh IP boundary
+///   - any octet > 255 or with a leading zero on a 2+ digit run
+///     (`010.1.2.3` is a shell escape / rare curiosity, and the
+///     leading-zero-reject also kills `1.02.3.4`-style version noise)
+///   - after the 4 octets, next char is `.` / alnum / `-` / `_` — a
+///     5th component or an identifier-continuation = version string
+///     (`1.2.3.4.5`, `1.2.3.4-rc1`, `1.2.3.4beta`)
+fn try_scan_ipv4_url(chars: &[char], start: usize) -> Option<usize> {
+    if start > 0 {
+        let prev = chars[start - 1];
+        if prev.is_ascii_alphanumeric()
+            || matches!(prev, '.' | '-' | '_' | '@' | '/' | ':')
+        {
+            return None;
+        }
+    }
+    let mut i = start;
+    for octet in 0..4 {
+        if octet > 0 {
+            if chars.get(i) != Some(&'.') {
+                return None;
+            }
+            i += 1;
+        }
+        let d0 = i;
+        while i < chars.len() && chars[i].is_ascii_digit() && i - d0 < 3 {
+            i += 1;
+        }
+        let digits = &chars[d0..i];
+        if digits.is_empty() {
+            return None;
+        }
+        if digits.len() > 1 && digits[0] == '0' {
+            return None;
+        }
+        let val: u32 = digits
+            .iter()
+            .map(|c| c.to_digit(10).unwrap())
+            .fold(0, |a, d| a * 10 + d);
+        if val > 255 {
+            return None;
+        }
+    }
+    if let Some(&next) = chars.get(i) {
+        if next.is_ascii_alphanumeric() || matches!(next, '.' | '-' | '_') {
+            return None;
+        }
+    }
+    let ip_end = i;
+    if chars.get(i) == Some(&':') {
+        let ps = i + 1;
+        let mut pe = ps;
+        while pe < chars.len() && chars[pe].is_ascii_digit() && pe - ps < 5 {
+            pe += 1;
+        }
+        if pe > ps {
+            let port: u32 = chars[ps..pe]
+                .iter()
+                .map(|c| c.to_digit(10).unwrap())
+                .fold(0, |a, d| a * 10 + d);
+            if port <= 65535 {
+                i = pe;
+            }
+        }
+    }
+    if chars.get(i) == Some(&'/') {
+        while i < chars.len() && is_url_char(chars[i]) {
+            i += 1;
+        }
+    }
+    // Trim like the URL scanner: balanced parens + prose punctuation.
+    // The floor is `ip_end`, not `start` — the bare IPv4 body itself
+    // must not be shortened by trim (a trailing `.` inside it was
+    // already rejected by the octet regex).
+    loop {
+        if i <= ip_end {
+            break;
+        }
+        let last = chars[i - 1];
+        if last == ')' {
+            let (o, c) = count_parens(&chars[start..i]);
+            if c > o {
+                i -= 1;
+                continue;
+            }
+            break;
+        }
+        if last == '(' {
+            let (o, c) = count_parens(&chars[start..i]);
+            if o > c {
+                i -= 1;
+                continue;
+            }
+            break;
+        }
+        if matches!(last, ',' | '.' | ';' | ':' | ']' | '}' | '!' | '?') {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    Some(i)
+}
+
+/// Try to parse `chars[start..]` as an IPv6 address.  Two shapes:
+///
+///   - Bracketed: `[<ipv6>]` with optional `:port` and `/path` —
+///     unambiguous, no false-positive risk
+///   - Bare: `<ipv6>` — requires either `::` or the full 8-group form
+///     so time strings (`12:34:56`) don't trip it
+///
+/// Validation delegates to `std::net::Ipv6Addr::from_str`; the local
+/// gate just carves out the candidate token from the character stream
+/// and enforces the `::`-or-8-group rule for the bare form.
+fn try_scan_ipv6(chars: &[char], start: usize) -> Option<usize> {
+    if start > 0 {
+        let prev = chars[start - 1];
+        if prev.is_ascii_alphanumeric()
+            || matches!(prev, '.' | ':' | '-' | '_' | '@' | '/')
+        {
+            return None;
+        }
+    }
+    if chars.get(start) == Some(&'[') {
+        // Bracketed form.  Body is hex + `:` + `.` (for the IPv4-
+        // mapped `::ffff:1.2.3.4` shape); anything else in the
+        // brackets means it's not an IPv6 literal.
+        let body_start = start + 1;
+        let mut body_end = body_start;
+        while body_end < chars.len() && chars[body_end] != ']' {
+            let c = chars[body_end];
+            if !(c.is_ascii_hexdigit() || c == ':' || c == '.') {
+                return None;
+            }
+            body_end += 1;
+        }
+        if chars.get(body_end) != Some(&']') {
+            return None;
+        }
+        let body: String = chars[body_start..body_end].iter().collect();
+        body.parse::<std::net::Ipv6Addr>().ok()?;
+        let mut i = body_end + 1;
+        if chars.get(i) == Some(&':') {
+            let ps = i + 1;
+            let mut pe = ps;
+            while pe < chars.len() && chars[pe].is_ascii_digit() && pe - ps < 5 {
+                pe += 1;
+            }
+            if pe > ps {
+                let port: u32 = chars[ps..pe]
+                    .iter()
+                    .map(|c| c.to_digit(10).unwrap())
+                    .fold(0, |a, d| a * 10 + d);
+                if port <= 65535 {
+                    i = pe;
+                }
+            }
+        }
+        if chars.get(i) == Some(&'/') {
+            while i < chars.len() && is_url_char(chars[i]) {
+                i += 1;
+            }
+            // Trim prose punctuation from the path tail.
+            while i > body_end + 1 {
+                let last = chars[i - 1];
+                if matches!(last, ',' | '.' | ';' | ':' | ')' | '}' | '!' | '?') {
+                    i -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        return Some(i);
+    }
+    // Bare form: sweep hex + `:` + `.`, then validate + apply the
+    // discriminator (contains `::` OR exactly 7 colons = 8 groups).
+    let mut i = start;
+    while i < chars.len() {
+        let c = chars[i];
+        if !(c.is_ascii_hexdigit() || c == ':' || c == '.') {
+            break;
+        }
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    // Right boundary — the token must not slide into an identifier.
+    if let Some(&next) = chars.get(i) {
+        if next.is_ascii_alphanumeric() || matches!(next, '.' | '-' | '_') {
+            return None;
+        }
+    }
+    let body: String = chars[start..i].iter().collect();
+    let colon_count = body.chars().filter(|&c| c == ':').count();
+    // `::` compression is the sharpest IPv6 signal; the 8-group form
+    // (7 colons) is the other unambiguous shape.  Everything else
+    // falls back to being possibly-time / possibly-URL-port fragment
+    // and is rejected here (the URL scanner already ran).
+    if !body.contains("::") && colon_count != 7 {
+        return None;
+    }
+    body.parse::<std::net::Ipv6Addr>().ok()?;
+    Some(i)
+}
+
+/// Canonical UUID: 8-4-4-4-12 hex with dashes.  Anchored at word
+/// boundaries so partial matches inside longer identifiers don't
+/// trip.  Emits raw text; the click dispatcher offers Copy only.
+fn try_scan_uuid(chars: &[char], start: usize) -> Option<usize> {
+    if start > 0 {
+        let prev = chars[start - 1];
+        if prev.is_ascii_alphanumeric() || matches!(prev, '-' | '_' | '.' | ':' | '@' | '/') {
+            return None;
+        }
+    }
+    let seg_lens = [8usize, 4, 4, 4, 12];
+    let mut i = start;
+    for (idx, &want) in seg_lens.iter().enumerate() {
+        if idx > 0 {
+            if chars.get(i) != Some(&'-') {
+                return None;
+            }
+            i += 1;
+        }
+        let s0 = i;
+        while i < chars.len() && chars[i].is_ascii_hexdigit() && i - s0 < want {
+            i += 1;
+        }
+        if i - s0 != want {
+            return None;
+        }
+    }
+    if let Some(&next) = chars.get(i) {
+        // `/` — a uuid-named PATH COMPONENT (claude scratchpads,
+        // session dirs) is not a standalone UUID token; claiming it
+        // here splits the surrounding path into garbage links
+        // (2026-07-18 field report).  Mirrors the `/` in the
+        // left-boundary reject set.
+        if next.is_ascii_alphanumeric() || matches!(next, '-' | '_' | '.' | '/') {
+            return None;
+        }
+    }
+    Some(i)
+}
+
+/// Widest run that could still be one filesystem path.
+///
+/// Stops only where a path genuinely **cannot** continue: whitespace,
+/// control characters, and the quoting / redirection metacharacters a
+/// shell would need escaped anyway.
+///
+/// Punctuation is deliberately NOT a stop — not ASCII `(`, not the
+/// fullwidth CJK family.  It used to be, on the reasoning that CJK
+/// prose glues those onto paths far more often than filenames contain
+/// them (宁可漏不可错).  That reasoning is sound only for a scanner
+/// with no way to check its answer, and this one has the best check
+/// there is: **a path link is only ever emitted for a path that
+/// exists on disk.**  Guessing narrow could only ever lose true
+/// positives — which it did: a Japanese document named
+/// `株主総会議事録（役員報酬改定・20260805）.pdf` was cut at `（`,
+/// and the line lost its link entirely (2026-08-05 report).
+///
+/// So: scan greedily, and let [`resolve_path_end`] ask the filesystem
+/// where the name really ended.
+fn scan_path_candidate(chars: &[char], start: usize) -> usize {
+    let mut i = start;
+    while i < chars.len() {
+        let c = chars[i];
+        // A quoted run, or an escaped space.  A path with a space in
+        // it is not rare — it is what `~/Library/Safari/"Favicon
+        // Cache"` looks like the moment anyone pastes a command that
+        // touches one — and stopping at the quote leaves the link
+        // ending mid-name (2026-08-09 report).  Both shells' spellings
+        // are accepted; [`unquote_path`] takes them back off before
+        // anything is asked of the filesystem.
+        if (c == '"' || c == '\'') && i > start {
+            match closing_quote(chars, i) {
+                Some(close) => {
+                    i = close + 1;
+                    continue;
+                }
+                // An unmatched quote is prose, not a name.
+                None => break,
+            }
+        }
+        if c == '\\' && i + 1 < chars.len() && chars[i + 1] == ' ' {
+            i += 2;
+            continue;
+        }
+        if c.is_whitespace() || c == '\0' || (c.is_control() && c != '\t') {
+            break;
+        }
+        if matches!(c, '<' | '>' | '"' | '\'' | '`' | '|') {
+            break;
+        }
+        i += 1;
+    }
+    i
+}
+
+/// The partner of the quote at `open`, if it is on this line and
+/// close enough to be one.
+///
+/// Bounded because an unpaired quote is common in prose (`don't`,
+/// `"as we said"`) and an unbounded search would happily pair one
+/// with another sentence's, swallowing the line between them.  The
+/// bound is generous — names with spaces are still names, not
+/// paragraphs — and anything it lets through still has to survive
+/// `stat`.
+fn closing_quote(chars: &[char], open: usize) -> Option<usize> {
+    const MAX_QUOTED_LEN: usize = 96;
+    let q = chars[open];
+    let hi = (open + 1 + MAX_QUOTED_LEN).min(chars.len());
+    (open + 1..hi).find(|&j| chars[j] == q)
+}
+
+/// Take shell quoting back off a candidate before the filesystem is
+/// asked about it.
+///
+/// The screen shows `~/Library/Safari/"Favicon Cache"`; the thing on
+/// disk is `~/Library/Safari/Favicon Cache`.  The link's *span* stays
+/// on what is drawn — that is what the user points at — while its
+/// target is what this returns.
+fn unquote_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(c) = it.next() {
+        match c {
+            // Inside single quotes a backslash is literal, as in sh.
+            '\\' if quote != Some('\'') => {
+                if let Some(n) = it.next() {
+                    out.push(n);
+                }
+            }
+            '"' | '\'' if quote.is_none() => quote = Some(c),
+            c if Some(c) == quote => quote = None,
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Could prose have started here?
+///
+/// Every such position is a candidate end for the path — nothing
+/// more.  Being generous costs one `stat` that the cache mostly
+/// absorbs; being stingy costs a link the user can see is missing.
+///
+/// `:` is the one mark deliberately left out.  `path:120:5` is
+/// already arbitrated by [`strip_line_col_suffix`], and the rest of
+/// that family — `path:note`, `host:path` — was settled as 宁可漏 by
+/// the 2026-07-13 report.  Cutting there would reach past what this
+/// change is about: the greedy scan exists so that punctuation stops
+/// **terminating** names, not so that every mark becomes a place to
+/// chop one.
+///
+/// ASCII `.` is out for a sharper reason: inside a token it is not
+/// prose, it is the extension separator.  Cutting there turns a file
+/// that does NOT exist into its prefix that does — and the prefix is
+/// typically the directory the file is about to be written into.
+/// Reported 2026-09-11: `.notes/exprtool.html` had not been
+/// generated yet, `.notes/exprtool/` beside it had, and the line
+/// drew a link to the directory with `.html` left as plain text.
+/// Nothing is lost by leaving it out — a `.` that really does end a
+/// sentence sits at the end of the token, where
+/// [`trim_sentence_tail`] already takes it off, and the CJK stops
+/// (`。`, `，`, `——`) that end a Chinese clause are still here.
+fn is_prose_cut_point(c: char) -> bool {
+    matches!(
+        c,
+        ',' | ';' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}'
+            // A quote both opens a name-with-spaces and closes one, so
+            // it is also where a name can end and prose resume.  The
+            // greedy scan pairs them; this is what lets the arbitration
+            // back out when the pairing was wrong.
+            | '"' | '\''
+    ) || matches!(
+        c,
+        '\u{3001}'..='\u{3003}'   // 、。〃
+            | '\u{3008}'..='\u{301F}' // 〈〉《》「」『』【】〔〕〖〗〘〙〚〛〜〝〞
+            | '\u{FF01}'            // ！
+            | '\u{FF08}' | '\u{FF09}' // （）
+            | '\u{FF0C}'            // ，
+            | '\u{FF1A}' | '\u{FF1B}' // ：；
+            | '\u{FF1F}'            // ？
+            | '\u{2018}' | '\u{2019}' | '\u{201C}' | '\u{201D}' // 弯引号
+            | '\u{2026}'            // …
+            | '\u{30FB}'            // ・
+            // The dash family.  `——` is how Chinese prose attaches a
+            // gloss to the thing it just named, so it lands glued to
+            // the end of a path with no space to stop the greedy scan
+            // (`…/paper1-discovers.html——页首是三条路与定论`, 2026-09-04
+            // field report).  ASCII `-` stays out — filenames are full
+            // of it — but these have no business inside one, and even
+            // if a name did carry one the longer candidate is offered
+            // to the filesystem first and wins.
+            | '\u{2013}' | '\u{2014}' | '\u{2015}' // – — ―
+            | '\u{2212}' | '\u{FF0D}' // − －
+            | '\u{00B7}' | '\u{2022}' // · •
+            | '\u{FF0E}' | '\u{FF5E}' // ． ～
+    )
+}
+
+/// Most candidate ends we will `stat` for one token.
+///
+/// This runs on the render path — `build_instances` scans every
+/// visible pane every frame — so the greedy scan has to come with a
+/// ceiling.  A real path glued to prose resolves within the first two
+/// or three tries; a line of pure punctuation is what the cap is for.
+const MAX_PATH_CANDIDATES: usize = 24;
+
+/// Trim the trailing marks that end a sentence rather than a name.
+///
+/// Tried as a *variant* of each candidate, never instead of it: a
+/// filename really ending in one of these is legal, and the untrimmed
+/// form is offered to the filesystem first.
+fn trim_sentence_tail(chars: &[char], lo: usize, mut end: usize) -> usize {
+    while end > lo
+        && matches!(chars[end - 1], ',' | '.' | ';' | ':' | ')' | ']' | '}' | '!' | '?')
+    {
+        end -= 1;
+    }
+    end
+}
+
+/// Where did the path actually end?  Ask the disk, longest first.
+///
+/// The scan is deliberately greedy, so this is the whole arbitration:
+/// each candidate end is offered to `is_real_path`, longest first, and
+/// the first one that exists wins.  Longest-first matters — when both
+/// a file and the directory prefixing it exist, the line is pointing
+/// at the file.
+///
+/// Cannot invent a link: prose does not name files that exist.
+fn resolve_path_end(
+    chars: &[char],
+    lo: usize,
+    hi: usize,
+    segments: &[LineSegment],
+    oracle: &dyn PathOracle,
+) -> Option<usize> {
+    resolve_path_end_from(chars, lo, hi, segments, oracle, None)
+}
+
+/// [`resolve_path_end`] with an optional base directory.  When `base`
+/// is set the candidate is RELATIVE: every trimming step is the same,
+/// but what gets asked of the filesystem is `<base>/<candidate>`, so
+/// the returned end still indexes the text as drawn.
+fn resolve_path_end_from(
+    chars: &[char],
+    lo: usize,
+    hi: usize,
+    segments: &[LineSegment],
+    oracle: &dyn PathOracle,
+    base: Option<&str>,
+) -> Option<usize> {
+    let mut tried = 0usize;
+    let mut last: Option<usize> = None;
+    let consider = |end: usize, tried: &mut usize, last: &mut Option<usize>| -> bool {
+        if end <= lo || *last == Some(end) || *tried >= MAX_PATH_CANDIDATES {
+            return false;
+        }
+        *last = Some(end);
+        *tried += 1;
+        let span = &chars[lo..end];
+        let text: String = span.iter().collect();
+        let unquoted = unquote_path(&text);
+        match base {
+            None => {
+                if !looks_like_path(span) {
+                    return false;
+                }
+                is_real_path(oracle, &unquoted)
+            }
+            Some(cwd) => {
+                if !looks_like_relative_path(span) {
+                    return false;
+                }
+                is_real_path(oracle, &join_cwd(cwd, &unquoted))
+            }
+        }
+    };
+    // The whole token, then the whole token minus its sentence tail.
+    if consider(hi, &mut tried, &mut last) {
+        return Some(hi);
+    }
+    let trimmed = trim_sentence_tail(chars, lo, hi);
+    if trimmed < hi && consider(trimmed, &mut tried, &mut last) {
+        return Some(trimmed);
+    }
+    // rustc / panic output habitually appends `:line(:col)`.
+    let stripped = strip_line_col_suffix(chars, lo, hi);
+    if stripped < hi && consider(stripped, &mut tried, &mut last) {
+        return Some(stripped);
+    }
+    // Then the seams claudecode broke the line at, and every point
+    // prose could have started — one pass, longest first.
+    //
+    // A seam matters when the line broke at a space: the space
+    // survives nowhere, so the merged text has two tokens run
+    // together and the seam is exactly where they part.  But it is
+    // one candidate end among the others, not a rule that outranks
+    // them.  It used to be tried first, and a path broken right
+    // before a `/` then stopped at the directory on the upper row
+    // even when the full file name, ended by the `。` glued to it,
+    // existed too (2026-09-16:
+    // `…/buwanren/notes/rfcs` ⏎ `/20260916-handoff.md。按项目…`).
+    // Longest-first is the rule everywhere else in this function —
+    // when a file and the directory above it both exist, the line is
+    // pointing at the file.
+    for cut in (lo + 1..hi).rev() {
+        if tried >= MAX_PATH_CANDIDATES {
+            break;
+        }
+        let is_seam = segments.iter().any(|seg| seg.cc_seam && seg.char_offset == cut);
+        if is_seam && !seam_cuts_a_name(chars, cut) && consider(cut, &mut tried, &mut last) {
+            return Some(cut);
+        }
+        if !is_prose_cut_point(chars[cut]) {
+            continue;
+        }
+        let end = trim_sentence_tail(chars, lo, cut);
+        if consider(end, &mut tried, &mut last) {
+            return Some(end);
+        }
+    }
+    None
+}
+
+/// Does this slice look enough like a path that it's WORTH the
+/// follow-up `stat()` check?  Cheap structural filter that throws
+/// out obvious garbage so we don't spend syscalls on it:
+///
+///   - too short to be plausible (`/`, `~/`)
+///   - contains consecutive slashes (`//`, `//./`, `////`)
+///   - root + dot-only components (`/.`, `/..`, `/./`)
+///   - no actual letter or digit anywhere (only slashes, dots, dashes)
+///
+/// Real existence is verified by `is_real_path`; this just avoids
+/// asking the filesystem about strings that couldn't possibly be a
+/// filename a human typed or a tool printed.
+fn looks_like_path(chars: &[char]) -> bool {
+    if chars.len() < 2 {
+        return false;
+    }
+    // No consecutive slashes anywhere.
+    for w in chars.windows(2) {
+        if w[0] == '/' && w[1] == '/' {
+            return false;
+        }
+    }
+    // Skip the leading `/` or `~/` prefix.
+    let body_start = if chars[0] == '~' { 2 } else { 1 };
+    if body_start >= chars.len() {
+        return false;
+    }
+    let body = &chars[body_start..];
+    // Must contain at least one alphanumeric char somewhere in the body
+    // (rules out `/./`, `/..`, `/-/-/`, etc).
+    if !body.iter().any(|c| c.is_alphanumeric()) {
+        return false;
+    }
+    // Reject paths whose every component is only dots (`/././.`).
+    let mut all_dots = true;
+    for seg in body.split(|c| *c == '/') {
+        if !seg.is_empty() && !seg.iter().all(|c| *c == '.') {
+            all_dots = false;
+            break;
+        }
+    }
+    if all_dots {
+        return false;
+    }
+    true
+}
+
+/// Ask the oracle whether the candidate path is real.  Only
+/// `Exists` makes a link: `Unknown` — the async oracle has not
+/// resolved this path yet — reads exactly like `Missing` here, so a
+/// path the oracle has not seen simply is not underlined on this
+/// frame.  It becomes a link on a later frame, once the answer
+/// lands.  That collapse is the whole point of the three-state
+/// verdict: the scanner needs no notion of "pending".
+fn is_real_path(oracle: &dyn PathOracle, path: &str) -> bool {
+    matches!(oracle.probe(path), PathVerdict::Exists)
+}
+
+/// Turn a link's text into a path the OS will accept.
+///
+/// `~` is shell syntax, not filesystem syntax: nothing below the shell
+/// expands it.  This matters beyond the existence check — whoever ACTS
+/// on a file link (opening it, revealing it) has to hand the same
+/// expanded path to the OS, or the link resolves here and fails there.
+/// That was live until 2026-08-21: every `~/…` file link stat'ed fine,
+/// underlined, and then did nothing when opened, because
+/// `/usr/bin/open` took `~` for a directory name and looked for it
+/// under the process's cwd.
+///
+/// Returns `None` only when `~/` is present and `HOME` is not — there
+/// is no sensible path to hand back in that case.
+pub fn expand_user_path(path: &str) -> Option<PathBuf> {
+    match path.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME").map(|home| {
+            let mut p = PathBuf::from(home);
+            p.push(rest);
+            p
+        }),
+        None => Some(PathBuf::from(path)),
+    }
+}
+
+/// What the oracle knows about one candidate path.
+///
+/// `Unknown` exists so an oracle can answer without touching the
+/// filesystem.  `scan_visible_links` runs inside `build_instances`,
+/// once per pane per frame; an oracle that blocks on `lstat` there
+/// puts a syscall — and a page-cache miss, and whatever the disk is
+/// doing — on the render thread.  On 2026-08-22 that cost a live
+/// 14-pane window frames of 2.1 s to 13.6 s (`l2.loop.stall`,
+/// build-bound), with 79.5 % of render self-time in `lstat` under
+/// this call.  An async oracle answers `Unknown` on a miss, queues
+/// the probe, and the link appears a frame or two later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathVerdict {
+    /// The path resolves to a filesystem entry.
+    Exists,
+    /// The path was checked and does not resolve.
+    Missing,
+    /// Not checked yet.  Never blocks; treated as "no link, for now".
+    Unknown,
+}
+
+/// Decides whether a candidate path is real.  Injected so the stone
+/// crate itself performs no I/O: the scanner is pure over
+/// (cells, opts, oracle), which is also what makes it testable
+/// without a filesystem.
+pub trait PathOracle {
+    fn probe(&self, path: &str) -> PathVerdict;
+}
+
+/// The blocking oracle: one `symlink_metadata` per call, no cache.
+///
+/// Correct for one-shot callers (tests, `scan_text_line`, snapshot
+/// rendering) where a handful of stats is cheaper than any cache.
+/// NOT for the render loop — see [`PathVerdict::Unknown`].
+pub struct FsOracle;
+
+impl PathOracle for FsOracle {
+    fn probe(&self, path: &str) -> PathVerdict {
+        match expand_user_path(path) {
+            Some(expanded) if std::fs::symlink_metadata(&expanded).is_ok() => PathVerdict::Exists,
+            _ => PathVerdict::Missing,
+        }
+    }
+}
+
+/// An oracle that answers `Unknown` for everything — no link is ever
+/// a file link.  For callers that want URL/email/IP detection with
+/// zero filesystem access.
+pub struct NoFsOracle;
+
+impl PathOracle for NoFsOracle {
+    fn probe(&self, _path: &str) -> PathVerdict {
+        PathVerdict::Unknown
+    }
+}
+
+/// Structural URL filter.  The `http://` / `https://` prefix is the
+/// caller's gate; this checks the rest.  Rejects:
+///
+///   - hosts that are empty, `localhost`-shaped (no dot, no digits),
+///     or just punctuation (`https://.`, `https://-`)
+///   - hosts whose first or last byte is a dot or dash
+///   - hosts shorter than 3 chars (`https://a` — too short to point
+///     anywhere a user typed on purpose)
+fn looks_like_url(span: &[char]) -> bool {
+    // Find the scheme separator.
+    let after_scheme = if matches_prefix(span, 0, "https://") {
+        8
+    } else if matches_prefix(span, 0, "http://") {
+        7
+    } else {
+        return false;
+    };
+    if after_scheme >= span.len() {
+        return false;
+    }
+    // Host runs until the next `/`, `?`, `#`, or end.
+    let mut host_end = after_scheme;
+    while host_end < span.len() {
+        let c = span[host_end];
+        if c == '/' || c == '?' || c == '#' {
+            break;
+        }
+        host_end += 1;
+    }
+    let host = &span[after_scheme..host_end];
+    if host.len() < 3 {
+        return false;
+    }
+    let first = host[0];
+    let last = host[host.len() - 1];
+    if first == '.' || first == '-' || last == '.' || last == '-' {
+        return false;
+    }
+    // Host characters must be a sane subset.
+    if !host.iter().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(*c, '.' | '-' | ':')
+    }) {
+        return false;
+    }
+    // Split off an explicit port so the name and the port can be
+    // judged separately — which is the whole of the rule below.
+    let (name, port) = match host.iter().position(|c| *c == ':') {
+        Some(i) => (&host[..i], Some(&host[i + 1..])),
+        None => (host, None),
+    };
+    if name.is_empty() {
+        return false;
+    }
+    let port_ok = match port {
+        // `http://host:port` — the placeholder people actually write —
+        // stays rejected, because `port` is not a number.
+        Some(p) => !p.is_empty() && p.len() <= 5 && p.iter().all(|c| c.is_ascii_digit()),
+        None => false,
+    };
+    // A dotted name is the ordinary case.  An explicit numeric port is
+    // the other one, and it is what a dev terminal is full of:
+    // `localhost:6014`, `myserver:8080`.  A port is what separates a
+    // real address from the `https://x` placeholders this filter exists
+    // to reject — those never carry one, and the `http://host:port`
+    // people actually type fails the digits test above.
+    //
+    // 2026-08-07 report: `http://localhost:6014/tools/documents` went
+    // unlinked.  The rule was written as "no dot, no digits" and
+    // implemented as "no dot" — the digits half was never there.
+    //
+    // Bare `https://localhost` stays rejected.  That was settled
+    // separately (`url_without_dot_in_host_rejected`: it is the shape
+    // chat examples take), and a port is all this report needs.
+    name.iter().any(|c| *c == '.') || port_ok
+}
+
+/// Walk backwards from an `@` to find the start of the local part.
+/// Stops as soon as we hit something that can't be in an email local
+/// part (whitespace, punctuation we don't allow, etc.).
+fn scan_back_local(chars: &[char], at_pos: usize) -> usize {
+    let mut i = at_pos;
+    while i > 0 {
+        let c = chars[i - 1];
+        if is_email_local_char(c) {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+/// Walk forward from after `@` for the host part: letters, digits,
+/// `-`, `.`.  Stops at the first foreign char.
+fn scan_forward_host(chars: &[char], start: usize) -> usize {
+    let mut i = start;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    // Trim a trailing dot (common in prose: "ping foo@bar.com.").
+    if i > start && chars[i - 1] == '.' {
+        i -= 1;
+    }
+    i
+}
+
+/// Structural hostname check for the email scanner, distilled from
+/// how mature linkifiers avoid the `pkg@1.0.23` false-positive class
+/// (npm/cargo version strings, `tag@sha`, `image@digest`, …):
+///
+///   - dot-separated labels, ≥ 2 of them
+///   - every label non-empty, `[a-z0-9-]`, no leading/trailing `-`
+///   - the FINAL label (TLD) is purely ALPHABETIC, length ≥ 2 —
+///     this is the discriminating rule; no real TLD is numeric
+///
+/// GitHub's linkifier and commonmark autolinks apply the same TLD
+/// constraint; WezTerm's default `\w+@[\w-]+(\.[\w-]+)+` does not
+/// and underlines version strings — the exact trap we hit
+/// (2026-07-12: `adapter-maestro@1.0.23` underlined).  IP-literal
+/// mail hosts are RFC-legal but never appear in prose worth
+/// linking; deliberately left unmatched.
+fn is_email_host(chars: &[char]) -> bool {
+    if chars.is_empty() {
+        return false;
+    }
+    let mut label_count = 0usize;
+    let mut last_label_alpha = false;
+    let mut last_label_len = 0usize;
+    for label in chars.split(|c| *c == '.') {
+        if label.is_empty() {
+            return false;
+        }
+        if label[0] == '-' || label[label.len() - 1] == '-' {
+            return false;
+        }
+        if !label
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == '-')
+        {
+            return false;
+        }
+        label_count += 1;
+        last_label_alpha = label.iter().all(|c| c.is_ascii_alphabetic());
+        last_label_len = label.len();
+    }
+    label_count >= 2 && last_label_alpha && last_label_len >= 2
+}
+
+fn is_email_local_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-' | '%')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A path wrapped mid-token, with the break landing on an
+    /// ordinary character rather than on a separator.
+    ///
+    /// The merge used to demand the first row end within 2 cells of
+    /// the pane edge, relaxing to 8 only when the row ended in `/`.
+    /// claudecode's `●`/`⎿` blocks wrap at a content width several
+    /// cells short of the pane, so where the break lands decides
+    /// whether the path survives — and the path does not get a say in
+    /// that.  Here it landed inside `…-e18-ve` / `rdict.md`: the
+    /// halves stayed separate, the first half named nothing that
+    /// exists, and the link fell back to the last directory that did
+    /// (`~/workspace/labs/lab36-continus/`), which is exactly what the
+    /// user saw underlined (2026-08-16).
+    ///
+    /// Swept across the gap widths a real pane produces, because a
+    /// fixture at one width only proves that width.
+    /// codex wraps flush at column 0, and its URLs were cut at the
+    /// wrap.
+    ///
+    /// The three rows are copied off pane 435 at 73 columns
+    /// (2026-09-26): a 401 body whose two URLs each break mid-token,
+    /// once right after the scheme and once inside the path.  What the
+    /// user saw: the first URL not underlined at all, and the second
+    /// underlined as `https://chatgpt.com/backend-` — a URL that
+    /// exists and goes somewhere else.
+    #[test]
+    fn a_url_wrapped_flush_at_column_zero_is_still_one_url() {
+        let rows = [
+            "**************fvMA. You can find your API key at https://",
+            "platform.openai.com/account/api-keys., url: https://chatgpt.com/backend-",
+            "api/codex/responses, cf-ray: a40db52ee9100dce-NRT, request id: 3acb2d64-",
+            "504d-49d5-9030-a179087f4bce",
+            "",
+        ];
+        let mut src = StrSource::new(&rows, 73);
+        src.cursor = (0, 4);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        assert!(
+            texts.contains(&"https://platform.openai.com/account/api-keys"),
+            "the URL broken after its scheme must rejoin, got {texts:?}"
+        );
+        assert!(
+            texts.contains(&"https://chatgpt.com/backend-api/codex/responses"),
+            "the URL broken inside its path must rejoin, got {texts:?}"
+        );
+        assert!(
+            !texts.contains(&"https://chatgpt.com/backend-"),
+            "and must never be offered as the half that fits, got {texts:?}"
+        );
+    }
+
+    /// A row with nothing left over is not evidence of anything.
+    ///
+    /// It can end at the edge because it wrapped or because it fitted;
+    /// the screen cannot say which, so the flush seam keeps stopping
+    /// the URL.  `marspot-term`'s own `zero_indent_does_not_glue_urls`
+    /// watches the same line from the grid side — this is the case the
+    /// first cut of the forced-break test got wrong, because with no
+    /// room left every word looks like it did not fit.
+    #[test]
+    fn a_full_row_is_not_evidence_of_a_wrap() {
+        let url = format!("https://example.com/{}", "a".repeat(10)); // 30 chars
+        let rows = [url.as_str(), "and more prose", ""];
+        let mut src = StrSource::new(&rows, 30);
+        src.cursor = (0, 2);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, vec![url.as_str()], "the URL must stop at the row edge");
+    }
+
+    /// A break the renderer did not have to make is a real newline.
+    ///
+    /// Same shape — a URL ending a row, a flush row under it opening
+    /// with path characters — but the word below had room on the row
+    /// above.  Joining those would invent a URL that is on neither
+    /// row, and nothing would arbitrate it.
+    #[test]
+    fn a_flush_row_that_had_room_is_not_a_wrap() {
+        let rows = [
+            "see https://example.com",
+            "api/codex/responses is the endpoint",
+            "",
+        ];
+        let mut src = StrSource::new(&rows, 73);
+        src.cursor = (0, 2);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        assert!(
+            texts.contains(&"https://example.com"),
+            "the URL that is actually there, got {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("example.comapi")),
+            "nothing may be glued across a break that was not forced, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_path_wrapped_mid_token_is_still_one_path() {
+        let dir = std::env::temp_dir().join("marspot-linkify-wrap-test");
+        let deep = dir.join("reports");
+        if std::fs::create_dir_all(&deep).is_err() {
+            return; // no temp dir: nothing to assert against
+        }
+        let file = deep.join("2026-08-16-e18-verdict.md");
+        if std::fs::write(&file, b"x").is_err() {
+            return;
+        }
+        let full = file.to_string_lossy().into_owned();
+        // Cut the path mid-token, two characters before the end.
+        let cut = full.len() - 8;
+        let r0 = format!("● Write({}", &full[..cut]);
+        let r1 = format!("  {})", &full[cut..]);
+        let width = r0.chars().count() as u16;
+
+        // Gaps of 0..=7 columns between the text and the pane edge.
+        // Seven is what the slack buys; the case that prompted this
+        // was a gap of two, which the old slack of 2 already refused
+        // (it tolerated one), so the margin is real rather than
+        // fitted to the one report.
+        for gap in 0..=7u16 {
+            let cols = width + gap;
+            let mut src = StrSource::new(&[r0.as_str(), r1.as_str(), ""], cols);
+            src.cursor = (0, 2);
+            let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+            assert!(
+                links.iter().any(|l| l.text == full),
+                "gap {gap}: the two halves must rejoin into {full:?}, got {:?}",
+                links.iter().map(|l| &l.text).collect::<Vec<_>>(),
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// claudecode's composer as it is drawn **today** — two grey
+    /// rules with the prompt between them, no rounded corners
+    /// anywhere.  Captured off the wire from a live pane
+    /// (2026-08-14): `…/effort ␛[1B ─────… ␛[1B ❯ ␛[6G␛[K ␛[1B
+    /// ─────… ⏵⏵ bypass permissions on`.
+    ///
+    /// The path being typed must not underline itself, and the path
+    /// in the output *above* the composer must still be a link —
+    /// exempting the composer is not permission to stop scanning.
+    #[test]
+    fn the_composer_is_exempt_even_when_it_has_no_box() {
+        // Real paths on both sides: a span only survives the scan if
+        // it exists on disk, so a fixture of invented names would
+        // pass whether or not the exemption worked.
+        let rule: String = "─".repeat(40);
+        let rows = [
+            "wrote /etc/hosts just now",
+            "",
+            "  Ran 1 shell command",
+            "",
+            "some more output",
+            rule.as_str(),
+            "❯ /usr/bin",
+            rule.as_str(),
+            "⏵⏵ bypass permissions on (shift+tab to cycle)",
+        ];
+        let mut src = StrSource::new(&rows, 46);
+        src.cursor = (10, 6); // caret in the prompt row
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        assert!(
+            links.iter().all(|l| l.row != 2),
+            "the composer must not be scanned: {links:?}",
+        );
+        assert!(
+            links.iter().any(|l| l.row == 0 && l.text.contains("/etc/hosts")),
+            "output above the composer is still linkable: {links:?}",
+        );
+    }
+
+    /// Also found while investigating the 2026-09-04 report, and also
+    /// not its cause: with a DECAWM soft wrap (rather than the
+    /// claudecode hard wrap that report turned out to involve), a
+    /// caret coming to rest on the continuation — the
+    /// tail of a path the terminal had wrapped — and the chromeless-
+    /// composer branch claimed it, so the continuation never joined
+    /// the row above it.  The scan then saw a prefix that is not a
+    /// real path and backed off to the longest one that is.
+    ///
+    /// A composer's first row is drawn by the app; it is never the
+    /// tail of a wrapped line.  That is the whole distinction.
+    #[test]
+    fn a_caret_resting_on_a_wrapped_tail_is_not_a_composer() {
+        // `/etc/hosts` exists everywhere this builds.
+        let rows = ["see /etc/hos", "ts here"];
+        let mut src = StrSource::new(&rows, 12);
+        src.soft_wrapped = vec![false, true];
+        src.cursor = (7, 1); // caret parked on the continuation
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        assert!(
+            links.iter().any(|l| l.text == "/etc/hosts"),
+            "the wrapped tail was swallowed by a phantom composer: {links:?}",
+        );
+    }
+
+    /// 2026-09-04, the reported defect itself, reproduced from
+    /// session 385's bytelog: `…/notes/provenance-probe.sh -n 5`
+    /// underlined only as far as `…/spg/`.
+    ///
+    /// claudecode broke that line at the space.  The break costs the
+    /// space twice over — the previous row's trailing blanks are
+    /// popped and this row's hanging indent is skipped — so the merge
+    /// produces `…probe.sh-n 5`, which is not a file.  Backing off
+    /// through punctuation then lands on the directory.
+    ///
+    /// A break inside a word (`…exec-tax` + `-2026-09-04.md`) needs
+    /// exactly the seamless join this one must not have, and the two
+    /// are indistinguishable on the grid: both rows fill the width,
+    /// both continuations open with `-`.  So the seam is offered as a
+    /// candidate end rather than decided either way.
+    #[test]
+    fn a_cc_seam_where_the_line_broke_at_a_space_is_a_candidate_end() {
+        // The shape needs a shorter prefix that DOES exist, or the
+        // wrong answer has nowhere to land and the test passes for
+        // the wrong reason.  A dotted directory supplies exactly that
+        // — which is why the report ended at `…/spg/`.
+        let root = std::env::temp_dir().join(format!("marspot-seam-{}", std::process::id()));
+        let deep = root.join(".notes").join("docs");
+        std::fs::create_dir_all(&deep).unwrap();
+        let file = deep.join("probe.sh");
+        std::fs::write(&file, b"x").unwrap();
+        let p = file.display().to_string();
+
+        let first = format!("  {p}");
+        let rows = [first.as_str(), "  -n 5"];
+        let cols = first.chars().count() as u16;
+        let mut src = StrSource::new(&rows, cols);
+        src.cursor = (6, 1);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        let root_s = format!("{}/", root.display());
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(
+            texts.iter().any(|t| *t == p),
+            "seam not offered as a path end, got {texts:?}",
+        );
+        assert!(
+            !texts.iter().any(|t| *t == root_s),
+            "fell back past the seam to a bare directory: {texts:?}",
+        );
+    }
+
+    /// Reported 2026-09-16.  claudecode broke an absolute path right
+    /// before a `/`, and the file name on the next row had Chinese
+    /// glued to it with no space:
+    ///
+    ///   `交接文档写好了：/Users/…/buwanren/notes/rfcs`
+    ///   `  /20260916-handoff.md。按项目规矩写在 …`
+    ///
+    /// The link stopped at `…/rfcs` — a directory the line never
+    /// named.  The seam and the `。` are both candidate ends and both
+    /// exist on disk; the file is the longer one and has to win.
+    #[test]
+    fn a_seam_does_not_outrank_a_longer_end_that_exists() {
+        let root = std::env::temp_dir().join(format!("marspot-seam-cjk-{}", std::process::id()));
+        let dir = root.join("notes").join("rfcs");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("handoff.md"), b"x").unwrap();
+        let d = dir.display().to_string();
+
+        let first = format!("  {d}");
+        let second = "  /handoff.md。按项目规矩写在";
+        let rows = [first.as_str(), second];
+        let cols = first.chars().count() as u16;
+        let mut src = StrSource::new(&rows, cols);
+        src.cursor = (0, 1);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        std::fs::remove_dir_all(&root).ok();
+
+        let want = format!("{d}/handoff.md");
+        assert!(texts.iter().any(|t| *t == want), "got {texts:?}");
+        assert!(!texts.iter().any(|t| *t == d), "stopped at the seam: {texts:?}");
+    }
+
+    /// The counter-case that keeps the seam a candidate rather than a
+    /// rule: a name really broken mid-word still matches whole,
+    /// because the full span is offered before any seam.
+    #[test]
+    fn a_word_broken_across_a_cc_seam_still_matches_whole() {
+        let rows = ["  /etc/hos", "  ts"];
+        let mut src = StrSource::new(&rows, 10);
+        src.cursor = (4, 1);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        assert!(
+            links.iter().any(|l| l.text == "/etc/hosts"),
+            "seamless join broken: {links:?}",
+        );
+    }
+
+    /// claudecode's `⎿` result block hangs its wrapped continuation at
+    /// FIVE cells (`  ⎿  `), one past the indent bound that was
+    /// measured off its prose blocks.  Every path those blocks wrapped
+    /// lost its tail: the link stopped at the last directory that
+    /// happened to exist on disk.  Reproduced from session 384's
+    /// bytelog, which breaks the line with `\r ESC[5C ESC[1B` —
+    /// geometrically a five-cell hanging indent.
+    #[test]
+    fn a_path_wrapped_into_a_five_cell_hanging_indent_still_joins() {
+        // Five leading cells stand in for `  ⎿  `, so the test does not
+        // also depend on that glyph's width.
+        let rows = ["     /etc/ho", "     sts"];
+        let src = StrSource::new(&rows, 12);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        assert!(
+            links.iter().any(|l| l.text == "/etc/hosts"),
+            "five-cell hanging indent did not join: {links:?}",
+        );
+    }
+
+    /// The bound only widens for a tail that carries a separator.  A
+    /// prose row has no `stat` to arbitrate a wrong join, so a line
+    /// five cells in is still its own line — and the path that starts
+    /// it keeps its link instead of being glued onto the word above.
+    #[test]
+    fn a_prose_tail_does_not_swallow_the_next_line_at_five_cells() {
+        let rows = ["     plain wor", "     /etc/hosts"];
+        let src = StrSource::new(&rows, 15);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        assert!(
+            links.iter().any(|l| l.text == "/etc/hosts"),
+            "prose row was joined and swallowed the path below it: {links:?}",
+        );
+    }
+
+    /// A separate defect found while investigating the 2026-09-04
+    /// report — not its cause (that was the seam above), but real:
+    /// paths that did NOT wrap lost their links entirely near the
+    /// bottom of the pane.
+    ///
+    /// The caret comes to rest at the end of the last line of output.
+    /// Treating that as the chromeless composer exempts the very line
+    /// the user is looking at — not a truncated link, no link at all.
+    #[test]
+    fn a_caret_at_the_end_of_output_does_not_blank_its_own_row() {
+        let rows = ["first line", "see /etc/hosts here"];
+        let mut src = StrSource::new(&rows, 24);
+        src.cursor = (19, 1); // caret where output left it
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        assert!(
+            links.iter().any(|l| l.text == "/etc/hosts"),
+            "output row blanked by a phantom composer: {links:?}",
+        );
+    }
+
+    /// 2026-09-06 field report: a path wrapped by claudecode inside a
+    /// 73-column pane underlined only as far as `…/lab36-continus/`.
+    ///
+    /// claudecode does not wrap at the pane edge — it wraps at its own
+    /// content width, an indent inside it, and that width differs by
+    /// block.  The first row stopped at column 65 of a 73-column pane,
+    /// eight cells short, and the flush test allowed exactly eight:
+    /// off by one.  Widening the constant would only move the boundary
+    /// to the next block type, so the tail carrying a `/` is what
+    /// decides now, with `stat` and the seam candidate arbitrating.
+    #[test]
+    fn a_path_wrapped_short_of_the_pane_edge_still_joins() {
+        let root = std::env::temp_dir()
+            .join(format!("marspot-shortwrap-{}", std::process::id()));
+        // A dotted directory gives the wrong answer somewhere real to
+        // land — without it the test could pass for the wrong reason.
+        let deep = root.join(".tmp");
+        std::fs::create_dir_all(&deep).unwrap();
+        let file = deep.join("20260906-gpt6-headline-strategy-for-claude.md");
+        std::fs::write(&file, b"x").unwrap();
+        let p = file.display().to_string();
+
+        // Split mid-word, and leave the first row well short of the
+        // pane edge — which is what claudecode actually produces.
+        let cut = p.find("gpt6-").map(|i| i + "gpt6-".len()).unwrap();
+        let (a, b) = p.split_at(cut);
+        let short_of_edge = (a.chars().count() as u16) + 8;
+
+        let rows = [a, b];
+        let mut src = StrSource::new(&rows, short_of_edge);
+        src.cursor = (0, 1);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        let dir_only = format!("{}/", root.display());
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(
+            texts.iter().any(|t| *t == p),
+            "wrapped path not joined: {texts:?}",
+        );
+        assert!(
+            !texts.iter().any(|t| *t == dir_only),
+            "fell back to the directory: {texts:?}",
+        );
+    }
+
+    /// 2026-09-06 report: `file:///Users/…/paper1-discovers.html`
+    /// underlined from the `/Users` on, leaving `file:` beside the
+    /// link — the path matched on its own, so the click worked while
+    /// the selection started four characters late.
+    #[test]
+    fn a_file_url_is_one_link_including_its_scheme() {
+        let root = std::env::temp_dir().join(format!("marspot-fileurl-{}", std::process::id()));
+        let deep = root.join(".notes");
+        std::fs::create_dir_all(&deep).unwrap();
+        let f = deep.join("paper1-discovers.html");
+        std::fs::write(&f, b"x").unwrap();
+        let p = f.display().to_string();
+        let url = format!("file://{p}");
+
+        let bare = scan(&url);
+        let in_prose = scan(&format!("open {url} now"));
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(bare.len(), 1, "{bare:?}");
+        assert_eq!(bare[0].text, url, "the scheme belongs to the link");
+        assert_eq!(bare[0].kind, LinkKind::File, "it names a file, not a web page");
+        assert!(
+            in_prose.iter().any(|l| l.text == url),
+            "surrounded by prose it is still one link: {in_prose:?}",
+        );
+    }
+
+    /// A `file://` URL naming something that is NOT there must not be
+    /// underlined.  This is the whole reason it is a `File` and not a
+    /// `Url`: a URL has no arbiter, and would happily link a file that
+    /// does not exist.
+    #[test]
+    fn a_file_url_for_a_missing_path_is_not_a_link() {
+        let v = scan("file:///nope/definitely/not/here-9c3f1e.html");
+        assert!(
+            !v.iter().any(|l| l.text.starts_with("file://")),
+            "missing file must not link: {v:?}",
+        );
+    }
+
+    /// The shape claudecode shipped in v2.1.212 — no box, no rules,
+    /// just the prompt line.  There is nothing above the caret to
+    /// widen to, so the caret's own row is the exemption, and the
+    /// bounded upward walk must not swallow the output above it.
+    #[test]
+    fn a_composer_with_no_chrome_at_all_still_exempts_its_own_row() {
+        let rows = [
+            "see /etc/hosts for details",
+            "and /usr/share too",
+            "❯ /usr/bin",
+        ];
+        let mut src = StrSource::new(&rows, 40);
+        src.cursor = (10, 2);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        assert!(links.iter().all(|l| l.row != 2), "caret row exempt: {links:?}");
+        assert!(
+            links.iter().filter(|l| l.row == 0 || l.row == 1).count() >= 2,
+            "both output rows keep their links: {links:?}",
+        );
+    }
+
+    /// A caret parked up in the output — which happens mid-repaint —
+    /// must not exempt everything below it.  This is the failure the
+    /// bottom-third guard exists to prevent, and it is worse than the
+    /// bug being fixed: it would silently drop links from real text.
+    #[test]
+    fn a_caret_in_the_output_does_not_blank_the_rows_below_it() {
+        let rows = [
+            "line one",
+            "see /etc/hosts here",
+            "see /usr/bin here",
+            "see /usr/lib here",
+            "see /var/log here",
+            "see /usr/share here",
+        ];
+        let mut src = StrSource::new(&rows, 30);
+        src.cursor = (0, 1); // top of the view, nowhere near a composer
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        for r in 1..=5u16 {
+            assert!(
+                links.iter().any(|l| l.row == r),
+                "row {r} lost its link to a bogus exemption: {links:?}",
+            );
+        }
+    }
+
+    /// A separator row is drawn rule and nothing else.  A table row
+    /// built from the same glyphs carries text between them and must
+    /// not be mistaken for one, or the upward walk would stop early
+    /// and leave part of a multi-line prompt scanned.
+    #[test]
+    fn a_table_row_is_not_a_separator() {
+        let src = StrSource::new(&["│ name │ size │", "──────────────"], 15);
+        assert!(!is_separator_row(&src, 0, 15), "text between rules is a table");
+        assert!(is_separator_row(&src, 1, 15), "a bare rule is a separator");
+    }
+
+    /// Minimal CellSource over plain rows of text — what a test needs
+    /// and nothing more.  Wide chars are "everything above ASCII that
+    /// the terminal would render double-width"; for tests the CJK +
+    /// fullwidth ranges suffice.
+    pub(crate) struct StrSource {
+        pub rows: Vec<Vec<char>>,
+        pub cols: u16,
+        pub cursor: (u16, u16),
+        pub soft_wrapped: Vec<bool>,
+    }
+    impl StrSource {
+        pub fn new(rows: &[&str], cols: u16) -> Self {
+            let rows: Vec<Vec<char>> = rows
+                .iter()
+                .map(|r| {
+                    let mut v: Vec<char> = r.chars().collect();
+                    v.truncate(cols as usize);
+                    while v.len() < cols as usize {
+                        v.push('\0');
+                    }
+                    v
+                })
+                .collect();
+            let n = rows.len();
+            Self { rows, cols, cursor: (0, 0), soft_wrapped: vec![false; n] }
+        }
+    }
+    impl CellSource for StrSource {
+        fn cols(&self) -> u16 { self.cols }
+        fn rows(&self) -> u16 { self.rows.len() as u16 }
+        fn char_at(&self, col: u16, row: u16) -> char {
+            self.rows[row as usize][col as usize]
+        }
+        fn is_soft_wrap_continuation(&self, row: u16) -> bool {
+            self.soft_wrapped[row as usize]
+        }
+        fn cursor(&self) -> (u16, u16) { self.cursor }
+        fn is_wide(&self, ch: char) -> bool {
+            matches!(ch,
+                '\u{1100}'..='\u{115F}' | '\u{2E80}'..='\u{A4CF}'
+                | '\u{AC00}'..='\u{D7A3}' | '\u{F900}'..='\u{FAFF}'
+                | '\u{FE30}'..='\u{FE4F}' | '\u{FF00}'..='\u{FF60}'
+                | '\u{FFE0}'..='\u{FFE6}' | '\u{1F300}'..='\u{1FAFF}')
+        }
+    }
+
+
+
+    /// 2026-09-27 report: a `file://` URL wrapped across two rows of a
+    /// codex pane linked only as far as the row above's last
+    /// directory, and `vis/brand-dist/index-ja.html#principles` below
+    /// it stayed plain.
+    ///
+    /// The rows merged fine.  What failed is the arbitration: a
+    /// `file://` link is checked against the disk, `#principles` is
+    /// not on the disk, the whole span therefore did not exist, and the
+    /// walk back to a shorter candidate stopped at the first one that
+    /// does — the directory ending the row above, right at the seam.
+    #[test]
+    fn a_wrapped_file_url_keeps_its_fragment_and_crosses_the_seam() {
+        let root = std::env::temp_dir().join(format!("marspot-fragwrap-{}", std::process::id()));
+        let dir = root.join("vis/brand-dist");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("index-ja.html");
+        std::fs::write(&file, b"x").unwrap();
+        let url = format!("file://{}#principles", file.display());
+
+        // Wrap it the way codex does: break after a `/` near the right
+        // edge, continuation hanging two columns in.
+        let cols: u16 = 73;
+        let indent = "  ";
+        let chars: Vec<char> = url.chars().collect();
+        let cut = (1..chars.len())
+            .filter(|&k| chars[k - 1] == '/')
+            .filter(|&k| {
+                let head = indent.chars().count() + k;
+                let tail = indent.chars().count() + (chars.len() - k);
+                // Flush enough to read as a wrap, and the rest must fit.
+                head <= cols as usize && head >= 50 && tail <= cols as usize
+            })
+            .next_back();
+        let Some(cut) = cut else {
+            std::fs::remove_dir_all(&root).ok();
+            panic!("no wrap point in {url} — the case this test is about cannot be built");
+        };
+        let row = |text: String| -> Vec<char> {
+            let mut v: Vec<char> = text.chars().collect();
+            v.truncate(cols as usize);
+            while v.len() < cols as usize {
+                v.push('\0');
+            }
+            v
+        };
+        let head: String = chars[..cut].iter().collect();
+        let tail: String = chars[cut..].iter().collect();
+        let src = StrSource {
+            rows: vec![row(format!("{indent}{head}")), row(format!("{indent}{tail}"))],
+            cols,
+            cursor: (0, 0),
+            soft_wrapped: vec![false; 2],
+        };
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(links.len(), 2, "the link covers both rows: {links:?}");
+        for l in &links {
+            assert_eq!(l.text, url, "each row carries the whole URL");
+            assert_eq!(l.kind, LinkKind::File, "it names a file, not a web page");
+        }
+    }
+
+    /// Half a name is worse than none.
+    ///
+    /// Same wrap as above, but the file it names is not there.  The
+    /// arbitration then walks back and the first candidate that does
+    /// exist is the directory ending the row above — a link over half
+    /// of what is drawn, pointing somewhere the line never named.
+    /// 「现在的问题是识别一半，你要么完全不识别也好」(2026-09-27), so
+    /// nothing is emitted.
+    #[test]
+    fn a_wrapped_name_that_does_not_exist_is_not_linked_by_half() {
+        let root = std::env::temp_dir().join(format!("marspot-halfname-{}", std::process::id()));
+        let dir = root.join("vis/brand-dist");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Note: no file written — the name on screen is not there.
+        let missing = dir.join("index-ja.html");
+        let url = format!("file://{}", missing.display());
+
+        let cols: u16 = 73;
+        let indent = "  ";
+        let chars: Vec<char> = url.chars().collect();
+        let cut = (1..chars.len())
+            .filter(|&k| chars[k - 1] == '/' && chars[k] != '/')
+            .filter(|&k| {
+                let head = indent.chars().count() + k;
+                let tail = indent.chars().count() + (chars.len() - k);
+                head <= cols as usize && head >= 50 && tail <= cols as usize
+            })
+            .next_back();
+        let Some(cut) = cut else {
+            std::fs::remove_dir_all(&root).ok();
+            panic!("no wrap point in {url} — the case this test is about cannot be built");
+        };
+        let row = |text: String| -> Vec<char> {
+            let mut v: Vec<char> = text.chars().collect();
+            v.truncate(cols as usize);
+            while v.len() < cols as usize {
+                v.push('\0');
+            }
+            v
+        };
+        let head: String = chars[..cut].iter().collect();
+        let tail: String = chars[cut..].iter().collect();
+        let src = StrSource {
+            rows: vec![row(format!("{indent}{head}")), row(format!("{indent}{tail}"))],
+            cols,
+            cursor: (0, 0),
+            soft_wrapped: vec![false; 2],
+        };
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(
+            links.is_empty(),
+            "a name broken across rows is linked whole or not at all: {links:?}",
+        );
+    }
+
+    /// 2026-07-28 field report: a URL inside a markdown table came
+    /// out linked only as far as the first row of its cell.  The row
+    /// merge asks whether the previous row ran out of room at the
+    /// PANE edge; a table cell runs out at its own border, several
+    /// columns short, with the border glyph itself sitting where the
+    /// heuristic looks for the last character of the token.
+    #[test]
+    fn a_url_wrapped_across_one_table_cell_is_one_link() {
+        // Two columns; the URL fills the right cell over three rows.
+        // ASCII only: `StrSource` stores one char per column, so a
+        // wide glyph here would misalign the rules against the rows
+        // below it — a fixture artefact, not something a real grid
+        // does (there the trail half occupies its own column).
+        let src = StrSource::new(
+            &[
+                "│ file      │ Source link                     │",
+                "│ detect.   │ https://raw.githubusercontent.c │",
+                "│ caffemo   │ om/WeChatCV/opencv_3rdparty/a8b │",
+                "│ del       │ 69ccc/detect.caffemodel         │",
+                "├───────────┼─────────────────────────────────┤",
+                "│ detect.p  │ same     /detect.prototxt       │",
+            ],
+            47,
+        );
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let full = "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/a8b69ccc/detect.caffemodel";
+        let url_rows: Vec<u16> = links
+            .iter()
+            .filter(|l| l.kind == LinkKind::Url && l.text == full)
+            .map(|l| l.row)
+            .collect();
+        assert_eq!(
+            url_rows,
+            vec![1, 2, 3],
+            "the URL should be one link underlined on all three of its rows, got {links:?}"
+        );
+        // …and the truncated prefix the row pass finds on row 1 must
+        // not survive alongside it, or the click opens the wrong URL.
+        let on_row_1: Vec<&str> = links
+            .iter()
+            .filter(|l| l.row == 1)
+            .map(|l| l.text.as_str())
+            .collect();
+        assert_eq!(on_row_1, vec![full], "row 1 must carry ONE link");
+
+        // The underline stays inside the cell.  A multi-row span used
+        // to run every row but its last out to the pane's right edge
+        // — fine for a soft wrap, but here it drew straight through
+        // the cell border and out the other side of the table.
+        // Layout: `│ ` + 9-wide cell + ` │ ` + 31-wide cell + ` │`,
+        // so the right cell's text lives in columns 14..=44 and its
+        // border sits at 46.
+        for l in links.iter().filter(|l| l.text == full) {
+            assert!(
+                l.col_start >= 14 && l.col_end <= 44,
+                "row {} underlines {}..={}, outside the cell's 14..=44: {l:?}",
+                l.row,
+                l.col_start,
+                l.col_end
+            );
+        }
+    }
+
+    /// The join is per cell, not per row.  Two table rows whose cells
+    /// are both flush look exactly like one wrapped cell — which is
+    /// what a column sized by its longest URL always looks like — so
+    /// the fresh scheme on the second row is what has to stop it.
+    #[test]
+    fn table_cells_do_not_bleed_into_each_other() {
+        let src = StrSource::new(
+            &[
+                "│ https://a.example/one │ plain words   │",
+                "│ https://b.example/two │ more words    │",
+            ],
+            40,
+        );
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let mut texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        texts.sort_unstable();
+        texts.dedup();
+        assert_eq!(
+            texts,
+            vec!["https://a.example/one", "https://b.example/two"],
+            "each cell keeps its own link, got {links:?}"
+        );
+    }
+
+    /// Trait-path smoke: soft-wrap merge + tui_mode input-box
+    /// exemption through `scan_visible_links` over a plain
+    /// `StrSource` — the exact surface an external consumer sees.
+    #[test]
+    fn cellsource_scan_merges_soft_wrap_and_exempts_composer() {
+        let mut src = StrSource::new(
+            &[
+                "see https://example.c",
+                "om/long/path now ok  ",
+                "                     ",
+                "╭───────────────────╮",
+                "│ > https://foo.com │",
+                "╰───────────────────╯",
+            ],
+            21,
+        );
+        src.soft_wrapped[1] = true;
+        src.cursor = (4, 4);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        assert_eq!(links.len(), 2, "{links:?}"); // one URL fanned over 2 rows
+        assert!(links.iter().all(|l| l.text == "https://example.com/long/path"));
+        assert_eq!((links[0].row, links[1].row), (0, 1));
+        // Without tui_mode the composer URL is scanned too.
+        let all = scan_visible_links(&src, ScanOpts::default());
+        assert!(all.iter().any(|l| l.text == "https://foo.com"), "{all:?}");
+    }
+
+    /// 2026-08-18 field report: the URL ending one bullet came out
+    /// with the NEXT bullet's `-` glued to its tail.  The item above
+    /// ends flush at the pane edge on a path character, and a nested
+    /// item's indent is indistinguishable from a hanging wrap indent
+    /// — geometry says "continuation", the marker says otherwise.
+    #[test]
+    fn a_following_list_marker_is_not_a_wrap_continuation() {
+        let head = "- 村子 → http://192.168.50.20:6031/index.html?page=pages/village/index";
+        let cols = head.chars().count() as u16; // flush at the edge
+        for next in [
+            "  - 阿云的屋 → http://a.example/x", // the field report, verbatim
+            "- room -> http://a.example/x",      // no indent
+            "  - room -> http://a.example/x",    // hanging-indent shape
+            "  * room -> http://a.example/x",
+            "  2. room -> http://a.example/x",
+        ] {
+            let src = StrSource::new(&[head, next], cols);
+            let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+            assert!(
+                links.iter().any(|l| l.text
+                    == "http://192.168.50.20:6031/index.html?page=pages/village/index"),
+                "next={next:?} must not extend the bullet above, got {links:?}"
+            );
+        }
+    }
+
+    /// The marker gate must not cost the merge its real job: a row
+    /// that resumes mid-token still joins, marker chars or not.
+    #[test]
+    fn a_mid_token_continuation_still_joins_after_the_marker_gate() {
+        let head = "- 村子 → http://192.168.50.20:6031/index.html?page=pages/village/index";
+        let cols = head.chars().count() as u16;
+        let src = StrSource::new(&[head, "  -more/parts here"], cols);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        assert!(
+            links.iter().any(|l| l.text
+                == "http://192.168.50.20:6031/index.html?page=pages/village/index-more/parts"),
+            "a token tail that merely starts with `-` still belongs to the row above, got {links:?}"
+        );
+    }
+
+    /// Three complete paths in a row, each ending a few columns shy
+    /// of the right edge, must stay three links.
+    ///
+    /// 2026-08-19 field report: a `ls`-style listing inside a TUI (two
+    /// spaces of indent, absolute paths) came out with the first and
+    /// second entries unlinked and the third linked.  The merge is
+    /// working as designed — a row ending within the path slack of the
+    /// edge, followed by an indented row, is exactly the shape of a
+    /// wrapped path — so the three rows become one logical line whose
+    /// text is `…/a.sql/…/bb//…/ccc/`.  Nothing is wrong with that;
+    /// the seam retry exists to take such a line apart again.
+    ///
+    /// What was wrong: the retry sat behind `looks_like_path(whole
+    /// span)`, and the whole span is a concatenation of paths, which
+    /// does not look like a path.  The guard therefore rejected
+    /// precisely the input the retry was written for, and it had the
+    /// right answer at every step without ever being asked.
+    #[test]
+    fn consecutive_near_flush_paths_stay_separate_links() {
+        let dir = std::env::temp_dir().join("marspot-linkify-seam-rows");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bb")).expect("mkdir bb");
+        std::fs::create_dir_all(dir.join("ccc")).expect("mkdir ccc");
+        std::fs::write(dir.join("a.sql"), b"x").expect("write a.sql");
+        let d = format!("{}/", dir.to_string_lossy());
+
+        let rows = vec![
+            format!("  {d}a.sql"),
+            format!("  {d}bb/"),
+            format!("  {d}ccc/"),
+        ];
+        // Two columns wider than the longest row: every row now ends
+        // inside the slack, which is what triggers the merge.
+        let cols = (rows.iter().map(|r| r.chars().count()).max().unwrap() + 2) as u16;
+        let refs: Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
+        let src = StrSource::new(&refs, cols);
+
+        let mut texts: Vec<String> = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() })
+            .into_iter()
+            .map(|l| l.text)
+            .collect();
+        texts.sort();
+        texts.dedup();
+        assert_eq!(
+            texts,
+            vec![
+                format!("{d}a.sql"),
+                format!("{d}bb/"),
+                format!("{d}ccc/"),
+            ],
+            "each row is a complete path and must keep its own link"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn scan(s: &str) -> Vec<LinkRange> {
+        let mut out = Vec::new();
+        scan_line(s, 0, &mut out);
+        out
+    }
+
+
+    fn chars(s: &str) -> Vec<char> {
+        s.chars().collect()
+    }
+
+
+    #[test]
+    fn url_https_ok() {
+        let v = scan("see https://example.com/path for more");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].kind, LinkKind::Url);
+        assert_eq!(v[0].text, "https://example.com/path");
+        assert_eq!(v[0].col_start, 4);
+    }
+
+
+    #[test]
+    fn url_trims_trailing_period() {
+        let v = scan("Check out https://example.com/path.");
+        assert_eq!(v[0].text, "https://example.com/path");
+    }
+
+
+    #[test]
+    fn url_trims_trailing_paren() {
+        let v = scan("link (https://example.com/a)");
+        assert_eq!(v[0].text, "https://example.com/a");
+    }
+
+
+    #[test]
+    fn url_without_dot_in_host_rejected() {
+        // `https://localhost` and friends — typical chat example
+        // form that shouldn't underline.
+        assert!(!looks_like_url(&chars("https://localhost")));
+        assert!(!looks_like_url(&chars("https://x")));
+    }
+
+
+    #[test]
+    fn url_dot_or_dash_at_host_edge_rejected() {
+        assert!(!looks_like_url(&chars("https://.example.com")));
+        assert!(!looks_like_url(&chars("https://example.com.")));
+        assert!(!looks_like_url(&chars("https://-example.com")));
+    }
+
+
+    #[test]
+    fn url_garbage_after_scheme_rejected() {
+        assert!(!looks_like_url(&chars("https://")));
+        assert!(!looks_like_url(&chars("https:///path")));
+    }
+
+
+    #[test]
+    fn absolute_path_stats_real_file() {
+        // The test binary itself is guaranteed to exist on disk.
+        let bin = std::env::current_exe().unwrap();
+        let line = format!("see {} for details", bin.display());
+        let v = scan(&line);
+        assert_eq!(v.iter().filter(|r| r.kind == LinkKind::File).count(), 1);
+        assert_eq!(v[0].kind, LinkKind::File);
+        assert_eq!(v[0].text, bin.display().to_string());
+    }
+
+    /// Pinned while chasing the 2026-09-04 truncation, which stopped
+    /// at `…/spg/` — the segment right before a dotted directory.
+    /// The scanner turned out to be innocent (the cause was upstream,
+    /// see `a_caret_resting_on_a_wrapped_tail_is_not_a_composer`), but
+    /// a dotted component IS the point a wrong answer backs off to, so
+    /// the boundary is worth holding: `.config`, `.git`, `.local` are
+    /// where a developer's own files live.
+    #[test]
+    fn a_dotted_directory_component_does_not_truncate_the_path() {
+        let root = std::env::temp_dir()
+            .join(format!("marspot-linkify-dotdir-{}", std::process::id()));
+        let deep = root.join(".notes").join("docs");
+        std::fs::create_dir_all(&deep).unwrap();
+        let file = deep.join("provenance-exec-tax-2026-09-04.md");
+        std::fs::write(&file, b"x").unwrap();
+        let p = file.display().to_string();
+
+        let bare = scan(&p);
+        // A trailing argument is how the line actually appeared.
+        let with_arg = scan(&format!("{p} -n 5"));
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(bare.len(), 1, "bare path: {bare:?}");
+        assert_eq!(bare[0].text, p, "bare path truncated");
+        assert_eq!(with_arg.len(), 1, "path + arg: {with_arg:?}");
+        assert_eq!(with_arg[0].text, p, "path with trailing arg truncated");
+    }
+
+
+    /// 2026-08-02 field report: a `⏺` summary ending
+    /// `…/sentori-feedback-reply-b-section-2.md;memory 已记(…)` showed
+    /// no link at all.  The path was real, the wrap merge was right —
+    /// the sentence simply resumed straight after the `;`, so the
+    /// scanner stat'ed `…-2.md;memory` and got nothing.  Chinese
+    /// written with ASCII punctuation puts no space after the mark, so
+    /// this is not an edge case in this codebase; it is most lines.
+    #[test]
+    fn prose_resuming_after_a_mark_does_not_swallow_the_path() {
+        let bin = std::env::current_exe().unwrap();
+        let p = bin.display().to_string();
+        for line in [
+            format!("- 回执:{p};memory 已记"),
+            format!("- 回执:{p},另见下条"),
+            format!("见 {p}!下一条"),
+        ] {
+            let v = scan(&line);
+            let files: Vec<&LinkRange> = v.iter().filter(|r| r.kind == LinkKind::File).collect();
+            assert_eq!(files.len(), 1, "no link in {line:?}");
+            assert_eq!(files[0].text, p, "wrong span in {line:?}");
+        }
+    }
+
+    /// …and the mark is only a *candidate* end.  A filename that
+    /// really contains one is legal, and the full span is stat'ed
+    /// before any cut is tried, so it still wins outright.
+    #[test]
+    fn a_filename_that_really_contains_a_mark_still_wins() {
+        let p = std::env::temp_dir().join(format!(
+            "marspot-linkify-a;b,c-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&p, b"x").unwrap();
+        let text = p.display().to_string();
+        let v = scan(&format!("see {text} today"));
+        let files: Vec<&LinkRange> = v.iter().filter(|r| r.kind == LinkKind::File).collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].text, text, "the whole name, marks and all");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// 2026-08-05 report: a Japanese document path went unlinked —
+    /// and the design lesson behind the fix.
+    ///
+    /// `株主総会議事録（役員報酬改定・20260805）.pdf`.  The scan used to
+    /// stop at `（`, because CJK prose glues brackets onto paths
+    /// constantly and a filename containing them was judged rarer
+    /// (宁可漏不可错).  But that trade only makes sense for a scanner
+    /// that cannot check its answer, and this one can: **a path link
+    /// is only emitted for a path that exists.**  Guessing narrow
+    /// could therefore only ever lose true positives.
+    ///
+    /// So the scan is greedy and the filesystem decides.  This test
+    /// pins the reported case; `punctuation_inside_a_real_name_is_not
+    /// _a_terminator` pins the principle it is an instance of.
+    #[test]
+    fn a_filename_with_fullwidth_brackets_is_one_link() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-linkify-brackets-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("株主総会議事録（役員報酬改定・20260805）.pdf");
+        std::fs::write(&p, b"x").unwrap();
+        let text = p.display().to_string();
+
+        // Exactly the reported line: prose in ASCII parens glued to
+        // the end, a fullwidth stop after that.
+        let v = scan(&format!("一页收好了。{text}(docx 同目录同名)。"));
+        let files: Vec<&LinkRange> = v.iter().filter(|r| r.kind == LinkKind::File).collect();
+        assert_eq!(files.len(), 1, "no link in the reported line");
+        assert_eq!(files[0].text, text, "the whole name, brackets and all");
+
+        // The same shape naming a file that does NOT exist stays
+        // unlinked — the extension is not a licence to guess.
+        let ghost = dir.join("株主総会議事録（不存在）.pdf");
+        let v = scan(&format!("见 {}", ghost.display()));
+        assert!(
+            v.iter().all(|r| r.kind != LinkKind::File),
+            "a bracket group that names nothing must not become a link"
+        );
+
+        // And a genuine prose parenthetical after a real directory
+        // still links only the directory.
+        let v = scan(&format!("见 {}（说明）的东西", dir.display()));
+        let files: Vec<&LinkRange> = v.iter().filter(|r| r.kind == LinkKind::File).collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].text, dir.display().to_string(), "prose stays prose");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 2026-08-07 report: `http://localhost:6014/tools/documents` was
+    /// not a link.
+    ///
+    /// The host filter demanded a dot, so every dev-server URL a
+    /// terminal is full of failed it.  The rule was *written* as "no
+    /// dot, no digits" and *implemented* as "no dot" — the digits half
+    /// had never been there.
+    ///
+    /// There is no filesystem oracle for URLs, so the structure has to
+    /// carry the decision — here, an explicit numeric port.  That is
+    /// what separates a real address from the `https://x` placeholders
+    /// this filter rejects, and it is all this report needs: bare
+    /// `https://localhost` is left rejected, as `url_without_dot_in
+    /// _host_rejected` settled.
+    #[test]
+    fn a_dev_server_url_is_a_link_and_a_placeholder_is_not() {
+        for good in [
+            "http://localhost:6014/tools/documents",
+            "http://localhost:3000",
+            "http://myserver:8080/api",
+            "http://127.0.0.1:6014/x",
+            "https://example.com/a",
+        ] {
+            let v = scan(&format!("打开 {good} 看看"));
+            let urls: Vec<&LinkRange> =
+                v.iter().filter(|r| r.kind == LinkKind::Url).collect();
+            assert_eq!(urls.len(), 1, "no link for {good:?}: {v:?}");
+            assert_eq!(urls[0].text, good);
+        }
+        for bad in [
+            "https://x",
+            "https://foo",
+            // Settled separately, and left alone: without a port this
+            // is the shape chat examples take.
+            "https://localhost",
+            // The placeholder people actually write — `port` is not a
+            // number, so it is still not an address.
+            "http://host:port",
+            "https://.",
+            "https://-",
+        ] {
+            let v = scan(&format!("比如 {bad} 之类"));
+            assert!(
+                v.iter().all(|r| r.kind != LinkKind::Url),
+                "{bad:?} must stay unlinked: {v:?}"
+            );
+        }
+    }
+
+    /// The principle, not the instance: **no punctuation terminates a
+    /// path**, because the filesystem is a better judge than any table
+    /// of characters.
+    ///
+    /// Each of these names contains a character the old scan treated
+    /// as a hard stop, so none of them could be linked at all — the
+    /// span was cut inside the name, the prefix did not exist, and the
+    /// line lost its link.  Each is also followed by prose glued on
+    /// with the *same* character, which is the case that table was
+    /// protecting against; the greedy scan gets both right by asking.
+    #[test]
+    fn punctuation_inside_a_real_name_is_not_a_terminator() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-linkify-punct-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // (name, the prose glued straight onto it)
+        let cases = [
+            ("plan(v2).md", "、然后再说"),
+            ("a,b.txt", ",这句话继续"),
+            ("sec；1.md", ";memory 已记"),
+            ("note【草稿】.md", "。下一步"),
+        ];
+        for (name, tail) in cases {
+            let p = dir.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            let text = p.display().to_string();
+            let v = scan(&format!("见 {text}{tail}"));
+            let files: Vec<&LinkRange> =
+                v.iter().filter(|r| r.kind == LinkKind::File).collect();
+            assert_eq!(files.len(), 1, "no link for {name:?}");
+            assert_eq!(
+                files[0].text, text,
+                "{name:?} lost part of its name to the prose after it"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A name with a space in it, spelled the way a shell spells it.
+    ///
+    /// 2026-08-09 report: `rm -rf ~/Library/Safari/"Favicon Cache"`
+    /// linked nothing.  The scan stopped at the quote, so the
+    /// candidate was `~/Library/Safari/` — a real directory, but not
+    /// the thing the line points at, and not what the user was
+    /// pointing their cursor at either.
+    ///
+    /// Both spellings are exercised, and both halves of the contract:
+    /// the **span** covers what is drawn (quotes and all — that is
+    /// what the user clicks), the **text** is what opens.
+    #[test]
+    fn a_quoted_or_escaped_space_is_part_of_the_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-linkify-space-{}",
+            std::process::id()
+        ));
+        let inner = dir.join("Favicon Cache");
+        std::fs::create_dir_all(&inner).unwrap();
+        let real = inner.display().to_string();
+        let parent = dir.display().to_string();
+
+        // Each spelling, and what the drawn text is.
+        let drawn = [
+            format!("{parent}/\"Favicon Cache\""),
+            format!("{parent}/'Favicon Cache'"),
+            format!("{parent}/Favicon\\ Cache"),
+        ];
+        for d in drawn {
+            let line = format!("rm -rf {d}");
+            let v = scan(&line);
+            let files: Vec<&LinkRange> =
+                v.iter().filter(|r| r.kind == LinkKind::File).collect();
+            assert_eq!(files.len(), 1, "no link for {d:?}");
+            assert_eq!(
+                files[0].text, real,
+                "{d:?} must open the real path, not the quoted spelling"
+            );
+            // The span ends where the drawn text ends — including the
+            // closing quote, so the whole thing underlines rather than
+            // stopping mid-name.
+            let last = line.chars().count() as u16 - 1;
+            assert!(
+                files[0].col_end >= last,
+                "{d:?}: underline stops at col {} but the name runs to {last}",
+                files[0].col_end
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unpaired quote is prose, not the start of a name — and the
+    /// arbitration has to be able to back out of a pairing that
+    /// swallowed too much.
+    #[test]
+    fn an_unpaired_quote_does_not_swallow_the_line() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-linkify-quote-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.display().to_string();
+        // The directory is real; the quote after it opens nothing.
+        let v = scan(&format!("cd {d}/\" then he said \"hello\" and left"));
+        let files: Vec<&LinkRange> =
+            v.iter().filter(|r| r.kind == LinkKind::File).collect();
+        for f in &files {
+            assert!(
+                !f.text.contains("hello"),
+                "a quote pairing swallowed the sentence: {:?}",
+                f.text
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The greedy scan runs on the render path, so it comes with a
+    /// ceiling: a token that is nothing but cut points must not turn
+    /// into a `stat` storm, and must still link nothing.
+    #[test]
+    fn a_token_of_pure_punctuation_is_bounded_and_links_nothing() {
+        let junk: String = std::iter::repeat("/a、").take(200).collect();
+        let v = scan(&format!("见 {junk} 完"));
+        assert!(
+            v.iter().all(|r| r.kind != LinkKind::File),
+            "nothing here exists, so nothing here is a link"
+        );
+    }
+
+    /// The field report's actual shape: the path hard-wrapped at the
+    /// pane edge *and* the sentence resumed after the `;`.  Both
+    /// repairs have to hold at once — the merge to reach the second
+    /// row, the cut to drop what follows.
+    #[test]
+    fn a_wrapped_path_with_prose_glued_to_its_end_is_one_link() {
+        let p = std::env::temp_dir().join(format!(
+            "marspot-linkify-wrapped-reply-b-section-2-{}.md",
+            std::process::id()
+        ));
+        std::fs::write(&p, b"x").unwrap();
+        let text = p.display().to_string();
+        // Split the path so the first row ends flush at the right
+        // edge, which is what claudecode's fixed-width wrap does.
+        let split = text.len() - 12;
+        let head = format!("  - note:{}", &text[..split]);
+        let cols = head.chars().count() as u16;
+        let tail = format!("  {};memory noted", &text[split..]);
+        let src = StrSource::new(&[&head, &tail], cols);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let files: Vec<&LinkRange> = links.iter().filter(|l| l.kind == LinkKind::File).collect();
+        assert!(!files.is_empty(), "wrapped path found no link at all");
+        assert!(
+            files.iter().all(|l| l.text == text),
+            "every segment carries the whole path: {:?}",
+            files.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+        // One segment per physical row it crosses.
+        assert_eq!(files.len(), 2, "both rows underline");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// 2026-09-04 field report: `——` glues a Chinese gloss straight
+    /// onto the name it just introduced, with no space for the greedy
+    /// scan to stop on.  The dash was not a place the arbitration
+    /// would cut, so the walk back went from
+    /// `…/paper1-discovers.html——页首是…` past the extension to
+    /// `…/paper1-discovers`, and the link that finally existed was the
+    /// directory two levels up.
+    #[test]
+    fn an_em_dash_gloss_does_not_eat_the_extension() {
+        let p = std::env::temp_dir().join(format!(
+            "marspot-linkify-emdash-{}.html",
+            std::process::id()
+        ));
+        std::fs::write(&p, b"x").unwrap();
+        let text = p.display().to_string();
+        let v = scan(&format!("open {text}——页首是三条路与定论"));
+        let files: Vec<&LinkRange> = v.iter().filter(|r| r.kind == LinkKind::File).collect();
+        assert_eq!(
+            files.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            vec![text.as_str()],
+            "the path ends where the gloss begins"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The field report's full shape: the same gloss, but the path
+    /// also hard-wrapped mid-token at the pane edge, so the row merge
+    /// and the dash cut both have to land for the link to come out
+    /// whole.  A dot-directory sits in the middle — the break fell
+    /// inside it (`/.n` + `otes/`), which is what made the truncated
+    /// link look like a plausible one.
+    #[test]
+    fn a_wrapped_path_with_an_em_dash_gloss_is_one_link() {
+        let dir = std::env::temp_dir()
+            .join(format!("marspot-linkify-emdash-wrap-{}", std::process::id()))
+            .join(".notes");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("paper1-discovers.html");
+        std::fs::write(&p, b"x").unwrap();
+        let text = p.display().to_string();
+        // Cut the path so the first row ends flush at the right edge,
+        // which is where claudecode's fixed-width wrap puts it.
+        let split = text.chars().count() - 27;
+        let head: String = format!("open {}", text.chars().take(split).collect::<String>());
+        let cols = head.chars().count() as u16;
+        let tail = format!(
+            "  {}——页首是三条路与定论",
+            text.chars().skip(split).collect::<String>()
+        );
+        let src = StrSource::new(&[&head, &tail], cols);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let files: Vec<&LinkRange> = links.iter().filter(|l| l.kind == LinkKind::File).collect();
+        assert!(!files.is_empty(), "wrapped path found no link at all");
+        assert!(
+            files.iter().all(|l| l.text == text),
+            "every segment carries the whole path: {:?}",
+            files.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+        assert_eq!(files.len(), 2, "both rows underline");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn absolute_path_nonexistent_is_rejected() {
+        // Pattern matches but stat fails → no link.
+        let v = scan("see /Users/x/foo_definitely_not_here.txt for details");
+        assert_eq!(v.iter().filter(|r| r.kind == LinkKind::File).count(), 0);
+    }
+
+
+    #[test]
+    fn double_slash_rejected_by_pattern() {
+        assert!(!looks_like_path(&chars("//")));
+        assert!(!looks_like_path(&chars("//./")));
+        assert!(!looks_like_path(&chars("////")));
+        assert!(!looks_like_path(&chars("/x//y")));
+    }
+
+
+    #[test]
+    fn dot_only_components_rejected_by_pattern() {
+        assert!(!looks_like_path(&chars("/.")));
+        assert!(!looks_like_path(&chars("/./")));
+        assert!(!looks_like_path(&chars("/../..")));
+    }
+
+
+    #[test]
+    fn mid_word_slash_is_not_a_path() {
+        // `cargo/Cargo.toml` shouldn't trip the path detector.
+        let v = scan("see cargo/Cargo.toml today");
+        assert_eq!(v.iter().filter(|r| r.kind == LinkKind::File).count(), 0);
+    }
+
+
+    #[test]
+    fn bare_slash_is_not_a_path() {
+        let v = scan("only a /");
+        assert_eq!(v.iter().filter(|r| r.kind == LinkKind::File).count(), 0);
+    }
+
+
+    #[test]
+    fn email_ok() {
+        let v = scan("ping ada@example.jp today");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].kind, LinkKind::Email);
+        assert_eq!(v[0].text, "ada@example.jp");
+    }
+
+
+    #[test]
+    fn email_at_alone_is_not_an_email() {
+        let v = scan("hey @everyone");
+        assert_eq!(v.iter().filter(|r| r.kind == LinkKind::Email).count(), 0);
+    }
+
+
+    #[test]
+    fn email_trims_trailing_period() {
+        let v = scan("contact foo@bar.com.");
+        let emails: Vec<_> = v.iter().filter(|r| r.kind == LinkKind::Email).collect();
+        assert_eq!(emails.len(), 1);
+        assert_eq!(emails[0].text, "foo@bar.com");
+    }
+
+
+    /// 2026-07-12 regression: `name@version` tokens (npm / cargo /
+    /// image digests) must NOT match as email — a real mail domain's
+    /// TLD is alphabetic, a version's final label is numeric.
+    #[test]
+    fn version_strings_are_not_emails() {
+        let line = "crates.io smix-cli/adapter-maestro@1.0.23, npm @goliapkg/smix@1.0.23,";
+        let v = scan(line);
+        assert!(
+            v.is_empty(),
+            "version strings must not produce any link: {v:?}"
+        );
+        assert!(scan("docker pull app@sha256.0abc").is_empty());
+        assert!(scan("pinned pkg@2.x today").is_empty()); // 1-char TLD
+        // Real addresses keep matching.
+        assert_eq!(scan("mail cara@example.com now").len(), 1);
+        assert_eq!(scan("cc user.name+tag@sub-1.example.co").len(), 1);
+    }
+
+
+    #[test]
+    fn email_host_label_rules() {
+        assert!(is_email_host(&chars("golia.jp")));
+        assert!(is_email_host(&chars("sub-1.example.co")));
+        assert!(!is_email_host(&chars("1.0.23"))); // numeric TLD
+        assert!(!is_email_host(&chars("example"))); // single label
+        assert!(!is_email_host(&chars("bar-.com"))); // label ends with '-'
+        assert!(!is_email_host(&chars("-bar.com"))); // label starts with '-'
+        assert!(!is_email_host(&chars("bar..com"))); // empty label
+        assert!(!is_email_host(&chars("bar.c"))); // 1-char TLD
+    }
+
+
+    #[test]
+    fn empty_line_emits_nothing() {
+        assert!(scan("").is_empty());
+        assert!(scan("                ").is_empty());
+    }
+
+
+    // Phase 1 — soft-wrap-aware visible-grid scanning.  A URL or
+    // absolute path that overflowed the right edge into a DECAWM
+    // continuation row is matched as a single logical token and
+    // emitted as one LinkRange per physical row segment.
+    #[test]
+    fn url_spanning_soft_wrap_emits_per_row_segments() {
+        // 10-col grid; URL is 13 chars so it spans row 0 (cols 0..=9)
+        // + row 1 (cols 0..=2).  Test the scanner directly on a
+        // pre-built logical line + segment table.
+        let line = "https://x.com";
+        let segments = vec![
+            super::LineSegment {
+                phys_row: 0,
+                char_offset: 0,
+                cc_zero_indent: false,
+                cc_seam: false,
+            },
+            super::LineSegment {
+                phys_row: 1,
+                char_offset: 10,
+                cc_zero_indent: false,
+                cc_seam: false,
+            },
+        ];
+        let mut out = Vec::new();
+        // col_map: chars 0..9 → row-0 cols 0..9; chars 10..12 → row-1 cols 0..2.
+        let col_map: Vec<u16> = (0..10).chain(0..3).collect();
+        let chars: Vec<char> = line.chars().collect();
+        super::scan_line_into_matches(&chars, &col_map, &mut out, &segments, 10, &super::FsOracle, None);
+        // One match, fanned into 2 LinkRanges (one per physical row).
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].kind, LinkKind::Url);
+        assert_eq!(out[0].text, "https://x.com");
+        assert_eq!(out[0].row, 0);
+        assert_eq!(out[0].col_start, 0);
+        assert_eq!(out[0].col_end, 9);
+        assert_eq!(out[1].kind, LinkKind::Url);
+        assert_eq!(out[1].text, "https://x.com");
+        assert_eq!(out[1].row, 1);
+        assert_eq!(out[1].col_start, 0);
+        assert_eq!(out[1].col_end, 2);
+    }
+
+
+    #[test]
+    fn single_row_match_still_emits_one_segment() {
+        // No wrap: 1 segment, 1 LinkRange (regression guard for the
+        // common case after the multi-row refactor).
+        let line = "see https://example.com today      ";
+        let segments = vec![super::LineSegment {
+            phys_row: 7,
+            char_offset: 0,
+            cc_zero_indent: false,
+                cc_seam: false,
+        }];
+        let mut out = Vec::new();
+        let chars: Vec<char> = line.chars().collect();
+        let col_map: Vec<u16> = (0..chars.len() as u16).collect();
+        super::scan_line_into_matches(
+            &chars,
+            &col_map,
+            &mut out,
+            &segments,
+            chars.len(),
+            &super::FsOracle,
+            None,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].row, 7);
+        assert_eq!(out[0].kind, LinkKind::Url);
+        assert_eq!(out[0].text, "https://example.com");
+    }
+
+
+    /// URLs keep the permissive terminator set — parens are legal
+    /// inside them (Wikipedia article URLs) and balanced pairs must
+    /// survive the trim.
+    #[test]
+    fn url_keeps_parens_inside() {
+        let mut v = Vec::new();
+        scan_line(
+            "see https://en.wikipedia.org/wiki/Rust_(programming_language) ok",
+            0,
+            &mut v,
+        );
+        assert_eq!(v.len(), 1);
+        assert_eq!(
+            v[0].text,
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+        );
+    }
+
+
+    /// 2026-07-15 field report: `https://devops.golia.jp/calendar(刷新一下)。`
+    /// was underlined as the URL text — `(` and CJK chars weren't
+    /// terminators.  Strict ASCII URL char class + balanced-paren trim
+    /// cut it back to the real URL.
+    #[test]
+    fn url_terminates_at_cjk_and_strips_dangling_paren() {
+        let mut v = Vec::new();
+        scan_line("日历 - https://devops.golia.jp/calendar(刷新一下)。", 0, &mut v);
+        let urls: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Url).collect();
+        assert_eq!(urls.len(), 1, "{v:?}");
+        assert_eq!(urls[0].text, "https://devops.golia.jp/calendar");
+    }
+
+
+    /// URL directly abutting Japanese prose (no `(`) — same fix, no
+    /// dangling ASCII to arbitrate; just non-ASCII terminates.
+    #[test]
+    fn url_terminates_at_bare_cjk() {
+        let mut v = Vec::new();
+        scan_line("参考 https://example.com/foo は使えます", 0, &mut v);
+        let urls: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Url).collect();
+        assert_eq!(urls.len(), 1, "{v:?}");
+        assert_eq!(urls[0].text, "https://example.com/foo");
+    }
+
+
+    /// Prose-wrapping parens still get stripped (long-standing case).
+    #[test]
+    fn url_in_prose_parens_still_trimmed() {
+        let mut v = Vec::new();
+        scan_line("(see https://example.com/x)", 0, &mut v);
+        let urls: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Url).collect();
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].text, "https://example.com/x");
+    }
+
+
+    /// 2026-07-16 field ask: bare IPv4 must be recognised as its own
+    /// `Ip` kind — OpenLink prepends `http://` (defaults to port 80),
+    /// Copy keeps the raw displayed text.  Cover the common shapes:
+    /// bare, `:port`, `/path`, both.
+    #[test]
+    fn bare_ipv4_recognised_as_ip() {
+        for (line, expected) in [
+            ("connect 47.96.114.231 now", "47.96.114.231"),
+            ("admin 192.168.1.1:8080/status ok", "192.168.1.1:8080/status"),
+            ("dashboard 10.0.0.5:3000", "10.0.0.5:3000"),
+            ("see 8.8.8.8/dns page", "8.8.8.8/dns"),
+        ] {
+            let mut v = Vec::new();
+            scan_line(line, 0, &mut v);
+            let ips: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Ip).collect();
+            assert_eq!(ips.len(), 1, "line {line:?}: {v:?}");
+            assert_eq!(ips[0].text, expected, "line {line:?}");
+        }
+    }
+
+
+    /// URL always wins over Ip — if `http://…` is present, the URL
+    /// scanner consumes the string first and the IP scanner never
+    /// sees the digits (per user: "如果他形成了 url 就以 url 为准").
+    #[test]
+    fn url_with_scheme_wins_over_ip() {
+        let mut v = Vec::new();
+        scan_line("visit http://47.96.114.231:8080/foo done", 0, &mut v);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].kind, LinkKind::Url);
+        assert_eq!(v[0].text, "http://47.96.114.231:8080/foo");
+    }
+
+
+    /// IPv4 recogniser must NOT swallow version strings, other
+    /// identifiers, or IPs inside an `http://…` URL's tail.
+    #[test]
+    fn ipv4_rejects_version_strings_and_url_tails() {
+        for line in [
+            "runtime v1.2.3.4 released",       // preceded by 'v'
+            "kernel 1.2.3.4-rc1 in test",      // trailing -rc1
+            "matrix 1.2.3.4.5 dot",            // 5th component
+            "big 999.1.1.1 not valid",         // octet > 255
+            "cargo pkg 1.0.23 pinned",         // not 4 octets
+            "leading 010.0.0.1 zero rejected", // leading zero
+        ] {
+            let mut v = Vec::new();
+            scan_line(line, 0, &mut v);
+            let ips: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Ip).collect();
+            assert!(
+                ips.is_empty(),
+                "line {line:?} must not produce a bare-IP: {v:?}"
+            );
+        }
+    }
+
+
+    /// Prose-wrapping parens around the IP get stripped by the same
+    /// balanced-paren trim as URLs.
+    #[test]
+    fn ipv4_in_prose_parens_trimmed() {
+        let mut v = Vec::new();
+        scan_line("(see 47.96.114.231:8080)", 0, &mut v);
+        let ips: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Ip).collect();
+        assert_eq!(ips.len(), 1, "{v:?}");
+        assert_eq!(ips[0].text, "47.96.114.231:8080");
+    }
+
+
+    /// IPv6 — the three shapes we support: bracketed with port/path,
+    /// bare with `::` compression, bare full 8-group form.
+    #[test]
+    fn ipv6_recognised_as_ip() {
+        for (line, expected) in [
+            ("localhost ::1 test", "::1"),
+            ("connect 2001:db8::1 done", "2001:db8::1"),
+            ("bracketed [fe80::1]:8080/foo now", "[fe80::1]:8080/foo"),
+            ("bracketed [::1]:22 ssh", "[::1]:22"),
+            (
+                "full 2001:0db8:85a3:0000:0000:8a2e:0370:7334 ipv6",
+                "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+            ),
+        ] {
+            let mut v = Vec::new();
+            scan_line(line, 0, &mut v);
+            let ips: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Ip).collect();
+            assert_eq!(ips.len(), 1, "line {line:?}: {v:?}");
+            assert_eq!(ips[0].text, expected, "line {line:?}");
+        }
+    }
+
+
+    /// Time-of-day, hex identifiers, and other colon-bearing tokens
+    /// must NOT match as IPv6 — no `::`, not 8 groups → reject.
+    #[test]
+    fn ipv6_rejects_time_and_hex_ids() {
+        for line in [
+            "logged 12:34:56 now",             // time
+            "hex abc:def:123 label",           // 3 groups, no ::
+            "sha 1a2b3c4d:5e6f7a8b thing",     // 2 groups
+            "commit deadbeef today",           // no colon
+        ] {
+            let mut v = Vec::new();
+            scan_line(line, 0, &mut v);
+            let ips: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Ip).collect();
+            assert!(ips.is_empty(), "line {line:?}: {v:?}");
+        }
+    }
+
+
+    /// UUID canonical form — hex + dashes at fixed positions.
+    #[test]
+    fn uuid_recognised_as_uuid() {
+        for line in [
+            "session 550e8400-e29b-41d4-a716-446655440000 opened",
+            "trace-id: f47ac10b-58cc-4372-a567-0e02b2c3d479 end",
+            "start 00000000-0000-0000-0000-000000000000 nil",
+        ] {
+            let mut v = Vec::new();
+            scan_line(line, 0, &mut v);
+            let uuids: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Uuid).collect();
+            assert_eq!(uuids.len(), 1, "line {line:?}: {v:?}");
+            assert_eq!(uuids[0].text.len(), 36, "line {line:?}");
+        }
+    }
+
+
+    /// UUID reject: wrong segment lengths, non-hex chars, or
+    /// left-boundary-inside-identifier.
+    #[test]
+    fn uuid_rejects_wrong_shapes() {
+        for line in [
+            "abc123-def456-789012-345678-901234567890 wrong-lens", // 6-6-6-6-12
+            "session id-550e8400-e29b-41d4-a716-446655440000 inside", // preceded by '-'
+            "not 550e8400e29b41d4a716446655440000 dashless",       // no dashes
+            "gh 550e8400-e29b-41d4-a716-44665544000g bad-hex",     // 'g' not hex
+        ] {
+            let mut v = Vec::new();
+            scan_line(line, 0, &mut v);
+            let uuids: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Uuid).collect();
+            assert!(uuids.is_empty(), "line {line:?}: {v:?}");
+        }
+    }
+
+
+    /// A uuid followed by `/` is a path component, never a Uuid link;
+    /// a standalone uuid still links.
+    #[test]
+    fn uuid_component_in_path_rejected_standalone_still_links() {
+        let mut v = Vec::new();
+        scan_line("id 3dbde79c-ab6e-43bd-8143-c448617e1d69/scratch x", 0, &mut v);
+        assert!(
+            v.iter().all(|l| l.kind != LinkKind::Uuid),
+            "{v:?}"
+        );
+        let mut v2 = Vec::new();
+        scan_line("id 3dbde79c-ab6e-43bd-8143-c448617e1d69 done", 0, &mut v2);
+        assert_eq!(
+            v2.iter().filter(|l| l.kind == LinkKind::Uuid).count(),
+            1,
+            "{v2:?}"
+        );
+    }
+
+    /// 2026-09-06 field report, inside codex: the path came out
+    /// underlined only as far as `…/lab36-continus/`, dropping the
+    /// `.tmp/…` tail and the wrapped remainder.
+    ///
+    /// The geometry is taken off the pane it happened in — 73 columns,
+    /// codex's `›` prompt glyph, and codex's own line break with a
+    /// two-space hanging indent (no DECAWM flag, because codex wrapped
+    /// it, not the terminal).  The scanner handles this shape; what
+    /// failed was `tui_mode` being off for that pane, which is fixed
+    /// on the marspot side.  Held here because the shape is the thing
+    /// that has to keep working.
+    #[test]
+    fn a_codex_wrapped_path_with_a_dot_directory_survives() {
+        let root = std::env::temp_dir()
+            .join(format!("marspot-linkify-codexwrap-{}", std::process::id()));
+        let deep = root.join(".tmp");
+        std::fs::create_dir_all(&deep).unwrap();
+        let file = deep.join("20260906-claude-to-gpt6-guard-scope.md");
+        std::fs::write(&file, b"x").unwrap();
+        let full = file.display().to_string();
+
+        // Break it where codex would: leaving the tail on the next row
+        // behind a hanging indent.
+        let cut = full.len() - "gpt6-guard-scope.md".len();
+        let head = format!("\u{203a} {}", &full[..cut]);
+        let tail = format!("  {}", &full[cut..]);
+        // The real row sat two columns short of the pane edge (71 of
+        // 73); keep that slack, since "ends flush" is a signal the
+        // continuation test reads.
+        let cols = head.chars().count() as u16 + 2;
+        let mut src = StrSource::new(&[&head, &tail], cols);
+        src.soft_wrapped[1] = false; // codex wrapped it, not the terminal
+
+        let on = scan_visible_links(&src, ScanOpts { tui_mode: true, ..Default::default() });
+        let off = scan_visible_links(&src, ScanOpts { tui_mode: false, ..Default::default() });
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(
+            on.iter().all(|l| l.text == full),
+            "an agent TUI's own wrap must merge: {on:?}"
+        );
+        assert!(!on.is_empty(), "the path vanished entirely");
+        assert!(
+            off.iter().all(|l| l.text != full),
+            "without tui_mode the merge is not attempted — this is what \
+             made the pane's mode the whole ballgame: {off:?}"
+        );
+    }
+
+}
+
+
+
+#[cfg(test)]
+mod relative_path_tests {
+    use super::*;
+
+    /// An oracle that knows exactly one directory's contents, so a
+    /// test states what exists instead of touching a real filesystem.
+    struct Fake(&'static [&'static str]);
+    impl PathOracle for Fake {
+        fn probe(&self, path: &str) -> PathVerdict {
+            if self.0.contains(&path) {
+                PathVerdict::Exists
+            } else {
+                PathVerdict::Missing
+            }
+        }
+    }
+
+    struct Line(String);
+    impl CellSource for Line {
+        fn cols(&self) -> u16 {
+            120
+        }
+        fn rows(&self) -> u16 {
+            1
+        }
+        fn char_at(&self, col: u16, _row: u16) -> char {
+            self.0.chars().nth(col as usize).unwrap_or(' ')
+        }
+        fn is_soft_wrap_continuation(&self, _row: u16) -> bool {
+            false
+        }
+        fn cursor(&self) -> (u16, u16) {
+            (0, 0)
+        }
+        fn is_wide(&self, _ch: char) -> bool {
+            false
+        }
+    }
+
+    fn scan(text: &str, cwd: Option<&str>, exists: &'static [&'static str]) -> Vec<LinkRange> {
+        scan_visible_links_with(
+            &Line(text.to_string()),
+            ScanOpts { cwd, ..Default::default() },
+            &Fake(exists),
+        )
+    }
+
+    #[test]
+    fn a_relative_path_that_resolves_is_a_link_to_the_full_path() {
+        let v = scan(
+            "edit src/main.rs then run it",
+            Some("/w/proj"),
+            &["/w/proj/src/main.rs"],
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].kind, LinkKind::File);
+        // The underline covers what is drawn …
+        assert_eq!(v[0].text, "src/main.rs");
+        // … and Open / Copy get the file.
+        assert_eq!(v[0].target.as_deref(), Some("/w/proj/src/main.rs"));
+    }
+
+    #[test]
+    fn a_colon_ends_the_word_before_a_path_rather_than_joining_it() {
+        // Reported 2026-09-11.  The line on screen was
+        // `⏺ 写好了:.notes/sentori-ack-v8.0.1.md(442 行,六部分)。`
+        // and the path drew as ordinary text.  The candidate started
+        // at `写` — a colon counted as "inside a token", so it did not
+        // start at the path — ran to the next space, resolved to
+        // nothing, and blocked every start position it had covered.
+        let v = scan(
+            "⏺ 写好了:.notes/sentori-ack-v8.0.1.md(442 行,六部分)。",
+            Some("/w/proj"),
+            &["/w/proj/.notes/sentori-ack-v8.0.1.md"],
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, ".notes/sentori-ack-v8.0.1.md");
+        assert_eq!(
+            v[0].target.as_deref(),
+            Some("/w/proj/.notes/sentori-ack-v8.0.1.md")
+        );
+    }
+
+    #[test]
+    fn the_same_holds_for_an_ascii_word_and_for_a_tui_pane() {
+        let v = scan("wrote:docs/notes/x.md", Some("/w/proj"), &["/w/proj/docs/notes/x.md"]);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, "docs/notes/x.md");
+
+        let v = scan_visible_links_with(
+            &Line("⏺ 写好了:.notes/x.md(442 行)。".to_string()),
+            ScanOpts { cwd: Some("/w/proj"), tui_mode: true },
+            &Fake(&["/w/proj/.notes/x.md"]),
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, ".notes/x.md");
+    }
+
+    #[test]
+    fn a_name_that_is_not_there_yet_does_not_become_the_directory_beside_it() {
+        // Reported 2026-09-11.  `.notes/exprtool.html` was being
+        // described before it was generated; `.notes/exprtool/`, the
+        // directory it is generated FROM, was already there.  The
+        // screen underlined `.notes/exprtool` and left `.html` as
+        // plain text — a link to a directory the line never named.
+        //
+        // A file that does not exist is not a link.  Backing off to a
+        // prefix that does is how a missing name turns into a wrong
+        // one, and a `.` inside a token is an extension separator,
+        // never prose.
+        let v = scan(
+            ".notes/exprtool.html, 由 harness/scripts/make.py 生成",
+            Some("/w/p"),
+            &["/w/p/.notes/exprtool"],
+        );
+        assert!(v.is_empty(), "{v:?}");
+
+        // Once it exists, it is the link — whole, extension included.
+        let v = scan(
+            ".notes/exprtool.html, 由 harness/scripts/make.py 生成",
+            Some("/w/p"),
+            &["/w/p/.notes/exprtool", "/w/p/.notes/exprtool.html"],
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, ".notes/exprtool.html");
+        assert_eq!(v[0].target.as_deref(), Some("/w/p/.notes/exprtool.html"));
+    }
+
+    #[test]
+    fn a_period_that_really_does_end_the_sentence_is_still_taken_off() {
+        // The counterpart: dropping `.` as a cut point must not cost
+        // the trailing-period case, which is arbitrated one step
+        // earlier by `trim_sentence_tail`.
+        let v = scan("wrote docs/a.md.", Some("/w/p"), &["/w/p/docs/a.md"]);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, "docs/a.md");
+    }
+
+    #[test]
+    fn a_colon_after_a_path_is_still_the_line_number_rule() {
+        // The colon INSIDE a span is arbitrated where it always was,
+        // by the line/col suffix rule — not by where a candidate is
+        // allowed to start.  The span stops at the file.
+        let v = scan("at src/main.rs:42 it failed", Some("/w/proj"), &["/w/proj/src/main.rs"]);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, "src/main.rs");
+        assert_eq!(v[0].target.as_deref(), Some("/w/proj/src/main.rs"));
+    }
+
+    #[test]
+    fn one_that_does_not_resolve_is_not_a_link() {
+        let v = scan("edit src/main.rs", Some("/w/proj"), &[]);
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
+    fn without_a_working_directory_nothing_relative_matches() {
+        // `src/main.rs` names nothing on its own.
+        let v = scan("edit src/main.rs", None, &["/w/proj/src/main.rs"]);
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
+    fn dot_forms_resolve_and_the_dot_slash_is_folded_away() {
+        let v = scan("see ./notes.md", Some("/w/proj"), &["/w/proj/notes.md"]);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, "./notes.md");
+        assert_eq!(v[0].target.as_deref(), Some("/w/proj/notes.md"));
+
+        let up = scan("see ../sib/x.rs", Some("/w/proj"), &["/w/proj/../sib/x.rs"]);
+        assert_eq!(up.len(), 1, "{up:?}");
+        assert_eq!(up[0].target.as_deref(), Some("/w/proj/../sib/x.rs"));
+    }
+
+    #[test]
+    fn a_bare_filename_needs_an_extension_not_just_a_match() {
+        // A word that happens to name a directory must not light up in
+        // prose — `~` is full of them (Music, Public, Downloads).
+        let bare = scan("play some Music now", Some("/home/u"), &["/home/u/Music"]);
+        assert!(bare.is_empty(), "a bare word is not a path: {bare:?}");
+        // With an extension it is worth asking about.
+        let named = scan("open Cargo.toml", Some("/w/p"), &["/w/p/Cargo.toml"]);
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert_eq!(named[0].target.as_deref(), Some("/w/p/Cargo.toml"));
+    }
+
+    #[test]
+    fn numbers_are_never_candidates() {
+        // Even if a file with that name existed, `1.5` in prose is a
+        // number.  The extension must start with a letter and the stem
+        // must contain one.
+        for (text, exists) in [
+            ("took 1.5 seconds", "/w/p/1.5"),
+            ("version v1.2.3 shipped", "/w/p/v1.2.3"),
+            ("built 2026.09 release", "/w/p/2026.09"),
+        ] {
+            let v = scan(text, Some("/w/p"), &[]);
+            assert!(v.is_empty(), "{text}: {v:?}");
+            let _ = exists;
+        }
+    }
+
+    #[test]
+    fn absolute_and_url_forms_still_win() {
+        // The relative branch runs last; nothing it could match is
+        // allowed to re-read something another kind already claimed.
+        let v = scan("go to https://x.dev/a.rs", Some("/w/p"), &[]);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].kind, LinkKind::Url);
+        assert_eq!(v[0].target, None, "a URL is what it shows");
+
+        let m = scan("mail a.b@c.dev now", Some("/w/p"), &[]);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].kind, LinkKind::Email);
+    }
+
+    /// Two rows, as a fixed-width TUI actually draws them.
+    struct Rows(Vec<String>, u16);
+    impl CellSource for Rows {
+        fn cols(&self) -> u16 {
+            self.1
+        }
+        fn rows(&self) -> u16 {
+            self.0.len() as u16
+        }
+        fn char_at(&self, col: u16, row: u16) -> char {
+            // Columns, not chars: a CJK glyph occupies two.
+            let mut c = 0u16;
+            for ch in self.0.get(row as usize).map(|s| s.chars()).into_iter().flatten() {
+                let w = if self.is_wide(ch) { 2 } else { 1 };
+                if col < c + w {
+                    return if col == c { ch } else { '\0' };
+                }
+                c += w;
+            }
+            ' '
+        }
+        fn is_soft_wrap_continuation(&self, _r: u16) -> bool {
+            false
+        }
+        fn cursor(&self) -> (u16, u16) {
+            (0, 0)
+        }
+        fn is_wide(&self, ch: char) -> bool {
+            matches!(ch as u32, 0x2E80..=0xA4CF | 0xAC00..=0xD7A3 | 0xFF00..=0xFF60)
+        }
+    }
+
+    #[test]
+    fn a_relative_path_broken_at_a_tui_hard_wrap_is_still_one_link() {
+        // The geometry a real report arrived in: a 73-column pane, the
+        // path running to column 69, and the remainder on the next row
+        // after four spaces.  Three unwrapped paths in the same block
+        // were recognised and this one was not — the pane's agent-TUI
+        // flag had been lost across a core swap, so the rows were
+        // never merged.
+        let rows = vec![
+            "  - one item with attachments (notes/20260907-maintenance-experiment-".to_string(),
+            "    priorities.md)".to_string(),
+        ];
+        let exists: &'static [&'static str] =
+            &["/w/lab/notes/20260907-maintenance-experiment-priorities.md"];
+        let v = scan_visible_links_with(
+            &Rows(rows.clone(), 73),
+            ScanOpts { cwd: Some("/w/lab"), tui_mode: true },
+            &Fake(exists),
+        );
+        assert!(!v.is_empty(), "the wrapped path was not recognised");
+        assert_eq!(v[0].target.as_deref(), Some(exists[0]), "{v:?}");
+
+        // Without the TUI flag the rows are two lines and neither half
+        // names anything — which is correct, and is why the flag has
+        // to survive a core swap.
+        let off = scan_visible_links_with(
+            &Rows(rows, 73),
+            ScanOpts { cwd: Some("/w/lab"), tui_mode: false },
+            &Fake(exists),
+        );
+        assert!(off.is_empty(), "{off:?}");
+    }
+
+    #[test]
+    fn a_line_col_suffix_is_trimmed_the_same_way() {
+        // rustc output: `src/main.rs:120:5`.
+        let v = scan(
+            "error at src/main.rs:120:5 here",
+            Some("/w/p"),
+            &["/w/p/src/main.rs"],
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].text, "src/main.rs");
+        assert_eq!(v[0].target.as_deref(), Some("/w/p/src/main.rs"));
+    }
+}
+

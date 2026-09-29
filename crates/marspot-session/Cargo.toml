@@ -1,0 +1,37 @@
+[package]
+name = "marspot-session"
+version = "0.2.12"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+# Private repo — nothing here is published to crates.io.  (Also what
+# lets cargo-deny accept the version-less workspace path deps.)
+publish = false
+
+# The per-session L3 process (target #4): parser/terminal only, NO
+# Metal/AppKit/CoreText. Depends ONLY on the zero-GUI marspot-term
+# engine so it links no GUI frameworks and floors at ~3–5 MB resident.
+# Skeleton today (boot + attach shelld + pump → grid); shm grid publish
+# + L2↔L3 control channel land in later steps.
+
+[[bin]]
+name = "marspot-session"
+path = "src/main.rs"
+
+[dependencies]
+# Disable marspot-term's `compress` feature so the L3 process doesn't
+# link flate2 + miniz_oxide — those are dead weight at ~3-5 MB target
+# resident, and the per-pid session log files are bounded by rotate
+# count + age regardless of whether the rotated files are gzipped.
+marspot-term = { path = "../marspot-term", default-features = false }
+# libc — same FFI binding marspot-term and marspot-shelld already use.
+# Needed because RFC-003 moves PTY ownership into L3: openpty, ioctl
+# TIOCSWINSZ, EIO error checks all live here now. Trivial code size.
+libc = "0.2"
+
+# Dev-only: the L3 echo probe (examples/l3_echo_probe.rs) replicates
+# L2's spawn (clear CLOEXEC on the inherited shm + control fds) to drive
+# a real marspot-session headlessly. libc is the same FFI binding the
+# rest of the workspace already uses — not a runtime dep of the shipped
+# binary, which still links zero GUI frameworks.
+[dev-dependencies]
+libc = "0.2"

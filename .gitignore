@@ -1,0 +1,25 @@
+# Rust
+/target/
+
+# Local build logs (run.sh output)
+/build/
+
+# Reference open-source projects and specs — local-only, not committed.
+# Pinned versions tracked in references/README.md.
+/references/*
+!/references/README.md
+
+# Update-signing PRIVATE key — never commit.  The public half
+# (keys/marspot-update.pub) IS committed and embedded in the updater.
+/keys/marspot-update.sec
+
+# macOS
+.DS_Store
+*.swp
+bench/scenarios/
+bench/results/
+bench/remote-runs/
+
+# Local credentials — never committed.
+.env.local
+

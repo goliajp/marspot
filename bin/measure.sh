@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+# Cross-terminal throughput measurement.
+#
+# For each (terminal, scenario) pair: spawn the terminal, type/inject a
+# `time cat scenario` command, and capture the shell-side `time`
+# output.  The terminal's drain rate appears as cat's elapsed time
+# because cat blocks on PTY writes when the terminal can't keep up
+# (this is the vtebench trick — works without instrumenting the
+# terminal binaries).
+#
+# Output: one JSON object per (terminal, scenario) run, plus a
+# Markdown comparison table that gets folded into the perf notes.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCENARIOS_DIR="$ROOT/bench/scenarios"
+RESULTS_DIR="$ROOT/bench/results"
+mkdir -p "$RESULTS_DIR"
+# LIVE_MIN_BYTES / live_repeat / live_cat_args — the live-sizing rule
+# both this script and bin/measure-other.sh must agree on.
+source "$ROOT/bin/_lib.sh"
+# Every trial spawns a real mcli, which opens a session and writes
+# scrollback in whatever MARSPOT_STATE_DIR names.  Unsourced, that is
+# the state dir of the terminal the user actually lives in — the exact
+# shape of the 2026-07-03 incident where a test run truncated a live
+# pane's history.  On the bench host it makes no difference; on a dev
+# box it is the difference between a measurement and an accident.
+source "$ROOT/bin/_dev-sandbox.sh"
+
+SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji)
+# AppleScript dispatch to iTerm/Warp/Terminal.app is fragile (AppleEvent
+# timeouts, profile-specific shell init differences), so this script
+# automates marspot only; the competitors go through
+# bin/measure-other.sh, which shares the live sizing rule via _lib.sh.
+TERMINALS=(marspot)
+
+# Number of trials per (terminal, scenario).  We keep only the median.
+TRIALS=3
+
+# ---- per-terminal launchers ---------------------------------------------
+
+# All launchers share this contract: they get a scenario path + a marker
+# path, they make the targeted terminal run
+#   { time cat <scenario_path> ; } 2> <marker_path>; exit
+# in a fresh window, and they return after the marker file is non-empty.
+
+wait_for_marker() {
+  local marker=$1
+  for _ in $(seq 1 360); do  # up to 180s — slow terminals on 32MB scenarios take a while
+    [[ -s "$marker" ]] && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+run_in_marspot() {
+  local scenario=$1
+  local marker=$2
+
+  # Drive the single-session `mcli` binary, NOT the 9-session `marspot`
+  # app.  `marspot` runs MARSPOT_SHELL in every cell (3×3 = 9 parallel
+  # cats), so the per-scenario "live throughput" timed via marker
+  # would be ~1/9 of the real per-session number.  The product-level
+  # multi-session test lives in `bin/scenarios/multi-session-9x.sh`.
+  # Shared with the competitor harness (bin/_lib.sh): cat enough bytes
+  # to clear LIVE_MIN_BYTES, then make the terminal certify it consumed
+  # them by answering a DSR.  Same script shape for every terminal.
+  local cmd_script="/tmp/marspot-bench-cmd.sh"
+  write_live_trial_script "$cmd_script" "$marker" "$scenario"
+
+  # Forward MARSPOT_PROFILE through if set, so a profiling run can
+  # capture per-trial counters under the harness.
+  local profile_env=""
+  if [[ -n "${MARSPOT_PROFILE:-}" ]]; then
+    local pf="${MARSPOT_PROFILE}.${scenario}.${trial:-x}"
+    profile_env="MARSPOT_PROFILE=$pf"
+  fi
+  # Spawn mcli and remember its PID so cleanup is targeted.  Earlier
+  # code did `killall mcli marspot` to nuke any prior instance, but that
+  # is friendly-fire on parallel marspot sessions (e.g. an active-9x-soak
+  # already in flight gets clobbered by a measure.sh sanity run).
+  # measure.sh can run concurrent with other marspot instances now.
+  # perf-attack E7.
+  cd "$ROOT" && env $profile_env MARSPOT_SHELL="$cmd_script" \
+    nohup target/release/mcli > /dev/null 2>&1 < /dev/null &
+  local mcli_pid=$!
+  disown 2>/dev/null || true
+
+  local rc=0
+  if ! wait_for_marker "$marker"; then
+    rc=1
+  fi
+  kill "$mcli_pid" 2>/dev/null || true
+  wait "$mcli_pid" 2>/dev/null || true
+  sleep 0.3
+  return $rc
+}
+
+run_in_iterm() {
+  local scenario=$1
+  local marker=$2
+
+  local reps args
+  reps=$(live_repeat "$scenario")
+  args=$(live_cat_args "$scenario" "$reps")
+  osascript <<APPLESCRIPT >/dev/null
+tell application "iTerm"
+  activate
+  create window with default profile
+  tell current session of current window
+    write text "/usr/bin/time -p /bin/cat $args 2> $marker; sleep 0.2; exit"
+  end tell
+end tell
+APPLESCRIPT
+
+  if ! wait_for_marker "$marker"; then
+    return 1
+  fi
+}
+
+run_in() {
+  local terminal=$1; shift
+  case "$terminal" in
+    marspot)  run_in_marspot  "$@" ;;
+    iterm) run_in_iterm "$@" ;;
+    *)     echo "unknown terminal: $terminal" >&2; return 2 ;;
+  esac
+}
+
+# ---- timing parser -------------------------------------------------------
+
+# `time` writes lines like:
+#     real  0m1.234s
+#     user  0m0.123s
+#     sys   0m0.045s
+# Convert real time to nanoseconds.
+
+parse_real_ns() {
+  local marker=$1
+  # `/usr/bin/time -p` writes POSIX format (`real 1.234`), zsh/bash
+  # builtin `time` writes `real 0m1.234s`.  Handle both.
+  awk '
+    /real/ {
+      s = $2
+      if (s ~ /m/) {
+        split(s, parts, "m")
+        mins = parts[1]+0
+        sub("s", "", parts[2])
+        secs = parts[2]+0
+        total = mins*60 + secs
+      } else {
+        total = s+0
+      }
+      printf "%d", total * 1e9
+      exit
+    }
+  ' "$marker"
+}
+
+# ---- median over trials --------------------------------------------------
+
+median() {
+  python3 -c "
+import sys
+xs = sorted(int(x) for x in sys.argv[1:])
+print(xs[len(xs)//2])
+" "$@"
+}
+
+# ---- main ----------------------------------------------------------------
+
+# macOS default bash is 3.2 (no associative arrays), so we keep all
+# per-run results in a temp dir keyed by filename, then aggregate.
+RUN_DIR=$(mktemp -d)
+trap 'rm -rf "$RUN_DIR"' EXIT
+
+for scenario in "${SCENARIOS[@]}"; do
+  scenario_path="$SCENARIOS_DIR/$scenario.bin"
+  if [[ ! -f "$scenario_path" ]]; then
+    echo "missing $scenario_path — run bin/gen-scenarios.sh first" >&2
+    exit 2
+  fi
+  # Bytes actually pushed through the terminal this trial — the file
+  # size times the repeat count, NOT the file size.
+  scenario_reps=$(live_repeat "$scenario_path")
+  scenario_bytes=$(( $(stat -f%z "$scenario_path") * scenario_reps ))
+  echo "$scenario_bytes" > "$RUN_DIR/${scenario}.bytes"
+
+  for terminal in "${TERMINALS[@]}"; do
+    for trial in $(seq 1 $TRIALS); do
+      marker="/tmp/measure-${terminal}-${scenario}-${trial}.txt"
+      rm -f "$marker"
+      echo "==> $terminal $scenario trial $trial/$TRIALS"
+
+      if ! run_in "$terminal" "$scenario_path" "$marker"; then
+        echo "    failed/timeout"
+        continue
+      fi
+
+      # The DSR reply is the terminal certifying it consumed the
+      # corpus; without it the elapsed time only says how fast the
+      # PTY buffer drained.  An empty `cpr=` means the read timed out
+      # — drop the trial rather than fold a 5 s timeout into MB/s.
+      if ! grep -q '^cpr=[0-9]' "$marker" 2>/dev/null; then
+        echo "    no DSR reply — trial dropped (terminal never confirmed)"
+        continue
+      fi
+      ns=$(parse_real_ns "$marker")
+      if [[ -z "$ns" || "$ns" == "0" ]]; then
+        echo "    couldn't parse timing from $marker"
+        continue
+      fi
+      echo "$ns" >> "$RUN_DIR/${terminal}__${scenario}.ns"
+      bytes_per_sec=$((scenario_bytes * 1000000000 / ns))
+      printf "    real=%.3fs  %.1f MB/s\n" \
+        "$(echo "scale=3; $ns/1000000000" | bc)" \
+        "$(echo "scale=1; $bytes_per_sec/1048576" | bc)"
+    done
+  done
+done
+
+# ---- write results -------------------------------------------------------
+
+OUT_JSON="$RESULTS_DIR/cross-terminal.json"
+python3 - "$RUN_DIR" "$SCENARIOS_DIR" "${SCENARIOS[*]}" "${TERMINALS[*]}" > "$OUT_JSON" <<'PY'
+import json, os, sys
+run_dir, scenarios_dir, scenarios_str, terminals_str = sys.argv[1:5]
+scenarios = scenarios_str.split()
+terminals = terminals_str.split()
+out = {}
+for scenario in scenarios:
+    # Written by the shell loop: file size x live repeat count.
+    bpath = os.path.join(run_dir, scenario + ".bytes")
+    bytes_total = (int(open(bpath).read().strip()) if os.path.exists(bpath)
+                   else os.path.getsize(os.path.join(scenarios_dir, scenario + ".bin")))
+    out[scenario] = {"bytes": bytes_total}
+    for term in terminals:
+        path = os.path.join(run_dir, f"{term}__{scenario}.ns")
+        if not os.path.exists(path):
+            out[scenario][term] = {"median_ns": 0, "bytes_per_sec": 0, "samples": []}
+            continue
+        samples = sorted(int(x) for x in open(path).read().split() if x.strip())
+        if not samples:
+            out[scenario][term] = {"median_ns": 0, "bytes_per_sec": 0, "samples": []}
+            continue
+        med = samples[len(samples)//2]
+        bps = bytes_total * 1_000_000_000 // med if med > 0 else 0
+        out[scenario][term] = {"median_ns": med, "bytes_per_sec": bps, "samples": samples}
+print(json.dumps(out, indent=2))
+PY
+
+echo
+echo "==> $OUT_JSON"
+/bin/cat "$OUT_JSON"
+echo
+echo "---"
+echo "Cross-terminal comparison: paste these in iTerm2 / Warp / Terminal.app"
+echo "and capture each /tmp/<terminal>-<scenario>.txt as a marker file."
+echo "(The perf notes say how to fold the numbers in.)"
+for s in "${SCENARIOS[@]}"; do
+  spath="$SCENARIOS_DIR/$s.bin"
+  reps=$(live_repeat "$spath")
+  args=$(live_cat_args "$spath" "$reps")
+  echo
+  echo "  $s ($(( $(stat -f%z "$spath") * reps )) bytes = ${reps}x the file):"
+  echo "    /usr/bin/time -p /bin/cat$args 2> /tmp/<terminal>-$s.txt"
+done

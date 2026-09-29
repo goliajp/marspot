@@ -1,0 +1,31 @@
+# Three-layer version vector (RFC-003: L4 shelld retired).  THE
+# marspot version is the L2 (core) version — that's what the title
+# bar displays and what users mean when they ask "what version of
+# marspot are you on?". L1 and L3 each carry their own semver, bumped
+# only when their specific code surface changes.
+#
+# Canonical layer numbering (used everywhere — code, logs, docs):
+#
+#   L1 = marspot-shell    NSWindow owner / supervisor state machine /
+#                         banner / probation logic / shell self-update
+#                         path. Stable wrapper; bump rarely.
+#
+#   L2 = marspot-core     THE marspot version. Renderer (Metal), UI
+#                         dispatch, layout, session bootstrap, control-
+#                         socket protocol driving, registry-based L3
+#                         spawn + reattach (RFC-003). Bump on every
+#                         user-visible release.
+#
+#   L3 = marspot-session  Per-pane terminal engine + PTY owner: parser,
+#                         grid, scrollback, shm publish, UDS control
+#                         surface, bytelog.  Bump when in-process
+#                         terminal mechanics or the L2↔L3 wire change.
+#
+# Bump protocol: bump the version below and put a one-line subject on
+# the same line.  The full why/how belongs in the commit message.  Do
+# NOT keep appending to this line — it grew to ~25 KB once and ate
+# `git diff` readability.
+
+shell   = "0.7.176"  # a spent window is out, whatever the status says
+core    = "0.12.218"  # dev builds stop piling up .o files on macOS
+session = "0.11.102"  # build.rs only watches git paths that exist

@@ -1,0 +1,937 @@
+//! Window layout: where each session and the sidebar live, in
+//! physical pixels.
+//!
+//! marspot carves the window into:
+//!
+//! ```text
+//!   ┌─────────┬───────────────────────────┐
+//!   │ sidebar │  N×M grid of session cells │
+//!   │         │  ┌──────┬──────┬──────┐   │
+//!   │         │  │ cell │ cell │ cell │   │
+//!   │         │  ├──────┼──────┼──────┤   │
+//!   │         │  │ cell │ cell │ cell │   │
+//!   │         │  └──────┴──────┴──────┘   │
+//!   └─────────┴───────────────────────────┘
+//! ```
+//!
+//! Sizes are everywhere in **physical pixels** so the renderer can
+//! consume them directly.  The caller passes `cell_w` / `cell_h`
+//! (font cell metrics) so each session knows how many terminal
+//! columns / rows actually fit in its physical sub-rect.
+
+/// A simple physical-pixel rectangle.  Used for non-cell UI chrome
+/// elements (layout-picker button, picker option icons, sidebar
+/// close-buttons, sidebar add-button).  Distinct from `CellRect`
+/// because those carry terminal cols/rows; these are pure UI.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f64,
+    pub y_top: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl Rect {
+    pub fn contains(&self, px: f64, py: f64) -> bool {
+        px >= self.x && px < self.x + self.w && py >= self.y_top && py < self.y_top + self.h
+    }
+    pub const ZERO: Rect = Rect {
+        x: 0.0,
+        y_top: 0.0,
+        w: 0.0,
+        h: 0.0,
+    };
+
+    /// F3+3.4 — uniform inset on all four sides.  `padding > 0`
+    /// shrinks the rect inward; negative input clamps to 0.  When
+    /// padding > half the rect's smaller axis, returns a zero-size
+    /// rect at the rect's center so callers can no-op-paint
+    /// without panicking on negative w/h.
+    pub fn inset(self, padding: f64) -> Rect {
+        let p = padding.max(0.0);
+        let w = (self.w - 2.0 * p).max(0.0);
+        let h = (self.h - 2.0 * p).max(0.0);
+        // If padding ate the whole rect, recentre to a zero-size box
+        // at the rect's centre so `place` still returns a sensible point.
+        if w == 0.0 || h == 0.0 {
+            return Rect {
+                x: self.x + self.w * 0.5,
+                y_top: self.y_top + self.h * 0.5,
+                w: 0.0,
+                h: 0.0,
+            };
+        }
+        Rect {
+            x: self.x + p,
+            y_top: self.y_top + p,
+            w,
+            h,
+        }
+    }
+
+    /// F3+3.4 — anchor a `(w, h)`-sized child inside this rect at
+    /// the given alignment.  Resulting rect is clamped to fit
+    /// inside `self` (if child larger than self, child overflows
+    /// from the anchor edge / center, NOT clipped).  Pure
+    /// positioning helper — caller still has to draw the box.
+    pub fn place(self, w: f64, h: f64, align: Alignment) -> Rect {
+        let (hx, vy) = align.factors();
+        let x = self.x + (self.w - w) * hx;
+        let y_top = self.y_top + (self.h - h) * vy;
+        Rect { x, y_top, w, h }
+    }
+}
+
+/// F3+3.4 — nine-anchor alignment, the standard React Native /
+/// CSS box model knob.  Used by `Rect::place` to position a child
+/// box inside a parent rect, and by `ViewPainter::text_in` to
+/// position a text run inside a chrome label area.
+///
+/// Naming follows the CSS convention: vertical first, horizontal
+/// second.  Variants:
+///
+/// | TopLeft     | TopCenter    | TopRight     |
+/// | CenterLeft  | Center       | CenterRight  |
+/// | BottomLeft  | BottomCenter | BottomRight  |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Alignment {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    CenterLeft,
+    Center,
+    CenterRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+}
+
+impl Alignment {
+    /// (horizontal, vertical) fractions, each ∈ {0.0, 0.5, 1.0}.
+    /// Returned tuple is `(hx, vy)` where 0 = top/left, 0.5 =
+    /// center, 1.0 = bottom/right.  `Rect::place` multiplies these
+    /// against `(parent.w - child.w, parent.h - child.h)` to
+    /// compute the placement offset.
+    pub fn factors(self) -> (f64, f64) {
+        let hx = match self {
+            Self::TopLeft | Self::CenterLeft | Self::BottomLeft => 0.0,
+            Self::TopCenter | Self::Center | Self::BottomCenter => 0.5,
+            Self::TopRight | Self::CenterRight | Self::BottomRight => 1.0,
+        };
+        let vy = match self {
+            Self::TopLeft | Self::TopCenter | Self::TopRight => 0.0,
+            Self::CenterLeft | Self::Center | Self::CenterRight => 0.5,
+            Self::BottomLeft | Self::BottomCenter | Self::BottomRight => 1.0,
+        };
+        (hx, vy)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CellRect {
+    /// Physical-pixel x of the rect's left edge.
+    pub x: f64,
+    /// Physical-pixel y of the rect's TOP edge (y-down).  The renderer
+    /// flips to y-up when computing baselines.
+    pub y_top: f64,
+    pub w: f64,
+    pub h: f64,
+    /// Terminal column count that fits in this rect at the configured
+    /// font cell width.
+    pub cols: u16,
+    /// Terminal row count that fits.
+    pub rows: u16,
+}
+
+#[derive(Clone, Debug)]
+pub struct Layout {
+    /// Total window dimensions in physical pixels.
+    pub window_w: f64,
+    pub window_h: f64,
+    /// Sidebar width in physical pixels.  The sidebar occupies
+    /// `[0, sidebar_w] × [top_inset, window_h]`.  Set to 0 for no
+    /// sidebar.
+    pub sidebar_w: f64,
+    /// Top inset in physical pixels — a clear band above sidebar
+    /// items AND cells, reserved for the macOS traffic-light buttons
+    /// when `FullSizeContentView` is on.  Without it, the buttons
+    /// would overlap whatever the renderer paints into the top-left
+    /// (sidebar item 1, cell 1's first row).  Set to 0 for headless
+    /// / snapshot use where there's no window chrome to clear.
+    pub top_inset: f64,
+    /// `(cols, rows)` of the session grid layout itself (not the
+    /// terminal cell grid inside one session — that's per-cell).
+    pub grid_cols: usize,
+    pub grid_rows: usize,
+    /// The N session sub-rects, in row-major order.  Length is
+    /// `grid_cols * grid_rows`.
+    pub cells: Vec<CellRect>,
+    /// Inter-cell gutter width in physical pixels.  The renderer
+    /// uses this to paint the focus indicator AS the gutter around
+    /// the focused cell (focus frame and divider are the same
+    /// thing — no separate inner stroke).  0 if the grid is 1×1.
+    pub gutter: f64,
+    /// Inner padding on each side of every cell, in physical pixels.
+    /// `cell.cols` / `cell.rows` are counted off the area AFTER
+    /// padding; the renderer offsets glyph origins by this amount
+    /// so terminal content doesn't crowd the cell's visible edge.
+    pub padding: f64,
+    /// Title strip height at the top of every cell, in physical
+    /// pixels.  The renderer paints the strip with the session
+    /// label + a SEAM hairline at its bottom; terminal content
+    /// (cols × rows × glyphs) starts BELOW this strip.  Set to 0
+    /// for headless / single-pane snapshot layouts that don't
+    /// want a title band.
+    pub cell_title_h: f64,
+    /// Floating [layout] button — top-right of the main session-
+    /// grid area.  Renderer paints a small rounded chip showing the
+    /// current grid shape; clicking toggles the picker.  Always
+    /// present (even at 1×1) so the user can switch layouts.
+    pub layout_button_rect: Rect,
+    /// Floating [sidebar] button — sits immediately left of the
+    /// layout button.  Clicking toggles the sidebar collapsed state.
+    /// Always present (even when the sidebar is currently collapsed)
+    /// so the user can re-open it.
+    pub sidebar_button_rect: Rect,
+    /// F3+1 — third chrome icon button immediately right of the
+    /// layout button.  Toggles the right-side process-tree panel.
+    /// Always present so the user can pop the panel any time.
+    pub process_button_rect: Rect,
+    /// Dev-panel toggle — fourth chrome icon button,  immediately
+    /// right of the process-tree button.  Toggles the UI-system
+    /// workbench panel.  Always present.
+    pub dev_panel_button_rect: Rect,
+    /// cc — toolbar `Cc` button (Claude profile usage modal).
+    pub cc_button_rect: Rect,
+    /// Toolbar button #6 — the settings panel.
+    pub settings_button_rect: Rect,
+    // F3+3.0 — picker popup removed.  The toolbar layout button
+    // now opens a `LayoutModal` (see `src/ui/components/`) where
+    // the user sets arbitrary cols × rows.  The modal is rendered
+    // by the chrome layer, not layout.rs — Layout no longer carries
+    // picker-overlay rects.
+    /// One rect per sidebar row — the close [×] hit-target on the
+    /// row's right edge.  Length == n_sessions.  Empty when the
+    /// chrome wasn't built or n_sessions == 0.  Renderer paints a
+    /// [×] glyph or hairline cross inside each rect.  The first
+    /// (only) rect is the "last session" — `mouse_down` may choose
+    /// to ignore clicks on it to prevent killing the final session.
+    pub close_session_rects: Vec<Rect>,
+    /// [+] add-session button — a row-tall band immediately under
+    /// the macOS header strip, above sidebar row 0.  Always present
+    /// when the sidebar is shown (renderer paints it disabled when
+    /// `n_sessions >= 9`).  Width spans the sidebar minus padding.
+    pub add_session_button_rect: Rect,
+    /// Y offset (physical px) from `top_inset` to the top of
+    /// sidebar row 0.  Reserves space for the header gap + add-
+    /// session button + body gap when the sidebar is shown; zero
+    /// when sidebar_w == 0.  Both renderers (Metal / AppKit) read
+    /// this instead of a hard-coded constant so the row positions
+    /// + chrome rects stay in lockstep.
+    pub sidebar_top_pad_phys: f64,
+}
+
+/// Square icon-button side length (logical pt). Both chrome buttons
+/// (sidebar toggle, layout picker) are now true squares — Lucide-
+/// style monochrome line icons sit inside a 22×22 hit-target.
+const ICON_BUTTON_LOGICAL_SIZE: f64 = 22.0;
+const ICON_BUTTON_LOGICAL_GAP: f64 = 6.0;
+
+/// Vertical center of the macOS traffic-light row, in logical pt from
+/// the window's top edge.  AppKit draws the window buttons itself at a
+/// fixed offset that ignores our chrome height, so this is measured,
+/// not derived: screen-captured the live window at its frame origin and
+/// found the 14pt discs spanning y 9..23 — center 16.  (The capture
+/// self-calibrates: the toolbar buttons in the same frame landed on
+/// exactly the row this constant asked for, so the capture's origin and
+/// the layout's origin are known to agree.)  The toolbar buttons center
+/// on this same row, which is what makes the header read as one line
+/// instead of a title strip stacked over a toolbar.
+pub const TRAFFIC_LIGHT_CENTER_Y_LOGICAL: f64 = 16.0;
+/// Left edge of the toolbar's first icon button, logical pt from the
+/// window's left edge.  Same capture: the light group runs x 9..69, so
+/// this leaves a 15pt gap — wide enough that the OS's cluster and ours
+/// read as two groups instead of one crowded run of controls.
+const TOOLBAR_LEFT_LOGICAL: f64 = 84.0;
+/// Gap between the OS's window-button cluster and our first icon —
+/// wide enough that the two read as two groups rather than one
+/// crowded run of controls.  (The old constant above bakes the same
+/// 15 pt in against a measured cluster edge of 69.)
+const TOOLBAR_LIGHTS_GAP_LOGICAL: f64 = 15.0;
+/// Left margin when there is no cluster to clear.  The same breathing
+/// room the cluster itself gets from the window edge.
+const TOOLBAR_EDGE_MARGIN_LOGICAL: f64 = 9.0;
+
+/// Sidebar geometry, all in physical pixels.  Renderer reads
+/// `Layout::sidebar_top_pad_phys` (computed at build time so the
+/// header band reserved for the [+] add-session button is accounted
+/// for); session-row height stays a fixed phys constant.
+pub const SIDEBAR_ROW_H_PHYS: f64 = 22.0;
+const SIDEBAR_HEADER_GAP_PHYS: f64 = 8.0;
+const SIDEBAR_ADD_BTN_H_PHYS: f64 = 22.0;
+const SIDEBAR_BODY_GAP_PHYS: f64 = 8.0;
+const SIDEBAR_ADD_BTN_X_PAD_PHYS: f64 = 8.0;
+const SIDEBAR_CLOSE_PHYS_SIZE: f64 = 14.0;
+const SIDEBAR_CLOSE_PHYS_MARGIN_RIGHT: f64 = 8.0;
+
+impl Layout {
+    /// Build a layout for `grid_cols × grid_rows` sessions inside a
+    /// window of `(window_w, window_h)` physical pixels, leaving a
+    /// `sidebar_w`-wide strip on the left for chrome.
+    ///
+    /// `cell_w` / `cell_h` are the font's per-character cell metrics
+    /// — used to compute how many terminal cols / rows fit in each
+    /// sub-rect.
+    pub fn build(
+        window_w: f64,
+        window_h: f64,
+        sidebar_w: f64,
+        top_inset: f64,
+        cell_title_h: f64,
+        grid_cols: usize,
+        grid_rows: usize,
+        cell_w: f64,
+        cell_h: f64,
+    ) -> Self {
+        assert!(grid_cols > 0 && grid_rows > 0);
+        // When a sidebar is present, reserve one 1 px strip between
+        // it and the 9-grid for the SEAM hairline.  Same physical
+        // width as inter-cell seams — iTerm2 reads as a 1-pixel
+        // hairline; anything wider looks like chrome.
+        let sidebar_seam = if sidebar_w > 0.0 { 1.0 } else { 0.0 };
+        let avail_w = (window_w - sidebar_w - sidebar_seam).max(0.0);
+        let avail_h = (window_h - top_inset).max(0.0);
+        // Inter-cell gutter in physical pixels — a thin strip of
+        // chrome (the GUTTER color cleared by the renderer) shows
+        // between sessions so the 3×3 grid reads as a grid, not as a
+        // single sea of identical-looking shells.  2 px = 1 logical
+        // point at 2× retina; iTerm2-style hairline.  Skipped when
+        // the grid is 1×1 (single session, nothing to divide).
+        let gutter = if grid_cols > 1 || grid_rows > 1 {
+            1.0
+        } else {
+            0.0
+        };
+        // Inner padding (physical px) — breathing room between the
+        // cell rect's edge and the first/last terminal column / row.
+        // Without this, "Last login: ..." crowds the very top-left
+        // pixel of the cell.  ~8 px ≈ 4 logical points at 2× retina,
+        // matches iTerm2's default leftmargin/topmargin feel.
+        let padding = 8.0;
+
+        // Cells flush to the available area's outer edges — gutters
+        // appear ONLY between cells, never around the outside.  Old
+        // layout left a `gutter/2` margin on each side; that strip
+        // showed the renderer's GUTTER clear colour (a light grey
+        // hairline) all the way around the 9-grid, framing it like
+        // a chrome inset.  Worse, the strip extended into macOS's
+        // rounded window corners — the rounded mask clipped the
+        // grey strip into a "chipped" look.  Flushing cells means
+        // cell BG paints the whole window-content rectangle and
+        // the rounding just clips dark-on-dark.
+        let inner_w = (avail_w - (grid_cols - 1) as f64 * gutter).max(1.0);
+        let inner_h = (avail_h - (grid_rows - 1) as f64 * gutter).max(1.0);
+        let cell_phys_w = (inner_w / grid_cols as f64).max(1.0);
+        let cell_phys_h = (inner_h / grid_rows as f64).max(1.0);
+        // Inner content area (after padding + title strip) is what
+        // cols/rows are counted from.  The cell rect itself stays
+        // at the outer size — the title strip and BG fill cover
+        // the whole cell so the padding zone reads as terminal-bg.
+        let cell_inner_w = (cell_phys_w - 2.0 * padding).max(1.0);
+        let cell_inner_h = (cell_phys_h - cell_title_h - 2.0 * padding).max(1.0);
+
+        let mut cells = Vec::with_capacity(grid_cols * grid_rows);
+        for r in 0..grid_rows {
+            for c in 0..grid_cols {
+                let x = sidebar_w + sidebar_seam + c as f64 * (cell_phys_w + gutter);
+                let y_top = top_inset + r as f64 * (cell_phys_h + gutter);
+                let cols = ((cell_inner_w / cell_w).floor() as u16).max(1);
+                let rows = ((cell_inner_h / cell_h).floor() as u16).max(1);
+                cells.push(CellRect {
+                    x,
+                    y_top,
+                    w: cell_phys_w,
+                    h: cell_phys_h,
+                    cols,
+                    rows,
+                });
+            }
+        }
+        // Sidebar-top pad: header gap + add-session button + body
+        // gap when the sidebar is shown.  Zero otherwise (snapshot /
+        // bench paths don't reserve a header band).  Computed here
+        // (not in `with_chrome`) because the renderer's row math
+        // reads it whether or not chrome was layered on.
+        let sidebar_top_pad_phys = if sidebar_w > 0.0 {
+            SIDEBAR_HEADER_GAP_PHYS + SIDEBAR_ADD_BTN_H_PHYS + SIDEBAR_BODY_GAP_PHYS
+        } else {
+            0.0
+        };
+        Self {
+            window_w,
+            window_h,
+            sidebar_w,
+            top_inset,
+            grid_cols,
+            grid_rows,
+            cells,
+            gutter,
+            padding,
+            cell_title_h,
+            // Chrome rects default to ZERO / empty — call `with_chrome`
+            // to populate them after build.  Snapshot/bench/test
+            // call sites that don't render the picker leave them
+            // zeroed; marspot's main path always layers on the chrome.
+            layout_button_rect: Rect::ZERO,
+            sidebar_button_rect: Rect::ZERO,
+            process_button_rect: Rect::ZERO,
+            dev_panel_button_rect: Rect::ZERO,
+            cc_button_rect: Rect::ZERO,
+            settings_button_rect: Rect::ZERO,
+            close_session_rects: Vec::new(),
+            add_session_button_rect: Rect::ZERO,
+            sidebar_top_pad_phys,
+        }
+    }
+
+    /// Layer the floating-chrome rects (the [layout] button, the
+    /// picker overlay when `picker_open`, and the per-row close [×]
+    /// rects) onto an already-built `Layout`.  Done as a post-build
+    /// step so snapshot / bench / test paths that don't render
+    /// chrome can call the original `build` unchanged.
+    /// `scale` is the device pixel ratio (caller already has it
+    /// from `ctx.scale()`); we use it for the button + picker
+    /// (logical-pt sizing).  `n_sessions` populates the close-[×]
+    /// rects (one per row).
+    /// `lights_right_phys` is where the OS's own window buttons end,
+    /// as measured by the shell: `Some(0.0)` when they are not on
+    /// screen, and **`None` when nobody has measured yet**.
+    ///
+    /// Those two are not the same thing and collapsing them put the
+    /// toolbar straight on top of the buttons: a freshly built window
+    /// has no measurement, `0.0` was read as "no cluster", and the
+    /// icons drew over the OS's own (2026-08-11).  Unknown falls back
+    /// to the historical constant, which is right for the overwhelming
+    /// case (a normal window) and wrong only until the first frame
+    /// arrives.
+    pub fn with_chrome(
+        mut self,
+        scale: f64,
+        n_sessions: usize,
+        lights_right_phys: Option<f64>,
+    ) -> Self {
+        let btn_size = ICON_BUTTON_LOGICAL_SIZE * scale;
+        let btn_gap = ICON_BUTTON_LOGICAL_GAP * scale;
+        // Buttons center on the traffic-light row, NOT inside the
+        // header band — the lights are AppKit's and sit at a fixed
+        // offset from the window top, so that row is the anchor the
+        // whole header lines up against (`HEADER_PT` is sized to
+        // agree with it, but this math doesn't depend on that).
+        let btn_y = TRAFFIC_LIGHT_CENTER_Y_LOGICAL * scale - btn_size * 0.5;
+        // Icon buttons anchored to the LEFT of the header, starting
+        // right of the traffic lights so the user's hand path stays on
+        // one side; sidebar toggle first (it stays visible when the
+        // sidebar is collapsed and is the most-used affordance),
+        // layout picker right of it.
+        // Anchored to the window's left edge, NOT to the sidebar's
+        // right edge — the header extends full width over the sidebar
+        // area, so window-left is the consistent anchor whether the
+        // sidebar is shown or collapsed.
+        let btn_w = btn_size;
+        let btn_h = btn_size;
+        // The toolbar starts after the OS's cluster, wherever that
+        // ends — and when the cluster is gone (full screen), it starts
+        // at the window's own margin instead of leaving a hole where
+        // the buttons used to be (2026-08-11 report).
+        //
+        // `TOOLBAR_LEFT_LOGICAL` survives only as the fallback for a
+        // shell too old to send the measurement.
+        let sidebar_btn_x = match lights_right_phys {
+            Some(right) if right > 0.0 => right + TOOLBAR_LIGHTS_GAP_LOGICAL * scale,
+            Some(_) => TOOLBAR_EDGE_MARGIN_LOGICAL * scale,
+            None => TOOLBAR_LEFT_LOGICAL * scale,
+        };
+        let layout_btn_x = sidebar_btn_x + btn_size + btn_gap;
+        // F3+1 — process-tree toggle sits immediately right of layout
+        // picker, anchored to the left toolbar group.  Keeps all three
+        // affordances clustered so the user's eye can scan them in one
+        // movement.
+        let process_btn_x = layout_btn_x + btn_size + btn_gap;
+        let dev_panel_btn_x = process_btn_x + btn_size + btn_gap;
+        let cc_btn_x = dev_panel_btn_x + btn_size + btn_gap;
+        let settings_btn_x = cc_btn_x + btn_size + btn_gap;
+        self.sidebar_button_rect = Rect {
+            x: sidebar_btn_x,
+            y_top: btn_y,
+            w: btn_w,
+            h: btn_h,
+        };
+        self.layout_button_rect = Rect {
+            x: layout_btn_x,
+            y_top: btn_y,
+            w: btn_w,
+            h: btn_h,
+        };
+        self.process_button_rect = Rect {
+            x: process_btn_x,
+            y_top: btn_y,
+            w: btn_w,
+            h: btn_h,
+        };
+        self.dev_panel_button_rect = Rect {
+            x: dev_panel_btn_x,
+            y_top: btn_y,
+            w: btn_w,
+            h: btn_h,
+        };
+        self.cc_button_rect = Rect {
+            x: cc_btn_x,
+            y_top: btn_y,
+            w: btn_w,
+            h: btn_h,
+        };
+        self.settings_button_rect = Rect {
+            x: settings_btn_x,
+            y_top: btn_y,
+            w: btn_w,
+            h: btn_h,
+        };
+        // Sidebar close-[×] rects.  Geometry uses
+        // `sidebar_top_pad_phys` (set by `build`) so it always lines
+        // up with the visually painted row — both renderers consume
+        // the same value.  Skip when the sidebar is absent
+        // (snapshot / 1-pane bench paths).
+        if self.sidebar_w > 0.0 && n_sessions > 0 {
+            let mut rects = Vec::with_capacity(n_sessions);
+            let close_size = SIDEBAR_CLOSE_PHYS_SIZE;
+            let close_x = self.sidebar_w - SIDEBAR_CLOSE_PHYS_MARGIN_RIGHT - close_size;
+            for i in 0..n_sessions {
+                let row_top =
+                    self.top_inset + self.sidebar_top_pad_phys + i as f64 * SIDEBAR_ROW_H_PHYS;
+                let close_y = row_top + (SIDEBAR_ROW_H_PHYS - close_size) / 2.0;
+                rects.push(Rect {
+                    x: close_x,
+                    y_top: close_y,
+                    w: close_size,
+                    h: close_size,
+                });
+            }
+            self.close_session_rects = rects;
+        }
+
+        // [+] add-session button — sits in the header band above
+        // row 0, spans (most of) the sidebar width.  Always built
+        // when sidebar exists; renderer paints it disabled when
+        // n_sessions >= 9 and `mouse_down` ignores the click.
+        if self.sidebar_w > 0.0 {
+            let x = SIDEBAR_ADD_BTN_X_PAD_PHYS;
+            let w = (self.sidebar_w - 2.0 * SIDEBAR_ADD_BTN_X_PAD_PHYS).max(1.0);
+            let y = self.top_inset + SIDEBAR_HEADER_GAP_PHYS;
+            self.add_session_button_rect = Rect {
+                x,
+                y_top: y,
+                w,
+                h: SIDEBAR_ADD_BTN_H_PHYS,
+            };
+        }
+
+        self
+    }
+
+    /// True when `(px, py)` falls inside the floating layout button.
+    pub fn hit_test_layout_button(&self, px: f64, py: f64) -> bool {
+        self.layout_button_rect.contains(px, py)
+    }
+
+    /// True when `(px, py)` falls inside the floating sidebar toggle
+    /// button.  Always live (the button stays visible even when the
+    /// sidebar is collapsed, since it's the only way back).
+    pub fn hit_test_sidebar_button(&self, px: f64, py: f64) -> bool {
+        self.sidebar_button_rect.contains(px, py)
+    }
+
+    /// F3+1 — true when `(px, py)` falls inside the floating process-
+    /// tree toggle button.
+    pub fn hit_test_process_button(&self, px: f64, py: f64) -> bool {
+        self.process_button_rect.contains(px, py)
+    }
+
+    /// True when `(px, py)` falls inside the dev-panel toggle button.
+    pub fn hit_test_dev_panel_button(&self, px: f64, py: f64) -> bool {
+        self.dev_panel_button_rect.contains(px, py)
+    }
+
+    /// cc — true when `(px, py)` falls inside the toolbar `Cc`
+    /// (Claude usage modal) button.
+    pub fn hit_test_cc_button(&self, px: f64, py: f64) -> bool {
+        self.cc_button_rect.contains(px, py)
+    }
+
+    pub fn hit_test_settings_button(&self, px: f64, py: f64) -> bool {
+        self.settings_button_rect.contains(px, py)
+    }
+
+    /// Every toolbar button, in left-to-right order.
+    ///
+    /// The painter iterates **this**, zipped against a same-length
+    /// array of icons, so a button that exists in the layout cannot be
+    /// left undrawn — which is exactly what happened when the settings
+    /// button was added (2026-08-08: the rect was laid out, the
+    /// hit-test worked, and nothing was painted, so the toolbar had an
+    /// invisible sixth button for an hour).  A mismatched icon list
+    /// now fails to compile.
+    pub fn toolbar_buttons(&self) -> [Rect; 6] {
+        [
+            self.sidebar_button_rect,
+            self.layout_button_rect,
+            self.process_button_rect,
+            self.dev_panel_button_rect,
+            self.cc_button_rect,
+            self.settings_button_rect,
+        ]
+    }
+
+    // F3+3.0 — `hit_test_picker_option` / `hit_test_picker_panel`
+    // removed alongside the popup picker.  The toolbar layout
+    // button now opens a `LayoutModal` whose hit-tests live in
+    // its own component (sees the modal rects via the modal
+    // state struct, not via Layout).
+
+    /// Returns the sidebar row index whose close-[×] button
+    /// `(px, py)` falls inside, or `None`.  Hit-target lives on the
+    /// row's right edge; clicks to its left fall through to
+    /// `hit_test_sidebar_row` for normal focus switching.
+    pub fn hit_test_close_session(&self, px: f64, py: f64) -> Option<usize> {
+        self.close_session_rects
+            .iter()
+            .position(|r| r.contains(px, py))
+    }
+
+    /// True when `(px, py)` lands on the sidebar's [+] add-session
+    /// button.  The button is always present when the sidebar is
+    /// shown; the renderer dims it (and `mouse_down` ignores the
+    /// click) when `sessions.len() >= 9`.
+    pub fn hit_test_add_session_button(&self, px: f64, py: f64) -> bool {
+        self.add_session_button_rect.contains(px, py)
+    }
+
+    /// Hit-test a click at physical coords `(px, py)`.  Returns the
+    /// session index when the click landed inside one of the grid
+    /// cells, else `None` (sidebar hit, or outside the window).  For
+    /// sidebar clicks, see [`hit_test_sidebar_row`](Self::hit_test_sidebar_row).
+    pub fn hit_test(&self, px: f64, py: f64) -> Option<usize> {
+        if px < self.sidebar_w {
+            return None;
+        }
+        for (i, c) in self.cells.iter().enumerate() {
+            if px >= c.x && px < c.x + c.w && py >= c.y_top && py < c.y_top + c.h {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Map a click in the terminal-content area of a cell to its
+    /// `(session_idx, col, row)` cell coordinates.  Returns `None`
+    /// when the click is in the sidebar, the title strip, the
+    /// padding band, or outside the window.  Used by the selection
+    /// machinery to anchor / extend a selection on mouse drag.
+    /// `cell_w` / `cell_h` are the per-glyph monospace metrics in
+    /// physical pixels; the renderer is the source of truth for
+    /// these so the caller passes them through.
+    pub fn hit_test_cell_pos(
+        &self,
+        px: f64,
+        py: f64,
+        cell_w: f64,
+        cell_h: f64,
+    ) -> Option<(usize, u16, u16)> {
+        if px < self.sidebar_w {
+            return None;
+        }
+        for (i, c) in self.cells.iter().enumerate() {
+            if px < c.x || px >= c.x + c.w || py < c.y_top || py >= c.y_top + c.h {
+                continue;
+            }
+            // Inside the rect — discard hits in the title strip and
+            // the surrounding padding so the selection only anchors
+            // on actual terminal content.
+            let inner_x = c.x + self.padding;
+            let inner_y = c.y_top + self.cell_title_h + self.padding;
+            if py < inner_y {
+                return None;
+            }
+            let dx = px - inner_x;
+            let dy = py - inner_y;
+            if dx < 0.0 {
+                return None;
+            }
+            let col = (dx / cell_w).floor().max(0.0) as u16;
+            let row = (dy / cell_h).floor().max(0.0) as u16;
+            // Clamp to the cell's reported terminal dims so a
+            // drag past the right / bottom edge doesn't escape.
+            let col = col.min(c.cols.saturating_sub(1));
+            let row = row.min(c.rows.saturating_sub(1));
+            return Some((i, col, row));
+        }
+        None
+    }
+
+    /// Inverse of `hit_test_cell_pos`: given a cell index + `(col,
+    /// row)` inside that cell's terminal grid, return the physical-pixel
+    /// rect that one character cell occupies in view-local top-left
+    /// coordinates (y-down — same space the renderer paints in).
+    /// Returns `None` when `cell_idx` is out of range.  Both
+    /// `MarspotApp` and `mcli` use this to publish the focused caret
+    /// to the IME (`MarspotAppCtx::set_caret_rect_phys`).
+    pub fn caret_view_phys_rect(
+        &self,
+        cell_idx: usize,
+        col: u16,
+        row: u16,
+        cell_w: f64,
+        cell_h: f64,
+    ) -> Option<(f64, f64, f64, f64)> {
+        let c = self.cells.get(cell_idx)?;
+        let inner_x = c.x + self.padding;
+        let inner_y = c.y_top + self.cell_title_h + self.padding;
+        let x = inner_x + col as f64 * cell_w;
+        let y = inner_y + row as f64 * cell_h;
+        Some((x, y, cell_w, cell_h))
+    }
+
+    /// Hit-test the per-cell title strip — the band at the top of
+    /// each cell where `cell_title_h` reserves space for the
+    /// session label.  Returns `Some(i)` if the click landed in
+    /// cell `i`'s title strip, else `None`.  Used for click-to-edit
+    /// title behaviour without disturbing terminal-area clicks.
+    pub fn hit_test_cell_title(&self, px: f64, py: f64) -> Option<usize> {
+        if self.cell_title_h <= 0.0 || px < self.sidebar_w {
+            return None;
+        }
+        for (i, c) in self.cells.iter().enumerate() {
+            if px >= c.x && px < c.x + c.w && py >= c.y_top && py < c.y_top + self.cell_title_h {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Hit-test the per-cell refresh affordance — a square at the right
+    /// edge of cell `i`'s title strip (`cell_title_h` wide, the full strip
+    /// height), where the renderer draws the deferred-update glyph (target
+    /// #4 step 5b).  Returns `Some(i)` if the click landed there.  The
+    /// caller only acts on it when that pane actually has an update staged;
+    /// the generous square (vs. the exact glyph advance the renderer uses)
+    /// keeps it a comfortable click target.
+    pub fn hit_test_cell_refresh(&self, px: f64, py: f64) -> Option<usize> {
+        if self.cell_title_h <= 0.0 || px < self.sidebar_w {
+            return None;
+        }
+        let icon_w = self.cell_title_h;
+        for (i, c) in self.cells.iter().enumerate() {
+            let right = c.x + c.w - self.padding;
+            let left = right - icon_w;
+            if px >= left && px < right && py >= c.y_top && py < c.y_top + self.cell_title_h {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Map a click in the sidebar to the session-list row index.
+    /// Returns `None` if the click was outside the sidebar or above /
+    /// below the entry list.  `row_height_phys` is the per-entry
+    /// height the renderer used (in physical pixels), and `top_pad`
+    /// is the gap between the window's top edge and the first entry.
+    pub fn hit_test_sidebar_row(
+        &self,
+        px: f64,
+        py: f64,
+        top_pad: f64,
+        row_height_phys: f64,
+        rows: usize,
+    ) -> Option<usize> {
+        if px < 0.0 || px >= self.sidebar_w || py < top_pad {
+            return None;
+        }
+        let idx = ((py - top_pad) / row_height_phys).floor() as usize;
+        if idx >= rows { None } else { Some(idx) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    /// The toolbar's buttons must be laid out where a user can hit
+    /// them, in order, without overlapping — and `toolbar_buttons()`
+    /// must list every one of them.
+    ///
+    /// The list is what the painter iterates.  A button missing from
+    /// it is a button that exists (it has a rect, its hit-test works)
+    /// and is never drawn — which is how the settings button shipped
+    /// invisible on 2026-08-08.
+    #[test]
+    fn every_toolbar_button_is_laid_out_and_listed() {
+        // `with_chrome` is what lays the toolbar out; `build` alone
+        // makes the chrome-less layout the bench and snapshot paths use.
+        let l = Layout::build(1400.0, 900.0, 0.0, 40.0, 20.0, 2, 2, 8.0, 16.0).with_chrome(
+            2.0,
+            2,
+            Some(138.0),
+        );
+        let btns = l.toolbar_buttons();
+        assert_eq!(btns.len(), 6, "add the icon too, or it will not be painted");
+        for (i, b) in btns.iter().enumerate() {
+            assert!(b.w > 0.0 && b.h > 0.0, "button {i} has no area");
+            assert!(b.x >= 0.0, "button {i} starts off-screen");
+            assert!(
+                b.x + b.w <= l.window_w,
+                "button {i} runs past the window edge"
+            );
+            if i > 0 {
+                let prev = btns[i - 1];
+                assert!(b.x >= prev.x + prev.w, "button {i} overlaps its neighbour");
+            }
+        }
+        // Each one's own hit-test agrees with its rect in the list.
+        let mid = |r: Rect| (r.x + r.w / 2.0, r.y_top + r.h / 2.0);
+        let (x, y) = mid(btns[5]);
+        assert!(l.hit_test_settings_button(x, y), "settings");
+        assert!(!l.hit_test_cc_button(x, y), "and only settings");
+        let (x, y) = mid(btns[4]);
+        assert!(l.hit_test_cc_button(x, y), "cc");
+        assert!(!l.hit_test_settings_button(x, y));
+    }
+    use super::*;
+
+    #[test]
+    fn three_by_three_with_sidebar_uses_full_width() {
+        // Cells flush to the outer cell area; 2 px inter-cell gutter
+        // only between cells.  When a sidebar is present, an extra
+        // 2 px seam strip sits between sidebar and grid for the
+        // sidebar-to-grid region hairline.
+        let gutter = 1.0;
+        let sidebar_seam = 1.0;
+        let l = Layout::build(1440.0, 900.0, 200.0, 0.0, 0.0, 3, 3, 8.0, 16.0);
+        assert_eq!(l.cells.len(), 9);
+
+        // First column flush against the sidebar seam.
+        assert!((l.cells[0].x - (200.0 + sidebar_seam)).abs() < 1e-6);
+        // Cells share `inner_w = avail_w - 2 * gutter` equally,
+        // where avail_w excludes the sidebar AND the seam.
+        let avail_w = 1440.0 - 200.0 - sidebar_seam;
+        let cell_w = (avail_w - 2.0 * gutter) / 3.0;
+        // Third column at sidebar_w + seam + 2 * (cell_w + gutter).
+        assert!((l.cells[2].x - (200.0 + sidebar_seam + 2.0 * (cell_w + gutter))).abs() < 1e-6);
+        // Last cell's right edge flush against the window's right.
+        assert!(((l.cells[2].x + l.cells[2].w) - 1440.0).abs() < 1e-6);
+
+        // Inner content area (where cols/rows are counted) is the
+        // cell rect shrunk by 2 * padding.
+        let cell_h = (900.0 - 2.0 * gutter) / 3.0;
+        let inner_w = cell_w - 2.0 * l.padding;
+        let inner_h = cell_h - 2.0 * l.padding;
+        assert_eq!(l.cells[0].cols, (inner_w / 8.0).floor() as u16);
+        assert_eq!(l.cells[0].rows, (inner_h / 16.0).floor() as u16);
+    }
+
+    #[test]
+    fn hit_test_cell_refresh_only_at_title_right_edge() {
+        // 2×2 with a 20 px title strip, no sidebar.
+        let l = Layout::build(1000.0, 600.0, 0.0, 0.0, 20.0, 2, 2, 8.0, 16.0);
+        let c = &l.cells[1]; // top-right cell
+        let icon_w = l.cell_title_h;
+        let right = c.x + c.w - l.padding;
+        // A point in the icon square (right edge of the title strip).
+        let px = right - icon_w / 2.0;
+        let py = c.y_top + l.cell_title_h / 2.0;
+        assert_eq!(l.hit_test_cell_refresh(px, py), Some(1));
+        // Left side of the same title strip → not the icon.
+        assert_eq!(l.hit_test_cell_refresh(c.x + 2.0, py), None);
+        // Below the title strip (terminal body) → None even at the right.
+        assert_eq!(
+            l.hit_test_cell_refresh(px, c.y_top + l.cell_title_h + 5.0),
+            None
+        );
+        // No title strip → never hits.
+        let l0 = Layout::build(1000.0, 600.0, 0.0, 0.0, 0.0, 2, 2, 8.0, 16.0);
+        assert_eq!(l0.hit_test_cell_refresh(px, py), None);
+    }
+
+    #[test]
+    fn hit_test_picks_correct_cell_or_sidebar() {
+        let l = Layout::build(1000.0, 600.0, 200.0, 0.0, 0.0, 2, 2, 8.0, 16.0);
+        // Click in sidebar
+        assert_eq!(l.hit_test(50.0, 300.0), None);
+        // Click in top-left cell
+        assert_eq!(l.hit_test(250.0, 50.0), Some(0));
+        // Click in top-right cell
+        assert_eq!(l.hit_test(800.0, 50.0), Some(1));
+        // Click in bottom-left cell
+        assert_eq!(l.hit_test(250.0, 400.0), Some(2));
+        // Click in bottom-right cell
+        assert_eq!(l.hit_test(800.0, 400.0), Some(3));
+    }
+
+    /// Full screen takes the OS's window buttons away; the toolbar
+    /// has to move into the space they left rather than sit to the
+    /// right of a hole (2026-08-11 report).
+    #[test]
+    fn the_toolbar_follows_the_window_buttons() {
+        let windowed = Layout::build(1600.0, 900.0, 0.0, 40.0, 0.0, 1, 1, 8.0, 16.0).with_chrome(
+            2.0,
+            1,
+            Some(138.0),
+        );
+        let full = Layout::build(1600.0, 900.0, 0.0, 40.0, 0.0, 1, 1, 8.0, 16.0).with_chrome(
+            2.0,
+            1,
+            Some(0.0),
+        );
+        // Not measured yet is its own answer: keep clear of where the
+        // buttons normally are, rather than assuming they are gone.
+        let unknown =
+            Layout::build(1600.0, 900.0, 0.0, 40.0, 0.0, 1, 1, 8.0, 16.0).with_chrome(2.0, 1, None);
+        assert!(
+            unknown.toolbar_buttons()[0].x >= 84.0 * 2.0 - 1e-6,
+            "an unmeasured window must not put its toolbar on the OS's buttons",
+        );
+
+        let w0 = windowed.toolbar_buttons()[0];
+        let f0 = full.toolbar_buttons()[0];
+        assert!(
+            w0.x > 138.0,
+            "windowed: the toolbar starts after the cluster, not on it",
+        );
+        assert!(
+            f0.x < w0.x,
+            "full screen: the toolbar moves left into the freed space \
+             ({:.0} should be left of {:.0})",
+            f0.x,
+            w0.x,
+        );
+        assert!(f0.x > 0.0, "…but keeps a margin off the window edge");
+        // Everything shifts together — the group keeps its shape.
+        let wb = windowed.toolbar_buttons();
+        let fb = full.toolbar_buttons();
+        let shift = wb[0].x - fb[0].x;
+        for (a, b) in wb.iter().zip(fb.iter()) {
+            assert!((a.x - b.x - shift).abs() < 1e-6, "the toolbar came apart");
+            assert!((a.y_top - b.y_top).abs() < 1e-6, "and it stays on its row");
+        }
+    }
+
+    #[test]
+    fn zero_sidebar_means_grid_uses_whole_window() {
+        // 3×1 has > 1 cell so a gutter applies *between* cells —
+        // first cell is flush at x=0, last cell flush at the right.
+        let gutter = 1.0;
+        let l = Layout::build(900.0, 600.0, 0.0, 0.0, 0.0, 3, 1, 8.0, 16.0);
+        assert!(l.cells[0].x.abs() < 1e-6);
+        let cell_w = (900.0 - 2.0 * gutter) / 3.0;
+        assert!((l.cells[2].x - 2.0 * (cell_w + gutter)).abs() < 1e-6);
+        // Last cell's right edge flush against window_w.
+        assert!(((l.cells[2].x + l.cells[2].w) - 900.0).abs() < 1e-6);
+    }
+}

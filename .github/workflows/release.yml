@@ -1,0 +1,80 @@
+name: release
+
+# Cut a signed silent-update release when a version tag is pushed.
+#
+#   git tag v0.2.1 && git push origin v0.2.1
+#
+# Produces `marspot-aarch64-apple-darwin.tar.gz` + `.sig` (ECDSA P-256 /
+# SHA-256, signed with the MARSPOT_UPDATE_SEC repo secret) and attaches
+# them to a GitHub Release for the tag.  The shipped updater polls
+# `releases/latest`, downloads the asset + `.sig`, verifies against the
+# checked-in `keys/marspot-update.pub`, and stages it — so the asset name
+# and signing key here MUST match what the updater expects.
+#
+# Supply-chain posture: only the first-party actions/checkout is used;
+# Rust (rustup), gh, and openssl are preinstalled on the runner. No
+# third-party actions touch the signing key.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Least privilege: the job only needs to create a Release.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # arm64 Apple Silicon runner → native aarch64-apple-darwin build,
+    # matching the tarball name the updater asks for.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc -V
+
+      - name: Tag ↔ Cargo version sanity
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_v="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          echo "tag=$tag cargo=$cargo_v"
+          if [[ "$tag" != "$cargo_v" ]]; then
+            echo "::error::tag v$tag != Cargo.toml version $cargo_v — bump Cargo.toml before tagging" >&2
+            exit 1
+          fi
+
+      - name: Build + sign release tarball
+        env:
+          MARSPOT_UPDATE_SEC: ${{ secrets.MARSPOT_UPDATE_SEC }}
+        run: |
+          set -euo pipefail
+          keyfile="$(mktemp)"
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s\n' "$MARSPOT_UPDATE_SEC" > "$keyfile"
+          # --strip: smaller asset; --sign: writes .sig and self-verifies
+          # against keys/marspot-update.pub (fails the build on key mismatch
+          # so an unverifiable release can never publish).
+          bin/build-release-tarball.sh --strip --sign "$keyfile"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          out="target/release/marspot-aarch64-apple-darwin.tar.gz"
+          test -f "$out" && test -f "$out.sig"
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Marspot $GITHUB_REF_NAME" \
+            --notes "Automated signed release for $GITHUB_REF_NAME (silent-update asset + detached .sig)." \
+            "$out" "$out.sig"
