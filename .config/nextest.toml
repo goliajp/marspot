@@ -1,0 +1,14 @@
+# A test that asserts a time budget needs the machine to itself.
+#
+# `b1_perf_1mb_first_64_hits_under_20ms` went red the first time the
+# remote runner used one thread per core (2026-09-28): the search still
+# worked, it just took longer than 20 ms while thirteen other tests had
+# the cores.  The budget is the point of those tests, so the answer is
+# not a looser budget — it is that they do not share.
+#
+# `threads-required = "num-cpus"` makes nextest hold the whole runner
+# for one of them at a time.  There are three, each well under a
+# second, so the suite pays for it in milliseconds.
+[[profile.default.overrides]]
+filter = 'test(b1_perf_1mb_first_64_hits_under_20ms) + test(b3_perf_1mb_first_64_hits_under_50ms) + test(the_blank_test_is_cheap_on_a_screen_with_content)'
+threads-required = "num-cpus"

@@ -1,0 +1,93 @@
+[package]
+name = "marspot"
+version = "0.2.12"
+edition = "2024"
+build = "build.rs"
+license = "Apache-2.0 OR MIT"
+# Private repo — nothing here is published to crates.io.  (Also what
+# lets cargo-deny accept the version-less workspace path deps.)
+publish = false
+
+[workspace]
+members = ["crates/marspot-term", "crates/marspot-session", "crates/marspot-linkify"]
+# Without this, a bare `cargo build` builds only the root `marspot`
+# package (+ its marspot-term dep) and silently SKIPS marspot-session
+# (nothing depends on it) — so iterating on L3 with `cargo build` runs a
+# stale session binary. List every member + the root so bare cargo
+# commands cover the whole workspace; scripts still pass --workspace.
+default-members = [".", "crates/marspot-term", "crates/marspot-session", "crates/marspot-linkify"]
+
+[features]
+# Offscreen panel screenshots — `marspot --snapshot out.png --panel X`.
+#
+# A development tool, and off by default because the shipped binary
+# should not carry it: the PNG encoder plus the snapshot path is ~17 KB,
+# which is most of the headroom the size gate leaves, and nothing a user
+# runs ever calls it.  Build it when you need to look at a panel:
+#
+#     cargo build --features snapshot --bin marspot
+snapshot = []
+
+# PTY-path decomposition benches — `marspot --bench pty-raw|pty-drain|
+# pty-feed:<corpus>`, plus the reader-thread read/gather counters they
+# report.
+#
+# Same reasoning as `snapshot`: these answer "where does the live
+# pipeline's time go", which is a question for whoever is working on
+# it, not for the shipped binary — and the size gate's headroom is
+# measured in kilobytes.  Build them when decomposing:
+#
+#     cargo build --features bench-pty --bin marspot
+bench-pty = ["marspot-term/bench-pty"]
+
+[dependencies]
+# The zero-GUI terminal engine (parser/grid/terminal/pty/shelld/...).
+# Extracted (target #4) so a light, Metal-free per-session process (L3)
+# can link it without dragging in AppKit/Metal/CoreText. The marspot
+# lib re-exports it (`pub use marspot_term::*`) so existing
+# `marspot::grid::...` paths keep resolving.
+marspot-term = { path = "crates/marspot-term" }
+libc = "0.2"
+objc2 = "0.6"
+# 0.3 framework crates dropped the "all" feature — the defaults now
+# enable every regular binding (306/314 features), the residue being
+# gnustep / unstable flags we don't want.
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+objc2-quartz-core = "0.3"
+objc2-metal = "0.3"
+core-text = "22.0"
+core-graphics = "0.25"
+core-foundation = "0.10"
+foreign-types = "0.5"
+png = "0.18"
+
+[profile.release]
+# Fat LTO matters now that we split into a lib + multiple bins (marspot,
+# mcli): the render and parser hot paths cross the lib↔bin boundary
+# every frame, and `thin` LTO leaves them un-inlined.  Measured
+# regression on `bin/bench.sh` jumping from ~1 ms to ~20 ms p99
+# render with `thin` after the split; `fat` recovers it.
+lto = "fat"
+codegen-units = 1
+# `strip = "debuginfo"` (was `true` = "symbols") keeps the symbol
+# table so `sample` / `samply` profiles produce function-level
+# frames.  DWARF debug info is still stripped so the binary stays
+# small; we only need the .symtab for stack walks.  Reverting to
+# `true` is a one-line change if binary size becomes a hard concern.
+strip = "debuginfo"
+
+[profile.dev]
+# debug=1 (line tables) instead of the default 2 (full DWARF). Backtraces keep
+# file and line; what is lost is variable inspection in a debugger, which this
+# project's workflow does not use. Measured 2026-08-28: target/debug/deps is
+# the largest single thing on these machines — 104 GB in smix alone — and the
+# debug info is most of it.
+debug = 1
+# macOS keeps every compilation's `.o` next to the binary and never
+# collects them; the pile is what makes a test binary's FIRST exec slow,
+# because the system walks the directory it sits in.  Packed writes the
+# debug info into its own file instead and leaves no `.o` behind; line
+# numbers survive either way.  323 `.o` files were already sitting in
+# this project's runner tree.
+split-debuginfo = "packed"

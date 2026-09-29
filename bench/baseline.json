@@ -1,0 +1,197 @@
+{
+  "_comment": [
+    "Baseline numbers for bin/bench.sh.  Each scenario gets two floors",
+    "(mars_parse_MBps and mars_live_MBps) plus a vs-best-other ratio.",
+    "If a current measurement falls below the floor, the gate fails.",
+    "Tolerances bake observed run-to-run noise (~5-8% headless, ~10% live)",
+    "into the floor so the gate doesn't flap on identical code.",
+    "",
+    "Re-baseline: run `bin/bench.sh --update-baseline` after a change",
+    "you actually want to lock in.  Re-run cross-terminal numbers via",
+    "`bin/measure-other.sh` (now 3-trial median per E5) if the iTerm2 /",
+    "Warp comparison drifts.",
+    "",
+    "F gate-lock 2026-05-05 (perf-attack F): clean-machine numbers from",
+    "bench-run + measure-other (3-trial), \u00d7 0.93 (parse) / 0.90 (live,",
+    "ratios) safety margin.  Earlier same-day floors were over-loose due",
+    "to godot CPU contention skewing measurements ~30% slower than truth.",
+    "These are the *minimum* marspot must hold while A/B/C/D attack work is",
+    "ongoing; the targets to break above are tracked outside this repository."
+  ],
+  "scenarios": [
+    {
+      "id": "cat-ascii",
+      "bytes": 33554570,
+      "mars_parse_MBps_min": 173,
+      "mars_live_MBps_min": 94,
+      "mars_vs_best_other_min": 1.0,
+      "mars_l3_MBps_min": 132.8,
+      "_l3_note": "mars_l3_MBps_min: the SHIPPED path (core -> L3, file-backed scrollback), measured by bin/measure-l3.sh and gated by --full since 2026-08-19.  The probe reports the MINIMUM of its trials, not the median: load can only add time, so the fastest trial is the least-contaminated one.  That change is what made this metric usable on a host with a permanent tenant - one batch read 28.7 / 72.3 / 160.0 MiB/s for the same scenario, where a median reports the tenant and the minimum reports marspot.  Floors are min-of-3 x0.90 taken at load1 4.5: 132.8 / 151.0 / 152.9 / 111.9.  Idle best for reference: 194.5 / 167.8 / 172.1 / 125.4 - three of the four are within noise of the loaded reading, which is the point.  ascii is the exception (147.5 loaded vs 194.5 idle): its trial pushes 134 MB and is the likeliest to catch interference in all three tries.",
+      "_live_note": "mars_vs_best_other_min compares the SHIPPED path (L3) against the best other terminal measured, and is set to 1.0 flat: the requirement is that the product is faster, and a requirement does not get a tolerance band.  That makes this the one floor in the file that can go red from load alone - it divides a number that swings with the host (L3 ascii read 194.5 idle and 134.2 at load1 5.3) by a competitor figure frozen in the snapshot.  Treat a failure here the way bin/bench-remote.sh's load gate says to: valid when idle, re-measure otherwise.  The job of catching a real regression belongs to mars_l3_MBps_min, which carries the margin.  Idle headroom as of 2026-08-19: ascii 1.91x, mixed 1.65x, cjk 1.14x, emoji 1.06x - emoji is the thin one and the next thing worth widening.",
+      "mars_parse_file_MBps_min": 113,
+      "_parse_file_note": "mars_parse_file_MBps_min: the SAME headless parse with the scrollback a real pane has. `--bench parse` builds a Terminal with no MARSPOT_SESSION_ID and gets the in-RAM scrollback; every L3 pane sets it and gets the file-backed one, which trims, encodes and writes every scrolled line and keeps a RAM ring besides. Measured on mini 2026-09-07, median of 5: RAM 371.7 / 240.7 / 263.8 / 174.1 against file-backed 126.8 / 121.3 / 122.4 / 113.2 - the write dominates so completely that it flattens four very different corpora into 113-127. The fast gate had only ever shown the RAM number, so a whole afternoon of comparing against Alacritty was done against a path no user runs. (mars_l3_MBps_min covers the shipped path end to end but only under --full; this one isolates parse+scrollback without the L3 IPC.) Floors are min-of-5 x0.95 - this metric's spread is wide (ascii 119.6-155.6 in one batch) and its job is catching a regression, not holding a line."
+    },
+    {
+      "id": "cat-mixed",
+      "bytes": 16777256,
+      "mars_parse_MBps_min": 167,
+      "mars_live_MBps_min": 92,
+      "mars_vs_best_other_min": 1.0,
+      "mars_l3_MBps_min": 151.0,
+      "mars_parse_file_MBps_min": 96
+    },
+    {
+      "id": "cat-cjk",
+      "bytes": 8388690,
+      "mars_parse_MBps_min": 208,
+      "mars_live_MBps_min": 92,
+      "mars_vs_best_other_min": 1.0,
+      "mars_l3_MBps_min": 152.9,
+      "mars_parse_file_MBps_min": 110
+    },
+    {
+      "id": "cat-emoji",
+      "bytes": 8388720,
+      "mars_parse_MBps_min": 135,
+      "mars_live_MBps_min": 84,
+      "mars_vs_best_other_min": 1.0,
+      "_note": "Relocked 2026-08-18 after the emoji fast-path attack: floor = 135.  Two mini runs an hour apart gave 153.2 (idle) and 145.0 (load1 4.3); 135 is the loaded run x 0.93, so the gate reports a real regression rather than whoever else happens to be compiling on the bench host.  This REPLACES the 2026-07-11 note, whose reasoning was disproved rather than merely outgrown.  That note read: 'pictographic codepoints cannot take the batch lanes (a following VS16/ZWJ changes width), so they pay the segmenter... the honest ceiling is ~66 MB/s'.  The premise is right and the conclusion does not follow: the fast class already guarantees that a batch commit leaves the LAST character buffered, so a following VS16 / ZWJ / skin-tone modifier still meets an OPEN cluster on the slow path and re-decides its width there.  What genuinely cannot be admitted is a character whose boundary depends on a neighbour - regional indicators (GB12/13) and skin-tone modifiers (GBP=Extend) - and those are two ranges, pinned against the tables by `the_fast_pictograph_class_never_outruns_the_tables` over the whole codepoint space.  Measured 61 -> 153.2 MB/s = 2.15x, with ascii / mixed / cjk unchanged or better.  Full decomposition and the per-change prices are in the perf notes.  mars_live_MBps_min / vs_best_other for this scenario are STILL stale (locked against the wrong-width parser) - re-measure on the next --full run before trusting.",
+      "mars_l3_MBps_min": 111.9,
+      "mars_parse_file_MBps_min": 97
+    }
+  ],
+  "render_full_repaint": {
+    "_comment": "p99 across 1000 iterations \u00d7 median of 3 trials.  Real-world swing on a hot mac is up to ~2 ms (observed range 1.0-1.4 ms across one day's bench runs \u2014 30 % spread driven by GPU thermal + scheduler noise).  Ceiling at 1.8 ms catches an actual regression (1.5x current median) while tolerating that noise.  --update-baseline applies the default 1.10 margin which collapses to the noise floor; manually widened.",
+    "p99_us_max": 1301
+  },
+  "scroll_repaint": {
+    "_comment": "p99 ns/repaint while walking view_offset from 5000 -> 0 in 3-line steps over 100K-line scroll-history.bin (--bench scroll).  Picks up MARS_DISK_SCROLLBACK so the gate tracks whichever variant is current default.  Median of 5 trials.  Relocked 2026-07-11: 10-sample idle-mini distribution is 3000-3125ns, median 3083ns, stdev ~1% (timer quantum ~41ns) - the old floor 3 was set as 2x a ~1.5us median and never re-widened; same-binary historical readings spanned 1.8-3.1us so no regression vs Jun-6 is provable from available data.  Floor = 3.083 x 1.3 (the 30% margin scroll convention, matching scroll_cold) = 4.  A real >30% scroll regression still fails the gate.",
+    "p99_us_max": 4
+  },
+  "scroll_cold_repaint": {
+    "_comment": "Sister gate to scroll_repaint, forced to disk-backed (MARS_DISK_SCROLLBACK=1) and with pages evicted via madvise(DONTNEED) before the walk.  Catches disk-path regressions that the default-env scroll bench misses when memory is the default.  Cold-cache p99 measured ~3-5 \u00b5s; same 30 % run-to-run noise as the warm gate, manually widened to ~2x current median.",
+    "p99_us_max": 4
+  },
+  "binary_size_bytes_max": {
+    "_comment": "Release binary size ceiling (after lto=fat strip).  Purpose: flag ACCIDENTAL code-size jumps (a heavy dep sneaking in, a forgotten debug table) - NOT a hard product budget.  RESOLUTION: on arm64 macOS the __TEXT segment is 16 KiB page-aligned, so these numbers move in ~16 KiB steps whatever the source change was - 2026-08-11 a ~2 KB chrome-layout change (measured: __text +2036 B, every other section flat) grew mcli by 16512 B = one page + 128 B of code signature.  A jump under ~20 KiB says nothing; read the section table (`size -m`) before calling it bloat.  Relocked 2026-08-11 at mini-measured current x 1.06 (one page of headroom, not a percentage): mcli 1375488, marspot 1515840.  marspot came DOWN 34 KB in the same commit by moving `--snapshot` + the PNG writer behind the `snapshot` cargo feature - a development tool has no business in the shipped binary.  Previous ceilings 1370000/1541000 dated 2026-07-11.  NB: measure on the canonical bench host (idle mini); dev-box toolchains can differ.  Relocked 2026-08-12 (marspot only): 1533000 -> 1549776 = mini-measured 1533392 + one 16 KiB page.  The old ceiling sat 72 B above the then-current build - zero headroom - so the next ordinary commit tripped it: a same-machine A/B minutes apart (git stash) showed __TEXT UNCHANGED at 1245184 and __text +3548 B absorbed inside the page, with the 464 B file delta living in linkedit + signature.  That is the sub-page noise this comment already says to ignore, and a floor that fires on it teaches you to relock rather than to look.  mcli's ceiling already carried exactly one page of headroom (1392000 vs 1376160); marspot's now matches the same rule.  Relocked 2026-08-18 (marspot only): 1549776 -> 1567136 = mini-measured 1550752 + one 16 KiB page.  The emoji fast-path commit moved the binary by exactly 16512 B - one page plus 128 B of signature, the same quantum this comment records for 2026-08-11 - i.e. the sub-page noise it already says to ignore.  Relocked 2026-08-19: mcli 1392000 -> 1452592, marspot 1567136 -> 1626608 (mini-measured + one 16 KiB page).  Both grew ~43 KB in one commit range, which is past the ~20 KB this comment says to ignore, so it was read rather than waved through: the growth is the `async_writer` module plus the reworked scrollback and bytelog paths, and it bought 2.9-4.8x on the shipped path.  Relocked 2026-09-07: mcli 1452592 -> 1471968, marspot 1626608 -> 1646720 (mini-measured 1455584 / 1630336 + one 16 KiB page).  The local-echo expiry commit tripped both by 2992 / 3728 B - under the ~20 KB this comment says to ignore, so the section table was read first: same-machine A/B (git stash) shows __TEXT UNCHANGED at 1179648 with __text +872 B, __const +96 B, __cstring +109 B absorbed inside the page; the file delta lives in linkedit + signature.  Sub-page noise, and both ceilings had under 3 KB of headroom left.  NOT relocked 2026-09-08, and the near-miss is worth recording: the Codex-accounts commit tripped both ceilings by 18224 / 18176 B and the section table said one 16 KiB __TEXT page carrying __text +4640 B and __const +3992 B.  A follow-up commit that only lower-cased the panel's window labels put __TEXT back to 1327104 \u2014 UNCHANGED from before the feature \u2014 leaving the whole feature at __text +112 B, __cstring -132 B, and both binaries under the existing ceilings (mini-measured 1456640 / 1631424 vs 1471968 / 1646720).  Same on the dev box, byte for byte.  The ~8.6 KB was then chased down with a symbol-level diff of two unstripped builds (`strip = \"debuginfo\"` keeps the table, so plain `nm` is enough): it is `alloc::str::to_lowercase` \u2014 3348 B of code that drags in the Final_Sigma rule (a Greek capital sigma lower-cases to \u03c2 at the end of a word), which needs the Cased and Case_Ignorable properties, hence `unicode_data::{case_ignorable, lowercase, uppercase, lt}` bitsets: 2270 + 1712 + 919 + 456 + 352 + 320 + 304 + 268 B, all present ONLY in the upper-case build.  `str::to_uppercase` has no context-sensitive rule and costs nothing comparable.  The upper-case cut called `to_lowercase` from inside the PAINTER (to lower-case each label for its timeline tag), and the painter is reachable from every binary; the lower-case cut left the only calls in `cc_usage`, which is dead code in `marspot` and `mcli`.  Acting on that finding, the two feed-label conversions moved to `to_ascii_lowercase` (model names out of a JSON feed are ASCII by construction), which took the same 17776 B back out of `marspot-core` \u2014 the binary that actually draws the panel and is NOT one of the two this ceiling watches.  Rule of thumb worth keeping: `str::to_lowercase` costs ~9 KB the first time a binary reaches it, `to_ascii_lowercase` costs nothing, and case-folding ASCII data with the Unicode one buys only the sigma rule.  The lesson that does hold: a ceiling trip of ~18 KB can be one page of alignment around a few hundred bytes of real change, and relocking before reading the section table would have raised both ceilings 34 KB above what the shipped build actually needs.  Relocked 2026-09-23 (mcli only): 1471968 -> 1491728 = mini-measured 1475344 + one 16 KiB page.  The IME-composition mask (L2 0.12.207) measured __text +2808 B with every other section flat or smaller, and the file grew 16368 B - one page less 16 B of signature, the same quantum this comment records twice already.  2.8 KB of code that lands on the wrong side of a page boundary is not bloat.",
+    "mcli": 1491728,
+    "marspot": 1646720
+  },
+  "memory_idle_kb_max": {
+    "_comment": "RSS in KiB, sampled 1.5 s after launch with no input.  Lazy-alloc scrollback ring (commit landed in this branch) means idle pays only for sessions' immediate state, not the worst-case 19 MiB ring.  20 % headroom over current.",
+    "mcli": 99648,
+    "marspot": 95981
+  },
+  "competitors_snapshot": {
+    "_comment": "Per-terminal version + captured_at. Each entry self-describes when and against what version it was measured, so a snapshot that drifts (one terminal refreshed today, another stuck at an older date) is auditable. `host` describes the bench host all measurements were taken on. bench.sh `vs-best-other` iterates entries with *_MBps keys; `host` / `_comment` are skipped automatically (no key match). terminal.app excluded from the denominator by design (OS-vendor reference floor, not a competitor).  2026-08-18: ghostty + marspot re-measured under a NEW protocol and are NOT comparable with the 2026-06-07 rows above them.  Two changes: (1) every terminal now pushes LIVE_MIN_BYTES (32 MiB) by cat'ing the scenario file as many times as needed \u2014 a single 8 MiB pass never blocks `cat` long enough to measure a fast terminal, and the old rows mix per-scenario byte counts; (2) each trial ends with a DSR round-trip (`CSI 6 n`), so the number covers work the terminal has CONFIRMED it consumed.  Without (2) a terminal that drops or coalesces under pressure finishes early and wins \u2014 the reason marspot grew DSR support the same day (L2 0.12.138).  iterm/warp/terminal cannot be driven from an ssh session (AppleEvent -1712 under both plain ssh and launchctl asuser for iTerm); they need a console run of bin/measure-other.sh and are stale until then.",
+    "captured_at": "2026-09-29",
+    "host": {
+      "name": "mini",
+      "arch": "arm64 (Darwin 27.0.0)",
+      "os": "macOS 27.0 (build 26A428)"
+    },
+    "iterm2": {
+      "version": "3.7.3",
+      "bundle_id": "com.googlecode.iterm2",
+      "captured_at": "2026-09-29",
+      "method": "console / Screen Sharing",
+      "cat-ascii_MBps": 84.2,
+      "cat-mixed_MBps": 24.1,
+      "cat-cjk_MBps": 10.0,
+      "cat-emoji_MBps": 0.5
+    },
+    "warp": {
+      "version": "0.2026.06.03.09.49.01",
+      "bundle_id": "dev.warp.Warp-Stable",
+      "captured_at": "2026-06-07",
+      "method": "console / Screen Sharing",
+      "cat-ascii_MBps": 46.4,
+      "cat-mixed_MBps": 40.0,
+      "cat-cjk_MBps": 53.3,
+      "cat-emoji_MBps": 47.1
+    },
+    "ghostty": {
+      "version": "1.3.1 (build 15212)",
+      "bundle_id": "com.mitchellh.ghostty",
+      "captured_at": "2026-09-29",
+      "method": "console / Screen Sharing",
+      "cat-ascii_MBps": 97.0,
+      "cat-mixed_MBps": 88.9,
+      "cat-cjk_MBps": 118.5,
+      "cat-emoji_MBps": 110.3
+    },
+    "terminal": {
+      "version": "2.15 (build 488)",
+      "bundle_id": "com.apple.Terminal",
+      "captured_at": "2026-09-29",
+      "method": "console / Screen Sharing",
+      "cat-ascii_MBps": 43.2,
+      "cat-mixed_MBps": 36.0,
+      "cat-cjk_MBps": 35.6,
+      "cat-emoji_MBps": 38.6
+    },
+    "marspot": {
+      "bundle_id": "com.goliajp.marspot",
+      "captured_at": "2026-09-29",
+      "method": "console / Screen Sharing",
+      "cat-ascii_MBps": 128.0,
+      "cat-mixed_MBps": 128.0,
+      "cat-cjk_MBps": 133.3,
+      "cat-emoji_MBps": 128.0
+    },
+    "_captured_at_note": "2026-08-19: ghostty / iterm2 / terminal / marspot were all measured in ONE run, on one host, under the certified protocol (32 MiB per trial, DSR round-trip) - the first time every terminal in this table was compared under identical conditions rather than assembled from separate sessions.  The absolute numbers are lower than an idle host produces (the run happened at load1 ~6), which is fine and is the point: they are all lower together, so the RATIOS hold.  warp is still 2026-06-07: it has no AppleScript dictionary, so driving it needs System Events keystrokes, which TCC does not grant an ssh session - the reachability probe correctly skipped it instead of inventing a number.  Its old figures sit far below ghostty on every corpus, so it does not affect which terminal is 'best other'.  NB the marspot row here is mcli (that is what bin/measure-other.sh drives); the gate compares the SHIPPED path via bin/measure-l3.sh - see load_live() in bin/bench.sh."
+  },
+  "multi_session_thresholds": {
+    "_comment": [
+      "Floors for the bench-run.sh scenarios (cat-mixed.9x = multi-session-9x,",
+      "scrollback-1m).  Read from bench/results/cross-terminal.json (latest",
+      "bench-run.sh snapshot).  Two checks per scenario: marspot's own absolute",
+      "throughput floor, and the marspot-vs-best-other ratio floor.  The ratio",
+      "floor is the structural protection \u2014 without it, marspot and competitors",
+      "can both slow down and the gate stays green even though our relative",
+      "advantage shrunk.",
+      "",
+      "Locked 2026-05-05 against c43d26b (clean-machine, post-godot-cleanup):",
+      "  multi-session-9x: marspot 104.6 / iterm 18.2 / terminal 60.1 MiB/s",
+      "  scrollback-1m:    marspot 97.7  / iterm 71.8 / terminal 91.6 MiB/s",
+      "10% safety margin.  Re-lock via `bin/bench.sh --full --update-baseline`",
+      "after re-running `bin/bench-run.sh` \u22653\u00d7 to populate snapshots."
+    ],
+    "snapshot_max_age_hours": 168,
+    "scenarios": {
+      "cat-mixed.9x": {
+        "metric": "aggregate_throughput_MBps",
+        "mars_throughput_min": 94,
+        "mars_vs_best_other_min": 1.57
+      },
+      "scrollback-1m": {
+        "metric": "push_throughput_MBps",
+        "mars_throughput_min": 88,
+        "mars_vs_best_other_min": 0.96
+      }
+    }
+  },
+  "competitors_snapshot_studio": {
+    "_comment": "TAKEN ON THE WRONG HOST, kept as a record rather than deleted. This measurement pushes 32 MB into each terminal and saturates the machine it runs on; run on the studio 2026-09-07 with nine live panes it both disturbed the user's work and contaminated itself - marspot's cat-ascii trials came back 380 / 1710 / 1890 ms and the median took a disturbed one, so the 0.21x below is interference, not a result (the best trial works out to ~88 MB/s, about parity with iTerm2). The other three scenarios were stable to within 10 % and are worth something: marspot 1.77x / 1.88x / 1.74x over the best other on mixed / cjk / emoji. bin/measure-other.sh now refuses to run off the bench host for exactly this reason. bench.sh's vs-best-other reads the mini snapshot, not this one - a ratio only means anything between numbers from the same host at the same time. mini's rows are still from 2026-08-19 and need a Screen-Sharing session there (ssh cannot dispatch AppleEvents); bin/remote-measure-others.sh prints the steps, and the driving is automatic now, so it is one command rather than four pastes.",
+    "captured_at": "2026-09-07",
+    "host": "studio (dev box, 9 live panes) - NOT the mini bench host",
+    "iterm2": {
+      "cat-ascii": 88.9,
+      "cat-mixed": 27.8,
+      "cat-cjk": 5.9,
+      "cat-emoji": 2.4
+    },
+    "terminal": {
+      "cat-ascii": 50.0,
+      "cat-mixed": 46.4,
+      "cat-cjk": 50.0,
+      "cat-emoji": 54.2
+    },
+    "marspot": {
+      "cat-ascii": 18.7,
+      "cat-mixed": 82.1,
+      "cat-cjk": 94.1,
+      "cat-emoji": 94.1
+    }
+  }
+}

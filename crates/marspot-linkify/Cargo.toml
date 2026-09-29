@@ -1,0 +1,19 @@
+[package]
+name = "marspot-linkify"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+
+# Stone-tier (steel-cement-stone): clickable-span detection over a
+# terminal cell surface — URLs, filesystem paths, emails, IPv4/IPv6,
+# UUIDs — with soft-wrap (DECAWM) and fixed-width hard-wrap merge so
+# tokens split across rows scan as one.  Zero dependencies beyond
+# std + libc (munmap-free; libc unused today, reserved).  Knows
+# NOTHING about marspot: input arrives through the `CellSource`
+# trait, output is `Vec<LinkRange>`.  Battle-tested surface — every
+# rule in here traces to a field report (CJK terminators, balanced
+# parens, uuid path components, hard-wrap seams); see the unit tests
+# for the incident-by-incident history.
+
+[dependencies]
