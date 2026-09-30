@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.187"  # the return waits for the text itself
+shell   = "0.7.188"  # the return checks whether it landed
 core    = "0.12.231"  # motion and drag reach the program
 session = "0.11.109"  # the shm carries the tracking mode
