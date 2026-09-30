@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.188"  # the return checks whether it landed
+shell   = "0.7.189"  # where the supervisor's wake goes
 core    = "0.12.236"  # one pane gets no title strip
 session = "0.11.122"  # a line knows which run it belongs to
