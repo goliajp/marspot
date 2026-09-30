@@ -165,11 +165,20 @@ fn a_gap_that_closed_comes_off_the_page() {
     let mut t = Terminal::new(40, 3);
     t.feed(b"a\tb");
     assert_ne!(row(&t), "ab", "tabs stopped moving the cursor");
+    let mut t2 = Terminal::new(40, 3);
+    t2.feed(b"\x1b]52;c;aGVsbG8=\x07");
+    assert_eq!(t2.take_osc_clipboard().as_deref(), Some("hello"), "OSC 52 stopped working");
+
     for (what, text) in [("the page", SITE), ("the README", README)] {
         assert!(
             !text.contains("tabs are not implemented")
                 && !text.contains("literal tab character is dropped"),
             "tabs work; {what} still says they are dropped"
+        );
+        assert!(
+            !text.contains("OSC 52 / 8 / 7 / 133")
+                && !text.contains("OSC 8 (hyperlinks), OSC 52"),
+            "OSC 52 works; {what} still lists it as missing"
         );
     }
 }
