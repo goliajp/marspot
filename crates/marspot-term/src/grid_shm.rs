@@ -287,6 +287,53 @@ pub fn open_region(name: &std::ffi::CStr) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// Read a published frame's sequence and mode flags without mapping
+/// the grid or touching the region.
+///
+/// For a watcher that only wants to know what the program in the pane
+/// has declared about the terminal — alt screen, bracketed paste,
+/// mouse tracking.  Deliberately not `GridShmReader`: that maps the
+/// whole region RDWR and may perform a one-shot layout upgrade, both
+/// of which are too much to ask of a process that is merely looking.
+///
+/// A region written by an older build is read as far as the header
+/// goes, which is all of it: `seq` and `flags` have been at the same
+/// offsets since v1.
+pub fn peek(name: &std::ffi::CStr) -> io::Result<(u64, u32)> {
+    let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let base = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            HEADER_BYTES,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            fd.as_raw_fd(),
+            0,
+        )
+    };
+    if base == libc::MAP_FAILED {
+        return Err(io::Error::last_os_error());
+    }
+    let h = base as *const Header;
+    let out = unsafe {
+        let magic = std::ptr::read_volatile(&(*h).magic);
+        if magic != MAGIC {
+            Err(io::Error::new(io::ErrorKind::InvalidData, "not a marspot grid region"))
+        } else {
+            Ok((
+                (*h).seq.load(Ordering::Acquire),
+                std::ptr::read_volatile(&(*h).flags),
+            ))
+        }
+    };
+    unsafe { libc::munmap(base, HEADER_BYTES) };
+    out
+}
+
 /// Best-effort `shm_unlink` of a region by name.  Called when a
 /// session is retired so the kernel actually frees the memory once
 /// every fd-holder has closed it.
