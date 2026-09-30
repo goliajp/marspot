@@ -265,6 +265,8 @@ pub struct Terminal {
     /// collapsed — and the kernel does not help: a pseudo-terminal
     /// leaves `OXTABS` off, so the tab arrives verbatim.
     tabs: crate::tabs::TabStops,
+    /// G0 is the DEC Special Graphics set, selected by `ESC ( 0`.
+    g0_graphics: bool,
     /// Rollbacks in a row.  A program that draws its own input
     /// somewhere else — codex, and any full-screen TUI that skips the
     /// alternate screen — never confirms a prediction, so the guess
@@ -542,6 +544,7 @@ impl Terminal {
             mouse_sgr_encoding: false,
             pending_wrap: false,
             tabs: crate::tabs::TabStops::new(cols),
+            g0_graphics: false,
             predict_misses: 0,
             predict_declined: 0,
             predictions: VecDeque::new(),
@@ -1071,6 +1074,7 @@ impl Terminal {
             let cluster_anchor = &mut self.cluster_anchor;
             let grapheme_cursor = &mut self.grapheme_cursor;
             let seg_synced = &mut self.seg_synced;
+            let g0_graphics = &mut self.g0_graphics;
             let mut handler = Handler {
                 grid,
                 saved_main,
@@ -1099,6 +1103,7 @@ impl Terminal {
                 mouse_sgr_encoding,
                 pending_wrap,
                 tabs,
+                g0_graphics,
                 cluster_buf,
                 cluster_fast,
                 cluster_anchor,
@@ -1126,7 +1131,14 @@ impl Terminal {
                         .iter()
                         .position(|&b| !(0x20..=0x7E).contains(&b))
                         .unwrap_or(bytes.len() - i);
-                    if run_len >= 2 {
+                    // The bulk lane writes the bytes as they arrived.
+                    // With G0 on the special graphics set they are not
+                    // the characters to write, so that case goes one
+                    // at a time through `print`, which translates.
+                    // The check is one already-hot bool and the answer
+                    // is false for every program that is not drawing a
+                    // box right now.
+                    if run_len >= 2 && !*handler.g0_graphics {
                         handler.print_ascii_run(&bytes[i..i + run_len]);
                         i += run_len;
                         continue;
@@ -1138,9 +1150,11 @@ impl Terminal {
                     // predictions pending, a byte in 0x20..=0x7E dispatches
                     // to `print` and nothing else, so calling it directly
                     // is the same work minus the dispatch.
-                    if run_len == 1 {
-                        handler.print(b0 as char);
-                        i += 1;
+                    if run_len >= 1 {
+                        for b in &bytes[i..i + run_len] {
+                            handler.print(*b as char);
+                        }
+                        i += run_len;
                         continue;
                     }
                 } else if (0xE0..=0xEF).contains(&b0) {
@@ -2306,6 +2320,7 @@ struct Handler<'a> {
     mouse_sgr_encoding: &'a mut bool,
     pending_wrap: &'a mut bool,
     tabs: &'a mut crate::tabs::TabStops,
+    g0_graphics: &'a mut bool,
     cluster_buf: &'a mut String,
     /// See `Terminal::cluster_fast`.
     cluster_fast: &'a mut Option<(char, u8)>,
@@ -3055,6 +3070,7 @@ impl<'a> Handler<'a> {
         self.grid.clear_scrollback();
         self.grid.set_cursor(0, 0);
         *self.tabs = crate::tabs::TabStops::new(cols);
+        *self.g0_graphics = false;
         self.osc_title.clear();
     }
 
@@ -3206,6 +3222,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
             self.u_step(ch);
             return;
         }
+        let ch = if *self.g0_graphics { dec_special_graphic(ch) } else { ch };
         self.print_glyph(ch);
     }
 
@@ -3333,9 +3350,11 @@ impl<'a> ParserCallbacks for Handler<'a> {
             // silently for now (the keypad-specific keys we encode
             // don't yet distinguish modes).
             b'=' | b'>' => {}
-            // ESC ( <c> — designate G0 charset. We're always ASCII so
-            // every variant is a no-op.
-            _ if intermediates == b"(" => {}
+            // ESC ( <c> — designate G0.  `0` is DEC Special Graphics,
+            // which is how a great many TUIs draw their boxes; every
+            // other variant is one of the national ASCII sets, and
+            // this terminal treats them all as ASCII.
+            _ if intermediates == b"(" => *self.g0_graphics = byte == b'0',
             // RIS — what `reset` sends.
             b'c' if intermediates.is_empty() => self.hard_reset(),
             // Charset switching etc. arrive in later phases.
@@ -4401,6 +4420,49 @@ fn erase_in_line(grid: &mut Grid, col: u16, row: u16, cols: u16, mode: u16, attr
 ///
 /// We walk the param list with an explicit index because 38/48 (extended
 /// color) consume additional params depending on the second value.
+/// DEC Special Graphics, the set `ESC ( 0` selects.
+///
+/// Only `_` through `~` are remapped; everything below is the same
+/// ASCII it always was.  Without this a TUI drawing a box with it
+/// prints `lqqqk` where the line should be.
+fn dec_special_graphic(ch: char) -> char {
+    match ch {
+        '_' => ' ',
+        '`' => '\u{25c6}', // ◆
+        'a' => '\u{2592}', // ▒
+        'b' => '\u{2409}', // ␉
+        'c' => '\u{240c}', // ␌
+        'd' => '\u{240d}', // ␍
+        'e' => '\u{240a}', // ␊
+        'f' => '\u{00b0}', // °
+        'g' => '\u{00b1}', // ±
+        'h' => '\u{2424}', // ␤
+        'i' => '\u{240b}', // ␋
+        'j' => '\u{2518}', // ┘
+        'k' => '\u{2510}', // ┐
+        'l' => '\u{250c}', // ┌
+        'm' => '\u{2514}', // └
+        'n' => '\u{253c}', // ┼
+        'o' => '\u{23ba}', // ⎺
+        'p' => '\u{23bb}', // ⎻
+        'q' => '\u{2500}', // ─
+        'r' => '\u{23bc}', // ⎼
+        's' => '\u{23bd}', // ⎽
+        't' => '\u{251c}', // ├
+        'u' => '\u{2524}', // ┤
+        'v' => '\u{2534}', // ┴
+        'w' => '\u{252c}', // ┬
+        'x' => '\u{2502}', // │
+        'y' => '\u{2264}', // ≤
+        'z' => '\u{2265}', // ≥
+        '{' => '\u{03c0}', // π
+        '|' => '\u{2260}', // ≠
+        '}' => '\u{00a3}', // £
+        '~' => '\u{00b7}', // ·
+        other => other,
+    }
+}
+
 fn apply_sgr(attrs: &mut CellAttrs, params: &[u16], subs: &[bool]) {
     if params.is_empty() {
         *attrs = CellAttrs::default();
