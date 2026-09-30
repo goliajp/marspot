@@ -82,6 +82,16 @@ const KCGIMAGE_ALPHA_ONLY: u32 = 7;
 // alpha-only context the atlas needs.
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
+    /// Draw a shaped line at the context's current text position.
+    ///
+    /// The whole reason a cluster goes through CoreText rather than
+    /// through `rasterise_glyph`: a cluster is not a glyph.  `é` may be
+    /// two glyphs with the mark positioned by the font's anchor table,
+    /// a ZWJ family is one glyph the font composed, and a flag is a
+    /// pair CoreText knows to fuse.  `CTLineDraw` does all of that; a
+    /// per-glyph loop here would be a second, worse shaper.
+    fn CTLineDraw(line: *const c_void, context: *mut core_graphics::sys::CGContext);
+
     fn CGBitmapContextCreate(
         data: *mut c_void,
         width: usize,
@@ -101,6 +111,36 @@ pub type FontId = u32;
 /// enough that real FontCache indices won't collide — FontCache grows
 /// linearly from 0 as fallback fonts are discovered.
 pub const BOX_DRAWING_FONT_ID: FontId = u32::MAX;
+
+/// Font id for a rasterised grapheme cluster.
+///
+/// A cluster has no glyph id — it may be several glyphs, or one the
+/// font composed — so its atlas key cannot be `(font, glyph)`.  It is
+/// keyed by a hash of the text instead, and this id says "the glyph
+/// field is the low half of that hash, not a glyph".  One below
+/// box-drawing's, so neither can be a real font index.
+pub const CLUSTER_FONT_ID: FontId = u32::MAX - 1;
+
+/// The atlas key for a cluster drawn at `metrics`.
+///
+/// Forty-eight bits of hash: the font-id field carries the high half
+/// and the glyph field the low sixteen.  A collision would draw one
+/// cluster in another's place, and at 2^48 against a pool the
+/// measurements put in the tens, that is not a risk worth a second
+/// lookup to remove.
+pub fn cluster_key(text: &str, metrics: &SlotMetrics) -> GlyphKey {
+    use std::hash::{Hash, Hasher};
+    let mut h = marspot_term::fast_hash::FxHasher::default();
+    text.hash(&mut h);
+    let v = h.finish();
+    GlyphKey::new(
+        CLUSTER_FONT_ID ^ (v >> 16) as u32,
+        v as u16,
+        metrics.cell_h as u16,
+        0,
+        0,
+    )
+}
 
 /// Phase 2 — atlas lookup key.
 ///
@@ -934,6 +974,83 @@ struct Raster {
 ///
 /// Returns `None` only if the glyph has no ink (control char,
 /// .notdef-with-degenerate-bbox).
+/// Draw a whole grapheme cluster into an alpha bitmap.
+///
+/// `rasterise_glyph` takes a glyph id; a cluster is not a glyph.  It
+/// may be a base plus a mark the font anchors, a ZWJ sequence the font
+/// composed into one glyph, or a regional-indicator pair CoreText
+/// fuses — so the cluster is shaped and drawn by CoreText rather than
+/// looked up.
+///
+/// The bitmap is cell-sized (`n_cells` wide) because that is the space
+/// the cluster was measured to occupy; a cluster that overflows it is
+/// clipped rather than scaled, which is what happens to a glyph whose
+/// font disagrees with the width table and is the honest failure here
+/// too.
+pub fn rasterise_cluster(
+    text: &str,
+    font: &CTFont,
+    metrics: SlotMetrics,
+    n_cells: u16,
+    buf: &mut [u8],
+) -> bool {
+    use core_foundation::attributed_string::CFMutableAttributedString;
+    use core_foundation::base::{CFRange, TCFType};
+    use core_foundation::string::CFString;
+    use core_text::line::CTLine;
+    use core_text::string_attributes::kCTFontAttributeName;
+
+    let px_w = metrics.cell_w * n_cells.max(1) as u32;
+    let px_h = metrics.cell_h;
+    if buf.len() < (px_w as usize) * (px_h as usize) {
+        return false;
+    }
+
+    let cf_text = CFString::new(text);
+    let mut attr = CFMutableAttributedString::new();
+    attr.replace_str(&cf_text, CFRange::init(0, 0));
+    let len = attr.char_len();
+    unsafe {
+        attr.set_attribute(
+            CFRange::init(0, len),
+            kCTFontAttributeName,
+            &font.clone(),
+        );
+    }
+    let line = CTLine::new_with_attributed_string(attr.as_concrete_TypeRef());
+
+    let ctx = unsafe {
+        let raw = CGBitmapContextCreate(
+            buf.as_mut_ptr() as *mut c_void,
+            px_w as usize,
+            px_h as usize,
+            8,
+            px_w as usize,
+            std::ptr::null_mut(),
+            KCGIMAGE_ALPHA_ONLY,
+        );
+        if raw.is_null() {
+            return false;
+        }
+        CGContext::from_ptr(raw)
+    };
+    ctx.set_should_antialias(true);
+    ctx.set_allows_antialiasing(true);
+    ctx.set_should_smooth_fonts(true);
+    ctx.set_allows_font_smoothing(true);
+    ctx.set_should_subpixel_position_fonts(true);
+    ctx.set_allows_font_subpixel_positioning(true);
+    ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
+    ctx.set_gray_fill_color(1.0, 1.0);
+
+    // The bitmap's origin is bottom-left and the baseline is measured
+    // from the top, same as every other raster here.
+    let baseline_from_bottom = px_h.saturating_sub(metrics.baseline_from_top) as f64;
+    ctx.set_text_position(0.0, baseline_from_bottom);
+    unsafe { CTLineDraw(line.as_concrete_TypeRef() as *const c_void, ctx.as_ptr()) };
+    true
+}
+
 fn rasterise_glyph(
     font: &CTFont,
     glyph: CGGlyph,
