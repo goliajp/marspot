@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Marspot — guide</title>
+<meta name="description" content="How to use Marspot: panes, search, the command line, and what reaches the program in a pane.">
+<style>
+  :root {
+    color-scheme: dark light;
+    --bg: #0b0b0c;
+    --panel: #141416;
+    --fg: #e8e6e3;
+    --dim: #8b8985;
+    --rule: #26262a;
+    --accent: #d7775a;
+    --ok: #7fb069;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #fbfaf8; --panel: #ffffff; --fg: #1b1a18;
+      --dim: #6a6862; --rule: #e4e1db; --accent: #b4522f;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.65 var(--sans);
+    font-feature-settings: "kern" 1;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 60rem; margin: 0 auto; padding: 0 1.5rem; }
+  table.keys { border-collapse: collapse; width: 100%; margin-top: 1.25rem; }
+  table.keys td { padding: 0.55rem 0.75rem 0.55rem 0; border-top: 1px solid var(--rule);
+                  vertical-align: baseline; }
+  table.keys td:first-child { width: 7rem; white-space: nowrap; font-family: var(--mono); }
+  a { color: inherit; text-decoration-color: var(--dim); text-underline-offset: 3px; }
+  a:hover { text-decoration-color: var(--accent); }
+  code, .mono { font-family: var(--mono); font-size: 0.92em; }
+
+  header { padding: 6rem 0 4rem; border-bottom: 1px solid var(--rule); }
+  .mark {
+    font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.22em;
+    text-transform: uppercase; color: var(--dim); margin: 0 0 1.75rem;
+  }
+  h1 {
+    font-size: clamp(2rem, 5.5vw, 3.1rem); line-height: 1.12;
+    letter-spacing: -0.02em; font-weight: 640; margin: 0 0 1.25rem;
+    max-width: 22ch;
+  }
+  .lede { font-size: clamp(1.05rem, 2.2vw, 1.2rem); color: var(--dim); margin: 0; max-width: 56ch; }
+
+  .cta { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-top: 2.5rem; }
+  .btn {
+    display: inline-block; padding: 0.7rem 1.15rem; border-radius: 7px;
+    background: var(--fg); color: var(--bg); text-decoration: none;
+    font-weight: 600; font-size: 0.95rem;
+  }
+  .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--rule); }
+  .req { color: var(--dim); font-size: 0.88rem; }
+
+  section { padding: 4rem 0; border-bottom: 1px solid var(--rule); }
+  h2 {
+    font-size: 0.8rem; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--dim); font-weight: 600; margin: 0 0 1.75rem;
+  }
+  h3 { font-size: 1.15rem; margin: 0 0 0.5rem; letter-spacing: -0.01em; }
+  p { max-width: 62ch; }
+  .two { display: grid; gap: 2.5rem; grid-template-columns: 1fr; }
+  @media (min-width: 46rem) { .two { grid-template-columns: 1fr 1fr; gap: 3rem; } }
+
+  table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 0.88rem; }
+  caption { text-align: left; color: var(--dim); font-family: var(--sans); font-size: 0.9rem; padding-bottom: 0.75rem; }
+  th, td { text-align: right; padding: 0.55rem 0.75rem; border-bottom: 1px solid var(--rule); }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { color: var(--dim); font-weight: 500; }
+  td.win { color: var(--ok); font-weight: 600; }
+
+  .note {
+    background: var(--panel); border: 1px solid var(--rule); border-radius: 9px;
+    padding: 1.25rem 1.4rem; margin-top: 1.75rem;
+  }
+  .note p { margin: 0 0 0.6rem; font-size: 0.93rem; color: var(--dim); }
+  .note p:last-child { margin-bottom: 0; }
+
+  ul.plain { list-style: none; padding: 0; margin: 0; }
+  ul.plain li { padding: 0.55rem 0; border-bottom: 1px solid var(--rule); font-size: 0.95rem; }
+  ul.plain li:last-child { border-bottom: 0; }
+
+  footer { padding: 3rem 0 5rem; color: var(--dim); font-size: 0.88rem; }
+  footer a { color: var(--dim); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <p class="mono dim"><a href="./">Marspot</a> / guide</p>
+    <h1>Guide</h1>
+    <p>
+      Organised by what you are trying to do. Everything here is true of the
+      build in this repository; where something is not implemented yet it says
+      so on the <a href="./#not-yet">front page</a> rather than being left out.
+    </p>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2>Getting it</h2>
+    <p>
+      macOS 14 or newer, Apple silicon. There is no signed release yet — the
+      pipeline exists and is rehearsed on every change, but it is waiting on
+      credentials, so for now you build it:
+    </p>
+    <pre class="mono">git clone https://github.com/goliajp/marspot
+cd marspot
+cargo build --release</pre>
+    <p>
+      Three binaries come out. <span class="mono">marspot-shell</span> owns the
+      window, <span class="mono">marspot-core</span> draws, and one
+      <span class="mono">marspot-session</span> runs per pane and owns that
+      pane's pty. A pane that crashes takes nothing else with it.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Panes</h2>
+    <p>
+      A new pane opens in the directory the pane you were in is in — not the
+      one it was launched in, which for anything you have <span class="mono">cd</span>'d
+      out of is the wrong answer. A new <em>window</em> starts at your home
+      directory, because it has no pane to inherit from.
+    </p>
+    <p>
+      Each pane is its own process. That is what makes twenty of them cheap:
+      nothing animates when nothing changes, and an idle pane costs close to
+      nothing.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Keys</h2>
+    <p>Everything not listed goes to the program in the pane, unchanged.</p>
+    <table class="keys">
+      <tbody>
+        <tr><td>⌘N</td><td>New window</td></tr>
+        <tr><td>⌘C</td><td>Copy the selection</td></tr>
+        <tr><td>⌘V</td><td>Paste</td></tr>
+        <tr><td>⌘F</td><td>Search this pane's scrollback</td></tr>
+        <tr><td>⌘B</td><td>Show or hide the sidebar</td></tr>
+        <tr><td>⇧⌘C</td><td>Agent usage for this account</td></tr>
+        <tr><td>⌘W</td><td>Close the panel that is open</td></tr>
+        <tr><td>Esc</td><td>Close the panel that is open; three times in five seconds ends a stuck agent session</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>What reaches the program</h2>
+    <p>
+      A program that asks for mouse reporting gets it: the wheel, button
+      presses and releases at the cell you clicked, and motion — but only the
+      kind it asked for. A program that wants drag-only is not sent every idle
+      pointer move. Motion is reported once per cell you enter, not once per
+      mouse event.
+    </p>
+    <p>
+      Holding shift takes the mouse back, so you can always select text over a
+      program that is tracking it.
+    </p>
+    <p>
+      <span class="mono">OSC 52</span> works, which is the one thing a terminal
+      can do for a remote editor that nothing else can: yank in vim over ssh
+      and it lands on your Mac's clipboard. Reading the clipboard back is
+      refused on purpose — answering that hands any program which can write to
+      the pty whatever you last copied.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>From a script</h2>
+    <p>
+      The <span class="mono">marspot</span> binary talks to a running window,
+      so a script can see and drive panes. A pane is named by its directory's
+      last component, a path tail, or its session id; an ambiguous name is
+      refused and the error lists the candidates.
+    </p>
+    <table class="keys">
+      <tbody>
+        <tr><td>--panes</td><td>List panes: session id, name, working directory</td></tr>
+        <tr><td>--read</td><td>Print what a pane says — its screen, plus scrolled-off lines</td></tr>
+        <tr><td>--send</td><td>Type text into a pane and press Enter</td></tr>
+        <tr><td>--autorun</td><td>Keep a rotation going by itself</td></tr>
+        <tr><td>--status</td><td>Summarise state from the supervisor log and live pids</td></tr>
+        <tr><td>--version</td><td>Print version, git and build info</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>
+      <a href="./">Back to the front page</a> ·
+      <a href="https://github.com/goliajp/marspot">Source</a> ·
+      Dual licensed Apache 2.0 and MIT
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>
