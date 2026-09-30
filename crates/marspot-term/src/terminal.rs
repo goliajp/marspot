@@ -3004,6 +3004,60 @@ impl<'a> Handler<'a> {
 
     /// `?1049l` — restore the saved main grid + cursor.  No-op if not
     /// in alt mode.
+    /// DECSTR — soft reset (`CSI ! p`).
+    ///
+    /// Puts the terminal's modes back where a fresh program expects
+    /// them and leaves the screen alone.  That division is the point
+    /// of the sequence: a program recovering from a confused
+    /// predecessor wants its modes back without losing what is on
+    /// screen.
+    ///
+    /// Tab stops are deliberately not touched — DEC STD 070 leaves
+    /// those to RIS, and a program that soft-resets in the middle of a
+    /// table would otherwise lose its columns.
+    fn soft_reset(&mut self) {
+        *self.attrs = CellAttrs::default();
+        *self.saved_cursor = None;
+        *self.cursor_visible = true;
+        *self.cursor_shape = 0;
+        *self.cursor_key_app_mode = false;
+        *self.bracketed_paste = false;
+        *self.sync_output = false;
+        *self.alt_scroll = false;
+        *self.focus_reporting = false;
+        *self.focus_reported = None;
+        *self.mouse_tracking_mode = MouseTrackingMode::Off;
+        *self.mouse_sgr_encoding = false;
+        *self.pending_wrap = false;
+        *self.scroll_top = 0;
+        *self.scroll_bot = self.grid.rows().saturating_sub(1);
+    }
+
+    /// RIS — reset to initial state (`ESC c`).  What `reset` sends.
+    ///
+    /// Everything the soft reset does, and then the screen: out of the
+    /// alternate buffer, scrollback gone, every cell blank, cursor
+    /// home, tab stops back to every eighth column, title forgotten.
+    ///
+    /// The two marspot-specific switches — `u_tags` and
+    /// `render_markup` — are not reset here, because this dispatcher
+    /// does not hold them.  They are ours, no program sends RIS
+    /// expecting them to move, and claiming to reset them from here
+    /// would be a comment rather than code.
+    fn hard_reset(&mut self) {
+        if self.saved_main.is_some() {
+            self.exit_alt_screen();
+        }
+        self.soft_reset();
+        let (cols, rows) = (self.grid.cols(), self.grid.rows());
+        fill_range(self.grid, 0, cols as u32 * rows as u32, CellAttrs::default());
+        self.grid.clear_all_wrapped();
+        self.grid.clear_scrollback();
+        self.grid.set_cursor(0, 0);
+        *self.tabs = crate::tabs::TabStops::new(cols);
+        self.osc_title.clear();
+    }
+
     fn exit_alt_screen(&mut self) {
         if let Some(saved) = self.saved_main.take() {
             *self.grid = saved.grid;
@@ -3282,7 +3336,9 @@ impl<'a> ParserCallbacks for Handler<'a> {
             // ESC ( <c> — designate G0 charset. We're always ASCII so
             // every variant is a no-op.
             _ if intermediates == b"(" => {}
-            // RIS / charset switching / etc. arrive in later phases.
+            // RIS — what `reset` sends.
+            b'c' if intermediates.is_empty() => self.hard_reset(),
+            // Charset switching etc. arrive in later phases.
             _ => {}
         }
     }
@@ -3447,6 +3503,9 @@ impl<'a> ParserCallbacks for Handler<'a> {
                     let mode = param(params, 1, 1);
                     self.kitty_keyboard.set(mode, flags);
                 }
+                // DECSTR — soft reset.  Modes back to a known state,
+                // screen untouched.
+                (b"!", b'p') => self.soft_reset(),
                 (b"?$", b'p') => {
                     let mode = param(params, 0, 0);
                     let state = self.dec_mode_report(mode);
@@ -4319,7 +4378,8 @@ fn erase_in_display(
         0 => fill_range(grid, cursor_idx, total, attrs),
         1 => fill_range(grid, 0, cursor_idx + 1, attrs),
         2 => fill_range(grid, 0, total, attrs),
-        // 3 = erase scrollback — deferred until scrollback exists (1.1.5).
+        // 3 — erase scrollback.  Handled by the caller, which is where
+        // the scrollback is; nothing reaches here with it.
         _ => {}
     }
 }
