@@ -179,8 +179,17 @@ STALE_PASS=""
 # The absolute path on purpose: a non-login ssh does not have
 # /usr/local/bin on its PATH, and the failure looks like "bench-lock:
 # not found" from a tool that is installed.
-LOCK_CMD="/usr/local/bin/bench-lock bench"
-BUILD_LOCK="/usr/local/bin/bench-lock heavy"
+# How long this is willing to wait for the machine.
+#
+# A waiting benchmark holds every new heavy job back, so one that
+# waits and then gives up has blocked them for nothing: on 2026-10-01
+# this one waited 91 minutes behind a long batch, timed out, and the
+# six jobs queued behind it all took the lock the second it vanished.
+# Saying the number out loud is the fix -- how long we can wait is
+# something only this side knows.
+MAX_WAIT="${MARSPOT_BENCH_MAX_WAIT:-1200}"
+LOCK_CMD="/usr/local/bin/bench-lock bench --max-wait $MAX_WAIT"
+BUILD_LOCK="/usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT"
 if [[ "${MARSPOT_BENCH_NO_LOCK:-}" == "1" ]]; then
   echo "==> MARSPOT_BENCH_NO_LOCK=1 — measuring without the host lock" >&2
   LOCK_CMD=""
@@ -207,6 +216,13 @@ ssh "$HOST" "
   exec $LOCK_CMD caffeinate -dims ./bin/bench.sh --no-build $ARGS_Q
 " </dev/null
 REMOTE_RC=$?
+# 75 is bench-lock giving up: the machine was busy, not the code.  A
+# different thing to report and a different thing to do about it.
+if (( REMOTE_RC == 75 )); then
+  echo "==> could not get $HOST to itself within ${MAX_WAIT}s — nothing was measured." >&2
+  echo "    Who was in the way is above.  Raise MARSPOT_BENCH_MAX_WAIT, or wait" >&2
+  echo "    for them and try again; this is not a gate failure." >&2
+fi
 set -e
 
 # ---- retrieve --------------------------------------------------------
