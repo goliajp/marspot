@@ -224,7 +224,13 @@ pub enum StepKind {
     ///
     /// Needs `AwaitTuiReady` in front of it, because the wrapping
     /// depends on the pane having bracketed paste on.
-    Submit { line: String, pasted: Option<(SystemTime, u64)> },
+    Submit {
+        line: String,
+        /// When the paste went out, the output length at that moment,
+        /// and — once the pane starts painting — the last length seen
+        /// and when it last changed.
+        pasted: Option<SubmitState>,
+    },
 }
 
 /// The far end of an [`StepKind::AwaitJob`]: whoever does the work
@@ -498,6 +504,26 @@ pub const MAX_PAYLOAD: usize = 64 * 1024;
 /// the only cost of waiting is that the sentence lands a moment later,
 /// and the cost of not waiting is a message nobody sent.
 const SUBMIT_ECHO_GRACE: Duration = Duration::from_millis(1500);
+
+/// How long the pane has to stay quiet before the return counts as
+/// arriving after the paste rather than inside it.
+///
+/// "It wrote something back" was the first attempt and it was not
+/// evidence of anything: claude's interface repaints on its own, so
+/// any byte satisfied it.  On 2026-09-30 a pane's return went out
+/// 26 ms after the paste on that basis and the composer took it as a
+/// newline, exactly as when the two were one write.  What is wanted
+/// is that the repaint *finished*.
+const SUBMIT_QUIET: Duration = Duration::from_millis(250);
+
+/// What a [`StepKind::Submit`] has seen since its paste went out.
+#[derive(Clone, Copy, Debug)]
+pub struct SubmitState {
+    sent_at: SystemTime,
+    base_len: u64,
+    seen_len: u64,
+    changed_at: SystemTime,
+}
 
 const SPINNER_FRAME: Duration = Duration::from_millis(125);
 
@@ -813,7 +839,7 @@ impl OpRunner {
                 true
             }
             StepKind::Submit { ref line, pasted } => {
-                let Some((at, base)) = pasted else {
+                let Some(st) = pasted else {
                     use marspot_term::grid_shm::FLAG_BRACKETED_PASTE;
                     let bracketed = self
                         .env
@@ -848,23 +874,51 @@ impl OpRunner {
                     if let Some(StepKind::Submit { pasted, .. }) =
                         self.op.steps.get_mut(self.at).map(|s| &mut s.kind)
                     {
-                        *pasted = Some((self.env.now(), base));
+                        let now = self.env.now();
+                        *pasted = Some(SubmitState {
+                            sent_at: now,
+                            base_len: base,
+                            seen_len: base,
+                            changed_at: now,
+                        });
                     }
                     return false;
                 };
-                // The composer has to have said something back before
-                // the return can be a key rather than more paste.  A
-                // program that redraws nothing still gets its return,
-                // late, rather than leaving the op to time out.
-                let drew = self.env.output_len(sid) > base;
-                let waited = self.env.now().duration_since(at).unwrap_or_default();
-                if !drew && waited < SUBMIT_ECHO_GRACE {
+                // Two things have to be true: the pane painted
+                // something after the paste, and it has stopped.  The
+                // first alone is not evidence — this interface
+                // repaints by itself — and it was what let a return go
+                // out 26 ms behind the paste and land as a newline.
+                let now = self.env.now();
+                let len = self.env.output_len(sid);
+                let waited = now.duration_since(st.sent_at).unwrap_or_default();
+                // The grace is checked before anything else: a pane
+                // that repaints on every tick would otherwise keep
+                // resetting the quiet window and never reach it.
+                let expired = waited >= SUBMIT_ECHO_GRACE;
+                if !expired
+                    && len != st.seen_len
+                    && let Some(StepKind::Submit { pasted: Some(p), .. }) =
+                        self.op.steps.get_mut(self.at).map(|s| &mut s.kind)
+                {
+                    p.seen_len = len;
+                    p.changed_at = now;
+                    return false;
+                }
+                let drew = len > st.base_len;
+                let quiet = now.duration_since(st.changed_at).unwrap_or_default();
+                if !expired && !(drew && quiet >= SUBMIT_QUIET) {
                     return false;
                 }
                 host.log(
                     LogLevel::Info,
                     &format!("{}.submit", self.op.name),
-                    &format!("sid={sid} drew={drew} after={}ms", waited.as_millis()),
+                    &format!(
+                        "sid={sid} drew={drew} painted={}B quiet={}ms after={}ms",
+                        len.saturating_sub(st.base_len),
+                        quiet.as_millis(),
+                        waited.as_millis()
+                    ),
                 );
                 if let Err(e) = self.env.io().send(sid, b"\r") {
                     self.finish(
@@ -1923,15 +1977,18 @@ mod tests {
         );
     }
 
-    /// The text leaves first; the return waits for the pane to redraw
-    /// with the text in it.
+    /// The text leaves first; the return waits for the pane to finish
+    /// repainting.
     ///
     /// Glued together, claude's composer reads the return as part of
     /// the pasted block and turns it into a second line — the sentence
-    /// sits there unsent.  The redraw is the proof that the paste was
-    /// taken as a paste.
+    /// sits there unsent.  The first attempt at a gate here was "the
+    /// pane wrote something back", which is not evidence: that
+    /// interface repaints on its own, so any byte satisfied it and a
+    /// return went out 26 ms behind the paste to exactly the same
+    /// effect.  What is wanted is that the repaint stopped.
     #[test]
-    fn the_return_waits_for_the_composer_to_redraw() {
+    fn the_return_waits_for_the_repaint_to_finish() {
         use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
         let (state, env, host) = setup();
         *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE));
@@ -1944,23 +2001,28 @@ mod tests {
             "the paste goes out on its own, wrapped"
         );
 
-        // The pane has not said anything back yet.
-        run(&mut r, &host, &state, 320);
-        assert_eq!(
-            state.sent.lock().unwrap().len(),
-            1,
-            "a return sent before the redraw is the one that becomes a newline"
-        );
+        // The pane is painting.  Output keeps arriving, and while it
+        // does the return must not go out — this is the case that
+        // used to satisfy the gate on its first byte.
+        for tick in 1..=8u64 {
+            *state.out_len.lock().unwrap() = 64 * tick;
+            run(&mut r, &host, &state, 48);
+            assert_eq!(
+                state.sent.lock().unwrap().len(),
+                1,
+                "a pane still painting is not a pane that has finished (tick {tick})"
+            );
+        }
 
-        *state.out_len.lock().unwrap() = 64;
-        run(&mut r, &host, &state, 64);
+        // It stops.
+        run(&mut r, &host, &state, SUBMIT_QUIET.as_millis() as u64 + 64);
         let sent = state.sent.lock().unwrap().clone();
         assert_eq!(sent.len(), 2, "{sent:?}");
         assert_eq!(sent[1], b"\r".to_vec(), "and it is a return by itself");
         assert!(*host.ended.lock().unwrap(), "the step is done once the return is out");
     }
 
-    /// A program that redraws nothing still gets its return, late.
+    /// A program that paints nothing at all still gets its return.
     #[test]
     fn a_silent_pane_gets_its_return_after_the_grace() {
         use marspot_term::grid_shm::FLAG_BRACKETED_PASTE;
@@ -1974,6 +2036,31 @@ mod tests {
         run(&mut r, &host, &state, SUBMIT_ECHO_GRACE.as_millis() as u64 * 2);
         let sent = state.sent.lock().unwrap().clone();
         assert_eq!(sent.len(), 2, "waiting forever is worse than a late return: {sent:?}");
+        assert_eq!(sent[1], b"\r".to_vec());
+    }
+
+    /// And a pane that never stops painting is not held for ever.
+    #[test]
+    fn a_pane_that_never_settles_still_gets_its_return() {
+        use marspot_term::grid_shm::FLAG_BRACKETED_PASTE;
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, FLAG_BRACKETED_PASTE));
+        let mut r = OpRunner::new(
+            PtyOp::new("test.submit")
+                .step(Step::submit("carry on").timeout(SUBMIT_ECHO_GRACE * 4)),
+            env,
+        );
+        run(&mut r, &host, &state, 32);
+        // Output on every single tick, for longer than the grace.
+        for tick in 1..=200u64 {
+            *state.out_len.lock().unwrap() = 8 * tick;
+            run(&mut r, &host, &state, 16);
+            if state.sent.lock().unwrap().len() == 2 {
+                break;
+            }
+        }
+        let sent = state.sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2, "the grace is the upper bound, painting or not");
         assert_eq!(sent[1], b"\r".to_vec());
     }
 

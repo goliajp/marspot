@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.185"  # the return waits for the composer to redraw
+shell   = "0.7.186"  # the return waits for the repaint to finish
 core    = "0.12.229"  # a new pane opens where you were
 session = "0.11.107"  # colon sub-parameters
