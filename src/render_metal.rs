@@ -7077,7 +7077,7 @@ mod tests {
         // bright.  A gate that only looked at averages would miss it.
         let mut split = vec![0u8; n];
         for (i, px) in split.chunks_mut(4).enumerate() {
-            let v = if (i / w as usize) % 2 == 0 { 30 } else { 226 };
+            let v = if (i / w as usize).is_multiple_of(2) { 30 } else { 226 };
             px.copy_from_slice(&[v, v, v, 255]);
         }
         let s = ssim_luma(&flat, &split, w, h);
