@@ -96,3 +96,37 @@ fn the_charset_survives_a_snapshot() {
     back.feed(b"qqq");
     assert_eq!(row(&back, 0), "qqq", "and so did the one the saved cursor held");
 }
+
+/// One saved-cursor slot per screen buffer.
+///
+/// `ESC 7` inside a full-screen program saves where that program is,
+/// and it is still there when the program comes back from a visit to
+/// the main screen -- the two slots do not overwrite each other and
+/// neither is thrown away by a switch.
+#[test]
+fn each_screen_keeps_its_own_saved_cursor() {
+    let mut t = Terminal::new(20, 6);
+    t.feed(b"\x1b[2;3H\x1b7"); // main saves row 2, col 3
+
+    t.feed(b"\x1b[?1049h");
+    t.feed(b"\x1b[5;7H\x1b7"); // the alt screen saves its own
+    t.feed(b"\x1b[?1049l");
+
+    // Back on main: the slot is main's, as `?1049h` left it.
+    t.feed(b"\x1b8");
+    assert_eq!(t.grid().cursor(), (2, 1), "the alt screen's save is not main's");
+
+    t.feed(b"\x1b[?1049h");
+    t.feed(b"\x1b8");
+    assert_eq!(t.grid().cursor(), (6, 4), "and the alt screen's survived the trip");
+}
+
+/// The switch itself does not move the cursor; `?1049l` restores it
+/// because the program moved it, not because the switch did.
+#[test]
+fn switching_buffers_leaves_the_cursor_where_it_stood() {
+    let mut t = Terminal::new(20, 6);
+    t.feed(b"\x1b[3;7H");
+    t.feed(b"\x1b[?1049h");
+    assert_eq!(t.grid().cursor(), (6, 2));
+}
