@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.184"  # clippy sweep
-core    = "0.12.221"  # clippy sweep
-session = "0.11.104"  # clippy sweep
+shell   = "0.7.185"  # the return waits for the composer to redraw
+core    = "0.12.222"  # a selected list row is no longer white on white
+session = "0.11.105"  # clippy sweep

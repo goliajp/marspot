@@ -207,21 +207,24 @@ pub enum StepKind {
     /// direction: a stale match in the tail costs a sentence the
     /// person can type, while a miss is exactly today's behaviour.
     StopIfWaiting { needles: &'static [&'static str] },
-    /// Put a line in and submit it, in one write.
+    /// Put a line in, then submit it.
     ///
     /// Everything about this step is about the gap between the text
-    /// and the newline.  Send them as separate writes and the user's
-    /// own keystroke can land in between, or the TUI can read both out
-    /// of its buffer in one go and take the newline as part of the
-    /// pasted block — a message nobody sent, sitting in the composer
-    /// (2026-09-29 and 0.7.82 before it).  One write closes both
-    /// holes: the bracketed-paste end marker terminates the text, the
-    /// carriage return behind it is unambiguously a key, and no other
-    /// writer can get between them.
+    /// and the newline.  Too wide and the user's own keystroke lands
+    /// in between.  Too narrow — the two in one write — and claude's
+    /// composer reads the carriage return as part of the pasted block
+    /// and turns it into a second line: the sentence sits there
+    /// unsent, which is what 0.7.82 and 2026-09-29 both did.
+    ///
+    /// So: paste, wait for the composer to redraw itself with the text
+    /// in it, then send the carriage return on its own.  The redraw is
+    /// the proof that the paste was consumed as a paste, and it is
+    /// what makes the return unambiguously a key.  The gap is one
+    /// frame wide, not a fixed sleep.
     ///
     /// Needs `AwaitTuiReady` in front of it, because the wrapping
     /// depends on the pane having bracketed paste on.
-    Submit(String),
+    Submit { line: String, pasted: Option<(SystemTime, u64)> },
 }
 
 /// The far end of an [`StepKind::AwaitJob`]: whoever does the work
@@ -360,7 +363,7 @@ impl Step {
     /// Put a line in and submit it, in one write.
     pub fn submit(line: impl Into<String>) -> Self {
         Self {
-            kind: StepKind::Submit(line.into()),
+            kind: StepKind::Submit { line: line.into(), pasted: None },
             timeout: Some(Duration::from_secs(5)),
             proceed_on_timeout: false,
             label: "submit",
@@ -490,6 +493,12 @@ pub const MAX_PAYLOAD: usize = 64 * 1024;
 /// turn a second, which reads as motion without being a strobe — and
 /// it decouples the animation from the tick, which is 16 ms while a
 /// pane is drawing and ~250 ms when the window is idle.
+/// How long [`StepKind::Submit`] waits for the composer to redraw with
+/// the pasted text in it before sending the return anyway.  Generous:
+/// the only cost of waiting is that the sentence lands a moment later,
+/// and the cost of not waiting is a message nobody sent.
+const SUBMIT_ECHO_GRACE: Duration = Duration::from_millis(1500);
+
 const SPINNER_FRAME: Duration = Duration::from_millis(125);
 
 /// How often a parked run re-asserts its badge.
@@ -803,35 +812,61 @@ impl OpRunner {
                 }
                 true
             }
-            StepKind::Submit(ref line) => {
-                use marspot_term::grid_shm::FLAG_BRACKETED_PASTE;
-                let bracketed = self
-                    .env
-                    .pane_modes(sid)
-                    .map(|(_, f)| f & FLAG_BRACKETED_PASTE != 0)
-                    .unwrap_or(false);
-                let mut bytes = Vec::with_capacity(line.len() + 16);
-                if bracketed {
-                    bytes.extend_from_slice(b"\x1b[200~");
-                    bytes.extend_from_slice(line.as_bytes());
-                    bytes.extend_from_slice(b"\x1b[201~");
-                } else {
-                    // Nothing to bracket with: the line still goes in,
-                    // and the newline behind it is the same key it
-                    // would have been.  Worse than the wrapped form
-                    // only in that a TUI reading a burst could take the
-                    // two together — which is the case `AwaitTuiReady`
-                    // exists to prevent, and this is what happens when
-                    // it was allowed to give up.
-                    bytes.extend_from_slice(line.as_bytes());
+            StepKind::Submit { ref line, pasted } => {
+                let Some((at, base)) = pasted else {
+                    use marspot_term::grid_shm::FLAG_BRACKETED_PASTE;
+                    let bracketed = self
+                        .env
+                        .pane_modes(sid)
+                        .map(|(_, f)| f & FLAG_BRACKETED_PASTE != 0)
+                        .unwrap_or(false);
+                    let mut bytes = Vec::with_capacity(line.len() + 16);
+                    if bracketed {
+                        bytes.extend_from_slice(b"\x1b[200~");
+                        bytes.extend_from_slice(line.as_bytes());
+                        bytes.extend_from_slice(b"\x1b[201~");
+                    } else {
+                        // Nothing to bracket with.  The text still goes
+                        // in and the return still follows it a redraw
+                        // later; all that is lost is the marker that
+                        // told the program this was a paste.
+                        bytes.extend_from_slice(line.as_bytes());
+                    }
+                    let base = self.env.output_len(sid);
+                    host.log(
+                        LogLevel::Info,
+                        &format!("{}.paste", self.op.name),
+                        &format!("sid={sid} bytes={} bracketed={bracketed}", bytes.len()),
+                    );
+                    if let Err(e) = self.env.io().send(sid, &bytes) {
+                        self.finish(
+                            host,
+                            OpOutcome::Failed { step: self.at, label: step.label, err: e.to_string() },
+                        );
+                        return true;
+                    }
+                    if let Some(StepKind::Submit { pasted, .. }) =
+                        self.op.steps.get_mut(self.at).map(|s| &mut s.kind)
+                    {
+                        *pasted = Some((self.env.now(), base));
+                    }
+                    return false;
+                };
+                // The composer has to have said something back before
+                // the return can be a key rather than more paste.  A
+                // program that redraws nothing still gets its return,
+                // late, rather than leaving the op to time out.
+                let drew = self.env.output_len(sid) > base;
+                let waited = self.env.now().duration_since(at).unwrap_or_default();
+                if !drew && waited < SUBMIT_ECHO_GRACE {
+                    return false;
                 }
-                bytes.push(b'\r');
                 host.log(
                     LogLevel::Info,
                     &format!("{}.submit", self.op.name),
-                    &format!("sid={sid} bytes={} bracketed={bracketed}", bytes.len()),
+                    &format!("sid={sid} drew={drew} after={}ms", waited.as_millis()),
                 );
-                if let Err(e) = self.env.io().send(sid, &bytes) {
+                if let Err(e) = self.env.io().send(sid, b"\r") {
                     self.finish(
                         host,
                         OpOutcome::Failed { step: self.at, label: step.label, err: e.to_string() },
@@ -1888,30 +1923,70 @@ mod tests {
         );
     }
 
-    /// The line and its newline leave in one write, wrapped.
+    /// The text leaves first; the return waits for the pane to redraw
+    /// with the text in it.
+    ///
+    /// Glued together, claude's composer reads the return as part of
+    /// the pasted block and turns it into a second line — the sentence
+    /// sits there unsent.  The redraw is the proof that the paste was
+    /// taken as a paste.
     #[test]
-    fn a_submit_is_one_write() {
+    fn the_return_waits_for_the_composer_to_redraw() {
         use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
         let (state, env, host) = setup();
         *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE));
         let mut r = OpRunner::new(PtyOp::new("test.submit").step(Step::submit("carry on")), env);
-        run(&mut r, &host, &state, 200);
 
-        let sent = state.sent.lock().unwrap().clone();
-        assert_eq!(sent.len(), 1, "one write, or a keystroke can land inside it: {sent:?}");
+        run(&mut r, &host, &state, 32);
         assert_eq!(
-            sent[0],
-            b"\x1b[200~carry on\x1b[201~\r".to_vec(),
-            "bracketed, and the newline behind the end marker"
+            state.sent.lock().unwrap().clone(),
+            vec![b"\x1b[200~carry on\x1b[201~".to_vec()],
+            "the paste goes out on its own, wrapped"
         );
 
-        // A pane without bracketed paste still gets the line — there
-        // is nothing to wrap it with.
+        // The pane has not said anything back yet.
+        run(&mut r, &host, &state, 320);
+        assert_eq!(
+            state.sent.lock().unwrap().len(),
+            1,
+            "a return sent before the redraw is the one that becomes a newline"
+        );
+
+        *state.out_len.lock().unwrap() = 64;
+        run(&mut r, &host, &state, 64);
+        let sent = state.sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert_eq!(sent[1], b"\r".to_vec(), "and it is a return by itself");
+        assert!(*host.ended.lock().unwrap(), "the step is done once the return is out");
+    }
+
+    /// A program that redraws nothing still gets its return, late.
+    #[test]
+    fn a_silent_pane_gets_its_return_after_the_grace() {
+        use marspot_term::grid_shm::FLAG_BRACKETED_PASTE;
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, FLAG_BRACKETED_PASTE));
+        let mut r = OpRunner::new(
+            PtyOp::new("test.submit")
+                .step(Step::submit("carry on").timeout(SUBMIT_ECHO_GRACE * 4)),
+            env,
+        );
+        run(&mut r, &host, &state, SUBMIT_ECHO_GRACE.as_millis() as u64 * 2);
+        let sent = state.sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2, "waiting forever is worse than a late return: {sent:?}");
+        assert_eq!(sent[1], b"\r".to_vec());
+    }
+
+    /// A pane without bracketed paste still gets the line — there is
+    /// nothing to wrap it with.
+    #[test]
+    fn an_unbracketed_pane_still_gets_the_line() {
+        use marspot_term::grid_shm::FLAG_ALT_SCREEN;
         let (state, env, host) = setup();
         *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN));
         let mut r = OpRunner::new(PtyOp::new("test.submit").step(Step::submit("carry on")), env);
-        run(&mut r, &host, &state, 200);
-        assert_eq!(state.sent.lock().unwrap()[0], b"carry on\r".to_vec());
+        run(&mut r, &host, &state, 32);
+        assert_eq!(state.sent.lock().unwrap()[0], b"carry on".to_vec());
     }
 
     /// A pane that came back to a question is left alone.

@@ -2476,9 +2476,6 @@ fn is_bookkeeping_record(line: &str) -> bool {
 }
 
 
-/// The model out of claude's own startup banner, if this screen has
-/// one on it.
-
 /// The live session uuid as stated by the claude process tree's own
 /// argv, if it states one.
 ///
@@ -2678,6 +2675,7 @@ mod tests {
     /// the suite — see `run_idle_policy_at`.
     const TEST_THRESHOLD: Duration = Duration::from_secs(30 * 60);
     use std::io::Write;
+    use std::path::Path;
 
     /// A `WorkerCtx` with nothing cached, for the model-half tests.
     fn ctx_for_test(projects_root: PathBuf) -> WorkerCtx {
@@ -3220,8 +3218,8 @@ mod tests {
         let say = at("say_continue").expect("the switch must say something");
         assert!(resume < proc && proc < ready && ready < say, "{labels:?}");
         assert!(
-            matches!(&op.steps[say].kind, pty_op::StepKind::Submit(t) if !t.is_empty()),
-            "the line and its newline go in one write: {labels:?}"
+            matches!(&op.steps[say].kind, pty_op::StepKind::Submit { line, .. } if !line.is_empty()),
+            "the switch has a line to say: {labels:?}"
         );
         assert!(
             !labels.contains(&"enter"),
@@ -4133,7 +4131,7 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + secs)
     }
 
-    fn set_mtime(path: &PathBuf, t: SystemTime) {
+    fn set_mtime(path: &Path, t: SystemTime) {
         let secs = t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
         let times = [
             libc::timeval { tv_sec: secs as i64, tv_usec: 0 },
