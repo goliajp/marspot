@@ -24,7 +24,8 @@ use std::time::{Duration, Instant};
 use crate::grid::{Cell, Grid};
 use crate::grid_shm::{
     GridShmReader, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
-    FLAG_ALT_SCREEN, FLAG_ALT_SCROLL, FLAG_MOUSE_SGR, FLAG_MOUSE_TRACKING,
+    FLAG_ALT_SCREEN, FLAG_ALT_SCROLL, FLAG_MOUSE_ANY_MOTION, FLAG_MOUSE_DRAG,
+    FLAG_MOUSE_SGR, FLAG_MOUSE_TRACKING,
 };
 use crate::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use crate::render::SessionView;
@@ -418,6 +419,22 @@ impl PaneBackend {
         }
     }
 
+    /// Does the program want to hear about motion while a button is
+    /// held, and about motion with no button?
+    ///
+    /// Two questions rather than one, because `?1002` and `?1003`
+    /// differ in exactly that: a program that asked for the first and
+    /// is sent the second gets a report per pixel of idle pointer
+    /// travel across its window.
+    pub fn l3_mouse_motion_wanted(&self, button_held: bool) -> bool {
+        match self {
+            PaneBackend::L3(c) => {
+                if button_held { c.mouse_drag_wanted } else { c.mouse_any_motion_wanted }
+            }
+            _ => false,
+        }
+    }
+
     pub fn l3_mouse_sgr_active(&self) -> bool {
         match self {
             PaneBackend::L3(c) => c.mouse_sgr_active(),
@@ -487,6 +504,20 @@ impl PaneBackend {
             buf.push(b + 32);
             buf.push((col.min(223) as u8) + 32);
             buf.push((row.min(223) as u8) + 32);
+        }
+    }
+
+    /// The pointer moved, at the cell it moved to.
+    ///
+    /// `button` is the one being held, or 3 for none — which is what
+    /// both encodings use to mean "no button".  The motion bit (32) is
+    /// what tells the program this is travel rather than a press.
+    pub fn l3_inject_mouse_motion(&mut self, button: u8, col: u32, row: u32) {
+        let sgr = self.l3_mouse_sgr_active();
+        let mut buf = Vec::with_capacity(16);
+        Self::encode_mouse(&mut buf, sgr, button + 32, true, col, row);
+        if let PaneBackend::L3(c) = self {
+            c.forward_inject_input(&buf);
         }
     }
 
@@ -821,6 +852,10 @@ pub struct L3Conn {
     /// Mouse SGR encoding(DECSET 1006).L2 mouse-on 时按这个选 SGR
     /// 字节格式 vs X11 legacy.
     mouse_sgr_active: bool,
+    /// The program asked for motion while a button is held (`?1002`).
+    mouse_drag_wanted: bool,
+    /// …and for motion with no button at all (`?1003`).
+    mouse_any_motion_wanted: bool,
     /// Last shm publish seq we mirrored; lets `poll()` skip a re-fill
     /// when nothing changed (so L2's heartbeat doesn't force a render).
     last_seq: u64,
@@ -887,6 +922,8 @@ impl L3Conn {
             alt_screen_active: false,
             alt_scroll_active: false,
             mouse_sgr_active: false,
+            mouse_drag_wanted: false,
+            mouse_any_motion_wanted: false,
             bracketed_paste: false,
             last_seq: 0,
             req_cols: cols,
@@ -920,6 +957,8 @@ impl L3Conn {
             alt_screen_active: false,
             alt_scroll_active: false,
             mouse_sgr_active: false,
+            mouse_drag_wanted: false,
+            mouse_any_motion_wanted: false,
             bracketed_paste: false,
             last_seq: 0,
             req_cols: cols,
@@ -1061,6 +1100,8 @@ impl L3Conn {
         self.bracketed_paste = snap.flags & FLAG_BRACKETED_PASTE != 0;
         self.mouse_tracking_active = snap.flags & FLAG_MOUSE_TRACKING != 0;
         self.mouse_sgr_active = snap.flags & FLAG_MOUSE_SGR != 0;
+        self.mouse_drag_wanted = snap.flags & FLAG_MOUSE_DRAG != 0;
+        self.mouse_any_motion_wanted = snap.flags & FLAG_MOUSE_ANY_MOTION != 0;
         self.alt_screen_active = snap.flags & FLAG_ALT_SCREEN != 0;
         self.alt_scroll_active = snap.flags & FLAG_ALT_SCROLL != 0;
         self.snap_scrollback_len = snap.scrollback_len;
@@ -2355,6 +2396,24 @@ mod mouse_encoding_tests {
         assert_eq!(far[5], 223 + 32);
         // And SGR, which has no such limit, says the real number.
         assert_eq!(sgr(0, true, 500, 500), "\u{1b}[<0;500;500M");
+    }
+
+    /// Motion carries the 32 bit, and a held button rides under it.
+    ///
+    /// `?1002` reports travel while a button is held and `?1003`
+    /// reports all of it; the difference on the wire is which button
+    /// is named, with 3 meaning none.  Both encodings add 32 to say
+    /// this is travel rather than a press, which is why the legacy
+    /// byte lands at button + 64.
+    #[test]
+    fn motion_is_a_button_plus_the_motion_bit() {
+        // Left button (0) held while moving: the motion bit makes 32.
+        assert_eq!(sgr(32, true, 7, 9), "\u{1b}[<32;7;9M");
+        // No button (3) while moving: 35.
+        assert_eq!(sgr(35, true, 7, 9), "\u{1b}[<35;7;9M");
+        // X10 adds its own 32 on top of whatever it is handed.
+        assert_eq!(x10(32, true, 7, 9)[3], 64);
+        assert_eq!(x10(35, true, 7, 9)[3], 67);
     }
 
     /// A wheel tick is a press, never a release.

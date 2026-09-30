@@ -815,6 +815,7 @@ mod window_state_tests {
             drag_window: None,
             pane_drag: None,
             mouse_report_press: None,
+            mouse_report_last_cell: None,
             drop_target: None,
             pending_move_sid: None,
             saved_windows: std::collections::VecDeque::new(),
@@ -2345,6 +2346,55 @@ mod boot_assembly_tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         panic!("the shell never reported /usr/lib; still {:?}", live_cwd_of(sid));
+    }
+
+    /// `?1002` and `?1003` arrive as different answers.
+    ///
+    /// Press and release are reported by every tracking mode, so they
+    /// needed no knowledge of which was on.  Motion is the half that
+    /// differs, and a program that asked for drag-only and is sent
+    /// every idle pointer move gets buried.  The shm carries two more
+    /// bits for it; this checks they mean what they say against a real
+    /// shell setting each mode.
+    #[test]
+    fn the_two_motion_modes_are_told_apart_on_a_real_pty() {
+        for (mode, want_drag, want_any) in
+            [("1000", false, false), ("1002", true, false), ("1003", true, true)]
+        {
+            let _sb = Sandbox::new(&format!("mm{mode}"));
+            let (tx, _rx) = mpsc::channel();
+            let sid = reg::allocate_next_session_id().unwrap();
+            let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
+                .expect("real L3 spawn (is marspot-session built?)");
+
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(20);
+            let mut on = false;
+            while std::time::Instant::now() < deadline && !on {
+                pane.session_mut()
+                    .forward_inject_input(format!("printf '\\033[?{mode}h'\r").as_bytes());
+                for _ in 0..40 {
+                    pane.pump();
+                    if pane.session().l3_mouse_tracking_active() {
+                        on = true;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+            assert!(on, "?{mode} never reached the terminal");
+
+            assert_eq!(
+                pane.session().l3_mouse_motion_wanted(true),
+                want_drag,
+                "?{mode}: motion while a button is held"
+            );
+            assert_eq!(
+                pane.session().l3_mouse_motion_wanted(false),
+                want_any,
+                "?{mode}: motion with no button"
+            );
+        }
     }
 
     /// OSC 52 travels from the program to the Mac's pasteboard.
@@ -4087,6 +4137,11 @@ struct CoreApp {
     /// be told it came up, even if the pointer left the pane first —
     /// otherwise it sits believing the button is still held.
     mouse_report_press: Option<(usize, u32, u32)>,
+    /// The last cell a motion report named.  Motion is reported when
+    /// the pointer changes cell, not when the mouse moves: a program
+    /// wants to know it is over a different character, and the pixels
+    /// in between are the terminal's business.
+    mouse_report_last_cell: Option<(usize, u32, u32)>,
     /// Where the active pane drag would land right now (None = over
     /// nothing droppable).  Drives the per-window `drop_preview`.
     drop_target: Option<DropTarget>,
@@ -7875,6 +7930,32 @@ impl CoreApp {
     }
 
     fn mouse_moved(&mut self, wi: usize, x_phys: f64, y_phys: f64) {
+        // Motion, for a program that asked to hear about it.
+        //
+        // Only the mode it asked for: `?1002` wants travel while a
+        // button is held and `?1003` wants all of it, and sending the
+        // second to a program expecting the first buries it in reports
+        // per pixel of idle pointer movement.  Reported once per cell
+        // the pointer enters, not once per event, for the same reason.
+        let held = self.mouse_report_press.is_some();
+        let (cw, ch) = self.renderer.cell_dims();
+        if let Some((idx, col, row)) =
+            win!(self, wi).layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)
+            && win!(self, wi).panes.get(idx)
+                .map(|p| p.session().l3_mouse_motion_wanted(held))
+                .unwrap_or(false)
+        {
+            let (c1, r1) = (col as u32 + 1, row as u32 + 1);
+            if self.mouse_report_last_cell != Some((idx, c1, r1)) {
+                self.mouse_report_last_cell = Some((idx, c1, r1));
+                let button = if held { 0 } else { 3 };
+                if let Some(pane) = win!(self, wi).panes.get_mut(idx) {
+                    pane.session_mut().l3_inject_mouse_motion(button, c1, r1);
+                }
+            }
+            return;
+        }
+
         // Reveal the traffic-light glyphs while the cursor is anywhere
         // in the panel's title bar, matching the system's affordance.
         let w = &mut win!(self, wi);
@@ -8755,6 +8836,7 @@ impl CoreApp {
         // Release the button the program was told about, at whatever
         // cell the pointer is over now — or, if it left the pane, at
         // the one the press reported.
+        self.mouse_report_last_cell = None;
         if let Some((idx, press_c, press_r)) = self.mouse_report_press.take() {
             let (cw, ch) = self.renderer.cell_dims();
             let here = win!(self, wi)
@@ -10316,6 +10398,7 @@ fn main() {
     let mut app = CoreApp {
         renderer,
         mouse_report_press: None,
+        mouse_report_last_cell: None,
         pane_badges: std::collections::HashMap::new(),
         pane_wheel_keys: std::collections::HashMap::new(),
         pane_agent_tui: std::collections::HashMap::new(),

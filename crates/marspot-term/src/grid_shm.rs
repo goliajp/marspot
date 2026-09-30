@@ -100,6 +100,17 @@ pub const FLAG_MOUSE_TRACKING: u32 = 1 << 3;
 /// 还是 X11 legacy 字节格式.
 pub const FLAG_MOUSE_SGR: u32 = 1 << 4;
 
+/// The program wants motion while a button is held (DECSET ?1002).
+///
+/// `FLAG_MOUSE_TRACKING` says only that some tracking is on, which is
+/// all a press and a release need — every mode reports those.  Motion
+/// is the half that differs, and forwarding it to a program that asked
+/// for `?1000` would bury it in reports it never wanted.
+pub const FLAG_MOUSE_DRAG: u32 = 1 << 7;
+/// The program wants motion whether or not a button is held
+/// (DECSET ?1003).
+pub const FLAG_MOUSE_ANY_MOTION: u32 = 1 << 8;
+
 /// The session is inside the alternate screen (`?1049h`).
 ///
 /// L2 needs this to tell two states apart that look identical from the

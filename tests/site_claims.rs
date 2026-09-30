@@ -142,9 +142,9 @@ fn the_page_does_not_promise_what_is_known_missing() {
     // The gaps list is there so a first hour is not a series of
     // surprises.  If a gap closes, this is the reminder to take it off
     // the page rather than leaving it to read as false modesty.
-    for gap in ["Mouse reporting", "terminfo"] {
-        assert!(SITE.contains(gap), "the page stopped mentioning {gap:?}");
-    }
+    // One left.  The others closed today, each taken off both
+    // documents by the test below rather than by remembering to.
+    assert!(SITE.contains("terminfo"), "the page stopped mentioning terminfo");
 }
 
 /// And it does not keep confessing a gap that closed.
