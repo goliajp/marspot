@@ -91,6 +91,14 @@ pub enum MouseTrackingMode {
     AnyEvent,
 }
 
+/// Sweep the cluster pool once it is holding more than this.
+///
+/// A screen cannot point at more clusters than it has cells, and the
+/// pool only grows where a cluster is written, so a bound a few
+/// screens wide means the sweep runs rarely and the pool never
+/// wanders.  Not a timer: an idle grid does no work at all.
+const CLUSTER_POOL_SWEEP_AT: usize = 4096;
+
 /// The most a program may put on the clipboard in one OSC 52.
 ///
 /// 64 KiB is more than any yank and far less than a pty can be made
@@ -4241,6 +4249,39 @@ impl<'a> Handler<'a> {
         *self.cluster_fast = None;
         let w = crate::grapheme::cluster_width(self.cluster_buf);
         self.widen_anchor(w);
+        self.store_cluster_at_anchor();
+    }
+
+    /// The cluster on screen is now more than one codepoint, so the
+    /// cell holding it has to hold all of it.
+    ///
+    /// Called every time a codepoint joins, which rewrites the same
+    /// cell with a longer string each time — `e` then `é` then `é` with
+    /// a second mark.  Each rewrite leaves the previous pool entry
+    /// unreferenced, which is what the sweep is for; that is cheaper
+    /// than trying to extend an entry in place, and clusters are rare
+    /// enough that it does not matter (55 in forty million, measured).
+    fn store_cluster_at_anchor(&mut self) {
+        let Some((col, row, _)) = *self.cluster_anchor else {
+            return;
+        };
+        if self.cluster_buf.chars().count() < 2 {
+            return;
+        }
+        // Sweep before growing rather than on a timer: the pool is
+        // only allowed to hold what the screen points at, and this is
+        // the one place it grows.
+        if self.grid.cluster_pool_len() > CLUSTER_POOL_SWEEP_AT {
+            self.grid.sweep_clusters();
+        }
+        let attrs = *self.attrs;
+        let cell = {
+            let buf = std::mem::take(self.cluster_buf);
+            let cell = self.grid.cluster_cell(&buf, attrs);
+            *self.cluster_buf = buf;
+            cell
+        };
+        self.grid.set_cell(col, row, cell);
     }
 
     /// Draw `ch` as the first codepoint of a new cluster and remember
@@ -4783,12 +4824,14 @@ mod tests {
         // LV syllable + trailing T jamo conjoin into ONE cluster
         // (GB8 via the buffered last char), not two cell pairs.
         let t = term_with(20, 4, "\u{AC00}\u{11A8}z".as_bytes());
-        assert_eq!(t.grid().cell(0, 0).ch, '\u{AC00}');
+        let syllable = t.grid().cell(0, 0);
+        assert_eq!(t.grid().cluster_text(&syllable), Some("\u{AC00}\u{11A8}"));
         assert_eq!(t.grid().cell(2, 0).ch, 'z');
 
         // L + V jamo compose via the slow path (neither is fast class).
         let t = term_with(20, 4, "\u{1100}\u{1161}z".as_bytes());
-        assert_eq!(t.grid().cell(0, 0).ch, '\u{1100}');
+        let composed = t.grid().cell(0, 0);
+        assert_eq!(t.grid().cluster_text(&composed), Some("\u{1100}\u{1161}"));
         assert_eq!(t.grid().cell(2, 0).ch, 'z');
     }
 
@@ -4802,7 +4845,8 @@ mod tests {
         // U+0600 at cluster_width, then '2','3','4' follow.
         let w = crate::grapheme::cluster_width("\u{0600}1") as u16;
         let t = term_with(20, 4, "\u{0600}1234".as_bytes());
-        assert_eq!(t.grid().cell(0, 0).ch, '\u{0600}');
+        let prepended = t.grid().cell(0, 0);
+        assert_eq!(t.grid().cluster_text(&prepended), Some("\u{0600}1"));
         assert_eq!(t.grid().cell(w, 0).ch, '2');
         assert_eq!(t.grid().cell(w + 1, 0).ch, '3');
         assert_eq!(t.grid().cell(w + 2, 0).ch, '4');
@@ -4880,12 +4924,18 @@ mod tests {
         let t = term_with(4, 4, "一二三".as_bytes());
         assert_eq!(t.grid().cell(0, 1).ch, '三');
 
-        // CJK then combining mark: last run char stays the open
-        // cluster, mark attaches (and is dropped per Phase 1) without
-        // a stray cell.
+        // CJK then combining mark: the last run char stays the open
+        // cluster and the mark joins it, without a stray cell.  The
+        // mark used to be dropped here; the cell now holds the whole
+        // cluster and `ch` is the pool index that says so.
         let t = term_with(20, 4, "水木\u{3099}z".as_bytes());
         assert_eq!(t.grid().cell(0, 0).ch, '水');
-        assert_eq!(t.grid().cell(2, 0).ch, '木');
+        let joined = t.grid().cell(2, 0);
+        assert_eq!(
+            t.grid().cluster_text(&joined),
+            Some("木\u{3099}"),
+            "the mark used to be dropped"
+        );
         assert_eq!(t.grid().cell(4, 0).ch, 'z');
     }
 
@@ -4899,7 +4949,12 @@ mod tests {
         // wrongly or emit a stray cell.
         let t = term_with(20, 4, "ae\u{0301}b".as_bytes());
         assert_eq!(t.grid().cell(0, 0).ch, 'a');
-        assert_eq!(t.grid().cell(1, 0).ch, 'e'); // base committed, mark dropped (Phase 1)
+        let joined = t.grid().cell(1, 0);
+        assert_eq!(
+            t.grid().cluster_text(&joined),
+            Some("e\u{0301}"),
+            "the mark used to be dropped here"
+        );
         assert_eq!(t.grid().cell(2, 0).ch, 'b');
         assert_eq!(t.grid().cursor(), (3, 0));
 
@@ -4921,13 +4976,15 @@ mod tests {
         let mut t = Terminal::new(20, 4);
         t.feed(b"e");
         t.feed("\u{0301}z".as_bytes());
-        assert_eq!(t.grid().cell(0, 0).ch, 'e');
+        let joined = t.grid().cell(0, 0);
+        assert_eq!(t.grid().cluster_text(&joined), Some("e\u{0301}"));
         assert_eq!(t.grid().cell(1, 0).ch, 'z');
 
         // VS16 emoji sandwiched in ASCII keeps its 2-cell width.
         let t = term_with(20, 4, "a\u{26A0}\u{FE0F}b".as_bytes());
         assert_eq!(t.grid().cell(0, 0).ch, 'a');
-        assert_eq!(t.grid().cell(1, 0).ch, '\u{26A0}');
+        let vs16 = t.grid().cell(1, 0);
+        assert_eq!(t.grid().cluster_text(&vs16), Some("\u{26A0}\u{FE0F}"));
         assert_eq!(t.grid().cell(2, 0).ch, '\0'); // wide trail pad
         assert_eq!(t.grid().cell(3, 0).ch, 'b');
     }

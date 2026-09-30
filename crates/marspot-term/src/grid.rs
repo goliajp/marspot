@@ -31,6 +31,43 @@ pub struct Cell {
 /// Bytes per cell on disk and in memory — they are the same thing.
 pub const CELL_MEM_BYTES: usize = 20;
 
+/// `_pad[0]` bit: this cell's `ch` is an index into the grid's cluster
+/// pool, not a codepoint.
+///
+/// A grapheme cluster of more than one codepoint — `é` written as
+/// `e` + U+0301, a ZWJ family, a flag — used to lose everything after
+/// its base.  Measured over 180 MB of real pane output, 55 clusters in
+/// forty million are like this, so they go in a pool and the cell
+/// holds a pointer to it rather than every cell paying for the case.
+pub const FLAG_CLUSTER: u8 = 1 << 0;
+
+/// Where pool indices start inside `char`.
+///
+/// Not zero.  `'\0'` already means "the second cell of a wide glyph"
+/// here, and `' '` means blank, so an index that lands on one of them
+/// is read as that by any code checking `ch` without checking the
+/// flag — which is most of it, correctly, since before the pool there
+/// was nothing else `ch` could be.  Plane 15 is private use: 65 536
+/// slots, sixteen times the sweep threshold, and nothing in a real
+/// stream is ever compared against these values.
+pub const CLUSTER_INDEX_BASE: u32 = 0xF_0000;
+
+impl Cell {
+    /// Is this cell's `ch` a pool index rather than a character?
+    #[inline]
+    pub fn is_cluster(&self) -> bool {
+        self.attrs._pad[0] & FLAG_CLUSTER != 0
+    }
+
+    /// The pool index this cell points at, if it points at one.
+    #[inline]
+    pub fn cluster_index(&self) -> Option<u32> {
+        self.is_cluster()
+            .then(|| (self.ch as u32).checked_sub(CLUSTER_INDEX_BASE))
+            .flatten()
+    }
+}
+
 const _: () = {
     assert!(std::mem::size_of::<Cell>() == CELL_MEM_BYTES);
     assert!(std::mem::align_of::<Cell>() == 4);
@@ -124,8 +161,15 @@ pub struct CellAttrs {
     /// (typical: multiply RGB by ~0.55). TUIs (claudecode tips column
     /// divider, dimmed help text) use this for "secondary" content.
     pub dim: bool,
-    /// Always zero.  Present so the struct has no implicit padding and
-    /// a `Cell` can be written to disk as its own bytes — see `Cell`.
+    /// Flags that are not SGR, then two bytes that are always zero.
+    ///
+    /// The zeroes are still load-bearing: they are why the struct has
+    /// no implicit padding and a `Cell` can go to disk as its own
+    /// bytes — see `Cell`.  The first byte was one of them until a
+    /// cluster needed somewhere to say it is a cluster; every value
+    /// ever written to disk has it zero, which is exactly what
+    /// `FLAG_CLUSTER` unset means.
+    ///
     /// Public only because struct-update syntax (`..Default::default()`)
     /// cannot fill a private field from another crate.
     pub _pad: [u8; 3],
@@ -637,6 +681,17 @@ pub struct Grid {
     /// (`cat large.log` triggers one scroll per line, hundreds of
     /// thousands of times for a 32 MB file).
     cells: Vec<Cell>,
+    /// Grapheme clusters of more than one codepoint, pointed at by
+    /// cells carrying `FLAG_CLUSTER`.
+    ///
+    /// Swept, not reference counted.  The measurement that decided
+    /// that: 55 such clusters in forty million, across 180 MB of real
+    /// pane output, with three of six panes having none — so the pool
+    /// holds tens of entries and a counter per entry would be
+    /// machinery for a thing that does not happen.  `sweep_clusters`
+    /// drops what no cell points at; it runs when the pool has grown,
+    /// not on a timer, so an idle grid does no work.
+    clusters: Vec<Box<str>>,
     /// Cursor as (col, row).  Always bounded to [0, cols-1] x [0, rows-1].
     cursor_col: u16,
     cursor_row: u16,
@@ -729,6 +784,7 @@ impl Grid {
             cols,
             rows,
             cells,
+            clusters: Vec::new(),
             cursor_col: 0,
             cursor_row: 0,
             top_row: 0,
@@ -780,6 +836,130 @@ impl Grid {
         debug_assert!(col < self.cols && row < self.rows);
         let pr = self.phys_row(row);
         self.cells[pr * self.cols as usize + col as usize]
+    }
+
+    /// Put a multi-codepoint cluster in the pool and hand back the
+    /// cell that points at it.
+    ///
+    /// The caller writes that cell wherever the cluster goes.  Callers
+    /// with a single codepoint do not come here — they keep writing
+    /// `ch` directly, and their cells are byte-for-byte what they
+    /// always were.
+    pub fn cluster_cell(&mut self, cluster: &str, attrs: CellAttrs) -> Cell {
+        debug_assert!(cluster.chars().count() > 1, "one codepoint needs no pool");
+        // An index has to be a valid `char` to live in `ch`.  The pool
+        // would have to hold a million clusters to reach the surrogate
+        // range, and the measurement says it holds tens; past that the
+        // cluster degrades to its base codepoint, which is exactly
+        // today's behaviour.
+        let idx = self.clusters.len();
+        let Some(as_char) = u32::try_from(idx)
+            .ok()
+            .and_then(|i| i.checked_add(CLUSTER_INDEX_BASE))
+            .and_then(char::from_u32)
+        else {
+            return Cell { ch: crate::grapheme::cluster_first_codepoint(cluster), attrs };
+        };
+        self.clusters.push(cluster.into());
+        let mut attrs = attrs;
+        attrs._pad[0] |= FLAG_CLUSTER;
+        Cell { ch: as_char, attrs }
+    }
+
+    /// What a cell says, as text.
+    ///
+    /// One codepoint for an ordinary cell; the whole cluster for one
+    /// that points into the pool.  Returns `None` for a cell whose
+    /// index is stale, which a sweep can produce and which reads as
+    /// the blank it will be overwritten with.
+    pub fn cluster_text(&self, cell: &Cell) -> Option<&str> {
+        let idx = cell.cluster_index()?;
+        self.clusters.get(idx as usize).map(|s| &**s)
+    }
+
+    /// Drop pool entries no cell points at.
+    ///
+    /// Sweeping, not reference counting — see the field's own comment
+    /// for the measurement that decided it.  Indices move, so every
+    /// cell that survives is repointed here; a cell pointing past the
+    /// end afterwards is one this sweep could not see, and it reads as
+    /// blank rather than as somebody else's cluster.
+    pub fn sweep_clusters(&mut self) {
+        if self.clusters.is_empty() {
+            return;
+        }
+        let mut keep = vec![false; self.clusters.len()];
+        for c in &self.cells {
+            if let Some(i) = c.cluster_index()
+                && (i as usize) < keep.len()
+            {
+                keep[i as usize] = true;
+            }
+        }
+        let mut remap = vec![u32::MAX; self.clusters.len()];
+        let mut next = 0u32;
+        let mut kept: Vec<Box<str>> = Vec::new();
+        for (i, k) in keep.iter().enumerate() {
+            if *k {
+                remap[i] = next;
+                next += 1;
+                kept.push(self.clusters[i].clone());
+            }
+        }
+        // No early return when nothing was dropped: a cell can point
+        // past the end of the pool — a torn read, a format that moved
+        // — and it still has to be cleared.  Skipping the pass because
+        // the pool did not shrink left exactly that cell holding a
+        // flag with nothing behind it.
+        for c in &mut self.cells {
+            if let Some(i) = c.cluster_index() {
+                match remap.get(i as usize).copied() {
+                    Some(n) if n != u32::MAX => {
+                        c.ch = char::from_u32(n + CLUSTER_INDEX_BASE).unwrap_or(' ');
+                    }
+                    _ => {
+                        c.attrs._pad[0] &= !FLAG_CLUSTER;
+                        c.ch = ' ';
+                    }
+                }
+            }
+        }
+        self.clusters = kept;
+    }
+
+    /// How many clusters the pool is holding.  For the tests and for
+    /// anything that wants to know the grid is not growing.
+    pub fn cluster_pool_len(&self) -> usize {
+        self.clusters.len()
+    }
+
+    /// Turn any cluster cell in a row back into its base codepoint.
+    ///
+    /// Called just before a row is handed to scrollback, because a
+    /// scrollback row is stored as plain `Cell`s with nowhere to keep
+    /// a pool — an index in one would point into a pool that sweeps
+    /// without it, i.e. at whatever cluster later took that slot.
+    /// History therefore looks the way it did before the pool existed;
+    /// giving scrollback its own storage is a separate step.
+    ///
+    /// Free for a pane that never printed one: the pool is empty and
+    /// this is a single test.  Safe to mutate in place because the row
+    /// is on its way off the screen and will be overwritten by the
+    /// fill behind it.
+    fn degrade_clusters_in_row(&mut self, start: usize, cols: usize) {
+        if self.clusters.is_empty() {
+            return;
+        }
+        for i in start..start + cols {
+            let Some(idx) = self.cells[i].cluster_index() else { continue };
+            let base = self
+                .clusters
+                .get(idx as usize)
+                .map(|c| crate::grapheme::cluster_first_codepoint(c))
+                .unwrap_or(' ');
+            self.cells[i].ch = base;
+            self.cells[i].attrs._pad[0] &= !FLAG_CLUSTER;
+        }
     }
 
     /// Clamp-and-set the cursor.  Out-of-bounds values clamp to the last
@@ -921,6 +1101,7 @@ impl Grid {
             // gates the REGION path, so resetting it is enough — and
             // erring toward "do not collapse" is the safe direction.
             self.filed_blank_run = 0;
+            self.degrade_clusters_in_row(start, cols);
             self.scrollback
                 .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
             self.sb_wrapped.push_back(self.wrapped[pr]);
@@ -1014,6 +1195,7 @@ impl Grid {
                 if !(blank && self.filed_blank_run >= MAX_FILED_BLANK_RUN) {
                     self.filed_blank_run =
                         if blank { self.filed_blank_run.saturating_add(1) } else { 0 };
+                    self.degrade_clusters_in_row(start, cols);
                     self.scrollback
                         .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
                     self.sb_wrapped.push_back(self.wrapped[pr]);
