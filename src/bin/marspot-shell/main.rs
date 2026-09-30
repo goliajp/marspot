@@ -1891,6 +1891,10 @@ impl ShellApp {
         // holds a ref so the surfaces stay alive across the gap; the
         // new core's IOSurfaceLookup at boot finds them.  No presenter
         // handshake needed.
+        // A fresh core knows nothing about the panes, so the memo of
+        // what each pane has already been told has to go with the old
+        // one -- see `ShellPluginHost::declared`.
+        self.plugin_host.forget_declarations();
         self.active = match self.spawn_core(front_id, back_id, w_px, h_px, scale) {
             Some(c) => {
                 self.record_core_boot();
@@ -2131,7 +2135,15 @@ impl ShellApp {
             let w_px = s.width();
             let h_px = s.height();
             let scale = ctx.scale();
-            self.active = self.spawn_core(front_id, back_id, w_px, h_px, scale);
+            // A fresh core knows nothing about the panes, so the memo of
+            // what each pane has already been told has to go with the old
+            // one -- see `ShellPluginHost::declared`.
+            self.plugin_host.forget_declarations();
+            // A fresh core knows nothing about the panes, so the memo of
+        // what each pane has already been told has to go with the old
+        // one -- see `ShellPluginHost::declared`.
+        self.plugin_host.forget_declarations();
+        self.active = self.spawn_core(front_id, back_id, w_px, h_px, scale);
             if self.active.is_some() {
                 self.record_core_boot();
                 self.announce_windows_to_new_core(ctx);

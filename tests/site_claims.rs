@@ -423,6 +423,34 @@ fn the_uninstall_removes_every_launch_agent_the_installer_writes() {
     }
 }
 
+/// The third place this got written wrong: the log is not under the
+/// state directory. It moved to where macOS keeps logs, and a stale
+/// empty file was left behind at the old path -- so looking in the
+/// documented place found nothing and read as "logging is broken".
+#[test]
+fn the_readme_names_the_directory_the_log_is_actually_written_to() {
+    const PATHS: &str = include_str!("../crates/marspot-term/src/paths.rs");
+    let literal = "Library/Logs/Marspot";
+    assert!(
+        PATHS.contains(literal),
+        "paths.rs no longer builds the log directory from {literal:?}"
+    );
+    assert!(
+        README.contains(literal),
+        "the README does not name the directory the log is written to"
+    );
+    // And the uninstall has to take it: it is outside the state
+    // directory, so removing that does not remove this.
+    let uninstall = README
+        .split("## Uninstalling")
+        .nth(1)
+        .expect("the README has an uninstall section");
+    assert!(
+        uninstall.contains(literal),
+        "the uninstall leaves the log directory behind"
+    );
+}
+
 #[test]
 fn the_readme_installs_the_app_where_the_installer_puts_it() {
     assert!(

@@ -82,6 +82,22 @@ pub struct PaneSnapshot {
     pub pid_tree: Vec<PtyChild>,
 }
 
+/// The declarations a pane can be given, for the "already told it"
+/// memo.  See `ShellPluginHost::declared`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Decl {
+    RenderMarkup,
+    AgentTui,
+    WheelKeys,
+}
+
+/// What was said, in a form two statements can be compared by.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum DeclValue {
+    Flag(bool),
+    Keys(Vec<u8>),
+}
+
 pub struct ShellPluginHost {
     /// Live during a session.  Resized when L2 core reports a new
     /// pane count.  Index is the L2 pane index (1-based to plugins?
@@ -118,6 +134,23 @@ pub struct ShellPluginHost {
     /// Where a submitted PTY operation goes.  The queue itself lives in
     /// the main loop — see `PtyOpRequest`.
     pty_op_tx: Mutex<Option<Sender<PtyOpRequest>>>,
+    /// What each pane was last told, so telling it again is free.
+    ///
+    /// A declaration is idempotent by nature -- "this pane holds an
+    /// agent TUI", "do not read markup here" -- and a plugin that
+    /// re-states it every tick is not wrong, it is being explicit
+    /// about state an older supervisor may have left in the core.  But
+    /// each re-statement travelled the whole way to L3 and wrote a log
+    /// line, and one plugin doing it every two seconds for two panes
+    /// came to **78% of every line in the log** (23331 of the last
+    /// 30000, measured 2026-10-01) -- burying the events anyone would
+    /// actually look for under four parts noise to one.
+    ///
+    /// So a repeat of what a pane was already told is dropped, and the
+    /// memo is forgotten whenever the core is replaced: a fresh core
+    /// knows nothing, and the next re-statement is the one that tells
+    /// it.  That is the case the plugins re-state *for*.
+    declared: Mutex<std::collections::HashMap<(u64, Decl), DeclValue>>,
     /// Knock on the supervisor after queueing something for it.
     ///
     /// The channels below are drained on the supervisor's tick, so
@@ -233,6 +266,7 @@ impl ShellPluginHost {
             pane_session_begin_tx: Mutex::new(None),
             inject_input_tx: Mutex::new(None),
             pty_op_tx: Mutex::new(None),
+            declared: Mutex::new(std::collections::HashMap::new()),
             wake: Mutex::new(None),
             pane_activity_tx: Mutex::new(None),
         }
@@ -273,6 +307,24 @@ impl ShellPluginHost {
 
     /// Wire the channel the shell main loop drains for cc-driven
     /// PTY inject requests.  Called once during shell startup.
+    /// Drop the memo of what each pane has been told.  Call whenever
+    /// the core is replaced -- see the `declared` field.
+    pub fn forget_declarations(&self) {
+        self.declared.lock().unwrap().clear();
+    }
+
+    /// True when this is news.  Records it either way.
+    fn is_news(&self, sid: u64, what: Decl, value: DeclValue) -> bool {
+        let mut d = self.declared.lock().unwrap();
+        match d.get(&(sid, what)) {
+            Some(prev) if *prev == value => false,
+            _ => {
+                d.insert((sid, what), value);
+                true
+            }
+        }
+    }
+
     /// Install the knock.  See the `wake` field.
     pub fn attach_wake(&self, wake: std::sync::Arc<dyn Fn() + Send + Sync>) {
         *self.wake.lock().unwrap() = Some(wake);
@@ -485,6 +537,9 @@ impl PluginHost for ShellPluginHost {
         on: bool,
     ) -> Result<(), PluginError> {
         self.require(PermissionSet::SET_STATUS_LINE)?;
+        if !self.is_news(shelld_session_id, Decl::RenderMarkup, DeclValue::Flag(on)) {
+            return Ok(());
+        }
         let Some(tx) = self.pane_render_markup_tx.lock().unwrap().clone() else {
             return Ok(());
         };
@@ -499,6 +554,9 @@ impl PluginHost for ShellPluginHost {
         on: bool,
     ) -> Result<(), PluginError> {
         self.require(PermissionSet::SET_STATUS_LINE)?;
+        if !self.is_news(shelld_session_id, Decl::AgentTui, DeclValue::Flag(on)) {
+            return Ok(());
+        }
         let Some(tx) = self.pane_agent_tui_tx.lock().unwrap().clone() else {
             return Ok(());
         };
@@ -516,6 +574,14 @@ impl PluginHost for ShellPluginHost {
         marker: &[u8],
     ) -> Result<(), PluginError> {
         self.require(PermissionSet::SET_STATUS_LINE)?;
+        let mut keys = Vec::with_capacity(enter.len() + up.len() + down.len() + marker.len() + 4);
+        for part in [enter, up, down, marker] {
+            keys.extend_from_slice(part);
+            keys.push(0xff); // a separator no key sequence contains
+        }
+        if !self.is_news(shelld_session_id, Decl::WheelKeys, DeclValue::Keys(keys)) {
+            return Ok(());
+        }
         // No L2 wired (standalone host, e.g. tests); drop silently.
         // A real shell always has this attached before plugins tick,
         // and remembers what it forwarded — see `pane_wheel_keys` in
@@ -674,5 +740,79 @@ mod knock_tests {
         host.set_active_plugin("t", PermissionSet::SET_STATUS_LINE);
         host.submit_pty_op(7, crate::plugins::pty_op::PtyOp::new("t"))
             .expect("queued without a hook");
+    }
+}
+
+#[cfg(test)]
+mod declaration_tests {
+    use super::*;
+
+    fn wired() -> (ShellPluginHost, std::sync::mpsc::Receiver<PaneRenderMarkupUpdate>) {
+        let host = ShellPluginHost::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        host.attach_pane_render_markup_tx(tx);
+        host.set_active_plugin("t", PermissionSet::SET_STATUS_LINE);
+        (host, rx)
+    }
+
+    /// A plugin restating what it already said is not wrong -- it is
+    /// being explicit about state an older supervisor may have left
+    /// behind -- but it should cost nothing. One plugin doing it every
+    /// two seconds was 78% of every line in the log.
+    #[test]
+    fn saying_the_same_thing_again_sends_nothing() {
+        let (host, rx) = wired();
+        host.set_pane_render_markup(7, false).unwrap();
+        host.set_pane_render_markup(7, false).unwrap();
+        host.set_pane_render_markup(7, false).unwrap();
+        assert!(rx.try_recv().is_ok(), "the first one goes");
+        assert!(rx.try_recv().is_err(), "and the repeats do not");
+    }
+
+    #[test]
+    fn changing_it_back_is_news_again() {
+        let (host, rx) = wired();
+        host.set_pane_render_markup(7, false).unwrap();
+        host.set_pane_render_markup(7, true).unwrap();
+        host.set_pane_render_markup(7, false).unwrap();
+        assert_eq!(rx.try_iter().count(), 3);
+    }
+
+    #[test]
+    fn panes_are_remembered_apart() {
+        let (host, rx) = wired();
+        host.set_pane_render_markup(7, false).unwrap();
+        host.set_pane_render_markup(8, false).unwrap();
+        assert_eq!(rx.try_iter().count(), 2);
+    }
+
+    /// The case the plugins restate *for*: a core that was replaced
+    /// knows nothing, and the next restatement is what tells it.
+    #[test]
+    fn a_new_core_has_to_be_told_everything_again() {
+        let (host, rx) = wired();
+        host.set_pane_render_markup(7, false).unwrap();
+        assert_eq!(rx.try_iter().count(), 1);
+
+        host.forget_declarations();
+        host.set_pane_render_markup(7, false).unwrap();
+        assert_eq!(rx.try_iter().count(), 1, "the same words, to a core that has not heard them");
+    }
+
+    #[test]
+    fn wheel_keys_compare_by_what_they_are() {
+        let host = ShellPluginHost::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        host.attach_pane_wheel_keys_tx(tx);
+        host.set_active_plugin("t", PermissionSet::SET_STATUS_LINE);
+
+        host.set_pane_wheel_keys(7, b"a", b"b", b"c", b"d").unwrap();
+        host.set_pane_wheel_keys(7, b"a", b"b", b"c", b"d").unwrap();
+        assert_eq!(rx.try_iter().count(), 1);
+
+        // The separator is what keeps a shift across the four fields
+        // from reading as the same declaration.
+        host.set_pane_wheel_keys(7, b"ab", b"", b"c", b"d").unwrap();
+        assert_eq!(rx.try_iter().count(), 1, "different fields, different declaration");
     }
 }
