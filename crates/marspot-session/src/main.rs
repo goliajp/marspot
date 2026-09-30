@@ -37,7 +37,8 @@ use marspot_term::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
 use marspot_term::grid_shm::{
     GridShmWriter, ENV_SHM_FD, FLAG_ALT_SCROLL, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE,
     FLAG_CURSOR_VISIBLE,
-    FLAG_ALT_SCREEN, FLAG_MOUSE_SGR, FLAG_MOUSE_TRACKING,
+    FLAG_ALT_SCREEN, FLAG_MOUSE_ANY_MOTION, FLAG_MOUSE_DRAG, FLAG_MOUSE_SGR,
+    FLAG_MOUSE_TRACKING,
 };
 use marspot_term::input_core::{MarspotKeyEvent, Modifiers};
 use marspot_term::render::grid_selection_text;
@@ -706,6 +707,13 @@ fn publish(shm: &mut GridShmWriter, session: &SessionImpl, view_offset: u16) -> 
     }
     if term.mouse_sgr_encoding() {
         flags |= FLAG_MOUSE_SGR;
+    }
+    match term.mouse_tracking_mode() {
+        marspot_term::terminal::MouseTrackingMode::ButtonEvent => flags |= FLAG_MOUSE_DRAG,
+        marspot_term::terminal::MouseTrackingMode::AnyEvent => {
+            flags |= FLAG_MOUSE_DRAG | FLAG_MOUSE_ANY_MOTION
+        }
+        _ => {}
     }
     if term.in_alt_screen() {
         flags |= FLAG_ALT_SCREEN;

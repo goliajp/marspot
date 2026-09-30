@@ -88,8 +88,6 @@ Honest list, because you will hit these in the first hour:
 
 - One cell holds one code point, so combining marks, ZWJ emoji and flag
   sequences collapse to their first code point.
-- Mouse reporting covers the wheel and button presses; motion and drag
-  do not reach the program in the pane.
 - No OSC 8 (hyperlinks), OSC 7 (working directory) or OSC 133 (prompt
   marks).  OSC 52 puts text on the clipboard; reading it back is
   refused on purpose, because answering hands any program that can
