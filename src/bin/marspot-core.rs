@@ -2347,6 +2347,76 @@ mod boot_assembly_tests {
         panic!("the shell never reported /usr/lib; still {:?}", live_cwd_of(sid));
     }
 
+    /// OSC 52 travels from the program to the Mac's pasteboard.
+    ///
+    /// Three processes are involved and only the last one can touch a
+    /// pasteboard: the program writes the escape, L3 parses it and
+    /// has no AppKit, L2 receives the frame and writes it.  The unit
+    /// tests cover the parse; this covers the journey, by putting a
+    /// value on the real pasteboard through a real shell and reading
+    /// it back.
+    #[test]
+    fn osc52_reaches_the_pasteboard_from_a_real_shell() {
+        let _sb = Sandbox::new("mosc52");
+        let (tx, _rx) = mpsc::channel();
+        let sid = reg::allocate_next_session_id().unwrap();
+        let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
+            .expect("real L3 spawn (is marspot-session built?)");
+
+        // Something no other test or person would have copied.
+        let token = format!("marspot-osc52-{}", std::process::id());
+        let b64 = {
+            const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let src = token.as_bytes();
+            let mut out = String::new();
+            for c in src.chunks(3) {
+                let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+                let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+                for i in 0..4 {
+                    if i <= c.len() {
+                        out.push(A[((n >> (18 - 6 * i)) & 0x3f) as usize] as char);
+                    } else {
+                        out.push('=');
+                    }
+                }
+            }
+            out
+        };
+        // The encoder above is the test's own; the decoder under test
+        // is the one in the terminal.  Check they agree before relying
+        // on it, or a broken encoder would read as a broken journey.
+        assert_eq!(
+            marspot_term::base64::decode(b64.as_bytes(), 4096).unwrap(),
+            token.as_bytes(),
+            "the test's encoder and the terminal's decoder disagree"
+        );
+
+        let before = marspot::input::read_clipboard_text();
+        assert_ne!(before.as_deref(), Some(token.as_str()), "the token is already there");
+
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut sent = false;
+        while std::time::Instant::now() < deadline {
+            if !sent {
+                pane.session_mut().forward_inject_input(
+                    format!("printf '\\033]52;c;{b64}\\007'\r").as_bytes(),
+                );
+                sent = true;
+            }
+            pane.pump();
+            if marspot::input::read_clipboard_text().as_deref() == Some(token.as_str()) {
+                // Put back whatever the person had.
+                if let Some(prev) = before {
+                    marspot::input::write_clipboard_text(&prev);
+                }
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("the clipboard never got {token:?}");
+    }
+
     /// A click reaches the program, on a real PTY.
     ///
     /// The encoding is unit-tested; this is the other half — that a
@@ -3031,6 +3101,17 @@ fn l3_reader_loop(
                 MsgType::GridReady => {
                     if tx.send(CoreEvent::L3Ready).is_err() {
                         return;
+                    }
+                }
+                // OSC 52 — a program in this pane asked for text to go
+                // on the clipboard.  L3 has no AppKit, so it travels
+                // here.  Written straight from the reader thread: the
+                // pasteboard is a system-wide object with its own
+                // lock, not window state, and routing it through the
+                // event loop would make a yank wait on a redraw.
+                MsgType::PaneClipboardWrite => {
+                    if let Ok(text) = std::str::from_utf8(&f.payload) {
+                        marspot::input::write_clipboard_text(text);
                     }
                 }
                 // Reply to a Cmd-C `GetSelectionText`: hand it to whoever is

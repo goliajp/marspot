@@ -90,8 +90,10 @@ Honest list, because you will hit these in the first hour:
   sequences collapse to their first code point.
 - Mouse reporting covers the wheel and button presses; motion and drag
   do not reach the program in the pane.
-- No OSC 8 (hyperlinks), OSC 52 (clipboard), OSC 7 (working directory)
-  or OSC 133 (prompt marks).
+- No OSC 8 (hyperlinks), OSC 7 (working directory) or OSC 133 (prompt
+  marks).  OSC 52 puts text on the clipboard; reading it back is
+  refused on purpose, because answering hands any program that can
+  write to the pty whatever you last copied.
 - `ESC ( 0` line drawing is not translated, so `dialog`-style TUIs draw
   letters instead of box characters.
 - There is no terminfo entry of its own; `TERM` is set to

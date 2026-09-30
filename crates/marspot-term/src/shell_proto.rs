@@ -528,6 +528,14 @@ pub enum MsgType {
     /// while the three unwrapped ones beside it still were).  Named
     /// directly and re-issued every tick, a swap costs one tick.
     PaneAgentTui = 82,
+    /// L3 → L2: text a program asked to put on the clipboard with
+    /// OSC 52.  Payload is the decoded UTF-8, already size-capped by
+    /// the terminal that parsed it.
+    ///
+    /// It has to travel: the pasteboard is AppKit, and L3 is the
+    /// process that has no window.  Older images skip the unknown
+    /// msg_type, which costs a clipboard write and nothing else.
+    PaneClipboardWrite = 83,
     /// Put this pane's pen back to plain — what `reset` does, for a
     /// pane whose program is never going to send one.
     ///
@@ -610,6 +618,7 @@ impl MsgType {
             80 => MsgType::PaneRenderMarkup,
             81 => MsgType::PaneResetAttrs,
             82 => MsgType::PaneAgentTui,
+            83 => MsgType::PaneClipboardWrite,
             200 => MsgType::Error,
             _ => return None,
         })

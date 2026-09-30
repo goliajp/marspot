@@ -13,6 +13,7 @@
 //! paths keep resolving.
 
 pub mod async_writer;
+pub mod base64;
 pub mod binary_tree;
 pub mod bytelog;
 pub mod emoji_presentation;

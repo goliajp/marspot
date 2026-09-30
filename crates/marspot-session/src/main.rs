@@ -1104,6 +1104,16 @@ fn publish_and_poke(
     blank_gate: &mut BlankGate,
     mut poke: Option<&mut ControlWriter>,
 ) {
+    // A clipboard write goes out before any of the gates below.  It
+    // is not a frame and it is not about the grid: a program that
+    // yanked something should not have to wait for a redraw, and the
+    // sync-output gate can withhold one indefinitely.
+    if let Some(text) = session.terminal_mut().take_osc_clipboard()
+        && let Some(w) = poke.as_deref_mut()
+    {
+        let _ = w.send(Frame::new(MsgType::PaneClipboardWrite, text.into_bytes()));
+    }
+
     // Withheld frames are not lost: the bytes are already in the grid,
     // and the publish that follows the closing `l` carries all of them
     // at once — which is the whole point of the mode.

@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.186"  # the return waits for the repaint to finish
-core    = "0.12.229"  # a new pane opens where you were
-session = "0.11.107"  # colon sub-parameters
+core    = "0.12.230"  # OSC 52 reaches the pasteboard
+session = "0.11.108"  # OSC 52

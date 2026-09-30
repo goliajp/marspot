@@ -91,6 +91,14 @@ pub enum MouseTrackingMode {
     AnyEvent,
 }
 
+/// The most a program may put on the clipboard in one OSC 52.
+///
+/// 64 KiB is more than any yank and far less than a pty can be made
+/// to carry.  A payload over it is dropped whole rather than
+/// truncated: half of what was copied is worse than none of it,
+/// because nothing tells the user which half.
+const OSC52_MAX: usize = 64 * 1024;
+
 /// What marspot answers DA1 (and DECID) with: VT220-class with
 /// selective attributes — 1 = 132-column mode, 6 = selective erase,
 /// 22 = colour text, the same shape xterm reports.  A program that
@@ -265,6 +273,9 @@ pub struct Terminal {
     /// collapsed — and the kernel does not help: a pseudo-terminal
     /// leaves `OXTABS` off, so the tab arrives verbatim.
     tabs: crate::tabs::TabStops,
+    /// Text a program asked to put on the clipboard with OSC 52,
+    /// waiting for whoever owns the pasteboard to collect it.
+    osc_clipboard: Option<String>,
     /// Rollbacks in a row.  A program that draws its own input
     /// somewhere else — codex, and any full-screen TUI that skips the
     /// alternate screen — never confirms a prediction, so the guess
@@ -542,6 +553,7 @@ impl Terminal {
             mouse_sgr_encoding: false,
             pending_wrap: false,
             tabs: crate::tabs::TabStops::new(cols),
+            osc_clipboard: None,
             predict_misses: 0,
             predict_declined: 0,
             predictions: VecDeque::new(),
@@ -750,6 +762,16 @@ impl Terminal {
         // it (measured 2026-09-06 on a pane left underlined by a bug
         // of mine: 300 KB of output, not one reset in it).
         self.attrs = CellAttrs::default();
+    }
+
+    /// Take whatever a program asked to put on the clipboard.
+    ///
+    /// The terminal cannot reach a pasteboard — it does not know
+    /// there is one — so it holds the text until the layer that can
+    /// comes to collect it.  Taking it clears it: a clipboard write
+    /// happens once.
+    pub fn take_osc_clipboard(&mut self) -> Option<String> {
+        self.osc_clipboard.take()
     }
 
     /// Forget that anything asked for mouse reports.
@@ -1071,6 +1093,7 @@ impl Terminal {
             let cluster_anchor = &mut self.cluster_anchor;
             let grapheme_cursor = &mut self.grapheme_cursor;
             let seg_synced = &mut self.seg_synced;
+            let osc_clipboard = &mut self.osc_clipboard;
             let mut handler = Handler {
                 grid,
                 saved_main,
@@ -1099,6 +1122,7 @@ impl Terminal {
                 mouse_sgr_encoding,
                 pending_wrap,
                 tabs,
+                osc_clipboard,
                 cluster_buf,
                 cluster_fast,
                 cluster_anchor,
@@ -2306,6 +2330,7 @@ struct Handler<'a> {
     mouse_sgr_encoding: &'a mut bool,
     pending_wrap: &'a mut bool,
     tabs: &'a mut crate::tabs::TabStops,
+    osc_clipboard: &'a mut Option<String>,
     cluster_buf: &'a mut String,
     /// See `Terminal::cluster_fast`.
     cluster_fast: &'a mut Option<(char, u8)>,
@@ -3979,6 +4004,31 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 let reply = format!("\x1b]{n};{}\x07", crate::palette::xterm_rgb(c));
                 self.pending_response.extend_from_slice(reply.as_bytes());
                 self.record_response("OSC-COLOR");
+            }
+            // OSC 52 — a program putting something on the clipboard.
+            //
+            // `52 ; <targets> ; <base64>`.  This is how yanking in vim
+            // over ssh reaches the Mac's pasteboard, and it is the one
+            // thing a terminal can do for a remote editor that nothing
+            // else can.
+            //
+            // The read form (`52 ; c ; ?`) is refused, deliberately and
+            // silently.  Answering it hands any program that can write
+            // to this pty whatever the user last copied — a password,
+            // a token — and no program needs that to do its job.  A
+            // terminal that stays quiet is read as one without the
+            // feature, which is the right amount of information.
+            Some(52) => {
+                let payload = match rest.iter().position(|&b| b == b';') {
+                    Some(i) => &rest[i + 1..],
+                    None => &rest[rest.len()..],
+                };
+                if payload != b"?"
+                    && let Some(bytes) = crate::base64::decode(payload, OSC52_MAX)
+                    && let Ok(text) = String::from_utf8(bytes)
+                {
+                    *self.osc_clipboard = Some(text);
+                }
             }
             // OSC 4 — one or more palette entries: `4 ; n ; ? ; n ; ?`.
             // vim and tmux read these to decide what they can draw
