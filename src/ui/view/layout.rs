@@ -191,9 +191,17 @@ pub struct EdgesPhys {
 /// The Monaco / mono path's metrics are constant for the run so we
 /// derive them from `LayoutCtx.cell_w_phys` / `cell_h_phys`; the
 /// SF Pro / proportional path's depend on weight + opts + actual
-/// string, so layout has to query.  Renderer impl reaches into
-/// `FontCache::shape_ui_weighted_opts` (Phase 3 cache) which makes
-/// these queries free after first warm-up.
+/// string, so layout has to query.
+///
+/// Those queries are NOT free.  This said they were — that the
+/// renderer's impl reaches the shaping cache and warms up — and it
+/// does not: `ChromeMeasure::advance_phys` lands in
+/// `FontCache::measure_ui_text_at_size`, which interns a font variant
+/// and calls `font_shape::measure_line` for a fresh CoreText line,
+/// every call (`font_cache.rs:546-560`).  Even the cache it was
+/// naming allocates on a hit, because the lookup key owns its text
+/// (`font_shape.rs:347`).  Measured 2026-09-30: one build of the dev
+/// panel's tree costs 458 allocations for 45 primitives.
 pub trait FontMetricsProvider {
     /// Line height in physical pixels for one row of this font /
     /// size.  Independent of content; cached per `font` variant by
