@@ -398,13 +398,26 @@ pub(crate) fn retryable_error_kind(buf: &[u8]) -> Option<&'static str> {
 
 
 /// What has been spent on one stranded pane.
-#[derive(Default, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct Stranding {
     /// Moves made while this pane has been continuously refused.
     moves: u8,
     /// Where the last one was aimed, so a move that has not taken
     /// effect yet is not made twice.
     last_target: Option<u8>,
+    /// When the pane was first seen stuck on an account that is out.
+    since: Instant,
+    /// Whether the reason for holding has already been said once.  A
+    /// hold is a steady state, and the sweep runs every two seconds:
+    /// without this, one held pane wrote 170 identical lines
+    /// (2026-09-29, sid 430).
+    hold_logged: bool,
+}
+
+impl Default for Stranding {
+    fn default() -> Self {
+        Self { moves: 0, last_target: None, since: Instant::now(), hold_logged: false }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1320,37 +1333,41 @@ impl ClaudecodePlugin {
         meta: BindMeta,
         result: &ScanResult,
     ) {
-        // Two questions, both answered from structure rather than from
-        // anything printed on a screen.
+        // One question, answered from structure: is a command of the
+        // user's running on this machine right now — then leave the
+        // pane alone until it finishes, because moving kills the
+        // process and takes the command with it.
         //
-        // Is a command of the user's running on this machine right now
-        // — then leave the pane alone until it finishes.  And did this
-        // pane look busy at all: its own turn unfinished, or background
-        // agents alive under it.  The first comes from the transcript's
-        // last record, which is what the pane state machine has always
-        // read; the second from the process tree.  Neither is proof —
-        // both are a snapshot that can be a moment old — so a pane that
-        // looked busy is asked to carry on *if* something was cut off,
-        // and one that was waiting for its person is moved in silence.
+        // There used to be a second question — was this pane working,
+        // so should it be told to carry on.  It is gone, and the
+        // sentence now goes to every pane that is moved.  The reading
+        // was wrong half the time in the direction that costs the
+        // most: of six panes moved in silence on 2026-09-30, three had
+        // a turn killed mid-flight by the very refusal that triggered
+        // the move.  They look idle because they are: the CLI printed
+        // its error, closed the turn, and the transcript's last record
+        // is a finished one.  Nothing in the structure separates
+        // "finished" from "cut off" after the fact.
+        //
+        // Saying it to a pane that really was idle costs one line,
+        // which is what the sentence is worded for — it asks the
+        // session to continue *if* something was interrupted.
         let activity = result.new_activity.get(&sid);
         let tool_executing = matches!(activity, Some(CcActivity::ToolPending { executing: true }));
-        let has_agents = result.new_vetoes.get(&sid).map(|v| v.0).unwrap_or(false);
-        let looked_busy = has_agents
-            || matches!(
-                activity,
-                Some(CcActivity::Working) | Some(CcActivity::ToolPending { .. })
-            );
         let decision = quota::next_move(&quota::Situation {
             rooms,
             current: meta.profile_num,
             tool_executing,
             moves_this_episode: self.stranded.get(&sid).map(|s| s.moves).unwrap_or(0),
             last_target: self.stranded.get(&sid).and_then(|s| s.last_target),
+            stranded_for: self.stranded.get(&sid).map(|s| s.since.elapsed()),
             since_last_move: self.moved_at.get(&sid).map(|at| at.elapsed()),
         });
         match decision {
             quota::Move::Hold(why) => {
-                if self.stranded.get(&sid).map(|s| s.moves).unwrap_or(0) == 0 {
+                let tally = self.stranded.entry(sid).or_default();
+                if !tally.hold_logged {
+                    tally.hold_logged = true;
                     host.log(
                         LogLevel::Info,
                         "quota.hold",
@@ -1362,13 +1379,9 @@ impl ClaudecodePlugin {
                 host.log(
                     LogLevel::Info,
                     "quota.moving",
-                    &format!(
-                        "sid={sid} P{} → P{target} ({})",
-                        meta.profile_num,
-                        if looked_busy { "looked busy — will ask it to carry on" } else { "idle" }
-                    ),
+                    &format!("sid={sid} P{} → P{target}", meta.profile_num),
                 );
-                if self.start_profile_cycle_to(host, sid, meta, target, looked_busy) {
+                if self.start_profile_cycle_to(host, sid, meta, target, true) {
                     self.moved_at.insert(sid, Instant::now());
                     let tally = self.stranded.entry(sid).or_default();
                     tally.moves += 1;
@@ -2806,7 +2819,9 @@ mod tests {
         let host = FakeHost::new(home.join("state"));
         let sid = 77u64;
         let mut plugin = stranded_plugin(pane_on_p1(&home, "u-77"), sid);
-        // Waiting for its person: moved, but not spoken to.
+        // Waiting for its person as far as the transcript can tell —
+        // which is also what a turn the account just killed looks
+        // like, so it is spoken to all the same.
         let result = scan_of(sid, CcActivity::AwaitingUser);
         plugin.sweep_unusable_profiles(&host, &result);
 
@@ -2815,8 +2830,10 @@ mod tests {
         assert_eq!(handed[0].0, sid);
         assert!(handed[0].1.contains(&"resume"), "{:?}", handed[0].1);
         assert!(
-            !handed[0].1.contains(&"say_continue"),
-            "an idle pane is moved in silence: {:?}",
+            handed[0].1.contains(&"say_continue"),
+            "every moved pane is asked to carry on — the reading of \"idle\" was \
+             wrong for three of six panes on 2026-09-30, and the sentence is \
+             conditional so that being wrong costs a line: {:?}",
             handed[0].1
         );
 
@@ -2841,7 +2858,9 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
-    /// The same pane, but a turn was in flight: it is told to carry on.
+    /// A turn visibly in flight gets the same treatment — the point of
+    /// this one is that nothing about the wiring depends on which of
+    /// the two readings the transcript gave.
     #[test]
     fn a_pane_that_was_working_is_told_to_carry_on() {
         let home = quota_home("say");

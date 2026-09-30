@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.176"  # a spent window is out, whatever the status says
+shell   = "0.7.177"  # every moved pane is asked to carry on
 core    = "0.12.218"  # dev builds stop piling up .o files on macOS
 session = "0.11.102"  # build.rs only watches git paths that exist
