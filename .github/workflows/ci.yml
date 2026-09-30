@@ -72,9 +72,24 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Built from source once and kept, because the alternative is a
+      # third-party action fetching binaries into a signing job.
+      - name: Cache dependency-policy tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/bin/cargo-deny
+            ~/.cargo/bin/cargo-machete
+          key: ${{ matrix.os }}-deptools-1
+
       - name: Dependency policy
         # Every non-FFI dependency carries a written reason next to it.
-        run: bin/lint-deps.sh
+        run: |
+          for t in cargo-audit cargo-deny cargo-machete; do
+            [[ -x "$HOME/.cargo/bin/$t" ]] || cargo install --locked "$t"
+          done
+          bin/lint-deps.sh
 
       - name: The app bundle assembles
         run: |
