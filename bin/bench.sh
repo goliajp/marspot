@@ -376,7 +376,7 @@ baseline_path, cur_dir, mode, update_str = sys.argv[1:5]
 do_update = update_str == "1"
 
 baseline = json.load(open(baseline_path))
-results = {"pass": [], "fail": [], "current": {}}
+results = {"pass": [], "fail": [], "current": {}, "inconclusive": set()}
 
 def block_load1(name):
     """Host load while a block ran, or -1 when it was not recorded
@@ -396,13 +396,33 @@ def load_parse_file(scenario):
     if not os.path.exists(p): return None
     samples = sorted(int(x) for x in open(p).read().split() if x.strip())
     if not samples: return None
+    _remember(f"parse-file {scenario:10}", samples, 1 / 1024 / 1024)
     return samples[len(samples) // 2] / 1024 / 1024
+
+# What each metric's trials actually spanned this run.
+#
+# Every number in the table below is the median of five trials and the
+# other four were thrown away with the temp directory. So a run that
+# read 33.6 against a floor of 35.0 could not say whether that was a
+# regression or the machine, and the only way to find out was to run it
+# again -- three times, on 2026-10-01, before the answer came back
+# "the machine". The spread was measured each time and discarded each
+# time.
+#
+# Keyed by the same label `check` is given.
+SPREADS = {}
+
+def _remember(label, samples, scale=1.0):
+    if not samples:
+        return
+    SPREADS[label] = (min(samples) * scale, max(samples) * scale)
 
 def load_parse(scenario):
     p = os.path.join(cur_dir, f"parse-{scenario}.samples")
     if not os.path.exists(p): return None
     samples = sorted(int(x) for x in open(p).read().split() if x.strip())
     if not samples: return None
+    _remember(f"parse {scenario:10}", samples, 1 / 1024 / 1024)
     median = samples[len(samples) // 2]
     return median / 1024 / 1024  # MB/s
 
@@ -411,6 +431,7 @@ def load_render():
     if not os.path.exists(p): return None
     samples = sorted(int(x) for x in open(p).read().split() if x.strip())
     if not samples: return None
+    _remember("render p99 (µs)", samples, 1 / 1000.0)
     return {"p99_ns": samples[len(samples) // 2]}
 
 def load_scroll():
@@ -418,6 +439,7 @@ def load_scroll():
     if not os.path.exists(p): return None
     samples = sorted(int(x) for x in open(p).read().split() if x.strip())
     if not samples: return None
+    _remember("scroll p99 (µs)", samples, 1 / 1000.0)
     return {"p99_ns": samples[len(samples) // 2]}
 
 def load_scroll_cold():
@@ -425,6 +447,7 @@ def load_scroll_cold():
     if not os.path.exists(p): return None
     samples = sorted(int(x) for x in open(p).read().split() if x.strip())
     if not samples: return None
+    _remember("scroll-cold p99 (µs)", samples, 1 / 1000.0)
     return {"p99_ns": samples[len(samples) // 2]}
 
 _L3_THROUGHPUT = None
@@ -538,6 +561,12 @@ def check(label, current, floor, lower_better=False):
     bucket = "pass" if ok else "fail"
     results[bucket].append((bucket, label, current, floor))
     results["current"][label] = current
+    # A failure the run's own trials cannot distinguish from a pass is
+    # not a finding. If the floor sits inside what the five trials
+    # spanned, this run measured both sides of it.
+    lo, hi = SPREADS.get(label, (None, None))
+    if not ok and lo is not None and lo <= floor <= hi:
+        results["inconclusive"].add(label)
 
 def fmt_num(n):
     if n is None: return "-"
@@ -667,6 +696,7 @@ for bin_name, ceiling in baseline.get("memory_idle_kb_max", {}).items():
     if not samples:
         continue
     median = samples[len(samples) // 2]
+    _remember(f"rss  {bin_name:6} (KiB)", samples)
     check(f"rss  {bin_name:6} (KiB)", median, ceiling, lower_better=True)
 
 # Multi-session vs-best-other ratio gate (the structural protection
@@ -737,7 +767,7 @@ if multi_cfg and mode == "full":
 
 # Print
 print()
-header = f"{'metric':<24} {'current':>10} {'floor':>10}   {'verdict'}"
+header = f"{'metric':<24} {'current':>10} {'floor':>10} {'trials':>17}   {'verdict'}"
 print(header)
 print("-" * len(header))
 all_rows = results["pass"] + results["fail"]
@@ -745,14 +775,30 @@ for verdict, label, current, floor in all_rows:
     cur_s = fmt_num(current)
     floor_s = fmt_num(floor)
     verdict_s = {"pass": "✓ pass", "fail": "✗ FAIL", "skip": "- skip"}[verdict]
-    print(f"{label:<24} {cur_s:>10} {floor_s:>10}   {verdict_s}")
+    lo, hi = SPREADS.get(label, (None, None))
+    span = f"{lo:.1f}-{hi:.1f}" if lo is not None else ""
+    if label in results["inconclusive"]:
+        verdict_s = "? UNSURE"
+    print(f"{label:<24} {cur_s:>10} {floor_s:>10} {span:>17}   {verdict_s}")
 print()
 
 n_fail = len(results["fail"])
+n_unsure = len(results["inconclusive"])
+n_real = n_fail - n_unsure
 if n_fail == 0:
     print(f"GATE PASSED ({len(results['pass'])} checks)")
+elif n_real == 0:
+    print(
+        f"GATE INCONCLUSIVE ({n_unsure} of {len(results['pass']) + n_fail} checks read "
+        f"below the floor, and each one's five trials span the floor -- this run "
+        f"measured both sides of it. Re-run on a quiet machine.)"
+    )
 else:
-    print(f"GATE FAILED ({n_fail} regression(s) of {len(results['pass']) + n_fail} checks)")
+    extra = f", {n_unsure} inconclusive" if n_unsure else ""
+    print(
+        f"GATE FAILED ({n_real} regression(s){extra} of "
+        f"{len(results['pass']) + n_fail} checks)"
+    )
 
 if do_update:
     if n_fail > 0:
