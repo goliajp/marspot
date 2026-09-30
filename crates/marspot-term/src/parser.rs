@@ -28,7 +28,11 @@ pub trait ParserCallbacks {
     fn print(&mut self, ch: char);
     fn execute(&mut self, byte: u8);
     fn esc_dispatch(&mut self, intermediates: &[u8], byte: u8);
-    fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], byte: u8);
+    /// `subs[i]` is true when parameter `i` arrived after a colon and
+    /// therefore continues the group that started at the last `false`.
+    /// A sequence with no colons in it has every entry false, which is
+    /// every sequence this terminal saw before colons were accepted.
+    fn csi_dispatch(&mut self, params: &[u16], subs: &[bool], intermediates: &[u8], byte: u8);
     /// `data` is the raw OSC payload (between `ESC ]` and the terminator).
     /// Caller splits on `;` if needed; we don't pre-parse to avoid lifetime
     /// noise in the trait.
@@ -56,6 +60,11 @@ pub struct Parser {
     intermediates: [u8; MAX_INTERMEDIATES],
     intermediates_len: usize,
     params: [u16; MAX_PARAMS],
+    /// Which parameters are sub-parameters of the one before them.
+    subs: [bool; MAX_PARAMS],
+    /// Set when a colon has been seen and the next committed parameter
+    /// belongs to the group in progress.
+    next_is_sub: bool,
     params_len: usize,
     /// In-progress numeric parameter accumulation.  u32 lets us detect
     /// overflow before clamping to u16 on commit.
@@ -82,6 +91,8 @@ impl Parser {
             intermediates: [0; MAX_INTERMEDIATES],
             intermediates_len: 0,
             params: [0; MAX_PARAMS],
+            subs: [false; MAX_PARAMS],
+            next_is_sub: false,
             params_len: 0,
             current_param: 0,
             has_current_param: false,
@@ -147,6 +158,7 @@ impl Parser {
         self.params_len = 0;
         self.current_param = 0;
         self.has_current_param = false;
+        self.next_is_sub = false;
         self.osc_buffer.clear();
         // We deliberately do NOT touch utf8_remaining here — an in-flight
         // UTF-8 sequence interrupted by ESC is malformed; we surface that
@@ -269,6 +281,10 @@ impl Parser {
                 self.commit_param();
                 self.state = State::CsiParam;
             }
+            0x3A => {
+                self.open_sub_param();
+                self.state = State::CsiParam;
+            }
             0x3C..=0x3F => {
                 // Private-use intermediate (e.g. '?').  Williams collects
                 // these the same way as 0x20..=0x2F intermediates.
@@ -280,7 +296,7 @@ impl Parser {
                 self.state = State::CsiIntermediate;
             }
             0x40..=0x7E => {
-                cb.csi_dispatch(self.params_slice(), self.intermediates_slice(), byte);
+                cb.csi_dispatch(self.params_slice(), self.subs_slice(), self.intermediates_slice(), byte);
                 self.state = State::Ground;
             }
             0x7F => {}
@@ -293,6 +309,7 @@ impl Parser {
         match byte {
             0x00..=0x17 | 0x19 | 0x1C..=0x1F => cb.execute(byte),
             0x30..=0x39 => self.continue_param_digit(byte),
+            0x3A => self.open_sub_param(),
             0x3B => self.commit_param(),
             0x3C..=0x3F => {
                 // Out-of-place private marker — invalid; ignore until end.
@@ -305,7 +322,7 @@ impl Parser {
             }
             0x40..=0x7E => {
                 self.commit_param_if_pending();
-                cb.csi_dispatch(self.params_slice(), self.intermediates_slice(), byte);
+                cb.csi_dispatch(self.params_slice(), self.subs_slice(), self.intermediates_slice(), byte);
                 self.state = State::Ground;
             }
             0x7F => {}
@@ -319,7 +336,7 @@ impl Parser {
             0x00..=0x17 | 0x19 | 0x1C..=0x1F => cb.execute(byte),
             0x20..=0x2F => self.collect_intermediate(byte),
             0x40..=0x7E => {
-                cb.csi_dispatch(self.params_slice(), self.intermediates_slice(), byte);
+                cb.csi_dispatch(self.params_slice(), self.subs_slice(), self.intermediates_slice(), byte);
                 self.state = State::Ground;
             }
             0x30..=0x3F => self.state = State::CsiIgnore,
@@ -387,10 +404,12 @@ impl Parser {
     fn commit_param(&mut self) {
         if self.params_len < MAX_PARAMS {
             self.params[self.params_len] = self.current_param as u16;
+            self.subs[self.params_len] = self.next_is_sub;
             self.params_len += 1;
         }
         self.current_param = 0;
         self.has_current_param = false;
+        self.next_is_sub = false;
     }
 
     fn commit_param_if_pending(&mut self) {
@@ -401,6 +420,21 @@ impl Parser {
 
     fn params_slice(&self) -> &[u16] {
         &self.params[..self.params_len]
+    }
+
+    fn subs_slice(&self) -> &[bool] {
+        &self.subs[..self.params_len]
+    }
+
+    /// A colon separates sub-parameters within one parameter, the way
+    /// `38:2::255:0:0` is one colour and `4:3` is one underline.  It
+    /// used to land in the catch-all and send the whole sequence to
+    /// `CsiIgnore`, so a single colon anywhere threw away every other
+    /// parameter with it — an app that asked for a curly underline got
+    /// no styling at all rather than a straight one.
+    fn open_sub_param(&mut self) {
+        self.commit_param();
+        self.next_is_sub = true;
     }
 }
 
@@ -418,6 +452,7 @@ mod tests {
         },
         Csi {
             params: Vec<u16>,
+            subs: Vec<bool>,
             intermediates: Vec<u8>,
             byte: u8,
         },
@@ -442,9 +477,10 @@ mod tests {
                 byte,
             });
         }
-        fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], byte: u8) {
+        fn csi_dispatch(&mut self, params: &[u16], subs: &[bool], intermediates: &[u8], byte: u8) {
             self.events.push(Event::Csi {
                 params: params.to_vec(),
+                subs: subs.to_vec(),
                 intermediates: intermediates.to_vec(),
                 byte,
             });
@@ -541,6 +577,7 @@ mod tests {
             parse(b"\x1B[A"),
             vec![Event::Csi {
                 params: vec![],
+                subs: vec![false; 0],
                 intermediates: vec![],
                 byte: b'A'
             }]
@@ -554,6 +591,7 @@ mod tests {
             parse(b"\x1B[5A"),
             vec![Event::Csi {
                 params: vec![5],
+                subs: vec![false; 1],
                 intermediates: vec![],
                 byte: b'A'
             }]
@@ -567,6 +605,7 @@ mod tests {
             parse(b"\x1B[1;2;3H"),
             vec![Event::Csi {
                 params: vec![1, 2, 3],
+                subs: vec![false; 3],
                 intermediates: vec![],
                 byte: b'H'
             }]
@@ -581,6 +620,7 @@ mod tests {
             parse(b"\x1B[;5H"),
             vec![Event::Csi {
                 params: vec![0, 5],
+                subs: vec![false; 2],
                 intermediates: vec![],
                 byte: b'H'
             }]
@@ -594,6 +634,7 @@ mod tests {
             parse(b"\x1B[?25h"),
             vec![Event::Csi {
                 params: vec![25],
+                subs: vec![false; 1],
                 intermediates: vec![b'?'],
                 byte: b'h'
             }]
@@ -686,7 +727,7 @@ mod tests {
         );
         assert!(matches!(
             csi_events[0],
-            Event::Csi { params, intermediates, byte: b'A' }
+            Event::Csi { params, intermediates, byte: b'A', .. }
                 if params.is_empty() && intermediates.is_empty()
         ));
     }
