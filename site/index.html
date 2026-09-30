@@ -215,8 +215,10 @@
       hit in the first hour, listed because finding them yourself is worse.
     </p>
     <ul class="plain">
-      <li>One cell holds one code point, so combining marks, emoji built from several
-          code points, and flags collapse to their first one.</li>
+      <li>Scrolled-off history loses combining marks, emoji built from several code
+          points, and flags. They keep their shape on screen; a row on its way into
+          scrollback has nowhere to put the rest of a cluster, so scrolling back shows
+          the base character.</li>
       <li>Fonts, themes and key bindings are not configurable yet — the keys listed
           above are the keys.</li>
       <li>No hyperlink, working-directory or prompt escape sequences

@@ -174,7 +174,24 @@ fn a_gap_that_closed_comes_off_the_page() {
     t2.feed(b"\x1b]52;c;aGVsbG8=\x07");
     assert_eq!(t2.take_osc_clipboard().as_deref(), Some("hello"), "OSC 52 stopped working");
 
+    // Clusters keep their shape on screen now, so neither document
+    // may still say a cell holds one code point — but both must still
+    // say what scrolling back loses, which is true until scrollback
+    // has storage of its own.
+    let mut t3 = Terminal::new(20, 3);
+    t3.feed("e\u{301}".as_bytes());
+    let c3 = t3.grid().cell(0, 0);
+    assert_eq!(t3.grid().cluster_text(&c3), Some("e\u{301}"), "clusters stopped working");
+
     for (what, text) in [("the page", SITE), ("the README", README)] {
+        assert!(
+            !text.contains("One cell holds one code point"),
+            "a cluster keeps its shape now; {what} still says a cell holds one code point"
+        );
+        assert!(
+            text.contains("Scrolled-off history loses"),
+            "{what} stopped saying what scrolling back loses"
+        );
         assert!(
             !text.contains("tabs are not implemented")
                 && !text.contains("literal tab character is dropped"),
