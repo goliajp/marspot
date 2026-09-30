@@ -1,0 +1,11 @@
+[package]
+name = "golia-ui-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Platform-agnostic core of a zero-dependency Rust GUI: units, colour, and the scene a backend draws."
+
+# No dependencies, and none are coming.  Everything below stdlib is
+# ours; a backend brings its own FFI and never reaches back in here.
+[dependencies]
+

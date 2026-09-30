@@ -9,13 +9,13 @@ license = "Apache-2.0 OR MIT"
 publish = false
 
 [workspace]
-members = ["crates/marspot-term", "crates/marspot-session", "crates/marspot-linkify"]
+members = ["crates/marspot-term", "crates/marspot-session", "crates/marspot-linkify", "crates/ui/core"]
 # Without this, a bare `cargo build` builds only the root `marspot`
 # package (+ its marspot-term dep) and silently SKIPS marspot-session
 # (nothing depends on it) — so iterating on L3 with `cargo build` runs a
 # stale session binary. List every member + the root so bare cargo
 # commands cover the whole workspace; scripts still pass --workspace.
-default-members = [".", "crates/marspot-term", "crates/marspot-session", "crates/marspot-linkify"]
+default-members = [".", "crates/marspot-term", "crates/marspot-session", "crates/marspot-linkify", "crates/ui/core"]
 
 [features]
 # Offscreen panel screenshots — `marspot --snapshot out.png --panel X`.
