@@ -1773,7 +1773,7 @@ fn profile_cycle_op(
             // after 4096 bytes" was never reached by half the panes
             // (2026-09-30).  Alt screen plus bracketed paste is the
             // program itself saying it has the terminal.
-            .step(pty_op::Step::await_tui_ready().timeout(WAKE_WATCHDOG).or_late()),
+            .step(pty_op::Step::await_tui_ready().or_late()),
     )
     .map(|op| if say_continue { say_carry_on(op) } else { op })
 }

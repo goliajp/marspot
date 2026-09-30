@@ -324,7 +324,11 @@ impl Step {
     pub fn await_tui_ready() -> Self {
         Self {
             kind: StepKind::AwaitTuiReady { entry_seq: None },
-            timeout: Some(Duration::from_secs(30)),
+            // Short on purpose.  A terminal that has not declared
+            // itself in three seconds is not going to be helped by
+            // twenty-seven more, and the pane is frozen for every one
+            // of them.
+            timeout: Some(Duration::from_secs(3)),
             proceed_on_timeout: false,
             label: "await_tui_ready",
         }
@@ -503,6 +507,9 @@ pub struct OpRunner {
     /// Set once the run is over; the next tick ends the session.  Two
     /// ticks rather than one because ending is the host's to do.
     finished: Option<OpOutcome>,
+    /// What the last readiness probe saw, kept so a step that gives up
+    /// can say what it was looking at rather than only that it waited.
+    ready_saw: Option<(u64, u32)>,
     /// Cleanup is idempotent, and this is what makes it so.
     cleaned: bool,
     /// Whether the first tick has run.  An explicit flag rather than
@@ -532,6 +539,7 @@ impl OpRunner {
             still_since: now,
             drew: false,
             finished: None,
+            ready_saw: None,
             cleaned: false,
             started: false,
             spin_phase: 0,
@@ -737,8 +745,13 @@ impl OpRunner {
             StepKind::AwaitTuiReady { entry_seq } => {
                 use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
                 let Some((seq, flags)) = self.env.pane_modes(sid) else {
+                    // No answer is its own diagnosis, and it used to be
+                    // an invisible one: the step simply never finished
+                    // and the whole wait read as "the CLI is slow".
+                    self.ready_saw = Some((0, 0));
                     return false;
                 };
+                self.ready_saw = Some((seq, flags));
                 let base = match entry_seq {
                     Some(v) => v,
                     None => {
@@ -1013,11 +1026,17 @@ impl PaneSession for OpRunner {
                             .env
                             .output_len(host.shelld_session_id())
                             .saturating_sub(self.entered_len);
+                        let saw = match self.ready_saw {
+                            Some((seq, flags)) => {
+                                format!(", last saw seq={seq} flags={flags:#x}")
+                            }
+                            None => String::new(),
+                        };
                         host.log(
                             LogLevel::Info,
                             &format!("{}.late", self.op.name),
                             &format!(
-                                "step={} waited {}ms, drew {drawn}B — going on anyway",
+                                "step={} waited {}ms, drew {drawn}B{saw} — going on anyway",
                                 step.label,
                                 limit.as_millis()
                             ),
