@@ -358,3 +358,73 @@ fn what_measuring_text_costs() {
     );
     assert!(mock_n > 0 && real_n > 0, "mock {mock_n}, real {real_n}");
 }
+
+/// What building the tree costs, by what the node is made of.
+///
+/// After layout stopped laying children out twice and stopped carrying
+/// copies of its subtree, building the tree is nearly the whole frame:
+/// 201 of the dev panel's 215.  The three candidate architectures for
+/// the declarative tree are all really about this number, so it gets
+/// the same treatment layout got — split it before choosing.
+///
+/// Four trees of 64 nodes each, differing only in what a node holds.
+#[test]
+fn what_building_a_tree_costs() {
+    use marspot::ui::core::Length as L;
+    use marspot::ui::view::{Edges, FrameSpec, Text, UiSize, vstack};
+
+    const N: usize = 64;
+
+    // Warm whatever the first build touches once.
+    std::hint::black_box(vstack(
+        (0..N).map(|_| Text::new("x").ui_size(UiSize::Body).build()).collect(),
+    ));
+
+    let (bare_n, bare_b, _) = measured(|| {
+        vstack((0..N).map(|_| Text::new("label").ui_size(UiSize::Body).build()).collect())
+    });
+
+    // Owned strings: the same tree, but each label had to be made.
+    let owned: Vec<String> = (0..N).map(|i| format!("label {i}")).collect();
+    let (owned_n, owned_b, _) = measured(|| {
+        vstack(owned.iter().map(|s| Text::new(s.as_str()).ui_size(UiSize::Body).build()).collect())
+    });
+
+    // One modifier per node.
+    let (pad_n, pad_b, _) = measured(|| {
+        vstack(
+            (0..N)
+                .map(|_| {
+                    Text::new("label")
+                        .ui_size(UiSize::Body)
+                        .build()
+                        .padding(Edges::xy(L::Pt(4.0), L::Pt(2.0)))
+                })
+                .collect(),
+        )
+    });
+
+    // Two modifiers per node — the shape the chrome actually builds.
+    let (two_n, two_b, _) = measured(|| {
+        vstack(
+            (0..N)
+                .map(|_| {
+                    Text::new("label")
+                        .ui_size(UiSize::Body)
+                        .build()
+                        .padding(Edges::xy(L::Pt(4.0), L::Pt(2.0)))
+                        .frame(FrameSpec { width: Some(L::Pct(1.0)), ..Default::default() })
+                })
+                .collect(),
+        )
+    });
+
+    eprintln!(
+        "[frame-alloc] building {N} nodes:\n\
+         [frame-alloc]   &'static str, no modifier   {bare_n:>5} allocs {bare_b:>8} B\n\
+         [frame-alloc]   owned str,    no modifier   {owned_n:>5} allocs {owned_b:>8} B\n\
+         [frame-alloc]   &'static str, 1 modifier    {pad_n:>5} allocs {pad_b:>8} B\n\
+         [frame-alloc]   &'static str, 2 modifiers   {two_n:>5} allocs {two_b:>8} B"
+    );
+    assert!(bare_n > 0, "the bare tree has to have been built");
+}
