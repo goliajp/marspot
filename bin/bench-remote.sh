@@ -189,7 +189,6 @@ STALE_PASS=""
 # something only this side knows.
 MAX_WAIT="${MARSPOT_BENCH_MAX_WAIT:-1200}"
 LOCK_CMD="/usr/local/bin/bench-lock bench --max-wait $MAX_WAIT"
-BUILD_LOCK="/usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT"
 if [[ "${MARSPOT_BENCH_NO_LOCK:-}" == "1" ]]; then
   echo "==> MARSPOT_BENCH_NO_LOCK=1 — measuring without the host lock" >&2
   LOCK_CMD=""
@@ -206,23 +205,20 @@ ssh "$HOST" "
     echo 'bench-remote: /usr/local/bin/bench-lock is not on the runner' >&2
     exit 1
   fi
-  # Two holds, not one.  A compile is heavy work and belongs beside
-  # other heavy work; only the measurement wants the machine to
-  # itself.  Held together, everyone else on the runner waited out a
-  # three-minute build for a one-minute measurement -- and the build
-  # is the part that varies, because a tree that changed has to be
-  # rebuilt and a tree that did not is a no-op.
-  # If the compile never got the machine there is nothing to measure,
-  # so the give-up code travels rather than being stepped over: the
-  # first attempt at this let the build abandon its wait and then
-  # measured anyway, and came back exit 1 -- a gate failure, which is
-  # not what happened.
-  if ! $BUILD_LOCK caffeinate -dims ./bin/bench.sh --build-only; then
-    rc=\$?
-    echo \"bench.sh --build-only did not run (exit \$rc)\" >&2
-    exit \$rc
-  fi
-  exec $LOCK_CMD caffeinate -dims ./bin/bench.sh --no-build $ARGS_Q
+  # One hold, covering the compile and the measurement together.
+  #
+  # The compile was split out under `heavy` first, on the reasoning
+  # that a build is not a measurement and should not make everyone
+  # wait -- which is true of one bench on a quiet machine and wrong
+  # with two. A waiting bench holds new heavy work back, so the other
+  # session's queued bench stood in front of this one's compile and
+  # the build timed out without ever producing a binary to measure.
+  # Queueing the whole thing as one bench puts it in the bench queue
+  # instead, where it waits behind benches rather than behind the
+  # consequences of them. The cost is holding the exclusive lock
+  # across a compile, which is the trade the global rule takes.
+  exec $LOCK_CMD caffeinate -dims sh -c \
+    './bin/bench.sh --build-only && exec ./bin/bench.sh --no-build $ARGS_Q'
 " </dev/null
 REMOTE_RC=$?
 # 75 is bench-lock giving up: the machine was busy, not the code.  A
