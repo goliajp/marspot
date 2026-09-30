@@ -94,7 +94,11 @@ for suite in "${SUITES[@]}"; do
   echo
   echo "════ $suite on $HOST ════"
   set +e
-  remote_gui "cd ~/$REMOTE_DIR && bin/$suite"
+  # Shared, like every other heavy run: E2E suites build release
+  # binaries and drive real windows, and a measurement taking the lock
+  # exclusively has to wait for that rather than read a number through
+  # it.  See bin/bench-remote.sh for the other half.
+  remote_gui "export PATH=/opt/homebrew/bin:\$PATH; cd ~/$REMOTE_DIR && flock -s ${MARSPOT_BENCH_LOCK:-/Users/Shared/bench.lock} bin/$suite"
   suite_rc=$?
   set -e
   if (( suite_rc != 0 )); then
