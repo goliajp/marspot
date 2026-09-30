@@ -141,7 +141,74 @@ fn the_page_does_not_promise_what_is_known_missing() {
     // The gaps list is there so a first hour is not a series of
     // surprises.  If a gap closes, this is the reminder to take it off
     // the page rather than leaving it to read as false modesty.
-    for gap in ["Horizontal tabs", "Mouse reporting", "terminfo"] {
+    for gap in ["Mouse reporting", "terminfo"] {
         assert!(SITE.contains(gap), "the page stopped mentioning {gap:?}");
+    }
+}
+
+/// And it does not keep confessing a gap that closed.
+///
+/// The list above only catches a gap going missing.  A page that goes
+/// on apologising for something that works is wrong in the other
+/// direction, and the only way to tell the two apart is to ask the
+/// terminal rather than to read the page twice.
+#[test]
+fn a_gap_that_closed_comes_off_the_page() {
+    use marspot::terminal::Terminal;
+
+    let row = |t: &Terminal| -> String {
+        let cols = t.grid().cols();
+        (0..cols).map(|c| t.grid().cell(c, 0).ch).collect::<String>().trim_end().to_string()
+    };
+
+    let mut t = Terminal::new(40, 3);
+    t.feed(b"a\tb");
+    assert_ne!(row(&t), "ab", "tabs stopped moving the cursor");
+    assert!(
+        !SITE.contains("literal tab character is dropped"),
+        "tabs work; the page still says they are dropped"
+    );
+}
+
+/// The keyboard reference on the page is the list the code keeps.
+///
+/// A key table is the part of a page that goes wrong quietly: a chord
+/// is removed or renamed and the page keeps promising it.  The list in
+/// `marspot::shortcuts` is already tied to the handlers by
+/// `shortcuts_are_real`; this ties the page to the list, so the chain
+/// runs from what the page says to the code that does it.
+#[test]
+fn the_pages_key_table_is_the_list_the_code_keeps() {
+    use marspot::shortcuts::SHORTCUTS;
+
+    let table_start = SITE
+        .find("<table class=\"keys\">")
+        .expect("the page has no key table");
+    let table_end = SITE[table_start..]
+        .find("</table>")
+        .map(|i| table_start + i)
+        .expect("the key table is not closed");
+    let table = &SITE[table_start..table_end];
+
+    let rows = table.matches("<tr>").count();
+    assert_eq!(
+        rows,
+        SHORTCUTS.len(),
+        "the page lists {rows} shortcuts and the code keeps {}",
+        SHORTCUTS.len()
+    );
+
+    for s in SHORTCUTS {
+        assert!(
+            table.contains(s.chord),
+            "the page's key table does not mention {}",
+            s.chord
+        );
+        assert!(
+            table.contains(s.action),
+            "{} is on the page, but described as something other than {:?}",
+            s.chord,
+            s.action
+        );
     }
 }

@@ -36,6 +36,10 @@
     -webkit-font-smoothing: antialiased;
   }
   .wrap { max-width: 60rem; margin: 0 auto; padding: 0 1.5rem; }
+  table.keys { border-collapse: collapse; width: 100%; margin-top: 1.25rem; }
+  table.keys td { padding: 0.55rem 0.75rem 0.55rem 0; border-top: 1px solid var(--rule);
+                  vertical-align: baseline; }
+  table.keys td:first-child { width: 7rem; white-space: nowrap; font-family: var(--mono); }
   a { color: inherit; text-decoration-color: var(--dim); text-underline-offset: 3px; }
   a:hover { text-decoration-color: var(--accent); }
   code, .mono { font-family: var(--mono); font-size: 0.92em; }
@@ -183,25 +187,46 @@
 
 <section>
   <div class="wrap">
+    <h2>Keys</h2>
+    <p>
+      Everything else goes to the program in the pane, unchanged.
+    </p>
+    <table class="keys">
+      <tbody>
+        <tr><td>⌘N</td><td>New window</td></tr>
+        <tr><td>⌘C</td><td>Copy the selection</td></tr>
+        <tr><td>⌘V</td><td>Paste</td></tr>
+        <tr><td>⌘F</td><td>Search this pane's scrollback</td></tr>
+        <tr><td>⌘B</td><td>Show or hide the sidebar</td></tr>
+        <tr><td>⇧⌘C</td><td>Agent usage for this account</td></tr>
+        <tr><td>⌘W</td><td>Close the panel that is open</td></tr>
+        <tr><td>Esc</td><td>Close the panel that is open; three times in five seconds ends a stuck agent session</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
     <h2>Not yet</h2>
     <p>
       Pre-1.0, and used daily by the people writing it. These are the things you would
       hit in the first hour, listed because finding them yourself is worse.
     </p>
     <ul class="plain">
-      <li>Horizontal tabs are not implemented — a literal tab character is dropped.</li>
       <li>One cell holds one code point, so combining marks, emoji built from several
           code points, and flags collapse to their first one.</li>
       <li>Mouse reporting forwards the wheel only; clicks and drags do not reach the
           program in the pane.</li>
-      <li>No clipboard, hyperlink, working-directory or prompt escape sequences
-          (<span class="mono">OSC 52 / 8 / 7 / 133</span>).</li>
       <li>Line-drawing character sets are not translated, so some text interfaces draw
           letters where box characters belong.</li>
+      <li>Fonts, themes and key bindings are not configurable yet — the keys below are
+          the keys.</li>
+      <li>No clipboard, hyperlink, working-directory or prompt escape sequences
+          (<span class="mono">OSC 52 / 8 / 7 / 133</span>).</li>
       <li>No terminfo entry of its own; <span class="mono">TERM</span> is set to
           <span class="mono">xterm-256color</span>, which claims a few capabilities that
           are not implemented yet.</li>
-      <li>Fonts, themes and key bindings are not configurable yet.</li>
     </ul>
   </div>
 </section>
