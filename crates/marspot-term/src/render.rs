@@ -335,7 +335,13 @@ pub fn grid_selection_text(
             if cell.ch == '\0' {
                 continue;
             }
-            row_text.push(cell.ch);
+            // A cell holding a cluster keeps its text in the grid's
+            // pool and its `ch` is the index — copying that would put
+            // a plane-15 codepoint on the clipboard.
+            match grid.cluster_text(&cell) {
+                Some(text) => row_text.push_str(text),
+                None => row_text.push(cell.ch),
+            }
         }
         // Soft-wrap merge gate.  The wrap flag is "this row is the
         // overflow continuation of the row above," i.e. the row

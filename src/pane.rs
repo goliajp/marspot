@@ -1973,9 +1973,14 @@ impl Pane {
             .map(|r| {
                 let mut line = String::with_capacity(cols as usize);
                 for c in 0..cols {
-                    let ch = g.cell_at_view(0, c, r).ch;
-                    if ch != '\0' {
-                        line.push(ch);
+                    let cell = g.cell_at_view(0, c, r);
+                    if cell.ch == '\0' {
+                        continue;
+                    }
+                    // A cluster cell's `ch` is a pool index, not text.
+                    match g.cluster_text(&cell) {
+                        Some(text) => line.push_str(text),
+                        None => line.push(cell.ch),
                     }
                 }
                 line.truncate(line.trim_end().len());

@@ -199,3 +199,32 @@ fn a_cluster_that_scrolls_off_degrades_rather_than_dangles() {
         }
     }
 }
+
+/// Copying a cluster copies the cluster, not its pool index.
+///
+/// Everything above is about the grid.  A cell's `ch` is a plane-15
+/// index once it points into the pool, and every reader that takes
+/// `ch` directly — the clipboard, `--read`, the pane's own text — puts
+/// that codepoint where a person will see it.  This is the one that
+/// reaches the system pasteboard, so it gets its own test.
+#[test]
+fn the_clipboard_gets_the_text_and_not_the_index() {
+    use marspot_term::render::grid_selection_text;
+
+    let mut t = Terminal::new(20, 4);
+    t.feed("ae\u{301}b".as_bytes());
+
+    // `abs` counts from the bottom row, so text written on row 0 of a
+    // four-row grid is abs 3.
+    let abs = (t.grid().rows() - 1) as u32;
+    let text = grid_selection_text(t.grid(), (0, abs), (2, abs), false)
+        .expect("a selection across the cluster");
+    assert!(
+        text.contains("e\u{301}"),
+        "the mark did not make it to the clipboard: {text:?}"
+    );
+    assert!(
+        !text.chars().any(|c| (c as u32) >= 0xF_0000),
+        "a pool index reached the clipboard: {text:?}"
+    );
+}
