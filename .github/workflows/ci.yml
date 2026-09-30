@@ -54,10 +54,20 @@ jobs:
         run: cargo build --workspace --all-targets
 
       - name: Test
+        # nextest, because that is the gate this project actually runs.
+        # `cargo test` puts every test of a binary in one process and
+        # runs them on threads, and several of these own a state
+        # directory — under threads they land on each other's files and
+        # four of them failed here while passing locally.  Per-test
+        # processes are not a preference, they are what makes the suite
+        # mean the same thing in both places.
+        #
         # A runner has no display and no keychain.  Tests that need one
         # skip themselves and say so; a test that needs one and does
         # not skip is a bug in the test, not a reason to weaken this.
-        run: cargo test --workspace
+        run: |
+          curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C "$HOME/.cargo/bin"
+          cargo nextest run --workspace --no-fail-fast
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
