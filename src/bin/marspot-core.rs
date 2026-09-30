@@ -2313,6 +2313,40 @@ mod boot_assembly_tests {
         panic!("L3 kept reporting mouse tracking after being told to stop");
     }
 
+    /// A new pane opens where the shell actually is.
+    ///
+    /// The registry records where a session was launched; every pane
+    /// that has since `cd`'d somewhere would open in the wrong place
+    /// if that were the answer.  This drives a real shell into a
+    /// directory it was not started in and asks.
+    #[test]
+    fn a_new_pane_inherits_the_directory_the_shell_is_in_now() {
+        let _sb = Sandbox::new("mcwd");
+        let (tx, _rx) = mpsc::channel();
+        let sid = reg::allocate_next_session_id().unwrap();
+        let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
+            .expect("real L3 spawn (is marspot-session built?)");
+
+        let launched = live_cwd_of(sid);
+        assert!(!launched.is_empty(), "the shell has to have a directory to begin with");
+
+        // Somewhere it certainly was not started in.
+        pane.session_mut().forward_inject_input(b"cd /usr/lib\r");
+
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            pane.pump();
+            let now = live_cwd_of(sid);
+            if now.ends_with("/usr/lib") {
+                assert_ne!(now, launched, "the answer is the live cwd, not the launch one");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("the shell never reported /usr/lib; still {:?}", live_cwd_of(sid));
+    }
+
     /// A click reaches the program, on a real PTY.
     ///
     /// The encoding is unit-tested; this is the other half — that a
@@ -3295,17 +3329,38 @@ fn spawn_l3_with_cwd(
 /// keeps calling `spawn_l3_pane_with_cwd` synchronously — there is no
 /// loop to freeze before the loop starts, and boot wants the pane fully
 /// formed before it lays out.
+///
+/// An empty `cwd` is the L3 default, which is `$HOME`.
+/// Where a pane's shell currently is.
+///
+/// A new pane opens where the one you were in is, which is what every
+/// other terminal does and what makes [+] useful next to a build.  The
+/// answer has to come from the shell's own process: the registry
+/// records where the session was *launched*, and every pane that has
+/// since `cd`'d somewhere would open in the wrong place.
+///
+/// One `proc_pidinfo` per new pane.  This is the reason OSC 7 is not
+/// wired up — a push-based cwd report costs a parse on every prompt,
+/// and this costs one syscall when a pane is actually created.
+///
+/// Empty when the pid is gone or the call is refused, which is the
+/// same string the caller passed before and means `$HOME`.
+fn live_cwd_of(session_id: u64) -> String {
+    marspot_term::session_registry::read_session_entry(session_id)
+        .ok()
+        .and_then(|e| marspot::pidtree::proc_cwd(e.shell_child_pid))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 fn spawn_l3_pane_async(
     cols: u16,
     rows: u16,
     session_id: u64,
+    cwd: String,
     event_tx: &Sender<CoreEvent>,
 ) -> Pane {
     let tx = event_tx.clone();
-    // Both callers ([+] and revive) want the default cwd; a fresh L3
-    // resolves it from $HOME.  Carrying a parameter that is always ""
-    // just invites a reader to look for the caller that sets it.
-    let cwd = String::new();
     std::thread::Builder::new()
         .name(format!("l2-spawn-{session_id}"))
         .spawn(move || {
@@ -5514,8 +5569,13 @@ impl CoreApp {
             // id (a flock + a directory scan) and pushes a "starting…"
             // slot.  Clicking [+] used to freeze every pane for as long
             // as the new L3 took to register and handshake.
+            let from = win!(self, wi)
+                .try_focused_pane()
+                .and_then(|p| p.shelld_session_id())
+                .map(live_cwd_of)
+                .unwrap_or_default();
             match allocate_next_session_id().map(|id| {
-                spawn_l3_pane_async(cols, rows, id, &self.event_tx)
+                spawn_l3_pane_async(cols, rows, id, from, &self.event_tx)
             }) {
                 Ok(pane) => {
                     let new_sid = pane.shelld_session_id();
@@ -5773,7 +5833,8 @@ impl CoreApp {
         let cols = ((w_phys / cell_w) as u16).max(INITIAL_COLS);
         let rows = ((h_phys / cell_h) as u16).max(INITIAL_ROWS);
         let pane = match allocate_next_session_id() {
-            Ok(id) => spawn_l3_pane_async(cols, rows, id, &self.event_tx),
+            // A new window has no pane to inherit a directory from.
+            Ok(id) => spawn_l3_pane_async(cols, rows, id, String::new(), &self.event_tx),
             Err(e) => {
                 lx_error!("core.window.session_id_failed", &format!("{e}"));
                 return;
@@ -6737,7 +6798,7 @@ impl CoreApp {
                 // must not freeze the other fifteen panes while the
                 // replacement boots.
                 *win!(self, wi).focused_pane_mut() =
-                    spawn_l3_pane_async(cols, rows, sid, &self.event_tx);
+                    spawn_l3_pane_async(cols, rows, sid, String::new(), &self.event_tx);
                 win!(self, wi).needs_render = true;
                 lx_event!(
                     "L3_REVIVING",
@@ -8315,8 +8376,13 @@ impl CoreApp {
                         .get(idx)
                         .map(|c| (c.cols, c.rows))
                         .unwrap_or((INITIAL_COLS, INITIAL_ROWS));
+                    let from = win!(self, wi)
+                        .try_focused_pane()
+                        .and_then(|p| p.shelld_session_id())
+                        .map(live_cwd_of)
+                        .unwrap_or_default();
                     win!(self, wi).panes[idx] =
-                        spawn_l3_pane_async(cols, rows, sid, &self.event_tx);
+                        spawn_l3_pane_async(cols, rows, sid, from, &self.event_tx);
                     win!(self, wi).focused_idx = idx;
                     win!(self, wi).needs_render = true;
                     self.save_session_state();
