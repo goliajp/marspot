@@ -49,7 +49,15 @@ pub fn socket_path() -> std::path::PathBuf {
 /// terminal.  The stale-socket unlink is unconditional because the
 /// previous owner is this same process's predecessor — an execv, a
 /// crash — and there is no case where a live one should be preserved.
-pub fn serve(tx: Sender<CliRequest>) -> io::Result<()> {
+/// Start the command socket.
+///
+/// `wake` is called after every request is queued.  Without it the
+/// supervisor picks the request up on its next timer tick, so what the
+/// user waits for is not the work but the tick -- and the tick is the
+/// thing we want to slow down.  Queue, then knock.
+pub type Wake = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+pub fn serve(tx: Sender<CliRequest>, wake: Wake) -> io::Result<()> {
     let path = socket_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -63,12 +71,13 @@ pub fn serve(tx: Sender<CliRequest>) -> io::Result<()> {
                 match conn {
                     Ok(stream) => {
                         let tx = tx.clone();
+                        let wake = wake.clone();
                         // A connection per thread: requests are rare,
                         // short, and must not be able to wedge each
                         // other or the accept loop.
                         std::thread::Builder::new()
                             .name("l1-cmd-conn".into())
-                            .spawn(move || handle(stream, tx))
+                            .spawn(move || handle(stream, tx, wake))
                             .ok();
                     }
                     Err(e) => {
@@ -82,7 +91,16 @@ pub fn serve(tx: Sender<CliRequest>) -> io::Result<()> {
     Ok(())
 }
 
-fn handle(mut stream: UnixStream, tx: Sender<CliRequest>) {
+fn handle(mut stream: UnixStream, tx: Sender<CliRequest>, wake: Wake) {
+    // Queue, then knock.  The supervisor is asleep between ticks and
+    // the caller is about to block for its answer.
+    let send = |req: CliRequest| -> bool {
+        let queued = tx.send(req).is_ok();
+        if queued {
+            wake();
+        }
+        queued
+    };
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
     let frame = match Frame::read_from(&mut stream) {
         Ok(Some(f)) => f,
@@ -90,7 +108,7 @@ fn handle(mut stream: UnixStream, tx: Sender<CliRequest>) {
     };
     if frame.msg_type == MsgType::CliListPanes {
         let (rtx, rrx) = std::sync::mpsc::channel();
-        if tx.send(CliRequest::ListPanes { reply: rtx }).is_ok()
+        if send(CliRequest::ListPanes { reply: rtx })
             && let Ok(panes) = rrx.recv_timeout(std::time::Duration::from_secs(5)) {
                 let _ = Frame::new(
                     MsgType::CliPaneList,
@@ -115,7 +133,7 @@ fn handle(mut stream: UnixStream, tx: Sender<CliRequest>) {
             return;
         };
         let (rtx, rrx) = std::sync::mpsc::channel();
-        if tx.send(CliRequest::ReadPane { target, extra_lines, reply: rtx }).is_err() {
+        if !send(CliRequest::ReadPane { target, extra_lines, reply: rtx }) {
             reply_err(&mut stream, "shell is shutting down");
             return;
         }
@@ -139,7 +157,7 @@ fn handle(mut stream: UnixStream, tx: Sender<CliRequest>) {
             return;
         };
         let (rtx, rrx) = std::sync::mpsc::channel();
-        let sent = tx.send(CliRequest::Autorun { target, on, reply: rtx }).is_ok();
+        let sent = send(CliRequest::Autorun { target, on, reply: rtx });
         let out = if sent {
             rrx.recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap_or_else(|_| Err("shell did not answer in 5 s".into()))
@@ -170,7 +188,7 @@ fn handle(mut stream: UnixStream, tx: Sender<CliRequest>) {
         }
     };
     let (rtx, rrx) = std::sync::mpsc::channel();
-    if tx.send(CliRequest::SendText { target, text, reply: rtx }).is_err() {
+    if !send(CliRequest::SendText { target, text, reply: rtx }) {
         let _ = Frame::new(MsgType::CliResult, encode_cli_result(false, "shell is shutting down"))
             .write_to(&mut stream);
         return;

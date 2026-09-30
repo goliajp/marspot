@@ -118,6 +118,14 @@ pub struct ShellPluginHost {
     /// Where a submitted PTY operation goes.  The queue itself lives in
     /// the main loop — see `PtyOpRequest`.
     pty_op_tx: Mutex<Option<Sender<PtyOpRequest>>>,
+    /// Knock on the supervisor after queueing something for it.
+    ///
+    /// The channels below are drained on the supervisor's tick, so
+    /// without this a plugin's op waits for the next tick rather than
+    /// for the work -- and the tick is what we want to be able to slow
+    /// down.  None in tests and before the main loop is up, where the
+    /// queue is drained by whoever is driving.
+    wake: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     /// Plugin → shell activity reports, feeding the pane state
     /// machines.  Plugins push what they know about the program they
     /// understand; composition with the kernel's view is the shell's
@@ -225,6 +233,7 @@ impl ShellPluginHost {
             pane_session_begin_tx: Mutex::new(None),
             inject_input_tx: Mutex::new(None),
             pty_op_tx: Mutex::new(None),
+            wake: Mutex::new(None),
             pane_activity_tx: Mutex::new(None),
         }
     }
@@ -264,6 +273,17 @@ impl ShellPluginHost {
 
     /// Wire the channel the shell main loop drains for cc-driven
     /// PTY inject requests.  Called once during shell startup.
+    /// Install the knock.  See the `wake` field.
+    pub fn attach_wake(&self, wake: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        *self.wake.lock().unwrap() = Some(wake);
+    }
+
+    fn knock(&self) {
+        if let Some(w) = self.wake.lock().unwrap().as_ref() {
+            w();
+        }
+    }
+
     pub fn attach_pty_op_tx(&self, tx: Sender<PtyOpRequest>) {
         *self.pty_op_tx.lock().unwrap() = Some(tx);
     }
@@ -414,6 +434,7 @@ impl PluginHost for ShellPluginHost {
         self.require(PermissionSet::SET_STATUS_LINE)?;
         if let Some(tx) = self.pane_activity_tx.lock().unwrap().as_ref() {
             let _ = tx.send((shelld_session_id, activity));
+            self.knock();
         }
         Ok(())
     }
@@ -468,6 +489,7 @@ impl PluginHost for ShellPluginHost {
             return Ok(());
         };
         let _ = tx.send(PaneRenderMarkupUpdate { shelld_session_id, on });
+        self.knock();
         Ok(())
     }
 
@@ -481,6 +503,7 @@ impl PluginHost for ShellPluginHost {
             return Ok(());
         };
         let _ = tx.send(PaneAgentTuiUpdate { shelld_session_id, on });
+        self.knock();
         Ok(())
     }
 
@@ -507,6 +530,7 @@ impl PluginHost for ShellPluginHost {
             down: down.to_vec(),
             marker: marker.to_vec(),
         });
+        self.knock();
         Ok(())
     }
 
@@ -524,6 +548,7 @@ impl PluginHost for ShellPluginHost {
             shelld_session_id,
             text: text.to_string(),
         });
+        self.knock();
         Ok(())
     }
 
@@ -540,6 +565,7 @@ impl PluginHost for ShellPluginHost {
             shelld_session_id,
             text: text.to_string(),
         });
+        self.knock();
         Ok(())
     }
 
@@ -564,8 +590,11 @@ impl PluginHost for ShellPluginHost {
         let Some(tx) = self.pty_op_tx.lock().unwrap().clone() else {
             return Err(PluginError::Other("no L2 wired".into()));
         };
-        tx.send(PtyOpRequest { shelld_session_id, op, start_at })
-            .map_err(|_| PluginError::Other("main loop dropped".into()))
+        let queued = tx
+            .send(PtyOpRequest { shelld_session_id, op, start_at })
+            .map_err(|_| PluginError::Other("main loop dropped".into()));
+        self.knock();
+        queued
     }
 
     fn begin_pane_session(
@@ -589,6 +618,61 @@ impl PluginHost for ShellPluginHost {
             session,
         })
         .map_err(|_| PluginError::Other("main loop dropped".into()))?;
+        self.knock();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod knock_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn host_with_counter() -> (ShellPluginHost, Arc<AtomicUsize>) {
+        let host = ShellPluginHost::new();
+        let n = Arc::new(AtomicUsize::new(0));
+        let c = n.clone();
+        host.attach_wake(Arc::new(move || {
+            c.fetch_add(1, Ordering::Relaxed);
+        }));
+        (host, n)
+    }
+
+    /// The supervisor is asleep between ticks. Queueing something for
+    /// it and not knocking means the caller waits for the tick rather
+    /// than for the work -- and the tick is deliberately slow.
+    #[test]
+    fn queueing_an_op_knocks_on_the_supervisor() {
+        let (host, knocks) = host_with_counter();
+        let (tx, rx) = std::sync::mpsc::channel();
+        host.attach_pty_op_tx(tx);
+        host.set_active_plugin("t", PermissionSet::SET_STATUS_LINE);
+
+        host.submit_pty_op(7, crate::plugins::pty_op::PtyOp::new("t"))
+            .expect("queued");
+        assert_eq!(knocks.load(Ordering::Relaxed), 1);
+        assert!(rx.try_recv().is_ok(), "and it really went on the queue");
+    }
+
+    #[test]
+    fn a_badge_knocks_too() {
+        let (host, knocks) = host_with_counter();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        host.attach_pane_badge_tx(tx);
+        host.set_active_plugin("t", PermissionSet::SET_STATUS_LINE);
+        let _ = host.set_pane_badge(7, "x");
+        assert_eq!(knocks.load(Ordering::Relaxed), 1);
+    }
+
+    /// No hook installed is the shape tests and early boot are in.
+    #[test]
+    fn without_a_hook_it_is_a_no_op() {
+        let host = ShellPluginHost::new();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        host.attach_pty_op_tx(tx);
+        host.set_active_plugin("t", PermissionSet::SET_STATUS_LINE);
+        host.submit_pty_op(7, crate::plugins::pty_op::PtyOp::new("t"))
+            .expect("queued without a hook");
     }
 }

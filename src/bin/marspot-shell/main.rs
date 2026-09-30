@@ -63,12 +63,27 @@ const DEFAULT_H_PT: f64 = 800.0;
 /// them would be mostly empty.
 const FRESH_W_PT: f64 = 800.0;
 const FRESH_H_PT: f64 = 600.0;
-// Safety-net only: the shell presents on the core's per-frame
-// `FrameRendered` poke, so this timer just guarantees forward progress if a
-// poke is ever missed (it never freezes).  Was 16 ms (~60 fps blind
-// present) — that burned idle CPU and occasionally sampled the IOSurface
-// mid-render (a flicker).  250 ms = 4 Hz idle floor, negligible CPU.
-const REDRAW_INTERVAL_MS: u64 = 250;
+// How often the supervisor wakes with nothing to do.
+//
+// Everything that has to happen promptly now knocks: the core's reader
+// thread wakes the loop when a frame or a reply arrives, the command
+// socket wakes it after queueing a request, and the plugin host wakes
+// it after queueing an op.  What is left on this timer is polling, and
+// the fastest poller is the pane sweep at one second
+// (`pane_status::SWEEP_INTERVAL`); the plugins want two, the core
+// healthcheck five, the stale-present net five, autorun thirty.
+//
+// So the timer runs at the rate of its fastest consumer and no faster.
+// It was 250 ms, which is four wakes for every one that anything
+// wanted -- and the supervisor's cost turned out to be in the waking
+// rather than in the work it does once awake (measured 2026-10-01:
+// every timed thing it does adds up to about a tenth of one percent of
+// a core, against 4.4% for the process).  Before that it was 16 ms, a
+// blind 60 Hz present.
+//
+// The floor on how slow this may go is the pane sweep, not the
+// present: presents ride the poke, and the stale net is five seconds.
+const REDRAW_INTERVAL_MS: u64 = 1_000;
 
 /// Frames the reader thread parses off the control socket and hands
 /// to the main thread.
@@ -1184,7 +1199,11 @@ impl ShellApp {
         let (cli_tx, cli_rx) = std::sync::mpsc::channel();
         // Best-effort: a shell that cannot bind still runs the
         // terminal, it just cannot be asked to type into it.
-        if let Err(e) = cli_socket::serve(cli_tx) {
+        let wake_for_cli: cli_socket::Wake = {
+            let p = proxy.clone();
+            std::sync::Arc::new(move || p.wake())
+        };
+        if let Err(e) = cli_socket::serve(cli_tx, wake_for_cli) {
             lx_warn!("shell.cli.bind_failed", &format!("{e}"));
         }
         let (inject_input_tx, inject_input_rx) = std::sync::mpsc::channel();
@@ -1192,6 +1211,11 @@ impl ShellApp {
         // so nothing has a private path to a pane.
         let inject_input_tx_for_ops = inject_input_tx.clone();
         let (pane_activity_tx, pane_activity_rx) = std::sync::mpsc::channel();
+        // Cloned before the move: the plugin host gets its own knock.
+        let wake_for_host: std::sync::Arc<dyn Fn() + Send + Sync> = {
+            let p = proxy.clone();
+            std::sync::Arc::new(move || p.wake())
+        };
         Self {
             proxy,
             // The boot window is always entry 0 of both saved lists.
@@ -1241,6 +1265,7 @@ impl ShellApp {
                 h.attach_pty_op_tx(pty_op_tx);
                 h.attach_inject_input_tx(inject_input_tx);
                 h.attach_pane_activity_tx(pane_activity_tx);
+                h.attach_wake(wake_for_host);
                 h
             },
             plugin_registry: PluginRegistry::new(),
