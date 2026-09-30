@@ -39,6 +39,16 @@ on:
   push:
     tags:
       - 'v*'
+  # A rehearsal.  Everything a tag does except the four steps that
+  # need a secret — so the first real tag is not the first time the
+  # build, the bundle, the disk image and the asset names have run
+  # together.  It publishes nothing and signs nothing.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to rehearse as (must be the product version)'
+        required: true
+        default: '0.0.0-rehearsal'
 
 permissions:
   contents: write
@@ -47,11 +57,27 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Set on a tag push, empty on a rehearsal.  Every step that needs a
+  # secret is gated on it.
+  REAL: ${{ github.event_name == 'push' && '1' || '' }}
+
 jobs:
   release:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
+      - name: What version this is
+        run: |
+          set -euo pipefail
+          if [[ -n "${REAL:-}" ]]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="${{ inputs.version }}"
+          fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          echo "building $v (real=${REAL:-no})"
 
       - name: Toolchain
         run: |
@@ -60,6 +86,7 @@ jobs:
           rustc -V
 
       - name: Every secret this needs is present
+        if: github.event_name == 'push'
         # Checked first and all at once.  Discovering a missing secret
         # after notarisation has already been submitted wastes a round
         # trip and leaves a half-made release behind.
@@ -84,6 +111,7 @@ jobs:
           fi
 
       - name: Tag names the product version
+        if: github.event_name == 'push'
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
@@ -104,6 +132,7 @@ jobs:
         run: cargo build --release --bins
 
       - name: Import the signing identity
+        if: github.event_name == 'push'
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -141,6 +170,11 @@ jobs:
           set -euo pipefail
           app="$RUNNER_TEMP/Marspot.app"
           bin/build-app-bundle.sh --out "$app"
+          test -x "$app/Contents/MacOS/marspot-shell"
+          if [[ -z "${REAL:-}" ]]; then
+            echo "rehearsal: assembled, not signed"
+            exit 0
+          fi
           # Inside out: nested binaries first, the bundle last, or the
           # outer signature is invalidated by signing what it covers.
           for b in marspot-core marspot-session marspot-shell; do
@@ -152,6 +186,7 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
 
       - name: Notarise and staple
+        if: github.event_name == 'push'
         env:
           MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
           MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
@@ -175,17 +210,21 @@ jobs:
       - name: Disk image
         run: |
           set -euo pipefail
-          v="${GITHUB_REF_NAME#v}"
+          v="$VERSION"
           stage="$RUNNER_TEMP/dmg"
           mkdir -p "$stage"
           cp -R "$RUNNER_TEMP/Marspot.app" "$stage/"
           ln -s /Applications "$stage/Applications"
           hdiutil create -volname "Marspot $v" -srcfolder "$stage" \
             -ov -format UDZO "$RUNNER_TEMP/Marspot-$v.dmg"
-          codesign --force --timestamp --sign "$CODESIGN_IDENTITY" \
-            "$RUNNER_TEMP/Marspot-$v.dmg"
+          if [[ -n "${REAL:-}" ]]; then
+            codesign --force --timestamp --sign "$CODESIGN_IDENTITY" \
+              "$RUNNER_TEMP/Marspot-$v.dmg"
+          fi
+          ls -la "$RUNNER_TEMP/Marspot-$v.dmg"
 
       - name: Build and sign the update tarball
+        if: github.event_name == 'push'
         env:
           MARSPOT_UPDATE_SEC: ${{ secrets.MARSPOT_UPDATE_SEC }}
         run: |
@@ -198,12 +237,26 @@ jobs:
           # here instead of at every user's next poll.
           bin/build-release-tarball.sh --strip --sign "$keyfile"
 
+      - name: The update tarball builds (rehearsal)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          # Unsigned: the signing half needs the key.  What this proves
+          # is that the tarball assembles and carries the name the
+          # shipped updater asks for.
+          bin/build-release-tarball.sh --strip
+          tar="target/release/marspot-aarch64-apple-darwin.tar.gz"
+          test -f "$tar"
+          tar tzf "$tar" | head
+          echo "rehearsal: $(wc -c < "$tar") bytes, unsigned"
+
       - name: Publish
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          v="${GITHUB_REF_NAME#v}"
+          v="$VERSION"
           tar="target/release/marspot-aarch64-apple-darwin.tar.gz"
           dmg="$RUNNER_TEMP/Marspot-$v.dmg"
           test -f "$tar" && test -f "$tar.sig" && test -f "$dmg"
@@ -214,5 +267,5 @@ jobs:
             "$dmg" "$tar" "$tar.sig"
 
       - name: Remove the signing keychain
-        if: always()
+        if: always() && github.event_name == 'push'
         run: security delete-keychain "$BUILD_KEYCHAIN" || true
