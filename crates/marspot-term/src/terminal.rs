@@ -500,6 +500,12 @@ struct SavedCursor {
     /// the wrap it had armed, or the glyph after the restore lands on
     /// top of that column instead of on the next row.
     pending_wrap: bool,
+    /// Whether G0 was the DEC special graphics set.  The saved cursor
+    /// carries the character set, so a program that designates
+    /// graphics, draws a box, and restores comes back to the set it
+    /// had -- otherwise every letter it prints afterwards arrives as
+    /// line-drawing.
+    g0_graphics: bool,
 }
 
 impl Terminal {
@@ -1428,6 +1434,20 @@ impl Terminal {
         if self.focus_reporting {
             modes |= 1 << 9;
         }
+        // bit 10 = the G0 charset is DEC special graphics.  A pane that
+        // is mid box-drawing when its process is replaced comes back
+        // drawing boxes; without this it came back printing the letters
+        // the line-drawing set is spelled with.  An older snapshot has
+        // the bit clear, which is the charset it in fact had.
+        if self.g0_graphics {
+            modes |= 1 << 10;
+        }
+        // bit 11 = the charset the saved cursor is holding.  Bit 10 is
+        // the live one; while a TUI is up, bit 10 is the TUI's and
+        // bit 11 is what the shell gets back on `?1049l`.
+        if self.saved_cursor.is_some_and(|c| c.g0_graphics) {
+            modes |= 1 << 11;
+        }
         out.extend_from_slice(&modes.to_le_bytes());
         out.extend_from_slice(&self.generation.to_le_bytes());
         out.extend_from_slice(&serialize_attrs(self.attrs));
@@ -1676,8 +1696,12 @@ impl Terminal {
                 // SAVED cursor is a transient bit that only matters
                 // between a DECSC and its DECRC; carrying it would cost
                 // a snapshot format bump, and every reader older than
-                // that bump would have to be taught to skip it.
+                // that bump would have to be taught to skip it.  The
+                // saved charset is not transient in the same way --
+                // `?1049l` hands it back to the shell -- so it rides in
+                // the mode bits, and is filled in below.
                 pending_wrap: false,
+                g0_graphics: (modes & (1 << 11)) != 0,
             })
         } else {
             None
@@ -1895,6 +1919,7 @@ impl Terminal {
         self.mouse_sgr_encoding = (modes & (1 << 7)) != 0;
         self.alt_scroll = (modes & (1 << 8)) != 0;
         self.focus_reporting = (modes & (1 << 9)) != 0;
+        self.g0_graphics = (modes & (1 << 10)) != 0;
         // Bit 4 (in_alt_screen) is informational for the wire format
         // but not actionable here — apply_snapshot replaces the
         // current grid; alt-mode save state is regenerated on the
@@ -3063,6 +3088,36 @@ impl<'a> Handler<'a> {
     /// Tab stops are deliberately not touched — DEC STD 070 leaves
     /// those to RIS, and a program that soft-resets in the middle of a
     /// table would otherwise lose its columns.
+    /// DECSC, and the save half of `?1048` / `?1049`.
+    ///
+    /// One slot, shared: xterm defines `?1049` as "save cursor as in
+    /// DECSC" and `?1048` as DECSC outright, so a program that saves
+    /// with `ESC 7` and then enters the alternate screen finds its
+    /// own save replaced.  Keeping a second slot would make `ESC 8`
+    /// after an alt-screen round trip restore something no other
+    /// terminal restores.
+    fn save_cursor(&mut self) {
+        let (col, row) = self.grid.cursor();
+        *self.saved_cursor = Some(SavedCursor {
+            col,
+            row,
+            attrs: *self.attrs,
+            pending_wrap: *self.pending_wrap,
+            g0_graphics: *self.g0_graphics,
+        });
+    }
+
+    /// DECRC, and the restore half of `?1048` / `?1049`.  xterm-style
+    /// no-op when nothing was ever saved.
+    fn restore_cursor(&mut self) {
+        if let Some(s) = *self.saved_cursor {
+            self.grid.set_cursor(s.col, s.row);
+            *self.attrs = s.attrs;
+            *self.pending_wrap = s.pending_wrap;
+            *self.g0_graphics = s.g0_graphics;
+        }
+    }
+
     /// DECALN — fill the screen with `E` and go home.
     fn screen_alignment_pattern(&mut self) {
         let (cols, rows) = (self.grid.cols(), self.grid.rows());
@@ -3198,11 +3253,34 @@ impl<'a> Handler<'a> {
             25 => *self.cursor_visible = set,
             // smcup/rmcup — alt screen + save/restore cursor.  ?1047
             // and ?47 are older variants; we accept them as aliases.
-            1049 | 1047 | 47 => {
+            // `?1049` is `?1047` plus `?1048`: the cursor is saved
+            // before the switch and restored after coming back, which
+            // is what lets a TUI leave the shell's prompt where it was
+            // and printing the charset it had.  `?1047` and the older
+            // `?47` switch buffers only; a program using those does
+            // its own DECSC when it wants one.
+            1049 => {
+                if set {
+                    self.save_cursor();
+                    self.enter_alt_screen();
+                } else {
+                    self.exit_alt_screen();
+                    self.restore_cursor();
+                }
+            }
+            1047 | 47 => {
                 if set {
                     self.enter_alt_screen();
                 } else {
                     self.exit_alt_screen();
+                }
+            }
+            // `?1048` is DECSC and DECRC by another spelling.
+            1048 => {
+                if set {
+                    self.save_cursor();
+                } else {
+                    self.restore_cursor();
                 }
             }
             // DECSET ?2004 — bracketed paste. When set, the input
@@ -3372,23 +3450,9 @@ impl<'a> ParserCallbacks for Handler<'a> {
             // Guarded on having no intermediate: `ESC # 8` is DECALN,
             // not DECRC, and without the guard it was being restored
             // as a cursor.
-            b'7' if intermediates.is_empty() => {
-                let (col, row) = self.grid.cursor();
-                *self.saved_cursor = Some(SavedCursor {
-                    col,
-                    row,
-                    attrs: *self.attrs,
-                    pending_wrap: *self.pending_wrap,
-                });
-            }
+            b'7' if intermediates.is_empty() => self.save_cursor(),
             // DECRC — restore cursor. xterm-style no-op when no save exists.
-            b'8' if intermediates.is_empty() => {
-                if let Some(s) = *self.saved_cursor {
-                    self.grid.set_cursor(s.col, s.row);
-                    *self.attrs = s.attrs;
-                    *self.pending_wrap = s.pending_wrap;
-                }
-            }
+            b'8' if intermediates.is_empty() => self.restore_cursor(),
             // IND (ESC D) — index.  NEL (ESC E) — index with a
             // carriage return.  RI (ESC M) — reverse index.
             //
@@ -3787,6 +3851,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                     row,
                     attrs: *self.attrs,
                     pending_wrap: *self.pending_wrap,
+                    g0_graphics: *self.g0_graphics,
                 });
             }
             b'u' => {
@@ -3795,6 +3860,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                     self.grid.set_cursor(s.col, s.row);
                     *self.attrs = s.attrs;
                     *self.pending_wrap = s.pending_wrap;
+                    *self.g0_graphics = s.g0_graphics;
                 }
             }
             b'r' => {
