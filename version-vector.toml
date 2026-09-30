@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.188"  # the return checks whether it landed
-core    = "0.12.231"  # motion and drag reach the program
+core    = "0.12.232"  # the renderer draws the whole cluster
 session = "0.11.112"  # a cluster stays whole on screen
