@@ -253,3 +253,55 @@ fn the_pages_key_table_is_the_list_the_code_keeps() {
         );
     }
 }
+
+const GUIDE: &str = include_str!("../site/guide.html");
+const SHELL_MAIN: &str = include_str!("../src/bin/marspot-shell/main.rs");
+
+/// The guide's key table is the same list as everywhere else.
+#[test]
+fn the_guide_keeps_the_same_keys() {
+    use marspot::shortcuts::SHORTCUTS;
+    for s in SHORTCUTS {
+        assert!(GUIDE.contains(s.chord), "the guide does not mention {}", s.chord);
+        assert!(GUIDE.contains(s.action), "{} is in the guide, described as something else", s.chord);
+    }
+}
+
+/// Every command the guide documents is one the binary has.
+///
+/// A page that lists a flag the program does not take is worse than a
+/// page that lists none: the reader tries it. The help text is the
+/// binary's own statement of what it accepts, so the guide is checked
+/// against that rather than against a list kept by hand.
+#[test]
+fn the_guide_documents_only_flags_the_binary_takes() {
+    let flags: Vec<&str> = SHELL_MAIN
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("marspot-shell --"))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .filter(|f| !f.is_empty())
+        .collect();
+    assert!(
+        flags.len() >= 6,
+        "read {} flags out of the help text; the parser stopped working",
+        flags.len()
+    );
+
+    // Pull the flags the guide's command table names.
+    let documented: Vec<&str> = GUIDE
+        .match_indices("<tr><td>--")
+        .map(|(i, _)| {
+            let rest = &GUIDE[i + "<tr><td>".len()..];
+            &rest[..rest.find("</td>").unwrap_or(0)]
+        })
+        .collect();
+    assert!(!documented.is_empty(), "the guide's command table is empty");
+
+    for d in &documented {
+        let bare = d.trim_start_matches("--");
+        assert!(
+            flags.iter().any(|f| *f == bare),
+            "the guide documents --{bare}, which the binary does not take"
+        );
+    }
+}
