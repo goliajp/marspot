@@ -7997,10 +7997,24 @@ impl CoreApp {
         // second to a program expecting the first buries it in reports
         // per pixel of idle pointer movement.  Reported once per cell
         // the pointer enters, not once per event, for the same reason.
+        // Chrome that floats over the panes owns the pointer while it
+        // is up.  `mouse_down` has always checked the menu first; this
+        // did not, so moving inside an open badge menu was reported to
+        // the program underneath as pointer travel and returned before
+        // the menu's own hover ran.  The menu still took clicks -- it
+        // just stopped following the mouse.
+        let chrome_owns_pointer = {
+            let w = &win!(self, wi);
+            w.context_menu.is_some()
+                || w.process_panel
+                    .as_ref()
+                    .is_some_and(|p| p.modal_rect.contains(x_phys, y_phys))
+        };
         let held = self.mouse_report_press.is_some();
         let (cw, ch) = self.renderer.cell_dims();
-        if let Some((idx, col, row)) =
-            win!(self, wi).layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)
+        if !chrome_owns_pointer
+            && let Some((idx, col, row)) =
+                win!(self, wi).layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)
             && win!(self, wi).panes.get(idx)
                 .map(|p| p.session().l3_mouse_motion_wanted(held))
                 .unwrap_or(false)

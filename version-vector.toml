@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.193"  # a plugin is not charged for waiting
-core    = "0.12.236"  # one pane gets no title strip
+core    = "0.12.237"  # an open menu owns the pointer
 session = "0.11.123"  # a burst that stops is not a loop
