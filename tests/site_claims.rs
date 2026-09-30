@@ -300,7 +300,7 @@ fn the_guide_documents_only_flags_the_binary_takes() {
     for d in &documented {
         let bare = d.trim_start_matches("--");
         assert!(
-            flags.iter().any(|f| *f == bare),
+            flags.contains(&bare),
             "the guide documents --{bare}, which the binary does not take"
         );
     }
