@@ -11,7 +11,9 @@
 #   HOST=other-mini bin/bench-remote.sh --full
 #
 # Contract:
-#   - exclusive : mkdir lock both ends (atomic; macOS has no flock(1))
+#   - exclusive : mkdir lock both ends against other marspot runs, plus
+#                 the host's shared bench lock, held exclusively, against
+#                 everything else using the machine
 #   - clean     : dedicated CARGO_TARGET_DIR, caffeinate -dims
 #   - terminating: trap on EXIT/INT/TERM kills the remote PGID + sweeps
 #                  any orphan marspot/mcli; lock released unconditionally
@@ -153,6 +155,25 @@ echo "==> running bench on $HOST: bin/bench.sh $ARGS_Q"
 STALE_PASS=""
 [[ "${MARSPOT_BENCH_ALLOW_STALE_COMPETITORS:-}" == "1" ]] && \
   STALE_PASS="export MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1;"
+# The measurement holds the machine's bench lock, exclusively, for as
+# long as it runs.
+#
+# That lock is how everything on this host says "I am using the CPU":
+# builds, test runs and batch jobs take it shared and run alongside each
+# other, a measurement takes it exclusively and therefore waits for all
+# of them.  We were not taking it at all -- the header used to say macOS
+# has no flock(1), which stopped being true when Homebrew's went on the
+# runner -- so the gate measured straight through whatever else was
+# running.  On 2026-10-01 that was a research job holding three cores
+# for three hours, and the same scenario read 218 MB/s and 142 MB/s
+# forty minutes apart, one side of the gate's floor and then the other.
+# A number taken while someone else has the CPU is not a slower number,
+# it is not a number.
+LOCK_CMD="flock ${MARSPOT_BENCH_LOCK:-/Users/Shared/bench.lock}"
+if [[ "${MARSPOT_BENCH_NO_LOCK:-}" == "1" ]]; then
+  echo "==> MARSPOT_BENCH_NO_LOCK=1 — measuring without the host lock" >&2
+  LOCK_CMD=""
+fi
 set +e
 ssh "$HOST" "
   set -e
@@ -160,7 +181,16 @@ ssh "$HOST" "
   export CARGO_TARGET_DIR=\$HOME/$REMOTE_DIR/target
   $STALE_PASS
   echo \$\$ > $REMOTE_PIDF
-  exec caffeinate -dims ./bin/bench.sh $ARGS_Q
+  export PATH=/opt/homebrew/bin:\$PATH
+  if [ -n \"$LOCK_CMD\" ] && ! command -v flock >/dev/null; then
+    echo 'bench-remote: no flock on the runner (brew install flock)' >&2
+    exit 1
+  fi
+  if [ -n \"$LOCK_CMD\" ]; then
+    $LOCK_CMD -n true 2>/dev/null || \
+      echo '==> waiting for the host bench lock (something else is running)' >&2
+  fi
+  exec $LOCK_CMD caffeinate -dims ./bin/bench.sh $ARGS_Q
 " </dev/null
 REMOTE_RC=$?
 set -e

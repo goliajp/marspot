@@ -111,8 +111,17 @@ set +e
 # this stops.  An earlier sweep that ranked ten and fourteen LAST was
 # reading the load it had made itself; load1 is a lagging average, and
 # each run has to start from a quiet box or the comparison is noise.
+# The run holds the host's bench lock, shared.
+#
+# Shared is what heavy work takes: several builds and test runs can hold
+# it at once and none of them waits for another.  What it does do is
+# make a measurement -- which takes the same lock exclusively -- wait
+# for this to finish instead of reading a number taken while a test
+# suite had the cores.  See `bin/bench-remote.sh` for the other half.
 ssh "$HOST" "echo \$\$ > $REMOTE_PIDF; cd ~/$REMOTE_DIR && \
-  MARSPOT_TEST_JOBS=${MARSPOT_TEST_JOBS:-14} exec bin/test.sh$args"
+  export PATH=/opt/homebrew/bin:\$PATH && \
+  MARSPOT_TEST_JOBS=${MARSPOT_TEST_JOBS:-14} \
+  exec flock -s ${MARSPOT_BENCH_LOCK:-/Users/Shared/bench.lock} bin/test.sh$args"
 rc=$?
 set -e
 exit $rc
