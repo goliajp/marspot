@@ -260,6 +260,11 @@ pub struct Terminal {
     /// `\r\n` advances TWO rows instead of one — visible as extra blank
     /// rows between every row of TUI content (claudecode welcome box).
     pending_wrap: bool,
+    /// Where the tabs are.  A tab used to be a no-op here, so anything
+    /// that laid its output out with them came out with its columns
+    /// collapsed — and the kernel does not help: a pseudo-terminal
+    /// leaves `OXTABS` off, so the tab arrives verbatim.
+    tabs: crate::tabs::TabStops,
     /// Rollbacks in a row.  A program that draws its own input
     /// somewhere else — codex, and any full-screen TUI that skips the
     /// alternate screen — never confirms a prediction, so the guess
@@ -536,6 +541,7 @@ impl Terminal {
             mouse_tracking_mode: MouseTrackingMode::Off,
             mouse_sgr_encoding: false,
             pending_wrap: false,
+            tabs: crate::tabs::TabStops::new(cols),
             predict_misses: 0,
             predict_declined: 0,
             predictions: VecDeque::new(),
@@ -779,6 +785,7 @@ impl Terminal {
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.grid.resize(cols, rows);
+        self.tabs.resize(cols);
         // Reset DECSTBM scroll region to full grid on resize — apps
         // re-set their region when they reflow anyway (xterm behavior).
         // Saves us from having to clamp + worry about top > bot edge
@@ -1058,6 +1065,7 @@ impl Terminal {
             let mouse_tracking_mode = &mut self.mouse_tracking_mode;
             let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
             let pending_wrap = &mut self.pending_wrap;
+            let tabs = &mut self.tabs;
             let cluster_buf = &mut self.cluster_buf;
             let cluster_fast = &mut self.cluster_fast;
             let cluster_anchor = &mut self.cluster_anchor;
@@ -1090,6 +1098,7 @@ impl Terminal {
                 mouse_tracking_mode,
                 mouse_sgr_encoding,
                 pending_wrap,
+                tabs,
                 cluster_buf,
                 cluster_fast,
                 cluster_anchor,
@@ -2296,6 +2305,7 @@ struct Handler<'a> {
     mouse_tracking_mode: &'a mut MouseTrackingMode,
     mouse_sgr_encoding: &'a mut bool,
     pending_wrap: &'a mut bool,
+    tabs: &'a mut crate::tabs::TabStops,
     cluster_buf: &'a mut String,
     /// See `Terminal::cluster_fast`.
     cluster_fast: &'a mut Option<(char, u8)>,
@@ -3187,7 +3197,14 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 let (_col, row) = self.grid.cursor();
                 self.grid.set_cursor(0, row);
             }
-            0x09 => {} // TAB — tab stops land in a later phase
+            0x09 => {
+                // HT.  The deferred wrap is deliberately NOT cleared:
+                // a tab does not move to a new row, and ghostty keeps
+                // it here too.
+                let (col, row) = self.grid.cursor();
+                let to = self.tabs.next(col, 1);
+                self.grid.set_cursor(to, row);
+            }
             0x07 => {} // BEL — visible bell deferred
             _ => {}    // unknown C0 control: ignore for now
         }
@@ -3199,6 +3216,11 @@ impl<'a> ParserCallbacks for Handler<'a> {
         // No blanket clear of the deferred wrap here: an escape that
         // does not move the cursor must not drop it (see `csi_dispatch`).
         match byte {
+            // HTS — set a tab stop at the cursor's column.
+            b'H' if intermediates.is_empty() => {
+                let (col, _) = self.grid.cursor();
+                self.tabs.set(col);
+            }
             // DECSC — save cursor (position + SGR attrs + deferred wrap).
             b'7' => {
                 let (col, row) = self.grid.cursor();
@@ -3508,6 +3530,30 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // HPA: horizontal position absolute (1-indexed).
                 let c = param(params, 0, 1).saturating_sub(1);
                 self.grid.set_cursor(c, row);
+            }
+            b'I' => {
+                // CHT — forward n tab stops.  Like HT, it does not
+                // change rows, so the deferred wrap stands.
+                let n = param(params, 0, 1).max(1) as u16;
+                let to = self.tabs.next(col, n);
+                self.grid.set_cursor(to, row);
+            }
+            b'Z' => {
+                // CBT — backward n tab stops.
+                *self.pending_wrap = false;
+                let n = param(params, 0, 1).max(1) as u16;
+                let to = self.tabs.prev(col, n);
+                self.grid.set_cursor(to, row);
+            }
+            b'g' => {
+                // TBC — clear this column's stop (0, the default) or
+                // every stop (3).  Other values are undefined and
+                // ignored rather than guessed at.
+                match param(params, 0, 0) {
+                    0 => self.tabs.clear(col),
+                    3 => self.tabs.clear_all(),
+                    _ => {}
+                }
             }
             b'd' => {
                 *self.pending_wrap = false;
