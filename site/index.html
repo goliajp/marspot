@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Marspot — a terminal for people who keep twenty of them open</title>
+<meta name="description" content="A macOS terminal written in Rust. Cheap with many sessions open, and it knows what a coding agent in a pane is doing.">
+<meta property="og:title" content="Marspot">
+<meta property="og:description" content="A macOS terminal written in Rust. Cheap with many sessions open, and it knows what a coding agent in a pane is doing.">
+<meta property="og:type" content="website">
+<style>
+  :root {
+    color-scheme: dark light;
+    --bg: #0b0b0c;
+    --panel: #141416;
+    --fg: #e8e6e3;
+    --dim: #8b8985;
+    --rule: #26262a;
+    --accent: #d7775a;
+    --ok: #7fb069;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #fbfaf8; --panel: #ffffff; --fg: #1b1a18;
+      --dim: #6a6862; --rule: #e4e1db; --accent: #b4522f;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.65 var(--sans);
+    font-feature-settings: "kern" 1;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 60rem; margin: 0 auto; padding: 0 1.5rem; }
+  a { color: inherit; text-decoration-color: var(--dim); text-underline-offset: 3px; }
+  a:hover { text-decoration-color: var(--accent); }
+  code, .mono { font-family: var(--mono); font-size: 0.92em; }
+
+  header { padding: 6rem 0 4rem; border-bottom: 1px solid var(--rule); }
+  .mark {
+    font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.22em;
+    text-transform: uppercase; color: var(--dim); margin: 0 0 1.75rem;
+  }
+  h1 {
+    font-size: clamp(2rem, 5.5vw, 3.1rem); line-height: 1.12;
+    letter-spacing: -0.02em; font-weight: 640; margin: 0 0 1.25rem;
+    max-width: 22ch;
+  }
+  .lede { font-size: clamp(1.05rem, 2.2vw, 1.2rem); color: var(--dim); margin: 0; max-width: 56ch; }
+
+  .cta { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-top: 2.5rem; }
+  .btn {
+    display: inline-block; padding: 0.7rem 1.15rem; border-radius: 7px;
+    background: var(--fg); color: var(--bg); text-decoration: none;
+    font-weight: 600; font-size: 0.95rem;
+  }
+  .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--rule); }
+  .req { color: var(--dim); font-size: 0.88rem; }
+
+  section { padding: 4rem 0; border-bottom: 1px solid var(--rule); }
+  h2 {
+    font-size: 0.8rem; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--dim); font-weight: 600; margin: 0 0 1.75rem;
+  }
+  h3 { font-size: 1.15rem; margin: 0 0 0.5rem; letter-spacing: -0.01em; }
+  p { max-width: 62ch; }
+  .two { display: grid; gap: 2.5rem; grid-template-columns: 1fr; }
+  @media (min-width: 46rem) { .two { grid-template-columns: 1fr 1fr; gap: 3rem; } }
+
+  table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 0.88rem; }
+  caption { text-align: left; color: var(--dim); font-family: var(--sans); font-size: 0.9rem; padding-bottom: 0.75rem; }
+  th, td { text-align: right; padding: 0.55rem 0.75rem; border-bottom: 1px solid var(--rule); }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { color: var(--dim); font-weight: 500; }
+  td.win { color: var(--ok); font-weight: 600; }
+
+  .note {
+    background: var(--panel); border: 1px solid var(--rule); border-radius: 9px;
+    padding: 1.25rem 1.4rem; margin-top: 1.75rem;
+  }
+  .note p { margin: 0 0 0.6rem; font-size: 0.93rem; color: var(--dim); }
+  .note p:last-child { margin-bottom: 0; }
+
+  ul.plain { list-style: none; padding: 0; margin: 0; }
+  ul.plain li { padding: 0.55rem 0; border-bottom: 1px solid var(--rule); font-size: 0.95rem; }
+  ul.plain li:last-child { border-bottom: 0; }
+
+  footer { padding: 3rem 0 5rem; color: var(--dim); font-size: 0.88rem; }
+  footer a { color: var(--dim); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <p class="mark">Marspot</p>
+    <h1>A terminal for people who keep twenty of them open.</h1>
+    <p class="lede">
+      Written in Rust for macOS. Each pane is its own process, nothing animates when
+      nothing changes, and the thing running in a pane is something the terminal
+      knows about rather than text scrolling past.
+    </p>
+    <div class="cta">
+      <a class="btn" href="https://github.com/goliajp/marspot/releases/latest">Download</a>
+      <a class="btn ghost" href="https://github.com/goliajp/marspot">Source</a>
+      <span class="req">macOS 14 or newer · Apple silicon</span>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2>Why</h2>
+    <div class="two">
+      <div>
+        <h3>It stays cheap when you open twenty panes</h3>
+        <p>
+          Each pane owns its own PTY in its own process. The window process draws and
+          nothing redraws unless something changed. A pane that crashes does not take
+          the window with it, and idle panes cost close to nothing.
+        </p>
+      </div>
+      <div>
+        <h3>It treats a coding agent as a program, not as text</h3>
+        <p>
+          Marspot knows which agent is running where, what it is doing right now, and
+          what it is costing. It can act on that: move a session off an account that
+          has run out of quota and pick the conversation back up, hand work from one
+          agent to another, park a pane that has gone quiet and bring it back on a
+          keystroke.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Speed</h2>
+    <table>
+      <caption>
+        Throughput reading a prepared byte stream, MB/s, higher is better. Measured
+        2026-09-29 on an idle Mac mini, macOS 26.5, every terminal driven through its
+        own interface in one sequential cycle so each number is that terminal against
+        an otherwise quiet machine.
+      </caption>
+      <thead>
+        <tr><th>stream</th><th>Marspot</th><th>Ghostty 1.3.1</th><th>iTerm2 3.7.3</th><th>Terminal 2.15</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>ASCII</td><td class="win">128.0</td><td>97.0</td><td>84.2</td><td>43.2</td></tr>
+        <tr><td>mixed</td><td class="win">128.0</td><td>88.9</td><td>24.1</td><td>36.0</td></tr>
+        <tr><td>CJK</td><td class="win">133.3</td><td>118.5</td><td>10.0</td><td>35.6</td></tr>
+        <tr><td>emoji</td><td class="win">128.0</td><td>110.3</td><td>0.5</td><td>38.6</td></tr>
+      </tbody>
+    </table>
+
+    <div class="note">
+      <p><strong>What this measures, and what it does not.</strong></p>
+      <p>
+        It measures how fast a terminal reads and parses a pseudo-terminal. It says
+        nothing about frame rate or about the delay between a keystroke and a
+        character appearing. A terminal that combines several updates into one frame
+        does less drawing work here, and that is a reasonable design choice rather
+        than cheating.
+      </p>
+      <p>
+        One run, one machine, one day. Repeatability has not been established, and
+        three of the four numbers landing on exactly 128.0 says the timer's resolution
+        is the limiting factor at these speeds.
+      </p>
+      <p>
+        The harness is in the repository. A benchmark you cannot re-run is a marketing
+        claim, so the intention is that you re-run it.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Not yet</h2>
+    <p>
+      Pre-1.0, and used daily by the people writing it. These are the things you would
+      hit in the first hour, listed because finding them yourself is worse.
+    </p>
+    <ul class="plain">
+      <li>Horizontal tabs are not implemented — a literal tab character is dropped.</li>
+      <li>One cell holds one code point, so combining marks, emoji built from several
+          code points, and flags collapse to their first one.</li>
+      <li>Mouse reporting forwards the wheel only; clicks and drags do not reach the
+          program in the pane.</li>
+      <li>No clipboard, hyperlink, working-directory or prompt escape sequences
+          (<span class="mono">OSC 52 / 8 / 7 / 133</span>).</li>
+      <li>Line-drawing character sets are not translated, so some text interfaces draw
+          letters where box characters belong.</li>
+      <li>No terminfo entry of its own; <span class="mono">TERM</span> is set to
+          <span class="mono">xterm-256color</span>, which claims a few capabilities that
+          are not implemented yet.</li>
+      <li>Fonts, themes and key bindings are not configurable yet.</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>
+      Made by <a href="https://golia.jp">GOLIA K.K.</a> ·
+      <a href="https://github.com/goliajp/marspot">Source</a> ·
+      Dual licensed Apache 2.0 and MIT
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>
