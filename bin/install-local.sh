@@ -237,50 +237,29 @@ else
   echo "    WARN: no cert; binaries stay adhoc (MARSPOT_ALLOW_ADHOC=1)" >&2
 fi
 
-# ── 2. Scaffold the bundle (first run) ────────────────────────────
+# ── 2. Scaffold the bundle ────────────────────────────────────────
+# One builder, shared with the release workflow — see
+# bin/build-app-bundle.sh.  It rewrites Info.plist every time rather
+# than patching it, which is what stopped the installed app reporting
+# a version from months ago.  Binaries are placed in step 4; this call
+# is only here to make sure the bundle and its plist exist and are
+# current before anything compares against them.
 mkdir -p "$MACOS"
-if [[ ! -f "$PLIST" ]]; then
-  echo "==> creating Info.plist"
-  cat > "$PLIST" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key><string>Marspot</string>
-  <key>CFBundleDisplayName</key><string>Marspot</string>
-  <key>CFBundleIdentifier</key><string>com.goliajp.marspot</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleExecutable</key><string>marspot-shell</string>
-  <key>CFBundleShortVersionString</key><string>0.2.0</string>
-  <key>LSMinimumSystemVersion</key><string>14.0</string>
-  <key>NSHighResolutionCapable</key><true/>
-  <key>CFBundleIconFile</key><string>AppIcon</string>
-</dict>
-</plist>
-PLIST
-fi
-# Make sure CFBundleIconFile is wired (idempotent — for old bundles
-# created before the icon landed).
-/usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile AppIcon' "$PLIST" 2>/dev/null \
-  || /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string AppIcon' "$PLIST"
-# Install the .icns into Resources/.  iconutil's output isn't in the
-# repo (built from assets/Marspot.iconset/ at gen time);  fall back to
-# the iconset's 512px PNG if .icns isn't available.
-mkdir -p "$MACOS/../Resources"
-if [[ -f "$ROOT/assets/AppIcon.icns" ]]; then
-  cp "$ROOT/assets/AppIcon.icns" "$MACOS/../Resources/AppIcon.icns"
-fi
-# macOS aggressively caches icons by bundle identifier.  Touching the
-# bundle root tells Finder/Dock to re-read the icon on next launch.
-touch "$MACOS/.." 2>/dev/null || true
-# No symlinks: a stale `marspot` symlink into target/ would make the
-# installed app track dev builds.  Drop it; the bundle runs the shell.
-if [[ -L "$MACOS/marspot" ]]; then
-  echo "==> removing legacy target/ symlink ($MACOS/marspot)"
-  rm -f "$MACOS/marspot"
-fi
-/usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable marspot-shell' "$PLIST" 2>/dev/null \
-  || /usr/libexec/PlistBuddy -c 'Add :CFBundleExecutable string marspot-shell' "$PLIST"
+# Only when the binaries alongside it can be replaced in the same
+# breath.  Info.plist is sealed by the signature of the executable
+# beside it, so rewriting it under a bundle whose binaries are pinned
+# (the app is running) leaves the bundle unverifiable and macOS kills
+# anything launched from it.  Measured the hard way, 2026-09-30.
+#
+# When the app is running, the plist waits for the lander, which
+# replaces the binaries and the plist together and re-signs.
+plist_is_current() {
+  local want have
+  want="$(sed -n '/^\[package\]/,/^\[/p' "$ROOT/Cargo.toml" \
+          | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
+  have="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST" 2>/dev/null || echo "")"
+  [[ -n "$want" && "$want" == "$have" ]]
+}
 
 # ── 3. Decide the silent update BEFORE overwriting the bundle ─────
 # Order matters: step 4 overwrites the bundle binaries, so any
@@ -516,8 +495,41 @@ for b in marspot-shell marspot-core marspot-session; do
   else
     install -m 0755 "$TARGET/$b" "$MACOS/$b"
     xattr -c "$MACOS/$b" 2>/dev/null || true   # clear ALL provenance/quarantine
+    BUNDLE_WRITABLE=1
   fi
 done
+
+# The plist rides with the binaries or not at all.  It is sealed by
+# their signature; writing it while they are pinned leaves a bundle
+# that macOS refuses to launch, and the failure is a SIGKILL with no
+# explanation attached.
+if (( ${BUNDLE_WRITABLE:-0} )); then
+  if ! plist_is_current; then
+    echo "==> refreshing Info.plist"
+    "$ROOT/bin/build-app-bundle.sh" --scaffold-only --out "$APP" >/dev/null
+  fi
+  # Sign the BUNDLE, not the files in it.  Signing each binary on its
+  # own leaves no `Contents/_CodeSignature`, and a bundle without one
+  # fails verification the moment anything it should have sealed — the
+  # plist above, for instance — changes underneath.  That is what made
+  # a cold launch die with nothing but a SIGKILL on 2026-09-30.
+  if [[ -n "${SIGN_ID:-}" ]]; then
+    codesign --force --sign "$SIGN_ID" --timestamp=none "$APP" >/dev/null 2>&1 || true
+  fi
+fi
+
+# Say whether the bundle is launchable, every time.  A broken seal is
+# invisible until someone cold-launches the app and it dies without a
+# message; one line here is cheaper than that.
+if codesign --verify --verbose=2 "$APP" >/dev/null 2>&1; then
+  echo "    bundle signature: ok"
+else
+  why=$(codesign --verify --verbose=2 "$APP" 2>&1 | head -1)
+  echo "    bundle signature: BROKEN — $why"
+  echo "       ↳ the running app is unaffected (it runs from current/), but a"
+  echo "         cold launch would be killed.  Quit fully to let the lander repair it."
+  sup_log "INSTALL_BUNDLE_UNVERIFIED" "$why"
+fi
 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
   -f "$APP" >/dev/null 2>&1 || true
 
@@ -557,6 +569,12 @@ if (( ${ARM_LANDER:-0} )); then
     [[ -f "$src" ]] || src="$TREE/current/$b"
     install -m 0755 "$src" "$LANDER_DIR/$b"
   done
+  # The plist rides with them.  It is sealed by the bundle signature,
+  # so landing new binaries and leaving an old plist — or the reverse —
+  # produces a bundle macOS will not launch.  One moment, both.
+  "$ROOT/bin/build-app-bundle.sh" --scaffold-only --out "$LANDER_DIR/stage.app" >/dev/null
+  install -m 0644 "$LANDER_DIR/stage.app/Contents/Info.plist" "$LANDER_DIR/Info.plist"
+  rm -rf "$LANDER_DIR/stage.app"
   cat > "$LANDER_DIR/land.sh" <<'LANDER'
 #!/bin/sh
 # Generated by bin/install-local.sh — do not edit here; edit the
@@ -631,6 +649,9 @@ for b in marspot-shell marspot-core marspot-session; do
   /usr/bin/install -m 0755 "$STAGE/$b" "$MACOS/$b" && echo "installed $b"
   /usr/bin/xattr -c "$MACOS/$b" 2>/dev/null
 done
+# The plist the binaries were staged with.  Landing one without the
+# other leaves a bundle whose seal does not match its contents.
+[ -f "$STAGE/Info.plist" ] && /usr/bin/install -m 0644 "$STAGE/Info.plist" "$APP/Contents/Info.plist"
 # Changing any bundle content invalidates the outer signature, and the
 # Developer Tools TCC grant is matched against it — so re-sign the
 # binaries AND the bundle, innermost first.

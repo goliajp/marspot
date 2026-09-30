@@ -1,26 +1,45 @@
 name: release
 
-# Cut a signed silent-update release when a version tag is pushed.
+# Cut a release when a version tag is pushed.
 #
-#   git tag v0.2.1 && git push origin v0.2.1
+#   git tag v0.4.1 && git push origin v0.4.1
 #
-# Produces `marspot-aarch64-apple-darwin.tar.gz` + `.sig` (ECDSA P-256 /
-# SHA-256, signed with the MARSPOT_UPDATE_SEC repo secret) and attaches
-# them to a GitHub Release for the tag.  The shipped updater polls
-# `releases/latest`, downloads the asset + `.sig`, verifies against the
-# checked-in `keys/marspot-update.pub`, and stages it — so the asset name
-# and signing key here MUST match what the updater expects.
+# Two artefacts come out, for two different audiences:
 #
-# Supply-chain posture: only the first-party actions/checkout is used;
-# Rust (rustup), gh, and openssl are preinstalled on the runner. No
-# third-party actions touch the signing key.
+#   Marspot-<version>.dmg                        — what a person installs
+#   marspot-aarch64-apple-darwin.tar.gz + .sig   — what the shipped
+#                                                  updater downloads
+#
+# The updater polls `releases/latest`, fetches the tarball and its
+# detached signature, verifies against the checked-in
+# `keys/marspot-update.pub`, and stages it.  The asset name and the
+# signing key here must match what the updater asks for.
+#
+# A release is refused rather than published unsigned.  A terminal
+# distributed without a Developer ID and a notarisation ticket makes
+# its user answer a scary dialog to run it, and pays a Gatekeeper scan
+# on every first execution of every binary inside it.
+#
+# Secrets this needs, all of them repository secrets:
+#
+#   MARSPOT_UPDATE_SEC    ECDSA P-256 private key for the update signature
+#   MACOS_CERT_P12        base64 of the "Developer ID Application" .p12
+#   MACOS_CERT_PASSWORD   its export password
+#   MACOS_NOTARY_KEY      base64 of the App Store Connect API key (.p8)
+#   MACOS_NOTARY_KEY_ID   that key's id
+#   MACOS_NOTARY_ISSUER   the issuer uuid
+#
+# An API key rather than an app-specific password: it is scoped, it can
+# be revoked on its own, and it does not belong to a person's Apple ID.
+#
+# Supply chain: first-party actions only.  Nothing third-party is given
+# a chance to see the signing key.
 
 on:
   push:
     tags:
       - 'v*'
 
-# Least privilege: the job only needs to create a Release.
 permissions:
   contents: write
 
@@ -30,8 +49,6 @@ concurrency:
 
 jobs:
   release:
-    # arm64 Apple Silicon runner → native aarch64-apple-darwin build,
-    # matching the tarball name the updater asks for.
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -42,18 +59,133 @@ jobs:
           rustup default stable
           rustc -V
 
-      - name: Tag ↔ Cargo version sanity
+      - name: Every secret this needs is present
+        # Checked first and all at once.  Discovering a missing secret
+        # after notarisation has already been submitted wastes a round
+        # trip and leaves a half-made release behind.
+        env:
+          MARSPOT_UPDATE_SEC: ${{ secrets.MARSPOT_UPDATE_SEC }}
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
-          cargo_v="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          echo "tag=$tag cargo=$cargo_v"
-          if [[ "$tag" != "$cargo_v" ]]; then
-            echo "::error::tag v$tag != Cargo.toml version $cargo_v — bump Cargo.toml before tagging" >&2
+          missing=()
+          for name in MARSPOT_UPDATE_SEC MACOS_CERT_P12 MACOS_CERT_PASSWORD \
+                      MACOS_NOTARY_KEY MACOS_NOTARY_KEY_ID MACOS_NOTARY_ISSUER; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::missing repository secrets: ${missing[*]}" >&2
+            echo "A release is not published unsigned; add them and re-tag." >&2
             exit 1
           fi
 
-      - name: Build + sign release tarball
+      - name: Tag names the product version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_v="$(sed -n '/^\[package\]/,/^\[/p' Cargo.toml \
+                     | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
+          echo "tag=$tag product=$cargo_v"
+          if [[ "$tag" != "$cargo_v" ]]; then
+            echo "::error::tag v$tag is not the product version $cargo_v" >&2
+            exit 1
+          fi
+
+      - name: The gate
+        # The same tests CI runs.  A tag is not a reason to skip them;
+        # it is the one moment they matter most.
+        run: cargo test --workspace
+
+      - name: Build
+        run: cargo build --release --bins
+
+      - name: Import the signing identity
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # A keychain of its own, unlocked only for this job, deleted
+          # with the runner.  The login keychain is not touched.
+          kc="$RUNNER_TEMP/build.keychain"
+          pw="$(uuidgen)"
+          security create-keychain -p "$pw" "$kc"
+          security set-keychain-settings -lut 3600 "$kc"
+          security unlock-keychain -p "$pw" "$kc"
+          p12="$RUNNER_TEMP/cert.p12"
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$p12"
+          security import "$p12" -k "$kc" -P "$MACOS_CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          rm -f "$p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pw" "$kc" >/dev/null
+          # Put ours in the search list without dropping the ones that
+          # were there.  Word-splitting a command substitution would
+          # break on any path with a space in it.
+          existing=()
+          while IFS= read -r line; do
+            existing+=("$(echo "$line" | tr -d '"' | xargs)")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$kc" "${existing[@]}"
+          id=$(security find-identity -v -p codesigning "$kc" \
+               | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -1)
+          [[ -n "$id" ]] || { echo "::error::no Developer ID Application identity in the imported certificate" >&2; exit 1; }
+          echo "CODESIGN_IDENTITY=$id" >> "$GITHUB_ENV"
+          echo "BUILD_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+
+      - name: Assemble and sign the app
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/Marspot.app"
+          bin/build-app-bundle.sh --out "$app"
+          # Inside out: nested binaries first, the bundle last, or the
+          # outer signature is invalidated by signing what it covers.
+          for b in marspot-core marspot-session marspot-shell; do
+            codesign --force --timestamp --options runtime \
+              --sign "$CODESIGN_IDENTITY" "$app/Contents/MacOS/$b"
+          done
+          codesign --force --timestamp --options runtime \
+            --sign "$CODESIGN_IDENTITY" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+      - name: Notarise and staple
+        env:
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/Marspot.app"
+          key="$RUNNER_TEMP/notary.p8"
+          printf '%s' "$MACOS_NOTARY_KEY" | base64 --decode > "$key"
+          zip="$RUNNER_TEMP/Marspot-notarise.zip"
+          ditto -c -k --keepParent "$app" "$zip"
+          xcrun notarytool submit "$zip" \
+            --key "$key" --key-id "$MACOS_NOTARY_KEY_ID" \
+            --issuer "$MACOS_NOTARY_ISSUER" --wait
+          rm -f "$key" "$zip"
+          xcrun stapler staple "$app"
+          # Ask the way Gatekeeper asks.  A stapled ticket that does not
+          # satisfy this would hand the user a dialog on first launch.
+          spctl --assess --type execute --verbose=4 "$app"
+
+      - name: Disk image
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"
+          stage="$RUNNER_TEMP/dmg"
+          mkdir -p "$stage"
+          cp -R "$RUNNER_TEMP/Marspot.app" "$stage/"
+          ln -s /Applications "$stage/Applications"
+          hdiutil create -volname "Marspot $v" -srcfolder "$stage" \
+            -ov -format UDZO "$RUNNER_TEMP/Marspot-$v.dmg"
+          codesign --force --timestamp --sign "$CODESIGN_IDENTITY" \
+            "$RUNNER_TEMP/Marspot-$v.dmg"
+
+      - name: Build and sign the update tarball
         env:
           MARSPOT_UPDATE_SEC: ${{ secrets.MARSPOT_UPDATE_SEC }}
         run: |
@@ -61,20 +193,26 @@ jobs:
           keyfile="$(mktemp)"
           trap 'rm -f "$keyfile"' EXIT
           printf '%s\n' "$MARSPOT_UPDATE_SEC" > "$keyfile"
-          # --strip: smaller asset; --sign: writes .sig and self-verifies
-          # against keys/marspot-update.pub (fails the build on key mismatch
-          # so an unverifiable release can never publish).
+          # --sign self-verifies against keys/marspot-update.pub, so a
+          # key that does not match the one shipped in the binary fails
+          # here instead of at every user's next poll.
           bin/build-release-tarball.sh --strip --sign "$keyfile"
 
-      - name: Publish GitHub Release
+      - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          out="target/release/marspot-aarch64-apple-darwin.tar.gz"
-          test -f "$out" && test -f "$out.sig"
+          v="${GITHUB_REF_NAME#v}"
+          tar="target/release/marspot-aarch64-apple-darwin.tar.gz"
+          dmg="$RUNNER_TEMP/Marspot-$v.dmg"
+          test -f "$tar" && test -f "$tar.sig" && test -f "$dmg"
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Marspot $GITHUB_REF_NAME" \
-            --notes "Automated signed release for $GITHUB_REF_NAME (silent-update asset + detached .sig)." \
-            "$out" "$out.sig"
+            --title "Marspot $v" \
+            --notes "Signed and notarised. \`Marspot-$v.dmg\` to install by hand; the tarball and its detached signature are what an installed copy updates itself from." \
+            "$dmg" "$tar" "$tar.sig"
+
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$BUILD_KEYCHAIN" || true
