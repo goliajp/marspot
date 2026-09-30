@@ -23,7 +23,17 @@ fn env_seen_by_a_pane(strip: Vec<String>) -> String {
         // open for a moment removes the race; what this test is about
         // is which variables a pane sees, not what happens when a
         // child exits instantly.
-        args: vec!["-c".into(), "env; sleep 1; exit".into()],
+        // `__END__` is printed last, on purpose.  The reader used to
+        // stop as soon as it saw one of the variables it was looking
+        // for, but `env` prints in no particular order: on a build
+        // runner that variable came out second and everything after it
+        // was never read, which then failed as "inheritance is not the
+        // default" while the capture was two lines long.
+        //
+        // The sleep is not decoration either.  `env; exit` can be over
+        // before the parent's first read, and once the slave closes,
+        // whatever was in the master is gone.
+        args: vec!["-c".into(), "env; echo __END__; sleep 1; exit".into()],
         size: TerminalSize { cols: 200, rows: 40, ..Default::default() },
         env_remove_prefixes: strip,
         ..Default::default()
@@ -46,7 +56,7 @@ fn env_seen_by_a_pane(strip: Vec<String>) -> String {
         match pty.read(&mut buf) {
             Ok(n) if n > 0 => out.push_str(&String::from_utf8_lossy(&buf[..n])),
             _ => {
-                if out.contains("CANARY_TAIL") {
+                if out.contains("__END__") {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(5));
