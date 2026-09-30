@@ -357,6 +357,32 @@ pub(super) fn wrap_text_greedy<F: Fn(&str) -> f64>(
 /// Run the layout pass.  `origin` is the parent's top-left in phys;
 /// `constraints` bounds this node's size.  Returns the laid-out
 /// subtree with all rects in phys.
+/// The node's own data, without its subtree.
+///
+/// `LaidOut` keeps a copy of the `View` it laid out, and cloning a
+/// stack deep-copies every descendant — so a tree of n nodes nested d
+/// deep was copied O(n·d) times, once per ancestor.  Nothing reads
+/// those copies' children: `paint` and `hit_test` walk `LaidOut`'s own
+/// `children`, and they look at the stored view only for its kind and
+/// its own fields.  So the children do not come along.
+///
+/// Only the two stacks, because they are the ones that nest.  The
+/// other variants that hold a subtree reach it through a `Box`, which
+/// has nothing empty to hold — and measured, emptying them was 13
+/// allocations out of 227, which does not buy a placeholder `View`
+/// sitting in the tree claiming to be a child.
+fn without_children(v: &View) -> View {
+    match v {
+        View::VStack { children: _, gap, align, distribute } => View::VStack {
+            children: Vec::new(), gap: *gap, align: *align, distribute: *distribute,
+        },
+        View::HStack { children: _, gap, align, distribute } => View::HStack {
+            children: Vec::new(), gap: *gap, align: *align, distribute: *distribute,
+        },
+        other => other.clone(),
+    }
+}
+
 pub fn layout<'a>(view: &View, ctx: LayoutCtx<'a>, origin: (f64, f64), c: Constraints) -> LaidOut {
     match view {
         View::Text(t) => {
@@ -558,7 +584,7 @@ fn layout_lazy_vstack<'a>(
     }
 
     LaidOut {
-        view: self_view.clone(),
+        view: without_children(self_view),
         rect: Rect { x: origin.0, y: origin.1, w: viewport_w, h: viewport_h },
         deco: Decoration::default(),
         children: laid_children,
@@ -604,7 +630,7 @@ fn layout_lazy_hstack<'a>(
     }
 
     LaidOut {
-        view: self_view.clone(),
+        view: without_children(self_view),
         rect: Rect { x: origin.0, y: origin.1, w: viewport_w, h: viewport_h },
         deco: Decoration::default(),
         children: laid_children,
@@ -626,7 +652,7 @@ fn layout_grid<'a>(
 ) -> LaidOut {
     if cols == 0 {
         return LaidOut {
-            view: self_view.clone(),
+            view: without_children(self_view),
             rect: Rect { x: origin.0, y: origin.1, w: 0.0, h: 0.0 },
             deco: Decoration::default(),
             children: Vec::new(),
@@ -662,7 +688,7 @@ fn layout_grid<'a>(
     let total_h = rows as f64 * cell_h_phys + rows.saturating_sub(1) as f64 * row_gap_phys;
 
     LaidOut {
-        view: self_view.clone(),
+        view: without_children(self_view),
         rect: Rect { x: origin.0, y: origin.1, w: total_w, h: total_h },
         deco: Decoration::default(),
         children: laid_children,
@@ -720,7 +746,7 @@ fn layout_variable_grid<'a>(
     let cols = tracks_w.len();
     if cols == 0 {
         return LaidOut {
-            view: self_view.clone(),
+            view: without_children(self_view),
             rect: Rect { x: origin.0, y: origin.1, w: 0.0, h: 0.0 },
             deco: Decoration::default(),
             children: Vec::new(),
@@ -780,7 +806,7 @@ fn layout_variable_grid<'a>(
     let total_h: f64 = track_heights.iter().sum::<f64>()
         + needed_rows.saturating_sub(1) as f64 * row_gap_phys;
     LaidOut {
-        view: self_view.clone(),
+        view: without_children(self_view),
         rect: Rect { x: origin.0, y: origin.1, w: total_w, h: total_h },
         deco: Decoration::default(),
         children: laid_children,
@@ -830,7 +856,7 @@ fn layout_scroll<'a>(
     }
 
     LaidOut {
-        view: self_view.clone(),
+        view: without_children(self_view),
         rect: Rect { x: origin.0, y: origin.1, w: viewport_w, h: viewport_h },
         deco: Decoration::default(),
         children: vec![child_laid],
@@ -1008,7 +1034,7 @@ fn layout_stack<'a>(
     let size = c.clamp(w_self, h_self);
 
     LaidOut {
-        view: self_view.clone(),
+        view: without_children(self_view),
         rect: Rect { x: origin.0, y: origin.1, w: size.w, h: size.h },
         deco: Decoration::default(),
         children: laid_children,
@@ -1042,7 +1068,7 @@ fn layout_zstack<'a>(
         laid.rect.y = origin.1 + dy;
     }
     LaidOut {
-        view: self_view.clone(),
+        view: without_children(self_view),
         rect: Rect { x: origin.0, y: origin.1, w: size.w, h: size.h },
         deco: Decoration::default(),
         children: child_laid,
@@ -1062,7 +1088,7 @@ fn layout_modified<'a>(
     // Short-circuit Collapsed — zero-size rect, no child layout.
     if has_collapsed(mods) {
         return LaidOut {
-            view: self_view.clone(),
+            view: without_children(self_view),
             rect: Rect { x: origin.0, y: origin.1, w: 0.0, h: 0.0 },
             deco: Decoration { hidden: true, ..Decoration::default() },
             children: Vec::new(),
@@ -1252,7 +1278,7 @@ fn layout_modified<'a>(
     }
 
     LaidOut {
-        view: self_view.clone(),
+        view: without_children(self_view),
         rect: Rect { x: origin.0 + offset_phys.0, y: origin.1 + offset_phys.1, w: size.w, h: size.h },
         deco: bake,
         children: vec![child_laid],
