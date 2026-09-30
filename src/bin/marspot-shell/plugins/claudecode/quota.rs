@@ -174,6 +174,8 @@ pub(super) struct Situation<'a> {
     pub moves_this_episode: u8,
     /// Since the last move, if there was one.
     pub since_last_move: Option<Duration>,
+    /// How long this pane has been stuck on an account that is out.
+    pub stranded_for: Option<Duration>,
     /// Where the last move was aimed, if there was one.  A pane is
     /// bound to a profile by the scan, which happens after the
     /// process it names exists — so between the move and the binding
@@ -195,6 +197,14 @@ pub(super) enum Move {
 pub(super) const MOVES_PER_EPISODE: u8 = 2;
 /// And then it waits.
 pub(super) const MOVE_COOLDOWN: Duration = Duration::from_secs(600);
+/// How long "a tool is running here" is allowed to hold a pane.
+///
+/// The hold exists to protect a command of the user's from being
+/// killed with the process.  It is not meant to cover a CLI that has
+/// parked itself until its window reopens, which reads the same from
+/// the transcript — and did, for nine hours and 170 log lines
+/// (2026-09-29, sid 430).  Past this, the pane moves.
+pub(super) const TOOL_HOLD_MAX: Duration = Duration::from_secs(600);
 
 /// Where a refused pane goes next, or why it stays.
 ///
@@ -204,7 +214,9 @@ pub(super) fn next_move(s: &Situation) -> Move {
     // Moving kills the process, and a command running under it goes
     // with it.  That one waits; it will finish, and the next pass will
     // move the pane.
-    if s.tool_executing {
+    if s.tool_executing
+        && s.stranded_for.map(|d| d < TOOL_HOLD_MAX).unwrap_or(true)
+    {
         return Move::Hold("a tool is running here");
     }
     // A move already made and not yet visible.  The pane is rebound by
@@ -303,6 +315,7 @@ mod tests {
             moves_this_episode: 0,
             since_last_move: None,
             last_target: None,
+            stranded_for: None,
         }
     }
 
@@ -317,6 +330,16 @@ mod tests {
         // Not while it is in the middle of something.
         let s = Situation { tool_executing: true, ..situation(&r) };
         assert_eq!(next_move(&s), Move::Hold("a tool is running here"));
+
+        // But that hold is not forever.  A CLI parked until its window
+        // reopens reads exactly like a running tool, and held one pane
+        // for nine hours before this bound existed.
+        let s = Situation {
+            tool_executing: true,
+            stranded_for: Some(Duration::from_secs(601)),
+            ..situation(&r)
+        };
+        assert_eq!(next_move(&s), Move::To(3));
 
         // A move already made, and the pane is not there yet: wait
         // for it to land rather than start a second resume on top of
