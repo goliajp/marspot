@@ -1775,10 +1775,16 @@ fn profile_cycle_op(
             // into a CLI that was not reading input yet — the text
             // landed in the composer and the Enter behind it did not
             // submit it, which is what the user kept finding.
+            // …and if it never paints that much, go on anyway.  This
+            // wait only sharpens the timing of what follows; failing
+            // the run here throws away the resume that already
+            // happened and the sentence that was going to follow it,
+            // which is what killed five of ten switches on 2026-09-30.
             .step(
                 pty_op::Step::await_quiet(WAKE_QUIET_FOR)
                     .after_bytes(RESUME_FIRST_FRAME)
-                    .timeout(WAKE_WATCHDOG),
+                    .timeout(WAKE_WATCHDOG)
+                    .or_late(),
             ),
     )
     .map(|op| if say_continue { say_carry_on(op) } else { op })
@@ -1809,6 +1815,7 @@ fn say_carry_on(op: pty_op::PtyOp) -> pty_op::PtyOp {
             pty_op::Step::await_quiet(HOLD_SETTLE)
                 .after_bytes(COMPOSER_REDRAW)
                 .timeout(Duration::from_secs(10))
+                .or_late()
                 .named("before_enter"),
         )
         .step(pty_op::Step::send(b"\r".to_vec()).named("enter"))
@@ -3143,14 +3150,20 @@ mod tests {
         let enter = at("enter").expect("and press enter");
         assert!(resume < proc && proc < say, "{labels:?}");
         assert!(say < enter, "the newline is its own step: {labels:?}");
-        // Both waits have a byte floor.  Without one they are satisfied
-        // by a CLI that has emitted its startup trickle and gone quiet
-        // to load, and the sentence goes to something that is not
-        // reading input yet (pane 442, 2026-09-29).
+        // Both waits have a byte floor, and neither may fail the run:
+        // without the floor they are satisfied by a CLI that has
+        // emitted its startup trickle and gone quiet to load (pane
+        // 442, 2026-09-29); with the floor and no `or_late`, a CLI
+        // that paints less than the floor loses the sentence
+        // altogether (five panes, 2026-09-30).
         for (i, label) in [(proc + 1, "after the resume"), (enter - 1, "before the enter")] {
             match &op.steps[i].kind {
                 pty_op::StepKind::AwaitQuiet { min_bytes, .. } => {
-                    assert!(*min_bytes > 0, "{label}: a quiet wait with no floor: {labels:?}")
+                    assert!(*min_bytes > 0, "{label}: a quiet wait with no floor: {labels:?}");
+                    assert!(
+                        op.steps[i].proceed_on_timeout,
+                        "{label}: a timing wait must not fail the run: {labels:?}"
+                    );
                 }
                 _ => panic!("{label}: expected a quiet wait at step {i}: {labels:?}"),
             }
