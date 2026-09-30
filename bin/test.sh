@@ -61,5 +61,11 @@ mkdir -p "$MARSPOT_STATE_DIR"
 # Cost the first time this was noticed (2026-09-01): a wire change
 # visible in L3's own log, invisible to the assertion watching for it.
 cargo build --bin marspot-session
+# The pixel snapshots compare against a committed baseline only under
+# `check`.  Without it they render, assert nothing, and report green —
+# which is how a layout change could have moved every row in the dev
+# panel with the whole suite passing.  A machine with no GPU skips the
+# render itself; that is the test's own business, not this flag's.
+export MARSPOT_FONT_SNAPSHOT="${MARSPOT_FONT_SNAPSHOT:-check}"
 exec cargo nextest run --workspace --all-targets --all-features \
   --test-threads "${MARSPOT_TEST_JOBS:-6}" "$@"
