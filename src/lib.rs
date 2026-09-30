@@ -35,6 +35,36 @@ pub static MARSPOT_FP: &str = concat!(
     "|END"
 );
 
+/// The version of the product: what a tag is, what a release is named,
+/// what the updater compares against, and what a person means when
+/// they say which marspot they are on.
+///
+/// One definition, from `Cargo.toml`.  There used to be four numbers
+/// all called "the version" and none of them agreed, which is how the
+/// update channel came to be quietly dead: the shell handed the
+/// updater the *core layer's* build number, and the updater compared
+/// it to a release tag, so a tag could never be newer.
+pub const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// What the three layers were built from.
+///
+/// Not versions of anything anyone buys — build numbers, and they earn
+/// their keep twice: `install-local` decides from them which layers
+/// changed, and they are how you tell at a glance whether the code you
+/// just wrote is the code that is running.
+pub mod build_ids {
+    pub const SHELL: &str = env!("MARSPOT_VERSION_SHELL");
+    pub const CORE: &str = env!("MARSPOT_VERSION_CORE");
+    pub const SESSION: &str = env!("MARSPOT_VERSION_SESSION");
+}
+
+/// `0.4.0 (core 0.12.219)` — identity, then the build that is running.
+/// Both are wanted and they are not the same question.
+pub fn version_line() -> String {
+    format!("{PRODUCT_VERSION} (core {})", build_ids::CORE)
+}
+
+
 /// Per-layer version vector embedded in the binary rodata so
 /// `install-local.sh` can decide "did THIS layer's contract change?"
 /// without relying on byte-compare (which sees every rebuild as

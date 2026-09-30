@@ -541,6 +541,13 @@ mod tests {
 
     #[test]
     fn version_ordering() {
+        // The pair that kept the channel dead: the shell passed the
+        // core layer's build number as "what I am running", and the
+        // feed offers a release tag.  0.4.0 is not newer than 0.12.219
+        // and never would be, whatever we released.
+        assert!(!is_newer_than("0.4.0", "0.12.219"));
+        // What it compares now: a product version against the next one.
+        assert!(is_newer_than("0.4.1", "0.4.0"));
         assert!(is_newer_than("0.2.1", "0.2.0"));
         assert!(is_newer_than("1.0.0", "0.99.99"));
         assert!(!is_newer_than("0.2.0", "0.2.0"));
