@@ -29,7 +29,12 @@ fn env_seen_by_a_pane(strip: Vec<String>) -> String {
     let mut out = String::new();
     let mut buf = [0u8; 8192];
     let t0 = Instant::now();
-    while t0.elapsed() < Duration::from_secs(5) {
+    // Generous on purpose.  This waits for a shell to start and print
+    // its environment; the assertion is about what it prints, not how
+    // fast, and five seconds was short enough to lose on a shared
+    // build runner.  A correctness test that fails on a slow machine
+    // teaches people to re-run rather than to look.
+    while t0.elapsed() < Duration::from_secs(60) {
         match pty.read(&mut buf) {
             Ok(n) if n > 0 => out.push_str(&String::from_utf8_lossy(&buf[..n])),
             _ => {

@@ -4318,7 +4318,13 @@ mod tests {
     }
 
     fn poll_until<F: FnMut() -> bool>(what: &str, mut f: F) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        // Sixty, not ten.  What is being waited for is a process
+        // appearing and a scan noticing it; how long that takes is a
+        // property of the machine, and ten seconds was enough here and
+        // not enough on a shared build runner.  The budget only has to
+        // be long enough that exceeding it means something is actually
+        // wrong.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while std::time::Instant::now() < deadline {
             if f() {
                 return;
