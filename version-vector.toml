@@ -28,4 +28,4 @@
 
 shell   = "0.7.188"  # the return checks whether it landed
 core    = "0.12.231"  # motion and drag reach the program
-session = "0.11.110"  # DEC special graphics
+session = "0.11.111"  # TERM is set, not inherited

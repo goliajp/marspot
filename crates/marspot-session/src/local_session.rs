@@ -179,12 +179,21 @@ impl LocalSession {
         // forked zsh saw a sane env.  We replicate the same heuristic
         // here at the L3 boundary now that L3 owns the spawn.  Same
         // for the ZDOTDIR shim that installs PROMPT_SP / EOL_MARK.
-        let term_ok = std::env::var("TERM")
-            .map(|t| !t.is_empty() && t != "network" && t != "dumb" && t != "unknown")
-            .unwrap_or(false);
-        if !term_ok {
-            unsafe { std::env::set_var("TERM", "xterm-256color") };
-        }
+        // Unconditional, not "only when it looks broken".
+        //
+        // TERM describes the terminal a program is talking to, and the
+        // terminal is this one — whatever the launcher happened to
+        // have is a statement about some other terminal.  The old
+        // heuristic only replaced the obviously-wrong values, so a
+        // pane launched from a session that had exported, say,
+        // `screen-256color` handed that to every shell, and programs
+        // then addressed a terminal that is not here.
+        //
+        // The value stays `xterm-256color` rather than a name of our
+        // own until there is an entry of our own AND an answer for
+        // what a remote host should use over ssh — an entry nothing
+        // can look up is worse than borrowing one that is close.
+        unsafe { std::env::set_var("TERM", "xterm-256color") };
         if std::env::var_os("COLORTERM").is_none() {
             unsafe { std::env::set_var("COLORTERM", "truecolor") };
         }

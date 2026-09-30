@@ -2314,6 +2314,48 @@ mod boot_assembly_tests {
         panic!("L3 kept reporting mouse tracking after being told to stop");
     }
 
+    /// A pane's shell is told which terminal it is talking to.
+    ///
+    /// TERM used to be replaced only when it looked broken, so a pane
+    /// launched from a session that exported some other terminal's
+    /// name handed that on, and programs addressed a terminal that is
+    /// not here.  This sets a wrong one deliberately and checks the
+    /// shell does not see it.
+    #[test]
+    fn a_pane_is_not_given_the_launchers_idea_of_the_terminal() {
+        let _sb = Sandbox::new("mterm");
+        let (tx, _rx) = mpsc::channel();
+        let sid = reg::allocate_next_session_id().unwrap();
+
+        // Safety: the test harness is single-threaded here (the suite
+        // runs a process per test), and the value is restored below.
+        let before = std::env::var("TERM").ok();
+        unsafe { std::env::set_var("TERM", "screen-256color") };
+        let spawned = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx);
+        match before {
+            Some(v) => unsafe { std::env::set_var("TERM", v) },
+            None => unsafe { std::env::remove_var("TERM") },
+        }
+        let mut pane = spawned.expect("real L3 spawn (is marspot-session built?)");
+
+        pane.session_mut().forward_inject_input(b"printf 'TERM=[%s]\\n' \"$TERM\"\r");
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            pane.pump();
+            let screen = pane.screen_rows().join("\n");
+            if screen.contains("TERM=[xterm-256color]") {
+                assert!(
+                    !screen.contains("TERM=[screen-256color]"),
+                    "the launcher's TERM reached the shell:\n{screen}"
+                );
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("the shell never reported its TERM:\n{}", pane.screen_rows().join("\n"));
+    }
+
     /// A new pane opens where the shell actually is.
     ///
     /// The registry records where a session was launched; every pane
