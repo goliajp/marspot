@@ -73,6 +73,47 @@ use core_graphics::font::CGGlyph;
 /// masks fill the cell exactly so adjacent cells join with zero
 /// drift.  Pure Rust path, no extra deps, atlas + GPU pipeline
 /// downstream is unchanged.
+/// An atlas entry for a whole grapheme cluster.
+///
+/// The cluster is rasterised once, by CoreText, into a cell-sized
+/// bitmap and cached under a hash of its text — so a screen full of
+/// the same cluster costs one raster, and a cluster that never recurs
+/// costs one that the atlas evicts like any other.
+///
+/// The font is chosen by the cluster's base codepoint, which is the
+/// same choice the old single-glyph path made for that cell; what
+/// changes is that the mark, the ZWJ tail or the second regional
+/// indicator now gets drawn with it.
+fn resolve_cluster_glyph(
+    atlas: &mut GlyphAtlas,
+    font: &mut FontCache,
+    text: &str,
+    bold: bool,
+    italic: bool,
+    metrics: SlotMetrics,
+) -> Option<AtlasEntry> {
+    let base = marspot_term::grapheme::cluster_first_codepoint(text);
+    let (font_idx, _) = font.resolve_char(base, bold, italic);
+    let ct_font = font.font(font_idx).clone();
+    let n_cells = marspot_term::grapheme::cluster_width(text).max(1) as u16;
+    let key = crate::glyph_atlas::cluster_key(text, &metrics);
+    let w = metrics.cell_w * n_cells as u32;
+    let h = metrics.cell_h;
+    let mut drew = false;
+    let entry = atlas.get_or_insert_custom_raster(
+        key,
+        w,
+        h,
+        metrics.baseline_from_top,
+        n_cells,
+        |buf| {
+            drew = crate::glyph_atlas::rasterise_cluster(text, &ct_font, metrics, n_cells, buf);
+        },
+    );
+    let _ = drew;
+    entry
+}
+
 fn resolve_cell_glyph(
     atlas: &mut GlyphAtlas,
     font: &mut FontCache,
@@ -5594,17 +5635,34 @@ fn push_session(
                 cell_h: cell_h.round() as u32,
                 baseline_from_top: ascent.round() as u32,
             };
-            let (entry, is_color) = match resolve_cell_glyph_routed(
-                atlas,
-                color_atlas,
-                font,
-                cell.ch,
-                cell.attrs.bold,
-                cell.attrs.italic,
-                metrics,
-            ) {
-                Some(e) => e,
-                None => continue,
+            // A cell holding more than one codepoint is drawn as the
+            // whole cluster; everything else takes the path it always
+            // did, byte for byte.
+            let cluster = grid.cluster_text(&cell).map(str::to_string);
+            let (entry, is_color) = match cluster {
+                Some(text) => match resolve_cluster_glyph(
+                    atlas,
+                    font,
+                    &text,
+                    cell.attrs.bold,
+                    cell.attrs.italic,
+                    metrics,
+                ) {
+                    Some(e) => (e, false),
+                    None => continue,
+                },
+                None => match resolve_cell_glyph_routed(
+                    atlas,
+                    color_atlas,
+                    font,
+                    cell.ch,
+                    cell.attrs.bold,
+                    cell.attrs.italic,
+                    metrics,
+                ) {
+                    Some(e) => e,
+                    None => continue,
+                },
             };
             let fg = if in_link(r, c as u16) {
                 (
@@ -9078,6 +9136,69 @@ mod tests {
         // textures would agree perfectly.
         let lit = a.chunks(4).filter(|px| px[0] > 8 || px[1] > 8 || px[2] > 8).count();
         assert!(lit > 1000, "the rects were not drawn: only {lit} lit pixels");
+    }
+
+    /// A cluster rasterises to something other than its base alone.
+    ///
+    /// The grid now keeps `e` + U+0301 whole, and the renderer asks
+    /// CoreText to draw the pair.  If that path were a no-op — wrong
+    /// font, empty line, baseline off the bitmap — the cell would
+    /// simply look like `e` and every test above would still pass,
+    /// because they are all about the grid.  This compares pixels.
+    #[test]
+    fn a_cluster_draws_differently_from_its_base() {
+        let Ok(mut font) = crate::font_cache::FontCache::build() else {
+            eprintln!("skipping: no font stack");
+            return;
+        };
+        let metrics = SlotMetrics { cell_w: 16, cell_h: 32, baseline_from_top: 24 };
+        let mut buf_base = vec![0u8; 16 * 32];
+        let mut buf_pair = vec![0u8; 16 * 32];
+
+        let (idx, _) = font.resolve_char('e', false, false);
+        let ct = font.font(idx).clone();
+        assert!(
+            crate::glyph_atlas::rasterise_cluster("e", &ct, metrics, 1, &mut buf_base),
+            "the rasteriser refused a one-codepoint cluster"
+        );
+        assert!(
+            crate::glyph_atlas::rasterise_cluster("e\u{301}", &ct, metrics, 1, &mut buf_pair),
+            "the rasteriser refused the pair"
+        );
+
+        let ink_base: u32 = buf_base.iter().map(|b| *b as u32).sum();
+        let ink_pair: u32 = buf_pair.iter().map(|b| *b as u32).sum();
+        assert!(ink_base > 0, "even the base drew nothing; the path is dead");
+        assert!(
+            ink_pair > ink_base,
+            "the mark added no ink: base {ink_base}, pair {ink_pair}"
+        );
+
+        // And the mark sits above the letter, which is the whole
+        // point of letting CoreText place it rather than stacking two
+        // rasters.  Row order is taken from the data, not from an
+        // argument about Core Graphics' origin: the letter's own ink
+        // says which way is up, and the mark has to be on the other
+        // side of its first row.
+        let row_ink = |b: &[u8]| -> Vec<u32> {
+            (0..32)
+                .map(|r| b[r * 16..(r + 1) * 16].iter().map(|v| *v as u32).sum())
+                .collect()
+        };
+        let base_rows = row_ink(&buf_base);
+        let pair_rows = row_ink(&buf_pair);
+        let base_first = base_rows.iter().position(|v| *v > 0).expect("the base drew nothing");
+        let added: Vec<usize> = (0..32).filter(|r| pair_rows[*r] > base_rows[*r]).collect();
+        assert!(!added.is_empty(), "the pair added ink to no row");
+        assert!(
+            added.iter().all(|r| *r < base_first),
+            "the mark is not clear of the letter: the letter starts at row \
+             {base_first} and the added rows are {added:?}"
+        );
+        assert!(
+            added.iter().all(|r| base_rows[*r] == 0),
+            "the mark landed on top of the letter rather than beside it"
+        );
     }
 
     /// Verify the basic Metal plumbing works on this machine — proves
