@@ -9,6 +9,16 @@
 //! The usage feed a separate collector keeps (`marspot::cc_usage`)
 //! already says, per account, how much of each rolling window is gone
 //! and when it comes back.  This turns that into a choice.
+//!
+//! **The feed is the only trigger, and its lag is accepted.**  A pane
+//! learns it has been refused the moment the API says so; the feed
+//! learns on its own schedule, so panes can sit on a spent account for
+//! minutes before anything moves them.  Measured 2026-09-30: the feed
+//! was written at 07:00:10.641 and the first pane moved at
+//! 07:00:11.106 — the sweep is not slow, it was waiting to be told.
+//! Adding a second, faster trigger from each pane's own transcript was
+//! considered and turned down: one source that is right about every
+//! pane at once beats two sources that can disagree.
 
 use std::time::Duration;
 
