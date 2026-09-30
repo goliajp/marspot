@@ -86,10 +86,10 @@ Everything not listed goes to the program in the pane, unchanged.
 
 Honest list, because you will hit these in the first hour:
 
-- Scrolled-off history loses combining marks, ZWJ emoji and flag
-  sequences — they keep their shape on screen, but a row on its way
-  into scrollback is stored as plain cells with nowhere to put the
-  rest of a cluster, so scrolling back shows the base character.
+- Combining marks, ZWJ emoji and flag sequences survive scrolling
+  back, but not a restart: the cluster is kept beside the row in
+  memory, while the row itself goes to disk holding the base
+  character.
 - No OSC 8 (hyperlinks), OSC 7 (working directory) or OSC 133 (prompt
   marks).  OSC 52 puts text on the clipboard; reading it back is
   refused on purpose, because answering hands any program that can
