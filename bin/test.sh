@@ -11,6 +11,10 @@
 #   bin/test.sh --failure-output immediate
 
 set -euo pipefail
+
+# The suite here is the authoritative one, so it runs the tests that
+# need a real pty and process tree.  CI skips those and says so.
+export MARSPOT_PTY_INTEGRATION=1
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 # --workspace so the marspot-term crate's tests (the terminal engine —

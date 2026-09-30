@@ -15,7 +15,15 @@ use std::time::{Duration, Instant};
 fn env_seen_by_a_pane(strip: Vec<String>) -> String {
     let mut pty = Pty::spawn(PtyConfig {
         program: "/bin/sh".into(),
-        args: vec!["-c".into(), "env; exit".into()],
+        // The sleep is not decoration.  `env; exit` can be over before
+        // the parent's first read, and once the slave closes, whatever
+        // was in the master is gone — on a build runner that produced
+        // an empty capture and an assertion failure about inheritance
+        // that had nothing to do with inheritance.  Holding the slave
+        // open for a moment removes the race; what this test is about
+        // is which variables a pane sees, not what happens when a
+        // child exits instantly.
+        args: vec!["-c".into(), "env; sleep 1; exit".into()],
         size: TerminalSize { cols: 200, rows: 40, ..Default::default() },
         env_remove_prefixes: strip,
         ..Default::default()
