@@ -159,6 +159,17 @@ impl Scrollback {
     /// original widths on disk; display renders them as-is (cells
     /// past `cols` show as default — visually shorter row in a wider
     /// pane, truncated in a narrower one).
+    /// Which run of line numbering the current lines belong to.
+    ///
+    /// Anything filed against a line records this alongside, and
+    /// refuses itself when the two disagree -- see `new_epoch`.
+    pub fn epoch(&self) -> u64 {
+        match self {
+            Self::Memory(m) => m.epoch,
+            Self::File(f) => f.epoch,
+        }
+    }
+
     pub fn is_persistent(&self) -> bool {
         matches!(self, Self::File(_))
     }
@@ -316,6 +327,13 @@ impl Scrollback {
                         .open(&bin_path)?;
                     bin_fd.set_len(FILE_HEADER_BYTES)?;
                     drop(bin_fd);
+                    // The header survives the truncate, so the epoch in
+                    // it would too -- and this is the one path where a
+                    // local line index comes back meaning a different
+                    // line.  Stamp a new one before the re-wrapped
+                    // lines are pushed in, so anything filed against
+                    // the old numbering is refused rather than matched.
+                    stamp_epoch_in_place(&bin_path, new_epoch())?;
                     let idx_fd = std::fs::OpenOptions::new()
                         .read(true)
                         .write(true)
@@ -354,6 +372,11 @@ pub struct MemoryScrollback {
     cols: usize,
     head: usize,
     len: usize,
+    /// The same idea as the file variant's, kept so that a consumer
+    /// filing something against a line does not have to know which
+    /// variant it is talking to.  In RAM it changes on construction
+    /// only -- reflow builds a whole new `MemoryScrollback`.
+    epoch: u64,
 }
 
 impl MemoryScrollback {
@@ -369,6 +392,7 @@ impl MemoryScrollback {
             cols,
             head: 0,
             len: 0,
+            epoch: new_epoch(),
         }
     }
 
@@ -642,6 +666,38 @@ pub struct FileScrollback {
     /// from the env at open; doesn't re-check on every push so a mid-
     /// session env change is ignored.
     hot_bytes_cap: u64,
+    /// Which run of line numbering this file's local line indices
+    /// belong to.  See [`new_epoch`].
+    epoch: u64,
+}
+
+/// A value that changes whenever a local line index in this file stops
+/// meaning the line it used to mean.
+///
+/// A local line index -- the k-th record in one file -- is stable under
+/// everything except reflow: `restart` truncates the file back to its
+/// header and pushes the re-wrapped lines in, so index 0 is a different
+/// line than it was a moment ago.  Anything filed against a line (the
+/// text of a grapheme cluster too wide for its cell, where a command
+/// began, what a hyperlink pointed at) has to be able to tell the two
+/// runs apart, or it attaches one line's note to another -- not a
+/// crash, a quiet wrong character, and only where a note happened to
+/// exist before.
+///
+/// The value is a nanosecond timestamp with a per-process counter
+/// mixed in, so two reflows in the same nanosecond still differ.  Not
+/// random: a readable time is worth having when asking which run a
+/// record came from, and a collision costs one discarded sidecar.
+fn new_epoch() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    // The low bits of a nanosecond clock are the noisy ones, so the
+    // counter goes in the top where it cannot be swallowed.
+    ns ^ (SEQ.fetch_add(1, Ordering::Relaxed) << 48)
 }
 
 // Raw mmap ptrs are private to this struct and the kernel takes care
@@ -698,6 +754,9 @@ impl FileScrollback {
             .create(true)
             .open(&bin_path)?;
 
+        // Filled in from the header below when the file already
+        // exists; see the `epoch` binding after the writer is built.
+        let mut existing_epoch: u64 = 0;
         if bin_existed {
             let cur_len = bin_w.metadata()?.len();
             if cur_len < FILE_HEADER_BYTES {
@@ -735,16 +794,32 @@ impl FileScrollback {
                     format!("scrollback bin v{version} cell_abi {cell_abi} != {expected_abi}"),
                 ));
             }
+            existing_epoch = u64::from_le_bytes(hdr[24..32].try_into().unwrap());
             if version == 2 {
                 upgrade_v2_header_in_place(&bin_path)?;
             }
         }
 
         let mut bin = crate::async_writer::AsyncWriter::new(bin_w, BIN_BUF_BYTES, 4);
-        if !bin_existed {
-            Self::write_header(&mut bin)?;
+        let epoch = if bin_existed {
+            match existing_epoch {
+                0 => {
+                    // Written before this field meant anything.  Give
+                    // it one now: the lines already in the file are
+                    // whatever they were, and nothing has been filed
+                    // against them, so there is nothing to mismatch.
+                    let e = new_epoch();
+                    stamp_epoch_in_place(&bin_path, e)?;
+                    e
+                }
+                e => e,
+            }
+        } else {
+            let e = new_epoch();
+            Self::write_header(&mut bin, e)?;
             bin.flush();
-        }
+            e
+        };
 
         let bin_for_read = std::fs::OpenOptions::new().read(true).open(&bin_path)?;
         let bin_eof = bin_for_read.metadata()?.len();
@@ -932,10 +1007,14 @@ impl FileScrollback {
             cold_total_lines,
             hot_first_line,
             hot_bytes_cap: hot_bytes_cap(),
+            epoch,
         })
     }
 
-    fn write_header(bin: &mut crate::async_writer::AsyncWriter) -> std::io::Result<()> {
+    fn write_header(
+        bin: &mut crate::async_writer::AsyncWriter,
+        epoch: u64,
+    ) -> std::io::Result<()> {
         let mut hdr = [0u8; FILE_HEADER_BYTES as usize];
         hdr[0..4].copy_from_slice(&FILE_MAGIC.to_le_bytes());
         hdr[4..8].copy_from_slice(&FILE_VERSION.to_le_bytes());
@@ -946,7 +1025,12 @@ impl FileScrollback {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
         hdr[16..24].copy_from_slice(&now_ns.to_le_bytes());
-        hdr[24..32].copy_from_slice(&0u64.to_le_bytes());
+        // Bytes 24..32 were written as zero and read by nobody, which
+        // is why the epoch can live here: every reader that predates it
+        // goes on reading the same file the same way, so this costs no
+        // FILE_VERSION bump and cannot make a rolled-back binary
+        // quarantine a user's history.
+        hdr[24..32].copy_from_slice(&epoch.to_le_bytes());
         bin.write(&hdr);
         Ok(())
     }
@@ -1071,7 +1155,8 @@ impl FileScrollback {
             .create(true)
             .open(&self.bin_path)?;
         let mut bin = crate::async_writer::AsyncWriter::new(bin_w, BIN_BUF_BYTES, 4);
-        Self::write_header(&mut bin)?;
+        self.epoch = new_epoch();
+        Self::write_header(&mut bin, self.epoch)?;
         bin.flush();
         let idx_w = std::fs::OpenOptions::new()
             .read(true)
@@ -1807,6 +1892,17 @@ fn upgrade_v2_header_in_place(bin_path: &std::path::Path) -> std::io::Result<()>
     Ok(())
 }
 
+/// Put an epoch into a header that was written before the field meant
+/// anything.  Same shape as the v2 upgrade above: one 8-byte write at a
+/// fixed offset, no record touched.
+fn stamp_epoch_in_place(bin_path: &std::path::Path, epoch: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    let f = std::fs::OpenOptions::new().write(true).open(bin_path)?;
+    f.write_all_at(&epoch.to_le_bytes(), 24)?;
+    f.sync_data()?;
+    Ok(())
+}
+
 fn pad_or_clip(line: &[crate::grid::Cell], cols: usize) -> Vec<crate::grid::Cell> {
     if line.len() == cols {
         return line.to_vec();
@@ -2065,6 +2161,113 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    // ─── line identity: which run a local line index belongs to ──────
+
+    fn push_n(sb: &mut FileScrollback, n: usize, cols: usize, ch: char) {
+        for _ in 0..n {
+            let line: Vec<Cell> = (0..cols)
+                .map(|_| Cell { ch, ..Default::default() })
+                .collect();
+            sb.push_line(&line, false);
+        }
+    }
+
+    fn header_epoch(bin: &std::path::Path) -> u64 {
+        let f = std::fs::File::open(bin).expect("open bin");
+        let mut hdr = [0u8; FILE_HEADER_BYTES as usize];
+        read_exact_at(&f, &mut hdr, 0).expect("read header");
+        u64::from_le_bytes(hdr[24..32].try_into().unwrap())
+    }
+
+    #[test]
+    fn a_fresh_file_says_which_run_its_lines_belong_to() {
+        let tmp = TmpDir::new("epoch-fresh");
+        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), 8, 4).expect("open");
+        assert_ne!(sb.epoch, 0, "zero is the value a file written before this had");
+        assert_eq!(header_epoch(&tmp.bin()), sb.epoch, "and it is on disk");
+    }
+
+    /// Reopening is not reflow. The lines are the same lines, so
+    /// anything filed against them has to still match.
+    #[test]
+    fn reopening_keeps_the_run() {
+        let tmp = TmpDir::new("epoch-reopen");
+        let first = {
+            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), 8, 4).expect("open");
+            push_n(&mut sb, 3, 8, 'a');
+            sb.flush_for_handoff();
+            sb.epoch
+        };
+        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), 8, 4).expect("reopen");
+        assert_eq!(sb.epoch, first);
+        assert_eq!(sb.len(), 3, "and the lines are still there");
+    }
+
+    /// Reflow is the one path where local line index 0 comes back
+    /// meaning a different line, so it is the one that has to move.
+    #[test]
+    fn reflow_starts_a_new_run() {
+        let tmp = TmpDir::new("epoch-reflow");
+        let mut sb = Scrollback::file(tmp.bin(), tmp.idx(), 8, 4).expect("open");
+        let line: Vec<Cell> = (0..8).map(|_| Cell { ch: 'a', ..Default::default() }).collect();
+        sb.push_line(&line);
+        let before = sb.epoch();
+        assert!(sb.is_persistent(), "the fixture has to be the file variant");
+
+        sb.restart(12);
+        assert_ne!(sb.epoch(), before, "index 0 now means a different line");
+        assert_eq!(header_epoch(&tmp.bin()), sb.epoch(), "and the file says so too");
+    }
+
+    /// A file written before this field meant anything is given a run
+    /// rather than left at zero -- nothing has been filed against its
+    /// lines, so there is nothing to mismatch.
+    #[test]
+    fn a_file_from_before_is_given_a_run_in_place() {
+        let tmp = TmpDir::new("epoch-legacy");
+        {
+            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), 8, 4).expect("open");
+            push_n(&mut sb, 2, 8, 'a');
+            sb.flush_for_handoff();
+        }
+        // Put the header back the way it was written before epochs.
+        {
+            use std::os::unix::fs::FileExt;
+            let f = std::fs::OpenOptions::new().write(true).open(tmp.bin()).unwrap();
+            f.write_all_at(&0u64.to_le_bytes(), 24).unwrap();
+        }
+        assert_eq!(header_epoch(&tmp.bin()), 0, "the fixture has to be the old shape");
+
+        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), 8, 4).expect("reopen");
+        assert_ne!(sb.epoch, 0);
+        assert_eq!(header_epoch(&tmp.bin()), sb.epoch, "written back, not just held");
+        assert_eq!(sb.len(), 2, "the history it already had is untouched");
+    }
+
+    /// The whole point of putting it in the reserved bytes: a reader
+    /// that predates the field reads the same file the same way.
+    #[test]
+    fn the_run_is_invisible_to_a_reader_that_does_not_know_about_it() {
+        let tmp = TmpDir::new("epoch-compat");
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), 8, 4).expect("open");
+        push_n(&mut sb, 2, 8, 'x');
+        sb.flush_for_handoff();
+
+        let f = std::fs::File::open(tmp.bin()).unwrap();
+        let mut hdr = [0u8; FILE_HEADER_BYTES as usize];
+        read_exact_at(&f, &mut hdr, 0).unwrap();
+        assert_eq!(u32::from_le_bytes(hdr[0..4].try_into().unwrap()), FILE_MAGIC);
+        assert_eq!(
+            u32::from_le_bytes(hdr[4..8].try_into().unwrap()),
+            FILE_VERSION,
+            "no version bump -- a rolled-back binary must not quarantine this"
+        );
+        assert_eq!(
+            u32::from_le_bytes(hdr[8..12].try_into().unwrap()),
+            crate::grid::CELL_MEM_BYTES as u32
+        );
     }
 
     /// A row whose cells exercise every attribute and every colour kind,
