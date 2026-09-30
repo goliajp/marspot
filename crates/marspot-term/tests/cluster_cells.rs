@@ -15,66 +15,82 @@
 //! pipeline that breaks on a slow pty.
 use marspot_term::terminal::Terminal;
 
-/// `(name, input, expected cells)` — `'\0'` is a wide glyph's trailing
-/// pad, `' '` an untouched cell.
+/// `(name, input, expected cells)` — `"\0"` is a wide glyph's trailing
+/// pad, `" "` an untouched cell.
+///
+/// The expectation is the TEXT of each cell, not its `ch`.  A cell
+/// holding a cluster of more than one codepoint keeps the whole thing
+/// in the grid's pool and `ch` is the index — so asserting on `ch`
+/// would be asserting on a pool offset, and it would also have said
+/// these clusters were correct back when everything after the base was
+/// being thrown away.
 struct Case {
     name: &'static str,
     input: &'static str,
-    cells: &'static [char],
+    cells: &'static [&'static str],
 }
 
 const CASES: &[Case] = &[
-    Case { name: "ascii", input: "abc", cells: &['a', 'b', 'c'] },
-    Case { name: "cjk", input: "中文", cells: &['中', '\0', '文', '\0'] },
+    Case { name: "ascii", input: "abc", cells: &["a", "b", "c"] },
+    Case { name: "cjk", input: "中文", cells: &["中", "\0", "文", "\0"] },
     Case {
         name: "combining mark joins its base",
         input: "e\u{0301}z",
-        cells: &['e', 'z'],
+        cells: &["e\u{0301}", "z"],
     },
     Case {
         name: "VS16 widens a text-presentation symbol",
         input: "a\u{26A0}\u{FE0F}b",
-        cells: &['a', '\u{26A0}', '\0', 'b'],
+        cells: &["a", "\u{26A0}\u{FE0F}", "\0", "b"],
     },
     Case {
         name: "emoji-presentation symbol is wide on its own",
         input: "a\u{2B50}b",
-        cells: &['a', '\u{2B50}', '\0', 'b'],
+        cells: &["a", "\u{2B50}", "\0", "b"],
     },
     Case {
         name: "ZWJ family is one cluster",
         input: "a\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}b",
-        cells: &['a', '\u{1F468}', '\0', 'b'],
+        cells: &["a", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}", "\0", "b"],
     },
     Case {
         name: "regional indicator pair is one flag",
         input: "a\u{1F1EF}\u{1F1F5}b",
-        cells: &['a', '\u{1F1EF}', '\0', 'b'],
+        cells: &["a", "\u{1F1EF}\u{1F1F5}", "\0", "b"],
     },
     Case {
         name: "skin tone modifier joins its base",
         input: "a\u{1F44D}\u{1F3FD}b",
-        cells: &['a', '\u{1F44D}', '\0', 'b'],
+        cells: &["a", "\u{1F44D}\u{1F3FD}", "\0", "b"],
     },
     Case {
         name: "hangul syllable then trailing jamo",
         input: "a\u{AC00}\u{11A8}b",
-        cells: &['a', '\u{AC00}', '\0', 'b'],
+        cells: &["a", "\u{AC00}\u{11A8}", "\0", "b"],
     },
     Case {
         name: "devanagari virama conjunct",
         input: "a\u{0915}\u{094D}\u{0915}b",
-        cells: &['a', '\u{0915}', 'b'],
+        cells: &["a", "\u{0915}\u{094D}\u{0915}", "b"],
     },
     Case {
         name: "plain emoji run",
         input: "\u{1F3A8}\u{1F680}",
-        cells: &['\u{1F3A8}', '\0', '\u{1F680}', '\0'],
+        cells: &["\u{1F3A8}", "\0", "\u{1F680}", "\0"],
     },
 ];
 
-fn row0(t: &Terminal, n: usize) -> Vec<char> {
-    (0..n as u16).map(|c| t.grid().cell(c, 0).ch).collect()
+
+fn row0(t: &Terminal, n: usize) -> Vec<String> {
+    (0..n as u16)
+        .map(|c| {
+            let cell = t.grid().cell(c, 0);
+            t.grid()
+                .cluster_text(&cell)
+                .map(str::to_string)
+                .unwrap_or_else(|| cell.ch.to_string())
+        })
+        .collect()
 }
 
 /// Feed `input` in `chunk`-byte pieces (0 = all at once).
@@ -94,7 +110,8 @@ fn a_cluster_occupies_the_cells_it_should() {
     for case in CASES {
         let mut t = Terminal::new(20, 4);
         feed_in(&mut t, case.input, 0);
-        assert_eq!(row0(&t, case.cells.len()), case.cells.to_vec(), "{}", case.name);
+        let want: Vec<String> = case.cells.iter().map(|s| s.to_string()).collect();
+        assert_eq!(row0(&t, case.cells.len()), want, "{}", case.name);
     }
 }
 
