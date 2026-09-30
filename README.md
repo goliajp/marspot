@@ -92,8 +92,6 @@ Honest list, because you will hit these in the first hour:
   marks).  OSC 52 puts text on the clipboard; reading it back is
   refused on purpose, because answering hands any program that can
   write to the pty whatever you last copied.
-- `ESC ( 0` line drawing is not translated, so `dialog`-style TUIs draw
-  letters instead of box characters.
 - There is no terminfo entry of its own; `TERM` is set to
   `xterm-256color`, which claims a few capabilities not yet
   implemented.

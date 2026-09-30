@@ -165,6 +165,11 @@ fn a_gap_that_closed_comes_off_the_page() {
     let mut t = Terminal::new(40, 3);
     t.feed(b"a\tb");
     assert_ne!(row(&t), "ab", "tabs stopped moving the cursor");
+    let mut t1 = Terminal::new(40, 3);
+    t1.feed(b"\x1b(0lqk");
+    let drawn: String = (0..3).map(|c| t1.grid().cell(c, 0).ch).collect();
+    assert_eq!(drawn, "\u{250c}\u{2500}\u{2510}", "the line-drawing set stopped translating");
+
     let mut t2 = Terminal::new(40, 3);
     t2.feed(b"\x1b]52;c;aGVsbG8=\x07");
     assert_eq!(t2.take_osc_clipboard().as_deref(), Some("hello"), "OSC 52 stopped working");
@@ -174,6 +179,11 @@ fn a_gap_that_closed_comes_off_the_page() {
             !text.contains("tabs are not implemented")
                 && !text.contains("literal tab character is dropped"),
             "tabs work; {what} still says they are dropped"
+        );
+        assert!(
+            !text.contains("Line-drawing character sets are not translated")
+                && !text.contains("`ESC ( 0` line drawing is not translated"),
+            "the charset is translated; {what} still says it is not"
         );
         assert!(
             !text.contains("OSC 52 / 8 / 7 / 133")
