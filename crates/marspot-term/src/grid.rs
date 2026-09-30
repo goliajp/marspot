@@ -41,6 +41,17 @@ pub const CELL_MEM_BYTES: usize = 20;
 /// holds a pointer to it rather than every cell paying for the case.
 pub const FLAG_CLUSTER: u8 = 1 << 0;
 
+/// Where pool indices start inside `char`.
+///
+/// Not zero.  `'\0'` already means "the second cell of a wide glyph"
+/// here, and `' '` means blank, so an index that lands on one of them
+/// is read as that by any code checking `ch` without checking the
+/// flag — which is most of it, correctly, since before the pool there
+/// was nothing else `ch` could be.  Plane 15 is private use: 65 536
+/// slots, sixteen times the sweep threshold, and nothing in a real
+/// stream is ever compared against these values.
+pub const CLUSTER_INDEX_BASE: u32 = 0xF_0000;
+
 impl Cell {
     /// Is this cell's `ch` a pool index rather than a character?
     #[inline]
@@ -51,7 +62,9 @@ impl Cell {
     /// The pool index this cell points at, if it points at one.
     #[inline]
     pub fn cluster_index(&self) -> Option<u32> {
-        self.is_cluster().then_some(self.ch as u32)
+        self.is_cluster()
+            .then(|| (self.ch as u32).checked_sub(CLUSTER_INDEX_BASE))
+            .flatten()
     }
 }
 
@@ -840,7 +853,11 @@ impl Grid {
         // cluster degrades to its base codepoint, which is exactly
         // today's behaviour.
         let idx = self.clusters.len();
-        let Some(as_char) = char::from_u32(idx as u32) else {
+        let Some(as_char) = u32::try_from(idx)
+            .ok()
+            .and_then(|i| i.checked_add(CLUSTER_INDEX_BASE))
+            .and_then(char::from_u32)
+        else {
             return Cell { ch: crate::grapheme::cluster_first_codepoint(cluster), attrs };
         };
         self.clusters.push(cluster.into());
@@ -898,7 +915,7 @@ impl Grid {
             if let Some(i) = c.cluster_index() {
                 match remap.get(i as usize).copied() {
                     Some(n) if n != u32::MAX => {
-                        c.ch = char::from_u32(n).unwrap_or('\0');
+                        c.ch = char::from_u32(n + CLUSTER_INDEX_BASE).unwrap_or(' ');
                     }
                     _ => {
                         c.attrs._pad[0] &= !FLAG_CLUSTER;
@@ -914,6 +931,35 @@ impl Grid {
     /// anything that wants to know the grid is not growing.
     pub fn cluster_pool_len(&self) -> usize {
         self.clusters.len()
+    }
+
+    /// Turn any cluster cell in a row back into its base codepoint.
+    ///
+    /// Called just before a row is handed to scrollback, because a
+    /// scrollback row is stored as plain `Cell`s with nowhere to keep
+    /// a pool — an index in one would point into a pool that sweeps
+    /// without it, i.e. at whatever cluster later took that slot.
+    /// History therefore looks the way it did before the pool existed;
+    /// giving scrollback its own storage is a separate step.
+    ///
+    /// Free for a pane that never printed one: the pool is empty and
+    /// this is a single test.  Safe to mutate in place because the row
+    /// is on its way off the screen and will be overwritten by the
+    /// fill behind it.
+    fn degrade_clusters_in_row(&mut self, start: usize, cols: usize) {
+        if self.clusters.is_empty() {
+            return;
+        }
+        for i in start..start + cols {
+            let Some(idx) = self.cells[i].cluster_index() else { continue };
+            let base = self
+                .clusters
+                .get(idx as usize)
+                .map(|c| crate::grapheme::cluster_first_codepoint(c))
+                .unwrap_or(' ');
+            self.cells[i].ch = base;
+            self.cells[i].attrs._pad[0] &= !FLAG_CLUSTER;
+        }
     }
 
     /// Clamp-and-set the cursor.  Out-of-bounds values clamp to the last
@@ -1055,6 +1101,7 @@ impl Grid {
             // gates the REGION path, so resetting it is enough — and
             // erring toward "do not collapse" is the safe direction.
             self.filed_blank_run = 0;
+            self.degrade_clusters_in_row(start, cols);
             self.scrollback
                 .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
             self.sb_wrapped.push_back(self.wrapped[pr]);
@@ -1148,6 +1195,7 @@ impl Grid {
                 if !(blank && self.filed_blank_run >= MAX_FILED_BLANK_RUN) {
                     self.filed_blank_run =
                         if blank { self.filed_blank_run.saturating_add(1) } else { 0 };
+                    self.degrade_clusters_in_row(start, cols);
                     self.scrollback
                         .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
                     self.sb_wrapped.push_back(self.wrapped[pr]);
