@@ -3180,6 +3180,22 @@ impl<'a> Handler<'a> {
         }
     }
 
+    /// How far up a relative move may go: the top margin when the
+    /// cursor is inside the region, the top of the screen when it is
+    /// already above it.
+    fn up_limit(&self, row: u16) -> u16 {
+        if row >= *self.scroll_top { *self.scroll_top } else { 0 }
+    }
+
+    /// The mirror of `up_limit`.
+    fn down_limit(&self, row: u16) -> u16 {
+        if row <= *self.scroll_bot {
+            *self.scroll_bot
+        } else {
+            self.grid.rows().saturating_sub(1)
+        }
+    }
+
     fn cursor_to_origin(&mut self) {
         let (top, _) = self.row_origin();
         self.grid.set_cursor(0, top);
@@ -3814,16 +3830,22 @@ impl<'a> ParserCallbacks for Handler<'a> {
         match byte {
             b'A' => {
                 *self.pending_wrap = false;
-                // CUU: cursor up by N (default 1).
+                // CUU: cursor up by N (default 1), stopping at the top
+                // margin -- a relative move does not step out of the
+                // region the program set up.
                 let n = param(params, 0, 1);
-                self.grid.set_cursor(col, row.saturating_sub(n));
+                let to = row.saturating_sub(n).max(self.up_limit(row));
+                self.grid.set_cursor(col, to);
             }
             b'B' => {
                 *self.pending_wrap = false;
-                // CUD: cursor down by N.  set_cursor clamps at rows-1.
+                // CUD: cursor down by N, stopping at the bottom margin.
+                // Without that, `CSI 24 B` inside a two-row region put
+                // the cursor five rows below the region and the text
+                // that followed was written outside it.
                 let n = param(params, 0, 1);
-                self.grid
-                    .set_cursor(col, row.saturating_add(n).min(rows - 1));
+                let to = row.saturating_add(n).min(self.down_limit(row));
+                self.grid.set_cursor(col, to);
             }
             b'C' => {
                 *self.pending_wrap = false;
@@ -3834,9 +3856,11 @@ impl<'a> ParserCallbacks for Handler<'a> {
             }
             b'E' => {
                 *self.pending_wrap = false;
-                // CNL: cursor next line — down N, column 0.
+                // CNL: cursor next line — down N, column 0.  Same
+                // margin as CUD; it is CUD with a carriage return.
                 let n = param(params, 0, 1);
-                self.grid.set_cursor(0, row.saturating_add(n).min(rows - 1));
+                let to = row.saturating_add(n).min(self.down_limit(row));
+                self.grid.set_cursor(0, to);
             }
             b'F' => {
                 *self.pending_wrap = false;
@@ -3846,8 +3870,11 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // missing the cursor never moved up and every refresh
                 // APPENDED its lines — the 2026-07-28 "brew progress
                 // scrolls forever" field report.
+                //
+                // Same margin as CUU; it is CUU with a carriage return.
                 let n = param(params, 0, 1);
-                self.grid.set_cursor(0, row.saturating_sub(n));
+                let to = row.saturating_sub(n).max(self.up_limit(row));
+                self.grid.set_cursor(0, to);
             }
             b'D' => {
                 *self.pending_wrap = false;
