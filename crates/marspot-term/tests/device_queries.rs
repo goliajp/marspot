@@ -210,11 +210,17 @@ fn decrqm_reports_the_mode_it_was_just_given() {
 }
 
 #[test]
-fn decrqm_is_honest_about_the_two_modes_with_no_switch() {
-    // 3 = permanently set, 4 = permanently reset.  Wrap cannot be
-    // turned off here and origin mode cannot be turned on, and saying
+fn decrqm_is_honest_about_the_mode_with_no_switch() {
+    // 3 = permanently set.  Wrap cannot be turned off here, and saying
     // so is more useful to a program than claiming not to know.
+    //
+    // Origin mode used to be answered 4, permanently reset, which was
+    // true of a terminal that had no origin mode.  It has one now, so
+    // it answers with its state like every other mode that moves.
     let mut t = Terminal::new(40, 4);
     t.feed(b"\x1b[?7$p\x1b[?6$p");
-    assert_eq!(t.take_response(), b"\x1b[?7;3$y\x1b[?6;4$y");
+    assert_eq!(t.take_response(), b"\x1b[?7;3$y\x1b[?6;2$y");
+
+    t.feed(b"\x1b[?6h\x1b[?6$p");
+    assert_eq!(t.take_response(), b"\x1b[?6;1$y");
 }

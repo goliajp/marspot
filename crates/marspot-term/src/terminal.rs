@@ -286,6 +286,10 @@ pub struct Terminal {
     osc_clipboard: Option<String>,
     /// G0 is the DEC Special Graphics set, selected by `ESC ( 0`.
     g0_graphics: bool,
+    /// DECOM (`?6`).  While set, row addressing counts from the top
+    /// margin rather than the top of the screen, and the cursor cannot
+    /// leave the scroll region.
+    origin_mode: bool,
     /// Rollbacks in a row.  A program that draws its own input
     /// somewhere else — codex, and any full-screen TUI that skips the
     /// alternate screen — never confirms a prediction, so the guess
@@ -506,6 +510,10 @@ struct SavedCursor {
     /// had -- otherwise every letter it prints afterwards arrives as
     /// line-drawing.
     g0_graphics: bool,
+    /// DECOM, which the saved cursor carries for the same reason: a
+    /// restore that put the cursor back without its addressing mode
+    /// would send the program's next move to a different row.
+    origin_mode: bool,
 }
 
 impl Terminal {
@@ -571,6 +579,7 @@ impl Terminal {
             tabs: crate::tabs::TabStops::new(cols),
             osc_clipboard: None,
             g0_graphics: false,
+            origin_mode: false,
             predict_misses: 0,
             predict_declined: 0,
             predictions: VecDeque::new(),
@@ -1112,6 +1121,7 @@ impl Terminal {
             let seg_synced = &mut self.seg_synced;
             let osc_clipboard = &mut self.osc_clipboard;
             let g0_graphics = &mut self.g0_graphics;
+            let origin_mode = &mut self.origin_mode;
             let mut handler = Handler {
                 grid,
                 saved_main,
@@ -1142,6 +1152,7 @@ impl Terminal {
                 tabs,
                 osc_clipboard,
                 g0_graphics,
+                origin_mode,
                 cluster_buf,
                 cluster_fast,
                 cluster_anchor,
@@ -1448,6 +1459,13 @@ impl Terminal {
         if self.saved_cursor.is_some_and(|c| c.g0_graphics) {
             modes |= 1 << 11;
         }
+        // bits 12 and 13 = DECOM, live and as the saved cursor holds it.
+        if self.origin_mode {
+            modes |= 1 << 12;
+        }
+        if self.saved_cursor.is_some_and(|c| c.origin_mode) {
+            modes |= 1 << 13;
+        }
         out.extend_from_slice(&modes.to_le_bytes());
         out.extend_from_slice(&self.generation.to_le_bytes());
         out.extend_from_slice(&serialize_attrs(self.attrs));
@@ -1702,6 +1720,7 @@ impl Terminal {
                 // the mode bits, and is filled in below.
                 pending_wrap: false,
                 g0_graphics: (modes & (1 << 11)) != 0,
+                origin_mode: (modes & (1 << 13)) != 0,
             })
         } else {
             None
@@ -1920,6 +1939,7 @@ impl Terminal {
         self.alt_scroll = (modes & (1 << 8)) != 0;
         self.focus_reporting = (modes & (1 << 9)) != 0;
         self.g0_graphics = (modes & (1 << 10)) != 0;
+        self.origin_mode = (modes & (1 << 12)) != 0;
         // Bit 4 (in_alt_screen) is informational for the wire format
         // but not actionable here — apply_snapshot replaces the
         // current grid; alt-mode save state is regenerated on the
@@ -2379,6 +2399,8 @@ struct Handler<'a> {
     tabs: &'a mut crate::tabs::TabStops,
     osc_clipboard: &'a mut Option<String>,
     g0_graphics: &'a mut bool,
+    /// See `Terminal::origin_mode`.
+    origin_mode: &'a mut bool,
     cluster_buf: &'a mut String,
     /// See `Terminal::cluster_fast`.
     cluster_fast: &'a mut Option<(char, u8)>,
@@ -3088,6 +3110,39 @@ impl<'a> Handler<'a> {
     /// Tab stops are deliberately not touched — DEC STD 070 leaves
     /// those to RIS, and a program that soft-resets in the middle of a
     /// table would otherwise lose its columns.
+    /// Where row 1 is, and how far down rows are allowed to go.
+    ///
+    /// With DECOM off these are the screen's own extremes.  With it on
+    /// they are the scroll region's, and a program addressing "row 1"
+    /// means the first row of its region -- which is the whole point of
+    /// the mode for anything drawing inside a window it set up.
+    fn row_origin(&self) -> (u16, u16) {
+        if *self.origin_mode {
+            (*self.scroll_top, *self.scroll_bot)
+        } else {
+            (0, self.grid.rows().saturating_sub(1))
+        }
+    }
+
+    /// Turn a row a program asked for into a row on the screen.
+    fn absolute_row(&self, requested: u16) -> u16 {
+        let (top, bot) = self.row_origin();
+        top.saturating_add(requested).min(bot)
+    }
+
+    /// The 1-based row to report back, in the origin the program is
+    /// addressing in.
+    fn reported_row(&self, row: u16) -> u16 {
+        let (top, _) = self.row_origin();
+        row.saturating_sub(top) + 1
+    }
+
+    fn cursor_to_origin(&mut self) {
+        let (top, _) = self.row_origin();
+        self.grid.set_cursor(0, top);
+        *self.pending_wrap = false;
+    }
+
     /// DECSC, and the save half of `?1048` / `?1049`.
     ///
     /// One slot, shared: xterm defines `?1049` as "save cursor as in
@@ -3104,6 +3159,7 @@ impl<'a> Handler<'a> {
             attrs: *self.attrs,
             pending_wrap: *self.pending_wrap,
             g0_graphics: *self.g0_graphics,
+            origin_mode: *self.origin_mode,
         });
     }
 
@@ -3115,6 +3171,7 @@ impl<'a> Handler<'a> {
             *self.attrs = s.attrs;
             *self.pending_wrap = s.pending_wrap;
             *self.g0_graphics = s.g0_graphics;
+            *self.origin_mode = s.origin_mode;
         }
     }
 
@@ -3172,6 +3229,7 @@ impl<'a> Handler<'a> {
         *self.pending_wrap = false;
         *self.scroll_top = 0;
         *self.scroll_bot = self.grid.rows().saturating_sub(1);
+        *self.origin_mode = false;
     }
 
     /// RIS — reset to initial state (`ESC c`).  What `reset` sends.
@@ -3213,16 +3271,14 @@ impl<'a> Handler<'a> {
     ///
     /// Mirrors `dec_mode` arm for arm — a mode this terminal acts on
     /// answers with its real state, and one it does not answers 0 so
-    /// the program stays on whatever it does without us.  The two
-    /// permanent answers are the honest ones for the two modes marspot
-    /// has no switch for: wrap is always on, origin mode is always off.
+    /// the program stays on whatever it does without us.  The one
+    /// permanent answer is the honest one for the mode marspot has no
+    /// switch for: wrap is always on.
     fn dec_mode_report(&self, mode: u16) -> u16 {
         let on = |b: bool| if b { 1 } else { 2 };
         match mode {
             1 => on(*self.cursor_key_app_mode),
-            // DECOM — marspot has no origin mode to be relative to
-            // (see the CPR arm); absolute is the only reading it has.
-            6 => 4,
+            6 => on(*self.origin_mode),
             // DECAWM — always on: there is no code path that stops a
             // glyph in the last column from wrapping.
             7 => 3,
@@ -3245,6 +3301,14 @@ impl<'a> Handler<'a> {
             // DECCKM — cursor keys send `ESC O X` in app mode, `ESC [ X`
             // otherwise. Read by the input layer for arrow encoding.
             1 => *self.cursor_key_app_mode = set,
+            // DECOM.  Changing it homes the cursor, to the top margin
+            // when it is on, because a program that switches addressing
+            // modes and then draws has to start from a row both it and
+            // the terminal agree on.
+            6 => {
+                *self.origin_mode = set;
+                self.cursor_to_origin();
+            }
             // DECCOLM — see `column_mode_reset`; set and reset do the
             // same thing here, because the difference between them is
             // the column count we do not own.
@@ -3585,7 +3649,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // long as one that asked with `CSI 6 n`.
                 b'n' if params.first().copied() == Some(6) => {
                     let (c0, r0) = self.grid.cursor();
-                    let (row, col) = (r0 + 1, c0 + 1);
+                    let (row, col) = (self.reported_row(r0), c0 + 1);
                     let mut buf = [0u8; 32];
                     let n = {
                         use std::io::Write;
@@ -3750,7 +3814,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
             b'H' | b'f' => {
                 *self.pending_wrap = false;
                 // CUP / HVP: cursor position (1-indexed row;col → 0-indexed).
-                let r = param(params, 0, 1).saturating_sub(1);
+                let r = self.absolute_row(param(params, 0, 1).saturating_sub(1));
                 let c = param(params, 1, 1).saturating_sub(1);
                 self.grid.set_cursor(c, r);
             }
@@ -3786,8 +3850,9 @@ impl<'a> ParserCallbacks for Handler<'a> {
             }
             b'd' => {
                 *self.pending_wrap = false;
-                // VPA: vertical position absolute (1-indexed).
-                let r = param(params, 0, 1).saturating_sub(1);
+                // VPA: vertical position absolute (1-indexed), inside
+                // the origin like CUP.
+                let r = self.absolute_row(param(params, 0, 1).saturating_sub(1));
                 self.grid.set_cursor(col, r);
             }
             b'J' => {
@@ -3843,26 +3908,10 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // SGR: set graphic rendition.  Mutates self.attrs in place.
                 apply_sgr(self.attrs, params, subs);
             }
-            b's' => {
-                // SCO save cursor.  Same semantics as DECSC (ESC 7).
-                let (col, row) = self.grid.cursor();
-                *self.saved_cursor = Some(SavedCursor {
-                    col,
-                    row,
-                    attrs: *self.attrs,
-                    pending_wrap: *self.pending_wrap,
-                    g0_graphics: *self.g0_graphics,
-                });
-            }
-            b'u' => {
-                // SCO restore cursor.  Same semantics as DECRC (ESC 8).
-                if let Some(s) = *self.saved_cursor {
-                    self.grid.set_cursor(s.col, s.row);
-                    *self.attrs = s.attrs;
-                    *self.pending_wrap = s.pending_wrap;
-                    *self.g0_graphics = s.g0_graphics;
-                }
-            }
+            // SCO save / restore cursor.  Same slot, same contents as
+            // DECSC and DECRC.
+            b's' => self.save_cursor(),
+            b'u' => self.restore_cursor(),
             b'r' => {
                 *self.pending_wrap = false;
                 // DECSTBM: set top + bottom margins of the scroll region.
@@ -3883,7 +3932,8 @@ impl<'a> ParserCallbacks for Handler<'a> {
                     *self.scroll_top = top;
                     *self.scroll_bot = bot;
                 }
-                self.grid.set_cursor(0, 0);
+                // Home, which under DECOM is the region's first row.
+                self.cursor_to_origin();
             }
             b'L' => {
                 *self.pending_wrap = false;
@@ -4072,13 +4122,12 @@ impl<'a> ParserCallbacks for Handler<'a> {
                     }
                     6 => {
                         // `Grid::cursor` is (col, row), 0-based; CPR is
-                        // (row, col), 1-based.  No DECOM here because
-                        // marspot has no origin mode to be relative to
-                        // — absolute is the only reading available, and
-                        // it is what every app assumes when DECOM is
-                        // off (the default everywhere).
+                        // (row, col), 1-based, and counted from the
+                        // same origin the program addresses with -- a
+                        // report in screen rows to a program working in
+                        // region rows sends it to the wrong line.
                         let (c0, r0) = self.grid.cursor();
-                        let (row, col) = (r0 + 1, c0 + 1);
+                        let (row, col) = (self.reported_row(r0), c0 + 1);
                         let mut buf = [0u8; 24];
                         let n = {
                             use std::io::Write;
