@@ -112,6 +112,7 @@ pub mod pidtree;
 #[cfg(feature = "snapshot")]
 pub mod png;
 pub mod qos;
+pub mod shortcuts;
 pub mod render_metal;
 /// Shared with L3, so it lives in the stone crate — every layer
 /// reads the same file, and only one of them parses it.

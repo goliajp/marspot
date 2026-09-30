@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.185"  # the return waits for the composer to redraw
-core    = "0.12.226"  # a GPU reads the published scene bytes
+core    = "0.12.227"  # one list of shortcuts, and the page reads it
 session = "0.11.107"  # colon sub-parameters
