@@ -3343,7 +3343,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
         }
     }
 
-    fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], byte: u8) {
+    fn csi_dispatch(&mut self, params: &[u16], subs: &[bool], intermediates: &[u8], byte: u8) {
         self.flush_u_buf();
         self.flush_cluster_for_break();
         trace_seq("CSI", intermediates, params, byte);
@@ -3671,7 +3671,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
             }
             b'm' => {
                 // SGR: set graphic rendition.  Mutates self.attrs in place.
-                apply_sgr(self.attrs, params);
+                apply_sgr(self.attrs, params, subs);
             }
             b's' => {
                 // SCO save cursor.  Same semantics as DECSC (ESC 7).
@@ -4401,13 +4401,26 @@ fn erase_in_line(grid: &mut Grid, col: u16, row: u16, cols: u16, mode: u16, attr
 ///
 /// We walk the param list with an explicit index because 38/48 (extended
 /// color) consume additional params depending on the second value.
-fn apply_sgr(attrs: &mut CellAttrs, params: &[u16]) {
+fn apply_sgr(attrs: &mut CellAttrs, params: &[u16], subs: &[bool]) {
     if params.is_empty() {
         *attrs = CellAttrs::default();
         return;
     }
     let mut i = 0;
     while i < params.len() {
+        // A parameter written with colons arrives as itself plus the
+        // sub-parameters behind it, and means one thing: `4:3` is a
+        // curly underline, not underline-then-italic.  Take the whole
+        // group or none of it.
+        let mut end = i + 1;
+        while end < params.len() && subs.get(end).copied().unwrap_or(false) {
+            end += 1;
+        }
+        if end > i + 1 {
+            apply_sgr_group(attrs, &params[i..end]);
+            i = end;
+            continue;
+        }
         match params[i] {
             0 => *attrs = CellAttrs::default(),
             1 => attrs.bold = true,
@@ -4449,6 +4462,57 @@ fn apply_sgr(attrs: &mut CellAttrs, params: &[u16]) {
             _ => {} // unknown / unimplemented SGR code: silently skip
         }
         i += 1;
+    }
+}
+
+/// One SGR parameter that came with sub-parameters.
+///
+/// The colon forms are the ones that used to take the whole sequence
+/// down with them, so what matters most here is that an unhandled
+/// group is skipped whole rather than leaking its numbers back into
+/// the flat path — `58:2::255:0:0` must not set the foreground.
+fn apply_sgr_group(attrs: &mut CellAttrs, g: &[u16]) {
+    match g[0] {
+        // `4:0` off, `4:1`..`4:5` are styles this terminal draws as a
+        // straight underline; the distinction is a renderer feature,
+        // not an attribute we drop the sequence over.
+        4 => attrs.underline = g.get(1).copied().unwrap_or(1) != 0,
+        38 => {
+            if let Some(c) = colour_from_group(&g[1..]) {
+                attrs.fg = c;
+            }
+        }
+        48 => {
+            if let Some(c) = colour_from_group(&g[1..]) {
+                attrs.bg = c;
+            }
+        }
+        // 58 / 59 colour the underline itself, which this terminal has
+        // no separate attribute for.  Skipped, deliberately.
+        _ => {}
+    }
+}
+
+/// The colour inside a `38:` / `48:` group.
+///
+/// `5:n` is the palette.  `2:r:g:b` and `2::r:g:b` are both direct
+/// colour — the second carries an empty colour-space id, which the
+/// parser commits as a zero, so the length says which form arrived.
+fn colour_from_group(rest: &[u16]) -> Option<Color> {
+    match rest.first().copied()? {
+        5 => rest.get(1).map(|n| Color::indexed((*n).min(255) as u8)),
+        2 => {
+            let base = if rest.len() >= 5 { 2 } else { 1 };
+            let r = *rest.get(base)?;
+            let g = *rest.get(base + 1)?;
+            let b = *rest.get(base + 2)?;
+            Some(Color::rgb(
+                r.min(255) as u8,
+                g.min(255) as u8,
+                b.min(255) as u8,
+            ))
+        }
+        _ => None,
     }
 }
 
