@@ -131,7 +131,7 @@ if [[ -z "${REMOTE_MEAS_JSON:-}" ]]; then
   # Exclusive, like the gate: this is a measurement, and a competitor's
   # throughput read while the machine is busy is not a slower number,
   # it is not a number.
-  ssh "$HOST" "export PATH=/opt/homebrew/bin:\$PATH; cd ~/$REMOTE_DIR && flock ${MARSPOT_BENCH_LOCK:-/Users/Shared/bench.lock} bash bin/_remote-measure-others-mini.sh" \
+  ssh "$HOST" "export PATH=/usr/local/bin:/opt/homebrew/bin:\$PATH; cd ~/$REMOTE_DIR && bench-lock bench bash bin/_remote-measure-others-mini.sh" \
     </dev/null > "$MEAS_JSON"
 else
   echo "==> using pre-captured $MEAS_JSON (manual workflow)"

@@ -119,9 +119,9 @@ set +e
 # for this to finish instead of reading a number taken while a test
 # suite had the cores.  See `bin/bench-remote.sh` for the other half.
 ssh "$HOST" "echo \$\$ > $REMOTE_PIDF; cd ~/$REMOTE_DIR && \
-  export PATH=/opt/homebrew/bin:\$PATH && \
+  export PATH=/usr/local/bin:/opt/homebrew/bin:\$PATH && \
   MARSPOT_TEST_JOBS=${MARSPOT_TEST_JOBS:-14} \
-  exec flock -s ${MARSPOT_BENCH_LOCK:-/Users/Shared/bench.lock} bin/test.sh$args"
+  exec bench-lock heavy bin/test.sh$args"
 rc=$?
 set -e
 exit $rc
