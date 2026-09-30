@@ -180,9 +180,11 @@ STALE_PASS=""
 # /usr/local/bin on its PATH, and the failure looks like "bench-lock:
 # not found" from a tool that is installed.
 LOCK_CMD="/usr/local/bin/bench-lock bench"
+BUILD_LOCK="/usr/local/bin/bench-lock heavy"
 if [[ "${MARSPOT_BENCH_NO_LOCK:-}" == "1" ]]; then
   echo "==> MARSPOT_BENCH_NO_LOCK=1 — measuring without the host lock" >&2
   LOCK_CMD=""
+  BUILD_LOCK=""
 fi
 set +e
 ssh "$HOST" "
@@ -195,7 +197,14 @@ ssh "$HOST" "
     echo 'bench-remote: /usr/local/bin/bench-lock is not on the runner' >&2
     exit 1
   fi
-  exec $LOCK_CMD caffeinate -dims ./bin/bench.sh $ARGS_Q
+  # Two holds, not one.  A compile is heavy work and belongs beside
+  # other heavy work; only the measurement wants the machine to
+  # itself.  Held together, everyone else on the runner waited out a
+  # three-minute build for a one-minute measurement -- and the build
+  # is the part that varies, because a tree that changed has to be
+  # rebuilt and a tree that did not is a no-op.
+  $BUILD_LOCK caffeinate -dims ./bin/bench.sh --build-only
+  exec $LOCK_CMD caffeinate -dims ./bin/bench.sh --no-build $ARGS_Q
 " </dev/null
 REMOTE_RC=$?
 set -e
