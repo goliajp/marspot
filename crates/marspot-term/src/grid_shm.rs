@@ -524,6 +524,7 @@ pub struct GridShmWriter {
     rows: u16,
     /// FNV-1a hash of the most recent `publish()`'s grid + cursor + flags
     /// + view window.  `publish_if_changed()` skips the entire shm write
+    ///
     /// (and the caller's GridReady poke) when the next publish would
     /// produce a bit-identical snapshot.  Was the leading idle-CPU source
     /// before this gate: TUIs (claudecode, etc.) hammer the PTY at their

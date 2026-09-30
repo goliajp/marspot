@@ -154,6 +154,7 @@ impl View {
     ///   1. backdrop UI rect (semi-trans dim)
     ///   2. View frame UI rect (opaque BG + border + shadow)
     ///   3. caller's content (rects, rounded rects, glyphs)
+    ///
     /// All three live in overlay scratches, so they render after every
     /// main grid pass.  Caller text / fills inside the View frame
     /// always sit on top of the View BG.

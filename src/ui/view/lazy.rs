@@ -64,6 +64,7 @@ pub fn lazy_hstack(id: ViewId, items: Vec<View>, item_width: Length, gap: Length
 /// Compute the visible-item index range for a given scroll offset
 /// + viewport.  Returns `(first, last)` where `first <= last <=
 /// items_len`.  Both indices are inclusive on first, exclusive on
+///
 /// last — like `&items[first..last]`.
 pub fn visible_range(
     items_len: usize,

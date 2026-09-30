@@ -149,6 +149,7 @@ pub enum MsgType {
     MouseMove = 17,
     /// shell → core: right-mouse-down at physical-pixel `(x f64, y f64)`
     /// + modifier byte.  Same encoding as `MouseDown`.  Drives the
+    ///
     /// F3+9 right-click context menu in L2; missing on pre-F3+9
     /// images, which is wire-safe per `feedback_frame_forward_compat`
     /// (older receivers silently skip the unknown msg_type, older
@@ -328,6 +329,7 @@ pub enum MsgType {
     /// resolution chain ABOVE cwd basename, BELOW user-set custom title
     /// + edit buffer).Payload mirrors `PaneBadge`:
     ///   `session_id u64 LE, title_len u16 LE, title_utf8`.
+    ///
     /// Empty `title_len` clears the plugin-set title for that pane.
     /// Used by the claudecode plugin to project-name the pane on bind.
     PaneTitle = 56,

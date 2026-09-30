@@ -100,7 +100,7 @@ fn main() {
     // detector says is only useful if the tape keeps a line's text
     // under the same virtual number across it.
     let t0 = frame_text(id).expect("text");
-    let anchor_row = (rows / 2);
+    let anchor_row = rows / 2;
     let anchored_text = t0[anchor_row as usize].clone();
     let mut tape = marspot::selection_tape::SelectionTape::new(0, &t0, 0, anchor_row);
     send(&mut sock, true, ticks);

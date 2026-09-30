@@ -1882,6 +1882,7 @@ fn badge_menu_for(
 ///   * `Some("P1")` for `/Users/.../.claude-profile-1`
 ///   * `Some("P0")` for the default `/Users/.../.claude` (no -profile-N)
 ///   * `None`       when the env var isn't set / the read failed
+///
 /// The profile tag for a pane, from the config dir it was started
 /// with.
 ///

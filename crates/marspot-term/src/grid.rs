@@ -239,6 +239,7 @@ pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 ///   requires the parser to look ahead one codepoint and adjust width
 ///   on-the-fly — separate from per-char width.
 /// - ZWJ sequences, regional indicators (flag pairs), modifier bases.
+///
 /// How much of the East-Asian Ambiguous table should be rendered at
 /// width 2.
 ///

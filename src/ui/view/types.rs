@@ -295,6 +295,7 @@ impl AnimCurve {
 ///
 /// v1 = data type only.  Real frame scheduling(`schedule_redraw_in`
 /// + per-frame interpolation)is v2+ animation rollout;  this struct
+///
 /// already gives callers the carrier shape.
 #[derive(Clone, Copy, Debug)]
 pub struct Anim<T: Copy> {

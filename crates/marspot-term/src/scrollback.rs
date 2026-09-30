@@ -148,6 +148,7 @@ impl Scrollback {
     /// re-pushes wrapped segments at the new width.  For File that
     /// double-counts the on-disk records (they survive the restart
     /// + we re-push the same content wrapped to new_cols), so reflow
+    ///
     /// skips the re-push step.  The historical records stay at their
     /// original widths on disk; display renders them as-is (cells
     /// past `cols` show as default — visually shorter row in a wider

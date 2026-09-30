@@ -339,6 +339,7 @@ struct ProcessPanelState {
     max_btn_rect: marspot_term::layout::Rect,
     /// F3+1.5 — title bar hit rect; clicks here begin a drag.  Body
     /// + tab strip do NOT initiate drag, only title bar (matches
+    ///
     /// macOS window-drag semantics).
     title_bar_rect: marspot_term::layout::Rect,
     /// Cursor inside `title_bar_rect` — reveals the ×/−/+ glyphs.

@@ -840,6 +840,7 @@ struct ShellApp {
 
 /// Bundle: the plugin's session object + the metadata we need to log
 /// + cleanly tear it down (plugin name for log namespace).
+///
 /// Starts the queue's runs.
 ///
 /// One method's worth of type, but it must not be the plugin host:
@@ -2303,6 +2304,7 @@ impl ShellApp {
     ///      abandon any in-flight update).
     ///   2. Drive any in-flight silent update via `poll_pending_update`
     ///      (the probationary core's crash/timeout/ready handling).
+    ///
     ///   3-5. Active core healthcheck: HELLO timeout, PING, PONG
     ///      deadline — unchanged, but scoped to `active` only.
     ///   6. SIGUSR1 manual trigger; 7. banner refresh.
