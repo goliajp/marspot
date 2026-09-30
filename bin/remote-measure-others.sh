@@ -128,7 +128,10 @@ MEAS_JSON="${REMOTE_MEAS_JSON:-$OUT_DIR/measured.json}"
 
 if [[ -z "${REMOTE_MEAS_JSON:-}" ]]; then
   echo "==> dispatching iTerm / Warp on $HOST (~1-2 min)"
-  ssh "$HOST" "cd ~/$REMOTE_DIR && bash bin/_remote-measure-others-mini.sh" \
+  # Exclusive, like the gate: this is a measurement, and a competitor's
+  # throughput read while the machine is busy is not a slower number,
+  # it is not a number.
+  ssh "$HOST" "export PATH=/opt/homebrew/bin:\$PATH; cd ~/$REMOTE_DIR && flock ${MARSPOT_BENCH_LOCK:-/Users/Shared/bench.lock} bash bin/_remote-measure-others-mini.sh" \
     </dev/null > "$MEAS_JSON"
 else
   echo "==> using pre-captured $MEAS_JSON (manual workflow)"
