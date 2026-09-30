@@ -98,7 +98,7 @@ pub(crate) fn record_launch_and_detect_loop(current: &std::path::Path) -> bool {
         return false;
     }
     let span = recent[0].0 - recent[recent.len() - 1].0;
-    recent.iter().all(|r| r.1 == mtime) && span >= 0.0 && span <= LAUNCH_LOOP_WINDOW_SECS
+    recent.iter().all(|r| r.1 == mtime) && (0.0..=LAUNCH_LOOP_WINDOW_SECS).contains(&span)
 }
 
 /// 2026-07-28 incident — what a launch history says about THIS boot.
@@ -156,68 +156,6 @@ pub(crate) fn assess_launch_history(stamps: &[f64], now: f64) -> LaunchVerdict {
         LaunchVerdict::Backoff(backoff)
     } else {
         LaunchVerdict::Normal
-    }
-}
-
-#[cfg(test)]
-mod crash_loop_tests {
-    use super::*;
-
-    /// 正常一天的启动分布(早一次、午一次、崩一次后 1 次)不触发。
-    #[test]
-    fn scattered_launches_are_normal() {
-        let now = 100_000.0;
-        assert_eq!(
-            assess_launch_history(&[now - 40_000.0, now - 7_000.0, now], now),
-            LaunchVerdict::Normal
-        );
-        // 两次快速重启还够不着阈值(用户手滑连开两次)。
-        assert_eq!(
-            assess_launch_history(&[now - 10.0, now], now),
-            LaunchVerdict::Normal
-        );
-    }
-
-    /// 60 秒里第 3 次 → 退避,且指数增长、有上限。
-    #[test]
-    fn rapid_relaunches_back_off_exponentially() {
-        let now = 100_000.0;
-        assert_eq!(
-            assess_launch_history(&[now - 20.0, now - 10.0, now], now),
-            LaunchVerdict::Backoff(2)
-        );
-        assert_eq!(
-            assess_launch_history(&[now - 30.0, now - 20.0, now - 10.0, now], now),
-            LaunchVerdict::Backoff(4)
-        );
-        // 8 连发:1<<6=64 被 30 封顶……但 300 秒窗口里 ≥5 已经进
-        // safe mode,所以先验证 cap 在 SafeMode 的退避里生效。
-        let burst: Vec<f64> = (0..8).map(|i| now - i as f64 * 5.0).collect();
-        assert_eq!(
-            assess_launch_history(&burst, now),
-            LaunchVerdict::SafeMode(30)
-        );
-    }
-
-    /// 5 分钟里第 5 次 → safe mode —— 2026-07-28 那晚的形状:
-    /// 崩溃后 1~5 秒被外部拉起,每轮 restore 又多一代进程。
-    #[test]
-    fn a_crash_loop_enters_safe_mode() {
-        let now = 100_000.0;
-        let stamps = [now - 240.0, now - 180.0, now - 120.0, now - 70.0, now];
-        assert_eq!(
-            assess_launch_history(&stamps, now),
-            LaunchVerdict::SafeMode(1),
-            "5 launches spread over 5 min: no rapid burst, but still a loop"
-        );
-    }
-
-    /// 时钟异常(未来时间戳)不许把正常启动误判成循环。
-    #[test]
-    fn future_stamps_do_not_count() {
-        let now = 100_000.0;
-        let stamps = [now + 50.0, now + 60.0, now + 70.0, now + 80.0, now];
-        assert_eq!(assess_launch_history(&stamps, now), LaunchVerdict::Normal);
     }
 }
 
@@ -527,8 +465,8 @@ pub(crate) fn write_shell_pid() {
 /// the file is absent or its pid is dead.
 pub(crate) fn running_shell_pid() -> Option<u32> {
     let path = marspot::paths::shell_pid_file();
-    if let Ok(s) = std::fs::read_to_string(&path) {
-        if let Ok(pid) = s.trim().parse::<u32>() {
+    if let Ok(s) = std::fs::read_to_string(&path)
+        && let Ok(pid) = s.trim().parse::<u32>() {
             // kill(pid, 0): 0 = alive and ours to signal.
             if pid != std::process::id()
                 && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
@@ -536,7 +474,6 @@ pub(crate) fn running_shell_pid() -> Option<u32> {
                 return Some(pid);
             }
         }
-    }
     find_running_shell_pid()
 }
 
@@ -571,5 +508,67 @@ pub(crate) fn install_sigusr1_handler() {
             libc::SIGUSR1,
             sigusr1_handler as *const () as libc::sighandler_t,
         );
+    }
+}
+
+#[cfg(test)]
+mod crash_loop_tests {
+    use super::*;
+
+    /// 正常一天的启动分布(早一次、午一次、崩一次后 1 次)不触发。
+    #[test]
+    fn scattered_launches_are_normal() {
+        let now = 100_000.0;
+        assert_eq!(
+            assess_launch_history(&[now - 40_000.0, now - 7_000.0, now], now),
+            LaunchVerdict::Normal
+        );
+        // 两次快速重启还够不着阈值(用户手滑连开两次)。
+        assert_eq!(
+            assess_launch_history(&[now - 10.0, now], now),
+            LaunchVerdict::Normal
+        );
+    }
+
+    /// 60 秒里第 3 次 → 退避,且指数增长、有上限。
+    #[test]
+    fn rapid_relaunches_back_off_exponentially() {
+        let now = 100_000.0;
+        assert_eq!(
+            assess_launch_history(&[now - 20.0, now - 10.0, now], now),
+            LaunchVerdict::Backoff(2)
+        );
+        assert_eq!(
+            assess_launch_history(&[now - 30.0, now - 20.0, now - 10.0, now], now),
+            LaunchVerdict::Backoff(4)
+        );
+        // 8 连发:1<<6=64 被 30 封顶……但 300 秒窗口里 ≥5 已经进
+        // safe mode,所以先验证 cap 在 SafeMode 的退避里生效。
+        let burst: Vec<f64> = (0..8).map(|i| now - i as f64 * 5.0).collect();
+        assert_eq!(
+            assess_launch_history(&burst, now),
+            LaunchVerdict::SafeMode(30)
+        );
+    }
+
+    /// 5 分钟里第 5 次 → safe mode —— 2026-07-28 那晚的形状:
+    /// 崩溃后 1~5 秒被外部拉起,每轮 restore 又多一代进程。
+    #[test]
+    fn a_crash_loop_enters_safe_mode() {
+        let now = 100_000.0;
+        let stamps = [now - 240.0, now - 180.0, now - 120.0, now - 70.0, now];
+        assert_eq!(
+            assess_launch_history(&stamps, now),
+            LaunchVerdict::SafeMode(1),
+            "5 launches spread over 5 min: no rapid burst, but still a loop"
+        );
+    }
+
+    /// 时钟异常(未来时间戳)不许把正常启动误判成循环。
+    #[test]
+    fn future_stamps_do_not_count() {
+        let now = 100_000.0;
+        let stamps = [now + 50.0, now + 60.0, now + 70.0, now + 80.0, now];
+        assert_eq!(assess_launch_history(&stamps, now), LaunchVerdict::Normal);
     }
 }

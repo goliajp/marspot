@@ -188,8 +188,8 @@ pub fn scan_visible_links_with<S: CellSource>(
         // row without contributing any chars.  The `chars`/`col_map`/
         // `segments` buffers are cleared so the row after the box
         // starts a fresh line, not a phantom continuation.
-        if let Some((lo, hi)) = exempt_range {
-            if r >= lo && r <= hi {
+        if let Some((lo, hi)) = exempt_range
+            && r >= lo && r <= hi {
                 if !segments.is_empty() {
                     scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle, opts.cwd);
                     chars.clear();
@@ -199,7 +199,6 @@ pub fn scan_visible_links_with<S: CellSource>(
                 }
                 continue;
             }
-        }
         let decawm_cont = r > 0 && src.is_soft_wrap_continuation(r);
         let cc_cont = !decawm_cont
             && r > 0
@@ -1069,8 +1068,8 @@ fn scan_line_into_matches(
         let c = chars[i];
 
         // URL: http:// or https://
-        if matches_prefix(&chars, i, "http://") || matches_prefix(&chars, i, "https://") {
-            let mut end = scan_until_link_terminator(&chars, i);
+        if matches_prefix(chars, i, "http://") || matches_prefix(chars, i, "https://") {
+            let mut end = scan_until_link_terminator(chars, i);
             // A zero-indent cc join is the weakest merge guess (flush
             // prose looks identical), and URLs have no existence
             // oracle to arbitrate — so a URL stops at one, unless the
@@ -1114,8 +1113,8 @@ fn scan_line_into_matches(
         // there.  It also must NOT be a `Url`, because the click path
         // prefixes anything that is not `http(s)://` with `http://`,
         // which would open `http://file:///…`.
-        if matches_prefix(&chars, i, "file://") {
-            let end = scan_path_candidate(&chars, i);
+        if matches_prefix(chars, i, "file://") {
+            let end = scan_path_candidate(chars, i);
             // Arbitrate on the PATH the scheme names, while the link's
             // span stays over what is drawn — the user selects and
             // sees `file://…`, and the click resolves the file.
@@ -1133,8 +1132,8 @@ fn scan_line_into_matches(
             // `file:///…/goliajp/` ⏎ `vis/brand-dist/index-ja.html#principles`).
             let frag = (path_start..end).find(|&j| chars[j] == '#' || chars[j] == '?');
             let stat_end = frag.unwrap_or(end);
-            if path_start < stat_end {
-                if let Some(b) = resolve_path_end(&chars, path_start, stat_end, segments, oracle) {
+            if path_start < stat_end
+                && let Some(b) = resolve_path_end(chars, path_start, stat_end, segments, oracle) {
                     // The fragment belongs to the link only when the
                     // whole path it hangs off resolved; a shorter
                     // arbitrated end means the rest is not this link's.
@@ -1146,18 +1145,17 @@ fn scan_line_into_matches(
                     i = span_end.max(i + 1);
                     continue;
                 }
-            }
         }
 
-        if c == '/' && i + 1 < n && (at_seg_start || !is_left_boundary_alnum(&chars, i)) {
-            let end = scan_path_candidate(&chars, i);
+        if c == '/' && i + 1 < n && (at_seg_start || !is_left_boundary_alnum(chars, i)) {
+            let end = scan_path_candidate(chars, i);
             // Greedy scan, filesystem arbitration — `resolve_path_end`
             // is the whole decision.  The seam retry stays separate:
             // its candidates are cc hard-wrap boundaries, not prose
             // marks, and a seam prefix that happens to be a real
             // *directory* must not win over the file the line points
             // at, so it is tried only after every prose cut has.
-            if let Some(b) = resolve_path_end(&chars, i, end, segments, oracle) {
+            if let Some(b) = resolve_path_end(chars, i, end, segments, oracle) {
                 let text = unquote_path(&chars[i..b].iter().collect::<String>());
                 emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
                 i = b.max(i + 1);
@@ -1191,24 +1189,23 @@ fn scan_line_into_matches(
         if c == '~'
             && i + 1 < n
             && chars[i + 1] == '/'
-            && (at_seg_start || !is_left_boundary_alnum(&chars, i))
+            && (at_seg_start || !is_left_boundary_alnum(chars, i))
         {
-            let end = scan_path_candidate(&chars, i);
+            let end = scan_path_candidate(chars, i);
             if end - i >= 3 {
-                if let Some(b) = resolve_path_end(&chars, i, end, segments, oracle) {
+                if let Some(b) = resolve_path_end(chars, i, end, segments, oracle) {
                     let text = unquote_path(&chars[i..b].iter().collect::<String>());
                     emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
                     i = b.max(i + 1);
                     continue;
                 }
-                if looks_like_path(&chars[i..end]) {
-                    if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end, oracle) {
+                if looks_like_path(&chars[i..end])
+                    && let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end, oracle) {
                         let text = unquote_path(&chars[i..b].iter().collect::<String>());
                         emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
                         i = b;
                         continue;
                     }
-                }
             }
         }
 
@@ -1218,8 +1215,8 @@ fn scan_line_into_matches(
         // text.  Reject rules kill version strings (`v1.2.3.4`,
         // `1.2.3.4.5`, `1.2.3.4-rc1`), IPs inside longer identifiers,
         // and IPs already inside an `http://…` URL (prev char is `/`).
-        if c.is_ascii_digit() {
-            if let Some(end) = try_scan_ipv4_url(chars, i) {
+        if c.is_ascii_digit()
+            && let Some(end) = try_scan_ipv4_url(chars, i) {
                 let text: String = chars[i..end].iter().collect();
                 emit_match(
                     out, segments, col_map, cols_per_row, i, end,
@@ -1228,14 +1225,13 @@ fn scan_line_into_matches(
                 i = end;
                 continue;
             }
-        }
 
         // IPv6 — bracketed form (`[::1]:8080/foo`) triggers on `[`;
         // bare form (`2001:db8::1`, `::1`, or full 8-group) triggers
         // on hex or `:`.  `::` OR exactly 8 groups is required for
         // bare form so time strings (`12:34:56`) don't match.
-        if c == '[' {
-            if let Some(end) = try_scan_ipv6(chars, i) {
+        if c == '['
+            && let Some(end) = try_scan_ipv6(chars, i) {
                 let text: String = chars[i..end].iter().collect();
                 emit_match(
                     out, segments, col_map, cols_per_row, i, end,
@@ -1244,9 +1240,8 @@ fn scan_line_into_matches(
                 i = end;
                 continue;
             }
-        }
-        if c.is_ascii_hexdigit() || c == ':' {
-            if let Some(end) = try_scan_ipv6(chars, i) {
+        if (c.is_ascii_hexdigit() || c == ':')
+            && let Some(end) = try_scan_ipv6(chars, i) {
                 let text: String = chars[i..end].iter().collect();
                 emit_match(
                     out, segments, col_map, cols_per_row, i, end,
@@ -1255,13 +1250,12 @@ fn scan_line_into_matches(
                 i = end;
                 continue;
             }
-        }
 
         // UUID — canonical `8-4-4-4-12` hex.  Triggers on hex digit;
         // the shape is rigid enough that false-positive risk is
         // negligible without further gating.
-        if c.is_ascii_hexdigit() {
-            if let Some(end) = try_scan_uuid(chars, i) {
+        if c.is_ascii_hexdigit()
+            && let Some(end) = try_scan_uuid(chars, i) {
                 let text: String = chars[i..end].iter().collect();
                 emit_match(
                     out, segments, col_map, cols_per_row, i, end,
@@ -1270,11 +1264,10 @@ fn scan_line_into_matches(
                 i = end;
                 continue;
             }
-        }
 
         if c == '@' && i > 0 && i + 1 < n {
-            let local_start = scan_back_local(&chars, i);
-            let host_end = scan_forward_host(&chars, i + 1);
+            let local_start = scan_back_local(chars, i);
+            let host_end = scan_forward_host(chars, i + 1);
             if local_start < i
                 && host_end > i + 1
                 && is_email_host(&chars[i + 1..host_end])
@@ -1302,14 +1295,14 @@ fn scan_line_into_matches(
         // so a URL, an address, an IP or a UUID is never re-read as a
         // filename.  Only reachable when the pane's directory is
         // known: `src/main.rs` names nothing on its own.
-        if let Some(cwd) = cwd {
-            if (c.is_alphanumeric() || c == '.' || c == '_')
-                && (at_seg_start || !is_left_boundary_pathish(&chars, i))
+        if let Some(cwd) = cwd
+            && (c.is_alphanumeric() || c == '.' || c == '_')
+                && (at_seg_start || !is_left_boundary_pathish(chars, i))
             {
-                let end = scan_path_candidate(&chars, i);
-                if end > i && looks_like_relative_path(&chars[i..end]) {
-                    if let Some(b) =
-                        resolve_path_end_from(&chars, i, end, segments, oracle, Some(cwd))
+                let end = scan_path_candidate(chars, i);
+                if end > i && looks_like_relative_path(&chars[i..end])
+                    && let Some(b) =
+                        resolve_path_end_from(chars, i, end, segments, oracle, Some(cwd))
                     {
                         let text = unquote_path(&chars[i..b].iter().collect::<String>());
                         let full = join_cwd(cwd, &text);
@@ -1320,9 +1313,7 @@ fn scan_line_into_matches(
                         i = b.max(i + 1);
                         continue;
                     }
-                }
             }
-        }
 
         i += 1;
     }
@@ -1859,11 +1850,10 @@ fn try_scan_ipv4_url(chars: &[char], start: usize) -> Option<usize> {
             return None;
         }
     }
-    if let Some(&next) = chars.get(i) {
-        if next.is_ascii_alphanumeric() || matches!(next, '.' | '-' | '_') {
+    if let Some(&next) = chars.get(i)
+        && (next.is_ascii_alphanumeric() || matches!(next, '.' | '-' | '_')) {
             return None;
         }
-    }
     let ip_end = i;
     if chars.get(i) == Some(&':') {
         let ps = i + 1;
@@ -2004,11 +1994,10 @@ fn try_scan_ipv6(chars: &[char], start: usize) -> Option<usize> {
         return None;
     }
     // Right boundary — the token must not slide into an identifier.
-    if let Some(&next) = chars.get(i) {
-        if next.is_ascii_alphanumeric() || matches!(next, '.' | '-' | '_') {
+    if let Some(&next) = chars.get(i)
+        && (next.is_ascii_alphanumeric() || matches!(next, '.' | '-' | '_')) {
             return None;
         }
-    }
     let body: String = chars[start..i].iter().collect();
     let colon_count = body.chars().filter(|&c| c == ':').count();
     // `::` compression is the sharpest IPv6 signal; the 8-group form
@@ -2558,7 +2547,7 @@ fn looks_like_url(span: &[char]) -> bool {
     // Bare `https://localhost` stays rejected.  That was settled
     // separately (`url_without_dot_in_host_rejected`: it is the shape
     // chat examples take), and a port is all this report needs.
-    name.iter().any(|c| *c == '.') || port_ok
+    name.contains(&'.') || port_ok
 }
 
 /// Walk backwards from an `@` to find the start of the local part.
@@ -3212,14 +3201,12 @@ mod tests {
         let indent = "  ";
         let chars: Vec<char> = url.chars().collect();
         let cut = (1..chars.len())
-            .filter(|&k| chars[k - 1] == '/')
-            .filter(|&k| {
+            .filter(|&k| chars[k - 1] == '/').rfind(|&k| {
                 let head = indent.chars().count() + k;
                 let tail = indent.chars().count() + (chars.len() - k);
                 // Flush enough to read as a wrap, and the rest must fit.
                 head <= cols as usize && head >= 50 && tail <= cols as usize
-            })
-            .next_back();
+            });
         let Some(cut) = cut else {
             std::fs::remove_dir_all(&root).ok();
             panic!("no wrap point in {url} — the case this test is about cannot be built");
@@ -3271,13 +3258,11 @@ mod tests {
         let indent = "  ";
         let chars: Vec<char> = url.chars().collect();
         let cut = (1..chars.len())
-            .filter(|&k| chars[k - 1] == '/' && chars[k] != '/')
-            .filter(|&k| {
+            .filter(|&k| chars[k - 1] == '/' && chars[k] != '/').rfind(|&k| {
                 let head = indent.chars().count() + k;
                 let tail = indent.chars().count() + (chars.len() - k);
                 head <= cols as usize && head >= 50 && tail <= cols as usize
-            })
-            .next_back();
+            });
         let Some(cut) = cut else {
             std::fs::remove_dir_all(&root).ok();
             panic!("no wrap point in {url} — the case this test is about cannot be built");
@@ -3488,11 +3473,9 @@ mod tests {
         std::fs::write(dir.join("a.sql"), b"x").expect("write a.sql");
         let d = format!("{}/", dir.to_string_lossy());
 
-        let rows = vec![
-            format!("  {d}a.sql"),
+        let rows = [format!("  {d}a.sql"),
             format!("  {d}bb/"),
-            format!("  {d}ccc/"),
-        ];
+            format!("  {d}ccc/")];
         // Two columns wider than the longest row: every row now ends
         // inside the slack, which is what triggers the merge.
         let cols = (rows.iter().map(|r| r.chars().count()).max().unwrap() + 2) as u16;
@@ -3879,7 +3862,7 @@ mod tests {
     /// into a `stat` storm, and must still link nothing.
     #[test]
     fn a_token_of_pure_punctuation_is_bounded_and_links_nothing() {
-        let junk: String = std::iter::repeat("/a、").take(200).collect();
+        let junk: String = std::iter::repeat_n("/a、", 200).collect();
         let v = scan(&format!("见 {junk} 完"));
         assert!(
             v.iter().all(|r| r.kind != LinkKind::File),

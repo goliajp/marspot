@@ -31,6 +31,7 @@ pub const QUERY_MAX_CHARS: usize = 1024;
 /// **char** units, not bytes, so insertion / deletion are UTF-8 safe
 /// without slicing into multi-byte sequences.
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct SearchBar {
     /// The user's typed query.  Re-search debounces 100 ms after the
     /// last keystroke.
@@ -76,21 +77,6 @@ pub struct ToolRectPx {
     pub h: f64,
 }
 
-impl Default for SearchBar {
-    fn default() -> Self {
-        Self {
-            query: String::new(),
-            case_sensitive: false,
-            query_id: 0,
-            focused: false,
-            counter: None,
-            cursor: 0,
-            preedit: String::new(),
-            debounce_until: None,
-            rect_px: ToolRectPx::default(),
-        }
-    }
-}
 
 impl SearchBar {
     pub fn new() -> Self {
@@ -178,7 +164,7 @@ impl SearchBar {
         // Fallback — we should always find it because cursor <= char_len.
         if at_byte == 0 {
             // edge case: cursor at end
-            if let Some((idx, c)) = self.query.char_indices().rev().next() {
+            if let Some((idx, c)) = self.query.char_indices().next_back() {
                 prev_byte = idx;
                 at_byte = idx + c.len_utf8();
             }
@@ -338,11 +324,10 @@ impl SearchBar {
             _ => {
                 // Printable char insertion via ev.text (already
                 // case-resolved by the window backend).
-                if let Some(t) = &ev.text {
-                    if self.insert_chars(t, now) {
+                if let Some(t) = &ev.text
+                    && self.insert_chars(t, now) {
                         return InputDisposition::HandledRequestRedraw;
                     }
-                }
                 InputDisposition::Handled
             }
         }

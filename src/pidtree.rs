@@ -660,7 +660,7 @@ fn build_node(
 /// F3+1 — flatten a nested tree to a depth-tagged sequence for UI
 /// row rendering.  `(depth, &node)` pairs in pre-order so root is
 /// first, then children left-to-right.
-pub fn flatten_pre_order<'a>(root: &'a ProcNode) -> Vec<(usize, &'a ProcNode)> {
+pub fn flatten_pre_order(root: &ProcNode) -> Vec<(usize, &ProcNode)> {
     let mut out: Vec<(usize, &ProcNode)> = Vec::new();
     fn walk<'a>(node: &'a ProcNode, depth: usize, out: &mut Vec<(usize, &'a ProcNode)>) {
         out.push((depth, node));

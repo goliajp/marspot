@@ -236,7 +236,7 @@ impl MarspotAppCtx {
 
     /// Backing scale factor of the window's current screen.
     pub fn scale(&self) -> f64 {
-        self.nswindow.backingScaleFactor() as f64
+        self.nswindow.backingScaleFactor()
     }
 
     /// Right edge of the macOS traffic-light cluster, in **physical
@@ -600,7 +600,7 @@ define_class!(
             // When it commits, insertText fires.  When the key was
             // navigation / editing, doCommandBySelector fires.
             let array = NSArray::from_slice(&[event]);
-            { self.interpretKeyEvents(&array) };
+            self.interpretKeyEvents(&array);
 
             if !self.ivars().ime_consumed.get() {
                 // Composing guard: when marked_text is non-empty the
@@ -813,19 +813,17 @@ define_class!(
             // (pixel-precise) from wheels (line-stepped).  Scale on
             // the caller side via cell height.
             let precise = { event.hasPreciseScrollingDeltas() };
-            let dx;
-            let dy;
-            if precise {
+            
+            
+            let (dx, dy) = if precise {
                 // In points; convert to backing pixels.
                 let scale =
                     self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
-                dx = { event.scrollingDeltaX() } * scale;
-                dy = { event.scrollingDeltaY() } * scale;
+                ({ event.scrollingDeltaX() } * scale, { event.scrollingDeltaY() } * scale)
             } else {
                 // Lines; pass through, caller scales.
-                dx = event.deltaX();
-                dy = event.deltaY();
-            }
+                (event.deltaX(), event.deltaY())
+            };
             dispatch_event_for(self.ivars().window_id.get(), EventKind::Scroll { dx, dy, precise });
         }
     }
@@ -1461,13 +1459,11 @@ fn set_dock_icon_from_bundle(nsapp: &NSApplication) {
     // Resources there;  fall through to the known install path so
     // post-execv L1 still updates the Dock.
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(macos_dir) = exe.parent() {
-            if let Some(contents) = macos_dir.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(macos_dir) = exe.parent()
+            && let Some(contents) = macos_dir.parent() {
                 candidates.push(contents.join("Resources").join("AppIcon.icns"));
             }
-        }
-    }
     if let Some(home) = std::env::var_os("HOME") {
         candidates.push(
             PathBuf::from(home)
@@ -1530,7 +1526,7 @@ fn build_window(
     // mutability blocks the plain `from_slice` retainable bound;
     // copying an immutable NSString is just a retain.)
     let drag_types = NSArray::from_retained_slice(&[unsafe { NSPasteboardTypeFileURL.copy() }]);
-    { view.registerForDraggedTypes(&drag_types) };
+    view.registerForDraggedTypes(&drag_types);
 
     // 2. Create NSWindow with view as content.
     //
@@ -1927,7 +1923,7 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
 
     // Show + focus + activate.  `activate()` replaces the deprecated
     // `activateIgnoringOtherApps(true)`; macOS 14+ is our target floor.
-    { nsapp.activate() };
+    nsapp.activate();
     window.makeKeyAndOrderFront(None);
 
     // Hand control to the app's resumed handler.  Borrow the cell as
@@ -1973,7 +1969,7 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     crate::dev_window::drain_pending_actions();
 
     // 6. Run.  Returns after dispatch_event sees an exit request.
-    { nsapp.run() };
+    nsapp.run();
 
     // Drop app state on the main thread so `Drop`s for sessions /
     // renderers fire here.

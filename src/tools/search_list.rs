@@ -31,6 +31,7 @@ pub const MAX_HITS: usize = 256;
 /// shape (we store `WireSearchHit` so C5's main loop can hand it
 /// straight to the renderer + L4 wire layer without re-mapping).
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct SearchList {
     /// The query that this list belongs to.  Stale batches with a
     /// different `query_id` (D15 race) are dropped on `apply_results`.
@@ -58,19 +59,6 @@ pub struct SearchList {
     pub rect_px: ToolRectPx,
 }
 
-impl Default for SearchList {
-    fn default() -> Self {
-        Self {
-            query_id: 0,
-            hits: VecDeque::new(),
-            focused: None,
-            visible_top: 0,
-            exhausted_older: false,
-            pending_more: false,
-            rect_px: ToolRectPx::default(),
-        }
-    }
-}
 
 /// What `on_scroll` decided.  Drives L2's frame dispatch — when
 /// `should_load_more = true`, L2 emits a `SearchMore` frame.
@@ -131,11 +119,10 @@ impl SearchList {
             if self.hits.len() > MAX_HITS {
                 self.hits.pop_front();
                 // Adjust indices since we trimmed the front.
-                if let Some(f) = self.focused.as_mut() {
-                    if *f > 0 {
+                if let Some(f) = self.focused.as_mut()
+                    && *f > 0 {
                         *f -= 1;
                     }
-                }
                 if self.visible_top > 0 {
                     self.visible_top -= 1;
                 }

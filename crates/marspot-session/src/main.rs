@@ -488,7 +488,7 @@ fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L3Handoff> {
     );
     let version: u32 = fields.get("version").ok_or_else(|| inv("version"))?
         .parse().map_err(|_| inv("version"))?;
-    if version < HANDOFF_MANIFEST_MIN_COMPAT || version > HANDOFF_MANIFEST_VERSION {
+    if !(HANDOFF_MANIFEST_MIN_COMPAT..=HANDOFF_MANIFEST_VERSION).contains(&version) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
@@ -857,41 +857,35 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
                     }
                 }
                 MsgType::GridResize => {
-                    if let Ok((cols, rows)) = decode_grid_resize(&f.payload) {
-                        if tx.send(SessionEvent::Resize(cols, rows)).is_err() {
+                    if let Ok((cols, rows)) = decode_grid_resize(&f.payload)
+                        && tx.send(SessionEvent::Resize(cols, rows)).is_err() {
                             break;
                         }
-                    }
                 }
                 MsgType::GridScroll => {
-                    if let Ok(off) = decode_grid_scroll(&f.payload) {
-                        if tx.send(SessionEvent::Scroll(off)).is_err() {
+                    if let Ok(off) = decode_grid_scroll(&f.payload)
+                        && tx.send(SessionEvent::Scroll(off)).is_err() {
                             break;
                         }
-                    }
                 }
                 MsgType::GetSelectionText => {
-                    if let Ok((seq, a, fo, bw)) = decode_get_selection_text(&f.payload) {
-                        if tx.send(SessionEvent::GetSelection(seq, a, fo, bw)).is_err() {
+                    if let Ok((seq, a, fo, bw)) = decode_get_selection_text(&f.payload)
+                        && tx.send(SessionEvent::GetSelection(seq, a, fo, bw)).is_err() {
                             break;
                         }
-                    }
                 }
                 MsgType::Paste => {
-                    if let Ok(text) = decode_paste(&f.payload) {
-                        if tx.send(SessionEvent::Paste(text)).is_err() {
+                    if let Ok(text) = decode_paste(&f.payload)
+                        && tx.send(SessionEvent::Paste(text)).is_err() {
                             break;
                         }
-                    }
                 }
                 MsgType::PaneHoldGrid => {
                     if let Ok((_sid, on)) =
                         marspot_term::shell_proto::decode_pane_hold_grid(&f.payload)
-                    {
-                        if tx.send(SessionEvent::HoldGrid(on)).is_err() {
+                        && tx.send(SessionEvent::HoldGrid(on)).is_err() {
                             break;
                         }
-                    }
                 }
                 MsgType::PaneResetAttrs => {
                     if marspot_term::shell_proto::decode_pane_reset_attrs(&f.payload)
@@ -904,20 +898,16 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
                 MsgType::PaneRenderMarkup => {
                     if let Ok((_sid, on)) =
                         marspot_term::shell_proto::decode_pane_render_markup(&f.payload)
-                    {
-                        if tx.send(SessionEvent::RenderMarkup(on)).is_err() {
+                        && tx.send(SessionEvent::RenderMarkup(on)).is_err() {
                             break;
                         }
-                    }
                 }
                 MsgType::InjectInput => {
                     if let Ok((_sid, bytes)) =
                         marspot_term::shell_proto::decode_inject_input(&f.payload)
-                    {
-                        if tx.send(SessionEvent::InjectInput(bytes)).is_err() {
+                        && tx.send(SessionEvent::InjectInput(bytes)).is_err() {
                             break;
                         }
-                    }
                 }
                 MsgType::PaneResetMouseReporting => {
                     if marspot_term::shell_proto::decode_pane_reset_mouse_reporting(
@@ -932,8 +922,7 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
                 MsgType::SearchScrollback => {
                     if let Ok((query_id, case_sensitive, max_total, query)) =
                         decode_search_scrollback(&f.payload)
-                    {
-                        if tx
+                        && tx
                             .send(SessionEvent::SearchRequest {
                                 query_id,
                                 case_sensitive,
@@ -944,17 +933,15 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
                         {
                             break;
                         }
-                    }
                 }
                 MsgType::SearchCancel => {
-                    if let Ok(query_id) = decode_search_cancel(&f.payload) {
-                        if tx
+                    if let Ok(query_id) = decode_search_cancel(&f.payload)
+                        && tx
                             .send(SessionEvent::SearchCancelRequested(query_id))
                             .is_err()
                         {
                             break;
                         }
-                    }
                 }
                 _ => {}
             },
@@ -1901,8 +1888,8 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     // a FULL queue is worth a line, because it means the
                     // foreground process has stopped reading stdin and
                     // the user's input is being dropped on the floor.
-                    if let Err(e) = session.write(&bytes) {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
+                    if let Err(e) = session.write(&bytes)
+                        && e.kind() == std::io::ErrorKind::WouldBlock {
                             lx_warn!(
                                 "l3.pty.write_dropped",
                                 &format!("{e}"),
@@ -1910,7 +1897,6 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                                 backlog = session.pty_write_backlog()
                             );
                         }
-                    }
                 }
                 SessionEvent::Wake => {}
                 SessionEvent::CoreGone(core_gen) => {
@@ -2356,8 +2342,8 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
 
         watch.phase("selection");
         // Answer any Cmd-C selection requests against the post-pump grid.
-        if !selection_reqs.is_empty() {
-            if let Some(w) = poke.as_mut() {
+        if !selection_reqs.is_empty()
+            && let Some(w) = poke.as_mut() {
                 for (seq, anchor, focus, blockwise) in selection_reqs {
                     let text = grid_selection_text(session.terminal().grid(), anchor, focus, blockwise)
                         .unwrap_or_default();
@@ -2377,7 +2363,6 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     }
                 }
             }
-        }
 
         frame += 1;
         if last_predict_report.elapsed() >= PREDICT_REPORT_EVERY {

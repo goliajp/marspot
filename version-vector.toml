@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.183"  # readiness reads the byte stream, not a frame a hold froze
-core    = "0.12.220"  # the title bar shows product version and core build
-session = "0.11.103"  # tabs move the cursor
+shell   = "0.7.184"  # clippy sweep
+core    = "0.12.221"  # clippy sweep
+session = "0.11.104"  # clippy sweep

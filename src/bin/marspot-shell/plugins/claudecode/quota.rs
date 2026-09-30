@@ -236,11 +236,10 @@ pub(super) fn next_move(s: &Situation) -> Move {
     // through.  The caller has to keep this tally across the gap where
     // the pane has no binding at all, which is exactly where it was
     // being dropped (pane 442, 2026-09-29: three cycles in 40 seconds).
-    if let Some(t) = s.last_target {
-        if t != s.current {
+    if let Some(t) = s.last_target
+        && t != s.current {
             return Move::Hold("the last move has not landed");
         }
-    }
     if s.moves_this_episode >= MOVES_PER_EPISODE
         && s.since_last_move.map(|d| d < MOVE_COOLDOWN).unwrap_or(false)
     {

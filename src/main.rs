@@ -360,8 +360,8 @@ impl MarspotApp for Marspot {
                 //     in `key_event`.
                 let pushed = p.drain_scroll_push_delta();
                 let has_bytes = n > 0;
-                if let Some(sel) = self.selection.as_mut() {
-                    if sel.session_idx == i {
+                if let Some(sel) = self.selection.as_mut()
+                    && sel.session_idx == i {
                         if pushed > 0 {
                             let bump = pushed as u32;
                             sel.anchor.1 = sel.anchor.1.saturating_add(bump);
@@ -379,7 +379,6 @@ impl MarspotApp for Marspot {
                             self.selection = None;
                         }
                     }
-                }
             }
             total
         };
@@ -413,13 +412,12 @@ impl MarspotApp for Marspot {
         // (the keystroke does NOT reach the focused pane) — that
         // matches NSMenu, and avoids surprise side-effects like
         // sending `\e` to a vim session that meant to close a menu.
-        if event.state == KeyState::Pressed && self.context_menu.is_some() {
-            if let LogicalKey::Named(NamedKey::Escape) = event.logical {
+        if event.state == KeyState::Pressed && self.context_menu.is_some()
+            && let LogicalKey::Named(NamedKey::Escape) = event.logical {
                 self.context_menu = None;
                 ctx.request_redraw();
                 return;
             }
-        }
 
         // Cmd-C: copy current text selection to the macOS clipboard.
         // Must run before the title-edit fall-through so a selection
@@ -430,11 +428,9 @@ impl MarspotApp for Marspot {
         if event.state == KeyState::Pressed
             && modifiers.super_key()
             && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'c'))
-        {
-            if self.copy_selection_to_clipboard() {
+            && self.copy_selection_to_clipboard() {
                 return;
             }
-        }
 
         // Cmd-B: toggle the sidebar.  Collapsed sidebar reclaims its
         // width for the cell grid (VSCode / Cursor convention).  Cmd-*
@@ -678,8 +674,8 @@ impl MarspotApp for Marspot {
 
         // Title-strip click → focus that cell.  A pane's name is its
         // directory, so there is nothing to type here.
-        if let Some(idx) = title_hit {
-            if idx < self.panes.len() {
+        if let Some(idx) = title_hit
+            && idx < self.panes.len() {
                 self.focused_idx = idx;
                 let _ = self.panes[self.focused_idx].snap_to_live();
                 self.selection = None;
@@ -687,7 +683,6 @@ impl MarspotApp for Marspot {
                 ctx.request_redraw();
                 return;
             }
-        }
 
         // Click in cell body → start a fresh text selection at that
         // cell coord, AND focus that cell.  Drag continues the
@@ -732,13 +727,12 @@ impl MarspotApp for Marspot {
         }
 
         let new_focus = sidebar_hit.or(cell_hit);
-        if let Some(idx) = new_focus {
-            if idx < self.panes.len() && idx != self.focused_idx {
+        if let Some(idx) = new_focus
+            && idx < self.panes.len() && idx != self.focused_idx {
                 self.focused_idx = idx;
                 let _ = self.panes[self.focused_idx].snap_to_live();
                 ctx.request_redraw();
             }
-        }
     }
 
     fn mouse_drag(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64, _hw: u32, _hx: f64, _hy: f64) {
@@ -753,7 +747,7 @@ impl MarspotApp for Marspot {
             None => return,
         };
         let cell = match layout.cells.get(target_idx) {
-            Some(c) => c.clone(),
+            Some(c) => *c,
             None => return,
         };
         let inner_x = cell.x + layout.padding;
@@ -853,11 +847,10 @@ impl MarspotApp for Marspot {
         // a single-cell highlight.
         if self.selection_dragging {
             self.selection_dragging = false;
-            if let Some(sel) = self.selection {
-                if sel.anchor == sel.focus {
+            if let Some(sel) = self.selection
+                && sel.anchor == sel.focus {
                     self.selection = None;
                 }
-            }
         }
     }
 
@@ -1301,11 +1294,10 @@ impl Marspot {
             None => return,
         };
         let now = std::time::Instant::now();
-        if let Some(last) = self.last_rss_dump {
-            if now.duration_since(last).as_secs() < 1 {
+        if let Some(last) = self.last_rss_dump
+            && now.duration_since(last).as_secs() < 1 {
                 return;
             }
-        }
         let started = *self.rss_dump_started_at.get_or_insert(now);
         self.last_rss_dump = Some(now);
         let elapsed_s = now.duration_since(started).as_secs();
@@ -1386,11 +1378,10 @@ impl Marspot {
                     // tagging the active one is the right call.
                     let now = std::time::Instant::now();
                     let tmux = self.tmux.as_mut().unwrap();
-                    if let Some(active) = tmux.active_window {
-                        if let Some(w) = tmux.windows.iter_mut().find(|w| w.id == active) {
+                    if let Some(active) = tmux.active_window
+                        && let Some(w) = tmux.windows.iter_mut().find(|w| w.id == active) {
                             w.last_output = Some(now);
                         }
-                    }
                     self.panes[0].session_mut().feed_terminal(&bytes);
                 }
                 tmux::Event::WindowAdd { window_id } => {
@@ -1570,15 +1561,14 @@ impl Marspot {
         // Sidebar source-of-truth depends on mode: in tmux mode, list
         // tmux windows; otherwise list sessions by ordinal number.
         const PER_WINDOW_ACTIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
-        if let Some(t) = &self.tmux {
-            if std::env::var("MARSPOT_TMUX_DEBUG").is_ok() {
+        if let Some(t) = &self.tmux
+            && std::env::var("MARSPOT_TMUX_DEBUG").is_ok() {
                 lx_debug!(
                     "gui.render.tmux_windows",
                     "tmux windows count",
                     len = t.windows.len()
                 );
             }
-        }
         let (labels, states, sidebar_focus) = if let Some(t) = &self.tmux {
             if t.windows.is_empty() {
                 (
@@ -2948,7 +2938,7 @@ fn bench_first_frame(arg: &str) {
     let phys_w: u32 = 3840;
     let phys_h: u32 = 2130;
     let grid_cols = 6usize;
-    let grid_rows = ((panes + grid_cols - 1) / grid_cols).max(1);
+    let grid_rows = panes.div_ceil(grid_cols).max(1);
 
     // Fill every pane with text of the requested diversity.  CJK
     // sweeps a contiguous CJK block so each cell is a glyph the atlas
@@ -2975,7 +2965,7 @@ fn bench_first_frame(arg: &str) {
                 let want_cjk = match charset {
                     "ascii" => false,
                     "cjk" => true,
-                    _ => (r as usize + c as usize) % 3 == 0,
+                    _ => (r as usize + c as usize).is_multiple_of(3),
                 };
                 if want_cjk {
                     let ch = char::from_u32(CJK_LO + cjk_i).unwrap_or('中');

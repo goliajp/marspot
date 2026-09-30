@@ -55,9 +55,7 @@ impl HostState {
 
     pub fn entry_or_default<T: 'static + Default>(&mut self, id: ViewId) -> &mut T {
         let key = (id, TypeId::of::<T>());
-        if !self.inner.contains_key(&key) {
-            self.inner.insert(key, Box::new(T::default()));
-        }
+        self.inner.entry(key).or_insert_with(|| Box::new(T::default()));
         self.inner.get_mut(&key).unwrap().downcast_mut::<T>().unwrap()
     }
 
@@ -104,6 +102,12 @@ struct AnimSlot {
     duration_ms: f64,
     /// `true` when elapsed >= duration.
     finished: bool,
+}
+
+impl Default for AnimRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AnimRegistry {
@@ -254,10 +258,11 @@ mod tests {
     use super::*;
 
     #[derive(Debug, PartialEq)]
+    #[derive(Default)]
     struct FakeState {
         n: i32,
     }
-    impl Default for FakeState { fn default() -> Self { Self { n: 0 } } }
+    
 
     #[test]
     fn insert_then_get() {

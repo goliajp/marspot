@@ -90,8 +90,8 @@ fn handle(mut stream: UnixStream, tx: Sender<CliRequest>) {
     };
     if frame.msg_type == MsgType::CliListPanes {
         let (rtx, rrx) = std::sync::mpsc::channel();
-        if tx.send(CliRequest::ListPanes { reply: rtx }).is_ok() {
-            if let Ok(panes) = rrx.recv_timeout(std::time::Duration::from_secs(5)) {
+        if tx.send(CliRequest::ListPanes { reply: rtx }).is_ok()
+            && let Ok(panes) = rrx.recv_timeout(std::time::Duration::from_secs(5)) {
                 let _ = Frame::new(
                     MsgType::CliPaneList,
                     marspot_term::shell_proto::encode_cli_pane_list(&panes),
@@ -99,7 +99,6 @@ fn handle(mut stream: UnixStream, tx: Sender<CliRequest>) {
                 .write_to(&mut stream);
                 return;
             }
-        }
         let _ = Frame::new(MsgType::CliResult, encode_cli_result(false, "no answer"))
             .write_to(&mut stream);
         return;
@@ -309,8 +308,8 @@ pub fn parse_target(target: &str) -> Result<Target, String> {
     if t.is_empty() {
         return Err("empty target".into());
     }
-    if let Some(rest) = t.strip_prefix('w').or_else(|| t.strip_prefix('W')) {
-        if let Some(inner) = rest.trim().strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+    if let Some(rest) = t.strip_prefix('w').or_else(|| t.strip_prefix('W'))
+        && let Some(inner) = rest.trim().strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
             let nums: Vec<&str> = inner.split(',').map(str::trim).collect();
             if nums.len() != 3 {
                 return Err(format!("{target:?}: expected w(window, x, y)"));
@@ -326,7 +325,6 @@ pub fn parse_target(target: &str) -> Result<Target, String> {
             }
             return Ok(Target::Cell { w: vals[0], x: vals[1], y: vals[2] });
         }
-    }
     let bare = t.strip_prefix('#').unwrap_or(t);
     if let Ok(sid) = bare.parse::<u64>() {
         return Ok(Target::Id(sid));

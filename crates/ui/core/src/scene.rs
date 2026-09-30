@@ -565,8 +565,8 @@ mod tests {
             r.push(RectInstance { origin: [1.0, 1.0], ..Default::default() });
             drop(r);
             l.glyphs().push(GlyphInstance::default());
-            let used = scene.bytes().len();
-            used
+            
+            scene.bytes().len()
         };
         let mut a = vec![0x11u8; 4096];
         let mut al = vec![Layer::default(); 4];

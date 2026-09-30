@@ -335,8 +335,8 @@ impl PaneStateTracker {
                 // started watching it.  Consumed once — a restored
                 // clock that no longer matches is dropped, not kept
                 // around for a later state to pick up by accident.
-                if let Some((label, since)) = self.restorable.remove(&sid) {
-                    if label == change.to.label() {
+                if let Some((label, since)) = self.restorable.remove(&sid)
+                    && label == change.to.label() {
                         let age = SystemTime::now()
                             .duration_since(since)
                             .unwrap_or_default();
@@ -344,7 +344,6 @@ impl PaneStateTracker {
                             machine.backdate(now - age, now);
                         }
                     }
-                }
                 changes.push(SessionChange { sid, change });
             }
         }

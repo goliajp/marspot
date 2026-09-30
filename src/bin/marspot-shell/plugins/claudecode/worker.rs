@@ -142,11 +142,10 @@ impl WorkerCtx {
             cands.truncate(SESSIONS_KEPT_PER_PROJECT);
             for (jsonl_path, mtime, size) in cands {
                 alive.insert(jsonl_path.clone());
-                if let Some(prev) = self.seen.get(&jsonl_path) {
-                    if prev.last_mtime == mtime && prev.last_size == size {
+                if let Some(prev) = self.seen.get(&jsonl_path)
+                    && prev.last_mtime == mtime && prev.last_size == size {
                         continue;
                     }
-                }
                 let Some(session_id) = parse_session_id(&jsonl_path) else { continue };
                 let last_message_kind = tail_last_message_type(&jsonl_path);
                 let is_new = !self.seen.contains_key(&jsonl_path);
@@ -255,11 +254,10 @@ impl WorkerCtx {
         const RECHECK: Duration = Duration::from_secs(60);
         let want = marspot::settings::get().cc_statusline_hook;
         let now = Instant::now();
-        if let Some((was, at)) = self.statusline_state {
-            if was == want && now.duration_since(at) < RECHECK {
+        if let Some((was, at)) = self.statusline_state
+            && was == want && now.duration_since(at) < RECHECK {
                 return Vec::new();
             }
-        }
         self.statusline_state = Some((want, now));
         reconcile_statusline_hook(want)
     }
@@ -303,11 +301,10 @@ impl WorkerCtx {
                 // only from a record naming the same model — an
                 // effort read off a turn served by a different model
                 // would be a number about something else.
-                if let Some(t) = tail_model_short(path, cutoff) {
-                    if t.model == m.model {
+                if let Some(t) = tail_model_short(path, cutoff)
+                    && t.model == m.model {
                         m.effort = t.effort;
                     }
-                }
             }
             self.last_model.insert(path.to_path_buf(), m.clone());
             return Some(m);
@@ -411,11 +408,10 @@ impl WorkerCtx {
             .unwrap_or(false);
         let retry = if young { YOUNG_RETRY } else { BANNER_RETRY };
         let now = Instant::now();
-        if let Some(&t) = self.banner_tried.get(&sid) {
-            if now.duration_since(t) < retry {
+        if let Some(&t) = self.banner_tried.get(&sid)
+            && now.duration_since(t) < retry {
                 return None;
             }
-        }
         self.banner_tried.insert(sid, now);
         let entry = marspot_term::session_registry::list_session_entries()
             .into_iter()
@@ -748,7 +744,7 @@ impl WorkerCtx {
             // One read of the tail answers two questions: whether the
             // session is waiting on a timer of its own, and whether the
             // account refused it.
-            let tail = jsonl_path.as_ref().map(|p| tail_window(p));
+            let tail = jsonl_path.as_ref().map(tail_window);
             new_vetoes.insert(
                 f.shelld_sid,
                 (
@@ -885,11 +881,10 @@ impl WorkerCtx {
             {
                 continue;
             }
-            if let Some(t) = argv_mtime {
-                if s.last_mtime < t + SUPERSEDE_MARGIN {
+            if let Some(t) = argv_mtime
+                && s.last_mtime < t + SUPERSEDE_MARGIN {
                     continue;
                 }
-            }
             match best {
                 Some((t, _)) if t >= s.last_mtime => {}
                 _ => best = Some((s.last_mtime, s)),

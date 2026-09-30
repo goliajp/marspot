@@ -238,10 +238,7 @@ impl LocalSession {
         let bytelog = if std::env::var("MARSPOT_BYTELOG").as_deref() == Ok("0") {
             None
         } else {
-            match ByteLog::open(id) {
-                Ok(b) => Some(b),
-                Err(_) => None,
-            }
+            ByteLog::open(id).ok()
         };
 
         let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
@@ -276,7 +273,7 @@ impl LocalSession {
             })
             .expect("spawn l3-pty-reader thread");
 
-        let writer = PtyWriter::new(&format!("l3-pty-writer-id"), io::sink(), marspot_term::frame_writer::cap::PTY);
+        let writer = PtyWriter::new("l3-pty-writer-id", io::sink(), marspot_term::frame_writer::cap::PTY);
 
         Ok(Self {
             id,
@@ -584,7 +581,7 @@ impl LocalSession {
             })
             .expect("spawn l3-pty-reader thread");
 
-        let writer = PtyWriter::new(&format!("l3-pty-writer-id"), io::sink(), marspot_term::frame_writer::cap::PTY);
+        let writer = PtyWriter::new("l3-pty-writer-id", io::sink(), marspot_term::frame_writer::cap::PTY);
 
         Ok(Self {
             id,
@@ -832,7 +829,7 @@ mod tests {
             terminal: Terminal::new(80, 24),
             bytelog: None,
             rx: { let (_t, r) = mpsc::channel(); r },
-            writer: PtyWriter::new(&format!("l3-pty-writer-1"), io::sink(), marspot_term::frame_writer::cap::PTY),
+            writer: PtyWriter::new(&"l3-pty-writer-1".to_string(), io::sink(), marspot_term::frame_writer::cap::PTY),
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -894,7 +891,7 @@ mod tests {
             terminal: Terminal::new(80, 24),
             bytelog: None,
             rx: { let (_t, r) = mpsc::channel(); r },
-            writer: PtyWriter::new(&format!("l3-pty-writer-2"), io::sink(), marspot_term::frame_writer::cap::PTY),
+            writer: PtyWriter::new(&"l3-pty-writer-2".to_string(), io::sink(), marspot_term::frame_writer::cap::PTY),
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -953,7 +950,7 @@ mod tests {
             terminal: Terminal::new(80, 24),
             bytelog: None,
             rx: { let (_t, r) = mpsc::channel(); r },
-            writer: PtyWriter::new(&format!("l3-pty-writer-0"), io::sink(), marspot_term::frame_writer::cap::PTY),
+            writer: PtyWriter::new(&"l3-pty-writer-0".to_string(), io::sink(), marspot_term::frame_writer::cap::PTY),
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),

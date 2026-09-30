@@ -378,7 +378,7 @@ impl LayoutModal {
             let dx = cx - px;
             let dy = cy - py;
             let d2 = dx * dx + dy * dy;
-            if best.map_or(true, |(_, bd)| d2 < bd) {
+            if best.is_none_or(|(_, bd)| d2 < bd) {
                 best = Some((i, d2));
             }
         }

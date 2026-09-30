@@ -71,8 +71,7 @@ fn main() {
     {
         let mut f = std::fs::File::create(&script).expect("create trial script");
         let arg = scenario.to_string_lossy();
-        let cats = std::iter::repeat(arg.as_ref())
-            .take(repeats.max(1))
+        let cats = std::iter::repeat_n(arg.as_ref(), repeats.max(1))
             .collect::<Vec<_>>()
             .join(" ");
         write!(
@@ -171,12 +170,11 @@ fn main() {
     let deadline = Instant::now() + Duration::from_secs(300);
     let mut text = String::new();
     while Instant::now() < deadline {
-        if let Ok(s) = std::fs::read_to_string(&marker) {
-            if s.contains("real") {
+        if let Ok(s) = std::fs::read_to_string(&marker)
+            && s.contains("real") {
                 text = s;
                 break;
             }
-        }
         thread::sleep(Duration::from_millis(20));
     }
     if text.is_empty() {

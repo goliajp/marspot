@@ -54,15 +54,14 @@ impl Real {
     fn new() -> Self {
         let snap = std::env::var("MARSPOT_LINK_SNAP").ok();
         let mut known = BTreeMap::new();
-        if let Some(f) = &snap {
-            if let Ok(text) = std::fs::read_to_string(f) {
+        if let Some(f) = &snap
+            && let Ok(text) = std::fs::read_to_string(f) {
                 for line in text.lines() {
                     if let Some((v, p)) = line.split_once('\t') {
                         known.insert(p.to_string(), v == "1");
                     }
                 }
             }
-        }
         Self { snap, known: RefCell::new(known) }
     }
     fn save(&self) {
@@ -110,8 +109,8 @@ fn main() {
             marspot_term::grid_links::ScanOpts { cwd: Some(&cwd), cc_mode: true },
             &oracle,
         ) {
-            if let Some(w) = &why {
-                if h.text.contains(w.as_str()) {
+            if let Some(w) = &why
+                && h.text.contains(w.as_str()) {
                     let line: String = (0..t.grid().cols())
                         .map(|c| t.grid().cell_at_view(0, c, h.row).ch)
                         .filter(|c| *c != '\0')
@@ -122,7 +121,6 @@ fn main() {
                         eprintln!("why: {entry}");
                     }
                 }
-            }
             seen.insert(format!(
                 "{:?}\t{}\t{}",
                 h.kind,
