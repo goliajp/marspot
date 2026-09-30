@@ -170,13 +170,16 @@ STALE_PASS=""
 # A number taken while someone else has the CPU is not a slower number,
 # it is not a number.
 #
-# `bench-lock bench` rather than a bare exclusive flock: a batch job
+# `/usr/local/bin/bench-lock bench` rather than a bare exclusive flock: a batch job
 # holding the shared lock for hours made an exclusive one unobtainable
 # -- not slow, unobtainable -- and both this and another repo's bench
 # ended up going around the lock, which is how one of them got
 # mistaken for a stray process and killed. It blocks new heavy work and
 # waits only for what is already running.
-LOCK_CMD="bench-lock bench"
+# The absolute path on purpose: a non-login ssh does not have
+# /usr/local/bin on its PATH, and the failure looks like "bench-lock:
+# not found" from a tool that is installed.
+LOCK_CMD="/usr/local/bin/bench-lock bench"
 if [[ "${MARSPOT_BENCH_NO_LOCK:-}" == "1" ]]; then
   echo "==> MARSPOT_BENCH_NO_LOCK=1 — measuring without the host lock" >&2
   LOCK_CMD=""
@@ -188,9 +191,8 @@ ssh "$HOST" "
   export CARGO_TARGET_DIR=\$HOME/$REMOTE_DIR/target
   $STALE_PASS
   echo \$\$ > $REMOTE_PIDF
-  export PATH=/usr/local/bin:/opt/homebrew/bin:\$PATH
-  if [ -n \"$LOCK_CMD\" ] && ! command -v bench-lock >/dev/null; then
-    echo 'bench-remote: no bench-lock on the runner' >&2
+  if [ -n \"$LOCK_CMD\" ] && [ ! -x /usr/local/bin/bench-lock ]; then
+    echo 'bench-remote: /usr/local/bin/bench-lock is not on the runner' >&2
     exit 1
   fi
   exec $LOCK_CMD caffeinate -dims ./bin/bench.sh $ARGS_Q
