@@ -4275,9 +4275,13 @@ impl<'a> Handler<'a> {
             self.grid.sweep_clusters();
         }
         let attrs = *self.attrs;
+        // The cell being replaced may already point at the newest pool
+        // entry — this cluster, one codepoint shorter.  Say so, and it
+        // is rewritten in place rather than pushed again.
+        let prev = self.grid.cell(col, row).cluster_index();
         let cell = {
             let buf = std::mem::take(self.cluster_buf);
-            let cell = self.grid.cluster_cell(&buf, attrs);
+            let cell = self.grid.cluster_cell_reusing(prev, &buf, attrs);
             *self.cluster_buf = buf;
             cell
         };
