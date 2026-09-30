@@ -9151,6 +9151,55 @@ mod tests {
         assert!(lit > 1000, "the rects were not drawn: only {lit} lit pixels");
     }
 
+    /// The resolver hands back an atlas entry for a cluster, and
+    /// caches it.
+    ///
+    /// Between "CoreText draws the pair" and "the render loop asks for
+    /// it" sits this function, and nothing tested it: the pixel test
+    /// below calls the rasteriser directly, and the grid tests never
+    /// reach the atlas.  A cluster that failed here would simply draw
+    /// nothing, silently, for every cell holding one.
+    #[test]
+    fn the_resolver_caches_a_cluster_entry() {
+        let Ok(mut font) = crate::font_cache::FontCache::build() else {
+            eprintln!("skipping: no font stack");
+            return;
+        };
+        let Ok(r) = MetalRenderer::new_headless() else {
+            eprintln!("skipping: no Metal device");
+            return;
+        };
+        let Ok(mut atlas) = GlyphAtlas::new(&r.device, 512, 512) else {
+            eprintln!("skipping: atlas would not allocate");
+            return;
+        };
+        let metrics = SlotMetrics { cell_w: 16, cell_h: 32, baseline_from_top: 24 };
+
+        let first = resolve_cluster_glyph(&mut atlas, &mut font, "e\u{301}", false, false, metrics);
+        assert!(first.is_some(), "the resolver returned no entry for a cluster");
+
+        // Asked again, it must be the same slot — a screen full of one
+        // cluster has to cost one raster, not one per cell.
+        let again = resolve_cluster_glyph(&mut atlas, &mut font, "e\u{301}", false, false, metrics);
+        assert_eq!(
+            format!("{:?}", first.map(|e| (e.u0, e.v0))),
+            format!("{:?}", again.map(|e| (e.u0, e.v0))),
+            "the same cluster took a second atlas slot"
+        );
+
+        // And a different cluster is a different slot, or the key is
+        // not carrying the text.
+        let other = resolve_cluster_glyph(
+            &mut atlas, &mut font, "\u{1f1ef}\u{1f1f5}", false, false, metrics,
+        );
+        assert!(other.is_some());
+        assert_ne!(
+            format!("{:?}", first.map(|e| (e.u0, e.v0))),
+            format!("{:?}", other.map(|e| (e.u0, e.v0))),
+            "two different clusters share a slot; the key ignores the text"
+        );
+    }
+
     /// A cluster rasterises to something other than its base alone.
     ///
     /// The grid now keeps `e` + U+0301 whole, and the renderer asks

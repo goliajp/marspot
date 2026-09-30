@@ -112,29 +112,25 @@ pub type FontId = u32;
 /// linearly from 0 as fallback fonts are discovered.
 pub const BOX_DRAWING_FONT_ID: FontId = u32::MAX;
 
-/// Font id for a rasterised grapheme cluster.
-///
-/// A cluster has no glyph id — it may be several glyphs, or one the
-/// font composed — so its atlas key cannot be `(font, glyph)`.  It is
-/// keyed by a hash of the text instead, and this id says "the glyph
-/// field is the low half of that hash, not a glyph".  One below
-/// box-drawing's, so neither can be a real font index.
-pub const CLUSTER_FONT_ID: FontId = u32::MAX - 1;
-
 /// The atlas key for a cluster drawn at `metrics`.
 ///
-/// Forty-eight bits of hash: the font-id field carries the high half
-/// and the glyph field the low sixteen.  A collision would draw one
-/// cluster in another's place, and at 2^48 against a pool the
-/// measurements put in the tens, that is not a risk worth a second
-/// lookup to remove.
+/// Thirty-nine bits of hash: twenty-three in the font-id field and
+/// sixteen in the glyph field.  The font-id field is twenty-four bits
+/// wide, so the whole hash does not fit and the top bit is spent
+/// marking the key as a cluster's — a real font index is a small
+/// integer and can never have it set.
+///
+/// A collision would draw one cluster in another's place.  At 2^39
+/// against a pool the measurements put in the tens, that is not worth
+/// a second lookup to remove.
 pub fn cluster_key(text: &str, metrics: &SlotMetrics) -> GlyphKey {
     use std::hash::{Hash, Hasher};
     let mut h = marspot_term::fast_hash::FxHasher::default();
     text.hash(&mut h);
     let v = h.finish();
+    const CLUSTER_BIT: u32 = 1 << 23;
     GlyphKey::new(
-        CLUSTER_FONT_ID ^ (v >> 16) as u32,
+        CLUSTER_BIT | ((v >> 16) as u32 & (CLUSTER_BIT - 1)),
         v as u16,
         metrics.cell_h as u16,
         0,
