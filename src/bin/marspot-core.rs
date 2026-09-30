@@ -4487,12 +4487,30 @@ impl CoreApp {
             SIDEBAR_W_LOGICAL * win!(self, wi).scale
         };
         let (lc, lr) = (win!(self, wi).grid_cols, win!(self, wi).grid_rows);
+        // One pane gets no title strip.
+        //
+        // The strip says which pane is which, and with one pane there
+        // is no which.  The window header above it already carries
+        // the traffic lights and the icon buttons, so the strip is a
+        // second band of chrome that names the only thing on screen —
+        // which is what makes a single window look busy next to a
+        // plain terminal.
+        //
+        // It costs the pane-drag handle in that state.  A lone pane
+        // has nowhere to be dragged to that dragging the window does
+        // not already do, and the strip comes back the moment there
+        // are two.
+        let title_h = if win!(self, wi).panes.len() <= 1 {
+            0.0
+        } else {
+            CELL_TITLE_PT * win!(self, wi).scale
+        };
         let layout = Layout::build(
             win!(self, wi).w_phys,
             win!(self, wi).h_phys,
             sidebar_phys,
             HEADER_PT * win!(self, wi).scale,
-            CELL_TITLE_PT * win!(self, wi).scale,
+            title_h,
             lc,
             lr,
             cell_w,
