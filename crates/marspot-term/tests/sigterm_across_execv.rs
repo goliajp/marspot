@@ -25,7 +25,7 @@ fn child() -> ! {
         // A handler that does nothing is enough: the point is that the
         // default action (terminate) is no longer what happens.
         extern "C" fn noop(_: libc::c_int) {}
-        libc::signal(libc::SIGTERM, noop as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, noop as *const () as libc::sighandler_t);
     }
     marspot_term::signals::set_sigterm_blocked(false);
     // An exit code, not a print: the test harness captures `println!`
