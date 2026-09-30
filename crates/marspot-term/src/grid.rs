@@ -668,6 +668,39 @@ mod char_width_tests {
 
 use crate::scrollback::Scrollback;
 
+/// Where a shell says one command's territory ends and the next
+/// begins, from `OSC 133`.
+///
+/// A shell that emits these turns a wall of output into a sequence of
+/// commands: where the prompt was, where what you typed began, where
+/// its output began, and what it exited with. Scrolling back to "the
+/// command before this one" needs nothing more than this, and without
+/// it there is nothing to scroll to -- a terminal cannot tell a prompt
+/// from any other line that happens to start with a glyph.
+///
+/// One byte a row, beside the wrap flag, and only for the rows a shell
+/// actually marked. It is not written to disk: the scrollback record
+/// has one byte for `wrapped` and a reader decides on `!= 0`, so a
+/// spare bit in it would read as a wrapped line to a binary that
+/// predates this -- the quiet kind of wrong. Persisting it waits for
+/// the sidecar in `20261001-line-identity.md`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PromptMark {
+    #[default]
+    None,
+    /// `OSC 133 ; A` -- a prompt starts on this row.
+    PromptStart,
+    /// `OSC 133 ; B` -- the prompt ended; what follows is what the
+    /// person typed.
+    InputStart,
+    /// `OSC 133 ; C` -- the command was sent; what follows is its
+    /// output.
+    OutputStart,
+    /// `OSC 133 ; D ; <status>` -- the command finished. `None` when
+    /// the shell reported no status, which is different from zero.
+    CommandEnd(Option<u8>),
+}
+
 pub struct Grid {
     cols: u16,
     rows: u16,
@@ -735,6 +768,12 @@ pub struct Grid {
     /// has none: real output measured 55 multi-codepoint clusters in
     /// forty million, so the `Vec` is empty and costs a pointer.
     sb_clusters: std::collections::VecDeque<Vec<(u16, String)>>,
+    /// Command boundaries for the rows on screen, by physical row.
+    /// See [`PromptMark`].
+    prompt: Vec<PromptMark>,
+    /// The same for rows that have scrolled off.  Parallel to
+    /// `sb_wrapped` and trimmed with it.
+    sb_prompt: std::collections::VecDeque<PromptMark>,
     /// Consecutive all-blank rows most recently filed into scrollback.
     /// Read only by the region path — see [`MAX_FILED_BLANK_RUN`].
     filed_blank_run: u16,
@@ -803,8 +842,10 @@ impl Grid {
             scrollback,
             scroll_push_count: 0,
             wrapped: vec![false; rows as usize],
+            prompt: vec![PromptMark::None; rows as usize],
             sb_wrapped: std::collections::VecDeque::with_capacity(sb_capacity + 1),
             sb_clusters: std::collections::VecDeque::with_capacity(sb_capacity + 1),
+            sb_prompt: std::collections::VecDeque::with_capacity(sb_capacity + 1),
             filed_blank_run: 0,
         }
     }
@@ -1114,6 +1155,55 @@ impl Grid {
         self.wrapped[pr]
     }
 
+    /// What a shell said about this row, if anything.  See
+    /// [`PromptMark`].
+    pub fn set_row_prompt(&mut self, row: u16, mark: PromptMark) {
+        let pr = self.phys_row(row.min(self.rows - 1));
+        self.prompt[pr] = mark;
+    }
+
+    pub fn row_prompt(&self, row: u16) -> PromptMark {
+        let pr = self.phys_row(row.min(self.rows - 1));
+        self.prompt[pr]
+    }
+
+    /// The mark on scrollback line `idx` (0 = oldest), the same
+    /// indexing `scrollback_line` uses.
+    pub fn scrollback_prompt(&self, idx: usize) -> PromptMark {
+        self.sb_prompt.get(idx).copied().unwrap_or_default()
+    }
+
+    /// The view offset that puts the nearest prompt above the current
+    /// one at the top of the screen, or `None` when there is no
+    /// earlier prompt to go to.
+    ///
+    /// `view_offset` counts rows scrolled back from the live screen,
+    /// the way `cell_at_view` does. Scanning is what kitty does too:
+    /// the marks are a byte a row and a screenful is a few dozen, so
+    /// there is nothing here worth an index.
+    pub fn prompt_above(&self, view_offset: u16) -> Option<u16> {
+        let sb = self.scrollback.len();
+        // The absolute line index currently at the top of the view,
+        // counting scrollback from 0 and then the live rows.
+        let top_abs = (sb + self.rows as usize).checked_sub(
+            self.rows as usize + view_offset as usize,
+        )?;
+        for abs in (0..top_abs).rev() {
+            let mark = if abs < sb {
+                self.scrollback_prompt(abs)
+            } else {
+                self.row_prompt((abs - sb) as u16)
+            };
+            if mark == PromptMark::PromptStart {
+                // Put that line at the top: everything below it,
+                // minus a screen, is how far back that is.
+                let below = sb + self.rows as usize - abs;
+                return Some((below.saturating_sub(self.rows as usize)) as u16);
+            }
+        }
+        None
+    }
+
     /// Continuation flag for scrollback line `idx` (same indexing as
     /// `scrollback_line`: 0 = oldest).
     ///
@@ -1205,6 +1295,7 @@ impl Grid {
             self.scrollback
                 .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
             self.sb_wrapped.push_back(self.wrapped[pr]);
+            self.sb_prompt.push_back(std::mem::take(&mut self.prompt[pr]));
             self.sb_clusters.push_back(row_clusters);
             self.wrapped[pr] = false;
             for c in &mut self.cells[start..start + cols] {
@@ -1220,6 +1311,7 @@ impl Grid {
         // the flags deque must never outgrow what the ring retains.
         while self.sb_wrapped.len() > self.scrollback.len() {
             self.sb_wrapped.pop_front();
+            self.sb_prompt.pop_front();
         }
         while self.sb_clusters.len() > self.scrollback.len() {
             self.sb_clusters.pop_front();
@@ -1303,6 +1395,8 @@ impl Grid {
                     self.scrollback
                         .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
                     self.sb_wrapped.push_back(self.wrapped[pr]);
+                    self.sb_prompt.push_back(std::mem::take(&mut self.prompt[pr]));
+            self.sb_prompt.push_back(std::mem::take(&mut self.prompt[pr]));
                     self.sb_clusters.push_back(row_clusters);
                     self.scroll_push_count = self.scroll_push_count.saturating_add(1);
                 }
@@ -1360,6 +1454,7 @@ impl Grid {
         // deque must never outgrow what the ring retains.
         while self.sb_wrapped.len() > self.scrollback.len() {
             self.sb_wrapped.pop_front();
+            self.sb_prompt.pop_front();
         }
         while self.sb_clusters.len() > self.scrollback.len() {
             self.sb_clusters.pop_front();
@@ -1533,6 +1628,7 @@ impl Grid {
         self.sb_clusters.push_back(Vec::new());
         while self.sb_wrapped.len() > self.scrollback.len() {
             self.sb_wrapped.pop_front();
+            self.sb_prompt.pop_front();
         }
         while self.sb_clusters.len() > self.scrollback.len() {
             self.sb_clusters.pop_front();
@@ -1542,6 +1638,7 @@ impl Grid {
         self.scrollback.clear();
         self.sb_wrapped.clear();
         self.sb_clusters.clear();
+        self.sb_prompt.clear();
     }
 
     /// Resize the visible grid **without losing content**.
@@ -1579,14 +1676,17 @@ impl Grid {
             // fresh buffer so indexing stays simple.
             let mut new_cells = vec![Cell::default(); cols * rows as usize];
             let mut new_wrapped = vec![false; rows as usize];
+            let mut new_prompt = vec![PromptMark::None; rows as usize];
             for r in 0..self.rows {
                 let src = self.phys_row(r) * cols;
                 let dst = r as usize * cols;
                 new_cells[dst..dst + cols].copy_from_slice(&self.cells[src..src + cols]);
                 new_wrapped[r as usize] = self.wrapped[self.phys_row(r)];
+                new_prompt[r as usize] = self.prompt[self.phys_row(r)];
             }
             self.cells = new_cells;
             self.wrapped = new_wrapped;
+            self.prompt = new_prompt;
             self.rows = rows;
             self.top_row = 0;
             return;
@@ -1607,14 +1707,17 @@ impl Grid {
         }
         let mut new_cells = vec![Cell::default(); cols * rows as usize];
         let mut new_wrapped = vec![false; rows as usize];
+        let mut new_prompt = vec![PromptMark::None; rows as usize];
         for r in 0..rows {
             let src = self.phys_row(r) * cols;
             let dst = r as usize * cols;
             new_cells[dst..dst + cols].copy_from_slice(&self.cells[src..src + cols]);
             new_wrapped[r as usize] = self.wrapped[self.phys_row(r)];
+            new_prompt[r as usize] = self.prompt[self.phys_row(r)];
         }
         self.cells = new_cells;
         self.wrapped = new_wrapped;
+        self.prompt = new_prompt;
         self.rows = rows;
         self.top_row = 0;
         self.cursor_row = self.cursor_row.min(rows - 1);
@@ -1762,6 +1865,11 @@ impl Grid {
         self.scrollback.restart(new_cols);
         self.sb_wrapped.clear();
         self.sb_clusters.clear();
+        // Reflow re-cuts every logical line, so a mark that said "a
+        // prompt starts here" is about a row that no longer exists.
+        // Dropped rather than guessed at: a mark on the wrong line is
+        // worse than no mark, because it is the thing a jump lands on.
+        self.sb_prompt.clear();
         for (i, (cells, cont)) in segs[..live_start].iter().enumerate() {
             let mut row = cells.clone();
             row.resize(new_cols, pad_cell(i, &segs));
@@ -1773,12 +1881,14 @@ impl Grid {
         }
         while self.sb_wrapped.len() > self.scrollback.len() {
             self.sb_wrapped.pop_front();
+            self.sb_prompt.pop_front();
         }
         while self.sb_clusters.len() > self.scrollback.len() {
             self.sb_clusters.pop_front();
         }
         let mut new_cells = vec![Cell::default(); new_cols * rows as usize];
         let mut new_wrapped = vec![false; rows as usize];
+        let new_prompt = vec![PromptMark::None; rows as usize];
         for (r, (cells, cont)) in segs[live_start..].iter().enumerate() {
             let dst = r * new_cols;
             new_cells[dst..dst + cells.len()].copy_from_slice(cells);
@@ -1791,6 +1901,9 @@ impl Grid {
             new_wrapped[r] = *cont;
         }
         self.cells = new_cells;
+        // Reflow re-cut every line; the old marks named rows that no
+        // longer exist.  See `clear_scrollback`'s sibling note.
+        self.prompt = new_prompt;
         self.wrapped = new_wrapped;
         self.cols = cols;
         self.rows = rows;
