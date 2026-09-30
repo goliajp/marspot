@@ -1978,7 +1978,7 @@ impl Pane {
                         continue;
                     }
                     // A cluster cell's `ch` is a pool index, not text.
-                    match g.cluster_text(&cell) {
+                    match g.cluster_text_at_view(0, c, r, &cell) {
                         Some(text) => line.push_str(text),
                         None => line.push(cell.ch),
                     }

@@ -71,7 +71,7 @@ fn render(term: &Terminal, extra_lines: u16) -> String {
         out.push(scrollback_line(grid, i));
     }
     for row in 0..grid.rows() {
-        out.push(row_text_of(grid, |c| grid.cell(c, row)));
+        out.push(row_text_of(grid, row, 0, |c| grid.cell(c, row)));
     }
     while out.last().is_some_and(|l| l.is_empty()) {
         out.pop();
@@ -85,7 +85,7 @@ fn scrollback_line(grid: &marspot_term::grid::Grid, back: usize) -> String {
     // viewport row of 0 with an offset of `back + 1` is the line that
     // scrolled off `back` rows ago.
     let off = (back + 1).min(u16::MAX as usize) as u16;
-    row_text_of(grid, |c| grid.cell_at_view(off, c, 0))
+    row_text_of(grid, 0, off, |c| grid.cell_at_view(off, c, 0))
 }
 
 /// One row as text, minus the grid's own bookkeeping.
@@ -104,6 +104,8 @@ fn scrollback_line(grid: &marspot_term::grid::Grid, back: usize) -> String {
 /// what a person reads.
 fn row_text_of(
     grid: &marspot_term::grid::Grid,
+    viewport_row: u16,
+    view_offset: u16,
     cell: impl Fn(u16) -> marspot_term::grid::Cell,
 ) -> String {
     let mut out = String::with_capacity(grid.cols() as usize);
@@ -113,7 +115,7 @@ fn row_text_of(
         if cell.ch == '\0' {
             continue;
         }
-        match grid.cluster_text(&cell) {
+        match grid.cluster_text_at_view(view_offset, c, viewport_row, &cell) {
             Some(text) => out.push_str(text),
             None => out.push(cell.ch),
         }

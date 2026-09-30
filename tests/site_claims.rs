@@ -189,8 +189,11 @@ fn a_gap_that_closed_comes_off_the_page() {
             "a cluster keeps its shape now; {what} still says a cell holds one code point"
         );
         assert!(
-            text.contains("Scrolled-off history loses"),
-            "{what} stopped saying what scrolling back loses"
+            text.contains("survive
+          scrolling back, but not a restart")
+                || text.contains("survive scrolling
+  back, but not a restart"),
+            "{what} stopped saying that a restart loses the cluster"
         );
         assert!(
             !text.contains("tabs are not implemented")

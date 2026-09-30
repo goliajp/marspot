@@ -723,6 +723,18 @@ pub struct Grid {
     /// than the anon-mmap ring does.  Kept in lockstep with ring
     /// eviction by trimming to `scrollback.len()` after each push.
     sb_wrapped: std::collections::VecDeque<bool>,
+    /// Clusters that were on a row when it left the screen, by column.
+    ///
+    /// A scrollback row is plain cells with nowhere to keep a pool, so
+    /// the cells themselves hold the base codepoint — which is what a
+    /// binary that predates this reads, and what one that rolls back
+    /// to it will read again.  The rest of each cluster lives here,
+    /// keyed by position, and is applied on the way out.
+    ///
+    /// Parallel to `sb_wrapped` and trimmed with it.  Almost every row
+    /// has none: real output measured 55 multi-codepoint clusters in
+    /// forty million, so the `Vec` is empty and costs a pointer.
+    sb_clusters: std::collections::VecDeque<Vec<(u16, String)>>,
     /// Consecutive all-blank rows most recently filed into scrollback.
     /// Read only by the region path — see [`MAX_FILED_BLANK_RUN`].
     filed_blank_run: u16,
@@ -792,6 +804,7 @@ impl Grid {
             scroll_push_count: 0,
             wrapped: vec![false; rows as usize],
             sb_wrapped: std::collections::VecDeque::with_capacity(sb_capacity + 1),
+            sb_clusters: std::collections::VecDeque::with_capacity(sb_capacity + 1),
             filed_blank_run: 0,
         }
     }
@@ -909,6 +922,45 @@ impl Grid {
         self.clusters.get(idx as usize).map(|s| &**s)
     }
 
+    /// What a cell says, when you know where it is.
+    ///
+    /// `cluster_text` answers from the cell alone, which is all a live
+    /// cell needs: its `ch` is the pool index.  A scrollback cell
+    /// cannot work that way — it holds the base codepoint, because
+    /// that is what a binary without this feature reads out of the
+    /// file — so its cluster is keyed by position instead, and only
+    /// the caller knows the position.
+    ///
+    /// Same argument order as `cell_at_view`, and the same index
+    /// arithmetic, so the two cannot disagree about which row is meant.
+    pub fn cluster_text_at_view(
+        &self,
+        view_offset: u16,
+        col: u16,
+        viewport_row: u16,
+        cell: &Cell,
+    ) -> Option<&str> {
+        if let Some(text) = self.cluster_text(cell) {
+            return Some(text);
+        }
+        let rows = self.rows() as usize;
+        let abs = view_offset as usize + (rows - 1 - viewport_row as usize);
+        if abs < rows {
+            return None;
+        }
+        let from_end = abs - rows;
+        let sb_len = self.scrollback_len();
+        if from_end >= sb_len {
+            return None;
+        }
+        let line = sb_len - 1 - from_end;
+        self.sb_clusters
+            .get(line)?
+            .iter()
+            .find(|(c, _)| *c == col)
+            .map(|(_, t)| t.as_str())
+    }
+
     /// Drop pool entries no cell points at.
     ///
     /// Sweeping, not reference counting — see the field's own comment
@@ -978,20 +1030,36 @@ impl Grid {
     /// this is a single test.  Safe to mutate in place because the row
     /// is on its way off the screen and will be overwritten by the
     /// fill behind it.
-    fn degrade_clusters_in_row(&mut self, start: usize, cols: usize) {
+    fn degrade_clusters_in_row(&mut self, start: usize, cols: usize) -> Vec<(u16, String)> {
         if self.clusters.is_empty() {
-            return;
+            return Vec::new();
         }
+        let mut kept = Vec::new();
         for i in start..start + cols {
             let Some(idx) = self.cells[i].cluster_index() else { continue };
-            let base = self
-                .clusters
-                .get(idx as usize)
-                .map(|c| crate::grapheme::cluster_first_codepoint(c))
-                .unwrap_or(' ');
+            // Moved, not copied.  A pool entry has exactly one cell
+            // pointing at it — `cluster_cell` pushes one per call and
+            // the reuse path only ever rewrites the entry belonging to
+            // the cell it is replacing — and that cell is the one being
+            // degraded here, so nothing is left referring to it.
+            // Copying instead cost 34% on a cluster-heavy stream
+            // (39.6 -> 26.1 MB/s on mini), because a scrolled row full
+            // of clusters is a heap allocation per cluster on the
+            // scroll path.  The emptied slot is swept like any other.
+            let (base, text) = match self.clusters.get_mut(idx as usize) {
+                Some(c) => (
+                    crate::grapheme::cluster_first_codepoint(c),
+                    Some(std::mem::take(c)),
+                ),
+                None => (' ', None),
+            };
+            if let Some(t) = text {
+                kept.push(((i - start) as u16, t));
+            }
             self.cells[i].ch = base;
             self.cells[i].attrs._pad[0] &= !FLAG_CLUSTER;
         }
+        kept
     }
 
     /// Clamp-and-set the cursor.  Out-of-bounds values clamp to the last
@@ -1133,10 +1201,11 @@ impl Grid {
             // gates the REGION path, so resetting it is enough — and
             // erring toward "do not collapse" is the safe direction.
             self.filed_blank_run = 0;
-            self.degrade_clusters_in_row(start, cols);
+            let row_clusters = self.degrade_clusters_in_row(start, cols);
             self.scrollback
                 .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
             self.sb_wrapped.push_back(self.wrapped[pr]);
+            self.sb_clusters.push_back(row_clusters);
             self.wrapped[pr] = false;
             for c in &mut self.cells[start..start + cols] {
                 *c = fill;
@@ -1151,6 +1220,9 @@ impl Grid {
         // the flags deque must never outgrow what the ring retains.
         while self.sb_wrapped.len() > self.scrollback.len() {
             self.sb_wrapped.pop_front();
+        }
+        while self.sb_clusters.len() > self.scrollback.len() {
+            self.sb_clusters.pop_front();
         }
     }
 
@@ -1227,10 +1299,11 @@ impl Grid {
                 if !(blank && self.filed_blank_run >= MAX_FILED_BLANK_RUN) {
                     self.filed_blank_run =
                         if blank { self.filed_blank_run.saturating_add(1) } else { 0 };
-                    self.degrade_clusters_in_row(start, cols);
+                    let row_clusters = self.degrade_clusters_in_row(start, cols);
                     self.scrollback
                         .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
                     self.sb_wrapped.push_back(self.wrapped[pr]);
+                    self.sb_clusters.push_back(row_clusters);
                     self.scroll_push_count = self.scroll_push_count.saturating_add(1);
                 }
             }
@@ -1287,6 +1360,9 @@ impl Grid {
         // deque must never outgrow what the ring retains.
         while self.sb_wrapped.len() > self.scrollback.len() {
             self.sb_wrapped.pop_front();
+        }
+        while self.sb_clusters.len() > self.scrollback.len() {
+            self.sb_clusters.pop_front();
         }
     }
 
@@ -1454,13 +1530,18 @@ impl Grid {
         // the flag (their truth lives in `sb_wrapped` below).
         self.scrollback.push_line_with_wrapped(line, wrapped);
         self.sb_wrapped.push_back(wrapped);
+        self.sb_clusters.push_back(Vec::new());
         while self.sb_wrapped.len() > self.scrollback.len() {
             self.sb_wrapped.pop_front();
+        }
+        while self.sb_clusters.len() > self.scrollback.len() {
+            self.sb_clusters.pop_front();
         }
     }
     pub fn clear_scrollback(&mut self) {
         self.scrollback.clear();
         self.sb_wrapped.clear();
+        self.sb_clusters.clear();
     }
 
     /// Resize the visible grid **without losing content**.
@@ -1680,6 +1761,7 @@ impl Grid {
         // current display width with no width-drift artifacts.
         self.scrollback.restart(new_cols);
         self.sb_wrapped.clear();
+        self.sb_clusters.clear();
         for (i, (cells, cont)) in segs[..live_start].iter().enumerate() {
             let mut row = cells.clone();
             row.resize(new_cols, pad_cell(i, &segs));
@@ -1687,9 +1769,13 @@ impl Grid {
             // reflow-derived continuation flag.
             self.scrollback.push_line_with_wrapped(&row, *cont);
             self.sb_wrapped.push_back(*cont);
+            self.sb_clusters.push_back(Vec::new());
         }
         while self.sb_wrapped.len() > self.scrollback.len() {
             self.sb_wrapped.pop_front();
+        }
+        while self.sb_clusters.len() > self.scrollback.len() {
+            self.sb_clusters.pop_front();
         }
         let mut new_cells = vec![Cell::default(); new_cols * rows as usize];
         let mut new_wrapped = vec![false; rows as usize];

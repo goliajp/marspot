@@ -228,3 +228,92 @@ fn the_clipboard_gets_the_text_and_not_the_index() {
         "a pool index reached the clipboard: {text:?}"
     );
 }
+
+/// A cluster survives scrolling off the screen.
+///
+/// The cells that go into scrollback keep the base codepoint, because
+/// that is what a binary without this feature — or one rolled back to
+/// before it — reads out of the file.  The rest of the cluster is kept
+/// beside the row and applied when the row is read back.
+#[test]
+fn scrolling_back_shows_the_whole_cluster() {
+    let mut t = Terminal::new(20, 3);
+    t.feed("e\u{301}\r\n".as_bytes());
+    for _ in 0..6 {
+        t.feed(b"x\r\n");
+    }
+    assert!(t.grid().scrollback_len() >= 4, "the fixture needs scrollback");
+
+    // Scroll back far enough that the first line is on screen again.
+    let g = t.grid();
+    let mut found = None;
+    for off in 1..=(g.scrollback_len() as u16) {
+        for row in 0..g.rows() {
+            let cell = g.cell_at_view(off, 0, row);
+            if let Some(text) = g.cluster_text_at_view(off, 0, row, &cell) {
+                found = Some(text.to_string());
+            }
+        }
+    }
+    assert_eq!(
+        found.as_deref(),
+        Some("e\u{301}"),
+        "the mark did not survive the row leaving the screen"
+    );
+}
+
+/// And the cell itself still reads as the base, which is what the file
+/// holds and what an older binary would show.
+#[test]
+fn the_scrollback_cell_keeps_the_base_codepoint() {
+    let mut t = Terminal::new(20, 3);
+    t.feed("e\u{301}\r\n".as_bytes());
+    for _ in 0..6 {
+        t.feed(b"x\r\n");
+    }
+    let g = t.grid();
+    for off in 1..=(g.scrollback_len() as u16) {
+        for row in 0..g.rows() {
+            let cell = g.cell_at_view(off, 0, row);
+            assert!(
+                !cell.is_cluster(),
+                "a scrollback cell carries a pool index; a rolled-back \
+                 binary would render plane 15"
+            );
+        }
+    }
+}
+
+/// Copying out of scrollback copies the cluster too.
+///
+/// The on-screen case has its own test above; this is the half that
+/// reads from the overlay, and it is the one a person hits by
+/// scrolling up and dragging across an old line.
+#[test]
+fn copying_out_of_scrollback_gets_the_cluster() {
+    use marspot_term::render::grid_selection_text;
+
+    let mut t = Terminal::new(20, 3);
+    t.feed("ae\u{301}b\r\n".as_bytes());
+    for _ in 0..6 {
+        t.feed(b"x\r\n");
+    }
+    let sb = t.grid().scrollback_len();
+    assert!(sb >= 4, "the fixture needs scrollback");
+
+    // Walk back until the selection finds the line that had the mark.
+    let mut got = None;
+    for abs in (t.grid().rows() as u32)..(t.grid().rows() as u32 + sb as u32) {
+        if let Some(text) = grid_selection_text(t.grid(), (0, abs), (2, abs), false)
+            && text.contains('a')
+        {
+            got = Some(text);
+            break;
+        }
+    }
+    let text = got.expect("the line with the mark is somewhere in scrollback");
+    assert!(
+        text.contains("e\u{301}"),
+        "copying from scrollback lost the mark: {text:?}"
+    );
+}

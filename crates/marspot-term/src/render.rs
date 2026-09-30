@@ -338,7 +338,7 @@ pub fn grid_selection_text(
             // A cell holding a cluster keeps its text in the grid's
             // pool and its `ch` is the index — copying that would put
             // a plane-15 codepoint on the clipboard.
-            match grid.cluster_text(&cell) {
+            match grid.cluster_text_at_view(abs as u16, c, last_view_row, &cell) {
                 Some(text) => row_text.push_str(text),
                 None => row_text.push(cell.ch),
             }

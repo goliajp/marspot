@@ -5638,7 +5638,9 @@ fn push_session(
             // A cell holding more than one codepoint is drawn as the
             // whole cluster; everything else takes the path it always
             // did, byte for byte.
-            let cluster = grid.cluster_text(&cell).map(str::to_string);
+            let cluster = grid
+                .cluster_text_at_view(view.view_offset, c as u16, r, &cell)
+                .map(str::to_string);
             let (entry, is_color) = match cluster {
                 Some(text) => match resolve_cluster_glyph(
                     atlas,
@@ -5846,7 +5848,7 @@ fn push_session(
             };
             // Same split as the main pass: a cluster under the cursor
             // is drawn whole, or its index would be drawn as a glyph.
-            let cursor_glyph = match grid.cluster_text(&cell) {
+            let cursor_glyph = match grid.cluster_text_at_view(0, col, row, &cell) {
                 Some(text) => {
                     let owned = text.to_string();
                     resolve_cluster_glyph(
