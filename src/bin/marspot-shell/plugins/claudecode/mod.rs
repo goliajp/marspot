@@ -1766,26 +1766,14 @@ fn profile_cycle_op(
                 pty_op::Step::await_process(shell_pid, looks_like_claudecode)
                     .timeout(Duration::from_secs(20)),
             )
-            // With no byte floor this reads a *trickle* as "finished
-            // drawing": a starting claude emits a couple of kilobytes
-            // of mode sets and queries, then goes silent while it loads
-            // the conversation (measured 2026-09-29: 1.7 KB, then
-            // nothing for 20 s).  Pane 442's switch cleared the wait
-            // 2.1 s in on exactly that trickle, and the sentence went
-            // into a CLI that was not reading input yet — the text
-            // landed in the composer and the Enter behind it did not
-            // submit it, which is what the user kept finding.
-            // …and if it never paints that much, go on anyway.  This
-            // wait only sharpens the timing of what follows; failing
-            // the run here throws away the resume that already
-            // happened and the sentence that was going to follow it,
-            // which is what killed five of ten switches on 2026-09-30.
-            .step(
-                pty_op::Step::await_quiet(WAKE_QUIET_FOR)
-                    .after_bytes(RESUME_FIRST_FRAME)
-                    .timeout(WAKE_WATCHDOG)
-                    .or_late(),
-            ),
+            // Ask the terminal instead of counting its bytes.  Two
+            // guesses came before this one: "quiet for a while" fired
+            // on the startup trickle and the message went into a CLI
+            // that was not reading input yet (2026-09-29), and "quiet
+            // after 4096 bytes" was never reached by half the panes
+            // (2026-09-30).  Alt screen plus bracketed paste is the
+            // program itself saying it has the terminal.
+            .step(pty_op::Step::await_tui_ready().timeout(WAKE_WATCHDOG).or_late()),
     )
     .map(|op| if say_continue { say_carry_on(op) } else { op })
 }
@@ -1804,29 +1792,22 @@ fn profile_cycle_op(
 /// the newline into the paste — the autorun path lost turns that way
 /// (0.7.82).
 fn say_carry_on(op: pty_op::PtyOp) -> pty_op::PtyOp {
-    op.step(pty_op::Step::paste(resume_word()).named("say_continue"))
-        // Wait for the sentence to appear rather than for a fixed
-        // quarter second.  A CLI that is busy reads its input in one
-        // go, and text followed by a newline in the same read is one
-        // pasted block, newline included — the composer then holds a
-        // message nobody sent.  The redraw of the composer is the
-        // proof that the paste was taken as input on its own.
-        .step(
-            pty_op::Step::await_quiet(HOLD_SETTLE)
-                .after_bytes(COMPOSER_REDRAW)
-                .timeout(Duration::from_secs(10))
-                .or_late()
-                .named("before_enter"),
-        )
-        .step(pty_op::Step::send(b"\r".to_vec()).named("enter"))
+    op.step(pty_op::Step::settle(HOLD_SETTLE).named("let_it_paint"))
+        .step(pty_op::Step::stop_if_waiting(WAITING_FOR_A_KEY))
+        .step(pty_op::Step::submit(resume_word()).named("say_continue"))
 }
 
-/// What a resumed claude paints before it is reading input.  Above the
-/// startup trickle (1.7 KB measured), far below a first frame (tens of
-/// KB, and `<name>.quiet` logs the real number per switch).
-const RESUME_FIRST_FRAME: u64 = 4096;
-/// What redrawing the composer around a pasted sentence costs.
-const COMPOSER_REDRAW: u64 = 64;
+/// What a claude that came back to a question looks like, rather than
+/// one that came back to its composer.
+///
+/// Two footers cover the family: every selection list in the CLI ends
+/// with the confirm/cancel hint, and the trust prompt is the one that
+/// appears before a resume has even happened — with "No, exit"
+/// selected, so an unread Enter closes the pane's session.
+const WAITING_FOR_A_KEY: &[&str] = &[
+    "Enter to confirm",
+    "Do you trust the files in this folder",
+];
 
 /// What to say to a session that has just been resumed on another
 /// account.
@@ -2887,7 +2868,7 @@ mod tests {
         let handed = host.submitted.lock().unwrap().clone();
         assert_eq!(handed.len(), 1);
         assert!(
-            handed[0].1.contains(&"say_continue") && handed[0].1.contains(&"enter"),
+            handed[0].1.contains(&"say_continue"),
             "a pane that was working is told to carry on: {:?}",
             handed[0].1
         );
@@ -3139,11 +3120,10 @@ mod tests {
     ///
     /// `--resume` reopens the session and waits — the refused turn is
     /// not retried by itself, which is why every switch so far has
-    /// ended with someone typing "继续" by hand.  Order matters as
-    /// much as presence: the words go in only after the new process
-    /// exists and the screen has stopped moving, and the Enter is a
-    /// step of its own (a paste carrying its own newline loses it in a
-    /// TUI that is still settling, 0.7.82).
+    /// ended with someone typing "继续" by hand.  Order is the whole
+    /// content of this test: the words go in only after the new
+    /// process exists *and* the program in it has taken the terminal
+    /// over, and the words and the newline leave together.
     #[test]
     fn a_cycle_ends_by_saying_continue() {
         let op = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200).expect("cycle");
@@ -3151,31 +3131,24 @@ mod tests {
         let at = |name: &str| labels.iter().position(|l| *l == name);
         let resume = at("resume").expect("resume");
         let proc = at("await_process").or_else(|| at("await_proc")).unwrap_or(resume);
+        let ready = at("await_tui_ready").expect("the terminal is asked first");
         let say = at("say_continue").expect("the switch must say something");
-        let enter = at("enter").expect("and press enter");
-        assert!(resume < proc && proc < say, "{labels:?}");
-        assert!(say < enter, "the newline is its own step: {labels:?}");
-        // Both waits have a byte floor, and neither may fail the run:
-        // without the floor they are satisfied by a CLI that has
-        // emitted its startup trickle and gone quiet to load (pane
-        // 442, 2026-09-29); with the floor and no `or_late`, a CLI
-        // that paints less than the floor loses the sentence
-        // altogether (five panes, 2026-09-30).
-        for (i, label) in [(proc + 1, "after the resume"), (enter - 1, "before the enter")] {
-            match &op.steps[i].kind {
-                pty_op::StepKind::AwaitQuiet { min_bytes, .. } => {
-                    assert!(*min_bytes > 0, "{label}: a quiet wait with no floor: {labels:?}");
-                    assert!(
-                        op.steps[i].proceed_on_timeout,
-                        "{label}: a timing wait must not fail the run: {labels:?}"
-                    );
-                }
-                _ => panic!("{label}: expected a quiet wait at step {i}: {labels:?}"),
-            }
-        }
+        assert!(resume < proc && proc < ready && ready < say, "{labels:?}");
         assert!(
-            matches!(&op.steps[say].kind, pty_op::StepKind::Paste(t) if !t.is_empty()),
-            "{labels:?}"
+            matches!(&op.steps[say].kind, pty_op::StepKind::Submit(t) if !t.is_empty()),
+            "the line and its newline go in one write: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"enter"),
+            "a separate newline is what let the user's keystroke in between: {labels:?}"
+        );
+        // Asking the terminal may not get an answer — an older L3, a
+        // region that cannot be read — and that must not cost the
+        // resume that already happened (five of ten switches died that
+        // way on 2026-09-30, at a step that was only about timing).
+        assert!(
+            op.steps[ready].proceed_on_timeout,
+            "readiness is a deadline, not a precondition: {labels:?}"
         );
     }
 

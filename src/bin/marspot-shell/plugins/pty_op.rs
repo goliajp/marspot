@@ -73,6 +73,18 @@ pub trait OpEnv: Send {
     /// Bytes this pane's PTY has produced, ever.  Monotone; only the
     /// differences matter.
     fn output_len(&self, sid: u64) -> u64;
+    /// The last `bytes` the pane's PTY produced, as raw bytes.
+    fn output_tail(&self, sid: u64, bytes: usize) -> Vec<u8>;
+    /// `(published frame sequence, terminal mode flags)` for this
+    /// pane, as the program running in it last declared them.
+    ///
+    /// The flags are the only honest answer to "is the thing in this
+    /// pane ready to be typed at" — counting bytes and waiting for
+    /// quiet is guessing at it, and guessed wrong in both directions
+    /// (2026-09-29 too early, 2026-09-30 never).  `None` means the
+    /// question could not be asked: no session dir, no region, or a
+    /// region written by something else.
+    fn pane_modes(&self, sid: u64) -> Option<(u64, u32)>;
 }
 
 /// What one step of a script does.
@@ -143,6 +155,58 @@ pub enum StepKind {
     /// Run a quick effect, failing the run with its error.  For
     /// committing a decision only once the steps before it worked.
     Call(CallFn),
+    /// Wait until the program in the pane has taken the terminal over
+    /// and is reading input: alt screen on, bracketed paste on, in a
+    /// frame published after this step began.
+    ///
+    /// Asking the terminal replaces two guesses that were both wrong.
+    /// "Quiet for a while" fires on the trickle a CLI emits before it
+    /// loads anything, and the message then lands in something not
+    /// reading input yet.  "Quiet after N bytes" fixes that and
+    /// invents N, which half the panes never reach.  Alt screen plus
+    /// bracketed paste is not a proxy for readiness — it *is* the
+    /// program saying it has the terminal.
+    ///
+    /// The sequence number matters as much as the flags: a pane whose
+    /// program was just killed still has that program's last frame in
+    /// the region, flags and all.  Only a frame published after this
+    /// step started can be talking about the new one.
+    AwaitTuiReady { entry_seq: Option<u64> },
+    /// End the run, successfully, if the pane is showing something
+    /// that is waiting for a keypress.
+    ///
+    /// A resumed CLI does not always come back to its composer.  It
+    /// can come back to "do you trust the files in this folder", to a
+    /// compaction prompt, to a permission confirmation — a list with
+    /// one entry highlighted and `Enter` bound to *choose it*.  Typing
+    /// a line there does nothing and pressing Enter answers a question
+    /// nobody read.  The trust dialog's default answer is "No, exit".
+    ///
+    /// So: look at what the pane has drawn, and if a prompt is
+    /// waiting, stop and leave it for the person.  The run ends
+    /// successfully because there is nothing wrong — the pane moved to
+    /// the account it needed, it just is not a pane that can be typed
+    /// at right now.
+    ///
+    /// This is a veto, not a trigger, and it fails in the safe
+    /// direction: a stale match in the tail costs a sentence the
+    /// person can type, while a miss is exactly today's behaviour.
+    StopIfWaiting { needles: &'static [&'static str] },
+    /// Put a line in and submit it, in one write.
+    ///
+    /// Everything about this step is about the gap between the text
+    /// and the newline.  Send them as separate writes and the user's
+    /// own keystroke can land in between, or the TUI can read both out
+    /// of its buffer in one go and take the newline as part of the
+    /// pasted block — a message nobody sent, sitting in the composer
+    /// (2026-09-29 and 0.7.82 before it).  One write closes both
+    /// holes: the bracketed-paste end marker terminates the text, the
+    /// carriage return behind it is unambiguously a key, and no other
+    /// writer can get between them.
+    ///
+    /// Needs `AwaitTuiReady` in front of it, because the wrapping
+    /// depends on the pane having bracketed paste on.
+    Submit(String),
 }
 
 /// The far end of an [`StepKind::AwaitJob`]: whoever does the work
@@ -255,6 +319,33 @@ impl Step {
     pub fn paste(text: impl Into<String>) -> Self {
         Self { kind: StepKind::Paste(text.into()), timeout: Some(Duration::from_secs(5)), proceed_on_timeout: false,
             label: "paste" }
+    }
+    /// Wait for the program in the pane to take the terminal over.
+    pub fn await_tui_ready() -> Self {
+        Self {
+            kind: StepKind::AwaitTuiReady { entry_seq: None },
+            timeout: Some(Duration::from_secs(30)),
+            proceed_on_timeout: false,
+            label: "await_tui_ready",
+        }
+    }
+    /// Stop before typing if the pane is waiting on a keypress.
+    pub fn stop_if_waiting(needles: &'static [&'static str]) -> Self {
+        Self {
+            kind: StepKind::StopIfWaiting { needles },
+            timeout: Some(Duration::from_secs(5)),
+            proceed_on_timeout: false,
+            label: "stop_if_waiting",
+        }
+    }
+    /// Put a line in and submit it, in one write.
+    pub fn submit(line: impl Into<String>) -> Self {
+        Self {
+            kind: StepKind::Submit(line.into()),
+            timeout: Some(Duration::from_secs(5)),
+            proceed_on_timeout: false,
+            label: "submit",
+        }
     }
     pub fn await_quiet(still: Duration) -> Self {
         Self {
@@ -643,6 +734,84 @@ impl OpRunner {
                 }
                 true
             }
+            StepKind::AwaitTuiReady { entry_seq } => {
+                use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
+                let Some((seq, flags)) = self.env.pane_modes(sid) else {
+                    return false;
+                };
+                let base = match entry_seq {
+                    Some(v) => v,
+                    None => {
+                        if let Some(StepKind::AwaitTuiReady { entry_seq }) =
+                            self.op.steps.get_mut(self.at).map(|s| &mut s.kind)
+                        {
+                            *entry_seq = Some(seq);
+                        }
+                        seq
+                    }
+                };
+                let ready = flags & (FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE)
+                    == (FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE);
+                let fresh = seq > base;
+                if ready && fresh {
+                    host.log(
+                        LogLevel::Info,
+                        &format!("{}.ready", self.op.name),
+                        &format!("sid={sid} the pane's program has the terminal (flags={flags:#x})"),
+                    );
+                }
+                ready && fresh
+            }
+            StepKind::StopIfWaiting { needles } => {
+                let tail = self.env.output_tail(sid, 16 * 1024);
+                let text = String::from_utf8_lossy(&tail);
+                if let Some(hit) = needles.iter().find(|n| text.contains(**n)) {
+                    host.log(
+                        LogLevel::Info,
+                        &format!("{}.waiting", self.op.name),
+                        &format!("sid={sid} the pane is asking something ({hit:?}); leaving it alone"),
+                    );
+                    self.finish(host, OpOutcome::Done);
+                    return true;
+                }
+                true
+            }
+            StepKind::Submit(ref line) => {
+                use marspot_term::grid_shm::FLAG_BRACKETED_PASTE;
+                let bracketed = self
+                    .env
+                    .pane_modes(sid)
+                    .map(|(_, f)| f & FLAG_BRACKETED_PASTE != 0)
+                    .unwrap_or(false);
+                let mut bytes = Vec::with_capacity(line.len() + 16);
+                if bracketed {
+                    bytes.extend_from_slice(b"\x1b[200~");
+                    bytes.extend_from_slice(line.as_bytes());
+                    bytes.extend_from_slice(b"\x1b[201~");
+                } else {
+                    // Nothing to bracket with: the line still goes in,
+                    // and the newline behind it is the same key it
+                    // would have been.  Worse than the wrapped form
+                    // only in that a TUI reading a burst could take the
+                    // two together — which is the case `AwaitTuiReady`
+                    // exists to prevent, and this is what happens when
+                    // it was allowed to give up.
+                    bytes.extend_from_slice(line.as_bytes());
+                }
+                bytes.push(b'\r');
+                host.log(
+                    LogLevel::Info,
+                    &format!("{}.submit", self.op.name),
+                    &format!("sid={sid} bytes={} bracketed={bracketed}", bytes.len()),
+                );
+                if let Err(e) = self.env.io().send(sid, &bytes) {
+                    self.finish(
+                        host,
+                        OpOutcome::Failed { step: self.at, label: step.label, err: e.to_string() },
+                    );
+                }
+                true
+            }
             StepKind::AwaitQuiet { still, min_bytes } => {
                 let len = self.env.output_len(sid);
                 if len != self.seen_len {
@@ -1022,6 +1191,30 @@ impl OpEnv for RealEnv {
             .metadata()
             .map(|m| m.len())
             .unwrap_or(0)
+    }
+    fn output_tail(&self, sid: u64, bytes: usize) -> Vec<u8> {
+        use std::io::{Read, Seek, SeekFrom};
+        let path = marspot_term::paths::sessions_dir()
+            .join(sid.to_string())
+            .join("bytelog");
+        let Ok(mut f) = std::fs::File::open(&path) else { return Vec::new() };
+        let Ok(len) = f.metadata().map(|m| m.len()) else { return Vec::new() };
+        let from = len.saturating_sub(bytes as u64);
+        if f.seek(SeekFrom::Start(from)).is_err() {
+            return Vec::new();
+        }
+        let mut buf = Vec::with_capacity(bytes.min(len as usize));
+        let _ = f.take(bytes as u64).read_to_end(&mut buf);
+        buf
+    }
+    fn pane_modes(&self, sid: u64) -> Option<(u64, u32)> {
+        // Same route as `output_len`: read what the session left on
+        // disk.  The registry entry names the region; the region's
+        // header carries the flags.  Read-only, header-sized, and only
+        // while an op is running.
+        let entry = marspot_term::session_registry::read_session_entry(sid).ok()?;
+        let name = std::ffi::CString::new(entry.shm_name).ok()?;
+        marspot_term::grid_shm::peek(&name).ok()
     }
 }
 
@@ -1510,6 +1703,11 @@ mod tests {
         holds: Mutex<Vec<bool>>,
         pasted: Mutex<Vec<String>>,
         mouse_resets: Mutex<Vec<u64>>,
+        /// `(seq, flags)` the pane's region would report, or `None`
+        /// for a pane whose region cannot be read.
+        modes: Mutex<Option<(u64, u32)>>,
+        /// What the pane has drawn lately.
+        tail: Mutex<Vec<u8>>,
     }
 
     struct FakeIo(Arc<FakeState>);
@@ -1547,6 +1745,12 @@ mod tests {
         }
         fn pid_alive(&self, pid: i32) -> bool {
             self.state.alive.lock().unwrap().contains(&pid)
+        }
+        fn output_tail(&self, _sid: u64, _bytes: usize) -> Vec<u8> {
+            self.state.tail.lock().unwrap().clone()
+        }
+        fn pane_modes(&self, _sid: u64) -> Option<(u64, u32)> {
+            *self.state.modes.lock().unwrap()
         }
         fn find_descendant(&self, _under: i32, _pred: fn(&pidtree::ProcRow) -> bool) -> Option<i32> {
             self.state.present.lock().unwrap().first().copied()
@@ -1599,6 +1803,108 @@ mod tests {
             r.on_tick(host);
             advance(state, 16);
         }
+    }
+
+    /// Readiness is the terminal's own answer, and a stale frame is
+    /// not an answer.
+    ///
+    /// The pane a script has just killed still holds the dead
+    /// program's last published frame — alt screen and bracketed paste
+    /// both on, because that is how it was running.  Believing it
+    /// means typing into a shell prompt.
+    #[test]
+    fn readiness_needs_a_frame_published_after_the_wait_began() {
+        use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
+        let ready = FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE;
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((7, ready));
+        let mut r = OpRunner::new(
+            PtyOp::new("test.ready").step(Step::await_tui_ready()),
+            env,
+        );
+
+        run(&mut r, &host, &state, 500);
+        assert!(!*host.ended.lock().unwrap(), "the dead program's own frame proves nothing");
+
+        // The same flags, one frame later: that one is the new
+        // program's.
+        *state.modes.lock().unwrap() = Some((8, ready));
+        run(&mut r, &host, &state, 500);
+        assert!(*host.ended.lock().unwrap(), "a fresh frame with both flags is the answer");
+
+        // And flags alone are not enough either.
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((7, FLAG_ALT_SCREEN));
+        let mut r = OpRunner::new(
+            PtyOp::new("test.ready").step(Step::await_tui_ready().timeout(Duration::from_secs(1))),
+            env,
+        );
+        *state.modes.lock().unwrap() = Some((9, FLAG_ALT_SCREEN));
+        run(&mut r, &host, &state, 2000);
+        assert!(
+            matches!(r.finished, Some(OpOutcome::TimedOut { .. })),
+            "without bracketed paste the newline is not safe to send"
+        );
+    }
+
+    /// The line and its newline leave in one write, wrapped.
+    #[test]
+    fn a_submit_is_one_write() {
+        use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE));
+        let mut r = OpRunner::new(PtyOp::new("test.submit").step(Step::submit("carry on")), env);
+        run(&mut r, &host, &state, 200);
+
+        let sent = state.sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "one write, or a keystroke can land inside it: {sent:?}");
+        assert_eq!(
+            sent[0],
+            b"\x1b[200~carry on\x1b[201~\r".to_vec(),
+            "bracketed, and the newline behind the end marker"
+        );
+
+        // A pane without bracketed paste still gets the line — there
+        // is nothing to wrap it with.
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN));
+        let mut r = OpRunner::new(PtyOp::new("test.submit").step(Step::submit("carry on")), env);
+        run(&mut r, &host, &state, 200);
+        assert_eq!(state.sent.lock().unwrap()[0], b"carry on\r".to_vec());
+    }
+
+    /// A pane that came back to a question is left alone.
+    #[test]
+    fn a_waiting_prompt_stops_the_script_before_it_types() {
+        const NEEDLES: &[&str] = &["Enter to confirm"];
+        let (state, env, host) = setup();
+        *state.tail.lock().unwrap() =
+            b"  Yes, I trust this folder\r\n  No, exit\r\n Enter to confirm \xc2\xb7 Esc to cancel"
+                .to_vec();
+        let mut r = OpRunner::new(
+            PtyOp::new("test.veto")
+                .step(Step::stop_if_waiting(NEEDLES))
+                .step(Step::submit("carry on")),
+            env,
+        );
+        run(&mut r, &host, &state, 200);
+        assert!(
+            state.sent.lock().unwrap().is_empty(),
+            "the highlighted answer to the trust prompt is \"No, exit\""
+        );
+        assert!(matches!(r.finished, Some(OpOutcome::Done)));
+
+        // Nothing waiting: the line goes in.
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, 0));
+        let mut r = OpRunner::new(
+            PtyOp::new("test.veto")
+                .step(Step::stop_if_waiting(NEEDLES))
+                .step(Step::submit("carry on")),
+            env,
+        );
+        run(&mut r, &host, &state, 200);
+        assert_eq!(state.sent.lock().unwrap().len(), 1);
     }
 
     /// The reclamation script, end to end, in the world the test
