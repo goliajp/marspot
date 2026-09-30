@@ -212,7 +212,16 @@ ssh "$HOST" "
   # three-minute build for a one-minute measurement -- and the build
   # is the part that varies, because a tree that changed has to be
   # rebuilt and a tree that did not is a no-op.
-  $BUILD_LOCK caffeinate -dims ./bin/bench.sh --build-only
+  # If the compile never got the machine there is nothing to measure,
+  # so the give-up code travels rather than being stepped over: the
+  # first attempt at this let the build abandon its wait and then
+  # measured anyway, and came back exit 1 -- a gate failure, which is
+  # not what happened.
+  if ! $BUILD_LOCK caffeinate -dims ./bin/bench.sh --build-only; then
+    rc=\$?
+    echo \"bench.sh --build-only did not run (exit \$rc)\" >&2
+    exit \$rc
+  fi
   exec $LOCK_CMD caffeinate -dims ./bin/bench.sh --no-build $ARGS_Q
 " </dev/null
 REMOTE_RC=$?
