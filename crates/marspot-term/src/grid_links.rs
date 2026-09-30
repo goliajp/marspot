@@ -820,7 +820,27 @@ mod grid_tests {
             " > bare composer, no box (claudecode v2.1.212)",
         );
         grid.set_cursor(3, 7);
-        let with_cc = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true, ..Default::default() });
+        // An oracle the test owns.  This used to ask the real
+        // filesystem whether `~/workspace` was there, which made the
+        // assertion true on the machines it was written on and false
+        // on a build runner — a test about link detection deciding
+        // itself on somebody's home directory layout.
+        struct Present;
+        impl PathOracle for Present {
+            fn probe(&self, path: &str) -> PathVerdict {
+                if path.ends_with("/workspace") {
+                    PathVerdict::Exists
+                } else {
+                    PathVerdict::Missing
+                }
+            }
+        }
+        let with_cc = scan_visible_links_with(
+            &grid,
+            0,
+            ScanOpts { cc_mode: true, ..Default::default() },
+            &Present,
+        );
         let texts: Vec<&str> = with_cc.iter().map(|l| l.text.as_str()).collect();
         assert!(
             texts.contains(&"cara@example.com"),
