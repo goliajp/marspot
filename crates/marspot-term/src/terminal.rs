@@ -134,6 +134,13 @@ pub struct Terminal {
     /// regions in place. `None` until first save; restore with no prior
     /// save is a no-op (matches xterm).
     saved_cursor: Option<SavedCursor>,
+    /// The saved cursor belonging to the screen buffer that is *not*
+    /// current.  There is one slot per buffer, as there is one grid per
+    /// buffer: `ESC 7` inside a full-screen program saves where that
+    /// program is, and it is still there when the program comes back,
+    /// having gone to the main screen and returned.  The two swap on
+    /// every switch, so `saved_cursor` is always the live buffer's.
+    parked_saved_cursor: Option<SavedCursor>,
     /// DECSTBM scroll region — `[scroll_top..=scroll_bot]` rows scroll
     /// together; rows outside this band stay put on LF / SU / IL / DL.
     /// Default `(0, rows-1)` = full grid (no region). Resize re-clamps.
@@ -557,6 +564,7 @@ impl Terminal {
             parser: Parser::new(),
             attrs: CellAttrs::default(),
             saved_cursor: None,
+            parked_saved_cursor: None,
             scroll_top: 0,
             scroll_bot: rows.saturating_sub(1),
             pending_response: Vec::new(),
@@ -1095,6 +1103,7 @@ impl Terminal {
             let saved_main = &mut self.saved_main;
             let attrs = &mut self.attrs;
             let saved_cursor = &mut self.saved_cursor;
+            let parked_saved_cursor = &mut self.parked_saved_cursor;
             let scroll_top = &mut self.scroll_top;
             let scroll_bot = &mut self.scroll_bot;
             let pending_response = &mut self.pending_response;
@@ -1132,6 +1141,7 @@ impl Terminal {
                 saved_main,
                 attrs,
                 saved_cursor,
+                parked_saved_cursor,
                 scroll_top,
                 scroll_bot,
                 pending_response,
@@ -2378,6 +2388,8 @@ struct Handler<'a> {
     saved_main: &'a mut Option<SavedMain>,
     attrs: &'a mut CellAttrs,
     saved_cursor: &'a mut Option<SavedCursor>,
+    /// See `Terminal::parked_saved_cursor`.
+    parked_saved_cursor: &'a mut Option<SavedCursor>,
     scroll_top: &'a mut u16,
     scroll_bot: &'a mut u16,
     pending_response: &'a mut Vec<u8>,
@@ -3108,8 +3120,16 @@ impl<'a> Handler<'a> {
         // ring 主屏用 — claudecode 等 TUI 输出量大,小 ring 装不下
         // 一次会话.Drop wholesale on `?1049l`(exit_alt_screen 把整
         // 个 grid 替换回 saved_main).
-        let alt = Grid::with_scrollback(cols, rows, DEFAULT_SCROLLBACK_LINES);
+        let mut alt = Grid::with_scrollback(cols, rows, DEFAULT_SCROLLBACK_LINES);
+        // The switch does not move the cursor.  `?1049l` restores it
+        // because the program moved it, not because the switch did.
+        // A recording of `ESC 7` taken immediately after `?1049h`
+        // settles it: the reference terminal saves the row the shell
+        // was on, so the `ESC 8` at the end of that stream lands nine
+        // rows down, where this used to put it at the top.
+        alt.set_cursor(cursor.0, cursor.1);
         let main = std::mem::replace(self.grid, alt);
+        std::mem::swap(self.saved_cursor, self.parked_saved_cursor);
         // The alt screen starts with the protocol off, and the main
         // screen's stack is put away with its grid.  A TUI that raises
         // the protocol and then dies cannot leave the shell it drops
@@ -3275,6 +3295,7 @@ impl<'a> Handler<'a> {
     fn soft_reset(&mut self) {
         *self.attrs = CellAttrs::default();
         *self.saved_cursor = None;
+        *self.parked_saved_cursor = None;
         *self.cursor_visible = true;
         *self.cursor_shape = 0;
         *self.cursor_key_app_mode = false;
@@ -3320,6 +3341,7 @@ impl<'a> Handler<'a> {
 
     fn exit_alt_screen(&mut self) {
         if let Some(saved) = self.saved_main.take() {
+            std::mem::swap(self.saved_cursor, self.parked_saved_cursor);
             *self.grid = saved.grid;
             self.grid.set_cursor(saved.cursor.0, saved.cursor.1);
             *self.kitty_keyboard = saved.kitty_keyboard;
@@ -6839,8 +6861,12 @@ mod tests {
         t.feed(b"main_a\r\nmain_b");
         let cursor_before = t.grid().cursor();
 
-        // Enter alt, write something only in alt.
+        // Enter alt, write something only in alt.  The switch does not
+        // move the cursor -- that is why `?1049l` has to restore it --
+        // so the program's first line lands where it was standing, and
+        // one that wants the top asks for it.
         t.feed(b"\x1b[?1049h");
+        t.feed(b"\x1b[H");
         t.feed(b"alt_only");
         assert_eq!(first_row_text(&t).trim_end(), "alt_only");
 
