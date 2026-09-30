@@ -76,6 +76,7 @@ impl ContextMenuAction {
 /// - the anchor (so resize / scroll redraws keep the menu put), and
 /// - the region (so the action dispatcher knows the target pane /
 ///   slot when an item fires).
+///
 /// `hovered_idx` is the row currently under the cursor (None = no
 /// row hovered, e.g. cursor over the menu frame's padding).
 struct ContextMenuState {

@@ -230,6 +230,7 @@ pub struct FontCache {
     pub ascent: f64,
     /// UI font — used by chrome (dev panel etc.).  Different family
     /// + size from the mono terminal font.  Falls back to terminal
+    ///
     /// font (= same as base) when the system UI font fails to load.
     pub ui_font_idx: usize,
     /// UI font metrics — width of '0' glyph as approximate cell_w;

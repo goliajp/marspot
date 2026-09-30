@@ -7203,6 +7203,7 @@ mod tests {
     /// Phase 9 (extended) — visual-regression strings.  Renders the
     /// canonical Mono Monaco workload (ASCII + CJK cascade + emoji
     /// + kerning/ligature lines) as a single PNG so a reviewer can
+    ///
     /// eyeball it AND a future SSIM gate can diff it byte-for-byte
     /// against a frozen baseline.  Same opt-in shape as
     /// `font_v5_showcase_snapshot` (env-gated so default test runs
@@ -7313,6 +7314,7 @@ mod tests {
     /// Phase 9 (extended) — box-drawing + block-element pieces.
     /// Validates the per-codepoint custom raster (`box_drawing_arms`
     /// + `block_element_rects` in render_metal.rs) — the path that
+    ///
     /// can fall out of sync with `cell_h` / baseline if any of the
     /// chrome-font metrics drift.  Locks the rendered pixels so a
     /// hairline gap at any `┌─┐│└─┘` junction surfaces as an SSIM
