@@ -3063,6 +3063,44 @@ impl<'a> Handler<'a> {
     /// Tab stops are deliberately not touched — DEC STD 070 leaves
     /// those to RIS, and a program that soft-resets in the middle of a
     /// table would otherwise lose its columns.
+    /// DECALN — fill the screen with `E` and go home.
+    fn screen_alignment_pattern(&mut self) {
+        let (cols, rows) = (self.grid.cols(), self.grid.rows());
+        let attrs = CellAttrs::default();
+        fill_range(self.grid, 0, cols as u32 * rows as u32, attrs);
+        for row in 0..rows {
+            for col in 0..cols {
+                self.grid.set_cell(col, row, Cell { ch: 'E', attrs });
+            }
+        }
+        self.grid.clear_all_wrapped();
+        *self.scroll_top = 0;
+        *self.scroll_bot = rows.saturating_sub(1);
+        self.grid.set_cursor(0, 0);
+        *self.pending_wrap = false;
+    }
+
+    /// DECCOLM — the part of it that is ours to do.
+    ///
+    /// The mode asks for 80 or 132 columns.  How wide a pane is is not
+    /// this terminal's to decide: the window owns it, and a program
+    /// that could reshape the window by printing four bytes would be a
+    /// worse terminal, not a more compatible one.  What the mode also
+    /// does is specified and is ours: the screen is cleared, the scroll
+    /// region goes back to the full height, and the cursor goes home.
+    /// Programs use DECCOLM for exactly that clearing side effect, and
+    /// ignoring it leaves the old screen underneath whatever they draw
+    /// next.
+    fn column_mode_reset(&mut self) {
+        let (cols, rows) = (self.grid.cols(), self.grid.rows());
+        fill_range(self.grid, 0, cols as u32 * rows as u32, CellAttrs::default());
+        self.grid.clear_all_wrapped();
+        *self.scroll_top = 0;
+        *self.scroll_bot = rows.saturating_sub(1);
+        self.grid.set_cursor(0, 0);
+        *self.pending_wrap = false;
+    }
+
     fn soft_reset(&mut self) {
         *self.attrs = CellAttrs::default();
         *self.saved_cursor = None;
@@ -3152,6 +3190,10 @@ impl<'a> Handler<'a> {
             // DECCKM — cursor keys send `ESC O X` in app mode, `ESC [ X`
             // otherwise. Read by the input layer for arrow encoding.
             1 => *self.cursor_key_app_mode = set,
+            // DECCOLM — see `column_mode_reset`; set and reset do the
+            // same thing here, because the difference between them is
+            // the column count we do not own.
+            3 => self.column_mode_reset(),
             // DECTCEM — cursor visibility.
             25 => *self.cursor_visible = set,
             // smcup/rmcup — alt screen + save/restore cursor.  ?1047
@@ -3326,7 +3368,11 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 self.tabs.set(col);
             }
             // DECSC — save cursor (position + SGR attrs + deferred wrap).
-            b'7' => {
+            //
+            // Guarded on having no intermediate: `ESC # 8` is DECALN,
+            // not DECRC, and without the guard it was being restored
+            // as a cursor.
+            b'7' if intermediates.is_empty() => {
                 let (col, row) = self.grid.cursor();
                 *self.saved_cursor = Some(SavedCursor {
                     col,
@@ -3336,7 +3382,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 });
             }
             // DECRC — restore cursor. xterm-style no-op when no save exists.
-            b'8' => {
+            b'8' if intermediates.is_empty() => {
                 if let Some(s) = *self.saved_cursor {
                     self.grid.set_cursor(s.col, s.row);
                     *self.attrs = s.attrs;
@@ -3388,6 +3434,14 @@ impl<'a> ParserCallbacks for Handler<'a> {
             // other variant is one of the national ASCII sets, and
             // this terminal treats them all as ASCII.
             _ if intermediates == b"(" => *self.g0_graphics = byte == b'0',
+            // DECALN (ESC # 8) — the screen alignment pattern: every
+            // cell an uppercase E, default attributes, cursor home.
+            // vttest opens with it, and a terminal that ignores it
+            // shows the shell's own echo where the pattern should be,
+            // which makes every test after it read against the wrong
+            // screen.  DECALN also drops the scroll region, so the
+            // pattern is not sliced by whatever was set before.
+            b'8' if intermediates == b"#" => self.screen_alignment_pattern(),
             // RIS — what `reset` sends.
             b'c' if intermediates.is_empty() => self.hard_reset(),
             // Charset switching etc. arrive in later phases.
@@ -5090,7 +5144,14 @@ mod tests {
         // DECSC (ESC 7) saves cursor + attrs; DECSET ?1, ?2004, ?25
         // exercise the mode bitset path.  After roundtrip the
         // SavedCursor option + modes must survive.
-        let src = term_with(20, 5, b"\x1b[31mAB\x1b 7\x1b[?1h\x1b[?2004h\x1b[?25l");
+        //
+        // The DECSC here used to be written `ESC SP 7`, with a stray
+        // space, and still saved a cursor because the dispatcher
+        // ignored intermediates.  Once `ESC # 8` had to mean DECALN
+        // rather than DECRC, intermediates started counting and this
+        // fixture stopped saving anything -- which is the test having
+        // been right about the roundtrip and wrong about the input.
+        let src = term_with(20, 5, b"\x1b[31mAB\x1b7\x1b[?1h\x1b[?2004h\x1b[?25l");
         let bytes = src.serialize_snapshot();
         let mut dst = Terminal::new(20, 5);
         dst.apply_snapshot(&bytes).unwrap();
