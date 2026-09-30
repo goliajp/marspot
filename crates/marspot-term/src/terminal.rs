@@ -1599,7 +1599,7 @@ impl Terminal {
             ));
         }
         let snapshot_v = read_u32(&mut cur)?;
-        if snapshot_v < SNAPSHOT_MIN_COMPAT || snapshot_v > SNAPSHOT_VERSION {
+        if !(SNAPSHOT_MIN_COMPAT..=SNAPSHOT_VERSION).contains(&snapshot_v) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -2672,7 +2672,7 @@ impl<'a> Handler<'a> {
     /// the LAST char buffered so a following VS15/VS16/jamo still
     /// sees an open cluster.
     fn print_wide_run(&mut self, run: &[u8]) {
-        debug_assert!(run.len() % 3 == 0 && run.len() >= 6);
+        debug_assert!(run.len().is_multiple_of(3) && run.len() >= 6);
         // A `<` held from the previous chunk cannot be a tag once a
         // wide character follows; print it before the bulk write, or
         // it would sit in the buffer and attach itself to whatever
@@ -3166,7 +3166,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
         // Trace C0 row-advancers (LF/CR/BS/Tab) so we can see how the
         // app actually moves between rows — `CSI 1 B` shows up in the
         // CSI trace but plain `\n` / `\r` only show here.
-        if matches!(byte, 0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0D) {
+        if matches!(byte, 0x08..=0x0D) {
             trace_seq("C0", &[], &[], byte);
         }
         // The deferred wrap is cancelled per control, not by all of
@@ -3186,7 +3186,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                     self.grid.set_cursor(col - 1, row);
                 }
             }
-            0x0A | 0x0B | 0x0C => {
+            0x0A..=0x0C => {
                 *self.pending_wrap = false;
                 // LF / VT / FF are IND with no carriage return.
                 self.index();
@@ -3534,14 +3534,14 @@ impl<'a> ParserCallbacks for Handler<'a> {
             b'I' => {
                 // CHT — forward n tab stops.  Like HT, it does not
                 // change rows, so the deferred wrap stands.
-                let n = param(params, 0, 1).max(1) as u16;
+                let n = param(params, 0, 1).max(1);
                 let to = self.tabs.next(col, n);
                 self.grid.set_cursor(to, row);
             }
             b'Z' => {
                 // CBT — backward n tab stops.
                 *self.pending_wrap = false;
-                let n = param(params, 0, 1).max(1) as u16;
+                let n = param(params, 0, 1).max(1);
                 let to = self.tabs.prev(col, n);
                 self.grid.set_cursor(to, row);
             }
@@ -3898,14 +3898,14 @@ impl<'a> ParserCallbacks for Handler<'a> {
             // protocol one — but a program that says what it is
             // shouldn't have that thrown away in the parser.
             Some(0) | Some(2) => {
-                if let Ok(t) = std::str::from_utf8(rest) {
-                    if self.osc_title != t {
-                        self.osc_title.clear();
-                        // Bounded: a title is a label, and a program
-                        // that sends a megabyte of one is not going to
-                        // get a megabyte of storage for it.
-                        self.osc_title.extend(t.chars().take(256));
-                    }
+                if let Ok(t) = std::str::from_utf8(rest)
+                    && self.osc_title != t
+                {
+                    self.osc_title.clear();
+                    // Bounded: a title is a label, and a program that
+                    // sends a megabyte of one is not going to get a
+                    // megabyte of storage for it.
+                    self.osc_title.extend(t.chars().take(256));
                 }
             }
             // 10 = default foreground, 11 = default background, and
@@ -4081,11 +4081,11 @@ impl<'a> Handler<'a> {
         // the boundary is NOT unconditional — GB11 joins ZWJ to the
         // pictograph after it — so `👨 ZWJ 👩` has to reach the
         // segmenter even though `👩` is fast class on its own.
-        if let Some(w) = fast_width(ch) {
-            if self.cluster_buf.is_empty() || self.cluster_fast.is_some() {
-                self.commit_cluster_head(ch, w, true);
-                return;
-            }
+        if let Some(w) = fast_width(ch)
+            && (self.cluster_buf.is_empty() || self.cluster_fast.is_some())
+        {
+            self.commit_cluster_head(ch, w, true);
+            return;
         }
         // SLOW PATH — this codepoint may EXTEND what was just drawn
         // (`e` + ́ , ⚠ + VS16, 👨 + ZWJ + 👩, LV + jamo, क + virama),
@@ -4096,7 +4096,7 @@ impl<'a> Handler<'a> {
             // Anything that widens it arrives later and amends it.
             let w = crate::grapheme::cluster_width(ch.encode_utf8(&mut [0u8; 4]));
             if w > 0 {
-                self.commit_cluster_head(ch, w as u8, false);
+                self.commit_cluster_head(ch, w, false);
             } else {
                 // A zero-width codepoint with a boundary before it has
                 // nothing to attach to — it is not drawn, but it does
@@ -4112,7 +4112,7 @@ impl<'a> Handler<'a> {
         self.cluster_buf.push(ch);
         *self.cluster_fast = None;
         let w = crate::grapheme::cluster_width(self.cluster_buf);
-        self.widen_anchor(w as u8);
+        self.widen_anchor(w);
     }
 
     /// Draw `ch` as the first codepoint of a new cluster and remember
@@ -4280,7 +4280,7 @@ fn fill_range(grid: &mut Grid, start: u32, end_exclusive: u32, attrs: CellAttrs)
     // them at the last column).
     let mut start = start;
     let mut end_exclusive = end_exclusive;
-    if start > 0 && start % cols != 0 {
+    if start > 0 && !start.is_multiple_of(cols) {
         let prev_col = ((start - 1) % cols) as u16;
         let row = ((start - 1) / cols) as u16;
         let prev = grid.cell(prev_col, row);
@@ -4289,7 +4289,7 @@ fn fill_range(grid: &mut Grid, start: u32, end_exclusive: u32, attrs: CellAttrs)
         }
     }
     let total = cols * grid.rows() as u32;
-    if end_exclusive < total && end_exclusive % cols != 0 {
+    if end_exclusive < total && !end_exclusive.is_multiple_of(cols) {
         let last_col = ((end_exclusive - 1) % cols) as u16;
         let row = ((end_exclusive - 1) / cols) as u16;
         let last = grid.cell(last_col, row);
@@ -4903,7 +4903,7 @@ mod tests {
         // every line must be the canonical line for its index (the
         // pre-B14 emitter refilled the gap with copies of the OLDEST
         // lines; a prefix-only assertion never noticed).
-        for idx in 0..dst_post {
+        for (idx, _) in canonical.iter().enumerate().take(dst_post) {
             let line = dst.grid().scrollback_line(idx).expect("line");
             let txt: String = line
                 .iter()
@@ -6917,7 +6917,7 @@ mod osc_tests {
     fn a_title_is_a_label_not_a_buffer() {
         let mut t = Terminal::new(20, 5);
         let mut b = b"\x1b]0;".to_vec();
-        b.extend(std::iter::repeat(b'x').take(10_000));
+        b.extend(std::iter::repeat_n(b'x', 10_000));
         b.push(0x07);
         t.feed(&b);
         assert_eq!(t.osc_title().chars().count(), 256);

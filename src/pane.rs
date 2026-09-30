@@ -43,6 +43,11 @@ use crate::terminal::Terminal;
 /// path).  Same observable interface; the GUI / Pane don't need to
 /// branch on which is in use except where shelld-specific affordances
 /// (session id, reattach) come into play.
+//
+// The two variants differ by ~2 KB: `Local` carries the whole parser
+// and grid inline.  Boxing it would put a pointer chase on every PTY
+// read to save memory on a value there is exactly one of per pane.
+#[allow(clippy::large_enum_variant)]
 pub enum PaneBackend {
     Local(Session),
     /// A per-session L3 process (`marspot-session`, target #4) that owns
@@ -144,9 +149,7 @@ impl VacantPane {
         for (i, ch) in msg.chars().enumerate() {
             let col = start + i as u16;
             if col >= grid.cols() { break; }
-            let mut cell = Cell::default();
-            cell.ch = ch;
-            grid.set_cell(col, row, cell);
+            grid.set_cell(col, row, Cell { ch, ..Cell::default() });
         }
         Self {
             session_id: 0,

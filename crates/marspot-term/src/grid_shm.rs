@@ -407,8 +407,7 @@ fn attach_and_maybe_upgrade(fd: RawFd) -> io::Result<(*mut u8, usize, u16, u16)>
         )
     };
     let bad = magic != MAGIC
-        || version < VERSION_MIN_COMPAT
-        || version > VERSION
+        || !(VERSION_MIN_COMPAT..=VERSION).contains(&version)
         || cell_size != std::mem::size_of::<Cell>() as u32
         || region_len(cols as u16, rows as u16) > len;
     if bad {
@@ -737,7 +736,7 @@ fn compute_publish_hash(grid: &Grid, view_offset: u16, flags: u32) -> u64 {
     h = mix(h, cur_c as u64);
     h = mix(h, cur_r as u64);
     h = mix(h, view_offset as u64);
-    h = mix(h, grid.scroll_push_count() as u64);
+    h = mix(h, grid.scroll_push_count());
     h = mix(h, grid.scrollback_len() as u64);
     h = mix(h, cols as u64);
     h = mix(h, rows as u64);

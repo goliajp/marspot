@@ -129,9 +129,12 @@ fn one_pane_of_cells_and_glyphs_allocates_nothing() {
             });
         }
         let glyphs = g.len();
-        drop(g);
-        drop(l);
-        (rects, glyphs, scene.overflowed())
+        drop(g); // closes the run, which is what records it
+        let overflowed = {
+            let _ = &l; // the layer's borrow ends here, on purpose
+            scene.overflowed()
+        };
+        (rects, glyphs, overflowed)
     });
 
     assert_eq!(rects as usize, CELLS);

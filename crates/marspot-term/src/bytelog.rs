@@ -255,7 +255,7 @@ mod tests {
         // measuring, none in what is measured (2026-09-28).  The
         // assertion is the same: each tag's FIRST position, in
         // ascending chunk order, must ascend.
-        let mut first_at: Vec<Option<usize>> = vec![None; n_chunks as usize];
+        let mut first_at: Vec<Option<usize>> = vec![None; n_chunks];
         let bytes = text.as_bytes();
         for (at, _) in bytes.iter().enumerate().filter(|(_, b)| **b == b'<') {
             let Some(close) = bytes[at + 1..].iter().position(|b| *b == b'>') else {

@@ -37,3 +37,6 @@ flate2 = { version = "1.1", optional = true }
 bench-pty = []
 default = ["compress"]
 compress = ["dep:flate2"]
+
+[lints]
+workspace = true

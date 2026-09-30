@@ -68,7 +68,7 @@ impl Color {
     ///
     /// Accepts:
     /// - `#rgb`        — 3-digit shorthand, each nibble doubled
-    ///                   (so `#f0a` ≡ `#ff00aa`)
+    ///   (so `#f0a` ≡ `#ff00aa`)
     /// - `#rgba`       — 4-digit shorthand
     /// - `#rrggbb`     — full 6-digit, alpha = 1.0
     /// - `#rrggbbaa`   — full 8-digit, alpha = `aa / 255`

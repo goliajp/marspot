@@ -377,7 +377,7 @@ mod tests {
         touch(&tree.prev());
         std::fs::write(tree.current(), b"new").unwrap();
         std::fs::write(tree.prev(), b"old").unwrap();
-        assert_eq!(tree.rollback_to_prev().unwrap(), true);
+        assert!(tree.rollback_to_prev().unwrap());
         assert_eq!(std::fs::read(tree.current()).unwrap(), b"old");
         assert!(tree.root.join("quarantine").join("marspot-core").exists());
     }
@@ -387,7 +387,7 @@ mod tests {
         let (_d, tree) = temp_tree("marspot-core");
         touch(&tree.current());
         std::fs::write(tree.current(), b"new-but-broken").unwrap();
-        assert_eq!(tree.rollback_to_prev().unwrap(), false);
+        assert!(!tree.rollback_to_prev().unwrap());
         assert!(!tree.current().exists());
         let quar = tree.root.join("quarantine").join("marspot-core");
         assert!(quar.exists());

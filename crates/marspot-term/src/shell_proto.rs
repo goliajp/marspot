@@ -3223,10 +3223,11 @@ mod tests {
     /// current shape and a test that asks it to is testing nothing.
     fn old_style_key_frame(text: &str, window_id: u32) -> Vec<u8> {
         let t = text.as_bytes();
-        let mut out = Vec::new();
-        out.push(WireKeyState::Pressed as u8);
-        out.push(0);
-        out.push(WireLogicalKind::Char as u8);
+        let mut out = vec![
+            WireKeyState::Pressed as u8,
+            0,
+            WireLogicalKind::Char as u8,
+        ];
         out.push(0); // padding, before it meant anything
         out.extend_from_slice(&('a' as u32).to_le_bytes());
         out.extend_from_slice(&(t.len() as u16).to_le_bytes());

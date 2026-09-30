@@ -146,22 +146,22 @@ fn text_glyph_key(font_id: u32, glyph: CGGlyph, ct_font: &core_text::font::CTFon
     )
 }
 
-/// How wide a cell's glyph is drawn is decided by the width table
-/// alone — never by what happens to sit next to it.
-///
-/// There was a rule here that let a squeezed glyph spill into the cell
-/// on its right when that cell was blank (WezTerm's
-/// `WhenFollowedBySpace`).  It is gone: `①` came out full-size before a
-/// space and small before a character, so the *same* character changed
-/// size as the line around it was written, which reads as a rendering
-/// fault whichever size you preferred.  A cell now looks the way it
-/// looks because of what is in it.
-///
-/// The circled family is genuinely too wide for one cell — PingFang
-/// draws `①` 11.71 px against a 7.20 px cell — so one cell means
-/// scaled down, always.  Full size costs a second cell, which moves
-/// the wrap point; that is a decision with a real downside, so it is
-/// the settings panel's `appearance_circled_wide`, off by default.
+// How wide a cell's glyph is drawn is decided by the width table
+// alone — never by what happens to sit next to it.
+//
+// There was a rule here that let a squeezed glyph spill into the cell
+// on its right when that cell was blank (WezTerm's
+// `WhenFollowedBySpace`).  It is gone: `①` came out full-size before a
+// space and small before a character, so the *same* character changed
+// size as the line around it was written, which reads as a rendering
+// fault whichever size you preferred.  A cell now looks the way it
+// looks because of what is in it.
+//
+// The circled family is genuinely too wide for one cell — PingFang
+// draws `①` 11.71 px against a 7.20 px cell — so one cell means
+// scaled down, always.  Full size costs a second cell, which moves
+// the wrap point; that is a decision with a real downside, so it is
+// the settings panel's `appearance_circled_wide`, off by default.
 
 /// Like `resolve_cell_glyph`, but routes colour glyphs (Apple Color Emoji)
 /// to the colour (`BGRA8`) atlas and everything else to the mono (`R8`)
@@ -451,6 +451,10 @@ impl WindowRender {
     }
 
     /// The next frame for this window must clear rather than load.
+    /// Call from anywhere the visible BG region shape is about to
+    /// change (layout mode switch, sidebar toggle, resize, surface
+    /// reattach).  See the `clear_bg_required` field doc for the race
+    /// that motivates the Load-default for steady-state frames.
     pub fn mark_bg_clear_required(&mut self) {
         self.clear_bg_required = true;
     }
@@ -1274,13 +1278,6 @@ impl MetalRenderer {
         self.hover_chrome_btn = h;
     }
 
-    /// Mark the next IOSurface-target render as needing a hard Clear.
-    /// Call from anywhere the visible BG region SHAPE is about to change
-    /// (layout mode switch, sidebar toggle, resize, surface reattach).
-    /// See `clear_bg_required` field doc for the race that motivates
-    /// the Load-default for steady-state frames.
-
-
     /// Reserve a top strip (physical pixels) above the grid so window
     /// chrome (traffic lights, focused-session status) doesn't paint
     /// over terminal content. Single-session callers (mcli) set this
@@ -1739,7 +1736,6 @@ impl MetalRenderer {
                     chrome_cell_w, chrome_cell_h, chrome_ascent,
                     &measure,
                 );
-                drop(measure);
                 encode_canvas_into(
                     &canvas, &texture, &cmd,
                     ui_pipeline, fg_pipeline, fg_color_pipeline, fg_sampler,
@@ -2001,7 +1997,6 @@ impl MetalRenderer {
                     chrome_cell_w, chrome_cell_h, chrome_ascent,
                     &measure,
                 );
-                drop(measure);
                 encode_canvas_into(
                     &canvas, target, &cmd,
                     ui_pipeline, fg_pipeline, fg_color_pipeline, fg_sampler,
@@ -6776,9 +6771,9 @@ pub fn encode_canvas_into(
         unsafe {
             let color = pass.colorAttachments().objectAtIndexedSubscript(0);
             color.setTexture(Some(target));
-            if first_pass && clear_color.is_some() {
+            if let (true, Some(c)) = (first_pass, clear_color) {
                 color.setLoadAction(MTLLoadAction::Clear);
-                color.setClearColor(clear_color.unwrap());
+                color.setClearColor(c);
             } else {
                 color.setLoadAction(MTLLoadAction::Load);
             }
@@ -6849,13 +6844,13 @@ pub fn encode_canvas_into(
         enc.endEncoding();
     }
 
-    if first_pass && clear_color.is_some() {
+    if let (true, Some(cc)) = (first_pass, clear_color) {
         let pass = { MTLRenderPassDescriptor::new() };
         unsafe {
             let color = pass.colorAttachments().objectAtIndexedSubscript(0);
             color.setTexture(Some(target));
             color.setLoadAction(MTLLoadAction::Clear);
-            color.setClearColor(clear_color.unwrap());
+            color.setClearColor(cc);
             color.setStoreAction(MTLStoreAction::Store);
         }
         if let Some(enc) = cmd.renderCommandEncoderWithDescriptor(&pass) {
@@ -7160,7 +7155,6 @@ mod tests {
             24.0, // chrome_ascent
             &measure,
         );
-        drop(measure);
         // ui_font = false matches the live dev panel: chrome stays
         // Monaco mono by default, the showcase rows opt INTO SF Pro
         // via `.ui()` per text run.  This snapshot is therefore
@@ -8375,7 +8369,6 @@ mod tests {
             24.0,
             &measure,
         );
-        drop(measure);
         let bytes = renderer
             .render_canvas_to_bitmap(w_px, h_px, &canvas, 16.0, 32.0, 24.0, false)
             .expect("canvas render");
@@ -8450,7 +8443,6 @@ mod tests {
             24.0,
             &measure,
         );
-        drop(measure);
         let bytes = renderer
             .render_canvas_to_bitmap(w_px, h_px, &canvas, 16.0, 32.0, 24.0, false)
             .expect("canvas render");
@@ -8525,7 +8517,6 @@ mod tests {
             24.0,
             &measure,
         );
-        drop(measure);
         let bytes = renderer
             .render_canvas_to_bitmap(w_px, h_px, &canvas, 16.0, 32.0, 24.0, false)
             .expect("canvas render");
@@ -9036,7 +9027,7 @@ mod tests {
             scrims.iter().any(|a| (*a - DRAG_SOURCE_SCRIM).abs() < 1e-6),
             "a dragged pane wears the drag scrim even while focused, got {scrims:?}"
         );
-        assert!(DRAG_SOURCE_SCRIM > EMPTY_SEAT_SCRIM);
+        const _: () = assert!(DRAG_SOURCE_SCRIM > EMPTY_SEAT_SCRIM);
     }
 
 
@@ -9055,11 +9046,11 @@ mod tests {
         assert_eq!(attention_scrim(false, 0), UNFOCUSED_SCRIM);
         assert_eq!(attention_scrim(false, 1), RESTING_SCRIM);
         assert_eq!(attention_scrim(false, 2), PARKED_SCRIM);
-        assert!(
+        const _: () = assert!(
             UNFOCUSED_SCRIM < RESTING_SCRIM && RESTING_SCRIM < PARKED_SCRIM,
             "the ladder has to be monotonic or it says nothing"
         );
-        assert!(
+        const _: () = assert!(
             PARKED_SCRIM > UNFOCUSED_SCRIM,
             "a pane whose program is gone has to read further away than \
              one that is merely not the focused pane"

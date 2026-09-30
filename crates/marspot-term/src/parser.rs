@@ -69,6 +69,12 @@ pub struct Parser {
     utf8_codepoint: u32,
 }
 
+impl Default for Parser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Parser {
     pub fn new() -> Self {
         Self {
@@ -637,7 +643,7 @@ mod tests {
     fn dcs_sos_pm_payloads_are_consumed_and_ground_resumes() {
         // DCS (ESC P), SOS (ESC X) and PM (ESC ^) share the state.  Each
         // swallows its payload, and ordinary text after the ST prints.
-        for intro in [b'P', b'X', b'^'] {
+        for intro in *b"PX^" {
             let mut bytes = vec![0x1B, intro];
             bytes.extend_from_slice(b"junk;1;2\x1B\\ok");
             assert_eq!(

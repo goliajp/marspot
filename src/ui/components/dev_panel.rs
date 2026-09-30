@@ -106,25 +106,25 @@ pub fn hit_test(
     None
 }
 
-/// ## DevPanel 层级模型(2026-06-25 重写)
-///
-/// 3-level strict hierarchy:
-///   DevPanel(root)
-///     └── Tab(top horizontal strip,e.g. UI / Font / Render / Sessions)
-///         └── SubGroup(left menu 标签头,e.g. Foundation / Tokens / Primitives)
-///             └── Item(可点的内容入口,e.g. Colors / Rects / Font v5)
-///
-/// 之前 `Tokens` / `Components` 是平级 top Tab,但二者都是 UI 系统
-/// 内部的产物 — 现在降级成 UI Tab 内的 SubGroup.Font v5 之前在
-/// UI/Items 里挤着,现独立成 Font Tab 因为字体系统是与 UI 系统
-/// 平行的 concern(影响 PTY render path,不只是 chrome).
-///
-/// `state.active_tab` 是 Tab id;`state.active_section` 是 Item id
-/// (跨 Tab 全局唯一,Item id 编码:`(tab_id << 16) | (subgroup_id << 8) | item_id`).
-///
-/// 实际 SECTION_* 常量为了 readability 直接列出有意义的数值;
-/// SubGroup id 都是 `(tab_id << 16) | (subgroup_id << 8)`(item_id=0
-/// 标示"SubGroup 头",不直接 select).
+// ## DevPanel 层级模型(2026-06-25 重写)
+//
+// 3-level strict hierarchy:
+//   DevPanel(root)
+//     └── Tab(top horizontal strip,e.g. UI / Font / Render / Sessions)
+//         └── SubGroup(left menu 标签头,e.g. Foundation / Tokens / Primitives)
+//             └── Item(可点的内容入口,e.g. Colors / Rects / Font v5)
+//
+// 之前 `Tokens` / `Components` 是平级 top Tab,但二者都是 UI 系统
+// 内部的产物 — 现在降级成 UI Tab 内的 SubGroup.Font v5 之前在
+// UI/Items 里挤着,现独立成 Font Tab 因为字体系统是与 UI 系统
+// 平行的 concern(影响 PTY render path,不只是 chrome).
+//
+// `state.active_tab` 是 Tab id;`state.active_section` 是 Item id
+// (跨 Tab 全局唯一,Item id 编码:`(tab_id << 16) | (subgroup_id << 8) | item_id`).
+//
+// 实际 SECTION_* 常量为了 readability 直接列出有意义的数值;
+// SubGroup id 都是 `(tab_id << 16) | (subgroup_id << 8)`(item_id=0
+// 标示"SubGroup 头",不直接 select).
 
 // ──────────────────── Top Tab ids ────────────────────
 pub const TAB_UI: usize        = 0x00;

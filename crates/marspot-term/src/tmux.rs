@@ -131,23 +131,23 @@ impl Parser {
         if let Some(cmd) = self.block {
             if line.starts_with(b"%end ") || line.starts_with(b"%error ") {
                 let is_error = line.starts_with(b"%error ");
-                if let Some(end_cmd) = parse_block_marker(&line) {
-                    if end_cmd == cmd {
-                        let output = std::mem::take(&mut self.block_buf);
-                        if is_error {
-                            out.push(Event::CommandError {
-                                cmd_number: cmd,
-                                output,
-                            });
-                        } else {
-                            out.push(Event::End {
-                                cmd_number: cmd,
-                                output,
-                            });
-                        }
-                        self.block = None;
-                        return;
+                if let Some(end_cmd) = parse_block_marker(&line)
+                    && end_cmd == cmd
+                {
+                    let output = std::mem::take(&mut self.block_buf);
+                    if is_error {
+                        out.push(Event::CommandError {
+                            cmd_number: cmd,
+                            output,
+                        });
+                    } else {
+                        out.push(Event::End {
+                            cmd_number: cmd,
+                            output,
+                        });
                     }
+                    self.block = None;
+                    return;
                 }
                 // Mismatched / malformed: drop the block, surface as Unknown.
                 let dropped = std::mem::take(&mut self.block_buf);

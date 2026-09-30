@@ -136,7 +136,7 @@ fn decide_break(p: ClusterProps, n: ClusterProps, state: &ClusterState) -> bool 
         // this run *including* `prev`.  GB12/13 say "break between two
         // RIs iff the count of RIs in the run ending at `prev` is
         // even" — i.e. an odd count means this RI joins the previous.
-        return state.ri_count % 2 == 0;
+        return state.ri_count.is_multiple_of(2);
     }
 
     // GB999: default — break.
@@ -640,11 +640,7 @@ mod tests {
             let mut string = String::new();
             let mut expected_boundaries: Vec<usize> = Vec::new();
             let mut byte_pos = 0usize;
-            loop {
-                let delim = match tokens.next() {
-                    Some(t) => t,
-                    None => break,
-                };
+            while let Some(delim) = tokens.next() {
                 match delim {
                     "÷" => expected_boundaries.push(byte_pos),
                     "×" => {}

@@ -9,9 +9,13 @@
 //!
 //! Layout algorithm + hit-test land in subsequent commits.
 
+// `view::view` holds the `View` enum itself; the sibling modules are the
+// algorithms over it.  Renaming either half would read worse than the
+// repetition.
+#[allow(clippy::module_inception)]
+pub mod view;
 pub mod types;
 pub mod type_scale;
-pub mod view;
 pub mod scroll;
 pub mod state;
 pub mod lazy;

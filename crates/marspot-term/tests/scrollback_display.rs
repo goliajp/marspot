@@ -138,7 +138,7 @@ fn scenario1_scroll_down_content_visible() {
     let cap = term.grid().scrollback_len() as u16;
     for vo in 0..=cap.min(40) {
         let v = view_at(&term, vo);
-        for r in 0..ROWS as usize - 1 {
+        for (r, row) in v.iter().enumerate().take(ROWS as usize - 1) {
             // Skip viewport rows whose absolute row index is past the
             // total content (top of the deepest scroll = blank grid
             // state before first push).
@@ -146,7 +146,7 @@ fn scenario1_scroll_down_content_visible() {
                 continue;
             }
             assert!(
-                !row_is_blank(&v[r]),
+                !row_is_blank(row),
                 "view_offset={vo} row={r} unexpectedly blank: {:?}",
                 v[r]
             );
@@ -282,8 +282,7 @@ fn scenario4_torn_write_recovery() {
     for vo in 1..=surviving.min(20) {
         let v = view_at(&term, vo);
         let sb_rows_in_view = (vo as usize).min(ROWS as usize);
-        for r in 0..sb_rows_in_view {
-            let row = &v[r];
+        for (r, row) in v.iter().enumerate().take(sb_rows_in_view) {
             let is_blank_or_marker = row_is_blank(row) || row.contains('T');
             assert!(
                 is_blank_or_marker,

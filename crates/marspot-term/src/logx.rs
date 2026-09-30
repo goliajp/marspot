@@ -338,7 +338,7 @@ pub fn sample_tick(counter: &AtomicU64, every_n: u64) -> bool {
     // SeqCst — the increment ordering across threads doesn't matter,
     // we just want each call to see a monotonically advancing value.
     let prev = counter.fetch_add(1, Ordering::Relaxed);
-    prev % n == 0
+    prev.is_multiple_of(n)
 }
 
 /// Re-export for the sampled macros' expansion site.
@@ -496,18 +496,25 @@ mod tests {
         assert_eq!(iso8601_ms(0), "1970-01-01T00:00:00.000Z");
     }
 
+    const SEC: u64 = 1_000;
+    const MIN: u64 = 60 * SEC;
+    const HOUR: u64 = 60 * MIN;
+    const DAY: u64 = 24 * HOUR;
+    /// 2024-01-01T00:00:00.000Z, in seconds.
+    const Y2024: u64 = 1_704_067_200;
+
     #[test]
     fn iso8601_matches_known_timestamps() {
-        // 2024-01-01T00:00:00.000Z = 1704067200 s = 19724 days (54×365 + 13 leap).
-        assert_eq!(iso8601_ms(1704067200_000), "2024-01-01T00:00:00.000Z");
+        // 1704067200 s = 19724 days (54×365 + 13 leap).
+        assert_eq!(iso8601_ms(Y2024 * SEC), "2024-01-01T00:00:00.000Z");
         // 2024-02-29 (leap day) at 12:00:00.500Z.
         assert_eq!(
-            iso8601_ms(1704067200_000 + 59 * 86400_000 + 12 * 3600_000 + 500),
+            iso8601_ms(Y2024 * SEC + 59 * DAY + 12 * HOUR + 500),
             "2024-02-29T12:00:00.500Z"
         );
         // 2026-12-31T23:59:59.999Z — multi-year + leap endpoint sanity.
         // Offset = 366 (2024 leap) + 365 (2025) + 364 (Jan 1 → Dec 31 2026) = 1095 days.
-        let ts = 1704067200_000_u64 + 1095 * 86400_000 + 23 * 3600_000 + 59 * 60_000 + 59_000 + 999;
+        let ts = Y2024 * SEC + 1095 * DAY + 23 * HOUR + 59 * MIN + 59 * SEC + 999;
         assert_eq!(iso8601_ms(ts), "2026-12-31T23:59:59.999Z");
     }
 
