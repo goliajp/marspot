@@ -85,6 +85,12 @@ pub trait OpEnv: Send {
     /// question could not be asked: no session dir, no region, or a
     /// region written by something else.
     fn pane_modes(&self, sid: u64) -> Option<(u64, u32)>;
+    /// The pane's screen as text, the way `--read` shows it.
+    ///
+    /// Rebuilt by replaying the tail of the bytelog, which is not
+    /// cheap — asked once, after a return has been sent, to find out
+    /// whether it did anything.
+    fn pane_screen(&self, sid: u64) -> Option<String>;
 }
 
 /// Is `needle` anywhere in `haystack`?
@@ -523,6 +529,32 @@ const SUBMIT_ECHO_GRACE: Duration = Duration::from_millis(8_000);
 /// that carried it has finished.
 const SUBMIT_QUIET: Duration = Duration::from_millis(250);
 
+/// How long to let the composer repaint before asking whether the
+/// return landed.
+const SUBMIT_VERIFY_AFTER: Duration = Duration::from_millis(600);
+/// How many returns to send before leaving the line for the person.
+/// Three is not a retry loop, it is "the first one was eaten, and so
+/// was the second".
+const SUBMIT_MAX_RETURNS: u8 = 3;
+
+/// Is `line` still sitting on the pane's prompt, unsent?
+///
+/// claude's interface marks both the composer and every message
+/// already sent with the same glyph, so the question is not "is the
+/// text on screen" — after a successful submit it is, in the
+/// transcript.  It is "is it on the LAST prompt", which is the
+/// composer.  That is the rule that told the five panes of
+/// 2026-09-30 apart by hand, and it is the one used here.
+fn line_is_still_in_the_composer(screen: &str, line: &str) -> bool {
+    let needle = std::str::from_utf8(submit_needle(line)).unwrap_or(line);
+    screen
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with('\u{276f}') || l.trim_start().starts_with("> "))
+        .map(|last_prompt| last_prompt.contains(needle))
+        .unwrap_or(false)
+}
+
 /// The piece of a submitted line to look for coming back.
 ///
 /// Short, and taken from the front: the composer wraps a long line, so
@@ -547,6 +579,9 @@ pub struct SubmitState {
     /// Set once the pasted text has been seen in the pane's output.
     /// Until then there is nothing to be quiet after.
     showed_at: Option<SystemTime>,
+    /// When the return went out, and how many have.
+    returned_at: Option<SystemTime>,
+    returns: u8,
 }
 
 const SPINNER_FRAME: Duration = Duration::from_millis(125);
@@ -905,6 +940,8 @@ impl OpRunner {
                             seen_len: base,
                             changed_at: now,
                             showed_at: None,
+                            returned_at: None,
+                            returns: 0,
                         });
                     }
                     return false;
@@ -915,6 +952,59 @@ impl OpRunner {
                 // repaints by itself — and it was what let a return go
                 // out 26 ms behind the paste and land as a newline.
                 let now = self.env.now();
+
+                // A return has gone out — did it do anything?
+                //
+                // Every gate before this one is a guess about when the
+                // composer is ready, and three of them have been wrong.
+                // This is not a guess: it reads the pane and looks for
+                // the line still sitting on the prompt.  If it is
+                // there, the return became a newline and another one
+                // is sent.
+                if let Some(at) = st.returned_at {
+                    if now.duration_since(at).unwrap_or_default() < SUBMIT_VERIFY_AFTER {
+                        return false;
+                    }
+                    let still = self
+                        .env
+                        .pane_screen(sid)
+                        .map(|screen| line_is_still_in_the_composer(&screen, line))
+                        .unwrap_or(false);
+                    if !still {
+                        host.log(
+                            LogLevel::Info,
+                            &format!("{}.landed", self.op.name),
+                            &format!("sid={sid} after {} return(s)", st.returns),
+                        );
+                        return true;
+                    }
+                    if st.returns >= SUBMIT_MAX_RETURNS {
+                        host.log(
+                            LogLevel::Warn,
+                            &format!("{}.stuck", self.op.name),
+                            &format!(
+                                "sid={sid} the line is still in the composer after {} returns; \
+                                 leaving it for the person",
+                                st.returns
+                            ),
+                        );
+                        return true;
+                    }
+                    host.log(
+                        LogLevel::Info,
+                        &format!("{}.again", self.op.name),
+                        &format!("sid={sid} the return became a newline; sending another"),
+                    );
+                    if self.env.io().send(sid, b"\r").is_ok()
+                        && let Some(StepKind::Submit { pasted: Some(p), .. }) =
+                            self.op.steps.get_mut(self.at).map(|s| &mut s.kind)
+                    {
+                        p.returned_at = Some(now);
+                        p.returns += 1;
+                    }
+                    return false;
+                }
+
                 let len = self.env.output_len(sid);
                 let waited = now.duration_since(st.sent_at).unwrap_or_default();
                 // The grace is checked before anything else: a pane
@@ -968,8 +1058,16 @@ impl OpRunner {
                         host,
                         OpOutcome::Failed { step: self.at, label: step.label, err: e.to_string() },
                     );
+                    return true;
                 }
-                true
+                if let Some(StepKind::Submit { pasted: Some(p), .. }) =
+                    self.op.steps.get_mut(self.at).map(|s| &mut s.kind)
+                {
+                    p.returned_at = Some(now);
+                    p.returns += 1;
+                    p.showed_at = showed_at;
+                }
+                false
             }
             StepKind::AwaitQuiet { still, min_bytes } => {
                 let len = self.env.output_len(sid);
@@ -1375,6 +1473,13 @@ impl OpEnv for RealEnv {
         let entry = marspot_term::session_registry::read_session_entry(sid).ok()?;
         let name = std::ffi::CString::new(entry.shm_name).ok()?;
         marspot_term::grid_shm::peek(&name).ok()
+    }
+    fn pane_screen(&self, sid: u64) -> Option<String> {
+        let entry = marspot_term::session_registry::read_session_entry(sid).ok()?;
+        let bytelog = marspot_term::paths::sessions_dir()
+            .join(sid.to_string())
+            .join("bytelog");
+        marspot::pane_read::screen_text(&bytelog, entry.cols, entry.rows, 0).ok()
     }
 }
 
@@ -1866,6 +1971,8 @@ mod tests {
         /// `(seq, flags)` the pane's region would report, or `None`
         /// for a pane whose region cannot be read.
         modes: Mutex<Option<(u64, u32)>>,
+        /// What the pane's screen would show.
+        screen: Mutex<String>,
         /// What the pane has drawn lately.
         tail: Mutex<Vec<u8>>,
     }
@@ -1908,6 +2015,9 @@ mod tests {
         }
         fn output_tail(&self, _sid: u64, _bytes: usize) -> Vec<u8> {
             self.state.tail.lock().unwrap().clone()
+        }
+        fn pane_screen(&self, _sid: u64) -> Option<String> {
+            Some(self.state.screen.lock().unwrap().clone())
         }
         fn pane_modes(&self, _sid: u64) -> Option<(u64, u32)> {
             *self.state.modes.lock().unwrap()
@@ -2065,7 +2175,90 @@ mod tests {
         let sent = state.sent.lock().unwrap().clone();
         assert_eq!(sent.len(), 2, "{sent:?}");
         assert_eq!(sent[1], b"\r".to_vec(), "and it is a return by itself");
+
+        // The composer came back empty, so the return landed.
+        *state.screen.lock().unwrap() = "\u{276f}\n".to_string();
+        run(&mut r, &host, &state, SUBMIT_VERIFY_AFTER.as_millis() as u64 + 64);
         assert!(*host.ended.lock().unwrap());
+        assert_eq!(state.sent.lock().unwrap().len(), 2, "one return was enough");
+    }
+
+    /// A return that became a newline gets another one.
+    ///
+    /// Every gate before this is a guess about when the composer is
+    /// ready, and three of them have been wrong in a row.  This one
+    /// reads the pane: if the line is still on the last prompt, the
+    /// return did not submit it.
+    #[test]
+    fn a_return_that_was_eaten_is_sent_again() {
+        use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE));
+        let mut r = OpRunner::new(
+            PtyOp::new("test.submit")
+                .step(Step::submit("carry on").timeout(Duration::from_secs(60))),
+            env,
+        );
+        // Paste, show the text, settle, first return.
+        run(&mut r, &host, &state, 32);
+        *state.tail.lock().unwrap() = b"\x1b[2K> carry on".to_vec();
+        *state.out_len.lock().unwrap() = 300;
+        run(&mut r, &host, &state, SUBMIT_QUIET.as_millis() as u64 + 96);
+        assert_eq!(state.sent.lock().unwrap().len(), 2, "the first return");
+
+        // …and the line is still sitting there.
+        *state.screen.lock().unwrap() = "some output\n\u{276f} carry on\n".to_string();
+        run(&mut r, &host, &state, SUBMIT_VERIFY_AFTER.as_millis() as u64 + 96);
+        assert_eq!(state.sent.lock().unwrap().len(), 3, "a second return goes out");
+
+        // Now it lands.
+        *state.screen.lock().unwrap() = "\u{276f} carry on\nsome output\n\u{276f}\n".to_string();
+        run(&mut r, &host, &state, SUBMIT_VERIFY_AFTER.as_millis() as u64 + 96);
+        assert!(*host.ended.lock().unwrap(), "the last prompt is empty, so it went");
+        assert_eq!(state.sent.lock().unwrap().len(), 3, "and no more are sent");
+    }
+
+    /// Three returns, then it is the person's.
+    #[test]
+    fn it_stops_after_three_returns_rather_than_hammering() {
+        use marspot_term::grid_shm::FLAG_BRACKETED_PASTE;
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, FLAG_BRACKETED_PASTE));
+        let mut r = OpRunner::new(
+            PtyOp::new("test.submit")
+                .step(Step::submit("carry on").timeout(Duration::from_secs(120))),
+            env,
+        );
+        run(&mut r, &host, &state, 32);
+        *state.tail.lock().unwrap() = b"> carry on".to_vec();
+        *state.out_len.lock().unwrap() = 300;
+        // Never leaves the composer, whatever is sent.
+        *state.screen.lock().unwrap() = "\u{276f} carry on\n".to_string();
+        run(&mut r, &host, &state, 20_000);
+        let sent = state.sent.lock().unwrap().clone();
+        assert_eq!(
+            sent.len(),
+            1 + SUBMIT_MAX_RETURNS as usize,
+            "one paste and three returns, then stop: {sent:?}"
+        );
+        assert!(*host.ended.lock().unwrap(), "and the op ends rather than hanging");
+    }
+
+    /// A message already sent is not a message still in the composer.
+    ///
+    /// The interface marks both with the same glyph, so "the text is on
+    /// screen" would say every successful submit had failed.  The rule
+    /// is the LAST prompt, which is the composer.
+    #[test]
+    fn a_sent_message_is_not_mistaken_for_a_stuck_one() {
+        let sent = "\u{276f} carry on\n  …a reply…\n\u{276f}\n";
+        assert!(!line_is_still_in_the_composer(sent, "carry on"));
+
+        let stuck = "  …a reply…\n\u{276f} carry on\n";
+        assert!(line_is_still_in_the_composer(stuck, "carry on"));
+
+        // No prompt on screen at all is not a stuck line.
+        assert!(!line_is_still_in_the_composer("just output\n", "carry on"));
     }
 
     /// A program that never gets to it still gets its return.
