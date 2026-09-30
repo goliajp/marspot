@@ -191,6 +191,101 @@ impl FontRegistry {
 
 /// Shared font handling for both renderers.  Owns the font registry,
 /// the glyph cache, and the precomputed cell metrics.
+/// Advances for UI text, keyed without allocating on a hit.
+///
+/// Chrome lays out the same strings every frame, and measuring one
+/// used to build a CoreText line each time — two allocations per text
+/// node, every frame, forever.  A `HashMap<(String, …), f64>` would
+/// have replaced that with a `to_owned()` per lookup, which is the
+/// same problem wearing a cache's clothes.  So the map is keyed by a
+/// hash of the borrowed parts, and the entry carries the text back so
+/// a collision is caught rather than silently answered.
+///
+/// Bounded, because nothing here is allowed to grow with uptime: at
+/// the cap the least recently used entry goes.  Chrome's working set
+/// is a few hundred strings, so the cap is reached only by something
+/// unusual, and then it behaves like a cache instead of a leak.
+struct UiMeasureCache {
+    map: FxHashMap<u64, UiMeasureEntry>,
+    tick: u64,
+    cap: usize,
+    hits: u64,
+    misses: u64,
+}
+
+struct UiMeasureEntry {
+    text: Box<str>,
+    weight_q: u16,
+    opts_bits: u8,
+    size_q: u16,
+    advance: f64,
+    last_used: u64,
+}
+
+impl Default for UiMeasureCache {
+    fn default() -> Self {
+        Self { map: FxHashMap::default(), tick: 0, cap: 2048, hits: 0, misses: 0 }
+    }
+}
+
+impl UiMeasureCache {
+    fn hash(text: &str, weight_q: u16, opts_bits: u8, size_q: u16) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = marspot_term::fast_hash::FxHasher::default();
+        text.hash(&mut h);
+        weight_q.hash(&mut h);
+        opts_bits.hash(&mut h);
+        size_q.hash(&mut h);
+        h.finish()
+    }
+
+    fn get(&mut self, text: &str, weight_q: u16, opts_bits: u8, size_q: u16) -> Option<f64> {
+        self.tick += 1;
+        let now = self.tick;
+        let k = Self::hash(text, weight_q, opts_bits, size_q);
+        let e = self.map.get_mut(&k)?;
+        // Two different strings can land on one hash; answering with
+        // the wrong advance would be a mis-measured line nobody could
+        // trace back to here.
+        if &*e.text != text || e.weight_q != weight_q || e.opts_bits != opts_bits
+            || e.size_q != size_q
+        {
+            self.misses += 1;
+            return None;
+        }
+        e.last_used = now;
+        self.hits += 1;
+        Some(e.advance)
+    }
+
+    fn put(&mut self, text: &str, weight_q: u16, opts_bits: u8, size_q: u16, advance: f64) {
+        self.misses += 1;
+        if self.map.len() >= self.cap
+            && let Some(&oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(k, _)| k)
+        {
+            self.map.remove(&oldest);
+        }
+        let k = Self::hash(text, weight_q, opts_bits, size_q);
+        self.tick += 1;
+        let last_used = self.tick;
+        self.map.insert(
+            k,
+            UiMeasureEntry {
+                text: text.into(),
+                weight_q,
+                opts_bits,
+                size_q,
+                advance,
+                last_used,
+            },
+        );
+    }
+}
+
 pub struct FontCache {
     fonts: FontRegistry,
     /// `(codepoint, style)` → `((font_idx, glyph), last_used)`.  Style is
@@ -233,6 +328,14 @@ pub struct FontCache {
     ///
     /// font (= same as base) when the system UI font fails to load.
     pub ui_font_idx: usize,
+    /// Advances already measured, so a steady frame does not build a
+    /// CoreText line per text node all over again.
+    ui_measure: UiMeasureCache,
+    /// Interned SF Pro variants by `(weight bucket, size_q)`.  The
+    /// variant store is keyed by name, and building that name is a
+    /// `format!` — which the lookup would then pay on every hit, once
+    /// per text node per frame.
+    ui_variants: FxHashMap<u32, usize>,
     /// UI font metrics — width of '0' glyph as approximate cell_w;
     /// ascent + descent + leading for cell_h.  Proportional fonts
     /// have variable advance, so this is an approximation used by
@@ -385,6 +488,8 @@ impl FontCache {
             cell_h,
             ascent,
             ui_font_idx,
+            ui_measure: UiMeasureCache::default(),
+            ui_variants: FxHashMap::default(),
             ui_cell_w,
             ui_cell_h,
             ui_ascent,
@@ -554,11 +659,24 @@ impl FontCache {
         if self.ui_font_idx == 0 || text.is_empty() {
             return 0.0;
         }
+        let opts_bits = crate::ui::view::pack_shape_opts(opts);
+        let size_q = (size_pt * 4.0).round() as u16;
+        if let Some(a) = self.ui_measure.get(text, weight_q, opts_bits, size_q) {
+            return a;
+        }
         let base_idx = self
             .intern_ui_weighted_at_size(weight_q, size_pt)
             .unwrap_or(self.ui_font_idx);
         let base_font = self.fonts.fonts[base_idx].clone();
-        crate::font_shape::measure_line(text, &base_font, opts)
+        let advance = crate::font_shape::measure_line(text, &base_font, opts);
+        self.ui_measure.put(text, weight_q, opts_bits, size_q, advance);
+        advance
+    }
+
+    /// Hits and misses on the advance cache, for whoever is measuring
+    /// whether a frame still allocates.
+    pub fn ui_measure_stats(&self) -> (u64, u64) {
+        (self.ui_measure.hits, self.ui_measure.misses)
     }
 
     /// Phase 10c — chrome line-height in physical pixels for the
@@ -712,8 +830,13 @@ impl FontCache {
         if bucket == 400 && size_q == base_size_q {
             return Some(self.ui_font_idx);
         }
+        let variant_key = ((bucket as u32) << 16) | size_q as u32;
+        if let Some(&idx) = self.ui_variants.get(&variant_key) {
+            return Some(idx);
+        }
         let unique_key = format!("__marspot_ui@w{}@s{}", bucket, size_q);
         if let Some(&idx) = self.fonts.by_name.get(&unique_key) {
+            self.ui_variants.insert(variant_key, idx);
             return Some(idx);
         }
         let base = self.fonts.fonts[self.ui_font_idx].clone();
@@ -728,7 +851,9 @@ impl FontCache {
         // Same string bold looks proportional" symptom.
         let weight_ct = css_weight_to_ct_trait(bucket);
         let weighted = build_weight_variant(&base, size_pt, weight_ct)?;
-        Some(self.fonts.intern_with_key(unique_key, weighted))
+        let idx = self.fonts.intern_with_key(unique_key, weighted);
+        self.ui_variants.insert(variant_key, idx);
+        Some(idx)
     }
 
     /// Phase 3 — chrome ascent + cell height.  Identical to the PTY
