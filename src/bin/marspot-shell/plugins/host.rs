@@ -523,11 +523,16 @@ impl PluginHost for ShellPluginHost {
     /// override, claudecode's init failed permission every install
     /// because the trait default fired no-op and `active_plugin`
     /// stayed None.
-    fn set_active_plugin(&self, name: &'static str, permissions: PermissionSet) {
+    fn set_active_plugin(
+        &self,
+        _who: &crate::plugins::dispatch::Dispatching,
+        name: &'static str,
+        permissions: PermissionSet,
+    ) {
         *self.active_plugin.lock().unwrap() = Some(ActivePlugin { name, permissions });
     }
 
-    fn clear_active_plugin(&self) {
+    fn clear_active_plugin(&self, _who: &crate::plugins::dispatch::Dispatching) {
         *self.active_plugin.lock().unwrap() = None;
     }
 
@@ -692,6 +697,12 @@ impl PluginHost for ShellPluginHost {
 #[cfg(test)]
 mod knock_tests {
     use super::*;
+    /// Run as a plugin would: through the one wrapper the registry
+    /// uses, so the test cannot set up a state production cannot.
+    fn as_plugin<R>(host: &ShellPluginHost, f: impl FnOnce() -> R) -> R {
+        crate::plugins::dispatch::with(host, "t", PermissionSet::SET_STATUS_LINE, f)
+    }
+
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -713,10 +724,8 @@ mod knock_tests {
         let (host, knocks) = host_with_counter();
         let (tx, rx) = std::sync::mpsc::channel();
         host.attach_pty_op_tx(tx);
-        host.set_active_plugin("t", PermissionSet::SET_STATUS_LINE);
 
-        host.submit_pty_op(7, crate::plugins::pty_op::PtyOp::new("t"))
-            .expect("queued");
+        as_plugin(&host, || host.submit_pty_op(7, crate::plugins::pty_op::PtyOp::new("t")) .expect("queued"));
         assert_eq!(knocks.load(Ordering::Relaxed), 1);
         assert!(rx.try_recv().is_ok(), "and it really went on the queue");
     }
@@ -726,8 +735,7 @@ mod knock_tests {
         let (host, knocks) = host_with_counter();
         let (tx, _rx) = std::sync::mpsc::channel();
         host.attach_pane_badge_tx(tx);
-        host.set_active_plugin("t", PermissionSet::SET_STATUS_LINE);
-        let _ = host.set_pane_badge(7, "x");
+        as_plugin(&host, || { let _ = host.set_pane_badge(7, "x"); });
         assert_eq!(knocks.load(Ordering::Relaxed), 1);
     }
 
@@ -737,21 +745,24 @@ mod knock_tests {
         let host = ShellPluginHost::new();
         let (tx, _rx) = std::sync::mpsc::channel();
         host.attach_pty_op_tx(tx);
-        host.set_active_plugin("t", PermissionSet::SET_STATUS_LINE);
-        host.submit_pty_op(7, crate::plugins::pty_op::PtyOp::new("t"))
-            .expect("queued without a hook");
+        as_plugin(&host, || host.submit_pty_op(7, crate::plugins::pty_op::PtyOp::new("t")) .expect("queued without a hook"));
     }
 }
 
 #[cfg(test)]
 mod declaration_tests {
     use super::*;
+    /// Run as a plugin would: through the one wrapper the registry
+    /// uses, so the test cannot set up a state production cannot.
+    fn as_plugin<R>(host: &ShellPluginHost, f: impl FnOnce() -> R) -> R {
+        crate::plugins::dispatch::with(host, "t", PermissionSet::SET_STATUS_LINE, f)
+    }
+
 
     fn wired() -> (ShellPluginHost, std::sync::mpsc::Receiver<PaneRenderMarkupUpdate>) {
         let host = ShellPluginHost::new();
         let (tx, rx) = std::sync::mpsc::channel();
         host.attach_pane_render_markup_tx(tx);
-        host.set_active_plugin("t", PermissionSet::SET_STATUS_LINE);
         (host, rx)
     }
 
@@ -762,9 +773,9 @@ mod declaration_tests {
     #[test]
     fn saying_the_same_thing_again_sends_nothing() {
         let (host, rx) = wired();
-        host.set_pane_render_markup(7, false).unwrap();
-        host.set_pane_render_markup(7, false).unwrap();
-        host.set_pane_render_markup(7, false).unwrap();
+        as_plugin(&host, || host.set_pane_render_markup(7, false).unwrap());
+        as_plugin(&host, || host.set_pane_render_markup(7, false).unwrap());
+        as_plugin(&host, || host.set_pane_render_markup(7, false).unwrap());
         assert!(rx.try_recv().is_ok(), "the first one goes");
         assert!(rx.try_recv().is_err(), "and the repeats do not");
     }
@@ -772,17 +783,17 @@ mod declaration_tests {
     #[test]
     fn changing_it_back_is_news_again() {
         let (host, rx) = wired();
-        host.set_pane_render_markup(7, false).unwrap();
-        host.set_pane_render_markup(7, true).unwrap();
-        host.set_pane_render_markup(7, false).unwrap();
+        as_plugin(&host, || host.set_pane_render_markup(7, false).unwrap());
+        as_plugin(&host, || host.set_pane_render_markup(7, true).unwrap());
+        as_plugin(&host, || host.set_pane_render_markup(7, false).unwrap());
         assert_eq!(rx.try_iter().count(), 3);
     }
 
     #[test]
     fn panes_are_remembered_apart() {
         let (host, rx) = wired();
-        host.set_pane_render_markup(7, false).unwrap();
-        host.set_pane_render_markup(8, false).unwrap();
+        as_plugin(&host, || host.set_pane_render_markup(7, false).unwrap());
+        as_plugin(&host, || host.set_pane_render_markup(8, false).unwrap());
         assert_eq!(rx.try_iter().count(), 2);
     }
 
@@ -791,11 +802,11 @@ mod declaration_tests {
     #[test]
     fn a_new_core_has_to_be_told_everything_again() {
         let (host, rx) = wired();
-        host.set_pane_render_markup(7, false).unwrap();
+        as_plugin(&host, || host.set_pane_render_markup(7, false).unwrap());
         assert_eq!(rx.try_iter().count(), 1);
 
         host.forget_declarations();
-        host.set_pane_render_markup(7, false).unwrap();
+        as_plugin(&host, || host.set_pane_render_markup(7, false).unwrap());
         assert_eq!(rx.try_iter().count(), 1, "the same words, to a core that has not heard them");
     }
 
@@ -804,15 +815,14 @@ mod declaration_tests {
         let host = ShellPluginHost::new();
         let (tx, rx) = std::sync::mpsc::channel();
         host.attach_pane_wheel_keys_tx(tx);
-        host.set_active_plugin("t", PermissionSet::SET_STATUS_LINE);
 
-        host.set_pane_wheel_keys(7, b"a", b"b", b"c", b"d").unwrap();
-        host.set_pane_wheel_keys(7, b"a", b"b", b"c", b"d").unwrap();
+        as_plugin(&host, || host.set_pane_wheel_keys(7, b"a", b"b", b"c", b"d").unwrap());
+        as_plugin(&host, || host.set_pane_wheel_keys(7, b"a", b"b", b"c", b"d").unwrap());
         assert_eq!(rx.try_iter().count(), 1);
 
         // The separator is what keeps a shift across the four fields
         // from reading as the same declaration.
-        host.set_pane_wheel_keys(7, b"ab", b"", b"c", b"d").unwrap();
+        as_plugin(&host, || host.set_pane_wheel_keys(7, b"ab", b"", b"c", b"d").unwrap());
         assert_eq!(rx.try_iter().count(), 1, "different fields, different declaration");
     }
 }

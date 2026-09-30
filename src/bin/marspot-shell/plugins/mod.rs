@@ -57,6 +57,7 @@ pub mod claudecode;
 pub mod codex;
 pub mod handoff;
 pub mod host;
+pub mod dispatch;
 pub mod pty_op;
 // F3+1 — pidtree moved to marspot lib (`src/pidtree.rs`) so L2
 // (marspot-core) can use the same libproc walker for the process-
@@ -286,9 +287,24 @@ pub trait PluginHost: Send + Sync {
     /// permission / log namespace checks know which plugin asked.
     /// Default no-op so non-tracking hosts (tests) don't need to
     /// implement it.
-    fn set_active_plugin(&self, _name: &'static str, _permissions: PermissionSet) {}
+    ///
+    /// The token is why this is safe to have on the trait every plugin
+    /// holds. Without it a plugin could call this inside its own hook
+    /// -- the implementation writes whatever it is given, without
+    /// checking that the caller is the plugin it names or that the
+    /// permissions are a subset of the ones it has -- and hand itself
+    /// everything for the rest of that hook, which is long enough to
+    /// submit an op or take a pane. `Dispatching` can only be made
+    /// here, so a plugin cannot say it.
+    fn set_active_plugin(
+        &self,
+        _who: &dispatch::Dispatching,
+        _name: &'static str,
+        _permissions: PermissionSet,
+    ) {
+    }
     /// Pairs with `set_active_plugin`.
-    fn clear_active_plugin(&self) {}
+    fn clear_active_plugin(&self, _who: &dispatch::Dispatching) {}
 
     /// Decorate the right side of the pane title strip for the pane
     /// backing this shelld session.  Empty `text` clears the badge.
@@ -665,10 +681,7 @@ impl PluginRegistry {
     where
         F: FnOnce() -> R,
     {
-        host.set_active_plugin(slot.metadata.name, slot.metadata.permissions);
-        let r = f();
-        host.clear_active_plugin();
-        r
+        dispatch::with(host, slot.metadata.name, slot.metadata.permissions, f)
     }
 
     /// Sugar for ShellPluginHost callers — they typically have a
@@ -705,9 +718,9 @@ impl PluginRegistry {
                 slot.enabled = false;
                 continue;
             }
-            host.set_active_plugin(slot.metadata.name, slot.metadata.permissions);
+            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
             run_hook(slot, "init", |p| p.init(host));
-            host.clear_active_plugin();
+            });
         }
     }
 
@@ -716,9 +729,9 @@ impl PluginRegistry {
             if !slot.enabled {
                 continue;
             }
-            host.set_active_plugin(slot.metadata.name, slot.metadata.permissions);
+            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
             run_hook(slot, "start", |p| p.start(host));
-            host.clear_active_plugin();
+            });
         }
         self.started = true;
     }
@@ -739,9 +752,9 @@ impl PluginRegistry {
                 continue;
             }
             slot.last_tick = now;
-            host.set_active_plugin(slot.metadata.name, slot.metadata.permissions);
+            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
             run_hook_void(slot, "tick", |p| p.tick(host));
-            host.clear_active_plugin();
+            });
         }
     }
 
@@ -756,9 +769,9 @@ impl PluginRegistry {
             if !slot.enabled {
                 continue;
             }
-            host.set_active_plugin(slot.metadata.name, slot.metadata.permissions);
+            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
             run_hook_void(slot, "on_pane_focused", |p| p.on_pane_focused(host, sid));
-            host.clear_active_plugin();
+            });
         }
     }
 
@@ -771,11 +784,11 @@ impl PluginRegistry {
             if !slot.enabled {
                 continue;
             }
-            host.set_active_plugin(slot.metadata.name, slot.metadata.permissions);
+            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
             run_hook_void(slot, "on_pane_badge_click", |p| {
                 p.on_pane_badge_click(host, shelld_session_id)
             });
-            host.clear_active_plugin();
+            });
         }
     }
 
@@ -801,13 +814,13 @@ impl PluginRegistry {
             if !slot.enabled {
                 continue;
             }
-            host.set_active_plugin(slot.metadata.name, slot.metadata.permissions);
+            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
             if let Some(items) = run_hook_ret(slot, "pane_badge_menu", |p| {
                 p.pane_badge_menu(host, shelld_session_id)
             }) {
                 out.extend(items);
             }
-            host.clear_active_plugin();
+            });
         }
         out
     }
@@ -825,11 +838,11 @@ impl PluginRegistry {
             if !slot.enabled {
                 continue;
             }
-            host.set_active_plugin(slot.metadata.name, slot.metadata.permissions);
+            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
             run_hook_void(slot, "on_pane_badge_menu_action", |p| {
                 p.on_pane_badge_menu_action(host, shelld_session_id, tag)
             });
-            host.clear_active_plugin();
+            });
         }
     }
 
@@ -838,9 +851,9 @@ impl PluginRegistry {
             if !slot.enabled {
                 continue;
             }
-            host.set_active_plugin(slot.metadata.name, slot.metadata.permissions);
+            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
             run_hook_void(slot, "stop", |p| p.stop(host));
-            host.clear_active_plugin();
+            });
         }
         self.started = false;
     }
