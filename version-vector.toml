@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.185"  # the return waits for the composer to redraw
-core    = "0.12.225"  # measuring chrome text stops allocating
+core    = "0.12.226"  # a GPU reads the published scene bytes
 session = "0.11.106"  # reset works

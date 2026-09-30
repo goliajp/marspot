@@ -163,6 +163,7 @@ dependencies = [
  "core-graphics",
  "core-text",
  "foreign-types",
+ "golia-ui-core",
  "libc",
  "marspot-term",
  "objc2",
