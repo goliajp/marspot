@@ -4425,41 +4425,52 @@ fn erase_in_line(grid: &mut Grid, col: u16, row: u16, cols: u16, mode: u16, attr
 /// Only `_` through `~` are remapped; everything below is the same
 /// ASCII it always was.  Without this a TUI drawing a box with it
 /// prints `lqqqk` where the line should be.
+///
+/// A table rather than a match: thirty-odd match arms compile to a
+/// comparison chain that cost 5 KB of binary, which the size budget
+/// caught.  This is 128 bytes of rodata and an index.
+const DEC_GRAPHICS: [char; 32] = [
+    ' ',        // _
+    '\u{25c6}', // ` ◆
+    '\u{2592}', // a ▒
+    '\u{2409}', // b ␉
+    '\u{240c}', // c ␌
+    '\u{240d}', // d ␍
+    '\u{240a}', // e ␊
+    '\u{00b0}', // f °
+    '\u{00b1}', // g ±
+    '\u{2424}', // h ␤
+    '\u{240b}', // i ␋
+    '\u{2518}', // j ┘
+    '\u{2510}', // k ┐
+    '\u{250c}', // l ┌
+    '\u{2514}', // m └
+    '\u{253c}', // n ┼
+    '\u{23ba}', // o ⎺
+    '\u{23bb}', // p ⎻
+    '\u{2500}', // q ─
+    '\u{23bc}', // r ⎼
+    '\u{23bd}', // s ⎽
+    '\u{251c}', // t ├
+    '\u{2524}', // u ┤
+    '\u{2534}', // v ┴
+    '\u{252c}', // w ┬
+    '\u{2502}', // x │
+    '\u{2264}', // y ≤
+    '\u{2265}', // z ≥
+    '\u{03c0}', // { π
+    '\u{2260}', // | ≠
+    '\u{00a3}', // } £
+    '\u{00b7}', // ~ ·
+];
+
+#[inline]
 fn dec_special_graphic(ch: char) -> char {
-    match ch {
-        '_' => ' ',
-        '`' => '\u{25c6}', // ◆
-        'a' => '\u{2592}', // ▒
-        'b' => '\u{2409}', // ␉
-        'c' => '\u{240c}', // ␌
-        'd' => '\u{240d}', // ␍
-        'e' => '\u{240a}', // ␊
-        'f' => '\u{00b0}', // °
-        'g' => '\u{00b1}', // ±
-        'h' => '\u{2424}', // ␤
-        'i' => '\u{240b}', // ␋
-        'j' => '\u{2518}', // ┘
-        'k' => '\u{2510}', // ┐
-        'l' => '\u{250c}', // ┌
-        'm' => '\u{2514}', // └
-        'n' => '\u{253c}', // ┼
-        'o' => '\u{23ba}', // ⎺
-        'p' => '\u{23bb}', // ⎻
-        'q' => '\u{2500}', // ─
-        'r' => '\u{23bc}', // ⎼
-        's' => '\u{23bd}', // ⎽
-        't' => '\u{251c}', // ├
-        'u' => '\u{2524}', // ┤
-        'v' => '\u{2534}', // ┴
-        'w' => '\u{252c}', // ┬
-        'x' => '\u{2502}', // │
-        'y' => '\u{2264}', // ≤
-        'z' => '\u{2265}', // ≥
-        '{' => '\u{03c0}', // π
-        '|' => '\u{2260}', // ≠
-        '}' => '\u{00a3}', // £
-        '~' => '\u{00b7}', // ·
-        other => other,
+    let c = ch as u32;
+    if (0x5F..=0x7E).contains(&c) {
+        DEC_GRAPHICS[(c - 0x5F) as usize]
+    } else {
+        ch
     }
 }
 
