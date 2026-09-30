@@ -633,7 +633,9 @@ pub fn breadcrumb(segments: Vec<&str>) -> View {
 pub fn list_row(label: &str, trailing: Option<&str>, selected: bool, action: super::types::ActionId) -> View {
     use crate::ui::theme::{color, radius, text};
     let bg = if selected { color::BG_SELECTED } else { color::BG };
-    let fg = if selected { color::FG }          else { color::FG };
+    // FG_INVERSE is the one that stays readable on BG_SELECTED — in the
+    // high-contrast theme both FG and BG_SELECTED are pure white.
+    let fg = if selected { color::FG_INVERSE } else { color::FG };
     let mut content = vec![
         Text::new(label).style(text::BODY).color(fg).build(),
         spacer(),
