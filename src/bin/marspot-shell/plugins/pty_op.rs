@@ -183,18 +183,28 @@ pub struct Step {
     /// `None` = no deadline.  Only [`StepKind::AwaitUser`] should use
     /// it; the builder is where that is enforced by construction.
     pub timeout: Option<Duration>,
+    /// What the deadline means.  For most steps it is a failure — the
+    /// process never died, the program never appeared — and the run
+    /// has nothing left to do.  For a wait that only improves the
+    /// *timing* of what follows, it is not: running late is better
+    /// than not running, and aborting there throws away the rest of
+    /// the script.  Five of ten switches died this way on 2026-09-30,
+    /// at a step whose only job was to hold the paste back until the
+    /// CLI had painted.
+    pub proceed_on_timeout: bool,
     pub label: &'static str,
 }
 
 impl Step {
     pub fn settle(d: Duration) -> Self {
-        Self { kind: StepKind::Settle, timeout: Some(d), label: "settle" }
+        Self { kind: StepKind::Settle, timeout: Some(d), proceed_on_timeout: false, label: "settle" }
     }
     /// Signal `pid` and wait for it to leave the process table.
     pub fn terminate(pid: i32, signal: i32) -> Self {
         Self {
             kind: StepKind::Terminate { pid, signal, escalate: None, sent: false },
             timeout: Some(Duration::from_secs(10)),
+            proceed_on_timeout: false,
             label: "terminate",
         }
     }
@@ -210,6 +220,7 @@ impl Step {
         Self {
             kind: StepKind::StopIfProcess { under, matching },
             timeout: Some(Duration::from_secs(5)),
+            proceed_on_timeout: false,
             label: "stop_if_process",
         }
     }
@@ -217,31 +228,39 @@ impl Step {
         Self {
             kind: StepKind::AwaitProcess { under, matching },
             timeout: Some(Duration::from_secs(30)),
+            proceed_on_timeout: false,
             label: "await_process",
         }
     }
     pub fn await_job(job: Arc<Job>) -> Self {
-        Self { kind: StepKind::AwaitJob(job), timeout: Some(Duration::from_secs(30)), label: "await_job" }
+        Self { kind: StepKind::AwaitJob(job), timeout: Some(Duration::from_secs(30)), proceed_on_timeout: false,
+            label: "await_job" }
     }
     pub fn paste_job(job: Arc<Job>) -> Self {
-        Self { kind: StepKind::PasteJob(job), timeout: Some(Duration::from_secs(5)), label: "paste_job" }
+        Self { kind: StepKind::PasteJob(job), timeout: Some(Duration::from_secs(5)), proceed_on_timeout: false,
+            label: "paste_job" }
     }
     pub fn call(f: CallFn) -> Self {
-        Self { kind: StepKind::Call(f), timeout: Some(Duration::from_secs(5)), label: "call" }
+        Self { kind: StepKind::Call(f), timeout: Some(Duration::from_secs(5)), proceed_on_timeout: false,
+            label: "call" }
     }
     pub fn await_user() -> Self {
-        Self { kind: StepKind::AwaitUser, timeout: None, label: "await_user" }
+        Self { kind: StepKind::AwaitUser, timeout: None, proceed_on_timeout: false,
+            label: "await_user" }
     }
     pub fn send(bytes: Vec<u8>) -> Self {
-        Self { kind: StepKind::Send(bytes), timeout: Some(Duration::from_secs(5)), label: "send" }
+        Self { kind: StepKind::Send(bytes), timeout: Some(Duration::from_secs(5)), proceed_on_timeout: false,
+            label: "send" }
     }
     pub fn paste(text: impl Into<String>) -> Self {
-        Self { kind: StepKind::Paste(text.into()), timeout: Some(Duration::from_secs(5)), label: "paste" }
+        Self { kind: StepKind::Paste(text.into()), timeout: Some(Duration::from_secs(5)), proceed_on_timeout: false,
+            label: "paste" }
     }
     pub fn await_quiet(still: Duration) -> Self {
         Self {
             kind: StepKind::AwaitQuiet { still, min_bytes: 0 },
             timeout: Some(Duration::from_secs(30)),
+            proceed_on_timeout: false,
             label: "await_quiet",
         }
     }
@@ -251,6 +270,14 @@ impl Step {
         if let StepKind::AwaitQuiet { min_bytes, .. } = &mut self.kind {
             *min_bytes = n;
         }
+        self
+    }
+    /// Treat this step's deadline as "long enough" rather than as a
+    /// failure: when it passes, move on.  Only for waits that sharpen
+    /// the timing of a later step, never for one whose success the
+    /// rest of the script depends on.
+    pub fn or_late(mut self) -> Self {
+        self.proceed_on_timeout = true;
         self
     }
     pub fn timeout(mut self, d: Duration) -> Self {
@@ -812,10 +839,27 @@ impl PaneSession for OpRunner {
         if let Some(step) = self.op.steps.get(self.at) {
             if let Some(limit) = step.timeout {
                 if elapsed >= limit {
-                    self.finish(
-                        host,
-                        OpOutcome::TimedOut { step: self.at, label: step.label },
-                    );
+                    if step.proceed_on_timeout {
+                        let drawn = self
+                            .env
+                            .output_len(host.shelld_session_id())
+                            .saturating_sub(self.entered_len);
+                        host.log(
+                            LogLevel::Info,
+                            &format!("{}.late", self.op.name),
+                            &format!(
+                                "step={} waited {}ms, drew {drawn}B — going on anyway",
+                                step.label,
+                                limit.as_millis()
+                            ),
+                        );
+                        self.advance(host);
+                    } else {
+                        self.finish(
+                            host,
+                            OpOutcome::TimedOut { step: self.at, label: step.label },
+                        );
+                    }
                 }
             }
         }
