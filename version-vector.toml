@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.185"  # the return waits for the composer to redraw
-core    = "0.12.222"  # a selected list row is no longer white on white
+core    = "0.12.223"  # layout stops laying every child out twice
 session = "0.11.105"  # clippy sweep

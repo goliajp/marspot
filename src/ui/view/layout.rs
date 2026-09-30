@@ -861,11 +861,16 @@ fn layout_stack<'a>(
     let mut sum_flex: u32 = 0;
     let mut intrinsic_main: f64 = 0.0;
     let mut cross_used: f64 = 0.0;
-    let mut child_sizes: Vec<Option<Size>> = Vec::with_capacity(children.len());
+    // Pass A's results are kept, not just their sizes.  Pass B asks
+    // most children for exactly the size they just reported, at a
+    // different origin — which is the same layout, translated.  The
+    // subtree is reused and shifted; only a child whose constraints
+    // actually changed is laid out again.
+    let mut probes: Vec<Option<LaidOut>> = Vec::with_capacity(children.len());
     for ch in children {
         if let View::Spacer { flex } = ch {
             sum_flex += *flex;
-            child_sizes.push(None);
+            probes.push(None);
             continue;
         }
         let inner_c = if vertical {
@@ -874,10 +879,9 @@ fn layout_stack<'a>(
             Constraints { min_w: 0.0, max_w: f64::INFINITY, min_h: 0.0, max_h: cross_max }
         };
         let laid = layout(ch, ctx, (0.0, 0.0), inner_c);
-        let s = Size { w: laid.rect.w, h: laid.rect.h };
-        intrinsic_main += if vertical { s.h } else { s.w };
-        cross_used = cross_used.max(if vertical { s.w } else { s.h });
-        child_sizes.push(Some(s));
+        intrinsic_main += if vertical { laid.rect.h } else { laid.rect.w };
+        cross_used = cross_used.max(if vertical { laid.rect.w } else { laid.rect.h });
+        probes.push(Some(laid));
     }
 
     let n_gaps = (children.len().saturating_sub(1)) as f64;
@@ -919,10 +923,15 @@ fn layout_stack<'a>(
         cross_used
     };
 
+    // Stretch is the one align that hands a child a cross extent it
+    // did not ask for, so it is the one that has to be laid out twice.
+    let stretching = matches!(align, AlignCross::Stretch);
+
     let mut laid_children: Vec<LaidOut> = Vec::with_capacity(children.len());
     let mut cursor_main = lead_pad;
     for (i, ch) in children.iter().enumerate() {
-        let (child_main, child_cross) = match (ch, child_sizes[i]) {
+        let probe_size = probes[i].as_ref().map(|p| Size { w: p.rect.w, h: p.rect.h });
+        let (child_main, child_cross) = match (ch, probe_size) {
             (View::Spacer { flex }, _) => {
                 let m = per_flex * (*flex as f64);
                 (m, 0.0)
@@ -970,7 +979,14 @@ fn layout_stack<'a>(
             }
         };
 
-        let laid = layout(ch, ctx, child_origin, child_c);
+        let laid = match probes[i].take() {
+            Some(mut p) if !stretching => {
+                let (dx, dy) = (child_origin.0 - p.rect.x, child_origin.1 - p.rect.y);
+                shift_subtree(&mut p, dx, dy);
+                p
+            }
+            _ => layout(ch, ctx, child_origin, child_c),
+        };
         laid_children.push(laid);
 
         cursor_main += child_main;
