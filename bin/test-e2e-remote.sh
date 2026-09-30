@@ -25,9 +25,27 @@
 #   - honest                    : exits with the suite's exit code
 set -euo pipefail
 
+# One tool does the copying, for every session and every repo: it takes
+# the exclude list from git itself, so a path this repo ignores is never
+# sent and never deleted on the far side -- which is how the remote
+# target/ survives a sync from a tree that has none.
+remote_sync() {
+  local tool
+  tool="$(command -v remote-sync || true)"
+  [[ -n $tool ]] || tool="$HOME/workspace/goliajp/golia-claude-configs/bin/remote-sync"
+  [[ -x $tool ]] || {
+    echo "remote-sync not found (looked on PATH and in $tool)" >&2
+    exit 1
+  }
+  "$tool" "$@"
+}
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST="${HOST:-mini}"
-REMOTE_DIR="${REMOTE_DIR:-e2e-marspot}"
+REMOTE_NAME="${REMOTE_NAME:-e2e-marspot}"
+# remote-sync always lands in ~/work/<name>, so that is where the
+# run has to look.
+REMOTE_DIR="work/$REMOTE_NAME"
 REMOTE_LOCK="/tmp/marspot-runner.lock.d"
 GUI_UID="${GUI_UID:-501}"
 
@@ -66,18 +84,7 @@ until ssh -o ConnectTimeout=5 "$HOST" "
   sleep 5
 done
 
-echo "==> rsync → $HOST:~/$REMOTE_DIR/"
-# By content, not by timestamp — see test-remote.sh for what `-a` costs.
-rsync -rlpDz --checksum --delete --quiet \
-  --exclude '/target/' \
-  --exclude '/build/' \
-  --exclude '/references/*' --include '/references/README.md' \
-  --exclude '/bench/remote-runs/' \
-  --exclude '/bench/results/' \
-  --exclude '/bench/scenarios/*.bin' \
-  --exclude '.DS_Store' \
-  --exclude-from="$HOME/.config/git/ignore" \
-  "$ROOT/" "$HOST:$REMOTE_DIR/"
+remote_sync "$HOST" --name "$REMOTE_NAME"
 
 echo "==> building release on $HOST"
 ssh "$HOST" "source ~/.cargo/env && cd ~/$REMOTE_DIR && cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session 2>&1 | tail -2"

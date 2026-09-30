@@ -15,15 +15,33 @@
 # Contract:
 #   - exclusive  : mkdir lock locally (atomic; macOS has no flock(1))
 #   - separate   : its own remote dir, so it never disturbs the bench
-#                  mirror bench-remote.sh keeps in ~/bench-marspot
+#                  mirror bench-remote.sh keeps in ~/work/bench-marspot
 #   - terminating: Ctrl-C kills the remote process group
 #   - honest     : exits with the remote suite's exit code
 
 set -euo pipefail
 
+# One tool does the copying, for every session and every repo: it takes
+# the exclude list from git itself, so a path this repo ignores is never
+# sent and never deleted on the far side -- which is how the remote
+# target/ survives a sync from a tree that has none.
+remote_sync() {
+  local tool
+  tool="$(command -v remote-sync || true)"
+  [[ -n $tool ]] || tool="$HOME/workspace/goliajp/golia-claude-configs/bin/remote-sync"
+  [[ -x $tool ]] || {
+    echo "remote-sync not found (looked on PATH and in $tool)" >&2
+    exit 1
+  }
+  "$tool" "$@"
+}
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST="${HOST:-mini}"
-REMOTE_DIR="${REMOTE_DIR:-test-marspot}"
+REMOTE_NAME="${REMOTE_NAME:-test-marspot}"
+# remote-sync always lands in ~/work/<name>, so that is where the
+# run has to look.
+REMOTE_DIR="work/$REMOTE_NAME"
 LOCK_LOCAL="/tmp/marspot-test-remote.lock.d"
 REMOTE_PIDF="/tmp/marspot-test-remote.pgid"
 
@@ -70,22 +88,7 @@ until ssh -o ConnectTimeout=5 "$HOST" "
   sleep 5
 done
 
-echo "==> rsync → $HOST:~/$REMOTE_DIR/"
-# Not `-a`: it keeps the local mtimes, and a file that arrives older
-# than the remote's last build makes cargo decide nothing changed — the
-# run then measures the previous binary and says it passed.  Content is
-# what matters here, so compare by checksum and let the copies take the
-# remote's own clock.
-rsync -rlpDz --checksum --delete --quiet \
-  --exclude '/target/' \
-  --exclude '/build/' \
-  --exclude '/references/*' --include '/references/README.md' \
-  --exclude '/bench/remote-runs/' \
-  --exclude '/bench/results/' \
-  --exclude '/bench/scenarios/*.bin' \
-  --exclude '.DS_Store' \
-  --exclude-from="$HOME/.config/git/ignore" \
-  "$ROOT/" "$HOST:$REMOTE_DIR/"
+remote_sync "$HOST" --name "$REMOTE_NAME"
 
 args=""
 for a in "$@"; do args+=" $(printf '%q' "$a")"; done
