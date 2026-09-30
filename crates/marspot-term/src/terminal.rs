@@ -114,6 +114,12 @@ const OSC52_MAX: usize = 64 * 1024;
 /// to a degraded rendering path.
 const DA1_REPLY: &[u8] = b"\x1b[?62;1;6;22c";
 
+/// Responses inside the rolling 100 ms window that count as a storm.
+const RESPONSE_BURST_AT: usize = 5;
+/// How long the window has to stay over [`RESPONSE_BURST_AT`] before
+/// it is a loop rather than a program starting up.
+const RESPONSE_BURST_SUSTAINED: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub struct Terminal {
     grid: Grid,
     /// Saved main grid while the terminal is in alt-screen mode (`?1049h`).
@@ -160,13 +166,21 @@ pub struct Terminal {
     /// every pane fill with literal `[?62;1;6;22c` text — DA1
     /// responses fed back into the PTY input by a stuck shell loop —
     /// and the surface symptom (cell content) couldn't point at a
-    /// driver.  With this we emit one `term.respond.burst` WARN per
-    /// session whenever the window crosses 5 responses, with the
-    /// burst rate-limited to 1 / s so a sustained loop doesn't drown
-    /// the log itself.  The window is intentionally per-Terminal —
-    /// nine panes loop in parallel show up as nine warnings, which is
-    /// what we want.
+    /// driver.  The window is intentionally per-Terminal — nine panes
+    /// loop in parallel show up as nine warnings, which is what we
+    /// want.
+    ///
+    /// Crossing the threshold is not the signal; **staying** over it
+    /// is.  A program starting up asks the same question several times
+    /// in a row -- claudecode sends five `CSI ? u` inside 100 ms while
+    /// it pushes keyboard flags -- and that was warning on every agent
+    /// restart.  54 of them in one log, all of them a TUI booting, and
+    /// among that a real loop would have gone unread.  A loop does not
+    /// stop, so the warning waits for it not to.
     response_window: VecDeque<Instant>,
+    /// When the window first went over the threshold and stayed there,
+    /// or `None` while it is under.  See `response_window`.
+    response_burst_since: Option<Instant>,
     /// Last time we emitted a burst-warn, to rate-limit the WARNs.
     /// `None` if we've never warned (cold path).
     response_burst_last_warn: Option<Instant>,
@@ -569,6 +583,7 @@ impl Terminal {
             scroll_bot: rows.saturating_sub(1),
             pending_response: Vec::new(),
             response_window: VecDeque::new(),
+            response_burst_since: None,
             response_burst_last_warn: None,
             cursor_key_application_mode: false,
             bracketed_paste_mode: false,
@@ -839,6 +854,14 @@ impl Terminal {
     /// response to capability / version queries (CSI c, CSI > 0 c,
     /// CSI > 0 q, …). Caller (Session::pump) writes them to the PTY
     /// after the feed cycle so the app's `read()` returns them.
+    /// Whether this pane has ever been flagged for a sustained storm
+    /// of capability responses.  See `response_window`: a program
+    /// starting up bursts and stops, a loop does not, and only the
+    /// second one sets this.
+    pub fn response_burst_warned(&self) -> bool {
+        self.response_burst_last_warn.is_some()
+    }
+
     pub fn take_response(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pending_response)
     }
@@ -1108,6 +1131,7 @@ impl Terminal {
             let scroll_bot = &mut self.scroll_bot;
             let pending_response = &mut self.pending_response;
             let response_window = &mut self.response_window;
+            let response_burst_since = &mut self.response_burst_since;
             let response_burst_last_warn = &mut self.response_burst_last_warn;
             let cursor_key_app_mode = &mut self.cursor_key_application_mode;
             let bracketed_paste = &mut self.bracketed_paste_mode;
@@ -1146,6 +1170,7 @@ impl Terminal {
                 scroll_bot,
                 pending_response,
                 response_window,
+                response_burst_since,
                 response_burst_last_warn,
                 cursor_key_app_mode,
                 bracketed_paste,
@@ -2394,6 +2419,8 @@ struct Handler<'a> {
     scroll_bot: &'a mut u16,
     pending_response: &'a mut Vec<u8>,
     response_window: &'a mut VecDeque<Instant>,
+    /// See `Terminal::response_burst_since`.
+    response_burst_since: &'a mut Option<Instant>,
     response_burst_last_warn: &'a mut Option<Instant>,
     cursor_key_app_mode: &'a mut bool,
     bracketed_paste: &'a mut bool,
@@ -2614,22 +2641,30 @@ impl<'a> Handler<'a> {
             self.response_window.pop_front();
         }
         self.response_window.push_back(now);
-        if self.response_window.len() >= 5 {
-            let warn_ok = self
-                .response_burst_last_warn
-                .map(|t| now.duration_since(t) >= std::time::Duration::from_secs(1))
-                .unwrap_or(true);
-            if warn_ok {
-                let count = self.response_window.len();
-                lx_warn!(
-                    "term.respond.burst",
-                    "capability-response storm — likely echo loop",
-                    count = count,
-                    window_ms = 100,
-                    kind = kind
-                );
-                *self.response_burst_last_warn = Some(now);
-            }
+        if self.response_window.len() < RESPONSE_BURST_AT {
+            // Under the threshold: whatever it was, it stopped.
+            *self.response_burst_since = None;
+            return;
+        }
+        let since = *self.response_burst_since.get_or_insert(now);
+        if now.duration_since(since) < RESPONSE_BURST_SUSTAINED {
+            return;
+        }
+        let warn_ok = self
+            .response_burst_last_warn
+            .map(|t| now.duration_since(t) >= std::time::Duration::from_secs(1))
+            .unwrap_or(true);
+        if warn_ok {
+            let count = self.response_window.len();
+            lx_warn!(
+                "term.respond.burst",
+                "capability-response storm — likely echo loop",
+                count = count,
+                window_ms = 100,
+                sustained_ms = now.duration_since(since).as_millis() as u64,
+                kind = kind
+            );
+            *self.response_burst_last_warn = Some(now);
         }
     }
 }
