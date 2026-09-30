@@ -346,3 +346,91 @@ fn the_page_does_not_offer_a_download_it_cannot_deliver() {
         "the page neither offers a build nor says why not -- one of the two has to be true"
     );
 }
+
+// ─── what the README tells people to delete ───────────────────────
+
+const INSTALL_SH: &str = include_str!("../bin/install-local.sh");
+
+/// Uninstall instructions are the one page a reader follows literally
+/// and cannot check, because by the time they notice a leftover they
+/// have already deleted the thing that would have told them.
+///
+/// Both of these were written wrong the first time: the state
+/// directory moved from `Caches` to `Application Support` and the page
+/// still said the old one, and the page said there was no login item
+/// while a LaunchAgent sat in `~/Library/LaunchAgents`.
+#[test]
+fn the_uninstall_names_the_directory_the_code_uses() {
+    // `paths::state_root()` is `<home>/Library/Application Support/marspot`
+    // unless MARSPOT_STATE_DIR overrides it, which it does in tests --
+    // so compare against the literal the source builds it from.
+    const PATHS: &str = include_str!("../crates/marspot-term/src/paths.rs");
+    let literal = "Library/Application Support/marspot";
+    assert!(
+        PATHS.contains(literal),
+        "paths.rs no longer builds the state root from {literal:?}"
+    );
+    assert!(
+        README.contains(literal),
+        "the README does not name the directory the code actually uses"
+    );
+    let uninstall = README
+        .split("## Uninstalling")
+        .nth(1)
+        .expect("the README has an uninstall section");
+    assert!(
+        uninstall.contains("Application\\ Support/marspot"),
+        "the uninstall does not remove the state directory"
+    );
+}
+
+#[test]
+fn the_uninstall_removes_every_launch_agent_the_installer_writes() {
+    // Whatever labels install-local.sh writes plists for, the README
+    // has to say how to remove.  Comments do not count: the retired L4
+    // daemon is discussed at length in this file and installed by
+    // nothing, and counting it would have the uninstall tell people to
+    // delete a file they do not have.
+    let mut labels: Vec<&str> = Vec::new();
+    for line in INSTALL_SH.lines() {
+        let code = line.trim_start();
+        if code.starts_with('#') {
+            continue;
+        }
+        let Some(i) = code.find("LaunchAgents/") else {
+            continue;
+        };
+        let rest = &code[i + "LaunchAgents/".len()..];
+        let name = &rest[..rest.find(".plist").unwrap_or(0)];
+        if !name.is_empty() && !labels.contains(&name) {
+            labels.push(name);
+        }
+    }
+    assert!(
+        !labels.is_empty(),
+        "no LaunchAgent found in the installer -- has it moved, or has this stopped looking?"
+    );
+    let uninstall = README
+        .split("## Uninstalling")
+        .nth(1)
+        .expect("the README has an uninstall section");
+    for label in labels {
+        assert!(
+            uninstall.contains(label),
+            "the installer writes ~/Library/LaunchAgents/{label}.plist \
+             and the uninstall never removes it"
+        );
+    }
+}
+
+#[test]
+fn the_readme_installs_the_app_where_the_installer_puts_it() {
+    assert!(
+        INSTALL_SH.contains("$HOME/.local/Marspot.app"),
+        "the installer no longer puts the app in ~/.local"
+    );
+    assert!(
+        README.contains("~/.local/Marspot.app"),
+        "the README names a different place than the installer uses"
+    );
+}

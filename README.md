@@ -28,7 +28,45 @@ idle and bring it back on a keystroke.
 
 ## Requirements
 
-macOS 14.0 or newer, Apple silicon.
+macOS 14.0 or newer, Apple silicon. Intel Macs are not supported and
+are not planned: the renderer targets Metal on Apple silicon and the
+performance numbers below are what the design is for.
+
+## Where it keeps things
+
+Everything is under `~/Library/Application Support/marspot`:
+
+| | |
+|---|---|
+| `logs/marspot.log` | what every layer logged; rotated, bounded |
+| `sessions/<id>/` | one directory per pane: its scrollback, its byte log |
+| `binaries/` | the version running now, and the one staged next |
+| `settings.toml` | your settings, read live — edit it and the next sweep uses it |
+
+An older version kept this under `~/Library/Caches/marspot`, and a
+symlink is left there so anything that still computes the old path
+finds the new one.
+
+The app itself installs to `~/.local/Marspot.app`.
+
+One LaunchAgent may exist: `com.marspot.land-bundle`. It is armed only
+when an update has been staged and the running app is holding the old
+binary open; it waits for the app to quit, swaps the bundle, and
+reopens. Nothing is installed to keep the app running or to start it at
+login.
+
+## Uninstalling
+
+```sh
+launchctl bootout "gui/$(id -u)/com.marspot.land-bundle" 2>/dev/null
+rm -f  ~/Library/LaunchAgents/com.marspot.land-bundle.plist
+rm -rf ~/.local/Marspot.app
+rm -rf ~/Library/Application\ Support/marspot ~/Library/Caches/marspot
+```
+
+That is all of it: no receipt in the package database, nothing in
+`/usr/local`, and no line added to your shell's rc files. Panes are
+child processes of the app and go when it does.
 
 ## Building
 
@@ -36,9 +74,12 @@ macOS 14.0 or newer, Apple silicon.
 cargo build --release
 ```
 
-Three binaries come out: `marspot` (the app), `marspot-core` (renderer)
-and `marspot-session` (one per pane). `mcli` is a single-session
-companion.
+Five binaries come out. Three of them are the terminal: `marspot-shell`
+owns the window and supervises, `marspot-core` draws, and one
+`marspot-session` runs per pane and owns that pane's pty — a pane that
+crashes takes nothing else with it. `mcli` is a single-session
+companion, and `marspot` is a single-process build of the same engine,
+useful for working on the renderer without the other two.
 
 ## Performance
 

@@ -120,11 +120,24 @@
 cd marspot
 cargo build --release</pre>
     <p>
-      Three binaries come out. <span class="mono">marspot-shell</span> owns the
-      window, <span class="mono">marspot-core</span> draws, and one
+      Three of the binaries are the terminal.
+      <span class="mono">marspot-shell</span> owns the window,
+      <span class="mono">marspot-core</span> draws, and one
       <span class="mono">marspot-session</span> runs per pane and owns that
       pane's pty. A pane that crashes takes nothing else with it.
     </p>
+    <p>
+      It keeps everything under
+      <span class="mono">~/Library/Application&nbsp;Support/marspot</span> — the
+      log, one directory per pane, and <span class="mono">settings.toml</span>,
+      which is read live: edit it and the next sweep is already using it. The
+      app installs to <span class="mono">~/.local/Marspot.app</span>. To remove
+      it, delete those two and the one LaunchAgent an update may have armed:
+    </p>
+    <pre class="mono">launchctl bootout "gui/$(id -u)/com.marspot.land-bundle"
+rm -f  ~/Library/LaunchAgents/com.marspot.land-bundle.plist
+rm -rf ~/.local/Marspot.app
+rm -rf ~/Library/Application\ Support/marspot ~/Library/Caches/marspot</pre>
   </div>
 </section>
 
