@@ -5844,14 +5844,25 @@ fn push_session(
                 cell_h: cell_h.round() as u32,
                 baseline_from_top: ascent.round() as u32,
             };
-            if let Some(entry) = resolve_cell_glyph(
-                atlas,
-                font,
-                cell.ch,
-                cell.attrs.bold,
-                cell.attrs.italic,
-                metrics,
-            ) {
+            // Same split as the main pass: a cluster under the cursor
+            // is drawn whole, or its index would be drawn as a glyph.
+            let cursor_glyph = match grid.cluster_text(&cell) {
+                Some(text) => {
+                    let owned = text.to_string();
+                    resolve_cluster_glyph(
+                        atlas, font, &owned, cell.attrs.bold, cell.attrs.italic, metrics,
+                    )
+                }
+                None => resolve_cell_glyph(
+                    atlas,
+                    font,
+                    cell.ch,
+                    cell.attrs.bold,
+                    cell.attrs.italic,
+                    metrics,
+                ),
+            };
+            if let Some(entry) = cursor_glyph {
                 // Phase 1.1 bearing formula (cursor BG re-emit).
                 let pen_x = (inner_x + col as f32 * cell_w).round();
                 let dest_y = (inner_y + (row as f32) * cell_h).round();

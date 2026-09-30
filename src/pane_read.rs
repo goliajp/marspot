@@ -71,7 +71,7 @@ fn render(term: &Terminal, extra_lines: u16) -> String {
         out.push(scrollback_line(grid, i));
     }
     for row in 0..grid.rows() {
-        out.push(row_text(grid, |c| grid.cell(c, row).ch));
+        out.push(row_text_of(grid, |c| grid.cell(c, row)));
     }
     while out.last().is_some_and(|l| l.is_empty()) {
         out.pop();
@@ -85,7 +85,7 @@ fn scrollback_line(grid: &marspot_term::grid::Grid, back: usize) -> String {
     // viewport row of 0 with an offset of `back + 1` is the line that
     // scrolled off `back` rows ago.
     let off = (back + 1).min(u16::MAX as usize) as u16;
-    row_text(grid, |c| grid.cell_at_view(off, c, 0).ch)
+    row_text_of(grid, |c| grid.cell_at_view(off, c, 0))
 }
 
 /// One row as text, minus the grid's own bookkeeping.
@@ -96,13 +96,29 @@ fn scrollback_line(grid: &marspot_term::grid::Grid, back: usize) -> String {
 /// a terminal swallows into a space so the damage is invisible until
 /// something tries to match on the text.  And something does: the
 /// autorun policy reads this.
-fn row_text(grid: &marspot_term::grid::Grid, cell: impl Fn(u16) -> char) -> String {
-    (0..grid.cols())
-        .map(cell)
-        .filter(|ch| *ch != '\0')
-        .collect::<String>()
-        .trim_end()
-        .to_string()
+/// One row as text.
+///
+/// Takes the cell rather than its `ch`, because a cell holding a
+/// grapheme cluster keeps the text in the grid's pool and its `ch` is
+/// the pool index — printing that would put a plane-15 codepoint in
+/// what a person reads.
+fn row_text_of(
+    grid: &marspot_term::grid::Grid,
+    cell: impl Fn(u16) -> marspot_term::grid::Cell,
+) -> String {
+    let mut out = String::with_capacity(grid.cols() as usize);
+    for c in 0..grid.cols() {
+        let cell = cell(c);
+        // NUL is the wide glyph's trailing half.
+        if cell.ch == '\0' {
+            continue;
+        }
+        match grid.cluster_text(&cell) {
+            Some(text) => out.push_str(text),
+            None => out.push(cell.ch),
+        }
+    }
+    out.trim_end().to_string()
 }
 
 #[cfg(test)]
