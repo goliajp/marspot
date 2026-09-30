@@ -87,6 +87,11 @@ pub trait OpEnv: Send {
     fn pane_modes(&self, sid: u64) -> Option<(u64, u32)>;
 }
 
+/// Is `needle` anywhere in `haystack`?
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 /// What one step of a script does.
 #[derive(Clone)]
 pub enum StepKind {
@@ -167,11 +172,21 @@ pub enum StepKind {
     /// bracketed paste is not a proxy for readiness — it *is* the
     /// program saying it has the terminal.
     ///
-    /// The sequence number matters as much as the flags: a pane whose
+    /// Freshness cannot come from the published frame.  A pane whose
     /// program was just killed still has that program's last frame in
-    /// the region, flags and all.  Only a frame published after this
-    /// step started can be talking about the new one.
-    AwaitTuiReady { entry_seq: Option<u64> },
+    /// the region, flags and all — but this step runs inside a script
+    /// that holds the screen, so the region stops being republished
+    /// and its sequence number never moves.  Waiting for a newer frame
+    /// under a hold waits forever, which is exactly what it did: every
+    /// switch sat out the full budget with both flags already set
+    /// (`flags=0x25`, 2026-09-30).
+    ///
+    /// So the evidence is the byte stream, which keeps flowing whether
+    /// or not anything is drawn: the mode-enabling sequences the new
+    /// program sends when it takes the terminal, looked for only in
+    /// the bytes written after this step began.  That is the program's
+    /// own declaration, read off the wire instead of off a frame.
+    AwaitTuiReady { from_len: Option<u64> },
     /// End the run, successfully, if the pane is showing something
     /// that is waiting for a keypress.
     ///
@@ -323,7 +338,7 @@ impl Step {
     /// Wait for the program in the pane to take the terminal over.
     pub fn await_tui_ready() -> Self {
         Self {
-            kind: StepKind::AwaitTuiReady { entry_seq: None },
+            kind: StepKind::AwaitTuiReady { from_len: None },
             // Short on purpose.  A terminal that has not declared
             // itself in three seconds is not going to be helped by
             // twenty-seven more, and the pane is frozen for every one
@@ -742,38 +757,39 @@ impl OpRunner {
                 }
                 true
             }
-            StepKind::AwaitTuiReady { entry_seq } => {
-                use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
-                let Some((seq, flags)) = self.env.pane_modes(sid) else {
-                    // No answer is its own diagnosis, and it used to be
-                    // an invisible one: the step simply never finished
-                    // and the whole wait read as "the CLI is slow".
-                    self.ready_saw = Some((0, 0));
-                    return false;
-                };
-                self.ready_saw = Some((seq, flags));
-                let base = match entry_seq {
+            StepKind::AwaitTuiReady { from_len } => {
+                let now = self.env.output_len(sid);
+                let base = match from_len {
                     Some(v) => v,
                     None => {
-                        if let Some(StepKind::AwaitTuiReady { entry_seq }) =
+                        if let Some(StepKind::AwaitTuiReady { from_len }) =
                             self.op.steps.get_mut(self.at).map(|s| &mut s.kind)
                         {
-                            *entry_seq = Some(seq);
+                            *from_len = Some(now);
                         }
-                        seq
+                        now
                     }
                 };
-                let ready = flags & (FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE)
-                    == (FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE);
-                let fresh = seq > base;
-                if ready && fresh {
+                let fresh = now.saturating_sub(base) as usize;
+                self.ready_saw = Some((fresh as u64, 0));
+                if fresh == 0 {
+                    return false;
+                }
+                let tail = self.env.output_tail(sid, fresh.min(256 * 1024));
+                // What a full-screen program sends when it takes over.
+                // Both, because a shell sets bracketed paste on its own
+                // and only a full-screen program asks for the alternate
+                // buffer.
+                let took_over = contains(&tail, b"\x1b[?1049h") || contains(&tail, b"\x1b[?47h");
+                let reads_pastes = contains(&tail, b"\x1b[?2004h");
+                if took_over && reads_pastes {
                     host.log(
                         LogLevel::Info,
                         &format!("{}.ready", self.op.name),
-                        &format!("sid={sid} the pane's program has the terminal (flags={flags:#x})"),
+                        &format!("sid={sid} the pane's program took the terminal ({fresh} B in)"),
                     );
                 }
-                ready && fresh
+                took_over && reads_pastes
             }
             StepKind::StopIfWaiting { needles } => {
                 let tail = self.env.output_tail(sid, 16 * 1024);
@@ -1027,9 +1043,7 @@ impl PaneSession for OpRunner {
                             .output_len(host.shelld_session_id())
                             .saturating_sub(self.entered_len);
                         let saw = match self.ready_saw {
-                            Some((seq, flags)) => {
-                                format!(", last saw seq={seq} flags={flags:#x}")
-                            }
+                            Some((bytes, _)) => format!(", {bytes} B since the step began"),
                             None => String::new(),
                         };
                         host.log(
@@ -1824,45 +1838,58 @@ mod tests {
         }
     }
 
-    /// Readiness is the terminal's own answer, and a stale frame is
-    /// not an answer.
+    /// Readiness is the program's own declaration, read off the byte
+    /// stream rather than off a published frame.
     ///
-    /// The pane a script has just killed still holds the dead
-    /// program's last published frame — alt screen and bracketed paste
-    /// both on, because that is how it was running.  Believing it
-    /// means typing into a shell prompt.
+    /// The frame cannot be the evidence: this step runs inside a
+    /// script that holds the screen, so nothing is republished and the
+    /// sequence number never moves.  Every switch on 2026-09-30 sat
+    /// out its whole budget with both mode flags already set, waiting
+    /// for a newer frame that a hold guarantees will not come.
     #[test]
-    fn readiness_needs_a_frame_published_after_the_wait_began() {
-        use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
-        let ready = FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE;
+    fn readiness_comes_from_the_bytes_not_the_frame() {
         let (state, env, host) = setup();
-        *state.modes.lock().unwrap() = Some((7, ready));
+        // A shell prompt: bracketed paste on, no alternate screen.
+        *state.tail.lock().unwrap() = b"\x1b[?2004h$ ".to_vec();
+        *state.out_len.lock().unwrap() = 10;
         let mut r = OpRunner::new(
-            PtyOp::new("test.ready").step(Step::await_tui_ready()),
+            PtyOp::new("test.ready")
+                .step(Step::await_tui_ready().timeout(Duration::from_millis(500))),
             env,
         );
+        run(&mut r, &host, &state, 200);
+        assert!(!*host.ended.lock().unwrap(), "a shell is not a full-screen program");
 
-        run(&mut r, &host, &state, 500);
-        assert!(!*host.ended.lock().unwrap(), "the dead program's own frame proves nothing");
+        // The program takes the terminal.
+        *state.tail.lock().unwrap() =
+            b"\x1b[?2004h$ claude\r\n\x1b[?1049h\x1b[?2004h".to_vec();
+        *state.out_len.lock().unwrap() = 40;
+        run(&mut r, &host, &state, 400);
+        assert!(*host.ended.lock().unwrap(), "both declarations are the answer");
+    }
 
-        // The same flags, one frame later: that one is the new
-        // program's.
-        *state.modes.lock().unwrap() = Some((8, ready));
-        run(&mut r, &host, &state, 500);
-        assert!(*host.ended.lock().unwrap(), "a fresh frame with both flags is the answer");
-
-        // And flags alone are not enough either.
+    /// And a frame that never moves does not stop it.
+    #[test]
+    fn a_held_screen_does_not_starve_the_wait() {
         let (state, env, host) = setup();
-        *state.modes.lock().unwrap() = Some((7, FLAG_ALT_SCREEN));
+        // `pane_modes` pinned: this is what a hold looks like from the
+        // shm side — the same frame, forever.
+        *state.modes.lock().unwrap() = Some((7, 0x25));
         let mut r = OpRunner::new(
-            PtyOp::new("test.ready").step(Step::await_tui_ready().timeout(Duration::from_secs(1))),
+            PtyOp::new("test.held")
+                .step(Step::await_tui_ready().timeout(Duration::from_millis(500))),
             env,
         );
-        *state.modes.lock().unwrap() = Some((9, FLAG_ALT_SCREEN));
-        run(&mut r, &host, &state, 2000);
+        // Nothing written yet when the step opens; the program writes
+        // afterwards, which is the only thing that still moves under a
+        // hold.
+        run(&mut r, &host, &state, 32);
+        *state.tail.lock().unwrap() = b"\x1b[?1049h\x1b[?2004h".to_vec();
+        *state.out_len.lock().unwrap() = 20;
+        run(&mut r, &host, &state, 300);
         assert!(
-            matches!(r.finished, Some(OpOutcome::TimedOut { .. })),
-            "without bracketed paste the newline is not safe to send"
+            *host.ended.lock().unwrap(),
+            "the wait must not depend on a frame the hold is preventing"
         );
     }
 

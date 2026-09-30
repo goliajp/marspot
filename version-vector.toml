@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.182"  # the updater is fed the product version
+shell   = "0.7.183"  # readiness reads the byte stream, not a frame a hold froze
 core    = "0.12.220"  # the title bar shows product version and core build
 session = "0.11.102"  # build.rs only watches git paths that exist
