@@ -5206,7 +5206,11 @@ Usage:\n\
     // the next focus-loss trigger.  Returns a flag we don't currently
     // consult (Step 5's `BinaryTree::has_pending` is the source of
     // truth); kept alive for the eventual UI affordance.
-    let _update_flag = marspot::updater::spawn(env!("MARSPOT_VERSION_CORE").to_string());
+    // The product version, not a layer's build number.  Feeding it the
+    // core layer's number is what kept the update channel dead: the
+    // updater compares against a release tag, and no tag was ever
+    // going to be newer than 0.12.x.
+    let _update_flag = marspot::updater::spawn(marspot::PRODUCT_VERSION.to_string());
 
     // Frame restore: the predecessor shell (self-update execv) hands
     // its exact window frame over via env so this process reopens in

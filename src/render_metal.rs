@@ -4842,11 +4842,11 @@ fn push_layout_chrome(
 /// title and in logs.
 pub fn version_label() -> String {
     // L2 (marspot-core) is the canonical marspot version — the header
-    // shows it, since the renderer is what users actually interact
-    // with. The other layers (L1 shell, L3 session) carry their own
-    // semver in version-vector.toml for operator diagnostics, but the
-    // headline number is L2's.
-    format!("v{}", env!("MARSPOT_VERSION_CORE"))
+    // Two numbers, because two questions are being asked.  The
+    // product version says which marspot this is; the core build
+    // number says whether the code someone just wrote is the code
+    // running, which is the only reason that number exists.
+    crate::version_line()
 }
 
 /// Lay a run of text starting at baseline `(x, baseline_y)` in
