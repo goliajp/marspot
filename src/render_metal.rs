@@ -712,11 +712,18 @@ pub struct ProcessPanelRender {
 /// affect rendered output.  Any change here invalidates the per-pane
 /// instance cache and forces a rebuild.  Cheap (~tens of ns) so it's
 /// run unconditionally each frame.
+/// Everything `push_session` reads, and nothing else.
+///
+/// The toolbar's hover index used to be hashed in here.  It is window
+/// state, not pane state — `push_session` does not take it and cannot
+/// see it — so moving the mouse across the toolbar changed every
+/// pane's key at once and rebuilt all of them, in a window where
+/// nothing about any pane had changed.  Whatever goes in here has to
+/// be something the cached bytes actually depend on.
 fn pane_fingerprint(
     view: &SessionView,
     rect: &CellRect,
     window_focused: bool,
-    hover_chrome_btn: Option<u8>,
     cell_w: f32,
     cell_h: f32,
 ) -> u64 {
@@ -766,7 +773,6 @@ fn pane_fingerprint(
         false.hash(&mut h);
     }
     window_focused.hash(&mut h);
-    hover_chrome_btn.hash(&mut h);
     // Layout (catches resize → cache invalidation naturally).
     (rect.x as i64).hash(&mut h);
     (rect.y_top as i64).hash(&mut h);
@@ -2777,9 +2783,7 @@ fn build_instances(
         // into the cache so the NEXT idle frame for this pane is
         // a hit.  ui_rects are NOT cached (only one pane has the
         // search overlay at a time, and rebuilding it is cheap).
-        let fp = pane_fingerprint(
-            view, rect, window_focused, hover_chrome_btn, cell_w, cell_h,
-        );
+        let fp = pane_fingerprint(view, rect, window_focused, cell_w, cell_h);
         let cur_atlas_gen = atlas.rebuild_count;
         let cur_color_gen = color_atlas.rebuild_count;
         let cur_link_gen = crate::link_probe::generation();
