@@ -3,9 +3,12 @@ name: site
 # Publish the marketing site on every push to develop.
 #
 # Static, single file, no build step and no dependencies — the same
-# posture as the product.  Pages serves `site/` as-is; `site/CNAME`
-# carries the domain, which still needs a DNS record pointing at
-# GitHub Pages before it answers.
+# posture as the product.
+#
+# No CNAME file yet on purpose.  Adding one makes Pages take the
+# custom domain immediately and redirect the github.io address to it,
+# so until DNS points here the site would be unreachable at both
+# names.  It goes in when the records do.
 
 on:
   push:
