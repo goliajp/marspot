@@ -362,10 +362,16 @@ fn what_measuring_text_costs() {
 /// What building the tree costs, by what the node is made of.
 ///
 /// After layout stopped laying children out twice and stopped carrying
-/// copies of its subtree, building the tree is nearly the whole frame:
-/// 201 of the dev panel's 215.  The three candidate architectures for
-/// the declarative tree are all really about this number, so it gets
-/// the same treatment layout got — split it before choosing.
+/// copies of its subtree, building the tree is the largest phase of
+/// the 40-row tree above: 201 of its 769.
+///
+/// Note which tree that is.  `one_dev_panel_frame` measures a
+/// different, smaller tree and reports one number for all three
+/// phases; its split has never been measured, because the panel's
+/// builders are private to it.  Reading 201 against the dev panel's
+/// 215 — as an earlier version of this comment did — puts two trees'
+/// numbers in one sentence and makes layout look like 14 allocations
+/// when it is 402 on the tree it was measured on.
 ///
 /// Four trees of 64 nodes each, differing only in what a node holds.
 #[test]
