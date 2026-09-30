@@ -213,6 +213,62 @@ struct URVOut {
     float4 shadow_color;
 };
 
+// The same rounded rect, read straight out of a `Scene` slab.
+//
+// `golia-ui-core` publishes this layout: 48 bytes, colours packed to
+// four bytes, offsets fixed by `UiRectInstance::encode`.  The struct
+// below is that byte layout spelled in Metal, and the offsets are
+// asserted on the Rust side rather than trusted here.  It exists so a
+// backend reads the published format instead of a parallel one that
+// happens to agree today.
+//
+// Shares `URVOut` and therefore `ui_rect_fragment` with the float
+// path: only the way the instance is read differs.
+struct SceneUiRect {
+    float2 origin;          //  0
+    float2 size;            //  8
+    uchar4 fill;            // 16
+    uchar4 border;          // 20
+    float  radius;          // 24
+    float  border_width;    // 28
+    float2 shadow_offset;   // 32
+    uchar4 shadow_color;    // 40
+    float  shadow_blur;     // 44
+};
+
+vertex URVOut scene_ui_rect_vertex(
+    uint vid [[vertex_id]],
+    uint iid [[instance_id]],
+    device const SceneUiRect* rects [[buffer(0)]],
+    constant float2& viewport_px [[buffer(1)]]
+) {
+    SceneUiRect r = rects[iid];
+    float2 padded_origin = r.origin - float2(r.shadow_blur, r.shadow_blur);
+    float2 padded_size = r.size + float2(2.0 * r.shadow_blur, 2.0 * r.shadow_blur);
+    float2 px = padded_origin + padded_size * corners[vid];
+
+    float2 ndc = (px / viewport_px) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+
+    URVOut o;
+    o.position = float4(ndc, 0.0, 1.0);
+    o.quad_uv = corners[vid];
+    o.padded_size = padded_size;
+    o.fill_size = r.size;
+    o.fill_color = float4(r.fill) / 255.0;
+    o.border_color = float4(r.border) / 255.0;
+    o.corner_radius = r.radius;
+    o.border_width = r.border_width;
+    o.shadow_blur = r.shadow_blur;
+    // The float path carries `shadow_alpha` as a separate field, but
+    // its only producer sets it to the shadow colour's own alpha
+    // (`ui_rect_instance_from_rect`), so reading it from there is the
+    // same value and not an approximation.
+    o.shadow_alpha = float(r.shadow_color.a) / 255.0;
+    o.shadow_color = float4(r.shadow_color) / 255.0;
+    return o;
+}
+
 vertex URVOut ui_rect_vertex(
     uint vid [[vertex_id]],
     uint iid [[instance_id]],

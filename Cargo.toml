@@ -78,6 +78,12 @@ bench-pty = ["marspot-term/bench-pty"]
 # lib re-exports it (`pub use marspot_term::*`) so existing
 # `marspot::grid::...` paths keep resolving.
 marspot-term = { path = "crates/marspot-term" }
+
+# The scene format a backend draws from.  In-tree, ours, zero deps —
+# not a third-party dependency, and it carries no reason-to-exist
+# comment for that reason.  The renderer reads its published byte
+# layout rather than a parallel struct that happens to agree.
+golia-ui-core = { path = "crates/ui/core" }
 libc = "0.2"
 objc2 = "0.6"
 # 0.3 framework crates dropped the "all" feature — the defaults now

@@ -917,6 +917,9 @@ pub struct MetalRenderer {
     /// chrome sits over the grid while text on top of the panel
     /// (which goes through `glyphs_scratch`) reads correctly.
     ui_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// The same rects, read out of a `Scene` slab.  Built alongside so
+    /// the two paths can be held against each other on real pixels.
+    scene_ui_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Shared font handling — same data the AppKit renderer uses.
     font: FontCache,
     /// The `ui::chrome_scale` the fonts above were built for.  A
@@ -1030,6 +1033,7 @@ impl MetalRenderer {
         let fg_sampler = build_fg_sampler(&device)?;
         let dot_pipeline = build_dot_pipeline(&device, &library)?;
         let ui_pipeline = build_ui_pipeline(&device, &library)?;
+        let scene_ui_pipeline = build_scene_ui_pipeline(&device, &library)?;
         let font = FontCache::build()?;
         // 4096×4096 R8 atlas = 16 MiB (Phase 2 bump from 2048²).
         // Pre-bump 2048² fit ~6000 Menlo 13pt 2× glyphs; Phase 2
@@ -1128,6 +1132,7 @@ impl MetalRenderer {
             fg_sampler,
             dot_pipeline,
             ui_pipeline,
+            scene_ui_pipeline,
             font,
             atlas,
             color_atlas,
@@ -1165,6 +1170,7 @@ impl MetalRenderer {
         let fg_sampler = build_fg_sampler(&device)?;
         let dot_pipeline = build_dot_pipeline(&device, &library)?;
         let ui_pipeline = build_ui_pipeline(&device, &library)?;
+        let scene_ui_pipeline = build_scene_ui_pipeline(&device, &library)?;
         let font = FontCache::build()?;
         // 4096×4096 R8 atlas = 16 MiB (Phase 2 bump from 2048²).
         // Pre-bump 2048² fit ~6000 Menlo 13pt 2× glyphs; Phase 2
@@ -1194,6 +1200,7 @@ impl MetalRenderer {
             fg_sampler,
             dot_pipeline,
             ui_pipeline,
+            scene_ui_pipeline,
             font,
             atlas,
             color_atlas,
@@ -6187,11 +6194,95 @@ fn build_dot_pipeline(
         .map_err(|e| format!("newRenderPipelineState (dot) error: {:?}", e))
 }
 
-fn build_ui_pipeline(
+/// The rounded-rect pipeline that reads a `Scene` slab.
+///
+/// Same descriptor, same fragment function; the only difference is a
+/// vertex function that reads the published 48-byte layout instead of
+/// the renderer's own 80-byte one.
+/// One canvas's rounded rects, written into a `Scene`.
+///
+/// This is the bridge that makes the published format load-bearing:
+/// the bytes the GPU reads come from `UiRectInstance::encode` in
+/// `golia-ui-core`, not from a struct in this file that happens to
+/// agree with it.  If the two ever disagree, the pixels do.
+///
+/// The caller owns the slab and the layer array, which is the shape
+/// the format asks for — they come from a buffer the renderer already
+/// has rather than being allocated here.
+fn write_canvas_rects_into_scene(
+    canvas: &crate::ui::core::canvas::Canvas,
+    slab: &mut [u8],
+    layers: &mut [golia_ui_core::scene::Layer],
+    clip: golia_ui_core::RectPx,
+) -> Option<(u32, u32)> {
+    use crate::ui::core::canvas::Primitive;
+    use golia_ui_core::scene::{Scene, UiRectInstance};
+
+    let mut scene = Scene::new(slab, layers);
+    let mut layer = scene.layer(clip, 0)?;
+    {
+        let mut run = layer.ui_rects();
+        for p in canvas.primitives() {
+            let Primitive::Rect(r) = p else { continue };
+            let (border_w, border_c) = r
+                .border
+                .map(|(w, c)| (w as f32, rgba8_of(c)))
+                .unwrap_or((0.0, golia_ui_core::Rgba8::TRANSPARENT));
+            let (blur, offset, shadow_c) = r
+                .shadow
+                .map(|(b, o, c)| (b as f32, o, rgba8_of(c)))
+                .unwrap_or((0.0, (0.0, 0.0), golia_ui_core::Rgba8::TRANSPARENT));
+            run.push(UiRectInstance {
+                origin: [r.x as f32, r.y as f32],
+                size: [r.w as f32, r.h as f32],
+                fill: rgba8_of(r.fill),
+                border: border_c,
+                radius: r.radius as f32,
+                border_width: border_w,
+                shadow_offset: [offset.0 as f32, offset.1 as f32],
+                shadow_color: shadow_c,
+                shadow_blur: blur,
+            });
+        }
+    }
+    let runs = scene.layers()[0].runs[golia_ui_core::scene::Kind::UiRect as usize];
+    if scene.overflowed() {
+        return None;
+    }
+    Some((runs.offset, runs.count))
+}
+
+fn rgba8_of(c: crate::ui::core::Color) -> golia_ui_core::Rgba8 {
+    let [r, g, b, a] = c.to_rgba_f32();
+    golia_ui_core::Rgba8::rgba(
+        (r * 255.0).round().clamp(0.0, 255.0) as u8,
+        (g * 255.0).round().clamp(0.0, 255.0) as u8,
+        (b * 255.0).round().clamp(0.0, 255.0) as u8,
+        (a * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+fn build_scene_ui_pipeline(
     device: &ProtocolObject<dyn MTLDevice>,
     library: &ProtocolObject<dyn MTLLibrary>,
 ) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
-    let vfn = pipeline_function(library, "ui_rect_vertex")?;
+    build_ui_pipeline_with(device, library, "scene_ui_rect_vertex")
+}
+
+fn build_ui_pipeline(
+
+    device: &ProtocolObject<dyn MTLDevice>,
+    library: &ProtocolObject<dyn MTLLibrary>,
+) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
+    build_ui_pipeline_with(device, library, "ui_rect_vertex")
+}
+
+fn build_ui_pipeline_with(
+    device: &ProtocolObject<dyn MTLDevice>,
+    library: &ProtocolObject<dyn MTLLibrary>,
+    vertex_fn: &str,
+) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
+    let vfn = pipeline_function(library, vertex_fn)?;
     let ffn = pipeline_function(library, "ui_rect_fragment")?;
 
     let descriptor = MTLRenderPipelineDescriptor::new();
@@ -6890,6 +6981,127 @@ impl MetalRenderer {
     /// return the BGRA8 bytes.  Pairs with the
     /// `canvas_*` tests below to verify submission-order
     /// invariants on pixel readback.
+    /// Draw a canvas's rounded rects twice — once from this file's
+    /// instance struct, once from a `Scene` slab — and hand back both
+    /// bitmaps.
+    ///
+    /// The Scene format is a byte layout with a published encoder and,
+    /// until now, no reader: a format nothing consumes is a format
+    /// nothing has checked.  This puts a real GPU on the other end of
+    /// it.  If the Metal struct and `UiRectInstance::encode` ever
+    /// disagree about an offset, these two bitmaps stop matching.
+    pub fn render_ui_rects_both_ways(
+        &mut self,
+        width: u32,
+        height: u32,
+        canvas: &crate::ui::core::canvas::Canvas,
+    ) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let mut slab = vec![0u8; 64 * 1024];
+        let mut layers = vec![golia_ui_core::scene::Layer::default(); 4];
+        let clip = golia_ui_core::RectPx::new(0.0, 0.0, width as f32, height as f32);
+        let (offset, count) = write_canvas_rects_into_scene(canvas, &mut slab, &mut layers, clip)
+            .ok_or_else(|| "the scene overflowed its slab".to_string())?;
+
+        let mut floats: Vec<UiRectInstance> = Vec::new();
+        for p in canvas.primitives() {
+            if let crate::ui::core::canvas::Primitive::Rect(r) = p {
+                floats.push(ui_rect_instance_from_rect(r));
+            }
+        }
+        if floats.len() as u32 != count {
+            return Err(format!("{} rects one way, {count} the other", floats.len()));
+        }
+
+        let viewport_px: [f32; 2] = [width as f32, height as f32];
+        let a = self.draw_ui_instances(
+            width, height, ui_rects_as_bytes(&floats), floats.len() as u32,
+            &self.ui_pipeline.clone(), &viewport_px,
+        )?;
+        let from = offset as usize;
+        let to = from + count as usize * 48;
+        let b = self.draw_ui_instances(
+            width, height, &slab[from..to], count,
+            &self.scene_ui_pipeline.clone(), &viewport_px,
+        )?;
+        Ok((a, b))
+    }
+
+    /// One render pass of `count` instances through `pipeline`, read
+    /// back as BGRA bytes.
+    fn draw_ui_instances(
+        &mut self,
+        width: u32,
+        height: u32,
+        instances: &[u8],
+        count: u32,
+        pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+        viewport_px: &[f32; 2],
+    ) -> Result<Vec<u8>, String> {
+        let descriptor = unsafe {
+            objc2_metal::MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                TARGET_FORMAT, width as usize, height as usize, false,
+            )
+        };
+        descriptor.setUsage(
+            objc2_metal::MTLTextureUsage::RenderTarget | objc2_metal::MTLTextureUsage::ShaderRead,
+        );
+        descriptor.setStorageMode(objc2_metal::MTLStorageMode::Managed);
+        let texture = self.device.newTextureWithDescriptor(&descriptor)
+            .ok_or_else(|| "newTextureWithDescriptor returned nil".to_string())?;
+        let cmd = self.queue.commandBuffer()
+            .ok_or_else(|| "commandBuffer returned nil".to_string())?;
+
+        let buf = make_instance_buffer(&self.device, instances);
+        let pass = MTLRenderPassDescriptor::new();
+        unsafe {
+            let color = pass.colorAttachments().objectAtIndexedSubscript(0);
+            color.setTexture(Some(ProtocolObject::from_ref(&*texture)));
+            color.setLoadAction(MTLLoadAction::Clear);
+            color.setClearColor(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 });
+            color.setStoreAction(MTLStoreAction::Store);
+        }
+        if let Some(enc) = cmd.renderCommandEncoderWithDescriptor(&pass) {
+            enc.setRenderPipelineState(pipeline);
+            if let Some(b) = &buf {
+                unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
+            }
+            unsafe {
+                enc.setVertexBytes_length_atIndex(
+                    NonNull::new(viewport_px.as_ptr() as *mut c_void).unwrap(),
+                    std::mem::size_of::<[f32; 2]>(),
+                    1,
+                );
+                enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                    MTLPrimitiveType::Triangle, 0, 6, count as usize,
+                );
+            }
+            enc.endEncoding();
+        }
+
+        let blit = cmd.blitCommandEncoder()
+            .ok_or_else(|| "blitCommandEncoder returned nil".to_string())?;
+        let resource: &ProtocolObject<dyn objc2_metal::MTLResource> =
+            ProtocolObject::from_ref(&*texture);
+        blit.synchronizeResource(resource);
+        blit.endEncoding();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        let bytes_per_row = (width as usize) * 4;
+        let mut bytes = vec![0u8; bytes_per_row * height as usize];
+        let region = objc2_metal::MTLRegion {
+            origin: objc2_metal::MTLOrigin { x: 0, y: 0, z: 0 },
+            size: objc2_metal::MTLSize { width: width as usize, height: height as usize, depth: 1 },
+        };
+        unsafe {
+            texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                NonNull::new(bytes.as_mut_ptr() as *mut c_void).unwrap(),
+                bytes_per_row, region, 0,
+            );
+        }
+        Ok(bytes)
+    }
+
     pub fn render_canvas_to_bitmap(
         &mut self,
         width: u32,
@@ -8788,6 +9000,84 @@ mod tests {
         // refused rather than panicking.
         assert!(pool.upload(&device, 0, &[]).is_none());
         assert!(pool.upload(&device, INSTANCE_SLOTS, &small).is_none());
+    }
+
+    /// A real GPU reads the published Scene bytes and gets the same
+    /// picture.
+    ///
+    /// `golia-ui-core` defines `UiRectInstance` as 48 bytes at fixed
+    /// offsets, and until now nothing read them — the format was
+    /// asserted by its own encoder and by tests written against that
+    /// encoder, which is a closed loop.  This draws the same rects
+    /// twice, once from the renderer's own 80-byte struct through
+    /// `ui_rect_vertex` and once from a `Scene` slab through
+    /// `scene_ui_rect_vertex`, and requires the two frames to be the
+    /// same picture.  Move one offset on either side and they stop
+    /// being it.
+    #[test]
+    fn a_gpu_reads_the_published_scene_bytes() {
+        use crate::ui::core::canvas::{Canvas, ParentRect};
+        use crate::ui::core::{Color, Length, Pt};
+
+        let Ok(mut r) = MetalRenderer::new_headless() else {
+            eprintln!("skipping: no Metal device on this host");
+            return;
+        };
+
+        // Every field of the layout gets a distinct value, so an
+        // offset that is wrong by four bytes shows up as a wrong
+        // colour or a wrong radius rather than as nothing.
+        let (w, h) = (256u32, 128u32);
+        let mut canvas = Canvas::new(1.0, ParentRect::window(w as f64, h as f64));
+        canvas.rect()
+            .at(Length::Pt(16.0), Length::Pt(16.0))
+            .size(Length::Pt(80.0), Length::Pt(40.0))
+            .fill(Color::rgba(200, 60, 40, 1.0))
+            .radius(Pt(9.0))
+            .border(Pt(2.0), Color::rgba(40, 200, 90, 1.0))
+            .draw();
+        canvas.rect()
+            .at(Length::Pt(140.0), Length::Pt(30.0))
+            .size(Length::Pt(60.0), Length::Pt(60.0))
+            .fill(Color::rgba(30, 90, 220, 0.5))
+            .radius(Pt(30.0))
+            .shadow(Pt(6.0), (Pt(0.0), Pt(3.0)), Color::rgba(0, 0, 0, 0.75))
+            .draw();
+
+        let (a, b) = r.render_ui_rects_both_ways(w, h, &canvas).expect("both renders");
+        assert_eq!(a.len(), b.len());
+
+        let differing = a.iter().zip(b.iter()).filter(|(x, y)| x != y).count();
+        let worst = a.iter().zip(b.iter())
+            .map(|(x, y)| (*x as i32 - *y as i32).abs())
+            .max()
+            .unwrap_or(0);
+        eprintln!(
+            "[scene] {differing} of {} bytes differ, worst by {worst}",
+            a.len()
+        );
+
+        // What the packed format costs, measured rather than assumed:
+        // `Rgba8` is eight bits a channel and `Color` holds alpha as an
+        // f32, so an alpha of 0.5 becomes 128/255 = 0.50196 and the
+        // pixels it touches land one level off.  One level is the
+        // whole disagreement — an offset read wrong would not be
+        // bounded like this, it would be a wrong colour or a wrong
+        // shape.
+        assert!(
+            worst <= 1,
+            "the two paths disagree by {worst}, which is more than rounding"
+        );
+        assert!(
+            differing * 100 < a.len(),
+            "{differing} of {} bytes differ; quantisation touches edges, not the picture",
+            a.len()
+        );
+
+        // And the frame has to contain something, or two blank
+        // textures would agree perfectly.
+        let lit = a.chunks(4).filter(|px| px[0] > 8 || px[1] > 8 || px[2] > 8).count();
+        assert!(lit > 1000, "the rects were not drawn: only {lit} lit pixels");
     }
 
     /// Verify the basic Metal plumbing works on this machine — proves
