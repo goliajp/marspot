@@ -40,9 +40,27 @@
 #     from the snapshot (others still update).
 
 set -euo pipefail
+
+# One tool does the copying, for every session and every repo: it takes
+# the exclude list from git itself, so a path this repo ignores is never
+# sent and never deleted on the far side -- which is how the remote
+# target/ survives a sync from a tree that has none.
+remote_sync() {
+  local tool
+  tool="$(command -v remote-sync || true)"
+  [[ -n $tool ]] || tool="$HOME/workspace/goliajp/golia-claude-configs/bin/remote-sync"
+  [[ -x $tool ]] || {
+    echo "remote-sync not found (looked on PATH and in $tool)" >&2
+    exit 1
+  }
+  "$tool" "$@"
+}
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST="${HOST:-mini}"
-REMOTE_DIR="${REMOTE_DIR:-bench-marspot}"
+REMOTE_NAME="${REMOTE_NAME:-bench-marspot}"
+# remote-sync always lands in ~/work/<name>, so that is where the
+# run has to look.
+REMOTE_DIR="work/$REMOTE_NAME"
 LOCK_LOCAL="/tmp/marspot-remote-measure.lock.d"
 REMOTE_LOCK="/tmp/marspot-remote-measure.lock.d"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -102,22 +120,7 @@ if [[ "$HEALTH" == *"-1712"* ]] || [[ "$HEALTH" == *"timed out"* ]] || [[ "$HEAL
 fi
 
 # ---- sync ------------------------------------------------------------
-echo "==> rsync → $HOST:~/$REMOTE_DIR/"
-# Not `-a`: it keeps the local mtimes, and a file that arrives older
-# than the remote's last build makes cargo decide nothing changed — the
-# run then measures the previous binary and says it passed.  Content is
-# what matters here, so compare by checksum and let the copies take the
-# remote's own clock.
-rsync -rlpDz --checksum --delete --quiet \
-  --exclude '/target/' \
-  --exclude '/build/' \
-  --exclude '/references/*' --include '/references/README.md' \
-  --exclude '/bench/remote-runs/' \
-  --exclude '/bench/results/' \
-  --exclude '/bench/scenarios/*.bin' \
-  --exclude '.DS_Store' \
-  --exclude-from="$HOME/.config/git/ignore" \
-  "$ROOT/" "$HOST:$REMOTE_DIR/"
+remote_sync "$HOST" --name "$REMOTE_NAME"
 
 # ---- run + emit JSON to stdout, capture locally ----------------------
 mkdir -p "$OUT_DIR"
