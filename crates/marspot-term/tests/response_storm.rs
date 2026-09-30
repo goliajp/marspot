@@ -39,10 +39,19 @@ fn asking_forever_is_a_loop() {
     let mut t = Terminal::new(40, 8);
     let start = std::time::Instant::now();
     // Keep asking for longer than the sustained window.
-    while start.elapsed() < std::time::Duration::from_millis(1_200) {
+    //
+    // No sleeping. The window is 100 ms wide and wants five in it, and
+    // a sleep asked for in milliseconds is a floor, not a promise: the
+    // first version of this slept 5 ms between single queries, which
+    // is twenty to a window on an idle machine and four on a busy one
+    // -- it passed here and failed on CI. Sleeping less does not fix
+    // it, it only makes the overshoot that empties the window rarer.
+    // Feeding without pause leaves the window full at every instant,
+    // and the only thing the test then needs from the clock is that a
+    // second and a half goes by, which it must.
+    while start.elapsed() < std::time::Duration::from_millis(1_500) {
         t.feed(QUERY);
         let _ = t.take_response();
-        std::thread::sleep(std::time::Duration::from_millis(5));
     }
     assert!(warned(&t), "a storm that does not stop is what this is for");
 }
