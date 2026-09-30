@@ -325,3 +325,24 @@ fn the_guide_documents_only_flags_the_binary_takes() {
         );
     }
 }
+
+/// The button and the small print have to agree.
+///
+/// There is no signed build published, so the page says so and its
+/// first button sends people to the source instead. When the first
+/// release lands, both change together -- a `Download` button above a
+/// line admitting there is nothing to download is the shape this
+/// catches.
+#[test]
+fn the_page_does_not_offer_a_download_it_cannot_deliver() {
+    let admits_none = SITE.contains("no signed build published yet");
+    let offers_download = SITE.contains(">Download<");
+    assert!(
+        !(admits_none && offers_download),
+        "the page offers a Download and says there is no build to download"
+    );
+    assert!(
+        admits_none || offers_download,
+        "the page neither offers a build nor says why not -- one of the two has to be true"
+    );
+}
