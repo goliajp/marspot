@@ -499,22 +499,43 @@ pub const MAX_PAYLOAD: usize = 64 * 1024;
 /// turn a second, which reads as motion without being a strobe — and
 /// it decouples the animation from the tick, which is 16 ms while a
 /// pane is drawing and ~250 ms when the window is idle.
-/// How long [`StepKind::Submit`] waits for the composer to redraw with
-/// the pasted text in it before sending the return anyway.  Generous:
-/// the only cost of waiting is that the sentence lands a moment later,
-/// and the cost of not waiting is a message nobody sent.
-const SUBMIT_ECHO_GRACE: Duration = Duration::from_millis(1500);
-
-/// How long the pane has to stay quiet before the return counts as
-/// arriving after the paste rather than inside it.
+/// How long [`StepKind::Submit`] waits for the pasted text to appear
+/// before sending the return anyway.
 ///
-/// "It wrote something back" was the first attempt and it was not
-/// evidence of anything: claude's interface repaints on its own, so
-/// any byte satisfied it.  On 2026-09-30 a pane's return went out
-/// 26 ms after the paste on that basis and the composer took it as a
-/// newline, exactly as when the two were one write.  What is wanted
-/// is that the repaint *finished*.
+/// Eight seconds, because the thing being waited for is a busy program
+/// getting round to its input queue.  A pane mid-task can take
+/// seconds; 1.5 was enough for an idle one and not for that, which is
+/// what left a sentence in a composer on 2026-09-30 after the quiet
+/// window had already been added.  Sending late costs a slow sentence;
+/// sending early costs a message nobody sent.
+const SUBMIT_ECHO_GRACE: Duration = Duration::from_millis(8_000);
+
+/// How long the pane has to stay quiet, *after the text has shown up*,
+/// before the return counts as arriving behind the paste.
+///
+/// Two attempts got here.  "It wrote something back" was not evidence
+/// of anything — that interface repaints on its own, so any byte
+/// satisfied it and a return went out 26 ms behind its paste.  Adding
+/// this quiet window fixed four panes out of five; the fifth was
+/// mid-task, painted 104 bytes of something else, and went quiet
+/// without ever having drawn the paste.  Quiet is a proxy.  The text
+/// on screen is the thing itself, and this now only says the repaint
+/// that carried it has finished.
 const SUBMIT_QUIET: Duration = Duration::from_millis(250);
+
+/// The piece of a submitted line to look for coming back.
+///
+/// Short, and taken from the front: the composer wraps a long line, so
+/// the further in a fragment sits the likelier a line break lands in
+/// the middle of it.  A prefix that survives wrapping is enough —
+/// nothing else in the pane is going to be painting it.
+fn submit_needle(line: &str) -> &[u8] {
+    let mut end = line.len().min(12);
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    &line.as_bytes()[..end]
+}
 
 /// What a [`StepKind::Submit`] has seen since its paste went out.
 #[derive(Clone, Copy, Debug)]
@@ -523,6 +544,9 @@ pub struct SubmitState {
     base_len: u64,
     seen_len: u64,
     changed_at: SystemTime,
+    /// Set once the pasted text has been seen in the pane's output.
+    /// Until then there is nothing to be quiet after.
+    showed_at: Option<SystemTime>,
 }
 
 const SPINNER_FRAME: Duration = Duration::from_millis(125);
@@ -880,6 +904,7 @@ impl OpRunner {
                             base_len: base,
                             seen_len: base,
                             changed_at: now,
+                            showed_at: None,
                         });
                     }
                     return false;
@@ -896,6 +921,22 @@ impl OpRunner {
                 // that repaints on every tick would otherwise keep
                 // resetting the quiet window and never reach it.
                 let expired = waited >= SUBMIT_ECHO_GRACE;
+
+                // Has the text itself come back?  A busy program gets
+                // to its input queue when it gets to it, and until it
+                // has drawn what was pasted there is nothing to be
+                // quiet after.
+                let mut showed_at = st.showed_at;
+                if showed_at.is_none() && !expired {
+                    let fresh = len.saturating_sub(st.base_len) as usize;
+                    if fresh > 0 {
+                        let tail = self.env.output_tail(sid, fresh.min(256 * 1024));
+                        if contains(&tail, submit_needle(line)) {
+                            showed_at = Some(now);
+                        }
+                    }
+                }
+
                 if !expired
                     && len != st.seen_len
                     && let Some(StepKind::Submit { pasted: Some(p), .. }) =
@@ -903,18 +944,20 @@ impl OpRunner {
                 {
                     p.seen_len = len;
                     p.changed_at = now;
+                    p.showed_at = showed_at;
                     return false;
                 }
-                let drew = len > st.base_len;
                 let quiet = now.duration_since(st.changed_at).unwrap_or_default();
-                if !expired && !(drew && quiet >= SUBMIT_QUIET) {
+                let settled = showed_at.is_some() && quiet >= SUBMIT_QUIET;
+                if !expired && !settled {
                     return false;
                 }
                 host.log(
                     LogLevel::Info,
                     &format!("{}.submit", self.op.name),
                     &format!(
-                        "sid={sid} drew={drew} painted={}B quiet={}ms after={}ms",
+                        "sid={sid} showed={} painted={}B quiet={}ms after={}ms",
+                        showed_at.is_some(),
                         len.saturating_sub(st.base_len),
                         quiet.as_millis(),
                         waited.as_millis()
@@ -1977,18 +2020,18 @@ mod tests {
         );
     }
 
-    /// The text leaves first; the return waits for the pane to finish
-    /// repainting.
+    /// The text leaves first; the return waits for the text to come
+    /// back and the repaint that carried it to finish.
     ///
-    /// Glued together, claude's composer reads the return as part of
-    /// the pasted block and turns it into a second line — the sentence
-    /// sits there unsent.  The first attempt at a gate here was "the
-    /// pane wrote something back", which is not evidence: that
-    /// interface repaints on its own, so any byte satisfied it and a
-    /// return went out 26 ms behind the paste to exactly the same
-    /// effect.  What is wanted is that the repaint stopped.
+    /// Three attempts got to this.  Glued together, the composer reads
+    /// the return as part of the pasted block and turns it into a
+    /// second line.  "It wrote something back" was not evidence — that
+    /// interface repaints on its own.  Adding a quiet window fixed
+    /// four panes out of five; the fifth was mid-task, painted 104
+    /// bytes of something else, and went quiet without ever having
+    /// drawn the paste.  So the gate is the text itself.
     #[test]
-    fn the_return_waits_for_the_repaint_to_finish() {
+    fn the_return_waits_for_the_text_to_come_back() {
         use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
         let (state, env, host) = setup();
         *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE));
@@ -2001,30 +2044,37 @@ mod tests {
             "the paste goes out on its own, wrapped"
         );
 
-        // The pane is painting.  Output keeps arriving, and while it
-        // does the return must not go out — this is the case that
-        // used to satisfy the gate on its first byte.
-        for tick in 1..=8u64 {
-            *state.out_len.lock().unwrap() = 64 * tick;
-            run(&mut r, &host, &state, 48);
-            assert_eq!(
-                state.sent.lock().unwrap().len(),
-                1,
-                "a pane still painting is not a pane that has finished (tick {tick})"
-            );
-        }
+        // The pane paints, and goes quiet, without the text in it —
+        // the case that got through the previous gate.
+        *state.tail.lock().unwrap() = b"\x1b[2K\x1b[38;5;8m  Searched for 1 pattern".to_vec();
+        *state.out_len.lock().unwrap() = 104;
+        run(&mut r, &host, &state, SUBMIT_QUIET.as_millis() as u64 * 3);
+        assert_eq!(
+            state.sent.lock().unwrap().len(),
+            1,
+            "a quiet pane that never drew the paste has not consumed it"
+        );
 
-        // It stops.
+        // Now it gets round to its input queue.
+        *state.tail.lock().unwrap() = b"\x1b[2K> carry on".to_vec();
+        *state.out_len.lock().unwrap() = 300;
+        run(&mut r, &host, &state, 32);
+        assert_eq!(state.sent.lock().unwrap().len(), 1, "and the repaint has to finish");
+
         run(&mut r, &host, &state, SUBMIT_QUIET.as_millis() as u64 + 64);
         let sent = state.sent.lock().unwrap().clone();
         assert_eq!(sent.len(), 2, "{sent:?}");
         assert_eq!(sent[1], b"\r".to_vec(), "and it is a return by itself");
-        assert!(*host.ended.lock().unwrap(), "the step is done once the return is out");
+        assert!(*host.ended.lock().unwrap());
     }
 
-    /// A program that paints nothing at all still gets its return.
+    /// A program that never gets to it still gets its return.
+    ///
+    /// Late is the safe direction: a sentence that lands slowly is a
+    /// slow sentence, and one that never lands is the op hanging on a
+    /// pane nobody is watching.
     #[test]
-    fn a_silent_pane_gets_its_return_after_the_grace() {
+    fn a_pane_that_never_shows_the_text_gets_its_return_at_the_grace() {
         use marspot_term::grid_shm::FLAG_BRACKETED_PASTE;
         let (state, env, host) = setup();
         *state.modes.lock().unwrap() = Some((1, FLAG_BRACKETED_PASTE));
@@ -2033,27 +2083,13 @@ mod tests {
                 .step(Step::submit("carry on").timeout(SUBMIT_ECHO_GRACE * 4)),
             env,
         );
-        run(&mut r, &host, &state, SUBMIT_ECHO_GRACE.as_millis() as u64 * 2);
-        let sent = state.sent.lock().unwrap().clone();
-        assert_eq!(sent.len(), 2, "waiting forever is worse than a late return: {sent:?}");
-        assert_eq!(sent[1], b"\r".to_vec());
-    }
-
-    /// And a pane that never stops painting is not held for ever.
-    #[test]
-    fn a_pane_that_never_settles_still_gets_its_return() {
-        use marspot_term::grid_shm::FLAG_BRACKETED_PASTE;
-        let (state, env, host) = setup();
-        *state.modes.lock().unwrap() = Some((1, FLAG_BRACKETED_PASTE));
-        let mut r = OpRunner::new(
-            PtyOp::new("test.submit")
-                .step(Step::submit("carry on").timeout(SUBMIT_ECHO_GRACE * 4)),
-            env,
-        );
+        // Busy: painting something else on every tick, for longer than
+        // the grace.  This also covers the pane that never settles —
+        // the quiet window is reset every tick and never reached.
         run(&mut r, &host, &state, 32);
-        // Output on every single tick, for longer than the grace.
-        for tick in 1..=200u64 {
+        for tick in 1..=800u64 {
             *state.out_len.lock().unwrap() = 8 * tick;
+            *state.tail.lock().unwrap() = b"spinner".to_vec();
             run(&mut r, &host, &state, 16);
             if state.sent.lock().unwrap().len() == 2 {
                 break;
@@ -2062,6 +2098,20 @@ mod tests {
         let sent = state.sent.lock().unwrap().clone();
         assert_eq!(sent.len(), 2, "the grace is the upper bound, painting or not");
         assert_eq!(sent[1], b"\r".to_vec());
+    }
+
+    /// The needle survives the composer wrapping the line.
+    #[test]
+    fn the_needle_is_a_short_prefix_on_a_character_boundary() {
+        // Multi-byte: cutting at 12 bytes must not split a character.
+        let cn = "额度恢复了，如果有刚被打断的工作请继续";
+        let n = submit_needle(cn);
+        assert!(std::str::from_utf8(n).is_ok(), "the needle is not valid UTF-8");
+        assert!(cn.as_bytes().starts_with(n));
+        assert!(!n.is_empty() && n.len() <= 12);
+
+        // Shorter than the window is the whole line.
+        assert_eq!(submit_needle("hi"), b"hi");
     }
 
     /// A pane without bracketed paste still gets the line — there is
