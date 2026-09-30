@@ -376,7 +376,7 @@ impl Step {
     pub fn submit(line: impl Into<String>) -> Self {
         Self {
             kind: StepKind::Submit { line: line.into(), pasted: None },
-            timeout: Some(Duration::from_secs(5)),
+            timeout: Some(submit_deadline()),
             proceed_on_timeout: false,
             label: "submit",
         }
@@ -536,6 +536,27 @@ const SUBMIT_VERIFY_AFTER: Duration = Duration::from_millis(600);
 /// Three is not a retry loop, it is "the first one was eaten, and so
 /// was the second".
 const SUBMIT_MAX_RETURNS: u8 = 3;
+
+/// How long the step is allowed to take, from the four numbers above.
+///
+/// It was five seconds, flat, while the step was designed to spend up
+/// to eight waiting for the paste alone -- so it could never reach its
+/// own grace, and the log has it giving up at 5.4 and 5.6 seconds on
+/// two panes whose sentences were left sitting in their composers.
+/// The grace had been raised from 1.5 to 8 to cover a busy pane; the
+/// deadline was not, because it was written somewhere else and nothing
+/// tied them together.
+///
+/// Now it is derived, so raising any of them raises this too: wait out
+/// the paste, then the quiet, then up to three returns each followed
+/// by a look at the composer, and two seconds of slack for a pane that
+/// is slow at every one of those.
+fn submit_deadline() -> Duration {
+    SUBMIT_ECHO_GRACE
+        + SUBMIT_QUIET
+        + SUBMIT_VERIFY_AFTER * SUBMIT_MAX_RETURNS as u32
+        + Duration::from_secs(2)
+}
 
 /// Is `line` still sitting on the pane's prompt, unsent?
 ///
@@ -2686,5 +2707,52 @@ mod tests {
         // The wipe never takes the scrollback with it.
         let line = PtyCommand::new("claude").clear_screen_first(true).to_bytes().unwrap();
         assert!(!String::from_utf8(line).unwrap().contains("[3J"));
+    }
+}
+
+#[cfg(test)]
+mod submit_deadline_tests {
+    use super::*;
+
+    /// The step's deadline has to outlast the step's own patience.
+    ///
+    /// It did not: five seconds flat against an eight-second grace, so
+    /// the wait for the paste could never finish and the sentence was
+    /// left in the composer. Both numbers were right on their own; the
+    /// bug was that nothing made them agree.
+    #[test]
+    fn the_deadline_outlasts_everything_the_step_waits_for() {
+        let worst = SUBMIT_ECHO_GRACE
+            + SUBMIT_QUIET
+            + SUBMIT_VERIFY_AFTER * SUBMIT_MAX_RETURNS as u32;
+        assert!(
+            submit_deadline() > worst,
+            "a submit is given {:?} to do something that can take {:?}",
+            submit_deadline(),
+            worst
+        );
+    }
+
+    /// And the step that gets built actually carries it.
+    #[test]
+    fn a_built_submit_carries_that_deadline() {
+        let s = Step::submit("hello");
+        assert_eq!(s.timeout, Some(submit_deadline()));
+        assert!(
+            s.timeout.unwrap() > SUBMIT_ECHO_GRACE,
+            "the deadline is shorter than the grace it is supposed to contain"
+        );
+    }
+
+    /// Raising the grace has to raise the deadline with it -- that is
+    /// the whole point of deriving it. Checked by arithmetic on the
+    /// same expression rather than by editing a constant.
+    #[test]
+    fn the_two_cannot_drift_apart() {
+        let derived = SUBMIT_ECHO_GRACE
+            + SUBMIT_QUIET
+            + SUBMIT_VERIFY_AFTER * SUBMIT_MAX_RETURNS as u32
+            + Duration::from_secs(2);
+        assert_eq!(submit_deadline(), derived, "the deadline stopped being derived");
     }
 }
