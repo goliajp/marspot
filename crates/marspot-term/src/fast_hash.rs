@@ -17,7 +17,7 @@
 
 use std::hash::{BuildHasherDefault, Hasher};
 
-const FX_K: u64 = 0xf1_357a_ea2e_62a9_c5_u64;
+const FX_K: u64 = 0xf135_7aea_2e62_a9c5_u64;
 
 /// Hasher for HashMaps whose keys are SMALL and TRUSTED.
 #[derive(Default, Clone)]

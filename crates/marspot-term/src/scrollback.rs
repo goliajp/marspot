@@ -34,6 +34,12 @@ pub const LINES_PER_PAGE: usize = 256;
 /// `Scrollback::push_line` for every line that scrolls off.
 /// Trait-object dispatch costs ~1 % on emoji-dense parse benches;
 /// the enum lets the compiler inline through the match.
+// The two variants differ a lot in size and that is on purpose: this
+// enum exists to avoid trait-object dispatch on the parse hot path
+// (~1 % on emoji-dense benches), and boxing the big variant would put
+// a pointer chase back in exactly the place the enum was chosen to
+// keep clear.
+#[allow(clippy::large_enum_variant)]
 pub enum Scrollback {
     Memory(MemoryScrollback),
     /// Persistent file-backed scrollback (A1 of the pane upgrade).
@@ -403,6 +409,10 @@ impl MemoryScrollback {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn capacity(&self) -> usize {
         self.capacity
     }
@@ -709,7 +719,7 @@ impl FileScrollback {
                 ));
             }
             let version = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
-            if version < FILE_MIN_COMPAT || version > FILE_VERSION {
+            if !(FILE_MIN_COMPAT..=FILE_VERSION).contains(&version) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
@@ -741,7 +751,7 @@ impl FileScrollback {
 
         let idx_w = std::fs::OpenOptions::new()
             .read(true)
-            .write(true)
+            
             .append(true)
             .create(true)
             .open(&idx_path)?;
@@ -1065,7 +1075,7 @@ impl FileScrollback {
         bin.flush();
         let idx_w = std::fs::OpenOptions::new()
             .read(true)
-            .write(true)
+            
             .append(true)
             .create(true)
             .open(&self.idx_path)?;
@@ -1177,8 +1187,8 @@ impl FileScrollback {
             return;
         }
         // Order matters: data before the index that points at it.
-        let _ = self.bin.borrow_mut().flush();
-        let _ = self.idx.borrow_mut().flush();
+        self.bin.borrow_mut().flush();
+        self.idx.borrow_mut().flush();
         self.has_unflushed.set(false);
     }
 
@@ -1193,7 +1203,7 @@ impl FileScrollback {
     /// recent rows hit the file directly instead of having to wait
     /// for the next push_line to spill.
     pub fn flush_for_handoff(&self) {
-        let _ = self.bin.borrow_mut().flush();
+        self.bin.borrow_mut().flush();
         self.has_unflushed.set(false);
     }
 
@@ -1320,6 +1330,10 @@ impl FileScrollback {
         self.ram_cells[start..start + take].copy_from_slice(&line[..take]);
         self.ram_lens[slot] = take as u16;
         self.ram_wrapped[slot] = wrapped;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total_lines == 0
     }
 
     pub fn len(&self) -> usize {
@@ -1592,7 +1606,7 @@ impl Drop for FileScrollback {
         use std::io::{Seek, SeekFrom};
         // Flush BufWriters so any buffered bytes hit the page cache
         // before our fds close.  No fsync.  Dense idx — no sentinel.
-        let _ = self.bin.borrow_mut().flush();
+        self.bin.borrow_mut().flush();
         // Unmap any active mmap regions.
         let bp = self.bin_mmap_ptr.get();
         let bl = self.bin_mmap_len.get();
@@ -1651,10 +1665,10 @@ impl FileSnapshot {
         if idx >= self.total_lines {
             return None;
         }
-        if let Some((cached_idx, cached)) = &*self.last_read.borrow() {
-            if *cached_idx == idx {
-                return Some(std::sync::Arc::clone(cached));
-            }
+        if let Some((cached_idx, cached)) = &*self.last_read.borrow()
+            && *cached_idx == idx
+        {
+            return Some(std::sync::Arc::clone(cached));
         }
         let off = read_idx_at(&self.idx, idx).ok()?;
         let (cells, wrapped) = read_record_at(&self.bin, off).ok()?;
@@ -2072,11 +2086,11 @@ mod tests {
                     attrs: CellAttrs {
                         fg: color(k),
                         bg: color(k / 3),
-                        bold: k % 2 == 0,
-                        italic: k % 3 == 0,
-                        underline: k % 5 == 0,
-                        reverse: k % 7 == 0,
-                        dim: k % 11 == 0,
+                        bold: k.is_multiple_of(2),
+                        italic: k.is_multiple_of(3),
+                        underline: k.is_multiple_of(5),
+                        reverse: k.is_multiple_of(7),
+                        dim: k.is_multiple_of(11),
                         ..Default::default()
                     },
                 }
@@ -2196,7 +2210,7 @@ mod tests {
         assert_eq!(decode_record_cells(&body_20, 3).map(|v| v.len()), Some(3));
         let body_13 = vec![0u8; 3 * V2_CELL_BYTES];
         assert_eq!(decode_record_cells(&body_13, 3).map(|v| v.len()), Some(3));
-        assert!(decode_record_cells(&vec![0u8; 50], 3).is_none());
+        assert!(decode_record_cells(&[0u8; 50], 3).is_none());
         assert!(decode_record_cells(&[], 3).is_none());
         assert_eq!(decode_record_cells(&[], 0).map(|v| v.len()), Some(0));
         assert!(decode_record_cells(&[0u8; 20], 0).is_none());
@@ -2412,7 +2426,7 @@ mod tests {
         {
             let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 16).expect("create");
             for i in 0..5000 {
-                let ch = (b'a' + (i % 26) as u8) as u8;
+                let ch = b'a' + (i % 26) as u8;
                 sb.push_line(&fill(ch, cols), false);
             }
             assert_eq!(sb.len(), 5000);
@@ -2518,7 +2532,7 @@ mod tests {
         // the BufWriter still has not auto-flushed.
         let n = 200usize; // 200 * 59 = 11.8 KiB < 64 KiB buffer
         for i in 0..n {
-            let ch = (b'a' + (i % 26) as u8) as u8;
+            let ch = b'a' + (i % 26) as u8;
             sb.push_line(&fill(ch, cols), false);
         }
         assert_eq!(sb.len(), n);
@@ -2556,7 +2570,7 @@ mod tests {
             FileScrollback::open(tmp.bin(), tmp.idx(), cols, ram_capacity).expect("create");
         // First batch: push 20 lines, cold-read to mmap them.
         for i in 0..20 {
-            sb.push_line(&fill((b'a' + (i % 26) as u8) as u8, cols), false);
+            sb.push_line(&fill(b'a' + (i % 26) as u8, cols), false);
         }
         let first_old_idx = 5;
         let _ = sb.cell_at(first_old_idx, 0); // triggers initial mmap
@@ -2565,7 +2579,7 @@ mod tests {
         // Second batch: push another 50 lines so the file grows
         // past mmap_len_first.
         for i in 20..70 {
-            sb.push_line(&fill((b'a' + (i % 26) as u8) as u8, cols), false);
+            sb.push_line(&fill(b'a' + (i % 26) as u8, cols), false);
         }
         // Cold-read a line that landed in the second batch (now
         // aged out of ring of 4).
@@ -2901,13 +2915,13 @@ mod tests {
         // Append 5 bogus idx entries pointing past bin EOF.  The
         // bin file isn't extended — so these entries can NEVER
         // resolve to a real record.
-        let bin_size = std::fs::metadata(&tmp.bin()).unwrap().len();
+        let bin_size = std::fs::metadata(tmp.bin()).unwrap().len();
         {
             use std::io::Write;
             let mut idx = std::fs::OpenOptions::new()
-                .write(true)
+                
                 .append(true)
-                .open(&tmp.idx())
+                .open(tmp.idx())
                 .unwrap();
             for i in 0..5u64 {
                 let bogus = bin_size + 100 + i * 7;

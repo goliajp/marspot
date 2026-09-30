@@ -3428,9 +3428,7 @@ impl WindowSurfaces {
         device: &ProtocolObject<dyn objc2_metal::MTLDevice>,
     ) -> Option<Self> {
         let front = IOSurface::lookup(front_id)?;
-        let Some(back) = IOSurface::lookup(back_id) else {
-            return None;
-        };
+        let back = IOSurface::lookup(back_id)?;
         front.increment_use();
         back.increment_use();
         let tex_f = front.make_metal_texture(device);
@@ -3830,9 +3828,9 @@ struct CoreApp {
     /// RFC-003 pane sessions currently held by L1 plugins, keyed by
     /// shelld_session_id.  Membership routes L2 behaviour:
     ///   * LOCK_KEYS cap → key events forwarded as PaneSessionKey,
-    ///                     not the PTY
+    ///     not the PTY
     ///   * FREEZE_GRID cap → render keeps the last-painted instance
-    ///                       buffer for that pane (C6)
+    ///     buffer for that pane (C6)
     ///   * INPUT cap → informational; plugin writes via shelld
     pane_sessions: std::collections::HashMap<u64, PaneSessionState>,
     /// Rolling timestamps of recent Escape presses per locked session;
@@ -4618,10 +4616,10 @@ impl CoreApp {
         // we can move them around without re-borrow conflicts.
         let mut drained: Vec<Option<Pane>> =
             win!(self, wi).panes.drain(..n_in_grid).map(Some).collect();
-        for slot_idx in 0..n_in_grid {
+        for (slot_idx, slot) in new_panes.iter_mut().enumerate() {
             let from = win!(self, wi).card_slots[slot_idx];
             if from < drained.len() {
-                new_panes[slot_idx] = drained[from].take();
+                *slot = drained[from].take();
             }
         }
         // Re-insert at the head.  Any leftover (None) means the slot
@@ -4630,12 +4628,15 @@ impl CoreApp {
         // avoid panicking.
         let mut leftover: Vec<Pane> = drained.into_iter().flatten().collect();
         let mut ordered: Vec<Pane> = Vec::with_capacity(n_in_grid);
-        for i in 0..n_in_grid {
-            match new_panes[i].take() { Some(p) => {
-                ordered.push(p);
-            } _ => { if let Some(p) = leftover.pop() {
-                ordered.push(p);
-            }}}
+        for slot in new_panes.iter_mut() {
+            match slot.take() {
+                Some(p) => ordered.push(p),
+                None => {
+                    if let Some(p) = leftover.pop() {
+                        ordered.push(p);
+                    }
+                }
+            }
         }
         // Re-prepend.
         let tail_panes = std::mem::take(&mut win!(self, wi).panes);
@@ -4644,10 +4645,6 @@ impl CoreApp {
         self.reset_card_slots(wi);
     }
 
-    /// Spawn a fresh session and append it.  Refuses past
-    /// `SESSION_COUNT_HARD_CAP`.  Sized to the cell it will land in
-    /// (falling back to the first cell's shape) so the shell prompt
-    /// prints at the right width from its very first byte.
     // ─── F3+9 — right-click context menu (split-arch L2 side) ────────
 
     fn mouse_right_down(
@@ -6197,10 +6194,7 @@ impl CoreApp {
         let now = std::time::Instant::now();
         for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
             let Some(s) = pane.search.as_mut() else { continue };
-            let fire = match s.bar.debounce_until {
-                Some(t) if now >= t => true,
-                _ => false,
-            };
+            let fire = matches!(s.bar.debounce_until, Some(t) if now >= t);
             if !fire {
                 continue;
             }
@@ -6943,7 +6937,6 @@ impl CoreApp {
     /// that into a line naming the click, the box, and the text.
     fn badge_miss_report(&self, wi: usize, x_phys: f64, y_phys: f64) -> Option<String> {
         let (cell_w, _) = self.renderer.cell_dims();
-        let cell_w = cell_w;
         let padding = win!(self, wi).layout.padding;
         let title_h = win!(self, wi).layout.cell_title_h;
         let cell_count = win!(self, wi).layout.cells.len();
@@ -7002,7 +6995,6 @@ impl CoreApp {
         y_phys: f64,
     ) -> Option<usize> {
         let (cell_w, _) = self.renderer.cell_dims();
-        let cell_w = cell_w;
         let padding = win!(self, wi).layout.padding;
         let title_h = win!(self, wi).layout.cell_title_h;
         let cell_count = win!(self, wi).layout.cells.len();

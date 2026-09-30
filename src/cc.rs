@@ -87,9 +87,8 @@ fn rejoin_paragraph(lines: &[&str]) -> String {
     let mut out = String::with_capacity(lines.iter().map(|l| l.len()).sum::<usize>() + lines.len());
     out.push_str(lines[0].trim_end());
 
-    for j in 1..lines.len() {
+    for next in lines.iter().skip(1) {
         let prev_tail = last_non_space_char(&out);
-        let next = lines[j];
         let next_trimmed_start = next.trim_start();
         let next_head = next_trimmed_start.chars().next();
 
@@ -152,7 +151,6 @@ fn should_keep_break(prev_tail: Option<char>, next_trimmed: &str) -> bool {
 fn starts_with_bullet(s: &str) -> bool {
     // "- foo", "* foo", "• foo", "● foo" (cc's bullet glyph),
     // "1. foo", "2) foo", "> quoted"
-    let s = s;
     if let Some(first) = s.chars().next() {
         if matches!(first, '-' | '*' | '•' | '●' | '◆' | '◇' | '▪' | '▫' | '>') {
             // Require the marker to be followed by whitespace, else

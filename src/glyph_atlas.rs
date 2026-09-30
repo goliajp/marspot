@@ -130,7 +130,7 @@ pub const BOX_DRAWING_FONT_ID: FontId = u32::MAX;
 /// - `[0..32)`  font_id (FontId = u32; full range)
 /// - `[32..48)` glyph (CGGlyph = u16; full range)
 /// - `[48..60)` size_q (12 bits = 4096 max, room for 1024 pt × 4
-///               buckets; current PTY/chrome usage stays under 80)
+///   buckets; current PTY/chrome usage stays under 80)
 /// - `[60..62)` subpx_x (2 bits, 0..4 — Phase 4 sub-pixel bucket)
 /// - `[62..64)` flags (2 bits — `FLAG_SMOOTH` + `FLAG_SUBPX_AA`)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

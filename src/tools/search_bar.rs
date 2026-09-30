@@ -150,16 +150,9 @@ impl SearchBar {
         // Find byte range of the char left of cursor.
         let mut prev_byte = 0;
         let mut at_byte = 0;
-        let mut i = 0;
-        for (idx, c) in self.query.char_indices() {
-            if i == self.cursor - 1 {
-                prev_byte = idx;
-                at_byte = idx + c.len_utf8();
-                break;
-            }
-            i += 1;
-            // Loop runs to find the (cursor - 1)-th char.
-            let _ = idx;
+        if let Some((idx, c)) = self.query.char_indices().nth(self.cursor - 1) {
+            prev_byte = idx;
+            at_byte = idx + c.len_utf8();
         }
         // Fallback — we should always find it because cursor <= char_len.
         if at_byte == 0 {
@@ -542,8 +535,7 @@ mod tests {
         b.handle_key(&pressed_char('b'), Modifiers::default(), t);
         b.handle_key(&pressed_named(NamedKey::Home), Modifiers::default(), t);
         assert_eq!(b.cursor, 0);
-        let mut cmd = Modifiers::default();
-        cmd.super_ = true;
+        let cmd = Modifiers { super_: true, ..Default::default() };
         b.handle_key(&pressed_char('a'), cmd, t);
         assert_eq!(b.cursor, 2);
     }
@@ -552,8 +544,7 @@ mod tests {
     fn c2_other_cmd_keys_pass_through() {
         let mut b = focused_bar();
         let t = Instant::now();
-        let mut cmd = Modifiers::default();
-        cmd.super_ = true;
+        let cmd = Modifiers { super_: true, ..Default::default() };
         // Cmd+C — not handled by SearchBar, falls through.
         let d = b.handle_key(&pressed_char('c'), cmd, t);
         assert_eq!(d, InputDisposition::Pass);

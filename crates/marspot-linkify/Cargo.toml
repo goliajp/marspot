@@ -17,3 +17,6 @@ publish = false
 # for the incident-by-incident history.
 
 [dependencies]
+
+[lints]
+workspace = true

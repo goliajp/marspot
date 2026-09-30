@@ -138,7 +138,7 @@ impl WorkerCtx {
                     meta.len(),
                 ));
             }
-            cands.sort_by(|a, b| b.1.cmp(&a.1));
+            cands.sort_by_key(|c| std::cmp::Reverse(c.1));
             cands.truncate(SESSIONS_KEPT_PER_PROJECT);
             for (jsonl_path, mtime, size) in cands {
                 alive.insert(jsonl_path.clone());

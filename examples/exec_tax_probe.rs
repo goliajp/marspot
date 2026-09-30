@@ -45,7 +45,7 @@ fn main() {
 
     let mut cmd = std::process::Command::new(&bin);
     cmd.env_clear().envs(env.iter().cloned());
-    cmd.spawn().expect("spawn L3");
+    let mut child = cmd.spawn().expect("spawn L3");
 
     let mut control = marspot_term::uds_session_client::wait_and_connect(
         sid,
@@ -92,6 +92,7 @@ fn main() {
     if let Ok(e) = marspot_term::session_registry::read_session_entry(sid) {
         unsafe { libc::kill(e.pid, libc::SIGTERM) };
     }
+    let _ = child.wait();
     std::thread::sleep(std::time::Duration::from_millis(300));
     let _ = std::fs::remove_dir_all(&root);
     unsafe { libc::shm_unlink(cname.as_ptr()) };

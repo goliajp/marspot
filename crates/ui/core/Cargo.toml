@@ -9,3 +9,5 @@ description = "Platform-agnostic core of a zero-dependency Rust GUI: units, colo
 # ours; a backend brings its own FFI and never reaches back in here.
 [dependencies]
 
+[lints]
+workspace = true

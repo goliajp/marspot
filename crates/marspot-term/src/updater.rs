@@ -248,7 +248,7 @@ fn asset_filename() -> String {
     // Architecture-tagged so a GitHub Release with both arm64 + x86
     // tarballs hands us the right one.  Only aarch64 is supported
     // today, but the format anticipates a multi-arch release manifest.
-    format!("marspot-aarch64-apple-darwin.tar.gz")
+    "marspot-aarch64-apple-darwin.tar.gz".to_string()
 }
 
 /// Tiny "parse what I need" scraper.  Given a substring of the
@@ -487,10 +487,10 @@ fn find_named_file(dir: &Path, name: &str) -> Option<PathBuf> {
         if path.is_file() && path.file_name().and_then(|s| s.to_str()) == Some(name) {
             return Some(path);
         }
-        if path.is_dir() {
-            if let Some(p) = find_named_file(&path, name) {
-                return Some(p);
-            }
+        if path.is_dir()
+            && let Some(p) = find_named_file(&path, name)
+        {
+            return Some(p);
         }
     }
     None
@@ -524,14 +524,14 @@ mod tests {
         std::fs::write(pend.join("marspot-session"), b"NEW-ENGINE").unwrap();
 
         // First call promotes pending → current.
-        assert_eq!(promote_pending_session_in(&dir).unwrap(), true);
+        assert!(promote_pending_session_in(&dir).unwrap());
         assert!(!dir.join("binaries/pending/marspot-session").exists());
         assert_eq!(
             std::fs::read(dir.join("binaries/current/marspot-session")).unwrap(),
             b"NEW-ENGINE"
         );
         // Second call is a no-op (nothing staged) — never clobbers current.
-        assert_eq!(promote_pending_session_in(&dir).unwrap(), false);
+        assert!(!promote_pending_session_in(&dir).unwrap());
         assert_eq!(
             std::fs::read(dir.join("binaries/current/marspot-session")).unwrap(),
             b"NEW-ENGINE"

@@ -17,6 +17,37 @@ members = ["crates/marspot-term", "crates/marspot-session", "crates/marspot-link
 # commands cover the whole workspace; scripts still pass --workspace.
 default-members = [".", "crates/marspot-term", "crates/marspot-session", "crates/marspot-linkify", "crates/ui/core"]
 
+# Clippy's bar, written down rather than argued about.
+#
+# Everything not listed is denied in CI.  These three are allowed
+# because the codebase disagrees with them on purpose:
+#
+#   collapsible_if   — most were collapsed into let-chains and read
+#                      better for it.  What is left is four levels
+#                      deep with a comment on each, and flattening
+#                      those into one chain hides which condition the
+#                      comment belongs to.
+#   too_many_args    — the renderer and the pty-op runner pass their
+#                      inputs explicitly instead of bundling them into
+#                      a struct, so that what a function reads is
+#                      visible at the call site rather than hidden in
+#                      a field somebody else set.
+#   type_complexity  — the callback and tuple types are spelled out
+#                      where they are used; naming them would move the
+#                      shape away from the place that has to match it.
+[lints]
+workspace = true
+
+[workspace.lints.clippy]
+# clippy's own suggestion here does not compile: it rewrites
+# `chunks_exact(N)` to `as_chunks::<N>()` with a const in type
+# position and no braces, which is a syntax error.  Until the lint
+# emits something that builds, it has nothing to offer.
+chunks_exact_to_as_chunks = "allow"
+collapsible_if = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+
 [features]
 # Offscreen panel screenshots — `marspot --snapshot out.png --panel X`.
 #

@@ -100,20 +100,20 @@ fn sweep_rotated_logs(dir: &Path, age: Duration) {
         if !(s.ends_with(".log") || s.ends_with(".log.gz")) {
             continue;
         }
-        if let Ok(meta) = e.metadata() {
-            if older_than(&meta, age) {
-                let _ = fs::remove_file(e.path());
-            }
+        if let Ok(meta) = e.metadata()
+            && older_than(&meta, age)
+        {
+            let _ = fs::remove_file(e.path());
         }
     }
 }
 
 fn sweep_legacy_supervisor_log(dir: &Path, age: Duration) {
     let p = dir.join("supervisor.log");
-    if let Ok(meta) = fs::metadata(&p) {
-        if older_than(&meta, age) {
-            let _ = fs::remove_file(&p);
-        }
+    if let Ok(meta) = fs::metadata(&p)
+        && older_than(&meta, age)
+    {
+        let _ = fs::remove_file(&p);
     }
 }
 
@@ -169,10 +169,10 @@ fn sweep_dir_by_age(dir: &Path, age: Duration) {
         Err(_) => return,
     };
     for e in entries.filter_map(|e| e.ok()) {
-        if let Ok(meta) = e.metadata() {
-            if older_than(&meta, age) {
-                let _ = fs::remove_file(e.path());
-            }
+        if let Ok(meta) = e.metadata()
+            && older_than(&meta, age)
+        {
+            let _ = fs::remove_file(e.path());
         }
     }
 }

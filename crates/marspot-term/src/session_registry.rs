@@ -65,6 +65,10 @@ pub fn allocate_next_session_id() -> io::Result<u64> {
 
     let mut file = OpenOptions::new()
         .create(true)
+        // Explicitly not truncating: this file exists to be locked,
+        // and clobbering it on open would throw away whatever the
+        // holder wrote into it.
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&path)?;
@@ -137,6 +141,7 @@ pub fn try_lock_session_dir(id: u64) -> io::Result<std::fs::File> {
     let path = dir.join(".lock");
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&path)?;

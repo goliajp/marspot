@@ -206,12 +206,12 @@ pub trait FontMetricsProvider {
     /// Line height in physical pixels for one row of this font /
     /// size.  Independent of content; cached per `font` variant by
     /// the implementor.
-    fn line_h_phys<'a>(&self, font: TextFontSpec) -> f64;
+    fn line_h_phys(&self, font: TextFontSpec) -> f64;
     /// Total advance (physical pixels) the renderer will paint for
     /// `text` in this font.  For Mono this is just
     /// `text_width_cells × cell_w_phys`; for Ui this is the sum of
     /// CTLine-shaped glyph advances.
-    fn advance_phys<'a>(&self, text: &str, font: TextFontSpec) -> f64;
+    fn advance_phys(&self, text: &str, font: TextFontSpec) -> f64;
 }
 
 /// Resolution context — everything `Length::resolve_*` needs PLUS a
@@ -546,14 +546,14 @@ fn layout_lazy_vstack<'a>(
     );
 
     let mut laid_children = Vec::with_capacity(last.saturating_sub(first));
-    for i in first..last {
+    for (i, item) in items.iter().enumerate().take(last).skip(first) {
         let item_y_local = super::lazy::item_y(i, item_h_phys, gap_phys);
         let item_origin = (origin.0, origin.1 + item_y_local - state.offset_y);
         let item_c = Constraints {
             min_w: 0.0, max_w: viewport_w,
             min_h: item_h_phys, max_h: item_h_phys,
         };
-        let laid = layout(&items[i], ctx, item_origin, item_c);
+        let laid = layout(item, ctx, item_origin, item_c);
         laid_children.push(laid);
     }
 
@@ -592,14 +592,14 @@ fn layout_lazy_hstack<'a>(
     );
 
     let mut laid_children = Vec::with_capacity(last.saturating_sub(first));
-    for i in first..last {
+    for (i, item) in items.iter().enumerate().take(last).skip(first) {
         let item_x_local = super::lazy::item_y(i, item_w_phys, gap_phys);
         let item_origin = (origin.0 + item_x_local - state.offset_y, origin.1);
         let item_c = Constraints {
             min_w: item_w_phys, max_w: item_w_phys,
             min_h: 0.0, max_h: viewport_h,
         };
-        let laid = layout(&items[i], ctx, item_origin, item_c);
+        let laid = layout(item, ctx, item_origin, item_c);
         laid_children.push(laid);
     }
 

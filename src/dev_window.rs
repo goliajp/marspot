@@ -462,7 +462,6 @@ impl DevWindow {
             chrome_cell_w, chrome_cell_h, chrome_ascent,
             &measure,
         );
-        drop(measure);
         // Dev panel chrome — keep the global default Monaco mono so
         // every section that built its layout against cell metrics
         // (Model / Tokens / Components etc.) lays out the same way

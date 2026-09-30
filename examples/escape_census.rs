@@ -34,8 +34,8 @@ fn main() {
                 let fin = d[j] as char;
                 // Group private modes by their number; everything else
                 // by final byte alone, so the tally stays readable.
-                let key = if params.starts_with('?') {
-                    format!("CSI ?{params} {fin}", params = &params[1..])
+                let key = if let Some(rest) = params.strip_prefix('?') {
+                    format!("CSI ?{rest} {fin}")
                 } else {
                     format!("CSI {fin}")
                 };

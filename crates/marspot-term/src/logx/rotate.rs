@@ -50,6 +50,7 @@ fn rotate_now(sink: &mut Sink) -> io::Result<()> {
     let lock_path = dir.join("marspot.log.rotate-lock");
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(&lock_path)?;
     let lock_fd = lock_file.as_raw_fd();
@@ -187,7 +188,7 @@ fn prune_retention(dir: &Path, keep: usize) {
         })
         .filter_map(|e| Some((e.path(), e.metadata().ok()?.modified().ok()?)))
         .collect();
-    backups.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
+    backups.sort_by_key(|b| std::cmp::Reverse(b.1)); // newest first
     for (path, _) in backups.iter().skip(keep) {
         let _ = std::fs::remove_file(path);
     }

@@ -1331,7 +1331,7 @@ fn scan_line_into_matches(
 /// disk is the real token.  Returns the char-pos to truncate at.
 /// (URL candidates have no existence oracle, so they keep the plain
 /// merged behaviour.)
-
+///
 /// Does this span look like it could name something relative to a
 /// working directory?
 ///

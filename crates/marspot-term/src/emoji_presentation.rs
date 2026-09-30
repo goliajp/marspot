@@ -143,7 +143,7 @@ pub fn has_emoji_presentation(cp: u32) -> bool {
     if cp >= SMP_LO {
         cp <= SMP_HI && bit(&SMP, SMP_LO, cp)
     } else {
-        cp >= BMP_LO && cp <= BMP_HI && bit(&BMP, BMP_LO, cp)
+        (BMP_LO..=BMP_HI).contains(&cp) && bit(&BMP, BMP_LO, cp)
     }
 }
 

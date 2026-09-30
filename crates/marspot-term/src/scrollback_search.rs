@@ -1144,7 +1144,7 @@ mod tests {
         );
         for s in &live_hit.spans {
             assert!(
-                (s.phys_row_idx as u64) < live_len,
+                s.phys_row_idx < live_len,
                 "live span row_idx {} should be live-local",
                 s.phys_row_idx
             );

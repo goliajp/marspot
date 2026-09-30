@@ -5,7 +5,7 @@
 //! what a NEW session would start as — codex does not write the
 //! model picker's choice back to it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(super) fn codex_home() -> Option<PathBuf> {
     std::env::var_os("CODEX_HOME")
@@ -19,7 +19,7 @@ pub(super) fn codex_home() -> Option<PathBuf> {
 /// tables, and only two top-level scalars are wanted.  Stopping at the
 /// first table header keeps a `[projects."…"]` section's own keys from
 /// being mistaken for the globals.
-pub(super) fn read_model_and_effort(home: &PathBuf) -> (Option<String>, Option<String>) {
+pub(super) fn read_model_and_effort(home: &Path) -> (Option<String>, Option<String>) {
     let Ok(text) = std::fs::read_to_string(home.join("config.toml")) else {
         return (None, None);
     };
@@ -200,7 +200,7 @@ fn recent_rollouts(codex_home: &std::path::Path) -> Vec<PathBuf> {
             }
         }
     }
-    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.sort_by_key(|o| std::cmp::Reverse(o.0));
     out.into_iter().map(|(_, p)| p).collect()
 }
 
