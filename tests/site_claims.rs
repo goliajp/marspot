@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 const SITE: &str = include_str!("../site/index.html");
+const README: &str = include_str!("../README.md");
 const BASELINE: &str = include_str!("../bench/baseline.json");
 
 /// The four streams, in the order the page's columns use them.
@@ -164,10 +165,31 @@ fn a_gap_that_closed_comes_off_the_page() {
     let mut t = Terminal::new(40, 3);
     t.feed(b"a\tb");
     assert_ne!(row(&t), "ab", "tabs stopped moving the cursor");
-    assert!(
-        !SITE.contains("literal tab character is dropped"),
-        "tabs work; the page still says they are dropped"
-    );
+    for (what, text) in [("the page", SITE), ("the README", README)] {
+        assert!(
+            !text.contains("tabs are not implemented")
+                && !text.contains("literal tab character is dropped"),
+            "tabs work; {what} still says they are dropped"
+        );
+    }
+}
+
+/// The README and the page keep the same key table.
+///
+/// They are two documents with the same list in them, which is two
+/// places for it to go stale.  Both are built from `shortcuts`, so
+/// both are checked against it.
+#[test]
+fn the_readme_keeps_the_same_keys() {
+    use marspot::shortcuts::SHORTCUTS;
+    for s in SHORTCUTS {
+        assert!(README.contains(s.chord), "the README does not mention {}", s.chord);
+        assert!(
+            README.contains(s.action),
+            "{} is in the README, described as something else",
+            s.chord
+        );
+    }
 }
 
 /// The keyboard reference on the page is the list the code keeps.

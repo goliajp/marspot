@@ -67,15 +67,29 @@ Read that table with its limits in mind, which are real:
 The harness is in `bench/` and `bin/bench.sh`. A benchmark you cannot
 re-run is a marketing claim, so the intent is that you re-run it.
 
+## Keys
+
+Everything not listed goes to the program in the pane, unchanged.
+
+| | |
+|---|---|
+| `⌘N` | New window |
+| `⌘C` | Copy the selection |
+| `⌘V` | Paste |
+| `⌘F` | Search this pane's scrollback |
+| `⌘B` | Show or hide the sidebar |
+| `⇧⌘C` | Agent usage for this account |
+| `⌘W` | Close the panel that is open |
+| `Esc` | Close the panel that is open; three times in five seconds ends a stuck agent session |
+
 ## Known gaps
 
 Honest list, because you will hit these in the first hour:
 
-- Horizontal tabs are not implemented — a literal `\t` is dropped.
 - One cell holds one code point, so combining marks, ZWJ emoji and flag
   sequences collapse to their first code point.
-- Mouse reporting forwards the wheel only; clicks and drags do not
-  reach the program in the pane.
+- Mouse reporting covers the wheel and button presses; motion and drag
+  do not reach the program in the pane.
 - No OSC 8 (hyperlinks), OSC 52 (clipboard), OSC 7 (working directory)
   or OSC 133 (prompt marks).
 - `ESC ( 0` line drawing is not translated, so `dialog`-style TUIs draw
@@ -84,7 +98,8 @@ Honest list, because you will hit these in the first hour:
   `xterm-256color`, which claims a few capabilities not yet
   implemented.
 - The preferences window exposes a handful of settings. Fonts, themes
-  and key bindings are not configurable yet.
+  and key bindings are not configurable yet — the keys listed above
+  are the keys.
 
 ## Licence
 
