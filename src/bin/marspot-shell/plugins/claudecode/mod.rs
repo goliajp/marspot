@@ -973,17 +973,15 @@ impl ClaudecodePlugin {
             }
             // Title 只用 project basename — profile 已经在 badge 里
             // ("P3 …"),title 再重复就冗余.
-            if let Some(meta) = result.new_meta.get(sh_sid) {
-                if !meta.project_basename.is_empty() {
-                    if let Err(e) = host.set_pane_title(*sh_sid, &meta.project_basename) {
+            if let Some(meta) = result.new_meta.get(sh_sid)
+                && !meta.project_basename.is_empty()
+                    && let Err(e) = host.set_pane_title(*sh_sid, &meta.project_basename) {
                         host.log(
                             LogLevel::Warn,
                             "pane_title.set_failed",
                             &format!("{e}"),
                         );
                     }
-                }
-            }
         }
     }
 
@@ -1655,11 +1653,10 @@ fn background_held_sessions(config_dir: &std::path::Path) -> Vec<String> {
         else {
             continue;
         };
-        if let Some(rec) = recorded_session(config_dir, pid) {
-            if rec.kind != "interactive" {
+        if let Some(rec) = recorded_session(config_dir, pid)
+            && rec.kind != "interactive" {
                 out.push(rec.session_id);
             }
-        }
     }
     out
 }
@@ -2166,8 +2163,8 @@ impl Plugin for ClaudecodePlugin {
         // one in-flight request: if the worker is still chewing on
         // the previous (slow disk), we skip — preserves the worker
         // queue from growing unbounded.
-        if !self.scan_inflight {
-            if let Some(tx) = &self.scan_req_tx {
+        if !self.scan_inflight
+            && let Some(tx) = &self.scan_req_tx {
                 if tx.send(()).is_ok() {
                     self.scan_inflight = true;
                 } else {
@@ -2181,7 +2178,6 @@ impl Plugin for ClaudecodePlugin {
                     return;
                 }
             }
-        }
 
         // (3) RFC-003 profile-cycle state machine lives in
         // ProfileCyclePaneSession::on_tick, driven by the L1 plugin
@@ -2580,6 +2576,94 @@ fn parse_session_id(path: &PathBuf) -> Option<String> {
     let key = "\"sessionId\":\"";
     let i = line.find(key)? + key.len();
     let rest = &line[i..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Cheap "what's the type of the last record" check.  Reads at most
+/// the last 32 KiB of the file and looks at the last `\n`-separated
+/// record's `"type":"…"` field.  Returns None if the file is malformed
+/// or has no recognisable type.
+/// The tail window of a transcript as text, for the cheap
+/// "what has this session been doing" checks.  Same 32 KB window the
+/// classifier uses; a read failure yields an empty string, which the
+/// callers read as "no evidence" — and every caller's no-evidence
+/// answer is the conservative one.
+fn tail_window(path: &PathBuf) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 32 * 1024;
+    let Ok(mut f) = fs::File::open(path) else {
+        return String::new();
+    };
+    let Ok(md) = f.metadata() else {
+        return String::new();
+    };
+    let start = md.len().saturating_sub(TAIL);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::with_capacity(TAIL as usize);
+    if f.read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Read a session's last record and classify it.  Same 32 KB tail
+/// window as `tail_last_message_type`; the record we need is the last
+/// line, and a single record over 32 KB (a huge tool result) reads as
+/// `Unknown`, which the caller must already treat as "in flight".
+fn tail_activity(path: &PathBuf, has_young_child: bool) -> CcActivity {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 32 * 1024;
+    let Ok(mut f) = fs::File::open(path) else {
+        return CcActivity::Unknown;
+    };
+    let Ok(md) = f.metadata() else {
+        return CcActivity::Unknown;
+    };
+    let len = md.len();
+    let start = len.saturating_sub(TAIL);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return CcActivity::Unknown;
+    }
+    let mut buf = Vec::with_capacity(TAIL as usize);
+    if f.read_to_end(&mut buf).is_err() {
+        return CcActivity::Unknown;
+    }
+    let s = String::from_utf8_lossy(&buf);
+    // Walk back to the last record that is part of the conversation,
+    // stepping over the bookkeeping ones claudecode appends after a
+    // turn.  Bounded so a long run of them can't turn one tick into a
+    // scan of the whole window.
+    const MAX_SKIP: usize = 64;
+    match s
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(MAX_SKIP)
+        .find(|l| !is_bookkeeping_record(l))
+    {
+        Some(last) => activity_from_last_record(last, has_young_child),
+        None => CcActivity::Unknown,
+    }
+}
+
+fn tail_last_message_type(path: &PathBuf) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 32 * 1024;
+    let mut f = fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL);
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::with_capacity(TAIL as usize);
+    f.read_to_end(&mut buf).ok()?;
+    // Find the last newline-anchored record.
+    let s = String::from_utf8_lossy(&buf);
+    let last_line = s.lines().rev().find(|l| !l.trim().is_empty())?;
+    let key = "\"type\":\"";
+    let i = last_line.find(key)? + key.len();
+    let rest = &last_line[i..];
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
 }
@@ -4467,7 +4551,7 @@ mod tests {
             let procs = pidtree::list_all_procs();
             pidtree::descendants_of(shell_pid, &procs)
                 .iter()
-                .any(|d| looks_like_claudecode(d))
+                .any(looks_like_claudecode)
         });
         // The scan only binds a transcript that is newer than the
         // process writing it, same as in production.
@@ -4622,7 +4706,7 @@ mod tests {
             let procs = pidtree::list_all_procs();
             !pidtree::descendants_of(shell_pid, &procs)
                 .iter()
-                .any(|d| looks_like_claudecode(d))
+                .any(looks_like_claudecode)
         });
 
         // …and the shell is back in front of its own tty, which is
@@ -6604,93 +6688,5 @@ mod tests {
         let line = b"\x1b[31mAPI Error: Rate limited\x1b[0m\r";
         assert_eq!(retryable_error_kind(line), Some("rate_limited"));
     }
-}
-
-/// Cheap "what's the type of the last record" check.  Reads at most
-/// the last 32 KiB of the file and looks at the last `\n`-separated
-/// record's `"type":"…"` field.  Returns None if the file is malformed
-/// or has no recognisable type.
-/// The tail window of a transcript as text, for the cheap
-/// "what has this session been doing" checks.  Same 32 KB window the
-/// classifier uses; a read failure yields an empty string, which the
-/// callers read as "no evidence" — and every caller's no-evidence
-/// answer is the conservative one.
-fn tail_window(path: &PathBuf) -> String {
-    use std::io::{Read, Seek, SeekFrom};
-    const TAIL: u64 = 32 * 1024;
-    let Ok(mut f) = fs::File::open(path) else {
-        return String::new();
-    };
-    let Ok(md) = f.metadata() else {
-        return String::new();
-    };
-    let start = md.len().saturating_sub(TAIL);
-    if f.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
-    }
-    let mut buf = Vec::with_capacity(TAIL as usize);
-    if f.read_to_end(&mut buf).is_err() {
-        return String::new();
-    }
-    String::from_utf8_lossy(&buf).into_owned()
-}
-
-/// Read a session's last record and classify it.  Same 32 KB tail
-/// window as `tail_last_message_type`; the record we need is the last
-/// line, and a single record over 32 KB (a huge tool result) reads as
-/// `Unknown`, which the caller must already treat as "in flight".
-fn tail_activity(path: &PathBuf, has_young_child: bool) -> CcActivity {
-    use std::io::{Read, Seek, SeekFrom};
-    const TAIL: u64 = 32 * 1024;
-    let Ok(mut f) = fs::File::open(path) else {
-        return CcActivity::Unknown;
-    };
-    let Ok(md) = f.metadata() else {
-        return CcActivity::Unknown;
-    };
-    let len = md.len();
-    let start = len.saturating_sub(TAIL);
-    if f.seek(SeekFrom::Start(start)).is_err() {
-        return CcActivity::Unknown;
-    }
-    let mut buf = Vec::with_capacity(TAIL as usize);
-    if f.read_to_end(&mut buf).is_err() {
-        return CcActivity::Unknown;
-    }
-    let s = String::from_utf8_lossy(&buf);
-    // Walk back to the last record that is part of the conversation,
-    // stepping over the bookkeeping ones claudecode appends after a
-    // turn.  Bounded so a long run of them can't turn one tick into a
-    // scan of the whole window.
-    const MAX_SKIP: usize = 64;
-    match s
-        .lines()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(MAX_SKIP)
-        .find(|l| !is_bookkeeping_record(l))
-    {
-        Some(last) => activity_from_last_record(last, has_young_child),
-        None => CcActivity::Unknown,
-    }
-}
-
-fn tail_last_message_type(path: &PathBuf) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    const TAIL: u64 = 32 * 1024;
-    let mut f = fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    let start = if len > TAIL { len - TAIL } else { 0 };
-    f.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf = Vec::with_capacity(TAIL as usize);
-    f.read_to_end(&mut buf).ok()?;
-    // Find the last newline-anchored record.
-    let s = String::from_utf8_lossy(&buf);
-    let last_line = s.lines().rev().find(|l| !l.trim().is_empty())?;
-    let key = "\"type\":\"";
-    let i = last_line.find(key)? + key.len();
-    let rest = &last_line[i..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
 }
 

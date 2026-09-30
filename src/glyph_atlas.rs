@@ -631,11 +631,10 @@ impl GlyphAtlas {
         if let Some(p) = self.place(w, h) {
             return Some(p);
         }
-        if self.evict_lru_shelf(w + 2 * PAD, h + 2 * PAD) {
-            if let Some(p) = self.place(w, h) {
+        if self.evict_lru_shelf(w + 2 * PAD, h + 2 * PAD)
+            && let Some(p) = self.place(w, h) {
                 return Some(p);
             }
-        }
         self.rebuild();
         self.place(w, h)
     }

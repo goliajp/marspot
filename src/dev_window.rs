@@ -396,7 +396,7 @@ impl DevWindow {
             return;
         }
         let scale = self.nswindow.screen()
-            .map(|s| s.backingScaleFactor() as f64)
+            .map(|s| s.backingScaleFactor())
             .unwrap_or(2.0);
         // Pull the actual content-area size off the NSWindow each
         // frame.  Autoresizing on the content view is unreliable in

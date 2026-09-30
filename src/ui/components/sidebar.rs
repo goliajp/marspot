@@ -85,7 +85,7 @@ impl<'a> Sidebar<'a> {
             p.fill_rounded_rect(
                 Rect { x: dot_x, y_top: dot_y, w: dot_d, h: dot_d },
                 row.dot_color,
-                (self.style.dot_radius) as f32,
+                self.style.dot_radius,
                 ([0.0, 0.0, 0.0, 0.0], 0.0),
             );
             // Label.  Align cap-height roughly with dot centre:

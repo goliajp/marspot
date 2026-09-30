@@ -69,12 +69,11 @@ fn main() {
 
     let mut got = String::new();
     for _ in 0..600 {
-        if let Ok(t) = std::fs::read_to_string(&out) {
-            if t.contains("R7T_DONE") {
+        if let Ok(t) = std::fs::read_to_string(&out)
+            && t.contains("R7T_DONE") {
                 got = t;
                 break;
             }
-        }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 

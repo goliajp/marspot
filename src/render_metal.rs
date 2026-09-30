@@ -1444,7 +1444,7 @@ impl MetalRenderer {
             Some(l) => l,
             None => return false,
         };
-        let drawable = match { layer.nextDrawable() } {
+        let drawable = match layer.nextDrawable() {
             Some(d) => d,
             None => return false,
         };
@@ -1550,7 +1550,7 @@ impl MetalRenderer {
                 height: height_px as f64,
             });
         }
-        let drawable = match { layer.nextDrawable() } {
+        let drawable = match layer.nextDrawable() {
             Some(d) => d,
             None => return,
         };
@@ -1678,7 +1678,7 @@ impl MetalRenderer {
         );
 
         let layer = layer.as_ref().unwrap();
-        let drawable = match { layer.nextDrawable() } {
+        let drawable = match layer.nextDrawable() {
             Some(d) => d,
             None => return,
         };
@@ -1726,8 +1726,8 @@ impl MetalRenderer {
         let chrome_cell_h = font.cell_h as f32;
         let chrome_ascent = font.ascent as f32;
         let viewport_px = [width_px as f32, height_px as f32];
-        if let Some(dev_state) = self.dev_panel_state.as_ref() {
-            if dev_state.visible {
+        if let Some(dev_state) = self.dev_panel_state.as_ref()
+            && dev_state.visible {
                 let measure = crate::chrome_measure::ChromeMeasure::new(
                     font,
                     chrome_cell_w as f64,
@@ -1749,7 +1749,6 @@ impl MetalRenderer {
                     false,
                 );
             }
-        }
 
         // P2c — ContextMenu draws OUT-OF-BAND via the Canvas
         // pipeline: built fresh per frame and encoded with
@@ -1990,8 +1989,8 @@ impl MetalRenderer {
         let chrome_cell_h = font.cell_h as f32;
         let chrome_ascent = font.ascent as f32;
         let viewport_px = [width_px as f32, height_px as f32];
-        if let Some(dev_state) = self.dev_panel_state.as_ref() {
-            if dev_state.visible {
+        if let Some(dev_state) = self.dev_panel_state.as_ref()
+            && dev_state.visible {
                 let measure = crate::chrome_measure::ChromeMeasure::new(
                     font,
                     chrome_cell_w as f64,
@@ -2012,7 +2011,6 @@ impl MetalRenderer {
                     false,
                 );
             }
-        }
         if let Some(menu_state) = self.context_menu_state.as_ref() {
             let canvas = build_context_menu_canvas(
                 menu_state, width_px, height_px,
@@ -2035,7 +2033,7 @@ impl MetalRenderer {
         // round-trip in one number.  The live path hands the frame to
         // `wr` and returns — see `WindowRender::in_flight`.
         let gpu_exec_us = if block {
-            { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             let (s, e) = (cmd.GPUStartTime(), cmd.GPUEndTime());
             ((e - s).max(0.0) * 1e6) as u64
         } else {
@@ -4420,8 +4418,8 @@ fn paint_layout_modal_content(
         // continus`, `lab38-golialab`) and a card is as wide as the
         // grid leaves it, so "draw it and hope" put 101 px of name in
         // an 80 px card and let the rest run over its neighbour.
-        if let Some(title) = state.slot_titles.get(slot) {
-            if !title.is_empty() {
+        if let Some(title) = state.slot_titles.get(slot)
+            && !title.is_empty() {
                 let fg = if is_drag_origin { card_fg_drag_origin } else { card_fg };
                 let pad = crate::ui::components::layout_modal::CARD_LABEL_PAD_LOGICAL
                     * state.scale;
@@ -4430,15 +4428,14 @@ fn paint_layout_modal_content(
                 );
                 p.text_in(*rect, &fitted, fg, Alignment::Center);
             }
-        }
     }
     let _ = (cell_w, cell_h, ascent);
     // Floating dragged card: a copy of the source card painted at
     // (mouse - grab_offset).  Drawn LAST so it sits on top of all
     // other cards.  Same BG / border as a regular card but more
     // saturated to read as "lifted".
-    if let Some(d) = state.drag.as_ref() {
-        if d.from_slot < modal.cards.len() {
+    if let Some(d) = state.drag.as_ref()
+        && d.from_slot < modal.cards.len() {
             let src = modal.cards[d.from_slot];
             let drag_rect = marspot_term::layout::Rect {
                 x: d.mouse_phys.0 - d.grab_offset_phys.0,
@@ -4449,13 +4446,11 @@ fn paint_layout_modal_content(
             let drag_bg = [0.22, 0.26, 0.32, 1.0];
             let drag_border = [0.55, 0.62, 0.72, 1.0];
             p.fill_rounded_rect(drag_rect, drag_bg, 6.0, (drag_border, 1.5));
-            if let Some(title) = state.slot_titles.get(d.from_slot) {
-                if !title.is_empty() {
+            if let Some(title) = state.slot_titles.get(d.from_slot)
+                && !title.is_empty() {
                     p.text_in(drag_rect, title, card_fg, Alignment::Center);
                 }
-            }
         }
-    }
 }
 
 /// Internal: the content of the Process Monitor modal (title bar
@@ -5198,12 +5193,12 @@ fn push_text_run_ui_shaped(
 /// Wraps at the right edge like iTerm2 / Alacritty rather than
 /// truncating, and stops at the bottom row — the IME's own candidate
 /// window remains the source of truth for a composition that long.
-fn preedit_placements<'a>(
-    preedit: &'a str,
+fn preedit_placements(
+    preedit: &str,
     cursor: (u16, u16),
     cols: u16,
     rows: u16,
-) -> Vec<(u16, u16, u16, &'a str)> {
+) -> Vec<(u16, u16, u16, &str)> {
     let (col, row) = cursor;
     let mut out = Vec::new();
     if cols == 0 || rows == 0 {
@@ -5298,7 +5293,7 @@ fn push_session(
             + (title_h - cell_h) * 0.5
             + ascent;
         push_text_run(
-            &view.title,
+            view.title,
             label_x,
             label_baseline_y,
             [SIDEBAR_TEXT_FG.0, SIDEBAR_TEXT_FG.1, SIDEBAR_TEXT_FG.2, 1.0],
@@ -5871,8 +5866,8 @@ fn push_session(
             // / ZWJ joiners we don't render inline yet — acceptable
             // first-cut, the candidate window is the source of truth
             // anyway).
-            if let Some(lead) = cluster.chars().next() {
-                if let Some(entry) = resolve_cell_glyph(atlas, font, lead, false, false, metrics) {
+            if let Some(lead) = cluster.chars().next()
+                && let Some(entry) = resolve_cell_glyph(atlas, font, lead, false, false, metrics) {
                     // Phase 1.1 bearing formula (IME preedit).
                     let baseline_y = dest_y + metrics.baseline_from_top as f32;
                     let (origin, size) = entry.quad(dest_x, baseline_y);
@@ -5884,7 +5879,6 @@ fn push_session(
                         color: [IME_PREEDIT_FG.0, IME_PREEDIT_FG.1, IME_PREEDIT_FG.2, 1.0],
                     });
                 }
-            }
             // Underline — 2× the old hairline so it actually reads
             // as "this is provisional text" against the BG quad.
             // Hairline (cell_h * 0.06) was invisible at small font
@@ -6349,7 +6343,7 @@ impl MetalRenderer {
         blit.endEncoding();
 
         cmd.commit();
-        { cmd.waitUntilCompleted() };
+        cmd.waitUntilCompleted();
 
         let bytes_per_row = (width as usize) * 4;
         let mut bytes = vec![0u8; bytes_per_row * height as usize];
@@ -6494,7 +6488,7 @@ impl MetalRenderer {
         blit.endEncoding();
 
         cmd.commit();
-        { cmd.waitUntilCompleted() };
+        cmd.waitUntilCompleted();
 
         let bytes_per_row = (width as usize) * 4;
         let mut bytes = vec![0u8; bytes_per_row * height as usize];
@@ -6943,7 +6937,7 @@ impl MetalRenderer {
         blit.synchronizeResource(resource);
         blit.endEncoding();
         cmd.commit();
-        { cmd.waitUntilCompleted() };
+        cmd.waitUntilCompleted();
 
         let bytes_per_row = (width as usize) * 4;
         let mut bytes = vec![0u8; bytes_per_row * height as usize];
@@ -7271,7 +7265,7 @@ mod tests {
         for (i, line) in lines.iter().enumerate() {
             let y_pt = pad_y_pt + (i as f64) * line_h_pt;
             canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), *line)
+                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), line)
                 .color(fg)
                 .draw();
         }
@@ -7378,7 +7372,7 @@ mod tests {
         for (i, line) in lines.iter().enumerate() {
             let y_pt = pad_y_pt + (i as f64) * line_h_pt;
             canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), *line)
+                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), line)
                 .color(fg)
                 .draw();
         }
@@ -7488,7 +7482,7 @@ mod tests {
         for (i, line) in lines.iter().enumerate() {
             let y_pt = pad_y_pt + (i as f64) * line_h_pt;
             canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), *line)
+                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), line)
                 .color(fg)
                 .draw();
         }
@@ -7594,7 +7588,7 @@ mod tests {
             let y_pt = pad_y_pt + (i as f64) * line_gap_pt;
             let size_q = crate::glyph_atlas::GlyphKey::size_q_for(*pt);
             canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), *line)
+                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), line)
                 .color(fg)
                 .ui()
                 .ui_size_q(size_q)
@@ -7616,7 +7610,7 @@ mod tests {
         for (i, (w, line)) in weight_rows.iter().enumerate() {
             let y_pt = weight_pad_y_pt + (i as f64) * 22.0;
             canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), *line)
+                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), line)
                 .color(fg)
                 .ui()
                 .ui_size_q(weight_size_q)
@@ -7725,7 +7719,7 @@ mod tests {
         for (pt, weight, line) in rows.iter() {
             let size_q = crate::glyph_atlas::GlyphKey::size_q_for(*pt);
             canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), *line)
+                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), line)
                 .color(fg)
                 .ui()
                 .ui_size_q(size_q)
@@ -7837,7 +7831,7 @@ mod tests {
         for (pt, line) in rows.iter() {
             let size_q = crate::glyph_atlas::GlyphKey::size_q_for(*pt);
             canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), *line)
+                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), line)
                 .color(fg)
                 .ui()
                 .ui_size_q(size_q)
@@ -7954,7 +7948,7 @@ mod tests {
         for source in sources.iter() {
             // Group separator label.
             canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), *source)
+                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), source)
                 .color(fg_dim)
                 .ui()
                 .ui_size_q(label_size_q)
@@ -8127,7 +8121,7 @@ mod tests {
         for (i, line) in lines.iter().enumerate() {
             let y = pad_y_pt + (i as f64) * cell_h_pt;
             canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y), *line)
+                .text(Length::Pt(pad_x_pt), Length::Pt(y), line)
                 .color(fg)
                 .draw();
         }
@@ -8660,7 +8654,7 @@ mod tests {
             // reached this texture, which is a broken test rig, not a
             // broken renderer.
             let mut distinct = std::collections::HashSet::new();
-            for px in fresh.chunks_exact(4) {
+            for px in fresh.as_chunks::<4>().0 {
                 distinct.insert([px[0], px[1], px[2], px[3]]);
                 if distinct.len() > 8 { break }
             }

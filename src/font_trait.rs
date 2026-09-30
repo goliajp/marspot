@@ -154,7 +154,7 @@ impl Shaper for CoreTextShaper {
         opts: crate::font_shape::ShapeOptions,
         intern: &mut dyn FnMut(CTFont) -> u32,
     ) -> Vec<crate::font_shape::ShapedGlyph> {
-        crate::font_shape::shape_line(text, base_font, opts, |f| intern(f))
+        crate::font_shape::shape_line(text, base_font, opts, intern)
     }
 }
 

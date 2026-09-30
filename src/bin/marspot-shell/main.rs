@@ -1366,7 +1366,7 @@ impl ShellApp {
 
     fn shutdown_active(&mut self, reason: &'static str) {
         match self.active.take() { Some(conn) => {
-            let pid = conn.child.as_ref().and_then(|c| Some(c.id())).unwrap_or(0);
+            let pid = conn.child.as_ref().map(|c| c.id()).unwrap_or(0);
             lx_event!(
                 "ACTIVE_SHUTDOWN",
                 "tearing down active core",
@@ -2050,7 +2050,7 @@ impl ShellApp {
         for w in self.windows.iter_mut() {
             let Some(p) = w.presenter.as_mut() else { continue };
             if let Err(e) = p.set_banner(want, scale) {
-                lx_warn!("shell.set_banner_failed", &format!("{e}"));
+                lx_warn!("shell.set_banner_failed", &e.to_string());
                 return;
             }
         }
@@ -2143,7 +2143,7 @@ impl ShellApp {
                     Err(e) => {
                         lx_error!(
                             "shell.restart_handshake.pair_create_failed",
-                            &format!("{e}")
+                            &e.to_string()
                         );
                     }
                 }
@@ -2767,8 +2767,8 @@ impl ShellApp {
                 "per-frame SurfaceReady ack",
                 id = id
             );
-            if let Some(p) = self.windows[i].presenter.as_mut() {
-                if !p.swap_to_id(id) {
+            if let Some(p) = self.windows[i].presenter.as_mut()
+                && !p.swap_to_id(id) {
                     // Presenter and shell pair-ids disagree — should
                     // not happen, but log if it ever does.
                     lx_warn!(
@@ -2778,7 +2778,6 @@ impl ShellApp {
                     );
                     return;
                 }
-            }
             // First-ever SurfaceReady on the boot pair flips the
             // first_frame_ready gate so `redraw()` finally presents.
             // Without this the gate stays false for the entire run
@@ -2805,7 +2804,7 @@ impl ShellApp {
         match self.windows[i].presenter.as_mut() {
             Some(p) => {
                 if let Err(e) = p.set_pair(&new_pair.front, &new_pair.back) {
-                    lx_error!("shell.set_pair_failed", &format!("{e}"));
+                    lx_error!("shell.set_pair_failed", &e.to_string());
                     new_pair.release();
                     return;
                 }
@@ -2881,8 +2880,7 @@ impl ShellApp {
         if let Ok(out) = std::process::Command::new("/usr/bin/pgrep")
             .args(["-f", "marspot-session"])
             .output()
-        {
-            if out.status.success() {
+            && out.status.success() {
                 for line in String::from_utf8_lossy(&out.stdout).lines() {
                     if let Ok(pid) = line.trim().parse::<i32>() {
                         if pid == std::process::id() as i32 {
@@ -2897,7 +2895,6 @@ impl ShellApp {
                     }
                 }
             }
-        }
         lx_event!(
             "SHELL_QUIT_CLEANUP",
             "quitting; registered sessions kept running, orphans swept",
@@ -3187,20 +3184,18 @@ impl ShellApp {
                     // Kill the child but keep the conn — `spawned_at` and
                     // `hello_acked == false` stay, so the HELLO timeout in
                     // poll_supervisor respawns it.
-                    if let Some(c) = self.active.as_mut() {
-                        if let Some(mut child) = c.child.take() {
+                    if let Some(c) = self.active.as_mut()
+                        && let Some(mut child) = c.child.take() {
                             let _ = child.kill();
                             let _ = child.wait();
                         }
-                    }
                 }
             }
             ShellInbox::Pong(nonce) => {
-                if let Some(c) = self.active.as_mut() {
-                    if nonce == c.last_ping_nonce {
+                if let Some(c) = self.active.as_mut()
+                    && nonce == c.last_ping_nonce {
                         c.last_pong_at = Instant::now();
                     }
-                }
             }
             ShellInbox::CaretRect(rect, window_id) => {
                 // NOT `ctx` — the control socket is drained in
@@ -3258,8 +3253,8 @@ impl ShellApp {
                 // Empty menu still gets no reply on purpose — L2
                 // opens nothing either way, so the frame would be
                 // dead weight.
-                if !items.is_empty() {
-                    if let Some(conn) = self.active.as_ref() {
+                if !items.is_empty()
+                    && let Some(conn) = self.active.as_ref() {
                         conn.send(
                             MsgType::PaneBadgeMenu,
                             marspot::shell_proto::encode_pane_badge_menu(
@@ -3267,7 +3262,6 @@ impl ShellApp {
                             ),
                         );
                     }
-                }
             }
             ShellInbox::PaneBadgeMenuAction(shelld_sid, tag) => {
                 self.plugin_registry.dispatch_pane_badge_menu_action(
@@ -4216,7 +4210,7 @@ impl MarspotApp for ShellApp {
             Err(e) => {
                 lx_error!(
                     "shell.resumed.pair_create_failed",
-                    &format!("{e}"),
+                    &e.to_string(),
                     w = w_px,
                     h = h_px
                 );
@@ -4233,7 +4227,7 @@ impl MarspotApp for ShellApp {
         ) {
             Ok(p) => p,
             Err(e) => {
-                lx_error!("shell.resumed.presenter_new_failed", &format!("{e}"));
+                lx_error!("shell.resumed.presenter_new_failed", &e.to_string());
                 ctx.exit();
                 return;
             }
@@ -4519,7 +4513,7 @@ impl MarspotApp for ShellApp {
                 );
             }
             Err(e) => {
-                lx_error!("shell.resize.pair_create_failed", &format!("{e}"));
+                lx_error!("shell.resize.pair_create_failed", &e.to_string());
             }
         }
         ctx.request_redraw();
@@ -4551,11 +4545,10 @@ impl MarspotApp for ShellApp {
         //
         // Skipped while a probe is in flight: one staged binary at a
         // time, and the probe already decided what happens next.
-        if !focused && matches!(self.sup_state, SupervisorState::Idle) {
-            if std::env::var_os("MARSPOT_MANUAL_UPDATE_ONLY").is_none() {
+        if !focused && matches!(self.sup_state, SupervisorState::Idle)
+            && std::env::var_os("MARSPOT_MANUAL_UPDATE_ONLY").is_none() {
                 self.apply_pending_update();
             }
-        }
     }
 
     fn ime_preedit_changed(&mut self, ctx: &MarspotAppCtx, text: &str) {
@@ -4577,7 +4570,7 @@ impl MarspotApp for ShellApp {
         ) {
             Ok(p) => p,
             Err(e) => {
-                lx_error!("shell.window.pair_create_failed", &format!("{e}"));
+                lx_error!("shell.window.pair_create_failed", &e.to_string());
                 marspot::app::close_window(window_id);
                 return;
             }
@@ -4610,7 +4603,7 @@ impl MarspotApp for ShellApp {
                 );
             }
             Err(e) => {
-                lx_error!("shell.window.presenter_new_failed", &format!("{e}"));
+                lx_error!("shell.window.presenter_new_failed", &e.to_string());
                 pair.release();
                 marspot::app::close_window(window_id);
                 return;
@@ -4996,7 +4989,7 @@ fn main() {
                     // registry happened to be in: a list you read is a
                     // list you scan.
                     panes.sort_by(|a, b| a.2.cmp(&b.2));
-                    println!("{:>6}  {:<34}  {}", "id", "address", "directory");
+                    println!("{:>6}  {:<34}  directory", "id", "address");
                     for (sid, cwd, addr) in panes {
                         println!("{sid:>6}  {addr:<34}  {cwd}");
                     }

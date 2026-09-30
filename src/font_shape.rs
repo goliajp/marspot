@@ -197,7 +197,7 @@ pub fn shape_line<F: FnMut(CTFont) -> u32>(
         let Some(run_font) = run_font else {
             continue;
         };
-        let font_id = intern(run_font) as u32;
+        let font_id = intern(run_font);
         let glyphs = run.glyphs();
         let positions = run.positions();
         for i in 0..glyphs.len() {
@@ -321,8 +321,8 @@ impl ShapeCache {
         // Default cache path — use the macOS `shape_line` directly.
         // Phase 10b callers that need to plug a custom Shaper go
         // through `shape_with(...)` instead.
-        self.shape_with(text, base_font, base_font_id, size_q, opts, |t, bf, o, mut i| {
-            shape_line(t, bf, o, &mut i)
+        self.shape_with(text, base_font, base_font_id, size_q, opts, |t, bf, o, i| {
+            shape_line(t, bf, o, i)
         }, intern)
     }
 

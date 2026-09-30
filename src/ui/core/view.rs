@@ -325,8 +325,8 @@ impl<'a> ViewPainter<'a> {
         align: Alignment,
     ) {
         let w = self.panel_text_width(role, s) as f64;
-        let cap = (crate::ui::view::type_scale::sf_pro_cap_height(role.pt())
-            * Self::px_per_pt()) as f64;
+        let cap = crate::ui::view::type_scale::sf_pro_cap_height(role.pt())
+            * Self::px_per_pt();
         let box_rect = rect.place(w, cap, align);
         // `place` gave the cap box; the baseline is its bottom.
         self.panel_text(role, box_rect.x as f32, (box_rect.y_top + cap) as f32, s, color);

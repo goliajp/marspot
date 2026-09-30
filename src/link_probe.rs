@@ -165,11 +165,10 @@ impl LinkProbe {
                 insert_hot(&mut c, path.to_string(), *e);
             }),
         };
-        if let Some(e) = held {
-            if e.fresh(now) {
+        if let Some(e) = held
+            && e.fresh(now) {
                 return verdict(e.exists);
             }
-        }
 
         if !c.inflight.contains(path) && c.queue.len() < QUEUE_CAP {
             c.inflight.insert(path.to_string());

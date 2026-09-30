@@ -604,15 +604,14 @@ impl OpRunner {
             return;
         }
         self.cleaned = true;
-        if self.op.hold_screen {
-            if let Err(e) = self.env.io().hold(host.shelld_session_id(), false) {
+        if self.op.hold_screen
+            && let Err(e) = self.env.io().hold(host.shelld_session_id(), false) {
                 host.log(
                     LogLevel::Warn,
                     &format!("{}.release_failed", self.op.name),
                     &format!("{e}"),
                 );
             }
-        }
     }
 
     fn enter_step(&mut self, host: &dyn PaneSessionHost) {
@@ -681,11 +680,10 @@ impl OpRunner {
                         .reset_mouse_reporting(host.shelld_session_id());
                     return true;
                 }
-                if let Some((after, sig)) = escalate {
-                    if elapsed >= after {
+                if let Some((after, sig)) = escalate
+                    && elapsed >= after {
                         self.env.signal(pid, sig);
                     }
-                }
                 false
             }
             StepKind::AwaitProcess { under, matching } => {
@@ -978,15 +976,14 @@ impl PaneSession for OpRunner {
             // First tick: take the hold before anything else runs, and
             // log where we are starting.
             self.started = true;
-            if self.op.hold_screen {
-                if let Err(e) = self.env.io().hold(host.shelld_session_id(), true) {
+            if self.op.hold_screen
+                && let Err(e) = self.env.io().hold(host.shelld_session_id(), true) {
                     host.log(
                         LogLevel::Warn,
                         &format!("{}.hold_failed", self.op.name),
                         &format!("{e}"),
                     );
                 }
-            }
             self.enter_step(host);
         }
         if let Some(b) = &self.op.badge {
@@ -1034,9 +1031,9 @@ impl PaneSession for OpRunner {
             self.advance(host);
             return;
         }
-        if let Some(step) = self.op.steps.get(self.at) {
-            if let Some(limit) = step.timeout {
-                if elapsed >= limit {
+        if let Some(step) = self.op.steps.get(self.at)
+            && let Some(limit) = step.timeout
+                && elapsed >= limit {
                     if step.proceed_on_timeout {
                         let drawn = self
                             .env
@@ -1063,8 +1060,6 @@ impl PaneSession for OpRunner {
                         );
                     }
                 }
-            }
-        }
     }
 
     fn on_end(&mut self, host: &dyn PaneSessionHost, reason: EndReason) {

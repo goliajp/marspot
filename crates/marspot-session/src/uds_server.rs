@@ -234,8 +234,7 @@ impl SessionListener {
             .keep_listener
             .as_ref()
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::Other,
+                io::Error::other(
                     "prepare_for_execv: no kept listener",
                 )
             })?;

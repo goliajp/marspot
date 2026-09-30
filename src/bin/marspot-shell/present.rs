@@ -376,7 +376,7 @@ impl ShellPresenter {
     /// Render the IOSurface to the next CAMetalLayer drawable and
     /// present.  No-op if no drawable is available (all in-flight).
     pub fn present(&mut self) {
-        let drawable = match { self.layer.nextDrawable() } {
+        let drawable = match self.layer.nextDrawable() {
             Some(d) => d,
             None => {
                 // Dev-only — flash investigation 2026-06-15.  If

@@ -279,11 +279,10 @@ pub(super) fn cc_settings_files() -> Vec<PathBuf> {
 /// binary the bundle would exec into anyway.
 pub(super) fn hook_binary() -> Option<PathBuf> {
     let mut cands: Vec<PathBuf> = Vec::new();
-    if let Ok(me) = std::env::current_exe() {
-        if let Some(dir) = me.parent() {
+    if let Ok(me) = std::env::current_exe()
+        && let Some(dir) = me.parent() {
             cands.push(dir.join("marspot-shell"));
         }
-    }
     cands.push(
         marspot_term::paths::state_root()
             .join("binaries")
@@ -435,7 +434,7 @@ pub(super) fn reconcile_statusline_in(
     let mut notes = Vec::new();
     for path in files {
         let path = path.as_path();
-        let Ok(text) = fs::read_to_string(&path) else {
+        let Ok(text) = fs::read_to_string(path) else {
             continue;
         };
         let found = status_line_command(&text);
@@ -500,7 +499,7 @@ pub(super) fn reconcile_statusline_in(
             notes.push(format!("{}: edit refused — would not parse", path.display()));
             continue;
         }
-        if let Err(e) = write_through_symlink(&path, &new_text) {
+        if let Err(e) = write_through_symlink(path, &new_text) {
             notes.push(format!("{}: {e}", path.display()));
         }
     }

@@ -353,11 +353,10 @@ impl RolloutIndex {
         let known = self.facts.get(cwd).map(|(seen, f)| {
             (*seen, SessionFacts { model: f.model.clone(), effort: f.effort.clone() })
         });
-        if let Some((seen, f)) = &known {
-            if *seen == mtime {
+        if let Some((seen, f)) = &known
+            && *seen == mtime {
                 return Some(SessionFacts { model: f.model.clone(), effort: f.effort.clone() });
             }
-        }
         if let Some(f) = tail_of(path)
             .as_deref()
             .and_then(last_fact_line)

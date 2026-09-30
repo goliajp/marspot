@@ -88,11 +88,10 @@ impl TitleBar {
     }
 
     pub fn hit_test(&self, x: f64, y: f64) -> Option<TitleBarHit> {
-        if let Some(l) = &self.lights {
-            if let Some(h) = l.hit_test(x, y) {
+        if let Some(l) = &self.lights
+            && let Some(h) = l.hit_test(x, y) {
                 return Some(TitleBarHit::Light(h));
             }
-        }
         if self.rect.contains(x, y) {
             return Some(TitleBarHit::Body);
         }

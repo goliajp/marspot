@@ -32,7 +32,7 @@ pub fn hit_test_hover(laid: &LaidOut, p: (f64, f64)) -> Option<HoverId> {
 
 fn hit_test_hover_clipped(laid: &LaidOut, p: (f64, f64), clip: Option<&super::layout::Rect>) -> Option<HoverId> {
     if laid.deco.hidden { return None; }
-    if let Some(c) = clip { if !c.contains(p) { return None; } }
+    if let Some(c) = clip && !c.contains(p) { return None; }
     if !laid.rect.contains(p) { return None; }
     let child_clip = if establishes_clip(&laid.view, &laid.deco) {
         Some(&laid.rect)
@@ -75,7 +75,7 @@ fn hit_test_field<T: Copy>(
     field: impl Fn(&super::layout::Decoration) -> Option<T> + Copy,
 ) -> Option<T> {
     if laid.deco.hidden { return None; }
-    if let Some(c) = clip { if !c.contains(p) { return None; } }
+    if let Some(c) = clip && !c.contains(p) { return None; }
     if !laid.rect.contains(p) { return None; }
     let child_clip = if establishes_clip(&laid.view, &laid.deco) {
         Some(&laid.rect)

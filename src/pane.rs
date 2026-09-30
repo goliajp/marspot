@@ -977,15 +977,14 @@ impl L3Conn {
         // log it once and leave the pane showing its last frame (state →
         // Exited).  The process boundary means it can't take L2 or sibling
         // L3s down; the container reaps the child via `L3Conn::Drop`.
-        if !self.exited {
-            if let Ok(Some(status)) = self.child.try_wait() {
+        if !self.exited
+            && let Ok(Some(status)) = self.child.try_wait() {
                 self.exited = true;
                 eprintln!(
                     "[core] L3 session pid={} exited ({status}) — pane frozen at last frame, others unaffected",
                     self.child.id()
                 );
             }
-        }
         let seq = self.reader.seq();
         if seq == self.last_seq && !force_fill {
             return false;
@@ -1944,7 +1943,7 @@ impl Pane {
             return;
         }
         let max = if self.session.is_l3() {
-            self.session.l3_scrollback_len() as u16
+            self.session.l3_scrollback_len()
         } else {
             self.session.grid().scrollback_len() as u16
         };

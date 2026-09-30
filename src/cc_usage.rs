@@ -572,7 +572,7 @@ fn codex_windows(obj: &str) -> Vec<CcWindow> {
         reset: b.reset,
         span_secs: if b.span > 0 { b.span } else { WEEK_SECS },
     };
-    let weekly_named = |n: &str| buckets.iter().find(|b| !is_sub_day(&b) && b.name == n);
+    let weekly_named = |n: &str| buckets.iter().find(|b| !is_sub_day(b) && b.name == n);
 
     let mut out = Vec::new();
     if let Some(b) = buckets.iter().find(is_sub_day) {
@@ -596,7 +596,7 @@ fn codex_windows(obj: &str) -> Vec<CcWindow> {
     out.extend(
         buckets
             .iter()
-            .filter(|b| !is_sub_day(&b) && b.name != "spark" && b.name != "reserve")
+            .filter(|b| !is_sub_day(b) && b.name != "spark" && b.name != "reserve")
             .map(|b| row(&b.name, b)),
     );
     out

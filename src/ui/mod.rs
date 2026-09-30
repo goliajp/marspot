@@ -148,7 +148,7 @@ pub fn chrome_scale() -> f64 {
 /// NaN) rather than letting it reach the layout — a bad scale there
 /// collapses every rect in the app to nothing.
 pub fn set_chrome_scale(scale: f64) {
-    if scale.is_finite() && scale >= 0.5 && scale <= 4.0 {
+    if scale.is_finite() && (0.5..=4.0).contains(&scale) {
         CHROME_SCALE_BITS.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
     }
 }

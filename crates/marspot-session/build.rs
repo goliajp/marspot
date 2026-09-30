@@ -68,12 +68,11 @@ fn main() {
             println!("cargo:rerun-if-changed={p}");
         }
     }
-    if let Ok(head) = std::fs::read_to_string("../../.git/HEAD") {
-        if let Some(refname) = head.strip_prefix("ref: ").map(str::trim) {
+    if let Ok(head) = std::fs::read_to_string("../../.git/HEAD")
+        && let Some(refname) = head.strip_prefix("ref: ").map(str::trim) {
             let p = format!("../../.git/{refname}");
             if std::path::Path::new(&p).exists() {
                 println!("cargo:rerun-if-changed={p}");
             }
         }
-    }
 }

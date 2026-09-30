@@ -591,15 +591,14 @@ pub fn context_menu(items: Vec<&str>, divider_after_idx: Option<usize>, action_b
             .frame(FrameSpec { width: Some(Length::Pct(1.0)), ..Default::default() })
             .on_click(super::types::ActionId(action_base.0.wrapping_add(i as u32)));
         rows.push(row);
-        if let Some(d) = divider_after_idx {
-            if i == d {
+        if let Some(d) = divider_after_idx
+            && i == d {
                 rows.push(hairline_horiz(color::DIVIDER).frame(FrameSpec {
                     height: Some(Length::Pt(1.0)),
                     width: Some(Length::Pct(1.0)),
                     ..Default::default()
                 }));
             }
-        }
     }
     vstack(rows)
         .vstack_gap(Length::Pt(0.0))

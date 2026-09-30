@@ -175,9 +175,9 @@ fn main() {
         polls += 1;
         // Follow a re-attach.  Cheap enough at 20 Hz, and the
         // alternative is a watch that silently observes a dead pair.
-        if polls % 10 == 0 {
-            if let Some(now) = current_pair(&log) {
-                if now != ids {
+        if polls.is_multiple_of(10)
+            && let Some(now) = current_pair(&log)
+                && now != ids {
                     let fresh: Vec<Surface> = [now.0, now.1]
                         .iter()
                         .filter_map(|id| Surface::lookup(*id))
@@ -190,8 +190,6 @@ fn main() {
                         dirty = vec![false; 2];
                     }
                 }
-            }
-        }
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
 

@@ -277,7 +277,7 @@ impl Plugin for CodexPlugin {
             }
             let codex_pid = pidtree::descendants_of(shell, &procs)
                 .into_iter()
-                .find(|p| looks_like_codex(p))
+                .find(looks_like_codex)
                 .map(|p| p.pid);
             let has_codex = codex_pid.is_some();
             // Ask THIS pane's session what it is running, and fall

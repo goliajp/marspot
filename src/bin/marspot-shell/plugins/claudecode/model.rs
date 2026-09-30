@@ -111,8 +111,8 @@ pub(super) fn tail_model_short_uncached(path: &std::path::Path, min_offset: u64)
                 }
             }
         }
-        if line.contains("\"role\":\"assistant\"") {
-            if let Some(i) = line.find("\"model\":\"") {
+        if line.contains("\"role\":\"assistant\"")
+            && let Some(i) = line.find("\"model\":\"") {
                 let rest = &line[i + 9..];
                 if let Some(end) = rest.find('"') {
                     let name = short_model(&rest[..end]);
@@ -129,7 +129,6 @@ pub(super) fn tail_model_short_uncached(path: &std::path::Path, min_offset: u64)
                     }
                 }
             }
-        }
     }
     None
 }

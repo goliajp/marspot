@@ -20,11 +20,10 @@ fn cargo_toml_version() -> String {
         .expect("Cargo.toml has a [package] section");
     for line in package.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("version") {
-            if let Some(v) = rest.split('"').nth(1) {
+        if let Some(rest) = line.strip_prefix("version")
+            && let Some(v) = rest.split('"').nth(1) {
                 return v.to_string();
             }
-        }
         if line.starts_with('[') {
             break;
         }

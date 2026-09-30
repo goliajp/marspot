@@ -139,13 +139,12 @@ fn should_keep_break(prev_tail: Option<char>, next_trimmed: &str) -> bool {
     // Sentence-final punctuation followed by capitalised start of a
     // new sentence → keep.  Comma / dash / hyphen do NOT count.
     let next_first = next_trimmed.chars().next().unwrap();
-    if let Some(p) = prev_tail {
-        if matches!(p, '.' | '!' | '?' | '。' | '！' | '？')
+    if let Some(p) = prev_tail
+        && matches!(p, '.' | '!' | '?' | '。' | '！' | '？')
             && (next_first.is_uppercase() || is_wide(next_first))
         {
             return true;
         }
-    }
 
     false
 }

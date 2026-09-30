@@ -372,8 +372,8 @@ pub fn layout<'a>(view: &View, ctx: LayoutCtx<'a>, origin: (f64, f64), c: Constr
             // word-break against `c.max_w`; each line becomes a
             // single-line child Text LaidOut so paint can re-use the
             // existing TextPrim path without learning multi-line.
-            if let TextLines::Wrap { max } = t.lines {
-                if raw_w > c.max_w && c.max_w > 0.0 {
+            if let TextLines::Wrap { max } = t.lines
+                && raw_w > c.max_w && c.max_w > 0.0 {
                     let lines = wrap_text_greedy(&t.content, c.max_w, |s| {
                         ctx.fonts.advance_phys(s, t.font)
                     });
@@ -409,7 +409,6 @@ pub fn layout<'a>(view: &View, ctx: LayoutCtx<'a>, origin: (f64, f64), c: Constr
                         children,
                     };
                 }
-            }
             let size = c.clamp(raw_w, line_h);
             LaidOut {
                 view: view.clone(),
@@ -657,7 +656,7 @@ fn layout_grid<'a>(
         }
     }
     let rows = if items.is_empty() { 0 } else {
-        ((items.len() + cols - 1) / cols).max(1)
+        items.len().div_ceil(cols).max(1)
     };
     let total_w = cols as f64 * cell_w_phys + cols.saturating_sub(1) as f64 * col_gap_phys;
     let total_h = rows as f64 * cell_h_phys + rows.saturating_sub(1) as f64 * row_gap_phys;

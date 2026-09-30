@@ -100,8 +100,8 @@ fn main() {
         }
         let cur = row_hashes(&t, cols, rows);
         let live = cur.iter().filter(|h| **h != blank).count();
-        if let Some(p) = &prev {
-            if *p != cur && live >= 8 {
+        if let Some(p) = &prev
+            && *p != cur && live >= 8 {
                 changed += 1;
                 let (s, m) = best_shift(p, &cur, blank);
                 if s != 0 && m * 2 >= live {
@@ -112,7 +112,6 @@ fn main() {
                     }
                 }
             }
-        }
         prev = Some(cur);
     }
     println!("alt frames that changed: {changed}");

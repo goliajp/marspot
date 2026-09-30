@@ -71,7 +71,7 @@ pub fn hit_test(
     y_pt: f64,
 ) -> Option<DevPanelHit> {
     // Tab strip — full width, 0..TAB_BAR_H_PT vertically.
-    if y_pt < TAB_BAR_H_PT && y_pt >= 0.0 {
+    if (0.0..TAB_BAR_H_PT).contains(&y_pt) {
         let _ = chrome_cell_w_pt;  // tab 同宽,不再用 cell pitch 估
         let mut tab_x: f64 = 0.0;
         for (_label, id) in TAB_LABELS.iter() {
@@ -2971,6 +2971,6 @@ mod tests {
         let s = DevPanelState { visible: false, ..Default::default() };
         let fonts = crate::ui::view::MockFontMetrics { cell_w_phys: 8.0, cell_h_phys: 16.0 };
         let c = build_dev_panel_canvas(&s, 800.0, 600.0, 8.0, 16.0, 12.0, &fonts);
-        assert!(c.len() > 0);
+        assert!(!c.is_empty());
     }
 }
