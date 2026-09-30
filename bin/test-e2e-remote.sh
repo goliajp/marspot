@@ -98,7 +98,7 @@ for suite in "${SUITES[@]}"; do
   # binaries and drive real windows, and a measurement taking the lock
   # exclusively has to wait for that rather than read a number through
   # it.  See bin/bench-remote.sh for the other half.
-  remote_gui "export PATH=/opt/homebrew/bin:\$PATH; cd ~/$REMOTE_DIR && flock -s ${MARSPOT_BENCH_LOCK:-/Users/Shared/bench.lock} bin/$suite"
+  remote_gui "export PATH=/usr/local/bin:/opt/homebrew/bin:\$PATH; cd ~/$REMOTE_DIR && bench-lock heavy bin/$suite"
   suite_rc=$?
   set -e
   if (( suite_rc != 0 )); then

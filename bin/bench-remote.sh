@@ -169,7 +169,14 @@ STALE_PASS=""
 # forty minutes apart, one side of the gate's floor and then the other.
 # A number taken while someone else has the CPU is not a slower number,
 # it is not a number.
-LOCK_CMD="flock ${MARSPOT_BENCH_LOCK:-/Users/Shared/bench.lock}"
+#
+# `bench-lock bench` rather than a bare exclusive flock: a batch job
+# holding the shared lock for hours made an exclusive one unobtainable
+# -- not slow, unobtainable -- and both this and another repo's bench
+# ended up going around the lock, which is how one of them got
+# mistaken for a stray process and killed. It blocks new heavy work and
+# waits only for what is already running.
+LOCK_CMD="bench-lock bench"
 if [[ "${MARSPOT_BENCH_NO_LOCK:-}" == "1" ]]; then
   echo "==> MARSPOT_BENCH_NO_LOCK=1 — measuring without the host lock" >&2
   LOCK_CMD=""
@@ -181,14 +188,10 @@ ssh "$HOST" "
   export CARGO_TARGET_DIR=\$HOME/$REMOTE_DIR/target
   $STALE_PASS
   echo \$\$ > $REMOTE_PIDF
-  export PATH=/opt/homebrew/bin:\$PATH
-  if [ -n \"$LOCK_CMD\" ] && ! command -v flock >/dev/null; then
-    echo 'bench-remote: no flock on the runner (brew install flock)' >&2
+  export PATH=/usr/local/bin:/opt/homebrew/bin:\$PATH
+  if [ -n \"$LOCK_CMD\" ] && ! command -v bench-lock >/dev/null; then
+    echo 'bench-remote: no bench-lock on the runner' >&2
     exit 1
-  fi
-  if [ -n \"$LOCK_CMD\" ]; then
-    $LOCK_CMD -n true 2>/dev/null || \
-      echo '==> waiting for the host bench lock (something else is running)' >&2
   fi
   exec $LOCK_CMD caffeinate -dims ./bin/bench.sh $ARGS_Q
 " </dev/null
