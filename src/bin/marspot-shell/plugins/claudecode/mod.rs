@@ -1831,15 +1831,20 @@ const COMPOSER_REDRAW: u64 = 64;
 /// What to say to a session that has just been resumed on another
 /// account.
 ///
-/// Said only to panes that looked busy when the account stopped
-/// answering, and the sentence is conditional on purpose: the reading
-/// of "busy" comes from a transcript record and a process tree, both
-/// of which can be a moment stale.  A flat "继续" to a session that
-/// had in fact finished makes it invent work; asking it to continue
-/// *if something was interrupted* costs a wasted line at worst.
+/// Said to every pane the sweep moves, because no reading of the
+/// transcript separates "finished" from "cut off" after the fact.
+///
+/// It carries both branches so that it can be said in either state:
+/// carry on if something was interrupted, stay put if nothing was.
+/// Tried by hand across every agent pane on 2026-09-30 — nothing was
+/// woken that should have stayed asleep, and nothing that had been
+/// cut off was missed.  Naming the idle case is what buys that;
+/// without it the earlier wording still nudged an idle session into
+/// finding something to continue.
 fn resume_word() -> String {
-    std::env::var("MARSPOT_CC_RESUME_WORD")
-        .unwrap_or_else(|_| "额度恢复了，如果有刚被打断的工作请继续".to_string())
+    std::env::var("MARSPOT_CC_RESUME_WORD").unwrap_or_else(|_| {
+        "额度恢复了，如果有刚被打断的工作请继续，如果是 idle 状态请保持".to_string()
+    })
 }
 
 /// Scan `$HOME` for `.claude-profile-N` directories and return the
