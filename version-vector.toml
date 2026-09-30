@@ -28,4 +28,4 @@
 
 shell   = "0.7.188"  # the return checks whether it landed
 core    = "0.12.236"  # one pane gets no title strip
-session = "0.11.118"  # origin mode
+session = "0.11.119"  # insert mode

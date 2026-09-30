@@ -290,6 +290,9 @@ pub struct Terminal {
     /// margin rather than the top of the screen, and the cursor cannot
     /// leave the scroll region.
     origin_mode: bool,
+    /// IRM (`CSI 4 h`).  While set, a printed glyph pushes the rest of
+    /// the line right instead of overwriting.
+    insert_mode: bool,
     /// Rollbacks in a row.  A program that draws its own input
     /// somewhere else — codex, and any full-screen TUI that skips the
     /// alternate screen — never confirms a prediction, so the guess
@@ -580,6 +583,7 @@ impl Terminal {
             osc_clipboard: None,
             g0_graphics: false,
             origin_mode: false,
+            insert_mode: false,
             predict_misses: 0,
             predict_declined: 0,
             predictions: VecDeque::new(),
@@ -1122,6 +1126,7 @@ impl Terminal {
             let osc_clipboard = &mut self.osc_clipboard;
             let g0_graphics = &mut self.g0_graphics;
             let origin_mode = &mut self.origin_mode;
+            let insert_mode = &mut self.insert_mode;
             let mut handler = Handler {
                 grid,
                 saved_main,
@@ -1153,6 +1158,7 @@ impl Terminal {
                 osc_clipboard,
                 g0_graphics,
                 origin_mode,
+                insert_mode,
                 cluster_buf,
                 cluster_fast,
                 cluster_anchor,
@@ -1180,14 +1186,16 @@ impl Terminal {
                         .iter()
                         .position(|&b| !(0x20..=0x7E).contains(&b))
                         .unwrap_or(bytes.len() - i);
-                    // The bulk lane writes the bytes as they arrived.
-                    // With G0 on the special graphics set they are not
-                    // the characters to write, so that case goes one
-                    // at a time through `print`, which translates.
-                    // The check is one already-hot bool and the answer
-                    // is false for every program that is not drawing a
-                    // box right now.
-                    if run_len >= 2 && !*handler.g0_graphics {
+                    // The bulk lane writes the bytes as they arrived,
+                    // straight into consecutive cells.  Two modes make
+                    // that the wrong thing: with G0 on the special
+                    // graphics set they are not the characters to
+                    // write, and under IRM each one has to push the
+                    // rest of the line along first.  Both go one at a
+                    // time through `print` instead.  The check is two
+                    // already-hot bools, false for every program that
+                    // is not drawing a box or inserting mid-line.
+                    if run_len >= 2 && !*handler.g0_graphics && !*handler.insert_mode {
                         handler.print_ascii_run(&bytes[i..i + run_len]);
                         i += run_len;
                         continue;
@@ -1462,6 +1470,10 @@ impl Terminal {
         // bits 12 and 13 = DECOM, live and as the saved cursor holds it.
         if self.origin_mode {
             modes |= 1 << 12;
+        }
+        // bit 14 = IRM.
+        if self.insert_mode {
+            modes |= 1 << 14;
         }
         if self.saved_cursor.is_some_and(|c| c.origin_mode) {
             modes |= 1 << 13;
@@ -1940,6 +1952,7 @@ impl Terminal {
         self.focus_reporting = (modes & (1 << 9)) != 0;
         self.g0_graphics = (modes & (1 << 10)) != 0;
         self.origin_mode = (modes & (1 << 12)) != 0;
+        self.insert_mode = (modes & (1 << 14)) != 0;
         // Bit 4 (in_alt_screen) is informational for the wire format
         // but not actionable here — apply_snapshot replaces the
         // current grid; alt-mode save state is regenerated on the
@@ -2401,6 +2414,8 @@ struct Handler<'a> {
     g0_graphics: &'a mut bool,
     /// See `Terminal::origin_mode`.
     origin_mode: &'a mut bool,
+    /// See `Terminal::insert_mode`.
+    insert_mode: &'a mut bool,
     cluster_buf: &'a mut String,
     /// See `Terminal::cluster_fast`.
     cluster_fast: &'a mut Option<(char, u8)>,
@@ -2933,6 +2948,16 @@ impl<'a> Handler<'a> {
             self.grid.set_row_wrapped(row, true);
         }
 
+        // IRM: the glyph makes room for itself rather than taking
+        // someone's place.  Everything from the cursor rightward moves
+        // over by the glyph's width and whatever runs off the end of
+        // the line is gone -- `vttest`'s insert page builds its line
+        // that way, and so does any editor inserting mid-line without
+        // repainting the rest.
+        if *self.insert_mode {
+            self.shift_line_right(col, row, w as u16);
+        }
+
         // Lead cell carries the printable char.  For wide glyphs, the
         // trail cell stores NUL with the same attrs — the renderer
         // skips drawing its glyph (NUL is treated as blank), and the
@@ -3137,6 +3162,24 @@ impl<'a> Handler<'a> {
         row.saturating_sub(top) + 1
     }
 
+    /// Push `[col..cols)` of a row right by `n`, dropping what falls
+    /// off the end.  The vacated cells are left for the caller to
+    /// write over.
+    fn shift_line_right(&mut self, col: u16, row: u16, n: u16) {
+        let cols = self.grid.cols();
+        if n == 0 || col >= cols {
+            return;
+        }
+        for c in (col + n..cols).rev() {
+            let src = self.grid.cell(c - n, row);
+            self.grid.set_cell(c, row, src);
+        }
+        let blank = blank_with(*self.attrs);
+        for c in col..(col + n).min(cols) {
+            self.grid.set_cell(c, row, blank);
+        }
+    }
+
     fn cursor_to_origin(&mut self) {
         let (top, _) = self.row_origin();
         self.grid.set_cursor(0, top);
@@ -3230,6 +3273,7 @@ impl<'a> Handler<'a> {
         *self.scroll_top = 0;
         *self.scroll_bot = self.grid.rows().saturating_sub(1);
         *self.origin_mode = false;
+        *self.insert_mode = false;
     }
 
     /// RIS — reset to initial state (`ESC c`).  What `reset` sends.
@@ -3912,6 +3956,21 @@ impl<'a> ParserCallbacks for Handler<'a> {
             // DECSC and DECRC.
             b's' => self.save_cursor(),
             b'u' => self.restore_cursor(),
+            // SM / RM without the `?`: the ANSI modes.  IRM is the one
+            // that does anything here; the rest of the set is either
+            // about the keyboard (KAM), the host echo (SRM) or a
+            // newline convention (LNM) that no program on a pty relies
+            // on this terminal for.
+            b'h' | b'l' => {
+                let set = byte == b'h';
+                for &p in params {
+                    if p == 4 {
+                        *self.insert_mode = set;
+                    } else {
+                        lx_debug!("term.mode.ansi", "ANSI mode ignored", mode = p, set = set);
+                    }
+                }
+            }
             b'r' => {
                 *self.pending_wrap = false;
                 // DECSTBM: set top + bottom margins of the scroll region.
