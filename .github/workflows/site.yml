@@ -1,0 +1,56 @@
+name: site
+
+# Publish the marketing site on every push to develop.
+#
+# Static, single file, no build step and no dependencies — the same
+# posture as the product.  Pages serves `site/` as-is; `site/CNAME`
+# carries the domain, which still needs a DNS record pointing at
+# GitHub Pages before it answers.
+
+on:
+  push:
+    branches: [develop]
+    paths: ['site/**', '.github/workflows/site.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: site
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The page is what it claims to be
+        # Cheap checks that catch the things a static page gets wrong
+        # silently: a download link that goes nowhere, a stale version,
+        # a title that is still the template's.
+        run: |
+          set -euo pipefail
+          test -f site/index.html
+          grep -q 'releases/latest' site/index.html \
+            || { echo "::error::no download link on the page" >&2; exit 1; }
+          grep -q '<title>Marspot' site/index.html \
+            || { echo "::error::the page has no title" >&2; exit 1; }
+          # Every absolute link must be https.
+          if grep -oE 'href="http://[^"]*"' site/index.html; then
+            echo "::error::a plain-http link on the page" >&2
+            exit 1
+          fi
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
