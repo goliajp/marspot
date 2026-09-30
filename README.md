@@ -38,14 +38,17 @@ Everything is under `~/Library/Application Support/marspot`:
 
 | | |
 |---|---|
-| `logs/marspot.log` | what every layer logged; rotated, bounded |
 | `sessions/<id>/` | one directory per pane: its scrollback, its byte log |
 | `binaries/` | the version running now, and the one staged next |
 | `settings.toml` | your settings, read live — edit it and the next sweep uses it |
 
 An older version kept this under `~/Library/Caches/marspot`, and a
 symlink is left there so anything that still computes the old path
-finds the new one.
+finds the new one. An empty `logs/` may be left from that era too — the
+log has not been written there since.
+
+The log is where macOS keeps logs: `~/Library/Logs/Marspot/marspot.log`,
+holding what every layer wrote, rotated and bounded.
 
 The app itself installs to `~/.local/Marspot.app`.
 
@@ -62,6 +65,7 @@ launchctl bootout "gui/$(id -u)/com.marspot.land-bundle" 2>/dev/null
 rm -f  ~/Library/LaunchAgents/com.marspot.land-bundle.plist
 rm -rf ~/.local/Marspot.app
 rm -rf ~/Library/Application\ Support/marspot ~/Library/Caches/marspot
+rm -rf ~/Library/Logs/Marspot
 ```
 
 That is all of it: no receipt in the package database, nothing in
