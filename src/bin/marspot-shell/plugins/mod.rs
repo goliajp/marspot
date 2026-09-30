@@ -879,11 +879,13 @@ where
     F: FnOnce(&mut Box<dyn Plugin>) -> Result<(), PluginError>,
 {
     let t0 = Instant::now();
+    let cpu0 = thread_cpu_now();
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| f(&mut slot.plugin)));
     let dur = t0.elapsed();
+    let cpu = thread_cpu_now().saturating_sub(cpu0);
     match result {
         Ok(Ok(())) => {
-            check_budget(slot, tag, dur);
+            check_budget(slot, tag, dur, cpu);
         }
         Ok(Err(e)) => {
             lx_warn!(
@@ -914,11 +916,13 @@ where
     F: FnOnce(&mut Box<dyn Plugin>) -> T,
 {
     let t0 = Instant::now();
+    let cpu0 = thread_cpu_now();
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| f(&mut slot.plugin)));
     let dur = t0.elapsed();
+    let cpu = thread_cpu_now().saturating_sub(cpu0);
     match result {
         Ok(v) => {
-            check_budget(slot, tag, dur);
+            check_budget(slot, tag, dur, cpu);
             Some(v)
         }
         Err(_panic) => {
@@ -940,11 +944,13 @@ where
     F: FnOnce(&mut Box<dyn Plugin>),
 {
     let t0 = Instant::now();
+    let cpu0 = thread_cpu_now();
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| f(&mut slot.plugin)));
     let dur = t0.elapsed();
+    let cpu = thread_cpu_now().saturating_sub(cpu0);
     match result {
         Ok(()) => {
-            check_budget(slot, tag, dur);
+            check_budget(slot, tag, dur, cpu);
         }
         Err(_panic) => {
             lx_error!(
@@ -958,8 +964,37 @@ where
     }
 }
 
-fn check_budget(slot: &mut Slot, tag: &'static str, dur: Duration) {
-    if dur > HOOK_BUDGET {
+
+/// CPU this thread has actually burned, as opposed to wall-clock.
+///
+/// The budget exists to catch a hook that hogs the thread the window
+/// is drawn on. Wall-clock cannot tell that from a hook that was
+/// descheduled while something else had the machine -- and on a busy
+/// host it reads the second as the first. Two consecutive "slow"
+/// ticks were recorded on 2026-09-30 at 17:26:00 and 17:26:02, both
+/// around 70 ms, with nothing logged between them and a build running
+/// on the same machine. One more and the plugin that reclaims panes
+/// and switches accounts would have disabled itself over somebody
+/// else's load.
+///
+/// So the strike is decided on CPU time and the log still reports the
+/// wall-clock, because the wall-clock is what the user felt.
+fn thread_cpu_now() -> Duration {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: `ts` is a valid, correctly-aligned timespec we own, and
+    // the clock id is a constant this platform defines.
+    let ok = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } == 0;
+    if ok {
+        Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+    } else {
+        // No clock: fall back to charging nothing, which cannot
+        // disable a plugin. A missing clock is not a plugin's fault.
+        Duration::ZERO
+    }
+}
+
+fn check_budget(slot: &mut Slot, tag: &'static str, dur: Duration, cpu: Duration) {
+    if cpu > HOOK_BUDGET {
         slot.consecutive_overshoots += 1;
         lx_warn!(
             "plugin.budget_overshoot",
@@ -967,6 +1002,7 @@ fn check_budget(slot: &mut Slot, tag: &'static str, dur: Duration) {
             name = slot.metadata.name,
             hook = tag,
             dur_us = dur.as_micros() as u64,
+            cpu_us = cpu.as_micros() as u64,
             budget_us = HOOK_BUDGET.as_micros() as u64,
             count = slot.consecutive_overshoots
         );
@@ -988,7 +1024,92 @@ fn check_budget(slot: &mut Slot, tag: &'static str, dur: Duration) {
             "plugin hook finished",
             name = slot.metadata.name,
             hook = tag,
-            dur_us = dur.as_micros() as u64
+            dur_us = dur.as_micros() as u64,
+            cpu_us = cpu.as_micros() as u64
         );
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    /// A hook that is slow on the clock but used no CPU was waiting,
+    /// not working. Striking it would disable a plugin over somebody
+    /// else's load -- and the plugin that gets disabled is the one
+    /// that reclaims panes and switches accounts.
+    #[test]
+    fn being_descheduled_is_not_an_overshoot() {
+        let mut slot = test_slot();
+        for _ in 0..(BUDGET_OVERSHOOT_LIMIT + 2) {
+            check_budget(&mut slot, "tick", HOOK_BUDGET * 10, Duration::from_micros(200));
+        }
+        assert!(slot.enabled, "a plugin must not be disabled for waiting");
+        assert_eq!(slot.consecutive_overshoots, 0);
+    }
+
+    #[test]
+    fn burning_the_thread_still_strikes() {
+        let mut slot = test_slot();
+        for _ in 0..BUDGET_OVERSHOOT_LIMIT {
+            check_budget(&mut slot, "tick", HOOK_BUDGET * 10, HOOK_BUDGET * 2);
+        }
+        assert!(!slot.enabled, "sustained CPU over budget is what this is for");
+    }
+
+    #[test]
+    fn one_clean_run_clears_the_strikes() {
+        let mut slot = test_slot();
+        check_budget(&mut slot, "tick", HOOK_BUDGET * 10, HOOK_BUDGET * 2);
+        check_budget(&mut slot, "tick", Duration::from_millis(1), Duration::from_micros(50));
+        assert_eq!(slot.consecutive_overshoots, 0);
+        check_budget(&mut slot, "tick", HOOK_BUDGET * 10, HOOK_BUDGET * 2);
+        check_budget(&mut slot, "tick", HOOK_BUDGET * 10, HOOK_BUDGET * 2);
+        assert!(slot.enabled, "the strikes have to be consecutive");
+    }
+
+    /// The clock has to move, or every hook looks free and the budget
+    /// stops meaning anything.
+    #[test]
+    fn the_cpu_clock_actually_advances() {
+        let before = thread_cpu_now();
+        let mut n: u64 = 0;
+        for i in 0..3_000_000u64 {
+            n = n.wrapping_add(i).rotate_left(7);
+        }
+        assert_ne!(n, 0);
+        assert!(
+            thread_cpu_now() > before,
+            "CLOCK_THREAD_CPUTIME_ID did not move across three million rotations"
+        );
+    }
+
+    fn test_slot() -> Slot {
+        Slot {
+            plugin: Box::new(Nothing),
+            metadata: PluginMetadata {
+                name: "t",
+                version: "0.0.0",
+                api_version: PLUGIN_API_VERSION,
+                permissions: PermissionSet::NONE,
+                tick_interval_ms: 1000,
+            },
+            enabled: true,
+            consecutive_overshoots: 0,
+            last_tick: Instant::now(),
+        }
+    }
+
+    struct Nothing;
+    impl Plugin for Nothing {
+        fn metadata(&self) -> PluginMetadata {
+            PluginMetadata {
+                name: "t",
+                version: "0.0.0",
+                api_version: PLUGIN_API_VERSION,
+                permissions: PermissionSet::NONE,
+                tick_interval_ms: 1000,
+            }
+        }
     }
 }
