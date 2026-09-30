@@ -2318,9 +2318,28 @@ impl ShellApp {
         // reports first so this round's observation is built from
         // them, then step the machines, and only then tick the plugins
         // — which read the fresh state back through the host.
+        // Phase timing, off unless MARSPOT_SUPERVISOR_PROFILE=1.  See
+        // `supervisor_profile`: this runs four times a second forever,
+        // so what it costs per wake is what the app costs at idle.
+        let prof = supervisor_profile::on();
+        let mut mark = std::time::Instant::now();
+        macro_rules! lap {
+            ($phase:expr) => {
+                if prof {
+                    let now = std::time::Instant::now();
+                    supervisor_profile::add($phase, now - mark);
+                    // The last lap has nothing after it; the write is
+                    // what keeps every other lap measuring its own
+                    // phase rather than everything since the top.
+                    let _ = std::mem::replace(&mut mark, now);
+                }
+            };
+        }
+
         while let Ok((sid, activity)) = self.pane_activity_rx.try_recv() {
             self.pane_status.report_activity(sid, activity);
         }
+        lap!(0);
         // One `stat` a tick.  This is what makes the settings file
         // live: edit it by hand or from the panel and the next sweep
         // is already using the new values, with nothing restarted.
@@ -2334,14 +2353,20 @@ impl ShellApp {
                 prefetch = s.reclaim_prefetch as u32
             );
         }
+        lap!(1);
         self.sweep_pane_status();
+        lap!(2);
         self.sweep_autorun();
+        lap!(3);
         self.dev_drive_badge_menu();
         self.dev_drive_close_sequence();
         self.dev_drive_quit();
+        lap!(4);
         self.drive_wake_queue();
+        lap!(5);
         self.last_plugin_tick = Instant::now();
         self.plugin_registry.tick_all_with(&self.plugin_host);
+        lap!(6);
 
         // Answer the command socket.  Before the submit drain, so a
         // request that arrives this pass runs this pass.
@@ -2711,6 +2736,10 @@ impl ShellApp {
         // transition happened above, the visible banner should
         // reflect it.
         self.refresh_banner(ctx);
+        lap!(7);
+        if prof {
+            supervisor_profile::wake_done();
+        }
     }
 
     fn start_redraw_pump(&mut self) {
@@ -5253,3 +5282,106 @@ Usage:\n\
     let app = ShellApp::new(proxy.clone());
     run_app(app, proxy, attrs);
 }
+
+/// Where the supervisor's wake goes, when anyone asks.
+///
+/// The supervisor wakes four times a second forever (`start_redraw_pump`),
+/// and at idle that is the only thing waking it -- so whatever it costs
+/// per wake is multiplied by four and paid for as long as the app is
+/// open.  On a machine with seventeen panes the process was measured at
+/// 4.4% of a core while all seventeen panes together used 1.1%, and no
+/// instrument said where it went.
+///
+/// Turned on by `MARSPOT_SUPERVISOR_PROFILE=1`, or by creating the file
+/// `<state>/supervisor-profile` -- the file, because the question is
+/// about a running app with real panes in it, and an env var would mean
+/// relaunching the thing being measured.  The file is looked at once
+/// every ten seconds, never on the wake path.  Off, each phase costs
+/// one relaxed atomic load.
+mod supervisor_profile {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::Instant;
+
+    pub const PHASES: [&str; 8] = [
+        "activity_drain",
+        "settings_stat",
+        "sweep_pane_status",
+        "sweep_autorun",
+        "dev_drivers",
+        "wake_queue",
+        "plugin_tick",
+        "rest",
+    ];
+    static ON: AtomicBool = AtomicBool::new(false);
+    static READY: AtomicBool = AtomicBool::new(false);
+    static NEXT_LOOK: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    static NANOS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+    static WAKES: AtomicU64 = AtomicU64::new(0);
+    static SINCE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+    fn marker() -> std::path::PathBuf {
+        marspot_term::paths::state_root().join("supervisor-profile")
+    }
+
+    pub fn on() -> bool {
+        if !READY.load(Ordering::Relaxed) {
+            if std::env::var("MARSPOT_SUPERVISOR_PROFILE").as_deref() == Ok("1") {
+                ON.store(true, Ordering::Relaxed);
+            }
+            READY.store(true, Ordering::Relaxed);
+        }
+        // The marker file, at most once every ten seconds.  Off, this
+        // is a clock read and a comparison; it is never a stat on the
+        // wake path.
+        let mut next = NEXT_LOOK.lock().unwrap_or_else(|p| p.into_inner());
+        let due = next.map(|t| Instant::now() >= t).unwrap_or(true);
+        if due {
+            *next = Some(Instant::now() + std::time::Duration::from_secs(10));
+            let present = marker().exists();
+            if present != ON.load(Ordering::Relaxed) {
+                ON.store(present, Ordering::Relaxed);
+                crate::lx_info!(
+                    "supervisor.profile.toggled",
+                    "supervisor phase timing",
+                    on = present as u32,
+                    marker = marker().display()
+                );
+            }
+        }
+        ON.load(Ordering::Relaxed)
+    }
+
+    pub fn add(phase: usize, d: std::time::Duration) {
+        NANOS[phase].fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    /// Call once per wake, after the phases.  Prints every ten seconds.
+    pub fn wake_done() {
+        WAKES.fetch_add(1, Ordering::Relaxed);
+        let mut since = SINCE.lock().unwrap_or_else(|p| p.into_inner());
+        let start = since.get_or_insert_with(Instant::now);
+        let elapsed = start.elapsed();
+        if elapsed < std::time::Duration::from_secs(10) {
+            return;
+        }
+        let wakes = WAKES.swap(0, Ordering::Relaxed).max(1);
+        let secs = elapsed.as_secs_f64();
+        let mut total = 0u64;
+        let mut parts = String::new();
+        for (i, name) in PHASES.iter().enumerate() {
+            let n = NANOS[i].swap(0, Ordering::Relaxed);
+            total += n;
+            parts.push_str(&format!(" {name}={:.0}us", n as f64 / wakes as f64 / 1000.0));
+        }
+        *since = Some(Instant::now());
+        crate::lx_info!(
+            "supervisor.profile",
+            "where the wake went",
+            wakes_per_s = format!("{:.1}", wakes as f64 / secs),
+            per_wake_us = format!("{:.0}", total as f64 / wakes as f64 / 1000.0),
+            core_pct = format!("{:.2}", total as f64 / 1e9 / secs * 100.0),
+            parts = parts.trim().to_string()
+        );
+    }
+}
+
