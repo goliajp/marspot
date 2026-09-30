@@ -814,6 +814,7 @@ mod window_state_tests {
             event_tx,
             drag_window: None,
             pane_drag: None,
+            mouse_report_press: None,
             drop_target: None,
             pending_move_sid: None,
             saved_windows: std::collections::VecDeque::new(),
@@ -2310,6 +2311,64 @@ mod boot_assembly_tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         panic!("L3 kept reporting mouse tracking after being told to stop");
+    }
+
+    /// A click reaches the program, on a real PTY.
+    ///
+    /// The encoding is unit-tested; this is the other half — that a
+    /// button press forwarded through `l3_inject_mouse_button` comes
+    /// out of the pty as the bytes a program reads.  `cat -v` makes
+    /// them visible, so the assertion is on what the program itself
+    /// received rather than on what we believe we sent.
+    #[test]
+    fn a_click_reaches_the_program_on_a_real_pty() {
+        let _sb = Sandbox::new("mclick");
+        let (tx, _rx) = mpsc::channel();
+        let sid = reg::allocate_next_session_id().unwrap();
+        let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
+            .expect("real L3 spawn (is marspot-session built?)");
+
+        // Turn tracking on the same way the other test does — the
+        // shell has to print the mode for the terminal to see it.
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut on = false;
+        while std::time::Instant::now() < deadline && !on {
+            pane.session_mut()
+                .forward_inject_input(b"printf '\\033[?1002h\\033[?1006h'\r");
+            for _ in 0..40 {
+                pane.pump();
+                if pane.session().l3_mouse_tracking_active() {
+                    on = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        assert!(on, "shell never got as far as turning mouse tracking on");
+
+        // Read what the program receives, with the escapes shown.
+        pane.session_mut().forward_inject_input(b"cat -v\r");
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        for _ in 0..20 {
+            pane.pump();
+        }
+
+        pane.session_mut().l3_inject_mouse_button(0, true, 12, 3);
+        pane.session_mut().l3_inject_mouse_button(0, false, 12, 3);
+
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
+            pane.pump();
+            let screen = pane.screen_rows().join("\n");
+            if screen.contains("[<0;12;3M") && screen.contains("[<0;12;3m") {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let screen = pane.screen_rows().join("\n");
+        panic!("the press and release never reached the program; screen was:\n{screen}");
     }
 
     /// Duplicate sid in a corrupt saved state must not double-bind one
@@ -3887,6 +3946,11 @@ struct CoreApp {
     /// meaning, entering title edit).  One at a time, app-wide — a
     /// drag spans windows by nature.
     pane_drag: Option<PaneDrag>,
+    /// The pane a forwarded mouse press went to, and the cell it
+    /// landed in.  A program that was told a button went down has to
+    /// be told it came up, even if the pointer left the pane first —
+    /// otherwise it sits believing the button is still held.
+    mouse_report_press: Option<(usize, u32, u32)>,
     /// Where the active pane drag would land right now (None = over
     /// nothing droppable).  Drives the per-window `drop_preview`.
     drop_target: Option<DropTarget>,
@@ -8265,6 +8329,28 @@ impl CoreApp {
                 return;
             }
 
+        // A program that asked for mouse reports gets the click.
+        //
+        // Holding shift takes it back: that is the convention every
+        // terminal follows, and without it there is no way to select
+        // text over a full-screen program that tracks the mouse.
+        if let Some((idx, col, row)) = cell_pos_hit
+            && !modifiers.shift
+            && win!(self, wi).panes.get(idx)
+                .map(|p| p.session().l3_mouse_tracking_active())
+                .unwrap_or(false)
+        {
+            win!(self, wi).focused_idx = idx;
+            win!(self, wi).needs_render = true;
+            let (c1, r1) = (col as u32 + 1, row as u32 + 1);
+            if let Some(pane) = win!(self, wi).panes.get_mut(idx) {
+                // Both encodings count from one.
+                pane.session_mut().l3_inject_mouse_button(0, true, c1, r1);
+            }
+            self.mouse_report_press = Some((idx, c1, r1));
+            return;
+        }
+
         // Click in cell body → start a fresh selection there AND
         // focus that cell.
         let prior_selection = win!(self, wi).selection;
@@ -8519,6 +8605,22 @@ impl CoreApp {
     }
 
     fn mouse_up(&mut self, wi: usize, drop_window_id: u32, drop_x: f64, drop_y: f64) {
+        // Release the button the program was told about, at whatever
+        // cell the pointer is over now — or, if it left the pane, at
+        // the one the press reported.
+        if let Some((idx, press_c, press_r)) = self.mouse_report_press.take() {
+            let (cw, ch) = self.renderer.cell_dims();
+            let here = win!(self, wi)
+                .layout
+                .hit_test_cell_pos(drop_x, drop_y, cw, ch)
+                .filter(|(i, _, _)| *i == idx)
+                .map(|(_, c, r)| (c as u32 + 1, r as u32 + 1));
+            let (c1, r1) = here.unwrap_or((press_c, press_r));
+            if let Some(pane) = win!(self, wi).panes.get_mut(idx) {
+                pane.session_mut().l3_inject_mouse_button(0, false, c1, r1);
+            }
+            return;
+        }
         // RFC-005 step 5 / RFC-006 — resolve an armed title press.
         if let Some(d) = self.pane_drag.take() {
             let target = self.drop_target.take();
@@ -10066,6 +10168,7 @@ fn main() {
         .unwrap_or(0);
     let mut app = CoreApp {
         renderer,
+        mouse_report_press: None,
         pane_badges: std::collections::HashMap::new(),
         pane_wheel_keys: std::collections::HashMap::new(),
         pane_agent_tui: std::collections::HashMap::new(),
