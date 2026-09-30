@@ -5,6 +5,10 @@
 #   bin/bench.sh           default: headless `--bench parse` + `--bench
 #                          render` only.  ~1-2 seconds, run on every
 #                          commit / before push.
+#   bin/bench.sh --build-only   build and stop; --no-build   measure
+#                          and do not build.  Split so a caller can
+#                          take a shared lock for the compile and an
+#                          exclusive one for the measurement.
 #   bin/bench.sh --full    also runs the live PTY pipeline through
 #                          bin/measure.sh (1-2 minutes), AND the
 #                          Phase 9 SSIM gate.  Use before merging to
@@ -45,11 +49,19 @@ SCENARIOS_DIR="$ROOT/bench/scenarios"
 MODE=fast
 UPDATE=0
 WITH_SSIM=0
+# Build and measure are separable so the caller can hold a different
+# lock for each: a build is heavy work that belongs alongside other
+# heavy work, a measurement wants the machine to itself.  Holding the
+# exclusive lock across both makes everyone else wait for a compile.
+DO_BUILD=1
+DO_MEASURE=1
 for arg in "$@"; do
   case "$arg" in
     --full)              MODE=full ;;
     --update-baseline)   UPDATE=1 ;;
     --ssim)              WITH_SSIM=1 ;;
+    --build-only)        DO_MEASURE=0 ;;
+    --no-build)          DO_BUILD=0 ;;
     --help|-h)
       sed -n '2,20p' "$0"; exit 0 ;;
     *)
@@ -131,8 +143,13 @@ done
 # once one existed: on the mini the gate measured a Jun 6 build for
 # a month of runs (caught 2026-07-11 via byte-identical size numbers
 # across an objc2 major upgrade).
-echo "==> building marspot (release)"
-( cd "$ROOT" && cargo build --release 2>&1 | tail -3 )
+if (( DO_BUILD )); then
+  echo "==> building marspot (release)"
+  ( cd "$ROOT" && cargo build --release 2>&1 | tail -3 )
+fi
+if (( ! DO_MEASURE )); then
+  exit 0
+fi
 
 
 
