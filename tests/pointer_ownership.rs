@@ -92,6 +92,34 @@ fn the_wheel_asks_the_same_question_first() {
     );
 }
 
+/// A plain click in a pane starts a selection, even over a program
+/// that asked for mouse reports.
+///
+/// Every other terminal gives that click to the program and makes you
+/// hold shift to select. The panes here are agent TUIs: clicking
+/// inside one does nothing, and selecting its output is what the mouse
+/// is for. Following the convention meant the only way to copy a line
+/// was a chord nobody had been told about, and it was reported as "I
+/// can't select text in a pane any more" within a day.
+#[test]
+fn a_plain_click_selects_and_shift_gives_it_to_the_program() {
+    let b = body_of("mouse_down");
+    let at = b
+        .find("l3_inject_mouse_button")
+        .expect("mouse_down no longer forwards a press");
+    let guard = &b[at.saturating_sub(600)..at];
+    assert!(
+        guard.contains("&& modifiers.shift"),
+        "the press is forwarded without shift held, which takes the plain click \
+         away from selection"
+    );
+    assert!(
+        !guard.contains("&& !modifiers.shift"),
+        "the shift guard is inverted: shift would select and a plain click would \
+         go to the program"
+    );
+}
+
 /// The half that was always right, kept so the pair reads as a rule.
 #[test]
 fn a_click_asks_the_same_question_first() {

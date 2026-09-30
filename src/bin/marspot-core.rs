@@ -8631,13 +8631,25 @@ impl CoreApp {
                 return;
             }
 
-        // A program that asked for mouse reports gets the click.
+        // Selecting wins the plain click; hold shift to hand it to the
+        // program instead.
         //
-        // Holding shift takes it back: that is the convention every
-        // terminal follows, and without it there is no way to select
-        // text over a full-screen program that tracks the mouse.
+        // That is the inverse of the convention, and deliberately. Every
+        // other terminal gives the plain click to a program that asked
+        // for mouse reports, because the program is usually an editor or
+        // a pager the user is working *inside*. The panes here are agent
+        // TUIs: clicking inside one does nothing at all, and selecting
+        // its output is what the mouse is for, all day. Following the
+        // convention meant the only way to copy a line of output was a
+        // chord nobody had been told about -- reported as "I can't
+        // select text in a pane any more" within a day of the forwarding
+        // landing.
+        //
+        // The forwarding itself was never asked for. What was asked for
+        // was the wheel, and the wheel is a different path (`scroll`),
+        // untouched by this.
         if let Some((idx, col, row)) = cell_pos_hit
-            && !modifiers.shift
+            && modifiers.shift
             && win!(self, wi).panes.get(idx)
                 .map(|p| p.session().l3_mouse_tracking_active())
                 .unwrap_or(false)
