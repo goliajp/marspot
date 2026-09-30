@@ -20,20 +20,33 @@
 //! one we must not be able to fake.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::cell::Cell;
 
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
-static BYTES: AtomicUsize = AtomicUsize::new(0);
-static COUNTING: AtomicBool = AtomicBool::new(false);
+// Per-thread, not global: the test harness runs tests concurrently in
+// one process, and a global tally counts a sibling test's allocations
+// as this frame's.  Measured in the sibling crate: a frame that
+// allocates nothing read 4.  `const` init because a lazily initialised
+// thread-local would allocate from inside the allocator.
+thread_local! {
+    static ALLOCS: Cell<usize> = const { Cell::new(0) };
+    static BYTES: Cell<usize> = const { Cell::new(0) };
+    static COUNTING: Cell<bool> = const { Cell::new(false) };
+}
+
+fn note(size: usize) {
+    let _ = COUNTING.try_with(|c| {
+        if c.get() {
+            let _ = ALLOCS.try_with(|a| a.set(a.get() + 1));
+            let _ = BYTES.try_with(|b| b.set(b.get() + size));
+        }
+    });
+}
 
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.load(Ordering::Relaxed) {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-            BYTES.fetch_add(layout.size(), Ordering::Relaxed);
-        }
+        note(layout.size());
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -43,10 +56,7 @@ unsafe impl GlobalAlloc for Counting {
         // A realloc is a grow that could have been reserved for, so it
         // counts: it is the signature of a Vec that did not know its
         // own size.
-        if COUNTING.load(Ordering::Relaxed) {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-            BYTES.fetch_add(new_size.saturating_sub(layout.size()), Ordering::Relaxed);
-        }
+        note(new_size.saturating_sub(layout.size()));
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -56,21 +66,15 @@ static ALLOCATOR: Counting = Counting;
 
 /// Run `f` with the tally on, and return `(allocations, bytes)`.
 ///
-/// Other threads allocating during the window would land in the same
-/// tally.  Nothing here starts one, and nextest gives each test its
-/// own process, but a number from this is "what this process did",
-/// not "what this closure did".
+/// Only this thread's allocations, so a sibling test running at the
+/// same time cannot be mistaken for this frame's work.
 fn measured<T>(f: impl FnOnce() -> T) -> (usize, usize, T) {
-    ALLOCS.store(0, Ordering::Relaxed);
-    BYTES.store(0, Ordering::Relaxed);
-    COUNTING.store(true, Ordering::Relaxed);
+    ALLOCS.with(|a| a.set(0));
+    BYTES.with(|b| b.set(0));
+    COUNTING.with(|c| c.set(true));
     let out = f();
-    COUNTING.store(false, Ordering::Relaxed);
-    (
-        ALLOCS.load(Ordering::Relaxed),
-        BYTES.load(Ordering::Relaxed),
-        out,
-    )
+    COUNTING.with(|c| c.set(false));
+    (ALLOCS.with(|a| a.get()), BYTES.with(|b| b.get()), out)
 }
 
 #[test]
