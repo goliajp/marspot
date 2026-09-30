@@ -124,9 +124,22 @@ jobs:
           fi
 
       - name: The gate
-        # The same tests CI runs.  A tag is not a reason to skip them;
-        # it is the one moment they matter most.
-        run: cargo test --workspace
+        # The same tests CI runs, the same way — which this did not do.
+        #
+        # It ran `cargo test --workspace`, which puts every test of a
+        # binary in one process on threads, and several of these own a
+        # state directory.  And it ran before anything built the bins,
+        # while a dozen of the tests exec `target/debug/marspot-session`
+        # to drive a real session: `nextest` builds each binary's test
+        # harness, not the binary.  Twelve of them failed on the first
+        # rehearsal for exactly that reason.
+        #
+        # A tag is not a reason to skip the gate; it is the one moment
+        # it matters most, so it has to be the gate and not a lookalike.
+        run: |
+          curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C "$HOME/.cargo/bin"
+          cargo build --workspace --all-targets
+          cargo nextest run --workspace --no-fail-fast
 
       - name: Build
         run: cargo build --release --bins
