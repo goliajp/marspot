@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.185"  # the return waits for the composer to redraw
-core    = "0.12.223"  # layout stops laying every child out twice
+core    = "0.12.224"  # a laid-out node stops carrying a copy of its subtree
 session = "0.11.105"  # clippy sweep
