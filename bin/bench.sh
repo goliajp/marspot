@@ -112,10 +112,18 @@ PY
 fi
 
 # Make sure scenarios exist; regenerate if missing (cheap, deterministic).
-if [[ ! -f "$SCENARIOS_DIR/cat-ascii.bin" || ! -f "$SCENARIOS_DIR/scroll-history.bin" ]]; then
-  echo "==> generating bench scenarios"
-  "$ROOT/bin/gen-scenarios.sh" >/dev/null
-fi
+#
+# Every scenario, not two of them.  The list used to name cat-ascii and
+# scroll-history, so adding a scenario meant the remote host — which
+# never has them, they are gitignored and not synced — ran the whole
+# build and then failed on the first read of the new file.
+for _s in cat-ascii cat-mixed cat-cjk cat-emoji cat-clusters scroll-history; do
+  if [[ ! -f "$SCENARIOS_DIR/$_s.bin" ]]; then
+    echo "==> generating bench scenarios ($_s missing)"
+    "$ROOT/bin/gen-scenarios.sh" >/dev/null
+    break
+  fi
+done
 
 # Build release unconditionally — cargo is incremental, so an
 # up-to-date tree is a sub-second no-op.  The previous "only if the
@@ -186,7 +194,7 @@ trap 'rm -rf "$CUR_DIR"' EXIT
 # manufactures false gate failures.  The warm-up trial pre-pays
 # those costs; the recorded trials measure steady-state.
 echo "==> headless parse (5 trials each, taking median)"
-for s in cat-ascii cat-mixed cat-cjk cat-emoji; do
+for s in cat-ascii cat-mixed cat-cjk cat-emoji cat-clusters; do
   : > "$CUR_DIR/parse-$s.samples"
   "$(marspot_bin marspot)" --bench "parse:$SCENARIOS_DIR/$s.bin" >/dev/null
   for i in 1 2 3 4 5; do
@@ -572,7 +580,10 @@ for entry in baseline["scenarios"]:
         else:
             check(f"parse-file {sid:10}", load_parse_file(sid), floor_file)
 
-    if mode == "full":
+    # A scenario may exist only to exercise a code path; it has no
+    # competitor measurement and no live number, and asking for one
+    # would fail on a key that was never meant to be there.
+    if mode == "full" and "mars_live_MBps_min" in entry:
         cur_live = load_live(sid)
         trust = live_measurement_is_trustworthy()
         if not trust:

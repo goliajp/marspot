@@ -75,6 +75,37 @@ with open(out, "wb") as f:
 print(f"  {out}: {os.path.getsize(out):,} bytes")
 PY
 
+# ---- cat-clusters: 8 MiB of MULTI-CODEPOINT grapheme clusters -------------
+#
+# cat-emoji is single-codepoint emoji throughout — measured 2026-09-30,
+# 4 893 420 clusters and not one of them more than a codepoint.  So the
+# emoji number says nothing about the path a cluster takes, which is
+# the slow one by construction: a regional-indicator pair and a
+# skin-tone modifier are exactly the two things the fast pictograph
+# class cannot admit, because their boundary depends on a neighbour.
+#
+# This is that path: ZWJ sequences, variation selectors, skin tones,
+# flags and combining marks, all of which the terminal holds whole.
+echo "==> cat-clusters (8 MiB)"
+python3 - "$OUT/cat-clusters.bin" 8 <<'PYCL'
+import sys, os
+out, mb = sys.argv[1], int(sys.argv[2])
+target = mb * 1024 * 1024
+chunk = (
+    "\U0001F468‍\U0001F469‍\U0001F467‍\U0001F466 "
+    "\U0001F469\U0001F3FD‍\U0001F4BB \U0001F44D\U0001F3FF "
+    "\U0001F1EF\U0001F1F5 \U0001F1E9\U0001F1EA \U0001F1FA\U0001F1F8\n"
+    "café naïve Angèle ⚠️ ❤️ "
+    "क्क 각\n"
+).encode("utf-8")
+written = 0
+with open(out, "wb") as f:
+    while written < target:
+        f.write(chunk)
+        written += len(chunk)
+print(f"  {out}: {os.path.getsize(out):,} bytes")
+PYCL
+
 # ---- cat-emoji: 8 MiB of emoji-heavy text ---------------------------------
 echo "==> cat-emoji (8 MiB)"
 python3 - "$OUT/cat-emoji.bin" 8 <<'PY'
