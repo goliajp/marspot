@@ -7060,6 +7060,50 @@ mod tests {
     /// fast and host-portable (no Metal device → snapshot tests skip
     /// entirely upstream).  `bin/font-snapshot-check.sh` is the
     /// wrapper that flips the env and runs the matrix.
+    /// The SSIM gate has to be able to fail.
+    ///
+    /// Every snapshot reading is a number near 1.0, and a comparison
+    /// that silently compares an image with itself reads exactly the
+    /// same.  Two images that differ have to come out under the
+    /// threshold the gate uses.
+    #[test]
+    fn ssim_separates_two_different_images() {
+        let (w, h) = (64u32, 64u32);
+        let n = (w * h * 4) as usize;
+        let flat = vec![128u8; n];
+        assert_eq!(ssim_luma(&flat, &flat, w, h), 1.0, "an image against itself");
+
+        // Same mean, different structure: half the pixels dark, half
+        // bright.  A gate that only looked at averages would miss it.
+        let mut split = vec![0u8; n];
+        for (i, px) in split.chunks_mut(4).enumerate() {
+            let v = if (i / w as usize) % 2 == 0 { 30 } else { 226 };
+            px.copy_from_slice(&[v, v, v, 255]);
+        }
+        let s = ssim_luma(&flat, &split, w, h);
+        assert!(s < 0.98, "two different images must fall under the gate, got {s}");
+    }
+
+    /// Write a baseline PNG — but only when recording one.
+    ///
+    /// These tests used to write their own baseline on every run,
+    /// including the run that had just compared against it.  A render
+    /// that drifted therefore updated the file it was being judged
+    /// by, and the SSIM gate could never fail twice.  Recording is now
+    /// something you ask for.
+    fn write_snapshot_png(path: &std::path::Path, rgba: &[u8], w_px: u32, h_px: u32) {
+        if std::env::var("MARSPOT_FONT_SNAPSHOT").as_deref() != Ok("1") {
+            return;
+        }
+        let file = std::fs::File::create(path).expect("create png");
+        let buf = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(buf, w_px, h_px);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(rgba).expect("png data");
+    }
+
     fn assert_snapshot_ssim(
         rgba: &[u8],
         baseline_path: &std::path::Path,
@@ -7179,13 +7223,7 @@ mod tests {
         // we overwrite the on-disk PNG; otherwise the on-disk PNG IS
         // the fresh render and SSIM would be 1.0 by definition.
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        let file = std::fs::File::create(&out_path).expect("create png");
-        let buf = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(buf, w_px, h_px);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(&rgba).expect("png data");
+        write_snapshot_png(&out_path, &rgba, w_px, h_px);
         eprintln!(
             "[font v5 snapshot] wrote {} ({} × {})",
             out_path.display(),
@@ -7290,13 +7328,7 @@ mod tests {
         let out_path = out_dir.join("font_v5_mono_grid.png");
         // Phase 9 — SSIM gate (see assert_snapshot_ssim doc).
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        let file = std::fs::File::create(&out_path).expect("create png");
-        let buf = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(buf, w_px, h_px);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(&rgba).expect("png data");
+        write_snapshot_png(&out_path, &rgba, w_px, h_px);
         eprintln!(
             "[font v5 mono grid] wrote {} ({} × {})",
             out_path.display(),
@@ -7396,13 +7428,7 @@ mod tests {
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_box_drawing.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        let file = std::fs::File::create(&out_path).expect("create png");
-        let buf = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(buf, w_px, h_px);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(&rgba).expect("png data");
+        write_snapshot_png(&out_path, &rgba, w_px, h_px);
         eprintln!(
             "[font v5 box drawing] wrote {} ({} × {})",
             out_path.display(),
@@ -7506,13 +7532,7 @@ mod tests {
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_subpx_fingerprint.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        let file = std::fs::File::create(&out_path).expect("create png");
-        let buf = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(buf, w_px, h_px);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(&rgba).expect("png data");
+        write_snapshot_png(&out_path, &rgba, w_px, h_px);
         eprintln!(
             "[font v5 subpx fingerprint] wrote {} ({} × {})",
             out_path.display(),
@@ -7638,13 +7658,7 @@ mod tests {
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_chrome_small_sizes.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        let file = std::fs::File::create(&out_path).expect("create png");
-        let buf = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(buf, w_px, h_px);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(&rgba).expect("png data");
+        write_snapshot_png(&out_path, &rgba, w_px, h_px);
         eprintln!(
             "[font v5 chrome small sizes] wrote {} ({} × {})",
             out_path.display(),
@@ -7750,13 +7764,7 @@ mod tests {
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_cjk_fallback_baseline.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        let file = std::fs::File::create(&out_path).expect("create png");
-        let buf = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(buf, w_px, h_px);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(&rgba).expect("png data");
+        write_snapshot_png(&out_path, &rgba, w_px, h_px);
         eprintln!(
             "[font v5 cjk fallback baseline] wrote {} ({} × {})",
             out_path.display(),
@@ -7860,13 +7868,7 @@ mod tests {
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_emoji_color.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        let file = std::fs::File::create(&out_path).expect("create png");
-        let buf = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(buf, w_px, h_px);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(&rgba).expect("png data");
+        write_snapshot_png(&out_path, &rgba, w_px, h_px);
         eprintln!(
             "[font v5 emoji color] wrote {} ({} × {})",
             out_path.display(),
@@ -7990,13 +7992,7 @@ mod tests {
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_opentype_opts.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        let file = std::fs::File::create(&out_path).expect("create png");
-        let buf = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(buf, w_px, h_px);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(&rgba).expect("png data");
+        write_snapshot_png(&out_path, &rgba, w_px, h_px);
         eprintln!(
             "[font v5 opentype opts] wrote {} ({} × {})",
             out_path.display(),
@@ -8145,13 +8141,7 @@ mod tests {
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_terminal_scene.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        let file = std::fs::File::create(&out_path).expect("create png");
-        let buf = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(buf, w_px, h_px);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(&rgba).expect("png data");
+        write_snapshot_png(&out_path, &rgba, w_px, h_px);
         eprintln!(
             "[font v5 terminal scene] wrote {} ({} × {})",
             out_path.display(),
@@ -8309,13 +8299,7 @@ mod tests {
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_chrome_decoration.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        let file = std::fs::File::create(&out_path).expect("create png");
-        let buf = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(buf, w_px, h_px);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(&rgba).expect("png data");
+        write_snapshot_png(&out_path, &rgba, w_px, h_px);
         eprintln!(
             "[font v5 chrome decoration] wrote {} ({} × {})",
             out_path.display(),
@@ -8385,13 +8369,7 @@ mod tests {
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("devpanel_components_catalog.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        let file = std::fs::File::create(&out_path).expect("create png");
-        let buf = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(buf, w_px, h_px);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(&rgba).expect("png data");
+        write_snapshot_png(&out_path, &rgba, w_px, h_px);
         eprintln!(
             "[devpanel components catalog] wrote {} ({} × {})",
             out_path.display(),
@@ -8459,13 +8437,7 @@ mod tests {
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("devpanel_typography.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        let file = std::fs::File::create(&out_path).expect("create png");
-        let buf = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(buf, w_px, h_px);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(&rgba).expect("png data");
+        write_snapshot_png(&out_path, &rgba, w_px, h_px);
         eprintln!(
             "[devpanel typography] wrote {} ({} × {})",
             out_path.display(),
@@ -8533,13 +8505,7 @@ mod tests {
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("devpanel_architecture.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        let file = std::fs::File::create(&out_path).expect("create png");
-        let buf = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(buf, w_px, h_px);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(&rgba).expect("png data");
+        write_snapshot_png(&out_path, &rgba, w_px, h_px);
         eprintln!(
             "[devpanel architecture] wrote {} ({} × {})",
             out_path.display(),
