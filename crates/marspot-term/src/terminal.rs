@@ -4344,6 +4344,38 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 self.pending_response.extend_from_slice(reply.as_bytes());
                 self.record_response("OSC-COLOR");
             }
+            // OSC 133 — where one command's territory ends and the
+            // next begins, from the shell's own prompt hooks.
+            //
+            // The letters are FinalTerm's and the set is not small (a
+            // full implementation answers L, A, N, P, B, I, C and D).
+            // Four of them carry the boundaries anything would want to
+            // scroll to, and the rest are refinements of those; an
+            // unknown letter is ignored rather than guessed at.
+            //
+            // Options arrive as `;key=value` after the letter and are
+            // skipped, except `D`'s first parameter, which is the exit
+            // status. "No status" is a different thing from zero: a
+            // shell that did not say cannot be reported as success.
+            Some(133) => {
+                let body = std::str::from_utf8(rest).unwrap_or("");
+                let mut parts = body.split(';');
+                let mark = match parts.next() {
+                    Some("A") | Some("P") => crate::grid::PromptMark::PromptStart,
+                    Some("B") => crate::grid::PromptMark::InputStart,
+                    Some("C") => crate::grid::PromptMark::OutputStart,
+                    Some("D") => {
+                        let status = parts
+                            .next()
+                            .filter(|p| !p.is_empty() && !p.contains('='))
+                            .and_then(|p| p.parse::<u8>().ok());
+                        crate::grid::PromptMark::CommandEnd(status)
+                    }
+                    _ => return,
+                };
+                let (_, row) = self.grid.cursor();
+                self.grid.set_row_prompt(row, mark);
+            }
             // OSC 52 — a program putting something on the clipboard.
             //
             // `52 ; <targets> ; <base64>`.  This is how yanking in vim
