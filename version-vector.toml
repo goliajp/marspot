@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.210"  # a parked session remembers where it lives
+shell   = "0.7.211"  # the composer carry does not carry what marspot said
 core    = "0.12.252"  # a timing assertion says when it is measuring the host
 session = "0.11.137"  # a timing assertion says when it is measuring the host

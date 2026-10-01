@@ -202,7 +202,19 @@ pub enum StepKind {
     ///
     /// Nothing there is the ordinary case and is not a failure: the
     /// job finishes with `None`, and `PasteJob` ends the run quietly.
-    CaptureComposer(Arc<Job>),
+    CaptureComposer {
+        job: Arc<Job>,
+        /// A line this run is responsible for having put there.
+        ///
+        /// Carrying the composer across is for the person's own
+        /// half-written sentence. Anything marspot said is not theirs,
+        /// and putting it back makes it immortal: once it was in the
+        /// composer, every later switch read it as unsent text, held
+        /// it, and restored it -- five panes carrying the same 34
+        /// characters for a day, looking exactly like a product that
+        /// keeps typing into the input box.
+        ours: Option<String>,
+    },
     /// Run a quick effect, failing the run with its error.  For
     /// committing a decision only once the steps before it worked.
     Call(CallFn),
@@ -384,11 +396,21 @@ impl Step {
     /// Save what the person has typed but not sent.
     pub fn capture_composer(job: Arc<Job>) -> Self {
         Self {
-            kind: StepKind::CaptureComposer(job),
+            kind: StepKind::CaptureComposer { job, ours: None },
             timeout: Some(Duration::from_secs(5)),
             proceed_on_timeout: false,
             label: "capture_composer",
         }
+    }
+
+    /// Name the line this run put in the pane, so capturing the
+    /// composer does not carry marspot's own words across as if they
+    /// were the person's.
+    pub fn disowning(mut self, text: impl Into<String>) -> Self {
+        if let StepKind::CaptureComposer { ours, .. } = &mut self.kind {
+            *ours = Some(text.into());
+        }
+        self
     }
 
     pub fn paste_job(job: Arc<Job>) -> Self {
@@ -968,7 +990,7 @@ impl OpRunner {
                 self.finish(host, OpOutcome::Done);
                 true
             }
-            StepKind::CaptureComposer(job) => {
+            StepKind::CaptureComposer { job, ours } => {
                 // A screen we cannot read means we do not know whether
                 // anything was there, and the only safe reading of
                 // "do not know" is "nothing" -- pasting a guess into
@@ -980,6 +1002,24 @@ impl OpRunner {
                     .pane_screen(sid)
                     .as_deref()
                     .and_then(crate::plugins::autorun::unsent_line);
+                // Ours is not theirs. Taken off the front rather than
+                // matched whole, because the person may have started
+                // typing after it -- that part is theirs and travels.
+                let unsent = match (&unsent, &ours) {
+                    (Some(t), Some(ours)) if t.trim_start().starts_with(ours.as_str()) => {
+                        let rest = t.trim_start()[ours.len()..].trim();
+                        host.log(
+                            LogLevel::Info,
+                            &format!("{}.composer_ours", self.op.name),
+                            &format!(
+                                "pane {sid}: {} chars of it were ours and are not carried",
+                                ours.chars().count()
+                            ),
+                        );
+                        (!rest.is_empty()).then(|| rest.to_string())
+                    }
+                    _ => unsent,
+                };
                 match &unsent {
                     Some(t) => host.log(
                         LogLevel::Info,
@@ -2519,6 +2559,66 @@ mod tests {
         *state.out_len.lock().unwrap() = 40;
         run(&mut r, &host, &state, 400);
         assert!(*host.ended.lock().unwrap(), "both declarations are the answer");
+    }
+
+    /// The composer carry is for the person's sentence, and marspot's
+    /// own words are not theirs.
+    ///
+    /// This is how one sentence became immortal: an older build typed
+    /// it into the composer, where it stuck. Every switch after that
+    /// read it as unsent text, held it, and put it back -- five panes
+    /// carrying the same 34 characters for a day. The sentence had
+    /// already moved to the command line by then; what kept showing it
+    /// in the input box was the feature meant to protect what the
+    /// person was writing.
+    #[test]
+    fn the_composer_carry_does_not_carry_what_marspot_said() {
+        let (state, env, host) = setup();
+        let ours = "额度恢复了，如果有刚被打断的工作请继续，如果是 idle 状态请保持";
+        *state.screen.lock().unwrap() = format!("❯ {ours}\n");
+        let held = Arc::new(Job::new());
+        let mut r = OpRunner::new(
+            PtyOp::new("test.disown")
+                .step(Step::capture_composer(Arc::clone(&held)).disowning(ours)),
+            env,
+        );
+        run(&mut r, &host, &state, 64);
+        assert_eq!(
+            held.text(),
+            None,
+            "a line this run is responsible for is not the person's to carry"
+        );
+    }
+
+    /// And what the person typed after it still travels.
+    #[test]
+    fn what_the_person_added_after_it_is_still_theirs() {
+        let (state, env, host) = setup();
+        let ours = "say this";
+        *state.screen.lock().unwrap() = format!("❯ {ours} and then my own words\n");
+        let held = Arc::new(Job::new());
+        let mut r = OpRunner::new(
+            PtyOp::new("test.disown2")
+                .step(Step::capture_composer(Arc::clone(&held)).disowning(ours)),
+            env,
+        );
+        run(&mut r, &host, &state, 64);
+        assert_eq!(held.text().as_deref(), Some("and then my own words"));
+    }
+
+    /// A composer holding only the person's own text is untouched.
+    #[test]
+    fn a_sentence_that_is_not_ours_is_carried_whole() {
+        let (state, env, host) = setup();
+        *state.screen.lock().unwrap() = "❯ half a thought\n".to_string();
+        let held = Arc::new(Job::new());
+        let mut r = OpRunner::new(
+            PtyOp::new("test.theirs")
+                .step(Step::capture_composer(Arc::clone(&held)).disowning("something else")),
+            env,
+        );
+        run(&mut r, &host, &state, 64);
+        assert_eq!(held.text().as_deref(), Some("half a thought"));
     }
 
     /// A program quicker than the tick still counts as having drawn.

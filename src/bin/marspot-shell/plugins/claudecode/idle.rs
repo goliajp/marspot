@@ -519,7 +519,12 @@ pub(super) fn reclaim_op(
     Some(
         pty_op::PtyOp::new("cc.reclaim")
             .hold_screen(true)
-            .step(pty_op::Step::capture_composer(std::sync::Arc::clone(&held)))
+            // Same rule as the switch: the person's half-written
+            // sentence travels, marspot's own words do not.
+            .step(
+                pty_op::Step::capture_composer(std::sync::Arc::clone(&held))
+                    .disowning(super::resume_word()),
+            )
             // No Esc hatch: bailing out mid-park would leave a pane with
             // no claude and no wake armed, which is strictly worse than
             // waiting.  The wake itself takes ~2 s.

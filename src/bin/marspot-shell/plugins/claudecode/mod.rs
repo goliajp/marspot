@@ -1837,7 +1837,11 @@ fn profile_cycle_op(
     let mut op = pty_op::PtyOp::new("cc.profile_cycle")
         .hold_screen(true)
         .badge(format!("→ P{next_profile}"))
-        .step(pty_op::Step::capture_composer(Arc::clone(&held)))
+        // Whatever the person had typed travels; the sentence this
+        // script says does not. It is on the command line now and
+        // never reaches the composer -- but a copy left there by an
+        // older build would otherwise be carried forward for ever.
+        .step(pty_op::Step::capture_composer(Arc::clone(&held)).disowning(resume_word()))
         .step(pty_op::Step::settle(HOLD_SETTLE).named("hold_settle"))
         .step(
             pty_op::Step::terminate(claude_pid, libc::SIGTERM)
