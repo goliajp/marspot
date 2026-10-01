@@ -105,6 +105,32 @@ fn a_password_prompt_does_not_keep_what_was_typed_on_screen() {
     assert!(t.predictions_expired > 0, "expiry is what cleared it");
 }
 
+/// Feed until the program has echoed `want` bytes in total.
+///
+/// `seen` counts every byte read since the caller started counting, so
+/// the wait is for the thing itself rather than for a duration that
+/// happens to be long enough on an idle machine.
+fn pump_until_echoed(
+    pty: &mut Pty,
+    t: &mut Terminal,
+    seen: &mut usize,
+    want: usize,
+    limit: Duration,
+) {
+    let start = Instant::now();
+    let mut buf = [0u8; 8192];
+    while *seen < want && start.elapsed() < limit {
+        match pty.read(&mut buf) {
+            Ok(n) if n > 0 => {
+                *seen += n;
+                t.feed(&buf[..n]);
+            }
+            _ => std::thread::sleep(Duration::from_millis(1)),
+        }
+        t.expire_predictions();
+    }
+}
+
 #[test]
 fn a_program_that_echoes_keeps_its_local_echo() {
     // The other side of the same coin: `cat` echoes, so the guesses
@@ -113,12 +139,21 @@ fn a_program_that_echoes_keeps_its_local_echo() {
     let mut t = Terminal::new(60, 10);
     wait_until_ready(&mut pty, &mut t);
 
-    for &b in b"hello" {
+    // Each byte is guessed, sent, and then waited for -- waited for by
+    // counting what came back, not by sleeping.  What this test is
+    // about is the order of a guess and its confirmation, and a sleep
+    // only settles that order on an idle machine: on a loaded one the
+    // echo of `h` can arrive after `e` has been guessed, and the row
+    // reads `lhelo`.  That is the scheduler being observed, not local
+    // echo being wrong (seen three times on 2026-10-01, on a host at
+    // load 83-97, and on an unmodified tree).
+    let mut echoed = 0usize;
+    for (i, &b) in b"hello".iter().enumerate() {
         assert!(t.predict_byte(b));
         let _ = pty.write(&[b]);
-        std::thread::sleep(Duration::from_millis(15));
-        pump(&mut pty, &mut t, Duration::from_millis(20));
+        pump_until_echoed(&mut pty, &mut t, &mut echoed, i + 1, Duration::from_secs(10));
     }
+    assert_eq!(echoed, 5, "the fixture needs every byte echoed back");
     let settle = t.predict_deadline() + Duration::from_millis(150);
     pump(&mut pty, &mut t, settle);
 
