@@ -3001,7 +3001,7 @@ mod tests {
             .join(format!("marspot-shortwrap-{}", std::process::id()));
         // A dotted directory gives the wrong answer somewhere real to
         // land — without it the test could pass for the wrong reason.
-        let deep = root.join(".tmp");
+        let deep = root.join(".cache");
         std::fs::create_dir_all(&deep).unwrap();
         let file = deep.join("20260906-gpt6-headline-strategy-for-claude.md");
         std::fs::write(&file, b"x").unwrap();
@@ -4364,7 +4364,7 @@ mod tests {
 
     /// 2026-09-06 field report, inside codex: the path came out
     /// underlined only as far as `…/lab36-continus/`, dropping the
-    /// `.tmp/…` tail and the wrapped remainder.
+    /// `.cache/…` tail and the wrapped remainder.
     ///
     /// The geometry is taken off the pane it happened in — 73 columns,
     /// codex's `›` prompt glyph, and codex's own line break with a
@@ -4377,15 +4377,15 @@ mod tests {
     fn a_codex_wrapped_path_with_a_dot_directory_survives() {
         let root = std::env::temp_dir()
             .join(format!("marspot-linkify-codexwrap-{}", std::process::id()));
-        let deep = root.join(".tmp");
+        let deep = root.join(".cache");
         std::fs::create_dir_all(&deep).unwrap();
-        let file = deep.join("20260906-claude-to-gpt6-guard-scope.md");
+        let file = deep.join("20260906-long-note-that-wrapped-far.md");
         std::fs::write(&file, b"x").unwrap();
         let full = file.display().to_string();
 
         // Break it where codex would: leaving the tail on the next row
         // behind a hanging indent.
-        let cut = full.len() - "gpt6-guard-scope.md".len();
+        let cut = full.len() - "that-wrapped-far.md".len();
         let head = format!("\u{203a} {}", &full[..cut]);
         let tail = format!("  {}", &full[cut..]);
         // The real row sat two columns short of the pane edge (71 of
