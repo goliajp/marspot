@@ -250,3 +250,170 @@ mod modal_frame {
         assert_eq!(m.frame.y_top, 40.0);
     }
 }
+
+/// The settings panel, which is the first component whose layout is
+/// driven by measured text rather than by constants alone.
+///
+/// Its own tests are relations — a control is clickable where it is
+/// drawn, nothing overflows its card, the real font fits. All of them
+/// survive a panel moved three pixels down, which is exactly the
+/// failure a migration makes: the context menu's six relational tests
+/// all passed on a half-migrated tree that took only the frame from it.
+/// So the rects go here as numbers.
+mod settings_modal {
+    use marspot::settings::Settings;
+    use marspot::ui::components::settings_modal::{Slot, panel_rect, walk};
+    use marspot_term::layout::Rect;
+
+    /// `px_per_pt` reads a process-global scale, so a pin on absolute
+    /// px is only stable while this module owns it. Held for each
+    /// test's whole body, not just while setting it.
+    static SCALE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn at_scale_1<R>(f: impl FnOnce() -> R) -> R {
+        let _g = SCALE.lock().unwrap_or_else(|e| e.into_inner());
+        marspot::ui::set_chrome_scale(1.0);
+        f()
+    }
+
+    /// A measure that does not need a font: width proportional to the
+    /// character count, with a bold weight costing a little more. The
+    /// point of a pin is that the same input gives the same rects, so
+    /// what matters is that it is deterministic and that the migrated
+    /// code is handed the same one.
+    fn measure() -> impl FnMut(&str, f64, u16) -> f64 {
+        |s: &str, pt: f64, w: u16| {
+            let bold = if w >= 600 { 1.05 } else { 1.0 };
+            s.chars().count() as f64 * pt * 0.5 * bold * 2.0
+        }
+    }
+
+    fn r(x: &Rect) -> String {
+        format!("{:.1},{:.1} {:.1}x{:.1}", x.x, x.y_top, x.w, x.h)
+    }
+
+    fn dump(w: f64, h: f64, s: &Settings) -> String {
+        let mut m = measure();
+        let rect = panel_rect(w, h, s, &mut m, 30.0);
+        let mut out = format!("panel {}\n", r(&rect));
+        let mut m = measure();
+        walk(rect, s, &mut m, |slot| match slot {
+            Slot::Title { baseline } => out += &format!("title base {baseline:.1}\n"),
+            Slot::Group { heading, baseline } => {
+                out += &format!("group {heading:?} base {baseline:.1}\n")
+            }
+            Slot::Card { rect } => out += &format!("card {}\n", r(&rect)),
+            Slot::Row { row, band, label_baseline, desc_baseline, control, .. } => {
+                out += &format!(
+                    "row {row:?} band {} label {label_baseline:.1} desc {desc_baseline:.1} ctl {}\n",
+                    r(&band),
+                    r(&control)
+                )
+            }
+            Slot::Separator { rect } => out += &format!("sep {}\n", r(&rect)),
+            Slot::Footer { baseline } => out += &format!("footer base {baseline:.1}\n"),
+        });
+        out
+    }
+
+    /// Room on every side: the panel is its content's size, centred.
+    #[test]
+    fn a_window_with_room_gets_the_panel_at_its_natural_size() {
+        at_scale_1(|| {
+            assert_eq!(
+                dump(1600.0, 1200.0, &Settings::default()),
+                "panel 360.0,152.4 880.0x895.2\n\
+                 title base 198.4\n\
+                 group \"Idle reclamation\" base 238.4\n\
+                 card 396.0,252.4 808.0x245.7\n\
+                 row ReclaimEnabled band 396.0,252.4 808.0x81.9 label 289.9 desc 315.4 ctl 1138.0,272.4 42.0x24.0\n\
+                 sep 420.0,334.3 784.0x1.0\n\
+                 row ReclaimIdleMinutes band 396.0,334.3 808.0x81.9 label 371.8 desc 397.3 ctl 897.0,350.3 283.0x32.0\n\
+                 sep 420.0,416.2 784.0x1.0\n\
+                 row ReclaimPrefetch band 396.0,416.2 808.0x81.9 label 453.7 desc 479.2 ctl 1138.0,436.2 42.0x24.0\n\
+                 group \"Appearance\" base 534.1\n\
+                 card 396.0,548.1 808.0x163.8\n\
+                 row DimScale band 396.0,548.1 808.0x81.9 label 585.6 desc 611.1 ctl 915.2,564.1 264.8x32.0\n\
+                 sep 420.0,630.0 784.0x1.0\n\
+                 row CircledWide band 396.0,630.0 808.0x81.9 label 667.5 desc 693.0 ctl 1138.0,650.0 42.0x24.0\n\
+                 group \"Claude Code\" base 747.9\n\
+                 card 396.0,761.9 808.0x81.9\n\
+                 row CcStatuslineHook band 396.0,761.9 808.0x81.9 label 799.4 desc 824.9 ctl 1138.0,781.9 42.0x24.0\n\
+                 group \"Scrolling\" base 879.8\n\
+                 card 396.0,893.8 808.0x81.9\n\
+                 row ScrollFactor band 396.0,893.8 808.0x81.9 label 931.3 desc 956.8 ctl 902.0,909.8 278.0x32.0\n\
+                 footer base 1016.7\n"
+            );
+        });
+    }
+
+    /// Narrow: the width clamps to 94% of the window and everything
+    /// inside follows it -- the cards narrow, the separators narrow,
+    /// and the right-aligned controls move left by the same amount.
+    /// The vertical rhythm does not move, because nothing in it
+    /// depends on the width.
+    #[test]
+    fn a_narrow_window_clamps_the_width_and_the_contents_follow() {
+        at_scale_1(|| {
+            assert_eq!(
+                dump(800.0, 1200.0, &Settings::default()),
+                "panel 24.0,152.4 752.0x895.2\n\
+                 title base 198.4\n\
+                 group \"Idle reclamation\" base 238.4\n\
+                 card 60.0,252.4 680.0x245.7\n\
+                 row ReclaimEnabled band 60.0,252.4 680.0x81.9 label 289.9 desc 315.4 ctl 674.0,272.4 42.0x24.0\n\
+                 sep 84.0,334.3 656.0x1.0\n\
+                 row ReclaimIdleMinutes band 60.0,334.3 680.0x81.9 label 371.8 desc 397.3 ctl 433.0,350.3 283.0x32.0\n\
+                 sep 84.0,416.2 656.0x1.0\n\
+                 row ReclaimPrefetch band 60.0,416.2 680.0x81.9 label 453.7 desc 479.2 ctl 674.0,436.2 42.0x24.0\n\
+                 group \"Appearance\" base 534.1\n\
+                 card 60.0,548.1 680.0x163.8\n\
+                 row DimScale band 60.0,548.1 680.0x81.9 label 585.6 desc 611.1 ctl 451.2,564.1 264.8x32.0\n\
+                 sep 84.0,630.0 656.0x1.0\n\
+                 row CircledWide band 60.0,630.0 680.0x81.9 label 667.5 desc 693.0 ctl 674.0,650.0 42.0x24.0\n\
+                 group \"Claude Code\" base 747.9\n\
+                 card 60.0,761.9 680.0x81.9\n\
+                 row CcStatuslineHook band 60.0,761.9 680.0x81.9 label 799.4 desc 824.9 ctl 674.0,781.9 42.0x24.0\n\
+                 group \"Scrolling\" base 879.8\n\
+                 card 60.0,893.8 680.0x81.9\n\
+                 row ScrollFactor band 60.0,893.8 680.0x81.9 label 931.3 desc 956.8 ctl 438.0,909.8 278.0x32.0\n\
+                 footer base 1016.7\n"
+            );
+        });
+    }
+
+    /// The short-window case is not pinned, because what it does now
+    /// is wrong and pinning it would make the wrong thing the
+    /// baseline.  `panel_rect` clamps the height to 94% of the window;
+    /// `walk` never sees that clamp and lays the rows out from the top
+    /// regardless, so the last groups are drawn below the panel's own
+    /// background, over the terminal, and past the bottom of the
+    /// window -- and `hit_test` walks the same list, so they stay
+    /// clickable where nobody can reach them.  Nothing clips: the
+    /// settings paint path has no scissor.
+    ///
+    /// The panel's own `the_panel_fits_the_window_it_is_centred_in`
+    /// does not catch it: it asserts the *rect* fits the window and
+    /// never that the *content* fits the rect.
+    #[test]
+    #[should_panic(expected = "content runs past the panel")]
+    fn a_short_window_spills_the_contents_out_of_the_panel() {
+        at_scale_1(|| {
+            let s = Settings::default();
+            let mut m = measure();
+            let rect = panel_rect(1600.0, 700.0, &s, &mut m, 30.0);
+            let mut m = measure();
+            let mut bottom = rect.y_top;
+            walk(rect, &s, &mut m, |slot| {
+                if let Slot::Card { rect: c } = slot {
+                    bottom = bottom.max(c.y_top + c.h);
+                }
+            });
+            assert!(
+                bottom <= rect.y_top + rect.h,
+                "content runs past the panel by {:.1}px",
+                bottom - (rect.y_top + rect.h)
+            );
+        });
+    }
+}
