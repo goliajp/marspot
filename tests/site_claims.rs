@@ -555,3 +555,99 @@ mod idle_section {
         );
     }
 }
+
+/// The guide's claims about the terminal's own behaviour, as opposed to
+/// its key table and its flag list, which already have tests above.
+mod guide_behaviour {
+    use super::GUIDE;
+
+    /// The page's prose is wrapped, so a sentence spans lines with runs of
+    /// indentation in the middle. Asserting a literal against that fails on
+    /// the formatting rather than on the claim, which is the wrong thing to
+    /// be strict about.
+    fn prose(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    const TERMINAL: &str = include_str!("../crates/marspot-term/src/terminal.rs");
+    const PATHS: &str = include_str!("../crates/marspot-term/src/paths.rs");
+
+    /// The guide tells a reader that a program cannot read their clipboard
+    /// back. That is a security claim on a public page, so it is pinned to
+    /// the line that makes it true: OSC 52's handler excludes the `?`
+    /// query, so a read is neither answered nor acted on.
+    #[test]
+    fn the_clipboard_is_write_only_as_the_guide_says() {
+        assert!(
+            prose(GUIDE).contains("Reading the clipboard back is refused"),
+            "the guide stopped claiming the clipboard is write-only -- if that is \
+             because it no longer is, this test is the wrong thing to change"
+        );
+        assert!(
+            TERMINAL.contains(r#"if payload != b"?""#),
+            "OSC 52 no longer excludes the read query, so the guide's claim that a \
+             program cannot read the clipboard back is false"
+        );
+    }
+
+    /// Every path the guide's uninstall removes is a path the code writes.
+    ///
+    /// A guide that names the wrong directory leaves state behind, and the
+    /// reader has no way to know: the command succeeds either way.
+    #[test]
+    fn the_uninstall_names_the_paths_the_code_writes() {
+        for (in_guide, in_code, what) in [
+            ("Library/Application\\ Support/marspot", "Application Support/marspot", "state"),
+            ("Library/Logs/Marspot", "Library/Logs/Marspot", "the log"),
+            (".local/Marspot.app", "", "the app"),
+        ] {
+            assert!(
+                prose(GUIDE).contains(in_guide),
+                "the guide's uninstall no longer removes {what}"
+            );
+            if !in_code.is_empty() {
+                assert!(
+                    PATHS.contains(in_code),
+                    "the guide removes {in_guide:?} for {what}, and paths.rs does not \
+                     name {in_code:?}"
+                );
+            }
+        }
+    }
+
+    /// The guide says a new pane opens where the pane you were in is, not
+    /// where that pane was launched. The distinction is the whole point --
+    /// anything you have `cd`'d out of makes the launch directory the wrong
+    /// answer -- so the page may not say it without the code doing it.
+    #[test]
+    fn a_new_pane_inherits_the_live_directory_not_the_launch_one() {
+        const CORE: &str = include_str!("../src/bin/marspot-core.rs");
+        assert!(
+            prose(GUIDE).contains("the directory the pane you were in is in"),
+            "the guide stopped describing where a new pane opens"
+        );
+        // `live_cwd_of` is the pull-based lookup that replaced OSC 7's
+        // push reporting; a launch-time directory would not need it.
+        assert!(
+            CORE.contains("live_cwd_of"),
+            "nothing looks up a pane's live directory any more, so a new pane cannot \
+             be inheriting it"
+        );
+    }
+
+    /// And it does not go back to promising a signed download.
+    #[test]
+    fn it_does_not_claim_a_release_exists() {
+        assert!(
+            prose(GUIDE).contains("There is no published release yet"),
+            "the guide no longer says there is no published release -- if one was \
+             published, this is the test to change, after the front page"
+        );
+        assert!(
+            !prose(GUIDE).contains("waiting on credentials"),
+            "the guide says the pipeline waits on credentials. Local signing and \
+             notarisation were verified 2026-10-01; what is missing is a decision \
+             and, for CI, its secrets"
+        );
+    }
+}
