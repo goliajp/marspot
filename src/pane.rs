@@ -1907,13 +1907,20 @@ impl Pane {
         (0..rows)
             .map(|r| {
                 let mut line = String::with_capacity(cols as usize);
+                let mut row_clusters = Vec::new();
+                g.row_clusters_at_view(0, r, &mut row_clusters);
                 for c in 0..cols {
                     let cell = g.cell_at_view(0, c, r);
                     if cell.ch == '\0' {
                         continue;
                     }
-                    // A cluster cell's `ch` is a pool index, not text.
-                    match g.cluster_text_at_view(0, c, r, &cell) {
+                    // A cluster cell's `ch` is a pool index, not text;
+                    // one that has scrolled off holds the base
+                    // codepoint and its text is keyed by position.
+                    match g
+                        .cluster_text(&cell)
+                        .or_else(|| marspot_term::grid::cluster_in_row(&row_clusters, c))
+                    {
                         Some(text) => line.push_str(text),
                         None => line.push(cell.ch),
                     }

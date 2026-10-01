@@ -247,10 +247,15 @@ fn scrolling_back_shows_the_whole_cluster() {
     // Scroll back far enough that the first line is on screen again.
     let g = t.grid();
     let mut found = None;
+    let mut row_clusters = Vec::new();
     for off in 1..=(g.scrollback_len() as u16) {
         for row in 0..g.rows() {
             let cell = g.cell_at_view(off, 0, row);
-            if let Some(text) = g.cluster_text_at_view(off, 0, row, &cell) {
+            g.row_clusters_at_view(off, row, &mut row_clusters);
+            if let Some(text) = g
+                .cluster_text(&cell)
+                .or_else(|| marspot_term::grid::cluster_in_row(&row_clusters, 0))
+            {
                 found = Some(text.to_string());
             }
         }

@@ -837,6 +837,16 @@ const MAX_RESERVED_HEADER_ROWS: u16 = 1;
 /// once and reverted (F3+12.1).
 const MAX_FILED_BLANK_RUN: u16 = 3;
 
+/// The cluster text at `col` in a row fetched by
+/// [`Grid::row_clusters_at_view`].
+///
+/// A linear scan, because a row carries one entry per cluster on it and
+/// a row full of them is a few dozen -- a map would cost an allocation
+/// per row to save nothing.
+pub fn cluster_in_row(row: &[(u16, String)], col: u16) -> Option<&str> {
+    row.iter().find(|(c, _)| *c == col).map(|(_, t)| t.as_str())
+}
+
 impl Grid {
     pub fn new(cols: u16, rows: u16) -> Self {
         Self::with_scrollback(cols, rows, DEFAULT_SCROLLBACK_LINES)
@@ -994,43 +1004,47 @@ impl Grid {
         self.clusters.get(idx as usize).map(|s| &**s)
     }
 
-    /// What a cell says, when you know where it is.
+    /// The clusters on the row a viewport row is showing, appended to
+    /// `out`, which is cleared first.
     ///
-    /// `cluster_text` answers from the cell alone, which is all a live
-    /// cell needs: its `ch` is the pool index.  A scrollback cell
-    /// cannot work that way — it holds the base codepoint, because
-    /// that is what a binary without this feature reads out of the
-    /// file — so its cluster is keyed by position instead, and only
-    /// the caller knows the position.
+    /// Asked once per row rather than once per cell, because that is
+    /// how the answer is stored: a scrollback line's clusters are one
+    /// record, and a file-backed pane fetches it with one read. A
+    /// per-cell question would be one read per cell per frame.
+    ///
+    /// Rows still on screen have nothing here -- their cells point into
+    /// the live pool and [`Self::cluster_text`] answers for them. So a
+    /// reader asks this per row, then asks the pool per cell, and
+    /// [`cluster_in_row`] for whatever the pool does not know.
     ///
     /// Same argument order as `cell_at_view`, and the same index
     /// arithmetic, so the two cannot disagree about which row is meant.
-    pub fn cluster_text_at_view(
+    pub fn row_clusters_at_view(
         &self,
         view_offset: u16,
-        col: u16,
         viewport_row: u16,
-        cell: &Cell,
-    ) -> Option<&str> {
-        if let Some(text) = self.cluster_text(cell) {
-            return Some(text);
-        }
+        out: &mut Vec<(u16, String)>,
+    ) -> bool {
+        out.clear();
         let rows = self.rows() as usize;
         let abs = view_offset as usize + (rows - 1 - viewport_row as usize);
         if abs < rows {
-            return None;
+            return false;
         }
         let from_end = abs - rows;
         let sb_len = self.scrollback_len();
         if from_end >= sb_len {
-            return None;
+            return false;
         }
         let line = sb_len - 1 - from_end;
-        self.sb_clusters
-            .get(line)?
-            .iter()
-            .find(|(c, _)| *c == col)
-            .map(|(_, t)| t.as_str())
+        if self.scrollback.keeps_cluster_text() {
+            return self.scrollback.clusters_at(line, out);
+        }
+        let Some(row) = self.sb_clusters.get(line) else {
+            return false;
+        };
+        out.extend(row.iter().cloned());
+        !out.is_empty()
     }
 
     /// Drop pool entries no cell points at.
@@ -1102,6 +1116,32 @@ impl Grid {
     /// this is a single test.  Safe to mutate in place because the row
     /// is on its way off the screen and will be overwritten by the
     /// fill behind it.
+    /// Keep the cluster text of the line just pushed into scrollback.
+    ///
+    /// Where it goes depends on which scrollback this is, and the
+    /// difference is not a preference. The in-RAM variant has nowhere
+    /// but the grid, and the ring bounds the mirror. The file-backed
+    /// one has a sidecar, and must use it: its history outlives the
+    /// process, so a mirror could not answer for the lines written
+    /// before this one started -- and bounded by `scrollback.len()`,
+    /// which is the whole history, it would never be trimmed. Measured
+    /// before this existed: 2000 entries for 2000 lines, growing for as
+    /// long as the session runs.
+    ///
+    /// Must be called after the line itself is pushed: the sidecar
+    /// addresses it by its index in the file.
+    fn keep_row_clusters(&mut self, row_clusters: Vec<(u16, String)>) {
+        if !self.scrollback.keeps_cluster_text() {
+            self.sb_clusters.push_back(row_clusters);
+            return;
+        }
+        // Only lines that have some touch the sidecar; the test is one
+        // `is_empty` on the scroll path.
+        if !row_clusters.is_empty() {
+            self.scrollback.cluster_last_line(&row_clusters);
+        }
+    }
+
     fn degrade_clusters_in_row(&mut self, start: usize, cols: usize) -> Vec<(u16, String)> {
         if self.clusters.is_empty() {
             return Vec::new();
@@ -1358,7 +1398,7 @@ impl Grid {
             if mark != PromptMark::None {
                 self.scrollback.mark_last_line(mark);
             }
-            self.sb_clusters.push_back(row_clusters);
+            self.keep_row_clusters(row_clusters);
             self.wrapped[pr] = false;
             for c in &mut self.cells[start..start + cols] {
                 *c = fill;
@@ -1464,7 +1504,7 @@ impl Grid {
                     if mark != PromptMark::None {
                         self.scrollback.mark_last_line(mark);
                     }
-                    self.sb_clusters.push_back(row_clusters);
+                    self.keep_row_clusters(row_clusters);
                     self.scroll_push_count = self.scroll_push_count.saturating_add(1);
                 }
             }
@@ -1694,7 +1734,7 @@ impl Grid {
         // the flag (their truth lives in `sb_wrapped` below).
         self.scrollback.push_line_with_wrapped(line, wrapped);
         self.sb_wrapped.push_back(wrapped);
-        self.sb_clusters.push_back(Vec::new());
+        self.keep_row_clusters(Vec::new());
         while self.sb_wrapped.len() > self.scrollback.len() {
             self.sb_wrapped.pop_front();
             self.sb_prompt.pop_front();
@@ -1946,7 +1986,7 @@ impl Grid {
             // reflow-derived continuation flag.
             self.scrollback.push_line_with_wrapped(&row, *cont);
             self.sb_wrapped.push_back(*cont);
-            self.sb_clusters.push_back(Vec::new());
+            self.keep_row_clusters(Vec::new());
         }
         while self.sb_wrapped.len() > self.scrollback.len() {
             self.sb_wrapped.pop_front();
@@ -2468,11 +2508,15 @@ mod mirror_growth_tests {
     /// `scrollback.len()`, which is the whole history -- so they grow
     /// for as long as the session runs.
     ///
-    /// Two of the three are not even read for a file-backed scrollback:
-    /// `scrollback_wrapped` and `scrollback_prompt` both prefer the
-    /// file's copy, precisely because a mirror cannot answer for lines
-    /// written before this process started.  Keeping them is paying
-    /// per line, forever, for an answer nobody asks.
+    /// None of the three is the right place for a file-backed pane,
+    /// and for the same reason in each case: a mirror cannot answer
+    /// for the lines written before this process started.
+    /// `scrollback_wrapped` and `scrollback_prompt` already preferred
+    /// the file's copy, so keeping them was paying per line forever for
+    /// an answer nobody asks.  `sb_clusters` *was* read -- and measured
+    /// at 2000 entries for 2000 lines of history, each one a `Vec` and
+    /// the ones with clusters holding their text -- so it was not
+    /// dropped but moved: the file's sidecar answers it now.
     #[test]
     fn the_mirrors_do_not_grow_with_the_history_of_a_file_backed_pane() {
         let dir = std::env::temp_dir().join(format!(
@@ -2503,6 +2547,11 @@ mod mirror_growth_tests {
             g.sb_prompt.len() <= 64,
             "mark mirror holds {} entries for {history} lines of history",
             g.sb_prompt.len()
+        );
+        assert!(
+            g.sb_clusters.len() <= 64,
+            "cluster mirror holds {} entries for {history} lines of history",
+            g.sb_clusters.len()
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
