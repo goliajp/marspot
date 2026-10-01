@@ -727,6 +727,9 @@ impl WorkerCtx {
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
+            // The whole path, for the resume line: where the session
+            // lives is not the same question as what to call it.
+            let project_dir = f.cwd.to_str().map(str::to_string);
             // cc-layer status.  The generic layer already said a job
             // owns this tty (that is how we found claude at all); this
             // says what claude is doing inside it.  A tool that shells
@@ -777,6 +780,7 @@ impl WorkerCtx {
                     uuid: sid_uuid,
                     claude_pid: f.claude_pid,
                     project_basename,
+                    project_dir,
                     transcript_at: jsonl_path
                         .as_ref()
                         .and_then(|p| p.metadata().ok())

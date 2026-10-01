@@ -449,6 +449,16 @@ struct BindMeta {
     /// Empty when basename couldn't be resolved (e.g. process exited
     /// between scan and tick).
     project_basename: String,
+    /// The whole of that cwd, which is where the session lives.
+    ///
+    /// `claude --resume` resolves a session id against the project of
+    /// the directory it is run from, and binds what it reopens to that
+    /// directory -- rules, hooks and the pane's title follow. The
+    /// pane's shell is not reliably standing there: a profile switch
+    /// that types the resume wherever the shell happens to be moved a
+    /// torajs session into devops, and the only visible sign was the
+    /// title changing.
+    project_dir: Option<String>,
     /// When this session's transcript was last written.
     ///
     /// The honest answer to "how long has this session been idle".
@@ -852,6 +862,7 @@ impl ClaudecodePlugin {
                 meta.config_dir.as_deref(),
                 meta.claude_pid,
                 shell_pid_for(*sid),
+                meta.project_dir.as_deref(),
             ) else {
                 host.log(
                     LogLevel::Warn,
@@ -1071,6 +1082,12 @@ impl ClaudecodePlugin {
                 d.config_dir.as_deref(),
                 0,
                 shell_pid_for(d.shelld_sid),
+                // A re-armed wake does not know where its session
+                // lives: `dormant.tsv` does not carry it, and adding a
+                // column to a file that outlives the process is a
+                // separate change. This path keeps today's behaviour --
+                // resume where the shell stands.
+                None,
             ) else {
                 host.log(
                     LogLevel::Warn,
@@ -1497,6 +1514,7 @@ impl ClaudecodePlugin {
             meta.claude_pid,
             holder.map(|h| h.pid),
             shell_pid_for(shelld_sid),
+            meta.project_dir.as_deref(),
         ) else {
             host.log(
                 LogLevel::Warn,
@@ -1736,6 +1754,8 @@ fn profile_cycle_op(
     claude_pid: i32,
     background_holder: Option<i32>,
     shell_pid: i32,
+    // where the session lives, so resuming it does not move it
+    project_dir: Option<&str>,
 ) -> Option<pty_op::PtyOp> {
     // No uuid, no cycle: without a name for the session there is no
     // way to tell "nothing to resume" from "a conversation we failed
@@ -1767,6 +1787,13 @@ fn profile_cycle_op(
     if has_transcript {
         cmd = cmd.arg("--resume").arg(uuid);
     }
+    // Resumed where it lives, not where the pane's shell happens to
+    // stand. `--resume` looks the id up in the project of the current
+    // directory and binds what it reopens to that directory, so a
+    // shell that has wandered takes the session with it: a torajs
+    // session came back as `devops`, loading devops's rules, and the
+    // only sign was the pane's title.
+    cmd = cmd.in_dir(project_dir);
     // The sentence goes in as claude's own argument, not as typing.
     //
     // It used to be pasted into the composer and followed by a
@@ -1830,7 +1857,29 @@ fn profile_cycle_op(
             // (2026-09-30).  Alt screen plus bracketed paste is the
             // program itself saying it has the terminal.
             .step(pty_op::Step::await_tui_ready().or_late())
-            // Their sentence first. If there was one, it goes back and
+            // Then wait for it to actually paint, because the hold
+            // lifts when this run ends and what is underneath is a
+            // cleared screen.
+            //
+            // This used to be here by accident: the sentence was typed
+            // in, and the submit step waits for the composer to redraw
+            // with the text in it -- which is a first frame by another
+            // name. Moving the sentence onto the command line took the
+            // wait away with it, and the pane went black for as long as
+            // the new claude took to draw (reported the same evening,
+            // and the log shows `Done` nine milliseconds after
+            // `await_tui_ready` gave up at 13 bytes).
+            //
+            // `await_tui_ready` cannot serve as the wait: it proceeds
+            // on timeout by design, because a pane that will not answer
+            // must not cost the resume that already happened.
+            .step(
+                pty_op::Step::await_quiet(idle::WAKE_QUIET_FOR)
+                    .after_bytes(idle::FIRST_FRAME_BYTES)
+                    .timeout(idle::WAKE_WATCHDOG)
+                    .named("first_frame"),
+            )
+            // Their sentence last. If there was one, it goes back and
             // the run ends there -- a pane with someone mid-thought in
             // it does not also need to be told the quota came back.
             .step(pty_op::Step::restore_composer(held)),
@@ -2779,6 +2828,7 @@ mod tests {
             // keeps a regression from killing anything real regardless.
             claude_pid: i32::MAX,
             project_basename: String::new(),
+            project_dir: None,
             transcript_at: SystemTime::now(),
             has_transcript: true,
         };
@@ -2882,6 +2932,7 @@ mod tests {
             has_transcript: true,
             transcript_at: SystemTime::UNIX_EPOCH,
             project_basename: String::new(),
+            project_dir: None,
         }
     }
 
@@ -3083,6 +3134,7 @@ mod tests {
             // keeps it that way even if that changes.
             claude_pid: i32::MAX,
             project_basename: String::new(),
+            project_dir: None,
             transcript_at: SystemTime::now(),
             has_transcript: true,
         };
@@ -3212,7 +3264,7 @@ mod tests {
     /// `claude --resume` checks for a live holder the moment it starts.
     #[test]
     fn a_cycle_through_a_background_hold_stops_it_before_resuming() {
-        let op = profile_cycle_op(true, "u-1", true, 4, 4242, Some(5151), 4200).expect("cycle");
+        let op = profile_cycle_op(true, "u-1", true, 4, 4242, Some(5151), 4200, None).expect("cycle");
         let labels: Vec<&str> = op.steps.iter().map(|s| s.label).collect();
         let stop = labels.iter().position(|l| *l == "stop_background").expect("stop step present");
         let resume = labels.iter().position(|l| *l == "resume").expect("resume step present");
@@ -3222,10 +3274,10 @@ mod tests {
             pty_op::StepKind::Terminate { pid: 5151, .. }
         ));
         // No holder: no extra step.
-        let op = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200).unwrap();
+        let op = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200, None).unwrap();
         assert!(!op.steps.iter().any(|s| s.label == "stop_background"));
         // A holder that is the pane's own claude is not stopped twice.
-        let op = profile_cycle_op(true, "u-1", true, 4, 4242, Some(4242), 4200).unwrap();
+        let op = profile_cycle_op(true, "u-1", true, 4, 4242, Some(4242), 4200, None).unwrap();
         assert!(!op.steps.iter().any(|s| s.label == "stop_background"));
     }
 
@@ -3246,7 +3298,7 @@ mod tests {
     /// no second path: nothing in the run types the sentence.
     #[test]
     fn a_cycle_says_continue_on_the_command_line() {
-        let op = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200).expect("cycle");
+        let op = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200, None).expect("cycle");
         let labels: Vec<&str> = op.steps.iter().map(|s| s.label).collect();
         let resume = labels.iter().position(|l| *l == "resume").expect("resume");
         let line = match &op.steps[resume].kind {
@@ -3270,6 +3322,105 @@ mod tests {
         assert!(
             !labels.contains(&"enter"),
             "and nothing presses return in it either: {labels:?}"
+        );
+    }
+
+    /// A switch must not move the session it resumes.
+    ///
+    /// `claude --resume` resolves the id against the project of the
+    /// directory it runs in, and binds what it reopens to that
+    /// directory. The pane's shell is not reliably standing where the
+    /// session lives, and when it is not, the switch relocates the
+    /// conversation: a torajs session came back as `devops` and loaded
+    /// devops's rules, with nothing to show for it but a changed pane
+    /// title.
+    #[test]
+    fn a_cycle_resumes_the_session_where_it_lives() {
+        let op = profile_cycle_op(
+            true,
+            "u-1",
+            true,
+            4,
+            4242,
+            None,
+            4200,
+            Some("/Users/x/workspace/goliajp/torajs"),
+        )
+        .expect("cycle");
+        let resume = op
+            .steps
+            .iter()
+            .find(|s| s.label == "resume")
+            .expect("resume step");
+        let line = match &resume.kind {
+            pty_op::StepKind::Send(b) => String::from_utf8_lossy(b).into_owned(),
+            _ => panic!("the resume step writes a command line"),
+        };
+        assert!(
+            line.contains("cd '/Users/x/workspace/goliajp/torajs' && exec "),
+            "it goes to the session's own directory first: {line}"
+        );
+        assert!(
+            line.trim_end().ends_with(')'),
+            "and does it in a subshell, so the person's prompt is not moved: {line}"
+        );
+
+        // Without one, the line is what it has always been: run where
+        // the shell stands. Not knowing where a session lives is not a
+        // reason to refuse to move it off a spent account.
+        let plain = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200, None).expect("cycle");
+        let line = match &plain.steps.iter().find(|s| s.label == "resume").unwrap().kind {
+            pty_op::StepKind::Send(b) => String::from_utf8_lossy(b).into_owned(),
+            _ => unreachable!(),
+        };
+        assert!(!line.contains("cd "), "no directory, no cd: {line}");
+    }
+
+    /// A directory that could break out of its quoting is refused, and
+    /// refusing it costs the whole line rather than producing one that
+    /// runs somewhere else.
+    #[test]
+    fn a_directory_that_cannot_be_quoted_is_not_guessed_at() {
+        assert!(
+            !profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200, Some("/tmp/it's here"))
+                .map(|op| op.steps.iter().any(|s| s.label == "resume"))
+                .unwrap_or(false),
+            "a path with a quote in it produces no resume line at all"
+        );
+    }
+
+    /// The hold over the pane lifts when the run ends, and what is
+    /// under it is a screen we cleared ourselves -- so the run has to
+    /// outlast the new claude's first frame.
+    ///
+    /// This was here by accident until the sentence moved onto the
+    /// command line: the submit step waited for the composer to redraw
+    /// with the pasted text in it, which is a first frame by another
+    /// name. Taking the typing away took the wait with it and the pane
+    /// went black for as long as the new process took to draw.
+    #[test]
+    fn a_cycle_outlasts_the_first_frame_of_the_new_claude() {
+        let op = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200, None).expect("cycle");
+        let labels: Vec<&str> = op.steps.iter().map(|s| s.label).collect();
+        let at = |n: &str| labels.iter().position(|l| *l == n);
+        let ready = at("await_tui_ready").expect("the terminal is asked first");
+        let frame = at("first_frame").expect("and then waited for");
+        let restore = at("restore_composer").expect("the composer comes back last");
+        assert!(ready < frame && frame < restore, "{labels:?}");
+        assert!(
+            matches!(
+                &op.steps[frame].kind,
+                pty_op::StepKind::AwaitQuiet { min_bytes, .. } if *min_bytes > 0
+            ),
+            "the wait is for bytes drawn, not for a length of time: {labels:?}"
+        );
+        assert!(
+            !op.steps[frame].proceed_on_timeout,
+            "a pane that never draws is not a pane to unfreeze onto: {labels:?}"
+        );
+        assert!(
+            op.steps[ready].proceed_on_timeout,
+            "asking the terminal stays a deadline, not a precondition: {labels:?}"
         );
     }
 
@@ -4767,7 +4918,7 @@ mod tests {
         // it at the park step — which is exactly what a re-arm after an
         // L1 restart does — and drive the wake directly.
         let client = Arc::new(ShelldClient::new(Some(inject.clone())));
-        let op = reclaim_op(uuid, Some(&profile_dir.to_string_lossy()), 0, shell_pid)
+        let op = reclaim_op(uuid, Some(&profile_dir.to_string_lossy()), 0, shell_pid, None)
             .expect("a quotable profile builds a script");
         // By name, exactly as the re-arm does -- a test that hard-codes
         // the position is a test that stops asking the question when a
@@ -4899,7 +5050,7 @@ mod tests {
     /// is how long, and that it comes after the process check.
     #[test]
     fn the_wake_waits_for_the_repaint_after_the_process_appears() {
-        let op = reclaim_op("u", None, 1, 2).expect("script builds");
+        let op = reclaim_op("u", None, 1, 2, None).expect("script builds");
         let kinds: Vec<&pty_op::StepKind> = op.steps.iter().map(|s| &s.kind).collect();
         let process_at = kinds
             .iter()
@@ -5108,6 +5259,7 @@ mod tests {
                 uuid: uuid.to_string(),
                 claude_pid,
                 project_basename: "proj".into(),
+            project_dir: None,
                 // Long enough ago that the transcript clock is not what
                 // any of these tests are about.
                 transcript_at: SystemTime::now() - Duration::from_secs(7200),
@@ -5141,17 +5293,17 @@ mod tests {
     #[test]
     fn a_pane_with_no_session_file_yet_is_badged_but_never_reclaimed() {
         assert!(
-            reclaim_op("", Some("/Users/x/.claude-profile-2"), 4242, 4200).is_none(),
+            reclaim_op("", Some("/Users/x/.claude-profile-2"), 4242, 4200, None).is_none(),
             "no uuid ⇒ no resume line ⇒ claude must not be taken down"
         );
         assert!(
-            profile_cycle_op(true, "", false, 3, 4242, None, 4200).is_none(),
+            profile_cycle_op(true, "", false, 3, 4242, None, 4200, None).is_none(),
             "…and the badge-click cycle refuses for the same reason"
         );
         // The same call with a uuid is the normal path, so the guard
         // above is the only thing being tested here.
-        assert!(reclaim_op("u-1", None, 4242, 4200).is_some());
-        assert!(profile_cycle_op(true, "u-1", true, 3, 4242, None, 4200).is_some());
+        assert!(reclaim_op("u-1", None, 4242, 4200, None).is_some());
+        assert!(profile_cycle_op(true, "u-1", true, 3, 4242, None, 4200, None).is_some());
     }
 
     /// The record the hook leaves is found by the pid of the claude
@@ -5238,7 +5390,7 @@ mod tests {
     /// answered something.
     #[test]
     fn a_session_with_no_turn_yet_cycles_by_starting_fresh() {
-        let op = profile_cycle_op(true, "u-1", false, 3, 4242, None, 4200)
+        let op = profile_cycle_op(true, "u-1", false, 3, 4242, None, 4200, None)
             .expect("a named session with no transcript can still cycle");
         let sent = sent_text(&op);
         assert!(
@@ -5252,7 +5404,7 @@ mod tests {
 
         // The counter-case: once the transcript exists, the session
         // travels with the switch.
-        let op = profile_cycle_op(true, "u-1", true, 3, 4242, None, 4200).expect("normal path");
+        let op = profile_cycle_op(true, "u-1", true, 3, 4242, None, 4200, None).expect("normal path");
         let sent = sent_text(&op);
         assert!(sent.contains("--resume"), "{sent:?}");
         assert!(sent.contains("u-1"), "{sent:?}");
@@ -6065,7 +6217,7 @@ mod tests {
     #[test]
     fn the_reclamation_resumes_under_the_profile_it_was_running() {
         let line = |dir: Option<&str>| -> String {
-            let op = reclaim_op("abc-123", dir, 1, 2).expect("script builds");
+            let op = reclaim_op("abc-123", dir, 1, 2, None).expect("script builds");
             let bytes = op
                 .steps
                 .iter()
@@ -6120,11 +6272,11 @@ mod tests {
             "",
         ] {
             assert!(
-                reclaim_op("u", Some(bad), 1, 2).is_none(),
+                reclaim_op("u", Some(bad), 1, 2, None).is_none(),
                 "{bad:?} should stop the reclamation"
             );
         }
-        assert!(reclaim_op("u", Some("/home/u/.claude-profile-1"), 1, 2).is_some());
+        assert!(reclaim_op("u", Some("/home/u/.claude-profile-1"), 1, 2, None).is_some());
     }
 
     /// A session whose profile could not be read must not be

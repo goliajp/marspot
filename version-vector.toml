@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.205"  # the sentence a moved pane is told rides claude's argv, not its composer
+shell   = "0.7.206"  # a switch waits for the first frame and resumes where the session lives
 core    = "0.12.252"  # a timing assertion says when it is measuring the host
 session = "0.11.137"  # a timing assertion says when it is measuring the host
