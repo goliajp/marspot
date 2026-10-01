@@ -595,19 +595,6 @@ impl PaneBackend {
     }
 
 
-    /// A silent-update replacement is staged but not yet promoted.
-    pub fn is_l3_swapping(&self) -> bool {
-        matches!(self, PaneBackend::L3(c) if c.is_swapping())
-    }
-
-    /// Stage a silent-update replacement (new binary, same session).  No-op
-    /// for in-process backends.  Container spawns the `L3Spawn` and hands
-    /// it here; `poll` promotes once it has replayed + published.
-    pub fn begin_l3_swap(&mut self, spawn: L3Spawn) {
-        if let PaneBackend::L3(c) = self {
-            c.begin_swap(spawn);
-        }
-    }
 
     /// Cmd-C on an L3 pane: ask the session process for the selection text
     /// (it owns the grid + scrollback).  `None` for in-process backends —
@@ -830,7 +817,6 @@ pub struct L3Conn {
     /// scenes; once it has replayed the bytelog + published a frame, `poll`
     /// atomically promotes it (kills the old child, points us at the new
     /// pieces).  Invisible because the replayed screen matches.
-    pending: Option<L3Spawn>,
     /// Mirror of L3's visible grid, rebuilt from the shm snapshot.
     grid: Grid,
     /// Mode flags from the last snapshot, surfaced to the renderer /
@@ -914,7 +900,6 @@ impl L3Conn {
             control: new_control_writer(control),
             reader,
             session_id,
-            pending: None,
             grid,
             cursor_visible: true,
             app_cursor_keys: false,
@@ -949,7 +934,6 @@ impl L3Conn {
             control: new_control_writer(spawn.control),
             reader: spawn.reader,
             session_id,
-            pending: None,
             grid,
             cursor_visible: true,
             app_cursor_keys: false,
@@ -987,54 +971,8 @@ impl L3Conn {
         self.session_id
     }
 
-    /// True while a replacement L3 is being brought up but not yet
-    /// promoted — the container avoids stacking a second swap.
-    fn is_swapping(&self) -> bool {
-        self.pending.is_some()
-    }
 
-    /// Stage a replacement L3 (new binary, same session) for a per-session
-    /// silent update.  It replays the bytelog into its own region in the
-    /// background; `poll` promotes it once it has published a frame.
-    fn begin_swap(&mut self, spawn: L3Spawn) {
-        self.pending = Some(spawn);
-    }
 
-    /// Promote a staged replacement once it has published its first
-    /// (replayed) frame: kill the old child and point ourselves at the new
-    /// pieces.  Returns true if a promotion happened (mirror must re-fill).
-    fn try_promote(&mut self) -> bool {
-        let ready = self
-            .pending
-            .as_ref()
-            .is_some_and(|p| p.reader.seq() > 0);
-        if !ready {
-            return false;
-        }
-        let next = self.pending.take().unwrap();
-        // Kill + reap the old L3 (its reader thread ends on the resulting
-        // EOF; shelld keeps the session alive for the replacement).
-        let old_pid = self.child.id();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        self.child = L3Process::Spawned(next.child);
-        self.control = new_control_writer(next.control);
-        self.reader = next.reader;
-        self.selection_rx = next.selection_rx;
-        // The new L3 booted fresh: reset the mirror bookkeeping so the next
-        // poll re-fills from its region, and drop any stale scroll request
-        // (it republishes at live).
-        self.last_seq = 0;
-        self.req_view_offset = 0;
-        self.req_cols = self.reader.cols();
-        self.req_rows = self.reader.rows();
-        eprintln!(
-            "[core] L3 session {} silent-swapped: old pid={old_pid} → new pid={}",
-            self.session_id,
-            self.child.id()
-        );
-        true
-    }
 
     /// Re-read the shm mirror if L3 published a new frame.  Returns
     /// `true` when the mirror changed (caller should redraw).  Cheap
@@ -1044,10 +982,7 @@ impl L3Conn {
         // replayed + published — kills the old child and repoints us at the
         // new one. `force_fill` so we re-read the new region even if its
         // first seq coincides with our last.
-        let mut force_fill = false;
-        if self.pending.is_some() {
-            force_fill = self.try_promote();
-        }
+        let force_fill = false;
         // Observe exit here (the only `&mut` entry point); `is_exited`
         // and `state` are `&self` and just read the flag.  Crash isolation:
         // an L3 dying (panic / kill / shell exit) is one session ending —

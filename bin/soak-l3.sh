@@ -209,26 +209,21 @@ now=$(count_sandbox_sessions)
   || fail "crash: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
 echo "  crash-isolation OK — one L3 killed, sibling unaffected, dead shm still readable, no orphans"
 
-# Silent swap (5a) -- EXPECTED RED until `begin_pane_swap` is fixed.
+# Silent swap (5a) — the load-bearing mechanism of silent update.
 #
-# `l3_swap_probe` tests what `begin_pane_swap` does: spawn a replacement
-# L3 on the SAME session id, wait for it to replay the bytelog and
-# publish, then kill the old one.  That cannot work.  `marspot-session`
-# locks `sessions/<id>/` and refuses to start while another live L3 holds
-# it -- the 2026-07-28 defence against two writers on one session -- so
-# the replacement exits before publishing and `try_promote` never
-# promotes.  The probe reports `l3.session_dir_locked ... refusing`.
+# `l3_swap_probe` stages a copy of marspot-session whose MARSPOT_FP differs
+# (re-signed, or macOS refuses to exec it), SIGTERMs the session, and
+# asserts the handover: same pid, a frame the NEW image published still
+# carrying the marker, and input accepted over a fresh connection to the
+# listener after the Hello handshake.
 #
-# The probe is left in and left failing on purpose: both callers of
-# `begin_pane_swap` are user-reachable (moving focus off a pane with a
-# staged update, and the refresh glyph in its title strip), so this is a
-# defect on the silent-update path and not dead code.
-#
-# What the product actually does is Amendment 16: on SIGTERM an L3
-# compares its fingerprint with `current/marspot-session` and execv's
-# itself, keeping its pid, PTY master and listener.  `begin_pane_swap`
-# should send that signal instead of spawning anything.  Changing it
-# touches the v1 silent-update gate, so it waits for a decision.
+# This section was red until 2026-10-01.  `begin_pane_swap` used to spawn a
+# replacement L3 on the same session id, which cannot work -- the live L3
+# holds a lock on `sessions/<id>/` and a second one refuses to start -- so
+# the two user-reachable callers (moving focus off a pane with a staged
+# update, and the refresh glyph in its title strip) silently did nothing.
+# It now does what `swap_idle_l3` does for all panes: promote the staged
+# image, then signal that one L3 to execv itself.
 echo "--- silent-swap ---" | tee -a "$RUN_LOG"
 "$SWAP_PROBE_BIN" "$SESSION_BIN" >>"$RUN_LOG" 2>&1
 swrc=$?

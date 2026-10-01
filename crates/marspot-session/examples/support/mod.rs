@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 use marspot_term::grid_shm::{GridShmReader, create_region};
 use marspot_term::input_core::{KeyState, LogicalKey, MarspotKeyEvent, Modifiers, NamedKey};
 use marspot_term::shell_proto::{
-    FIRST_WINDOW_ID, Frame, MsgType, encode_key_event, event_to_wire,
+    FIRST_WINDOW_ID, Frame, MsgType, PROTO_VERSION, decode_hello_ack, encode_hello,
+    encode_key_event, event_to_wire,
 };
 
 pub const COLS: u16 = 80;
@@ -210,21 +211,30 @@ impl Session {
     /// them for one screenful, which turned a probe that polls the screen
     /// into one that never finishes.
     pub fn screen(&self, cols: u16, rows: u16) -> Vec<String> {
+        self.try_screen(cols, rows)
+            .unwrap_or_else(|| die("no published frame to read"))
+    }
+
+    /// The screen, or `None` when there is no frame to read yet.
+    ///
+    /// A wait loop needs this one: dying because a single read came up
+    /// empty turns "not published yet" into a failure, which is what made
+    /// the selection probe flake inside the suite while passing alone.
+    pub fn try_screen(&self, cols: u16, rows: u16) -> Option<Vec<String>> {
         let mut buf = Vec::new();
-        let _ = self
-            .reader
-            .read(&mut buf, &mut Vec::new())
-            .unwrap_or_else(|| die("no published frame to read"));
-        (0..rows)
-            .map(|r| {
-                let start = r as usize * cols as usize;
-                buf.get(start..start + cols as usize)
-                    .map(|row| row.iter().map(|c| c.ch).collect::<String>())
-                    .unwrap_or_default()
-                    .trim_end()
-                    .to_string()
-            })
-            .collect()
+        self.reader.read(&mut buf, &mut Vec::new())?;
+        Some(
+            (0..rows)
+                .map(|r| {
+                    let start = r as usize * cols as usize;
+                    buf.get(start..start + cols as usize)
+                        .map(|row| row.iter().map(|c| c.ch).collect::<String>())
+                        .unwrap_or_default()
+                        .trim_end()
+                        .to_string()
+                })
+                .collect(),
+        )
     }
 
     pub fn cursor(&self) -> (u16, u16) {
@@ -258,4 +268,61 @@ pub fn cleanup(sessions: &mut Vec<Session>) {
         s.kill();
     }
     sessions.clear();
+}
+
+/// Write one character as a KeyEvent on any control stream.
+///
+/// After a self-execv the inherited fd is gone and L2 reconnects over the
+/// session's listener, so a probe that wants to type afterwards needs this
+/// rather than `Session::send_char`.
+pub fn send_char_on(stream: &UnixStream, c: char) {
+    let ev = MarspotKeyEvent {
+        state: KeyState::Pressed,
+        logical: LogicalKey::Char(c),
+        text: Some(c.to_string()),
+        ..Default::default()
+    };
+    let frame = Frame::new(
+        MsgType::KeyEvent,
+        encode_key_event(&event_to_wire(&ev, Modifiers::default()), FIRST_WINDOW_ID),
+    );
+    let mut w = stream;
+    frame
+        .write_to(&mut w)
+        .unwrap_or_else(|e| die(format!("write key frame on reattach: {e}")));
+    w.flush().ok();
+}
+
+/// Connect to a session's listener and complete the handshake, the way L2
+/// reattaches after the session has execv'd itself.
+///
+/// The handshake is not optional: the accept path reads a `Hello` carrying
+/// the protocol version and answers `HelloAck` before handing the stream
+/// to the session's main loop.  A connection that skips it is accepted at
+/// the socket level and then ignored -- which from outside looks exactly
+/// like a session that has stopped taking input.
+pub fn reattach(sock: &Path, secs: u64) -> Option<UnixStream> {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        if let Ok(stream) = UnixStream::connect(sock) {
+            stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+            let hello = Frame::new(MsgType::Hello, encode_hello(PROTO_VERSION));
+            let mut w = &stream;
+            if hello.write_to(&mut w).is_ok() {
+                w.flush().ok();
+                let mut r = &stream;
+                if let Ok(Some(f)) = Frame::read_from(&mut r)
+                    && f.msg_type == MsgType::HelloAck
+                    && decode_hello_ack(&f.payload).is_ok()
+                {
+                    stream.set_read_timeout(None).ok();
+                    return Some(stream);
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
