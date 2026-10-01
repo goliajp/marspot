@@ -701,6 +701,37 @@ pub enum PromptMark {
     CommandEnd(Option<u8>),
 }
 
+impl PromptMark {
+    /// Two bytes: what kind, then the exit status for the one kind
+    /// that carries one.  Fixed width so a file of these is addressed
+    /// by line index rather than scanned.
+    pub(crate) fn to_bytes(self) -> [u8; 2] {
+        match self {
+            Self::None => [0, 0],
+            Self::PromptStart => [1, 0],
+            Self::InputStart => [2, 0],
+            Self::OutputStart => [3, 0],
+            // "the shell did not say" and "the shell said zero" are
+            // different answers and get different encodings.
+            Self::CommandEnd(None) => [4, 0],
+            Self::CommandEnd(Some(s)) => [5, s],
+        }
+    }
+
+    /// An encoding this build does not know reads as no mark, which is
+    /// the same safe failure a missing sidecar gives.
+    pub(crate) fn from_bytes(b: [u8; 2]) -> Self {
+        match b[0] {
+            1 => Self::PromptStart,
+            2 => Self::InputStart,
+            3 => Self::OutputStart,
+            4 => Self::CommandEnd(None),
+            5 => Self::CommandEnd(Some(b[1])),
+            _ => Self::None,
+        }
+    }
+}
+
 pub struct Grid {
     cols: u16,
     rows: u16,
@@ -1170,6 +1201,14 @@ impl Grid {
     /// The mark on scrollback line `idx` (0 = oldest), the same
     /// indexing `scrollback_line` uses.
     pub fn scrollback_prompt(&self, idx: usize) -> PromptMark {
+        // The same split `scrollback_wrapped` draws: the file holds
+        // what the session ever wrote, the mirror only what this
+        // process pushed.  An L3 that re-execs starts with an empty
+        // mirror against a history thousands of lines long, and every
+        // row of it would answer "no mark".
+        if self.scrollback.keeps_prompt_marks() {
+            return self.scrollback.prompt_at(idx);
+        }
         self.sb_prompt.get(idx).copied().unwrap_or_default()
     }
 
@@ -1295,7 +1334,13 @@ impl Grid {
             self.scrollback
                 .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
             self.sb_wrapped.push_back(self.wrapped[pr]);
-            self.sb_prompt.push_back(std::mem::take(&mut self.prompt[pr]));
+            let mark = std::mem::take(&mut self.prompt[pr]);
+            self.sb_prompt.push_back(mark);
+            // Only lines that carry a mark touch the sidecar: one per
+            // command, against a stream of millions of lines.
+            if mark != PromptMark::None {
+                self.scrollback.mark_last_line(mark);
+            }
             self.sb_clusters.push_back(row_clusters);
             self.wrapped[pr] = false;
             for c in &mut self.cells[start..start + cols] {
@@ -1395,8 +1440,11 @@ impl Grid {
                     self.scrollback
                         .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
                     self.sb_wrapped.push_back(self.wrapped[pr]);
-                    self.sb_prompt.push_back(std::mem::take(&mut self.prompt[pr]));
-            self.sb_prompt.push_back(std::mem::take(&mut self.prompt[pr]));
+                    let mark = std::mem::take(&mut self.prompt[pr]);
+                    self.sb_prompt.push_back(mark);
+                    if mark != PromptMark::None {
+                        self.scrollback.mark_last_line(mark);
+                    }
                     self.sb_clusters.push_back(row_clusters);
                     self.scroll_push_count = self.scroll_push_count.saturating_add(1);
                 }

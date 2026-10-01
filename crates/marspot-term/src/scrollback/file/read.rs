@@ -35,6 +35,33 @@ impl FileScrollback {
         self.ram_capacity
     }
 
+    /// The command mark on logical line `line_idx`, or `None` when
+    /// there is no mark there to find.
+    ///
+    /// Hot tier only. A rotated-away line's mark went with its file
+    /// (`scrollback.cold.bin.marks`) and is not read back yet, so
+    /// history older than the current hot file answers "no mark" --
+    /// the same answer a missing sidecar gives, and the one the jump
+    /// handles by looking further.
+    pub(in crate::scrollback) fn mark_at(&self, line_idx: usize) -> crate::grid::PromptMark {
+        use std::os::unix::fs::FileExt;
+        let none = crate::grid::PromptMark::None;
+        if line_idx >= self.total_lines as usize || (line_idx as u64) < self.hot_first_line {
+            return none;
+        }
+        let Some(f) = self.marks.as_ref() else {
+            return none;
+        };
+        let local = line_idx as u64 - self.hot_first_line;
+        let mut b = [0u8; 2];
+        if f.read_exact_at(&mut b, super::super::sidecar::HEADER_BYTES + local * 2)
+            .is_err()
+        {
+            return none;
+        }
+        crate::grid::PromptMark::from_bytes(b)
+    }
+
     pub fn cell_at(&self, line_idx: usize, col: usize) -> Option<crate::grid::Cell> {
         if line_idx >= self.total_lines as usize {
             return None;
@@ -253,6 +280,23 @@ impl FileScrollback {
         self.bin_tail_offset = FILE_HEADER_BYTES;
         self.total_lines = 0;
         self.hot_first_line = 0;
+        // The header survives the truncate, so the epoch in it would
+        // too -- and the next lines pushed take indices from zero
+        // again, which puts this in reflow's situation: a local line
+        // number comes back meaning a different line.  Without a new
+        // one, a mark filed against the cleared line 4 is handed back
+        // for the new line 4, and a jump lands on it.
+        let fresh = super::super::format::new_epoch();
+        self.bin.borrow_mut().flush();
+        if super::super::format::stamp_epoch_in_place(&self.bin_path, fresh).is_ok() {
+            self.epoch = fresh;
+            self.marks = super::super::sidecar::open_checked(
+                &super::super::sidecar::path_for(&self.bin_path, "marks"),
+                fresh,
+                super::super::sidecar::Kind::Marks,
+            )
+            .ok();
+        }
         // Drop the cold tier entirely.
         self.cold_bin_for_read = None;
         self.cold_idx_for_read = None;

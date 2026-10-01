@@ -85,6 +85,19 @@ impl FileScrollback {
         self.epoch = new_epoch();
         Self::write_header(&mut bin, self.epoch)?;
         bin.flush();
+        // The sidecar is keyed by index WITHIN the hot file, and the
+        // new hot file starts those indices over.  Reopening against
+        // the new epoch resets it; without this, the new file's line 1
+        // is handed the mark filed against the old file's line 1, and
+        // a jump lands on it.  Marks for the handed-over lines go with
+        // their file -- `mark_at` already answers "no mark" for
+        // anything older than the current hot file.
+        self.marks = super::super::sidecar::open_checked(
+            &super::super::sidecar::path_for(&self.bin_path, "marks"),
+            self.epoch,
+            super::super::sidecar::Kind::Marks,
+        )
+        .ok();
         let idx_w = std::fs::OpenOptions::new()
             .read(true)
             .append(true)
@@ -123,6 +136,26 @@ impl FileScrollback {
     }
 
     /// Append one line.  Hot path.
+    /// Record a mark against the line most recently pushed.
+    ///
+    /// Called only for the lines that carry one -- one per command,
+    /// against a stream that is millions of lines -- so the per-line
+    /// path pays nothing for the marks it does not have.
+    pub(in crate::scrollback) fn mark_last_line(&self, mark: crate::grid::PromptMark) {
+        use std::os::unix::fs::FileExt;
+        let Some(f) = self.marks.as_ref() else {
+            return;
+        };
+        if self.total_lines == 0 || self.total_lines <= self.hot_first_line {
+            return;
+        }
+        let local = self.total_lines - 1 - self.hot_first_line;
+        let _ = f.write_all_at(
+            &mark.to_bytes(),
+            super::super::sidecar::HEADER_BYTES + local * 2,
+        );
+    }
+
     pub fn push_line(&mut self, line: &[crate::grid::Cell], wrapped: bool) {
         // F3+11.1 — trim trailing cells equal to `Cell::default()`
         // before encoding.  This is pure disk-size optimisation; the
