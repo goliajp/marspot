@@ -917,6 +917,7 @@ impl ClaudecodePlugin {
                 uuid: meta.uuid,
                 profile_num: meta.profile_num,
                 config_dir: meta.config_dir,
+                project_dir: meta.project_dir,
                 created_at: SystemTime::now(),
             });
             self.persist_dormant(host);
@@ -1091,12 +1092,7 @@ impl ClaudecodePlugin {
                 d.config_dir.as_deref(),
                 0,
                 shell_pid_for(d.shelld_sid),
-                // A re-armed wake does not know where its session
-                // lives: `dormant.tsv` does not carry it, and adding a
-                // column to a file that outlives the process is a
-                // separate change. This path keeps today's behaviour --
-                // resume where the shell stands.
-                None,
+                d.project_dir.as_deref(),
             ) else {
                 host.log(
                     LogLevel::Warn,
@@ -5802,6 +5798,7 @@ mod tests {
             uuid: "u7".into(),
             profile_num: 1,
                 config_dir: None,
+                project_dir: None,
             created_at: scan.scanned_at + Duration::from_millis(1),
         });
 
@@ -5869,6 +5866,7 @@ mod tests {
             uuid: "u".into(),
             profile_num: 1,
             config_dir: None,
+            project_dir: None,
             created_at: std::time::UNIX_EPOCH,
         }];
         let mut scan = scan_with(999_999, 1, "u");
@@ -5907,6 +5905,7 @@ mod tests {
                 uuid: "u7".into(),
                 profile_num: 1,
                 config_dir: None,
+                project_dir: None,
                 created_at: std::time::UNIX_EPOCH,
             },
             DormantRecord {
@@ -5914,6 +5913,7 @@ mod tests {
                 uuid: "u8".into(),
                 profile_num: 1,
                 config_dir: None,
+                project_dir: None,
                 created_at: std::time::UNIX_EPOCH,
             },
         ];
@@ -5972,6 +5972,7 @@ mod tests {
             uuid: "u".into(),
             profile_num: 1,
                 config_dir: None,
+                project_dir: None,
             created_at: std::time::UNIX_EPOCH,
         }];
         assert_eq!(activity_for_unbound(7, &parked), CcActivity::Dormant);
@@ -6411,6 +6412,7 @@ mod tests {
                 uuid: "9cff8661-3275-4dce-8c93-89797bc63f44".into(),
                 profile_num: 1,
                 config_dir: Some("/Users/x/.claude-profile-1".into()),
+                project_dir: None,
                 created_at: t,
             },
             DormantRecord {
@@ -6418,10 +6420,43 @@ mod tests {
                 uuid: "abc".into(),
                 profile_num: 255,
                 config_dir: None,
+                project_dir: None,
                 created_at: t,
             },
         ];
         assert_eq!(decode_dormant(&encode_dormant(&records)), records);
+    }
+
+    /// The directory a wake must return to survives the restart with
+    /// the rest of the record.
+    ///
+    /// Without it a re-armed wake resumes wherever the pane's shell is
+    /// standing, and `claude --resume` binds the session to that --
+    /// which is how a session came back under another project's rules.
+    /// A directory may hold a space or a `$` and mean nothing by it;
+    /// what it may not hold is the quote that would end the argument.
+    #[test]
+    fn a_dormant_record_remembers_where_its_session_lives() {
+        let t = std::time::UNIX_EPOCH + Duration::from_secs(1_785_000_000);
+        let records = vec![DormantRecord {
+            shelld_sid: 7,
+            uuid: "9cff8661-3275-4dce-8c93-89797bc63f44".into(),
+            profile_num: 1,
+            config_dir: Some("/Users/x/.claude-profile-1".into()),
+            project_dir: Some("/Users/x/My Work/$proj".into()),
+            created_at: t,
+        }];
+        assert_eq!(decode_dormant(&encode_dormant(&records)), records);
+
+        // A row from before the column decodes as "do not know", which
+        // is the behaviour it had.
+        let older = "2\tgood-uuid-1\t2\t1785000000\t/Users/x/.claude-profile-2\n";
+        assert_eq!(decode_dormant(older)[0].project_dir, None);
+
+        // And one that could end the quoting is dropped rather than
+        // repaired, like every other field that reaches a command line.
+        let hostile = "3\tgood-uuid-2\t2\t1785000000\t\t/tmp/it's here\n";
+        assert_eq!(decode_dormant(hostile)[0].project_dir, None);
     }
 
     /// The uuid ends up inside a shell command line, so a corrupt or
@@ -6442,6 +6477,7 @@ mod tests {
                 uuid: "good-uuid-1".into(),
                 profile_num: 2,
                 config_dir: None,
+                project_dir: None,
                 created_at: std::time::UNIX_EPOCH,
             }]
         );

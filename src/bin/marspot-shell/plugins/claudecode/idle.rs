@@ -336,6 +336,14 @@ pub(super) struct DormantRecord {
     /// The config dir observed on the live process, so a wake after a
     /// restart still resumes under the same account.
     pub(super) config_dir: Option<String>,
+    /// The directory the session lives in, so a wake after a restart
+    /// does not move it.
+    ///
+    /// `claude --resume` binds what it reopens to the directory it
+    /// runs in. Without this the wake resumes wherever the pane's
+    /// shell is standing, which is how a session came back under
+    /// another project's rules.
+    pub(super) project_dir: Option<String>,
     /// When this pane was parked.  A record may only be judged
     /// ("is the program back?") by a scan that ran AFTER it was
     /// created — the scan that triggers the reclamation was taken
@@ -368,12 +376,13 @@ pub(super) fn encode_dormant(records: &[DormantRecord]) -> String {
             .unwrap_or_default()
             .as_secs();
         s.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
             r.shelld_sid,
             r.uuid,
             r.profile_num,
             secs,
-            r.config_dir.as_deref().unwrap_or("")
+            r.config_dir.as_deref().unwrap_or(""),
+            r.project_dir.as_deref().unwrap_or("")
         ));
     }
     s
@@ -395,6 +404,7 @@ pub(super) fn decode_dormant(text: &str) -> Vec<DormantRecord> {
                 .map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s))
                 .unwrap_or(std::time::UNIX_EPOCH);
             let config_dir = it.next().map(|s| s.to_string());
+            let project_dir = it.next().map(|s| s.to_string());
             // A uuid is the only field that can be typo'd into
             // something dangerous (it lands in a shell command), so it
             // is checked here rather than at the write site.
@@ -409,6 +419,12 @@ pub(super) fn decode_dormant(text: &str) -> Vec<DormantRecord> {
                 // older row without it falls back to the plain entry
                 // point, which is the default profile.
                 config_dir: config_dir.filter(|d| !d.is_empty() && pty_op::shell_safe(d)),
+                // 6th column. A row from before it decodes as absent,
+                // which is the behaviour it had: resume where the
+                // shell stands. The check is the quoting rule, not
+                // `shell_safe` -- a directory may hold a space or a
+                // `$` and mean nothing by it.
+                project_dir: project_dir.filter(|d| pty_op::quotable(d)),
                 created_at,
             })
         })

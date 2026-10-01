@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.209"  # what a line produced is evidence whenever it arrived
+shell   = "0.7.210"  # a parked session remembers where it lives
 core    = "0.12.252"  # a timing assertion says when it is measuring the host
 session = "0.11.137"  # a timing assertion says when it is measuring the host
