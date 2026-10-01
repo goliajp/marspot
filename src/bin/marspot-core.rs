@@ -9541,7 +9541,13 @@ impl CoreApp {
         // for the duration of the frame and put it back at the end.
         let mut wr = std::mem::take(&mut win!(self, wi).render);
 
-        let labels: Vec<String> = (1..=win!(self, wi).panes.len()).map(|n| n.to_string()).collect();
+        // Pane numbers from the static table: this used to be a `Vec`
+        // and one `String` per pane, rebuilt every frame for text that
+        // never changes.
+        let labels = &marspot::ui::PANE_NUMBER_LABELS[..win!(self, wi)
+            .panes
+            .len()
+            .min(marspot::ui::PANE_NUMBER_LABELS.len())];
         let states: Vec<SessionState> =
             win!(self, wi).panes.iter().map(|p| p.session().state()).collect();
 
@@ -9613,7 +9619,7 @@ impl CoreApp {
                 } else if let Some(Some(name)) = cwd_basenames.get(i) {
                     (*name).to_string()
                 } else {
-                    labels.get(i).cloned().unwrap_or_default()
+                    labels.get(i).map(|s| (*s).to_string()).unwrap_or_default()
                 }
             })
             .collect();
