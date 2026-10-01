@@ -1688,7 +1688,7 @@ impl PtyCommand {
         // `exec` keeps the process tree the shape the scanner expects
         // -- the program a direct child of the pane's shell.
         if let Some(d) = &self.dir {
-            if d.is_empty() || d.contains(['\'', '\n', '\r']) {
+            if !quotable(d) {
                 return None;
             }
             line.push_str(&format!("( cd '{d}' && "));
@@ -1739,6 +1739,16 @@ impl PtyCommand {
         line.push('\r');
         Some(line.into_bytes())
     }
+}
+
+/// A value that survives being wrapped in single quotes.
+///
+/// Weaker than [`shell_safe`] on purpose, and for a different job: a
+/// directory name may legitimately contain `$`, `&` or a space, and
+/// inside single quotes none of them mean anything. What it cannot
+/// contain is the quote itself, or a newline that would end the line.
+pub fn quotable(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 1024 && !s.contains(['\'', '\n', '\r'])
 }
 
 /// A value that can go on a command line without changing its meaning.
