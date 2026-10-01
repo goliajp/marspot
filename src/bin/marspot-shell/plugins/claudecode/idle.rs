@@ -519,7 +519,7 @@ pub(super) fn reclaim_op(
                 pty_op::Step::terminate(claude_pid, libc::SIGTERM)
                     .escalate_after(Duration::from_secs(3), libc::SIGKILL),
             )
-            .step(pty_op::Step::await_user())
+            .step(pty_op::Step::await_user().named(RECLAIM_PARK_LABEL))
             // Between parking and the user coming back, the session can
             // return by other means — a second wake armed on the same
             // pane, the user starting it themselves.  Typing then puts
@@ -556,4 +556,29 @@ pub(super) const FIRST_FRAME_BYTES: u64 = 2048;
 /// Where a re-armed run picks up: an L1 restart replaces this process
 /// while the pane stays parked, so the new run must not kill anything
 /// again — it starts at the step that waits for the user.
-pub(super) const RECLAIM_PARK_STEP: usize = 2;
+///
+/// A label, not a position. This was `= 2`, and adding a step in
+/// front of it moved the step it named without changing the number:
+/// a re-arm would have resumed in the middle of the teardown.
+pub(super) const RECLAIM_PARK_LABEL: &str = "reclaim_park";
+
+#[cfg(test)]
+mod park_label_tests {
+    use super::*;
+
+    /// The park step is findable by the name the re-arm looks for.
+    ///
+    /// The lookup falls back to step 0 when the name is missing, which
+    /// would send a re-armed run through the teardown again instead of
+    /// parking it -- killing a claude that is already gone and typing
+    /// a resume nobody asked for. A name that does not resolve is
+    /// worse than the number it replaced, so it is checked here rather
+    /// than trusted.
+    #[test]
+    fn the_park_step_answers_to_its_name() {
+        let op = reclaim_op("aaaa-bbbb", None, 0, 1234).expect("a script");
+        let at = op.index_of(RECLAIM_PARK_LABEL).expect("the park step is named");
+        assert!(at > 0, "the park is not the first step; it follows the teardown");
+        assert_eq!(op.index_of("no-such-step"), None, "and the lookup can fail");
+    }
+}
