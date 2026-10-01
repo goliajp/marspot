@@ -260,11 +260,20 @@ vertex URVOut scene_ui_rect_vertex(
     o.corner_radius = r.radius;
     o.border_width = r.border_width;
     o.shadow_blur = r.shadow_blur;
-    // The float path carries `shadow_alpha` as a separate field, but
-    // its only producer sets it to the shadow colour's own alpha
-    // (`ui_rect_instance_from_rect`), so reading it from there is the
-    // same value and not an approximation.
-    o.shadow_alpha = float(r.shadow_color.a) / 255.0;
+    // Shadow intensity is the shadow colour's alpha, once.
+    //
+    // The float path carries two knobs, `shadow_alpha` and the
+    // colour's own alpha, and the fragment multiplies them -- so what
+    // they mean together depends on which producer filled them in.
+    // `ui_rect_instance_from_rect` put the same number in both and got
+    // its square (a 0.45 shadow drawn at 0.20); the panel painter put
+    // 0.45 in one and 1.0 in the other and got 0.45. Two producers,
+    // two meanings, one struct.
+    //
+    // The published format has one field for this, which is the right
+    // number of fields, so the second knob is held at 1 here and the
+    // colour carries it all.
+    o.shadow_alpha = 1.0;
     o.shadow_color = float4(r.shadow_color) / 255.0;
     return o;
 }
