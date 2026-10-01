@@ -192,7 +192,6 @@ LOCK_CMD="/usr/local/bin/bench-lock bench --max-wait $MAX_WAIT"
 if [[ "${MARSPOT_BENCH_NO_LOCK:-}" == "1" ]]; then
   echo "==> MARSPOT_BENCH_NO_LOCK=1 — measuring without the host lock" >&2
   LOCK_CMD=""
-  BUILD_LOCK=""
 fi
 set +e
 ssh "$HOST" "
@@ -207,9 +206,10 @@ ssh "$HOST" "
   fi
   # One hold, covering the compile and the measurement together.
   #
-  # The compile was split out under `heavy` first, on the reasoning
+  # The compile was split out under the shared 'heavy' mode first,
+  # on the reasoning
   # that a build is not a measurement and should not make everyone
-  # wait -- which is true of one bench on a quiet machine and wrong
+  # wait -- true of one bench on a quiet machine, wrong
   # with two. A waiting bench holds new heavy work back, so the other
   # session's queued bench stood in front of this one's compile and
   # the build timed out without ever producing a binary to measure.
