@@ -170,11 +170,22 @@ impl<'a> Table<'a> {
             }
         }
         let available = (self.rect.w - fixed_total).max(0.0);
+        // Px columns adding up to more than the table used to be handed
+        // out at full width regardless, so the last ones sat past the
+        // right edge -- two 300px columns in a 400px table reached 700
+        // against an edge at 500.  They shrink in proportion, which
+        // keeps every column a share of the table instead of giving the
+        // first ones everything and the rest nothing.
+        let squeeze = if fixed_total > self.rect.w && fixed_total > 0.0 {
+            self.rect.w / fixed_total
+        } else {
+            1.0
+        };
         let mut out = Vec::with_capacity(self.columns.len());
         let mut cx = self.rect.x;
         for col in self.columns {
             let w = match col.width {
-                ColumnWidth::Px(w) => w,
+                ColumnWidth::Px(w) => w * squeeze,
                 ColumnWidth::Flex(f) => {
                     if flex_total > 0.0 { available * (f / flex_total) } else { 0.0 }
                 }
@@ -200,6 +211,25 @@ impl<'a> Table<'a> {
             w: self.rect.w,
             h: self.style.row_h,
         }
+    }
+
+    /// The rows `paint` may draw: those whose rect fits the body
+    /// whole.
+    ///
+    /// `paint` used to cull only rows *entirely* outside the body, so
+    /// the one straddling the edge was drawn whole -- fourteen pixels
+    /// onto whatever the table sits on, at the process monitor's own
+    /// geometry.  There is no scissor in the UI paint path (`View::
+    /// paint`: "no automatic clipping"), so the choice is between a
+    /// half-drawn row and a row that waits until it fits; a scrolled
+    /// list that gains and loses its edge row is the normal one.
+    pub fn drawable_rows(&self) -> impl Iterator<Item = usize> + '_ {
+        let body = self.body_rect();
+        let bottom = body.y_top + body.h;
+        (0..self.rows.len()).filter(move |&i| {
+            let r = self.row_rect(i);
+            r.y_top >= body.y_top - 1e-9 && r.y_top + r.h <= bottom + 1e-9
+        })
     }
 
     /// Index of the row containing `(px, py)`, or None.  Section
@@ -269,13 +299,9 @@ impl<'a> Table<'a> {
         }
 
         // ── Body rows ────────────────────────────────────────────
-        let body = self.body_rect();
-        for (i, row) in self.rows.iter().enumerate() {
+        for i in self.drawable_rows() {
+            let row = &self.rows[i];
             let row_rect = self.row_rect(i);
-            // Clip rows entirely outside the body.
-            if row_rect.y_top + row_rect.h <= body.y_top { continue; }
-            if row_rect.y_top >= body.y_top + body.h { break; }
-
             let is_selected = self.selected == Some(i)
                 && row.kind == RowKind::Data;
             // Row BG: selection > stripe > default.
