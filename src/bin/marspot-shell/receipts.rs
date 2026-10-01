@@ -170,6 +170,20 @@ fn handle(stream: UnixStream, receipts: &Receipts) {
 /// `None` when marspot cannot name its own binary, or when the path
 /// is one that cannot be quoted. A pane started without it simply has
 /// no receipts.
+/// **Nothing consumes a receipt today, so nothing asks for this.**
+///
+/// The one reader was the submit step's verification, and the sentence
+/// a moved pane is told now travels on claude's command line -- there
+/// is no production caller of `Step::submit` left, so no receipt is
+/// ever looked up. What the hook still cost was real and measured: a
+/// fork and exec of this binary on every prompt the person sends by
+/// hand, median 7.6 ms, up to 25.9 ms.
+///
+/// The machinery below it stays. It is a few hundred lines and a
+/// socket that costs nothing while unused, and the question it answers
+/// -- "did that text actually get submitted" -- is the one any future
+/// typing path has to answer. Re-enabling it is adding this argument
+/// back at the three places that built a `claude` command line.
 pub fn claude_settings_arg() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let exe = exe.to_str()?;

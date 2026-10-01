@@ -1788,9 +1788,9 @@ fn profile_cycle_op(
     // The claude this starts reports its own submits. This is the path
     // the badge takes, so it is the one that matters most and the one
     // that was missed when the other two were wired.
-    if let Some(settings) = crate::receipts::claude_settings_arg() {
-        cmd = cmd.arg("--settings").quoted_arg(settings);
-    }
+    // No submit receipt hook: nothing reads a receipt since the
+    // sentence moved to the command line, and the hook forked this
+    // binary on every prompt the person sent by hand.
     // A session with no transcript has taken no turn — there is
     // nothing to carry across, and `--resume` on a uuid claude never
     // wrote fails.  Start claude plain instead.
@@ -3375,9 +3375,19 @@ mod tests {
             line.contains(&resume_word()),
             "the sentence is an argument of the command that starts claude: {line}"
         );
+        // A flag and its value are adjacent or they are not a flag and
+        // its value. This is what keeping quoted arguments in a list of
+        // their own once broke -- the quoted ones were appended last,
+        // which put the sentence between `--resume` and the id it
+        // names. There is one bare flag and one quoted positional on
+        // this line, so the line itself is the case.
         assert!(
-            line.contains("--resume"),
-            "and it does not replace the resume it travels with: {line}"
+            line.contains("--resume u-1"),
+            "the id follows its flag: {line}"
+        );
+        assert!(
+            line.find("--resume").unwrap() < line.find(&resume_word()).unwrap(),
+            "and the sentence comes after the pair, not inside it: {line}"
         );
         assert!(
             !op.steps
@@ -3388,6 +3398,32 @@ mod tests {
         assert!(
             !labels.contains(&"enter"),
             "and nothing presses return in it either: {labels:?}"
+        );
+    }
+
+    /// Starting a claude does not install a hook that runs on the
+    /// person's keystrokes.
+    ///
+    /// Every pane marspot started carried a `UserPromptSubmit` hook so
+    /// that text typed into it could be confirmed rather than read off
+    /// the screen. Nothing reads a receipt any more -- the sentence
+    /// moved to the command line and no production path submits -- and
+    /// the hook was a fork and exec of marspot-shell on every prompt
+    /// the person sent by hand: median 7.6 ms, up to 25.9 ms, measured.
+    #[test]
+    fn a_resumed_pane_gets_no_hook_on_the_persons_keystrokes() {
+        let op = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200, None).expect("cycle");
+        let line = match &op.steps.iter().find(|s| s.label == "resume").unwrap().kind {
+            pty_op::StepKind::Send(b) => String::from_utf8_lossy(b).into_owned(),
+            _ => unreachable!(),
+        };
+        assert!(
+            !line.contains("UserPromptSubmit"),
+            "no hook rides in on the line that starts claude: {line}"
+        );
+        assert!(
+            !line.contains("--settings"),
+            "and nothing is added to the person's own settings: {line}"
         );
     }
 
@@ -6334,13 +6370,6 @@ mod tests {
             "{with_dir}"
         );
         assert!(with_dir.ends_with(" --resume abc-123\r"), "{with_dir}");
-        // A flag and its value are adjacent or they are not a flag and
-        // its value -- this is what keeping quoted args in their own
-        // list broke, putting `--settings` next to `--resume`.
-        assert!(
-            with_dir.contains("--settings '{\"hooks\""),
-            "the document has to follow its flag: {with_dir}"
-        );
 
         // No dir observed = the default profile's own entry point.
         let no_dir = line(None);
