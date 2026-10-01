@@ -3423,9 +3423,22 @@ mod tests {
             _ => panic!("the resume step writes a command line"),
         };
         assert!(
-            line.contains("cd '/Users/x/workspace/goliajp/torajs' && exec "),
+            line.contains("cd '/Users/x/workspace/goliajp/torajs' && "),
             "it goes to the session's own directory first: {line}"
         );
+        // Order matters and is not cosmetic: `exec FOO=bar cmd` runs a
+        // program named `FOO=bar`, which is how every switch came to
+        // exit 127 and then wait twenty seconds for a claude that had
+        // never been started.
+        let exec_at = line.find("exec ").expect("the subshell execs the program");
+        let cd_at = line.find("cd '").expect("after the cd");
+        assert!(cd_at < exec_at, "{line}");
+        if let Some(env_at) = line.find("CLAUDE_CONFIG_DIR=") {
+            assert!(
+                env_at < exec_at,
+                "the environment is set before exec, not after it: {line}"
+            );
+        }
         assert!(
             line.trim_end().ends_with(')'),
             "and does it in a subshell, so the person's prompt is not moved: {line}"
