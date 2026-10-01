@@ -1025,7 +1025,8 @@ impl OpRunner {
                     // A receipt is proof and arrives on its own
                     // schedule, so it is read before the delay that
                     // exists only to give the screen time to settle.
-                    if self.env.submit_receipt(sid, line) == Some(true) {
+                    let reported = self.env.submit_receipt(sid, line);
+                    if reported == Some(true) {
                         host.log(
                             LogLevel::Info,
                             &format!("{}.landed", self.op.name),
@@ -1039,11 +1040,23 @@ impl OpRunner {
                     if now.duration_since(at).unwrap_or_default() < SUBMIT_VERIFY_AFTER {
                         return false;
                     }
-                    let still = self
-                        .env
-                        .pane_screen(sid)
-                        .map(|screen| line_is_still_in_the_composer(&screen, line))
-                        .unwrap_or(true);
+                    // **A pane that can report is judged only on what
+                    // it reports.** Falling back to the screen here
+                    // would make the receipt an accelerator rather
+                    // than evidence: the run could still end in
+                    // `landed` because a composer looked empty, which
+                    // is the thing receipts exist to stop believing.
+                    // Cutting the channel then has to end in returns
+                    // exhausted and a reported failure, and that is
+                    // what the acceptance in the RFC asks for.
+                    let still = match reported {
+                        Some(_) => true,
+                        None => self
+                            .env
+                            .pane_screen(sid)
+                            .map(|screen| line_is_still_in_the_composer(&screen, line))
+                            .unwrap_or(true),
+                    };
                     if !still {
                         host.log(
                             LogLevel::Info,
@@ -2128,6 +2141,13 @@ mod tests {
         modes: Mutex<Option<(u64, u32)>>,
         /// What the pane's screen would show.
         screen: Mutex<String>,
+        /// What this pane's agent reports, if it reports at all.
+        ///
+        /// `None` -- the default -- is a pane with no receipt channel,
+        /// which is every pane that existed before there was one and
+        /// every pane running something that is not an agent. Those
+        /// read the screen, as they always did.
+        receipt: Mutex<Option<bool>>,
         /// What the pane has drawn lately.
         tail: Mutex<Vec<u8>>,
     }
@@ -2153,6 +2173,9 @@ mod tests {
     }
 
     impl OpEnv for FakeEnv {
+        fn submit_receipt(&self, _sid: u64, _text: &str) -> Option<bool> {
+            *self.state.receipt.lock().unwrap()
+        }
         fn io(&self) -> &Arc<dyn PtyIo> {
             &self.io
         }
@@ -2371,6 +2394,109 @@ mod tests {
         run(&mut r, &host, &state, SUBMIT_VERIFY_AFTER.as_millis() as u64 + 96);
         assert!(*host.ended.lock().unwrap(), "the last prompt is empty, so it went");
         assert_eq!(state.sent.lock().unwrap().len(), 3, "and no more are sent");
+    }
+
+    /// A pane that reports its own submit is believed, and its screen
+    /// is not consulted.
+    ///
+    /// The screen here says the line is still sitting in the composer
+    /// -- the exact picture that makes every other test send another
+    /// return. The receipt outranks it, because the receipt came from
+    /// the program that did the submitting and the screen is a guess
+    /// about what that program drew.
+    #[test]
+    fn a_reported_submit_is_believed_over_the_screen() {
+        use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE));
+        let mut r = OpRunner::new(
+            PtyOp::new("test.submit")
+                .step(Step::submit("carry on").timeout(Duration::from_secs(60))),
+            env,
+        );
+        run(&mut r, &host, &state, 32);
+        *state.tail.lock().unwrap() = b"\x1b[2K> carry on".to_vec();
+        *state.out_len.lock().unwrap() = 300;
+        run(&mut r, &host, &state, SUBMIT_QUIET.as_millis() as u64 + 96);
+        assert_eq!(state.sent.lock().unwrap().len(), 2, "paste and one return");
+
+        // The screen says it is stuck; the agent says it submitted.
+        *state.screen.lock().unwrap() = "\u{276f} carry on\n".to_string();
+        *state.receipt.lock().unwrap() = Some(true);
+        run(&mut r, &host, &state, SUBMIT_VERIFY_AFTER.as_millis() as u64 + 96);
+        assert!(*host.ended.lock().unwrap(), "the receipt settles it");
+        assert_eq!(
+            state.sent.lock().unwrap().len(),
+            2,
+            "and no second return goes out on top of a submit that happened"
+        );
+    }
+
+    /// **The acceptance for the whole receipt design.**
+    ///
+    /// A pane that has a receipt channel and never reports must end up
+    /// saying so. Before receipts the verification could not fail at
+    /// all -- `.stuck` had never fired once in the file's history,
+    /// because the branch that declared success always won first. Cut
+    /// the channel and this run has to end in returns exhausted, not
+    /// in a quiet `landed`.
+    #[test]
+    fn a_channel_that_never_reports_ends_in_giving_up_not_in_success() {
+        use marspot_term::grid_shm::FLAG_BRACKETED_PASTE;
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, FLAG_BRACKETED_PASTE));
+        let mut r = OpRunner::new(
+            PtyOp::new("test.submit")
+                .step(Step::submit("carry on").timeout(Duration::from_secs(120))),
+            env,
+        );
+        run(&mut r, &host, &state, 32);
+        *state.tail.lock().unwrap() = b"> carry on".to_vec();
+        *state.out_len.lock().unwrap() = 300;
+        // The channel is there and silent, and the screen says the
+        // line went: an empty composer below the message. Without the
+        // rule above, that screen ends the run in `landed` and the
+        // receipt buys nothing.
+        *state.receipt.lock().unwrap() = Some(false);
+        *state.screen.lock().unwrap() =
+            "\u{276f} carry on\n  …a reply…\n\u{276f}\n".to_string();
+        run(&mut r, &host, &state, 20_000);
+        let sent = state.sent.lock().unwrap().clone();
+        assert_eq!(
+            sent.len(),
+            1 + SUBMIT_MAX_RETURNS as usize,
+            "every return is spent before it gives up: {sent:?}"
+        );
+        assert!(*host.ended.lock().unwrap(), "and it ends rather than hanging");
+    }
+
+    /// A pane with no channel at all still reads the screen.
+    ///
+    /// Receipts are an addition, not a replacement: a plain shell, an
+    /// older agent, or a pane that started before any of this still
+    /// has to submit exactly as it did.
+    #[test]
+    fn a_pane_without_a_channel_still_goes_by_the_screen() {
+        use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE));
+        let mut r = OpRunner::new(
+            PtyOp::new("test.submit")
+                .step(Step::submit("carry on").timeout(Duration::from_secs(60))),
+            env,
+        );
+        run(&mut r, &host, &state, 32);
+        *state.tail.lock().unwrap() = b"\x1b[2K> carry on".to_vec();
+        *state.out_len.lock().unwrap() = 300;
+        run(&mut r, &host, &state, SUBMIT_QUIET.as_millis() as u64 + 96);
+        // No receipt channel (the default), and an empty composer
+        // below the message: the screen says it went.
+        assert_eq!(*state.receipt.lock().unwrap(), None);
+        *state.screen.lock().unwrap() =
+            "\u{276f} carry on\n  …a reply…\n\u{276f}\n".to_string();
+        run(&mut r, &host, &state, SUBMIT_VERIFY_AFTER.as_millis() as u64 + 96);
+        assert!(*host.ended.lock().unwrap(), "the screen is still evidence when it is all there is");
+        assert_eq!(state.sent.lock().unwrap().len(), 2, "one paste, one return");
     }
 
     /// Three returns, then it is the person's.
