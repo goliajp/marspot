@@ -742,6 +742,12 @@ pub struct OpRunner {
     /// started, the length now, and when it last moved.
     entered_len: u64,
     seen_len: u64,
+    /// Output length when this run last typed a line into the pane.
+    ///
+    /// The anchor for "what did that line produce": a step that reads
+    /// only what arrived after itself misses a program that was
+    /// quicker than the tick.
+    sent_len: Option<u64>,
     still_since: SystemTime,
     drew: bool,
     /// Set once the run is over; the next tick ends the session.  Two
@@ -776,6 +782,7 @@ impl OpRunner {
             entered: now,
             entered_len: 0,
             seen_len: 0,
+            sent_len: None,
             still_since: now,
             drew: false,
             finished: None,
@@ -1017,6 +1024,17 @@ impl OpRunner {
                     );
                     return true;
                 }
+                // Where to start reading for what the line produces.
+                // Taken here rather than when a later step first runs,
+                // because a program that starts quickly can take the
+                // terminal in the gap between the two -- and a step
+                // that only looks at bytes written after itself then
+                // sees nothing and concludes the pane never drew.
+                // Measured end to end: the stand-in painted at :31 and
+                // `await_tui_ready` began at :32, waited thirty
+                // seconds and gave up on a pane that was already
+                // showing a full screen.
+                self.sent_len = Some(self.env.output_len(sid));
                 if let Err(e) = self.env.io().send(sid, &bytes) {
                     self.finish(
                         host,
@@ -1030,12 +1048,15 @@ impl OpRunner {
                 let base = match from_len {
                     Some(v) => v,
                     None => {
+                        // Everything the line has produced, not
+                        // everything since this step woke up.
+                        let start = self.sent_len.unwrap_or(now);
                         if let Some(StepKind::AwaitTuiReady { from_len }) =
                             self.op.steps.get_mut(self.at).map(|s| &mut s.kind)
                         {
-                            *from_len = Some(now);
+                            *from_len = Some(start);
                         }
-                        now
+                        start
                     }
                 };
                 let fresh = now.saturating_sub(base) as usize;
@@ -1284,8 +1305,20 @@ impl OpRunner {
                     .now()
                     .duration_since(self.still_since)
                     .unwrap_or_default();
-                let drawn = self.seen_len.saturating_sub(self.entered_len);
-                let done = self.drew && drawn >= min_bytes && quiet >= still;
+                // Counted from the line that started the program, not
+                // from this step: a program quick enough to paint and
+                // go quiet before the step opened has drawn nothing by
+                // this step's own reckoning, and the floor is then
+                // unreachable. The quiet itself is still measured from
+                // the last byte, which is the thing it is about.
+                let from = self.sent_len.unwrap_or(self.entered_len).min(self.entered_len);
+                let drawn = self.seen_len.saturating_sub(from);
+                // `drew` is this step having seen the stream move. A
+                // program that was already finished moves it no more,
+                // so what counts is that the line produced bytes at
+                // all -- and the floor above is what says how many.
+                let painted = self.drew || drawn > 0;
+                let done = painted && drawn >= min_bytes && quiet >= still;
                 if done {
                     // What the floor is worth is a number nobody had:
                     // how much a resuming CLI actually paints before it
@@ -2476,6 +2509,105 @@ mod tests {
         *state.out_len.lock().unwrap() = 40;
         run(&mut r, &host, &state, 400);
         assert!(*host.ended.lock().unwrap(), "both declarations are the answer");
+    }
+
+    /// A program quicker than the tick still counts as having drawn.
+    ///
+    /// The readiness probe reads the bytes a line produced, and it used
+    /// to start reading when it first ran -- so a program that took the
+    /// terminal in the gap between the send and that first tick wrote
+    /// its declaration into a window nobody was looking at. The step
+    /// then waited its whole budget and reported a pane that drew
+    /// nothing, while the pane was showing a full screen. Measured end
+    /// to end on 2026-10-01: painted at :31, the step opened at :32,
+    /// gave up thirty seconds later.
+    #[test]
+    fn a_program_that_drew_before_the_step_opened_still_counts() {
+        let (state, env, host) = setup();
+        let mut r = OpRunner::new(
+            PtyOp::new("test.quick")
+                .step(Step::send(b"claude\r".to_vec()).named("resume"))
+                .step(Step::await_tui_ready().timeout(Duration::from_millis(500))),
+            env,
+        );
+        // The send goes out and the readiness step opens on an empty
+        // stream. The program then takes the terminal and goes quiet,
+        // which under the old rule was a declaration written into a
+        // window nobody was reading.
+        // Exactly one tick, so the send is out and the readiness step
+        // has not opened yet. The bytes arrive in that gap -- which is
+        // the whole case: under the old rule the step then started
+        // reading from after them and saw an empty stream forever.
+        run(&mut r, &host, &state, 16);
+        *state.tail.lock().unwrap() = b"\x1b[?1049h\x1b[?2004h".to_vec();
+        *state.out_len.lock().unwrap() = 20;
+        run(&mut r, &host, &state, 300);
+        assert!(
+            *host.ended.lock().unwrap(),
+            "what the line produced is the evidence, whenever it arrived"
+        );
+    }
+
+    /// The same gap, one step later: the floor on bytes drawn counts
+    /// what the line produced, not what arrived after the step opened.
+    ///
+    /// A program that paints its first screen and then waits is
+    /// finished before a later step gets a turn, and that step's own
+    /// reckoning says nothing was drawn -- so a floor of two kilobytes
+    /// can never be reached and the run gives up on a pane that is
+    /// showing a full screen. Measured end to end: 4604 bytes in, and
+    /// the step that wanted 2048 of them timed out after thirty
+    /// seconds.
+    #[test]
+    fn a_first_frame_painted_before_the_step_opened_counts_too() {
+        let (state, env, host) = setup();
+        let mut r = OpRunner::new(
+            PtyOp::new("test.painted")
+                .step(Step::send(b"claude\r".to_vec()).named("resume"))
+                // The step in between is the one that consumes the
+                // paint: it is satisfied by the same bytes, and the
+                // frame wait then opens on the far side of them.
+                .step(Step::await_tui_ready().timeout(Duration::from_millis(400)))
+                .step(
+                    Step::await_quiet(Duration::from_millis(50))
+                        .after_bytes(2048)
+                        .timeout(Duration::from_millis(600)),
+                ),
+            env,
+        );
+        run(&mut r, &host, &state, 16);
+        // The whole screen, at once.
+        *state.tail.lock().unwrap() = b"\x1b[?1049h\x1b[?2004h".to_vec();
+        *state.out_len.lock().unwrap() = 4604;
+        run(&mut r, &host, &state, 500);
+        assert!(
+            *host.ended.lock().unwrap(),
+            "the floor is about what the line produced, not about when this step woke up"
+        );
+    }
+
+    /// And a floor that is genuinely not reached still holds.
+    #[test]
+    fn a_program_that_barely_painted_does_not_pass_the_floor() {
+        let (state, env, host) = setup();
+        let mut r = OpRunner::new(
+            PtyOp::new("test.thin")
+                .step(Step::send(b"claude\r".to_vec()).named("resume"))
+                .step(
+                    Step::await_quiet(Duration::from_millis(50))
+                        .after_bytes(2048)
+                        .timeout(Duration::from_millis(300)),
+                ),
+            env,
+        );
+        run(&mut r, &host, &state, 16);
+        *state.out_len.lock().unwrap() = 12;
+        run(&mut r, &host, &state, 400);
+        assert!(
+            matches!(r.finished, Some(OpOutcome::TimedOut { .. })),
+            "twelve bytes is not a first frame: {:?}",
+            r.finished
+        );
     }
 
     /// And a frame that never moves does not stop it.
