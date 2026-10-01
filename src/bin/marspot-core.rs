@@ -3295,21 +3295,6 @@ fn install_swap_trigger(tx: Sender<CoreEvent>) {
     });
 }
 
-/// Spawn one per-session L3 process and return its assembled pieces.  L2
-/// owns the shm region's lifecycle: it creates + sizes the region, inherits
-/// the fd (4) and the control socket (3) into the child, maps the region as
-/// a reader, and starts a thread turning L3's `GridReady` pokes into
-/// `L3Ready` wakes (and routing `SelectionText` replies).  Behind
-/// `MARSPOT_L3=1`.  Used by `begin_pane_swap` to bring up a
-/// silent-update replacement on the same session ([`CoreApp::swap_idle_l3`]).
-fn spawn_l3(
-    cols: u16,
-    rows: u16,
-    session_id: u64,
-    event_tx: &Sender<CoreEvent>,
-) -> std::io::Result<L3Spawn> {
-    spawn_l3_with_cwd(cols, rows, session_id, "", event_tx)
-}
 
 /// Absolute ceiling on live `marspot-session` processes this state
 /// root may hold, counted against the registry at spawn time.
@@ -5879,29 +5864,72 @@ impl CoreApp {
     /// (clearing any deferred-update flag).  Caller has checked it's a live,
     /// not-already-swapping L3 pane.
     fn begin_pane_swap(&mut self, wi: usize, i: usize) {
+        // Amendment 16, for one pane: promote the staged image, then ask
+        // that pane's L3 to self-execv.  Same two steps `swap_idle_l3`
+        // does for all of them.
+        //
+        // This used to spawn a replacement L3 on the same session id and
+        // wait for `L3Conn::try_promote` to swap to it once it published.
+        // That cannot work and has not since July: `marspot-session`
+        // takes a lock on `sessions/<id>/` and refuses to start while
+        // another live L3 holds it, which is the defence against two
+        // writers on one session.  The replacement exited before
+        // publishing, nothing was ever promoted, and the pane stayed
+        // `is_swapping()` for the rest of its life -- so the two places
+        // that call this (moving focus off a pane with a staged update,
+        // and the refresh glyph in its title strip) did nothing.
+        //
+        // Promoting FIRST is not optional.  A SIGTERM whose fingerprint
+        // matches falls through to the user-quit path: state.bin, clean
+        // exit, and the shell gets a SIGHUP.  Signalling before `current/`
+        // holds the new image would close the pane instead of updating it.
         let pane = &win!(self, wi).panes[i];
+        if !pane.is_l3() || pane.is_exited() {
+            return;
+        }
         let Some(sid) = pane.session().l3_session_id() else {
             return;
         };
-        let (cols, rows) = (pane.session().grid().cols(), pane.session().grid().rows());
-        match spawn_l3(cols, rows, sid, &self.event_tx) {
-            Ok(spawn) => {
-                win!(self, wi).panes[i].session_mut().begin_l3_swap(spawn);
-                win!(self, wi).panes[i].set_update_pending(false);
-                win!(self, wi).needs_render = true;
-                lx_event!(
-                    "L3_SWAP_STAGED",
-                    "staged silent swap for L3 session",
-                    session = sid,
-                    pane = i
-                );
-            }
-            Err(e) => lx_error!(
-                "core.swap.spawn_failed",
-                &format!("{e}"),
-                session = sid,
-                pane = i
+        let Some(pid) = pane.session().l3_pid() else {
+            return;
+        };
+        if pid <= 0 {
+            return;
+        }
+        match marspot::updater::promote_pending_session() {
+            Ok(true) => lx_event!(
+                "SESSION_PROMOTE",
+                "promoted staged marspot-session → current/ for a single pane",
+                session = sid
             ),
+            Ok(false) => {
+                // Nothing staged: the pane's `update_pending` flag and the
+                // staging directory disagree.  Signalling now would end
+                // the session rather than update it.
+                lx_warn!(
+                    "core.pane_swap.nothing_staged",
+                    "a pane asked to swap but no replacement is staged; not signalling",
+                    session = sid
+                );
+                return;
+            }
+            Err(e) => {
+                lx_error!("core.pane_swap.promote_failed", &format!("{e}"));
+                return;
+            }
+        }
+        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+            lx_event!(
+                "L3_SWAP_SIGTERM",
+                "asked one L3 to self-execv into current/marspot-session",
+                session = sid,
+                pid = pid
+            );
+        } else {
+            lx_error!(
+                "core.pane_swap.signal_failed",
+                &format!("{}", std::io::Error::last_os_error()),
+            );
         }
     }
 

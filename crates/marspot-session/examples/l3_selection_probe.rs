@@ -44,12 +44,15 @@ fn main() {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let mut found_row: Option<u16> = None;
     while found_row.is_none() {
-        for row in 0..ROWS {
-            let line: String = (0..COLS).map(|c| session.cell(c, row, COLS)).collect();
+        // One read per poll, not one per cell, and an empty read means
+        // "not yet" rather than "failed".
+        if let Some(lines) = session.try_screen(COLS, ROWS) {
             // The echoed command line also contains the marker, so take
             // the LAST row that has it on its own -- that is the output.
-            if line.trim_end() == MARKER {
-                found_row = Some(row);
+            for (row, line) in lines.iter().enumerate() {
+                if line == MARKER {
+                    found_row = Some(row as u16);
+                }
             }
         }
         if found_row.is_none() && std::time::Instant::now() >= deadline {

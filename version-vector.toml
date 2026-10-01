@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.194"  # a submit gets long enough to do what it waits for
-core    = "0.12.243"  # a blend equation is not Rust
+core    = "0.12.244"  # a pane swap signals its L3 instead of spawning one
 session = "0.11.129"  # owning the PTY is the default, not an opt-in
