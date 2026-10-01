@@ -9,7 +9,7 @@ use marspot::render_metal::{make_target_texture, MetalRenderer, WindowRender};
 use marspot::session::SessionState;
 use marspot::terminal::Terminal;
 use marspot::tmux;
-use marspot::{lx_debug, lx_error};
+use marspot::{lx_debug, lx_error, lx_event};
 use marspot::ui::{
     scroll_lines, selection_text, selection_view_for_pane, truncate_for_sidebar,
     Selection, SelectionMode, CELL_TITLE_PT, MAX_SIDEBAR_LABEL_CHARS,
@@ -318,6 +318,11 @@ impl MarspotApp for Marspot {
 
         let nsview = ctx.ns_view();
         let renderer = MetalRenderer::new(nsview, scale).expect("metal renderer init");
+        lx_event!(
+            "GUI_WINDOW_READY",
+            "window created and Metal renderer up",
+            scale = scale
+        );
         self.renderer = Some(renderer);
         // run_app delivers an explicit Resized after resumed; that does
         // the renderer.resize + layout build + initial render.
@@ -958,6 +963,10 @@ impl MarspotApp for Marspot {
     }
 
     fn redraw(&mut self, ctx: &MarspotAppCtx) {
+        static FIRST_FRAME: std::sync::Once = std::sync::Once::new();
+        FIRST_FRAME.call_once(|| {
+            lx_event!("GUI_FIRST_FRAME", "window painted its first frame");
+        });
         self.prof.redraw_requested_calls += 1;
         let render_t0 = std::time::Instant::now();
         self.render_now(ctx);
@@ -1217,6 +1226,14 @@ impl Marspot {
         ) {
             Ok(s) => {
                 self.panes.push(marspot::pane::Pane::new(s));
+                lx_event!(
+                    "GUI_SESSION_SPAWNED",
+                    "in-process session attached to a pane",
+                    panes = self.panes.len(),
+                    shell = shell,
+                    cols = INITIAL_COLS,
+                    rows = INITIAL_ROWS
+                );
             }
             Err(e) => lx_error!("gui.spawn.session_failed", &format!("{e}")),
         }
@@ -1731,6 +1748,20 @@ fn main() {
     // RFC-004 D.1 — must precede logx / any path computation.
     marspot::paths::migrate_legacy_state_root();
     marspot::logx::init("gui");
+    // The standalone dev app had no Info-level call site at all, so a
+    // healthy run and a silent death left the same empty log -- which
+    // is twenty minutes of guessing every time something does not come
+    // up.  These four lines are the sequence: started, window painted,
+    // session attached.  Anything missing from the tail says where it
+    // stopped.
+    lx_event!(
+        "GUI_START",
+        "standalone marspot starting",
+        version = VERSION,
+        git = GIT_SHA,
+        pid = std::process::id(),
+        logs = marspot::paths::log_dir().display()
+    );
     let args: Vec<String> = std::env::args().collect();
     if let Some(path) = parse_named_arg(&args, "--snapshot") {
         let panel = parse_named_arg(&args, "--panel");
@@ -1797,6 +1828,7 @@ fn main() {
         // installed app (split-arch) which keeps L3 children across
         // L2 swaps via RFC-003 Amendment 7 reattach.
         let mut panes = Vec::with_capacity(n_sessions);
+        let shells_wanted = n_sessions;
         for _ in 0..n_sessions {
             let proxy_clone = proxy.clone();
             let wake = move || {
@@ -1814,6 +1846,15 @@ fn main() {
                 Err(e) => lx_error!("gui.session.spawn_failed", &format!("{e}")),
             }
         }
+        // How many of the panes asked for actually got a shell.  A run
+        // that comes up with fewer is the shape worth noticing, and
+        // without this line the only evidence is counting children.
+        lx_event!(
+            "GUI_PANES_READY",
+            "startup panes have their shells",
+            panes = panes.len(),
+            wanted = shells_wanted
+        );
         panes
     };
 
