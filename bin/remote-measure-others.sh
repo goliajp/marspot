@@ -142,11 +142,30 @@ if ! jq empty "$MEAS_JSON" 2>/dev/null; then
   cat "$MEAS_JSON" >&2
   exit 2
 fi
+BASELINE="$ROOT/bench/baseline.json"
 echo "==> measured:"
 jq . "$MEAS_JSON"
 
+# A run that measured nothing must not look like a run that measured
+# everything. The merge below keeps terminals this run did not reach --
+# which is right when one driver times out, and a lie when they all do:
+# it stamps `captured_at` with today, and the gate's seven-day
+# freshness check then believes numbers from a fortnight ago were taken
+# this morning.
+#
+# Happened on 2026-10-02: every driver's marker timed out, the script
+# exited 0, and the only change to the baseline was the date.
+MEASURED_TERMS=$(jq -r '[to_entries[] | select(.key != "host") | select(.value | type == "object") | select([.value | keys[] | select(endswith("_MBps"))] | length > 0) | .key] | length' "$MEAS_JSON")
+if [[ "${MEASURED_TERMS:-0}" -eq 0 ]]; then
+  echo "==> nothing was measured: no terminal produced a single throughput" >&2
+  echo "    number, so $BASELINE is left exactly as it was." >&2
+  echo "    Look above for which drivers timed out; after a macOS upgrade" >&2
+  echo "    they need their Automation permission granted again on the" >&2
+  echo "    bench host." >&2
+  exit 4
+fi
+
 # ---- merge into bench/baseline.json ----------------------------------
-BASELINE="$ROOT/bench/baseline.json"
 TMP="$BASELINE.tmp.$$"
 python3 - "$BASELINE" "$MEAS_JSON" "$TMP" <<'PY'
 import json, sys, datetime
@@ -165,4 +184,4 @@ with open(tmp_path, "w") as f:
     f.write("\n")
 PY
 mv "$TMP" "$BASELINE"
-echo "==> $BASELINE updated (captured_at=$(date +%Y-%m-%d))"
+echo "==> $BASELINE updated: $MEASURED_TERMS terminal(s) measured, captured_at=$(date +%Y-%m-%d)"
