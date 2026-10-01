@@ -78,6 +78,29 @@ pub(super) fn open_checked(
     Ok(file)
 }
 
+/// Open a sidecar for reading only, refusing it rather than resetting
+/// it when it belongs to anything else.
+///
+/// The cold tier's sidecar is read and never appended to, and
+/// `open_checked` would truncate what it does not recognise -- which
+/// for a file nobody writes means destroying the marks on a bad epoch
+/// read rather than declining to use them.
+pub(super) fn open_for_read(
+    path: &std::path::Path,
+    epoch: u64,
+    kind: Kind,
+) -> Option<std::fs::File> {
+    use std::os::unix::fs::FileExt;
+    let file = std::fs::File::open(path).ok()?;
+    let mut hdr = [0u8; HEADER_BYTES as usize];
+    file.read_exact_at(&mut hdr, 0).ok()?;
+    let ok = u32::from_le_bytes(hdr[0..4].try_into().unwrap()) == MAGIC
+        && u32::from_le_bytes(hdr[4..8].try_into().unwrap()) == VERSION
+        && u32::from_le_bytes(hdr[8..12].try_into().unwrap()) == kind as u32
+        && u64::from_le_bytes(hdr[16..24].try_into().unwrap()) == epoch;
+    ok.then_some(file)
+}
+
 /// The epoch a sidecar file states, for tests and for diagnosing a
 /// pair that disagrees with itself.
 #[cfg(test)]

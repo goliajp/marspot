@@ -11,6 +11,15 @@
 use marspot_term::grid::PromptMark;
 use marspot_term::scrollback::Scrollback;
 
+/// Every test here sets `MARSPOT_SCROLLBACK_HOT_CAP_MB`, and an env var
+/// is process-wide: under `cargo test` these run as threads in one
+/// process, so without this they read each other's cap.  The first
+/// version of `a_mark_in_the_cold_tier_is_still_read_after_one_handover`
+/// wanted one handover and counted 11 999, because a neighbour had set
+/// the cap to zero.  Held for the whole of each test, not just the
+/// `set_var`.
+static CAP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn row(c: u8, cols: usize) -> Vec<marspot_term::grid::Cell> {
     (0..cols)
         .map(|_| marspot_term::grid::Cell {
@@ -31,6 +40,7 @@ fn a_rotation_starts_the_marks_over_with_the_file() {
     let bin = dir.join("scrollback.bin");
     let idx = dir.join("scrollback.idx");
     // A tiny hot cap so a handful of lines forces the handover.
+    let _cap = CAP.lock().unwrap_or_else(|p| p.into_inner());
     unsafe { std::env::set_var("MARSPOT_SCROLLBACK_HOT_CAP_MB", "0") };
     let mut sb = Scrollback::file(bin, idx, 8, 8).unwrap();
     for i in 0..4 {
@@ -69,6 +79,7 @@ fn a_new_line_does_not_inherit_the_mark_at_its_index_in_the_old_file() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    let _cap = CAP.lock().unwrap_or_else(|p| p.into_inner());
     unsafe { std::env::set_var("MARSPOT_SCROLLBACK_HOT_CAP_MB", "0") };
     let mut sb =
         Scrollback::file(dir.join("scrollback.bin"), dir.join("scrollback.idx"), 8, 4).unwrap();
@@ -98,6 +109,49 @@ fn a_new_line_does_not_inherit_the_mark_at_its_index_in_the_old_file() {
         marked,
         Vec::<usize>::new(),
         "a line of the new file inherited the old file's mark at the same index"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What the rename is for: after ONE handover, the marks of the lines
+/// that went with the file are still readable through the cold tier.
+///
+/// The two tests above use a cap of zero, which rotates on every push
+/// and so overwrites the cold pair immediately -- they say nothing
+/// about whether cold marks work. This one rotates once.
+#[test]
+fn a_mark_in_the_cold_tier_is_still_read_after_one_handover() {
+    let dir = std::env::temp_dir().join(format!("marspot-lineid-cold-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // 1 MiB of hot file is a few thousand 8-column records, so one pass
+    // below hands the file over exactly once.
+    let _cap = CAP.lock().unwrap_or_else(|p| p.into_inner());
+    unsafe { std::env::set_var("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1") };
+    let mut sb =
+        Scrollback::file(dir.join("scrollback.bin"), dir.join("scrollback.idx"), 8, 4).unwrap();
+    let first_epoch = sb.epoch();
+    let mut rotations = 0;
+    let mut seen = first_epoch;
+    for i in 0..12_000 {
+        sb.push_line_with_wrapped(&row(b'a' + (i % 26) as u8, 8), false);
+        if i == 10 {
+            sb.mark_last_line(PromptMark::CommandEnd(Some(42)));
+        }
+        if sb.epoch() != seen {
+            seen = sb.epoch();
+            rotations += 1;
+        }
+    }
+    unsafe { std::env::remove_var("MARSPOT_SCROLLBACK_HOT_CAP_MB") };
+    assert_eq!(
+        rotations, 1,
+        "the fixture needs exactly one handover, or it is testing something else"
+    );
+    assert_eq!(
+        sb.prompt_at(10),
+        PromptMark::CommandEnd(Some(42)),
+        "line 10 went into the cold tier and its mark went with it"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

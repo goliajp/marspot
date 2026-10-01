@@ -219,6 +219,20 @@ pub(super) fn new_epoch() -> u64 {
     ns ^ (SEQ.fetch_add(1, Ordering::Relaxed) << 48)
 }
 
+/// The epoch a `.bin` states, or `None` when it is not one of ours.
+/// Used to open a sidecar against a file this process did not open as
+/// its writer -- the cold tier.
+pub(super) fn read_epoch(bin_path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::fs::FileExt;
+    let f = std::fs::File::open(bin_path).ok()?;
+    let mut hdr = [0u8; FILE_HEADER_BYTES as usize];
+    f.read_exact_at(&mut hdr, 0).ok()?;
+    if u32::from_le_bytes(hdr[0..4].try_into().unwrap()) != FILE_MAGIC {
+        return None;
+    }
+    Some(u64::from_le_bytes(hdr[24..32].try_into().unwrap()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

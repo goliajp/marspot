@@ -38,26 +38,37 @@ impl FileScrollback {
     /// The command mark on logical line `line_idx`, or `None` when
     /// there is no mark there to find.
     ///
-    /// Hot tier only. A rotated-away line's mark went with its file
-    /// (`scrollback.cold.bin.marks`) and is not read back yet, so
-    /// history older than the current hot file answers "no mark" --
-    /// the same answer a missing sidecar gives, and the one the jump
-    /// handles by looking further.
+    /// Both tiers: the hot file's sidecar, and the one that was renamed
+    /// alongside the file when it was handed over. Older than the cold
+    /// tier is gone with its file and answers "no mark" -- the same
+    /// answer a missing sidecar gives.
     pub(in crate::scrollback) fn mark_at(&self, line_idx: usize) -> crate::grid::PromptMark {
-        use std::os::unix::fs::FileExt;
         let none = crate::grid::PromptMark::None;
-        if line_idx >= self.total_lines as usize || (line_idx as u64) < self.hot_first_line {
+        if line_idx >= self.total_lines as usize {
             return none;
         }
-        let Some(f) = self.marks.as_ref() else {
-            return none;
+        let (file, local) = if (line_idx as u64) < self.hot_first_line {
+            let Some(l) = (line_idx as u64).checked_sub(self.cold_first_line) else {
+                return none;
+            };
+            if l >= self.cold_total_lines {
+                return none;
+            }
+            (self.cold_marks.as_ref(), l)
+        } else {
+            (self.marks.as_ref(), line_idx as u64 - self.hot_first_line)
         };
-        let local = line_idx as u64 - self.hot_first_line;
+        let Some(f) = file else { return none };
+        Self::read_mark(f, local)
+    }
+
+    fn read_mark(f: &std::fs::File, local: u64) -> crate::grid::PromptMark {
+        use std::os::unix::fs::FileExt;
         let mut b = [0u8; 2];
         if f.read_exact_at(&mut b, super::super::sidecar::HEADER_BYTES + local * 2)
             .is_err()
         {
-            return none;
+            return crate::grid::PromptMark::None;
         }
         crate::grid::PromptMark::from_bytes(b)
     }
