@@ -95,6 +95,14 @@ for scenario in "${SCENARIOS[@]}"; do
 
   : > "$RUN_DIR/$scenario.ns"
   for trial in $(seq 1 "$TRIALS"); do
+    # Sample the load before every trial, not once before the batch.
+    # A reading taken before the first trial says nothing about what
+    # arrived during the next seven minutes: 2026-10-01 this probe
+    # recorded 4.16 (under the 5.0 skip threshold) while two jobs
+    # started a minute in and ran to the end, and reported a 45%
+    # "regression" on cjk that was entirely the tenant.
+    uptime | sed 's/.*averages: //' | awk '{print $1}' >> "$RUN_DIR/load"
+
     echo "==> $scenario ×$repeats ($((total_bytes/1048576)) MiB) trial $trial/$TRIALS"
     ns=$(run_one "$spath" "$repeats")
     if [[ -z "$ns" || "$ns" == "0" ]]; then
@@ -125,7 +133,20 @@ try:
     load1 = os.getloadavg()[0]
 except OSError:
     load1 = -1.0
-out = {"_host_load1": round(load1, 2)}
+samples = []
+load_path = os.path.join(run_dir, "load")
+if os.path.exists(load_path):
+    samples = [float(x) for x in open(load_path).read().split() if x.strip()]
+# `_host_load1` stays the name every consumer already reads, and now
+# carries the WORST moment of the measurement rather than the calm
+# before it -- a quiet start followed by a busy middle has to read as
+# busy, or the gate measures the tenant and blames the code.
+out = {
+    "_host_load1": round(max(samples), 2) if samples else round(load1, 2),
+    "_host_load1_first": round(samples[0], 2) if samples else None,
+    "_host_load1_last": round(samples[-1], 2) if samples else None,
+    "_host_load1_trials": len(samples),
+}
 for scenario in scenarios_str.split():
     ns_path = os.path.join(run_dir, f"{scenario}.ns")
     by_path = os.path.join(run_dir, f"{scenario}.bytes")

@@ -586,6 +586,12 @@ if mode == "full":
         # load1 4.5 and 115.7 at load1 6.3 on cjk.  Report that as
         # "not measured", not as a regression — a red that means
         # "someone else was compiling" trains people to ignore reds.
+        # `_host_load1` is the WORST moment of the measurement, not
+        # the calm before it: the probe samples before every trial.
+        # It used to read once, and 2026-10-01 that reported 4.16 --
+        # under this threshold -- for a run two other jobs shared from
+        # the first minute to the last, which came out as a 45% cjk
+        # "regression" with all five trials below the floor.
         host_load = l3.get("_host_load1", -1.0)
         too_busy = isinstance(host_load, (int, float)) and host_load > 5.0
         for entry in baseline["scenarios"]:
@@ -595,9 +601,20 @@ if mode == "full":
                 continue
             bps = l3.get(sid, {}).get("bytes_per_sec", 0)
             cur = bps / 1e6 if bps > 0 else None
+            # The probe keeps its per-trial times; turn them into the
+            # same spread every other row carries.  It reports the
+            # MINIMUM of its trials rather than the median -- load can
+            # only add time -- so the spread here reads the other way
+            # round: the fastest trial is the right edge.
+            trials = l3.get(sid, {}).get("samples") or []
+            nbytes = l3.get(sid, {}).get("bytes", 0)
+            if trials and nbytes:
+                rates = sorted(nbytes / (ns / 1e9) / 1e6 for ns in trials if ns > 0)
+                if rates:
+                    SPREADS[f"L3 {sid}"] = (rates[0], rates[-1])
             if too_busy:
                 results["pass"].append(
-                    ("skip", f"L3 {sid}", f"host busy (load1 {host_load})", None)
+                    ("skip", f"L3 {sid}", f"host busy (peak load1 {host_load})", None)
                 )
                 continue
             check(f"L3 {sid}", cur, float(floor))
