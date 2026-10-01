@@ -43,6 +43,16 @@ pub(super) enum Room {
         /// a pane pinned to that model the account-level numbers are
         /// not the whole answer.
         models: Vec<(String, f64)>,
+        /// Unix seconds the per-model caps were actually measured.
+        ///
+        /// Not the same as when the row was collected: the feed
+        /// carries `model_limits` over from an earlier sample and says
+        /// so, and a carried number can be an hour and a half behind
+        /// what the API is doing. This is what a refusal seen in a
+        /// pane is compared against.
+        models_measured_at: i64,
+        /// Unix seconds the account-level windows were collected.
+        measured_at: i64,
     },
     /// No account matched it — a profile the collector does not cover,
     /// or one whose `.claude.json` names an address the feed has never
@@ -82,6 +92,40 @@ impl Room {
                 self.model_util(model).is_some_and(|u| u >= WINDOW_SPENT)
             }
             Room::Unknown => false,
+        }
+    }
+
+    /// Is this profile out for a pane that needs `model`, counting
+    /// what the pane has seen for itself?
+    ///
+    /// `refused_at` is when this pane was last told by the API that it
+    /// had reached a limit. The feed and the pane are not two opinions
+    /// to reconcile -- they are two witnesses to the same thing, and
+    /// the later one is believed. That keeps the rule the feed was
+    /// made the only trigger for: while it is current, it is still the
+    /// only thing speaking.
+    ///
+    /// It has to be this way round because collection is behind
+    /// consumption by construction, and can be behind by a lot: the
+    /// feed carries a row's model caps over from an earlier sample
+    /// when it cannot re-measure them, and one sat at 0.62 for 94
+    /// minutes while the API refused that account sixteen times.
+    pub(super) fn refused_for_now(&self, model: Option<&str>, refused_at: Option<i64>) -> bool {
+        if self.refused_for(model) {
+            return true;
+        }
+        let Some(seen) = refused_at else { return false };
+        match self {
+            // Compare against the numbers that would otherwise be
+            // believed: the model's cap when the pane is pinned to
+            // one, the account's windows when it is not.
+            Room::Known { models_measured_at, measured_at, .. } => {
+                let measured = if model.is_some() { *models_measured_at } else { *measured_at };
+                seen > measured
+            }
+            // Nothing to be newer than. A pane that has been refused
+            // where the feed cannot speak for it is out.
+            Room::Unknown => true,
         }
     }
 
@@ -174,6 +218,11 @@ pub(super) fn rooms_for(
                         .iter()
                         .map(|m| (m.label.to_ascii_lowercase(), m.util))
                         .collect(),
+                    // When the feed says the caps were carried, that
+                    // is when they were measured; otherwise this row's
+                    // own collection time.
+                    models_measured_at: a.limits_as_of.unwrap_or(a.collected_at),
+                    measured_at: a.collected_at,
                 })
                 .unwrap_or(Room::Unknown);
             (p, room)
@@ -349,7 +398,80 @@ mod tests {
             util_7d,
             reset_7d,
             models: models.iter().map(|(l, u)| (l.to_string(), *u)).collect(),
+            // Measured now, in the tests that are not about staleness.
+            models_measured_at: i64::MAX, measured_at: i64::MAX,
         }
+    }
+
+    /// A room whose numbers were measured at `measured`, with room to
+    /// spare by every figure the feed reports.
+    fn roomy_measured_at(measured: i64) -> Room {
+        Room::Known {
+            status: "allowed_warning".into(),
+            util_5h: 0.85,
+            util_7d: 0.88,
+            reset_7d: 500,
+            models: vec![("fable".to_string(), 0.62)],
+            models_measured_at: measured,
+            measured_at: measured,
+        }
+    }
+
+    /// The case this exists for, with the real numbers: the feed says
+    /// 0.62 of Fable is gone and the API says the account is out.
+    ///
+    /// The feed is not wrong, it is old -- it carried that row's model
+    /// caps forward from a sample taken 94 minutes earlier, while
+    /// fourteen panes it had just sent there spent what was left.
+    #[test]
+    fn a_refusal_newer_than_the_numbers_is_believed_over_them() {
+        let feed_at = 1_790_850_134; // 10:22, when the caps were measured
+        let refused_at = 1_790_855_512; // 11:51, when the API said no
+        let r = roomy_measured_at(feed_at);
+        assert!(
+            !r.refused_for(Some("fable-5")),
+            "by the feed alone there is room, which is why nothing moved"
+        );
+        assert!(
+            r.refused_for_now(Some("fable-5"), Some(refused_at)),
+            "but the pane was refused after those numbers were taken"
+        );
+    }
+
+    /// The other half, and the reason this is not a second trigger
+    /// that can disagree with the first: a refusal older than the
+    /// numbers is already accounted for in them.
+    ///
+    /// Without the comparison -- taking any refusal as proof -- a pane
+    /// would be moved off an account that has since been re-measured
+    /// and has room, once per refusal still sitting in its transcript.
+    #[test]
+    fn a_refusal_older_than_the_numbers_is_not() {
+        let refused_at = 1_790_850_000;
+        let feed_at = 1_790_855_000;
+        let r = roomy_measured_at(feed_at);
+        assert!(
+            !r.refused_for_now(Some("fable-5"), Some(refused_at)),
+            "the feed has looked since, and it says there is room"
+        );
+        assert!(
+            !r.refused_for_now(None, Some(refused_at)),
+            "and the same for a pane with no model of its own"
+        );
+    }
+
+    /// A profile the feed cannot speak for has nothing to be newer
+    /// than. Being refused there is all the evidence there is.
+    #[test]
+    fn a_refusal_where_the_feed_is_silent_counts() {
+        assert!(
+            Room::Unknown.refused_for_now(Some("fable-5"), Some(1)),
+            "unknown plus a closed door is a closed door"
+        );
+        assert!(
+            !Room::Unknown.refused_for_now(Some("fable-5"), None),
+            "unknown on its own is still not full"
+        );
     }
 
     /// An account can be at 7% of its week and still be shut out of
@@ -426,7 +548,7 @@ mod tests {
                         status: (*status).into(),
                         util_5h: 0.0,
                         util_7d: *util7,
-                        reset_7d: *reset7, models: Vec::new()
+                        reset_7d: *reset7, models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX
                     },
                 )
             })
@@ -442,7 +564,7 @@ mod tests {
             status: "allowed_warning".into(),
             util_5h: 0.99,
             util_7d: 0.37,
-            reset_7d: 500, models: Vec::new()
+            reset_7d: 500, models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX
         };
         assert!(warned.refused(), "99% of the five-hour window is not a warning");
 
@@ -450,12 +572,12 @@ mod tests {
             status: "allowed_warning".into(),
             util_5h: 0.10,
             util_7d: 0.80,
-            reset_7d: 900, models: Vec::new()
+            reset_7d: 900, models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX
         };
         assert!(!fresh.refused(), "a warning with room left is still usable");
 
         // And it is not offered as somewhere to go.
-        let r = vec![(1, Room::Known { status: "rejected".into(), util_5h: 0.0, util_7d: 1.0, reset_7d: 100 , models: Vec::new()}), (7, warned), (2, fresh)];
+        let r = vec![(1, Room::Known { status: "rejected".into(), util_5h: 0.0, util_7d: 1.0, reset_7d: 100 , models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX}), (7, warned), (2, fresh)];
         assert_eq!(best_profile(&r, 1, None), Some(2));
     }
 
@@ -541,6 +663,8 @@ mod tests {
             reset_5h: 0,
             reset_7d: reset7,
             model_limits: Vec::new(),
+            collected_at: 0,
+            limits_as_of: None,
         }
     }
 
