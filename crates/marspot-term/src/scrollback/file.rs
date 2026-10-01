@@ -139,6 +139,11 @@ pub struct FileScrollback {
     /// Which run of line numbering this file's local line indices
     /// belong to.  See [`new_epoch`].
     pub(super) epoch: u64,
+    /// Command marks for the hot file's lines, keyed by line index
+    /// within it (`super::sidecar`).  `None` when the file could not be
+    /// opened: marks are a cache, so the pane keeps working without
+    /// them and the next open rebuilds.
+    pub(super) marks: Option<std::fs::File>,
 }
 
 // Raw mmap ptrs are private to this struct and the kernel takes care

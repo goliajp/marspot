@@ -253,7 +253,19 @@ impl FileScrollback {
             }
         }
 
+        // Opened against the epoch this file states, so a sidecar left
+        // by an earlier generation is reset rather than read.  A
+        // failure here is not a failure to open the scrollback: the
+        // marks are derived from bytes the session still has.
+        let marks = super::super::sidecar::open_checked(
+            &super::super::sidecar::path_for(&bin_path, "marks"),
+            epoch,
+            super::super::sidecar::Kind::Marks,
+        )
+        .ok();
+
         Ok(Self {
+            marks,
             bin_path,
             idx_path,
             cols,

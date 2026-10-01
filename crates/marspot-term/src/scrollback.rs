@@ -222,6 +222,33 @@ impl Scrollback {
     /// caller that keeps its own mirror has to know whose copy to
     /// believe after an L3 re-exec, when the file outlives the mirror
     /// and the mirror comes back empty.
+    /// True when the scrollback itself keeps command marks, so a
+    /// reader should believe it over any in-process mirror.
+    ///
+    /// The same split `keeps_wrapped_flags` draws, for the same reason:
+    /// a mirror holds what THIS process pushed, the file holds what the
+    /// session ever wrote, and an L3 that re-execs starts with an empty
+    /// mirror against a history thousands of lines long.
+    pub fn keeps_prompt_marks(&self) -> bool {
+        matches!(self, Self::File(_))
+    }
+
+    /// The command mark on scrollback line `idx`, 0 = oldest.
+    pub fn prompt_at(&self, idx: usize) -> crate::grid::PromptMark {
+        match self {
+            Self::Memory(_) => crate::grid::PromptMark::None,
+            Self::File(f) => f.mark_at(idx),
+        }
+    }
+
+    /// Record a mark against the line most recently pushed.  A no-op
+    /// for the in-RAM variant, whose marks live in the grid's mirror.
+    pub fn mark_last_line(&mut self, mark: crate::grid::PromptMark) {
+        if let Self::File(f) = self {
+            f.mark_last_line(mark);
+        }
+    }
+
     pub fn keeps_wrapped_flags(&self) -> bool {
         matches!(self, Self::File(_))
     }
@@ -321,6 +348,7 @@ mod file;
 pub use file::FileScrollback;
 
 mod format;
+mod sidecar;
 
 mod snapshot;
 pub use snapshot::FileSnapshot;
