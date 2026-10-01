@@ -47,8 +47,14 @@ DEV_SOCK="$MARSPOT_STATE_DIR/shelld.sock"
 # MARSPOT_STATE_DIR. The anchor matches the binary at end-of-argv or
 # followed by a space (its CLI args), never the `d`/`shim` suffix.
 dev_kill_shell_core() {
-  pkill -9 -f "$DEV_TARGET/marspot-shell( |\$)" >/dev/null 2>&1 || true
-  pkill -9 -f "$DEV_TARGET/marspot-core( |\$)"  >/dev/null 2>&1 || true
+  # Both profiles, and the unified `marspot` name as well as the three
+  # suffixed ones.  `DEV_TARGET` alone is `target/release` while
+  # bin/run.sh defaults to debug and launches the unified binary, so on
+  # a default run this matched nothing at all and the sandbox app
+  # stayed up -- the shape the 2026-07-28 note below is about.  The
+  # anchor still refuses `marspot-coreshim` and `marspotd`, and nothing
+  # here can reach the installed app: it is rooted at this checkout.
+  pkill -9 -f "$ROOT/target/(debug|release)/marspot(-shell|-core|-session)?( |\$)" >/dev/null 2>&1 || true
   pkill -9 -f "$MARSPOT_STATE_DIR/binaries/.*/marspot-shell( |\$)" >/dev/null 2>&1 || true
   pkill -9 -f "$MARSPOT_STATE_DIR/binaries/.*/marspot-core( |\$)"  >/dev/null 2>&1 || true
   # 2026-07-28 事故:sessions 也必须收。L3 有意在 L2/L1 死后存活
