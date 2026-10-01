@@ -343,7 +343,27 @@ write_live_matrix_script() {
   local out=$1 marker=$2 trials=$3
   shift 3
   {
-    echo '#!/bin/bash'
+    # zsh, not bash, and not `/usr/bin/time -p`.
+    #
+    # `time -p` prints two decimals, so every reading is quantised to
+    # 10 ms.  At these speeds a scenario takes about a quarter of a
+    # second, which makes the step between adjacent readings worth
+    # several MB/s -- and the published table says so out loud: three of
+    # its four numbers landed on exactly 128.0, which is the timer
+    # talking, not the terminal.
+    #
+    # zsh's `zsh/datetime` gives `$EPOCHREALTIME` in microseconds from
+    # inside the shell, so nothing is spawned inside the timed region.
+    # macOS ships bash 3.2, which has no such variable, and reading the
+    # clock with `python3 -c` would charge its own startup -- about
+    # 20 ms, the thing being fixed -- to the measurement.
+    #
+    # `read -t 5 -srd R` behaves the same in both shells; checked.
+    echo '#!/bin/zsh'
+    echo 'zmodload zsh/datetime'
+    echo 'if [[ -z $EPOCHREALTIME ]]; then'
+    echo '  print -u2 "no EPOCHREALTIME: zsh/datetime did not load"; exit 1'
+    echo 'fi'
     echo "rm -f \"$marker\""
     local scenario reps args t
     for scenario in "$@"; do
@@ -351,7 +371,8 @@ write_live_matrix_script() {
       args=$(live_cat_args "$scenario" "$reps")
       for ((t = 1; t <= trials; t++)); do
         echo "echo '==SCN== $(basename "$scenario" .bin)' >> \"$marker\""
-        echo "{ /usr/bin/time -p /bin/bash -c '"
+        echo '__s=$EPOCHREALTIME'
+        echo "{ /bin/zsh -c '"
         echo "  /bin/cat$args"
         echo '  stty raw -echo 2>/dev/null'
         echo '  printf "\033[6n" > /dev/tty'
@@ -359,6 +380,8 @@ write_live_matrix_script() {
         echo '  stty sane 2>/dev/null'
         echo '  printf "cpr=%s,%s\n" "$_row" "$_col" >&2'
         echo "'; } 2>> \"$marker\""
+        echo '__e=$EPOCHREALTIME'
+        echo "printf 'real %.6f\n' \$((__e - __s)) >> \"$marker\""
       done
     done
     echo "echo '==ALL_DONE==' >> \"$marker\""
