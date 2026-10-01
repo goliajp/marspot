@@ -180,7 +180,9 @@ run_case() {
   done
 
   # Assert 2: nothing staged.
-  for b in marspot-core marspot-shell marspot-shelld; do
+  # marspot-session, not marspot-shelld: RFC-003 deleted that daemon, so
+  # "nothing staged it" was true of a binary nothing could stage.
+  for b in marspot-core marspot-shell marspot-session; do
     [[ -e "$TREE/pending/$b" ]] \
       && fail "[$label] updater STAGED $b from a rejected release — trust gate breached"
   done

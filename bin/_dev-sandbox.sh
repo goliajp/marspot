@@ -37,7 +37,6 @@ export MARSPOT_STATE_DIR="${MARSPOT_STATE_DIR:-/tmp/marspot-dev}"
 export MARSPOT_DEV_SANDBOX=1
 
 DEV_TARGET="$ROOT/target/release"
-DEV_SHELLD="$DEV_TARGET/marspot-shelld"
 DEV_SOCK="$MARSPOT_STATE_DIR/shelld.sock"
 
 # Kill only sandbox / dev-build shell+core — paths the installed app

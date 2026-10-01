@@ -95,11 +95,119 @@ fn stage_differing_copy(from: &std::path::Path, state: &std::path::Path) -> Path
     dst
 }
 
+/// FNV-1a over every cell of the published grid.
+///
+/// Characters only.  Colours and flags ride in the same frame, but a
+/// replay that got the text right and the attributes wrong is a different
+/// bug from the one this probe is about, and folding both into one hash
+/// would report either as the other.
+fn grid_fingerprint(session: &Session) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for line in session.screen(COLS, ROWS) {
+        for b in line.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+        h ^= b'\n' as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
+/// One handover: SIGTERM, then wait for the same pid to come back with its
+/// history and accept input over a fresh connection.
+///
+/// `Err` carries what went wrong rather than exiting, so a round number
+/// can be put in front of it.
+fn handover(session: &Session, pid: u32, id: u64, staged: &std::path::Path) -> Result<(), String> {
+    // Every cell, hashed, before the handover.  A marker line surviving
+    // says the replay ran; the whole grid matching bit for bit says it
+    // replayed the same screen, which is the property
+    // `soak-snapshot-survival.sh` was written for and could not check
+    // after RFC-003 deleted the daemon it drove.
+    let before_fp = grid_fingerprint(session);
+    unsafe {
+        if libc::kill(pid as i32, libc::SIGTERM) != 0 {
+            return Err(format!("SIGTERM {pid}: {}", std::io::Error::last_os_error()));
+        }
+    }
+    // The new image rebinds its readers, so there is a pause and then the
+    // same pid answering again.  A pid that is gone means the handler took
+    // the quit path instead of the execv one.
+    std::thread::sleep(Duration::from_millis(1500));
+    if support::rss_kib(pid).is_none() {
+        return Err(format!(
+            "{pid} is gone after SIGTERM -- the handler took the quit path, which means it \
+             did not see a different fingerprint in {}",
+            staged.display()
+        ));
+    }
+
+    // Reattach over the listener, the way L2 does: the inherited control
+    // fd died with the old image, and a live pid is not evidence the new
+    // one is running -- execv keeps the pid whatever happens next.
+    let sock = session_socket_path(id);
+    let Some(stream) = support::reattach(&sock, 8) else {
+        return Err(format!(
+            "{pid} survived but its listener does not accept (connect + Hello handshake) -- \
+             L2 would have nothing to reattach to"
+        ));
+    };
+
+    // The replayed publish first, then compare -- and compare BEFORE
+    // typing, since typing changes the grid it is being compared against.
+    let replay_deadline = Instant::now() + Duration::from_secs(5);
+    let seq_at_signal = session.reader.seq();
+    while session.reader.seq() == seq_at_signal && Instant::now() < replay_deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let after_fp = grid_fingerprint(session);
+    if after_fp != before_fp {
+        return Err(format!(
+            "the replayed screen differs: grid hash {before_fp:016x} before, \
+             {after_fp:016x} after"
+        ));
+    }
+
+    let (c0, r0) = session.cursor();
+    let before = session.reader.seq();
+    support::send_char_on(&stream, 's');
+    // Wait for a publish from the NEW image.  Reading the region without
+    // one proves nothing: shared memory keeps the last frame the old image
+    // wrote whether or not anything is alive.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while session.reader.seq() == before && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if session.cell(c0, r0, COLS) != 's' {
+        return Err(format!("{pid} accepted a reattach but no longer takes input"));
+    }
+    // Only now is the screen one the new image published.
+    if !session
+        .screen(COLS, ROWS)
+        .iter()
+        .any(|l| l.contains(MARKER))
+    {
+        return Err(format!(
+            "{pid} took over and takes input, but the history did not survive: \
+             wanted {MARKER:?} in a frame it published"
+        ));
+    }
+    Ok(())
+}
+
 fn main() {
     let bin: PathBuf = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| die("usage: l3_swap_probe <marspot-session>"));
+        .unwrap_or_else(|| die("usage: l3_swap_probe <marspot-session> [rounds]"));
+    let rounds: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    if rounds == 0 {
+        die("zero rounds hands nothing over");
+    }
     let state = PathBuf::from(
         std::env::var("MARSPOT_STATE_DIR")
             .unwrap_or_else(|_| die("set MARSPOT_STATE_DIR -- this stages a binary under it")),
@@ -110,7 +218,7 @@ fn main() {
     session.wait_ready("session");
     let pid = session.pid();
 
-    // Something in the history that has to still be there afterwards.
+    // Something in the history that has to survive every round.
     session.send_line(&format!("printf '%s\\n' {MARKER}"));
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -128,80 +236,33 @@ fn main() {
         }
         std::thread::sleep(Duration::from_millis(30));
     }
-    std::thread::sleep(Duration::from_millis(400));
-    let staged = stage_differing_copy(&bin, &state);
+    // The replay reads the bytelog from disk, not the grid.
+    std::thread::sleep(Duration::from_millis(500));
 
-    // The trigger L2 uses, and all it uses.
-    unsafe {
-        if libc::kill(pid as i32, libc::SIGTERM) != 0 {
-            die(format!(
-                "SIGTERM {pid}: {}",
-                std::io::Error::last_os_error()
-            ));
+    // Each round stages a copy whose fingerprint differs from the image
+    // that is running NOW -- staging against the original every time would
+    // make round two a no-op the handler declines.
+    let mut source = bin.clone();
+    let mut failure: Option<String> = None;
+    for round in 1..=rounds {
+        let staged = stage_differing_copy(&source, &state);
+        if let Err(e) = handover(&session, pid, id, &staged) {
+            failure = Some(format!("round {round} of {rounds}: {e}"));
+            break;
         }
-    }
-
-    // The new image rebinds its readers, so there is a pause and then the
-    // same pid answering again.  A pid that is gone means the handler took
-    // the quit path instead of the execv one.
-    std::thread::sleep(Duration::from_millis(1500));
-    let alive = support::rss_kib(pid).is_some();
-
-    // Reattach over the listener, the way L2 does: the inherited control
-    // fd died with the old image.  A successful connect is the first
-    // evidence that the NEW image is running -- a live pid is not, since
-    // execv keeps the pid whatever happens next.
-    let mut reattached = false;
-    let mut echoed = false;
-    let mut carried = false;
-    if alive {
-        let sock = session_socket_path(id);
-        let stream = support::reattach(&sock, 8);
-        reattached = stream.is_some();
-        if let Some(stream) = stream {
-            let (c0, r0) = session.cursor();
-            let before = session.reader.seq();
-            support::send_char_on(&stream, 's');
-            // Wait for a publish from the new image.  Reading the region
-            // without one proves nothing: shared memory keeps the last
-            // frame the OLD image wrote whether or not anyone is alive,
-            // so "the history is still there" was a free pass.
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while session.reader.seq() == before && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            echoed = session.cell(c0, r0, COLS) == 's';
-            // Only now is the screen one the new image published.
-            carried = session.screen(COLS, ROWS).iter().any(|l| l.contains(MARKER));
-        }
+        // Next round differs from what is now running, which is `staged`.
+        source = staged;
     }
 
     let mut all = vec![session];
     cleanup(&mut all);
-    let _ = std::fs::remove_file(&staged);
+    let _ = std::fs::remove_file(state.join("binaries/current/marspot-session"));
 
-    if !alive {
-        die(format!(
-            "{pid} is gone after SIGTERM -- the handler took the quit path, which means it \
-             did not see a different fingerprint in {}",
-            staged.display()
-        ));
+    if let Some(e) = failure {
+        die(e);
     }
-
-    if !reattached {
-        die(format!(
-            "{pid} survived with its history but its listener does not accept -- \
-             L2 would have nothing to reattach to (connect + Hello handshake)"
-        ));
-    }
-    if !echoed {
-        die(format!("{pid} accepted a reattach but no longer takes input"));
-    }
-    if !carried {
-        die(format!(
-            "{pid} took over and takes input, but the history did not survive the \
-             handover: wanted {MARKER:?} in a frame it published"
-        ));
-    }
-    println!("PASS: {pid} execv'd itself in place -- same pid, {MARKER:?} still on screen, echoes");
+    println!(
+        "PASS: session {id} handed over {rounds}x in place -- same pid {pid} throughout, \
+         {MARKER:?} still on screen, echoes"
+    );
 }

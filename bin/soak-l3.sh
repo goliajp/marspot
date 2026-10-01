@@ -213,9 +213,17 @@ echo "  crash-isolation OK — one L3 killed, sibling unaffected, dead shm still
 #
 # `l3_swap_probe` stages a copy of marspot-session whose MARSPOT_FP differs
 # (re-signed, or macOS refuses to exec it), SIGTERMs the session, and
-# asserts the handover: same pid, a frame the NEW image published still
-# carrying the marker, and input accepted over a fresh connection to the
-# listener after the Hello handshake.
+# asserts the handover: same pid, the replayed grid matching the old one
+# bit for bit (FNV-1a over every cell), and input accepted over a fresh
+# connection to the listener after the Hello handshake.
+#
+# Five rounds by default on ONE session (`SWAP_ROUNDS`), each staging
+# against the image now running.  That is the property
+# `soak-long-connection-execv.sh` claimed -- "survived 5 execv swaps" --
+# and `soak-snapshot-survival.sh`'s bit-for-bit grid comparison; both drove
+# `marspot-shelld`, which RFC-003 deleted in June, so both had been
+# reporting on a binary left in `target/`.  They are gone; this covers
+# what they were for, on the architecture that exists.
 #
 # This section was red until 2026-10-01.  `begin_pane_swap` used to spawn a
 # replacement L3 on the same session id, which cannot work -- the live L3
@@ -225,7 +233,7 @@ echo "  crash-isolation OK — one L3 killed, sibling unaffected, dead shm still
 # It now does what `swap_idle_l3` does for all panes: promote the staged
 # image, then signal that one L3 to execv itself.
 echo "--- silent-swap ---" | tee -a "$RUN_LOG"
-"$SWAP_PROBE_BIN" "$SESSION_BIN" >>"$RUN_LOG" 2>&1
+"$SWAP_PROBE_BIN" "$SESSION_BIN" "${SWAP_ROUNDS:-5}" >>"$RUN_LOG" 2>&1
 swrc=$?
 (( swrc == 0 )) || fail "swap probe exited $swrc (silent-swap mechanism broken)"
 sleep 0.2
