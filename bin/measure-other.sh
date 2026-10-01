@@ -7,7 +7,7 @@
 #
 # Pragmatic alternative: print a single command line per terminal.
 # Open the target terminal, paste, hit return.  The line runs all four
-# `cat-*` scenarios with `/usr/bin/time -p /bin/cat` and writes to a
+# `cat-*` scenarios, timed with zsh's microsecond clock, and writes to a
 # known marker.  This script polls for that marker, parses the timings,
 # and prints a comparison table.
 #

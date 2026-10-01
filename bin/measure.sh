@@ -109,7 +109,7 @@ tell application "iTerm"
   activate
   create window with default profile
   tell current session of current window
-    write text "/usr/bin/time -p /bin/cat $args 2> $marker; sleep 0.2; exit"
+    write text "zmodload zsh/datetime 2>/dev/null; if [ -n \"\$EPOCHREALTIME\" ]; then __s=\$EPOCHREALTIME; /bin/cat $args; __e=\$EPOCHREALTIME; printf 'real %.6f\\n' \$((__e - __s)) > $marker; else /usr/bin/time -p /bin/cat $args 2> $marker; fi; sleep 0.2; exit"
   end tell
 end tell
 APPLESCRIPT
@@ -138,8 +138,10 @@ run_in() {
 
 parse_real_ns() {
   local marker=$1
-  # `/usr/bin/time -p` writes POSIX format (`real 1.234`), zsh/bash
-  # builtin `time` writes `real 0m1.234s`.  Handle both.
+  # Three formats reach here: `real 0.262160` from the zsh clock (six
+  # decimals -- see `_lib.sh`'s note on why `time -p`'s two were not
+  # enough), POSIX `real 1.234` from the `time -p` fallback, and
+  # `real 0m1.234s` from a shell builtin `time`.
   awk '
     /real/ {
       s = $2
@@ -264,5 +266,5 @@ for s in "${SCENARIOS[@]}"; do
   args=$(live_cat_args "$spath" "$reps")
   echo
   echo "  $s ($(( $(stat -f%z "$spath") * reps )) bytes = ${reps}x the file):"
-  echo "    /usr/bin/time -p /bin/cat$args 2> /tmp/<terminal>-$s.txt"
+  echo "    zmodload zsh/datetime; __s=\$EPOCHREALTIME; /bin/cat$args; __e=\$EPOCHREALTIME; printf 'real %.6f\\n' \$((__e - __s)) > /tmp/<terminal>-$s.txt"
 done
