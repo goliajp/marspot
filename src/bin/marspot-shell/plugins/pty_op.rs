@@ -177,6 +177,32 @@ pub enum StepKind {
     /// none ends the run here, successfully: there was nothing to say,
     /// so the steps that would have said it are skipped.
     PasteJob(Arc<Job>),
+    /// Put back what the person was typing, and stop there if there
+    /// was anything.
+    ///
+    /// The mirror of [`StepKind::PasteJob`], and the asymmetry is the
+    /// point. A pane holding someone's half-written sentence does not
+    /// also need to be told something: pasting our line after theirs
+    /// would send the two as one prompt -- their sentence with ours
+    /// stapled on, which is the thing `autorun` refuses to do when it
+    /// sees an unsent line. Their text goes back, the run ends, and
+    /// what to do with it is theirs to decide.
+    ///
+    /// Nothing held: the run carries on to whatever was going to be
+    /// said.
+    RestoreComposer(Arc<Job>),
+    /// Take whatever is sitting unsent in the pane's composer and put
+    /// it in `job`, for a later [`StepKind::PasteJob`] to put back.
+    ///
+    /// Switching profiles restarts the agent, and a half-written
+    /// sentence in its input box is the user's -- it belongs to them,
+    /// not to the process that happened to be displaying it. Read
+    /// before the agent is taken down, pasted back once the new one is
+    /// reading input.
+    ///
+    /// Nothing there is the ordinary case and is not a failure: the
+    /// job finishes with `None`, and `PasteJob` ends the run quietly.
+    CaptureComposer(Arc<Job>),
     /// Run a quick effect, failing the run with its error.  For
     /// committing a decision only once the steps before it worked.
     Call(CallFn),
@@ -344,6 +370,27 @@ impl Step {
         Self { kind: StepKind::AwaitJob(job), timeout: Some(Duration::from_secs(30)), proceed_on_timeout: false,
             label: "await_job" }
     }
+    /// Give back what `capture_composer` took, and stop if there was
+    /// anything to give back.
+    pub fn restore_composer(job: Arc<Job>) -> Self {
+        Self {
+            kind: StepKind::RestoreComposer(job),
+            timeout: Some(Duration::from_secs(5)),
+            proceed_on_timeout: false,
+            label: "restore_composer",
+        }
+    }
+
+    /// Save what the person has typed but not sent.
+    pub fn capture_composer(job: Arc<Job>) -> Self {
+        Self {
+            kind: StepKind::CaptureComposer(job),
+            timeout: Some(Duration::from_secs(5)),
+            proceed_on_timeout: false,
+            label: "capture_composer",
+        }
+    }
+
     pub fn paste_job(job: Arc<Job>) -> Self {
         Self { kind: StepKind::PasteJob(job), timeout: Some(Duration::from_secs(5)), proceed_on_timeout: false,
             label: "paste_job" }
@@ -870,6 +917,51 @@ impl OpRunner {
                 if let Err(err) = f() {
                     self.finish(host, OpOutcome::Failed { step: self.at, label: step.label, err });
                 }
+                true
+            }
+            StepKind::RestoreComposer(job) => {
+                let Some(text) = job.text() else {
+                    // Nothing was held, so there is nothing to give
+                    // back and no reason to stop.
+                    return true;
+                };
+                host.log(
+                    LogLevel::Info,
+                    &format!("{}.composer_restored", self.op.name),
+                    &format!(
+                        "pane {sid}: {} unsent chars put back; the rest is theirs",
+                        text.chars().count()
+                    ),
+                );
+                self.deliver(host, step.label, &text);
+                self.finish(host, OpOutcome::Done);
+                true
+            }
+            StepKind::CaptureComposer(job) => {
+                // A screen we cannot read means we do not know whether
+                // anything was there, and the only safe reading of
+                // "do not know" is "nothing" -- pasting a guess into
+                // someone's input box is worse than losing a line they
+                // can retype. It is logged either way so the choice is
+                // visible afterwards.
+                let unsent = self
+                    .env
+                    .pane_screen(sid)
+                    .as_deref()
+                    .and_then(crate::plugins::autorun::unsent_line);
+                match &unsent {
+                    Some(t) => host.log(
+                        LogLevel::Info,
+                        &format!("{}.composer_held", self.op.name),
+                        &format!("pane {sid}: holding {} unsent chars", t.chars().count()),
+                    ),
+                    None => host.log(
+                        LogLevel::Info,
+                        &format!("{}.composer_empty", self.op.name),
+                        &format!("pane {sid}: nothing unsent to carry across"),
+                    ),
+                }
+                job.finish(Ok(unsent));
                 true
             }
             StepKind::PasteJob(job) => {
@@ -2394,6 +2486,98 @@ mod tests {
         run(&mut r, &host, &state, SUBMIT_VERIFY_AFTER.as_millis() as u64 + 96);
         assert!(*host.ended.lock().unwrap(), "the last prompt is empty, so it went");
         assert_eq!(state.sent.lock().unwrap().len(), 3, "and no more are sent");
+    }
+
+    /// A half-written sentence survives the agent being restarted.
+    ///
+    /// Switching profiles kills claude and starts another one. What
+    /// the person had typed and not sent lives only in the old
+    /// process's input box, so it has to be read off the screen before
+    /// the signal and handed back after the new one is reading input.
+    #[test]
+    fn what_the_person_was_typing_survives_the_restart() {
+        use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE));
+        *state.screen.lock().unwrap() = "a reply\n\u{276f} 我写了一半的句子\n".to_string();
+        let held = Job::new();
+        let mut r = OpRunner::new(
+            PtyOp::new("test.cycle")
+                .step(Step::capture_composer(Arc::clone(&held)))
+                // Stands in for kill / restart / await-ready.
+                .step(Step::settle(Duration::from_millis(10)))
+                .step(Step::restore_composer(Arc::clone(&held)))
+                // Only reached when nothing was held.
+                .step(Step::paste("我们要说的话")),
+            env,
+        );
+        // One tick: the capture completes and the settle after it
+        // starts waiting. (`run` advances in 16 ms steps, so anything
+        // under that runs nothing at all.)
+        run(&mut r, &host, &state, 16);
+        assert_eq!(
+            held.text().as_deref(),
+            Some("我写了一半的句子"),
+            "read before the agent is taken down, or there is nothing left to read"
+        );
+        // Now the agent has restarted and its box is empty.
+        *state.screen.lock().unwrap() = "\u{276f}\n".to_string();
+        run(&mut r, &host, &state, 2_000);
+
+        let pasted = state.pasted.lock().unwrap().clone();
+        assert_eq!(
+            pasted,
+            vec!["我写了一半的句子".to_string()],
+            "their sentence goes back, and ours is not stapled on: {pasted:?}"
+        );
+        assert!(*host.ended.lock().unwrap(), "and the run ends there");
+    }
+
+    /// An empty composer is the ordinary case and changes nothing.
+    #[test]
+    fn an_empty_composer_lets_the_run_carry_on() {
+        use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE));
+        *state.screen.lock().unwrap() = "a reply\n\u{276f}\n".to_string();
+        let held = Job::new();
+        let mut r = OpRunner::new(
+            PtyOp::new("test.cycle")
+                .step(Step::capture_composer(Arc::clone(&held)))
+                .step(Step::restore_composer(Arc::clone(&held)))
+                .step(Step::paste("我们要说的话")),
+            env,
+        );
+        run(&mut r, &host, &state, 2_000);
+        assert_eq!(
+            *state.pasted.lock().unwrap(),
+            vec!["我们要说的话".to_string()],
+            "nothing was held, so the thing we meant to say is said"
+        );
+    }
+
+    /// A screen that cannot be read holds nothing.
+    ///
+    /// Not knowing what was in the box is not permission to invent
+    /// something to put in it: a line the person can retype is a
+    /// smaller loss than text appearing in their composer from
+    /// nowhere.
+    #[test]
+    fn an_unreadable_screen_holds_nothing() {
+        use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE));
+        *state.screen.lock().unwrap() = "no composer here at all\n".to_string();
+        let held = Job::new();
+        let mut r = OpRunner::new(
+            PtyOp::new("test.cycle")
+                .step(Step::capture_composer(Arc::clone(&held)))
+                .step(Step::restore_composer(Arc::clone(&held)))
+                .step(Step::paste("我们要说的话")),
+            env,
+        );
+        run(&mut r, &host, &state, 2_000);
+        assert_eq!(*state.pasted.lock().unwrap(), vec!["我们要说的话".to_string()]);
     }
 
     /// A pane that reports its own submit is believed, and its screen

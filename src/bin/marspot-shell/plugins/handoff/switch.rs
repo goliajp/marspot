@@ -212,6 +212,10 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
     let resume = resumable(&ledger, to, &to_home);
     let line = command(to, &to_home, resume.as_deref())?;
 
+    // What the person was typing, carried across the switch.
+
+    let held = pty_op::Job::new();
+
     let job = pty_op::Job::new();
     let pending: Arc<Mutex<Option<Ledger>>> = Arc::new(Mutex::new(None));
     {
@@ -240,6 +244,11 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
         PtyOp::new("handoff.switch")
             .hold_screen(true)
             .badge(format!("→ {} P{to_profile}", to.key()))
+            // Read before the agent is taken down. Without this the
+            // handoff text pastes onto the end of whatever the person
+            // had typed and the two go as one prompt -- their sentence
+            // with the handover stapled on.
+            .step(Step::capture_composer(Arc::clone(&held)))
             .step(Step::settle(Duration::from_millis(250)).named("hold_settle"))
             .step(Step::await_job(Arc::clone(&job)).timeout(PREPARE_TIMEOUT).named("write_handoff"))
             .step(
@@ -264,7 +273,10 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
             .step(Step::call(commit).named("commit_ledger"))
             .step(Step::paste_job(job).named("hand_over"))
             .step(Step::settle(Duration::from_millis(300)).named("paste_settle"))
-            .step(Step::send(b"\r".to_vec()).named("submit")),
+            .step(Step::send(b"\r".to_vec()).named("submit"))
+            // The handover has gone; their half-written line comes
+            // back to the new agent's composer, unsent.
+            .step(Step::restore_composer(held)),
     )
 }
 

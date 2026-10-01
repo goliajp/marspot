@@ -1718,6 +1718,12 @@ fn profile_cycle_op(
     let mut cmd = pty_op::PtyCommand::new("claude")
         .env("CLAUDE_CONFIG_DIR", format!("{home}/.claude-profile-{next_profile}"))
         .clear_screen_first(true);
+    // The claude this starts reports its own submits. This is the path
+    // the badge takes, so it is the one that matters most and the one
+    // that was missed when the other two were wired.
+    if let Some(settings) = crate::receipts::claude_settings_arg() {
+        cmd = cmd.arg("--settings").quoted_arg(settings);
+    }
     // A session with no transcript has taken no turn — there is
     // nothing to carry across, and `--resume` on a uuid claude never
     // wrote fails.  Start claude plain instead.
@@ -1732,9 +1738,15 @@ fn profile_cycle_op(
         cmd = cmd.arg("--resume").arg(uuid);
     }
     let line = cmd.to_bytes()?;
+    // What the person had typed and not sent. Read before claude is
+    // taken down, handed back once the new one is reading input.
+    // Switching accounts is bookkeeping; it is not a reason to throw
+    // away someone's half-written sentence.
+    let held = pty_op::Job::new();
     let mut op = pty_op::PtyOp::new("cc.profile_cycle")
         .hold_screen(true)
         .badge(format!("→ P{next_profile}"))
+        .step(pty_op::Step::capture_composer(Arc::clone(&held)))
         .step(pty_op::Step::settle(HOLD_SETTLE).named("hold_settle"))
         .step(
             pty_op::Step::terminate(claude_pid, libc::SIGTERM)
@@ -1770,7 +1782,11 @@ fn profile_cycle_op(
             // after 4096 bytes" was never reached by half the panes
             // (2026-09-30).  Alt screen plus bracketed paste is the
             // program itself saying it has the terminal.
-            .step(pty_op::Step::await_tui_ready().or_late()),
+            .step(pty_op::Step::await_tui_ready().or_late())
+            // Their sentence first. If there was one, it goes back and
+            // the run ends there -- a pane with someone mid-thought in
+            // it does not also need to be told the quota came back.
+            .step(pty_op::Step::restore_composer(held)),
     )
     .map(|op| if say_continue { say_carry_on(op) } else { op })
 }
