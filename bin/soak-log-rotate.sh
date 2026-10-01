@@ -9,7 +9,7 @@
 #   MARSPOT_LOG_GC_AGE_D=7 (default; we plant an 8-day-old file to verify GC)
 #
 # Workload:
-#   N=8 concurrent bash workers, each invokes `marspot-shelld --log-event`
+#   N=8 concurrent workers, each a `log_soak` process emitting events
 #   in a tight loop for DURATION_S seconds. Each line ≈ 200-280 B, so a
 #   sustained ~5 kHz from one worker fills 1 MiB in ~1 s — multiple
 #   rotations per second across the lot.
@@ -28,18 +28,19 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE="${MARSPOT_TEST_PROFILE:-debug}"
-# RFC-003 deleted `marspot-shelld` (the L4 daemon) in June; `cargo build
-# --bin marspot-shelld` now answers "no such target".  This script kept
-# passing by executing a binary left behind in `target/`, so the check is
-# that the thing can still be built, not that a file exists at a path.
-if ! ( cd "$ROOT" && cargo build --release --bin marspot-shelld >/dev/null 2>&1 ); then
-  echo "FAIL: marspot-shelld is not a build target any more -- RFC-003 removed L4." >&2
-  echo "      A binary in target/ is not the product.  This script tests a layer" >&2
-  echo "      that no longer exists and should be rewritten or deleted." >&2
+# The driver is an example in the crate that owns logx, not a flag on a
+# shipping binary.  It used to be `marspot-shelld --log-soak`; RFC-003
+# deleted that daemon in June, and for the four months after, this soak
+# ran a binary left behind in `target/` and reported green for a layer the
+# product no longer has.  So: build it, and let the build's exit code out.
+DRIVER="$ROOT/target/$PROFILE/examples/log_soak"
+PROFILE_FLAG=""
+[[ "$PROFILE" == "release" ]] && PROFILE_FLAG="--release"
+if ! ( cd "$ROOT" && cargo build $PROFILE_FLAG -p marspot-term --example log_soak 2>&1 | tail -20 ); then
+  echo "FAIL: could not build the log_soak driver" >&2
   exit 1
 fi
-SHELLD="$ROOT/target/$PROFILE/marspot-shelld"
-[[ -x "$SHELLD" ]] || { echo "FAIL: build marspot-shelld first (cargo build${PROFILE:+ --$PROFILE})"; exit 1; }
+[[ -x "$DRIVER" ]] || { echo "FAIL: driver not built at $DRIVER" >&2; exit 1; }
 
 STATE_DIR="/tmp/marspot-log-soak.$$"
 export MARSPOT_STATE_DIR="$STATE_DIR"
@@ -82,7 +83,7 @@ plant_old
 PER_WORKER=${PER_WORKER:-20000}
 worker() {
   while :; do
-    "$SHELLD" --log-soak "$PER_WORKER" 2>/dev/null || true
+    "$DRIVER" "$PER_WORKER" "w$i" >/dev/null 2>&1 || true
   done
 }
 
