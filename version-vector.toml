@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.194"  # a submit gets long enough to do what it waits for
-core    = "0.12.240"  # command marks persist beside the scrollback
-session = "0.11.126"  # command marks persist beside the scrollback
+core    = "0.12.241"  # the mirrors stop growing with the history
+session = "0.11.127"  # the mirrors stop growing with the history
