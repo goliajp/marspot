@@ -491,9 +491,14 @@ pub(super) fn reclaim_op(
         cmd = cmd.arg("--settings").quoted_arg(settings);
     }
     let line = cmd.arg("--resume").arg(uuid).to_bytes()?;
+    // Reclaiming parks claude and brings it back later. Anything the
+    // person had typed and not sent lives in the process being parked,
+    // so it is read now and handed back when the new one has painted.
+    let held = pty_op::Job::new();
     Some(
         pty_op::PtyOp::new("cc.reclaim")
             .hold_screen(true)
+            .step(pty_op::Step::capture_composer(std::sync::Arc::clone(&held)))
             // No Esc hatch: bailing out mid-park would leave a pane with
             // no claude and no wake armed, which is strictly worse than
             // waiting.  The wake itself takes ~2 s.
@@ -528,7 +533,9 @@ pub(super) fn reclaim_op(
                 pty_op::Step::await_quiet(WAKE_QUIET_FOR)
                     .after_bytes(FIRST_FRAME_BYTES)
                     .timeout(WAKE_WATCHDOG),
-            ),
+            )
+            // Their sentence back where they left it.
+            .step(pty_op::Step::restore_composer(held)),
     )
 }
 

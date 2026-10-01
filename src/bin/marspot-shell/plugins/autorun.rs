@@ -378,7 +378,12 @@ pub fn unsent_line(screen: &str) -> Option<String> {
         // The prompt sits inside a bordered row, so both ends can carry
         // the box's own rule: `│ ❯ …            │`.
         let t = l.trim().trim_start_matches(['│', '┃', '|']).trim_start();
-        let rest = t.strip_prefix('❯')?;
+        // Claude draws U+276F, Codex draws U+203A. Read off the live
+        // panes rather than guessed, and the same list the submit
+        // check in `pty_op` keeps -- the two were out of step once
+        // already, and for every Codex pane that meant this function
+        // saw an empty composer no matter what was in it.
+        let rest = t.strip_prefix('\u{276f}').or_else(|| t.strip_prefix('\u{203a}'))?;
         let rest = rest.trim().trim_end_matches(['│', '┃', '|']).trim();
         (!rest.is_empty()).then(|| rest.to_string())
     })
@@ -639,6 +644,31 @@ mod tests {
         let (action, why) = decide(&quiet(&stuck), &mut mem, now);
         assert_eq!(action, Action::SubmitPending);
         assert_eq!(why, Ok(Reason::FinishOwnLine));
+    }
+
+    /// Both agents' composers are read, not just Claude's.
+    ///
+    /// Claude draws U+276F and Codex draws U+203A. Only the first was
+    /// recognised, so on a Codex pane this returned `None` whatever
+    /// the person had typed -- autorun saw an empty box and felt free
+    /// to type into it, and a profile switch would have carried
+    /// nothing across.
+    #[test]
+    fn each_agents_composer_is_read() {
+        for prompt in ['\u{276f}', '\u{203a}'] {
+            let screen = format!("some output\n{prompt} 我自己写的半句\n");
+            assert_eq!(
+                unsent_line(&screen).as_deref(),
+                Some("我自己写的半句"),
+                "{prompt:?} (U+{:04X}) is a composer too",
+                prompt as u32
+            );
+            // An empty one is empty, whichever agent drew it.
+            assert_eq!(unsent_line(&format!("out\n{prompt}\n")), None);
+            // And inside the box's own rule.
+            let boxed = format!("│ {prompt} 半句                │\n");
+            assert_eq!(unsent_line(&boxed).as_deref(), Some("半句"));
+        }
     }
 
     /// Someone else's unsent line is still untouchable, even when the
