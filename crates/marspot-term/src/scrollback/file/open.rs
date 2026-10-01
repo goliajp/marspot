@@ -264,8 +264,20 @@ impl FileScrollback {
         )
         .ok();
 
+        // The cold file states its own epoch, and the sidecar renamed
+        // alongside it on the rotation states the same one -- so a
+        // `.cold.marks` left from two rotations ago is refused.
+        let cold_marks = super::super::format::read_epoch(&cold_bin_path).and_then(|e| {
+            super::super::sidecar::open_for_read(
+                &super::super::sidecar::path_for(&cold_bin_path, "marks"),
+                e,
+                super::super::sidecar::Kind::Marks,
+            )
+        });
+
         Ok(Self {
             marks,
+            cold_marks,
             bin_path,
             idx_path,
             cols,

@@ -144,6 +144,9 @@ pub struct FileScrollback {
     /// opened: marks are a cache, so the pane keeps working without
     /// them and the next open rebuilds.
     pub(super) marks: Option<std::fs::File>,
+    /// The same for the cold file's lines.  Read-only: nothing appends
+    /// to a file that has already been handed over.
+    pub(super) cold_marks: Option<std::fs::File>,
 }
 
 // Raw mmap ptrs are private to this struct and the kernel takes care

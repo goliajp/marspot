@@ -75,6 +75,26 @@ impl FileScrollback {
         // 4) Rename hot → cold.
         std::fs::rename(&self.bin_path, &self.cold_bin_path)?;
         std::fs::rename(&self.idx_path, &self.cold_idx_path)?;
+        // The marks describe the file that just became cold, and its
+        // epoch went with it, so they are still its marks.  Renaming
+        // keeps them readable for as long as the cold tier is; the next
+        // rotation overwrites this pair the way it overwrites the other
+        // two.
+        {
+            let hot = super::super::sidecar::path_for(&self.bin_path, "marks");
+            let cold = super::super::sidecar::path_for(&self.cold_bin_path, "marks");
+            let _ = std::fs::remove_file(&cold);
+            let _ = std::fs::rename(&hot, &cold);
+            // Open it for reading now, with the epoch the handed-over
+            // file still carries -- `self.epoch` becomes the new file's
+            // further down.  Without this the marks of everything just
+            // rotated are unreadable until the pane is reopened.
+            self.cold_marks = super::super::sidecar::open_for_read(
+                &cold,
+                self.epoch,
+                super::super::sidecar::Kind::Marks,
+            );
+        }
         // 5) Reopen fresh hot pair.
         let bin_w = std::fs::OpenOptions::new()
             .read(true)
