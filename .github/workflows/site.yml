@@ -38,11 +38,23 @@ jobs:
         # Cheap checks that catch the things a static page gets wrong
         # silently: a download link that goes nowhere, a stale version,
         # a title that is still the template's.
+        #
+        # The download check used to be unconditional, and that is why
+        # the site had not deployed since the page started saying there
+        # was no build yet: the page was honest, the check demanded a
+        # link to something that does not exist, and every run failed
+        # on it. The page was live but months old, which is the worst
+        # of the three outcomes and the one nobody was told about.
+        #
+        # What is right depends on whether a release exists, so ask.
+        # Both directions are errors: a published build the page does
+        # not offer, and an offer of something that is not published --
+        # the second is a 404 for whoever clicks it.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test -f site/index.html
-          grep -q 'releases/latest' site/index.html \
-            || { echo "::error::no download link on the page" >&2; exit 1; }
           grep -q '<title>Marspot' site/index.html \
             || { echo "::error::the page has no title" >&2; exit 1; }
           # Every absolute link must be https.
@@ -50,6 +62,24 @@ jobs:
             echo "::error::a plain-http link on the page" >&2
             exit 1
           fi
+          released=$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""')
+          offers=$(grep -c 'releases/latest' site/index.html || true)
+          if [[ -n "$released" ]]; then
+            [[ "$offers" -gt 0 ]] || {
+              echo "::error::$released is published and the page does not offer it" >&2
+              exit 1
+            }
+          else
+            [[ "$offers" -eq 0 ]] || {
+              echo "::error::the page links to a release; none is published, so that is a 404" >&2
+              exit 1
+            }
+            grep -qi 'no signed build published yet' site/index.html || {
+              echo "::error::nothing is published and the page does not say so" >&2
+              exit 1
+            }
+          fi
+          echo "release=${released:-none} offers=$offers"
 
       - uses: actions/configure-pages@v5
         # Turn Pages on rather than asking someone to click it.  The
