@@ -67,5 +67,18 @@ cargo build --bin marspot-session
 # panel with the whole suite passing.  A machine with no GPU skips the
 # render itself; that is the test's own business, not this flag's.
 export MARSPOT_FONT_SNAPSHOT="${MARSPOT_FONT_SNAPSHOT:-check}"
-exec cargo nextest run --workspace --all-targets --all-features \
-  --test-threads "${MARSPOT_TEST_JOBS:-6}" "$@"
+cargo nextest run --workspace --all-targets --all-features \
+  --test-threads "${MARSPOT_TEST_JOBS:-6}" "$@" || exit $?
+
+# nextest does not run doctests, so for as long as this script was the
+# gate, a doc comment that rustdoc tries to compile could not fail
+# anything.  Found 2026-10-01 via `bin/soak.sh`: two `///` blocks
+# indented four spaces -- which is how rustdoc is told "this is Rust" --
+# held a blend equation, and `final.rgb = …` is not Rust.  Cheap to run:
+# this tree has a handful of doctests and they are all `ignore`.
+#
+# Filtered args are nextest expressions this does not understand, so a
+# filtered run skips the doctests rather than failing on the flag.
+if [[ $# -eq 0 ]]; then
+  cargo test --doc --workspace --quiet || exit $?
+fi
