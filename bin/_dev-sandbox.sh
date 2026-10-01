@@ -131,6 +131,28 @@ dev_require_probe() {
   return 0
 }
 
+# Build one binary from source, or refuse.
+#
+# The companion to `dev_require_probe`, and for the same reason: a path in
+# `target/` holding an executable proves only that something was built
+# there once.  `marspot-shelld` is the case that made this necessary --
+# RFC-003 deleted the L4 daemon in June, `cargo build --bin
+# marspot-shelld` now answers "no such target", and a binary from June 17
+# sat in `target/release/` where three soak scripts picked it up, ran it,
+# and reported ALL PASSED for a layer the product no longer has.
+dev_require_bin() {
+  local name="$1"
+  local log
+  log=$(cd "$ROOT" && cargo build --release --bin "$name" 2>&1) || {
+    echo "FAIL: '$name' is not a build target any more" >&2
+    echo "$log" | tail -10 >&2
+    echo "      A binary left in target/ is not the product.  If this" >&2
+    echo "      script tests a layer that was removed, delete the script." >&2
+    return 1
+  }
+  return 0
+}
+
 dev_warm_binaries() {
   for b in marspot-shell marspot-core marspot-session; do
     [[ -x "$DEV_TARGET/$b" ]] && \

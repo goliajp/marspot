@@ -27,6 +27,16 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE="${MARSPOT_TEST_PROFILE:-debug}"
+# RFC-003 deleted `marspot-shelld` (the L4 daemon) in June; `cargo build
+# --bin marspot-shelld` now answers "no such target".  This script kept
+# passing by executing a binary left behind in `target/`, so the check is
+# that the thing can still be built, not that a file exists at a path.
+if ! ( cd "$ROOT" && cargo build --release --bin marspot-shelld >/dev/null 2>&1 ); then
+  echo "FAIL: marspot-shelld is not a build target any more -- RFC-003 removed L4." >&2
+  echo "      A binary in target/ is not the product.  This script tests a layer" >&2
+  echo "      that no longer exists and should be rewritten or deleted." >&2
+  exit 1
+fi
 SHELLD="$ROOT/target/$PROFILE/marspot-shelld"
 PROBE="$ROOT/target/$PROFILE/examples/shelld_session_probe"
 if [[ ! -x "$SHELLD" || ! -x "$PROBE" ]]; then
