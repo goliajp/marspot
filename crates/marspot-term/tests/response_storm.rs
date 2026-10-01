@@ -37,8 +37,8 @@ fn a_program_starting_up_is_not_a_loop() {
 #[test]
 fn asking_forever_is_a_loop() {
     let mut t = Terminal::new(40, 8);
-    let start = std::time::Instant::now();
-    // Keep asking for longer than the sustained window.
+    // Keep asking until it is noticed, rather than for a length of
+    // time chosen to be long enough.
     //
     // No sleeping. The window is 100 ms wide and wants five in it, and
     // a sleep asked for in milliseconds is a floor, not a promise: the
@@ -46,10 +46,17 @@ fn asking_forever_is_a_loop() {
     // is twenty to a window on an idle machine and four on a busy one
     // -- it passed here and failed on CI. Sleeping less does not fix
     // it, it only makes the overshoot that empties the window rarer.
-    // Feeding without pause leaves the window full at every instant,
-    // and the only thing the test then needs from the clock is that a
-    // second and a half goes by, which it must.
-    while start.elapsed() < std::time::Duration::from_millis(1_500) {
+    //
+    // Feeding without pause leaves the window full at every instant --
+    // unless this thread is taken off the CPU for longer than the
+    // window, which empties it and restarts the one-second streak the
+    // detector is counting. Waiting a fixed second and a half then
+    // reads a stall as "no storm": that is what it did on a host at
+    // load 121. So the loop ends when the thing it is waiting for has
+    // happened, with a deadline far past any stall rather than at the
+    // edge of one.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !warned(&t) && std::time::Instant::now() < deadline {
         t.feed(QUERY);
         let _ = t.take_response();
     }

@@ -766,6 +766,16 @@ mod tests {
         );
     }
 
+    /// How long to wait for something that is not ours: a shell
+    /// starting, a child exiting.
+    ///
+    /// Nothing here is a measurement, so the deadline costs nothing
+    /// when things work and is set far past any scheduling delay
+    /// rather than at the edge of one. Three seconds was the edge of
+    /// one: on a host at load 52 the shell had not printed its prompt
+    /// yet and the suite read that as a broken pump.
+    const WAITING_ON_SOMEONE_ELSE: Duration = Duration::from_secs(30);
+
     fn pump_until<F: FnMut(&LocalSession) -> bool>(
         s: &mut LocalSession,
         mut done: F,
@@ -802,7 +812,11 @@ mod tests {
 
         // Wait for the shell prompt to land (any output is fine).
         assert!(
-            pump_until(&mut s, |s| s.terminal().grid().cursor() != (0, 0), Duration::from_secs(3)),
+            pump_until(
+                &mut s,
+                |s| s.terminal().grid().cursor() != (0, 0),
+                WAITING_ON_SOMEONE_ELSE
+            ),
             "expected shell to produce some output and move the cursor"
         );
 
@@ -1011,7 +1025,7 @@ mod tests {
             }
         });
 
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + WAITING_ON_SOMEONE_ELSE;
         while Instant::now() < deadline {
             s.pump();
             if s.is_exited() {
@@ -1019,7 +1033,7 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(20));
         }
-        assert!(s.is_exited(), "shell exit should flip is_exited within 3s");
+        assert!(s.is_exited(), "a shell that exited should flip is_exited");
         assert!(wake.load(Ordering::SeqCst), "reader should fire wake on exit");
     }
 }
