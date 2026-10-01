@@ -1291,6 +1291,13 @@ impl Grid {
     /// Drop every continuation flag (live + scrollback).  Used by
     /// full-screen erase — once the screen is wiped, gluing the new
     /// content to pre-wipe history would corrupt reflow.
+    ///
+    /// Reaches the live rows and the in-RAM mirror only. A file-backed
+    /// pane keeps each flag in the record beside its line, and those
+    /// are not rewritten, so for one of those this clears nothing that
+    /// a later reflow will read. Pre-existing; clearing them means
+    /// rewriting every record, which full-screen erase has no business
+    /// doing on the parse thread.
     pub fn clear_all_wrapped(&mut self) {
         self.wrapped.iter_mut().for_each(|w| *w = false);
         for w in self.sb_wrapped.iter_mut() {
@@ -1333,9 +1340,19 @@ impl Grid {
             let row_clusters = self.degrade_clusters_in_row(start, cols);
             self.scrollback
                 .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
-            self.sb_wrapped.push_back(self.wrapped[pr]);
             let mark = std::mem::take(&mut self.prompt[pr]);
-            self.sb_prompt.push_back(mark);
+            // The mirrors exist for the in-RAM variant, where there is
+            // nowhere else to keep these.  A file-backed pane reads
+            // both from the file -- it has to, since a mirror cannot
+            // answer for lines written before this process started --
+            // so maintaining them there is unbounded growth for an
+            // answer nobody asks: measured 2000 entries for 2000 lines
+            // of history, and a busy pane reaches hundreds of
+            // thousands.
+            if !self.scrollback.keeps_wrapped_flags() {
+                self.sb_wrapped.push_back(self.wrapped[pr]);
+                self.sb_prompt.push_back(mark);
+            }
             // Only lines that carry a mark touch the sidecar: one per
             // command, against a stream of millions of lines.
             if mark != PromptMark::None {
@@ -1439,9 +1456,11 @@ impl Grid {
                     let row_clusters = self.degrade_clusters_in_row(start, cols);
                     self.scrollback
                         .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
-                    self.sb_wrapped.push_back(self.wrapped[pr]);
                     let mark = std::mem::take(&mut self.prompt[pr]);
-                    self.sb_prompt.push_back(mark);
+                    if !self.scrollback.keeps_wrapped_flags() {
+                        self.sb_wrapped.push_back(self.wrapped[pr]);
+                        self.sb_prompt.push_back(mark);
+                    }
                     if mark != PromptMark::None {
                         self.scrollback.mark_last_line(mark);
                     }
@@ -1640,11 +1659,13 @@ impl Grid {
                 // read_lines returns oldest-first; mirror that into
                 // sb_wrapped which is indexed the same way.
                 let idx = start + i;
-                let wrapped = if idx < sb_len {
-                    self.sb_wrapped.get(idx).copied().unwrap_or(false)
-                } else {
-                    false
-                };
+                // Through `scrollback_wrapped`, not the mirror: for a
+                // file-backed pane the mirror only holds what this
+                // process pushed, so every line written before it
+                // started answered "not a continuation" -- and a page
+                // of those reflows as truncated content on the
+                // receiving side.
+                let wrapped = idx < sb_len && self.scrollback_wrapped(idx);
                 (row, wrapped)
             })
             .collect()
@@ -2434,5 +2455,55 @@ mod cell_bytes_tests {
         assert_eq!(Color::from(ColorKind::Rgb(4, 5, 6)), Color::rgb(4, 5, 6));
         assert_eq!(Color::rgb(4, 5, 6).kind(), ColorKind::Rgb(4, 5, 6));
         assert_eq!(Color::default(), Color::DEFAULT);
+    }
+}
+
+#[cfg(test)]
+mod mirror_growth_tests {
+    use super::*;
+
+    /// The three deques beside the scrollback ring are mirrors of what
+    /// THIS process pushed.  For the in-RAM variant they are bounded by
+    /// the ring.  For the file-backed one the trim bound is
+    /// `scrollback.len()`, which is the whole history -- so they grow
+    /// for as long as the session runs.
+    ///
+    /// Two of the three are not even read for a file-backed scrollback:
+    /// `scrollback_wrapped` and `scrollback_prompt` both prefer the
+    /// file's copy, precisely because a mirror cannot answer for lines
+    /// written before this process started.  Keeping them is paying
+    /// per line, forever, for an answer nobody asks.
+    #[test]
+    fn the_mirrors_do_not_grow_with_the_history_of_a_file_backed_pane() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-mirror-growth-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sb = Scrollback::file(
+            dir.join("scrollback.bin"),
+            dir.join("scrollback.idx"),
+            4,
+            16,
+        )
+        .unwrap();
+        let mut g = Grid::with_scrollback_kind(4, 2, sb);
+        for _ in 0..2000 {
+            g.scroll_up(1, Cell::default());
+        }
+        let history = g.scrollback_len();
+        assert!(history > 1000, "the fixture has to build history, got {history}");
+        assert!(
+            g.sb_wrapped.len() <= 64,
+            "wrapped mirror holds {} entries for {history} lines of history",
+            g.sb_wrapped.len()
+        );
+        assert!(
+            g.sb_prompt.len() <= 64,
+            "mark mirror holds {} entries for {history} lines of history",
+            g.sb_prompt.len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
