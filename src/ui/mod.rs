@@ -66,6 +66,21 @@ pub const MAX_SIDEBAR_LABEL_CHARS: usize = 22;
 /// exists so the number is chosen rather than stumbled into.
 pub const SESSION_COUNT_HARD_CAP: usize = 81;
 
+/// `"1"` … `"81"`, so a pane's number costs nothing to name.
+///
+/// `render_inner` built these with `(1..=n).map(|n| n.to_string())` every
+/// frame for every window -- a `Vec` and one `String` per pane, for text
+/// that never changes. The hot-path rule says a frame allocates nothing,
+/// and a number from a fixed range is the easiest kind of nothing.
+pub const PANE_NUMBER_LABELS: [&str; SESSION_COUNT_HARD_CAP] = [
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16",
+    "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30",
+    "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44",
+    "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58",
+    "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72",
+    "73", "74", "75", "76", "77", "78", "79", "80", "81",
+];
+
 /// Truncate a sidebar label to at most `max_chars` total characters,
 /// replacing the dropped tail with three ASCII dots.  Counts
 /// Unicode scalars, not bytes, so multi-byte characters survive
