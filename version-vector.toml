@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.207"  # a pane that has been refused knows it before the feed does
+shell   = "0.7.207"  # a refusal is remembered once seen, not re-read from a window that moves
 core    = "0.12.252"  # a timing assertion says when it is measuring the host
 session = "0.11.137"  # a timing assertion says when it is measuring the host

@@ -76,6 +76,20 @@ pub(super) struct WorkerCtx {
     /// Bounds `model_from_banner` to one bytelog replay per pane per
     /// window, so a pane that will never show one costs nothing.
     pub(super) banner_tried: HashMap<u64, Instant>,
+    /// Per-jsonl: when this session was last refused for want of
+    /// quota, remembered rather than re-derived.
+    ///
+    /// The tail window is a sample, not a history: thirty-two kilobytes
+    /// of a busy transcript is about six minutes, measured on a 21 MB
+    /// one. The refusal is in the window at the moment it is written --
+    /// the write is what makes the scan look at all -- and out of it
+    /// not long after. Reading it fresh every scan would therefore
+    /// answer "no" to a pane that is still shut out.
+    ///
+    /// Nothing expires it here. It is compared against when the feed
+    /// last measured that account, and a feed that has looked since is
+    /// what makes it stale (`Room::refused_for_now`).
+    pub(super) last_refusal: HashMap<PathBuf, i64>,
     /// Per-jsonl: the last model actually read out of it.
     ///
     /// The fence answers "what may I read right now", which is not
@@ -203,6 +217,7 @@ impl WorkerCtx {
         self.seen.retain(|p, _| alive.contains(p));
         self.model_cutoff.retain(|p, _| alive.contains(p));
         self.last_model.retain(|p, _| alive.contains(p));
+        self.last_refusal.retain(|p, _| alive.contains(p));
         if newly_seen > 0 || updates > 0 {
             log_lines.push((
                 LogLevel::Debug,
@@ -427,6 +442,21 @@ impl WorkerCtx {
             .find(|e| e.id == sid)?;
         let screen = marspot::pane_read::screen_text(&bytelog, entry.cols, entry.rows, 0).ok()?;
         parse_banner_model(&screen)
+    }
+}
+
+impl WorkerCtx {
+    /// The newest refusal known for this transcript: what the window
+    /// shows now, or what it showed when it was still in there.
+    ///
+    /// Kept rather than re-derived because the window moves -- see
+    /// `last_refusal` for how fast.
+    pub(super) fn remember_refusal(&mut self, path: &PathBuf, window: &str) -> Option<i64> {
+        if let Some(at) = super::last_quota_refusal(window) {
+            let kept = self.last_refusal.entry(path.clone()).or_insert(at);
+            *kept = (*kept).max(at);
+        }
+        self.last_refusal.get(path).copied()
     }
 }
 
@@ -757,6 +787,14 @@ impl WorkerCtx {
             // session is waiting on a timer of its own, and whether the
             // account refused it.
             let tail = jsonl_path.as_ref().map(tail_window);
+            // Remembered per transcript: a refusal leaves the window
+            // within minutes on a busy session, and a pane is still
+            // shut out after that.
+            let refused_at_for = match (&jsonl_path, tail.as_deref()) {
+                (Some(path), Some(window)) => self.remember_refusal(path, window),
+                (Some(path), None) => self.last_refusal.get(path).copied(),
+                (None, _) => None,
+            };
             new_vetoes.insert(
                 f.shelld_sid,
                 (
@@ -782,8 +820,9 @@ impl WorkerCtx {
                     project_basename,
                     project_dir,
                     // The same tail, third question: has the account
-                    // refused this session, and when.
-                    refused_at: tail.as_deref().and_then(super::last_quota_refusal),
+                    // refused this session, and when. Kept once seen,
+                    // because the window it is read from moves.
+                    refused_at: refused_at_for,
                     transcript_at: jsonl_path
                         .as_ref()
                         .and_then(|p| p.metadata().ok())
