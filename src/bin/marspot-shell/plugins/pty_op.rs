@@ -518,6 +518,20 @@ pub struct PtyOp {
 }
 
 impl PtyOp {
+    /// Where the step called `label` sits, for a run that has to
+    /// resume part-way through.
+    ///
+    /// A re-armed run used to be told to start at a number written
+    /// down beside the script. Inserting a step anywhere before it
+    /// moves what that number points at, silently -- putting a capture
+    /// of the composer at the front sent a re-arm into the middle of
+    /// the teardown instead of to the wake it was meant to park on,
+    /// and only a test standing on that exact step noticed. A name
+    /// survives the edit; a position does not.
+    pub fn index_of(&self, label: &str) -> Option<usize> {
+        self.steps.iter().position(|s| s.label == label)
+    }
+
     pub fn new(name: &'static str) -> Self {
         Self {
             name,

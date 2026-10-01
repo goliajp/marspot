@@ -1090,7 +1090,8 @@ impl ClaudecodePlugin {
                 title: String::new(),
             });
             let _ = client.hold_grid_of(d.shelld_sid, true);
-            match host.submit_pty_op_at(d.shelld_sid, op, RECLAIM_PARK_STEP) {
+            let park = op.index_of(RECLAIM_PARK_LABEL).unwrap_or(0);
+            match host.submit_pty_op_at(d.shelld_sid, op, park) {
                 Ok(()) => {
                     self.armed.insert(d.shelld_sid);
                     host.log(
@@ -4739,11 +4740,17 @@ mod tests {
         let client = Arc::new(ShelldClient::new(Some(inject.clone())));
         let op = reclaim_op(uuid, Some(&profile_dir.to_string_lossy()), 0, shell_pid)
             .expect("a quotable profile builds a script");
+        // By name, exactly as the re-arm does -- a test that hard-codes
+        // the position is a test that stops asking the question when a
+        // step is inserted, which is how this one found the bug.
+        let park = op
+            .index_of(idle::RECLAIM_PARK_LABEL)
+            .expect("the script has a park step");
         let mut session = pty_op::OpRunner::new(
             op,
             Box::new(pty_op::RealEnv::new(client as Arc<dyn pty_op::PtyIo>)),
         )
-        .start_at(RECLAIM_PARK_STEP);
+        .start_at(park);
         let host_session = FakePaneSessionHost { sid: 1 };
         assert!(session.is_awaiting_user(), "a re-armed run parks at the wake");
         crate::plugins::PaneSession::on_focus(&mut session, &host_session);
