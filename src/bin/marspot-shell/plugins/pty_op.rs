@@ -1658,13 +1658,21 @@ impl PtyCommand {
             if d.is_empty() || d.contains(['\'', '\n', '\r']) {
                 return None;
             }
-            line.push_str(&format!("( cd '{d}' && exec "));
+            line.push_str(&format!("( cd '{d}' && "));
         }
         for (k, v) in &self.env {
             if !shell_safe(k) || !shell_safe(v) {
                 return None;
             }
             line.push_str(&format!("{k}='{v}' "));
+        }
+        // After the assignments, never before them: `exec FOO=bar cmd`
+        // asks the shell to run a program called `FOO=bar`, and both
+        // sh and zsh answer "command not found". Written the wrong way
+        // round, every switch ran a subshell that exited 127 and then
+        // waited twenty seconds for a claude that was never started.
+        if self.dir.is_some() {
+            line.push_str("exec ");
         }
         if !shell_safe(&self.program) {
             return None;
@@ -3335,6 +3343,52 @@ mod tests {
         assert!(matches!(r.on_user_key(&host, &esc), KeyHandling::EndSession));
         r.on_end(&host, EndReason::UserEscape);
         assert_eq!(*state.holds.lock().unwrap(), vec![true, false]);
+    }
+
+    /// The line is run by a shell, so a test that only reads it is
+    /// testing a string. This one hands it to `/bin/sh` and checks
+    /// what came out.
+    ///
+    /// It exists because the first version put `exec` before the
+    /// environment assignments, which asks the shell to run a program
+    /// called `CLAUDE_CONFIG_DIR=/…`: every switch exited 127 and then
+    /// spent twenty seconds waiting for a process that was never
+    /// started. Every assertion about the text passed.
+    #[test]
+    fn the_line_a_shell_is_given_actually_runs() {
+        let dir = std::env::temp_dir();
+        let line = PtyCommand::new("/bin/sh")
+            .env("MARSPOT_PROBE", "ran")
+            .in_dir(Some(dir.to_string_lossy().to_string()))
+            .arg("-c")
+            .quoted_arg("printf %s-%s \"$MARSPOT_PROBE\" \"$(basename \"$PWD\")\"")
+            .to_bytes()
+            .expect("a line");
+        let text = String::from_utf8(line).unwrap();
+        let text = text.trim_end_matches('\r');
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(text)
+            .output()
+            .expect("run it");
+        assert!(
+            out.status.success(),
+            "the line a pane would be typed exits {:?}: {text}\nstderr: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let said = String::from_utf8_lossy(&out.stdout).to_string();
+        let want_dir = dir
+            .canonicalize()
+            .unwrap_or(dir.clone())
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            said,
+            format!("ran-{want_dir}"),
+            "the environment reached the program and so did the directory"
+        );
     }
 
     /// A value that could break out of its quoting is refused, not
