@@ -566,14 +566,39 @@ fn submit_deadline() -> Duration {
 /// transcript.  It is "is it on the LAST prompt", which is the
 /// composer.  That is the rule that told the five panes of
 /// 2026-09-30 apart by hand, and it is the one used here.
+/// The characters an agent's composer begins its prompt line with.
+///
+/// Read off the real panes rather than guessed: Claude Code draws
+/// U+276F, Codex draws U+203A, and a plain shell draws `>`. The list
+/// being short is the point -- when none of them is on screen this
+/// function says so rather than inventing an answer.
+const COMPOSER_PROMPTS: [char; 3] = ['\u{276f}', '\u{203a}', '>'];
+
+fn is_composer_line(l: &str) -> bool {
+    let t = l.trim_start();
+    COMPOSER_PROMPTS.iter().any(|p| t.starts_with(*p))
+}
+
+/// Is the line we pasted still sitting unsent on the prompt?
+///
+/// **A screen this cannot read counts as "still there".** It used to
+/// count as "gone", which made every way of failing look like success:
+/// a pane mid-repaint, a prompt character we do not know, a composer
+/// scrolled out of view -- each returned `false`, the submit was
+/// logged `landed`, and the text stayed in the box. On 2026-10-01
+/// three panes sat with an unsent line while the log said every one
+/// of them had landed, and `.stuck` -- the branch that gives up and
+/// says so -- had never once fired in the whole file.
+///
+/// Not knowing is not the same as knowing it worked. Saying "still
+/// there" costs another return, and the retry ceiling turns a wrong
+/// guess into a reported failure instead of a silent one.
 fn line_is_still_in_the_composer(screen: &str, line: &str) -> bool {
     let needle = std::str::from_utf8(submit_needle(line)).unwrap_or(line);
-    screen
-        .lines()
-        .rev()
-        .find(|l| l.trim_start().starts_with('\u{276f}') || l.trim_start().starts_with("> "))
-        .map(|last_prompt| last_prompt.contains(needle))
-        .unwrap_or(false)
+    match screen.lines().rev().find(|l| is_composer_line(l)) {
+        Some(last_prompt) => last_prompt.contains(needle),
+        None => true,
+    }
 }
 
 /// The piece of a submitted line to look for coming back.
@@ -2279,9 +2304,53 @@ mod tests {
 
         let stuck = "  …a reply…\n\u{276f} carry on\n";
         assert!(line_is_still_in_the_composer(stuck, "carry on"));
+    }
 
-        // No prompt on screen at all is not a stuck line.
-        assert!(!line_is_still_in_the_composer("just output\n", "carry on"));
+    /// Every composer this runs against, read off the real panes.
+    ///
+    /// Claude Code draws U+276F and Codex draws U+203A. Only the first
+    /// was in the list, so for every Codex pane the check found no
+    /// prompt, took the branch below, and reported `landed` -- the
+    /// verification could not fail there, which is worse than not
+    /// having it.
+    #[test]
+    fn each_agents_prompt_character_is_recognised() {
+        for prompt in ['\u{276f}', '\u{203a}', '>'] {
+            let stuck = format!("  …a reply…\n{prompt} carry on\n");
+            assert!(
+                line_is_still_in_the_composer(&stuck, "carry on"),
+                "{prompt:?} (U+{:04X}) is a composer and this line is unsent",
+                prompt as u32
+            );
+            let sent = format!("{prompt} carry on\n  …a reply…\n{prompt}\n");
+            assert!(
+                !line_is_still_in_the_composer(&sent, "carry on"),
+                "{prompt:?}: an empty composer below the message means it was sent"
+            );
+        }
+    }
+
+    /// A screen with no composer on it means "I cannot tell", and that
+    /// has to read as *still there*.
+    ///
+    /// It used to read as sent. Every way of failing -- a pane
+    /// mid-repaint, an unknown prompt character, a composer scrolled
+    /// away -- produced the same `false` as a real submit, so the op
+    /// logged `landed` and the text stayed in the box. On 2026-10-01
+    /// three panes sat with an unsent line while the log said all of
+    /// them had landed, and `.stuck` had never fired once in the
+    /// history of the file: the giving-up branch was unreachable
+    /// because the succeeding one always won.
+    #[test]
+    fn a_screen_we_cannot_read_is_not_evidence_of_success() {
+        assert!(
+            line_is_still_in_the_composer("just output\n", "carry on"),
+            "no composer on screen is not knowing, and not knowing is not success"
+        );
+        assert!(
+            line_is_still_in_the_composer("", "carry on"),
+            "an empty screen is the same kind of not knowing"
+        );
     }
 
     /// A program that never gets to it still gets its return.
