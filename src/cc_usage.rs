@@ -51,6 +51,19 @@ pub struct CcAccount {
     pub reset_7d: i64,
     /// Per-model caps, in feed order.  Empty on an older feed.
     pub model_limits: Vec<CcModelLimit>,
+    /// Unix seconds this row was collected; 0 when the feed does not
+    /// say.
+    pub collected_at: i64,
+    /// Unix seconds the `model_limits` were actually measured, when
+    /// they are not this row's own.
+    ///
+    /// The feed sets it exactly when `model_limits` and `credits` were
+    /// carried over from an earlier sample, so its presence is the
+    /// statement "these numbers are older than this row". A reader
+    /// that ignores it treats a frozen number as a current one: a pane
+    /// sat on an account whose model cap had been carried for 94
+    /// minutes while the API refused it sixteen times.
+    pub limits_as_of: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,6 +160,10 @@ pub fn parse(body: &str) -> Option<CcUsage> {
             reset_5h: num_field(obj, "reset_5h").unwrap_or(0.0) as i64,
             reset_7d: num_field(obj, "reset_7d").unwrap_or(0.0) as i64,
             model_limits: model_limits(obj),
+            collected_at: str_field(obj, "collected_at")
+                .and_then(parse_iso_utc)
+                .unwrap_or(0),
+            limits_as_of: str_field(obj, "limits_as_of").and_then(parse_iso_utc),
         })
         .collect();
     let mut accounts = accounts;
@@ -339,7 +356,11 @@ fn num_field(obj: &str, key: &str) -> Option<f64> {
 /// `2026-07-19T01:13:59.715798+00:00` → unix seconds.  The feed's
 /// generator always emits UTC; fractional seconds and the offset
 /// suffix are ignored (offset is `+00:00` by construction).
-fn parse_iso_utc(s: String) -> Option<i64> {
+/// `2026-10-01T11:51:52.440Z` and the `+00:00` form, to unix seconds.
+///
+/// Public because two readers need it: this feed's timestamps, and the
+/// ones Claude Code writes into a transcript.
+pub fn parse_iso_utc(s: String) -> Option<i64> {
     let b = s.as_bytes();
     if b.len() < 19 {
         return None;
@@ -1058,4 +1079,36 @@ mod tests {
         assert!(parse("{\"accounts\": []}").is_none());
         assert!(parse("not json at all").is_none());
     }
+    /// When a row's model caps were carried over from an earlier
+    /// sample, the feed says so -- and that is when they were true.
+    ///
+    /// Reading `collected_at` instead treats a frozen number as a
+    /// current one. The row this was written from stood at 0.62 of its
+    /// Fable window for 94 minutes while the API refused that account
+    /// sixteen times, and marspot read it as room.
+    #[test]
+    fn a_carried_limit_is_dated_when_it_was_measured() {
+        let carried = NESTED_FEED.replace(
+            r#""collected_at": "2026-07-31T22:42:29.478675+00:00""#,
+            r#""limits_as_of": "2026-07-31T21:00:00.000000+00:00",
+      "collected_at": "2026-07-31T22:42:29.478675+00:00""#,
+        );
+        let u = parse(&carried).expect("parse");
+        let a = &u.accounts[0];
+        assert_eq!(a.collected_at, 1_785_537_749, "the row itself is current");
+        assert_eq!(
+            a.limits_as_of,
+            Some(1_785_531_600),
+            "its model caps are an hour and a half older than that"
+        );
+    }
+
+    /// Without the field, the caps are this row's own.
+    #[test]
+    fn a_row_that_measured_its_own_limits_says_nothing_extra() {
+        let u = parse(NESTED_FEED).expect("parse");
+        assert_eq!(u.accounts[0].limits_as_of, None);
+        assert!(u.accounts[0].collected_at > 0, "but it still says when it was collected");
+    }
+
 }

@@ -781,6 +781,9 @@ impl WorkerCtx {
                     claude_pid: f.claude_pid,
                     project_basename,
                     project_dir,
+                    // The same tail, third question: has the account
+                    // refused this session, and when.
+                    refused_at: tail.as_deref().and_then(super::last_quota_refusal),
                     transcript_at: jsonl_path
                         .as_ref()
                         .and_then(|p| p.metadata().ok())

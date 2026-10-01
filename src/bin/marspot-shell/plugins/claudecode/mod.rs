@@ -459,6 +459,15 @@ struct BindMeta {
     /// torajs session into devops, and the only visible sign was the
     /// title changing.
     project_dir: Option<String>,
+    /// Unix seconds this session was last refused by the API for want
+    /// of quota, from its own transcript.
+    ///
+    /// The feed is collected behind what a session spends, and can be
+    /// behind by a lot -- it carries a row's model caps forward when it
+    /// cannot re-measure them, and one stood at 0.62 for 94 minutes
+    /// while this message was written sixteen times. So the two are
+    /// compared by when each was true, and the later one is believed.
+    refused_at: Option<i64>,
     /// When this session's transcript was last written.
     ///
     /// The honest answer to "how long has this session been idle".
@@ -1321,11 +1330,23 @@ impl ClaudecodePlugin {
         let rooms = quota::rooms_for(&profiles, &usage.accounts, |p| {
             quota::profile_email(&home, p)
         });
-        let shut: Vec<u8> = rooms
-            .iter()
-            .filter(|(_, r)| r.refused())
-            .map(|(p, _)| *p)
-            .collect();
+        // Whether a profile is out is a question about a pane, not
+        // about a profile: a pane pinned to a model can be shut out of
+        // an account whose week is fine, and a pane that has just been
+        // refused knows something the feed has not collected yet.
+        let is_out = |profile: u8, model: Option<&str>, refused_at: Option<i64>| -> bool {
+            rooms
+                .iter()
+                .find(|(p, _)| *p == profile)
+                .is_some_and(|(_, r)| r.refused_for_now(model, refused_at))
+        };
+        let out_for = |sid: &u64, meta: &BindMeta| -> bool {
+            is_out(
+                meta.profile_num,
+                result.new_models.get(sid).map(String::as_str),
+                meta.refused_at,
+            )
+        };
         // Forget what was tried for a pane that is out of trouble —
         // but not for one that is merely between bindings.  A cycle
         // kills the CLI and the scan cannot bind the pane again until
@@ -1339,7 +1360,7 @@ impl ClaudecodePlugin {
                 return false;
             }
             match self.last_meta.get(sid) {
-                Some(m) => shut.contains(&m.profile_num),
+                Some(m) => out_for(sid, m),
                 None => true,
             }
         });
@@ -1348,7 +1369,7 @@ impl ClaudecodePlugin {
         let sids: Vec<u64> = self.last_meta.keys().copied().collect();
         for sid in sids {
             let Some(meta) = self.last_meta.get(&sid).cloned() else { continue };
-            if !shut.contains(&meta.profile_num) {
+            if !out_for(&sid, &meta) {
                 continue;
             }
             let first_time = !self.stranded.contains_key(&sid);
@@ -2722,6 +2743,46 @@ fn tail_activity(path: &PathBuf, has_young_child: bool) -> CcActivity {
     }
 }
 
+/// When this session was last told by the API that it had reached a
+/// limit, as unix seconds.
+///
+/// Reads the tail window the scan already has, so it costs nothing
+/// beyond the scan of those lines.
+///
+/// Claude Code records the refusal itself rather than leaving it on
+/// the screen: `"isApiErrorMessage":true` on an assistant record whose
+/// text is the limit message, with the timestamp it happened. That is
+/// what makes this evidence and not a screen-scrape -- and it is the
+/// only timely evidence there is, because the usage feed is collected
+/// behind what a session is actually spending.
+///
+/// Two texts are matched, both read out of the CLI's own templates
+/// rather than guessed: the model-limit branch and the credits branch.
+/// Deliberately not `rate_limit` or `429`, which a loaded server
+/// produces too -- being overloaded is not being out of quota, and
+/// moving a pane for it costs a restart for nothing.
+pub(super) fn last_quota_refusal(tail: &str) -> Option<i64> {
+    tail.lines()
+        .rev()
+        .find(|l| l.contains("\"isApiErrorMessage\":true") && says_out_of_quota(l))
+        .and_then(record_timestamp)
+}
+
+/// The two ways the CLI says "this account cannot serve you".
+fn says_out_of_quota(line: &str) -> bool {
+    (line.contains("You've reached your") && line.contains("limit"))
+        || line.contains("requires usage credits")
+}
+
+/// The `timestamp` field of one transcript record.
+fn record_timestamp(line: &str) -> Option<i64> {
+    let key = "\"timestamp\":\"";
+    let i = line.find(key)? + key.len();
+    let rest = &line[i..];
+    let end = rest.find('"')?;
+    marspot::cc_usage::parse_iso_utc(rest[..end].to_string())
+}
+
 fn tail_last_message_type(path: &PathBuf) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     const TAIL: u64 = 32 * 1024;
@@ -2829,6 +2890,7 @@ mod tests {
             claude_pid: i32::MAX,
             project_basename: String::new(),
             project_dir: None,
+            refused_at: None,
             transcript_at: SystemTime::now(),
             has_transcript: true,
         };
@@ -2933,6 +2995,7 @@ mod tests {
             transcript_at: SystemTime::UNIX_EPOCH,
             project_basename: String::new(),
             project_dir: None,
+            refused_at: None,
         }
     }
 
@@ -3135,6 +3198,7 @@ mod tests {
             claude_pid: i32::MAX,
             project_basename: String::new(),
             project_dir: None,
+            refused_at: None,
             transcript_at: SystemTime::now(),
             has_transcript: true,
         };
@@ -5260,6 +5324,7 @@ mod tests {
                 claude_pid,
                 project_basename: "proj".into(),
             project_dir: None,
+            refused_at: None,
                 // Long enough ago that the transcript clock is not what
                 // any of these tests are about.
                 transcript_at: SystemTime::now() - Duration::from_secs(7200),
@@ -6856,6 +6921,69 @@ mod tests {
             "{LIVE_TURN_DURATION}\n{LIVE_TURN_DURATION}\n"
         ));
         assert_eq!(tail_activity(&path, false), CcActivity::Unknown);
+    }
+
+    /// The record a real refusal makes, copied off disk rather than
+    /// imagined: `isApiErrorMessage` with the CLI's own text and the
+    /// instant it happened.
+    const REFUSAL: &str = concat!(
+        r#"{"parentUuid":"8f670e3e","isSidechain":false,"type":"assistant","#,
+        r#""isApiErrorMessage":true,"timestamp":"2026-10-01T11:51:52.440Z","#,
+        r#""message":{"role":"assistant","content":[{"type":"text","text":"#,
+        r#""You've reached your Fable limit. Run /usage-credits to continue "#,
+        r#"or switch models with /model."}]}}"#
+    );
+
+    #[test]
+    fn a_refusal_in_the_transcript_is_read_with_its_time() {
+        let at = last_quota_refusal(REFUSAL).expect("the record says when");
+        assert_eq!(at, 1_790_855_512, "2026-10-01T11:51:52Z");
+    }
+
+    /// The newest one wins: a transcript holds every refusal it ever
+    /// had, and what matters is whether the account said no *since*
+    /// the feed last looked.
+    #[test]
+    fn the_newest_refusal_is_the_one_that_counts() {
+        let older = REFUSAL.replace("11:51:52", "09:18:13");
+        let tail = format!("{older}\n{REFUSAL}\n");
+        assert_eq!(last_quota_refusal(&tail), Some(1_790_855_512));
+    }
+
+    /// Being overloaded is not being out of quota, and moving a pane
+    /// for it restarts a session for nothing. The HTTP status and the
+    /// error type are shared between the two, so neither is matched.
+    #[test]
+    fn a_busy_server_is_not_a_spent_account() {
+        let overloaded = REFUSAL.replace(
+            "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.",
+            "API Error: 429 overloaded_error · Retrying in 8 seconds",
+        );
+        assert_eq!(
+            last_quota_refusal(&overloaded),
+            None,
+            "a retryable error is not a reason to move the pane"
+        );
+    }
+
+    /// And a record that is not flagged as an API error does not
+    /// count, however it reads -- a transcript that quotes the message
+    /// is not a transcript that received it. (This one is written from
+    /// a session that was discussing the bug: the text was in four
+    /// profiles' transcripts before any of them had been refused.)
+    #[test]
+    fn quoting_the_message_is_not_receiving_it() {
+        let quoted = REFUSAL.replace(r#""isApiErrorMessage":true,"#, "");
+        assert_eq!(last_quota_refusal(&quoted), None);
+    }
+
+    #[test]
+    fn the_credits_wording_counts_too() {
+        let credits = REFUSAL.replace(
+            "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.",
+            "Opus 5.5 requires usage credits.",
+        );
+        assert!(last_quota_refusal(&credits).is_some());
     }
 
     #[test]
