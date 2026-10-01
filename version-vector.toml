@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.212"  # no hook runs on the person's keystrokes
-core    = "0.12.252"  # a timing assertion says when it is measuring the host
+core    = "0.12.253"  # a shadow has one intensity, not two that multiply
 session = "0.11.137"  # a timing assertion says when it is measuring the host

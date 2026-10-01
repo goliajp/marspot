@@ -6709,8 +6709,13 @@ fn ui_rect_instance_from_rect(r: &crate::ui::core::canvas::RectPrim) -> UiRectIn
     let (border_w, border_c) = r.border
         .map(|(w, c)| (w as f32, c.to_rgba_f32()))
         .unwrap_or((0.0, [0.0; 4]));
+    // Intensity once, in the colour's alpha. This used to pass `c.a`
+    // here as well, and the fragment multiplies the two -- so a rect
+    // asking for a 45% shadow was drawn at 20%. The shader now holds
+    // the second knob at 1 for the published format; this is the same
+    // rule on the older path.
     let (shadow_blur, shadow_alpha, shadow_color) = r.shadow
-        .map(|(blur, _offset, c)| (blur as f32, c.a as f32, c.to_rgba_f32()))
+        .map(|(blur, _offset, c)| (blur as f32, 1.0f32, c.to_rgba_f32()))
         .unwrap_or((0.0, 0.0, [0.0; 4]));
     UiRectInstance {
         origin: [r.x as f32, r.y as f32],
@@ -7107,6 +7112,55 @@ impl MetalRenderer {
         let viewport_px: [f32; 2] = [width as f32, height as f32];
         let a = self.draw_ui_instances(
             width, height, ui_rects_as_bytes(&floats), floats.len() as u32,
+            &self.ui_pipeline.clone(), &viewport_px,
+        )?;
+        let from = offset as usize;
+        let to = from + count as usize * 48;
+        let b = self.draw_ui_instances(
+            width, height, &slab[from..to], count,
+            &self.scene_ui_pipeline.clone(), &viewport_px,
+        )?;
+        Ok((a, b))
+    }
+
+    /// One float instance and one Scene instance of the caller's
+    /// choosing, each through its own pipeline.
+    ///
+    /// `render_ui_rects_both_ways` builds both sides from a canvas,
+    /// which can only express what a canvas rect can -- and a canvas
+    /// rect puts the same number in both shadow knobs. The panel
+    /// painter does not: it asks for a 45% shadow by putting 0.45 in
+    /// one knob and leaving the colour opaque. That shape had no test,
+    /// and the Scene vertex shader read it as a fully opaque shadow.
+    pub fn render_one_rect_both_ways(
+        &mut self,
+        width: u32,
+        height: u32,
+        float_inst: UiRectInstance,
+        scene_inst: golia_ui_core::scene::UiRectInstance,
+    ) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let mut slab = vec![0u8; 4096];
+        let mut layers = vec![golia_ui_core::scene::Layer::default(); 2];
+        let clip = golia_ui_core::RectPx::new(0.0, 0.0, width as f32, height as f32);
+        let (offset, count) = {
+            let mut scene = golia_ui_core::scene::Scene::new(&mut slab, &mut layers);
+            let mut layer = scene.layer(clip, 0).ok_or("no layer")?;
+            {
+                let mut run = layer.ui_rects();
+                run.push(scene_inst);
+            }
+            let runs =
+                scene.layers()[0].runs[golia_ui_core::scene::Kind::UiRect as usize];
+            if scene.overflowed() {
+                return Err("the scene overflowed its slab".into());
+            }
+            (runs.offset, runs.count)
+        };
+
+        let viewport_px: [f32; 2] = [width as f32, height as f32];
+        let floats = [float_inst];
+        let a = self.draw_ui_instances(
+            width, height, ui_rects_as_bytes(&floats), 1,
             &self.ui_pipeline.clone(), &viewport_px,
         )?;
         let from = offset as usize;
@@ -9094,6 +9148,85 @@ mod tests {
         assert!(pool.upload(&device, INSTANCE_SLOTS, &small).is_none());
     }
 
+    /// The shape the panel painter makes: intensity in its own field,
+    /// an opaque shadow colour.
+    ///
+    /// Translating it to the published format means folding the two
+    /// into the colour's alpha, and the Scene shader then has to read
+    /// that as the whole intensity. It did not -- it copied the
+    /// colour's alpha into the second knob as well, which the fragment
+    /// multiplies, so a 45% shadow came out at 20%. Every panel, menu
+    /// and overlay in the product is this shape, and the only test of
+    /// the two paths used a canvas rect, which is the other shape and
+    /// agreed by accident.
+    #[test]
+    fn the_two_paths_agree_on_a_shadow_that_is_not_opaque() {
+        let Ok(mut r) = MetalRenderer::new_headless() else {
+            eprintln!("skipping: no Metal device on this host");
+            return;
+        };
+        let (w, h) = (128u32, 128u32);
+        // 0.45 of a red shadow, said the way each side says it.
+        let float_inst = UiRectInstance {
+            origin: [40.0, 40.0],
+            size: [48.0, 48.0],
+            fill_color: [0.2, 0.2, 0.25, 1.0],
+            border_color: [0.0; 4],
+            corner_radius: 8.0,
+            border_width: 0.0,
+            shadow_blur: 16.0,
+            shadow_alpha: 0.45,
+            // Red, not black: the pass clears to black, and a black
+            // shadow on black changes only the alpha channel. The
+            // first version of this test was that, and it compared two
+            // pictures that were both almost entirely the clear colour
+            // -- 432 bytes of difference across the whole frame.
+            shadow_color: [1.0, 0.0, 0.0, 1.0],
+        };
+        let scene_inst = golia_ui_core::scene::UiRectInstance {
+            origin: [40.0, 40.0],
+            size: [48.0, 48.0],
+            fill: golia_ui_core::Rgba8::rgba(51, 51, 64, 255),
+            border: golia_ui_core::Rgba8::TRANSPARENT,
+            radius: 8.0,
+            border_width: 0.0,
+            shadow_offset: [0.0, 0.0],
+            shadow_color: golia_ui_core::Rgba8::rgba(255, 0, 0, 115),
+            shadow_blur: 16.0,
+        };
+        let (a, b) = r
+            .render_one_rect_both_ways(w, h, float_inst, scene_inst)
+            .expect("both renders");
+        let worst = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (*x as i32 - *y as i32).abs())
+            .max()
+            .unwrap_or(0);
+        // Does either side draw a shadow at all? A test that compares
+        // two blank pictures agrees about nothing.
+        let mut no_shadow = float_inst;
+        no_shadow.shadow_blur = 0.0;
+        let (plain, _) = r
+            .render_one_rect_both_ways(w, h, no_shadow, scene_inst)
+            .expect("both renders");
+        let shadow_pixels = a.iter().zip(plain.iter()).filter(|(x, y)| x != y).count();
+        eprintln!(
+            "[scene-shadow] worst byte differs by {worst}; the float path's \
+             shadow covers {shadow_pixels} bytes"
+        );
+        assert!(
+            shadow_pixels > 1000,
+            "neither side drew a shadow, so this proves nothing"
+        );
+        // 0.45 as a byte is 115/255 = 0.4510, so the two sides differ
+        // by the rounding of one alpha and nothing else.
+        assert!(
+            worst <= 2,
+            "the two paths disagree by {worst}: one of them is applying the \
+             shadow's alpha twice"
+        );
+    }
     /// A real GPU reads the published Scene bytes and gets the same
     /// picture.
     ///
