@@ -71,12 +71,20 @@ run_n() {
   "$PROBE_BIN" "$SESSION_BIN" "$n" 2>/dev/null
 }
 
-echo "==> per-session idle L3 RSS scaling (N=1, N=9)"
+echo "==> per-session idle L3 RSS scaling (N=1, 4, 9, 16)"
 # Columns: N total_rss_kib per_rss_kib cpu_secs cpu_pct.  This gate reads
 # the two RSS ones; T4 of the public bench reads the CPU ones from the
 # same probe with a 60-second window.
+# One, four, nine and sixteen: the pane counts a 2x2, 3x3 and 4x4 grid
+# actually produce, so the linearity bound is tested across the range the
+# product offers rather than at its ends.  N=1 and N=9 alone would miss a
+# cost that only appears past a threshold.
 OUT1=$(run_n 1) || fail "N=1 probe failed"
+OUT4=$(run_n 4) || fail "N=4 probe failed"
 OUT9=$(run_n 9) || fail "N=9 probe failed"
+OUT16=$(run_n 16) || fail "N=16 probe failed"
+PER4=$(echo "$OUT4" | awk '{print $3}')
+PER16=$(echo "$OUT16" | awk '{print $3}')
 PER1=$(echo "$OUT1" | awk '{print $3}')
 TOT9=$(echo "$OUT9" | awk '{print $2}')
 PER9=$(echo "$OUT9" | awk '{print $3}')
@@ -84,6 +92,17 @@ PER9=$(echo "$OUT9" | awk '{print $3}')
 
 echo "    N=1 per-session ${PER1} KiB"
 echo "    N=9 total ${TOT9} KiB, per-session ${PER9} KiB"
+
+for n_per in "4:$PER4" "16:$PER16"; do
+  n=${n_per%%:*}; per=${n_per##*:}
+  [[ -n "$per" ]] || fail "could not parse the N=$n probe output"
+  echo "    N=$n per-session ${per} KiB"
+  (( per <= PER_SESSION_CAP_KIB )) || \
+    fail "per-session idle RSS at N=$n is ${per} KiB > cap ${PER_SESSION_CAP_KIB} KiB"
+  ok=$(python3 -c "print(1 if $per <= $PER1 * $LINEARITY_MAX else 0)")
+  (( ok == 1 )) || \
+    fail "per-session RSS grows with pane count: N=$n ${per} KiB vs N=1 ${PER1} KiB > ${LINEARITY_MAX}x"
+done
 
 (( PER9 <= PER_SESSION_CAP_KIB )) || \
   fail "per-session idle RSS ${PER9} KiB > cap ${PER_SESSION_CAP_KIB} KiB (GUI link or unbounded per-session state?)"
