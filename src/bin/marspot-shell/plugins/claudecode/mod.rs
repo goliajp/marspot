@@ -2122,6 +2122,7 @@ impl Plugin for ClaudecodePlugin {
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
+            last_refusal: HashMap::new(),
             last_model: HashMap::new(),
             last_model_by_pane: HashMap::new(),
         };
@@ -2822,6 +2823,7 @@ mod tests {
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
+            last_refusal: HashMap::new(),
             last_model: HashMap::new(),
             last_model_by_pane: HashMap::new(),
         }
@@ -3750,6 +3752,7 @@ mod tests {
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
+            last_refusal: HashMap::new(),
             last_model: HashMap::new(),
             last_model_by_pane: HashMap::new(),
         };
@@ -4024,6 +4027,7 @@ mod tests {
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
+            last_refusal: HashMap::new(),
             last_model: HashMap::new(),
             last_model_by_pane: HashMap::new(),
         };
@@ -4108,6 +4112,7 @@ mod tests {
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
+            last_refusal: HashMap::new(),
             last_model: HashMap::new(),
             last_model_by_pane: HashMap::new(),
         };
@@ -4243,6 +4248,7 @@ mod tests {
             seen,
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
+            last_refusal: HashMap::new(),
             last_model: HashMap::new(),
             last_model_by_pane: HashMap::new(),
         }
@@ -4332,6 +4338,7 @@ mod tests {
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
+            last_refusal: HashMap::new(),
             last_model: HashMap::new(),
             last_model_by_pane: HashMap::new(),
         };
@@ -4410,6 +4417,7 @@ mod tests {
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
+            last_refusal: HashMap::new(),
             last_model: HashMap::new(),
             last_model_by_pane: HashMap::new(),
         };
@@ -4455,6 +4463,7 @@ mod tests {
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
+            last_refusal: HashMap::new(),
             last_model: HashMap::new(),
             last_model_by_pane: HashMap::new(),
         };
@@ -4818,6 +4827,7 @@ mod tests {
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
+            last_refusal: HashMap::new(),
             last_model: HashMap::new(),
             last_model_by_pane: HashMap::new(),
         };
@@ -6527,6 +6537,7 @@ mod tests {
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
+            last_refusal: HashMap::new(),
             last_model: HashMap::new(),
             last_model_by_pane: HashMap::new(),
         };
@@ -6612,6 +6623,7 @@ mod tests {
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
+            last_refusal: HashMap::new(),
             last_model: HashMap::new(),
             last_model_by_pane: HashMap::new(),
         };
@@ -6933,6 +6945,56 @@ mod tests {
         r#""You've reached your Fable limit. Run /usage-credits to continue "#,
         r#"or switch models with /model."}]}}"#
     );
+
+    /// A refusal is in the tail window at the instant it is written
+    /// and gone from it soon after, so it has to be remembered.
+    ///
+    /// Measured on the real file this was written for: thirty-two
+    /// kilobytes of a 21.8 MB transcript reached back six minutes, and
+    /// the refusals that stranded the pane were outside it twenty-five
+    /// minutes later. A scan that re-derives this every time answers
+    /// "no refusal" for a pane that is still shut out -- which is the
+    /// same outcome as not having built any of this.
+    #[test]
+    fn a_refusal_that_has_scrolled_out_of_the_window_is_still_remembered() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-refusal-window-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+
+        let mut ctx = ctx_for_test(dir.clone());
+        // The moment it happens: the record is the newest line.
+        fs::write(&path, format!("{REFUSAL}\n")).unwrap();
+        assert_eq!(
+            ctx.remember_refusal(&path, &tail_window(&path)),
+            Some(1_790_855_512),
+            "seen when it is written"
+        );
+
+        // And later: the session keeps talking until the record is
+        // past the window.
+        let filler = format!("{}\n", r#"{"type":"assistant","timestamp":"2026-10-01T12:30:00.000Z"}"#);
+        let mut body = format!("{REFUSAL}\n");
+        while body.len() < 80 * 1024 {
+            body.push_str(&filler);
+        }
+        fs::write(&path, &body).unwrap();
+        let window = tail_window(&path);
+        assert_eq!(
+            last_quota_refusal(&window),
+            None,
+            "the fixture has to actually push it out, or this proves nothing"
+        );
+        assert_eq!(
+            ctx.remember_refusal(&path, &window),
+            Some(1_790_855_512),
+            "but the pane is no less shut out than it was"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_refusal_in_the_transcript_is_read_with_its_time() {

@@ -158,6 +158,18 @@ fn a_program_that_echoes_keeps_its_local_echo() {
     pump(&mut pty, &mut t, settle);
 
     assert_eq!(row0(&t), "hello");
-    assert_eq!(t.predictions_expired, 0, "nothing had to be taken back");
-    assert!(t.predictions_hit >= 5);
+    assert!(t.predictions_hit >= 5, "every guess was confirmed by the echo");
+    // "And none of them had to be taken back" is a claim about the
+    // echo beating the expiry deadline, which is a claim about the
+    // machine: a guess whose confirmation is late is *supposed* to be
+    // withdrawn, so the screen does not keep saying something the
+    // program never said. On a host at load 40 that is what happened,
+    // and the test was asserting the host was quick rather than that
+    // the code was right.
+    //
+    // It is still worth saying where it means something, which is on a
+    // machine that is not busy.
+    if marspot_term::host_load::quiet_enough_to_time("local echo against its expiry deadline") {
+        assert_eq!(t.predictions_expired, 0, "nothing had to be taken back");
+    }
 }
