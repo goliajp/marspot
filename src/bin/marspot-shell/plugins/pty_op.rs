@@ -705,6 +705,16 @@ pub struct SubmitState {
     returns: u8,
 }
 
+/// How much longer a step waits when the pane has drawn *nothing*.
+///
+/// `or_late` exists for a program that is slow, and going on is the
+/// right call for one: it has started, the screen is moving, and the
+/// step's timeout was only a guess about how long that takes. A pane
+/// that has produced zero bytes has not started, and no amount of
+/// typing at it helps. Multiplied rather than fixed, so each step
+/// keeps its own sense of scale.
+const LATE_EMPTY_GRACE: u32 = 10;
+
 const SPINNER_FRAME: Duration = Duration::from_millis(125);
 
 /// How often a parked run re-asserts its badge.
@@ -1462,6 +1472,40 @@ impl PaneSession for OpRunner {
                             .env
                             .output_len(host.shelld_session_id())
                             .saturating_sub(self.entered_len);
+                        // Nothing drawn at all is not "slow", it is
+                        // "has not started". Going on means typing
+                        // into a program that is not reading yet, and
+                        // the return lands as a newline -- which is
+                        // exactly what a machine at load 513 produced
+                        // on 2026-10-01: 0 B after 3 s, the line
+                        // pasted anyway, three returns, and a
+                        // sentence left sitting in the composer.
+                        //
+                        // A program that has drawn *something* is
+                        // merely slow and going on is the right call.
+                        // One that has drawn nothing gets the longer
+                        // wait, and then it is a failure rather than
+                        // a thing to type at.
+                        if drawn == 0 {
+                            if elapsed < limit * LATE_EMPTY_GRACE {
+                                return;
+                            }
+                            host.log(
+                                LogLevel::Warn,
+                                &format!("{}.never_drew", self.op.name),
+                                &format!(
+                                    "step={} waited {}ms and the pane drew nothing; \
+                                     not typing into it",
+                                    step.label,
+                                    elapsed.as_millis()
+                                ),
+                            );
+                            self.finish(
+                                host,
+                                OpOutcome::TimedOut { step: self.at, label: step.label },
+                            );
+                            return;
+                        }
                         let saw = match self.ready_saw {
                             Some((bytes, _)) => format!(", {bytes} B since the step began"),
                             None => String::new(),
@@ -2500,6 +2544,79 @@ mod tests {
         run(&mut r, &host, &state, SUBMIT_VERIFY_AFTER.as_millis() as u64 + 96);
         assert!(*host.ended.lock().unwrap(), "the last prompt is empty, so it went");
         assert_eq!(state.sent.lock().unwrap().len(), 3, "and no more are sent");
+    }
+
+    /// A pane that has drawn nothing is not typed into.
+    ///
+    /// `or_late` is for a program that is slow. One that has produced
+    /// zero bytes has not started, and going on means pasting into
+    /// something that is not reading: the return lands as a newline
+    /// and the sentence sits in the composer. That is what a machine
+    /// at load 513 produced on 2026-10-01 -- `drew 0B` after three
+    /// seconds, and three returns later a line left for the person.
+    #[test]
+    fn a_pane_that_drew_nothing_gets_longer_before_anything_is_typed() {
+        use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE));
+        let mut r = OpRunner::new(
+            PtyOp::new("test.late")
+                .step(Step::await_quiet(Duration::from_millis(100))
+                    .timeout(Duration::from_millis(500))
+                    .or_late())
+                .step(Step::paste("something")),
+            env,
+        );
+        // Nothing is ever drawn. Past the step's own timeout, and
+        // still nothing has been typed.
+        run(&mut r, &host, &state, 2_000);
+        assert!(
+            state.pasted.lock().unwrap().is_empty(),
+            "four times the timeout is still not a reason to type at a pane that has drawn nothing"
+        );
+        assert!(!*host.ended.lock().unwrap(), "and it is still waiting, not finished");
+
+        // Past the grace, it gives up rather than typing.
+        run(&mut r, &host, &state, 5_000);
+        assert!(*host.ended.lock().unwrap(), "it has to stop eventually");
+        assert!(
+            state.pasted.lock().unwrap().is_empty(),
+            "and it must not have typed on the way out"
+        );
+    }
+
+    /// A pane that drew *something* is merely slow, and going on is
+    /// what `or_late` is for.
+    #[test]
+    fn a_pane_that_drew_something_is_only_slow() {
+        use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
+        let (state, env, host) = setup();
+        *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE));
+        let mut r = OpRunner::new(
+            PtyOp::new("test.late")
+                .step(Step::await_quiet(Duration::from_millis(100))
+                    .timeout(Duration::from_millis(500))
+                    .or_late())
+                .step(Step::paste("something")),
+            env,
+        );
+        // Drawing the whole time, so `await_quiet` is never satisfied
+        // and the step runs out -- which is the case `or_late` is for.
+        // Set before the run it would be zero against `entered_len`,
+        // and set once it would simply go quiet and succeed.
+        for _ in 0..80 {
+            *state.out_len.lock().unwrap() += 100;
+            r.on_tick(&host);
+            advance(&state, 16);
+            if *host.ended.lock().unwrap() {
+                break;
+            }
+        }
+        assert_eq!(
+            *state.pasted.lock().unwrap(),
+            vec!["something".to_string()],
+            "a slow pane still gets its line"
+        );
     }
 
     /// A half-written sentence survives the agent being restarted.
