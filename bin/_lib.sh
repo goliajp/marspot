@@ -320,10 +320,23 @@ write_live_trial_script() {
   local reps args
   reps=$(live_repeat "$scenario")
   args=$(live_cat_args "$scenario" "$reps")
+  # Microseconds, for the reason spelled out in
+  # `write_live_matrix_script`: `/usr/bin/time -p` prints two decimals,
+  # a scenario here takes about a quarter of a second, and the step
+  # between adjacent readings is therefore worth several MB/s. The
+  # competitor harness was moved off that clock and this one -- which
+  # measures marspot itself, and feeds the gate's `live` and `vs-best`
+  # rows -- was left on it, so the two sides of the comparison were
+  # read with different instruments.
   cat > "$out" <<TRIAL
-#!/bin/bash
+#!/bin/zsh
+zmodload zsh/datetime
+if [[ -z \$EPOCHREALTIME ]]; then
+  print -u2 "no EPOCHREALTIME: zsh/datetime did not load"; exit 1
+fi
 exec 2> "$marker"
-/usr/bin/time -p /bin/bash -c '
+__s=\$EPOCHREALTIME
+/bin/zsh -c '
   /bin/cat$args
   stty raw -echo 2>/dev/null
   printf "\033[6n" > /dev/tty
@@ -331,6 +344,8 @@ exec 2> "$marker"
   stty sane 2>/dev/null
   printf "cpr=%s,%s\n" "\$_row" "\$_col" >&2
 '
+__e=\$EPOCHREALTIME
+printf 'real %.6f\n' \$((__e - __s)) >&2
 TRIAL
   chmod 0755 "$out"
 }
