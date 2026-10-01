@@ -109,13 +109,18 @@ fn row_text_of(
     cell: impl Fn(u16) -> marspot_term::grid::Cell,
 ) -> String {
     let mut out = String::with_capacity(grid.cols() as usize);
+    let mut row_clusters = Vec::new();
+    grid.row_clusters_at_view(view_offset, viewport_row, &mut row_clusters);
     for c in 0..grid.cols() {
         let cell = cell(c);
         // NUL is the wide glyph's trailing half.
         if cell.ch == '\0' {
             continue;
         }
-        match grid.cluster_text_at_view(view_offset, c, viewport_row, &cell) {
+        match grid
+            .cluster_text(&cell)
+            .or_else(|| marspot_term::grid::cluster_in_row(&row_clusters, c))
+        {
             Some(text) => out.push_str(text),
             None => out.push(cell.ch),
         }

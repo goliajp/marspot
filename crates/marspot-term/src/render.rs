@@ -296,6 +296,10 @@ pub fn grid_selection_text(
     // and `trim_end` the tail (the post-content cells were blank
     // padding the program never wrote into).
     let mut prev_text: Option<String> = None;
+    // One row's worth of cluster text, refilled per row.  Scrollback
+    // cells hold the base codepoint, so what a cluster said is keyed by
+    // where it was -- asked once for the row, not once per cell.
+    let mut row_clusters: Vec<(u16, String)> = Vec::new();
     loop {
         if abs > u16::MAX as u32 {
             // Beyond what cell_at_view can address; treat as unreachable.
@@ -325,6 +329,7 @@ pub fn grid_selection_text(
             (lo, hi)
         };
         let mut row_text = String::new();
+        grid.row_clusters_at_view(abs as u16, last_view_row, &mut row_clusters);
         for c in col_lo..=col_hi {
             if c >= cols {
                 break;
@@ -338,7 +343,10 @@ pub fn grid_selection_text(
             // A cell holding a cluster keeps its text in the grid's
             // pool and its `ch` is the index — copying that would put
             // a plane-15 codepoint on the clipboard.
-            match grid.cluster_text_at_view(abs as u16, c, last_view_row, &cell) {
+            match grid
+                .cluster_text(&cell)
+                .or_else(|| crate::grid::cluster_in_row(&row_clusters, c))
+            {
                 Some(text) => row_text.push_str(text),
                 None => row_text.push(cell.ch),
             }

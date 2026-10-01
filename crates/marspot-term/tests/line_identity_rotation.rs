@@ -155,3 +155,55 @@ fn a_mark_in_the_cold_tier_is_still_read_after_one_handover() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The same handover, for the cluster text: a line that went cold keeps
+/// what its cells said, because every sidecar of that `.bin` was renamed
+/// beside it rather than only the marks.
+///
+/// Worth its own test rather than trusting the shared rename, because
+/// the first version of the cold-tier mark test was green for the wrong
+/// reason -- with a cap of zero every line rotates immediately, so
+/// "no record" was the right answer whatever the code did.
+#[test]
+fn cluster_text_in_the_cold_tier_is_still_read_after_one_handover() {
+    let dir = std::env::temp_dir().join(format!("marspot-clusters-cold-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let _cap = CAP.lock().unwrap_or_else(|p| p.into_inner());
+    unsafe { std::env::set_var("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1") };
+    let mut sb =
+        Scrollback::file(dir.join("scrollback.bin"), dir.join("scrollback.idx"), 8, 4).unwrap();
+    let flag = "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}".to_string();
+    let first_epoch = sb.epoch();
+    let mut rotations = 0;
+    let mut seen = first_epoch;
+    for i in 0..12_000 {
+        sb.push_line_with_wrapped(&row(b'a' + (i % 26) as u8, 8), false);
+        if i == 10 {
+            sb.cluster_last_line(&[(3u16, flag.clone())]);
+        }
+        if sb.epoch() != seen {
+            seen = sb.epoch();
+            rotations += 1;
+        }
+    }
+    unsafe { std::env::remove_var("MARSPOT_SCROLLBACK_HOT_CAP_MB") };
+    assert_eq!(
+        rotations, 1,
+        "the fixture needs exactly one handover, or it is testing something else"
+    );
+    let mut got = Vec::new();
+    assert!(
+        sb.clusters_at(10, &mut got),
+        "line 10 went into the cold tier and its cluster text went with it"
+    );
+    assert_eq!(got, vec![(3u16, flag)]);
+    // And a line of the new hot file does not pick it up at the index
+    // it had in the old one.
+    got.clear();
+    assert!(
+        !sb.clusters_at(11_999, &mut got),
+        "the last line never had a cluster"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

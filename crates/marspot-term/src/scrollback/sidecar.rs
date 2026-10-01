@@ -37,6 +37,133 @@ pub(super) const HEADER_BYTES: u64 = 24;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Kind {
     Marks = 1,
+    /// One fixed slot per line saying where that line's clusters are.
+    ClusterSlots = 2,
+    /// The variable-length cluster text the slots point into.
+    ClusterText = 3,
+}
+
+/// The extension each kind lives under, beside the `.bin`.
+impl Kind {
+    pub(super) fn ext(self) -> &'static str {
+        match self {
+            Kind::Marks => "marks",
+            Kind::ClusterSlots => "clusters",
+            Kind::ClusterText => "clustertext",
+        }
+    }
+}
+
+/// Every sidecar of one `.bin`, opened and renamed as one thing.
+///
+/// They are separate files but a single lifetime: five paths move a
+/// line's numbering (crash reconciliation, reflow, quarantine,
+/// rotation, `clear`), and a path that takes one sidecar along and
+/// forgets another does not fail -- it answers with the previous
+/// generation's record for a line that now holds something else. A
+/// mark on the wrong line is what a jump lands on; a cluster on the
+/// wrong line is a typo nobody will ever spot.
+///
+/// So the five paths move this value, and which files it has is stated
+/// once here rather than five times.
+pub(super) struct LineExtras {
+    pub(super) marks: Option<std::fs::File>,
+    pub(super) cluster_slots: Option<std::fs::File>,
+    pub(super) cluster_text: Option<std::fs::File>,
+    /// Where the next cluster blob goes.  Held rather than asked of
+    /// the filesystem: appending is on the scroll path, and the length
+    /// of a file we are the only writer of is not something to pay a
+    /// `stat` for per line.
+    pub(super) cluster_text_len: u64,
+}
+
+/// Every kind, in the order a caller that wants all of them wants them.
+const ALL: [Kind; 3] = [Kind::Marks, Kind::ClusterSlots, Kind::ClusterText];
+
+impl LineExtras {
+    /// Nothing opened -- a pane whose sidecars could not be created
+    /// works exactly as one with empty ones, because they are caches.
+    pub(super) fn none() -> Self {
+        Self {
+            marks: None,
+            cluster_slots: None,
+            cluster_text: None,
+            cluster_text_len: HEADER_BYTES,
+        }
+    }
+
+    /// The writable set for a hot `.bin` of this epoch, each reset
+    /// rather than read when it belongs to another generation.
+    pub(super) fn open_hot(bin_path: &std::path::Path, epoch: u64) -> Self {
+        let mut f = ALL
+            .iter()
+            .map(|k| open_checked(&path_for(bin_path, k.ext()), epoch, *k).ok());
+        let mut out = Self {
+            marks: f.next().flatten(),
+            cluster_slots: f.next().flatten(),
+            cluster_text: f.next().flatten(),
+            cluster_text_len: HEADER_BYTES,
+        };
+        out.cluster_text_len = out.blob_end();
+        out
+    }
+
+    /// Where the blob file ends, which is where the next record goes.
+    ///
+    /// A file shorter than its own header is one `open_checked` just
+    /// created; anything longer is this generation's records, since a
+    /// file from another generation was reset rather than read.
+    fn blob_end(&self) -> u64 {
+        self.cluster_text
+            .as_ref()
+            .and_then(|f| f.metadata().ok())
+            .map(|m| m.len().max(HEADER_BYTES))
+            .unwrap_or(HEADER_BYTES)
+    }
+
+    /// The read-only set for a `.bin` that has been handed over.
+    ///
+    /// Read-only because nothing appends to a cold file, and
+    /// `open_checked` would truncate what it does not recognise --
+    /// which for a file nobody writes turns a bad epoch read into
+    /// destroyed data rather than a declined one.
+    pub(super) fn open_cold_for_read(bin_path: &std::path::Path, epoch: u64) -> Self {
+        let mut f = ALL
+            .iter()
+            .map(|k| open_for_read(&path_for(bin_path, k.ext()), epoch, *k));
+        let mut out = Self {
+            marks: f.next().flatten(),
+            cluster_slots: f.next().flatten(),
+            cluster_text: f.next().flatten(),
+            cluster_text_len: HEADER_BYTES,
+        };
+        out.cluster_text_len = out.blob_end();
+        out
+    }
+
+    /// Delete every sidecar beside `bin_path`.
+    ///
+    /// For a `.bin` that is going away rather than being handed over.
+    /// Leaving them would be safe -- they state an epoch nothing will
+    /// match again -- but a directory full of files no reader will ever
+    /// accept is how a stale file gets mistaken for a live one later.
+    pub(super) fn remove_beside(bin_path: &std::path::Path) {
+        for k in ALL {
+            let _ = std::fs::remove_file(path_for(bin_path, k.ext()));
+        }
+    }
+
+    /// Move every sidecar of `from` to sit beside `to`, as the rotation
+    /// moves the `.bin` and `.idx` it describes.
+    ///
+    /// A rename that fails leaves that kind absent on the far side,
+    /// which reads as "no record" -- the same answer a fresh pane
+    /// gives, and the reason these are caches.
+    pub(super) fn rename_beside(from: &std::path::Path, to: &std::path::Path) {
+        for k in ALL {
+            let _ = std::fs::rename(path_for(from, k.ext()), path_for(to, k.ext()));
+        }
+    }
 }
 
 /// Open the sidecar at `path` for the `.bin` whose epoch is `epoch`,

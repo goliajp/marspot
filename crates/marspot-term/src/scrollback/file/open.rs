@@ -255,29 +255,20 @@ impl FileScrollback {
 
         // Opened against the epoch this file states, so a sidecar left
         // by an earlier generation is reset rather than read.  A
-        // failure here is not a failure to open the scrollback: the
-        // marks are derived from bytes the session still has.
-        let marks = super::super::sidecar::open_checked(
-            &super::super::sidecar::path_for(&bin_path, "marks"),
-            epoch,
-            super::super::sidecar::Kind::Marks,
-        )
-        .ok();
+        // failure here is not a failure to open the scrollback: every
+        // one of these is derived from bytes the session still has.
+        let extras = super::super::sidecar::LineExtras::open_hot(&bin_path, epoch);
 
-        // The cold file states its own epoch, and the sidecar renamed
-        // alongside it on the rotation states the same one -- so a
+        // The cold file states its own epoch, and the sidecars renamed
+        // alongside it on the rotation state the same one -- so a
         // `.cold.marks` left from two rotations ago is refused.
-        let cold_marks = super::super::format::read_epoch(&cold_bin_path).and_then(|e| {
-            super::super::sidecar::open_for_read(
-                &super::super::sidecar::path_for(&cold_bin_path, "marks"),
-                e,
-                super::super::sidecar::Kind::Marks,
-            )
-        });
+        let cold_extras = super::super::format::read_epoch(&cold_bin_path)
+            .map(|e| super::super::sidecar::LineExtras::open_cold_for_read(&cold_bin_path, e))
+            .unwrap_or_else(super::super::sidecar::LineExtras::none);
 
         Ok(Self {
-            marks,
-            cold_marks,
+            extras,
+            cold_extras,
             bin_path,
             idx_path,
             cols,

@@ -5555,6 +5555,11 @@ fn push_session(
             .any(|l| l.row == row && col >= l.col_start && col <= l.col_end)
     };
 
+    // One row's cluster text, refilled per row and reused across them.
+    // A cell that has scrolled into history holds the base codepoint,
+    // so what the cluster said is keyed by where it was -- one lookup
+    // for the row, not one per cell per frame.
+    let mut row_clusters: Vec<(u16, String)> = Vec::new();
     for r in 0..grid.rows() {
         let row_y = inner_y + (r as f32) * cell_h;
         let _baseline_y = row_y + ascent;
@@ -5615,6 +5620,7 @@ fn push_session(
         // Glyphs.  Skip the cursor cell when the cursor is solid —
         // we re-emit it after with BG colour so the glyph reads
         // inverted on the white cursor block (mirrors render.rs).
+        grid.row_clusters_at_view(view.view_offset, r, &mut row_clusters);
         let cursor = grid.cursor();
         let solid_cursor = view.view_offset == 0
             && view.cursor_visible
@@ -5644,7 +5650,8 @@ fn push_session(
             // whole cluster; everything else takes the path it always
             // did, byte for byte.
             let cluster = grid
-                .cluster_text_at_view(view.view_offset, c as u16, r, &cell)
+                .cluster_text(&cell)
+                .or_else(|| marspot_term::grid::cluster_in_row(&row_clusters, c as u16))
                 .map(str::to_string);
             let (entry, is_color) = match cluster {
                 Some(text) => match resolve_cluster_glyph(
@@ -5853,7 +5860,12 @@ fn push_session(
             };
             // Same split as the main pass: a cluster under the cursor
             // is drawn whole, or its index would be drawn as a glyph.
-            let cursor_glyph = match grid.cluster_text_at_view(0, col, row, &cell) {
+            let mut cursor_row_clusters = Vec::new();
+            grid.row_clusters_at_view(0, row, &mut cursor_row_clusters);
+            let cursor_glyph = match grid
+                .cluster_text(&cell)
+                .or_else(|| marspot_term::grid::cluster_in_row(&cursor_row_clusters, col))
+            {
                 Some(text) => {
                     let owned = text.to_string();
                     resolve_cluster_glyph(

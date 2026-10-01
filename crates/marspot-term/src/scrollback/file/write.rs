@@ -75,26 +75,18 @@ impl FileScrollback {
         // 4) Rename hot → cold.
         std::fs::rename(&self.bin_path, &self.cold_bin_path)?;
         std::fs::rename(&self.idx_path, &self.cold_idx_path)?;
-        // The marks describe the file that just became cold, and its
-        // epoch went with it, so they are still its marks.  Renaming
+        // The sidecars describe the file that just became cold, and its
+        // epoch went with it, so they are still its sidecars.  Renaming
         // keeps them readable for as long as the cold tier is; the next
-        // rotation overwrites this pair the way it overwrites the other
-        // two.
-        {
-            let hot = super::super::sidecar::path_for(&self.bin_path, "marks");
-            let cold = super::super::sidecar::path_for(&self.cold_bin_path, "marks");
-            let _ = std::fs::remove_file(&cold);
-            let _ = std::fs::rename(&hot, &cold);
-            // Open it for reading now, with the epoch the handed-over
-            // file still carries -- `self.epoch` becomes the new file's
-            // further down.  Without this the marks of everything just
-            // rotated are unreadable until the pane is reopened.
-            self.cold_marks = super::super::sidecar::open_for_read(
-                &cold,
-                self.epoch,
-                super::super::sidecar::Kind::Marks,
-            );
-        }
+        // rotation overwrites them the way it overwrites the other two
+        // files.
+        super::super::sidecar::LineExtras::rename_beside(&self.bin_path, &self.cold_bin_path);
+        // Open them for reading now, with the epoch the handed-over
+        // file still carries -- `self.epoch` becomes the new file's
+        // further down.  Without this everything just rotated is
+        // unreadable until the pane is reopened.
+        self.cold_extras =
+            super::super::sidecar::LineExtras::open_cold_for_read(&self.cold_bin_path, self.epoch);
         // 5) Reopen fresh hot pair.
         let bin_w = std::fs::OpenOptions::new()
             .read(true)
@@ -105,19 +97,14 @@ impl FileScrollback {
         self.epoch = new_epoch();
         Self::write_header(&mut bin, self.epoch)?;
         bin.flush();
-        // The sidecar is keyed by index WITHIN the hot file, and the
+        // The sidecars are keyed by index WITHIN the hot file, and the
         // new hot file starts those indices over.  Reopening against
-        // the new epoch resets it; without this, the new file's line 1
-        // is handed the mark filed against the old file's line 1, and
-        // a jump lands on it.  Marks for the handed-over lines go with
-        // their file -- `mark_at` already answers "no mark" for
-        // anything older than the current hot file.
-        self.marks = super::super::sidecar::open_checked(
-            &super::super::sidecar::path_for(&self.bin_path, "marks"),
-            self.epoch,
-            super::super::sidecar::Kind::Marks,
-        )
-        .ok();
+        // the new epoch resets them; without this, the new file's line
+        // 1 is handed what was filed against the old file's line 1, and
+        // a jump lands on it.  What belongs to the handed-over lines
+        // goes with their file -- `mark_at` already answers "no mark"
+        // for anything older than the current hot file.
+        self.extras = super::super::sidecar::LineExtras::open_hot(&self.bin_path, self.epoch);
         let idx_w = std::fs::OpenOptions::new()
             .read(true)
             .append(true)
@@ -163,7 +150,7 @@ impl FileScrollback {
     /// path pays nothing for the marks it does not have.
     pub(in crate::scrollback) fn mark_last_line(&self, mark: crate::grid::PromptMark) {
         use std::os::unix::fs::FileExt;
-        let Some(f) = self.marks.as_ref() else {
+        let Some(f) = self.extras.marks.as_ref() else {
             return;
         };
         if self.total_lines == 0 || self.total_lines <= self.hot_first_line {
@@ -174,6 +161,20 @@ impl FileScrollback {
             &mark.to_bytes(),
             super::super::sidecar::HEADER_BYTES + local * 2,
         );
+    }
+
+    /// File the clusters of the line most recently pushed.
+    ///
+    /// Called only for the lines that have any, so a stream of plain
+    /// text never reaches the sidecar at all -- the caller tests for
+    /// emptiness, because that test is one `is_empty` on the scroll
+    /// path and this is two writes.
+    pub(in crate::scrollback) fn cluster_last_line(&mut self, clusters: &[(u16, String)]) {
+        if self.total_lines == 0 || self.total_lines <= self.hot_first_line {
+            return;
+        }
+        let local = self.total_lines - 1 - self.hot_first_line;
+        self.extras.put_clusters(local, clusters);
     }
 
     pub fn push_line(&mut self, line: &[crate::grid::Cell], wrapped: bool) {

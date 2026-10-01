@@ -54,12 +54,40 @@ impl FileScrollback {
             if l >= self.cold_total_lines {
                 return none;
             }
-            (self.cold_marks.as_ref(), l)
+            (self.cold_extras.marks.as_ref(), l)
         } else {
-            (self.marks.as_ref(), line_idx as u64 - self.hot_first_line)
+            (self.extras.marks.as_ref(), line_idx as u64 - self.hot_first_line)
         };
         let Some(f) = file else { return none };
         Self::read_mark(f, local)
+    }
+
+    /// The clusters on logical line `line_idx`, appended to `out`.
+    ///
+    /// Same two tiers and same arithmetic as [`Self::mark_at`] -- a
+    /// line older than the cold file has gone with it and has no
+    /// clusters, which is the answer a missing sidecar gives too, and
+    /// reads on screen as the base codepoints the record itself holds.
+    pub(in crate::scrollback) fn clusters_at(
+        &self,
+        line_idx: usize,
+        out: &mut Vec<(u16, String)>,
+    ) -> bool {
+        if line_idx >= self.total_lines as usize {
+            return false;
+        }
+        let (extras, local) = if (line_idx as u64) < self.hot_first_line {
+            let Some(l) = (line_idx as u64).checked_sub(self.cold_first_line) else {
+                return false;
+            };
+            if l >= self.cold_total_lines {
+                return false;
+            }
+            (&self.cold_extras, l)
+        } else {
+            (&self.extras, line_idx as u64 - self.hot_first_line)
+        };
+        extras.read_clusters(local, out)
     }
 
     fn read_mark(f: &std::fs::File, local: u64) -> crate::grid::PromptMark {
@@ -301,12 +329,7 @@ impl FileScrollback {
         self.bin.borrow_mut().flush();
         if super::super::format::stamp_epoch_in_place(&self.bin_path, fresh).is_ok() {
             self.epoch = fresh;
-            self.marks = super::super::sidecar::open_checked(
-                &super::super::sidecar::path_for(&self.bin_path, "marks"),
-                fresh,
-                super::super::sidecar::Kind::Marks,
-            )
-            .ok();
+            self.extras = super::super::sidecar::LineExtras::open_hot(&self.bin_path, fresh);
         }
         // Drop the cold tier entirely.
         self.cold_bin_for_read = None;
@@ -315,6 +338,8 @@ impl FileScrollback {
         self.cold_total_lines = 0;
         let _ = std::fs::remove_file(&self.cold_bin_path);
         let _ = std::fs::remove_file(&self.cold_idx_path);
+        self.cold_extras = super::super::sidecar::LineExtras::none();
+        super::super::sidecar::LineExtras::remove_beside(&self.cold_bin_path);
         // Invalidate read-side mmaps — they cover pre-truncate bytes.
         let bp = self.bin_mmap_ptr.get();
         let bl = self.bin_mmap_len.get();
