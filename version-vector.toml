@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.202"  # a re-armed run finds its step by name
+shell   = "0.7.203"  # a fable pane needs room in fable, not just in the week
 core    = "0.12.250"  # the rasteriser takes a font id, not a CoreText font
 session = "0.11.132"  # a pane carries the token it reports with

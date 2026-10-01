@@ -21,6 +21,15 @@ pub(super) struct ScanResult {
     /// `shelld_session_id → what cc is doing there`.  Reported to the
     /// shell, which folds it into the pane's state machine.
     pub(super) new_activity: HashMap<u64, CcActivity>,
+    /// `shelld_session_id → the model it is working in`, short token
+    /// (`fable-5`, `opus-5-5`).
+    ///
+    /// The badge already carries this for display. The quota chooser
+    /// needs it as a fact: some projects can only run on Fable, and
+    /// Fable has a cap of its own on top of the account's windows, so
+    /// moving such a pane to an account with a fresh week but a spent
+    /// Fable moves it nowhere.
+    pub(super) new_models: HashMap<u64, String>,
     /// `shelld_session_id → (claude subtree CPU ns, sampled at)`.
     /// Taken in the same pass as the bindings so the idle policy
     /// compares like with like.
@@ -469,7 +478,7 @@ impl WorkerCtx {
                     "tick.shelld_list_failed",
                     format!("{e}"),
                 ));
-                return ScanResult { new_mapping, new_meta, new_activity, new_cpu, new_vetoes, scanned_at, sessions_seen, log_lines };
+                return ScanResult { new_mapping, new_meta, new_activity, new_models: HashMap::new(), new_cpu, new_vetoes, scanned_at, sessions_seen, log_lines };
             }
         };
         let procs = pidtree::list_all_procs();
@@ -786,7 +795,14 @@ impl WorkerCtx {
         // Bounded growth: both per-pane maps follow the panes.
         self.last_model_by_pane.retain(|sid, _| sessions_seen.contains(sid));
         self.banner_tried.retain(|sid, _| sessions_seen.contains(sid));
-        ScanResult { new_mapping, new_meta, new_activity, new_cpu, new_vetoes, scanned_at, sessions_seen, log_lines }
+        // What the badge already knows, handed to the chooser as a
+        // fact rather than re-derived from the badge's text.
+        let new_models = self
+            .last_model_by_pane
+            .iter()
+            .map(|(sid, m)| (*sid, m.model.clone()))
+            .collect();
+        ScanResult { new_mapping, new_meta, new_activity, new_models, new_cpu, new_vetoes, scanned_at, sessions_seen, log_lines }
     }
 
     /// Reverse-lookup: encoded project dir → newest known session
