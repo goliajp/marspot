@@ -65,7 +65,7 @@ fn main() {
     std::thread::sleep(Duration::from_millis(500));
 
     // Stage the replacement on the same session id, as `begin_swap` does.
-    let mut new = Session::spawn_with_id(&bin, COLS, ROWS, Some(id));
+    let new = Session::spawn_with_id(&bin, COLS, ROWS, Some(id));
     let staged = Instant::now() + Duration::from_secs(10);
     while new.reader.seq() == 0 {
         if Instant::now() >= staged {
