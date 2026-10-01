@@ -116,12 +116,9 @@ fn command(to: Agent, to_home: &Path, resume: Option<&str>) -> Option<Vec<u8>> {
     let cmd = match to {
         Agent::Claude => {
             let mut c = PtyCommand::new("claude").env("CLAUDE_CONFIG_DIR", home);
-            // Same as the reclaim path: a pane marspot starts gets a
-            // submit hook, so what is typed into it afterwards is
-            // confirmed by the agent rather than read off the screen.
-            if let Some(settings) = crate::receipts::claude_settings_arg() {
-                c = c.arg("--settings").quoted_arg(settings);
-            }
+            // No submit receipt hook -- see
+            // `receipts::claude_settings_arg` for why nothing asks for
+            // one any more.
             match resume {
                 Some(id) => c.arg("--resume").arg(id),
                 None => c,
@@ -307,16 +304,15 @@ mod tests {
             "{claude}"
         );
         assert!(claude.ends_with(" --resume u-1\r"), "{claude}");
-        // A Claude pane marspot starts reports its own submits, and
-        // the flag has to stay next to its document -- `--settings`
-        // landing beside `--resume` is exactly what a separate list of
-        // quoted arguments produced.
-        assert!(
-            claude.contains("--settings '{\"hooks\""),
-            "the submit hook goes on the line, after its flag: {claude}"
-        );
-        // Codex has no equivalent flag, so its line is untouched.
-        assert!(!s(command(Agent::Codex, h, None).unwrap()).contains("--settings"));
+        // Neither agent is handed anything that runs on the person's
+        // keystrokes. A Claude pane used to carry a `UserPromptSubmit`
+        // hook so its submits could be confirmed; nothing reads a
+        // receipt now, and the hook forked marspot on every prompt
+        // they sent by hand.
+        for line in [&claude, &s(command(Agent::Codex, h, None).unwrap())] {
+            assert!(!line.contains("--settings"), "{line}");
+            assert!(!line.contains("UserPromptSubmit"), "{line}");
+        }
     }
 
     fn claude_history(dir: &Path, uuid: &str, body: &str) -> PathBuf {

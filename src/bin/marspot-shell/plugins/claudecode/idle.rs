@@ -505,9 +505,7 @@ pub(super) fn reclaim_op(
     // the next thing typed into it is confirmed rather than guessed
     // at. Absent when marspot cannot name its own binary; the pane
     // then works exactly as it did before.
-    if let Some(settings) = crate::receipts::claude_settings_arg() {
-        cmd = cmd.arg("--settings").quoted_arg(settings);
-    }
+    // No submit receipt hook -- see `receipts::claude_settings_arg`.
     // Brought back where it lives. Same reason as the profile switch:
     // `--resume` binds the session to the directory it is run from, and
     // the pane's shell may have wandered since it started.
