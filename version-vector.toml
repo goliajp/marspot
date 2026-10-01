@@ -28,4 +28,4 @@
 
 shell   = "0.7.196"  # a screen it cannot read is no longer proof the line was sent
 core    = "0.12.250"  # the rasteriser takes a font id, not a CoreText font
-session = "0.11.130"  # the engine asks the platform, not Darwin
+session = "0.11.131"  # a pane can be handed something, after the sweep

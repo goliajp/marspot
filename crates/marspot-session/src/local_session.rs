@@ -230,6 +230,10 @@ impl LocalSession {
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),
+            // This is the spawn a pane actually goes through -- L3
+            // owns the PTY.  Whatever marspot mints for a pane is
+            // applied here, after the sweep above.
+            env_set: Vec::new(),
         })?;
         let child_pid = pty.child_pid();
         let pty = Arc::new(pty);

@@ -60,6 +60,20 @@ pub struct PtyConfig {
     /// Only the parent-side snapshot is filtered; the parent's own
     /// env is untouched (L3 self-execv still sees its vars).
     pub env_remove_prefixes: Vec<String>,
+    /// Variables to set in the child, applied **after** the removals.
+    ///
+    /// The order is the whole point. `env_remove_prefixes` exists
+    /// because a pane must never inherit the launcher's session
+    /// identity, and that stays true: whatever came down from the
+    /// parent is stripped first. What goes in here is minted by
+    /// marspot for *this* pane, in this spawn, so the rule it has to
+    /// respect -- a pane gets the user's environment, never another
+    /// session's -- is not weakened by it.
+    ///
+    /// Without this there is no way to hand a pane anything at all:
+    /// every `MARSPOT_` name is removed by the filter it would have
+    /// had to pass through.
+    pub env_set: Vec<(String, String)>,
 }
 
 /// Environment prefixes a pane's shell must never inherit.
@@ -140,7 +154,7 @@ impl Pty {
         // `environ` for both the child env and its PATH search) pick
         // it up.  Parent-side env is never modified.
         let filtered_env: Option<(Vec<CString>, Vec<*const c_char>)> =
-            if config.env_remove_prefixes.is_empty() {
+            if config.env_remove_prefixes.is_empty() && config.env_set.is_empty() {
                 None
             } else {
                 use std::os::unix::ffi::OsStrExt;
@@ -163,6 +177,18 @@ impl Pty {
                         // An interior NUL can't be expressed in envp;
                         // such an entry is already unusable — drop it.
                         Err(_) => continue,
+                    }
+                }
+                // After the removals, so a name the filter would have
+                // taken out can still be handed to this pane on
+                // purpose. Anything already present under the same
+                // name is dropped -- the inherited one is the
+                // launcher's, this one is ours.
+                for (k, v) in &config.env_set {
+                    let prefix = format!("{k}=");
+                    kept.retain(|c| !c.to_bytes().starts_with(prefix.as_bytes()));
+                    if let Ok(c) = CString::new(format!("{k}={v}")) {
+                        kept.push(c);
                     }
                 }
                 let mut ptrs: Vec<*const c_char> = kept.iter().map(|c| c.as_ptr()).collect();
@@ -527,6 +553,51 @@ mod tests {
         );
     }
 
+    /// What marspot mints for a pane reaches it, and the launcher's
+    /// copy of the same name does not.
+    ///
+    /// The two have to be read together. `SESSION_ENV_PREFIXES`
+    /// removes every `MARSPOT_` name on the way into a pane, for two
+    /// incidents' worth of reason, so a variable marspot wants to
+    /// *give* a pane has to be applied after that sweep or it is
+    /// swept with everything else. The inherited value losing to the
+    /// fresh one is the same rule from the other side: a pane gets
+    /// this spawn's value, never the launcher's.
+    #[test]
+    fn a_var_set_for_this_pane_outlives_the_filter_that_removes_its_family() {
+        // SAFETY: test/example code, single-threaded at this point.
+        unsafe { std::env::set_var("MARSPOT_TEST_GIVEN", "the launcher's") };
+        let mut pty = Pty::spawn(PtyConfig {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                r#"echo "G=${MARSPOT_TEST_GIVEN:-UNSET} S=${MARSPOT_TEST_SWEPT:-UNSET}""#.into(),
+            ],
+            size: TerminalSize::default(),
+            argv0: None,
+            cwd: None,
+            env_remove_prefixes: vec!["MARSPOT_TEST_".into()],
+            env_set: vec![("MARSPOT_TEST_GIVEN".into(), "this pane's".into())],
+        })
+        .expect("spawn /bin/sh");
+        let output = drain_until_eof_or_timeout(&mut pty, Duration::from_secs(2));
+        let s = String::from_utf8_lossy(&output);
+        assert!(
+            s.contains("G=this pane's"),
+            "the value minted for this pane has to survive the sweep \
+             that removes its whole family -- if the sweep ran last it \
+             would read UNSET. got: {s:?}"
+        );
+        assert!(
+            !s.contains("the launcher's"),
+            "and the inherited one must not be there beside it: {s:?}"
+        );
+        assert!(
+            s.contains("S=UNSET"),
+            "a name nobody set for this pane is still swept: {s:?}"
+        );
+    }
+
     /// env_remove_prefixes strips matching vars from the child while
     /// keeping everything else (the child still needs PATH, HOME, …).
     /// Guards the 2026-07-03 class of bug: MARSPOT_SESSION_ID leaking
@@ -552,6 +623,7 @@ mod tests {
             argv0: None,
             cwd: None,
             env_remove_prefixes: vec!["MARSPOT_TEST_".into()],
+            env_set: Vec::new(),
         })
         .expect("spawn /bin/sh");
         let output = drain_until_eof_or_timeout(&mut pty, Duration::from_secs(2));
