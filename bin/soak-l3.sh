@@ -71,7 +71,7 @@ trap cleanup EXIT
 # is the only reason it was ever noticed.
 for probe in l3_echo_probe l3_multi_probe l3_resize_probe \
              l3_scroll_probe l3_selection_probe l3_latency_probe \
-             l3_crash_probe l3_swap_probe; do
+             l3_crash_probe; do
   dev_require_probe "$probe" || exit 1
 done
 [[ -x "$SESSION_BIN" ]]      || fail "marspot-session not built at $SESSION_BIN"
@@ -209,7 +209,28 @@ now=$(count_sandbox_sessions)
   || fail "crash: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
 echo "  crash-isolation OK — one L3 killed, sibling unaffected, dead shm still readable, no orphans"
 
-# Silent swap (5a): the load-bearing mechanism — a replacement L3 on the
+# Silent swap (5a) -- NOT COVERED, and not for want of a probe.
+#
+# This section used to run `l3_swap_probe` against what `begin_pane_swap`
+# does: spawn a replacement L3 on the SAME session id, wait for it to
+# replay the bytelog and publish, then kill the old one.  That cannot
+# work.  `marspot-session` takes a lock on `sessions/<id>/` and refuses
+# to start when another live L3 holds it -- a 2026-07-28 defence against
+# two writers on one session -- so the replacement exits before
+# publishing and `try_promote` never promotes.  Reproduced 2026-10-01:
+# `l3.session_dir_locked ... refusing`, `session.local.uds_bind_failed`.
+#
+# Both callers of `begin_pane_swap` are user-reachable (moving focus off a
+# pane with a staged update, and the refresh glyph in its title strip), so
+# this is a defect on the silent-update path, not dead code.
+#
+# What the product actually does is Amendment 16: on SIGTERM an L3 compares
+# its own fingerprint with `current/marspot-session` and execv's itself,
+# keeping its pid, PTY master and listener.  That is what should be gated
+# here -- and `bin/soak-long-connection-execv.sh`, which claims to cover
+# it, has been passing since June by running a `marspot-shelld` binary
+# left in `target/` for a daemon RFC-003 deleted.  Neither half of the
+# handover is gated today.
 # same session replays the bytelog (continuity), takes over after the old
 # is killed, no zombie. This is what L3Conn::begin_swap/try_promote drive.
 echo "--- silent-swap ---" | tee -a "$RUN_LOG"
