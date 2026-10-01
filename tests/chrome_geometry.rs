@@ -500,3 +500,173 @@ mod settings_modal {
         });
     }
 }
+
+/// The table, which the process monitor's two columns are built from
+/// and which is the first component here that scrolls.
+mod table {
+    use marspot::ui::components::table::{
+        ColumnWidth, RowKind, SortDir, Table, TableColumn, TableRow, TableStyle,
+    };
+    use marspot_term::layout::{Alignment, Rect};
+
+    fn col(header: &str, width: ColumnWidth, align: Alignment) -> TableColumn {
+        TableColumn { header: header.into(), width, align, sort: None, sortable: true }
+    }
+
+    fn rows(n: usize) -> Vec<TableRow> {
+        (0..n)
+            .map(|i| TableRow {
+                cells: vec![format!("row {i}"), format!("{i}")],
+                depth: 0,
+                kind: if i % 4 == 0 { RowKind::Section } else { RowKind::Data },
+            })
+            .collect()
+    }
+
+    fn r(x: &Rect) -> String {
+        format!("{:.1},{:.1} {:.1}x{:.1}", x.x, x.y_top, x.w, x.h)
+    }
+
+    fn table<'a>(
+        cols: &'a [TableColumn],
+        rows: &'a [TableRow],
+        w: f64,
+        h: f64,
+        scroll: f64,
+    ) -> Table<'a> {
+        Table {
+            rect: Rect { x: 100.0, y_top: 50.0, w, h },
+            columns: cols,
+            rows,
+            style: TableStyle::default(),
+            selected: Some(2),
+            scroll_y: scroll,
+            show_header: true,
+        }
+    }
+
+    fn two_cols() -> Vec<TableColumn> {
+        vec![
+            col("Name", ColumnWidth::Flex(2.0), Alignment::CenterLeft),
+            col("CPU%", ColumnWidth::Px(80.0), Alignment::CenterRight),
+        ]
+    }
+
+    fn dump(t: &Table<'_>) -> String {
+        let mut out = format!("header {}\nbody {}\n", r(&t.header_rect()), r(&t.body_rect()));
+        for (i, (x, w)) in t.column_x_widths().iter().enumerate() {
+            out += &format!("col[{i}] x {x:.1} w {w:.1}\n");
+        }
+        for i in 0..t.rows.len() {
+            out += &format!("row[{i}] {}\n", r(&t.row_rect(i)));
+        }
+        out
+    }
+
+    /// The header is sticky and the body is what is left; rows step by
+    /// `row_h` from the body's top, and the Flex column takes what the
+    /// Px column does not.
+    #[test]
+    fn the_header_is_sticky_and_the_rows_step_below_it() {
+        let cols = two_cols();
+        let rs = rows(6);
+        assert_eq!(
+            dump(&table(&cols, &rs, 400.0, 120.0, 0.0)),
+            "header 100.0,50.0 400.0x24.0\n\
+             body 100.0,74.0 400.0x96.0\n\
+             col[0] x 100.0 w 320.0\n\
+             col[1] x 420.0 w 80.0\n\
+             row[0] 100.0,74.0 400.0x22.0\n\
+             row[1] 100.0,96.0 400.0x22.0\n\
+             row[2] 100.0,118.0 400.0x22.0\n\
+             row[3] 100.0,140.0 400.0x22.0\n\
+             row[4] 100.0,162.0 400.0x22.0\n\
+             row[5] 100.0,184.0 400.0x22.0\n"
+        );
+        let _ = SortDir::Asc;
+    }
+
+    /// Scrolling moves the rows and leaves the header where it is --
+    /// which is the whole reason the header has its own rect.
+    #[test]
+    fn scrolling_moves_the_rows_and_not_the_header() {
+        let cols = two_cols();
+        let rs = rows(6);
+        let t = table(&cols, &rs, 400.0, 120.0, 30.0);
+        assert_eq!(r(&t.header_rect()), "100.0,50.0 400.0x24.0");
+        assert_eq!(r(&t.row_rect(0)), "100.0,44.0 400.0x22.0");
+        assert_eq!(r(&t.row_rect(2)), "100.0,88.0 400.0x22.0");
+        // A row scrolled above the body is not clickable there.
+        assert_eq!(t.hit_test_row(200.0, 50.0), None);
+        assert_eq!(t.hit_test_row(200.0, 90.0), Some(2));
+    }
+
+    /// `paint` used to cull only rows *entirely* outside the body, so
+    /// the one straddling the edge was drawn whole: at 400x120 the body
+    /// ends at 170 and row 4 runs to 184, fourteen pixels onto whatever
+    /// the table is sitting on. There is no scissor in the UI paint
+    /// path, so the component has to say which rows are drawable, and
+    /// `paint` has to use that and nothing else.
+    #[test]
+    fn only_rows_that_fit_the_body_whole_are_drawable() {
+        let cols = two_cols();
+        let rs = rows(6);
+        let t = table(&cols, &rs, 400.0, 120.0, 0.0);
+        let body = t.body_rect();
+        assert_eq!(t.drawable_rows().collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+        for i in t.drawable_rows() {
+            let rr = t.row_rect(i);
+            assert!(
+                rr.y_top >= body.y_top - 1e-9 && rr.y_top + rr.h <= body.y_top + body.h + 1e-9,
+                "row {i} at {rr:?} is outside the body {body:?}"
+            );
+        }
+        // Scrolled by 8px the top row no longer fits, and the next one
+        // down does not gain a place: the body is 96px, a row is 22,
+        // and an 8px offset leaves 82px below the top edge -- three
+        // rows, not four. A list mid-scroll shows one fewer than a
+        // list at rest, which is what having no scissor costs.
+        let t = table(&cols, &rs, 400.0, 120.0, 8.0);
+        assert_eq!(t.drawable_rows().collect::<Vec<_>>(), vec![1, 2, 3]);
+        // At exactly one row down it is back to four.
+        let t = table(&cols, &rs, 400.0, 120.0, 22.0);
+        assert_eq!(t.drawable_rows().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+    }
+
+    /// Px columns adding up to more than the table used to be handed
+    /// out at full width regardless, so the last ones sat past the
+    /// right edge: two 300px columns in a 400px table reached 700
+    /// against an edge at 500. They shrink in proportion instead, so
+    /// every column keeps a share and none escapes.
+    #[test]
+    fn px_columns_wider_than_the_table_shrink_instead_of_overflowing() {
+        let cols = vec![
+            col("A", ColumnWidth::Px(300.0), Alignment::CenterLeft),
+            col("B", ColumnWidth::Px(300.0), Alignment::CenterLeft),
+            col("C", ColumnWidth::Flex(1.0), Alignment::CenterLeft),
+        ];
+        let rs = rows(1);
+        let t = table(&cols, &rs, 400.0, 120.0, 0.0);
+        let xw = t.column_x_widths();
+        assert_eq!(
+            xw.iter().map(|(x, w)| format!("{x:.1}+{w:.1}")).collect::<Vec<_>>(),
+            ["100.0+200.0", "300.0+200.0", "500.0+0.0"],
+        );
+        let right = t.rect.x + t.rect.w;
+        for (i, (x, w)) in xw.iter().enumerate() {
+            assert!(x + w <= right + 1e-9, "col {i} ends at {} past {right}", x + w);
+        }
+    }
+
+    /// The ordinary case is untouched: the columns still fill the table
+    /// exactly, which is what the shrink must not change.
+    #[test]
+    fn columns_that_fit_still_fill_the_table_exactly() {
+        let cols = two_cols();
+        let rs = rows(1);
+        let t = table(&cols, &rs, 400.0, 120.0, 0.0);
+        let xw = t.column_x_widths();
+        let (x, w) = xw.last().copied().unwrap();
+        assert_eq!(x + w, t.rect.x + t.rect.w);
+    }
+}
