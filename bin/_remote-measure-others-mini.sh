@@ -132,7 +132,14 @@ build_one_cmd() {
     paths+=("$ROOT/bench/scenarios/$s.bin")
   done
   write_live_matrix_script "$script" "$marker" "$TRIALS" "${paths[@]}"
-  echo "bash $script; exit"
+  # Run it by its own shebang rather than naming a shell here. The
+  # generator moved to zsh when the timing moved to `$EPOCHREALTIME`
+  # (macOS bash is 3.2 and has no such variable) and this line was left
+  # saying `bash`, so every terminal was handed a zsh script to run
+  # under bash: it died on `zmodload` at line 2, wrote no marker, and
+  # all five drivers timed out looking for one. Naming the shell twice
+  # is what let the two drift apart; now only the shebang says it.
+  echo "$script; exit"
 }
 
 # ---- pre-flight inventory + trap cleanup ----------------------------
@@ -360,8 +367,10 @@ for t in "${TERMS[@]}"; do
     terminal) WIN_terminal="$(bin/drivers/terminal.sh run-single "$cmd" 2>&1)" || launch_rc=$? ;;
     marspot)
       # marspot.sh expects an executable script as MARSPOT_SHELL —
-      # wrap the same cat+/usr/bin/time cmd the GUI drivers got, so
-      # the test surface is bit-identical across all five terminals.
+      # wrap the same command the GUI drivers got, so the test surface
+      # is bit-identical across all five terminals. The wrapper only
+      # invokes it; which shell the measurement itself runs under is
+      # the measurement script's own shebang.
       wrapper=$(mktemp /tmp/marspot-wrapper-XXXXXX)
       printf '#!/bin/bash\n%s\n' "$cmd" > "$wrapper"
       chmod 0755 "$wrapper"
@@ -487,6 +496,15 @@ def probe_host():
         out["os"] = f"{prod} {ver} (build {build})"
     except Exception:
         out["os"] = "unknown"
+    # What else the machine was doing. These are absolute throughput
+    # numbers, and the published table says they were taken on an idle
+    # host -- so the condition has to travel with them rather than live
+    # in whoever remembers running it. Load only depresses a number, so
+    # a figure taken at load 6 is a floor for the same terminal idle.
+    try:
+        out["load1_at_capture"] = round(os.getloadavg()[0], 2)
+    except Exception:
+        pass
     return out
 
 ROOT = os.environ.get("PWD", os.getcwd())
