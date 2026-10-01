@@ -153,6 +153,20 @@ fn handle(stream: UnixStream, receipts: &Receipts) {
 /// config are untouched -- this adds one more `UserPromptSubmit`
 /// entry beside whatever is already there.
 ///
+/// **The hook can never fail.** Claude blocks the submit when a
+/// `UserPromptSubmit` hook exits non-zero -- measured, not guessed:
+///
+///     UserPromptSubmit operation blocked by hook:
+///     [... --submit-receipt]: unknown option `--submit-receipt`
+///
+/// That is a pane the person cannot type into at all, and it is one
+/// version skew away at any time: marspot replaces its own binaries
+/// and re-execs, the bundle and `binaries/current` are different
+/// paths, and a pane's claude outlives all of it. So the command ends
+/// in `; exit 0` and sends both streams to /dev/null. A receipt that
+/// does not arrive costs us a fallback to reading the screen; a hook
+/// that fails costs the person their terminal.
+///
 /// `None` when marspot cannot name its own binary, or when the path
 /// is one that cannot be quoted. A pane started without it simply has
 /// no receipts.
@@ -166,8 +180,9 @@ pub fn claude_settings_arg() -> Option<String> {
     if exe.contains(['"', '\'', '\\']) {
         return None;
     }
+    let cmd = format!("{exe} --submit-receipt >/dev/null 2>&1; exit 0");
     Some(format!(
-        r#"{{"hooks":{{"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"{exe} --submit-receipt"}}]}}]}}}}"#
+        r#"{{"hooks":{{"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"{cmd}"}}]}}]}}}}"#
     ))
 }
 
@@ -390,13 +405,65 @@ mod tests {
             .and_then(|a| a.arr().first())
             .and_then(|h| h.str_at("command"))
             .expect("a command");
-        assert!(cmd.ends_with(" --submit-receipt"), "{cmd:?}");
+        assert!(cmd.contains(" --submit-receipt"), "{cmd:?}");
         assert!(
             cmd.starts_with(std::env::current_exe().unwrap().to_str().unwrap()),
             "it has to be this binary, not a name on PATH: {cmd:?}"
         );
         // And it survives the quoting it will go through.
         assert!(!arg.contains('\''), "single quotes cannot be quoted this way");
+    }
+
+    /// The hook has to exit 0 whatever happens to the binary it names.
+    ///
+    /// Claude blocks the submit when a `UserPromptSubmit` hook fails,
+    /// so a pane whose marspot moved, was replaced by a version
+    /// without this flag, or is simply missing would stop accepting
+    /// typing altogether. Run as a shell would run it, against a
+    /// binary that does not exist, and against one that rejects the
+    /// flag.
+    #[test]
+    fn the_hook_cannot_block_the_person_from_typing() {
+        let arg = claude_settings_arg().expect("a path");
+        let v = crate::plugins::handoff::json::parse(&arg).expect("valid JSON");
+        let template = v
+            .at(&["hooks", "UserPromptSubmit"])
+            .and_then(|a| a.arr().first())
+            .and_then(|e| e.at(&["hooks"]))
+            .and_then(|a| a.arr().first())
+            .and_then(|h| h.str_at("command"))
+            .expect("a command")
+            .to_string();
+
+        let run = |cmd: &str| {
+            std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(cmd)
+                .output()
+                .expect("sh runs")
+        };
+
+        // The real one, with no socket listening: still 0.
+        let out = run(&template);
+        assert!(out.status.success(), "a receipt nobody is listening for: {out:?}");
+
+        // A marspot that is not there -- the version-skew case.
+        let gone = template.replacen(
+            std::env::current_exe().unwrap().to_str().unwrap(),
+            "/nonexistent/marspot-shell",
+            1,
+        );
+        let out = run(&gone);
+        assert!(out.status.success(), "a binary that is gone: {out:?}");
+        assert!(out.stderr.is_empty(), "and it says nothing to the person");
+
+        // One that rejects the flag -- an older marspot.
+        let old = template.replacen(
+            std::env::current_exe().unwrap().to_str().unwrap(),
+            "/bin/ls --definitely-not-a-flag",
+            1,
+        );
+        assert!(run(&old).status.success(), "a marspot too old to know the flag");
     }
 
     #[test]
