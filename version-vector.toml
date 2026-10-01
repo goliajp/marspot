@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.195"  # the permission model that enforced nothing is gone
-core    = "0.12.246"  # pane numbers stop allocating every frame
+core    = "0.12.247"  # the context menu lays itself out with the tree
 session = "0.11.129"  # owning the PTY is the default, not an opt-in
