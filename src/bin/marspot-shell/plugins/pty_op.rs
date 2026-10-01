@@ -1392,18 +1392,46 @@ impl PaneSession for OpRunner {
 /// check is the constructor: an unsafe value cannot reach the line.
 pub struct PtyCommand {
     program: String,
-    args: Vec<String>,
+    /// In the order they were given.  A flag and its value are
+    /// adjacent on the line or they are not a flag and its value --
+    /// keeping quoted arguments in a list of their own put
+    /// `--settings` next to `--resume` and the document at the end.
+    args: Vec<Arg>,
     env: Vec<(String, String)>,
     clear_first: bool,
 }
 
+enum Arg {
+    Bare(String),
+    Quoted(String),
+}
+
 impl PtyCommand {
     pub fn new(program: impl Into<String>) -> Self {
-        Self { program: program.into(), args: Vec::new(), env: Vec::new(), clear_first: false }
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            clear_first: false,
+        }
     }
 
     pub fn arg(mut self, a: impl Into<String>) -> Self {
-        self.args.push(a.into());
+        self.args.push(Arg::Bare(a.into()));
+        self
+    }
+
+    /// An argument wrapped in single quotes.
+    ///
+    /// `shell_safe` rejects the whole class of expansion characters,
+    /// which is right for a bare word and wrong for a JSON document --
+    /// `--settings '{"hooks":…}'` is a legitimate argument that can
+    /// never pass it. Inside single quotes a shell expands nothing, so
+    /// the only character that matters is the single quote itself, and
+    /// that is still refused rather than escaped. Same rule as `env`,
+    /// narrower proof.
+    pub fn quoted_arg(mut self, a: impl Into<String>) -> Self {
+        self.args.push(Arg::Quoted(a.into()));
         self
     }
 
@@ -1446,11 +1474,26 @@ impl PtyCommand {
         }
         line.push_str(&self.program);
         for a in &self.args {
-            if !shell_safe(a) {
-                return None;
+            match a {
+                Arg::Bare(a) => {
+                    if !shell_safe(a) {
+                        return None;
+                    }
+                    line.push(' ');
+                    line.push_str(a);
+                }
+                Arg::Quoted(q) => {
+                    // Everything a shell could act on is inert between
+                    // single quotes; a single quote is not, and is
+                    // refused rather than escaped.
+                    if q.is_empty() || q.contains(['\'', '\n', '\r']) {
+                        return None;
+                    }
+                    line.push_str(" '");
+                    line.push_str(q);
+                    line.push('\'');
+                }
             }
-            line.push(' ');
-            line.push_str(a);
         }
         line.push('\r');
         Some(line.into_bytes())
