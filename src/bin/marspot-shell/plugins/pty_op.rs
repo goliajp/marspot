@@ -91,6 +91,20 @@ pub trait OpEnv: Send {
     /// cheap — asked once, after a return has been sent, to find out
     /// whether it did anything.
     fn pane_screen(&self, sid: u64) -> Option<String>;
+
+    /// Did this pane's own agent report submitting this text?
+    ///
+    /// `Some(true)` is the only evidence here that is not a guess
+    /// about another program's screen: it came from the program
+    /// itself. `Some(false)` means a receipt was expected and has not
+    /// arrived yet; `None` means this pane has no receipt channel at
+    /// all -- no agent, no hook, an older one -- and the screen is
+    /// still the only thing to read.
+    ///
+    /// Claims it, so one receipt answers one submit.
+    fn submit_receipt(&self, _sid: u64, _text: &str) -> Option<bool> {
+        None
+    }
 }
 
 /// Is `needle` anywhere in `haystack`?
@@ -1008,6 +1022,20 @@ impl OpRunner {
                 // there, the return became a newline and another one
                 // is sent.
                 if let Some(at) = st.returned_at {
+                    // A receipt is proof and arrives on its own
+                    // schedule, so it is read before the delay that
+                    // exists only to give the screen time to settle.
+                    if self.env.submit_receipt(sid, line) == Some(true) {
+                        host.log(
+                            LogLevel::Info,
+                            &format!("{}.landed", self.op.name),
+                            &format!(
+                                "sid={sid} the pane reported it, after {} return(s)",
+                                st.returns
+                            ),
+                        );
+                        return true;
+                    }
                     if now.duration_since(at).unwrap_or_default() < SUBMIT_VERIFY_AFTER {
                         return false;
                     }
@@ -1015,7 +1043,7 @@ impl OpRunner {
                         .env
                         .pane_screen(sid)
                         .map(|screen| line_is_still_in_the_composer(&screen, line))
-                        .unwrap_or(false);
+                        .unwrap_or(true);
                     if !still {
                         host.log(
                             LogLevel::Info,
@@ -1443,15 +1471,33 @@ pub fn shell_safe(s: &str) -> bool {
 /// real clock, and the pane's own bytelog as the output counter.
 pub struct RealEnv {
     io: Arc<dyn PtyIo>,
+    /// Where a pane's own report of a submit arrives, when it has one.
+    ///
+    /// Optional because a shell that could not bind the socket still
+    /// runs the terminal; those panes fall back to reading the screen,
+    /// which is what every pane did before.
+    receipts: Option<Arc<crate::receipts::Receipts>>,
 }
 
 impl RealEnv {
     pub fn new(io: Arc<dyn PtyIo>) -> Self {
-        Self { io }
+        Self { io, receipts: None }
+    }
+
+    pub fn with_receipts(
+        io: Arc<dyn PtyIo>,
+        receipts: Option<Arc<crate::receipts::Receipts>>,
+    ) -> Self {
+        Self { io, receipts }
     }
 }
 
 impl OpEnv for RealEnv {
+    fn submit_receipt(&self, sid: u64, text: &str) -> Option<bool> {
+        let r = self.receipts.as_ref()?;
+        Some(r.claim(sid, marspot_term::submit_receipt::fingerprint(text)))
+    }
+
     fn io(&self) -> &Arc<dyn PtyIo> {
         &self.io
     }
@@ -1595,6 +1641,7 @@ const MAX_QUEUED_PER_PANE: usize = 8;
 /// like it, at panes that may already be mid-reclamation.
 pub struct PtyOps {
     io: Arc<dyn PtyIo>,
+    receipts: Option<Arc<crate::receipts::Receipts>>,
     queued: std::collections::HashMap<u64, std::collections::VecDeque<(OpId, PtyOp, usize)>>,
     active: std::collections::HashMap<u64, (OpId, &'static str)>,
     /// Where runners post their outcomes; drained by `pump`.
@@ -1606,11 +1653,22 @@ impl PtyOps {
     pub fn new(io: Arc<dyn PtyIo>) -> Self {
         Self {
             io,
+            receipts: None,
             queued: std::collections::HashMap::new(),
             active: std::collections::HashMap::new(),
             sink: Arc::new(std::sync::Mutex::new(Vec::new())),
             next_id: 1,
         }
+    }
+
+    /// Where panes report their own submits.
+    ///
+    /// Takes an `Option` because binding the socket is best-effort:
+    /// without it every op reads the screen, which is what they all
+    /// did before.
+    pub fn with_receipts(mut self, receipts: Option<Arc<crate::receipts::Receipts>>) -> Self {
+        self.receipts = receipts;
+        self
     }
 
     /// Queue `op` against `sid`.  Runs immediately if the pane is free.
@@ -1683,7 +1741,13 @@ impl PtyOps {
             };
             let name = op.name;
             let sink = Arc::clone(&self.sink);
-            let runner = OpRunner::new(op, Box::new(RealEnv::new(Arc::clone(&self.io))))
+            let runner = OpRunner::new(
+                op,
+                Box::new(RealEnv::with_receipts(
+                    Arc::clone(&self.io),
+                    self.receipts.clone(),
+                )),
+            )
                 .start_at(step)
                 .on_finish(move |_, outcome| {
                     sink.lock().unwrap().push(OpReport {

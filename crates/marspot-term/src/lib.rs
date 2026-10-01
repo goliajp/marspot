@@ -70,6 +70,7 @@ pub mod parser;
 pub mod palette;
 pub mod paths;
 pub mod platform;
+pub mod submit_receipt;
 pub mod pty;
 pub mod render;
 pub mod scrollback;

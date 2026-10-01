@@ -45,6 +45,7 @@ mod cli_socket;
 mod pane_status;
 mod plugins;
 mod present;
+mod receipts;
 mod sup_log;
 mod supervisor;
 use banner::BannerKind;
@@ -1207,6 +1208,17 @@ impl ShellApp {
         if let Err(e) = cli_socket::serve(cli_tx, wake_for_cli) {
             lx_warn!("shell.cli.bind_failed", &format!("{e}"));
         }
+        // Best-effort like the command socket above: a shell that
+        // cannot bind this one still runs the terminal, and submits
+        // fall back to reading the pane.
+        // The secret both layers derive pane tokens from. L1 makes it
+        // because L1 owns the state root; L3 only reads it, so that
+        // spawning a pane stays free of filesystem side effects.
+        marspot_term::submit_receipt::ensure_secret();
+        let receipts = receipts::Receipts::new();
+        if let Err(e) = receipts::serve(std::sync::Arc::clone(&receipts)) {
+            lx_warn!("shell.receipt.bind_failed", &format!("{e}"));
+        }
         let (inject_input_tx, inject_input_rx) = std::sync::mpsc::channel();
         // The queue's own route to a PTY: the same channel plugins use,
         // so nothing has a private path to a pane.
@@ -1312,7 +1324,8 @@ impl ShellApp {
             pty_ops: plugins::pty_op::PtyOps::new(
                 std::sync::Arc::new(plugins::host::HostPtyIo::new(inject_input_tx_for_ops))
                     as std::sync::Arc<dyn plugins::pty_op::PtyIo>,
-            ),
+            )
+            .with_receipts(Some(std::sync::Arc::clone(&receipts))),
             inject_input_rx,
             pane_badge_tx_clone,
             pane_title_tx_clone,
@@ -4982,6 +4995,12 @@ fn main() {
     // above only so it computes the same state root the badge reads.
     if std::env::args().nth(1).as_deref() == Some("--cc-statusline") {
         std::process::exit(plugins::claudecode::statusline_ingest());
+    }
+    // A pane's agent reporting that it submitted something, for the
+    // same reasons and with the same shape: stdin in, one socket out,
+    // no log stream and no window.  See `receipts`.
+    if std::env::args().nth(1).as_deref() == Some("--submit-receipt") {
+        std::process::exit(receipts::report_from_stdin());
     }
     // Make `println!` to a closed pipe (e.g. `marspot-shell --status |
     // head`) exit cleanly with the standard EPIPE convention instead

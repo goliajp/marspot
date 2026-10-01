@@ -3,7 +3,7 @@
 mod claude;
 mod codex;
 pub(crate) mod history;
-mod json;
+pub(crate) mod json;
 mod ledger;
 mod switch;
 mod transcript;

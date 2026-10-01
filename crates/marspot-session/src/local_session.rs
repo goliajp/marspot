@@ -231,9 +231,19 @@ impl LocalSession {
                 .map(|s| (*s).to_string())
                 .collect(),
             // This is the spawn a pane actually goes through -- L3
-            // owns the PTY.  Whatever marspot mints for a pane is
-            // applied here, after the sweep above.
-            env_set: Vec::new(),
+            // owns the PTY.  Applied after the sweep above, so this
+            // pane's token survives while every inherited `MARSPOT_`
+            // name still dies.
+            //
+            // L1 derives the same token from the same secret, so
+            // neither layer has to send it to the other. A pane with
+            // no token simply has no receipts, and the submit path
+            // falls back to reading the screen.
+            env_set: marspot_term::submit_receipt::token_for(id)
+                .map(|t| {
+                    vec![(marspot_term::submit_receipt::TOKEN_VAR.to_string(), t)]
+                })
+                .unwrap_or_default(),
         })?;
         let child_pid = pty.child_pid();
         let pty = Arc::new(pty);
