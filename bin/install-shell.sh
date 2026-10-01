@@ -32,7 +32,7 @@ cmd_status() {
   echo "App bundle:    $APP"
   if [[ -d "$APP" ]]; then
     echo "  Info.plist exec: $(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$PLIST" 2>/dev/null || echo missing)"
-    for b in marspot-shell marspot-core marspot-shelld; do
+    for b in marspot-shell marspot-core marspot-session; do
       if [[ -x "$MACOS/$b" ]]; then
         sz=$(stat -f '%z' "$MACOS/$b")
         echo "  $b: $sz B"

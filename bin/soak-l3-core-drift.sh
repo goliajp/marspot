@@ -39,8 +39,10 @@ teardown() {
 }
 trap teardown EXIT
 
-( cd "$ROOT" && cargo build --release \
-    --bin marspot-shell --bin marspot-core --bin marspot-shelld 2>&1 | tail -3 )
+if ! ( cd "$ROOT" && cargo build --release \
+    --bin marspot-shell --bin marspot-core 2>&1 | tail -20 ); then
+  fail "could not build the binaries this soak drives"
+fi
 ( cd "$ROOT" && cargo build --release -p marspot-session \
     --bin marspot-session --example flood_sessions 2>&1 | tail -3 )
 for b in "$SHELL_BIN" "$CORE_BIN" "$FLOOD_BIN"; do
