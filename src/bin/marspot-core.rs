@@ -3885,6 +3885,9 @@ struct WindowState {
     /// The settings panel, open in this window.  Per window like
     /// every other modal — opening it in one must not blank another.
     settings_modal_open: bool,
+    /// How far the settings panel's content is pushed up inside its
+    /// rect.  Only ever nonzero on a window too short to show it whole.
+    settings_modal_scroll: f64,
     ime_preedit: String,
     /// Window physical dims, updated by Resize frames.
     w_phys: f64,
@@ -3972,6 +3975,7 @@ impl WindowState {
             process_panel: None,
             cc_usage_modal: None,
             settings_modal_open: false,
+            settings_modal_scroll: 0.0,
             drop_preview: None,
             ime_preedit: String::new(),
             w_phys,
@@ -7409,6 +7413,7 @@ impl CoreApp {
 
     fn toggle_settings_modal(&mut self, wi: usize) {
         win!(self, wi).settings_modal_open = !win!(self, wi).settings_modal_open;
+        win!(self, wi).settings_modal_scroll = 0.0;
         if win!(self, wi).settings_modal_open {
             // Pick up anything edited by hand since the last look, so
             // the panel never shows a value the file disagrees with.
@@ -8331,6 +8336,7 @@ impl CoreApp {
                 return;
             }
             let cur_settings = marspot::settings::get();
+            let scroll = win!(self, wi).settings_modal_scroll;
             let hit = {
                 let font = self.renderer.font_mut();
                 let mut measure = |s: &str, pt: f64, weight: u16| {
@@ -8339,7 +8345,7 @@ impl CoreApp {
                     )
                 };
                 marspot::ui::components::settings_modal::hit_test(
-                    rect, &cur_settings, &mut measure, x_phys, y_phys,
+                    rect, scroll, &cur_settings, &mut measure, x_phys, y_phys,
                 )
             };
             if let Some((row, seg)) = hit {
@@ -9070,6 +9076,30 @@ impl CoreApp {
             }
             return;
         }
+        // Same mapping for the settings panel: while it is open the
+        // wheel is its own, whether or not it has anywhere to go.  It
+        // only has somewhere to go on a window too short to show the
+        // panel whole, which is also the only case where the content
+        // would otherwise be unreachable.
+        if win!(self, wi).settings_modal_open {
+            let rect = self.settings_modal_rect(wi);
+            let settings = marspot::settings::get();
+            let font = self.renderer.font_mut();
+            let mut measure = |s: &str, pt: f64, weight: u16| {
+                font.measure_ui_text_at_size(
+                    s, weight, marspot::font_shape::ShapeOptions::default(), pt,
+                )
+            };
+            let max = marspot::ui::components::settings_modal::max_scroll(
+                rect, &settings, &mut measure,
+            );
+            let y = (win!(self, wi).settings_modal_scroll + dy_phys).clamp(0.0, max);
+            if y != win!(self, wi).settings_modal_scroll {
+                win!(self, wi).settings_modal_scroll = y;
+                win!(self, wi).needs_render = true;
+            }
+            return;
+        }
         // A plugin-held PaneSession that took the keyboard owns the
         // wheel too.  Keys route to L1 in `key` above; the wheel used
         // to fall straight through to the PTY, and on a mouse-tracking
@@ -9660,6 +9690,7 @@ impl CoreApp {
         let settings_data = if win!(self, wi).settings_modal_open {
             Some(marspot::render_metal::SettingsRender {
                 rect: self.settings_modal_rect(wi),
+                scroll: win!(self, wi).settings_modal_scroll,
                 settings: (*marspot::settings::get()).clone(),
                 path: marspot::settings::path().display().to_string(),
             })
