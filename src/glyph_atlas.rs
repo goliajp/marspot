@@ -440,8 +440,9 @@ impl GlyphAtlas {
         device: &ProtocolObject<dyn MTLDevice>,
         width: u32,
         height: u32,
+        fonts: std::sync::Arc<crate::font_cache::CoreTextFontTable>,
     ) -> Result<Self, String> {
-        Self::with_format(device, width, height, false)
+        Self::with_format(device, width, height, false, fonts)
     }
 
     /// Colour (`BGRA8Unorm`) atlas — holds full-colour glyphs (Apple Color
@@ -451,8 +452,9 @@ impl GlyphAtlas {
         device: &ProtocolObject<dyn MTLDevice>,
         width: u32,
         height: u32,
+        fonts: std::sync::Arc<crate::font_cache::CoreTextFontTable>,
     ) -> Result<Self, String> {
-        Self::with_format(device, width, height, true)
+        Self::with_format(device, width, height, true, fonts)
     }
 
     /// Phase 10 — same as `new` / `new_color` but plugs a caller-
@@ -474,11 +476,12 @@ impl GlyphAtlas {
         width: u32,
         height: u32,
         color: bool,
+        fonts: std::sync::Arc<crate::font_cache::CoreTextFontTable>,
     ) -> Result<Self, String> {
         let rasteriser: Box<dyn crate::font_trait::Rasteriser> = if color {
-            Box::new(crate::font_trait::CoreTextColorRasteriser)
+            Box::new(crate::font_trait::CoreTextColorRasteriser { fonts })
         } else {
-            Box::new(crate::font_trait::CoreTextMonoRasteriser)
+            Box::new(crate::font_trait::CoreTextMonoRasteriser { fonts })
         };
         Self::with_format_and_rasteriser(device, width, height, color, rasteriser)
     }
@@ -566,10 +569,13 @@ impl GlyphAtlas {
     /// `Some(entry)` on success; `None` only when the glyph itself has
     /// no ink (control char, .notdef-with-degenerate-bbox).  Atlas-full
     /// triggers atomic rebuild and retry, never returns None.
+    /// The font comes from `key.font_id()`, not from an argument: the
+    /// key has carried it all along, and taking a `&CTFont` here was
+    /// what forced every caller of the atlas -- including the per-cell
+    /// path, on every cell, hit or miss -- to clone one.
     pub fn get_or_rasterize(
         &mut self,
         key: GlyphKey,
-        font: &CTFont,
         metrics: SlotMetrics,
         n_cells: u16,
     ) -> Option<AtlasEntry> {
@@ -587,10 +593,19 @@ impl GlyphAtlas {
             }
             return Some(*entry);
         }
-        let raster = if self.bpp == 4 {
-            rasterise_glyph_color(font, key.glyph(), metrics, n_cells)?
-        } else {
-            rasterise_glyph(font, key.glyph(), metrics, n_cells)?
+        // Through the trait, like the natural path -- so a headless
+        // test can drive the terminal grid with `MockRasteriser`, and
+        // so a second platform has one place to implement.
+        let out = self
+            .rasteriser
+            .rasterise_in_cell(key.font_id(), key.glyph(), metrics, n_cells)?;
+        let raster = Raster {
+            bytes: out.bytes,
+            px_w: out.px_w,
+            px_h: out.px_h,
+            n_cells: n_cells.max(1),
+            bearing_x: out.bearing_x,
+            bearing_y: out.bearing_y,
         };
         self.commit_raster(key, raster)
     }
@@ -603,11 +618,7 @@ impl GlyphAtlas {
     /// reports — there's no cell constraint to honour, so the
     /// rasteriser always takes the natural Phase 1.1 path
     /// (`bbox + 2*PAD` bitmap, real bearings, lsb pre-cancelled).
-    pub fn get_or_rasterize_natural(
-        &mut self,
-        key: GlyphKey,
-        font: &CTFont,
-    ) -> Option<AtlasEntry> {
+    pub fn get_or_rasterize_natural(&mut self, key: GlyphKey) -> Option<AtlasEntry> {
         if let Some(entry) = self.cache.get_mut(&key) {
             // Phase B v2 attack #2 — decay-store (see comment on
             // `LAST_USED_RESOLUTION`).
@@ -622,7 +633,9 @@ impl GlyphAtlas {
         // `key.subpx_x` ∈ 0..4 sub-pixel bucket (Phase 4) is part of
         // the contract so the trait impl rasterises the correct
         // variant.
-        let out = self.rasteriser.rasterise(font, key.glyph(), key.subpx_x())?;
+        let out = self
+            .rasteriser
+            .rasterise(key.font_id(), key.glyph(), key.subpx_x())?;
         let raster = Raster {
             bytes: out.bytes,
             px_w: out.px_w,
@@ -1324,6 +1337,39 @@ pub fn raster_natural_color(
     })
 }
 
+/// The cell-fitted pair, for the terminal grid.  Same role as the two
+/// above: the trait impl needs these without seeing `Raster`.
+pub fn raster_in_cell_mono(
+    font: &CTFont,
+    glyph: CGGlyph,
+    metrics: SlotMetrics,
+    n_cells: u16,
+) -> Option<crate::font_trait::RasterOutput> {
+    rasterise_glyph(font, glyph, metrics, n_cells).map(raster_out)
+}
+
+/// BGRA8 companion to `raster_in_cell_mono`.
+pub fn raster_in_cell_color(
+    font: &CTFont,
+    glyph: CGGlyph,
+    metrics: SlotMetrics,
+    n_cells: u16,
+) -> Option<crate::font_trait::RasterOutput> {
+    rasterise_glyph_color(font, glyph, metrics, n_cells).map(raster_out)
+}
+
+/// `n_cells` is not carried across: it is `n_cells.max(1)` of what the
+/// caller passed, so the atlas already knows it.
+fn raster_out(r: Raster) -> crate::font_trait::RasterOutput {
+    crate::font_trait::RasterOutput {
+        bytes: r.bytes,
+        px_w: r.px_w,
+        px_h: r.px_h,
+        bearing_x: r.bearing_x,
+        bearing_y: r.bearing_y,
+    }
+}
+
 fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> Option<Raster> {
     let bbox = font.get_bounding_rects_for_glyphs(
         core_text::font_descriptor::kCTFontOrientationDefault,
@@ -1497,7 +1543,7 @@ mod tests {
                 return;
             }
         };
-        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
+        let mut atlas = GlyphAtlas::new(&device, 256, 256, crate::font_cache::CoreTextFontTable::single(make_font())).expect("atlas");
         let font = make_font();
 
         // Glyph for 'A'.
@@ -1515,11 +1561,11 @@ mod tests {
             0,
             GlyphKey::FLAG_SMOOTH,
         );
-        let entry1 = atlas.get_or_rasterize(key, &font, test_metrics(), 1).expect("first call rasterises");
+        let entry1 = atlas.get_or_rasterize(key, test_metrics(), 1).expect("first call rasterises");
         assert!(entry1.px_w > 0 && entry1.px_h > 0);
         assert_eq!(atlas.cache_len(), 1);
 
-        let entry2 = atlas.get_or_rasterize(key, &font, test_metrics(), 1).expect("second call from cache");
+        let entry2 = atlas.get_or_rasterize(key, test_metrics(), 1).expect("second call from cache");
         assert_eq!(entry1.u0, entry2.u0, "second call must return the same UV");
         assert_eq!(atlas.cache_len(), 1, "cache must not grow on hit");
     }
@@ -1529,6 +1575,48 @@ mod tests {
     /// dispatch in `get_or_rasterize_natural` is wired correctly:
     /// the returned `AtlasEntry` dims must match what the mock
     /// emitted, and the cache-hit path stamps `last_used` the same
+    /// The terminal grid's path, driven by an implementation that has
+    /// no font at all.
+    ///
+    /// This is the thing that was impossible: `get_or_rasterize` took a
+    /// `&CTFont` and called CoreText directly, so the grid -- the hot
+    /// path, the one that matters -- could not be exercised, ported or
+    /// substituted. It now goes through the same trait as the chrome
+    /// path, and `MockRasteriser` has only `Vec<u8>`.
+    #[test]
+    fn mock_rasteriser_drives_the_terminal_grid_path() {
+        use crate::font_trait::MockRasteriser;
+        let device = match system_default_device() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let mut atlas = GlyphAtlas::new_with_rasteriser(
+            &device,
+            256,
+            256,
+            false,
+            Box::new(MockRasteriser::mono(1, 1)),
+        )
+        .expect("atlas with mock rasteriser");
+        let m = test_metrics();
+
+        // A one-cell glyph and a two-cell one, so the slot width has to
+        // come from `n_cells` rather than from the mock's own size.
+        let narrow = GlyphKey::new(3, 65, 52, 0, GlyphKey::FLAG_SMOOTH);
+        let wide = GlyphKey::new(3, 66, 52, 0, GlyphKey::FLAG_SMOOTH);
+        atlas.begin_frame(1);
+        let e1 = atlas.get_or_rasterize(narrow, m, 1).expect("one cell");
+        let e2 = atlas.get_or_rasterize(wide, m, 2).expect("two cells");
+        assert_eq!((e1.px_w as u32, e1.px_h as u32), (m.cell_w, m.cell_h));
+        assert_eq!((e2.px_w as u32, e2.px_h as u32), (m.cell_w * 2, m.cell_h));
+        assert_ne!(e1.u0, e2.u0, "two glyphs, two slots");
+
+        // And the second ask is a cache hit, which is the only thing
+        // the hot path actually does in steady state.
+        let again = atlas.get_or_rasterize(narrow, m, 1).expect("hit");
+        assert_eq!(again.u0, e1.u0);
+    }
+
     /// way it does for the real rasteriser.
     #[test]
     fn mock_rasteriser_drives_natural_path() {
@@ -1545,11 +1633,10 @@ mod tests {
             Box::new(MockRasteriser::mono(4, 6)),
         )
         .expect("atlas with mock rasteriser");
-        let font = make_font(); // unused by MockRasteriser
         let key = GlyphKey::new(7, 42, 100, 0, GlyphKey::FLAG_SMOOTH);
         atlas.begin_frame(11);
         let e1 = atlas
-            .get_or_rasterize_natural(key, &font)
+            .get_or_rasterize_natural(key)
             .expect("mock raster places");
         assert_eq!(e1.px_w, 4);
         assert_eq!(e1.px_h, 6);
@@ -1559,7 +1646,7 @@ mod tests {
         // `LAST_USED_RESOLUTION` frames must NOT rewrite the stamp.
         atlas.begin_frame(12);
         let e2 = atlas
-            .get_or_rasterize_natural(key, &font)
+            .get_or_rasterize_natural(key)
             .expect("cache hit");
         assert_eq!(e1.u0, e2.u0, "cache hit must reuse UV");
         assert_eq!(
@@ -1572,7 +1659,7 @@ mod tests {
         // coarse-grained age progress.
         atlas.begin_frame(11 + LAST_USED_RESOLUTION);
         let e3 = atlas
-            .get_or_rasterize_natural(key, &font)
+            .get_or_rasterize_natural(key)
             .expect("cache hit past resolution");
         assert_eq!(
             e3.last_used,
@@ -1592,7 +1679,7 @@ mod tests {
             Ok(d) => d,
             Err(_) => return,
         };
-        let mut atlas = GlyphAtlas::new(&device, 4096, 4096).expect("atlas");
+        let mut atlas = GlyphAtlas::new(&device, 4096, 4096, crate::font_cache::CoreTextFontTable::single(make_font())).expect("atlas");
         let font = make_font();
 
         let make_key = |ch: u8| -> GlyphKey {
@@ -1611,7 +1698,7 @@ mod tests {
             let key = make_key(c);
             let t0 = std::time::Instant::now();
             let _ = atlas
-                .get_or_rasterize(key, &font, test_metrics(), 1)
+                .get_or_rasterize(key, test_metrics(), 1)
                 .expect("cold raster");
             cold_us.push(t0.elapsed().as_micros());
         }
@@ -1624,7 +1711,7 @@ mod tests {
             let key = make_key(c);
             let t0 = std::time::Instant::now();
             let _ = atlas
-                .get_or_rasterize(key, &font, test_metrics(), 1)
+                .get_or_rasterize(key, test_metrics(), 1)
                 .expect("warm cache");
             warm_ns.push(t0.elapsed().as_nanos());
         }
@@ -1665,9 +1752,9 @@ mod tests {
         // its packed dimensions, then size a real test atlas around
         // it.  Real Menlo glyph metrics shift between macOS releases,
         // so hard-coding a tiny atlas is brittle — derive it.
-        let mut probe = GlyphAtlas::new(&device, 64, 64).expect("probe atlas");
+        let mut probe = GlyphAtlas::new(&device, 64, 64, crate::font_cache::CoreTextFontTable::single(make_font())).expect("probe atlas");
         let entry_a = probe
-            .get_or_rasterize(make_key(b'a', 52), &font, test_metrics(), 1)
+            .get_or_rasterize(make_key(b'a', 52), test_metrics(), 1)
             .expect("probe rasterise");
         let probe_w = entry_a.px_w as u32 + 2 * PAD;
         let probe_h = entry_a.px_h as u32 + 2 * PAD;
@@ -1676,16 +1763,16 @@ mod tests {
         // Atlas sized to fit exactly one ASCII glyph at size_q=52 in a
         // single shelf — that way the second placement must trigger
         // LRU shelf recycling.
-        let mut atlas = GlyphAtlas::new(&device, probe_w, probe_h).expect("atlas");
+        let mut atlas = GlyphAtlas::new(&device, probe_w, probe_h, crate::font_cache::CoreTextFontTable::single(make_font())).expect("atlas");
 
         atlas.begin_frame(1);
         atlas
-            .get_or_rasterize(make_key(b'a', 52), &font, test_metrics(), 1)
+            .get_or_rasterize(make_key(b'a', 52), test_metrics(), 1)
             .expect("place a@52 on frame 1");
 
         atlas.begin_frame(2);
         atlas
-            .get_or_rasterize(make_key(b'a', 52), &font, test_metrics(), 1)
+            .get_or_rasterize(make_key(b'a', 52), test_metrics(), 1)
             .expect("hit a@52 on frame 2");
 
         atlas.begin_frame(3);
@@ -1696,7 +1783,7 @@ mod tests {
         // new entry lands and `evict_count` ticks while
         // `rebuild_count` stays 0 — the Phase 6 contract.
         atlas
-            .get_or_rasterize(make_key(b'a', 53), &font, test_metrics(), 1)
+            .get_or_rasterize(make_key(b'a', 53), test_metrics(), 1)
             .expect("place a@53 on frame 3 via shelf eviction");
         assert!(
             atlas.evict_count >= 1,
@@ -1722,7 +1809,7 @@ mod tests {
         // the height once shelves close — the contract is "every
         // individually-fit glyph eventually places successfully", so
         // silent skip would leave gaps in the cache.
-        let mut atlas = GlyphAtlas::new(&device, 32, 32).expect("atlas");
+        let mut atlas = GlyphAtlas::new(&device, 32, 32, crate::font_cache::CoreTextFontTable::single(make_font())).expect("atlas");
         let font = make_font();
 
         let chars = b"abcdefghij";
@@ -1740,7 +1827,7 @@ mod tests {
                 0,
                 GlyphKey::FLAG_SMOOTH,
             );
-            if atlas.get_or_rasterize(key, &font, test_metrics(), 1).is_some() {
+            if atlas.get_or_rasterize(key, test_metrics(), 1).is_some() {
                 placed += 1;
             }
         }
