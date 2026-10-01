@@ -2101,6 +2101,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
             };
             renderer.set_settings_panel(Some(marspot::render_metal::SettingsRender {
                 rect,
+                scroll: 0.0,
                 settings: (*settings).clone(),
                 path: marspot::settings::path().display().to_string(),
             }));

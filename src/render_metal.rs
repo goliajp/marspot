@@ -684,6 +684,9 @@ pub struct CcUsageWindowRender {
 /// before a click and a segment from after it.
 pub struct SettingsRender {
     pub rect: marspot_term::layout::Rect,
+    /// How far the content is pushed up inside `rect`.  Nonzero only
+    /// when the window is too short to show the panel whole.
+    pub scroll: f64,
     pub settings: crate::settings::Settings,
     /// Shown in the footer so the file is findable.
     pub path: String,
@@ -3448,7 +3451,7 @@ fn push_settings_panel_via_view(
                     s, w, crate::font_shape::ShapeOptions::default(), pt,
                 )
             };
-            sm::walk(sp.rect, &sp.settings, &mut m, |slot| slots.push(slot));
+            sm::walk_visible(sp.rect, sp.scroll, &sp.settings, &mut m, |slot| slots.push(slot));
         }
 
         for slot in slots {

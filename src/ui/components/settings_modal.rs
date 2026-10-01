@@ -355,8 +355,18 @@ fn row_h() -> f64 {
 ///
 /// `rect` is the panel in physical px; everything below is computed in
 /// pt and scaled on the way out.
-pub fn walk(rect: Rect, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) {
+///
+/// `scroll` is how far the content has been pushed up inside `rect`.
+/// It is a parameter rather than a field on the rect because the panel
+/// used to have no such notion at all: `panel_rect` clamped its height
+/// to the window and the walk laid out from the top regardless, so a
+/// window shorter than the content drew the last groups over the
+/// terminal, off the bottom, still clickable where nobody could reach
+/// them. Threading it through the one walker the painter and the
+/// hit-test share is what keeps those two from disagreeing about it.
+pub fn walk(rect: Rect, scroll: f64, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) {
     let px = crate::ui::core::ViewPainter::px_per_pt();
+    let top = rect.y_top - scroll;
     let card_x = rect.x + metric::PAD_X * px;
     let card_w = rect.w - 2.0 * metric::PAD_X * px;
     let text_x = card_x + metric::CARD_PAD_X * px;
@@ -364,14 +374,14 @@ pub fn walk(rect: Rect, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) 
     // `y` walks in pt from the panel's top edge.
     let mut y = metric::PAD_TOP;
     let title_baseline = y + metric::TITLE.cap();
-    on(Slot::Title { baseline: rect.y_top + title_baseline * px });
+    on(Slot::Title { baseline: top + title_baseline * px });
     y = title_baseline;
 
     for (si, section) in SECTIONS.iter().enumerate() {
         y += if si == 0 { metric::TITLE_TO_GROUP } else { metric::CARD_TO_GROUP };
         on(Slot::Group {
             heading: crate::ui::strings::t(section.heading),
-            baseline: rect.y_top + y * px,
+            baseline: top + y * px,
         });
         y += metric::GROUP_TO_CARD;
 
@@ -380,7 +390,7 @@ pub fn walk(rect: Rect, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) 
         on(Slot::Card {
             rect: Rect {
                 x: card_x,
-                y_top: rect.y_top + card_top * px,
+                y_top: top + card_top * px,
                 w: card_w,
                 h: card_h * px,
             },
@@ -404,15 +414,15 @@ pub fn walk(rect: Rect, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) 
                 spec,
                 band: Rect {
                     x: card_x,
-                    y_top: rect.y_top + row_top * px,
+                    y_top: top + row_top * px,
                     w: card_w,
                     h: row_h() * px,
                 },
-                label_baseline: rect.y_top + label_baseline * px,
-                desc_baseline: rect.y_top + desc_baseline * px,
+                label_baseline: top + label_baseline * px,
+                desc_baseline: top + desc_baseline * px,
                 control: Rect {
                     x: card_x + card_w - (metric::CARD_PAD_X + ctl_w) * px,
-                    y_top: rect.y_top + (band_top + (metric::ROW_BAND_H - ctl_h) * 0.5) * px,
+                    y_top: top + (band_top + (metric::ROW_BAND_H - ctl_h) * 0.5) * px,
                     w: ctl_w * px,
                     h: ctl_h * px,
                 },
@@ -421,7 +431,7 @@ pub fn walk(rect: Rect, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) 
                 on(Slot::Separator {
                     rect: Rect {
                         x: text_x,
-                        y_top: rect.y_top + (row_top + row_h()) * px,
+                        y_top: top + (row_top + row_h()) * px,
                         w: card_x + card_w - text_x,
                         h: metric::SEP_H,
                     },
@@ -432,7 +442,7 @@ pub fn walk(rect: Rect, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) 
     }
 
     y += metric::CARD_TO_FOOTER + metric::FOOTER.cap();
-    on(Slot::Footer { baseline: rect.y_top + y * px });
+    on(Slot::Footer { baseline: top + y * px });
 }
 
 /// The panel's height in pt, from the same walk that draws it — so
@@ -443,7 +453,7 @@ fn panel_h_pt(s: &Settings, m: Measure<'_>) -> f64 {
     let probe = Rect { x: 0.0, y_top: 0.0, w: metric::PANEL_W, h: 0.0 };
     let px = crate::ui::core::ViewPainter::px_per_pt();
     let mut bottom = 0.0f64;
-    walk(probe, s, m, |slot| {
+    walk(probe, 0.0, s, m, |slot| {
         if let Slot::Footer { baseline } = slot {
             bottom = baseline / px + metric::FOOTER.descent() + metric::PAD_BOTTOM;
         }
@@ -468,6 +478,59 @@ pub fn panel_rect(
         w,
         h,
     }
+}
+
+/// The same walk, with everything outside `rect` dropped.
+///
+/// The paint path has no scissor -- `View::paint` says so in as many
+/// words ("no automatic clipping") -- so a scrolled panel has to cull
+/// its own slots or it draws over the terminal behind it. A card is
+/// clipped to the viewport rather than dropped, so the background
+/// continues to the edge and the panel reads as having more below; a
+/// row, a separator and a line of text are dropped unless they fit
+/// whole, because half a row and half a glyph are what the clip would
+/// have prevented.
+pub fn walk_visible(
+    rect: Rect,
+    scroll: f64,
+    s: &Settings,
+    m: Measure<'_>,
+    mut on: impl FnMut(Slot),
+) {
+    let top = rect.y_top;
+    let bottom = rect.y_top + rect.h;
+    let inside = |y_top: f64, h: f64| y_top >= top - 1e-9 && y_top + h <= bottom + 1e-9;
+    let baseline_inside = |b: f64, cap: f64| {
+        let px = crate::ui::core::ViewPainter::px_per_pt();
+        b - cap * px >= top - 1e-9 && b <= bottom + 1e-9
+    };
+    walk(rect, scroll, s, m, |slot| match slot {
+        Slot::Card { rect: c } => {
+            let y = c.y_top.max(top);
+            let h = (c.y_top + c.h).min(bottom) - y;
+            if h > 0.0 {
+                on(Slot::Card { rect: Rect { y_top: y, h, ..c } });
+            }
+        }
+        Slot::Separator { rect: r } if !inside(r.y_top, r.h) => {}
+        Slot::Row { band, .. } if !inside(band.y_top, band.h) => {}
+        Slot::Title { baseline } if !baseline_inside(baseline, metric::TITLE.cap()) => {}
+        Slot::Group { baseline, .. } if !baseline_inside(baseline, metric::GROUP.cap()) => {}
+        Slot::Footer { baseline } if !baseline_inside(baseline, metric::FOOTER.cap()) => {}
+        other => on(other),
+    });
+}
+
+/// Everything the panel draws, in physical px -- which is what the
+/// panel's rect is when the window has room for it.
+pub fn content_h(s: &Settings, m: Measure<'_>) -> f64 {
+    panel_h_pt(s, m) * crate::ui::core::ViewPainter::px_per_pt()
+}
+
+/// How far the content can be pushed up before its last pixel is at
+/// the bottom of `rect`.  Zero when it already fits.
+pub fn max_scroll(rect: Rect, s: &Settings, m: Measure<'_>) -> f64 {
+    (content_h(s, m) - rect.h).max(0.0)
 }
 
 /// How wide this row's control needs to be, in physical px.
@@ -513,15 +576,23 @@ pub fn text_x(rect: Rect) -> f64 {
 /// Which row and segment `(px_x, py)` lands on, if any.
 pub fn hit_test(
     rect: Rect,
+    scroll: f64,
     s: &Settings,
     m: Measure<'_>,
     px_x: f64,
     py: f64,
 ) -> Option<(Row, usize)> {
+    // A control scrolled out of the panel is not clickable where it
+    // would have been, so the clip the painter applies has to apply
+    // here too -- otherwise the row above the panel's top edge still
+    // answers clicks aimed at the terminal behind it.
+    if !rect.contains(px_x, py) {
+        return None;
+    }
     // Collect first: the walker borrows `m` for the duration, and the
     // segment geometry needs it again.
     let mut controls: Vec<(Row, Rect)> = Vec::new();
-    walk(rect, s, m, |slot| {
+    walk(rect, scroll, s, m, |slot| {
         if let Slot::Row { row, control, .. } = slot {
             controls.push((row, control));
         }
@@ -628,10 +699,33 @@ mod tests {
         }
     }
 
+    /// `chrome_scale` is a process global that these tests both read
+    /// (through `px_per_pt`) and write.  nextest gives each test its
+    /// own process, which hides that; a plain `cargo test` runs them
+    /// in one process and in parallel, where the density test's scale
+    /// 2.0 lands in the middle of another test's layout and the rect
+    /// and the slots inside it come out at different densities. The
+    /// lock makes which runner you used stop mattering.
+    static SCALE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct ScaleGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for ScaleGuard {
+        fn drop(&mut self) {
+            crate::ui::set_chrome_scale(1.0);
+        }
+    }
+
+    /// Hold for a test's whole body, not just while setting the scale.
+    fn scale_guard() -> ScaleGuard {
+        let g = SCALE.lock().unwrap_or_else(|e| e.into_inner());
+        crate::ui::set_chrome_scale(1.0);
+        ScaleGuard(g)
+    }
+
     fn collect(rect: Rect, s: &Settings) -> Vec<Slot> {
         let mut m = fake_measure();
         let mut out = Vec::new();
-        walk(rect, s, &mut m, |slot| out.push(slot));
+        walk(rect, 0.0, s, &mut m, |slot| out.push(slot));
         out
     }
 
@@ -649,6 +743,7 @@ mod tests {
     /// painter would paint, and the hit-test must name that same row.
     #[test]
     fn every_control_is_clickable_where_it_is_drawn() {
+        let _scale = scale_guard();
         let s = Settings::default();
         let rect = test_rect(1600.0, 1200.0, &s);
         let slots = collect(rect, &s);
@@ -661,7 +756,7 @@ mod tests {
             match row.control(&s) {
                 Control::Toggle(_) => {
                     let hit = hit_test(
-                        rect, &s, &mut m,
+                        rect, 0.0, &s, &mut m,
                         control.x + control.w / 2.0,
                         control.y_top + control.h / 2.0,
                     );
@@ -671,7 +766,7 @@ mod tests {
                     for n in 0..options.len() {
                         let sr = segment_rect(*control, n, options, &mut m);
                         let hit = hit_test(
-                            rect, &s, &mut m,
+                            rect, 0.0, &s, &mut m,
                             sr.x + sr.w / 2.0,
                             sr.y_top + sr.h / 2.0,
                         );
@@ -681,13 +776,14 @@ mod tests {
             }
         }
         // A click in the panel's empty space hits nothing.
-        assert_eq!(hit_test(rect, &s, &mut m, rect.x + 2.0, rect.y_top + 2.0), None);
+        assert_eq!(hit_test(rect, 0.0, &s, &mut m, rect.x + 2.0, rect.y_top + 2.0), None);
     }
 
     /// What the panel was rebuilt for, as assertions: rows must read
     /// as separate items inside a card, and nothing may overflow.
     #[test]
     fn rows_are_separated_and_nothing_overflows() {
+        let _scale = scale_guard();
         let s = Settings::default();
         let rect = test_rect(1800.0, 1400.0, &s);
         let slots = collect(rect, &s);
@@ -794,6 +890,7 @@ mod tests {
     /// scale moves is not guarding the thing it claims to guard.
     #[test]
     fn a_row_is_mostly_space_not_text() {
+        let _scale = scale_guard();
         let s = Settings::default();
         let rect = test_rect(2400.0, 1800.0, &s);
         let px = crate::ui::core::ViewPainter::px_per_pt();
@@ -835,6 +932,7 @@ mod tests {
     /// than failed if the font stack will not build.
     #[test]
     fn the_real_font_fits_the_boxes_drawn_for_it() {
+        let _scale = scale_guard();
         let Ok(mut font) = crate::font_cache::FontCache::build() else {
             eprintln!("no font stack; skipping");
             return;
@@ -849,7 +947,7 @@ mod tests {
         let rect = panel_rect(2000.0, 1500.0, &s, &mut m, 30.0);
 
         let mut slots = Vec::new();
-        walk(rect, &s, &mut m, |slot| slots.push(slot));
+        walk(rect, 0.0, &s, &mut m, |slot| slots.push(slot));
 
         let mut card = Rect { x: 0.0, y_top: 0.0, w: 0.0, h: 0.0 };
         for slot in &slots {
@@ -902,10 +1000,10 @@ mod tests {
     /// the toolbar on the traffic lights, the cards outside their
     /// modal, boxes doubling while their text stood still — was a
     /// second density nobody had rendered.  So the invariants run at
-    /// both, and `chrome_scale` is a process global that nextest's
-    /// per-test process isolation makes safe to set here.
+    /// both, under the scale lock.
     #[test]
     fn the_panel_holds_together_at_every_density() {
+        let _scale = scale_guard();
         for scale in [1.0f64, 2.0] {
             crate::ui::set_chrome_scale(scale);
             let px = crate::ui::core::ViewPainter::px_per_pt();
@@ -970,11 +1068,11 @@ mod tests {
             }
             assert_eq!(rows, super::rows().count(), "scale {scale}: rows lost");
         }
-        crate::ui::set_chrome_scale(1.0);
     }
 
     #[test]
     fn the_panel_fits_the_window_it_is_centred_in() {
+        let _scale = scale_guard();
         let s = Settings::default();
         for (w, h) in [(1200.0, 800.0), (400.0, 300.0), (3840.0, 2160.0)] {
             let r = panel_rect(w, h, &s, &mut fake_measure(), 30.0);

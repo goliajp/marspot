@@ -262,7 +262,9 @@ mod modal_frame {
 /// So the rects go here as numbers.
 mod settings_modal {
     use marspot::settings::Settings;
-    use marspot::ui::components::settings_modal::{Slot, panel_rect, walk};
+    use marspot::ui::components::settings_modal::{
+        Slot, hit_test, max_scroll, panel_rect, walk, walk_visible,
+    };
     use marspot_term::layout::Rect;
 
     /// `px_per_pt` reads a process-global scale, so a pin on absolute
@@ -297,7 +299,7 @@ mod settings_modal {
         let rect = panel_rect(w, h, s, &mut m, 30.0);
         let mut out = format!("panel {}\n", r(&rect));
         let mut m = measure();
-        walk(rect, s, &mut m, |slot| match slot {
+        walk(rect, 0.0, s, &mut m, |slot| match slot {
             Slot::Title { baseline } => out += &format!("title base {baseline:.1}\n"),
             Slot::Group { heading, baseline } => {
                 out += &format!("group {heading:?} base {baseline:.1}\n")
@@ -382,38 +384,119 @@ mod settings_modal {
         });
     }
 
-    /// The short-window case is not pinned, because what it does now
-    /// is wrong and pinning it would make the wrong thing the
-    /// baseline.  `panel_rect` clamps the height to 94% of the window;
-    /// `walk` never sees that clamp and lays the rows out from the top
-    /// regardless, so the last groups are drawn below the panel's own
-    /// background, over the terminal, and past the bottom of the
-    /// window -- and `hit_test` walks the same list, so they stay
-    /// clickable where nobody can reach them.  Nothing clips: the
-    /// settings paint path has no scissor.
+    /// A window too short for the panel used to spill: `panel_rect`
+    /// clamped the height to 94% of the window, `walk` never saw the
+    /// clamp and laid out from the top regardless, and the paint path
+    /// has no scissor -- so the last groups drew over the terminal and
+    /// off the bottom, still clickable where nobody could reach them.
     ///
     /// The panel's own `the_panel_fits_the_window_it_is_centred_in`
-    /// does not catch it: it asserts the *rect* fits the window and
-    /// never that the *content* fits the rect.
+    /// missed it by asserting the *rect* fits the window and never
+    /// that the *content* fits the rect. This is that assertion.
     #[test]
-    #[should_panic(expected = "content runs past the panel")]
-    fn a_short_window_spills_the_contents_out_of_the_panel() {
+    fn a_short_window_keeps_everything_it_draws_inside_the_panel() {
+        at_scale_1(|| {
+            let s = Settings::default();
+            for scroll in [0.0f64, 100.0, 1000.0] {
+                let mut m = measure();
+                let rect = panel_rect(1600.0, 700.0, &s, &mut m, 30.0);
+                let scroll = scroll.min(max_scroll(rect, &s, &mut measure()));
+                let mut m = measure();
+                let bottom = rect.y_top + rect.h;
+                let mut drew = 0usize;
+                walk_visible(rect, scroll, &s, &mut m, |slot| {
+                    drew += 1;
+                    let r = match slot {
+                        Slot::Card { rect } => rect,
+                        Slot::Separator { rect } => rect,
+                        Slot::Row { band, .. } => band,
+                        _ => return,
+                    };
+                    assert!(
+                        r.y_top >= rect.y_top - 1e-9 && r.y_top + r.h <= bottom + 1e-9,
+                        "at scroll {scroll}: {r:?} is outside the panel {rect:?}"
+                    );
+                });
+                assert!(drew > 0, "at scroll {scroll}: the panel drew nothing");
+            }
+        });
+    }
+
+    /// Culling is not the same as not drawing: a window with room must
+    /// still emit every slot, or the fix would have hidden the panel
+    /// instead of fitting it.
+    #[test]
+    fn a_window_with_room_culls_nothing() {
+        at_scale_1(|| {
+            let s = Settings::default();
+            let mut m = measure();
+            let rect = panel_rect(1600.0, 1200.0, &s, &mut m, 30.0);
+            let mut all = 0usize;
+            walk(rect, 0.0, &s, &mut measure(), |_| all += 1);
+            let mut shown = 0usize;
+            walk_visible(rect, 0.0, &s, &mut measure(), |_| shown += 1);
+            assert_eq!(shown, all, "a panel that fits must draw all of itself");
+            assert_eq!(max_scroll(rect, &s, &mut measure()), 0.0, "nowhere to scroll");
+        });
+    }
+
+    /// Scrolled to the bottom, the last row is inside the panel -- the
+    /// point of being able to scroll at all.
+    #[test]
+    fn scrolling_to_the_end_brings_the_last_row_into_view() {
         at_scale_1(|| {
             let s = Settings::default();
             let mut m = measure();
             let rect = panel_rect(1600.0, 700.0, &s, &mut m, 30.0);
+            let max = max_scroll(rect, &s, &mut measure());
+            assert!(max > 0.0, "a 700px window cannot show the panel whole");
+
+            let last = |scroll: f64| {
+                let mut seen = None;
+                walk_visible(rect, scroll, &s, &mut measure(), |slot| {
+                    if let Slot::Row { row, .. } = slot {
+                        seen = Some(row);
+                    }
+                });
+                seen
+            };
+            let all_last = {
+                let mut seen = None;
+                walk(rect, 0.0, &s, &mut measure(), |slot| {
+                    if let Slot::Row { row, .. } = slot {
+                        seen = Some(row);
+                    }
+                });
+                seen.expect("the panel has rows")
+            };
+            assert_ne!(last(0.0), Some(all_last), "the last row was already visible");
+            assert_eq!(last(max), Some(all_last), "scrolled to the end and still not there");
+        });
+    }
+
+    /// The clip the painter applies has to apply to clicks too, or a
+    /// row scrolled off the top answers a click aimed at the terminal
+    /// behind it.
+    #[test]
+    fn a_click_outside_the_panel_hits_nothing() {
+        at_scale_1(|| {
+            let s = Settings::default();
             let mut m = measure();
-            let mut bottom = rect.y_top;
-            walk(rect, &s, &mut m, |slot| {
-                if let Slot::Card { rect: c } = slot {
-                    bottom = bottom.max(c.y_top + c.h);
+            let rect = panel_rect(1600.0, 700.0, &s, &mut m, 30.0);
+            let max = max_scroll(rect, &s, &mut measure());
+
+            // Where a control sits once it has been scrolled above the
+            // panel's top edge.
+            let mut above: Option<(f64, f64)> = None;
+            walk(rect, max, &s, &mut measure(), |slot| {
+                if let Slot::Row { control, .. } = slot {
+                    if control.y_top + control.h < rect.y_top && above.is_none() {
+                        above = Some((control.x + control.w / 2.0, control.y_top + control.h / 2.0));
+                    }
                 }
             });
-            assert!(
-                bottom <= rect.y_top + rect.h,
-                "content runs past the panel by {:.1}px",
-                bottom - (rect.y_top + rect.h)
-            );
+            let (x, y) = above.expect("scrolling to the end puts a control above the panel");
+            assert_eq!(hit_test(rect, max, &s, &mut measure(), x, y), None);
         });
     }
 }
