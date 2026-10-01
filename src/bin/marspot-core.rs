@@ -37,6 +37,7 @@ use marspot::pane::{L3Conn, L3Spawn, Pane};
 use marspot::render::{SessionView, SidebarEntry};
 use marspot::render_metal::MetalRenderer;
 use marspot::ui::components::{GRID_MAX, GRID_MIN};
+use marspot::ui::strings::{t, Msg};
 use marspot::session::SessionState;
 use marspot::session_registry::{
     self, allocate_next_session_id, list_session_entries,
@@ -5090,17 +5091,17 @@ impl CoreApp {
                 // Never disabled: closing a window's last pane closes
                 // the window, and the last window's last pane quits.
                 let close = MenuItem::entry(
-                    "Close pane", ContextMenuAction::ClosePane.tag(),
+                    t(Msg::MenuClosePane), ContextMenuAction::ClosePane.tag(),
                 );
                 let copy = MenuItem::entry(
-                    "Copy", ContextMenuAction::CopySelection.tag(),
+                    t(Msg::MenuCopy), ContextMenuAction::CopySelection.tag(),
                 ).with_shortcut("⌘C");
                 let mut items = vec![
                     if win!(self, wi).selection.is_some() { copy } else { copy.disabled() },
-                    MenuItem::entry("Paste", ContextMenuAction::Paste.tag())
+                    MenuItem::entry(t(Msg::MenuPaste), ContextMenuAction::Paste.tag())
                         .with_shortcut("⌘V"),
                     MenuItem::divider(),
-                    MenuItem::entry("Clear scrollback",
+                    MenuItem::entry(t(Msg::MenuClearScrollback),
                         ContextMenuAction::ClearScrollback.tag()),
                     MenuItem::divider(),
                     MenuItem::entry("New pane",
@@ -5113,7 +5114,7 @@ impl CoreApp {
             }
             ContextRegion::SidebarSlot(_) => {
                 let close = MenuItem::entry(
-                    "Close pane", ContextMenuAction::ClosePane.tag(),
+                    t(Msg::MenuClosePane), ContextMenuAction::ClosePane.tag(),
                 );
                 let mut items = vec![
                     MenuItem::divider(),

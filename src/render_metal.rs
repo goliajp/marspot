@@ -3500,13 +3500,13 @@ fn push_settings_panel_via_view(
                     };
                     let x = sm::text_x(sp.rect) as f32;
                     p.ui_text_at(
-                        x, label_baseline as f32, spec.label,
+                        x, label_baseline as f32, crate::ui::strings::t(spec.label),
                         sm::metric::LABEL.pt(), sm::metric::LABEL.weight(), fg,
                     );
                     // Genuinely smaller, not merely dimmer: same size
                     // in a paler grey is two competing lines.
                     p.ui_text_at(
-                        x, desc_baseline as f32, spec.cost,
+                        x, desc_baseline as f32, crate::ui::strings::t(spec.cost),
                         sm::metric::DESC.pt(), sm::metric::DESC.weight(), sec,
                     );
                     match row.control(&sp.settings) {

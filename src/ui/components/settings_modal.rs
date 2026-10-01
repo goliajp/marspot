@@ -23,6 +23,7 @@
 //! way to break them.
 
 use crate::settings::Settings;
+use crate::ui::strings::Msg;
 
 /// Every measurement in this panel, in **typographic points**.
 ///
@@ -133,13 +134,16 @@ pub const SCROLL_LABELS: &[&str] = &["Slow", "Normal", "Fast", "Faster"];
 
 pub struct RowSpec {
     pub row: Row,
-    pub label: &'static str,
+    /// The label, as a catalogue id.  A `const` table cannot call a lookup
+    /// that depends on the running locale, so the id travels and the view
+    /// resolves it where it draws (`crate::ui::strings`).
+    pub label: Msg,
     /// What it costs.  Present on every row; see the module note.
-    pub cost: &'static str,
+    pub cost: Msg,
 }
 
 pub struct Section {
-    pub heading: &'static str,
+    pub heading: Msg,
     pub rows: &'static [RowSpec],
 }
 
@@ -148,65 +152,63 @@ pub struct Section {
 /// semibold, where all-caps only adds noise.
 pub const SECTIONS: &[Section] = &[
     Section {
-        heading: "Idle reclamation",
+        heading: Msg::SettingsIdleReclamation,
         rows: &[
             RowSpec {
                 row: Row::ReclaimEnabled,
-                label: "Reclaim idle claude panes",
-                cost: "coming back to one costs ~3s while its session reloads",
+                label: Msg::ReclaimIdlePanes,
+                cost: Msg::CostReclaimIdlePanes,
             },
             RowSpec {
                 row: Row::ReclaimIdleMinutes,
-                label: "Idle for",
-                cost: "measured by the session transcript's age, not terminal quiet",
+                label: Msg::IdleFor,
+                cost: Msg::CostIdleFor,
             },
             RowSpec {
                 row: Row::ReclaimPrefetch,
-                label: "Warm up on return",
-                cost: "wakes parked panes one per second as you come back",
+                label: Msg::WarmUpOnReturn,
+                cost: Msg::CostWarmUpOnReturn,
             },
         ],
     },
     Section {
-        heading: "Appearance",
+        heading: Msg::SettingsAppearance,
         rows: &[
             RowSpec {
                 row: Row::DimScale,
-                label: "Dim the panes you are not in",
+                label: Msg::DimOtherPanes,
                 // The ladder's *order* is not offered — it says what
                 // marspot knows about each pane.  Only its volume is.
-                cost: "deeper tells you at a glance what has drifted; \
-                       shallower keeps it readable",
+                cost: Msg::CostDimOtherPanes,
             },
             RowSpec {
             row: Row::CircledWide,
-            label: "Circled digits take two cells",
+            label: Msg::CircledDigitsWide,
             // The line this whole day bought.  Shipped as a default
             // once, reverted within the hour — so it is offered with
             // what it costs written next to it, and off.
-            cost: "sized like CJK, but moves the wrap point: text can strand",
+            cost: Msg::CostCircledDigitsWide,
             },
         ],
     },
     Section {
-        heading: "Claude Code",
+        heading: Msg::SettingsClaudeCode,
         rows: &[RowSpec {
             row: Row::CcStatuslineHook,
-            label: "Let Claude Code report its model",
+            label: Msg::ClaudeCodeReportsModel,
             // Says whose file it is, because that is the whole cost.
             // Off, the badge still names the model — from the session
             // transcript and the pane's own banner — it is just a turn
             // behind where those go quiet.
-            cost: "adds a status-line entry to Claude Code's settings; \
-                   yours, if any, is chained and restored",
+            cost: Msg::CostClaudeCodeReportsModel,
         }],
     },
     Section {
-        heading: "Scrolling",
+        heading: Msg::SettingsScrolling,
         rows: &[RowSpec {
             row: Row::ScrollFactor,
-            label: "Wheel speed",
-            cost: "faster gets there in fewer flicks and overshoots in one",
+            label: Msg::WheelSpeed,
+            cost: Msg::CostWheelSpeed,
         }],
     },
 ];
@@ -368,7 +370,7 @@ pub fn walk(rect: Rect, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) 
     for (si, section) in SECTIONS.iter().enumerate() {
         y += if si == 0 { metric::TITLE_TO_GROUP } else { metric::CARD_TO_GROUP };
         on(Slot::Group {
-            heading: section.heading,
+            heading: crate::ui::strings::t(section.heading),
             baseline: rect.y_top + y * px,
         });
         y += metric::GROUP_TO_CARD;
@@ -546,6 +548,7 @@ pub fn hit_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::strings::t;
 
     /// The panel's whole justification: every row names its downside.
     /// A row without one is a row that is asking the user to choose
@@ -554,9 +557,9 @@ mod tests {
     #[test]
     fn every_row_states_what_it_costs() {
         for r in rows() {
-            assert!(!r.label.is_empty(), "{:?} has no label", r.row);
+            assert!(!t(r.label).is_empty(), "{:?} has no label", r.row);
             assert!(
-                r.cost.len() >= 12,
+                t(r.cost).len() >= 12,
                 "{:?} has no real cost line: {:?}",
                 r.row,
                 r.cost
@@ -856,7 +859,7 @@ mod tests {
                     let text_left = card.x + metric::CARD_PAD_X * px;
                     // The cost line is the long text in this panel: it
                     // must fit the card, or it runs out of the box.
-                    let cost_w = m(spec.cost, metric::DESC.pt(), metric::DESC.weight());
+                    let cost_w = m(t(spec.cost), metric::DESC.pt(), metric::DESC.weight());
                     assert!(
                         text_left + cost_w <= card.x + card.w - metric::CARD_PAD_X * px,
                         "{:?}: cost line needs {:.0}pt and the card gives {:.0}pt",
@@ -866,7 +869,7 @@ mod tests {
                     );
                     // The label and the control share one line and must
                     // not collide.
-                    let label_w = m(spec.label, metric::LABEL.pt(), metric::LABEL.weight());
+                    let label_w = m(t(spec.label), metric::LABEL.pt(), metric::LABEL.weight());
                     assert!(
                         text_left + label_w + 12.0 * px <= control.x,
                         "{:?}: label runs into its control",
