@@ -1238,10 +1238,16 @@ fn main() {
     // place until there's real work.
     let (ev_tx, ev_rx): (Sender<SessionEvent>, Receiver<SessionEvent>) = mpsc::channel();
 
-    // RFC-003 step 1c: MARSPOT_L3_OWNS_PTY=1 picks the LocalSession
-    // path. Default off; L4 shelld still owns PTY until L2 (Phase 3)
-    // and the shelld delete (Phase 6) land.
-    let owns_pty = std::env::var("MARSPOT_L3_OWNS_PTY").as_deref() == Ok("1");
+    // Owning the PTY is the only thing a session can do since RFC-003
+    // Phase 6 deleted L4, so an unset variable means yes.
+    //
+    // It used to mean no, which left the single working mode behind an
+    // env var every caller had to know to set.  The two probes that set
+    // it worked and the two that did not exited 1 before publishing a
+    // frame, which reads from outside as "the session hangs"; the error
+    // they got even told them to leave it unset and rely on the
+    // default, which is exactly what had just failed.
+    let owns_pty = std::env::var("MARSPOT_L3_OWNS_PTY").as_deref() != Ok("0");
 
     // Shared grid framebuffer first — it defines the geometry. When L2
     // owns the region it sized it to the on-screen cell rect; we must
@@ -1488,7 +1494,7 @@ fn main() {
         // is now mandatory; the old shelld-driven fallback is gone.
         lx_error!(
             "session.shelld_path_removed",
-            "MARSPOT_L3_OWNS_PTY=0 used to route through shelld; RFC-003 removed L4 — set MARSPOT_L3_OWNS_PTY=1 (or leave it unset and rely on the default)"
+            "MARSPOT_L3_OWNS_PTY=0 asked to route through shelld, which RFC-003 removed; unset the variable or set it to 1"
         );
         std::process::exit(1);
     };
