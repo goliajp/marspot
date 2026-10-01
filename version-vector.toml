@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.203"  # a fable pane needs room in fable, not just in the week
+shell   = "0.7.204"  # a pane that drew nothing is not typed into
 core    = "0.12.250"  # the rasteriser takes a font id, not a CoreText font
 session = "0.11.135"  # a length off the wire is a claim, not a length
