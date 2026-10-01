@@ -6176,8 +6176,10 @@ fn build_bg_pipeline(
 /// FG-pass pipeline.  Alpha blending on so the glyph's coverage
 /// composites onto whatever the BG pass painted underneath:
 ///
-///     final.rgb = src.rgb * src.a + dst.rgb * (1 - src.a)
-///     final.a   = src.a   * src.a + dst.a   * (1 - src.a)
+/// ```text
+/// final.rgb = src.rgb * src.a + dst.rgb * (1 - src.a)
+/// final.a   = src.a   * src.a + dst.a   * (1 - src.a)
+/// ```
 fn build_fg_pipeline(
     device: &ProtocolObject<dyn MTLDevice>,
     library: &ProtocolObject<dyn MTLLibrary>,
@@ -6210,7 +6212,9 @@ fn build_fg_pipeline(
 /// context), so the blend uses source factor `One` rather than
 /// `SourceAlpha`:
 ///
-///     final.rgb = src.rgb * 1 + dst.rgb * (1 - src.a)
+/// ```text
+/// final.rgb = src.rgb * 1 + dst.rgb * (1 - src.a)
+/// ```
 fn build_fg_color_pipeline(
     device: &ProtocolObject<dyn MTLDevice>,
     library: &ProtocolObject<dyn MTLLibrary>,

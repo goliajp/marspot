@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.194"  # a submit gets long enough to do what it waits for
-core    = "0.12.242"  # marks readable in the cold tier too
+core    = "0.12.243"  # a blend equation is not Rust
 session = "0.11.128"  # marks readable in the cold tier too
