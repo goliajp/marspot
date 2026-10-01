@@ -4758,15 +4758,20 @@ mod tests {
             matches!(handling, crate::plugins::KeyHandling::Swallow),
             "keys during the wake are consumed, not run as shell commands"
         );
-        assert_eq!(
-            String::from_utf8_lossy(&inject.sent.lock().unwrap()),
-            format!(
-                "printf '\\033[H\\033[2J'; CLAUDE_CONFIG_DIR='{}' claude --resume {uuid}\r",
+        // In pieces, not as one string: the line carries a
+        // `--settings` document naming this binary by absolute path,
+        // which differs between a dev build, the bundle and
+        // `binaries/current`.
+        let sent = String::from_utf8_lossy(&inject.sent.lock().unwrap()).into_owned();
+        assert!(
+            sent.starts_with(&format!(
+                "printf '\\033[H\\033[2J'; CLAUDE_CONFIG_DIR='{}' claude ",
                 profile_dir.to_string_lossy()
-            ),
-            "the wake resumes the session under the profile it was running, \
-             behind a screen wipe so the line itself never shows"
+            )),
+            "the wake resumes under the profile it was running, behind a \
+             screen wipe so the line itself never shows: {sent}"
         );
+        assert!(sent.ends_with(&format!(" --resume {uuid}\r")), "{sent}");
         // It really reached the PTY: the shell echoes it back…
         let mut echoed = String::new();
         poll_until("the pane to echo the resume line", || {
@@ -6000,13 +6005,31 @@ mod tests {
                 .expect("the script types something");
             String::from_utf8(bytes).unwrap()
         };
-        assert_eq!(
-            line(Some("/Users/x/.claude-profile-3")),
-            "printf '\\033[H\\033[2J'; CLAUDE_CONFIG_DIR='/Users/x/.claude-profile-3' \
-             claude --resume abc-123\r"
+        // Asserted in pieces rather than as one string: the line now
+        // carries a `--settings` document naming this binary by its
+        // absolute path, which differs between a dev build, the
+        // bundle, and `binaries/current`. Pinning the whole line would
+        // go red on where it was built rather than on what it does.
+        let with_dir = line(Some("/Users/x/.claude-profile-3"));
+        assert!(
+            with_dir.starts_with(
+                "printf '\\033[H\\033[2J'; CLAUDE_CONFIG_DIR='/Users/x/.claude-profile-3' claude "
+            ),
+            "{with_dir}"
         );
+        assert!(with_dir.ends_with(" --resume abc-123\r"), "{with_dir}");
+        // A flag and its value are adjacent or they are not a flag and
+        // its value -- this is what keeping quoted args in their own
+        // list broke, putting `--settings` next to `--resume`.
+        assert!(
+            with_dir.contains("--settings '{\"hooks\""),
+            "the document has to follow its flag: {with_dir}"
+        );
+
         // No dir observed = the default profile's own entry point.
-        assert_eq!(line(None), "printf '\\033[H\\033[2J'; claude --resume abc-123\r");
+        let no_dir = line(None);
+        assert!(no_dir.starts_with("printf '\\033[H\\033[2J'; claude "), "{no_dir}");
+        assert!(no_dir.ends_with(" --resume abc-123\r"), "{no_dir}");
     }
 
     /// The dir lands inside single quotes on a real command line, so a

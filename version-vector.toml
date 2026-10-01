@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.197"  # a pane can report its own submits
+shell   = "0.7.198"  # a pane marspot starts reports its own submits
 core    = "0.12.250"  # the rasteriser takes a font id, not a CoreText font
 session = "0.11.132"  # a pane carries the token it reports with
