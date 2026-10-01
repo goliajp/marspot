@@ -25,7 +25,7 @@ pub mod dev_panel;
 
 pub use tab_strip::TabStrip;
 pub use scroll_view::ScrollView;
-pub use modal_frame::ModalFrame;
+pub use modal_frame::{ModalFrame, ModalLayoutSpec};
 pub use search_overlay::{SearchOverlayParams, paint_search_overlay};
 pub use panel::Panel;
 pub use text_input::{TextInput, TextInputStyle};

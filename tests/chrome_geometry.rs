@@ -140,3 +140,113 @@ mod context_menu {
         }
     }
 }
+
+/// Pinned, and deliberately not migrated.
+///
+/// `ModalFrame::layout` centres a window, clamps it against the screen
+/// and stacks three fixed strips inside it. The clamping is placement,
+/// which the tree does not do -- it lays children out inside a parent, it
+/// does not hold a floating window on screen. What is left for the tree
+/// is the stacking, and the body of that stack takes the slack: in this
+/// engine only `Spacer` is flexible, so a body that fills would have to be
+/// a spacer standing in for content. That is a tree built to satisfy a
+/// migration rather than to do anything, so the arithmetic stays and this
+/// records why.
+///
+/// The same goes for the sidebar, whose `row_rect` is `y + i × row_h` and
+/// which is called per row per frame -- a layout pass there would cost
+/// more than it saves.
+///
+/// Where the tree pays is content-driven layout: `settings_modal` sizing
+/// rows from measured text, `table` sizing columns from their contents.
+/// Those are next, and they get pinned the same way first.
+mod modal_frame {
+    use marspot::ui::components::{ModalFrame, ModalLayoutSpec};
+
+    fn spec(maximized: bool, minimized: bool, with_tab_strip: bool) -> ModalLayoutSpec {
+        ModalLayoutSpec {
+            default_w: 800.0,
+            default_h: 600.0,
+            title_bar_h: 28.0,
+            tab_strip_h: 30.0,
+            maximized,
+            max_w_ratio: 0.95,
+            max_h_ratio: 0.90,
+            minimized,
+            with_tab_strip,
+            pos_offset: (0.0, 0.0),
+            top_obstruction: 0.0,
+        }
+    }
+
+    fn dump(m: &ModalFrame) -> String {
+        let r = |n: &str, r: &marspot_term::layout::Rect| {
+            format!("{n} {:.1},{:.1} {:.1}x{:.1}\n", r.x, r.y_top, r.w, r.h)
+        };
+        r("frame", &m.frame) + &r("title", &m.title_bar) + &r("tabs", &m.tab_strip)
+            + &r("body", &m.body)
+    }
+
+    /// The in-file tests pin the heights. They do not pin where the tab
+    /// strip and the body sit, which is exactly what moving the stacking
+    /// onto the tree would change.
+    #[test]
+    fn the_parts_stack_under_the_title_bar() {
+        let m = ModalFrame::layout(1920.0, 1080.0, spec(false, false, true));
+        assert_eq!(
+            dump(&m),
+            "frame 560.0,240.0 800.0x600.0\n\
+             title 560.0,240.0 800.0x28.0\n\
+             tabs 560.0,268.0 800.0x30.0\n\
+             body 560.0,298.0 800.0x542.0\n"
+        );
+    }
+
+    /// Without a tab strip the body starts where the strip would have.
+    #[test]
+    fn no_tab_strip_leaves_no_gap() {
+        let m = ModalFrame::layout(1920.0, 1080.0, spec(false, false, false));
+        assert_eq!(
+            dump(&m),
+            "frame 560.0,240.0 800.0x600.0\n\
+             title 560.0,240.0 800.0x28.0\n\
+             tabs 560.0,268.0 800.0x0.0\n\
+             body 560.0,268.0 800.0x572.0\n"
+        );
+    }
+
+    /// Minimized is the title bar and nothing else, and the empty parts
+    /// still sit where they would have.
+    #[test]
+    fn minimized_keeps_the_empty_parts_in_place() {
+        let m = ModalFrame::layout(1920.0, 1080.0, spec(false, true, true));
+        assert_eq!(
+            dump(&m),
+            "frame 560.0,240.0 800.0x28.0\n\
+             title 560.0,240.0 800.0x28.0\n\
+             tabs 560.0,268.0 800.0x0.0\n\
+             body 560.0,268.0 800.0x0.0\n"
+        );
+    }
+
+    /// An offset moves the window and is then clamped, so a drag cannot
+    /// put the title bar out of reach.
+    #[test]
+    fn a_drag_offset_is_clamped_so_the_title_bar_stays_reachable() {
+        let mut s = spec(false, false, true);
+        s.pos_offset = (100_000.0, 100_000.0);
+        let m = ModalFrame::layout(1920.0, 1080.0, s);
+        assert_eq!(m.frame.x, 1920.0 - 800.0 * 0.5, "x ran off the right");
+        assert_eq!(m.frame.y_top, 1080.0 - 28.0, "the title bar left the window");
+    }
+
+    /// A title strip at the top of the window is a floor for the modal.
+    #[test]
+    fn it_does_not_slide_under_the_title_strip() {
+        let mut s = spec(false, false, true);
+        s.pos_offset = (0.0, -100_000.0);
+        s.top_obstruction = 40.0;
+        let m = ModalFrame::layout(1920.0, 1080.0, s);
+        assert_eq!(m.frame.y_top, 40.0);
+    }
+}
