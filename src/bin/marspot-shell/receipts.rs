@@ -146,6 +146,31 @@ fn handle(stream: UnixStream, receipts: &Receipts) {
     }
 }
 
+/// The `--settings` argument that gives a Claude pane a submit hook.
+///
+/// `--settings` loads **additional** settings (its own help says so),
+/// so the person's own hooks, permissions and everything else in their
+/// config are untouched -- this adds one more `UserPromptSubmit`
+/// entry beside whatever is already there.
+///
+/// `None` when marspot cannot name its own binary, or when the path
+/// is one that cannot be quoted. A pane started without it simply has
+/// no receipts.
+pub fn claude_settings_arg() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = exe.to_str()?;
+    // It goes inside a JSON string and then inside shell single
+    // quotes. Both of those have exactly one character they cannot
+    // carry, and neither is escaped here -- a marspot installed at a
+    // path like that is not one to guess about.
+    if exe.contains(['"', '\'', '\\']) {
+        return None;
+    }
+    Some(format!(
+        r#"{{"hooks":{{"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"{exe} --submit-receipt"}}]}}]}}}}"#
+    ))
+}
+
 pub fn serve(receipts: Arc<Receipts>) -> std::io::Result<()> {
     let path = socket_path();
     if let Some(dir) = path.parent() {
@@ -345,6 +370,33 @@ mod tests {
     fn the_fingerprint_ignores_the_edges() {
         assert_eq!(fingerprint("carry on"), fingerprint("  carry on\n"));
         assert_ne!(fingerprint("carry on"), fingerprint("carry on now"));
+    }
+
+    /// The settings argument has to be JSON, and it has to name this
+    /// binary with the flag that reads a receipt.
+    ///
+    /// Parsed rather than pattern-matched, because a string that
+    /// merely contains the right words can still be a broken document
+    /// -- and a broken one makes Claude refuse to start, which is a
+    /// pane the person cannot use.
+    #[test]
+    fn the_settings_argument_is_json_that_names_this_binary() {
+        let arg = claude_settings_arg().expect("this binary has a quotable path");
+        let v = crate::plugins::handoff::json::parse(&arg).expect("valid JSON");
+        let cmd = v
+            .at(&["hooks", "UserPromptSubmit"])
+            .and_then(|a| a.arr().first())
+            .and_then(|e| e.at(&["hooks"]))
+            .and_then(|a| a.arr().first())
+            .and_then(|h| h.str_at("command"))
+            .expect("a command");
+        assert!(cmd.ends_with(" --submit-receipt"), "{cmd:?}");
+        assert!(
+            cmd.starts_with(std::env::current_exe().unwrap().to_str().unwrap()),
+            "it has to be this binary, not a name on PATH: {cmd:?}"
+        );
+        // And it survives the quoting it will go through.
+        assert!(!arg.contains('\''), "single quotes cannot be quoted this way");
     }
 
     #[test]

@@ -115,7 +115,13 @@ fn command(to: Agent, to_home: &Path, resume: Option<&str>) -> Option<Vec<u8>> {
     let home = to_home.to_str()?;
     let cmd = match to {
         Agent::Claude => {
-            let c = PtyCommand::new("claude").env("CLAUDE_CONFIG_DIR", home);
+            let mut c = PtyCommand::new("claude").env("CLAUDE_CONFIG_DIR", home);
+            // Same as the reclaim path: a pane marspot starts gets a
+            // submit hook, so what is typed into it afterwards is
+            // confirmed by the agent rather than read off the screen.
+            if let Some(settings) = crate::receipts::claude_settings_arg() {
+                c = c.arg("--settings").quoted_arg(settings);
+            }
             match resume {
                 Some(id) => c.arg("--resume").arg(id),
                 None => c,
@@ -283,7 +289,22 @@ mod tests {
         assert!(s(command(Agent::Codex, h, Some("t-1")).unwrap()).contains("CODEX_HOME='/Users/x/.codex-profile-2' codex resume t-1\r"));
         assert!(s(command(Agent::Codex, h, None).unwrap()).ends_with("codex\r"));
         let c = Path::new("/Users/x/.claude-profile-3");
-        assert!(s(command(Agent::Claude, c, Some("u-1")).unwrap()).contains("CLAUDE_CONFIG_DIR='/Users/x/.claude-profile-3' claude --resume u-1\r"));
+        let claude = s(command(Agent::Claude, c, Some("u-1")).unwrap());
+        assert!(
+            claude.contains("CLAUDE_CONFIG_DIR='/Users/x/.claude-profile-3' claude "),
+            "{claude}"
+        );
+        assert!(claude.ends_with(" --resume u-1\r"), "{claude}");
+        // A Claude pane marspot starts reports its own submits, and
+        // the flag has to stay next to its document -- `--settings`
+        // landing beside `--resume` is exactly what a separate list of
+        // quoted arguments produced.
+        assert!(
+            claude.contains("--settings '{\"hooks\""),
+            "the submit hook goes on the line, after its flag: {claude}"
+        );
+        // Codex has no equivalent flag, so its line is untouched.
+        assert!(!s(command(Agent::Codex, h, None).unwrap()).contains("--settings"));
     }
 
     fn claude_history(dir: &Path, uuid: &str, body: &str) -> PathBuf {

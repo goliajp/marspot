@@ -483,6 +483,13 @@ pub(super) fn reclaim_op(
     if let Some(dir) = config_dir {
         cmd = cmd.env("CLAUDE_CONFIG_DIR", dir);
     }
+    // The pane we are about to bring back reports its own submits, so
+    // the next thing typed into it is confirmed rather than guessed
+    // at. Absent when marspot cannot name its own binary; the pane
+    // then works exactly as it did before.
+    if let Some(settings) = crate::receipts::claude_settings_arg() {
+        cmd = cmd.arg("--settings").quoted_arg(settings);
+    }
     let line = cmd.arg("--resume").arg(uuid).to_bytes()?;
     Some(
         pty_op::PtyOp::new("cc.reclaim")
