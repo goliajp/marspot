@@ -1767,6 +1767,23 @@ fn profile_cycle_op(
     if has_transcript {
         cmd = cmd.arg("--resume").arg(uuid);
     }
+    // The sentence goes in as claude's own argument, not as typing.
+    //
+    // It used to be pasted into the composer and followed by a
+    // return, and that is the wrong path however well it works: the
+    // composer is the person's buffer. Every failure leaves our text
+    // sitting in it -- a machine at load 513 produced exactly that,
+    // three times -- and even the successful path spends a moment
+    // with marspot's words in the person's input box.
+    //
+    // `claude [options] [prompt]` takes it as a positional argument
+    // and submits it itself. Measured 2026-10-01 through a real pty:
+    // an interactive claude started this way answers the prompt
+    // without the composer ever holding it, and it combines with
+    // `--resume`.
+    if say_continue {
+        cmd = cmd.quoted_arg(resume_word());
+    }
     let line = cmd.to_bytes()?;
     // What the person had typed and not sent. Read before claude is
     // taken down, handed back once the new one is reading input.
@@ -1818,39 +1835,7 @@ fn profile_cycle_op(
             // it does not also need to be told the quota came back.
             .step(pty_op::Step::restore_composer(held)),
     )
-    .map(|op| if say_continue { say_carry_on(op) } else { op })
 }
-
-/// Say the thing the person would have had to type.
-///
-/// `--resume` reopens the session and waits; the turn the account
-/// refused is not retried on its own.  Typing into a pane is only safe
-/// when you know what is in front of the cursor, and here the script
-/// does: it started this claude a moment ago, waited for the process,
-/// and waited for the screen to stop moving.  The composer is empty
-/// because nothing has touched it.
-///
-/// The Enter is its own step.  Pasting text and its newline together
-/// arrives as one chunk, and a TUI that is still settling can swallow
-/// the newline into the paste — the autorun path lost turns that way
-/// (0.7.82).
-fn say_carry_on(op: pty_op::PtyOp) -> pty_op::PtyOp {
-    op.step(pty_op::Step::settle(HOLD_SETTLE).named("let_it_paint"))
-        .step(pty_op::Step::stop_if_waiting(WAITING_FOR_A_KEY))
-        .step(pty_op::Step::submit(resume_word()).named("say_continue"))
-}
-
-/// What a claude that came back to a question looks like, rather than
-/// one that came back to its composer.
-///
-/// Two footers cover the family: every selection list in the CLI ends
-/// with the confirm/cancel hint, and the trust prompt is the one that
-/// appears before a resume has even happened — with "No, exit"
-/// selected, so an unread Enter closes the pane's session.
-const WAITING_FOR_A_KEY: &[&str] = &[
-    "Enter to confirm",
-    "Do you trust the files in this folder",
-];
 
 /// What to say to a session that has just been resumed on another
 /// account.
@@ -2947,12 +2932,14 @@ mod tests {
         assert_eq!(handed.len(), 1, "one switch for one stranded pane: {handed:?}");
         assert_eq!(handed[0].0, sid);
         assert!(handed[0].1.contains(&"resume"), "{:?}", handed[0].1);
+        let sent = host.sent.lock().unwrap().clone();
         assert!(
-            handed[0].1.contains(&"say_continue"),
+            sent[0].1.contains(&resume_word()),
             "every moved pane is asked to carry on — the reading of \"idle\" was \
-             wrong for three of six panes on 2026-09-30, and the sentence is \
-             conditional so that being wrong costs a line: {:?}",
-            handed[0].1
+             wrong for three of six panes on 2026-09-30 — and it is asked on \
+             claude's own command line, never through the person's composer: \
+             {:?}",
+            sent[0].1
         );
 
         // The next pass comes round before the resume has finished, so
@@ -2992,10 +2979,11 @@ mod tests {
 
         let handed = host.submitted.lock().unwrap().clone();
         assert_eq!(handed.len(), 1);
+        let sent = host.sent.lock().unwrap().clone();
         assert!(
-            handed[0].1.contains(&"say_continue"),
+            sent[0].1.contains(&resume_word()),
             "a pane that was working is told to carry on: {:?}",
-            handed[0].1
+            sent[0].1
         );
         let _ = fs::remove_dir_all(&home);
     }
@@ -3241,39 +3229,47 @@ mod tests {
         assert!(!op.steps.iter().any(|s| s.label == "stop_background"));
     }
 
-    /// The switch says the thing the person used to have to type.
+    /// The switch says the thing the person used to have to type, and
+    /// says it without touching the composer.
     ///
     /// `--resume` reopens the session and waits — the refused turn is
     /// not retried by itself, which is why every switch so far has
-    /// ended with someone typing "继续" by hand.  Order is the whole
-    /// content of this test: the words go in only after the new
-    /// process exists *and* the program in it has taken the terminal
-    /// over, and the words and the newline leave together.
+    /// ended with someone typing "继续" by hand.  It used to be typed
+    /// by us instead: pasted into the composer, then a return.  That
+    /// path is wrong however well it works, because the composer is
+    /// the person's buffer and every failure leaves our sentence
+    /// sitting in it unsent — seen three times on 2026-10-01.
+    ///
+    /// `claude [options] [prompt]` takes the sentence as an argument
+    /// and submits it itself, so it rides in on the one line that
+    /// starts the new process.  What this test pins is that there is
+    /// no second path: nothing in the run types the sentence.
     #[test]
-    fn a_cycle_ends_by_saying_continue() {
+    fn a_cycle_says_continue_on_the_command_line() {
         let op = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200).expect("cycle");
         let labels: Vec<&str> = op.steps.iter().map(|s| s.label).collect();
-        let at = |name: &str| labels.iter().position(|l| *l == name);
-        let resume = at("resume").expect("resume");
-        let proc = at("await_process").or_else(|| at("await_proc")).unwrap_or(resume);
-        let ready = at("await_tui_ready").expect("the terminal is asked first");
-        let say = at("say_continue").expect("the switch must say something");
-        assert!(resume < proc && proc < ready && ready < say, "{labels:?}");
+        let resume = labels.iter().position(|l| *l == "resume").expect("resume");
+        let line = match &op.steps[resume].kind {
+            pty_op::StepKind::Send(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+            _ => panic!("the resume step writes a command line, not {}", op.steps[resume].label),
+        };
         assert!(
-            matches!(&op.steps[say].kind, pty_op::StepKind::Submit { line, .. } if !line.is_empty()),
-            "the switch has a line to say: {labels:?}"
+            line.contains(&resume_word()),
+            "the sentence is an argument of the command that starts claude: {line}"
+        );
+        assert!(
+            line.contains("--resume"),
+            "and it does not replace the resume it travels with: {line}"
+        );
+        assert!(
+            !op.steps
+                .iter()
+                .any(|s| matches!(&s.kind, pty_op::StepKind::Submit { .. })),
+            "nothing in the run submits anything into the pane: {labels:?}"
         );
         assert!(
             !labels.contains(&"enter"),
-            "a separate newline is what let the user's keystroke in between: {labels:?}"
-        );
-        // Asking the terminal may not get an answer — an older L3, a
-        // region that cannot be read — and that must not cost the
-        // resume that already happened (five of ten switches died that
-        // way on 2026-09-30, at a step that was only about timing).
-        assert!(
-            op.steps[ready].proceed_on_timeout,
-            "readiness is a deadline, not a precondition: {labels:?}"
+            "and nothing presses return in it either: {labels:?}"
         );
     }
 
@@ -4947,6 +4943,11 @@ mod tests {
         /// know WHAT was asked for — rather than wait for it — reads
         /// this.
         submitted: std::sync::Mutex<Vec<(u64, Vec<&'static str>)>>,
+        /// What each op would write into the pane, as (session, bytes
+        /// of every `Send` step joined).  The sentence a moved pane is
+        /// told now travels on claude's command line, so asserting it
+        /// means reading the bytes, not a step label.
+        sent: std::sync::Mutex<Vec<(u64, String)>>,
         /// Every badge / title push, in order.
         pane_badges: std::sync::Mutex<Vec<(u64, String)>>,
         pane_titles: std::sync::Mutex<Vec<(u64, String)>>,
@@ -4965,6 +4966,7 @@ mod tests {
                 sessions: std::sync::Mutex::new(Vec::new()),
                 ops: std::sync::Mutex::new(pty_op::PtyOps::new(io)),
                 submitted: std::sync::Mutex::new(Vec::new()),
+                sent: std::sync::Mutex::new(Vec::new()),
                 pane_badges: std::sync::Mutex::new(Vec::new()),
                 pane_titles: std::sync::Mutex::new(Vec::new()),
             }
@@ -5038,6 +5040,17 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((sid, op.steps.iter().map(|s| s.label).collect()));
+            let sent: Vec<String> = op
+                .steps
+                .iter()
+                .filter_map(|s| match &s.kind {
+                    pty_op::StepKind::Send(bytes) => {
+                        Some(String::from_utf8_lossy(bytes).into_owned())
+                    }
+                    _ => None,
+                })
+                .collect();
+            self.sent.lock().unwrap().push((sid, sent.join("\n")));
             self.ops
                 .lock()
                 .unwrap()
