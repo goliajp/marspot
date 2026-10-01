@@ -2166,6 +2166,27 @@ impl Terminal {
     }
 }
 
+/// Can `body` still hold `cols` cells from here?  A length it cannot
+/// is not a length.
+///
+/// A page is written by another process and read back from disk, so
+/// `line_cols` is a claim rather than a fact -- and `with_capacity` on
+/// a claim turns a malformed page into an abort instead of an error.
+/// The Linux CI leg reported exactly that, as SIGABRT, on a runner
+/// with less memory to pretend with than a dev box: the legacy probe
+/// mis-parses by one byte on purpose, so the next line's length is
+/// whatever the cell data happened to spell.
+fn plausible_cols(cur: &Cursor<&[u8]>, cols: usize) -> io::Result<()> {
+    let remaining = cur.get_ref().len().saturating_sub(cur.position() as usize);
+    if cols > remaining / CELL_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("line claims {cols} cells, {remaining} bytes left"),
+        ));
+    }
+    Ok(())
+}
+
 fn decode_with_wrapped(
     line_count: u32,
     body: &[u8],
@@ -2175,6 +2196,7 @@ fn decode_with_wrapped(
     for _ in 0..line_count {
         let line_cols = read_u32(&mut cur)? as usize;
         let wrapped = read_u8(&mut cur)? != 0;
+        plausible_cols(&cur, line_cols)?;
         let mut line = Vec::with_capacity(line_cols);
         for _ in 0..line_cols {
             let ch_u = read_u32(&mut cur)?;
@@ -2192,6 +2214,7 @@ fn decode_legacy_no_wrapped(line_count: u32, body: &[u8]) -> io::Result<Vec<(Vec
     let mut out = Vec::with_capacity(line_count as usize);
     for _ in 0..line_count {
         let line_cols = read_u32(&mut cur)? as usize;
+        plausible_cols(&cur, line_cols)?;
         let mut line = Vec::with_capacity(line_cols);
         for _ in 0..line_cols {
             let ch_u = read_u32(&mut cur)?;
@@ -5904,6 +5927,50 @@ mod tests {
         assert_eq!(lines[0].0.len(), 8);
         // Hard newlines, not autowrap continuations.
         assert!(!lines[0].1);
+    }
+
+    /// A page that claims more cells than it can hold is an error,
+    /// not an abort.
+    ///
+    /// `line_cols` comes off the wire -- another process wrote the
+    /// page, and it is read back from disk -- so it is a claim. The
+    /// decoder used to hand it straight to `Vec::with_capacity`, and a
+    /// claim of a few hundred million cells is an allocation failure,
+    /// which aborts the process rather than failing the read.
+    ///
+    /// It took a Linux CI runner to show it: the legacy probe below
+    /// mis-parses by one byte deliberately, so the second line's
+    /// length is whatever the cell bytes spell, and on a dev box with
+    /// 62 GB the allocation can still succeed where a container's
+    /// limits say no. Same code, same input, different answer -- the
+    /// kind only another machine asks.
+    #[test]
+    fn a_page_claiming_more_than_it_holds_is_an_error() {
+        // One line, claiming 300 million cells, with nothing after it.
+        let mut body = Vec::new();
+        body.extend_from_slice(&300_000_000u32.to_le_bytes());
+        body.push(0); // wrapped
+        let err = Terminal::decode_scrollback_page_body(1, &body)
+            .expect_err("a length the body cannot back is not a length");
+        // *Which* error matters. Without the check this still fails --
+        // it allocates for 300 million cells first and then runs out
+        // of bytes to read -- and a test that only asks `is_err()`
+        // goes green on the version that aborts. It has to say the
+        // refusal happened before the allocation.
+        assert!(
+            err.to_string().contains("line claims"),
+            "must be refused before allocating, not after; got: {err}"
+        );
+
+        // And the honest version of the same shape still decodes.
+        let attrs = CellAttrs::default();
+        let mut ok = Vec::new();
+        ok.extend_from_slice(&1u32.to_le_bytes());
+        ok.push(0);
+        ok.extend_from_slice(&('Z' as u32).to_le_bytes());
+        ok.extend_from_slice(&serialize_attrs(attrs));
+        let lines = Terminal::decode_scrollback_page_body(1, &ok).expect("a page that adds up");
+        assert_eq!(lines[0].0[0].ch, 'Z');
     }
 
     #[test]
