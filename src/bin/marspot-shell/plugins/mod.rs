@@ -28,9 +28,12 @@
 //! - Performance budget: `tick` and event hooks measured; consecutive
 //!   overshoots auto-disable.  Forensic via `plugin.<name>.*` tags
 //!   in `marspot.log`.
-//! - Permissions: each plugin declares a `PermissionSet` in metadata;
-//!   host API entry-points check before honouring requests.  Default
-//!   is "no permission" — explicit opt-in only.
+//! - Capability boundary: set by what the code IS, not by what it
+//!   declares.  Official plugins are Rust compiled into this binary and
+//!   reviewed like the renderer is; a permission bit cannot hold a
+//!   native call inside the same process, so there is none to read as a
+//!   guarantee that is not there.  The design and the precedent are in
+//!   `.dev/rfcs`.
 //!
 //! ## Module layout
 //!
@@ -95,83 +98,12 @@ pub const PLUGIN_API_VERSION: u32 = 0x0001_0001;
 pub const HOOK_BUDGET: Duration = Duration::from_millis(100);
 const BUDGET_OVERSHOOT_LIMIT: u32 = 3;
 
-/// What a plugin is allowed to ask the host for.  Default = none.
-/// Declared in `PluginMetadata::permissions`.  Each `PluginHost`
-/// method that requires a permission checks via `bits & FLAG != 0`
-/// and returns `Err(NotPermitted)` otherwise.  Hand-rolled u32
-/// instead of pulling in `bitflags` — marspot stays self-build per
-/// the project's dependency principle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PermissionSet(pub u32);
-
-impl PermissionSet {
-    pub const NONE: Self = Self(0);
-    pub const READ_PANE_INFO: Self = Self(1 << 0);
-    pub const READ_PTY_TREE: Self = Self(1 << 1);
-    pub const READ_DISK_FS: Self = Self(1 << 2);
-    pub const NOTIFY_USER: Self = Self(1 << 3);
-    pub const SET_STATUS_LINE: Self = Self(1 << 4);
-    pub const INJECT_INPUT: Self = Self(1 << 5);
-    pub const SUBSCRIBE_GRID: Self = Self(1 << 6);
-    pub const PERSIST_STATE: Self = Self(1 << 7);
-
-    pub const fn empty() -> Self {
-        Self(0)
-    }
-
-    pub const fn contains(self, other: Self) -> bool {
-        (self.0 & other.0) == other.0
-    }
-
-    pub fn names(self) -> Vec<&'static str> {
-        let mut out = Vec::new();
-        if self.contains(Self::READ_PANE_INFO) {
-            out.push("READ_PANE_INFO");
-        }
-        if self.contains(Self::READ_PTY_TREE) {
-            out.push("READ_PTY_TREE");
-        }
-        if self.contains(Self::READ_DISK_FS) {
-            out.push("READ_DISK_FS");
-        }
-        if self.contains(Self::NOTIFY_USER) {
-            out.push("NOTIFY_USER");
-        }
-        if self.contains(Self::SET_STATUS_LINE) {
-            out.push("SET_STATUS_LINE");
-        }
-        if self.contains(Self::INJECT_INPUT) {
-            out.push("INJECT_INPUT");
-        }
-        if self.contains(Self::SUBSCRIBE_GRID) {
-            out.push("SUBSCRIBE_GRID");
-        }
-        if self.contains(Self::PERSIST_STATE) {
-            out.push("PERSIST_STATE");
-        }
-        out
-    }
-}
-
-impl std::ops::BitOr for PermissionSet {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self {
-        Self(self.0 | rhs.0)
-    }
-}
-
-impl std::ops::BitOrAssign for PermissionSet {
-    fn bitor_assign(&mut self, rhs: Self) {
-        self.0 |= rhs.0;
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct PluginMetadata {
     pub name: &'static str,
     pub version: &'static str,
     pub api_version: u32,
-    pub permissions: PermissionSet,
     /// Desired tick interval.  `0` means "no tick".  Host caps it at
     /// 100 ms minimum to keep idle CPU bounded; plugins wanting faster
     /// should subscribe to events instead.
@@ -181,7 +113,6 @@ pub struct PluginMetadata {
 #[derive(Debug)]
 pub enum PluginError {
     Other(String),
-    NotPermitted(PermissionSet),
     IoError(std::io::Error),
 }
 
@@ -189,9 +120,6 @@ impl fmt::Display for PluginError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PluginError::Other(s) => write!(f, "{}", s),
-            PluginError::NotPermitted(p) => {
-                write!(f, "missing permission: {:?}", p)
-            }
             PluginError::IoError(e) => write!(f, "io: {}", e),
         }
     }
@@ -296,13 +224,7 @@ pub trait PluginHost: Send + Sync {
     /// everything for the rest of that hook, which is long enough to
     /// submit an op or take a pane. `Dispatching` can only be made
     /// here, so a plugin cannot say it.
-    fn set_active_plugin(
-        &self,
-        _who: &dispatch::Dispatching,
-        _name: &'static str,
-        _permissions: PermissionSet,
-    ) {
-    }
+    fn set_active_plugin(&self, _who: &dispatch::Dispatching, _name: &'static str) {}
     /// Pairs with `set_active_plugin`.
     fn clear_active_plugin(&self, _who: &dispatch::Dispatching) {}
 
@@ -675,15 +597,6 @@ impl PluginRegistry {
         self.slots.is_empty()
     }
 
-    /// Wrap a hook with `set_active_plugin` / `clear_active_plugin`
-    /// so permission checks + log namespacing see the right plugin.
-    fn with_active<F, R>(host: &dyn PluginHost, slot: &Slot, f: F) -> R
-    where
-        F: FnOnce() -> R,
-    {
-        dispatch::with(host, slot.metadata.name, slot.metadata.permissions, f)
-    }
-
     /// Sugar for ShellPluginHost callers — they typically have a
     /// concrete reference and the `&dyn` coercion can be a pain in
     /// the lifetime-juggling.  Forwards to the trait-object impl.
@@ -718,7 +631,7 @@ impl PluginRegistry {
                 slot.enabled = false;
                 continue;
             }
-            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
+            dispatch::with(host, slot.metadata.name, || {
             run_hook(slot, "init", |p| p.init(host));
             });
         }
@@ -729,7 +642,7 @@ impl PluginRegistry {
             if !slot.enabled {
                 continue;
             }
-            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
+            dispatch::with(host, slot.metadata.name, || {
             run_hook(slot, "start", |p| p.start(host));
             });
         }
@@ -752,7 +665,7 @@ impl PluginRegistry {
                 continue;
             }
             slot.last_tick = now;
-            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
+            dispatch::with(host, slot.metadata.name, || {
             run_hook_void(slot, "tick", |p| p.tick(host));
             });
         }
@@ -769,7 +682,7 @@ impl PluginRegistry {
             if !slot.enabled {
                 continue;
             }
-            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
+            dispatch::with(host, slot.metadata.name, || {
             run_hook_void(slot, "on_pane_focused", |p| p.on_pane_focused(host, sid));
             });
         }
@@ -784,7 +697,7 @@ impl PluginRegistry {
             if !slot.enabled {
                 continue;
             }
-            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
+            dispatch::with(host, slot.metadata.name, || {
             run_hook_void(slot, "on_pane_badge_click", |p| {
                 p.on_pane_badge_click(host, shelld_session_id)
             });
@@ -814,7 +727,7 @@ impl PluginRegistry {
             if !slot.enabled {
                 continue;
             }
-            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
+            dispatch::with(host, slot.metadata.name, || {
             if let Some(items) = run_hook_ret(slot, "pane_badge_menu", |p| {
                 p.pane_badge_menu(host, shelld_session_id)
             }) {
@@ -838,7 +751,7 @@ impl PluginRegistry {
             if !slot.enabled {
                 continue;
             }
-            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
+            dispatch::with(host, slot.metadata.name, || {
             run_hook_void(slot, "on_pane_badge_menu_action", |p| {
                 p.on_pane_badge_menu_action(host, shelld_session_id, tag)
             });
@@ -851,19 +764,12 @@ impl PluginRegistry {
             if !slot.enabled {
                 continue;
             }
-            dispatch::with(host, slot.metadata.name, slot.metadata.permissions, || {
+            dispatch::with(host, slot.metadata.name, || {
             run_hook_void(slot, "stop", |p| p.stop(host));
             });
         }
         self.started = false;
     }
-}
-
-/// Suppress "unused" warning for the with_active helper while we wait
-/// for Milestone 2 to use it from a fresh path.
-#[allow(dead_code)]
-fn _suppress_unused() {
-    let _ = PluginRegistry::with_active::<fn(), ()>;
 }
 
 impl Default for PluginRegistry {
@@ -1091,7 +997,6 @@ mod budget_tests {
                 name: "t",
                 version: "0.0.0",
                 api_version: PLUGIN_API_VERSION,
-                permissions: PermissionSet::NONE,
                 tick_interval_ms: 1000,
             },
             enabled: true,
@@ -1107,7 +1012,6 @@ mod budget_tests {
                 name: "t",
                 version: "0.0.0",
                 api_version: PLUGIN_API_VERSION,
-                permissions: PermissionSet::NONE,
                 tick_interval_ms: 1000,
             }
         }

@@ -20,7 +20,7 @@ use std::time::Duration;
 use marspot::pane_state::{Activity, PaneStatus};
 use marspot::{lx_debug, lx_error, lx_info, lx_warn};
 
-use super::{LogLevel, PaneSession, PermissionSet, PluginError, PluginHost, PtyChild};
+use super::{LogLevel, PaneSession, PluginError, PluginHost, PtyChild};
 
 /// Channel message the shell main loop drains and forwards to L2 core
 /// as a `PaneBadge` frame.  Empty `text` = clear.
@@ -114,7 +114,7 @@ pub struct ShellPluginHost {
     pane_status: Arc<Mutex<HashMap<u64, (PaneStatus, Duration, bool)>>>,
     /// Current plugin being invoked — used for the log namespace and
     /// permission lookup.  Set/cleared by the registry around each
-    /// hook.  See `with_active_plugin`.
+    /// hook.  Set by `dispatch::with`, which is the only thing that can.
     active_plugin: Arc<Mutex<Option<ActivePlugin>>>,
     /// One-way pipe to the shell main loop for L2-bound side-effects.
     /// Plugin → host → channel → main loop → CoreConn::send.  None
@@ -248,7 +248,6 @@ pub enum InjectWhat {
 #[derive(Clone)]
 struct ActivePlugin {
     name: &'static str,
-    permissions: PermissionSet,
 }
 
 impl ShellPluginHost {
@@ -374,21 +373,6 @@ impl ShellPluginHost {
         *self.focused.lock().unwrap() = focused;
     }
 
-    fn require(&self, want: PermissionSet) -> Result<&'static str, PluginError> {
-        let active = self.active_plugin.lock().unwrap();
-        match active.as_ref() {
-            Some(ap) if ap.permissions.contains(want) => Ok(ap.name),
-            Some(_) => Err(PluginError::NotPermitted(want)),
-            None => {
-                // Called from outside a plugin hook — internal bug.
-                lx_warn!(
-                    "plugin.host.no_active",
-                    "host permission check fired with no active plugin"
-                );
-                Err(PluginError::NotPermitted(want))
-            }
-        }
-    }
 
     fn plugin_name(&self) -> &'static str {
         self.active_plugin
@@ -453,13 +437,11 @@ impl PluginHost for ShellPluginHost {
     }
 
     fn pane_pty_device(&self, pane: usize) -> Result<Option<PathBuf>, PluginError> {
-        self.require(PermissionSet::READ_PANE_INFO)?;
         let g = self.panes.lock().unwrap();
         Ok(g.get(pane).and_then(|s| s.pty_device.clone()))
     }
 
     fn pane_pty_pid_tree(&self, pane: usize) -> Result<Vec<PtyChild>, PluginError> {
-        self.require(PermissionSet::READ_PTY_TREE)?;
         let g = self.panes.lock().unwrap();
         Ok(g.get(pane).map(|s| s.pid_tree.clone()).unwrap_or_default())
     }
@@ -468,7 +450,6 @@ impl PluginHost for ShellPluginHost {
         &self,
         shelld_session_id: u64,
     ) -> Result<Option<super::PaneStatusView>, PluginError> {
-        self.require(PermissionSet::READ_PANE_INFO)?;
         Ok(self.pane_status.lock().unwrap().get(&shelld_session_id).map(
             |(status, held, quiescent)| super::PaneStatusView {
                 status: status.clone(),
@@ -483,7 +464,6 @@ impl PluginHost for ShellPluginHost {
         shelld_session_id: u64,
         activity: Activity,
     ) -> Result<(), PluginError> {
-        self.require(PermissionSet::SET_STATUS_LINE)?;
         if let Some(tx) = self.pane_activity_tx.lock().unwrap().as_ref() {
             let _ = tx.send((shelld_session_id, activity));
             self.knock();
@@ -496,7 +476,6 @@ impl PluginHost for ShellPluginHost {
     }
 
     fn state_dir(&self) -> Result<PathBuf, PluginError> {
-        self.require(PermissionSet::PERSIST_STATE)?;
         let plugin = self.plugin_name();
         let base = marspot::paths::state_root().join("plugins").join(plugin);
         std::fs::create_dir_all(&base)?;
@@ -523,13 +502,8 @@ impl PluginHost for ShellPluginHost {
     /// override, claudecode's init failed permission every install
     /// because the trait default fired no-op and `active_plugin`
     /// stayed None.
-    fn set_active_plugin(
-        &self,
-        _who: &crate::plugins::dispatch::Dispatching,
-        name: &'static str,
-        permissions: PermissionSet,
-    ) {
-        *self.active_plugin.lock().unwrap() = Some(ActivePlugin { name, permissions });
+    fn set_active_plugin(&self, _who: &crate::plugins::dispatch::Dispatching, name: &'static str) {
+        *self.active_plugin.lock().unwrap() = Some(ActivePlugin { name });
     }
 
     fn clear_active_plugin(&self, _who: &crate::plugins::dispatch::Dispatching) {
@@ -541,7 +515,6 @@ impl PluginHost for ShellPluginHost {
         shelld_session_id: u64,
         on: bool,
     ) -> Result<(), PluginError> {
-        self.require(PermissionSet::SET_STATUS_LINE)?;
         if !self.is_news(shelld_session_id, Decl::RenderMarkup, DeclValue::Flag(on)) {
             return Ok(());
         }
@@ -558,7 +531,6 @@ impl PluginHost for ShellPluginHost {
         shelld_session_id: u64,
         on: bool,
     ) -> Result<(), PluginError> {
-        self.require(PermissionSet::SET_STATUS_LINE)?;
         if !self.is_news(shelld_session_id, Decl::AgentTui, DeclValue::Flag(on)) {
             return Ok(());
         }
@@ -578,7 +550,6 @@ impl PluginHost for ShellPluginHost {
         down: &[u8],
         marker: &[u8],
     ) -> Result<(), PluginError> {
-        self.require(PermissionSet::SET_STATUS_LINE)?;
         let mut keys = Vec::with_capacity(enter.len() + up.len() + down.len() + marker.len() + 4);
         for part in [enter, up, down, marker] {
             keys.extend_from_slice(part);
@@ -610,7 +581,6 @@ impl PluginHost for ShellPluginHost {
         shelld_session_id: u64,
         text: &str,
     ) -> Result<(), PluginError> {
-        self.require(PermissionSet::SET_STATUS_LINE)?;
         let Some(tx) = self.pane_badge_tx.lock().unwrap().clone() else {
             // No L2 wired (standalone host); drop silently.
             return Ok(());
@@ -628,7 +598,6 @@ impl PluginHost for ShellPluginHost {
         shelld_session_id: u64,
         text: &str,
     ) -> Result<(), PluginError> {
-        self.require(PermissionSet::SET_STATUS_LINE)?;
         let Some(tx) = self.pane_title_tx.lock().unwrap().clone() else {
             return Ok(());
         };
@@ -657,7 +626,6 @@ impl PluginHost for ShellPluginHost {
     ) -> Result<(), PluginError> {
         // Same permission as `begin_pane_session`: an op *is* a pane
         // session, declared rather than hand-written.
-        self.require(PermissionSet::SET_STATUS_LINE)?;
         let Some(tx) = self.pty_op_tx.lock().unwrap().clone() else {
             return Err(PluginError::Other("no L2 wired".into()));
         };
@@ -678,7 +646,6 @@ impl PluginHost for ShellPluginHost {
         // session is the meta-action plugin uses to manage that
         // badge's pane.  Plugins without permission see a clear
         // refusal instead of a silent drop.
-        self.require(PermissionSet::SET_STATUS_LINE)?;
         let plugin_name = self.plugin_name();
         let Some(tx) = self.pane_session_begin_tx.lock().unwrap().clone() else {
             return Err(PluginError::Other("no L2 wired".into()));
@@ -700,7 +667,7 @@ mod knock_tests {
     /// Run as a plugin would: through the one wrapper the registry
     /// uses, so the test cannot set up a state production cannot.
     fn as_plugin<R>(host: &ShellPluginHost, f: impl FnOnce() -> R) -> R {
-        crate::plugins::dispatch::with(host, "t", PermissionSet::SET_STATUS_LINE, f)
+        crate::plugins::dispatch::with(host, "t", f)
     }
 
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -755,7 +722,7 @@ mod declaration_tests {
     /// Run as a plugin would: through the one wrapper the registry
     /// uses, so the test cannot set up a state production cannot.
     fn as_plugin<R>(host: &ShellPluginHost, f: impl FnOnce() -> R) -> R {
-        crate::plugins::dispatch::with(host, "t", PermissionSet::SET_STATUS_LINE, f)
+        crate::plugins::dispatch::with(host, "t", f)
     }
 
 

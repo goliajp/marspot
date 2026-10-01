@@ -18,7 +18,7 @@ mod badge;
 mod pane;
 mod rollout;
 
-use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PermissionSet,
+use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata,
             PLUGIN_API_VERSION};
 use crate::plugins::{handoff, pidtree};
 
@@ -134,10 +134,6 @@ impl Plugin for CodexPlugin {
             name: "codex",
             version: "0.1.0",
             api_version: PLUGIN_API_VERSION,
-            permissions: PermissionSet::READ_PANE_INFO
-                | PermissionSet::READ_PTY_TREE
-                | PermissionSet::READ_DISK_FS
-                | PermissionSet::SET_STATUS_LINE,
             // Matches claudecode's cadence.  The badge only moves when
             // the user changes model or effort, so anything faster
             // would be spending CPU to watch a file that rarely moves.
