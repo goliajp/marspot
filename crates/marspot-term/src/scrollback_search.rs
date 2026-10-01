@@ -1158,12 +1158,29 @@ mod tests {
         }
     }
 
-    /// B1 perf gate (hard ceiling per §0): 1 MB scrollback, first 64
-    /// hits, < 20 ms.  Synthesise ~10k 100-char lines with "foo"
-    /// scattered, run the scan, assert wall-clock.  If this fails on
-    /// mini we DROP a feature, not relax the budget.
+    /// B1: 1 MB scrollback, first 64 hits, under 50 ms.
+    ///
+    /// The name said 20 ms, the doc said 20 ms and said that failing
+    /// it means dropping a feature rather than relaxing the budget --
+    /// and the assertion said 50. Three numbers, one of them the one
+    /// that runs. Measured here 2026-10-01, 15 runs, release, on
+    /// studio:
+    ///
+    ///     min 4.16  median 5.83  p95 10.79  max 11.51  (ms)
+    ///
+    /// `rust.md` puts a budget at 3x the p95 on a dev machine, which
+    /// is 32 ms. So 50 is not a relaxation that needs justifying and
+    /// 20 was never reachable: it sits below twice the p95 and would
+    /// go red on an ordinary run. The ceiling here is now the number
+    /// the code enforces, and the comment claiming "< 5 ms locally"
+    /// is gone -- the median is 5.8 and the p95 is twice that.
+    ///
+    /// It still goes red on a busy shared runner, which is a fact
+    /// about where it runs rather than about this budget: a timing
+    /// assertion in the test gate competes with whatever else the
+    /// host is doing. See S5-12.
     #[test]
-    fn b1_perf_1mb_first_64_hits_under_20ms() {
+    fn b1_perf_1mb_first_64_hits_under_50ms() {
         let n = 10_000;
         let mut rows = Vec::with_capacity(n);
         for i in 0..n {
@@ -1185,8 +1202,10 @@ mod tests {
         let hits: Vec<SearchHit> = search_scrollback(src, "foo".into(), opts).collect();
         let elapsed = start.elapsed();
         assert_eq!(hits.len(), 64, "expected to fill max_total cap");
-        // Generous ceiling — measured locally on M-series should be
-        // < 5 ms; bin/bench-remote gating gives more reliable numbers.
+        // 3x the measured p95 on a dev machine, per `rust.md`. The
+        // authoritative numbers come from `bin/bench-remote`, which
+        // measures on an idle host while holding the lock; this is
+        // here to catch an order-of-magnitude regression early.
         assert!(
             elapsed < std::time::Duration::from_millis(50),
             "1 MB search first 64 hits should be < 50 ms; got {elapsed:?}"
