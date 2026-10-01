@@ -489,6 +489,11 @@ def _l3_throughput():
                 _L3_THROUGHPUT = None
     return _L3_THROUGHPUT
 
+# Above this, a measurement has company. It is not a reason to refuse
+# to measure -- see `check` -- only a reason to read a failure as
+# "unreadable" rather than as a regression.
+LOAD_CEILING = 5.0
+
 def live_measurement_is_trustworthy():
     # `vs_best_other` divides the L3 number by a frozen competitor
     # figure, so it inherits the L3 measurement's conditions exactly.
@@ -496,7 +501,7 @@ def live_measurement_is_trustworthy():
     if l3 is None:
         return True
     hl = l3.get("_host_load1", -1.0)
-    return not (isinstance(hl, (int, float)) and hl > 5.0)
+    return not (isinstance(hl, (int, float)) and hl > LOAD_CEILING)
 
 def load_live(scenario):
     # The SHIPPED path first.  `vs_best_other` asks "how does marspot
@@ -553,7 +558,7 @@ def best_other_mbps(baseline, sid):
     ]
     return max(vals) if vals else 0
 
-def check(label, current, floor, lower_better=False):
+def check(label, current, floor, lower_better=False, host_load=None):
     if current is None:
         results["pass"].append(("skip", label, "no measurement", None))
         return
@@ -566,6 +571,15 @@ def check(label, current, floor, lower_better=False):
     # spanned, this run measured both sides of it.
     lo, hi = SPREADS.get(label, (None, None))
     if not ok and lo is not None and lo <= floor <= hi:
+        results["inconclusive"].add(label)
+    # And a failure on a busy host is the same kind of non-finding, for
+    # a reason that runs one way only: company can make a measurement
+    # slower, never faster. So a PASS carrying that handicap is a pass
+    # and worth having -- which is why these are measured rather than
+    # skipped. Skipping threw away every valid pass to avoid reading
+    # one unreadable failure, and ten of them went unmeasured for as
+    # long as the fleet was busy, which is most of the time.
+    if not ok and isinstance(host_load, (int, float)) and host_load > LOAD_CEILING:
         results["inconclusive"].add(label)
 
 def fmt_num(n):
@@ -593,7 +607,7 @@ if mode == "full":
         # the first minute to the last, which came out as a 45% cjk
         # "regression" with all five trials below the floor.
         host_load = l3.get("_host_load1", -1.0)
-        too_busy = isinstance(host_load, (int, float)) and host_load > 5.0
+        too_busy = isinstance(host_load, (int, float)) and host_load > LOAD_CEILING
         for entry in baseline["scenarios"]:
             sid = entry["id"]
             floor = entry.get("mars_l3_MBps_min")
@@ -612,12 +626,8 @@ if mode == "full":
                 rates = sorted(nbytes / (ns / 1e9) / 1e6 for ns in trials if ns > 0)
                 if rates:
                     SPREADS[f"L3 {sid}"] = (rates[0], rates[-1])
-            if too_busy:
-                results["pass"].append(
-                    ("skip", f"L3 {sid}", f"host busy (peak load1 {host_load})", None)
-                )
-                continue
-            check(f"L3 {sid}", cur, float(floor))
+            check(f"L3 {sid}", cur, float(floor),
+                  host_load=host_load if too_busy else None)
         parts = []
         for sid in ("cat-ascii", "cat-mixed", "cat-cjk", "cat-emoji"):
             bps = l3.get(sid, {}).get("bytes_per_sec", 0)
@@ -636,28 +646,24 @@ for entry in baseline["scenarios"]:
     floor_file = entry.get("mars_parse_file_MBps_min")
     if floor_file is not None:
         pf_load = block_load1("parsefile")
-        if pf_load > 5.0:
-            results["pass"].append(
-                ("skip", f"parse-file {sid:10}", f"host busy (load1 {pf_load})", None)
-            )
-        else:
-            check(f"parse-file {sid:10}", load_parse_file(sid), floor_file)
+        check(f"parse-file {sid:10}", load_parse_file(sid), floor_file,
+              host_load=pf_load)
 
     # A scenario may exist only to exercise a code path; it has no
     # competitor measurement and no live number, and asking for one
     # would fail on a key that was never meant to be there.
     if mode == "full" and "mars_live_MBps_min" in entry:
         cur_live = load_live(sid)
-        trust = live_measurement_is_trustworthy()
-        if not trust:
-            results["pass"].append(("skip", f"live  {sid:10}", "host busy", None))
-            results["pass"].append(("skip", f"vs-best {sid:10}", "host busy", None))
-        else:
-            check(f"live  {sid:10}", cur_live, entry["mars_live_MBps_min"])
-            best_other = best_other_mbps(baseline, sid)
-            if cur_live is not None and best_other > 0:
-                ratio = cur_live / best_other
-                check(f"vs-best {sid:10}", ratio, entry["mars_vs_best_other_min"])
+        live_load = None if live_measurement_is_trustworthy() else (
+            (_l3_throughput() or {}).get("_host_load1")
+        )
+        check(f"live  {sid:10}", cur_live, entry["mars_live_MBps_min"],
+              host_load=live_load)
+        best_other = best_other_mbps(baseline, sid)
+        if cur_live is not None and best_other > 0:
+            ratio = cur_live / best_other
+            check(f"vs-best {sid:10}", ratio, entry["mars_vs_best_other_min"],
+                  host_load=live_load)
 
 # Render
 render = load_render()
@@ -668,29 +674,22 @@ if render is not None:
 # Scroll (read-path under simulated downward scrolling).  A p99 is the
 # tail, and the tail is the first thing another process's disk traffic
 # lengthens — 3.0 µs on a quiet box, 4.2-4.9 with company, against a
-# 4.0 ceiling.  Same rule as the rows above: above load1 5, say so
-# rather than call it a regression.
+# 4.0 ceiling.  Same rule as the rows above: measured either way, and
+# above load1 5 a failure is called unreadable rather than a
+# regression.
 scroll_load = block_load1("scroll")
 scroll = load_scroll()
 scroll_cold = load_scroll_cold()
-if scroll_load > 5.0:
-    if scroll is not None:
-        results["pass"].append(
-            ("skip", "scroll p99 (µs)", f"host busy (load1 {scroll_load})", None)
-        )
-    if scroll_cold is not None:
-        results["pass"].append(
-            ("skip", "scroll-cold p99 (µs)", f"host busy (load1 {scroll_load})", None)
-        )
-else:
-    if scroll is not None and "scroll_repaint" in baseline:
-        p99_us = scroll["p99_ns"] / 1000
-        check("scroll p99 (µs)", p99_us, baseline["scroll_repaint"]["p99_us_max"], lower_better=True)
+if scroll is not None and "scroll_repaint" in baseline:
+    p99_us = scroll["p99_ns"] / 1000
+    check("scroll p99 (µs)", p99_us, baseline["scroll_repaint"]["p99_us_max"],
+          lower_better=True, host_load=scroll_load)
 
-    # Scroll-cold (disk-backed, post-MADV_DONTNEED)
-    if scroll_cold is not None and "scroll_cold_repaint" in baseline:
-        p99_us = scroll_cold["p99_ns"] / 1000
-        check("scroll-cold p99 (µs)", p99_us, baseline["scroll_cold_repaint"]["p99_us_max"], lower_better=True)
+# Scroll-cold (disk-backed, post-MADV_DONTNEED)
+if scroll_cold is not None and "scroll_cold_repaint" in baseline:
+    p99_us = scroll_cold["p99_ns"] / 1000
+    check("scroll-cold p99 (µs)", p99_us, baseline["scroll_cold_repaint"]["p99_us_max"],
+          lower_better=True, host_load=scroll_load)
 
 # Binary size: lower-better, ceiling = baseline value
 for bin_name, ceiling in baseline.get("binary_size_bytes_max", {}).items():
@@ -807,8 +806,9 @@ if n_fail == 0:
 elif n_real == 0:
     print(
         f"GATE INCONCLUSIVE ({n_unsure} of {len(results['pass']) + n_fail} checks read "
-        f"below the floor, and each one's five trials span the floor -- this run "
-        f"measured both sides of it. Re-run on a quiet machine.)"
+        f"below the floor and cannot be read as regressions: either this run's own "
+        f"trials span the floor, or the host had company -- which can only make a "
+        f"number worse. Re-run on a quiet machine.)"
     )
 else:
     extra = f", {n_unsure} inconclusive" if n_unsure else ""
