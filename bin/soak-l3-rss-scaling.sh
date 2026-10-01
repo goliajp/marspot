@@ -26,7 +26,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 
 SESSION_BIN="$DEV_TARGET/marspot-session"
-PROBE_BIN="$DEV_TARGET/examples/l3_rss_scaling"
+PROBE_BIN="$DEV_TARGET/examples/l3_idle_cost"
 
 # Per-session idle L3 RSS cap.  Measured ~1.9 MiB on dev box; cap at 4 MiB
 # so a real regression (GUI link → tens of MiB, unbounded buffer) trips it
@@ -38,7 +38,19 @@ LINEARITY_MAX="${LINEARITY_MAX:-1.30}"
 
 fail() { echo "FAIL: $*"; exit 1; }
 
-( cd "$ROOT" && cargo build --release -p marspot-session --example l3_rss_scaling 2>&1 | tail -3 )
+# The pipe used to swallow this build's exit code.  The example it names
+# had not existed since the history rebuild, so the failure was invisible
+# and a binary from June sitting in `target/` satisfied the `-x` check
+# below -- this gate spent four months either failing with a misleading
+# message or, if the wire protocol had happened not to change, measuring
+# June's code.
+if ! ( cd "$ROOT" && cargo build --release -p marspot-session \
+         --example l3_idle_cost 2>&1 | tail -20 ); then
+  fail "could not build the probe"
+fi
+if ! ( cd "$ROOT" && cargo build --release -p marspot-session 2>&1 | tail -20 ); then
+  fail "could not build marspot-session"
+fi
 [[ -x "$SESSION_BIN" ]] || fail "marspot-session not built at $SESSION_BIN"
 [[ -x "$PROBE_BIN" ]]   || fail "probe not built at $PROBE_BIN"
 
@@ -60,6 +72,9 @@ run_n() {
 }
 
 echo "==> per-session idle L3 RSS scaling (N=1, N=9)"
+# Columns: N total_rss_kib per_rss_kib cpu_secs cpu_pct.  This gate reads
+# the two RSS ones; T4 of the public bench reads the CPU ones from the
+# same probe with a 60-second window.
 OUT1=$(run_n 1) || fail "N=1 probe failed"
 OUT9=$(run_n 9) || fail "N=9 probe failed"
 PER1=$(echo "$OUT1" | awk '{print $3}')
