@@ -6832,23 +6832,7 @@ mod tests {
 
     // ----- soak: long-running scroll must not grow memory -----
 
-    /// Read this process's resident set size in bytes.  Used by the soak
-    /// test to assert that millions of scrolled lines don't grow the
-    /// process — the scrollback ring is pre-allocated and bounded.
-    fn current_rss_bytes() -> u64 {
-        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
-        let r = unsafe {
-            libc::proc_pidinfo(
-                libc::getpid(),
-                libc::PROC_PIDTASKINFO,
-                0,
-                &mut info as *mut _ as *mut libc::c_void,
-                std::mem::size_of::<libc::proc_taskinfo>() as i32,
-            )
-        };
-        assert!(r > 0, "proc_pidinfo failed");
-        info.pti_resident_size
-    }
+    use crate::platform::testing::current_rss_bytes;
 
     #[test]
     #[ignore = "soak; run via bin/soak.sh"]

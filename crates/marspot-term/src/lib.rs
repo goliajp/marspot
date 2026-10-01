@@ -69,6 +69,7 @@ pub mod layout;
 pub mod parser;
 pub mod palette;
 pub mod paths;
+pub mod platform;
 pub mod pty;
 pub mod render;
 pub mod scrollback;
