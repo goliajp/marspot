@@ -462,3 +462,96 @@ fn the_readme_installs_the_app_where_the_installer_puts_it() {
         "the README names a different place than the installer uses"
     );
 }
+
+/// The Idle section makes three claims about the code. Each one is pinned
+/// here, because the section exists to say what the throughput table
+/// cannot and a claim nobody re-checks is the kind that goes stale first.
+///
+/// The first draft of that section said "no periodic poll" and "checked at
+/// one, four, nine and sixteen panes". Neither was true: the window
+/// process wakes on a one-second timer, and the gate ran at N=1 and N=9.
+/// The gate was widened and the sentence was corrected; this is what keeps
+/// the pair honest from here.
+mod idle_section {
+    use super::SITE;
+
+    const SOAK: &str = include_str!("../bin/soak-l3-rss-scaling.sh");
+    const SHELL_MAIN: &str = include_str!("../src/bin/marspot-shell/main.rs");
+
+    fn idle_section() -> &'static str {
+        let from = SITE
+            .find("<h2>Idle</h2>")
+            .expect("the site has an Idle section");
+        let rest = &SITE[from..];
+        let to = rest.find("</section>").expect("the Idle section closes");
+        &rest[..to]
+    }
+
+    #[test]
+    fn the_pane_counts_it_names_are_the_ones_the_gate_runs() {
+        let text = idle_section();
+        assert!(
+            text.contains("one, four, nine and sixteen panes"),
+            "the Idle section no longer names the pane counts"
+        );
+        for n in [1, 4, 9, 16] {
+            assert!(
+                SOAK.contains(&format!("run_n {n}")),
+                "the site says the gate checks N={n} and `soak-l3-rss-scaling.sh` does not"
+            );
+        }
+    }
+
+    #[test]
+    fn it_admits_the_one_timer_that_exists() {
+        let text = idle_section();
+        // The timer is real; the claim has to survive someone reading the
+        // source. If it is ever removed, this test says so by failing, and
+        // the sentence can go with it.
+        assert!(
+            SHELL_MAIN.contains("REDRAW_INTERVAL_MS"),
+            "the window process no longer has a periodic redraw -- the site's \
+             sentence about one timer remaining is now the stale one"
+        );
+        assert!(
+            text.contains("wakes once a second"),
+            "the Idle section stopped mentioning the timer the window process has"
+        );
+        assert!(
+            !text.contains("no periodic poll"),
+            "the Idle section claims there is no periodic poll, and there is one"
+        );
+    }
+
+    #[test]
+    fn the_cap_and_the_linearity_bound_it_claims_are_both_asserted() {
+        let text = idle_section();
+        assert!(
+            text.contains("a cap, and a linearity bound"),
+            "the Idle section no longer describes what the gate asserts"
+        );
+        assert!(
+            SOAK.contains("PER_SESSION_CAP_KIB"),
+            "the gate has no per-session cap for the site to point at"
+        );
+        assert!(
+            SOAK.contains("LINEARITY_MAX"),
+            "the gate has no linearity bound for the site to point at"
+        );
+    }
+
+    /// The section says there is no cross-terminal idle table yet. If one
+    /// is ever added, this fails and the sentence has to go.
+    #[test]
+    fn it_does_not_quietly_grow_a_table_while_saying_it_has_none() {
+        let text = idle_section();
+        assert!(
+            text.contains("What is not here is a table"),
+            "the Idle section stopped saying it has no comparison table"
+        );
+        assert!(
+            !text.contains("<table"),
+            "the Idle section says it has no table and has one"
+        );
+    }
+}

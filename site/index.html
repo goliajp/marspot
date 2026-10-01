@@ -176,11 +176,54 @@
       <p>
         One run, one machine, one day. Repeatability has not been established, and
         three of the four numbers landing on exactly 128.0 says the timer's resolution
-        is the limiting factor at these speeds.
+        was the limiting factor at these speeds — the harness read a clock with two
+        decimal places, and a tenth of that is several MB/s here. It reads a
+        microsecond clock now, and this table predates the fix: treat these numbers
+        as a floor with an unknown error bar until they are measured again.
       </p>
       <p>
         The harness is in the repository. A benchmark you cannot re-run is a marketing
         claim, so the intention is that you re-run it.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Idle</h2>
+    <p>
+      Throughput is the number every terminal benchmark reports, and it is not the
+      one that decides whether a machine with twenty sessions open is pleasant. That
+      number is what the thing costs while you are not typing, and it is the reason
+      this terminal exists.
+    </p>
+    <p>
+      Nothing here animates. There is no cursor-blink timer and no frame loop: a
+      pane redraws when its contents changed and not otherwise, so a window full of
+      idle panes draws nothing. One timer does remain — the process that owns the
+      window wakes once a second to refresh what it shows about the panes — and
+      saying there are none would be a tidier sentence than a true one. Each
+      pane's parser, grid and scrollback live in their own process, which is what
+      makes the cost per pane flat rather than compounding, and what keeps a crash
+      inside one pane.
+    </p>
+    <div class="note">
+      <p><strong>What is measured, and what is not yet.</strong></p>
+      <p>
+        The repository gates per-pane resident memory: a cap, and a linearity bound
+        that fails if the cost per pane grows with the pane count. It is checked at
+        one, four, nine and sixteen panes — the counts a 2&times;2, 3&times;3 and
+        4&times;4 grid actually produce. Bounded disk and bounded scrollback are
+        gated the same way, because a terminal that gets heavier the longer it runs
+        has only moved the problem.
+      </p>
+      <p>
+        What is not here is a table. Comparing idle cost across terminals needs a
+        machine doing nothing else — otherwise the scheduler charges one terminal
+        for another's work — and every terminal measured the same way. The harness
+        exists; the quiet machine is the part still owed. Until then this section
+        has no numbers in it, which is the honest state rather than a modest one.
       </p>
     </div>
   </div>
