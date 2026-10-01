@@ -176,7 +176,7 @@ impl ShelldClient {
 use crate::plugins::pidtree;
 use crate::plugins::pty_op;
 use crate::plugins::{
-    LogLevel, PermissionSet, Plugin, PluginError, PluginHost, PluginMetadata,
+    LogLevel, Plugin, PluginError, PluginHost, PluginMetadata,
     PLUGIN_API_VERSION,
 };
 
@@ -1963,12 +1963,6 @@ impl Plugin for ClaudecodePlugin {
             name: "claudecode",
             version: "0.1.0",
             api_version: PLUGIN_API_VERSION,
-            permissions: PermissionSet::READ_PANE_INFO
-                | PermissionSet::READ_PTY_TREE
-                | PermissionSet::READ_DISK_FS
-                | PermissionSet::NOTIFY_USER
-                | PermissionSet::SET_STATUS_LINE
-                | PermissionSet::PERSIST_STATE,
             // 2 s — long enough to be near-free,short enough to catch
             // "assistant message done" within a couple seconds for
             // future notification feature.

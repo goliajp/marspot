@@ -862,7 +862,8 @@ struct ShellApp {
 /// that one gates `begin_pane_session` on the *current plugin's*
 /// permissions, and a run the supervisor starts has no plugin behind
 /// it.  Routing through it denied the first CLI delivery with
-/// `missing permission: PermissionSet(16)` — the supervisor asking
+/// `missing permission: PermissionSet(16)`, from the permission model
+/// since removed — the supervisor asking
 /// itself for permission it has no identity to hold.
 struct SupervisorOpHost {
     begin_tx: std::sync::mpsc::Sender<plugins::host::PaneSessionBeginRequest>,

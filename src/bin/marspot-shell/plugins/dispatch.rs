@@ -1,14 +1,12 @@
 //! The one way a hook gets called.
 //!
-//! Every permission check and every log namespace asks the host "which
-//! plugin is running right now?", and the answer is set by whoever is
-//! about to call the hook. That made it a method on the trait every
-//! plugin holds, and the implementation wrote whatever it was given --
-//! it did not check that the caller was the plugin it named, or that
-//! the permissions were a subset of the ones that plugin has. A plugin
-//! could call it inside its own hook and hand itself everything for
-//! the rest of that hook, which is long enough to submit an op or take
-//! over a pane.
+//! The log namespace and `state_dir()` ask the host "which plugin is
+//! running right now?", and the answer is set by whoever is about to call
+//! the hook. That made it a method on the trait every plugin holds, and
+//! the implementation wrote whatever it was given -- it did not check that
+//! the caller was the plugin it named. A plugin could call it inside its
+//! own hook and spend the rest of that hook writing state and logs under
+//! another plugin's name.
 //!
 //! So the methods take a [`Dispatching`], whose field is private to
 //! this module. A private field is visible to the defining module *and
@@ -19,29 +17,24 @@
 //! Nothing outside here can construct it, and nothing here hands one
 //! out; [`with`] is the only way it is ever made.
 
-use super::{PermissionSet, PluginHost};
+use super::PluginHost;
 
 /// Proof that the registry is the caller. See the module docs.
 pub struct Dispatching(());
 
 /// Run `f` with `name` as the plugin the host answers questions about.
 ///
-/// The clear happens even if `f` panics, so a plugin that dies inside
-/// a hook does not leave its name and its permissions installed for
-/// whatever the supervisor does next.
-pub fn with<R>(
-    host: &dyn PluginHost,
-    name: &'static str,
-    permissions: PermissionSet,
-    f: impl FnOnce() -> R,
-) -> R {
+/// The clear happens even if `f` panics, so a plugin that dies inside a
+/// hook does not leave its name installed for whatever the supervisor
+/// does next.
+pub fn with<R>(host: &dyn PluginHost, name: &'static str, f: impl FnOnce() -> R) -> R {
     struct Clear<'a>(&'a dyn PluginHost, Dispatching);
     impl Drop for Clear<'_> {
         fn drop(&mut self) {
             self.0.clear_active_plugin(&self.1);
         }
     }
-    host.set_active_plugin(&Dispatching(()), name, permissions);
+    host.set_active_plugin(&Dispatching(()), name);
     let _clear = Clear(host, Dispatching(()));
     f()
 }
@@ -91,7 +84,7 @@ mod tests {
         }
         let spy = Spy(AtomicBool::new(false));
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            with(&spy, "t", PermissionSet::NONE, || panic!("the hook dies"));
+            with(&spy, "t", || panic!("the hook dies"));
         }));
         assert!(r.is_err(), "the panic has to reach the caller");
         assert!(spy.0.load(Ordering::Relaxed), "and the name has to be back");
@@ -102,7 +95,7 @@ mod tests {
         use std::sync::Mutex;
         struct Spy(Mutex<Vec<&'static str>>);
         impl PluginHost for Spy {
-            fn set_active_plugin(&self, _w: &Dispatching, name: &'static str, _p: PermissionSet) {
+            fn set_active_plugin(&self, _w: &Dispatching, name: &'static str) {
                 self.0.lock().unwrap().push(name);
             }
             fn clear_active_plugin(&self, _w: &Dispatching) {
@@ -111,7 +104,7 @@ mod tests {
             rest_of_the_host!();
         }
         let spy = Spy(Mutex::new(Vec::new()));
-        with(&spy, "t", PermissionSet::NONE, || {
+        with(&spy, "t", || {
             spy.0.lock().unwrap().push("<hook>");
         });
         assert_eq!(*spy.0.lock().unwrap(), ["t", "<hook>", "<cleared>"]);

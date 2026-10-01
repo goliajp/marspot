@@ -1525,7 +1525,9 @@ pub struct OpReport {
 /// Deliberately not `PluginHost`: that trait's `begin_pane_session`
 /// checks the *current plugin's* permissions, and the queue has
 /// submitters that are not plugins.  Routing through it denied the
-/// first CLI delivery with `missing permission: PermissionSet(16)` —
+/// first CLI delivery with `missing permission: PermissionSet(16)` (the
+/// permission model that message came from is gone; see the plugins
+/// module docs) —
 /// the supervisor asking itself for permission it has no identity to
 /// hold.  Plugins still submit through their host; starting the run is
 /// the owner's business.
