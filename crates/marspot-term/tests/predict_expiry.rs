@@ -68,6 +68,7 @@ fn spawn(program: &str) -> Pty {
             ..Default::default()
         },
         env_remove_prefixes: vec!["MARSPOT_".into()],
+            env_set: Vec::new(),
         ..Default::default()
     })
     .expect("spawn");

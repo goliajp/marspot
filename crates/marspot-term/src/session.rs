@@ -323,6 +323,10 @@ impl Session {
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),
+            // Nothing yet: the removals above are what a pane needs
+            // today. The channel exists so that what marspot mints
+            // for one pane can reach it without reopening the filter.
+            env_set: Vec::new(),
         })?;
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(PTY_CHANNEL_CAPACITY);
         let exited = Arc::new(AtomicBool::new(false));

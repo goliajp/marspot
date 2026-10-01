@@ -74,6 +74,7 @@ fn main() {
         argv0: Some("-zsh".into()),
         size: TerminalSize { cols: 120, rows: 40, ..Default::default() },
         env_remove_prefixes: vec!["MARSPOT_".into()],
+            env_set: Vec::new(),
         ..Default::default()
     })
     .expect("spawn zsh");

@@ -980,6 +980,7 @@ mod tests {
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),
+            env_set: Vec::new(),
         })
         .expect("spawn zsh on a pty");
         let shell_pid = pty.child_pid();

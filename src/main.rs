@@ -2777,6 +2777,7 @@ fn bench_pty_raw(spec: &str) {
             argv0: None,
             cwd: None,
             env_remove_prefixes: Vec::new(),
+            env_set: Vec::new(),
         }) {
             Ok(p) => p,
             Err(e) => {
