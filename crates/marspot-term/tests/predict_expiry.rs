@@ -110,6 +110,15 @@ fn a_password_prompt_does_not_keep_what_was_typed_on_screen() {
 /// `seen` counts every byte read since the caller started counting, so
 /// the wait is for the thing itself rather than for a duration that
 /// happens to be long enough on an idle machine.
+///
+/// Deliberately does not expire while it waits. Expiry is the other
+/// test's subject: a guess whose confirmation is late is supposed to
+/// be withdrawn, so the screen never keeps saying something the
+/// program did not. Running that clock here would make this test
+/// about whether the echo beat a deadline -- a fact about the machine
+/// -- when what it is about is that an echo, when it arrives,
+/// confirms the guess. It went red on a loaded host doing exactly
+/// that, twice, in two different clauses.
 fn pump_until_echoed(
     pty: &mut Pty,
     t: &mut Terminal,
@@ -127,7 +136,6 @@ fn pump_until_echoed(
             }
             _ => std::thread::sleep(Duration::from_millis(1)),
         }
-        t.expire_predictions();
     }
 }
 
