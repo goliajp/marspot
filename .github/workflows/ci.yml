@@ -4,9 +4,19 @@ name: ci
 # tests.  Nothing here signs or publishes — that is `release.yml`, and
 # it runs this same gate again before it does.
 #
-# One platform today.  Windows and Linux runners join when their
-# backends exist; the matrix below is written so adding them is a line
-# rather than a rewrite.
+# Two legs, and they check different things.
+#
+# macOS builds and tests the whole product. Linux builds and tests the
+# zero-GUI core -- `marspot-term`, which `marspot-session` is made of
+# and which a second platform reuses whole. Nothing above that layer
+# compiles there yet (Metal, AppKit), so the Linux leg is not a weaker
+# copy of the macOS one: it is the only thing that can say the core
+# stayed portable.
+#
+# It can say it because the core did not used to be. Measured
+# 2026-10-01: seven errors, four Darwin-only libc calls across three
+# files, in the crate documented as the zero-GUI engine. Nobody had
+# ever tried. This leg is what stops that happening again silently.
 
 on:
   push:
@@ -28,6 +38,16 @@ jobs:
         include:
           - os: macos-14
             name: macOS arm64
+            # The whole product.
+            scope: --workspace
+            nextest: mac
+            full: true
+          - os: ubuntu-latest
+            name: Linux x86_64 (core)
+            # Everything above these two is macOS-only today.
+            scope: -p marspot-term -p marspot-linkify
+            nextest: linux
+            full: false
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.name }}
     steps:
@@ -51,7 +71,7 @@ jobs:
           restore-keys: ${{ matrix.os }}-cargo-
 
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build ${{ matrix.scope }} --all-targets
 
       - name: Test
         # nextest, because that is the gate this project actually runs.
@@ -66,15 +86,17 @@ jobs:
         # skip themselves and say so; a test that needs one and does
         # not skip is a bug in the test, not a reason to weaken this.
         run: |
-          curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C "$HOME/.cargo/bin"
-          cargo nextest run --workspace --no-fail-fast
+          curl -LsSf https://get.nexte.st/latest/${{ matrix.nextest }} \
+            | tar zxf - -C "$HOME/.cargo/bin"
+          cargo nextest run ${{ matrix.scope }} --no-fail-fast
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy ${{ matrix.scope }} --all-targets -- -D warnings
 
       # Built from source once and kept, because the alternative is a
       # third-party action fetching binaries into a signing job.
       - name: Cache dependency-policy tools
+        if: matrix.full
         uses: actions/cache@v4
         with:
           path: |
@@ -84,7 +106,10 @@ jobs:
           key: ${{ matrix.os }}-deptools-1
 
       - name: Dependency policy
+        if: matrix.full
         # Every non-FFI dependency carries a written reason next to it.
+        # Once, not per leg: the policy is about the manifest, and the
+        # manifest is the same on both.
         run: |
           for t in cargo-audit cargo-deny cargo-machete; do
             [[ -x "$HOME/.cargo/bin/$t" ]] || cargo install --locked "$t"
@@ -92,6 +117,7 @@ jobs:
           bin/lint-deps.sh
 
       - name: The app bundle assembles
+        if: matrix.full
         run: |
           cargo build --release --bins
           bin/build-app-bundle.sh --out "$RUNNER_TEMP/Marspot.app"

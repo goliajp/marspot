@@ -107,6 +107,16 @@ pub unsafe fn set_environ(ptrs: *mut *mut libc::c_char) {
     unsafe { *libc::_NSGetEnviron() = ptrs };
 }
 
+/// # Safety
+///
+/// Same contract as the macOS one above: between `fork` and `exec` in
+/// the child, with a NULL-terminated array that outlives the call.
+///
+/// Written out again rather than shared, because a `cfg` branch is its
+/// own function and carries its own documentation -- clippy's
+/// `missing_safety_doc` is per item, so the version that is not being
+/// compiled is the version nobody checks. The Linux CI leg caught
+/// this on the first run; a mac does not look at this branch at all.
 #[cfg(target_os = "linux")]
 pub unsafe fn set_environ(ptrs: *mut *mut libc::c_char) {
     unsafe extern "C" {
