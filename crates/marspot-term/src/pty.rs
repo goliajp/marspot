@@ -875,6 +875,22 @@ mod tests {
     #[test]
     fn drop_does_not_hang_when_the_pane_holds_a_suspended_job() {
         use std::time::{Duration, Instant};
+        // This one is about zsh's job control specifically -- ^Z
+        // through the line discipline, and the tty's foreground group
+        // moving. Without zsh the spawn still succeeds (the fork does;
+        // the exec is what fails) and the only symptom is this test
+        // timing out ten seconds later saying the shell never
+        // settled, which is what the Linux CI leg reported on its
+        // first run.
+        //
+        // Saying so and skipping, rather than weakening the test or
+        // the gate: a test that needs something the host does not have
+        // reports that, and a test that needs it and stays silent is a
+        // bug in the test.
+        if !std::path::Path::new("/bin/zsh").exists() {
+            eprintln!("skipping: no /bin/zsh, and this test is about zsh's job control");
+            return;
+        }
         let mut pty = Pty::spawn(PtyConfig {
             program: "/bin/zsh".into(),
             args: vec!["-f".into()],
