@@ -127,17 +127,73 @@ unsafe extern "C" {
     ) -> CTFontRef;
 }
 
+/// The platform's font objects, indexed by `FontId`, shared with
+/// whoever has to turn an id back into a font.
+///
+/// It sits behind an `Arc` because two owners need it and neither
+/// contains the other: `FontCache` interns into it, and the glyph
+/// atlas's rasteriser reads from it on a miss.  Before this, the
+/// rasteriser took `&CTFont` as an argument, which meant every caller
+/// of the atlas had to hold a font — the one thing a Windows or Linux
+/// implementation cannot do.
+///
+/// Append-only, so an index stays valid for the process's life. The
+/// lock is taken by `intern` and by the miss path; everything the
+/// per-cell path needs (point size, ascent, whether the font has
+/// colour glyphs) is a parallel snapshot in `FontRegistry` and does
+/// not touch it.
+pub struct CoreTextFontTable {
+    fonts: std::sync::RwLock<Vec<CTFont>>,
+}
+
+impl CoreTextFontTable {
+    /// A table holding just `base`, so id 0 resolves to it.  For the
+    /// glyph-atlas tests, which build one font and never fall back.
+    pub fn single(base: CTFont) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::new(base))
+    }
+
+    fn new(base: CTFont) -> Self {
+        Self { fonts: std::sync::RwLock::new(vec![base]) }
+    }
+
+    fn push(&self, font: CTFont) -> usize {
+        let mut v = self.fonts.write().unwrap_or_else(|e| e.into_inner());
+        v.push(font);
+        v.len() - 1
+    }
+
+    /// The font at `idx`, cloned — a `CFRetain`, which is why the
+    /// per-cell path does not call this.
+    pub fn get(&self, idx: usize) -> Option<CTFont> {
+        self.fonts
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(idx)
+            .cloned()
+    }
+
+}
+
 /// Holds the base font + lazily-discovered fallbacks.  Postscript
 /// name → index map dedups instances (CT hands out a fresh CTFontRef
 /// each lookup even when the underlying font is the same).
 struct FontRegistry {
-    fonts: Vec<CTFont>,
+    fonts: std::sync::Arc<CoreTextFontTable>,
     by_name: HashMap<String, usize>,
     /// Parallel to `fonts`: whether the font carries colour glyphs
     /// (Apple Color Emoji and friends — `kCTFontColorGlyphsTrait`).
     /// Precomputed at intern time so the per-cell render path can route
     /// to the colour atlas without a CoreText call per glyph.
     color: Vec<bool>,
+    /// Parallel to `fonts`, same reason as `color`: the glyph key is
+    /// built from the font's point size on every cell, and reading it
+    /// used to mean cloning the `CTFont` (a `CFRetain`) per cell just
+    /// to ask it a constant.
+    pt_size: Vec<f64>,
+    /// Parallel to `fonts`.  Chrome's shaped-run path asks the first
+    /// glyph's font for its ascent, which was the same clone.
+    ascent: Vec<f64>,
 }
 
 fn font_has_color_glyphs(font: &CTFont) -> bool {
@@ -150,11 +206,25 @@ impl FontRegistry {
         let mut by_name = HashMap::new();
         by_name.insert(name, 0);
         let color = vec![font_has_color_glyphs(&base)];
+        let pt_size = vec![base.pt_size()];
+        let ascent = vec![base.ascent()];
         Self {
-            fonts: vec![base],
+            fonts: std::sync::Arc::new(CoreTextFontTable::new(base)),
             by_name,
             color,
+            pt_size,
+            ascent,
         }
+    }
+
+    /// Append `font` and record its snapshot metrics.  The snapshots
+    /// and the table must grow together or an id means two different
+    /// things depending on which one you ask.
+    fn append(&mut self, font: CTFont) -> usize {
+        self.color.push(font_has_color_glyphs(&font));
+        self.pt_size.push(font.pt_size());
+        self.ascent.push(font.ascent());
+        self.fonts.push(font)
     }
 
     fn intern(&mut self, font: CTFont) -> usize {
@@ -162,10 +232,8 @@ impl FontRegistry {
         if let Some(&idx) = self.by_name.get(&name) {
             return idx;
         }
-        let idx = self.fonts.len();
+        let idx = self.append(font);
         self.by_name.insert(name, idx);
-        self.color.push(font_has_color_glyphs(&font));
-        self.fonts.push(font);
         idx
     }
 
@@ -181,10 +249,8 @@ impl FontRegistry {
         if let Some(&idx) = self.by_name.get(&key) {
             return idx;
         }
-        let idx = self.fonts.len();
+        let idx = self.append(font);
         self.by_name.insert(key, idx);
-        self.color.push(font_has_color_glyphs(&font));
-        self.fonts.push(font);
         idx
     }
 }
@@ -549,7 +615,9 @@ impl FontCache {
             self.evict_count += 1;
         }
         let style_idx = self.style_font_idx[style as usize];
-        let base = self.fonts.fonts[style_idx].clone();
+        let Some(base) = self.fonts.fonts.get(style_idx) else {
+            return (0, 0);
+        };
         let glyph = lookup_glyph(&base, ch);
         let entry = if glyph != 0 {
             (style_idx, glyph)
@@ -567,8 +635,8 @@ impl FontCache {
                 if idx == style_idx {
                     continue;
                 }
-                let f = &self.fonts.fonts[idx];
-                let g = lookup_glyph(f, ch);
+                let Some(f) = self.fonts.fonts.get(idx) else { continue };
+                let g = lookup_glyph(&f, ch);
                 if g != 0 {
                     found = Some((idx, g));
                     break;
@@ -594,8 +662,32 @@ impl FontCache {
         entry
     }
 
-    pub fn font(&self, idx: usize) -> &CTFont {
-        &self.fonts.fonts[idx]
+    /// The platform font at `idx`, cloned.
+    ///
+    /// Only the platform's own code should need this -- the glyph key
+    /// and the per-cell routing read the snapshots below instead,
+    /// because this is a `CFRetain` and it used to happen once per
+    /// cell per frame.
+    pub fn font(&self, idx: usize) -> Option<CTFont> {
+        self.fonts.fonts.get(idx)
+    }
+
+    /// The table itself, for whoever has to turn an id back into a
+    /// font without holding a `FontCache` -- the glyph atlas's
+    /// rasteriser.
+    pub fn font_table(&self) -> std::sync::Arc<CoreTextFontTable> {
+        std::sync::Arc::clone(&self.fonts.fonts)
+    }
+
+    /// The font's point size, from the snapshot taken when it was
+    /// interned.  This is what the glyph key is built from.
+    pub fn font_pt_size(&self, idx: usize) -> f64 {
+        self.fonts.pt_size.get(idx).copied().unwrap_or(0.0)
+    }
+
+    /// The font's ascent, from the same snapshot.
+    pub fn font_ascent(&self, idx: usize) -> f64 {
+        self.fonts.ascent.get(idx).copied().unwrap_or(0.0)
     }
 
     /// Phase 3 — intern a CTFont produced by CTLine shaping (likely
@@ -667,7 +759,7 @@ impl FontCache {
         let base_idx = self
             .intern_ui_weighted_at_size(weight_q, size_pt)
             .unwrap_or(self.ui_font_idx);
-        let base_font = self.fonts.fonts[base_idx].clone();
+        let Some(base_font) = self.fonts.fonts.get(base_idx) else { return 0.0 };
         let advance = crate::font_shape::measure_line(text, &base_font, opts);
         self.ui_measure.put(text, weight_q, opts_bits, size_q, advance);
         advance
@@ -699,7 +791,7 @@ impl FontCache {
         let idx = self
             .intern_ui_weighted_at_size(400, size_pt)
             .unwrap_or(self.ui_font_idx);
-        let f = &self.fonts.fonts[idx];
+        let Some(f) = self.fonts.fonts.get(idx) else { return 0.0 };
         let line_h_pt = f.ascent() + f.descent() + f.leading();
         line_h_pt * 2.0
     }
@@ -738,7 +830,7 @@ impl FontCache {
         let base_idx = self
             .intern_ui_weighted_at_size(weight_q, size_pt)
             .unwrap_or(self.ui_font_idx);
-        let base_font = self.fonts.fonts[base_idx].clone();
+        let Some(base_font) = self.fonts.fonts.get(base_idx) else { return Vec::new() };
         let size_q = crate::glyph_atlas::GlyphKey::size_q_for(base_font.pt_size());
         let ui_id = base_idx as u32;
         // Phase 10c bug fix — shape's intern callback de-dupes
@@ -839,7 +931,7 @@ impl FontCache {
             self.ui_variants.insert(variant_key, idx);
             return Some(idx);
         }
-        let base = self.fonts.fonts[self.ui_font_idx].clone();
+        let base = self.fonts.fonts.get(self.ui_font_idx)?;
         // Always go through `build_weight_variant` (CTFontDescriptor
         // + kCTFontTraitsAttribute + kCTFontWeightTrait + size) so
         // weight = 400 and weight = 700 hit identical CT machinery.
@@ -871,8 +963,10 @@ impl FontCache {
     pub fn resolve_char_ui(&mut self, ch: char) -> (usize, CGGlyph) {
         if self.ui_font_idx > 0 {
             let g = {
-                let ui_font = &self.fonts.fonts[self.ui_font_idx];
-                lookup_glyph(ui_font, ch)
+                match self.fonts.fonts.get(self.ui_font_idx) {
+                    Some(ui_font) => lookup_glyph(&ui_font, ch),
+                    None => 0,
+                }
             };
             if g != 0 {
                 return (self.ui_font_idx, g);
@@ -905,7 +999,7 @@ impl FontCache {
         let char_cache_bytes =
             self.char_cache.capacity() * (char_entry + std::mem::size_of::<usize>());
         let fonts_vec_bytes =
-            self.fonts.fonts.capacity() * std::mem::size_of::<CTFont>();
+            self.fonts.pt_size.capacity() * std::mem::size_of::<CTFont>();
         let by_name_entry =
             std::mem::size_of::<String>() + std::mem::size_of::<usize>();
         let by_name_bytes = self.fonts.by_name.capacity()

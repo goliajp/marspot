@@ -1,24 +1,49 @@
-//! Phase 10 — `Rasteriser` trait + macOS impls + a no-Metal `MockRasteriser`
-//! for headless tests.
+//! The seam between the glyph atlas and whoever can turn a font id
+//! and a glyph index into pixels.
 //!
-//! The
-//! atlas wants to be platform-agnostic at the natural-bbox path:
-//! Linux/Windows would substitute their own glyph rasteriser (rustybuzz +
-//! ab_glyph or DirectWrite) while reusing the marspot shelf packer,
-//! eviction policy, and atlas storage.  Phase 10 plumbs only the
-//! `get_or_rasterize_natural` path through a trait; the PTY-side
-//! `get_or_rasterize` (n_cells + cell-fit safety net) stays as
-//! direct CoreText calls until cross-platform PTY rendering is on the
-//! table.
+//! **No platform type appears in `Rasteriser` or `Shaper`.** That is
+//! the whole point of the file and `tests/text_layer_is_portable.rs`
+//! holds it down: the traits used to take `&CTFont` and `CGGlyph`, so
+//! a DirectWrite or FreeType implementation could not be written at
+//! all -- it would have had to produce a CoreText font object to
+//! satisfy the signature. An implementation now receives a `FontId`,
+//! which is the atlas's own key, and looks it up in whatever table it
+//! keeps. Resolving and falling back between fonts stays on the
+//! platform side, because that is the part each platform must write
+//! for itself.
 //!
-//! The trait deliberately does NOT couple to Metal — `RasterOutput`
-//! is plain `Vec<u8>` + dims + bearing, so a test can plug a
-//! `MockRasteriser` into an atlas backed by a `MockTexture` (or a
-//! real Metal texture when one's available) without spinning up a
-//! GPU device.
+//! `BOX_DRAWING_FONT_ID` is the precedent: an id that corresponds to
+//! no font at all, drawn by our own code. The ids were never aliases
+//! for CoreText objects, and the traits were the only place that said
+//! otherwise.
+//!
+//! `Shaper` is **not** done: it still takes `&CTFont` and an intern
+//! callback handing back `CTFont`s that CoreText discovered mid-shape.
+//! Closing it means the font table owns the dedup, which would put
+//! the per-cell `is_color_font` lookup behind the table's lock -- a
+//! separate decision with a measurable cost, so it is a separate
+//! change. The portability test pins the gap so it cannot be
+//! forgotten or quietly widened.
+//!
+//! `RasterOutput` is plain `Vec<u8>` + dims + bearing, so a test can
+//! plug a `MockRasteriser` into an atlas backed by a `MockTexture`
+//! without a GPU device -- and, now that the terminal grid's path goes
+//! through the trait too, drive that path as well.
 
-use core_graphics::font::CGGlyph;
+use std::sync::Arc;
+
 use core_text::font::CTFont;
+
+use crate::font_cache::CoreTextFontTable;
+use crate::glyph_atlas::{FontId, SlotMetrics};
+
+/// A glyph index within one font.
+///
+/// `u16` because that is what every shaper on every platform calls a
+/// glyph index: CoreText's `CGGlyph`, DirectWrite's `UINT16`,
+/// HarfBuzz's `codepoint_t` in practice. The name no longer points at
+/// one of them.
+pub type GlyphId = u16;
 
 /// What the atlas needs to record a glyph slot — the pixel bytes plus
 /// the geometric metadata the renderer's `quad()` formula expects.
@@ -42,11 +67,24 @@ pub struct RasterOutput {
 /// `subpx_x × 0.25 px` so a single glyph at 4 sub-pixel positions
 /// caches as 4 distinct atlas entries.
 pub trait Rasteriser: Send + Sync + 'static {
-    fn rasterise(
+    /// Natural-bbox raster: the glyph at whatever size the font says,
+    /// used by chrome where there is no cell to fit.
+    fn rasterise(&self, font: FontId, glyph: GlyphId, subpx_x: u8) -> Option<RasterOutput>;
+
+    /// Cell-fitted raster for the terminal grid: the glyph is drawn
+    /// into an `n_cells`-wide slot of `metrics`, shrunk if it would
+    /// overflow.
+    ///
+    /// A separate method rather than an option on the first because
+    /// the two have different contracts -- this one promises the
+    /// output fits the slot, which is what lets every glyph in a row
+    /// share one baseline.
+    fn rasterise_in_cell(
         &self,
-        font: &CTFont,
-        glyph: CGGlyph,
-        subpx_x: u8,
+        font: FontId,
+        glyph: GlyphId,
+        metrics: SlotMetrics,
+        n_cells: u16,
     ) -> Option<RasterOutput>;
 }
 
@@ -57,28 +95,49 @@ pub trait Rasteriser: Send + Sync + 'static {
 /// one with a flag because the byte format differs and the atlas
 /// already routes on `bpp` — keeping the trait impls symmetrical
 /// makes downstream type errors loud.
-pub struct CoreTextMonoRasteriser;
-pub struct CoreTextColorRasteriser;
+/// Each holds the font table it resolves ids against.  That table is
+/// the platform's -- it is what the trait exists to keep out of the
+/// atlas.
+pub struct CoreTextMonoRasteriser {
+    pub fonts: Arc<CoreTextFontTable>,
+}
+pub struct CoreTextColorRasteriser {
+    pub fonts: Arc<CoreTextFontTable>,
+}
 
 impl Rasteriser for CoreTextMonoRasteriser {
-    fn rasterise(
+    fn rasterise(&self, font: FontId, glyph: GlyphId, subpx_x: u8) -> Option<RasterOutput> {
+        let f = self.fonts.get(font as usize)?;
+        crate::glyph_atlas::raster_natural_mono(&f, glyph, subpx_x)
+    }
+
+    fn rasterise_in_cell(
         &self,
-        font: &CTFont,
-        glyph: CGGlyph,
-        subpx_x: u8,
+        font: FontId,
+        glyph: GlyphId,
+        metrics: SlotMetrics,
+        n_cells: u16,
     ) -> Option<RasterOutput> {
-        crate::glyph_atlas::raster_natural_mono(font, glyph, subpx_x)
+        let f = self.fonts.get(font as usize)?;
+        crate::glyph_atlas::raster_in_cell_mono(&f, glyph, metrics, n_cells)
     }
 }
 
 impl Rasteriser for CoreTextColorRasteriser {
-    fn rasterise(
+    fn rasterise(&self, font: FontId, glyph: GlyphId, subpx_x: u8) -> Option<RasterOutput> {
+        let f = self.fonts.get(font as usize)?;
+        crate::glyph_atlas::raster_natural_color(&f, glyph, subpx_x)
+    }
+
+    fn rasterise_in_cell(
         &self,
-        font: &CTFont,
-        glyph: CGGlyph,
-        subpx_x: u8,
+        font: FontId,
+        glyph: GlyphId,
+        metrics: SlotMetrics,
+        n_cells: u16,
     ) -> Option<RasterOutput> {
-        crate::glyph_atlas::raster_natural_color(font, glyph, subpx_x)
+        let f = self.fonts.get(font as usize)?;
+        crate::glyph_atlas::raster_in_cell_color(&f, glyph, metrics, n_cells)
     }
 }
 
@@ -103,12 +162,33 @@ impl MockRasteriser {
 }
 
 impl Rasteriser for MockRasteriser {
-    fn rasterise(
+    fn rasterise(&self, _font: FontId, _glyph: GlyphId, _subpx_x: u8) -> Option<RasterOutput> {
+        self.canned()
+    }
+
+    /// The slot the grid asked for, filled -- so a headless test can
+    /// drive the terminal path and compare bytes.
+    fn rasterise_in_cell(
         &self,
-        _font: &CTFont,
-        _glyph: CGGlyph,
-        _subpx_x: u8,
+        _font: FontId,
+        _glyph: GlyphId,
+        metrics: SlotMetrics,
+        n_cells: u16,
     ) -> Option<RasterOutput> {
+        let px_w = metrics.cell_w * n_cells.max(1) as u32;
+        let px_h = metrics.cell_h;
+        Some(RasterOutput {
+            bytes: vec![0xFFu8; (px_w * px_h * self.bpp) as usize],
+            px_w,
+            px_h,
+            bearing_x: 0,
+            bearing_y: metrics.baseline_from_top as i16,
+        })
+    }
+}
+
+impl MockRasteriser {
+    fn canned(&self) -> Option<RasterOutput> {
         let n = (self.px_w * self.px_h * self.bpp) as usize;
         Some(RasterOutput {
             bytes: vec![0xFFu8; n],
@@ -180,6 +260,7 @@ impl Shaper for MockShaper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core_graphics::font::CGGlyph;
     use core_text::font::new_from_name;
 
     /// Sanity — the macOS impl returns SOMETHING for a real glyph
@@ -198,8 +279,8 @@ mod tests {
         unsafe {
             font.get_glyphs_for_characters(&cu, &mut g, 1);
         }
-        let r = CoreTextMonoRasteriser
-            .rasterise(&font, g, 0)
+        let r = CoreTextMonoRasteriser { fonts: CoreTextFontTable::single(font) }
+            .rasterise(0, g, 0)
             .expect("raster A");
         assert!(r.px_w > 0 && r.px_h > 0);
         assert_eq!(r.bytes.len(), (r.px_w * r.px_h) as usize, "mono is R8");
@@ -268,15 +349,27 @@ mod tests {
     /// the right byte count for both mono and colour formats.
     #[test]
     fn mock_rasteriser_emits_canned_bytes() {
-        let Ok(font) = new_from_name("Menlo", 13.0) else {
-            return;
-        };
         let mock = MockRasteriser::mono(4, 8);
-        let r = mock.rasterise(&font, 0, 0).expect("mock mono");
+        let r = mock.rasterise(0, 0, 0).expect("mock mono");
         assert_eq!(r.bytes.len(), 4 * 8, "mono = 1 bpp");
 
         let mock = MockRasteriser::color(4, 8);
-        let r = mock.rasterise(&font, 0, 0).expect("mock color");
+        let r = mock.rasterise(0, 0, 0).expect("mock color");
         assert_eq!(r.bytes.len(), 4 * 8 * 4, "color = 4 bpp");
+    }
+
+    /// The cell-fitted method fills exactly the slot the grid asked
+    /// for -- that is the contract that lets a headless test drive the
+    /// terminal path and compare bytes against the real rasteriser's
+    /// output shape.
+    #[test]
+    fn mock_fills_the_slot_the_grid_asked_for() {
+        let m = SlotMetrics { cell_w: 7, cell_h: 15, baseline_from_top: 11 };
+        let r = MockRasteriser::mono(1, 1)
+            .rasterise_in_cell(0, 0, m, 2)
+            .expect("mock in-cell");
+        assert_eq!((r.px_w, r.px_h), (14, 15), "two cells wide, one tall");
+        assert_eq!(r.bytes.len(), 14 * 15);
+        assert_eq!(r.bearing_y, 11, "baseline comes from the metrics");
     }
 }

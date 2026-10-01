@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.195"  # the permission model that enforced nothing is gone
-core    = "0.12.249"  # the table draws no row it cannot fit
+core    = "0.12.250"  # the rasteriser takes a font id, not a CoreText font
 session = "0.11.129"  # owning the PTY is the default, not an opt-in

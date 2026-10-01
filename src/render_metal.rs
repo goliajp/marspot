@@ -94,7 +94,6 @@ fn resolve_cluster_glyph(
 ) -> Option<AtlasEntry> {
     let base = marspot_term::grapheme::cluster_first_codepoint(text);
     let (font_idx, _) = font.resolve_char(base, bold, italic);
-    let ct_font = font.font(font_idx).clone();
     let n_cells = marspot_term::grapheme::cluster_width(text).max(1) as u16;
     let key = crate::glyph_atlas::cluster_key(text, &metrics);
     let w = metrics.cell_w * n_cells as u32;
@@ -107,7 +106,14 @@ fn resolve_cluster_glyph(
         metrics.baseline_from_top,
         n_cells,
         |buf| {
-            drew = crate::glyph_atlas::rasterise_cluster(text, &ct_font, metrics, n_cells, buf);
+            // Resolved here rather than before the call: the closure
+            // only runs on a miss, and this is a `CFRetain`.
+            drew = match font.font(font_idx) {
+                Some(f) => {
+                    crate::glyph_atlas::rasterise_cluster(text, &f, metrics, n_cells, buf)
+                }
+                None => false,
+            };
         },
     );
     let _ = drew;
@@ -142,11 +148,9 @@ fn resolve_cell_glyph(
     if glyph == 0 {
         return None;
     }
-    let ct_font = font.font(font_idx).clone();
     let n_cells = crate::grid::char_width(ch).max(1) as u16;
     atlas.get_or_rasterize(
-        text_glyph_key(font_idx as u32, glyph, &ct_font),
-        &ct_font,
+        text_glyph_key(font_idx as u32, glyph, font.font_pt_size(font_idx)),
         metrics,
         n_cells,
     )
@@ -177,11 +181,15 @@ fn box_drawing_key(ch: char, metrics: &SlotMetrics) -> GlyphKey {
 /// runs with font-smoothing on (see the `set_should_smooth_fonts(true)`
 /// line in the rasteriser).
 #[inline]
-fn text_glyph_key(font_id: u32, glyph: CGGlyph, ct_font: &core_text::font::CTFont) -> GlyphKey {
+/// `pt_size` comes from the `FontCache` snapshot, not from a font
+/// object: this runs once per cell per frame, and asking a `CTFont`
+/// for its point size meant cloning one (a `CFRetain`) to ask it a
+/// constant.
+fn text_glyph_key(font_id: u32, glyph: CGGlyph, pt_size: f64) -> GlyphKey {
     GlyphKey::new(
         font_id,
         glyph,
-        GlyphKey::size_q_for(ct_font.pt_size()),
+        GlyphKey::size_q_for(pt_size),
         0,
         GlyphKey::FLAG_SMOOTH,
     )
@@ -226,16 +234,15 @@ fn resolve_cell_glyph_routed(
     if glyph == 0 {
         return None;
     }
-    let ct_font = font.font(font_idx).clone();
-    let key = text_glyph_key(font_idx as u32, glyph, &ct_font);
+    let key = text_glyph_key(font_idx as u32, glyph, font.font_pt_size(font_idx));
     let n_cells = crate::grid::char_width(ch).max(1) as u16;
     if font.is_color_font(font_idx) {
         color_atlas
-            .get_or_rasterize(key, &ct_font, metrics, n_cells)
+            .get_or_rasterize(key, metrics, n_cells)
             .map(|e| (e, true))
     } else {
         atlas
-            .get_or_rasterize(key, &ct_font, metrics, n_cells)
+            .get_or_rasterize(key, metrics, n_cells)
             .map(|e| (e, false))
     }
 }
@@ -1088,12 +1095,12 @@ impl MetalRenderer {
         // without forcing rebuilds in steady state.  Still bounded:
         // `get_or_rasterize` does an atomic rebuild on full so the
         // user never sees silently-blank cells.
-        let atlas = GlyphAtlas::new(&device, 4096, 4096)?;
+        let atlas = GlyphAtlas::new(&device, 4096, 4096, font.font_table())?;
         // 1024×1024 BGRA8 colour atlas = 4 MiB.  Holds full-colour emoji
         // (~cell-sized slots) — a small working set, so 1024² is ample
         // and keeps the colour path's footprint to 4 MiB.  Same shelf
         // packer + atomic-rebuild-on-full bound as the mono atlas.
-        let color_atlas = GlyphAtlas::new_color(&device, 1024, 1024)?;
+        let color_atlas = GlyphAtlas::new_color(&device, 1024, 1024, font.font_table())?;
 
         let layer = { CAMetalLayer::new() };
         unsafe {
@@ -1225,12 +1232,12 @@ impl MetalRenderer {
         // without forcing rebuilds in steady state.  Still bounded:
         // `get_or_rasterize` does an atomic rebuild on full so the
         // user never sees silently-blank cells.
-        let atlas = GlyphAtlas::new(&device, 4096, 4096)?;
+        let atlas = GlyphAtlas::new(&device, 4096, 4096, font.font_table())?;
         // 1024×1024 BGRA8 colour atlas = 4 MiB.  Holds full-colour emoji
         // (~cell-sized slots) — a small working set, so 1024² is ample
         // and keeps the colour path's footprint to 4 MiB.  Same shelf
         // packer + atomic-rebuild-on-full bound as the mono atlas.
-        let color_atlas = GlyphAtlas::new_color(&device, 1024, 1024)?;
+        let color_atlas = GlyphAtlas::new_color(&device, 1024, 1024, font.font_table())?;
         Ok(Self {
             fonts_built_at_scale: crate::ui::chrome_scale(),
             device,
@@ -4968,10 +4975,8 @@ pub(crate) fn push_text_run_kind(
         let n_cells = crate::grid::char_width(ch).max(1) as u16;
         let (font_idx, glyph) = font.resolve_char(ch, false, false);
         if glyph != 0 {
-            let ct_font = font.font(font_idx).clone();
             if let Some(entry) = atlas.get_or_rasterize(
-                text_glyph_key(font_idx as u32, glyph, &ct_font),
-                &ct_font,
+                text_glyph_key(font_idx as u32, glyph, font.font_pt_size(font_idx)),
                 metrics,
                 n_cells,
             ) {
@@ -5033,15 +5038,14 @@ pub(crate) fn push_text_run_ui_shaped_mono(
     let baseline_y_q = baseline_y.round();
     let x_start_floor = x_start.floor() as i32;
     for sg in shaped {
-        let ct_font = font.font(sg.font_id as usize).clone();
         let key = GlyphKey::new(
             sg.font_id,
             sg.glyph_id,
-            GlyphKey::size_q_for(ct_font.pt_size()),
+            GlyphKey::size_q_for(font.font_pt_size(sg.font_id as usize)),
             sg.subpx_x,
             GlyphKey::FLAG_SMOOTH,
         );
-        let Some(entry) = atlas.get_or_rasterize_natural(key, &ct_font) else {
+        let Some(entry) = atlas.get_or_rasterize_natural(key) else {
             continue;
         };
         let pen_x = (x_start_floor + sg.pen_x_px) as f32;
@@ -5093,15 +5097,14 @@ pub(crate) fn push_text_run_ui_sized(
     let baseline_y_q = baseline_y.round();
     let x_start_floor = x_start.floor() as i32;
     for sg in shaped {
-        let ct_font = font.font(sg.font_id as usize).clone();
         let key = GlyphKey::new(
             sg.font_id,
             sg.glyph_id,
-            GlyphKey::size_q_for(ct_font.pt_size()),
+            GlyphKey::size_q_for(font.font_pt_size(sg.font_id as usize)),
             sg.subpx_x,
             GlyphKey::FLAG_SMOOTH,
         );
-        let Some(entry) = atlas.get_or_rasterize_natural(key, &ct_font) else {
+        let Some(entry) = atlas.get_or_rasterize_natural(key) else {
             continue;
         };
         let pen_x = (x_start_floor + sg.pen_x_px) as f32;
@@ -5156,7 +5159,7 @@ fn push_text_run_ui_shaped(
     // as 8.1pt top-of-em, not chrome cell pitch.  Bug fix 2026-06-25:
     // previously `baseline_y` was pre-computed with chrome ascent,
     // misaligning active-row BG vs SF Pro glyphs.
-    let real_ascent_pt = font.font(shaped[0].font_id as usize).ascent();
+    let real_ascent_pt = font.font_ascent(shaped[0].font_id as usize);
     // CTFont.ascent() returns pt — convert to phys at the 2× retina
     // baked into the atlas raster path (`RETINA_SCALE = 2.0`).
     let real_ascent_phys = (real_ascent_pt * 2.0) as f32;
@@ -5176,7 +5179,6 @@ fn push_text_run_ui_shaped(
         // the matching `fg_color_pipeline` pass blends them in
         // submission order with the mono runs.
         let is_color = font.is_color_font(sg.font_id as usize);
-        let ct_font = font.font(sg.font_id as usize).clone();
         // Phase 4 — `sg.subpx_x` bucket comes from CTLine's float
         // position (shape_line quantised it).  Atlas hands back a slot
         // whose ink is pre-shifted by `subpx_x × 0.25 px`, so
@@ -5184,21 +5186,21 @@ fn push_text_run_ui_shaped(
         let key = GlyphKey::new(
             sg.font_id,
             sg.glyph_id,
-            GlyphKey::size_q_for(ct_font.pt_size()),
+            GlyphKey::size_q_for(font.font_pt_size(sg.font_id as usize)),
             sg.subpx_x,
             GlyphKey::FLAG_SMOOTH,
         );
         let (entry_opt, aw, ah, sink): (Option<AtlasEntry>, f32, f32, &mut Vec<GlyphInstance>) =
             if is_color {
                 (
-                    color_atlas.get_or_rasterize_natural(key, &ct_font),
+                    color_atlas.get_or_rasterize_natural(key),
                     color_atlas_w,
                     color_atlas_h,
                     color_glyphs,
                 )
             } else {
                 (
-                    atlas.get_or_rasterize_natural(key, &ct_font),
+                    atlas.get_or_rasterize_natural(key),
                     atlas_w,
                     atlas_h,
                     glyphs,
@@ -9176,7 +9178,7 @@ mod tests {
             eprintln!("skipping: no Metal device");
             return;
         };
-        let Ok(mut atlas) = GlyphAtlas::new(&r.device, 512, 512) else {
+        let Ok(mut atlas) = GlyphAtlas::new(&r.device, 512, 512, font.font_table()) else {
             eprintln!("skipping: atlas would not allocate");
             return;
         };
@@ -9225,7 +9227,7 @@ mod tests {
         let mut buf_pair = vec![0u8; 16 * 32];
 
         let (idx, _) = font.resolve_char('e', false, false);
-        let ct = font.font(idx).clone();
+        let ct = font.font(idx).expect("the resolved font is in the table");
         assert!(
             crate::glyph_atlas::rasterise_cluster("e", &ct, metrics, 1, &mut buf_base),
             "the rasteriser refused a one-codepoint cluster"
@@ -9353,8 +9355,14 @@ mod tests {
             }
         };
 
-        let mut atlas = GlyphAtlas::new(&r.device, 256, 256).expect("atlas");
         let font = new_from_name("Menlo", 13.0).expect("Menlo");
+        let mut atlas = GlyphAtlas::new(
+            &r.device,
+            256,
+            256,
+            crate::font_cache::CoreTextFontTable::single(font.clone()),
+        )
+        .expect("atlas");
 
         let mut cg_glyph: core_graphics::font::CGGlyph = 0;
         let cu: u16 = b'A' as u16;
@@ -9365,8 +9373,7 @@ mod tests {
 
         let entry = atlas
             .get_or_rasterize(
-                text_glyph_key(0, cg_glyph, &font),
-                &font,
+                text_glyph_key(0, cg_glyph, font.pt_size()),
                 SlotMetrics { cell_w: 16, cell_h: 32, baseline_from_top: 24 },
                 1,
             )
@@ -9428,8 +9435,10 @@ mod tests {
             Err(_) => return,
         };
         let mut font = FontCache::build().expect("font");
-        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
-        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let mut atlas =
+            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+        let mut color_atlas =
+            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
         let grid = crate::grid::Grid::new(10, 4);
         let layout = Layout::build(800.0, 600.0, 0.0, 0.0, 20.0, 1, 1, 8.0, 16.0);
         let view = SessionView {
@@ -9535,8 +9544,10 @@ mod tests {
             Err(_) => return,
         };
         let mut font = FontCache::build().expect("font");
-        let mut atlas = GlyphAtlas::new(&device, 512, 512).expect("atlas");
-        let mut color_atlas = GlyphAtlas::new_color(&device, 64, 64).expect("color atlas");
+        let mut atlas =
+            GlyphAtlas::new(&device, 512, 512, font.font_table()).expect("atlas");
+        let mut color_atlas =
+            GlyphAtlas::new_color(&device, 64, 64, font.font_table()).expect("color atlas");
         let metrics = SlotMetrics { cell_w: 7, cell_h: 16, baseline_from_top: 12 };
 
         // The set the old rule fired on: narrow Ambiguous glyphs and
@@ -9628,8 +9639,10 @@ mod tests {
             Err(_) => return,
         };
         let mut font = FontCache::build().expect("font");
-        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
-        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let mut atlas =
+            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+        let mut color_atlas =
+            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
         let grid = crate::grid::Grid::new(10, 4);
         let layout = Layout::build(800.0, 600.0, 0.0, 0.0, 20.0, 1, 1, 8.0, 16.0);
         let mk = |focused: bool, dormant: bool, recede: u32| SessionView {
@@ -9735,8 +9748,10 @@ mod tests {
             Err(_) => return,
         };
         let mut font = FontCache::build().expect("font");
-        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
-        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let mut atlas =
+            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+        let mut color_atlas =
+            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
 
         // Six columns of text under a three-cell composition typed at
         // the start of the row — the placeholder's own shape.
@@ -9816,8 +9831,10 @@ mod tests {
             Err(_) => return,
         };
         let mut font = FontCache::build().expect("font");
-        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
-        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let mut atlas =
+            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+        let mut color_atlas =
+            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
 
         let grid = Grid::new(10, 4);
         // 2x2 with a gutter: gutter > 0 is what turns the ring on.
@@ -9900,8 +9917,10 @@ mod tests {
             Err(_) => return,
         };
         let mut font = FontCache::build().expect("font");
-        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
-        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let mut atlas =
+            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+        let mut color_atlas =
+            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
 
         let mut grid = Grid::new(10, 4);
         let cell_a = Cell {
@@ -10010,8 +10029,10 @@ mod tests {
             Err(_) => return,
         };
         let mut font = FontCache::build().expect("font");
-        let mut atlas = GlyphAtlas::new(&device, 512, 512).expect("atlas");
-        let mut color_atlas = GlyphAtlas::new_color(&device, 512, 512).expect("color atlas");
+        let mut atlas =
+            GlyphAtlas::new(&device, 512, 512, font.font_table()).expect("atlas");
+        let mut color_atlas =
+            GlyphAtlas::new_color(&device, 512, 512, font.font_table()).expect("color atlas");
 
         // Skip on the (macOS-impossible) chance there's no colour emoji
         // font — the routing decision keys off the resolved font's
@@ -10103,8 +10124,10 @@ mod tests {
         use crate::layout::Layout;
         let device = system_default_device().expect("metal device");
         let mut font = FontCache::build().expect("font");
-        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
-        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let mut atlas =
+            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+        let mut color_atlas =
+            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
         let mut grid = Grid::new(10, 4);
         grid.set_cell(0, 0, Cell { ch: 'A', attrs: Default::default() });
         grid.set_cell(2, 0, Cell { ch: 'B', attrs: Default::default() });
@@ -10213,8 +10236,10 @@ mod tests {
         }
         let device = system_default_device().expect("metal device");
         let mut font = FontCache::build().expect("font");
-        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
-        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let mut atlas =
+            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+        let mut color_atlas =
+            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
         let grid = Grid::new(10, 4);
         let layout = Layout::build(
             font.cell_w * 10.0,
@@ -10344,8 +10369,10 @@ mod tests {
         }
         let device = system_default_device().expect("metal device");
         let mut font = FontCache::build().expect("font");
-        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
-        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let mut atlas =
+            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+        let mut color_atlas =
+            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
         let grid = Grid::new(10, 4);
         let layout = Layout::build(
             font.cell_w * 10.0,
@@ -10427,8 +10454,10 @@ mod tests {
         }
         let device = system_default_device().expect("metal device");
         let mut font = FontCache::build().expect("font");
-        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
-        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let mut atlas =
+            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+        let mut color_atlas =
+            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
         let mut grid = Grid::new(10, 4);
         grid.set_cell(0, 0, Cell { ch: 'A', attrs: Default::default() });
         let layout = Layout::build(
