@@ -63,11 +63,17 @@ trap cleanup EXIT
 # ~instant when current, and rebuilding unconditionally rules out the
 # version-skew trap where a stale probe creates a grid_shm region an
 # updated marspot-session refuses (or vice-versa).
-( cd "$ROOT" && cargo build --release -p marspot-session \
-    --example l3_echo_probe --example l3_multi_probe --example l3_resize_probe \
-    --example l3_scroll_probe --example l3_selection_probe \
-    --example l3_latency_probe --example l3_crash_probe \
-    --example l3_swap_probe 2>&1 | tail -3 )
+# The trap above is the one this used to fall into.  The build was in a
+# pipe, so its exit code went to `tail`; the `-x` checks below then found
+# binaries from mid-June -- seven of these probes lost their source in the
+# history rebuild -- and ran those against today's session binary.  One of
+# them still tries to connect to shelld, which RFC-003 deleted, and that
+# is the only reason it was ever noticed.
+for probe in l3_echo_probe l3_multi_probe l3_resize_probe \
+             l3_scroll_probe l3_selection_probe l3_latency_probe \
+             l3_crash_probe l3_swap_probe; do
+  dev_require_probe "$probe" || exit 1
+done
 [[ -x "$SESSION_BIN" ]]      || fail "marspot-session not built at $SESSION_BIN"
 [[ -x "$PROBE_BIN" ]]        || fail "probe not built at $PROBE_BIN"
 [[ -x "$MULTI_PROBE_BIN" ]]  || fail "multi probe not built at $MULTI_PROBE_BIN"

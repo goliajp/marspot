@@ -17,6 +17,12 @@
 
 # Sandbox state dir.  /tmp keeps the unix socket path short (macOS caps
 # sun_path at 104 bytes) and survives nothing — a fresh box is fine.
+# Callers set ROOT before sourcing this; define it when they have not, so
+# a function here cannot build a path out of an empty variable.  Unset, it
+# expanded to an absolute-looking `/crates/...` that reads as a missing
+# file rather than a missing variable.
+ROOT="${ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+
 export MARSPOT_STATE_DIR="${MARSPOT_STATE_DIR:-/tmp/marspot-dev}"
 
 # A sandbox runs under the developer's own HOME, so anything the app
@@ -94,6 +100,37 @@ dev_wipe_state() {
 # So burn the cost here, outside every stopwatch.  This is the same
 # trick the supervisor plays before a swap (`binary_tree::can_start`),
 # for the same reason.  Call it after any build step.
+# Build one L3 probe from source, or refuse.
+#
+# Seven of the eleven probes the soak scripts name lost their source in
+# the June history rebuild, and every one of them still had a binary from
+# mid-June sitting in `target/release/examples/`.  The scripts checked
+# `-x` on the path, found those, and ran them -- so for three and a half
+# months the L3 soak suite was exercising June's code against today's
+# session binary and reporting whatever came out.  One of them still
+# tries to connect to shelld, a daemon RFC-003 deleted, which is the
+# only reason this was noticeable at all.
+#
+# So: the source is what is checked, before anything else, and the build's
+# exit code is not allowed into a pipe.
+dev_require_probe() {
+  local name="$1"
+  local src="$ROOT/crates/marspot-session/examples/$name.rs"
+  if [[ ! -f "$src" ]]; then
+    echo "FAIL: probe '$name' has no source at $src" >&2
+    echo "      A binary left in target/ is not coverage.  Write the probe" >&2
+    echo "      or stop naming it." >&2
+    return 1
+  fi
+  local log
+  log=$(cd "$ROOT" && cargo build --release -p marspot-session --example "$name" 2>&1) || {
+    echo "FAIL: probe '$name' did not build" >&2
+    echo "$log" | tail -20 >&2
+    return 1
+  }
+  return 0
+}
+
 dev_warm_binaries() {
   for b in marspot-shell marspot-core marspot-session; do
     [[ -x "$DEV_TARGET/$b" ]] && \

@@ -34,7 +34,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 
 # Always (re)build bin + probe together — incremental is instant when
 # current, and rules out the grid_shm version-skew trap.
-( cd "$ROOT" && cargo build --release -p marspot-session --example l3_drift_probe 2>&1 | tail -3 )
+dev_require_probe l3_drift_probe || exit 1
 [[ -x "$SESSION_BIN" ]]     || fail "marspot-session not built at $SESSION_BIN"
 [[ -x "$DRIFT_PROBE_BIN" ]] || fail "drift probe not built at $DRIFT_PROBE_BIN"
 
