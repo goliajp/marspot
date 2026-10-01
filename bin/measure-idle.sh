@@ -26,6 +26,9 @@
 #   - fewer shells than `--sessions` asks for   -> exit 3
 #   - the process set changed during the window -> exit 4
 #   - the window did not actually elapse        -> exit 5
+#   - the host was not idle during the window   -> exit 6 (the number is
+#     written anyway: it is still valid for an A/B on one machine, and
+#     only the caller knows which it is doing)
 # A changed set is the one that matters: a pane opening or a helper
 # dying mid-window makes the CPU delta a number with no meaning, and
 # it is invisible in the result.
@@ -134,10 +137,33 @@ if (( SHELLS < SESSIONS )); then
 fi
 
 echo "==> $APP: ${SESSIONS} pane(s), $(echo "$FIRST" | wc -l | tr -d ' ') process(es), idling ${WINDOW}s ($FOCUS)"
+# What the rest of the host did while we were calling it idle.  An
+# idle-cost measurement taken next to someone else's compile is not a
+# measurement of idle cost: the scheduler charges our processes for
+# cache and memory pressure they did not cause, and the number comes out
+# high with nothing in the result saying why.  2026-10-01 the throughput
+# probe read the load once, BEFORE its first trial, and reported a 45%
+# regression that was entirely a neighbour -- so this samples through
+# the window and keeps the peak.
+LOADS=""
+( while :; do
+    uptime | sed 's/.*averages: //' | awk '{print $1}'
+    sleep 5
+  done ) > /tmp/measure-idle-load.$$ 2>/dev/null &
+LOAD_PID=$!
+# Off the job table, or bash announces its own sampler's death on stderr
+# and the announcement lands in whatever is reading the result.
+disown "$LOAD_PID" 2>/dev/null || true
+cleanup_load() { kill "$LOAD_PID" 2>/dev/null; rm -f "/tmp/measure-idle-load.$$"; }
+trap cleanup_load EXIT
+
 T0=$(python3 -c 'import time; print(f"{time.monotonic():.3f}")')
 sleep "$WINDOW"
 T1=$(python3 -c 'import time; print(f"{time.monotonic():.3f}")')
 SECOND="$(sample)"
+kill "$LOAD_PID" 2>/dev/null
+wait "$LOAD_PID" 2>/dev/null
+LOADS="$(tr '\n' ' ' < "/tmp/measure-idle-load.$$")"
 
 ELAPSED=$(python3 -c "print(f'{$T1 - $T0:.3f}')")
 # The window is measured, not assumed: a suspended laptop or a busy host
@@ -152,9 +178,10 @@ PIDS_AFTER=$(echo "$SECOND" | awk '{print $1}' | sort | paste -sd, -)
   || die "the process set changed during the window (before: $PIDS_BEFORE / after: $PIDS_AFTER) -- the CPU delta would be meaningless" 4
 
 OUT="$RESULTS_DIR/idle-${APP}-${SESSIONS}-${FOCUS}.json"
-python3 - "$APP" "$SESSIONS" "$FOCUS" "$ELAPSED" "$OUT" <<PY
-import json, subprocess, sys
+python3 - "$APP" "$SESSIONS" "$FOCUS" "$ELAPSED" "$OUT" "$LOADS" <<PY
+import json, sys
 app, sessions, focus, elapsed, out = sys.argv[1], int(sys.argv[2]), sys.argv[3], float(sys.argv[4]), sys.argv[5]
+loads = [float(x) for x in sys.argv[6].split()] if len(sys.argv) > 6 and sys.argv[6].strip() else []
 
 def parse(block):
     rows = {}
@@ -191,6 +218,10 @@ doc = {
     "cpu_percent_of_one_core": round(100.0 * total_cpu / elapsed, 2),
     "rss_kib_total": total_rss,
     "rss_kib_per_session": round(total_rss / sessions, 1) if sessions else None,
+    "host_load1_peak": max(loads) if loads else None,
+    "host_load1_first": loads[0] if loads else None,
+    "host_load1_last": loads[-1] if loads else None,
+    "host_load1_samples": len(loads),
     "per_process": per,
 }
 with open(out, "w") as f:
@@ -199,4 +230,15 @@ with open(out, "w") as f:
 print(f"    CPU {doc['cpu_percent_of_one_core']}% of one core over {doc['window_secs']}s"
       f"  |  RSS {total_rss // 1024} MiB total, {doc['rss_kib_per_session'] and round(doc['rss_kib_per_session']/1024, 1)} MiB per pane")
 print(f"    {out}")
+# A publishable idle number needs an idle host.  Said rather than
+# enforced: the figure is still useful for an A/B on one machine, and
+# the caller is the one who knows which it is doing.
+if loads and max(loads) > 1.0:
+    print(
+        f"    NOT PUBLISHABLE: host load1 peaked at {max(loads)} during the window"
+        f" (first {loads[0]}, last {loads[-1]}).  Idle cost measured next to"
+        f" someone else's work is not idle cost.",
+        file=sys.stderr,
+    )
+    raise SystemExit(6)
 PY
