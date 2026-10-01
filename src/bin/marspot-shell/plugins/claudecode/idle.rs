@@ -472,6 +472,8 @@ pub(super) fn reclaim_op(
     config_dir: Option<&str>,
     claude_pid: i32,
     shell_pid: i32,
+    // where the session lives, so bringing it back does not move it
+    project_dir: Option<&str>,
 ) -> Option<pty_op::PtyOp> {
     // Same rule as `profile_cycle_op`: a session we cannot name cannot
     // be brought back, and taking claude down without a resume line
@@ -490,7 +492,10 @@ pub(super) fn reclaim_op(
     if let Some(settings) = crate::receipts::claude_settings_arg() {
         cmd = cmd.arg("--settings").quoted_arg(settings);
     }
-    let line = cmd.arg("--resume").arg(uuid).to_bytes()?;
+    // Brought back where it lives. Same reason as the profile switch:
+    // `--resume` binds the session to the directory it is run from, and
+    // the pane's shell may have wandered since it started.
+    let line = cmd.arg("--resume").arg(uuid).in_dir(project_dir).to_bytes()?;
     // Reclaiming parks claude and brings it back later. Anything the
     // person had typed and not sent lives in the process being parked,
     // so it is read now and handed back when the new one has painted.
@@ -576,7 +581,7 @@ mod park_label_tests {
     /// than trusted.
     #[test]
     fn the_park_step_answers_to_its_name() {
-        let op = reclaim_op("aaaa-bbbb", None, 0, 1234).expect("a script");
+        let op = reclaim_op("aaaa-bbbb", None, 0, 1234, None).expect("a script");
         let at = op.index_of(RECLAIM_PARK_LABEL).expect("the park step is named");
         assert!(at > 0, "the park is not the first step; it follows the teardown");
         assert_eq!(op.index_of("no-such-step"), None, "and the lookup can fail");
