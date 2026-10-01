@@ -28,7 +28,22 @@ use marspot::cc_usage::CcAccount;
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Room {
     /// The feed answered for this profile.
-    Known { status: String, util_5h: f64, util_7d: f64, reset_7d: i64 },
+    Known {
+        status: String,
+        util_5h: f64,
+        util_7d: f64,
+        reset_7d: i64,
+        /// Per-model caps the feed reports, label lower-cased.
+        ///
+        /// Some projects can only run on Fable, and Fable has a
+        /// quota of its own *on top of* the account's windows -- it
+        /// is bounded by 5h and 7d as well, so it is an extra
+        /// constraint rather than a separate pool. An account can be
+        /// at 7% of its week and still be shut out of Fable, and for
+        /// a pane pinned to that model the account-level numbers are
+        /// not the whole answer.
+        models: Vec<(String, f64)>,
+    },
     /// No account matched it — a profile the collector does not cover,
     /// or one whose `.claude.json` names an address the feed has never
     /// seen.  Not the same as "full".
@@ -50,18 +65,65 @@ const WINDOW_SPENT: f64 = 0.98;
 
 impl Room {
     pub(super) fn refused(&self) -> bool {
+        self.refused_for(None)
+    }
+
+    /// Is this profile out, for a pane that needs `model`?
+    ///
+    /// The model's own cap is an additional way to be out, never a
+    /// way to be in: an account whose week is spent is spent whatever
+    /// Fable says, because Fable is bounded by that week too.
+    pub(super) fn refused_for(&self, model: Option<&str>) -> bool {
         match self {
             Room::Known { status, util_5h, util_7d, .. } => {
-                status == "rejected" || *util_5h >= WINDOW_SPENT || *util_7d >= WINDOW_SPENT
+                if status == "rejected" || *util_5h >= WINDOW_SPENT || *util_7d >= WINDOW_SPENT {
+                    return true;
+                }
+                self.model_util(model).is_some_and(|u| u >= WINDOW_SPENT)
             }
             Room::Unknown => false,
+        }
+    }
+
+    /// How much of `model`'s own window is gone here, when the feed
+    /// says and the pane cares.
+    fn model_util(&self, model: Option<&str>) -> Option<f64> {
+        let want = model?.to_ascii_lowercase();
+        match self {
+            Room::Known { models, .. } => models
+                .iter()
+                // The badge says `fable-5`, the feed says `Fable`.
+                // Neither is a prefix of the other in general, so
+                // match on whichever side is shorter.
+                .find(|(label, _)| want.starts_with(label.as_str()) || label.starts_with(&want))
+                .map(|(_, util)| *util),
+            Room::Unknown => None,
         }
     }
     /// Seven days is the window that runs out here; five hours refills
     /// on its own within an afternoon.  Ties break on the shorter one.
     fn headroom(&self) -> (f64, f64) {
+        self.headroom_for(None)
+    }
+
+    /// Room to work in, for a pane that needs `model`.
+    ///
+    /// The model's cap narrows the seven-day figure rather than
+    /// adding a dimension: what a Fable-pinned pane can actually use
+    /// is whichever of the two runs out first. Keeping it in the same
+    /// pair means the ordering rule does not change -- the week
+    /// first, the five hours to break ties -- which is the whole
+    /// point of folding it in here instead of beside it.
+    fn headroom_for(&self, model: Option<&str>) -> (f64, f64) {
         match self {
-            Room::Known { util_5h, util_7d, .. } => (1.0 - util_7d, 1.0 - util_5h),
+            Room::Known { util_5h, util_7d, .. } => {
+                let week = 1.0 - util_7d;
+                let capped = match self.model_util(model) {
+                    Some(u) => week.min(1.0 - u),
+                    None => week,
+                };
+                (capped, 1.0 - util_5h)
+            }
             Room::Unknown => (0.0, 0.0),
         }
     }
@@ -107,6 +169,11 @@ pub(super) fn rooms_for(
                     util_5h: a.util_5h,
                     util_7d: a.util_7d,
                     reset_7d: a.reset_7d,
+                    models: a
+                        .model_limits
+                        .iter()
+                        .map(|m| (m.label.to_ascii_lowercase(), m.util))
+                        .collect(),
                 })
                 .unwrap_or(Room::Unknown);
             (p, room)
@@ -133,14 +200,14 @@ pub(super) fn rooms_for(
 /// bounded rather than prevented: a pane moves once per refusal and
 /// not again for ten minutes, which is the cost of this order and the
 /// reason no headroom floor is invented here.
-pub(super) fn best_profile(rooms: &[(u8, Room)], current: u8) -> Option<u8> {
+pub(super) fn best_profile(rooms: &[(u8, Room)], current: u8, model: Option<&str>) -> Option<u8> {
     let mut ranked: Vec<&(u8, Room)> = rooms.iter().filter(|(p, _)| *p != current).collect();
     if ranked.is_empty() {
         return None;
     }
     ranked.sort_by(|a, b| {
         let tier = |r: &Room| match r {
-            Room::Known { .. } if !r.refused() => 0,
+            Room::Known { .. } if !r.refused_for(model) => 0,
             Room::Unknown => 1,
             _ => 2,
         };
@@ -153,8 +220,8 @@ pub(super) fn best_profile(rooms: &[(u8, Room)], current: u8) -> Option<u8> {
                 a.1.reset_7d()
                     .cmp(&b.1.reset_7d())
                     .then_with(|| {
-                        b.1.headroom()
-                            .partial_cmp(&a.1.headroom())
+                        b.1.headroom_for(model)
+                            .partial_cmp(&a.1.headroom_for(model))
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
             })
@@ -191,6 +258,15 @@ pub(super) struct Situation<'a> {
     /// process it names exists — so between the move and the binding
     /// the pane still reads as being on the account it is leaving.
     pub last_target: Option<u8>,
+    /// The model this pane is working in, when the feed caps it
+    /// separately.
+    ///
+    /// Some projects can only run on Fable. Fable carries a quota of
+    /// its own, and it is bounded by the account's 5h and 7d windows
+    /// as well -- so a profile is usable for such a pane only when
+    /// both the account and the model have room. For every other pane
+    /// this is `None` and nothing about the decision changes.
+    pub needs_model: Option<&'a str>,
 }
 
 /// What to do with a pane its account has refused.
@@ -245,7 +321,7 @@ pub(super) fn next_move(s: &Situation) -> Move {
     {
         return Move::Hold("cooling down");
     }
-    let Some(target) = best_profile(s.rooms, s.current) else {
+    let Some(target) = best_profile(s.rooms, s.current, s.needs_model) else {
         return Move::Hold("nowhere else to go");
     };
     // Every account is out.  That is a normal ending: the CLI is
@@ -265,6 +341,73 @@ pub(super) fn next_move(s: &Situation) -> Move {
 
 #[cfg(test)]
 mod tests {
+
+    fn room(util_5h: f64, util_7d: f64, reset_7d: i64, models: &[(&str, f64)]) -> Room {
+        Room::Known {
+            status: "allowed".into(),
+            util_5h,
+            util_7d,
+            reset_7d,
+            models: models.iter().map(|(l, u)| (l.to_string(), *u)).collect(),
+        }
+    }
+
+    /// An account can be at 7% of its week and still be shut out of
+    /// one model.
+    ///
+    /// Some projects only run on Fable, and Fable is metered on its
+    /// own *as well as* against the account's 5h and 7d windows. So a
+    /// profile with a fresh week and a spent Fable is not a
+    /// destination for a Fable pane -- moving it there moves it
+    /// nowhere, and the pane comes straight back refused.
+    #[test]
+    fn a_fable_pane_does_not_go_to_a_profile_whose_fable_is_spent() {
+        let rooms = vec![
+            // Nearest renewal and nearly empty -- the ordinary winner.
+            (2, room(0.10, 0.07, 1_000, &[("fable", 0.99)])),
+            // Further out and fuller, but Fable is free.
+            (3, room(0.30, 0.40, 9_000, &[("fable", 0.20)])),
+        ];
+        assert_eq!(
+            best_profile(&rooms, 1, None),
+            Some(2),
+            "without a model to satisfy, the week decides and P2 wins"
+        );
+        assert_eq!(
+            best_profile(&rooms, 1, Some("fable-5")),
+            Some(3),
+            "a Fable pane cannot use P2's week, so it takes the one with Fable left"
+        );
+    }
+
+    /// The model's cap is a way to be out, never a way to be in.
+    ///
+    /// Fable is bounded by the account's windows too, so a spent week
+    /// is spent whatever the model row says.
+    #[test]
+    fn a_free_model_does_not_rescue_a_spent_account() {
+        let spent_week = room(0.10, 0.99, 1_000, &[("fable", 0.00)]);
+        assert!(spent_week.refused_for(Some("fable-5")), "the week is gone");
+        assert!(spent_week.refused_for(None));
+    }
+
+    /// The badge writes `fable-5`; the feed writes `Fable`.
+    #[test]
+    fn the_badge_token_and_the_feed_label_find_each_other() {
+        let r = room(0.1, 0.1, 1_000, &[("fable", 0.99)]);
+        assert!(r.refused_for(Some("fable-5")), "badge token, feed label");
+        assert!(r.refused_for(Some("fable")), "and the bare name");
+        assert!(!r.refused_for(Some("opus-5-5")), "a model it does not meter");
+        assert!(!r.refused_for(None));
+    }
+
+    /// A feed with no model rows at all changes nothing.
+    #[test]
+    fn an_older_feed_without_model_rows_decides_as_before() {
+        let rooms = vec![(2, room(0.10, 0.07, 1_000, &[])), (3, room(0.30, 0.40, 9_000, &[]))];
+        assert_eq!(best_profile(&rooms, 1, Some("fable-5")), Some(2));
+        assert_eq!(best_profile(&rooms, 1, None), Some(2));
+    }
     use super::*;
 
 
@@ -283,7 +426,7 @@ mod tests {
                         status: (*status).into(),
                         util_5h: 0.0,
                         util_7d: *util7,
-                        reset_7d: *reset7,
+                        reset_7d: *reset7, models: Vec::new()
                     },
                 )
             })
@@ -299,7 +442,7 @@ mod tests {
             status: "allowed_warning".into(),
             util_5h: 0.99,
             util_7d: 0.37,
-            reset_7d: 500,
+            reset_7d: 500, models: Vec::new()
         };
         assert!(warned.refused(), "99% of the five-hour window is not a warning");
 
@@ -307,17 +450,18 @@ mod tests {
             status: "allowed_warning".into(),
             util_5h: 0.10,
             util_7d: 0.80,
-            reset_7d: 900,
+            reset_7d: 900, models: Vec::new()
         };
         assert!(!fresh.refused(), "a warning with room left is still usable");
 
         // And it is not offered as somewhere to go.
-        let r = vec![(1, Room::Known { status: "rejected".into(), util_5h: 0.0, util_7d: 1.0, reset_7d: 100 }), (7, warned), (2, fresh)];
-        assert_eq!(best_profile(&r, 1), Some(2));
+        let r = vec![(1, Room::Known { status: "rejected".into(), util_5h: 0.0, util_7d: 1.0, reset_7d: 100 , models: Vec::new()}), (7, warned), (2, fresh)];
+        assert_eq!(best_profile(&r, 1, None), Some(2));
     }
 
     fn situation<'a>(rooms: &'a [(u8, Room)]) -> Situation<'a> {
         Situation {
+            needs_model: None,
             rooms,
             current: 1,
             tool_executing: false,
@@ -416,7 +560,7 @@ mod tests {
             acct("p4", "allowed", 0.0, 0.60, 400),
         ];
         let rooms = rooms_for(&[1, 2, 3, 4], &accounts, |p| Some(format!("p{p}")));
-        assert_eq!(best_profile(&rooms, 3), Some(4));
+        assert_eq!(best_profile(&rooms, 3, None), Some(4));
     }
 
     /// Same renewal, different room: then it is the fuller one.
@@ -427,7 +571,7 @@ mod tests {
             acct("p2", "allowed", 0.0, 0.20, 500),
         ];
         let rooms = rooms_for(&[1, 2], &accounts, |p| Some(format!("p{p}")));
-        assert_eq!(best_profile(&rooms, 0), Some(2));
+        assert_eq!(best_profile(&rooms, 0, None), Some(2));
     }
 
     /// A profile the feed has never heard of is a maybe, and a maybe
@@ -436,7 +580,7 @@ mod tests {
     fn an_unknown_profile_outranks_a_refused_one() {
         let accounts = vec![acct("p1", "rejected", 0.0, 1.0, 400)];
         let rooms = rooms_for(&[1, 9], &accounts, |p| Some(format!("p{p}")));
-        assert_eq!(best_profile(&rooms, 0), Some(9));
+        assert_eq!(best_profile(&rooms, 0, None), Some(9));
     }
 
     /// Everything is refused: the answer is the one that comes back
@@ -450,14 +594,14 @@ mod tests {
             acct("p3", "rejected", 0.0, 1.0, 700),
         ];
         let rooms = rooms_for(&[1, 2, 3], &accounts, |p| Some(format!("p{p}")));
-        assert_eq!(best_profile(&rooms, 1), Some(2));
+        assert_eq!(best_profile(&rooms, 1, None), Some(2));
     }
 
     /// Nowhere else to go.
     #[test]
     fn a_single_profile_has_no_answer() {
         let rooms = rooms_for(&[1], &[], |_| None);
-        assert_eq!(best_profile(&rooms, 1), None);
+        assert_eq!(best_profile(&rooms, 1, None), None);
     }
 }
 

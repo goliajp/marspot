@@ -203,6 +203,13 @@ pub struct ClaudecodePlugin {
     /// Richer per-binding meta we need to act on a badge click:
     /// profile number, sessionId, and the live claude pid.
     last_meta: HashMap<u64, BindMeta>,
+    /// Per pane: the model it is working in, as the scan last read it.
+    ///
+    /// Only the quota chooser reads this. Fable carries a cap of its
+    /// own on top of the account's 5h/7d windows, so for a pane
+    /// pinned to it a profile with a fresh week is not necessarily a
+    /// profile with room.
+    last_model: HashMap<u64, String>,
     /// Panes stranded on an account that is out: how many moves have
     /// been spent on each, and where the last one was aimed.  An entry
     /// disappears when the account answers again.
@@ -475,6 +482,7 @@ impl ClaudecodePlugin {
             shelld: None,
             last_mapping: HashMap::new(),
             last_meta: HashMap::new(),
+            last_model: HashMap::new(),
             stranded: HashMap::new(),
             moved_at: HashMap::new(),
 
@@ -1181,6 +1189,16 @@ impl ClaudecodePlugin {
     /// Kick off the profile cycle for `shelld_session_id`.  Called
     /// from `on_pane_badge_click`.  Builds a ProfileCyclePaneSession
     /// and hands it to the host; the host freezes the grid + locks
+    /// Which model this pane needs room in, when the feed caps one
+    /// separately.
+    ///
+    /// `None` for everything the feed does not meter on its own --
+    /// which is every pane except the Fable ones, and for those
+    /// nothing about the choice changes.
+    fn needs_model_for(&self, sid: u64) -> Option<String> {
+        self.last_model.get(&sid).cloned()
+    }
+
     /// the keyboard while the state machine runs.
     fn start_profile_cycle(
         &mut self,
@@ -1216,7 +1234,13 @@ impl ClaudecodePlugin {
                 let rooms = quota::rooms_for(&profiles, &u.accounts, |p| {
                     quota::profile_email(home, p)
                 });
-                let pick = quota::best_profile(&rooms, meta.profile_num);
+                // A pane pinned to Fable needs the profile to have
+                // room in Fable's own window as well as in the
+                // account's. Walking it onto an account with a fresh
+                // week but a spent Fable is a move that changes
+                // nothing.
+                let needs = self.needs_model_for(shelld_sid);
+                let pick = quota::best_profile(&rooms, meta.profile_num, needs.as_deref());
                 host.log(
                     LogLevel::Info,
                     "cycle.rooms",
@@ -1353,9 +1377,14 @@ impl ClaudecodePlugin {
         // session to continue *if* something was interrupted.
         let activity = result.new_activity.get(&sid);
         let tool_executing = matches!(activity, Some(CcActivity::ToolPending { executing: true }));
+        // Read before the Situation so the borrow ends here: the
+        // model is a fact about this pane, and the decision is about
+        // where it can go next.
+        let needs_model = result.new_models.get(&sid).cloned();
         let decision = quota::next_move(&quota::Situation {
             rooms,
             current: meta.profile_num,
+            needs_model: needs_model.as_deref(),
             tool_executing,
             moves_this_episode: self.stranded.get(&sid).map(|s| s.moves).unwrap_or(0),
             last_target: self.stranded.get(&sid).and_then(|s| s.last_target),
@@ -2169,6 +2198,7 @@ impl Plugin for ClaudecodePlugin {
             t_rearm = t0.elapsed().as_micros();
             self.last_mapping = result.new_mapping;
             self.last_meta = result.new_meta;
+            self.last_model = result.new_models;
         }
 
         // (2) Kick off the next scan if the worker is idle.  At most
@@ -2873,6 +2903,7 @@ mod tests {
     fn scan_of(sid: u64, activity: CcActivity) -> ScanResult {
         let mut result = ScanResult {
             new_mapping: HashMap::new(),
+            new_models: HashMap::new(),
             new_meta: HashMap::new(),
             new_activity: HashMap::new(),
             new_cpu: HashMap::new(),
@@ -4639,6 +4670,7 @@ mod tests {
         // the second to be able to decide.
         let mut first = ScanResult {
             new_mapping: scan.new_mapping.clone(),
+            new_models: HashMap::new(),
             new_meta: scan.new_meta.clone(),
             new_activity: scan.new_activity.clone(),
             new_cpu: HashMap::new(),
@@ -4673,6 +4705,7 @@ mod tests {
 
         let mut second = ScanResult {
             new_mapping: first.new_mapping.clone(),
+            new_models: HashMap::new(),
             new_meta: first.new_meta.clone(),
             new_activity: first.new_activity.clone(),
             new_cpu: HashMap::new(),
@@ -5072,6 +5105,7 @@ mod tests {
         new_cpu.insert(sid, (1_000u64, SystemTime::now()));
         ScanResult {
             new_mapping: HashMap::new(),
+            new_models: HashMap::new(),
             new_meta,
             new_activity: HashMap::new(),
             new_cpu,
@@ -5306,6 +5340,7 @@ mod tests {
     fn empty_scan() -> ScanResult {
         ScanResult {
             new_mapping: HashMap::new(),
+            new_models: HashMap::new(),
             new_meta: HashMap::new(),
             new_activity: HashMap::new(),
             new_cpu: HashMap::new(),
