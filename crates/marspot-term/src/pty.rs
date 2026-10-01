@@ -203,15 +203,15 @@ impl Pty {
                 if let Some(ref c) = cwd_cstring {
                     libc::chdir(c.as_ptr());
                 }
-                // Swap in the filtered env before exec.  A pointer
-                // store into `*_NSGetEnviron()` is async-signal-safe
+                // Swap in the filtered env before exec.  The pointer
+                // store is async-signal-safe
                 // (no allocation, no locks) — this is why the array
                 // was fully built pre-fork.  execvp reads `environ`
                 // for the child env AND its PATH search, so the
                 // filtered PATH (kept — only configured prefixes are
                 // dropped) still resolves relative program names.
                 if let Some((_, ref ptrs)) = filtered_env {
-                    *libc::_NSGetEnviron() = ptrs.as_ptr() as *mut *mut c_char;
+                    crate::platform::set_environ(ptrs.as_ptr() as *mut *mut c_char);
                 }
                 // execvp does PATH search for relative names (e.g. "tmux")
                 // while still matching execv's behaviour for absolute
@@ -689,29 +689,16 @@ mod tests {
     // run them explicitly via `bin/soak.sh` or:
     //   cargo test pty::tests::soak_ -- --ignored --test-threads=1
 
-    /// Number of file descriptors currently open by this process.  /dev/fd
-    /// on macOS lists this process's fds; the readdir itself uses one fd
-    /// briefly, but that offset cancels when we diff before/after.
-    fn count_open_fds() -> usize {
-        std::fs::read_dir("/dev/fd").map(|d| d.count()).unwrap_or(0)
-    }
+    use crate::platform::testing::{count_open_fds as count_fds, current_rss_bytes};
 
-    /// Current resident set size in bytes via proc_pidinfo.  Unlike
-    /// getrusage's ru_maxrss (peak), this returns the live value so we can
-    /// detect a process that grew and stayed grown.
-    fn current_rss_bytes() -> u64 {
-        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
-        let r = unsafe {
-            libc::proc_pidinfo(
-                libc::getpid(),
-                libc::PROC_PIDTASKINFO,
-                0,
-                &mut info as *mut _ as *mut libc::c_void,
-                std::mem::size_of::<libc::proc_taskinfo>() as i32,
-            )
-        };
-        assert!(r > 0, "proc_pidinfo failed: {}", io::Error::last_os_error());
-        info.pti_resident_size
+    /// Number of file descriptors currently open by this process.  The
+    /// readdir itself uses one fd briefly, but that offset cancels when
+    /// we diff before and after.
+    ///
+    /// Panics rather than returning 0 when the fd table cannot be read:
+    /// a leak test whose counter silently reads zero passes forever.
+    fn count_open_fds() -> usize {
+        count_fds().expect("the fd table has to be readable for a leak test to mean anything")
     }
 
     fn quick_spawn() -> Pty {
@@ -842,17 +829,9 @@ mod tests {
                     libc::read(master, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
                 } > 0
                 {}
-                let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-                let ok = unsafe {
-                    libc::proc_pidinfo(
-                        shell,
-                        libc::PROC_PIDTBSDINFO,
-                        0,
-                        &mut info as *mut _ as *mut libc::c_void,
-                        std::mem::size_of::<libc::proc_bsdinfo>() as i32,
-                    )
-                } > 0;
-                if ok && ((info.e_tpgid as i32 != info.pbi_pgid as i32) == want_job) {
+                if crate::platform::testing::has_foreground_job(shell)
+                    == Some(want_job)
+                {
                     return;
                 }
                 assert!(Instant::now() < deadline, "shell never settled");

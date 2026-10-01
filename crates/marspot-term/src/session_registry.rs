@@ -175,17 +175,10 @@ pub fn pid_is_live_session(pid: i32) -> bool {
     if unsafe { libc::kill(pid, 0) } != 0 {
         return false;
     }
-    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-    let n =
-        unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
-    if n <= 0 {
-        return false;
-    }
-    let path = String::from_utf8_lossy(&buf[..n as usize]);
-    path.rsplit('/')
-        .next()
+    crate::platform::pid_exe_name(pid)
         .is_some_and(|name| name.contains("marspot-session"))
 }
+
 
 /// Highest numeric session-dir id currently on disk, 0 when none.
 /// Used as the allocation floor so a lost `.next_id` can never

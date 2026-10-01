@@ -733,7 +733,20 @@ mod grid_tests {
     #[test]
     fn cc_wrapped_path_with_uuid_component_links_whole() {
         use crate::grid::{Cell, Grid};
-        let dir = std::env::temp_dir().join(format!("marspot-lnk-uuid-{}", std::process::id()));
+        // The pane is sized from row 1, so row 1 has to be long enough
+        // to hold row 2's continuation. That made the test depend on
+        // how long the platform's temp dir happens to be: macOS gives
+        // /var/folders/<...>/T/ (~70 chars) and the continuation fit,
+        // Linux gives /tmp/ (~28) and it was silently truncated, so
+        // there was nothing to link and the failure read like a
+        // portability bug in the scanner. Pad the directory until row 1
+        // is long enough, and the test asks the same question anywhere.
+        const TAIL: &str = "3dbde79c-ab6e-43bd-8143-c448617e1d69/scratchpad/env_now3_small.png";
+        let mut dir =
+            std::env::temp_dir().join(format!("marspot-lnk-uuid-{}", std::process::id()));
+        while dir.to_string_lossy().chars().count() + 1 < TAIL.chars().count() {
+            dir = dir.join("pad");
+        }
         let uuid_dir = dir.join("3dbde79c-ab6e-43bd-8143-c448617e1d69/scratchpad");
         std::fs::create_dir_all(&uuid_dir).unwrap();
         let png = uuid_dir.join("env_now3_small.png");

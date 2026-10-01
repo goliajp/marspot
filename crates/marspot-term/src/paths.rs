@@ -152,40 +152,23 @@ pub fn shell_pid_file() -> PathBuf {
     state_root().join("shell.pid")
 }
 
-/// Any marspot process other than this one alive?  Scans the BSD
-/// process table via sysctl-free libproc (proc_listallpids +
-/// proc_pidpath) — no fork, no shell.  Conservative: enumeration
-/// failure reads as "somebody might be alive" so the migration
-/// defers rather than racing.
+/// Any marspot process other than this one alive?  Asks the platform
+/// for the pid table and each pid's executable — no fork, no shell.
+/// Conservative: a question the platform cannot answer reads as
+/// "somebody might be alive", so the migration defers rather than
+/// racing.
 fn other_marspot_processes_alive() -> bool {
     let me = std::process::id() as i32;
-    let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    if n <= 0 {
+    let Some(pids) = crate::platform::all_pids() else {
         return true;
-    }
-    let mut pids = vec![0i32; n as usize * 2];
-    let filled = unsafe {
-        libc::proc_listallpids(
-            pids.as_mut_ptr() as *mut libc::c_void,
-            (pids.len() * std::mem::size_of::<i32>()) as i32,
-        )
     };
-    if filled <= 0 {
-        return true;
-    }
-    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-    for &pid in pids.iter().take(filled as usize) {
+    for pid in pids {
         if pid <= 0 || pid == me {
             continue;
         }
-        let len = unsafe {
-            libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
-        };
-        if len <= 0 {
+        let Some(name) = crate::platform::pid_exe_name(pid) else {
             continue;
-        }
-        let path = String::from_utf8_lossy(&buf[..len as usize]);
-        let name = path.rsplit('/').next().unwrap_or("");
+        };
         if name.starts_with("marspot-shell")
             || name.starts_with("marspot-core")
             || name.starts_with("marspot-session")
