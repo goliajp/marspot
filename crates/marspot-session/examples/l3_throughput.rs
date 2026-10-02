@@ -42,6 +42,70 @@ fn die(msg: &str) -> ! {
     std::process::exit(1)
 }
 
+/// User and system CPU nanoseconds the session process has burned, plus
+/// the wakeup count — how many times it was scheduled to do a round.
+///
+/// Wall clock on a shared host times the host's other tenants as much
+/// as the parser: preemption adds elapsed time without adding work.
+/// CPU time does not move when the scheduler hands the core to someone
+/// else, so it says what the code costs rather than what the neighbours
+/// did.  Reported alongside wall, never instead of it — a change that
+/// burns the same cycles over a longer window is still a regression the
+/// user feels.
+fn session_cpu_ns(pid: u32) -> Option<(u64, u64, u64)> {
+    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a live, correctly-sized rusage_info_v2, which is
+    // what RUSAGE_INFO_V2 tells the kernel to fill; the cast matches the
+    // C idiom (`(rusage_info_t *)&ru`).
+    let rc = unsafe {
+        libc::proc_pid_rusage(
+            pid as libc::c_int,
+            libc::RUSAGE_INFO_V2,
+            (&mut info as *mut libc::rusage_info_v2).cast(),
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    // Mach ticks, NOT nanoseconds, whatever the field name suggests.
+    // Calibrated against a child that burned a known 2.000 s of CPU
+    // (getrusage agreed): the raw total read 48_011_091, which is 2.000 s
+    // only after the timebase.  Taken as nanoseconds it would have
+    // reported this path absorbing bytes 14× faster than the parser can
+    // actually run.
+    // Declared here rather than taken from libc, which deprecates its
+    // copy in favour of a crate: two fields and one libSystem symbol are
+    // not worth a dependency.
+    #[repr(C)]
+    struct MachTimebase {
+        numer: u32,
+        denom: u32,
+    }
+    unsafe extern "C" {
+        fn mach_timebase_info(info: *mut MachTimebase) -> libc::c_int;
+    }
+    let mut tb = MachTimebase { numer: 0, denom: 0 };
+    // SAFETY: `tb` is a live MachTimebase, matching the C struct, for
+    // the kernel to fill.
+    if unsafe { mach_timebase_info(&mut tb) } != 0 || tb.denom == 0 {
+        return None;
+    }
+    // Kept apart, not summed.  The two answer different questions: user
+    // time is the parsing work, which the same corpus has to cost
+    // whatever else the host is doing, while system time is syscall
+    // overhead that genuinely falls when preemption lets bytes pool in
+    // the pty and each read returns a bigger chunk.  Summed, that second
+    // effect moves the total by ~48 % between runs and hides the first.
+    let ns = |ticks: u64| (ticks as u128 * tb.numer as u128 / tb.denom as u128) as u64;
+    // Wakeups are the test for why CPU time moves between runs: if a
+    // starved session does less work per byte because bytes pool in the
+    // pty and each round handles a bigger chunk, then CPU and wakeups
+    // fall together.  If CPU moves while wakeups hold, that story is
+    // wrong and the cost went somewhere else.
+    let wakeups = info.ri_interrupt_wkups + info.ri_pkg_idle_wkups;
+    Some((ns(info.ri_user_time), ns(info.ri_system_time), wakeups))
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 4 {
@@ -114,6 +178,7 @@ fn main() {
             let _ = self.0.wait();
         }
     }
+    let session_pid = child.id();
     let _guard = ChildGuard(child);
 
     // SAFETY: single-threaded at this point; the registry helpers read
@@ -204,7 +269,28 @@ fn main() {
         sz("bytelog"),
         sz("state.bin")
     );
-    println!("{}", (secs * 1e9) as u64);
+    // `-` when the kernel would not say (the session died early): the
+    // caller has to see a missing reading as missing, not as zero cost.
+    let wall_ns = (secs * 1e9) as u64;
+    match session_cpu_ns(session_pid) {
+        Some((user, sys, wakeups)) => {
+            let cpu = user + sys;
+            // A gauge that cannot fail is not a gauge.  Absorbing this
+            // corpus keeps at least one core busy for most of the
+            // window, so a CPU reading far below the wall time means the
+            // unit conversion broke, not that the work got free — the
+            // exact mistake a tick/nanosecond mixup makes, and it reads
+            // as a spectacular improvement rather than as an error.
+            if cpu * 8 < wall_ns {
+                die(&format!(
+                    "cpu {cpu} ns against wall {wall_ns} ns — too little CPU \
+                     for this much work; the timebase conversion is wrong"
+                ));
+            }
+            println!("{wall_ns} {user} {sys} {wakeups}");
+        }
+        None => println!("{wall_ns} - - -"),
+    }
     let _ = std::fs::remove_dir_all(&sandbox);
 }
 
