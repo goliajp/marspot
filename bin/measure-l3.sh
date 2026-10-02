@@ -65,9 +65,12 @@ fail() { echo "measure-l3: $*" >&2; exit 1; }
 [[ -x "$SESSION_BIN" ]] || fail "marspot-session not built at $SESSION_BIN"
 [[ -x "$PROBE_BIN" ]]   || fail "probe not built at $PROBE_BIN"
 
-# Between trials, make sure no session from a previous one is still
-# holding a pty.  The probe sandboxes itself per run, so this is only
-# about orphans from an aborted trial.
+# Before every trial, make sure no session from a previous one is still
+# holding a pty.  This used to run only after a failure, which meant one
+# failed trial's orphan taxed every trial after it until the next failure
+# swept it -- measured 2026-10-02: four of ten trials reading 29-59 s
+# against a normal 1.3 s, with twice the instructions and forty times the
+# wakeups, all of it our own leftovers competing for the host.
 reset_sessions() {
   pkill -9 -f "$SESSION_BIN( |\$)" >/dev/null 2>&1 || true
   sleep 0.3
@@ -77,8 +80,8 @@ cleanup() { pkill -9 -f "$SESSION_BIN( |\$)" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 run_one() {
-  # echoes "<wall_ns> <user_ns> <sys_ns> <wakeups>" on success, empty on
-  # failure.
+  # echoes "<wall_ns> <user_ns> <sys_ns> <wakeups> <instructions> <cycles>"
+  # on success, empty on failure.
   # The CPU fields are `-` if the kernel would not report them.
   local scenario_path=$1 repeats=$2
   "$PROBE_BIN" "$SESSION_BIN" "$scenario_path" "$repeats" 2>/dev/null
@@ -105,13 +108,14 @@ for scenario in "${SCENARIOS[@]}"; do
     # "regression" on cjk that was entirely the tenant.
     uptime | sed 's/.*averages: //' | awk '{print $1}' >> "$RUN_DIR/load"
 
+    reset_sessions
     echo "==> $scenario ×$repeats ($((total_bytes/1048576)) MiB) trial $trial/$TRIALS"
-    read -r ns user sys wk <<<"$(run_one "$spath" "$repeats")"
+    read -r ns user sys wk insn cyc <<<"$(run_one "$spath" "$repeats")"
     if [[ -z "$ns" || "$ns" == "0" ]]; then
       # One retry, in case an orphaned session held the pty.
       echo "    probe failed — clearing orphans and retrying" >&2
       reset_sessions
-      read -r ns user sys wk <<<"$(run_one "$spath" "$repeats")"
+      read -r ns user sys wk insn cyc <<<"$(run_one "$spath" "$repeats")"
     fi
     if [[ -z "$ns" || "$ns" == "0" ]]; then
       echo "    trial failed (no timing)" >&2
@@ -121,6 +125,8 @@ for scenario in "${SCENARIOS[@]}"; do
     echo "${user:--}" >> "$RUN_DIR/$scenario.user"
     echo "${sys:--}" >> "$RUN_DIR/$scenario.sys"
     echo "${wk:--}" >> "$RUN_DIR/$scenario.wk"
+    echo "${insn:--}" >> "$RUN_DIR/$scenario.insn"
+    echo "${cyc:--}" >> "$RUN_DIR/$scenario.cyc"
     mibps=$(python3 -c "print(f'{$total_bytes/1048576/($ns/1e9):.1f}')")
     if [[ "${user:--}" == "-" ]]; then
       printf "    %.3fs  %s MiB/s  (no cpu reading)\n" "$(python3 -c "print($ns/1e9)")" "$mibps"
@@ -177,6 +183,8 @@ for scenario in scenarios_str.split():
     user_samples = read_ns("user")
     sys_samples = read_ns("sys")
     wk_samples = read_ns("wk")
+    insn_samples = read_ns("insn")
+    cyc_samples = read_ns("cyc")
     in_order = [int(x) for x in open(ns_path).read().split() if x.strip()]
     samples = sorted(in_order)
     if not samples:
@@ -216,6 +224,8 @@ for scenario in scenarios_str.split():
         out[scenario]["user_samples"] = user_samples
         out[scenario]["sys_samples"] = sys_samples
         out[scenario]["wakeup_samples"] = wk_samples
+        out[scenario]["instruction_samples"] = insn_samples
+        out[scenario]["cycle_samples"] = cyc_samples
         out[scenario]["wall_samples_in_order"] = in_order
         out[scenario]["bytes_per_user_sec"] = (
             total_bytes * 1_000_000_000 // best_user if best_user > 0 else 0
