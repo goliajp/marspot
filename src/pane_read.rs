@@ -46,6 +46,60 @@ pub fn screen_text(
     Ok(render(&term, extra_lines))
 }
 
+/// What has been typed into an agent's input box and not sent, if
+/// anything.
+///
+/// Read off the grid rather than its text, because the text cannot
+/// tell three things apart that the person can: messages already sent
+/// carry the same prompt glyph as the box (and sit above it), Claude
+/// Code's agent list can put one below it, and the program's own
+/// suggestion or placeholder is drawn *in* the box. So the box is the
+/// prompt row that holds the cursor -- or the one a wrapped line
+/// continues from -- and dim cells in it are the program's, not the
+/// person's.
+///
+/// Only the prompt row is returned; a line wrapped past it is cut at
+/// the wrap.
+pub fn composer_text(
+    bytelog: &std::path::Path,
+    cols: u16,
+    rows: u16,
+) -> std::io::Result<Option<String>> {
+    let bytes = tail(bytelog, REPLAY_TAIL)?;
+    let mut term = Terminal::new(cols.max(1), rows.max(1));
+    term.feed(&bytes);
+    Ok(composer(term.grid()))
+}
+
+/// Claude Code draws U+276F, Codex U+203A.
+const PROMPTS: [char; 2] = ['\u{276f}', '\u{203a}'];
+/// The box's own sides, when it is drawn as a box.
+const SIDES: [char; 3] = ['│', '┃', '|'];
+
+fn composer(grid: &marspot_term::grid::Grid) -> Option<String> {
+    let (_, cursor_row) = grid.cursor();
+    let all = |r: u16| row_text_of(grid, r, 0, |c| grid.cell(c, r), |_| true);
+    // Up from the cursor to the prompt it is typing after. A blank row
+    // or a rule on the way means the cursor is not in the box at all,
+    // and not knowing has to read as nothing: pasting a guess into
+    // someone's input is worse than losing a line they can retype.
+    let row = (0..=cursor_row).rev().find_map(|r| {
+        let line = all(r);
+        let t = line.trim().trim_start_matches(SIDES).trim_start();
+        if t.starts_with(PROMPTS) {
+            Some(Some(r))
+        } else if t.is_empty() || t.chars().all(|c| matches!(c, '─' | '━' | '╭' | '╮' | '╰' | '╯')) {
+            Some(None)
+        } else {
+            None
+        }
+    })??;
+    let typed = row_text_of(grid, row, 0, |c| grid.cell(c, row), |cell| !cell.attrs.dim);
+    let t = typed.trim().trim_start_matches(SIDES).trim_start();
+    let rest = t.strip_prefix(PROMPTS)?.trim().trim_end_matches(SIDES).trim();
+    (!rest.is_empty()).then(|| rest.to_string())
+}
+
 /// The last `n` bytes of a file, or all of it when it is shorter.
 fn tail(path: &std::path::Path, n: u64) -> std::io::Result<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
@@ -71,7 +125,7 @@ fn render(term: &Terminal, extra_lines: u16) -> String {
         out.push(scrollback_line(grid, i));
     }
     for row in 0..grid.rows() {
-        out.push(row_text_of(grid, row, 0, |c| grid.cell(c, row)));
+        out.push(row_text_of(grid, row, 0, |c| grid.cell(c, row), |_| true));
     }
     while out.last().is_some_and(|l| l.is_empty()) {
         out.pop();
@@ -85,7 +139,7 @@ fn scrollback_line(grid: &marspot_term::grid::Grid, back: usize) -> String {
     // viewport row of 0 with an offset of `back + 1` is the line that
     // scrolled off `back` rows ago.
     let off = (back + 1).min(u16::MAX as usize) as u16;
-    row_text_of(grid, 0, off, |c| grid.cell_at_view(off, c, 0))
+    row_text_of(grid, 0, off, |c| grid.cell_at_view(off, c, 0), |_| true)
 }
 
 /// One row as text, minus the grid's own bookkeeping.
@@ -101,12 +155,13 @@ fn scrollback_line(grid: &marspot_term::grid::Grid, back: usize) -> String {
 /// Takes the cell rather than its `ch`, because a cell holding a
 /// grapheme cluster keeps the text in the grid's pool and its `ch` is
 /// the pool index — printing that would put a plane-15 codepoint in
-/// what a person reads.
+/// what a person reads.  Cells `keep` turns down read as blanks.
 fn row_text_of(
     grid: &marspot_term::grid::Grid,
     viewport_row: u16,
     view_offset: u16,
     cell: impl Fn(u16) -> marspot_term::grid::Cell,
+    keep: impl Fn(&marspot_term::grid::Cell) -> bool,
 ) -> String {
     let mut out = String::with_capacity(grid.cols() as usize);
     let mut row_clusters = Vec::new();
@@ -115,6 +170,10 @@ fn row_text_of(
         let cell = cell(c);
         // NUL is the wide glyph's trailing half.
         if cell.ch == '\0' {
+            continue;
+        }
+        if !keep(&cell) {
+            out.push(' ');
             continue;
         }
         match grid
@@ -221,6 +280,96 @@ mod tests {
         let p = std::env::temp_dir().join("marspot-read-nothing-here");
         let _ = std::fs::remove_file(&p);
         assert!(screen_text(&p, 40, 10, 0).is_err());
+    }
+
+    /// A Claude Code screen as it draws one: a sent message above,
+    /// the box between two rules, the agent list below, and the
+    /// cursor parked in the box.
+    fn claude(box_row: &str) -> Vec<u8> {
+        let rule = "─".repeat(40);
+        format!(
+            "\x1b[1;1H\x1b[48;2;55;55;55m\x1b[38;2;80;80;80m❯ \x1b[38;2;255;255;255msent before\x1b[39m\x1b[49m\
+             \x1b[3;1H{rule}\x1b[4;1H{box_row}\x1b[5;1H{rule}\
+             \x1b[7;3H⏺ main\x1b[8;1H❯ ◯ general-purpose\
+             \x1b[4;3H"
+        )
+        .into_bytes()
+    }
+
+    fn composer_of(name: &str, bytes: &[u8]) -> Option<String> {
+        let p = write(name, bytes);
+        let got = composer_text(&p, 40, 10).unwrap();
+        let _ = std::fs::remove_file(p);
+        got
+    }
+
+    /// The grey suggestion Claude Code draws in an empty box is not
+    /// something anyone typed.  Read as text it was, and a profile
+    /// switch pasted it back in as if it were.
+    #[test]
+    fn a_suggestion_drawn_in_the_box_is_not_unsent_text() {
+        let bytes = claude("\x1b[39m❯ \x1b[2m继续 autorun\x1b[22m");
+        assert_eq!(composer_of("ghost", &bytes), None);
+    }
+
+    /// What the person typed is read, and only up to where the
+    /// program's own completion starts.
+    #[test]
+    fn typed_text_is_read_and_the_completion_after_it_is_not() {
+        let bytes = claude("\x1b[39m❯ half a thought");
+        assert_eq!(composer_of("typed", &bytes).as_deref(), Some("half a thought"));
+        let bytes = claude("\x1b[39m❯ /com\x1b[2mpact\x1b[22m");
+        assert_eq!(composer_of("completion", &bytes).as_deref(), Some("/com"));
+    }
+
+    /// A message already sent and the agent list both carry the same
+    /// glyph as the box; neither is the box.
+    #[test]
+    fn sent_messages_and_the_agent_list_are_not_the_box() {
+        let bytes = claude("\x1b[39m❯");
+        assert_eq!(composer_of("empty", &bytes), None);
+    }
+
+    /// Codex: the conversation's first message is at the top of the
+    /// screen with the box's glyph, and the empty box shows a dim
+    /// placeholder.  Taking the first prompt on screen carried that
+    /// old message across a switch.
+    #[test]
+    fn codex_reads_its_box_not_the_first_message_on_screen() {
+        let screen = |box_text: &str| {
+            format!(
+                "\x1b[1;1H\x1b[1m\x1b[2m\x1b[39;48;2;41;42;43m› \x1b[22m\x1b[22m滚动一格 10% 固定值吧\x1b[49m\
+                 \x1b[8;1H\x1b[1m\x1b[39;48;2;31;32;33m›\x1b[8;3H\x1b[22m{box_text}\x1b[49m\
+                 \x1b[10;3HGPT-6-Astra high\x1b[8;3H"
+            )
+            .into_bytes()
+        };
+        let placeholder = screen("\x1b[2mAsk Codex to do anything\x1b[22m");
+        assert_eq!(composer_of("codex-empty", &placeholder), None);
+        let typed = screen("还没发的");
+        assert_eq!(composer_of("codex-typed", &typed).as_deref(), Some("还没发的"));
+    }
+
+    /// A line long enough to wrap leaves the cursor on the row below
+    /// the prompt; the box is still the prompt it continues from.
+    #[test]
+    fn a_wrapped_line_is_read_from_its_prompt_row() {
+        let bytes = format!(
+            "\x1b[3;1H{rule}\x1b[4;1H❯ the first part\x1b[5;3Hand more\x1b[6;1H{rule}\x1b[5;11H",
+            rule = "─".repeat(40)
+        );
+        assert_eq!(
+            composer_of("wrapped", bytes.as_bytes()).as_deref(),
+            Some("the first part")
+        );
+    }
+
+    /// The cursor somewhere other than a box -- mid-repaint, a dialog
+    /// -- reads as nothing, not as the nearest prompt above it.
+    #[test]
+    fn a_cursor_outside_any_box_reads_as_nothing() {
+        let bytes = b"\x1b[1;1H\xe2\x9d\xaf sent before\x1b[3;1Houtput\x1b[5;1H";
+        assert_eq!(composer_of("outside", bytes), None);
     }
 
     /// Only the tail is read, however long the log has grown — reading
