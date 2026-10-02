@@ -50,16 +50,11 @@ pub fn screen_text(
 /// anything.
 ///
 /// Read off the grid rather than its text, because the text cannot
-/// tell three things apart that the person can: messages already sent
-/// carry the same prompt glyph as the box (and sit above it), Claude
-/// Code's agent list can put one below it, and the program's own
-/// suggestion or placeholder is drawn *in* the box. So the box is the
-/// prompt row that holds the cursor -- or the one a wrapped line
-/// continues from -- and dim cells in it are the program's, not the
-/// person's.
-///
-/// Only the prompt row is returned; a line wrapped past it is cut at
-/// the wrap.
+/// tell apart things the person can: messages already sent carry the
+/// same prompt glyph as the box, Claude Code's agent list can put one
+/// below it, and the program's own suggestion or placeholder is drawn
+/// *in* the box.  So the box is found from the cursor, dim cells in it
+/// are the program's, and every row of it is read, not just the first.
 pub fn composer_text(
     bytelog: &std::path::Path,
     cols: u16,
@@ -76,28 +71,132 @@ const PROMPTS: [char; 2] = ['\u{276f}', '\u{203a}'];
 /// The box's own sides, when it is drawn as a box.
 const SIDES: [char; 3] = ['│', '┃', '|'];
 
+fn is_rule(t: &str) -> bool {
+    !t.is_empty() && t.chars().all(|c| matches!(c, '─' | '━' | '╭' | '╮' | '╰' | '╯'))
+}
+
+/// One cell of the box as typed: its column, its width, its text.
+type Glyph = (u16, u16, String);
+
+/// Not knowing reads as nothing throughout: pasting a guess into
+/// someone's input is worse than losing a line they can retype.
 fn composer(grid: &marspot_term::grid::Grid) -> Option<String> {
+    use marspot_term::grid::Color;
+    let bg = |r: u16| grid.cell(0, r).attrs.bg;
+    let bare = |r: u16| {
+        let line = row_text_of(grid, r, 0, |c| grid.cell(c, r));
+        line.trim().trim_start_matches(SIDES).trim_start().to_string()
+    };
+    // Up from the cursor to the prompt it is typing after.  A rule or a
+    // change of shade on the way means the cursor is not in the box.
     let (_, cursor_row) = grid.cursor();
-    let all = |r: u16| row_text_of(grid, r, 0, |c| grid.cell(c, r), |_| true);
-    // Up from the cursor to the prompt it is typing after. A blank row
-    // or a rule on the way means the cursor is not in the box at all,
-    // and not knowing has to read as nothing: pasting a guess into
-    // someone's input is worse than losing a line they can retype.
-    let row = (0..=cursor_row).rev().find_map(|r| {
-        let line = all(r);
-        let t = line.trim().trim_start_matches(SIDES).trim_start();
-        if t.starts_with(PROMPTS) {
-            Some(Some(r))
-        } else if t.is_empty() || t.chars().all(|c| matches!(c, '─' | '━' | '╭' | '╮' | '╰' | '╯')) {
-            Some(None)
-        } else {
-            None
+    let mut row = cursor_row;
+    while !bare(row).starts_with(PROMPTS) {
+        if row == 0 || is_rule(&bare(row)) || bg(row) != bg(cursor_row) {
+            return None;
         }
-    })??;
-    let typed = row_text_of(grid, row, 0, |c| grid.cell(c, row), |cell| !cell.attrs.dim);
-    let t = typed.trim().trim_start_matches(SIDES).trim_start();
-    let rest = t.strip_prefix(PROMPTS)?.trim().trim_end_matches(SIDES).trim();
-    (!rest.is_empty()).then(|| rest.to_string())
+        row -= 1;
+    }
+    let glyph_col = (0..grid.cols()).find(|&c| PROMPTS.contains(&grid.cell(c, row).ch))?;
+    let codex = grid.cell(glyph_col, row).ch == '\u{203a}';
+    // Claude Code rules the box off above; Codex shades it.  A prompt
+    // glyph without either is a message drawn in the transcript.
+    let boxed = if codex { bg(row) != Color::DEFAULT } else { row > 0 && is_rule(&bare(row - 1)) };
+    if !boxed {
+        return None;
+    }
+    // Down to the box's end: the rule under it, or where the shade
+    // stops.  Blank rows before that are the person's own blank lines.
+    let end = (row + 1..grid.rows()).find(|&r| is_rule(&bare(r)) || bg(r) != bg(row))?;
+    let lines: Vec<Vec<Glyph>> = (row..end).map(|r| typed_glyphs(grid, r, glyph_col + 2)).collect();
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push_str(joint(&lines[i - 1], line, grid.cols(), codex));
+        }
+        line.iter().for_each(|g| out.push_str(&g.2));
+    }
+    let out = out.trim();
+    (!out.is_empty()).then(|| out.to_string())
+}
+
+/// A row of the box from `from` on, dim cells blanked, without the
+/// blanks and box side that pad it out to the right.
+fn typed_glyphs(grid: &marspot_term::grid::Grid, row: u16, from: u16) -> Vec<Glyph> {
+    let mut clusters = Vec::new();
+    grid.row_clusters_at_view(0, row, &mut clusters);
+    let mut out: Vec<Glyph> = Vec::new();
+    for c in from..grid.cols() {
+        let cell = grid.cell(c, row);
+        if cell.ch == '\0' {
+            continue;
+        }
+        let wide = c + 1 < grid.cols() && grid.cell(c + 1, row).ch == '\0';
+        let text = if cell.attrs.dim {
+            " ".to_string()
+        } else {
+            match grid
+                .cluster_text(&cell)
+                .or_else(|| marspot_term::grid::cluster_in_row(&clusters, c))
+            {
+                Some(t) => t.to_string(),
+                None => cell.ch.to_string(),
+            }
+        };
+        out.push((c, if wide { 2 } else { 1 }, text));
+    }
+    let trailing_blank = |o: &mut Vec<Glyph>| {
+        while o.last().is_some_and(|g| g.2.trim().is_empty()) {
+            o.pop();
+        }
+    };
+    trailing_blank(&mut out);
+    if out.last().is_some_and(|g| g.2.chars().all(|ch| SIDES.contains(&ch))) {
+        out.pop();
+        trailing_blank(&mut out);
+    }
+    out
+}
+
+/// What stood between two rows of the box before it was drawn.
+///
+/// The box wraps a long line by itself, so a row break is either the
+/// person's newline or the program's wrap, and the screen does not say
+/// which.  The wrap does leave a mark: it only moves text down that
+/// would not have fit.  So if the next row's first word fits after the
+/// previous row, the break was the person's.  Words are what each
+/// program wraps by -- Claude Code only at spaces, so a run of Chinese
+/// is one word; Codex between any two wide characters too.  A wrap at
+/// a space ate the space; between two wide characters there was none.
+fn joint(prev: &[Glyph], next: &[Glyph], cols: u16, codex: bool) -> &'static str {
+    let (Some(last), Some(first)) = (prev.last(), next.first()) else {
+        return "\n";
+    };
+    // A wrap never starts a row with a space: the space is what it
+    // broke at.  Leading blanks are the person's indentation.
+    if first.2 == " " {
+        return "\n";
+    }
+    let both_wide = last.1 == 2 && first.1 == 2;
+    let word: u16 = if codex && first.1 == 2 {
+        2
+    } else {
+        next.iter()
+            .take_while(|g| g.2 != " " && !(codex && g.1 == 2))
+            .map(|g| g.1)
+            .sum()
+    };
+    let gap = if codex && both_wide { 0 } else { 1 };
+    // Codex never writes the last column: over the panes measured its
+    // rows stop at 72 of 73, Claude Code's reach 73.
+    let width = if codex { cols - 1 } else { cols };
+    if last.0 + last.1 + gap + word <= width {
+        "\n"
+    } else if both_wide {
+        ""
+    } else {
+        " "
+    }
 }
 
 /// The last `n` bytes of a file, or all of it when it is shorter.
@@ -125,7 +224,7 @@ fn render(term: &Terminal, extra_lines: u16) -> String {
         out.push(scrollback_line(grid, i));
     }
     for row in 0..grid.rows() {
-        out.push(row_text_of(grid, row, 0, |c| grid.cell(c, row), |_| true));
+        out.push(row_text_of(grid, row, 0, |c| grid.cell(c, row)));
     }
     while out.last().is_some_and(|l| l.is_empty()) {
         out.pop();
@@ -139,7 +238,7 @@ fn scrollback_line(grid: &marspot_term::grid::Grid, back: usize) -> String {
     // viewport row of 0 with an offset of `back + 1` is the line that
     // scrolled off `back` rows ago.
     let off = (back + 1).min(u16::MAX as usize) as u16;
-    row_text_of(grid, 0, off, |c| grid.cell_at_view(off, c, 0), |_| true)
+    row_text_of(grid, 0, off, |c| grid.cell_at_view(off, c, 0))
 }
 
 /// One row as text, minus the grid's own bookkeeping.
@@ -155,13 +254,12 @@ fn scrollback_line(grid: &marspot_term::grid::Grid, back: usize) -> String {
 /// Takes the cell rather than its `ch`, because a cell holding a
 /// grapheme cluster keeps the text in the grid's pool and its `ch` is
 /// the pool index — printing that would put a plane-15 codepoint in
-/// what a person reads.  Cells `keep` turns down read as blanks.
+/// what a person reads.
 fn row_text_of(
     grid: &marspot_term::grid::Grid,
     viewport_row: u16,
     view_offset: u16,
     cell: impl Fn(u16) -> marspot_term::grid::Cell,
-    keep: impl Fn(&marspot_term::grid::Cell) -> bool,
 ) -> String {
     let mut out = String::with_capacity(grid.cols() as usize);
     let mut row_clusters = Vec::new();
@@ -170,10 +268,6 @@ fn row_text_of(
         let cell = cell(c);
         // NUL is the wide glyph's trailing half.
         if cell.ch == '\0' {
-            continue;
-        }
-        if !keep(&cell) {
-            out.push(' ');
             continue;
         }
         match grid
@@ -350,18 +444,117 @@ mod tests {
         assert_eq!(composer_of("codex-typed", &typed).as_deref(), Some("还没发的"));
     }
 
-    /// A line long enough to wrap leaves the cursor on the row below
-    /// the prompt; the box is still the prompt it continues from.
+    /// A Claude Code box at the real panes' width, holding `rows`,
+    /// with the cursor after the last of them.
+    fn claude_box(rows: &[&str]) -> Vec<u8> {
+        let rule = "─".repeat(73);
+        let mut b = format!("\x1b[2;1H{rule}");
+        for (i, r) in rows.iter().enumerate() {
+            b.push_str(&format!("\x1b[{};1H{r}", i + 3));
+        }
+        b.push_str(&format!("\x1b[{};1H{rule}\x1b[{};{}H", rows.len() + 3, rows.len() + 2, 60));
+        b.into_bytes()
+    }
+
+    fn composer_at_73(name: &str, bytes: &[u8]) -> Option<String> {
+        let p = write(name, bytes);
+        let got = composer_text(&p, 73, 20).unwrap();
+        let _ = std::fs::remove_file(p);
+        got
+    }
+
+    /// The whole box travels, not its first row.  These rows are a
+    /// real message as Claude Code wrapped it: only at spaces, so a
+    /// row can end early when the run of Chinese after it is long.
     #[test]
-    fn a_wrapped_line_is_read_from_its_prompt_row() {
-        let bytes = format!(
-            "\x1b[3;1H{rule}\x1b[4;1H❯ the first part\x1b[5;3Hand more\x1b[6;1H{rule}\x1b[5;11H",
-            rule = "─".repeat(40)
-        );
+    fn a_wrapped_message_is_read_whole() {
+        let bytes = claude_box(&[
+            "❯ 以前我们一直开发效率挺高的，搞这些以后效率其实越来越差了，insight home",
+            "  是没办法，add device 也是因为需要大量",
+            "  mock/seed，否则绝大多数情况下，特别是 insight，我们都是 staging / prod",
+            "  开发",
+        ]);
         assert_eq!(
-            composer_of("wrapped", bytes.as_bytes()).as_deref(),
-            Some("the first part")
+            composer_at_73("claude-wrap", &bytes).as_deref(),
+            Some(
+                "以前我们一直开发效率挺高的，搞这些以后效率其实越来越差了，insight home \
+                 是没办法，add device 也是因为需要大量 \
+                 mock/seed，否则绝大多数情况下，特别是 insight，我们都是 staging / prod 开发"
+            )
         );
+        // Ended at 28 columns, yet a wrap: the next word is 48 wide.
+        let bytes = claude_box(&[
+            "❯ 我们现在不只是时间，token",
+            "  也花了太多在测试上，所有项目都如此，所以才会有刚刚 devops 的全局要求",
+        ]);
+        assert_eq!(
+            composer_at_73("claude-short-wrap", &bytes).as_deref(),
+            Some("我们现在不只是时间，token 也花了太多在测试上，所有项目都如此，所以才会有刚刚 devops 的全局要求")
+        );
+    }
+
+    /// The person's own line breaks and blank lines survive, and so
+    /// does their indentation.
+    #[test]
+    fn the_persons_line_breaks_are_kept() {
+        let bytes = claude_box(&["❯ first line", "  second", "", "    indented"]);
+        assert_eq!(
+            composer_at_73("breaks", &bytes).as_deref(),
+            Some("first line\nsecond\n\n  indented")
+        );
+    }
+
+    /// Codex wraps between any two wide characters, with nothing
+    /// between them to lose.  Real rows, and a real fenced paste whose
+    /// newline has to survive.
+    #[test]
+    fn codex_rows_join_the_way_codex_wrapped_them() {
+        let shaded = |rows: &[&str]| {
+            let mut b = String::from("\x1b[48;2;31;32;33m");
+            for (i, r) in rows.iter().enumerate() {
+                b.push_str(&format!("\x1b[{};1H{r}", i + 3));
+            }
+            b.push_str(&format!("\x1b[49m\x1b[{};1H\x1b[2K\x1b[{};60H", rows.len() + 3, rows.len() + 2));
+            b.into_bytes()
+        };
+        let bytes = shaded(&[
+            "› content 部分宽度大一点，然后 logo 什么的不行，我们在这里最开始要做的就",
+            "  是产品 vis，你先把上层的企业/lab vis 好好读一下，应该要继承的做好，在",
+            "  ~/workspace/stable/goliajp/vis 里",
+        ]);
+        assert_eq!(
+            composer_at_73("codex-wrap", &bytes).as_deref(),
+            Some(
+                "content 部分宽度大一点，然后 logo 什么的不行，我们在这里最开始要做的就\
+                 是产品 vis，你先把上层的企业/lab vis 好好读一下，应该要继承的做好，在 \
+                 ~/workspace/stable/goliajp/vis 里"
+            )
+        );
+        // Ends at 71 with a wide character next: one column short,
+        // because Codex leaves the last one empty.
+        let bytes = shaded(&[
+            "› 画布要支持 zoomin/out，按住 alt用鼠标滚轮可以放大缩小，里面需要的元素",
+            "  都要变",
+        ]);
+        assert_eq!(
+            composer_at_73("codex-edge", &bytes).as_deref(),
+            Some("画布要支持 zoomin/out，按住 alt用鼠标滚轮可以放大缩小，里面需要的元素都要变")
+        );
+        let bytes = shaded(&["› ```", "  今天凌晨，OpenAI在旧金山举行DevDay 2026", "  ```"]);
+        assert_eq!(
+            composer_at_73("codex-fence", &bytes).as_deref(),
+            Some("```\n今天凌晨，OpenAI在旧金山举行DevDay 2026\n```")
+        );
+    }
+
+    /// A delivered message in Claude Code's transcript has the Codex
+    /// glyph and no shade; it is not a box, whatever is under it.
+    #[test]
+    fn a_delivered_message_in_the_transcript_is_not_a_box() {
+        let bytes = "\x1b[1;1H\x1b[38;2;153;153;153m› Message from @devops-0d: hi\x1b[39m\
+                     \x1b[2;3Hmore of it\x1b[2;14H"
+            .as_bytes();
+        assert_eq!(composer_of("delivered", bytes), None);
     }
 
     /// The cursor somewhere other than a box -- mid-repaint, a dialog
