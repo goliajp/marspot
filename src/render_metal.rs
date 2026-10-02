@@ -6289,12 +6289,6 @@ fn build_dot_pipeline(
         .map_err(|e| format!("newRenderPipelineState (dot) error: {:?}", e))
 }
 
-/// The rounded-rect pipeline that reads a `Scene` slab.
-///
-/// Same descriptor, same fragment function; the only difference is a
-/// vertex function that reads the published 48-byte layout instead of
-/// the renderer's own 80-byte one.
-
 /// A premultiplication-free `[f32; 4]` in 0..1 as the published
 /// format's eight bits a channel.
 ///
@@ -7061,6 +7055,23 @@ impl MetalRenderer {
     }
 
 
+
+    /// Draw one published instance and hand back the pixels.
+    pub fn render_scene_rect(
+        &mut self,
+        width: u32,
+        height: u32,
+        rect: golia_ui_core::scene::UiRectInstance,
+    ) -> Result<Vec<u8>, String> {
+        use golia_ui_core::scene::Encode;
+        let mut bytes = vec![0u8; golia_ui_core::scene::UiRectInstance::SIZE];
+        rect.encode(&mut bytes);
+        let viewport_px: [f32; 2] = [width as f32, height as f32];
+        self.draw_ui_instances(
+            width, height, &bytes, 1,
+            &self.scene_ui_pipeline.clone(), &viewport_px,
+        )
+    }
 
     /// One render pass of `count` instances through `pipeline`, read
     /// back as BGRA bytes.
@@ -9361,7 +9372,7 @@ mod tests {
             .map(|r| r.fill.a)
             .collect();
         assert!(
-            scrims.iter().any(|a| *a == want),
+            scrims.contains(&want),
             "a dragged pane wears the drag scrim even while focused, got {scrims:?} \
              (wanted {want})"
         );
@@ -9587,6 +9598,61 @@ mod tests {
         let deep = both.iter().filter(|a| **a >= byte(EMPTY_SEAT_SCRIM)).count();
         assert_eq!(deep, 1, "exactly one scrim, got {both:?}");
         assert!(both.iter().any(|a| *a == byte(PARKED_SCRIM)));
+    }
+
+    /// The shader reads what the encoder writes.
+    ///
+    /// There used to be two paths and a test that drew the same rects
+    /// through both: if an offset disagreed, the two bitmaps stopped
+    /// matching. There is one path now, so the comparison has nothing
+    /// to compare against and the question needs asking directly --
+    /// put a distinct value in every field and look at the pixels it
+    /// produces.
+    ///
+    /// Each assertion names a field, so a layout that slips by four
+    /// bytes says which one moved rather than "the picture changed".
+    #[test]
+    fn the_shader_reads_what_the_encoder_writes() {
+        let Ok(mut r) = MetalRenderer::new_headless() else {
+            eprintln!("skipping: no Metal device on this host");
+            return;
+        };
+        let (w, h) = (96u32, 96u32);
+        let px = |buf: &[u8], x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            // BGRA, which is what the target format is.
+            (buf[i + 2], buf[i + 1], buf[i], buf[i + 3])
+        };
+        let out = r
+            .render_scene_rect(
+                w,
+                h,
+                golia_ui_core::scene::UiRectInstance {
+                    origin: [24.0, 24.0],
+                    size: [48.0, 48.0],
+                    fill: golia_ui_core::Rgba8::rgba(200, 60, 40, 255),
+                    border: golia_ui_core::Rgba8::rgba(40, 200, 90, 255),
+                    radius: 0.0,
+                    border_width: 4.0,
+                    shadow_offset: [0.0, 0.0],
+                    shadow_color: golia_ui_core::Rgba8::TRANSPARENT,
+                    shadow_blur: 0.0,
+                },
+            )
+            .expect("one rect");
+
+        // `origin` and `size`: inside is painted, outside is not.
+        assert_eq!(px(&out, 48, 48).0, 200, "fill red at the centre");
+        // The pass clears to opaque black, which is also why a black
+        // shadow on this target is invisible.
+        assert_eq!(px(&out, 4, 4), (0, 0, 0, 255), "nothing outside the rect");
+        // `fill`: the centre is the fill colour, not the border's.
+        assert_eq!(px(&out, 48, 48), (200, 60, 40, 255), "fill colour");
+        // `border` and `border_width`: the shader strokes inside, so
+        // two pixels in from the edge is still border.
+        assert_eq!(px(&out, 26, 48), (40, 200, 90, 255), "border colour");
+        // ... and six in is past a four-pixel stroke.
+        assert_eq!(px(&out, 30, 48), (200, 60, 40, 255), "border is 4px wide");
     }
 
     /// The focus ring survives the neighbours' scrims.
