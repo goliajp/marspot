@@ -86,13 +86,21 @@ fragment float4 bg_fragment(VOut in [[stage_in]]) {
 // the BG underneath.
 // ----------------------------------------------------------------------
 
+// One glyph, as the published Scene format writes it: 36 bytes,
+// colour packed to eight bits a channel.
+//
+// `packed_float2` for the same reason `SceneRect` needs it -- a
+// `float2` aligns to eight and would pad this to 40 while the encoder
+// strides by 36, so every instance after the first would read from the
+// wrong place.
 struct Glyph {
-    float2 origin;
-    float2 size;
-    float2 uv0;
-    float2 uv1;
-    float4 color;
+    packed_float2 origin;   // 0
+    packed_float2 size;     // 8
+    packed_float2 uv0;      // 16
+    packed_float2 uv1;      // 24
+    uchar4 color;           // 32
 };
+static_assert(sizeof(Glyph) == 36, "Glyph must match GlyphInstance::SIZE");
 
 struct GVOut {
     float4 position [[position]];
@@ -114,7 +122,7 @@ vertex GVOut fg_vertex(
     GVOut o;
     o.position = float4(ndc, 0.0, 1.0);
     o.uv = mix(g.uv0, g.uv1, corners[vid]);
-    o.color = g.color;
+    o.color = float4(g.color) / 255.0;
     return o;
 }
 

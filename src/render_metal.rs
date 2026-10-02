@@ -256,19 +256,14 @@ fn resolve_cell_glyph_routed(
 pub use golia_ui_core::scene::RectInstance as CellInstance;
 
 
-/// One glyph's draw data, layout-compatible with `Glyph` in
-/// `src/shaders/cells.metal`.  `uv0` / `uv1` are normalised
-/// 0..1 atlas coords (top-left + bottom-right corners of the
-/// glyph's slot).
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct GlyphInstance {
-    pub origin: [f32; 2],
-    pub size: [f32; 2],
-    pub uv0: [f32; 2],
-    pub uv1: [f32; 2],
-    pub color: [f32; 4],
-}
+/// One glyph the GPU reads, which is the published one.
+///
+/// `uv0` / `uv1` are normalised 0..1 atlas coordinates -- the glyph's
+/// slot, top-left and bottom-right. Both atlases, mono and colour, are
+/// drawn from this shape, which is why `Kind::Glyph` and
+/// `Kind::ColorGlyph` share it in the format too.
+pub use golia_ui_core::scene::GlyphInstance;
+
 
 /// Renderer state that belongs to one window rather than to the
 /// renderer as a whole.
@@ -2295,7 +2290,7 @@ fn encode_passes(
         color.setLoadAction(MTLLoadAction::Load);
         color.setStoreAction(MTLStoreAction::Store);
     }
-    let fg_buffer = inst!(3, glyphs_as_bytes(glyphs));
+    let fg_buffer = inst!(3, glyphs_as_bytes(glyphs, ui_slab));
     let fg_encoder = cmd
         .renderCommandEncoderWithDescriptor(&fg_pass)
         .expect("fg encoder");
@@ -2330,7 +2325,7 @@ fn encode_passes(
             color.setLoadAction(MTLLoadAction::Load);
             color.setStoreAction(MTLStoreAction::Store);
         }
-        let cfg_buffer = inst!(4, glyphs_as_bytes(color_glyphs));
+        let cfg_buffer = inst!(4, glyphs_as_bytes(color_glyphs, ui_slab));
         let cfg_encoder = cmd
             .renderCommandEncoderWithDescriptor(&cfg_pass)
             .expect("color fg encoder");
@@ -2421,7 +2416,7 @@ fn encode_passes(
             color.setLoadAction(MTLLoadAction::Load);
             color.setStoreAction(MTLStoreAction::Store);
         }
-        let buf = inst!(7, glyphs_as_bytes(overlay_glyphs));
+        let buf = inst!(7, glyphs_as_bytes(overlay_glyphs, ui_slab));
         let enc = cmd
             .renderCommandEncoderWithDescriptor(&pass)
             .expect("overlay fg encoder");
@@ -4991,7 +4986,7 @@ pub(crate) fn push_text_run_kind(
                     size,
                     uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
                     uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
-                    color,
+                    color: rgba8_of_f32(color),
                 });
             }
         }
@@ -5053,7 +5048,7 @@ pub(crate) fn push_text_run_ui_shaped_mono(
             size,
             uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
             uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
-            color,
+            color: rgba8_of_f32(color),
         });
     }
     let _ = ascent;
@@ -5112,7 +5107,7 @@ pub(crate) fn push_text_run_ui_sized(
             size,
             uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
             uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
-            color,
+            color: rgba8_of_f32(color),
         });
     }
 }
@@ -5214,7 +5209,7 @@ fn push_text_run_ui_shaped(
             size,
             uv0: [entry.u0 as f32 / aw, entry.v0 as f32 / ah],
             uv1: [entry.u1 as f32 / aw, entry.v1 as f32 / ah],
-            color,
+            color: rgba8_of_f32(color),
         });
     }
     let _ = fallback_ascent;
@@ -5708,7 +5703,7 @@ fn push_session(
                 size,
                 uv0: [entry.u0 as f32 / aw, entry.v0 as f32 / ah],
                 uv1: [entry.u1 as f32 / aw, entry.v1 as f32 / ah],
-                color: [fg.0 as f32, fg.1 as f32, fg.2 as f32, 1.0],
+                color: rgba8_of_f32([fg.0 as f32, fg.1 as f32, fg.2 as f32, 1.0]),
             });
         }
 
@@ -5890,7 +5885,7 @@ fn push_session(
                     size,
                     uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
                     uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
-                    color: [BG.0 as f32, BG.1 as f32, BG.2 as f32, 1.0],
+                    color: rgba8_of_f32([BG.0 as f32, BG.1 as f32, BG.2 as f32, 1.0]),
                 });
             }
         }
@@ -5966,7 +5961,7 @@ fn push_session(
                         size,
                         uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
                         uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
-                        color: [IME_PREEDIT_FG.0, IME_PREEDIT_FG.1, IME_PREEDIT_FG.2, 1.0],
+                        color: rgba8_of_f32([IME_PREEDIT_FG.0, IME_PREEDIT_FG.1, IME_PREEDIT_FG.2, 1.0]),
                     });
                 }
             // Underline — 2× the old hairline so it actually reads
@@ -6553,9 +6548,23 @@ fn ui_rects_as_bytes<'a>(rects: &[UiRectInstance], slab: &'a mut Vec<u8>) -> &'a
     &slab[..need]
 }
 
-fn glyphs_as_bytes(glyphs: &[GlyphInstance]) -> &[u8] {
-    let len = std::mem::size_of_val(glyphs);
-    unsafe { std::slice::from_raw_parts(glyphs.as_ptr() as *const u8, len) }
+/// The bytes the GPU reads for a run of glyphs, written by the
+/// published encoder into a slab the caller reuses.
+///
+/// Same rule as the flat and rounded rects: `GlyphInstance` is a plain
+/// Rust struct with an explicit `encode`, so only `encode` says what
+/// the layout is.
+fn glyphs_as_bytes<'a>(glyphs: &[GlyphInstance], slab: &'a mut Vec<u8>) -> &'a [u8] {
+    use golia_ui_core::scene::Encode;
+    let need = glyphs.len() * GlyphInstance::SIZE;
+    if slab.len() < need {
+        slab.resize(need, 0);
+    }
+    for (i, g) in glyphs.iter().enumerate() {
+        let at = i * GlyphInstance::SIZE;
+        g.encode(&mut slab[at..at + GlyphInstance::SIZE]);
+    }
+    &slab[..need]
 }
 
 impl MetalRenderer {
@@ -6589,7 +6598,8 @@ impl MetalRenderer {
             .newTextureWithDescriptor(&descriptor)
             .ok_or_else(|| "newTextureWithDescriptor returned nil".to_string())?;
 
-        let glyph_bytes = glyphs_as_bytes(glyphs);
+        let mut slab: Vec<u8> = Vec::new();
+        let glyph_bytes = glyphs_as_bytes(glyphs, &mut slab);
         let buffer = if glyph_bytes.is_empty() {
             None
         } else {
@@ -6994,7 +7004,8 @@ pub fn encode_canvas_into(
             CanvasRunKind::Glyph => {
                 enc.setRenderPipelineState(fg_pipeline);
                 let slice = &gl_buf[gl_cursor..gl_cursor + run.count];
-                let buf = make_instance_buffer(device, glyphs_as_bytes(slice));
+                let buf =
+                    make_instance_buffer(device, glyphs_as_bytes(slice, &mut ui_slab));
                 if let Some(b) = &buf {
                     unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
                 }
@@ -7015,7 +7026,8 @@ pub fn encode_canvas_into(
                 // by the per-cell `color` field.
                 enc.setRenderPipelineState(fg_color_pipeline);
                 let slice = &color_gl_buf[color_gl_cursor..color_gl_cursor + run.count];
-                let buf = make_instance_buffer(device, glyphs_as_bytes(slice));
+                let buf =
+                    make_instance_buffer(device, glyphs_as_bytes(slice, &mut ui_slab));
                 if let Some(b) = &buf {
                     unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
                 }
@@ -9289,10 +9301,16 @@ mod tests {
             .expect("rasterise A");
         let (atlas_w, atlas_h) = atlas.dims();
 
-        // One glyph instance, drawn at (8, 8) with the atlas's pixel
-        // size, fully opaque white tint.  Atlas R8 alpha modulates
+        // Two glyph instances, not one. A layout that strides by the
+        // wrong number of bytes draws the first correctly and reads
+        // the second from the wrong place -- the same trap that put a
+        // green cell at G=0 when the flat rects moved, and one
+        // instance cannot see it.
+        //
+        // Drawn at (8, 8) and (36, 8) with the atlas's pixel size and
+        // a fully opaque white tint; the atlas's R8 alpha modulates
         // through to the readable colour.
-        let glyphs = vec![GlyphInstance {
+        let one = GlyphInstance {
             origin: [8.0, 8.0],
             size: [entry.px_w as f32, entry.px_h as f32],
             uv0: [
@@ -9303,8 +9321,9 @@ mod tests {
                 entry.u1 as f32 / atlas_w as f32,
                 entry.v1 as f32 / atlas_h as f32,
             ],
-            color: [1.0, 1.0, 1.0, 1.0],
-        }];
+            color: rgba8_of_f32([1.0, 1.0, 1.0, 1.0]),
+        };
+        let glyphs = vec![one, GlyphInstance { origin: [36.0, 8.0], ..one }];
 
         let bytes = r
             .render_glyphs_fg_offscreen(64, 64, atlas.texture(), &glyphs, (0.0, 0.0, 0.0, 1.0))
@@ -9330,6 +9349,26 @@ mod tests {
         assert!(
             max_brightness > 100,
             "expected at least one bright pixel inside glyph rect, got max={max_brightness}"
+        );
+
+        // And the second one, which is the instance that a wrong
+        // stride loses.
+        let mut second = 0u8;
+        for y in 8..(8 + entry.px_h as usize) {
+            for x in 36..(36 + entry.px_w as usize) {
+                let off = (y * 64 + x) * 4;
+                let lum = ((bytes[off] as u16
+                    + bytes[off + 1] as u16
+                    + bytes[off + 2] as u16)
+                    / 3) as u8;
+                if lum > second {
+                    second = lum;
+                }
+            }
+        }
+        assert!(
+            second > 100,
+            "the second instance never drew: stride, got max={second}"
         );
     }
 
