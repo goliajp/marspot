@@ -226,7 +226,7 @@ impl<'a> ViewPainter<'a> {
         self.cells.push(CellInstance {
             origin: [rect.x as f32, rect.y_top as f32],
             size:   [rect.w as f32, rect.h as f32],
-            color,
+            color: rgba8_of_f32(color),
         });
     }
 

@@ -247,19 +247,14 @@ fn resolve_cell_glyph_routed(
     }
 }
 
-/// One cell's draw data, layout-compatible with `Cell` in
-/// `src/shaders/cells.metal`.  Repr-C; no padding shenanigans.
+/// One flat rectangle the GPU reads, which is the published one.
 ///
-/// Coordinate convention: `origin` and `size` in physical pixels,
-/// origin = top-left of the viewport, +y = down.  `color` is RGBA
-/// in 0..1.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CellInstance {
-    pub origin: [f32; 2],
-    pub size: [f32; 2],
-    pub color: [f32; 4],
-}
+/// Cell backgrounds, underlines, cursors, rules and the small round
+/// indicators are all this shape, and so is `Kind::Rect` and
+/// `Kind::Circle` in the format -- which is why one struct serves two
+/// pipelines here exactly as it does there.
+pub use golia_ui_core::scene::RectInstance as CellInstance;
+
 
 /// One glyph's draw data, layout-compatible with `Glyph` in
 /// `src/shaders/cells.metal`.  `uv0` / `uv1` are normalised
@@ -2207,7 +2202,7 @@ fn encode_passes(
             alpha: 1.0,
         });
     }
-    let bg_buffer = inst!(0, cells_as_bytes(cells));
+    let bg_buffer = inst!(0, cells_as_bytes(cells, ui_slab));
     let bg_encoder = cmd
         .renderCommandEncoderWithDescriptor(&bg_pass)
         .expect("bg encoder");
@@ -2239,7 +2234,7 @@ fn encode_passes(
             color.setLoadAction(MTLLoadAction::Load);
             color.setStoreAction(MTLStoreAction::Store);
         }
-        let dot_buffer = inst!(1, cells_as_bytes(dots));
+        let dot_buffer = inst!(1, cells_as_bytes(dots, ui_slab));
         let dot_encoder = cmd
             .renderCommandEncoderWithDescriptor(&dot_pass)
             .expect("dot encoder");
@@ -2372,7 +2367,7 @@ fn encode_passes(
             color.setLoadAction(MTLLoadAction::Load);
             color.setStoreAction(MTLStoreAction::Store);
         }
-        let buf = inst!(5, cells_as_bytes(overlay_cells));
+        let buf = inst!(5, cells_as_bytes(overlay_cells, ui_slab));
         let enc = cmd
             .renderCommandEncoderWithDescriptor(&pass)
             .expect("overlay cells encoder");
@@ -5317,7 +5312,7 @@ fn push_session(
     cells.push(CellInstance {
         origin: [rect.x as f32, rect.y_top as f32],
         size: [rect.w as f32, rect.h as f32],
-        color: pane_bg,
+        color: rgba8_of_f32(pane_bg),
     });
 
     // Title strip — band at the top of the cell hosting the
@@ -5334,7 +5329,7 @@ fn push_session(
         cells.push(CellInstance {
             origin: [rect.x as f32, strip_bottom - gutter.max(1.0)],
             size: [rect.w as f32, gutter.max(1.0)],
-            color: [SEAM.0, SEAM.1, SEAM.2, 1.0],
+            color: rgba8_of_f32([SEAM.0, SEAM.1, SEAM.2, 1.0]),
         });
         // Title text — same monospace metrics as the terminal
         // body; vertically centred in the strip, left-aligned
@@ -5408,12 +5403,12 @@ fn push_session(
                     cells.push(CellInstance {
                         origin: [badge_x, underline_y],
                         size: [prefix_chars as f32 * cell_w, gutter.max(1.0)],
-                        color: [
+                        color: rgba8_of_f32([
                             PLUGIN_BADGE_FG.0,
                             PLUGIN_BADGE_FG.1,
                             PLUGIN_BADGE_FG.2,
                             1.0,
-                        ],
+                        ]),
                     });
                 }
             }
@@ -5588,7 +5583,7 @@ fn push_session(
             cells.push(CellInstance {
                 origin: [inner_x + start as f32 * cell_w, row_y],
                 size: [(c - start) as f32 * cell_w, cell_h],
-                color: [bg.0 as f32, bg.1 as f32, bg.2 as f32, 1.0],
+                color: rgba8_of_f32([bg.0 as f32, bg.1 as f32, bg.2 as f32, 1.0]),
             });
         }
 
@@ -5616,7 +5611,7 @@ fn push_session(
             cells.push(CellInstance {
                 origin: [inner_x + span.col_start as f32 * cell_w, row_y],
                 size: [n_cols * cell_w, cell_h],
-                color: [HIGHLIGHT_BG.0, HIGHLIGHT_BG.1, HIGHLIGHT_BG.2, 1.0],
+                color: rgba8_of_f32([HIGHLIGHT_BG.0, HIGHLIGHT_BG.1, HIGHLIGHT_BG.2, 1.0]),
             });
         }
 
@@ -5743,7 +5738,7 @@ fn push_session(
             cells.push(CellInstance {
                 origin: [inner_x + start as f32 * cell_w, underline_y],
                 size: [(u - start) as f32 * cell_w, underline_h],
-                color: [fg.0 as f32, fg.1 as f32, fg.2 as f32, 1.0],
+                color: rgba8_of_f32([fg.0 as f32, fg.1 as f32, fg.2 as f32, 1.0]),
             });
         }
     }
@@ -5778,7 +5773,7 @@ fn push_session(
                             inner_y + r as f32 * cell_h,
                         ],
                         size: [w, cell_h],
-                        color: [SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0],
+                        color: rgba8_of_f32([SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0]),
                     });
                 }
             }
@@ -5808,7 +5803,7 @@ fn push_session(
                 cells.push(CellInstance {
                     origin: [x, y],
                     size: [w, cell_h],
-                    color: [SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0],
+                    color: rgba8_of_f32([SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0]),
                 });
             }
         }
@@ -5832,12 +5827,12 @@ fn push_session(
                     underline_y,
                 ],
                 size: [cols_in_span as f32 * cell_w, underline_h],
-                color: [
+                color: rgba8_of_f32([
                     LINK_UNDERLINE_FG.0,
                     LINK_UNDERLINE_FG.1,
                     LINK_UNDERLINE_FG.2,
                     1.0,
-                ],
+                ]),
             });
         }
     }
@@ -5910,6 +5905,7 @@ fn push_session(
         let solid = view.focused && window_focused;
         let color = [CURSOR_FG.0, CURSOR_FG.1, CURSOR_FG.2, 1.0];
         if solid {
+            let color = rgba8_of_f32(color);
             cells.push(CellInstance {
                 origin: [cx, cy],
                 size: [cell_w, cell_h],
@@ -5918,6 +5914,7 @@ fn push_session(
         } else {
             // Hollow: 4 stroke quads.  Stroke width tracks render.rs.
             let stroke = (cell_h * 0.07).max(1.0);
+            let color = rgba8_of_f32(color);
             cells.push(CellInstance { origin: [cx, cy], size: [cell_w, stroke], color });
             cells.push(CellInstance { origin: [cx, cy + cell_h - stroke], size: [cell_w, stroke], color });
             cells.push(CellInstance { origin: [cx, cy], size: [stroke, cell_h], color });
@@ -5950,7 +5947,7 @@ fn push_session(
             cells.push(CellInstance {
                 origin: [dest_x, dest_y],
                 size: [slot_w, cell_h],
-                color: [IME_PREEDIT_BG.0, IME_PREEDIT_BG.1, IME_PREEDIT_BG.2, 1.0],
+                color: rgba8_of_f32([IME_PREEDIT_BG.0, IME_PREEDIT_BG.1, IME_PREEDIT_BG.2, 1.0]),
             });
             // Glyph — same atlas path the cell-render uses, so the
             // preedit text is rendered at the EXACT same px size as
@@ -5980,7 +5977,7 @@ fn push_session(
             cells.push(CellInstance {
                 origin: [dest_x, dest_y + cell_h - underline_h],
                 size: [slot_w, underline_h],
-                color: [IME_PREEDIT_FG.0, IME_PREEDIT_FG.1, IME_PREEDIT_FG.2, 1.0],
+                color: rgba8_of_f32([IME_PREEDIT_FG.0, IME_PREEDIT_FG.1, IME_PREEDIT_FG.2, 1.0]),
             });
         }
     }
@@ -6405,7 +6402,11 @@ impl MetalRenderer {
 
         // Per-instance buffer.  StorageModeShared: CPU writes, GPU reads,
         // no manual sync needed.  newBufferWithBytes does the copy.
-        let cells_bytes = cells_as_bytes(cells);
+        //
+        // A local slab: this is a headless one-shot, not the frame
+        // path, so there is no frame-to-frame buffer to reuse.
+        let mut slab: Vec<u8> = Vec::new();
+        let cells_bytes = cells_as_bytes(cells, &mut slab);
         let buffer = if cells_bytes.is_empty() {
             None
         } else {
@@ -6502,9 +6503,27 @@ impl MetalRenderer {
 /// SAFETY: `CellInstance` is `#[repr(C)]` with no padding, so its
 /// memory representation is a flat slice of bytes.  No interior
 /// uninitialised bytes; safe to view the slice as `&[u8]`.
-fn cells_as_bytes(cells: &[CellInstance]) -> &[u8] {
-    let len = std::mem::size_of_val(cells);
-    unsafe { std::slice::from_raw_parts(cells.as_ptr() as *const u8, len) }
+/// The bytes the GPU reads for a run of flat rects, written by the
+/// published encoder into a slab the caller reuses.
+///
+/// Not a reinterpret, for the same reason the rounded rects are not:
+/// `RectInstance` is a plain Rust struct with an explicit `encode`, so
+/// its field order in memory is the compiler's business and only
+/// `encode` says what the layout is.
+///
+/// This is the per-frame bulk -- thousands of cells -- so the slab is
+/// kept between frames and the encode writes in place.
+fn cells_as_bytes<'a>(cells: &[CellInstance], slab: &'a mut Vec<u8>) -> &'a [u8] {
+    use golia_ui_core::scene::Encode;
+    let need = cells.len() * CellInstance::SIZE;
+    if slab.len() < need {
+        slab.resize(need, 0);
+    }
+    for (i, c) in cells.iter().enumerate() {
+        let at = i * CellInstance::SIZE;
+        c.encode(&mut slab[at..at + CellInstance::SIZE]);
+    }
+    &slab[..need]
 }
 
 /// SAFETY: same reasoning as `cells_as_bytes` — `GlyphInstance` is
@@ -9198,12 +9217,12 @@ mod tests {
             CellInstance {
                 origin: [0.0, 0.0],
                 size: [2.0, 4.0],
-                color: [1.0, 0.0, 0.0, 1.0],
+                color: rgba8_of_f32([1.0, 0.0, 0.0, 1.0]),
             },
             CellInstance {
                 origin: [2.0, 0.0],
                 size: [2.0, 4.0],
-                color: [0.0, 1.0, 0.0, 1.0],
+                color: rgba8_of_f32([0.0, 1.0, 0.0, 1.0]),
             },
         ];
         let bytes = r
@@ -10291,7 +10310,9 @@ mod tests {
         // Find the highlight cells (colour = HIGHLIGHT_BG).
         let highlight: Vec<&CellInstance> = with_hl
             .iter()
-            .filter(|c| (c.color[0] - HIGHLIGHT_BG.0).abs() < 1e-3)
+            // Eight bits now, so the colour is matched as the byte it
+            // becomes rather than as the float it was written as.
+            .filter(|c| c.color.r == (HIGHLIGHT_BG.0 * 255.0).round() as u8)
             .collect();
         assert_eq!(highlight.len(), 2);
         // Each highlight cell sits one cell_h below the previous (consecutive rows).
@@ -10392,7 +10413,9 @@ mod tests {
         // No HIGHLIGHT_BG cell should be present.
         let highlight_count = cells
             .iter()
-            .filter(|c| (c.color[0] - HIGHLIGHT_BG.0).abs() < 1e-3)
+            // Eight bits now, so the colour is matched as the byte it
+            // becomes rather than as the float it was written as.
+            .filter(|c| c.color.r == (HIGHLIGHT_BG.0 * 255.0).round() as u8)
             .count();
         assert_eq!(highlight_count, 0);
     }

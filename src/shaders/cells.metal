@@ -17,13 +17,24 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// One cell's drawing data, packed to 32 bytes.  Must match
-// `CellInstance` in render_metal.rs exactly.
-struct Cell {
-    float2 origin;
-    float2 size;
-    float4 color;
+// One flat rectangle, as the published Scene format writes it: 20
+// bytes, colour packed to eight bits a channel.
+//
+// There is no second declaration of this layout on the Rust side --
+// `RectInstance` is a plain struct with an explicit `encode`, and that
+// encoder is what fills the buffer this reads. Cell backgrounds,
+// underlines, cursors, rules and the small round indicators all arrive
+// through it.
+struct SceneRect {
+    // `packed_float2`, not `float2`: a `float2` aligns to 8, which
+    // pads this struct to 24 bytes while the encoder strides by 20.
+    // Every instance after the first then reads from the wrong place
+    // -- the test that draws a red half and a green half saw G=0.
+    packed_float2 origin;   // 0
+    packed_float2 size;     // 8
+    uchar4 color;           // 16
 };
+static_assert(sizeof(SceneRect) == 20, "SceneRect must match RectInstance::SIZE");
 
 struct VOut {
     float4 position [[position]];
@@ -45,10 +56,10 @@ constant float2 corners[6] = {
 vertex VOut bg_vertex(
     uint vid [[vertex_id]],
     uint iid [[instance_id]],
-    device const Cell* cells [[buffer(0)]],
+    device const SceneRect* cells [[buffer(0)]],
     constant float2& viewport_px [[buffer(1)]]
 ) {
-    Cell c = cells[iid];
+    SceneRect c = cells[iid];
     float2 px = c.origin + c.size * corners[vid];
 
     // px → NDC.  px is top-left/y-down; NDC is centre/y-up.
@@ -57,7 +68,7 @@ vertex VOut bg_vertex(
 
     VOut o;
     o.position = float4(ndc, 0.0, 1.0);
-    o.color = c.color;
+    o.color = float4(c.color) / 255.0;
     return o;
 }
 
@@ -148,10 +159,10 @@ struct DVOut {
 vertex DVOut dot_vertex(
     uint vid [[vertex_id]],
     uint iid [[instance_id]],
-    device const Cell* cells [[buffer(0)]],
+    device const SceneRect* cells [[buffer(0)]],
     constant float2& viewport_px [[buffer(1)]]
 ) {
-    Cell c = cells[iid];
+    SceneRect c = cells[iid];
     float2 px = c.origin + c.size * corners[vid];
     float2 ndc = (px / viewport_px) * 2.0 - 1.0;
     ndc.y = -ndc.y;
@@ -159,7 +170,7 @@ vertex DVOut dot_vertex(
     DVOut o;
     o.position = float4(ndc, 0.0, 1.0);
     o.quad_uv = corners[vid];
-    o.color = c.color;
+    o.color = float4(c.color) / 255.0;
     return o;
 }
 

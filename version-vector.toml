@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.212"  # no hook runs on the person's keystrokes
-core    = "0.12.255"  # the shader reads what the encoder writes, asserted per field
+core    = "0.12.256"  # cell backgrounds and dots read the published format too
 session = "0.11.137"  # a timing assertion says when it is measuring the host
