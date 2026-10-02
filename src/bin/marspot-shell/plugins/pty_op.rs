@@ -671,6 +671,21 @@ fn submit_deadline() -> Duration {
 /// function says so rather than inventing an answer.
 const COMPOSER_PROMPTS: [char; 3] = ['\u{276f}', '\u{203a}', '>'];
 
+/// Text that is sitting in the composer because something delivered it
+/// there, not because the person typed it.
+///
+/// Another session's message arrives by being written into the input
+/// box, so it is indistinguishable from a half-finished sentence by
+/// shape alone. Carrying it across a switch puts someone else's words
+/// back under the person's cursor, and the carry writes it in again on
+/// every switch after that.
+fn delivered_not_typed(t: &str) -> bool {
+    t.trim_start()
+        .strip_prefix("Message from @")
+        .and_then(|rest| rest.split_once(':'))
+        .is_some_and(|(from, _)| !from.is_empty() && !from.contains(char::is_whitespace))
+}
+
 fn is_composer_line(l: &str) -> bool {
     let t = l.trim_start();
     COMPOSER_PROMPTS.iter().any(|p| t.starts_with(*p))
@@ -1017,6 +1032,22 @@ impl OpRunner {
                             ),
                         );
                         (!rest.is_empty()).then(|| rest.to_string())
+                    }
+                    _ => unsent,
+                };
+                // Someone else's message is not the person's unsent text,
+                // however much it looks like it from the grid.
+                let unsent = match &unsent {
+                    Some(t) if delivered_not_typed(t) => {
+                        host.log(
+                            LogLevel::Info,
+                            &format!("{}.composer_delivered", self.op.name),
+                            &format!(
+                                "pane {sid}: the composer holds a message delivered to it, \
+                                 not typed; not carried"
+                            ),
+                        );
+                        None
                     }
                     _ => unsent,
                 };
@@ -2604,6 +2635,43 @@ mod tests {
         );
         run(&mut r, &host, &state, 64);
         assert_eq!(held.text().as_deref(), Some("and then my own words"));
+    }
+
+    /// A message another session delivered into the input box is not
+    /// the person's half-finished sentence, and carrying it would hand
+    /// their cursor someone else's words -- then do it again on every
+    /// switch, because the carry writes it back in.
+    #[test]
+    fn a_message_delivered_into_the_composer_is_not_carried() {
+        let (state, env, host) = setup();
+        *state.screen.lock().unwrap() =
+            "❯ Message from @smix-30: firefly /root/work/smix cleaned; disk 78% → 59%.\n"
+                .to_string();
+        let held = Arc::new(Job::new());
+        let mut r = OpRunner::new(
+            PtyOp::new("test.delivered").step(Step::capture_composer(Arc::clone(&held))),
+            env,
+        );
+        run(&mut r, &host, &state, 64);
+        assert_eq!(held.text(), None, "a delivery is not something the person typed");
+    }
+
+    /// And a sentence that merely begins with the same words is theirs.
+    #[test]
+    fn a_sentence_about_a_message_is_still_the_persons() {
+        let (state, env, host) = setup();
+        *state.screen.lock().unwrap() =
+            "❯ Message from the deploy box never arrived\n".to_string();
+        let held = Arc::new(Job::new());
+        let mut r = OpRunner::new(
+            PtyOp::new("test.not_delivered").step(Step::capture_composer(Arc::clone(&held))),
+            env,
+        );
+        run(&mut r, &host, &state, 64);
+        assert_eq!(
+            held.text().as_deref(),
+            Some("Message from the deploy box never arrived")
+        );
     }
 
     /// A composer holding only the person's own text is untouched.
