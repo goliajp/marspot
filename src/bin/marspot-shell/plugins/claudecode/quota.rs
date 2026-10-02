@@ -73,6 +73,9 @@ pub(super) enum Room {
 /// all.
 const WINDOW_SPENT: f64 = 0.98;
 
+/// The model with a cap of its own, as the feed labels it, lower case.
+const FABLE: &str = "fable";
+
 impl Room {
     pub(super) fn refused(&self) -> bool {
         self.refused_for(None)
@@ -171,6 +174,10 @@ impl Room {
             Room::Unknown => (0.0, 0.0),
         }
     }
+    /// Is Fable's own cap spent on this account?
+    fn fable_spent(&self) -> bool {
+        self.model_util(Some(FABLE)).is_some_and(|u| u >= WINDOW_SPENT)
+    }
     fn reset_7d(&self) -> i64 {
         match self {
             Room::Known { reset_7d, .. } => *reset_7d,
@@ -240,6 +247,13 @@ pub(super) fn rooms_for(
 /// quota goes first and the expensive quota is left alone.  Headroom
 /// only breaks ties.
 ///
+/// A pane that is not working in Fable goes to an account whose Fable
+/// is already spent before anything else: that account's remaining
+/// week is no use to the panes that can only run on Fable, while the
+/// accounts with Fable left are the only place those panes can go.
+/// A pane whose model has not been read yet might be one of them, so
+/// it is not steered this way.
+///
 /// Then the ones the feed cannot speak for — not knowing is not the
 /// same as being full.  Refused accounts last, soonest to come back
 /// first, because when every account is refused the only question left
@@ -254,14 +268,21 @@ pub(super) fn best_profile(rooms: &[(u8, Room)], current: u8, model: Option<&str
     if ranked.is_empty() {
         return None;
     }
+    // Unknown counts as Fable: steering it off the Fable accounts is
+    // only right when it is known not to need them.
+    let needs_fable = model.is_none_or(|m| m.to_ascii_lowercase().starts_with(FABLE));
     ranked.sort_by(|a, b| {
         let tier = |r: &Room| match r {
             Room::Known { .. } if !r.refused_for(model) => 0,
             Room::Unknown => 1,
             _ => 2,
         };
+        // Only among the usable: the refused are ordered by when they
+        // come back, and nothing else.
+        let keeps_fable = |r: &Room| tier(r) == 0 && !needs_fable && r.fable_spent();
         tier(&a.1)
             .cmp(&tier(&b.1))
+            .then_with(|| keeps_fable(&b.1).cmp(&keeps_fable(&a.1)))
             .then_with(|| {
                 // Both ends of the list are ordered by the clock: the
                 // refused by when they come back, the usable by when
@@ -500,6 +521,42 @@ mod tests {
             Some(3),
             "a Fable pane cannot use P2's week, so it takes the one with Fable left"
         );
+    }
+
+    /// The other way round: a pane that does not run on Fable takes
+    /// an account whose Fable is spent, so the accounts with Fable
+    /// left stay for the panes that can only run there.
+    #[test]
+    fn a_pane_not_on_fable_takes_an_account_whose_fable_is_spent() {
+        let rooms = vec![
+            // Nearest renewal and nearly empty -- the ordinary winner,
+            // and one of the few places a Fable pane can still go.
+            (2, room(0.10, 0.07, 1_000, &[("fable", 0.20)])),
+            // Further out and fuller, with nothing left for Fable.
+            (3, room(0.30, 0.40, 9_000, &[("fable", 1.00)])),
+        ];
+        assert_eq!(best_profile(&rooms, 1, Some("opus-5-5")), Some(3));
+        assert_eq!(
+            best_profile(&rooms, 1, Some("fable-5")),
+            Some(2),
+            "a Fable pane is not steered there"
+        );
+        assert_eq!(
+            best_profile(&rooms, 1, None),
+            Some(2),
+            "nor is a pane whose model is not known: it might be on Fable"
+        );
+    }
+
+    /// Spent Fable is a preference among accounts that can answer,
+    /// not a way past a refusal.
+    #[test]
+    fn spent_fable_does_not_make_a_refused_account_a_destination() {
+        let rooms = vec![
+            (2, room(0.10, 0.99, 1_000, &[("fable", 1.00)])),
+            (3, room(0.30, 0.40, 9_000, &[("fable", 0.20)])),
+        ];
+        assert_eq!(best_profile(&rooms, 1, Some("opus-5-5")), Some(3));
     }
 
     /// The model's cap is a way to be out, never a way to be in.
