@@ -156,15 +156,17 @@ pub fn paint_discs(
     let plain = |r: Rect, color: [f32; 4], radius: f32| UiRectInstance {
         origin: [r.x as f32, r.y_top as f32],
         size: [r.w as f32, r.h as f32],
-        fill_color: color,
-        border_color: [0.0; 4],
-        corner_radius: radius,
+        fill: crate::render_metal::rgba8_of_f32(color),
+        border: golia_ui_core::Rgba8::TRANSPARENT,
+        radius,
         // No rim: the shader strokes borders *inside* the shape, so
         // 1 px eats a pixel off every edge of an already-small disc.
         border_width: 0.0,
+        shadow_offset: [0.0, 0.0],
+        // No shadow: the blur is zero, so the colour never reaches a
+        // pixel whatever its alpha says.
+        shadow_color: golia_ui_core::Rgba8::TRANSPARENT,
         shadow_blur: 0.0,
-        shadow_alpha: 0.0,
-        shadow_color: [0.0, 0.0, 0.0, 1.0],
     };
     for (r, color, icon) in [
         (rects[0], COLOR_CLOSE, &ICON_CLOSE),
