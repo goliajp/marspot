@@ -36,7 +36,7 @@
 //! ```
 
 use marspot_term::layout::{Rect, Alignment};
-use crate::render_metal::{CellInstance, GlyphInstance, UiRectInstance};
+use crate::render_metal::{CellInstance, GlyphInstance, UiRectInstance, rgba8_of_f32};
 use crate::font_cache::FontCache;
 use crate::glyph_atlas::GlyphAtlas;
 
@@ -171,26 +171,30 @@ impl View {
                     painter.window_w as f32,
                     (painter.window_h as f32 - y_top).max(0.0),
                 ],
-                fill_color: color,
-                border_color: [0.0, 0.0, 0.0, 0.0],
-                corner_radius: 0.0,
+                fill: rgba8_of_f32(color),
+                border: golia_ui_core::Rgba8::TRANSPARENT,
+                radius: 0.0,
                 border_width: 0.0,
+                shadow_offset: [0.0, 0.0],
+                shadow_color: golia_ui_core::Rgba8::TRANSPARENT,
                 shadow_blur: 0.0,
-                shadow_alpha: 0.0,
-                shadow_color: [0.0, 0.0, 0.0, 1.0],
             });
         }
         // 2. Frame (one SDF rect = BG + border + shadow).
         painter.ui_rects.push(UiRectInstance {
             origin: [self.rect.x as f32, self.rect.y_top as f32],
             size: [self.rect.w as f32, self.rect.h as f32],
-            fill_color: self.style.bg,
-            border_color: self.style.border_color,
-            corner_radius: self.style.corner_radius,
+            fill: rgba8_of_f32(self.style.bg),
+            border: rgba8_of_f32(self.style.border_color),
+            radius: self.style.corner_radius,
             border_width: self.style.border_width,
+            shadow_offset: [0.0, 0.0],
+            // The style says how strong the shadow is in its own
+            // field and leaves the colour opaque. The format has one
+            // number for it, so the two fold here: black at that
+            // strength.
+            shadow_color: rgba8_of_f32([0.0, 0.0, 0.0, self.style.shadow_alpha]),
             shadow_blur: self.style.shadow_blur,
-            shadow_alpha: self.style.shadow_alpha,
-            shadow_color: [0.0, 0.0, 0.0, 1.0],
         });
         // 3. Caller content.
         body(painter);
@@ -239,13 +243,13 @@ impl<'a> ViewPainter<'a> {
         self.ui_rects.push(UiRectInstance {
             origin: [rect.x as f32, rect.y_top as f32],
             size:   [rect.w as f32, rect.h as f32],
-            fill_color: color,
-            border_color: border.0,
-            corner_radius: radius,
+            fill: rgba8_of_f32(color),
+            border: rgba8_of_f32(border.0),
+            radius,
             border_width: border.1,
+            shadow_offset: [0.0, 0.0],
+            shadow_color: golia_ui_core::Rgba8::TRANSPARENT,
             shadow_blur: 0.0,
-            shadow_alpha: 0.0,
-            shadow_color: [0.0, 0.0, 0.0, 1.0],
         });
     }
 

@@ -184,6 +184,9 @@ fn handle(stream: UnixStream, receipts: &Receipts) {
 /// -- "did that text actually get submitted" -- is the one any future
 /// typing path has to answer. Re-enabling it is adding this argument
 /// back at the three places that built a `claude` command line.
+// Kept deliberately: see the paragraph above for what it costs to
+// inject and what would re-enable it.
+#[allow(dead_code)]
 pub fn claude_settings_arg() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let exe = exe.to_str()?;

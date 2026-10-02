@@ -186,17 +186,6 @@ fragment float4 dot_fragment(DVOut in [[stage_in]]) {
 // BG + border + shadow without extra pipeline switches.
 // ----------------------------------------------------------------------
 
-struct UiRect {
-    float2 origin;        // top-left in physical px (the FILL rect)
-    float2 size;          // fill rect size in physical px
-    float4 fill_color;    // panel BG, premultiplied alpha allowed
-    float4 border_color;  // 1-px stroke; alpha=0 to skip
-    float corner_radius;  // px; clamped to min(size)/2 in shader
-    float border_width;   // px; 0 to skip border
-    float shadow_blur;    // px; 0 to skip shadow
-    float shadow_alpha;   // 0..1 shadow intensity
-    float4 shadow_color;  // typically black, alpha-mixed by shadow_alpha
-};
 
 struct URVOut {
     float4 position [[position]];
@@ -209,7 +198,6 @@ struct URVOut {
     float corner_radius;
     float border_width;
     float shadow_blur;
-    float shadow_alpha;
     float4 shadow_color;
 };
 
@@ -260,55 +248,10 @@ vertex URVOut scene_ui_rect_vertex(
     o.corner_radius = r.radius;
     o.border_width = r.border_width;
     o.shadow_blur = r.shadow_blur;
-    // Shadow intensity is the shadow colour's alpha, once.
-    //
-    // The float path carries two knobs, `shadow_alpha` and the
-    // colour's own alpha, and the fragment multiplies them -- so what
-    // they mean together depends on which producer filled them in.
-    // `ui_rect_instance_from_rect` put the same number in both and got
-    // its square (a 0.45 shadow drawn at 0.20); the panel painter put
-    // 0.45 in one and 1.0 in the other and got 0.45. Two producers,
-    // two meanings, one struct.
-    //
-    // The published format has one field for this, which is the right
-    // number of fields, so the second knob is held at 1 here and the
-    // colour carries it all.
-    o.shadow_alpha = 1.0;
     o.shadow_color = float4(r.shadow_color) / 255.0;
     return o;
 }
 
-vertex URVOut ui_rect_vertex(
-    uint vid [[vertex_id]],
-    uint iid [[instance_id]],
-    device const UiRect* rects [[buffer(0)]],
-    constant float2& viewport_px [[buffer(1)]]
-) {
-    UiRect r = rects[iid];
-    // Inflate the quad by shadow_blur on each side so the shadow falloff
-    // has pixels to draw into.  Drop shadow becomes a 0-cost optional
-    // by setting shadow_blur=0.
-    float2 padded_origin = r.origin - float2(r.shadow_blur, r.shadow_blur);
-    float2 padded_size = r.size + float2(2.0 * r.shadow_blur, 2.0 * r.shadow_blur);
-    float2 px = padded_origin + padded_size * corners[vid];
-
-    float2 ndc = (px / viewport_px) * 2.0 - 1.0;
-    ndc.y = -ndc.y;
-
-    URVOut o;
-    o.position = float4(ndc, 0.0, 1.0);
-    o.quad_uv = corners[vid];
-    o.padded_size = padded_size;
-    o.fill_size = r.size;
-    o.fill_color = r.fill_color;
-    o.border_color = r.border_color;
-    o.corner_radius = r.corner_radius;
-    o.border_width = r.border_width;
-    o.shadow_blur = r.shadow_blur;
-    o.shadow_alpha = r.shadow_alpha;
-    o.shadow_color = r.shadow_color;
-    return o;
-}
 
 fragment float4 ui_rect_fragment(URVOut in [[stage_in]]) {
     // Convert quad_uv (0..1 across padded quad) back to a centred
@@ -346,9 +289,15 @@ fragment float4 ui_rect_fragment(URVOut in [[stage_in]]) {
 
     // Soft shadow falloff outside the fill rect.
     float shadow_coverage = 0.0;
-    if (in.shadow_blur > 0.0 && in.shadow_alpha > 0.0) {
+    // Intensity is the shadow colour's alpha, once. There used to be
+    // a second knob multiplied into this, and what the pair meant
+    // depended on which producer filled it in: one put the same number
+    // in both and got its square (a 45% shadow drawn at 20%), the
+    // other put the strength in one and left the colour opaque. The
+    // published format has one field for it.
+    if (in.shadow_blur > 0.0 && in.shadow_color.a > 0.0) {
         // d > 0 outside; ramp from full at d=0 to 0 at d=shadow_blur.
-        shadow_coverage = (1.0 - smoothstep(0.0, in.shadow_blur, max(d, 0.0))) * in.shadow_alpha;
+        shadow_coverage = 1.0 - smoothstep(0.0, in.shadow_blur, max(d, 0.0));
         // Don't draw shadow inside the rect — fill takes over there.
         shadow_coverage *= step(0.0, d);
     }

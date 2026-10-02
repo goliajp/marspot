@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.212"  # no hook runs on the person's keystrokes
-core    = "0.12.253"  # a shadow has one intensity, not two that multiply
+core    = "0.12.254"  # the rect path reads the published format, and the float one is gone
 session = "0.11.137"  # a timing assertion says when it is measuring the host
