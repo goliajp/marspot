@@ -32,18 +32,36 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use marspot_term::session_registry::{read_session_entry, session_socket_path};
 use marspot_term::shell_proto::{encode_grid_resize, Frame, MsgType};
 
+/// The session this probe spawned, for `die` to take down with it.
+static SESSION_PID: AtomicU32 = AtomicU32::new(0);
+
 fn die(msg: &str) -> ! {
     eprintln!("FAIL: {msg}");
+    // `process::exit` skips Drop, so the ChildGuard that would have
+    // killed the session never runs.  Every failed trial used to leave a
+    // live session holding a pty and spinning, and the harness only swept
+    // orphans after the NEXT failure -- so one failure quietly taxed
+    // every trial that followed it.  That read as the product needing
+    // 30-60 s and twice the instructions for a corpus it normally
+    // absorbs in 1.3 s.
+    let pid = SESSION_PID.load(Ordering::Relaxed);
+    if pid != 0 {
+        // SAFETY: a kill to a pid this process spawned; a stale pid can
+        // only fail with ESRCH, which is ignored.
+        unsafe { libc::kill(pid as libc::c_int, libc::SIGKILL) };
+    }
     std::process::exit(1)
 }
 
-/// User and system CPU nanoseconds the session process has burned, plus
-/// the wakeup count — how many times it was scheduled to do a round.
+/// What the session spent: user and system CPU nanoseconds, wakeups, and
+/// the hardware counters that separate "did more work" from "ran the same
+/// work on a slower core".
 ///
 /// Wall clock on a shared host times the host's other tenants as much
 /// as the parser: preemption adds elapsed time without adding work.
@@ -52,16 +70,16 @@ fn die(msg: &str) -> ! {
 /// did.  Reported alongside wall, never instead of it — a change that
 /// burns the same cycles over a longer window is still a regression the
 /// user feels.
-fn session_cpu_ns(pid: u32) -> Option<(u64, u64, u64)> {
-    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
-    // SAFETY: `info` is a live, correctly-sized rusage_info_v2, which is
-    // what RUSAGE_INFO_V2 tells the kernel to fill; the cast matches the
+fn session_cpu_ns(pid: u32) -> Option<Spend> {
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a live, correctly-sized rusage_info_v4, which is
+    // what RUSAGE_INFO_V4 tells the kernel to fill; the cast matches the
     // C idiom (`(rusage_info_t *)&ru`).
     let rc = unsafe {
         libc::proc_pid_rusage(
             pid as libc::c_int,
-            libc::RUSAGE_INFO_V2,
-            (&mut info as *mut libc::rusage_info_v2).cast(),
+            libc::RUSAGE_INFO_V4,
+            (&mut info as *mut libc::rusage_info_v4).cast(),
         )
     };
     if rc != 0 {
@@ -103,7 +121,28 @@ fn session_cpu_ns(pid: u32) -> Option<(u64, u64, u64)> {
     // fall together.  If CPU moves while wakeups hold, that story is
     // wrong and the cost went somewhere else.
     let wakeups = info.ri_interrupt_wkups + info.ri_pkg_idle_wkups;
-    Some((ns(info.ri_user_time), ns(info.ri_system_time), wakeups))
+    Some(Spend {
+        user_ns: ns(info.ri_user_time),
+        sys_ns: ns(info.ri_system_time),
+        wakeups,
+        // Instructions retired is the only one of these that answers
+        // "did this build do more work": it does not move when the
+        // scheduler puts the thread on an efficiency core or drops the
+        // clock, while every time-based reading does.  Cycles come with
+        // it so the two can be divided — same instructions at worse IPC
+        // is a memory-system story, not a code-size one.
+        instructions: info.ri_instructions,
+        cycles: info.ri_cycles,
+    })
+}
+
+/// What one trial cost, in every unit the kernel will report.
+struct Spend {
+    user_ns: u64,
+    sys_ns: u64,
+    wakeups: u64,
+    instructions: u64,
+    cycles: u64,
 }
 
 fn main() {
@@ -179,6 +218,16 @@ fn main() {
         }
     }
     let session_pid = child.id();
+    SESSION_PID.store(session_pid, Ordering::Relaxed);
+    // A seam for checking that a failed trial takes its session with it.
+    // `spawn` fails before the session is up, `connected` after it holds a
+    // pty and is absorbing -- the moment the real die sites (handshake,
+    // missing DSR) happen, and the only one where an orphan would have
+    // anything left to do.
+    let die_at = env::var("MARSPOT_PROBE_DIE_AT").unwrap_or_default();
+    if die_at == "spawn" {
+        die("asked to die after spawn");
+    }
     let _guard = ChildGuard(child);
 
     // SAFETY: single-threaded at this point; the registry helpers read
@@ -230,6 +279,10 @@ fn main() {
         Err(e) => die(&format!("try_clone control stream: {e}")),
     }
 
+    if die_at == "connected" {
+        die("asked to die once connected");
+    }
+
     // The session runs the script once its pty is up; wait for the
     // marker to carry a complete `time` record.
     let deadline = Instant::now() + Duration::from_secs(300);
@@ -273,7 +326,8 @@ fn main() {
     // caller has to see a missing reading as missing, not as zero cost.
     let wall_ns = (secs * 1e9) as u64;
     match session_cpu_ns(session_pid) {
-        Some((user, sys, wakeups)) => {
+        Some(spend) => {
+            let (user, sys) = (spend.user_ns, spend.sys_ns);
             let cpu = user + sys;
             // A gauge that cannot fail is not a gauge.  Absorbing this
             // corpus keeps at least one core busy for most of the
@@ -287,9 +341,12 @@ fn main() {
                      for this much work; the timebase conversion is wrong"
                 ));
             }
-            println!("{wall_ns} {user} {sys} {wakeups}");
+            println!(
+                "{wall_ns} {user} {sys} {} {} {}",
+                spend.wakeups, spend.instructions, spend.cycles
+            );
         }
-        None => println!("{wall_ns} - - -"),
+        None => println!("{wall_ns} - - - - -"),
     }
     let _ = std::fs::remove_dir_all(&sandbox);
 }
