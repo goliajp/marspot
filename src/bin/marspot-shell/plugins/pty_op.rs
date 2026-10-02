@@ -91,6 +91,10 @@ pub trait OpEnv: Send {
     /// cheap — asked once, after a return has been sent, to find out
     /// whether it did anything.
     fn pane_screen(&self, sid: u64) -> Option<String>;
+    /// What sits typed and unsent in the pane's input box, read off
+    /// the grid so the program's own suggestion and the messages
+    /// already sent are not taken for it.
+    fn pane_unsent(&self, sid: u64) -> Option<String>;
 
     /// Did this pane's own agent report submitting this text?
     ///
@@ -1012,11 +1016,7 @@ impl OpRunner {
                 // someone's input box is worse than losing a line they
                 // can retype. It is logged either way so the choice is
                 // visible afterwards.
-                let unsent = self
-                    .env
-                    .pane_screen(sid)
-                    .as_deref()
-                    .and_then(crate::plugins::autorun::unsent_line);
+                let unsent = self.env.pane_unsent(sid);
                 // Ours is not theirs. Taken off the front rather than
                 // matched whole, because the person may have started
                 // typing after it -- that part is theirs and travels.
@@ -1938,6 +1938,13 @@ impl OpEnv for RealEnv {
             .join("bytelog");
         marspot::pane_read::screen_text(&bytelog, entry.cols, entry.rows, 0).ok()
     }
+    fn pane_unsent(&self, sid: u64) -> Option<String> {
+        let entry = marspot_term::session_registry::read_session_entry(sid).ok()?;
+        let bytelog = marspot_term::paths::sessions_dir()
+            .join(sid.to_string())
+            .join("bytelog");
+        marspot::pane_read::composer_text(&bytelog, entry.cols, entry.rows).ok()?
+    }
 }
 
 // ── the service ──────────────────────────────────────────────────────
@@ -2505,6 +2512,9 @@ mod tests {
         }
         fn pane_screen(&self, _sid: u64) -> Option<String> {
             Some(self.state.screen.lock().unwrap().clone())
+        }
+        fn pane_unsent(&self, sid: u64) -> Option<String> {
+            self.pane_screen(sid).as_deref().and_then(crate::plugins::autorun::unsent_line)
         }
         fn pane_modes(&self, _sid: u64) -> Option<(u64, u32)> {
             *self.state.modes.lock().unwrap()
