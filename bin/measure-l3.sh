@@ -77,7 +77,9 @@ cleanup() { pkill -9 -f "$SESSION_BIN( |\$)" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 run_one() {
-  # echoes ns on success, empty on failure
+  # echoes "<wall_ns> <user_ns> <sys_ns> <wakeups>" on success, empty on
+  # failure.
+  # The CPU fields are `-` if the kernel would not report them.
   local scenario_path=$1 repeats=$2
   "$PROBE_BIN" "$SESSION_BIN" "$scenario_path" "$repeats" 2>/dev/null
 }
@@ -104,20 +106,30 @@ for scenario in "${SCENARIOS[@]}"; do
     uptime | sed 's/.*averages: //' | awk '{print $1}' >> "$RUN_DIR/load"
 
     echo "==> $scenario ×$repeats ($((total_bytes/1048576)) MiB) trial $trial/$TRIALS"
-    ns=$(run_one "$spath" "$repeats")
+    read -r ns user sys wk <<<"$(run_one "$spath" "$repeats")"
     if [[ -z "$ns" || "$ns" == "0" ]]; then
       # One retry, in case an orphaned session held the pty.
       echo "    probe failed — clearing orphans and retrying" >&2
       reset_sessions
-      ns=$(run_one "$spath" "$repeats")
+      read -r ns user sys wk <<<"$(run_one "$spath" "$repeats")"
     fi
     if [[ -z "$ns" || "$ns" == "0" ]]; then
       echo "    trial failed (no timing)" >&2
       continue
     fi
     echo "$ns" >> "$RUN_DIR/$scenario.ns"
+    echo "${user:--}" >> "$RUN_DIR/$scenario.user"
+    echo "${sys:--}" >> "$RUN_DIR/$scenario.sys"
+    echo "${wk:--}" >> "$RUN_DIR/$scenario.wk"
     mibps=$(python3 -c "print(f'{$total_bytes/1048576/($ns/1e9):.1f}')")
-    printf "    %.3fs  %s MiB/s\n" "$(python3 -c "print($ns/1e9)")" "$mibps"
+    if [[ "${user:--}" == "-" ]]; then
+      printf "    %.3fs  %s MiB/s  (no cpu reading)\n" "$(python3 -c "print($ns/1e9)")" "$mibps"
+    else
+      printf "    %.3fs  %s MiB/s   user %.3fs sys %.3fs  %s MiB/user-s\n" \
+        "$(python3 -c "print($ns/1e9)")" "$mibps" \
+        "$(python3 -c "print($user/1e9)")" "$(python3 -c "print($sys/1e9)")" \
+        "$(python3 -c "print(f'{$total_bytes/1048576/($user/1e9):.1f}')")"
+    fi
   done
   echo "$total_bytes" > "$RUN_DIR/$scenario.bytes"
 done
@@ -152,7 +164,21 @@ for scenario in scenarios_str.split():
     by_path = os.path.join(run_dir, f"{scenario}.bytes")
     if not (os.path.exists(ns_path) and os.path.exists(by_path)):
         continue
-    samples = sorted(int(x) for x in open(ns_path).read().split() if x.strip())
+    def read_ns(suffix):
+        # Trial order, NOT sorted: these are read alongside each other to
+        # ask whether they move together, and sorting each independently
+        # throws the pairing away.
+        path = os.path.join(run_dir, f"{scenario}.{suffix}")
+        if not os.path.exists(path):
+            return []
+        return [
+            int(x) for x in open(path).read().split() if x.strip() and x.strip() != "-"
+        ]
+    user_samples = read_ns("user")
+    sys_samples = read_ns("sys")
+    wk_samples = read_ns("wk")
+    in_order = [int(x) for x in open(ns_path).read().split() if x.strip()]
+    samples = sorted(in_order)
     if not samples:
         out[scenario] = {"bytes": 0, "median_ns": 0, "bytes_per_sec": 0, "samples": []}
         continue
@@ -178,6 +204,22 @@ for scenario in scenarios_str.split():
         "bytes_per_sec": bps,
         "samples": samples,
     }
+    # Throughput per second of user CPU, next to the wall figure so the
+    # two can be compared trial by trial.  System time is recorded but
+    # not turned into a rate: it falls when the host is busy (bytes pool
+    # in the pty, reads get chunkier), so a rate built on it flatters a
+    # contended run.  Which gauge the gate should believe is a question
+    # the numbers answer, not this script.
+    if user_samples:
+        best_user = min(user_samples)
+        out[scenario]["user_ns"] = best_user
+        out[scenario]["user_samples"] = user_samples
+        out[scenario]["sys_samples"] = sys_samples
+        out[scenario]["wakeup_samples"] = wk_samples
+        out[scenario]["wall_samples_in_order"] = in_order
+        out[scenario]["bytes_per_user_sec"] = (
+            total_bytes * 1_000_000_000 // best_user if best_user > 0 else 0
+        )
 json.dump(out, open(out_json, "w"), indent=2)
 PY
 
