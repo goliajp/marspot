@@ -84,7 +84,11 @@ run_one() {
   # on success, empty on failure.
   # The CPU fields are `-` if the kernel would not report them.
   local scenario_path=$1 repeats=$2
-  "$PROBE_BIN" "$SESSION_BIN" "$scenario_path" "$repeats" 2>/dev/null
+  # stderr carries the probe's witness line (what the session actually
+  # wrote this trial).  It used to go to /dev/null, which is why a run
+  # that cost 20% less per byte than its siblings could not be asked
+  # whether it had also written less.
+  "$PROBE_BIN" "$SESSION_BIN" "$scenario_path" "$repeats" 2>"$RUN_DIR/stderr"
 }
 
 RUN_DIR=$(mktemp -d)
@@ -128,6 +132,8 @@ for scenario in "${SCENARIOS[@]}"; do
       echo "    trial failed (no timing)" >&2
       continue
     fi
+    sed -n 's/^witness: //p' "$RUN_DIR/stderr" | tail -1 \
+      >> "$RUN_DIR/$scenario.witness"
     echo "$ns" >> "$RUN_DIR/$scenario.ns"
     echo "${user:--}" >> "$RUN_DIR/$scenario.user"
     echo "${sys:--}" >> "$RUN_DIR/$scenario.sys"
@@ -192,6 +198,14 @@ for scenario in scenarios_str.split():
     wk_samples = read_ns("wk")
     insn_samples = read_ns("insn")
     cyc_samples = read_ns("cyc")
+    wit_path = os.path.join(run_dir, f"{scenario}.witness")
+    witness = []
+    if os.path.exists(wit_path):
+        for line in open(wit_path):
+            fields = dict(
+                kv.split("=", 1) for kv in line.split() if "=" in kv
+            )
+            witness.append({k: int(v) for k, v in fields.items() if v.isdigit()})
     load_path = os.path.join(run_dir, f"{scenario}.load")
     load_samples = (
         [float(x) for x in open(load_path).read().split() if x.strip()]
@@ -258,6 +272,8 @@ for scenario in scenarios_str.split():
         out[scenario]["instruction_samples"] = insn_samples
         out[scenario]["cycle_samples"] = cyc_samples
         out[scenario]["load_samples"] = load_samples
+        if witness:
+            out[scenario]["witness"] = witness
         mib = total_bytes / 1048576
         if insn_samples and wk_samples and mib:
             n_pair = min(len(insn_samples), len(wk_samples))
