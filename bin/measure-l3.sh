@@ -107,6 +107,13 @@ for scenario in "${SCENARIOS[@]}"; do
     # started a minute in and ran to the end, and reported a 45%
     # "regression" on cjk that was entirely the tenant.
     uptime | sed 's/.*averages: //' | awk '{print $1}' >> "$RUN_DIR/load"
+    # Per scenario and in trial order as well, so a reading can be paired
+    # with the load that was on the host while it was taken.  The
+    # run-wide file above answers "was this run clean"; this one answers
+    # "does the cost move WITH the load", which is a different question
+    # and the only one that can say whether the work itself is
+    # load-dependent.
+    uptime | sed 's/.*averages: //' | awk '{print $1}' >> "$RUN_DIR/$scenario.load"
 
     reset_sessions
     echo "==> $scenario ×$repeats ($((total_bytes/1048576)) MiB) trial $trial/$TRIALS"
@@ -185,6 +192,11 @@ for scenario in scenarios_str.split():
     wk_samples = read_ns("wk")
     insn_samples = read_ns("insn")
     cyc_samples = read_ns("cyc")
+    load_path = os.path.join(run_dir, f"{scenario}.load")
+    load_samples = (
+        [float(x) for x in open(load_path).read().split() if x.strip()]
+        if os.path.exists(load_path) else []
+    )
     in_order = [int(x) for x in open(ns_path).read().split() if x.strip()]
     samples = sorted(in_order)
     if not samples:
@@ -218,6 +230,25 @@ for scenario in scenarios_str.split():
     # in the pty, reads get chunkier), so a rate built on it flatters a
     # contended run.  Which gauge the gate should believe is a question
     # the numbers answer, not this script.
+    # Per-round overhead, instructions per (wakeup per MB), fitted over 164
+    # trials across four runs on 2026-10-02.  It lands in 17.6-22.6 for four
+    # workloads with nothing in common but the code that absorbs them, which
+    # is what a cost per round rather than per byte should look like, and it
+    # is why the raw figure above moves: a starved session is chopped into
+    # far more rounds for the same bytes.  Subtracting it leaves the per-byte
+    # cost.  On the one run that spent its whole length starved (emoji,
+    # wakeups 1003 against a normal 28-37) this pulls a 70% disagreement with
+    # its sibling runs down to 4.5%.
+    ROUND_OVERHEAD = {
+        "cat-ascii": 22.58, "cat-mixed": 19.69, "cat-cjk": 17.57, "cat-emoji": 18.87,
+    }
+    # Normal rounds land at 0.19-0.41 wakeups/MB, starved at 4.7-10.2, so this
+    # separates the two populations with an order of magnitude to spare.  An
+    # ABSOLUTE line, not one relative to the run's own median: a run that is
+    # starved from end to end moves its own median, and a relative test then
+    # calls every trial in it normal.  That happened -- emoji's starved run
+    # kept all seven trials.
+    STARVED_WAKEUPS_PER_MB = 1.5
     if user_samples:
         best_user = min(user_samples)
         out[scenario]["user_ns"] = best_user
@@ -226,6 +257,25 @@ for scenario in scenarios_str.split():
         out[scenario]["wakeup_samples"] = wk_samples
         out[scenario]["instruction_samples"] = insn_samples
         out[scenario]["cycle_samples"] = cyc_samples
+        out[scenario]["load_samples"] = load_samples
+        mib = total_bytes / 1048576
+        if insn_samples and wk_samples and mib:
+            n_pair = min(len(insn_samples), len(wk_samples))
+            per_mb = [wk_samples[i] / mib for i in range(n_pair)]
+            per_byte = [insn_samples[i] / total_bytes for i in range(n_pair)]
+            b = ROUND_OVERHEAD.get(scenario)
+            out[scenario]["wakeups_per_mb"] = [round(x, 3) for x in per_mb]
+            out[scenario]["starved_trials"] = sum(
+                1 for x in per_mb if x > STARVED_WAKEUPS_PER_MB
+            )
+            if b:
+                norm = sorted(
+                    per_byte[i] - b * per_mb[i] for i in range(n_pair)
+                )
+                out[scenario]["insn_per_byte_normalised"] = [round(x, 2) for x in norm]
+                out[scenario]["insn_per_byte_normalised_median"] = round(
+                    norm[len(norm) // 2], 2
+                )
         out[scenario]["wall_samples_in_order"] = in_order
         out[scenario]["bytes_per_user_sec"] = (
             total_bytes * 1_000_000_000 // best_user if best_user > 0 else 0
