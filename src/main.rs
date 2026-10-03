@@ -2221,13 +2221,13 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
 /// Fixed values, never the live feed: a snapshot whose content moves
 /// cannot be compared against the one before it, and comparing is the
 /// whole point — the panels are supposed to look like one program.
-fn demo_cc_usage(rect: marspot_term::layout::Rect) -> marspot::render_metal::CcUsageRender {
-    use marspot::render_metal::{CcUsageAccountRender, CcUsageRender};
+fn demo_cc_usage(rect: marspot_term::layout::Rect) -> marspot::ui::components::cc_usage_modal::CcUsageRender {
+    use marspot::ui::components::cc_usage_modal::{CcUsageAccountRender, CcUsageRender};
     // A fixed instant, so the timeline lands in the same place every
     // run: 2026-01-02 03:00:00 UTC.
     let now = 1_767_322_800i64;
     let win = |label: &str, util: f32, reset: i64, hm: &str, span: i64| {
-        marspot::render_metal::CcUsageWindowRender {
+        marspot::ui::components::cc_usage_modal::CcUsageWindowRender {
             label: label.to_string(),
             util,
             reset_unix: Some(reset),
