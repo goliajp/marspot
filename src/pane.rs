@@ -2049,7 +2049,7 @@ impl Pane {
     /// what stops it: when every pane has arrived, the window goes back
     /// to drawing only on change.
     pub fn aim_scrim(&mut self, focused: bool, now: std::time::Instant) -> bool {
-        let target = crate::render_metal::attention_scrim(focused, self.recede);
+        let target = crate::frame_build::frame::attention_scrim(focused, self.recede);
         self.scrim.aim(target, now);
         self.scrim.is_moving(now)
     }
