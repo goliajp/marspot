@@ -5,3 +5,4 @@
 
 pub mod glyph_resolve;
 pub mod text_run;
+pub mod palette;
