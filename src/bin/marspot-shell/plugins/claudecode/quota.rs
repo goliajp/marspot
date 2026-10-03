@@ -77,10 +77,6 @@ const WINDOW_SPENT: f64 = 0.98;
 const FABLE: &str = "fable";
 
 impl Room {
-    pub(super) fn refused(&self) -> bool {
-        self.refused_for(None)
-    }
-
     /// Is this profile out, for a pane that needs `model`?
     ///
     /// The model's own cap is an additional way to be out, never a
@@ -89,7 +85,10 @@ impl Room {
     pub(super) fn refused_for(&self, model: Option<&str>) -> bool {
         match self {
             Room::Known { status, util_5h, util_7d, .. } => {
-                if status == "rejected" || *util_5h >= WINDOW_SPENT || *util_7d >= WINDOW_SPENT {
+                if *util_5h >= WINDOW_SPENT || *util_7d >= WINDOW_SPENT {
+                    return true;
+                }
+                if status == "rejected" && !self.rejected_only_for_another_model(model) {
                     return true;
                 }
                 self.model_util(model).is_some_and(|u| u >= WINDOW_SPENT)
@@ -132,6 +131,29 @@ impl Room {
         }
     }
 
+    /// Is the account's `rejected` explained by a model this pane does
+    /// not use?
+    ///
+    /// The collector writes `rejected` when ANY of an account's windows
+    /// is full, its per-model ones included. Measured 2026-10-03: P1 at
+    /// 0% of five hours and 77% of the week read `rejected` because its
+    /// Fable cap was spent, and an Opus pane put there by hand was moved
+    /// off it six seconds later. The account windows are already
+    /// checked on their own numbers, so the word only adds something
+    /// when no capped model accounts for it -- or when the pane may be
+    /// on that model, which includes a pane whose model is not known.
+    fn rejected_only_for_another_model(&self, model: Option<&str>) -> bool {
+        let Some(want) = model else { return false };
+        match self {
+            Room::Known { models, .. } => {
+                let mut spent = models.iter().filter(|(_, u)| *u >= WINDOW_SPENT).peekable();
+                spent.peek().is_some()
+                    && spent.all(|(label, _)| !same_model(&want.to_ascii_lowercase(), label))
+            }
+            Room::Unknown => false,
+        }
+    }
+
     /// How much of `model`'s own window is gone here, when the feed
     /// says and the pane cares.
     fn model_util(&self, model: Option<&str>) -> Option<f64> {
@@ -139,10 +161,7 @@ impl Room {
         match self {
             Room::Known { models, .. } => models
                 .iter()
-                // The badge says `fable-5`, the feed says `Fable`.
-                // Neither is a prefix of the other in general, so
-                // match on whichever side is shorter.
-                .find(|(label, _)| want.starts_with(label.as_str()) || label.starts_with(&want))
+                .find(|(label, _)| same_model(&want, label))
                 .map(|(_, util)| *util),
             Room::Unknown => None,
         }
@@ -184,6 +203,14 @@ impl Room {
             Room::Unknown => i64::MAX,
         }
     }
+}
+
+/// Does the pane's model (lower case) name the feed's capped model?
+///
+/// The badge says `fable-5`, the feed says `fable`. Neither is a prefix
+/// of the other in general, so match on whichever side is shorter.
+fn same_model(want: &str, label: &str) -> bool {
+    want.starts_with(label) || label.starts_with(want)
 }
 
 /// Read a profile's account address out of its own config.
@@ -401,7 +428,7 @@ pub(super) fn next_move(s: &Situation) -> Move {
         .rooms
         .iter()
         .find(|(p, _)| *p == target)
-        .map(|(_, r)| r.refused())
+        .map(|(_, r)| r.refused_for(s.needs_model))
         .unwrap_or(false);
     if known_shut {
         return Move::Hold("every account is out");
@@ -623,7 +650,7 @@ mod tests {
             util_7d: 0.37,
             reset_7d: 500, models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX
         };
-        assert!(warned.refused(), "99% of the five-hour window is not a warning");
+        assert!(warned.refused_for(None), "99% of the five-hour window is not a warning");
 
         let fresh = Room::Known {
             status: "allowed_warning".into(),
@@ -631,7 +658,7 @@ mod tests {
             util_7d: 0.80,
             reset_7d: 900, models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX
         };
-        assert!(!fresh.refused(), "a warning with room left is still usable");
+        assert!(!fresh.refused_for(None), "a warning with room left is still usable");
 
         // And it is not offered as somewhere to go.
         let r = vec![(1, Room::Known { status: "rejected".into(), util_5h: 0.0, util_7d: 1.0, reset_7d: 100 , models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX}), (7, warned), (2, fresh)];
@@ -784,6 +811,89 @@ mod tests {
         let rooms = rooms_for(&[1], &[], |_| None);
         assert_eq!(best_profile(&rooms, 1, None), None);
     }
+    /// The feed's numbers for P1 on 2026-10-03, when an Opus pane put
+    /// there by hand was moved off it six seconds later: both account
+    /// windows with room, Fable spent, and the collector's word
+    /// `rejected` -- which it writes when any window is full, the
+    /// per-model ones included.
+    fn fable_spent_but_open(reset_7d: i64) -> Room {
+        Room::Known {
+            status: "rejected".into(),
+            util_5h: 0.0,
+            util_7d: 0.77,
+            reset_7d,
+            models: vec![("fable".to_string(), 1.0)],
+            models_measured_at: i64::MAX,
+            measured_at: i64::MAX,
+        }
+    }
+
+    #[test]
+    fn a_rejection_that_only_fable_explains_shuts_out_only_fable_panes() {
+        let r = fable_spent_but_open(500);
+        assert!(!r.refused_for(Some("opus-5-5")), "an Opus pane has the whole week left here");
+        assert!(r.refused_for(Some("fable-5")), "a Fable pane has nothing");
+        assert!(
+            r.refused_for(None),
+            "a pane whose model is not known may be a Fable pane"
+        );
+    }
+
+    /// The word still counts when no capped model accounts for it.
+    #[test]
+    fn a_rejection_no_model_explains_shuts_out_every_pane() {
+        let plain = Room::Known {
+            status: "rejected".into(),
+            util_5h: 0.10,
+            util_7d: 0.50,
+            reset_7d: 500,
+            models: vec![("fable".to_string(), 0.30)],
+            models_measured_at: i64::MAX,
+            measured_at: i64::MAX,
+        };
+        assert!(plain.refused_for(Some("opus-5-5")));
+        let Room::Known { status, util_5h, util_7d, reset_7d, models_measured_at, measured_at, .. } =
+            plain
+        else {
+            unreachable!()
+        };
+        let no_rows = Room::Known {
+            status, util_5h, util_7d, reset_7d, models: Vec::new(), models_measured_at, measured_at,
+        };
+        assert!(no_rows.refused_for(Some("opus-5-5")));
+    }
+
+    /// With the rejection read per pane, an Opus pane leaving a spent
+    /// account goes where Fable is already gone, and is not held as if
+    /// every account were out.
+    #[test]
+    fn an_opus_pane_moves_to_an_account_whose_only_lack_is_fable() {
+        let r = vec![
+            (4, room(0.16, 0.05, 9_000, &[("fable", 0.01)])),
+            (1, fable_spent_but_open(5_000)),
+            (6, Room::Known {
+                status: "rejected".into(),
+                util_5h: 0.08,
+                util_7d: 0.98,
+                reset_7d: 100,
+                models: vec![("fable".to_string(), 1.0)],
+                models_measured_at: i64::MAX,
+                measured_at: i64::MAX,
+            }),
+        ];
+        let s = Situation { current: 6, needs_model: Some("opus-5-5"), ..situation(&r) };
+        assert_eq!(next_move(&s), Move::To(1), "P4's Fable is kept for the panes that need it");
+        let s = Situation { current: 6, needs_model: Some("fable-5"), ..situation(&r) };
+        assert_eq!(next_move(&s), Move::To(4));
+
+        // The only other account lacks just Fable: that is a place to
+        // go for an Opus pane, not "every account is out".
+        let only = vec![r[1].clone(), r[2].clone()];
+        let s = Situation { current: 6, needs_model: Some("opus-5-5"), ..situation(&only) };
+        assert_eq!(next_move(&s), Move::To(1));
+        let s = Situation { current: 6, needs_model: Some("fable-5"), ..situation(&only) };
+        assert_eq!(next_move(&s), Move::Hold("every account is out"));
+    }
 }
 
 #[cfg(test)]
@@ -811,4 +921,5 @@ mod live_feed_tests {
              in .claude.json and the feed's email no longer line up: {rooms:?}"
         );
     }
+
 }
