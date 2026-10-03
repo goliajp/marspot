@@ -344,6 +344,9 @@ pub(super) struct DormantRecord {
     /// shell is standing, which is how a session came back under
     /// another project's rules.
     pub(super) project_dir: Option<String>,
+    /// The model and effort it was running with, so it wakes on them
+    /// rather than on its profile's default.
+    pub(super) choice: CliChoice,
     /// When this pane was parked.  A record may only be judged
     /// ("is the program back?") by a scan that ran AFTER it was
     /// created — the scan that triggers the reclamation was taken
@@ -376,13 +379,15 @@ pub(super) fn encode_dormant(records: &[DormantRecord]) -> String {
             .unwrap_or_default()
             .as_secs();
         s.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             r.shelld_sid,
             r.uuid,
             r.profile_num,
             secs,
             r.config_dir.as_deref().unwrap_or(""),
-            r.project_dir.as_deref().unwrap_or("")
+            r.project_dir.as_deref().unwrap_or(""),
+            r.choice.model.as_deref().unwrap_or(""),
+            r.choice.effort.as_deref().unwrap_or("")
         ));
     }
     s
@@ -405,6 +410,11 @@ pub(super) fn decode_dormant(text: &str) -> Vec<DormantRecord> {
                 .unwrap_or(std::time::UNIX_EPOCH);
             let config_dir = it.next().map(|s| s.to_string());
             let project_dir = it.next().map(|s| s.to_string());
+            // 7th and 8th columns. A row without them wakes on the
+            // profile's default, as it did before; a reader older than
+            // them stops at the 6th.
+            let model = it.next().filter(|m| cli_model_ok(m)).map(str::to_string);
+            let effort = it.next().filter(|e| cli_effort_ok(e)).map(str::to_string);
             // A uuid is the only field that can be typo'd into
             // something dangerous (it lands in a shell command), so it
             // is checked here rather than at the write site.
@@ -425,6 +435,7 @@ pub(super) fn decode_dormant(text: &str) -> Vec<DormantRecord> {
                 // `shell_safe` -- a directory may hold a space or a
                 // `$` and mean nothing by it.
                 project_dir: project_dir.filter(|d| pty_op::quotable(d)),
+                choice: CliChoice { model, effort },
                 created_at,
             })
         })
@@ -490,6 +501,8 @@ pub(super) fn reclaim_op(
     shell_pid: i32,
     // where the session lives, so bringing it back does not move it
     project_dir: Option<&str>,
+    // the model and effort it was running with
+    choice: &CliChoice,
 ) -> Option<pty_op::PtyOp> {
     // Same rule as `profile_cycle_op`: a session we cannot name cannot
     // be brought back, and taking claude down without a resume line
@@ -509,7 +522,16 @@ pub(super) fn reclaim_op(
     // Brought back where it lives. Same reason as the profile switch:
     // `--resume` binds the session to the directory it is run from, and
     // the pane's shell may have wandered since it started.
-    let line = cmd.arg("--resume").arg(uuid).in_dir(project_dir).to_bytes()?;
+    cmd = cmd.arg("--resume").arg(uuid).in_dir(project_dir);
+    // Woken on the model it was on, not the profile's default. Quoted:
+    // `[1m]` is a glob to a shell.
+    if let Some(model) = &choice.model {
+        cmd = cmd.arg("--model").quoted_arg(model.clone());
+    }
+    if let Some(effort) = &choice.effort {
+        cmd = cmd.arg("--effort").arg(effort.clone());
+    }
+    let line = cmd.to_bytes()?;
     // Reclaiming parks claude and brings it back later. Anything the
     // person had typed and not sent lives in the process being parked,
     // so it is read now and handed back when the new one has painted.
@@ -600,7 +622,7 @@ mod park_label_tests {
     /// than trusted.
     #[test]
     fn the_park_step_answers_to_its_name() {
-        let op = reclaim_op("aaaa-bbbb", None, 0, 1234, None).expect("a script");
+        let op = reclaim_op("aaaa-bbbb", None, 0, 1234, None, &CliChoice::default()).expect("a script");
         let at = op.index_of(RECLAIM_PARK_LABEL).expect("the park step is named");
         assert!(at > 0, "the park is not the first step; it follows the teardown");
         assert_eq!(op.index_of("no-such-step"), None, "and the lookup can fail");

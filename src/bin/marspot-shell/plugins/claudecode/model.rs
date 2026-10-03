@@ -294,21 +294,26 @@ pub(super) fn pushed_choice(uuid: &str) -> CliChoice {
         return CliChoice::default();
     };
     let lines: Vec<&str> = raw.lines().collect();
-    let effort = lines
-        .get(2)
-        .and_then(|l| short_effort(l))
-        .filter(|e| ["low", "medium", "high", "xhigh", "max"].contains(&e.as_str()));
+    let effort = lines.get(2).and_then(|l| short_effort(l)).filter(|e| cli_effort_ok(e));
     let model = lines
         .iter()
         .find_map(|l| l.strip_prefix("id="))
         .map(str::trim)
-        .filter(|id| {
-            !id.is_empty()
-                && id.len() <= 64
-                && id.chars().all(|c| c.is_ascii_alphanumeric() || "-._[]".contains(c))
-        })
+        .filter(|id| cli_model_ok(id))
         .map(str::to_string);
     CliChoice { model, effort }
+}
+
+/// A value that may go to `--model`: claude's own id, `[1m]` and all.
+pub(super) fn cli_model_ok(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || "-._[]".contains(c))
+}
+
+/// A value that may go to `--effort`: one of the levels claude takes.
+pub(super) fn cli_effort_ok(effort: &str) -> bool {
+    ["low", "medium", "high", "xhigh", "max"].contains(&effort)
 }
 
 /// This process's ancestors, nearest first, at most `max` of them.
