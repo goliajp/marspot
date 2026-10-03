@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.222"  # an account that cannot log in is nowhere to move a pane
+shell   = "0.7.223"  # a pane is switched only once its model and its account are both known
 core    = "0.12.257"  # glyphs read the published format; the grid is off the local layouts
 session = "0.11.137"  # a timing assertion says when it is measuring the host
