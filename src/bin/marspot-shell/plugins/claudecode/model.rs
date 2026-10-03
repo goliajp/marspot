@@ -270,6 +270,47 @@ pub(super) fn pushed_model(jsonl: &std::path::Path) -> Option<(ModelBadge, Effor
     Some((ModelBadge::new(model.to_string(), effort), said))
 }
 
+/// The model and effort a session is running with, as claude names
+/// them on its own command line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct CliChoice {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+/// What the status-line hook last recorded for session `uuid`, in the
+/// form `--model` and `--effort` take.
+///
+/// A profile switch starts a new claude, and a new claude takes the
+/// new profile's default unless told otherwise. On 2026-10-03 a pane
+/// switched to Opus came back on Fable that way, on an account whose
+/// Fable was spent. The record is a file on disk, so both values are
+/// checked here rather than trusted.
+pub(super) fn pushed_choice(uuid: &str) -> CliChoice {
+    if uuid.is_empty() || !uuid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return CliChoice::default();
+    }
+    let Ok(raw) = fs::read_to_string(model_push_dir().join(uuid)) else {
+        return CliChoice::default();
+    };
+    let lines: Vec<&str> = raw.lines().collect();
+    let effort = lines
+        .get(2)
+        .and_then(|l| short_effort(l))
+        .filter(|e| ["low", "medium", "high", "xhigh", "max"].contains(&e.as_str()));
+    let model = lines
+        .iter()
+        .find_map(|l| l.strip_prefix("id="))
+        .map(str::trim)
+        .filter(|id| {
+            !id.is_empty()
+                && id.len() <= 64
+                && id.chars().all(|c| c.is_ascii_alphanumeric() || "-._[]".contains(c))
+        })
+        .map(str::to_string);
+    CliChoice { model, effort }
+}
+
 /// This process's ancestors, nearest first, at most `max` of them.
 ///
 /// Stops at the first pid it cannot read (pid 1, or a parent that

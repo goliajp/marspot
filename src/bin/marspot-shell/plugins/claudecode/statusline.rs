@@ -100,7 +100,20 @@ pub fn statusline_ingest() -> i32 {
         .map(|p| p.to_string())
         .collect::<Vec<_>>()
         .join(",");
-    if fs::write(&tmp, format!("{}\n{transcript}\n{effort}\npids={chain}\n", badge.model)).is_ok() {
+    // Line 5 is the model exactly as claude names it, `[1m]` and all:
+    // what a profile switch hands to `--model`, so the session comes
+    // back on the model it was on and not on the new profile's
+    // default. Readers older than this line stop at line 4.
+    let id = payload
+        .find("\"model\":{")
+        .and_then(|at| json_string_field(&payload[at..], "\"id\":\""))
+        .unwrap_or_default();
+    if fs::write(
+        &tmp,
+        format!("{}\n{transcript}\n{effort}\npids={chain}\nid={id}\n", badge.model),
+    )
+    .is_ok()
+    {
         let _ = fs::rename(&tmp, dir.join(&sid));
     }
     prune_model_pushes(&dir);
