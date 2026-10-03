@@ -216,6 +216,15 @@ pub struct ClaudecodePlugin {
     stranded: HashMap<u64, Stranding>,
     /// When each pane was last moved off a refused account.
     moved_at: HashMap<u64, Instant>,
+    /// Panes a person put on a profile by hand, and which one.
+    ///
+    /// A choice made by someone looking at the pane outranks the feed:
+    /// it can be behind, and it judges accounts, not panes. Such a pane
+    /// leaves only when it is refused there itself. An automatic move
+    /// ends the choice; so does a new claude in the pane on any other
+    /// profile. Kept with the pid of the claude the switch replaced,
+    /// which is what tells "still switching" from "went elsewhere".
+    hand_picked: HashMap<u64, HandPick>,
 
     /// Previous tick's `shelld_session_id → ("<fg|bg>,<activity>",
     /// since)`, so `cc_status.changed` is transition-only and can say
@@ -427,6 +436,13 @@ impl Default for Stranding {
     }
 }
 
+/// A profile someone chose for a pane, and the claude it replaced.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HandPick {
+    profile: u8,
+    replaced_pid: i32,
+}
+
 #[derive(Clone, Debug)]
 struct BindMeta {
     /// 0 = default `.claude`, N = `.claude-profile-N`, 255 = unknown.
@@ -504,6 +520,7 @@ impl ClaudecodePlugin {
             last_model: HashMap::new(),
             stranded: HashMap::new(),
             moved_at: HashMap::new(),
+            hand_picked: HashMap::new(),
 
             last_activity: HashMap::new(),
             dormant: Vec::new(),
@@ -1294,7 +1311,7 @@ impl ClaudecodePlugin {
         );
         // A hand click is someone who is right here: they can say
         // whatever they meant to say.
-        let _ = self.start_profile_cycle_to(host, shelld_sid, meta, next_profile, false);
+        self.switch_by_hand(host, shelld_sid, meta, next_profile);
     }
 
 
@@ -1336,7 +1353,20 @@ impl ClaudecodePlugin {
                 .find(|(p, _)| *p == profile)
                 .is_some_and(|(_, r)| r.refused_for_now(model, refused_at))
         };
+        let last_meta = &self.last_meta;
+        self.hand_picked.retain(|sid, pick| {
+            result.sessions_seen.contains(sid)
+                && last_meta.get(sid).is_none_or(|m| {
+                    m.profile_num == pick.profile || m.claude_pid == pick.replaced_pid
+                })
+        });
+        // A copy: the loop below moves panes, which needs `self`.
+        let hand_picked = self.hand_picked.clone();
         let out_for = |sid: &u64, meta: &BindMeta| -> bool {
+            if hand_picked.get(sid).is_some_and(|p| p.profile == meta.profile_num) {
+                // Only what this pane was told here, never the feed.
+                return meta.refused_at.is_some();
+            }
             is_out(
                 meta.profile_num,
                 result.new_models.get(sid).map(String::as_str),
@@ -1444,12 +1474,28 @@ impl ClaudecodePlugin {
                     &format!("sid={sid} P{} → P{target}", meta.profile_num),
                 );
                 if self.start_profile_cycle_to(host, sid, meta, target, true) {
+                    self.hand_picked.remove(&sid);
                     self.moved_at.insert(sid, Instant::now());
                     let tally = self.stranded.entry(sid).or_default();
                     tally.moves += 1;
                     tally.last_target = Some(target);
                 }
             }
+        }
+    }
+
+    /// A switch someone asked for, remembered so the sweep leaves the
+    /// pane where they put it.
+    ///
+    /// The pane still reads as being on the profile it is leaving
+    /// until the new process is bound, and the sweep must not start a
+    /// move of its own over the top of this one: the same "not landed"
+    /// mark an automatic move leaves covers that gap.
+    fn switch_by_hand(&mut self, host: &dyn PluginHost, sid: u64, meta: BindMeta, target: u8) {
+        let replaced_pid = meta.claude_pid;
+        if self.start_profile_cycle_to(host, sid, meta, target, false) {
+            self.hand_picked.insert(sid, HandPick { profile: target, replaced_pid });
+            self.stranded.entry(sid).or_default().last_target = Some(target);
         }
     }
 
@@ -2401,7 +2447,7 @@ impl Plugin for ClaudecodePlugin {
             ),
         );
         // A menu pick is someone who is right here.
-        let _ = self.start_profile_cycle_to(host, shelld_session_id, meta, target, false);
+        self.switch_by_hand(host, shelld_session_id, meta, target);
     }
 
     fn stop(&mut self, host: &dyn PluginHost) {
@@ -3107,6 +3153,58 @@ mod tests {
             "a pane that was working is told to carry on: {:?}",
             sent[0].1
         );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A profile chosen by hand is left alone until the pane itself is
+    /// refused there.
+    ///
+    /// The feed judges accounts and runs behind; the person picking
+    /// judges the pane in front of them. On 2026-10-03 an Opus pane
+    /// put on P1 by hand was moved to P4 six seconds later on the
+    /// feed's word alone.
+    #[test]
+    fn a_pane_put_on_a_profile_by_hand_stays_until_it_is_refused_there() {
+        let home = quota_home("hand");
+        let _home = HomeOverride::set(&home);
+        let host = FakeHost::new(home.join("state"));
+        let sid = 80u64;
+        let on = |profile: u8, pid: i32| {
+            let mut m = pane_on_p1(&home, "u-80");
+            m.profile_num = profile;
+            m.config_dir =
+                Some(home.join(format!(".claude-profile-{profile}")).to_string_lossy().into_owned());
+            m.claude_pid = pid;
+            m
+        };
+        let mut plugin = stranded_plugin(on(2, 100), sid);
+        let result = scan_of(sid, CcActivity::AwaitingUser);
+
+        plugin.on_pane_badge_menu_action(&host, sid, 1);
+        assert_eq!(host.submitted.lock().unwrap().len(), 1, "the pick itself");
+
+        // Landed on P1, which the feed calls spent.
+        plugin.last_meta.insert(sid, on(1, 200));
+        plugin.sweep_unusable_profiles(&host, &result);
+        plugin.sweep_unusable_profiles(&host, &result);
+        assert_eq!(host.submitted.lock().unwrap().len(), 1, "the feed does not overrule the person");
+
+        // The account refuses this claude: now it goes.
+        let mut refused = on(1, 200);
+        refused.refused_at = Some(i64::MAX);
+        plugin.last_meta.insert(sid, refused);
+        plugin.sweep_unusable_profiles(&host, &result);
+        assert_eq!(host.submitted.lock().unwrap().len(), 2, "refused where it was put");
+        assert!(plugin.hand_picked.is_empty(), "an automatic move ends the choice");
+
+        // A pick is also over once a new claude shows up anywhere else.
+        plugin.hand_picked.insert(sid, HandPick { profile: 1, replaced_pid: 200 });
+        plugin.last_meta.insert(sid, on(1, 200));
+        plugin.sweep_unusable_profiles(&host, &result);
+        assert!(!plugin.hand_picked.is_empty(), "still where it was put");
+        plugin.last_meta.insert(sid, on(2, 300));
+        plugin.sweep_unusable_profiles(&host, &result);
+        assert!(plugin.hand_picked.is_empty(), "moved on");
         let _ = fs::remove_dir_all(&home);
     }
 
