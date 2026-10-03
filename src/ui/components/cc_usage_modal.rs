@@ -11,6 +11,8 @@
 //! rather than in points: the panel is drawn with the terminal cell grid
 //! as its unit, so it tracks font size automatically.
 
+use marspot_term::layout::Rect;
+
 /// Multipliers on the painter's cell width / height / line advance.
 ///
 /// Grouped rather than scattered so a reader can see the rhythm of the
@@ -185,6 +187,114 @@ pub fn panel_rect(
         y_top: ((h_phys - h) / 2.0).max(top_inset + 8.0),
         w,
         h,
+    }
+}
+
+/// cc — one Claude account card in the `Cc` usage modal.
+/// Pre-formatted by L2 (`build_cc_usage_render`); the renderer only
+/// lays out and paints.
+#[derive(Debug, Clone)]
+pub struct CcUsageAccountRender {
+    pub name: String,
+    pub email: String,
+    /// Short status label (≤ 7 chars, pre-classified by L2 from the
+    /// feed's raw status string) + the severity that picks its colour.
+    pub status_label: String,
+    /// 0 = ok, 1 = warn, 2 = limited/unknown-bad.
+    pub status_severity: u8,
+    /// "reset 5h: 7/19 11:50" — local time, formatted by L2.
+    pub reset_label: String,
+    /// Every window this account is metered on, in reading order.
+    ///
+    /// Not a fixed 5h/7d pair plus extras: that is Anthropic's shape,
+    /// and a Codex account has no account-wide 5h at all — its only
+    /// sub-day allowance belongs to one model.  One list means the card
+    /// and the timeline draw the same rows, and a provider that meters
+    /// something new needs no new field.
+    pub windows: Vec<CcUsageWindowRender>,
+}
+
+/// cc — one metered window of an account card.
+#[derive(Debug, Clone)]
+pub struct CcUsageWindowRender {
+    /// Row label as printed, lower case ("5h", "fable", "spark").
+    pub label: String,
+    /// 0.0 ..= 1.0 utilization of this window.
+    pub util: f32,
+    /// Unix reset instant.  `None` = nothing used yet / not reported:
+    /// the card still draws the row, the timeline draws no bar, because
+    /// there is no extent to draw.
+    pub reset_unix: Option<i64>,
+    /// Window length in seconds; the timeline bar runs
+    /// `[reset - span, reset]`.
+    pub span_secs: i64,
+    /// "11:50" — the bar's end label.
+    pub reset_hm: String,
+}
+
+/// cc — full data for one render of the `Cc` (Claude usage) modal.
+/// Renderer pulls this via `set_cc_usage`.  `None` = closed.
+pub struct CcUsageRender {
+    /// Modal frame rect (physical px), centered by L2.
+    pub rect: Rect,
+    /// "updated 7/19 10:13" — feed generation time, local.
+    pub updated_label: String,
+    pub accounts: Vec<CcUsageAccountRender>,
+    pub now_unix: i64,
+    /// Feed missing/unparseable → placeholder text instead of cards.
+    pub feed_missing: bool,
+}
+
+/// Clip `s` to `cols` monospace columns, marking the cut with `…`.
+/// Returns empty when there isn't room for at least a few glyphs —
+/// a lone ellipsis carries no information and just adds noise.
+pub(crate) fn fit_ellipsis(s: &str, cols: f64) -> String {
+    let fit = cols.floor().max(0.0) as usize;
+    if s.chars().count() <= fit {
+        return s.to_string();
+    }
+    if fit < 3 {
+        return String::new();
+    }
+    s.chars().take(fit - 1).chain(['…']).collect()
+}
+
+/// Height of `n` stacked timeline bars including the gaps between them.
+pub(crate) fn cc_bars_height(bar_h: f64, bar_gap: f64, n: usize) -> f64 {
+    let n = n.max(1) as f64;
+    bar_h * n + bar_gap * (n - 1.0)
+}
+
+/// Height of one timeline band: its bars, plus the room the account
+/// name and the gap to the next band need.
+pub(crate) fn timeline_row_height(cell_h: f64, line_h: f64, bars: usize) -> f64 {
+    use crate::ui::components::cc_usage_modal::metric;
+    cc_bars_height(cell_h * metric::BAR_H, cell_h * metric::TIMELINE_BAR_GAP, bars)
+        + line_h * metric::TIMELINE_ROW_EXTRA
+}
+
+#[cfg(test)]
+mod cc_layout_tests {
+    use super::fit_ellipsis;
+
+    #[test]
+    fn fit_ellipsis_bounds_every_case() {
+        // Fits untouched.
+        assert_eq!(fit_ellipsis("ada@example.jp", 20.0), "ada@example.jp");
+        assert_eq!(fit_ellipsis("abc", 3.0), "abc");
+        // Too long: cut to exactly the budget, last column is the mark.
+        let cut = fit_ellipsis("ada@example.jp", 8.0);
+        assert_eq!(cut, "ada@exa…");
+        assert_eq!(cut.chars().count(), 8);
+        // Never exceeds the budget for any prefix length.
+        for cols in 3..30 {
+            let out = fit_ellipsis("some.very.long.address@example.com", cols as f64);
+            assert!(out.chars().count() <= cols, "cols={cols} out={out:?}");
+        }
+        // Below the useful minimum the slot is dropped, not filled with
+        // a bare ellipsis.
+        assert_eq!(fit_ellipsis("abcdef", 2.0), "");
+        assert_eq!(fit_ellipsis("abcdef", 0.0), "");
     }
 }
 

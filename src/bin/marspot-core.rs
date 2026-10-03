@@ -7536,8 +7536,8 @@ impl CoreApp {
 
     /// cc — build the `Cc` usage modal render data.  Re-reads the
     /// feed at most every 5 s while the modal is open.
-    fn build_cc_usage_render(&mut self, wi: usize) -> Option<marspot::render_metal::CcUsageRender> {
-        use marspot::render_metal::{CcUsageAccountRender, CcUsageRender};
+    fn build_cc_usage_render(&mut self, wi: usize) -> Option<marspot::ui::components::cc_usage_modal::CcUsageRender> {
+        use marspot::ui::components::cc_usage_modal::{CcUsageAccountRender, CcUsageRender};
         let modal = win!(self, wi).cc_usage_modal.as_mut()?;
         if modal.loaded_at.elapsed() > std::time::Duration::from_secs(5) {
             modal.data = marspot::cc_usage::read();
@@ -7560,7 +7560,7 @@ impl CoreApp {
         };
         // Windows carry their own reset, so the bar-end labels are
         // formatted per window rather than per account.
-        let window = |w: &marspot::cc_usage::CcWindow| marspot::render_metal::CcUsageWindowRender {
+        let window = |w: &marspot::cc_usage::CcWindow| marspot::ui::components::cc_usage_modal::CcUsageWindowRender {
             label: w.label.clone(),
             util: w.util as f32,
             reset_unix: w.reset,
