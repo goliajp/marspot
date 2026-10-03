@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.226"  # the refusal reader is private to the plugin that uses it
-core    = "0.12.262"  # the layout modal is painted from its component, not the backend
+core    = "0.12.263"  # the context menu is built from its component, not the backend
 session = "0.11.137"  # a timing assertion says when it is measuring the host
