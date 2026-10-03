@@ -483,7 +483,7 @@ struct BindMeta {
     /// cannot re-measure them, and one stood at 0.62 for 94 minutes
     /// while this message was written sixteen times. So the two are
     /// compared by when each was true, and the later one is believed.
-    refused_at: Option<i64>,
+    refused_at: Option<quota::Refusal>,
     /// When this session's transcript was last written.
     ///
     /// The honest answer to "how long has this session been idle".
@@ -1347,11 +1347,11 @@ impl ClaudecodePlugin {
         // about a profile: a pane pinned to a model can be shut out of
         // an account whose week is fine, and a pane that has just been
         // refused knows something the feed has not collected yet.
-        let is_out = |profile: u8, model: Option<&str>, refused_at: Option<i64>| -> bool {
+        let is_out = |profile: u8, model: Option<&str>, refusal: Option<&quota::Refusal>| -> bool {
             rooms
                 .iter()
                 .find(|(p, _)| *p == profile)
-                .is_some_and(|(_, r)| r.refused_for_now(model, refused_at))
+                .is_some_and(|(_, r)| r.refused_for_now(model, refusal))
         };
         let last_meta = &self.last_meta;
         self.hand_picked.retain(|sid, pick| {
@@ -1363,15 +1363,12 @@ impl ClaudecodePlugin {
         // A copy: the loop below moves panes, which needs `self`.
         let hand_picked = self.hand_picked.clone();
         let out_for = |sid: &u64, meta: &BindMeta| -> bool {
+            let model = result.new_models.get(sid).map(String::as_str);
             if hand_picked.get(sid).is_some_and(|p| p.profile == meta.profile_num) {
                 // Only what this pane was told here, never the feed.
-                return meta.refused_at.is_some();
+                return meta.refused_at.as_ref().is_some_and(|r| r.applies_to(model));
             }
-            is_out(
-                meta.profile_num,
-                result.new_models.get(sid).map(String::as_str),
-                meta.refused_at,
-            )
+            is_out(meta.profile_num, model, meta.refused_at.as_ref())
         };
         // Forget what was tried for a pane that is out of trouble —
         // but not for one that is merely between bindings.  A cycle
@@ -2808,17 +2805,35 @@ fn tail_activity(path: &PathBuf, has_young_child: bool) -> CcActivity {
 /// Deliberately not `rate_limit` or `429`, which a loaded server
 /// produces too -- being overloaded is not being out of quota, and
 /// moving a pane for it costs a restart for nothing.
-pub(super) fn last_quota_refusal(tail: &str) -> Option<i64> {
-    tail.lines()
+pub(super) fn last_quota_refusal(tail: &str) -> Option<quota::Refusal> {
+    let line = tail
+        .lines()
         .rev()
-        .find(|l| l.contains("\"isApiErrorMessage\":true") && says_out_of_quota(l))
-        .and_then(record_timestamp)
+        .find(|l| l.contains("\"isApiErrorMessage\":true") && says_out_of_quota(l))?;
+    Some(quota::Refusal { at: record_timestamp(line)?, model: refused_model(line) })
+}
+
+/// The model a refusal names, or empty when it cannot be read.
+///
+/// The CLI's two templates put it in fixed places: "You've reached
+/// your Fable limit." and "Opus 5.5 requires usage credits.".
+fn refused_model(line: &str) -> String {
+    const LIMIT: &str = "You've reached your ";
+    if let Some(i) = line.find(LIMIT) {
+        let rest = &line[i + LIMIT.len()..];
+        return rest.find(" limit").map(|j| short_model(&rest[..j])).unwrap_or_default();
+    }
+    match line.find(" requires usage credits") {
+        // the text field opens with the model's display name
+        Some(j) => short_model(&line[line[..j].rfind('"').map_or(0, |q| q + 1)..j]),
+        None => String::new(),
+    }
 }
 
 /// A refusal, if it reached the claude that started at `started`.
-fn refused_since(refused_at: Option<i64>, started: SystemTime) -> Option<i64> {
+fn refused_since(refusal: Option<quota::Refusal>, started: SystemTime) -> Option<quota::Refusal> {
     let start = started.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs() as i64;
-    refused_at.filter(|&at| at >= start)
+    refusal.filter(|r| r.at >= start)
 }
 
 /// The two ways the CLI says "this account cannot serve you".
@@ -3191,7 +3206,7 @@ mod tests {
 
         // The account refuses this claude: now it goes.
         let mut refused = on(1, 200);
-        refused.refused_at = Some(i64::MAX);
+        refused.refused_at = Some(quota::Refusal { at: i64::MAX, model: String::new() });
         plugin.last_meta.insert(sid, refused);
         plugin.sweep_unusable_profiles(&host, &result);
         assert_eq!(host.submitted.lock().unwrap().len(), 2, "refused where it was put");
@@ -7155,7 +7170,7 @@ mod tests {
         // The moment it happens: the record is the newest line.
         fs::write(&path, format!("{REFUSAL}\n")).unwrap();
         assert_eq!(
-            ctx.remember_refusal(&path, &tail_window(&path)),
+            ctx.remember_refusal(&path, &tail_window(&path)).map(|r| r.at),
             Some(1_790_855_512),
             "seen when it is written"
         );
@@ -7175,7 +7190,7 @@ mod tests {
             "the fixture has to actually push it out, or this proves nothing"
         );
         assert_eq!(
-            ctx.remember_refusal(&path, &window),
+            ctx.remember_refusal(&path, &window).map(|r| r.at),
             Some(1_790_855_512),
             "but the pane is no less shut out than it was"
         );
@@ -7184,8 +7199,9 @@ mod tests {
 
     #[test]
     fn a_refusal_in_the_transcript_is_read_with_its_time() {
-        let at = last_quota_refusal(REFUSAL).expect("the record says when");
-        assert_eq!(at, 1_790_855_512, "2026-10-01T11:51:52Z");
+        let r = last_quota_refusal(REFUSAL).expect("the record says when");
+        assert_eq!(r.at, 1_790_855_512, "2026-10-01T11:51:52Z");
+        assert_eq!(r.model, "fable", "and which model it is about");
     }
 
     /// The newest one wins: a transcript holds every refusal it ever
@@ -7195,7 +7211,7 @@ mod tests {
     fn the_newest_refusal_is_the_one_that_counts() {
         let older = REFUSAL.replace("11:51:52", "09:18:13");
         let tail = format!("{older}\n{REFUSAL}\n");
-        assert_eq!(last_quota_refusal(&tail), Some(1_790_855_512));
+        assert_eq!(last_quota_refusal(&tail).map(|r| r.at), Some(1_790_855_512));
     }
 
     /// Being overloaded is not being out of quota, and moving a pane
@@ -7206,8 +7222,9 @@ mod tests {
     #[test]
     fn only_a_refusal_after_this_claude_started_counts() {
         let started = SystemTime::UNIX_EPOCH + Duration::from_secs(1_791_002_529);
-        assert_eq!(refused_since(Some(1_790_966_543), started), None, "the day before");
-        assert_eq!(refused_since(Some(1_791_002_600), started), Some(1_791_002_600));
+        let at = |at| Some(quota::Refusal { at, model: "fable".into() });
+        assert_eq!(refused_since(at(1_790_966_543), started), None, "the day before");
+        assert_eq!(refused_since(at(1_791_002_600), started), at(1_791_002_600));
         assert_eq!(refused_since(None, started), None);
     }
 
@@ -7241,7 +7258,7 @@ mod tests {
             "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.",
             "Opus 5.5 requires usage credits.",
         );
-        assert!(last_quota_refusal(&credits).is_some());
+        assert_eq!(last_quota_refusal(&credits).map(|r| r.model), Some("opus-5-5".into()));
     }
 
     #[test]

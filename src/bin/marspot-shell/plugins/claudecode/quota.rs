@@ -24,6 +24,36 @@ use std::time::Duration;
 
 use marspot::cc_usage::CcAccount;
 
+/// A pane was told by the API that it had run out.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Refusal {
+    /// Unix seconds, from the record's own timestamp.
+    pub at: i64,
+    /// The model the refusal names, as `short_model` spells it, or
+    /// empty when it could not be read.
+    ///
+    /// Every refusal the CLI writes names one: "You've reached your
+    /// Fable limit." or "Opus 5.5 requires usage credits.". It says
+    /// nothing about any other model on the same account: on
+    /// 2026-10-03 a Fable refusal moved a pane that had just been
+    /// switched to Opus, onto an account where it ran out again.
+    pub model: String,
+}
+
+impl Refusal {
+    /// Does this refusal shut out a pane working in `model`?
+    ///
+    /// One that names no model, or a pane whose model is not known,
+    /// is taken as covering it: that is how every refusal was read
+    /// before they were told apart.
+    pub(super) fn applies_to(&self, model: Option<&str>) -> bool {
+        match model {
+            Some(m) if !self.model.is_empty() => same_model(&m.to_ascii_lowercase(), &self.model),
+            _ => true,
+        }
+    }
+}
+
 /// What is known about a profile when choosing.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Room {
@@ -100,7 +130,7 @@ impl Room {
     /// Is this profile out for a pane that needs `model`, counting
     /// what the pane has seen for itself?
     ///
-    /// `refused_at` is when this pane was last told by the API that it
+    /// `refusal` is when this pane was last told by the API that it
     /// had reached a limit. The feed and the pane are not two opinions
     /// to reconcile -- they are two witnesses to the same thing, and
     /// the later one is believed. That keeps the rule the feed was
@@ -112,11 +142,13 @@ impl Room {
     /// feed carries a row's model caps over from an earlier sample
     /// when it cannot re-measure them, and one sat at 0.62 for 94
     /// minutes while the API refused that account sixteen times.
-    pub(super) fn refused_for_now(&self, model: Option<&str>, refused_at: Option<i64>) -> bool {
+    pub(super) fn refused_for_now(&self, model: Option<&str>, refusal: Option<&Refusal>) -> bool {
         if self.refused_for(model) {
             return true;
         }
-        let Some(seen) = refused_at else { return false };
+        let Some(seen) = refusal.filter(|r| r.applies_to(model)).map(|r| r.at) else {
+            return false;
+        };
         match self {
             // Compare against the numbers that would otherwise be
             // believed: the model's cap when the pane is pinned to
@@ -451,6 +483,27 @@ mod tests {
         }
     }
 
+    fn fable_refusal(at: i64) -> Refusal {
+        Refusal { at, model: "fable".into() }
+    }
+
+    /// The pane had just been switched to Opus when the Fable refusal
+    /// it had received earlier moved it (2026-10-03, pane 442). A
+    /// refusal is about the model it names.
+    #[test]
+    fn a_refusal_for_one_model_says_nothing_about_another() {
+        let r = roomy_measured_at(1_000);
+        let fable = fable_refusal(2_000);
+        assert!(r.refused_for_now(Some("fable-5-1"), Some(&fable)));
+        assert!(!r.refused_for_now(Some("opus-5-5"), Some(&fable)), "an Opus pane was not refused");
+        assert!(r.refused_for_now(None, Some(&fable)), "a pane whose model is unknown may be on Fable");
+        let credits = Refusal { at: 2_000, model: "opus-5-5".into() };
+        assert!(r.refused_for_now(Some("opus-5-5"), Some(&credits)));
+        assert!(!r.refused_for_now(Some("fable-5-1"), Some(&credits)));
+        let unnamed = Refusal { at: 2_000, model: String::new() };
+        assert!(r.refused_for_now(Some("opus-5-5"), Some(&unnamed)), "unread is taken as covering it");
+    }
+
     /// A room whose numbers were measured at `measured`, with room to
     /// spare by every figure the feed reports.
     fn roomy_measured_at(measured: i64) -> Room {
@@ -481,7 +534,7 @@ mod tests {
             "by the feed alone there is room, which is why nothing moved"
         );
         assert!(
-            r.refused_for_now(Some("fable-5"), Some(refused_at)),
+            r.refused_for_now(Some("fable-5"), Some(&fable_refusal(refused_at))),
             "but the pane was refused after those numbers were taken"
         );
     }
@@ -499,11 +552,11 @@ mod tests {
         let feed_at = 1_790_855_000;
         let r = roomy_measured_at(feed_at);
         assert!(
-            !r.refused_for_now(Some("fable-5"), Some(refused_at)),
+            !r.refused_for_now(Some("fable-5"), Some(&fable_refusal(refused_at))),
             "the feed has looked since, and it says there is room"
         );
         assert!(
-            !r.refused_for_now(None, Some(refused_at)),
+            !r.refused_for_now(None, Some(&fable_refusal(refused_at))),
             "and the same for a pane with no model of its own"
         );
     }
@@ -513,7 +566,7 @@ mod tests {
     #[test]
     fn a_refusal_where_the_feed_is_silent_counts() {
         assert!(
-            Room::Unknown.refused_for_now(Some("fable-5"), Some(1)),
+            Room::Unknown.refused_for_now(Some("fable-5"), Some(&fable_refusal(1))),
             "unknown plus a closed door is a closed door"
         );
         assert!(
