@@ -2860,7 +2860,7 @@ fn tail_activity(path: &PathBuf, has_young_child: bool) -> CcActivity {
 /// Deliberately not `rate_limit` or `429`, which a loaded server
 /// produces too -- being overloaded is not being out of quota, and
 /// moving a pane for it costs a restart for nothing.
-pub(super) fn last_quota_refusal(tail: &str) -> Option<quota::Refusal> {
+fn last_quota_refusal(tail: &str) -> Option<quota::Refusal> {
     let line = tail
         .lines()
         .rev()

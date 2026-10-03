@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.225"  # a reclaimed pane wakes on the model and effort it was parked on
+shell   = "0.7.226"  # the refusal reader is private to the plugin that uses it
 core    = "0.12.257"  # glyphs read the published format; the grid is off the local layouts
 session = "0.11.137"  # a timing assertion says when it is measuring the host
