@@ -8,3 +8,6 @@ pub mod text_run;
 pub mod palette;
 pub mod session;
 pub mod session_marks;
+pub mod frame;
+pub mod pane_cache;
+pub mod chrome;

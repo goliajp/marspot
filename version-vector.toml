@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.226"  # the refusal reader is private to the plugin that uses it
-core    = "0.12.269"  # a pane is laid out outside the backend, in pieces under 200 lines
+core    = "0.12.270"  # a frame is assembled outside the backend
 session = "0.11.137"  # a timing assertion says when it is measuring the host
