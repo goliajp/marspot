@@ -216,6 +216,10 @@ pub struct ClaudecodePlugin {
     stranded: HashMap<u64, Stranding>,
     /// When each pane was last moved off a refused account.
     moved_at: HashMap<u64, Instant>,
+    /// Panes left out of the sweep because their model or effort could
+    /// not be confirmed, kept so the reason is logged once rather than
+    /// every pass.
+    unjudged: std::collections::HashSet<u64>,
 
     /// Previous tick's `shelld_session_id → ("<fg|bg>,<activity>",
     /// since)`, so `cc_status.changed` is transition-only and can say
@@ -504,6 +508,7 @@ impl ClaudecodePlugin {
             last_model: HashMap::new(),
             stranded: HashMap::new(),
             moved_at: HashMap::new(),
+            unjudged: std::collections::HashSet::new(),
 
             last_activity: HashMap::new(),
             dormant: Vec::new(),
@@ -1348,9 +1353,29 @@ impl ClaudecodePlugin {
         });
         // Bounded with the panes, like everything else here.
         self.moved_at.retain(|sid, _| result.sessions_seen.contains(sid));
+        self.unjudged.retain(|sid| result.sessions_seen.contains(sid));
         let sids: Vec<u64> = self.last_meta.keys().copied().collect();
         for sid in sids {
             let Some(meta) = self.last_meta.get(&sid).cloned() else { continue };
+            // What the pane is running comes first. A pane whose model
+            // and effort cannot both be confirmed takes no part: it is
+            // not judged and not moved, and nothing about it is assumed.
+            let model = result.new_models.get(&sid).cloned();
+            let choice = pushed_choice(&meta.uuid);
+            if let Err(why) = confirm_choice(model.as_deref(), &choice) {
+                if self.unjudged.insert(sid) {
+                    host.log(
+                        LogLevel::Info,
+                        "quota.unjudged",
+                        &format!(
+                            "sid={sid} on P{} takes no part in switching: {why} (scan={model:?} hook={:?}/{:?})",
+                            meta.profile_num, choice.model, choice.effort
+                        ),
+                    );
+                }
+                continue;
+            }
+            self.unjudged.remove(&sid);
             if !out_for(&sid, &meta) {
                 continue;
             }
@@ -1363,7 +1388,7 @@ impl ClaudecodePlugin {
                     &format!("sid={sid} is on P{}, which is out", meta.profile_num),
                 );
             }
-            self.move_off_refused(host, sid, &rooms, meta, result);
+            self.move_off_refused(host, sid, &rooms, meta, result, choice);
         }
     }
 
@@ -1375,6 +1400,8 @@ impl ClaudecodePlugin {
         rooms: &[(u8, quota::Room)],
         meta: BindMeta,
         result: &ScanResult,
+        // the model and effort the sweep confirmed for this pane
+        choice: CliChoice,
     ) {
         // One question, answered from structure: is a command of the
         // user's running on this machine right now — then leave the
@@ -1424,28 +1451,6 @@ impl ClaudecodePlugin {
                 }
             }
             quota::Move::To(target) => {
-                // Nothing moves on a guess about the pane itself: the
-                // model it is on has to be known, and the hook's record
-                // that the new claude is started from has to name the
-                // same one. Otherwise the new claude comes up on the new
-                // profile's default, which is how a pane switched to
-                // Opus came back on Fable (2026-10-03, pane 442).
-                let choice = pushed_choice(&meta.uuid);
-                if let Err(why) = confirm_choice(needs_model.as_deref(), &choice) {
-                    let tally = self.stranded.entry(sid).or_default();
-                    if !tally.hold_logged {
-                        tally.hold_logged = true;
-                        host.log(
-                            LogLevel::Info,
-                            "quota.hold",
-                            &format!(
-                                "sid={sid} stays on P{}: {why} (scan={:?} hook={:?})",
-                                meta.profile_num, needs_model, choice.model
-                            ),
-                        );
-                    }
-                    return;
-                }
                 host.log(
                     LogLevel::Info,
                     "quota.moving",
@@ -1794,10 +1799,11 @@ fn cycle_blocked_op(badge: &'static str) -> pty_op::PtyOp {
         .step(pty_op::Step::settle(Duration::from_secs(4)).named("show"))
 }
 
-/// Is the model a switch would carry the one the pane is on?
+/// Are the pane's model and effort both known?
 ///
 /// The scan's reading and the hook's record are two reads of the same
-/// thing; a switch goes ahead only when both exist and agree. The id
+/// model; they have to exist and agree, and the record has to name the
+/// effort as well. Without all of that a pane takes no part in a switch. The id
 /// carries a context suffix (`claude-fable-5-1[1m]`) that the short
 /// name leaves out.
 fn confirm_choice(pane_model: Option<&str>, choice: &CliChoice) -> Result<(), &'static str> {
@@ -1807,6 +1813,9 @@ fn confirm_choice(pane_model: Option<&str>, choice: &CliChoice) -> Result<(), &'
     let Some(id) = choice.model.as_deref() else {
         return Err("the hook has not recorded the model to carry");
     };
+    if choice.effort.is_none() {
+        return Err("the hook has not recorded the effort");
+    }
     if short_model(id.split('[').next().unwrap_or(id)) != pane {
         return Err("the hook's record names a different model from the pane's");
     }
@@ -3141,6 +3150,13 @@ mod tests {
         unknown.new_models.clear();
         plugin.sweep_unusable_profiles(&host, &unknown);
         assert!(host.submitted.lock().unwrap().is_empty(), "model not known");
+        assert!(plugin.stranded.is_empty(), "not even judged: it takes no part");
+
+        fs::write(model_push_dir().join("u-81"), "opus-5-5\n/t/x.jsonl\n\npids=1\nid=claude-opus-5-5\n")
+            .unwrap();
+        plugin.sweep_unusable_profiles(&host, &scan_of(sid, CcActivity::AwaitingUser));
+        assert!(host.submitted.lock().unwrap().is_empty(), "effort not known");
+        assert!(plugin.stranded.is_empty(), "not judged either");
 
         let mut other = scan_of(sid, CcActivity::AwaitingUser);
         other.new_models.insert(sid, "fable-5-1".into());
@@ -3314,7 +3330,11 @@ mod tests {
         let result = scan_of(sid, CcActivity::Working);
         plugin.sweep_unusable_profiles(&host, &result);
         assert!(host.submitted.lock().unwrap().is_empty(), "nothing to hand over");
-        assert_eq!(plugin.stranded.get(&sid).map(|s| s.moves), Some(0), "no move was spent");
+        assert_eq!(
+            plugin.stranded.get(&sid).map_or(0, |s| s.moves),
+            0,
+            "no move was spent -- with no session name there is no hook record, so it is not even judged"
+        );
 
         // Once the scan learns the session's name, the move happens.
         plugin.last_meta.insert(sid, pane_on_p1(&home, "u-79"));
@@ -3638,7 +3658,7 @@ mod tests {
     /// What an automatic switch needs to know about the pane first.
     #[test]
     fn a_switch_needs_the_panes_model_confirmed_twice() {
-        let carry = |id: &str| CliChoice { model: Some(id.into()), effort: None };
+        let carry = |id: &str| CliChoice { model: Some(id.into()), effort: Some("medium".into()) };
         assert_eq!(confirm_choice(Some("fable-5-1"), &carry("claude-fable-5-1[1m]")), Ok(()));
         assert_eq!(confirm_choice(Some("opus-5-5"), &carry("claude-opus-5-5")), Ok(()));
         assert!(confirm_choice(None, &carry("claude-opus-5-5")).is_err(), "model not known");
@@ -3650,6 +3670,8 @@ mod tests {
             confirm_choice(Some("opus-5-5"), &carry("claude-fable-5-1[1m]")).is_err(),
             "the two reads disagree"
         );
+        let no_effort = CliChoice { model: Some("claude-opus-5-5".into()), effort: None };
+        assert!(confirm_choice(Some("opus-5-5"), &no_effort).is_err(), "effort not known");
     }
 
     /// The hook's record is a file: what goes on a command line from it

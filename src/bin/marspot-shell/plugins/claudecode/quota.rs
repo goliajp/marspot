@@ -43,14 +43,14 @@ pub(super) struct Refusal {
 impl Refusal {
     /// Does this refusal shut out a pane working in `model`?
     ///
-    /// One that names no model, or a pane whose model is not known,
-    /// is taken as covering it: that is how every refusal was read
-    /// before they were told apart.
+    /// One that names no model covers every pane. One that names a
+    /// model covers only panes on it: with no model given, nothing is
+    /// assumed, Fable included.
     pub(super) fn applies_to(&self, model: Option<&str>) -> bool {
-        match model {
-            Some(m) if !self.model.is_empty() => same_model(&m.to_ascii_lowercase(), &self.model),
-            _ => true,
+        if self.model.is_empty() {
+            return true;
         }
+        model.is_some_and(|m| same_model(&m.to_ascii_lowercase(), &self.model))
     }
 }
 
@@ -179,15 +179,16 @@ impl Room {
     /// Fable cap was spent, and an Opus pane put there by hand was moved
     /// off it six seconds later. The account windows are already
     /// checked on their own numbers, so the word only adds something
-    /// when no capped model accounts for it -- or when the pane may be
-    /// on that model, which includes a pane whose model is not known.
+    /// when no capped model accounts for it, or when the pane is on
+    /// that model. No model given means none is assumed, Fable included.
     fn rejected_only_for_another_model(&self, model: Option<&str>) -> bool {
-        let Some(want) = model else { return false };
         match self {
             Room::Known { models, .. } => {
                 let mut spent = models.iter().filter(|(_, u)| *u >= WINDOW_SPENT).peekable();
                 spent.peek().is_some()
-                    && spent.all(|(label, _)| !same_model(&want.to_ascii_lowercase(), label))
+                    && spent.all(|(label, _)| {
+                        model.is_none_or(|m| !same_model(&m.to_ascii_lowercase(), label))
+                    })
             }
             Room::Unknown => false,
         }
@@ -317,8 +318,7 @@ pub(super) fn rooms_for(
 /// is already spent before anything else: that account's remaining
 /// week is no use to the panes that can only run on Fable, while the
 /// accounts with Fable left are the only place those panes can go.
-/// A pane whose model has not been read yet might be one of them, so
-/// it is not steered this way.
+/// Callers only ask for a pane whose model is known.
 ///
 /// A profile the feed cannot speak for is never a destination: a pane
 /// is only moved to an account known to have room for its model.
@@ -337,9 +337,7 @@ pub(super) fn best_profile(rooms: &[(u8, Room)], current: u8, model: Option<&str
     if ranked.is_empty() {
         return None;
     }
-    // Unknown counts as Fable: steering it off the Fable accounts is
-    // only right when it is known not to need them.
-    let needs_fable = model.is_none_or(|m| m.to_ascii_lowercase().starts_with(FABLE));
+    let needs_fable = model.is_some_and(|m| m.to_ascii_lowercase().starts_with(FABLE));
     ranked.sort_by(|a, b| {
         let tier = |r: &Room| if r.refused_for(model) { 1 } else { 0 };
         // Only among the usable: the refused are ordered by when they
@@ -521,7 +519,7 @@ mod tests {
         let fable = fable_refusal(2_000);
         assert!(r.refused_for_now(Some("fable-5-1"), Some(&fable)));
         assert!(!r.refused_for_now(Some("opus-5-5"), Some(&fable)), "an Opus pane was not refused");
-        assert!(r.refused_for_now(None, Some(&fable)), "a pane whose model is unknown may be on Fable");
+        assert!(!r.refused_for_now(None, Some(&fable)), "no model given: Fable is not assumed");
         let credits = Refusal { at: 2_000, model: "opus-5-5".into() };
         assert!(r.refused_for_now(Some("opus-5-5"), Some(&credits)));
         assert!(!r.refused_for_now(Some("fable-5-1"), Some(&credits)));
@@ -648,8 +646,8 @@ mod tests {
         );
         assert_eq!(
             best_profile(&rooms, 1, None),
-            Some(2),
-            "nor is a pane whose model is not known: it might be on Fable"
+            Some(3),
+            "no model given: it is not assumed to be on Fable"
         );
     }
 
@@ -912,10 +910,7 @@ mod tests {
         let r = fable_spent_but_open(500);
         assert!(!r.refused_for(Some("opus-5-5")), "an Opus pane has the whole week left here");
         assert!(r.refused_for(Some("fable-5")), "a Fable pane has nothing");
-        assert!(
-            r.refused_for(None),
-            "a pane whose model is not known may be a Fable pane"
-        );
+        assert!(!r.refused_for(None), "no model given: Fable is not assumed");
     }
 
     /// The word still counts when no capped model accounts for it.
