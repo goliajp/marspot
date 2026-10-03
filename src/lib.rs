@@ -95,6 +95,7 @@ pub mod chrome_measure;
 pub mod font_cache;
 pub mod font_shape;
 pub mod font_trait;
+pub mod frame_build;
 pub mod frame_scene;
 pub mod glyph_atlas;
 pub mod input;
