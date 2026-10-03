@@ -142,8 +142,20 @@ unsafe extern "C" {
 /// per-cell path needs (point size, ascent, whether the font has
 /// colour glyphs) is a parallel snapshot in `FontRegistry` and does
 /// not touch it.
+///
+/// The name dedup lives here, not in the registry, because the shaper
+/// interns too: CoreText finds fallback fonts in the middle of shaping
+/// a line, and the shaper is given an id, not the registry.
 pub struct CoreTextFontTable {
-    fonts: std::sync::RwLock<Vec<CTFont>>,
+    inner: std::sync::RwLock<FontTableInner>,
+}
+
+struct FontTableInner {
+    fonts: Vec<CTFont>,
+    /// Postscript name (or a caller's own key) to index.  CoreText
+    /// hands out a fresh font object on every lookup even when the
+    /// underlying font is the same, so identity is the name.
+    by_name: HashMap<String, usize>,
 }
 
 impl CoreTextFontTable {
@@ -154,33 +166,76 @@ impl CoreTextFontTable {
     }
 
     fn new(base: CTFont) -> Self {
-        Self { fonts: std::sync::RwLock::new(vec![base]) }
+        let mut by_name = HashMap::new();
+        by_name.insert(base.postscript_name(), 0);
+        Self { inner: std::sync::RwLock::new(FontTableInner { fonts: vec![base], by_name }) }
     }
 
-    fn push(&self, font: CTFont) -> usize {
-        let mut v = self.fonts.write().unwrap_or_else(|e| e.into_inner());
-        v.push(font);
-        v.len() - 1
+    /// The id for `font`, adding it if no font of that name is here.
+    pub fn intern(&self, font: CTFont) -> usize {
+        let name = font.postscript_name();
+        self.intern_with_key(name, font)
+    }
+
+    /// The id for `font` under `key` rather than its own name.
+    ///
+    /// For weight and size variants of SF Pro: CoreText reports the same
+    /// postscript name for every one of them, so the natural dedup
+    /// would collapse them into one slot.
+    pub fn intern_with_key(&self, key: String, font: CTFont) -> usize {
+        let mut t = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(&idx) = t.by_name.get(&key) {
+            return idx;
+        }
+        t.fonts.push(font);
+        let idx = t.fonts.len() - 1;
+        t.by_name.insert(key, idx);
+        idx
+    }
+
+    /// The id already registered under `key`, if any.
+    pub fn id_of(&self, key: &str) -> Option<usize> {
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).by_name.get(key).copied()
+    }
+
+    /// What the name dedup costs, the same way the rest of
+    /// `FontCache::approx_bytes` counts: bucket overhead as one extra
+    /// `usize` per slot, plus the names themselves.
+    pub fn approx_name_bytes(&self) -> usize {
+        let t = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let entry = std::mem::size_of::<String>() + std::mem::size_of::<usize>();
+        t.by_name.capacity() * (entry + std::mem::size_of::<usize>())
+            + t.by_name.keys().map(|k| k.capacity()).sum::<usize>()
+    }
+
+    /// How many fonts there are; ids run from 0 to this.
+    pub fn len(&self) -> usize {
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).fonts.len()
     }
 
     /// The font at `idx`, cloned — a `CFRetain`, which is why the
     /// per-cell path does not call this.
     pub fn get(&self, idx: usize) -> Option<CTFont> {
-        self.fonts
+        self.inner
             .read()
             .unwrap_or_else(|e| e.into_inner())
+            .fonts
             .get(idx)
             .cloned()
     }
 
 }
 
-/// Holds the base font + lazily-discovered fallbacks.  Postscript
-/// name → index map dedups instances (CT hands out a fresh CTFontRef
-/// each lookup even when the underlying font is the same).
+/// The font table, plus the per-font facts the per-cell path reads
+/// without taking the table's lock.
+///
+/// The table can grow behind the registry's back -- the shaper interns
+/// the fallback fonts CoreText finds -- so the snapshots are caught up
+/// with `sync` after anything that can add a font.  The table is
+/// append-only, so the only way the two can differ is the table being
+/// longer.
 struct FontRegistry {
     fonts: std::sync::Arc<CoreTextFontTable>,
-    by_name: HashMap<String, usize>,
     /// Parallel to `fonts`: whether the font carries colour glyphs
     /// (Apple Color Emoji and friends — `kCTFontColorGlyphsTrait`).
     /// Precomputed at intern time so the per-cell render path can route
@@ -202,38 +257,32 @@ fn font_has_color_glyphs(font: &CTFont) -> bool {
 
 impl FontRegistry {
     fn new(base: CTFont) -> Self {
-        let name = base.postscript_name();
-        let mut by_name = HashMap::new();
-        by_name.insert(name, 0);
         let color = vec![font_has_color_glyphs(&base)];
         let pt_size = vec![base.pt_size()];
         let ascent = vec![base.ascent()];
         Self {
             fonts: std::sync::Arc::new(CoreTextFontTable::new(base)),
-            by_name,
             color,
             pt_size,
             ascent,
         }
     }
 
-    /// Append `font` and record its snapshot metrics.  The snapshots
-    /// and the table must grow together or an id means two different
-    /// things depending on which one you ask.
-    fn append(&mut self, font: CTFont) -> usize {
-        self.color.push(font_has_color_glyphs(&font));
-        self.pt_size.push(font.pt_size());
-        self.ascent.push(font.ascent());
-        self.fonts.push(font)
+    /// Bring the snapshots up to the table.  Cheap when nothing was
+    /// added: one length read.
+    fn sync(&mut self) {
+        let n = self.fonts.len();
+        while self.color.len() < n {
+            let Some(font) = self.fonts.get(self.color.len()) else { break };
+            self.color.push(font_has_color_glyphs(&font));
+            self.pt_size.push(font.pt_size());
+            self.ascent.push(font.ascent());
+        }
     }
 
     fn intern(&mut self, font: CTFont) -> usize {
-        let name = font.postscript_name();
-        if let Some(&idx) = self.by_name.get(&name) {
-            return idx;
-        }
-        let idx = self.append(font);
-        self.by_name.insert(name, idx);
+        let idx = self.fonts.intern(font);
+        self.sync();
         idx
     }
 
@@ -246,11 +295,8 @@ impl FontRegistry {
     /// slot.  The caller threads `"AppleSystemUIFont@w<weight>"` (or
     /// similar) so each variant keeps its own font_id.
     fn intern_with_key(&mut self, key: String, font: CTFont) -> usize {
-        if let Some(&idx) = self.by_name.get(&key) {
-            return idx;
-        }
-        let idx = self.append(font);
-        self.by_name.insert(key, idx);
+        let idx = self.fonts.intern_with_key(key, font);
+        self.sync();
         idx
     }
 }
@@ -543,6 +589,8 @@ impl FontCache {
             None => (0, cell_w, cell_h, ascent),
         };
 
+        let shaper: Box<dyn crate::font_trait::Shaper> =
+            Box::new(crate::font_trait::CoreTextShaper { fonts: std::sync::Arc::clone(&fonts.fonts) });
         Ok(Self {
             fonts,
             char_cache: FxHashMap::default(),
@@ -561,7 +609,7 @@ impl FontCache {
             ui_ascent,
             text_fallback_idxs,
             shape_cache: crate::font_shape::ShapeCache::default(),
-            shaper: Box::new(crate::font_trait::CoreTextShaper),
+            shaper,
         })
     }
 
@@ -833,43 +881,17 @@ impl FontCache {
         let Some(base_font) = self.fonts.fonts.get(base_idx) else { return Vec::new() };
         let size_q = crate::glyph_atlas::GlyphKey::size_q_for(base_font.pt_size());
         let ui_id = base_idx as u32;
-        // Phase 10c bug fix — shape's intern callback de-dupes
-        // fallback fonts by postscript_name.  But our size+weight
-        // variants share postscript_name with the base UI font, so
-        // a postscript-name lookup hits the first-interned variant
-        // and returns its idx — Bold 24pt would shape with the Bold
-        // 40pt CTFont (whichever was interned first), Regular 24pt
-        // with the startup 13pt one.  Fix: when the CTRun's font
-        // postscript-name matches the base we just chose, return
-        // `base_idx` directly instead of asking the registry.
-        let base_postscript: String = base_font.postscript_name();
-        // Phase 10b — take both cache and shaper out so the closure
-        // can mutably borrow the rest of FontCache (specifically
-        // `self.fonts`) without aliasing.  Restore both after the
-        // call — even on panic the shaper is the default CoreText
-        // impl so the swap is non-destructive.
+        // The cache and the shaper are both fields; take the cache out
+        // so the shaper can be borrowed while the cache is written.
         let mut cache = std::mem::take(&mut self.shape_cache);
-        let shaper =
-            std::mem::replace(&mut self.shaper, Box::new(crate::font_trait::CoreTextShaper));
+        let shaper = &self.shaper;
         let result = cache
-            .shape_with(
-                text,
-                &base_font,
-                ui_id,
-                size_q,
-                opts,
-                |t, bf, o, intern| shaper.shape(t, bf, o, intern),
-                |f| {
-                    if f.postscript_name() == base_postscript {
-                        base_idx as u32
-                    } else {
-                        self.fonts.intern(f) as u32
-                    }
-                },
-            )
+            .shape_with(text, ui_id, size_q, opts, |t, o| shaper.shape(t, ui_id, o))
             .to_vec();
         self.shape_cache = cache;
-        self.shaper = shaper;
+        // Shaping may have registered fallback fonts in the table; the
+        // per-cell snapshots catch up before anything asks about them.
+        self.fonts.sync();
         result
     }
 
@@ -927,7 +949,7 @@ impl FontCache {
             return Some(idx);
         }
         let unique_key = format!("__marspot_ui@w{}@s{}", bucket, size_q);
-        if let Some(&idx) = self.fonts.by_name.get(&unique_key) {
+        if let Some(idx) = self.fonts.fonts.id_of(&unique_key) {
             self.ui_variants.insert(variant_key, idx);
             return Some(idx);
         }
@@ -1000,13 +1022,7 @@ impl FontCache {
             self.char_cache.capacity() * (char_entry + std::mem::size_of::<usize>());
         let fonts_vec_bytes =
             self.fonts.pt_size.capacity() * std::mem::size_of::<CTFont>();
-        let by_name_entry =
-            std::mem::size_of::<String>() + std::mem::size_of::<usize>();
-        let by_name_bytes = self.fonts.by_name.capacity()
-            * (by_name_entry + std::mem::size_of::<usize>());
-        let by_name_keys_bytes: usize =
-            self.fonts.by_name.keys().map(|k| k.capacity()).sum();
-        char_cache_bytes + fonts_vec_bytes + by_name_bytes + by_name_keys_bytes
+        char_cache_bytes + fonts_vec_bytes + self.fonts.fonts.approx_name_bytes()
     }
 }
 
@@ -1181,6 +1197,35 @@ mod tests {
         // Still functional after all that.
         let (_idx, glyph) = fc.resolve_char('A', false, false);
         assert!(glyph != 0, "resolve still works post-eviction");
+    }
+
+    /// A fallback font CoreText finds while shaping is registered by
+    /// the shaper, in the table, behind the cache's back.  The per-cell
+    /// snapshots have to know about it before anything asks: a stale
+    /// snapshot answers "not a colour font, 0 pt" for the emoji font,
+    /// and the emoji goes to the wrong atlas at the wrong size.
+    #[test]
+    fn a_font_found_while_shaping_has_its_snapshots_before_anyone_asks() {
+        let Ok(mut fc) = FontCache::build() else { return };
+        if fc.ui_font_idx == 0 {
+            return;
+        }
+        let before = fc.fonts.fonts.len();
+        let glyphs = fc.shape_ui("a😀b");
+        let found: Vec<usize> = glyphs
+            .iter()
+            .map(|g| g.font_id as usize)
+            .filter(|&id| id >= before)
+            .collect();
+        assert!(
+            !found.is_empty(),
+            "the emoji has to come from a font registered while shaping, or this proves nothing: {glyphs:?}"
+        );
+        for id in found {
+            assert!(fc.is_color_font(id), "font {id} is the emoji font");
+            assert!(fc.font_pt_size(id) > 0.0, "font {id} has a size");
+            assert!(fc.font_ascent(id) > 0.0, "font {id} has an ascent");
+        }
     }
 
     /// Phase 10b — FontCache uses its Shaper trait for the shape path.

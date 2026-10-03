@@ -321,27 +321,20 @@ impl ShapeCache {
         // Default cache path — use the macOS `shape_line` directly.
         // Phase 10b callers that need to plug a custom Shaper go
         // through `shape_with(...)` instead.
-        self.shape_with(text, base_font, base_font_id, size_q, opts, |t, bf, o, i| {
-            shape_line(t, bf, o, i)
-        }, intern)
+        self.shape_with(text, base_font_id, size_q, opts, |t, o| shape_line(t, base_font, o, intern))
     }
 
     /// Phase 10b — same as `shape`, but the miss path goes through
     /// `shape_fn` instead of calling `shape_line` directly.  Lets
     /// FontCache route via its `Shaper` trait without the cache
     /// having a dependency on the trait type.
-    pub fn shape_with<
-        S: FnOnce(&str, &CTFont, ShapeOptions, &mut dyn FnMut(CTFont) -> u32) -> Vec<ShapedGlyph>,
-        F: FnMut(CTFont) -> u32,
-    >(
+    pub fn shape_with<S: FnOnce(&str, ShapeOptions) -> Vec<ShapedGlyph>>(
         &mut self,
         text: &str,
-        base_font: &CTFont,
         base_font_id: u32,
         size_q: u16,
         opts: ShapeOptions,
         shape_fn: S,
-        mut intern: F,
     ) -> &[ShapedGlyph] {
         let key = ShapeKey {
             text: text.to_owned(),
@@ -364,7 +357,7 @@ impl ShapeCache {
             return &e.glyphs;
         }
         self.misses += 1;
-        let shaped = shape_fn(text, base_font, opts_for_shape, &mut intern);
+        let shaped = shape_fn(text, opts_for_shape);
         if self.map.len() >= self.cap {
             // Only reached on a miss into a full cache, so the scan is
             // amortised against a CoreText shaping call that costs far
