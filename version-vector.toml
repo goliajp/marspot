@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.226"  # the refusal reader is private to the plugin that uses it
-core    = "0.12.266"  # which atlas entry a cell is drawn with is decided outside the backend
+core    = "0.12.267"  # text runs are placed outside the backend
 session = "0.11.137"  # a timing assertion says when it is measuring the host
