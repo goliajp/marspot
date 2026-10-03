@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.226"  # the refusal reader is private to the plugin that uses it
-core    = "0.12.257"  # glyphs read the published format; the grid is off the local layouts
+core    = "0.12.258"  # a frame is one scene drawn in one render pass
 session = "0.11.137"  # a timing assertion says when it is measuring the host

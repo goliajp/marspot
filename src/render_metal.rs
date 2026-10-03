@@ -40,7 +40,7 @@ use objc2_metal::{
     MTLLoadAction, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder,
     MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
     MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerDescriptor, MTLSamplerMinMagFilter,
-    MTLSamplerState, MTLStoreAction, MTLTexture,
+    MTLSamplerState, MTLScissorRect, MTLStoreAction, MTLTexture,
 };
 use core_graphics::color_space::{kCGColorSpaceSRGB, CGColorSpace};
 use foreign_types::ForeignType;
@@ -2171,22 +2171,36 @@ fn encode_passes(
     let viewport_ptr = NonNull::new(viewport.as_ptr() as *mut c_void).unwrap();
     let viewport_len = std::mem::size_of::<[f32; 2]>();
 
-    // BG pass — clear to SIDEBAR_BG, then draw all opaque cells in
-    // submission order (chrome → sidebar → per-session bg → cursor →
-    // focus outline → underline → inter-cell gutter seams).  Always
-    // Clear: the chrome strip above the grid is NOT covered by an
-    // opaque CellInstance, so it relies on the Clear to reset every
-    // frame.  Briefly attempted Load-by-default (2126cda) to dodge a
-    // suspected cross-process IOSurface race, but the real race-killer
-    // is the shell-side frame_pending gate in `redraw()` (a1d3930);
-    // Load was redundant AND it let the chrome strip's alpha-blended
-    // glyphs accumulate over their own anti-aliased edges, fuzzing the
-    // title-bar text after a few seconds.  The `clear_bg` parameter is
-    // retained as a hook for any future per-frame decision.
+    // One pass for the whole frame. Clear to SIDEBAR_BG first: the
+    // chrome strip above the grid is not covered by any opaque cell,
+    // so it relies on the clear to reset every frame. (Load-by-default
+    // was tried once, 2126cda, and let the strip's antialiased glyphs
+    // accumulate over their own edges.) `clear_bg` is kept as the hook
+    // for a per-frame decision.
+    //
+    // The frame used to be eight passes, one per kind of instance, each
+    // loading the whole target and storing it again. It is now one
+    // scene: the same instances in one slab, in layers that keep the
+    // order the passes drew in -- see `frame_scene`.
     let _ = clear_bg;
-    let bg_pass = { MTLRenderPassDescriptor::new() };
+    let mut layers = [golia_ui_core::scene::Layer::default(); crate::frame_scene::FRAME_LAYERS];
+    let frame = crate::frame_scene::FrameInstances {
+        cells,
+        dots,
+        ui_rects,
+        glyphs,
+        color_glyphs,
+        overlay_cells,
+        overlay_ui_rects,
+        overlay_glyphs,
+    };
+    let clip = golia_ui_core::units::RectPx::new(0.0, 0.0, viewport_w, viewport_h);
+    let built = crate::frame_scene::build(&frame, clip, ui_slab, &mut layers);
+    let slab_buffer = inst!(0, &ui_slab[..built.bytes]);
+
+    let pass = { MTLRenderPassDescriptor::new() };
     unsafe {
-        let color = bg_pass.colorAttachments().objectAtIndexedSubscript(0);
+        let color = pass.colorAttachments().objectAtIndexedSubscript(0);
         color.setTexture(Some(target));
         color.setStoreAction(MTLStoreAction::Store);
         color.setLoadAction(MTLLoadAction::Clear);
@@ -2197,246 +2211,65 @@ fn encode_passes(
             alpha: 1.0,
         });
     }
-    let bg_buffer = inst!(0, cells_as_bytes(cells, ui_slab));
-    let bg_encoder = cmd
-        .renderCommandEncoderWithDescriptor(&bg_pass)
-        .expect("bg encoder");
-    bg_encoder.setRenderPipelineState(bg_pipeline);
-    if let Some(buf) = &bg_buffer {
-        unsafe { bg_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0) };
-    }
-    unsafe {
-        bg_encoder.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
-        if !cells.is_empty() {
-            bg_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                MTLPrimitiveType::Triangle,
-                0,
-                6,
-                cells.len(),
-            );
-        }
-    }
-    bg_encoder.endEncoding();
-
-    // Dot pass — circle-clipped, alpha-blended.  Skipped entirely if
-    // no dots queued (fast path for the bench / mcli single-session
-    // case where there's no sidebar).
-    if !dots.is_empty() {
-        let dot_pass = { MTLRenderPassDescriptor::new() };
-        unsafe {
-            let color = dot_pass.colorAttachments().objectAtIndexedSubscript(0);
-            color.setTexture(Some(target));
-            color.setLoadAction(MTLLoadAction::Load);
-            color.setStoreAction(MTLStoreAction::Store);
-        }
-        let dot_buffer = inst!(1, cells_as_bytes(dots, ui_slab));
-        let dot_encoder = cmd
-            .renderCommandEncoderWithDescriptor(&dot_pass)
-            .expect("dot encoder");
-        dot_encoder.setRenderPipelineState(dot_pipeline);
-        if let Some(buf) = &dot_buffer {
-            unsafe { dot_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0) };
-        }
-        unsafe {
-            dot_encoder.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
-            dot_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                MTLPrimitiveType::Triangle,
-                0,
-                6,
-                dots.len(),
-            );
-        }
-        dot_encoder.endEncoding();
-    }
-
-    // UI rect pass — anti-aliased rounded rectangles for chrome
-    // overlays (search panel, future tooltips/menus).  Drawn AFTER
-    // grid BG / highlights / dots, BEFORE the glyph passes — so
-    // glyphs that belong to the overlay (panel text) read on top.
-    // Skipped entirely when no overlay is queued.
-    if !ui_rects.is_empty() {
-        let ui_pass = { MTLRenderPassDescriptor::new() };
-        unsafe {
-            let color = ui_pass.colorAttachments().objectAtIndexedSubscript(0);
-            color.setTexture(Some(target));
-            color.setLoadAction(MTLLoadAction::Load);
-            color.setStoreAction(MTLStoreAction::Store);
-        }
-        let ui_buffer = inst!(2, ui_rects_as_bytes(ui_rects, ui_slab));
-        let ui_encoder = cmd
-            .renderCommandEncoderWithDescriptor(&ui_pass)
-            .expect("ui encoder");
-        ui_encoder.setRenderPipelineState(scene_ui_pipeline);
-        if let Some(buf) = &ui_buffer {
-            unsafe { ui_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0) };
-        }
-        unsafe {
-            ui_encoder.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
-            ui_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                MTLPrimitiveType::Triangle,
-                0,
-                6,
-                ui_rects.len(),
-            );
-        }
-        ui_encoder.endEncoding();
-    }
-
-    // FG pass — textured glyph quads, alpha-blended on top.
-    let fg_pass = { MTLRenderPassDescriptor::new() };
-    unsafe {
-        let color = fg_pass.colorAttachments().objectAtIndexedSubscript(0);
-        color.setTexture(Some(target));
-        color.setLoadAction(MTLLoadAction::Load);
-        color.setStoreAction(MTLStoreAction::Store);
-    }
-    let fg_buffer = inst!(3, glyphs_as_bytes(glyphs, ui_slab));
-    let fg_encoder = cmd
-        .renderCommandEncoderWithDescriptor(&fg_pass)
-        .expect("fg encoder");
-    fg_encoder.setRenderPipelineState(fg_pipeline);
-    if let Some(buf) = &fg_buffer {
-        unsafe { fg_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0) };
-    }
-    unsafe {
-        fg_encoder.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
-        fg_encoder.setFragmentTexture_atIndex(Some(atlas.texture()), 0);
-        fg_encoder.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
-        if !glyphs.is_empty() {
-            fg_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                MTLPrimitiveType::Triangle,
-                0,
-                6,
-                glyphs.len(),
-            );
-        }
-    }
-    fg_encoder.endEncoding();
-
-    // Colour FG pass — full-colour glyphs (emoji) sampled from the BGRA
-    // atlas, premultiplied-alpha blended on top.  Skipped entirely when
-    // nothing colour was queued (the common case — most frames have no
-    // emoji), so the extra encoder costs nothing for plain text.
-    if !color_glyphs.is_empty() {
-        let cfg_pass = { MTLRenderPassDescriptor::new() };
-        unsafe {
-            let color = cfg_pass.colorAttachments().objectAtIndexedSubscript(0);
-            color.setTexture(Some(target));
-            color.setLoadAction(MTLLoadAction::Load);
-            color.setStoreAction(MTLStoreAction::Store);
-        }
-        let cfg_buffer = inst!(4, glyphs_as_bytes(color_glyphs, ui_slab));
-        let cfg_encoder = cmd
-            .renderCommandEncoderWithDescriptor(&cfg_pass)
-            .expect("color fg encoder");
-        cfg_encoder.setRenderPipelineState(fg_color_pipeline);
-        if let Some(buf) = &cfg_buffer {
-            unsafe { cfg_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0) };
-        }
-        unsafe {
-            cfg_encoder.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
-            cfg_encoder.setFragmentTexture_atIndex(Some(color_atlas.texture()), 0);
-            cfg_encoder.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
-            cfg_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                MTLPrimitiveType::Triangle,
-                0,
-                6,
-                color_glyphs.len(),
-            );
-        }
-        cfg_encoder.endEncoding();
-    }
-
-    // F3+1.6 — OVERLAY PASSES.  Drawn after every main pass so the
-    // overlay (Process Monitor modal, future tooltips/sheets) covers
-    // whatever the grid + chrome + glyphs produced underneath.  No
-    // filtering of grid scratches needed; the overlay's BG is on top
-    // by construction.  Sequence: BG cells → UI rects → FG glyphs.
-    // (Cells go FIRST so opaque flat fills sit below the SDF chrome
-    // rects; glyphs LAST so text always reads on top.)
-    if !overlay_cells.is_empty() {
-        let pass = { MTLRenderPassDescriptor::new() };
-        unsafe {
-            let color = pass.colorAttachments().objectAtIndexedSubscript(0);
-            color.setTexture(Some(target));
-            color.setLoadAction(MTLLoadAction::Load);
-            color.setStoreAction(MTLStoreAction::Store);
-        }
-        let buf = inst!(5, cells_as_bytes(overlay_cells, ui_slab));
-        let enc = cmd
-            .renderCommandEncoderWithDescriptor(&pass)
-            .expect("overlay cells encoder");
-        enc.setRenderPipelineState(bg_pipeline);
-        if let Some(b) = &buf {
-            unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
-        }
-        unsafe {
-            enc.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
-            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                MTLPrimitiveType::Triangle,
-                0,
-                6,
-                overlay_cells.len(),
-            );
-        }
+    let enc = cmd.renderCommandEncoderWithDescriptor(&pass).expect("frame encoder");
+    unsafe { enc.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1) };
+    let Some(buf) = &slab_buffer else {
+        // Nothing in the scene: the clear is the frame.
         enc.endEncoding();
+        return;
+    };
+    use golia_ui_core::scene::Kind;
+    let (tw, th) = (target.width(), target.height());
+    for layer in &layers[..built.layers] {
+        enc.setScissorRect(scissor_for(layer.clip, tw, th));
+        for kind in Kind::ALL {
+            let run = layer.runs[kind as usize];
+            if run.count == 0 {
+                continue;
+            }
+            let pipeline = match kind {
+                Kind::Rect => bg_pipeline,
+                Kind::Circle => dot_pipeline,
+                Kind::Glyph => fg_pipeline,
+                Kind::ColorGlyph => fg_color_pipeline,
+                Kind::UiRect => scene_ui_pipeline,
+                // nothing produces images yet, and there is no pipeline
+                Kind::Image => continue,
+            };
+            enc.setRenderPipelineState(pipeline);
+            unsafe {
+                enc.setVertexBuffer_offset_atIndex(Some(buf), run.offset as usize, 0);
+                match kind {
+                    Kind::Glyph => {
+                        enc.setFragmentTexture_atIndex(Some(atlas.texture()), 0);
+                        enc.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
+                    }
+                    Kind::ColorGlyph => {
+                        enc.setFragmentTexture_atIndex(Some(color_atlas.texture()), 0);
+                        enc.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
+                    }
+                    _ => {}
+                }
+                enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                    MTLPrimitiveType::Triangle,
+                    0,
+                    6,
+                    run.count as usize,
+                );
+            }
+        }
     }
-    if !overlay_ui_rects.is_empty() {
-        let pass = { MTLRenderPassDescriptor::new() };
-        unsafe {
-            let color = pass.colorAttachments().objectAtIndexedSubscript(0);
-            color.setTexture(Some(target));
-            color.setLoadAction(MTLLoadAction::Load);
-            color.setStoreAction(MTLStoreAction::Store);
-        }
-        let buf = inst!(6, ui_rects_as_bytes(overlay_ui_rects, ui_slab));
-        let enc = cmd
-            .renderCommandEncoderWithDescriptor(&pass)
-            .expect("overlay ui encoder");
-        enc.setRenderPipelineState(scene_ui_pipeline);
-        if let Some(b) = &buf {
-            unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
-        }
-        unsafe {
-            enc.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
-            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                MTLPrimitiveType::Triangle,
-                0,
-                6,
-                overlay_ui_rects.len(),
-            );
-        }
-        enc.endEncoding();
-    }
-    if !overlay_glyphs.is_empty() {
-        let pass = { MTLRenderPassDescriptor::new() };
-        unsafe {
-            let color = pass.colorAttachments().objectAtIndexedSubscript(0);
-            color.setTexture(Some(target));
-            color.setLoadAction(MTLLoadAction::Load);
-            color.setStoreAction(MTLStoreAction::Store);
-        }
-        let buf = inst!(7, glyphs_as_bytes(overlay_glyphs, ui_slab));
-        let enc = cmd
-            .renderCommandEncoderWithDescriptor(&pass)
-            .expect("overlay fg encoder");
-        enc.setRenderPipelineState(fg_pipeline);
-        if let Some(b) = &buf {
-            unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
-        }
-        unsafe {
-            enc.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
-            enc.setFragmentTexture_atIndex(Some(atlas.texture()), 0);
-            enc.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
-            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                MTLPrimitiveType::Triangle,
-                0,
-                6,
-                overlay_glyphs.len(),
-            );
-        }
-        enc.endEncoding();
-    }
+    enc.endEncoding();
+}
+
+/// A layer's clip as Metal's scissor, held inside the target: Metal
+/// rejects a scissor that reaches past the attachment.
+fn scissor_for(clip: golia_ui_core::units::RectPx, tw: usize, th: usize) -> MTLScissorRect {
+    let x0 = (clip.x.max(0.0).floor() as usize).min(tw);
+    let y0 = (clip.y.max(0.0).floor() as usize).min(th);
+    let x1 = ((clip.x + clip.w).max(0.0).ceil() as usize).min(tw);
+    let y1 = ((clip.y + clip.h).max(0.0).ceil() as usize).min(th);
+    MTLScissorRect { x: x0, y: y0, width: x1.saturating_sub(x0), height: y1.saturating_sub(y0) }
 }
 
 /// Allocate a render-target MTLTexture.  Helper for tests + the
@@ -6067,8 +5900,8 @@ pub struct InstanceBufferPool {
     caps: [usize; INSTANCE_SLOTS],
 }
 
-/// One slot per draw the IOSurface path encodes.
-pub const INSTANCE_SLOTS: usize = 8;
+/// One slot: the IOSurface path uploads a frame as one scene slab.
+pub const INSTANCE_SLOTS: usize = 1;
 
 impl Default for InstanceBufferPool {
     fn default() -> Self {
