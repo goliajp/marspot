@@ -811,6 +811,21 @@ impl ClaudecodePlugin {
                 }
                 continue;
             }
+            // Reclaiming restarts claude, and it comes back on what it
+            // is told: without its model and effort it would wake on
+            // the profile's default. Same rule as a switch.
+            let choice = pushed_choice(&meta.uuid);
+            if let Err(why) = confirm_choice(result.new_models.get(sid).map(String::as_str), &choice) {
+                if self.blocked_reason.get(sid).map(String::as_str) != Some("model_unconfirmed") {
+                    host.log(
+                        LogLevel::Info,
+                        "hibernate.model_unconfirmed",
+                        &format!("shelld_session={sid} — {why}; not reclaiming"),
+                    );
+                    self.blocked_reason.insert(*sid, "model_unconfirmed".to_string());
+                }
+                continue;
+            }
             // Re-verify the pid immediately before signalling it.
             // `last_meta` is up to one scan old, pids are recycled by
             // the kernel, and the consequence of acting on a stale one
@@ -877,6 +892,7 @@ impl ClaudecodePlugin {
                 meta.claude_pid,
                 shell_pid_for(*sid),
                 meta.project_dir.as_deref(),
+                &choice,
             ) else {
                 host.log(
                     LogLevel::Warn,
@@ -923,6 +939,7 @@ impl ClaudecodePlugin {
                 profile_num: meta.profile_num,
                 config_dir: meta.config_dir,
                 project_dir: meta.project_dir,
+                choice,
                 created_at: SystemTime::now(),
             });
             self.persist_dormant(host);
@@ -1098,6 +1115,7 @@ impl ClaudecodePlugin {
                 0,
                 shell_pid_for(d.shelld_sid),
                 d.project_dir.as_deref(),
+                &d.choice,
             ) else {
                 host.log(
                     LogLevel::Warn,
@@ -5240,9 +5258,12 @@ mod tests {
 
         // First pass records the CPU baseline; make it old enough for
         // the second to be able to decide.
+        // The model and effort, as the status-line hook would have
+        // recorded them: a pane whose model is not known is not reclaimed.
+        record_known_model(uuid);
         let mut first = ScanResult {
             new_mapping: scan.new_mapping.clone(),
-            new_models: HashMap::new(),
+            new_models: HashMap::from([(1, "opus-5-5".to_string())]),
             new_meta: scan.new_meta.clone(),
             new_activity: scan.new_activity.clone(),
             new_cpu: HashMap::new(),
@@ -5277,7 +5298,7 @@ mod tests {
 
         let mut second = ScanResult {
             new_mapping: first.new_mapping.clone(),
-            new_models: HashMap::new(),
+            new_models: first.new_models.clone(),
             new_meta: first.new_meta.clone(),
             new_activity: first.new_activity.clone(),
             new_cpu: HashMap::new(),
@@ -5343,7 +5364,7 @@ mod tests {
         // it at the park step — which is exactly what a re-arm after an
         // L1 restart does — and drive the wake directly.
         let client = Arc::new(ShelldClient::new(Some(inject.clone())));
-        let op = reclaim_op(uuid, Some(&profile_dir.to_string_lossy()), 0, shell_pid, None)
+        let op = reclaim_op(uuid, Some(&profile_dir.to_string_lossy()), 0, shell_pid, None, &CliChoice::default())
             .expect("a quotable profile builds a script");
         // By name, exactly as the re-arm does -- a test that hard-codes
         // the position is a test that stops asking the question when a
@@ -5475,7 +5496,7 @@ mod tests {
     /// is how long, and that it comes after the process check.
     #[test]
     fn the_wake_waits_for_the_repaint_after_the_process_appears() {
-        let op = reclaim_op("u", None, 1, 2, None).expect("script builds");
+        let op = reclaim_op("u", None, 1, 2, None, &CliChoice::default()).expect("script builds");
         let kinds: Vec<&pty_op::StepKind> = op.steps.iter().map(|s| &s.kind).collect();
         let process_at = kinds
             .iter()
@@ -5674,7 +5695,26 @@ mod tests {
         }
     }
 
+    /// The status-line hook's record for `uuid`, naming Opus 5.5 at
+    /// medium effort, so the pane counts as one whose model is known.
+    ///
+    /// The record lives under `MARSPOT_STATE_DIR`; a test process that
+    /// has not set it is pointed at a directory of its own first, so
+    /// nothing is ever written into an installed app's state.
+    fn record_known_model(uuid: &str) {
+        if std::env::var_os("MARSPOT_STATE_DIR").is_none() {
+            let state = std::env::temp_dir().join(format!("marspot-choice-{}", std::process::id()));
+            unsafe { std::env::set_var("MARSPOT_STATE_DIR", &state) };
+        }
+        let push = model_push_dir();
+        fs::create_dir_all(&push).unwrap();
+        fs::write(push.join(uuid), "opus-5-5\n/t/x.jsonl\nmedium\npids=1\nid=claude-opus-5-5\n").unwrap();
+    }
+
     fn scan_with(sid: u64, claude_pid: i32, uuid: &str) -> ScanResult {
+        if !uuid.is_empty() {
+            record_known_model(uuid);
+        }
         let mut new_meta = HashMap::new();
         new_meta.insert(
             sid,
@@ -5696,7 +5736,7 @@ mod tests {
         new_cpu.insert(sid, (1_000u64, SystemTime::now()));
         ScanResult {
             new_mapping: HashMap::new(),
-            new_models: HashMap::new(),
+            new_models: HashMap::from([(sid, "opus-5-5".to_string())]),
             new_meta,
             new_activity: HashMap::new(),
             new_cpu,
@@ -5719,7 +5759,7 @@ mod tests {
     #[test]
     fn a_pane_with_no_session_file_yet_is_badged_but_never_reclaimed() {
         assert!(
-            reclaim_op("", Some("/Users/x/.claude-profile-2"), 4242, 4200, None).is_none(),
+            reclaim_op("", Some("/Users/x/.claude-profile-2"), 4242, 4200, None, &CliChoice::default()).is_none(),
             "no uuid ⇒ no resume line ⇒ claude must not be taken down"
         );
         assert!(
@@ -5728,7 +5768,7 @@ mod tests {
         );
         // The same call with a uuid is the normal path, so the guard
         // above is the only thing being tested here.
-        assert!(reclaim_op("u-1", None, 4242, 4200, None).is_some());
+        assert!(reclaim_op("u-1", None, 4242, 4200, None, &CliChoice::default()).is_some());
         assert!(profile_cycle_op(true, "u-1", true, 3, 4242, None, 4200, None, &CliChoice::default()).is_some());
     }
 
@@ -5945,6 +5985,49 @@ mod tests {
     /// The whole reclamation path, with a real process on the other
     /// end of the signal: first pass only samples CPU, second pass
     /// decides, signals, and records the pane as dormant.
+    /// Reclaiming restarts claude, and a pane whose model or effort is
+    /// not known would wake on its profile's default. So it is left
+    /// running, however idle it is.
+    #[test]
+    fn a_pane_whose_model_is_not_known_is_not_reclaimed() {
+        let dir = std::env::temp_dir().join(format!("marspot-hib-{}-{}", std::process::id(), line!()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut child = spawn_fake_claude(&dir);
+        let pid = child.id() as i32;
+        let host = FakeHost::new(dir.clone());
+        host.set_status(7, idle_view(Duration::from_secs(7200)));
+        let mut plugin = ClaudecodePlugin::new();
+        plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
+        let uuid = "cccc-dddd";
+
+        let unknown = |scan: &mut ScanResult| scan.new_models.clear();
+        let mut scan = scan_with(7, pid, uuid);
+        unknown(&mut scan);
+        scan.new_cpu.insert(7, (1_000, SystemTime::now() - Duration::from_secs(120)));
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
+        let mut scan = scan_with(7, pid, uuid);
+        unknown(&mut scan);
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
+        host.pump_ops();
+        assert!(plugin.dormant.is_empty(), "not reclaimed: its model is not known");
+        assert!(host.begun.lock().unwrap().is_empty());
+
+        // Known, it is reclaimed as before: the guard is the only
+        // difference.
+        let scan = scan_with(7, pid, uuid);
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
+        host.pump_ops();
+        assert_eq!(plugin.dormant.len(), 1, "reclaimed once its model is known");
+        assert_eq!(
+            plugin.dormant[0].choice,
+            CliChoice { model: Some("claude-opus-5-5".into()), effort: Some("medium".into()) },
+            "and it remembers what to wake on"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn idle_policy_reclaims_a_real_process_and_records_it_dormant() {
         let dir = std::env::temp_dir().join(format!(
@@ -6141,6 +6224,7 @@ mod tests {
             profile_num: 1,
                 config_dir: None,
                 project_dir: None,
+                choice: CliChoice::default(),
             created_at: scan.scanned_at + Duration::from_millis(1),
         });
 
@@ -6209,6 +6293,7 @@ mod tests {
             profile_num: 1,
             config_dir: None,
             project_dir: None,
+            choice: CliChoice::default(),
             created_at: std::time::UNIX_EPOCH,
         }];
         let mut scan = scan_with(999_999, 1, "u");
@@ -6248,6 +6333,7 @@ mod tests {
                 profile_num: 1,
                 config_dir: None,
                 project_dir: None,
+                choice: CliChoice::default(),
                 created_at: std::time::UNIX_EPOCH,
             },
             DormantRecord {
@@ -6256,6 +6342,7 @@ mod tests {
                 profile_num: 1,
                 config_dir: None,
                 project_dir: None,
+                choice: CliChoice::default(),
                 created_at: std::time::UNIX_EPOCH,
             },
         ];
@@ -6315,6 +6402,7 @@ mod tests {
             profile_num: 1,
                 config_dir: None,
                 project_dir: None,
+                choice: CliChoice::default(),
             created_at: std::time::UNIX_EPOCH,
         }];
         assert_eq!(activity_for_unbound(7, &parked), CcActivity::Dormant);
@@ -6648,7 +6736,7 @@ mod tests {
     #[test]
     fn the_reclamation_resumes_under_the_profile_it_was_running() {
         let line = |dir: Option<&str>| -> String {
-            let op = reclaim_op("abc-123", dir, 1, 2, None).expect("script builds");
+            let op = reclaim_op("abc-123", dir, 1, 2, None, &CliChoice::default()).expect("script builds");
             let bytes = op
                 .steps
                 .iter()
@@ -6696,11 +6784,11 @@ mod tests {
             "",
         ] {
             assert!(
-                reclaim_op("u", Some(bad), 1, 2, None).is_none(),
+                reclaim_op("u", Some(bad), 1, 2, None, &CliChoice::default()).is_none(),
                 "{bad:?} should stop the reclamation"
             );
         }
-        assert!(reclaim_op("u", Some("/home/u/.claude-profile-1"), 1, 2, None).is_some());
+        assert!(reclaim_op("u", Some("/home/u/.claude-profile-1"), 1, 2, None, &CliChoice::default()).is_some());
     }
 
     /// A session whose profile could not be read must not be
@@ -6748,6 +6836,7 @@ mod tests {
                 profile_num: 1,
                 config_dir: Some("/Users/x/.claude-profile-1".into()),
                 project_dir: None,
+                choice: CliChoice::default(),
                 created_at: t,
             },
             DormantRecord {
@@ -6756,10 +6845,57 @@ mod tests {
                 profile_num: 255,
                 config_dir: None,
                 project_dir: None,
+                choice: CliChoice::default(),
                 created_at: t,
             },
         ];
         assert_eq!(decode_dormant(&encode_dormant(&records)), records);
+    }
+
+    /// A parked pane wakes on the model and effort it was parked on,
+    /// across an L1 restart too: the record carries them.
+    #[test]
+    fn a_dormant_record_remembers_the_model_and_effort() {
+        let t = std::time::UNIX_EPOCH + Duration::from_secs(1_785_000_000);
+        let records = vec![DormantRecord {
+            shelld_sid: 7,
+            uuid: "9cff8661-3275-4dce-8c93-89797bc63f44".into(),
+            profile_num: 1,
+            config_dir: Some("/Users/x/.claude-profile-1".into()),
+            project_dir: None,
+            choice: CliChoice {
+                model: Some("claude-fable-5-1[1m]".into()),
+                effort: Some("high".into()),
+            },
+            created_at: t,
+        }];
+        assert_eq!(decode_dormant(&encode_dormant(&records)), records);
+
+        let older = "2\tgood-uuid-1\t2\t1785000000\t/Users/x/.claude-profile-2\t/w\n";
+        assert_eq!(decode_dormant(older)[0].choice, CliChoice::default(), "a row from before the columns");
+
+        let hostile = "3\tgood-uuid-2\t2\t1785000000\t\t\topus; rm -rf ~\tloud\n";
+        assert_eq!(decode_dormant(hostile)[0].choice, CliChoice::default(), "neither value is one claude takes");
+    }
+
+    /// The wake line names the model and effort, quoted where a shell
+    /// would read the value as a pattern.
+    #[test]
+    fn a_reclaimed_pane_wakes_on_the_model_it_was_on() {
+        let choice = CliChoice { model: Some("claude-fable-5-1[1m]".into()), effort: Some("high".into()) };
+        let op = reclaim_op("u-1", None, 4242, 4200, None, &choice).expect("script");
+        let line = op
+            .steps
+            .iter()
+            .find_map(|s| match &s.kind {
+                pty_op::StepKind::Send(bytes) if s.label == "resume" => {
+                    Some(String::from_utf8_lossy(bytes).into_owned())
+                }
+                _ => None,
+            })
+            .expect("a resume line");
+        assert!(line.contains("--model 'claude-fable-5-1[1m]'"), "{line}");
+        assert!(line.contains("--effort high"), "{line}");
     }
 
     /// The directory a wake must return to survives the restart with
@@ -6779,6 +6915,7 @@ mod tests {
             profile_num: 1,
             config_dir: Some("/Users/x/.claude-profile-1".into()),
             project_dir: Some("/Users/x/My Work/$proj".into()),
+            choice: CliChoice::default(),
             created_at: t,
         }];
         assert_eq!(decode_dormant(&encode_dormant(&records)), records);
@@ -6813,6 +6950,7 @@ mod tests {
                 profile_num: 2,
                 config_dir: None,
                 project_dir: None,
+                choice: CliChoice::default(),
                 created_at: std::time::UNIX_EPOCH,
             }]
         );
