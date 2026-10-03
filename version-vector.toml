@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.216"  # a pane not on Fable is moved to an account whose Fable is spent first
+shell   = "0.7.217"  # a rejection only Fable explains does not shut out a pane on another model
 core    = "0.12.257"  # glyphs read the published format; the grid is off the local layouts
 session = "0.11.137"  # a timing assertion says when it is measuring the host
