@@ -822,7 +822,15 @@ impl WorkerCtx {
                     // The same tail, third question: has the account
                     // refused this session, and when. Kept once seen,
                     // because the window it is read from moves.
-                    refused_at: refused_at_for,
+                    //
+                    // Only what this process was told counts. The
+                    // transcript follows a session across a profile
+                    // switch, so a refusal from the account it just
+                    // left is still in there and would read as the new
+                    // account refusing. An account that really is out
+                    // refuses the new process too, and that refusal is
+                    // newer than its start.
+                    refused_at: super::refused_since(refused_at_for, f.claude_start),
                     transcript_at: jsonl_path
                         .as_ref()
                         .and_then(|p| p.metadata().ok())

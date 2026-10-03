@@ -2769,6 +2769,12 @@ pub(super) fn last_quota_refusal(tail: &str) -> Option<i64> {
         .and_then(record_timestamp)
 }
 
+/// A refusal, if it reached the claude that started at `started`.
+fn refused_since(refused_at: Option<i64>, started: SystemTime) -> Option<i64> {
+    let start = started.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs() as i64;
+    refused_at.filter(|&at| at >= start)
+}
+
 /// The two ways the CLI says "this account cannot serve you".
 fn says_out_of_quota(line: &str) -> bool {
     (line.contains("You've reached your") && line.contains("limit"))
@@ -7097,6 +7103,16 @@ mod tests {
     /// Being overloaded is not being out of quota, and moving a pane
     /// for it restarts a session for nothing. The HTTP status and the
     /// error type are shared between the two, so neither is matched.
+    /// The transcript follows a session across a switch; the refusal
+    /// the old account gave stays in it and is not the new one's.
+    #[test]
+    fn only_a_refusal_after_this_claude_started_counts() {
+        let started = SystemTime::UNIX_EPOCH + Duration::from_secs(1_791_002_529);
+        assert_eq!(refused_since(Some(1_790_966_543), started), None, "the day before");
+        assert_eq!(refused_since(Some(1_791_002_600), started), Some(1_791_002_600));
+        assert_eq!(refused_since(None, started), None);
+    }
+
     #[test]
     fn a_busy_server_is_not_a_spent_account() {
         let overloaded = REFUSAL.replace(
