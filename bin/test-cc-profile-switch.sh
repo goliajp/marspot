@@ -18,6 +18,12 @@
 # What they have in common is that every assertion about that line read
 # the line as text. This runs it.
 #
+# A fourth came on 2026-10-03: a pane switched to Opus with /model was
+# moved to another profile and came back on Fable, that profile's
+# default, because the resume line named no model. So the stand-in
+# reports a model the way claude does, through the status-line hook,
+# and comes up on its profile's default unless it is told otherwise.
+#
 # claude itself is not in the chain: a stand-in records how it was
 # called and waits. Driving the real CLI would sign into the user's
 # accounts and end their sessions.
@@ -85,10 +91,15 @@ rm -rf "$SB"; mkdir -p "$SB/bin" "$SB/work" "$SB/elsewhere"
 # basename, and a `#!` script is exec'd as `/bin/sh <path>` -- argv[0]
 # would be `sh` and nothing would ever be recognised.
 #
-# It does three things the real one does and this test depends on:
+# It does four things the real one does and this test depends on:
 # records how it was called (including the directory it is running
 # in), writes the session record the plugin reads to learn which
-# conversation a pane is on, and then waits.
+# conversation a pane is on, reports its model and effort through the
+# status-line hook, and then waits.
+#
+# The model is the one --model named, or else its profile's default:
+# Opus on profile 1, Fable on profile 2. That difference is the case:
+# a switch that drops the model lands the session on Fable.
 #
 # It also moves itself into $SB/work while the pane's shell stays in
 # $SB/elsewhere. That divergence is the point: the session lives where
@@ -119,6 +130,34 @@ int main(int argc, char **argv) {
             fprintf(s, "{\"sessionId\":\"$UUID\",\"kind\":\"interactive\"}");
             fclose(s);
         }
+    }
+    // The model and effort it runs with: what it was told, or its
+    // profile's default.
+    const char *model = 0, *effort = 0;
+    for (int i = 1; i + 1 < argc; i++) {
+        if (!strcmp(argv[i], "--model")) model = argv[i + 1];
+        if (!strcmp(argv[i], "--effort")) effort = argv[i + 1];
+    }
+    int p1 = cfg && strstr(cfg, "/.claude-profile-1");
+    if (!model) model = p1 ? "claude-opus-5-5" : "claude-fable-5-1[1m]";
+    if (!effort) effort = p1 ? "medium" : "high";
+    const char *shown = !strncmp(model, "claude-opus-5-5", 15) ? "Opus 5.5"
+                      : !strncmp(model, "claude-fable-5-1", 16) ? "Fable 5.1" : model;
+    // What claude does with the command its settings name: run it with
+    // the status-line payload on stdin. The sandbox leaves the real
+    // settings alone, so the command is the one the hook installs.
+    // MARSPOT_STATE_DIR is set here rather than inherited: if the
+    // pane's environment had lost it, the hook would write into the
+    // installed app's state.
+    setenv("MARSPOT_STATE_DIR", "$MARSPOT_STATE_DIR", 1);
+    FILE *hook = popen("'$SHELL_BIN' --cc-statusline", "w");
+    if (hook) {
+        fprintf(hook,
+            "{\"session_id\":\"$UUID\",\"transcript_path\":\"%s/projects/x/$UUID.jsonl\","
+            "\"cwd\":\"%s\",\"model\":{\"id\":\"%s\",\"display_name\":\"%s\"},"
+            "\"effort\":{\"level\":\"%s\"},\"version\":\"stand-in\"}",
+            cfg ? cfg : "-", cwd, model, shown, effort);
+        pclose(hook);
     }
     FILE *f = fopen("$CLAUDE_LOG", "a");
     // Nothing to record means this test can observe nothing, and a
@@ -227,6 +266,20 @@ wait_for "claudecode.*sid=$SID|session.bound.*$SID" 60 \
   || fail "the plugin never recognised the pane's agent"
 ok "the plugin bound the pane to it"
 
+# A switch needs the pane's model and effort, from the hook's record
+# and the scan, before it will start anything.
+RECORD="$MARSPOT_STATE_DIR/plugins/claudecode/model/$UUID"
+for (( i = 0; i < 100; i++ )); do
+  grep -q '^id=claude-opus-5-5$' "$RECORD" 2>/dev/null && break
+  sleep 0.2
+done
+grep -q '^id=claude-opus-5-5$' "$RECORD" 2>/dev/null \
+  || fail "the hook left no record of the model ($(tr '\n' '|' < "$RECORD" 2>/dev/null))"
+ok "the hook recorded the model as claude names it"
+wait_for "badge.changed.*sid=$SID badge=\"P1@opus-5-5.+medium\"" 30 \
+  || fail "the badge never showed the pane's model and effort"
+ok "the scan read the same model and effort"
+
 echo "==> picking profile 2 from the badge menu"
 echo "$SID 2" > "$MENU_FILE.tmp" && mv "$MENU_FILE.tmp" "$MENU_FILE"
 wait_for 'DEV_BADGE_MENU' 20 || fail "the seam never fired"
@@ -254,6 +307,11 @@ ok "it resumed the conversation rather than starting a new one"
 grep -q "cwd=$WORK" <<<"$SECOND" \
   || fail "the resume ran where the shell stood, not where the session lives: $SECOND"
 ok "it resumed in the session's own directory, not the shell's"
+grep -q -- "--model claude-opus-5-5 " <<<"$SECOND " \
+  || fail "the new claude was not told the model it was on, so it took profile 2's: $SECOND"
+grep -q -- "--effort medium" <<<"$SECOND" \
+  || fail "the new claude was not told the effort it was on: $SECOND"
+ok "it came back on the model and effort it was on, not profile 2's defaults"
 
 # The hold over the pane lifts when the run ends, and the run cleared
 # the screen itself -- so it has to outlast the first frame.
