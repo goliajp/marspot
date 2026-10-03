@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.218"  # a refusal counts only if it reached the claude now running
+shell   = "0.7.219"  # a profile picked by hand is left until the pane is refused there
 core    = "0.12.257"  # glyphs read the published format; the grid is off the local layouts
 session = "0.11.137"  # a timing assertion says when it is measuring the host
