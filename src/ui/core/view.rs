@@ -36,7 +36,8 @@
 //! ```
 
 use marspot_term::layout::{Rect, Alignment};
-use crate::render_metal::{CellInstance, GlyphInstance, UiRectInstance, rgba8_of_f32};
+use crate::frame_build::color::rgba8_of_f32;
+use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance, UiRectInstance};
 use crate::font_cache::FontCache;
 use crate::glyph_atlas::GlyphAtlas;
 

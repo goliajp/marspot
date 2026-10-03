@@ -7,7 +7,7 @@ use marspot_term::layout::Rect;
 
 use crate::font_cache::FontCache;
 use crate::glyph_atlas::GlyphAtlas;
-use crate::render_metal::{CellInstance, GlyphInstance, UiRectInstance};
+use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance, UiRectInstance};
 use crate::ui::components::cc_usage_modal::{
     card_height, cc_bars_height, fit_ellipsis, metric, timeline_range, timeline_row_height,
     CcUsageRender, CcUsageWindowRender,

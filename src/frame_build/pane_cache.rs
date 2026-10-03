@@ -6,7 +6,7 @@ use crate::frame_build::session::push_session;
 use crate::glyph_atlas::GlyphAtlas;
 use crate::layout::{CellRect, Layout};
 use crate::render::SessionView;
-use crate::render_metal::{CellInstance, GlyphInstance, UiRectInstance};
+use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance, UiRectInstance};
 use crate::frame_build::frame::BuildStats;
 
 /// F1+13 — cached per-pane render contributions.  When a pane's

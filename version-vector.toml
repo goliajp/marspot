@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.226"  # the refusal reader is private to the plugin that uses it
-core    = "0.12.270"  # a frame is assembled outside the backend
+core    = "0.12.271"  # frame layout no longer reaches into the Metal renderer
 session = "0.11.137"  # a timing assertion says when it is measuring the host

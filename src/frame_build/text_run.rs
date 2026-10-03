@@ -5,7 +5,8 @@
 use crate::font_cache::FontCache;
 use crate::glyph_atlas::{AtlasEntry, GlyphAtlas, GlyphKey, SlotMetrics};
 use crate::frame_build::glyph_resolve::text_glyph_key;
-use crate::render_metal::{rgba8_of_f32, GlyphInstance};
+use crate::frame_build::color::rgba8_of_f32;
+use golia_ui_core::scene::GlyphInstance;
 
 /// Lay a run of text starting at baseline `(x, baseline_y)` in
 /// physical pixels, advancing one monospace cell per char.  Shared

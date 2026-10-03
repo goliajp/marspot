@@ -9,7 +9,8 @@ use crate::glyph_atlas::{GlyphAtlas, SlotMetrics};
 use crate::grid::Grid;
 use crate::layout::CellRect;
 use crate::render::SessionView;
-use crate::render_metal::{rgba8_of_f32, CellInstance, GlyphInstance, UiRectInstance};
+use crate::frame_build::color::rgba8_of_f32;
+use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance, UiRectInstance};
 use crate::frame_build::session_marks::*;
 
 /// What every part of a pane's drawing reads: the view, where its grid
