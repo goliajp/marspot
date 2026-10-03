@@ -5,7 +5,8 @@
 use crate::frame_build::palette::*;
 use crate::layout::{Layout, Rect};
 use crate::render::SidebarEntry;
-use crate::render_metal::{rgba8_of_f32, UiRectInstance};
+use crate::frame_build::color::rgba8_of_f32;
+use golia_ui_core::scene::UiRectInstance;
 use crate::session::SessionState;
 use crate::ui::components::{
     Button, ButtonStyle, GridEdges, GridItem, GridSeams, IconPosition, IconSpec, Outline,

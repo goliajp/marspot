@@ -129,3 +129,31 @@ fn the_graphics_check_catches_a_texture_field() {
 }
 
 const GRAPHICS_WORDS: [&str; 5] = ["MTL", "objc2_metal", "ProtocolObject", "ID3D12", "VkImage"];
+
+/// Laying out a frame turns panes, chrome and text into instances; any
+/// backend draws those.  Reaching into the Metal renderer, or naming a
+/// graphics API, from that code ties the layout to one backend again.
+#[test]
+fn the_frame_layout_names_no_backend() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/frame_build");
+    let mut seen = 0;
+    for entry in std::fs::read_dir(&dir).expect("src/frame_build") {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        seen += 1;
+        let src = std::fs::read_to_string(&path).unwrap();
+        for w in GRAPHICS_WORDS.iter().chain(&["render_metal"]) {
+            assert!(!src.contains(w), "{} mentions {w}", path.display());
+        }
+    }
+    assert!(seen >= 10, "read only {seen} files from src/frame_build");
+}
+
+/// And it still catches the import every layout file used to have.
+#[test]
+fn the_backend_check_catches_an_import_from_the_renderer() {
+    let was = "use crate::render_metal::{rgba8_of_f32, CellInstance, GlyphInstance};";
+    assert!(GRAPHICS_WORDS.iter().chain(&["render_metal"]).any(|w| was.contains(w)));
+}

@@ -8,7 +8,8 @@ use crate::frame_build::text_run::push_text_run;
 use crate::glyph_atlas::{GlyphAtlas, SlotMetrics};
 use crate::layout::CellRect;
 use crate::render::SessionView;
-use crate::render_metal::{rgba8_of_f32, CellInstance, GlyphInstance};
+use crate::frame_build::color::rgba8_of_f32;
+use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance};
 use crate::frame_build::session::{PaneGeom, PaneOut};
 
 /// The pane's title strip: its seam, its label, the plugin badge and the

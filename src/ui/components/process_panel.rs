@@ -8,7 +8,7 @@ use marspot_term::layout::{Alignment, Rect};
 
 use crate::font_cache::FontCache;
 use crate::glyph_atlas::GlyphAtlas;
-use crate::render_metal::{CellInstance, GlyphInstance, UiRectInstance};
+use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance, UiRectInstance};
 use crate::ui::components::modal_frame::{MODAL_FRAME_BG, MODAL_FRAME_BORDER, MODAL_FRAME_CORNER_RADIUS};
 
 /// F3+4 — one row in the detail process-tree panel (right column of

@@ -3,7 +3,7 @@
 //! corner_radius = size/2) anchored to the left edge of a title bar.
 
 use marspot_term::layout::Rect;
-use crate::render_metal::UiRectInstance;
+use golia_ui_core::scene::UiRectInstance;
 
 /// Layout: 3 dots anchored left.  Rects use physical px.
 #[derive(Debug, Clone)]
@@ -156,7 +156,7 @@ pub fn paint_discs(
     let plain = |r: Rect, color: [f32; 4], radius: f32| UiRectInstance {
         origin: [r.x as f32, r.y_top as f32],
         size: [r.w as f32, r.h as f32],
-        fill: crate::render_metal::rgba8_of_f32(color),
+        fill: crate::frame_build::color::rgba8_of_f32(color),
         border: golia_ui_core::Rgba8::TRANSPARENT,
         radius,
         // No rim: the shader strokes borders *inside* the shape, so
