@@ -83,31 +83,22 @@ fn the_rasteriser_names_no_platform() {
     assert!(body.contains("FontId"), "the font is identified by its id");
 }
 
-/// `Shaper` is **not** portable yet, and this pins that rather than
-/// leaving it to be discovered.
-///
-/// It takes `&CTFont` plus an intern callback handing back `CTFont`s
-/// that CoreText found mid-shape. Closing it means the font table owns
-/// the name dedup, which puts the per-cell `is_color_font` read behind
-/// that table's lock -- a cost that wants measuring, so it is a
-/// separate change.
-///
-/// When someone does it, this test fails and tells them to move the
-/// name into the list above. That is the point: the gap cannot widen
-/// quietly and cannot be forgotten.
+/// `Shaper` used to take `&CTFont` and a callback handing back the
+/// `CTFont`s CoreText found mid-shape. It takes a `FontId` now, and the
+/// implementation registers fallbacks in its own table; the caller's
+/// per-font snapshots catch up after the call (see `FontCache`'s test
+/// that a font found while shaping is known before anyone asks).
 #[test]
-fn the_shaper_is_still_not_portable_and_this_is_the_record_of_it() {
+fn the_shaper_names_no_platform() {
     let body = trait_body(&source(), "Shaper");
-    let hits: Vec<&str> = PLATFORM_WORDS
-        .iter()
-        .copied()
-        .filter(|w| body.contains(w))
-        .collect();
-    assert_eq!(
-        hits,
-        ["CTFont"],
-        "`Shaper`'s remaining platform coupling changed. If it is now \
-         clean, move it to `the_rasteriser_names_no_platform` and delete \
-         this test; if something new crept in, that is a step backwards."
-    );
+    for w in PLATFORM_WORDS {
+        assert!(
+            !body.contains(w),
+            "`Shaper` mentions {w}. An implementation on another platform \
+             cannot satisfy that. Take a `FontId` and register fallbacks in \
+             the implementation's own table."
+        );
+    }
+    assert!(body.contains("fn shape"), "found something that is not the trait");
+    assert!(body.contains("FontId"), "the font is identified by its id");
 }

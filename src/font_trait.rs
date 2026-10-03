@@ -32,8 +32,6 @@
 
 use std::sync::Arc;
 
-use core_text::font::CTFont;
-
 use crate::font_cache::CoreTextFontTable;
 use crate::glyph_atlas::{FontId, SlotMetrics};
 
@@ -204,37 +202,51 @@ impl MockRasteriser {
     }
 }
 
-/// Phase 10b — line shaper.  Same scope as `Rasteriser`: macOS impl
-/// wraps `font_shape::shape_line`; tests can plug `MockShaper` to
-/// drive the `FontCache.shape_cache` without spinning up CoreText.
+/// Line shaper: text in a font, glyphs out, each naming the font it
+/// came from by id.  The macOS implementation wraps
+/// `font_shape::shape_line`; `MockShaper` drives the shape cache
+/// without CoreText.
 ///
-/// The trait method takes a `&mut dyn FnMut(CTFont) -> u32` for the
-/// fallback-font intern callback, so callers (FontCache) can hand
-/// the closure their `FontRegistry::intern` without committing to a
-/// generic type parameter on the trait.  `&dyn` keeps the trait
-/// object-safe.
+/// The font is an id, like `Rasteriser`'s.  Shaping can turn up fonts
+/// the caller never registered -- CoreText falls back mid-line -- and
+/// the implementation registers those in its own table; the caller
+/// catches its per-font snapshots up afterwards.
 pub trait Shaper: Send + Sync + 'static {
     fn shape(
         &self,
         text: &str,
-        base_font: &CTFont,
+        font: FontId,
         opts: crate::font_shape::ShapeOptions,
-        intern: &mut dyn FnMut(CTFont) -> u32,
     ) -> Vec<crate::font_shape::ShapedGlyph>;
 }
 
-/// macOS-native shaper: thin wrapper around `font_shape::shape_line`.
-pub struct CoreTextShaper;
+/// macOS shaper over `font_shape::shape_line`, registering the
+/// fallback fonts CoreText finds in the shared table.
+pub struct CoreTextShaper {
+    pub fonts: Arc<CoreTextFontTable>,
+}
 
 impl Shaper for CoreTextShaper {
     fn shape(
         &self,
         text: &str,
-        base_font: &CTFont,
+        font: FontId,
         opts: crate::font_shape::ShapeOptions,
-        intern: &mut dyn FnMut(CTFont) -> u32,
     ) -> Vec<crate::font_shape::ShapedGlyph> {
-        crate::font_shape::shape_line(text, base_font, opts, intern)
+        let Some(base) = self.fonts.get(font as usize) else { return Vec::new() };
+        // A run in the base font comes back as the base font's id, not
+        // as whatever its name is registered under.  SF Pro's weight
+        // and size variants all report the same postscript name, so a
+        // lookup by name would answer with whichever variant was
+        // registered first: Bold 24pt shaping as Bold 40pt.
+        let base_name = base.postscript_name();
+        crate::font_shape::shape_line(text, &base, opts, |f| {
+            if f.postscript_name() == base_name {
+                font
+            } else {
+                self.fonts.intern(f) as FontId
+            }
+        })
     }
 }
 
@@ -249,9 +261,8 @@ impl Shaper for MockShaper {
     fn shape(
         &self,
         _text: &str,
-        _base_font: &CTFont,
+        _font: FontId,
         _opts: crate::font_shape::ShapeOptions,
-        _intern: &mut dyn FnMut(CTFont) -> u32,
     ) -> Vec<crate::font_shape::ShapedGlyph> {
         self.canned.clone()
     }
@@ -291,9 +302,6 @@ mod tests {
     /// custom shaper for headless tests.
     #[test]
     fn mock_shaper_emits_canned_glyphs() {
-        let Ok(font) = new_from_name("Menlo", 13.0) else {
-            return;
-        };
         let canned = vec![
             crate::font_shape::ShapedGlyph {
                 font_id: 99,
@@ -309,21 +317,10 @@ mod tests {
             },
         ];
         let shaper = MockShaper { canned: canned.clone() };
-        let mut intern_calls = 0;
-        let mut intern = |_f: CTFont| -> u32 {
-            intern_calls += 1;
-            0
-        };
-        let out = shaper.shape(
-            "ignored",
-            &font,
-            crate::font_shape::ShapeOptions::full(),
-            &mut intern,
-        );
+        let out = shaper.shape("ignored", 0, crate::font_shape::ShapeOptions::full());
         assert_eq!(out.len(), canned.len());
         assert_eq!(out[0].glyph_id, canned[0].glyph_id);
         assert_eq!(out[1].pen_x_px, canned[1].pen_x_px);
-        assert_eq!(intern_calls, 0, "mock should not call intern");
     }
 
     /// CoreTextShaper just delegates — calling `shape_line` directly
@@ -336,8 +333,8 @@ mod tests {
         };
         let opts = crate::font_shape::ShapeOptions::full();
         let direct = crate::font_shape::shape_line("Hi!", &font, opts, |_| 0);
-        let mut via_trait_intern = |_f: CTFont| -> u32 { 0 };
-        let via_trait = CoreTextShaper.shape("Hi!", &font, opts, &mut via_trait_intern);
+        let shaper = CoreTextShaper { fonts: CoreTextFontTable::single(font.clone()) };
+        let via_trait = shaper.shape("Hi!", 0, opts);
         assert_eq!(direct.len(), via_trait.len(), "trait must match free fn");
         for i in 0..direct.len() {
             assert_eq!(direct[i].glyph_id, via_trait[i].glyph_id);
