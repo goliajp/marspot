@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.226"  # the refusal reader is private to the plugin that uses it
-core    = "0.12.264"  # the shaper is given a font id and registers fallbacks itself
+core    = "0.12.265"  # the glyph atlas writes through a sink; the texture is the backend's
 session = "0.11.137"  # a timing assertion says when it is measuring the host

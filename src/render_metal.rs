@@ -759,6 +759,9 @@ pub struct MetalRenderer {
     /// `atlas` so the mono R8 path stays untouched; populated only when a
     /// colour glyph is first seen.
     color_atlas: GlyphAtlas,
+    /// The two atlases' textures, bound by the glyph passes.
+    atlas_texture: std::sync::Arc<MetalAtlasTexture>,
+    color_atlas_texture: std::sync::Arc<MetalAtlasTexture>,
     /// Per-frame instance scratch.  Reset at the start of each
     /// `render_layout` so per-frame allocations stay zero in the
     /// steady state.
@@ -873,12 +876,12 @@ impl MetalRenderer {
         // without forcing rebuilds in steady state.  Still bounded:
         // `get_or_rasterize` does an atomic rebuild on full so the
         // user never sees silently-blank cells.
-        let atlas = GlyphAtlas::new(&device, 4096, 4096, font.font_table())?;
+        let (atlas, atlas_texture) = new_atlas(&device, 4096, 4096, false, font.font_table())?;
         // 1024×1024 BGRA8 colour atlas = 4 MiB.  Holds full-colour emoji
         // (~cell-sized slots) — a small working set, so 1024² is ample
         // and keeps the colour path's footprint to 4 MiB.  Same shelf
         // packer + atomic-rebuild-on-full bound as the mono atlas.
-        let color_atlas = GlyphAtlas::new_color(&device, 1024, 1024, font.font_table())?;
+        let (color_atlas, color_atlas_texture) = new_atlas(&device, 1024, 1024, true, font.font_table())?;
 
         let layer = { CAMetalLayer::new() };
         unsafe {
@@ -964,6 +967,8 @@ impl MetalRenderer {
             font,
             atlas,
             color_atlas,
+            atlas_texture,
+            color_atlas_texture,
             cells_scratch: Vec::new(),
             dots_scratch: Vec::new(),
             ui_rects_scratch: Vec::new(),
@@ -1009,12 +1014,12 @@ impl MetalRenderer {
         // without forcing rebuilds in steady state.  Still bounded:
         // `get_or_rasterize` does an atomic rebuild on full so the
         // user never sees silently-blank cells.
-        let atlas = GlyphAtlas::new(&device, 4096, 4096, font.font_table())?;
+        let (atlas, atlas_texture) = new_atlas(&device, 4096, 4096, false, font.font_table())?;
         // 1024×1024 BGRA8 colour atlas = 4 MiB.  Holds full-colour emoji
         // (~cell-sized slots) — a small working set, so 1024² is ample
         // and keeps the colour path's footprint to 4 MiB.  Same shelf
         // packer + atomic-rebuild-on-full bound as the mono atlas.
-        let color_atlas = GlyphAtlas::new_color(&device, 1024, 1024, font.font_table())?;
+        let (color_atlas, color_atlas_texture) = new_atlas(&device, 1024, 1024, true, font.font_table())?;
         Ok(Self {
             fonts_built_at_scale: crate::ui::chrome_scale(),
             device,
@@ -1031,6 +1036,8 @@ impl MetalRenderer {
             font,
             atlas,
             color_atlas,
+            atlas_texture,
+            color_atlas_texture,
             cells_scratch: Vec::new(),
             dots_scratch: Vec::new(),
             ui_rects_scratch: Vec::new(),
@@ -1402,6 +1409,8 @@ impl MetalRenderer {
             &self.fg_sampler,
             &mut self.atlas,
             &mut self.color_atlas,
+            self.atlas_texture.texture(),
+            self.color_atlas_texture.texture(),
             &self.device,
             &mut self.font,
             Some(MTLClearColor { red: 0.078, green: 0.086, blue: 0.110, alpha: 1.0 }),
@@ -1453,6 +1462,8 @@ impl MetalRenderer {
             ref mut font,
             ref mut atlas,
             ref mut color_atlas,
+            ref atlas_texture,
+            ref color_atlas_texture,
             ref mut cells_scratch,
             ref mut glyphs_scratch,
             ref mut color_glyphs_scratch,
@@ -1531,8 +1542,8 @@ impl MetalRenderer {
             fg_color_pipeline,
             scene_ui_pipeline,
             fg_sampler,
-            atlas,
-            color_atlas,
+            atlas_texture.texture(),
+            color_atlas_texture.texture(),
             device,
             cells_scratch,
             dots_scratch,
@@ -1576,7 +1587,7 @@ impl MetalRenderer {
                 encode_canvas_into(
                     &canvas, &texture, &cmd,
                     scene_ui_pipeline, fg_pipeline, fg_color_pipeline, fg_sampler,
-                    atlas, color_atlas, device, font,
+                    atlas, color_atlas, atlas_texture.texture(), color_atlas_texture.texture(), device, font,
                     None, &viewport_px,
                     chrome_cell_w, chrome_cell_h, chrome_ascent,
                     false,
@@ -1605,6 +1616,8 @@ impl MetalRenderer {
                 fg_sampler,
                 atlas,
                 color_atlas,
+                atlas_texture.texture(),
+                color_atlas_texture.texture(),
                 device,
                 font,
                 None, // Load — preserve everything below
@@ -1712,6 +1725,8 @@ impl MetalRenderer {
             ref mut font,
             ref mut atlas,
             ref mut color_atlas,
+            ref atlas_texture,
+            ref color_atlas_texture,
             ref mut cells_scratch,
             ref mut glyphs_scratch,
             ref mut color_glyphs_scratch,
@@ -1795,8 +1810,8 @@ impl MetalRenderer {
             fg_color_pipeline,
             scene_ui_pipeline,
             fg_sampler,
-            atlas,
-            color_atlas,
+            atlas_texture.texture(),
+            color_atlas_texture.texture(),
             device,
             cells_scratch,
             dots_scratch,
@@ -1839,7 +1854,7 @@ impl MetalRenderer {
                 encode_canvas_into(
                     &canvas, target, &cmd,
                     scene_ui_pipeline, fg_pipeline, fg_color_pipeline, fg_sampler,
-                    atlas, color_atlas, device, font,
+                    atlas, color_atlas, atlas_texture.texture(), color_atlas_texture.texture(), device, font,
                     None, &viewport_px,
                     chrome_cell_w, chrome_cell_h, chrome_ascent,
                     false,
@@ -1853,7 +1868,7 @@ impl MetalRenderer {
             encode_canvas_into(
                 &canvas, target, &cmd,
                 scene_ui_pipeline, fg_pipeline, fg_color_pipeline, fg_sampler,
-                atlas, color_atlas, device, font,
+                atlas, color_atlas, atlas_texture.texture(), color_atlas_texture.texture(), device, font,
                 None, &viewport_px,
                 chrome_cell_w, chrome_cell_h, chrome_ascent,
                 false,
@@ -1919,8 +1934,8 @@ fn encode_passes(
     fg_color_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
     scene_ui_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
     fg_sampler: &ProtocolObject<dyn MTLSamplerState>,
-    atlas: &GlyphAtlas,
-    color_atlas: &GlyphAtlas,
+    atlas_texture: &ProtocolObject<dyn MTLTexture>,
+    color_atlas_texture: &ProtocolObject<dyn MTLTexture>,
     device: &ProtocolObject<dyn MTLDevice>,
     cells: &[CellInstance],
     dots: &[CellInstance],
@@ -2032,11 +2047,11 @@ fn encode_passes(
                 enc.setVertexBuffer_offset_atIndex(Some(buf), run.offset as usize, 0);
                 match kind {
                     Kind::Glyph => {
-                        enc.setFragmentTexture_atIndex(Some(atlas.texture()), 0);
+                        enc.setFragmentTexture_atIndex(Some(atlas_texture), 0);
                         enc.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
                     }
                     Kind::ColorGlyph => {
-                        enc.setFragmentTexture_atIndex(Some(color_atlas.texture()), 0);
+                        enc.setFragmentTexture_atIndex(Some(color_atlas_texture), 0);
                         enc.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
                     }
                     _ => {}
@@ -4168,6 +4183,96 @@ pub fn take_instance_buffer_cost() -> (u64, u64) {
 }
 
 
+/// The glyph atlas's texture: the half of the atlas that is Metal's.
+///
+/// The atlas packs and evicts on the CPU and writes each new glyph
+/// through `AtlasSink` the moment it is rasterised; this is what it
+/// writes into, and what the glyph passes bind.  The renderer keeps one
+/// handle and the atlas the other.
+pub struct MetalAtlasTexture {
+    texture: Retained<ProtocolObject<dyn MTLTexture>>,
+    width: u32,
+    height: u32,
+    bpp: u32,
+}
+
+impl MetalAtlasTexture {
+    /// An R8 texture for the mono atlas, or a BGRA8 one for colour.
+    pub fn new(
+        device: &ProtocolObject<dyn MTLDevice>,
+        width: u32,
+        height: u32,
+        color: bool,
+    ) -> Result<std::sync::Arc<Self>, String> {
+        let (format, bpp) = if color {
+            (MTLPixelFormat::BGRA8Unorm, 4u32)
+        } else {
+            (MTLPixelFormat::R8Unorm, 1u32)
+        };
+        let descriptor = unsafe {
+            objc2_metal::MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                format,
+                width as usize,
+                height as usize,
+                false,
+            )
+        };
+        // Managed: CPU writes via replaceRegion, GPU reads.  On Apple
+        // Silicon Shared would also work and skip the synchronize step,
+        // but Managed is portable across Intel and Apple Silicon and the
+        // difference is irrelevant for an atlas written on a miss only.
+        descriptor.setStorageMode(objc2_metal::MTLStorageMode::Managed);
+        descriptor.setUsage(objc2_metal::MTLTextureUsage::ShaderRead);
+        let texture = device
+            .newTextureWithDescriptor(&descriptor)
+            .ok_or_else(|| "newTextureWithDescriptor returned nil".to_string())?;
+        Ok(std::sync::Arc::new(Self { texture, width, height, bpp }))
+    }
+
+    pub fn texture(&self) -> &ProtocolObject<dyn MTLTexture> {
+        &self.texture
+    }
+}
+
+impl crate::glyph_atlas::AtlasSink for MetalAtlasTexture {
+    fn dims(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn bytes_per_pixel(&self) -> u32 {
+        self.bpp
+    }
+
+    fn upload(&self, bytes: &[u8], w: u32, h: u32, x: u32, y: u32) {
+        let region = objc2_metal::MTLRegion {
+            origin: objc2_metal::MTLOrigin { x: x as usize, y: y as usize, z: 0 },
+            size: objc2_metal::MTLSize { width: w as usize, height: h as usize, depth: 1 },
+        };
+        unsafe {
+            let ptr = NonNull::new(bytes.as_ptr() as *mut c_void).unwrap();
+            self.texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                region,
+                0,
+                ptr,
+                (w * self.bpp) as usize,
+            );
+        }
+    }
+}
+
+/// A glyph atlas over a new Metal texture, and the texture to bind it by.
+pub fn new_atlas(
+    device: &ProtocolObject<dyn MTLDevice>,
+    width: u32,
+    height: u32,
+    color: bool,
+    fonts: std::sync::Arc<crate::font_cache::CoreTextFontTable>,
+) -> Result<(GlyphAtlas, std::sync::Arc<MetalAtlasTexture>), String> {
+    let texture = MetalAtlasTexture::new(device, width, height, color)?;
+    let atlas = GlyphAtlas::new(texture.clone(), fonts)?;
+    Ok((atlas, texture))
+}
+
 /// Instance buffers that outlive the frame that fills them.
 ///
 /// Every pass used to hand its instances to `newBufferWithBytes`,
@@ -5057,6 +5162,8 @@ pub fn encode_canvas_into(
     fg_sampler: &ProtocolObject<dyn MTLSamplerState>,
     atlas: &mut GlyphAtlas,
     color_atlas: &mut GlyphAtlas,
+    atlas_texture: &ProtocolObject<dyn MTLTexture>,
+    color_atlas_texture: &ProtocolObject<dyn MTLTexture>,
     device: &ProtocolObject<dyn MTLDevice>,
     font: &mut FontCache,
     clear_color: Option<MTLClearColor>,
@@ -5144,7 +5251,7 @@ pub fn encode_canvas_into(
                     unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
                 }
                 unsafe {
-                    enc.setFragmentTexture_atIndex(Some(atlas.texture()), 0);
+                    enc.setFragmentTexture_atIndex(Some(atlas_texture), 0);
                     enc.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
                     enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
                         MTLPrimitiveType::Triangle, 0, 6, run.count,
@@ -5166,7 +5273,7 @@ pub fn encode_canvas_into(
                     unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
                 }
                 unsafe {
-                    enc.setFragmentTexture_atIndex(Some(color_atlas.texture()), 0);
+                    enc.setFragmentTexture_atIndex(Some(color_atlas_texture), 0);
                     enc.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
                     enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
                         MTLPrimitiveType::Triangle, 0, 6, run.count,
@@ -5212,7 +5319,8 @@ impl MetalRenderer {
         encode_canvas_into(
             canvas, target, cmd,
             &self.scene_ui_pipeline, &self.fg_pipeline, &self.fg_color_pipeline, &self.fg_sampler,
-            &mut self.atlas, &mut self.color_atlas, &self.device, &mut self.font,
+            &mut self.atlas, &mut self.color_atlas,
+            self.atlas_texture.texture(), self.color_atlas_texture.texture(), &self.device, &mut self.font,
             clear_color, viewport_px,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
             ui_font,
@@ -7233,7 +7341,7 @@ mod tests {
             eprintln!("skipping: no Metal device");
             return;
         };
-        let Ok(mut atlas) = GlyphAtlas::new(&r.device, 512, 512, font.font_table()) else {
+        let Ok(mut atlas) = new_atlas(&r.device, 512, 512, false, font.font_table()).map(|(a, _)| a) else {
             eprintln!("skipping: atlas would not allocate");
             return;
         };
@@ -7399,7 +7507,6 @@ mod tests {
     /// instanced draw + readback.
     #[test]
     fn fg_pass_renders_one_atlas_glyph() {
-        use crate::glyph_atlas::GlyphAtlas;
         use core_text::font::new_from_name;
 
         let r = match MetalRenderer::new_headless() {
@@ -7411,10 +7518,11 @@ mod tests {
         };
 
         let font = new_from_name("Menlo", 13.0).expect("Menlo");
-        let mut atlas = GlyphAtlas::new(
+        let (mut atlas, atlas_texture) = new_atlas(
             &r.device,
             256,
             256,
+            false,
             crate::font_cache::CoreTextFontTable::single(font.clone()),
         )
         .expect("atlas");
@@ -7460,7 +7568,7 @@ mod tests {
         let glyphs = vec![one, GlyphInstance { origin: [36.0, 8.0], ..one }];
 
         let bytes = r
-            .render_glyphs_fg_offscreen(64, 64, atlas.texture(), &glyphs, (0.0, 0.0, 0.0, 1.0))
+            .render_glyphs_fg_offscreen(64, 64, atlas_texture.texture(), &glyphs, (0.0, 0.0, 0.0, 1.0))
             .expect("fg offscreen");
         assert_eq!(bytes.len(), 64 * 64 * 4);
 
@@ -7518,9 +7626,9 @@ mod tests {
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas =
-            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+            new_atlas(&device, 256, 256, false, font.font_table()).map(|(a, _)| a).expect("atlas");
         let mut color_atlas =
-            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
+            new_atlas(&device, 256, 256, true, font.font_table()).map(|(a, _)| a).expect("color atlas");
         let grid = crate::grid::Grid::new(10, 4);
         let layout = Layout::build(800.0, 600.0, 0.0, 0.0, 20.0, 1, 1, 8.0, 16.0);
         let view = SessionView {
@@ -7631,9 +7739,9 @@ mod tests {
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas =
-            GlyphAtlas::new(&device, 512, 512, font.font_table()).expect("atlas");
+            new_atlas(&device, 512, 512, false, font.font_table()).map(|(a, _)| a).expect("atlas");
         let mut color_atlas =
-            GlyphAtlas::new_color(&device, 64, 64, font.font_table()).expect("color atlas");
+            new_atlas(&device, 64, 64, true, font.font_table()).map(|(a, _)| a).expect("color atlas");
         let metrics = SlotMetrics { cell_w: 7, cell_h: 16, baseline_from_top: 12 };
 
         // The set the old rule fired on: narrow Ambiguous glyphs and
@@ -7726,9 +7834,9 @@ mod tests {
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas =
-            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+            new_atlas(&device, 256, 256, false, font.font_table()).map(|(a, _)| a).expect("atlas");
         let mut color_atlas =
-            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
+            new_atlas(&device, 256, 256, true, font.font_table()).map(|(a, _)| a).expect("color atlas");
         let grid = crate::grid::Grid::new(10, 4);
         let layout = Layout::build(800.0, 600.0, 0.0, 0.0, 20.0, 1, 1, 8.0, 16.0);
         let mk = |focused: bool, dormant: bool, recede: u32| SessionView {
@@ -7896,9 +8004,9 @@ mod tests {
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas =
-            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+            new_atlas(&device, 256, 256, false, font.font_table()).map(|(a, _)| a).expect("atlas");
         let mut color_atlas =
-            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
+            new_atlas(&device, 256, 256, true, font.font_table()).map(|(a, _)| a).expect("color atlas");
 
         // Six columns of text under a three-cell composition typed at
         // the start of the row — the placeholder's own shape.
@@ -7979,9 +8087,9 @@ mod tests {
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas =
-            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+            new_atlas(&device, 256, 256, false, font.font_table()).map(|(a, _)| a).expect("atlas");
         let mut color_atlas =
-            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
+            new_atlas(&device, 256, 256, true, font.font_table()).map(|(a, _)| a).expect("color atlas");
 
         let grid = Grid::new(10, 4);
         // 2x2 with a gutter: gutter > 0 is what turns the ring on.
@@ -8066,9 +8174,9 @@ mod tests {
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas =
-            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+            new_atlas(&device, 256, 256, false, font.font_table()).map(|(a, _)| a).expect("atlas");
         let mut color_atlas =
-            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
+            new_atlas(&device, 256, 256, true, font.font_table()).map(|(a, _)| a).expect("color atlas");
 
         let mut grid = Grid::new(10, 4);
         let cell_a = Cell {
@@ -8178,9 +8286,9 @@ mod tests {
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas =
-            GlyphAtlas::new(&device, 512, 512, font.font_table()).expect("atlas");
+            new_atlas(&device, 512, 512, false, font.font_table()).map(|(a, _)| a).expect("atlas");
         let mut color_atlas =
-            GlyphAtlas::new_color(&device, 512, 512, font.font_table()).expect("color atlas");
+            new_atlas(&device, 512, 512, true, font.font_table()).map(|(a, _)| a).expect("color atlas");
 
         // Skip on the (macOS-impossible) chance there's no colour emoji
         // font — the routing decision keys off the resolved font's
@@ -8273,9 +8381,9 @@ mod tests {
         let device = system_default_device().expect("metal device");
         let mut font = FontCache::build().expect("font");
         let mut atlas =
-            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+            new_atlas(&device, 256, 256, false, font.font_table()).map(|(a, _)| a).expect("atlas");
         let mut color_atlas =
-            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
+            new_atlas(&device, 256, 256, true, font.font_table()).map(|(a, _)| a).expect("color atlas");
         let mut grid = Grid::new(10, 4);
         grid.set_cell(0, 0, Cell { ch: 'A', attrs: Default::default() });
         grid.set_cell(2, 0, Cell { ch: 'B', attrs: Default::default() });
@@ -8385,9 +8493,9 @@ mod tests {
         let device = system_default_device().expect("metal device");
         let mut font = FontCache::build().expect("font");
         let mut atlas =
-            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+            new_atlas(&device, 256, 256, false, font.font_table()).map(|(a, _)| a).expect("atlas");
         let mut color_atlas =
-            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
+            new_atlas(&device, 256, 256, true, font.font_table()).map(|(a, _)| a).expect("color atlas");
         let grid = Grid::new(10, 4);
         let layout = Layout::build(
             font.cell_w * 10.0,
@@ -8520,9 +8628,9 @@ mod tests {
         let device = system_default_device().expect("metal device");
         let mut font = FontCache::build().expect("font");
         let mut atlas =
-            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+            new_atlas(&device, 256, 256, false, font.font_table()).map(|(a, _)| a).expect("atlas");
         let mut color_atlas =
-            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
+            new_atlas(&device, 256, 256, true, font.font_table()).map(|(a, _)| a).expect("color atlas");
         let grid = Grid::new(10, 4);
         let layout = Layout::build(
             font.cell_w * 10.0,
@@ -8607,9 +8715,9 @@ mod tests {
         let device = system_default_device().expect("metal device");
         let mut font = FontCache::build().expect("font");
         let mut atlas =
-            GlyphAtlas::new(&device, 256, 256, font.font_table()).expect("atlas");
+            new_atlas(&device, 256, 256, false, font.font_table()).map(|(a, _)| a).expect("atlas");
         let mut color_atlas =
-            GlyphAtlas::new_color(&device, 256, 256, font.font_table()).expect("color atlas");
+            new_atlas(&device, 256, 256, true, font.font_table()).map(|(a, _)| a).expect("color atlas");
         let mut grid = Grid::new(10, 4);
         grid.set_cell(0, 0, Cell { ch: 'A', attrs: Default::default() });
         let layout = Layout::build(

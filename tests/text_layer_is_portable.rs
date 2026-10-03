@@ -102,3 +102,30 @@ fn the_shaper_names_no_platform() {
     assert!(body.contains("fn shape"), "found something that is not the trait");
     assert!(body.contains("FontId"), "the font is identified by its id");
 }
+
+/// The glyph atlas packs and looks up on the CPU; the texture belongs to
+/// whichever backend draws, behind `AtlasSink`.  A graphics API's name
+/// in the atlas's source is that line being crossed again.
+#[test]
+fn the_glyph_atlas_names_no_graphics_api() {
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/glyph_atlas.rs"),
+    )
+    .expect("src/glyph_atlas.rs");
+    for w in GRAPHICS_WORDS {
+        assert!(
+            !src.contains(w),
+            "src/glyph_atlas.rs mentions {w}. Pixels leave the atlas through \
+             `AtlasSink::upload`; the texture lives in the backend."
+        );
+    }
+}
+
+/// And the check still catches what the file looked like before.
+#[test]
+fn the_graphics_check_catches_a_texture_field() {
+    let was = "texture: Retained<ProtocolObject<dyn MTLTexture>>,";
+    assert!(GRAPHICS_WORDS.iter().any(|w| was.contains(w)));
+}
+
+const GRAPHICS_WORDS: [&str; 5] = ["MTL", "objc2_metal", "ProtocolObject", "ID3D12", "VkImage"];
