@@ -7641,7 +7641,7 @@ impl CoreApp {
     /// new UI component kit (ModalFrame, TrafficLights, TabStrip,
     /// ScrollView).  Returns render data + populates parallel hit-test
     /// state.  All rects are physical pixels.
-    fn build_process_panel_render(&mut self, wi: usize) -> Option<marspot::render_metal::ProcessPanelRender> {
+    fn build_process_panel_render(&mut self, wi: usize) -> Option<marspot::ui::components::process_panel::ProcessPanelRender> {
         // F3+4 — char-level truncation with ASCII ellipsis (matches the
         // sidebar's `truncate_for_sidebar` style; kept inline to avoid
         // pulling a "process panel utils" module in for one helper).
@@ -7651,7 +7651,7 @@ impl CoreApp {
             let head: String = s.chars().take(max_chars.saturating_sub(1)).collect();
             format!("{head}…")
         }
-        use marspot::render_metal::{
+        use marspot::ui::components::process_panel::{
             ProcessPanelRender, ProcessPanelRow, ProcessPanelPaneRow,
         };
         use marspot::ui::components::ScrollView;
@@ -7805,10 +7805,10 @@ impl CoreApp {
         // `paint_process_panel_content`): same pad, same split.  The two
         // must stay in lockstep — this side places the kill buttons'
         // hit rects, the other draws them.
-        let pad = marspot::render_metal::PROCESS_PANEL_SIDE_PAD_LOGICAL as f64 * scale;
+        let pad = marspot::ui::components::process_panel::PROCESS_PANEL_SIDE_PAD_LOGICAL as f64 * scale;
         let content_x = frame.body.x + pad;
         let content_w = frame.body.w - pad * 2.0;
-        let master_w = content_w * marspot::render_metal::PROCESS_PANEL_MASTER_FRAC;
+        let master_w = content_w * marspot::ui::components::process_panel::PROCESS_PANEL_MASTER_FRAC;
         let master_rows_top = frame.body.y_top + pad + header_h;
         let mut pane_row_rects: Vec<marspot_term::layout::Rect> =
             Vec::with_capacity(pane_rows.len());

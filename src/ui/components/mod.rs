@@ -9,6 +9,7 @@ pub mod settings_modal;
 pub mod tab_strip;
 pub mod scroll_view;
 pub mod modal_frame;
+pub mod process_panel;
 pub mod search_overlay;
 pub mod panel;
 pub mod text_input;

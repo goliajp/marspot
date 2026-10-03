@@ -2268,8 +2268,8 @@ fn demo_process_panel(
     w_phys: f64,
     h_phys: f64,
     top_inset: f64,
-) -> marspot::render_metal::ProcessPanelRender {
-    use marspot::render_metal::{
+) -> marspot::ui::components::process_panel::ProcessPanelRender {
+    use marspot::ui::components::process_panel::{
         ProcessPanelPaneRow, ProcessPanelRender, ProcessPanelRow,
     };
     use marspot::ui::components::modal_frame::{ModalFrame, ModalLayoutSpec};

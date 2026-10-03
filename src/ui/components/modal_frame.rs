@@ -5,6 +5,11 @@
 
 use marspot_term::layout::Rect;
 
+/// The frame every modal is drawn in: fill, border, corner radius.
+pub(crate) const MODAL_FRAME_BG: [f32; 4] = [0.13, 0.14, 0.17, 1.0];
+pub(crate) const MODAL_FRAME_BORDER: [f32; 4] = [0.32, 0.34, 0.40, 1.0];
+pub(crate) const MODAL_FRAME_CORNER_RADIUS: f32 = 10.0;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ModalFrame {
     pub frame: Rect,
