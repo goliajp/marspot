@@ -2116,7 +2116,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
         Some("layout") => {
             // Six columns and long project names — the shape that
             // overflowed its own modal (2026-08-11).
-            renderer.set_layout_modal(Some(marspot::render_metal::LayoutModalRender {
+            renderer.set_layout_modal(Some(marspot::ui::components::layout_modal_paint::LayoutModalRender {
                 cols: std::env::var("MARSPOT_SHOT_COLS")
                     .ok().and_then(|v| v.parse().ok()).unwrap_or(6),
                 rows: std::env::var("MARSPOT_SHOT_ROWS")

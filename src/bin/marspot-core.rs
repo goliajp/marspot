@@ -9738,7 +9738,7 @@ impl CoreApp {
         // chain (custom > cwd basename > ordinal).  Empty slot if
         // the slot points at a pane index past the live count.
         self.renderer.set_layout_modal(if win!(self, wi).layout_modal_open {
-            use marspot::render_metal::{LayoutModalRender, LayoutModalDragRender};
+            use marspot::ui::components::layout_modal_paint::{LayoutModalRender, LayoutModalDragRender};
             let cells = win!(self, wi).pending_grid_cols * win!(self, wi).pending_grid_rows;
             let slot_titles: Vec<String> = (0..cells)
                 .map(|slot| {
