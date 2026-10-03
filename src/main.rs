@@ -2099,7 +2099,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
                     phys_w as f64, phys_h as f64, &settings, &mut measure, layout.top_inset,
                 )
             };
-            renderer.set_settings_panel(Some(marspot::render_metal::SettingsRender {
+            renderer.set_settings_panel(Some(marspot::ui::components::settings_paint::SettingsRender {
                 rect,
                 scroll: 0.0,
                 settings: (*settings).clone(),
