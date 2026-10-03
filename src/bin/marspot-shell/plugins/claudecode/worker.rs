@@ -89,7 +89,7 @@ pub(super) struct WorkerCtx {
     /// Nothing expires it here. It is compared against when the feed
     /// last measured that account, and a feed that has looked since is
     /// what makes it stale (`Room::refused_for_now`).
-    pub(super) last_refusal: HashMap<PathBuf, i64>,
+    pub(super) last_refusal: HashMap<PathBuf, super::quota::Refusal>,
     /// Per-jsonl: the last model actually read out of it.
     ///
     /// The fence answers "what may I read right now", which is not
@@ -451,12 +451,18 @@ impl WorkerCtx {
     ///
     /// Kept rather than re-derived because the window moves -- see
     /// `last_refusal` for how fast.
-    pub(super) fn remember_refusal(&mut self, path: &PathBuf, window: &str) -> Option<i64> {
-        if let Some(at) = super::last_quota_refusal(window) {
-            let kept = self.last_refusal.entry(path.clone()).or_insert(at);
-            *kept = (*kept).max(at);
+    pub(super) fn remember_refusal(
+        &mut self,
+        path: &PathBuf,
+        window: &str,
+    ) -> Option<super::quota::Refusal> {
+        if let Some(seen) = super::last_quota_refusal(window) {
+            let kept = self.last_refusal.entry(path.clone()).or_insert_with(|| seen.clone());
+            if seen.at > kept.at {
+                *kept = seen;
+            }
         }
-        self.last_refusal.get(path).copied()
+        self.last_refusal.get(path).cloned()
     }
 }
 
@@ -792,7 +798,7 @@ impl WorkerCtx {
             // shut out after that.
             let refused_at_for = match (&jsonl_path, tail.as_deref()) {
                 (Some(path), Some(window)) => self.remember_refusal(path, window),
-                (Some(path), None) => self.last_refusal.get(path).copied(),
+                (Some(path), None) => self.last_refusal.get(path).cloned(),
                 (None, _) => None,
             };
             new_vetoes.insert(
