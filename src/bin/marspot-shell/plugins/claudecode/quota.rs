@@ -115,6 +115,13 @@ impl Room {
     pub(super) fn refused_for(&self, model: Option<&str>) -> bool {
         match self {
             Room::Known { status, util_5h, util_7d, .. } => {
+                // The collector could not log in as this account. Its
+                // numbers are whatever was last read, and a claude
+                // started there cannot authenticate (P1 on 2026-10-03:
+                // 78% of the week, logged out).
+                if status == "auth_error" {
+                    return true;
+                }
                 if *util_5h >= WINDOW_SPENT || *util_7d >= WINDOW_SPENT {
                     return true;
                 }
@@ -481,6 +488,25 @@ mod tests {
             // Measured now, in the tests that are not about staleness.
             models_measured_at: i64::MAX, measured_at: i64::MAX,
         }
+    }
+
+    /// A logged-out account is nowhere to go, whatever its numbers
+    /// last said.
+    #[test]
+    fn an_account_that_cannot_log_in_is_out_for_every_pane() {
+        let logged_out = Room::Known {
+            status: "auth_error".into(),
+            util_5h: 0.0,
+            util_7d: 0.78,
+            reset_7d: 100,
+            models: vec![("fable".to_string(), 1.0)],
+            models_measured_at: i64::MAX,
+            measured_at: i64::MAX,
+        };
+        assert!(logged_out.refused_for(Some("opus-5-5")));
+        let r = vec![(1, logged_out), (5, fable_spent_but_open(5_000))];
+        let s = Situation { current: 4, needs_model: Some("opus-5-5"), ..situation(&r) };
+        assert_eq!(next_move(&s), Move::To(5), "not P1, whose renewal is nearer");
     }
 
     fn fable_refusal(at: i64) -> Refusal {
