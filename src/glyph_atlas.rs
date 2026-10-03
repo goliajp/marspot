@@ -1,18 +1,18 @@
-//! Glyph atlas — alpha-only MTLTexture that holds rasterised glyphs
-//! the FG-pass shader samples.
+//! Glyph atlas — packs rasterised glyphs into a texture the glyph pass
+//! samples, and looks them up by `(font_id, glyph_id)`.
 //!
-//! Used by the Metal renderer (`render_metal.rs`).  Lives in its own
-//! module because the responsibilities are clean: rasterise CT glyphs
-//! into a packed texture, look them up by `(font_id, glyph_id)`, evict
-//! when full.  The renderer doesn't need to know how packing or
-//! eviction work.
+//! Lives in its own module because the responsibilities are clean:
+//! rasterise glyphs, pack them, find them, evict when full.  The
+//! texture itself belongs to the backend that draws, behind
+//! [`AtlasSink`]; this module never names a graphics API.
 //!
 //! ## Format
 //!
-//! `MTLPixelFormat::R8Unorm`, single channel = alpha coverage 0..255.
-//! Colour comes from a per-cell uniform in the FG shader, so the atlas
+//! One byte a pixel, alpha coverage 0..255, for the mono atlas.
+//! Colour comes from a per-cell uniform in the glyph shader, so the atlas
 //! stays font-colour-agnostic and cells of different colours share
-//! glyph slots.
+//! glyph slots.  The colour atlas is four bytes a pixel, BGRA
+//! premultiplied.
 //!
 //! ## Packing
 //!
@@ -60,15 +60,8 @@ use core_graphics::font::CGGlyph;
 use core_graphics::geometry::CGPoint;
 use core_text::font::CTFont;
 use foreign_types::ForeignType;
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_metal::{
-    MTLDevice, MTLOrigin, MTLPixelFormat, MTLRegion, MTLSize, MTLStorageMode, MTLTexture,
-    MTLTextureDescriptor, MTLTextureUsage,
-};
 use marspot_term::fast_hash::FxHashMap;
 use std::ffi::c_void;
-use std::ptr::NonNull;
 
 /// `kCGImageAlphaOnly` — Apple's `CGImageAlphaInfo` value for an
 /// alpha-only bitmap context.  Not exposed as a constant by
@@ -361,8 +354,26 @@ struct Shelf {
     entries: Vec<GlyphKey>,
 }
 
+/// Where the atlas's pixels go.
+///
+/// The atlas packs and evicts on the CPU; the texture the GPU samples
+/// belongs to whichever backend is drawing.  This is the whole of what
+/// the atlas needs from it: how big it is, how many bytes a pixel takes,
+/// and a way to write a rectangle.  The write happens the moment a
+/// glyph is rasterised, as it always has, so no draw path has to
+/// remember to flush anything first.
+pub trait AtlasSink {
+    /// Width and height in pixels.
+    fn dims(&self) -> (u32, u32);
+    /// 1 for an alpha-only atlas, 4 for a colour one (BGRA, premultiplied).
+    fn bytes_per_pixel(&self) -> u32;
+    /// Write `bytes` -- `h` rows of `w * bytes_per_pixel()` -- with its
+    /// top-left at `(x, y)`.
+    fn upload(&self, bytes: &[u8], w: u32, h: u32, x: u32, y: u32);
+}
+
 pub struct GlyphAtlas {
-    texture: Retained<ProtocolObject<dyn MTLTexture>>,
+    sink: std::sync::Arc<dyn AtlasSink>,
     width: u32,
     height: u32,
     /// Bytes per pixel of the backing texture: 1 for the alpha-only
@@ -434,91 +445,35 @@ const PAD: u32 = 1;
 const LAST_USED_RESOLUTION: u64 = 8;
 
 impl GlyphAtlas {
-    /// Alpha-only (`R8Unorm`) atlas — the mono path for all text glyphs,
-    /// tinted by the per-cell foreground colour in the FG shader.
+    /// An atlas over `sink`, rasterising through CoreText: the alpha-only
+    /// mono path when the sink holds one byte a pixel, the colour path
+    /// (Apple Color Emoji) when it holds four.
     pub fn new(
-        device: &ProtocolObject<dyn MTLDevice>,
-        width: u32,
-        height: u32,
+        sink: std::sync::Arc<dyn AtlasSink>,
         fonts: std::sync::Arc<crate::font_cache::CoreTextFontTable>,
     ) -> Result<Self, String> {
-        Self::with_format(device, width, height, false, fonts)
-    }
-
-    /// Colour (`BGRA8Unorm`) atlas — holds full-colour glyphs (Apple Color
-    /// Emoji) sampled directly by the colour FG shader.  `color = true`
-    /// switches the texture format + the upload stride + the rasteriser.
-    pub fn new_color(
-        device: &ProtocolObject<dyn MTLDevice>,
-        width: u32,
-        height: u32,
-        fonts: std::sync::Arc<crate::font_cache::CoreTextFontTable>,
-    ) -> Result<Self, String> {
-        Self::with_format(device, width, height, true, fonts)
-    }
-
-    /// Phase 10 — same as `new` / `new_color` but plugs a caller-
-    /// supplied rasteriser.  Headless tests use this with
-    /// `MockRasteriser` to exercise shelf packing / LRU eviction
-    /// without a CoreText font.
-    pub fn new_with_rasteriser(
-        device: &ProtocolObject<dyn MTLDevice>,
-        width: u32,
-        height: u32,
-        color: bool,
-        rasteriser: Box<dyn crate::font_trait::Rasteriser>,
-    ) -> Result<Self, String> {
-        Self::with_format_and_rasteriser(device, width, height, color, rasteriser)
-    }
-
-    fn with_format(
-        device: &ProtocolObject<dyn MTLDevice>,
-        width: u32,
-        height: u32,
-        color: bool,
-        fonts: std::sync::Arc<crate::font_cache::CoreTextFontTable>,
-    ) -> Result<Self, String> {
-        let rasteriser: Box<dyn crate::font_trait::Rasteriser> = if color {
+        let rasteriser: Box<dyn crate::font_trait::Rasteriser> = if sink.bytes_per_pixel() == 4 {
             Box::new(crate::font_trait::CoreTextColorRasteriser { fonts })
         } else {
             Box::new(crate::font_trait::CoreTextMonoRasteriser { fonts })
         };
-        Self::with_format_and_rasteriser(device, width, height, color, rasteriser)
+        Self::new_with_rasteriser(sink, rasteriser)
     }
 
-    fn with_format_and_rasteriser(
-        device: &ProtocolObject<dyn MTLDevice>,
-        width: u32,
-        height: u32,
-        color: bool,
+    /// Same, with a caller-supplied rasteriser.  Headless tests use this
+    /// with `MockRasteriser` to exercise shelf packing / LRU eviction
+    /// without a CoreText font.
+    pub fn new_with_rasteriser(
+        sink: std::sync::Arc<dyn AtlasSink>,
         rasteriser: Box<dyn crate::font_trait::Rasteriser>,
     ) -> Result<Self, String> {
-        let (format, bpp) = if color {
-            (MTLPixelFormat::BGRA8Unorm, 4u32)
-        } else {
-            (MTLPixelFormat::R8Unorm, 1u32)
-        };
-        let descriptor = unsafe {
-            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-                format,
-                width as usize,
-                height as usize,
-                false,
-            )
-        };
-        // Managed: CPU writes via replaceRegion, GPU reads.  On
-        // Apple Silicon (UMA) Shared would also work and skip
-        // the synchronize step, but Managed is portable across
-        // Intel + Apple Silicon and the perf delta is irrelevant
-        // for an atlas updated on cache miss only.
-        descriptor.setStorageMode(MTLStorageMode::Managed);
-        descriptor.setUsage(MTLTextureUsage::ShaderRead);
-        let texture = device
-            .newTextureWithDescriptor(&descriptor)
-            .ok_or_else(|| "newTextureWithDescriptor returned nil".to_string())?;
-
+        let (width, height) = sink.dims();
+        let bpp = sink.bytes_per_pixel();
+        if bpp != 1 && bpp != 4 {
+            return Err(format!("an atlas holds 1 or 4 bytes a pixel, not {bpp}"));
+        }
         Ok(Self {
-            texture,
+            sink,
             width,
             height,
             bpp,
@@ -549,10 +504,6 @@ impl GlyphAtlas {
     /// previous total.
     pub fn take_rasterised(&mut self) -> u32 {
         std::mem::take(&mut self.rasterised)
-    }
-
-    pub fn texture(&self) -> &ProtocolObject<dyn MTLTexture> {
-        &self.texture
     }
 
     pub fn dims(&self) -> (u32, u32) {
@@ -873,28 +824,7 @@ impl GlyphAtlas {
         if bytes.is_empty() {
             return;
         }
-        let region = MTLRegion {
-            origin: MTLOrigin {
-                x: dst_x as usize,
-                y: dst_y as usize,
-                z: 0,
-            },
-            size: MTLSize {
-                width: w as usize,
-                height: h as usize,
-                depth: 1,
-            },
-        };
-        unsafe {
-            let ptr = NonNull::new(bytes.as_ptr() as *mut c_void).unwrap();
-            self.texture
-                .replaceRegion_mipmapLevel_withBytes_bytesPerRow(
-                    region,
-                    0,
-                    ptr,
-                    (w * self.bpp) as usize,
-                );
-        }
+        self.sink.upload(bytes, w, h, dst_x, dst_y);
     }
 
     /// For tests / instrumentation.
@@ -904,8 +834,8 @@ impl GlyphAtlas {
 
     /// Approximate resident bytes for instrumentation
     /// (MARSPOT_PROFILE_RSS).  Texture is reported at its full
-    /// `width * height` R8 footprint (the renderer holds it via
-    /// MTLTextureDescriptor::Managed, which keeps a CPU mirror), and
+    /// `width * height * bytes-per-pixel` footprint (the backend keeps a
+    /// CPU mirror of it), and
     /// the cache + shelves are reported at their `Vec`/`HashMap`
     /// capacities.  HashMap bucket overhead beyond the (key, value)
     /// pair size is approximated as one extra `usize` per bucket — a
@@ -1185,8 +1115,8 @@ fn rasterise_glyph(
 /// `n_cells × cell_w`), but the context is 4-channel BGRA with a device-RGB
 /// colour space, so `draw_glyphs` emits the glyph's real colours (decoding
 /// the embedded sbix bitmap) instead of an alpha mask.  Byte layout
-/// (premultiplied-first + little-endian 32) is B,G,R,A in memory, matching
-/// `MTLPixelFormat::BGRA8Unorm`; the colour FG shader samples it directly.
+/// (premultiplied-first + little-endian 32) is B,G,R,A in memory, which is
+/// what a colour atlas holds; the colour glyph shader samples it directly.
 fn rasterise_glyph_color(
     font: &CTFont,
     glyph: CGGlyph,
@@ -1501,7 +1431,41 @@ fn rasterise_glyph_color_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render_metal::system_default_device;
+
+    /// A sink with nothing behind it but a count: these tests are about
+    /// packing and lookup, not about what a GPU does with the bytes.
+    struct MemSink {
+        w: u32,
+        h: u32,
+        bpp: u32,
+        uploads: std::sync::atomic::AtomicUsize,
+        bytes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl AtlasSink for MemSink {
+        fn dims(&self) -> (u32, u32) {
+            (self.w, self.h)
+        }
+        fn bytes_per_pixel(&self) -> u32 {
+            self.bpp
+        }
+        fn upload(&self, bytes: &[u8], w: u32, h: u32, x: u32, y: u32) {
+            assert!(x + w <= self.w && y + h <= self.h, "an upload past the edge of the atlas");
+            assert_eq!(bytes.len(), (w * h * self.bpp) as usize, "rows of w * bpp, h of them");
+            self.uploads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.bytes.fetch_add(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn mem_sink(w: u32, h: u32, bpp: u32) -> std::sync::Arc<MemSink> {
+        std::sync::Arc::new(MemSink {
+            w,
+            h,
+            bpp,
+            uploads: Default::default(),
+            bytes: Default::default(),
+        })
+    }
     use core_text::font::new_from_name;
 
     /// The key was fully packed — font_id owned 32 bits for a registry
@@ -1536,14 +1500,7 @@ mod tests {
 
     #[test]
     fn rasterise_then_cache_hit() {
-        let device = match system_default_device() {
-            Ok(d) => d,
-            Err(_) => {
-                eprintln!("skipping: no Metal device");
-                return;
-            }
-        };
-        let mut atlas = GlyphAtlas::new(&device, 256, 256, crate::font_cache::CoreTextFontTable::single(make_font())).expect("atlas");
+        let mut atlas = GlyphAtlas::new(mem_sink(256, 256, 1), crate::font_cache::CoreTextFontTable::single(make_font())).expect("atlas");
         let font = make_font();
 
         // Glyph for 'A'.
@@ -1586,15 +1543,8 @@ mod tests {
     #[test]
     fn mock_rasteriser_drives_the_terminal_grid_path() {
         use crate::font_trait::MockRasteriser;
-        let device = match system_default_device() {
-            Ok(d) => d,
-            Err(_) => return,
-        };
         let mut atlas = GlyphAtlas::new_with_rasteriser(
-            &device,
-            256,
-            256,
-            false,
+            mem_sink(256, 256, 1),
             Box::new(MockRasteriser::mono(1, 1)),
         )
         .expect("atlas with mock rasteriser");
@@ -1618,18 +1568,47 @@ mod tests {
     }
 
     /// way it does for the real rasteriser.
+    /// The atlas hands a new glyph's pixels to the sink once, at the
+    /// moment it is rasterised, and never again for a hit.
+    #[test]
+    fn a_new_glyph_goes_to_the_sink_once() {
+        use crate::font_trait::MockRasteriser;
+        use std::sync::atomic::Ordering::Relaxed;
+        for (bpp, rasteriser) in [
+            (1, MockRasteriser::mono(4, 6)),
+            (4, MockRasteriser::color(4, 6)),
+        ] {
+            let sink = mem_sink(128, 128, bpp);
+            let mut atlas = GlyphAtlas::new_with_rasteriser(sink.clone(), Box::new(rasteriser))
+                .expect("atlas over a memory sink");
+            let key = GlyphKey::new(7, 42, 100, 0, GlyphKey::FLAG_SMOOTH);
+            atlas.get_or_rasterize_natural(key).expect("placed");
+            assert_eq!(sink.uploads.load(Relaxed), 1, "bpp {bpp}: one write for a new glyph");
+            assert_eq!(sink.bytes.load(Relaxed), (4 * 6 * bpp) as usize, "bpp {bpp}: w * h * bpp");
+            atlas.get_or_rasterize_natural(key).expect("hit");
+            assert_eq!(sink.uploads.load(Relaxed), 1, "bpp {bpp}: a hit writes nothing");
+        }
+    }
+
+    /// The atlas takes its size and pixel format from the sink, and a
+    /// format it does not know is refused rather than mis-strided.
+    #[test]
+    fn the_atlas_takes_its_shape_from_the_sink() {
+        use crate::font_trait::MockRasteriser;
+        let atlas = GlyphAtlas::new_with_rasteriser(mem_sink(96, 64, 1), Box::new(MockRasteriser::mono(1, 1)))
+            .expect("atlas");
+        assert_eq!(atlas.dims(), (96, 64));
+        assert!(
+            GlyphAtlas::new_with_rasteriser(mem_sink(8, 8, 3), Box::new(MockRasteriser::mono(1, 1))).is_err(),
+            "three bytes a pixel is not a format the atlas holds"
+        );
+    }
+
     #[test]
     fn mock_rasteriser_drives_natural_path() {
         use crate::font_trait::MockRasteriser;
-        let device = match system_default_device() {
-            Ok(d) => d,
-            Err(_) => return,
-        };
         let mut atlas = GlyphAtlas::new_with_rasteriser(
-            &device,
-            128,
-            128,
-            false,
+            mem_sink(128, 128, 1),
             Box::new(MockRasteriser::mono(4, 6)),
         )
         .expect("atlas with mock rasteriser");
@@ -1675,11 +1654,7 @@ mod tests {
     /// macOS-version GPU jitter.
     #[test]
     fn raster_warm_cache_beats_cold_raster() {
-        let device = match system_default_device() {
-            Ok(d) => d,
-            Err(_) => return,
-        };
-        let mut atlas = GlyphAtlas::new(&device, 4096, 4096, crate::font_cache::CoreTextFontTable::single(make_font())).expect("atlas");
+        let mut atlas = GlyphAtlas::new(mem_sink(4096, 4096, 1), crate::font_cache::CoreTextFontTable::single(make_font())).expect("atlas");
         let font = make_font();
 
         let make_key = |ch: u8| -> GlyphKey {
@@ -1734,10 +1709,6 @@ mod tests {
 
     #[test]
     fn lru_evicts_oldest_shelf_when_full() {
-        let device = match system_default_device() {
-            Ok(d) => d,
-            Err(_) => return,
-        };
         let font = make_font();
         let make_key = |ch: u8, size_q: u16| -> GlyphKey {
             let mut g: CGGlyph = 0;
@@ -1752,7 +1723,7 @@ mod tests {
         // its packed dimensions, then size a real test atlas around
         // it.  Real Menlo glyph metrics shift between macOS releases,
         // so hard-coding a tiny atlas is brittle — derive it.
-        let mut probe = GlyphAtlas::new(&device, 64, 64, crate::font_cache::CoreTextFontTable::single(make_font())).expect("probe atlas");
+        let mut probe = GlyphAtlas::new(mem_sink(64, 64, 1), crate::font_cache::CoreTextFontTable::single(make_font())).expect("probe atlas");
         let entry_a = probe
             .get_or_rasterize(make_key(b'a', 52), test_metrics(), 1)
             .expect("probe rasterise");
@@ -1763,7 +1734,7 @@ mod tests {
         // Atlas sized to fit exactly one ASCII glyph at size_q=52 in a
         // single shelf — that way the second placement must trigger
         // LRU shelf recycling.
-        let mut atlas = GlyphAtlas::new(&device, probe_w, probe_h, crate::font_cache::CoreTextFontTable::single(make_font())).expect("atlas");
+        let mut atlas = GlyphAtlas::new(mem_sink(probe_w, probe_h, 1), crate::font_cache::CoreTextFontTable::single(make_font())).expect("atlas");
 
         atlas.begin_frame(1);
         atlas
@@ -1798,10 +1769,6 @@ mod tests {
 
     #[test]
     fn atlas_full_triggers_rebuild_and_keeps_serving() {
-        let device = match system_default_device() {
-            Ok(d) => d,
-            Err(_) => return,
-        };
         // Sized to force at least one shelf rebuild with Phase-1.1
         // bbox-sized bitmaps (ASCII glyphs at Menlo 13 are ~6×10 px
         // including PAD instead of 16×32 cell-sized).  A 32×32 atlas
@@ -1809,7 +1776,7 @@ mod tests {
         // the height once shelves close — the contract is "every
         // individually-fit glyph eventually places successfully", so
         // silent skip would leave gaps in the cache.
-        let mut atlas = GlyphAtlas::new(&device, 32, 32, crate::font_cache::CoreTextFontTable::single(make_font())).expect("atlas");
+        let mut atlas = GlyphAtlas::new(mem_sink(32, 32, 1), crate::font_cache::CoreTextFontTable::single(make_font())).expect("atlas");
         let font = make_font();
 
         let chars = b"abcdefghij";
