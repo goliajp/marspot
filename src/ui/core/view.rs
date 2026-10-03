@@ -259,7 +259,7 @@ impl<'a> ViewPainter<'a> {
     /// (atlas rebuilds during a paint frame are safe — the renderer
     /// catches the new generation count after `build_instances`).
     pub fn text(&mut self, x: f32, baseline_y: f32, s: &str, color: [f32; 4]) {
-        crate::render_metal::push_text_run(
+        crate::frame_build::text_run::push_text_run(
             s, x, baseline_y, color,
             self.cell_w, self.cell_h, self.ascent,
             self.atlas_w, self.atlas_h,
@@ -279,7 +279,7 @@ impl<'a> ViewPainter<'a> {
     /// `baseline_y` is the text baseline in physical px.  Weight 600
     /// (semibold) matches the macOS title convention.
     pub fn ui_text(&mut self, x: f32, baseline_y: f32, s: &str, color: [f32; 4]) {
-        crate::render_metal::push_text_run_ui_shaped_mono(
+        crate::frame_build::text_run::push_text_run_ui_shaped_mono(
             s, x, baseline_y, color,
             self.ascent, self.atlas_w, self.atlas_h,
             600,
@@ -359,7 +359,7 @@ impl<'a> ViewPainter<'a> {
         weight: u16,
         color: [f32; 4],
     ) {
-        crate::render_metal::push_text_run_ui_sized(
+        crate::frame_build::text_run::push_text_run_ui_sized(
             s, x, baseline_y, color, size_pt, weight,
             self.atlas_w, self.atlas_h,
             self.font, self.atlas, self.glyphs,

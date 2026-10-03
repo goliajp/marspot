@@ -4,3 +4,4 @@
 //! graphics API.
 
 pub mod glyph_resolve;
+pub mod text_run;
