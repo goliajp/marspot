@@ -9688,7 +9688,7 @@ impl CoreApp {
         // set of values, so a toggle and a segment can never be drawn
         // from either side of the same click.
         let settings_data = if win!(self, wi).settings_modal_open {
-            Some(marspot::render_metal::SettingsRender {
+            Some(marspot::ui::components::settings_paint::SettingsRender {
                 rect: self.settings_modal_rect(wi),
                 scroll: win!(self, wi).settings_modal_scroll,
                 settings: (*marspot::settings::get()).clone(),

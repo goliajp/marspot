@@ -8,6 +8,7 @@ pub mod cc_usage_modal;
 pub mod cc_usage_paint;
 pub mod panel_palette;
 pub mod settings_modal;
+pub mod settings_paint;
 pub mod tab_strip;
 pub mod scroll_view;
 pub mod modal_frame;
