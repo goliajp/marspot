@@ -9719,7 +9719,7 @@ impl CoreApp {
         );
 
         self.renderer.set_context_menu(win!(self, wi).context_menu.as_ref().map(|state| {
-            use marspot::render_metal::{ContextMenuRender, ContextMenuRow};
+            use marspot::ui::components::context_menu_paint::{ContextMenuRender, ContextMenuRow};
             ContextMenuRender {
                 scale: win!(self, wi).scale,
                 anchor_phys: (state.anchor_x, state.anchor_y),

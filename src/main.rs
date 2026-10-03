@@ -1715,7 +1715,7 @@ impl Marspot {
         });
 
         renderer.set_context_menu(self.context_menu.as_ref().map(|state| {
-            use marspot::render_metal::{ContextMenuRender, ContextMenuRow};
+            use marspot::ui::components::context_menu_paint::{ContextMenuRender, ContextMenuRow};
             ContextMenuRender {
                 scale: ctx.scale(),
                 anchor_phys: (state.anchor_x, state.anchor_y),
@@ -2138,7 +2138,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
             }));
         }
         Some("menu") => {
-            use marspot::render_metal::{ContextMenuRender, ContextMenuRow};
+            use marspot::ui::components::context_menu_paint::{ContextMenuRender, ContextMenuRow};
             let item = |label: &str, hint: &str, enabled: bool| ContextMenuRow {
                 label: label.to_string(),
                 shortcut_hint: hint.to_string(),

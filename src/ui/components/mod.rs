@@ -26,6 +26,7 @@ pub mod table;
 pub mod layout_modal;
 pub mod layout_modal_paint;
 pub mod context_menu;
+pub mod context_menu_paint;
 pub mod dev_panel;
 
 pub use tab_strip::TabStrip;
