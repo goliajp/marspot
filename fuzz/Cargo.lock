@@ -182,6 +182,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "golia-ui-core"
+version = "0.1.0"
+
+[[package]]
 name = "jobserver"
 version = "0.1.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -209,12 +213,13 @@ dependencies = [
 
 [[package]]
 name = "marspot"
-version = "0.2.12"
+version = "0.4.0"
 dependencies = [
  "core-foundation",
  "core-graphics",
  "core-text",
  "foreign-types",
+ "golia-ui-core",
  "libc",
  "marspot-term",
  "objc2",
