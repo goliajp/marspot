@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.220"  # a refusal shuts out only panes on the model it names
+shell   = "0.7.221"  # a profile switch keeps the model and effort the session was on
 core    = "0.12.257"  # glyphs read the published format; the grid is off the local layouts
 session = "0.11.137"  # a timing assertion says when it is measuring the host
