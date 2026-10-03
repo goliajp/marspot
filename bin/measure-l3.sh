@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# bin/measure-l3.sh — production-path (shell→core→L3) single-session cat
-# throughput, for each cross-terminal cat-* scenario.
+# bin/measure-l3.sh — single-session cat throughput of marspot-session,
+# for each cross-terminal cat-* scenario.
 #
 # Why this exists: bin/measure.sh drives the standalone `mcli` binary (one
 # in-process session, no IPC/shm hop), and the marspot number in
 # baseline.json's competitors_snapshot was hand-captured via Screen Sharing
-# on the pre-L3 app.  Neither is the architecture the product ships: per-
-# session L3 (default since 2026-06-13) routes every pane's bytes through
-# shelld → marspot-session (parser → grid → shm publish), ~0.90× the in-
-# process bulk-cat rate.  This script measures that real path headlessly so
-# bin/bench.sh --full can gate the number the user actually experiences.
+# on the pre-L3 app.  Neither is the architecture the product ships: every
+# pane's bytes go through its own marspot-session process (parser → grid →
+# shm publish), ~0.90× the in-process bulk-cat rate.
 #
-# It runs entirely in the dev sandbox (its own MARSPOT_STATE_DIR + shelld);
-# never touches the installed app.  Output: bench/results/l3-throughput.json,
+# What it drives: the `l3_throughput` example spawns marspot-session
+# directly and feeds it the scenario.  The shell and the core are not on
+# this path, so only a change to marspot-session or marspot-term can move
+# these numbers -- worth knowing before reading a red row as a regression
+# in something else.
+#
+# It runs in a sandbox of its own (its own MARSPOT_STATE_DIR); it never
+# touches the installed app.  Output: bench/results/l3-throughput.json,
 # one entry per scenario with median_ns / bytes_per_sec / per-trial samples.
 #
 # Each scenario file is `cat`-ed REPEATS times in one command so the drain
