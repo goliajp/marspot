@@ -320,17 +320,20 @@ pub(super) fn rooms_for(
 /// A pane whose model has not been read yet might be one of them, so
 /// it is not steered this way.
 ///
-/// Then the ones the feed cannot speak for — not knowing is not the
-/// same as being full.  Refused accounts last, soonest to come back
-/// first, because when every account is refused the only question left
-/// is how long the wait is.
+/// A profile the feed cannot speak for is never a destination: a pane
+/// is only moved to an account known to have room for its model.
+/// Refused accounts last, soonest to come back first, so a caller can
+/// tell "every account is out" from "nowhere else to go".
 ///
 /// Landing on an account that refuses immediately is possible and
 /// bounded rather than prevented: a pane moves once per refusal and
 /// not again for ten minutes, which is the cost of this order and the
 /// reason no headroom floor is invented here.
 pub(super) fn best_profile(rooms: &[(u8, Room)], current: u8, model: Option<&str>) -> Option<u8> {
-    let mut ranked: Vec<&(u8, Room)> = rooms.iter().filter(|(p, _)| *p != current).collect();
+    let mut ranked: Vec<&(u8, Room)> = rooms
+        .iter()
+        .filter(|(p, r)| *p != current && *r != Room::Unknown)
+        .collect();
     if ranked.is_empty() {
         return None;
     }
@@ -338,11 +341,7 @@ pub(super) fn best_profile(rooms: &[(u8, Room)], current: u8, model: Option<&str
     // only right when it is known not to need them.
     let needs_fable = model.is_none_or(|m| m.to_ascii_lowercase().starts_with(FABLE));
     ranked.sort_by(|a, b| {
-        let tier = |r: &Room| match r {
-            Room::Known { .. } if !r.refused_for(model) => 0,
-            Room::Unknown => 1,
-            _ => 2,
-        };
+        let tier = |r: &Room| if r.refused_for(model) { 1 } else { 0 };
         // Only among the usable: the refused are ordered by when they
         // come back, and nothing else.
         let keeps_fable = |r: &Room| tier(r) == 0 && !needs_fable && r.fable_spent();
@@ -808,12 +807,13 @@ mod tests {
         assert_eq!(next_move(&situation(&alone)), Move::Hold("nowhere else to go"));
     }
 
-    /// No feed, and the pane has just been refused where it is:
-    /// somewhere unknown beats somewhere known shut.
+    /// A profile nothing is known about is not somewhere to go.
     #[test]
-    fn without_a_feed_it_still_leaves_a_closed_door() {
+    fn a_profile_the_feed_cannot_speak_for_is_never_a_destination() {
         let r = vec![(1, Room::Unknown), (2, Room::Unknown)];
-        assert_eq!(next_move(&situation(&r)), Move::To(2));
+        assert_eq!(next_move(&situation(&r)), Move::Hold("nowhere else to go"));
+        let mixed = vec![(1, Room::Unknown), (2, Room::Unknown), (3, room(0.1, 0.1, 900, &[]))];
+        assert_eq!(best_profile(&mixed, 1, Some("opus-5-5")), Some(3));
     }
 
     fn acct(email: &str, status: &str, u5: f64, u7: f64, reset7: i64) -> CcAccount {
@@ -861,13 +861,13 @@ mod tests {
         assert_eq!(best_profile(&rooms, 0, None), Some(2));
     }
 
-    /// A profile the feed has never heard of is a maybe, and a maybe
-    /// beats a refusal.
+    /// A profile the feed has never heard of is not chosen over a
+    /// refused one: nothing is known about whether it has room.
     #[test]
-    fn an_unknown_profile_outranks_a_refused_one() {
+    fn an_unknown_profile_is_not_chosen_even_over_a_refused_one() {
         let accounts = vec![acct("p1", "rejected", 0.0, 1.0, 400)];
         let rooms = rooms_for(&[1, 9], &accounts, |p| Some(format!("p{p}")));
-        assert_eq!(best_profile(&rooms, 0, None), Some(9));
+        assert_eq!(best_profile(&rooms, 0, None), Some(1), "the refused one, so the caller holds");
     }
 
     /// Everything is refused: the answer is the one that comes back

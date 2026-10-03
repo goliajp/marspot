@@ -216,15 +216,6 @@ pub struct ClaudecodePlugin {
     stranded: HashMap<u64, Stranding>,
     /// When each pane was last moved off a refused account.
     moved_at: HashMap<u64, Instant>,
-    /// Panes a person put on a profile by hand, and which one.
-    ///
-    /// A choice made by someone looking at the pane outranks the feed:
-    /// it can be behind, and it judges accounts, not panes. Such a pane
-    /// leaves only when it is refused there itself. An automatic move
-    /// ends the choice; so does a new claude in the pane on any other
-    /// profile. Kept with the pid of the claude the switch replaced,
-    /// which is what tells "still switching" from "went elsewhere".
-    hand_picked: HashMap<u64, HandPick>,
 
     /// Previous tick's `shelld_session_id → ("<fg|bg>,<activity>",
     /// since)`, so `cc_status.changed` is transition-only and can say
@@ -436,13 +427,6 @@ impl Default for Stranding {
     }
 }
 
-/// A profile someone chose for a pane, and the claude it replaced.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct HandPick {
-    profile: u8,
-    replaced_pid: i32,
-}
-
 #[derive(Clone, Debug)]
 struct BindMeta {
     /// 0 = default `.claude`, N = `.claude-profile-N`, 255 = unknown.
@@ -520,7 +504,6 @@ impl ClaudecodePlugin {
             last_model: HashMap::new(),
             stranded: HashMap::new(),
             moved_at: HashMap::new(),
-            hand_picked: HashMap::new(),
 
             last_activity: HashMap::new(),
             dormant: Vec::new(),
@@ -1253,61 +1236,47 @@ impl ClaudecodePlugin {
             return;
         };
         let profiles = discover_profiles();
-        let Some(&lowest) = profiles.first() else {
-            host.log(
-                LogLevel::Warn,
-                "cycle.no_profiles",
-                "no ~/.claude-profile-N dirs; cannot cycle",
-            );
-            return;
-        };
-        // Where there is room, not the next number.  The numbers say
-        // nothing about which account can still answer: measured
-        // 2026-09-29, six of the eight had spent their week, so the
-        // next number was usually a refusal.  The usage feed knows,
-        // and `marspot::cc_usage` already reads it.
+        // The best account for the model this pane is on, from what the
+        // accounts say about themselves. Without that there is no
+        // choice to make: walking to the next number was a guess, and
+        // with most accounts spent it was usually a refused one.
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
         let usage = marspot::cc_usage::read();
-        let next_profile = match (&usage, &home) {
+        let needs = self.needs_model_for(shelld_sid);
+        let picked = match (&usage, &home) {
             (Some(u), Some(home)) => {
                 let rooms = quota::rooms_for(&profiles, &u.accounts, |p| {
                     quota::profile_email(home, p)
                 });
-                // A pane pinned to Fable needs the profile to have
-                // room in Fable's own window as well as in the
-                // account's. Walking it onto an account with a fresh
-                // week but a spent Fable is a move that changes
-                // nothing.
-                let needs = self.needs_model_for(shelld_sid);
-                let pick = quota::best_profile(&rooms, meta.profile_num, needs.as_deref());
                 host.log(
                     LogLevel::Info,
                     "cycle.rooms",
-                    &format!("current=P{} rooms={:?}", meta.profile_num, rooms),
+                    &format!("current=P{} model={needs:?} rooms={rooms:?}", meta.profile_num),
                 );
-                pick
+                quota::best_profile(&rooms, meta.profile_num, needs.as_deref()).filter(|p| {
+                    rooms
+                        .iter()
+                        .find(|(n, _)| n == p)
+                        .is_some_and(|(_, r)| !r.refused_for(needs.as_deref()))
+                })
             }
             _ => None,
         };
-        // No feed, or nothing it can speak for: the old walk, which at
-        // least moves somewhere.
-        let next_profile = next_profile.unwrap_or_else(|| {
-            profiles
-                .iter()
-                .copied()
-                .find(|&n| n > meta.profile_num)
-                .unwrap_or(lowest)
-        });
+        let Some(next_profile) = picked else {
+            let why = if usage.is_some() { "no account has room for this model" } else { "no usage feed" };
+            host.log(
+                LogLevel::Info,
+                "cycle.no_target",
+                &format!("pane {shelld_sid} stays on P{}: {why}", meta.profile_num),
+            );
+            let badge = if usage.is_some() { "⚠ no account free" } else { "⚠ no usage data" };
+            let _ = host.submit_pty_op(shelld_sid, cycle_blocked_op(badge));
+            return;
+        };
         host.log(
             LogLevel::Info,
             "cycle.profiles",
-            &format!(
-                "discovered={:?} current=P{} next=P{} feed={}",
-                profiles,
-                meta.profile_num,
-                next_profile,
-                if usage.is_some() { "read" } else { "missing" }
-            ),
+            &format!("discovered={profiles:?} current=P{} next=P{next_profile}", meta.profile_num),
         );
         // A hand click is someone who is right here: they can say
         // whatever they meant to say.
@@ -1353,21 +1322,11 @@ impl ClaudecodePlugin {
                 .find(|(p, _)| *p == profile)
                 .is_some_and(|(_, r)| r.refused_for_now(model, refusal))
         };
-        let last_meta = &self.last_meta;
-        self.hand_picked.retain(|sid, pick| {
-            result.sessions_seen.contains(sid)
-                && last_meta.get(sid).is_none_or(|m| {
-                    m.profile_num == pick.profile || m.claude_pid == pick.replaced_pid
-                })
-        });
-        // A copy: the loop below moves panes, which needs `self`.
-        let hand_picked = self.hand_picked.clone();
+        // However the pane got where it is -- by hand, by a move, or
+        // started there -- one rule: what it is running against what its
+        // profile has left for that model.
         let out_for = |sid: &u64, meta: &BindMeta| -> bool {
             let model = result.new_models.get(sid).map(String::as_str);
-            if hand_picked.get(sid).is_some_and(|p| p.profile == meta.profile_num) {
-                // Only what this pane was told here, never the feed.
-                return meta.refused_at.as_ref().is_some_and(|r| r.applies_to(model));
-            }
             is_out(meta.profile_num, model, meta.refused_at.as_ref())
         };
         // Forget what was tried for a pane that is out of trouble —
@@ -1465,13 +1424,34 @@ impl ClaudecodePlugin {
                 }
             }
             quota::Move::To(target) => {
+                // Nothing moves on a guess about the pane itself: the
+                // model it is on has to be known, and the hook's record
+                // that the new claude is started from has to name the
+                // same one. Otherwise the new claude comes up on the new
+                // profile's default, which is how a pane switched to
+                // Opus came back on Fable (2026-10-03, pane 442).
+                let choice = pushed_choice(&meta.uuid);
+                if let Err(why) = confirm_choice(needs_model.as_deref(), &choice) {
+                    let tally = self.stranded.entry(sid).or_default();
+                    if !tally.hold_logged {
+                        tally.hold_logged = true;
+                        host.log(
+                            LogLevel::Info,
+                            "quota.hold",
+                            &format!(
+                                "sid={sid} stays on P{}: {why} (scan={:?} hook={:?})",
+                                meta.profile_num, needs_model, choice.model
+                            ),
+                        );
+                    }
+                    return;
+                }
                 host.log(
                     LogLevel::Info,
                     "quota.moving",
                     &format!("sid={sid} P{} → P{target}", meta.profile_num),
                 );
-                if self.start_profile_cycle_to(host, sid, meta, target, true) {
-                    self.hand_picked.remove(&sid);
+                if self.start_profile_cycle_to(host, sid, meta, target, true, choice) {
                     self.moved_at.insert(sid, Instant::now());
                     let tally = self.stranded.entry(sid).or_default();
                     tally.moves += 1;
@@ -1489,9 +1469,23 @@ impl ClaudecodePlugin {
     /// move of its own over the top of this one: the same "not landed"
     /// mark an automatic move leaves covers that gap.
     fn switch_by_hand(&mut self, host: &dyn PluginHost, sid: u64, meta: BindMeta, target: u8) {
-        let replaced_pid = meta.claude_pid;
-        if self.start_profile_cycle_to(host, sid, meta, target, false) {
-            self.hand_picked.insert(sid, HandPick { profile: target, replaced_pid });
+        // Asked for or not, a switch starts a new claude, and it starts
+        // on the model the pane is on or not at all.
+        let choice = pushed_choice(&meta.uuid);
+        let model = self.needs_model_for(sid);
+        if let Err(why) = confirm_choice(model.as_deref(), &choice) {
+            host.log(
+                LogLevel::Warn,
+                "cycle.model_unconfirmed",
+                &format!(
+                    "pane {sid}: not switching to P{target}: {why} (scan={model:?} hook={:?})",
+                    choice.model
+                ),
+            );
+            let _ = host.submit_pty_op(sid, cycle_blocked_op("⚠ model unknown"));
+            return;
+        }
+        if self.start_profile_cycle_to(host, sid, meta, target, false, choice) {
             self.stranded.entry(sid).or_default().last_target = Some(target);
         }
     }
@@ -1512,6 +1506,8 @@ impl ClaudecodePlugin {
         meta: BindMeta,
         next_profile: u8,
         say_continue: bool,
+        // the model and effort the new claude is started with
+        choice: CliChoice,
     ) -> bool {
         if self.shelld.is_none() {
             host.log(
@@ -1546,7 +1542,7 @@ impl ClaudecodePlugin {
                     meta.uuid, h.pid
                 ),
             );
-            if let Err(e) = host.submit_pty_op(shelld_sid, cycle_blocked_op()) {
+            if let Err(e) = host.submit_pty_op(shelld_sid, cycle_blocked_op("⚠ held by bg job")) {
                 host.log(
                     LogLevel::Warn,
                     "cycle.blocked_badge_failed",
@@ -1566,9 +1562,6 @@ impl ClaudecodePlugin {
                 ),
             );
         }
-        // Read before claude is taken down: the hook's record is the
-        // only place that names the model the way `--model` takes it.
-        let choice = pushed_choice(&meta.uuid);
         let Some(op) = profile_cycle_op(
             say_continue,
             &meta.uuid,
@@ -1792,13 +1785,32 @@ pub(crate) fn config_dir_or_default(config_dir: Option<&str>) -> PathBuf {
 /// op is what makes it appear and then put itself away — the scan loop
 /// owns the badge the rest of the time and would otherwise overwrite
 /// this within the second.
-fn cycle_blocked_op() -> pty_op::PtyOp {
+fn cycle_blocked_op(badge: &'static str) -> pty_op::PtyOp {
     pty_op::PtyOp::new("cc.cycle_blocked")
         .lock_keys(false)
         .hold_screen(false)
         .escape_hatch(false)
-        .badge("⚠ held by bg job")
+        .badge(badge)
         .step(pty_op::Step::settle(Duration::from_secs(4)).named("show"))
+}
+
+/// Is the model a switch would carry the one the pane is on?
+///
+/// The scan's reading and the hook's record are two reads of the same
+/// thing; a switch goes ahead only when both exist and agree. The id
+/// carries a context suffix (`claude-fable-5-1[1m]`) that the short
+/// name leaves out.
+fn confirm_choice(pane_model: Option<&str>, choice: &CliChoice) -> Result<(), &'static str> {
+    let Some(pane) = pane_model else {
+        return Err("the pane's model is not known");
+    };
+    let Some(id) = choice.model.as_deref() else {
+        return Err("the hook has not recorded the model to carry");
+    };
+    if short_model(id.split('[').next().unwrap_or(id)) != pane {
+        return Err("the hook's record names a different model from the pane's");
+    }
+    Ok(())
 }
 
 /// The profile-cycle script: take the current claude down and bring the
@@ -2980,7 +2992,7 @@ mod tests {
             has_transcript: true,
         };
 
-        plugin.start_profile_cycle_to(&host, 7, meta, 2, false);
+        plugin.start_profile_cycle_to(&host, 7, meta, 2, false, CliChoice::default());
         host.pump_ops();
 
         // The badge rides the PaneSession, so it takes a tick to
@@ -3065,6 +3077,18 @@ mod tests {
             ),
         )
         .unwrap();
+        // The status-line hook's records, which a switch starts the new
+        // claude from: every pane in these tests is on Opus 5.5.
+        unsafe { std::env::set_var("MARSPOT_STATE_DIR", home.join("state")) };
+        let push = model_push_dir();
+        fs::create_dir_all(&push).unwrap();
+        for n in 77..=81 {
+            fs::write(
+                push.join(format!("u-{n}")),
+                "opus-5-5\n/t/x.jsonl\nmedium\npids=1\nid=claude-opus-5-5\n",
+            )
+            .unwrap();
+        }
         home
     }
 
@@ -3098,7 +3122,46 @@ mod tests {
         };
         result.new_activity.insert(sid, activity);
         result.new_vetoes.insert(sid, (false, false));
+        result.new_models.insert(sid, "opus-5-5".into());
         result
+    }
+
+    /// An automatic switch does not go ahead on a guess about the pane:
+    /// its model has to be known, and the hook's record of what to
+    /// start the new claude on has to name the same one.
+    #[test]
+    fn a_pane_is_not_moved_until_its_model_is_confirmed() {
+        let home = quota_home("confirm");
+        let _home = HomeOverride::set(&home);
+        let host = FakeHost::new(home.join("state"));
+        let sid = 81u64;
+        let mut plugin = stranded_plugin(pane_on_p1(&home, "u-81"), sid);
+
+        let mut unknown = scan_of(sid, CcActivity::AwaitingUser);
+        unknown.new_models.clear();
+        plugin.sweep_unusable_profiles(&host, &unknown);
+        assert!(host.submitted.lock().unwrap().is_empty(), "model not known");
+
+        let mut other = scan_of(sid, CcActivity::AwaitingUser);
+        other.new_models.insert(sid, "fable-5-1".into());
+        plugin.sweep_unusable_profiles(&host, &other);
+        assert!(host.submitted.lock().unwrap().is_empty(), "the record names another model");
+
+        fs::remove_file(model_push_dir().join("u-81")).unwrap();
+        plugin.sweep_unusable_profiles(&host, &scan_of(sid, CcActivity::AwaitingUser));
+        assert!(host.submitted.lock().unwrap().is_empty(), "no record to start the new claude from");
+
+        fs::write(
+            model_push_dir().join("u-81"),
+            "opus-5-5\n/t/x.jsonl\nmedium\npids=1\nid=claude-opus-5-5\n",
+        )
+        .unwrap();
+        plugin.sweep_unusable_profiles(&host, &scan_of(sid, CcActivity::AwaitingUser));
+        let handed = host.submitted.lock().unwrap().clone();
+        assert_eq!(handed.len(), 1, "both reads agree: it moves");
+        let sent = host.sent.lock().unwrap().clone();
+        assert!(sent[0].1.contains("--model 'claude-opus-5-5'"), "{:?}", sent[0].1);
+        let _ = fs::remove_dir_all(&home);
     }
 
     fn stranded_plugin(meta: BindMeta, sid: u64) -> ClaudecodePlugin {
@@ -3187,15 +3250,11 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
-    /// A profile chosen by hand is left alone until the pane itself is
-    /// refused there.
-    ///
-    /// The feed judges accounts and runs behind; the person picking
-    /// judges the pane in front of them. On 2026-10-03 an Opus pane
-    /// put on P1 by hand was moved to P4 six seconds later on the
-    /// feed's word alone.
+    /// A pane put somewhere by hand is judged like any other: by its
+    /// model against what that account has left for it. And the switch
+    /// itself waits until the pane's model is confirmed.
     #[test]
-    fn a_pane_put_on_a_profile_by_hand_stays_until_it_is_refused_there() {
+    fn a_switch_by_hand_follows_the_same_rule() {
         let home = quota_home("hand");
         let _home = HomeOverride::set(&home);
         let host = FakeHost::new(home.join("state"));
@@ -3210,32 +3269,33 @@ mod tests {
         };
         let mut plugin = stranded_plugin(on(2, 100), sid);
         let result = scan_of(sid, CcActivity::AwaitingUser);
+        let switches = |host: &FakeHost| {
+            host.submitted.lock().unwrap().iter().filter(|(_, steps)| steps.contains(&"resume")).count()
+        };
 
+        // Model not read yet: the pick is refused, nothing is started.
         plugin.on_pane_badge_menu_action(&host, sid, 1);
-        assert_eq!(host.submitted.lock().unwrap().len(), 1, "the pick itself");
+        assert_eq!(switches(&host), 0, "the model is not known yet");
+        assert_eq!(host.submitted.lock().unwrap().len(), 1, "the badge says why");
 
-        // Landed on P1, which the feed calls spent.
+        plugin.last_model.insert(sid, "opus-5-5".into());
+        plugin.on_pane_badge_menu_action(&host, sid, 1);
+        assert_eq!(switches(&host), 1, "the pick itself");
+        assert!(
+            host.sent.lock().unwrap().iter().any(|(_, l)| l.contains("--model 'claude-opus-5-5'")),
+            "started on the model it was on"
+        );
+
+        // Landed on P1, which has no room for it: it moves on, to P2.
         plugin.last_meta.insert(sid, on(1, 200));
         plugin.sweep_unusable_profiles(&host, &result);
-        plugin.sweep_unusable_profiles(&host, &result);
-        assert_eq!(host.submitted.lock().unwrap().len(), 1, "the feed does not overrule the person");
+        assert_eq!(switches(&host), 2, "unusable is unusable, however it got there");
 
-        // The account refuses this claude: now it goes.
-        let mut refused = on(1, 200);
-        refused.refused_at = Some(quota::Refusal { at: i64::MAX, model: String::new() });
-        plugin.last_meta.insert(sid, refused);
-        plugin.sweep_unusable_profiles(&host, &result);
-        assert_eq!(host.submitted.lock().unwrap().len(), 2, "refused where it was put");
-        assert!(plugin.hand_picked.is_empty(), "an automatic move ends the choice");
-
-        // A pick is also over once a new claude shows up anywhere else.
-        plugin.hand_picked.insert(sid, HandPick { profile: 1, replaced_pid: 200 });
-        plugin.last_meta.insert(sid, on(1, 200));
-        plugin.sweep_unusable_profiles(&host, &result);
-        assert!(!plugin.hand_picked.is_empty(), "still where it was put");
+        // On P2, which has room, nothing happens however often it looks.
         plugin.last_meta.insert(sid, on(2, 300));
         plugin.sweep_unusable_profiles(&host, &result);
-        assert!(plugin.hand_picked.is_empty(), "moved on");
+        plugin.sweep_unusable_profiles(&host, &result);
+        assert_eq!(switches(&host), 2, "usable: left alone");
         let _ = fs::remove_dir_all(&home);
     }
 
@@ -3340,7 +3400,7 @@ mod tests {
             has_transcript: true,
         };
 
-        plugin.start_profile_cycle_to(&host, 7, meta, 2, false);
+        plugin.start_profile_cycle_to(&host, 7, meta, 2, false, CliChoice::default());
         host.pump_ops();
 
         struct Recording(std::sync::Mutex<Vec<String>>);
@@ -3575,6 +3635,23 @@ mod tests {
         assert!(!sent.contains("--model"), "nothing known, nothing passed: {sent}");
     }
 
+    /// What an automatic switch needs to know about the pane first.
+    #[test]
+    fn a_switch_needs_the_panes_model_confirmed_twice() {
+        let carry = |id: &str| CliChoice { model: Some(id.into()), effort: None };
+        assert_eq!(confirm_choice(Some("fable-5-1"), &carry("claude-fable-5-1[1m]")), Ok(()));
+        assert_eq!(confirm_choice(Some("opus-5-5"), &carry("claude-opus-5-5")), Ok(()));
+        assert!(confirm_choice(None, &carry("claude-opus-5-5")).is_err(), "model not known");
+        assert!(
+            confirm_choice(Some("opus-5-5"), &CliChoice::default()).is_err(),
+            "nothing to start the new claude on"
+        );
+        assert!(
+            confirm_choice(Some("opus-5-5"), &carry("claude-fable-5-1[1m]")).is_err(),
+            "the two reads disagree"
+        );
+    }
+
     /// The hook's record is a file: what goes on a command line from it
     /// is checked first.
     #[test]
@@ -3800,7 +3877,7 @@ mod tests {
     /// click that did nothing at all.
     #[test]
     fn cycle_blocked_op_takes_nothing_from_the_pane() {
-        let op = cycle_blocked_op();
+        let op = cycle_blocked_op("⚠ held by bg job");
         assert!(!op.lock_keys, "a refused click must not eat the keyboard");
         assert!(!op.hold_screen, "nothing to hide — the pane is untouched");
         assert_eq!(op.badge.as_deref(), Some("⚠ held by bg job"));
