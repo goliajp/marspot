@@ -20,6 +20,7 @@
 
 mod idle;
 mod quota;
+mod refusal;
 mod model;
 mod statusline;
 mod worker;
@@ -28,6 +29,7 @@ use idle::*;
 use model::*;
 use statusline::*;
 use worker::*;
+use refusal::{last_quota_refusal, refused_since};
 
 use std::collections::HashMap;
 use std::fs;
@@ -220,6 +222,11 @@ pub struct ClaudecodePlugin {
     /// not be confirmed, kept so the reason is logged once rather than
     /// every pass.
     unjudged: std::collections::HashSet<u64>,
+    /// Per profile, the newest time a pane there was told it could not
+    /// log in. Outlives the panes that saw it: they move off, and the
+    /// next pane to be moved must not be sent back. One entry per
+    /// profile at most.
+    logged_out: HashMap<u8, i64>,
 
     /// Previous tick's `shelld_session_id → ("<fg|bg>,<activity>",
     /// since)`, so `cc_status.changed` is transition-only and can say
@@ -418,16 +425,18 @@ struct Stranding {
     last_target: Option<u8>,
     /// When the pane was first seen stuck on an account that is out.
     since: Instant,
-    /// Whether the reason for holding has already been said once.  A
-    /// hold is a steady state, and the sweep runs every two seconds:
-    /// without this, one held pane wrote 170 identical lines
-    /// (2026-09-29, sid 430).
-    hold_logged: bool,
+    /// The reason for holding last said.  A hold is a steady state,
+    /// and the sweep runs every two seconds: said every pass, one held
+    /// pane wrote 170 identical lines (2026-09-29, sid 430).  Said only
+    /// once, a pane held from 01:26 to 02:59 left one line, and nothing
+    /// showed what kept it there (2026-10-08).  So: again whenever it
+    /// changes.
+    hold_said: Option<&'static str>,
 }
 
 impl Default for Stranding {
     fn default() -> Self {
-        Self { moves: 0, last_target: None, since: Instant::now(), hold_logged: false }
+        Self { moves: 0, last_target: None, since: Instant::now(), hold_said: None }
     }
 }
 
@@ -509,6 +518,7 @@ impl ClaudecodePlugin {
             stranded: HashMap::new(),
             moved_at: HashMap::new(),
             unjudged: std::collections::HashSet::new(),
+            logged_out: HashMap::new(),
 
             last_activity: HashMap::new(),
             dormant: Vec::new(),
@@ -1268,9 +1278,10 @@ impl ClaudecodePlugin {
         let needs = self.needs_model_for(shelld_sid);
         let picked = match (&usage, &home) {
             (Some(u), Some(home)) => {
-                let rooms = quota::rooms_for(&profiles, &u.accounts, |p| {
+                let mut rooms = quota::rooms_for(&profiles, &u.accounts, |p| {
                     quota::profile_email(home, p)
                 });
+                refusal::mark_logged_out(&mut rooms, &self.logged_out);
                 host.log(
                     LogLevel::Info,
                     "cycle.rooms",
@@ -1332,9 +1343,22 @@ impl ClaudecodePlugin {
             return;
         };
         let profiles = discover_profiles();
-        let rooms = quota::rooms_for(&profiles, &usage.accounts, |p| {
+        let mut rooms = quota::rooms_for(&profiles, &usage.accounts, |p| {
             quota::profile_email(&home, p)
         });
+        for meta in self.last_meta.values() {
+            if let Some(r) = meta.refused_at.as_ref().filter(|r| r.logged_out)
+                && self.logged_out.get(&meta.profile_num).is_none_or(|seen| r.at > *seen)
+            {
+                self.logged_out.insert(meta.profile_num, r.at);
+                host.log(
+                    LogLevel::Info,
+                    "quota.logged_out",
+                    &format!("P{} could not log in at {}", meta.profile_num, r.at),
+                );
+            }
+        }
+        refusal::mark_logged_out(&mut rooms, &self.logged_out);
         // Whether a profile is out is a question about a pane, not
         // about a profile: a pane pinned to a model can be shut out of
         // an account whose week is fine, and a pane that has just been
@@ -1459,8 +1483,8 @@ impl ClaudecodePlugin {
         match decision {
             quota::Move::Hold(why) => {
                 let tally = self.stranded.entry(sid).or_default();
-                if !tally.hold_logged {
-                    tally.hold_logged = true;
+                if tally.hold_said != Some(why) {
+                    tally.hold_said = Some(why);
                     host.log(
                         LogLevel::Info,
                         "quota.hold",
@@ -2842,70 +2866,6 @@ fn tail_activity(path: &PathBuf, has_young_child: bool) -> CcActivity {
     }
 }
 
-/// When this session was last told by the API that it had reached a
-/// limit, as unix seconds.
-///
-/// Reads the tail window the scan already has, so it costs nothing
-/// beyond the scan of those lines.
-///
-/// Claude Code records the refusal itself rather than leaving it on
-/// the screen: `"isApiErrorMessage":true` on an assistant record whose
-/// text is the limit message, with the timestamp it happened. That is
-/// what makes this evidence and not a screen-scrape -- and it is the
-/// only timely evidence there is, because the usage feed is collected
-/// behind what a session is actually spending.
-///
-/// Two texts are matched, both read out of the CLI's own templates
-/// rather than guessed: the model-limit branch and the credits branch.
-/// Deliberately not `rate_limit` or `429`, which a loaded server
-/// produces too -- being overloaded is not being out of quota, and
-/// moving a pane for it costs a restart for nothing.
-fn last_quota_refusal(tail: &str) -> Option<quota::Refusal> {
-    let line = tail
-        .lines()
-        .rev()
-        .find(|l| l.contains("\"isApiErrorMessage\":true") && says_out_of_quota(l))?;
-    Some(quota::Refusal { at: record_timestamp(line)?, model: refused_model(line) })
-}
-
-/// The model a refusal names, or empty when it cannot be read.
-///
-/// The CLI's two templates put it in fixed places: "You've reached
-/// your Fable limit." and "Opus 5.5 requires usage credits.".
-fn refused_model(line: &str) -> String {
-    const LIMIT: &str = "You've reached your ";
-    if let Some(i) = line.find(LIMIT) {
-        let rest = &line[i + LIMIT.len()..];
-        return rest.find(" limit").map(|j| short_model(&rest[..j])).unwrap_or_default();
-    }
-    match line.find(" requires usage credits") {
-        // the text field opens with the model's display name
-        Some(j) => short_model(&line[line[..j].rfind('"').map_or(0, |q| q + 1)..j]),
-        None => String::new(),
-    }
-}
-
-/// A refusal, if it reached the claude that started at `started`.
-fn refused_since(refusal: Option<quota::Refusal>, started: SystemTime) -> Option<quota::Refusal> {
-    let start = started.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs() as i64;
-    refusal.filter(|r| r.at >= start)
-}
-
-/// The two ways the CLI says "this account cannot serve you".
-fn says_out_of_quota(line: &str) -> bool {
-    (line.contains("You've reached your") && line.contains("limit"))
-        || line.contains("requires usage credits")
-}
-
-/// The `timestamp` field of one transcript record.
-fn record_timestamp(line: &str) -> Option<i64> {
-    let key = "\"timestamp\":\"";
-    let i = line.find(key)? + key.len();
-    let rest = &line[i..];
-    let end = rest.find('"')?;
-    marspot::cc_usage::parse_iso_utc(rest[..end].to_string())
-}
-
 fn tail_last_message_type(path: &PathBuf) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     const TAIL: u64 = 32 * 1024;
@@ -3203,6 +3163,64 @@ mod tests {
         plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
         plugin.last_meta.insert(sid, meta);
         plugin
+    }
+
+    /// P2 has room by the feed, which cannot tell an account nobody has
+    /// used for a while from one that is logged out. A pane on P2 has
+    /// just been told it cannot log in. It leaves, and nothing is sent
+    /// there in its place: the pane on the spent P1 stays put.
+    #[test]
+    fn a_profile_a_pane_could_not_log_in_to_is_no_destination() {
+        let home = quota_home("login");
+        let _home = HomeOverride::set(&home);
+        let host = FakeHost::new(home.join("state"));
+        let mut on_p2 = pane_on_p1(&home, "u-78");
+        on_p2.profile_num = 2;
+        on_p2.config_dir = Some(home.join(".claude-profile-2").to_string_lossy().into_owned());
+        on_p2.refused_at = Some(quota::Refusal { at: 1_000, model: String::new(), logged_out: true });
+        let mut plugin = stranded_plugin(on_p2, 78);
+        plugin.last_meta.insert(79, pane_on_p1(&home, "u-79"));
+        let mut result = scan_of(78, CcActivity::AwaitingUser);
+        result.sessions_seen.push(79);
+        result.new_activity.insert(79, CcActivity::AwaitingUser);
+        result.new_vetoes.insert(79, (false, false));
+        result.new_models.insert(79, "opus-5-5".into());
+
+        plugin.sweep_unusable_profiles(&host, &result);
+        assert_eq!(plugin.logged_out.get(&2), Some(&1_000));
+        assert!(host.submitted.lock().unwrap().is_empty(), "P1 is spent and P2 cannot log in");
+        assert_eq!(plugin.stranded.get(&79).and_then(|s| s.hold_said), Some("every account is out"));
+        assert_eq!(plugin.stranded.get(&78).and_then(|s| s.hold_said), Some("every account is out"));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// The reason a pane is held is said again when it changes, so the
+    /// log shows what kept it there all along.
+    #[test]
+    fn a_new_reason_for_holding_is_said_again() {
+        let home = quota_home("hold");
+        let _home = HomeOverride::set(&home);
+        let host = FakeHost::new(home.join("state"));
+        // both accounts spent
+        fs::write(
+            home.join(".local/state/devops/claude-usage.json"),
+            r#"{"generated_at": "2026-09-29T00:00:00+00:00", "accounts": [
+               {"name":"A","email":"hold1@example","status":"rejected","utilization_5h":0.0,
+                "utilization_7d":1.0,"reset_5h":1,"reset_7d":2},
+               {"name":"B","email":"hold2@example","status":"rejected","utilization_5h":0.0,
+                "utilization_7d":1.0,"reset_5h":1,"reset_7d":3}]}"#,
+        )
+        .unwrap();
+        let sid = 80u64;
+        let mut plugin = stranded_plugin(pane_on_p1(&home, "u-80"), sid);
+        let said = |p: &ClaudecodePlugin| p.stranded.get(&sid).and_then(|s| s.hold_said);
+
+        plugin.sweep_unusable_profiles(&host, &scan_of(sid, CcActivity::ToolPending { executing: true }));
+        assert_eq!(said(&plugin), Some("a tool is running here"));
+        plugin.sweep_unusable_profiles(&host, &scan_of(sid, CcActivity::AwaitingUser));
+        assert_eq!(said(&plugin), Some("every account is out"));
+        assert!(host.submitted.lock().unwrap().is_empty());
+        let _ = fs::remove_dir_all(&home);
     }
 
     /// The wiring, end to end inside the process: a pane sitting on an
@@ -7543,7 +7561,7 @@ mod tests {
     #[test]
     fn only_a_refusal_after_this_claude_started_counts() {
         let started = SystemTime::UNIX_EPOCH + Duration::from_secs(1_791_002_529);
-        let at = |at| Some(quota::Refusal { at, model: "fable".into() });
+        let at = |at| Some(quota::Refusal { at, model: "fable".into(), logged_out: false });
         assert_eq!(refused_since(at(1_790_966_543), started), None, "the day before");
         assert_eq!(refused_since(at(1_791_002_600), started), at(1_791_002_600));
         assert_eq!(refused_since(None, started), None);
@@ -7580,6 +7598,26 @@ mod tests {
             "Opus 5.5 requires usage credits.",
         );
         assert_eq!(last_quota_refusal(&credits).map(|r| r.model), Some("opus-5-5".into()));
+    }
+
+    /// The record the CLI writes when it cannot log in, as it was
+    /// written on 2026-09-28 (trimmed).
+    const LOGIN_EXPIRED: &str = concat!(
+        r#"{"parentUuid":"18fba766","isSidechain":false,"type":"assistant","#,
+        r#""timestamp":"2026-09-28T08:41:45.587Z","message":{"model":"<synthetic>","#,
+        r#""role":"assistant","content":[{"type":"text","text":"Login expired · Please run /login"}]},"#,
+        r#""error":"authentication_failed","isApiErrorMessage":true}"#,
+    );
+
+    #[test]
+    fn a_failed_login_is_a_refusal_for_every_model() {
+        let r = last_quota_refusal(LOGIN_EXPIRED).expect("a failed login shuts the pane out");
+        assert_eq!(r.at, 1_790_584_905, "2026-09-28T08:41:45Z");
+        assert!(r.logged_out);
+        assert!(r.model.is_empty(), "it names no model, so it covers them all");
+        assert!(!last_quota_refusal(REFUSAL).unwrap().logged_out, "running out is not being logged out");
+        let quoted = LOGIN_EXPIRED.replace(r#","isApiErrorMessage":true"#, "");
+        assert_eq!(last_quota_refusal(&quoted), None, "only a record the CLI flagged");
     }
 
     #[test]

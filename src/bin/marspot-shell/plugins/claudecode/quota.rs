@@ -38,6 +38,14 @@ pub(super) struct Refusal {
     /// 2026-10-03 a Fable refusal moved a pane that had just been
     /// switched to Opus, onto an account where it ran out again.
     pub model: String,
+    /// The account could not log in at all, rather than being out of
+    /// quota.
+    ///
+    /// The feed cannot tell a logged-out account from an idle one:
+    /// both show as an access token that has expired and was never
+    /// refreshed. Only a claude that tried to use it finds out, and
+    /// that is the only place this is learnt. It names no model.
+    pub logged_out: bool,
 }
 
 impl Refusal {
@@ -507,7 +515,7 @@ mod tests {
     }
 
     fn fable_refusal(at: i64) -> Refusal {
-        Refusal { at, model: "fable".into() }
+        Refusal { at, model: "fable".into(), logged_out: false }
     }
 
     /// The pane had just been switched to Opus when the Fable refusal
@@ -520,10 +528,10 @@ mod tests {
         assert!(r.refused_for_now(Some("fable-5-1"), Some(&fable)));
         assert!(!r.refused_for_now(Some("opus-5-5"), Some(&fable)), "an Opus pane was not refused");
         assert!(!r.refused_for_now(None, Some(&fable)), "no model given: Fable is not assumed");
-        let credits = Refusal { at: 2_000, model: "opus-5-5".into() };
+        let credits = Refusal { at: 2_000, model: "opus-5-5".into(), logged_out: false };
         assert!(r.refused_for_now(Some("opus-5-5"), Some(&credits)));
         assert!(!r.refused_for_now(Some("fable-5-1"), Some(&credits)));
-        let unnamed = Refusal { at: 2_000, model: String::new() };
+        let unnamed = Refusal { at: 2_000, model: String::new(), logged_out: false };
         assert!(r.refused_for_now(Some("opus-5-5"), Some(&unnamed)), "unread is taken as covering it");
     }
 
@@ -968,6 +976,50 @@ mod tests {
         let s = Situation { current: 6, needs_model: Some("fable-5"), ..situation(&only) };
         assert_eq!(next_move(&s), Move::Hold("every account is out"));
     }
+
+    /// A pane met a login failure on P5 after the feed last read it:
+    /// P5 is no destination, though its numbers have room. Once the
+    /// feed reads it again, someone has logged in, and it is.
+    #[test]
+    fn a_profile_a_pane_could_not_log_in_to_is_no_destination_until_it_is_read_again() {
+        use super::super::refusal::mark_logged_out;
+        use std::collections::HashMap;
+        let read_at = |at| Room::Known {
+            status: "allowed".into(),
+            util_5h: 0.18,
+            util_7d: 0.32,
+            reset_7d: 100,
+            models: vec![],
+            models_measured_at: at,
+            measured_at: at,
+        };
+        let seen = HashMap::from([(5, 2_000)]);
+        let mut rooms = vec![(5, read_at(1_000)), (6, room(0.5, 0.9, 900, &[]))];
+        mark_logged_out(&mut rooms, &seen);
+        let s = Situation { current: 8, ..situation(&rooms) };
+        assert_eq!(next_move(&s), Move::To(6), "not P5, whose renewal is nearer");
+
+        let mut rooms = vec![(5, read_at(3_000)), (6, room(0.5, 0.9, 900, &[]))];
+        mark_logged_out(&mut rooms, &seen);
+        let s = Situation { current: 8, ..situation(&rooms) };
+        assert_eq!(next_move(&s), Move::To(5));
+    }
+
+    /// The feed writes `null` for a window that has reset since it was
+    /// last read, or that has not started; either way nothing of it is
+    /// used. An account reported that way has room.
+    #[test]
+    fn an_account_whose_windows_are_all_null_has_room() {
+        let feed = r#"{"generated_at":"2026-10-09T03:10:00+00:00","accounts":[
+            {"name":"Claude 1","email":"a@x","status":"allowed",
+             "utilization_5h":null,"utilization_7d":null,"reset_5h":null,"reset_7d":null,
+             "model_limits":[],"collected_at":"2026-10-04T06:31:50+00:00"}]}"#;
+        let usage = marspot::cc_usage::parse(feed).expect("the feed parses");
+        let rooms = rooms_for(&[1], &usage.accounts, |_| Some("a@x".into()));
+        assert!(!rooms[0].1.refused_for(Some("fable-5-1")));
+        let s = Situation { current: 8, needs_model: Some("fable-5-1"), ..situation(&rooms) };
+        assert_eq!(next_move(&s), Move::To(1));
+    }
 }
 
 #[cfg(test)]
@@ -995,5 +1047,4 @@ mod live_feed_tests {
              in .claude.json and the feed's email no longer line up: {rooms:?}"
         );
     }
-
 }
