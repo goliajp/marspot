@@ -2,14 +2,20 @@
 
 use super::super::{LogLevel, PluginHost};
 
-/// `gpt-6-astra·high` — the shape claudecode's badge already uses for
-/// its own model and effort, so the two read as one system.
-pub(super) fn badge_text(model: Option<&str>, effort: Option<&str>) -> String {
-    match (model, effort) {
+/// `P2@gpt-6-astra·high` — the shape claudecode's badge already uses
+/// for its own profile, model and effort, so the two read as one system.
+/// Panes run different accounts, so the profile is the half that tells
+/// two otherwise identical corners apart.
+pub(super) fn badge_text(profile: Option<u8>, model: Option<&str>, effort: Option<&str>) -> String {
+    let what = match (model, effort) {
         (Some(m), Some(e)) => format!("{m}·{e}"),
         (Some(m), None) => m.to_string(),
         (None, Some(e)) => format!("codex·{e}"),
         (None, None) => "codex".to_string(),
+    };
+    match profile {
+        Some(p) => format!("P{p}@{what}"),
+        None => what,
     }
 }
 
@@ -147,8 +153,14 @@ mod badge_text_tests {
     /// not look like two unrelated tools.
     #[test]
     fn badge_pairs_model_with_effort() {
-        assert_eq!(badge_text(Some("gpt-6-astra"), Some("high")), "gpt-6-astra·high");
-        assert_eq!(badge_text(Some("gpt-6-astra"), None), "gpt-6-astra");
-        assert_eq!(badge_text(None, None), "codex");
+        assert_eq!(badge_text(None, Some("gpt-6-astra"), Some("high")), "gpt-6-astra·high");
+        assert_eq!(badge_text(None, Some("gpt-6-astra"), None), "gpt-6-astra");
+        assert_eq!(badge_text(None, None, None), "codex");
+    }
+
+    #[test]
+    fn badge_leads_with_the_profile() {
+        assert_eq!(badge_text(Some(2), Some("gpt-6-astra"), Some("high")), "P2@gpt-6-astra·high");
+        assert_eq!(badge_text(Some(1), None, None), "P1@codex");
     }
 }
