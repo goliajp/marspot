@@ -297,7 +297,8 @@ impl Plugin for CodexPlugin {
                 ),
                 None => (pane_model, pane_effort),
             };
-            let text = badge_text(model.as_deref(), effort.as_deref());
+            let profile = codex_pid.and_then(profile_of);
+            let text = badge_text(profile, model.as_deref(), effort.as_deref());
             if let Some(pid) = codex_pid {
                 self.panes.insert(
                     sid,
@@ -305,7 +306,7 @@ impl Plugin for CodexPlugin {
                         codex_pid: pid,
                         shell_pid: shell,
                         effort: effort.clone(),
-                        profile: profile_of(pid),
+                        profile,
                     },
                 );
             } else {

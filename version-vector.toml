@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.227"  # a profile a pane could not log in to is no longer a place to move panes
+shell   = "0.7.228"  # a codex badge names the profile the pane runs under
 core    = "0.12.271"  # frame layout no longer reaches into the Metal renderer
 session = "0.11.137"  # a timing assertion says when it is measuring the host
