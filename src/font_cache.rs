@@ -213,6 +213,11 @@ impl CoreTextFontTable {
         self.inner.read().unwrap_or_else(|e| e.into_inner()).fonts.len()
     }
 
+    /// Never true once built: a table starts with its base font.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// The font at `idx`, cloned — a `CFRetain`, which is why the
     /// per-cell path does not call this.
     pub fn get(&self, idx: usize) -> Option<CTFont> {

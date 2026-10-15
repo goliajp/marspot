@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.233"  # a resume that dies ends the run at once; the hold waits for a settled screen
-core    = "0.12.271"  # frame layout no longer reaches into the Metal renderer
+core    = "0.12.272"  # the glyph atlas texture is held by Rc, as nothing shares it across threads
 session = "0.11.137"  # a timing assertion says when it is measuring the host
