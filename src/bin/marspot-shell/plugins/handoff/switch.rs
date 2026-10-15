@@ -115,7 +115,7 @@ fn command(to: Agent, to_home: &Path, resume: Option<&str>) -> Option<Vec<u8>> {
     let home = to_home.to_str()?;
     let cmd = match to {
         Agent::Claude => {
-            let mut c = PtyCommand::new("claude").env("CLAUDE_CONFIG_DIR", home);
+            let c = PtyCommand::new("claude").env("CLAUDE_CONFIG_DIR", home);
             // No submit receipt hook -- see
             // `receipts::claude_settings_arg` for why nothing asks for
             // one any more.
