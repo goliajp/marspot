@@ -204,6 +204,7 @@ impl Pty {
         };
 
         let mut master_fd: c_int = -1;
+        let close_limit = crate::inherited_fds::close_limit();
         // SAFETY: forkpty is the standard POSIX/BSD primitive for spawning a
         // controlling-terminal child.  We pass NULL for the slave name (we
         // don't need it back) and NULL termios (use defaults).
@@ -229,6 +230,8 @@ impl Pty {
                 if let Some(ref c) = cwd_cstring {
                     libc::chdir(c.as_ptr());
                 }
+                // the shell needs its terminal and nothing else of ours
+                crate::inherited_fds::close_inherited(close_limit, &[]);
                 // Swap in the filtered env before exec.  The pointer
                 // store is async-signal-safe
                 // (no allocation, no locks) — this is why the array
@@ -551,6 +554,33 @@ mod tests {
             "expected 'hello marspot' in output, got: {:?}",
             s
         );
+    }
+
+    /// The shell gets its terminal and nothing else this process has
+    /// open. A descriptor without `FD_CLOEXEC` -- the frame region L2
+    /// hands L3, for one -- used to reach the shell and every program
+    /// it ran.
+    #[test]
+    fn the_shell_inherits_no_descriptor_but_its_terminal() {
+        use std::os::fd::AsRawFd;
+        let leaked = std::fs::File::open("/dev/null").unwrap();
+        let fd = leaked.as_raw_fd();
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+        }
+        let mut pty = Pty::spawn(PtyConfig {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), format!("[ -e /dev/fd/{fd} ] && echo LEAKED{fd}; echo DONE")],
+            size: TerminalSize::default(),
+            argv0: None,
+            cwd: None,
+            ..Default::default()
+        })
+        .expect("spawn /bin/sh");
+        let out = String::from_utf8_lossy(&drain_until_eof_or_timeout(&mut pty, Duration::from_secs(2))).into_owned();
+        assert!(out.contains("DONE"), "{out:?}");
+        assert!(!out.contains("LEAKED"), "{out:?}");
     }
 
     /// What marspot mints for a pane reaches it, and the launcher's
