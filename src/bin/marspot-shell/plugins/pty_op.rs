@@ -143,6 +143,15 @@ pub enum StepKind {
     /// Typing then puts the command into the running program's prompt,
     /// where it sits as text the user has to delete.
     StopIfProcess { under: i32, matching: fn(&pidtree::ProcRow) -> bool },
+    /// From here on the run depends on the program `matching` under
+    /// `under` staying up: if that process exits, the run fails at
+    /// once instead of waiting out whatever step it is in.
+    ///
+    /// A resume the program refuses (`No conversation found`) exits
+    /// within a second, and the steps after it -- waiting for the
+    /// program to take the terminal, then to draw -- had nothing to
+    /// wait for and held the screen frozen until their deadlines.
+    WatchProcess { under: i32, matching: fn(&pidtree::ProcRow) -> bool },
     /// Wait for the user to come back — focus or a keystroke.  The one
     /// step with no deadline: a parked pane may sit for days.
     AwaitUser,
@@ -167,12 +176,14 @@ pub enum StepKind {
     /// screen it just cleared: **the black flash**.  A first frame is
     /// tens of kilobytes; startup noise is a few hundred bytes.
     ///
-    /// `or_composer` also ends the wait, once the floor is reached,
-    /// when an agent's input box is on screen. An agent that starts
-    /// working straight away animates its spinner several times a
-    /// second (about 1 KB per second, measured) and never goes still; the
-    /// box is drawn together with the resumed conversation, so seeing
-    /// it is the same fact the quiet stands in for.
+    /// `or_composer` is for an agent that may start working straight
+    /// away: its spinner animates several times a second (about 1 KB
+    /// per second, measured) and the pane never goes still. With it,
+    /// "still" means no more than a spinner's trickle over `still`
+    /// ([`TRICKLE_BYTES_PER_SEC`]), and it counts only while an input
+    /// box is on screen. The trickle bound keeps a resume that is still
+    /// repainting -- bursts of tens of KB -- from counting as settled;
+    /// the box keeps a loading spinner, which has no box, from it.
     AwaitQuiet { still: Duration, min_bytes: u64, or_composer: bool },
     /// Wait for work running on another thread, and fail the run with
     /// its error if it fails.
@@ -370,6 +381,16 @@ impl Step {
             *escalate = Some((after, sig));
         }
         self
+    }
+    /// Fail the rest of the run if this process exits — see
+    /// [`StepKind::WatchProcess`].
+    pub fn watch_process(under: i32, matching: fn(&pidtree::ProcRow) -> bool) -> Self {
+        Self {
+            kind: StepKind::WatchProcess { under, matching },
+            timeout: Some(Duration::from_secs(1)),
+            proceed_on_timeout: false,
+            label: "watch_process",
+        }
     }
     /// Finish here if `matching` is already running under `under`.
     pub fn stop_if_process(under: i32, matching: fn(&pidtree::ProcRow) -> bool) -> Self {
@@ -704,9 +725,17 @@ fn delivered_not_typed(t: &str) -> bool {
         .is_some_and(|(from, _)| !from.is_empty() && !from.contains(char::is_whitespace))
 }
 
-/// How often a waiting step may look at the pane's frame. Each look
-/// maps the session's grid and copies it.
-const SCREEN_READ_EVERY: Duration = Duration::from_millis(500);
+/// How often an `or_composer` wait samples the output counter, and at
+/// most how often it looks at the pane's frame.
+const SAMPLE_EVERY: Duration = Duration::from_millis(500);
+
+/// Output an agent's spinner may produce and still count as still.
+/// Measured on a working claude: 1.1-1.9 KB per 1.5 s, with one 5 KB
+/// burst; a resumed conversation repainting is tens of KB at a time.
+const TRICKLE_BYTES_PER_SEC: u64 = 4 * 1024;
+
+/// Samples an `or_composer` wait keeps: enough to span its window.
+const SAMPLES_KEPT: usize = 8;
 
 /// Is an agent's input box drawn on this screen?
 ///
@@ -824,9 +853,11 @@ pub struct OpRunner {
     sent_len: Option<u64>,
     still_since: SystemTime,
     drew: bool,
-    /// When `AwaitQuiet` last read the frame for an input box. Reads
-    /// are rationed.
-    screen_read_at: Option<SystemTime>,
+    /// The process [`StepKind::WatchProcess`] tied the run to.
+    watched: Option<i32>,
+    /// `(when, output length)` every [`SAMPLE_EVERY`] while an
+    /// `or_composer` wait runs; at most [`SAMPLES_KEPT`].
+    samples: std::collections::VecDeque<(SystemTime, u64)>,
     /// Set once the run is over; the next tick ends the session.  Two
     /// ticks rather than one because ending is the host's to do.
     finished: Option<OpOutcome>,
@@ -862,7 +893,8 @@ impl OpRunner {
             sent_len: None,
             still_since: now,
             drew: false,
-            screen_read_at: None,
+            watched: None,
+            samples: std::collections::VecDeque::new(),
             finished: None,
             ready_saw: None,
             cleaned: false,
@@ -924,10 +956,29 @@ impl OpRunner {
             }
     }
 
-    fn screen_due(&self) -> bool {
-        self.screen_read_at.is_none_or(|t| {
-            self.env.now().duration_since(t).unwrap_or_default() >= SCREEN_READ_EVERY
-        })
+    /// Take a sample if one is due, and say whether one was taken.
+    fn sample(&mut self, len: u64) -> bool {
+        let now = self.env.now();
+        let due = self.samples.back().is_none_or(|(t, _)| {
+            now.duration_since(*t).unwrap_or_default() >= SAMPLE_EVERY
+        });
+        if due {
+            if self.samples.len() == SAMPLES_KEPT {
+                self.samples.pop_front();
+            }
+            self.samples.push_back((now, len));
+        }
+        due
+    }
+
+    /// Output over the last `window`, once the samples reach that far.
+    fn grown_over(&self, window: Duration, len: u64) -> Option<u64> {
+        let now = self.env.now();
+        self.samples
+            .iter()
+            .rev()
+            .find(|(t, _)| now.duration_since(*t).unwrap_or_default() >= window)
+            .map(|(_, l)| len.saturating_sub(*l))
     }
 
     fn enter_step(&mut self, host: &dyn PaneSessionHost) {
@@ -936,7 +987,7 @@ impl OpRunner {
         self.seen_len = self.env.output_len(host.shelld_session_id());
         self.entered_len = self.seen_len;
         self.drew = false;
-        self.screen_read_at = None;
+        self.samples.clear();
         if let Some(s) = self.op.steps.get(self.at) {
             host.log(
                 LogLevel::Info,
@@ -1005,6 +1056,20 @@ impl OpRunner {
             }
             StepKind::AwaitProcess { under, matching } => {
                 self.env.find_descendant(under, matching).is_some()
+            }
+            StepKind::WatchProcess { under, matching } => {
+                match self.env.find_descendant(under, matching) {
+                    Some(pid) => self.watched = Some(pid),
+                    None => self.finish(
+                        host,
+                        OpOutcome::Failed {
+                            step: self.at,
+                            label: step.label,
+                            err: "the program to watch is not running".into(),
+                        },
+                    ),
+                }
+                true
             }
             StepKind::StopIfProcess { under, matching } => {
                 if self.env.find_descendant(under, matching).is_some() {
@@ -1434,16 +1499,20 @@ impl OpRunner {
                 // all -- and the floor above is what says how many.
                 let painted = self.drew || drawn > 0;
                 let done = painted && drawn >= min_bytes && quiet >= still;
-                if !done && or_composer && painted && drawn >= min_bytes && self.screen_due() {
-                    self.screen_read_at = Some(self.env.now());
-                    let boxed = self.env.pane_screen(sid).is_some_and(|s| composer_on_screen(&s));
-                    if boxed {
+                if !done && or_composer && painted && drawn >= min_bytes && self.sample(len) {
+                    let allowance = TRICKLE_BYTES_PER_SEC * still.as_millis() as u64 / 1000;
+                    let trickle = self.grown_over(still, len).filter(|&g| g <= allowance);
+                    if let Some(grew) = trickle
+                        && self.env.pane_screen(sid).is_some_and(|s| composer_on_screen(&s))
+                    {
                         host.log(
                             LogLevel::Info,
                             &format!("{}.composer", self.op.name),
                             &format!(
-                                "sid={sid} step={} drew={drawn}B floor={min_bytes}B, still moving",
-                                step.label
+                                "sid={sid} step={} drew={drawn}B floor={min_bytes}B, \
+                                 {grew}B in the last {}ms with the input box up",
+                                step.label,
+                                still.as_millis()
                             ),
                         );
                         return true;
@@ -1617,6 +1686,21 @@ impl PaneSession for OpRunner {
                 };
                 host.set_badge(&text);
             }
+        }
+        if let Some(pid) = self.watched
+            && !self.env.pid_alive(pid)
+        {
+            let label = self.op.steps.get(self.at).map_or("end", |s| s.label);
+            host.log(
+                LogLevel::Warn,
+                &format!("{}.program_exited", self.op.name),
+                &format!("pid {pid} exited during {label}; ending the run"),
+            );
+            self.finish(
+                host,
+                OpOutcome::Failed { step: self.at, label, err: format!("pid {pid} exited") },
+            );
+            return;
         }
         let elapsed = self
             .env
@@ -3403,8 +3487,65 @@ mod tests {
         *state.out_len.lock().unwrap() += 40_000;
         *state.screen.lock().unwrap() = CLAUDE_BOX.into();
         run_spinning(&mut r, &host, &state, 1_000);
-        assert!(*host.ended.lock().unwrap(), "the box is drawn: the frame is up");
+        assert!(!*host.ended.lock().unwrap(), "the paint is still inside the window");
+        run_spinning(&mut r, &host, &state, 2_000);
+        assert!(*host.ended.lock().unwrap(), "the box is up and only the spinner moves");
         assert!(matches!(r.finished, Some(OpOutcome::Done)), "{:?}", r.finished);
+    }
+
+    /// A large session is drawn in passes: paint, read more of the
+    /// transcript, paint again. The box can be up after the first
+    /// pass; lifting the hold there shows the rest arriving.
+    #[test]
+    fn a_box_on_a_screen_that_is_still_repainting_does_not_end_the_wait() {
+        let (state, env, host) = setup();
+        let op = PtyOp::new("test.cycle").step(
+            Step::await_quiet(Duration::from_millis(1_500)).after_bytes(2048).or_composer(),
+        );
+        let mut r = OpRunner::new(op, env);
+        *state.screen.lock().unwrap() = CLAUDE_BOX.into();
+        for _ in 0..6 {
+            *state.out_len.lock().unwrap() += 20_000;
+            run_spinning(&mut r, &host, &state, 1_000);
+            assert!(!*host.ended.lock().unwrap(), "a repaint every second is not settled");
+        }
+        run_spinning(&mut r, &host, &state, 2_500);
+        assert!(*host.ended.lock().unwrap(), "once the passes stop, it is");
+    }
+
+    /// The program the run was started for exits -- a resume it
+    /// refused. The run ends there rather than at the next deadline.
+    #[test]
+    fn a_watched_program_that_exits_ends_the_run_at_once() {
+        let (state, env, host) = setup();
+        state.present.lock().unwrap().push(77);
+        state.alive.lock().unwrap().push(77);
+        let op = PtyOp::new("test.cycle")
+            .step(Step::watch_process(1, |_| true))
+            .step(Step::await_quiet(Duration::from_millis(1_500)).after_bytes(2048).timeout(Duration::from_secs(30)));
+        let mut r = OpRunner::new(op, env);
+        run(&mut r, &host, &state, 200);
+        assert!(!*host.ended.lock().unwrap(), "running, so the wait goes on");
+        state.alive.lock().unwrap().clear();
+        run(&mut r, &host, &state, 100);
+        assert!(*host.ended.lock().unwrap());
+        assert!(
+            matches!(&r.finished, Some(OpOutcome::Failed { label: "await_quiet", .. })),
+            "{:?}",
+            r.finished
+        );
+    }
+
+    #[test]
+    fn watching_a_program_that_never_started_fails_the_run() {
+        let (state, env, host) = setup();
+        let op = PtyOp::new("test.cycle")
+            .step(Step::watch_process(1, |_| true))
+            .step(Step::send(b"x".to_vec()));
+        let mut r = OpRunner::new(op, env);
+        run(&mut r, &host, &state, 100);
+        assert!(matches!(&r.finished, Some(OpOutcome::Failed { label: "watch_process", .. })));
+        assert!(state.sent.lock().unwrap().is_empty(), "nothing after it ran");
     }
 
     #[test]
