@@ -1,5 +1,5 @@
 //! Looking at a published frame from outside the pane's processes,
-//! read-only: the mode flags, and the screen as text.
+//! read-only: the mode flags, and the frame itself.
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -55,19 +55,33 @@ pub fn peek(name: &std::ffi::CStr) -> io::Result<(u64, u32)> {
     out
 }
 
-/// The published frame as text, one line per row, trailing blanks
-/// trimmed. `None` when nothing has been published yet.
+/// One published frame, copied out of the region.
+#[derive(Clone, Debug)]
+pub struct Frame {
+    pub cols: u16,
+    pub rows: u16,
+    pub cursor_col: u16,
+    pub cursor_row: u16,
+    /// How far the viewport is scrolled back. Non-zero means the cells
+    /// are history the person is looking at, not the live screen.
+    pub view_offset: u16,
+    /// `cols * rows`, row-major. A cluster cell's text lives in the
+    /// writer's pool and is not here.
+    pub cells: Vec<Cell>,
+}
+
+/// The frame the pane is showing. `None` when nothing has been
+/// published yet.
 ///
-/// This is the screen the pane is showing. Replaying the tail of the
-/// bytelog into a fresh terminal is not: a full-screen program draws
-/// later frames with relative cursor moves against a screen the replay
-/// never saw, and Claude Code's input box, plainly on screen, was
-/// missing from every such replay of two live panes.
+/// This is the screen itself. Replaying the tail of the bytelog into a
+/// fresh terminal is not: a full-screen program draws later frames
+/// with relative cursor moves against a screen the replay never saw,
+/// and Claude Code's input box, plainly on screen, was missing from
+/// every such replay of two live panes.
 ///
 /// Mapped read-only, like [`peek`]; one frame is copied under the
-/// seqlock. A grapheme cluster, whose text lives in the writer's pool,
-/// reads as U+FFFD.
-pub fn peek_text(name: &std::ffi::CStr) -> io::Result<Option<String>> {
+/// seqlock.
+pub fn peek_frame(name: &std::ffi::CStr) -> io::Result<Option<Frame>> {
     let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
@@ -87,14 +101,14 @@ pub fn peek_text(name: &std::ffi::CStr) -> io::Result<Option<String>> {
     if base == libc::MAP_FAILED {
         return Err(io::Error::last_os_error());
     }
-    let out = unsafe { read_text(base as *const u8) };
+    let out = unsafe { read_frame(base as *const u8) };
     unsafe { libc::munmap(base, len) };
     out
 }
 
 /// # Safety
 /// `base` maps at least [`capacity_bytes`] of a grid region.
-unsafe fn read_text(base: *const u8) -> io::Result<Option<String>> {
+unsafe fn read_frame(base: *const u8) -> io::Result<Option<Frame>> {
     let h = base as *const Header;
     unsafe {
         if std::ptr::read_volatile(&(*h).magic) != MAGIC
@@ -103,8 +117,8 @@ unsafe fn read_text(base: *const u8) -> io::Result<Option<String>> {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "not a readable grid region"));
         }
     }
-    let cells = unsafe { base.add(HEADER_BYTES) as *const Cell };
-    let mut copy: Vec<Cell> = Vec::new();
+    let src = unsafe { base.add(HEADER_BYTES) as *const Cell };
+    let mut cells: Vec<Cell> = Vec::new();
     // same bounded retry as the reader: a writer that died mid-publish
     // leaves seq odd for good
     for _ in 0..1024 {
@@ -117,36 +131,22 @@ unsafe fn read_text(base: *const u8) -> io::Result<Option<String>> {
             std::hint::spin_loop();
             continue;
         }
+        let (cursor_col, cursor_row, view_offset) = unsafe {
+            ((*h).cursor_col as u16, (*h).cursor_row as u16, (*h).view_offset as u16)
+        };
         let n = cols as usize * rows as usize;
-        copy.clear();
-        copy.reserve(n);
+        cells.clear();
+        cells.reserve(n);
         unsafe {
-            std::ptr::copy_nonoverlapping(cells, copy.as_mut_ptr(), n);
-            copy.set_len(n);
+            std::ptr::copy_nonoverlapping(src, cells.as_mut_ptr(), n);
+            cells.set_len(n);
         }
         fence(Ordering::Acquire);
         if unsafe { (*h).seq.load(Ordering::Relaxed) } == s1 {
-            return Ok(Some(rows_text(&copy, cols)));
+            return Ok(Some(Frame { cols, rows, cursor_col, cursor_row, view_offset, cells }));
         }
     }
     Ok(None)
-}
-
-fn rows_text(cells: &[Cell], cols: u16) -> String {
-    let mut out = String::new();
-    for row in cells.chunks(cols as usize) {
-        let start = out.len();
-        for c in row {
-            match c.ch {
-                '\0' => {}
-                _ if c.is_cluster() => out.push('\u{fffd}'),
-                ch => out.push(ch),
-            }
-        }
-        out.truncate(start + out[start..].trim_end().len());
-        out.push('\n');
-    }
-    out
 }
 
 #[cfg(test)]
@@ -162,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn the_published_frame_reads_back_as_text() {
+    fn the_published_frame_reads_back_with_its_cursor() {
         let mut grid = Grid::new(12, 3);
         for col in 0..3 {
             put(&mut grid, col, 0, '\u{2500}');
@@ -174,16 +174,22 @@ mod tests {
         let name = std::ffi::CString::new(format!("/msp-t-pk-{}", std::process::id())).unwrap();
         let fd = create_region_named(12, 3, &name).unwrap();
         let mut w = GridShmWriter::from_fd(fd).unwrap();
-        assert_eq!(peek_text(&name).unwrap(), None, "nothing published yet");
+        assert!(peek_frame(&name).unwrap().is_none(), "nothing published yet");
+        grid.set_cursor(2, 1);
         w.publish(&grid, 0, 0);
-        let text = peek_text(&name).unwrap().unwrap();
+        let f = peek_frame(&name).unwrap().unwrap();
         delete_region(&name);
-        assert_eq!(text, "\u{2500}\u{2500}\u{2500}\n\u{276f} \u{4e2d}\n\n");
+        assert_eq!((f.cols, f.rows, f.cursor_col, f.cursor_row, f.view_offset), (12, 3, 2, 1, 0));
+        let row = |r: usize| -> String {
+            f.cells[r * 12..(r + 1) * 12].iter().map(|c| c.ch).filter(|&c| c != '\0').collect()
+        };
+        assert_eq!(row(0).trim_end(), "\u{2500}\u{2500}\u{2500}");
+        assert_eq!(row(1).trim_end(), "\u{276f} \u{4e2d}");
     }
 
     #[test]
     fn a_region_that_does_not_exist_is_an_error() {
         let name = std::ffi::CString::new("/msp-t-pk-none").unwrap();
-        assert!(peek_text(&name).is_err());
+        assert!(peek_frame(&name).is_err());
     }
 }
