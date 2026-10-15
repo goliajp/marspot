@@ -24,6 +24,10 @@ mod refusal;
 mod model;
 mod statusline;
 mod worker;
+mod binding;
+mod transcript;
+
+use transcript::{has_conversation, parse_session_id, tail_activity, tail_last_message_type, tail_window};
 pub use statusline::statusline_ingest;
 use idle::*;
 use model::*;
@@ -191,6 +195,9 @@ struct SessionInfo {
     last_mtime: SystemTime,
     last_size: u64,
     last_message_kind: Option<String>,
+    /// Holds at least one user or assistant record, so `--resume` can
+    /// open it. See `transcript::has_conversation`.
+    has_conversation: bool,
 }
 
 pub struct ClaudecodePlugin {
@@ -2570,131 +2577,6 @@ impl Plugin for ClaudecodePlugin {
 /// including `Unknown` — has to be treated as "do not touch this pane".
 type CcActivity = marspot::pane_state::Activity;
 
-/// Value of a **top-level** string field of one jsonl record.
-///
-/// Depth-aware, and that is the whole point.  Measured off live
-/// records, the field order is not what a reader assumes:
-///
-/// ```text
-/// user:      {"parentUuid":…,"promptId":…,"type":"user","message":{…}}
-/// assistant: {"parentUuid":…,"message":{"model":…,"type":"message",…},…,"type":"assistant",…}
-/// ```
-///
-/// Assistant records put `message` — which has its own
-/// `"type":"message"` — **before** their own `type`, so "first
-/// `"type"` in the line" reads every assistant record as `message`.
-/// That shipped in 0.7.38 and made all 9 live panes report `working`:
-/// assistant records were being skipped as bookkeeping and the scan
-/// fell through to the user record behind them.  Scanning at depth 1
-/// is the fix, and it retires the whole class of field-order bugs.
-fn top_level_str<'a>(line: &'a str, field: &str) -> Option<&'a str> {
-    let b = line.as_bytes();
-    // Content of the JSON string starting at `at` (which must be the
-    // opening quote), plus the index just past its closing quote.
-    // Escapes are stepped over, not decoded — the values this reads
-    // ("assistant", "user", …) have none.
-    fn scan_string(b: &[u8], at: usize) -> Option<(&str, usize)> {
-        let mut i = at + 1;
-        let start = i;
-        while i < b.len() {
-            match b[i] {
-                b'\\' => i += 2,
-                b'"' => {
-                    return std::str::from_utf8(&b[start..i]).ok().map(|s| (s, i + 1))
-                }
-                _ => i += 1,
-            }
-        }
-        None
-    }
-    let mut i = 0usize;
-    let mut depth: i32 = 0;
-    while i < b.len() {
-        match b[i] {
-            b'{' | b'[' => {
-                depth += 1;
-                i += 1;
-            }
-            b'}' | b']' => {
-                depth -= 1;
-                i += 1;
-            }
-            b'"' => {
-                let (s, after) = scan_string(b, i)?;
-                let mut j = after;
-                while j < b.len() && b[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                // A key is a string followed by ':'.  Only depth 1 is
-                // the record's own object.
-                if depth == 1 && j < b.len() && b[j] == b':' {
-                    let mut k = j + 1;
-                    while k < b.len() && b[k].is_ascii_whitespace() {
-                        k += 1;
-                    }
-                    if s == field {
-                        return if k < b.len() && b[k] == b'"' {
-                            scan_string(b, k).map(|(v, _)| v)
-                        } else {
-                            None // present but not a string
-                        };
-                    }
-                    i = k; // resume at the value; its braces adjust depth
-                } else {
-                    i = after;
-                }
-            }
-            _ => i += 1,
-        }
-    }
-    None
-}
-
-/// The record's own `type` — `assistant`, `user`, `system`,
-/// `last-prompt`, `attachment`, `ai-title`, `mode`, `permission-mode`,
-/// … (that list is what live transcripts actually contain).
-fn record_type(line: &str) -> Option<&str> {
-    top_level_str(line, "type")
-}
-
-/// Classify one conversation record.  Split from the file read so the
-/// shape rules are testable against literal records.
-///
-/// `has_young_child` answers "does claude have a process younger than
-/// this record" — the caller resolves it from the proc table it already
-/// walked, since a tool that shells out shows up as a child of claude
-/// while an approval prompt shows nothing.
-fn activity_from_last_record(line: &str, has_young_child: bool) -> CcActivity {
-    match record_type(line) {
-        Some("assistant") => {
-            if line.contains("\"type\":\"tool_use\"") {
-                CcActivity::ToolPending { executing: has_young_child }
-            } else {
-                CcActivity::AwaitingUser
-            }
-        }
-        // A user record is either a real prompt or the transcript's
-        // record of a tool result; both leave the assistant owing the
-        // next record.
-        Some("user") => CcActivity::Working,
-        _ => CcActivity::Unknown,
-    }
-}
-
-/// True for records that say nothing about whose turn it is and must be
-/// skipped when scanning back for the conversation's last state.
-///
-/// This is not a hypothetical: claudecode writes
-/// `{"type":"system","subtype":"turn_duration",…}` **after** the
-/// assistant's closing message, so the single most common resting state
-/// — a finished turn waiting on the user — sits behind one of these.
-/// Classifying only the literal last line read `unknown` on 7 of 9 live
-/// panes, which is what caught it.
-fn is_bookkeeping_record(line: &str) -> bool {
-    !matches!(record_type(line), Some("assistant") | Some("user"))
-}
-
-
 /// The live session uuid as stated by the claude process tree's own
 /// argv, if it states one.
 ///
@@ -2778,116 +2660,12 @@ fn is_uuid(s: &str) -> bool {
     parts.next().is_none()
 }
 
-/// Read the first line of `path` and try to parse `"sessionId":"<uuid>"`
-/// out of it.  Cheap regex-free string scan — JSON parser would be
-/// overkill for one well-known field, and pulling serde_json into the
-/// shell binary just for this would violate the self-build principle.
-fn parse_session_id(path: &PathBuf) -> Option<String> {
-    use std::io::{BufRead, BufReader};
-    let f = fs::File::open(path).ok()?;
-    let mut reader = BufReader::new(f);
-    let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
-    // claudecode jsonl always starts the file with a "mode" record
-    // containing `"sessionId":"<uuid>"`.  We look for that key.
-    let key = "\"sessionId\":\"";
-    let i = line.find(key)? + key.len();
-    let rest = &line[i..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
-}
-
-/// Cheap "what's the type of the last record" check.  Reads at most
-/// the last 32 KiB of the file and looks at the last `\n`-separated
-/// record's `"type":"…"` field.  Returns None if the file is malformed
-/// or has no recognisable type.
-/// The tail window of a transcript as text, for the cheap
-/// "what has this session been doing" checks.  Same 32 KB window the
-/// classifier uses; a read failure yields an empty string, which the
-/// callers read as "no evidence" — and every caller's no-evidence
-/// answer is the conservative one.
-fn tail_window(path: &PathBuf) -> String {
-    use std::io::{Read, Seek, SeekFrom};
-    const TAIL: u64 = 32 * 1024;
-    let Ok(mut f) = fs::File::open(path) else {
-        return String::new();
-    };
-    let Ok(md) = f.metadata() else {
-        return String::new();
-    };
-    let start = md.len().saturating_sub(TAIL);
-    if f.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
-    }
-    let mut buf = Vec::with_capacity(TAIL as usize);
-    if f.read_to_end(&mut buf).is_err() {
-        return String::new();
-    }
-    String::from_utf8_lossy(&buf).into_owned()
-}
-
-/// Read a session's last record and classify it.  Same 32 KB tail
-/// window as `tail_last_message_type`; the record we need is the last
-/// line, and a single record over 32 KB (a huge tool result) reads as
-/// `Unknown`, which the caller must already treat as "in flight".
-fn tail_activity(path: &PathBuf, has_young_child: bool) -> CcActivity {
-    use std::io::{Read, Seek, SeekFrom};
-    const TAIL: u64 = 32 * 1024;
-    let Ok(mut f) = fs::File::open(path) else {
-        return CcActivity::Unknown;
-    };
-    let Ok(md) = f.metadata() else {
-        return CcActivity::Unknown;
-    };
-    let len = md.len();
-    let start = len.saturating_sub(TAIL);
-    if f.seek(SeekFrom::Start(start)).is_err() {
-        return CcActivity::Unknown;
-    }
-    let mut buf = Vec::with_capacity(TAIL as usize);
-    if f.read_to_end(&mut buf).is_err() {
-        return CcActivity::Unknown;
-    }
-    let s = String::from_utf8_lossy(&buf);
-    // Walk back to the last record that is part of the conversation,
-    // stepping over the bookkeeping ones claudecode appends after a
-    // turn.  Bounded so a long run of them can't turn one tick into a
-    // scan of the whole window.
-    const MAX_SKIP: usize = 64;
-    match s
-        .lines()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(MAX_SKIP)
-        .find(|l| !is_bookkeeping_record(l))
-    {
-        Some(last) => activity_from_last_record(last, has_young_child),
-        None => CcActivity::Unknown,
-    }
-}
-
-fn tail_last_message_type(path: &PathBuf) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    const TAIL: u64 = 32 * 1024;
-    let mut f = fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    let start = len.saturating_sub(TAIL);
-    f.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf = Vec::with_capacity(TAIL as usize);
-    f.read_to_end(&mut buf).ok()?;
-    // Find the last newline-anchored record.
-    let s = String::from_utf8_lossy(&buf);
-    let last_line = s.lines().rev().find(|l| !l.trim().is_empty())?;
-    let key = "\"type\":\"";
-    let i = last_line.find(key)? + key.len();
-    let rest = &last_line[i..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::transcript::{
+        activity_from_last_record, is_bookkeeping_record, record_type, top_level_str,
+    };
 
     /// The policy threshold every idle test runs at: the shipped
     /// default, stated here rather than read off the machine running
@@ -4625,6 +4403,7 @@ mod tests {
                     last_mtime: *mtime,
                     last_size: 1,
                     last_message_kind: None,
+                    has_conversation: true,
                 },
             );
         }
@@ -7069,6 +6848,7 @@ mod tests {
             last_mtime: t0 + Duration::from_secs(mtime_off),
             last_size: 1,
             last_message_kind: None,
+            has_conversation: true,
         };
         let mut ctx = WorkerCtx {
             projects_root: PathBuf::from("/fake"),
