@@ -87,19 +87,9 @@ pub trait OpEnv: Send {
     /// question could not be asked: no session dir, no region, or a
     /// region written by something else.
     fn pane_modes(&self, sid: u64) -> Option<(u64, u32)>;
-    /// The pane's screen as text, the way `--read` shows it.
-    ///
-    /// Rebuilt by replaying the tail of the bytelog, which is not
-    /// cheap — asked once, after a return has been sent, to find out
-    /// whether it did anything.
+    /// The pane's screen as text, the way `--read` shows it: the frame
+    /// the session publishes, copied once.
     fn pane_screen(&self, sid: u64) -> Option<String>;
-    /// The frame the pane is showing right now, as text, read from the
-    /// grid the session publishes.
-    ///
-    /// Unlike [`OpEnv::pane_screen`] this is not rebuilt from output:
-    /// it is the session's own grid, copied once. A full-screen agent
-    /// that redraws in place reads correctly here and garbled there.
-    fn pane_frame(&self, sid: u64) -> Option<String>;
     /// What sits typed and unsent in the pane's input box, read off
     /// the grid so the program's own suggestion and the messages
     /// already sent are not taken for it.
@@ -1446,7 +1436,7 @@ impl OpRunner {
                 let done = painted && drawn >= min_bytes && quiet >= still;
                 if !done && or_composer && painted && drawn >= min_bytes && self.screen_due() {
                     self.screen_read_at = Some(self.env.now());
-                    let boxed = self.env.pane_frame(sid).is_some_and(|s| composer_on_screen(&s));
+                    let boxed = self.env.pane_screen(sid).is_some_and(|s| composer_on_screen(&s));
                     if boxed {
                         host.log(
                             LogLevel::Info,
@@ -1819,23 +1809,10 @@ impl OpEnv for RealEnv {
         marspot_term::grid_shm::peek(&name).ok()
     }
     fn pane_screen(&self, sid: u64) -> Option<String> {
-        let entry = marspot_term::session_registry::read_session_entry(sid).ok()?;
-        let bytelog = marspot_term::paths::sessions_dir()
-            .join(sid.to_string())
-            .join("bytelog");
-        marspot::pane_read::screen_text(&bytelog, entry.cols, entry.rows, 0).ok()
-    }
-    fn pane_frame(&self, sid: u64) -> Option<String> {
-        let entry = marspot_term::session_registry::read_session_entry(sid).ok()?;
-        let name = std::ffi::CString::new(entry.shm_name).ok()?;
-        marspot_term::grid_shm::peek_text(&name).ok()?
+        marspot::pane_read::screen(sid, 0).ok()
     }
     fn pane_unsent(&self, sid: u64) -> Option<String> {
-        let entry = marspot_term::session_registry::read_session_entry(sid).ok()?;
-        let bytelog = marspot_term::paths::sessions_dir()
-            .join(sid.to_string())
-            .join("bytelog");
-        marspot::pane_read::composer_text(&bytelog, entry.cols, entry.rows).ok()?
+        marspot::pane_read::composer(sid).ok()?
     }
 }
 
@@ -2404,9 +2381,6 @@ mod tests {
         }
         fn pane_screen(&self, _sid: u64) -> Option<String> {
             Some(self.state.screen.lock().unwrap().clone())
-        }
-        fn pane_frame(&self, sid: u64) -> Option<String> {
-            self.pane_screen(sid)
         }
         fn pane_unsent(&self, sid: u64) -> Option<String> {
             self.pane_screen(sid).as_deref().and_then(crate::plugins::autorun::unsent_line)

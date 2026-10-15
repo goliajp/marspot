@@ -443,10 +443,7 @@ impl WorkerCtx {
                 return None;
             }
         self.banner_tried.insert(sid, now);
-        let entry = marspot_term::session_registry::list_session_entries()
-            .into_iter()
-            .find(|e| e.id == sid)?;
-        let screen = marspot::pane_read::screen_text(&bytelog, entry.cols, entry.rows, 0).ok()?;
+        let screen = marspot::pane_read::screen(sid, 0).ok()?;
         parse_banner_model(&screen)
     }
 }

@@ -3763,15 +3763,9 @@ impl ShellApp {
             .ok_or_else(|| format!("pane {sid} has too much queued"))
     }
 
-    /// The pane's screen, replayed from its bytelog.
+    /// The pane's screen as it is showing it.
     fn read_pane_screen(sid: u64) -> Option<String> {
-        let entry = marspot_term::session_registry::list_session_entries()
-            .into_iter()
-            .find(|e| e.id == sid)?;
-        let bytelog = marspot_term::paths::sessions_dir()
-            .join(sid.to_string())
-            .join("bytelog");
-        marspot::pane_read::screen_text(&bytelog, entry.cols, entry.rows, 0).ok()
+        marspot::pane_read::screen(sid, 0).ok()
     }
 
     /// Turn what a caller said into one pane.
@@ -3820,26 +3814,14 @@ impl ShellApp {
 
     /// What the pane called `target` says.
     ///
-    /// Replayed from its bytelog rather than asked of L3: the record is
-    /// already on disk and complete, so reading costs one file tail and
-    /// disturbs nothing — no round trip, no state, and a pane that is
+    /// Read from what the session has already left behind -- its
+    /// published frame, and its bytelog for history -- rather than asked
+    /// of L3: no round trip, no state, and a pane that is
     /// mid-reclamation answers as readily as one nobody has touched.
     fn run_cli_read(&self, target: &str, extra_lines: u32) -> Result<String, String> {
         let sid = self.resolve_target(target)?;
-        let entry = marspot_term::session_registry::list_session_entries()
-            .into_iter()
-            .find(|e| e.id == sid)
-            .ok_or_else(|| format!("pane {sid} is gone"))?;
-        let bytelog = marspot_term::paths::sessions_dir()
-            .join(sid.to_string())
-            .join("bytelog");
-        marspot::pane_read::screen_text(
-            &bytelog,
-            entry.cols,
-            entry.rows,
-            extra_lines.min(u16::MAX as u32) as u16,
-        )
-        .map_err(|e| format!("cannot read pane {sid}: {e}"))
+        marspot::pane_read::screen(sid, extra_lines.min(u16::MAX as u32) as u16)
+            .map_err(|e| format!("cannot read pane {sid}: {e}"))
     }
 
     /// Type `text` into the pane called `target`, then Enter.
