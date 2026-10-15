@@ -35,6 +35,8 @@ use std::time::{Duration, SystemTime};
 use crate::plugins::{EndReason, KeyHandling, LogLevel, PaneSession, PaneSessionHost};
 use marspot::pidtree;
 
+pub use super::pty_command::{PtyCommand, quotable, shell_safe};
+
 /// Bytes to a pane's PTY, and holds on its picture.
 ///
 /// Implemented over whatever can reach the pane (in production, the
@@ -167,7 +169,14 @@ pub enum StepKind {
     /// reads as "finished drawing", and the freeze lifts onto the
     /// screen it just cleared: **the black flash**.  A first frame is
     /// tens of kilobytes; startup noise is a few hundred bytes.
-    AwaitQuiet { still: Duration, min_bytes: u64 },
+    ///
+    /// `or_composer` also ends the wait, once the floor is reached,
+    /// when an agent's input box is on screen. An agent that starts
+    /// working straight away animates its spinner several times a
+    /// second (about 1 KB per second, measured) and never goes still; the
+    /// box is drawn together with the resumed conversation, so seeing
+    /// it is the same fact the quiet stands in for.
+    AwaitQuiet { still: Duration, min_bytes: u64, or_composer: bool },
     /// Wait for work running on another thread, and fail the run with
     /// its error if it fails.
     ///
@@ -470,7 +479,7 @@ impl Step {
     }
     pub fn await_quiet(still: Duration) -> Self {
         Self {
-            kind: StepKind::AwaitQuiet { still, min_bytes: 0 },
+            kind: StepKind::AwaitQuiet { still, min_bytes: 0, or_composer: false },
             timeout: Some(Duration::from_secs(30)),
             proceed_on_timeout: false,
             label: "await_quiet",
@@ -481,6 +490,14 @@ impl Step {
     pub fn after_bytes(mut self, n: u64) -> Self {
         if let StepKind::AwaitQuiet { min_bytes, .. } = &mut self.kind {
             *min_bytes = n;
+        }
+        self
+    }
+    /// Also finish when an agent's input box is on screen — see
+    /// [`StepKind::AwaitQuiet`].
+    pub fn or_composer(mut self) -> Self {
+        if let StepKind::AwaitQuiet { or_composer, .. } = &mut self.kind {
+            *or_composer = true;
         }
         self
     }
@@ -690,6 +707,25 @@ fn delivered_not_typed(t: &str) -> bool {
         .is_some_and(|(from, _)| !from.is_empty() && !from.contains(char::is_whitespace))
 }
 
+/// How often a waiting step may replay the bytelog to look at the
+/// screen. Each look parses up to 512 KB.
+const SCREEN_READ_EVERY: Duration = Duration::from_millis(500);
+
+/// Is an agent's input box drawn on this screen?
+///
+/// Claude Code rules the box off above its prompt line, which is what
+/// tells it from the messages already sent: those carry the same glyph
+/// but no rule.
+fn composer_on_screen(screen: &str) -> bool {
+    let bare = |l: &str| l.trim().trim_matches(['│', '┃', '|']).trim().to_string();
+    let lines: Vec<String> = screen.lines().map(bare).collect();
+    lines.windows(2).any(|w| {
+        !w[0].is_empty()
+            && w[0].chars().all(|c| matches!(c, '─' | '━' | '╭' | '╮'))
+            && w[1].starts_with(['\u{276f}', '\u{203a}'])
+    })
+}
+
 fn is_composer_line(l: &str) -> bool {
     let t = l.trim_start();
     COMPOSER_PROMPTS.iter().any(|p| t.starts_with(*p))
@@ -791,6 +827,9 @@ pub struct OpRunner {
     sent_len: Option<u64>,
     still_since: SystemTime,
     drew: bool,
+    /// When `AwaitQuiet` last read the screen for an input box. A read
+    /// replays the bytelog tail, so it is rationed.
+    screen_read_at: Option<SystemTime>,
     /// Set once the run is over; the next tick ends the session.  Two
     /// ticks rather than one because ending is the host's to do.
     finished: Option<OpOutcome>,
@@ -826,6 +865,7 @@ impl OpRunner {
             sent_len: None,
             still_since: now,
             drew: false,
+            screen_read_at: None,
             finished: None,
             ready_saw: None,
             cleaned: false,
@@ -887,12 +927,19 @@ impl OpRunner {
             }
     }
 
+    fn screen_due(&self) -> bool {
+        self.screen_read_at.is_none_or(|t| {
+            self.env.now().duration_since(t).unwrap_or_default() >= SCREEN_READ_EVERY
+        })
+    }
+
     fn enter_step(&mut self, host: &dyn PaneSessionHost) {
         self.entered = self.env.now();
         self.still_since = self.entered;
         self.seen_len = self.env.output_len(host.shelld_session_id());
         self.entered_len = self.seen_len;
         self.drew = false;
+        self.screen_read_at = None;
         if let Some(s) = self.op.steps.get(self.at) {
             host.log(
                 LogLevel::Info,
@@ -1364,7 +1411,7 @@ impl OpRunner {
                 }
                 false
             }
-            StepKind::AwaitQuiet { still, min_bytes } => {
+            StepKind::AwaitQuiet { still, min_bytes, or_composer } => {
                 let len = self.env.output_len(sid);
                 if len != self.seen_len {
                     self.seen_len = len;
@@ -1390,6 +1437,21 @@ impl OpRunner {
                 // all -- and the floor above is what says how many.
                 let painted = self.drew || drawn > 0;
                 let done = painted && drawn >= min_bytes && quiet >= still;
+                if !done && or_composer && painted && drawn >= min_bytes && self.screen_due() {
+                    self.screen_read_at = Some(self.env.now());
+                    let boxed = self.env.pane_screen(sid).is_some_and(|s| composer_on_screen(&s));
+                    if boxed {
+                        host.log(
+                            LogLevel::Info,
+                            &format!("{}.composer", self.op.name),
+                            &format!(
+                                "sid={sid} step={} drew={drawn}B floor={min_bytes}B, still moving",
+                                step.label
+                            ),
+                        );
+                        return true;
+                    }
+                }
                 if done {
                     // What the floor is worth is a number nobody had:
                     // how much a resuming CLI actually paints before it
@@ -1648,188 +1710,6 @@ impl PaneSession for OpRunner {
             f(host, &outcome);
         }
     }
-}
-
-/// A shell command line built from parts that are checked, not hoped
-/// about.
-///
-/// The hand-written version of this was `format!("CLAUDE_CONFIG_DIR='{}'
-/// claude --resume {}\r", dir, uuid)` with a separate "is this dir
-/// safe?" predicate that the caller had to remember to call.  Here the
-/// check is the constructor: an unsafe value cannot reach the line.
-pub struct PtyCommand {
-    program: String,
-    /// In the order they were given.  A flag and its value are
-    /// adjacent on the line or they are not a flag and its value --
-    /// keeping quoted arguments in a list of their own put
-    /// `--settings` next to `--resume` and the document at the end.
-    args: Vec<Arg>,
-    env: Vec<(String, String)>,
-    /// Where the line runs, when it matters which directory that is.
-    dir: Option<String>,
-    clear_first: bool,
-}
-
-enum Arg {
-    Bare(String),
-    Quoted(String),
-}
-
-impl PtyCommand {
-    pub fn new(program: impl Into<String>) -> Self {
-        Self {
-            dir: None,
-            program: program.into(),
-            args: Vec::new(),
-            env: Vec::new(),
-            clear_first: false,
-        }
-    }
-
-    pub fn arg(mut self, a: impl Into<String>) -> Self {
-        self.args.push(Arg::Bare(a.into()));
-        self
-    }
-
-    /// An argument wrapped in single quotes.
-    ///
-    /// `shell_safe` rejects the whole class of expansion characters,
-    /// which is right for a bare word and wrong for a JSON document --
-    /// `--settings '{"hooks":…}'` is a legitimate argument that can
-    /// never pass it. Inside single quotes a shell expands nothing, so
-    /// the only character that matters is the single quote itself, and
-    /// that is still refused rather than escaped. Same rule as `env`,
-    /// narrower proof.
-    pub fn quoted_arg(mut self, a: impl Into<String>) -> Self {
-        self.args.push(Arg::Quoted(a.into()));
-        self
-    }
-
-    /// `KEY='value'` in front of the command.  A value that could break
-    /// out of its quoting is **refused**, not escaped: a path that
-    /// strange is not one to guess about, and the caller gets `None`
-    /// rather than a line that does something else.
-    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.env.push((key.into(), value.into()));
-        self
-    }
-
-    /// Run the command from `dir`.
-    ///
-    /// For a command that resumes something: a `claude --resume` is
-    /// answered from the shell's working directory, and claude binds
-    /// the session it reopens to *that* directory -- its project rules
-    /// and its hooks come from there. A pane whose shell has been
-    /// `cd`-ed somewhere else since the session started therefore
-    /// reopens it under a different project, and the only sign is that
-    /// the pane's title changes. Seen on the real machine: a torajs
-    /// session came back as `devops`, loading devops's rules.
-    ///
-    /// A directory that could break out of its quoting is refused the
-    /// way an env value is, and a `None` leaves the line as it was --
-    /// running where the shell stands, which is today's behaviour.
-    pub fn in_dir(mut self, dir: Option<impl Into<String>>) -> Self {
-        self.dir = dir.map(Into::into);
-        self
-    }
-
-    /// Wipe the screen as the line's first act.
-    ///
-    /// The typed line is echoed by the shell; behind a screen hold
-    /// nobody watches that happen, but it is still there when the hold
-    /// lifts.  Erasing the display first leaves the pane showing only
-    /// what the command itself paints.  `\033[2J` and nothing else —
-    /// `\033[3J` would take the scrollback with it, and the scrollback
-    /// is the user's.
-    pub fn clear_screen_first(mut self, on: bool) -> Self {
-        self.clear_first = on;
-        self
-    }
-
-    /// The bytes to type, or `None` if any part is unsafe to quote.
-    pub fn to_bytes(&self) -> Option<Vec<u8>> {
-        let mut line = String::new();
-        if self.clear_first {
-            line.push_str("printf '\\033[H\\033[2J'; ");
-        }
-        // A subshell, so the directory this runs in is not left behind
-        // on the person's prompt: they did not ask to be moved. `&&`
-        // and not `;` because a cd that fails must not be followed by a
-        // resume in the wrong place, which is the thing this is for.
-        // `exec` keeps the process tree the shape the scanner expects
-        // -- the program a direct child of the pane's shell.
-        if let Some(d) = &self.dir {
-            if !quotable(d) {
-                return None;
-            }
-            line.push_str(&format!("( cd '{d}' && "));
-        }
-        for (k, v) in &self.env {
-            if !shell_safe(k) || !shell_safe(v) {
-                return None;
-            }
-            line.push_str(&format!("{k}='{v}' "));
-        }
-        // After the assignments, never before them: `exec FOO=bar cmd`
-        // asks the shell to run a program called `FOO=bar`, and both
-        // sh and zsh answer "command not found". Written the wrong way
-        // round, every switch ran a subshell that exited 127 and then
-        // waited twenty seconds for a claude that was never started.
-        if self.dir.is_some() {
-            line.push_str("exec ");
-        }
-        if !shell_safe(&self.program) {
-            return None;
-        }
-        line.push_str(&self.program);
-        for a in &self.args {
-            match a {
-                Arg::Bare(a) => {
-                    if !shell_safe(a) {
-                        return None;
-                    }
-                    line.push(' ');
-                    line.push_str(a);
-                }
-                Arg::Quoted(q) => {
-                    // Everything a shell could act on is inert between
-                    // single quotes; a single quote is not, and is
-                    // refused rather than escaped.
-                    if q.is_empty() || q.contains(['\'', '\n', '\r']) {
-                        return None;
-                    }
-                    line.push_str(" '");
-                    line.push_str(q);
-                    line.push('\'');
-                }
-            }
-        }
-        if self.dir.is_some() {
-            line.push_str(" )");
-        }
-        line.push('\r');
-        Some(line.into_bytes())
-    }
-}
-
-/// A value that survives being wrapped in single quotes.
-///
-/// Weaker than [`shell_safe`] on purpose, and for a different job: a
-/// directory name may legitimately contain `$`, `&` or a space, and
-/// inside single quotes none of them mean anything. What it cannot
-/// contain is the quote itself, or a newline that would end the line.
-pub fn quotable(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 1024 && !s.contains(['\'', '\n', '\r'])
-}
-
-/// A value that can go on a command line without changing its meaning.
-///
-/// Rejects rather than escapes, and rejects the whole class: quotes,
-/// newlines, backslashes, and the three shells' expansion characters.
-pub fn shell_safe(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 512
-        && !s.contains(['\'', '"', '\n', '\r', '\\', '$', '`', ';', '&', '|', '<', '>'])
 }
 
 /// The production [`OpEnv`]: real signals, the real process table, the
@@ -3495,6 +3375,90 @@ mod tests {
         assert!(!*host.ended.lock().unwrap(), "still settling");
         run(&mut r, &host, &state, 600);
         assert!(*host.ended.lock().unwrap(), "drawn, and still — now release");
+    }
+
+    /// Ticks the runner while the pane keeps printing a spinner: 30
+    /// bytes a frame, roughly what claude emits while it works.
+    fn run_spinning(r: &mut OpRunner, host: &Host, state: &FakeState, ms: u64) {
+        for _ in 0..(ms / 16) {
+            if *host.ended.lock().unwrap() {
+                return;
+            }
+            *state.out_len.lock().unwrap() += 30;
+            r.on_tick(host);
+            advance(state, 16);
+        }
+    }
+
+    const CLAUDE_BOX: &str = "⏺ resumed\n\n✻ Working…\n────────────\n❯\u{a0}\n────────────\n";
+
+    /// A resumed claude told to carry on starts working at once, and
+    /// its spinner never lets the pane go still. Waiting for quiet
+    /// held the screen frozen for the whole 30 s deadline and then
+    /// failed the run, skipping what came after it -- on 5 of 9 panes
+    /// in one profile switch.
+    #[test]
+    fn an_input_box_on_screen_ends_the_wait_for_a_pane_that_never_goes_still() {
+        let (state, env, host) = setup();
+        let op = PtyOp::new("test.cycle").step(
+            Step::await_quiet(Duration::from_millis(1_500)).after_bytes(2048).or_composer(),
+        );
+        let mut r = OpRunner::new(op, env);
+        run(&mut r, &host, &state, 50);
+
+        // loading: a spinner, no box yet
+        *state.screen.lock().unwrap() = "✳ Resuming conversation…".into();
+        run_spinning(&mut r, &host, &state, 3_000);
+        assert!(!*host.ended.lock().unwrap(), "no box is a conversation still loading");
+
+        *state.out_len.lock().unwrap() += 40_000;
+        *state.screen.lock().unwrap() = CLAUDE_BOX.into();
+        run_spinning(&mut r, &host, &state, 1_000);
+        assert!(*host.ended.lock().unwrap(), "the box is drawn: the frame is up");
+        assert!(matches!(r.finished, Some(OpOutcome::Done)), "{:?}", r.finished);
+    }
+
+    #[test]
+    fn an_input_box_does_not_count_below_the_byte_floor() {
+        let (state, env, host) = setup();
+        let op = PtyOp::new("test.cycle").step(
+            Step::await_quiet(Duration::from_millis(1_500)).after_bytes(2048).or_composer(),
+        );
+        let mut r = OpRunner::new(op, env);
+        run(&mut r, &host, &state, 50);
+        // the screen still shows the old session's box from before the clear
+        *state.screen.lock().unwrap() = CLAUDE_BOX.into();
+        *state.out_len.lock().unwrap() = 300;
+        for _ in 0..60 {
+            r.on_tick(&host);
+            advance(&state, 16);
+            // a slow trickle that never reaches the floor
+            if *state.out_len.lock().unwrap() < 1_500 {
+                *state.out_len.lock().unwrap() += 1;
+            }
+        }
+        assert!(!*host.ended.lock().unwrap());
+    }
+
+    #[test]
+    fn without_or_composer_a_spinning_pane_still_waits_for_quiet() {
+        let (state, env, host) = setup();
+        let op = PtyOp::new("test.wake")
+            .step(Step::await_quiet(Duration::from_millis(1_500)).after_bytes(2048));
+        let mut r = OpRunner::new(op, env);
+        *state.out_len.lock().unwrap() = 40_000;
+        *state.screen.lock().unwrap() = CLAUDE_BOX.into();
+        run_spinning(&mut r, &host, &state, 5_000);
+        assert!(!*host.ended.lock().unwrap());
+    }
+
+    #[test]
+    fn a_sent_message_is_not_an_input_box() {
+        // past prompts carry the same glyph, without the rule above
+        assert!(!composer_on_screen("❯ fix the bug\n⏺ done\n"));
+        assert!(!composer_on_screen("✳ Resuming conversation…"));
+        assert!(composer_on_screen(CLAUDE_BOX));
+        assert!(composer_on_screen("│ ─────── │\n│ ❯ half a sentence │\n"));
     }
 
     /// A run that exists to bring something back must not do it twice.

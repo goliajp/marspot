@@ -2027,6 +2027,9 @@ fn profile_cycle_op(
                 pty_op::Step::await_quiet(idle::WAKE_QUIET_FOR)
                     .after_bytes(idle::FIRST_FRAME_BYTES)
                     .timeout(idle::WAKE_WATCHDOG)
+                    // asked to carry on, it starts working at once and
+                    // its spinner never lets the pane go still
+                    .or_composer()
                     .named("first_frame"),
             )
             // Their sentence last. If there was one, it goes back and
@@ -5310,7 +5313,7 @@ mod tests {
         assert!(
             matches!(
                 kinds[quiet_at],
-                pty_op::StepKind::AwaitQuiet { still, min_bytes }
+                pty_op::StepKind::AwaitQuiet { still, min_bytes, .. }
                     if *still >= Duration::from_millis(400) && *min_bytes > 0
             ),
             "a still-window measured in tens of ms lands inside claude's \
