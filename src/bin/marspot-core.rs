@@ -3411,6 +3411,7 @@ fn spawn_l3_with_cwd(
     cmd.env_remove(ENV_CONTROL_FD);
     // SAFETY: pre_exec runs between fork and exec; only async-signal-safe
     // libc calls (dup2/close/fcntl) are used.
+    let close_limit = marspot_term::inherited_fds::close_limit();
     unsafe {
         cmd.pre_exec(move || {
             if region_raw != SHM_TARGET_FD
@@ -3421,6 +3422,8 @@ fn spawn_l3_with_cwd(
             if flags >= 0 {
                 libc::fcntl(SHM_TARGET_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
             }
+            // the frame region is the one descriptor L3 is meant to have
+            marspot_term::inherited_fds::close_inherited(close_limit, &[SHM_TARGET_FD]);
             Ok(())
         });
     }
