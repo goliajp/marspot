@@ -575,10 +575,14 @@ pub(super) fn reclaim_op(
             .step(pty_op::Step::stop_if_process(shell_pid, looks_like_claudecode))
             .step(pty_op::Step::send(line).named("resume"))
             .step(pty_op::Step::await_process(shell_pid, looks_like_claudecode))
+            .step(pty_op::Step::watch_process(shell_pid, looks_like_claudecode))
             .step(
                 pty_op::Step::await_quiet(WAKE_QUIET_FOR)
                     .after_bytes(FIRST_FRAME_BYTES)
-                    .timeout(WAKE_WATCHDOG),
+                    .timeout(WAKE_WATCHDOG)
+                    // a session with background work picks it up again
+                    // on waking, and its spinner keeps the pane moving
+                    .or_composer(),
             )
             // Their sentence back where they left it.
             .step(pty_op::Step::restore_composer(held)),

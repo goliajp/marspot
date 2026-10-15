@@ -42,7 +42,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 use crate::grid::{Cell, Grid};
 
 mod peek;
-pub use peek::{peek, peek_text};
+pub use peek::{Frame, peek, peek_frame};
 
 const MAGIC: u32 = 0x4d_53_47_31; // "MSG1"
 // VERSION 3 (2026-06-17): per-row DECAWM wrap flags appended after the
