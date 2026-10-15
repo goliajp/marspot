@@ -449,6 +449,10 @@ impl Default for Stranding {
 
 #[derive(Clone, Debug)]
 struct BindMeta {
+    /// Which binding pass named the session: `record`,
+    /// `record_overridden`, `argv`, `argv_successor`,
+    /// `newest_transcript`, `statusline_hook`, or `unbound`.
+    bound_by: &'static str,
     /// 0 = default `.claude`, N = `.claude-profile-N`, 255 = unknown.
     profile_num: u8,
     /// `CLAUDE_CONFIG_DIR` as read off the live process — the ground
@@ -1019,6 +1023,25 @@ impl ClaudecodePlugin {
             // took a screenshot and a manual dig to explain
             // (2026-08-10).  Logged only when it *changes*, so a
             // steady screen costs nothing.
+            // The badge text does not include the session, so a pane
+            // moving to another session under the same badge said
+            // nothing; this is where a wrong binding is first visible.
+            if let Some(meta) = result.new_meta.get(sh_sid) {
+                let was = self.last_meta.get(sh_sid);
+                if was.map(|w| (w.uuid.as_str(), w.bound_by)) != Some((meta.uuid.as_str(), meta.bound_by)) {
+                    host.log(
+                        LogLevel::Info,
+                        "session.binding",
+                        &format!(
+                            "sid={sh_sid} uuid={:?} by={} was={:?} by={}",
+                            meta.uuid,
+                            meta.bound_by,
+                            was.map(|w| w.uuid.as_str()).unwrap_or("-"),
+                            was.map(|w| w.bound_by).unwrap_or("-"),
+                        ),
+                    );
+                }
+            }
             if self.last_mapping.get(sh_sid) != Some(cc_sid) {
                 let meta = result.new_meta.get(sh_sid);
                 host.log(
@@ -2748,6 +2771,7 @@ mod tests {
         let mut plugin = ClaudecodePlugin::new();
         plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
         let meta = BindMeta {
+            bound_by: "test",
             profile_num: 1,
             config_dir: Some(
                 home.join(".claude-profile-1").to_string_lossy().into_owned(),
@@ -2867,6 +2891,7 @@ mod tests {
     /// would have to resume.
     fn pane_on_p1(home: &std::path::Path, uuid: &str) -> BindMeta {
         BindMeta {
+            bound_by: "test",
             profile_num: 1,
             config_dir: Some(home.join(".claude-profile-1").to_string_lossy().into_owned()),
             uuid: uuid.into(),
@@ -3224,6 +3249,7 @@ mod tests {
         let mut plugin = ClaudecodePlugin::new();
         plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
         let meta = BindMeta {
+            bound_by: "test",
             profile_num: 1,
             config_dir: Some(
                 home.join(".claude-profile-1").to_string_lossy().into_owned(),
@@ -5522,6 +5548,7 @@ mod tests {
         new_meta.insert(
             sid,
             BindMeta {
+                bound_by: "test",
                 profile_num: 2,
                 config_dir: Some("/Users/x/.claude-profile-2".into()),
                 uuid: uuid.to_string(),

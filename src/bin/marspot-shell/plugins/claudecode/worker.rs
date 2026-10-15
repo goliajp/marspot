@@ -594,7 +594,8 @@ impl WorkerCtx {
         // Pass 2 — assign, proof first, guesses after, no uuid twice.
         let mut claimed: std::collections::HashSet<String> =
             std::collections::HashSet::new();
-        let mut bound: Vec<(usize, String, Option<PathBuf>)> = Vec::new();
+        // (pane, uuid, transcript, which pass named it)
+        let mut bound: Vec<(usize, String, Option<PathBuf>, &'static str)> = Vec::new();
 
         // Proof first means the CLI's own word first.  Every live claude
         // writes `<config-dir>/sessions/<pid>.json` with the session it
@@ -628,6 +629,7 @@ impl WorkerCtx {
             if rec.kind != "interactive" || claimed.contains(&rec.session_id) {
                 continue;
             }
+            let mut by = "record";
             let uuid = match self.successor_of_empty_record(
                 &rec.session_id,
                 &f.encoded,
@@ -644,6 +646,7 @@ impl WorkerCtx {
                             f.shelld_sid, rec.session_id, live
                         ),
                     ));
+                    by = "record_overridden";
                     live
                 }
                 None => rec.session_id,
@@ -652,13 +655,13 @@ impl WorkerCtx {
                 continue;
             }
             let path = self.session_by_uuid(&uuid).map(|s| s.jsonl_path.clone());
-            bound.push((i, uuid, path));
+            bound.push((i, uuid, path, by));
         }
         // Models that came from the hook rather than from a transcript
         // — see pass 3.
         let mut pushed_model_by_pane: HashMap<usize, ModelBadge> = HashMap::new();
         for (i, f) in facts.iter().enumerate() {
-            if bound.iter().any(|(j, _, _)| *j == i) {
+            if bound.iter().any(|(j, ..)| *j == i) {
                 continue;
             }
             let Some(argv_uuid) = &f.argv_uuid else { continue };
@@ -668,23 +671,24 @@ impl WorkerCtx {
             // at whatever it was launched with.  So argv is a starting
             // position, and the session actually in front of the user
             // is the one being written.
-            let uuid = self
-                .successor_session(&f.encoded, &claimed, f.claude_start, argv_uuid)
-                .unwrap_or_else(|| argv_uuid.clone());
+            let (uuid, by) = match self.successor_session(&f.encoded, &claimed, f.claude_start, argv_uuid) {
+                Some(next) => (next, "argv_successor"),
+                None => (argv_uuid.clone(), "argv"),
+            };
             if claimed.insert(uuid.clone()) {
                 let path = self.session_by_uuid(&uuid).map(|s| s.jsonl_path.clone());
-                bound.push((i, uuid, path));
+                bound.push((i, uuid, path, by));
             }
         }
         for (i, f) in facts.iter().enumerate() {
-            if bound.iter().any(|(j, _, _)| *j == i) {
+            if bound.iter().any(|(j, ..)| *j == i) {
                 continue;
             }
             if let Some((uuid, path)) =
                 self.session_for_project(&f.encoded, &claimed, f.claude_start)
             {
                 claimed.insert(uuid.clone());
-                bound.push((i, uuid, Some(path)));
+                bound.push((i, uuid, Some(path), "newest_transcript"));
             }
         }
 
@@ -696,7 +700,7 @@ impl WorkerCtx {
         // already run, though, and said which session it is — that is
         // the only channel that speaks before the first turn.
         for (i, f) in facts.iter().enumerate() {
-            if bound.iter().any(|(j, _, _)| *j == i) {
+            if bound.iter().any(|(j, ..)| *j == i) {
                 continue;
             }
             let Some((uuid, transcript, badge)) = pushed_session_for_pid(f.claude_pid)
@@ -712,7 +716,7 @@ impl WorkerCtx {
             // is not a better answer than none.
             let path = transcript.is_file().then_some(transcript);
             pushed_model_by_pane.insert(i, badge);
-            bound.push((i, uuid, path));
+            bound.push((i, uuid, path, "statusline_hook"));
         }
 
         // Every pane running claude gets an entry, bound or not.
@@ -725,14 +729,14 @@ impl WorkerCtx {
         // honest badge in that window is `P1`: the account is known,
         // the model is not, and `@model` fills in on the tick after
         // the session file appears.
-        let bound: HashMap<usize, (String, Option<PathBuf>)> = bound
+        let bound: HashMap<usize, (String, Option<PathBuf>, &'static str)> = bound
             .into_iter()
-            .map(|(i, uuid, path)| (i, (uuid, path)))
+            .map(|(i, uuid, path, by)| (i, (uuid, path, by)))
             .collect();
         for (i, f) in facts.iter().enumerate() {
-            let (sid_uuid, jsonl_path) = match bound.get(&i) {
-                Some((uuid, path)) => (uuid.clone(), path.clone()),
-                None => (String::new(), None),
+            let (sid_uuid, jsonl_path, bound_by) = match bound.get(&i) {
+                Some((uuid, path, by)) => (uuid.clone(), path.clone(), *by),
+                None => (String::new(), None, "unbound"),
             };
             let (tag, profile_num) = match profile_tag_from(f.config_dir.as_deref()) {
                 Some(t) => {
@@ -845,6 +849,7 @@ impl WorkerCtx {
             new_meta.insert(
                 f.shelld_sid,
                 BindMeta {
+                    bound_by,
                     profile_num,
                     config_dir: f.config_dir.clone(),
                     uuid: sid_uuid,
