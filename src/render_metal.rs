@@ -468,8 +468,8 @@ pub struct MetalRenderer {
     /// colour glyph is first seen.
     color_atlas: GlyphAtlas,
     /// The two atlases' textures, bound by the glyph passes.
-    atlas_texture: std::sync::Arc<MetalAtlasTexture>,
-    color_atlas_texture: std::sync::Arc<MetalAtlasTexture>,
+    atlas_texture: std::rc::Rc<MetalAtlasTexture>,
+    color_atlas_texture: std::rc::Rc<MetalAtlasTexture>,
     /// Per-frame instance scratch.  Reset at the start of each
     /// `render_layout` so per-frame allocations stay zero in the
     /// steady state.
@@ -1971,7 +1971,7 @@ impl MetalAtlasTexture {
         width: u32,
         height: u32,
         color: bool,
-    ) -> Result<std::sync::Arc<Self>, String> {
+    ) -> Result<std::rc::Rc<Self>, String> {
         let (format, bpp) = if color {
             (MTLPixelFormat::BGRA8Unorm, 4u32)
         } else {
@@ -1994,7 +1994,7 @@ impl MetalAtlasTexture {
         let texture = device
             .newTextureWithDescriptor(&descriptor)
             .ok_or_else(|| "newTextureWithDescriptor returned nil".to_string())?;
-        Ok(std::sync::Arc::new(Self { texture, width, height, bpp }))
+        Ok(std::rc::Rc::new(Self { texture, width, height, bpp }))
     }
 
     pub fn texture(&self) -> &ProtocolObject<dyn MTLTexture> {
@@ -2035,7 +2035,7 @@ pub fn new_atlas(
     height: u32,
     color: bool,
     fonts: std::sync::Arc<crate::font_cache::CoreTextFontTable>,
-) -> Result<(GlyphAtlas, std::sync::Arc<MetalAtlasTexture>), String> {
+) -> Result<(GlyphAtlas, std::rc::Rc<MetalAtlasTexture>), String> {
     let texture = MetalAtlasTexture::new(device, width, height, color)?;
     let atlas = GlyphAtlas::new(texture.clone(), fonts)?;
     Ok((atlas, texture))

@@ -364,31 +364,31 @@ macro_rules! __lx_internal {
 #[macro_export]
 macro_rules! lx_trace {
     ($tag:expr, $msg:expr $(, $($t:tt)*)?) => {
-        $crate::__lx_internal!($crate::logx::Level::Trace, $tag, $msg $(, $($t)*)?);
+        $crate::__lx_internal!($crate::logx::Level::Trace, $tag, $msg $(, $($t)*)?)
     };
 }
 #[macro_export]
 macro_rules! lx_debug {
     ($tag:expr, $msg:expr $(, $($t:tt)*)?) => {
-        $crate::__lx_internal!($crate::logx::Level::Debug, $tag, $msg $(, $($t)*)?);
+        $crate::__lx_internal!($crate::logx::Level::Debug, $tag, $msg $(, $($t)*)?)
     };
 }
 #[macro_export]
 macro_rules! lx_info {
     ($tag:expr, $msg:expr $(, $($t:tt)*)?) => {
-        $crate::__lx_internal!($crate::logx::Level::Info, $tag, $msg $(, $($t)*)?);
+        $crate::__lx_internal!($crate::logx::Level::Info, $tag, $msg $(, $($t)*)?)
     };
 }
 #[macro_export]
 macro_rules! lx_warn {
     ($tag:expr, $msg:expr $(, $($t:tt)*)?) => {
-        $crate::__lx_internal!($crate::logx::Level::Warn, $tag, $msg $(, $($t)*)?);
+        $crate::__lx_internal!($crate::logx::Level::Warn, $tag, $msg $(, $($t)*)?)
     };
 }
 #[macro_export]
 macro_rules! lx_error {
     ($tag:expr, $msg:expr $(, $($t:tt)*)?) => {
-        $crate::__lx_internal!($crate::logx::Level::Error, $tag, $msg $(, $($t)*)?);
+        $crate::__lx_internal!($crate::logx::Level::Error, $tag, $msg $(, $($t)*)?)
     };
 }
 /// Lifecycle event — same as `lx_info!` but takes the sup_log tradition
@@ -397,7 +397,7 @@ macro_rules! lx_error {
 #[macro_export]
 macro_rules! lx_event {
     ($tag:expr, $msg:expr $(, $($t:tt)*)?) => {
-        $crate::__lx_internal!($crate::logx::Level::Info, $tag, $msg $(, $($t)*)?);
+        $crate::__lx_internal!($crate::logx::Level::Info, $tag, $msg $(, $($t)*)?)
     };
 }
 
