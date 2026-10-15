@@ -5,6 +5,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{Ordering, fence};
 
+use super::clusters::{ClusterTable, ClusterTableReader};
 use super::{HEADER_BYTES, Header, MAGIC, capacity_bytes, fits_capacity};
 use crate::grid::Cell;
 
@@ -65,9 +66,12 @@ pub struct Frame {
     /// How far the viewport is scrolled back. Non-zero means the cells
     /// are history the person is looking at, not the live screen.
     pub view_offset: u16,
-    /// `cols * rows`, row-major. A cluster cell's text lives in the
-    /// writer's pool and is not here.
+    /// `cols * rows`, row-major. A cluster cell holds an index into
+    /// the writer's pool; its text is in `clusters`.
     pub cells: Vec<Cell>,
+    /// `(col, row, text)` of each cluster in the frame, when the
+    /// session publishes them -- see [`super::clusters`].
+    pub clusters: Vec<(u16, u16, String)>,
 }
 
 /// The frame the pane is showing. `None` when nothing has been
@@ -81,7 +85,9 @@ pub struct Frame {
 ///
 /// Mapped read-only, like [`peek`]; one frame is copied under the
 /// seqlock.
-pub fn peek_frame(name: &std::ffi::CStr) -> io::Result<Option<Frame>> {
+pub fn peek_frame(name: &std::ffi::CStr, session_id: u64) -> io::Result<Option<Frame>> {
+    // no region is a session from before clusters were published
+    let clusters = ClusterTableReader::open(session_id).ok();
     let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
@@ -101,14 +107,17 @@ pub fn peek_frame(name: &std::ffi::CStr) -> io::Result<Option<Frame>> {
     if base == libc::MAP_FAILED {
         return Err(io::Error::last_os_error());
     }
-    let out = unsafe { read_frame(base as *const u8) };
+    let out = unsafe { read_frame(base as *const u8, clusters.as_ref()) };
     unsafe { libc::munmap(base, len) };
     out
 }
 
 /// # Safety
 /// `base` maps at least [`capacity_bytes`] of a grid region.
-unsafe fn read_frame(base: *const u8) -> io::Result<Option<Frame>> {
+unsafe fn read_frame(
+    base: *const u8,
+    clusters: Option<&ClusterTableReader>,
+) -> io::Result<Option<Frame>> {
     let h = base as *const Header;
     unsafe {
         if std::ptr::read_volatile(&(*h).magic) != MAGIC
@@ -119,6 +128,7 @@ unsafe fn read_frame(base: *const u8) -> io::Result<Option<Frame>> {
     }
     let src = unsafe { base.add(HEADER_BYTES) as *const Cell };
     let mut cells: Vec<Cell> = Vec::new();
+    let mut table = ClusterTable::default();
     // same bounded retry as the reader: a writer that died mid-publish
     // leaves seq odd for good
     for _ in 0..1024 {
@@ -141,9 +151,13 @@ unsafe fn read_frame(base: *const u8) -> io::Result<Option<Frame>> {
             std::ptr::copy_nonoverlapping(src, cells.as_mut_ptr(), n);
             cells.set_len(n);
         }
+        if let Some(r) = clusters {
+            r.read_into(&mut table);
+        }
         fence(Ordering::Acquire);
         if unsafe { (*h).seq.load(Ordering::Relaxed) } == s1 {
-            return Ok(Some(Frame { cols, rows, cursor_col, cursor_row, view_offset, cells }));
+            let clusters = table.iter().map(|(c, r, t)| (c, r, t.to_string())).collect();
+            return Ok(Some(Frame { cols, rows, cursor_col, cursor_row, view_offset, cells, clusters }));
         }
     }
     Ok(None)
@@ -174,10 +188,10 @@ mod tests {
         let name = std::ffi::CString::new(format!("/msp-t-pk-{}", std::process::id())).unwrap();
         let fd = create_region_named(12, 3, &name).unwrap();
         let mut w = GridShmWriter::from_fd(fd).unwrap();
-        assert!(peek_frame(&name).unwrap().is_none(), "nothing published yet");
+        assert!(peek_frame(&name, u64::MAX).unwrap().is_none(), "nothing published yet");
         grid.set_cursor(2, 1);
         w.publish(&grid, 0, 0);
-        let f = peek_frame(&name).unwrap().unwrap();
+        let f = peek_frame(&name, u64::MAX).unwrap().unwrap();
         delete_region(&name);
         assert_eq!((f.cols, f.rows, f.cursor_col, f.cursor_row, f.view_offset), (12, 3, 2, 1, 0));
         let row = |r: usize| -> String {
@@ -190,6 +204,6 @@ mod tests {
     #[test]
     fn a_region_that_does_not_exist_is_an_error() {
         let name = std::ffi::CString::new("/msp-t-pk-none").unwrap();
-        assert!(peek_frame(&name).is_err());
+        assert!(peek_frame(&name, u64::MAX).is_err());
     }
 }

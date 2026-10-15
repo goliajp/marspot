@@ -5961,7 +5961,7 @@ impl CoreApp {
             // Amendment 7 step 3: also drop the named shm region so
             // the kernel actually frees the pages once every fd-holder
             // closes.
-            grid_shm::delete_region(&grid_shm::session_shm_name(id));
+            grid_shm::delete_session_regions(&grid_shm::session_shm_name(id), id);
         }
         // F3+5 — drop cached cwd state so it can't leak past the pane.
         // The same id may eventually be reused; a fresh pane gets a
@@ -10072,7 +10072,7 @@ fn assemble_panes_at_boot(
         if let Some(entry) = entry_by_id.get(&spawn_sid)
             && !entry.shm_name.is_empty()
                 && let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
-                    grid_shm::delete_region(&c);
+                    grid_shm::delete_session_regions(&c, spawn_sid);
                 }
         // RFC-004 C.2 belt+braces — a resurrect dir still holds the
         // DEAD process's entry.toml; `wait_for_entry` would read it
@@ -10190,7 +10190,7 @@ fn assemble_panes_at_boot(
                 unsafe { libc::kill(entry.pid, libc::SIGKILL) };
                 if !entry.shm_name.is_empty()
                     && let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
-                        grid_shm::delete_region(&c);
+                        grid_shm::delete_session_regions(&c, id);
                     }
             }
             match session_registry::retire_session_dir(id) {
@@ -10252,7 +10252,7 @@ fn assemble_panes_at_boot(
         if let Some(entry) = entry_by_id.get(&id)
             && !entry.shm_name.is_empty()
                 && let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
-                    grid_shm::delete_region(&c);
+                    grid_shm::delete_session_regions(&c, id);
                 }
         match session_registry::retire_session_dir(id) {
             Ok(_) => retired += 1,

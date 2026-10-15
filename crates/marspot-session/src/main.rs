@@ -1506,6 +1506,7 @@ fn main() {
         cols = cols,
         rows = rows
     );
+    shm.attach_clusters(session.id());
 
     // RFC-003 §6 Amendment 15 — install SIGTERM handler so L2 can
     // ask us to retire (silent-update path) or L1 can wipe us on
@@ -2568,9 +2569,12 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 session_id = id,
                 pid = std::process::id()
             );
+            marspot_term::grid_shm::clusters::delete(id);
             std::process::exit(0);
         }
     }
+    // the session is over and no image follows it
+    marspot_term::grid_shm::clusters::delete(session.id());
 }
 
 // B3 integration tests.  These exercise the L3-side surface of the
