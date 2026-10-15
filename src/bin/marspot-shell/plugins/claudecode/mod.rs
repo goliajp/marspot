@@ -1999,6 +1999,9 @@ fn profile_cycle_op(
                 pty_op::Step::await_process(shell_pid, looks_like_claudecode)
                     .timeout(Duration::from_secs(20)),
             )
+            // A resume claude refuses exits within a second; nothing
+            // after this has anything to wait for once it has gone.
+            .step(pty_op::Step::watch_process(shell_pid, looks_like_claudecode))
             // Ask the terminal instead of counting its bytes.  Two
             // guesses came before this one: "quiet for a while" fired
             // on the startup trickle and the message went into a CLI

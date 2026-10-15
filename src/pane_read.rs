@@ -14,10 +14,14 @@
 //! is a terminal emulator, and marspot is one: replay the tail through
 //! a headless [`Terminal`] of the pane's own size and read the grid.
 //!
-//! The replay is an approximation in one direction only — state set
-//! before the window (a colour, a mode) is missing, never invented.  In
-//! practice a full-screen program repaints far more often than the
-//! window is long, and a shell's output is plain enough not to care.
+//! The visible screen comes from the frame the session publishes, which
+//! is the screen itself. Replaying the tail of the bytelog through a
+//! headless [`Terminal`] is kept for what the frame does not hold:
+//! lines that have scrolled off the top, and the live screen while the
+//! person has the pane scrolled back. A replay can be wrong about the
+//! live screen -- a full-screen program draws later frames with
+//! relative cursor moves against a screen the replay never saw -- which
+//! is why it is not the first choice.
 
 use marspot_term::terminal::Terminal;
 
@@ -63,7 +67,7 @@ pub fn composer_text(
     let bytes = tail(bytelog, REPLAY_TAIL)?;
     let mut term = Terminal::new(cols.max(1), rows.max(1));
     term.feed(&bytes);
-    Ok(composer(term.grid()))
+    Ok(composer_of(term.grid()))
 }
 
 /// Claude Code draws U+276F, Codex U+203A.
@@ -80,7 +84,7 @@ type Glyph = (u16, u16, String);
 
 /// Not knowing reads as nothing throughout: pasting a guess into
 /// someone's input is worse than losing a line they can retype.
-fn composer(grid: &marspot_term::grid::Grid) -> Option<String> {
+fn composer_of(grid: &marspot_term::grid::Grid) -> Option<String> {
     use marspot_term::grid::Color;
     let bg = |r: u16| grid.cell(0, r).attrs.bg;
     let bare = |r: u16| {
@@ -197,6 +201,89 @@ fn joint(prev: &[Glyph], next: &[Glyph], cols: u16, codex: bool) -> &'static str
     } else {
         " "
     }
+}
+
+/// What pane `sid` shows: `extra_lines` lines of history, then the
+/// screen, trailing blank lines dropped.
+pub fn screen(sid: u64, extra_lines: u16) -> std::io::Result<String> {
+    let entry = marspot_term::session_registry::read_session_entry(sid)?;
+    let Some(frame) = live_frame(&entry.shm_name)? else {
+        return screen_text(&bytelog_of(sid), entry.cols, entry.rows, extra_lines);
+    };
+    let grid = grid_of(&frame);
+    let mut out: Vec<String> = Vec::new();
+    if extra_lines > 0 {
+        // history is only in the record
+        let bytes = tail(&bytelog_of(sid), REPLAY_TAIL)?;
+        let mut term = Terminal::new(entry.cols.max(1), entry.rows.max(1));
+        term.feed(&bytes);
+        let g = term.grid();
+        for i in (0..g.scrollback_len().min(extra_lines as usize)).rev() {
+            out.push(scrollback_line(g, i));
+        }
+    }
+    for row in 0..grid.rows() {
+        out.push(row_text_of(&grid, row, 0, |c| grid.cell(c, row)));
+    }
+    while out.last().is_some_and(|l| l.is_empty()) {
+        out.pop();
+    }
+    Ok(out.join("\n"))
+}
+
+/// What is typed and unsent in pane `sid`'s input box -- see
+/// [`composer_text`] for how the box is found.
+///
+/// A grapheme cluster in the box makes the answer `None`: the frame
+/// does not carry a cluster's text, and handing back a placeholder in
+/// place of what the person typed is worse than handing back nothing.
+pub fn composer(sid: u64) -> std::io::Result<Option<String>> {
+    let entry = marspot_term::session_registry::read_session_entry(sid)?;
+    let Some(frame) = live_frame(&entry.shm_name)? else {
+        return composer_text(&bytelog_of(sid), entry.cols, entry.rows);
+    };
+    Ok(composer_in_frame(&frame))
+}
+
+fn composer_in_frame(frame: &marspot_term::grid_shm::Frame) -> Option<String> {
+    composer_of(&grid_of(frame)).filter(|t| !t.contains(UNKNOWN_CLUSTER))
+}
+
+/// The published frame, when it is the live screen. `None` when the
+/// session names no region, when nothing is published yet, or when the
+/// person has scrolled the pane back and the frame is the history they
+/// are looking at.
+fn live_frame(shm_name: &str) -> std::io::Result<Option<marspot_term::grid_shm::Frame>> {
+    if shm_name.is_empty() {
+        return Ok(None);
+    }
+    let name = std::ffi::CString::new(shm_name)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    Ok(marspot_term::grid_shm::peek_frame(&name)?.filter(|f| f.view_offset == 0))
+}
+
+fn bytelog_of(sid: u64) -> std::path::PathBuf {
+    marspot_term::paths::sessions_dir().join(sid.to_string()).join("bytelog")
+}
+
+/// What a cluster cell reads as: its text is in the writer's pool.
+const UNKNOWN_CLUSTER: char = '\u{fffd}';
+
+/// A grid holding the frame's cells and cursor, so the readers written
+/// for a replayed grid read a published one the same way.
+fn grid_of(frame: &marspot_term::grid_shm::Frame) -> marspot_term::grid::Grid {
+    let mut grid = marspot_term::grid::Grid::new(frame.cols, frame.rows);
+    for (i, cell) in frame.cells.iter().enumerate() {
+        let mut cell = *cell;
+        if cell.is_cluster() {
+            cell.ch = UNKNOWN_CLUSTER;
+            cell.attrs._pad[0] &= !marspot_term::grid::FLAG_CLUSTER;
+        }
+        let (col, row) = ((i % frame.cols as usize) as u16, (i / frame.cols as usize) as u16);
+        grid.set_cell(col, row, cell);
+    }
+    grid.set_cursor(frame.cursor_col, frame.cursor_row);
+    grid
 }
 
 /// The last `n` bytes of a file, or all of it when it is shorter.
@@ -575,5 +662,52 @@ mod tests {
         let text = screen_text(&p, 20, 4, 0).unwrap();
         assert_eq!(text, "the end");
         let _ = std::fs::remove_file(p);
+    }
+
+    /// A frame as the session would publish it, taken from a grid that
+    /// was drawn the way a pane is.
+    fn frame_of(bytes: &[u8], cols: u16, rows: u16) -> marspot_term::grid_shm::Frame {
+        let mut term = Terminal::new(cols, rows);
+        term.feed(bytes);
+        let g = term.grid();
+        let (cursor_col, cursor_row) = g.cursor();
+        let mut cells = Vec::new();
+        for r in 0..rows {
+            for c in 0..cols {
+                cells.push(g.cell(c, r));
+            }
+        }
+        marspot_term::grid_shm::Frame { cols, rows, cursor_col, cursor_row, view_offset: 0, cells }
+    }
+
+    #[test]
+    fn a_published_frame_yields_the_typed_text_in_the_box() {
+        let f = frame_of(&claude("❯ half a sentence"), 40, 10);
+        assert_eq!(composer_in_frame(&f).as_deref(), Some("half a sentence"));
+    }
+
+    #[test]
+    fn a_published_frame_with_an_empty_box_yields_nothing() {
+        let f = frame_of(&claude("❯ "), 40, 10);
+        assert_eq!(composer_in_frame(&f), None);
+    }
+
+    /// The frame does not carry a cluster's text. A box holding one
+    /// reads as nothing rather than as a placeholder in its place.
+    #[test]
+    fn a_cluster_in_the_box_reads_as_nothing_rather_than_a_placeholder() {
+        // a flag is two regional indicators: one cluster
+        let f = frame_of(&claude("❯ ship it \u{1f1ef}\u{1f1f5}"), 40, 10);
+        assert!(f.cells.iter().any(|c| c.is_cluster()), "fixture must hold a cluster");
+        assert_eq!(composer_in_frame(&f), None);
+    }
+
+    #[test]
+    fn a_frame_keeps_rows_cursor_and_wide_glyphs() {
+        let f = frame_of("继续\r\nnext".as_bytes(), 10, 3);
+        let g = grid_of(&f);
+        assert_eq!(row_text_of(&g, 0, 0, |c| g.cell(c, 0)), "继续");
+        assert_eq!(row_text_of(&g, 1, 0, |c| g.cell(c, 1)), "next");
+        assert_eq!(g.cursor(), (4, 1));
     }
 }
