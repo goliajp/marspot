@@ -769,14 +769,22 @@ fi
 # The pids that were running before the fanout, recorded so the check
 # afterwards can tell "adopted" from "gone".
 BEFORE_L3_PIDS=""
-snapshot_l3_pids() { BEFORE_L3_PIDS="$(pgrep -f marspot-session 2>/dev/null | sort | tr '\n' ' ')"; }
+# Every L3, by process name. `-a` because pgrep leaves out its own
+# ancestors by default, and the L3 of the pane this script runs in is
+# one: that pane was never signalled, and never counted, so it stayed
+# on an old image through every install run from it while the check
+# reported every pane up to date. `-x` rather than `-f`: with ancestors
+# included, a shell whose command line merely mentions marspot-session
+# would match too, and be sent SIGTERM.
+l3_pids() { pgrep -a -x marspot-session 2>/dev/null; }
+snapshot_l3_pids() { BEFORE_L3_PIDS="$(l3_pids | sort | tr '\n' ' ')"; }
 
 verify_l3_adoption() {
   local want stale=0 total=0 gone=0 ino p
   want=$(stat -f %i "$TREE/current/marspot-session" 2>/dev/null) || return 0
   sleep 3
   local now
-  now="$(pgrep -f marspot-session 2>/dev/null | sort | tr '\n' ' ')"
+  now="$(l3_pids | sort | tr '\n' ' ')"
   # A pane that DIED is not in `now` at all, so counting only what is
   # still running answers "are the survivors up to date" and calls that
   # success.  On 2026-09-07 that printed "all 8 panes are on this
@@ -788,7 +796,7 @@ verify_l3_adoption() {
       *) gone=$((gone+1)); echo "    LOST: pid $p did not come back" >&2 ;;
     esac
   done
-  for p in $(pgrep -f "$TREE/current/marspot-session" 2>/dev/null); do
+  for p in $(l3_pids); do
     total=$((total+1))
     ino=$(lsof -p "$p" -a -d txt -Fi 2>/dev/null | grep '^i' | tr -d 'i' | head -1)
     [ "$ino" = "$want" ] || stale=$((stale+1))
@@ -830,7 +838,7 @@ if (( STAGED )) \
     || echo "    WARN: current/marspot-session did not start; L3s will refuse it" >&2
   snapshot_l3_pids
   signalled=0
-  for pid in $(pgrep -f marspot-session 2>/dev/null); do
+  for pid in $(l3_pids); do
     if kill -TERM "$pid" 2>/dev/null; then
       signalled=$((signalled+1))
     fi
@@ -907,7 +915,7 @@ if (( STAGED )); then
       || echo "    WARN: current/marspot-session did not start; L3s will refuse it" >&2
     snapshot_l3_pids
     signalled=0
-    for pid in $(pgrep -f marspot-session 2>/dev/null); do
+    for pid in $(l3_pids); do
       kill -TERM "$pid" 2>/dev/null && signalled=$((signalled+1))
     done
     echo "    L3 self-execv: SIGTERM'd $signalled session pids"
