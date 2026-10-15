@@ -23,6 +23,13 @@ pub const ROTATE_AGE: Duration = Duration::from_secs(24 * 3600);
 /// rotations under us. Lower → faster detection but more syscalls;
 /// 256 keeps fstat to ~0.1 % of writes.
 const STAT_INTERVAL: u32 = 256;
+/// Re-stat on the first write this long after the last one, whatever
+/// the count. A process that logs a few lines a day never reaches
+/// `STAT_INTERVAL`: an L3 kept appending to a file rotated, compressed
+/// and unlinked days earlier, and everything it logged in between was
+/// lost -- found when its pane would not take an update and its log
+/// had nothing to say why.
+const STAT_EVERY: Duration = Duration::from_secs(60);
 
 pub(crate) static SINK: OnceLock<Mutex<Sink>> = OnceLock::new();
 
@@ -34,6 +41,7 @@ pub(crate) struct Sink {
     pub bytes: u64,
     pub rotated_at: Instant,
     pub writes_since_stat: u32,
+    pub stat_at: Instant,
     pub max_bytes: u64,
 }
 
@@ -59,6 +67,7 @@ impl Sink {
             bytes: meta.len(),
             rotated_at: Instant::now(),
             writes_since_stat: 0,
+            stat_at: Instant::now(),
             max_bytes,
         })
     }
@@ -111,6 +120,7 @@ pub fn ensure_open() -> std::io::Result<()> {
                 bytes: 0,
                 rotated_at: Instant::now(),
                 writes_since_stat: 0,
+                stat_at: Instant::now(),
                 max_bytes: u64::MAX,
             },
         })
@@ -129,6 +139,10 @@ pub fn write_line(line: &[u8]) {
         Ok(g) => g,
         Err(poison) => poison.into_inner(),
     };
+    write_to(&mut sink, line);
+}
+
+fn write_to(sink: &mut Sink, line: &[u8]) {
     if sink.file.write_all(line).is_err() {
         // Disk full, fd closed under us, etc. Drop silently — log
         // failures never escalate to caller failures.
@@ -136,12 +150,15 @@ pub fn write_line(line: &[u8]) {
     }
     sink.bytes += line.len() as u64;
     sink.writes_since_stat += 1;
-    let should_check = sink.writes_since_stat >= STAT_INTERVAL || sink.bytes >= sink.max_bytes;
+    let should_check = sink.writes_since_stat >= STAT_INTERVAL
+        || sink.bytes >= sink.max_bytes
+        || sink.stat_at.elapsed() >= STAT_EVERY;
     if !should_check {
         return;
     }
     sink.writes_since_stat = 0;
-    let _ = super::rotate::check_and_maybe_rotate(&mut sink);
+    sink.stat_at = Instant::now();
+    let _ = super::rotate::check_and_maybe_rotate(sink);
 }
 
 pub(crate) fn log_dir() -> PathBuf {
@@ -205,5 +222,35 @@ mod tests {
             "the new file should hold the lines written after the deletion"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A process that logs rarely follows a rotation made by another
+    /// process on its next write, not 256 writes later.
+    #[test]
+    fn a_quiet_writer_follows_a_rotation_on_its_next_write() {
+        use std::time::{Duration, Instant};
+        let dir: PathBuf = std::env::temp_dir().join(format!("marspot-logx-quiet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut sink = super::Sink::open_at_dir(dir.clone(), u64::MAX).unwrap();
+        super::write_to(&mut sink, b"before\n");
+
+        // another process rotates: the active file is renamed away and a
+        // fresh one takes its name
+        let active = dir.join("marspot.log");
+        let rotated = dir.join("marspot.rotated.log");
+        std::fs::rename(&active, &rotated).unwrap();
+        std::fs::write(&active, b"").unwrap();
+
+        // within the minute, a single write still lands in the old file
+        super::write_to(&mut sink, b"soon\n");
+        assert!(std::fs::read_to_string(&rotated).unwrap().contains("soon"));
+
+        // a minute on, the next write notices and moves over
+        sink.stat_at = Instant::now() - Duration::from_secs(61);
+        super::write_to(&mut sink, b"later\n");
+        super::write_to(&mut sink, b"after\n");
+        let fresh = std::fs::read_to_string(&active).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(fresh.contains("after"), "{fresh:?}");
     }
 }
