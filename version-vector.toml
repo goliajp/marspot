@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.236"  # the log says which pass bound a pane to its session, and when it changes
-core    = "0.12.275"  # an L3 inherits its frame region and nothing else
-session = "0.11.141"  # the reply guard holds when a loaded machine reorders the job and the shell
+shell   = "0.7.237"  # a process that logs rarely follows a log rotation within a minute
+core    = "0.12.276"  # a process that logs rarely follows a log rotation within a minute
+session = "0.11.142"  # a process that logs rarely follows a log rotation within a minute
