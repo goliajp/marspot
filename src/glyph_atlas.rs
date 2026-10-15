@@ -373,7 +373,7 @@ pub trait AtlasSink {
 }
 
 pub struct GlyphAtlas {
-    sink: std::sync::Arc<dyn AtlasSink>,
+    sink: std::rc::Rc<dyn AtlasSink>,
     width: u32,
     height: u32,
     /// Bytes per pixel of the backing texture: 1 for the alpha-only
@@ -449,7 +449,7 @@ impl GlyphAtlas {
     /// mono path when the sink holds one byte a pixel, the colour path
     /// (Apple Color Emoji) when it holds four.
     pub fn new(
-        sink: std::sync::Arc<dyn AtlasSink>,
+        sink: std::rc::Rc<dyn AtlasSink>,
         fonts: std::sync::Arc<crate::font_cache::CoreTextFontTable>,
     ) -> Result<Self, String> {
         let rasteriser: Box<dyn crate::font_trait::Rasteriser> = if sink.bytes_per_pixel() == 4 {
@@ -464,7 +464,7 @@ impl GlyphAtlas {
     /// with `MockRasteriser` to exercise shelf packing / LRU eviction
     /// without a CoreText font.
     pub fn new_with_rasteriser(
-        sink: std::sync::Arc<dyn AtlasSink>,
+        sink: std::rc::Rc<dyn AtlasSink>,
         rasteriser: Box<dyn crate::font_trait::Rasteriser>,
     ) -> Result<Self, String> {
         let (width, height) = sink.dims();
@@ -1457,8 +1457,8 @@ mod tests {
         }
     }
 
-    fn mem_sink(w: u32, h: u32, bpp: u32) -> std::sync::Arc<MemSink> {
-        std::sync::Arc::new(MemSink {
+    fn mem_sink(w: u32, h: u32, bpp: u32) -> std::rc::Rc<MemSink> {
+        std::rc::Rc::new(MemSink {
             w,
             h,
             bpp,
