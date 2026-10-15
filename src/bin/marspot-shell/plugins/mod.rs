@@ -62,6 +62,7 @@ pub mod handoff;
 pub mod host;
 pub mod dispatch;
 pub mod pty_op;
+pub mod pty_command;
 // F3+1 — pidtree moved to marspot lib (`src/pidtree.rs`) so L2
 // (marspot-core) can use the same libproc walker for the process-
 // tree panel.  Re-export under the old path keeps L1 plugin code
