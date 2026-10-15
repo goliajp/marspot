@@ -425,9 +425,15 @@ impl LocalSession {
         unsafe { libc::getpgid(self.child_pid) }
     }
 
-    /// Whether replies are being watched; the loop wakes sooner then.
+    /// Whether replies are being watched.
+    #[cfg(test)]
     pub fn watching_replies(&self) -> bool {
         self.replies.is_watching()
+    }
+
+    /// How soon the loop should wake while replies are being watched.
+    pub fn reply_poll_every(&self) -> Option<std::time::Duration> {
+        self.replies.poll_every()
     }
 
     #[cfg(test)]

@@ -9,9 +9,22 @@
 //! and appended `>|marspot0u62;1;6;22c` to it.
 //!
 //! This keeps count of the reply bytes written since anything else was
-//! written and watches the queue while a job holds the terminal. When
-//! the job has given the terminal back to the shell and the queue held
-//! nothing but those replies, it is flushed.
+//! written and watches the queue while a job holds the terminal. The
+//! queue is flushed, when it held nothing but those replies, at the
+//! first of two moments the session sees:
+//!
+//! - the job puts the terminal back in canonical mode (its own `stty
+//!   sane`, claude restoring its settings on the way out). A reply has
+//!   no newline, so from then on no read returns it.
+//! - the job has gone and the shell has the terminal again.
+//!
+//! The session sees either only when it next looks -- on output, or
+//! every 10 ms while watching. A job that restores the terminal and
+//! exits within that, under a shell that reads input the moment its job
+//! is reaped (bash without prompt hooks), can still hand the shell its
+//! replies; waiting on the job's exit with kqueue was tried and lost
+//! that race to bash every time. zsh running prompt hooks first does
+//! not read that soon.
 //!
 //! The queue is measured with `FIONREAD`, which only counts bytes a
 //! read would return now. In canonical mode an incomplete line counts as
@@ -57,6 +70,23 @@ impl ReplyGuard {
         self.watch.is_some()
     }
 
+    /// How soon the session loop should look again, while watching.
+    ///
+    /// Every millisecond while a job holds replies it may never read:
+    /// between the job putting the terminal back in canonical mode and
+    /// the next look, the tty can echo the pending reply onto the
+    /// screen (seen once in sixty runs at 10 ms). That state lasts only
+    /// as long as a program that asked and never read is running, and
+    /// at most `GIVE_UP_AFTER`; otherwise every 10 ms.
+    pub fn poll_every(&self) -> Option<Duration> {
+        let w = self.watch.as_ref()?;
+        Some(if w.job_seen && w.only_replies {
+            Duration::from_millis(1)
+        } else {
+            Duration::from_millis(10)
+        })
+    }
+
     #[cfg(test)]
     pub fn flushes(&self) -> u64 {
         self.flushes
@@ -72,21 +102,15 @@ impl ReplyGuard {
     /// Under heavy load that reading was missed: the asker ran half a
     /// second in raw mode and the session never looked.
     pub fn wrote_replies(&mut self, master: RawFd, shell_pgrp: libc::pid_t, n: usize, empty_before: bool) {
-        let job_in_front = unsafe { libc::tcgetpgrp(master) } != shell_pgrp;
-        match self.watch.as_mut() {
-            Some(w) => {
-                w.reply_bytes += n;
-                w.job_seen |= job_in_front;
-            }
-            None => {
-                self.watch = Some(Watch {
-                    reply_bytes: n,
-                    job_seen: job_in_front,
-                    only_replies: empty_before,
-                    since: Instant::now(),
-                });
-            }
-        }
+        let w = self.watch.get_or_insert_with(|| Watch {
+            reply_bytes: 0,
+            job_seen: false,
+            only_replies: empty_before,
+            since: Instant::now(),
+        });
+        w.reply_bytes += n;
+        let fg = unsafe { libc::tcgetpgrp(master) };
+        w.job_seen |= fg > 0 && fg != shell_pgrp;
     }
 
     /// Something other than a reply was queued: from here on the queue
@@ -116,12 +140,34 @@ impl ReplyGuard {
             self.watch = None;
             return None;
         }
-        let shell_in_front = unsafe { libc::tcgetpgrp(master) } == shell_pgrp;
-        if !shell_in_front {
+        let fg = unsafe { libc::tcgetpgrp(master) };
+        let shell_in_front = fg == shell_pgrp;
+        if !shell_in_front && fg > 0 {
             w.job_seen = true;
+            // The job has put the terminal back in canonical mode with
+            // the replies still queued. They have no newline, so no read
+            // in this mode returns them: nobody will. This is the last
+            // moment before the job exits, and the shell, once the job
+            // has gone, can read its input before the session looks --
+            // bash did, every time, when the flush waited for the exit.
+            if delivered && w.only_replies && !raw_mode(master) {
+                let w = self.watch.take()?;
+                flush_input(master)?;
+                self.flushes += 1;
+                return Some(w.reply_bytes);
+            }
         }
         if !shell_in_front || !w.job_seen {
-            if delivered {
+            // Once the queue is known to hold only replies, it is not
+            // read again while a job is in front: FIONREAD on a tty with
+            // PENDIN set -- which the kernel sets the moment the job
+            // goes back to canonical mode -- re-inputs the pending bytes
+            // and echoes them, and a reading that landed in that instant
+            // printed the reply on screen. Whether the job then read the
+            // replies no longer matters: nothing but replies can be
+            // queued, and flushing a queue it emptied costs nothing.
+            let settled = w.only_replies && !shell_in_front;
+            if delivered && !settled {
                 match queued_in_raw_mode(master) {
                     Some(0) => self.watch = None,
                     Some(q) => w.only_replies = q <= w.reply_bytes,
@@ -225,6 +271,13 @@ mod tests {
     }
 
     fn shell(id: u64) -> LocalSession {
+        shell_named(id, "/bin/zsh")
+    }
+
+    /// A pane running `program` as its shell. Each test runs in its own
+    /// process, so setting `SHELL` here touches no other test.
+    fn shell_named(id: u64, program: &str) -> LocalSession {
+        unsafe { std::env::set_var("SHELL", program) };
         let mut s = LocalSession::spawn(id, 100, 30, "", || {}).expect("spawn");
         assert!(pump_until(&mut s, |s| s.terminal().grid().cursor() != (0, 0)), "shell should come up");
         s
@@ -233,8 +286,22 @@ mod tests {
     /// The screenshot's case: a program asks, never reads, and exits.
     #[test]
     fn replies_a_program_left_unread_do_not_reach_the_shell() {
-        let mut s = shell(0xF1);
-        s.write(b"sh -c 'stty raw -echo; printf \"\\033[c\"; sleep 0.5; stty sane'\r").unwrap();
+        unread_reply_does_not_reach(shell_named(0xF1, "/bin/zsh"));
+    }
+
+    /// bash reads input the moment its job is reaped, so the replies
+    /// have to be gone before the job exits.
+    #[test]
+    fn replies_a_program_left_unread_do_not_reach_bash() {
+        unread_reply_does_not_reach(shell_named(0xF4, "/bin/bash"));
+    }
+
+    fn unread_reply_does_not_reach(mut s: LocalSession) {
+        // the job saves the terminal settings, restores them on its way
+        // out and is still there for a moment, as claude does. (`stty
+        // sane` would set PENDIN, and the tty would echo the pending
+        // reply itself at that instant -- on screen, never as input.)
+        s.write(b"sh -c 'o=$(stty -g); stty raw -echo; printf \"\\033[c\"; sleep 0.5; stty $o; sleep 0.3'\r").unwrap();
         assert!(pump_until(&mut s, |s| s.watching_replies()), "the query was answered:\n{}", screen(&s));
         assert!(pump_until(&mut s, |s| s.reply_flushes() > 0), "the unread reply is flushed:\n{}", screen(&s));
         // the next keystroke, as a person's would, once the shell is
