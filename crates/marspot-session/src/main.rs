@@ -118,9 +118,9 @@ impl SessionImpl {
             Self::Local(s) => s.pump(),
         }
     }
-    fn watching_replies(&self) -> bool {
+    fn reply_poll_every(&self) -> Option<Duration> {
         match self {
-            Self::Local(s) => s.watching_replies(),
+            Self::Local(s) => s.reply_poll_every(),
         }
     }
     fn hold_grid(&mut self, on: bool) {
@@ -1739,18 +1739,18 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         // back on a timer, not on the next byte — a `sudo` password
         // prompt sends no bytes at all until Enter, and the guesses
         // would otherwise sit on screen showing what was typed.
-        // replies a program has not read are watched until it reads
-        // them or leaves the foreground -- see `reply_guard`
         let wait = if sync_gate.owes_a_frame()
             || blank_gate.owes_a_frame()
             || session.terminal().predictions_pending()
-            || session.watching_replies()
         {
             Duration::from_millis(10)
         } else {
             // Never sleep past the beat that has to fire.
             entry_check_interval.min(Duration::from_secs(5))
         };
+        // replies a program has not read are watched until it reads
+        // them or is done with the terminal -- see `reply_guard`
+        let wait = session.reply_poll_every().map_or(wait, |p| wait.min(p));
         let first = match ev_rx.recv_timeout(wait) {
             Ok(ev) => Some(ev),
             Err(RecvTimeoutError::Timeout) => None,
