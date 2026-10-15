@@ -409,7 +409,7 @@ impl LocalSession {
             return;
         }
         let delivered = self.writer.backlog() == 0;
-        if let Some(n) = self.replies.check(self.pty.raw_master(), delivered) {
+        if let Some(n) = self.replies.check(self.pty.raw_master(), self.shell_pgrp(), delivered) {
             marspot_term::lx_info!(
                 "l3.replies_flushed",
                 "the program that asked left the foreground; flushed the input queue, \
@@ -420,6 +420,11 @@ impl LocalSession {
         }
     }
 
+    /// The shell's process group: the foreground whenever no job is.
+    fn shell_pgrp(&self) -> libc::pid_t {
+        unsafe { libc::getpgid(self.child_pid) }
+    }
+
     /// Whether replies are being watched; the loop wakes sooner then.
     pub fn watching_replies(&self) -> bool {
         self.replies.is_watching()
@@ -428,6 +433,11 @@ impl LocalSession {
     #[cfg(test)]
     pub fn reply_flushes(&self) -> u64 {
         self.replies.flushes()
+    }
+
+    #[cfg(test)]
+    pub fn pty_in_raw_mode(&self) -> bool {
+        crate::reply_guard::raw_mode(self.pty.raw_master())
     }
 
     /// Send back whatever the parser queued in reply to a capability
@@ -454,8 +464,16 @@ impl LocalSession {
     /// is free.
     fn flush_capability_responses(&mut self) {
         let response = self.terminal.take_response();
-        if !response.is_empty() && self.enqueue(&response).is_ok() {
-            self.replies.wrote_replies(self.pty.raw_master(), response.len());
+        if response.is_empty() {
+            return;
+        }
+        let master = self.pty.raw_master();
+        // only asked when a watch would start; while one runs, the queue
+        // is ours already
+        let empty_before = !self.replies.is_watching()
+            && crate::reply_guard::queue_was_empty(master, self.writer.backlog() == 0);
+        if self.enqueue(&response).is_ok() {
+            self.replies.wrote_replies(master, self.shell_pgrp(), response.len(), empty_before);
         }
     }
 

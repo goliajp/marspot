@@ -9,9 +9,9 @@
 //! and appended `>|marspot0u62;1;6;22c` to it.
 //!
 //! This keeps count of the reply bytes written since anything else was
-//! written, watches the queue while the asker still has the terminal,
-//! and when the asker is no longer in the foreground and the queue held
-//! nothing but those replies, discards them.
+//! written and watches the queue while a job holds the terminal. When
+//! the job has given the terminal back to the shell and the queue held
+//! nothing but those replies, it is flushed.
 //!
 //! The queue is measured with `FIONREAD`, which only counts bytes a
 //! read would return now. In canonical mode an incomplete line counts as
@@ -29,9 +29,16 @@ const GIVE_UP_AFTER: Duration = Duration::from_secs(30);
 struct Watch {
     /// Reply bytes written since the last write of anything else.
     reply_bytes: usize,
-    /// The foreground process group when the first of them was written:
-    /// the program that asked.
-    pgrp: libc::pid_t,
+    /// A job -- anything but the shell -- has held the foreground during
+    /// the watch.
+    ///
+    /// Who asked is not recorded, because it cannot be read reliably:
+    /// zsh hands the terminal to a new job from its own side of the
+    /// fork, and under load the job printed its query before that
+    /// happened, so the foreground still named zsh. Measured against
+    /// the shell instead, the question is only whether a job has come
+    /// and gone.
+    job_seen: bool,
     /// The last trustworthy reading found nothing in the queue but
     /// replies.
     only_replies: bool,
@@ -55,16 +62,29 @@ impl ReplyGuard {
         self.flushes
     }
 
-    /// `n` reply bytes were queued for the pty.
-    pub fn wrote_replies(&mut self, master: RawFd, n: usize) {
+    /// `n` reply bytes were queued for the pty. `empty_before` is
+    /// [`queue_was_empty`], asked just before they were.
+    ///
+    /// An input queue known to be empty when the first reply goes in
+    /// holds nothing but replies from then on -- anything else written
+    /// ends the watch -- so the verdict is known at once and does not
+    /// wait on a reading taken while the asker still has the terminal.
+    /// Under heavy load that reading was missed: the asker ran half a
+    /// second in raw mode and the session never looked.
+    pub fn wrote_replies(&mut self, master: RawFd, shell_pgrp: libc::pid_t, n: usize, empty_before: bool) {
+        let job_in_front = unsafe { libc::tcgetpgrp(master) } != shell_pgrp;
         match self.watch.as_mut() {
-            Some(w) => w.reply_bytes += n,
+            Some(w) => {
+                w.reply_bytes += n;
+                w.job_seen |= job_in_front;
+            }
             None => {
-                let pgrp = unsafe { libc::tcgetpgrp(master) };
-                if pgrp <= 0 {
-                    return;
-                }
-                self.watch = Some(Watch { reply_bytes: n, pgrp, only_replies: false, since: Instant::now() });
+                self.watch = Some(Watch {
+                    reply_bytes: n,
+                    job_seen: job_in_front,
+                    only_replies: empty_before,
+                    since: Instant::now(),
+                });
             }
         }
     }
@@ -75,8 +95,10 @@ impl ReplyGuard {
         self.watch = None;
     }
 
-    /// Look at the queue, and flush it if the replies' asker is gone and
-    /// the queue held nothing but replies.
+    /// Look at the queue, and flush it if a job has held the foreground
+    /// and given it back to the shell, and the queue held nothing but
+    /// replies. A shell's own query -- a prompt asking the terminal
+    /// something -- has no job come and go, and is never flushed.
     ///
     /// `delivered` is whether everything queued for the pty has reached
     /// it; until then an empty tty queue means "not arrived yet", not
@@ -88,16 +110,19 @@ impl ReplyGuard {
     /// the terminal is usually back in canonical mode and cannot say --
     /// and then the flush found the queue empty. Either way nothing but
     /// replies was in it.
-    pub fn check(&mut self, master: RawFd, delivered: bool) -> Option<usize> {
+    pub fn check(&mut self, master: RawFd, shell_pgrp: libc::pid_t, delivered: bool) -> Option<usize> {
         let w = self.watch.as_mut()?;
         if w.since.elapsed() >= GIVE_UP_AFTER {
             self.watch = None;
             return None;
         }
-        let fg = unsafe { libc::tcgetpgrp(master) };
-        if fg == w.pgrp {
-            if delivered && raw_mode(master) {
-                match queued(master) {
+        let shell_in_front = unsafe { libc::tcgetpgrp(master) } == shell_pgrp;
+        if !shell_in_front {
+            w.job_seen = true;
+        }
+        if !shell_in_front || !w.job_seen {
+            if delivered {
+                match queued_in_raw_mode(master) {
                     Some(0) => self.watch = None,
                     Some(q) => w.only_replies = q <= w.reply_bytes,
                     None => {}
@@ -115,7 +140,14 @@ impl ReplyGuard {
     }
 }
 
-fn raw_mode(master: RawFd) -> bool {
+/// Whether the tty's input queue is known to be empty: nothing is still
+/// on its way to it, the terminal is in raw mode (in canonical mode an
+/// unfinished line reads as nothing), and nothing is waiting to be read.
+pub fn queue_was_empty(master: RawFd, delivered: bool) -> bool {
+    delivered && queued_in_raw_mode(master) == Some(0)
+}
+
+pub fn raw_mode(master: RawFd) -> bool {
     let mut t: libc::termios = unsafe { std::mem::zeroed() };
     unsafe { libc::tcgetattr(master, &mut t) == 0 && t.c_lflag & libc::ICANON == 0 }
 }
@@ -142,6 +174,18 @@ impl Drop for Slave {
     }
 }
 
+/// The queue's length, if the terminal was in raw mode both before and
+/// after it was read. A program switching to canonical mode in between
+/// -- the `stty sane` on its way out -- makes queued bytes read as none,
+/// and that reading was once taken for "the replies were read".
+fn queued_in_raw_mode(master: RawFd) -> Option<usize> {
+    if !raw_mode(master) {
+        return None;
+    }
+    let q = queued(master)?;
+    raw_mode(master).then_some(q)
+}
+
 fn queued(master: RawFd) -> Option<usize> {
     let slave = Slave::open(master)?;
     let mut n: libc::c_int = 0;
@@ -160,7 +204,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn pump_until(s: &mut LocalSession, mut done: impl FnMut(&LocalSession) -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // a loaded runner starts a configured zsh slowly
+        let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             s.pump();
             if done(s) {
@@ -190,7 +235,11 @@ mod tests {
     fn replies_a_program_left_unread_do_not_reach_the_shell() {
         let mut s = shell(0xF1);
         s.write(b"sh -c 'stty raw -echo; printf \"\\033[c\"; sleep 0.5; stty sane'\r").unwrap();
-        assert!(pump_until(&mut s, |s| s.reply_flushes() > 0), "the unread reply is flushed");
+        assert!(pump_until(&mut s, |s| s.watching_replies()), "the query was answered:\n{}", screen(&s));
+        assert!(pump_until(&mut s, |s| s.reply_flushes() > 0), "the unread reply is flushed:\n{}", screen(&s));
+        // the next keystroke, as a person's would, once the shell is
+        // reading input again
+        assert!(pump_until(&mut s, |s| s.pty_in_raw_mode()), "the shell reads input again");
         s.write(b"IFS= read -r -t 1 x; echo \"<$x>\"\r").unwrap();
         assert!(
             pump_until(&mut s, |s| screen(s).lines().any(|l| l.trim() == "<>")),
