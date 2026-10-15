@@ -70,6 +70,7 @@ pub mod parser;
 pub mod palette;
 pub mod paths;
 pub mod host_load;
+pub mod inherited_fds;
 pub mod platform;
 pub mod submit_receipt;
 pub mod pty;

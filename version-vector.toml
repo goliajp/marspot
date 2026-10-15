@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.234"  # the handoff command builder drops a mut it never used
-core    = "0.12.272"  # the glyph atlas texture is held by Rc, as nothing shares it across threads
-session = "0.11.137"  # a timing assertion says when it is measuring the host
+shell   = "0.7.236"  # the log says which pass bound a pane to its session, and when it changes
+core    = "0.12.275"  # an L3 inherits its frame region and nothing else
+session = "0.11.141"  # the reply guard holds when a loaded machine reorders the job and the shell

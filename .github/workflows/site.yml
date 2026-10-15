@@ -27,12 +27,12 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: The page is what it claims to be
         # Cheap checks that catch the things a static page gets wrong
@@ -81,13 +81,13 @@ jobs:
           fi
           echo "release=${released:-none} offers=$offers"
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
         # Turn Pages on rather than asking someone to click it.  The
         # first run failed on exactly this: the site had nowhere to go.
         with:
           enablement: true
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
