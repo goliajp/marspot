@@ -25,6 +25,7 @@ mod snapshot_writer;
 use control_writer::ControlWriter;
 use snapshot_writer::SnapshotWriter;
 mod local_session;
+mod reply_guard;
 mod uds_server;
 
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -115,6 +116,11 @@ impl SessionImpl {
     fn pump(&mut self) -> usize {
         match self {
             Self::Local(s) => s.pump(),
+        }
+    }
+    fn watching_replies(&self) -> bool {
+        match self {
+            Self::Local(s) => s.watching_replies(),
         }
     }
     fn hold_grid(&mut self, on: bool) {
@@ -1733,9 +1739,12 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         // back on a timer, not on the next byte — a `sudo` password
         // prompt sends no bytes at all until Enter, and the guesses
         // would otherwise sit on screen showing what was typed.
+        // replies a program has not read are watched until it reads
+        // them or leaves the foreground -- see `reply_guard`
         let wait = if sync_gate.owes_a_frame()
             || blank_gate.owes_a_frame()
             || session.terminal().predictions_pending()
+            || session.watching_replies()
         {
             Duration::from_millis(10)
         } else {
