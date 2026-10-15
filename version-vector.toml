@@ -28,4 +28,4 @@
 
 shell   = "0.7.236"  # the log says which pass bound a pane to its session, and when it changes
 core    = "0.12.275"  # an L3 inherits its frame region and nothing else
-session = "0.11.140"  # a pane's shell inherits its terminal and nothing else
+session = "0.11.141"  # the reply guard holds when a loaded machine reorders the job and the shell
