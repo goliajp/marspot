@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.228"  # a codex badge names the profile the pane runs under
+shell   = "0.7.230"  # a switch stops waiting once the resumed claude has drawn its input box
 core    = "0.12.271"  # frame layout no longer reaches into the Metal renderer
 session = "0.11.137"  # a timing assertion says when it is measuring the host

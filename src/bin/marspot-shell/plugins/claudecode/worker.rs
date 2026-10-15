@@ -171,7 +171,11 @@ impl WorkerCtx {
                     }
                 let Some(session_id) = parse_session_id(&jsonl_path) else { continue };
                 let last_message_kind = tail_last_message_type(&jsonl_path);
-                let is_new = !self.seen.contains_key(&jsonl_path);
+                let prev = self.seen.get(&jsonl_path);
+                let is_new = prev.is_none();
+                // append-only: a file that once had a conversation still has one
+                let has_conversation =
+                    prev.is_some_and(|p| p.has_conversation) || has_conversation(&jsonl_path);
                 self.seen.insert(
                     jsonl_path.clone(),
                     SessionInfo {
@@ -181,6 +185,7 @@ impl WorkerCtx {
                         last_mtime: mtime,
                         last_size: size,
                         last_message_kind: last_message_kind.clone(),
+                        has_conversation,
                     },
                 );
                 if is_new {
@@ -189,11 +194,12 @@ impl WorkerCtx {
                         LogLevel::Info,
                         "session",
                         format!(
-                            "session detected sid={} project={} kind={} size={}",
+                            "session detected sid={} project={} kind={} size={} conversation={}",
                             session_id,
                             project_dir,
                             last_message_kind.as_deref().unwrap_or("?"),
-                            size
+                            size,
+                            has_conversation
                         ),
                     ));
                 } else {
@@ -622,11 +628,34 @@ impl WorkerCtx {
         for (i, f) in facts.iter().enumerate() {
             let dir = config_dir_or_default(f.config_dir.as_deref());
             let Some(rec) = recorded_session(&dir, f.claude_pid) else { continue };
-            if rec.kind != "interactive" || !claimed.insert(rec.session_id.clone()) {
+            if rec.kind != "interactive" || claimed.contains(&rec.session_id) {
                 continue;
             }
-            let path = self.session_by_uuid(&rec.session_id).map(|s| s.jsonl_path.clone());
-            bound.push((i, rec.session_id, path));
+            let uuid = match self.successor_of_empty_record(
+                &rec.session_id,
+                &f.encoded,
+                &claimed,
+                f.claude_start,
+            ) {
+                Some(live) => {
+                    log_lines.push((
+                        LogLevel::Info,
+                        "session.record_overridden",
+                        format!(
+                            "pane {}: claude's record names {} which has no conversation; \
+                             bound to {} which this process is writing",
+                            f.shelld_sid, rec.session_id, live
+                        ),
+                    ));
+                    live
+                }
+                None => rec.session_id,
+            };
+            if !claimed.insert(uuid.clone()) {
+                continue;
+            }
+            let path = self.session_by_uuid(&uuid).map(|s| s.jsonl_path.clone());
+            bound.push((i, uuid, path));
         }
         // Models that came from the hook rather than from a transcript
         // — see pass 3.
@@ -842,7 +871,12 @@ impl WorkerCtx {
                         .and_then(|p| p.metadata().ok())
                         .and_then(|m| m.modified().ok())
                         .unwrap_or(SystemTime::UNIX_EPOCH),
-                    has_transcript: jsonl_path.is_some(),
+                    // a file with no conversation is one `--resume` refuses
+                    has_transcript: jsonl_path.as_ref().is_some_and(|p| {
+                        self.seen
+                            .get(p)
+                            .map_or_else(|| has_conversation(p), |s| s.has_conversation)
+                    }),
                 },
             );
             // No log line here on purpose — `session.bound` is
@@ -863,117 +897,5 @@ impl WorkerCtx {
             .map(|(sid, m)| (*sid, m.model.clone()))
             .collect();
         ScanResult { new_mapping, new_meta, new_activity, new_models, new_cpu, new_vetoes, scanned_at, sessions_seen, log_lines }
-    }
-
-    /// Reverse-lookup: encoded project dir → newest known session
-    /// (id + its jsonl path, so callers can tail per-session state
-    /// like the active model).  Cheap scan over `seen`; a dozen
-    /// projects active in practice.
-    ///
-    /// Two constraints make this a *guess with guardrails* rather than
-    /// a free-for-all:
-    ///
-    /// * `claimed` — a uuid already bound to another pane is skipped.
-    ///   Two panes cwd'd into one project used to receive the identical
-    ///   badge, which is provably wrong for at least one of them
-    ///   (2026-07-30: sessions 383 + 394 both in `qualcomm/insight`,
-    ///   both badged `9e304c9a`, which argv shows belongs to 383).
-    /// * `claude_start` — a session whose file has not been written
-    ///   since this claude process started cannot be the session it is
-    ///   writing.  Without this, a pane freshly `claude`d in a project
-    ///   whose newest session is days old wears that dead session's
-    ///   uuid.  No eligible candidate ⇒ no badge, which is the honest
-    ///   answer until the pane's own session file appears.
-    pub(super) fn session_for_project(
-        &self,
-        encoded_dir: &str,
-        claimed: &std::collections::HashSet<String>,
-        claude_start: SystemTime,
-    ) -> Option<(String, PathBuf)> {
-        let mut newest: Option<(SystemTime, &SessionInfo)> = None;
-        for s in self.seen.values() {
-            if s.project_dir != encoded_dir {
-                continue;
-            }
-            if claimed.contains(&s.session_id) {
-                continue;
-            }
-            if s.last_mtime < claude_start {
-                continue;
-            }
-            match newest {
-                Some((t, _)) if t >= s.last_mtime => {}
-                _ => newest = Some((s.last_mtime, s)),
-            }
-        }
-        newest.map(|(_, s)| (s.session_id.clone(), s.jsonl_path.clone()))
-    }
-
-    /// The session that has superseded `argv_uuid` in this project, if
-    /// one has.
-    ///
-    /// **Why argv is not enough.** `claude --resume X` puts X in argv
-    /// and leaves it there for the life of the process.  A `/clear`
-    /// starts a different session in the same process; so does an
-    /// in-session `/resume`.  Bind by argv alone and the pane keeps
-    /// naming a transcript nobody is writing any more — the badge
-    /// tails a dead file for its model, reclamation parks and resumes
-    /// the wrong conversation, and switching profile brings back a
-    /// session the user left hours ago (2026-08-11 report: `torajs`,
-    /// argv `--resume f7a8a54b` while the live transcript was
-    /// `e024458b`, 3 minutes newer and still growing).
-    ///
-    /// The only evidence available is which transcript is being
-    /// appended to — claude closes the file between writes, so there
-    /// is no descriptor to inspect.  So: the newest unclaimed session
-    /// of this project, provided it has been written **since this
-    /// claude started** (older ones belong to other runs) and is
-    /// clearly newer than the argv one.
-    ///
-    /// `SUPERSEDE_MARGIN` keeps a pane from flip-flopping between two
-    /// files touched in the same instant at startup; a real `/clear`
-    /// leaves the old transcript untouched from then on, so the margin
-    /// costs nothing there.
-    ///
-    /// Known limit: two panes on **one** project cannot be told apart
-    /// this way — both see the same newest file.  The claim set hands
-    /// it to the lower `shelld_sid` and the other keeps its argv, which
-    /// is the same tie-break the guess path has always used.
-    pub(super) fn successor_session(
-        &self,
-        encoded_dir: &str,
-        claimed: &std::collections::HashSet<String>,
-        claude_start: SystemTime,
-        argv_uuid: &str,
-    ) -> Option<String> {
-        const SUPERSEDE_MARGIN: Duration = Duration::from_secs(5);
-        let argv_mtime = self.session_by_uuid(argv_uuid).map(|s| s.last_mtime);
-        let mut best: Option<(SystemTime, &SessionInfo)> = None;
-        for s in self.seen.values() {
-            if s.project_dir != encoded_dir
-                || s.session_id == argv_uuid
-                || claimed.contains(&s.session_id)
-                || s.last_mtime < claude_start
-            {
-                continue;
-            }
-            if let Some(t) = argv_mtime
-                && s.last_mtime < t + SUPERSEDE_MARGIN {
-                    continue;
-                }
-            match best {
-                Some((t, _)) if t >= s.last_mtime => {}
-                _ => best = Some((s.last_mtime, s)),
-            }
-        }
-        best.map(|(_, s)| s.session_id.clone())
-    }
-
-    /// Look a session up by uuid — the argv-authoritative path knows
-    /// *which* session a pane owns but still needs its jsonl to tail
-    /// the active model.  `None` for a session too new to have been
-    /// scanned yet; the badge then carries no model until it is.
-    pub(super) fn session_by_uuid(&self, uuid: &str) -> Option<&SessionInfo> {
-        self.seen.values().find(|s| s.session_id == uuid)
     }
 }
