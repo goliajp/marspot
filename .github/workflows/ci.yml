@@ -42,7 +42,7 @@ jobs:
             scope: --workspace
             nextest: mac
             full: true
-          - os: ubuntu-latest
+          - os: ubuntu-26.04
             name: Linux x86_64 (core)
             # Everything above these two is macOS-only today.
             scope: -p marspot-term -p marspot-linkify
@@ -51,7 +51,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Toolchain
         run: |
@@ -61,7 +61,7 @@ jobs:
           rustc -V
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -97,7 +97,7 @@ jobs:
       # third-party action fetching binaries into a signing job.
       - name: Cache dependency-policy tools
         if: matrix.full
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/cargo-audit
