@@ -25,6 +25,7 @@ mod snapshot_writer;
 use control_writer::ControlWriter;
 use snapshot_writer::SnapshotWriter;
 mod local_session;
+mod reply_guard;
 mod uds_server;
 
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -115,6 +116,11 @@ impl SessionImpl {
     fn pump(&mut self) -> usize {
         match self {
             Self::Local(s) => s.pump(),
+        }
+    }
+    fn watching_replies(&self) -> bool {
+        match self {
+            Self::Local(s) => s.watching_replies(),
         }
     }
     fn hold_grid(&mut self, on: bool) {
@@ -1506,6 +1512,7 @@ fn main() {
         cols = cols,
         rows = rows
     );
+    shm.attach_clusters(session.id());
 
     // RFC-003 §6 Amendment 15 — install SIGTERM handler so L2 can
     // ask us to retire (silent-update path) or L1 can wipe us on
@@ -1732,9 +1739,12 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         // back on a timer, not on the next byte — a `sudo` password
         // prompt sends no bytes at all until Enter, and the guesses
         // would otherwise sit on screen showing what was typed.
+        // replies a program has not read are watched until it reads
+        // them or leaves the foreground -- see `reply_guard`
         let wait = if sync_gate.owes_a_frame()
             || blank_gate.owes_a_frame()
             || session.terminal().predictions_pending()
+            || session.watching_replies()
         {
             Duration::from_millis(10)
         } else {
@@ -2568,9 +2578,12 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 session_id = id,
                 pid = std::process::id()
             );
+            marspot_term::grid_shm::clusters::delete(id);
             std::process::exit(0);
         }
     }
+    // the session is over and no image follows it
+    marspot_term::grid_shm::clusters::delete(session.id());
 }
 
 // B3 integration tests.  These exercise the L3-side surface of the

@@ -22,6 +22,8 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use crate::grid::{Cell, Grid};
+
+mod mirror;
 use crate::grid_shm::{
     GridShmReader, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
     FLAG_ALT_SCREEN, FLAG_ALT_SCROLL, FLAG_MOUSE_ANY_MOTION, FLAG_MOUSE_DRAG,
@@ -869,6 +871,11 @@ pub struct L3Conn {
     /// alongside the cells (shm v3+).  Mirrors the same allocate-once
     /// reuse as `scratch`.
     scratch_wrapped: Vec<bool>,
+    /// The last frame's cluster text, reused across frames.
+    cluster_table: crate::grid_shm::ClusterTable,
+    /// When attaching to this session's cluster region was last tried;
+    /// an L3 from before clusters were published has none.
+    clusters_tried_at: Option<Instant>,
     /// Reply channel for `GetSelectionText`: the control-socket reader
     /// thread routes each `SelectionText` frame here, and
     /// `request_selection_text` blocks on it (Cmd-C round-trip).  L3 owns
@@ -918,6 +925,8 @@ impl L3Conn {
             exited: false,
             scratch: Vec::new(),
             scratch_wrapped: Vec::new(),
+            cluster_table: Default::default(),
+            clusters_tried_at: None,
             selection_rx,
             selection_seq: 0,
         }
@@ -952,6 +961,8 @@ impl L3Conn {
             exited: false,
             scratch: Vec::new(),
             scratch_wrapped: Vec::new(),
+            cluster_table: Default::default(),
+            clusters_tried_at: None,
             selection_rx: spawn.selection_rx,
             selection_seq: 0,
         }
@@ -1001,35 +1012,9 @@ impl L3Conn {
         if seq == self.last_seq && !force_fill {
             return false;
         }
-        let Some(snap) = self
-            .reader
-            .read(&mut self.scratch, &mut self.scratch_wrapped)
-        else {
+        let Some(snap) = self.read_into_mirror() else {
             return false; // never published yet (seq 0)
         };
-        // Reshape the mirror if L3's geometry changed under us.
-        if self.grid.cols() != snap.cols || self.grid.rows() != snap.rows {
-            self.grid = Grid::new(snap.cols, snap.rows);
-        }
-        for row in 0..snap.rows {
-            let base = row as usize * snap.cols as usize;
-            for col in 0..snap.cols {
-                self.grid
-                    .set_cell(col, row, self.scratch[base + col as usize]);
-            }
-        }
-        // Per-row DECAWM continuation flags — without this the L2-side
-        // link scanner can't tell a soft-wrapped row from a real
-        // newline, breaking URL/path detection that overflows a row.
-        for row in 0..snap.rows {
-            let flag = self
-                .scratch_wrapped
-                .get(row as usize)
-                .copied()
-                .unwrap_or(false);
-            self.grid.set_row_wrapped(row, flag);
-        }
-        self.grid.set_cursor(snap.cursor_col, snap.cursor_row);
         self.cursor_visible = snap.flags & FLAG_CURSOR_VISIBLE != 0;
         self.app_cursor_keys = snap.flags & FLAG_APP_CURSOR_KEYS != 0;
         self.bracketed_paste = snap.flags & FLAG_BRACKETED_PASTE != 0;

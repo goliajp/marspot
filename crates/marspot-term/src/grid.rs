@@ -837,15 +837,8 @@ const MAX_RESERVED_HEADER_ROWS: u16 = 1;
 /// once and reverted (F3+12.1).
 const MAX_FILED_BLANK_RUN: u16 = 3;
 
-/// The cluster text at `col` in a row fetched by
-/// [`Grid::row_clusters_at_view`].
-///
-/// A linear scan, because a row carries one entry per cluster on it and
-/// a row full of them is a few dozen -- a map would cost an allocation
-/// per row to save nothing.
-pub fn cluster_in_row(row: &[(u16, String)], col: u16) -> Option<&str> {
-    row.iter().find(|(c, _)| *c == col).map(|(_, t)| t.as_str())
-}
+mod cluster_mirror;
+pub use cluster_mirror::{UNKNOWN_CLUSTER, cluster_in_row};
 
 impl Grid {
     pub fn new(cols: u16, rows: u16) -> Self {

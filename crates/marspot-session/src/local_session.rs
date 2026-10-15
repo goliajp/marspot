@@ -104,6 +104,8 @@ pub struct LocalSession {
     rx: Receiver<Vec<u8>>,
     /// PTY write half.  Dropping this ends the writer thread.
     writer: PtyWriter,
+    /// Replies written for programs that may never read them.
+    replies: crate::reply_guard::ReplyGuard,
     exited: Arc<AtomicBool>,
     last_output: Option<Instant>,
     pending_scrollback_pages: Vec<PendingPage>,
@@ -306,6 +308,7 @@ impl LocalSession {
             bytelog,
             rx,
             writer,
+            replies: Default::default(),
             exited,
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -394,7 +397,47 @@ impl LocalSession {
             }
         }
         self.flush_capability_responses();
+        self.check_unread_replies();
         total
+    }
+
+    /// See [`crate::reply_guard`]. Runs on every pump while replies are
+    /// unaccounted for -- any output, the shell's prompt included, or
+    /// the loop's short wake while watching.
+    fn check_unread_replies(&mut self) {
+        if !self.replies.is_watching() {
+            return;
+        }
+        let delivered = self.writer.backlog() == 0;
+        if let Some(n) = self.replies.check(self.pty.raw_master(), self.shell_pgrp(), delivered) {
+            marspot_term::lx_info!(
+                "l3.replies_flushed",
+                "the program that asked left the foreground; flushed the input queue, \
+                 which held nothing but its replies (at most this many bytes)",
+                session_id = self.id,
+                bytes = n as u64
+            );
+        }
+    }
+
+    /// The shell's process group: the foreground whenever no job is.
+    fn shell_pgrp(&self) -> libc::pid_t {
+        unsafe { libc::getpgid(self.child_pid) }
+    }
+
+    /// Whether replies are being watched; the loop wakes sooner then.
+    pub fn watching_replies(&self) -> bool {
+        self.replies.is_watching()
+    }
+
+    #[cfg(test)]
+    pub fn reply_flushes(&self) -> u64 {
+        self.replies.flushes()
+    }
+
+    #[cfg(test)]
+    pub fn pty_in_raw_mode(&self) -> bool {
+        crate::reply_guard::raw_mode(self.pty.raw_master())
     }
 
     /// Send back whatever the parser queued in reply to a capability
@@ -421,8 +464,16 @@ impl LocalSession {
     /// is free.
     fn flush_capability_responses(&mut self) {
         let response = self.terminal.take_response();
-        if !response.is_empty() {
-            let _ = self.write(&response);
+        if response.is_empty() {
+            return;
+        }
+        let master = self.pty.raw_master();
+        // only asked when a watch would start; while one runs, the queue
+        // is ours already
+        let empty_before = !self.replies.is_watching()
+            && crate::reply_guard::queue_was_empty(master, self.writer.backlog() == 0);
+        if self.enqueue(&response).is_ok() {
+            self.replies.wrote_replies(master, self.shell_pgrp(), response.len(), empty_before);
         }
     }
 
@@ -474,6 +525,11 @@ impl LocalSession {
         if bytes.is_empty() {
             return Ok(0);
         }
+        self.replies.wrote_other();
+        self.enqueue(bytes)
+    }
+
+    fn enqueue(&mut self, bytes: &[u8]) -> io::Result<usize> {
         // The cap check lives in `BoundedWriter::send` — duplicating it
         // here is how the two could drift apart.
         let chunk = PtyChunk { pty: Arc::clone(&self.pty), bytes: bytes.to_vec() };
@@ -614,6 +670,7 @@ impl LocalSession {
             bytelog,
             rx,
             writer,
+            replies: Default::default(),
             exited,
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -867,6 +924,7 @@ mod tests {
             bytelog: None,
             rx: { let (_t, r) = mpsc::channel(); r },
             writer: PtyWriter::new("l3-pty-writer-1", io::sink(), marspot_term::frame_writer::cap::PTY),
+            replies: Default::default(),
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -929,6 +987,7 @@ mod tests {
             bytelog: None,
             rx: { let (_t, r) = mpsc::channel(); r },
             writer: PtyWriter::new("l3-pty-writer-2", io::sink(), marspot_term::frame_writer::cap::PTY),
+            replies: Default::default(),
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -988,6 +1047,7 @@ mod tests {
             bytelog: None,
             rx: { let (_t, r) = mpsc::channel(); r },
             writer: PtyWriter::new("l3-pty-writer-0", io::sink(), marspot_term::frame_writer::cap::PTY),
+            replies: Default::default(),
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),
