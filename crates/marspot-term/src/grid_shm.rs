@@ -41,8 +41,12 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 
 use crate::grid::{Cell, Grid};
 
+pub mod clusters;
+mod hash;
 mod peek;
+pub use clusters::{ClusterTable, ClusterTableReader, ClusterTableWriter};
 pub use peek::{Frame, peek, peek_frame};
+use hash::compute_publish_hash;
 
 const MAGIC: u32 = 0x4d_53_47_31; // "MSG1"
 // VERSION 3 (2026-06-17): per-row DECAWM wrap flags appended after the
@@ -301,6 +305,13 @@ pub fn open_region(name: &std::ffi::CStr) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// Remove both regions a session publishes through: the grid region
+/// named `main`, and session `id`'s cluster region.
+pub fn delete_session_regions(main: &std::ffi::CStr, id: u64) {
+    delete_region(main);
+    clusters::delete(id);
+}
+
 /// Best-effort `shm_unlink` of a region by name.  Called when a
 /// session is retired so the kernel actually frees the memory once
 /// every fd-holder has closed it.
@@ -498,6 +509,11 @@ pub struct GridShmWriter {
     /// so without dedupe L3 publishes ~30/s, L2 wakes + renders ~25/s,
     /// shows up as ~10 % idle CPU on a 9-pane window.
     last_publish_hash: u64,
+    /// Where the text of the frame's clusters goes, once attached.
+    clusters: Option<ClusterTableWriter>,
+    /// One scrollback row's clusters, refilled per row while a
+    /// scrolled view is published.
+    row_clusters: Vec<(u16, String)>,
 }
 
 // The raw pointer is into a private mmap this struct solely owns; it is
@@ -536,7 +552,23 @@ impl GridShmWriter {
             // publish always proceeds.  Worst case (collision = 0): one
             // missed first frame; L2 sees the next change.
             last_publish_hash: 0,
+            clusters: None,
+            row_clusters: Vec::new(),
         })
+    }
+
+    /// Publish the text of each frame's clusters for session `id` from
+    /// now on -- see [`clusters`]. Without it a reader draws a cluster
+    /// cell's pool index, so a failure is logged and the frame goes out
+    /// without its clusters, as frames always did.
+    pub fn attach_clusters(&mut self, id: u64) {
+        match ClusterTableWriter::open(id) {
+            Ok(w) => {
+                self.clusters = Some(w);
+                self.last_publish_hash = 0;
+            }
+            Err(e) => crate::lx_warn!("grid_shm.clusters.open_failed", &format!("{e}"), session_id = id),
+        }
     }
 
     /// The shm fd, for passing to a child (e.g. inherited by L2/L3).
@@ -653,14 +685,41 @@ impl GridShmWriter {
             (*h).view_offset = view_offset as u32;
 
             // Cells: read the visible window straight into the region,
-            // no intermediate allocation.
+            // no intermediate allocation. The cluster table is written in
+            // the same pass and under the same odd seq; a grid with an
+            // empty pool and no history in view has none to write.
             let cells = self.cells_ptr();
+            let mut table = self.clusters.as_mut().filter(|t| {
+                grid.cluster_pool_len() > 0 || view_offset > 0 || t.last_count > 0
+            });
+            if let Some(t) = table.as_mut() {
+                t.begin();
+            }
             for row in 0..rows {
+                // history rows keep their cluster text per row, not in
+                // the pool
+                if let Some(t) = table.as_mut()
+                    && view_offset > 0
+                    && grid.row_clusters_at_view(view_offset, row, &mut self.row_clusters)
+                {
+                    for (col, text) in &self.row_clusters {
+                        t.push(*col, row, text);
+                    }
+                }
                 let row_base = row as usize * cols as usize;
                 for col in 0..cols {
                     let cell = grid.cell_at_view(view_offset, col, row);
                     std::ptr::write(cells.add(row_base + col as usize), cell);
+                    if let Some(t) = table.as_mut()
+                        && cell.is_cluster()
+                        && let Some(text) = grid.cluster_text(&cell)
+                    {
+                        t.push(col, row, text);
+                    }
                 }
+            }
+            if let Some(t) = table {
+                t.finish();
             }
             // Per-row DECAWM wrapped flags — one byte per viewport row
             // at the fixed wrapped offset.  L2's link scanner depends
@@ -676,68 +735,6 @@ impl GridShmWriter {
             // Exit the write: publish with a release store to even.
             fence(Ordering::Release);
             (*h).seq.store(s.wrapping_add(2), Ordering::Release);
-        }
-    }
-}
-
-/// FNV-1a over the full publish payload — header dims/cursor/flags
-/// plus every cell + per-row wrapped flag.  Walked in the same order
-/// `publish()` would write so two identical grids produce identical
-/// hashes regardless of how they were reached.  The constants are the
-/// canonical 64-bit FNV-1a (offset basis + prime) — fast on M-series,
-/// good enough for the equality-only use we make of it (no
-/// adversarial input here, only a same-process L3 hashing its own
-/// terminal state).
-fn compute_publish_hash(grid: &Grid, view_offset: u16, flags: u32) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-    #[inline(always)]
-    fn mix(h: u64, x: u64) -> u64 {
-        h.wrapping_mul(FNV_PRIME) ^ x
-    }
-    let cols = grid.cols();
-    let rows = grid.rows();
-    let (cur_c, cur_r) = grid.cursor();
-    let mut h = FNV_OFFSET;
-    h = mix(h, flags as u64);
-    h = mix(h, cur_c as u64);
-    h = mix(h, cur_r as u64);
-    h = mix(h, view_offset as u64);
-    h = mix(h, grid.scroll_push_count());
-    h = mix(h, grid.scrollback_len() as u64);
-    h = mix(h, cols as u64);
-    h = mix(h, rows as u64);
-    for row in 0..rows {
-        for col in 0..cols {
-            let cell = grid.cell_at_view(view_offset, col, row);
-            h = mix(h, cell.ch as u64);
-            h = mix(h, hash_cell_attrs(&cell.attrs));
-        }
-        h = mix(h, grid.wrapped_at_view(view_offset, row) as u64);
-    }
-    h
-}
-
-#[inline(always)]
-fn hash_cell_attrs(a: &crate::grid::CellAttrs) -> u64 {
-    let bools = (a.bold as u64)
-        | ((a.italic as u64) << 1)
-        | ((a.underline as u64) << 2)
-        | ((a.reverse as u64) << 3)
-        | ((a.dim as u64) << 4);
-    bools
-        .wrapping_add(hash_color(&a.fg) << 8)
-        .wrapping_add(hash_color(&a.bg) << 32)
-}
-
-#[inline(always)]
-fn hash_color(c: &crate::grid::Color) -> u64 {
-    use crate::grid::ColorKind;
-    match c.kind() {
-        ColorKind::Default => 0,
-        ColorKind::Indexed(i) => 0x100 | (i as u64),
-        ColorKind::Rgb(r, g, b) => {
-            0x1_0000_0000 | ((r as u64) << 16) | ((g as u64) << 8) | (b as u64)
         }
     }
 }
@@ -760,6 +757,7 @@ pub struct GridShmReader {
     len: usize,
     cols: u16,
     rows: u16,
+    clusters: Option<ClusterTableReader>,
 }
 
 unsafe impl Send for GridShmReader {}
@@ -780,6 +778,7 @@ impl GridShmReader {
             len,
             cols,
             rows,
+            clusters: None,
         })
     }
 
@@ -833,6 +832,38 @@ impl GridShmReader {
         cells_out: &mut Vec<Cell>,
         wrapped_out: &mut Vec<bool>,
     ) -> Option<GridSnapshot> {
+        self.read_frame(cells_out, wrapped_out, None)
+    }
+
+    /// Read the text of each frame's clusters from now on -- see
+    /// [`clusters`].
+    pub fn attach_clusters(&mut self, table: ClusterTableReader) {
+        self.clusters = Some(table);
+    }
+
+    pub fn has_clusters(&self) -> bool {
+        self.clusters.is_some()
+    }
+
+    /// [`Self::read`], and the frame's cluster table into `table`,
+    /// both from the same publish. With no table attached `table` comes
+    /// back empty.
+    pub fn read_with_clusters(
+        &self,
+        cells_out: &mut Vec<Cell>,
+        wrapped_out: &mut Vec<bool>,
+        table: &mut ClusterTable,
+    ) -> Option<GridSnapshot> {
+        table.clear();
+        self.read_frame(cells_out, wrapped_out, Some(table))
+    }
+
+    fn read_frame(
+        &self,
+        cells_out: &mut Vec<Cell>,
+        wrapped_out: &mut Vec<bool>,
+        mut table: Option<&mut ClusterTable>,
+    ) -> Option<GridSnapshot> {
         cells_out.clear();
         wrapped_out.clear();
         // Bounded spin: a single writer holds the odd window for the
@@ -885,6 +916,9 @@ impl GridShmReader {
                 for row in 0..rows {
                     let flag = *wptr.add(row as usize) != 0;
                     wrapped_out.push(flag);
+                }
+                if let (Some(r), Some(t)) = (self.clusters.as_ref(), table.as_deref_mut()) {
+                    r.read_into(t);
                 }
 
                 fence(Ordering::Acquire);

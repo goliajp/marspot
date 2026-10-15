@@ -207,7 +207,7 @@ fn joint(prev: &[Glyph], next: &[Glyph], cols: u16, codex: bool) -> &'static str
 /// screen, trailing blank lines dropped.
 pub fn screen(sid: u64, extra_lines: u16) -> std::io::Result<String> {
     let entry = marspot_term::session_registry::read_session_entry(sid)?;
-    let Some(frame) = live_frame(&entry.shm_name)? else {
+    let Some(frame) = live_frame(&entry.shm_name, sid)? else {
         return screen_text(&bytelog_of(sid), entry.cols, entry.rows, extra_lines);
     };
     let grid = grid_of(&frame);
@@ -234,54 +234,48 @@ pub fn screen(sid: u64, extra_lines: u16) -> std::io::Result<String> {
 /// What is typed and unsent in pane `sid`'s input box -- see
 /// [`composer_text`] for how the box is found.
 ///
-/// A grapheme cluster in the box makes the answer `None`: the frame
-/// does not carry a cluster's text, and handing back a placeholder in
-/// place of what the person typed is worse than handing back nothing.
+/// A cluster whose text did not arrive with the frame (a session from
+/// before clusters were published, or a table that overflowed) makes the
+/// answer `None`: handing back a placeholder in place of what the person
+/// typed is worse than handing back nothing.
 pub fn composer(sid: u64) -> std::io::Result<Option<String>> {
     let entry = marspot_term::session_registry::read_session_entry(sid)?;
-    let Some(frame) = live_frame(&entry.shm_name)? else {
+    let Some(frame) = live_frame(&entry.shm_name, sid)? else {
         return composer_text(&bytelog_of(sid), entry.cols, entry.rows);
     };
     Ok(composer_in_frame(&frame))
 }
 
 fn composer_in_frame(frame: &marspot_term::grid_shm::Frame) -> Option<String> {
-    composer_of(&grid_of(frame)).filter(|t| !t.contains(UNKNOWN_CLUSTER))
+    composer_of(&grid_of(frame)).filter(|t| !t.contains(marspot_term::grid::UNKNOWN_CLUSTER))
 }
 
 /// The published frame, when it is the live screen. `None` when the
 /// session names no region, when nothing is published yet, or when the
 /// person has scrolled the pane back and the frame is the history they
 /// are looking at.
-fn live_frame(shm_name: &str) -> std::io::Result<Option<marspot_term::grid_shm::Frame>> {
+fn live_frame(shm_name: &str, sid: u64) -> std::io::Result<Option<marspot_term::grid_shm::Frame>> {
     if shm_name.is_empty() {
         return Ok(None);
     }
     let name = std::ffi::CString::new(shm_name)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    Ok(marspot_term::grid_shm::peek_frame(&name)?.filter(|f| f.view_offset == 0))
+    Ok(marspot_term::grid_shm::peek_frame(&name, sid)?.filter(|f| f.view_offset == 0))
 }
 
 fn bytelog_of(sid: u64) -> std::path::PathBuf {
     marspot_term::paths::sessions_dir().join(sid.to_string()).join("bytelog")
 }
 
-/// What a cluster cell reads as: its text is in the writer's pool.
-const UNKNOWN_CLUSTER: char = '\u{fffd}';
-
 /// A grid holding the frame's cells and cursor, so the readers written
 /// for a replayed grid read a published one the same way.
 fn grid_of(frame: &marspot_term::grid_shm::Frame) -> marspot_term::grid::Grid {
     let mut grid = marspot_term::grid::Grid::new(frame.cols, frame.rows);
     for (i, cell) in frame.cells.iter().enumerate() {
-        let mut cell = *cell;
-        if cell.is_cluster() {
-            cell.ch = UNKNOWN_CLUSTER;
-            cell.attrs._pad[0] &= !marspot_term::grid::FLAG_CLUSTER;
-        }
         let (col, row) = ((i % frame.cols as usize) as u16, (i / frame.cols as usize) as u16);
-        grid.set_cell(col, row, cell);
+        grid.set_cell(col, row, *cell);
     }
+    grid.mirror_clusters(frame.clusters.iter().map(|(c, r, t)| (*c, *r, t.as_str())));
     grid.set_cursor(frame.cursor_col, frame.cursor_row);
     grid
 }
@@ -672,12 +666,17 @@ mod tests {
         let g = term.grid();
         let (cursor_col, cursor_row) = g.cursor();
         let mut cells = Vec::new();
+        let mut clusters = Vec::new();
         for r in 0..rows {
             for c in 0..cols {
-                cells.push(g.cell(c, r));
+                let cell = g.cell(c, r);
+                if let Some(t) = g.cluster_text(&cell) {
+                    clusters.push((c, r, t.to_string()));
+                }
+                cells.push(cell);
             }
         }
-        marspot_term::grid_shm::Frame { cols, rows, cursor_col, cursor_row, view_offset: 0, cells }
+        marspot_term::grid_shm::Frame { cols, rows, cursor_col, cursor_row, view_offset: 0, cells, clusters }
     }
 
     #[test]
@@ -692,13 +691,21 @@ mod tests {
         assert_eq!(composer_in_frame(&f), None);
     }
 
-    /// The frame does not carry a cluster's text. A box holding one
-    /// reads as nothing rather than as a placeholder in its place.
     #[test]
-    fn a_cluster_in_the_box_reads_as_nothing_rather_than_a_placeholder() {
+    fn a_cluster_in_the_box_reads_back_as_its_text() {
         // a flag is two regional indicators: one cluster
         let f = frame_of(&claude("❯ ship it \u{1f1ef}\u{1f1f5}"), 40, 10);
         assert!(f.cells.iter().any(|c| c.is_cluster()), "fixture must hold a cluster");
+        assert_eq!(composer_in_frame(&f).as_deref(), Some("ship it \u{1f1ef}\u{1f1f5}"));
+    }
+
+    /// A session from before clusters were published sends no text for
+    /// them. A box holding one reads as nothing rather than as a
+    /// placeholder in its place.
+    #[test]
+    fn a_cluster_whose_text_did_not_arrive_reads_as_nothing() {
+        let mut f = frame_of(&claude("❯ ship it \u{1f1ef}\u{1f1f5}"), 40, 10);
+        f.clusters.clear();
         assert_eq!(composer_in_frame(&f), None);
     }
 
