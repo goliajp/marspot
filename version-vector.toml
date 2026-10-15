@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.235"  # a pane read from L1 carries the text of its grapheme clusters
-core    = "0.12.273"  # a session's cluster region is removed with its frame region
+core    = "0.12.274"  # an L3 pane draws grapheme clusters, not their pool index
 session = "0.11.138"  # each frame publishes the text of its grapheme clusters
