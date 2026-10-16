@@ -118,6 +118,11 @@ impl SessionImpl {
             Self::Local(s) => s.pump(),
         }
     }
+    fn pump_within(&mut self, budget: Duration) -> (usize, bool) {
+        match self {
+            Self::Local(s) => s.pump_within(budget),
+        }
+    }
     fn reply_poll_every(&self) -> Option<Duration> {
         match self {
             Self::Local(s) => s.reply_poll_every(),
@@ -1598,6 +1603,10 @@ fn main() {
 /// already anomalous and worth a line in the log.
 const LOOP_STALL_THRESHOLD: Duration = Duration::from_millis(150);
 
+/// Most one iteration spends parsing before it goes round again to
+/// publish, take keys and apply a resize. A frame at 120 Hz.
+const PUMP_BUDGET: Duration = Duration::from_millis(8);
+
 
 const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let mut last_snapshot_generation: u64 = session.terminal().generation();
@@ -1703,6 +1712,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let my_socket_path = marspot_term::session_registry::session_socket_path(session.id());
     let my_pid = std::process::id() as i32;
     let mut last_entry_check = Instant::now();
+    let mut output_queued = false;
     // Five seconds in production.  A test that deletes a registry
     // entry to watch the session leave should not have to sit through
     // that beat — it was 5.7 s of a 41 s suite, and the beat is not
@@ -1751,6 +1761,9 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         // replies a program has not read are watched until it reads
         // them or is done with the terminal -- see `reply_guard`
         let wait = session.reply_poll_every().map_or(wait, |p| wait.min(p));
+        // the reader's wakes for what is still queued were taken by
+        // the drain below last time round
+        let wait = if output_queued { Duration::ZERO } else { wait };
         let first = match ev_rx.recv_timeout(wait) {
             Ok(ev) => Some(ev),
             Err(RecvTimeoutError::Timeout) => None,
@@ -2274,7 +2287,8 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         };
 
         watch.phase("pump");
-        let n = session.pump();
+        let (n, queued) = session.pump_within(PUMP_BUDGET);
+        output_queued = queued;
         // Auto-pin view_offset on scrollback push: when the grid scrolls
         // a row into scrollback while the user is viewing history,
         // shift view_offset by the same delta so the visible window
