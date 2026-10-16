@@ -2,7 +2,7 @@
 //! the grid row by row, and the marks drawn over it.
 
 use crate::font_cache::{resolve_attrs, FontCache, BG};
-use crate::frame_build::glyph_resolve::{resolve_cell_glyph_routed, resolve_cluster_glyph};
+use crate::frame_build::glyph_resolve::{resolve_cell_glyph_routed, resolve_cluster_glyph_routed};
 use crate::frame_build::palette::*;
 use crate::frame_build::text_run::preedit_placements;
 use crate::glyph_atlas::{GlyphAtlas, SlotMetrics};
@@ -382,15 +382,16 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
                 .or_else(|| marspot_term::grid::cluster_in_row(&row_clusters, c as u16))
                 .map(str::to_string);
             let (entry, is_color) = match cluster {
-                Some(text) => match resolve_cluster_glyph(
+                Some(text) => match resolve_cluster_glyph_routed(
                     atlas,
+                    color_atlas,
                     font,
                     &text,
                     cell.attrs.bold,
                     cell.attrs.italic,
                     metrics,
                 ) {
-                    Some(e) => (e, false),
+                    Some(e) => e,
                     None => continue,
                 },
                 None => match resolve_cell_glyph_routed(
