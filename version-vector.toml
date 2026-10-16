@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.237"  # a process that logs rarely follows a log rotation within a minute
-core    = "0.12.276"  # a process that logs rarely follows a log rotation within a minute
-session = "0.11.144"  # output faster than the parser no longer holds the pane: keys, resizes and frames get through
+core    = "0.12.277"  # trailing blanks of a scrolled line are found at half the cost
+session = "0.11.145"  # trailing blanks of a scrolled line are found at half the cost
