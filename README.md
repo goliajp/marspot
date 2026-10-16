@@ -87,17 +87,17 @@ useful for working on the renderer without the other two.
 
 ## Performance
 
-Measured 2026-09-29 on an idle Mac mini (M-series, macOS 26.5), every
-terminal driven through its own GUI in one sequential cycle so each
-measurement is that terminal against an otherwise quiet machine.
+Measured 2026-10-16 on a Mac mini at load 2.7 (M-series, macOS 27.0.1),
+every terminal driven through its own GUI in one sequential cycle so each
+measurement is that terminal against the same machine in the same state.
 Throughput of `cat`-ing a prepared byte stream, MB/s, higher is better:
 
-| stream | marspot | Ghostty 1.3.1 | iTerm2 3.7.3 | Terminal 2.15 |
+| stream | marspot | Ghostty 1.3.1 | iTerm2 3.7.5 | Terminal 2.15 |
 |---|---:|---:|---:|---:|
-| ASCII | **128.0** | 97.0 | 84.2 | 43.2 |
-| mixed | **128.0** | 88.9 | 24.1 | 36.0 |
-| CJK | **133.3** | 118.5 | 10.0 | 35.6 |
-| emoji | **128.0** | 110.3 | 0.5 | 38.6 |
+| ASCII | **128.0** | 90.0 | 84.9 | 36.2 |
+| mixed | **127.0** | 86.2 | 22.6 | 35.8 |
+| CJK | **131.3** | 109.4 | 9.5 | 35.8 |
+| emoji | **120.2** | 101.7 | 0.4 | 39.5 |
 
 Read that table with its limits in mind, which are real:
 
