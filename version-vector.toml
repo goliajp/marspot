@@ -28,4 +28,4 @@
 
 shell   = "0.7.237"  # a process that logs rarely follows a log rotation within a minute
 core    = "0.12.276"  # a process that logs rarely follows a log rotation within a minute
-session = "0.11.143"  # unread replies are flushed when the job leaves raw mode, before a fast shell can read them
+session = "0.11.144"  # output faster than the parser no longer holds the pane: keys, resizes and frames get through
