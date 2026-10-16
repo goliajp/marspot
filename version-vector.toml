@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.237"  # a process that logs rarely follows a log rotation within a minute
-core    = "0.12.276"  # a process that logs rarely follows a log rotation within a minute
-session = "0.11.143"  # unread replies are flushed when the job leaves raw mode, before a fast shell can read them
+core    = "0.12.277"  # trailing blanks of a scrolled line are found at half the cost
+session = "0.11.145"  # trailing blanks of a scrolled line are found at half the cost

@@ -354,8 +354,29 @@ impl LocalSession {
     /// bytelog, feed it into the terminal parser.  Returns bytes
     /// consumed this tick (0 = nothing happened).
     pub fn pump(&mut self) -> usize {
+        self.drain(None).0
+    }
+
+    /// [`Self::pump`], stopping once `budget` has been spent parsing.
+    /// The flag says chunks are still queued.
+    ///
+    /// The reader queues whatever the PTY gives it, and a program can
+    /// write faster than the parser reads -- `cat` of a big file, `yes`.
+    /// Draining to empty then never ends while the program runs, and
+    /// the loop that called it stops publishing frames, applying
+    /// resizes and delivering keys, Ctrl-C included.
+    pub fn pump_within(&mut self, budget: Duration) -> (usize, bool) {
+        self.drain(Some(Instant::now() + budget))
+    }
+
+    fn drain(&mut self, deadline: Option<Instant>) -> (usize, bool) {
         let mut total = 0;
+        let mut more = false;
         loop {
+            if total > 0 && deadline.is_some_and(|d| Instant::now() >= d) {
+                more = true;
+                break;
+            }
             match self.rx.try_recv() {
                 Ok(bytes) => {
                     // The bytelog is written either way: it is the
@@ -398,7 +419,7 @@ impl LocalSession {
         }
         self.flush_capability_responses();
         self.check_unread_replies();
-        total
+        (total, more)
     }
 
     /// See [`crate::reply_guard`]. Runs on every pump while replies are
@@ -968,6 +989,55 @@ mod tests {
             s.pty_write_backlog() > 0,
             "expected a backlog against a child that never reads stdin"
         );
+    }
+
+    /// Output arriving faster than it parses must not hold the loop:
+    /// a bounded pump stops at its budget, says more is queued, and
+    /// what it left is still there for the next one.
+    #[test]
+    fn a_bounded_pump_stops_at_its_budget_and_leaves_the_rest() {
+        let pty_arc = Arc::new(
+            Pty::spawn(PtyConfig {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "sleep 3".into()],
+                size: TerminalSize { cols: 80, rows: 24, pixel_width: 0, pixel_height: 0 },
+                argv0: None,
+                cwd: None,
+                ..Default::default()
+            })
+            .expect("spawn /bin/sh"),
+        );
+        let (tx, rx) = mpsc::channel();
+        let mut s = LocalSession {
+            id: 1,
+            pty: Arc::clone(&pty_arc),
+            child_pid: 0,
+            terminal: Terminal::new(80, 24),
+            bytelog: None,
+            rx,
+            writer: PtyWriter::new("l3-pty-writer-1", io::sink(), marspot_term::frame_writer::cap::PTY),
+            replies: Default::default(),
+            exited: Arc::new(AtomicBool::new(false)),
+            last_output: None,
+            pending_scrollback_pages: Vec::new(),
+            hold: false,
+            held: Vec::new(),
+            held_bytes: 0,
+            cols: 80,
+            rows: 24,
+        };
+        let chunk = "ab 漢字 \x1b[1mcd\x1b[0m\r\n".repeat(2048).into_bytes();
+        let chunks = 64;
+        for _ in 0..chunks {
+            tx.send(chunk.clone()).expect("queue a chunk");
+        }
+        let all = chunk.len() * chunks;
+
+        let (first, more) = s.pump_within(Duration::from_micros(1));
+        assert!(more, "the budget ran out with chunks still queued");
+        assert!(first > 0, "a bounded pump still makes progress");
+        assert!(first < all, "it stopped at the budget, not at the end: {first} of {all}");
+        assert_eq!(first + s.pump(), all, "nothing was dropped");
     }
 
     /// The queue is bounded: past the cap, input is refused rather than

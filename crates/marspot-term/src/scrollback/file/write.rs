@@ -190,10 +190,28 @@ impl FileScrollback {
         // the first ~40 cols means 80% disk savings, and 80% of the
         // Grid::resize reflow read volume.  Without this, resize on
         // a session with megabytes of history takes seconds.
+        // Compared as three words, which for `Cell` is the same as
+        // `==`: the field-wise compare cost ~29 instructions a cell, a
+        // fifth of all the parse thread did on a wide pane of short
+        // lines, and a byte-slice compare becomes a `memcmp` call.
+        const N: usize = crate::grid::CELL_MEM_BYTES;
+        fn words(c: &[u8; N]) -> (u64, u64, u32) {
+            let (a, rest) = c.split_first_chunk::<8>().expect("20 bytes");
+            let (b, rest) = rest.split_first_chunk::<8>().expect("12 bytes");
+            let c = rest.first_chunk::<4>().expect("4 bytes");
+            (u64::from_ne_bytes(*a), u64::from_ne_bytes(*b), u32::from_ne_bytes(*c))
+        }
         let default_cell = crate::grid::Cell::default();
-        let trimmed_len = line
+        let blank = words(
+            crate::grid::Cell::slice_as_bytes(std::slice::from_ref(&default_cell))
+                .try_into()
+                .expect("a cell is CELL_MEM_BYTES"),
+        );
+        let trimmed_len = crate::grid::Cell::slice_as_bytes(line)
+            .as_chunks::<N>()
+            .0
             .iter()
-            .rposition(|c| *c != default_cell)
+            .rposition(|c| words(c) != blank)
             .map(|i| i + 1)
             .unwrap_or(0);
         let line = &line[..trimmed_len];
@@ -478,6 +496,39 @@ mod tests {
                 "trimmed tail col {c} should be None (renderer fills \
                  default), got Some"
             );
+        }
+    }
+
+    /// The trim compares whole cells: a blank that differs from the
+    /// default in any one byte -- a background colour, a single flag,
+    /// the cluster bit -- is content and stays.
+    #[test]
+    fn push_line_keeps_a_tail_cell_that_differs_in_any_byte() {
+        use crate::grid::{CellAttrs, Color, FLAG_CLUSTER};
+        let blank = |attrs: CellAttrs| Cell { ch: ' ', attrs };
+        let tails = [
+            blank(CellAttrs { bg: Color::indexed(4), ..Default::default() }),
+            blank(CellAttrs { fg: Color::rgb(1, 2, 3), ..Default::default() }),
+            blank(CellAttrs { dim: true, ..Default::default() }),
+            blank(CellAttrs { _pad: [FLAG_CLUSTER, 0, 0], ..Default::default() }),
+            Cell { ch: '\0', ..Default::default() },
+        ];
+        let cols = 8usize;
+        let tmp = TmpDir::new("trim-any-byte");
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 64).expect("create");
+        for tail in tails {
+            let mut row = vec![Cell::default(); cols];
+            row[0] = Cell { ch: 'a', ..Default::default() };
+            row[5] = tail;
+            sb.push_line(&row, false);
+        }
+        drop(sb);
+        // a ring of one: every row but the last is read from its record
+        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 1).expect("reopen");
+        // presence, not value: a record read back drops the cluster bit
+        for i in 0..tails.len() - 1 {
+            assert!(sb.cell_at(i, 5).is_some(), "row {i}: the tail cell was trimmed");
+            assert_eq!(sb.cell_at(i, 6), None, "row {i}: the default cells after it were not");
         }
     }
 
