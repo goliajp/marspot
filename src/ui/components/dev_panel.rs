@@ -1133,11 +1133,6 @@ fn build_model_view() -> crate::ui::view::View {
     let l6 = vstack(vec![
         h1("L6 — Cross-cutting"),
         hstack(vec![
-            ok("[✓]"),
-            body("Theme: ThemeId + theme::current()"),
-        ]).hstack_gap(Length::Pt(6.0)),
-        hint("    AtomicU8 全局;组件都用 Dark 常量,current() 还没有读者"),
-        hstack(vec![
             todo_v2("[v2+]"),
             hint("    HighContrast + 真 theme swap redraw 钩子"),
         ]).hstack_gap(Length::Pt(6.0)),
@@ -1906,11 +1901,9 @@ fn build_l6_view() -> crate::ui::view::View {
         h::v2_row("真接 NSAccessibility(VoiceOver / 自动 AX tree)"),
 
         h::h2("Theme"),
-        h::done_row("ThemeId { Dark, Light, HighContrast }"),
-        h::sub("theme::current() / theme::set_current(id) — AtomicU8 全局"),
-        h::v2_row("按 current() 取色(现在组件都用 Dark 常量,Light / HC 只有下面几个样色)"),
+        h::v2_row("切换主题(现在组件都用 Dark 常量,Light / HC 只有下面几个样色)"),
         hstack(vec![
-            h::hint("    ThemeId::Dark = "),
+            h::hint("    Dark = "),
             filled(color::BG).corner_radius(radius::SM).frame(FrameSpec {
                 width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
                 ..Default::default()
@@ -1925,7 +1918,7 @@ fn build_l6_view() -> crate::ui::view::View {
             }),
         ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
         hstack(vec![
-            h::hint("    ThemeId::Light = "),
+            h::hint("    Light = "),
             filled(crate::ui::theme::color::light::BG).corner_radius(radius::SM).frame(FrameSpec {
                 width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
                 ..Default::default()
@@ -1941,7 +1934,7 @@ fn build_l6_view() -> crate::ui::view::View {
         ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
         h::done_row("HighContrast 样色(BG / ACCENT / FG)"),
         hstack(vec![
-            h::hint("    ThemeId::HighContrast = "),
+            h::hint("    HighContrast = "),
             filled(crate::ui::theme::color::hc::BG).corner_radius(radius::SM).frame(FrameSpec {
                 width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
                 ..Default::default()
@@ -1955,8 +1948,6 @@ fn build_l6_view() -> crate::ui::view::View {
                 ..Default::default()
             }),
         ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
-        h::done_row("真 theme swap redraw hook(theme::version() AtomicU64 counter)"),
-        h::sub("set_current(id) 自动 fetch_add;host redraw() 比对版本号 → request_redraw"),
 
         h::h2("Animation"),
         h::done_row("Anim<T> + Lerp + AnimCurve 5 curves(含 Spring)"),
@@ -1968,8 +1959,7 @@ fn build_l6_view() -> crate::ui::view::View {
             easing_demo(AnimCurve::Spring { bounce: 1.0 },  "Spring"),
         ]).hstack_gap(Length::Pt(14.0)).align_cross_start(),
         h::sub("Spring = damped-cosine 关闭式;真 ODE 弹簧 = v2+"),
-        h::done_row("AnimRegistry + tick(now) + any_active() — frame schedule"),
-        h::sub("AnimRegistry::start(dur) 注册;anim_tick(Instant::now()) 推进;anim_any_active() 触发 request_redraw"),
+        h::v2_row("动画按帧推进(还没有组件启动动画)"),
         h::sub("ShellApp::redraw 每帧 tick+gc;active 时连续 redraw,idle 时 0(兼容 idle CPU=0)"),
         h::v2_row("enter/exit 过渡动画(transition modifier)"),
 
