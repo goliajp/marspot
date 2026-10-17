@@ -157,9 +157,11 @@ disown "$LOAD_PID" 2>/dev/null || true
 cleanup_load() { kill "$LOAD_PID" 2>/dev/null; rm -f "/tmp/measure-idle-load.$$"; }
 trap cleanup_load EXIT
 
-T0=$(python3 -c 'import time; print(f"{time.monotonic():.3f}")')
+# Wall clock, not `time.monotonic()`: the system python on macOS counts
+# that from its own start, so two separate calls both read ~0.004.
+T0=$(python3 -c 'import time; print(f"{time.time():.3f}")')
 sleep "$WINDOW"
-T1=$(python3 -c 'import time; print(f"{time.monotonic():.3f}")')
+T1=$(python3 -c 'import time; print(f"{time.time():.3f}")')
 SECOND="$(sample)"
 kill "$LOAD_PID" 2>/dev/null
 wait "$LOAD_PID" 2>/dev/null
