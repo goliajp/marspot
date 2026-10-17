@@ -3441,13 +3441,15 @@ impl ShellApp {
     /// read live off the pane's shell rather than taken from the
     /// registry: the registry's copy is from spawn time and says the
     /// launch directory for every pane that has since cd'd somewhere.
+    /// Only a live session's shell is read: a dead one's pid may name
+    /// any process by now.
     fn live_panes(obs: &observe::Observation) -> Vec<(u64, String, String)> {
-        let cwd_of = |pid: i32| (pid > 1).then(|| marspot::pidtree::proc_cwd(pid)).flatten();
         obs.sessions
             .iter()
             .map(|s| {
                 let e = &s.entry;
-                let cwd = cwd_of(e.shell_child_pid).map(|p| p.to_string_lossy().into_owned());
+                let cwd = s.shell.and_then(|id| marspot::pidtree::proc_cwd(id.pid));
+                let cwd = cwd.map(|p| p.to_string_lossy().into_owned());
                 (e.id, cwd.unwrap_or_else(|| e.cwd.clone()), e.title.clone())
             })
             .collect()
