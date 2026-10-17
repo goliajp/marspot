@@ -67,6 +67,41 @@ pub(crate) fn resolve_cluster_glyph(
     entry
 }
 
+/// [`resolve_cluster_glyph`], into the colour atlas when the cluster's
+/// font is a colour one.  `(entry, is_color)`, as
+/// [`resolve_cell_glyph_routed`] returns.
+pub(crate) fn resolve_cluster_glyph_routed(
+    atlas: &mut GlyphAtlas,
+    color_atlas: &mut GlyphAtlas,
+    font: &mut FontCache,
+    text: &str,
+    bold: bool,
+    italic: bool,
+    metrics: SlotMetrics,
+) -> Option<(AtlasEntry, bool)> {
+    let base = marspot_term::grapheme::cluster_first_codepoint(text);
+    let (font_idx, _) = font.resolve_char(base, bold, italic);
+    if !font.is_color_font(font_idx) {
+        return resolve_cluster_glyph(atlas, font, text, bold, italic, metrics).map(|e| (e, false));
+    }
+    let n_cells = marspot_term::grapheme::cluster_width(text).max(1) as u16;
+    let key = crate::glyph_atlas::cluster_key(text, &metrics);
+    color_atlas
+        .get_or_insert_custom_raster(
+            key,
+            metrics.cell_w * n_cells as u32,
+            metrics.cell_h,
+            metrics.baseline_from_top,
+            n_cells,
+            |buf| {
+                if let Some(f) = font.font(font_idx) {
+                    crate::glyph_atlas::rasterise_cluster_color(text, &f, metrics, n_cells, buf);
+                }
+            },
+        )
+        .map(|e| (e, true))
+}
+
 pub(crate) fn resolve_cell_glyph(
     atlas: &mut GlyphAtlas,
     font: &mut FontCache,

@@ -63,6 +63,9 @@ use foreign_types::ForeignType;
 use marspot_term::fast_hash::FxHashMap;
 use std::ffi::c_void;
 
+mod cluster;
+pub use cluster::{rasterise_cluster, rasterise_cluster_color};
+
 /// `kCGImageAlphaOnly` — Apple's `CGImageAlphaInfo` value for an
 /// alpha-only bitmap context.  Not exposed as a constant by
 /// `core-graphics` 0.24, so we declare it directly (it's part of
@@ -730,7 +733,7 @@ impl GlyphAtlas {
             }
             return Some(*entry);
         }
-        let mut buf = vec![0u8; (w as usize) * (h as usize)];
+        let mut buf = vec![0u8; (w as usize) * (h as usize) * self.bpp as usize];
         rasterise(&mut buf);
         let (x, y, shelf_idx) = self.place_or_evict(w, h)?;
         self.upload(&buf, w, h, x, y);
@@ -913,83 +916,6 @@ struct Raster {
 ///
 /// Returns `None` only if the glyph has no ink (control char,
 /// .notdef-with-degenerate-bbox).
-/// Draw a whole grapheme cluster into an alpha bitmap.
-///
-/// `rasterise_glyph` takes a glyph id; a cluster is not a glyph.  It
-/// may be a base plus a mark the font anchors, a ZWJ sequence the font
-/// composed into one glyph, or a regional-indicator pair CoreText
-/// fuses — so the cluster is shaped and drawn by CoreText rather than
-/// looked up.
-///
-/// The bitmap is cell-sized (`n_cells` wide) because that is the space
-/// the cluster was measured to occupy; a cluster that overflows it is
-/// clipped rather than scaled, which is what happens to a glyph whose
-/// font disagrees with the width table and is the honest failure here
-/// too.
-pub fn rasterise_cluster(
-    text: &str,
-    font: &CTFont,
-    metrics: SlotMetrics,
-    n_cells: u16,
-    buf: &mut [u8],
-) -> bool {
-    use core_foundation::attributed_string::CFMutableAttributedString;
-    use core_foundation::base::{CFRange, TCFType};
-    use core_foundation::string::CFString;
-    use core_text::line::CTLine;
-    use core_text::string_attributes::kCTFontAttributeName;
-
-    let px_w = metrics.cell_w * n_cells.max(1) as u32;
-    let px_h = metrics.cell_h;
-    if buf.len() < (px_w as usize) * (px_h as usize) {
-        return false;
-    }
-
-    let cf_text = CFString::new(text);
-    let mut attr = CFMutableAttributedString::new();
-    attr.replace_str(&cf_text, CFRange::init(0, 0));
-    let len = attr.char_len();
-    unsafe {
-        attr.set_attribute(
-            CFRange::init(0, len),
-            kCTFontAttributeName,
-            &font.clone(),
-        );
-    }
-    let line = CTLine::new_with_attributed_string(attr.as_concrete_TypeRef());
-
-    let ctx = unsafe {
-        let raw = CGBitmapContextCreate(
-            buf.as_mut_ptr() as *mut c_void,
-            px_w as usize,
-            px_h as usize,
-            8,
-            px_w as usize,
-            std::ptr::null_mut(),
-            KCGIMAGE_ALPHA_ONLY,
-        );
-        if raw.is_null() {
-            return false;
-        }
-        CGContext::from_ptr(raw)
-    };
-    ctx.set_should_antialias(true);
-    ctx.set_allows_antialiasing(true);
-    ctx.set_should_smooth_fonts(true);
-    ctx.set_allows_font_smoothing(true);
-    ctx.set_should_subpixel_position_fonts(true);
-    ctx.set_allows_font_subpixel_positioning(true);
-    ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
-    ctx.set_gray_fill_color(1.0, 1.0);
-
-    // The bitmap's origin is bottom-left and the baseline is measured
-    // from the top, same as every other raster here.
-    let baseline_from_bottom = px_h.saturating_sub(metrics.baseline_from_top) as f64;
-    ctx.set_text_position(0.0, baseline_from_bottom);
-    unsafe { CTLineDraw(line.as_concrete_TypeRef() as *const c_void, ctx.as_ptr()) };
-    true
-}
-
 fn rasterise_glyph(
     font: &CTFont,
     glyph: CGGlyph,
