@@ -42,6 +42,7 @@ use marspot::shell_proto::{
 mod banner;
 mod launch;
 mod cli_socket;
+mod pane_decls;
 mod pane_status;
 mod plugins;
 mod present;
@@ -72,7 +73,7 @@ const FRESH_H_PT: f64 = 600.0;
 // it after queueing an op.  What is left on this timer is polling, and
 // the fastest poller is the pane sweep at one second
 // (`pane_status::SWEEP_INTERVAL`); the plugins want two, the core
-// healthcheck five, the stale-present net five, autorun thirty.
+// healthcheck five, autorun thirty.
 //
 // So the timer runs at the rate of its fastest consumer and no faster.
 // It was 250 ms, which is four wakes for every one that anything
@@ -83,7 +84,8 @@ const FRESH_H_PT: f64 = 600.0;
 // blind 60 Hz present.
 //
 // The floor on how slow this may go is the pane sweep, not the
-// present: presents ride the poke, and the stale net is five seconds.
+// present: presents ride the poke, and a present that did not happen
+// is retried on the next wake (see `frame_pending`).
 const REDRAW_INTERVAL_MS: u64 = 1_000;
 
 /// Frames the reader thread parses off the control socket and hands
@@ -163,8 +165,9 @@ const PONG_DEADLINE: Duration = Duration::from_secs(15);
 /// accuses anyone else of being asleep.  Deadlines are handed the gap
 /// back rather than charged for it.
 ///
-/// Nominal cadence is ~250 ms, so one ping interval is 20× nominal:
-/// far outside ordinary jitter, far inside a real hang.
+/// Nominal cadence is the 1 s redraw pump (`REDRAW_INTERVAL_MS`), so
+/// one ping interval is 5× nominal: far outside ordinary jitter, far
+/// inside a real hang.
 const SUPERVISOR_STALL_GAP: Duration = PING_INTERVAL;
 /// Crash-budget window.  More than `MAX_CRASHES_IN_WINDOW` in this
 /// span and we stop auto-restarting (binary is broken; user needs
@@ -293,7 +296,8 @@ struct CoreConn {
 impl CoreConn {
     /// Write a frame to this core.  Logs and drops on EPIPE; a core
     /// dying mid-session is the supervisor's problem, not this path's.
-    fn send(&self, msg_type: MsgType, payload: Vec<u8>) {
+    /// True when the frame was written.
+    fn send(&self, msg_type: MsgType, payload: Vec<u8>) -> bool {
         let frame = Frame::new(msg_type, payload);
         let mut stream = match self.control_tx.lock() {
             Ok(g) => g,
@@ -305,7 +309,9 @@ impl CoreConn {
                 &format!("{e}"),
                 msg_type = format!("{:?}", msg_type)
             );
+            return false;
         }
+        true
     }
 
     /// Drop the control socket (clean EOF for the core's read side),
@@ -435,30 +441,29 @@ struct ShellWindow {
     /// per-frame ack that the IOSurface has been fully written +
     /// waitUntilCompleted'd).  Cleared by `redraw` after `present()`.
     ///
-    /// Why: the 250 ms safety-net timer in `start_redraw_pump`
-    /// wakes the AppKit redraw callback unconditionally — if the
-    /// callback then samples the IOSurface, it can land MID-RENDER
-    /// (between core's BG pass and FG glyph pass), producing the
-    /// frequent "all 9 panes' contents momentarily disappear and
-    /// reappear" flash documented in the 2026-06-15 debugging.
-    /// Gating presents on FrameRendered means the safety-net timer
-    /// only forces a present when a frame is actually new *and*
-    /// AppKit hasn't already picked it up via the poke fast-path.
-    /// `safety_present_after` below provides the real safety net
-    /// for genuinely-missed pokes.
-    frame_pending: bool,
-    /// Wall-clock time of this window's last `present()`.  Combined
-    /// with `frame_pending`: when the redraw callback runs and no
-    /// fresh frame is pending, we ALSO force a present if too long has
-    /// elapsed — covers the pathological "core froze mid-render and no
-    /// future poke is coming" case where waiting for FrameRendered
-    /// would freeze the window.
+    /// Why: the redraw pump (`start_redraw_pump`) wakes the AppKit
+    /// redraw callback unconditionally — if the callback then samples
+    /// the IOSurface, it can land MID-RENDER (between core's BG pass
+    /// and FG glyph pass), producing the frequent "all 9 panes'
+    /// contents momentarily disappear and reappear" flash documented in
+    /// the 2026-06-15 debugging.  So a window is presented only when
+    /// this is set: a new frame, or a banner change (`refresh_banner`),
+    /// which is drawn by the presenter and has no frame of its own.
+    /// It stays set when `present()` could not draw (no drawable), so
+    /// the next wake tries again.  A poke the main thread missed is not
+    /// lost either: every wake drains the core's inbox first.
     ///
-    /// Per window, because the net is per window: held on `ShellApp`,
-    /// a window painting at 60 Hz kept the timestamp permanently fresh
-    /// and no OTHER window could ever look stale — so the one that
-    /// actually froze never got its forced present.
-    last_present_at: Option<Instant>,
+    /// There used to be a second net here, a present every 5 s with
+    /// nothing pending, for "core froze mid-render and no poke is
+    /// coming".  A frozen core is the PONG deadline's to catch, and
+    /// presenting the same surface again shows nothing new; what that
+    /// net really covered was the skipped present and the banner, both
+    /// handled above.  Each spurious present made WindowServer
+    /// composite again.
+    frame_pending: bool,
+    /// Whether this window has been presented once, for the one-line
+    /// `WINDOW_FIRST_PRESENT` log.
+    presented: bool,
     /// Dev seam only: this window is to be closed again as soon as it
     /// has painted (`MARSPOT_DEV_CLOSE_EXTRA`).  Latched so the close
     /// runs once.
@@ -586,7 +591,7 @@ impl ShellWindow {
             first_frame_ready: false,
             frame_pending: false,
             dev_close_after_paint: false,
-            last_present_at: None,
+            presented: false,
             last_saved_window: None,
             last_attached: None,
             skipped_resizes: 0,
@@ -733,8 +738,9 @@ struct ShellApp {
     plugin_host: ShellPluginHost,
     plugin_registry: PluginRegistry,
     /// When the supervisor last drove plugin ticks.  Coarse — the
-    /// supervisor itself runs at ~250 ms, plugins requesting < 250 ms
-    /// just see the supervisor cadence.  Their per-plugin interval
+    /// supervisor runs on the 1 s redraw pump plus whatever knocks it
+    /// (core frames, queued plugin work), so a plugin asking for less
+    /// than a second gets the supervisor's cadence.  Their per-plugin interval
     /// gating lives in the registry.
     last_plugin_tick: Instant,
     /// Generic per-pane foreground status (shell at prompt / job
@@ -743,9 +749,9 @@ struct ShellApp {
     /// The pane-status layer that knows about specific programs lives
     /// in the plugins on top of this one.
     pane_status: pane_status::PaneStateTracker,
-    /// Last recede level sent to L2 per session, so the frame goes out
-    /// on change rather than every sweep.
-    pane_recede: std::collections::HashMap<u64, u32>,
+    /// Recede level, badge and title per session, sent to the core on
+    /// change and all again to a new core.
+    pane_look: pane_decls::PaneLook,
     /// Plugin → shell reports of what the program in a pane is doing.
     /// Drained at the top of each supervisor tick, straight into the
     /// state machines.  Same shape as the badge channel: plugins push,
@@ -759,9 +765,7 @@ struct ShellApp {
     pane_wheel_keys_rx: std::sync::mpsc::Receiver<plugins::host::PaneWheelKeysUpdate>,
     /// The wheel declarations currently in force, by pane.
     ///
-    /// Badges are re-issued by their plugin every tick, so a frame
-    /// dropped while no core is attached costs one tick.  A wheel
-    /// declaration is issued ONCE per pane — a plugin says "this is
+    /// A wheel declaration is issued ONCE per pane — a plugin says "this is
     /// how the wheel reaches me" and has nothing to repeat.  Dropping
     /// that one frame left the pane with no wheel keys for the rest of
     /// its life, and it landed exactly in the gap a core swap opens
@@ -811,10 +815,6 @@ struct ShellApp {
     /// Receiver for cc-plugin inject-input requests; drained each tick
     /// and forwarded to the active core as `MsgType::InjectInput` frames.
     inject_input_rx: std::sync::mpsc::Receiver<plugins::host::InjectInputRequest>,
-    /// Sender clone of the badge channel — held so PaneSession host
-    /// helpers can push set_badge updates without re-importing the
-    /// channel from inside ShellApp methods.
-    pane_badge_tx_clone: std::sync::mpsc::Sender<plugins::host::PaneBadgeUpdate>,
     /// Active PaneSessions held by L1 plugins, keyed by shelld
     /// session_id.  At most one per pane.
     active_pane_sessions:
@@ -895,13 +895,14 @@ struct ActivePaneSession {
 }
 
 /// Concrete `PaneSessionHost` constructed per-dispatch; lives only
-/// for the duration of one plugin callback.  set_badge → channel,
-/// end → flips a `Cell` the main-loop checks after the callback
-/// returns.  log → logx via the plugin namespace.
+/// for the duration of one plugin callback.  set_badge → the plugin
+/// host's badge path (the same change check a plugin's badge goes
+/// through), end → flips a `Cell` the main-loop checks after the
+/// callback returns.  log → logx via the plugin namespace.
 struct ConcretePaneSessionHost<'a> {
     sid: u64,
     plugin_name: &'static str,
-    badge_tx: &'a std::sync::mpsc::Sender<plugins::host::PaneBadgeUpdate>,
+    plugin_host: &'a ShellPluginHost,
     end_requested: &'a std::cell::Cell<bool>,
 }
 
@@ -913,10 +914,7 @@ impl<'a> plugins::PaneSessionHost for ConcretePaneSessionHost<'a> {
         self.end_requested.set(true);
     }
     fn set_badge(&self, text: &str) {
-        let _ = self.badge_tx.send(plugins::host::PaneBadgeUpdate {
-            shelld_session_id: self.sid,
-            text: text.to_string(),
-        });
+        self.plugin_host.send_pane_badge(self.sid, text);
     }
     fn log(&self, level: plugins::LogLevel, tag: &str, msg: &str) {
         let composed = format!("plugin.{}.{}", self.plugin_name, tag);
@@ -1178,7 +1176,6 @@ impl ShellApp {
         let (pane_wheel_keys_tx, pane_wheel_keys_rx) = std::sync::mpsc::channel();
         let (pane_agent_tui_tx, pane_agent_tui_rx) = std::sync::mpsc::channel();
         let (pane_render_markup_tx, pane_render_markup_rx) = std::sync::mpsc::channel();
-        let pane_badge_tx_clone = pane_badge_tx.clone();
         let (pane_title_tx, pane_title_rx) = std::sync::mpsc::channel();
         let (pane_session_begin_tx, pane_session_begin_rx) = std::sync::mpsc::channel();
         let pane_session_begin_tx_for_ops = pane_session_begin_tx.clone();
@@ -1268,7 +1265,7 @@ impl ShellApp {
             },
             plugin_registry: PluginRegistry::new(),
             last_plugin_tick: Instant::now() - Duration::from_secs(1),
-            pane_recede: std::collections::HashMap::new(),
+            pane_look: pane_decls::PaneLook::new(),
             pane_status: {
                 // Idle is a property of the pane, not of this process:
                 // pick up the clocks the previous image left so a
@@ -1312,7 +1309,6 @@ impl ShellApp {
             )
             .with_receipts(Some(std::sync::Arc::clone(&receipts))),
             inject_input_rx,
-            pane_badge_tx_clone,
             active_pane_sessions: std::collections::HashMap::new(),
             dev_panel: marspot::ui::components::DevPanelState::default(),
             last_saved_dev_window: None,
@@ -2080,6 +2076,10 @@ impl ShellApp {
                 lx_warn!("shell.set_banner_failed", &e.to_string());
                 return;
             }
+            // The banner is drawn by the presenter, so with no core
+            // frames coming (the core is what the banner is about) it
+            // shows only if this window is presented for it.
+            w.frame_pending = true;
         }
         self.banner_kind = want;
     }
@@ -2136,11 +2136,7 @@ impl ShellApp {
             // what each pane has already been told has to go with the old
             // one -- see `ShellPluginHost::declared`.
             self.plugin_host.forget_declarations();
-            // A fresh core knows nothing about the panes, so the memo of
-        // what each pane has already been told has to go with the old
-        // one -- see `ShellPluginHost::declared`.
-        self.plugin_host.forget_declarations();
-        self.active = self.spawn_core(front_id, back_id, w_px, h_px, scale);
+            self.active = self.spawn_core(front_id, back_id, w_px, h_px, scale);
             if self.active.is_some() {
                 self.record_core_boot();
                 self.announce_windows_to_new_core(ctx);
@@ -2307,12 +2303,7 @@ impl ShellApp {
                 continue;
             }
             let level = pane_status::recede_level_for(status, *held);
-            if self.pane_recede.get(sid).copied() != Some(level) {
-                self.pane_recede.insert(*sid, level);
-                self.send(
-                    MsgType::PaneRecede,
-                    marspot::shell_proto::encode_pane_recede(*sid, level),
-                );
+            if self.pane_look.recede.declare(*sid, level) {
                 // On change only — a pane that stays rested for an
                 // hour is one line, not one per second.  Worth having:
                 // "the pane looks wrong" is otherwise unanswerable
@@ -2327,12 +2318,28 @@ impl ShellApp {
                 );
             }
         }
-        self.pane_recede.retain(|sid, _| snapshot.contains_key(sid));
+        // Closed panes leave every per-pane table here, against the
+        // same map the plugin host drops its memo by: a repeat the host
+        // swallows must be one these tables still hold.
+        self.pane_look.retain(|sid| snapshot.contains_key(&sid));
         self.plugin_host.publish_pane_status(snapshot);
+        self.flush_pane_decls();
     }
 
-    /// Periodic check.  Fired from `user_event` (which runs every
-    /// 16 ms via the redraw pump).  Responsibilities:
+    /// Send the current core every badge, title and recede level it
+    /// has not been sent.  Nothing goes to a core before its HelloAck:
+    /// that is where `core_replaced` marks everything pending, and a
+    /// frame written before it would only be written again.
+    fn flush_pane_decls(&mut self) {
+        let Some(conn) = self.active.as_ref().filter(|c| c.hello_acked) else {
+            return;
+        };
+        self.pane_look.flush(|t, payload| conn.send(t, payload));
+    }
+
+    /// Periodic check.  Fired from `user_event`, which runs on every
+    /// wake: the 1 s redraw pump, a core frame, a plugin's knock.
+    /// Responsibilities:
     ///
     ///   1. If the *active* (visible) core died → restart it (and
     ///      abandon any in-flight update).
@@ -2343,8 +2350,8 @@ impl ShellApp {
     ///      deadline — unchanged, but scoped to `active` only.
     ///   6. SIGUSR1 manual trigger; 7. banner refresh.
     fn poll_supervisor(&mut self, ctx: &MarspotAppCtx) {
-        // Plugin tick — runs at the supervisor cadence (~250 ms via
-        // start_redraw_pump), each plugin further gates by its own
+        // Plugin tick — runs at the supervisor cadence (1 s pump plus
+        // knocks, see `user_event`), each plugin further gates by its own
         // tick_interval_ms.  Cheap when no plugin needs to tick.
         // last_plugin_tick is reserved for future "supervisor-level
         // throttle" — MVP doesn't gate here, the registry handles it.
@@ -2353,8 +2360,9 @@ impl ShellApp {
         // them, then step the machines, and only then tick the plugins
         // — which read the fresh state back through the host.
         // Phase timing, off unless MARSPOT_SUPERVISOR_PROFILE=1.  See
-        // `supervisor_profile`: this runs four times a second forever,
-        // so what it costs per wake is what the app costs at idle.
+        // `supervisor_profile`: this runs at least once a second
+        // forever, so what it costs per wake is what the app costs at
+        // idle.
         let prof = supervisor_profile::on();
         let mut mark = std::time::Instant::now();
         macro_rules! lap {
@@ -2540,31 +2548,12 @@ impl ShellApp {
             self.send_pane_wheel_keys(&upd);
         }
         while let Ok(upd) = self.pane_badge_rx.try_recv() {
-            if let Some(conn) = self.active.as_ref() {
-                conn.send(
-                    MsgType::PaneBadge,
-                    marspot::shell_proto::encode_pane_badge(
-                        upd.shelld_session_id,
-                        &upd.text,
-                    ),
-                );
-            }
-            // No active core → drop silently.  Plugin re-pushes every
-            // tick so the next valid core will pick it up.
+            self.pane_look.badges.declare(upd.shelld_session_id, upd.text);
         }
-
-        // Same shape for plugin-set pane titles.
         while let Ok(upd) = self.pane_title_rx.try_recv() {
-            if let Some(conn) = self.active.as_ref() {
-                conn.send(
-                    MsgType::PaneTitle,
-                    marspot::shell_proto::encode_pane_title(
-                        upd.shelld_session_id,
-                        &upd.text,
-                    ),
-                );
-            }
+            self.pane_look.titles.declare(upd.shelld_session_id, upd.text);
         }
+        self.flush_pane_decls();
 
         // Drain cc inject-input requests onto the active core's
         // control socket as InjectInput frames; L2 routes by
@@ -2599,7 +2588,7 @@ impl ShellApp {
                             req.session_id,
                         ),
                     ),
-                }
+                };
             }
         }
 
@@ -3238,6 +3227,10 @@ impl ShellApp {
                     lx_event!("HELLO_ACK", "core handshake OK", v = v);
                     sup_log::log("HELLO_ACK", &format!("v={v}"));
                     self.replay_pane_wheel_keys();
+                    // Every core that becomes the active one comes
+                    // through here (boot, restart, update swap).
+                    self.pane_look.core_replaced();
+                    self.flush_pane_decls();
                 } else {
                     lx_event!(
                         "HELLO_MISMATCH",
@@ -3463,7 +3456,7 @@ impl ShellApp {
             let host = ConcretePaneSessionHost {
                 sid,
                 plugin_name: self.active_pane_sessions[&sid].plugin_name,
-                badge_tx: &self.pane_badge_tx_clone,
+                plugin_host: &self.plugin_host,
                 end_requested: &end_flag,
             };
             if let Some(active) = self.active_pane_sessions.get_mut(&sid) {
@@ -3864,7 +3857,7 @@ impl ShellApp {
         let host = ConcretePaneSessionHost {
             sid,
             plugin_name,
-            badge_tx: &self.pane_badge_tx_clone,
+            plugin_host: &self.plugin_host,
             end_requested: &end_flag,
         };
         active.session.on_focus(&host);
@@ -3886,7 +3879,7 @@ impl ShellApp {
         let host = ConcretePaneSessionHost {
             sid,
             plugin_name,
-            badge_tx: &self.pane_badge_tx_clone,
+            plugin_host: &self.plugin_host,
             end_requested: &end_flag,
         };
         let handling = active.session.on_user_key(&host, &ev);
@@ -3909,7 +3902,7 @@ impl ShellApp {
         let host = ConcretePaneSessionHost {
             sid,
             plugin_name,
-            badge_tx: &self.pane_badge_tx_clone,
+            plugin_host: &self.plugin_host,
             end_requested: &end_flag,
         };
         active.session.on_end(&host, reason);
@@ -4791,7 +4784,6 @@ impl MarspotApp for ShellApp {
         // window's SECOND root cause).  Same class of bug as the L2
         // render pass before step 4d: a per-window duty attached to
         // one window.
-        let now = Instant::now();
         for wi in 0..self.windows.len() {
             // Hold off until the core has written real content into
             // this window's pair.  Without this gate the user sees an
@@ -4800,30 +4792,20 @@ impl MarspotApp for ShellApp {
             if !self.windows[wi].first_frame_ready {
                 continue;
             }
-            // Gate on a fresh frame actually pending.  See the
-            // `frame_pending` field doc — the safety-net 250 ms timer
-            // wakes this callback unconditionally, and sampling the
-            // IOSurface on every tick races the core's mid-render
-            // state (the historical all-panes flash).
-            //
-            // Stale safety net: if it's been a long while since this
-            // window's last present (core stuck but alive — no future
-            // poke coming), force one so the window doesn't freeze.
-            // Threshold deliberately wide (5 s): every spurious
-            // present makes WindowServer composite again, and sub-LSB
-            // alpha rounding reads as a faint background pulse at 1 Hz.
-            let stale = self.windows[wi]
-                .last_present_at
-                .map(|t| now.duration_since(t) > Duration::from_secs(5))
-                .unwrap_or(true);
-            if !self.windows[wi].frame_pending && !stale {
+            // Only when something new is pending — see the
+            // `frame_pending` field doc.  Every present makes
+            // WindowServer composite again, and sub-LSB alpha rounding
+            // reads as a faint background pulse.
+            if !self.windows[wi].frame_pending {
                 continue;
             }
             if let Some(p) = self.windows[wi].presenter.as_mut() {
-                p.present();
+                if !p.present() {
+                    continue;
+                }
                 self.windows[wi].frame_pending = false;
-                let first = self.windows[wi].last_present_at.is_none();
-                self.windows[wi].last_present_at = Some(now);
+                let first = !self.windows[wi].presented;
+                self.windows[wi].presented = true;
                 // One INFO per window per boot: the present-side
                 // mirror of the core's WINDOW_FIRST_FRAME.  The chain
                 // "painted → pair installed → presenter exists" logged
@@ -5285,10 +5267,11 @@ Usage:\n\
 
 /// Where the supervisor's wake goes, when anyone asks.
 ///
-/// The supervisor wakes four times a second forever (`start_redraw_pump`),
-/// and at idle that is the only thing waking it -- so whatever it costs
-/// per wake is multiplied by four and paid for as long as the app is
-/// open.  On a machine with seventeen panes the process was measured at
+/// The supervisor wakes at least once a second forever
+/// (`start_redraw_pump`; four times a second when the numbers below were
+/// taken), and at idle that is the only thing waking it -- so whatever
+/// it costs per wake is paid on every one of those wakes for as long as
+/// the app is open.  On a machine with seventeen panes the process was measured at
 /// 4.4% of a core while all seventeen panes together used 1.1%, and no
 /// instrument said where it went.
 ///
