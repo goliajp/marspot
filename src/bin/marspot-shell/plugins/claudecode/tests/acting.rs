@@ -19,7 +19,9 @@ fn a_cycle_checks_for_a_claude_right_before_typing() {
 }
 
 /// The automatic move waits while claude has work of its own running,
-/// whatever the transcript says, and goes once it has none.
+/// whatever the transcript says, and goes once it has none -- or once
+/// the pane has been stranded for as long as a running tool may hold
+/// it: work in the background can outlive any wait.
 #[test]
 fn a_quota_move_waits_for_work_in_flight() {
     let home = quota_home("inflight");
@@ -40,6 +42,26 @@ fn a_quota_move_waits_for_work_in_flight() {
 
     sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::AwaitingUser));
     assert_eq!(host.submitted.lock().unwrap().len(), 1, "nothing in flight: it moves");
+}
+
+#[test]
+fn work_in_the_background_holds_a_spent_pane_only_for_a_while() {
+    let home = quota_home("inflight-bound");
+    let host = FakeHost::new(home.join("state"));
+    let sid = 78u64;
+    let mut plugin = stranded_plugin(pane_on_p1(&home, "u-78"), sid);
+
+    let mut busy = scan_of(sid, CcActivity::AwaitingUser);
+    busy.new_vetoes.insert(sid, (true, false));
+    sweep(&mut plugin, &host, &mut busy);
+    assert!(host.submitted.lock().unwrap().is_empty(), "held at first");
+
+    let tally = plugin.stranded.get_mut(&sid).expect("stranded");
+    tally.since = std::time::Instant::now() - quota::TOOL_HOLD_MAX - std::time::Duration::from_secs(1);
+    let mut still_busy = scan_of(sid, CcActivity::AwaitingUser);
+    still_busy.new_vetoes.insert(sid, (true, false));
+    sweep(&mut plugin, &host, &mut still_busy);
+    assert_eq!(host.submitted.lock().unwrap().len(), 1, "past the bound it moves, work or not");
 }
 
 /// A pane bound to a claude that has since been replaced is not moved:
