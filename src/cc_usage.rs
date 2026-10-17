@@ -880,7 +880,11 @@ mod tests {
         assert_eq!(read(), None, "no feed written yet");
 
         let path = feed_path();
-        assert!(path.starts_with(home.path()), "{}", path.display());
+        assert_eq!(
+            path,
+            home.join(".local/state/devops/claude-usage.json"),
+            "where the collector writes it"
+        );
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, NESTED_FEED).unwrap();
         let u = read().expect("the feed under HOME parses");
