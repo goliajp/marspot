@@ -536,6 +536,12 @@ pub enum MsgType {
     /// process that has no window.  Older images skip the unknown
     /// msg_type, which costs a clipboard write and nothing else.
     PaneClipboardWrite = 83,
+    /// L2 → L3: whether this pane has the keyboard — the focused pane
+    /// of the key window of an active app.  Sent on change.  A program
+    /// that turned on focus reporting (DEC 1004) is told with `CSI I` /
+    /// `CSI O`; the terminal that knows the mode lives in L3.  Older
+    /// images skip the unknown msg_type, as they always did.
+    PaneTerminalFocus = 84,
     /// Put this pane's pen back to plain — what `reset` does, for a
     /// pane whose program is never going to send one.
     ///
@@ -619,6 +625,7 @@ impl MsgType {
             81 => MsgType::PaneResetAttrs,
             82 => MsgType::PaneAgentTui,
             83 => MsgType::PaneClipboardWrite,
+            84 => MsgType::PaneTerminalFocus,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1819,6 +1826,24 @@ pub fn decode_pane_reset_mouse_reporting(payload: &[u8]) -> io::Result<u64> {
         ));
     }
     Ok(u64::from_le_bytes(payload.try_into().unwrap()))
+}
+
+/// PaneTerminalFocus payload: `session_id u64 LE, focused u8`.
+pub fn encode_pane_terminal_focus(session_id: u64, focused: bool) -> Vec<u8> {
+    let mut v = Vec::with_capacity(9);
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.push(focused as u8);
+    v
+}
+
+pub fn decode_pane_terminal_focus(payload: &[u8]) -> io::Result<(u64, bool)> {
+    if payload.len() != 9 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_terminal_focus payload != 9 bytes",
+        ));
+    }
+    Ok((u64::from_le_bytes(payload[0..8].try_into().unwrap()), payload[8] != 0))
 }
 
 /// PaneHoldGrid payload: `session_id u64 LE, on u8` (1 = hold).
@@ -3640,6 +3665,16 @@ mod tests {
             MsgType::from_u32(78),
             Some(MsgType::PaneResetMouseReporting)
         );
+    }
+
+    #[test]
+    fn pane_terminal_focus_roundtrip() {
+        for focused in [true, false] {
+            let p = encode_pane_terminal_focus(7, focused);
+            assert_eq!(decode_pane_terminal_focus(&p).unwrap(), (7, focused));
+        }
+        assert!(decode_pane_terminal_focus(&[0u8; 8]).is_err());
+        assert_eq!(MsgType::from_u32(84), Some(MsgType::PaneTerminalFocus));
     }
 
     #[test]
