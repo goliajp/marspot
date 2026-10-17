@@ -78,7 +78,9 @@ pub fn menu_rows(from: Agent) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
 #[derive(Debug, Clone)]
 pub struct Leaving {
     pub agent: Agent,
-    pub pid: i32,
+    /// The process taken down: named by pid and start time, so the
+    /// switch stops this one and never a process that took its pid.
+    pub proc: marspot::pidtree::ProcId,
     pub shell_pid: i32,
     /// `CLAUDE_CONFIG_DIR` / `CODEX_HOME` it runs under.
     pub home: PathBuf,
@@ -146,11 +148,8 @@ fn prepare(sid: u64, dir: &Path, leaving: &Leaving, to: Agent, resume: Option<&s
     -> Result<Outcome, String>
 {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let live: Vec<u64> = marspot_term::session_registry::list_session_entries()
-        .into_iter()
-        .map(|e| e.id)
-        .chain(std::iter::once(sid))
-        .collect();
+    let obs = crate::observe::shared().latest();
+    let live: Vec<u64> = obs.sessions.iter().map(|s| s.entry.id).chain(std::iter::once(sid)).collect();
     ledger::prune(dir, &live);
     prepare_in(sid, dir, leaving, to, resume, ledger, history_of(leaving))
 }
@@ -249,7 +248,7 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
             .step(Step::settle(Duration::from_millis(250)).named("hold_settle"))
             .step(Step::await_job(Arc::clone(&job)).timeout(PREPARE_TIMEOUT).named("write_handoff"))
             .step(
-                Step::terminate(leaving.pid, libc::SIGTERM)
+                Step::terminate(leaving.proc, libc::SIGTERM)
                     .escalate_after(Duration::from_secs(3), libc::SIGKILL),
             )
             .step(Step::send(line).named("start_target"))
@@ -329,7 +328,7 @@ mod tests {
     fn leaving_claude(home: &Path, uuid: &str) -> Leaving {
         Leaving {
             agent: Agent::Claude,
-            pid: 1,
+            proc: marspot::pidtree::ProcId { pid: 1, start_us: 0 },
             shell_pid: 1,
             home: home.to_path_buf(),
             session_id: Some(uuid.into()),
