@@ -169,18 +169,31 @@ pub(crate) fn try_resume_handoff() -> Option<L3Handoff> {
 /// Read the MARSPOT_FP=<sha>|<ts>|END rodata marker out of a binary.
 /// Used by the SIGTERM handler to decide between execv-handoff and
 /// user-quit cleanup.
+///
+/// The first well-formed marker, not the first `MARSPOT_FP=`: the
+/// needle below is itself in the binary's rodata, and where the linker
+/// puts it decides which comes first.  A release build merges the two;
+/// a debug build lays the needle out on its own ahead of the marker,
+/// and reading from there found no fingerprint at all, so a debug L3
+/// never handed over.
 fn read_binary_fingerprint(path: &Path) -> Option<String> {
-    use std::io::Read;
-    let mut f = std::fs::File::open(path).ok()?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).ok()?;
+    let buf = std::fs::read(path).ok()?;
     let needle = b"MARSPOT_FP=";
-    let start = buf.windows(needle.len()).position(|w| w == needle)?;
-    let tail = &buf[start..];
-    let end_off = tail.windows(4).position(|w| w == b"|END")?;
-    std::str::from_utf8(&tail[..end_off])
-        .ok()
-        .map(|s| s.to_string())
+    let mut from = 0;
+    while let Some(at) = buf[from..].windows(needle.len()).position(|w| w == needle) {
+        let start = from + at;
+        let tail = &buf[start..buf.len().min(start + 256)];
+        let marker = tail
+            .windows(4)
+            .position(|w| w == b"|END")
+            .and_then(|end| std::str::from_utf8(&tail[..end]).ok())
+            .filter(|s| s[needle.len()..].bytes().all(|b| b.is_ascii_graphic()));
+        if let Some(s) = marker {
+            return Some(s.to_string());
+        }
+        from = start + needle.len();
+    }
+    None
 }
 
 /// On SIGTERM, decide whether to execv (binary update) or clean-exit
@@ -405,6 +418,23 @@ mod tests {
         assert!(execv_wanted(&other, me), "a different build is an update");
         assert!(!execv_wanted(&none, me), "an unmarked file is not a build");
         assert!(!execv_wanted(&dir.join("absent"), me), "nothing staged");
+    }
+
+    /// A debug build holds the bare needle ahead of the marker, with
+    /// unrelated rodata after it; the fingerprint is the marker behind.
+    #[test]
+    fn the_marker_is_found_behind_a_stray_needle() {
+        let dir = TempDir::new("handoff-fp");
+        let p = dir.join("debug-layout");
+        let mut body = b"MARSPOT_FP=marspot-sessionthere is no such thing\x12\xff\xfe".to_vec();
+        body.extend(std::iter::repeat_n(0u8, 4096));
+        body.extend_from_slice(b"MARSPOT_FP=unknown|2026-10-17T15:27:04|ENDMARSPOT_LAYER_VERS=x");
+        std::fs::write(&p, body).unwrap();
+        assert_eq!(
+            read_binary_fingerprint(&p).as_deref(),
+            Some("MARSPOT_FP=unknown|2026-10-17T15:27:04")
+        );
+        assert!(execv_wanted(&p, "MARSPOT_FP=other|2026-10-17T15:27:04|END"));
     }
 
     /// The marker read out of the file stops before `|END` and the
