@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use crate::plugins::{EndReason, KeyHandling, LogLevel, PaneSession, PaneSessionHost};
-use marspot::pidtree;
+use marspot::pidtree::{self, ProcId, SignalError};
 
 pub use super::pty_command::{PtyCommand, quotable, shell_safe};
 
@@ -68,10 +68,12 @@ pub trait PtyIo: Send + Sync {
 pub trait OpEnv: Send {
     fn io(&self) -> &Arc<dyn PtyIo>;
     fn now(&self) -> SystemTime;
-    fn signal(&self, pid: i32, sig: i32);
-    fn pid_alive(&self, pid: i32) -> bool;
+    /// Signal the process `id` names and no other; `Gone` when its pid
+    /// now names another process or none.
+    fn signal(&self, id: ProcId, sig: i32) -> Result<(), SignalError>;
+    fn pid_alive(&self, id: ProcId) -> bool;
     /// A descendant of `under` matching `pred`, if any.
-    fn find_descendant(&self, under: i32, pred: fn(&pidtree::ProcRow) -> bool) -> Option<i32>;
+    fn find_descendant(&self, under: i32, pred: fn(&pidtree::ProcRow) -> bool) -> Option<ProcId>;
     /// Bytes this pane's PTY has produced, ever.  Monotone; only the
     /// differences matter.
     fn output_len(&self, sid: u64) -> u64;
@@ -130,7 +132,9 @@ pub enum StepKind {
     /// to find it and a reader had to know the two were a pair.  They
     /// are one thing — "make this process go away" — and every caller
     /// used them together.
-    Terminate { pid: i32, signal: i32, escalate: Option<(Duration, i32)>, sent: bool },
+    /// Named by `ProcId`, so a pid recycled since the decision is never
+    /// signalled: the step then ends as already gone.
+    Terminate { target: ProcId, signal: i32, escalate: Option<(Duration, i32)>, sent: bool },
     /// Wait for a descendant of `under` to match.
     AwaitProcess { under: i32, matching: fn(&pidtree::ProcRow) -> bool },
     /// Finish the run early, successfully, if the process is already
@@ -374,10 +378,10 @@ impl Step {
     pub fn settle(d: Duration) -> Self {
         Self { kind: StepKind::Settle, timeout: Some(d), proceed_on_timeout: false, label: "settle" }
     }
-    /// Signal `pid` and wait for it to leave the process table.
-    pub fn terminate(pid: i32, signal: i32) -> Self {
+    /// Signal `target` and wait for it to leave the process table.
+    pub fn terminate(target: ProcId, signal: i32) -> Self {
         Self {
-            kind: StepKind::Terminate { pid, signal, escalate: None, sent: false },
+            kind: StepKind::Terminate { target, signal, escalate: None, sent: false },
             timeout: Some(Duration::from_secs(10)),
             proceed_on_timeout: false,
             label: "terminate",
@@ -592,7 +596,13 @@ pub struct PtyOp {
     pub escape_hatch: bool,
     /// Badge while running; a spinner is appended.
     pub badge: Option<String>,
+    /// Told how the run ended: the submitter's own channel back, since
+    /// the queue's reports go to whoever owns the queue.
+    pub on_end: Option<OnEnd>,
 }
+
+/// See [`PtyOp::on_end`].
+pub type OnEnd = Arc<dyn Fn(&OpOutcome) + Send + Sync>;
 
 impl PtyOp {
     /// Where the step called `label` sits, for a run that has to
@@ -617,7 +627,12 @@ impl PtyOp {
             lock_keys: true,
             escape_hatch: true,
             badge: None,
+            on_end: None,
         }
+    }
+    pub fn on_end(mut self, f: OnEnd) -> Self {
+        self.on_end = Some(f);
+        self
     }
     pub fn step(mut self, s: Step) -> Self {
         self.steps.push(s);
@@ -870,7 +885,7 @@ pub struct OpRunner {
     still_since: SystemTime,
     drew: bool,
     /// The process [`StepKind::WatchProcess`] tied the run to.
-    watched: Option<i32>,
+    watched: Option<ProcId>,
     /// `(when, output length)` every [`SAMPLE_EVERY`] while an
     /// `or_composer` wait runs; at most [`SAMPLES_KEPT`].
     samples: std::collections::VecDeque<(SystemTime, u64)>,
@@ -1035,16 +1050,26 @@ impl OpRunner {
         };
         match step.kind {
             StepKind::Settle => elapsed >= step.timeout.unwrap_or_default(),
-            StepKind::Terminate { pid, signal, escalate, sent } => {
-                if !sent {
-                    self.env.signal(pid, signal);
-                    if let Some(StepKind::Terminate { sent, .. }) =
-                        self.op.steps.get_mut(self.at).map(|s| &mut s.kind)
-                    {
-                        *sent = true;
-                    }
+            StepKind::Terminate { target, signal, escalate, sent } => {
+                let due = if sent { escalate.filter(|(after, _)| elapsed >= *after) } else { Some((Duration::ZERO, signal)) };
+                if let Some(StepKind::Terminate { sent, .. }) = self.op.steps.get_mut(self.at).map(|s| &mut s.kind) {
+                    *sent = true;
                 }
-                if !self.env.pid_alive(pid) {
+                // re-verified on every send: the escalation can come seconds after the decision
+                let gone = match due.map(|(_, sig)| self.env.signal(target, sig)) {
+                    Some(Err(SignalError::Gone)) => {
+                        let msg = format!("pid {} is already gone", target.pid);
+                        host.log(LogLevel::Info, &format!("{}.already_gone", self.op.name), &msg);
+                        true
+                    }
+                    Some(Err(e)) => {
+                        let err = format!("pid {}: {e}", target.pid);
+                        self.finish(host, OpOutcome::Failed { step: self.at, label: step.label, err });
+                        return true;
+                    }
+                    _ => !self.env.pid_alive(target),
+                };
+                if gone {
                     // We took it down, so we own what it left switched
                     // on.  Mouse reporting is the one mode that outlives
                     // its program here: a signal produces no bytes, so
@@ -1053,16 +1078,9 @@ impl OpRunner {
                     // — usually a shell prompt — inherits a terminal
                     // that encodes each scroll as `CSI < 64;x;y M` and
                     // types it in (2026-09-01).
-                    let _ = self
-                        .env
-                        .io()
-                        .reset_mouse_reporting(host.shelld_session_id());
+                    let _ = self.env.io().reset_mouse_reporting(sid);
                     return true;
                 }
-                if let Some((after, sig)) = escalate
-                    && elapsed >= after {
-                        self.env.signal(pid, sig);
-                    }
                 false
             }
             StepKind::AwaitProcess { under, matching } => {
@@ -1698,9 +1716,10 @@ impl PaneSession for OpRunner {
                 host.set_badge(&text);
             }
         }
-        if let Some(pid) = self.watched
-            && !self.env.pid_alive(pid)
+        if let Some(id) = self.watched
+            && !self.env.pid_alive(id)
         {
+            let pid = id.pid;
             let label = self.op.steps.get(self.at).map_or("end", |s| s.label);
             host.log(
                 LogLevel::Warn,
@@ -1799,112 +1818,14 @@ impl PaneSession for OpRunner {
         if let Some(f) = self.on_finish.as_mut() {
             f(host, &outcome);
         }
+        if let Some(f) = &self.op.on_end {
+            f(&outcome);
+        }
     }
 }
 
-/// The production [`OpEnv`]: real signals, the real process table, the
-/// real clock, and the pane's own bytelog as the output counter.
-pub struct RealEnv {
-    io: Arc<dyn PtyIo>,
-    /// Where a pane's own report of a submit arrives, when it has one.
-    ///
-    /// Optional because a shell that could not bind the socket still
-    /// runs the terminal; those panes fall back to reading the screen,
-    /// which is what every pane did before.
-    receipts: Option<Arc<crate::receipts::Receipts>>,
-}
-
-impl RealEnv {
-    #[cfg(test)]
-    pub fn new(io: Arc<dyn PtyIo>) -> Self {
-        Self { io, receipts: None }
-    }
-
-    pub fn with_receipts(
-        io: Arc<dyn PtyIo>,
-        receipts: Option<Arc<crate::receipts::Receipts>>,
-    ) -> Self {
-        Self { io, receipts }
-    }
-}
-
-impl OpEnv for RealEnv {
-    fn submit_receipt(&self, sid: u64, text: &str) -> Option<bool> {
-        let r = self.receipts.as_ref()?;
-        Some(r.claim(sid, marspot_term::submit_receipt::fingerprint(text)))
-    }
-
-    fn io(&self) -> &Arc<dyn PtyIo> {
-        &self.io
-    }
-    fn now(&self) -> SystemTime {
-        SystemTime::now()
-    }
-    fn signal(&self, pid: i32, sig: i32) {
-        if pid > 0 {
-            unsafe { libc::kill(pid, sig) };
-        }
-    }
-    fn pid_alive(&self, pid: i32) -> bool {
-        if pid <= 0 {
-            return false;
-        }
-        unsafe {
-            if libc::kill(pid, 0) == 0 {
-                return true;
-            }
-            *libc::__error() != libc::ESRCH
-        }
-    }
-    fn find_descendant(&self, under: i32, pred: fn(&pidtree::ProcRow) -> bool) -> Option<i32> {
-        // an op waits on, or is about to type at, what it just changed
-        let obs = crate::observe::shared().fresh(crate::observe::NOW);
-        let found = obs.table.descendants(under).into_iter().find(|r| pred(r));
-        found.map(|r| r.pid)
-    }
-    fn output_len(&self, sid: u64) -> u64 {
-        // L3 appends every byte the PTY produces to the session's
-        // bytelog, so its length is the cheapest "has anything been
-        // drawn" counter there is — one `stat`, and only while an op
-        // is running.
-        marspot_term::paths::sessions_dir()
-            .join(sid.to_string())
-            .join("bytelog")
-            .metadata()
-            .map(|m| m.len())
-            .unwrap_or(0)
-    }
-    fn output_tail(&self, sid: u64, bytes: usize) -> Vec<u8> {
-        use std::io::{Read, Seek, SeekFrom};
-        let path = marspot_term::paths::sessions_dir()
-            .join(sid.to_string())
-            .join("bytelog");
-        let Ok(mut f) = std::fs::File::open(&path) else { return Vec::new() };
-        let Ok(len) = f.metadata().map(|m| m.len()) else { return Vec::new() };
-        let from = len.saturating_sub(bytes as u64);
-        if f.seek(SeekFrom::Start(from)).is_err() {
-            return Vec::new();
-        }
-        let mut buf = Vec::with_capacity(bytes.min(len as usize));
-        let _ = f.take(bytes as u64).read_to_end(&mut buf);
-        buf
-    }
-    fn pane_modes(&self, sid: u64) -> Option<(u64, u32)> {
-        // Same route as `output_len`: read what the session left on
-        // disk.  The registry entry names the region; the region's
-        // header carries the flags.  Read-only, header-sized, and only
-        // while an op is running.
-        let entry = marspot_term::session_registry::read_session_entry(sid).ok()?;
-        let name = std::ffi::CString::new(entry.shm_name).ok()?;
-        marspot_term::grid_shm::peek(&name).ok()
-    }
-    fn pane_screen(&self, sid: u64) -> Option<String> {
-        marspot::pane_read::screen(sid, 0).ok()
-    }
-    fn pane_unsent(&self, sid: u64) -> Option<String> {
-        marspot::pane_read::composer(sid).ok()?
-    }
-}
+mod real_env;
+pub use real_env::RealEnv;
 
 // ── the service ──────────────────────────────────────────────────────
 
@@ -2253,7 +2174,7 @@ mod tests {
         let sink = Arc::clone(&finished);
         let op = PtyOp::new("test.job")
             .step(Step::await_job(Arc::clone(&job)))
-            .step(Step::terminate(4242, libc::SIGTERM));
+            .step(Step::terminate(fid(4242), libc::SIGTERM));
         let mut r = OpRunner::new(op, env).on_finish(move |_, o| *sink.lock().unwrap() = Some(o.clone()));
         run(&mut r, &host, &state, 500);
         assert!(state.signals.lock().unwrap().is_empty(), "nothing is killed while the job runs");
@@ -2277,7 +2198,7 @@ mod tests {
         job.finish(Ok(None));
         let op = PtyOp::new("test.job")
             .step(Step::await_job(job))
-            .step(Step::terminate(4242, libc::SIGTERM));
+            .step(Step::terminate(fid(4242), libc::SIGTERM));
         let mut r = OpRunner::new(op, env);
         run(&mut r, &host, &state, 100);
         assert_eq!(state.signals.lock().unwrap().first(), Some(&(4242, libc::SIGTERM)));
@@ -2382,6 +2303,11 @@ mod tests {
         assert!(ops.is_busy(390));
     }
 
+    /// A fake process id: the fake env matches on the pid alone.
+    fn fid(pid: i32) -> ProcId {
+        ProcId { pid, start_us: 0 }
+    }
+
     #[derive(Default)]
     struct FakeState {
         now_ms: Mutex<u64>,
@@ -2439,14 +2365,15 @@ mod tests {
         fn now(&self) -> SystemTime {
             SystemTime::UNIX_EPOCH + Duration::from_millis(*self.state.now_ms.lock().unwrap())
         }
-        fn signal(&self, pid: i32, sig: i32) {
-            self.state.signals.lock().unwrap().push((pid, sig));
+        fn signal(&self, id: ProcId, sig: i32) -> Result<(), SignalError> {
+            self.state.signals.lock().unwrap().push((id.pid, sig));
             if sig == libc::SIGKILL {
-                self.state.alive.lock().unwrap().retain(|p| *p != pid);
+                self.state.alive.lock().unwrap().retain(|p| *p != id.pid);
             }
+            Ok(())
         }
-        fn pid_alive(&self, pid: i32) -> bool {
-            self.state.alive.lock().unwrap().contains(&pid)
+        fn pid_alive(&self, id: ProcId) -> bool {
+            self.state.alive.lock().unwrap().contains(&id.pid)
         }
         fn output_tail(&self, _sid: u64, _bytes: usize) -> Vec<u8> {
             self.state.tail.lock().unwrap().clone()
@@ -2460,8 +2387,8 @@ mod tests {
         fn pane_modes(&self, _sid: u64) -> Option<(u64, u32)> {
             *self.state.modes.lock().unwrap()
         }
-        fn find_descendant(&self, _under: i32, _pred: fn(&pidtree::ProcRow) -> bool) -> Option<i32> {
-            self.state.present.lock().unwrap().first().copied()
+        fn find_descendant(&self, _under: i32, _pred: fn(&pidtree::ProcRow) -> bool) -> Option<ProcId> {
+            self.state.present.lock().unwrap().first().map(|&pid| fid(pid))
         }
         fn output_len(&self, _sid: u64) -> u64 {
             *self.state.out_len.lock().unwrap()
@@ -3311,7 +3238,7 @@ mod tests {
             .badge("zZ")
             .step(Step::settle(Duration::from_millis(250)))
             .step(
-                Step::terminate(4242, libc::SIGTERM)
+                Step::terminate(fid(4242), libc::SIGTERM)
                     .escalate_after(Duration::from_secs(3), libc::SIGKILL),
             )
             .step(Step::await_user())
@@ -3631,7 +3558,7 @@ mod tests {
         let (state, env, host) = setup();
         state.alive.lock().unwrap().push(7);
         let op = PtyOp::new("test.kill").step(
-            Step::terminate(7, libc::SIGTERM)
+            Step::terminate(fid(7), libc::SIGTERM)
                 .escalate_after(Duration::from_secs(3), libc::SIGKILL)
                 .timeout(Duration::from_secs(10)),
         );
@@ -3657,7 +3584,7 @@ mod tests {
         let (state, env, host) = setup();
         state.alive.lock().unwrap().push(7);
         let op = PtyOp::new("test.kill").step(
-            Step::terminate(7, libc::SIGTERM).timeout(Duration::from_secs(10)),
+            Step::terminate(fid(7), libc::SIGTERM).timeout(Duration::from_secs(10)),
         );
         let mut r = OpRunner::new(op, env);
         run(&mut r, &host, &state, 100);
@@ -3684,7 +3611,7 @@ mod tests {
         let (state, env, host) = setup();
         state.alive.lock().unwrap().push(7);
         let op = PtyOp::new("test.kill").step(
-            Step::terminate(7, libc::SIGTERM)
+            Step::terminate(fid(7), libc::SIGTERM)
                 .escalate_after(Duration::from_secs(3), libc::SIGKILL)
                 .timeout(Duration::from_secs(10)),
         );
@@ -3707,7 +3634,7 @@ mod tests {
         let finished: Arc<Mutex<Option<OpOutcome>>> = Arc::new(Mutex::new(None));
         let sink = Arc::clone(&finished);
         let op = PtyOp::new("test.stuck").hold_screen(true).step(
-            Step::terminate(7, libc::SIGTERM).timeout(Duration::from_secs(2)),
+            Step::terminate(fid(7), libc::SIGTERM).timeout(Duration::from_secs(2)),
         );
         let mut r = OpRunner::new(op, env)
             .on_finish(move |_, o| *sink.lock().unwrap() = Some(o.clone()));
