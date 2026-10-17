@@ -64,7 +64,6 @@ fn pane_fingerprint(
     view.focused.hash(&mut h);
     view.title.hash(&mut h);
     view.right_badge.hash(&mut h);
-    view.update_pending.hash(&mut h);
     view.ime_preedit.hash(&mut h);
     view.top_fixed_h_cells.hash(&mut h);
     view.bot_fixed_h_cells.hash(&mut h);

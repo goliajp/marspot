@@ -225,13 +225,11 @@ echo "  crash-isolation OK — one L3 killed, sibling unaffected, dead shm still
 # reporting on a binary left in `target/`.  They are gone; this covers
 # what they were for, on the architecture that exists.
 #
-# This section was red until 2026-10-01.  `begin_pane_swap` used to spawn a
-# replacement L3 on the same session id, which cannot work -- the live L3
-# holds a lock on `sessions/<id>/` and a second one refuses to start -- so
-# the two user-reachable callers (moving focus off a pane with a staged
-# update, and the refresh glyph in its title strip) silently did nothing.
-# It now does what `swap_idle_l3` does for all panes: promote the staged
-# image, then signal that one L3 to execv itself.
+# This section was red until 2026-10-01.  The single-pane swap used to
+# spawn a replacement L3 on the same session id, which cannot work -- the
+# live L3 holds a lock on `sessions/<id>/` and a second one refuses to
+# start.  The swap that exists is `swap_idle_l3`: promote the staged
+# image, then signal each L3 to execv itself.
 echo "--- silent-swap ---" | tee -a "$RUN_LOG"
 "$SWAP_PROBE_BIN" "$SESSION_BIN" "${SWAP_ROUNDS:-5}" >>"$RUN_LOG" 2>&1
 swrc=$?

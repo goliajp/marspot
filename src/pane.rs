@@ -1346,13 +1346,6 @@ pub struct Pane {
     /// just rolled into scrollback — keeping the highlight pinned to
     /// the original content instead of the original screen position.
     last_seen_scroll_push: u64,
-    /// A per-session silent update is staged for this pane but deferred
-    /// because it's the *focused* pane (an idle pane swaps immediately; a
-    /// replay would blip an interactive TUI under the user's hands).  The
-    /// renderer draws a refresh affordance in the focused pane's title
-    /// strip while this is set; clicking it triggers the swap.  Target #4
-    /// step 5b.  Only ever set on an L3 pane.
-    update_pending: bool,
     /// C1 — pane-attached interactive overlays (search bar in C2,
     /// result list in C3, …).  Default empty; layout math sums their
     /// `fixed_height_rows()` on each frame via `tool_fixed_height_sums`
@@ -1551,7 +1544,6 @@ impl Pane {
             scrim: ScrimFade::default(),
             view_offset: 0,
             last_seen_scroll_push: 0,
-            update_pending: false,
             tools: Vec::new(),
             active_highlight: None,
             search: None,
@@ -1569,7 +1561,6 @@ impl Pane {
             scrim: ScrimFade::default(),
             view_offset: 0,
             last_seen_scroll_push: 0,
-            update_pending: false,
             tools: Vec::new(),
             active_highlight: None,
             search: None,
@@ -1588,7 +1579,6 @@ impl Pane {
             scrim: ScrimFade::default(),
             view_offset: 0,
             last_seen_scroll_push: 0,
-            update_pending: false,
             tools: Vec::new(),
             active_highlight: None,
             search: None,
@@ -1620,7 +1610,6 @@ impl Pane {
             scrim: ScrimFade::default(),
             view_offset: 0,
             last_seen_scroll_push: 0,
-            update_pending: false,
             tools: Vec::new(),
             active_highlight: None,
             search: None,
@@ -1647,7 +1636,6 @@ impl Pane {
             scrim: ScrimFade::default(),
             view_offset: 0,
             last_seen_scroll_push: 0,
-            update_pending: false,
             tools: Vec::new(),
             active_highlight: None,
             search: None,
@@ -1751,12 +1739,6 @@ impl Pane {
         } else {
             0
         }
-    }
-
-    /// A deferred silent update is staged for this (focused) pane — the
-    /// renderer shows a refresh affordance; a click triggers the swap.
-    pub fn update_pending(&self) -> bool {
-        self.update_pending
     }
 
     /// Drain the PTY reader into the terminal parser. Returns the
@@ -2104,7 +2086,6 @@ impl Pane {
             title,
             selection: None,
             ime_preedit: "",
-            update_pending: self.update_pending,
             dormant: self.is_dormant(),
             recede: self.recede,
             scrim: self.scrim.value(std::time::Instant::now()),
