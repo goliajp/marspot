@@ -1484,21 +1484,18 @@ impl ClaudecodePlugin {
         let needs_model = result.new_models.get(&sid).cloned();
         // The idle policy's rule too: a process of its own under claude
         // (unknown counts as one) is work a move would kill.
-        let in_flight = result.new_vetoes.get(&sid).is_none_or(|v| v.0);
-        let decision = if in_flight {
-            quota::Move::Hold("work is in flight here")
-        } else {
-            quota::next_move(&quota::Situation {
+        let work_running = result.new_vetoes.get(&sid).is_none_or(|v| v.0);
+        let decision = quota::next_move(&quota::Situation {
             rooms,
             current: meta.profile_num,
             needs_model: needs_model.as_deref(),
             tool_executing,
+            work_running,
             moves_this_episode: self.stranded.get(&sid).map(|s| s.moves).unwrap_or(0),
             last_target: self.stranded.get(&sid).and_then(|s| s.last_target),
             stranded_for: self.stranded.get(&sid).map(|s| s.since.elapsed()),
             since_last_move: self.moved_at.get(&sid).map(|at| at.elapsed()),
-            })
-        };
+        });
         match decision {
             quota::Move::Hold(why) => {
                 let tally = self.stranded.entry(sid).or_default();
@@ -6029,18 +6026,18 @@ mod tests {
             row(104, claude, "caffeinate"),
             row(105, claude, "zsh"),
         ];
-        assert!(!has_work_in_flight(claude, &pidtree::ProcTable::from_rows(resting.clone())), "none of that is work");
+        assert!(work_in_flight(claude, &pidtree::ProcTable::from_rows(resting.clone())).is_empty(), "none of that is work");
 
         // The same session with a job under its shell.
         let mut working = resting.clone();
         working.push(row(106, 105, "cargo-fuzz"));
-        assert!(has_work_in_flight(claude, &pidtree::ProcTable::from_rows(working)), "a job under the shell is work");
+        assert!(!work_in_flight(claude, &pidtree::ProcTable::from_rows(working)).is_empty(), "a job under the shell is work");
 
         // An unrecognised helper counts as work: the allowlist fails
         // towards not reclaiming, never towards killing something.
         let mut unknown = resting.clone();
         unknown.push(row(107, claude, "some-new-helper"));
-        assert!(has_work_in_flight(claude, &pidtree::ProcTable::from_rows(unknown)));
+        assert!(!work_in_flight(claude, &pidtree::ProcTable::from_rows(unknown)).is_empty());
     }
 
     #[test]

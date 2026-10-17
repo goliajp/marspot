@@ -365,6 +365,10 @@ pub(super) struct Situation<'a> {
     /// forever.  This is the narrower thing: a command of the user's
     /// is running, and killing the process would take it with it.
     pub tool_executing: bool,
+    /// claude has a process of its own running under it that is not a
+    /// resting helper -- a background job, a watcher -- or the scan
+    /// could not tell.  A move kills it too.
+    pub work_running: bool,
     /// Moves already made while this pane has been continuously
     /// refused.
     pub moves_this_episode: u8,
@@ -402,7 +406,8 @@ pub(super) enum Move {
 pub(super) const MOVES_PER_EPISODE: u8 = 2;
 /// And then it waits.
 pub(super) const MOVE_COOLDOWN: Duration = Duration::from_secs(600);
-/// How long "a tool is running here" is allowed to hold a pane.
+/// How long "a tool is running here", or work of claude's own in the
+/// background, is allowed to hold a pane.
 ///
 /// The hold exists to protect a command of the user's from being
 /// killed with the process.  It is not meant to cover a CLI that has
@@ -419,10 +424,21 @@ pub(super) fn next_move(s: &Situation) -> Move {
     // Moving kills the process, and a command running under it goes
     // with it.  That one waits; it will finish, and the next pass will
     // move the pane.
-    if s.tool_executing
+    //
+    // Work in the background is held for the same while and no longer.
+    // It used to hold the pane for as long as it ran, and a session
+    // keeps such things for hours -- a loop polling for a file, a
+    // watchdog -- so a pane whose account had run out sat on it, idle,
+    // until someone moved it by hand (pane 482, 2026-10-17).  The
+    // account cannot answer whatever that work comes back with.
+    if (s.tool_executing || s.work_running)
         && s.stranded_for.map(|d| d < TOOL_HOLD_MAX).unwrap_or(true)
     {
-        return Move::Hold("a tool is running here");
+        return Move::Hold(if s.tool_executing {
+            "a tool is running here"
+        } else {
+            "work is in flight here"
+        });
     }
     // A move already made and not yet visible.  The pane is rebound by
     // the scan, and the scan can only bind it once the new process is
@@ -733,6 +749,7 @@ mod tests {
             rooms,
             current: 1,
             tool_executing: false,
+            work_running: false,
             moves_this_episode: 0,
             since_last_move: None,
             last_target: None,
@@ -751,6 +768,18 @@ mod tests {
         // Not while it is in the middle of something.
         let s = Situation { tool_executing: true, ..situation(&r) };
         assert_eq!(next_move(&s), Move::Hold("a tool is running here"));
+
+        // Nor while something of its own runs in the background -- for
+        // the same while, and then it goes: a loop polling for a file
+        // held a spent pane for half an hour.
+        let s = Situation { work_running: true, ..situation(&r) };
+        assert_eq!(next_move(&s), Move::Hold("work is in flight here"));
+        let s = Situation {
+            work_running: true,
+            stranded_for: Some(Duration::from_secs(601)),
+            ..situation(&r)
+        };
+        assert_eq!(next_move(&s), Move::To(3));
 
         // But that hold is not forever.  A CLI parked until its window
         // reopens reads exactly like a running tool, and held one pane
