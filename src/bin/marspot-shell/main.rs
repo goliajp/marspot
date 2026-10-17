@@ -43,6 +43,7 @@ mod banner;
 mod launch;
 mod cli_socket;
 mod observe;
+mod orphans;
 mod pane_decls;
 mod pane_status;
 mod plugins;
@@ -2922,38 +2923,13 @@ impl ShellApp {
         // against the rest of the teardown.
         self.plugin_registry.stop_all_with(&self.plugin_host);
 
-        // RFC-003 §6 Amendment 15.2 — pgrep sweep for orphan L3s.
-        // Resurrect / silent-update spawn races can leave behind L3
-        // processes whose entry.toml got overwritten by a later
-        // sibling: unreachable, so nothing will ever reattach to them.
-        // Registered sessions are skipped — those are the ones we are
-        // keeping.
-        let entries = marspot_term::session_registry::list_session_entries();
-        let known_pids: std::collections::HashSet<i32> =
-            entries.iter().map(|e| e.pid).collect();
-        let mut orphans_killed = 0usize;
-        if let Ok(out) = std::process::Command::new("/usr/bin/pgrep")
-            .args(["-f", "marspot-session"])
-            .output()
-            && out.status.success() {
-                for line in String::from_utf8_lossy(&out.stdout).lines() {
-                    if let Ok(pid) = line.trim().parse::<i32>() {
-                        if pid == std::process::id() as i32 {
-                            continue;
-                        }
-                        if known_pids.contains(&pid) {
-                            continue;
-                        }
-                        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
-                            orphans_killed += 1;
-                        }
-                    }
-                }
-            }
+        // Spawn races can leave L3s whose entry a later sibling
+        // overwrote: nothing will ever reattach to them.
+        let (n_kept, orphans_killed) = orphans::stop(&orphans::Install::ours(&self.binaries));
         lx_event!(
             "SHELL_QUIT_CLEANUP",
             "quitting; registered sessions kept running, orphans swept",
-            n_kept = entries.len(),
+            n_kept = n_kept,
             n_orphans_killed = orphans_killed
         );
 
