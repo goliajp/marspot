@@ -368,7 +368,9 @@ impl ShellPresenter {
 
     /// Render the IOSurface to the next CAMetalLayer drawable and
     /// present.  No-op if no drawable is available (all in-flight).
-    pub fn present(&mut self) {
+    /// False when nothing was drawn (no drawable, no command buffer),
+    /// so the caller keeps the frame pending.
+    pub fn present(&mut self) -> bool {
         let drawable = match self.layer.nextDrawable() {
             Some(d) => d,
             None => {
@@ -384,7 +386,7 @@ impl ShellPresenter {
                     "shell.present.no_drawable",
                     "nextDrawable returned None — frame skipped"
                 );
-                return;
+                return false;
             }
         };
         let texture = { drawable.texture() };
@@ -420,11 +422,11 @@ impl ShellPresenter {
 
         let cmd = match self.queue.commandBuffer() {
             Some(c) => c,
-            None => return,
+            None => return false,
         };
         let encoder = match cmd.renderCommandEncoderWithDescriptor(&pass) {
             Some(e) => e,
-            None => return,
+            None => return false,
         };
 
         encoder.setRenderPipelineState(&self.pipeline);
@@ -488,6 +490,7 @@ impl ShellPresenter {
         let mtl_drawable: &ProtocolObject<dyn objc2_metal::MTLDrawable> =
             ProtocolObject::from_ref(&*drawable);
         mtl_drawable.present();
+        true
     }
 }
 

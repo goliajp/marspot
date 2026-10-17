@@ -15,6 +15,14 @@
 use std::ffi::CStr;
 use std::path::PathBuf;
 
+mod args;
+mod ident;
+mod table;
+
+pub use args::{proc_argv, proc_cmdline, proc_env_value};
+pub use ident::{ProcId, SignalError, proc_id, signal};
+pub use table::{ProcNode, ProcTable, descendants_of, flatten_pre_order, tree_rooted_at};
+
 /// One process as returned by the sysctl table.  We only keep what
 /// the plugin actually needs.
 #[derive(Clone, Debug)]
@@ -30,6 +38,9 @@ pub struct ProcRow {
     /// to tell "this process is writing that session" from "that file
     /// belongs to something older than this process".
     pub start_unix: u64,
+    /// Start time in microseconds (`pbi_start_tvsec`, `pbi_start_tvusec`):
+    /// with the pid, the identity of this process.
+    pub start_us: u64,
     /// `pbi_pgid` — this process's own process-group id.  A job's
     /// top-level process is the group leader, i.e. `pgid == pid`.
     pub pgid: i32,
@@ -53,6 +64,10 @@ pub struct ProcRow {
 }
 
 impl ProcRow {
+    pub fn id(&self) -> ProcId {
+        ProcId { pid: self.pid, start_us: self.start_us }
+    }
+
     /// Suspended (`^Z`, `SIGSTOP`).  Not "not running" — a stopped
     /// process holds all of its state and resumes on `fg`.
     pub fn is_stopped(&self) -> bool {
@@ -71,82 +86,81 @@ impl ProcRow {
 /// `ps -A` without spawning a process.  Typically 300–600 rows on
 /// a dev machine; the table is materialised into a Vec we own.
 pub fn list_all_procs() -> Vec<ProcRow> {
-    unsafe { list_all_procs_inner().unwrap_or_default() }
+    WALKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    list_all_procs_inner().unwrap_or_default()
 }
 
-unsafe fn list_all_procs_inner() -> Option<Vec<ProcRow>> { unsafe {
-    // proc_listpids(PROC_ALL_PIDS) — get every pid on the host.
-    // libc crate doesn't expose PROC_ALL_PIDS; <sys/proc_info.h>
-    // defines it as 1.
+static WALKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times this process has walked the whole process table.
+pub fn table_walks() -> u64 {
+    WALKS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn list_all_procs_inner() -> Option<Vec<ProcRow>> {
+    // <sys/proc_info.h>; not exposed by the libc crate
     const PROC_ALL_PIDS: u32 = 1;
-    // Round 1: ask for size (pass NULL buf).
-    let cap_bytes = libc::proc_listpids(
-        PROC_ALL_PIDS,
-        0,
-        std::ptr::null_mut(),
-        0,
-    );
-    if cap_bytes <= 0 {
+    const PID: usize = std::mem::size_of::<libc::pid_t>();
+    const ATTEMPTS: usize = 6;
+    let sized = unsafe { libc::proc_listpids(PROC_ALL_PIDS, 0, std::ptr::null_mut(), 0) };
+    if sized <= 0 {
         return None;
     }
-    // Add slop for new forks between sizing and read.
-    let extra = 64 * std::mem::size_of::<libc::pid_t>() as i32;
-    let mut pids: Vec<libc::pid_t> =
-        vec![0; ((cap_bytes + extra) as usize) / std::mem::size_of::<libc::pid_t>()];
-    let got_bytes = libc::proc_listpids(
-        PROC_ALL_PIDS,
-        0,
-        pids.as_mut_ptr() as *mut libc::c_void,
-        (pids.len() * std::mem::size_of::<libc::pid_t>()) as i32,
-    );
-    if got_bytes <= 0 {
-        return None;
+    // slack for processes forked between the sizing call and the fill
+    let mut slots = sized as usize / PID + 256;
+    let mut pids: Vec<libc::pid_t> = Vec::new();
+    for attempt in 0..ATTEMPTS {
+        pids.clear();
+        pids.resize(slots, 0);
+        let got = unsafe {
+            libc::proc_listpids(
+                PROC_ALL_PIDS,
+                0,
+                pids.as_mut_ptr() as *mut libc::c_void,
+                (slots * PID) as i32,
+            )
+        };
+        if got <= 0 {
+            return None;
+        }
+        let count = (got as usize / PID).min(slots);
+        // a full buffer may have cut processes off the end
+        if count < slots || attempt + 1 == ATTEMPTS {
+            pids.truncate(count);
+            break;
+        }
+        slots *= 2;
     }
-    let count = got_bytes as usize / std::mem::size_of::<libc::pid_t>();
-    pids.truncate(count);
-    let mut out = Vec::with_capacity(count);
+    let mut out = Vec::with_capacity(pids.len());
     for pid in pids {
-        if pid == 0 {
+        if pid <= 0 {
             continue;
         }
-        // None = exited between listpids and pidinfo.
+        // None = exited between listpids and pidinfo
         if let Some(row) = proc_row(pid) {
             out.push(row);
         }
     }
     Some(out)
-}}
+}
 
 /// One process's row, without the table walk — a single
 /// `proc_pidinfo(PROC_PIDTBSDINFO)`.  None when the pid is gone or the
 /// call is refused.
 pub fn proc_row(pid: i32) -> Option<ProcRow> {
-    unsafe {
-        let mut info: libc::proc_bsdinfo = std::mem::zeroed();
-        let r = libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            &mut info as *mut _ as *mut libc::c_void,
-            std::mem::size_of::<libc::proc_bsdinfo>() as i32,
-        );
-        if r <= 0 {
-            return None;
-        }
-        let comm = CStr::from_ptr(info.pbi_comm.as_ptr())
-            .to_string_lossy()
-            .into_owned();
-        Some(ProcRow {
-            pid,
-            ppid: info.pbi_ppid as i32,
-            comm,
-            start_unix: info.pbi_start_tvsec,
-            pgid: info.pbi_pgid as i32,
-            tty_dev: info.e_tdev,
-            tty_fg_pgid: info.e_tpgid as i32,
-            status: info.pbi_status,
-        })
-    }
+    let info = ident::bsdinfo(pid).ok()?;
+    let comm = unsafe { CStr::from_ptr(info.pbi_comm.as_ptr()) }.to_string_lossy().into_owned();
+    Some(ProcRow {
+        pid,
+        ppid: info.pbi_ppid as i32,
+        comm,
+        start_unix: info.pbi_start_tvsec,
+        start_us: ident::start_us_of(&info),
+        pgid: info.pbi_pgid as i32,
+        tty_dev: info.e_tdev,
+        tty_fg_pgid: info.e_tpgid as i32,
+        status: info.pbi_status,
+    })
 }
 
 /// Total CPU time this process has consumed, in nanoseconds (user +
@@ -389,207 +403,6 @@ pub fn proc_stat(pid: i32) -> Option<ProcStat> {
     })
 }
 
-/// Full command line of `pid` via `sysctl(KERN_PROCARGS2)`.  Returns
-/// the argv joined by spaces, or None on failure.  Empty argv → empty
-/// string.
-pub fn proc_cmdline(pid: i32) -> Option<String> {
-    unsafe { proc_cmdline_inner(pid) }
-}
-
-unsafe fn proc_cmdline_inner(pid: i32) -> Option<String> { unsafe {
-    // First read kern.argmax to size the buffer right.
-    let mut argmax: libc::c_int = 0;
-    let mut sz: libc::size_t = std::mem::size_of::<libc::c_int>();
-    let mut mib_argmax: [libc::c_int; 2] = [libc::CTL_KERN, libc::KERN_ARGMAX];
-    if libc::sysctl(
-        mib_argmax.as_mut_ptr(),
-        2,
-        &mut argmax as *mut _ as *mut libc::c_void,
-        &mut sz,
-        std::ptr::null_mut(),
-        0,
-    ) != 0
-    {
-        return None;
-    }
-    if argmax <= 0 {
-        return None;
-    }
-    let mut buf = vec![0u8; argmax as usize];
-    // KERN_PROCARGS2 = 49.  libc crate may not expose it on all
-    // versions, so use the numeric value directly.
-    const KERN_PROCARGS2: libc::c_int = 49;
-    let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, KERN_PROCARGS2, pid];
-    let mut got: libc::size_t = buf.len();
-    if libc::sysctl(
-        mib.as_mut_ptr(),
-        3,
-        buf.as_mut_ptr() as *mut libc::c_void,
-        &mut got,
-        std::ptr::null_mut(),
-        0,
-    ) != 0
-    {
-        return None;
-    }
-    buf.truncate(got);
-    // Layout: [argc: i32 LE][argv0_path: cstr][\0...padding...]
-    //         [argv[0]: cstr][argv[1]: cstr]...[argv[argc-1]: cstr]
-    //         [envp...]
-    if buf.len() < 4 {
-        return None;
-    }
-    let argc = i32::from_ne_bytes(buf[0..4].try_into().ok()?);
-    if argc < 0 {
-        return None;
-    }
-    // Skip the i32 + the argv0_path c-string + its NUL padding.
-    let mut cur = 4usize;
-    // Walk past argv0_path (first NUL).
-    while cur < buf.len() && buf[cur] != 0 {
-        cur += 1;
-    }
-    // Skip the padding NULs to reach argv[0].
-    while cur < buf.len() && buf[cur] == 0 {
-        cur += 1;
-    }
-    // Now read `argc` NUL-separated strings.
-    let mut parts: Vec<String> = Vec::with_capacity(argc as usize);
-    for _ in 0..argc {
-        let start = cur;
-        while cur < buf.len() && buf[cur] != 0 {
-            cur += 1;
-        }
-        if start == cur {
-            break;
-        }
-        let s = String::from_utf8_lossy(&buf[start..cur]).into_owned();
-        parts.push(s);
-        if cur < buf.len() {
-            cur += 1; // skip the NUL
-        }
-    }
-    Some(parts.join(" "))
-}}
-
-/// Look up one environment variable on a running pid by walking
-/// KERN_PROCARGS2 past argv into envp.  Returns the value of the
-/// first match, or None when the var isn't set / the call is denied
-/// (sandbox / SIP).
-pub fn proc_env_value(pid: i32, key: &str) -> Option<String> {
-    unsafe { proc_env_value_inner(pid, key) }
-}
-
-unsafe fn proc_env_value_inner(pid: i32, key: &str) -> Option<String> { unsafe {
-    // Same buffer-sizing dance as `proc_cmdline_inner`.
-    let mut argmax: libc::c_int = 0;
-    let mut sz: libc::size_t = std::mem::size_of::<libc::c_int>();
-    let mut mib_argmax: [libc::c_int; 2] = [libc::CTL_KERN, libc::KERN_ARGMAX];
-    if libc::sysctl(
-        mib_argmax.as_mut_ptr(),
-        2,
-        &mut argmax as *mut _ as *mut libc::c_void,
-        &mut sz,
-        std::ptr::null_mut(),
-        0,
-    ) != 0
-    {
-        return None;
-    }
-    if argmax <= 0 {
-        return None;
-    }
-    let mut buf = vec![0u8; argmax as usize];
-    const KERN_PROCARGS2: libc::c_int = 49;
-    let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, KERN_PROCARGS2, pid];
-    let mut got: libc::size_t = buf.len();
-    if libc::sysctl(
-        mib.as_mut_ptr(),
-        3,
-        buf.as_mut_ptr() as *mut libc::c_void,
-        &mut got,
-        std::ptr::null_mut(),
-        0,
-    ) != 0
-    {
-        return None;
-    }
-    buf.truncate(got);
-    if buf.len() < 4 {
-        return None;
-    }
-    let argc = i32::from_ne_bytes(buf[0..4].try_into().ok()?);
-    if argc < 0 {
-        return None;
-    }
-    let mut cur = 4usize;
-    // Skip argv0_path (a single c-string).
-    while cur < buf.len() && buf[cur] != 0 {
-        cur += 1;
-    }
-    // Skip padding NULs to argv[0].
-    while cur < buf.len() && buf[cur] == 0 {
-        cur += 1;
-    }
-    // Step over `argc` argv strings.
-    for _ in 0..argc {
-        while cur < buf.len() && buf[cur] != 0 {
-            cur += 1;
-        }
-        if cur < buf.len() {
-            cur += 1; // skip NUL
-        }
-    }
-    // Now `cur` is at envp[0].  Walk NUL-separated KEY=VALUE entries
-    // until we either find our key or hit a zero-length entry (envp's
-    // terminator on some kernels).
-    let key_eq = format!("{}=", key);
-    while cur < buf.len() {
-        let start = cur;
-        while cur < buf.len() && buf[cur] != 0 {
-            cur += 1;
-        }
-        if start == cur {
-            break;
-        }
-        let entry = &buf[start..cur];
-        if entry.starts_with(key_eq.as_bytes()) {
-            let value = &entry[key_eq.len()..];
-            return Some(String::from_utf8_lossy(value).into_owned());
-        }
-        if cur < buf.len() {
-            cur += 1;
-        }
-    }
-    None
-}}
-
-/// BFS the process tree rooted at `root_pid` using a pre-fetched
-/// `procs` table.  Returns every descendant in discovery order
-/// (root NOT included).  Useful for "what's running under this PTY's
-/// zsh".
-pub fn descendants_of(root_pid: i32, procs: &[ProcRow]) -> Vec<ProcRow> {
-    use std::collections::HashMap;
-    // ppid → Vec<idx into procs>
-    let mut by_ppid: HashMap<i32, Vec<usize>> = HashMap::new();
-    for (i, p) in procs.iter().enumerate() {
-        by_ppid.entry(p.ppid).or_default().push(i);
-    }
-    let mut out = Vec::new();
-    let mut queue: Vec<i32> = Vec::new();
-    queue.push(root_pid);
-    while let Some(parent) = queue.pop() {
-        if let Some(kids) = by_ppid.get(&parent) {
-            for &idx in kids {
-                let p = &procs[idx];
-                out.push(p.clone());
-                queue.push(p.pid);
-            }
-        }
-    }
-    out
-}
-
 /// The process at the head of a foreground job — what the user
 /// launched (`claude`, `vim`, `cargo`, `ssh`), not whatever it has
 /// since forked underneath.
@@ -608,68 +421,6 @@ pub struct JobLeader {
     /// gives "how long has this job held the pane" with no history
     /// kept anywhere.
     pub start_unix: u64,
-}
-
-/// F3+1 — one node of a process tree.  Same data as `ProcRow` plus
-/// children list (depth-first nesting).  Used by the L2 process-tree
-/// panel renderer to indent rows by depth.
-#[derive(Debug, Clone)]
-pub struct ProcNode {
-    pub pid: i32,
-    pub ppid: i32,
-    pub comm: String,
-    pub children: Vec<ProcNode>,
-}
-
-/// F3+1 — build a nested tree rooted at `root_pid` from a pre-fetched
-/// proc table.  Returns None if `root_pid` itself isn't in the table
-/// (process gone since the snapshot).  Children are ordered by pid
-/// (deterministic across refresh ticks so the UI doesn't reshuffle
-/// rows under the cursor on a frame where nothing changed).
-pub fn tree_rooted_at(root_pid: i32, procs: &[ProcRow]) -> Option<ProcNode> {
-    use std::collections::HashMap;
-    let mut by_ppid: HashMap<i32, Vec<usize>> = HashMap::new();
-    for (i, p) in procs.iter().enumerate() {
-        by_ppid.entry(p.ppid).or_default().push(i);
-    }
-    let by_pid: HashMap<i32, &ProcRow> = procs.iter().map(|p| (p.pid, p)).collect();
-    let root = by_pid.get(&root_pid)?;
-    Some(build_node(root, procs, &by_ppid))
-}
-
-fn build_node(
-    row: &ProcRow,
-    procs: &[ProcRow],
-    by_ppid: &std::collections::HashMap<i32, Vec<usize>>,
-) -> ProcNode {
-    let mut children: Vec<ProcNode> = by_ppid
-        .get(&row.pid)
-        .into_iter()
-        .flat_map(|kids| kids.iter().copied())
-        .map(|idx| build_node(&procs[idx], procs, by_ppid))
-        .collect();
-    children.sort_by_key(|n| n.pid);
-    ProcNode {
-        pid: row.pid,
-        ppid: row.ppid,
-        comm: row.comm.clone(),
-        children,
-    }
-}
-
-/// F3+1 — flatten a nested tree to a depth-tagged sequence for UI
-/// row rendering.  `(depth, &node)` pairs in pre-order so root is
-/// first, then children left-to-right.
-pub fn flatten_pre_order(root: &ProcNode) -> Vec<(usize, &ProcNode)> {
-    let mut out: Vec<(usize, &ProcNode)> = Vec::new();
-    fn walk<'a>(node: &'a ProcNode, depth: usize, out: &mut Vec<(usize, &'a ProcNode)>) {
-        out.push((depth, node));
-        for c in &node.children {
-            walk(c, depth + 1, out);
-        }
-    }
-    walk(root, 0, &mut out);
-    out
 }
 
 /// F3+1 — send `signal` to `pid`.  Thin wrapper over `libc::kill(2)`
@@ -841,6 +592,7 @@ mod tests {
             ppid,
             comm: comm.into(),
             start_unix: start,
+            start_us: start * 1_000_000,
             pgid,
             tty_dev: tty,
             tty_fg_pgid: fg,

@@ -379,6 +379,7 @@ pub(crate) fn find_running_shell_pid() -> Option<u32> {
             .next()
             .map(|n| n == "marspot-shell")
             .unwrap_or(false)
+            && crate::orphans::shares_our_state_dir(pid as i32)
         {
             return Some(pid);
         }
@@ -467,9 +468,12 @@ pub(crate) fn running_shell_pid() -> Option<u32> {
     let path = marspot::paths::shell_pid_file();
     if let Ok(s) = std::fs::read_to_string(&path)
         && let Ok(pid) = s.trim().parse::<u32>() {
-            // kill(pid, 0): 0 = alive and ours to signal.
+            // the file outlives the shell, and SIGUSR1 ends a process
+            // that does not handle it: the pid must still be a shell of
+            // this state dir
             if pid != std::process::id()
-                && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+                && marspot_term::platform::pid_exe_name(pid as i32).as_deref() == Some("marspot-shell")
+                && crate::orphans::shares_our_state_dir(pid as i32)
             {
                 return Some(pid);
             }
