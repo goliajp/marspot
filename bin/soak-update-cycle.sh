@@ -49,12 +49,11 @@ trap cleanup EXIT
 [[ -x "$SHELL_BIN" && -x "$CORE_BIN" ]] \
   || ( cd "$ROOT" && cargo build --release --bin marspot-shell --bin marspot-core 2>&1 | tail -3 )
 
-dev_ensure_shelld || { echo "FAIL: sandbox shelld"; exit 1; }
 cleanup
 dev_wipe_state
 mkdir -p "$(dirname "$SUP_LOG")"
 rm -f "$SUP_LOG" 2>/dev/null || true
-nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 # --- boot ------------------------------------------------------------
@@ -63,12 +62,21 @@ for _ in $(seq 1 80); do
   sleep 0.1
 done
 grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
-SHELL_PID=$(cat "$MARSPOT_STATE_DIR/shell.pid" 2>/dev/null \
-            || pgrep -f "$SHELL_BIN( |$)" | head -1)
-[[ -n "$SHELL_PID" ]] || fail "no shell pid"
+SHELL_PID=$(cat "$MARSPOT_STATE_DIR/shell.pid" 2>/dev/null)
+_dev_is_ours "$SHELL_PID" \
+  || fail "shell.pid is missing or does not name this sandbox's shell (got '${SHELL_PID}')"
 
 rss_of() { ps -o rss= -p "$1" 2>/dev/null | tr -d ' '; }
-core_count() { pgrep -f "$TREE/current/marspot-core( |$)" 2>/dev/null | wc -l | tr -d ' '; }
+# The shell's own core children: a core is spawned by the shell, so this
+# counts this sandbox's and nobody else's.
+core_count() {
+  local k comm n=0
+  for k in $(pgrep -P "$SHELL_PID" 2>/dev/null); do
+    comm=$(ps -o comm= -p "$k" 2>/dev/null) || continue
+    if [[ ${comm##*/} == marspot-core ]]; then n=$((n + 1)); fi
+  done
+  echo "$n"
+}
 # grep -c already prints 0 on no match (and exits 1, which the command
 # substitution swallows) — an `|| echo 0` would double the output.
 stable_count() { grep -c $'\tUPDATE_STABLE\t' "$SUP_LOG" 2>/dev/null; }

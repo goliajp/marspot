@@ -208,7 +208,7 @@ dev_kill_shell_core
 rm -rf "$MARSPOT_STATE_DIR"; mkdir -p "$MARSPOT_STATE_DIR/logs"
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
   MARSPOT_DEV_BADGE_MENU="$MENU_FILE" \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 wait_for 'L3_SPAWNED' 90 || fail "no pane session was ever spawned"

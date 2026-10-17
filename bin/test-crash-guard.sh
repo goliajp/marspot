@@ -5,9 +5,10 @@
 #   1. 崩溃循环刹车 —— 伪造一份"5 分钟内 5 次启动"的 journal,
 #      shell 必须进 safe mode:反复 boot 也不许 spawn 任何新 session
 #      (只许 reattach),不许复原额外窗口。
-#   2. 沙箱清场 —— dev_kill_shell_core 之后,沙箱里的
-#      marspot-session 必须在 10 秒内归零(直接杀 + registry 哨兵
-#      双保险)。这就是报告第七节第 2 条验收,按沙箱语义落地。
+#   2. 沙箱清场 —— dev_kill_shell_core 之后,沙箱记下的 shell、core、
+#      marspot-session 和它们的子进程必须在 10 秒内全部退出;同时一个
+#      命令行里带着沙箱路径、但沙箱没有记下的旁观进程必须活着(清场只按
+#      记下的 pid 杀,不按命令行匹配)。
 #   3. registry 哨兵 —— 注册表被删的 session 自行退出(rm -rf
 #      sessions/ 这种测试脚本的惯用动作不再制造永生孤儿)。
 #
@@ -44,8 +45,13 @@ rm -rf "$MARSPOT_STATE_DIR/sessions" "$MARSPOT_STATE_DIR/retired"
 mkdir -p "$MARSPOT_STATE_DIR/logs"
 rm -f "$APPLOG"
 
-sandbox_session_count() {
-  pgrep -f "$ROOT/target/release/marspot-session( |$)" 2>/dev/null | wc -l | tr -d ' '
+# How many of the given pids are still running.
+alive() {
+  local p n=0
+  for p in "$@"; do
+    if kill -0 "$p" 2>/dev/null; then n=$((n + 1)); fi
+  done
+  echo "$n"
 }
 
 wait_for() { # tag, seconds
@@ -70,7 +76,7 @@ open(path, 'w').write(''.join(f"{t}\t{m}\n" for t, m in rows))
 PY
 
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 wait_for SHELL_SAFE_MODE 30 || fail "seeded crash loop did not enter safe mode"
@@ -86,45 +92,75 @@ echo "==> phase 2: dev_kill_shell_core reaps every sandbox session"
 cleanup
 rm -f "$MARSPOT_STATE_DIR/shell_launches.tsv" "$APPLOG"
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 wait_for WINDOW_FIRST_FRAME 30 || fail "sandbox app never painted"
 sleep 2
-before=$(sandbox_session_count)
+l3s=$(dev_session_pids)
+everything=$(dev_sandbox_pids)
+# shellcheck disable=SC2086
+before=$(alive $l3s)
 (( before >= 1 )) || fail "expected live sandbox sessions before the kill, got $before"
+# A bystander whose command line names this sandbox's binaries and
+# state dir.  Cleanup used to select by command line, which would have
+# killed it; now it must survive, because nothing recorded it.
+/bin/sh -c 'sleep 600; :' "$SESSION_BIN" "$MARSPOT_STATE_DIR/binaries/current/marspot-session" &
+decoy=$!
+sleep 0.3
+decoy_kids=$(pgrep -P "$decoy")
+# shellcheck disable=SC2086
+echo "    recorded: $(for p in $everything; do ps -o comm= -p "$p" | sed 's|.*/||'; done | sort | uniq -c | awk '{printf "%s×%s ", $2, $1}')"
 dev_kill_shell_core
 for i in $(seq 1 20); do
-  [[ "$(sandbox_session_count)" == "0" ]] && break
+  # shellcheck disable=SC2086
+  [[ "$(alive $everything)" == "0" ]] && break
   sleep 0.5
 done
-after=$(sandbox_session_count)
+# shellcheck disable=SC2086
+after=$(alive $everything)
+decoy_alive=$(alive "$decoy")
+# shellcheck disable=SC2086
+kill $decoy_kids "$decoy" 2>/dev/null
+wait "$decoy" 2>/dev/null
+(( decoy_alive == 1 )) || fail "dev_kill_shell_core killed a process it had not recorded (pid $decoy)"
 [[ "$after" == "0" ]] \
-  || fail "$after sandbox session(s) survived dev_kill_shell_core (had $before)"
-echo "    $before sessions before kill → 0 within 10s — OK"
+  || fail "$after sandbox process(es) survived dev_kill_shell_core (had $(echo $everything | wc -w | tr -d ' '), $before of them sessions)"
+echo "    $before sessions and $(echo $everything | wc -w | tr -d ' ') processes before kill → 0 within 10s, bystander untouched — OK"
 
 # --- 3. registry 哨兵 -------------------------------------------------
 echo "==> phase 3: deleting the registry kills the orphans"
 rm -f "$APPLOG"
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 wait_for WINDOW_FIRST_FRAME 30 || fail "sandbox app never painted (phase 3)"
 sleep 2
-before=$(sandbox_session_count)
+l3s=$(dev_session_pids)
+# shellcheck disable=SC2086
+before=$(alive $l3s)
 (( before >= 1 )) || fail "no sessions to orphan"
 # 只杀 shell/core,把 session 留成孤儿 —— 然后删注册表。
-pkill -9 -f "$ROOT/target/release/marspot-shell( |$)" 2>/dev/null || true
-pkill -9 -f "$ROOT/target/release/marspot-core( |$)"  2>/dev/null || true
+# shell 按它写下的 pid 找,core 是它的子进程。
+shell_pid=$(dev_shell_pid)
+[[ -n $shell_pid ]] || fail "shell.pid does not name this sandbox's shell"
+# only these two: the sessions' own shells are descendants too, and
+# killing those would end the sessions this phase needs as orphans
+upper="$shell_pid $(dev_core_pids)"
+# shellcheck disable=SC2086
+kill -KILL $upper 2>/dev/null
 sleep 1
-orphans=$(sandbox_session_count)
+# shellcheck disable=SC2086
+orphans=$(alive $l3s)
 (( orphans >= 1 )) || fail "orphans already gone before the registry delete?"
 rm -rf "$MARSPOT_STATE_DIR/sessions"
 # 哨兵每 5 秒查一次;给 12 秒。
 for i in $(seq 1 24); do
-  [[ "$(sandbox_session_count)" == "0" ]] && break
+  # shellcheck disable=SC2086
+  [[ "$(alive $l3s)" == "0" ]] && break
   sleep 0.5
 done
-left=$(sandbox_session_count)
+# shellcheck disable=SC2086
+left=$(alive $l3s)
 [[ "$left" == "0" ]] \
   || fail "$left orphan(s) outlived their deleted registry ($orphans before)"
 echo "    $orphans orphans + registry deleted → 0 within 12s — OK"

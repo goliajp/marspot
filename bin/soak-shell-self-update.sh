@@ -91,13 +91,16 @@ rm -f "$SUP_LOG" 2>/dev/null || true
 install -m 755 "$SHELL_BIN" "$TREE/current/marspot-shell"
 install -m 755 "$CORE_BIN" "$TREE/current/marspot-core"
 
-nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 wait_for $'\tHELLO_ACK\t' 1 100 || fail "boot HelloAck never landed"
-SHELL_PID=$(cat "$MARSPOT_STATE_DIR/shell.pid" 2>/dev/null \
-            || pgrep -f "marspot-shell( |$)" | head -1)
-[[ -n "$SHELL_PID" ]] || fail "no shell pid after boot"
+# Only the pid file of this state dir names the shell to signal.  A
+# fallback that looked the shell up by name could pick any marspot-shell
+# on the machine, the installed app's included, and SIGUSR1 it.
+SHELL_PID=$(cat "$MARSPOT_STATE_DIR/shell.pid" 2>/dev/null)
+_dev_is_ours "$SHELL_PID" \
+  || fail "shell.pid is missing or does not name this sandbox's shell (got '${SHELL_PID}')"
 # `apply_pending_update` refuses unless the supervisor is Idle, and a
 # HELLO_ACK is not yet Idle — poking at that instant makes the trigger a
 # no-op and the cycle looks like a failure.

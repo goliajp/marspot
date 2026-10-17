@@ -57,8 +57,10 @@ case "$cmd" in
     # nohup + redirect so the bench harness isn't tied to marspot's output;
     # its result is reported through the marker file.
     bin_path="$(marspot_bin "$bin")"
+    # The pid is written down so kill_app stops this instance and only
+    # this one (env and nohup exec, so $! is the binary's pid).
     (cd "$ROOT" && env $env_pass MARSPOT_SHELL="$shell_script" \
-      nohup "$bin_path" "$@" > /dev/null 2>&1 < /dev/null &) || true
+      nohup "$bin_path" "$@" > /dev/null 2>&1 < /dev/null & bench_record_pid $!) || true
     disown 2>/dev/null || true
     # Don't `wait` — marspot exits when all sessions exit, scenario script polls marker.
     ;;

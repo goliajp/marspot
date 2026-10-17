@@ -128,7 +128,34 @@ rss_kib() {
   ps -o rss= -p "$1" 2>/dev/null | tr -d ' '
 }
 
+# What this bench run launched of our own binaries (marspot, mcli) is
+# written down here, one pid per line, and pids_of / kill_app answer
+# from it: another checkout's bench, or someone's own marspot, may be
+# running on the same host, and a lookup by name would measure or kill
+# theirs too.  Exported, so the scenarios and drivers a run starts add
+# to the same list.
+export MARSPOT_BENCH_PIDS="${MARSPOT_BENCH_PIDS:-/tmp/marspot-bench-pids.$$}"
+
+# bench_record_pid <pid> — the caller just launched `pid`
+bench_record_pid() {
+  echo "$1" >> "$MARSPOT_BENCH_PIDS"
+}
+
+# _bench_pids <name> → the recorded pids still running binary `name`
+_bench_pids() {
+  local p comm
+  [[ -f $MARSPOT_BENCH_PIDS ]] || return 0
+  while read -r p; do
+    [[ $p =~ ^[0-9]+$ ]] || continue
+    comm=$(ps -o comm= -p "$p" 2>/dev/null) || continue
+    if [[ ${comm##*/} == "$1" ]]; then echo "$p"; fi
+  done < "$MARSPOT_BENCH_PIDS"
+  return 0
+}
+
 # pids_of <terminal-name> → newline-separated list of matching pids.
+# marspot and mcli: only the ones this run launched (see above).  The
+# other terminals are whole apps the bench drives, matched by name.
 # macOS quirks:
 #   - pgrep -x doesn't match because comm is the full path on macOS,
 #     not the basename — `pgrep -x iTerm2` returns nothing even when
@@ -136,19 +163,12 @@ rss_kib() {
 #   - pgrep -fl matches the full command line; we filter the result.
 # Returns empty if nothing matches.  Don't depend on order.
 pids_of() {
-  # macOS pgrep matches against `comm` (the executable basename) by
-  # default — that's the most reliable mode and what we use here.
-  # `-f` (match full cmdline) gives inconsistent results across
-  # macOS versions for paths under `/Applications`, so we avoid it.
   # Process basename map:
-  #   marspot     → marspot      (our binary)
-  #   mcli     → mcli      (our binary)
   #   iterm    → iTerm2    (iTerm2 main process)
   #   warp     → stable    (Warp's binary name; verified via ps -axo comm)
   #   terminal → Terminal  (Terminal.app)
   case "$1" in
-    marspot)     pgrep -al '^marspot$'     2>/dev/null | awk '{print $1}' ;;
-    mcli)     pgrep -al '^mcli$'     2>/dev/null | awk '{print $1}' ;;
+    marspot|mcli) _bench_pids "$1" ;;
     iterm)    pgrep -al '^iTerm2$'   2>/dev/null | awk '{print $1}' ;;
     warp)     pgrep -al '^stable$'   2>/dev/null | awk '{print $1}' ;;
     terminal) pgrep -al '^Terminal$' 2>/dev/null | awk '{print $1}' ;;
@@ -187,19 +207,34 @@ json_emit_kv() {
 }
 
 # kill_app <name>
-# DANGEROUS — quits the named terminal app entirely, including the
-# user's open windows.  Only safe for `marspot` (our SUT) and `mcli`.
-# For iterm2 / warp / terminal.app, use close_bench_windows below
-# to close ONLY the windows we opened, leaving the user's work alone.
+# Stops the marspot / mcli instances this bench run launched (see
+# MARSPOT_BENCH_PIDS above), and no others.  For iterm2 / warp /
+# terminal.app, use close_bench_windows below to close ONLY the windows
+# we opened, leaving the user's work alone.
 kill_app() {
   case "$1" in
     marspot|mcli)
-      # marspot/mcli are not the user's daily driver in this repo.
-      # Match by the release/debug binary path so we don't hit any
-      # `marspot` script the user might have on PATH.
-      local pids; pids=$(pids_of "$1")
-      for p in $pids; do kill "$p" 2>/dev/null || true; done
-      sleep 0.3
+      local pids p i keep=""
+      pids=$(_bench_pids "$1")
+      [[ -n $pids ]] || return 0
+      # shellcheck disable=SC2086
+      kill -TERM $pids 2>/dev/null || true
+      for ((i = 0; i < 30; i++)); do
+        # shellcheck disable=SC2086
+        kill -0 $pids 2>/dev/null || break
+        sleep 0.1
+      done
+      # shellcheck disable=SC2086
+      kill -KILL $pids 2>/dev/null || true
+      # keep the list to what is still running, so it stays small
+      while read -r p; do
+        if kill -0 "$p" 2>/dev/null; then keep+="$p"$'\n'; fi
+      done < "$MARSPOT_BENCH_PIDS"
+      if [[ -n $keep ]]; then
+        printf '%s' "$keep" > "$MARSPOT_BENCH_PIDS"
+      else
+        rm -f "$MARSPOT_BENCH_PIDS"
+      fi
       ;;
     *)
       echo "kill_app: refusing to quit '$1' — bench must not destroy user state." >&2
