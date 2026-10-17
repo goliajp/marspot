@@ -61,7 +61,7 @@ ssh "$MAC" "cd ~/work/$NAME && export PATH=\$HOME/.cargo/bin:/usr/local/bin:\$PA
   exec /usr/local/bin/bench-lock heavy bash -c '
     set -e
     cargo build --workspace --all-targets
-    MARSPOT_TEST_JOBS=14 bin/test.sh
+    MARSPOT_TEST_JOBS=14 bin/test.sh --no-fail-fast
     cargo clippy --workspace --all-targets -- -D warnings
     bin/lint-deps.sh
     cargo build --release --bins
