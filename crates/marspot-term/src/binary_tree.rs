@@ -62,10 +62,17 @@ pub fn can_start(bin: &Path) -> bool {
 
 /// [`can_start`] with the deadline spelled out, so a test can prove the
 /// bound exists without waiting for it.
+///
+/// The candidate runs in a process group of its own, and a timeout kills
+/// the group: a candidate that hangs may have started children of its
+/// own (a script's `sleep`, a shell's pipeline), and killing only the
+/// process we spawned leaves them running for good.
 pub fn can_start_within(bin: &Path, timeout: std::time::Duration) -> bool {
+    use std::os::unix::process::CommandExt;
     match Command::new(bin)
         .arg("--version")
         .env("MARSPOT_NO_REDIRECT", "1")
+        .process_group(0)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -85,7 +92,9 @@ pub fn can_start_within(bin: &Path, timeout: std::time::Duration) -> bool {
                     }
                     Ok(None) => {
                         if std::time::Instant::now() >= deadline {
-                            let _ = child.kill();
+                            // Not yet reaped, so the group id is still
+                            // this child's and cannot name anyone else.
+                            unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
                             let _ = child.wait();
                             crate::lx_warn!(
                                 "binary_tree.can_start.timed_out",
@@ -443,20 +452,28 @@ mod probe_bound_tests {
     /// "answered non-zero" path and proving nothing about the bound.
     #[test]
     fn a_candidate_that_never_answers_is_given_up_on() {
-        let script =
-            std::env::temp_dir().join(format!("marspot-probe-hang-{}", std::process::id()));
-        std::fs::write(&script, b"#!/bin/sh\nsleep 60\n").unwrap();
+        let dir = crate::test_env::TempDir::new("probe-hang");
+        let script = dir.join("candidate");
+        let grandchild = dir.join("grandchild.pid");
+        // The candidate's own child is what a timeout used to leave
+        // behind, so the script starts one and says which.
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nsleep 60 &\necho $! > {}\nwait\n", grandchild.display()),
+        )
+        .unwrap();
         std::fs::set_permissions(
             &script,
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
         )
         .unwrap();
 
-        let budget = std::time::Duration::from_millis(300);
+        // Long enough for the script to have written the pid of its
+        // child before it is killed, on a busy host too.
+        let budget = std::time::Duration::from_millis(500);
         let t0 = std::time::Instant::now();
         let verdict = super::can_start_within(&script, budget);
         let took = t0.elapsed();
-        std::fs::remove_file(&script).ok();
 
         assert!(
             !verdict,
@@ -466,6 +483,28 @@ mod probe_bound_tests {
             took < budget * 8,
             "gave up after {took:?} against a {budget:?} budget — not a bound"
         );
+
+        let pid: libc::pid_t = std::fs::read_to_string(&grandchild)
+            .expect("the candidate ran far enough to start its child")
+            .trim()
+            .parse()
+            .unwrap();
+        // Reparented to launchd once its parent died, which reaps it;
+        // until then it can show as a zombie for a moment.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let gone = loop {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        if !gone {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(gone, "the candidate's child {pid} outlived the probe that gave up on it");
     }
 
     /// A candidate that answers non-zero is rejected at once, not
