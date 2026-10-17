@@ -87,13 +87,12 @@ curl -sf "http://127.0.0.1:$PORT/feed.json" >/dev/null \
 echo "[1/5] feed OK — signed tarball + feed.json served on :$PORT"
 
 # --- 1. Boot with the fake feed --------------------------------------
-dev_ensure_shelld || fail "sandbox shelld"
 dev_kill_shell_core
 dev_wipe_state
 mkdir -p "$(dirname "$SUP_LOG")"
 rm -f "$SUP_LOG" 2>/dev/null || true
 MARSPOT_UPDATE_FEED="http://127.0.0.1:$PORT/feed.json" \
-  nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 for _ in $(seq 1 50); do

@@ -78,7 +78,7 @@ sleep 0.3
 MARSPOT_BIN_PATH="$(marspot_bin marspot)"
 ( cd "$ROOT" && MARSPOT_LATENCY="$LAT_PATH" MARSPOT_PROFILE="$PROF_PATH" \
   MARSPOT_SHELL="$WORKER" \
-  nohup "$MARSPOT_BIN_PATH" > /dev/null 2>&1 < /dev/null & ) || true
+  nohup "$MARSPOT_BIN_PATH" > /dev/null 2>&1 < /dev/null & bench_record_pid $! ) || true
 disown 2>/dev/null || true
 
 # Wait for marspot to come up + accept focus.

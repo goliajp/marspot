@@ -57,7 +57,7 @@ launch() { # extra env assignments passed as VAR=VAL …
   rm -f "$APPLOG"
   > "$RUNLOG"
   env MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" "$@" \
-    nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+    nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
   disown
 }
 
@@ -118,7 +118,7 @@ sleep 3
 
 grep -q 'WINDOW_CLOSE_LAST_PANE' "$APPLOG" \
   && fail "with two windows open, emptying one must not quit the app"
-pgrep -f "$SHELL_BIN" >/dev/null || fail "the app quit when it should not have"
+[[ -n "$(dev_shell_pid)" ]] || fail "the app quit when it should not have"
 
 shape="$(saved_shape)"
 echo "==> saved layout after emptying one window: $shape"
@@ -136,7 +136,7 @@ wait_for CORE_LOOP 40 || fail "the core never came up for phase 2"
 wait_for WINDOW_CLOSE_LAST_PANE 60 \
   || fail "emptying the last window did not quit marspot"
 sleep 3
-pgrep -f "$SHELL_BIN" >/dev/null && fail "marspot is still running after the last pane closed"
+[[ -n "$(dev_shell_pid)" ]] && fail "marspot is still running after the last pane closed"
 
 [[ "$(saved_shape)" == "NONE" ]] || fail "the saved layout outlived the last pane"
 [[ -f "$MARSPOT_STATE_DIR/window-state.bin" ]] \

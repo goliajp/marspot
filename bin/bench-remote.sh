@@ -11,18 +11,22 @@
 #   HOST=other-mini bin/bench-remote.sh --full
 #
 # Contract:
-#   - exclusive : mkdir lock both ends against other marspot runs, plus
-#                 the host's shared bench lock, held exclusively, against
-#                 everything else using the machine
+#   - exclusive : a local mkdir lock against another bench-remote from
+#                 this machine, and the host's bench lock, taken as
+#                 `bench`, against everything else using the machine
 #   - clean     : dedicated CARGO_TARGET_DIR, caffeinate -dims
-#   - terminating: trap on EXIT/INT/TERM kills the remote PGID + sweeps
-#                  any orphan marspot/mcli; lock released unconditionally
-#   - bounded   : cargo sweep --time 30 prunes stale target/ artefacts
+#   - bounded   : the build + measurement is stopped after
+#                 MARSPOT_BENCH_TIMEOUT seconds (default 5400); cargo
+#                 sweep --time 30 prunes stale target/ artefacts
+#   - terminating: trap on EXIT/INT/TERM kills the remote process group,
+#                  and with it the bench's own marspot/mcli children
 #   - retrievable: bench/results/ rsync'd back to bench/remote-runs/<ts>/
 #
 # The remote shell pid is captured into $REMOTE_PIDF; SSH-spawned shells
 # are session/PG leaders so $$ == PGID, which lets `kill -- -PGID` collect
 # every descendant including the bench.sh subshells and mcli children.
+# Nothing is killed by name: other sessions run their own marspot and
+# mcli on the same host.
 
 set -euo pipefail
 
@@ -48,15 +52,9 @@ REMOTE_NAME="${REMOTE_NAME:-bench-marspot}"
 # run has to look.
 REMOTE_DIR="work/$REMOTE_NAME"
 LOCK_LOCAL="/tmp/marspot-bench-remote.lock.d"
-# One lock for every kind of measuring this host does.  A bench and a
-# test run on the same box at the same time do not merely queue — the
-# bench measures the test suite's load and calls it a regression
-# (2026-09-28: an "idle re-measure" scored parse-file 47% low and
-# skipped its L3 rows at load 19.8, because a 14-thread test run had
-# started underneath it).  The name is deliberately not "bench".
-REMOTE_LOCK="/tmp/marspot-runner.lock.d"
-REMOTE_PIDF="/tmp/marspot-bench-remote.pgid"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
+REMOTE_PIDF="/tmp/marspot-bench-remote-$TS-$$.pgid"
+TIMEOUT="${MARSPOT_BENCH_TIMEOUT:-5400}"
 OUT_DIR="$ROOT/bench/remote-runs/$TS"
 
 # ---- local lock ------------------------------------------------------
@@ -76,16 +74,10 @@ cleanup() {
   local rc=$?
   echo "==> cleanup"
   ssh -o ConnectTimeout=5 "$HOST" "
-    if [[ -f $REMOTE_PIDF ]]; then
-      pgid=\$(cat $REMOTE_PIDF 2>/dev/null || true)
-      if [[ -n \${pgid:-} ]]; then
-        kill -- -\$pgid 2>/dev/null || true
-      fi
+    if [ -f $REMOTE_PIDF ]; then
+      kill -TERM -- -\$(cat $REMOTE_PIDF) 2>/dev/null
       rm -f $REMOTE_PIDF
     fi
-    pkill -x marspot 2>/dev/null || true
-    pkill -x mcli 2>/dev/null || true
-    rm -rf $REMOTE_LOCK
   " </dev/null >/dev/null 2>&1 || true
   rm -rf "$LOCK_LOCAL"
   exit $rc
@@ -97,13 +89,6 @@ echo "==> pre-flight on $HOST"
 ssh -o ConnectTimeout=5 "$HOST" "
   set -e
   mkdir -p ~/$REMOTE_DIR
-  if ! mkdir $REMOTE_LOCK 2>/dev/null; then
-    if [[ -f $REMOTE_LOCK/pid ]] && kill -0 \$(cat $REMOTE_LOCK/pid) 2>/dev/null; then
-      echo 'remote lock held by pid '\$(cat $REMOTE_LOCK/pid) >&2; exit 1
-    fi
-    rm -rf $REMOTE_LOCK && mkdir $REMOTE_LOCK
-  fi
-  echo \$\$ > $REMOTE_LOCK/pid
   command -v cargo >/dev/null || { echo 'cargo missing on remote' >&2; exit 2; }
 " </dev/null
 
@@ -221,10 +206,16 @@ ssh "$HOST" "
   # instead, where it waits behind benches rather than behind the
   # consequences of them. The cost is holding the exclusive lock
   # across a compile, which is the trade the global rule takes.
-  exec $LOCK_CMD caffeinate -dims sh -c \
-    './bin/bench.sh --build-only && exec ./bin/bench.sh --no-build $ARGS_Q'
+  # The pid file lives exactly as long as the run, so the cleanup never
+  # signals a process group that has since been reused.
+  rc=0
+  $LOCK_CMD caffeinate -dims bin/_bounded.sh $TIMEOUT sh -c \
+    './bin/bench.sh --build-only && exec ./bin/bench.sh --no-build $ARGS_Q' || rc=\$?
+  rm -f $REMOTE_PIDF
+  exit \$rc
 " </dev/null
 REMOTE_RC=$?
+(( REMOTE_RC != 124 )) || echo "==> the bench on $HOST did not finish within ${TIMEOUT}s; stopped it" >&2
 # 75 is bench-lock giving up: the machine was busy, not the code.  A
 # different thing to report and a different thing to do about it.
 if (( REMOTE_RC == 75 )); then

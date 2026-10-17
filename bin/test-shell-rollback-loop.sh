@@ -44,7 +44,7 @@ trap cleanup EXIT
 # the real shell instead of redirecting -- fails the test instead of
 # holding the runner until someone notices.
 launch_expecting_exit() {
-  "$SHELL_BIN" >/dev/null 2>&1 &
+  "$SHELL_BIN" >/dev/null 2>&1 & dev_record_pid $!
   local pid=$! i
   for (( i = 0; i < 300; i++ )); do
     kill -0 "$pid" 2>/dev/null || { wait "$pid"; return 0; }
@@ -88,7 +88,6 @@ if [[ ! -x "$SHELL_BIN" ]]; then
   ( cd "$ROOT" && cargo build --release --bin marspot-shell 2>&1 | tail -3 )
 fi
 [[ -x "$SHELL_BIN" ]] || fail "no $SHELL_BIN after build"
-dev_ensure_shelld || fail "sandbox shelld"
 
 # --- Case A: crash loop with a prev/ to fall back to ----------------
 reset
@@ -124,7 +123,7 @@ stage_broken_current
 launch_expecting_exit
 launch_expecting_exit
 # Launch 3 continues as the real bundle shell (GUI) — background it.
-nohup "$SHELL_BIN" >/dev/null 2>&1 < /dev/null &
+nohup "$SHELL_BIN" >/dev/null 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 START=$(date +%s)
