@@ -15,10 +15,9 @@
 #   E2E_SUITE_TIMEOUT=1800 bin/test-e2e-remote.sh test-multi-window.sh
 #   HOST=other-mini bin/test-e2e-remote.sh
 #
-# Not in the default set, run by hand on the machine that holds the
-# private update key (keys/marspot-update.sec): test-real-update.sh,
-# test-negative-update.sh, test-adversarial-update.sh.  They sign a
-# feed with it, and the key does not leave that machine.
+# The update suites sign their feed with a key generated for the run;
+# the build they test accepts it only with the `test-update-key` feature
+# on and a state dir set.
 #
 # Contract:
 #   - shares the host     : every suite holds the host's bench lock,
@@ -52,6 +51,9 @@ DEFAULT_SUITES=(
   test-cc-profile-switch.sh
   test-codex-profile-switch.sh
   test-agent-handoff.sh
+  test-real-update.sh
+  test-negative-update.sh
+  test-adversarial-update.sh
 )
 
 # One tool does the copying, for every session and every repo: it takes
