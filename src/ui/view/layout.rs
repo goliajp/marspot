@@ -119,11 +119,6 @@ pub struct Decoration {
     pub shortcut: Option<(super::types::KeyEquivalent, super::types::ActionId)>,
     /// Initial-focus marker (at most one per tree).
     pub auto_focus: bool,
-    /// Lifecycle hooks — nothing dispatches them yet.
-    pub on_appear: Option<super::types::ActionId>,
-    pub on_disappear: Option<super::types::ActionId>,
-    /// Declarative enter / exit anim spec.
-    pub transition: Option<super::types::Transition>,
     /// Transform applied at paint time.  Translate goes through
     /// offset accumulator already;  scale/rotate held for v2+.
     pub transform: Option<super::types::Transform>,
@@ -150,9 +145,6 @@ impl Default for Decoration {
             bg_gradient: None,
             shortcut: None,
             auto_focus: false,
-            on_appear: None,
-            on_disappear: None,
-            transition: None,
             transform: None,
         }
     }
@@ -463,10 +455,6 @@ pub fn layout<'a>(view: &View, ctx: LayoutCtx<'a>, origin: (f64, f64), c: Constr
             layout_zstack(children, *align, ctx, origin, c, view)
         }
         View::ScrollView { child, id } => layout_scroll(child, *id, ctx, origin, c, view),
-        View::LazyVStack { items, gap, item_height, id } =>
-            layout_lazy_vstack(items, *gap, *item_height, *id, ctx, origin, c, view),
-        View::LazyHStack { items, gap, item_width, id } =>
-            layout_lazy_hstack(items, *gap, *item_width, *id, ctx, origin, c, view),
         View::Grid { items, cols, col_gap, row_gap, cell_w, cell_h } =>
             layout_grid(items, *cols, *col_gap, *row_gap, *cell_w, *cell_h, ctx, origin, c, view),
         View::VariableGrid { items, tracks_w, tracks_h, gap } =>
@@ -499,19 +487,6 @@ pub fn layout<'a>(view: &View, ctx: LayoutCtx<'a>, origin: (f64, f64), c: Constr
                 children: Vec::new(),
             }
         }
-        View::Image(_) => {
-            // Hug constraints or full size if unbounded.  Caller is
-            // expected to wrap in `.frame(width:, height:)`.
-            let w = if c.max_w.is_finite() { c.max_w } else { 64.0 };
-            let h = if c.max_h.is_finite() { c.max_h } else { 64.0 };
-            let size = c.clamp(w, h);
-            LaidOut {
-                view: view.clone(),
-                rect: Rect { x: origin.0, y: origin.1, w: size.w, h: size.h },
-                deco: Decoration::default(),
-                children: Vec::new(),
-            }
-        }
         View::Shape(_) => {
             // Same shape contract as Filled — fills constraints.
             let w = if c.max_w.is_finite() { c.max_w } else { 32.0 };
@@ -525,102 +500,6 @@ pub fn layout<'a>(view: &View, ctx: LayoutCtx<'a>, origin: (f64, f64), c: Constr
             }
         }
         View::Modified { child, mods } => layout_modified(child, mods, ctx, origin, c, view),
-    }
-}
-
-// ─── LazyVStack ───────────────────────────────────────────────
-
-#[allow(clippy::too_many_arguments)]
-fn layout_lazy_vstack<'a>(
-    items: &[View],
-    gap: Length,
-    item_height: Length,
-    id: super::types::ViewId,
-    ctx: LayoutCtx<'a>,
-    origin: (f64, f64),
-    c: Constraints,
-    self_view: &View,
-) -> LaidOut {
-    let gap_phys = gap.resolve_for_axis_with_cell(0.0, ctx.scale, ctx.cell_w_phys);
-    let item_h_phys = item_height.resolve_for_axis_with_cell(0.0, ctx.scale, ctx.cell_w_phys);
-    let viewport_w = c.max_w;
-    let viewport_h = if c.max_h.is_finite() { c.max_h } else { 400.0 };
-
-    // Update / read scroll state (uniform-height list = ScrollView
-    // state shape; reuse same key).
-    let mut state = super::scroll::scroll_state(id);
-    state.content_h = super::lazy::total_height(items.len(), item_h_phys, gap_phys);
-    state.viewport_h = viewport_h;
-    state.clamp_offset();
-    super::scroll::set_scroll_state(id, state);
-
-    let (first, last) = super::lazy::visible_range(
-        items.len(), item_h_phys, gap_phys, state.offset_y, viewport_h,
-    );
-
-    let mut laid_children = Vec::with_capacity(last.saturating_sub(first));
-    for (i, item) in items.iter().enumerate().take(last).skip(first) {
-        let item_y_local = super::lazy::item_y(i, item_h_phys, gap_phys);
-        let item_origin = (origin.0, origin.1 + item_y_local - state.offset_y);
-        let item_c = Constraints {
-            min_w: 0.0, max_w: viewport_w,
-            min_h: item_h_phys, max_h: item_h_phys,
-        };
-        let laid = layout(item, ctx, item_origin, item_c);
-        laid_children.push(laid);
-    }
-
-    LaidOut {
-        view: without_children(self_view),
-        rect: Rect { x: origin.0, y: origin.1, w: viewport_w, h: viewport_h },
-        deco: Decoration::default(),
-        children: laid_children,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn layout_lazy_hstack<'a>(
-    items: &[View],
-    gap: Length,
-    item_width: Length,
-    id: super::types::ViewId,
-    ctx: LayoutCtx<'a>,
-    origin: (f64, f64),
-    c: Constraints,
-    self_view: &View,
-) -> LaidOut {
-    let gap_phys = gap.resolve_for_axis_with_cell(0.0, ctx.scale, ctx.cell_w_phys);
-    let item_w_phys = item_width.resolve_for_axis_with_cell(0.0, ctx.scale, ctx.cell_w_phys);
-    let viewport_h = if c.max_h.is_finite() { c.max_h } else { 32.0 };
-    let viewport_w = if c.max_w.is_finite() { c.max_w } else { 400.0 };
-
-    let mut state = super::scroll::scroll_state(id);
-    state.content_h = super::lazy::total_height(items.len(), item_w_phys, gap_phys);
-    state.viewport_h = viewport_w;
-    state.clamp_offset();
-    super::scroll::set_scroll_state(id, state);
-
-    let (first, last) = super::lazy::visible_range(
-        items.len(), item_w_phys, gap_phys, state.offset_y, viewport_w,
-    );
-
-    let mut laid_children = Vec::with_capacity(last.saturating_sub(first));
-    for (i, item) in items.iter().enumerate().take(last).skip(first) {
-        let item_x_local = super::lazy::item_y(i, item_w_phys, gap_phys);
-        let item_origin = (origin.0 + item_x_local - state.offset_y, origin.1);
-        let item_c = Constraints {
-            min_w: item_w_phys, max_w: item_w_phys,
-            min_h: 0.0, max_h: viewport_h,
-        };
-        let laid = layout(item, ctx, item_origin, item_c);
-        laid_children.push(laid);
-    }
-
-    LaidOut {
-        view: without_children(self_view),
-        rect: Rect { x: origin.0, y: origin.1, w: viewport_w, h: viewport_h },
-        deco: Decoration::default(),
-        children: laid_children,
     }
 }
 
@@ -1192,15 +1071,6 @@ fn layout_modified<'a>(
             }
             Modifier::AutoFocus => {
                 bake.auto_focus = true;
-            }
-            Modifier::OnAppear(a) => {
-                bake.on_appear = Some(*a);
-            }
-            Modifier::OnDisappear(a) => {
-                bake.on_disappear = Some(*a);
-            }
-            Modifier::Transition(t) => {
-                bake.transition = Some(*t);
             }
             Modifier::Transform(t) => {
                 // Translate accumulates into offset for v1 paint;

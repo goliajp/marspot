@@ -330,33 +330,6 @@ impl Default for Transform {
     fn default() -> Self { Self::identity() }
 }
 
-/// `Transition` — declarative enter / exit animation spec.  Attached
-/// via `.transition()` modifier.
-///
-/// v1 = data type only;  nothing drives it yet.
-#[derive(Clone, Copy, Debug)]
-pub struct Transition {
-    pub kind: TransitionKind,
-    pub duration_ms: f64,
-    pub curve: AnimCurve,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum TransitionKind {
-    /// Fade alpha from 0 → 1 on appear, 1 → 0 on disappear.
-    Opacity,
-    /// Scale 0.8 → 1 on appear, 1 → 0.8 on disappear (size + opacity).
-    Scale,
-    /// Custom combination — caller specifies both.
-    Combined { from_opacity: f64, from_scale: f64, from_offset: (f64, f64) },
-}
-
-impl Transition {
-    pub const fn scale(duration_ms: f64) -> Self {
-        Self { kind: TransitionKind::Scale, duration_ms, curve: AnimCurve::EaseOut }
-    }
-}
-
 /// Linear interpolation trait — primitive types + Color implement.
 pub trait Lerp: Sized {
     fn lerp(from: Self, to: Self, t: f64) -> Self;

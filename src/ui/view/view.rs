@@ -27,9 +27,8 @@ pub enum View {
     Spacer { flex: u32 },
     /// Solid-color rect, hugs full constraints by default.
     Filled { color: Color, radius: Length },
-    /// 1pt hairline along its long axis.  At least one of (w, h)
-    /// should be small for this to read.
-    Hairline { color: Color, vertical: bool },
+    /// 1pt horizontal hairline across the middle of its rect.
+    Hairline { color: Color },
 
     // ─── Containers ────────────────────────────────────────────
     /// Vertical stack — main axis y, cross axis x.
@@ -56,21 +55,6 @@ pub enum View {
     /// keyed by `id`.  v1 vertical-only.
     ScrollView {
         child: Box<View>,
-        id: ViewId,
-    },
-    /// Uniform-height virtualised list — only items in the visible
-    /// viewport get laid out + painted.  See `lazy.rs` for details.
-    LazyVStack {
-        items: Vec<View>,
-        gap: Length,
-        item_height: Length,
-        id: ViewId,
-    },
-    /// Uniform-width horizontal mirror of `LazyVStack`.
-    LazyHStack {
-        items: Vec<View>,
-        gap: Length,
-        item_width: Length,
         id: ViewId,
     },
     /// Uniform-cell grid — items flow left-to-right, top-to-bottom
@@ -107,11 +91,6 @@ pub enum View {
         id: ViewId,
         options: Vec<String>,
     },
-    /// Image primitive — type defined; real renderer Image
-    /// primitive support is a v2+ follow-up (currently paints as
-    /// a tinted placeholder rect).  Always wrap in `.frame(width:,
-    /// height:)` since we have no intrinsic image dims yet.
-    Image(Image),
     /// Geometric shape primitive — Circle / Capsule / RoundedRect /
     /// Path (v2+).  v1 renders as approximating rects/lines through
     /// the existing Canvas; richer SDF paths land later.
@@ -123,32 +102,6 @@ pub enum View {
         mods: Vec<Modifier>,
     },
 }
-
-#[derive(Clone, Debug)]
-pub struct Image {
-    pub source: ImageSource,
-    pub mode: ContentMode,
-    pub tint: Option<Color>,
-}
-
-#[derive(Clone, Debug)]
-pub enum ImageSource {
-    /// Glyph atlas entry — the renderer's existing chrome SDF
-    /// path can paint this.  Reserved name; wiring lands when
-    /// real Image primitive is added.
-    Glyph(u32),
-    /// Inline RGBA bytes (PNG/JPEG decoded).  Paint emits a
-    /// placeholder until Image primitive is added.
-    Raw(std::sync::Arc<Vec<u8>>),
-    /// IOSurface — for shared GPU images (future use).
-    IOSurface(u32),
-    /// Placeholder named token (eg system icon) — v1 paints as
-    /// tinted rect.
-    Named(&'static str),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContentMode { Fit, Fill, Center }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ShapeSpec {
@@ -237,7 +190,6 @@ pub struct Text {
     pub color: Color,
     pub size: TextSize,
     pub weight: TextWeight,
-    pub align: TextAlign,
     pub lines: TextLines,
     /// Which font path lays this run out.  Default
     /// `Mono { size: Body }` preserves the current Monaco cell
@@ -268,9 +220,6 @@ pub struct TextStyle {
     pub color: crate::ui::core::Color,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TextAlign { Leading, Center, Trailing }
-
 #[derive(Clone, Copy, Debug)]
 pub enum TextLines {
     Single { truncate: Truncate },
@@ -288,7 +237,6 @@ impl Text {
             color: crate::ui::theme::color::FG,
             size,
             weight: TextWeight::Regular,
-            align: TextAlign::Leading,
             lines: TextLines::Single { truncate: Truncate::End },
             font: TextFontSpec::Mono { size },
         }
@@ -366,14 +314,6 @@ pub enum Modifier {
     /// one per frame should be set;  framework picks the first if
     /// multiple appear.
     AutoFocus,
-    /// Fire when this view first appears in the tree (its
-    /// `ViewId` enters the live set).  Nothing dispatches it yet.
-    OnAppear(ActionId),
-    /// Fire when this view leaves the tree.
-    OnDisappear(ActionId),
-    /// Declarative enter / exit animation.  Nothing drives it yet;
-    /// baked into Decoration so paint can apply it during transit.
-    Transition(super::types::Transition),
     /// Scale / rotate / translate transform applied at paint time.
     /// v1 = data only(paint applies translate via offset accumulator);
     /// rotate / scale need Metal vertex transform = v2+.
@@ -442,7 +382,7 @@ pub fn filled(color: Color) -> View {
 }
 
 pub fn hairline_horiz(color: Color) -> View {
-    View::Hairline { color, vertical: false }
+    View::Hairline { color }
 }
 
 /// Wrap `child` in a scrolling viewport keyed by `id`.
@@ -738,11 +678,6 @@ impl View {
         self.add_mod(Modifier::Shortcut(k, a))
     }
     pub fn auto_focus(self) -> Self { self.add_mod(Modifier::AutoFocus) }
-    pub fn on_appear(self, a: ActionId) -> Self { self.add_mod(Modifier::OnAppear(a)) }
-    pub fn on_disappear(self, a: ActionId) -> Self { self.add_mod(Modifier::OnDisappear(a)) }
-    pub fn transition(self, t: super::types::Transition) -> Self {
-        self.add_mod(Modifier::Transition(t))
-    }
     pub fn transform(self, t: super::types::Transform) -> Self {
         self.add_mod(Modifier::Transform(t))
     }
