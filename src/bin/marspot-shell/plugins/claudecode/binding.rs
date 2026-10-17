@@ -159,10 +159,8 @@ impl WorkerCtx {
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
-    use std::sync::Arc;
 
     use super::*;
-    use crate::plugins::claudecode::ShelldClient;
 
     fn session(uuid: &str, mtime: SystemTime, has_conversation: bool) -> SessionInfo {
         SessionInfo {
@@ -178,7 +176,7 @@ mod tests {
     fn ctx(sessions: Vec<SessionInfo>) -> WorkerCtx {
         WorkerCtx {
             projects_root: PathBuf::from("/fake"),
-            shelld: Arc::new(ShelldClient::new(None)),
+            caches: Default::default(),
             statusline_state: None,
             seen: sessions.into_iter().map(|s| (s.jsonl_path.clone(), s)).collect(),
             model_cutoff: HashMap::new(),
