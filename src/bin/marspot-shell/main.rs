@@ -46,6 +46,7 @@ mod observe;
 mod orphans;
 mod pane_decls;
 mod pane_status;
+mod pane_tables;
 mod plugins;
 mod present;
 mod receipts;
@@ -765,25 +766,11 @@ struct ShellApp {
     /// to the active core as `MsgType::PaneBadge` frames.
     pane_badge_rx: std::sync::mpsc::Receiver<plugins::host::PaneBadgeUpdate>,
     pane_wheel_keys_rx: std::sync::mpsc::Receiver<plugins::host::PaneWheelKeysUpdate>,
-    /// The wheel declarations currently in force, by pane.
-    ///
-    /// A wheel declaration is issued ONCE per pane — a plugin says "this is
-    /// how the wheel reaches me" and has nothing to repeat.  Dropping
-    /// that one frame left the pane with no wheel keys for the rest of
-    /// its life, and it landed exactly in the gap a core swap opens
-    /// (2026-09-06: codex declared 1s after L1 re-execed, core was
-    /// mid-boot, the wheel then did nothing at all).  So the shell
-    /// keeps the mapping and replays it on every handshake.
-    pane_wheel_keys: std::collections::HashMap<u64, plugins::host::PaneWheelKeysUpdate>,
     pane_agent_tui_rx: std::sync::mpsc::Receiver<plugins::host::PaneAgentTuiUpdate>,
     pane_render_markup_rx:
         std::sync::mpsc::Receiver<plugins::host::PaneRenderMarkupUpdate>,
-    /// The markup declarations in force, replayed on every handshake
-    /// for the same reason the wheel ones are: a plugin says it once.
-    /// Last agent-TUI declaration per pane, so the heartbeat is
-    /// only logged when it changes.
-    pane_agent_tui: std::collections::HashMap<u64, bool>,
-    pane_render_markup: std::collections::HashMap<u64, bool>,
+    /// Per-pane declarations and autorun memory, dropped with the pane.
+    pane_tables: pane_tables::PaneTables,
     /// Same shape as `pane_badge_rx` but for plugin-set pane titles.
     pane_title_rx: std::sync::mpsc::Receiver<plugins::host::PaneTitleUpdate>,
     /// Receiver for `begin_pane_session` requests.
@@ -797,11 +784,6 @@ struct ShellApp {
     /// directory — the one identity that survives a restart, a rename
     /// (there are none) and a move between windows.
     autorun_panes: std::collections::HashSet<String>,
-    /// Per-pane memory for that policy.
-    autorun_mem: std::collections::HashMap<u64, plugins::autorun::Memory>,
-    /// The last reason logged for each pane, so a steady state is one
-    /// line rather than one every thirty seconds.
-    autorun_why: std::collections::HashMap<u64, String>,
     /// When the panes were last looked at.  Once a minute is plenty:
     /// every trigger requires the pane to have been quiet for longer
     /// than that already.
@@ -1291,18 +1273,14 @@ impl ShellApp {
             saved_window_frames: marspot::state::read_windows().unwrap_or_default(),
             pane_badge_rx,
             pane_wheel_keys_rx,
-            pane_wheel_keys: std::collections::HashMap::new(),
+            pane_tables: pane_tables::PaneTables::default(),
             pane_agent_tui_rx,
             pane_render_markup_rx,
-            pane_agent_tui: std::collections::HashMap::new(),
-            pane_render_markup: std::collections::HashMap::new(),
             pane_title_rx,
             pane_session_begin_rx,
             pty_op_rx,
             cli_rx,
             autorun_panes: cli_socket::load_autorun(),
-            autorun_mem: std::collections::HashMap::new(),
-            autorun_why: std::collections::HashMap::new(),
             autorun_last_look: None,
             op_host: SupervisorOpHost { begin_tx: pane_session_begin_tx_for_ops },
             pty_ops: plugins::pty_op::PtyOps::new(
@@ -1368,19 +1346,19 @@ impl ShellApp {
     /// Replay every wheel declaration into a freshly-attached core.
     ///
     /// Without this a core swap silently disarms the wheel for every
-    /// pane that had declared before it — see `pane_wheel_keys`.
+    /// pane that had declared before it — see `PaneTables::wheel_keys`.
     fn replay_pane_wheel_keys(&self) {
-        if self.pane_wheel_keys.is_empty() {
+        if self.pane_tables.wheel_keys.is_empty() {
             return;
         }
         lx_info!(
             "shell.pane_wheel_keys.replayed",
-            &format!("panes={}", self.pane_wheel_keys.len())
+            &format!("panes={}", self.pane_tables.wheel_keys.len())
         );
-        for upd in self.pane_wheel_keys.values() {
+        for upd in self.pane_tables.wheel_keys.values() {
             self.send_pane_wheel_keys(upd);
         }
-        for (sid, on) in &self.pane_render_markup {
+        for (sid, on) in &self.pane_tables.render_markup {
             self.send_pane_render_markup(*sid, *on);
         }
     }
@@ -2323,9 +2301,23 @@ impl ShellApp {
         // Closed panes leave every per-pane table here, against the
         // same map the plugin host drops its memo by: a repeat the host
         // swallows must be one these tables still hold.
-        self.pane_look.retain(|sid| snapshot.contains_key(&sid));
+        self.forget_closed_panes(|sid| snapshot.contains_key(&sid));
         self.plugin_host.publish_pane_status(snapshot);
         self.flush_pane_decls();
+    }
+
+    /// A session the registry no longer lists is a closed pane: end what
+    /// L1 still runs on it and drop it from every per-pane table.
+    fn forget_closed_panes(&mut self, open: impl Fn(u64) -> bool) {
+        let closed: Vec<u64> =
+            self.active_pane_sessions.keys().copied().filter(|sid| !open(*sid)).collect();
+        for sid in closed {
+            self.end_pane_session(sid, plugins::EndReason::PaneClosed);
+        }
+        self.pty_ops.retain(&open);
+        self.pane_look.retain(&open);
+        self.pane_tables.retain(&open);
+        self.wake_queue.retain(|sid| open(*sid));
     }
 
     /// Send the current core every badge, title and recede level it
@@ -2503,12 +2495,12 @@ impl ShellApp {
         // CHANGE — the heartbeat is not news.
         while let Ok(upd) = self.pane_agent_tui_rx.try_recv() {
             let sid = upd.shelld_session_id;
-            if self.pane_agent_tui.get(&sid) != Some(&upd.on) {
+            if self.pane_tables.agent_tui.get(&sid) != Some(&upd.on) {
                 lx_info!(
                     "shell.pane_agent_tui.declared",
                     &format!("sid={sid} on={}", upd.on)
                 );
-                self.pane_agent_tui.insert(sid, upd.on);
+                self.pane_tables.agent_tui.insert(sid, upd.on);
             }
             self.send_pane_agent_tui(sid, upd.on);
         }
@@ -2519,9 +2511,9 @@ impl ShellApp {
                 &format!("sid={sid} on={}", upd.on)
             );
             if upd.on {
-                self.pane_render_markup.insert(sid, true);
+                self.pane_tables.render_markup.insert(sid, true);
             } else {
-                self.pane_render_markup.remove(&sid);
+                self.pane_tables.render_markup.remove(&sid);
             }
             self.send_pane_render_markup(sid, upd.on);
         }
@@ -2534,9 +2526,9 @@ impl ShellApp {
             // outlives L1's, so a one-shot clear is not enough), which
             // at INFO was 36 lines a minute per codex pane.
             let changed = if cleared {
-                self.pane_wheel_keys.remove(&sid).is_some()
+                self.pane_tables.wheel_keys.remove(&sid).is_some()
             } else {
-                self.pane_wheel_keys.insert(sid, upd.clone()).as_ref() != Some(&upd)
+                self.pane_tables.wheel_keys.insert(sid, upd.clone()).as_ref() != Some(&upd)
             };
             if changed {
                 lx_info!(
@@ -3548,7 +3540,7 @@ impl ShellApp {
             }
             Some(false) => {
                 self.autorun_panes.remove(&cwd);
-                self.autorun_mem.remove(&sid);
+                self.pane_tables.autorun_mem.remove(&sid);
                 let _ = cli_socket::save_autorun(&self.autorun_panes);
                 Ok(format!("autorun off for {cwd}"))
             }
@@ -3591,7 +3583,7 @@ impl ShellApp {
             .filter(|(_, cwd, _)| self.autorun_panes.contains(cwd))
             .map(|(sid, cwd, _)| (sid, cwd))
             .collect();
-        self.autorun_mem.retain(|sid, _| panes.iter().any(|(s, _)| s == sid));
+        self.pane_tables.autorun_mem.retain(|sid, _| panes.iter().any(|(s, _)| s == sid));
 
         for (sid, cwd) in panes {
             let Some((status, _held, _quiescent)) = statuses.get(&sid) else { continue };
@@ -3616,7 +3608,7 @@ impl ShellApp {
                 work_in_flight: matches!(status, marspot::pane_state::PaneStatus::Busy(_)),
                 screen: &screen,
             };
-            let mem = self.autorun_mem.entry(sid).or_default();
+            let mem = self.pane_tables.autorun_mem.entry(sid).or_default();
             let was_exhausted = mem.is_exhausted();
             let (action, why) = plugins::autorun::decide(&look, mem, wall);
             if mem.is_exhausted() && !was_exhausted {
@@ -3635,18 +3627,18 @@ impl ShellApp {
                 // one — *why has torajs stopped?* — and there was
                 // nothing to answer it with.
                 let reason = format!("{waiting:?}");
-                if self.autorun_why.get(&sid) != Some(&reason) {
+                if self.pane_tables.autorun_why.get(&sid) != Some(&reason) {
                     lx_info!(
                         "shell.autorun.waiting",
                         &reason,
                         shelld_session_id = sid,
                         cwd = cwd.as_str()
                     );
-                    self.autorun_why.insert(sid, reason);
+                    self.pane_tables.autorun_why.insert(sid, reason);
                 }
                 continue;
             }
-            self.autorun_why.remove(&sid);
+            self.pane_tables.autorun_why.remove(&sid);
             let lines: Vec<&str> = match action {
                 plugins::autorun::Action::ClearAndContinue => {
                     vec!["/clear", plugins::autorun::CONTINUE_AUTORUN]

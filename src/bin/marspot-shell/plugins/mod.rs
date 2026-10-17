@@ -493,6 +493,8 @@ pub enum EndReason {
     PluginRequested,
     /// User pressed Esc 3× in 5 s (L2 force-end).
     UserEscape,
+    /// The pane's session left the registry.
+    PaneClosed,
 }
 
 /// Per-PaneSession host handle passed to every plugin callback.
