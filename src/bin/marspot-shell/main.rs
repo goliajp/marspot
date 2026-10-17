@@ -73,7 +73,7 @@ const FRESH_H_PT: f64 = 600.0;
 // it after queueing an op.  What is left on this timer is polling, and
 // the fastest poller is the pane sweep at one second
 // (`pane_status::SWEEP_INTERVAL`); the plugins want two, the core
-// healthcheck five, the stale-present net five, autorun thirty.
+// healthcheck five, autorun thirty.
 //
 // So the timer runs at the rate of its fastest consumer and no faster.
 // It was 250 ms, which is four wakes for every one that anything
@@ -84,7 +84,8 @@ const FRESH_H_PT: f64 = 600.0;
 // blind 60 Hz present.
 //
 // The floor on how slow this may go is the pane sweep, not the
-// present: presents ride the poke, and the stale net is five seconds.
+// present: presents ride the poke, and a present that did not happen
+// is retried on the next wake (see `frame_pending`).
 const REDRAW_INTERVAL_MS: u64 = 1_000;
 
 /// Frames the reader thread parses off the control socket and hands
@@ -440,30 +441,29 @@ struct ShellWindow {
     /// per-frame ack that the IOSurface has been fully written +
     /// waitUntilCompleted'd).  Cleared by `redraw` after `present()`.
     ///
-    /// Why: the 250 ms safety-net timer in `start_redraw_pump`
-    /// wakes the AppKit redraw callback unconditionally — if the
-    /// callback then samples the IOSurface, it can land MID-RENDER
-    /// (between core's BG pass and FG glyph pass), producing the
-    /// frequent "all 9 panes' contents momentarily disappear and
-    /// reappear" flash documented in the 2026-06-15 debugging.
-    /// Gating presents on FrameRendered means the safety-net timer
-    /// only forces a present when a frame is actually new *and*
-    /// AppKit hasn't already picked it up via the poke fast-path.
-    /// `safety_present_after` below provides the real safety net
-    /// for genuinely-missed pokes.
-    frame_pending: bool,
-    /// Wall-clock time of this window's last `present()`.  Combined
-    /// with `frame_pending`: when the redraw callback runs and no
-    /// fresh frame is pending, we ALSO force a present if too long has
-    /// elapsed — covers the pathological "core froze mid-render and no
-    /// future poke is coming" case where waiting for FrameRendered
-    /// would freeze the window.
+    /// Why: the redraw pump (`start_redraw_pump`) wakes the AppKit
+    /// redraw callback unconditionally — if the callback then samples
+    /// the IOSurface, it can land MID-RENDER (between core's BG pass
+    /// and FG glyph pass), producing the frequent "all 9 panes'
+    /// contents momentarily disappear and reappear" flash documented in
+    /// the 2026-06-15 debugging.  So a window is presented only when
+    /// this is set: a new frame, or a banner change (`refresh_banner`),
+    /// which is drawn by the presenter and has no frame of its own.
+    /// It stays set when `present()` could not draw (no drawable), so
+    /// the next wake tries again.  A poke the main thread missed is not
+    /// lost either: every wake drains the core's inbox first.
     ///
-    /// Per window, because the net is per window: held on `ShellApp`,
-    /// a window painting at 60 Hz kept the timestamp permanently fresh
-    /// and no OTHER window could ever look stale — so the one that
-    /// actually froze never got its forced present.
-    last_present_at: Option<Instant>,
+    /// There used to be a second net here, a present every 5 s with
+    /// nothing pending, for "core froze mid-render and no poke is
+    /// coming".  A frozen core is the PONG deadline's to catch, and
+    /// presenting the same surface again shows nothing new; what that
+    /// net really covered was the skipped present and the banner, both
+    /// handled above.  Each spurious present made WindowServer
+    /// composite again.
+    frame_pending: bool,
+    /// Whether this window has been presented once, for the one-line
+    /// `WINDOW_FIRST_PRESENT` log.
+    presented: bool,
     /// Dev seam only: this window is to be closed again as soon as it
     /// has painted (`MARSPOT_DEV_CLOSE_EXTRA`).  Latched so the close
     /// runs once.
@@ -591,7 +591,7 @@ impl ShellWindow {
             first_frame_ready: false,
             frame_pending: false,
             dev_close_after_paint: false,
-            last_present_at: None,
+            presented: false,
             last_saved_window: None,
             last_attached: None,
             skipped_resizes: 0,
@@ -2076,6 +2076,10 @@ impl ShellApp {
                 lx_warn!("shell.set_banner_failed", &e.to_string());
                 return;
             }
+            // The banner is drawn by the presenter, so with no core
+            // frames coming (the core is what the banner is about) it
+            // shows only if this window is presented for it.
+            w.frame_pending = true;
         }
         self.banner_kind = want;
     }
@@ -4780,7 +4784,6 @@ impl MarspotApp for ShellApp {
         // window's SECOND root cause).  Same class of bug as the L2
         // render pass before step 4d: a per-window duty attached to
         // one window.
-        let now = Instant::now();
         for wi in 0..self.windows.len() {
             // Hold off until the core has written real content into
             // this window's pair.  Without this gate the user sees an
@@ -4789,30 +4792,20 @@ impl MarspotApp for ShellApp {
             if !self.windows[wi].first_frame_ready {
                 continue;
             }
-            // Gate on a fresh frame actually pending.  See the
-            // `frame_pending` field doc — the safety-net 250 ms timer
-            // wakes this callback unconditionally, and sampling the
-            // IOSurface on every tick races the core's mid-render
-            // state (the historical all-panes flash).
-            //
-            // Stale safety net: if it's been a long while since this
-            // window's last present (core stuck but alive — no future
-            // poke coming), force one so the window doesn't freeze.
-            // Threshold deliberately wide (5 s): every spurious
-            // present makes WindowServer composite again, and sub-LSB
-            // alpha rounding reads as a faint background pulse at 1 Hz.
-            let stale = self.windows[wi]
-                .last_present_at
-                .map(|t| now.duration_since(t) > Duration::from_secs(5))
-                .unwrap_or(true);
-            if !self.windows[wi].frame_pending && !stale {
+            // Only when something new is pending — see the
+            // `frame_pending` field doc.  Every present makes
+            // WindowServer composite again, and sub-LSB alpha rounding
+            // reads as a faint background pulse.
+            if !self.windows[wi].frame_pending {
                 continue;
             }
             if let Some(p) = self.windows[wi].presenter.as_mut() {
-                p.present();
+                if !p.present() {
+                    continue;
+                }
                 self.windows[wi].frame_pending = false;
-                let first = self.windows[wi].last_present_at.is_none();
-                self.windows[wi].last_present_at = Some(now);
+                let first = !self.windows[wi].presented;
+                self.windows[wi].presented = true;
                 // One INFO per window per boot: the present-side
                 // mirror of the core's WINDOW_FIRST_FRAME.  The chain
                 // "painted → pair installed → presenter exists" logged
