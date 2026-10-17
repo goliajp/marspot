@@ -966,10 +966,10 @@ fn build_model_view() -> crate::ui::view::View {
         hint("    .fill/.border/.radius/.shadow chain;submission order = z order"),
         hstack(vec![
             ok("[✓]"),
-            body("Image / Gradient(Linear)/ Shape(Circle/Capsule/RoundedRect)"),
+            body("Gradient(Linear)/ Shape(Circle/Capsule/RoundedRect)"),
         ]).hstack_gap(Length::Pt(6.0)),
         hint("    type 定义全 land,Shape paint 通过 rounded-rect 近似"),
-        hint("    real Image primitive + Path = v2+ Metal pipeline 工作"),
+        hint("    Image + Path = v2+ Metal pipeline 工作"),
         hint("    this entire panel IS Canvas — what you see, you can build"),
         // Shape 视觉 demo
         hint("    Shape views(Circle / Capsule / RoundedRect):"),
@@ -1055,9 +1055,8 @@ fn build_model_view() -> crate::ui::view::View {
         ]).hstack_gap(Length::Pt(10.0)).align_cross_start(),
         hstack(vec![
             ok("[✓]"),
-            body("Containers: ScrollView / LazyVStack / LazyHStack / Grid(均匀)"),
+            body("Containers: ScrollView / Grid(均匀)"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    sidebar / process panel / search overlay 长列表都可虚拟化"),
         // Grid demo - 4x2 colored squares
         hint("    Grid 4 cols × 8 cells uniform demo:"),
         grid(
@@ -1135,9 +1134,9 @@ fn build_model_view() -> crate::ui::view::View {
         h1("L6 — Cross-cutting"),
         hstack(vec![
             ok("[✓]"),
-            body("Theme: ThemeId + theme::current() + Light token 数据"),
+            body("Theme: ThemeId + theme::current()"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    AtomicU8 全局;Dark + Light 调色板;themed::color::* 闭包查"),
+        hint("    AtomicU8 全局;组件都用 Dark 常量,current() 还没有读者"),
         hstack(vec![
             todo_v2("[v2+]"),
             hint("    HighContrast + 真 theme swap redraw 钩子"),
@@ -1149,7 +1148,7 @@ fn build_model_view() -> crate::ui::view::View {
         hint("    Linear / EaseIn / EaseOut / EaseInOut 4 curves;Color/f64 已实 Lerp"),
         hstack(vec![
             todo_v2("[v2+]"),
-            body("    真 frame 调度 + .transition() + 不破坏 idle CPU=0"),
+            body("    真 frame 调度 + enter/exit 过渡动画 + 不破坏 idle CPU=0"),
         ]).hstack_gap(Length::Pt(6.0)),
         hstack(vec![
             todo_v2("[v2+]"),
@@ -1392,13 +1391,8 @@ fn build_l1_view() -> crate::ui::view::View {
 
         h::h2("Tokens v4"),
         h::done_row("Semantic palette + space + radius + elev + text style"),
-        h::done_row("UI color 完整:FG{,_MUTED,_DISABLED,_INVERSE,_LINK} + SURFACE_0..4 + OVERLAY"),
-        h::done_row("Tab/Sidebar/Status/Diff 命名空间(TAB_ACTIVE_BG / SIDEBAR_BG / DIFF_ADD_BG / ...)"),
-        h::done_row("4-level severity(INFO/SUCCESS/WARN/DANGER/CRITICAL)+ FOCUS_RING + DISABLED_*"),
-        h::done_row("Terminal palette terminal::{BG, FG, CURSOR_BG/FG, SELECTION_BG/FG, LINK, BOLD_FG}"),
-        h::done_row("Terminal ansi 16(black/red/green/yellow/blue/magenta/cyan/white × normal+bright)"),
-        h::done_row("Terminal search::{MATCH, MATCH_CURRENT}"),
-        h::done_row("themed::{color, terminal::{ansi, search}} 按当前主题(Dark/Light/HC)取色"),
+        h::done_row("UI color:FG{,_MUTED,_DISABLED,_INVERSE,_LINK} + BG{,_RAISED,_PANEL,_SELECTED,_HOVER} + SURFACE_3/4"),
+        h::done_row("状态色 SUCCESS / WARN / DANGER"),
         hstack(vec![
             h::mono("color::"),
             h::swatch(color::FG),
@@ -1646,9 +1640,7 @@ fn build_l3_view() -> crate::ui::view::View {
         ]).hstack_gap(Length::Pt(16.0)).align_cross_center(),
 
         h::h2("Image view"),
-        h::done_row("Image { source, mode, tint } API"),
-        h::sub("4 sources: Glyph / Raw(Arc<Vec<u8>>) / IOSurface / Named"),
-        h::sub("v1 paint = tinted rect placeholder;真 Image primitive = v2+"),
+        h::v2_row("Image view(source / mode / tint)— 需要真 Image primitive"),
 
         h::v2_row("Path SDF / 任意 vector shape / freeform stroke"),
         h::sub("需要 Metal pipeline 加 path mesh 或 SDF rendering"),
@@ -1706,7 +1698,7 @@ fn build_l4_view() -> crate::ui::view::View {
 
     h::scrollable_page(0xDE7_0040, vec![
         h::h2("View enum + Modifier chain"),
-        h::done_row("Atoms: Text / Spacer / Filled / Hairline / Image / Shape"),
+        h::done_row("Atoms: Text / Spacer / Filled / Hairline / Shape"),
         h::done_row("Containers: VStack / HStack / ZStack"),
         hstack(vec![
             vstack(vec![h::hint("VStack"), vs_demo]).vstack_gap(Length::Pt(6.0)).align_cross_center(),
@@ -1733,9 +1725,9 @@ fn build_l4_view() -> crate::ui::view::View {
         ]).hstack_gap(Length::Pt(10.0)).align_cross_start(),
         h::done_row("Anchor: 9-point(TopLeading … BottomTrailing)"),
 
-        h::h2("Lazy containers + Grid"),
-        h::done_row("ScrollView + LazyVStack + LazyHStack"),
-        h::sub("uniform-height/width 假设;variable-height = HostState cache,留 v2+"),
+        h::h2("ScrollView + Grid"),
+        h::done_row("ScrollView"),
+        h::v2_row("LazyVStack / LazyHStack(只排版可见行的长列表)"),
         h::done_row("Grid(uniform-cell m×n)"),
         h::done_row("VariableGrid(Fixed / Flex / Auto tracks)"),
         h::hint("    Grid 4 cols × 8 cells demo:"),
@@ -1793,7 +1785,6 @@ fn build_l4_view() -> crate::ui::view::View {
         h::sub("KeyEquivalent::{cmd(K), ctrl(K), plain(K)} 构造器"),
         h::sub("App 层每帧扫 tree 收 shortcut 表;KeyDown 对照 → dispatch"),
         h::done_row(".auto_focus() — 首帧自动 focus"),
-        h::done_row(".on_appear(ActionId) / .on_disappear(ActionId)"),
     ])
 }
 
@@ -1909,8 +1900,7 @@ fn build_l6_view() -> crate::ui::view::View {
 
     h::scrollable_page(0xDE7_0060, vec![
         h::h2("Lifecycle"),
-        h::done_row(".on_appear(ActionId) / .on_disappear(ActionId) modifier"),
-        h::sub("bake 进 Decoration.on_appear / on_disappear;还没有派发它们的代码"),
+        h::v2_row("on_appear / on_disappear 生命周期钩子"),
 
         h::h2("Accessibility"),
         h::v2_row("真接 NSAccessibility(VoiceOver / 自动 AX tree)"),
@@ -1918,7 +1908,7 @@ fn build_l6_view() -> crate::ui::view::View {
         h::h2("Theme"),
         h::done_row("ThemeId { Dark, Light, HighContrast }"),
         h::sub("theme::current() / theme::set_current(id) — AtomicU8 全局"),
-        h::done_row("Dark + Light token data 已 land(themed::color::* 闭包查 active)"),
+        h::v2_row("按 current() 取色(现在组件都用 Dark 常量,Light / HC 只有下面几个样色)"),
         hstack(vec![
             h::hint("    ThemeId::Dark = "),
             filled(color::BG).corner_radius(radius::SM).frame(FrameSpec {
@@ -1949,7 +1939,7 @@ fn build_l6_view() -> crate::ui::view::View {
                 ..Default::default()
             }),
         ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
-        h::done_row("HighContrast palette(新增,跟 Light 同结构)"),
+        h::done_row("HighContrast 样色(BG / ACCENT / FG)"),
         hstack(vec![
             h::hint("    ThemeId::HighContrast = "),
             filled(crate::ui::theme::color::hc::BG).corner_radius(radius::SM).frame(FrameSpec {
@@ -1981,8 +1971,7 @@ fn build_l6_view() -> crate::ui::view::View {
         h::done_row("AnimRegistry + tick(now) + any_active() — frame schedule"),
         h::sub("AnimRegistry::start(dur) 注册;anim_tick(Instant::now()) 推进;anim_any_active() 触发 request_redraw"),
         h::sub("ShellApp::redraw 每帧 tick+gc;active 时连续 redraw,idle 时 0(兼容 idle CPU=0)"),
-        h::done_row(".transition(Transition) modifier — declarative enter/exit anim"),
-        h::sub("Opacity / Scale / Combined;driver 留 P3i 接绑"),
+        h::v2_row("enter/exit 过渡动画(transition modifier)"),
 
         h::h2("Internationalization"),
         h::done_row("text_width_cells 走 char_width(CJK = 2 cells)"),

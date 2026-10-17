@@ -211,20 +211,13 @@ fn paint_atom<'a>(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, 
                 super::view::TextLines::Wrap { .. } => t.content.clone(),
             };
             let color = mul_alpha(t.color, opacity);
-            // Re-measure the (potentially truncated) string for align.
-            let drawn_w_phys = ctx.fonts.advance_phys(&drawn, t.font);
-            let x_pad = match t.align {
-                super::view::TextAlign::Leading  => 0.0,
-                super::view::TextAlign::Center   => (rect.w - drawn_w_phys) * 0.5,
-                super::view::TextAlign::Trailing => rect.w - drawn_w_phys,
-            };
             // Phase 10c — map view's `TextFontSpec` onto the canvas
             // TextPrim's per-run override fields so the renderer's
             // chrome path knows whether to take the SF Pro shape +
             // colour-emoji route or stay on Monaco mono.  Mono runs
             // emit through the default `text(...)` path (font_kind
             // = None → inherit encoder's global `ui_font`).
-            let mut builder = canvas.text(phys_to_pt(rect.x + x_pad), top_pt, &drawn)
+            let mut builder = canvas.text(phys_to_pt(rect.x), top_pt, &drawn)
                 .color(color);
             if let super::view::TextFontSpec::Ui { size_q, weight, opts_bits } = t.font {
                 builder = builder
@@ -247,12 +240,11 @@ fn paint_atom<'a>(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, 
                 .radius(r_pt)
                 .draw();
         }
-        View::Hairline { color, vertical } => {
-            let cx = phys_to_pt(rect.x + if *vertical { rect.w * 0.5 } else { 0.0 });
-            let cy = phys_to_pt(rect.y + if *vertical { 0.0 } else { rect.h * 0.5 });
-            let end_x = phys_to_pt(rect.x + if *vertical { rect.w * 0.5 } else { rect.w });
-            let end_y = phys_to_pt(rect.y + if *vertical { rect.h } else { rect.h * 0.5 });
-            canvas.line((cx, cy), (end_x, end_y))
+        View::Hairline { color } => {
+            let y = phys_to_pt(rect.y + rect.h * 0.5);
+            let x0 = phys_to_pt(rect.x);
+            let x1 = phys_to_pt(rect.x + rect.w);
+            canvas.line((x0, y), (x1, y))
                 .stroke(crate::ui::core::Pt(1.0), mul_alpha(*color, opacity))
                 .draw();
         }
@@ -262,21 +254,10 @@ fn paint_atom<'a>(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, 
         View::Picker { id, options } => {
             paint_picker(canvas, rect, *id, options, ctx, opacity);
         }
-        View::Image(img) => {
-            // v1 stub: paint a tinted placeholder rect.  Real Image
-            // primitive support lands when renderer adds it.
-            let placeholder_color = img.tint
-                .unwrap_or(crate::ui::theme::color::BG_HOVER);
-            canvas.rect()
-                .at(phys_to_pt(rect.x), phys_to_pt(rect.y))
-                .size(phys_to_pt(rect.w), phys_to_pt(rect.h))
-                .fill(mul_alpha(placeholder_color, opacity))
-                .draw();
-        }
         View::Shape(spec) => {
             paint_shape(canvas, spec, rect, ctx, opacity);
         }
-        // Stacks / Modified / Spacer / LazyVStack / ScrollView don't
+        // Stacks / Modified / Spacer / ScrollView don't
         // paint anything on their own — decoration is already painted
         // above, children come next in the recursion.
         _ => {}

@@ -18,7 +18,6 @@ pub mod types;
 pub mod type_scale;
 pub mod scroll;
 pub mod state;
-pub mod lazy;
 pub mod layout;
 pub mod paint;
 pub mod hit_test;
@@ -32,9 +31,9 @@ pub use view::{
 };
 pub use type_scale::UiSize;
 pub use view::{
-    View, Modifier, Text, TextSize, TextWeight, TextStyle, TextAlign,
+    View, Modifier, Text, TextSize, TextWeight, TextStyle,
     TextLines, Truncate, ClipShape, AspectMode,
-    Image, ImageSource, ContentMode, ShapeSpec,
+    ShapeSpec,
     LinearGradient, GradientDir, MaterialStyle,
     ToggleState, PickerState,
     vstack, hstack, zstack, spacer, filled, hairline_horiz,
@@ -44,7 +43,7 @@ pub use view::{
 };
 pub use types::{
     ScrollWheelId, DragId, Point, Modifiers, DragInProgress,
-    AnimCurve, Anim, Lerp, Transition, TransitionKind,
+    AnimCurve, Anim, Lerp,
     Transform,
 };
 pub use layout::{
@@ -57,7 +56,6 @@ pub use hit_test::hit_test_click;
 pub use scroll::{
     ScrollState,
     scroll_state, set_scroll_state, with_scroll_state, apply_scroll_delta,
-    forget as forget_scroll_state,
 };
 pub use view::scroll_view;
 pub use state::{
