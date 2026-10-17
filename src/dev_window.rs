@@ -313,29 +313,10 @@ impl DevWindow {
         })
     }
 
-    /// Direct-call AppKit show/hide.  ONLY safe outside the
-    /// host's `APP_STATE` borrow — `makeKeyAndOrderFront:` /
-    /// `orderOut:` synchronously fire window-delegate
-    /// notifications that re-enter Rust via `dispatch_event`.
-    /// Inside redraw / event-handler closures, use
-    /// [`DevWindow::set_visible_deferred`] instead and let the
-    /// host's drain loop apply the change.
-    pub fn set_visible_now(&self, visible: bool) {
-        if visible == self.is_visible() {
-            return;
-        }
-        if visible {
-            self.nswindow.makeKeyAndOrderFront(None);
-        } else {
-            self.nswindow.orderOut(None);
-        }
-    }
-
     /// Queue a visibility change for the host's next drain pass.
     /// Idempotent: later calls overwrite earlier ones (the host
     /// will apply only the final value).
     pub fn set_visible_deferred(&self, visible: bool) {
-        let _ = self; // method signature parity with set_visible_now
         PENDING_VISIBLE.with(|cell| *cell.borrow_mut() = Some(visible));
     }
 

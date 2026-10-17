@@ -120,6 +120,7 @@ fn last_fact_line(tail: &str) -> Option<&str> {
 /// reading one whole, per pane, every two seconds is out of the
 /// question.  The last record is near the end by construction, and a
 /// window that misses it just leaves the caller with what it had.
+#[cfg(test)]
 pub(crate) fn facts_from_tail(tail: &str, want_cwd: &str) -> Option<SessionFacts> {
     tail.lines()
         .rev()

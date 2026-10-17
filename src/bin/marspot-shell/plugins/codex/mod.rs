@@ -29,30 +29,6 @@ use rollout::{codex_home, read_model_and_effort, RolloutIndex};
 pub(crate) use pane::{argv_thread_id, home_of, profile_dirs};
 pub(crate) use rollout::newest_rollout_for_cwd;
 
-/// How the wheel reaches codex.  Verified by injecting into a real
-/// pty: `Ctrl+T` opens the transcript, and from there codex takes both
-/// `↑`/`↓` (one line) and `PgUp`/`PgDn` (one screen).
-///
-/// The wheel maps to the LINE keys, not the page keys.  A wheel notch
-/// means a few lines — the caller already turns the trackpad's pixels
-/// and the mouse's notches into an accelerated line count — so paging
-/// per notch threw away a whole screen for one flick of the finger
-/// (2026-09-06: "我们一下就滚一屏", against iTerm2 scrolling line by
-/// line with acceleration).
-///
-/// Plain `CSI A`, not `SS3 A`: codex never turns on application cursor
-/// keys (`CSI ? 1 h` appears zero times in a full session's byte log),
-/// so the normal-mode encoding is the one it reads.
-///
-/// `Ctrl+T` is a TOGGLE — measured, a second one closes the view — so
-/// L2 must never send it blind.  `WHEEL_MARKER` is the rule codex
-/// draws across the top of that view (it survives paging), letting L2
-/// read the state off the screen instead of remembering it.
-const WHEEL_ENTER: &[u8] = b"\x14";
-const WHEEL_UP: &[u8] = b"\x1b[A";
-const WHEEL_DOWN: &[u8] = b"\x1b[B";
-const WHEEL_MARKER: &[u8] = b"/TRANSCRIPT/";
-
 /// Is this descendant the `codex` CLI?
 ///
 /// Same argv[0] approach `looks_like_claudecode` needs: a released
@@ -132,7 +108,6 @@ impl Plugin for CodexPlugin {
     fn metadata(&self) -> PluginMetadata {
         PluginMetadata {
             name: "codex",
-            version: "0.1.0",
             api_version: PLUGIN_API_VERSION,
             // Matches claudecode's cadence.  The badge only moves when
             // the user changes model or effort, so anything faster
@@ -305,7 +280,6 @@ impl Plugin for CodexPlugin {
                     PaneCodex {
                         codex_pid: pid,
                         shell_pid: shell,
-                        effort: effort.clone(),
                         profile,
                     },
                 );
@@ -406,57 +380,3 @@ impl Plugin for CodexPlugin {
     }
 }
 
-
-#[cfg(test)]
-mod wheel_decl_tests {
-    use super::*;
-
-    /// The marker must be one the shared predicate can actually use —
-    /// a blank or non-UTF-8 marker reads as "no marker", which would
-    /// silently turn the wheel back into a blind toggle.
-    #[test]
-    fn the_declared_marker_is_usable() {
-        assert_eq!(
-            marspot::wheel_marker::needle(WHEEL_MARKER).as_deref(),
-            Some("/TRANSCRIPT/")
-        );
-    }
-
-    /// Pinned against a row captured off a live transcript: the
-    /// declared marker must match the screen codex actually draws,
-    /// which is letter-spaced.
-    #[test]
-    fn the_declared_marker_matches_the_real_screen() {
-        let row = "/ T R A N S C R I P T / / / / / / / / / / / / / ";
-        assert!(marspot::wheel_marker::shows_marker(
-            row.chars().count() as u16,
-            1,
-            |col, _| row.chars().nth(col as usize).unwrap_or(' '),
-            WHEEL_MARKER
-        ));
-    }
-
-    /// Entering must not be confused with paging: if `enter` were one
-    /// of the page keys, L2 could not both open and scroll.
-    #[test]
-    fn enter_is_distinct_from_the_page_keys() {
-        assert_ne!(WHEEL_ENTER, WHEEL_UP);
-        assert_ne!(WHEEL_ENTER, WHEEL_DOWN);
-        assert_ne!(WHEEL_UP, WHEEL_DOWN);
-    }
-
-    /// The declaration names codex's own on-screen marker, so L2 can
-    /// see whether the transcript is open instead of remembering that
-    /// it opened one.  `Ctrl+T` toggles: a stale flag would close the
-    /// view rather than open it.
-    #[test]
-    fn the_declaration_carries_a_marker_to_read_the_state_from() {
-        // The bytes a wheel needs, as declared to the host.
-        let (enter, up, down, marker): (&[u8], &[u8], &[u8], &[u8]) =
-            (b"\x14", b"\x1b[5~", b"\x1b[6~", b"/TRANSCRIPT/");
-        assert_eq!(enter, b"\x14", "Ctrl+T opens codex's transcript");
-        assert_eq!(up, b"\x1b[5~", "PageUp");
-        assert_eq!(down, b"\x1b[6~", "PageDown");
-        assert!(!marker.is_empty(), "without a marker L2 would have to guess");
-    }
-}

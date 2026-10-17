@@ -277,7 +277,6 @@ struct Marspot {
     /// Cross-thread wake handle, cloned on demand to power
     /// per-session reader threads spawned at runtime (e.g. via the
     /// sidebar [+] button).  Same proxy main passed into `run_app`.
-    #[allow(dead_code)]
     event_proxy: EventProxy,
 }
 
@@ -2073,7 +2072,6 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
         title: "snapshot",
         selection: None,
         ime_preedit: "",
-        update_pending: false,
         dormant: false,
         right_badge: "",
         agent_tui: false, cwd: "",
@@ -3048,7 +3046,6 @@ fn bench_first_frame(arg: &str) {
             title: "",
             selection: None,
             ime_preedit: "",
-            update_pending: false,
             dormant: false,
             right_badge: "",
             agent_tui: false, cwd: "",
@@ -3163,7 +3160,6 @@ fn bench_metal_render(arg: &str) {
         title: "",
         selection: None,
         ime_preedit: "",
-        update_pending: false,
         dormant: false,
         right_badge: "",
         agent_tui: false, cwd: "",

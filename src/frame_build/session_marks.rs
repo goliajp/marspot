@@ -12,12 +12,11 @@ use crate::frame_build::color::rgba8_of_f32;
 use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance};
 use crate::frame_build::session::{PaneGeom, PaneOut};
 
-/// The pane's title strip: its seam, its label, the plugin badge and the
-/// refresh affordance.  Drawn at the unrounded cell metrics, as it always was.
+/// The pane's title strip: its seam, its label and the plugin badge.
+/// Drawn at the unrounded cell metrics, as it always was.
 pub(crate) fn paint_title_strip(
     rect: &CellRect,
     view: &SessionView,
-    pane_focused: bool,
     cell_w: f32,
     cell_h: f32,
     ascent: f32,
@@ -77,18 +76,8 @@ pub(crate) fn paint_title_strip(
         // — owns the meaning of the prefix; this just decorates it.
         if !view.right_badge.is_empty() {
             let badge_chars = view.right_badge.chars().count() as f32;
-            // Right anchor: leave room for the refresh affordance
-            // (one cell + a half-cell gap) when both are present,
-            // otherwise hug the right edge with a single padding.
-            let reserved = if view.update_pending && pane_focused {
-                cell_w * 1.5
-            } else {
-                0.0
-            };
-            let badge_x = rect.x as f32 + rect.w as f32
-                - padding
-                - reserved
-                - badge_chars * cell_w;
+            // Right anchor: hug the right edge with a single padding.
+            let badge_x = rect.x as f32 + rect.w as f32 - padding - badge_chars * cell_w;
             if badge_x > label_x {
                 push_text_run(
                     view.right_badge,
@@ -128,28 +117,6 @@ pub(crate) fn paint_title_strip(
                     });
                 }
             }
-        }
-        // Deferred-update affordance (target #4 step 5b): a refresh glyph
-        // at the right edge of the *focused* pane's title strip when a
-        // silent swap is staged for it.  Clicking it (hit-tested via
-        // `Layout::hit_test_cell_refresh`) triggers the swap.  Brighter
-        // than the dim title text so it reads as an actionable control.
-        if view.update_pending && pane_focused {
-            let icon_x = rect.x as f32 + rect.w as f32 - padding - cell_w;
-            push_text_run(
-                "\u{27F3}", // ⟳ CLOCKWISE GONG WITH CIRCLE ARROW
-                icon_x,
-                label_baseline_y,
-                [REFRESH_ICON_FG.0, REFRESH_ICON_FG.1, REFRESH_ICON_FG.2, 1.0],
-                cell_w,
-                cell_h,
-                ascent,
-                atlas_w,
-                atlas_h,
-                font,
-                atlas,
-                glyphs,
-            );
         }
     }
 }
@@ -236,7 +203,7 @@ pub(crate) fn paint_link_underlines(g: &PaneGeom, o: &mut PaneOut) {
     // pass above, so a link sitting on already-underlined text just
     // paints the link colour over the same row.
     {
-        for link in &g.links {
+        for link in g.links {
             let row_y = inner_y + (link.row as f32) * cell_h;
             let underline_y = row_y + cell_h - (cell_h - ascent) * 0.45;
             let underline_h = (cell_h * 0.06).max(1.0);

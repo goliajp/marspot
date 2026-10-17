@@ -53,9 +53,7 @@ pub const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// changed, and they are how you tell at a glance whether the code you
 /// just wrote is the code that is running.
 pub mod build_ids {
-    pub const SHELL: &str = env!("MARSPOT_VERSION_SHELL");
     pub const CORE: &str = env!("MARSPOT_VERSION_CORE");
-    pub const SESSION: &str = env!("MARSPOT_VERSION_SESSION");
 }
 
 /// `0.4.0 (core 0.12.219)` — identity, then the build that is running.
@@ -96,6 +94,8 @@ pub mod font_cache;
 pub mod font_shape;
 pub mod font_trait;
 pub mod frame_build;
+#[cfg(test)]
+mod frame_alloc_tests;
 pub mod frame_scene;
 pub mod glyph_atlas;
 pub mod input;

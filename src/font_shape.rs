@@ -111,7 +111,7 @@ impl Default for ShapeOptions {
 /// into the renderer's `FontCache`.  Returns one `ShapedGlyph` per
 /// CTRun glyph, in line order.
 ///
-/// `intern` is a closure so callers can pass `FontCache::intern_ctfont`
+/// `intern` is a closure so callers can intern into the `FontCache`
 /// without giving up the rest of the cache's borrow.
 ///
 /// Phase 8 — `opts` applies per-context OpenType-style feature

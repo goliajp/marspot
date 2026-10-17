@@ -21,7 +21,9 @@ use marspot_linkify::CellSource;
 /// path exists, so the opener must expand it too or the link resolves
 /// in one place and fails in the other.
 pub use marspot_linkify::expand_user_path;
-pub use marspot_linkify::{FsOracle, LinkKind, LinkRange, NoFsOracle, PathOracle, PathVerdict};
+pub use marspot_linkify::{
+    FsOracle, LinkKind, LinkRange, LinkScratch, NoFsOracle, PathOracle, PathVerdict,
+};
 
 /// Options that tune `scan_visible_links` for the calling pane.  All
 /// fields default to off so the existing call path stays opt-in.
@@ -78,12 +80,36 @@ pub fn scan_visible_links_with(
 ) -> Vec<LinkRange> {
     marspot_linkify::scan_visible_links_with(
         &GridSource { grid, view_offset },
-        marspot_linkify::ScanOpts {
-            tui_mode: opts.cc_mode,
-            cwd: opts.cwd,
-        },
+        linkify_opts(opts),
         oracle,
     )
+}
+
+/// [`scan_visible_links_with`] into caller-owned buffers, for the
+/// per-frame path: keep one `scratch` and one `out` per pane and a
+/// warm scan allocates nothing.  `out` is replaced, not appended to.
+pub fn scan_visible_links_into(
+    grid: &Grid,
+    view_offset: u16,
+    opts: ScanOpts<'_>,
+    oracle: &dyn PathOracle,
+    scratch: &mut LinkScratch,
+    out: &mut Vec<LinkRange>,
+) {
+    marspot_linkify::scan_visible_links_into(
+        &GridSource { grid, view_offset },
+        linkify_opts(opts),
+        oracle,
+        scratch,
+        out,
+    )
+}
+
+fn linkify_opts(opts: ScanOpts<'_>) -> marspot_linkify::ScanOpts<'_> {
+    marspot_linkify::ScanOpts {
+        tui_mode: opts.cc_mode,
+        cwd: opts.cwd,
+    }
 }
 
 #[cfg(test)]
@@ -1036,6 +1062,36 @@ mod grid_tests {
         let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true, ..Default::default() });
         assert_eq!(links.len(), 1, "{links:?}");
         assert_eq!(links[0].text, "https://example.com/x");
+    }
+
+    /// The per-frame entry point over a real grid: same answer as the
+    /// allocating one, with its buffers carried from a larger screen to
+    /// a smaller one and back.
+    #[test]
+    fn scan_into_matches_scan_with_across_grids() {
+        use crate::terminal::Terminal;
+        let big = {
+            let mut t = Terminal::new(40, 8);
+            t.feed(b"see https://example.com/a/very/long/path/that/wraps here\r\n");
+            t.feed("mail ops@golia.jp 192.168.1.1 /etc/hosts 決算 https://b.jp/x\r\n".as_bytes());
+            t.feed(b"3acb2d64-504d-49d5-9030-a179087f4bce and [::1]:80/y");
+            t
+        };
+        let small = {
+            let mut t = Terminal::new(30, 3);
+            t.feed(b"only https://golia.jp here");
+            t
+        };
+        let opts = ScanOpts { cwd: Some("/"), cc_mode: true };
+        let render = |v: &[LinkRange]| format!("{v:?}");
+        let mut scratch = LinkScratch::default();
+        let mut out = Vec::new();
+        for t in [&big, &small, &big, &small] {
+            let expect = scan_visible_links_with(t.grid(), 0, opts, &NoFsOracle);
+            assert!(!expect.is_empty());
+            scan_visible_links_into(t.grid(), 0, opts, &NoFsOracle, &mut scratch, &mut out);
+            assert_eq!(render(&out), render(&expect));
+        }
     }
 }
 

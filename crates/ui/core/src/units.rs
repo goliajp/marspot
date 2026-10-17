@@ -61,19 +61,6 @@ impl RectPx {
     }
 }
 
-/// Which way text and layout run.
-///
-/// A first-class property rather than a late flag: right-to-left is not
-/// a mirrored afterthought, it is the same infrastructure that carries
-/// bidirectional text, and layout has to know before it places
-/// anything.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Direction {
-    #[default]
-    LeftToRight,
-    RightToLeft,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

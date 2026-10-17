@@ -3,8 +3,8 @@
 //!
 //! The view layout pass needs real per-string advance + line-height
 //! for both Monaco mono and SF Pro proportional text;  `FontCache`
-//! has the underlying `measure_ui_text` / `ui_line_h_phys` /
-//! `ui_metrics` APIs but they take `&mut self` because shape +
+//! has the underlying `measure_ui_text_at_size` /
+//! `ui_line_h_phys_at_size` APIs but they take `&mut self` because shape +
 //! variant interning mutate caches.  This module wraps a
 //! `&mut FontCache` borrow in `RefCell` and implements
 //! `FontMetricsProvider` (which expects `&self`) on top — pragmatic

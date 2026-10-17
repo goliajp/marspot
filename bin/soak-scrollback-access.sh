@@ -8,7 +8,7 @@
 #
 #  1. marspot's disk-backed scrollback is a FIXED ~26 624-line ring
 #     (DISK_SCROLLBACK_RAM_LINES 1024 + DISK_SCROLLBACK_PAGES 100 ×
-#     LINES_PER_PAGE 256), ~50 MiB anonymous mmap, bounded forever.  The
+#     256 lines a page), ~50 MiB anonymous mmap, bounded forever.  The
 #     "unlimited / 1M / 10M scroll" framing was aspirational — the product
 #     retains the most recent ~26 624 lines by default.
 #  2. Within that ring, access is O(1): the COLD (post-MADV_DONTNEED) read
