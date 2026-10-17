@@ -102,15 +102,11 @@ fn a_flush_row_that_had_room_is_not_a_wrap() {
 /// fixture at one width only proves that width.
 #[test]
 fn a_path_wrapped_mid_token_is_still_one_path() {
-    let dir = std::env::temp_dir().join("marspot-linkify-wrap-test");
-    let deep = dir.join("reports");
-    if std::fs::create_dir_all(&deep).is_err() {
-        return; // no temp dir: nothing to assert against
-    }
+    let dir = ScratchDir::new("wrap");
+    let deep = dir.0.join("reports");
+    std::fs::create_dir_all(&deep).unwrap();
     let file = deep.join("2026-08-16-e18-verdict.md");
-    if std::fs::write(&file, b"x").is_err() {
-        return;
-    }
+    std::fs::write(&file, b"x").unwrap();
     let full = file.to_string_lossy().into_owned();
     // Cut the path mid-token, two characters before the end.
     let cut = full.len() - 8;
@@ -134,7 +130,6 @@ fn a_path_wrapped_mid_token_is_still_one_path() {
             links.iter().map(|l| &l.text).collect::<Vec<_>>(),
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// claudecode's `⎿` result block hangs its wrapped continuation at
@@ -278,8 +273,8 @@ fn a_mid_token_continuation_still_joins_after_the_marker_gate() {
 /// right answer at every step without ever being asked.
 #[test]
 fn consecutive_near_flush_paths_stay_separate_links() {
-    let dir = std::env::temp_dir().join("marspot-linkify-seam-rows");
-    let _ = std::fs::remove_dir_all(&dir);
+    let scratch = ScratchDir::new("seam-rows");
+    let dir = &scratch.0;
     std::fs::create_dir_all(dir.join("bb")).expect("mkdir bb");
     std::fs::create_dir_all(dir.join("ccc")).expect("mkdir ccc");
     std::fs::write(dir.join("a.sql"), b"x").expect("write a.sql");
@@ -309,7 +304,6 @@ fn consecutive_near_flush_paths_stay_separate_links() {
         ],
         "each row is a complete path and must keep its own link"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 2026-09-06 field report, inside codex: the path came out

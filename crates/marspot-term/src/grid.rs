@@ -542,8 +542,8 @@ mod char_width_tests {
     /// without a restart.
     #[test]
     fn the_circled_width_follows_the_setting() {
-        // SAFETY: nextest runs one test per process.
-        unsafe { std::env::remove_var("MARSPOT_AMBIGUOUS_WIDE") };
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove("MARSPOT_AMBIGUOUS_WIDE");
 
         crate::settings::set_for_test(crate::settings::Settings::default());
         assert_eq!(char_width('①'), 1, "default agrees with everyone else");

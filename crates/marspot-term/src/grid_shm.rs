@@ -1085,14 +1085,17 @@ mod tests {
         // dims/cells pairing (or an OOB copy from garbage dims) would trip
         // one of these.
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
         let dims = [(64u16, 24u16), (120, 50), (16, 8), (200, 60)];
         let mut writer = GridShmWriter::create(dims[0].0, dims[0].1).expect("create");
         let reader = GridShmReader::from_fd(dup_fd(writer.fd())).expect("reader");
         let stop = Arc::new(AtomicBool::new(false));
 
+        let published = Arc::new(AtomicU64::new(0));
+
         let stop_w = stop.clone();
+        let published_w = published.clone();
         let writer_thread = std::thread::spawn(move || {
             let mut round = 0u32;
             while !stop_w.load(Ordering::Relaxed) {
@@ -1105,29 +1108,28 @@ mod tests {
                     }
                 }
                 writer.publish(&grid, 0, 0);
+                published_w.fetch_add(1, Ordering::Relaxed);
                 round = round.wrapping_add(1);
             }
         });
 
-        let mut buf = Vec::new();
-        let mut reads = 0;
-        while reads < 50_000 {
-            if let Some(snap) = reader.read(&mut buf, &mut Vec::new()) {
-                assert_eq!(
-                    buf.len(),
-                    snap.cols as usize * snap.rows as usize,
-                    "cell count must match reported dims"
-                );
-                let first = buf[0].ch;
-                assert!(
-                    buf.iter().all(|c| c.ch == first),
-                    "torn frame: cell mix across a resize"
-                );
-                reads += 1;
-            }
-        }
+        let reads = read_while_written(&reader, &published, |buf, snap| {
+            assert_eq!(
+                buf.len(),
+                snap.cols as usize * snap.rows as usize,
+                "cell count must match reported dims"
+            );
+            let first = buf[0].ch;
+            assert!(
+                buf.iter().all(|c| c.ch == first),
+                "torn frame: cell mix across a resize"
+            );
+            (first, snap.cols)
+        });
         stop.store(true, Ordering::Relaxed);
         writer_thread.join().unwrap();
+        let sizes: std::collections::HashSet<u16> = reads.iter().map(|r| r.1).collect();
+        assert!(sizes.len() > 1, "every read saw one size, so no read crossed a resize");
     }
 
     #[test]
@@ -1184,7 +1186,7 @@ mod tests {
         // frame where ALL cells agree — a torn read would mix two
         // rounds' chars. Catches a broken seqlock.
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
         let cols = 64u16;
         let rows = 24u16;
@@ -1192,7 +1194,10 @@ mod tests {
         let reader = GridShmReader::from_fd(dup_fd(writer.fd())).expect("reader");
         let stop = Arc::new(AtomicBool::new(false));
 
+        let published = Arc::new(AtomicU64::new(0));
+
         let stop_w = stop.clone();
+        let published_w = published.clone();
         let writer_thread = std::thread::spawn(move || {
             let mut grid = Grid::new(cols, rows);
             let mut round = 0u32;
@@ -1204,23 +1209,61 @@ mod tests {
                     }
                 }
                 writer.publish(&grid, 0, 0);
+                published_w.fetch_add(1, Ordering::Relaxed);
                 round = round.wrapping_add(1);
             }
         });
 
-        let mut buf = Vec::new();
-        let mut reads = 0;
-        while reads < 50_000 {
-            if let Some(_snap) = reader.read(&mut buf, &mut Vec::new()) {
-                let first = buf[0].ch;
-                assert!(
-                    buf.iter().all(|c| c.ch == first),
-                    "torn frame: cell mix detected"
-                );
-                reads += 1;
-            }
-        }
+        read_while_written(&reader, &published, |buf, _snap| {
+            let first = buf[0].ch;
+            assert!(
+                buf.iter().all(|c| c.ch == first),
+                "torn frame: cell mix detected"
+            );
+            (first, 0)
+        });
         stop.store(true, Ordering::Relaxed);
         writer_thread.join().unwrap();
+    }
+
+    /// Read until 50 000 frames have been checked by `check`, and
+    /// prove the reads raced the writer rather than ran after it.
+    ///
+    /// `published` counts the writer's publishes.  A torn-frame test
+    /// whose reads all landed on one frame, or all before the writer
+    /// started, would pass against a reader with no seqlock at all, so
+    /// the writer has to have published during the reads and the reads
+    /// have to have seen several rounds.  The deadline is what a writer
+    /// that never publishes would otherwise cost: forever.
+    fn read_while_written(
+        reader: &GridShmReader,
+        published: &std::sync::atomic::AtomicU64,
+        mut check: impl FnMut(&[Cell], &GridSnapshot) -> (char, u16),
+    ) -> Vec<(char, u16)> {
+        use std::sync::atomic::Ordering;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut buf = Vec::new();
+        let mut seen = Vec::new();
+        let mut first_at = None;
+        while seen.len() < 50_000 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{} frames read in 20 s, writer at {} publishes",
+                seen.len(),
+                published.load(Ordering::Relaxed)
+            );
+            if let Some(snap) = reader.read(&mut buf, &mut Vec::new()) {
+                first_at.get_or_insert_with(|| published.load(Ordering::Relaxed));
+                seen.push(check(&buf, &snap));
+            }
+        }
+        let during = published.load(Ordering::Relaxed) - first_at.unwrap_or(0);
+        assert!(during > 0, "the writer published nothing while the reads ran");
+        let rounds: std::collections::HashSet<char> = seen.iter().map(|r| r.0).collect();
+        assert!(
+            rounds.len() > 1,
+            "every read saw the same round: the reads never raced a publish"
+        );
+        seen
     }
 }

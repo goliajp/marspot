@@ -474,8 +474,7 @@ mod grid_tests {
     #[test]
     fn cjk_path_detected_across_wide_char_cells() {
         use crate::terminal::Terminal;
-        let dir = std::env::temp_dir().join("marspot-link-cjk-test");
-        std::fs::create_dir_all(&dir).expect("mkdir tempdir");
+        let dir = crate::test_env::TempDir::new("link-cjk");
         let path = dir.join("決算明細_2025-2026.txt");
         std::fs::write(&path, b"x").expect("write tempfile");
         let path_str = path.to_string_lossy().into_owned();
@@ -1105,19 +1104,13 @@ mod tilde_cjk_tests {
     /// branch + wide-char trail-half handling + `is_real_path`'s
     /// HOME expansion must compose.  The sibling CJK test uses an
     /// absolute path, so it never exercises the tilde branch.
-    ///
-    /// `set_var("HOME")` is safe under nextest (process per test);
-    /// under plain multi-threaded `cargo test` it could race other
-    /// tests reading HOME — the project runner is nextest
-    /// (bin/test.sh).
     #[test]
     fn tilde_cjk_path_detected() {
-        let home = std::env::temp_dir().join("marspot-link-tilde-cjk");
+        let home = crate::test_env::TempDir::new("link-tilde-cjk");
         std::fs::create_dir_all(home.join("Downloads")).unwrap();
         std::fs::write(home.join("Downloads/GOLIA-代表取缔役印.png"), b"x").unwrap();
-        // SAFETY: test/example code, single-threaded at this point (state-dir
-        // mutations additionally serialized by the suite's state-dir lock).
-        unsafe { std::env::set_var("HOME", &home) };
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("HOME", home.path());
         let s = "~/Downloads/GOLIA-代表取缔役印.png";
         let cols = (s.chars().count() as u16) * 2 + 20;
         let mut t = Terminal::new(cols, 3);
