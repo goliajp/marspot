@@ -17,4 +17,4 @@ pub mod units;
 
 pub use color::Rgba8;
 pub use scene::{Kind, Layer, Run, Scene};
-pub use units::{Direction, Px, RectPx};
+pub use units::{Px, RectPx};

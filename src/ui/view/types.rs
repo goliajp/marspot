@@ -36,10 +36,6 @@ impl Edges {
         Self { top: Length::Pt(0.0), right: l, bottom: Length::Pt(0.0), left: l }
     }
 
-    pub const fn vert(l: Length) -> Self {
-        Self { top: l, right: Length::Pt(0.0), bottom: l, left: Length::Pt(0.0) }
-    }
-
     pub const fn only(
         top: Length, right: Length, bottom: Length, left: Length,
     ) -> Self {
@@ -154,7 +150,7 @@ pub struct HoverId(pub u32);
 pub struct ViewId(pub u32);
 
 /// Scroll-wheel target id — used by `Modifier::OnScroll` to route
-/// wheel events from `hit_test_scroll` to the right reducer.
+/// wheel events to the right reducer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ScrollWheelId(pub u32);
 
@@ -162,11 +158,6 @@ pub struct ScrollWheelId(pub u32);
 /// move / end events so reducers know which interaction continues.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DragId(pub u32);
-
-/// Focus chain target id — `.focusable(FocusId)` adds the view to
-/// the Tab navigation ring keyed by this id.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct FocusId(pub u32);
 
 /// Logical key code — a small enum covering the keys we route at
 /// view-tree level.  Letter / digit keys come through as their char
@@ -195,9 +186,6 @@ impl KeyEquivalent {
     pub const fn cmd(key: Key) -> Self {
         Self { key, mods: Modifiers { command: true, shift: false, control: false, option: false } }
     }
-    pub const fn cmd_shift(key: Key) -> Self {
-        Self { key, mods: Modifiers { command: true, shift: true, control: false, option: false } }
-    }
     pub const fn ctrl(key: Key) -> Self {
         Self { key, mods: Modifiers { command: false, shift: false, control: true, option: false } }
     }
@@ -216,21 +204,6 @@ pub struct Modifiers {
     pub control: bool,
     pub option: bool,
     pub command: bool,
-}
-
-/// Unified input event surface for the View tree's gesture model.
-/// Hit-test routes events to `ActionId` / `ScrollWheelId` / etc.
-/// via the existing `hit_test_*` functions.
-#[derive(Clone, Debug)]
-pub enum InputEvent {
-    Click(Point, Modifiers),
-    DoubleClick(Point, Modifiers),
-    RightClick(Point, Modifiers),
-    DragBegin { at: Point, mods: Modifiers, drag_id: DragId },
-    DragMove  { from: Point, to: Point, drag_id: DragId },
-    DragEnd   { from: Point, to: Point, drag_id: DragId },
-    Hover { at: Point, entered: bool, hover_id: HoverId },
-    Scroll { at: Point, delta: (f64, f64), precise: bool, target: ScrollWheelId },
 }
 
 /// In-progress drag — kept by host across move events.  Established
@@ -346,9 +319,6 @@ impl Transform {
     pub const fn identity() -> Self {
         Self { translate_x: 0.0, translate_y: 0.0, scale_x: 1.0, scale_y: 1.0, rotate_deg: 0.0 }
     }
-    pub const fn translate(x: f64, y: f64) -> Self {
-        Self { translate_x: x, translate_y: y, ..Self::identity() }
-    }
     pub const fn scale(s: f64) -> Self {
         Self { scale_x: s, scale_y: s, ..Self::identity() }
     }
@@ -358,63 +328,6 @@ impl Transform {
 }
 impl Default for Transform {
     fn default() -> Self { Self::identity() }
-}
-
-/// CSS-flavored blend mode.  v1 data only;  pipeline integration
-/// (Metal `MTLBlendOperation` selection)is v2+.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlendMode {
-    Normal,
-    Multiply,
-    Screen,
-    Overlay,
-    Darken,
-    Lighten,
-    ColorDodge,
-    ColorBurn,
-    HardLight,
-    SoftLight,
-    Difference,
-    Exclusion,
-}
-
-/// `Transition` — declarative enter / exit animation spec.  Attached
-/// via `.transition()` modifier;  framework reads on `LifecycleEvent
-/// ::Appear / Disappear` to drive `Anim<T>` automatically.
-///
-/// v1 = data type only.  Real driver lands with [A3] frame schedule.
-#[derive(Clone, Copy, Debug)]
-pub struct Transition {
-    pub kind: TransitionKind,
-    pub duration_ms: f64,
-    pub curve: AnimCurve,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum TransitionKind {
-    /// Fade alpha from 0 → 1 on appear, 1 → 0 on disappear.
-    Opacity,
-    /// Scale 0.8 → 1 on appear, 1 → 0.8 on disappear (size + opacity).
-    Scale,
-    /// Slide in from a side, slide out to the same side.
-    Slide(SlideDirection),
-    /// Custom combination — caller specifies both.
-    Combined { from_opacity: f64, from_scale: f64, from_offset: (f64, f64) },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SlideDirection { FromTop, FromBottom, FromLeading, FromTrailing }
-
-impl Transition {
-    pub const fn fade(duration_ms: f64) -> Self {
-        Self { kind: TransitionKind::Opacity, duration_ms, curve: AnimCurve::EaseOut }
-    }
-    pub const fn scale(duration_ms: f64) -> Self {
-        Self { kind: TransitionKind::Scale, duration_ms, curve: AnimCurve::EaseOut }
-    }
-    pub const fn slide(direction: SlideDirection, duration_ms: f64) -> Self {
-        Self { kind: TransitionKind::Slide(direction), duration_ms, curve: AnimCurve::EaseOut }
-    }
 }
 
 /// Linear interpolation trait — primitive types + Color implement.

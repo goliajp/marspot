@@ -119,7 +119,6 @@ const PROCESS_PANEL_ROW_FG: [f32; 4] = [0.86, 0.88, 0.92, 1.0];
 const PROCESS_PANEL_HEADER_FG: [f32; 4] = [0.65, 0.78, 0.95, 1.0];
 
 const PROCESS_PANEL_TITLE_BAR_H_LOGICAL: f32 = 28.0;
-const PROCESS_PANEL_TAB_STRIP_H_LOGICAL: f32 = 30.0;
 // Traffic-light geometry and colour live in
 // `ui::system::macos::traffic_lights` — the panel used to carry its own
 // copy of both, which is why two rounds of "make the dots match the
@@ -212,7 +211,6 @@ fn paint_process_panel_content(
     // keep that heuristic so glyph sizes stay in proportion.
     let scale_hint = (p.cell_h / 20.0).max(0.5);
     let title_h = PROCESS_PANEL_TITLE_BAR_H_LOGICAL * scale_hint;
-    let _tab_h = PROCESS_PANEL_TAB_STRIP_H_LOGICAL * scale_hint;
     use crate::ui::system::macos::traffic_lights as tl;
 
 

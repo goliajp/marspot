@@ -697,8 +697,8 @@ impl MetalRenderer {
     }
 
     /// Construct without a view — for unit tests, benches, or a future
-    /// offscreen render path.  `render_clear` is a no-op (no drawable),
-    /// but `render_cells_bg_offscreen` works end-to-end against a
+    /// offscreen render path.  There is no drawable, but
+    /// `render_cells_bg_offscreen` works end-to-end against a
     /// caller-provided MTLTexture.
     pub fn new_headless() -> Result<Self, String> {
         let device = system_default_device()?;
@@ -987,55 +987,6 @@ impl MetalRenderer {
         }
     }
 
-    /// Phase-1 render: clear the drawable to `bg` and present.  Returns
-    /// `false` if there's no drawable available (e.g. all in-flight, or
-    /// headless mode), `true` if a frame was committed.
-    pub fn render_clear(&self, bg: (f64, f64, f64)) -> bool {
-        let layer = match &self.layer {
-            Some(l) => l,
-            None => return false,
-        };
-        let drawable = match layer.nextDrawable() {
-            Some(d) => d,
-            None => return false,
-        };
-        let texture = { drawable.texture() };
-
-        let pass = { MTLRenderPassDescriptor::new() };
-        unsafe {
-            let attachments = pass.colorAttachments();
-            let color = attachments.objectAtIndexedSubscript(0);
-            color.setTexture(Some(&texture));
-            color.setLoadAction(MTLLoadAction::Clear);
-            color.setStoreAction(MTLStoreAction::Store);
-            color.setClearColor(MTLClearColor {
-                red: bg.0,
-                green: bg.1,
-                blue: bg.2,
-                alpha: 1.0,
-            });
-        }
-
-        let cmd = self
-            .queue
-            .commandBuffer()
-            .expect("command queue out of buffers");
-        let encoder = cmd
-            .renderCommandEncoderWithDescriptor(&pass)
-            .expect("renderCommandEncoderWithDescriptor returned nil");
-        encoder.endEncoding();
-        // `presentsWithTransaction = true` path: see comment in
-        // `render_layout` below.  Cast Retained<dyn CAMetalDrawable>
-        // down to MTLDrawable for `present`.
-        cmd.commit();
-        cmd.waitUntilScheduled();
-        use objc2_metal::MTLDrawable;
-        let mtl_drawable: &ProtocolObject<dyn objc2_metal::MTLDrawable> =
-            ProtocolObject::from_ref(&*drawable);
-        mtl_drawable.present();
-        true
-    }
-
     /// Phase 5b live render — same call shape as
     /// `crate::render::Renderer::render_layout`.  Walks each session's
     /// grid + scrollback, emits BG cell instances + FG glyph
@@ -1046,14 +997,6 @@ impl MetalRenderer {
     /// canvases outside the main render flow.
     pub fn chrome_font_metrics(&self) -> (f32, f32, f32) {
         (self.font.cell_w as f32, self.font.cell_h as f32, self.font.ascent as f32)
-    }
-
-    /// Terminal font metrics — the font used for the actual grid /
-    /// PTY output.  Identical to `chrome_font_metrics` for v1 because
-    /// they currently share a `FontCache`;  reserves the API surface
-    /// for future split where UI chrome can use a different font.
-    pub fn terminal_font_metrics(&self) -> (f32, f32, f32) {
-        self.chrome_font_metrics()
     }
 
     /// UI font metrics — the font used for chrome / dev panel / UI
@@ -4457,8 +4400,8 @@ mod tests {
 
     /// DevPanel UI > Tokens > Typography snapshot.  Locks the Size
     /// scale(Caption / Body / Header / LargeHeader)+ Weight pair
-    /// (Regular / Bold)+ 8 named TextStyle tokens (CAPTION / BODY /
-    /// HEADER / LARGE_HEADER / HINT / CODE / LINK / ERROR).Future
+    /// (Regular / Bold)+ 7 named TextStyle tokens (CAPTION / BODY /
+    /// HEADER / HINT / CODE / LINK / ERROR).Future
     /// drift in the Mono Monaco font metrics(advance / line-height /
     /// cap-height ratio)or theme token registry shows up as an SSIM
     /// hit instead of going unnoticed for weeks.

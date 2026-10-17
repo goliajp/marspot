@@ -6,11 +6,11 @@
 //!
 //! ## ThemeId (P3v)
 //!
-//! `ThemeId::{Dark, Light, HighContrast}` global lets users (future)
-//! flip the active palette.  v1 only `Dark` token data exists;
-//! `current()` always returns `ThemeId::Dark`.  Light + HC will
-//! ship as additional token data files swapped at lookup time
-//! (P3v-2 follow-up).
+//! `ThemeId::{Dark, Light, HighContrast}` global is meant to let users
+//! flip the active palette.  Nothing reads `current()` yet: every
+//! component uses the Dark constants, so `set_current()` changes no
+//! colour; it only bumps `version()`, which the shell polls to
+//! schedule a redraw.
 
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
