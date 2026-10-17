@@ -255,23 +255,7 @@ fn same_model(want: &str, label: &str) -> bool {
     want.starts_with(label) || label.starts_with(want)
 }
 
-/// Read a profile's account address out of its own config.
-///
-/// The feed is keyed by address, the pane is keyed by directory, and
-/// this is the only thing on the machine that ties the two together.
-pub(super) fn profile_email(home: &std::path::Path, profile: u8) -> Option<String> {
-    let body = std::fs::read_to_string(home.join(format!(".claude-profile-{profile}/.claude.json")))
-        .ok()?;
-    let at = body.find("\"oauthAccount\"")?;
-    // The file is pretty-printed, so the colon has a space after it —
-    // matching `"emailAddress":"` found nothing on the real thing,
-    // which is what the live test caught.
-    let rest = &body[at..];
-    let key = rest.find("\"emailAddress\"")? + "\"emailAddress\"".len();
-    let open = key + rest[key..].find('"')? + 1;
-    let close = open + rest[open..].find('"')?;
-    Some(rest[open..close].to_string())
-}
+pub(super) use super::profiles::profile_email;
 
 /// What the feed says about each candidate, in the caller's order.
 pub(super) fn rooms_for(

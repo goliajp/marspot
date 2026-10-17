@@ -100,20 +100,16 @@ pub(super) fn is_resting_helper(row: &pidtree::ProcRow, has_children: bool) -> b
 
 /// Does this session have work of its own running?
 ///
-/// Cheap: one pass over the descendants the scan already walked.
-pub fn has_work_in_flight(claude_pid: i32, procs: &[pidtree::ProcRow]) -> bool {
-    let descendants = pidtree::descendants_of(claude_pid, procs);
+/// Cheap: lookups in the observation's indexed table.
+pub fn has_work_in_flight(claude_pid: i32, table: &pidtree::ProcTable) -> bool {
+    let descendants = table.descendants(claude_pid);
+    let has_children = |pid: i32| table.children(pid).next().is_some();
     descendants.iter().any(|d| {
         // A helper's own children (rust-analyzer's proc-macro server)
         // ride along with it; judge each row on its own name first.
-        let has_children = procs.iter().any(|p| p.ppid == d.pid);
-        !is_resting_helper(d, has_children)
+        !is_resting_helper(d, has_children(d.pid))
             && !descendants.iter().any(|parent| {
-                parent.pid == d.ppid
-                    && is_resting_helper(
-                        parent,
-                        procs.iter().any(|p| p.ppid == parent.pid),
-                    )
+                parent.pid == d.ppid && is_resting_helper(parent, has_children(parent.pid))
             })
     })
 }
@@ -287,15 +283,11 @@ pub(super) fn should_hibernate(e: IdleEvidence, threshold: Duration) -> bool {
         && e.cpu_delta_ns <= IDLE_CPU_TOLERANCE_NS
 }
 
-/// The pane's shell pid, straight from the registry.  0 when the
-/// session is gone — the callers treat that as "cannot tell", which is
-/// the honest reading.
+/// The pane's shell pid, from the registry as last observed.  0 when
+/// the session is gone — the callers treat that as "cannot tell", which
+/// is the honest reading.
 pub(super) fn shell_pid_for(sid: u64) -> i32 {
-    marspot_term::session_registry::list_session_entries()
-        .into_iter()
-        .find(|e| e.id == sid)
-        .map(|e| e.shell_child_pid)
-        .unwrap_or(0)
+    crate::observe::shared().latest().shell_pid(sid)
 }
 
 /// What this plugin reports for a pane it has no live binding in.

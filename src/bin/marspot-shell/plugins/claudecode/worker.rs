@@ -54,13 +54,24 @@ pub(super) struct ScanResult {
     /// thread-only).  `tick` replays them through `host.log`.  Stays
     /// near-empty in steady state — only transitions add lines.
     pub(super) log_lines: Vec<(LogLevel, &'static str, String)>,
+    /// Every `~/.claude-profile-N` with its account address, read here
+    /// so the main thread's quota sweep does not touch the disk.
+    pub(super) profiles: Vec<(u8, Option<String>)>,
+}
+
+/// What the scan keeps per process and per file between passes.
+#[derive(Default)]
+pub(super) struct ScanCaches {
+    pub(super) env: crate::observe::EnvCache,
+    pub(super) tails: super::transcript::TailCache,
+    pub(super) profiles: super::profiles::ProfileCache,
 }
 
 /// Everything the worker owns.  No shared mutable state with the
 /// plugin; the worker reads disk + procs and sends ScanResult back.
 pub(super) struct WorkerCtx {
     pub(super) projects_root: PathBuf,
-    pub(super) shelld: Arc<ShelldClient>,
+    pub(super) caches: ScanCaches,
     /// Last `(switch value, time)` the status-line hook was
     /// reconciled against, so the usual scan does not re-read Claude
     /// Code's settings every two seconds.
@@ -223,6 +234,7 @@ impl WorkerCtx {
         self.model_cutoff.retain(|p, _| alive.contains(p));
         self.last_model.retain(|p, _| alive.contains(p));
         self.last_refusal.retain(|p, _| alive.contains(p));
+        self.caches.tails.retain(|p| alive.contains(p));
         if newly_seen > 0 || updates > 0 {
             log_lines.push((
                 LogLevel::Debug,
@@ -483,7 +495,7 @@ pub(super) fn worker_main(
         for line in ctx.reconcile_statusline() {
             marspot::lx_info!("plugin.claudecode.statusline_hook", &line);
         }
-        let result = ctx.scan_once();
+        let result = ctx.scan_once(&crate::observe::shared().latest());
         if res_tx.send(result).is_err() {
             // Main side hung up; nothing left to do.
             break;
@@ -492,12 +504,12 @@ pub(super) fn worker_main(
 }
 
 impl WorkerCtx {
-    /// One full scan pass: walk `~/.claude/projects/*/*.jsonl`,
-    /// update `self.seen`, list shelld sessions, BFS each for a
-    /// `claude` descendant, and compute the new badge mapping.
-    /// Slow (disk + sysctl) but runs off the L1 main loop so its
-    /// runtime is invisible to the plugin host's 100ms tick budget.
-    pub(super) fn scan_once(&mut self) -> ScanResult {
+    /// One full scan pass over an observation: find each live pane's
+    /// `claude`, update `self.seen` from `~/.claude/projects/*/*.jsonl`,
+    /// and compute the new badge mapping.  Disk-bound, so it runs off
+    /// the L1 main loop; the process table is the observer's, not
+    /// walked here.
+    pub(super) fn scan_once(&mut self, obs: &crate::observe::Observation) -> ScanResult {
         let mut log_lines: Vec<(LogLevel, &'static str, String)> = Vec::new();
 
         // -- per-session mapping: BFS each shelld session ------------
@@ -508,18 +520,7 @@ impl WorkerCtx {
         let scanned_at = SystemTime::now();
         let mut new_cpu: HashMap<u64, (u64, SystemTime)> = HashMap::new();
         let mut new_vetoes: HashMap<u64, (bool, bool)> = HashMap::new();
-        let sessions = match self.shelld.list_sessions() {
-            Ok(v) => v,
-            Err(e) => {
-                log_lines.push((
-                    LogLevel::Info,
-                    "tick.shelld_list_failed",
-                    format!("{e}"),
-                ));
-                return ScanResult { new_mapping, new_meta, new_activity, new_models: HashMap::new(), new_cpu, new_vetoes, scanned_at, sessions_seen, log_lines };
-            }
-        };
-        let procs = pidtree::list_all_procs();
+        self.caches.env.prune(obs);
         // Pass 1 — the per-pane facts, gathered before anything is
         // bound.  Binding needs to be a decision over the whole set:
         // one session uuid belongs to exactly one pane, so a pane that
@@ -550,31 +551,26 @@ impl WorkerCtx {
             projects_root: PathBuf,
         }
         let mut facts: Vec<PaneFacts> = Vec::new();
-        for s in &sessions {
-            if !s.alive {
-                continue;
-            }
-            sessions_seen.push(s.session_id);
-            let descendants = pidtree::descendants_of(s.child_pid, &procs);
-            let Some(claude) =
-                descendants.iter().find(|d| looks_like_claudecode(d))
-            else {
+        for s in obs.live() {
+            sessions_seen.push(s.entry.id);
+            let Some(claude) = s.find("claude") else {
                 continue;
             };
-            let Some(cwd) = pidtree::proc_cwd(claude.pid) else {
+            // read per scan: unlike its environment, a process's cwd moves
+            let Some(cwd) = pidtree::proc_cwd(claude.row.pid) else {
                 continue;
             };
-            let config_dir = pidtree::proc_env_value(claude.pid, "CLAUDE_CONFIG_DIR");
+            let config_dir = self.caches.env.value(&claude.row, "CLAUDE_CONFIG_DIR");
             let projects_root = projects_root_from(config_dir.as_deref())
                 .unwrap_or_else(|| self.projects_root.clone());
             facts.push(PaneFacts {
-                shelld_sid: s.session_id,
-                claude_pid: claude.pid,
+                shelld_sid: s.entry.id,
+                claude_pid: claude.row.pid,
                 claude_start: SystemTime::UNIX_EPOCH
-                    + Duration::from_secs(claude.start_unix),
+                    + Duration::from_secs(claude.row.start_unix),
                 encoded: encode_project_dir(&cwd),
                 cwd,
-                argv_uuid: argv_session_uuid(claude.pid, &descendants),
+                argv_uuid: argv_session_uuid(claude, &s.descendants),
                 config_dir,
                 projects_root,
             });
@@ -795,6 +791,10 @@ impl WorkerCtx {
             // The whole path, for the resume line: where the session
             // lives is not the same question as what to call it.
             let project_dir = f.cwd.to_str().map(str::to_string);
+            // One read of the tail per file version answers three
+            // questions: what the session is doing, whether it is waiting
+            // on a timer of its own, and whether the account refused it.
+            let tail = jsonl_path.as_ref().and_then(|p| self.caches.tails.tail(p));
             // cc-layer status.  The generic layer already said a job
             // owns this tty (that is how we found claude at all); this
             // says what claude is doing inside it.  A tool that shells
@@ -810,18 +810,13 @@ impl WorkerCtx {
                     .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                let has_young_child = pidtree::descendants_of(f.claude_pid, &procs)
-                    .iter()
-                    .any(|d| d.start_unix >= record_at);
-                new_activity.insert(
-                    f.shelld_sid,
-                    tail_activity(path, has_young_child),
-                );
+                let has_young_child =
+                    obs.table.descendants(f.claude_pid).iter().any(|d| d.start_unix >= record_at);
+                new_activity.insert(f.shelld_sid, activity_of(tail.as_deref(), has_young_child));
             }
-            // One read of the tail answers two questions: whether the
-            // session is waiting on a timer of its own, and whether the
-            // account refused it.
-            let tail = jsonl_path.as_ref().map(tail_window);
+            // a read failure is an empty window, which every check below
+            // takes as "no evidence"
+            let tail = jsonl_path.as_ref().map(|_| tail.unwrap_or_default());
             // Remembered per transcript: a refusal leaves the window
             // within minutes on a busy session, and a pane is still
             // shut out after that.
@@ -833,14 +828,14 @@ impl WorkerCtx {
             new_vetoes.insert(
                 f.shelld_sid,
                 (
-                    has_work_in_flight(f.claude_pid, &procs),
+                    has_work_in_flight(f.claude_pid, &obs.table),
                     tail.as_deref().map(tail_mentions_own_timer).unwrap_or(false),
                 ),
             );
             new_cpu.insert(
                 f.shelld_sid,
                 (
-                    pidtree::subtree_cpu_time_ns(f.claude_pid, &procs),
+                    obs.table.subtree_cpu_time_ns(f.claude_pid),
                     SystemTime::now(),
                 ),
             );
@@ -897,6 +892,7 @@ impl WorkerCtx {
             .iter()
             .map(|(sid, m)| (*sid, m.model.clone()))
             .collect();
-        ScanResult { new_mapping, new_meta, new_activity, new_models, new_cpu, new_vetoes, scanned_at, sessions_seen, log_lines }
+        let profiles = self.caches.profiles.read();
+        ScanResult { new_mapping, new_meta, new_activity, new_models, new_cpu, new_vetoes, scanned_at, sessions_seen, log_lines, profiles }
     }
 }

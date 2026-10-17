@@ -23,7 +23,7 @@ use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata,
 use crate::plugins::{handoff, pidtree};
 
 use badge::{badge_text, publish_badge};
-use pane::{profile_of, profile_switch_op, PaneCodex};
+use pane::{home_from, profile_from, profile_switch_op, PaneCodex};
 use rollout::{codex_home, read_model_and_effort, RolloutIndex};
 
 pub(crate) use pane::{argv_thread_id, home_of, profile_dirs};
@@ -54,6 +54,8 @@ pub struct CodexPlugin {
     rollouts: RolloutIndex,
     /// What each codex pane is running, for the badge menu.
     panes: std::collections::HashMap<u64, PaneCodex>,
+    /// `CODEX_HOME` of each codex process, read once per process.
+    env: crate::observe::EnvCache,
 }
 
 impl CodexPlugin {
@@ -63,6 +65,7 @@ impl CodexPlugin {
             last_badge: std::collections::HashMap::new(),
             rollouts: RolloutIndex::default(),
             panes: std::collections::HashMap::new(),
+            env: crate::observe::EnvCache::default(),
         }
     }
 }
@@ -228,6 +231,14 @@ impl Plugin for CodexPlugin {
         if !self.initialised {
             return;
         }
+        // The observer's view, up to its interval old; this runs on the
+        // main thread, which must not walk the process table.  With no
+        // codex anywhere and none left to clear there is nothing to do.
+        let obs = crate::observe::shared().latest();
+        self.env.prune(&obs);
+        if self.last_badge.is_empty() && !obs.live().any(|s| s.find("codex").is_some()) {
+            return;
+        }
         let Some(home) = codex_home() else { return };
         self.rollouts.begin_tick();
         // The global config is the FALLBACK, not the answer: it says
@@ -239,24 +250,23 @@ impl Plugin for CodexPlugin {
         // pane index is a position in a layout that moves when panes
         // are dragged or closed, while the session id is what a badge
         // is addressed to.  claudecode's scan reads the same source.
-        let procs = pidtree::list_all_procs();
-        for entry in marspot_term::session_registry::list_session_entries() {
-            let sid = entry.id;
-            let shell = entry.shell_child_pid;
+        for s in &obs.sessions {
+            let sid = s.entry.id;
+            let shell = s.entry.shell_child_pid;
             if shell <= 0 {
                 continue;
             }
-            let codex_pid = pidtree::descendants_of(shell, &procs)
-                .into_iter()
-                .find(looks_like_codex)
-                .map(|p| p.pid);
+            let codex = s.find("codex");
+            let codex_pid = codex.map(|p| p.row.pid);
             let has_codex = codex_pid.is_some();
+            // one read per process: its environment does not change
+            let codex_env = codex.map(|p| self.env.value(&p.row, "CODEX_HOME"));
             // Ask THIS pane's session what it is running, and fall
             // back to a config when its record cannot be found (a
             // session that has not written a turn yet).  The config is
             // this pane's own: panes run different accounts, and the
             // supervisor's `CODEX_HOME` is one of them at best.
-            let pane_home = codex_pid.and_then(home_of).unwrap_or_else(|| home.clone());
+            let pane_home = codex_env.clone().and_then(home_from).unwrap_or_else(|| home.clone());
             let (pane_model, pane_effort) = if pane_home == home {
                 (cfg_model.clone(), cfg_effort.clone())
             } else {
@@ -272,7 +282,7 @@ impl Plugin for CodexPlugin {
                 ),
                 None => (pane_model, pane_effort),
             };
-            let profile = codex_pid.and_then(profile_of);
+            let profile = codex_env.and_then(profile_from);
             let text = badge_text(profile, model.as_deref(), effort.as_deref());
             if let Some(pid) = codex_pid {
                 self.panes.insert(
