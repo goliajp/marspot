@@ -179,3 +179,26 @@ fn the_observer_rebuilds_on_its_interval() {
     assert!(obs.walks() >= 3, "walks {}", obs.walks());
     assert!(obs.latest().at > first.at);
 }
+
+/// A consumer waiting for a fresh observation must not wait forever
+/// for an observer that has died.
+#[test]
+fn a_dead_observer_serves_its_last_observation_instead_of_hanging() {
+    let mut builds = 0;
+    let obs = Arc::new(Observer::spawn_with(Duration::from_secs(3600), move |_| {
+        builds += 1;
+        assert!(builds == 1, "injected failure of the second build");
+        Observation::from_parts(Instant::now(), ProcTable::from_rows(Vec::new()), Vec::new(), |_| None)
+    }));
+    let first = obs.latest();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiter = Arc::clone(&obs);
+    // detached, so a hang fails the test instead of hanging it
+    std::thread::spawn(move || tx.send(waiter.fresh(Duration::ZERO)).unwrap());
+    let got = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("fresh() returns after the observer died");
+    assert!(Arc::ptr_eq(&got, &first), "the last observation it made");
+    let again = obs.fresh(Duration::ZERO);
+    assert!(Arc::ptr_eq(&again, &first), "and every later call returns at once");
+}
