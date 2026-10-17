@@ -10,20 +10,29 @@
 # put the windows somewhere nobody is looking.
 #
 # Usage:
-#   bin/test-e2e-remote.sh                       # the window-opening set
-#   bin/test-e2e-remote.sh test-window-close-order.sh
+#   bin/test-e2e-remote.sh                       # the suites in DEFAULT_SUITES
+#   bin/test-e2e-remote.sh test-window-close-order.sh test-multi-window.sh
+#   E2E_SUITE_TIMEOUT=1800 bin/test-e2e-remote.sh test-multi-window.sh
 #   HOST=other-mini bin/test-e2e-remote.sh
 #
 # Contract:
-#   - one measurement at a time : takes the same remote lock as the
-#                                 test and bench runners
-#   - GUI                       : runs inside the console login session
-#                                 (`launchctl asuser`), or windows
-#                                 cannot be created at all
-#   - leaves nothing behind     : kills the sandbox app on the way out,
-#                                 whatever the outcome
-#   - honest                    : exits with the suite's exit code
+#   - shares the host     : every suite holds the host's bench lock,
+#                           shared (`heavy`), so a measurement waits for
+#                           it; `E2E_LOCK=bench` takes it exclusively
+#                           for a suite that is itself a measurement
+#   - bounded             : each suite is stopped after E2E_SUITE_TIMEOUT
+#                           seconds (default 900); the build after
+#                           E2E_BUILD_TIMEOUT (default 1800)
+#   - GUI                 : runs inside the console login session
+#                           (`launchctl asuser`), or windows cannot be
+#                           created at all
+#   - its own sandbox     : each suite gets a state dir of its own, and
+#                           the cleanup stops the processes recorded
+#                           there and nothing else on the host
+#   - honest              : exits non-zero when any suite failed
 set -euo pipefail
+
+DEFAULT_SUITES=(test-window-close-order.sh test-shell-rollback-loop.sh)
 
 # One tool does the copying, for every session and every repo: it takes
 # the exclude list from git itself, so a path this repo ignores is never
@@ -46,74 +55,131 @@ REMOTE_NAME="${REMOTE_NAME:-e2e-marspot}"
 # remote-sync always lands in ~/work/<name>, so that is where the
 # run has to look.
 REMOTE_DIR="work/$REMOTE_NAME"
-REMOTE_LOCK="/tmp/marspot-runner.lock.d"
 GUI_UID="${GUI_UID:-501}"
+SUITE_TIMEOUT="${E2E_SUITE_TIMEOUT:-900}"
+BUILD_TIMEOUT="${E2E_BUILD_TIMEOUT:-1800}"
+MAX_WAIT="${E2E_MAX_WAIT:-3600}"
+RUN_ID="$(date +%H%M%S)$$"
+# Names the remote process group of whatever is running right now, so
+# an interrupted run can stop exactly that and nothing else.
+REMOTE_PIDF="/tmp/marspot-e2e-$RUN_ID.pgid"
+# Two runs from two checkouts would sync over each other's remote tree.
+LOCK_LOCAL="/tmp/marspot-e2e-remote.lock.d"
 
 SUITES=("$@")
 if [[ ${#SUITES[@]} -eq 0 ]]; then
-  SUITES=(test-window-close-order.sh test-shell-rollback-loop.sh)
+  SUITES=("${DEFAULT_SUITES[@]}")
 fi
+for suite in "${SUITES[@]}"; do
+  [[ -f "$ROOT/bin/$suite" ]] || { echo "no such suite: bin/$suite" >&2; exit 2; }
+done
+
+if ! mkdir "$LOCK_LOCAL" 2>/dev/null; then
+  if [[ -f "$LOCK_LOCAL/pid" ]] && kill -0 "$(cat "$LOCK_LOCAL/pid")" 2>/dev/null; then
+    echo "test-e2e-remote already running locally (pid $(cat "$LOCK_LOCAL/pid"))" >&2
+    exit 1
+  fi
+  rm -rf "$LOCK_LOCAL" && mkdir "$LOCK_LOCAL"
+fi
+echo "$$" > "$LOCK_LOCAL/pid"
 
 # Anything that reaches the GUI session has to be asked for through
 # launchd; a plain ssh process is in another bootstrap namespace and
 # `NSApplication` there has no window server to talk to.
 remote_gui() {
-  ssh "$HOST" "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /bin/bash -lc $(printf '%q' "$1")"
+  remote_tracked "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /bin/bash -lc $(printf '%q' "$1")"
 }
 
-cleanup() {
-  local rc=$?
-  echo "==> cleaning up on $HOST"
-  remote_gui "cd ~/$REMOTE_DIR && bin/kill-sandbox-marspot.sh" >/dev/null 2>&1 || true
-  ssh -o ConnectTimeout=5 "$HOST" "rm -rf $REMOTE_LOCK" >/dev/null 2>&1 || true
-  exit $rc
+# The ssh login shell leads a process group of its own, and everything
+# the command starts is in it unless it leaves on purpose.  Its pid is
+# written down for as long as the command runs, so an interrupted run
+# stops that group and nothing else on the host.
+remote_tracked() {
+  ssh "$HOST" "echo \$\$ > $REMOTE_PIDF; $1; rc=\$?; rm -f $REMOTE_PIDF; exit \$rc" </dev/null
 }
-trap cleanup EXIT INT TERM
 
-echo "==> waiting for $HOST to be free"
-waited=0
-until ssh -o ConnectTimeout=5 "$HOST" "
-  if mkdir $REMOTE_LOCK 2>/dev/null; then echo \$\$ > $REMOTE_LOCK/pid; exit 0; fi
-  if [[ -f $REMOTE_LOCK/pid ]] && kill -0 \$(cat $REMOTE_LOCK/pid) 2>/dev/null; then exit 1; fi
-  rm -rf $REMOTE_LOCK && mkdir $REMOTE_LOCK && echo \$\$ > $REMOTE_LOCK/pid" </dev/null 2>/dev/null; do
-  waited=$((waited + 5))
-  if (( waited > 900 )); then
-    echo "gave up after 15 min: $HOST is still measuring something else" >&2
-    exit 1
-  fi
-  sleep 5
-done
+stop_remote() {
+  ssh -o ConnectTimeout=5 "$HOST" "
+    if [ -f $REMOTE_PIDF ]; then
+      kill -TERM -- -\$(cat $REMOTE_PIDF) 2>/dev/null
+      rm -f $REMOTE_PIDF
+    fi" </dev/null >/dev/null 2>&1 || true
+}
+
+# Stops the processes the suite's sandbox recorded, and only those.
+reap_sandbox() {
+  ssh -o ConnectTimeout=5 "$HOST" \
+    "cd ~/$REMOTE_DIR && bin/kill-sandbox-marspot.sh --state-dir $1" </dev/null || true
+}
+
+current_sd=""
+interrupted() {
+  echo "==> interrupted; stopping the run on $HOST"
+  stop_remote
+  [[ -n $current_sd ]] && reap_sandbox "$current_sd"
+  exit 130
+}
+trap interrupted INT TERM
+trap 'rm -rf "$LOCK_LOCAL"' EXIT
 
 remote_sync "$HOST" --name "$REMOTE_NAME"
 
 echo "==> building release on $HOST"
-ssh "$HOST" "source ~/.cargo/env && cd ~/$REMOTE_DIR && cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session 2>&1 | tail -2"
+remote_tracked "source ~/.cargo/env && cd ~/$REMOTE_DIR && \
+  /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT bin/_bounded.sh $BUILD_TIMEOUT \
+  cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session" \
+  2>&1 | tail -2 || { echo "FAIL: release build on $HOST" >&2; exit 1; }
+# macOS assesses a freshly built executable on its first exec, for an
+# unbounded time on a busy host; pay that here, outside every suite's
+# stopwatch.
+ssh "$HOST" "cd ~/$REMOTE_DIR && for b in marspot-shell marspot-core marspot-session; do \
+  MARSPOT_NO_REDIRECT=1 target/release/\$b --version >/dev/null 2>&1; done" </dev/null || true
+
+# A measuring suite's knobs (`IDLE_*`) are set here and read there, and
+# so is anything listed in E2E_ENV ("K=V K=V", e.g. a soak's duration).
+fwd=""
+while IFS= read -r kv; do fwd+=" $(printf '%q' "$kv")"; done < <(env | grep -E '^IDLE_[A-Z_]+=' || true)
+for kv in ${E2E_ENV:-}; do fwd+=" $(printf '%q' "$kv")"; done
 
 rc=0
+results=()
+i=0
 for suite in "${SUITES[@]}"; do
+  i=$((i + 1))
   echo
   echo "════ $suite on $HOST ════"
-  set +e
-  # Shared, like every other heavy run: E2E suites build release
-  # binaries and drive real windows, and a measurement taking the lock
-  # exclusively has to wait for that rather than read a number through
-  # it.  See bin/bench-remote.sh for the other half.
-  # A suite that is itself a measurement (`E2E_LOCK=bench`) takes it
-  # exclusively instead, with the wait bounded.
   if [[ ${E2E_LOCK:-heavy} == bench ]]; then
-    lock="bench --max-wait ${E2E_MAX_WAIT:-3600}"
+    lock="bench --max-wait $MAX_WAIT"
   else
-    lock=heavy
+    lock="heavy --max-wait $MAX_WAIT"
   fi
-  # A measuring suite's knobs (`IDLE_*`) are set here and read there.
-  fwd=""
-  while IFS= read -r kv; do fwd+=" $(printf '%q' "$kv")"; done < <(env | grep -E '^IDLE_[A-Z_]+=' || true)
-  remote_gui "cd ~/$REMOTE_DIR && env$fwd /usr/local/bin/bench-lock $lock bin/$suite"
+  # Short: the session sockets live under it and sun_path is 104 bytes.
+  current_sd="/tmp/msp-e2e-$RUN_ID-$i"
+  start=$(date +%s)
+  set +e
+  remote_gui "cd ~/$REMOTE_DIR && rm -rf $current_sd && env MARSPOT_STATE_DIR=$current_sd$fwd \
+    /usr/local/bin/bench-lock $lock bin/_bounded.sh $SUITE_TIMEOUT bin/$suite"
   suite_rc=$?
   set -e
-  if (( suite_rc != 0 )); then
-    echo "FAIL: $suite exited $suite_rc" >&2
-    rc=$suite_rc
+  secs=$(( $(date +%s) - start ))
+  reap_sandbox "$current_sd"
+  if (( suite_rc == 0 )); then
+    ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
+    results+=("PASS  ${secs}s  $suite")
+  else
+    case $suite_rc in
+      124) why="timed out after ${SUITE_TIMEOUT}s" ;;
+      75) why="could not get the host's lock within ${MAX_WAIT}s" ;;
+      *) why="exit $suite_rc" ;;
+    esac
+    echo "FAIL: $suite: $why (state dir kept: $HOST:$current_sd)" >&2
+    results+=("FAIL  ${secs}s  $suite  ($why)")
+    rc=1
   fi
+  current_sd=""
 done
+
+echo
+echo "════ summary ($HOST) ════"
+printf '  %s\n' "${results[@]}"
 exit $rc
