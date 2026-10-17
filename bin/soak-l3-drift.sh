@@ -17,7 +17,7 @@
 #
 # Usage:
 #   bin/soak-l3-drift.sh                 # default 300 s (A1 gate window)
-#   DURATION_S=60  bin/soak-l3-drift.sh  # quick dev iteration
+#   DURATION_S=60 INTERVAL_S=2 bin/soak-l3-drift.sh  # quick dev iteration (the drift needs ≥ 8 samples)
 #   DURATION_S=1800 bin/soak-l3-drift.sh # 30-min extended (release / nightly)
 
 set -uo pipefail
