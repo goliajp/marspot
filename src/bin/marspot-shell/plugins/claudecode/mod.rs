@@ -6432,6 +6432,7 @@ mod tests {
             ppid,
             comm: comm.into(),
             start_unix: 0,
+            start_us: 0,
             pgid: pid,
             tty_dev: 1,
             tty_fg_pgid: 1,
