@@ -33,22 +33,27 @@
 /// ask. On Linux reading another user's `/proc/<pid>/exe` gives
 /// EACCES, which is exactly the macOS sandbox case: being refused is
 /// itself evidence the pid is not our child.
-#[cfg(target_os = "macos")]
 pub fn pid_exe_name(pid: i32) -> Option<String> {
+    Some(pid_exe_path(pid)?.file_name()?.to_string_lossy().into_owned())
+}
+
+/// The path of the executable `pid` is running, or `None`, with the
+/// same failure rule as [`pid_exe_name`].
+#[cfg(target_os = "macos")]
+pub fn pid_exe_path(pid: i32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
     let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let n =
         unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
     if n <= 0 {
         return None;
     }
-    let path = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
-    Some(path.rsplit('/').next().unwrap_or("").to_string())
+    Some(std::ffi::OsStr::from_bytes(&buf[..n as usize]).into())
 }
 
 #[cfg(target_os = "linux")]
-pub fn pid_exe_name(pid: i32) -> Option<String> {
-    let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    Some(path.file_name()?.to_string_lossy().into_owned())
+pub fn pid_exe_path(pid: i32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
 }
 
 /// When `pid` started, microseconds since the epoch, or `None` when no
