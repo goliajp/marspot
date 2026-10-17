@@ -413,7 +413,7 @@ fn handshake_and_handoff(
 
     // Hand the stream off to main. The blocking read timeout we set
     // earlier doesn't carry over to the new reader thread (main's
-    // spawn_control_reader does its own blocking read), but reset it
+    // the control reader does its own blocking read), but reset it
     // here defensively so a stale timeout can't sneak through.
     stream.set_read_timeout(None)?;
     if ev_tx.send(crate::SessionEvent::NewClient(stream)).is_err() {

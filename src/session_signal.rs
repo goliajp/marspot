@@ -35,10 +35,11 @@ mod tests {
     /// recycled pid) is refused, and that process is left alone.
     #[test]
     fn an_entry_whose_pid_is_not_an_l3_is_not_signalled() {
-        let dir = std::env::temp_dir().join(format!("marspot-sigtest-{}", std::process::id()));
-        // each test is its own process under nextest
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
-        let mut child = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let sandbox = marspot_term::test_env::sandbox_state_dir();
+        let dir = sandbox.path();
+        let mut child = marspot_term::test_env::ChildGuard::new(
+            std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap(),
+        );
         let entry = SessionEntry {
             id: 7,
             pid: child.id() as i32,
@@ -47,7 +48,7 @@ mod tests {
             rows: 24,
             title: String::new(),
             cwd: "/tmp".into(),
-            proto_version: 1,
+            proto_version: marspot_term::shell_proto::PROTO_VERSION,
             created_at_unix: 0,
             shm_name: String::new(),
             shell_child_pid: 0,
@@ -57,9 +58,6 @@ mod tests {
         let by_sid = signal_session(7, libc::SIGKILL);
         let missing = signal_session(8, libc::SIGKILL);
         let alive = child.try_wait().unwrap().is_none();
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(by_entry, Err(SignalError::Gone));
         assert_eq!(by_sid, Err(SignalError::Gone));
         assert_eq!(missing, Err(SignalError::Gone));

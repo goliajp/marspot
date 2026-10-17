@@ -73,13 +73,13 @@ PY
 
 : > "$RUNLOG"
 env SHELL="$IDLE_SHELL" MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 # Every pane has its shell: count shells whose parent is one of our L3s.
 shells() {
   local l3
-  l3=$(pgrep -f "$SESSION_BIN( |\$)" | paste -sd, -)
+  l3=$(dev_session_pids | paste -sd, -)
   [[ -n $l3 ]] || { echo 0; return; }
   ps -Ao ppid=,command= | awk -v want="$l3" '
     BEGIN { n = split(want, a, ","); for (i = 1; i <= n; i++) p[a[i]] = 1 }
@@ -90,7 +90,7 @@ for (( i = 0; i < 600; i++ )); do
   sleep 0.1
 done
 (( $(shells) >= N )) || fail "only $(shells) of $N panes have a shell after 60 s"
-echo "==> $N panes up ($(pgrep -f "$SESSION_BIN( |\$)" | wc -l | tr -d ' ') L3), settling ${SETTLE}s"
+echo "==> $N panes up ($(dev_session_pids | wc -l | tr -d ' ') L3), settling ${SETTLE}s"
 sleep "$SETTLE"
 
 "$ROOT/bin/measure-idle.sh" --app marspot-dev --sessions "$N" --window "$WINDOW"
@@ -116,7 +116,7 @@ PY
 fi
 if [[ -n ${IDLE_PROFILE:-} ]]; then
   for bin in "$SHELL_BIN" "$CORE_BIN"; do
-    pid=$(pgrep -f "$bin( |\$)" | head -1)
+    if [[ $bin == "$SHELL_BIN" ]]; then pid=$(dev_shell_pid); else pid=$(dev_core_pids | head -1); fi
     [[ -n $pid ]] || continue
     out=/tmp/marspot-idle-$(basename "$bin").sample
     sample "$pid" "$IDLE_PROFILE" -file "$out" >/dev/null 2>&1

@@ -10,9 +10,8 @@
 #   - every round PASSes the echo check (input path works),
 #   - marspot-session links zero GUI frameworks (RSS floor intact),
 #   - L3 resident stays under RSS_CAP_KIB (the ~3–5 MB floor, generous),
-#   - no marspot-session process is orphaned between rounds (clean
-#     Drop / teardown — the probe kills + reaps each child),
-#   - the sandbox shelld is never touched.
+#   - no marspot-session a probe started outlives it (clean Drop /
+#     teardown — the probe kills + reaps each child).
 #
 # Runs entirely in the dev sandbox; never touches the installed app.
 # Run after `cargo build --release`.
@@ -47,18 +46,6 @@ fail() {
   exit 1
 }
 
-# Reap any sandbox marspot-session a previous aborted run left behind.
-# Scoped to the dev-build path so the installed app is never matched.
-kill_sandbox_sessions() {
-  pkill -9 -f "$SESSION_BIN( |\$)" >/dev/null 2>&1 || true
-}
-count_sandbox_sessions() {
-  pgrep -f "$SESSION_BIN( |$)" 2>/dev/null | grep -c . || true
-}
-
-cleanup() { kill_sandbox_sessions; }
-trap cleanup EXIT
-
 # Always (re)build the bin + probes together: an incremental build is
 # ~instant when current, and rebuilding unconditionally rules out the
 # version-skew trap where a stale probe creates a grid_shm region an
@@ -67,8 +54,8 @@ trap cleanup EXIT
 # pipe, so its exit code went to `tail`; the `-x` checks below then found
 # binaries from mid-June -- seven of these probes lost their source in the
 # history rebuild -- and ran those against today's session binary.  One of
-# them still tries to connect to shelld, which RFC-003 deleted, and that
-# is the only reason it was ever noticed.
+# them still tried to connect to a daemon RFC-003 deleted, and that is
+# the only reason it was ever noticed.
 for probe in l3_echo_probe l3_multi_probe l3_resize_probe \
              l3_scroll_probe l3_selection_probe l3_latency_probe \
              l3_crash_probe l3_swap_probe; do
@@ -90,28 +77,25 @@ if otool -L "$SESSION_BIN" | grep -qiE 'Metal|AppKit|CoreText'; then
 fi
 echo "otool OK — marspot-session links zero GUI frameworks"
 
-dev_ensure_shelld || fail "sandbox shelld"
-kill_sandbox_sessions
 : > "$RUN_LOG"
-
-base_sessions=$(count_sandbox_sessions)
-echo "boot OK — sandbox shelld up; ${base_sessions} pre-existing sandbox session procs"
 
 peak_rss=0
 for i in $(seq 1 "$ITERATIONS"); do
   echo "--- round $i/$ITERATIONS ---" | tee -a "$RUN_LOG"
 
   # Run the probe in the background so we can sample the L3 RSS while it
-  # lives, then assert its exit code.
+  # lives, then assert its exit code.  The session is the probe's child;
+  # its pid is taken from there, never looked up by name.
   "$PROBE_BIN" "$SESSION_BIN" >>"$RUN_LOG" 2>&1 &
   probe_pid=$!
-
-  # Sample the spawned marspot-session's RSS a few times during the run.
+  kids=""
   for _ in $(seq 1 20); do
     kill -0 "$probe_pid" 2>/dev/null || break
-    rss=$(pgrep -f "$SESSION_BIN( |$)" 2>/dev/null | head -1 \
-          | xargs -I{} ps -p {} -o rss= 2>/dev/null | tr -d ' ')
-    if [[ -n "${rss:-}" ]] && (( rss > peak_rss )); then peak_rss=$rss; fi
+    for k in $(dev_probe_sessions "$probe_pid"); do
+      [[ " $kids " == *" $k "* ]] || kids+=" $k"
+      rss=$(ps -o rss= -p "$k" 2>/dev/null | tr -d ' ')
+      if [[ -n "${rss:-}" ]] && (( rss > peak_rss )); then peak_rss=$rss; fi
+    done
     sleep 0.1
   done
 
@@ -121,10 +105,10 @@ for i in $(seq 1 "$ITERATIONS"); do
 
   # The child must be reaped — no orphan accumulation.
   sleep 0.2
-  now=$(count_sandbox_sessions)
-  (( now <= base_sessions )) \
-    || fail "round $i: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
-  echo "  round $i OK — echo verified, L3 reaped (procs=${now})"
+  # shellcheck disable=SC2086
+  orphans=$(dev_reap_probe_sessions $kids)
+  (( orphans == 0 )) || fail "round $i: ${orphans} marspot-session(s) outlived the probe (orphan leak)"
+  echo "  round $i OK — echo verified, L3 reaped"
 done
 
 (( peak_rss > 0 )) || echo "  (note: never caught an L3 RSS sample — rounds too fast)"
@@ -132,81 +116,54 @@ if (( peak_rss > RSS_CAP_KIB )); then
   fail "L3 peak RSS ${peak_rss} KiB exceeds cap ${RSS_CAP_KIB}"
 fi
 
+# section <label> <what broke> <probe> [args...] — one probe, its exit
+# code, and no session of it left running.
+section() {
+  local label=$1 broke=$2 rc
+  shift 2
+  echo "--- $label ---" | tee -a "$RUN_LOG"
+  dev_run_probe "$@" >>"$RUN_LOG" 2>&1
+  rc=$?
+  (( rc != 3 )) || fail "$label: a marspot-session outlived the probe (orphan leak)"
+  (( rc == 0 )) || fail "$label probe exited $rc ($broke)"
+}
+
 # N-session collision check (4a): allocate N distinct sessions via the
 # L2-allocates / L3-attaches split, spawn one L3 each, assert every one
 # echoes only its own char (a session collision would cross them) and
 # leaves no orphan.
-echo "--- multi-session (N=${MULTI_N}) ---" | tee -a "$RUN_LOG"
-"$MULTI_PROBE_BIN" "$SESSION_BIN" "$MULTI_N" >>"$RUN_LOG" 2>&1
-mrc=$?
-(( mrc == 0 )) || fail "multi-session probe exited $mrc (session collision or echo lost)"
-sleep 0.2
-now=$(count_sandbox_sessions)
-(( now <= base_sessions )) \
-  || fail "multi-session: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
+section "multi-session (N=${MULTI_N})" "session collision or echo lost" \
+  "$MULTI_PROBE_BIN" "$SESSION_BIN" "$MULTI_N"
 echo "  multi-session OK — ${MULTI_N} distinct sessions, each echoed its own char, no orphans"
 
 # Resize check (4b): grow + shrink an L3 in place; the published snapshot
 # dims must track each resize with no remap (region is capacity-mapped).
-echo "--- resize ---" | tee -a "$RUN_LOG"
-"$RESIZE_PROBE_BIN" "$SESSION_BIN" >>"$RUN_LOG" 2>&1
-rrc=$?
-(( rrc == 0 )) || fail "resize probe exited $rrc (resize not tracked in shm)"
-sleep 0.2
-now=$(count_sandbox_sessions)
-(( now <= base_sessions )) \
-  || fail "resize: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
+section resize "resize not tracked in shm" "$RESIZE_PROBE_BIN" "$SESSION_BIN"
 echo "  resize OK — 80x24 → 100x40 → 40x12 → 80x24 tracked in place, no orphans"
 
 # Scroll check (4b): build scrollback, scroll into history, assert the
 # published window tracks the offset (content changes), then back to live.
-echo "--- scroll ---" | tee -a "$RUN_LOG"
-"$SCROLL_PROBE_BIN" "$SESSION_BIN" >>"$RUN_LOG" 2>&1
-src=$?
-(( src == 0 )) || fail "scroll probe exited $src (scrollback window not tracked)"
-sleep 0.2
-now=$(count_sandbox_sessions)
-(( now <= base_sessions )) \
-  || fail "scroll: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
+section scroll "scrollback window not tracked" "$SCROLL_PROBE_BIN" "$SESSION_BIN"
 echo "  scroll OK — scrolled into history (window moved) and back to live, no orphans"
 
 # Selection-text check (4c): Cmd-C round-trip — request the text under a
 # selection from L3 (L2's mirror is window-only) and assert it carries the
 # on-screen marker.
-echo "--- selection ---" | tee -a "$RUN_LOG"
-"$SELECTION_PROBE_BIN" "$SESSION_BIN" >>"$RUN_LOG" 2>&1
-selrc=$?
-(( selrc == 0 )) || fail "selection probe exited $selrc (GetSelectionText round-trip broken)"
-sleep 0.2
-now=$(count_sandbox_sessions)
-(( now <= base_sessions )) \
-  || fail "selection: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
+section selection "GetSelectionText round-trip broken" "$SELECTION_PROBE_BIN" "$SESSION_BIN"
 echo "  selection OK — GetSelectionText returned the on-screen text from L3, no orphans"
 
 # Latency tail (4d): keystroke→echo through the extra L2→L3→L2 IPC hop.
 # The design calls for measuring this; the probe reports p50/p99/max and
 # fails only on a gross regression (a polling / stalling event loop).
-echo "--- latency ---" | tee -a "$RUN_LOG"
-lat_line=$("$LATENCY_PROBE_BIN" "$SESSION_BIN" 2>&1 | tee -a "$RUN_LOG" | grep -E '^PASS|keystroke')
-latrc=${PIPESTATUS[0]}
-(( latrc == 0 )) || fail "latency probe exited $latrc (keystroke→echo regression)"
-sleep 0.2
-now=$(count_sandbox_sessions)
-(( now <= base_sessions )) \
-  || fail "latency: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
+section latency "keystroke→echo regression" "$LATENCY_PROBE_BIN" "$SESSION_BIN"
+lat_line=$(grep -E '^PASS|keystroke' "$RUN_LOG" | tail -1)
 echo "  latency OK — ${lat_line##*: }"
 
 # Crash isolation (5c): SIGKILL one of two L3s; the sibling must keep
 # echoing and the dead L3's shm must stay readable (an L2 reading it keeps
 # running). Proves the process boundary isolates a per-session crash.
-echo "--- crash-isolation ---" | tee -a "$RUN_LOG"
-"$CRASH_PROBE_BIN" "$SESSION_BIN" >>"$RUN_LOG" 2>&1
-crrc=$?
-(( crrc == 0 )) || fail "crash probe exited $crrc (a crashing L3 took down a sibling / its shm)"
-sleep 0.2
-now=$(count_sandbox_sessions)
-(( now <= base_sessions )) \
-  || fail "crash: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
+section crash-isolation "a crashing L3 took down a sibling / its shm" \
+  "$CRASH_PROBE_BIN" "$SESSION_BIN"
 echo "  crash-isolation OK — one L3 killed, sibling unaffected, dead shm still readable, no orphans"
 
 # Silent swap (5a) — the load-bearing mechanism of silent update.
@@ -221,23 +178,17 @@ echo "  crash-isolation OK — one L3 killed, sibling unaffected, dead shm still
 # against the image now running.  That is the property
 # `soak-long-connection-execv.sh` claimed -- "survived 5 execv swaps" --
 # and `soak-snapshot-survival.sh`'s bit-for-bit grid comparison; both drove
-# `marspot-shelld`, which RFC-003 deleted in June, so both had been
-# reporting on a binary left in `target/`.  They are gone; this covers
-# what they were for, on the architecture that exists.
+# the L4 daemon RFC-003 deleted in June, so both had been reporting on a
+# binary left in `target/`.  They are gone; this covers what they were
+# for, on the architecture that exists.
 #
 # This section was red until 2026-10-01.  The single-pane swap used to
 # spawn a replacement L3 on the same session id, which cannot work -- the
 # live L3 holds a lock on `sessions/<id>/` and a second one refuses to
 # start.  The swap that exists is `swap_idle_l3`: promote the staged
 # image, then signal each L3 to execv itself.
-echo "--- silent-swap ---" | tee -a "$RUN_LOG"
-"$SWAP_PROBE_BIN" "$SESSION_BIN" "${SWAP_ROUNDS:-5}" >>"$RUN_LOG" 2>&1
-swrc=$?
-(( swrc == 0 )) || fail "swap probe exited $swrc (silent-swap mechanism broken)"
-sleep 0.2
-now=$(count_sandbox_sessions)
-(( now <= base_sessions )) \
-  || fail "swap: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
+section silent-swap "silent-swap mechanism broken" \
+  "$SWAP_PROBE_BIN" "$SESSION_BIN" "${SWAP_ROUNDS:-5}"
 echo "  silent-swap OK — replacement replayed + took over on the same session, no orphans"
 
 echo "PASS — ${ITERATIONS} rounds + N=${MULTI_N} multi-session + resize + scroll + selection + latency + crash + swap, all verified, L3 peak RSS=${peak_rss} KiB (cap ${RSS_CAP_KIB}), no orphans"

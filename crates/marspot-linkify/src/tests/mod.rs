@@ -26,6 +26,32 @@ pub(super) fn check_reuse<S: CellSource>(
     });
 }
 
+/// A directory of one test's own under the system temp dir, removed on
+/// drop.  A fixed name is shared by every run, worktree and test binary
+/// on the machine, and one run's leftovers become the next one's input.
+pub(crate) struct ScratchDir(pub std::path::PathBuf);
+impl ScratchDir {
+    pub fn new(tag: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let p = std::env::temp_dir().join(format!(
+            "marspot-linkify-{tag}-{}-{}-{nanos}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&p).expect("create the test's temp dir");
+        Self(p)
+    }
+}
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Minimal CellSource over plain rows of text — what a test needs
 /// and nothing more.  Wide chars are "everything above ASCII that
 /// the terminal would render double-width"; for tests the CJK +

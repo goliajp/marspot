@@ -13,7 +13,7 @@
 //! that file can build one. What can be checked is the ordering that
 //! broke, which is the whole of the bug.
 
-const CORE: &str = include_str!("../src/bin/marspot-core.rs");
+const CORE: &str = include_str!("../../src/bin/marspot-core.rs");
 
 /// The body of a free-standing `fn` in that file, by name.
 fn body_of(name: &str) -> &'static str {

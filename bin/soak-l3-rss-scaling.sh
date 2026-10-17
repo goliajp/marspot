@@ -60,15 +60,10 @@ if otool -L "$SESSION_BIN" | grep -qiE 'Metal|AppKit|CoreText'; then
   fail "marspot-session links a GUI framework (RSS floor broken)"
 fi
 
-dev_ensure_shelld || fail "sandbox shelld did not come up"
-cleanup() { pkill -9 -f "$SESSION_BIN( |\$)" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
-
+# The probe's sessions are its children; dev_run_probe kills any that
+# outlive it and returns 3, which fails the run below.
 run_n() {
-  local n=$1
-  pkill -9 -f "$SESSION_BIN( |\$)" >/dev/null 2>&1 || true
-  sleep 0.3
-  "$PROBE_BIN" "$SESSION_BIN" "$n" 2>/dev/null
+  dev_run_probe "$PROBE_BIN" "$SESSION_BIN" "$1" 2>/dev/null
 }
 
 echo "==> per-session idle L3 RSS scaling (N=1, 4, 9, 16)"
@@ -79,10 +74,10 @@ echo "==> per-session idle L3 RSS scaling (N=1, 4, 9, 16)"
 # actually produce, so the linearity bound is tested across the range the
 # product offers rather than at its ends.  N=1 and N=9 alone would miss a
 # cost that only appears past a threshold.
-OUT1=$(run_n 1) || fail "N=1 probe failed"
-OUT4=$(run_n 4) || fail "N=4 probe failed"
-OUT9=$(run_n 9) || fail "N=9 probe failed"
-OUT16=$(run_n 16) || fail "N=16 probe failed"
+OUT1=$(run_n 1) || fail "N=1 probe failed (exit $?; 3: a session outlived it)"
+OUT4=$(run_n 4) || fail "N=4 probe failed (exit $?; 3: a session outlived it)"
+OUT9=$(run_n 9) || fail "N=9 probe failed (exit $?; 3: a session outlived it)"
+OUT16=$(run_n 16) || fail "N=16 probe failed (exit $?; 3: a session outlived it)"
 PER4=$(echo "$OUT4" | awk '{print $3}')
 PER16=$(echo "$OUT16" | awk '{print $3}')
 PER1=$(echo "$OUT1" | awk '{print $3}')
@@ -111,8 +106,5 @@ ratio=$(python3 -c "print(f'{$PER9/$PER1:.3f}')")
 ok=$(python3 -c "print(1 if $PER9 <= $PER1 * $LINEARITY_MAX else 0)")
 (( ok == 1 )) || \
   fail "per-session RSS grows with pane count: N=9 ${PER9} KiB vs N=1 ${PER1} KiB = ${ratio}× > ${LINEARITY_MAX}× (superlinear per-session state)"
-
-orphans=$(pgrep -f "$SESSION_BIN( |$)" 2>/dev/null | grep -c . || true)
-(( orphans == 0 )) || fail "left ${orphans} orphan marspot-session proc(s)"
 
 echo "PASS: per-session idle L3 RSS ${PER9} KiB ≤ ${PER_SESSION_CAP_KIB} KiB, linear (${ratio}× ≤ ${LINEARITY_MAX}×), no orphans"

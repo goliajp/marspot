@@ -124,7 +124,7 @@ dev_kill_shell_core
 rm -rf "$MARSPOT_STATE_DIR"; mkdir -p "$MARSPOT_STATE_DIR/logs"
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
   MARSPOT_DEV_BADGE_MENU="$MENU_FILE" \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 # A cold first exec of each binary can take seconds on a host whose
@@ -180,13 +180,14 @@ done
 grep -q '^start ' "$CODEX_LOG" || fail "the stand-in did not start"
 
 starts() { grep -c '^start ' "$CODEX_LOG"; }
-settle() { # no new start for 2 s
-  local last=-1 n
-  while :; do
+settle() { # no new start for 2 s, within 60 s
+  local last=-1 n i
+  for (( i = 0; i < 30; i++ )); do
     n="$(starts)"
     [[ "$n" == "$last" ]] && return 0
     last="$n"; sleep 2
   done
+  fail "the stand-in kept restarting for 60 s ($(starts) starts)"
 }
 settle
 BEFORE="$(starts)"

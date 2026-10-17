@@ -1,3 +1,31 @@
+# No test may run forever.  A test that has not finished in 30 s is
+# reported as slow, and one that reaches a minute is killed and fails:
+# the slowest test in the suite takes a few seconds, so a minute is a
+# hang, not a slow machine.  Before this a wedged test held the runner
+# until someone noticed.
+#
+# A test whose process has exited while something it started still
+# holds its stdout or stderr has left a process behind.
+#
+# Five seconds, not less.  On macOS a test can be reported leaky for
+# a few seconds with nothing of its own alive: a unit test that starts
+# no process at all was, under a parallel run, and at 200 ms and at 1 s
+# leaks came and went with how long the tests running beside it took;
+# at 5 s sixty parallel runs of the same tests had none.  The likely
+# holder is another test process that inherited the pipe while both
+# were being started.  A process a test really leaves behind holds the
+# handle for as long as it lives; one that ends within five seconds
+# goes unreported, and costs the runner nothing.
+[profile.default]
+slow-timeout = { period = "30s", terminate-after = 2 }
+leak-timeout = "5s"
+
+# Every child these crates' tests start has an owner that kills it, so
+# here a leak fails the test; elsewhere it is still only reported.
+[[profile.default.overrides]]
+filter = 'package(marspot-term) | package(marspot-session) | package(marspot-linkify) | package(marspot)'
+leak-timeout = { period = "5s", result = "fail" }
+
 # A test that asserts a time budget needs the machine to itself.
 #
 # `b1_perf_1mb_first_64_hits_under_20ms` went red the first time the

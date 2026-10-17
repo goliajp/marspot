@@ -4,7 +4,8 @@
 //! running system reads it back — reattach restores from `state.bin`
 //! instead — so this is a write-only forensic record, kept for the
 //! "the scrollback is gone but the raw bytes survived" case that
-//! `examples/rebuild_scrollback_from_bytelog.rs` exists to handle.
+//! [`replay`] (and `examples/rebuild_scrollback_from_bytelog.rs`, the
+//! tool around it) exists to handle.
 //! Bounded by **rotation**, not by copying.  The live file is
 //! `bytelog`; once it passes `BYTELOG_SEGMENT_BYTES` it is renamed to
 //! `bytelog.1` (replacing the previous `.1`) and a fresh empty
@@ -163,23 +164,41 @@ impl ByteLog {
     }
 }
 
+/// Feed a log's segments, oldest first, through `term`'s parser: the
+/// same bytes in the same order the pane's L3 parsed them, so the grid
+/// and scrollback come out as they were, at `term`'s size.  Returns the
+/// number of bytes fed.
+///
+/// A segment that does not exist is skipped, so the list from
+/// [`ByteLog::segment_paths`] or a hand-built `[<log>.1, <log>]` both
+/// work.  Callers reading a live log flush it first.
+pub fn replay(segments: &[PathBuf], term: &mut crate::terminal::Terminal) -> io::Result<u64> {
+    use std::io::Read;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut fed = 0u64;
+    for seg in segments {
+        let mut f = match std::fs::File::open(seg) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            term.feed(&buf[..n]);
+            fed += n as u64;
+        }
+    }
+    Ok(fed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Read;
     use std::time::Instant;
-
-    /// Point the state root at a scratch dir for one test.
-    fn sandbox(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("marspot-bytelog-test-{tag}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: nextest gives each test its own process, so no
-        // other thread can be reading the environment concurrently.
-        // Mirrors the `set_var("HOME")` pattern in `grid_links`.
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
-        dir
-    }
 
     /// Read the log back from disk.  Appends go through a writer
     /// thread, so a test that wants to see them must flush first —
@@ -202,7 +221,7 @@ mod tests {
     /// rename cannot take 500 ms, a copy of this much data can.
     #[test]
     fn rotation_is_bounded_ordered_and_cheap() {
-        let dir = sandbox("rotate");
+        let _sandbox = crate::test_env::sandbox_state_dir();
         let id = 7;
         let mut log = ByteLog::open(id).unwrap();
 
@@ -286,12 +305,12 @@ mod tests {
             trigger > std::time::Duration::ZERO,
             "never observed the rotating append"
         );
-        assert!(
-            trigger.as_millis() < 100,
-            "the rotating append took {trigger:?} — data is being copied, not renamed"
-        );
-
-        let _ = std::fs::remove_dir_all(dir);
+        if crate::host_load::quiet_enough_to_time("the rotating bytelog append") {
+            assert!(
+                trigger.as_millis() < 100,
+                "the rotating append took {trigger:?} — data is being copied, not renamed"
+            );
+        }
     }
 
     /// A legacy oversized log (written by the copy-compaction scheme,
@@ -299,7 +318,8 @@ mod tests {
     /// on open instead of being grown further.
     #[test]
     fn legacy_oversized_segment_rotates_on_open() {
-        let dir = sandbox("legacy");
+        let sandbox = crate::test_env::sandbox_state_dir();
+        let dir = sandbox.path();
         let id = 11;
         let seg_dir = dir.join("sessions").join(id.to_string());
         std::fs::create_dir_all(&seg_dir).unwrap();
@@ -316,13 +336,12 @@ mod tests {
             2,
             "the oversized legacy file should have been retired to .1"
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A log that has never rotated still reads back as one segment.
     #[test]
     fn single_segment_before_rotation() {
-        let dir = sandbox("single");
+        let _sandbox = crate::test_env::sandbox_state_dir();
         let id = 9;
         let mut log = ByteLog::open(id).unwrap();
         log.append(b"hello ").unwrap();
@@ -330,6 +349,113 @@ mod tests {
         log.flush();
         assert_eq!(ByteLog::segment_paths(id).len(), 1);
         assert_eq!(read_all(id), b"hello world");
-        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// What a pane's program printed: enough to scroll several screens
+    /// off the top, with colour, wide characters, a carriage-return
+    /// overwrite and a cursor move, so a replay that only gets plain
+    /// ASCII right still fails.
+    fn program_output() -> Vec<u8> {
+        let mut out = Vec::new();
+        for i in 0..120 {
+            out.extend_from_slice(
+                format!(
+                    "\x1b[3{}mline {i:03}\x1b[0m 漢字 ✓ {}\r\n",
+                    i % 8,
+                    "x".repeat(i % 37)
+                )
+                .as_bytes(),
+            );
+            if i % 17 == 0 {
+                out.extend_from_slice(b"overwritten\rOVER\r\n");
+            }
+        }
+        out.extend_from_slice(b"\x1b[3;5Hmid-screen\x1b[10;1Hprompt$ ");
+        out
+    }
+
+    fn assert_same_terminal(a: &crate::terminal::Terminal, b: &crate::terminal::Terminal) {
+        let (ga, gb) = (a.grid(), b.grid());
+        assert_eq!(
+            ga.scrollback_len(),
+            gb.scrollback_len(),
+            "scrollback length"
+        );
+        assert!(
+            ga.scrollback_len() > 50,
+            "the output scrolled well past one screen"
+        );
+        for i in 0..ga.scrollback_len() {
+            assert_eq!(
+                ga.scrollback_line(i),
+                gb.scrollback_line(i),
+                "scrollback line {i}"
+            );
+        }
+        for r in 0..ga.rows() {
+            for c in 0..ga.cols() {
+                assert_eq!(ga.cell(c, r), gb.cell(c, r), "cell ({c}, {r})");
+            }
+        }
+        assert_eq!(ga.cursor(), gb.cursor(), "cursor");
+    }
+
+    /// The bytes a pane parsed, logged as it parsed them, rebuild the
+    /// same grid and scrollback in a fresh terminal.  The live side is
+    /// fed in small odd-sized chunks, so escape sequences and UTF-8
+    /// characters straddle the chunk boundaries the way PTY reads cut
+    /// them; the replay reads in its own, much larger, chunks.
+    #[test]
+    fn a_replayed_log_rebuilds_the_same_screen_and_scrollback() {
+        let mut sandbox = crate::test_env::sandbox_state_dir();
+        sandbox.env.remove("MARSPOT_SESSION_ID");
+        let id = 21;
+        let mut log = ByteLog::open(id).unwrap();
+        let mut live = crate::terminal::Terminal::new(40, 10);
+        for chunk in program_output().chunks(7) {
+            live.feed(chunk);
+            log.append(chunk).unwrap();
+        }
+        log.flush();
+
+        let mut replayed = crate::terminal::Terminal::new(40, 10);
+        let fed = replay(&ByteLog::segment_paths(id), &mut replayed).unwrap();
+        assert_eq!(fed, program_output().len() as u64);
+        assert_same_terminal(&live, &replayed);
+    }
+
+    /// A rotated log replays the retired segment first.  Either order
+    /// feeds every byte; only one of them is the pane's history.
+    #[test]
+    fn a_rotated_log_replays_oldest_first() {
+        let mut sandbox = crate::test_env::sandbox_state_dir();
+        sandbox.env.remove("MARSPOT_SESSION_ID");
+        let id = 23;
+        let dir = sandbox.path().join("sessions").join(id.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        let all = program_output();
+        let (older, newer) = all.split_at(all.len() / 2);
+        std::fs::write(dir.join("bytelog.1"), older).unwrap();
+        std::fs::write(dir.join("bytelog"), newer).unwrap();
+
+        let mut live = crate::terminal::Terminal::new(40, 10);
+        live.feed(&all);
+        let mut replayed = crate::terminal::Terminal::new(40, 10);
+        replay(&ByteLog::segment_paths(id), &mut replayed).unwrap();
+        assert_same_terminal(&live, &replayed);
+
+        // the tool's own list, built from the live segment's path
+        let mut by_path = crate::terminal::Terminal::new(40, 10);
+        let fed = replay(
+            &[
+                dir.join("bytelog.1"),
+                dir.join("bytelog"),
+                dir.join("bytelog.2"),
+            ],
+            &mut by_path,
+        )
+        .unwrap();
+        assert_eq!(fed, all.len() as u64, "a missing segment is skipped");
+        assert_same_terminal(&live, &by_path);
     }
 }

@@ -2,7 +2,7 @@
 //! and a glyph index into pixels.
 //!
 //! **No platform type appears in `Rasteriser` or `Shaper`.** That is
-//! the whole point of the file and `tests/text_layer_is_portable.rs`
+//! the whole point of the file and `tests/it/text_layer_is_portable.rs`
 //! holds it down: the traits used to take `&CTFont` and `CGGlyph`, so
 //! a DirectWrite or FreeType implementation could not be written at
 //! all -- it would have had to produce a CoreText font object to
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn coretext_mono_returns_raster() {
         let Ok(font) = new_from_name("Menlo", 13.0) else {
-            eprintln!("skipping: no Menlo");
+            eprintln!("SKIPPED: no Menlo");
             return;
         };
         let mut g: CGGlyph = 0;
@@ -329,6 +329,7 @@ mod tests {
     #[test]
     fn coretext_shaper_matches_shape_line() {
         let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
+            eprintln!("SKIPPED: no system UI font");
             return;
         };
         let opts = crate::font_shape::ShapeOptions::full();

@@ -175,7 +175,7 @@ impl ContextMenu {
     ) -> Self {
         // The geometry comes from the declarative tree now (S3-09).  What
         // this function returns is unchanged -- a frame and a rect per
-        // item -- so `tests/chrome_geometry.rs` is the proof that moving
+        // item -- so `tests/it/chrome_geometry.rs` is the proof that moving
         // it moved nothing.
         //
         // The tree carries LOGICAL units and resolves them against

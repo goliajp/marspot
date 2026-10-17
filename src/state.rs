@@ -478,12 +478,6 @@ fn read_string(c: &mut Cursor<&[u8]>) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// `cargo test` runs tests as threads in one process and
-    /// `MARSPOT_STATE_DIR` is process-global, so the two tests that
-    /// touch real files serialise on this.  (nextest is process-per-
-    /// test and immune, but keep `cargo test` correct too.)
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn pane(sid: u64, title: &str, cwd: &str) -> SavedPane {
         SavedPane { sid, flags: 0, custom_title: title.into(), last_cwd: cwd.into() }
     }
@@ -491,20 +485,9 @@ mod tests {
     /// Encode via the real writer's body builder by writing to a temp
     /// state dir, so the test can't drift from `write()`'s layout.
     fn round_trip(s: &SavedState) -> SavedState {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-state-test-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        // SAFETY: single-threaded within this test; the var is read
-        // by `state_file_path` on this thread only.
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
+        let _sandbox = crate::test_env::sandbox_state_dir();
         write(s).expect("write");
-        let out = read().expect("read back");
-        let _ = std::fs::remove_dir_all(&dir);
-        out
+        read().expect("read back")
     }
 
     /// RFC-005 step 6 — the whole point of v2: every window survives,
@@ -650,10 +633,8 @@ mod tests {
     /// says so instead of leaving a guard that quietly does nothing.
     #[test]
     fn a_test_binary_cannot_write_the_installed_apps_state() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let restore = std::env::var_os("MARSPOT_STATE_DIR");
-        // SAFETY: serialised by ENV_LOCK; restored before returning.
-        unsafe { std::env::remove_var("MARSPOT_STATE_DIR") };
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove("MARSPOT_STATE_DIR");
 
         let err = write(&SavedState::default()).expect_err("write must be refused");
         assert!(
@@ -665,21 +646,12 @@ mod tests {
             display_id: 0, x: 0.0, y: 0.0, w: 1.0, h: 1.0, visible: false,
         })
         .is_err());
-
-        if let Some(v) = restore {
-            // SAFETY: as above.
-            unsafe { std::env::set_var("MARSPOT_STATE_DIR", v) };
-        }
     }
 
     /// Geometry file: same peer treatment, same v1 tolerance.
     #[test]
     fn window_frames_round_trip_as_a_list() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let dir = std::env::temp_dir().join(format!("marspot-frames-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        // SAFETY: single-threaded within this test.
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
+        let _sandbox = crate::test_env::sandbox_state_dir();
         let frames = vec![
             SavedWindow { display_id: 1, x: 0.0, y: 10.0, w: 800.0, h: 600.0 },
             SavedWindow { display_id: 2, x: 900.0, y: 20.0, w: 400.0, h: 300.0 },
@@ -704,6 +676,5 @@ mod tests {
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].display_id, 7);
         assert_eq!(back[0].h, 4.0);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

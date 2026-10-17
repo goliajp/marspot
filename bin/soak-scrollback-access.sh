@@ -24,8 +24,8 @@
 #   - the deepest read isn't dramatically slower than the shallowest,
 #   - the ring stays bounded (sb_len == the configured cap; RSS under cap).
 #
-# Headless (the bench uses Terminal only, no renderer / window).  Runs
-# against the default disk scrollback; never touches the installed app.
+# Headless (the bench uses Terminal only, no renderer / window); never
+# touches the installed app.
 #
 #   bin/soak-scrollback-access.sh
 
@@ -56,8 +56,11 @@ if [[ ! -x "$BIN" ]]; then
 fi
 [[ -x "$BIN" ]] || fail "marspot not built at $BIN"
 
-echo "==> scrollback access-at-depth (feed ${TARGET_LINES} lines, disk ring)"
-OUT=$(MARSPOT_DISK_SCROLLBACK=1 "$BIN" --bench "scrollaccess:$TARGET_LINES" 2>/dev/null)
+# No env switch picks the scrollback any more (MARSPOT_DISK_SCROLLBACK
+# was removed): the bench gets whatever a process without a session id
+# gets, which is what this measures.
+echo "==> scrollback access-at-depth (feed ${TARGET_LINES} lines)"
+OUT=$("$BIN" --bench "scrollaccess:$TARGET_LINES" 2>/dev/null)
 [[ -n "$OUT" ]] || fail "bench produced no output"
 echo "$OUT" | python3 -m json.tool 2>/dev/null || { echo "$OUT"; fail "bench output not JSON"; }
 

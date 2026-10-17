@@ -127,7 +127,7 @@ PY
   echo "==> launching ($label)"
   MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
     env "$driver" \
-    nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+    nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
   disown
 
   wait_for WINDOW_RESTORED 40 || fail "[$label] the second window never assembled"
@@ -150,7 +150,7 @@ PY
   # Give the old teardown's SIGTERM + 200 ms grace more than its due.
   sleep 2
 
-  pgrep -f "$SHELL_BIN" >/dev/null && fail "[$label] the shell is still running"
+  [[ -n "$(dev_shell_pid)" ]] && fail "[$label] the shell is still running"
 
   # The lander was started, waited for the shell to be gone, and only
   # then did its work — a landing under a running app is the AMFI kill
@@ -181,7 +181,7 @@ PY
   echo "==> relaunching"
   rm -f "$APPLOG"
   MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
-    nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+    nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
   disown
   wait_for WINDOW_RESTORED 40 || fail "[$label] the second window did not come back"
   sleep 3

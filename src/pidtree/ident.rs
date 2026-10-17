@@ -114,11 +114,13 @@ mod tests {
     use std::process::{Child, Command};
     use std::time::{Duration, Instant};
 
-    fn sleeper() -> Child {
-        Command::new("/bin/sleep")
-            .arg("30")
-            .spawn()
-            .expect("spawn /bin/sleep")
+    fn sleeper() -> crate::test_env::ChildGuard {
+        crate::test_env::ChildGuard::new(
+            Command::new("/bin/sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn /bin/sleep"),
+        )
     }
 
     /// `try_wait` until the child exits, bounded.

@@ -321,9 +321,11 @@ close_one() {
       ;;
     marspot)
       # mcli exits when its single session finishes (wrapper ends with
-      # `exit`). pkill is belt-and-suspenders for a hung wrapper.
-      pkill -x mcli 2>/dev/null || true
-      pkill -x marspot 2>/dev/null || true
+      # `exit`).  This is the backstop for a hung wrapper, and it stops
+      # only the instance the driver launched and recorded: other
+      # sessions run their own marspot and mcli on this host.
+      kill_app mcli || true
+      kill_app marspot || true
       ;;
   esac
   return 0

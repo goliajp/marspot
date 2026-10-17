@@ -224,7 +224,10 @@ done
 
 # ---- write results -------------------------------------------------------
 
-OUT_JSON="$RESULTS_DIR/cross-terminal.json"
+# Not cross-terminal.json: bench-run.sh keeps that as a symlink to its
+# latest snapshot, and writing through it replaced the snapshot the
+# --full gate reads its multi-session numbers from with this file.
+OUT_JSON="$RESULTS_DIR/live-cat.json"
 python3 - "$RUN_DIR" "$SCENARIOS_DIR" "${SCENARIOS[*]}" "${TERMINALS[*]}" > "$OUT_JSON" <<'PY'
 import json, os, sys
 run_dir, scenarios_dir, scenarios_str, terminals_str = sys.argv[1:5]

@@ -159,7 +159,14 @@ int main(int argc, char **argv) {
     } else {
         snprintf(dir, sizeof dir, "%s/sessions/2026/09/22", home); mkdirs(dir);
         snprintf(hist, sizeof hist, "%s/rollout-2026-09-22T00-00-00-%s.jsonl", dir, id);
+        struct stat st;
+        int fresh = stat(hist, &st) != 0 || st.st_size == 0;
         FILE *h = fopen(hist, "a");
+        // Every rollout codex writes opens with session_meta, and the
+        // switch finds a codex pane's rollout by the directory named
+        // there; a resume appends to the same file.
+        if (fresh)
+            fprintf(h, "{\\"timestamp\\":\\"2026-09-22T00:00:00.000Z\\",\\"type\\":\\"session_meta\\",\\"payload\\":{\\"id\\":\\"%s\\",\\"timestamp\\":\\"2026-09-22T00:00:00.000Z\\",\\"cwd\\":\\"%s\\",\\"originator\\":\\"codex_cli_rs\\"}}\\n", id, cwd);
         fprintf(h, "{\\"type\\":\\"turn_context\\",\\"payload\\":{\\"cwd\\":\\"%s\\",\\"model\\":\\"stub\\"}}\\n", cwd);
         fclose(h);
     }
@@ -212,7 +219,7 @@ dev_kill_shell_core
 rm -rf "$MARSPOT_STATE_DIR"; mkdir -p "$MARSPOT_STATE_DIR/logs"
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
   MARSPOT_DEV_BADGE_MENU="$MENU_FILE" \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 wait_for 'L3_SPAWNED' 90 || fail "no pane session was ever spawned"

@@ -394,6 +394,47 @@ mod tests {
         assert_eq!(o.next.codex, led.codex);
     }
 
+    /// Leaving a codex pane whose argv names no session: its rollout is
+    /// the newest one whose opening `session_meta` names the pane's
+    /// directory, and what it holds is handed over. A file that does not
+    /// open with that record is not a rollout codex wrote and is never
+    /// taken, whatever directory its later records name.
+    #[test]
+    fn a_codex_pane_without_a_session_id_is_found_by_its_session_meta() {
+        let user = |t: &str| {
+            format!(r#"{{"type":"event_msg","payload":{{"type":"item_completed","item":{{"type":"UserMessage","content":[{{"type":"text","text":"{t}"}}]}}}}}}"#) + "\n"
+        };
+        let turn = r#"{"type":"turn_context","payload":{"cwd":"/w/a","model":"m"}}"#.to_string() + "\n";
+        let meta = r#"{"type":"session_meta","payload":{"id":"t-1","cwd":"/w/a"}}"#.to_string() + "\n";
+        let leaving = |home: &Path| Leaving {
+            agent: Agent::Codex,
+            proc: marspot::pidtree::ProcId { pid: 1, start_us: 0 },
+            shell_pid: 1,
+            home: home.to_path_buf(),
+            session_id: None,
+            cwd: Some("/w/a".into()),
+        };
+
+        let home = tmp("switch-codex-meta");
+        let day = home.join("sessions/2026/09/22");
+        std::fs::create_dir_all(&day).unwrap();
+        let headless = day.join("rollout-2026-09-22T00-00-00-00000000-0000-4000-8000-000000000002.jsonl");
+        std::fs::write(&headless, format!("{turn}{}", user("not codex's"))).unwrap();
+        assert_eq!(history_of(&leaving(&home)), None, "no session_meta, no rollout");
+
+        let real = day.join("rollout-2026-09-22T00-00-00-00000000-0000-4000-8000-000000000001.jsonl");
+        std::fs::write(&real, format!("{meta}{turn}{}", user("second ask"))).unwrap();
+        let found = history_of(&leaving(&home));
+        assert_eq!(found.as_deref(), Some(real.as_path()));
+
+        let state = home.join("handoff");
+        std::fs::create_dir_all(&state).unwrap();
+        let o = prepare_in(4, &state, &leaving(&home), Agent::Claude, Some("u-1"), &Ledger::default(), found).unwrap();
+        assert!(o.message.expect("codex's turn is handed over").contains("since you left"));
+        assert!(std::fs::read_to_string(ledger::doc_path(&state, 4)).unwrap().contains("second ask"));
+        assert!(o.next.codex.is_some(), "the codex side is recorded for next time");
+    }
+
     #[test]
     fn resume_needs_the_history_to_be_reachable() {
         let d = tmp("switch-resume");

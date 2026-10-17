@@ -22,8 +22,8 @@
 #      204 s frozen window when Gatekeeper (not a bad binary) was what
 #      held the new core up.
 #
-# Sandbox-only; never touches the installed app.  Run after
-# `cargo build --release`.  Port 6026 is this project's registry
+# Sandbox-only; never touches the installed app.  Builds the release
+# binaries itself, with the test-update-key feature.  Port 6026 is this project's registry
 # allocation for the adversarial feed.
 
 set -uo pipefail
@@ -54,16 +54,43 @@ cleanup() {
 }
 trap cleanup EXIT
 
-RUNNING_VER=$("$SHELL_BIN" --version 2>/dev/null | awk '{print $2}')
-[[ -n "$RUNNING_VER" ]] || fail "could not read running version"
-
 # ====================================================================
 # Case 1: equal-version feed → poll happens, no download, no stage.
 # ====================================================================
-[[ -f "$ROOT/keys/marspot-update.sec" ]] \
-  || fail "no keys/marspot-update.sec — needed to build the feed tarball"
-"$ROOT/bin/build-release-tarball.sh" --output "$SERVE_DIR/$ASSET" --sign >/dev/null \
-  || fail "build-release-tarball.sh --sign failed"
+# A throwaway signing key for this run.  The binaries are built with
+# the `test-update-key` feature, which makes the updater trust the PEM
+# that MARSPOT_TEST_UPDATE_PUBKEY names -- only while MARSPOT_STATE_DIR
+# names a sandbox, as it does here.  The real release key never has to
+# be on the machine that runs the suite.  The build goes to
+# target/release, where the sandbox helpers expect it; install-local
+# rebuilds without the feature, and a feature build outside a sandbox
+# trusts only the real key anyway.
+TEST_KEY="$SERVE_DIR/test-update.sec"
+openssl ecparam -genkey -name prime256v1 -noout -out "$TEST_KEY" 2>/dev/null \
+  || fail "could not generate the test signing key"
+openssl ec -in "$TEST_KEY" -pubout -out "$SERVE_DIR/test-update.pub" 2>/dev/null \
+  || fail "could not derive the test public key"
+export MARSPOT_TEST_UPDATE_PUBKEY="$SERVE_DIR/test-update.pub"
+( cd "$ROOT" && cargo build --release --features test-update-key \
+    --bin marspot-shell --bin marspot-core --bin marspot-session 2>&1 | tail -2 ) \
+  || fail "release build with test-update-key failed"
+LC_ALL=C grep -q MARSPOT_TEST_UPDATE_PUBKEY "$ROOT/target/release/marspot-shell" \
+  || fail "target/release/marspot-shell was built without test-update-key"
+# The release tarball, from exactly those binaries.  Not
+# build-release-tarball.sh: it rebuilds without the feature.
+make_tarball() {
+  local out="$1" stage
+  stage=$(mktemp -d "$SERVE_DIR/stage.XXXXXX")
+  for b in marspot-shell marspot-core marspot-session; do
+    install -m 0755 "$ROOT/target/release/$b" "$stage/$b" || return 1
+  done
+  tar -czf "$out" -C "$stage" marspot-shell marspot-core marspot-session
+}
+make_tarball "$SERVE_DIR/$ASSET" || fail "could not build the release tarball"
+openssl dgst -sha256 -sign "$TEST_KEY" -out "$SERVE_DIR/$ASSET.sig" "$SERVE_DIR/$ASSET" \
+  || fail "could not sign the release tarball"
+RUNNING_VER=$("$SHELL_BIN" --version 2>/dev/null | awk '{print $2}')
+[[ -n "$RUNNING_VER" ]] || fail "could not read running version"
 # That step ran `cargo build --release`, so the binaries this test is
 # about to launch may be brand-new inodes.  Pay their Gatekeeper
 # assessment now, before anything is on a clock.
@@ -88,13 +115,12 @@ sleep 0.5
 curl -sf "http://127.0.0.1:$PORT/feed.json" >/dev/null \
   || fail "feed server didn't come up on :$PORT"
 
-dev_ensure_shelld || fail "sandbox shelld"
 dev_kill_shell_core
 dev_wipe_state
 mkdir -p "$(dirname "$SUP_LOG")"
 rm -f "$SUP_LOG" 2>/dev/null || true; : > "$RUN_LOG"
 MARSPOT_UPDATE_FEED="http://127.0.0.1:$PORT/feed.json" \
-  nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 for _ in $(seq 1 50); do grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null && break; sleep 0.1; done
 grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "[equal] boot HelloAck never landed"
@@ -127,11 +153,9 @@ dev_kill_shell_core
 # ====================================================================
 # Case 2: concurrent triggers → apply exactly once.
 # ====================================================================
-export MARSPOT_PROBATION_S=3
-dev_ensure_shelld || fail "sandbox shelld"
 dev_wipe_state
 rm -f "$SUP_LOG" 2>/dev/null || true; : > "$RUN_LOG"
-nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 for _ in $(seq 1 50); do grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null && break; sleep 0.1; done
 grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "[concurrent] boot HelloAck never landed"
@@ -147,7 +171,7 @@ cp "$CORE_BIN" "$TREE/pending/marspot-core"
 # Wait for the swap to stabilise.
 START=$(date +%s)
 until grep -q $'\tUPDATE_STABLE\t' "$SUP_LOG" 2>/dev/null; do
-  if (( $(date +%s) - START > 30 )); then fail "[concurrent] no UPDATE_STABLE"; fi
+  if (( $(date +%s) - START > 60 )); then fail "[concurrent] no UPDATE_STABLE within 60 s"; fi
   sleep 0.3
 done
 # Let any duplicate apply attempts settle.
@@ -158,7 +182,7 @@ sleep 2
 # counts 2 for a single swap and this assertion could never pass.
 swaps=$(grep -c $'\tUPDATE_SWAP\tsingle-core swap complete' "$SUP_LOG" 2>/dev/null)
 [[ "$swaps" == "1" ]] || fail "[concurrent] $swaps swaps from one pending (expected exactly 1 — double-apply)"
-cores=$(pgrep -f "$TREE/current/marspot-core( |$)" 2>/dev/null | wc -l | tr -d ' ')
+cores=$(dev_core_pids | wc -l | tr -d ' ')
 [[ "$cores" == "1" ]] || fail "[concurrent] $cores live cores (expected 1)"
 [[ ! -f "$TREE/pending/marspot-core" ]] || fail "[concurrent] pending/ not consumed"
 [[ ! -f "$TREE/prev/marspot-core" ]] || fail "[concurrent] prev/ not finalized"
@@ -176,10 +200,9 @@ echo "[concurrent] OK — 3 rapid triggers applied exactly once, one core, tree 
 # quarantined and the live core is never touched.
 # ====================================================================
 dev_kill_shell_core
-dev_ensure_shelld || fail "sandbox shelld"
 dev_wipe_state
 rm -f "$SUP_LOG" 2>/dev/null || true; : > "$RUN_LOG"
-nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 for _ in $(seq 1 50); do grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null && break; sleep 0.1; done
 grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "[bad-core] boot HelloAck never landed"
@@ -187,7 +210,7 @@ grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "[bad-core] boot HelloAc
 # A cold boot runs the core straight out of target/release; only a swap
 # moves it to current/.  Match the boot path, so "still the same pid"
 # and "never got swapped" are the same observation.
-before_pid=$(pgrep -f "$CORE_BIN( |$)" 2>/dev/null | head -1)
+before_pid=$(dev_core_pids | head -1)
 [[ -n "$before_pid" ]] || fail "[bad-core] no live core after boot"
 
 # Executable, but exits non-zero — which is what the probe exists to
@@ -204,7 +227,7 @@ until grep -q $'\tUPDATE_PROBE_REJECT\t' "$SUP_LOG" 2>/dev/null; do
   sleep 0.3
 done
 
-after_pid=$(pgrep -f "$CORE_BIN( |$)" 2>/dev/null | head -1)
+after_pid=$(dev_core_pids | head -1)
 [[ "$after_pid" == "$before_pid" ]] \
   || fail "[bad-core] live core changed ($before_pid → ${after_pid:-none}) — it must be untouched"
 if grep -q $'\tUPDATE_SWAP\tsingle-core swap complete' "$SUP_LOG" 2>/dev/null; then

@@ -189,30 +189,31 @@ fn other_marspot_processes_alive() -> bool {
 mod tests {
     use super::*;
 
+    /// Every test process has `MARSPOT_STATE_DIR` set (cargo's config
+    /// sets it), so the default is only reachable with it removed.
     #[test]
     fn default_root_is_under_application_support() {
-        if std::env::var_os("MARSPOT_STATE_DIR").is_none() {
-            assert!(state_root().ends_with("Library/Application Support/marspot"));
-            assert!(log_dir().ends_with("Library/Logs/Marspot"));
-        }
+        let home = crate::test_env::TempDir::new("default-root-home");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove("MARSPOT_STATE_DIR").set("HOME", home.path());
+        assert_eq!(
+            state_root(),
+            home.join("Library/Application Support/marspot")
+        );
+        assert_eq!(log_dir(), home.join("Library/Logs/Marspot"));
     }
 
     /// RFC-004 D.1 — migration renames the legacy Caches root to the
     /// new location and leaves a symlink; idempotent on re-run.
-    /// Uses a fake $HOME (nextest = process-per-test; safe to set).
     #[test]
     fn migrate_legacy_root_renames_and_symlinks() {
-        let fake_home =
-            std::env::temp_dir().join(format!("marspot-d1-home-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&fake_home);
+        let home = crate::test_env::TempDir::new("d1-home");
+        let fake_home = home.path();
         let old = fake_home.join("Library/Caches/marspot");
         std::fs::create_dir_all(old.join("sessions/7")).unwrap();
         std::fs::write(old.join("sessions/7/bytelog"), b"H").unwrap();
-        // SAFETY: test process, no concurrent env readers.
-        unsafe {
-            std::env::remove_var("MARSPOT_STATE_DIR");
-            std::env::set_var("HOME", &fake_home);
-        }
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove("MARSPOT_STATE_DIR").set("HOME", fake_home);
         let new = fake_home.join("Library/Application Support/marspot");
         migrate_roots(&old, &new);
         assert!(
@@ -237,7 +238,6 @@ mod tests {
         // Idempotent at the public entry (barrier + exists-check):
         migrate_legacy_state_root();
         assert!(std::fs::symlink_metadata(&new).unwrap().is_dir());
-        let _ = std::fs::remove_dir_all(&fake_home);
     }
 
     #[test]

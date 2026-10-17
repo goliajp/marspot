@@ -47,18 +47,17 @@ case "$cmd" in
     ensure_build "$bin"
     kill_app "$bin" || true
     # Forward profiling env-vars so per-trial counters can be captured.
-    # MARSPOT_DISK_SCROLLBACK is the documented opt-out for regression bisects
-    # (see commit 86e81d1) — it must reach the bench-spawned marspot process,
-    # otherwise the bisect tool isn't actually usable from the harness.
     env_pass=""
-    for v in MARSPOT_PROFILE MARSPOT_LATENCY MARSPOT_SCALE MARSPOT_TMUX_DEBUG MARSPOT_DISK_SCROLLBACK; do
+    for v in MARSPOT_PROFILE MARSPOT_LATENCY MARSPOT_SCALE MARSPOT_TMUX_DEBUG; do
       if [[ -n "${!v:-}" ]]; then env_pass+=" $v=${!v}"; fi
     done
     # nohup + redirect so the bench harness isn't tied to marspot's output;
     # its result is reported through the marker file.
     bin_path="$(marspot_bin "$bin")"
+    # The pid is written down so kill_app stops this instance and only
+    # this one (env and nohup exec, so $! is the binary's pid).
     (cd "$ROOT" && env $env_pass MARSPOT_SHELL="$shell_script" \
-      nohup "$bin_path" "$@" > /dev/null 2>&1 < /dev/null &) || true
+      nohup "$bin_path" "$@" > /dev/null 2>&1 < /dev/null & bench_record_pid $!) || true
     disown 2>/dev/null || true
     # Don't `wait` — marspot exits when all sessions exit, scenario script polls marker.
     ;;

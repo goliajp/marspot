@@ -179,13 +179,18 @@ mod tests {
     /// empty element in the middle.
     #[test]
     fn a_real_argv_with_an_empty_element_round_trips() {
-        // `; :` keeps sh from exec'ing sleep in its own place
-        let mut child = std::process::Command::new("/bin/sh")
-            .args(["-c", "sleep 5; :", "", "x"])
-            .spawn()
-            .expect("spawn sh");
+        use std::os::unix::process::CommandExt;
+        // `; :` keeps sh from exec'ing sleep in its own place, so the
+        // sleep is a child of the shell and only the group takes it
+        let child = crate::test_env::ChildGuard::group(
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "sleep 30; :", "", "x"])
+                .process_group(0)
+                .spawn()
+                .expect("spawn sh"),
+        );
         let pid = child.id() as i32;
-        let want = vec!["/bin/sh", "-c", "sleep 5; :", "", "x"];
+        let want = vec!["/bin/sh", "-c", "sleep 30; :", "", "x"];
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut got = None;
         while Instant::now() < deadline {
@@ -196,10 +201,23 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let cmdline = proc_cmdline(pid);
-        let _ = child.kill();
-        let _ = child.wait();
+        // Wait for the sleep, so the guard always has a grandchild to
+        // take: dropped before the shell forks, the test passes
+        // whether or not the guard kills the group.
+        let mut sleeps = Vec::new();
+        while sleeps.is_empty() && Instant::now() < deadline {
+            sleeps = crate::pidtree::child_pids(pid);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(child);
+        assert_eq!(sleeps.len(), 1, "the shell started its sleep");
+        let gone = Instant::now() + Duration::from_secs(2);
+        while unsafe { libc::kill(sleeps[0], 0) } == 0 && Instant::now() < gone {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_ne!(unsafe { libc::kill(sleeps[0], 0) }, 0, "the shell's sleep outlived the test");
         assert_eq!(got.expect("argv of the child"), want);
-        assert_eq!(cmdline.as_deref(), Some("/bin/sh -c sleep 5; :  x"));
+        assert_eq!(cmdline.as_deref(), Some("/bin/sh -c sleep 30; :  x"));
     }
 
     #[test]

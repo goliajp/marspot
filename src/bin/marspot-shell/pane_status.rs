@@ -401,11 +401,6 @@ mod tests {
         Generic::Foreground { pgid: 600, leader: None }
     }
 
-    /// `MARSPOT_STATE_DIR` is process-global, so the tests that touch
-    /// real files serialise on this.  (nextest is process-per-test and
-    /// immune; keep `cargo test` correct too.)
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Step the tracker `n` times, one `SWEEP_INTERVAL` apart.
     fn steps<F: FnMut(i32) -> Generic + Copy>(
         t: &mut PaneStateTracker,
@@ -584,17 +579,10 @@ mod tests {
     /// answerable at startup.
     #[test]
     fn a_pane_that_has_said_nothing_since_the_restart_is_quiet_immediately() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-pane-clock-test-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let bytelog = dir.join("sessions").join("1").join("bytelog");
+        let sandbox = marspot_term::test_env::sandbox_state_dir();
+        let bytelog = sandbox.path().join("sessions").join("1").join("bytelog");
         std::fs::create_dir_all(bytelog.parent().unwrap()).expect("temp dir");
         std::fs::write(&bytelog, b"hello from the pty").expect("bytelog");
-        // SAFETY: single-threaded within this test, guarded by ENV_LOCK.
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
 
         // One process watches the pane, sees it settle, and exits.
         let base = Instant::now();
@@ -638,21 +626,12 @@ mod tests {
             PaneStatus::Busy(BusyKind::Output),
             "new bytes since the save is exactly what the signal is for"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_clock_file_from_an_older_build_still_loads() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-pane-clock-old-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        // SAFETY: single-threaded within this test, guarded by ENV_LOCK.
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
+        let sandbox = marspot_term::test_env::sandbox_state_dir();
+        let dir = sandbox.path();
         // Three columns — the shape before byte counts existed.
         std::fs::write(dir.join("pane-state-clock.tsv"), "7\tawaiting_user\t1700000000\n")
             .expect("clock file");
@@ -660,7 +639,6 @@ mod tests {
         let mut t = PaneStateTracker::new();
         assert_eq!(t.load_clocks(), 1, "the clock still parses");
         assert!(t.restorable_bytes.is_empty(), "with no byte count to go with it");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
