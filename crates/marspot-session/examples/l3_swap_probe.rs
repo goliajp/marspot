@@ -22,13 +22,14 @@
 //! verified before anything is signalled.
 //! A matching fingerprint means no update, and the handler then takes the
 //! user-quit path instead -- state.bin, clean exit, SIGHUP to the shell --
-//! which is why `begin_pane_swap` promotes before it signals and why this
-//! probe would otherwise be testing pane closure.
+//! which is why the staged image is promoted into `current/` before the
+//! L3 is signalled, and why this probe would otherwise be testing pane
+//! closure.
 //!
-//! Written 2026-10-01. What this file used to hold tested
-//! `begin_pane_swap`'s old mechanism -- a replacement L3 on the same
-//! session id -- which cannot work: `sessions/<id>/` is locked by the live
-//! L3 and a second one refuses to start.
+//! Written 2026-10-01. What this file used to hold tested an older
+//! mechanism -- a replacement L3 on the same session id -- which cannot
+//! work: `sessions/<id>/` is locked by the live L3 and a second one
+//! refuses to start.
 //!
 //!     MARSPOT_STATE_DIR=/tmp/marspot-dev \
 //!       cargo run -p marspot-session --example l3_swap_probe -- \

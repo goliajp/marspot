@@ -105,7 +105,6 @@ fn a_terminal_frame_allocates_nothing_once_warm() {
         title: "",
         selection: None,
         ime_preedit: "",
-        update_pending: false,
         dormant: false,
         recede: 0,
         scrim: 0.0,

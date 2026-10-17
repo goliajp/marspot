@@ -124,8 +124,8 @@ pub(crate) fn push_session(
     });
 
     paint_title_strip(
-        rect, view, pane_focused, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, cells,
-        glyphs, gutter, padding, title_h,
+        rect, view, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, cells, glyphs, gutter,
+        padding, title_h,
     );
 
     let grid = view.grid;
