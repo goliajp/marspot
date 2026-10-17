@@ -23,7 +23,6 @@ fn a_cycle_checks_for_a_claude_right_before_typing() {
 #[test]
 fn a_quota_move_waits_for_work_in_flight() {
     let home = quota_home("inflight");
-    let _home = HomeOverride::set(&home);
     let host = FakeHost::new(home.join("state"));
     let sid = 77u64;
     let mut plugin = stranded_plugin(pane_on_p1(&home, "u-77"), sid);
@@ -41,7 +40,6 @@ fn a_quota_move_waits_for_work_in_flight() {
 
     sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::AwaitingUser));
     assert_eq!(host.submitted.lock().unwrap().len(), 1, "nothing in flight: it moves");
-    let _ = fs::remove_dir_all(&home);
 }
 
 /// A pane bound to a claude that has since been replaced is not moved:
@@ -49,7 +47,6 @@ fn a_quota_move_waits_for_work_in_flight() {
 #[test]
 fn a_quota_move_rechecks_the_claude() {
     let home = quota_home("recheck");
-    let _home = HomeOverride::set(&home);
     let host = FakeHost::new(home.join("state"));
     let sid = 78u64;
     let mut meta = pane_on_p1(&home, "u-78");
@@ -57,7 +54,6 @@ fn a_quota_move_rechecks_the_claude() {
     let mut plugin = stranded_plugin(meta, sid);
     sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::AwaitingUser));
     assert!(host.submitted.lock().unwrap().is_empty(), "another process now: not moved");
-    let _ = fs::remove_dir_all(&home);
 }
 
 fn parked_plugin(dir: &std::path::Path, sid: u64) -> (FakeHost, ClaudecodePlugin) {
@@ -88,7 +84,8 @@ fn badges_for(host: &FakeHost, sid: u64) -> Vec<String> {
 /// re-asserted over a plain shell.
 #[test]
 fn a_failed_wake_lets_the_pane_go() {
-    let dir = std::env::temp_dir().join(format!("marspot-wake-{}-{}", std::process::id(), line!()));
+    let tmp = TempDir::new("wake");
+    let dir = tmp.path().to_path_buf();
     let sid = 7u64;
     let (host, mut plugin) = parked_plugin(&dir, sid);
     let scan = scan_of(sid, CcActivity::AwaitingUser);
@@ -101,18 +98,29 @@ fn a_failed_wake_lets_the_pane_go() {
     assert!(plugin.dormant.is_empty());
     assert!(!plugin.held.contains_key(&sid));
     assert!(!fs::read_to_string(dir.join("dormant.tsv")).unwrap_or_default().contains("u-park"));
+    // the scan no longer maps the pane, so letting it go is the one
+    // thing that clears its corner
+    assert_eq!(
+        badges_for(&host, sid),
+        vec!["P2 park".to_string(), String::new()],
+        "the frozen badge is cleared when the wake fails"
+    );
 
     host.pane_badges.lock().unwrap().clear();
     plugin.publish_looks(&host, &scan);
-    assert!(badges_for(&host, sid).iter().all(|b| b.is_empty()), "{:?}", badges_for(&host, sid));
-    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        badges_for(&host, sid).is_empty(),
+        "and the next publish does not put it back over a plain shell: {:?}",
+        badges_for(&host, sid)
+    );
 }
 
 /// A run ended from outside is not a failed wake: the pane may still be
 /// parked, so only the arming goes and the re-arm sweep judges it.
 #[test]
 fn a_cancelled_wake_keeps_the_pane_parked() {
-    let dir = std::env::temp_dir().join(format!("marspot-wake-{}-{}", std::process::id(), line!()));
+    let tmp = TempDir::new("wake");
+    let dir = tmp.path().to_path_buf();
     let sid = 7u64;
     let (host, mut plugin) = parked_plugin(&dir, sid);
     (plugin.wake_reporter(sid))(&pty_op::OpOutcome::Cancelled("plugin"));
@@ -120,28 +128,27 @@ fn a_cancelled_wake_keeps_the_pane_parked() {
     assert!(!plugin.armed.contains(&sid));
     assert_eq!(plugin.dormant.len(), 1);
     assert!(plugin.held.contains_key(&sid));
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// A frozen look for a pane that no longer exists is dropped.
 #[test]
 fn a_held_look_goes_with_its_pane() {
-    let dir = std::env::temp_dir().join(format!("marspot-wake-{}-{}", std::process::id(), line!()));
+    let tmp = TempDir::new("wake");
+    let dir = tmp.path().to_path_buf();
     let (host, mut plugin) = parked_plugin(&dir, 7);
     plugin.held.insert(8, FrozenLook { badge: "P1".into(), title: String::new() });
     plugin.rearm_dormant(&host, &scan_of(7, CcActivity::AwaitingUser));
     assert!(plugin.held.contains_key(&7));
     assert!(!plugin.held.contains_key(&8));
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// A CPU sample taken of another process is no baseline: the claude
 /// that replaced it started its counter low, which would read as idle.
 #[test]
 fn a_cpu_baseline_from_another_process_is_no_evidence() {
-    let dir = std::env::temp_dir().join(format!("marspot-hib-{}-{}", std::process::id(), line!()));
-    fs::create_dir_all(&dir).unwrap();
-    let mut child = spawn_fake_claude(&dir);
+    let sandbox = sandbox_state_dir();
+    let dir = sandbox.path().to_path_buf();
+    let child = spawn_fake_claude(&dir);
     let pid = child.id() as i32;
     let host = FakeHost::new(dir.clone());
     host.set_status(7, idle_view(Duration::from_secs(7200)));
@@ -161,7 +168,5 @@ fn a_cpu_baseline_from_another_process_is_no_evidence() {
     plugin.cpu_samples.insert(7, (now_id, 1_000, SystemTime::now() - Duration::from_secs(120)));
     plugin.run_idle_policy_at(&host, &scan_with(7, pid, "aaaa-cccc"), TEST_THRESHOLD);
     assert_eq!(plugin.dormant.len(), 1, "and with it the pane is reclaimed");
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = fs::remove_dir_all(&dir);
+    drop(child);
 }
