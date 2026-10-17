@@ -328,8 +328,8 @@ mod tests {
     /// the gate stops futile cycles, it does not gate on proof.
     #[test]
     fn missing_sessions_dir_is_not_a_holder() {
-        let dir = std::env::temp_dir().join("cc-bg-session-test-nonexistent");
-        fs::remove_dir_all(&dir).ok();
+        let tmp = marspot_term::test_env::TempDir::new("cc-bg-none");
+        let dir = tmp.join("nonexistent");
         assert_eq!(background_session_holder(&dir, "1bcedee1-2228-4e82-a9c2-632aac03bd2d"), None);
     }
 }
