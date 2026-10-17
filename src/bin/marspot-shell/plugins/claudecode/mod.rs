@@ -26,8 +26,18 @@ mod statusline;
 mod worker;
 mod binding;
 mod transcript;
+mod profiles;
+mod argv;
 
-use transcript::{has_conversation, parse_session_id, tail_activity, tail_last_message_type, tail_window};
+use transcript::{activity_of, has_conversation, parse_session_id, tail_last_message_type};
+#[cfg(test)]
+use transcript::{tail_activity, tail_window};
+pub(crate) use profiles::discover_profiles;
+#[cfg(test)]
+use profiles::discover_profiles_in;
+use argv::argv_session_uuid;
+#[cfg(test)]
+use argv::{flag_uuid, is_uuid};
 pub use statusline::statusline_ingest;
 use idle::*;
 use model::*;
@@ -76,12 +86,6 @@ pub trait InjectInputProxy: Send + Sync {
     fn reset_mouse_reporting(&self, session_id: u64) -> std::io::Result<()>;
 }
 
-struct CcSessionInfo {
-    pub session_id: u64,
-    pub alive: bool,
-    pub child_pid: i32,
-}
-
 /// The plugin's route to a pane is also the op runner's, so a script
 /// can be handed the same client the rest of this plugin already uses.
 impl pty_op::PtyIo for ShelldClient {
@@ -114,24 +118,6 @@ impl pty_op::PtyIo for ShelldClient {
 impl ShelldClient {
     fn new(host_inject: Option<Arc<dyn InjectInputProxy>>) -> Self {
         Self { host_inject }
-    }
-
-    /// Walk the L3 entry.toml registry for every live session and
-    /// return CcSessionInfo per entry whose pid (L3 process) is still
-    /// alive.  Each entry carries shell_child_pid (zsh) — the cc
-    /// badge / profile-cycle code walks pidtree from there.
-    fn list_sessions(&self) -> std::io::Result<Vec<CcSessionInfo>> {
-        let entries = marspot_term::session_registry::list_session_entries();
-        let mut out = Vec::with_capacity(entries.len());
-        for e in entries {
-            let alive = unsafe { libc::kill(e.pid, 0) } == 0;
-            out.push(CcSessionInfo {
-                session_id: e.id,
-                alive,
-                child_pid: e.shell_child_pid,
-            });
-        }
-        Ok(out)
     }
 
     /// Forward raw bytes into the PTY backing `sid`.  Routes through
@@ -1115,21 +1101,20 @@ impl ClaudecodePlugin {
         // for 1200 processes here.  Small, but it is the thread that
         // draws the window and it was paying it every two seconds for
         // nothing.
-        let procs = if self.dormant.iter().any(|d| !self.armed.contains(&d.shelld_sid)) {
-            pidtree::list_all_procs()
-        } else {
-            Vec::new()
-        };
+        let obs = self
+            .dormant
+            .iter()
+            .any(|d| !self.armed.contains(&d.shelld_sid))
+            .then(|| crate::observe::shared().fresh(crate::observe::NOW));
         let rearm: Vec<DormantRecord> = self
             .dormant
             .iter()
             .filter(|d| !self.armed.contains(&d.shelld_sid))
             .filter(|d| {
-                let shell = shell_pid_for(d.shelld_sid);
-                shell > 0
-                    && !pidtree::descendants_of(shell, &procs)
-                        .iter()
-                        .any(looks_like_claudecode)
+                let Some(s) = obs.as_ref().and_then(|o| o.session(d.shelld_sid)) else {
+                    return false;
+                };
+                s.shell.is_some() && s.find("claude").is_none()
             })
             .cloned()
             .collect();
@@ -1352,18 +1337,18 @@ impl ClaudecodePlugin {
         if self.last_meta.is_empty() {
             return;
         }
-        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        if std::env::var_os("HOME").is_none() {
             return;
-        };
+        }
         let Some(usage) = marspot::cc_usage::read() else {
             // No feed is not "all clear" — it is "no answer", and a
             // pane is not moved on no answer.
             return;
         };
-        let profiles = discover_profiles();
-        let mut rooms = quota::rooms_for(&profiles, &usage.accounts, |p| {
-            quota::profile_email(&home, p)
-        });
+        // read by the worker, so this sweep touches no profile on disk
+        let profiles: Vec<u8> = result.profiles.iter().map(|(n, _)| *n).collect();
+        let email = |p: u8| result.profiles.iter().find(|(n, _)| *n == p).and_then(|(_, e)| e.clone());
+        let mut rooms = quota::rooms_for(&profiles, &usage.accounts, email);
         for meta in self.last_meta.values() {
             if let Some(r) = meta.refused_at.as_ref().filter(|r| r.logged_out)
                 && self.logged_out.get(&meta.profile_num).is_none_or(|seen| r.at > *seen)
@@ -2072,38 +2057,6 @@ fn resume_word() -> String {
     })
 }
 
-/// Scan `$HOME` for `.claude-profile-N` directories and return the
-/// profile numbers, sorted ascending.  This is the source of truth
-/// for the badge-click cycle — add a `~/.claude-profile-5` dir (plus
-/// its `claude5` shell alias) and the cycle picks it up on the next
-/// click, no code change.  The default `.claude` (P0) is deliberately
-/// not part of the cycle, matching the previous hardcoded 1→2→3 loop.
-pub(crate) fn discover_profiles() -> Vec<u8> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return Vec::new();
-    };
-    discover_profiles_in(std::path::Path::new(&home))
-}
-
-fn discover_profiles_in(home: &std::path::Path) -> Vec<u8> {
-    let Ok(rd) = std::fs::read_dir(home) else {
-        return Vec::new();
-    };
-    let mut nums: Vec<u8> = rd
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| {
-            e.file_name()
-                .to_str()?
-                .strip_prefix(".claude-profile-")?
-                .parse::<u8>()
-                .ok()
-        })
-        .collect();
-    nums.sort_unstable();
-    nums
-}
-
 /// Build the badge right-click menu rows: one "switch to Px" per
 /// discovered profile except the pane's current one.  Tag = the
 /// profile number (echoed back via `on_pane_badge_menu_action`).
@@ -2229,18 +2182,15 @@ impl Plugin for ClaudecodePlugin {
             PluginError::Other("HOME not set; claudecode plugin idle".into())
         })?;
         let projects_root = PathBuf::from(home).join(".claude").join("projects");
-        // RFC-003 Amendment 16 cc: read sessions from L3 entry.toml
-        // registry instead of shelld.  ShelldClient is now a thin
-        // façade over `session_registry::list_session_entries()` and
-        // the L1→L2→L3 InjectInput wire-frame proxy (set later by
-        // the registry via `attach_inject_proxy`).
-        let proxy = host.cc_inject_proxy();
-        let shelld = Arc::new(ShelldClient::new(proxy));
-        self.shelld = Some(shelld.clone());
+        // Sessions and their processes come from the shell's shared
+        // observation; ShelldClient is the L1→L2→L3 InjectInput
+        // wire-frame proxy (set later by the registry via
+        // `attach_inject_proxy`).
+        self.shelld = Some(Arc::new(ShelldClient::new(host.cc_inject_proxy())));
         host.log(
             LogLevel::Info,
             "init.registry_walker",
-            "cc reading sessions from L3 entry.toml + InjectInput proxy",
+            "cc reading sessions from the shared observation + InjectInput proxy",
         );
         host.log(
             LogLevel::Info,
@@ -2262,7 +2212,7 @@ impl Plugin for ClaudecodePlugin {
         let (res_tx, res_rx) = mpsc::channel::<ScanResult>();
         let ctx = WorkerCtx {
             projects_root,
-            shelld,
+            caches: ScanCaches::default(),
             statusline_state: None,
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
@@ -2593,89 +2543,6 @@ impl Plugin for ClaudecodePlugin {
 /// including `Unknown` — has to be treated as "do not touch this pane".
 type CcActivity = marspot::pane_state::Activity;
 
-/// The live session uuid as stated by the claude process tree's own
-/// argv, if it states one.
-///
-/// This is the only *authoritative* binding available: everything else
-/// is inference from file mtimes.  Two argv shapes carry it —
-///
-/// * `--session-id <uuid>` — the session this process writes.  Wins,
-///   because a forked resume (`--resume old.jsonl --fork-session
-///   --session-id new`) writes `new` while naming `old`.
-/// * `--resume <uuid>` / `--resume <path>/<uuid>.jsonl` — a plain
-///   resume continues writing the file it names.
-///
-/// Searched on the matched process and its own subtree: the daemon
-/// shape (`claude daemon run` → pty host → version binary) puts the
-/// flags several levels below the `claude` the pane sees.  A plain
-/// interactive `claude` states nothing, which is why the inference path
-/// still has to exist.
-///
-/// `pane_tree` is the pane's already-computed descendant list, so this
-/// costs no new process-table walk.  Only claude's own subtree gets a
-/// `proc_cmdline` (a sysctl each) — scanning the whole pane tree would
-/// mean paying for rust-analyzer, node, and every build job as well.
-fn argv_session_uuid(claude_pid: i32, pane_tree: &[pidtree::ProcRow]) -> Option<String> {
-    let mut subtree: Vec<i32> = vec![claude_pid];
-    // Transitive closure by repeated passes.  The claude subtree is a
-    // handful of processes and at most a few levels deep, so this beats
-    // building a map for it.
-    loop {
-        let before = subtree.len();
-        for p in pane_tree {
-            if subtree.contains(&p.ppid) && !subtree.contains(&p.pid) {
-                subtree.push(p.pid);
-            }
-        }
-        if subtree.len() == before {
-            break;
-        }
-    }
-    let mut resumed: Option<String> = None;
-    for pid in subtree {
-        let Some(line) = pidtree::proc_cmdline(pid) else { continue };
-        if let Some(u) = flag_uuid(&line, "--session-id") {
-            return Some(u);
-        }
-        if resumed.is_none() {
-            resumed = flag_uuid(&line, "--resume");
-        }
-    }
-    resumed
-}
-
-/// Value of `flag` in a space-joined argv, reduced to a bare uuid.
-/// Accepts both `<uuid>` and `<path>/<uuid>.jsonl`; returns None when
-/// the flag is absent or its value isn't uuid-shaped (`--resume` also
-/// takes a session *name*).
-fn flag_uuid(cmdline: &str, flag: &str) -> Option<String> {
-    let mut it = cmdline.split(' ');
-    let raw = loop {
-        let tok = it.next()?;
-        if tok == flag {
-            break it.next()?;
-        }
-    };
-    let base = raw.rsplit('/').next().unwrap_or(raw);
-    let base = base.strip_suffix(".jsonl").unwrap_or(base);
-    is_uuid(base).then(|| base.to_string())
-}
-
-/// 8-4-4-4-12 lowercase hex with dashes.  Deliberately strict: a
-/// non-uuid `--resume` value must fall through to the inference path,
-/// not become a bogus badge.
-fn is_uuid(s: &str) -> bool {
-    const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
-    let mut parts = s.split('-');
-    for want in GROUPS {
-        let Some(p) = parts.next() else { return false };
-        if p.len() != want || !p.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return false;
-        }
-    }
-    parts.next().is_none()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2694,7 +2561,7 @@ mod tests {
     fn ctx_for_test(projects_root: PathBuf) -> WorkerCtx {
         WorkerCtx {
             projects_root,
-            shelld: Arc::new(ShelldClient::new(None)),
+            caches: Default::default(),
             statusline_state: None,
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
@@ -2901,6 +2768,7 @@ mod tests {
             scanned_at: SystemTime::now(),
             sessions_seen: vec![sid],
             log_lines: Vec::new(),
+            profiles: profiles::ProfileCache::default().read(),
         };
         result.new_activity.insert(sid, activity);
         result.new_vetoes.insert(sid, (false, false));
@@ -3929,7 +3797,7 @@ mod tests {
 
         let mut ctx = WorkerCtx {
             projects_root: dir.clone(),
-            shelld: Arc::new(ShelldClient::new(None)),
+            caches: Default::default(),
             statusline_state: None,
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
@@ -4205,7 +4073,7 @@ mod tests {
         let mut ctx = WorkerCtx {
             statusline_state: None,
             projects_root: dir.clone(),
-            shelld: Arc::new(ShelldClient::new(None)),
+            caches: Default::default(),
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
@@ -4289,7 +4157,7 @@ mod tests {
 
         let mut ctx = WorkerCtx {
             projects_root: dir.clone(),
-            shelld: Arc::new(ShelldClient::new(None)),
+            caches: Default::default(),
             statusline_state: None,
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
@@ -4426,7 +4294,7 @@ mod tests {
         WorkerCtx {
             statusline_state: None,
             projects_root: PathBuf::from("/fake"),
-            shelld: Arc::new(ShelldClient::new(None)),
+            caches: Default::default(),
             seen,
             model_cutoff: HashMap::new(),
             banner_tried: HashMap::new(),
@@ -4515,7 +4383,7 @@ mod tests {
 
         let mut ctx = WorkerCtx {
             projects_root: root.clone(),
-            shelld: Arc::new(ShelldClient::new(None)),
+            caches: Default::default(),
             statusline_state: None,
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
@@ -4594,7 +4462,7 @@ mod tests {
 
         let mut ctx = WorkerCtx {
             projects_root: dir.clone(),
-            shelld: Arc::new(ShelldClient::new(None)),
+            caches: Default::default(),
             statusline_state: None,
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
@@ -4640,7 +4508,7 @@ mod tests {
 
         let mut ctx = WorkerCtx {
             projects_root: dir.clone(),
-            shelld: Arc::new(ShelldClient::new(None)),
+            caches: Default::default(),
             statusline_state: None,
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
@@ -5004,7 +4872,7 @@ mod tests {
         // Real scan → real binding.
         let mut worker = WorkerCtx {
             projects_root: PathBuf::from(&home).join(".claude/projects"),
-            shelld: Arc::new(ShelldClient::new(None)),
+            caches: Default::default(),
             statusline_state: None,
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
@@ -5013,9 +4881,17 @@ mod tests {
             last_model: HashMap::new(),
             last_model_by_pane: HashMap::new(),
         };
-        let mut scan = worker.scan_once();
+        // the stand-in registry entry names this test process, which is
+        // no L3; the session is marked live as the observer would mark ours
+        let observe = || {
+            let e = marspot_term::session_registry::read_session_entry(1).unwrap();
+            let mut argv = crate::observe::ArgvCache::default();
+            let table = pidtree::ProcTable::take();
+            crate::observe::Observation::from_parts(std::time::Instant::now(), table, vec![(e, true)], |r| argv.get(r))
+        };
+        let mut scan = worker.scan_once(&observe());
         poll_until("the scan to bind the pane", || {
-            scan = worker.scan_once();
+            scan = worker.scan_once(&observe());
             scan.new_meta.contains_key(&1)
         });
         let claude_pid = scan.new_meta[&1].claude_pid;
@@ -5084,6 +4960,7 @@ mod tests {
             scanned_at: SystemTime::now(),
             sessions_seen: vec![1],
             log_lines: Vec::new(),
+            profiles: Vec::new(),
         };
         // The stand-in is a system binary, and macOS redacts the
         // environment of hardened ones — `proc_cmdline` works on it,
@@ -5119,6 +4996,7 @@ mod tests {
             scanned_at: SystemTime::now(),
             sessions_seen: vec![1],
             log_lines: Vec::new(),
+            profiles: Vec::new(),
         };
         second.new_cpu.insert(
             1,
@@ -5542,6 +5420,7 @@ mod tests {
             scanned_at: SystemTime::now(),
             sessions_seen: vec![sid],
             log_lines: Vec::new(),
+            profiles: Vec::new(),
         }
     }
 
@@ -5777,6 +5656,7 @@ mod tests {
             scanned_at: SystemTime::now(),
             sessions_seen: Vec::new(),
             log_lines: Vec::new(),
+            profiles: Vec::new(),
         }
     }
 
@@ -6449,18 +6329,18 @@ mod tests {
             row(104, claude, "caffeinate"),
             row(105, claude, "zsh"),
         ];
-        assert!(!has_work_in_flight(claude, &resting), "none of that is work");
+        assert!(!has_work_in_flight(claude, &pidtree::ProcTable::from_rows(resting.clone())), "none of that is work");
 
         // The same session with a job under its shell.
         let mut working = resting.clone();
         working.push(row(106, 105, "cargo-fuzz"));
-        assert!(has_work_in_flight(claude, &working), "a job under the shell is work");
+        assert!(has_work_in_flight(claude, &pidtree::ProcTable::from_rows(working)), "a job under the shell is work");
 
         // An unrecognised helper counts as work: the allowlist fails
         // towards not reclaiming, never towards killing something.
         let mut unknown = resting.clone();
         unknown.push(row(107, claude, "some-new-helper"));
-        assert!(has_work_in_flight(claude, &unknown));
+        assert!(has_work_in_flight(claude, &pidtree::ProcTable::from_rows(unknown)));
     }
 
     #[test]
@@ -6853,7 +6733,7 @@ mod tests {
         };
         let mut ctx = WorkerCtx {
             projects_root: PathBuf::from("/fake"),
-            shelld: Arc::new(ShelldClient::new(None)),
+            caches: Default::default(),
             statusline_state: None,
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
@@ -6939,7 +6819,7 @@ mod tests {
 
         let mut ctx = WorkerCtx {
             projects_root: base.join(".claude").join("projects"),
-            shelld: Arc::new(ShelldClient::new(None)),
+            caches: Default::default(),
             statusline_state: None,
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),

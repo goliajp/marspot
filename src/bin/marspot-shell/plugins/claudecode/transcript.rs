@@ -1,10 +1,18 @@
 //! Reading claude's jsonl transcripts: what a record is, what the
 //! session was last doing, and whether there is a conversation in it.
 
+use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use super::CcActivity;
+
+/// How much of a transcript's end the cheap checks read.  A single
+/// record longer than this (a huge tool result) reads as `Unknown`,
+/// which the callers already treat as "in flight".
+const TAIL: u64 = 32 * 1024;
 
 /// Value of a **top-level** string field of one jsonl record.
 ///
@@ -153,54 +161,73 @@ pub(super) fn parse_session_id(path: &PathBuf) -> Option<String> {
 /// the last 32 KiB of the file and looks at the last `\n`-separated
 /// record's `"type":"…"` field.  Returns None if the file is malformed
 /// or has no recognisable type.
-/// The tail window of a transcript as text, for the cheap
-/// "what has this session been doing" checks.  Same 32 KB window the
-/// classifier uses; a read failure yields an empty string, which the
-/// callers read as "no evidence" — and every caller's no-evidence
-/// answer is the conservative one.
-pub(super) fn tail_window(path: &PathBuf) -> String {
+/// The last [`TAIL`] bytes of a transcript as text.  None when it
+/// cannot be read.
+fn read_tail(path: &Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
-    const TAIL: u64 = 32 * 1024;
-    let Ok(mut f) = fs::File::open(path) else {
-        return String::new();
-    };
-    let Ok(md) = f.metadata() else {
-        return String::new();
-    };
-    let start = md.len().saturating_sub(TAIL);
-    if f.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
-    }
+    let mut f = fs::File::open(path).ok()?;
+    let start = f.metadata().ok()?.len().saturating_sub(TAIL);
+    f.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::with_capacity(TAIL as usize);
-    if f.read_to_end(&mut buf).is_err() {
-        return String::new();
-    }
-    String::from_utf8_lossy(&buf).into_owned()
+    f.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// Read a session's last record and classify it.  Same 32 KB tail
-/// window as `tail_last_message_type`; the record we need is the last
-/// line, and a single record over 32 KB (a huge tool result) reads as
-/// `Unknown`, which the caller must already treat as "in flight".
-pub(super) fn tail_activity(path: &PathBuf, has_young_child: bool) -> CcActivity {
-    use std::io::{Read, Seek, SeekFrom};
-    const TAIL: u64 = 32 * 1024;
-    let Ok(mut f) = fs::File::open(path) else {
+/// Transcript tails, read once per file version.
+///
+/// A scan asks each bound transcript what the session is doing, whether
+/// it waits on its own timer and whether its account refused it; all
+/// three come from the same window, and a resting session's file does
+/// not change between scans, so the window is read again only when the
+/// file's (size, mtime) moved.  Bounded by the transcripts the scan
+/// keeps in `seen`.
+#[derive(Default)]
+pub(super) struct TailCache {
+    map: HashMap<PathBuf, (u64, SystemTime, Arc<str>)>,
+    pub(super) reads: u64,
+}
+
+impl TailCache {
+    pub(super) fn tail(&mut self, path: &Path) -> Option<Arc<str>> {
+        let md = fs::metadata(path).ok()?;
+        let key = (md.len(), md.modified().ok()?);
+        if let Some((len, mtime, text)) = self.map.get(path)
+            && (*len, *mtime) == key
+        {
+            return Some(text.clone());
+        }
+        self.reads += 1;
+        let text: Arc<str> = read_tail(path)?.into();
+        self.map.insert(path.to_path_buf(), (key.0, key.1, text.clone()));
+        Some(text)
+    }
+
+    pub(super) fn retain(&mut self, keep: impl Fn(&PathBuf) -> bool) {
+        self.map.retain(|p, _| keep(p));
+    }
+}
+
+/// The tail window of a transcript as text, for the cheap
+/// "what has this session been doing" checks; a read failure yields an
+/// empty string, which the callers read as "no evidence" — and every
+/// caller's no-evidence answer is the conservative one.
+#[cfg(test)]
+pub(super) fn tail_window(path: &Path) -> String {
+    read_tail(path).unwrap_or_default()
+}
+
+/// Read a session's last record and classify it.
+#[cfg(test)]
+pub(super) fn tail_activity(path: &Path, has_young_child: bool) -> CcActivity {
+    activity_of(read_tail(path).as_deref(), has_young_child)
+}
+
+/// Classify a session by the last conversation record in its tail
+/// window; `Unknown` when there is no window or no such record in it.
+pub(super) fn activity_of(tail: Option<&str>, has_young_child: bool) -> CcActivity {
+    let Some(s) = tail else {
         return CcActivity::Unknown;
     };
-    let Ok(md) = f.metadata() else {
-        return CcActivity::Unknown;
-    };
-    let len = md.len();
-    let start = len.saturating_sub(TAIL);
-    if f.seek(SeekFrom::Start(start)).is_err() {
-        return CcActivity::Unknown;
-    }
-    let mut buf = Vec::with_capacity(TAIL as usize);
-    if f.read_to_end(&mut buf).is_err() {
-        return CcActivity::Unknown;
-    }
-    let s = String::from_utf8_lossy(&buf);
     // Walk back to the last record that is part of the conversation,
     // stepping over the bookkeeping ones claudecode appends after a
     // turn.  Bounded so a long run of them can't turn one tick into a
@@ -316,6 +343,31 @@ mod tests {
         );
         assert!(!has_conversation(&p));
         fs::remove_file(&p).unwrap();
+    }
+
+    /// What the session is doing and what its window says come from
+    /// one read, and an unchanged file is not read again.
+    #[test]
+    fn a_tail_is_read_once_per_file_version() {
+        let p = write(
+            "tail-once",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\"}]}}\n",
+        );
+        let mut cache = TailCache::default();
+        for _ in 0..3 {
+            let tail = cache.tail(&p);
+            assert_eq!(activity_of(tail.as_deref(), false), CcActivity::AwaitingUser);
+            assert!(tail.as_deref().is_some_and(|w| w.contains("assistant")));
+        }
+        assert_eq!(cache.reads, 1, "one read serves every scan of an unchanged file");
+        let mut f = fs::OpenOptions::new().append(true).open(&p).unwrap();
+        std::io::Write::write_all(&mut f, b"{\"type\":\"user\"}\n").unwrap();
+        assert_eq!(activity_of(cache.tail(&p).as_deref(), false), CcActivity::Working);
+        assert_eq!(cache.reads, 2, "a grown file is read again");
+        cache.retain(|_| false);
+        fs::remove_file(&p).unwrap();
+        assert!(cache.tail(&p).is_none());
+        assert_eq!(activity_of(None, false), CcActivity::Unknown);
     }
 
     #[test]
