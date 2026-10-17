@@ -64,39 +64,55 @@ fail() { echo "measure-l3: $*" >&2; exit 1; }
 
 # Build session bin + probe together (version-skew guard: a stale probe
 # would create a grid_shm region an updated marspot-session refuses).
-( cd "$ROOT" && cargo build --release -p marspot-session \
-    --example l3_throughput 2>&1 | tail -3 )
+# The build's exit code decides, not whether a binary is lying in target/.
+dev_require_probe l3_throughput || fail "could not build the probe"
+dev_require_bin marspot-session || fail "could not build marspot-session"
 [[ -x "$SESSION_BIN" ]] || fail "marspot-session not built at $SESSION_BIN"
 [[ -x "$PROBE_BIN" ]]   || fail "probe not built at $PROBE_BIN"
 
-# Before every trial, make sure no session from a previous one is still
-# holding a pty.  This used to run only after a failure, which meant one
-# failed trial's orphan taxed every trial after it until the next failure
-# swept it -- measured 2026-10-02: four of ten trials reading 29-59 s
-# against a normal 1.3 s, with twice the instructions and forty times the
-# wakeups, all of it our own leftovers competing for the host.
-reset_sessions() {
-  pkill -9 -f "$SESSION_BIN( |\$)" >/dev/null 2>&1 || true
-  sleep 0.3
+# After every trial, make sure its session is not still holding a pty.
+# One failed trial's orphan used to tax every trial after it until the
+# next failure swept it -- measured 2026-10-02: four of ten trials
+# reading 29-59 s against a normal 1.3 s, with twice the instructions and
+# forty times the wakeups, all of it our own leftovers competing for the
+# host.  The probe runs its session in a sandbox named after its own pid
+# ($TMPDIR/l3-throughput-<pid>) and removes it when it ends cleanly; a
+# sandbox still there holds the registry entry of the session it
+# started, which is the one pid this stops.
+reap_trial() {
+  # std::env::temp_dir: TMPDIR, else the per-user temp dir
+  local sandbox="${TMPDIR:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp)}"
+  sandbox="${sandbox%/}/l3-throughput-$1"
+  [[ -d $sandbox ]] || return 0
+  ( MARSPOT_STATE_DIR="$sandbox"; dev_kill_shell_core )
+  rm -rf "$sandbox"
 }
-
-cleanup() { pkill -9 -f "$SESSION_BIN( |\$)" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
 
 run_one() {
   # echoes "<wall_ns> <user_ns> <sys_ns> <wakeups> <instructions> <cycles>"
   # on success, empty on failure.
   # The CPU fields are `-` if the kernel would not report them.
-  local scenario_path=$1 repeats=$2
+  local scenario_path=$1 repeats=$2 pid rc
   # stderr carries the probe's witness line (what the session actually
   # wrote this trial).  It used to go to /dev/null, which is why a run
   # that cost 20% less per byte than its siblings could not be asked
   # whether it had also written less.
-  "$PROBE_BIN" "$SESSION_BIN" "$scenario_path" "$repeats" 2>"$RUN_DIR/stderr"
+  "$PROBE_BIN" "$SESSION_BIN" "$scenario_path" "$repeats" 2>"$RUN_DIR/stderr" &
+  pid=$!
+  echo "$pid" >> "$RUN_DIR/probe-pids"
+  wait "$pid"
+  rc=$?
+  reap_trial "$pid"
+  return "$rc"
 }
 
 RUN_DIR=$(mktemp -d)
-trap 'cleanup; rm -rf "$RUN_DIR"' EXIT
+cleanup() {
+  local p
+  for p in $(cat "$RUN_DIR/probe-pids" 2>/dev/null); do reap_trial "$p"; done
+  rm -rf "$RUN_DIR"
+}
+trap cleanup EXIT
 
 for scenario in "${SCENARIOS[@]}"; do
   spath="$SCENARIOS_DIR/$scenario.bin"
@@ -123,13 +139,11 @@ for scenario in "${SCENARIOS[@]}"; do
     # load-dependent.
     uptime | sed 's/.*averages: //' | awk '{print $1}' >> "$RUN_DIR/$scenario.load"
 
-    reset_sessions
     echo "==> $scenario ×$repeats ($((total_bytes/1048576)) MiB) trial $trial/$TRIALS"
     read -r ns user sys wk insn cyc <<<"$(run_one "$spath" "$repeats")"
     if [[ -z "$ns" || "$ns" == "0" ]]; then
-      # One retry, in case an orphaned session held the pty.
-      echo "    probe failed — clearing orphans and retrying" >&2
-      reset_sessions
+      # One retry; run_one has already stopped the failed trial's session.
+      echo "    probe failed — retrying" >&2
       read -r ns user sys wk insn cyc <<<"$(run_one "$spath" "$repeats")"
     fi
     if [[ -z "$ns" || "$ns" == "0" ]]; then

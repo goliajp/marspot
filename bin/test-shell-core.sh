@@ -48,8 +48,7 @@ if [[ ! -x "$SHELL_BIN" || ! -x "$CORE_BIN" ]]; then
   ( cd "$ROOT" && cargo build --release --bin marspot-shell --bin marspot-core 2>&1 | tail -3 )
 fi
 
-# Sandbox daemon + clean slate (sandbox tree only — never production).
-dev_ensure_shelld || fail "could not start sandbox shelld"
+# Clean slate (sandbox tree only — never production).
 dev_wipe_state
 
 # A previously-tripped crash budget poisons the test: each SIGKILL
@@ -62,7 +61,7 @@ cleanup
 > "$LOG"
 
 # --- 1. Boot --------------------------------------------------------
-nohup "$SHELL_BIN" >"$LOG" 2>&1 < /dev/null &
+nohup "$SHELL_BIN" >"$LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 SHELL_PID=$!
 
@@ -79,14 +78,14 @@ fi
 echo "[1/3] boot OK — HELLO_ACK logged"
 
 # --- 2. Crash recovery ---------------------------------------------
-PRE_PID=$(pgrep -f "$CORE_BIN( |$)" | head -1)
+PRE_PID=$(dev_core_pids | head -1)
 [[ -n "$PRE_PID" ]] || fail "no marspot-core running after boot"
 
 # Count HelloAcks before we kill; the restart should produce a fresh one.
 BEFORE_ACKS=$(grep -c $'\tHELLO_ACK\tcore handshake OK' "$SUP_LOG")
 kill -9 "$PRE_PID"
 for _ in $(seq 1 30); do
-  POST_PID=$(pgrep -f "$CORE_BIN( |$)" | head -1)
+  POST_PID=$(dev_core_pids | head -1)
   if [[ -n "$POST_PID" && "$POST_PID" != "$PRE_PID" ]]; then
     AFTER_ACKS=$(grep -c $'\tHELLO_ACK\tcore handshake OK' "$SUP_LOG")
     if (( AFTER_ACKS > BEFORE_ACKS )); then
@@ -107,7 +106,7 @@ echo "[2/3] crash recovery OK — core $PRE_PID → $POST_PID, fresh HelloAck"
 # We've already used 1 crash; 3 more in quick succession should
 # trip the budget (MAX_CRASHES_IN_WINDOW = 3).
 for _ in 1 2 3; do
-  P=$(pgrep -f "$CORE_BIN( |$)" | head -1)
+  P=$(dev_core_pids | head -1)
   if [[ -n "$P" ]]; then
     kill -9 "$P"
     sleep 1
@@ -119,7 +118,7 @@ sleep 2
 if ! grep -q $'\tBUDGET_EXCEEDED\t' "$SUP_LOG"; then
   fail "crash budget did not trip after 4 SIGKILLs"
 fi
-if pgrep -f "$CORE_BIN( |$)" >/dev/null; then
+if [[ -n "$(dev_core_pids)" ]]; then
   fail "core still running after crash budget trip"
 fi
 echo "[3/3] crash budget OK — auto-restart disabled, no core respawn"

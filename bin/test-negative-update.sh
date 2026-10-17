@@ -142,7 +142,6 @@ echo "[setup] OK — 3 malicious feeds served on :$PORT (wrongkey / tampered / n
 run_case() {
   local label="$1" reason="$2"
   echo "--- case: $label ---"
-  dev_ensure_shelld || fail "[$label] sandbox shelld"
   dev_kill_shell_core
   dev_wipe_state
   mkdir -p "$(dirname "$SUP_LOG")"
@@ -150,7 +149,7 @@ run_case() {
   : > "$RUN_LOG"
 
   MARSPOT_UPDATE_FEED="http://127.0.0.1:$PORT/$label/feed.json" \
-    nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+    nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null & dev_record_pid $!
   disown
 
   local i

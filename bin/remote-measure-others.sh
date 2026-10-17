@@ -62,7 +62,6 @@ REMOTE_NAME="${REMOTE_NAME:-bench-marspot}"
 # run has to look.
 REMOTE_DIR="work/$REMOTE_NAME"
 LOCK_LOCAL="/tmp/marspot-remote-measure.lock.d"
-REMOTE_LOCK="/tmp/marspot-remote-measure.lock.d"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT_DIR="$ROOT/bench/remote-runs/measure-$TS"
 
@@ -78,24 +77,16 @@ echo "$$" > "$LOCK_LOCAL/pid"
 
 cleanup() {
   local rc=$?
-  ssh -o ConnectTimeout=5 "$HOST" "rm -rf $REMOTE_LOCK" </dev/null >/dev/null 2>&1 || true
   rm -rf "$LOCK_LOCAL"
   exit $rc
 }
 trap cleanup EXIT INT TERM
 
 # ---- pre-flight ------------------------------------------------------
-ssh -o ConnectTimeout=5 "$HOST" "
-  set -e
-  mkdir -p ~/$REMOTE_DIR
-  if ! mkdir $REMOTE_LOCK 2>/dev/null; then
-    if [[ -f $REMOTE_LOCK/pid ]] && kill -0 \$(cat $REMOTE_LOCK/pid) 2>/dev/null; then
-      echo 'remote lock held by pid '\$(cat $REMOTE_LOCK/pid) >&2; exit 1
-    fi
-    rm -rf $REMOTE_LOCK && mkdir $REMOTE_LOCK
-  fi
-  echo \$\$ > $REMOTE_LOCK/pid
-" </dev/null
+# No lock of our own on the host: the measurement below holds the host's
+# bench lock, which is what keeps every other measurement and heavy job
+# off the machine while it runs.
+ssh -o ConnectTimeout=5 "$HOST" "mkdir -p ~/$REMOTE_DIR" </dev/null
 
 # ---- health-check: can the ssh-spawned shell dispatch AppleEvents? ---
 # We try a trivial no-op AppleEvent with a 3 s timeout. If it returns
@@ -131,7 +122,7 @@ if [[ -z "${REMOTE_MEAS_JSON:-}" ]]; then
   # Exclusive, like the gate: this is a measurement, and a competitor's
   # throughput read while the machine is busy is not a slower number,
   # it is not a number.
-  ssh "$HOST" "cd ~/$REMOTE_DIR && /usr/local/bin/bench-lock bench bash bin/_remote-measure-others-mini.sh" \
+  ssh "$HOST" "cd ~/$REMOTE_DIR && /usr/local/bin/bench-lock bench --max-wait ${MARSPOT_BENCH_MAX_WAIT:-1200} bash bin/_remote-measure-others-mini.sh" \
     </dev/null > "$MEAS_JSON"
 else
   echo "==> using pre-captured $MEAS_JSON (manual workflow)"

@@ -13,11 +13,16 @@
 #   HOST=other-mini bin/test-remote.sh
 #
 # Contract:
-#   - exclusive  : mkdir lock locally (atomic; macOS has no flock(1))
+#   - exclusive  : mkdir lock locally (atomic; macOS has no flock(1)),
+#                  so two checkouts never sync over one remote tree
 #   - separate   : its own remote dir, so it never disturbs the bench
 #                  mirror bench-remote.sh keeps in ~/work/bench-marspot
+#   - shares     : holds the host's bench lock shared (`heavy`), so a
+#                  measurement waits for the run instead of measuring it
+#   - bounded    : the remote run is stopped after TEST_REMOTE_TIMEOUT
+#                  seconds (default 1800, build included)
 #   - terminating: Ctrl-C kills the remote process group
-#   - honest     : exits with the remote suite's exit code
+#   - honest     : exits with the remote suite's exit code (124: timed out)
 
 set -euo pipefail
 
@@ -43,7 +48,9 @@ REMOTE_NAME="${REMOTE_NAME:-test-marspot}"
 # run has to look.
 REMOTE_DIR="work/$REMOTE_NAME"
 LOCK_LOCAL="/tmp/marspot-test-remote.lock.d"
-REMOTE_PIDF="/tmp/marspot-test-remote.pgid"
+REMOTE_PIDF="/tmp/marspot-test-remote-$(date +%H%M%S)$$.pgid"
+TIMEOUT="${TEST_REMOTE_TIMEOUT:-1800}"
+MAX_WAIT="${TEST_REMOTE_MAX_WAIT:-3600}"
 
 if ! mkdir "$LOCK_LOCAL" 2>/dev/null; then
   if [[ -f "$LOCK_LOCAL/pid" ]] && kill -0 "$(cat "$LOCK_LOCAL/pid")" 2>/dev/null; then
@@ -56,37 +63,13 @@ echo "$$" > "$LOCK_LOCAL/pid"
 
 cleanup() {
   ssh -o ConnectTimeout=5 "$HOST" "
-    if [[ -f $REMOTE_PIDF ]]; then
-      pgid=\$(cat $REMOTE_PIDF 2>/dev/null || true)
-      [[ -n \${pgid:-} ]] && kill -- -\$pgid 2>/dev/null || true
+    if [ -f $REMOTE_PIDF ]; then
+      kill -TERM -- -\$(cat $REMOTE_PIDF) 2>/dev/null
       rm -f $REMOTE_PIDF
-    fi
-    rm -rf $REMOTE_LOCK" >/dev/null 2>&1 || true
+    fi" </dev/null >/dev/null 2>&1 || true
   rm -rf "$LOCK_LOCAL"
 }
 trap cleanup EXIT INT TERM
-
-# Same excludes as bench-remote.sh: the tree, not its build products.
-# ---- remote lock -----------------------------------------------------
-# Shared with bench-remote: whatever is measuring on that host, only one
-# thing measures at a time.  A test run underneath a bench is what made
-# an idle re-measure read 47% low (2026-09-28).
-REMOTE_LOCK="/tmp/marspot-runner.lock.d"
-waited=0
-until ssh -o ConnectTimeout=5 "$HOST" "
-  if mkdir $REMOTE_LOCK 2>/dev/null; then echo \$\$ > $REMOTE_LOCK/pid; exit 0; fi
-  if [[ -f $REMOTE_LOCK/pid ]] && kill -0 \$(cat $REMOTE_LOCK/pid) 2>/dev/null; then exit 1; fi
-  rm -rf $REMOTE_LOCK && mkdir $REMOTE_LOCK && echo \$\$ > $REMOTE_LOCK/pid" </dev/null 2>/dev/null; do
-  if (( waited == 0 )); then
-    echo "==> $HOST is measuring something else; waiting for it"
-  fi
-  waited=$((waited + 5))
-  if (( waited > 600 )); then
-    echo "gave up after 10 min: $HOST still holds $REMOTE_LOCK" >&2
-    exit 1
-  fi
-  sleep 5
-done
 
 remote_sync "$HOST" --name "$REMOTE_NAME"
 
@@ -118,9 +101,14 @@ set +e
 # make a measurement -- which takes the same lock exclusively -- wait
 # for this to finish instead of reading a number taken while a test
 # suite had the cores.  See `bin/bench-remote.sh` for the other half.
+# The login shell's pid is the process group of the whole run; it stays
+# written down only while the run lasts, so the cleanup never signals a
+# group that has since been reused.
 ssh "$HOST" "echo \$\$ > $REMOTE_PIDF; cd ~/$REMOTE_DIR && \
   MARSPOT_TEST_JOBS=${MARSPOT_TEST_JOBS:-14} \
-  exec /usr/local/bin/bench-lock heavy bin/test.sh$args"
+  /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT bin/_bounded.sh $TIMEOUT bin/test.sh$args; \
+  rc=\$?; rm -f $REMOTE_PIDF; exit \$rc" </dev/null
 rc=$?
 set -e
+(( rc != 124 )) || echo "==> bin/test.sh on $HOST did not finish within ${TIMEOUT}s" >&2
 exit $rc

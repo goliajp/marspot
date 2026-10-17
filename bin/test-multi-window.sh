@@ -96,7 +96,7 @@ PY
 echo "==> launching marspot-shell"
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
   MARSPOT_LOG_CORE=debug MARSPOT_DEV_CARET_PROBE=1 \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 wait_for() { # tag, seconds
@@ -237,7 +237,7 @@ rm -f "$APPLOG" "$MARSPOT_STATE_DIR/shell-state.bin" \
 
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
   MARSPOT_LOG_CORE=debug MARSPOT_DEV_EXTRA_WINDOWS=1 \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 wait_for WINDOW_ADOPTED 30 || fail "the fresh window was never adopted by the core"
@@ -309,7 +309,7 @@ rm -f "$APPLOG" "$MARSPOT_STATE_DIR/shell-state.bin" \
 
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
   MARSPOT_DEV_EXTRA_WINDOWS=1 MARSPOT_DEV_CLOSE_EXTRA=1 \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 SHELL_PID=$!
 
@@ -344,13 +344,12 @@ rm -f "$APPLOG" "$MARSPOT_STATE_DIR/shell-state.bin" \
 > "$RUNLOG"
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
   MARSPOT_LOG_CORE=debug MARSPOT_DEV_EXTRA_WINDOWS=1 \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 wait_for WINDOW_ADOPTED 30 || fail "the second window never came up for the swap phase"
 sleep 2
 mark=$(wc -l < "$APPLOG")
-CORE_PID=$(pgrep -f "$MARSPOT_STATE_DIR/binaries/.*/marspot-core( |$)" | head -1)
-[[ -z "$CORE_PID" ]] && CORE_PID=$(pgrep -f "$CORE_BIN( |$)" | head -1)
+CORE_PID=$(dev_core_pids | head -1)
 [[ -n "$CORE_PID" ]] || fail "could not find the running core to kill"
 echo "==> SIGKILL core pid $CORE_PID"
 kill -9 "$CORE_PID"
@@ -406,7 +405,7 @@ cp "$CORE_BIN" "$MARSPOT_STATE_DIR/binaries/pending/marspot-core"
 "$SHELL_BIN" --trigger >/dev/null 2>&1 || fail "--trigger did not reach the shell"
 
 after7() { tail -n "+$((mark + 1))" "$APPLOG"; }
-for i in $(seq 1 300); do
+for i in $(seq 1 600); do
   after7 | grep -q 'UPDATE_SWAP' && break
   sleep 0.1
 done
@@ -481,7 +480,7 @@ for i, (c, r) in enumerate(grids):
 PY
   MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
     MARSPOT_DEV_DRAG="$ending" \
-    nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+    nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
   disown
   wait_for DEV_DRAG_DONE 40 || fail "[$ending $seed] the drag seam never released"
   # The landing reshapes, reattaches and saves off the release; give

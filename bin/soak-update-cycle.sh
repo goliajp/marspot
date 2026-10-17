@@ -12,13 +12,12 @@
 #   - quarantine/ never grows (happy swaps never quarantine)
 #   - shell RSS stays bounded across all N cycles (no per-swap leak in
 #     the supervisor's CoreConn / PendingUpdate bookkeeping)
-#   - the shelld session is never lost (each new core reattaches and
-#     HelloAcks — a swap must not SIGHUP sessions)
+#   - the sessions are never lost (each new core HelloAcks and takes
+#     over the live L3s — a swap must not SIGHUP them)
 #
-# Uses a short probation (MARSPOT_PROBATION_S=3) so 20 cycles run in
-# ~1.5 min instead of ~12.  The faked "new" core is bit-identical to
-# the current build — the swap machinery doesn't care, it just needs the
-# slot populated.  Sandbox-only; never touches the installed app.
+# The faked "new" core is bit-identical to the current build — the swap
+# machinery doesn't care, it just needs the slot populated.  Sandbox-only;
+# never touches the installed app.
 #
 # Env: CYCLES (default 20), RSS_GROWTH_PCT (max % shell-RSS growth
 # tolerated end-to-end, default 25).  Run after `cargo build --release`.
@@ -35,8 +34,6 @@ RUN_LOG=/tmp/marspot-soak-update-cycle.log
 CYCLES="${CYCLES:-20}"
 RSS_GROWTH_PCT="${RSS_GROWTH_PCT:-25}"
 
-export MARSPOT_PROBATION_S=3
-
 fail() {
   echo "FAIL: $*"
   echo "  (last 25 supervisor events):"
@@ -49,12 +46,11 @@ trap cleanup EXIT
 [[ -x "$SHELL_BIN" && -x "$CORE_BIN" ]] \
   || ( cd "$ROOT" && cargo build --release --bin marspot-shell --bin marspot-core 2>&1 | tail -3 )
 
-dev_ensure_shelld || { echo "FAIL: sandbox shelld"; exit 1; }
 cleanup
 dev_wipe_state
 mkdir -p "$(dirname "$SUP_LOG")"
 rm -f "$SUP_LOG" 2>/dev/null || true
-nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 # --- boot ------------------------------------------------------------
@@ -63,12 +59,21 @@ for _ in $(seq 1 80); do
   sleep 0.1
 done
 grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
-SHELL_PID=$(cat "$MARSPOT_STATE_DIR/shell.pid" 2>/dev/null \
-            || pgrep -f "$SHELL_BIN( |$)" | head -1)
-[[ -n "$SHELL_PID" ]] || fail "no shell pid"
+SHELL_PID=$(cat "$MARSPOT_STATE_DIR/shell.pid" 2>/dev/null)
+_dev_is_ours "$SHELL_PID" \
+  || fail "shell.pid is missing or does not name this sandbox's shell (got '${SHELL_PID}')"
 
 rss_of() { ps -o rss= -p "$1" 2>/dev/null | tr -d ' '; }
-core_count() { pgrep -f "$TREE/current/marspot-core( |$)" 2>/dev/null | wc -l | tr -d ' '; }
+# The shell's own core children: a core is spawned by the shell, so this
+# counts this sandbox's and nobody else's.
+core_count() {
+  local k comm n=0
+  for k in $(pgrep -P "$SHELL_PID" 2>/dev/null); do
+    comm=$(ps -o comm= -p "$k" 2>/dev/null) || continue
+    if [[ ${comm##*/} == marspot-core ]]; then n=$((n + 1)); fi
+  done
+  echo "$n"
+}
 # grep -c already prints 0 on no match (and exits 1, which the command
 # substitution swallows) — an `|| echo 0` would double the output.
 stable_count() { grep -c $'\tUPDATE_STABLE\t' "$SUP_LOG" 2>/dev/null; }
@@ -76,7 +81,9 @@ quarantine_count() { ls "$TREE/quarantine" 2>/dev/null | wc -l | tr -d ' '; }
 
 RSS_START=$(rss_of "$SHELL_PID")
 [[ -n "$RSS_START" ]] || fail "could not read shell RSS"
-echo "[boot] shell pid=$SHELL_PID RSS=${RSS_START}KiB — running $CYCLES update cycles (probation ${MARSPOT_PROBATION_S}s)"
+echo "[boot] shell pid=$SHELL_PID RSS=${RSS_START}KiB — running $CYCLES update cycles"
+acks_start=$(grep -c $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null)
+reattached_start=$(grep -c $'\tL3_REATTACHED\t' "$SUP_LOG" 2>/dev/null)
 
 # --- N cycles --------------------------------------------------------
 for c in $(seq 1 "$CYCLES"); do
@@ -85,10 +92,12 @@ for c in $(seq 1 "$CYCLES"); do
   cp "$CORE_BIN" "$TREE/pending/marspot-core"
   "$SHELL_BIN" --trigger >/dev/null 2>&1
 
-  # Wait for this cycle's UPDATE_STABLE.
+  # Wait for this cycle's UPDATE_STABLE.  60 s, as in test-update-flow:
+  # the probe of the staged binary pays the first-exec assessment, which
+  # alone has taken tens of seconds on a busy host.
   START=$(date +%s)
   until (( $(stable_count) > before )); do
-    if (( $(date +%s) - START > 30 )); then
+    if (( $(date +%s) - START > 60 )); then
       fail "cycle $c: UPDATE_STABLE never logged (probation/swap stalled)"
     fi
     sleep 0.3
@@ -113,10 +122,16 @@ done
 RSS_END=$(rss_of "$SHELL_PID")
 echo "[done] $CYCLES cycles — shell RSS ${RSS_START} → ${RSS_END} KiB"
 
-# Session never lost: the shell logged a fresh PENDING_HELLO_ACK every
-# cycle (each promoted core reattached), and the shell is still up.
-acks=$(grep -c $'\tPENDING_HELLO_ACK\t' "$SUP_LOG" 2>/dev/null)
-(( acks >= CYCLES )) || fail "only $acks PENDING_HELLO_ACK for $CYCLES cycles — a swap lost its session?"
+# Sessions never lost: every cycle's new core handshook with the shell
+# (HELLO_ACK) and took over the live L3s (L3_REATTACHED, logged by the
+# core once per session it attaches).  It used to count
+# PENDING_HELLO_ACK, a dual-core probation event nothing has logged since
+# RFC-003, so this check could not pass.
+acks=$(( $(grep -c $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null) - acks_start ))
+(( acks >= CYCLES )) || fail "only $acks HELLO_ACK for $CYCLES cycles — a new core never handshook?"
+reattached=$(( $(grep -c $'\tL3_REATTACHED\t' "$SUP_LOG" 2>/dev/null) - reattached_start ))
+(( reattached >= CYCLES )) \
+  || fail "only $reattached L3_REATTACHED for $CYCLES cycles — a swap lost its session?"
 
 # RSS growth bounded.  Allow RSS_GROWTH_PCT% end-to-end (steady-state
 # allocator slack, not a per-cycle leak).

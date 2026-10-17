@@ -72,7 +72,7 @@ echo "==> launching mcli with continuous cat-ascii workload"
 kill_app marspot || true; kill_app mcli || true
 sleep 0.3
 ( cd "$ROOT" && MARSPOT_SHELL="$WORKER" \
-  nohup target/release/mcli > /dev/null 2>&1 < /dev/null & ) || true
+  nohup target/release/mcli > /dev/null 2>&1 < /dev/null & bench_record_pid $! ) || true
 disown 2>/dev/null || true
 
 # Wait for mcli to come up.

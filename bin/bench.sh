@@ -263,11 +263,8 @@ for trial in 1 2 3; do
     >> "$CUR_DIR/render.samples"
 done
 
-# Scroll-down read-path gate.  Whatever scrollback variant the env
-# selects (memory by default, disk if MARSPOT_DISK_SCROLLBACK is set) is
-# what gets measured — the floor in baseline.json must be calibrated
-# for the corresponding default.  When the default flips this gate
-# auto-tracks via --update-baseline.
+# Scroll-down read-path gate, over the in-memory scrollback a process
+# without a session id gets (the file-backed one belongs to L3s).
 echo "==> headless scroll (5 trials, taking median p99)"
 sysctl -n vm.loadavg | awk '{print $2}' > "$CUR_DIR/scroll.load1"
 : > "$CUR_DIR/scroll.samples"
@@ -278,18 +275,17 @@ for trial in 1 2 3 4 5; do
     >> "$CUR_DIR/scroll.samples"
 done
 
-# Cold-cache scroll: forces disk-backed scrollback and asks the kernel
-# to evict its resident pages (madvise(DONTNEED)) before walking.
-# Measures the realistic worst case — a user returning to scrollback
-# hours after the writes, when the unified buffer cache has reclaimed
-# pages.  Catches disk-path read regressions even when memory is the
-# default (so this gate is meaningful both pre- and post-flip).
-echo "==> headless scroll-cold (disk-on, 5 trials, taking median p99)"
+# Cold-cache scroll.  It used to force the disk-backed scrollback through
+# an env switch and evict its pages first; that switch and the disk
+# variant are gone (the file-backed scrollback is on for every L3, off
+# elsewhere), and `--bench scroll-cold` now walks the same in-memory
+# scrollback as `scroll`.  Kept so its baseline key keeps a reading.
+echo "==> headless scroll-cold (5 trials, taking median p99)"
 : > "$CUR_DIR/scroll-cold.samples"
-MARSPOT_DISK_SCROLLBACK=1 "$(marspot_bin marspot)" \
+"$(marspot_bin marspot)" \
   --bench scroll-cold:"$SCENARIOS_DIR/scroll-history.bin" >/dev/null 2>&1
 for trial in 1 2 3 4 5; do
-  MARSPOT_DISK_SCROLLBACK=1 "$(marspot_bin marspot)" \
+  "$(marspot_bin marspot)" \
     --bench scroll-cold:"$SCENARIOS_DIR/scroll-history.bin" 2>/dev/null \
     | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
     >> "$CUR_DIR/scroll-cold.samples"
@@ -307,6 +303,10 @@ for bin in marspot mcli; do
 done
 
 echo "==> idle memory (3 trials each, taking median)"
+# A state dir of its own: without one the instance below runs on the
+# default state root, which on a developer's machine is the installed
+# app's.  Short and under /tmp for the 104-byte socket path limit.
+RSS_STATE="$(mktemp -d /tmp/msp-bench-rss.XXXXXX)"
 for bin in marspot mcli; do
   if [[ ! -x "$(marspot_bin "$bin")" ]]; then continue; fi
   : > "$CUR_DIR/rss-$bin.samples"
@@ -317,7 +317,8 @@ for bin in marspot mcli; do
     # bench (e.g. an active-9x-soak run already in flight gets killed
     # by a sanity bench.sh invocation).  We measure $pid directly so
     # other instances are irrelevant; perf-attack E7.
-    "$(marspot_bin "$bin")" >/dev/null 2>&1 &
+    MARSPOT_STATE_DIR="$RSS_STATE" MARSPOT_DEV_SANDBOX=1 \
+      "$(marspot_bin "$bin")" >/dev/null 2>&1 &
     pid=$!
     disown 2>/dev/null || true
     sleep 1.5  # let the binary settle past startup allocs
@@ -332,6 +333,7 @@ for bin in marspot mcli; do
       "$(python3 -c "import sys; xs=sorted(int(x) for x in open('$CUR_DIR/rss-$bin.samples')); print(xs[len(xs)//2])")"
   fi
 done
+rm -rf "$RSS_STATE"
 
 if [[ $MODE == "full" ]]; then
   echo "==> live PTY (this takes a minute)"
@@ -339,7 +341,7 @@ if [[ $MODE == "full" ]]; then
   # a parallel active-9x-soak / soak run.  measure.sh manages its own
   # mcli lifecycle by PID; that's sufficient.  perf-attack E7.
   (cd "$ROOT" && ./bin/measure.sh > "$CUR_DIR/measure.log" 2>&1) || true
-  cp "$ROOT/bench/results/cross-terminal.json" "$CUR_DIR/live.json" || true
+  cp "$ROOT/bench/results/live-cat.json" "$CUR_DIR/live.json" || true
 
   # Same settle between stages, for the same reason as after the build:
   # by this point the run has already pushed a few hundred MB through a
