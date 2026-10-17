@@ -839,11 +839,6 @@ struct ShellApp {
     /// to ask for it.  Writing just the live windows there deleted that
     /// entry — see `save_window_frames`.
     saved_window_frames: Vec<marspot::state::SavedWindow>,
-    /// Last observed `marspot::ui::theme::version()` value.  When
-    /// the theme is swapped via `set_current()`, the framework bumps
-    /// this counter; we compare each `redraw()` to invalidate cached
-    /// state and trigger an additional repaint.
-    last_theme_version: u64,
     /// Dev panel content has changed and the next `redraw()` should
     /// re-render its NSWindow.  Set on visibility flip / click /
     /// scroll / window resize / theme swap;  cleared after render.
@@ -1321,7 +1316,6 @@ impl ShellApp {
             active_pane_sessions: std::collections::HashMap::new(),
             dev_panel: marspot::ui::components::DevPanelState::default(),
             last_saved_dev_window: None,
-            last_theme_version: marspot::ui::theme::version(),
             dev_panel_dirty: true,   // 0.6.26 — render once on first frame
         }
     }
@@ -4763,25 +4757,7 @@ impl MarspotApp for ShellApp {
         self.dev_panel_dirty = true;
     }
 
-    fn redraw(&mut self, ctx: &MarspotAppCtx) {
-        // [A1] HighContrast theme swap hook.  When `theme::set_current()`
-        // bumps the version counter, take note + force a redraw of all
-        // surfaces so themed views pick up the new palette.
-        let cur_v = marspot::ui::theme::version();
-        if cur_v != self.last_theme_version {
-            self.last_theme_version = cur_v;
-            self.dev_panel_dirty = true;
-            ctx.request_redraw();
-        }
-        // [A3] Animation frame schedule — advance any active anims
-        // by elapsed wall-clock, GC finished ones, and request the
-        // next vsync redraw while any anim is still running.  Idle
-        // CPU = 0 is preserved when nothing's running.
-        marspot::ui::view::anim_tick(std::time::Instant::now());
-        marspot::ui::view::anim_gc();
-        if marspot::ui::view::anim_any_active() {
-            ctx.request_redraw();
-        }
+    fn redraw(&mut self, _ctx: &MarspotAppCtx) {
         // Sync the dev panel's NSWindow visibility against the L1
         // state bit, and render its contents when visible.  Cheap
         // when nothing changed: `set_visible_deferred` only writes

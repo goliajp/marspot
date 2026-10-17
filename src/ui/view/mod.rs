@@ -60,6 +60,5 @@ pub use scroll::{
 pub use view::scroll_view;
 pub use state::{
     HostState, HOST_STATE, with_host_state, with_host_state_mut,
-    AnimRegistry, anim_tick, anim_any_active, anim_gc,
 };
 pub use types::{Key, KeyEquivalent};

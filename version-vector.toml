@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.237"  # a process that logs rarely follows a log rotation within a minute
-core    = "0.12.281"  # a warm terminal frame allocates nothing: links are scanned into kept buffers
+shell   = "0.7.238"  # no longer polls a theme switch and an animation registry nothing drives
+core    = "0.12.282"  # unused UI tokens, view-tree API and dev panel leftovers are gone
 session = "0.11.146"  # a program that asked for focus reports hears when its pane gains and loses the keyboard
