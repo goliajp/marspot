@@ -585,8 +585,8 @@ mod tests {
     /// this spawn's value, never the launcher's.
     #[test]
     fn a_var_set_for_this_pane_outlives_the_filter_that_removes_its_family() {
-        // SAFETY: test/example code, single-threaded at this point.
-        unsafe { std::env::set_var("MARSPOT_TEST_GIVEN", "the launcher's") };
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("MARSPOT_TEST_GIVEN", "the launcher's");
         let mut pty = Pty::spawn(PtyConfig {
             program: "/bin/sh".into(),
             args: vec![
@@ -625,14 +625,11 @@ mod tests {
     /// and overwrite — the session's real on-disk scrollback.
     #[test]
     fn spawn_env_remove_prefixes_strips_child_env() {
-        // Safe under nextest (process per test); the var only needs
-        // to exist in THIS process for the child to inherit it.
-        // SAFETY: test/example code, single-threaded at this point (state-dir
-        // mutations additionally serialized by the suite's state-dir lock).
-        unsafe { std::env::set_var("MARSPOT_TEST_LEAK_PROBE", "leaked") };
-        // SAFETY: test/example code, single-threaded at this point (state-dir
-        // mutations additionally serialized by the suite's state-dir lock).
-        unsafe { std::env::set_var("MARSPOT_KEEP_PROBE", "kept") };
+        // The vars only need to exist in THIS process for the child to
+        // inherit them.
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("MARSPOT_TEST_LEAK_PROBE", "leaked")
+            .set("MARSPOT_KEEP_PROBE", "kept");
         let mut pty = Pty::spawn(PtyConfig {
             program: "/bin/sh".into(),
             args: vec![

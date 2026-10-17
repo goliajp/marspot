@@ -9,41 +9,17 @@
 //! selection of a file-backed scrollback is the production one rather
 //! than a constructor a test called.
 //!
-//! Alone in its binary because it sets environment variables, which are
-//! process-wide: the existing end-to-end test of this wiring is
-//! `#[ignore]`d for exactly that reason, and an ignored test is one
-//! nobody runs.
+//! It sets environment variables, which are process-wide, so each test
+//! holds the environment guard while it runs.
 
 use marspot_term::terminal::Terminal;
 
-struct Env {
-    dir: std::path::PathBuf,
-}
-impl Env {
-    /// A state dir and session id of its own, set the way L3 sets them.
-    fn new(sid: u64) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-clusterparse-{}-{}",
-            std::process::id(),
-            sid
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("sessions").join(sid.to_string())).unwrap();
-        unsafe {
-            std::env::set_var("MARSPOT_STATE_DIR", &dir);
-            std::env::set_var("MARSPOT_SESSION_ID", sid.to_string());
-        }
-        Self { dir }
-    }
-}
-impl Drop for Env {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("MARSPOT_SESSION_ID");
-            std::env::remove_var("MARSPOT_STATE_DIR");
-        }
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
+/// A state dir and session id of its own, set the way L3 sets them.
+fn env(sid: u64) -> marspot_term::test_env::StateSandbox {
+    let mut sandbox = marspot_term::test_env::sandbox_state_dir();
+    std::fs::create_dir_all(sandbox.dir.join("sessions").join(sid.to_string())).unwrap();
+    sandbox.env.set("MARSPOT_SESSION_ID", sid.to_string());
+    sandbox
 }
 
 /// Every cluster the viewport can see at this offset, read the way the
@@ -71,7 +47,7 @@ fn clusters_on_screen(t: &Terminal) -> Vec<String> {
 
 #[test]
 fn clusters_fed_as_bytes_come_back_after_the_session_restarts() {
-    let _env = Env::new(90_001);
+    let _env = env(90_001);
     let combining = "e\u{301}";
     let flag = "\u{1F1EF}\u{1F1F5}";
     let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
@@ -126,7 +102,7 @@ fn clusters_fed_as_bytes_come_back_after_the_session_restarts() {
 /// common case free.
 #[test]
 fn a_pane_of_plain_text_files_nothing() {
-    let _env = Env::new(90_002);
+    let _env = env(90_002);
     let mut t = Terminal::new(40, 6);
     for i in 0..60 {
         t.feed(format!("plain line {i}\r\n").as_bytes());

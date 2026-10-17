@@ -11,14 +11,12 @@
 use marspot_term::grid::PromptMark;
 use marspot_term::scrollback::Scrollback;
 
-/// Every test here sets `MARSPOT_SCROLLBACK_HOT_CAP_MB`, and an env var
-/// is process-wide: under `cargo test` these run as threads in one
-/// process, so without this they read each other's cap.  The first
-/// version of `a_mark_in_the_cold_tier_is_still_read_after_one_handover`
-/// wanted one handover and counted 11 999, because a neighbour had set
-/// the cap to zero.  Held for the whole of each test, not just the
-/// `set_var`.
-static CAP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Every test here sets `MARSPOT_SCROLLBACK_HOT_CAP_MB` and holds the
+// environment guard for the whole test, not just the set: under
+// `cargo test` the tests are threads of one process, and the first
+// version of `a_mark_in_the_cold_tier_is_still_read_after_one_handover`
+// counted 11 999 handovers because a neighbour had set the cap to zero.
+use marspot_term::test_env::EnvGuard;
 
 fn row(c: u8, cols: usize) -> Vec<marspot_term::grid::Cell> {
     (0..cols)
@@ -40,8 +38,8 @@ fn a_rotation_starts_the_marks_over_with_the_file() {
     let bin = dir.join("scrollback.bin");
     let idx = dir.join("scrollback.idx");
     // A tiny hot cap so a handful of lines forces the handover.
-    let _cap = CAP.lock().unwrap_or_else(|p| p.into_inner());
-    unsafe { std::env::set_var("MARSPOT_SCROLLBACK_HOT_CAP_MB", "0") };
+    let mut env = EnvGuard::new();
+    env.set("MARSPOT_SCROLLBACK_HOT_CAP_MB", "0");
     let mut sb = Scrollback::file(bin, idx, 8, 8).unwrap();
     for i in 0..4 {
         sb.push_line_with_wrapped(&row(b'a' + i, 8), false);
@@ -53,7 +51,7 @@ fn a_rotation_starts_the_marks_over_with_the_file() {
     for i in 0..40 {
         sb.push_line_with_wrapped(&row(b'A' + (i % 26) as u8, 8), false);
     }
-    unsafe { std::env::remove_var("MARSPOT_SCROLLBACK_HOT_CAP_MB") };
+    env.remove("MARSPOT_SCROLLBACK_HOT_CAP_MB");
     assert_ne!(
         sb.epoch(),
         first_epoch,
@@ -79,8 +77,8 @@ fn a_new_line_does_not_inherit_the_mark_at_its_index_in_the_old_file() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let _cap = CAP.lock().unwrap_or_else(|p| p.into_inner());
-    unsafe { std::env::set_var("MARSPOT_SCROLLBACK_HOT_CAP_MB", "0") };
+    let mut env = EnvGuard::new();
+    env.set("MARSPOT_SCROLLBACK_HOT_CAP_MB", "0");
     let mut sb =
         Scrollback::file(dir.join("scrollback.bin"), dir.join("scrollback.idx"), 8, 4).unwrap();
     // Local index 1 of the first hot file carries a mark.
@@ -96,7 +94,7 @@ fn a_new_line_does_not_inherit_the_mark_at_its_index_in_the_old_file() {
     for i in 0..20 {
         sb.push_line_with_wrapped(&row(b'A' + (i % 26) as u8, 8), false);
     }
-    unsafe { std::env::remove_var("MARSPOT_SCROLLBACK_HOT_CAP_MB") };
+    env.remove("MARSPOT_SCROLLBACK_HOT_CAP_MB");
     assert_ne!(sb.epoch(), before, "the fixture has to actually rotate");
 
     // Every line of the current history, asked one by one: none of them
@@ -126,8 +124,8 @@ fn a_mark_in_the_cold_tier_is_still_read_after_one_handover() {
     std::fs::create_dir_all(&dir).unwrap();
     // 1 MiB of hot file is a few thousand 8-column records, so one pass
     // below hands the file over exactly once.
-    let _cap = CAP.lock().unwrap_or_else(|p| p.into_inner());
-    unsafe { std::env::set_var("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1") };
+    let mut env = EnvGuard::new();
+    env.set("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1");
     let mut sb =
         Scrollback::file(dir.join("scrollback.bin"), dir.join("scrollback.idx"), 8, 4).unwrap();
     let first_epoch = sb.epoch();
@@ -143,7 +141,7 @@ fn a_mark_in_the_cold_tier_is_still_read_after_one_handover() {
             rotations += 1;
         }
     }
-    unsafe { std::env::remove_var("MARSPOT_SCROLLBACK_HOT_CAP_MB") };
+    env.remove("MARSPOT_SCROLLBACK_HOT_CAP_MB");
     assert_eq!(
         rotations, 1,
         "the fixture needs exactly one handover, or it is testing something else"
@@ -169,8 +167,8 @@ fn cluster_text_in_the_cold_tier_is_still_read_after_one_handover() {
     let dir = std::env::temp_dir().join(format!("marspot-clusters-cold-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let _cap = CAP.lock().unwrap_or_else(|p| p.into_inner());
-    unsafe { std::env::set_var("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1") };
+    let mut env = EnvGuard::new();
+    env.set("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1");
     let mut sb =
         Scrollback::file(dir.join("scrollback.bin"), dir.join("scrollback.idx"), 8, 4).unwrap();
     let flag = "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}".to_string();
@@ -187,7 +185,7 @@ fn cluster_text_in_the_cold_tier_is_still_read_after_one_handover() {
             rotations += 1;
         }
     }
-    unsafe { std::env::remove_var("MARSPOT_SCROLLBACK_HOT_CAP_MB") };
+    env.remove("MARSPOT_SCROLLBACK_HOT_CAP_MB");
     assert_eq!(
         rotations, 1,
         "the fixture needs exactly one handover, or it is testing something else"

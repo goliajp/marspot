@@ -8,6 +8,7 @@
 //! are children of a session that was never theirs: four of them
 //! turned transcript saving off and exited without a word.
 use marspot_term::pty::{Pty, PtyConfig, SESSION_ENV_PREFIXES, TerminalSize};
+use marspot_term::test_env::EnvGuard;
 use std::time::{Duration, Instant};
 
 /// Run `env` in a pty configured the way a pane's shell is, and
@@ -70,16 +71,15 @@ fn env_seen_by_a_pane(strip: Vec<String>) -> String {
 fn a_pane_does_not_inherit_the_launchers_session_identity() {
     // Exactly what was found on the real L1: this session's id, its
     // child-session flag, and the socket its agents talk over.
-    unsafe {
-        std::env::set_var("CLAUDE_CODE_CHILD_SESSION", "1");
-        std::env::set_var("CLAUDE_CODE_SESSION_ID", "not-yours");
-        std::env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/000.sock");
-        std::env::set_var("CLAUDECODE", "1");
-        std::env::set_var("MARSPOT_SESSION_ID", "999");
-        std::env::set_var("CODEX_HOME", "/nope");
+    let mut env = EnvGuard::new();
+    env.set("CLAUDE_CODE_CHILD_SESSION", "1")
+        .set("CLAUDE_CODE_SESSION_ID", "not-yours")
+        .set("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/000.sock")
+        .set("CLAUDECODE", "1")
+        .set("MARSPOT_SESSION_ID", "999")
+        .set("CODEX_HOME", "/nope")
         // An ordinary variable, to prove the shell still gets one.
-        std::env::set_var("CANARY_TAIL", "kept");
-    }
+        .set("CANARY_TAIL", "kept");
 
     let stripped = env_seen_by_a_pane(
         SESSION_ENV_PREFIXES.iter().map(|s| (*s).to_string()).collect(),
@@ -108,10 +108,9 @@ fn without_the_strip_list_they_all_come_through() {
     // The other half of the claim: these ARE inherited by default, so
     // the list above is doing the work rather than describing a thing
     // that never happens.
-    unsafe {
-        std::env::set_var("CLAUDE_CODE_CHILD_SESSION", "1");
-        std::env::set_var("CANARY_TAIL", "kept");
-    }
+    let mut env = EnvGuard::new();
+    env.set("CLAUDE_CODE_CHILD_SESSION", "1")
+        .set("CANARY_TAIL", "kept");
     let plain = env_seen_by_a_pane(Vec::new());
     assert!(
         plain.contains("CLAUDE_CODE_CHILD_SESSION"),
