@@ -414,7 +414,13 @@ pub(super) const MOVE_COOLDOWN: Duration = Duration::from_secs(600);
 /// parked itself until its window reopens, which reads the same from
 /// the transcript — and did, for nine hours and 170 log lines
 /// (2026-09-29, sid 430).  Past this, the pane moves.
-pub(super) const TOOL_HOLD_MAX: Duration = Duration::from_secs(600);
+///
+/// Five minutes, not ten: the account cannot answer whatever the work
+/// comes back with, so a longer wait buys a finished command whose
+/// result nobody reads, at the price of a pane standing still.  What
+/// it costs is a foreground command between five and ten minutes long
+/// cut off; the moved session is asked to carry on and runs it again.
+pub(super) const TOOL_HOLD_MAX: Duration = Duration::from_secs(300);
 
 /// Where a refused pane goes next, or why it stays.
 ///
@@ -776,17 +782,23 @@ mod tests {
         assert_eq!(next_move(&s), Move::Hold("work is in flight here"));
         let s = Situation {
             work_running: true,
-            stranded_for: Some(Duration::from_secs(601)),
+            stranded_for: Some(Duration::from_secs(299)),
             ..situation(&r)
         };
-        assert_eq!(next_move(&s), Move::To(3));
+        assert_eq!(next_move(&s), Move::Hold("work is in flight here"), "just under five minutes");
+        let s = Situation {
+            work_running: true,
+            stranded_for: Some(Duration::from_secs(301)),
+            ..situation(&r)
+        };
+        assert_eq!(next_move(&s), Move::To(3), "past five minutes");
 
         // But that hold is not forever.  A CLI parked until its window
         // reopens reads exactly like a running tool, and held one pane
         // for nine hours before this bound existed.
         let s = Situation {
             tool_executing: true,
-            stranded_for: Some(Duration::from_secs(601)),
+            stranded_for: Some(Duration::from_secs(301)),
             ..situation(&r)
         };
         assert_eq!(next_move(&s), Move::To(3));
