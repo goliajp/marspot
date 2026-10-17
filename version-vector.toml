@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.243"  # the quit sweep closes orphaned sessions with SIGHUP
-core    = "0.12.287"  # asks each session to update once, the way it understands; closes with SIGHUP
+core    = "0.12.288"  # asks every reattached session to update, in a window restored later too
 session = "0.11.152"  # takes updates as a frame and closes on SIGHUP; a copy of its own build is not an update
