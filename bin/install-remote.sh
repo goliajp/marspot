@@ -73,11 +73,28 @@ done
 echo "    signed: $(codesign -dv "$STAGE" 2>&1 | grep -o 'TeamIdentifier=[A-Z0-9]*')"
 echo "    version: $(MARSPOT_NO_REDIRECT=1 "$STAGE/Contents/MacOS/marspot-shell" --version 2>&1 | head -1)"
 
+# The installed app's running shell, by its own record, and only if
+# that pid still is the installed app's shell: a runner also hosts
+# sandbox apps whose processes have the same name, and matching on the
+# name stopped those too.
+REMOTE_SHELL_PID='
+  bin="$HOME/.local/Marspot.app/Contents/MacOS/marspot-shell"
+  [ -x "$bin" ] || exit 0
+  pid=$(MARSPOT_NO_REDIRECT=1 "$bin" --status 2>/dev/null | sed -n "s/^Running supervisor: pid //p")
+  [ -n "$pid" ] || exit 0
+  exe=$(ps -o comm= -p "$pid" 2>/dev/null)
+  case "$exe" in
+    "$HOME/.local/Marspot.app/Contents/MacOS/marspot-shell" | \
+    "$HOME/Library/Application Support/marspot/binaries/current/marspot-shell") echo "$pid" ;;
+  esac'
+remote_shell_pid() { ssh "$HOST" "$REMOTE_SHELL_PID"; }
+
 # Replacing a bundle binary under a LIVE process gets that process
 # killed by AMFI once the on-disk CDHash stops matching, so the remote
 # app has to be down first.  Ask rather than decide: it may have live
 # sessions in it.
-if ssh "$HOST" 'pgrep -x marspot-shell >/dev/null'; then
+RUNNING=$(remote_shell_pid)
+if [[ -n "$RUNNING" ]]; then
   if [[ -z "${MARSPOT_REMOTE_FORCE:-}" ]]; then
     echo "" >&2
     echo "==> marspot is RUNNING on $HOST." >&2
@@ -86,8 +103,9 @@ if ssh "$HOST" 'pgrep -x marspot-shell >/dev/null'; then
     echo "    or re-run with MARSPOT_REMOTE_FORCE=1 to stop it from here." >&2
     exit 1
   fi
-  echo "==> stopping marspot on $HOST (MARSPOT_REMOTE_FORCE=1)"
-  ssh "$HOST" 'pkill -x marspot-shell 2>/dev/null; sleep 2' || true
+  echo "==> stopping marspot on $HOST (pid $RUNNING, MARSPOT_REMOTE_FORCE=1)"
+  ssh "$HOST" "kill -TERM $RUNNING 2>/dev/null; for i in \$(seq 1 50); do kill -0 $RUNNING 2>/dev/null || exit 0; sleep 0.2; done; echo '    still running after 10 s' >&2; exit 1" \
+    || { echo "marspot on $HOST did not stop; not replacing its bundle" >&2; exit 1; }
 fi
 
 echo "==> shipping to $HOST:~/.local/Marspot.app"
@@ -99,7 +117,8 @@ ssh "$HOST" "/System/Library/Frameworks/CoreServices.framework/Versions/A/Framew
 echo "==> launching on $HOST"
 ssh "$HOST" "open -n $REMOTE_APP" || true
 sleep 5
-ssh "$HOST" 'pgrep -x marspot-shell >/dev/null && echo "    running (pid $(pgrep -x marspot-shell | head -1))" || echo "    did NOT start — check the host" >&2'
+STARTED=$(remote_shell_pid)
+if [[ -n "$STARTED" ]]; then echo "    running (pid $STARTED)"; else echo "    did NOT start — check the host" >&2; fi
 rm -rf "$STAGE"
 echo "==> done"
 echo "    If this host has never been granted Developer Tools, add it once:"
