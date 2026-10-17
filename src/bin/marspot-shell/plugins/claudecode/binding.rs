@@ -171,7 +171,6 @@ mod tests {
             jsonl_path: PathBuf::from(format!("/fake/-p-lab/{uuid}.jsonl")),
             last_mtime: mtime,
             last_size: 1,
-            last_message_kind: None,
             has_conversation,
         }
     }

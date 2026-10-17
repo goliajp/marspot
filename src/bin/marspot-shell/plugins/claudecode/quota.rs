@@ -214,12 +214,6 @@ impl Room {
             Room::Unknown => None,
         }
     }
-    /// Seven days is the window that runs out here; five hours refills
-    /// on its own within an afternoon.  Ties break on the shorter one.
-    fn headroom(&self) -> (f64, f64) {
-        self.headroom_for(None)
-    }
-
     /// Room to work in, for a pane that needs `model`.
     ///
     /// The model's cap narrows the seven-day figure rather than
