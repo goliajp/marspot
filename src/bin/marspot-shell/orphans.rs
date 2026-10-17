@@ -129,7 +129,8 @@ pub fn stop(install: &Install) -> (usize, usize) {
 mod tests {
     use super::*;
     use std::os::unix::process::CommandExt;
-    use std::process::{Child, Command};
+    use marspot_term::test_env::{ChildGuard, TempDir};
+    use std::process::Command;
     use std::time::{Duration, Instant};
 
     const HELPER_ENV: &str = "MARSPOT_TEST_ORPHAN_HELPER";
@@ -146,7 +147,7 @@ mod tests {
         }
     }
 
-    fn run_helper(exe: &Path, state_dir: Option<&Path>) -> Child {
+    fn run_helper(exe: &Path, state_dir: Option<&Path>) -> ChildGuard {
         let mut cmd = Command::new(exe);
         cmd.args(["--ignored", "--exact", "orphans::tests::helper_sleeps", "--test-threads=1"])
             .env(HELPER_ENV, "1")
@@ -154,7 +155,7 @@ mod tests {
         if let Some(d) = state_dir {
             cmd.env("MARSPOT_STATE_DIR", d);
         }
-        cmd.spawn().expect("spawn the helper")
+        ChildGuard::new(cmd.spawn().expect("spawn the helper"))
     }
 
     /// The table once `pid` runs an executable named `comm`.
@@ -192,7 +193,8 @@ mod tests {
 
     #[test]
     fn only_an_l3_executable_of_ours_with_our_state_dir_is_an_orphan() {
-        let dir = std::env::temp_dir().join(format!("marspot-orphans-{}", std::process::id()));
+        let tmp = TempDir::new("orphans");
+        let dir = tmp.path();
         let ours_root = dir.join("ours");
         let theirs_root = dir.join("theirs");
         std::fs::create_dir_all(&ours_root).unwrap();
@@ -202,7 +204,7 @@ mod tests {
         let install = Install::new(vec![l3.clone()], &ours_root);
 
         // pgrep -f matches this one: argv[0] says marspot-session
-        let mut named = Command::new("/bin/sleep").arg0(L3).arg("30").spawn().unwrap();
+        let mut named = ChildGuard::new(Command::new("/bin/sleep").arg0(L3).arg("30").spawn().unwrap());
         let mut theirs = run_helper(&l3, Some(&theirs_root));
         let mut mine = run_helper(&l3, Some(&ours_root));
         let pids = [named.id() as i32, theirs.id() as i32, mine.id() as i32];
@@ -215,7 +217,6 @@ mod tests {
             let _ = c.kill();
             let _ = c.wait();
         }
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(argv.as_ref().and_then(|a| a.first()).map(String::as_str), Some(L3));
         assert_eq!(got, vec![pids[2]], "only the L3 of our state dir; named={} theirs={}", pids[0], pids[1]);
     }
@@ -251,11 +252,12 @@ mod tests {
     #[test]
     fn only_a_process_with_our_state_dir_shares_it() {
         let me = std::env::current_exe().expect("test binary");
-        let other = std::env::temp_dir().join(format!("marspot-other-state-{}", std::process::id()));
+        let tmp = TempDir::new("other-state");
+        let other = tmp.join("state");
         let mut same = run_helper(&me, Some(&paths::state_root()));
         let mut different = run_helper(&me, Some(&other));
         // until exec the child still has our environment
-        let execed = |c: &Child| pidtree::proc_env_value(c.id() as i32, HELPER_ENV).is_some();
+        let execed = |c: &ChildGuard| pidtree::proc_env_value(c.id() as i32, HELPER_ENV).is_some();
         let deadline = Instant::now() + Duration::from_secs(10);
         while !(execed(&same) && execed(&different)) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));

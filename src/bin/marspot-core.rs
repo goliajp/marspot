@@ -734,26 +734,26 @@ mod window_state_tests {
         assert!(a.render.take_clear_required());
     }
 
-    /// Point every `marspot::paths` lookup at a per-process temp dir.
-    ///
-    /// Idempotent and cheap, so helpers call it unconditionally rather
-    /// than leaving it to each test to remember.
-    fn sandbox_state_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("marspot-core-tests-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("test state dir");
-        // SAFETY: nextest runs one test per process; `cargo test`
-        // shares one, but every test here wants the same sandbox, so
-        // racing writers all write the same value.
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
-        dir
+    use marspot_term::test_env::{sandbox_state_dir, StateSandbox};
+
+    /// Panics unless the calling test holds `sandbox` and the state
+    /// root is still the one it made: a test that forgot to take one
+    /// would otherwise write into whatever root the process has.
+    fn assert_sandboxed(sandbox: &StateSandbox) {
+        let resolved = marspot::state::state_file_path();
+        assert!(
+            resolved.starts_with(sandbox.path()),
+            "state path is not in this test's sandbox: {}",
+            resolved.display()
+        );
     }
 
     /// The guard that would have caught the 2026-07-27 incident: no
     /// test in this module may run against the real state dir.
     #[test]
     fn tests_never_touch_the_real_state_dir() {
-        sandbox_state_dir();
+        let sandbox = sandbox_state_dir();
+        assert_sandboxed(&sandbox);
         let resolved = marspot::state::state_file_path();
         assert!(
             !resolved.starts_with(dirs_home().join("Library/Application Support/marspot")),
@@ -775,7 +775,7 @@ mod window_state_tests {
     /// `MetalRenderer` because the paths under test (`rebuild_layout`,
     /// texture creation) go through it.
     ///
-    /// **Redirects the state dir first, always.**  A `CoreApp` reaches
+    /// **Refuses to build without the test's own state dir.**  A `CoreApp` reaches
     /// `save_session_state`, and `marspot::paths` resolves to the real
     /// `~/Library/Application Support/marspot` whenever
     /// `MARSPOT_STATE_DIR` is unset — so a test that touches any path
@@ -787,8 +787,8 @@ mod window_state_tests {
     /// up with one 1×1 window and every session re-adopted as an
     /// orphan.  The sessions survived (their dirs are the real store);
     /// the layout did not.
-    fn app_with(windows: Vec<WindowState>) -> CoreApp {
-        sandbox_state_dir();
+    fn app_with(sandbox: &StateSandbox, windows: Vec<WindowState>) -> CoreApp {
+        assert_sandboxed(sandbox);
         let (event_tx, _rx) = mpsc::channel();
         CoreApp {
             renderer: MetalRenderer::new_headless().expect("headless renderer"),
@@ -842,7 +842,8 @@ mod window_state_tests {
     /// into, and that window froze on its last frame.
     #[test]
     fn each_window_owns_its_paint_target() {
-        let mut app = app_with(vec![win(1, Vec::new()), win(2, Vec::new())]);
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![win(1, Vec::new()), win(2, Vec::new())]);
         let mk = || {
             let f = IOSurface::create(64, 64).expect("front");
             let b = IOSurface::create(64, 64).expect("back");
@@ -895,6 +896,7 @@ mod window_state_tests {
     /// long its window has been out of focus.
     #[test]
     fn the_app_exits_only_when_every_window_is_dead() {
+        let sandbox = sandbox_state_dir();
         // Vacant = born exited; pending = a spawn in flight, i.e.
         // alive — but only for `PENDING_MAX` (30 s), so the pane is
         // built *after* the renderer (whose construction can take
@@ -902,7 +904,7 @@ mod window_state_tests {
         let dead = || Pane::new_vacant(1, 80, 24);
         let alive = || Pane::new_pending(2, 80, 24);
 
-        let mut app = app_with(vec![win(1, Vec::new()), win(2, Vec::new())]);
+        let mut app = app_with(&sandbox, vec![win(1, Vec::new()), win(2, Vec::new())]);
         app.windows[0].panes.push(dead());
         app.windows[1].panes.push(alive());
         app.pump_all();
@@ -929,11 +931,9 @@ mod window_state_tests {
     /// change to `GRID_MAX` cannot leave a copy behind again.
     #[test]
     fn a_restored_window_keeps_every_column_it_was_saved_with() {
+        let mut sandbox = sandbox_state_dir();
         use marspot::ui::components::{GRID_MAX, GRID_MIN};
-        // SAFETY: nextest runs one test per process.
-        unsafe {
-            std::env::set_var("MARSPOT_SESSION_BIN", "/nonexistent/marspot-session");
-        }
+        sandbox.env.set("MARSPOT_SESSION_BIN", "/nonexistent/marspot-session");
         for cols in GRID_MIN..=GRID_MAX {
             let record = marspot::state::SavedWindowLayout {
                 grid_cols: cols as u16,
@@ -941,7 +941,7 @@ mod window_state_tests {
                 focused_idx: 0,
                 panes: vec![marspot::state::SavedPane { sid: 11, ..Default::default() }],
             };
-            let mut app = app_with(vec![win(1, vec![Pane::new_vacant(1, 80, 24)])]);
+            let mut app = app_with(&sandbox, vec![win(1, vec![Pane::new_vacant(1, 80, 24)])]);
             app.saved_windows.push_back((1, record));
             app.adopt_window(2, 1600.0, 900.0, 2.0, Some(1));
             assert_eq!(
@@ -958,12 +958,10 @@ mod window_state_tests {
     /// already up never wait on this one's I/O.
     #[test]
     fn a_restored_window_shows_its_saved_shape_before_its_panes_arrive() {
+        let mut sandbox = sandbox_state_dir();
         // Point the assembly worker at a binary that cannot start, so
         // it fails fast instead of spawning real L3s behind the test.
-        // SAFETY: nextest runs one test per process.
-        unsafe {
-            std::env::set_var("MARSPOT_SESSION_BIN", "/nonexistent/marspot-session");
-        }
+        sandbox.env.set("MARSPOT_SESSION_BIN", "/nonexistent/marspot-session");
         let record = marspot::state::SavedWindowLayout {
             grid_cols: 2,
             grid_rows: 2,
@@ -974,7 +972,7 @@ mod window_state_tests {
                 marspot::state::SavedPane { sid: 13, ..Default::default() },
             ],
         };
-        let mut app = app_with(vec![win(1, vec![Pane::new_vacant(1, 80, 24)])]);
+        let mut app = app_with(&sandbox, vec![win(1, vec![Pane::new_vacant(1, 80, 24)])]);
         app.saved_windows.push_back((1, record));
 
         app.adopt_window(2, 800.0, 600.0, 2.0, Some(1));
@@ -999,7 +997,8 @@ mod window_state_tests {
     /// A window closed in the meantime is a normal race.
     #[test]
     fn assembled_panes_replace_the_placeholders() {
-        let mut app = app_with(vec![
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![
             win(1, vec![Pane::new_vacant(1, 80, 24)]),
             win(2, vec![Pane::new_pending(11, 80, 24), Pane::new_pending(12, 80, 24)]),
         ]);
@@ -1034,7 +1033,8 @@ mod window_state_tests {
     /// string in window 1.
     #[test]
     fn an_event_acts_on_the_window_it_names_not_the_focused_one() {
-        let mut app = app_with(vec![
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![
             win(1, vec![Pane::new_vacant(10, 80, 24)]),
             win(2, vec![Pane::new_vacant(20, 80, 24)]),
         ]);
@@ -1059,7 +1059,8 @@ mod window_state_tests {
     /// moving underneath it, must not redirect the selection.
     #[test]
     fn a_drag_stays_with_the_window_that_took_the_press() {
-        let mut app = app_with(vec![win(1, Vec::new()), win(2, Vec::new())]);
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![win(1, Vec::new()), win(2, Vec::new())]);
         app.drag_window = Some(1); // pressed in window 1
         app.key_window = 1; // …and focus has since moved to window 2
 
@@ -1074,7 +1075,8 @@ mod window_state_tests {
     /// closed changes nothing.
     #[test]
     fn focusing_a_window_repaints_the_one_it_left() {
-        let mut app = app_with(vec![win(1, Vec::new()), win(2, Vec::new())]);
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![win(1, Vec::new()), win(2, Vec::new())]);
         app.windows[0].needs_render = false;
         app.windows[1].needs_render = false;
 
@@ -1097,7 +1099,8 @@ mod window_state_tests {
     /// drew the modal into every open window at once.
     #[test]
     fn an_overlay_opens_in_one_window_only() {
-        let mut app = app_with(vec![win(1, Vec::new()), win(2, Vec::new())]);
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![win(1, Vec::new()), win(2, Vec::new())]);
 
         app.toggle_cc_usage_modal(1);
         assert!(app.windows[1].cc_usage_modal.is_some());
@@ -1113,7 +1116,8 @@ mod window_state_tests {
     /// as soon as two windows each hold a locked pane.
     #[test]
     fn the_escape_hatch_counts_presses_per_session() {
-        let mut app = app_with(vec![win(1, Vec::new())]);
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![win(1, Vec::new())]);
         let t = std::time::Instant::now();
 
         assert!(!app.note_escape_for_pane_session(10, t));
@@ -1139,7 +1143,8 @@ mod window_state_tests {
     /// close it.  The target still appends + focuses + becomes key.
     #[test]
     fn moving_a_pane_repairs_both_windows() {
-        let mut app = app_with(vec![
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![
             win(1, vec![
                 Pane::new_vacant(10, 80, 24),
                 Pane::new_vacant(11, 80, 24),
@@ -1201,7 +1206,8 @@ mod window_state_tests {
     /// still open at quit.
     #[test]
     fn closing_a_window_parks_it_for_the_next_launch() {
-        let mut app = app_with(vec![
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![
             win(1, vec![Pane::new_vacant(10, 80, 24)]),
             win(2, vec![Pane::new_vacant(20, 80, 24), Pane::new_vacant(21, 80, 24)]),
         ]);
@@ -1228,7 +1234,8 @@ mod window_state_tests {
     /// geometry (`window-state.bin` is paired by index).
     #[test]
     fn a_parked_window_holds_its_slot() {
-        let mut app = app_with(vec![
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![
             win(1, vec![Pane::new_vacant(10, 80, 24)]),
             win(2, vec![Pane::new_vacant(20, 80, 24)]),
             win(3, vec![Pane::new_vacant(30, 80, 24)]),
@@ -1254,7 +1261,8 @@ mod window_state_tests {
     /// parked, and asks L1 to close it.
     #[test]
     fn closing_the_last_pane_closes_the_window() {
-        let mut app = app_with(vec![
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![
             win(1, vec![Pane::new_vacant(10, 80, 24)]),
             win(2, vec![Pane::new_vacant(20, 80, 24)]),
         ]);
@@ -1286,7 +1294,8 @@ mod window_state_tests {
     /// neighbour's geometry on the next launch.
     #[test]
     fn discarding_a_window_compacts_the_slots_above_it() {
-        let mut app = app_with(vec![
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![
             win(1, vec![Pane::new_vacant(10, 80, 24)]),
             win(2, vec![Pane::new_vacant(20, 80, 24)]),
             win(3, vec![Pane::new_vacant(30, 80, 24)]),
@@ -1312,7 +1321,8 @@ mod window_state_tests {
     /// default window instead of restoring what was just dismantled.
     #[test]
     fn closing_the_last_pane_of_the_last_window_discards_the_layout() {
-        let mut app = app_with(vec![win(1, vec![Pane::new_vacant(10, 80, 24)])]);
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![win(1, vec![Pane::new_vacant(10, 80, 24)])]);
         app.save_session_state();
         assert!(marspot::state::read().is_some(), "precondition: a layout exists");
 
@@ -1340,7 +1350,8 @@ mod window_state_tests {
     /// pane — no fresh spawn, and it outranks the restore queue.
     #[test]
     fn a_parked_move_claims_the_new_window_before_the_restore_queue() {
-        let mut app = app_with(vec![win(1, vec![
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![win(1, vec![
             Pane::new_vacant(10, 80, 24),
             Pane::new_vacant(11, 80, 24),
         ])]);
@@ -1382,8 +1393,9 @@ mod window_state_tests {
     /// moves there; travel + release anywhere else = cancelled.
     #[test]
     fn a_title_press_is_a_click_a_move_or_nothing() {
+        let sandbox = sandbox_state_dir();
         let mk = || {
-            let mut app = app_with(vec![
+            let mut app = app_with(&sandbox, vec![
                 win(1, vec![Pane::new_vacant(10, 80, 24), Pane::new_vacant(11, 80, 24)]),
                 win(2, vec![Pane::new_vacant(20, 80, 24)]),
             ]);
@@ -1459,7 +1471,8 @@ mod window_state_tests {
     /// pane lands exactly where the preview said.
     #[test]
     fn dropping_on_a_1x1_window_splits_it() {
-        let mk = || app_with(vec![
+        let sandbox = sandbox_state_dir();
+        let mk = || app_with(&sandbox, vec![
             win(1, vec![Pane::new_vacant(10, 80, 24), Pane::new_vacant(11, 80, 24)]),
             win(2, vec![Pane::new_vacant(20, 80, 24)]),
         ]);
@@ -1492,7 +1505,8 @@ mod window_state_tests {
     /// count is unchanged, only the order moves.
     #[test]
     fn splitting_within_a_window_rearranges_without_placeholders() {
-        let mut app = app_with(vec![win(1, vec![
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![win(1, vec![
             Pane::new_vacant(10, 80, 24),
             Pane::new_vacant(11, 80, 24),
             Pane::new_vacant(12, 80, 24),
@@ -1511,7 +1525,8 @@ mod window_state_tests {
     /// placeholder, focus + key follow the dragged pane's landing.
     #[test]
     fn center_drop_swaps_across_windows() {
-        let mut app = app_with(vec![
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![
             win(1, vec![Pane::new_vacant(10, 80, 24), Pane::new_vacant(11, 80, 24)]),
             win(2, vec![Pane::new_vacant(20, 80, 24)]),
         ]);
@@ -1532,7 +1547,8 @@ mod window_state_tests {
     /// resolve to Nothing:
     #[test]
     fn releases_that_change_nothing_preview_nothing() {
-        let mut app = app_with(vec![win(1, vec![
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![win(1, vec![
             Pane::new_vacant(10, 80, 24),
             Pane::new_vacant(11, 80, 24),
         ])]);
@@ -1579,9 +1595,10 @@ mod window_state_tests {
     /// half-pane split there would promise an impossible shape.
     #[test]
     fn capped_grids_resolve_edge_drops_to_append() {
+        let sandbox = sandbox_state_dir();
         let mut panes: Vec<Pane> = (0..36).map(|i| Pane::new_vacant(100 + i, 80, 24)).collect();
         let extra = Pane::new_vacant(10, 80, 24);
-        let mut app = app_with(vec![
+        let mut app = app_with(&sandbox, vec![
             win(1, vec![extra]),
             win(2, std::mem::take(&mut panes)),
         ]);
@@ -1601,7 +1618,8 @@ mod window_state_tests {
     /// reshape anywhere.
     #[test]
     fn dropping_on_a_placeholder_fills_it() {
-        let mut app = app_with(vec![
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![
             win(1, vec![Pane::new_vacant(10, 80, 24), Pane::new_vacant(11, 80, 24)]),
             win(2, vec![Pane::new_vacant(20, 80, 24), Pane::new_dormant(80, 24)]),
         ]);
@@ -1657,8 +1675,8 @@ mod window_state_tests {
 
     /// Fake a registry entry for `sid` whose `shell_child_pid` is `pid`,
     /// which is all `resolve_pane_cwd` reads out of it.
-    fn write_entry_with_child_pid(sid: u64, pid: i32) {
-        sandbox_state_dir();
+    fn write_entry_with_child_pid(sandbox: &StateSandbox, sid: u64, pid: i32) {
+        assert_sandboxed(sandbox);
         let dir = marspot_term::session_registry::session_dir(sid);
         std::fs::create_dir_all(&dir).expect("session dir");
         std::fs::write(
@@ -1681,9 +1699,10 @@ mod window_state_tests {
     /// frame per second forever with the user's hands off the keyboard.
     #[test]
     fn resolving_an_unchanged_cwd_reports_no_change() {
+        let sandbox = sandbox_state_dir();
         let sid = 7701;
-        write_entry_with_child_pid(sid, std::process::id() as i32);
-        let mut app = app_with(vec![win(1, vec![Pane::new_vacant(sid, 80, 24)])]);
+        write_entry_with_child_pid(&sandbox, sid, std::process::id() as i32);
+        let mut app = app_with(&sandbox, vec![win(1, vec![Pane::new_vacant(sid, 80, 24)])]);
 
         assert!(app.resolve_pane_cwd(sid), "first resolve = new value");
         assert_eq!(app.pane_cwds.get(&sid), Some(&cwd_string()));
@@ -1700,9 +1719,10 @@ mod window_state_tests {
     /// cache so the next attempt re-reads entry.toml.
     #[test]
     fn a_dead_cached_pid_is_dropped_and_the_entry_reread() {
+        let sandbox = sandbox_state_dir();
         let sid = 7702;
-        write_entry_with_child_pid(sid, std::process::id() as i32);
-        let mut app = app_with(vec![win(1, vec![Pane::new_vacant(sid, 80, 24)])]);
+        write_entry_with_child_pid(&sandbox, sid, std::process::id() as i32);
+        let mut app = app_with(&sandbox, vec![win(1, vec![Pane::new_vacant(sid, 80, 24)])]);
         app.pane_cwds.insert(sid, "/somewhere/known".into());
         // Above any plausible pid: proc_pidinfo says "no such process".
         app.shell_child_pids.insert(sid, i32::MAX);
@@ -1739,9 +1759,10 @@ mod window_state_tests {
     /// moved, and does nothing at all inside `CWD_SWEEP_INTERVAL`.
     #[test]
     fn sweep_repaints_only_on_a_real_move_and_respects_its_interval() {
+        let sandbox = sandbox_state_dir();
         let sid = 7703;
-        write_entry_with_child_pid(sid, std::process::id() as i32);
-        let mut app = app_with(vec![win(1, vec![Pane::new_vacant(sid, 80, 24)])]);
+        write_entry_with_child_pid(&sandbox, sid, std::process::id() as i32);
+        let mut app = app_with(&sandbox, vec![win(1, vec![Pane::new_vacant(sid, 80, 24)])]);
 
         app.sweep_pane_cwds();
         assert_eq!(app.pane_cwds.get(&sid), Some(&cwd_string()));
@@ -1784,9 +1805,10 @@ mod window_state_tests {
     /// the boot save, and no later sweep had anything new to report.
     #[test]
     fn a_move_inside_the_save_gap_is_deferred_not_dropped() {
+        let sandbox = sandbox_state_dir();
         let sid = 7704;
-        write_entry_with_child_pid(sid, std::process::id() as i32);
-        let mut app = app_with(vec![win(1, vec![Pane::new_vacant(sid, 80, 24)])]);
+        write_entry_with_child_pid(&sandbox, sid, std::process::id() as i32);
+        let mut app = app_with(&sandbox, vec![win(1, vec![Pane::new_vacant(sid, 80, 24)])]);
         // Something else just saved (boot, spawn, focus change).
         app.last_cwd_save = Instant::now();
 
@@ -1823,37 +1845,81 @@ mod boot_assembly_tests {
         self as reg, write_session_entry, SessionEntry,
     };
 
-    // `cargo test` runs tests as THREADS in one process; the sandbox
-    // env vars (MARSPOT_STATE_DIR / MARSPOT_SESSION_BIN) are process-
-    // global, so unsynchronised tests race and a spawned L3 lands in
-    // the wrong sandbox (observed: wait_and_connect polling a path
-    // the child never writes → spurious TimedOut).  nextest is
-    // process-per-test and immune, but keep `cargo test` correct too.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    /// The test's own state root and session binary, and every L3 it
+    /// started gone by the time it is dropped.
+    ///
+    /// Dropped in field order: the L3s are killed and reaped while the
+    /// registry that names them is still where the variable points,
+    /// then the variables go back, then the directory goes.
     struct Sandbox {
-        dir: std::path::PathBuf,
-        _env: std::sync::MutexGuard<'static, ()>,
+        l3s: L3Reaper,
+        env: marspot_term::test_env::EnvGuard,
+        root: ShortRoot,
     }
-    impl Sandbox {
-        fn new(tag: &str) -> Self {
-            let env = ENV_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let dir = std::env::temp_dir().join(format!(
-                "marspot-rfc004-{}-{}",
-                tag,
-                std::process::id()
+
+    /// A state root with a short path.  An L3 binds its socket at
+    /// `<root>/sessions/<id>/sock`, macOS caps a socket path at 104
+    /// bytes, and the per-user temp dir alone is half of that: under
+    /// it the L3 dies at `uds_bind_failed` before it registers.
+    struct ShortRoot(std::path::PathBuf);
+
+    impl ShortRoot {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static N: AtomicU32 = AtomicU32::new(0);
+            let dir = std::path::PathBuf::from(format!(
+                "/tmp/mspt-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
             ));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            // SAFETY: nextest runs one test per process; no other
-            // thread reads these vars concurrently at this point.
-            unsafe {
-                std::env::set_var("MARSPOT_STATE_DIR", &dir);
-                std::env::set_var("MARSPOT_SESSION_BIN", real_session_bin());
-                std::env::remove_var("MARSPOT_SESSION_ID");
+            Self(dir)
+        }
+    }
+
+    impl Drop for ShortRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Kills, on drop, every L3 the sandbox's registry names and every
+    /// pid handed to [`Sandbox::own`], and waits until each has exited:
+    /// one still tearing down when the test process exits holds its
+    /// stdout, and the runner reports the test as leaking.
+    struct L3Reaper {
+        extra: std::cell::RefCell<Vec<i32>>,
+    }
+
+    impl Drop for L3Reaper {
+        fn drop(&mut self) {
+            let mut pids: Vec<i32> = reg::list_session_entries()
+                .into_iter()
+                .map(|e| e.pid)
+                .chain(self.extra.borrow().iter().copied())
+                .filter(|&pid| reg::pid_is_live_session(pid))
+                .collect();
+            pids.sort_unstable();
+            pids.dedup();
+            for &pid in &pids {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
             }
+            for &pid in &pids {
+                // every L3 here is this process's child, so this reaps it
+                let mut st = 0;
+                unsafe { libc::waitpid(pid, &mut st, 0) };
+            }
+        }
+    }
+
+    impl Sandbox {
+        fn new() -> Self {
+            let root = ShortRoot::new();
+            let mut env = marspot_term::test_env::EnvGuard::new();
+            env.set("MARSPOT_STATE_DIR", &root.0)
+                .set("MARSPOT_SESSION_BIN", real_session_bin())
+                .remove("MARSPOT_SESSION_ID");
             // POSIX shm names (`/msp-s-<id>`) are a GLOBAL namespace:
             // the sandbox isolates the filesystem but not shm.  With
             // every sandbox allocating ids from 1, two tests spawning
@@ -1864,34 +1930,32 @@ mod boot_assembly_tests {
             // with a per-process base keeps every test's id space —
             // and therefore its shm names — disjoint.  Production is
             // untouched: one state root, one monotonic counter.
-            let sessions = dir.join("sessions");
+            let sessions = root.0.join("sessions");
             std::fs::create_dir_all(&sessions).unwrap();
             std::fs::write(
                 sessions.join(".next_id"),
                 format!("{}", std::process::id() as u64 * 100_000),
             )
             .unwrap();
-            Self { dir, _env: env }
-        }
-        fn break_session_bin(&self) {
-            // SAFETY: as above.
-            unsafe {
-                std::env::set_var(
-                    "MARSPOT_SESSION_BIN",
-                    "/nonexistent/marspot-session-broken",
-                );
+            Self {
+                l3s: L3Reaper { extra: Default::default() },
+                env,
+                root,
             }
         }
-    }
-    impl Drop for Sandbox {
-        fn drop(&mut self) {
-            // Kill any L3 the test spawned in this sandbox, then wipe.
-            for e in reg::list_session_entries() {
-                if reg::pid_is_live_session(e.pid) {
-                    unsafe { libc::kill(e.pid, libc::SIGKILL) };
-                }
-            }
-            let _ = std::fs::remove_dir_all(&self.dir);
+        fn dir(&self) -> &std::path::Path {
+            &self.root.0
+        }
+        fn set(&mut self, key: &str, value: &str) {
+            self.env.set(key, value);
+        }
+        fn break_session_bin(&mut self) {
+            self.set("MARSPOT_SESSION_BIN", "/nonexistent/marspot-session-broken");
+        }
+        /// Kill `pid` with the rest, for an L3 the registry may no
+        /// longer name by the time the test ends.
+        fn own(&self, pid: i32) {
+            self.l3s.extra.borrow_mut().push(pid);
         }
     }
 
@@ -1953,7 +2017,7 @@ mod boot_assembly_tests {
     /// slot's own sid resurrected as a live pane.
     #[test]
     fn dead_sessions_resurrect_in_saved_slot_order() {
-        let _sb = Sandbox::new("resurrect-order");
+        let _sb = Sandbox::new();
         for id in [12u64, 5, 9] {
             write_session_entry(&dead_entry(id)).unwrap();
         }
@@ -1982,7 +2046,7 @@ mod boot_assembly_tests {
     /// entry.toml — described a feature that no longer exists.
     #[test]
     fn assembly_binds_the_saved_slots_to_their_sessions() {
-        let _sb = Sandbox::new("titles");
+        let _sb = Sandbox::new();
         for id in [4u64, 6] {
             write_session_entry(&dead_entry(id)).unwrap();
         }
@@ -1996,7 +2060,7 @@ mod boot_assembly_tests {
     /// the sid — never compact, never shift the neighbours.
     #[test]
     fn spawn_failure_yields_vacant_slots_never_compacts() {
-        let sb = Sandbox::new("vacant");
+        let mut sb = Sandbox::new();
         sb.break_session_bin();
         let s = saved(&[(7, "seven"), (0, ""), (8, "eight")]);
         let (tx, _rx) = mpsc::channel();
@@ -2018,14 +2082,14 @@ mod boot_assembly_tests {
     /// (the pre-RFC-004 behaviour when a layout shrank).
     #[test]
     fn orphan_live_session_adopted_not_killed() {
-        let _sb = Sandbox::new("adopt");
+        let _sb = Sandbox::new();
         let (tx, _rx) = mpsc::channel();
         // Bring up a REAL live L3 outside any saved layout.
         let orphan_sid = reg::allocate_next_session_id().unwrap();
         let live = spawn_l3_pane_with_cwd(60, 16, orphan_sid, "", &tx)
             .expect("real L3 spawn (is marspot-session built?)");
-        // Keep it alive across the assembly (Drop would SIGKILL it);
-        // Sandbox::drop kills it via the registry at test end.
+        // Keep it alive across the assembly; the sandbox kills it via
+        // the registry at test end.
         std::mem::forget(live);
 
         let s = saved(&[(0, "")]);
@@ -2046,7 +2110,7 @@ mod boot_assembly_tests {
     /// (recoverable), never deletes.
     #[test]
     fn unreferenced_dead_dir_retires_to_recycle_bin() {
-        let sb = Sandbox::new("retire");
+        let mut sb = Sandbox::new();
         write_session_entry(&dead_entry(31)).unwrap();
         // Give it recognisable history so the retired copy is provably
         // the same dir.
@@ -2061,7 +2125,7 @@ mod boot_assembly_tests {
             !reg::session_dir(31).exists(),
             "unreferenced dead dir must move out of sessions/"
         );
-        let retired_root = sb.dir.join("retired");
+        let retired_root = sb.dir().join("retired");
         let retired: Vec<_> = std::fs::read_dir(&retired_root)
             .expect("retired/ must exist")
             .flatten()
@@ -2083,13 +2147,13 @@ mod boot_assembly_tests {
     /// contains exactly one of each.
     #[test]
     fn a_restore_assembly_leaves_other_windows_sessions_alone() {
-        let sb = Sandbox::new("no-sweep");
+        let mut sb = Sandbox::new();
         let (tx, _rx) = mpsc::channel();
         // A live session belonging to some other window.
         let other_sid = reg::allocate_next_session_id().unwrap();
         let live = spawn_l3_pane_with_cwd(60, 16, other_sid, "", &tx)
             .expect("real L3 spawn (is marspot-session built?)");
-        std::mem::forget(live); // Sandbox::drop kills it via the registry
+        std::mem::forget(live); // the sandbox kills it via the registry
         // A dead dir the sweeping assembly would retire.
         write_session_entry(&dead_entry(31)).unwrap();
         std::fs::write(reg::session_dir(31).join("bytelog"), b"HISTORY").unwrap();
@@ -2124,7 +2188,7 @@ mod boot_assembly_tests {
     /// to reattach sessions that were already bound elsewhere.
     #[test]
     fn sessions_owned_by_another_saved_window_are_left_for_it() {
-        let sb = Sandbox::new("reserved");
+        let mut sb = Sandbox::new();
         let (tx, _rx) = mpsc::channel();
         // Window 2's live session…
         let live_sid = reg::allocate_next_session_id().unwrap();
@@ -2157,9 +2221,8 @@ mod boot_assembly_tests {
     /// proving the refusal doesn't itself need a process storm.
     #[test]
     fn spawning_past_the_session_population_cap_refuses() {
-        let _sb = Sandbox::new("popcap");
-        // SAFETY: nextest is process-per-test.
-        unsafe { std::env::set_var("MARSPOT_SESSION_CAP", "1") };
+        let mut sb = Sandbox::new();
+        sb.set("MARSPOT_SESSION_CAP", "1");
         let (tx, _rx) = mpsc::channel();
         let first_sid = reg::allocate_next_session_id().unwrap();
         let _first = spawn_l3_pane_with_cwd(60, 16, first_sid, "", &tx)
@@ -2173,14 +2236,13 @@ mod boot_assembly_tests {
             err.to_string().contains("hard cap"),
             "refusal must name the cap, got: {err}"
         );
-        unsafe { std::env::remove_var("MARSPOT_SESSION_CAP") };
     }
 
     /// RFC-006 — a dormant slot restores AS a dormant slot: boot
     /// assembly must not reattach, resurrect, or spawn for it.
     #[test]
     fn a_dormant_slot_boots_as_a_placeholder() {
-        let sb = Sandbox::new("dormant-boot");
+        let mut sb = Sandbox::new();
         sb.break_session_bin(); // any spawn attempt would fail loudly
         let s = SavedWindowLayout {
             grid_cols: 2,
@@ -2212,18 +2274,19 @@ mod boot_assembly_tests {
     /// push the machine into a forced reboot.
     #[test]
     fn a_session_whose_registry_entry_is_deleted_exits_by_itself() {
-        let _sb = Sandbox::new("deadman");
+        let mut sb = Sandbox::new();
         // The deadman's beat is five seconds in production; what this
-        // asserts is that it fires at all, not how often.  Each test
-        // is its own process (nextest), so the variable reaches the
-        // L3 this spawn starts and nobody else.
-        unsafe { std::env::set_var("MARSPOT_SESSION_ENTRY_CHECK_MS", "200") };
+        // asserts is that it fires at all, not how often.
+        sb.set("MARSPOT_SESSION_ENTRY_CHECK_MS", "200");
         let (tx, _rx) = mpsc::channel();
         let sid = reg::allocate_next_session_id().unwrap();
         let live = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
             .expect("real L3 spawn (is marspot-session built?)");
         let pid = live.session().l3_pid().expect("spawned L3 has a pid");
-        std::mem::forget(live); // Drop would SIGKILL it — the deadman must do the work
+        // once its entry is gone the registry no longer names it, so
+        // the sandbox is told about it to kill it if the deadman fails
+        sb.own(pid);
+        std::mem::forget(live);
         assert!(reg::pid_is_live_session(pid));
 
         std::fs::remove_file(reg::session_entry_path(sid)).expect("remove entry");
@@ -2237,7 +2300,6 @@ mod boot_assembly_tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
-        unsafe { libc::kill(pid, libc::SIGKILL) };
         panic!("session {pid} outlived its deleted registry entry");
     }
 
@@ -2258,7 +2320,7 @@ mod boot_assembly_tests {
         // L3's socket under it has to fit macOS's 104-byte `sun_path`.
         // `mouse-reset` overran it by a few bytes and the session died
         // at `uds_bind_failed` before it could register.
-        let _sb = Sandbox::new("mreset");
+        let _sb = Sandbox::new();
         let (tx, _rx) = mpsc::channel();
         let sid = reg::allocate_next_session_id().unwrap();
         let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
@@ -2324,20 +2386,12 @@ mod boot_assembly_tests {
     /// shell does not see it.
     #[test]
     fn a_pane_is_not_given_the_launchers_idea_of_the_terminal() {
-        let _sb = Sandbox::new("mterm");
+        let mut sb = Sandbox::new();
         let (tx, _rx) = mpsc::channel();
         let sid = reg::allocate_next_session_id().unwrap();
 
-        // Safety: the test harness is single-threaded here (the suite
-        // runs a process per test), and the value is restored below.
-        let before = std::env::var("TERM").ok();
-        unsafe { std::env::set_var("TERM", "screen-256color") };
-        let spawned = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx);
-        match before {
-            Some(v) => unsafe { std::env::set_var("TERM", v) },
-            None => unsafe { std::env::remove_var("TERM") },
-        }
-        let mut pane = spawned.expect("real L3 spawn (is marspot-session built?)");
+        sb.set("TERM", "screen-256color");
+        let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx).expect("real L3 spawn (is marspot-session built?)");
 
         pane.session_mut().forward_inject_input(b"printf 'TERM=[%s]\\n' \"$TERM\"\r");
         let deadline =
@@ -2365,7 +2419,7 @@ mod boot_assembly_tests {
     /// directory it was not started in and asks.
     #[test]
     fn a_new_pane_inherits_the_directory_the_shell_is_in_now() {
-        let _sb = Sandbox::new("mcwd");
+        let _sb = Sandbox::new();
         let (tx, _rx) = mpsc::channel();
         let sid = reg::allocate_next_session_id().unwrap();
         let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
@@ -2404,7 +2458,7 @@ mod boot_assembly_tests {
         for (mode, want_drag, want_any) in
             [("1000", false, false), ("1002", true, false), ("1003", true, true)]
         {
-            let _sb = Sandbox::new(&format!("mm{mode}"));
+            let _sb = Sandbox::new();
             let (tx, _rx) = mpsc::channel();
             let sid = reg::allocate_next_session_id().unwrap();
             let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
@@ -2450,7 +2504,7 @@ mod boot_assembly_tests {
     /// it back.
     #[test]
     fn osc52_reaches_the_pasteboard_from_a_real_shell() {
-        let _sb = Sandbox::new("mosc52");
+        let _sb = Sandbox::new();
         let (tx, _rx) = mpsc::channel();
         let sid = reg::allocate_next_session_id().unwrap();
         let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
@@ -2519,7 +2573,7 @@ mod boot_assembly_tests {
     /// received rather than on what we believe we sent.
     #[test]
     fn a_click_reaches_the_program_on_a_real_pty() {
-        let _sb = Sandbox::new("mclick");
+        let _sb = Sandbox::new();
         let (tx, _rx) = mpsc::channel();
         let sid = reg::allocate_next_session_id().unwrap();
         let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
@@ -2572,7 +2626,7 @@ mod boot_assembly_tests {
     /// session to two panes — the second slot falls back to a fresh id.
     #[test]
     fn duplicate_saved_sid_does_not_double_bind() {
-        let sb = Sandbox::new("dup-sid");
+        let mut sb = Sandbox::new();
         sb.break_session_bin();
         let s = saved(&[(9, "a"), (9, "b")]);
         let (tx, _rx) = mpsc::channel();

@@ -65,7 +65,7 @@ fn a_terminal_frame_allocates_nothing_once_warm() {
     use crate::terminal::Terminal;
 
     let Ok(device) = system_default_device() else {
-        eprintln!("skip (no Metal)");
+        eprintln!("SKIPPED: no Metal device");
         return;
     };
     let mut font = FontCache::build().expect("font");

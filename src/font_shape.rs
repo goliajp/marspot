@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn shape_proportional_widths_differ() {
         let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
-            eprintln!("skipping: no SF Pro on this host");
+            eprintln!("SKIPPED: no SF Pro on this host");
             return;
         };
         // 'i' and 'm' have very different proportional widths; CT
@@ -428,6 +428,7 @@ mod tests {
     #[test]
     fn shape_subpx_buckets_in_range() {
         let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
+            eprintln!("SKIPPED: no system UI font");
             return;
         };
         let shaped = shape_line("Hello world", &font, ShapeOptions::full(), |_| 0);
@@ -449,6 +450,7 @@ mod tests {
     #[test]
     fn shape_empty_string_returns_empty() {
         let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
+            eprintln!("SKIPPED: no system UI font");
             return;
         };
         let shaped = shape_line("", &font, ShapeOptions::full(), |_| 0);
@@ -458,6 +460,7 @@ mod tests {
     #[test]
     fn cache_hit_skips_reshape() {
         let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
+            eprintln!("SKIPPED: no system UI font");
             return;
         };
         let mut cache = ShapeCache::new(8);
@@ -472,6 +475,7 @@ mod tests {
         // Pick a font that DOES ship `fi` / `fl` ligatures.  SF Pro
         // has them at all weights; on hosts without SF Pro, skip.
         let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
+            eprintln!("SKIPPED: no system UI font");
             return;
         };
         let with = shape_line("fi", &font, ShapeOptions::full(), |_| 0);
@@ -491,6 +495,7 @@ mod tests {
     #[test]
     fn shape_cache_distinguishes_opts() {
         let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
+            eprintln!("SKIPPED: no system UI font");
             return;
         };
         let mut cache = ShapeCache::new(8);
@@ -503,14 +508,14 @@ mod tests {
         assert_eq!(cache.misses, 2, "two distinct keys = two misses");
     }
 
-    /// Phase 9 — perf characterization for the shape cache.  Not a
-    /// micro-bench (no warm-up; first-Metal-context cost varies) — a
-    /// sanity gate that proves cache hits are at least an order of
-    /// magnitude faster than misses.  Prints both timings so a dev
-    /// can spot creeping regression before the assertion fires.
+    /// Phase 9 — a warm shape is a cache hit, and it costs a fraction
+    /// of shaping.  The cold pass is the control: both halves run back
+    /// to back on the same host, so a loaded machine slows both and
+    /// the ratio still holds.
     #[test]
     fn shape_warm_cache_beats_cold_shape() {
         let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
+            eprintln!("SKIPPED: no system UI font");
             return;
         };
         let mut cache = ShapeCache::new(32);
@@ -523,41 +528,35 @@ mod tests {
             "0123456789",
         ];
 
-        // Cold pass: every call misses.  Time the median of N attempts.
-        let mut cold_us: Vec<u128> = Vec::with_capacity(texts.len());
+        // Cold pass: every call misses.
+        let mut cold_ns: Vec<u128> = Vec::with_capacity(texts.len());
         for t in &texts {
             let t0 = std::time::Instant::now();
             let _ = cache.shape(t, &font, 0, 52, ShapeOptions::full(), |_| 0).len();
-            cold_us.push(t0.elapsed().as_micros());
+            cold_ns.push(t0.elapsed().as_nanos());
         }
-        cold_us.sort_unstable();
-        let cold_median = cold_us[cold_us.len() / 2];
+        cold_ns.sort_unstable();
+        let cold_median = cold_ns[cold_ns.len() / 2];
+        assert_eq!((cache.hits, cache.misses), (0, texts.len() as u64), "the cold pass misses");
 
         // Warm pass: every call hits.
-        let mut warm_us: Vec<u128> = Vec::with_capacity(texts.len());
+        let mut warm_ns: Vec<u128> = Vec::with_capacity(texts.len());
         for t in &texts {
             let t0 = std::time::Instant::now();
             let _ = cache.shape(t, &font, 0, 52, ShapeOptions::full(), |_| 0).len();
-            warm_us.push(t0.elapsed().as_micros());
+            warm_ns.push(t0.elapsed().as_nanos());
         }
-        warm_us.sort_unstable();
-        let warm_median = warm_us[warm_us.len() / 2];
+        warm_ns.sort_unstable();
+        let warm_median = warm_ns[warm_ns.len() / 2];
+        assert_eq!(cache.hits, texts.len() as u64, "the warm pass hits");
 
         eprintln!(
-            "[font v5 Phase 9] shape cache: cold median = {cold_median} µs, warm median = {warm_median} µs"
-        );
-
-        // Loose bounds — protects against gross regression without
-        // false-flagging on macOS GPU jitter.  Real spec is 1ms shape /
-        // 100ns warm-cache; these are the don't-break-prod bounds.
-        assert!(
-            cold_median < 5000,
-            "cold shape median {cold_median} µs exceeds 5000 µs safety bound",
+            "[font v5 Phase 9] shape cache: cold median = {cold_median} ns, warm median = {warm_median} ns"
         );
         assert!(
-            warm_median < 1000,
-            "warm cache lookup median {warm_median} µs exceeds 1000 µs safety bound; \
-             cache is supposed to be near-instant",
+            warm_median * 4 < cold_median,
+            "a warm lookup ({warm_median} ns) must cost under a quarter of shaping \
+             ({cold_median} ns); near the same means the cache is not being hit",
         );
     }
 
@@ -572,6 +571,7 @@ mod tests {
     #[test]
     fn cache_evicts_least_recently_used_not_oldest_inserted() {
         let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
+            eprintln!("SKIPPED: no system UI font");
             return;
         };
         let mut cache = ShapeCache::new(2);

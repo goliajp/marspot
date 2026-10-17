@@ -452,8 +452,8 @@ mod tests {
     /// empty screen that looks like a quiet pane.
     #[test]
     fn a_missing_bytelog_is_an_error() {
-        let p = std::env::temp_dir().join("marspot-read-nothing-here");
-        let _ = std::fs::remove_file(&p);
+        let tmp = crate::test_env::TempDir::new("read-nothing");
+        let p = tmp.join("nothing-here");
         assert!(screen_text(&p, 40, 10, 0).is_err());
     }
 

@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn coretext_mono_returns_raster() {
         let Ok(font) = new_from_name("Menlo", 13.0) else {
-            eprintln!("skipping: no Menlo");
+            eprintln!("SKIPPED: no Menlo");
             return;
         };
         let mut g: CGGlyph = 0;
@@ -329,6 +329,7 @@ mod tests {
     #[test]
     fn coretext_shaper_matches_shape_line() {
         let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
+            eprintln!("SKIPPED: no system UI font");
             return;
         };
         let opts = crate::font_shape::ShapeOptions::full();

@@ -736,6 +736,25 @@ mod tests {
         })
         .expect("spawn zsh on a pty");
         let shell_pid = pty.child_pid();
+        // Tear down what this test parks in the pane BEFORE `Pty`'s
+        // Drop runs, pass or fail: a stopped job left behind makes that
+        // Drop block (measured -- the test sat in it for 13 minutes
+        // until nextest SIGKILLed the process).  Declared after `pty`,
+        // so it is dropped first.
+        struct KillJobs(i32);
+        impl Drop for KillJobs {
+            fn drop(&mut self) {
+                for pid in child_pids(self.0) {
+                    if let Some(row) = proc_row(pid) {
+                        unsafe {
+                            libc::killpg(row.pgid, libc::SIGCONT);
+                            libc::killpg(row.pgid, libc::SIGKILL);
+                        }
+                    }
+                }
+            }
+        }
+        let _jobs = KillJobs(shell_pid);
 
         // Drain whatever the shell prints; a full pty buffer would
         // block it and stall the test for reasons unrelated to what is
@@ -807,22 +826,6 @@ mod tests {
             !status.is_quiet(),
             "composed state {status:?} must not be quiet with a job parked in the pane"
         );
-
-        // Tear down what this test parked in the pane, BEFORE `Pty`'s
-        // Drop runs: a stopped job left behind makes that Drop block
-        // (measured — the test sat in it for 13 minutes until nextest
-        // SIGKILLed the process).  Whether Drop should survive a
-        // stopped job on its own is a separate question about `Pty`;
-        // this test is about the classification and cleans up after
-        // itself either way.
-        for pid in child_pids(shell_pid) {
-            if let Some(row) = proc_row(pid) {
-                unsafe {
-                    libc::killpg(row.pgid, libc::SIGCONT);
-                    libc::killpg(row.pgid, libc::SIGKILL);
-                }
-            }
-        }
     }
 
     /// Pins the calling convention against a real child.  The first
@@ -832,10 +835,12 @@ mod tests {
     /// inert while every synthetic test still passed.
     #[test]
     fn child_pids_finds_a_real_child_process() {
-        let mut child = std::process::Command::new("/bin/sleep")
-            .arg("5")
-            .spawn()
-            .expect("spawn /bin/sleep");
+        let mut child = crate::test_env::ChildGuard::new(
+            std::process::Command::new("/bin/sleep")
+                .arg("5")
+                .spawn()
+                .expect("spawn /bin/sleep"),
+        );
         // The child is visible as soon as fork returns; no wait needed
         // beyond the spawn itself.
         let me = std::process::id() as i32;
