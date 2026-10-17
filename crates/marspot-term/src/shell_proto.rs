@@ -536,6 +536,12 @@ pub enum MsgType {
     /// process that has no window.  Older images skip the unknown
     /// msg_type, which costs a clipboard write and nothing else.
     PaneClipboardWrite = 83,
+    /// L2 → L3: whether this pane has the keyboard — the focused pane
+    /// of the key window of an active app.  Sent on change.  A program
+    /// that turned on focus reporting (DEC 1004) is told with `CSI I` /
+    /// `CSI O`; the terminal that knows the mode lives in L3.  Older
+    /// images skip the unknown msg_type, as they always did.
+    PaneTerminalFocus = 84,
     /// Put this pane's pen back to plain — what `reset` does, for a
     /// pane whose program is never going to send one.
     ///
@@ -619,6 +625,7 @@ impl MsgType {
             81 => MsgType::PaneResetAttrs,
             82 => MsgType::PaneAgentTui,
             83 => MsgType::PaneClipboardWrite,
+            84 => MsgType::PaneTerminalFocus,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1821,6 +1828,24 @@ pub fn decode_pane_reset_mouse_reporting(payload: &[u8]) -> io::Result<u64> {
     Ok(u64::from_le_bytes(payload.try_into().unwrap()))
 }
 
+/// PaneTerminalFocus payload: `session_id u64 LE, focused u8`.
+pub fn encode_pane_terminal_focus(session_id: u64, focused: bool) -> Vec<u8> {
+    let mut v = Vec::with_capacity(9);
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.push(focused as u8);
+    v
+}
+
+pub fn decode_pane_terminal_focus(payload: &[u8]) -> io::Result<(u64, bool)> {
+    if payload.len() != 9 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_terminal_focus payload != 9 bytes",
+        ));
+    }
+    Ok((u64::from_le_bytes(payload[0..8].try_into().unwrap()), payload[8] != 0))
+}
+
 /// PaneHoldGrid payload: `session_id u64 LE, on u8` (1 = hold).
 pub fn encode_pane_hold_grid(session_id: u64, on: bool) -> Vec<u8> {
     let mut v = Vec::with_capacity(9);
@@ -2276,8 +2301,6 @@ pub fn decode_pane_badge_menu_action(payload: &[u8]) -> io::Result<(u64, u32)> {
 pub const PANE_SESSION_CAP_INPUT: u32 = 1 << 0;
 pub const PANE_SESSION_CAP_LOCK_KEYS: u32 = 1 << 1;
 pub const PANE_SESSION_CAP_FREEZE_GRID: u32 = 1 << 2;
-pub const PANE_SESSION_CAP_OBSERVE_PTY: u32 = 1 << 3;
-pub const PANE_SESSION_CAP_OVERLAY: u32 = 1 << 4;
 
 pub fn encode_pane_session_begin(session_id: u64, caps: u32) -> Vec<u8> {
     let mut v = Vec::with_capacity(12);
@@ -2354,54 +2377,6 @@ pub fn decode_pane_session_user_escape(payload: &[u8]) -> io::Result<u64> {
         ));
     }
     Ok(u64::from_le_bytes(payload.try_into().unwrap()))
-}
-
-/// PaneSessionOverlay payload (stub format — refined when the first
-/// overlay renderer lands):
-/// ```text
-/// [session_id u64 LE]
-/// [region: x f32, y_top f32, w f32, h f32  (16 bytes, phys px)]
-/// [body_len u32 LE]
-/// [body bytes]            — plugin-defined; renderer treats as UTF-8 for v1
-/// ```
-pub fn encode_pane_session_overlay(
-    session_id: u64,
-    region: (f32, f32, f32, f32),
-    body: &[u8],
-) -> Vec<u8> {
-    let mut v = Vec::with_capacity(8 + 16 + 4 + body.len());
-    v.extend_from_slice(&session_id.to_le_bytes());
-    v.extend_from_slice(&region.0.to_le_bytes());
-    v.extend_from_slice(&region.1.to_le_bytes());
-    v.extend_from_slice(&region.2.to_le_bytes());
-    v.extend_from_slice(&region.3.to_le_bytes());
-    v.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    v.extend_from_slice(body);
-    v
-}
-
-pub fn decode_pane_session_overlay(
-    payload: &[u8],
-) -> io::Result<(u64, (f32, f32, f32, f32), Vec<u8>)> {
-    if payload.len() < 8 + 16 + 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "pane_session_overlay header < 28 bytes",
-        ));
-    }
-    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
-    let rx = f32::from_le_bytes(payload[8..12].try_into().unwrap());
-    let ry = f32::from_le_bytes(payload[12..16].try_into().unwrap());
-    let rw = f32::from_le_bytes(payload[16..20].try_into().unwrap());
-    let rh = f32::from_le_bytes(payload[20..24].try_into().unwrap());
-    let body_len = u32::from_le_bytes(payload[24..28].try_into().unwrap()) as usize;
-    if payload.len() < 28 + body_len {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "pane_session_overlay body truncated",
-        ));
-    }
-    Ok((sid, (rx, ry, rw, rh), payload[28..28 + body_len].to_vec()))
 }
 
 /// GridResize payload: `cols: u16 LE, rows: u16 LE` — the cell-grid
@@ -3331,32 +3306,6 @@ mod tests {
     }
 
     #[test]
-    fn pane_session_overlay_roundtrip() {
-        let body = b"hello overlay";
-        let p = encode_pane_session_overlay(9, (10.0, 20.0, 100.0, 30.0), body);
-        let (sid, region, decoded) = decode_pane_session_overlay(&p).unwrap();
-        assert_eq!(sid, 9);
-        assert_eq!(region, (10.0, 20.0, 100.0, 30.0));
-        assert_eq!(decoded, body);
-        assert_eq!(MsgType::from_u32(47), Some(MsgType::PaneSessionOverlay));
-    }
-
-    #[test]
-    fn pane_session_overlay_rejects_short_header() {
-        let err = decode_pane_session_overlay(&[0u8; 27]).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn pane_session_overlay_rejects_truncated_body() {
-        // 28-byte valid header claiming body_len=100, but no body.
-        let mut p = encode_pane_session_overlay(1, (0.0, 0.0, 0.0, 0.0), &[0u8; 100]);
-        p.truncate(28 + 50);
-        let err = decode_pane_session_overlay(&p).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    }
-
-    #[test]
     fn selection_text_frames_roundtrip() {
         let p = encode_get_selection_text(7, (3, 100), (40, 7), true);
         let (seq, a, f, b) = decode_get_selection_text(&p).unwrap();
@@ -3716,6 +3665,16 @@ mod tests {
             MsgType::from_u32(78),
             Some(MsgType::PaneResetMouseReporting)
         );
+    }
+
+    #[test]
+    fn pane_terminal_focus_roundtrip() {
+        for focused in [true, false] {
+            let p = encode_pane_terminal_focus(7, focused);
+            assert_eq!(decode_pane_terminal_focus(&p).unwrap(), (7, focused));
+        }
+        assert!(decode_pane_terminal_focus(&[0u8; 8]).is_err());
+        assert_eq!(MsgType::from_u32(84), Some(MsgType::PaneTerminalFocus));
     }
 
     #[test]

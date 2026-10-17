@@ -90,12 +90,6 @@ pub fn apply_scroll_delta(id: ViewId, delta_y: f64) -> ScrollState {
     })
 }
 
-/// Forget state for `id` — called by lifecycle reconcile when a
-/// ScrollView no longer exists in the View tree.
-pub fn forget(id: ViewId) {
-    SCROLL_STATES.with(|m| { m.borrow_mut().remove(&id); });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,7 +118,6 @@ mod tests {
         assert_eq!(s1.offset_y, 50.0);
         let s2 = apply_scroll_delta(id, 30.0);
         assert_eq!(s2.offset_y, 80.0);
-        forget(id);
     }
 
     #[test]
@@ -134,6 +127,5 @@ mod tests {
         apply_scroll_delta(id, 100_000.0);
         let s = scroll_state(id);
         assert_eq!(s.offset_y, 800.0); // 1000 - 200
-        forget(id);
     }
 }

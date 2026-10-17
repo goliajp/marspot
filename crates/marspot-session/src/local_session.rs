@@ -222,7 +222,7 @@ impl LocalSession {
             argv0: Some(argv0),
             cwd,
             // L2 → L3 plumbing vars (MARSPOT_SESSION_ID, MARSPOT_SHM_FD,
-            // MARSPOT_L3_OWNS_PTY, …) are for THIS process, not the
+            // MARSPOT_SHM_NAME, …) are for THIS process, not the
             // user's shell.  Leaking them broke real workflows: a
             // `cargo test` inside a marspot pane inherited
             // MARSPOT_SESSION_ID and overwrote that session's on-disk

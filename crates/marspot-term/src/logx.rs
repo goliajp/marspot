@@ -112,7 +112,7 @@ pub fn init(component: &'static str) {
     {
         std::thread::Builder::new()
             .name("marspot-logx-gc-startup".into())
-            .spawn(move || gc::sweep_startup(component))
+            .spawn(gc::sweep_startup)
             .ok();
     }
 }

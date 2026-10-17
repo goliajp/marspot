@@ -27,9 +27,8 @@ pub enum View {
     Spacer { flex: u32 },
     /// Solid-color rect, hugs full constraints by default.
     Filled { color: Color, radius: Length },
-    /// 1pt hairline along its long axis.  At least one of (w, h)
-    /// should be small for this to read.
-    Hairline { color: Color, vertical: bool },
+    /// 1pt horizontal hairline across the middle of its rect.
+    Hairline { color: Color },
 
     // ─── Containers ────────────────────────────────────────────
     /// Vertical stack — main axis y, cross axis x.
@@ -56,21 +55,6 @@ pub enum View {
     /// keyed by `id`.  v1 vertical-only.
     ScrollView {
         child: Box<View>,
-        id: ViewId,
-    },
-    /// Uniform-height virtualised list — only items in the visible
-    /// viewport get laid out + painted.  See `lazy.rs` for details.
-    LazyVStack {
-        items: Vec<View>,
-        gap: Length,
-        item_height: Length,
-        id: ViewId,
-    },
-    /// Uniform-width horizontal mirror of `LazyVStack`.
-    LazyHStack {
-        items: Vec<View>,
-        gap: Length,
-        item_width: Length,
         id: ViewId,
     },
     /// Uniform-cell grid — items flow left-to-right, top-to-bottom
@@ -107,11 +91,6 @@ pub enum View {
         id: ViewId,
         options: Vec<String>,
     },
-    /// Image primitive — type defined; real renderer Image
-    /// primitive support is a v2+ follow-up (currently paints as
-    /// a tinted placeholder rect).  Always wrap in `.frame(width:,
-    /// height:)` since we have no intrinsic image dims yet.
-    Image(Image),
     /// Geometric shape primitive — Circle / Capsule / RoundedRect /
     /// Path (v2+).  v1 renders as approximating rects/lines through
     /// the existing Canvas; richer SDF paths land later.
@@ -123,32 +102,6 @@ pub enum View {
         mods: Vec<Modifier>,
     },
 }
-
-#[derive(Clone, Debug)]
-pub struct Image {
-    pub source: ImageSource,
-    pub mode: ContentMode,
-    pub tint: Option<Color>,
-}
-
-#[derive(Clone, Debug)]
-pub enum ImageSource {
-    /// Glyph atlas entry — the renderer's existing chrome SDF
-    /// path can paint this.  Reserved name; wiring lands when
-    /// real Image primitive is added.
-    Glyph(u32),
-    /// Inline RGBA bytes (PNG/JPEG decoded).  Paint emits a
-    /// placeholder until Image primitive is added.
-    Raw(std::sync::Arc<Vec<u8>>),
-    /// IOSurface — for shared GPU images (future use).
-    IOSurface(u32),
-    /// Placeholder named token (eg system icon) — v1 paints as
-    /// tinted rect.
-    Named(&'static str),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContentMode { Fit, Fill, Center }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ShapeSpec {
@@ -237,7 +190,6 @@ pub struct Text {
     pub color: Color,
     pub size: TextSize,
     pub weight: TextWeight,
-    pub align: TextAlign,
     pub lines: TextLines,
     /// Which font path lays this run out.  Default
     /// `Mono { size: Body }` preserves the current Monaco cell
@@ -268,9 +220,6 @@ pub struct TextStyle {
     pub color: crate::ui::core::Color,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TextAlign { Leading, Center, Trailing }
-
 #[derive(Clone, Copy, Debug)]
 pub enum TextLines {
     Single { truncate: Truncate },
@@ -288,7 +237,6 @@ impl Text {
             color: crate::ui::theme::color::FG,
             size,
             weight: TextWeight::Regular,
-            align: TextAlign::Leading,
             lines: TextLines::Single { truncate: Truncate::End },
             font: TextFontSpec::Mono { size },
         }
@@ -336,9 +284,6 @@ pub enum Modifier {
     /// Aspect ratio enforcement applied in layout.  Equivalent to
     /// `.frame(aspect: Some(r))` but standalone.
     AspectRatio(f64, AspectMode),
-    /// Composited on top of same-z siblings — only meaningful inside
-    /// a ZStack; ignored elsewhere.
-    ZIndex(i32),
     /// Don't paint self or descendants; still occupies layout space.
     Hidden(bool),
     /// Skip the whole subtree from layout AND paint.  Like CSS
@@ -360,31 +305,15 @@ pub enum Modifier {
     /// progress.
     OnDragBegin(super::types::DragId),
     Id(ViewId),
-    /// Accessibility label string.  Baked into `Decoration` for
-    /// future NSAccessibility tree dispatch (v2+).
-    AccessibilityLabel(String),
-    /// Accessibility role / semantic category.
-    AccessibilityRole(AxRole),
     /// Keyboard shortcut binding — when the user types this
     /// `KeyEquivalent` while the panel has focus, the reducer
     /// receives `ActionId`.  Routing is host-level: app collects
     /// shortcut tables each frame.
     Shortcut(super::types::KeyEquivalent, ActionId),
-    /// Add to the Tab navigation ring at this `FocusId`.
-    Focusable(super::types::FocusId),
     /// Mark the view as the initially-focused element.  At most
     /// one per frame should be set;  framework picks the first if
     /// multiple appear.
     AutoFocus,
-    /// Fire when this view first appears in the tree (its
-    /// `ViewId` enters the live set).  Lifecycle reconcile detects.
-    OnAppear(ActionId),
-    /// Fire when this view leaves the tree.
-    OnDisappear(ActionId),
-    /// Declarative enter / exit animation.  Framework drives via
-    /// `LifecycleEvent::Appear/Disappear` once [A3] frame schedule
-    /// lands.  Bake into Decoration so paint can apply during transit.
-    Transition(super::types::Transition),
     /// Scale / rotate / translate transform applied at paint time.
     /// v1 = data only(paint applies translate via offset accumulator);
     /// rotate / scale need Metal vertex transform = v2+.
@@ -392,14 +321,6 @@ pub enum Modifier {
     /// Alpha mask using another view's shape.  v1 data only;  paint
     /// = noop until Metal stencil pipeline lands.
     Mask(Box<View>),
-    /// Compositing blend mode.  v1 data only;  paint = noop.
-    BlendMode(super::types::BlendMode),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AxRole {
-    Button, Heading, ListItem, TextField, Image, StaticText,
-    Group, Link, Checkbox, Toggle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -461,11 +382,7 @@ pub fn filled(color: Color) -> View {
 }
 
 pub fn hairline_horiz(color: Color) -> View {
-    View::Hairline { color, vertical: false }
-}
-
-pub fn hairline_vert(color: Color) -> View {
-    View::Hairline { color, vertical: true }
+    View::Hairline { color }
 }
 
 /// Wrap `child` in a scrolling viewport keyed by `id`.
@@ -489,11 +406,6 @@ pub fn grid(items: Vec<View>, cols: usize, cell_w: Length, cell_h: Length, gap: 
     View::Grid { items, cols, col_gap: gap, row_gap: gap, cell_w, cell_h }
 }
 
-/// Uniform grid with separate col_gap / row_gap.
-pub fn grid_with_gaps(items: Vec<View>, cols: usize, cell_w: Length, cell_h: Length, col_gap: Length, row_gap: Length) -> View {
-    View::Grid { items, cols, col_gap, row_gap, cell_w, cell_h }
-}
-
 /// Variable-track grid: each column / row track gets its own size
 /// spec (Fixed / Flex / Auto).  Items flow l-to-r, t-to-b across
 /// `tracks_w.len()` columns.
@@ -505,15 +417,6 @@ pub fn variable_grid(
     row_gap: Length,
 ) -> View {
     View::VariableGrid { items, tracks_w, tracks_h, gap: (col_gap, row_gap) }
-}
-
-/// Image built from a `Named` source token.
-pub fn image_named(name: &'static str, tint: Option<Color>) -> View {
-    View::Image(Image {
-        source: ImageSource::Named(name),
-        mode: ContentMode::Fit,
-        tint,
-    })
 }
 
 /// Filled circle.
@@ -720,7 +623,6 @@ impl View {
     pub fn align_cross_start(self) -> Self    { self.align_cross(AlignCross::Start) }
     pub fn align_cross_center(self) -> Self   { self.align_cross(AlignCross::Center) }
     pub fn align_cross_end(self) -> Self      { self.align_cross(AlignCross::End) }
-    pub fn align_cross_stretch(self) -> Self  { self.align_cross(AlignCross::Stretch) }
 
     pub fn align_cross(self, a: AlignCross) -> Self {
         match self {
@@ -749,7 +651,6 @@ impl View {
     pub fn shadow(self, s: Shadow) -> Self { self.add_mod(Modifier::Shadow(s)) }
     pub fn frame(self, f: FrameSpec) -> Self { self.add_mod(Modifier::Frame(f)) }
     pub fn offset(self, x: Length, y: Length) -> Self { self.add_mod(Modifier::Offset(x, y)) }
-    pub fn z_index(self, z: i32) -> Self { self.add_mod(Modifier::ZIndex(z)) }
     pub fn hidden(self, h: bool) -> Self { self.add_mod(Modifier::Hidden(h)) }
     pub fn on_hover(self, id: HoverId) -> Self { self.add_mod(Modifier::OnHover(id)) }
     pub fn on_click(self, id: ActionId) -> Self { self.add_mod(Modifier::OnClick(id)) }
@@ -773,32 +674,15 @@ impl View {
         self.add_mod(Modifier::BackgroundMaterial(m))
     }
 
-    pub fn accessibility_label(self, s: impl Into<String>) -> Self {
-        self.add_mod(Modifier::AccessibilityLabel(s.into()))
-    }
-    pub fn accessibility_role(self, r: AxRole) -> Self {
-        self.add_mod(Modifier::AccessibilityRole(r))
-    }
     pub fn shortcut(self, k: super::types::KeyEquivalent, a: ActionId) -> Self {
         self.add_mod(Modifier::Shortcut(k, a))
     }
-    pub fn focusable(self, id: super::types::FocusId) -> Self {
-        self.add_mod(Modifier::Focusable(id))
-    }
     pub fn auto_focus(self) -> Self { self.add_mod(Modifier::AutoFocus) }
-    pub fn on_appear(self, a: ActionId) -> Self { self.add_mod(Modifier::OnAppear(a)) }
-    pub fn on_disappear(self, a: ActionId) -> Self { self.add_mod(Modifier::OnDisappear(a)) }
-    pub fn transition(self, t: super::types::Transition) -> Self {
-        self.add_mod(Modifier::Transition(t))
-    }
     pub fn transform(self, t: super::types::Transform) -> Self {
         self.add_mod(Modifier::Transform(t))
     }
     pub fn mask(self, m: View) -> Self {
         self.add_mod(Modifier::Mask(Box::new(m)))
-    }
-    pub fn blend_mode(self, m: super::types::BlendMode) -> Self {
-        self.add_mod(Modifier::BlendMode(m))
     }
 }
 
@@ -818,7 +702,6 @@ impl Text {
         self
     }
     pub fn weight(mut self, w: TextWeight) -> Self { self.weight = w; self }
-    pub fn text_align(mut self, a: TextAlign) -> Self { self.align = a; self }
     pub fn lines(mut self, l: TextLines) -> Self { self.lines = l; self }
 
     /// Switch this run to the SF Pro proportional shape path (Phase

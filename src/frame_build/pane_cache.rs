@@ -30,6 +30,7 @@ pub(crate) struct PaneInstanceCache {
     cells: Vec<CellInstance>,
     glyphs: Vec<GlyphInstance>,
     color_glyphs: Vec<GlyphInstance>,
+    links: crate::frame_build::session::LinkBufs,
     /// `true` once this slot has actually been built at least once;
     /// distinguishes "fresh default" from "valid but happens to
     /// have empty contributions".
@@ -63,7 +64,6 @@ fn pane_fingerprint(
     view.focused.hash(&mut h);
     view.title.hash(&mut h);
     view.right_badge.hash(&mut h);
-    view.update_pending.hash(&mut h);
     view.ime_preedit.hash(&mut h);
     view.top_fixed_h_cells.hash(&mut h);
     view.bot_fixed_h_cells.hash(&mut h);
@@ -193,6 +193,7 @@ pub(crate) fn push_panes(
             layout.gutter as f32,
             layout.padding as f32,
             layout.cell_title_h as f32,
+            &mut pane_caches[i].links,
         );
         // Snapshot this pane's contributions into the cache.
         // Re-read atlas gens after the call: a glyph miss during

@@ -9,8 +9,8 @@
 //!
 //! The obvious reading is "too many syscalls, cache harder".  Measured
 //! on the live 14-pane window (2026-08-22), it is not:
-//! `examples/link_scan_probe` replaying each pane's real bytelog put
-//! the whole window at **0–37 probes per scan**.  Volume was never the
+//! replaying each pane's real bytelog through the scanner put the
+//! whole window at **0–37 probes per scan**.  Volume was never the
 //! problem.  Tail latency was:
 //!
 //! | probe                              | median | max      |
