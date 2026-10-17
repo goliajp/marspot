@@ -70,6 +70,15 @@ fn state_dir_of(pid: i32) -> Option<Option<String>> {
     Some(pidtree::proc_env_value(pid, "MARSPOT_STATE_DIR"))
 }
 
+/// Whether `pid` runs with this process's state directory.  False when
+/// its environment cannot be read.
+pub fn shares_our_state_dir(pid: i32) -> bool {
+    state_dir_of(pid).is_some_and(|d| {
+        let root = d.map_or_else(paths::default_state_root, PathBuf::from);
+        canonical(&root) == canonical(&paths::state_root())
+    })
+}
+
 /// The L3s of `install` among `rows` whose pid no registry entry names.
 pub fn orphans<'a>(
     rows: impl IntoIterator<Item = &'a ProcRow>,
@@ -234,5 +243,29 @@ mod tests {
             orphans(&rows, &registered, &sandbox, exe, state).is_empty(),
             "a sandbox does not own L3s that have no MARSPOT_STATE_DIR"
         );
+    }
+
+    /// What `--trigger` relies on before sending SIGUSR1, which ends a
+    /// process that does not handle it.  The helper, not `/bin/sleep`:
+    /// a platform binary's environment cannot be read at all.
+    #[test]
+    fn only_a_process_with_our_state_dir_shares_it() {
+        let me = std::env::current_exe().expect("test binary");
+        let other = std::env::temp_dir().join(format!("marspot-other-state-{}", std::process::id()));
+        let mut same = run_helper(&me, Some(&paths::state_root()));
+        let mut different = run_helper(&me, Some(&other));
+        // until exec the child still has our environment
+        let execed = |c: &Child| pidtree::proc_env_value(c.id() as i32, HELPER_ENV).is_some();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !(execed(&same) && execed(&different)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (s, d) = (shares_our_state_dir(same.id() as i32), shares_our_state_dir(different.id() as i32));
+        for c in [&mut same, &mut different] {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        assert!(s, "a process run with our state dir shares it");
+        assert!(!d, "a process run with another state dir does not");
     }
 }
