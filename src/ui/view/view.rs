@@ -336,9 +336,6 @@ pub enum Modifier {
     /// Aspect ratio enforcement applied in layout.  Equivalent to
     /// `.frame(aspect: Some(r))` but standalone.
     AspectRatio(f64, AspectMode),
-    /// Composited on top of same-z siblings — only meaningful inside
-    /// a ZStack; ignored elsewhere.
-    ZIndex(i32),
     /// Don't paint self or descendants; still occupies layout space.
     Hidden(bool),
     /// Skip the whole subtree from layout AND paint.  Like CSS
@@ -360,30 +357,22 @@ pub enum Modifier {
     /// progress.
     OnDragBegin(super::types::DragId),
     Id(ViewId),
-    /// Accessibility label string.  Baked into `Decoration` for
-    /// future NSAccessibility tree dispatch (v2+).
-    AccessibilityLabel(String),
-    /// Accessibility role / semantic category.
-    AccessibilityRole(AxRole),
     /// Keyboard shortcut binding — when the user types this
     /// `KeyEquivalent` while the panel has focus, the reducer
     /// receives `ActionId`.  Routing is host-level: app collects
     /// shortcut tables each frame.
     Shortcut(super::types::KeyEquivalent, ActionId),
-    /// Add to the Tab navigation ring at this `FocusId`.
-    Focusable(super::types::FocusId),
     /// Mark the view as the initially-focused element.  At most
     /// one per frame should be set;  framework picks the first if
     /// multiple appear.
     AutoFocus,
     /// Fire when this view first appears in the tree (its
-    /// `ViewId` enters the live set).  Lifecycle reconcile detects.
+    /// `ViewId` enters the live set).  Nothing dispatches it yet.
     OnAppear(ActionId),
     /// Fire when this view leaves the tree.
     OnDisappear(ActionId),
-    /// Declarative enter / exit animation.  Framework drives via
-    /// `LifecycleEvent::Appear/Disappear` once [A3] frame schedule
-    /// lands.  Bake into Decoration so paint can apply during transit.
+    /// Declarative enter / exit animation.  Nothing drives it yet;
+    /// baked into Decoration so paint can apply it during transit.
     Transition(super::types::Transition),
     /// Scale / rotate / translate transform applied at paint time.
     /// v1 = data only(paint applies translate via offset accumulator);
@@ -392,14 +381,6 @@ pub enum Modifier {
     /// Alpha mask using another view's shape.  v1 data only;  paint
     /// = noop until Metal stencil pipeline lands.
     Mask(Box<View>),
-    /// Compositing blend mode.  v1 data only;  paint = noop.
-    BlendMode(super::types::BlendMode),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AxRole {
-    Button, Heading, ListItem, TextField, Image, StaticText,
-    Group, Link, Checkbox, Toggle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -464,10 +445,6 @@ pub fn hairline_horiz(color: Color) -> View {
     View::Hairline { color, vertical: false }
 }
 
-pub fn hairline_vert(color: Color) -> View {
-    View::Hairline { color, vertical: true }
-}
-
 /// Wrap `child` in a scrolling viewport keyed by `id`.
 pub fn scroll_view(id: ViewId, child: View) -> View {
     View::ScrollView { child: Box::new(child), id }
@@ -489,11 +466,6 @@ pub fn grid(items: Vec<View>, cols: usize, cell_w: Length, cell_h: Length, gap: 
     View::Grid { items, cols, col_gap: gap, row_gap: gap, cell_w, cell_h }
 }
 
-/// Uniform grid with separate col_gap / row_gap.
-pub fn grid_with_gaps(items: Vec<View>, cols: usize, cell_w: Length, cell_h: Length, col_gap: Length, row_gap: Length) -> View {
-    View::Grid { items, cols, col_gap, row_gap, cell_w, cell_h }
-}
-
 /// Variable-track grid: each column / row track gets its own size
 /// spec (Fixed / Flex / Auto).  Items flow l-to-r, t-to-b across
 /// `tracks_w.len()` columns.
@@ -505,15 +477,6 @@ pub fn variable_grid(
     row_gap: Length,
 ) -> View {
     View::VariableGrid { items, tracks_w, tracks_h, gap: (col_gap, row_gap) }
-}
-
-/// Image built from a `Named` source token.
-pub fn image_named(name: &'static str, tint: Option<Color>) -> View {
-    View::Image(Image {
-        source: ImageSource::Named(name),
-        mode: ContentMode::Fit,
-        tint,
-    })
 }
 
 /// Filled circle.
@@ -720,7 +683,6 @@ impl View {
     pub fn align_cross_start(self) -> Self    { self.align_cross(AlignCross::Start) }
     pub fn align_cross_center(self) -> Self   { self.align_cross(AlignCross::Center) }
     pub fn align_cross_end(self) -> Self      { self.align_cross(AlignCross::End) }
-    pub fn align_cross_stretch(self) -> Self  { self.align_cross(AlignCross::Stretch) }
 
     pub fn align_cross(self, a: AlignCross) -> Self {
         match self {
@@ -749,7 +711,6 @@ impl View {
     pub fn shadow(self, s: Shadow) -> Self { self.add_mod(Modifier::Shadow(s)) }
     pub fn frame(self, f: FrameSpec) -> Self { self.add_mod(Modifier::Frame(f)) }
     pub fn offset(self, x: Length, y: Length) -> Self { self.add_mod(Modifier::Offset(x, y)) }
-    pub fn z_index(self, z: i32) -> Self { self.add_mod(Modifier::ZIndex(z)) }
     pub fn hidden(self, h: bool) -> Self { self.add_mod(Modifier::Hidden(h)) }
     pub fn on_hover(self, id: HoverId) -> Self { self.add_mod(Modifier::OnHover(id)) }
     pub fn on_click(self, id: ActionId) -> Self { self.add_mod(Modifier::OnClick(id)) }
@@ -773,17 +734,8 @@ impl View {
         self.add_mod(Modifier::BackgroundMaterial(m))
     }
 
-    pub fn accessibility_label(self, s: impl Into<String>) -> Self {
-        self.add_mod(Modifier::AccessibilityLabel(s.into()))
-    }
-    pub fn accessibility_role(self, r: AxRole) -> Self {
-        self.add_mod(Modifier::AccessibilityRole(r))
-    }
     pub fn shortcut(self, k: super::types::KeyEquivalent, a: ActionId) -> Self {
         self.add_mod(Modifier::Shortcut(k, a))
-    }
-    pub fn focusable(self, id: super::types::FocusId) -> Self {
-        self.add_mod(Modifier::Focusable(id))
     }
     pub fn auto_focus(self) -> Self { self.add_mod(Modifier::AutoFocus) }
     pub fn on_appear(self, a: ActionId) -> Self { self.add_mod(Modifier::OnAppear(a)) }
@@ -796,9 +748,6 @@ impl View {
     }
     pub fn mask(self, m: View) -> Self {
         self.add_mod(Modifier::Mask(Box::new(m)))
-    }
-    pub fn blend_mode(self, m: super::types::BlendMode) -> Self {
-        self.add_mod(Modifier::BlendMode(m))
     }
 }
 
@@ -818,7 +767,6 @@ impl Text {
         self
     }
     pub fn weight(mut self, w: TextWeight) -> Self { self.weight = w; self }
-    pub fn text_align(mut self, a: TextAlign) -> Self { self.align = a; self }
     pub fn lines(mut self, l: TextLines) -> Self { self.lines = l; self }
 
     /// Switch this run to the SF Pro proportional shape path (Phase

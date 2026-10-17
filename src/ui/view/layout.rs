@@ -114,19 +114,12 @@ pub struct Decoration {
     /// Linear gradient background — baked from `Modifier::Background
     /// Gradient`.  Paint emits as a series of solid bands per stop.
     pub bg_gradient: Option<super::view::LinearGradient>,
-    /// Accessibility label / role — surfaced via `NSAccessibility`
-    /// bridge in v2+;  v1 just preserves the data for inspection /
-    /// future routing.
-    pub ax_label: Option<String>,
-    pub ax_role: Option<super::view::AxRole>,
     /// Keyboard shortcut binding — KeyEquivalent → ActionId.  Host
     /// collects from tree each frame to build a shortcut table.
     pub shortcut: Option<(super::types::KeyEquivalent, super::types::ActionId)>,
-    /// Focus ring membership — view participates in Tab navigation.
-    pub focus_id: Option<super::types::FocusId>,
     /// Initial-focus marker (at most one per tree).
     pub auto_focus: bool,
-    /// Lifecycle hooks — emitted by reconcile() on appear/disappear.
+    /// Lifecycle hooks — nothing dispatches them yet.
     pub on_appear: Option<super::types::ActionId>,
     pub on_disappear: Option<super::types::ActionId>,
     /// Declarative enter / exit anim spec.
@@ -134,8 +127,6 @@ pub struct Decoration {
     /// Transform applied at paint time.  Translate goes through
     /// offset accumulator already;  scale/rotate held for v2+.
     pub transform: Option<super::types::Transform>,
-    /// Blend mode held for paint side (v2+ paint applies it).
-    pub blend_mode: Option<super::types::BlendMode>,
 }
 
 impl Default for Decoration {
@@ -157,16 +148,12 @@ impl Default for Decoration {
             on_drag_begin: None,
             id: None,
             bg_gradient: None,
-            ax_label: None,
-            ax_role: None,
             shortcut: None,
-            focus_id: None,
             auto_focus: false,
             on_appear: None,
             on_disappear: None,
             transition: None,
             transform: None,
-            blend_mode: None,
         }
     }
 }
@@ -1190,7 +1177,6 @@ fn layout_modified<'a>(
             Modifier::OnDragBegin(id) => bake.on_drag_begin = Some(*id),
             Modifier::OnHover(id) => bake.on_hover = Some(*id),
             Modifier::Id(id) => bake.id = Some(*id),
-            Modifier::ZIndex(_) => { /* read at paint, future */ }
             Modifier::BackgroundGradient(g) => {
                 bake.bg_gradient = Some(g.clone());
             }
@@ -1201,17 +1187,8 @@ fn layout_modified<'a>(
                 c.a = 0.85;
                 bake.bg = Some(c);
             }
-            Modifier::AccessibilityLabel(s) => {
-                bake.ax_label = Some(s.clone());
-            }
-            Modifier::AccessibilityRole(r) => {
-                bake.ax_role = Some(*r);
-            }
             Modifier::Shortcut(k, a) => {
                 bake.shortcut = Some((*k, *a));
-            }
-            Modifier::Focusable(id) => {
-                bake.focus_id = Some(*id);
             }
             Modifier::AutoFocus => {
                 bake.auto_focus = true;
@@ -1234,9 +1211,6 @@ fn layout_modified<'a>(
                 offset_phys.0 += tx_phys;
                 offset_phys.1 += ty_phys;
                 bake.transform = Some(*t);
-            }
-            Modifier::BlendMode(m) => {
-                bake.blend_mode = Some(*m);
             }
             Modifier::Mask(_inner) => {
                 // v1: no-op.  Mask shape rendering requires Metal

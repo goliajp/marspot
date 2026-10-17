@@ -277,7 +277,6 @@ struct Marspot {
     /// Cross-thread wake handle, cloned on demand to power
     /// per-session reader threads spawned at runtime (e.g. via the
     /// sidebar [+] button).  Same proxy main passed into `run_app`.
-    #[allow(dead_code)]
     event_proxy: EventProxy,
 }
 

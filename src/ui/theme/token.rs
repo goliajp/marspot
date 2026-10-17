@@ -1,5 +1,5 @@
 //! Semantic tokens v4 — color / space / radius / typography /
-//! terminal palette / motion / border / layer / elevation.
+//! terminal palette / elevation.
 //!
 //! Single source of truth.  Components reference tokens by name
 //! (`color::ACCENT`, `space::MD`, `terminal::ansi::RED`); literal
@@ -329,7 +329,7 @@ pub mod terminal {
 }
 
 // ═════════════════════════════════════════════════════════════
-// Space / Radius / Text / Elev / Motion / Border / Layer
+// Space / Radius / Text / Elev
 // ═════════════════════════════════════════════════════════════
 
 pub mod space {
@@ -351,50 +351,6 @@ pub mod radius {
     pub const PILL: Length = Length::Pt(9999.0);
 }
 
-/// Border-width tokens.  Use with `.border(width, color)` modifier.
-pub mod border {
-    use super::Length;
-    pub const NONE:     Length = Length::Pt(0.0);
-    pub const HAIRLINE: Length = Length::Pt(0.5);
-    pub const THIN:     Length = Length::Pt(1.0);
-    pub const MEDIUM:   Length = Length::Pt(2.0);
-    pub const THICK:    Length = Length::Pt(3.0);
-}
-
-/// Motion / animation duration tokens.  Pair with `AnimCurve` from
-/// `theme::motion::curve`.  Durations in milliseconds.
-pub mod motion {
-    pub const INSTANT:   f64 = 0.0;
-    pub const FAST:      f64 = 120.0;
-    pub const NORMAL:    f64 = 200.0;
-    pub const SLOW:      f64 = 350.0;
-    pub const VERY_SLOW: f64 = 700.0;
-
-    /// Curve preset bag — convenience re-export.
-    pub mod curve {
-        use crate::ui::view::AnimCurve;
-        pub const STANDARD: AnimCurve = AnimCurve::EaseInOut;
-        pub const DECEL:    AnimCurve = AnimCurve::EaseOut;
-        pub const ACCEL:    AnimCurve = AnimCurve::EaseIn;
-        pub const LINEAR:   AnimCurve = AnimCurve::Linear;
-        pub const SPRING:   AnimCurve = AnimCurve::Spring { bounce: 1.0 };
-    }
-}
-
-/// Z-index / paint layer tokens.  Use with `.z_index(layer::POPOVER)`
-/// inside a ZStack to compose overlays at consistent depths.
-pub mod layer {
-    pub const CONTENT: i32 = 0;
-    pub const STATUS:  i32 = 10;
-    pub const STICKY:  i32 = 100;
-    pub const TOOLBAR: i32 = 200;
-    pub const POPOVER: i32 = 1000;
-    pub const MODAL:   i32 = 2000;
-    pub const TOAST:   i32 = 3000;
-    pub const TOOLTIP: i32 = 4000;
-    pub const SYSTEM:  i32 = 9999;
-}
-
 /// Semantic text styles — size + weight + color preset.
 pub mod text {
     use crate::ui::view::{TextSize, TextWeight, TextStyle};
@@ -414,11 +370,6 @@ pub mod text {
         size:   TextSize::Header,
         weight: TextWeight::Bold,
         color:  color::ACCENT_DIM,
-    };
-    pub const LARGE_HEADER: TextStyle = TextStyle {
-        size:   TextSize::LargeHeader,
-        weight: TextWeight::Bold,
-        color:  color::FG,
     };
     pub const HINT: TextStyle = TextStyle {
         size:   TextSize::Caption,
@@ -496,21 +447,10 @@ pub mod themed {
         // ─── Foreground ──────────────────────────────────────
         pub fn fg()           -> Color { pick(p::FG,           p::light::FG,           p::hc::FG) }
         pub fn fg_muted()     -> Color { pick(p::FG_MUTED,     p::light::FG_MUTED,     p::hc::FG_MUTED) }
-        pub fn fg_disabled()  -> Color { pick(p::FG_DISABLED,  p::light::FG_DISABLED,  p::hc::FG_DISABLED) }
-        pub fn fg_inverse()   -> Color { pick(p::FG_INVERSE,   p::light::FG_INVERSE,   p::hc::FG_INVERSE) }
-        pub fn fg_link()      -> Color { pick(p::FG_LINK,      p::light::FG_LINK,      p::hc::FG_LINK) }
 
         // ─── Surfaces ────────────────────────────────────────
         pub fn bg()           -> Color { pick(p::BG,           p::light::BG,           p::hc::BG) }
-        pub fn bg_raised()    -> Color { pick(p::BG_RAISED,    p::light::BG_RAISED,    p::hc::BG_RAISED) }
-        pub fn bg_panel()     -> Color { pick(p::BG_PANEL,     p::light::BG_PANEL,     p::hc::BG_PANEL) }
-        pub fn bg_selected()  -> Color { pick(p::BG_SELECTED,  p::light::BG_SELECTED,  p::hc::BG_SELECTED) }
         pub fn bg_hover()     -> Color { pick(p::BG_HOVER,     p::light::BG_HOVER,     p::hc::BG_HOVER) }
-        pub fn surface_0()    -> Color { pick(p::SURFACE_0,    p::light::SURFACE_0,    p::hc::SURFACE_0) }
-        pub fn surface_1()    -> Color { pick(p::SURFACE_1,    p::light::SURFACE_1,    p::hc::SURFACE_1) }
-        pub fn surface_2()    -> Color { pick(p::SURFACE_2,    p::light::SURFACE_2,    p::hc::SURFACE_2) }
-        pub fn surface_3()    -> Color { pick(p::SURFACE_3,    p::light::SURFACE_3,    p::hc::SURFACE_3) }
-        pub fn surface_4()    -> Color { pick(p::SURFACE_4,    p::light::SURFACE_4,    p::hc::SURFACE_4) }
         pub fn overlay()      -> Color { pick(p::OVERLAY,      p::light::OVERLAY,      p::hc::OVERLAY) }
 
         // ─── Lines ───────────────────────────────────────────
@@ -520,41 +460,10 @@ pub mod themed {
 
         // ─── Accent / severity ───────────────────────────────
         pub fn accent()       -> Color { pick(p::ACCENT,       p::light::ACCENT,       p::hc::ACCENT) }
-        pub fn accent_dim()   -> Color { pick(p::ACCENT_DIM,   p::light::ACCENT_DIM,   p::hc::ACCENT_DIM) }
         pub fn info()         -> Color { pick(p::INFO,         p::light::INFO,         p::hc::INFO) }
         pub fn success()      -> Color { pick(p::SUCCESS,      p::light::SUCCESS,      p::hc::SUCCESS) }
         pub fn warn()         -> Color { pick(p::WARN,         p::light::WARN,         p::hc::WARN) }
         pub fn danger()       -> Color { pick(p::DANGER,       p::light::DANGER,       p::hc::DANGER) }
-        pub fn critical()     -> Color { pick(p::CRITICAL,     p::light::CRITICAL,     p::hc::CRITICAL) }
-
-        // ─── Focus / Disabled ────────────────────────────────
-        pub fn focus_ring()   -> Color { pick(p::FOCUS_RING,   p::light::FOCUS_RING,   p::hc::FOCUS_RING) }
-        pub fn disabled_bg()  -> Color { pick(p::DISABLED_BG,  p::light::DISABLED_BG,  p::hc::DISABLED_BG) }
-        pub fn disabled_fg()  -> Color { pick(p::DISABLED_FG,  p::light::DISABLED_FG,  p::hc::DISABLED_FG) }
-
-        // ─── Tabs ────────────────────────────────────────────
-        pub fn tab_active_bg()    -> Color { pick(p::TAB_ACTIVE_BG,   p::light::TAB_ACTIVE_BG,   p::hc::TAB_ACTIVE_BG) }
-        pub fn tab_active_fg()    -> Color { pick(p::TAB_ACTIVE_FG,   p::light::TAB_ACTIVE_FG,   p::hc::TAB_ACTIVE_FG) }
-        pub fn tab_inactive_bg()  -> Color { pick(p::TAB_INACTIVE_BG, p::light::TAB_INACTIVE_BG, p::hc::TAB_INACTIVE_BG) }
-        pub fn tab_inactive_fg()  -> Color { pick(p::TAB_INACTIVE_FG, p::light::TAB_INACTIVE_FG, p::hc::TAB_INACTIVE_FG) }
-        pub fn tab_hover_bg()     -> Color { pick(p::TAB_HOVER_BG,    p::light::TAB_HOVER_BG,    p::hc::TAB_HOVER_BG) }
-
-        // ─── Sidebar ─────────────────────────────────────────
-        pub fn sidebar_bg()        -> Color { pick(p::SIDEBAR_BG,        p::light::SIDEBAR_BG,        p::hc::SIDEBAR_BG) }
-        pub fn sidebar_fg()        -> Color { pick(p::SIDEBAR_FG,        p::light::SIDEBAR_FG,        p::hc::SIDEBAR_FG) }
-        pub fn sidebar_active_bg() -> Color { pick(p::SIDEBAR_ACTIVE_BG, p::light::SIDEBAR_ACTIVE_BG, p::hc::SIDEBAR_ACTIVE_BG) }
-        pub fn sidebar_active_fg() -> Color { pick(p::SIDEBAR_ACTIVE_FG, p::light::SIDEBAR_ACTIVE_FG, p::hc::SIDEBAR_ACTIVE_FG) }
-
-        // ─── Status bar ──────────────────────────────────────
-        pub fn status_bar_bg()    -> Color { pick(p::STATUS_BAR_BG, p::light::STATUS_BAR_BG, p::hc::STATUS_BAR_BG) }
-        pub fn status_bar_fg()    -> Color { pick(p::STATUS_BAR_FG, p::light::STATUS_BAR_FG, p::hc::STATUS_BAR_FG) }
-
-        // ─── Diff ────────────────────────────────────────────
-        pub fn diff_add_bg()      -> Color { pick(p::DIFF_ADD_BG,    p::light::DIFF_ADD_BG,    p::hc::DIFF_ADD_BG) }
-        pub fn diff_add_fg()      -> Color { pick(p::DIFF_ADD_FG,    p::light::DIFF_ADD_FG,    p::hc::DIFF_ADD_FG) }
-        pub fn diff_remove_bg()   -> Color { pick(p::DIFF_REMOVE_BG, p::light::DIFF_REMOVE_BG, p::hc::DIFF_REMOVE_BG) }
-        pub fn diff_remove_fg()   -> Color { pick(p::DIFF_REMOVE_FG, p::light::DIFF_REMOVE_FG, p::hc::DIFF_REMOVE_FG) }
-        pub fn diff_change_bg()   -> Color { pick(p::DIFF_CHANGE_BG, p::light::DIFF_CHANGE_BG, p::hc::DIFF_CHANGE_BG) }
 
         // ─── Misc ────────────────────────────────────────────
         pub fn shadow()       -> Color { pick(p::SHADOW,       p::light::SHADOW,       p::hc::SHADOW) }
@@ -576,12 +485,7 @@ pub mod themed {
 
         pub fn bg()           -> Color { pick(t::BG,           t::light::BG,           t::hc::BG) }
         pub fn fg()           -> Color { pick(t::FG,           t::light::FG,           t::hc::FG) }
-        pub fn cursor_bg()    -> Color { pick(t::CURSOR_BG,    t::light::CURSOR_BG,    t::hc::CURSOR_BG) }
-        pub fn cursor_fg()    -> Color { pick(t::CURSOR_FG,    t::light::CURSOR_FG,    t::hc::CURSOR_FG) }
-        pub fn selection_bg() -> Color { pick(t::SELECTION_BG, t::light::SELECTION_BG, t::hc::SELECTION_BG) }
-        pub fn selection_fg() -> Color { pick(t::SELECTION_FG, t::light::SELECTION_FG, t::hc::SELECTION_FG) }
         pub fn link()         -> Color { pick(t::LINK,         t::light::LINK,         t::hc::LINK) }
-        pub fn bold_fg()      -> Color { pick(t::BOLD_FG,      t::light::BOLD_FG,      t::hc::BOLD_FG) }
 
         pub mod ansi {
             use crate::ui::core::Color;
@@ -641,7 +545,6 @@ pub mod themed {
                 }
             }
             pub fn r#match()         -> Color { pick(t::search::MATCH,         t::light::search::MATCH,         t::hc::search::MATCH) }
-            pub fn match_current()   -> Color { pick(t::search::MATCH_CURRENT, t::light::search::MATCH_CURRENT, t::hc::search::MATCH_CURRENT) }
         }
     }
 }

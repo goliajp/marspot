@@ -21,45 +21,8 @@
 //! offset_y / content_h / viewport_h).Same shape as `ScrollView`
 //! so the scroll-wheel pipeline routes events identically.
 
-use crate::ui::core::Length;
 use super::scroll::ScrollState;
 use super::types::ViewId;
-use super::view::View;
-
-/// Wrap `items` in a LazyVStack keyed by `id`.  All items lay out
-/// at exactly `item_height`;  uniform-height invariant is the
-/// caller's responsibility.
-pub fn lazy_vstack(id: ViewId, items: Vec<View>, item_height: Length, gap: Length) -> View {
-    View::LazyVStack { id, items, item_height, gap }
-}
-
-/// LazyVStack with extra leading/trailing margin (scrollable padding
-/// at top and bottom of the content).  Useful for sticky-header
-/// patterns or breathing room at scroll-boundaries.
-pub fn lazy_vstack_padded(
-    id: ViewId,
-    items: Vec<View>,
-    item_height: Length,
-    gap: Length,
-    leading_margin: Length,
-    trailing_margin: Length,
-) -> View {
-    use super::types::Edges;
-    let base = View::LazyVStack { id, items, item_height, gap };
-    let lm = leading_margin;
-    let tm = trailing_margin;
-    base.padding(Edges {
-        top: lm,
-        right: Length::Pt(0.0),
-        bottom: tm,
-        left: Length::Pt(0.0),
-    })
-}
-
-/// Horizontal mirror — uniform-width virtualised list.
-pub fn lazy_hstack(id: ViewId, items: Vec<View>, item_width: Length, gap: Length) -> View {
-    View::LazyHStack { id, items, item_width, gap }
-}
 
 /// Compute the visible-item index range for a given scroll offset
 /// + viewport.  Returns `(first, last)` where `first <= last <=

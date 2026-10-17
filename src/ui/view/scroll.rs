@@ -90,8 +90,8 @@ pub fn apply_scroll_delta(id: ViewId, delta_y: f64) -> ScrollState {
     })
 }
 
-/// Forget state for `id` — called by lifecycle reconcile when a
-/// ScrollView no longer exists in the View tree.
+/// Forget state for `id`, for a ScrollView that no longer exists in
+/// the View tree.
 pub fn forget(id: ViewId) {
     SCROLL_STATES.with(|m| { m.borrow_mut().remove(&id); });
 }
