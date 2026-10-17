@@ -236,7 +236,7 @@ pub(crate) fn paint_link_underlines(g: &PaneGeom, o: &mut PaneOut) {
     // pass above, so a link sitting on already-underlined text just
     // paints the link colour over the same row.
     {
-        for link in &g.links {
+        for link in g.links {
             let row_y = inner_y + (link.row as f32) * cell_h;
             let underline_y = row_y + cell_h - (cell_h - ascent) * 0.45;
             let underline_h = (cell_h * 0.06).max(1.0);
