@@ -81,14 +81,15 @@ impl CodexPlugin {
             host.log(LogLevel::Warn, "handoff.profile_gone", &format!("claude profile {n} no longer exists"));
             return;
         };
-        let Some(home) = home_of(pane.codex_pid) else { return };
+        let pid = pane.codex.pid;
+        let Some(home) = home_of(pid) else { return };
         let leaving = handoff::Leaving {
             agent: handoff::Agent::Codex,
-            pid: pane.codex_pid,
+            proc: pane.codex,
             shell_pid: pane.shell_pid,
             home,
-            session_id: argv_thread_id(pane.codex_pid),
-            cwd: pidtree::proc_cwd(pane.codex_pid).map(|c| c.to_string_lossy().into_owned()),
+            session_id: argv_thread_id(pid),
+            cwd: pidtree::proc_cwd(pid).map(|c| c.to_string_lossy().into_owned()),
         };
         host.log(LogLevel::Info, "handoff.start", &format!("pane {sid} codex → claude P{n}: {leaving:?}"));
         let Some(op) = handoff::switch_op(sid, leaving, handoff::Agent::Claude, n, dir) else {
@@ -257,7 +258,8 @@ impl Plugin for CodexPlugin {
                 continue;
             }
             let codex = s.find("codex");
-            let codex_pid = codex.map(|p| p.row.pid);
+            let codex_id = codex.map(|p| p.row.id());
+            let codex_pid = codex_id.map(|id| id.pid);
             let has_codex = codex_pid.is_some();
             // one read per process: its environment does not change
             let codex_env = codex.map(|p| self.env.value(&p.row, "CODEX_HOME"));
@@ -284,11 +286,11 @@ impl Plugin for CodexPlugin {
             };
             let profile = codex_env.and_then(profile_from);
             let text = badge_text(profile, model.as_deref(), effort.as_deref());
-            if let Some(pid) = codex_pid {
+            if let Some(id) = codex_id {
                 self.panes.insert(
                     sid,
                     PaneCodex {
-                        codex_pid: pid,
+                        codex: id,
                         shell_pid: shell,
                         profile,
                     },

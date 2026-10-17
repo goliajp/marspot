@@ -28,6 +28,8 @@ mod binding;
 mod transcript;
 mod profiles;
 mod argv;
+mod records;
+mod wake;
 
 use transcript::{activity_of, has_conversation, parse_session_id, tail_last_message_type};
 #[cfg(test)]
@@ -43,6 +45,7 @@ use idle::*;
 use model::*;
 use statusline::*;
 use worker::*;
+use records::*;
 use refusal::{last_quota_refusal, refused_since};
 
 use std::collections::HashMap;
@@ -236,10 +239,14 @@ pub struct ClaudecodePlugin {
     /// the mapping is what clears badges.  A parked pane would blank
     /// its corner, which is the reclamation announcing itself.
     held: HashMap<u64, FrozenLook>,
-    /// `shelld_session_id → (claude subtree CPU ns, sampled at)` from
-    /// the previous scan, so the idle policy can look at a delta
-    /// rather than an absolute.
-    cpu_samples: HashMap<u64, (u64, SystemTime)>,
+    /// How each reclaim run ended; see `wake`.
+    wake_ends: wake::WakeEnds,
+    /// `shelld_session_id → (the claude sampled, its subtree CPU ns,
+    /// sampled at)` from the previous scan, so the idle policy can look
+    /// at a delta rather than an absolute.  A sample of another process
+    /// is no baseline: a claude that replaced the old one is not idle
+    /// because its counter started low.
+    cpu_samples: HashMap<u64, (pidtree::ProcId, u64, SystemTime)>,
     /// Last logged "why not yet" per candidate pane, so the reason is
     /// logged on change rather than every scan.
     blocked_reason: HashMap<u64, String>,
@@ -443,7 +450,9 @@ struct BindMeta {
     /// explicit and independent of all of that.
     config_dir: Option<String>,
     uuid: String,
-    claude_pid: i32,
+    /// The claude this binding was read off; what any action on the
+    /// pane re-verifies before it signals or types.
+    claude: pidtree::ProcId,
     /// Basename of the claude process's cwd — used as the pane title
     /// so user sees "marspot" instead of "session-3" once cc binds.
     /// Empty when basename couldn't be resolved (e.g. process exited
@@ -509,6 +518,7 @@ impl ClaudecodePlugin {
             dormant: Vec::new(),
             armed: std::collections::HashSet::new(),
             held: HashMap::new(),
+            wake_ends: Default::default(),
             cpu_samples: HashMap::new(),
             blocked_reason: HashMap::new(),
             focused_sid: None,
@@ -698,10 +708,16 @@ impl ClaudecodePlugin {
             let Ok(Some(view)) = host.pane_status(*sid) else {
                 continue; // no machine for this pane yet
             };
-            let Some((cpu_prev, prev_at)) = self.cpu_samples.get(sid).copied() else {
-                // First sample for this pane: record it and decide on
+            let Some(claude) = result.new_meta.get(sid).map(|m| m.claude) else { continue };
+            let Some((cpu_prev, prev_at)) = self
+                .cpu_samples
+                .get(sid)
+                .filter(|(id, ..)| *id == claude)
+                .map(|&(_, c, at)| (c, at))
+            else {
+                // First sample for this process: record it and decide on
                 // the next pass, when there is a delta to look at.
-                self.cpu_samples.insert(*sid, (*cpu_now, *sampled_at));
+                self.cpu_samples.insert(*sid, (claude, *cpu_now, *sampled_at));
                 continue;
             };
             let (work_in_flight, own_timer) =
@@ -754,7 +770,7 @@ impl ClaudecodePlugin {
                 // window: rolling it forward every scan is what made
                 // the delta span 2 s and the gate unreachable.
                 if evidence.since_sample >= CPU_BASELINE_WINDOW {
-                    self.cpu_samples.insert(*sid, (*cpu_now, *sampled_at));
+                    self.cpu_samples.insert(*sid, (claude, *cpu_now, *sampled_at));
                 }
                 continue;
             }
@@ -821,28 +837,17 @@ impl ClaudecodePlugin {
                 }
                 continue;
             }
-            // Re-verify the pid immediately before signalling it.
-            // `last_meta` is up to one scan old, pids are recycled by
-            // the kernel, and the consequence of acting on a stale one
-            // is sending SIGTERM to an unrelated process.  Cheap check,
-            // unbounded downside without it.
-            let still_claude = pidtree::proc_cmdline(meta.claude_pid)
-                .map(|line| {
-                    let first = line.split_whitespace().next().unwrap_or("");
-                    std::path::Path::new(first)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.starts_with("claude") || n == "node")
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false);
-            if !still_claude {
+            // Re-verify immediately before signalling: the same process
+            // the evidence above was gathered on, and still claude.
+            // `new_meta` is up to one observation old and pids are
+            // recycled; acting on a stale one SIGTERMs whatever has it.
+            if !still_claude(meta.claude) {
                 host.log(
                     LogLevel::Warn,
                     "hibernate.pid_no_longer_claude",
                     &format!(
                         "shelld_session={} pid={} is not claude any more; not signalling",
-                        sid, meta.claude_pid
+                        sid, meta.claude.pid
                     ),
                 );
                 self.cpu_samples.remove(sid);
@@ -865,7 +870,7 @@ impl ClaudecodePlugin {
                     evidence.held.as_secs(),
                     evidence.cpu_delta_ns / 1_000_000,
                     evidence.since_sample.as_secs(),
-                    meta.claude_pid,
+                    meta.claude.pid,
                 ),
             );
             // Hold the pane's picture BEFORE anything else happens on
@@ -884,7 +889,7 @@ impl ClaudecodePlugin {
             let Some(op) = reclaim_op(
                 &meta.uuid,
                 meta.config_dir.as_deref(),
-                meta.claude_pid,
+                Some(meta.claude),
                 shell_pid_for(*sid),
                 meta.project_dir.as_deref(),
                 &choice,
@@ -899,6 +904,7 @@ impl ClaudecodePlugin {
                 );
                 continue;
             };
+            let op = op.on_end(self.wake_reporter(*sid));
             // Freeze the chrome at the same instant as the picture:
             // this scan still sees the claude we are about to take
             // down, so it is the last one that knows what the corner
@@ -1064,6 +1070,8 @@ impl ClaudecodePlugin {
         let Some(client) = self.shelld.as_ref().cloned() else {
             return;
         };
+        self.settle_wake_ends(host);
+        self.held.retain(|sid, _| result.sessions_seen.contains(sid));
         let before = self.dormant.len();
         // A pane that reports a binding again has a live claude: it is
         // no longer dormant, whoever woke it.
@@ -1125,7 +1133,7 @@ impl ClaudecodePlugin {
             let Some(op) = reclaim_op(
                 &d.uuid,
                 d.config_dir.as_deref(),
-                0,
+                None,
                 shell_pid_for(d.shelld_sid),
                 d.project_dir.as_deref(),
                 &d.choice,
@@ -1137,6 +1145,7 @@ impl ClaudecodePlugin {
                 );
                 continue;
             };
+            let op = op.on_end(self.wake_reporter(d.shelld_sid));
 
             // Idempotent by design: if this pane is already held (the
             // usual case — L3 outlived the L1 that asked), L3 sees no
@@ -1334,7 +1343,7 @@ impl ClaudecodePlugin {
     /// one field, it is true for every pane on that account at once,
     /// and it is already on this machine.
     fn sweep_unusable_profiles(&mut self, host: &dyn PluginHost, result: &ScanResult) {
-        if self.last_meta.is_empty() {
+        if result.new_meta.is_empty() {
             return;
         }
         if std::env::var_os("HOME").is_none() {
@@ -1349,7 +1358,7 @@ impl ClaudecodePlugin {
         let profiles: Vec<u8> = result.profiles.iter().map(|(n, _)| *n).collect();
         let email = |p: u8| result.profiles.iter().find(|(n, _)| *n == p).and_then(|(_, e)| e.clone());
         let mut rooms = quota::rooms_for(&profiles, &usage.accounts, email);
-        for meta in self.last_meta.values() {
+        for meta in result.new_meta.values() {
             if let Some(r) = meta.refused_at.as_ref().filter(|r| r.logged_out)
                 && self.logged_out.get(&meta.profile_num).is_none_or(|seen| r.at > *seen)
             {
@@ -1382,7 +1391,7 @@ impl ClaudecodePlugin {
         // Forget what was tried for a pane that is out of trouble —
         // but not for one that is merely between bindings.  A cycle
         // kills the CLI and the scan cannot bind the pane again until
-        // the new process exists, so for a tick or two `last_meta` has
+        // the new process exists, so for a tick or two `new_meta` has
         // nothing to say about it.  Dropping the tally there loses the
         // fact that a move is already on its way, and the next pass
         // starts a second one on top of the first (seen on pane 442,
@@ -1391,7 +1400,7 @@ impl ClaudecodePlugin {
             if !result.sessions_seen.contains(sid) {
                 return false;
             }
-            match self.last_meta.get(sid) {
+            match result.new_meta.get(sid) {
                 Some(m) => out_for(sid, m),
                 None => true,
             }
@@ -1399,9 +1408,9 @@ impl ClaudecodePlugin {
         // Bounded with the panes, like everything else here.
         self.moved_at.retain(|sid, _| result.sessions_seen.contains(sid));
         self.unjudged.retain(|sid| result.sessions_seen.contains(sid));
-        let sids: Vec<u64> = self.last_meta.keys().copied().collect();
+        let sids: Vec<u64> = result.new_meta.keys().copied().collect();
         for sid in sids {
-            let Some(meta) = self.last_meta.get(&sid).cloned() else { continue };
+            let Some(meta) = result.new_meta.get(&sid).cloned() else { continue };
             // What the pane is running comes first. A pane whose model
             // and effort cannot both be confirmed takes no part: it is
             // not judged and not moved, and nothing about it is assumed.
@@ -1473,7 +1482,13 @@ impl ClaudecodePlugin {
         // model is a fact about this pane, and the decision is about
         // where it can go next.
         let needs_model = result.new_models.get(&sid).cloned();
-        let decision = quota::next_move(&quota::Situation {
+        // The idle policy's rule too: a process of its own under claude
+        // (unknown counts as one) is work a move would kill.
+        let in_flight = result.new_vetoes.get(&sid).is_none_or(|v| v.0);
+        let decision = if in_flight {
+            quota::Move::Hold("work is in flight here")
+        } else {
+            quota::next_move(&quota::Situation {
             rooms,
             current: meta.profile_num,
             needs_model: needs_model.as_deref(),
@@ -1482,7 +1497,8 @@ impl ClaudecodePlugin {
             last_target: self.stranded.get(&sid).and_then(|s| s.last_target),
             stranded_for: self.stranded.get(&sid).map(|s| s.since.elapsed()),
             since_last_move: self.moved_at.get(&sid).map(|at| at.elapsed()),
-        });
+            })
+        };
         match decision {
             quota::Move::Hold(why) => {
                 let tally = self.stranded.entry(sid).or_default();
@@ -1567,6 +1583,12 @@ impl ClaudecodePlugin {
             );
             return false;
         }
+        // The claude the decision was made on, at the moment of acting.
+        if !still_claude(meta.claude) {
+            let msg = format!("pane {shelld_sid}: pid {} is not that claude any more; not cycling", meta.claude.pid);
+            host.log(LogLevel::Warn, "cycle.pid_no_longer_claude", &msg);
+            return false;
+        }
         // Before the signal, not after it.  This cycle kills first and
         // resumes second, so a resume the CLI was always going to
         // refuse costs the pane its session rather than just failing.
@@ -1589,7 +1611,7 @@ impl ClaudecodePlugin {
                     "pane {shelld_sid}: uuid={} is held by a background session (pid {}) that is \
                      busy; not cycling — stopping it would cut off its work, and \
                      `claude --resume` refuses while it runs",
-                    meta.uuid, h.pid
+                    meta.uuid, h.id.pid
                 ),
             );
             if let Err(e) = host.submit_pty_op(shelld_sid, cycle_blocked_op("⚠ held by bg job")) {
@@ -1608,7 +1630,7 @@ impl ClaudecodePlugin {
                 &format!(
                     "pane {shelld_sid}: uuid={} is held by an idle background session (pid {}); \
                      stopping it so the conversation can resume here under P{next_profile}",
-                    meta.uuid, h.pid
+                    meta.uuid, h.id.pid
                 ),
             );
         }
@@ -1617,8 +1639,8 @@ impl ClaudecodePlugin {
             &meta.uuid,
             meta.has_transcript,
             next_profile,
-            meta.claude_pid,
-            holder.map(|h| h.pid),
+            meta.claude,
+            holder.map(|h| h.id),
             shell_pid_for(shelld_sid),
             meta.project_dir.as_deref(),
             &choice,
@@ -1674,9 +1696,14 @@ impl ClaudecodePlugin {
             host.log(LogLevel::Warn, "handoff.profile_gone", &format!("codex profile {n} no longer exists"));
             return;
         };
+        if !still_claude(meta.claude) {
+            let msg = format!("pane {sid}: pid {} is not that claude any more", meta.claude.pid);
+            host.log(LogLevel::Warn, "handoff.pid_no_longer_claude", &msg);
+            return;
+        }
         let leaving = handoff::Leaving {
             agent: handoff::Agent::Claude,
-            pid: meta.claude_pid,
+            proc: meta.claude,
             shell_pid: shell_pid_for(sid),
             home: config_dir_or_default(meta.config_dir.as_deref()),
             session_id: Some(meta.uuid.clone()),
@@ -1693,130 +1720,6 @@ impl ClaudecodePlugin {
     }
 }
 
-
-/// The claude session that would make a `--resume` of `uuid` fail, if
-/// there is one.
-///
-/// Worth a stat before every cycle because of the order the cycle runs
-/// in: the running claude is taken down *first*, and only then is the
-/// resume line typed.  A resume that was never going to be accepted
-/// therefore does not merely fail — the pane is left at a shell prompt
-/// with the conversation no longer in it, and the way back is `claude
-/// attach <id>` typed by hand.  The user saw a red paragraph and a
-/// screenful of mouse reports instead (2026-09-01, uuid=1bcedee1).
-///
-/// The test mirrors the CLI's own, read out of `claude` 2.1.252: among
-/// the live session records, a holder is one whose `sessionId` matches
-/// and whose `kind` is anything other than `"interactive"` — which is
-/// the case it reports as `Session <id> is running as a background
-/// session`.
-///
-/// Records are one JSON file per pid under `<config-dir>/sessions/`,
-/// named for the pid.  `config_dir` is the profile the *resuming*
-/// claude will run under, because that is the directory it will read;
-/// whether that sees another profile's sessions is the user's business
-/// (mine symlinks them all to one shared dir, which is exactly why the
-/// refusal crossed profiles at all).
-///
-/// Anything unreadable answers "no holder".  The gate is here to stop a
-/// cycle already known to be futile, not to demand proof that one is
-/// safe.
-fn background_session_holder(config_dir: &std::path::Path, uuid: &str) -> Option<BackgroundHolder> {
-    if uuid.is_empty() {
-        return None;
-    }
-    let needle = format!("\"sessionId\":\"{uuid}\"");
-    for e in fs::read_dir(config_dir.join("sessions")).ok()?.flatten() {
-        let path = e.path();
-        if path.extension().and_then(|x| x.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(pid) = path
-            .file_stem()
-            .and_then(|x| x.to_str())
-            .and_then(|x| x.parse::<i32>().ok())
-        else {
-            continue;
-        };
-        let Ok(body) = fs::read_to_string(&path) else {
-            continue;
-        };
-        if !body.contains(&needle) {
-            continue;
-        }
-        // A record with no `kind` is not a holder — the CLI skips
-        // those too rather than guessing what they are.
-        let Some(kind) = json_string_field(&body, "\"kind\":\"") else {
-            continue;
-        };
-        if kind == "interactive" {
-            continue;
-        }
-        // The directory keeps a file per pid that ever ran, so most of
-        // what is in it is dead.  Only a live process holds anything.
-        if unsafe { libc::kill(pid, 0) } != 0 {
-            continue;
-        }
-        let idle = json_string_field(&body, "\"status\":\"").as_deref() == Some("idle");
-        return Some(BackgroundHolder { pid, idle });
-    }
-    None
-}
-
-/// A live background claude holding a session a cycle wants to resume.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BackgroundHolder {
-    pid: i32,
-    /// The CLI's own `status` for it.  Idle means nothing is in flight:
-    /// stopping it loses no work, only the process — the conversation is
-    /// the transcript, and the cycle resumes that in the pane.
-    idle: bool,
-}
-
-/// What the CLI says one live claude process is doing, from
-/// `<config-dir>/sessions/<pid>.json`.
-struct RecordedSession {
-    session_id: String,
-    kind: String,
-}
-
-/// The session a live claude is on, in its own words — `None` when the
-/// process has no record (older CLI builds, or the record not written
-/// yet) or the record does not parse.  A dead pid's record is stale by
-/// definition and not consulted.
-fn recorded_session(config_dir: &std::path::Path, pid: i32) -> Option<RecordedSession> {
-    if unsafe { libc::kill(pid, 0) } != 0 {
-        return None;
-    }
-    let body = fs::read_to_string(config_dir.join("sessions").join(format!("{pid}.json"))).ok()?;
-    let session_id = json_string_field(&body, "\"sessionId\":\"")?;
-    let kind = json_string_field(&body, "\"kind\":\"")?;
-    (!session_id.is_empty()).then_some(RecordedSession { session_id, kind })
-}
-
-/// Every session a live non-interactive claude holds, per the records in
-/// `config_dir` — the uuids no pane can be bound to.
-fn background_held_sessions(config_dir: &std::path::Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(config_dir.join("sessions")) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for e in entries.flatten() {
-        let path = e.path();
-        let Some(pid) = path
-            .file_stem()
-            .and_then(|x| x.to_str())
-            .and_then(|x| x.parse::<i32>().ok())
-        else {
-            continue;
-        };
-        if let Some(rec) = recorded_session(config_dir, pid)
-            && rec.kind != "interactive" {
-                out.push(rec.session_id);
-            }
-    }
-    out
-}
 
 /// `CLAUDE_CONFIG_DIR` as a path, or the CLI's default when unset.
 pub(crate) fn config_dir_or_default(config_dir: Option<&str>) -> PathBuf {
@@ -1883,8 +1786,8 @@ fn profile_cycle_op(
     uuid: &str,
     has_transcript: bool,
     next_profile: u8,
-    claude_pid: i32,
-    background_holder: Option<i32>,
+    claude: pidtree::ProcId,
+    background_holder: Option<pidtree::ProcId>,
     shell_pid: i32,
     // where the session lives, so resuming it does not move it
     project_dir: Option<&str>,
@@ -1969,22 +1872,25 @@ fn profile_cycle_op(
         .step(pty_op::Step::capture_composer(Arc::clone(&held)).disowning(resume_word()))
         .step(pty_op::Step::settle(HOLD_SETTLE).named("hold_settle"))
         .step(
-            pty_op::Step::terminate(claude_pid, libc::SIGTERM)
+            pty_op::Step::terminate(claude, libc::SIGTERM)
                 .escalate_after(Duration::from_secs(3), libc::SIGKILL),
         );
     // The same way the pane's own claude is taken down — a signal, and
     // gone before the resume is typed, because `claude --resume` checks
     // for a live holder the moment it starts.  Its transcript is the
     // conversation; the resume below picks it up.
-    if let Some(pid) = background_holder.filter(|&p| p != claude_pid) {
+    if let Some(id) = background_holder.filter(|h| h.pid != claude.pid) {
         op = op.step(
-            pty_op::Step::terminate(pid, libc::SIGTERM)
+            pty_op::Step::terminate(id, libc::SIGTERM)
                 .escalate_after(Duration::from_secs(3), libc::SIGKILL)
                 .named("stop_background"),
         );
     }
     Some(
-        op.step(pty_op::Step::send(line).named("resume"))
+        // Same guard as the reclaim's: a claude that replaced the one
+        // taken down would get the resume line typed into its prompt.
+        op.step(pty_op::Step::stop_if_process(shell_pid, looks_like_claudecode))
+            .step(pty_op::Step::send(line).named("resume"))
             // Wait for the new claude to draw, exactly as the
             // reclamation does.  The hand-written version settled for a
             // flat 600 ms and unfroze onto whatever was there — fine for
@@ -2546,6 +2452,13 @@ type CcActivity = marspot::pane_state::Activity;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod acting;
+
+    /// A process id for an op that is only inspected, never run.
+    fn fid(pid: i32) -> pidtree::ProcId {
+        pidtree::ProcId { pid, start_us: 0 }
+    }
     use super::transcript::{
         activity_from_last_record, is_bookkeeping_record, record_type, top_level_str,
     };
@@ -2591,8 +2504,8 @@ mod tests {
     /// with that job's CLI `status`, and return the badge the click put
     /// up after ONE tick.
     ///
-    /// One tick only, on purpose: the holder pid is this test process,
-    /// and a cycle that got as far as `stop_background` would signal it.
+    /// One tick only, on purpose: a cycle that got as far as
+    /// `stop_background` would signal the holder.
     /// The first step of every cycle is a timed settle, so a single tick
     /// cannot reach a signal — what it can do is show which op the click
     /// queued, and that is the whole question.
@@ -2606,7 +2519,9 @@ mod tests {
                 .unwrap();
         }
         let uuid = "e1e62fd9-d0bc-493a-865a-56f2de8d7ac3";
-        let me = std::process::id() as i32;
+        // a holder counts only if it is a live claude
+        let mut holder = spawn_fake_claude(&home);
+        let me = holder.id() as i32;
         // The shape claude actually writes, taken off a real `claude
         // --bg` run: `kind` is **"bg"**, not "background".  The test
         // being `!= "interactive"` rather than a list of known kinds
@@ -2631,9 +2546,9 @@ mod tests {
                 home.join(".claude-profile-1").to_string_lossy().into_owned(),
             ),
             uuid: uuid.to_string(),
-            // Never signalled within one tick; a pid that cannot exist
-            // keeps a regression from killing anything real regardless.
-            claude_pid: i32::MAX,
+            // Never signalled within one tick: the cycle re-checks the
+            // claude before acting, so it has to be a live one.
+            claude: live_claude(),
             project_basename: String::new(),
             project_dir: None,
             refused_at: None,
@@ -2663,6 +2578,8 @@ mod tests {
         }
         let badges = rec.0.lock().unwrap().clone();
         fs::remove_dir_all(&home).ok();
+        let _ = holder.kill();
+        let _ = holder.wait();
         assert_eq!(badges.len(), 1, "one badge, for the one click: {badges:?}");
         badges[0].clone()
     }
@@ -2748,7 +2665,7 @@ mod tests {
             profile_num: 1,
             config_dir: Some(home.join(".claude-profile-1").to_string_lossy().into_owned()),
             uuid: uuid.into(),
-            claude_pid: i32::MAX,
+            claude: live_claude(),
             has_transcript: true,
             transcript_at: SystemTime::UNIX_EPOCH,
             project_basename: String::new(),
@@ -2789,23 +2706,23 @@ mod tests {
 
         let mut unknown = scan_of(sid, CcActivity::AwaitingUser);
         unknown.new_models.clear();
-        plugin.sweep_unusable_profiles(&host, &unknown);
+        sweep(&mut plugin, &host, &mut unknown);
         assert!(host.submitted.lock().unwrap().is_empty(), "model not known");
         assert!(plugin.stranded.is_empty(), "not even judged: it takes no part");
 
         fs::write(model_push_dir().join("u-81"), "opus-5-5\n/t/x.jsonl\n\npids=1\nid=claude-opus-5-5\n")
             .unwrap();
-        plugin.sweep_unusable_profiles(&host, &scan_of(sid, CcActivity::AwaitingUser));
+        sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::AwaitingUser));
         assert!(host.submitted.lock().unwrap().is_empty(), "effort not known");
         assert!(plugin.stranded.is_empty(), "not judged either");
 
         let mut other = scan_of(sid, CcActivity::AwaitingUser);
         other.new_models.insert(sid, "fable-5-1".into());
-        plugin.sweep_unusable_profiles(&host, &other);
+        sweep(&mut plugin, &host, &mut other);
         assert!(host.submitted.lock().unwrap().is_empty(), "the record names another model");
 
         fs::remove_file(model_push_dir().join("u-81")).unwrap();
-        plugin.sweep_unusable_profiles(&host, &scan_of(sid, CcActivity::AwaitingUser));
+        sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::AwaitingUser));
         assert!(host.submitted.lock().unwrap().is_empty(), "no record to start the new claude from");
 
         fs::write(
@@ -2813,12 +2730,37 @@ mod tests {
             "opus-5-5\n/t/x.jsonl\nmedium\npids=1\nid=claude-opus-5-5\n",
         )
         .unwrap();
-        plugin.sweep_unusable_profiles(&host, &scan_of(sid, CcActivity::AwaitingUser));
+        sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::AwaitingUser));
         let handed = host.submitted.lock().unwrap().clone();
         assert_eq!(handed.len(), 1, "both reads agree: it moves");
         let sent = host.sent.lock().unwrap().clone();
         assert!(sent[0].1.contains("--model 'claude-opus-5-5'"), "{:?}", sent[0].1);
         let _ = fs::remove_dir_all(&home);
+    }
+
+    /// The sweep on a scan that bound what `plugin.last_meta` holds:
+    /// the sweep reads the scan's bindings, these tests set the plugin's.
+    fn sweep(plugin: &mut ClaudecodePlugin, host: &FakeHost, scan: &mut ScanResult) {
+        for (sid, m) in &plugin.last_meta {
+            scan.new_meta.insert(*sid, m.clone());
+        }
+        plugin.sweep_unusable_profiles(host, scan);
+    }
+
+    /// A live process whose argv[0] is `claude`, for the paths that
+    /// re-check the claude before acting.  One per test process: `cat`
+    /// on a pipe nobody writes, so it ends when this process does.
+    fn live_claude() -> pidtree::ProcId {
+        use std::os::unix::process::CommandExt;
+        static CAT: std::sync::OnceLock<std::process::Child> = std::sync::OnceLock::new();
+        let c = CAT.get_or_init(|| {
+            std::process::Command::new("/bin/cat")
+                .arg0("claude")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        });
+        pidtree::proc_id(c.id() as i32).unwrap()
     }
 
     fn stranded_plugin(meta: BindMeta, sid: u64) -> ClaudecodePlugin {
@@ -2849,7 +2791,7 @@ mod tests {
         result.new_vetoes.insert(79, (false, false));
         result.new_models.insert(79, "opus-5-5".into());
 
-        plugin.sweep_unusable_profiles(&host, &result);
+        sweep(&mut plugin, &host, &mut result);
         assert_eq!(plugin.logged_out.get(&2), Some(&1_000));
         assert!(host.submitted.lock().unwrap().is_empty(), "P1 is spent and P2 cannot log in");
         assert_eq!(plugin.stranded.get(&79).and_then(|s| s.hold_said), Some("every account is out"));
@@ -2878,9 +2820,9 @@ mod tests {
         let mut plugin = stranded_plugin(pane_on_p1(&home, "u-80"), sid);
         let said = |p: &ClaudecodePlugin| p.stranded.get(&sid).and_then(|s| s.hold_said);
 
-        plugin.sweep_unusable_profiles(&host, &scan_of(sid, CcActivity::ToolPending { executing: true }));
+        sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::ToolPending { executing: true }));
         assert_eq!(said(&plugin), Some("a tool is running here"));
-        plugin.sweep_unusable_profiles(&host, &scan_of(sid, CcActivity::AwaitingUser));
+        sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::AwaitingUser));
         assert_eq!(said(&plugin), Some("every account is out"));
         assert!(host.submitted.lock().unwrap().is_empty());
         let _ = fs::remove_dir_all(&home);
@@ -2902,8 +2844,8 @@ mod tests {
         // Waiting for its person as far as the transcript can tell —
         // which is also what a turn the account just killed looks
         // like, so it is spoken to all the same.
-        let result = scan_of(sid, CcActivity::AwaitingUser);
-        plugin.sweep_unusable_profiles(&host, &result);
+        let mut result = scan_of(sid, CcActivity::AwaitingUser);
+        sweep(&mut plugin, &host, &mut result);
 
         let handed = host.submitted.lock().unwrap().clone();
         assert_eq!(handed.len(), 1, "one switch for one stranded pane: {handed:?}");
@@ -2922,16 +2864,16 @@ mod tests {
         // The next pass comes round before the resume has finished, so
         // the pane still reads as being on P1.  It is not moved a
         // second time on top of the first.
-        plugin.sweep_unusable_profiles(&host, &result);
+        sweep(&mut plugin, &host, &mut result);
         assert_eq!(host.submitted.lock().unwrap().len(), 1, "one move per stranding");
 
         // And not even when the pane is briefly unbound in between —
         // which is what the cycle itself causes, and where the tally
         // used to be thrown away (pane 442, 2026-09-29).
         plugin.last_meta.remove(&sid);
-        plugin.sweep_unusable_profiles(&host, &result);
+        sweep(&mut plugin, &host, &mut result);
         plugin.last_meta.insert(sid, pane_on_p1(&home, "u-77"));
-        plugin.sweep_unusable_profiles(&host, &result);
+        sweep(&mut plugin, &host, &mut result);
         assert_eq!(
             host.submitted.lock().unwrap().len(),
             1,
@@ -2951,8 +2893,8 @@ mod tests {
         let sid = 78u64;
         let mut plugin = stranded_plugin(pane_on_p1(&home, "u-78"), sid);
         // A turn was being produced when the account stopped answering.
-        let result = scan_of(sid, CcActivity::Working);
-        plugin.sweep_unusable_profiles(&host, &result);
+        let mut result = scan_of(sid, CcActivity::Working);
+        sweep(&mut plugin, &host, &mut result);
 
         let handed = host.submitted.lock().unwrap().clone();
         assert_eq!(handed.len(), 1);
@@ -2974,16 +2916,15 @@ mod tests {
         let _home = HomeOverride::set(&home);
         let host = FakeHost::new(home.join("state"));
         let sid = 80u64;
-        let on = |profile: u8, pid: i32| {
+        let on = |profile: u8| {
             let mut m = pane_on_p1(&home, "u-80");
             m.profile_num = profile;
             m.config_dir =
                 Some(home.join(format!(".claude-profile-{profile}")).to_string_lossy().into_owned());
-            m.claude_pid = pid;
             m
         };
-        let mut plugin = stranded_plugin(on(2, 100), sid);
-        let result = scan_of(sid, CcActivity::AwaitingUser);
+        let mut plugin = stranded_plugin(on(2), sid);
+        let mut result = scan_of(sid, CcActivity::AwaitingUser);
         let switches = |host: &FakeHost| {
             host.submitted.lock().unwrap().iter().filter(|(_, steps)| steps.contains(&"resume")).count()
         };
@@ -3002,14 +2943,14 @@ mod tests {
         );
 
         // Landed on P1, which has no room for it: it moves on, to P2.
-        plugin.last_meta.insert(sid, on(1, 200));
-        plugin.sweep_unusable_profiles(&host, &result);
+        plugin.last_meta.insert(sid, on(1));
+        sweep(&mut plugin, &host, &mut result);
         assert_eq!(switches(&host), 2, "unusable is unusable, however it got there");
 
         // On P2, which has room, nothing happens however often it looks.
-        plugin.last_meta.insert(sid, on(2, 300));
-        plugin.sweep_unusable_profiles(&host, &result);
-        plugin.sweep_unusable_profiles(&host, &result);
+        plugin.last_meta.insert(sid, on(2));
+        sweep(&mut plugin, &host, &mut result);
+        sweep(&mut plugin, &host, &mut result);
         assert_eq!(switches(&host), 2, "usable: left alone");
         let _ = fs::remove_dir_all(&home);
     }
@@ -3026,8 +2967,8 @@ mod tests {
         let host = FakeHost::new(home.join("state"));
         let sid = 79u64;
         let mut plugin = stranded_plugin(pane_on_p1(&home, ""), sid);
-        let result = scan_of(sid, CcActivity::Working);
-        plugin.sweep_unusable_profiles(&host, &result);
+        let mut result = scan_of(sid, CcActivity::Working);
+        sweep(&mut plugin, &host, &mut result);
         assert!(host.submitted.lock().unwrap().is_empty(), "nothing to hand over");
         assert_eq!(
             plugin.stranded.get(&sid).map_or(0, |s| s.moves),
@@ -3037,7 +2978,7 @@ mod tests {
 
         // Once the scan learns the session's name, the move happens.
         plugin.last_meta.insert(sid, pane_on_p1(&home, "u-79"));
-        plugin.sweep_unusable_profiles(&host, &result);
+        sweep(&mut plugin, &host, &mut result);
         assert_eq!(host.submitted.lock().unwrap().len(), 1);
         let _ = fs::remove_dir_all(&home);
     }
@@ -3109,10 +3050,10 @@ mod tests {
                 home.join(".claude-profile-1").to_string_lossy().into_owned(),
             ),
             uuid: uuid.to_string(),
-            // The cycle's first step is a settle, so nothing is
-            // signalled during this test; a pid that cannot exist
-            // keeps it that way even if that changes.
-            claude_pid: i32::MAX,
+            // The cycle's first steps do not signal, so nothing is
+            // signalled during this test; the claude has to be live
+            // because the cycle re-checks it before acting.
+            claude: live_claude(),
             project_basename: String::new(),
             project_dir: None,
             refused_at: None,
@@ -3150,114 +3091,25 @@ mod tests {
         fs::remove_dir_all(&home).ok();
     }
 
-    /// A `<config-dir>/sessions/` holding one record per `(pid, kind)`,
-    /// all naming `uuid`.  Records are written the way claude writes
-    /// them: one JSON object per file, named for the pid.
-    fn tmp_config_with_sessions(uuid: &str, records: &[(i32, &str)]) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "cc-bg-session-test-{}-{}",
-            std::process::id(),
-            n
-        ));
-        let sessions = dir.join("sessions");
-        fs::create_dir_all(&sessions).unwrap();
-        for (pid, kind) in records {
-            let body = format!(
-                r#"{{"pid":{pid},"sessionId":"{uuid}","cwd":"/tmp","kind":"{kind}","status":"idle"}}"#
-            );
-            fs::write(sessions.join(format!("{pid}.json")), body).unwrap();
-        }
-        dir
-    }
-
-    /// The case the gate exists for: a live record for this uuid whose
-    /// kind is not `interactive`.  `claude --resume` refuses this one,
-    /// so the cycle must not take the running claude down for it.
-    #[test]
-    fn background_holder_found_for_live_non_interactive_record() {
-        let uuid = "1bcedee1-2228-4e82-a9c2-632aac03bd2d";
-        let me = std::process::id() as i32;
-        let dir = tmp_config_with_sessions(uuid, &[(me, "background")]);
-        assert_eq!(
-            background_session_holder(&dir, uuid),
-            Some(BackgroundHolder { pid: me, idle: true })
-        );
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    /// A busy background job is a holder too, but a different one: the
-    /// cycle stops an idle job and refuses a busy one, so the status has
-    /// to come through.
-    #[test]
-    fn a_busy_background_holder_says_so() {
-        let uuid = "fb55e303-d796-4e20-80cf-d4be31c91a7a";
-        let me = std::process::id() as i32;
-        let dir = tmp_config_with_sessions(uuid, &[(me, "bg")]);
-        let f = dir.join("sessions").join(format!("{me}.json"));
-        let body = fs::read_to_string(&f).unwrap().replace("\"idle\"", "\"busy\"");
-        fs::write(&f, body).unwrap();
-        assert_eq!(
-            background_session_holder(&dir, uuid),
-            Some(BackgroundHolder { pid: me, idle: false })
-        );
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The CLI's record for a pid is the session that process is on now,
-    /// and it is what a pane binds to.  Only a live pid's record counts.
-    #[test]
-    fn a_live_claudes_record_names_its_session() {
-        let uuid = "bcdc11f1-d813-4337-b30b-30a637e43238";
-        let me = std::process::id() as i32;
-        let dir = tmp_config_with_sessions(uuid, &[(me, "interactive")]);
-        let rec = recorded_session(&dir, me).expect("own record");
-        assert_eq!(rec.session_id, uuid);
-        assert_eq!(rec.kind, "interactive");
-        // No file for this pid (and it is not alive either).
-        assert!(recorded_session(&dir, i32::MAX).is_none());
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Sessions background jobs hold are excluded from the binding
-    /// guesses; interactive ones are not.  2026-09-17: panes 390 and 391
-    /// were bound to sessions two background jobs owned, and every
-    /// profile switch was refused.
-    #[test]
-    fn only_background_jobs_sessions_are_held() {
-        let me = std::process::id() as i32;
-        let dir = tmp_config_with_sessions("52e33087-2410-4f10-91f1-6d3182120ed6", &[(me, "bg")]);
-        assert_eq!(
-            background_held_sessions(&dir),
-            vec!["52e33087-2410-4f10-91f1-6d3182120ed6".to_string()]
-        );
-        fs::remove_dir_all(&dir).ok();
-        let dir = tmp_config_with_sessions("bcdc11f1-d813-4337-b30b-30a637e43238", &[(me, "interactive")]);
-        assert!(background_held_sessions(&dir).is_empty());
-        fs::remove_dir_all(&dir).ok();
-    }
-
     /// With an idle background job holding the session, the cycle stops
     /// that job after the pane's claude and before the resume is typed —
     /// `claude --resume` checks for a live holder the moment it starts.
     #[test]
     fn a_cycle_through_a_background_hold_stops_it_before_resuming() {
-        let op = profile_cycle_op(true, "u-1", true, 4, 4242, Some(5151), 4200, None, &CliChoice::default()).expect("cycle");
+        let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), Some(fid(5151)), 4200, None, &CliChoice::default()).expect("cycle");
         let labels: Vec<&str> = op.steps.iter().map(|s| s.label).collect();
         let stop = labels.iter().position(|l| *l == "stop_background").expect("stop step present");
         let resume = labels.iter().position(|l| *l == "resume").expect("resume step present");
         assert!(stop < resume, "{labels:?}");
         assert!(matches!(
             op.steps[stop].kind,
-            pty_op::StepKind::Terminate { pid: 5151, .. }
+            pty_op::StepKind::Terminate { target: pidtree::ProcId { pid: 5151, .. }, .. }
         ));
         // No holder: no extra step.
-        let op = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200, None, &CliChoice::default()).unwrap();
+        let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).unwrap();
         assert!(!op.steps.iter().any(|s| s.label == "stop_background"));
         // A holder that is the pane's own claude is not stopped twice.
-        let op = profile_cycle_op(true, "u-1", true, 4, 4242, Some(4242), 4200, None, &CliChoice::default()).unwrap();
+        let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), Some(fid(4242)), 4200, None, &CliChoice::default()).unwrap();
         assert!(!op.steps.iter().any(|s| s.label == "stop_background"));
     }
 
@@ -3278,7 +3130,7 @@ mod tests {
     /// no second path: nothing in the run types the sentence.
     #[test]
     fn a_cycle_says_continue_on_the_command_line() {
-        let op = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200, None, &CliChoice::default()).expect("cycle");
+        let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).expect("cycle");
         let labels: Vec<&str> = op.steps.iter().map(|s| s.label).collect();
         let resume = labels.iter().position(|l| *l == "resume").expect("resume");
         let line = match &op.steps[resume].kind {
@@ -3326,7 +3178,7 @@ mod tests {
             model: Some("claude-fable-5-1[1m]".into()),
             effort: Some("medium".into()),
         };
-        let op = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200, None, &choice).expect("cycle");
+        let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, None, &choice).expect("cycle");
         let line = op
             .steps
             .iter()
@@ -3340,7 +3192,7 @@ mod tests {
         assert!(line.contains("--model 'claude-fable-5-1[1m]'"), "quoted, or the shell globs it: {line}");
         assert!(line.contains("--effort medium"), "{line}");
 
-        let plain = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200, None, &CliChoice::default())
+        let plain = profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default())
             .expect("cycle");
         let sent: String = plain
             .steps
@@ -3412,7 +3264,7 @@ mod tests {
     /// the person sent by hand: median 7.6 ms, up to 25.9 ms, measured.
     #[test]
     fn a_resumed_pane_gets_no_hook_on_the_persons_keystrokes() {
-        let op = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200, None, &CliChoice::default()).expect("cycle");
+        let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).expect("cycle");
         let line = match &op.steps.iter().find(|s| s.label == "resume").unwrap().kind {
             pty_op::StepKind::Send(b) => String::from_utf8_lossy(b).into_owned(),
             _ => unreachable!(),
@@ -3443,7 +3295,7 @@ mod tests {
             "u-1",
             true,
             4,
-            4242,
+            fid(4242),
             None,
             4200,
             Some("/Users/x/workspace/goliajp/torajs"),
@@ -3484,7 +3336,7 @@ mod tests {
         // Without one, the line is what it has always been: run where
         // the shell stands. Not knowing where a session lives is not a
         // reason to refuse to move it off a spent account.
-        let plain = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200, None, &CliChoice::default()).expect("cycle");
+        let plain = profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).expect("cycle");
         let line = match &plain.steps.iter().find(|s| s.label == "resume").unwrap().kind {
             pty_op::StepKind::Send(b) => String::from_utf8_lossy(b).into_owned(),
             _ => unreachable!(),
@@ -3498,7 +3350,7 @@ mod tests {
     #[test]
     fn a_directory_that_cannot_be_quoted_is_not_guessed_at() {
         assert!(
-            !profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200, Some("/tmp/it's here"), &CliChoice::default())
+            !profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, Some("/tmp/it's here"), &CliChoice::default())
                 .map(|op| op.steps.iter().any(|s| s.label == "resume"))
                 .unwrap_or(false),
             "a path with a quote in it produces no resume line at all"
@@ -3516,7 +3368,7 @@ mod tests {
     /// went black for as long as the new process took to draw.
     #[test]
     fn a_cycle_outlasts_the_first_frame_of_the_new_claude() {
-        let op = profile_cycle_op(true, "u-1", true, 4, 4242, None, 4200, None, &CliChoice::default()).expect("cycle");
+        let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).expect("cycle");
         let labels: Vec<&str> = op.steps.iter().map(|s| s.label).collect();
         let at = |n: &str| labels.iter().position(|l| *l == n);
         let ready = at("await_tui_ready").expect("the terminal is asked first");
@@ -3537,59 +3389,6 @@ mod tests {
         assert!(
             op.steps[ready].proceed_on_timeout,
             "asking the terminal stays a deadline, not a precondition: {labels:?}"
-        );
-    }
-
-    /// The ordinary case — a pane running claude in the foreground has
-    /// a record of its own, and cycling it is the whole feature.
-    #[test]
-    fn interactive_record_is_not_a_holder() {
-        let uuid = "1bcedee1-2228-4e82-a9c2-632aac03bd2d";
-        let me = std::process::id() as i32;
-        let dir = tmp_config_with_sessions(uuid, &[(me, "interactive")]);
-        assert_eq!(background_session_holder(&dir, uuid), None);
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The directory keeps a file for every pid that ever ran, so the
-    /// common shape is a background record whose process is long gone.
-    /// Blocking on those would make the cycle unusable after the first
-    /// background job the project ever ran.
-    #[test]
-    fn dead_background_record_is_not_a_holder() {
-        let uuid = "1bcedee1-2228-4e82-a9c2-632aac03bd2d";
-        // Reserved by POSIX for the swapper / kernel; a `kill(0, ...)`
-        // would signal our own process group, which is why the code
-        // never passes it — and 2^31-1 is never a live pid here.
-        let dead = i32::MAX;
-        let dir = tmp_config_with_sessions(uuid, &[(dead, "background")]);
-        assert_eq!(background_session_holder(&dir, uuid), None);
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Another conversation's background job says nothing about this
-    /// one — the match is on sessionId, not on "any background job in
-    /// this profile".
-    #[test]
-    fn other_uuid_background_record_is_not_a_holder() {
-        let mine = "1bcedee1-2228-4e82-a9c2-632aac03bd2d";
-        let theirs = "dc928502-4c1c-4cdc-a1b8-ab993d342c64";
-        let me = std::process::id() as i32;
-        let dir = tmp_config_with_sessions(theirs, &[(me, "background")]);
-        assert_eq!(background_session_holder(&dir, mine), None);
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    /// A profile that has never run claude has no `sessions/` at all,
-    /// and an unreadable directory must not stand in for "blocked" —
-    /// the gate stops futile cycles, it does not gate on proof.
-    #[test]
-    fn missing_sessions_dir_is_not_a_holder() {
-        let dir = std::env::temp_dir().join("cc-bg-session-test-nonexistent");
-        fs::remove_dir_all(&dir).ok();
-        assert_eq!(
-            background_session_holder(&dir, "1bcedee1-2228-4e82-a9c2-632aac03bd2d"),
-            None
         );
     }
 
@@ -4894,7 +4693,7 @@ mod tests {
             scan = worker.scan_once(&observe());
             scan.new_meta.contains_key(&1)
         });
-        let claude_pid = scan.new_meta[&1].claude_pid;
+        let claude_pid = scan.new_meta[&1].claude.pid;
         assert_eq!(
             scan.new_activity.get(&1),
             Some(&marspot::pane_state::Activity::AwaitingUser),
@@ -5055,7 +4854,7 @@ mod tests {
         // it at the park step — which is exactly what a re-arm after an
         // L1 restart does — and drive the wake directly.
         let client = Arc::new(ShelldClient::new(Some(inject.clone())));
-        let op = reclaim_op(uuid, Some(&profile_dir.to_string_lossy()), 0, shell_pid, None, &CliChoice::default())
+        let op = reclaim_op(uuid, Some(&profile_dir.to_string_lossy()), None, shell_pid, None, &CliChoice::default())
             .expect("a quotable profile builds a script");
         // By name, exactly as the re-arm does -- a test that hard-codes
         // the position is a test that stops asking the question when a
@@ -5186,7 +4985,7 @@ mod tests {
     /// is how long, and that it comes after the process check.
     #[test]
     fn the_wake_waits_for_the_repaint_after_the_process_appears() {
-        let op = reclaim_op("u", None, 1, 2, None, &CliChoice::default()).expect("script builds");
+        let op = reclaim_op("u", None, Some(fid(1)), 2, None, &CliChoice::default()).expect("script builds");
         let kinds: Vec<&pty_op::StepKind> = op.steps.iter().map(|s| &s.kind).collect();
         let process_at = kinds
             .iter()
@@ -5398,7 +5197,7 @@ mod tests {
                 profile_num: 2,
                 config_dir: Some("/Users/x/.claude-profile-2".into()),
                 uuid: uuid.to_string(),
-                claude_pid,
+                claude: pidtree::proc_id(claude_pid).unwrap_or(fid(claude_pid)),
                 project_basename: "proj".into(),
             project_dir: None,
             refused_at: None,
@@ -5436,17 +5235,17 @@ mod tests {
     #[test]
     fn a_pane_with_no_session_file_yet_is_badged_but_never_reclaimed() {
         assert!(
-            reclaim_op("", Some("/Users/x/.claude-profile-2"), 4242, 4200, None, &CliChoice::default()).is_none(),
+            reclaim_op("", Some("/Users/x/.claude-profile-2"), Some(fid(4242)), 4200, None, &CliChoice::default()).is_none(),
             "no uuid ⇒ no resume line ⇒ claude must not be taken down"
         );
         assert!(
-            profile_cycle_op(true, "", false, 3, 4242, None, 4200, None, &CliChoice::default()).is_none(),
+            profile_cycle_op(true, "", false, 3, fid(4242), None, 4200, None, &CliChoice::default()).is_none(),
             "…and the badge-click cycle refuses for the same reason"
         );
         // The same call with a uuid is the normal path, so the guard
         // above is the only thing being tested here.
-        assert!(reclaim_op("u-1", None, 4242, 4200, None, &CliChoice::default()).is_some());
-        assert!(profile_cycle_op(true, "u-1", true, 3, 4242, None, 4200, None, &CliChoice::default()).is_some());
+        assert!(reclaim_op("u-1", None, Some(fid(4242)), 4200, None, &CliChoice::default()).is_some());
+        assert!(profile_cycle_op(true, "u-1", true, 3, fid(4242), None, 4200, None, &CliChoice::default()).is_some());
     }
 
     /// The record the hook leaves is found by the pid of the claude
@@ -5533,7 +5332,7 @@ mod tests {
     /// answered something.
     #[test]
     fn a_session_with_no_turn_yet_cycles_by_starting_fresh() {
-        let op = profile_cycle_op(true, "u-1", false, 3, 4242, None, 4200, None, &CliChoice::default())
+        let op = profile_cycle_op(true, "u-1", false, 3, fid(4242), None, 4200, None, &CliChoice::default())
             .expect("a named session with no transcript can still cycle");
         let sent = sent_text(&op);
         assert!(
@@ -5547,7 +5346,7 @@ mod tests {
 
         // The counter-case: once the transcript exists, the session
         // travels with the switch.
-        let op = profile_cycle_op(true, "u-1", true, 3, 4242, None, 4200, None, &CliChoice::default()).expect("normal path");
+        let op = profile_cycle_op(true, "u-1", true, 3, fid(4242), None, 4200, None, &CliChoice::default()).expect("normal path");
         let sent = sent_text(&op);
         assert!(sent.contains("--resume"), "{sent:?}");
         assert!(sent.contains("u-1"), "{sent:?}");
@@ -5814,14 +5613,14 @@ mod tests {
         let mut scan = recent(scan_with(7, std::process::id() as i32, "u"));
         scan.new_cpu.insert(7, (1_000, t0));
         plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
-        assert_eq!(plugin.cpu_samples.get(&7).map(|(c, _)| *c), Some(1_000));
+        assert_eq!(plugin.cpu_samples.get(&7).map(|(_, c, _)| *c), Some(1_000));
 
         // A scan two seconds later must NOT move the baseline.
         let mut scan = recent(scan_with(7, std::process::id() as i32, "u"));
         scan.new_cpu.insert(7, (2_000, t0 + Duration::from_secs(2)));
         plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
         assert_eq!(
-            plugin.cpu_samples.get(&7).map(|(c, _)| *c),
+            plugin.cpu_samples.get(&7).map(|(_, c, _)| *c),
             Some(1_000),
             "a 2s-old baseline must be kept, or the delta measures nothing"
         );
@@ -5831,7 +5630,7 @@ mod tests {
         scan.new_cpu.insert(7, (3_000, t0 + CPU_BASELINE_WINDOW + Duration::from_secs(1)));
         plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
         assert_eq!(
-            plugin.cpu_samples.get(&7).map(|(c, _)| *c),
+            plugin.cpu_samples.get(&7).map(|(_, c, _)| *c),
             Some(3_000),
             "past the window the baseline should move"
         );
@@ -6415,7 +6214,7 @@ mod tests {
     #[test]
     fn the_reclamation_resumes_under_the_profile_it_was_running() {
         let line = |dir: Option<&str>| -> String {
-            let op = reclaim_op("abc-123", dir, 1, 2, None, &CliChoice::default()).expect("script builds");
+            let op = reclaim_op("abc-123", dir, Some(fid(1)), 2, None, &CliChoice::default()).expect("script builds");
             let bytes = op
                 .steps
                 .iter()
@@ -6463,11 +6262,11 @@ mod tests {
             "",
         ] {
             assert!(
-                reclaim_op("u", Some(bad), 1, 2, None, &CliChoice::default()).is_none(),
+                reclaim_op("u", Some(bad), Some(fid(1)), 2, None, &CliChoice::default()).is_none(),
                 "{bad:?} should stop the reclamation"
             );
         }
-        assert!(reclaim_op("u", Some("/home/u/.claude-profile-1"), 1, 2, None, &CliChoice::default()).is_some());
+        assert!(reclaim_op("u", Some("/home/u/.claude-profile-1"), Some(fid(1)), 2, None, &CliChoice::default()).is_some());
     }
 
     /// A session whose profile could not be read must not be
@@ -6562,7 +6361,7 @@ mod tests {
     #[test]
     fn a_reclaimed_pane_wakes_on_the_model_it_was_on() {
         let choice = CliChoice { model: Some("claude-fable-5-1[1m]".into()), effort: Some("high".into()) };
-        let op = reclaim_op("u-1", None, 4242, 4200, None, &choice).expect("script");
+        let op = reclaim_op("u-1", None, Some(fid(4242)), 4200, None, &choice).expect("script");
         let line = op
             .steps
             .iter()
