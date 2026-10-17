@@ -54,7 +54,7 @@ teardown; sleep 0.5
 
 echo "==> launching shell→core→L3 (sandbox)"
 : > "$RUN_LOG"
-MARSPOT_L3=1 nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
 
 # Wait for the full 9-L3 tree.
 i=0

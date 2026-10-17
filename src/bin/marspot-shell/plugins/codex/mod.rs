@@ -108,7 +108,6 @@ impl Plugin for CodexPlugin {
     fn metadata(&self) -> PluginMetadata {
         PluginMetadata {
             name: "codex",
-            version: "0.1.0",
             api_version: PLUGIN_API_VERSION,
             // Matches claudecode's cadence.  The badge only moves when
             // the user changes model or effort, so anything faster

@@ -1,6 +1,6 @@
 //! RFC-003 step 2f — end-to-end UDS demo client.
 //!
-//! Spawns a `marspot-session` with `MARSPOT_L3_OWNS_PTY=1`, waits for
+//! Spawns a `marspot-session`, waits for
 //! the registry entry, connects to its UDS, performs the Hello
 //! handshake, sends a GridResize, and confirms the GridReady poke
 //! comes back. Exercises every wire we touched in Phase 2 (a–e) in
@@ -58,7 +58,6 @@ fn main() {
 
     let child = Command::new(&bin)
         .env("MARSPOT_STATE_DIR", &sandbox)
-        .env("MARSPOT_L3_OWNS_PTY", "1")
         .env("MARSPOT_SESSION_ID", session_id.to_string())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

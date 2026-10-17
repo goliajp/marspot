@@ -59,21 +59,6 @@ mod badge_publish_tests {
     }
 
     impl PluginHost for FakeHost {
-        fn pane_count(&self) -> usize {
-            0
-        }
-        fn pane_pty_device(&self, _p: usize) -> Result<Option<PathBuf>, PluginError> {
-            Ok(None)
-        }
-        fn pane_pty_pid_tree(
-            &self,
-            _p: usize,
-        ) -> Result<Vec<crate::plugins::PtyChild>, PluginError> {
-            Ok(Vec::new())
-        }
-        fn pane_focused(&self) -> Option<usize> {
-            None
-        }
         fn state_dir(&self) -> Result<PathBuf, PluginError> {
             Ok(std::env::temp_dir())
         }
@@ -116,21 +101,6 @@ mod badge_publish_tests {
     fn a_refused_send_is_not_cached() {
         struct Refusing;
         impl PluginHost for Refusing {
-            fn pane_count(&self) -> usize {
-                0
-            }
-            fn pane_pty_device(&self, _p: usize) -> Result<Option<PathBuf>, PluginError> {
-                Ok(None)
-            }
-            fn pane_pty_pid_tree(
-                &self,
-                _p: usize,
-            ) -> Result<Vec<crate::plugins::PtyChild>, PluginError> {
-                Ok(Vec::new())
-            }
-            fn pane_focused(&self) -> Option<usize> {
-                None
-            }
             fn state_dir(&self) -> Result<PathBuf, PluginError> {
                 Ok(std::env::temp_dir())
             }

@@ -1,20 +1,5 @@
 //! marspot plugin system — see RFC-001.
 //!
-//! ## Why module-wide `#[allow(dead_code)]`
-//!
-//! This module is the RFC-001 protocol surface.  Most items
-//! (`Capabilities` bit constants, `PluginMetadata.version`, `PtyChild`
-//! fields, `EndReason::{Timeout, PaneClosed}`, `LogLevel::Error`,
-//! `on_pty_bytes` default trait method, `PaneSessionHost`'s
-//! `pane_count` / `pane_pty_device` / `pane_pty_pid_tree` /
-//! `pane_focused`) aren't reached by the in-tree plugins (claudecode +
-//! pidtree) today but are part of the public ABI a future plugin may
-//! rely on.  Deleting them would be a silent protocol break; warning
-//! on each is noise.  Suppress at the module level so the surface
-//! stays loud-by-RFC and silent-by-compiler.
-#![allow(dead_code)]
-
-//!
 //! ## Design
 //!
 //! - Plugins run **in the L1 shell process**.  GUI / status / notify
@@ -103,7 +88,6 @@ const BUDGET_OVERSHOOT_LIMIT: u32 = 3;
 #[derive(Clone, Debug)]
 pub struct PluginMetadata {
     pub name: &'static str,
-    pub version: &'static str,
     pub api_version: u32,
     /// Desired tick interval.  `0` means "no tick".  Host caps it at
     /// 100 ms minimum to keep idle CPU bounded; plugins wanting faster
@@ -145,25 +129,11 @@ pub struct PaneStatusView {
     pub quiescent: bool,
 }
 
-/// One PTY child observed by `pane_pty_pid_tree`.
-#[derive(Clone, Debug)]
-pub struct PtyChild {
-    pub pid: u32,
-    pub ppid: u32,
-    pub cmdline: String,
-    pub cwd: Option<PathBuf>,
-}
-
 /// Host → Plugin API.  All methods are `&self` so plugins can hold
 /// the host in async contexts / pass to threads without lifetime
 /// gymnastics; the underlying state uses interior mutability where
 /// needed.
 pub trait PluginHost: Send + Sync {
-    // ── Info(READ_PANE_INFO / READ_PTY_TREE) ──────────────────────
-    fn pane_count(&self) -> usize;
-    fn pane_pty_device(&self, pane: usize) -> Result<Option<PathBuf>, PluginError>;
-    fn pane_pty_pid_tree(&self, pane: usize) -> Result<Vec<PtyChild>, PluginError>;
-
     /// The pane's composed state — the kernel's view of the pane
     /// folded with whatever plugins have reported about it — plus how
     /// long it has held and whether it is safe to act on.
@@ -196,8 +166,6 @@ pub trait PluginHost: Send + Sync {
     ) -> Result<(), PluginError> {
         Ok(())
     }
-
-    fn pane_focused(&self) -> Option<usize>;
 
     // ── Persistence(PERSIST_STATE) ───────────────────────────────
     /// Plugin-scoped writable directory under
@@ -368,7 +336,6 @@ pub enum LogLevel {
     Debug,
     Info,
     Warn,
-    Error,
 }
 
 /// What every plugin implements.  See RFC-001 §4.
@@ -494,10 +461,6 @@ pub trait PaneSession: Send {
         false
     }
 
-    fn on_pty_bytes(&mut self, host: &dyn PaneSessionHost, bytes: &[u8]) {
-        let _ = (host, bytes);
-    }
-
     /// Periodic tick at the plugin's normal cadence (or faster while
     /// any PaneSession is alive — see C5).
     fn on_tick(&mut self, host: &dyn PaneSessionHost) {
@@ -530,10 +493,6 @@ pub enum EndReason {
     PluginRequested,
     /// User pressed Esc 3× in 5 s (L2 force-end).
     UserEscape,
-    /// Host-side safety: stale session past max duration.
-    Timeout,
-    /// L2 told us the pane is gone (kill / detach).
-    PaneClosed,
 }
 
 /// Per-PaneSession host handle passed to every plugin callback.
@@ -548,11 +507,6 @@ pub trait PaneSessionHost {
     /// Update the pane's right-side badge text (typically a spinner /
     /// progress string while the session runs).  Empty clears.
     fn set_badge(&self, text: &str);
-    /// Update the pane's main title text.  Inserts into the title
-    /// resolution chain ABOVE cwd basename, BELOW user-set custom
-    /// title.  Empty clears the plugin-set entry — chain falls back
-    /// to the underlying basename / ordinal label.
-    fn set_pane_title(&self, text: &str);
     /// Plugin-namespaced log proxy mirroring the regular PluginHost
     /// log so callbacks don't need to thread the outer host through.
     fn log(&self, level: LogLevel, tag: &str, msg: &str);
@@ -996,7 +950,6 @@ mod budget_tests {
             plugin: Box::new(Nothing),
             metadata: PluginMetadata {
                 name: "t",
-                version: "0.0.0",
                 api_version: PLUGIN_API_VERSION,
                 tick_interval_ms: 1000,
             },
@@ -1011,7 +964,6 @@ mod budget_tests {
         fn metadata(&self) -> PluginMetadata {
             PluginMetadata {
                 name: "t",
-                version: "0.0.0",
                 api_version: PLUGIN_API_VERSION,
                 tick_interval_ms: 1000,
             }
