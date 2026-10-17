@@ -528,7 +528,7 @@ impl WorkerCtx {
         // that is only guessing from mtimes.
         struct PaneFacts {
             shelld_sid: u64,
-            claude_pid: i32,
+            claude: pidtree::ProcId,
             claude_start: SystemTime,
             cwd: PathBuf,
             encoded: String,
@@ -565,7 +565,7 @@ impl WorkerCtx {
                 .unwrap_or_else(|| self.projects_root.clone());
             facts.push(PaneFacts {
                 shelld_sid: s.entry.id,
-                claude_pid: claude.row.pid,
+                claude: claude.row.id(),
                 claude_start: SystemTime::UNIX_EPOCH
                     + Duration::from_secs(claude.row.start_unix),
                 encoded: encode_project_dir(&cwd),
@@ -620,7 +620,7 @@ impl WorkerCtx {
         }
         for (i, f) in facts.iter().enumerate() {
             let dir = config_dir_or_default(f.config_dir.as_deref());
-            let Some(rec) = recorded_session(&dir, f.claude_pid) else { continue };
+            let Some(rec) = recorded_session(&dir, f.claude.pid) else { continue };
             if rec.kind != "interactive" || claimed.contains(&rec.session_id) {
                 continue;
             }
@@ -698,7 +698,7 @@ impl WorkerCtx {
             if bound.iter().any(|(j, ..)| *j == i) {
                 continue;
             }
-            let Some((uuid, transcript, badge)) = pushed_session_for_pid(f.claude_pid)
+            let Some((uuid, transcript, badge)) = pushed_session_for_pid(f.claude.pid)
             else {
                 continue;
             };
@@ -756,7 +756,7 @@ impl WorkerCtx {
                 jsonl_path.as_deref(),
                 &sid_uuid,
                 pushed_model_by_pane.get(&i).cloned(),
-                f.claude_pid,
+                f.claude.pid,
                 f.shelld_sid,
             );
             // The session uuid used to ride along here.  It is 36
@@ -811,7 +811,7 @@ impl WorkerCtx {
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 let has_young_child =
-                    obs.table.descendants(f.claude_pid).iter().any(|d| d.start_unix >= record_at);
+                    obs.table.descendants(f.claude.pid).iter().any(|d| d.start_unix >= record_at);
                 new_activity.insert(f.shelld_sid, activity_of(tail.as_deref(), has_young_child));
             }
             // a read failure is an empty window, which every check below
@@ -828,14 +828,14 @@ impl WorkerCtx {
             new_vetoes.insert(
                 f.shelld_sid,
                 (
-                    has_work_in_flight(f.claude_pid, &obs.table),
+                    has_work_in_flight(f.claude.pid, &obs.table),
                     tail.as_deref().map(tail_mentions_own_timer).unwrap_or(false),
                 ),
             );
             new_cpu.insert(
                 f.shelld_sid,
                 (
-                    obs.table.subtree_cpu_time_ns(f.claude_pid),
+                    obs.table.subtree_cpu_time_ns(f.claude.pid),
                     SystemTime::now(),
                 ),
             );
@@ -847,7 +847,7 @@ impl WorkerCtx {
                     profile_num,
                     config_dir: f.config_dir.clone(),
                     uuid: sid_uuid,
-                    claude_pid: f.claude_pid,
+                    claude: f.claude,
                     project_basename,
                     project_dir,
                     // The same tail, third question: has the account

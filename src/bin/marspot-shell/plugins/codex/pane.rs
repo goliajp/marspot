@@ -99,7 +99,9 @@ pub(super) fn profile_from(codex_home: Option<String>) -> Option<u8> {
 /// is changing and what to leave alone.
 #[derive(Clone)]
 pub(crate) struct PaneCodex {
-    pub codex_pid: i32,
+    /// From an observation up to two seconds old; the switch's
+    /// terminate step re-checks it when it acts.
+    pub codex: pidtree::ProcId,
     pub shell_pid: i32,
     /// Which `CODEX_HOME` this pane's codex is running under, read off
     /// the live process.  `None` when it could not be determined —
@@ -138,7 +140,7 @@ pub(super) fn profile_switch_op(pane: &PaneCodex, profile: u8, dir: &std::path::
             .badge(format!("→ P{profile}"))
             .step(pty_op::Step::settle(Duration::from_millis(250)).named("hold_settle"))
             .step(
-                pty_op::Step::terminate(pane.codex_pid, libc::SIGTERM)
+                pty_op::Step::terminate(pane.codex, libc::SIGTERM)
                     .escalate_after(Duration::from_secs(3), libc::SIGKILL),
             )
             .step(pty_op::Step::send(line).named("resume"))
@@ -156,7 +158,7 @@ mod profile_menu_tests {
 
     fn pane(profile: u8) -> PaneCodex {
         PaneCodex {
-            codex_pid: 4242,
+            codex: marspot::pidtree::ProcId { pid: 4242, start_us: 0 },
             shell_pid: 4200,
             profile: Some(profile),
         }
@@ -202,7 +204,7 @@ mod profile_menu_tests {
         assert!(
             op.steps.iter().any(|s| matches!(
                 &s.kind,
-                super::pty_op::StepKind::Terminate { pid, .. } if *pid == 4242
+                super::pty_op::StepKind::Terminate { target, .. } if target.pid == 4242
             )),
             "the running codex must be signalled"
         );
