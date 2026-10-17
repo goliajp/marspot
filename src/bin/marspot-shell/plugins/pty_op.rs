@@ -2372,6 +2372,10 @@ mod tests {
         receipt: Mutex<Option<bool>>,
         /// What the pane has drawn lately.
         tail: Mutex<Vec<u8>>,
+        /// What `signal` answers instead of delivering, per signal:
+        /// the pid naming another process by now, or one we may not
+        /// signal.  A signal not listed is delivered.
+        refuse: Mutex<Vec<(i32, SignalError)>>,
     }
 
     struct FakeIo(Arc<FakeState>);
@@ -2406,6 +2410,9 @@ mod tests {
         }
         fn signal(&self, id: ProcId, sig: i32) -> Result<(), SignalError> {
             self.state.signals.lock().unwrap().push((id.pid, sig));
+            if let Some((_, e)) = self.state.refuse.lock().unwrap().iter().find(|(s, _)| *s == sig) {
+                return Err(*e);
+            }
             if sig == libc::SIGKILL {
                 self.state.alive.lock().unwrap().retain(|p| *p != id.pid);
             }
@@ -3610,6 +3617,82 @@ mod tests {
             "then the deadline"
         );
         assert!(*host.ended.lock().unwrap(), "and the wait completes once it is gone");
+    }
+
+    /// A target that turns out to be gone when it is signalled is the
+    /// step done, not the run failed: the process the decision was
+    /// about has already left, which is what the step was waiting for.
+    #[test]
+    fn a_target_already_gone_ends_the_step_and_the_run_goes_on() {
+        let (state, env, host) = setup();
+        state.alive.lock().unwrap().push(7);
+        state.refuse.lock().unwrap().push((libc::SIGTERM, SignalError::Gone));
+        let finished: Arc<Mutex<Option<OpOutcome>>> = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&finished);
+        let op = PtyOp::new("test.gone")
+            .step(Step::terminate(fid(7), libc::SIGTERM).timeout(Duration::from_secs(10)))
+            .step(Step::send(b"after\r".to_vec()));
+        let mut r = OpRunner::new(op, env).on_finish(move |_, o| *sink.lock().unwrap() = Some(o.clone()));
+        run(&mut r, &host, &state, 200);
+        assert_eq!(*state.signals.lock().unwrap(), vec![(7, libc::SIGTERM)], "asked once");
+        assert_eq!(*state.sent.lock().unwrap(), vec![b"after\r".to_vec()], "the next step ran");
+        assert_eq!(*state.mouse_resets.lock().unwrap(), vec![1], "what it left on is ours to clear");
+        assert!(*host.ended.lock().unwrap(), "the run asked to end");
+        r.on_end(&host, EndReason::PluginRequested);
+        assert_eq!(*finished.lock().unwrap(), Some(OpOutcome::Done));
+    }
+
+    /// One we may not signal fails the run at that step: nothing after
+    /// it may act as though the process were gone.
+    #[test]
+    fn a_target_we_may_not_signal_fails_the_run() {
+        let (state, env, host) = setup();
+        state.alive.lock().unwrap().push(7);
+        state.refuse.lock().unwrap().push((libc::SIGTERM, SignalError::Denied));
+        let finished: Arc<Mutex<Option<OpOutcome>>> = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&finished);
+        let op = PtyOp::new("test.denied")
+            .step(Step::terminate(fid(7), libc::SIGTERM).timeout(Duration::from_secs(10)))
+            .step(Step::send(b"after\r".to_vec()));
+        let mut r = OpRunner::new(op, env).on_finish(move |_, o| *sink.lock().unwrap() = Some(o.clone()));
+        run(&mut r, &host, &state, 200);
+        assert!(*host.ended.lock().unwrap(), "the run asked to end");
+        r.on_end(&host, EndReason::PluginRequested);
+        match finished.lock().unwrap().clone() {
+            Some(OpOutcome::Failed { step: 0, label: "terminate", err }) => {
+                assert!(err.contains("pid 7"), "the error names the process: {err}")
+            }
+            other => panic!("a refused signal fails the terminate step, got {other:?}"),
+        }
+        assert!(state.sent.lock().unwrap().is_empty(), "nothing after the step ran");
+        assert!(state.mouse_resets.lock().unwrap().is_empty(), "the program is still there");
+    }
+
+    /// The escalation is checked the same way: a process that went in
+    /// the seconds between the polite signal and the deadline is done.
+    #[test]
+    fn a_target_gone_by_the_escalation_ends_the_step() {
+        let (state, env, host) = setup();
+        state.alive.lock().unwrap().push(7);
+        state.refuse.lock().unwrap().push((libc::SIGKILL, SignalError::Gone));
+        let finished: Arc<Mutex<Option<OpOutcome>>> = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&finished);
+        let op = PtyOp::new("test.late").step(
+            Step::terminate(fid(7), libc::SIGTERM)
+                .escalate_after(Duration::from_secs(3), libc::SIGKILL)
+                .timeout(Duration::from_secs(10)),
+        );
+        let mut r = OpRunner::new(op, env).on_finish(move |_, o| *sink.lock().unwrap() = Some(o.clone()));
+        run(&mut r, &host, &state, 1_000);
+        assert_eq!(finished.lock().unwrap().clone(), None, "still waiting on the polite one");
+        run(&mut r, &host, &state, 3_000);
+        assert_eq!(
+            *state.signals.lock().unwrap(),
+            vec![(7, libc::SIGTERM), (7, libc::SIGKILL)]
+        );
+        assert!(*host.ended.lock().unwrap(), "the run asked to end");
+        r.on_end(&host, EndReason::PluginRequested);
+        assert_eq!(*finished.lock().unwrap(), Some(OpOutcome::Done));
     }
 
     /// Killing the foreground program is also giving up the modes it
