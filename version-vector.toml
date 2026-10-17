@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.242"  # ignores SIGPIPE, so a write to a core that just died cannot end the app
-core    = "0.12.286"  # a pane's program starts with default signal handling
-session = "0.11.151"  # an execv leaks no descriptor and drops no input or output in flight
+shell   = "0.7.243"  # the quit sweep closes orphaned sessions with SIGHUP
+core    = "0.12.287"  # asks each session to update once, the way it understands; closes with SIGHUP
+session = "0.11.152"  # takes updates as a frame and closes on SIGHUP; a copy of its own build is not an update
