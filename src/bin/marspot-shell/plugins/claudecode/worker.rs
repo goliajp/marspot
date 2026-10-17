@@ -65,6 +65,9 @@ pub(super) struct ScanCaches {
     pub(super) env: crate::observe::EnvCache,
     pub(super) tails: super::transcript::TailCache,
     pub(super) profiles: super::profiles::ProfileCache,
+    /// Per pane: the processes under its claude last reported as work,
+    /// so the log says when that set changes and not every pass.
+    pub(super) work: HashMap<u64, Vec<String>>,
 }
 
 /// Everything the worker owns.  No shared mutable state with the
@@ -825,10 +828,20 @@ impl WorkerCtx {
                 (Some(path), None) => self.last_refusal.get(path).cloned(),
                 (None, _) => None,
             };
+            let mut work = work_in_flight(f.claude.pid, &obs.table);
+            work.sort();
+            if self.caches.work.get(&f.shelld_sid) != Some(&work) {
+                log_lines.push((
+                    LogLevel::Info,
+                    "work.changed",
+                    format!("sid={} work under claude: {work:?}", f.shelld_sid),
+                ));
+                self.caches.work.insert(f.shelld_sid, work.clone());
+            }
             new_vetoes.insert(
                 f.shelld_sid,
                 (
-                    has_work_in_flight(f.claude.pid, &obs.table),
+                    !work.is_empty(),
                     tail.as_deref().map(tail_mentions_own_timer).unwrap_or(false),
                 ),
             );
@@ -885,6 +898,7 @@ impl WorkerCtx {
         // Bounded growth: both per-pane maps follow the panes.
         self.last_model_by_pane.retain(|sid, _| sessions_seen.contains(sid));
         self.banner_tried.retain(|sid, _| sessions_seen.contains(sid));
+        self.caches.work.retain(|sid, _| sessions_seen.contains(sid));
         // What the badge already knows, handed to the chooser as a
         // fact rather than re-derived from the badge's text.
         let new_models = self
