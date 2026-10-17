@@ -48,9 +48,6 @@ pub const MENU_ROW_H_PT: f64 = 18.0;
 pub const MENU_TEXT_PAD_X_PT: f64 = 10.0;
 pub const MENU_TOP_PAD_PT: f64 = 4.0;
 pub const CONTENT_X_PAD_PT: f64 = 20.0;
-pub const SECTION_GAP_PT: f64 = 24.0;
-/// Sub-item indent (rendered with "  " prefix in label).
-pub const MENU_SUB_INDENT_PT: f64 = 10.0;
 
 /// Hit-test result.  Click landed on a tab strip entry or a left-menu
 /// row, or nowhere actionable (content area / outside).
@@ -348,7 +345,6 @@ pub fn build_dev_panel_canvas(
 
     // Cell metrics translated to logical pt — text width math.
     let cell_w_pt = chrome_cell_w as f64 / scale;
-    let _cell_h_pt = chrome_cell_h as f64 / scale;
 
     // ─── Tab strip ─────────────────────────────────────────────
     canvas.rect()
@@ -843,10 +839,9 @@ fn build_model_view() -> crate::ui::view::View {
         ]).hstack_gap(Length::Pt(10.0)).align_cross_center(),
         hstack(vec![
             ok("[✓]"),
-            body("Identity / HostState map + Lifecycle reconcile"),
+            body("Identity / HostState map"),
         ]).hstack_gap(Length::Pt(6.0)),
         hint("    HashMap<(ViewId, TypeId), Box<dyn Any>>;同 id 可挂多种状态"),
-        hint("    reconcile() 收集树里所有 id,drop 失踪的(on_disappear)"),
     ]).vstack_gap(Length::Pt(2.0));
 
     // ── L2 Box Model — actual box demo ───────────────────────
@@ -971,10 +966,10 @@ fn build_model_view() -> crate::ui::view::View {
         hint("    .fill/.border/.radius/.shadow chain;submission order = z order"),
         hstack(vec![
             ok("[✓]"),
-            body("Image / Gradient(Linear)/ Shape(Circle/Capsule/RoundedRect)"),
+            body("Gradient(Linear)/ Shape(Circle/Capsule/RoundedRect)"),
         ]).hstack_gap(Length::Pt(6.0)),
         hint("    type 定义全 land,Shape paint 通过 rounded-rect 近似"),
-        hint("    real Image primitive + Path = v2+ Metal pipeline 工作"),
+        hint("    Image + Path = v2+ Metal pipeline 工作"),
         hint("    this entire panel IS Canvas — what you see, you can build"),
         // Shape 视觉 demo
         hint("    Shape views(Circle / Capsule / RoundedRect):"),
@@ -1060,9 +1055,8 @@ fn build_model_view() -> crate::ui::view::View {
         ]).hstack_gap(Length::Pt(10.0)).align_cross_start(),
         hstack(vec![
             ok("[✓]"),
-            body("Containers: ScrollView / LazyVStack / LazyHStack / Grid(均匀)"),
+            body("Containers: ScrollView / Grid(均匀)"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    sidebar / process panel / search overlay 长列表都可虚拟化"),
         // Grid demo - 4x2 colored squares
         hint("    Grid 4 cols × 8 cells uniform demo:"),
         grid(
@@ -1086,9 +1080,8 @@ fn build_model_view() -> crate::ui::view::View {
         ]).hstack_gap(Length::Pt(6.0)),
         hstack(vec![
             ok("[✓]"),
-            body("Gesture: hit_test_* + InputEvent + DragInProgress 状态机"),
+            body("Gesture: hit_test_click + DragInProgress 状态机"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    InputEvent enum(Click/DoubleClick/RightClick/DragBegin/Move/End/Hover/Scroll)"),
         hint("    DragInProgress { drag_id, started_at, current, modifiers, delta() }"),
         hint("    ActionId / ScrollWheelId / DragId 跟 host reducer 派发(elm-y)"),
         hstack(vec![
@@ -1141,19 +1134,9 @@ fn build_model_view() -> crate::ui::view::View {
         h1("L6 — Cross-cutting"),
         hstack(vec![
             ok("[✓]"),
-            body("Lifecycle: reconcile(LaidOut) — on_disappear 实施"),
+            body("Theme: ThemeId + theme::current()"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    每帧 build 完调 reconcile;drop 失踪 id 的 HostState slot"),
-        hstack(vec![
-            ok("[✓]"),
-            body("Accessibility: .accessibility_label / role(modifier API)"),
-        ]).hstack_gap(Length::Pt(6.0)),
-        hint("    bake 进 LaidOut.deco;真接 NSAccessibility 留 v2+"),
-        hstack(vec![
-            ok("[✓]"),
-            body("Theme: ThemeId + theme::current() + Light token 数据"),
-        ]).hstack_gap(Length::Pt(6.0)),
-        hint("    AtomicU8 全局;Dark + Light 调色板;themed::color::* 闭包查"),
+        hint("    AtomicU8 全局;组件都用 Dark 常量,current() 还没有读者"),
         hstack(vec![
             todo_v2("[v2+]"),
             hint("    HighContrast + 真 theme swap redraw 钩子"),
@@ -1165,7 +1148,7 @@ fn build_model_view() -> crate::ui::view::View {
         hint("    Linear / EaseIn / EaseOut / EaseInOut 4 curves;Color/f64 已实 Lerp"),
         hstack(vec![
             todo_v2("[v2+]"),
-            body("    真 frame 调度 + .transition() + 不破坏 idle CPU=0"),
+            body("    真 frame 调度 + enter/exit 过渡动画 + 不破坏 idle CPU=0"),
         ]).hstack_gap(Length::Pt(6.0)),
         hstack(vec![
             todo_v2("[v2+]"),
@@ -1407,17 +1390,9 @@ fn build_l1_view() -> crate::ui::view::View {
         h::sub("u8 通道 + f64 alpha;Lerp impl 已 land 用于 Anim<Color>"),
 
         h::h2("Tokens v4"),
-        h::done_row("Semantic palette + space + radius + elev + text style + motion + border + layer"),
-        h::done_row("UI color 完整:FG{,_MUTED,_DISABLED,_INVERSE,_LINK} + SURFACE_0..4 + OVERLAY"),
-        h::done_row("Tab/Sidebar/Status/Diff 命名空间(TAB_ACTIVE_BG / SIDEBAR_BG / DIFF_ADD_BG / ...)"),
-        h::done_row("4-level severity(INFO/SUCCESS/WARN/DANGER/CRITICAL)+ FOCUS_RING + DISABLED_*"),
-        h::done_row("Terminal palette terminal::{BG, FG, CURSOR_BG/FG, SELECTION_BG/FG, LINK, BOLD_FG}"),
-        h::done_row("Terminal ansi 16(black/red/green/yellow/blue/magenta/cyan/white × normal+bright)"),
-        h::done_row("Terminal search::{MATCH, MATCH_CURRENT}"),
-        h::done_row("motion::{INSTANT, FAST, NORMAL, SLOW, VERY_SLOW} + motion::curve::*"),
-        h::done_row("border::{NONE, HAIRLINE, THIN, MEDIUM, THICK}"),
-        h::done_row("layer::{CONTENT, STATUS, STICKY, TOOLBAR, POPOVER, MODAL, TOAST, TOOLTIP, SYSTEM}"),
-        h::done_row("themed::{color::*, terminal::{ansi, search}::*} 全闭包覆盖 Dark/Light/HC"),
+        h::done_row("Semantic palette + space + radius + elev + text style"),
+        h::done_row("UI color:FG{,_MUTED,_DISABLED,_INVERSE,_LINK} + BG{,_RAISED,_PANEL,_SELECTED,_HOVER} + SURFACE_3/4"),
+        h::done_row("状态色 SUCCESS / WARN / DANGER"),
         hstack(vec![
             h::mono("color::"),
             h::swatch(color::FG),
@@ -1451,8 +1426,8 @@ fn build_l1_view() -> crate::ui::view::View {
         ]).hstack_gap(Length::Pt(12.0)).align_cross_center(),
 
         h::h2("Font 分离(PTY vs UI)"),
-        h::done_row("MetalRenderer::{chrome_font_metrics, terminal_font_metrics, ui_font_metrics}"),
-        h::sub("UI 走 ui_font_metrics;Terminal grid 走 terminal_font_metrics — 当前两者 = chrome"),
+        h::done_row("MetalRenderer::{chrome_font_metrics, ui_font_metrics}"),
+        h::sub("UI 走 ui_font_metrics;chrome_font_metrics 给的是终端字体的尺寸"),
         h::done_row("MARSPOT_UI_FONT_SCALE env var(0.0..4.0,默认 1.0)"),
         h::sub("layout 端尺寸适配已 land;真 glyph 在 UI size rasterize = B0.7(FontCache 扩展)"),
         h::v2_row("不同 font 真切换(MARSPOT_UI_FONT_NAME — 加载独立 CTFont)"),
@@ -1461,8 +1436,6 @@ fn build_l1_view() -> crate::ui::view::View {
         h::done_row("HashMap<(ViewId, TypeId), Box<dyn Any>>"),
         h::sub("一个 view id 可挂多种状态类型(Scroll/Toggle/Picker/TextField/...)"),
         h::sub("HOST_STATE thread_local;with_host_state(_mut) 闭包入口"),
-        h::done_row("reconcile(LaidOut) — on_disappear 实施"),
-        h::sub("遍历 tree 收集 id;retain HOST_STATE 中存在的;drop 失踪"),
         h::v2_row("on_appear hook"),
         h::sub("当 stateful view 类型加 init hook 时绑(eg TextField 加载光标位)"),
     ])
@@ -1616,7 +1589,7 @@ fn build_l2_view() -> crate::ui::view::View {
         h::sub("CSS 类比:visibility: hidden;vs display: none"),
 
         h::done_row(".transform(Transform) — translate v1 已 paint,scale/rotate 数据保留"),
-        h::done_row(".mask(View) / .blend_mode(BlendMode) — modifier API 已落"),
+        h::done_row(".mask(View) — modifier API 已落"),
         h::sub("paint 端:mask 需 Metal stencil;scale/rotate 需 vertex transform — v2+"),
         h::v2_row("真 Metal scissor pixel-clip(替换 culling)+ mask/transform paint"),
     ])
@@ -1667,9 +1640,7 @@ fn build_l3_view() -> crate::ui::view::View {
         ]).hstack_gap(Length::Pt(16.0)).align_cross_center(),
 
         h::h2("Image view"),
-        h::done_row("Image { source, mode, tint } API"),
-        h::sub("4 sources: Glyph / Raw(Arc<Vec<u8>>) / IOSurface / Named"),
-        h::sub("v1 paint = tinted rect placeholder;真 Image primitive = v2+"),
+        h::v2_row("Image view(source / mode / tint)— 需要真 Image primitive"),
 
         h::v2_row("Path SDF / 任意 vector shape / freeform stroke"),
         h::sub("需要 Metal pipeline 加 path mesh 或 SDF rendering"),
@@ -1727,7 +1698,7 @@ fn build_l4_view() -> crate::ui::view::View {
 
     h::scrollable_page(0xDE7_0040, vec![
         h::h2("View enum + Modifier chain"),
-        h::done_row("Atoms: Text / Spacer / Filled / Hairline / Image / Shape"),
+        h::done_row("Atoms: Text / Spacer / Filled / Hairline / Shape"),
         h::done_row("Containers: VStack / HStack / ZStack"),
         hstack(vec![
             vstack(vec![h::hint("VStack"), vs_demo]).vstack_gap(Length::Pt(6.0)).align_cross_center(),
@@ -1754,13 +1725,11 @@ fn build_l4_view() -> crate::ui::view::View {
         ]).hstack_gap(Length::Pt(10.0)).align_cross_start(),
         h::done_row("Anchor: 9-point(TopLeading … BottomTrailing)"),
 
-        h::h2("Lazy containers + Grid"),
-        h::done_row("ScrollView + LazyVStack + LazyHStack"),
-        h::sub("uniform-height/width 假设;variable-height = HostState cache,留 v2+"),
-        h::done_row("Grid(uniform-cell m×n)+ grid_with_gaps(分 col_gap / row_gap)"),
+        h::h2("ScrollView + Grid"),
+        h::done_row("ScrollView"),
+        h::v2_row("LazyVStack / LazyHStack(只排版可见行的长列表)"),
+        h::done_row("Grid(uniform-cell m×n)"),
         h::done_row("VariableGrid(Fixed / Flex / Auto tracks)"),
-        h::done_row("lazy_vstack_padded(leading_margin, trailing_margin)"),
-        h::sub("Lazy 容器加 top/bottom 滚动 padding;现 lazy_vstack 默认无 margin"),
         h::hint("    Grid 4 cols × 8 cells demo:"),
         grid(
             (0..8).map(|i| {
@@ -1794,8 +1763,7 @@ fn build_l4_view() -> crate::ui::view::View {
         ),
 
         h::h2("Gesture model"),
-        h::done_row("InputEvent enum + hit_test_*"),
-        h::sub("Click / DoubleClick / RightClick / DragBegin/Move/End / Hover / Scroll"),
+        h::done_row("hit_test_click"),
         h::done_row("DragInProgress 状态机 + delta()"),
         h::sub("host 持 Option<DragInProgress>;Begin set / Move update / End drop"),
         h::done_row("ActionId / ScrollWheelId / DragId — elm-y reducer 派发"),
@@ -1814,12 +1782,9 @@ fn build_l4_view() -> crate::ui::view::View {
 
         h::h2("Keyboard / Focus / Lifecycle modifiers"),
         h::done_row(".shortcut(KeyEquivalent, ActionId) — Cmd-key 等绑定"),
-        h::sub("KeyEquivalent::{cmd(K), cmd_shift(K), ctrl(K), plain(K)} 构造器"),
+        h::sub("KeyEquivalent::{cmd(K), ctrl(K), plain(K)} 构造器"),
         h::sub("App 层每帧扫 tree 收 shortcut 表;KeyDown 对照 → dispatch"),
-        h::done_row(".focusable(FocusId) — 加入 Tab 导航环"),
         h::done_row(".auto_focus() — 首帧自动 focus"),
-        h::done_row(".on_appear(ActionId) / .on_disappear(ActionId)"),
-        h::sub("reconcile() diff 前后帧 live ids 生成 LifecycleEvent 列表"),
     ])
 }
 
@@ -1935,23 +1900,15 @@ fn build_l6_view() -> crate::ui::view::View {
 
     h::scrollable_page(0xDE7_0060, vec![
         h::h2("Lifecycle"),
-        h::done_row("reconcile(&LaidOut) → Vec<LifecycleEvent>"),
-        h::sub("每帧 build+layout 后调,diff prev/live ids 生成 Appear/Disappear 事件"),
-        h::sub("Appear { id, action }/Disappear { id, action } — host 按 action 派发"),
-        h::done_row(".on_appear(ActionId) / .on_disappear(ActionId) modifier"),
-        h::sub("bake 进 Decoration.on_appear / on_disappear;reconcile() 跟踪 prev frame"),
+        h::v2_row("on_appear / on_disappear 生命周期钩子"),
 
         h::h2("Accessibility"),
-        h::done_row(".accessibility_label(s) / .accessibility_role(AxRole)"),
-        h::sub("bake 进 Decoration.ax_label / ax_role"),
-        h::sub("AxRole: Button / Heading / ListItem / TextField / Image / StaticText /"),
-        h::sub("        Group / Link / Checkbox / Toggle"),
         h::v2_row("真接 NSAccessibility(VoiceOver / 自动 AX tree)"),
 
         h::h2("Theme"),
         h::done_row("ThemeId { Dark, Light, HighContrast }"),
         h::sub("theme::current() / theme::set_current(id) — AtomicU8 全局"),
-        h::done_row("Dark + Light token data 已 land(themed::color::* 闭包查 active)"),
+        h::v2_row("按 current() 取色(现在组件都用 Dark 常量,Light / HC 只有下面几个样色)"),
         hstack(vec![
             h::hint("    ThemeId::Dark = "),
             filled(color::BG).corner_radius(radius::SM).frame(FrameSpec {
@@ -1982,7 +1939,7 @@ fn build_l6_view() -> crate::ui::view::View {
                 ..Default::default()
             }),
         ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
-        h::done_row("HighContrast palette(新增,跟 Light 同结构)"),
+        h::done_row("HighContrast 样色(BG / ACCENT / FG)"),
         hstack(vec![
             h::hint("    ThemeId::HighContrast = "),
             filled(crate::ui::theme::color::hc::BG).corner_radius(radius::SM).frame(FrameSpec {
@@ -2012,10 +1969,9 @@ fn build_l6_view() -> crate::ui::view::View {
         ]).hstack_gap(Length::Pt(14.0)).align_cross_start(),
         h::sub("Spring = damped-cosine 关闭式;真 ODE 弹簧 = v2+"),
         h::done_row("AnimRegistry + tick(now) + any_active() — frame schedule"),
-        h::sub("anim_start(dur) 注册;anim_tick(Instant::now()) 推进;anim_any_active() 触发 request_redraw"),
+        h::sub("AnimRegistry::start(dur) 注册;anim_tick(Instant::now()) 推进;anim_any_active() 触发 request_redraw"),
         h::sub("ShellApp::redraw 每帧 tick+gc;active 时连续 redraw,idle 时 0(兼容 idle CPU=0)"),
-        h::done_row(".transition(Transition) modifier — declarative enter/exit anim"),
-        h::sub("Opacity / Scale / Slide(4 dir)/ Combined;LifecycleEvent driver 留 P3i 接绑"),
+        h::v2_row("enter/exit 过渡动画(transition modifier)"),
 
         h::h2("Internationalization"),
         h::done_row("text_width_cells 走 char_width(CJK = 2 cells)"),
@@ -2023,119 +1979,6 @@ fn build_l6_view() -> crate::ui::view::View {
         h::v2_row("RTL(Leading/Trailing 命名已留接口;实际 bidi 走 Unicode UAX#9)"),
         h::v2_row("Locale-aware 数字 / 日期 / pluralisation"),
     ])
-}
-
-/// Legacy `draw_model_sample` — kept around as a fallback in case
-/// the View-tree path needs to be bypassed.  Not on the default
-/// code path; remove once the new pipeline has soaked.
-#[allow(dead_code)]
-fn draw_model_sample(canvas: &mut Canvas, x: f64, mut y: f64) -> f64 {
-    let line_h = 18.0;
-    let block_gap = 14.0;
-
-    // 1. Length
-    canvas.text(Length::Pt(x), Length::Pt(y), "Length = Pt | Pct")
-        .color(tokens::SECTION_BODY_FG)
-        .draw();
-    y += line_h;
-    canvas.text(Length::Pt(x + 16.0), Length::Pt(y),
-        "Pt(N) ≈ CSS N px — logical pt, scale-independent")
-        .color(tokens::SAMPLE_HINT_FG)
-        .draw();
-    y += line_h;
-    canvas.text(Length::Pt(x + 16.0), Length::Pt(y),
-        "Pct(F) = F × parent (0.0..1.0)")
-        .color(tokens::SAMPLE_HINT_FG)
-        .draw();
-    y += block_gap + line_h;
-
-    // 2. Box model — Rect builder
-    canvas.text(Length::Pt(x), Length::Pt(y), "Rect = box-model")
-        .color(tokens::SECTION_BODY_FG)
-        .draw();
-    y += line_h;
-    let api_lines = [
-        ".at(x, y)              — top / left",
-        ".size(w, h)            — width / height",
-        ".fill(color)           — background",
-        ".border(width, color)  — border (inside-stroke, box-sizing: border-box)",
-        ".radius(r)             — border-radius",
-        ".shadow(blur, off, c)  — box-shadow",
-    ];
-    for line in api_lines.iter() {
-        canvas.text(Length::Pt(x + 16.0), Length::Pt(y), line)
-            .color(tokens::SAMPLE_HINT_FG)
-            .draw();
-        y += line_h;
-    }
-    y += block_gap;
-
-    // 3. Color — CSS rgba
-    canvas.text(Length::Pt(x), Length::Pt(y), "Color = CSS rgba")
-        .color(tokens::SECTION_BODY_FG)
-        .draw();
-    y += line_h;
-    canvas.text(Length::Pt(x + 16.0), Length::Pt(y),
-        "Color::rgba(r, g, b, a)  — r/g/b 0..255, a 0.0..1.0")
-        .color(tokens::SAMPLE_HINT_FG)
-        .draw();
-    y += line_h;
-    canvas.text(Length::Pt(x + 16.0), Length::Pt(y),
-        "alpha 跟 CSS rgba() 一致;0.0 完全透明,1.0 不透明")
-        .color(tokens::SAMPLE_HINT_FG)
-        .draw();
-    y += block_gap + line_h;
-
-    // 4. Z-order — submission order
-    canvas.text(Length::Pt(x), Length::Pt(y), "Z order = submission order")
-        .color(tokens::SECTION_BODY_FG)
-        .draw();
-    y += line_h;
-    canvas.text(Length::Pt(x + 16.0), Length::Pt(y),
-        "later .draw() paints on top (no z-index, no explicit ordering)")
-        .color(tokens::SAMPLE_HINT_FG)
-        .draw();
-    y += line_h + 6.0;
-
-    // Z-order visual demo: 3 overlapping rects of decreasing size,
-    // each .draw() lands above the previous.  Labels to the right.
-    let demo_x = x + 16.0;
-    let demo_w = 64.0;
-    let demo_h = 32.0;
-    let demo_step = 16.0;
-    let z1 = Color::rgba(220,  60,  60, 1.0);  // red
-    let z2 = Color::rgba( 80, 190, 110, 1.0);  // green
-    let z3 = Color::rgba( 91, 162, 250, 1.0);  // blue
-    // Draw in 1→2→3 order; expect green to cover red's right edge,
-    // blue to cover green's right edge.
-    canvas.rect()
-        .at(Length::Pt(demo_x), Length::Pt(y))
-        .size(Length::Pt(demo_w), Length::Pt(demo_h))
-        .fill(z1)
-        .radius(Pt(4.0))
-        .draw();
-    canvas.rect()
-        .at(Length::Pt(demo_x + demo_step), Length::Pt(y + 6.0))
-        .size(Length::Pt(demo_w), Length::Pt(demo_h))
-        .fill(z2)
-        .radius(Pt(4.0))
-        .draw();
-    canvas.rect()
-        .at(Length::Pt(demo_x + demo_step * 2.0), Length::Pt(y + 12.0))
-        .size(Length::Pt(demo_w), Length::Pt(demo_h))
-        .fill(z3)
-        .radius(Pt(4.0))
-        .draw();
-    canvas.text(
-        Length::Pt(demo_x + demo_w + demo_step * 2.0 + 12.0),
-        Length::Pt(y + 18.0),
-        "1st .draw() ← red,  2nd ← green,  3rd ← blue (top)",
-    )
-    .color(tokens::SAMPLE_HINT_FG)
-    .draw();
-    y += demo_h + 20.0;
-
-    y
 }
 
 /// Colors: a row of named swatches.  Demonstrates `Color::rgba` +
@@ -2326,10 +2169,8 @@ fn draw_text_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
 /// (已撤,统一去 [`UiSize`] cap-height 校准 scale).每个 helper 选
 /// 一个 token + weight + 颜色,字号变更走 `UiSize::cap_height_pt` 一处,
 /// 不用 caller 逐个改.
-#[allow(dead_code)]
 mod chrome_text {
     use crate::ui::view::{Text, UiSize};
-    use crate::font_shape::ShapeOptions;
     use crate::ui::theme::color;
 
     // ──────────────────── vertical rhythm ────────────────────
@@ -2338,7 +2179,6 @@ mod chrome_text {
     // 的同时也建议同比例改这里.
     pub const VSTACK_GAP:  f64 = 4.0;
     pub const HSTACK_GAP:  f64 = 8.0;
-    pub const SECTION_GAP: f64 = 10.0;
 
     // ──────────────────── style helpers ────────────────────
     //
@@ -2347,43 +2187,12 @@ mod chrome_text {
     // 保证 monotonic 单增(见 type_scale.rs `scale_is_monotonic`).
 
     #[inline]
-    pub fn footnote(s: &str) -> Text {
-        Text::new(s).ui_size(UiSize::Mini).color(color::FG_MUTED)
-    }
-    #[inline]
     pub fn caption(s: &str) -> Text {
         Text::new(s).ui_size(UiSize::Small).color(color::FG_MUTED)
     }
     #[inline]
-    pub fn body(s: &str) -> Text {
-        Text::new(s).ui_size(UiSize::Body).color(color::FG)
-    }
-    #[inline]
-    pub fn body_bold(s: &str) -> Text {
-        Text::new(s).ui_size(UiSize::Body).ui_weight(600).color(color::FG)
-    }
-    #[inline]
-    pub fn emphasized(s: &str) -> Text {
-        Text::new(s).ui_size(UiSize::Body).ui_weight(500).color(color::FG)
-    }
-    #[inline]
     pub fn title(s: &str) -> Text {
         Text::new(s).ui_size(UiSize::Heading).ui_weight(600).color(color::FG)
-    }
-    /// Alias for `title` — kept for callers reading "header" intent.
-    #[inline]
-    pub fn header(s: &str) -> Text { title(s) }
-    /// Alias for `caption` — muted "hint" intent.
-    #[inline]
-    pub fn hint(s: &str) -> Text { caption(s) }
-    /// Code-look style: SF Pro Body + `ShapeOptions::code()` (kerning
-    /// off, ligatures off) — 读起来近似 mono,但跟同 UiSize 的其它
-    /// chrome 共享 cap-height,不会出现 mono vs proportional 视觉跳.
-    #[inline]
-    pub fn code(s: &str) -> Text {
-        Text::new(s)
-            .ui(UiSize::Body.sf_pro_pt(), 400, ShapeOptions::code())
-            .color(color::FG)
     }
 }
 

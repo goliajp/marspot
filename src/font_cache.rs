@@ -326,8 +326,6 @@ struct UiMeasureCache {
     map: FxHashMap<u64, UiMeasureEntry>,
     tick: u64,
     cap: usize,
-    hits: u64,
-    misses: u64,
 }
 
 struct UiMeasureEntry {
@@ -341,7 +339,7 @@ struct UiMeasureEntry {
 
 impl Default for UiMeasureCache {
     fn default() -> Self {
-        Self { map: FxHashMap::default(), tick: 0, cap: 2048, hits: 0, misses: 0 }
+        Self { map: FxHashMap::default(), tick: 0, cap: 2048 }
     }
 }
 
@@ -367,16 +365,13 @@ impl UiMeasureCache {
         if &*e.text != text || e.weight_q != weight_q || e.opts_bits != opts_bits
             || e.size_q != size_q
         {
-            self.misses += 1;
             return None;
         }
         e.last_used = now;
-        self.hits += 1;
         Some(e.advance)
     }
 
     fn put(&mut self, text: &str, weight_q: u16, opts_bits: u8, size_q: u16, advance: f64) {
-        self.misses += 1;
         if self.map.len() >= self.cap
             && let Some(&oldest) = self
                 .map
@@ -743,16 +738,6 @@ impl FontCache {
         self.fonts.ascent.get(idx).copied().unwrap_or(0.0)
     }
 
-    /// Phase 3 — intern a CTFont produced by CTLine shaping (likely
-    /// a fallback font CT auto-discovered for a CJK / emoji codepoint
-    /// the base UI font lacks).  Returns its `font_id` so the renderer
-    /// can pack it into `GlyphKey` for atlas lookup.  Dedups against
-    /// postscript name, so repeated calls during shaping a long string
-    /// don't grow the registry per-glyph.
-    pub fn intern_ctfont(&mut self, font: CTFont) -> usize {
-        self.fonts.intern(font)
-    }
-
     /// Phase 3 — shape `text` through CTLine against the UI font,
     /// caching by `(text, size_q, ui_font_idx)`.  Returns owned Vec
     /// (clone of the cached slice) so callers can re-borrow
@@ -776,19 +761,6 @@ impl FontCache {
         weight_q: u16,
     ) -> Vec<crate::font_shape::ShapedGlyph> {
         self.shape_ui_weighted_opts(text, weight_q, crate::font_shape::ShapeOptions::full())
-    }
-
-    /// Phase 10c — measure SF Pro advance width in physical px for
-    /// the given (text, weight, opts) tuple.  Used by the view
-    /// system's `FontMetricsProvider` impl during layout so chrome
-    /// proportional text gets a real width before paint.
-    pub fn measure_ui_text(
-        &mut self,
-        text: &str,
-        weight_q: u16,
-        opts: crate::font_shape::ShapeOptions,
-    ) -> f64 {
-        self.measure_ui_text_at_size(text, weight_q, opts, UI_FONT_POINT)
     }
 
     /// Phase 10c — measure at an explicit pt size.  Used by
@@ -816,18 +788,6 @@ impl FontCache {
         let advance = crate::font_shape::measure_line(text, &base_font, opts);
         self.ui_measure.put(text, weight_q, opts_bits, size_q, advance);
         advance
-    }
-
-    /// Hits and misses on the advance cache, for whoever is measuring
-    /// whether a frame still allocates.
-    pub fn ui_measure_stats(&self) -> (u64, u64) {
-        (self.ui_measure.hits, self.ui_measure.misses)
-    }
-
-    /// Phase 10c — chrome line-height in physical pixels for the
-    /// current UI font at the startup-interned pt size.
-    pub fn ui_line_h_phys(&self) -> f64 {
-        self.ui_cell_h * 2.0
     }
 
     /// Phase 10c — line-height at an arbitrary SF Pro pt size.
@@ -973,33 +933,6 @@ impl FontCache {
         let idx = self.fonts.intern_with_key(unique_key, weighted);
         self.ui_variants.insert(variant_key, idx);
         Some(idx)
-    }
-
-    /// Phase 3 — chrome ascent + cell height.  Identical to the PTY
-    /// `ascent` / `cell_h` shape but driven by the UI font's metrics
-    /// so the chrome renderer can position SF Pro glyphs at the right
-    /// baseline regardless of the terminal font.
-    pub fn ui_metrics(&self) -> (f64, f64, f64) {
-        (self.ui_cell_w, self.ui_cell_h, self.ui_ascent)
-    }
-
-    /// Resolve `ch` against the UI font first (system default).  If
-    /// the UI font lacks coverage (eg CJK characters), falls through
-    /// to the standard `resolve_char` cascade (returns chars from
-    /// the mono fallback chain).  Chrome rendering paths use this.
-    pub fn resolve_char_ui(&mut self, ch: char) -> (usize, CGGlyph) {
-        if self.ui_font_idx > 0 {
-            let g = {
-                match self.fonts.fonts.get(self.ui_font_idx) {
-                    Some(ui_font) => lookup_glyph(&ui_font, ch),
-                    None => 0,
-                }
-            };
-            if g != 0 {
-                return (self.ui_font_idx, g);
-            }
-        }
-        self.resolve_char(ch, false, false)
     }
 
     /// Whether font `idx` carries colour glyphs (Apple Color Emoji).

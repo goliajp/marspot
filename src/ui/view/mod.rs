@@ -18,7 +18,6 @@ pub mod types;
 pub mod type_scale;
 pub mod scroll;
 pub mod state;
-pub mod lazy;
 pub mod layout;
 pub mod paint;
 pub mod hit_test;
@@ -32,41 +31,35 @@ pub use view::{
 };
 pub use type_scale::UiSize;
 pub use view::{
-    View, Modifier, Text, TextSize, TextWeight, TextStyle, TextAlign,
+    View, Modifier, Text, TextSize, TextWeight, TextStyle,
     TextLines, Truncate, ClipShape, AspectMode,
-    Image, ImageSource, ContentMode, ShapeSpec,
-    LinearGradient, GradientDir, MaterialStyle, AxRole,
+    ShapeSpec,
+    LinearGradient, GradientDir, MaterialStyle,
     ToggleState, PickerState,
-    vstack, hstack, zstack, spacer, filled, hairline_horiz, hairline_vert,
-    toggle, picker, grid, grid_with_gaps, variable_grid, GridTrack,
-    image_named, shape_circle, shape_capsule, shape_rounded_rect,
+    vstack, hstack, zstack, spacer, filled, hairline_horiz,
+    toggle, picker, grid, variable_grid, GridTrack,
+    shape_circle, shape_capsule, shape_rounded_rect,
     card, panel, badge, tooltip, tab_strip, context_menu, breadcrumb, list_row,
 };
 pub use types::{
-    ScrollWheelId, DragId, Point, Modifiers, InputEvent, DragInProgress,
-    AnimCurve, Anim, Lerp, Transition, TransitionKind, SlideDirection,
-    Transform, BlendMode,
+    ScrollWheelId, DragId, Point, Modifiers, DragInProgress,
+    AnimCurve, Anim, Lerp,
+    Transform,
 };
-pub use lazy::{lazy_vstack, lazy_vstack_padded, lazy_hstack};
 pub use layout::{
     layout as layout_view, Constraints, Size, Rect, LaidOut,
     Decoration, DecoShadow, EdgesPhys, LayoutCtx,
     FontMetricsProvider, MockFontMetrics,
 };
 pub use paint::{paint, paint_into};
-pub use hit_test::{
-    hit_test_click, hit_test_double_click, hit_test_right_click,
-    hit_test_scroll, hit_test_drag_begin, hit_test_hover, HitTarget,
-};
+pub use hit_test::hit_test_click;
 pub use scroll::{
     ScrollState,
     scroll_state, set_scroll_state, with_scroll_state, apply_scroll_delta,
-    forget as forget_scroll_state,
 };
 pub use view::scroll_view;
 pub use state::{
     HostState, HOST_STATE, with_host_state, with_host_state_mut,
-    reconcile, LifecycleEvent,
-    AnimRegistry, anim_start, anim_tick, anim_progress, anim_any_active, anim_gc,
+    AnimRegistry, anim_tick, anim_any_active, anim_gc,
 };
-pub use types::{FocusId, Key, KeyEquivalent};
+pub use types::{Key, KeyEquivalent};

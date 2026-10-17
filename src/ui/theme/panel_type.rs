@@ -1,8 +1,8 @@
 //! The five sizes a panel is allowed to set text in.
 //!
 //! Before this, each panel picked its own numbers.  The `Cc` panel drew
-//! its two titles through `ViewPainter::ui_text` — SF Pro at the
-//! startup chrome size, weight 600 — and everything else in the
+//! its two titles in SF Pro at the startup chrome size, weight 600,
+//! and everything else in the
 //! terminal's mono cell.  The settings panel, built later, picked 17 /
 //! 13 / 12 / 11 / 10.5 pt by hand.  The result was a settings panel
 //! whose **row labels** were the size of every other panel's **title**,
