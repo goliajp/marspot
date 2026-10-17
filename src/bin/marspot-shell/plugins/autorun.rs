@@ -134,6 +134,7 @@ impl Memory {
         self.exhausted
     }
     /// Whether the policy is waiting to see if its last action took.
+    #[cfg(test)]
     pub fn is_waiting(&self) -> bool {
         self.acted.is_some()
     }
