@@ -203,7 +203,7 @@ pub fn entry_is_live_with(entry: &SessionEntry, written_us: u64, proc_start_us: 
 #[cfg(test)]
 mod tests {
     use super::super::test_support::sample_entry;
-    use crate::test_env::sandbox_state_dir;
+    use crate::test_env::{ChildGuard, sandbox_state_dir};
     use super::super::{session_dir, write_session_entry};
     use super::*;
     use std::time::{Duration, Instant};
@@ -348,11 +348,13 @@ mod tests {
         let bin = session_dir(11).join("marspot-session");
         std::fs::create_dir_all(session_dir(11)).unwrap();
         std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
-        let mut child = std::process::Command::new(&bin)
-            .args(["--ignored", "--exact", "session_registry::cache::tests::helper_sleeps"])
-            .env(HELPER_ENV, "1")
-            .spawn()
-            .unwrap();
+        let mut child = ChildGuard::new(
+            std::process::Command::new(&bin)
+                .args(["--ignored", "--exact", "session_registry::cache::tests::helper_sleeps"])
+                .env(HELPER_ENV, "1")
+                .spawn()
+                .unwrap(),
+        );
         let pid = child.id() as i32;
         // the child's image is ours until it has exec'd
         let deadline = Instant::now() + Duration::from_secs(5);

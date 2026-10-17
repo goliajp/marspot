@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.239"  # observes processes and sessions once, sends only what changed, and signals only the process it decided about
-core    = "0.12.284"  # signals a session only while its pid is still that session
-session = "0.11.147"  # its registry entry is written durably and escapes newlines
+shell   = "0.7.240"  # a binary it probes before an update is killed with its children when it does not answer
+core    = "0.12.285"  # a binary it probes before an update is killed with its children when it does not answer
+session = "0.11.148"  # a binary it probes before an update is killed with its children when it does not answer

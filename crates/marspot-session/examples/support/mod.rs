@@ -29,9 +29,13 @@ use marspot_term::shell_proto::{
 pub const COLS: u16 = 80;
 pub const ROWS: u16 = 24;
 
+/// A panic, not `process::exit`: the integration tests share this file,
+/// and an exit there ends the test binary without running a single
+/// destructor -- the session it spawned and that session's shell are
+/// left running.  A probe that panics still exits non-zero, which is
+/// all the scripts that run them look at.
 pub fn die(msg: impl std::fmt::Display) -> ! {
-    eprintln!("FAIL: {msg}");
-    std::process::exit(1);
+    panic!("FAIL: {msg}");
 }
 
 /// Clear FD_CLOEXEC so an inherited fd survives the child's exec.  L2
@@ -249,6 +253,17 @@ impl Session {
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// However the probe or test ends, its sessions do not outlive it.
+/// The session's shell goes with it: the kernel hangs up the pty when
+/// the last holder of its master dies.
+impl Drop for Session {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            self.kill();
+        }
     }
 }
 
