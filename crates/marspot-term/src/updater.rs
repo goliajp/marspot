@@ -39,6 +39,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+mod verify;
+#[cfg(test)]
+mod stage_tests;
+
+use verify::verify_signature;
+
 /// How long to wait between background polls of the releases API after
 /// the initial startup check.  5 min: a self-used terminal wants fresh
 /// builds to land promptly, and one unauthenticated GitHub API call every
@@ -316,48 +322,6 @@ fn scrape_asset_url(body: &str, asset_name: &str) -> Option<String> {
     scrape_string(slice, "\"browser_download_url\"")
 }
 
-/// The release-signing public key, checked in at
-/// `keys/marspot-update.pub` and baked into the binary so the trust
-/// anchor travels with the code instead of the filesystem.
-const UPDATE_PUBKEY_PEM: &str = include_str!("../../../keys/marspot-update.pub");
-
-/// Verify `file` against its detached `sig` using the embedded
-/// public key.  ECDSA P-256 / SHA-256 via `/usr/bin/openssl dgst`
-/// (LibreSSL — see the module doc for why not Ed25519).
-fn verify_signature(file: &Path, sig: &Path) -> Result<(), String> {
-    let pubkey = cache_dir().join("download/marspot-update.pub");
-    if let Some(parent) = pubkey.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir pubkey dir: {}", e))?;
-    }
-    std::fs::write(&pubkey, UPDATE_PUBKEY_PEM).map_err(|e| format!("write pubkey: {}", e))?;
-    verify_signature_with(&pubkey, file, sig)
-}
-
-/// Inner verify, parameterised on the public-key path so tests can
-/// run against a throwaway keypair.
-fn verify_signature_with(pubkey: &Path, file: &Path, sig: &Path) -> Result<(), String> {
-    let out = Command::new("/usr/bin/openssl")
-        .arg("dgst")
-        .arg("-sha256")
-        .arg("-verify")
-        .arg(pubkey)
-        .arg("-signature")
-        .arg(sig)
-        .arg(file)
-        .output()
-        .map_err(|e| format!("spawn openssl: {}", e))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "openssl dgst -verify exited {}: {}{}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout).trim(),
-            String::from_utf8_lossy(&out.stderr).trim(),
-        ))
-    }
-}
-
 /// Compare semver-shaped strings.  Returns true when `candidate`
 /// strictly orders later than `current`.  Strict enough for the
 /// `MAJOR.MINOR.PATCH` strings cargo produces; tolerant of an
@@ -498,6 +462,7 @@ fn find_named_file(dir: &Path, name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::verify::{UPDATE_PUBKEY_PEM, verify_signature_with};
     use super::*;
 
     #[test]

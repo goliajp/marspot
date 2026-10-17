@@ -339,9 +339,15 @@ mod tests {
         }
         sleep(Duration::from_millis(5));
         let r = w.end().unwrap();
+        // The phases tile the iteration -- each one ends at the instant
+        // the next begins -- so they add up to the total exactly, on any
+        // host.  The slack is for rounding each span to nanoseconds, not
+        // for time: the 5 ms above lands in the merged last slot, and
+        // losing it is the failure this looks for.
         let sum: Duration = r.phases.iter().map(|(_, d)| *d).sum();
+        let rounding = Duration::from_nanos(MAX_PHASES as u64 * 2 + 1);
         assert!(
-            sum <= r.total && r.total - sum < Duration::from_millis(2),
+            sum <= r.total && r.total - sum <= rounding,
             "phases summed to {sum:?} against a total of {:?}",
             r.total
         );

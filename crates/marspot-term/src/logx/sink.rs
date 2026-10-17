@@ -191,12 +191,12 @@ mod tests {
     /// case was handled; the missing-parent case was not.
     #[test]
     fn writing_after_the_log_directory_is_deleted_recreates_it() {
-        let dir: PathBuf =
-            std::env::temp_dir().join(format!("marspot-logx-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        // SAFETY: nextest gives each test its own process, and the sink
-        // singleton below is initialised from this value.
-        unsafe { std::env::set_var("MARSPOT_LOG_DIR", &dir) };
+        // The sink is a process-wide singleton initialised from this
+        // variable, so the guard is held for the whole test.
+        let tmp = crate::test_env::TempDir::new("logx");
+        let dir: PathBuf = tmp.join("logs");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("MARSPOT_LOG_DIR", &dir);
 
         crate::logx::init("test");
         crate::lx_info!("logx.test", "before the cleaner");
@@ -221,7 +221,6 @@ mod tests {
             body.contains("after the cleaner"),
             "the new file should hold the lines written after the deletion"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A process that logs rarely follows a rotation made by another

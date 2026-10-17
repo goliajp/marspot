@@ -71,6 +71,11 @@ snapshot = []
 #     cargo build --features bench-pty --bin marspot
 bench-pty = ["marspot-term/bench-pty"]
 
+# The updater also trusts a throwaway signing key in a sandbox — see
+# the feature of the same name in crates/marspot-term.  Only the
+# end-to-end update tests build with it.
+test-update-key = ["marspot-term/test-update-key"]
+
 [dependencies]
 # The zero-GUI terminal engine (parser/grid/terminal/pty/shelld/...).
 # Extracted (target #4) so a light, Metal-free per-session process (L3)

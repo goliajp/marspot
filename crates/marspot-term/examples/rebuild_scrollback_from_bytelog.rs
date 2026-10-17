@@ -42,8 +42,6 @@
 //! differ from the original where the pane was resized mid-history
 //! (the replay runs at one fixed width); content is complete.
 
-use std::io::Read;
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if !(6..=8).contains(&args.len()) {
@@ -102,20 +100,8 @@ fn main() {
         "  replaying {} segment(s), {total} bytes total",
         segments.len()
     );
-    let mut buf = vec![0u8; 1 << 20];
-    let mut fed: u64 = 0;
     let started = std::time::Instant::now();
-    for seg in &segments {
-        let mut f = std::fs::File::open(seg).expect("open bytelog segment");
-        loop {
-            let n = f.read(&mut buf).expect("read bytelog segment");
-            if n == 0 {
-                break;
-            }
-            term.feed(&buf[..n]);
-            fed += n as u64;
-        }
-    }
+    let fed = marspot_term::bytelog::replay(&segments, &mut term).expect("replay the bytelog");
     term.grid().scrollback_flush_for_handoff();
 
     let lines = term.grid().scrollback_len();

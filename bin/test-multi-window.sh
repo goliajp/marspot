@@ -96,7 +96,7 @@ PY
 echo "==> launching marspot-shell"
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
   MARSPOT_LOG_CORE=debug MARSPOT_DEV_CARET_PROBE=1 \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 wait_for() { # tag, seconds
@@ -237,7 +237,7 @@ rm -f "$APPLOG" "$MARSPOT_STATE_DIR/shell-state.bin" \
 
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
   MARSPOT_LOG_CORE=debug MARSPOT_DEV_EXTRA_WINDOWS=1 \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 wait_for WINDOW_ADOPTED 30 || fail "the fresh window was never adopted by the core"
@@ -309,7 +309,7 @@ rm -f "$APPLOG" "$MARSPOT_STATE_DIR/shell-state.bin" \
 
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
   MARSPOT_DEV_EXTRA_WINDOWS=1 MARSPOT_DEV_CLOSE_EXTRA=1 \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 SHELL_PID=$!
 
@@ -344,13 +344,12 @@ rm -f "$APPLOG" "$MARSPOT_STATE_DIR/shell-state.bin" \
 > "$RUNLOG"
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
   MARSPOT_LOG_CORE=debug MARSPOT_DEV_EXTRA_WINDOWS=1 \
-  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 wait_for WINDOW_ADOPTED 30 || fail "the second window never came up for the swap phase"
 sleep 2
 mark=$(wc -l < "$APPLOG")
-CORE_PID=$(pgrep -f "$MARSPOT_STATE_DIR/binaries/.*/marspot-core( |$)" | head -1)
-[[ -z "$CORE_PID" ]] && CORE_PID=$(pgrep -f "$CORE_BIN( |$)" | head -1)
+CORE_PID=$(dev_core_pids | head -1)
 [[ -n "$CORE_PID" ]] || fail "could not find the running core to kill"
 echo "==> SIGKILL core pid $CORE_PID"
 kill -9 "$CORE_PID"
@@ -406,7 +405,7 @@ cp "$CORE_BIN" "$MARSPOT_STATE_DIR/binaries/pending/marspot-core"
 "$SHELL_BIN" --trigger >/dev/null 2>&1 || fail "--trigger did not reach the shell"
 
 after7() { tail -n "+$((mark + 1))" "$APPLOG"; }
-for i in $(seq 1 300); do
+for i in $(seq 1 600); do
   after7 | grep -q 'UPDATE_SWAP' && break
   sleep 0.1
 done
@@ -468,20 +467,28 @@ drag_run() {
   python3 - "$MARSPOT_STATE_DIR" "$seed" <<'PY' || exit 1
 import struct, sys, pathlib
 d = pathlib.Path(sys.argv[1])
-grids = [tuple(int(v) for v in w.split('x')) for w in sys.argv[2].split(',')]
-def pane():
-    return struct.pack('<QHH', 0, 0, 0)
-body = struct.pack('<II', 0xA5505010, 2) + struct.pack('<HH', 0, len(grids))
+# "CxR" is a grid of live slots; a trailing "d" makes its last slot a
+# dormant placeholder (state v3, flags bit 0).
+grids = []
+for w in sys.argv[2].split(','):
+    dormant_last = w.endswith('d')
+    c, r = (int(v) for v in w.rstrip('d').split('x'))
+    grids.append((c, r, dormant_last))
+def pane(flags):
+    return struct.pack('<QBHH', 0, flags, 0, 0)
+body = struct.pack('<II', 0xA5505010, 3) + struct.pack('<HH', 0, len(grids))
 frames = struct.pack('<IIH', 0xA5505011, 2, len(grids))
-for i, (c, r) in enumerate(grids):
-    body += struct.pack('<HHHH', c, r, 0, c * r) + b''.join(pane() for _ in range(c * r))
+for i, (c, r, dormant_last) in enumerate(grids):
+    n = c * r
+    flags = [1 if dormant_last and k == n - 1 else 0 for k in range(n)]
+    body += struct.pack('<HHHH', c, r, 0, n) + b''.join(pane(f) for f in flags)
     frames += struct.pack('<Idddd', 0, 100.0 + i * 950.0, 400.0, 900.0, 600.0)
 (d / 'shell-state.bin').write_bytes(body)
 (d / 'window-state.bin').write_bytes(frames)
 PY
   MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
     MARSPOT_DEV_DRAG="$ending" \
-    nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+    nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
   disown
   wait_for DEV_DRAG_DONE 40 || fail "[$ending $seed] the drag seam never released"
   # The landing reshapes, reattaches and saves off the release; give
@@ -503,10 +510,12 @@ echo "    split-right from 2x1 onto 1x1 -> $(echo $got | tr '\n' '|')"
 [[ "$(sed -n 2p <<<"$got")" == "2 1 2 0" ]] \
   || fail "target 1x1 should become 1x2 (cols 2) with two live panes, got: $(sed -n 2p <<<"$got")"
 
-# The last live pane dragged out of a window closes that window.
-drag_run split-right "1x1,1x1"
+# The last live pane dragged out of a window closes that window.  A
+# lone pane has no title strip to grab, so the source is a live pane
+# beside a placeholder — the shape a window has after a move-out.
+drag_run split-right "2x1d,1x1"
 got=$(saved)
-echo "    split-right from 1x1 onto 1x1 -> $(echo $got | tr '\n' '|')"
+echo "    split-right from 2x1 (one live, one dormant) onto 1x1 -> $(echo $got | tr '\n' '|')"
 [[ "$(wc -l <<<"$got" | tr -d ' ')" == "1" ]] \
   || fail "the emptied source window should have closed, saved windows: $(echo $got | tr '\n' '|')"
 [[ "$got" == "2 1 2 0" ]] \

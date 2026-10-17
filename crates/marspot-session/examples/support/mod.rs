@@ -29,9 +29,13 @@ use marspot_term::shell_proto::{
 pub const COLS: u16 = 80;
 pub const ROWS: u16 = 24;
 
+/// A panic, not `process::exit`: the integration tests share this file,
+/// and an exit there ends the test binary without running a single
+/// destructor -- the session it spawned and that session's shell are
+/// left running.  A probe that panics still exits non-zero, which is
+/// all the scripts that run them look at.
 pub fn die(msg: impl std::fmt::Display) -> ! {
-    eprintln!("FAIL: {msg}");
-    std::process::exit(1);
+    panic!("FAIL: {msg}");
 }
 
 /// Clear FD_CLOEXEC so an inherited fd survives the child's exec.  L2
@@ -220,21 +224,20 @@ impl Session {
     /// A wait loop needs this one: dying because a single read came up
     /// empty turns "not published yet" into a failure, which is what made
     /// the selection probe flake inside the suite while passing alone.
+    /// The screen and the cursor of one published frame, or `None`
+    /// while there is none to read (an image that just took over has not
+    /// published yet).
+    pub fn try_screen_and_cursor(&self, cols: u16, rows: u16) -> Option<(Vec<String>, (u16, u16))> {
+        let mut buf = Vec::new();
+        let f = self.reader.read(&mut buf, &mut Vec::new())?;
+        let cursor = (f.cursor_col, f.cursor_row);
+        Some((rows_of(&buf, cols, rows), cursor))
+    }
+
     pub fn try_screen(&self, cols: u16, rows: u16) -> Option<Vec<String>> {
         let mut buf = Vec::new();
         self.reader.read(&mut buf, &mut Vec::new())?;
-        Some(
-            (0..rows)
-                .map(|r| {
-                    let start = r as usize * cols as usize;
-                    buf.get(start..start + cols as usize)
-                        .map(|row| row.iter().map(|c| c.ch).collect::<String>())
-                        .unwrap_or_default()
-                        .trim_end()
-                        .to_string()
-                })
-                .collect(),
-        )
+        Some(rows_of(&buf, cols, rows))
     }
 
     pub fn cursor(&self) -> (u16, u16) {
@@ -249,6 +252,17 @@ impl Session {
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// However the probe or test ends, its sessions do not outlive it.
+/// The session's shell goes with it: the kernel hangs up the pty when
+/// the last holder of its master dies.
+impl Drop for Session {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            self.kill();
+        }
     }
 }
 
@@ -276,21 +290,25 @@ pub fn cleanup(sessions: &mut Vec<Session>) {
 /// session's listener, so a probe that wants to type afterwards needs this
 /// rather than `Session::send_char`.
 pub fn send_char_on(stream: &UnixStream, c: char) {
+    let mut w = stream;
+    key_frame(c)
+        .write_to(&mut w)
+        .unwrap_or_else(|e| die(format!("write key frame on reattach: {e}")));
+    w.flush().ok();
+}
+
+/// The frame L2 sends for the key `c`.
+pub fn key_frame(c: char) -> Frame {
     let ev = MarspotKeyEvent {
         state: KeyState::Pressed,
         logical: LogicalKey::Char(c),
         text: Some(c.to_string()),
         ..Default::default()
     };
-    let frame = Frame::new(
+    Frame::new(
         MsgType::KeyEvent,
         encode_key_event(&event_to_wire(&ev, Modifiers::default()), FIRST_WINDOW_ID),
-    );
-    let mut w = stream;
-    frame
-        .write_to(&mut w)
-        .unwrap_or_else(|e| die(format!("write key frame on reattach: {e}")));
-    w.flush().ok();
+    )
 }
 
 /// Connect to a session's listener and complete the handshake, the way L2
@@ -325,4 +343,17 @@ pub fn reattach(sock: &Path, secs: u64) -> Option<UnixStream> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn rows_of(buf: &[marspot_term::grid::Cell], cols: u16, rows: u16) -> Vec<String> {
+    (0..rows)
+        .map(|r| {
+            let start = r as usize * cols as usize;
+            buf.get(start..start + cols as usize)
+                .map(|row| row.iter().map(|c| c.ch).collect::<String>())
+                .unwrap_or_default()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
 }

@@ -7,7 +7,7 @@
 //! its own rectangles inline.
 //!
 //! A migration like that is supposed to move nothing on screen, and
-//! `tests/layout_geometry.rs` already says why that cannot be checked
+//! `tests/it/layout_geometry.rs` already says why that cannot be checked
 //! afterwards: "looks the same is not something a test can check later —
 //! so the rects go in here first". It says it about the view tree. The
 //! direct-draw side has no such file, so a migration could not be proven

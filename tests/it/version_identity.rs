@@ -71,11 +71,19 @@ fn a_layer_build_number_is_not_the_product_version() {
 fn the_newest_tag_matches_the_product_version() {
     let out = Command::new("git")
         .args(["-C", env!("CARGO_MANIFEST_DIR"), "tag", "--sort=-v:refname"])
-        .output();
-    let Ok(out) = out else {
-        eprintln!("SKIPPED: git not runnable here");
-        return;
-    };
+        .output()
+        .expect("git runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        // A copy of the tree that is not a checkout (a mirror synced to
+        // a test host, a source tarball) has no tags to compare with;
+        // any other failure of git is a failure.
+        if stderr.contains("not a git repository") {
+            eprintln!("SKIPPED: not a git checkout, so no tags: {}", stderr.trim());
+            return;
+        }
+        panic!("git tag failed ({}): {stderr}", out.status);
+    }
     let tags = String::from_utf8_lossy(&out.stdout);
     let Some(newest) = tags.lines().next() else {
         // Saying so matters: "no tags" and "the tag matches" are the

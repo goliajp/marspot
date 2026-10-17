@@ -1727,14 +1727,13 @@ impl ShellApp {
     /// the running process untouched.
     fn finish_probe(&mut self, ctx: &MarspotAppCtx, v: ProbeVerdict) {
         lx_event!("UPDATE_PROBE_DONE", "probe round finished", verdict = v.summary());
+        let plan = v.plan();
 
         // Quarantine whatever failed, before acting on whatever passed.
-        // A rejected candidate must leave `pending/` either way, or the
-        // next trigger retries the same dead binary forever.
-        if v.shell == Some(false) {
+        if plan.quarantine_shell {
             self.quarantine_rejected("shell", supervisor::BinaryTree::for_shell().and_then(|t| t.quarantine_pending()));
         }
-        if v.core == Some(false) {
+        if plan.quarantine_core {
             self.quarantine_rejected("core", self.binaries.quarantine_pending());
         }
 
@@ -1744,7 +1743,7 @@ impl ShellApp {
         // this, it boots the outgoing core (still in `current/` at exec
         // time) and a second probe + swap retires it seconds later —
         // two core starts, two L3 control reconnects, for one install.
-        if v.shell == Some(true) && v.core == Some(true) {
+        if plan.promote_core_before_exec {
             match self.binaries.promote_pending() {
                 Ok(()) => {
                     lx_event!(
@@ -1768,7 +1767,7 @@ impl ShellApp {
             }
         }
 
-        if v.shell == Some(true) {
+        if plan.then == supervisor::AfterProbe::ShellExec {
             // The successor opens ITS window 0 at the frame we hand
             // over, so hand over window 0's frame — not `ctx`'s.  This
             // path runs from the redraw pump, whose ctx is whichever
@@ -1785,7 +1784,7 @@ impl ShellApp {
             self.finish_shell_self_update(frame0);
             return;
         }
-        if v.core == Some(true) {
+        if plan.then == supervisor::AfterProbe::CoreSwap {
             self.perform_core_swap(ctx);
         }
     }
@@ -2068,14 +2067,7 @@ impl ShellApp {
     /// `auto_restart_disabled` if too many have happened recently.
     fn record_crash(&mut self) {
         let now = Instant::now();
-        self.crashes.push_back(now);
-        while let Some(t) = self.crashes.front() {
-            if now.duration_since(*t) > CRASH_WINDOW {
-                self.crashes.pop_front();
-            } else {
-                break;
-            }
-        }
+        supervisor::note_crash(&mut self.crashes, now, CRASH_WINDOW);
         sup_log::log(
             "CRASH",
             &format!("count={}/{}", self.crashes.len(), MAX_CRASHES_IN_WINDOW),
@@ -5111,6 +5103,15 @@ Usage:\n\
         _ => {}
     }
 
+    // The default SIGPIPE above is for the CLI's stdout.  The GUI shell
+    // writes to its core's socket, and a core that just died makes the
+    // next write a SIGPIPE: with the default action that ended the whole
+    // app silently before the supervisor could see the core was gone and
+    // start another.  Ignored, the write fails with EPIPE instead.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
     // Same reasoning as L2's loop: this thread runs the supervisor\n    // tick and every AppKit callback, and it was measured 100.8 s\n    // late during the 2026-08-11 incident.
     // Measured on an idle bench host with background load as the only
     // variable: at default QoS a frame's p99 went from 293 µs (idle)
@@ -5194,11 +5195,7 @@ Usage:\n\
     let restore_frame = std::env::var("MARSPOT_RESTORE_FRAME").ok().and_then(|s| {
         // SAFETY: startup path in main(), before any thread is spawned.
         unsafe { std::env::remove_var("MARSPOT_RESTORE_FRAME") };
-        let v: Vec<f64> = s.split(',').filter_map(|p| p.parse().ok()).collect();
-        match v[..] {
-            [x, y, w, h] if w > 0.0 && h > 0.0 => Some((x, y, w, h)),
-            _ => None,
-        }
+        supervisor::parse_restore_frame(&s)
     });
     // F3+6.1 — fall back to the persisted window-state.bin when the
     // env-var path (used by L1 self-execv to round-trip through itself)

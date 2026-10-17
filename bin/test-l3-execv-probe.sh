@@ -50,13 +50,12 @@ if [[ ! -x "$SHELL_BIN" || ! -x "$SESSION_BIN" ]]; then
 fi
 
 cleanup
-dev_ensure_shelld || fail "sandbox shelld"
 dev_wipe_state
 mkdir -p "$(dirname "$SUP_LOG")"
 rm -f "$SUP_LOG" 2>/dev/null || true; : > "$RUN_LOG"
 
 # --- 1. Boot until at least one L3 is driving a PTY ------------------
-nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 for _ in $(seq 1 100); do
   grep -q $'\tL3_SIGTERM_INSTALLED\t' "$SUP_LOG" 2>/dev/null && break
@@ -66,8 +65,8 @@ grep -q $'\tL3_SIGTERM_INSTALLED\t' "$SUP_LOG" 2>/dev/null \
   || fail "no L3 came up within 10 s"
 
 # macOS ships bash 3.2 — no mapfile.
-L3_COUNT=$(pgrep -f "$SESSION_BIN( |$)" 2>/dev/null | wc -l | tr -d ' ')
-TARGET_PID=$(pgrep -f "$SESSION_BIN( |$)" 2>/dev/null | head -1)
+L3_COUNT=$(dev_session_pids | wc -l | tr -d ' ')
+TARGET_PID=$(dev_session_pids | head -1)
 [[ -n "$TARGET_PID" ]] || fail "no live marspot-session processes after boot"
 echo "[1/3] boot OK — $L3_COUNT L3s up, probing against pid=$TARGET_PID"
 

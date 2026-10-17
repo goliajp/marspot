@@ -4,9 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Dev sandbox: run.sh's standalone marspot connects to a sandbox
-# shelld on its own MARSPOT_STATE_DIR, never the installed app's
-# daemon — so iterating here can't disturb the terminal you use.
+# Dev sandbox: run.sh's marspot runs on its own MARSPOT_STATE_DIR,
+# never the installed app's, so iterating here can't disturb the
+# terminal you use.
 source "$ROOT/bin/_dev-sandbox.sh"
 
 PROFILE=debug
@@ -26,15 +26,23 @@ for arg in "$@"; do
   esac
 done
 
-# Kill any previously-running instance up-front so the old window disappears
-# immediately, instead of lingering through the build.
-if pgrep -x marspot > /dev/null; then
-  echo "==> killing previous marspot instance(s)"
-  killall marspot 2>/dev/null || true
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    pgrep -x marspot > /dev/null || break
-    sleep 0.1
-  done
+# Stop the instance a previous run.sh launched, so the old window
+# disappears immediately instead of lingering through the build.  Only
+# that one: its pid is in the sandbox, and it is checked to still be a
+# marspot of this sandbox before anything is sent to it.
+RUN_PID_FILE="$MARSPOT_STATE_DIR/run.pid"
+if [[ -f $RUN_PID_FILE ]]; then
+  prev=$(cat "$RUN_PID_FILE")
+  if _dev_is_ours "$prev"; then
+    echo "==> stopping the previous run.sh instance (pid $prev)"
+    kill -TERM "$prev" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "$prev" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -KILL "$prev" 2>/dev/null || true
+  fi
+  rm -f "$RUN_PID_FILE"
 fi
 
 mkdir -p build
@@ -58,21 +66,22 @@ if [ ! -x "$BIN" ]; then
   echo "error: binary not found at $BIN" >&2
   exit 1
 fi
-# RFC-003: shelld retired.  Standalone marspot now spawns in-process
-# Sessions per pane (src/main.rs).  No daemon to bring up.
-
 echo "==> launching $BIN"
 # Fully detach stdio so the child outlives this script.  Without redirecting,
 # closing the script's stdin/out/err can take marspot down with it on macOS.
 # nohup additionally ignores SIGHUP for safety.
 nohup "$BIN" > /dev/null 2>&1 < /dev/null &
+pid=$!
 disown
+mkdir -p "$MARSPOT_STATE_DIR"
+echo "$pid" > "$RUN_PID_FILE"
+dev_record_pid "$pid"
 
-# Wait for the process to actually appear in the process list before returning,
-# so callers chaining `./bin/run.sh && pgrep marspot` don't race.  Up to ~2s.
+# Return once the process is up, so callers chaining on run.sh don't
+# race it.  Up to ~2s.
 for _ in $(seq 1 40); do
-  pgrep -x marspot > /dev/null && exit 0
+  _dev_is_ours "$pid" && exit 0
   sleep 0.05
 done
-echo "warn: marspot did not appear in process list within 2s" >&2
+echo "warn: marspot (pid $pid) is not running 2s after launch" >&2
 exit 1

@@ -20,11 +20,15 @@
 //! CPU is ~0. With neither env var set it stays fully standalone
 //! (self-creates the region, no input source) for the dev/test path.
 
+mod control_reader;
 mod control_writer;
 mod snapshot_writer;
+use control_reader::ControlReaders;
 use control_writer::ControlWriter;
 use snapshot_writer::SnapshotWriter;
+mod handoff;
 mod local_session;
+mod pty_reader;
 mod reply_guard;
 mod uds_server;
 
@@ -47,13 +51,15 @@ use marspot_term::scrollback_search::{
     spawn_search_merged, LiveGridSnapshot, SearchOpts, SearchWorker,
 };
 use marspot_term::shell_proto::{
-    decode_get_selection_text, decode_grid_resize, decode_grid_scroll, decode_key_event,
-    decode_paste, decode_search_cancel, decode_search_scrollback,
-    encode_search_results, encode_selection_text, wire_to_event, Frame, MsgType,
-    WireSearchHit, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
+    encode_search_results, encode_selection_text, Frame, MsgType, WireSearchHit,
+    DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
 };
 use marspot_term::session_state::{PendingPage, SessionState};
 
+use handoff::{
+    ENV_HANDOFF_MANIFEST, L3Handoff, handoff_manifest_path, should_execv_on_sigterm,
+    try_resume_handoff, write_handoff_manifest,
+};
 use local_session::LocalSession;
 
 /// RFC-003 step 1c. Two session backends coexist:
@@ -420,157 +426,22 @@ impl Drop for MappedFile {
     }
 }
 
-/// RFC-003 §6 Amendment 16 — L3 self-execv handoff (L4 shelld model).
-///
-/// On SIGTERM, the L3 looks at the `current/marspot-session` binary
-/// next door.  If its MARSPOT_FP fingerprint differs from this
-/// process's rodata fingerprint, the L3 stages an execv handoff:
-///
-///   1. clear CLOEXEC on PTY master fd + UDS listener fd
-///   2. write Terminal snapshot to `sessions/<id>/state.bin`
-///   3. write manifest TSV to /tmp keyed by pid
-///   4. set env sentinel `MARSPOT_L3_HANDOFF_MANIFEST=<path>`
-///   5. `execv("current/marspot-session", argv)`
-///
-/// PID is preserved across execv; the master fd / listener fd / shell
-/// child / PTY tty session are all unchanged.  The new image detects
-/// the env sentinel at boot, reads the manifest, and rebuilds
-/// LocalSession + SessionListener via `from_handoff` instead of
-/// forkpty + bind.  L2 sees a brief read pause on its control
-/// channel while the new image rebinds its reader; keystrokes resume
-/// transparently.
-///
-/// Fingerprint-match (or missing `current/`) → fall through to the
-/// user-quit cleanup path (state.bin + clean exit, shell SIGHUPs).
-const ENV_HANDOFF_MANIFEST: &str = "MARSPOT_L3_HANDOFF_MANIFEST";
-// Manifest version 2 (2026-06-17): added optional `control_stream_fd`
-// so the L3 self-execv can carry the adopted L2↔L3 control UnixStream
-// across the image swap.  Without it the stream's fd kept its default
-// CLOEXEC=1, closed across execv, and L2 saw EOF + had no auto-reconnect
-// → user couldn't type for many minutes after every install.
-// Forward-compat: a v1 manifest is still accepted (`control_stream_fd`
-// defaults to -1, meaning "no inherited stream — wait for NewClient").
-const HANDOFF_MANIFEST_VERSION: u32 = 2;
-const HANDOFF_MANIFEST_MIN_COMPAT: u32 = 1;
-
-struct L3Handoff {
-    master_fd: RawFd,
-    child_pid: i32,
-    listen_fd: RawFd,
-    cols: u16,
-    rows: u16,
-    /// Adopted L2↔L3 control UnixStream raw fd, or `-1` if there was
-    /// no live control stream when the execv handoff fired (which
-    /// happens when L2 is mid-swap and the previous client EOF'd
-    /// before NewClient adopted a new one).
-    control_stream_fd: RawFd,
-}
-
-fn handoff_manifest_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(format!(
-        "/tmp/marspot-session-handoff.{}.tsv",
-        std::process::id()
-    ))
-}
-
-fn write_handoff_manifest(h: &L3Handoff, path: &std::path::Path) -> std::io::Result<()> {
-    let body = format!(
-        "version={}\nmaster_fd={}\nchild_pid={}\nlisten_fd={}\ncols={}\nrows={}\ncontrol_stream_fd={}\n",
-        HANDOFF_MANIFEST_VERSION,
-        h.master_fd, h.child_pid, h.listen_fd, h.cols, h.rows,
-        h.control_stream_fd,
-    );
-    let tmp = path.with_extension("tsv.tmp");
-    std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L3Handoff> {
-    let body = std::fs::read_to_string(path)?;
-    let mut fields = std::collections::HashMap::new();
-    for line in body.lines() {
-        let line = line.trim();
-        if line.is_empty() { continue; }
-        if let Some((k, v)) = line.split_once('=') {
-            fields.insert(k.trim().to_string(), v.trim().to_string());
-        }
-    }
-    let inv = |k: &str| std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!("manifest bad/missing {k}"),
-    );
-    let version: u32 = fields.get("version").ok_or_else(|| inv("version"))?
-        .parse().map_err(|_| inv("version"))?;
-    if !(HANDOFF_MANIFEST_MIN_COMPAT..=HANDOFF_MANIFEST_VERSION).contains(&version) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "manifest version {version} not in [{HANDOFF_MANIFEST_MIN_COMPAT}, {HANDOFF_MANIFEST_VERSION}]"
-            ),
-        ));
-    }
-    // v1 lacked control_stream_fd — default to -1 (no inherited stream).
-    let control_stream_fd: RawFd = fields
-        .get("control_stream_fd")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(-1);
-    Ok(L3Handoff {
-        master_fd: fields.get("master_fd").ok_or_else(|| inv("master_fd"))?
-            .parse().map_err(|_| inv("master_fd"))?,
-        child_pid: fields.get("child_pid").ok_or_else(|| inv("child_pid"))?
-            .parse().map_err(|_| inv("child_pid"))?,
-        listen_fd: fields.get("listen_fd").ok_or_else(|| inv("listen_fd"))?
-            .parse().map_err(|_| inv("listen_fd"))?,
-        cols: fields.get("cols").ok_or_else(|| inv("cols"))?
-            .parse().map_err(|_| inv("cols"))?,
-        rows: fields.get("rows").ok_or_else(|| inv("rows"))?
-            .parse().map_err(|_| inv("rows"))?,
-        control_stream_fd,
-    })
-}
-
-fn try_resume_handoff() -> Option<L3Handoff> {
-    let path = std::env::var(ENV_HANDOFF_MANIFEST).ok()?;
-    unsafe { std::env::remove_var(ENV_HANDOFF_MANIFEST); }
-    let path = std::path::PathBuf::from(path);
-    match read_handoff_manifest(&path) {
-        Ok(h) => {
-            let _ = std::fs::remove_file(&path);
-            Some(h)
-        }
-        Err(e) => {
-            lx_warn!(
-                "l3.handoff.manifest_read_failed",
-                &format!("{e}; cold start"),
-                path = path.display()
-            );
-            let _ = std::fs::remove_file(&path);
-            None
-        }
-    }
-}
-
-/// Read the MARSPOT_FP=<sha>|<ts>|END rodata marker out of a binary.
-/// Used by the SIGTERM handler to decide between execv-handoff and
-/// user-quit cleanup.
-fn read_binary_fingerprint(path: &std::path::Path) -> Option<String> {
-    use std::io::Read;
-    let mut f = std::fs::File::open(path).ok()?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).ok()?;
-    let needle = b"MARSPOT_FP=";
-    let start = buf.windows(needle.len()).position(|w| w == needle)?;
-    let tail = &buf[start..];
-    let end_off = tail.windows(4).position(|w| w == b"|END")?;
-    std::str::from_utf8(&tail[..end_off]).ok().map(|s| s.to_string())
-}
-
 fn clear_cloexec(fd: RawFd) -> std::io::Result<()> {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFD);
         if flags < 0 { return Err(std::io::Error::last_os_error()); }
         if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+fn set_cloexec(fd: RawFd) -> std::io::Result<()> {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags < 0 { return Err(std::io::Error::last_os_error()); }
+        if libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
@@ -587,6 +458,8 @@ fn do_l3_execv_swap(
     poke: Option<ControlWriter>,
 ) -> std::io::Result<()> {
     let started = Instant::now();
+    let mut local = local;
+    local.quiesce_for_handoff();
     let (master_fd, child_pid, terminal, cols, rows) = local.extract_for_handoff();
 
     // v5 LIVE snapshot (RFC-004 C.1 amendment): the TUI on this PTY
@@ -665,23 +538,6 @@ fn do_l3_execv_swap(
     Err(err)
 }
 
-/// On SIGTERM, decide whether to execv (binary update) or clean-exit
-/// (user quit / non-update SIGTERM).  Returns true when caller should
-/// proceed with execv via `do_l3_execv_swap`.
-fn should_execv_on_sigterm() -> bool {
-    let Ok(tree) = marspot_term::binary_tree::BinaryTree::default_for("marspot-session") else {
-        return false;
-    };
-    let current = tree.current();
-    if !current.exists() {
-        return false;
-    }
-    let Some(target_fp) = read_binary_fingerprint(&current) else {
-        return false;
-    };
-    let self_fp = marspot_term::MARSPOT_FP_TERM;
-    target_fp != self_fp
-}
 
 /// Placeholder geometry until L2 drives a real resize (later step).
 const INITIAL_COLS: u16 = 80;
@@ -804,7 +660,7 @@ fn handle_paste(session: &mut SessionImpl, text: &str) {
 /// exit (`CoreGone`): the surviving shelld session is re-attached by the
 /// next core, so an orphaned engine would only leak (see `CoreGone`).
 /// No env var → standalone, no input source, no writer.
-fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<ControlWriter> {
+fn setup_control_socket(readers: &mut ControlReaders, tx: Sender<SessionEvent>) -> Option<ControlWriter> {
     let fd: RawFd = match std::env::var(ENV_CONTROL_FD) {
         Ok(s) => match s.parse() {
             Ok(fd) => fd,
@@ -838,7 +694,7 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<ControlWriter> {
     lx_info!("session.control_socket.attached", "control socket fd inherited", fd = fd);
     // The inherited-fd path runs at generation 0; if it dies, that's a
     // genuine "no client left" (not a stale-reader race).
-    spawn_control_reader(stream, tx, 0);
+    readers.spawn(stream, tx, 0);
     match ControlWriter::new(writer) {
         Ok(w) => Some(w),
         Err((e, _)) => {
@@ -854,132 +710,6 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<ControlWriter> {
             None
         }
     }
-}
-
-/// RFC-003 step 2e — frame-dispatch loop for the L2↔L3 control socket.
-/// Shared by both the inherited-fd path (`setup_control_socket`) and
-/// the UDS accept path (`uds_server::handshake`) so both ends speak
-/// the same protocol and unknown-frame handling lives in exactly one
-/// place.  `generation` tags the CoreGone emitted on EOF so a stale
-/// reader (from a swapped-out L2 socket) can't null the current poke.
-fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, generation: u64) {
-    std::thread::spawn(move || loop {
-        match Frame::read_from(&mut reader) {
-            Ok(Some(f)) => match f.msg_type {
-                MsgType::KeyEvent => {
-                    // The trailing window id is an L1↔L2 concern; a
-                    // session belongs to a pane, and a pane does not
-                    // care which window draws it.
-                    if let Ok((w, _window_id)) = decode_key_event(&f.payload) {
-                        let (e, m) = wire_to_event(w);
-                        if tx.send(SessionEvent::Key(e, m)).is_err() {
-                            break;
-                        }
-                    }
-                }
-                MsgType::GridResize => {
-                    if let Ok((cols, rows)) = decode_grid_resize(&f.payload)
-                        && tx.send(SessionEvent::Resize(cols, rows)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::GridScroll => {
-                    if let Ok(off) = decode_grid_scroll(&f.payload)
-                        && tx.send(SessionEvent::Scroll(off)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::GetSelectionText => {
-                    if let Ok((seq, a, fo, bw)) = decode_get_selection_text(&f.payload)
-                        && tx.send(SessionEvent::GetSelection(seq, a, fo, bw)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::Paste => {
-                    if let Ok(text) = decode_paste(&f.payload)
-                        && tx.send(SessionEvent::Paste(text)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::PaneHoldGrid => {
-                    if let Ok((_sid, on)) =
-                        marspot_term::shell_proto::decode_pane_hold_grid(&f.payload)
-                        && tx.send(SessionEvent::HoldGrid(on)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::PaneResetAttrs => {
-                    if marspot_term::shell_proto::decode_pane_reset_attrs(&f.payload)
-                        .is_ok()
-                        && tx.send(SessionEvent::ResetAttrs).is_err()
-                    {
-                        break;
-                    }
-                }
-                MsgType::PaneRenderMarkup => {
-                    if let Ok((_sid, on)) =
-                        marspot_term::shell_proto::decode_pane_render_markup(&f.payload)
-                        && tx.send(SessionEvent::RenderMarkup(on)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::InjectInput => {
-                    if let Ok((_sid, bytes)) =
-                        marspot_term::shell_proto::decode_inject_input(&f.payload)
-                        && tx.send(SessionEvent::InjectInput(bytes)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::PaneTerminalFocus => {
-                    if let Ok((_sid, focused)) =
-                        marspot_term::shell_proto::decode_pane_terminal_focus(&f.payload)
-                        && tx.send(SessionEvent::TerminalFocus(focused)).is_err()
-                    {
-                        break;
-                    }
-                }
-                MsgType::PaneResetMouseReporting => {
-                    if marspot_term::shell_proto::decode_pane_reset_mouse_reporting(
-                        &f.payload,
-                    )
-                    .is_ok()
-                        && tx.send(SessionEvent::ResetMouseReporting).is_err()
-                    {
-                        break;
-                    }
-                }
-                MsgType::SearchScrollback => {
-                    if let Ok((query_id, case_sensitive, max_total, query)) =
-                        decode_search_scrollback(&f.payload)
-                        && tx
-                            .send(SessionEvent::SearchRequest {
-                                query_id,
-                                case_sensitive,
-                                max_total,
-                                query,
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                }
-                MsgType::SearchCancel => {
-                    if let Ok(query_id) = decode_search_cancel(&f.payload)
-                        && tx
-                            .send(SessionEvent::SearchCancelRequested(query_id))
-                            .is_err()
-                        {
-                            break;
-                        }
-                }
-                _ => {}
-            },
-            Ok(None) | Err(_) => {
-                let _ = tx.send(SessionEvent::CoreGone(generation));
-                break;
-            }
-        }
-    });
 }
 
 /// Holds frames while a program is drawing one (DEC mode 2026).
@@ -1258,6 +988,7 @@ fn main() {
     // L2-forwarded keystrokes, so the main loop sleeps in a single
     // place until there's real work.
     let (ev_tx, ev_rx): (Sender<SessionEvent>, Receiver<SessionEvent>) = mpsc::channel();
+    let mut readers = ControlReaders::new().expect("a socket pair to stop the control readers with");
 
     // Shared grid framebuffer first — it defines the geometry. When L2
     // owns the region it sized it to the on-screen cell rect; we must
@@ -1387,12 +1118,22 @@ fn main() {
             // CoreGone from any race during the swap is recognised
             // and ignored.
             if h.control_stream_fd >= 0 {
+                // The next execv hands over the writer, a duplicate of
+                // this descriptor; this one must not cross with it, or
+                // every update leaves one more open for good.
+                if let Err(e) = set_cloexec(h.control_stream_fd) {
+                    lx_warn!(
+                        "l3.execv.control_cloexec_failed",
+                        &format!("{e}"),
+                        stream_fd = h.control_stream_fd
+                    );
+                }
                 let stream = unsafe { UnixStream::from_raw_fd(h.control_stream_fd) };
                 match stream.try_clone() {
                     Ok(writer) => {
                         resumed_client_generation = 1;
                         resumed_poke = ControlWriter::new(writer).ok();
-                        spawn_control_reader(stream, ev_tx.clone(), 1);
+                        readers.spawn(stream, ev_tx.clone(), 1);
                         lx_event!(
                             "L3_EXECV_CONTROL_ADOPTED",
                             "adopted inherited L2 control stream across execv",
@@ -1544,7 +1285,7 @@ fn main() {
     // already adopted + a reader is running on it).
     let mut poke = match resumed_poke.take() {
         Some(s) => Some(s),
-        None => setup_control_socket(ev_tx.clone()),
+        None => setup_control_socket(&mut readers, ev_tx.clone()),
     };
     // Scrollback view offset L2 last asked us to publish (0 = live tail).
     let mut view_offset: u16 = 0;
@@ -2199,7 +1940,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 }
                 SessionEvent::NewClient(stream) => {
                     // Adopt the validated stream as the control
-                    // socket. spawn_control_reader fires inbound
+                    // socket. Its reader fires inbound
                     // frames as SessionEvent::Key/Resize/etc just
                     // like the inherited-fd path.  Bump the
                     // generation BEFORE spawning so any in-flight
@@ -2210,7 +1951,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     match stream.try_clone() {
                         Ok(writer) => {
                             poke = ControlWriter::new(writer).ok();
-                            spawn_control_reader(stream, ev_tx.clone(), this_gen);
+                            readers.spawn(stream, ev_tx.clone(), this_gen);
                             // RFC-003 §6 Amendment 7: republish the
                             // current grid + fire GridReady so L2 has
                             // a poke to read the shm we already
@@ -2536,6 +2277,25 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     }
     // RFC-003 §6 Amendment 16 — post-loop dispatcher.
     if want_shutdown {
+        if execv_verdict == Some(true) {
+            // Input the readers queued after the loop's last drain would
+            // die with this image.  Stopped first, they queue no more;
+            // what they have not read stays in the socket, and the next
+            // image reads it.
+            readers.stop();
+            while let Ok(ev) = ev_rx.try_recv() {
+                match ev {
+                    SessionEvent::Key(e, m) => {
+                        handle_key(&mut session, e, m);
+                    }
+                    SessionEvent::Paste(text) => handle_paste(&mut session, &text),
+                    SessionEvent::InjectInput(bytes) => {
+                        let _ = session.write(&bytes);
+                    }
+                    _ => {}
+                }
+            }
+        }
         let id = session.id();
         let SessionImpl::Local(local) = session;
         // Only the probe can authorise an execv now; `None` means we

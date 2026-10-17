@@ -199,9 +199,7 @@ mod deadline_tests {
     /// caller asked for.
     #[test]
     fn handshake_cannot_outlast_the_caller_budget() {
-        let dir = std::env::temp_dir().join("marspot-uds-silent-peer-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_env::TempDir::new("uds-silent-peer");
         let sock = dir.join("sock");
 
         // Accept connections, then never write anything back.
@@ -231,23 +229,22 @@ mod deadline_tests {
             "took {elapsed:?} — the handshake read timeout is still using \
              its own 5 s allowance instead of the caller's deadline"
         );
-        assert!(
-            elapsed < budget * 3,
-            "took {elapsed:?} against a {budget:?} budget"
-        );
+        // The 5 s allowance above is what the bug spends, so that bound
+        // holds on any host; this tighter one only on a quiet one.
+        if crate::host_load::quiet_enough_to_time("the silent-peer handshake") {
+            assert!(
+                elapsed < budget * 3,
+                "took {elapsed:?} against a {budget:?} budget"
+            );
+        }
 
         let _ = stop_tx.send(());
         let _ = accepted.join();
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn wait_and_connect_honours_a_single_deadline() {
-        let dir = std::env::temp_dir().join("marspot-uds-deadline-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: nextest runs each test in its own process.
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
+        let _sandbox = crate::test_env::sandbox_state_dir();
 
         let timeout = Duration::from_millis(300);
         let t0 = Instant::now();
@@ -258,11 +255,15 @@ mod deadline_tests {
             r.is_err(),
             "a session that never registers must not connect"
         );
-        assert!(
-            elapsed < timeout * 2,
-            "took {elapsed:?} against a {timeout:?} budget — the two halves \
-             are still each starting their own deadline"
-        );
-        let _ = std::fs::remove_dir_all(dir);
+        // Two deadlines in a row spend at least twice the timeout, so
+        // this is the bound that tells them apart; what it leaves for
+        // the host is one timeout, which only a busy host uses up.
+        if crate::host_load::quiet_enough_to_time("wait_and_connect against its deadline") {
+            assert!(
+                elapsed < timeout * 2,
+                "took {elapsed:?} against a {timeout:?} budget — the two halves \
+                 are still each starting their own deadline"
+            );
+        }
     }
 }

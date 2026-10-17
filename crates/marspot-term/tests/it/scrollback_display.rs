@@ -33,48 +33,21 @@
 //!    reopen, every line surfaces.
 //!
 //! Each scenario owns a fresh tmp state dir + unique session id so
-//! parallel runs don't collide.  Env-var writes are serialised
-//! through `ENV_LOCK` (Rust `std::env` is process-global).
-
-use std::sync::Mutex;
+//! parallel runs don't collide, and holds the environment guard while
+//! it runs (Rust `std::env` is process-global).
 
 use marspot_term::grid::Cell;
 use marspot_term::terminal::Terminal;
+use marspot_term::test_env::{StateSandbox, sandbox_state_dir};
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct ScenarioState {
-    state_dir: std::path::PathBuf,
-    sid: u64,
-}
-
-impl ScenarioState {
-    fn new(label: &str, sid: u64) -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let dir =
-            std::env::temp_dir().join(format!("marspot-scrollback-display-{label}-{pid}-{n}"));
-        let session_dir = dir.join("sessions").join(sid.to_string());
-        std::fs::create_dir_all(&session_dir).expect("create session dir");
-        ScenarioState {
-            state_dir: dir,
-            sid,
-        }
-    }
-    fn apply_env(&self) {
-        unsafe {
-            std::env::set_var("MARSPOT_STATE_DIR", &self.state_dir);
-            std::env::set_var("MARSPOT_SESSION_ID", self.sid.to_string());
-        }
-    }
-}
-
-impl Drop for ScenarioState {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.state_dir);
-    }
+/// A state dir and session id of the scenario's own, set the way L3
+/// sets them.
+fn scenario(sid: u64) -> StateSandbox {
+    let mut sandbox = sandbox_state_dir();
+    std::fs::create_dir_all(sandbox.dir.join("sessions").join(sid.to_string()))
+        .expect("create session dir");
+    sandbox.env.set("MARSPOT_SESSION_ID", sid.to_string());
+    sandbox
 }
 
 /// Read the full viewport at `view_offset` as `Vec<String>`.
@@ -112,9 +85,7 @@ fn push_line(term: &mut Terminal, text: &str) {
 
 #[test]
 fn scenario1_scroll_down_content_visible() {
-    let _g = ENV_LOCK.lock().unwrap();
-    let state = ScenarioState::new("s1-content-visible", 1001);
-    state.apply_env();
+    let _state = scenario(1001);
 
     const COLS: u16 = 20;
     const ROWS: u16 = 5;
@@ -158,9 +129,7 @@ fn scenario1_scroll_down_content_visible() {
 
 #[test]
 fn scenario2_scroll_cap_matches_pushes() {
-    let _g = ENV_LOCK.lock().unwrap();
-    let state = ScenarioState::new("s2-cap-matches", 1002);
-    state.apply_env();
+    let _state = scenario(1002);
 
     const COLS: u16 = 16;
     const ROWS: u16 = 4;
@@ -209,9 +178,7 @@ fn scenario3_blanks_are_preserved_verbatim() {
     // dropping them at storage time silently deletes their content
     // and the user has no way to recover it (verified F3+12 → user
     // pointed at red-boxed blanks vanishing from history).
-    let _g = ENV_LOCK.lock().unwrap();
-    let state = ScenarioState::new("s3-blanks-preserved", 1003);
-    state.apply_env();
+    let _state = scenario(1003);
 
     const COLS: u16 = 12;
     const ROWS: u16 = 3;
@@ -259,9 +226,7 @@ fn scenario4_torn_write_recovery() {
     //       any orphaned idx entries (idx ahead of bin) so the
     //       newly-opened state is internally consistent
     //   (d) subsequent pushes succeed against the recovered state
-    let _g = ENV_LOCK.lock().unwrap();
-    let state = ScenarioState::new("s4-torn-write", 1004);
-    state.apply_env();
+    let _state = scenario(1004);
 
     const COLS: u16 = 20;
     const ROWS: u16 = 5;
@@ -275,7 +240,6 @@ fn scenario4_torn_write_recovery() {
         std::mem::forget(term);
     }
 
-    state.apply_env();
     let mut term = Terminal::new(COLS, ROWS);
     let surviving = term.grid().scrollback_len() as u16;
     // Whatever survived must decode without garbage.
@@ -308,9 +272,7 @@ fn scenario4_torn_write_recovery() {
 
 #[test]
 fn scenario5_resize_no_corruption() {
-    let _g = ENV_LOCK.lock().unwrap();
-    let state = ScenarioState::new("s5-resize", 1005);
-    state.apply_env();
+    let _state = scenario(1005);
 
     const ROWS: u16 = 5;
     let mut term = Terminal::new(20, ROWS);
@@ -333,9 +295,7 @@ fn scenario5_resize_no_corruption() {
 
 #[test]
 fn scenario6_clean_restart_preserves_all_content() {
-    let _g = ENV_LOCK.lock().unwrap();
-    let state = ScenarioState::new("s6-clean-restart", 1006);
-    state.apply_env();
+    let _state = scenario(1006);
 
     const COLS: u16 = 20;
     const ROWS: u16 = 5;
@@ -348,7 +308,6 @@ fn scenario6_clean_restart_preserves_all_content() {
         // BufWriter Drop flushes.
     }
 
-    state.apply_env();
     let term = Terminal::new(COLS, ROWS);
     let cap = term.grid().scrollback_len();
     assert!(

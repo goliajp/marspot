@@ -1,0 +1,7 @@
+# Every process cargo starts -- test binaries above all -- gets a state
+# root inside the build tree, so a test run that does not go through
+# bin/test.sh (plain `cargo test`, an IDE, CI) cannot write into the
+# installed app's state.  A value already in the environment wins:
+# bin/test.sh, bin/run.sh and the soak scripts set their own.
+[env]
+MARSPOT_STATE_DIR = { value = "target/test-state", relative = true }

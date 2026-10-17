@@ -30,15 +30,16 @@ use marspot_term::pty::{Pty, PtyConfig, TerminalSize};
 use marspot_term::session_state::{PendingPage, SessionState};
 use marspot_term::terminal::Terminal;
 
+use crate::pty_reader::PtyReader;
+
 /// How recently we have to have seen PTY output to count as "active".
 /// Mirrors `shelld_client::ACTIVE_WINDOW` so L2's badge state is the
 /// same regardless of which session impl is feeding it.
 const ACTIVE_WINDOW: Duration = Duration::from_secs(2);
 
-/// Reader-thread chunk size.  Bigger than the parser's typical 4 KiB
-/// burst because `cat bigfile` happily fills 64 KiB in a single read,
-/// and the kernel returns whatever's queued — no benefit to capping.
-const READ_BUF_BYTES: usize = 64 * 1024;
+/// Longest an execv waits for typed input to reach the PTY.  A child
+/// that does not read its stdin never takes it; the rest is lost.
+const HANDOFF_INPUT_WAIT: Duration = Duration::from_millis(200);
 
 /// Write half of the PTY, owned by a dedicated thread.
 ///
@@ -102,6 +103,8 @@ pub struct LocalSession {
     terminal: Terminal,
     bytelog: Option<ByteLog>,
     rx: Receiver<Vec<u8>>,
+    /// Fills `rx`.  `None` only in tests that drive `rx` themselves.
+    reader: Option<PtyReader>,
     /// PTY write half.  Dropping this ends the writer thread.
     writer: PtyWriter,
     /// Replies written for programs that may never read them.
@@ -269,34 +272,7 @@ impl LocalSession {
         let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
         let exited = Arc::new(AtomicBool::new(false));
 
-        let pty_reader = Arc::clone(&pty);
-        let exited_writer = Arc::clone(&exited);
-        thread::Builder::new()
-            .name(format!("l3-pty-reader-{id}"))
-            .spawn(move || {
-                let mut buf = vec![0u8; READ_BUF_BYTES];
-                loop {
-                    let n = match pty_reader.read_shared(&mut buf) {
-                        Ok(0) => 0,
-                        Ok(n) => n,
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                        // macOS gives EIO when the slave side fully closes.
-                        Err(e) if e.raw_os_error() == Some(libc::EIO) => 0,
-                        Err(_) => 0,
-                    };
-                    if n == 0 {
-                        exited_writer.store(true, Ordering::SeqCst);
-                        wake();
-                        break;
-                    }
-                    if tx.send(buf[..n].to_vec()).is_err() {
-                        // main loop is gone — stop forwarding
-                        break;
-                    }
-                    wake();
-                }
-            })
-            .expect("spawn l3-pty-reader thread");
+        let reader = Some(PtyReader::spawn(id, Arc::clone(&pty), Arc::clone(&exited), tx, wake));
 
         let writer = PtyWriter::new("l3-pty-writer-id", io::sink(), marspot_term::frame_writer::cap::PTY);
 
@@ -307,6 +283,7 @@ impl LocalSession {
             terminal: Terminal::new(cols, rows),
             bytelog,
             rx,
+            reader,
             writer,
             replies: Default::default(),
             exited,
@@ -660,32 +637,7 @@ impl LocalSession {
         let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
         let exited = Arc::new(AtomicBool::new(false));
 
-        let pty_reader = Arc::clone(&pty);
-        let exited_writer = Arc::clone(&exited);
-        thread::Builder::new()
-            .name(format!("l3-pty-reader-{id}"))
-            .spawn(move || {
-                let mut buf = vec![0u8; READ_BUF_BYTES];
-                loop {
-                    let n = match pty_reader.read_shared(&mut buf) {
-                        Ok(0) => 0,
-                        Ok(n) => n,
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(e) if e.raw_os_error() == Some(libc::EIO) => 0,
-                        Err(_) => 0,
-                    };
-                    if n == 0 {
-                        exited_writer.store(true, Ordering::SeqCst);
-                        wake();
-                        break;
-                    }
-                    if tx.send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                    wake();
-                }
-            })
-            .expect("spawn l3-pty-reader thread");
+        let reader = Some(PtyReader::spawn(id, Arc::clone(&pty), Arc::clone(&exited), tx, wake));
 
         let writer = PtyWriter::new("l3-pty-writer-id", io::sink(), marspot_term::frame_writer::cap::PTY);
 
@@ -696,6 +648,7 @@ impl LocalSession {
             terminal,
             bytelog,
             rx,
+            reader,
             writer,
             replies: Default::default(),
             exited,
@@ -707,6 +660,33 @@ impl LocalSession {
             cols,
             rows,
         })
+    }
+
+    /// Before an execv: let nothing in flight die with this image.
+    ///
+    /// The reader stops between two reads and everything it queued is
+    /// parsed into the terminal the snapshot is taken from, held output
+    /// included -- the next image starts unheld.  Input queued for the
+    /// PTY, replies included, is given time to reach it.  What the PTY
+    /// has not given up yet stays there for the next image.
+    pub fn quiesce_for_handoff(&mut self) {
+        if let Some(r) = self.reader.take() {
+            r.stop();
+        }
+        self.hold_grid(false);
+        self.drain(None);
+        let deadline = Instant::now() + HANDOFF_INPUT_WAIT;
+        while self.writer.backlog() > 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        if self.writer.backlog() > 0 {
+            marspot_term::lx_warn!(
+                "l3.execv.input_not_written",
+                "the PTY did not take queued input before the execv",
+                session_id = self.id,
+                bytes = self.writer.backlog() as u64
+            );
+        }
     }
 
     /// RFC-003 §6 Amendment 14 — disassemble for `execv` handoff.
@@ -750,6 +730,29 @@ impl LocalSession {
 // main thread, the reader thread only touches the Arc<Pty>).
 unsafe impl Send for LocalSession {}
 
+/// The environment a test pane is spawned in: a state dir and home of
+/// its own, and `shell` without the user's startup files.
+///
+/// Without it a test pane appends to the real state root's bytelog for
+/// its id and starts the user's login shell, rc files and all.
+/// `spawn` sets `TERM`, `COLORTERM` and `ZDOTDIR` itself; they are put
+/// back with the rest.  Spawn the pane after this, so it is dropped
+/// first.
+#[cfg(test)]
+pub(crate) fn test_pane_env(shell: &str) -> marspot_term::test_env::StateSandbox {
+    let mut sandbox = marspot_term::test_env::sandbox_state_dir();
+    let script = marspot_term::test_env::shell_without_rc_files(sandbox.path(), shell);
+    let home = sandbox.path().to_path_buf();
+    sandbox
+        .env
+        .set("SHELL", script)
+        .set("HOME", home)
+        .preserve("TERM")
+        .preserve("COLORTERM")
+        .preserve("ZDOTDIR");
+    sandbox
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -763,8 +766,48 @@ mod tests {
     /// restarts one), so a parked pane came back showing the bare
     /// shell prompt that appeared after claude was killed.  Held here,
     /// the picture is the session's own property.
+    /// Before an execv nothing this image holds may be left to die
+    /// with it: held output is on the screen the snapshot is taken from,
+    /// the reader has stopped and queued nothing it was not given time
+    /// to hand over, and typed input has reached the PTY.
+    #[test]
+    fn quiescing_for_a_handoff_leaves_nothing_in_flight() {
+        let _env = test_pane_env("/bin/zsh");
+        let mut s = LocalSession::spawn(8, 80, 24, "", || {}).expect("spawn");
+        let text = |s: &LocalSession| -> String {
+            let g = s.terminal().grid();
+            (0..g.rows())
+                .flat_map(|r| (0..g.cols()).map(move |c| (c, r)))
+                .map(|(c, r)| g.cell(c, r).ch)
+                .collect()
+        };
+        assert!(
+            pump_until(&mut s, |s| s.terminal().grid().cursor() != (0, 0), Duration::from_secs(5)),
+            "shell should come up"
+        );
+        s.hold_grid(true);
+        s.write(b"printf 'HE''LD\\n'\r").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !s.held.concat().windows(4).any(|w| w == b"HELD") {
+            assert!(Instant::now() < deadline, "the held output never arrived");
+            s.pump();
+            thread::sleep(Duration::from_millis(10));
+        }
+        s.write(b"true\r").unwrap();
+
+        s.quiesce_for_handoff();
+        assert!(text(&s).contains("HELD"), "held output is on the screen");
+        assert!(!s.is_holding(), "the next image starts unheld");
+        assert_eq!(s.writer.backlog(), 0, "typed input reached the PTY");
+        assert!(
+            matches!(s.rx.try_recv(), Err(TryRecvError::Disconnected)),
+            "the reader has stopped and everything it queued was parsed"
+        );
+    }
+
     #[test]
     fn a_held_grid_keeps_its_picture_and_replays_on_release() {
+        let _env = test_pane_env("/bin/zsh");
         let mut s = LocalSession::spawn(7, 80, 24, "", || {}).expect("spawn");
         let text = |s: &LocalSession| -> String {
             let g = s.terminal().grid();
@@ -830,6 +873,7 @@ mod tests {
     /// itself is `self.write`, which the input paths already exercise.
     #[test]
     fn pump_answers_capability_queries() {
+        let _env = test_pane_env("/bin/zsh");
         let mut s = LocalSession::spawn(9, 80, 24, "", || {}).expect("spawn");
         assert!(
             pump_until(&mut s, |s| s.terminal().grid().cursor() != (0, 0), Duration::from_secs(5)),
@@ -883,6 +927,7 @@ mod tests {
     fn spawn_write_pump_echoes_into_grid() {
         let wake_count = Arc::new(AtomicUsize::new(0));
         let w = Arc::clone(&wake_count);
+        let _env = test_pane_env("/bin/zsh");
         let mut s = LocalSession::spawn(
             42,
             80,
@@ -950,6 +995,7 @@ mod tests {
             terminal: Terminal::new(80, 24),
             bytelog: None,
             rx: { let (_t, r) = mpsc::channel(); r },
+            reader: None,
             writer: PtyWriter::new("l3-pty-writer-1", io::sink(), marspot_term::frame_writer::cap::PTY),
             replies: Default::default(),
             exited: Arc::new(AtomicBool::new(false)),
@@ -1015,6 +1061,7 @@ mod tests {
             terminal: Terminal::new(80, 24),
             bytelog: None,
             rx,
+            reader: None,
             writer: PtyWriter::new("l3-pty-writer-1", io::sink(), marspot_term::frame_writer::cap::PTY),
             replies: Default::default(),
             exited: Arc::new(AtomicBool::new(false)),
@@ -1062,6 +1109,7 @@ mod tests {
             terminal: Terminal::new(80, 24),
             bytelog: None,
             rx: { let (_t, r) = mpsc::channel(); r },
+            reader: None,
             writer: PtyWriter::new("l3-pty-writer-2", io::sink(), marspot_term::frame_writer::cap::PTY),
             replies: Default::default(),
             exited: Arc::new(AtomicBool::new(false)),
@@ -1122,6 +1170,7 @@ mod tests {
             terminal: Terminal::new(80, 24),
             bytelog: None,
             rx: { let (_t, r) = mpsc::channel(); r },
+            reader: None,
             writer: PtyWriter::new("l3-pty-writer-0", io::sink(), marspot_term::frame_writer::cap::PTY),
             replies: Default::default(),
             exited: Arc::new(AtomicBool::new(false)),
@@ -1133,33 +1182,17 @@ mod tests {
             cols: 80,
             rows: 24,
         };
-        // Manually start a reader bound to the same Pty so this short
-        // helper-test mirrors what spawn() does internally.
-        let pty_reader = Arc::clone(&s.pty);
-        let exited_writer = Arc::clone(&s.exited);
-        let (tx, new_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
+        // the reader spawn() starts, on this Pty
+        let (tx, new_rx) = mpsc::channel();
         s.rx = new_rx;
         let w2 = Arc::clone(&wake);
-        thread::spawn(move || {
-            let mut buf = vec![0u8; READ_BUF_BYTES];
-            loop {
-                let n = match pty_reader.read_shared(&mut buf) {
-                    Ok(0) => 0,
-                    Ok(n) => n,
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) if e.raw_os_error() == Some(libc::EIO) => 0,
-                    Err(_) => 0,
-                };
-                if n == 0 {
-                    exited_writer.store(true, Ordering::SeqCst);
-                    w2.store(true, Ordering::SeqCst);
-                    break;
-                }
-                if tx.send(buf[..n].to_vec()).is_err() {
-                    break;
-                }
-            }
-        });
+        s.reader = Some(PtyReader::spawn(
+            1,
+            Arc::clone(&s.pty),
+            Arc::clone(&s.exited),
+            tx,
+            move || w2.store(true, Ordering::SeqCst),
+        ));
 
         let deadline = Instant::now() + WAITING_ON_SOMEONE_ELSE;
         while Instant::now() < deadline {
