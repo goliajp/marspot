@@ -402,6 +402,24 @@ echo "==> fourth phase: silent update with two windows open"
 mark=$(wc -l < "$APPLOG")
 mkdir -p "$MARSPOT_STATE_DIR/binaries/pending"
 cp "$CORE_BIN" "$MARSPOT_STATE_DIR/binaries/pending/marspot-core"
+# A session engine of another build rides along, so every pane in both
+# windows must move: its build marker's first sha character is flipped,
+# and the copy re-signed (a changed byte voids the signature).
+staged_session="$MARSPOT_STATE_DIR/binaries/pending/marspot-session"
+cp "$SESSION_BIN" "$staged_session"
+python3 - "$staged_session" <<'PY' || fail "could not make another session build"
+import sys
+p = sys.argv[1]; b = bytearray(open(p, 'rb').read())
+i = b.find(b'MARSPOT_FP=')
+while i >= 0 and b.find(b'|END', i, i + 256) < 0:
+    i = b.find(b'MARSPOT_FP=', i + 1)
+assert i >= 0, 'no build marker'
+j = i + len(b'MARSPOT_FP=')
+b[j] = ord('1') if b[j] == ord('0') else ord('0')
+open(p, 'wb').write(b)
+PY
+codesign --force --sign - "$staged_session" >/dev/null 2>&1 || fail "could not re-sign the session build"
+L3_BEFORE="$(dev_session_pids | sort | tr '\n' ' ')"
 "$SHELL_BIN" --trigger >/dev/null 2>&1 || fail "--trigger did not reach the shell"
 
 after7() { tail -n "+$((mark + 1))" "$APPLOG"; }
@@ -424,6 +442,30 @@ if after7 | grep -q 'WINDOW_RESTORE\b'; then
 fi
 after7 | grep -q 'core.boot.orphan_adopted' \
   && fail "the swapped-in core adopted the other window's panes as orphans"
+
+# Every pane, in both windows, moved to the staged session build: the
+# second window's panes land after the boot, and are asked then.
+build_of() { strings "$1" | grep -o 'MARSPOT_FP=[^|]*|[^|]*|END' | head -1 | sed 's/|END$//'; }
+want_build=$(build_of "$MARSPOT_STATE_DIR/binaries/current/marspot-session")
+[[ -n "$want_build" ]] || fail "the swapped-in core never promoted the session build"
+for i in $(seq 1 600); do
+  on=0 total=0
+  for e in "$MARSPOT_STATE_DIR"/sessions/*/entry.toml; do
+    p=$(sed -n 's/^pid = \([0-9][0-9]*\)$/\1/p' "$e")
+    case " $L3_BEFORE " in *" $p "*) ;; *) continue ;; esac
+    total=$((total+1))
+    [[ "$(sed -n 's/^build = "\(.*\)"$/\1/p' "$e")" == "$want_build" ]] && on=$((on+1))
+  done
+  (( total > 0 && on == total )) && break
+  sleep 0.1
+done
+(( total > 0 && on == total )) || fail "$on/$total panes moved to the staged session build"
+for p in $L3_BEFORE; do
+  kill -0 "$p" 2>/dev/null || fail "pane L3 pid $p is gone after the update"
+  n=$(after7 | grep $'\tL3_EXECV_INVOKE\t' | grep -c $'\t'"$p"$'\t')
+  (( n == 1 )) || fail "pane L3 pid $p execv'd $n times for one update"
+done
+echo "==> all $total panes in both windows moved to the staged session build, once each"
 
 # --- RFC-006 §8 step 6 — pane drag endings ---------------------------
 # A script cannot move the pointer in the sandbox app, so the core's
