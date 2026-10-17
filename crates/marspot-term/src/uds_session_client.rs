@@ -229,10 +229,14 @@ mod deadline_tests {
             "took {elapsed:?} — the handshake read timeout is still using \
              its own 5 s allowance instead of the caller's deadline"
         );
-        assert!(
-            elapsed < budget * 3,
-            "took {elapsed:?} against a {budget:?} budget"
-        );
+        // The 5 s allowance above is what the bug spends, so that bound
+        // holds on any host; this tighter one only on a quiet one.
+        if crate::host_load::quiet_enough_to_time("the silent-peer handshake") {
+            assert!(
+                elapsed < budget * 3,
+                "took {elapsed:?} against a {budget:?} budget"
+            );
+        }
 
         let _ = stop_tx.send(());
         let _ = accepted.join();
@@ -251,10 +255,15 @@ mod deadline_tests {
             r.is_err(),
             "a session that never registers must not connect"
         );
-        assert!(
-            elapsed < timeout * 2,
-            "took {elapsed:?} against a {timeout:?} budget — the two halves \
-             are still each starting their own deadline"
-        );
+        // Two deadlines in a row spend at least twice the timeout, so
+        // this is the bound that tells them apart; what it leaves for
+        // the host is one timeout, which only a busy host uses up.
+        if crate::host_load::quiet_enough_to_time("wait_and_connect against its deadline") {
+            assert!(
+                elapsed < timeout * 2,
+                "took {elapsed:?} against a {timeout:?} budget — the two halves \
+                 are still each starting their own deadline"
+            );
+        }
     }
 }

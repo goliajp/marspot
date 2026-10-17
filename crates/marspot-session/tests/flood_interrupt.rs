@@ -13,55 +13,62 @@ use std::time::{Duration, Instant};
 
 use marspot_term::shell_proto::{MsgType, encode_inject_input};
 
+/// Several of the reader's chunks: the flood is well under way.
+const FLOODED: u64 = 1 << 20;
+
+/// Bytes this pane's L3 has taken off its PTY: it appends each chunk
+/// to the bytelog as it hands it to the parser.
+fn logged_bytes(state: &std::path::Path) -> u64 {
+    let Ok(sessions) = std::fs::read_dir(state.join("sessions")) else {
+        return 0;
+    };
+    sessions
+        .flatten()
+        .filter_map(|d| std::fs::metadata(d.path().join("bytelog")).ok())
+        .map(|m| m.len())
+        .sum()
+}
+
 #[test]
 fn ctrl_c_stops_a_program_that_floods_the_pane() {
-    let dir = std::env::temp_dir().join(format!("marspot-flood-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("state dir");
+    let mut sandbox = marspot_term::test_env::sandbox_state_dir();
     // wide, attributed and CJK, so the parser is the slow end of the pipe
-    let script = dir.join("flood.sh");
+    let script = sandbox.dir.join("flood.sh");
     std::fs::write(
         &script,
         "#!/bin/sh\nexec yes \"$(printf 'ab \\346\\274\\242\\345\\255\\227 \\033[1mcd\\033[0m %.0s' 1 2 3 4 5 6 7 8)\"\n",
     )
     .expect("write script");
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    // SAFETY: set before the only child this test spawns, which is what
-    // reads them; nothing else in this process looks at either.
-    unsafe {
-        std::env::set_var("MARSPOT_STATE_DIR", &dir);
-        std::env::set_var("SHELL", &script);
-    }
+    sandbox.env.set("SHELL", &script);
 
     let bin = std::path::Path::new(env!("CARGO_BIN_EXE_marspot-session"));
-    // a failed assert must not leave an L3 flooding the machine
-    struct Killed(support::Session);
-    impl Drop for Killed {
-        fn drop(&mut self) {
-            if self.0.child.try_wait().ok().flatten().is_none() {
-                let _ = self.0.child.kill();
-                let _ = self.0.child.wait();
-            }
-        }
-    }
-    let mut s = Killed(support::Session::spawn(bin, support::COLS, support::ROWS));
+    // a failed assert must not leave an L3 flooding the machine: the
+    // session is killed when it is dropped
+    let mut s = support::Session::spawn(bin, support::COLS, support::ROWS);
+    // The queue is ahead of the parser once the parser has been kept
+    // busy for a while: the reader fills its bounded queue far faster
+    // than a parser at these attributed CJK lines empties it.  A fixed
+    // sleep stood in for that, and could not tell a flood from a pane
+    // whose program never started.
     let deadline = Instant::now() + Duration::from_secs(10);
-    while s.0.reader.seq() == 0 {
-        assert!(Instant::now() < deadline, "no frame while the program floods the pane");
+    while logged_bytes(sandbox.path()) < FLOODED {
+        assert!(
+            Instant::now() < deadline,
+            "the program never got {FLOODED} bytes into its pane ({} so far)",
+            logged_bytes(sandbox.path())
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
-    // long enough that the queue is well ahead of the parser
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(s.0.child.try_wait().expect("try_wait").is_none(), "the flood ended by itself");
+    assert!(s.child.try_wait().expect("try_wait").is_none(), "the flood ended by itself");
 
-    s.0.send_frame(MsgType::InjectInput, encode_inject_input(0, b"\x03"));
+    s.send_frame(MsgType::InjectInput, encode_inject_input(0, b"\x03"));
     let sent = Instant::now();
-    while s.0.child.try_wait().expect("try_wait").is_none() {
+    while s.child.try_wait().expect("try_wait").is_none() {
         assert!(
             sent.elapsed() < Duration::from_secs(10),
             "the session was still flooding 10 s after Ctrl-C"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
