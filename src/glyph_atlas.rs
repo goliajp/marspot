@@ -1589,11 +1589,10 @@ mod tests {
         );
     }
 
-    /// Phase 9 — atlas raster perf characterization.  Same idea as
-    /// the shape-cache test: prove warm cache hits are sub-µs faster
-    /// than cold raster.  Prints both timings; loose bound guards
-    /// against grossly broken cache behaviour while tolerating
-    /// macOS-version GPU jitter.
+    /// Phase 9 — a warm lookup is the cached entry, and it costs a
+    /// fraction of rasterising.  The cold pass is the control: both
+    /// halves run back to back on the same host, so a loaded machine
+    /// slows both and the ratio still holds.
     #[test]
     fn raster_warm_cache_beats_cold_raster() {
         let mut atlas = GlyphAtlas::new(mem_sink(4096, 4096, 1), crate::font_cache::CoreTextFontTable::single(make_font())).expect("atlas");
@@ -1610,42 +1609,41 @@ mod tests {
 
         let chars: &[u8] = b"abcdefghijklmnop";
         // Cold pass — each first call rasterises into the atlas.
-        let mut cold_us: Vec<u128> = Vec::with_capacity(chars.len());
+        let mut cold_ns: Vec<u128> = Vec::with_capacity(chars.len());
+        let mut placed = Vec::with_capacity(chars.len());
         for &c in chars {
             let key = make_key(c);
             let t0 = std::time::Instant::now();
-            let _ = atlas
+            let e = atlas
                 .get_or_rasterize(key, test_metrics(), 1)
                 .expect("cold raster");
-            cold_us.push(t0.elapsed().as_micros());
+            cold_ns.push(t0.elapsed().as_nanos());
+            placed.push((e.u0, e.v0));
         }
-        cold_us.sort_unstable();
-        let cold_median = cold_us[cold_us.len() / 2];
+        cold_ns.sort_unstable();
+        let cold_median = cold_ns[cold_ns.len() / 2];
 
         // Warm pass — every call hits the cache.
         let mut warm_ns: Vec<u128> = Vec::with_capacity(chars.len());
-        for &c in chars {
+        for (&c, at) in chars.iter().zip(&placed) {
             let key = make_key(c);
             let t0 = std::time::Instant::now();
-            let _ = atlas
+            let e = atlas
                 .get_or_rasterize(key, test_metrics(), 1)
                 .expect("warm cache");
             warm_ns.push(t0.elapsed().as_nanos());
+            assert_eq!((e.u0, e.v0), *at, "a warm lookup returns the entry the cold pass placed");
         }
         warm_ns.sort_unstable();
         let warm_median = warm_ns[warm_ns.len() / 2];
 
         eprintln!(
-            "[font v5 Phase 9] atlas raster: cold median = {cold_median} µs, warm median = {warm_median} ns"
-        );
-
-        assert!(
-            cold_median < 5000,
-            "cold raster median {cold_median} µs exceeds 5000 µs safety bound",
+            "[font v5 Phase 9] atlas raster: cold median = {cold_median} ns, warm median = {warm_median} ns"
         );
         assert!(
-            warm_median < 50_000,
-            "warm cache lookup median {warm_median} ns exceeds 50 µs safety bound",
+            warm_median * 4 < cold_median,
+            "a warm lookup ({warm_median} ns) must cost under a quarter of a raster \
+             ({cold_median} ns); near the same means the cache is not being hit",
         );
     }
 
