@@ -1259,17 +1259,6 @@ fn main() {
     // place until there's real work.
     let (ev_tx, ev_rx): (Sender<SessionEvent>, Receiver<SessionEvent>) = mpsc::channel();
 
-    // Owning the PTY is the only thing a session can do since RFC-003
-    // Phase 6 deleted L4, so an unset variable means yes.
-    //
-    // It used to mean no, which left the single working mode behind an
-    // env var every caller had to know to set.  The two probes that set
-    // it worked and the two that did not exited 1 before publishing a
-    // frame, which reads from outside as "the session hangs"; the error
-    // they got even told them to leave it unset and rely on the
-    // default, which is exactly what had just failed.
-    let owns_pty = std::env::var("MARSPOT_L3_OWNS_PTY").as_deref() != Ok("0");
-
     // Shared grid framebuffer first — it defines the geometry. When L2
     // owns the region it sized it to the on-screen cell rect; we must
     // drive the session at exactly those dims, since the grid we publish
@@ -1285,12 +1274,12 @@ fn main() {
     let mut _listener: Option<uds_server::SessionListener> = None;
 
     // Resumed control stream from the pre-execv image, if any —
-    // populated by the resume branch below.  Lives outside `if
-    // owns_pty` so `setup_control_socket` after the spawn can adopt
-    // it.
+    // populated by the resume branch below.  Lives outside the
+    // session setup block so `setup_control_socket` after the spawn
+    // can adopt it.
     let mut resumed_poke: Option<ControlWriter> = None;
     let mut resumed_client_generation: u64 = 0;
-    let mut session: SessionImpl = if owns_pty {
+    let mut session: SessionImpl = {
         let wake_tx = ev_tx.clone();
         let wake = move || {
             let _ = wake_tx.send(SessionEvent::Wake);
@@ -1510,14 +1499,6 @@ fn main() {
             local
         };
         SessionImpl::Local(local)
-    } else {
-        // RFC-003 Phase 6: L4 shelld retired.  MARSPOT_L3_OWNS_PTY=1
-        // is now mandatory; the old shelld-driven fallback is gone.
-        lx_error!(
-            "session.shelld_path_removed",
-            "MARSPOT_L3_OWNS_PTY=0 asked to route through shelld, which RFC-003 removed; unset the variable or set it to 1"
-        );
-        std::process::exit(1);
     };
     lx_event!(
         "SESSION_DRIVING",
@@ -1847,7 +1828,6 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         let mut pending_resize: Option<(u16, u16)> = None;
         let mut pending_scroll: Option<u16> = None;
         let mut selection_reqs: Vec<(u32, (u16, u32), (u16, u32), bool)> = Vec::new();
-        let mut core_gone = false;
         for ev in first.into_iter().chain(std::iter::from_fn(|| ev_rx.try_recv().ok())) {
             match ev {
                 SessionEvent::Key(e, m) => {
@@ -1985,15 +1965,13 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                             stale_gen = core_gen,
                             current_gen = client_generation
                         );
-                    } else if owns_pty {
+                    } else {
                         poke = None;
                         lx_event!(
                             "L3_UDS_CLIENT_GONE",
                             "control client closed; awaiting reattach (owns-pty)",
                             generation = core_gen
                         );
-                    } else {
-                        core_gone = true;
                     }
                 }
                 SessionEvent::ShutdownRequested => {
@@ -2262,12 +2240,6 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     }
                 }
             }
-        }
-        // Our core vanished: the shelld session lives on (re-attached by
-        // the next core), so exit rather than linger as an orphan.
-        if core_gone {
-            lx_event!("CORE_GONE", "L2/core gone (control EOF); exiting cleanly");
-            break;
         }
         if want_shutdown {
             // Final pump before post-loop dispatcher decides

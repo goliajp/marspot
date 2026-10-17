@@ -815,7 +815,6 @@ struct ShellApp {
     /// helpers can push set_badge updates without re-importing the
     /// channel from inside ShellApp methods.
     pane_badge_tx_clone: std::sync::mpsc::Sender<plugins::host::PaneBadgeUpdate>,
-    pane_title_tx_clone: std::sync::mpsc::Sender<plugins::host::PaneTitleUpdate>,
     /// Active PaneSessions held by L1 plugins, keyed by shelld
     /// session_id.  At most one per pane.
     active_pane_sessions:
@@ -887,7 +886,7 @@ impl plugins::pty_op::OpHost for SupervisorOpHost {
 
     fn log(&self, level: plugins::LogLevel, tag: &str, msg: &str) {
         match level {
-            plugins::LogLevel::Warn | plugins::LogLevel::Error => {
+            plugins::LogLevel::Warn => {
                 lx_warn!("shell.pty_op", msg, tag = tag)
             }
             _ => lx_info!("shell.pty_op", msg, tag = tag),
@@ -908,7 +907,6 @@ struct ConcretePaneSessionHost<'a> {
     sid: u64,
     plugin_name: &'static str,
     badge_tx: &'a std::sync::mpsc::Sender<plugins::host::PaneBadgeUpdate>,
-    title_tx: &'a std::sync::mpsc::Sender<plugins::host::PaneTitleUpdate>,
     end_requested: &'a std::cell::Cell<bool>,
 }
 
@@ -925,19 +923,12 @@ impl<'a> plugins::PaneSessionHost for ConcretePaneSessionHost<'a> {
             text: text.to_string(),
         });
     }
-    fn set_pane_title(&self, text: &str) {
-        let _ = self.title_tx.send(plugins::host::PaneTitleUpdate {
-            shelld_session_id: self.sid,
-            text: text.to_string(),
-        });
-    }
     fn log(&self, level: plugins::LogLevel, tag: &str, msg: &str) {
         let composed = format!("plugin.{}.{}", self.plugin_name, tag);
         match level {
             plugins::LogLevel::Debug => marspot::lx_debug!(&*composed, msg),
             plugins::LogLevel::Info => marspot::lx_info!(&*composed, msg),
             plugins::LogLevel::Warn => marspot::lx_warn!(&*composed, msg),
-            plugins::LogLevel::Error => marspot::lx_error!(&*composed, msg),
         }
     }
 }
@@ -1194,7 +1185,6 @@ impl ShellApp {
         let (pane_render_markup_tx, pane_render_markup_rx) = std::sync::mpsc::channel();
         let pane_badge_tx_clone = pane_badge_tx.clone();
         let (pane_title_tx, pane_title_rx) = std::sync::mpsc::channel();
-        let pane_title_tx_clone = pane_title_tx.clone();
         let (pane_session_begin_tx, pane_session_begin_rx) = std::sync::mpsc::channel();
         let pane_session_begin_tx_for_ops = pane_session_begin_tx.clone();
         let (pty_op_tx, pty_op_rx) = std::sync::mpsc::channel();
@@ -1328,7 +1318,6 @@ impl ShellApp {
             .with_receipts(Some(std::sync::Arc::clone(&receipts))),
             inject_input_rx,
             pane_badge_tx_clone,
-            pane_title_tx_clone,
             active_pane_sessions: std::collections::HashMap::new(),
             dev_panel: marspot::ui::components::DevPanelState::default(),
             last_saved_dev_window: None,
@@ -3481,7 +3470,6 @@ impl ShellApp {
                 sid,
                 plugin_name: self.active_pane_sessions[&sid].plugin_name,
                 badge_tx: &self.pane_badge_tx_clone,
-                title_tx: &self.pane_title_tx_clone,
                 end_requested: &end_flag,
             };
             if let Some(active) = self.active_pane_sessions.get_mut(&sid) {
@@ -3883,7 +3871,6 @@ impl ShellApp {
             sid,
             plugin_name,
             badge_tx: &self.pane_badge_tx_clone,
-            title_tx: &self.pane_title_tx_clone,
             end_requested: &end_flag,
         };
         active.session.on_focus(&host);
@@ -3906,7 +3893,6 @@ impl ShellApp {
             sid,
             plugin_name,
             badge_tx: &self.pane_badge_tx_clone,
-            title_tx: &self.pane_title_tx_clone,
             end_requested: &end_flag,
         };
         let handling = active.session.on_user_key(&host, &ev);
@@ -3930,7 +3916,6 @@ impl ShellApp {
             sid,
             plugin_name,
             badge_tx: &self.pane_badge_tx_clone,
-            title_tx: &self.pane_title_tx_clone,
             end_requested: &end_flag,
         };
         active.session.on_end(&host, reason);

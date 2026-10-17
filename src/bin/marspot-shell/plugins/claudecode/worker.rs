@@ -184,7 +184,6 @@ impl WorkerCtx {
                         jsonl_path: jsonl_path.clone(),
                         last_mtime: mtime,
                         last_size: size,
-                        last_message_kind: last_message_kind.clone(),
                         has_conversation,
                     },
                 );

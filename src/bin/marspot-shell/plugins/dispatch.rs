@@ -46,21 +46,6 @@ mod tests {
     /// that matter.
     macro_rules! rest_of_the_host {
         () => {
-            fn pane_count(&self) -> usize {
-                0
-            }
-            fn pane_pty_device(&self, _p: usize) -> Result<Option<std::path::PathBuf>, crate::plugins::PluginError> {
-                Ok(None)
-            }
-            fn pane_pty_pid_tree(
-                &self,
-                _p: usize,
-            ) -> Result<Vec<crate::plugins::PtyChild>, crate::plugins::PluginError> {
-                Ok(Vec::new())
-            }
-            fn pane_focused(&self) -> Option<usize> {
-                None
-            }
             fn state_dir(&self) -> Result<std::path::PathBuf, crate::plugins::PluginError> {
                 Ok(std::path::PathBuf::new())
             }

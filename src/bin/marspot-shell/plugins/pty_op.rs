@@ -285,6 +285,10 @@ pub enum StepKind {
     /// This is a veto, not a trigger, and it fails in the safe
     /// direction: a stale match in the tail costs a sentence the
     /// person can type, while a miss is exactly today's behaviour.
+    // no script builds this step since the resume sentence moved onto
+    // claude's argv; it stays until the submit-receipt path that only it
+    // consumes is retired along with it
+    #[allow(dead_code)]
     StopIfWaiting { needles: &'static [&'static str] },
     /// Put a line in, then submit it.
     ///
@@ -303,6 +307,10 @@ pub enum StepKind {
     ///
     /// Needs `AwaitTuiReady` in front of it, because the wrapping
     /// depends on the pane having bracketed paste on.
+    // no script builds this step since the resume sentence moved onto
+    // claude's argv; it stays until the submit-receipt path that only it
+    // consumes is retired along with it
+    #[allow(dead_code)]
     Submit {
         line: String,
         /// When the paste went out, the output length at that moment,
@@ -478,6 +486,10 @@ impl Step {
         }
     }
     /// Stop before typing if the pane is waiting on a keypress.
+    // no script builds this step since the resume sentence moved onto
+    // claude's argv; it stays until the submit-receipt path that only it
+    // consumes is retired along with it
+    #[allow(dead_code)]
     pub fn stop_if_waiting(needles: &'static [&'static str]) -> Self {
         Self {
             kind: StepKind::StopIfWaiting { needles },
@@ -487,6 +499,10 @@ impl Step {
         }
     }
     /// Put a line in and submit it, in one write.
+    // no script builds this step since the resume sentence moved onto
+    // claude's argv; it stays until the submit-receipt path that only it
+    // consumes is retired along with it
+    #[allow(dead_code)]
     pub fn submit(line: impl Into<String>) -> Self {
         Self {
             kind: StepKind::Submit { line: line.into(), pasted: None },
@@ -921,11 +937,6 @@ impl OpRunner {
     ) -> Self {
         self.on_finish = Some(Box::new(f));
         self
-    }
-
-    /// Which step is running.  For a caller that persists progress.
-    pub fn step_index(&self) -> usize {
-        self.at
     }
 
     fn finish(&mut self, host: &dyn PaneSessionHost, outcome: OpOutcome) {
@@ -1780,8 +1791,6 @@ impl PaneSession for OpRunner {
         if self.finished.is_none() {
             self.finish(host, OpOutcome::Cancelled(match reason {
                 EndReason::UserEscape => "escape",
-                EndReason::PaneClosed => "pane_closed",
-                EndReason::Timeout => "host_timeout",
                 EndReason::PluginRequested => "plugin",
             }));
         }
@@ -1806,6 +1815,7 @@ pub struct RealEnv {
 }
 
 impl RealEnv {
+    #[cfg(test)]
     pub fn new(io: Arc<dyn PtyIo>) -> Self {
         Self { io, receipts: None }
     }
@@ -2323,24 +2333,6 @@ mod tests {
     }
 
     impl crate::plugins::PluginHost for FakePluginHost {
-        fn pane_count(&self) -> usize {
-            0
-        }
-        fn pane_pty_device(
-            &self,
-            _pane: usize,
-        ) -> Result<Option<std::path::PathBuf>, crate::plugins::PluginError> {
-            Ok(None)
-        }
-        fn pane_pty_pid_tree(
-            &self,
-            _pane: usize,
-        ) -> Result<Vec<crate::plugins::PtyChild>, crate::plugins::PluginError> {
-            Ok(Vec::new())
-        }
-        fn pane_focused(&self) -> Option<usize> {
-            None
-        }
         fn state_dir(&self) -> Result<std::path::PathBuf, crate::plugins::PluginError> {
             Ok(std::env::temp_dir())
         }
@@ -2494,7 +2486,6 @@ mod tests {
         fn set_badge(&self, t: &str) {
             self.badges.lock().unwrap().push(t.into());
         }
-        fn set_pane_title(&self, _t: &str) {}
         fn log(&self, _l: LogLevel, _t: &str, _m: &str) {}
     }
 

@@ -355,13 +355,6 @@ impl ShellPresenter {
         }
     }
 
-    /// Current pair ids — used by the shell to attribute incoming
-    /// SurfaceReady acks to either the active pair or a pending one.
-    #[allow(dead_code)]
-    pub fn pair_ids(&self) -> (u32, u32) {
-        (self.surface_ids[0], self.surface_ids[1])
-    }
-
     /// Update the CAMetalLayer drawable size after the window resizes.
     /// Cheap on Apple Silicon — the layer pools drawables.
     pub fn set_drawable_size(&self, w_phys: f64, h_phys: f64) {

@@ -76,12 +76,10 @@ pub trait InjectInputProxy: Send + Sync {
     fn reset_mouse_reporting(&self, session_id: u64) -> std::io::Result<()>;
 }
 
-#[allow(dead_code)]
 struct CcSessionInfo {
     pub session_id: u64,
     pub alive: bool,
     pub child_pid: i32,
-    pub title: String,
 }
 
 /// The plugin's route to a pane is also the op runner's, so a script
@@ -131,7 +129,6 @@ impl ShelldClient {
                 session_id: e.id,
                 alive,
                 child_pid: e.shell_child_pid,
-                title: e.title,
             });
         }
         Ok(out)
@@ -194,7 +191,6 @@ struct SessionInfo {
     jsonl_path: PathBuf,
     last_mtime: SystemTime,
     last_size: u64,
-    last_message_kind: Option<String>,
     /// Holds at least one user or assistant record, so `--resume` can
     /// open it. See `transcript::has_conversation`.
     has_conversation: bool,
@@ -235,12 +231,6 @@ pub struct ClaudecodePlugin {
     /// profile at most.
     logged_out: HashMap<u8, i64>,
 
-    /// Previous tick's `shelld_session_id → ("<fg|bg>,<activity>",
-    /// since)`, so `cc_status.changed` is transition-only and can say
-    /// how long the state it replaces had held — the number any future
-    /// idle threshold has to be calibrated against.  Pruned every tick
-    /// to the sessions still reporting.
-    last_activity: HashMap<u64, (String, Instant)>,
     /// Panes whose claude has been reclaimed and that are waiting for a
     /// keypress.  Persisted (`dormant.tsv`) because an L1 self-execv
     /// drops the PaneSessions that carry the wake path.
@@ -530,8 +520,6 @@ impl ClaudecodePlugin {
             moved_at: HashMap::new(),
             unjudged: std::collections::HashSet::new(),
             logged_out: HashMap::new(),
-
-            last_activity: HashMap::new(),
             dormant: Vec::new(),
             armed: std::collections::HashSet::new(),
             held: HashMap::new(),
@@ -2220,7 +2208,6 @@ impl Plugin for ClaudecodePlugin {
     fn metadata(&self) -> PluginMetadata {
         PluginMetadata {
             name: "claudecode",
-            version: "0.1.0",
             api_version: PLUGIN_API_VERSION,
             // 2 s — long enough to be near-free,short enough to catch
             // "assistant message done" within a couple seconds for
@@ -2801,7 +2788,6 @@ mod tests {
             fn set_badge(&self, text: &str) {
                 self.0.lock().unwrap().push(text.to_string());
             }
-            fn set_pane_title(&self, _t: &str) {}
             fn log(&self, _l: LogLevel, _t: &str, _m: &str) {}
         }
         let rec = Recording(std::sync::Mutex::new(Vec::new()));
@@ -3278,7 +3264,6 @@ mod tests {
             fn set_badge(&self, text: &str) {
                 self.0.lock().unwrap().push(text.to_string());
             }
-            fn set_pane_title(&self, _t: &str) {}
             fn log(&self, _l: LogLevel, _t: &str, _m: &str) {}
         }
         let rec = Recording(std::sync::Mutex::new(Vec::new()));
@@ -4434,7 +4419,6 @@ mod tests {
                     jsonl_path: path,
                     last_mtime: *mtime,
                     last_size: 1,
-                    last_message_kind: None,
                     has_conversation: true,
                 },
             );
@@ -5299,7 +5283,6 @@ mod tests {
         }
         fn end(&self) {}
         fn set_badge(&self, _text: &str) {}
-        fn set_pane_title(&self, _text: &str) {}
         fn log(&self, _l: LogLevel, _t: &str, _m: &str) {}
     }
 
@@ -5430,21 +5413,6 @@ mod tests {
                 .unwrap()
                 .push((shelld_session_id, text.to_string()));
             Ok(())
-        }
-        fn pane_count(&self) -> usize {
-            1
-        }
-        fn pane_pty_device(&self, _: usize) -> Result<Option<PathBuf>, PluginError> {
-            Ok(None)
-        }
-        fn pane_pty_pid_tree(
-            &self,
-            _: usize,
-        ) -> Result<Vec<crate::plugins::PtyChild>, PluginError> {
-            Ok(Vec::new())
-        }
-        fn pane_focused(&self) -> Option<usize> {
-            None
         }
         fn pane_status(
             &self,
@@ -6880,7 +6848,6 @@ mod tests {
             jsonl_path: PathBuf::from(format!("/tmp/{uuid}.jsonl")),
             last_mtime: t0 + Duration::from_secs(mtime_off),
             last_size: 1,
-            last_message_kind: None,
             has_conversation: true,
         };
         let mut ctx = WorkerCtx {
