@@ -1857,14 +1857,10 @@ impl OpEnv for RealEnv {
         }
     }
     fn find_descendant(&self, under: i32, pred: fn(&pidtree::ProcRow) -> bool) -> Option<i32> {
-        if under <= 0 {
-            return None;
-        }
-        let procs = pidtree::list_all_procs();
-        pidtree::descendants_of(under, &procs)
-            .iter()
-            .find(|r| pred(r))
-            .map(|r| r.pid)
+        // an op waits on, or is about to type at, what it just changed
+        let obs = crate::observe::shared().fresh(crate::observe::NOW);
+        let found = obs.table.descendants(under).into_iter().find(|r| pred(r));
+        found.map(|r| r.pid)
     }
     fn output_len(&self, sid: u64) -> u64 {
         // L3 appends every byte the PTY produces to the session's

@@ -86,7 +86,15 @@ impl ProcRow {
 /// `ps -A` without spawning a process.  Typically 300–600 rows on
 /// a dev machine; the table is materialised into a Vec we own.
 pub fn list_all_procs() -> Vec<ProcRow> {
+    WALKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     list_all_procs_inner().unwrap_or_default()
+}
+
+static WALKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times this process has walked the whole process table.
+pub fn table_walks() -> u64 {
+    WALKS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn list_all_procs_inner() -> Option<Vec<ProcRow>> {
