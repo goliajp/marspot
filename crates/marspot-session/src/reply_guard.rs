@@ -245,7 +245,7 @@ fn flush_input(master: RawFd) -> Option<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::local_session::LocalSession;
+    use crate::local_session::{LocalSession, test_pane_env};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -270,14 +270,9 @@ mod tests {
             .join("\n")
     }
 
+    /// A pane whose shell is the one `test_pane_env` was given: zsh or
+    /// bash with their line editors, without the user's rc files.
     fn shell(id: u64) -> LocalSession {
-        shell_named(id, "/bin/zsh")
-    }
-
-    /// A pane running `program` as its shell. Each test runs in its own
-    /// process, so setting `SHELL` here touches no other test.
-    fn shell_named(id: u64, program: &str) -> LocalSession {
-        unsafe { std::env::set_var("SHELL", program) };
         let mut s = LocalSession::spawn(id, 100, 30, "", || {}).expect("spawn");
         assert!(pump_until(&mut s, |s| s.terminal().grid().cursor() != (0, 0)), "shell should come up");
         s
@@ -286,14 +281,16 @@ mod tests {
     /// The screenshot's case: a program asks, never reads, and exits.
     #[test]
     fn replies_a_program_left_unread_do_not_reach_the_shell() {
-        unread_reply_does_not_reach(shell_named(0xF1, "/bin/zsh"));
+        let _env = test_pane_env("/bin/zsh");
+        unread_reply_does_not_reach(shell(0xF1));
     }
 
     /// bash reads input the moment its job is reaped, so the replies
     /// have to be gone before the job exits.
     #[test]
     fn replies_a_program_left_unread_do_not_reach_bash() {
-        unread_reply_does_not_reach(shell_named(0xF4, "/bin/bash"));
+        let _env = test_pane_env("/bin/bash");
+        unread_reply_does_not_reach(shell(0xF4));
     }
 
     fn unread_reply_does_not_reach(mut s: LocalSession) {
@@ -318,6 +315,7 @@ mod tests {
 
     #[test]
     fn a_program_that_reads_its_reply_gets_all_of_it() {
+        let _env = test_pane_env("/bin/zsh");
         let mut s = shell(0xF2);
         s.write(
             b"sh -c 'stty raw -echo; printf \"\\033[c\"; r=$(dd bs=13 count=1 2>/dev/null); \
@@ -339,6 +337,7 @@ mod tests {
     /// none of it may be dropped.
     #[test]
     fn nothing_is_dropped_once_something_else_was_typed() {
+        let _env = test_pane_env("/bin/zsh");
         let mut s = shell(0xF3);
         s.write(b"sh -c 'stty raw -echo; printf \"\\033[c\"; sleep 0.5; stty sane'\r").unwrap();
         assert!(pump_until(&mut s, |s| s.watching_replies()), "the reply is being watched");

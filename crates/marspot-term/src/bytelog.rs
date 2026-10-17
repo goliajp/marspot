@@ -169,18 +169,6 @@ mod tests {
     use std::io::Read;
     use std::time::Instant;
 
-    /// Point the state root at a scratch dir for one test.
-    fn sandbox(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("marspot-bytelog-test-{tag}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: nextest gives each test its own process, so no
-        // other thread can be reading the environment concurrently.
-        // Mirrors the `set_var("HOME")` pattern in `grid_links`.
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
-        dir
-    }
-
     /// Read the log back from disk.  Appends go through a writer
     /// thread, so a test that wants to see them must flush first —
     /// same contract the recovery tooling follows.
@@ -202,7 +190,7 @@ mod tests {
     /// rename cannot take 500 ms, a copy of this much data can.
     #[test]
     fn rotation_is_bounded_ordered_and_cheap() {
-        let dir = sandbox("rotate");
+        let _sandbox = crate::test_env::sandbox_state_dir();
         let id = 7;
         let mut log = ByteLog::open(id).unwrap();
 
@@ -291,7 +279,6 @@ mod tests {
             "the rotating append took {trigger:?} — data is being copied, not renamed"
         );
 
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A legacy oversized log (written by the copy-compaction scheme,
@@ -299,7 +286,8 @@ mod tests {
     /// on open instead of being grown further.
     #[test]
     fn legacy_oversized_segment_rotates_on_open() {
-        let dir = sandbox("legacy");
+        let sandbox = crate::test_env::sandbox_state_dir();
+        let dir = sandbox.path();
         let id = 11;
         let seg_dir = dir.join("sessions").join(id.to_string());
         std::fs::create_dir_all(&seg_dir).unwrap();
@@ -316,13 +304,12 @@ mod tests {
             2,
             "the oversized legacy file should have been retired to .1"
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A log that has never rotated still reads back as one segment.
     #[test]
     fn single_segment_before_rotation() {
-        let dir = sandbox("single");
+        let _sandbox = crate::test_env::sandbox_state_dir();
         let id = 9;
         let mut log = ByteLog::open(id).unwrap();
         log.append(b"hello ").unwrap();
@@ -330,6 +317,5 @@ mod tests {
         log.flush();
         assert_eq!(ByteLog::segment_paths(id).len(), 1);
         assert_eq!(read_all(id), b"hello world");
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

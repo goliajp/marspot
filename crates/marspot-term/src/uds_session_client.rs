@@ -199,9 +199,7 @@ mod deadline_tests {
     /// caller asked for.
     #[test]
     fn handshake_cannot_outlast_the_caller_budget() {
-        let dir = std::env::temp_dir().join("marspot-uds-silent-peer-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_env::TempDir::new("uds-silent-peer");
         let sock = dir.join("sock");
 
         // Accept connections, then never write anything back.
@@ -238,16 +236,11 @@ mod deadline_tests {
 
         let _ = stop_tx.send(());
         let _ = accepted.join();
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn wait_and_connect_honours_a_single_deadline() {
-        let dir = std::env::temp_dir().join("marspot-uds-deadline-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: nextest runs each test in its own process.
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
+        let _sandbox = crate::test_env::sandbox_state_dir();
 
         let timeout = Duration::from_millis(300);
         let t0 = Instant::now();
@@ -263,6 +256,5 @@ mod deadline_tests {
             "took {elapsed:?} against a {timeout:?} budget — the two halves \
              are still each starting their own deadline"
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

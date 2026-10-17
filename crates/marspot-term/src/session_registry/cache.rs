@@ -202,7 +202,8 @@ pub fn entry_is_live_with(entry: &SessionEntry, written_us: u64, proc_start_us: 
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{StateDirGuard, sample_entry};
+    use super::super::test_support::sample_entry;
+    use crate::test_env::sandbox_state_dir;
     use super::super::{session_dir, write_session_entry};
     use super::*;
     use std::time::{Duration, Instant};
@@ -224,7 +225,7 @@ mod tests {
 
     #[test]
     fn unchanged_files_are_not_parsed_again_and_removed_ids_drop_out() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         write_session_entry(&sample_entry(1)).unwrap();
         write_session_entry(&sample_entry(2)).unwrap();
         let mut c = RegistryCache::default();
@@ -241,7 +242,7 @@ mod tests {
     /// Same size, same second: only the inode tells the versions apart.
     #[test]
     fn a_same_size_rewrite_within_the_second_is_seen() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         let mut e = sample_entry(3);
         e.title = "aaa".into();
         write_session_entry(&e).unwrap();
@@ -263,7 +264,7 @@ mod tests {
 
     #[test]
     fn a_cwd_with_newlines_round_trips() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         let mut e = sample_entry(4);
         e.cwd = "/tmp/a\nb\r\nc \\n \"q\"\\".into();
         e.title = "t\nitle".into();
@@ -277,7 +278,7 @@ mod tests {
     /// A file as the writer before the newline escapes produced it.
     #[test]
     fn an_old_format_file_reads_the_same() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         let old = "# marspot session registry entry — RFC-003\nid = 5\npid = 123\n\
             socket = \"/s/5/sock\"\ncols = 80\nrows = 24\ntitle = \"a \\\"b\\\" c\\\\n\"\n\
             cwd = \"C:\\\\dir\\\\new\"\nproto_version = 3\ncreated_at_unix = 1700000000\n\
@@ -293,7 +294,7 @@ mod tests {
 
     #[test]
     fn empty_and_truncated_entries_are_reported_not_hidden() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         write_session_entry(&sample_entry(6)).unwrap();
         let full = std::fs::read_to_string(session_entry_path(6)).unwrap();
         std::fs::create_dir_all(session_dir(7)).unwrap();
@@ -315,7 +316,7 @@ mod tests {
 
     #[test]
     fn an_entry_naming_a_foreign_or_missing_pid_is_not_live() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         let mut e = sample_entry(10);
         e.pid = std::process::id() as i32;
         write_session_entry(&e).unwrap();
@@ -343,7 +344,7 @@ mod tests {
     /// only if it started before its entry was written.
     #[test]
     fn a_session_executable_is_live_until_its_pid_is_younger_than_the_entry() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         let bin = session_dir(11).join("marspot-session");
         std::fs::create_dir_all(session_dir(11)).unwrap();
         std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();

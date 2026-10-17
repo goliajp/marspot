@@ -39,8 +39,16 @@ unset MARSPOT_SESSION_ID
 # 之后,一条断言默认回收阈值的测试在作者从面板里把回收关掉那天开始失败,
 # 而且只在他的机器上失败。测试报告的是它所在机器的状态,不是代码的状态。
 # 整个测试进程树钉在沙箱状态目录上;需要真实目录的测试自己覆盖。
-export MARSPOT_STATE_DIR="${MARSPOT_STATE_DIR:-/tmp/marspot-test-state}"
-mkdir -p "$MARSPOT_STATE_DIR"
+#
+# A new directory per run, removed when it ends: the fixed
+# /tmp/marspot-test-state was shared by consecutive runs and by
+# worktrees, so one run's leftovers were the next one's input.  A
+# directory the caller passes in is used as given and left alone.
+if [[ -z ${MARSPOT_STATE_DIR:-} ]]; then
+  MARSPOT_STATE_DIR="$(mktemp -d /tmp/marspot-test-state.XXXXXX)"
+  trap 'rm -rf "$MARSPOT_STATE_DIR"' EXIT
+fi
+export MARSPOT_STATE_DIR
 # 2026-07-28 事故:nextest 默认并发 = 核数(此机 14),811 个测试里
 # 一批要各自初始化 Metal / CoreText 的重进程(每个 ~130MB)齐发,
 # 32 个测试二进制两分钟内并发拉起,16 个同时抢一把内核 rwlock 写锁,
