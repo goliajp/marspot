@@ -1827,6 +1827,8 @@ impl PaneSession for OpRunner {
 
 mod real_env;
 pub use real_env::RealEnv;
+#[cfg(test)]
+mod never_ran_tests;
 
 // ── the service ──────────────────────────────────────────────────────
 
@@ -1937,6 +1939,9 @@ impl PtyOps {
     pub fn submit_at(&mut self, sid: u64, op: PtyOp, step: usize) -> Option<OpId> {
         let q = self.queued.entry(sid).or_default();
         if q.len() >= MAX_QUEUED_PER_PANE {
+            if let Some(f) = &op.on_end {
+                f(&OpOutcome::Failed { step: 0, label: "queue", err: "the pane's queue is full".into() });
+            }
             return None;
         }
         let id = OpId(self.next_id);
@@ -1947,6 +1952,14 @@ impl PtyOps {
 
     /// Forget closed panes: drop their queued runs and free their slot.
     pub fn retain(&mut self, open: impl Fn(u64) -> bool) {
+        // a run that never started is still told it is over
+        for (_, q) in self.queued.iter().filter(|(sid, _)| !open(**sid)) {
+            for (_, op, _) in q {
+                if let Some(f) = &op.on_end {
+                    f(&OpOutcome::Cancelled("pane closed"));
+                }
+            }
+        }
         self.queued.retain(|sid, _| open(*sid));
         self.active.retain(|sid, _| open(*sid));
     }
@@ -1999,6 +2012,7 @@ impl PtyOps {
                 continue;
             };
             let name = op.name;
+            let notify = op.on_end.clone();
             let sink = Arc::clone(&self.sink);
             let runner = OpRunner::new(
                 op,
@@ -2031,12 +2045,11 @@ impl PtyOps {
                         "pty_op.begin_failed",
                         &format!("{name} on pane {sid}: {e}"),
                     );
-                    self.sink.lock().unwrap().push(OpReport {
-                        id,
-                        sid,
-                        name,
-                        outcome: OpOutcome::Failed { step: 0, label: "begin", err: e },
-                    });
+                    let outcome = OpOutcome::Failed { step: 0, label: "begin", err: e };
+                    if let Some(f) = &notify {
+                        f(&outcome);
+                    }
+                    self.sink.lock().unwrap().push(OpReport { id, sid, name, outcome });
                 }
             }
         }
