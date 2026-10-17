@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.238"  # no longer polls a theme switch and an animation registry nothing drives
-core    = "0.12.282"  # unused UI tokens, view-tree API and dev panel leftovers are gone
+core    = "0.12.283"  # the per-pane deferred update, which nothing could trigger, is gone
 session = "0.11.146"  # a program that asked for focus reports hears when its pane gains and loses the keyboard
