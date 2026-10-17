@@ -57,16 +57,41 @@ cleanup() {
 trap cleanup EXIT
 
 # --- 0. Build ONE pristine (unsigned) tarball + a throwaway wrong key --
-[[ -f "$ROOT/keys/marspot-update.sec" ]] \
-  || fail "no keys/marspot-update.sec — generate it before running"
-PROD_KEY="$ROOT/keys/marspot-update.sec"
+# A throwaway signing key for this run.  The binaries are built with
+# the `test-update-key` feature, which makes the updater trust the PEM
+# that MARSPOT_TEST_UPDATE_PUBKEY names -- only while MARSPOT_STATE_DIR
+# names a sandbox, as it does here.  The real release key never has to
+# be on the machine that runs the suite.  The build goes to
+# target/release, where the sandbox helpers expect it; install-local
+# rebuilds without the feature, and a feature build outside a sandbox
+# trusts only the real key anyway.
+TEST_KEY="$SERVE_DIR/test-update.sec"
+openssl ecparam -genkey -name prime256v1 -noout -out "$TEST_KEY" 2>/dev/null \
+  || fail "could not generate the test signing key"
+openssl ec -in "$TEST_KEY" -pubout -out "$SERVE_DIR/test-update.pub" 2>/dev/null \
+  || fail "could not derive the test public key"
+export MARSPOT_TEST_UPDATE_PUBKEY="$SERVE_DIR/test-update.pub"
+( cd "$ROOT" && cargo build --release --features test-update-key \
+    --bin marspot-shell --bin marspot-core --bin marspot-session 2>&1 | tail -2 ) \
+  || fail "release build with test-update-key failed"
+LC_ALL=C grep -q MARSPOT_TEST_UPDATE_PUBKEY "$ROOT/target/release/marspot-shell" \
+  || fail "target/release/marspot-shell was built without test-update-key"
+# The release tarball, from exactly those binaries.  Not
+# build-release-tarball.sh: it rebuilds without the feature.
+make_tarball() {
+  local out="$1" stage
+  stage=$(mktemp -d "$SERVE_DIR/stage.XXXXXX")
+  for b in marspot-shell marspot-core marspot-session; do
+    install -m 0755 "$ROOT/target/release/$b" "$stage/$b" || return 1
+  done
+  tar -czf "$out" -C "$stage" marspot-shell marspot-core marspot-session
+}
 WRONG_KEY="$SERVE_DIR/wrong.sec"
 openssl ecparam -genkey -name prime256v1 -noout -out "$WRONG_KEY" 2>/dev/null \
   || fail "could not generate throwaway wrong key"
 
 BASE="$SERVE_DIR/base.tar.gz"
-"$ROOT/bin/build-release-tarball.sh" --output "$BASE" >/dev/null \
-  || fail "build-release-tarball.sh failed"
+make_tarball "$BASE" || fail "could not build the release tarball"
 # That step ran `cargo build --release`, so the binaries this test is
 # about to launch may be brand-new inodes.  Pay their Gatekeeper
 # assessment now, before anything is on a clock.
@@ -110,11 +135,11 @@ openssl dgst -sha256 -sign "$WRONG_KEY" -out "$SERVE_DIR/wrongkey/$ASSET.sig" \
   || fail "could not sign wrongkey tarball"
 write_feed wrongkey 1
 
-# --- Case "tampered": signed with the REAL key over pristine bytes,
+# --- Case "tampered": signed with the trusted key over pristine bytes,
 #     then the tarball is mutated after signing → digest mismatch. ----
 mkdir -p "$SERVE_DIR/tampered"
 cp "$BASE" "$SERVE_DIR/tampered/$ASSET"
-openssl dgst -sha256 -sign "$PROD_KEY" -out "$SERVE_DIR/tampered/$ASSET.sig" \
+openssl dgst -sha256 -sign "$TEST_KEY" -out "$SERVE_DIR/tampered/$ASSET.sig" \
   "$SERVE_DIR/tampered/$ASSET" 2>/dev/null \
   || fail "could not sign tampered tarball"
 # Corrupt AFTER signing: the .sig is valid for the original bytes only.

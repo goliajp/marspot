@@ -24,6 +24,7 @@ mod control_writer;
 mod snapshot_writer;
 use control_writer::ControlWriter;
 use snapshot_writer::SnapshotWriter;
+mod handoff;
 mod local_session;
 mod reply_guard;
 mod uds_server;
@@ -54,6 +55,10 @@ use marspot_term::shell_proto::{
 };
 use marspot_term::session_state::{PendingPage, SessionState};
 
+use handoff::{
+    ENV_HANDOFF_MANIFEST, L3Handoff, handoff_manifest_path, should_execv_on_sigterm,
+    try_resume_handoff, write_handoff_manifest,
+};
 use local_session::LocalSession;
 
 /// RFC-003 step 1c. Two session backends coexist:
@@ -420,152 +425,6 @@ impl Drop for MappedFile {
     }
 }
 
-/// RFC-003 §6 Amendment 16 — L3 self-execv handoff (L4 shelld model).
-///
-/// On SIGTERM, the L3 looks at the `current/marspot-session` binary
-/// next door.  If its MARSPOT_FP fingerprint differs from this
-/// process's rodata fingerprint, the L3 stages an execv handoff:
-///
-///   1. clear CLOEXEC on PTY master fd + UDS listener fd
-///   2. write Terminal snapshot to `sessions/<id>/state.bin`
-///   3. write manifest TSV to /tmp keyed by pid
-///   4. set env sentinel `MARSPOT_L3_HANDOFF_MANIFEST=<path>`
-///   5. `execv("current/marspot-session", argv)`
-///
-/// PID is preserved across execv; the master fd / listener fd / shell
-/// child / PTY tty session are all unchanged.  The new image detects
-/// the env sentinel at boot, reads the manifest, and rebuilds
-/// LocalSession + SessionListener via `from_handoff` instead of
-/// forkpty + bind.  L2 sees a brief read pause on its control
-/// channel while the new image rebinds its reader; keystrokes resume
-/// transparently.
-///
-/// Fingerprint-match (or missing `current/`) → fall through to the
-/// user-quit cleanup path (state.bin + clean exit, shell SIGHUPs).
-const ENV_HANDOFF_MANIFEST: &str = "MARSPOT_L3_HANDOFF_MANIFEST";
-// Manifest version 2 (2026-06-17): added optional `control_stream_fd`
-// so the L3 self-execv can carry the adopted L2↔L3 control UnixStream
-// across the image swap.  Without it the stream's fd kept its default
-// CLOEXEC=1, closed across execv, and L2 saw EOF + had no auto-reconnect
-// → user couldn't type for many minutes after every install.
-// Forward-compat: a v1 manifest is still accepted (`control_stream_fd`
-// defaults to -1, meaning "no inherited stream — wait for NewClient").
-const HANDOFF_MANIFEST_VERSION: u32 = 2;
-const HANDOFF_MANIFEST_MIN_COMPAT: u32 = 1;
-
-struct L3Handoff {
-    master_fd: RawFd,
-    child_pid: i32,
-    listen_fd: RawFd,
-    cols: u16,
-    rows: u16,
-    /// Adopted L2↔L3 control UnixStream raw fd, or `-1` if there was
-    /// no live control stream when the execv handoff fired (which
-    /// happens when L2 is mid-swap and the previous client EOF'd
-    /// before NewClient adopted a new one).
-    control_stream_fd: RawFd,
-}
-
-fn handoff_manifest_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(format!(
-        "/tmp/marspot-session-handoff.{}.tsv",
-        std::process::id()
-    ))
-}
-
-fn write_handoff_manifest(h: &L3Handoff, path: &std::path::Path) -> std::io::Result<()> {
-    let body = format!(
-        "version={}\nmaster_fd={}\nchild_pid={}\nlisten_fd={}\ncols={}\nrows={}\ncontrol_stream_fd={}\n",
-        HANDOFF_MANIFEST_VERSION,
-        h.master_fd, h.child_pid, h.listen_fd, h.cols, h.rows,
-        h.control_stream_fd,
-    );
-    let tmp = path.with_extension("tsv.tmp");
-    std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L3Handoff> {
-    let body = std::fs::read_to_string(path)?;
-    let mut fields = std::collections::HashMap::new();
-    for line in body.lines() {
-        let line = line.trim();
-        if line.is_empty() { continue; }
-        if let Some((k, v)) = line.split_once('=') {
-            fields.insert(k.trim().to_string(), v.trim().to_string());
-        }
-    }
-    let inv = |k: &str| std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!("manifest bad/missing {k}"),
-    );
-    let version: u32 = fields.get("version").ok_or_else(|| inv("version"))?
-        .parse().map_err(|_| inv("version"))?;
-    if !(HANDOFF_MANIFEST_MIN_COMPAT..=HANDOFF_MANIFEST_VERSION).contains(&version) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "manifest version {version} not in [{HANDOFF_MANIFEST_MIN_COMPAT}, {HANDOFF_MANIFEST_VERSION}]"
-            ),
-        ));
-    }
-    // v1 lacked control_stream_fd — default to -1 (no inherited stream).
-    let control_stream_fd: RawFd = fields
-        .get("control_stream_fd")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(-1);
-    Ok(L3Handoff {
-        master_fd: fields.get("master_fd").ok_or_else(|| inv("master_fd"))?
-            .parse().map_err(|_| inv("master_fd"))?,
-        child_pid: fields.get("child_pid").ok_or_else(|| inv("child_pid"))?
-            .parse().map_err(|_| inv("child_pid"))?,
-        listen_fd: fields.get("listen_fd").ok_or_else(|| inv("listen_fd"))?
-            .parse().map_err(|_| inv("listen_fd"))?,
-        cols: fields.get("cols").ok_or_else(|| inv("cols"))?
-            .parse().map_err(|_| inv("cols"))?,
-        rows: fields.get("rows").ok_or_else(|| inv("rows"))?
-            .parse().map_err(|_| inv("rows"))?,
-        control_stream_fd,
-    })
-}
-
-fn try_resume_handoff() -> Option<L3Handoff> {
-    let path = std::env::var(ENV_HANDOFF_MANIFEST).ok()?;
-    unsafe { std::env::remove_var(ENV_HANDOFF_MANIFEST); }
-    let path = std::path::PathBuf::from(path);
-    match read_handoff_manifest(&path) {
-        Ok(h) => {
-            let _ = std::fs::remove_file(&path);
-            Some(h)
-        }
-        Err(e) => {
-            lx_warn!(
-                "l3.handoff.manifest_read_failed",
-                &format!("{e}; cold start"),
-                path = path.display()
-            );
-            let _ = std::fs::remove_file(&path);
-            None
-        }
-    }
-}
-
-/// Read the MARSPOT_FP=<sha>|<ts>|END rodata marker out of a binary.
-/// Used by the SIGTERM handler to decide between execv-handoff and
-/// user-quit cleanup.
-fn read_binary_fingerprint(path: &std::path::Path) -> Option<String> {
-    use std::io::Read;
-    let mut f = std::fs::File::open(path).ok()?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).ok()?;
-    let needle = b"MARSPOT_FP=";
-    let start = buf.windows(needle.len()).position(|w| w == needle)?;
-    let tail = &buf[start..];
-    let end_off = tail.windows(4).position(|w| w == b"|END")?;
-    std::str::from_utf8(&tail[..end_off]).ok().map(|s| s.to_string())
-}
-
 fn clear_cloexec(fd: RawFd) -> std::io::Result<()> {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFD);
@@ -665,23 +524,6 @@ fn do_l3_execv_swap(
     Err(err)
 }
 
-/// On SIGTERM, decide whether to execv (binary update) or clean-exit
-/// (user quit / non-update SIGTERM).  Returns true when caller should
-/// proceed with execv via `do_l3_execv_swap`.
-fn should_execv_on_sigterm() -> bool {
-    let Ok(tree) = marspot_term::binary_tree::BinaryTree::default_for("marspot-session") else {
-        return false;
-    };
-    let current = tree.current();
-    if !current.exists() {
-        return false;
-    }
-    let Some(target_fp) = read_binary_fingerprint(&current) else {
-        return false;
-    };
-    let self_fp = marspot_term::MARSPOT_FP_TERM;
-    target_fp != self_fp
-}
 
 /// Placeholder geometry until L2 drives a real resize (later step).
 const INITIAL_COLS: u16 = 80;
