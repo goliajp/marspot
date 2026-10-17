@@ -27,8 +27,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use marspot::pane_state::{Activity, Change, Generic, Observation, PaneMachine, PaneStatus};
 use marspot::pidtree;
 
-/// How often the machines are stepped.  Rides `poll_supervisor`'s
-/// ~250 ms cadence but gates itself to this, so the syscall cost is
+/// How often the machines are stepped.  Rides `poll_supervisor`, which
+/// runs on the 1 s redraw pump plus every knock, and gates itself to
+/// this, so the syscall cost is
 /// ~2-4 per pane per second — the same order as L2's cwd sweep.
 ///
 /// This is also the machine's clock: `CONFIRM_TICKS` agreeing
