@@ -28,4 +28,4 @@
 
 shell   = "0.7.242"  # ignores SIGPIPE, so a write to a core that just died cannot end the app
 core    = "0.12.286"  # a pane's program starts with default signal handling
-session = "0.11.150"  # a pane's program starts with default signal handling, so `yes | head` ends quietly
+session = "0.11.151"  # an execv leaks no descriptor and drops no input or output in flight
