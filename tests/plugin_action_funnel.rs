@@ -50,9 +50,14 @@ fn plugin_sources() -> Vec<(String, String)> {
 /// receive them -- so including it would make the check fail for the one
 /// reason that does not matter.
 fn production_lines(text: &str) -> Vec<(usize, &str)> {
-    let cut = text
-        .lines()
-        .position(|l| l.trim_start().starts_with("#[cfg(test)]"))
+    // the test module, not the first test-only item: a `#[cfg(test)]`
+    // helper in the middle of the file is followed by more production code
+    let lines: Vec<&str> = text.lines().collect();
+    let cut = lines
+        .windows(2)
+        .position(|w| {
+            w[0].trim_start().starts_with("#[cfg(test)]") && w[1].trim_start().starts_with("mod ")
+        })
         .unwrap_or(usize::MAX);
     text.lines()
         .enumerate()

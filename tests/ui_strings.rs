@@ -93,10 +93,11 @@ fn migrated_files_do_not_grow_new_literals() {
     for (path, allowed) in MIGRATED {
         let text = std::fs::read_to_string(path).expect("a migrated file is readable");
         // Production code only: a test fixture may hold whatever it likes.
+        // Cut at the test module, not at the first test-only item.
         let prod = text
-            .split("#[cfg(test)]")
-            .next()
-            .expect("there is something before the tests");
+            .match_indices("#[cfg(test)]")
+            .find(|(i, m)| text[i + m.len()..].trim_start().starts_with("mod "))
+            .map_or(text.as_str(), |(i, _)| &text[..i]);
         let mut offenders = Vec::new();
         for (n, line) in prod.lines().enumerate() {
             let trimmed = line.trim_start();
