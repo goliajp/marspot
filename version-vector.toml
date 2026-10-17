@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.237"  # a process that logs rarely follows a log rotation within a minute
-core    = "0.12.278"  # a ZWJ family, a flag or a skin tone is drawn in colour, not as its silhouette
+core    = "0.12.279"  # a frame no longer copies the text of every cluster it draws
 session = "0.11.145"  # trailing blanks of a scrolled line are found at half the cost
