@@ -193,6 +193,21 @@ mod tests {
         Some((glyphs, color_glyphs))
     }
 
+    /// A colour cluster is drawn from the colour atlas.  Drawn as an
+    /// alpha mask it came out as its silhouette in the text colour: a
+    /// family as a white tile, a flag as a white flag.
+    #[test]
+    fn colour_clusters_are_drawn_in_colour() {
+        let mut term = Terminal::new(20, 3);
+        term.feed(format!("A {FLAG} {FAMILY}").as_bytes());
+        let Some((mono, colour)) = drawn(term.grid()) else {
+            eprintln!("skip (no Metal)");
+            return;
+        };
+        assert_eq!(colour.len(), 2, "the flag and the family are colour glyphs");
+        assert_eq!(mono.len(), 1, "only the A is a mono glyph");
+    }
+
     /// An L3 pane draws a cluster exactly as an in-process pane does:
     /// the same glyphs, from the same atlas entries, in the same places.
     /// Without the cluster table it does not, which is what this test
