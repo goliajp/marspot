@@ -5800,14 +5800,9 @@ impl CoreApp {
         }
     }
 
-    /// Per-session silent update (target #4 step 5a): bring up a
-    /// replacement L3 (the current `marspot-session` binary) on each *idle*
-    /// (non-focused) pane's session and let `L3Conn::poll` swap to it once
-    /// it has replayed the bytelog + published — invisible, since the
-    /// replayed screen matches.  The focused pane is left alone (a replay
-    /// could blip an interactive TUI mid-keystroke); step 5b adds a
-    /// click-to-swap affordance for it.  Skips panes already swapping or
-    /// exited.
+    /// Per-session silent update: promote the staged `marspot-session`
+    /// into `current/`, then ask every live L3 pane to execv itself into
+    /// it.  Skips panes that have exited.
     fn swap_idle_l3(&mut self) {
         // RFC-003 §6 Amendment 16 — L3 self-execv silent update.
         //
@@ -5858,94 +5853,6 @@ impl CoreApp {
             "SIGTERM fanned out for L3 self-execv",
             n_signalled = signalled
         );
-    }
-
-    /// Call right before moving focus to `new_idx`: if the currently-
-    /// focused pane has a deferred update, it's about to become idle, so
-    /// trigger its swap now (a replay is safe once it's not under the
-    /// user's hands).  No-op if focus isn't actually changing.
-    fn resolve_pending_on_defocus(&mut self, wi: usize, new_idx: usize) {
-        if new_idx != win!(self, wi).focused_idx
-            && win!(self, wi)
-                .panes
-                .get(win!(self, wi).focused_idx)
-                .is_some_and(|p| p.update_pending())
-        {
-            self.begin_pane_swap(wi, win!(self, wi).focused_idx);
-        }
-    }
-
-    /// Bring up a replacement L3 on pane `i`'s session and stage the swap
-    /// (clearing any deferred-update flag).  Caller has checked it's a live,
-    /// not-already-swapping L3 pane.
-    fn begin_pane_swap(&mut self, wi: usize, i: usize) {
-        // Amendment 16, for one pane: promote the staged image, then ask
-        // that pane's L3 to self-execv.  Same two steps `swap_idle_l3`
-        // does for all of them.
-        //
-        // This used to spawn a replacement L3 on the same session id and
-        // wait for `L3Conn::try_promote` to swap to it once it published.
-        // That cannot work and has not since July: `marspot-session`
-        // takes a lock on `sessions/<id>/` and refuses to start while
-        // another live L3 holds it, which is the defence against two
-        // writers on one session.  The replacement exited before
-        // publishing, nothing was ever promoted, and the pane stayed
-        // `is_swapping()` for the rest of its life -- so the two places
-        // that call this (moving focus off a pane with a staged update,
-        // and the refresh glyph in its title strip) did nothing.
-        //
-        // Promoting FIRST is not optional.  A SIGTERM whose fingerprint
-        // matches falls through to the user-quit path: state.bin, clean
-        // exit, and the shell gets a SIGHUP.  Signalling before `current/`
-        // holds the new image would close the pane instead of updating it.
-        let pane = &win!(self, wi).panes[i];
-        if !pane.is_l3() || pane.is_exited() {
-            return;
-        }
-        let Some(sid) = pane.session().l3_session_id() else {
-            return;
-        };
-        let Some(pid) = pane.session().l3_pid() else {
-            return;
-        };
-        if pid <= 0 {
-            return;
-        }
-        match marspot::updater::promote_pending_session() {
-            Ok(true) => lx_event!(
-                "SESSION_PROMOTE",
-                "promoted staged marspot-session → current/ for a single pane",
-                session = sid
-            ),
-            Ok(false) => {
-                // Nothing staged: the pane's `update_pending` flag and the
-                // staging directory disagree.  Signalling now would end
-                // the session rather than update it.
-                lx_warn!(
-                    "core.pane_swap.nothing_staged",
-                    "a pane asked to swap but no replacement is staged; not signalling",
-                    session = sid
-                );
-                return;
-            }
-            Err(e) => {
-                lx_error!("core.pane_swap.promote_failed", &format!("{e}"));
-                return;
-            }
-        }
-        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
-            lx_event!(
-                "L3_SWAP_SIGTERM",
-                "asked one L3 to self-execv into current/marspot-session",
-                session = sid,
-                pid = pid
-            );
-        } else {
-            lx_error!(
-                "core.pane_swap.signal_failed",
-                &format!("{}", std::io::Error::last_os_error()),
-            );
-        }
     }
 
     /// Terminate `panes[idx]` and keep all parallel state in sync.
@@ -7330,24 +7237,18 @@ impl CoreApp {
                 // which is not a miss.
                 return None;
             }
-            let reserved = if p.update_pending() && i == win!(self, wi).focused_idx {
-                cell_w * 1.5
-            } else {
-                0.0
-            };
             let chars = badge.chars().count() as f64;
-            let lo = rect.x + rect.w - padding - reserved - chars * cell_w;
+            let lo = rect.x + rect.w - padding - chars * cell_w;
             let prefix = badge.split(' ').next().unwrap_or("").chars().count() as f64;
             return Some(format!(
                 "sid={sid} click=({x_phys:.1},{y_phys:.1}) \
                  badge={badge:?} chars={chars} prefix_chars={prefix} \
-                 box=[{lo:.1},{:.1}) cell_w={cell_w:.2} reserved={reserved:.1} \
-                 pane=[{:.1},{:.1}) focused_idx={} update_pending={}",
+                 box=[{lo:.1},{:.1}) cell_w={cell_w:.2} \
+                 pane=[{:.1},{:.1}) focused_idx={}",
                 lo + prefix * cell_w,
                 rect.x,
                 rect.x + rect.w,
                 win!(self, wi).focused_idx,
-                p.update_pending(),
             ));
         }
         None
@@ -7378,15 +7279,7 @@ impl CoreApp {
             let badge_chars = badge.chars().count() as f64;
             let prefix_chars = prefix.chars().count() as f64;
             let rect = &win!(self, wi).layout.cells[i];
-            // Match the renderer's `reserved` carve-out for the
-            // refresh affordance on the focused pane with a staged
-            // update.
-            let reserved = if p.update_pending() && i == win!(self, wi).focused_idx {
-                cell_w * 1.5
-            } else {
-                0.0
-            };
-            let badge_x = rect.x + rect.w - padding - reserved - badge_chars * cell_w;
+            let badge_x = rect.x + rect.w - padding - badge_chars * cell_w;
             let prefix_lo = badge_x;
             let prefix_hi = prefix_lo + prefix_chars * cell_w;
             let y_lo = rect.y_top;
@@ -8198,7 +8091,6 @@ impl CoreApp {
         let sidebar_btn_hit = layout.hit_test_sidebar_button(x_phys, y_phys);
         let close_session_hit = layout.hit_test_close_session(x_phys, y_phys);
         let add_session_hit = layout.hit_test_add_session_button(x_phys, y_phys);
-        let refresh_hit = layout.hit_test_cell_refresh(x_phys, y_phys);
 
         // Sidebar toggle: highest-priority chrome action so a click
         // on the chip never falls through to the cell underneath.
@@ -8550,20 +8442,9 @@ impl CoreApp {
             return;
         }
 
-        // Refresh affordance: click the deferred-update glyph on a pending
-        // pane to trigger its silent swap now.  Sits inside the title strip,
-        // so it must take priority over the title-edit hit below — but only
-        // when that pane actually has an update staged (else fall through to
-        // normal title behaviour).
-        if let Some(i) = refresh_hit
-            && win!(self, wi).panes.get(i).is_some_and(|p| p.update_pending()) {
-                self.begin_pane_swap(wi, i);
-                return;
-            }
-
         // Plugin badge prefix click: route to L1 (the plugin owns
         // what the prefix means and what cycling it does).  Sits in
-        // the same title strip as title-edit + refresh; check here
+        // the same title strip as title-edit; check here
         // before title-edit so a click on `P<n>` doesn't drop the
         // pane into rename mode.
         if let Some(i) = self.hit_test_pane_badge_prefix(wi, x_phys, y_phys)
@@ -8602,7 +8483,6 @@ impl CoreApp {
                 return;
             }
             if idx < win!(self, wi).panes.len() {
-                self.resolve_pending_on_defocus(wi, idx);
                 win!(self, wi).focused_idx = idx;
                 let _ = win!(self, wi).focused_pane_mut().snap_to_live();
                 win!(self, wi).selection = None;
@@ -8747,7 +8627,6 @@ impl CoreApp {
                 win!(self, wi).selection_dragging = true;
                 win!(self, wi).selection_tape = tape;
                 if idx != win!(self, wi).focused_idx {
-                    self.resolve_pending_on_defocus(wi, idx);
                     win!(self, wi).focused_idx = idx;
                 }
                 win!(self, wi).needs_render = true;
@@ -8775,7 +8654,6 @@ impl CoreApp {
                 return;
             }
             if idx < win!(self, wi).panes.len() && idx != win!(self, wi).focused_idx {
-                self.resolve_pending_on_defocus(wi, idx);
                 win!(self, wi).focused_idx = idx;
                 let _ = win!(self, wi).focused_pane_mut().snap_to_live();
                 win!(self, wi).needs_render = true;
@@ -8811,7 +8689,6 @@ impl CoreApp {
         // Same focus motion as a click — the pane receiving the text
         // becomes the pane the user is typing into next.
         if idx != win!(self, wi).focused_idx {
-            self.resolve_pending_on_defocus(wi, idx);
             win!(self, wi).focused_idx = idx;
         }
         if win!(self, wi).panes[idx].snap_to_live() {

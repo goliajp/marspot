@@ -125,12 +125,6 @@ pub struct SessionView<'a> {
     /// session AND view_offset == 0 (preedit is anchored to the live
     /// cursor; scrolled-back views don't show one).
     pub ime_preedit: &'a str,
-    /// A deferred per-session silent update is staged for this pane
-    /// (target #4 step 5b).  When set on the focused pane, the renderer
-    /// draws a refresh affordance at the right edge of the title strip;
-    /// clicking it triggers the swap.  Only the focused pane ever carries
-    /// it (idle panes swap immediately).
-    pub update_pending: bool,
     /// RFC-006 — this slot is a dormant placeholder (a moved-out
     /// pane's empty seat).  The renderer recesses it: a translucent
     /// scrim over the whole cell so it reads as "space held, nothing
@@ -158,8 +152,7 @@ pub struct SessionView<'a> {
     /// frames and the renderer has none.
     pub scrim: f32,
     /// RFC-001 plugin badge — a short tag drawn at the right edge of
-    /// the title strip (left of the optional refresh affordance) so
-    /// plugins can surface per-pane metadata without overloading the
+    /// the title strip so plugins can surface per-pane metadata without overloading the
     /// main title.  Empty = nothing drawn.  See `MsgType::PaneBadge`.
     pub right_badge: &'a str,
     /// Is this pane painted by an agent TUI that wraps its own lines?

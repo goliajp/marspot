@@ -79,10 +79,6 @@ pub(crate) const SIDEBAR_TEXT_FG: (f32, f32, f32) = (0.78, 0.82, 0.88);
 /// the "current version" reads clearly when the user glances up to
 /// confirm an update landed.
 pub(crate) const HEADER_VERSION_FG: (f32, f32, f32) = (0.62, 0.68, 0.80);
-/// Deferred-update refresh glyph in the focused pane's title strip — a
-/// warm amber so it reads as an actionable "update ready" control against
-/// the dim title text (target #4 step 5b).
-pub(crate) const REFRESH_ICON_FG: (f32, f32, f32) = (0.95, 0.74, 0.30);
 /// Claudecode brand coral — matches the orange the claude CLI uses
 /// for its own prompt + spinner glyphs.  Plugin badges currently
 /// hard-code this so the right-side decoration reads as "claudecode"
