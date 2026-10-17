@@ -1,3 +1,22 @@
+# No test may run forever.  A test that has not finished in 30 s is
+# reported as slow, and one that reaches a minute is killed and fails:
+# the slowest test in the suite takes a few seconds, so a minute is a
+# hang, not a slow machine.  Before this a wedged test held the runner
+# until someone noticed.
+#
+# A test whose process has exited while something it started still
+# holds its stdout or stderr has left a process behind.
+[profile.default]
+slow-timeout = { period = "30s", terminate-after = 2 }
+leak-timeout = "200ms"
+
+# Every child these three crates' tests start has an owner that kills
+# it, so here a leak fails the test; elsewhere it is still only
+# reported.
+[[profile.default.overrides]]
+filter = 'package(marspot-term) | package(marspot-session) | package(marspot-linkify)'
+leak-timeout = { period = "200ms", result = "fail" }
+
 # A test that asserts a time budget needs the machine to itself.
 #
 # `b1_perf_1mb_first_64_hits_under_20ms` went red the first time the
