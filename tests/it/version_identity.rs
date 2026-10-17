@@ -5,9 +5,9 @@
 //! release tag, and no tag was ever going to be newer than `0.12.x`.
 //! The update channel was dead from June and nothing said so.
 //!
-//! These tests are what would have said so.
-
-use std::process::Command;
+//! These tests are what would have said so.  That a release tag
+//! names the product version is checked where tags exist: the release
+//! workflow refuses a tag that does not.
 
 fn cargo_toml_version() -> String {
     let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
@@ -64,38 +64,5 @@ fn a_layer_build_number_is_not_the_product_version() {
         marspot::build_ids::CORE,
         "the product version and the core layer's build number are \
          different kinds of number and should not be kept in lockstep"
-    );
-}
-
-#[test]
-fn the_newest_tag_matches_the_product_version() {
-    let out = Command::new("git")
-        .args(["-C", env!("CARGO_MANIFEST_DIR"), "tag", "--sort=-v:refname"])
-        .output()
-        .expect("git runs");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() {
-        // A copy of the tree that is not a checkout (a mirror synced to
-        // a test host, a source tarball) has no tags to compare with;
-        // any other failure of git is a failure.
-        if stderr.contains("not a git repository") {
-            eprintln!("SKIPPED: not a git checkout, so no tags: {}", stderr.trim());
-            return;
-        }
-        panic!("git tag failed ({}): {stderr}", out.status);
-    }
-    let tags = String::from_utf8_lossy(&out.stdout);
-    let Some(newest) = tags.lines().next() else {
-        // Saying so matters: "no tags" and "the tag matches" are the
-        // same silent pass otherwise, and this repository's history
-        // was rebuilt once, which dropped every tag.
-        eprintln!("SKIPPED: no tags in this repository yet");
-        return;
-    };
-    assert_eq!(
-        newest.trim_start_matches('v'),
-        marspot::PRODUCT_VERSION,
-        "newest tag {newest} does not name the product version; a release \
-         cut from it would be refused by the workflow's tag check"
     );
 }
