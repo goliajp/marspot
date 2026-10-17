@@ -10,11 +10,10 @@
 slow-timeout = { period = "30s", terminate-after = 2 }
 leak-timeout = "200ms"
 
-# Every child these three crates' tests start has an owner that kills
-# it, so here a leak fails the test; elsewhere it is still only
-# reported.
+# Every child these crates' tests start has an owner that kills it, so
+# here a leak fails the test; elsewhere it is still only reported.
 [[profile.default.overrides]]
-filter = 'package(marspot-term) | package(marspot-session) | package(marspot-linkify)'
+filter = 'package(marspot-term) | package(marspot-session) | package(marspot-linkify) | package(marspot)'
 leak-timeout = { period = "200ms", result = "fail" }
 
 # A test that asserts a time budget needs the machine to itself.
