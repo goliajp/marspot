@@ -20,12 +20,15 @@
 //! CPU is ~0. With neither env var set it stays fully standalone
 //! (self-creates the region, no input source) for the dev/test path.
 
+mod control_reader;
 mod control_writer;
 mod snapshot_writer;
+use control_reader::ControlReaders;
 use control_writer::ControlWriter;
 use snapshot_writer::SnapshotWriter;
 mod handoff;
 mod local_session;
+mod pty_reader;
 mod reply_guard;
 mod uds_server;
 
@@ -48,10 +51,8 @@ use marspot_term::scrollback_search::{
     spawn_search_merged, LiveGridSnapshot, SearchOpts, SearchWorker,
 };
 use marspot_term::shell_proto::{
-    decode_get_selection_text, decode_grid_resize, decode_grid_scroll, decode_key_event,
-    decode_paste, decode_search_cancel, decode_search_scrollback,
-    encode_search_results, encode_selection_text, wire_to_event, Frame, MsgType,
-    WireSearchHit, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
+    encode_search_results, encode_selection_text, Frame, MsgType, WireSearchHit,
+    DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
 };
 use marspot_term::session_state::{PendingPage, SessionState};
 
@@ -436,6 +437,17 @@ fn clear_cloexec(fd: RawFd) -> std::io::Result<()> {
     }
 }
 
+fn set_cloexec(fd: RawFd) -> std::io::Result<()> {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags < 0 { return Err(std::io::Error::last_os_error()); }
+        if libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
 /// Stage the execv handoff and replace this process's image with
 /// `current/marspot-session`.  Returns Err only if we couldn't even
 /// reach execv — on success the function does not return.
@@ -446,6 +458,8 @@ fn do_l3_execv_swap(
     poke: Option<ControlWriter>,
 ) -> std::io::Result<()> {
     let started = Instant::now();
+    let mut local = local;
+    local.quiesce_for_handoff();
     let (master_fd, child_pid, terminal, cols, rows) = local.extract_for_handoff();
 
     // v5 LIVE snapshot (RFC-004 C.1 amendment): the TUI on this PTY
@@ -646,7 +660,7 @@ fn handle_paste(session: &mut SessionImpl, text: &str) {
 /// exit (`CoreGone`): the surviving shelld session is re-attached by the
 /// next core, so an orphaned engine would only leak (see `CoreGone`).
 /// No env var → standalone, no input source, no writer.
-fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<ControlWriter> {
+fn setup_control_socket(readers: &mut ControlReaders, tx: Sender<SessionEvent>) -> Option<ControlWriter> {
     let fd: RawFd = match std::env::var(ENV_CONTROL_FD) {
         Ok(s) => match s.parse() {
             Ok(fd) => fd,
@@ -680,7 +694,7 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<ControlWriter> {
     lx_info!("session.control_socket.attached", "control socket fd inherited", fd = fd);
     // The inherited-fd path runs at generation 0; if it dies, that's a
     // genuine "no client left" (not a stale-reader race).
-    spawn_control_reader(stream, tx, 0);
+    readers.spawn(stream, tx, 0);
     match ControlWriter::new(writer) {
         Ok(w) => Some(w),
         Err((e, _)) => {
@@ -696,132 +710,6 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<ControlWriter> {
             None
         }
     }
-}
-
-/// RFC-003 step 2e — frame-dispatch loop for the L2↔L3 control socket.
-/// Shared by both the inherited-fd path (`setup_control_socket`) and
-/// the UDS accept path (`uds_server::handshake`) so both ends speak
-/// the same protocol and unknown-frame handling lives in exactly one
-/// place.  `generation` tags the CoreGone emitted on EOF so a stale
-/// reader (from a swapped-out L2 socket) can't null the current poke.
-fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, generation: u64) {
-    std::thread::spawn(move || loop {
-        match Frame::read_from(&mut reader) {
-            Ok(Some(f)) => match f.msg_type {
-                MsgType::KeyEvent => {
-                    // The trailing window id is an L1↔L2 concern; a
-                    // session belongs to a pane, and a pane does not
-                    // care which window draws it.
-                    if let Ok((w, _window_id)) = decode_key_event(&f.payload) {
-                        let (e, m) = wire_to_event(w);
-                        if tx.send(SessionEvent::Key(e, m)).is_err() {
-                            break;
-                        }
-                    }
-                }
-                MsgType::GridResize => {
-                    if let Ok((cols, rows)) = decode_grid_resize(&f.payload)
-                        && tx.send(SessionEvent::Resize(cols, rows)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::GridScroll => {
-                    if let Ok(off) = decode_grid_scroll(&f.payload)
-                        && tx.send(SessionEvent::Scroll(off)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::GetSelectionText => {
-                    if let Ok((seq, a, fo, bw)) = decode_get_selection_text(&f.payload)
-                        && tx.send(SessionEvent::GetSelection(seq, a, fo, bw)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::Paste => {
-                    if let Ok(text) = decode_paste(&f.payload)
-                        && tx.send(SessionEvent::Paste(text)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::PaneHoldGrid => {
-                    if let Ok((_sid, on)) =
-                        marspot_term::shell_proto::decode_pane_hold_grid(&f.payload)
-                        && tx.send(SessionEvent::HoldGrid(on)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::PaneResetAttrs => {
-                    if marspot_term::shell_proto::decode_pane_reset_attrs(&f.payload)
-                        .is_ok()
-                        && tx.send(SessionEvent::ResetAttrs).is_err()
-                    {
-                        break;
-                    }
-                }
-                MsgType::PaneRenderMarkup => {
-                    if let Ok((_sid, on)) =
-                        marspot_term::shell_proto::decode_pane_render_markup(&f.payload)
-                        && tx.send(SessionEvent::RenderMarkup(on)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::InjectInput => {
-                    if let Ok((_sid, bytes)) =
-                        marspot_term::shell_proto::decode_inject_input(&f.payload)
-                        && tx.send(SessionEvent::InjectInput(bytes)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::PaneTerminalFocus => {
-                    if let Ok((_sid, focused)) =
-                        marspot_term::shell_proto::decode_pane_terminal_focus(&f.payload)
-                        && tx.send(SessionEvent::TerminalFocus(focused)).is_err()
-                    {
-                        break;
-                    }
-                }
-                MsgType::PaneResetMouseReporting => {
-                    if marspot_term::shell_proto::decode_pane_reset_mouse_reporting(
-                        &f.payload,
-                    )
-                    .is_ok()
-                        && tx.send(SessionEvent::ResetMouseReporting).is_err()
-                    {
-                        break;
-                    }
-                }
-                MsgType::SearchScrollback => {
-                    if let Ok((query_id, case_sensitive, max_total, query)) =
-                        decode_search_scrollback(&f.payload)
-                        && tx
-                            .send(SessionEvent::SearchRequest {
-                                query_id,
-                                case_sensitive,
-                                max_total,
-                                query,
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                }
-                MsgType::SearchCancel => {
-                    if let Ok(query_id) = decode_search_cancel(&f.payload)
-                        && tx
-                            .send(SessionEvent::SearchCancelRequested(query_id))
-                            .is_err()
-                        {
-                            break;
-                        }
-                }
-                _ => {}
-            },
-            Ok(None) | Err(_) => {
-                let _ = tx.send(SessionEvent::CoreGone(generation));
-                break;
-            }
-        }
-    });
 }
 
 /// Holds frames while a program is drawing one (DEC mode 2026).
@@ -1100,6 +988,7 @@ fn main() {
     // L2-forwarded keystrokes, so the main loop sleeps in a single
     // place until there's real work.
     let (ev_tx, ev_rx): (Sender<SessionEvent>, Receiver<SessionEvent>) = mpsc::channel();
+    let mut readers = ControlReaders::new().expect("a socket pair to stop the control readers with");
 
     // Shared grid framebuffer first — it defines the geometry. When L2
     // owns the region it sized it to the on-screen cell rect; we must
@@ -1229,12 +1118,22 @@ fn main() {
             // CoreGone from any race during the swap is recognised
             // and ignored.
             if h.control_stream_fd >= 0 {
+                // The next execv hands over the writer, a duplicate of
+                // this descriptor; this one must not cross with it, or
+                // every update leaves one more open for good.
+                if let Err(e) = set_cloexec(h.control_stream_fd) {
+                    lx_warn!(
+                        "l3.execv.control_cloexec_failed",
+                        &format!("{e}"),
+                        stream_fd = h.control_stream_fd
+                    );
+                }
                 let stream = unsafe { UnixStream::from_raw_fd(h.control_stream_fd) };
                 match stream.try_clone() {
                     Ok(writer) => {
                         resumed_client_generation = 1;
                         resumed_poke = ControlWriter::new(writer).ok();
-                        spawn_control_reader(stream, ev_tx.clone(), 1);
+                        readers.spawn(stream, ev_tx.clone(), 1);
                         lx_event!(
                             "L3_EXECV_CONTROL_ADOPTED",
                             "adopted inherited L2 control stream across execv",
@@ -1386,7 +1285,7 @@ fn main() {
     // already adopted + a reader is running on it).
     let mut poke = match resumed_poke.take() {
         Some(s) => Some(s),
-        None => setup_control_socket(ev_tx.clone()),
+        None => setup_control_socket(&mut readers, ev_tx.clone()),
     };
     // Scrollback view offset L2 last asked us to publish (0 = live tail).
     let mut view_offset: u16 = 0;
@@ -2041,7 +1940,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 }
                 SessionEvent::NewClient(stream) => {
                     // Adopt the validated stream as the control
-                    // socket. spawn_control_reader fires inbound
+                    // socket. Its reader fires inbound
                     // frames as SessionEvent::Key/Resize/etc just
                     // like the inherited-fd path.  Bump the
                     // generation BEFORE spawning so any in-flight
@@ -2052,7 +1951,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     match stream.try_clone() {
                         Ok(writer) => {
                             poke = ControlWriter::new(writer).ok();
-                            spawn_control_reader(stream, ev_tx.clone(), this_gen);
+                            readers.spawn(stream, ev_tx.clone(), this_gen);
                             // RFC-003 §6 Amendment 7: republish the
                             // current grid + fire GridReady so L2 has
                             // a poke to read the shm we already
@@ -2378,6 +2277,25 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     }
     // RFC-003 §6 Amendment 16 — post-loop dispatcher.
     if want_shutdown {
+        if execv_verdict == Some(true) {
+            // Input the readers queued after the loop's last drain would
+            // die with this image.  Stopped first, they queue no more;
+            // what they have not read stays in the socket, and the next
+            // image reads it.
+            readers.stop();
+            while let Ok(ev) = ev_rx.try_recv() {
+                match ev {
+                    SessionEvent::Key(e, m) => {
+                        handle_key(&mut session, e, m);
+                    }
+                    SessionEvent::Paste(text) => handle_paste(&mut session, &text),
+                    SessionEvent::InjectInput(bytes) => {
+                        let _ = session.write(&bytes);
+                    }
+                    _ => {}
+                }
+            }
+        }
         let id = session.id();
         let SessionImpl::Local(local) = session;
         // Only the probe can authorise an execv now; `None` means we
