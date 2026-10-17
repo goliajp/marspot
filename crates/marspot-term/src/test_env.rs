@@ -254,3 +254,124 @@ fn unreaped(pid: libc::pid_t) -> bool {
     };
     r == 0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn wait_until(mut done: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+
+    /// The guard's whole contract, through the worst way out of a test:
+    /// a panic while it is held, which also poisons the lock.
+    #[test]
+    fn a_guard_puts_back_what_it_changed_when_its_test_panics() {
+        const NEW: &str = "MARSPOT_TEST_ENV_NEVER_SET";
+        let home = std::env::var_os("HOME");
+        let path = std::env::var_os("PATH");
+        assert!(std::env::var_os(NEW).is_none());
+        let r = std::panic::catch_unwind(|| {
+            let mut env = EnvGuard::new();
+            env.set("HOME", "/nowhere")
+                .remove("PATH")
+                .set(NEW, "1")
+                .set("HOME", "/twice");
+            panic!("the test failed while holding the guard");
+        });
+        assert!(r.is_err());
+        let _again = EnvGuard::new();
+        assert_eq!(std::env::var_os("HOME"), home, "a changed variable is put back");
+        assert_eq!(std::env::var_os("PATH"), path, "a removed variable is put back");
+        assert_eq!(std::env::var_os(NEW), None, "a variable that was not there is removed again");
+    }
+
+    /// Killing a shell script leaves its children running; the group
+    /// guard is for exactly that.
+    #[test]
+    fn a_group_guard_takes_the_scripts_children_with_it() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        let mut child = ChildGuard::group(
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "sleep 60 & echo $!; wait"])
+                .process_group(0)
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let grandchild: libc::pid_t = line.trim().parse().unwrap();
+        drop(child);
+        let gone = wait_until(|| unsafe { libc::kill(grandchild, 0) } != 0);
+        if !gone {
+            unsafe { libc::kill(grandchild, libc::SIGKILL) };
+        }
+        assert!(gone, "the script's child {grandchild} outlived the guard");
+    }
+
+    /// What `shell_without_rc_files` is for, against the same shell
+    /// started the ordinary interactive way: without that control the
+    /// marker could be missing for any reason at all.
+    #[test]
+    fn the_scripted_shell_reads_no_startup_file() {
+        use crate::pty::{Pty, PtyConfig};
+        let home = TempDir::new("norc-home");
+        let mut env = EnvGuard::new();
+        env.set("HOME", home.path()).remove("ZDOTDIR");
+        for (shell, rc) in [("/bin/zsh", ".zshrc"), ("/bin/bash", ".bashrc")] {
+            let marker = home.join("rc-was-read");
+            std::fs::write(home.join(rc), format!(": > {}\n", marker.display())).unwrap();
+            let run = |program: String, args: Vec<String>| {
+                let mut pty = Pty::spawn(PtyConfig {
+                    program,
+                    args,
+                    size: crate::pty::TerminalSize {
+                        cols: 80,
+                        rows: 24,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .expect("spawn the shell");
+                unsafe {
+                    let fd = pty.raw_master();
+                    libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK);
+                }
+                pty.write(b"exit\r").unwrap();
+                let pid = pty.child_pid();
+                let mut buf = [0u8; 4096];
+                // the shell's output is read and dropped, so it never
+                // blocks writing its prompt
+                let exited = wait_until(|| {
+                    while matches!(pty.read(&mut buf), Ok(n) if n > 0) {}
+                    let mut st = 0;
+                    let reaped = unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) };
+                    reaped != 0
+                });
+                assert!(exited, "{shell} did not exit");
+            };
+            run(shell.into(), vec!["-i".into()]);
+            assert!(marker.exists(), "the control: {shell} -i reads {rc}");
+            std::fs::remove_file(&marker).unwrap();
+            run(
+                shell_without_rc_files(home.path(), shell)
+                    .to_string_lossy()
+                    .into_owned(),
+                Vec::new(),
+            );
+            assert!(!marker.exists(), "the scripted {shell} read {rc}");
+        }
+    }
+}
