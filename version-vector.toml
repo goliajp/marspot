@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.237"  # a process that logs rarely follows a log rotation within a minute
-core    = "0.12.280"  # the pane with the keyboard is told so, and the one that loses it
+core    = "0.12.281"  # a warm terminal frame allocates nothing: links are scanned into kept buffers
 session = "0.11.146"  # a program that asked for focus reports hears when its pane gains and loses the keyboard

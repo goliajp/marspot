@@ -36,7 +36,15 @@ pub(crate) struct PaneGeom<'a> {
     pub(crate) overlay_mask: Option<(u16, u16, u16, u16)>,
     /// Where each cluster of an IME composition goes.
     pub(crate) preedit_cells: Vec<(u16, u16, u16, &'a str)>,
-    pub(crate) links: Vec<marspot_term::grid_links::LinkRange>,
+    pub(crate) links: &'a [marspot_term::grid_links::LinkRange],
+}
+
+/// A pane's link scan, kept between frames so a rescan reuses what
+/// the last one allocated.
+#[derive(Default)]
+pub(crate) struct LinkBufs {
+    scratch: marspot_term::grid_links::LinkScratch,
+    out: Vec<marspot_term::grid_links::LinkRange>,
 }
 
 impl PaneGeom<'_> {
@@ -94,6 +102,7 @@ pub(crate) fn push_session(
     gutter: f32,
     padding: f32,
     title_h: f32,
+    links: &mut LinkBufs,
 ) {
     let (color_atlas_w, color_atlas_h) = color_atlas.dims();
     let color_atlas_w = color_atlas_w as f32;
@@ -206,11 +215,13 @@ pub(crate) fn push_session(
     // render thread a single `lstat` under a network mount or the
     // `auto_home` autofs map has been measured at six seconds.  See
     // `marspot::link_probe`.
-    let links = marspot_term::grid_links::scan_visible_links_with(
+    marspot_term::grid_links::scan_visible_links_into(
         grid,
         view.view_offset,
         link_opts,
         crate::link_probe::oracle(),
+        &mut links.scratch,
+        &mut links.out,
     );
 
     let g = PaneGeom {
@@ -229,7 +240,7 @@ pub(crate) fn push_session(
         window_focused,
         overlay_mask,
         preedit_cells,
-        links,
+        links: &links.out,
     };
     let mut o = PaneOut { font, atlas, color_atlas, cells, glyphs, color_glyphs };
     paint_rows(&g, &mut o);

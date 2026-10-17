@@ -13,3 +13,5 @@ pub mod pane_cache;
 pub mod chrome;
 pub mod color;
 pub mod canvas_runs;
+#[cfg(test)]
+mod alloc_tests;
