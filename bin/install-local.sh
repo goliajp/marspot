@@ -856,9 +856,11 @@ core_pids() {
 # SIGUSR2 makes a core promote pending/marspot-session and ask every L3
 # not on it to move.
 ask_core_to_update_sessions() {
-  local pid n=0
+  local pid comm n=0
   for pid in $(core_pids); do
-    [ "$(ps -o comm= -p "$pid" 2>/dev/null | xargs basename 2>/dev/null)" = marspot-core ] || continue
+    # the path has a space in it ("Application Support"): no xargs
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null)
+    [ "${comm##*/}" = marspot-core ] || continue
     kill -USR2 "$pid" 2>/dev/null && n=$((n+1))
   done
   (( n > 0 ))
