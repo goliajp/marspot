@@ -202,6 +202,8 @@ enum SessionEvent {
     /// arrives, and the shell prompt underneath inherits a terminal
     /// that encodes every scroll as `CSI < 64;x;y M` and types it in.
     ResetMouseReporting,
+    /// Whether this pane has the keyboard — see `MsgType::PaneTerminalFocus`.
+    TerminalFocus(bool),
     /// cc plugin asked to push raw bytes straight into the PTY (no
     /// bracketed-paste wrap, no key encoding).  Used by the profile-
     /// cycle state machine to send `claude5 --resume <uuid>\r`.
@@ -927,6 +929,14 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
                         && tx.send(SessionEvent::InjectInput(bytes)).is_err() {
                             break;
                         }
+                }
+                MsgType::PaneTerminalFocus => {
+                    if let Ok((_sid, focused)) =
+                        marspot_term::shell_proto::decode_pane_terminal_focus(&f.payload)
+                        && tx.send(SessionEvent::TerminalFocus(focused)).is_err()
+                    {
+                        break;
+                    }
                 }
                 MsgType::PaneResetMouseReporting => {
                     if marspot_term::shell_proto::decode_pane_reset_mouse_reporting(
@@ -1889,6 +1899,11 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                         );
                     }
                     session.hold_grid(on);
+                }
+                // `CSI I` / `CSI O` for a program that asked; the next
+                // pump flushes it with the terminal's other replies
+                SessionEvent::TerminalFocus(focused) => {
+                    session.terminal_mut().report_focus(focused);
                 }
                 SessionEvent::ResetMouseReporting => {
                     let was = session.terminal().mouse_tracking_mode()
