@@ -10,10 +10,15 @@
 # put the windows somewhere nobody is looking.
 #
 # Usage:
-#   bin/test-e2e-remote.sh                       # the suites in DEFAULT_SUITES
+#   bin/test-e2e-remote.sh                       # every suite in DEFAULT_SUITES
 #   bin/test-e2e-remote.sh test-window-close-order.sh test-multi-window.sh
 #   E2E_SUITE_TIMEOUT=1800 bin/test-e2e-remote.sh test-multi-window.sh
 #   HOST=other-mini bin/test-e2e-remote.sh
+#
+# Not in the default set, run by hand on the machine that holds the
+# private update key (keys/marspot-update.sec): test-real-update.sh,
+# test-negative-update.sh, test-adversarial-update.sh.  They sign a
+# feed with it, and the key does not leave that machine.
 #
 # Contract:
 #   - shares the host     : every suite holds the host's bench lock,
@@ -32,7 +37,22 @@
 #   - honest              : exits non-zero when any suite failed
 set -euo pipefail
 
-DEFAULT_SUITES=(test-window-close-order.sh test-shell-rollback-loop.sh)
+DEFAULT_SUITES=(
+  test-shell-core.sh
+  test-update-flow.sh
+  test-rollback.sh
+  test-manual-rollback.sh
+  test-shell-rollback-loop.sh
+  test-l3-execv-probe.sh
+  test-crash-guard.sh
+  test-window-close-order.sh
+  test-close-last-pane.sh
+  test-multi-window.sh
+  test-bundle-lander.sh
+  test-cc-profile-switch.sh
+  test-codex-profile-switch.sh
+  test-agent-handoff.sh
+)
 
 # One tool does the copying, for every session and every repo: it takes
 # the exclude list from git itself, so a path this repo ignores is never
