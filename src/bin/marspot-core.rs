@@ -5902,14 +5902,9 @@ impl CoreApp {
             Ok(false) => {}
             Err(e) => lx_error!("core.promote.swap_failed", &format!("{e}")),
         }
-        let staged = marspot::session_signal::staged_session_build();
-        let mut asked = 0usize;
-        for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
-            if !pane.is_l3() || pane.is_exited() {
-                continue;
-            }
-            asked += marspot::session_signal::ask_to_update(pane, staged.as_deref()) as usize;
-        }
+        let asked = marspot::session_signal::ask_all_to_update(
+            self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()),
+        );
         lx_event!(
             "L3_SWAP_FANOUT",
             "asked every L3 not on current/marspot-session to move to it",
@@ -6173,6 +6168,7 @@ impl CoreApp {
         }
         let n = panes.len();
         win!(self, wi).panes = panes;
+        let asked = marspot::session_signal::ask_all_to_update(win!(self, wi).panes.iter_mut());
         win!(self, wi).focused_idx = win!(self, wi).focused_idx.min(n - 1);
         // Placeholder-era selection referred to panes that no longer
         // exist.
@@ -6184,7 +6180,8 @@ impl CoreApp {
             "WINDOW_RESTORED",
             "assembled panes replaced the placeholders",
             window_id = window_id,
-            panes = n
+            panes = n,
+            asked_to_update = asked
         );
     }
 
@@ -10409,23 +10406,15 @@ fn main() {
     // first (bytelog replay on attach), then `create_session` for the
     // rest, handing each L3 its exact id.
     //
-    // RFC-003 §6 Amendment 14: did the boot promote a fresh marspot-
-    // session binary?  If yes, fan SIGUSR2 out to every reattached L3
-    // after the reattach loop so existing children also pick up the
-    // new image via execv self-update (not just freshly-spawned ones).
-    let mut session_binary_freshly_promoted = false;
     // A core update lands the new session engine in pending/; promote
     // it into current/ before spawning so each L3 (resolved as core's
     // sibling = current/marspot-session in an installed app) boots the
     // new binary in lockstep with this core.
     match marspot::updater::promote_pending_session() {
-        Ok(true) => {
-            session_binary_freshly_promoted = true;
-            lx_event!(
-                "SESSION_PROMOTE",
-                "promoted staged marspot-session → current/ at boot"
-            );
-        }
+        Ok(true) => lx_event!(
+            "SESSION_PROMOTE",
+            "promoted staged marspot-session → current/ at boot"
+        ),
         Ok(false) => {}
         Err(e) => lx_error!("core.promote.boot_failed", &format!("{e}")),
     }
@@ -10453,25 +10442,22 @@ fn main() {
         true,
         &reserved_sids,
     );
-    let panes = assembled;
-    // a freshly promoted session binary: every reattached L3 not on it
-    // is asked to move (see `session_signal::ask_to_update`)
-    let mut panes = panes;
-    if session_binary_freshly_promoted && !reattached_ids.is_empty() {
-        let staged = marspot::session_signal::staged_session_build();
-        let mut asked = 0usize;
-        for pane in panes.iter_mut() {
-            if pane.session().l3_session_id().is_some_and(|sid| reattached_ids.contains(&sid)) {
-                asked += marspot::session_signal::ask_to_update(pane, staged.as_deref()) as usize;
-            }
-        }
-        lx_event!(
-            "L3_BOOT_FANOUT",
-            "asked reattached L3s not on current/marspot-session to move to it",
-            n_asked = asked,
-            n_reattached = reattached_ids.len()
-        );
-    }
+    let mut panes = assembled;
+    // Every reattached L3 not on current/'s build is asked to move, not
+    // only after a promote: one whose probe failed last time moves now.
+    // Asking one already on it does nothing.  A window restored later
+    // asks for its own panes when they land.
+    let asked = marspot::session_signal::ask_all_to_update(
+        panes
+            .iter_mut()
+            .filter(|p| p.session().l3_session_id().is_some_and(|sid| reattached_ids.contains(&sid))),
+    );
+    lx_event!(
+        "L3_BOOT_FANOUT",
+        "asked reattached L3s not on current/marspot-session to move to it",
+        n_asked = asked,
+        n_reattached = reattached_ids.len()
+    );
     // Nothing could be spawned or reattached: there is no other backend.
     if panes.is_empty() {
         lx_error!("core.boot.no_sessions", "no sessions could be created — exiting");

@@ -82,6 +82,16 @@ pub fn ask_to_update(pane: &mut crate::pane::Pane, staged: Option<&str>) -> bool
     asked
 }
 
+/// [`ask_to_update`] for every live L3 pane of `panes`, against the
+/// build staged now.  Returns how many were asked.
+pub fn ask_all_to_update<'a>(panes: impl Iterator<Item = &'a mut crate::pane::Pane>) -> usize {
+    let staged = staged_session_build();
+    panes
+        .filter(|p| p.is_l3() && !p.is_exited())
+        .map(|p| ask_to_update(p, staged.as_deref()) as usize)
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
