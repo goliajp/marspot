@@ -6,7 +6,7 @@
 //! tells the user about a chord are all saying the same thing.
 //!
 //! Each entry names the file its handler lives in and the literal that
-//! handler matches on.  `tests/shortcuts_are_real.rs` looks for that
+//! handler matches on.  `tests/it/shortcuts_are_real.rs` looks for that
 //! literal in that file, so deleting a handler and leaving the
 //! documentation behind fails a test rather than misleading someone.
 

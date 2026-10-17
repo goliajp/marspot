@@ -11,9 +11,9 @@
 
 use std::collections::HashMap;
 
-const SITE: &str = include_str!("../site/index.html");
-const README: &str = include_str!("../README.md");
-const BASELINE: &str = include_str!("../bench/baseline.json");
+const SITE: &str = include_str!("../../site/index.html");
+const README: &str = include_str!("../../README.md");
+const BASELINE: &str = include_str!("../../bench/baseline.json");
 
 /// The four streams, in the order the page's columns use them.
 const STREAMS: [(&str, &str); 4] = [
@@ -274,8 +274,8 @@ fn the_pages_key_table_is_the_list_the_code_keeps() {
     }
 }
 
-const GUIDE: &str = include_str!("../site/guide.html");
-const SHELL_MAIN: &str = include_str!("../src/bin/marspot-shell/main.rs");
+const GUIDE: &str = include_str!("../../site/guide.html");
+const SHELL_MAIN: &str = include_str!("../../src/bin/marspot-shell/main.rs");
 
 /// The guide's key table is the same list as everywhere else.
 #[test]
@@ -349,7 +349,7 @@ fn the_page_does_not_offer_a_download_it_cannot_deliver() {
 
 // ─── what the README tells people to delete ───────────────────────
 
-const INSTALL_SH: &str = include_str!("../bin/install-local.sh");
+const INSTALL_SH: &str = include_str!("../../bin/install-local.sh");
 
 /// Uninstall instructions are the one page a reader follows literally
 /// and cannot check, because by the time they notice a leftover they
@@ -364,7 +364,7 @@ fn the_uninstall_names_the_directory_the_code_uses() {
     // `paths::state_root()` is `<home>/Library/Application Support/marspot`
     // unless MARSPOT_STATE_DIR overrides it, which it does in tests --
     // so compare against the literal the source builds it from.
-    const PATHS: &str = include_str!("../crates/marspot-term/src/paths.rs");
+    const PATHS: &str = include_str!("../../crates/marspot-term/src/paths.rs");
     let literal = "Library/Application Support/marspot";
     assert!(
         PATHS.contains(literal),
@@ -429,7 +429,7 @@ fn the_uninstall_removes_every_launch_agent_the_installer_writes() {
 /// documented place found nothing and read as "logging is broken".
 #[test]
 fn the_readme_names_the_directory_the_log_is_actually_written_to() {
-    const PATHS: &str = include_str!("../crates/marspot-term/src/paths.rs");
+    const PATHS: &str = include_str!("../../crates/marspot-term/src/paths.rs");
     let literal = "Library/Logs/Marspot";
     assert!(
         PATHS.contains(literal),
@@ -475,8 +475,8 @@ fn the_readme_installs_the_app_where_the_installer_puts_it() {
 mod idle_section {
     use super::SITE;
 
-    const SOAK: &str = include_str!("../bin/soak-l3-rss-scaling.sh");
-    const SHELL_MAIN: &str = include_str!("../src/bin/marspot-shell/main.rs");
+    const SOAK: &str = include_str!("../../bin/soak-l3-rss-scaling.sh");
+    const SHELL_MAIN: &str = include_str!("../../src/bin/marspot-shell/main.rs");
 
     fn idle_section() -> &'static str {
         let from = SITE
@@ -569,8 +569,8 @@ mod guide_behaviour {
         s.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
-    const TERMINAL: &str = include_str!("../crates/marspot-term/src/terminal.rs");
-    const PATHS: &str = include_str!("../crates/marspot-term/src/paths.rs");
+    const TERMINAL: &str = include_str!("../../crates/marspot-term/src/terminal.rs");
+    const PATHS: &str = include_str!("../../crates/marspot-term/src/paths.rs");
 
     /// The guide tells a reader that a program cannot read their clipboard
     /// back. That is a security claim on a public page, so it is pinned to
@@ -621,7 +621,7 @@ mod guide_behaviour {
     /// answer -- so the page may not say it without the code doing it.
     #[test]
     fn a_new_pane_inherits_the_live_directory_not_the_launch_one() {
-        const CORE: &str = include_str!("../src/bin/marspot-core.rs");
+        const CORE: &str = include_str!("../../src/bin/marspot-core.rs");
         assert!(
             prose(GUIDE).contains("the directory the pane you were in is in"),
             "the guide stopped describing where a new pane opens"

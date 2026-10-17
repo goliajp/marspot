@@ -5,8 +5,7 @@
 //! sat behind the flood for as long as the flood ran, which was
 //! forever.
 
-#[path = "../examples/support/mod.rs"]
-mod support;
+use crate::support;
 
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};

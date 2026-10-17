@@ -42,7 +42,7 @@ compress = ["dep:flate2"]
 # end-to-end update tests, which sign their feed with a throwaway key
 # instead of the real one.  The shipped builds (install-local,
 # build-release-tarball, the release workflow) never turn it on, and
-# `tests/update_key_gate.rs` fails if one of them starts to.
+# `tests/it/update_key_gate.rs` fails if one of them starts to.
 test-update-key = []
 
 [lints]

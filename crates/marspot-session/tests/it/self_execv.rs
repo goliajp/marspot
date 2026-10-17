@@ -7,8 +7,7 @@
 //! image; with nothing staged, or the same build staged, the same
 //! signal means "quit" and the process must go.
 
-#[path = "../examples/support/mod.rs"]
-mod support;
+use crate::support;
 
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};

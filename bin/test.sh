@@ -22,7 +22,7 @@ cd "$ROOT"
 # not just the GUI crate's handful of lib tests.
 #
 # `--all-targets` (instead of `--lib`) includes integration tests —
-# in particular `crates/marspot-term/tests/scrollback_display.rs`, the
+# in particular `crates/marspot-term/tests/it/scrollback_display.rs`, the
 # user-perspective gate that catches scrollback display bugs (blank
 # pushes leaking into scrollback, torn-write history loss, scroll
 # cap mismatches, resize content corruption) BEFORE they ship.

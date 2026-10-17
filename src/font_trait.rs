@@ -2,7 +2,7 @@
 //! and a glyph index into pixels.
 //!
 //! **No platform type appears in `Rasteriser` or `Shaper`.** That is
-//! the whole point of the file and `tests/text_layer_is_portable.rs`
+//! the whole point of the file and `tests/it/text_layer_is_portable.rs`
 //! holds it down: the traits used to take `&CTFont` and `CGGlyph`, so
 //! a DirectWrite or FreeType implementation could not be written at
 //! all -- it would have had to produce a CoreText font object to
