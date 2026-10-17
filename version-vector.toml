@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.241"  # a handed-over window frame is four finite numbers or nothing
-core    = "0.12.285"  # a binary it probes before an update is killed with its children when it does not answer
-session = "0.11.149"  # a debug build finds its fingerprint behind the stray needle
+shell   = "0.7.242"  # ignores SIGPIPE, so a write to a core that just died cannot end the app
+core    = "0.12.286"  # a pane's program starts with default signal handling
+session = "0.11.150"  # a pane's program starts with default signal handling, so `yes | head` ends quietly
