@@ -106,7 +106,12 @@ pub type FontId = u32;
 /// rasterised by our own code (not the CT font cache).  Chosen high
 /// enough that real FontCache indices won't collide — FontCache grows
 /// linearly from 0 as fallback fonts are discovered.
-pub const BOX_DRAWING_FONT_ID: FontId = u32::MAX;
+///
+/// It has to fit the key's 24-bit font field and stay below the
+/// cluster ids, which take bit 23 and up.  `u32::MAX` was truncated to
+/// 0xFF_FFFF by the key — inside the cluster range — and tripped the
+/// key's range assert in every debug build that drew a box.
+pub const BOX_DRAWING_FONT_ID: FontId = (1 << 23) - 1;
 
 /// The atlas key for a cluster drawn at `metrics`.
 ///
@@ -124,7 +129,7 @@ pub fn cluster_key(text: &str, metrics: &SlotMetrics) -> GlyphKey {
     let mut h = marspot_term::fast_hash::FxHasher::default();
     text.hash(&mut h);
     let v = h.finish();
-    const CLUSTER_BIT: u32 = 1 << 23;
+    const CLUSTER_BIT: u32 = BOX_DRAWING_FONT_ID + 1;
     GlyphKey::new(
         CLUSTER_BIT | ((v >> 16) as u32 & (CLUSTER_BIT - 1)),
         v as u16,
@@ -1357,6 +1362,17 @@ fn rasterise_glyph_color_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reserved id survives the key, and no cluster key can land on it.
+    #[test]
+    fn the_box_drawing_id_round_trips_and_is_not_a_cluster_id() {
+        let key = GlyphKey::new(BOX_DRAWING_FONT_ID, 0x2500, 32, 0, 0);
+        assert_eq!(key.font_id(), BOX_DRAWING_FONT_ID);
+        let m = SlotMetrics { cell_w: 16, cell_h: 32, baseline_from_top: 24 };
+        for text in ["e\u{301}", "\u{1f1ef}\u{1f1f5}", "\u{270b}\u{1f3fd}"] {
+            assert!(cluster_key(text, &m).font_id() > BOX_DRAWING_FONT_ID, "{text:?}");
+        }
+    }
 
     /// A sink with nothing behind it but a count: these tests are about
     /// packing and lookup, not about what a GPU does with the bytes.
