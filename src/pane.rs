@@ -371,6 +371,14 @@ impl PaneBackend {
         }
     }
 
+    /// Tell the pane's L3 whether it has the keyboard.  No-op on
+    /// non-L3 backends.
+    pub fn forward_pane_terminal_focus(&mut self, focused: bool) {
+        if let PaneBackend::L3(c) = self {
+            c.forward_pane_terminal_focus(focused);
+        }
+    }
+
     /// C5 — send a `SearchScrollback` frame to the L3 session
     /// behind this pane.  No-op on non-L3 backends (search is
     /// File-backed scrollback only, which only L3 owns).
@@ -1112,6 +1120,14 @@ impl L3Conn {
         let frame = Frame::new(
             MsgType::PaneResetMouseReporting,
             crate::shell_proto::encode_pane_reset_mouse_reporting(self.session_id),
+        );
+        let _ = self.control.send(frame);
+    }
+
+    fn forward_pane_terminal_focus(&mut self, focused: bool) {
+        let frame = Frame::new(
+            MsgType::PaneTerminalFocus,
+            crate::shell_proto::encode_pane_terminal_focus(self.session_id, focused),
         );
         let _ = self.control.send(frame);
     }
