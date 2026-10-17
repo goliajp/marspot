@@ -1,0 +1,64 @@
+== empty
+== blank rows
+== mixed prose
+0 4 35 Url "https://example.com/a/b?q=1#frag" None
+0 48 59 Email "ops@golia.jp" None
+1 10 33 Ip "192.168.1.10:8080/status" None
+1 39 50 Ip "[::1]:3000/x" None
+1 55 65 Ip "2001:db8::1" None
+2 3 38 Uuid "3acb2d64-504d-49d5-9030-a179087f4bce" None
+2 46 55 File "/etc/hosts" None
+2 62 69 File "/usr/bin" None
+4 5 61 Url "https://en.wikipedia.org/wiki/Rust_(programming_language)" None
+5 4 31 Url "https://example.com/calendar" None
+6 4 40 Url "http://localhost:6014/tools/documents" None
+== paths with cwd
+0 9 19 File "src/main.rs" Some("/w/p/src/main.rs")
+0 37 46 File "Cargo.toml" Some("/w/p/Cargo.toml")
+0 52 62 File "./README.md" Some("/w/p/README.md")
+1 5 25 File "../shared/config.toml" Some("/w/p/../shared/config.toml")
+1 30 41 File "文档/说明.md" Some("/w/p/文档/说明.md")
+2 4 25 File "/usr/local/bin/marspot" None
+2 31 65 File "~/Downloads/決算明細_2025-2026.xlsx" None
+3 7 38 File "~/Library/Safari/Favicon Cache" None
+3 52 82 File "~/Library/Safari/Favicon Cache" None
+4 4 62 File "/Users/me/docs/株主総会議事録（役員報酬改定・20260805）.pdf" None
+5 0 40 File "file:///tmp/site/index-ja.html#principles" None
+6 6 16 File "src/main.rs" Some("/w/p/src/main.rs")
+6 29 37 File "README.md" Some("/w/p/README.md")
+== soft-wrapped url
+0 4 20 Url "https://example.com/long/path" None
+1 0 11 Url "https://example.com/long/path" None
+2 4 20 Url "https://golia.jp/a/b/c/d/e/f/g/h/i/j/k/end" None
+3 0 20 Url "https://golia.jp/a/b/c/d/e/f/g/h/i/j/k/end" None
+4 0 3 Url "https://golia.jp/a/b/c/d/e/f/g/h/i/j/k/end" None
+4 10 20 Email "ops@golia.jp" None
+5 0 0 Email "ops@golia.jp" None
+== tui hard wrap
+0 31 68 File "notes/20260907-maintenance-experiment-priorities.md" Some("/w/p/notes/20260907-maintenance-experiment-priorities.md")
+1 4 16 File "notes/20260907-maintenance-experiment-priorities.md" Some("/w/p/notes/20260907-maintenance-experiment-priorities.md")
+2 49 56 Url "https://platform.openai.com/account/api-keys" None
+3 0 35 Url "https://platform.openai.com/account/api-keys" None
+3 44 71 Url "https://chatgpt.com/backend-api/codex/responses" None
+4 0 18 Url "https://chatgpt.com/backend-api/codex/responses" None
+6 8 67 File "/Users/me/workspace/goliajp/marspot/crates/marspot-linkify/src/lib.rs" None
+7 2 10 File "/Users/me/workspace/goliajp/marspot/crates/marspot-linkify/src/lib.rs" None
+== table cells
+1 14 44 Url "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/a8b69ccc/detect.caffemodel" None
+2 14 44 Url "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/a8b69ccc/detect.caffemodel" None
+3 14 36 Url "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/a8b69ccc/detect.caffemodel" None
+5 23 32 File "/etc/hosts" None
+6 2 22 Url "https://a.example/one" None
+6 26 37 Email "ops@golia.jp" None
+7 2 22 Url "https://b.example/two" None
+== composer box
+0 4 20 Url "https://example.com/long/path" None
+1 0 11 Url "https://example.com/long/path" None
+== chromeless composer
+0 6 15 File "/etc/hosts" None
+4 17 34 Url "https://golia.jp/x" None
+== wide chars in paths
+0 3 37 File "~/Downloads/決算明細_2025-2026.xlsx" None
+0 42 53 File "文档/说明.md" Some("/w/p/文档/说明.md")
+1 5 24 Url "https://example.com/" None
+1 33 42 File "/etc/hosts" None
