@@ -94,7 +94,6 @@ pub(super) fn profile_of(codex_pid: i32) -> Option<u8> {
 pub(crate) struct PaneCodex {
     pub codex_pid: i32,
     pub shell_pid: i32,
-    pub effort: Option<String>,
     /// Which `CODEX_HOME` this pane's codex is running under, read off
     /// the live process.  `None` when it could not be determined —
     /// the menu then marks nothing as current rather than guessing.
@@ -152,7 +151,6 @@ mod profile_menu_tests {
         PaneCodex {
             codex_pid: 4242,
             shell_pid: 4200,
-            effort: Some("medium".into()),
             profile: Some(profile),
         }
     }

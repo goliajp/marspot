@@ -58,6 +58,7 @@ impl Value {
             _ => None,
         }
     }
+    #[cfg(test)]
     pub fn i64(&self) -> Option<i64> {
         match self {
             Self::Num(n) if n.fract() == 0.0 => Some(*n as i64),
