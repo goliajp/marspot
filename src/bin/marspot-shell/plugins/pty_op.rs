@@ -1792,6 +1792,7 @@ impl PaneSession for OpRunner {
             self.finish(host, OpOutcome::Cancelled(match reason {
                 EndReason::UserEscape => "escape",
                 EndReason::PluginRequested => "plugin",
+                EndReason::PaneClosed => "pane closed",
             }));
         }
         self.cleanup(host);
@@ -2023,6 +2024,12 @@ impl PtyOps {
         Some(id)
     }
 
+    /// Forget closed panes: drop their queued runs and free their slot.
+    pub fn retain(&mut self, open: impl Fn(u64) -> bool) {
+        self.queued.retain(|sid, _| open(*sid));
+        self.active.retain(|sid, _| open(*sid));
+    }
+
     /// Is a run in flight on this pane?
     pub fn is_busy(&self, sid: u64) -> bool {
         self.active.contains_key(&sid)
@@ -2210,6 +2217,25 @@ mod tests {
         ops.pump(&host);
         assert_eq!(ops.running(3), Some("test.b"), "still b's pane");
         assert_ne!(a, b);
+    }
+
+    /// A closed pane frees its slot and nothing queued for it starts.
+    #[test]
+    fn a_closed_pane_frees_its_slot_and_drops_its_queue() {
+        let state = Arc::new(FakeState::default());
+        let mut ops = PtyOps::new(Arc::new(FakeIo(Arc::clone(&state))) as Arc<dyn PtyIo>);
+        let host = FakePluginHost::default();
+        ops.submit(4, PtyOp::new("test.a")).unwrap();
+        ops.submit(4, PtyOp::new("test.b")).unwrap();
+        ops.submit(5, PtyOp::new("test.c")).unwrap();
+        ops.pump(&host);
+        assert!(ops.is_busy(4) && ops.is_busy(5));
+        ops.retain(|sid| sid != 4);
+        assert!(!ops.is_busy(4), "the closed pane's slot is free");
+        ops.pump(&host);
+        assert_eq!(ops.running(4), None, "its queued run did not start");
+        assert_eq!(ops.running(5), Some("test.c"), "an open pane keeps its run");
+        assert_eq!(host.begun.lock().unwrap().len(), 2);
     }
 
     /// Multi-line text goes as a paste, and oversized payloads are

@@ -239,6 +239,22 @@ struct Builder {
 
 impl Builder {
     fn build(&mut self, walks: &AtomicU64) -> Observation {
+        let obs = self.walk(walks);
+        let walks = walks.load(Ordering::Relaxed);
+        if walks.is_multiple_of(STATS_EVERY) {
+            marspot::lx_info!(
+                "shell.observe.stats",
+                "process observation totals",
+                walks = walks,
+                table_walks = pidtree::table_walks(),
+                argv_cached = self.argv.len(),
+                sessions = obs.sessions.len()
+            );
+        }
+        obs
+    }
+
+    fn walk(&mut self, walks: &AtomicU64) -> Observation {
         let at = Instant::now();
         let table = ProcTable::take();
         walks.fetch_add(1, Ordering::Relaxed);
@@ -281,12 +297,41 @@ struct State {
     /// Someone is waiting for an observation newer than `latest`.
     wanted: bool,
     stop: bool,
+    /// The observer thread has ended: no newer observation will come.
+    dead: bool,
 }
 
 struct Shared {
     state: Mutex<State>,
     changed: Condvar,
     walks: AtomicU64,
+}
+
+impl Shared {
+    /// The state, also after a panic poisoned the lock: every field is
+    /// written whole, so what a panicking holder left is still sound.
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Marks the observer dead when its thread ends, by return or by
+/// unwinding, and wakes everyone waiting on it.
+struct Obituary<'a>(&'a Shared);
+
+impl Drop for Obituary<'_> {
+    fn drop(&mut self) {
+        let mut g = self.0.state();
+        g.dead = true;
+        if std::thread::panicking() && !g.stop {
+            marspot::lx_error!(
+                "shell.observe.died",
+                "the observer thread panicked; consumers keep the last observation"
+            );
+        }
+        drop(g);
+        self.0.changed.notify_all();
+    }
 }
 
 pub struct Observer {
@@ -304,40 +349,64 @@ impl Observer {
     /// consumer ever sees an empty one, then keep building on a thread
     /// of its own every `interval`.
     pub fn spawn(interval: Duration) -> Observer {
-        let walks = AtomicU64::new(0);
         let mut builder = Builder::default();
-        let first = builder.build(&walks);
-        let shared = Arc::new(Shared {
-            state: Mutex::new(State { latest: Arc::new(first), wanted: false, stop: false }),
-            changed: Condvar::new(),
-            walks,
-        });
+        Observer::spawn_with(interval, move |walks| builder.build(walks))
+    }
+
+    /// [`spawn`](Self::spawn) with the build step given, so a test can
+    /// make it fail.
+    fn spawn_with(
+        interval: Duration,
+        mut build: impl FnMut(&AtomicU64) -> Observation + Send + 'static,
+    ) -> Observer {
+        let walks = AtomicU64::new(0);
+        let first = build(&walks);
+        let state = State { latest: Arc::new(first), wanted: false, stop: false, dead: false };
+        let shared = Arc::new(Shared { state: Mutex::new(state), changed: Condvar::new(), walks });
         let theirs = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("l1-observe".into())
-            .spawn(move || run(&theirs, builder, interval))
+            .spawn(move || {
+                let _obituary = Obituary(&theirs);
+                run(&theirs, build, interval)
+            })
             .expect("spawn the observer thread");
         Observer { shared }
     }
 
     /// The newest observation, without waiting.
     pub fn latest(&self) -> Arc<Observation> {
-        self.shared.state.lock().unwrap().latest.clone()
+        self.shared.state().latest.clone()
     }
 
     /// An observation taken no more than `max_age` ago, waiting for a
     /// new one when the latest is older.  Callers asking within the same
     /// window share one build.
+    ///
+    /// When the observer has died this is the last observation it
+    /// made, however old: the caller must not wait for one that cannot
+    /// come.  Acting on a stale view is safe, because whoever acts
+    /// re-checks the `ProcId` first.
     pub fn fresh(&self, max_age: Duration) -> Arc<Observation> {
         let asked = Instant::now();
-        let mut g = self.shared.state.lock().unwrap();
+        let mut g = self.shared.state();
         loop {
             if asked.saturating_duration_since(g.latest.at) <= max_age {
                 return g.latest.clone();
             }
+            if g.dead {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    marspot::lx_warn!(
+                        "shell.observe.stale",
+                        "the observer is dead; serving its last observation"
+                    )
+                });
+                return g.latest.clone();
+            }
             g.wanted = true;
             self.shared.changed.notify_all();
-            g = self.shared.changed.wait(g).unwrap();
+            g = self.shared.changed.wait(g).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
     }
 
@@ -350,15 +419,15 @@ impl Observer {
 
 impl Drop for Observer {
     fn drop(&mut self) {
-        self.shared.state.lock().unwrap().stop = true;
+        self.shared.state().stop = true;
         self.shared.changed.notify_all();
     }
 }
 
-fn run(shared: &Shared, mut builder: Builder, interval: Duration) {
+fn run(shared: &Shared, mut build: impl FnMut(&AtomicU64) -> Observation, interval: Duration) {
     loop {
         {
-            let mut g = shared.state.lock().unwrap();
+            let mut g = shared.state();
             loop {
                 if g.stop {
                     return;
@@ -371,23 +440,16 @@ fn run(shared: &Shared, mut builder: Builder, interval: Duration) {
                 if now >= due {
                     break;
                 }
-                g = shared.changed.wait_timeout(g, due - now).unwrap().0;
+                g = shared
+                    .changed
+                    .wait_timeout(g, due - now)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .0;
             }
             g.wanted = false;
         }
-        let obs = Arc::new(builder.build(&shared.walks));
-        let walks = shared.walks.load(Ordering::Relaxed);
-        if walks.is_multiple_of(STATS_EVERY) {
-            marspot::lx_info!(
-                "shell.observe.stats",
-                "process observation totals",
-                walks = walks,
-                table_walks = pidtree::table_walks(),
-                argv_cached = builder.argv.len(),
-                sessions = obs.sessions.len()
-            );
-        }
-        let old = std::mem::replace(&mut shared.state.lock().unwrap().latest, obs);
+        let obs = Arc::new(build(&shared.walks));
+        let old = std::mem::replace(&mut shared.state().latest, obs);
         shared.changed.notify_all();
         drop(old);
     }
