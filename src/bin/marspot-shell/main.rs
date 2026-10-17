@@ -5103,6 +5103,15 @@ Usage:\n\
         _ => {}
     }
 
+    // The default SIGPIPE above is for the CLI's stdout.  The GUI shell
+    // writes to its core's socket, and a core that just died makes the
+    // next write a SIGPIPE: with the default action that ended the whole
+    // app silently before the supervisor could see the core was gone and
+    // start another.  Ignored, the write fails with EPIPE instead.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
     // Same reasoning as L2's loop: this thread runs the supervisor\n    // tick and every AppKit callback, and it was measured 100.8 s\n    // late during the 2026-08-11 incident.
     // Measured on an idle bench host with background load as the only
     // variable: at default QoS a frame's p99 went from 293 µs (idle)
