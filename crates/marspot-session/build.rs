@@ -35,7 +35,7 @@ fn main() {
     println!("cargo:rustc-env=MARSPOT_BUILD_TS={}", build_ts);
 
     let vv = std::fs::read_to_string("../../version-vector.toml").unwrap_or_default();
-    for layer in ["shell", "core", "session", "shelld"] {
+    for layer in ["shell", "core", "session"] {
         let version = vv
             .lines()
             .map(str::trim)

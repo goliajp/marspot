@@ -6,9 +6,7 @@
 //! `supervisor.log` TSV alongside the logx event so the twenty
 //! soak / integration scripts grepping that file kept working through
 //! the migration. With every script now anchored on `\t<TAG>\t` in
-//! `marspot.log`, the legacy file is no longer produced — the GC
-//! sweep in `marspot::logx::gc::sweep_legacy_supervisor_log` retires
-//! any leftover one from older installs.
+//! `marspot.log`, the legacy file is no longer produced.
 //!
 //! Future call sites should use `lx_event!` directly to attach
 //! structured fields; this shim exists only for the dozens of

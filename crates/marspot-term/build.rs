@@ -44,7 +44,7 @@ fn main() {
     // Per-layer version vector (read from workspace root). Each binary
     // that links marspot-term embeds its own layer's version.
     let vv = std::fs::read_to_string("../../version-vector.toml").unwrap_or_default();
-    for layer in ["shell", "core", "session", "shelld"] {
+    for layer in ["shell", "core", "session"] {
         let version = vv
             .lines()
             .map(str::trim)

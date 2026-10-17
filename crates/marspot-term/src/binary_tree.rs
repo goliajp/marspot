@@ -166,13 +166,6 @@ impl BinaryTree {
     pub fn for_shell() -> io::Result<Self> {
         Self::default_for("marspot-shell")
     }
-    /// Convenience: tree for the daemon. Promote happens either via
-    /// `bin/install-shelld.sh --apply-pending` (bootout/bootstrap
-    /// path, kills sessions) or via the shelld execv handoff path
-    /// (SIGUSR1, sessions survive).
-    pub fn for_shelld() -> io::Result<Self> {
-        Self::default_for("marspot-shelld")
-    }
 
     pub fn current(&self) -> PathBuf {
         self.root.join("current").join(&self.bin_name)
@@ -402,20 +395,6 @@ mod tests {
         tree.finalize_stable().unwrap();
         assert!(tree.current().exists());
         assert!(!tree.prev().exists());
-    }
-
-    #[test]
-    fn shelld_tree_uses_shelld_bin_name() {
-        // for_shelld() must point at binaries/{current,prev,pending}/marspot-shelld
-        // — the boot-promote path on the daemon reads from this exact location.
-        let dir = tempdir_lite::Dir::new();
-        let tree = BinaryTree {
-            root: dir.path().to_path_buf(),
-            bin_name: "marspot-shelld".to_string(),
-        };
-        assert!(tree.current().ends_with("current/marspot-shelld"));
-        assert!(tree.pending().ends_with("pending/marspot-shelld"));
-        assert!(tree.prev().ends_with("prev/marspot-shelld"));
     }
 }
 

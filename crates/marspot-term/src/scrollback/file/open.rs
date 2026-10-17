@@ -329,51 +329,6 @@ impl FileScrollback {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    fn trim_trailing_partial(
-        bin: &std::fs::File,
-        idx: &std::fs::File,
-        total_lines: u64,
-        bin_len: u64,
-    ) -> std::io::Result<(u64, u64)> {
-        // Walk from the last indexed record and verify it's complete.
-        // If incomplete, we accept the smaller total_lines.  We do
-        // NOT truncate the bin file — leftover bytes past the last
-        // good record are ignored by future appends (which use
-        // O_APPEND going to current EOF) and don't affect reads
-        // (.idx is the lookup truth).
-        if total_lines == 0 {
-            return Ok((0, FILE_HEADER_BYTES.max(bin_len)));
-        }
-        let mut last_good = total_lines;
-        let mut bin_tail = bin_len;
-        // Probe at most the last 4 records (a single mid-write crash
-        // touches one; we err generous).
-        let probe_n = last_good.min(4);
-        for off_back in 0..probe_n {
-            let li = last_good - 1 - off_back;
-            let off = read_idx_at(idx, li)?;
-            let mut len_buf = [0u8; 4];
-            if read_exact_at(bin, &mut len_buf, off).is_err() {
-                continue;
-            }
-            let rec_len = u32::from_le_bytes(len_buf) as u64;
-            let end = off + 4 + rec_len;
-            if end > bin_len {
-                // This record is partial; treat it (and any newer
-                // partial siblings) as not present.
-                last_good = li;
-                // The next record-start would have been `end`, which
-                // is past EOF — so bin tail effectively rolls back
-                // to this record's start.
-                bin_tail = off;
-            } else {
-                break;
-            }
-        }
-        Ok((last_good, bin_tail))
-    }
-
 
 }
 impl FileScrollback {

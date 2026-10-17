@@ -519,11 +519,6 @@ impl SearchWorker {
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
-    /// Snapshot the cancel flag.  Used by tests to assert that
-    /// last-write-wins cancels the prior worker.
-    pub fn is_cancelled(&self) -> bool {
-        self.cancel.load(std::sync::atomic::Ordering::Acquire)
-    }
 }
 
 impl Drop for SearchWorker {

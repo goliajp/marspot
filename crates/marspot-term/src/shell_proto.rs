@@ -2276,8 +2276,6 @@ pub fn decode_pane_badge_menu_action(payload: &[u8]) -> io::Result<(u64, u32)> {
 pub const PANE_SESSION_CAP_INPUT: u32 = 1 << 0;
 pub const PANE_SESSION_CAP_LOCK_KEYS: u32 = 1 << 1;
 pub const PANE_SESSION_CAP_FREEZE_GRID: u32 = 1 << 2;
-pub const PANE_SESSION_CAP_OBSERVE_PTY: u32 = 1 << 3;
-pub const PANE_SESSION_CAP_OVERLAY: u32 = 1 << 4;
 
 pub fn encode_pane_session_begin(session_id: u64, caps: u32) -> Vec<u8> {
     let mut v = Vec::with_capacity(12);
@@ -2354,54 +2352,6 @@ pub fn decode_pane_session_user_escape(payload: &[u8]) -> io::Result<u64> {
         ));
     }
     Ok(u64::from_le_bytes(payload.try_into().unwrap()))
-}
-
-/// PaneSessionOverlay payload (stub format — refined when the first
-/// overlay renderer lands):
-/// ```text
-/// [session_id u64 LE]
-/// [region: x f32, y_top f32, w f32, h f32  (16 bytes, phys px)]
-/// [body_len u32 LE]
-/// [body bytes]            — plugin-defined; renderer treats as UTF-8 for v1
-/// ```
-pub fn encode_pane_session_overlay(
-    session_id: u64,
-    region: (f32, f32, f32, f32),
-    body: &[u8],
-) -> Vec<u8> {
-    let mut v = Vec::with_capacity(8 + 16 + 4 + body.len());
-    v.extend_from_slice(&session_id.to_le_bytes());
-    v.extend_from_slice(&region.0.to_le_bytes());
-    v.extend_from_slice(&region.1.to_le_bytes());
-    v.extend_from_slice(&region.2.to_le_bytes());
-    v.extend_from_slice(&region.3.to_le_bytes());
-    v.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    v.extend_from_slice(body);
-    v
-}
-
-pub fn decode_pane_session_overlay(
-    payload: &[u8],
-) -> io::Result<(u64, (f32, f32, f32, f32), Vec<u8>)> {
-    if payload.len() < 8 + 16 + 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "pane_session_overlay header < 28 bytes",
-        ));
-    }
-    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
-    let rx = f32::from_le_bytes(payload[8..12].try_into().unwrap());
-    let ry = f32::from_le_bytes(payload[12..16].try_into().unwrap());
-    let rw = f32::from_le_bytes(payload[16..20].try_into().unwrap());
-    let rh = f32::from_le_bytes(payload[20..24].try_into().unwrap());
-    let body_len = u32::from_le_bytes(payload[24..28].try_into().unwrap()) as usize;
-    if payload.len() < 28 + body_len {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "pane_session_overlay body truncated",
-        ));
-    }
-    Ok((sid, (rx, ry, rw, rh), payload[28..28 + body_len].to_vec()))
 }
 
 /// GridResize payload: `cols: u16 LE, rows: u16 LE` — the cell-grid
@@ -3328,32 +3278,6 @@ mod tests {
         let p = encode_pane_session_user_escape(3);
         assert_eq!(decode_pane_session_user_escape(&p).unwrap(), 3);
         assert_eq!(MsgType::from_u32(46), Some(MsgType::PaneSessionUserEscape));
-    }
-
-    #[test]
-    fn pane_session_overlay_roundtrip() {
-        let body = b"hello overlay";
-        let p = encode_pane_session_overlay(9, (10.0, 20.0, 100.0, 30.0), body);
-        let (sid, region, decoded) = decode_pane_session_overlay(&p).unwrap();
-        assert_eq!(sid, 9);
-        assert_eq!(region, (10.0, 20.0, 100.0, 30.0));
-        assert_eq!(decoded, body);
-        assert_eq!(MsgType::from_u32(47), Some(MsgType::PaneSessionOverlay));
-    }
-
-    #[test]
-    fn pane_session_overlay_rejects_short_header() {
-        let err = decode_pane_session_overlay(&[0u8; 27]).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn pane_session_overlay_rejects_truncated_body() {
-        // 28-byte valid header claiming body_len=100, but no body.
-        let mut p = encode_pane_session_overlay(1, (0.0, 0.0, 0.0, 0.0), &[0u8; 100]);
-        p.truncate(28 + 50);
-        let err = decode_pane_session_overlay(&p).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

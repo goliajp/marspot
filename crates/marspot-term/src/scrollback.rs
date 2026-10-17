@@ -24,9 +24,6 @@
 
 use crate::grid::Cell;
 
-/// Lines per disk page.  Page is the read-cache and ring-rotation
-/// granularity.  256 lines × 80 cols × 24 B/cell ≈ 480 KiB per page.
-pub const LINES_PER_PAGE: usize = 256;
 
 /// Enum-dispatched storage.  All four call sites (`push_line`,
 /// `len`, `cell_at`, `clear`) are in the per-scroll hot path on the
