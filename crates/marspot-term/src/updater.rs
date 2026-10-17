@@ -40,6 +40,8 @@ use std::thread;
 use std::time::Duration;
 
 mod verify;
+#[cfg(test)]
+mod stage_tests;
 
 use verify::verify_signature;
 
