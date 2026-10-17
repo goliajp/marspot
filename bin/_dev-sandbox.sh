@@ -220,7 +220,10 @@ dev_require_probe() {
     return 1
   fi
   local log
-  log=$(cd "$ROOT" && cargo build --release -p marspot-session --example "$name" 2>&1) || {
+  # the session binary too: building an example does not build the
+  # package's binaries, and a probe drives the real one
+  log=$(cd "$ROOT" && cargo build --release -p marspot-session \
+          --bin marspot-session --example "$name" 2>&1) || {
     echo "FAIL: probe '$name' did not build" >&2
     echo "$log" | tail -20 >&2
     return 1
