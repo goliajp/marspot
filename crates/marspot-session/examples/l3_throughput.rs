@@ -196,7 +196,6 @@ fn main() {
     let session_id: u64 = 1;
     let child = Command::new(&session_bin)
         .env("MARSPOT_STATE_DIR", &sandbox)
-        .env("MARSPOT_L3_OWNS_PTY", "1")
         .env("MARSPOT_SESSION_ID", session_id.to_string())
         // `SHELL`, not `MARSPOT_SHELL`: an L3 spawns `$SHELL` directly
         // (local_session.rs) and never consults the MARSPOT_SHELL

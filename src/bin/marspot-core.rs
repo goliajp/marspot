@@ -811,7 +811,6 @@ mod window_state_tests {
             reconnecting: std::collections::HashSet::new(),
             all_exited: false,
             saw_window_aware_attach: false,
-            l3_mode: false,
             event_tx,
             drag_window: None,
             pane_drag: None,
@@ -2816,7 +2815,7 @@ enum CoreEvent {
     Ping(u32),
     /// Shell closed the control socket — supervisor will tear us down.
     Closed,
-    /// An L3 session process (`MARSPOT_L3`) published a new grid into
+    /// An L3 session process published a new grid into
     /// shared memory.  A pure wake: it unblocks the loop so `pump_all`
     /// re-reads the shm mirror promptly instead of waiting on the 1 s
     /// heartbeat.  Carries no data (the mirror is read from shm).
@@ -3392,10 +3391,6 @@ fn spawn_l3_with_cwd(
         // L2 owns session assignment: hand this L3 the exact session it
         // must drive so N children never race for the same one.
         .env("MARSPOT_SESSION_ID", session_id.to_string())
-        // RFC-003: L3 owns its own PTY *and* binds its own UDS at
-        // sessions/<id>/sock.  L2 connects to that socket post-spawn
-        // (see wait_and_connect below).
-        .env("MARSPOT_L3_OWNS_PTY", "1")
         // Amendment 7 step 3: hand the L3 the shm name we chose so it
         // records it in entry.toml.  A future L2 then knows what to
         // shm_open for reattach.
@@ -4147,11 +4142,8 @@ struct CoreApp {
     /// sends both so that a core predating RFC-005 still gets its
     /// surface.
     saw_window_aware_attach: bool,
-    /// `MARSPOT_L3=1`: panes are per-session L3 processes, so [+] spawns
-    /// a fresh L3 (with an L2-allocated session) instead of an in-process
-    /// shelld pane.  Clone of the event channel so a new L3's poke reader
-    /// can wake the loop, exactly like the boot spawns.
-    l3_mode: bool,
+    /// Clone of the event channel so a new L3's poke reader (spawned by
+    /// [+]) can wake the loop, exactly like the boot spawns.
     event_tx: Sender<CoreEvent>,
     /// Every open window, in creation order.  Never empty: the last
     /// window closing exits the app.
@@ -5750,47 +5742,37 @@ impl CoreApp {
             .or_else(|| win!(self, wi).layout.cells.first())
             .map(|c| (c.cols, c.rows))
             .unwrap_or((INITIAL_COLS, INITIAL_ROWS));
-        if self.l3_mode {
-            // RFC-003 step 3a: L2 allocates the session id itself via
-            // the on-disk registry (sessions/.next_id with flock), no
-            // L4 round-trip.
-            // The spawn itself runs off-loop; this only allocates the
-            // id (a flock + a directory scan) and pushes a "starting…"
-            // slot.  Clicking [+] used to freeze every pane for as long
-            // as the new L3 took to register and handshake.
-            let from = win!(self, wi)
-                .try_focused_pane()
-                .and_then(|p| p.shelld_session_id())
-                .map(live_cwd_of)
-                .unwrap_or_default();
-            match allocate_next_session_id().map(|id| {
-                spawn_l3_pane_async(cols, rows, id, from, &self.event_tx)
-            }) {
-                Ok(pane) => {
-                    let new_sid = pane.shelld_session_id();
-                    win!(self, wi).panes.push(pane);
-                    // One-shot resolve so the title strip lands
-                    // populated on the new pane's first paint instead
-                    // of showing its ordinal until the next sweep.
-                    // shell_child_pid may not be written yet on this
-                    // very tick — then this is a no-op and the sweep
-                    // picks the pane up within CWD_SWEEP_INTERVAL.
-                    if let Some(sid) = new_sid {
-                        self.resolve_pane_cwd(sid);
-                    }
-                    self.save_session_state();
+        // RFC-003 step 3a: L2 allocates the session id itself via
+        // the on-disk registry (sessions/.next_id with flock), no
+        // L4 round-trip.
+        // The spawn itself runs off-loop; this only allocates the
+        // id (a flock + a directory scan) and pushes a "starting…"
+        // slot.  Clicking [+] used to freeze every pane for as long
+        // as the new L3 took to register and handshake.
+        let from = win!(self, wi)
+            .try_focused_pane()
+            .and_then(|p| p.shelld_session_id())
+            .map(live_cwd_of)
+            .unwrap_or_default();
+        match allocate_next_session_id().map(|id| {
+            spawn_l3_pane_async(cols, rows, id, from, &self.event_tx)
+        }) {
+            Ok(pane) => {
+                let new_sid = pane.shelld_session_id();
+                win!(self, wi).panes.push(pane);
+                // One-shot resolve so the title strip lands
+                // populated on the new pane's first paint instead
+                // of showing its ordinal until the next sweep.
+                // shell_child_pid may not be written yet on this
+                // very tick — then this is a no-op and the sweep
+                // picks the pane up within CWD_SWEEP_INTERVAL.
+                if let Some(sid) = new_sid {
+                    self.resolve_pane_cwd(sid);
                 }
-                Err(e) => lx_error!("core.spawn.l3_failed", &format!("{e}")),
+                self.save_session_state();
             }
-            return;
+            Err(e) => lx_error!("core.spawn.l3_failed", &format!("{e}")),
         }
-        // RFC-003 Phase 6: L3 is the only backend.  If l3_mode is off
-        // we no longer have a shelld fallback — just log + skip.  Run
-        // with MARSPOT_L3=1 (the default) to get a pane.
-        lx_error!(
-            "core.spawn.non_l3_mode",
-            "MARSPOT_L3=0 used to fall back to shelld panes; RFC-003 removed L4 — ignoring spawn request"
-        );
     }
 
     /// Per-session silent update (target #4 step 5a): bring up a
@@ -5800,7 +5782,7 @@ impl CoreApp {
     /// replayed screen matches.  The focused pane is left alone (a replay
     /// could blip an interactive TUI mid-keystroke); step 5b adds a
     /// click-to-swap affordance for it.  Skips panes already swapping or
-    /// exited.  Behind `MARSPOT_L3=1` (no L3 panes otherwise → no-op).
+    /// exited.
     fn swap_idle_l3(&mut self) {
         // RFC-003 §6 Amendment 16 — L3 self-execv silent update.
         //
@@ -10456,92 +10438,79 @@ fn main() {
         );
         (boot.cells[0].cols, boot.cells[0].rows)
     };
-    let mut panes: Vec<Pane> = Vec::with_capacity(n_sessions);
-    // Per-session L3 is now the DEFAULT (target #4 step 6): one L3 process
-    // per cell, each owning its own session process + shm grid in its own
-    // address space.  L2 owns session *assignment* so the N children never
-    // race for one session: reuse the live sessions first (bytelog replay
-    // on attach), then `create_session` for the rest, handing each L3 its
-    // exact id.  `MARSPOT_L3=0` opts back out to the in-process shelld grid
-    // (kept as the escape hatch + the fallback if every L3 spawn fails).
-    let l3_mode = std::env::var("MARSPOT_L3").as_deref() != Ok("0");
+    // One L3 process per cell, each owning its own session process + shm
+    // grid in its own address space.  L2 owns session *assignment* so the
+    // N children never race for one session: reuse the live sessions
+    // first (bytelog replay on attach), then `create_session` for the
+    // rest, handing each L3 its exact id.
+    //
     // RFC-003 §6 Amendment 14: did the boot promote a fresh marspot-
     // session binary?  If yes, fan SIGUSR2 out to every reattached L3
     // after the reattach loop so existing children also pick up the
     // new image via execv self-update (not just freshly-spawned ones).
     let mut session_binary_freshly_promoted = false;
-    if l3_mode {
-        // A core update lands the new session engine in pending/; promote
-        // it into current/ before spawning so each L3 (resolved as core's
-        // sibling = current/marspot-session in an installed app) boots the
-        // new binary in lockstep with this core.
-        match marspot::updater::promote_pending_session() {
-            Ok(true) => {
-                session_binary_freshly_promoted = true;
-                lx_event!(
-                    "SESSION_PROMOTE",
-                    "promoted staged marspot-session → current/ at boot"
-                );
-            }
-            Ok(false) => {}
-            Err(e) => lx_error!("core.promote.boot_failed", &format!("{e}")),
-        }
-        // RFC-004 B.1 — identity-keyed slot assembly (extracted to
-        // `assemble_panes_at_boot`; see its doc for the semantics).
-        // The boot assembly is the sweeping one: it adopts orphaned
-        // live sessions and retires unclaimed dirs.  Restored windows
-        // (step 6b) run the same function with that turned off.
-        //
-        // Every sid the OTHER saved windows own is reserved: those
-        // sessions are neither orphans to adopt nor junk to retire,
-        // they are simply waiting for their own window to be opened.
-        let reserved_sids: std::collections::HashSet<u64> = saved_windows
-            .iter()
-            .flat_map(|(_, w)| w.panes.iter())
-            .map(|p| p.sid)
-            .filter(|sid| *sid != 0)
-            .collect();
-        let (assembled, reattached_ids) = assemble_panes_at_boot(
-            boot_window.as_ref(),
-            n_sessions,
-            boot_cols,
-            boot_rows,
-            &event_tx,
-            true,
-            &reserved_sids,
-        );
-        panes = assembled;
-        // RFC-003 §6 Amendment 16 — L3 self-execv silent update
-        // fanout (unchanged): freshly-promoted session binary →
-        // SIGTERM every reattached L3 so it execv's into the new
-        // image (PTY master fd + UDS listener fd + shell child all
-        // preserved via clear-CLOEXEC + manifest handoff).
-        if session_binary_freshly_promoted && !reattached_ids.is_empty() {
-            let mut signalled = 0usize;
-            for id in &reattached_ids {
-                if let Ok(entry) =
-                    marspot_term::session_registry::read_session_entry(*id)
-                    && unsafe { libc::kill(entry.pid, libc::SIGTERM) } == 0 {
-                        signalled += 1;
-                    }
-            }
+    // A core update lands the new session engine in pending/; promote
+    // it into current/ before spawning so each L3 (resolved as core's
+    // sibling = current/marspot-session in an installed app) boots the
+    // new binary in lockstep with this core.
+    match marspot::updater::promote_pending_session() {
+        Ok(true) => {
+            session_binary_freshly_promoted = true;
             lx_event!(
-                "L3_BOOT_FANOUT",
-                "SIGTERM sent to reattached L3s for self-execv",
-                n_signalled = signalled,
-                n_reattached = reattached_ids.len()
+                "SESSION_PROMOTE",
+                "promoted staged marspot-session → current/ at boot"
             );
         }
-        if panes.is_empty() {
-            lx_warn!(
-                "core.boot.l3_empty",
-                "no L3 panes spawned — falling back to shelld panes"
-            );
-        }
+        Ok(false) => {}
+        Err(e) => lx_error!("core.promote.boot_failed", &format!("{e}")),
     }
-
-    // RFC-003 Phase 6: shelld fallback path deleted.  If l3_mode failed
-    // to spawn anything we exit; no fallback to L4.
+    // RFC-004 B.1 — identity-keyed slot assembly (extracted to
+    // `assemble_panes_at_boot`; see its doc for the semantics).
+    // The boot assembly is the sweeping one: it adopts orphaned
+    // live sessions and retires unclaimed dirs.  Restored windows
+    // (step 6b) run the same function with that turned off.
+    //
+    // Every sid the OTHER saved windows own is reserved: those
+    // sessions are neither orphans to adopt nor junk to retire,
+    // they are simply waiting for their own window to be opened.
+    let reserved_sids: std::collections::HashSet<u64> = saved_windows
+        .iter()
+        .flat_map(|(_, w)| w.panes.iter())
+        .map(|p| p.sid)
+        .filter(|sid| *sid != 0)
+        .collect();
+    let (assembled, reattached_ids) = assemble_panes_at_boot(
+        boot_window.as_ref(),
+        n_sessions,
+        boot_cols,
+        boot_rows,
+        &event_tx,
+        true,
+        &reserved_sids,
+    );
+    let panes = assembled;
+    // RFC-003 §6 Amendment 16 — L3 self-execv silent update
+    // fanout (unchanged): freshly-promoted session binary →
+    // SIGTERM every reattached L3 so it execv's into the new
+    // image (PTY master fd + UDS listener fd + shell child all
+    // preserved via clear-CLOEXEC + manifest handoff).
+    if session_binary_freshly_promoted && !reattached_ids.is_empty() {
+        let mut signalled = 0usize;
+        for id in &reattached_ids {
+            if let Ok(entry) =
+                marspot_term::session_registry::read_session_entry(*id)
+                && unsafe { libc::kill(entry.pid, libc::SIGTERM) } == 0 {
+                    signalled += 1;
+                }
+        }
+        lx_event!(
+            "L3_BOOT_FANOUT",
+            "SIGTERM sent to reattached L3s for self-execv",
+            n_signalled = signalled,
+            n_reattached = reattached_ids.len()
+        );
+    }
+    // Nothing could be spawned or reattached: there is no other backend.
     if panes.is_empty() {
         lx_error!("core.boot.no_sessions", "no sessions could be created — exiting");
         return;
@@ -10576,7 +10545,6 @@ fn main() {
         reconnecting: std::collections::HashSet::new(),
         all_exited: false,
         saw_window_aware_attach: false,
-        l3_mode,
         event_tx: event_tx.clone(),
         drag_window: None,
         pane_drag: None,
@@ -10682,8 +10650,7 @@ fn main() {
     let reader_tx = event_tx.clone();
     std::thread::spawn(move || reader_loop(reader_stream, reader_tx));
 
-    // SIGUSR2 → per-session silent-update trigger (behind MARSPOT_L3=1 it
-    // swaps idle L3 panes; a no-op otherwise).
+    // SIGUSR2 → per-session silent-update trigger (swaps idle L3 panes).
     install_swap_trigger(event_tx.clone());
 
     // The thread that paints is the thread the user is waiting on.

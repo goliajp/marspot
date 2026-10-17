@@ -1,6 +1,6 @@
 //! RFC-003 step 2c — per-L3 UDS control socket.
 //!
-//! When `MARSPOT_L3_OWNS_PTY=1`, L3 binds a Unix-domain socket at
+//! L3 binds a Unix-domain socket at
 //! `sessions/<id>/sock` and writes a registry `entry.toml` so a
 //! freshly-spawned L2 (after a silent-update swap) can discover us by
 //! scanning `sessions/` and reattach via the recorded socket path.
@@ -21,7 +21,6 @@
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -38,10 +37,6 @@ use marspot_term::shell_proto::{
 
 pub struct SessionListener {
     id: u64,
-    // Phase 2d will read this to expose the bound path on the public
-    // surface; stays attached now so Drop's debug logs can name it.
-    #[allow(dead_code)]
-    socket_path: PathBuf,
     accept_thread: Option<JoinHandle<()>>,
     /// RFC-003 §6 Amendment 14 — a duplicate of the bound listener fd
     /// kept here (the original moved into the accept thread via
@@ -157,7 +152,6 @@ impl SessionListener {
 
         Ok(Self {
             id,
-            socket_path,
             accept_thread: Some(accept_thread),
             keep_listener: Some(listener),
             suppress_drop: false,
@@ -212,7 +206,6 @@ impl SessionListener {
         let _ = write_session_entry(&entry);
         Ok(Self {
             id,
-            socket_path: session_socket_path(id),
             accept_thread: Some(accept_thread),
             keep_listener: Some(listener),
             suppress_drop: false,
@@ -269,16 +262,6 @@ impl SessionListener {
         }
         self.suppress_drop = true;
         Ok(fd)
-    }
-
-    #[allow(dead_code)] // used by Phase 2d test helpers
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-
-    #[allow(dead_code)] // used by Phase 2d test helpers
-    pub fn socket_path(&self) -> &std::path::Path {
-        &self.socket_path
     }
 }
 
@@ -442,38 +425,3 @@ fn handshake_and_handoff(
     Ok(())
 }
 
-/// Helper for clients (the cargo example client + L2 Phase 3 wire) —
-/// open a connection to this session's UDS, perform the Hello
-/// handshake, and return the validated stream ready for further
-/// frames. Lives here so the wire shape has exactly one definition.
-#[allow(dead_code)] // wired up by Phase 3 / the cargo example client
-pub fn connect_with_handshake(socket_path: &std::path::Path) -> io::Result<UnixStream> {
-    use marspot_term::shell_proto::encode_hello;
-    let mut stream = UnixStream::connect(socket_path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    Frame::new(MsgType::Hello, encode_hello(PROTO_VERSION)).write_to(&mut stream)?;
-    let reply = Frame::read_from(&mut stream)?.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::UnexpectedEof, "server closed before HelloAck")
-    })?;
-    if reply.msg_type == MsgType::Error {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("server error: {}", String::from_utf8_lossy(&reply.payload)),
-        ));
-    }
-    if reply.msg_type != MsgType::HelloAck {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("expected HelloAck, got {:?}", reply.msg_type),
-        ));
-    }
-    let v = marspot_term::shell_proto::decode_hello_ack(&reply.payload)?;
-    if v != PROTO_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("server proto={v} doesn't match expected {PROTO_VERSION}"),
-        ));
-    }
-    stream.set_read_timeout(None)?;
-    Ok(stream)
-}

@@ -18,9 +18,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use marspot::pane_state::{Activity, PaneStatus};
-use marspot::{lx_debug, lx_error, lx_info, lx_warn};
+use marspot::{lx_debug, lx_info, lx_warn};
 
-use super::{LogLevel, PaneSession, PluginError, PluginHost, PtyChild};
+use super::{LogLevel, PaneSession, PluginError, PluginHost};
 
 /// Channel message the shell main loop drains and forwards to L2 core
 /// as a `PaneBadge` frame.  Empty `text` = clear.
@@ -73,15 +73,6 @@ pub struct PaneSessionBeginRequest {
     pub session: Box<dyn PaneSession>,
 }
 
-/// Snapshot taken once per tick by the host so plugins read O(1)
-/// instead of walking `/dev` + `/proc` (or its macOS equivalent)
-/// per call.  All fields default-empty until the host populates them.
-#[derive(Default, Clone)]
-pub struct PaneSnapshot {
-    pub pty_device: Option<PathBuf>,
-    pub pid_tree: Vec<PtyChild>,
-}
-
 /// The declarations a pane can be given, for the "already told it"
 /// memo.  See `ShellPluginHost::declared`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -99,12 +90,6 @@ enum DeclValue {
 }
 
 pub struct ShellPluginHost {
-    /// Live during a session.  Resized when L2 core reports a new
-    /// pane count.  Index is the L2 pane index (1-based to plugins?
-    /// — no, we keep 0-based to mirror Rust convention; plugins that
-    /// want 1-based label them).
-    panes: Arc<Mutex<Vec<PaneSnapshot>>>,
-    focused: Arc<Mutex<Option<usize>>>,
     /// `shelld_session_id → foreground status`, refreshed once per
     /// `pane_status::SWEEP_INTERVAL` by the shell's supervisor tick.
     /// Keyed by session id rather than pane index because that is what
@@ -253,8 +238,6 @@ struct ActivePlugin {
 impl ShellPluginHost {
     pub fn new() -> Self {
         Self {
-            panes: Arc::new(Mutex::new(Vec::new())),
-            focused: Arc::new(Mutex::new(None)),
             pane_status: Arc::new(Mutex::new(HashMap::new())),
             active_plugin: Arc::new(Mutex::new(None)),
             pane_badge_tx: Mutex::new(None),
@@ -357,23 +340,6 @@ impl ShellPluginHost {
         *self.pane_status.lock().unwrap() = map;
     }
 
-    /// Refresh per-pane snapshots.  Called from the shell's tick
-    /// prologue so plugins reading via `pane_pty_device` etc. see
-    /// fresh data.  MVP: takes a closure that walks the actual
-    /// system tree; in v1.1 wire to a system-level subscription.
-    pub fn refresh_panes<F>(&self, pane_count: usize, focused: Option<usize>, mut probe: F)
-    where
-        F: FnMut(usize) -> PaneSnapshot,
-    {
-        let mut g = self.panes.lock().unwrap();
-        g.clear();
-        for i in 0..pane_count {
-            g.push(probe(i));
-        }
-        *self.focused.lock().unwrap() = focused;
-    }
-
-
     fn plugin_name(&self) -> &'static str {
         self.active_plugin
             .lock()
@@ -429,23 +395,6 @@ impl crate::plugins::claudecode::InjectInputProxy for InjectInputForwarder {
 }
 
 impl PluginHost for ShellPluginHost {
-    fn pane_count(&self) -> usize {
-        // `READ_PANE_INFO` gates the per-pane queries, but the bare
-        // count is harmless and lets unauth'd plugins say "I'd need
-        // permission to do my job".
-        self.panes.lock().unwrap().len()
-    }
-
-    fn pane_pty_device(&self, pane: usize) -> Result<Option<PathBuf>, PluginError> {
-        let g = self.panes.lock().unwrap();
-        Ok(g.get(pane).and_then(|s| s.pty_device.clone()))
-    }
-
-    fn pane_pty_pid_tree(&self, pane: usize) -> Result<Vec<PtyChild>, PluginError> {
-        let g = self.panes.lock().unwrap();
-        Ok(g.get(pane).map(|s| s.pid_tree.clone()).unwrap_or_default())
-    }
-
     fn pane_status(
         &self,
         shelld_session_id: u64,
@@ -471,10 +420,6 @@ impl PluginHost for ShellPluginHost {
         Ok(())
     }
 
-    fn pane_focused(&self) -> Option<usize> {
-        *self.focused.lock().unwrap()
-    }
-
     fn state_dir(&self) -> Result<PathBuf, PluginError> {
         let plugin = self.plugin_name();
         let base = marspot::paths::state_root().join("plugins").join(plugin);
@@ -491,7 +436,6 @@ impl PluginHost for ShellPluginHost {
             LogLevel::Debug => lx_debug!(&*composed, msg),
             LogLevel::Info => lx_info!(&*composed, msg),
             LogLevel::Warn => lx_warn!(&*composed, msg),
-            LogLevel::Error => lx_error!(&*composed, msg),
         }
     }
 

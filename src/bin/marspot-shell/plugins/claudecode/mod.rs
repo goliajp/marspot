@@ -2208,7 +2208,6 @@ impl Plugin for ClaudecodePlugin {
     fn metadata(&self) -> PluginMetadata {
         PluginMetadata {
             name: "claudecode",
-            version: "0.1.0",
             api_version: PLUGIN_API_VERSION,
             // 2 s — long enough to be near-free,short enough to catch
             // "assistant message done" within a couple seconds for
@@ -2789,7 +2788,6 @@ mod tests {
             fn set_badge(&self, text: &str) {
                 self.0.lock().unwrap().push(text.to_string());
             }
-            fn set_pane_title(&self, _t: &str) {}
             fn log(&self, _l: LogLevel, _t: &str, _m: &str) {}
         }
         let rec = Recording(std::sync::Mutex::new(Vec::new()));
@@ -3266,7 +3264,6 @@ mod tests {
             fn set_badge(&self, text: &str) {
                 self.0.lock().unwrap().push(text.to_string());
             }
-            fn set_pane_title(&self, _t: &str) {}
             fn log(&self, _l: LogLevel, _t: &str, _m: &str) {}
         }
         let rec = Recording(std::sync::Mutex::new(Vec::new()));
@@ -5286,7 +5283,6 @@ mod tests {
         }
         fn end(&self) {}
         fn set_badge(&self, _text: &str) {}
-        fn set_pane_title(&self, _text: &str) {}
         fn log(&self, _l: LogLevel, _t: &str, _m: &str) {}
     }
 
@@ -5417,21 +5413,6 @@ mod tests {
                 .unwrap()
                 .push((shelld_session_id, text.to_string()));
             Ok(())
-        }
-        fn pane_count(&self) -> usize {
-            1
-        }
-        fn pane_pty_device(&self, _: usize) -> Result<Option<PathBuf>, PluginError> {
-            Ok(None)
-        }
-        fn pane_pty_pid_tree(
-            &self,
-            _: usize,
-        ) -> Result<Vec<crate::plugins::PtyChild>, PluginError> {
-            Ok(Vec::new())
-        }
-        fn pane_focused(&self) -> Option<usize> {
-            None
         }
         fn pane_status(
             &self,

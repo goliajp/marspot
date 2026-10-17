@@ -34,7 +34,6 @@ fn main() {
     let mut env: Vec<(String, String)> = std::env::vars().collect();
     for (k, v) in [
         ("MARSPOT_SESSION_ID", sid.to_string()),
-        ("MARSPOT_L3_OWNS_PTY", "1".to_string()),
         ("MARSPOT_SHM_NAME", shm_name.clone()),
         ("MARSPOT_STATE_DIR", root.to_string_lossy().to_string()),
     ] {
