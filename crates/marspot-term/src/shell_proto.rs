@@ -553,6 +553,14 @@ pub enum MsgType {
     /// has to be a way to say "stop", and it cannot be one that costs
     /// the user their session.
     PaneResetAttrs = 81,
+    /// core → session: move to the build in `current/` if it is not
+    /// the one this session runs.  Empty payload.
+    ///
+    /// An update used to be a SIGTERM, which also meant "close": the
+    /// same signal could not both be repeated safely and end a pane.
+    /// A frame says only this, and a second one is a no-op.  A session
+    /// that understands it says so in its registry entry (`build`).
+    SessionUpdate = 85,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -626,6 +634,7 @@ impl MsgType {
             82 => MsgType::PaneAgentTui,
             83 => MsgType::PaneClipboardWrite,
             84 => MsgType::PaneTerminalFocus,
+            85 => MsgType::SessionUpdate,
             200 => MsgType::Error,
             _ => return None,
         })

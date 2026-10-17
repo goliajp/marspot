@@ -1,11 +1,12 @@
 //! A pane's L3 replaced under it by its own execv, end to end.
 //!
-//! The real `marspot-session` binary, a real shell on its PTY, and a
-//! real SIGTERM: what the update fan-out does to every pane.  Against
-//! a different build in `binaries/current/` the process must come back
-//! as itself (same pid, same shell, same screen) running the new
-//! image; with nothing staged, or the same build staged, the same
-//! signal means "quit" and the process must go.
+//! The real `marspot-session` binary, a real shell on its PTY, and the
+//! real requests: a `SessionUpdate` frame from L2, a SIGTERM from a
+//! sender that predates it, a SIGHUP for a close.  Asked to update to a
+//! different build in `binaries/current/`, the process must come back
+//! as itself (same pid, same shell, same screen) running the new image,
+//! once however often it is asked; asked to update to the build it runs,
+//! nothing may happen; closed, it must go whatever is staged.
 
 use crate::support;
 
@@ -138,10 +139,8 @@ fn read_echoed_pid(s: &Session, tag: &str) -> Option<i32> {
 /// The test's connection to the session's socket, reopened the way L2
 /// reopens its own when the L3 closes it.
 ///
-/// A SIGTERM that reaches an image which already runs the staged build
-/// still re-execs it, and a connection accepted just before that execv
-/// is not handed over: the new image closes it.  L2 sees the EOF and
-/// reconnects; a key written in between is lost there too.  What must
+/// A connection accepted just before an execv is not handed over: the
+/// new image closes it.  L2 sees the EOF and reconnects.  What must
 /// never happen is input lost on a connection that stays open.
 struct Link {
     stream: UnixStream,
@@ -214,18 +213,22 @@ fn stage(state: &Path, differ: bool) -> PathBuf {
         let i = at + "MARSPOT_FP=".len();
         bytes[i] = if bytes[i] == b'0' { b'1' } else { b'0' };
     }
-    std::fs::write(&dst, &bytes).unwrap();
+    // A new file renamed into place: the L3 may be running the old one,
+    // and macOS kills a process whose executable is rewritten in place.
+    let tmp = dir.join("marspot-session.tmp");
+    std::fs::write(&tmp, &bytes).unwrap();
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
     let ok = |args: &[&str]| {
         std::process::Command::new("/usr/bin/codesign")
             .args(args)
-            .arg(&dst)
+            .arg(&tmp)
             .output()
             .is_ok_and(|o| o.status.success())
     };
     assert!(ok(&["--force", "--sign", "-"]), "re-sign the staged copy");
     assert!(ok(&["-v"]), "the staged copy verifies");
+    std::fs::rename(&tmp, &dst).unwrap();
     dst
 }
 
@@ -244,39 +247,57 @@ fn log_tail(state: &Path) -> String {
     out
 }
 
+fn signal(pid: u32, sig: i32) {
+    assert_eq!(unsafe { libc::kill(pid as i32, sig) }, 0, "signal {sig} to {pid}");
+}
+
 fn sigterm(pid: u32) {
-    assert_eq!(
-        unsafe { libc::kill(pid as i32, libc::SIGTERM) },
-        0,
-        "SIGTERM {pid}"
-    );
+    signal(pid, libc::SIGTERM);
+}
+
+/// How the test asks the L3 to update.
+#[derive(Clone, Copy, PartialEq)]
+enum Ask {
+    /// what L2 sends
+    Frame,
+    /// what a sender from before the frame sends
+    Sigterm,
+}
+
+fn ask(s: &Session, how: Ask) {
+    match how {
+        Ask::Frame => s.send_frame(MsgType::SessionUpdate, Vec::new()),
+        Ask::Sigterm => sigterm(s.pid()),
+    }
 }
 
 fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-/// SIGTERM the pane's L3 against what is staged, and check that it
+/// Ask the pane's L3 to update to a different build, and check that it
 /// came back as itself: same pid, now running the staged file, the same
 /// shell on its PTY, the same screen, and typing still reaching it.
 ///
-/// With `burst` the signal keeps coming every few milliseconds until the
-/// new image runs and for a while after, the way two fan-outs in one
-/// install deliver it: some land while the old image probes, some
-/// between its execv and the new image's handler, some on the new one.
-fn hand_over(sandbox: &mut Sandbox, differ: bool, burst: bool) {
+/// With `burst` the request keeps coming every few milliseconds, the
+/// way several senders in one install deliver it.  Frames keep coming
+/// after the swap too, and must change nothing; SIGTERMs stop at the
+/// swap -- one that reaches the new image with its own build in
+/// `current/` is "end", by design -- so the ones that matter are those
+/// sent while the swap was under way.  Either way there is one execv.
+fn hand_over(sandbox: &mut Sandbox, how: Ask, burst: bool) {
     let mut s = start(sandbox);
     let pid = s.pid();
     let shell_before = shell_pid(&s, "before");
     let screen_before = s.screen(COLS, ROWS);
-    let staged = stage(sandbox.path(), differ).canonicalize().unwrap();
+    let staged = stage(sandbox.path(), true).canonicalize().unwrap();
     let state = sandbox.path().to_path_buf();
     let running = || {
         marspot_term::platform::pid_exe_path(pid as i32).and_then(|p| p.canonicalize().ok())
     };
     assert_ne!(running().as_deref(), Some(staged.as_path()));
 
-    sigterm(pid);
+    ask(&s, how);
     // The new image is running under the same pid.  execv keeps the
     // pid whatever happens, so the executable is what says it ran.
     let mut after_swap = 0;
@@ -288,11 +309,11 @@ fn hand_over(sandbox: &mut Sandbox, differ: bool, burst: bool) {
             );
         }
         let swapped = running().as_deref() == Some(staged.as_path());
-        if burst {
-            sigterm(pid);
+        if burst && !(swapped && how == Ask::Sigterm) {
+            ask(&s, how);
             std::thread::sleep(Duration::from_millis(3));
             after_swap += swapped as u32;
-            return (after_swap > 100).then_some(());
+            return (swapped && (how == Ask::Sigterm || after_swap > 100)).then_some(());
         }
         swapped.then_some(())
     });
@@ -302,8 +323,6 @@ fn hand_over(sandbox: &mut Sandbox, differ: bool, burst: bool) {
     // is also the first frame that is certainly the new image's: the
     // region keeps the old image's last frame until something replaces
     // it, and a screen identical to the one before publishes nothing.
-    // A frame that is not the echo can come first: a SIGTERM of the
-    // burst that reached the new image re-execs it, and it republishes.
     let (_, (c0, r0)) = wait_for(10, "a frame after the swap", || {
         s.try_screen_and_cursor(COLS, ROWS)
     });
@@ -342,6 +361,7 @@ fn hand_over(sandbox: &mut Sandbox, differ: bool, burst: bool) {
     assert_eq!(shell_after, shell_before, "the same shell is on the PTY");
     assert_eq!(s.child.try_wait().unwrap(), None);
     assert_eq!(running().as_deref(), Some(staged.as_path()));
+    assert_eq!(count_in_log(&state, "L3_EXECV_INVOKE"), 1, "one execv, however often it was asked");
     s.kill();
 }
 
@@ -349,21 +369,56 @@ fn hand_over(sandbox: &mut Sandbox, differ: bool, burst: bool) {
 #[test]
 fn an_update_replaces_the_image_and_keeps_the_pane() {
     let mut sandbox = Sandbox::new();
-    hand_over(&mut sandbox, true, false);
+    hand_over(&mut sandbox, Ask::Frame, false);
+}
+
+/// Many requests, from several senders, before and after the swap: one
+/// execv, and the pane lives.
+#[test]
+fn repeated_update_requests_move_the_pane_once() {
+    let mut sandbox = Sandbox::new();
+    hand_over(&mut sandbox, Ask::Frame, true);
+}
+
+/// An L2 or script from before `SessionUpdate` asks with SIGTERM.
+#[test]
+fn a_sigterm_from_an_older_sender_still_updates() {
+    let mut sandbox = Sandbox::new();
+    hand_over(&mut sandbox, Ask::Sigterm, false);
 }
 
 /// A SIGTERM arriving between the old image's execv and the new one's
-/// handler waits instead of killing the process: lost five panes on
-/// 2026-09-07, when two fan-outs reached the same L3 in one install.
+/// handler is not a kill: it lost five panes on 2026-09-07, when two
+/// fan-outs reached the same L3 in one install.  Nor is it a close:
+/// it asked for the update that was already happening.
 #[test]
 fn sigterms_across_the_execv_do_not_kill_the_pane() {
     let mut sandbox = Sandbox::new();
-    hand_over(&mut sandbox, true, true);
+    hand_over(&mut sandbox, Ask::Sigterm, true);
 }
 
-/// Nothing staged: SIGTERM is the user closing the pane, and the L3
-/// takes its shell with it.  The session directory stays, for the next
-/// L2 to resurrect or retire; what must not stay is a live process.
+/// Asked to move to the build it already runs, an L3 does nothing: no
+/// execv, no exit.  A second fan-out in one install asks exactly this.
+#[test]
+fn an_update_to_the_running_build_does_nothing() {
+    let mut sandbox = Sandbox::new();
+    let mut s = start(&mut sandbox);
+    let state = sandbox.path().to_path_buf();
+    let shell = shell_pid(&s, "before");
+    stage(&state, false);
+    s.send_frame(MsgType::SessionUpdate, Vec::new());
+    wait_for(10, "the L3 to answer the request", || {
+        (count_in_log(&state, "L3_UPDATE_NOOP") > 0).then_some(())
+    });
+    assert_eq!(s.child.try_wait().unwrap(), None, "still running");
+    assert_eq!(count_in_log(&state, "L3_EXECV_PROBE_START"), 0, "no move was started");
+    assert_eq!(shell_pid(&s, "after"), shell, "the same shell");
+    s.kill();
+}
+
+/// Nothing staged: SIGTERM ends the L3, as it ends any process, and the
+/// L3 takes its shell with it.  The session directory stays, for the
+/// next L2 to resurrect or retire; what must not stay is a live process.
 #[test]
 fn with_nothing_staged_sigterm_quits() {
     let mut sandbox = Sandbox::new();
@@ -381,15 +436,56 @@ fn with_nothing_staged_sigterm_quits() {
     );
 }
 
-/// A copy of the running build in `current/` is taken for an update
-/// too: the fingerprint read from the file never equals the running
-/// one (see `a_copy_of_the_running_build_counts_as_an_update` in the
-/// handoff module).  Pinned, because a duplicate fan-out's second
-/// SIGTERM lands on exactly this state and needs the pane to survive.
+/// With its own build staged, SIGTERM is not an update either: it ends
+/// the L3.  A copy of the running build used to count as an update, so
+/// this re-execed.
 #[test]
-fn with_the_same_build_staged_sigterm_reexecs_the_pane() {
+fn with_the_same_build_staged_sigterm_quits() {
     let mut sandbox = Sandbox::new();
-    hand_over(&mut sandbox, false, false);
+    let mut s = start(&mut sandbox);
+    let state = sandbox.path().to_path_buf();
+    let shell = shell_pid(&s, "sh");
+    stage(&state, false);
+    sigterm(s.pid());
+    let status = wait_for(20, "the L3 to exit", || s.child.try_wait().unwrap());
+    assert_eq!(status.code(), Some(0), "a clean exit");
+    assert_eq!(count_in_log(&state, "L3_EXECV_INVOKE"), 0, "no execv");
+    wait_for(10, "the shell to go with it", || (!alive(shell)).then_some(()));
+}
+
+/// A close is a close whatever is staged.  It was a SIGTERM, which with
+/// another build staged re-execed the pane instead of ending it.
+#[test]
+fn a_close_ends_the_pane_even_with_another_build_staged() {
+    let mut sandbox = Sandbox::new();
+    let mut s = start(&mut sandbox);
+    let state = sandbox.path().to_path_buf();
+    let shell = shell_pid(&s, "sh");
+    stage(&state, true);
+    signal(s.pid(), libc::SIGHUP);
+    let status = wait_for(20, "the L3 to exit", || s.child.try_wait().unwrap());
+    assert_eq!(status.code(), Some(0), "a clean exit");
+    assert_eq!(count_in_log(&state, "L3_EXECV_PROBE_START"), 0, "no move was started");
+    wait_for(10, "the shell to go with it", || (!alive(shell)).then_some(()));
+}
+
+/// The registry entry says which build the L3 runs, which is also how
+/// L2 knows it takes `SessionUpdate`; after an update it says the new
+/// one.
+#[test]
+fn the_registry_entry_names_the_running_build() {
+    let mut sandbox = Sandbox::new();
+    let mut s = start(&mut sandbox);
+    let state = sandbox.path().to_path_buf();
+    let entry = read_session_entry(ID).expect("the L3 registered itself");
+    assert_eq!(entry.build, marspot_term::build::own());
+    let staged = stage(&state, true);
+    let want = marspot_term::build::of_file(&staged).expect("the staged build");
+    s.send_frame(MsgType::SessionUpdate, Vec::new());
+    wait_for(20, "the entry to name the staged build", || {
+        read_session_entry(ID).ok().filter(|e| e.build == want).map(|_| ())
+    });
+    s.kill();
 }
 
 /// The fewest descriptors `pid` holds over 300 ms: one opened for a
@@ -424,16 +520,17 @@ fn count_in_log(state: &Path, tag: &str) -> usize {
 /// next image a duplicate, so one more descriptor stayed open for
 /// good with every update.
 #[test]
-fn reexecs_do_not_accumulate_descriptors() {
+fn updates_do_not_accumulate_descriptors() {
     let mut sandbox = Sandbox::new();
     let mut s = start(&mut sandbox);
     let state = sandbox.path().to_path_buf();
-    stage(&state, false);
     let pid = s.pid();
+    // two builds in turn, so every request is a real move
     let swap = |s: &mut Session, n: usize| {
+        stage(&state, n % 2 == 1);
         let before = count_in_log(&state, "L3_SIGTERM_INSTALLED");
-        sigterm(pid);
-        wait_for(20, &format!("re-exec {n} to arm its handler"), || {
+        s.send_frame(MsgType::SessionUpdate, Vec::new());
+        wait_for(20, &format!("update {n} to arm its handler"), || {
             assert_eq!(s.child.try_wait().unwrap(), None, "the L3 exited");
             (count_in_log(&state, "L3_SIGTERM_INSTALLED") > before).then_some(())
         });
@@ -443,6 +540,6 @@ fn reexecs_do_not_accumulate_descriptors() {
     for n in 2..=6 {
         swap(&mut s, n);
     }
-    assert_eq!(open_fds(s.pid()), after_one, "open descriptors after five more re-execs");
+    assert_eq!(open_fds(s.pid()), after_one, "open descriptors after five more updates");
     s.kill();
 }

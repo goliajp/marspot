@@ -379,6 +379,15 @@ impl PaneBackend {
         }
     }
 
+    /// Ask the pane's L3 to move to the build in `current/`.  `false`
+    /// when there is no L3 or its queue refused the frame.
+    pub fn forward_session_update(&mut self) -> bool {
+        match self {
+            PaneBackend::L3(c) => c.forward_session_update(),
+            _ => false,
+        }
+    }
+
     /// C5 — send a `SearchScrollback` frame to the L3 session
     /// behind this pane.  No-op on non-L3 backends (search is
     /// File-backed scrollback only, which only L3 owns).
@@ -769,18 +778,6 @@ impl L3Process {
         }
     }
 
-    /// `Child::kill` for the Spawned variant; SIGTERM via pid for
-    /// the Reattached variant.  Best-effort either way.
-    pub fn kill(&mut self) -> std::io::Result<()> {
-        match self {
-            Self::Spawned(c) => c.kill(),
-            Self::Reattached { pid } => {
-                unsafe { libc::kill(*pid, libc::SIGTERM) };
-                Ok(())
-            }
-        }
-    }
-
     /// `Child::wait` for the Spawned variant; busy-poll `kill 0` for
     /// the Reattached variant (with a short timeout — we can't waitpid
     /// for a foreign process so we just verify it died).
@@ -1130,6 +1127,10 @@ impl L3Conn {
             crate::shell_proto::encode_pane_terminal_focus(self.session_id, focused),
         );
         let _ = self.control.send(frame);
+    }
+
+    fn forward_session_update(&mut self) -> bool {
+        self.control.send(Frame::new(MsgType::SessionUpdate, Vec::new()))
     }
 
     /// C5 — send a search request to the L3 worker.  The L3 main

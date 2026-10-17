@@ -15,6 +15,7 @@
 pub mod async_writer;
 pub mod base64;
 pub mod binary_tree;
+pub mod build;
 pub mod bytelog;
 pub mod emoji_presentation;
 pub mod fast_hash;

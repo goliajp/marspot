@@ -775,10 +775,22 @@ BEFORE_L3_PIDS=""
 # on an old image through every install run from it while the check
 # reported every pane up to date. `-x` rather than `-f`: with ancestors
 # included, a shell whose command line merely mentions marspot-session
-# would match too, and be sent SIGTERM.
+# would match too.
 l3_pids() { pgrep -a -x marspot-session 2>/dev/null; }
 snapshot_l3_pids() { BEFORE_L3_PIDS="$(l3_pids | sort | tr '\n' ' ')"; }
 
+# Check, and when some L3 has not moved (its probe of the new image
+# failed or wedged), ask once more: the core asks only the L3s not on
+# current/, so a repeat cannot touch a pane that already moved.
+adopt_l3s() {
+  verify_l3_adoption || return 1
+  if (( STALE_L3 > 0 )) && ask_core_to_update_sessions; then
+    echo "    asking the core once more"
+    verify_l3_adoption || return 1
+  fi
+}
+
+STALE_L3=0
 verify_l3_adoption() {
   local want stale=0 total=0 gone=0 ino p
   want=$(stat -f %i "$TREE/current/marspot-session" 2>/dev/null) || return 0
@@ -807,50 +819,78 @@ verify_l3_adoption() {
     echo "             examples/rebuild_scrollback_from_bytelog)" >&2
     return 1
   fi
+  STALE_L3=$stale
   if (( stale > 0 )); then
     echo "    WARN: $stale/$total panes are still on the previous image" >&2
-    echo "          (a pane whose probe is wedged retries on the next" >&2
-    echo "           signal; see l3.execv.probe_stuck in the log)" >&2
+    echo "          (see l3.execv.probe_* in the log)" >&2
   else
     echo "    all $total panes are on this image, none lost"
   fi
 }
 
-# Session-only fast path: when only marspot-session changed (no L1/L2
-# bin diff), the supervisor's SIGUSR1 path won't fire — it only
-# promotes pending/marspot-core (see L1 main.rs apply_update gate on
-# `binaries.has_pending()`).  Promote pending/marspot-session → current/
-# ourselves, then SIGTERM every running L3.  Each L3's SIGTERM handler
-# compares its rodata MARSPOT_FP to current/marspot-session's
-# fingerprint; mismatched ones execv into the new image with
-# control_stream_fd carry-across, matching ones clean-exit (then L2
-# respawns).  No L1 flash, no L2 swap — silent + lossless across the
-# L3 image bump.
+# The core is the one sender of update requests to L3s: it knows which
+# of them already run the staged build, and asks each of the rest once
+# in the way it understands (a `SessionUpdate` frame, or one SIGTERM
+# from an L3 that predates the frame).  This script used to SIGTERM
+# every L3 itself as well, after the core had: the second request
+# reached panes already on the new image, and only a bug in their build
+# comparison kept them from closing.
+#
+# Warm the staged session binary before anything is asked to adopt it.
+# Each L3 probes the candidate by running it once and refuses to execv
+# if that fails.  A just-installed binary is a NEW inode, so the first
+# exec pays a cold Gatekeeper verdict -- and thirteen panes probing a
+# cold one at once all failed within 144 ms (2026-09-06).  The promote
+# into current/ is a rename, so the verdict warmed here carries over.
+warm_staged_session() {
+  MARSPOT_NO_REDIRECT=1 "$TREE/pending/marspot-session" --version >/dev/null 2>&1 \
+    || echo "    WARN: pending/marspot-session did not start; L3s will refuse it" >&2
+}
+
+# The running core(s), as the supervisor recorded them.
+core_pids() {
+  MARSPOT_NO_REDIRECT=1 "$MACOS/marspot-shell" --status 2>/dev/null \
+    | sed -n 's/^Running core(s): //p' | tr ', ' '\n\n' | grep -E '^[0-9]+$'
+}
+
+# SIGUSR2 makes a core promote pending/marspot-session and ask every L3
+# not on it to move.
+ask_core_to_update_sessions() {
+  local pid n=0
+  for pid in $(core_pids); do
+    [ "$(ps -o comm= -p "$pid" 2>/dev/null | xargs basename 2>/dev/null)" = marspot-core ] || continue
+    kill -USR2 "$pid" 2>/dev/null && n=$((n+1))
+  done
+  (( n > 0 ))
+}
+
+# Session-only fast path: only marspot-session changed, so there is no
+# L1/L2 swap to carry it (the supervisor's SIGUSR1 path promotes
+# pending/marspot-core only).  The running core does it.
 if (( STAGED )) \
    && (( ! SHELL_CHANGED )) && (( ! CORE_CHANGED )) \
    && (( SESSION_CHANGED )); then
-  echo "==> session-only update (L3 self-execv via SIGTERM fanout)"
-  install -m 0755 "$TREE/pending/marspot-session" "$TREE/current/marspot-session"
-  xattr -c "$TREE/current/marspot-session" 2>/dev/null || true
-  rm -f "$TREE/pending/marspot-session"
-  # Same cold-inode warm-up as the silent-update path below.
-  MARSPOT_NO_REDIRECT=1 "$TREE/current/marspot-session" --version >/dev/null 2>&1 \
-    || echo "    WARN: current/marspot-session did not start; L3s will refuse it" >&2
+  echo "==> session-only update (the core asks each L3 to move)"
+  warm_staged_session
   snapshot_l3_pids
-  signalled=0
-  for pid in $(l3_pids); do
-    if kill -TERM "$pid" 2>/dev/null; then
-      signalled=$((signalled+1))
-    fi
+  ask_core_to_update_sessions || { echo "WARN: no running core to ask" >&2; exit 1; }
+  DEADLINE=$(( $(date +%s) + 30 ))
+  while [[ -f "$TREE/pending/marspot-session" ]]; do
+    (( $(date +%s) >= DEADLINE )) && { echo "WARN: the core never promoted pending/marspot-session" >&2; exit 1; }
+    sleep 0.2
   done
-  echo "    promoted current/marspot-session; SIGTERM'd $signalled L3 pids"
-  verify_l3_adoption
+  echo "    promoted current/marspot-session"
+  adopt_l3s || exit 1
   echo "==> done."
   exit 0
 fi
 
 if (( STAGED )); then
   echo "==> triggering silent update (window + sessions survive)"
+  if (( SESSION_CHANGED )); then
+    warm_staged_session
+    snapshot_l3_pids
+  fi
   # Trigger ONCE up front.  Previous behaviour was to fire SIGUSR1
   # every 3s until pending/ drained, but supervisor enters probation
   # on the first trigger and ignores subsequent ones with a
@@ -885,41 +925,10 @@ if (( STAGED )); then
   done
   echo "    applied.  $(tail -1 "$SUP_LOG" 2>/dev/null)"
 
-  # A silent update swaps L1 and L2.  It does NOT swap the L3s that
-  # are already running: the new core promotes pending/marspot-session
-  # into current/, so only panes spawned AFTER this point get the new
-  # image, and every existing pane keeps the old one for as long as it
-  # lives.  Measured 2026-09-06: L3s from two days earlier were still
-  # serving every pane, so two session-layer fixes had never once run
-  # on the machine they were installed on — and the report they were
-  # meant to close ("进 history 还是会闪黑") was correct.
-  #
-  # Same mechanism the session-only fast path above uses, and it is
-  # lossless: each L3 compares its own fingerprint against current/
-  # and either execv's into the new image carrying its PTY across, or
-  # clean-exits for L2 to respawn.  No PTY is restarted either way.
-  # Warm the freshly-promoted image before asking anyone to adopt it.
-  #
-  # Each L3 probes the candidate by running it once, and refuses to
-  # execv if that fails.  A just-installed binary is a NEW inode, so
-  # the first exec pays a cold Gatekeeper verdict — and thirteen panes
-  # probing a cold one at the same instant all got a failure back
-  # within 144 ms, refused, and then sat on their old image while four
-  # consecutive installs reported success (2026-09-06; measured, and
-  # confirmed by a single manual SIGTERM succeeding once the verdict
-  # had been warmed by hand).
-  #
-  # One exec here pays that once, for everyone.
+  # The new core promoted pending/marspot-session at boot and asked
+  # every reattached L3 not on it to move; check that they did.
   if (( SESSION_CHANGED )); then
-    MARSPOT_NO_REDIRECT=1 "$TREE/current/marspot-session" --version >/dev/null 2>&1 \
-      || echo "    WARN: current/marspot-session did not start; L3s will refuse it" >&2
-    snapshot_l3_pids
-    signalled=0
-    for pid in $(l3_pids); do
-      kill -TERM "$pid" 2>/dev/null && signalled=$((signalled+1))
-    done
-    echo "    L3 self-execv: SIGTERM'd $signalled session pids"
-    verify_l3_adoption
+    adopt_l3s || exit 1
   fi
 else
   echo "==> running app already matches this build"
