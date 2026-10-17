@@ -104,7 +104,7 @@ impl OpEnv for RealEnv {
 
 #[cfg(test)]
 mod tests {
-    use std::process::{Child, Command};
+    use std::process::Command;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
@@ -146,8 +146,10 @@ mod tests {
         }
     }
 
-    fn sleeper() -> Child {
-        Command::new("/bin/sleep").arg("30").spawn().expect("spawn /bin/sleep")
+    fn sleeper() -> marspot_term::test_env::ChildGuard {
+        marspot_term::test_env::ChildGuard::new(
+            Command::new("/bin/sleep").arg("30").spawn().expect("spawn /bin/sleep"),
+        )
     }
 
     /// Ticks until the runner asks to end, then ends it the way the

@@ -179,11 +179,16 @@ mod tests {
     /// empty element in the middle.
     #[test]
     fn a_real_argv_with_an_empty_element_round_trips() {
-        // `; :` keeps sh from exec'ing sleep in its own place
-        let mut child = std::process::Command::new("/bin/sh")
-            .args(["-c", "sleep 5; :", "", "x"])
-            .spawn()
-            .expect("spawn sh");
+        use std::os::unix::process::CommandExt;
+        // `; :` keeps sh from exec'ing sleep in its own place, so the
+        // sleep is a child of the shell and only the group takes it
+        let child = crate::test_env::ChildGuard::group(
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "sleep 5; :", "", "x"])
+                .process_group(0)
+                .spawn()
+                .expect("spawn sh"),
+        );
         let pid = child.id() as i32;
         let want = vec!["/bin/sh", "-c", "sleep 5; :", "", "x"];
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -196,8 +201,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let cmdline = proc_cmdline(pid);
-        let _ = child.kill();
-        let _ = child.wait();
+        drop(child);
         assert_eq!(got.expect("argv of the child"), want);
         assert_eq!(cmdline.as_deref(), Some("/bin/sh -c sleep 5; :  x"));
     }
