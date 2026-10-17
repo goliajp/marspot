@@ -248,13 +248,14 @@ done
 grep -q '^start ' "$CLAUDE_LOG" || fail "the stand-in did not start"
 
 starts() { grep -c '^start ' "$CLAUDE_LOG"; }
-settle() { # no new start for 2 s
-  local last=-1 n
-  while :; do
+settle() { # no new start for 2 s, within 60 s
+  local last=-1 n i
+  for (( i = 0; i < 30; i++ )); do
     n="$(starts)"
     [[ "$n" == "$last" ]] && return 0
     last="$n"; sleep 2
   done
+  fail "the stand-in kept restarting for 60 s ($(starts) starts)"
 }
 settle
 BEFORE="$(starts)"

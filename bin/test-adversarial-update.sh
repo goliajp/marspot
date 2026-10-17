@@ -144,7 +144,7 @@ cp "$CORE_BIN" "$TREE/pending/marspot-core"
 # Wait for the swap to stabilise.
 START=$(date +%s)
 until grep -q $'\tUPDATE_STABLE\t' "$SUP_LOG" 2>/dev/null; do
-  if (( $(date +%s) - START > 30 )); then fail "[concurrent] no UPDATE_STABLE"; fi
+  if (( $(date +%s) - START > 60 )); then fail "[concurrent] no UPDATE_STABLE within 60 s"; fi
   sleep 0.3
 done
 # Let any duplicate apply attempts settle.

@@ -45,8 +45,6 @@ TREE="$MARSPOT_STATE_DIR/binaries"
 RUN_LOG=/tmp/marspot-soak-shell-self-update.log
 CYCLES="${CYCLES:-5}"
 
-export MARSPOT_PROBATION_S=3
-
 fail() {
   echo "FAIL: $*"
   echo "  (last 25 supervisor events):"

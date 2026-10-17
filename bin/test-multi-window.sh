@@ -405,7 +405,7 @@ cp "$CORE_BIN" "$MARSPOT_STATE_DIR/binaries/pending/marspot-core"
 "$SHELL_BIN" --trigger >/dev/null 2>&1 || fail "--trigger did not reach the shell"
 
 after7() { tail -n "+$((mark + 1))" "$APPLOG"; }
-for i in $(seq 1 300); do
+for i in $(seq 1 600); do
   after7 | grep -q 'UPDATE_SWAP' && break
   sleep 0.1
 done

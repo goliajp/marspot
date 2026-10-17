@@ -309,8 +309,3 @@ dev_warm_binaries() {
   done
   return 0
 }
-
-# RFC-003 Phase 6: L4 shelld retired.  These helpers stay as no-ops
-# for backwards compat with any test script still calling them.
-dev_ensure_shelld() { return 0; }
-dev_stop_shelld() { return 0; }
