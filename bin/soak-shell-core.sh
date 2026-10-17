@@ -109,12 +109,16 @@ while (( elapsed < DURATION_S )); do
   fi
 done
 
-# Post-run assertions on the log itself.
-if grep -q "crash budget exceeded" "$LOG"; then
-  fail "log contains 'crash budget exceeded' — at least one crash happened"
+# Post-run assertions on the structured log.  They used to grep the
+# shell's stdout for two English phrases, which the supervisor writes
+# only to marspot.log, so neither could ever match.
+APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
+[[ -s "$APPLOG" ]] || fail "no structured log at $APPLOG"
+if grep -q $'\tBUDGET_EXCEEDED\t' "$APPLOG"; then
+  fail "log has BUDGET_EXCEEDED — the core crashed past the budget"
 fi
-if grep -q "core exited unexpectedly" "$LOG"; then
-  fail "log contains 'core exited unexpectedly'"
+if grep -q $'\tCRASH\t' "$APPLOG"; then
+  fail "log has CRASH — the core exited unexpectedly at least once"
 fi
 
 echo "PASS (ran ${DURATION_S}s; final shell_rss=${shell_rss} core_rss=${core_rss})"
