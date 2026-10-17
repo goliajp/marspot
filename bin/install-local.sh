@@ -779,18 +779,6 @@ BEFORE_L3_PIDS=""
 l3_pids() { pgrep -a -x marspot-session 2>/dev/null; }
 snapshot_l3_pids() { BEFORE_L3_PIDS="$(l3_pids | sort | tr '\n' ' ')"; }
 
-# Check, and when some L3 has not moved (its probe of the new image
-# failed or wedged), ask once more: the core asks only the L3s not on
-# current/, so a repeat cannot touch a pane that already moved.
-adopt_l3s() {
-  verify_l3_adoption || return 1
-  if (( STALE_L3 > 0 )) && ask_core_to_update_sessions; then
-    echo "    asking the core once more"
-    verify_l3_adoption || return 1
-  fi
-}
-
-STALE_L3=0
 verify_l3_adoption() {
   local want stale=0 total=0 gone=0 ino p
   want=$(stat -f %i "$TREE/current/marspot-session" 2>/dev/null) || return 0
@@ -819,10 +807,13 @@ verify_l3_adoption() {
     echo "             examples/rebuild_scrollback_from_bytelog)" >&2
     return 1
   fi
-  STALE_L3=$stale
   if (( stale > 0 )); then
+    # Not asked again from here: an older core, after a rollback, would
+    # answer with SIGTERM to every L3, and one already on the new build
+    # takes that as "end".  Every core boot asks the L3s not on the
+    # build, so these move at the next one.
     echo "    WARN: $stale/$total panes are still on the previous image" >&2
-    echo "          (see l3.execv.probe_* in the log)" >&2
+    echo "          (see l3.execv.probe_* in the log; the next core boot asks again)" >&2
   else
     echo "    all $total panes are on this image, none lost"
   fi
@@ -882,7 +873,7 @@ if (( STAGED )) \
     sleep 0.2
   done
   echo "    promoted current/marspot-session"
-  adopt_l3s || exit 1
+  verify_l3_adoption || exit 1
   echo "==> done."
   exit 0
 fi
@@ -930,7 +921,7 @@ if (( STAGED )); then
   # The new core promoted pending/marspot-session at boot and asked
   # every reattached L3 not on it to move; check that they did.
   if (( SESSION_CHANGED )); then
-    adopt_l3s || exit 1
+    verify_l3_adoption || exit 1
   fi
 else
   echo "==> running app already matches this build"
