@@ -270,7 +270,7 @@ mod tests {
         e.title = "t\nitle".into();
         write_session_entry(&e).unwrap();
         let text = std::fs::read_to_string(session_entry_path(4)).unwrap();
-        assert_eq!(text.lines().count(), 12, "a value split a line:\n{text}");
+        assert_eq!(text.lines().count(), 13, "a value split a line:\n{text}");
         let mut c = RegistryCache::default();
         assert_eq!(c.list(), &[e]);
     }

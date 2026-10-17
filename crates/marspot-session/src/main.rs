@@ -29,12 +29,12 @@ use snapshot_writer::SnapshotWriter;
 mod handoff;
 mod local_session;
 mod pty_reader;
+mod signal_events;
 mod reply_guard;
 mod uds_server;
 
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicI32, Ordering as AtomicOrdering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -57,7 +57,7 @@ use marspot_term::shell_proto::{
 use marspot_term::session_state::{PendingPage, SessionState};
 
 use handoff::{
-    ENV_HANDOFF_MANIFEST, L3Handoff, handoff_manifest_path, should_execv_on_sigterm,
+    ENV_HANDOFF_MANIFEST, L3Handoff, handoff_manifest_path, staged_is_another_build,
     try_resume_handoff, write_handoff_manifest,
 };
 use local_session::LocalSession;
@@ -243,6 +243,11 @@ enum SessionEvent {
     /// or the user-quit path will close that vault entry too, letting
     /// the shell exit on its own.
     ShutdownRequested,
+    /// L2 sent `SessionUpdate`: move to the build in `current/` if it
+    /// is another one, otherwise nothing.
+    UpdateRequested,
+    /// SIGHUP: the app retired this session.  Exit, never execv.
+    CloseRequested,
     /// The background probe of `current/marspot-session` finished; the
     /// payload is whether that image actually started.
     ///
@@ -284,64 +289,6 @@ enum SessionEvent {
         has_more: bool,
         total_seen: u32,
     },
-}
-
-/// RFC-003 §6 Amendment 15 — SIGTERM self-pipe write end.  -1 until
-/// the handler is installed.
-static SIGTERM_PIPE_W: AtomicI32 = AtomicI32::new(-1);
-
-extern "C" fn l3_sigterm_handler(_: libc::c_int) {
-    let fd = SIGTERM_PIPE_W.load(AtomicOrdering::Relaxed);
-    if fd >= 0 {
-        let buf: [u8; 1] = [1];
-        unsafe { libc::write(fd, buf.as_ptr() as *const _, 1); }
-    }
-}
-
-/// Install a SIGTERM handler that posts `SessionEvent::ShutdownRequested`
-/// onto the main loop via a self-pipe.  Async-signal-safe write is the
-/// only thing the handler does; the watcher thread translates each
-/// wake byte into a regular SessionEvent so the loop processes it in
-/// its normal drain.
-fn install_sigterm_handler(ev_tx: Sender<SessionEvent>) -> std::io::Result<()> {
-    let mut fds = [0i32; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let (r_fd, w_fd) = (fds[0], fds[1]);
-    for fd in [r_fd, w_fd] {
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags >= 0 {
-                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
-            }
-        }
-    }
-    SIGTERM_PIPE_W.store(w_fd, AtomicOrdering::Relaxed);
-
-    std::thread::Builder::new()
-        .name("l3-sigterm-watcher".to_string())
-        .spawn(move || {
-            let mut buf = [0u8; 1];
-            loop {
-                let n = unsafe { libc::read(r_fd, buf.as_mut_ptr() as *mut _, 1) };
-                if n <= 0 { break; }
-                if ev_tx.send(SessionEvent::ShutdownRequested).is_err() {
-                    break;
-                }
-            }
-        })?;
-
-    unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = l3_sigterm_handler as *const () as usize;
-        libc::sigemptyset(&mut sa.sa_mask);
-        sa.sa_flags = libc::SA_RESTART;
-        if libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut()) != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(())
 }
 
 fn session_state_bin_path(id: u64) -> std::path::PathBuf {
@@ -1010,6 +957,7 @@ fn main() {
     // can adopt it.
     let mut resumed_poke: Option<ControlWriter> = None;
     let mut resumed_client_generation: u64 = 0;
+    let mut resumed = false;
     let mut session: SessionImpl = {
         let wake_tx = ev_tx.clone();
         let wake = move || {
@@ -1036,6 +984,7 @@ fn main() {
         //             zero perception by the user.
         //   * Cold:   plain fresh forkpty + shell + bind UDS listener.
         let local = if let Some(h) = try_resume_handoff() {
+            resumed = true;
             // Adopt inherited PTY + listener — see do_l3_execv_swap.
             let mut terminal = marspot_term::terminal::Terminal::new(h.cols, h.rows);
             let state_path = session_state_bin_path(id);
@@ -1251,14 +1200,17 @@ fn main() {
     );
     shm.attach_clusters(session.id());
 
-    // RFC-003 §6 Amendment 15 — install SIGTERM handler so L2 can
-    // ask us to retire (silent-update path) or L1 can wipe us on
-    // marspot quit.  The handler is just a self-pipe write; the main
-    // loop turns the wake into a `ShutdownRequested` event and drives
-    // the persist-state-then-exit path.  Best-effort: if install
-    // fails the L3 still runs but silent updates degrade to "just
-    // gets SIGKILL'd and loses state.bin".
-    let armed = install_sigterm_handler(ev_tx.clone());
+    // SIGTERM and SIGHUP become events on the main loop; see
+    // `signal_events`.  Best-effort: if installing fails the L3 still
+    // runs, and a signal ends it without saving state.bin.
+    let armed = signal_events::install(ev_tx.clone());
+    if resumed && signal_events::drop_pending_sigterm() {
+        lx_event!(
+            "L3_EXECV_PENDING_SIGTERM_DROPPED",
+            "a SIGTERM sent during the handover asked for the update that just happened",
+            session_id = session.id()
+        );
+    }
     // Whatever happened, stop blocking: the mask was inherited from the
     // process that execv'd into this image, and leaving it set would
     // make this pane deaf to every future update.  Unblocking after the
@@ -1362,6 +1314,8 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     // the loop and the post-loop dispatcher decides between execv
     // handoff and clean-exit.
     let mut want_shutdown = false;
+    // SIGHUP came: exit even if a probe for an execv is under way
+    let mut closing = false;
     // What the Gatekeeper probe concluded about `current/marspot-
     // session`.  `None` = no probe ran, which is the clean-exit path
     // (the image on disk is the one we are already running, so there is
@@ -1715,24 +1669,23 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                         );
                     }
                 }
-                SessionEvent::ShutdownRequested => {
-                    // RFC-003 §6 Amendment 16 — defer to the
-                    // post-loop dispatcher so it can move `session`
-                    // and `_listener` into `do_l3_execv_swap` (which
-                    // needs ownership).  Drain the rest of this
-                    // burst then break.
+                ev @ (SessionEvent::ShutdownRequested | SessionEvent::UpdateRequested) => {
+                    // A move to another build defers to the post-loop
+                    // dispatcher, which needs `session` and `_listener`
+                    // by value for `do_l3_execv_swap`.  Until the probe
+                    // says the new image starts we keep driving the
+                    // PTY: retiring first and discovering that
+                    // afterwards is what froze twenty panes for 114 s
+                    // on 2026-07-29.
                     //
-                    // Unless an execv is on the cards: then we keep
-                    // driving the PTY until the probe says the new
-                    // image starts.  Retiring first and discovering
-                    // that afterwards is what froze twenty panes for
-                    // 114 s on 2026-07-29.
+                    // SIGTERM without another build staged ends the
+                    // session; an update request then does nothing.
+                    let is_update = matches!(ev, SessionEvent::UpdateRequested);
                     let probe_stuck = execv_probe_at
                         .is_some_and(|t| t.elapsed() >= EXECV_PROBE_STUCK_AFTER);
-                    if execv_probe_at.is_some() && !probe_stuck {
-                        // Probe already running; this SIGTERM is a
-                        // repeat.  Nothing to do but keep serving.
-                    } else if should_execv_on_sigterm() {
+                    if closing || (execv_probe_at.is_some() && !probe_stuck) {
+                        // closing, or a probe for this move is running
+                    } else if staged_is_another_build() {
                         if probe_stuck {
                             lx_warn!(
                                 "l3.execv.probe_stuck",
@@ -1751,7 +1704,8 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                                     "L3_EXECV_PROBE_START",
                                     "warming the new image's Gatekeeper verdict; pane keeps running",
                                     session_id = session.id(),
-                                    target = target.display()
+                                    target = target.display(),
+                                    by = if is_update { "frame" } else { "sigterm" }
                                 );
                                 let tx = ev_tx.clone();
                                 std::thread::spawn(move || {
@@ -1762,18 +1716,37 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                             Err(e) => {
                                 lx_warn!(
                                     "l3.execv.tree_unavailable",
-                                    &format!("{e}; retiring without execv"),
+                                    &format!("{e}; staying on the running image"),
                                     session_id = session.id()
                                 );
-                                want_shutdown = true;
+                                execv_probe_at = None;
+                                want_shutdown |= !is_update;
                             }
                         }
+                    } else if is_update {
+                        lx_event!(
+                            "L3_UPDATE_NOOP",
+                            "asked to update, and current/ is this build",
+                            session_id = session.id()
+                        );
                     } else {
                         want_shutdown = true;
                     }
                 }
+                SessionEvent::CloseRequested => {
+                    lx_event!(
+                        "L3_CLOSE_REQUESTED",
+                        "SIGHUP: the app retired this session",
+                        session_id = session.id()
+                    );
+                    closing = true;
+                    execv_verdict = None;
+                    want_shutdown = true;
+                }
                 SessionEvent::ExecvProbeDone(ok) => {
-                    if ok {
+                    if closing {
+                        // a close that came in meanwhile wins
+                    } else if ok {
                         execv_verdict = Some(true);
                         want_shutdown = true;
                     } else {

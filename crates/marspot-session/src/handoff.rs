@@ -26,8 +26,8 @@ use marspot_term::lx_warn;
 /// channel while the new image rebinds its reader; keystrokes resume
 /// transparently.
 ///
-/// Fingerprint-match (or missing `current/`) → fall through to the
-/// user-quit cleanup path (state.bin + clean exit, shell SIGHUPs).
+/// The same build in `current/` (or none) is not an update: see
+/// `staged_is_another_build`.
 pub(crate) const ENV_HANDOFF_MANIFEST: &str = "MARSPOT_L3_HANDOFF_MANIFEST";
 // Manifest version 2 (2026-06-17): added optional `control_stream_fd`
 // so the L3 self-execv can carry the adopted L2↔L3 control UnixStream
@@ -166,56 +166,29 @@ pub(crate) fn try_resume_handoff() -> Option<L3Handoff> {
     }
 }
 
-/// Read the MARSPOT_FP=<sha>|<ts>|END rodata marker out of a binary.
-/// Used by the SIGTERM handler to decide between execv-handoff and
-/// user-quit cleanup.
-///
-/// The first well-formed marker, not the first `MARSPOT_FP=`: the
-/// needle below is itself in the binary's rodata, and where the linker
-/// puts it decides which comes first.  A release build merges the two;
-/// a debug build lays the needle out on its own ahead of the marker,
-/// and reading from there found no fingerprint at all, so a debug L3
-/// never handed over.
-fn read_binary_fingerprint(path: &Path) -> Option<String> {
-    let buf = std::fs::read(path).ok()?;
-    let needle = b"MARSPOT_FP=";
-    let mut from = 0;
-    while let Some(at) = buf[from..].windows(needle.len()).position(|w| w == needle) {
-        let start = from + at;
-        let tail = &buf[start..buf.len().min(start + 256)];
-        let marker = tail
-            .windows(4)
-            .position(|w| w == b"|END")
-            .and_then(|end| std::str::from_utf8(&tail[..end]).ok())
-            .filter(|s| s[needle.len()..].bytes().all(|b| b.is_ascii_graphic()));
-        if let Some(s) = marker {
-            return Some(s.to_string());
-        }
-        from = start + needle.len();
-    }
-    None
-}
-
-/// On SIGTERM, decide whether to execv (binary update) or clean-exit
-/// (user quit / non-update SIGTERM).  Returns true when caller should
-/// proceed with execv via `do_l3_execv_swap`.
-pub(crate) fn should_execv_on_sigterm() -> bool {
+/// True when `current/marspot-session` is a different build from this
+/// one: the only case in which this session should move.
+pub(crate) fn staged_is_another_build() -> bool {
     let Ok(tree) = marspot_term::binary_tree::BinaryTree::default_for("marspot-session") else {
         return false;
     };
-    execv_wanted(&tree.current(), marspot_term::MARSPOT_FP_TERM)
+    execv_wanted(&tree.current(), marspot_term::build::own())
 }
 
-/// True when `current` is a different build from the one whose
-/// fingerprint is `self_fp`.
-fn execv_wanted(current: &Path, self_fp: &str) -> bool {
+/// True when `current` is a build other than `own`.
+///
+/// Both sides are compared in one form.  The running marker used to be
+/// compared with its `|END` and the file's without, so they never
+/// matched and every request re-execed, a copy of the running build
+/// included.
+fn execv_wanted(current: &Path, own: &str) -> bool {
     if !current.exists() {
         return false;
     }
-    let Some(target_fp) = read_binary_fingerprint(current) else {
+    let Some(target) = marspot_term::build::of_file(current) else {
         return false;
     };
-    target_fp != self_fp
+    target != own
 }
 
 #[cfg(test)]
@@ -411,7 +384,7 @@ mod tests {
     #[test]
     fn a_different_build_next_door_is_an_update_and_nothing_else_is() {
         let dir = TempDir::new("handoff-fp");
-        let me = "MARSPOT_FP=abc123|2026-10-17T00:00:00Z|END";
+        let me = "MARSPOT_FP=abc123|2026-10-17T00:00:00Z";
         let other = binary_with(&dir, "other", "MARSPOT_FP=def456|2026-10-17T00:00:00Z|END");
         let none = dir.join("none");
         std::fs::write(&none, b"no marker in here").unwrap();
@@ -420,40 +393,14 @@ mod tests {
         assert!(!execv_wanted(&dir.join("absent"), me), "nothing staged");
     }
 
-    /// A debug build holds the bare needle ahead of the marker, with
-    /// unrelated rodata after it; the fingerprint is the marker behind.
-    #[test]
-    fn the_marker_is_found_behind_a_stray_needle() {
-        let dir = TempDir::new("handoff-fp");
-        let p = dir.join("debug-layout");
-        let mut body = b"MARSPOT_FP=marspot-sessionthere is no such thing\x12\xff\xfe".to_vec();
-        body.extend(std::iter::repeat_n(0u8, 4096));
-        body.extend_from_slice(b"MARSPOT_FP=unknown|2026-10-17T15:27:04|ENDMARSPOT_LAYER_VERS=x");
-        std::fs::write(&p, body).unwrap();
-        assert_eq!(
-            read_binary_fingerprint(&p).as_deref(),
-            Some("MARSPOT_FP=unknown|2026-10-17T15:27:04")
-        );
-        assert!(execv_wanted(&p, "MARSPOT_FP=other|2026-10-17T15:27:04|END"));
-    }
 
-    /// The marker read out of the file stops before `|END` and the
-    /// running build's own marker does not, so the two never compare
-    /// equal: a copy of the running build next door counts as an
-    /// update, and SIGTERM re-execs the pane into it instead of quitting.
-    ///
-    /// Pinned, not endorsed.  A second SIGTERM from a duplicate update
-    /// fan-out reaches the NEW image with that same build in `current/`,
-    /// and only this keeps that pane alive; making the comparison exact
-    /// without another answer for that case closes those panes.  The
-    /// cost is that a pane-close SIGTERM, while anything is in
-    /// `current/`, re-execs too instead of quitting.
+    /// A copy of the running build is not an update.  The two markers
+    /// used to be compared in different forms and never matched, so a
+    /// copy counted as one and every SIGTERM re-execed.
     #[test]
-    fn a_copy_of_the_running_build_counts_as_an_update() {
+    fn a_copy_of_the_running_build_is_not_an_update() {
         let dir = TempDir::new("handoff-fp");
         let same = binary_with(&dir, "same", marspot_term::MARSPOT_FP_TERM);
-        assert!(execv_wanted(&same, marspot_term::MARSPOT_FP_TERM));
-        let me = "MARSPOT_FP=abc123|2026-10-17T00:00:00Z|END";
-        assert!(execv_wanted(&binary_with(&dir, "same2", me), me));
+        assert!(!execv_wanted(&same, marspot_term::build::own()));
     }
 }
