@@ -2017,6 +2017,7 @@ mod boot_assembly_tests {
             created_at_unix: 1,
             shm_name: String::new(),
             shell_child_pid: 0,
+            build: String::new(),
         }
     }
 
@@ -5891,22 +5892,8 @@ impl CoreApp {
     /// into `current/`, then ask every live L3 pane to execv itself into
     /// it.  Skips panes that have exited.
     fn swap_idle_l3(&mut self) {
-        // RFC-003 §6 Amendment 16 — L3 self-execv silent update.
-        //
-        // L2 is purely the trigger: SIGTERM each L3 pid.  L3's handler
-        // looks at current/marspot-session's MARSPOT_FP fingerprint;
-        // if different from its own rodata fingerprint it execvs into
-        // the new image (PTY master fd + UDS listener fd survive via
-        // clear-CLOEXEC + manifest handoff).  If the fingerprint
-        // matches its own (no real update) it falls back to the
-        // user-quit shutdown path (state.bin + clean exit, shell
-        // SIGHUPs).
-        //
-        // L2 doesn't touch fds, doesn't spawn a replacement, doesn't
-        // wait.  The L3 self-execv keeps PID + master_fd + listener_fd
-        // + shell child unchanged; L2 sees a brief control read pause
-        // while the new image rebinds its readers, then keystrokes
-        // resume.
+        // Each L3 execs itself into the new image, keeping its pid, PTY
+        // and listener; L2 only asks (see `session_signal::ask_to_update`).
         match marspot::updater::promote_pending_session() {
             Ok(true) => lx_event!(
                 "SESSION_PROMOTE",
@@ -5915,28 +5902,18 @@ impl CoreApp {
             Ok(false) => {}
             Err(e) => lx_error!("core.promote.swap_failed", &format!("{e}")),
         }
-        let mut signalled = 0usize;
-        for pane in self.windows.iter().flat_map(|w| w.panes.iter()) {
+        let staged = marspot::session_signal::staged_session_build();
+        let mut asked = 0usize;
+        for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
             if !pane.is_l3() || pane.is_exited() {
                 continue;
             }
-            let Some(sid) = pane.session().l3_session_id() else {
-                continue;
-            };
-            if let Ok(id) = marspot::session_signal::signal_session(sid, libc::SIGTERM) {
-                signalled += 1;
-                lx_event!(
-                    "L3_SWAP_SIGTERM",
-                    "asked L3 to self-execv into current/marspot-session",
-                    session = sid,
-                    pid = id.pid
-                );
-            }
+            asked += marspot::session_signal::ask_to_update(pane, staged.as_deref()) as usize;
         }
         lx_event!(
             "L3_SWAP_FANOUT",
-            "SIGTERM fanned out for L3 self-execv",
-            n_signalled = signalled
+            "asked every L3 not on current/marspot-session to move to it",
+            n_asked = asked
         );
     }
 
@@ -5951,12 +5928,15 @@ impl CoreApp {
     /// the teardown while keeping their own bookkeeping.
     ///
     /// RFC-003 step 3c: L3 panes own their PTY in-process, so the
-    /// close is SIGTERM via entry.toml's pid + delete the registry dir
+    /// close is SIGHUP via entry.toml's pid + delete the registry dir
     /// (which also wipes the bytelog, so the slot cannot replay if a
     /// later L3 picks the same id).
     fn retire_pane_session(&mut self, id: u64, is_l3: bool) {
         if is_l3 {
-            let _ = marspot::session_signal::signal_session(id, libc::SIGTERM);
+            // SIGHUP is a close and nothing else: SIGTERM also asks an
+            // L3 to update, and with another build staged it would
+            // re-exec instead of ending
+            let _ = marspot::session_signal::signal_session(id, libc::SIGHUP);
             let _ = session_registry::delete_session(id);
             // Amendment 7 step 3: also drop the named shm region so
             // the kernel actually frees the pages once every fd-holder
@@ -10474,22 +10454,21 @@ fn main() {
         &reserved_sids,
     );
     let panes = assembled;
-    // RFC-003 §6 Amendment 16 — L3 self-execv silent update
-    // fanout (unchanged): freshly-promoted session binary →
-    // SIGTERM every reattached L3 so it execv's into the new
-    // image (PTY master fd + UDS listener fd + shell child all
-    // preserved via clear-CLOEXEC + manifest handoff).
+    // a freshly promoted session binary: every reattached L3 not on it
+    // is asked to move (see `session_signal::ask_to_update`)
+    let mut panes = panes;
     if session_binary_freshly_promoted && !reattached_ids.is_empty() {
-        let mut signalled = 0usize;
-        for id in &reattached_ids {
-            if marspot::session_signal::signal_session(*id, libc::SIGTERM).is_ok() {
-                signalled += 1;
+        let staged = marspot::session_signal::staged_session_build();
+        let mut asked = 0usize;
+        for pane in panes.iter_mut() {
+            if pane.session().l3_session_id().is_some_and(|sid| reattached_ids.contains(&sid)) {
+                asked += marspot::session_signal::ask_to_update(pane, staged.as_deref()) as usize;
             }
         }
         lx_event!(
             "L3_BOOT_FANOUT",
-            "SIGTERM sent to reattached L3s for self-execv",
-            n_signalled = signalled,
+            "asked reattached L3s not on current/marspot-session to move to it",
+            n_asked = asked,
             n_reattached = reattached_ids.len()
         );
     }

@@ -15,10 +15,11 @@
 //!
 //! A signal mask survives `execv`, and a signal raised while blocked
 //! stays PENDING instead of being lost.  Blocking SIGTERM across the
-//! handoff therefore turns "killed mid-swap" into "delivered as soon
-//! as the new image is ready" — without needing the fan-outs to be
-//! deduplicated, which is the fix that would have to be re-done every
-//! time someone adds a third sender.
+//! handoff therefore turns "killed mid-swap" into "still pending when
+//! the new image is ready", and the new image drops it: it asked for
+//! the update that just happened.  Updates now go out once, by the
+//! core, as a `SessionUpdate` frame that is harmless to repeat; SIGTERM
+//! is only what senders from before that frame use.
 
 /// Block or unblock `SIGTERM` for this process.
 pub fn set_sigterm_blocked(block: bool) {

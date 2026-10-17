@@ -28,6 +28,10 @@ pub struct SessionEntry {
     /// descendants like `claude` they want to badge / send input to.
     /// `0` = legacy entry written before this field existed.
     pub shell_child_pid: i32,
+    /// The build this L3 runs (`MARSPOT_FP=<sha>|<ts>`).  Its presence
+    /// also says the L3 takes updates as a `SessionUpdate` frame; an
+    /// entry without it is from an L3 that only knows SIGTERM.
+    pub build: String,
 }
 
 /// Quote a string value.  `\n` and `\r` are escaped so a value can
@@ -100,6 +104,9 @@ pub fn write_session_entry(entry: &SessionEntry) -> io::Result<()> {
     writeln!(s, "created_at_unix = {}", entry.created_at_unix).ok();
     writeln!(s, "shm_name = {}", quote(&entry.shm_name)).ok();
     writeln!(s, "shell_child_pid = {}", entry.shell_child_pid).ok();
+    if !entry.build.is_empty() {
+        writeln!(s, "build = {}", quote(&entry.build)).ok();
+    }
     let mut f = std::fs::File::create(&tmp)?;
     f.write_all(s.as_bytes())?;
     f.sync_all()?;
@@ -193,6 +200,7 @@ pub fn parse_session_entry_text(contents: &str) -> io::Result<SessionEntry> {
         created_at_unix: req_num("created_at_unix")?,
         shm_name: opt_str("shm_name"),
         shell_child_pid: opt_i32("shell_child_pid"),
+        build: opt_str("build"),
     })
 }
 

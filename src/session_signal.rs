@@ -26,10 +26,78 @@ pub fn signal_session(sid: u64, sig: i32) -> Result<ProcId, SignalError> {
     signal_entry(&entry, sig)
 }
 
+/// How to ask the L3 behind an entry to move to the `staged` build.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UpdateAsk {
+    /// It understands `SessionUpdate`; repeating the frame is harmless.
+    Frame,
+    /// It predates the frame and takes an update as one SIGTERM.
+    Sigterm,
+    /// It runs that build already, or nothing readable is staged.
+    Nothing,
+}
+
+/// `entry_build` is the entry's `build` (empty from an L3 that predates
+/// it), `staged` the build in `current/`.
+pub fn how_to_update(entry_build: &str, staged: Option<&str>) -> UpdateAsk {
+    match staged {
+        None => UpdateAsk::Nothing,
+        Some(s) if s == entry_build => UpdateAsk::Nothing,
+        Some(_) if entry_build.is_empty() => UpdateAsk::Sigterm,
+        Some(_) => UpdateAsk::Frame,
+    }
+}
+
+/// The build in `current/marspot-session`, if one reads.
+pub fn staged_session_build() -> Option<String> {
+    let tree = marspot_term::binary_tree::BinaryTree::default_for("marspot-session").ok()?;
+    marspot_term::build::of_file(&tree.current())
+}
+
+/// Ask the L3 behind `pane` to move to `staged`, the way it understands:
+/// a `SessionUpdate` frame, or one SIGTERM from an L3 that predates it.
+/// Nothing for an L3 already on that build -- asking twice must never
+/// end or re-exec a pane.  True when it was asked.
+pub fn ask_to_update(pane: &mut crate::pane::Pane, staged: Option<&str>) -> bool {
+    let Some(sid) = pane.session().l3_session_id() else {
+        return false;
+    };
+    let Ok(entry) = read_session_entry(sid) else {
+        return false;
+    };
+    let ask = how_to_update(&entry.build, staged);
+    let asked = match ask {
+        UpdateAsk::Frame => pane.session_mut().forward_session_update(),
+        UpdateAsk::Sigterm => signal_entry(&entry, libc::SIGTERM).is_ok(),
+        UpdateAsk::Nothing => false,
+    };
+    marspot_term::lx_event!(
+        "L3_SWAP_ASK",
+        "asked an L3 to move to current/marspot-session",
+        session = sid,
+        pid = entry.pid,
+        how = format!("{ask:?}"),
+        sent = asked as u8
+    );
+    asked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use marspot_term::session_registry::write_session_entry;
+
+    /// A pane already on the staged build is left alone, whoever asks
+    /// and however often: a second request must not end or re-exec it.
+    #[test]
+    fn each_l3_is_asked_the_way_it_understands_and_only_if_it_must_move() {
+        let new = "MARSPOT_FP=b|2";
+        assert_eq!(how_to_update("MARSPOT_FP=a|1", Some(new)), UpdateAsk::Frame);
+        assert_eq!(how_to_update("", Some(new)), UpdateAsk::Sigterm, "an L3 from before `build`");
+        assert_eq!(how_to_update(new, Some(new)), UpdateAsk::Nothing);
+        assert_eq!(how_to_update("", None), UpdateAsk::Nothing, "nothing staged");
+        assert_eq!(how_to_update("MARSPOT_FP=a|1", None), UpdateAsk::Nothing);
+    }
 
     /// An entry whose pid is a live process other than an L3 (a
     /// recycled pid) is refused, and that process is left alone.
@@ -52,6 +120,7 @@ mod tests {
             created_at_unix: 0,
             shm_name: String::new(),
             shell_child_pid: 0,
+            build: String::new(),
         };
         write_session_entry(&entry).unwrap();
         let by_entry = signal_entry(&entry, libc::SIGKILL);

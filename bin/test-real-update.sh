@@ -75,6 +75,22 @@ make_tarball() {
   for b in marspot-shell marspot-core marspot-session; do
     install -m 0755 "$ROOT/target/release/$b" "$stage/$b" || return 1
   done
+  # The session engine shipped is another build than the one running, so
+  # the running panes must really move: the first character of its build
+  # marker's sha is flipped, and the copy re-signed (a changed byte voids
+  # the signature, and macOS will not exec it).
+  python3 - "$stage/marspot-session" <<'PY' || return 1
+import sys
+p = sys.argv[1]; b = bytearray(open(p, 'rb').read())
+i = b.find(b'MARSPOT_FP=')
+while i >= 0 and b.find(b'|END', i, i + 256) < 0:
+    i = b.find(b'MARSPOT_FP=', i + 1)
+assert i >= 0, 'no build marker'
+j = i + len(b'MARSPOT_FP=')
+b[j] = ord('1') if b[j] == ord('0') else ord('0')
+open(p, 'wb').write(b)
+PY
+  codesign --force --sign - "$stage/marspot-session" >/dev/null 2>&1 || return 1
   tar -czf "$out" -C "$stage" marspot-shell marspot-core marspot-session
 }
 make_tarball "$SERVE_DIR/$ASSET" || fail "could not build the release tarball"
@@ -112,7 +128,7 @@ disown
 sleep 0.5
 curl -sf "http://127.0.0.1:$PORT/feed.json" >/dev/null \
   || fail "feed server didn't come up on :$PORT (squatter? check port registry)"
-echo "[1/5] feed OK — signed tarball + feed.json served on :$PORT"
+echo "[1/6] feed OK — signed tarball + feed.json served on :$PORT"
 
 # --- 1. Boot with the fake feed --------------------------------------
 dev_kill_shell_core
@@ -128,7 +144,7 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
-echo "[2/5] boot OK"
+echo "[2/6] boot OK"
 
 # --- 2. Updater downloads, verifies, stages ---------------------------
 # 30 s startup stagger + download; allow 75 s total.  All three live
@@ -143,7 +159,7 @@ until [[ -f "$TREE/pending/marspot-core" && -f "$TREE/pending/marspot-shell" \
   fi
   sleep 1
 done
-echo "[3/5] stage OK — updater downloaded, verified signature, staged 3 binaries (incl. marspot-session)"
+echo "[3/6] stage OK — updater downloaded, verified signature, staged 3 binaries (incl. marspot-session)"
 
 # --- 3. First trigger: shell self-update ------------------------------
 # The trigger starts a Gatekeeper probe of the staged binary before any
@@ -163,11 +179,13 @@ until grep -q $'\tSHELL_SELF_UPDATE\t' "$SUP_LOG" 2>/dev/null; do
   sleep 0.5
 done
 [[ -f "$TREE/current/marspot-shell" ]] || fail "current/marspot-shell missing after self-update"
-echo "[4/5] shell self-update OK — exec'd into current/marspot-shell"
+echo "[4/6] shell self-update OK — exec'd into current/marspot-shell"
 
 # --- 4. Second trigger: core apply -------------------------------------
 # Give the new shell a beat to finish reattaching before signalling.
 sleep 2
+L3_BEFORE="$(dev_session_pids | sort | tr '\n' ' ')"
+[[ -n "${L3_BEFORE// }" ]] || fail "no pane's L3 is running before the core apply"
 "$SHELL_BIN" --trigger >/dev/null
 START=$(date +%s)
 # Same story as the shell: the staged core gets probed first.
@@ -186,7 +204,40 @@ until [[ -f "$TREE/current/marspot-session" && ! -f "$TREE/pending/marspot-sessi
   fi
   sleep 0.5
 done
-echo "[5/5] core apply OK — new core from current/, session promoted to current/"
+echo "[5/6] core apply OK — new core from current/, session promoted to current/"
+
+# --- 5. The running panes are on the promoted build, none lost ---------
+# The new core asks every reattached L3 not on the promoted build to move
+# to it, once, in the way that L3 understands; one already on it is left
+# alone.  Every pane that was running must still be (an execv keeps the
+# pid), its registry entry must name the promoted build, and it must have
+# execv'd at most once.
+build_of() { strings "$1" | grep -o 'MARSPOT_FP=[^|]*|[^|]*|END' | head -1 | sed 's/|END$//'; }
+want_build=$(build_of "$TREE/current/marspot-session")
+[[ -n "$want_build" ]] || fail "current/marspot-session carries no build marker"
+START=$(date +%s)
+while :; do
+  on=0 total=0
+  for e in "$MARSPOT_STATE_DIR"/sessions/*/entry.toml; do
+    p=$(sed -n 's/^pid = \([0-9][0-9]*\)$/\1/p' "$e")
+    case " $L3_BEFORE " in *" $p "*) ;; *) continue ;; esac
+    total=$((total+1))
+    b=$(sed -n 's/^build = "\(.*\)"$/\1/p' "$e")
+    [[ "$b" == "$want_build" ]] && on=$((on+1))
+  done
+  (( on == total && total > 0 )) && break
+  (( $(date +%s) - START > 60 )) && fail "$on/$total panes on the promoted session build within 60 s"
+  sleep 0.5
+done
+for p in $L3_BEFORE; do
+  kill -0 "$p" 2>/dev/null || fail "pane L3 pid $p is gone after the update"
+  n=$(grep $'\tL3_EXECV_INVOKE\t' "$SUP_LOG" | grep -c $'\t'"$p"$'\t')
+  (( n == 1 )) || fail "pane L3 pid $p execv'd $n times for one update"
+done
+# these L3s are of this build, so they take the frame, not SIGTERM
+grep $'\tL3_SWAP_ASK\t' "$SUP_LOG" | grep -q 'how=Frame' \
+  || fail "the core never asked a running L3 with a SessionUpdate frame"
+echo "[6/6] panes OK — $total L3s moved to the promoted build, each by one execv, none lost"
 
 cleanup
 trap - EXIT

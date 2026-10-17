@@ -3890,6 +3890,7 @@ mod tests {
             created_at_unix: 0,
             shm_name: String::new(),
             shell_child_pid: 0,
+            build: String::new(),
         })
         .unwrap();
         fs::write(
@@ -4564,6 +4565,7 @@ mod tests {
                 created_at_unix: 0,
                 shm_name: String::new(),
                 shell_child_pid: shell_pid,
+                build: String::new(),
             },
         )
         .unwrap();

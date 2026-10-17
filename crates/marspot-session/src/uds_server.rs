@@ -126,6 +126,7 @@ impl SessionListener {
                 .unwrap_or(0),
             shm_name: shm_name.to_string(),
             shell_child_pid,
+            build: marspot_term::build::own().to_string(),
         };
         if let Err(e) = write_session_entry(&entry) {
             // Narrow rollback so list / scan won't see a phantom
@@ -202,6 +203,7 @@ impl SessionListener {
                 .unwrap_or(0),
             shm_name: std::env::var("MARSPOT_SHM_NAME").unwrap_or_default(),
             shell_child_pid,
+            build: marspot_term::build::own().to_string(),
         };
         let _ = write_session_entry(&entry);
         Ok(Self {
