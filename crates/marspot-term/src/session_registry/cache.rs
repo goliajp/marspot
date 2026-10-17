@@ -326,6 +326,19 @@ mod tests {
         assert!(!entry_is_live_with(&e, u64::MAX, 0));
     }
 
+    const HELPER_ENV: &str = "MARSPOT_TEST_CACHE_HELPER";
+
+    /// Not a test: the body a copy of this test binary runs as a
+    /// process named `marspot-session`.  A copied system binary is no
+    /// use for that: launch constraints kill it at exec.
+    #[test]
+    #[ignore]
+    fn helper_sleeps() {
+        if std::env::var_os(HELPER_ENV).is_some() {
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    }
+
     /// A process whose executable is named `marspot-session` is live
     /// only if it started before its entry was written.
     #[test]
@@ -333,8 +346,12 @@ mod tests {
         let _g = StateDirGuard::new();
         let bin = session_dir(11).join("marspot-session");
         std::fs::create_dir_all(session_dir(11)).unwrap();
-        std::fs::copy("/bin/sleep", &bin).unwrap();
-        let mut child = std::process::Command::new(&bin).arg("30").spawn().unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
+        let mut child = std::process::Command::new(&bin)
+            .args(["--ignored", "--exact", "session_registry::cache::tests::helper_sleeps"])
+            .env(HELPER_ENV, "1")
+            .spawn()
+            .unwrap();
         let pid = child.id() as i32;
         // the child's image is ours until it has exec'd
         let deadline = Instant::now() + Duration::from_secs(5);
