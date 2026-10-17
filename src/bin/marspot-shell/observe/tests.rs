@@ -28,6 +28,7 @@ pub(crate) fn entry(id: u64, pid: i32, shell: i32) -> SessionEntry {
         created_at_unix: 0,
         shm_name: String::new(),
         shell_child_pid: shell,
+        build: String::new(),
     }
 }
 

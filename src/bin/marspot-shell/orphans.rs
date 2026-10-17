@@ -100,8 +100,10 @@ pub fn orphans<'a>(
         .collect()
 }
 
-/// SIGTERM every orphaned L3 of `install`.  Returns how many sessions
-/// the registry keeps and how many orphans were signalled.
+/// SIGHUP every orphaned L3 of `install`: a close, which ends it even
+/// with another build staged, where SIGTERM would re-exec it.  Returns
+/// how many sessions the registry keeps and how many orphans were
+/// signalled.
 pub fn stop(install: &Install) -> (usize, usize) {
     let obs = crate::observe::shared().fresh(crate::observe::NOW);
     let registered: HashSet<i32> = obs.sessions.iter().map(|s| s.entry.pid).collect();
@@ -114,7 +116,7 @@ pub fn stop(install: &Install) -> (usize, usize) {
     );
     let signalled = found
         .into_iter()
-        .filter(|id| match pidtree::signal(*id, libc::SIGTERM) {
+        .filter(|id| match pidtree::signal(*id, libc::SIGHUP) {
             Ok(()) => true,
             Err(e) => {
                 lx_warn!("shell.quit.orphan_signal_failed", &format!("{e}"), pid = id.pid);

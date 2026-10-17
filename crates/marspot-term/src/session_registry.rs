@@ -405,6 +405,7 @@ pub(crate) mod test_support {
             created_at_unix: 1_718_000_000 + id,
             shm_name: format!("/msp-s-{id}"),
             shell_child_pid: 99000 + id as i32,
+            build: format!("MARSPOT_FP=abc{id}|2026-10-17T00:00:00Z"),
         }
     }
 
@@ -516,6 +517,19 @@ mod tests {
         let got = read_session_entry(7).expect("read");
         assert_eq!(got, want, "roundtrip mismatch");
         assert!(session_entry_path(7).exists());
+    }
+
+    /// An entry from an L3 that predates `build` reads with it empty,
+    /// which is how L2 tells it to ask that L3 with SIGTERM.
+    #[test]
+    fn an_entry_without_a_build_reads_as_legacy() {
+        let _g = sandbox_state_dir();
+        let mut old = sample_entry(9);
+        old.build = String::new();
+        write_session_entry(&old).expect("write");
+        let text = std::fs::read_to_string(session_entry_path(9)).unwrap();
+        assert!(!text.contains("build"), "nothing written for an empty build");
+        assert_eq!(read_session_entry(9).expect("read").build, "");
     }
 
     #[test]
