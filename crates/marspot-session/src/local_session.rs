@@ -750,6 +750,29 @@ impl LocalSession {
 // main thread, the reader thread only touches the Arc<Pty>).
 unsafe impl Send for LocalSession {}
 
+/// The environment a test pane is spawned in: a state dir and home of
+/// its own, and `shell` without the user's startup files.
+///
+/// Without it a test pane appends to the real state root's bytelog for
+/// its id and starts the user's login shell, rc files and all.
+/// `spawn` sets `TERM`, `COLORTERM` and `ZDOTDIR` itself; they are put
+/// back with the rest.  Spawn the pane after this, so it is dropped
+/// first.
+#[cfg(test)]
+pub(crate) fn test_pane_env(shell: &str) -> marspot_term::test_env::StateSandbox {
+    let mut sandbox = marspot_term::test_env::sandbox_state_dir();
+    let script = marspot_term::test_env::shell_without_rc_files(sandbox.path(), shell);
+    let home = sandbox.path().to_path_buf();
+    sandbox
+        .env
+        .set("SHELL", script)
+        .set("HOME", home)
+        .preserve("TERM")
+        .preserve("COLORTERM")
+        .preserve("ZDOTDIR");
+    sandbox
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,6 +788,7 @@ mod tests {
     /// the picture is the session's own property.
     #[test]
     fn a_held_grid_keeps_its_picture_and_replays_on_release() {
+        let _env = test_pane_env("/bin/zsh");
         let mut s = LocalSession::spawn(7, 80, 24, "", || {}).expect("spawn");
         let text = |s: &LocalSession| -> String {
             let g = s.terminal().grid();
@@ -830,6 +854,7 @@ mod tests {
     /// itself is `self.write`, which the input paths already exercise.
     #[test]
     fn pump_answers_capability_queries() {
+        let _env = test_pane_env("/bin/zsh");
         let mut s = LocalSession::spawn(9, 80, 24, "", || {}).expect("spawn");
         assert!(
             pump_until(&mut s, |s| s.terminal().grid().cursor() != (0, 0), Duration::from_secs(5)),
@@ -883,6 +908,7 @@ mod tests {
     fn spawn_write_pump_echoes_into_grid() {
         let wake_count = Arc::new(AtomicUsize::new(0));
         let w = Arc::clone(&wake_count);
+        let _env = test_pane_env("/bin/zsh");
         let mut s = LocalSession::spawn(
             42,
             80,

@@ -689,17 +689,6 @@ mod tests {
         );
     }
 
-    /// A3: end-to-end through `Terminal::new` with the env-gate
-    /// active.  Push lines via `feed`, drop, re-instantiate, assert
-    /// scrollback persisted across the "reopen".  Verifies the
-    /// wiring of MARSPOT_SESSION_ID + MARSPOT_STATE_DIR all the
-    /// way down.
-    ///
-    /// NOTE: cannot run in parallel with other env-mutating tests in
-    /// the same process — uses a single global env.  We mark it
-    /// `#[ignore]` so `cargo test` skips it by default; `cargo test
-    /// -- --ignored a3_terminal_file_scrollback_end_to_end` runs it
-    /// explicitly.  Manual e2e in §7.4 covers the same.
     /// A4: snapshot v2 replay must write its scrollback section
     /// through the File variant so silent-update execv preserves
     /// history.  This is the "first install moment" migration path:
@@ -712,7 +701,6 @@ mod tests {
     /// future execvs read the file directly — snapshot is just
     /// the bootstrap path.
     #[test]
-    #[ignore]
     fn a4_snapshot_v2_replay_writes_into_file_scrollback() {
         let tmp = TmpDir::new("a4-seed");
         let state_dir = tmp.path.join("state");
@@ -723,6 +711,8 @@ mod tests {
 
         // 1. Build a "source" Terminal under Disk (env unset) and
         //    push lines so the snapshot carries a scrollback section.
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove("MARSPOT_SESSION_ID");
         let cols = 20u16;
         let rows = 4u16;
         let snapshot_body = {
@@ -736,10 +726,8 @@ mod tests {
         // 2. Build a "target" Terminal under File env, replay snapshot,
         //    drop, reopen → assert scrollback survived through the
         //    file, not just the in-process state.
-        unsafe {
-            std::env::set_var("MARSPOT_STATE_DIR", &state_dir);
-            std::env::set_var("MARSPOT_SESSION_ID", sid.to_string());
-        }
+        env.set("MARSPOT_STATE_DIR", &state_dir)
+            .set("MARSPOT_SESSION_ID", sid.to_string());
 
         let pre_sb_len = {
             let mut t = crate::terminal::Terminal::new(cols, rows);
@@ -762,15 +750,14 @@ mod tests {
             post_sb_len >= pre_sb_len,
             "scrollback after reopen-via-file must be ≥ the snapshot-seeded value; got pre={pre_sb_len} post={post_sb_len}"
         );
-
-        unsafe {
-            std::env::remove_var("MARSPOT_SESSION_ID");
-            std::env::remove_var("MARSPOT_STATE_DIR");
-        }
     }
 
+    /// A3: end-to-end through `Terminal::new` with the env-gate
+    /// active.  Push lines via `feed`, drop, re-instantiate, assert
+    /// scrollback persisted across the "reopen".  Verifies the
+    /// wiring of MARSPOT_SESSION_ID + MARSPOT_STATE_DIR all the
+    /// way down.
     #[test]
-    #[ignore]
     fn a3_terminal_file_scrollback_end_to_end() {
         // Build a clean per-test sandbox dir so we don't disturb
         // any real session.
@@ -782,11 +769,9 @@ mod tests {
         let session_dir = state_dir.join("sessions").join(sid.to_string());
         std::fs::create_dir_all(&session_dir).unwrap();
 
-        // SAFETY: tests mutate process env; we restore after.
-        unsafe {
-            std::env::set_var("MARSPOT_STATE_DIR", &state_dir);
-            std::env::set_var("MARSPOT_SESSION_ID", sid.to_string());
-        }
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("MARSPOT_STATE_DIR", &state_dir)
+            .set("MARSPOT_SESSION_ID", sid.to_string());
 
         // Push enough bytes through Terminal::feed to populate
         // scrollback.  Each "\n" advances row; after `rows` rows
@@ -817,11 +802,6 @@ mod tests {
             // Verify a sample cell.
             let sample = t.grid().scrollback_cell(0, 0);
             assert!(sample.is_some(), "scrollback_cell(0,0) must read back");
-        }
-
-        unsafe {
-            std::env::remove_var("MARSPOT_SESSION_ID");
-            std::env::remove_var("MARSPOT_STATE_DIR");
         }
     }
 }

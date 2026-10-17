@@ -135,10 +135,9 @@ mod tests {
     /// report submits for another.
     #[test]
     fn a_token_names_exactly_one_pane() {
-        let dir = std::env::temp_dir().join(format!("marspot-tok-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        // SAFETY: test code, single-threaded at this point.
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
+        let sandbox = crate::test_env::sandbox_state_dir();
+        let dir = sandbox.path();
+        let _ = std::fs::remove_dir_all(dir);
 
         assert_eq!(token_for(7), None, "no secret yet, so no token");
         ensure_secret().expect("a secret");
@@ -151,11 +150,10 @@ mod tests {
 
         // Not guessable from the session id alone: a fresh secret has
         // to produce a different token for the same pane.
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir);
         ensure_secret().expect("a secret");
         let c = token_for(7).expect("a token");
         assert_ne!(a, c, "a new secret means new tokens");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

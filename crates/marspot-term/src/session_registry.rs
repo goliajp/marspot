@@ -391,57 +391,6 @@ fn is_session_dir(p: &Path) -> bool {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
-    use std::ffi::OsString;
-    use std::sync::Mutex;
-
-    // Tests in this module share one process-global env var
-    // (MARSPOT_STATE_DIR), so cargo's parallel test scheduler would
-    // race them. Serialise via a static Mutex — single suite, no extra
-    // crate dependency needed.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    pub(crate) struct StateDirGuard {
-        prev: Option<OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-        _dir: std::path::PathBuf,
-    }
-    impl StateDirGuard {
-        pub(crate) fn new() -> Self {
-            let lock = ENV_LOCK.lock().expect("env lock");
-            let prev = std::env::var_os("MARSPOT_STATE_DIR");
-            // Unique per-test sandbox under the system temp dir.
-            let stamp = format!(
-                "rfc003-registry-{}-{:p}",
-                std::process::id(),
-                &lock as *const _
-            );
-            let dir = std::env::temp_dir().join(stamp);
-            // Best-effort cleanup of prior debris from the same path.
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("create sandbox dir");
-            // SAFETY: test/example code, single-threaded at this point (state-dir
-            // mutations additionally serialized by the suite's state-dir lock).
-            unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
-            Self {
-                prev,
-                _lock: lock,
-                _dir: dir,
-            }
-        }
-    }
-    impl Drop for StateDirGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self._dir);
-            match self.prev.take() {
-                // SAFETY: test/example code, single-threaded at this point (state-dir
-                // mutations additionally serialized by the suite's state-dir lock).
-                Some(v) => unsafe { std::env::set_var("MARSPOT_STATE_DIR", v) },
-                // SAFETY: test/example code, single-threaded at this point (state-dir
-                // mutations additionally serialized by the suite's state-dir lock).
-                None => unsafe { std::env::remove_var("MARSPOT_STATE_DIR") },
-            }
-        }
-    }
 
     pub(crate) fn sample_entry(id: u64) -> SessionEntry {
         SessionEntry {
@@ -463,17 +412,17 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{StateDirGuard, sample_entry};
+    use super::test_support::sample_entry;
+    use crate::test_env::sandbox_state_dir;
     use super::*;
     use std::sync::{Arc, Barrier};
     use std::thread;
-
 
     /// Each call to `allocate_next_session_id` returns a fresh,
     /// monotonically increasing value starting at 1.
     #[test]
     fn allocates_monotonic_starting_at_one() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         for expect in 1u64..=5 {
             let got = allocate_next_session_id().expect("allocate");
             assert_eq!(got, expect, "expected next_id={expect}, got={got}");
@@ -485,7 +434,7 @@ mod tests {
     /// at max(existing dir id).
     #[test]
     fn allocation_self_heals_from_lost_counter() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         // Simulate surviving session dirs 5 and 12 with NO .next_id
         // (the crash-lost-counter scenario).
         write_session_entry(&sample_entry(5)).expect("write 5");
@@ -506,7 +455,7 @@ mod tests {
     /// on drop, and independent across ids.
     #[test]
     fn session_dir_lock_is_exclusive_and_releases_on_drop() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         let first = try_lock_session_dir(21).expect("first lock");
         // Same id: second attempt must fail while the first is held.
         let second = try_lock_session_dir(21);
@@ -540,7 +489,7 @@ mod tests {
     /// `flock` serialises them so we never alias.
     #[test]
     fn concurrent_allocation_yields_distinct_ids() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         const N: usize = 8;
         let barrier = Arc::new(Barrier::new(N));
         let mut handles = Vec::with_capacity(N);
@@ -561,7 +510,7 @@ mod tests {
 
     #[test]
     fn entry_roundtrip_persists_all_fields() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         let want = sample_entry(7);
         write_session_entry(&want).expect("write");
         let got = read_session_entry(7).expect("read");
@@ -571,7 +520,7 @@ mod tests {
 
     #[test]
     fn delete_session_removes_everything() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         let e = sample_entry(3);
         write_session_entry(&e).expect("write");
         // Drop a fake socket file too, mimic a live session.
@@ -587,7 +536,7 @@ mod tests {
 
     #[test]
     fn list_session_entries_skips_non_numeric_and_corrupt() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         write_session_entry(&sample_entry(1)).expect("write 1");
         write_session_entry(&sample_entry(5)).expect("write 5");
 
@@ -605,7 +554,7 @@ mod tests {
 
     #[test]
     fn cleanup_stale_socket_is_idempotent_and_unlinks_only_that_id() {
-        let _g = StateDirGuard::new();
+        let _g = sandbox_state_dir();
         write_session_entry(&sample_entry(2)).expect("write");
         std::fs::write(session_socket_path(2), "").expect("touch sock");
         assert!(session_socket_path(2).exists());
