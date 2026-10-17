@@ -96,8 +96,8 @@ pub struct ScanOpts<'a> {
 }
 
 /// Walk the visible grid and return every detected span.  Empty grid
-/// → empty Vec.  Allocations: one Vec, one per-row scratch String
-/// (reused).
+/// → empty Vec.  Allocates its buffers afresh on every call; the
+/// per-frame path is [`scan_visible_links_into`], which reuses them.
 ///
 /// DECAWM soft-wrap handling: consecutive rows where `wrapped_at_view`
 /// flags the lower one as a continuation are joined into one
@@ -136,10 +136,90 @@ pub fn scan_visible_links_with<S: CellSource>(
     oracle: &dyn PathOracle,
 ) -> Vec<LinkRange> {
     let mut out = Vec::new();
+    scan_visible_links_into(src, opts, oracle, &mut LinkScratch::default(), &mut out);
+    #[cfg(test)]
+    tests::check_reuse(src, opts, oracle, &out);
+    out
+}
+
+/// Every buffer a scan needs, kept between calls so that a warm scan
+/// allocates nothing.  One per pane: [`scan_visible_links_into`]
+/// leaves no state in it that changes a result, only capacity.
+#[derive(Default)]
+pub struct LinkScratch {
+    chars: Vec<char>,
+    col_map: Vec<u16>,
+    segments: Vec<LineSegment>,
+    rule_cols: Vec<(u16, u16)>,
+    table: TableScratch,
+    text: TextBufs,
+    /// Target strings detached from a reused slot, waiting for the
+    /// next link that has one.
+    targets: Vec<String>,
+    /// Ranges past the end of the last result, kept for their strings.
+    spare: Vec<LinkRange>,
+}
+
+#[derive(Default)]
+struct TableScratch {
+    block_rows: Vec<u16>,
+    shared: Vec<u16>,
+    next: Vec<u16>,
+    cell: LineBufs,
+}
+
+#[derive(Default)]
+struct LineBufs {
+    chars: Vec<char>,
+    col_map: Vec<u16>,
+    segments: Vec<LineSegment>,
+}
+
+/// Strings a candidate is assembled in before it is asked about or
+/// emitted.
+#[derive(Default)]
+struct TextBufs {
+    span: String,
+    path: String,
+    joined: String,
+}
+
+/// [`scan_visible_links_with`] into caller-owned storage: the result
+/// replaces the contents of `out`, and the ranges already in it are
+/// overwritten in place, so a scan of similar content on the next
+/// frame reuses every string it needs.  This is the per-frame path.
+pub fn scan_visible_links_into<S: CellSource>(
+    src: &S,
+    opts: ScanOpts,
+    oracle: &dyn PathOracle,
+    scratch: &mut LinkScratch,
+    out: &mut Vec<LinkRange>,
+) {
+    let LinkScratch { chars, col_map, segments, rule_cols, table, text, targets, spare } = scratch;
+    out.append(spare);
+    let mut sink = Sink { out, len: 0, targets };
+    scan_into(src, opts, oracle, chars, col_map, segments, rule_cols, table, text, &mut sink);
+    let len = sink.len;
+    spare.extend(out.drain(len..));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_into<S: CellSource>(
+    src: &S,
+    opts: ScanOpts,
+    oracle: &dyn PathOracle,
+    chars: &mut Vec<char>,
+    col_map: &mut Vec<u16>,
+    segments: &mut Vec<LineSegment>,
+    rule_cols: &mut Vec<(u16, u16)>,
+    table: &mut TableScratch,
+    bufs: &mut TextBufs,
+    out: &mut Sink,
+) {
     let rows = src.rows();
     let cols = src.cols();
     if rows == 0 || cols == 0 {
-        return out;
+        return;
     }
     let exempt_range: Option<(u16, u16)> = if opts.tui_mode {
         find_input_box_rows(src, rows, cols)
@@ -152,10 +232,9 @@ pub fn scan_visible_links_with<S: CellSource>(
     // inside `scan_line_into_matches` — profiling on a 9-pane setup
     // (samply 15 s while typing) showed ~95 % of the main-thread
     // non-idle time inside `Vec::<char>::from_iter → realloc`
-    // chains from that path, manifesting as input latency.  The
-    // current shape allocates one `chars` buffer up front and
-    // reuses it across every logical-line scan within this call —
-    // amortised allocs per frame ≈ 1 vs O(logical-lines × panes).
+    // chains from that path, manifesting as input latency.  Now one
+    // `chars` buffer serves every logical line, and it lives in the
+    // caller's `LinkScratch`, so a warm frame allocates nothing.
     //
     // Wide-char (CJK / fullwidth / emoji) trail-half cells carry
     // NUL as a sentinel.  We DROP them entirely from `chars` (the
@@ -172,16 +251,18 @@ pub fn scan_visible_links_with<S: CellSource>(
     // bookkeeping tracks the stripped col count so `emit_match()`
     // still picks the right starting col for multi-row spans.
     let line_cap = cols as usize * rows as usize;
-    let mut chars: Vec<char> = Vec::with_capacity(line_cap);
-    let mut col_map: Vec<u16> = Vec::with_capacity(line_cap);
-    let mut segments: Vec<LineSegment> = Vec::with_capacity(8);
+    chars.clear();
+    col_map.clear();
+    segments.clear();
+    rule_cols.clear();
+    chars.reserve(line_cap);
+    col_map.reserve(line_cap);
     let mut char_offset: usize = 0;
     // Vertical rules seen while walking, for the table-cell pass
     // below.  Collected here rather than in a sweep of its own: this
     // loop already reads every cell once, and a second full pass over
     // the grid per pane per frame is exactly the kind of cost this
     // scanner has been profiled to avoid.  Empty on prose.
-    let mut rule_cols: Vec<(u16, u16)> = Vec::new();
     for r in 0..rows {
         // Rows inside the claudecode composer box are hard-skipped:
         // flush any in-flight logical line above, then jump past this
@@ -191,7 +272,7 @@ pub fn scan_visible_links_with<S: CellSource>(
         if let Some((lo, hi)) = exempt_range
             && r >= lo && r <= hi {
                 if !segments.is_empty() {
-                    scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle, opts.cwd);
+                    scan_logical_line(chars, col_map, segments, cols as usize, out, oracle, opts.cwd, bufs);
                     chars.clear();
                     col_map.clear();
                     segments.clear();
@@ -206,7 +287,7 @@ pub fn scan_visible_links_with<S: CellSource>(
             && is_hard_wrap_continuation(src, r - 1, r, cols);
         let is_continuation = decawm_cont || cc_cont;
         if !is_continuation && !segments.is_empty() {
-            scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle, opts.cwd);
+            scan_logical_line(chars, col_map, segments, cols as usize, out, oracle, opts.cwd, bufs);
             chars.clear();
             col_map.clear();
             segments.clear();
@@ -255,18 +336,17 @@ pub fn scan_visible_links_with<S: CellSource>(
         char_offset = chars.len();
     }
     if !segments.is_empty() {
-        scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle, opts.cwd);
+        scan_logical_line(chars, col_map, segments, cols as usize, out, oracle, opts.cwd, bufs);
     }
     if opts.tui_mode && rule_cols.len() >= 4 {
-        let before = out.len();
-        scan_table_cells(src, cols, &rule_cols, &mut out, oracle, opts.cwd);
+        let before = out.len;
+        scan_table_cells(src, cols, rule_cols, out, oracle, opts.cwd, table, bufs);
         // Nothing crossed a cell boundary — leave the row pass's
         // output exactly as it was, sort and all.
-        if out.len() != before {
-            drop_shadowed_ranges(&mut out);
+        if out.len != before {
+            drop_shadowed_ranges(out);
         }
     }
-    out
 }
 
 /// cc hard-wrap heuristic: does `r` look like a continuation of the
@@ -543,9 +623,9 @@ fn starts_new_scheme<S: CellSource>(src: &S, row: u16, from: u16, right: u16) ->
         seen += 1;
         c += 1;
     }
-    let head: String = buf[..seen].iter().collect();
-    let Some(pos) = head.find("://") else { return false };
-    pos > 0 && head[..pos].chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '.' || c == '-')
+    let head = &buf[..seen];
+    let Some(pos) = head.windows(3).position(|w| w == [':', '/', '/']) else { return false };
+    pos > 0 && head[..pos].iter().all(|&c| c.is_ascii_alphanumeric() || c == '+' || c == '.' || c == '-')
 }
 
 /// Vertical rules a table draws between its cells.  Box-drawing light
@@ -579,22 +659,26 @@ fn is_vertical_rule(c: char) -> bool {
 /// to arbitrate.  Whatever the row pass found on those same cells —
 /// necessarily the truncated prefix — is dropped by
 /// `drop_shadowed_ranges` in favour of the whole thing.
+#[allow(clippy::too_many_arguments)]
 fn scan_table_cells<S: CellSource>(
     src: &S,
     cols: u16,
     rule_cols: &[(u16, u16)],
-    out: &mut Vec<LinkRange>,
+    out: &mut Sink,
     oracle: &dyn PathOracle,
     cwd: Option<&str>,
+    table: &mut TableScratch,
+    bufs: &mut TextBufs,
 ) {
     if rule_cols.len() < 4 {
         return;
     }
     // rule_cols is (row, col), pushed in row-major order by the scan.
     let mut row_start = 0usize;
-    let mut block_rows: Vec<u16> = Vec::new();
-    let mut shared: Vec<u16> = Vec::new();
-    let mut scratch: Vec<u16> = Vec::new();
+    let TableScratch { block_rows, shared, next: scratch, cell } = table;
+    block_rows.clear();
+    shared.clear();
+    scratch.clear();
     while row_start < rule_cols.len() {
         let row = rule_cols[row_start].0;
         let mut row_end = row_start;
@@ -612,7 +696,7 @@ fn scan_table_cells<S: CellSource>(
                     .filter(|c| this_row.iter().any(|(_, rc)| rc == c)),
             );
             if scratch.len() >= 2 {
-                std::mem::swap(&mut shared, &mut scratch);
+                std::mem::swap(shared, scratch);
                 block_rows.push(row);
                 row_start = row_end;
                 continue;
@@ -620,7 +704,7 @@ fn scan_table_cells<S: CellSource>(
         }
         // This row does not extend the block — close what we have.
         if block_rows.len() >= 2 && shared.len() >= 2 {
-            scan_table_block(src, &block_rows, &shared, cols, out, oracle, cwd);
+            scan_table_block(src, block_rows, shared, cols, out, oracle, cwd, cell, bufs);
         }
         block_rows.clear();
         shared.clear();
@@ -629,23 +713,24 @@ fn scan_table_cells<S: CellSource>(
         row_start = row_end;
     }
     if block_rows.len() >= 2 && shared.len() >= 2 {
-        scan_table_block(src, &block_rows, &shared, cols, out, oracle, cwd);
+        scan_table_block(src, block_rows, shared, cols, out, oracle, cwd, cell, bufs);
     }
 }
 
 /// One table block: scan every column band between adjacent rules.
+#[allow(clippy::too_many_arguments)]
 fn scan_table_block<S: CellSource>(
     src: &S,
     block_rows: &[u16],
     rules: &[u16],
     cols: u16,
-    out: &mut Vec<LinkRange>,
+    out: &mut Sink,
     oracle: &dyn PathOracle,
     cwd: Option<&str>,
+    cell: &mut LineBufs,
+    bufs: &mut TextBufs,
 ) {
-    let mut chars: Vec<char> = Vec::new();
-    let mut col_map: Vec<u16> = Vec::new();
-    let mut segments: Vec<LineSegment> = Vec::new();
+    let LineBufs { chars, col_map, segments } = cell;
     for w in rules.windows(2) {
         let (left, right) = (w[0] + 1, w[1]);
         if right <= left + 1 {
@@ -659,7 +744,7 @@ fn scan_table_block<S: CellSource>(
             if is_rule_row(src, r, left, right) {
                 // A separator between table rows: whatever follows is
                 // a different cell, so nothing crosses it.
-                flush_table_line(&chars, &col_map, &segments, cols, out, oracle, cwd);
+                flush_table_line(chars, col_map, segments, cols, out, oracle, cwd, bufs);
                 chars.clear();
                 col_map.clear();
                 segments.clear();
@@ -671,7 +756,7 @@ fn scan_table_block<S: CellSource>(
                     && !starts_new_scheme(src, r, left, right)
             });
             if !joins {
-                flush_table_line(&chars, &col_map, &segments, cols, out, oracle, cwd);
+                flush_table_line(chars, col_map, segments, cols, out, oracle, cwd, bufs);
                 chars.clear();
                 col_map.clear();
                 segments.clear();
@@ -714,32 +799,35 @@ fn scan_table_block<S: CellSource>(
             }
             prev_row = Some(r);
         }
-        flush_table_line(&chars, &col_map, &segments, cols, out, oracle, cwd);
+        flush_table_line(chars, col_map, segments, cols, out, oracle, cwd, bufs);
     }
 }
 
 /// Scan a band's logical line, but keep only matches that actually
 /// crossed a row boundary — see `scan_table_cells`.
+#[allow(clippy::too_many_arguments)]
 fn flush_table_line(
     chars: &[char],
     col_map: &[u16],
     segments: &[LineSegment],
     cols: u16,
-    out: &mut Vec<LinkRange>,
+    out: &mut Sink,
     oracle: &dyn PathOracle,
     cwd: Option<&str>,
+    bufs: &mut TextBufs,
 ) {
     if segments.len() < 2 {
         return;
     }
-    let before = out.len();
-    scan_logical_line(chars, col_map, segments, cols as usize, out, oracle, cwd);
+    let before = out.len;
+    scan_logical_line(chars, col_map, segments, cols as usize, out, oracle, cwd, bufs);
     // A match confined to one row is one the row pass already had.
     let mut i = before;
-    while i < out.len() {
-        let same_text_rows = out[before..]
+    while i < out.len {
+        let live = out.live();
+        let same_text_rows = live[before..]
             .iter()
-            .filter(|l| l.text == out[i].text)
+            .filter(|l| l.text == live[i].text)
             .count();
         if same_text_rows < 2 {
             out.remove(i);
@@ -753,32 +841,47 @@ fn flush_table_line(
 /// link seen twice — the row pass's truncated prefix and the table
 /// pass's whole token.  Keep the longer text; it is the one the click
 /// should open.
-fn drop_shadowed_ranges(out: &mut Vec<LinkRange>) {
+fn drop_shadowed_ranges(out: &mut Sink) {
     // In place, no second Vec: this runs inside the per-frame scan,
-    // where the module's whole allocation budget is one reused
-    // buffer.  Sorted by (row, col_start, longest first), a range is
-    // shadowed exactly when it starts at or before the furthest
-    // column any kept range on that row already reaches.
-    out.sort_by(|a, b| {
-        a.row
-            .cmp(&b.row)
-            .then(a.col_start.cmp(&b.col_start))
-            .then(b.text.len().cmp(&a.text.len()))
-    });
+    // which allocates nothing once warm.  Sorted by (row, col_start,
+    // longest first), a range is shadowed exactly when it starts at or
+    // before the furthest column any kept range on that row already
+    // reaches.
+    //
+    // Insertion sort rather than `sort_by`: the std stable sort takes
+    // a heap buffer past a few dozen elements, and every stable sort
+    // gives the same order.  The input is mostly sorted already — the
+    // row pass emits in row order and only the table pass's ranges
+    // are out of place.
+    let key = |l: &LinkRange| (l.row, l.col_start, std::cmp::Reverse(l.text.len()));
+    let live = out.live_mut();
+    for i in 1..live.len() {
+        let k = key(&live[i]);
+        let at = live[..i].partition_point(|l| key(l) <= k);
+        live[at..=i].rotate_right(1);
+    }
     let mut row = u16::MAX;
     let mut reach = 0u16;
-    out.retain(|l| {
-        if l.row != row {
+    let mut kept = 0usize;
+    for i in 0..live.len() {
+        let l = &live[i];
+        let keep = if l.row != row {
             row = l.row;
             reach = l.col_end;
-            return true;
+            true
+        } else if l.col_start <= reach {
+            false
+        } else {
+            reach = reach.max(l.col_end);
+            true
+        };
+        if keep {
+            live.swap(kept, i);
+            kept += 1;
         }
-        if l.col_start <= reach {
-            return false;
-        }
-        reach = reach.max(l.col_end);
-        true
-    });
+    }
+    // the dropped ranges sit past `kept`, kept for their strings
+    out.len = kept;
 }
 
 /// Locate claudecode's composer in the visible grid, as an inclusive
@@ -1025,14 +1128,16 @@ struct LineSegment {
 /// segment matches collapse to one LinkRange; multi-segment matches
 /// fan out (same `text`, different `phys_row`/col_start/col_end),
 /// preserving the per-row hit-test + per-row underline model.
+#[allow(clippy::too_many_arguments)]
 fn scan_logical_line(
     chars: &[char],
     col_map: &[u16],
     segments: &[LineSegment],
     cols_per_row: usize,
-    out: &mut Vec<LinkRange>,
+    out: &mut Sink,
     oracle: &dyn PathOracle,
     cwd: Option<&str>,
+    bufs: &mut TextBufs,
 ) {
     if segments.is_empty() {
         return;
@@ -1042,7 +1147,7 @@ fn scan_logical_line(
     // showed up as ~250 samples in the input-lag profile (15 s, 9
     // panes typing).  emit_match is the only producer, append-only,
     // so passing `out` straight through is safe and saves the alloc.
-    scan_line_into_matches(chars, col_map, out, segments, cols_per_row, oracle, cwd);
+    scan_line_into_matches(chars, col_map, out, segments, cols_per_row, oracle, cwd, bufs);
 }
 
 /// Original pattern scanner, but the per-row emit step now consults
@@ -1050,14 +1155,16 @@ fn scan_logical_line(
 /// physical row it covers.  Each per-row LinkRange carries the FULL
 /// matched `text` (so click dispatch + hover tooltip are identical
 /// across segments).
+#[allow(clippy::too_many_arguments)]
 fn scan_line_into_matches(
     chars: &[char],
     col_map: &[u16],
-    out: &mut Vec<LinkRange>,
+    out: &mut Sink,
     segments: &[LineSegment],
     cols_per_row: usize,
     oracle: &dyn PathOracle,
     cwd: Option<&str>,
+    bufs: &mut TextBufs,
 ) {
     if segments.is_empty() {
         return;
@@ -1087,8 +1194,8 @@ fn scan_line_into_matches(
             }
             let span = &chars[i..end];
             if looks_like_url(span) {
-                let text: String = span.iter().collect();
-                emit_match(out, segments, col_map, cols_per_row, i, end, LinkKind::Url, text);
+                collect_into(&mut bufs.span, span);
+                emit_match(out, segments, col_map, cols_per_row, i, end, LinkKind::Url, &bufs.span);
                 i = end;
                 continue;
             }
@@ -1133,14 +1240,15 @@ fn scan_line_into_matches(
             let frag = (path_start..end).find(|&j| chars[j] == '#' || chars[j] == '?');
             let stat_end = frag.unwrap_or(end);
             if path_start < stat_end
-                && let Some(b) = resolve_path_end(chars, path_start, stat_end, segments, oracle) {
+                && let Some(b) = resolve_path_end(chars, path_start, stat_end, segments, oracle, bufs) {
                     // The fragment belongs to the link only when the
                     // whole path it hangs off resolved; a shorter
                     // arbitrated end means the rest is not this link's.
                     let span_end = if b == stat_end { end } else { b };
-                    let text: String = chars[i..span_end].iter().collect();
+                    collect_into(&mut bufs.span, &chars[i..span_end]);
                     emit_match(
-                        out, segments, col_map, cols_per_row, i, span_end, LinkKind::File, text,
+                        out, segments, col_map, cols_per_row, i, span_end, LinkKind::File,
+                        &bufs.span,
                     );
                     i = span_end.max(i + 1);
                     continue;
@@ -1155,9 +1263,9 @@ fn scan_line_into_matches(
             // marks, and a seam prefix that happens to be a real
             // *directory* must not win over the file the line points
             // at, so it is tried only after every prose cut has.
-            if let Some(b) = resolve_path_end(chars, i, end, segments, oracle) {
-                let text = unquote_path(&chars[i..b].iter().collect::<String>());
-                emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+            if let Some(b) = resolve_path_end(chars, i, end, segments, oracle, bufs) {
+                unquote_span(bufs, &chars[i..b]);
+                emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, &bufs.path);
                 i = b.max(i + 1);
                 continue;
             }
@@ -1177,9 +1285,9 @@ fn scan_line_into_matches(
             // right edge, merged into one logical line; the retry had
             // the correct answer at every step and never got asked.
             {
-                if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end, oracle) {
-                    let text = unquote_path(&chars[i..b].iter().collect::<String>());
-                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end, oracle, bufs) {
+                    unquote_span(bufs, &chars[i..b]);
+                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, &bufs.path);
                     i = b;
                     continue;
                 }
@@ -1193,16 +1301,16 @@ fn scan_line_into_matches(
         {
             let end = scan_path_candidate(chars, i);
             if end - i >= 3 {
-                if let Some(b) = resolve_path_end(chars, i, end, segments, oracle) {
-                    let text = unquote_path(&chars[i..b].iter().collect::<String>());
-                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                if let Some(b) = resolve_path_end(chars, i, end, segments, oracle, bufs) {
+                    unquote_span(bufs, &chars[i..b]);
+                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, &bufs.path);
                     i = b.max(i + 1);
                     continue;
                 }
                 if looks_like_path(&chars[i..end])
-                    && let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end, oracle) {
-                        let text = unquote_path(&chars[i..b].iter().collect::<String>());
-                        emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                    && let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end, oracle, bufs) {
+                        unquote_span(bufs, &chars[i..b]);
+                        emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, &bufs.path);
                         i = b;
                         continue;
                     }
@@ -1217,10 +1325,10 @@ fn scan_line_into_matches(
         // and IPs already inside an `http://…` URL (prev char is `/`).
         if c.is_ascii_digit()
             && let Some(end) = try_scan_ipv4_url(chars, i) {
-                let text: String = chars[i..end].iter().collect();
+                collect_into(&mut bufs.span, &chars[i..end]);
                 emit_match(
                     out, segments, col_map, cols_per_row, i, end,
-                    LinkKind::Ip, text,
+                    LinkKind::Ip, &bufs.span,
                 );
                 i = end;
                 continue;
@@ -1231,21 +1339,21 @@ fn scan_line_into_matches(
         // on hex or `:`.  `::` OR exactly 8 groups is required for
         // bare form so time strings (`12:34:56`) don't match.
         if c == '['
-            && let Some(end) = try_scan_ipv6(chars, i) {
-                let text: String = chars[i..end].iter().collect();
+            && let Some(end) = try_scan_ipv6(chars, i, &mut bufs.span) {
+                collect_into(&mut bufs.span, &chars[i..end]);
                 emit_match(
                     out, segments, col_map, cols_per_row, i, end,
-                    LinkKind::Ip, text,
+                    LinkKind::Ip, &bufs.span,
                 );
                 i = end;
                 continue;
             }
         if (c.is_ascii_hexdigit() || c == ':')
-            && let Some(end) = try_scan_ipv6(chars, i) {
-                let text: String = chars[i..end].iter().collect();
+            && let Some(end) = try_scan_ipv6(chars, i, &mut bufs.span) {
+                collect_into(&mut bufs.span, &chars[i..end]);
                 emit_match(
                     out, segments, col_map, cols_per_row, i, end,
-                    LinkKind::Ip, text,
+                    LinkKind::Ip, &bufs.span,
                 );
                 i = end;
                 continue;
@@ -1256,10 +1364,10 @@ fn scan_line_into_matches(
         // negligible without further gating.
         if c.is_ascii_hexdigit()
             && let Some(end) = try_scan_uuid(chars, i) {
-                let text: String = chars[i..end].iter().collect();
+                collect_into(&mut bufs.span, &chars[i..end]);
                 emit_match(
                     out, segments, col_map, cols_per_row, i, end,
-                    LinkKind::Uuid, text,
+                    LinkKind::Uuid, &bufs.span,
                 );
                 i = end;
                 continue;
@@ -1275,7 +1383,7 @@ fn scan_line_into_matches(
                 // of two flush prose rows is not an address.
                 && first_zero_indent_boundary(segments, local_start, host_end).is_none()
             {
-                let text: String = chars[local_start..host_end].iter().collect();
+                collect_into(&mut bufs.span, &chars[local_start..host_end]);
                 emit_match(
                     out,
                     segments,
@@ -1284,7 +1392,7 @@ fn scan_line_into_matches(
                     local_start,
                     host_end,
                     LinkKind::Email,
-                    text,
+                    &bufs.span,
                 );
                 i = host_end;
                 continue;
@@ -1302,13 +1410,13 @@ fn scan_line_into_matches(
                 let end = scan_path_candidate(chars, i);
                 if end > i && looks_like_relative_path(&chars[i..end])
                     && let Some(b) =
-                        resolve_path_end_from(chars, i, end, segments, oracle, Some(cwd))
+                        resolve_path_end_from(chars, i, end, segments, oracle, Some(cwd), bufs)
                     {
-                        let text = unquote_path(&chars[i..b].iter().collect::<String>());
-                        let full = join_cwd(cwd, &text);
+                        unquote_span(bufs, &chars[i..b]);
+                        join_cwd_into(&mut bufs.joined, cwd, &bufs.path);
                         emit_match_to(
                             out, segments, col_map, cols_per_row, i, b,
-                            LinkKind::File, text, Some(full),
+                            LinkKind::File, &bufs.path, Some(&bufs.joined),
                         );
                         i = b.max(i + 1);
                         continue;
@@ -1353,33 +1461,46 @@ fn looks_like_relative_path(span: &[char]) -> bool {
     if span.is_empty() || span[0] == '/' || span[0] == '~' {
         return false;
     }
-    let s: String = span.iter().collect();
-    if s.starts_with("./") || s.starts_with("../") {
+    if span.starts_with(&['.', '/']) || span.starts_with(&['.', '.', '/']) {
         return true;
     }
     // A separator, but not a leading or trailing one.
-    if let Some(p) = s.find('/') {
-        return p > 0 && p + 1 < s.len();
+    if let Some(p) = span.iter().position(|&c| c == '/') {
+        return p > 0 && p + 1 < span.len();
     }
-    let Some(dot) = s.rfind('.') else { return false };
-    if dot == 0 || dot + 1 >= s.len() {
+    let Some(dot) = span.iter().rposition(|&c| c == '.') else { return false };
+    if dot == 0 || dot + 1 >= span.len() {
         return false;
     }
-    let (stem, ext) = (&s[..dot], &s[dot + 1..]);
-    if !stem.chars().any(|c| c.is_alphabetic()) {
+    let (stem, ext) = (&span[..dot], &span[dot + 1..]);
+    if !stem.iter().any(|c| c.is_alphabetic()) {
         return false;
     }
-    let n = ext.chars().count();
-    n <= 8
-        && ext.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+    ext.len() <= 8
+        && ext[0].is_ascii_alphabetic()
+        && ext.iter().all(|c| c.is_ascii_alphanumeric())
 }
 
-/// `<cwd>/<rel>`, with a leading `./` folded away.  `..` is left for
-/// the filesystem to resolve — it is the one that knows about symlinks.
-fn join_cwd(cwd: &str, rel: &str) -> String {
+/// `<cwd>/<rel>` into `out`, with a leading `./` folded away.  `..` is
+/// left for the filesystem to resolve — it is the one that knows about
+/// symlinks.
+fn join_cwd_into(out: &mut String, cwd: &str, rel: &str) {
     let rel = rel.strip_prefix("./").unwrap_or(rel);
-    format!("{}/{}", cwd.trim_end_matches('/'), rel)
+    out.clear();
+    out.push_str(cwd.trim_end_matches('/'));
+    out.push('/');
+    out.push_str(rel);
+}
+
+fn collect_into(out: &mut String, chars: &[char]) {
+    out.clear();
+    out.extend(chars);
+}
+
+/// `chars` as drawn into `bufs.span`, unquoted into `bufs.path`.
+fn unquote_span(bufs: &mut TextBufs, chars: &[char]) {
+    collect_into(&mut bufs.span, chars);
+    unquote_path_into(&mut bufs.path, &bufs.span);
 }
 
 /// Is the character before `i` one that would make this the middle of
@@ -1541,6 +1662,7 @@ fn retry_file_at_segment_boundaries(
     lo: usize,
     hi: usize,
     oracle: &dyn PathOracle,
+    bufs: &mut TextBufs,
 ) -> Option<usize> {
     for seg in segments.iter().rev() {
         let b = seg.char_offset;
@@ -1554,8 +1676,8 @@ fn retry_file_at_segment_boundaries(
         if !looks_like_path(prefix) {
             continue;
         }
-        let text: String = prefix.iter().collect();
-        if is_real_path(oracle, &text) {
+        collect_into(&mut bufs.span, prefix);
+        if is_real_path(oracle, &bufs.span) {
             return Some(b);
         }
     }
@@ -1567,15 +1689,16 @@ fn retry_file_at_segment_boundaries(
 /// into one LinkRange (unchanged from the legacy per-row scanner);
 /// matches spanning N rows turn into N LinkRanges with the same
 /// `text` and matching per-row col spans.
+#[allow(clippy::too_many_arguments)]
 fn emit_match(
-    out: &mut Vec<LinkRange>,
+    out: &mut Sink,
     segments: &[LineSegment],
     col_map: &[u16],
     cols_per_row: usize,
     char_lo: usize,
     char_hi_exclusive: usize,
     kind: LinkKind,
-    text: String,
+    text: &str,
 ) {
     emit_match_to(out, segments, col_map, cols_per_row, char_lo, char_hi_exclusive, kind, text, None)
 }
@@ -1584,15 +1707,15 @@ fn emit_match(
 /// when that differs from what it shows.  See `LinkRange::target`.
 #[allow(clippy::too_many_arguments)]
 fn emit_match_to(
-    out: &mut Vec<LinkRange>,
+    out: &mut Sink,
     segments: &[LineSegment],
     col_map: &[u16],
     cols_per_row: usize,
     char_lo: usize,
     char_hi_exclusive: usize,
     kind: LinkKind,
-    text: String,
-    target: Option<String>,
+    text: &str,
+    target: Option<&str>,
 ) {
     if char_lo >= char_hi_exclusive || segments.is_empty() {
         return;
@@ -1632,17 +1755,119 @@ fn emit_match_to(
             continue;
         }
         let c1 = c1.min(cols_per_row.saturating_sub(1) as u16);
-        out.push(LinkRange {
-            target: target.clone(),
-            row: seg.phys_row,
-            col_start: c0,
-            col_end: c1,
-            kind,
-            // Every segment carries the FULL text, so click dispatch
-            // is the same wherever the user hit it.
-            text: text.clone(),
-        });
+        // Every segment carries the FULL text, so click dispatch is
+        // the same wherever the user hit it.
+        out.push(seg.phys_row, c0, c1, kind, text, target);
     }
+}
+
+/// The scan's output: `out[..len]` is the result so far, and
+/// `out[len..]` are ranges free to be overwritten.
+///
+/// Ranges are never dropped mid-scan, only moved past `len`, so their
+/// strings stay allocated for the next push — and for the next frame.
+struct Sink<'a> {
+    out: &'a mut Vec<LinkRange>,
+    len: usize,
+    /// Target strings no range is using at the moment.
+    targets: &'a mut Vec<String>,
+}
+
+impl Sink<'_> {
+    fn live(&self) -> &[LinkRange] {
+        &self.out[..self.len]
+    }
+
+    fn live_mut(&mut self) -> &mut [LinkRange] {
+        &mut self.out[..self.len]
+    }
+
+    /// `Vec::remove` on the result, keeping the removed range.
+    fn remove(&mut self, i: usize) {
+        self.out[i..self.len].rotate_left(1);
+        self.len -= 1;
+    }
+
+    fn push(
+        &mut self,
+        row: u16,
+        col_start: u16,
+        col_end: u16,
+        kind: LinkKind,
+        text: &str,
+        target: Option<&str>,
+    ) {
+        let at = self.len;
+        if at == self.out.len() {
+            self.out.push(LinkRange {
+                row,
+                col_start,
+                col_end,
+                kind,
+                text: String::new(),
+                target: None,
+            });
+        } else {
+            // Best fit, not the next in line: the free ranges come in
+            // the order the last frame left them, and the next text in
+            // line is rarely the one whose string it already holds.
+            // Smallest capacity that fits never spends a string a later
+            // text needs, so content that repeats never grows one.
+            let free = &self.out[at..];
+            let pick = smallest_fit(free.iter().map(|l| l.text.capacity()), text.len())
+                .unwrap_or_else(|| largest(free.iter().map(|l| l.text.capacity())));
+            self.out.swap(at, at + pick);
+        }
+        self.len += 1;
+        let slot = &mut self.out[at];
+        slot.row = row;
+        slot.col_start = col_start;
+        slot.col_end = col_end;
+        slot.kind = kind;
+        slot.text.clear();
+        slot.text.push_str(text);
+        let Some(t) = target else {
+            if let Some(s) = slot.target.take() {
+                self.targets.push(s);
+            }
+            return;
+        };
+        let mut fresh = false;
+        if slot.target.as_ref().is_none_or(|s| s.capacity() < t.len()) {
+            if let Some(k) = smallest_fit(self.targets.iter().map(String::capacity), t.len()) {
+                let s = self.targets.swap_remove(k);
+                if let Some(old) = slot.target.replace(s) {
+                    self.targets.push(old);
+                }
+            } else if slot.target.is_none() {
+                match self.targets.pop() {
+                    Some(s) => slot.target = Some(s),
+                    None => fresh = true,
+                }
+            }
+        }
+        let s = slot.target.get_or_insert_with(String::new);
+        s.clear();
+        s.push_str(t);
+        if fresh {
+            // A new string: make room to park every one in existence,
+            // so parking one never grows the pool.
+            let total = self.targets.len() + self.out.iter().filter(|l| l.target.is_some()).count();
+            self.targets.reserve(total - self.targets.len());
+        }
+    }
+}
+
+/// Index of the smallest capacity that is at least `need`.
+fn smallest_fit(caps: impl Iterator<Item = usize>, need: usize) -> Option<usize> {
+    caps.enumerate()
+        .filter(|&(_, c)| c >= need)
+        .min_by_key(|&(_, c)| c)
+        .map(|(k, _)| k)
+}
+
+fn largest(caps: impl Iterator<Item = usize>) -> usize {
+    caps.enumerate().max_by_key(|&(_, c)| c).map_or(0, |(k, _)| k)
 }
 
 /// Scan one already-joined line of text.  The public single-line
@@ -1673,7 +1898,13 @@ fn scan_line(line: &str, row: u16, out: &mut Vec<LinkRange>) {
         cc_zero_indent: false,
         cc_seam: false,
     }];
-    scan_line_into_matches(&chars, &col_map, out, &segments, cols, &FsOracle, None);
+    let mut targets = Vec::new();
+    let len = out.len();
+    let mut sink = Sink { out, len, targets: &mut targets };
+    let mut bufs = TextBufs::default();
+    scan_line_into_matches(&chars, &col_map, &mut sink, &segments, cols, &FsOracle, None, &mut bufs);
+    let len = sink.len;
+    out.truncate(len);
 }
 
 /// True when `chars[start..]` begins with `prefix`.  All known
@@ -1920,7 +2151,7 @@ fn try_scan_ipv4_url(chars: &[char], start: usize) -> Option<usize> {
 /// Validation delegates to `std::net::Ipv6Addr::from_str`; the local
 /// gate just carves out the candidate token from the character stream
 /// and enforces the `::`-or-8-group rule for the bare form.
-fn try_scan_ipv6(chars: &[char], start: usize) -> Option<usize> {
+fn try_scan_ipv6(chars: &[char], start: usize, body: &mut String) -> Option<usize> {
     if start > 0 {
         let prev = chars[start - 1];
         if prev.is_ascii_alphanumeric()
@@ -1945,7 +2176,7 @@ fn try_scan_ipv6(chars: &[char], start: usize) -> Option<usize> {
         if chars.get(body_end) != Some(&']') {
             return None;
         }
-        let body: String = chars[body_start..body_end].iter().collect();
+        collect_into(body, &chars[body_start..body_end]);
         body.parse::<std::net::Ipv6Addr>().ok()?;
         let mut i = body_end + 1;
         if chars.get(i) == Some(&':') {
@@ -1998,7 +2229,7 @@ fn try_scan_ipv6(chars: &[char], start: usize) -> Option<usize> {
         && (next.is_ascii_alphanumeric() || matches!(next, '.' | '-' | '_')) {
             return None;
         }
-    let body: String = chars[start..i].iter().collect();
+    collect_into(body, &chars[start..i]);
     let colon_count = body.chars().filter(|&c| c == ':').count();
     // `::` compression is the sharpest IPv6 signal; the 8-group form
     // (7 colons) is the other unambiguous shape.  Everything else
@@ -2128,9 +2359,9 @@ fn closing_quote(chars: &[char], open: usize) -> Option<usize> {
 /// The screen shows `~/Library/Safari/"Favicon Cache"`; the thing on
 /// disk is `~/Library/Safari/Favicon Cache`.  The link's *span* stays
 /// on what is drawn — that is what the user points at — while its
-/// target is what this returns.
-fn unquote_path(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+/// target is what this writes into `out`.
+fn unquote_path_into(out: &mut String, s: &str) {
+    out.clear();
     let mut it = s.chars().peekable();
     let mut quote: Option<char> = None;
     while let Some(c) = it.next() {
@@ -2146,7 +2377,6 @@ fn unquote_path(s: &str) -> String {
             other => out.push(other),
         }
     }
-    out
 }
 
 /// Could prose have started here?
@@ -2247,8 +2477,9 @@ fn resolve_path_end(
     hi: usize,
     segments: &[LineSegment],
     oracle: &dyn PathOracle,
+    bufs: &mut TextBufs,
 ) -> Option<usize> {
-    resolve_path_end_from(chars, lo, hi, segments, oracle, None)
+    resolve_path_end_from(chars, lo, hi, segments, oracle, None, bufs)
 }
 
 /// [`resolve_path_end`] with an optional base directory.  When `base`
@@ -2262,30 +2493,32 @@ fn resolve_path_end_from(
     segments: &[LineSegment],
     oracle: &dyn PathOracle,
     base: Option<&str>,
+    bufs: &mut TextBufs,
 ) -> Option<usize> {
     let mut tried = 0usize;
     let mut last: Option<usize> = None;
-    let consider = |end: usize, tried: &mut usize, last: &mut Option<usize>| -> bool {
+    let mut consider = |end: usize, tried: &mut usize, last: &mut Option<usize>| -> bool {
         if end <= lo || *last == Some(end) || *tried >= MAX_PATH_CANDIDATES {
             return false;
         }
         *last = Some(end);
         *tried += 1;
         let span = &chars[lo..end];
-        let text: String = span.iter().collect();
-        let unquoted = unquote_path(&text);
         match base {
             None => {
                 if !looks_like_path(span) {
                     return false;
                 }
-                is_real_path(oracle, &unquoted)
+                unquote_span(bufs, span);
+                is_real_path(oracle, &bufs.path)
             }
             Some(cwd) => {
                 if !looks_like_relative_path(span) {
                     return false;
                 }
-                is_real_path(oracle, &join_cwd(cwd, &unquoted))
+                unquote_span(bufs, span);
+                join_cwd_into(&mut bufs.joined, cwd, &bufs.path);
+                is_real_path(oracle, &bufs.joined)
             }
         }
     };
@@ -2634,6 +2867,26 @@ fn is_email_local_char(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    std::thread_local! {
+        static REUSED: std::cell::RefCell<(LinkScratch, Vec<LinkRange>)> =
+            std::cell::RefCell::new((LinkScratch::default(), Vec::new()));
+    }
+
+    /// Every scan a test makes is repeated on buffers last used by
+    /// whatever this thread scanned before, and has to agree with the
+    /// fresh one — so each fixture in this file is also a reuse test.
+    pub(super) fn check_reuse<S: CellSource>(
+        src: &S,
+        opts: ScanOpts,
+        oracle: &dyn PathOracle,
+        fresh: &[LinkRange],
+    ) {
+        REUSED.with_borrow_mut(|(scratch, out)| {
+            scan_visible_links_into(src, opts, oracle, scratch, out);
+            assert_eq!(format!("{out:?}"), format!("{fresh:?}"), "reused buffers changed the result");
+        });
+    }
 
     /// A path wrapped mid-token, with the break landing on an
     /// ordinary character rather than on a separator.
@@ -3506,6 +3759,23 @@ mod tests {
         out
     }
 
+    /// The pattern scanner over a hand-built logical line.
+    fn line_matches(
+        chars: &[char],
+        col_map: &[u16],
+        out: &mut Vec<LinkRange>,
+        segments: &[LineSegment],
+        cols: usize,
+    ) {
+        let mut targets = Vec::new();
+        let len = out.len();
+        let mut sink = Sink { out, len, targets: &mut targets };
+        let mut bufs = TextBufs::default();
+        scan_line_into_matches(chars, col_map, &mut sink, segments, cols, &FsOracle, None, &mut bufs);
+        let len = sink.len;
+        out.truncate(len);
+    }
+
 
     fn chars(s: &str) -> Vec<char> {
         s.chars().collect()
@@ -4096,7 +4366,7 @@ mod tests {
         // col_map: chars 0..9 → row-0 cols 0..9; chars 10..12 → row-1 cols 0..2.
         let col_map: Vec<u16> = (0..10).chain(0..3).collect();
         let chars: Vec<char> = line.chars().collect();
-        super::scan_line_into_matches(&chars, &col_map, &mut out, &segments, 10, &super::FsOracle, None);
+        line_matches(&chars, &col_map, &mut out, &segments, 10);
         // One match, fanned into 2 LinkRanges (one per physical row).
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].kind, LinkKind::Url);
@@ -4126,15 +4396,7 @@ mod tests {
         let mut out = Vec::new();
         let chars: Vec<char> = line.chars().collect();
         let col_map: Vec<u16> = (0..chars.len() as u16).collect();
-        super::scan_line_into_matches(
-            &chars,
-            &col_map,
-            &mut out,
-            &segments,
-            chars.len(),
-            &super::FsOracle,
-            None,
-        );
+        line_matches(&chars, &col_map, &mut out, &segments, chars.len());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].row, 7);
         assert_eq!(out[0].kind, LinkKind::Url);
