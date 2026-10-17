@@ -2,7 +2,7 @@
 # bin/ci-remote.sh — run what .github/workflows/ci.yml runs, before a push.
 #
 # The macOS job runs on mini, the Linux one on lx64, at the same time.
-# On a pass it records the tree it checked in .git/ci-pass/, and the
+# On a pass it records the tree it checked in <git common dir>/ci-pass/, and the
 # pre-push hook this script installs refuses to push a commit whose
 # tree has no record.  A tree with uncommitted changes is checked but
 # not recorded: what was checked would not be what gets pushed.
@@ -27,11 +27,11 @@ job_mac() {
   cargo clippy --workspace --all-targets -- -D warnings
   bin/lint-deps.sh
   cargo build --release --bins
-  local dir
-  dir="$(mktemp -d)"
-  trap 'rm -rf "$dir"' EXIT
-  bin/build-app-bundle.sh --out "$dir/Marspot.app"
-  test -x "$dir/Marspot.app/Contents/MacOS/marspot-shell"
+  # global: the EXIT trap runs after this function's locals are gone
+  BUNDLE_DIR="$(mktemp -d)"
+  trap 'rm -rf "$BUNDLE_DIR"' EXIT
+  bin/build-app-bundle.sh --out "$BUNDLE_DIR/Marspot.app"
+  test -x "$BUNDLE_DIR/Marspot.app/Contents/MacOS/marspot-shell"
 }
 
 job_linux() {
@@ -69,18 +69,28 @@ remote_sync() {
   "$tool" "$@"
 }
 
+# The repository's own dir, shared by every worktree: in a worktree
+# `.git` is a file, so hooks and records live in the common dir.
+GIT_COMMON="$(cd "$ROOT" && git rev-parse --path-format=absolute --git-common-dir)"
+
 install_hook() {
-  local hook="$ROOT/.git/hooks/pre-push"
-  [[ -f $hook ]] && grep -q 'ci-remote.sh' "$hook" && return
-  [[ -e $hook ]] && { echo "a pre-push hook exists and is not ours: $hook" >&2; return; }
+  local hook="$GIT_COMMON/hooks/pre-push"
+  # an earlier version of this hook looked under the worktree's .git,
+  # which is a file in a worktree; replace it
+  [[ -f $hook ]] && grep -q 'ci-remote.sh' "$hook" && grep -q 'git-common-dir' "$hook" && return
+  if [[ -e $hook ]] && ! grep -q 'installed by bin/ci-remote.sh' "$hook"; then
+    echo "a pre-push hook exists and is not ours: $hook" >&2
+    return
+  fi
+  mkdir -p "$GIT_COMMON/hooks"
   cat > "$hook" <<'HOOK'
 #!/usr/bin/env bash
 # installed by bin/ci-remote.sh: push only trees that passed it
-root="$(git rev-parse --show-toplevel)"
+common="$(git rev-parse --path-format=absolute --git-common-dir)"
 while read -r _ local_sha _ _; do
   [[ $local_sha =~ ^0+$ ]] && continue
   tree="$(git rev-parse "$local_sha^{tree}")"
-  if [[ ! -f "$root/.git/ci-pass/$tree" ]]; then
+  if [[ ! -f "$common/ci-pass/$tree" ]]; then
     echo "pre-push: $local_sha (tree $tree) has not passed bin/ci-remote.sh" >&2
     exit 1
   fi
@@ -137,8 +147,8 @@ echo "    logs: $LOGS"
 (( rc == 0 )) || exit 1
 
 if (( clean )); then
-  mkdir -p "$ROOT/.git/ci-pass"
-  touch "$ROOT/.git/ci-pass/$tree"
+  mkdir -p "$GIT_COMMON/ci-pass"
+  touch "$GIT_COMMON/ci-pass/$tree"
   echo "==> passed; tree $tree may be pushed"
 else
   echo "==> passed, but the working tree has uncommitted changes: nothing recorded"
