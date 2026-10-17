@@ -232,6 +232,14 @@ impl Pty {
                 }
                 // the shell needs its terminal and nothing else of ours
                 crate::inherited_fds::close_inherited(close_limit, &[]);
+                // nor our signals: this process is Rust and ignores
+                // SIGPIPE, and an ignored signal survives exec -- the
+                // shell's `yes | head` would end in "Broken pipe".
+                // A blocked mask would survive the same way.
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                let mut none: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut none);
+                libc::sigprocmask(libc::SIG_SETMASK, &none, ptr::null_mut());
                 // Swap in the filtered env before exec.  The pointer
                 // store is async-signal-safe
                 // (no allocation, no locks) — this is why the array
