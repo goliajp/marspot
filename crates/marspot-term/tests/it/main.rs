@@ -1,0 +1,29 @@
+//! The integration tests, in one binary so a change relinks one test executable instead of twenty-seven.
+
+mod alignment_and_column_mode;
+mod cluster_cells;
+mod cluster_history;
+mod cluster_history_through_the_parser;
+mod cluster_pool;
+mod device_queries;
+mod factory_defaults;
+mod insert_mode;
+mod kitty_keyboard;
+mod layout_single_pane;
+mod line_drawing_end_to_end;
+mod line_identity;
+mod line_identity_rotation;
+mod mouse_track_check;
+mod origin_mode;
+mod osc52_end_to_end;
+mod pane_env_isolation;
+mod predict_expiry;
+mod relative_moves_respect_margins;
+mod reset_end_to_end;
+mod response_storm;
+mod saved_cursor_carries_the_charset;
+mod scrollback_display;
+mod semantic_prompts;
+mod sgr_subparams_end_to_end;
+mod tabs_end_to_end;
+mod update_key_gate;

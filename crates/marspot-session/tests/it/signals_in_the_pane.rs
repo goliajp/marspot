@@ -5,8 +5,7 @@
 //! ignored across exec.  A shell that inherited it makes `yes | head`
 //! end with "yes: stdout: Broken pipe" instead of quietly.
 
-#[path = "../examples/support/mod.rs"]
-mod support;
+use crate::support;
 
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};

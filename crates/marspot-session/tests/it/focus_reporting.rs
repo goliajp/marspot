@@ -4,8 +4,7 @@
 //! The mode used to be parsed and kept, and the report never sent:
 //! nothing told L3 which pane had the keyboard.
 
-#[path = "../examples/support/mod.rs"]
-mod support;
+use crate::support;
 
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
