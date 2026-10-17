@@ -94,7 +94,7 @@ fn one_dev_panel_frame() {
     let mut font = match marspot::font_cache::FontCache::build() {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("skip (no font stack): {e}");
+            eprintln!("SKIPPED: no font stack: {e}");
             return;
         }
     };
@@ -315,7 +315,7 @@ fn what_measuring_text_costs() {
     let mut font = match marspot::font_cache::FontCache::build() {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("skip (no font stack): {e}");
+            eprintln!("SKIPPED: no font stack: {e}");
             return;
         }
     };

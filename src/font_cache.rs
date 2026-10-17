@@ -1086,7 +1086,10 @@ mod tests {
     fn char_cache_evicts_coldest_entry_only() {
         let mut fc = match FontCache::build() {
             Ok(f) => f,
-            Err(_) => return, // CI without the system font
+            Err(e) => {
+                eprintln!("SKIPPED: no font stack: {e}");
+                return;
+            }
         };
         // Eviction is the behaviour under test, not the size of the
         // table it happens in: 8 292 CoreText resolutions to reach the
@@ -1144,8 +1147,15 @@ mod tests {
     /// and the emoji goes to the wrong atlas at the wrong size.
     #[test]
     fn a_font_found_while_shaping_has_its_snapshots_before_anyone_asks() {
-        let Ok(mut fc) = FontCache::build() else { return };
+        let mut fc = match FontCache::build() {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("SKIPPED: no font stack: {e}");
+                return;
+            }
+        };
         if fc.ui_font_idx == 0 {
+            eprintln!("SKIPPED: no system UI font");
             return;
         }
         let before = fc.fonts.fonts.len();
@@ -1175,9 +1185,13 @@ mod tests {
     fn shape_ui_routes_through_shaper_trait() {
         let mut fc = match FontCache::build() {
             Ok(f) => f,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("SKIPPED: no font stack: {e}");
+                return;
+            }
         };
         if fc.ui_font_idx == 0 {
+            eprintln!("SKIPPED: no system UI font");
             return;
         }
         let canned = vec![
@@ -1218,11 +1232,13 @@ mod tests {
     fn weighted_variant_distinct_from_base() {
         let mut fc = match FontCache::build() {
             Ok(f) => f,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("SKIPPED: no font stack: {e}");
+                return;
+            }
         };
         if fc.ui_font_idx == 0 {
-            // No system UI font on this host — Phase 5 is a no-op,
-            // not a failure.
+            eprintln!("SKIPPED: no system UI font");
             return;
         }
         let base_idx = fc.ui_font_idx;
@@ -1245,16 +1261,21 @@ mod tests {
     fn shape_weighted_routes_to_variant_font() {
         let mut fc = match FontCache::build() {
             Ok(f) => f,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("SKIPPED: no font stack: {e}");
+                return;
+            }
         };
         if fc.ui_font_idx == 0 {
+            eprintln!("SKIPPED: no system UI font");
             return;
         }
         let regular = fc.shape_ui_weighted("Hi", 400);
         let bold = fc.shape_ui_weighted("Hi", 700);
-        if regular.is_empty() || bold.is_empty() {
-            return; // shape returned nothing — likely no UI font
-        }
+        assert!(
+            !regular.is_empty() && !bold.is_empty(),
+            "a UI font that is there shapes \"Hi\" at both weights"
+        );
         // First glyph's font_id must differ — the variant has its own
         // FontRegistry slot, so shape's intern callback returned it.
         assert_ne!(

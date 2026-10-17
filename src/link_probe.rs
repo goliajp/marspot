@@ -307,8 +307,11 @@ mod tests {
         let probe = LinkProbe::new();
         let t0 = Instant::now();
         let v = probe.probe("/definitely/not/here/at/all");
+        let took = t0.elapsed();
         assert_eq!(v, PathVerdict::Unknown);
-        assert!(t0.elapsed() < Duration::from_millis(5), "probe blocked");
+        if crate::host_load::quiet_enough_to_time("a first probe") {
+            assert!(took < Duration::from_millis(5), "probe blocked for {took:?}");
+        }
     }
 
     /// The reported defect, as a test.
