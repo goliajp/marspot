@@ -52,10 +52,6 @@ impl Rgba8 {
     pub const fn with_alpha(self, a: u8) -> Self {
         Self { a, ..self }
     }
-
-    pub fn is_invisible(&self) -> bool {
-        self.a == 0
-    }
 }
 
 #[cfg(test)]

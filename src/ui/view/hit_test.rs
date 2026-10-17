@@ -7,13 +7,7 @@
 //!
 
 use super::layout::LaidOut;
-use super::types::{ActionId, HoverId, ScrollWheelId, DragId};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HitTarget {
-    Click(ActionId),
-    Hover(HoverId),
-}
+use super::types::ActionId;
 
 /// Find the deepest / topmost click target containing the point.
 /// `None` when no view at that position carries an `OnClick` modifier.
@@ -23,49 +17,6 @@ pub fn hit_test_click(laid: &LaidOut, p: (f64, f64)) -> Option<ActionId> {
 
 fn hit_test_click_clipped(laid: &LaidOut, p: (f64, f64), clip: Option<&super::layout::Rect>) -> Option<ActionId> {
     hit_test_field(laid, p, clip, |d| d.on_click)
-}
-
-/// Same as `hit_test_click` but for hover regions.
-pub fn hit_test_hover(laid: &LaidOut, p: (f64, f64)) -> Option<HoverId> {
-    hit_test_hover_clipped(laid, p, None)
-}
-
-fn hit_test_hover_clipped(laid: &LaidOut, p: (f64, f64), clip: Option<&super::layout::Rect>) -> Option<HoverId> {
-    if laid.deco.hidden { return None; }
-    if let Some(c) = clip && !c.contains(p) { return None; }
-    if !laid.rect.contains(p) { return None; }
-    let child_clip = if establishes_clip(&laid.view, &laid.deco) {
-        Some(&laid.rect)
-    } else { clip };
-    for ch in laid.children.iter().rev() {
-        if let Some(h) = hit_test_hover_clipped(ch, p, child_clip) {
-            return Some(h);
-        }
-    }
-    laid.deco.on_hover
-}
-
-/// `Modifier::OnDoubleClick(...)` target lookup — same walk shape
-/// as `hit_test_click` but reads a different deco field.
-pub fn hit_test_double_click(laid: &LaidOut, p: (f64, f64)) -> Option<ActionId> {
-    hit_test_field(laid, p, None, |d| d.on_double_click)
-}
-
-/// `Modifier::OnRightClick(...)` target lookup.
-pub fn hit_test_right_click(laid: &LaidOut, p: (f64, f64)) -> Option<ActionId> {
-    hit_test_field(laid, p, None, |d| d.on_right_click)
-}
-
-/// `Modifier::OnScroll(...)` target lookup — used to route wheel
-/// events to the right `ScrollWheelId`.
-pub fn hit_test_scroll(laid: &LaidOut, p: (f64, f64)) -> Option<ScrollWheelId> {
-    hit_test_field(laid, p, None, |d| d.on_scroll)
-}
-
-/// `Modifier::OnDragBegin(...)` target lookup — mouse-down hit
-/// during gesture begin.
-pub fn hit_test_drag_begin(laid: &LaidOut, p: (f64, f64)) -> Option<DragId> {
-    hit_test_field(laid, p, None, |d| d.on_drag_begin)
 }
 
 fn hit_test_field<T: Copy>(

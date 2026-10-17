@@ -1743,11 +1743,6 @@ impl Pane {
         self.update_pending
     }
 
-    /// Mark/clear the deferred-update affordance (target #4 step 5b).
-    pub fn set_update_pending(&mut self, v: bool) {
-        self.update_pending = v;
-    }
-
     /// Drain the PTY reader into the terminal parser. Returns the
     /// number of bytes consumed; `0` means the wake was spurious or
     /// the channel went empty. Containers use this in the
