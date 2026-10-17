@@ -98,7 +98,17 @@ for suite in "${SUITES[@]}"; do
   # binaries and drive real windows, and a measurement taking the lock
   # exclusively has to wait for that rather than read a number through
   # it.  See bin/bench-remote.sh for the other half.
-  remote_gui "cd ~/$REMOTE_DIR && /usr/local/bin/bench-lock heavy bin/$suite"
+  # A suite that is itself a measurement (`E2E_LOCK=bench`) takes it
+  # exclusively instead, with the wait bounded.
+  if [[ ${E2E_LOCK:-heavy} == bench ]]; then
+    lock="bench --max-wait ${E2E_MAX_WAIT:-3600}"
+  else
+    lock=heavy
+  fi
+  # A measuring suite's knobs (`IDLE_*`) are set here and read there.
+  fwd=""
+  while IFS= read -r kv; do fwd+=" $(printf '%q' "$kv")"; done < <(env | grep -E '^IDLE_[A-Z_]+=' || true)
+  remote_gui "cd ~/$REMOTE_DIR && env$fwd /usr/local/bin/bench-lock $lock bin/$suite"
   suite_rc=$?
   set -e
   if (( suite_rc != 0 )); then
