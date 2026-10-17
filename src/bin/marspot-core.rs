@@ -802,6 +802,7 @@ mod window_state_tests {
             pane_cwds: std::collections::HashMap::new(),
             pending_to_shell: Vec::new(),
             last_focus_notified: std::collections::HashMap::new(),
+            terminal_focus: None,
             pane_sessions: std::collections::HashMap::new(),
             esc_history: std::collections::HashMap::new(),
             shell_child_pids: std::collections::HashMap::new(),
@@ -4105,6 +4106,8 @@ struct CoreApp {
     /// about, so `PaneFocused` is emitted on change rather than every
     /// loop iteration.
     last_focus_notified: std::collections::HashMap<usize, u64>,
+    /// The session whose L3 was last told it has the keyboard.
+    terminal_focus: Option<u64>,
     /// RFC-003 pane sessions currently held by L1 plugins, keyed by
     /// shelld_session_id.  Membership routes L2 behaviour:
     ///   * LOCK_KEYS cap → key events forwarded as PaneSessionKey,
@@ -4603,6 +4606,28 @@ impl CoreApp {
                 MsgType::PaneFocused,
                 marspot::shell_proto::encode_pane_focused(sid),
             ));
+        }
+        // The keyboard is in one pane at most: the key window's focused
+        // one, while the app is active.
+        let now = if self.renderer.window_focused() {
+            self.windows
+                .get(self.key_window)
+                .and_then(|w| w.panes.get(w.focused_idx))
+                .and_then(|p| p.shelld_session_id())
+        } else {
+            None
+        };
+        if now != self.terminal_focus {
+            let was = std::mem::replace(&mut self.terminal_focus, now);
+            for (sid, focused) in [(was, false), (now, true)] {
+                let Some(sid) = sid else { continue };
+                for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
+                    if pane.session().l3_session_id() == Some(sid) {
+                        pane.session_mut().forward_pane_terminal_focus(focused);
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -10564,6 +10589,7 @@ fn main() {
         pane_cwds: std::collections::HashMap::new(),
         pending_to_shell: Vec::new(),
         last_focus_notified: std::collections::HashMap::new(),
+        terminal_focus: None,
         pane_sessions: std::collections::HashMap::new(),
         esc_history: std::collections::HashMap::new(),
         shell_child_pids: std::collections::HashMap::new(),

@@ -769,6 +769,10 @@ impl MetalRenderer {
         self.window_focused = focused;
     }
 
+    pub fn window_focused(&self) -> bool {
+        self.window_focused
+    }
+
     /// F3+1.3 — push the process-tree panel render data.  `None`
     /// closes (renderer skips the panel pass).  Called by L2 on every
     /// render frame while the panel is open; cheap because typical
