@@ -2455,6 +2455,43 @@ mod tests {
 
     mod acting;
 
+    use marspot_term::test_env::{sandbox_state_dir, ChildGuard, EnvGuard, TempDir};
+
+    /// A `HOME` of the test's own, with the state root inside it, both
+    /// pointed at for as long as the test holds it.  Nothing a test
+    /// does through it reaches the person's `~/.claude*` or the
+    /// installed app's state.
+    ///
+    /// `_env` is declared first so it is dropped first: the variables
+    /// go back before the directory they named is removed.
+    struct TestHome {
+        _env: EnvGuard,
+        dir: TempDir,
+    }
+
+    impl TestHome {
+        fn new(tag: &str) -> Self {
+            let dir = TempDir::new(tag);
+            let mut env = EnvGuard::new();
+            env.set("HOME", dir.path())
+                .set("MARSPOT_STATE_DIR", dir.join("state"));
+            Self { _env: env, dir }
+        }
+    }
+
+    impl std::ops::Deref for TestHome {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            self.dir.path()
+        }
+    }
+
+    impl AsRef<Path> for TestHome {
+        fn as_ref(&self) -> &Path {
+            self.dir.path()
+        }
+    }
+
     /// A process id for an op that is only inspected, never run.
     fn fid(pid: i32) -> pidtree::ProcId {
         pidtree::ProcId { pid, start_us: 0 }
@@ -2510,9 +2547,7 @@ mod tests {
     /// cannot reach a signal — what it can do is show which op the click
     /// queued, and that is the whole question.
     fn badge_after_click_on_bg_held_session(tag: &str, status: &str) -> String {
-        let home = std::env::temp_dir()
-            .join(format!("cc-cycle-gate-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&home);
+        let home = TestHome::new(&format!("cc-cycle-gate-{tag}"));
         // Two profiles so the cycle has somewhere to go: P1 → P2.
         for n in [1u8, 2] {
             fs::create_dir_all(home.join(format!(".claude-profile-{n}/sessions")))
@@ -2520,7 +2555,7 @@ mod tests {
         }
         let uuid = "e1e62fd9-d0bc-493a-865a-56f2de8d7ac3";
         // a holder counts only if it is a live claude
-        let mut holder = spawn_fake_claude(&home);
+        let holder = spawn_fake_claude(&home);
         let me = holder.id() as i32;
         // The shape claude actually writes, taken off a real `claude
         // --bg` run: `kind` is **"bg"**, not "background".  The test
@@ -2534,7 +2569,6 @@ mod tests {
             ),
         )
         .unwrap();
-        let _home = HomeOverride::set(&home);
 
         let host = FakeHost::new(home.join("state"));
         let mut plugin = ClaudecodePlugin::new();
@@ -2577,9 +2611,7 @@ mod tests {
             sess.on_tick(&rec);
         }
         let badges = rec.0.lock().unwrap().clone();
-        fs::remove_dir_all(&home).ok();
-        let _ = holder.kill();
-        let _ = holder.wait();
+        drop(holder);
         assert_eq!(badges.len(), 1, "one badge, for the one click: {badges:?}");
         badges[0].clone()
     }
@@ -2611,17 +2643,11 @@ mod tests {
         );
     }
 
-    /// `HOME` is process-global.  nextest is process-per-test and
-    /// immune, but `cargo test` runs these as threads alongside a test
-    /// that reads the real `HOME`, so serialise and put it back.
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// A temp `HOME` with two profiles: P1 on an account that is out,
     /// P2 on one with room.  One right answer, so a test never has to
     /// argue about which way the pick went.
-    fn quota_home(tag: &str) -> std::path::PathBuf {
-        let home = std::env::temp_dir().join(format!("marspot-quota-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&home);
+    fn quota_home(tag: &str) -> TestHome {
+        let home = TestHome::new(&format!("quota-{tag}"));
         for n in [1u8, 2] {
             fs::create_dir_all(home.join(format!(".claude-profile-{n}/sessions"))).unwrap();
             fs::write(
@@ -2644,7 +2670,6 @@ mod tests {
         .unwrap();
         // The status-line hook's records, which a switch starts the new
         // claude from: every pane in these tests is on Opus 5.5.
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", home.join("state")) };
         let push = model_push_dir();
         fs::create_dir_all(&push).unwrap();
         for n in 77..=81 {
@@ -2699,7 +2724,6 @@ mod tests {
     #[test]
     fn a_pane_is_not_moved_until_its_model_is_confirmed() {
         let home = quota_home("confirm");
-        let _home = HomeOverride::set(&home);
         let host = FakeHost::new(home.join("state"));
         let sid = 81u64;
         let mut plugin = stranded_plugin(pane_on_p1(&home, "u-81"), sid);
@@ -2735,7 +2759,6 @@ mod tests {
         assert_eq!(handed.len(), 1, "both reads agree: it moves");
         let sent = host.sent.lock().unwrap().clone();
         assert!(sent[0].1.contains("--model 'claude-opus-5-5'"), "{:?}", sent[0].1);
-        let _ = fs::remove_dir_all(&home);
     }
 
     /// The sweep on a scan that bound what `plugin.last_meta` holds:
@@ -2757,6 +2780,10 @@ mod tests {
             std::process::Command::new("/bin/cat")
                 .arg0("claude")
                 .stdin(std::process::Stdio::piped())
+                // it outlives the test by a moment; holding the test's
+                // output would have the runner call that a leak
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn()
                 .unwrap()
         });
@@ -2777,7 +2804,6 @@ mod tests {
     #[test]
     fn a_profile_a_pane_could_not_log_in_to_is_no_destination() {
         let home = quota_home("login");
-        let _home = HomeOverride::set(&home);
         let host = FakeHost::new(home.join("state"));
         let mut on_p2 = pane_on_p1(&home, "u-78");
         on_p2.profile_num = 2;
@@ -2796,7 +2822,6 @@ mod tests {
         assert!(host.submitted.lock().unwrap().is_empty(), "P1 is spent and P2 cannot log in");
         assert_eq!(plugin.stranded.get(&79).and_then(|s| s.hold_said), Some("every account is out"));
         assert_eq!(plugin.stranded.get(&78).and_then(|s| s.hold_said), Some("every account is out"));
-        let _ = fs::remove_dir_all(&home);
     }
 
     /// The reason a pane is held is said again when it changes, so the
@@ -2804,7 +2829,6 @@ mod tests {
     #[test]
     fn a_new_reason_for_holding_is_said_again() {
         let home = quota_home("hold");
-        let _home = HomeOverride::set(&home);
         let host = FakeHost::new(home.join("state"));
         // both accounts spent
         fs::write(
@@ -2825,7 +2849,6 @@ mod tests {
         sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::AwaitingUser));
         assert_eq!(said(&plugin), Some("every account is out"));
         assert!(host.submitted.lock().unwrap().is_empty());
-        let _ = fs::remove_dir_all(&home);
     }
 
     /// The wiring, end to end inside the process: a pane sitting on an
@@ -2837,7 +2860,6 @@ mod tests {
     #[test]
     fn a_pane_on_a_spent_account_is_handed_to_the_host_as_a_switch() {
         let home = quota_home("wire");
-        let _home = HomeOverride::set(&home);
         let host = FakeHost::new(home.join("state"));
         let sid = 77u64;
         let mut plugin = stranded_plugin(pane_on_p1(&home, "u-77"), sid);
@@ -2879,7 +2901,6 @@ mod tests {
             1,
             "a pane between bindings is still a pane that was just moved"
         );
-        let _ = fs::remove_dir_all(&home);
     }
 
     /// A turn visibly in flight gets the same treatment — the point of
@@ -2888,7 +2909,6 @@ mod tests {
     #[test]
     fn a_pane_that_was_working_is_told_to_carry_on() {
         let home = quota_home("say");
-        let _home = HomeOverride::set(&home);
         let host = FakeHost::new(home.join("state"));
         let sid = 78u64;
         let mut plugin = stranded_plugin(pane_on_p1(&home, "u-78"), sid);
@@ -2904,7 +2924,6 @@ mod tests {
             "a pane that was working is told to carry on: {:?}",
             sent[0].1
         );
-        let _ = fs::remove_dir_all(&home);
     }
 
     /// A pane put somewhere by hand is judged like any other: by its
@@ -2913,7 +2932,6 @@ mod tests {
     #[test]
     fn a_switch_by_hand_follows_the_same_rule() {
         let home = quota_home("hand");
-        let _home = HomeOverride::set(&home);
         let host = FakeHost::new(home.join("state"));
         let sid = 80u64;
         let on = |profile: u8| {
@@ -2952,7 +2970,6 @@ mod tests {
         sweep(&mut plugin, &host, &mut result);
         sweep(&mut plugin, &host, &mut result);
         assert_eq!(switches(&host), 2, "usable: left alone");
-        let _ = fs::remove_dir_all(&home);
     }
 
     /// A pane whose session has no name yet cannot be moved — there is
@@ -2963,7 +2980,6 @@ mod tests {
     #[test]
     fn a_pane_with_no_session_to_resume_is_not_counted_as_moved() {
         let home = quota_home("nouuid");
-        let _home = HomeOverride::set(&home);
         let host = FakeHost::new(home.join("state"));
         let sid = 79u64;
         let mut plugin = stranded_plugin(pane_on_p1(&home, ""), sid);
@@ -2980,36 +2996,6 @@ mod tests {
         plugin.last_meta.insert(sid, pane_on_p1(&home, "u-79"));
         sweep(&mut plugin, &host, &mut result);
         assert_eq!(host.submitted.lock().unwrap().len(), 1);
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    struct HomeOverride {
-        old: Option<std::ffi::OsString>,
-        _guard: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl HomeOverride {
-        fn set(dir: &std::path::Path) -> Self {
-            let guard = HOME_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let old = std::env::var_os("HOME");
-            // SAFETY: no other thread reads HOME while the lock is held.
-            unsafe { std::env::set_var("HOME", dir) };
-            Self { old, _guard: guard }
-        }
-    }
-
-    impl Drop for HomeOverride {
-        fn drop(&mut self) {
-            // SAFETY: as above — still under the lock.
-            unsafe {
-                match self.old.take() {
-                    Some(v) => std::env::set_var("HOME", v),
-                    None => std::env::remove_var("HOME"),
-                }
-            }
-        }
     }
 
     /// And the other half: with nothing holding the session, the same
@@ -3022,9 +3008,7 @@ mod tests {
     /// one the feature exists for.
     #[test]
     fn a_click_on_an_unheld_session_still_cycles() {
-        let home = std::env::temp_dir()
-            .join(format!("cc-cycle-open-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&home);
+        let home = TestHome::new("cc-cycle-open");
         for n in [1u8, 2] {
             fs::create_dir_all(home.join(format!(".claude-profile-{n}/sessions")))
                 .unwrap();
@@ -3038,7 +3022,6 @@ mod tests {
             ),
         )
         .unwrap();
-        let _home = HomeOverride::set(&home);
 
         let host = FakeHost::new(home.join("state"));
         let mut plugin = ClaudecodePlugin::new();
@@ -3088,7 +3071,6 @@ mod tests {
             badges[0]
         );
         drop(badges);
-        fs::remove_dir_all(&home).ok();
     }
 
     /// With an idle background job holding the session, the cycle stops
@@ -3229,9 +3211,7 @@ mod tests {
     /// is checked first.
     #[test]
     fn the_hooks_record_names_the_model_as_claude_takes_it() {
-        let root = std::env::temp_dir().join(format!("cc-choice-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &root) };
+        let _sandbox = sandbox_state_dir();
         let push = model_push_dir();
         fs::create_dir_all(&push).unwrap();
         let write = |uuid: &str, body: &str| fs::write(push.join(uuid), body).unwrap();
@@ -3250,7 +3230,6 @@ mod tests {
         write("u-bad", "opus-5-5\n/t/u-bad.jsonl\nloud\npids=1,2\nid=opus; rm -rf ~\n");
         assert_eq!(pushed_choice("u-bad"), CliChoice::default(), "neither value is one claude takes");
         assert_eq!(pushed_choice("../u-new"), CliChoice::default(), "a uuid is not a path");
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// Starting a claude does not install a hook that runs on the
@@ -3403,16 +3382,8 @@ mod tests {
         assert_eq!(op.badge.as_deref(), Some("⚠ held by bg job"));
     }
 
-    fn tmphome(entries: &[(&str, bool)]) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let home = std::env::temp_dir().join(format!(
-            "claudecode-plugin-home-{}-{}",
-            std::process::id(),
-            n
-        ));
-        fs::create_dir_all(&home).unwrap();
+    fn tmphome(entries: &[(&str, bool)]) -> TempDir {
+        let home = TempDir::new("cc-plugin-home");
         for (name, is_dir) in entries {
             let p = home.join(name);
             if *is_dir {
@@ -3435,13 +3406,13 @@ mod tests {
             (".claude-profile-3", false),  // a file, not a dir
             ("Documents", true),
         ]);
-        assert_eq!(discover_profiles_in(&home), vec![1, 2, 4]);
+        assert_eq!(discover_profiles_in(home.path()), vec![1, 2, 4]);
     }
 
     #[test]
     fn discover_profiles_empty_when_none_exist() {
         let home = tmphome(&[(".claude", true)]);
-        assert!(discover_profiles_in(&home).is_empty());
+        assert!(discover_profiles_in(home.path()).is_empty());
     }
 
     /// Badges compare as what they would be drawn as.
@@ -3516,10 +3487,8 @@ mod tests {
     /// `Opus 5.5 (1M context) · Claude Max`, model and no more.
     #[test]
     fn a_pane_with_no_session_file_yet_still_shows_model_and_effort() {
-        let root = std::env::temp_dir().join("cc-fresh-pane-badge-test");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &root) };
+        let sandbox = sandbox_state_dir();
+        let root = sandbox.path().to_path_buf();
         let uuid = "d794e66f-bc9b-48e8-a114-70c5fc996678";
         let push = model_push_dir();
         fs::create_dir_all(&push).unwrap();
@@ -3547,10 +3516,8 @@ mod tests {
     /// (2026-09-23 report, 20 badge changes in one log tail).
     #[test]
     fn the_model_half_survives_a_tick_that_could_not_read_it() {
-        let root = std::env::temp_dir().join("cc-badge-blink-test");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &root) };
+        let sandbox = sandbox_state_dir();
+        let root = sandbox.path().to_path_buf();
         let uuid = "d794e66f-bc9b-48e8-a114-70c5fc996678";
         let mut ctx = ctx_for_test(root.join("projects"));
 
@@ -3578,12 +3545,8 @@ mod tests {
     /// is what the badge shows.
     #[test]
     fn claudes_own_report_beats_the_transcripts_last_word() {
-        let root = std::env::temp_dir().join("cc-pushed-model-test");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        // Process-global, and nextest gives every test its own
-        // process — this is why the suite runs under nextest.
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &root) };
+        let sandbox = sandbox_state_dir();
+        let root = sandbox.path().to_path_buf();
 
         let dir = root.join("projects");
         fs::create_dir_all(&dir).unwrap();
@@ -3631,7 +3594,6 @@ mod tests {
         .unwrap();
         assert_eq!(rendered(ctx.model_for(&other, 222, 0)).as_deref(), Some("sonnet-5"));
 
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// Registering the hook with Claude Code, on and off again.
@@ -3642,9 +3604,8 @@ mod tests {
     /// actually turns up in.
     #[test]
     fn the_hook_registers_and_unregisters_leaving_the_file_as_it_was() {
-        let dir = std::env::temp_dir().join("cc-statusline-reconcile-test");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = TempDir::new("cc-statusline-reconcile-test");
+        let dir = tmp.path().to_path_buf();
         let bin = std::path::Path::new("/Apps/Marspot.app/Contents/MacOS/marspot-shell");
 
         let shapes = [
@@ -3682,7 +3643,6 @@ mod tests {
                 "shape {i} did not come back as it was"
             );
         }
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A status line the user already wrote is borrowed, not taken.
@@ -3692,9 +3652,8 @@ mod tests {
     /// enough to write one.
     #[test]
     fn an_existing_status_line_is_chained_and_handed_back() {
-        let dir = std::env::temp_dir().join("cc-statusline-chain-test");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = TempDir::new("cc-statusline-chain-test");
+        let dir = tmp.path().to_path_buf();
         let path = dir.join("settings.json");
         let bin = std::path::Path::new("/Apps/M.app/marspot-shell");
         // Theirs has a space in it, and a quote, because both are
@@ -3718,7 +3677,6 @@ mod tests {
 
         reconcile_statusline_in(false, Some(bin), &files);
         assert_eq!(fs::read_to_string(&path).unwrap(), before);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// An installed hook follows the binary.
@@ -3729,9 +3687,8 @@ mod tests {
     /// is when it should move back.
     #[test]
     fn an_installed_hook_is_repointed_when_the_binary_moves() {
-        let dir = std::env::temp_dir().join("cc-statusline-repoint-test");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = TempDir::new("cc-statusline-repoint-test");
+        let dir = tmp.path().to_path_buf();
         let path = dir.join("settings.json");
         let files = vec![path.clone()];
         fs::write(&path, "{\n  \"a\": 1\n}\n").unwrap();
@@ -3743,7 +3700,6 @@ mod tests {
         assert!(notes[0].ends_with("repointed"), "{notes:?}");
         let (_, cmd) = status_line_command(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(cmd, "'/Apps/Marspot.app/Contents/MacOS/marspot-shell' --cc-statusline");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The guard that stands between an edit and the user's tool.
@@ -3764,9 +3720,8 @@ mod tests {
     /// model, so the badge gets both halves from one line.
     #[test]
     fn an_assistant_record_names_the_effort_it_ran_at() {
-        let dir = std::env::temp_dir().join("cc-effort-tail-test");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = TempDir::new("cc-effort-tail-test");
+        let dir = tmp.path().to_path_buf();
         let path = dir.join("s.jsonl");
 
         // Shape taken from a real record: `effort` is a sibling of the
@@ -3798,7 +3753,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rendered(tail_model_short(&path, 0)).as_deref(), Some("fable-5"));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A record written before the effort line existed still reads.
@@ -3809,10 +3763,8 @@ mod tests {
     /// generations.
     #[test]
     fn a_model_record_without_an_effort_line_still_reads() {
-        let root = std::env::temp_dir().join("cc-effort-record-test");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &root) };
+        let sandbox = sandbox_state_dir();
+        let root = sandbox.path().to_path_buf();
         let push = model_push_dir();
         fs::create_dir_all(&push).unwrap();
         let jsonl = root.join("11111111-1111-1111-1111-111111111111.jsonl");
@@ -3840,7 +3792,6 @@ mod tests {
             pushed_model(&jsonl).map(|(b, _)| b.render()).as_deref(),
             Some("opus-5\u{b7}xhigh")
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// A parked pane still gains the effort it never got pushed.
@@ -3853,10 +3804,8 @@ mod tests {
     /// stays parked.
     #[test]
     fn a_record_too_old_to_carry_the_effort_takes_it_from_the_transcript() {
-        let root = std::env::temp_dir().join("cc-effort-fill-test");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &root) };
+        let sandbox = sandbox_state_dir();
+        let root = sandbox.path().to_path_buf();
         let dir = root.join("projects");
         fs::create_dir_all(&dir).unwrap();
         let name = "22222222-2222-2222-2222-222222222222";
@@ -3902,7 +3851,6 @@ mod tests {
         ctx.last_model.clear();
         assert_eq!(rendered(ctx.model_for(&path, 111, 0)).as_deref(), Some("fable-5"));
 
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// The profile-switch case, from the other side.
@@ -3917,10 +3865,8 @@ mod tests {
     #[test]
     fn a_resumed_pane_reads_its_banner_before_falling_back() {
         use marspot_term::session_registry::{write_session_entry, SessionEntry};
-        let root = std::env::temp_dir().join("cc-banner-order-test");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &root) };
+        let sandbox = sandbox_state_dir();
+        let root = sandbox.path().to_path_buf();
 
         let dir = root.join("projects");
         fs::create_dir_all(&dir).unwrap();
@@ -3940,7 +3886,7 @@ mod tests {
             rows: 30,
             title: "t".into(),
             cwd: "/tmp".into(),
-            proto_version: 1,
+            proto_version: marspot_term::shell_proto::PROTO_VERSION,
             created_at_unix: 0,
             shm_name: String::new(),
             shell_child_pid: 0,
@@ -3983,7 +3929,6 @@ mod tests {
              names the effort while it is there"
         );
 
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// The profile-switch case.
@@ -3996,9 +3941,8 @@ mod tests {
     /// the badge then omits `@model`, which is honest.
     #[test]
     fn model_read_is_fenced_at_a_profile_switch() {
-        let dir = std::env::temp_dir().join("cc-model-fence-test");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = TempDir::new("cc-model-fence-test");
+        let dir = tmp.path().to_path_buf();
         let path = dir.join("s.jsonl");
 
         // Pre-switch history: P1 was answering with fable-5.
@@ -4028,7 +3972,6 @@ mod tests {
             "post-switch records must still be read"
         );
 
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The fence moves only when the owning process is replaced.
@@ -4156,14 +4099,8 @@ mod tests {
     /// entry per session file it had ever noticed.
     #[test]
     fn seen_keeps_the_newest_few_per_live_project_and_prunes_the_rest() {
-        let root = std::env::temp_dir().join(format!(
-            "cc-refresh-seen-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let tmp = TempDir::new("cc-refresh-seen");
+        let root = tmp.path().to_path_buf();
         let mk = |project: &str, n: usize| {
             let dir = root.join(project);
             fs::create_dir_all(&dir).unwrap();
@@ -4231,7 +4168,6 @@ mod tests {
         assert_eq!(ctx.seen.len(), SESSIONS_KEPT_PER_PROJECT);
         assert!(ctx.seen.values().all(|s| s.project_dir == "-p-alpha"));
 
-        let _ = fs::remove_dir_all(&root);
     }
 
     fn filetime_plus(secs: u64) -> SystemTime {
@@ -4253,9 +4189,8 @@ mod tests {
 
     #[test]
     fn model_cutoff_tracks_the_owning_pid() {
-        let dir = std::env::temp_dir().join("cc-model-cutoff-test");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = TempDir::new("cc-model-cutoff-test");
+        let dir = tmp.path().to_path_buf();
         let path = dir.join("s.jsonl");
         fs::write(&path, "x".repeat(100)).unwrap();
 
@@ -4283,7 +4218,6 @@ mod tests {
         fs::write(&path, "x".repeat(500)).unwrap();
         assert_eq!(ctx.model_cutoff_for(&path, 222), 200);
 
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 2026-08-02 report: after a profile switch the badge lost its
@@ -4297,9 +4231,8 @@ mod tests {
     /// parked pane that is hours of a badge saying `P4` alone.
     #[test]
     fn a_switched_profile_keeps_showing_the_last_model_it_saw() {
-        let dir = std::env::temp_dir().join("cc-model-carry-test");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = TempDir::new("cc-model-carry-test");
+        let dir = tmp.path().to_path_buf();
         let path = dir.join("s.jsonl");
         let assistant =
             |m: &str| format!("{{\"role\":\"assistant\",\"model\":\"claude-{m}\",\"x\":1}}\n");
@@ -4343,7 +4276,6 @@ mod tests {
         fs::write(&fresh, "{\"type\":\"mode\"}\n").unwrap();
         assert_eq!(ctx.model_for(&fresh, 333, 0), None);
 
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -4414,8 +4346,8 @@ mod tests {
 
     #[test]
     fn discover_profiles_missing_home_is_empty() {
-        let home = std::env::temp_dir().join("claudecode-plugin-home-nonexistent");
-        assert!(discover_profiles_in(&home).is_empty());
+        let tmp = TempDir::new("cc-no-home");
+        assert!(discover_profiles_in(&tmp.join("nonexistent")).is_empty());
     }
 
     #[test]
@@ -4551,7 +4483,9 @@ mod tests {
         }
         use marspot_term::pty::{Pty, PtyConfig, TerminalSize};
 
-        let root = std::env::temp_dir().join(format!("marspot-loop-{}", std::process::id()));
+        // The transcript the scan reads lives under `$HOME/.claude`, so
+        // the whole test runs under a `HOME` of its own.
+        let root = TestHome::new("loop");
         let bin = root.join("bin");
         let proj = root.join("proj");
         let state = root.join("state");
@@ -4572,7 +4506,7 @@ mod tests {
         // The transcript the scan binds against: one finished assistant
         // turn, in the on-disk shape (`message` before `type`).
         let uuid = "aaaaaaaa-1111-2222-3333-444444444444";
-        let home = std::env::var("HOME").unwrap();
+        let home = root.to_path_buf();
         // Use the plugin's own encoder, and canonicalise first: the
         // scan encodes what `proc_cwd` reports, which is the resolved
         // path (`/private/var/...`), while `temp_dir()` hands back the
@@ -4580,7 +4514,7 @@ mod tests {
         // fixture transcript in a directory the scan never looks at.
         let proj = fs::canonicalize(&proj).unwrap();
         let encoded = encode_project_dir(&proj);
-        let proj_dir = PathBuf::from(&home).join(".claude/projects").join(&encoded);
+        let proj_dir = home.join(".claude/projects").join(&encoded);
         fs::create_dir_all(&proj_dir).unwrap();
         let jsonl = proj_dir.join(format!("{uuid}.jsonl"));
         fs::write(
@@ -4611,10 +4545,12 @@ mod tests {
             libc::fcntl(master, libc::F_SETFL, fl | libc::O_NONBLOCK);
         }
         let shell_pid = pty.child_pid();
+        // Declared after `pty`, so it runs first: whatever the pane
+        // started goes before the shell does, pass or fail.
+        let _pane_tree = KillPaneTree(shell_pid);
 
         // Registry entry, so the plugin's session list finds this pane
         // exactly as it finds a real one.
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &state) };
         marspot_term::session_registry::write_session_entry(
             &marspot_term::session_registry::SessionEntry {
                 id: 1,
@@ -4624,7 +4560,7 @@ mod tests {
                 rows: 24,
                 title: "loop".into(),
                 cwd: proj.to_string_lossy().into_owned(),
-                proto_version: 1,
+                proto_version: marspot_term::shell_proto::PROTO_VERSION,
                 created_at_unix: 0,
                 shm_name: String::new(),
                 shell_child_pid: shell_pid,
@@ -4670,7 +4606,7 @@ mod tests {
 
         // Real scan → real binding.
         let mut worker = WorkerCtx {
-            projects_root: PathBuf::from(&home).join(".claude/projects"),
+            projects_root: home.join(".claude/projects"),
             caches: Default::default(),
             statusline_state: None,
             seen: HashMap::new(),
@@ -4935,18 +4871,23 @@ mod tests {
             echoed.contains("invalid time interval") || echoed.contains("usage:")
         });
 
-        // Teardown: kill whatever the pane still holds, then the shell.
-        for pid in pidtree::child_pids(shell_pid) {
-            if let Some(row) = pidtree::proc_row(pid) {
-                unsafe {
-                    libc::killpg(row.pgid, libc::SIGCONT);
-                    libc::killpg(row.pgid, libc::SIGKILL);
+    }
+
+    /// Kills, when dropped, every process group a pane's shell has
+    /// started: a stand-in left running would outlive the test.
+    struct KillPaneTree(i32);
+
+    impl Drop for KillPaneTree {
+        fn drop(&mut self) {
+            for pid in pidtree::child_pids(self.0) {
+                if let Some(row) = pidtree::proc_row(pid) {
+                    unsafe {
+                        libc::killpg(row.pgid, libc::SIGCONT);
+                        libc::killpg(row.pgid, libc::SIGKILL);
+                    }
                 }
             }
         }
-        drop(pty);
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_dir_all(&proj_dir);
     }
 
     /// Minimal `PaneSessionHost` for driving a PaneSession directly.
@@ -5152,13 +5093,15 @@ mod tests {
     /// would produce argv[0] = `/bin/sh` and be rejected, which is
     /// correct behaviour and useless as a fixture; `arg0` gives the
     /// real shape instead.
-    fn spawn_fake_claude(_dir: &std::path::Path) -> std::process::Child {
+    fn spawn_fake_claude(_dir: &std::path::Path) -> ChildGuard {
         use std::os::unix::process::CommandExt;
-        std::process::Command::new("/bin/sleep")
-            .arg0("claude")
-            .arg("120")
-            .spawn()
-            .unwrap()
+        ChildGuard::new(
+            std::process::Command::new("/bin/sleep")
+                .arg0("claude")
+                .arg("120")
+                .spawn()
+                .unwrap(),
+        )
     }
 
     fn idle_view(held: Duration) -> crate::plugins::PaneStatusView {
@@ -5172,15 +5115,17 @@ mod tests {
     /// The status-line hook's record for `uuid`, naming Opus 5.5 at
     /// medium effort, so the pane counts as one whose model is known.
     ///
-    /// The record lives under `MARSPOT_STATE_DIR`; a test process that
-    /// has not set it is pointed at a directory of its own first, so
-    /// nothing is ever written into an installed app's state.
+    /// The record lives under `MARSPOT_STATE_DIR`, so the calling test
+    /// has to hold a state root of its own; one that does not fails
+    /// here rather than writing into whatever root the process has.
     fn record_known_model(uuid: &str) {
-        if std::env::var_os("MARSPOT_STATE_DIR").is_none() {
-            let state = std::env::temp_dir().join(format!("marspot-choice-{}", std::process::id()));
-            unsafe { std::env::set_var("MARSPOT_STATE_DIR", &state) };
-        }
         let push = model_push_dir();
+        assert!(
+            push.starts_with(std::env::temp_dir())
+                && push.to_string_lossy().contains("/marspot-test-"),
+            "the test does not hold a state root of its own: {}",
+            push.display()
+        );
         fs::create_dir_all(&push).unwrap();
         fs::write(push.join(uuid), "opus-5-5\n/t/x.jsonl\nmedium\npids=1\nid=claude-opus-5-5\n").unwrap();
     }
@@ -5252,8 +5197,7 @@ mod tests {
     /// that ran it — the key that works before there is a transcript.
     #[test]
     fn the_hooks_record_is_found_by_which_claude_asked_for_it() {
-        let state = std::env::temp_dir().join(format!("marspot-push-{}", std::process::id()));
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &state) };
+        let _sandbox = sandbox_state_dir();
         let dir = model_push_dir();
         fs::create_dir_all(&dir).unwrap();
         let write = |uuid: &str, body: &str| fs::write(dir.join(uuid), body).unwrap();
@@ -5274,16 +5218,13 @@ mod tests {
             pushed_session_for_pid(4243).is_none(),
             "a pid in no chain matches nothing",
         );
-        fs::remove_dir_all(&state).ok();
-        unsafe { std::env::remove_var("MARSPOT_STATE_DIR") };
     }
 
     /// A claude inside a claude: both records name the outer pid, and
     /// the outer pane must take the one whose hook ran nearest to it.
     #[test]
     fn the_nearer_claude_in_the_chain_wins() {
-        let state = std::env::temp_dir().join(format!("marspot-push-near-{}", std::process::id()));
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &state) };
+        let _sandbox = sandbox_state_dir();
         let dir = model_push_dir();
         fs::create_dir_all(&dir).unwrap();
         // The outer claude is 4242.  Its own hook sits one hop from
@@ -5295,8 +5236,6 @@ mod tests {
 
         let got = pushed_session_for_pid(4242).expect("matched");
         assert_eq!(got.0, "u-outer", "the nearer hook is this pane's own");
-        fs::remove_dir_all(&state).ok();
-        unsafe { std::env::remove_var("MARSPOT_STATE_DIR") };
     }
 
     /// The chain the hook writes starts at its own parent and walks
@@ -5356,12 +5295,8 @@ mod tests {
     /// a reason, rather than building a broken resume line.
     #[test]
     fn the_idle_policy_leaves_an_unbound_pane_running() {
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-hib-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let sandbox = sandbox_state_dir();
+        let dir = sandbox.path().to_path_buf();
         let mut child = spawn_fake_claude(&dir);
         let pid = child.id() as i32;
         let host = FakeHost::new(dir.clone());
@@ -5391,7 +5326,6 @@ mod tests {
         );
         let _ = child.kill();
         let _ = child.wait();
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 2026-08-03 report: the reclamation is visible.
@@ -5403,9 +5337,8 @@ mod tests {
     /// that nothing about it moved.
     #[test]
     fn a_held_pane_keeps_the_badge_it_was_frozen_with() {
-        let dir = std::env::temp_dir()
-            .join(format!("marspot-look-{}-{}", std::process::id(), line!()));
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = TempDir::new("look");
+        let dir = tmp.path().to_path_buf();
         let host = FakeHost::new(dir.clone());
         let mut plugin = ClaudecodePlugin::new();
 
@@ -5441,7 +5374,6 @@ mod tests {
                 .contains(&(7, "proj".to_string())),
             "its title is frozen too"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     fn empty_scan() -> ScanResult {
@@ -5467,8 +5399,8 @@ mod tests {
     /// running, however idle it is.
     #[test]
     fn a_pane_whose_model_is_not_known_is_not_reclaimed() {
-        let dir = std::env::temp_dir().join(format!("marspot-hib-{}-{}", std::process::id(), line!()));
-        fs::create_dir_all(&dir).unwrap();
+        let sandbox = sandbox_state_dir();
+        let dir = sandbox.path().to_path_buf();
         let mut child = spawn_fake_claude(&dir);
         let pid = child.id() as i32;
         let host = FakeHost::new(dir.clone());
@@ -5502,17 +5434,12 @@ mod tests {
         );
         let _ = child.kill();
         let _ = child.wait();
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn idle_policy_reclaims_a_real_process_and_records_it_dormant() {
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-hib-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let sandbox = sandbox_state_dir();
+        let dir = sandbox.path().to_path_buf();
         let mut child = spawn_fake_claude(&dir);
         let pid = child.id() as i32;
         let host = FakeHost::new(dir.clone());
@@ -5577,7 +5504,6 @@ mod tests {
         // …and it survives a restart: the record is on disk.
         let text = fs::read_to_string(dir.join("dormant.tsv")).unwrap();
         assert_eq!(decode_dormant(&text).len(), 1);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The CPU baseline must survive across scans, or the delta always
@@ -5587,12 +5513,8 @@ mod tests {
     /// reclamation would never have fired for anyone.
     #[test]
     fn the_cpu_baseline_is_held_across_scans_not_replaced_every_time() {
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-hib-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let sandbox = sandbox_state_dir();
+        let dir = sandbox.path().to_path_buf();
         let host = FakeHost::new(dir.clone());
         // Below the threshold, so the policy keeps looking rather than
         // reclaiming — which is when the baseline handling matters.
@@ -5634,7 +5556,6 @@ mod tests {
             Some(3_000),
             "past the window the baseline should move"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The pid guard: `last_meta` can name a pid that has since been
@@ -5642,12 +5563,8 @@ mod tests {
     /// unrelated process.
     #[test]
     fn idle_policy_refuses_to_signal_a_pid_that_is_no_longer_claude() {
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-hib-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let sandbox = sandbox_state_dir();
+        let dir = sandbox.path().to_path_buf();
         // A live process that is emphatically not claude: this test
         // process itself.
         let host = FakeHost::new(dir.clone());
@@ -5667,7 +5584,6 @@ mod tests {
             "nothing may be armed against a pid that isn't claude"
         );
         assert!(plugin.dormant.is_empty());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A record must not be judged by a scan older than itself.
@@ -5680,12 +5596,8 @@ mod tests {
     /// the wake path would not have survived the next restart.
     #[test]
     fn a_record_is_not_dropped_by_the_scan_that_created_it() {
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-hib-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let sandbox = sandbox_state_dir();
+        let dir = sandbox.path().to_path_buf();
         let host = FakeHost::new(dir.clone());
         let mut plugin = ClaudecodePlugin::new();
         plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
@@ -5735,7 +5647,6 @@ mod tests {
             plugin.dormant[0].created_at + KILL_GRACE + Duration::from_secs(1);
         plugin.rearm_dormant(&host, &later);
         assert!(plugin.dormant.is_empty(), "a later scan may judge it");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A pane that already has a live claude must never get a wake
@@ -5752,12 +5663,8 @@ mod tests {
     /// same proc table everything else does.
     #[test]
     fn rearm_asks_the_kernel_whether_the_pane_is_really_empty() {
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-hib-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let sandbox = sandbox_state_dir();
+        let dir = sandbox.path().to_path_buf();
         let host = FakeHost::new(dir.clone());
         let mut plugin = ClaudecodePlugin::new();
         plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
@@ -5781,7 +5688,6 @@ mod tests {
             host.begun.lock().unwrap().is_empty(),
             "a pane we cannot inspect must not get a wake session"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A pane whose claude came back (woken, or restarted by hand)
@@ -5794,12 +5700,8 @@ mod tests {
     /// the full-loop PTY test.
     #[test]
     fn rearm_drops_records_for_panes_whose_claude_is_back() {
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-hib-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let sandbox = sandbox_state_dir();
+        let dir = sandbox.path().to_path_buf();
         let host = FakeHost::new(dir.clone());
         let mut plugin = ClaudecodePlugin::new();
         plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
@@ -5839,7 +5741,6 @@ mod tests {
         gone.sessions_seen = vec![9];
         plugin.rearm_dormant(&host, &gone);
         assert!(plugin.dormant.is_empty());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ── idle reclamation policy ───────────────────────────────────
@@ -5910,8 +5811,8 @@ mod tests {
     /// the user wants".
     #[test]
     fn the_reclaim_threshold_follows_the_settings_file() {
-        // SAFETY: nextest runs one test per process.
-        unsafe { std::env::remove_var("MARSPOT_CC_IDLE_HIBERNATE_S") };
+        let mut env = EnvGuard::new();
+        env.remove("MARSPOT_CC_IDLE_HIBERNATE_S");
 
         marspot::settings::set_for_test(marspot::settings::Settings {
             reclaim_enabled: true,
@@ -5934,10 +5835,8 @@ mod tests {
         assert_eq!(hibernate_after(), None, "the zero");
 
         // And the env var wins over any of it.
-        // SAFETY: as above.
-        unsafe { std::env::set_var("MARSPOT_CC_IDLE_HIBERNATE_S", "60") };
+        env.set("MARSPOT_CC_IDLE_HIBERNATE_S", "60");
         assert_eq!(hibernate_after(), Some(Duration::from_secs(60)));
-        unsafe { std::env::remove_var("MARSPOT_CC_IDLE_HIBERNATE_S") };
     }
 
     /// 2026-08-03 report: come back to marspot after a short break and
@@ -6274,12 +6173,8 @@ mod tests {
     /// it back where it was, and guessing means a different account.
     #[test]
     fn an_unreadable_profile_blocks_reclamation() {
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-hib-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let sandbox = sandbox_state_dir();
+        let dir = sandbox.path().to_path_buf();
         let host = FakeHost::new(dir.clone());
         host.set_status(7, idle_view(Duration::from_secs(7200)));
         let mut plugin = ClaudecodePlugin::new();
@@ -6299,7 +6194,6 @@ mod tests {
             "an unnamed profile must not be reclaimed"
         );
         assert!(plugin.dormant.is_empty());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -6599,11 +6493,8 @@ mod tests {
     /// have to come from the same place.
     #[test]
     fn a_second_profile_is_scanned_under_its_own_config_dir() {
-        let base = std::env::temp_dir().join(format!(
-            "marspot-cc-profiles-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&base);
+        let tmp = TempDir::new("cc-profiles");
+        let base = tmp.path().to_path_buf();
         // Two profiles, the same project open under each, a different
         // session id in each — exactly the shape on the machine.
         let mk = |profile: &str, uuid: &str| -> PathBuf {
@@ -6665,7 +6556,6 @@ mod tests {
             ctx.seen.contains_key(&default_path),
             "and the default profile's pane keeps its own"
         );
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -6680,27 +6570,20 @@ mod tests {
         // else's — a test that reports the state of the machine it
         // runs on rather than the state of the code.
         marspot::settings::set_for_test(marspot::settings::Settings::default());
-        // Serialised through the env, so keep the assertions in one
-        // test rather than racing sibling tests in the same process.
         let key = "MARSPOT_CC_IDLE_HIBERNATE_S";
-        let saved = std::env::var(key).ok();
-        unsafe {
-            std::env::set_var(key, "0");
-            assert_eq!(hibernate_after(), None, "0 disables reclamation");
-            std::env::set_var(key, "90");
-            assert_eq!(hibernate_after(), Some(Duration::from_secs(90)));
-            std::env::set_var(key, "nonsense");
-            assert_eq!(
-                hibernate_after(),
-                Some(HALF_HOUR),
-                "an unparsable value falls back to the default rather than to off"
-            );
-            std::env::remove_var(key);
-            assert_eq!(hibernate_after(), Some(HALF_HOUR));
-            if let Some(v) = saved {
-                std::env::set_var(key, v);
-            }
-        }
+        let mut env = EnvGuard::new();
+        env.set(key, "0");
+        assert_eq!(hibernate_after(), None, "0 disables reclamation");
+        env.set(key, "90");
+        assert_eq!(hibernate_after(), Some(Duration::from_secs(90)));
+        env.set(key, "nonsense");
+        assert_eq!(
+            hibernate_after(),
+            Some(HALF_HOUR),
+            "an unparsable value falls back to the default rather than to off"
+        );
+        env.remove(key);
+        assert_eq!(hibernate_after(), Some(HALF_HOUR));
     }
 
     // ── cc activity classification ────────────────────────────────
@@ -6957,12 +6840,8 @@ mod tests {
     /// same outcome as not having built any of this.
     #[test]
     fn a_refusal_that_has_scrolled_out_of_the_window_is_still_remembered() {
-        let dir = std::env::temp_dir().join(format!(
-            "marspot-refusal-window-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = TempDir::new("refusal-window");
+        let dir = tmp.path().to_path_buf();
         let path = dir.join("session.jsonl");
 
         let mut ctx = ctx_for_test(dir.clone());
@@ -6993,7 +6872,6 @@ mod tests {
             Some(1_790_855_512),
             "but the pane is no less shut out than it was"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

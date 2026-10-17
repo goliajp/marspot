@@ -869,16 +869,30 @@ mod tests {
         assert_eq!(untouched.util, 0.0);
     }
 
-    /// The live file on this machine, whatever it currently says —
-    /// skipped when it is not there (CI, a fresh checkout).
+    /// The feed is found where the collector writes it, under `HOME`,
+    /// and every account in it comes back -- through `read`, the path
+    /// the app takes, not `parse` alone.
     #[test]
-    fn the_live_feed_on_this_machine_parses_every_account() {
-        let Some(u) = read() else { return };
-        let n = std::fs::read_to_string(feed_path())
-            .unwrap()
-            .matches("\"collected_at\"")
-            .count();
+    fn the_feed_under_home_is_read_with_every_account() {
+        let home = crate::test_env::TempDir::new("cc-usage-home");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("HOME", home.path());
+        assert_eq!(read(), None, "no feed written yet");
+
+        let path = feed_path();
+        assert_eq!(
+            path,
+            home.join(".local/state/devops/claude-usage.json"),
+            "where the collector writes it"
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, NESTED_FEED).unwrap();
+        let u = read().expect("the feed under HOME parses");
+        let n = NESTED_FEED.matches("\"collected_at\"").count();
+        assert_eq!(n, 2, "the fixture has two accounts");
         assert_eq!(u.accounts.len(), n, "one account parsed per account written");
+        assert_eq!(u.accounts[0].email, "ada@example.jp");
+        assert_eq!(u.accounts[1].email, "ben@example.com");
     }
 
     /// The real feed, verbatim, as of 2026-08-01 — two accounts kept.

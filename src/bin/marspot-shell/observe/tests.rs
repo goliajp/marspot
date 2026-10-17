@@ -24,7 +24,7 @@ pub(crate) fn entry(id: u64, pid: i32, shell: i32) -> SessionEntry {
         rows: 24,
         title: String::new(),
         cwd: "/tmp".into(),
-        proto_version: 1,
+        proto_version: marspot_term::shell_proto::PROTO_VERSION,
         created_at_unix: 0,
         shm_name: String::new(),
         shell_child_pid: shell,
@@ -99,7 +99,9 @@ fn a_session_without_a_shell_pid_has_no_descendants() {
 
 #[test]
 fn the_argv_cache_reads_once_and_forgets_a_process_that_exited() {
-    let mut child = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    let mut child = marspot_term::test_env::ChildGuard::new(
+        std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap(),
+    );
     let pid = child.id() as i32;
     // the child's image is ours until it has exec'd
     let deadline = Instant::now() + Duration::from_secs(5);

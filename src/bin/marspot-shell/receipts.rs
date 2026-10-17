@@ -274,16 +274,12 @@ mod tests {
 
     /// Point the state root at a scratch dir so the secret, and the
     /// tokens derived from it, belong to this test.
-    fn sandbox(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("marspot-rcpt-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("sandbox");
-        // SAFETY: test code, single-threaded at this point.
-        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
+    fn sandbox() -> marspot_term::test_env::StateSandbox {
+        let sandbox = marspot_term::test_env::sandbox_state_dir();
         // L1 does this at startup; a token cannot be derived without
         // it, because deriving one no longer creates anything.
         marspot_term::submit_receipt::ensure_secret().expect("a secret");
-        dir
+        sandbox
     }
 
     fn token(sid: u64) -> String {
@@ -292,7 +288,7 @@ mod tests {
 
     #[test]
     fn a_receipt_is_claimed_once_and_only_by_its_own_pane() {
-        let dir = sandbox("claim");
+        let _sandbox = sandbox();
         let r = Receipts::new();
         let t = token(7);
         assert_eq!(r.record(&t, 99), Some(7));
@@ -300,7 +296,6 @@ mod tests {
         assert!(!r.claim(8, 99), "another pane cannot claim it");
         assert!(r.claim(7, 99), "the pane it was issued to can");
         assert!(!r.claim(7, 99), "and only once -- a replay is not a second submit");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A token nobody was issued names no pane, so the receipt is
@@ -309,12 +304,11 @@ mod tests {
     /// receipt is dropped rather than credited to a guess.
     #[test]
     fn an_unknown_token_reports_nothing() {
-        let dir = sandbox("unknown");
+        let _sandbox = sandbox();
         let r = Receipts::new();
         assert_eq!(r.record("not-a-token", 99), None, "no session id in it");
         assert_eq!(r.record("7-0000000000000000", 99), None, "right shape, wrong secret");
         assert_eq!(r.unclaimed(), 0);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The session id is read out of the token and then checked
@@ -322,13 +316,12 @@ mod tests {
     /// an id is a small number every pane knows.
     #[test]
     fn a_pane_cannot_report_for_its_neighbour_by_editing_the_id() {
-        let dir = sandbox("neighbour");
+        let _sandbox = sandbox();
         let r = Receipts::new();
         let mine = token(7);
         let forged = mine.replacen("7-", "8-", 1);
         assert_eq!(r.record(&forged, 99), None, "the id must match the token");
         assert_eq!(r.record(&mine, 99), Some(7));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Nothing here may grow with uptime: a pane the user drives by
@@ -336,7 +329,7 @@ mod tests {
     /// those.
     #[test]
     fn unclaimed_receipts_are_bounded() {
-        let dir = sandbox("bounded");
+        let _sandbox = sandbox();
         let r = Receipts::new();
         let t = token(7);
         for n in 0..(MAX_UNCLAIMED as u64 * 3) {
@@ -351,7 +344,6 @@ mod tests {
         // The newest survive: a submit that just happened is the one
         // somebody is about to ask about.
         assert!(r.claim(7, MAX_UNCLAIMED as u64 * 3 - 1));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The whole path, over a real socket: a hook's JSON goes in one
@@ -365,8 +357,8 @@ mod tests {
     #[test]
     fn a_hooks_json_becomes_a_claim_over_the_socket() {
         use std::io::Write as _;
-        let dir = sandbox("e2e");
-        let path = dir.join("s.sock");
+        let sandbox = sandbox();
+        let path = sandbox.path().join("s.sock");
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path).expect("bind");
 
@@ -392,7 +384,6 @@ mod tests {
         );
         // And a different text is a different submit.
         assert!(!r.claim(42, fingerprint("something else")));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Trailing whitespace is not a different submit: a composer may

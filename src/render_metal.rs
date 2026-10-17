@@ -3041,45 +3041,92 @@ mod tests {
         if count == 0 { 1.0 } else { total / count as f64 }
     }
 
+    /// Where the committed baselines live.
+    const SNAPSHOT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bench/font-rendering/snapshots");
+
+    /// What a pixel snapshot test does this run.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum SnapshotMode {
+        /// Compare against the committed baseline; a missing one fails.
+        Check,
+        /// Write the baseline (`MARSPOT_FONT_SNAPSHOT=1`).
+        Record,
+    }
+
+    /// `MARSPOT_FONT_SNAPSHOT`: unset or `check` compares, `1`
+    /// records, `0` skips.  Unset skips only where there are no
+    /// baselines to compare with, and says so.  `None` = skip.
+    fn snapshot_mode() -> Option<SnapshotMode> {
+        let var = std::env::var("MARSPOT_FONT_SNAPSHOT").ok();
+        snapshot_mode_for(var.as_deref(), std::path::Path::new(SNAPSHOT_DIR).is_dir())
+    }
+
+    /// The decision itself, apart from the environment: the snapshot
+    /// tests read the variable while this one's test would be changing
+    /// it, and a `1` read by the wrong test overwrites a baseline.
+    fn snapshot_mode_for(var: Option<&str>, have_baselines: bool) -> Option<SnapshotMode> {
+        match var {
+            Some("1") => Some(SnapshotMode::Record),
+            Some("check") => Some(SnapshotMode::Check),
+            Some("0") => {
+                eprintln!("SKIPPED: MARSPOT_FONT_SNAPSHOT=0");
+                None
+            }
+            Some(other) => panic!("MARSPOT_FONT_SNAPSHOT={other:?}: expected 1, check or 0"),
+            None if !have_baselines => {
+                eprintln!("SKIPPED: no baselines at {SNAPSHOT_DIR}");
+                None
+            }
+            None => Some(SnapshotMode::Check),
+        }
+    }
+
+    /// With baselines in the tree, a run that says nothing compares:
+    /// skipping is asked for, never the default.
+    #[test]
+    fn snapshots_are_compared_unless_told_otherwise() {
+        assert!(std::path::Path::new(SNAPSHOT_DIR).is_dir(), "the baselines are in the tree");
+        assert_eq!(snapshot_mode_for(None, true), Some(SnapshotMode::Check), "unset");
+        assert_eq!(snapshot_mode_for(Some("check"), true), Some(SnapshotMode::Check));
+        assert_eq!(snapshot_mode_for(Some("1"), true), Some(SnapshotMode::Record));
+        assert_eq!(snapshot_mode_for(Some("0"), true), None);
+        assert_eq!(snapshot_mode_for(None, false), None, "nothing to compare with");
+        assert_eq!(
+            snapshot_mode_for(Some("check"), false),
+            Some(SnapshotMode::Check),
+            "asked to compare, it compares, and a missing baseline fails"
+        );
+    }
+
     /// Phase 9 — load a baseline PNG as raw RGBA bytes (matches what
-    /// the snapshot harness produces post-channel-swap).  Returns
-    /// `None` if the file doesn't exist or its dims disagree — caller
-    /// treats a missing baseline as "first-time lock, write only".
+    /// the snapshot harness produces post-channel-swap), or say why
+    /// there is none to compare with.
     fn load_baseline_rgba(
         path: &std::path::Path,
         expected_w: u32,
         expected_h: u32,
-    ) -> Option<Vec<u8>> {
-        let file = std::fs::File::open(path).ok()?;
+    ) -> Result<Vec<u8>, String> {
+        let file = std::fs::File::open(path).map_err(|e| format!("cannot open it: {e}"))?;
         let decoder = png::Decoder::new(std::io::BufReader::new(file));
-        let mut reader = decoder.read_info().ok()?;
+        let mut reader = decoder.read_info().map_err(|e| format!("not a png: {e}"))?;
         let info = reader.info();
         if info.width != expected_w || info.height != expected_h {
-            return None;
+            return Err(format!(
+                "it is {}x{}, the render is {expected_w}x{expected_h}",
+                info.width, info.height
+            ));
         }
-        let mut buf = vec![0u8; reader.output_buffer_size()?];
-        let frame = reader.next_frame(&mut buf).ok()?;
+        let mut buf = vec![0u8; reader.output_buffer_size().ok_or("no buffer size")?];
+        let frame = reader.next_frame(&mut buf).map_err(|e| format!("bad frame: {e}"))?;
         buf.truncate(frame.buffer_size());
         // Force RGBA shape — decoder honours the encoder's RGBA8
-        // setup from `write_snapshot_png` below.  Other shapes would
-        // need a channel pad / expand here; for now reject by None.
+        // setup from `write_snapshot_png` below.
         if frame.color_type != png::ColorType::Rgba {
-            return None;
+            return Err(format!("it is {:?}, not RGBA", frame.color_type));
         }
-        Some(buf)
+        Ok(buf)
     }
 
-    /// Phase 9 — the SSIM gate.
-    /// Snapshot tests call this after producing fresh RGBA bytes:
-    ///   - if `MARSPOT_FONT_SNAPSHOT=check` and a baseline exists,
-    ///     compute SSIM and `assert! > 0.98` — failing means a real
-    ///     visual drift slipped in.
-    ///   - otherwise no-op (writes happen in the caller).
-    ///
-    /// The `check` mode is opt-in so default `cargo nextest` stays
-    /// fast and host-portable (no Metal device → snapshot tests skip
-    /// entirely upstream).  `bin/font-snapshot-check.sh` is the
-    /// wrapper that flips the env and runs the matrix.
     /// The SSIM gate has to be able to fail.
     ///
     /// Every snapshot reading is a number near 1.0, and a comparison
@@ -3112,7 +3159,7 @@ mod tests {
     /// by, and the SSIM gate could never fail twice.  Recording is now
     /// something you ask for.
     fn write_snapshot_png(path: &std::path::Path, rgba: &[u8], w_px: u32, h_px: u32) {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").as_deref() != Ok("1") {
+        if snapshot_mode() != Some(SnapshotMode::Record) {
             return;
         }
         let file = std::fs::File::create(path).expect("create png");
@@ -3124,6 +3171,11 @@ mod tests {
         writer.write_image_data(rgba).expect("png data");
     }
 
+    /// The SSIM gate, run after each snapshot test has its fresh RGBA
+    /// bytes and before anything is written: under `Check` the render
+    /// has to reach `threshold` against the committed baseline, and a
+    /// baseline that is missing or the wrong size fails -- it is not
+    /// a pass.
     fn assert_snapshot_ssim(
         rgba: &[u8],
         baseline_path: &std::path::Path,
@@ -3131,19 +3183,15 @@ mod tests {
         h_px: u32,
         threshold: f64,
     ) {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").as_deref() != Ok("check") {
+        if snapshot_mode() != Some(SnapshotMode::Check) {
             return;
         }
-        let baseline = match load_baseline_rgba(baseline_path, w_px, h_px) {
-            Some(b) => b,
-            None => {
-                eprintln!(
-                    "[ssim] no baseline at {} (or dim mismatch) — skipping check",
-                    baseline_path.display()
-                );
-                return;
-            }
-        };
+        let baseline = load_baseline_rgba(baseline_path, w_px, h_px).unwrap_or_else(|why| {
+            panic!(
+                "no usable baseline at {}: {why}; record one with MARSPOT_FONT_SNAPSHOT=1",
+                baseline_path.display()
+            )
+        });
         let s = ssim_luma(rgba, &baseline, w_px, h_px);
         eprintln!(
             "[ssim] {} = {:.4} (threshold {:.4})",
@@ -3162,9 +3210,8 @@ mod tests {
 
     /// Font v5 snapshot — renders the dev-panel canvas with the
     /// `Font v5` section active, encodes the BGRA framebuffer to a
-    /// PNG, and writes it to disk for manual eyeball.  Opt-in via
-    /// the `MARSPOT_FONT_SNAPSHOT` env var so the suite still runs
-    /// quickly when nobody asks for a snapshot.
+    /// PNG, and compares it with the committed baseline (see
+    /// `snapshot_mode` for what `MARSPOT_FONT_SNAPSHOT` changes).
     ///
     /// Workflow:
     ///   MARSPOT_FONT_SNAPSHOT=1 cargo nextest run -p marspot --lib \
@@ -3177,13 +3224,13 @@ mod tests {
     /// under `bench/remote-runs/`).
     #[test]
     fn font_v5_showcase_snapshot() {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+        if snapshot_mode().is_none() {
             return;
         }
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("skip (no Metal): {e}");
+                eprintln!("SKIPPED: no Metal device: {e}");
                 return;
             }
         };
@@ -3236,7 +3283,7 @@ mod tests {
             rgba[i + 3] = bytes[i + 3]; // A
         }
 
-        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_showcase.png");
         // Phase 9 — `=check` runs SSIM vs the committed baseline BEFORE
@@ -3257,26 +3304,22 @@ mod tests {
     /// + kerning/ligature lines) as a single PNG so a reviewer can
     ///
     /// eyeball it AND a future SSIM gate can diff it byte-for-byte
-    /// against a frozen baseline.  Same opt-in shape as
-    /// `font_v5_showcase_snapshot` (env-gated so default test runs
-    /// stay fast).  Output:
+    /// against a frozen baseline.  Same modes as
+    /// `font_v5_showcase_snapshot`.  Output:
     ///   bench/font-rendering/snapshots/font_v5_mono_grid.png
     ///
     /// Workflow:
     ///   MARSPOT_FONT_SNAPSHOT=1 cargo nextest run -p marspot --lib \
     ///     font_v5_mono_grid_snapshot
-    ///
-    /// The SSIM > 0.98 gate lives in a follow-up — this commit only
-    /// fixes the rendered bytes.
     #[test]
     fn font_v5_mono_grid_snapshot() {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+        if snapshot_mode().is_none() {
             return;
         }
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("skip (no Metal): {e}");
+                eprintln!("SKIPPED: no Metal device: {e}");
                 return;
             }
         };
@@ -3343,7 +3386,7 @@ mod tests {
             rgba[i + 3] = bytes[i + 3];
         }
 
-        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_mono_grid.png");
         // Phase 9 — SSIM gate (see assert_snapshot_ssim doc).
@@ -3367,19 +3410,19 @@ mod tests {
     /// drop instead of being noticed by the user months later.
     ///
     /// Same env triplet as the other snapshots (`MARSPOT_FONT_SNAPSHOT`):
-    /// unset → skip, =1 → write PNG fixture, =check → SSIM ≥ 0.98
+    /// =0 → skip, =1 → write PNG fixture, unset or =check → SSIM ≥ 0.98
     /// vs the committed baseline.  Bypassed by SF Pro / variable
     /// weight (those are covered by `font_v5_showcase_snapshot`);
     /// this one is purely the Monaco custom-raster path.
     #[test]
     fn font_v5_box_drawing_snapshot() {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+        if snapshot_mode().is_none() {
             return;
         }
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("skip (no Metal): {e}");
+                eprintln!("SKIPPED: no Metal device: {e}");
                 return;
             }
         };
@@ -3444,7 +3487,7 @@ mod tests {
             rgba[i + 3] = bytes[i + 3];
         }
 
-        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_box_drawing.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
@@ -3473,13 +3516,13 @@ mod tests {
     /// covered as a row inside `font_v5_showcase_snapshot`.
     #[test]
     fn font_v5_subpx_fingerprint_snapshot() {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+        if snapshot_mode().is_none() {
             return;
         }
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("skip (no Metal): {e}");
+                eprintln!("SKIPPED: no Metal device: {e}");
                 return;
             }
         };
@@ -3548,7 +3591,7 @@ mod tests {
             rgba[i + 3] = bytes[i + 3];
         }
 
-        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_subpx_fingerprint.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
@@ -3577,13 +3620,13 @@ mod tests {
     /// vertically for cell-pitch / x-height drift.
     #[test]
     fn font_v5_chrome_small_sizes_snapshot() {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+        if snapshot_mode().is_none() {
             return;
         }
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("skip (no Metal): {e}");
+                eprintln!("SKIPPED: no Metal device: {e}");
                 return;
             }
         };
@@ -3674,7 +3717,7 @@ mod tests {
             rgba[i + 3] = bytes[i + 3];
         }
 
-        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_chrome_small_sizes.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
@@ -3701,13 +3744,13 @@ mod tests {
     /// metrics re-sync surfaces as an SSIM hit.
     #[test]
     fn font_v5_cjk_fallback_baseline_snapshot() {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+        if snapshot_mode().is_none() {
             return;
         }
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("skip (no Metal): {e}");
+                eprintln!("SKIPPED: no Metal device: {e}");
                 return;
             }
         };
@@ -3780,7 +3823,7 @@ mod tests {
             rgba[i + 3] = bytes[i + 3];
         }
 
-        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_cjk_fallback_baseline.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
@@ -3809,13 +3852,13 @@ mod tests {
     /// switching between alpha + colour atlas mid-line is exercised.
     #[test]
     fn font_v5_emoji_color_snapshot() {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+        if snapshot_mode().is_none() {
             return;
         }
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("skip (no Metal): {e}");
+                eprintln!("SKIPPED: no Metal device: {e}");
                 return;
             }
         };
@@ -3884,7 +3927,7 @@ mod tests {
             rgba[i + 3] = bytes[i + 3];
         }
 
-        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_emoji_color.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
@@ -3915,13 +3958,13 @@ mod tests {
     ///   `AVA WAV LTL`  — wide-kern letter triples
     #[test]
     fn font_v5_opentype_opts_snapshot() {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+        if snapshot_mode().is_none() {
             return;
         }
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("skip (no Metal): {e}");
+                eprintln!("SKIPPED: no Metal device: {e}");
                 return;
             }
         };
@@ -4008,7 +4051,7 @@ mod tests {
             rgba[i + 3] = bytes[i + 3];
         }
 
-        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_opentype_opts.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
@@ -4035,13 +4078,13 @@ mod tests {
     /// glyph bleed across the selection edge, BG layering preserved.
     #[test]
     fn font_v5_terminal_scene_snapshot() {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+        if snapshot_mode().is_none() {
             return;
         }
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("skip (no Metal): {e}");
+                eprintln!("SKIPPED: no Metal device: {e}");
                 return;
             }
         };
@@ -4157,7 +4200,7 @@ mod tests {
             rgba[i + 3] = bytes[i + 3];
         }
 
-        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_terminal_scene.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
@@ -4185,13 +4228,13 @@ mod tests {
     ///       shadow blur (modal-on-modal, popover-on-popover)
     #[test]
     fn font_v5_chrome_decoration_snapshot() {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+        if snapshot_mode().is_none() {
             return;
         }
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("skip (no Metal): {e}");
+                eprintln!("SKIPPED: no Metal device: {e}");
                 return;
             }
         };
@@ -4315,7 +4358,7 @@ mod tests {
             rgba[i + 3] = bytes[i + 3];
         }
 
-        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_chrome_decoration.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
@@ -4339,13 +4382,13 @@ mod tests {
     /// this covers the composed surface that components live in.
     #[test]
     fn devpanel_components_catalog_snapshot() {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+        if snapshot_mode().is_none() {
             return;
         }
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("skip (no Metal): {e}");
+                eprintln!("SKIPPED: no Metal device: {e}");
                 return;
             }
         };
@@ -4385,7 +4428,7 @@ mod tests {
             rgba[i + 3] = bytes[i + 3];
         }
 
-        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("devpanel_components_catalog.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
@@ -4407,13 +4450,13 @@ mod tests {
     /// hit instead of going unnoticed for weeks.
     #[test]
     fn devpanel_typography_snapshot() {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+        if snapshot_mode().is_none() {
             return;
         }
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("skip (no Metal): {e}");
+                eprintln!("SKIPPED: no Metal device: {e}");
                 return;
             }
         };
@@ -4453,7 +4496,7 @@ mod tests {
             rgba[i + 3] = bytes[i + 3];
         }
 
-        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("devpanel_typography.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
@@ -4475,13 +4518,13 @@ mod tests {
     /// to cover the dev panel design system at 3 different sub-trees.
     #[test]
     fn devpanel_architecture_snapshot() {
-        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+        if snapshot_mode().is_none() {
             return;
         }
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("skip (no Metal): {e}");
+                eprintln!("SKIPPED: no Metal device: {e}");
                 return;
             }
         };
@@ -4521,7 +4564,7 @@ mod tests {
             rgba[i + 3] = bytes[i + 3];
         }
 
-        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("devpanel_architecture.png");
         assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
@@ -4556,7 +4599,10 @@ mod tests {
 
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
-            Err(_) => return, // no Metal on this machine
+            Err(e) => {
+                eprintln!("SKIPPED: no Metal device: {e}");
+                return;
+            }
         };
         // Shared storage so the CPU can read it back without a blit —
         // the thing the old comment said was missing.
@@ -4573,7 +4619,7 @@ mod tests {
         desc.setStorageMode(objc2_metal::MTLStorageMode::Shared);
         let target = match device.newTextureWithDescriptor(&desc) {
             Some(t) => t,
-            None => return,
+            None => panic!("a Metal device that cannot make a 320x160 shared texture"),
         };
 
         let (cell_w, cell_h) = renderer.cell_dims();
@@ -4689,7 +4735,10 @@ mod tests {
 
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
-            Err(_) => return, // no Metal on this machine
+            Err(e) => {
+                eprintln!("SKIPPED: no Metal device: {e}");
+                return;
+            }
         };
         let device = renderer.device().to_owned();
         let target = |w: usize, h: usize| {
@@ -4763,7 +4812,10 @@ mod tests {
     fn the_instance_pool_grows_once_and_then_stops_allocating() {
         let device = match system_default_device() {
             Ok(d) => d,
-            Err(_) => return, // no Metal on this machine
+            Err(e) => {
+                eprintln!("SKIPPED: no Metal device: {e}");
+                return;
+            }
         };
         let mut pool = InstanceBufferPool::default();
         let _ = take_instance_buffer_cost();
@@ -5109,7 +5161,10 @@ mod tests {
         use crate::layout::Layout;
         let device = match system_default_device() {
             Ok(d) => d,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("SKIPPED: no Metal device: {e}");
+                return;
+            }
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas =
@@ -5222,7 +5277,10 @@ mod tests {
     fn a_glyph_is_drawn_the_same_whatever_sits_next_to_it() {
         let device = match system_default_device() {
             Ok(d) => d,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("SKIPPED: no Metal device: {e}");
+                return;
+            }
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas =
@@ -5285,7 +5343,13 @@ mod tests {
     #[test]
     fn fonts_rebuild_only_when_the_scale_actually_moves() {
         let saved = crate::ui::chrome_scale();
-        let Ok(mut r) = MetalRenderer::new_headless() else { return };
+        let mut r = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SKIPPED: no Metal device: {e}");
+                return;
+            }
+        };
         let (w0, h0) = r.cell_dims();
 
         assert!(!r.rebuild_fonts_if_scale_changed(), "nothing moved");
@@ -5317,7 +5381,10 @@ mod tests {
         use crate::layout::Layout;
         let device = match system_default_device() {
             Ok(d) => d,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("SKIPPED: no Metal device: {e}");
+                return;
+            }
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas =
@@ -5487,7 +5554,10 @@ mod tests {
 
         let device = match system_default_device() {
             Ok(d) => d,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("SKIPPED: no Metal device: {e}");
+                return;
+            }
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas =
@@ -5569,7 +5639,10 @@ mod tests {
 
         let device = match system_default_device() {
             Ok(d) => d,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("SKIPPED: no Metal device: {e}");
+                return;
+            }
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas =
@@ -5655,7 +5728,10 @@ mod tests {
 
         let device = match system_default_device() {
             Ok(d) => d,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("SKIPPED: no Metal device: {e}");
+                return;
+            }
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas =
@@ -5766,7 +5842,10 @@ mod tests {
 
         let device = match system_default_device() {
             Ok(d) => d,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("SKIPPED: no Metal device: {e}");
+                return;
+            }
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas =
@@ -6289,7 +6368,7 @@ mod tests {
         use crate::ui::core::{Canvas, ParentRect, Color, Length};
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
-            Err(e) => { eprintln!("skip (no Metal): {e}"); return; }
+            Err(e) => { eprintln!("SKIPPED: no Metal device: {e}"); return; }
         };
         let (w, h) = (16u32, 16u32);
         for (alpha, want) in [(1.0_f64, 255.0_f64), (0.5, 127.5), (0.25, 63.75)] {
@@ -6322,7 +6401,7 @@ mod tests {
         use crate::ui::core::{Canvas, ParentRect, Color, Length};
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
-            Err(e) => { eprintln!("skip (no Metal): {e}"); return; }
+            Err(e) => { eprintln!("SKIPPED: no Metal device: {e}"); return; }
         };
         let w = 8u32;
         let h = 8u32;
@@ -6373,7 +6452,7 @@ mod tests {
         // doesn't render — it just probes the run-grouping logic.
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
-            Err(e) => { eprintln!("skip (no Metal): {e}"); return; }
+            Err(e) => { eprintln!("SKIPPED: no Metal device: {e}"); return; }
         };
         let mut ui = Vec::new();
         let mut gl = Vec::new();
