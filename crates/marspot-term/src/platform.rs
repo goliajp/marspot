@@ -1,8 +1,8 @@
-//! The three things this crate asks the operating system that are not
-//! the same call on every one.
+//! The things this crate asks the operating system that are not the
+//! same call on every one.
 //!
-//! Everything else here is POSIX and compiles anywhere. These three
-//! were written straight against Darwin's libc, which is why the
+//! Everything else here is POSIX and compiles anywhere. The first of
+//! these were written straight against Darwin's libc, which is why the
 //! "zero-GUI engine" -- the crate `marspot-session` is built from, and
 //! the one a second platform would reuse whole -- did not build on
 //! Linux at all.
@@ -12,6 +12,7 @@
 //! | question | macOS | Linux |
 //! |---|---|---|
 //! | what executable is this pid running? | `proc_pidpath` | `/proc/<pid>/exe` |
+//! | when did this pid start? | `proc_pidinfo` BSD info | `/proc/<pid>/stat` + boot time |
 //! | what pids exist? | `proc_listallpids` | the numeric entries of `/proc` |
 //! | swap the environment before exec | `*_NSGetEnviron() = p` | `environ = p` |
 //!
@@ -32,22 +33,81 @@
 /// ask. On Linux reading another user's `/proc/<pid>/exe` gives
 /// EACCES, which is exactly the macOS sandbox case: being refused is
 /// itself evidence the pid is not our child.
-#[cfg(target_os = "macos")]
 pub fn pid_exe_name(pid: i32) -> Option<String> {
+    Some(pid_exe_path(pid)?.file_name()?.to_string_lossy().into_owned())
+}
+
+/// The path of the executable `pid` is running, or `None`, with the
+/// same failure rule as [`pid_exe_name`].
+#[cfg(target_os = "macos")]
+pub fn pid_exe_path(pid: i32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
     let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let n =
         unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
     if n <= 0 {
         return None;
     }
-    let path = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
-    Some(path.rsplit('/').next().unwrap_or("").to_string())
+    Some(std::ffi::OsStr::from_bytes(&buf[..n as usize]).into())
 }
 
 #[cfg(target_os = "linux")]
-pub fn pid_exe_name(pid: i32) -> Option<String> {
-    let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    Some(path.file_name()?.to_string_lossy().into_owned())
+pub fn pid_exe_path(pid: i32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+/// When `pid` started, microseconds since the epoch, or `None` when no
+/// process has that pid or we may not ask.
+#[cfg(target_os = "macos")]
+pub fn pid_start_us(pid: i32) -> Option<u64> {
+    if pid <= 0 {
+        return None;
+    }
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    let r = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if r != size {
+        return None;
+    }
+    Some(
+        info.pbi_start_tvsec
+            .saturating_mul(1_000_000)
+            .saturating_add(info.pbi_start_tvusec),
+    )
+}
+
+/// Linux keeps the start in clock ticks since boot, and the boot time
+/// in whole seconds, so this is accurate to about one second.
+#[cfg(target_os = "linux")]
+pub fn pid_start_us(pid: i32) -> Option<u64> {
+    if pid <= 0 {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // comm may contain spaces and parentheses: fields resume after the last ')'
+    let rest = &stat[stat.rfind(')')? + 1..];
+    // rest[0] is field 3 (state), so field 22 (starttime) is rest[19]
+    let ticks: u64 = rest.split_whitespace().nth(19)?.parse().ok()?;
+    let boot = std::fs::read_to_string("/proc/stat").ok()?;
+    let btime: u64 = boot
+        .lines()
+        .find_map(|l| l.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if hz <= 0 {
+        return None;
+    }
+    Some(btime * 1_000_000 + ticks * 1_000_000 / hz as u64)
 }
 
 /// Every pid on the machine, or `None` when the question could not be
@@ -238,6 +298,23 @@ mod tests {
         );
         // Above the system maximum, so it is not merely unused.
         assert_eq!(pid_exe_name(i32::MAX), None, "an impossible pid");
+    }
+
+    #[test]
+    fn our_start_time_is_in_the_past_and_an_impossible_pid_has_none() {
+        let me = std::process::id() as i32;
+        let start = pid_start_us(me).expect("our own start time");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+        assert!(start <= now + 1_000_000, "started {start} after now {now}");
+        assert!(
+            now.saturating_sub(start) < 24 * 3600 * 1_000_000,
+            "a test process older than a day: {start}"
+        );
+        assert_eq!(pid_start_us(i32::MAX), None);
+        assert_eq!(pid_start_us(0), None);
     }
 
     #[test]

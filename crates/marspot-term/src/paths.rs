@@ -34,6 +34,11 @@ pub fn state_root() -> PathBuf {
     if let Some(dir) = std::env::var_os("MARSPOT_STATE_DIR") {
         return PathBuf::from(dir);
     }
+    default_state_root()
+}
+
+/// The state root of a process that has no `MARSPOT_STATE_DIR`.
+pub fn default_state_root() -> PathBuf {
     home().join("Library/Application Support/marspot")
 }
 

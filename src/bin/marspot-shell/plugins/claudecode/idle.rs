@@ -100,20 +100,16 @@ pub(super) fn is_resting_helper(row: &pidtree::ProcRow, has_children: bool) -> b
 
 /// Does this session have work of its own running?
 ///
-/// Cheap: one pass over the descendants the scan already walked.
-pub fn has_work_in_flight(claude_pid: i32, procs: &[pidtree::ProcRow]) -> bool {
-    let descendants = pidtree::descendants_of(claude_pid, procs);
+/// Cheap: lookups in the observation's indexed table.
+pub fn has_work_in_flight(claude_pid: i32, table: &pidtree::ProcTable) -> bool {
+    let descendants = table.descendants(claude_pid);
+    let has_children = |pid: i32| table.children(pid).next().is_some();
     descendants.iter().any(|d| {
         // A helper's own children (rust-analyzer's proc-macro server)
         // ride along with it; judge each row on its own name first.
-        let has_children = procs.iter().any(|p| p.ppid == d.pid);
-        !is_resting_helper(d, has_children)
+        !is_resting_helper(d, has_children(d.pid))
             && !descendants.iter().any(|parent| {
-                parent.pid == d.ppid
-                    && is_resting_helper(
-                        parent,
-                        procs.iter().any(|p| p.ppid == parent.pid),
-                    )
+                parent.pid == d.ppid && is_resting_helper(parent, has_children(parent.pid))
             })
     })
 }
@@ -287,15 +283,11 @@ pub(super) fn should_hibernate(e: IdleEvidence, threshold: Duration) -> bool {
         && e.cpu_delta_ns <= IDLE_CPU_TOLERANCE_NS
 }
 
-/// The pane's shell pid, straight from the registry.  0 when the
-/// session is gone — the callers treat that as "cannot tell", which is
-/// the honest reading.
+/// The pane's shell pid, from the registry as last observed.  0 when
+/// the session is gone — the callers treat that as "cannot tell", which
+/// is the honest reading.
 pub(super) fn shell_pid_for(sid: u64) -> i32 {
-    marspot_term::session_registry::list_session_entries()
-        .into_iter()
-        .find(|e| e.id == sid)
-        .map(|e| e.shell_child_pid)
-        .unwrap_or(0)
+    crate::observe::shared().latest().shell_pid(sid)
 }
 
 /// What this plugin reports for a pane it has no live binding in.
@@ -497,7 +489,8 @@ pub(super) const WAKE_WATCHDOG: Duration = Duration::from_secs(30);
 pub(super) fn reclaim_op(
     uuid: &str,
     config_dir: Option<&str>,
-    claude_pid: i32,
+    // None for a re-armed run, which starts at the park
+    claude: Option<pidtree::ProcId>,
     shell_pid: i32,
     // where the session lives, so bringing it back does not move it
     project_dir: Option<&str>,
@@ -536,8 +529,7 @@ pub(super) fn reclaim_op(
     // person had typed and not sent lives in the process being parked,
     // so it is read now and handed back when the new one has painted.
     let held = pty_op::Job::new();
-    Some(
-        pty_op::PtyOp::new("cc.reclaim")
+    let mut op = pty_op::PtyOp::new("cc.reclaim")
             .hold_screen(true)
             // Same rule as the switch: the person's half-written
             // sentence travels, marspot's own words do not.
@@ -560,12 +552,12 @@ pub(super) fn reclaim_op(
             // none, and sent together the signal wins — claude's parting
             // `Resume this session with: …` and the shell's prompt both
             // land on screen.
-            .step(pty_op::Step::settle(HOLD_SETTLE).named("hold_settle"))
-            .step(
-                pty_op::Step::terminate(claude_pid, libc::SIGTERM)
-                    .escalate_after(Duration::from_secs(3), libc::SIGKILL),
-            )
-            .step(pty_op::Step::await_user().named(RECLAIM_PARK_LABEL))
+            .step(pty_op::Step::settle(HOLD_SETTLE).named("hold_settle"));
+    if let Some(id) = claude {
+        op = op.step(pty_op::Step::terminate(id, libc::SIGTERM).escalate_after(Duration::from_secs(3), libc::SIGKILL));
+    }
+    Some(
+        op.step(pty_op::Step::await_user().named(RECLAIM_PARK_LABEL))
             // Between parking and the user coming back, the session can
             // return by other means — a second wake armed on the same
             // pane, the user starting it themselves.  Typing then puts
@@ -626,7 +618,7 @@ mod park_label_tests {
     /// than trusted.
     #[test]
     fn the_park_step_answers_to_its_name() {
-        let op = reclaim_op("aaaa-bbbb", None, 0, 1234, None, &CliChoice::default()).expect("a script");
+        let op = reclaim_op("aaaa-bbbb", None, None, 1234, None, &CliChoice::default()).expect("a script");
         let at = op.index_of(RECLAIM_PARK_LABEL).expect("the park step is named");
         assert!(at > 0, "the park is not the first step; it follows the teardown");
         assert_eq!(op.index_of("no-such-step"), None, "and the lookup can fail");

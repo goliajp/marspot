@@ -27,8 +27,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use marspot::pane_state::{Activity, Change, Generic, Observation, PaneMachine, PaneStatus};
 use marspot::pidtree;
 
-/// How often the machines are stepped.  Rides `poll_supervisor`'s
-/// ~250 ms cadence but gates itself to this, so the syscall cost is
+/// How often the machines are stepped.  Rides `poll_supervisor`, which
+/// runs on the 1 s redraw pump plus every knock, and gates itself to
+/// this, so the syscall cost is
 /// ~2-4 per pane per second — the same order as L2's cwd sweep.
 ///
 /// This is also the machine's clock: `CONFIRM_TICKS` agreeing
@@ -106,6 +107,9 @@ pub struct PaneStateTracker {
     /// output, which is the bluntest "is anything happening" signal
     /// there is.
     pty_bytes: HashMap<u64, (u64, Instant)>,
+    /// Sessions whose bytelog could not be stat'ed for a reason other
+    /// than its absence, so the failure is logged once per spell.
+    stat_failing: std::collections::HashSet<u64>,
     /// Clocks an earlier process left behind, consumed as each pane's
     /// state is re-confirmed.  Entries are removed once used or once
     /// contradicted, so a stale one cannot be applied twice.
@@ -132,6 +136,7 @@ impl PaneStateTracker {
         Self {
             machines: HashMap::new(),
             pty_bytes: HashMap::new(),
+            stat_failing: std::collections::HashSet::new(),
             restorable: HashMap::new(),
             restorable_bytes: HashMap::new(),
             reported: HashMap::new(),
@@ -157,13 +162,38 @@ impl PaneStateTracker {
         let path = marspot_term::paths::sessions_dir()
             .join(sid.to_string())
             .join("bytelog");
-        // No bytelog at all — a pane that has never had a PTY behind
-        // it, or a test harness — says nothing, and "says nothing" is
-        // quiet.  Reading a missing file as "just spoke" would freeze
-        // every such pane at busy forever.
-        let Ok(size) = std::fs::metadata(&path).map(|m| m.len()) else {
-            self.pty_bytes.remove(&sid);
-            return true;
+        let size = std::fs::metadata(&path).map(|m| m.len());
+        self.pty_quiet_with(sid, now, size)
+    }
+
+    /// [`pty_quiet`](Self::pty_quiet) with the bytelog's size, or why
+    /// it could not be read, already in hand.
+    fn pty_quiet_with(&mut self, sid: u64, now: Instant, size: std::io::Result<u64>) -> bool {
+        let size = match size {
+            Ok(n) => {
+                self.stat_failing.remove(&sid);
+                n
+            }
+            // No bytelog at all — a pane that has never had a PTY behind
+            // it, or a test harness — says nothing, and "says nothing" is
+            // quiet.  Reading a missing file as "just spoke" would freeze
+            // every such pane at busy forever.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.stat_failing.remove(&sid);
+                self.pty_bytes.remove(&sid);
+                return true;
+            }
+            // Any other failure says nothing about the pane: what was
+            // known stands, and a pane never measured is not quiet.
+            Err(e) => {
+                if self.stat_failing.insert(sid) {
+                    marspot::lx_warn!("shell.pane_state.bytelog_unreadable", &format!("{e}"), sid = sid);
+                }
+                return self
+                    .pty_bytes
+                    .get(&sid)
+                    .is_some_and(|(_, since)| now.duration_since(*since) >= PTY_QUIET_AFTER);
+            }
         };
         let seed = match self.restorable_bytes.remove(&sid) {
             // Same size the previous process recorded: this pane has
@@ -284,11 +314,16 @@ impl PaneStateTracker {
             return None;
         }
         self.last_sweep = Some(now);
-        let panes: Vec<(u64, i32)> = marspot_term::session_registry::list_session_entries()
-            .into_iter()
-            .map(|e| (e.id, e.shell_child_pid))
-            .collect();
-        let changes = self.sweep_with(panes, now, pidtree::observe_pane);
+        // The registry as the observer last read it, at most
+        // `observe::INTERVAL` old: a pane that just opened joins a sweep
+        // or two late, which no threshold here can notice.  The probe
+        // stays live per sweep — it is what reads who owns the tty now.
+        let obs = crate::observe::shared().latest();
+        let panes: Vec<(u64, i32)> =
+            obs.sessions.iter().map(|s| (s.entry.id, s.entry.shell_child_pid)).collect();
+        // a shell pid of 0 or 1 is an entry without one, not launchd
+        let probe = |pid: i32| if pid > 1 { pidtree::observe_pane(pid) } else { Generic::Unknown };
+        let changes = self.sweep_with(panes, now, probe);
         // Write only when something moved: in steady state this is a
         // sweep that touches no disk at all, which is what lets it run
         // once a second forever.
@@ -352,6 +387,7 @@ impl PaneStateTracker {
         self.machines.retain(|sid, _| live.contains(sid));
         self.reported.retain(|sid, _| live.contains(sid));
         self.pty_bytes.retain(|sid, _| live.contains(sid));
+        self.stat_failing.retain(|sid| live.contains(sid));
         changes
     }
 }
@@ -669,5 +705,31 @@ mod tests {
             |_| fg(),
         );
         assert_eq!(out.last().unwrap().change.to, PaneStatus::AwaitingUser);
+    }
+
+    /// Only a missing bytelog says "this pane is silent"; a stat that
+    /// fails for any other reason says nothing, and what was known
+    /// stands.
+    #[test]
+    fn only_a_missing_bytelog_reads_as_quiet() {
+        use std::io::{Error, ErrorKind};
+        let base = Instant::now();
+        let later = base + PTY_QUIET_AFTER + Duration::from_secs(1);
+        let mut t = PaneStateTracker::new();
+        let denied = || Err(Error::from(ErrorKind::PermissionDenied));
+
+        assert!(!t.pty_quiet_with(1, base, denied()), "never measured is not quiet");
+        assert!(!t.pty_quiet_with(1, later, Err(Error::other("io"))));
+
+        assert!(!t.pty_quiet_with(2, base, Ok(10)), "just spoke");
+        assert!(!t.pty_quiet_with(2, base + Duration::from_secs(1), denied()), "still the last word");
+        assert!(t.pty_quiet_with(2, later, denied()), "the silent clock kept running");
+        assert!(!t.pty_quiet_with(2, later, Ok(11)), "and a real read still counts");
+        assert!(!t.pty_quiet_with(2, later, denied()), "a failure keeps the new state");
+
+        assert!(t.pty_quiet_with(2, later, Err(Error::from(ErrorKind::NotFound))));
+        assert!(t.pty_quiet_with(3, base, Err(Error::from(ErrorKind::NotFound))));
+        assert!(!t.pty_bytes.contains_key(&2), "a missing log forgets the pane's count");
+        assert!(!t.stat_failing.contains(&2), "and ends the failure spell");
     }
 }

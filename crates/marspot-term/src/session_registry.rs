@@ -23,6 +23,12 @@ use std::path::{Path, PathBuf};
 
 use crate::paths::sessions_dir;
 
+mod cache;
+mod entry;
+
+pub use cache::{RegistryCache, entry_is_live, entry_is_live_with};
+pub use entry::{SessionEntry, parse_session_entry_text, read_session_entry, write_session_entry};
+
 /// File holding the next session id to allocate. Lives inside
 /// `sessions_dir()` so it shares the directory's lifecycle.
 fn next_id_path() -> PathBuf {
@@ -244,159 +250,6 @@ pub fn scrollback_idx_path(id: u64) -> PathBuf {
     session_dir(id).join("scrollback.idx")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionEntry {
-    pub id: u64,
-    pub pid: i32,
-    pub socket: PathBuf,
-    pub cols: u16,
-    pub rows: u16,
-    pub title: String,
-    pub cwd: String,
-    pub proto_version: u32,
-    pub created_at_unix: u64,
-    /// RFC-003 Amendment 7: shm region name the L3 publishes into.
-    /// A freshly-spawned L2 after a silent-update swap can shm_open
-    /// this name to reattach to a surviving L3's framebuffer (the fd
-    /// doesn't survive the swap; the name does).  Empty string =
-    /// legacy entry written before this field existed.
-    pub shm_name: String,
-    /// RFC-003 §6 cc: the L3's forkpty child PID (the zsh / login
-    /// shell at the other end of the PTY).  L1-side plugins
-    /// (claudecode, future ones) walk pidtree from this pid to find
-    /// descendants like `claude` they want to badge / send input to.
-    /// `0` = legacy entry written before this field existed.
-    pub shell_child_pid: i32,
-}
-
-fn quote(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
-}
-
-fn unquote(raw: &str) -> Option<String> {
-    let raw = raw.trim();
-    if raw.len() < 2 || !raw.starts_with('"') || !raw.ends_with('"') {
-        return None;
-    }
-    let inner = &raw[1..raw.len() - 1];
-    Some(inner.replace("\\\"", "\"").replace("\\\\", "\\"))
-}
-
-/// Write the entry atomically: serialize → tempfile + rename. On any
-/// failure the previous entry (or no entry) is what stays on disk.
-pub fn write_session_entry(entry: &SessionEntry) -> io::Result<()> {
-    let dir = session_dir(entry.id);
-    std::fs::create_dir_all(&dir)?;
-    let path = session_entry_path(entry.id);
-    let tmp = path.with_extension("toml.tmp");
-    let mut s = String::new();
-    use std::fmt::Write;
-    writeln!(s, "# marspot session registry entry — RFC-003").ok();
-    writeln!(s, "id = {}", entry.id).ok();
-    writeln!(s, "pid = {}", entry.pid).ok();
-    writeln!(s, "socket = {}", quote(&entry.socket.to_string_lossy())).ok();
-    writeln!(s, "cols = {}", entry.cols).ok();
-    writeln!(s, "rows = {}", entry.rows).ok();
-    writeln!(s, "title = {}", quote(&entry.title)).ok();
-    writeln!(s, "cwd = {}", quote(&entry.cwd)).ok();
-    writeln!(s, "proto_version = {}", entry.proto_version).ok();
-    writeln!(s, "created_at_unix = {}", entry.created_at_unix).ok();
-    writeln!(s, "shm_name = {}", quote(&entry.shm_name)).ok();
-    writeln!(s, "shell_child_pid = {}", entry.shell_child_pid).ok();
-    std::fs::write(&tmp, s)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
-}
-
-fn invalid<T: Into<String>>(msg: T) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, msg.into())
-}
-
-/// Parse one entry.toml. Tolerates unknown fields and blank/comment
-/// lines; rejects only when a required field is missing or the value
-/// can't be parsed at its declared type.
-pub fn parse_session_entry_text(contents: &str) -> io::Result<SessionEntry> {
-    use std::collections::HashMap;
-    let mut fields: HashMap<&str, &str> = HashMap::new();
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some(eq) = line.find('=') else { continue };
-        let key = line[..eq].trim();
-        let val = line[eq + 1..].trim();
-        fields.insert(key, val);
-    }
-    let req_str = |k: &str| -> io::Result<String> {
-        let raw = fields
-            .get(k)
-            .ok_or_else(|| invalid(format!("missing {k}")))?;
-        unquote(raw).ok_or_else(|| invalid(format!("{k} not quoted")))
-    };
-    let req_num = |k: &str| -> io::Result<u64> {
-        let raw = fields
-            .get(k)
-            .ok_or_else(|| invalid(format!("missing {k}")))?;
-        raw.parse::<u64>()
-            .map_err(|e| invalid(format!("bad {k}: {e}")))
-    };
-    let req_i32 = |k: &str| -> io::Result<i32> {
-        let raw = fields
-            .get(k)
-            .ok_or_else(|| invalid(format!("missing {k}")))?;
-        raw.parse::<i32>()
-            .map_err(|e| invalid(format!("bad {k}: {e}")))
-    };
-    let req_u16 = |k: &str| -> io::Result<u16> {
-        let raw = fields
-            .get(k)
-            .ok_or_else(|| invalid(format!("missing {k}")))?;
-        raw.parse::<u16>()
-            .map_err(|e| invalid(format!("bad {k}: {e}")))
-    };
-    let req_u32 = |k: &str| -> io::Result<u32> {
-        let raw = fields
-            .get(k)
-            .ok_or_else(|| invalid(format!("missing {k}")))?;
-        raw.parse::<u32>()
-            .map_err(|e| invalid(format!("bad {k}: {e}")))
-    };
-    // Optional field for back-compat with entries written before
-    // Amendment 7 added shm_name.  Missing / unquoted = "".
-    let opt_str = |k: &str| -> String {
-        fields
-            .get(k)
-            .and_then(|raw| unquote(raw))
-            .unwrap_or_default()
-    };
-    let opt_i32 = |k: &str| -> i32 {
-        fields
-            .get(k)
-            .and_then(|raw| raw.parse::<i32>().ok())
-            .unwrap_or(0)
-    };
-    Ok(SessionEntry {
-        id: req_num("id")?,
-        pid: req_i32("pid")?,
-        socket: PathBuf::from(req_str("socket")?),
-        cols: req_u16("cols")?,
-        rows: req_u16("rows")?,
-        title: req_str("title")?,
-        cwd: req_str("cwd")?,
-        proto_version: req_u32("proto_version")?,
-        created_at_unix: req_num("created_at_unix")?,
-        shm_name: opt_str("shm_name"),
-        shell_child_pid: opt_i32("shell_child_pid"),
-    })
-}
-
-pub fn read_session_entry(id: u64) -> io::Result<SessionEntry> {
-    let contents = std::fs::read_to_string(session_entry_path(id))?;
-    parse_session_entry_text(&contents)
-}
-
 /// Remove this session's whole directory tree (entry.toml + sock +
 /// bytelog). Called when L2 has confirmed the L3 is dead and the
 /// session id is being retired.
@@ -536,11 +389,10 @@ fn is_session_dir(p: &Path) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
     use std::ffi::OsString;
-    use std::sync::{Arc, Barrier, Mutex};
-    use std::thread;
+    use std::sync::Mutex;
 
     // Tests in this module share one process-global env var
     // (MARSPOT_STATE_DIR), so cargo's parallel test scheduler would
@@ -548,13 +400,13 @@ mod tests {
     // crate dependency needed.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    struct StateDirGuard {
+    pub(crate) struct StateDirGuard {
         prev: Option<OsString>,
         _lock: std::sync::MutexGuard<'static, ()>,
         _dir: std::path::PathBuf,
     }
     impl StateDirGuard {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let lock = ENV_LOCK.lock().expect("env lock");
             let prev = std::env::var_os("MARSPOT_STATE_DIR");
             // Unique per-test sandbox under the system temp dir.
@@ -590,6 +442,32 @@ mod tests {
             }
         }
     }
+
+    pub(crate) fn sample_entry(id: u64) -> SessionEntry {
+        SessionEntry {
+            id,
+            pid: 12345 + id as i32,
+            socket: session_socket_path(id),
+            cols: 120,
+            rows: 40,
+            title: "zsh".into(),
+            cwd: "/Users/test/with spaces and \"quotes\"".into(),
+            proto_version: PROTO_VERSION,
+            created_at_unix: 1_718_000_000 + id,
+            shm_name: format!("/msp-s-{id}"),
+            shell_child_pid: 99000 + id as i32,
+        }
+    }
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{StateDirGuard, sample_entry};
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
 
     /// Each call to `allocate_next_session_id` returns a fresh,
     /// monotonically increasing value starting at 1.
@@ -678,22 +556,6 @@ mod tests {
         assert_eq!(ids.len(), N);
         for (i, id) in ids.iter().enumerate() {
             assert_eq!(*id, (i + 1) as u64, "got ids {ids:?}");
-        }
-    }
-
-    fn sample_entry(id: u64) -> SessionEntry {
-        SessionEntry {
-            id,
-            pid: 12345 + id as i32,
-            socket: session_socket_path(id),
-            cols: 120,
-            rows: 40,
-            title: "zsh".into(),
-            cwd: "/Users/test/with spaces and \"quotes\"".into(),
-            proto_version: PROTO_VERSION,
-            created_at_unix: 1_718_000_000 + id,
-            shm_name: format!("/msp-s-{id}"),
-            shell_child_pid: 99000 + id as i32,
         }
     }
 

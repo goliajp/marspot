@@ -18,6 +18,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
+# The redirect into binaries/current is off unless asked for (it costs
+# the app its Gatekeeper exemption); this tests the guard on that path.
+export MARSPOT_REDIRECT=1
 SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
 LAUNCH_LOG="$MARSPOT_STATE_DIR/shell_launches.tsv"
@@ -36,6 +39,21 @@ cleanup() {
   dev_kill_shell_core
 }
 trap cleanup EXIT
+
+# A launch that is expected to exit.  One that does not -- it came up as
+# the real shell instead of redirecting -- fails the test instead of
+# holding the runner until someone notices.
+launch_expecting_exit() {
+  "$SHELL_BIN" >/dev/null 2>&1 &
+  local pid=$! i
+  for (( i = 0; i < 300; i++ )); do
+    kill -0 "$pid" 2>/dev/null || { wait "$pid"; return 0; }
+    sleep 0.1
+  done
+  kill -TERM "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  fail "a launch that should have redirected and exited was still running after 30 s"
+}
 
 # Broken shell: dies instantly, the way a bad self-update would.
 stage_broken_current() {
@@ -78,12 +96,12 @@ stage_broken_current
 stage_good_prev
 
 # Launches 1 + 2: redirect into the broken script, which exits 1.
-"$SHELL_BIN" >/dev/null 2>&1
-"$SHELL_BIN" >/dev/null 2>&1
+launch_expecting_exit
+launch_expecting_exit
 [[ -f "$MARKER" ]] && fail "prev/ ran before the loop threshold was reached"
 
 # Launch 3: threshold hit — rollback, then exec into restored prev/.
-"$SHELL_BIN" >/dev/null 2>&1
+launch_expecting_exit
 
 grep -q $'\tSHELL_AUTO_ROLLBACK\t.*restored prev/' "$SUP_LOG" \
   || fail "case A: SHELL_AUTO_ROLLBACK (restored prev/) not logged"
@@ -103,8 +121,8 @@ echo "[1/2] case A OK — quarantined broken current/, restored + exec'd prev/"
 reset
 stage_broken_current
 
-"$SHELL_BIN" >/dev/null 2>&1
-"$SHELL_BIN" >/dev/null 2>&1
+launch_expecting_exit
+launch_expecting_exit
 # Launch 3 continues as the real bundle shell (GUI) — background it.
 nohup "$SHELL_BIN" >/dev/null 2>&1 < /dev/null &
 disown

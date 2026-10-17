@@ -66,6 +66,18 @@ fn production_lines(text: &str) -> Vec<(usize, &str)> {
         .collect()
 }
 
+/// A line that sends a signal: the raw call, or the one that checks the
+/// process is still the one named first.  Signal 0 sends nothing -- it
+/// asks whether the process exists -- so it is allowed anywhere.
+fn sends_a_signal(line: &str) -> bool {
+    (line.contains("libc::kill(") || line.contains("pidtree::signal(")) && !line.contains(", 0)")
+}
+
+/// The op runner: `pty_op.rs` and the modules under `pty_op/`.
+fn is_op_runner(path: &str) -> bool {
+    path.ends_with("pty_op.rs") || path.contains("/pty_op/")
+}
+
 /// A signal is sent in exactly one place, and that place is the op runner.
 ///
 /// `libc::kill(pid, 0)` is not a signal -- it asks whether a pid exists --
@@ -75,14 +87,10 @@ fn signalling_happens_only_inside_the_op_runner() {
     let mut offenders = Vec::new();
     for (path, text) in plugin_sources() {
         for (n, line) in production_lines(&text) {
-            if !line.contains("libc::kill(") {
+            if !sends_a_signal(line) {
                 continue;
             }
-            // The liveness probe, which sends nothing.
-            if line.contains(", 0)") {
-                continue;
-            }
-            if path.ends_with("pty_op.rs") {
+            if is_op_runner(&path) {
                 continue;
             }
             offenders.push(format!("{path}:{n}: {}", line.trim()));
@@ -100,12 +108,16 @@ fn signalling_happens_only_inside_the_op_runner() {
 /// signalling at all.
 #[test]
 fn the_op_runner_is_where_a_signal_is_actually_sent() {
-    let text = std::fs::read_to_string(format!("{PLUGINS}/pty_op.rs"))
-        .expect("the op runner is where it was");
+    let runner: Vec<String> = plugin_sources()
+        .into_iter()
+        .filter(|(p, _)| is_op_runner(p))
+        .map(|(_, t)| t)
+        .collect();
+    assert!(!runner.is_empty(), "the op runner is where it was");
     assert!(
-        production_lines(&text)
+        runner
             .iter()
-            .any(|(_, l)| l.contains("libc::kill(") && !l.contains(", 0)")),
+            .any(|t| production_lines(t).iter().any(|(_, l)| sends_a_signal(l))),
         "nothing in pty_op.rs sends a signal any more -- either it moved, and the \
          test above now passes for the wrong reason, or the capability is gone"
     );

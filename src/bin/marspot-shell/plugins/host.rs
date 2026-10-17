@@ -80,6 +80,19 @@ enum Decl {
     RenderMarkup,
     AgentTui,
     WheelKeys,
+    Badge,
+    Title,
+    Activity,
+}
+
+impl Decl {
+    /// Whether the memo of this one survives a core replacement.  The
+    /// shell keeps badges and titles itself and gives a new core all of
+    /// them, and activity never goes to the core at all, so a plugin's
+    /// next restatement of these is not news to anyone.
+    fn outlives_core(self) -> bool {
+        matches!(self, Decl::Badge | Decl::Title | Decl::Activity)
+    }
 }
 
 /// What was said, in a form two statements can be compared by.
@@ -87,6 +100,8 @@ enum Decl {
 enum DeclValue {
     Flag(bool),
     Keys(Vec<u8>),
+    Text(String),
+    Activity(Activity),
 }
 
 pub struct ShellPluginHost {
@@ -134,7 +149,10 @@ pub struct ShellPluginHost {
     /// So a repeat of what a pane was already told is dropped, and the
     /// memo is forgotten whenever the core is replaced: a fresh core
     /// knows nothing, and the next re-statement is the one that tells
-    /// it.  That is the case the plugins re-state *for*.
+    /// it.  That is the case the plugins re-state *for*.  Badges,
+    /// titles and activity are the exception -- see
+    /// `Decl::outlives_core`.  A session that leaves the pane list
+    /// leaves the memo with it (`publish_pane_status`).
     declared: Mutex<std::collections::HashMap<(u64, Decl), DeclValue>>,
     /// Knock on the supervisor after queueing something for it.
     ///
@@ -292,7 +310,7 @@ impl ShellPluginHost {
     /// Drop the memo of what each pane has been told.  Call whenever
     /// the core is replaced -- see the `declared` field.
     pub fn forget_declarations(&self) {
-        self.declared.lock().unwrap().clear();
+        self.declared.lock().unwrap().retain(|(_, what), _| what.outlives_core());
     }
 
     /// True when this is news.  Records it either way.
@@ -336,8 +354,37 @@ impl ShellPluginHost {
     /// read a snapshot instead of probing the kernel per call (a
     /// plugin walking N panes would otherwise multiply the syscall
     /// cost by however many plugins are loaded).
+    ///
+    /// The map's keys are the live sessions, so this is also where the
+    /// memo of what a closed pane was told is dropped.  The shell drops
+    /// its own copy of badges and titles against the same map in the
+    /// same sweep, which is what keeps the two from disagreeing: a
+    /// repeat this memo swallows is always one the shell still holds.
     pub fn publish_pane_status(&self, map: HashMap<u64, (PaneStatus, Duration, bool)>) {
+        self.declared
+            .lock()
+            .unwrap()
+            .retain(|(sid, _), _| map.contains_key(sid));
         *self.pane_status.lock().unwrap() = map;
+    }
+
+    /// Queue a badge for the shell, if it differs from the last one
+    /// queued.  The trait method and the PaneSession host both come
+    /// through here, so a badge a PaneSession set is not mistaken for
+    /// the one a plugin set before it.
+    pub fn send_pane_badge(&self, shelld_session_id: u64, text: &str) {
+        let Some(tx) = self.pane_badge_tx.lock().unwrap().clone() else {
+            // No L2 wired (standalone host); drop silently.
+            return;
+        };
+        if !self.is_news(shelld_session_id, Decl::Badge, DeclValue::Text(text.to_string())) {
+            return;
+        }
+        let _ = tx.send(PaneBadgeUpdate {
+            shelld_session_id,
+            text: text.to_string(),
+        });
+        self.knock();
     }
 
     fn plugin_name(&self) -> &'static str {
@@ -413,7 +460,10 @@ impl PluginHost for ShellPluginHost {
         shelld_session_id: u64,
         activity: Activity,
     ) -> Result<(), PluginError> {
-        if let Some(tx) = self.pane_activity_tx.lock().unwrap().as_ref() {
+        let Some(tx) = self.pane_activity_tx.lock().unwrap().clone() else {
+            return Ok(());
+        };
+        if self.is_news(shelld_session_id, Decl::Activity, DeclValue::Activity(activity)) {
             let _ = tx.send((shelld_session_id, activity));
             self.knock();
         }
@@ -525,15 +575,7 @@ impl PluginHost for ShellPluginHost {
         shelld_session_id: u64,
         text: &str,
     ) -> Result<(), PluginError> {
-        let Some(tx) = self.pane_badge_tx.lock().unwrap().clone() else {
-            // No L2 wired (standalone host); drop silently.
-            return Ok(());
-        };
-        let _ = tx.send(PaneBadgeUpdate {
-            shelld_session_id,
-            text: text.to_string(),
-        });
-        self.knock();
+        self.send_pane_badge(shelld_session_id, text);
         Ok(())
     }
 
@@ -545,6 +587,9 @@ impl PluginHost for ShellPluginHost {
         let Some(tx) = self.pane_title_tx.lock().unwrap().clone() else {
             return Ok(());
         };
+        if !self.is_news(shelld_session_id, Decl::Title, DeclValue::Text(text.to_string())) {
+            return Ok(());
+        }
         let _ = tx.send(PaneTitleUpdate {
             shelld_session_id,
             text: text.to_string(),
@@ -648,6 +693,74 @@ mod knock_tests {
         host.attach_pane_badge_tx(tx);
         as_plugin(&host, || { let _ = host.set_pane_badge(7, "x"); });
         assert_eq!(knocks.load(Ordering::Relaxed), 1);
+    }
+
+    /// claudecode restates every bound pane's badge and title every
+    /// two seconds; a restatement must not wake the supervisor.
+    #[test]
+    fn the_same_badge_twice_queues_one_frame_and_one_knock() {
+        let (host, knocks) = host_with_counter();
+        let (tx, rx) = std::sync::mpsc::channel();
+        host.attach_pane_badge_tx(tx);
+        as_plugin(&host, || { let _ = host.set_pane_badge(7, "x"); });
+        as_plugin(&host, || { let _ = host.set_pane_badge(7, "x"); });
+        assert_eq!(rx.try_iter().count(), 1);
+        assert_eq!(knocks.load(Ordering::Relaxed), 1);
+
+        as_plugin(&host, || { let _ = host.set_pane_badge(7, "y"); });
+        assert_eq!(rx.try_iter().count(), 1, "a changed badge goes");
+        assert_eq!(knocks.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn the_same_title_twice_queues_one_frame_and_one_knock() {
+        let (host, knocks) = host_with_counter();
+        let (tx, rx) = std::sync::mpsc::channel();
+        host.attach_pane_title_tx(tx);
+        as_plugin(&host, || { let _ = host.set_pane_title(7, "t"); });
+        as_plugin(&host, || { let _ = host.set_pane_title(7, "t"); });
+        assert_eq!(rx.try_iter().count(), 1);
+        assert_eq!(knocks.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn the_same_activity_twice_queues_one_report_and_one_knock() {
+        let (host, knocks) = host_with_counter();
+        let (tx, rx) = std::sync::mpsc::channel();
+        host.attach_pane_activity_tx(tx);
+        as_plugin(&host, || { let _ = host.report_pane_activity(7, Activity::Working); });
+        as_plugin(&host, || { let _ = host.report_pane_activity(7, Activity::Working); });
+        assert_eq!(rx.try_iter().count(), 1);
+        assert_eq!(knocks.load(Ordering::Relaxed), 1);
+        as_plugin(&host, || { let _ = host.report_pane_activity(7, Activity::AwaitingUser); });
+        assert_eq!(rx.try_iter().count(), 1);
+    }
+
+    /// The shell gives a new core every badge itself, so replacing the
+    /// core must not turn the plugin's next restatement into a frame.
+    #[test]
+    fn a_core_replacement_does_not_make_a_badge_news() {
+        let (host, knocks) = host_with_counter();
+        let (tx, rx) = std::sync::mpsc::channel();
+        host.attach_pane_badge_tx(tx);
+        as_plugin(&host, || { let _ = host.set_pane_badge(7, "x"); });
+        host.forget_declarations();
+        as_plugin(&host, || { let _ = host.set_pane_badge(7, "x"); });
+        assert_eq!(rx.try_iter().count(), 1);
+        assert_eq!(knocks.load(Ordering::Relaxed), 1);
+    }
+
+    /// A session that dropped out of the pane list and came back has
+    /// lost the shell's copy too, so the next statement has to go.
+    #[test]
+    fn a_session_that_left_the_pane_list_is_news_again() {
+        let (host, _knocks) = host_with_counter();
+        let (tx, rx) = std::sync::mpsc::channel();
+        host.attach_pane_badge_tx(tx);
+        as_plugin(&host, || { let _ = host.set_pane_badge(7, "x"); });
+        host.publish_pane_status(HashMap::new());
+        as_plugin(&host, || { let _ = host.set_pane_badge(7, "x"); });
+        assert_eq!(rx.try_iter().count(), 2);
     }
 
     /// No hook installed is the shape tests and early boot are in.

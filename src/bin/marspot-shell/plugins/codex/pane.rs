@@ -20,7 +20,12 @@ pub(crate) fn argv_thread_id(codex_pid: i32) -> Option<String> {
 
 /// The home a live codex runs under: its `CODEX_HOME`, or `~/.codex`.
 pub(crate) fn home_of(codex_pid: i32) -> Option<PathBuf> {
-    marspot::pidtree::proc_env_value(codex_pid, "CODEX_HOME")
+    home_from(marspot::pidtree::proc_env_value(codex_pid, "CODEX_HOME"))
+}
+
+/// [`home_of`] from the process's `CODEX_HOME`, already read.
+pub(super) fn home_from(codex_home: Option<String>) -> Option<PathBuf> {
+    codex_home
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
 }
@@ -77,9 +82,11 @@ pub(crate) fn profile_dirs() -> Vec<(u8, std::path::PathBuf)> {
 /// shell, at that moment.  Unset means the default `~/.codex`, which
 /// is resolved through symlinks so a link to `.codex-profile-1` reads
 /// as profile 1 and not as a nameless "default".
-pub(super) fn profile_of(codex_pid: i32) -> Option<u8> {
+///
+/// Takes the process's `CODEX_HOME`, already read.
+pub(super) fn profile_from(codex_home: Option<String>) -> Option<u8> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
-    let raw = marspot::pidtree::proc_env_value(codex_pid, "CODEX_HOME")
+    let raw = codex_home
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| home.join(".codex"));
     let real = std::fs::canonicalize(&raw).unwrap_or(raw);
@@ -92,7 +99,9 @@ pub(super) fn profile_of(codex_pid: i32) -> Option<u8> {
 /// is changing and what to leave alone.
 #[derive(Clone)]
 pub(crate) struct PaneCodex {
-    pub codex_pid: i32,
+    /// From an observation up to two seconds old; the switch's
+    /// terminate step re-checks it when it acts.
+    pub codex: pidtree::ProcId,
     pub shell_pid: i32,
     /// Which `CODEX_HOME` this pane's codex is running under, read off
     /// the live process.  `None` when it could not be determined —
@@ -131,7 +140,7 @@ pub(super) fn profile_switch_op(pane: &PaneCodex, profile: u8, dir: &std::path::
             .badge(format!("→ P{profile}"))
             .step(pty_op::Step::settle(Duration::from_millis(250)).named("hold_settle"))
             .step(
-                pty_op::Step::terminate(pane.codex_pid, libc::SIGTERM)
+                pty_op::Step::terminate(pane.codex, libc::SIGTERM)
                     .escalate_after(Duration::from_secs(3), libc::SIGKILL),
             )
             .step(pty_op::Step::send(line).named("resume"))
@@ -149,7 +158,7 @@ mod profile_menu_tests {
 
     fn pane(profile: u8) -> PaneCodex {
         PaneCodex {
-            codex_pid: 4242,
+            codex: marspot::pidtree::ProcId { pid: 4242, start_us: 0 },
             shell_pid: 4200,
             profile: Some(profile),
         }
@@ -195,7 +204,7 @@ mod profile_menu_tests {
         assert!(
             op.steps.iter().any(|s| matches!(
                 &s.kind,
-                super::pty_op::StepKind::Terminate { pid, .. } if *pid == 4242
+                super::pty_op::StepKind::Terminate { target, .. } if target.pid == 4242
             )),
             "the running codex must be signalled"
         );
