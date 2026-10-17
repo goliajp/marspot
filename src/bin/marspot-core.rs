@@ -1501,6 +1501,39 @@ mod window_state_tests {
         assert_eq!(app.windows[1].panes[1].shelld_session_id(), Some(20));
     }
 
+    /// The last live pane of a window can only be dragged out when it
+    /// has a title strip to grab, and a lone pane has none.  The case
+    /// that exists is a live pane beside a placeholder: it keeps its
+    /// strip, and splitting it into another window empties the source,
+    /// which then asks L1 to close it.
+    #[test]
+    fn splitting_out_the_last_live_pane_closes_its_window() {
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![
+            win(1, vec![Pane::new_vacant(10, 80, 24), Pane::new_dormant(80, 24)]),
+            win(2, vec![Pane::new_vacant(20, 80, 24)]),
+        ]);
+        app.rebuild_layout(0);
+        app.rebuild_layout(1);
+        assert_eq!(app.windows[1].layout.cell_title_h, 0.0, "a lone pane has no strip");
+        assert!(
+            app.windows[0].layout.cell_title_h > 0.0,
+            "a live pane beside a placeholder keeps its strip"
+        );
+
+        app.split_insert(0, 0, 1, 0, DropZone::Right);
+
+        assert!(app.windows[0].panes.iter().all(|p| p.is_dormant()));
+        assert_eq!((app.windows[1].grid_cols, app.windows[1].grid_rows), (2, 1));
+        assert_eq!(app.windows[1].panes[1].shelld_session_id(), Some(10));
+        assert!(
+            app.pending_to_shell
+                .iter()
+                .any(|(ty, _)| *ty == MsgType::WindowCloseRequest),
+            "the emptied source window asks L1 to close it"
+        );
+    }
+
     /// Same-window edge drop is a REARRANGE: no placeholder, the pane
     /// count is unchanged, only the order moves.
     #[test]
