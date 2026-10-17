@@ -79,6 +79,9 @@ cargo nextest run --workspace --all-targets --all-features \
 #
 # Filtered args are nextest expressions this does not understand, so a
 # filtered run skips the doctests rather than failing on the flag.
-if [[ $# -eq 0 ]]; then
+# Flags alone (`--no-fail-fast`) are not a filter.
+filtered=0
+for a in "$@"; do [[ $a == --* ]] || filtered=1; done
+if (( ! filtered )); then
   cargo test --doc --workspace --quiet || exit $?
 fi

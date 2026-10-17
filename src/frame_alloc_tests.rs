@@ -131,7 +131,7 @@ fn a_terminal_frame_allocates_nothing_once_warm() {
         ui_rects.clear();
         ov_rects.clear();
         let v = view(seq);
-        super::frame::build_instances(
+        crate::frame_build::frame::build_instances(
             &layout,
             std::slice::from_ref(&v),
             &[],
