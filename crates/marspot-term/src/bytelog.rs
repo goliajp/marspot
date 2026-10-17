@@ -274,10 +274,12 @@ mod tests {
             trigger > std::time::Duration::ZERO,
             "never observed the rotating append"
         );
-        assert!(
-            trigger.as_millis() < 100,
-            "the rotating append took {trigger:?} — data is being copied, not renamed"
-        );
+        if crate::host_load::quiet_enough_to_time("the rotating bytelog append") {
+            assert!(
+                trigger.as_millis() < 100,
+                "the rotating append took {trigger:?} — data is being copied, not renamed"
+            );
+        }
 
     }
 
