@@ -379,14 +379,13 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
             // did, byte for byte.
             let cluster = grid
                 .cluster_text(&cell)
-                .or_else(|| marspot_term::grid::cluster_in_row(&row_clusters, c as u16))
-                .map(str::to_string);
+                .or_else(|| marspot_term::grid::cluster_in_row(&row_clusters, c as u16));
             let (entry, is_color) = match cluster {
                 Some(text) => match resolve_cluster_glyph_routed(
                     atlas,
                     color_atlas,
                     font,
-                    &text,
+                    text,
                     cell.attrs.bold,
                     cell.attrs.italic,
                     metrics,
