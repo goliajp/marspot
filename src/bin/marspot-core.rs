@@ -3316,7 +3316,7 @@ fn spawn_l3_with_cwd(
     initial_cwd: &str,
     event_tx: &Sender<CoreEvent>,
 ) -> std::io::Result<L3Spawn> {
-    // Population guard.  A readdir + one kill(0) per entry, only on
+    // Population guard.  A readdir + one liveness check per entry, only on
     // the spawn path — spawns are user-rate (boot, [+], revive), never
     // per-frame.  `MARSPOT_SESSION_CAP` overrides the cap for tests
     // (spawning 64 real processes to prove a refusal would itself be
@@ -3327,7 +3327,7 @@ fn spawn_l3_with_cwd(
         .unwrap_or(SESSION_PROCESS_HARD_CAP);
     let live = marspot_term::session_registry::list_session_entries()
         .iter()
-        .filter(|e| marspot_term::session_registry::pid_is_live_session(e.pid))
+        .filter(|e| marspot_term::session_registry::entry_is_live(e))
         .count();
     if live >= cap {
         lx_error!(
@@ -5836,15 +5836,13 @@ impl CoreApp {
             let Some(sid) = pane.session().l3_session_id() else {
                 continue;
             };
-            let Some(pid) = pane.session().l3_pid() else { continue };
-            if pid <= 0 { continue }
-            if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+            if let Ok(id) = marspot::session_signal::signal_session(sid, libc::SIGTERM) {
                 signalled += 1;
                 lx_event!(
                     "L3_SWAP_SIGTERM",
                     "asked L3 to self-execv into current/marspot-session",
                     session = sid,
-                    pid = pid
+                    pid = id.pid
                 );
             }
         }
@@ -5871,9 +5869,7 @@ impl CoreApp {
     /// later L3 picks the same id).
     fn retire_pane_session(&mut self, id: u64, is_l3: bool) {
         if is_l3 {
-            if let Ok(entry) = session_registry::read_session_entry(id) {
-                unsafe { libc::kill(entry.pid, libc::SIGTERM) };
-            }
+            let _ = marspot::session_signal::signal_session(id, libc::SIGTERM);
             let _ = session_registry::delete_session(id);
             // Amendment 7 step 3: also drop the named shm region so
             // the kernel actually frees the pages once every fd-holder
@@ -9828,12 +9824,12 @@ fn assemble_panes_at_boot(
         u64,
         &marspot_term::session_registry::SessionEntry,
     > = raw_list.iter().map(|e| (e.id, e)).collect();
-    // RFC-004 A.2 — liveness = pid signalable AND its executable
-    // is a marspot-session image.  A recycled pid can no longer
-    // impersonate a live session (nor eat a SIGKILL meant for one).
+    // Liveness = the pid runs a marspot-session image that started
+    // before its entry was written: a recycled pid cannot impersonate
+    // a live session, nor eat a SIGKILL meant for one.
     let alive_ids: std::collections::HashSet<u64> = raw_list
         .iter()
-        .filter(|e| session_registry::pid_is_live_session(e.pid))
+        .filter(|e| session_registry::entry_is_live(e))
         .map(|e| e.id)
         .collect();
     let dir_ids: std::collections::HashSet<u64> =
@@ -9936,7 +9932,7 @@ fn assemble_panes_at_boot(
                         session = sid
                     );
                     if let Some(entry) = entry_by_id.get(&sid) {
-                        unsafe { libc::kill(entry.pid, libc::SIGKILL) };
+                        let _ = marspot::session_signal::signal_entry(entry, libc::SIGKILL);
                     }
                 }
             }
@@ -10074,7 +10070,7 @@ fn assemble_panes_at_boot(
 
         if panes.len() >= SESSION_COUNT_HARD_CAP {
             if let Some(entry) = entry_by_id.get(&id) {
-                unsafe { libc::kill(entry.pid, libc::SIGKILL) };
+                let _ = marspot::session_signal::signal_entry(entry, libc::SIGKILL);
                 if !entry.shm_name.is_empty()
                     && let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
                         grid_shm::delete_session_regions(&c, id);
@@ -10399,11 +10395,9 @@ fn main() {
     if session_binary_freshly_promoted && !reattached_ids.is_empty() {
         let mut signalled = 0usize;
         for id in &reattached_ids {
-            if let Ok(entry) =
-                marspot_term::session_registry::read_session_entry(*id)
-                && unsafe { libc::kill(entry.pid, libc::SIGTERM) } == 0 {
-                    signalled += 1;
-                }
+            if marspot::session_signal::signal_session(*id, libc::SIGTERM).is_ok() {
+                signalled += 1;
+            }
         }
         lx_event!(
             "L3_BOOT_FANOUT",
