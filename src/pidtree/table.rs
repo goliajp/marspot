@@ -106,6 +106,16 @@ impl ProcTable {
             .map(|i| &self.rows[i])
             .collect()
     }
+
+    /// CPU time of `root` plus every descendant in this table,
+    /// nanoseconds; see [`super::subtree_cpu_time_ns`].
+    pub fn subtree_cpu_time_ns(&self, root: i32) -> u64 {
+        let mut total = super::proc_cpu_time_ns(root).unwrap_or(0);
+        for d in self.index.descendants(&self.rows, root) {
+            total = total.saturating_add(super::proc_cpu_time_ns(self.rows[d].pid).unwrap_or(0));
+        }
+        total
+    }
 }
 
 /// Every descendant of `root_pid` in `procs`, root excluded; empty for

@@ -42,6 +42,7 @@ use marspot::shell_proto::{
 mod banner;
 mod launch;
 mod cli_socket;
+mod observe;
 mod pane_decls;
 mod pane_status;
 mod plugins;
@@ -3468,20 +3469,18 @@ impl ShellApp {
         }
     }
 
-    /// Every live pane as `(session id, cwd, title)`.
-    ///
-    /// The cwd is read live off the pane's shell rather than taken from
-    /// the registry: the registry's copy is from spawn time and says
-    /// the launch directory for every pane that has since cd'd somewhere,
-    /// which is all of them.
-    fn live_panes() -> Vec<(u64, String, String)> {
-        marspot_term::session_registry::list_session_entries()
-            .into_iter()
-            .map(|e| {
-                let cwd = marspot::pidtree::proc_cwd(e.shell_child_pid)
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or(e.cwd);
-                (e.id, cwd, e.title)
+    /// Every pane in `obs` as `(session id, cwd, title)`.  The cwd is
+    /// read live off the pane's shell rather than taken from the
+    /// registry: the registry's copy is from spawn time and says the
+    /// launch directory for every pane that has since cd'd somewhere.
+    fn live_panes(obs: &observe::Observation) -> Vec<(u64, String, String)> {
+        let cwd_of = |pid: i32| (pid > 1).then(|| marspot::pidtree::proc_cwd(pid)).flatten();
+        obs.sessions
+            .iter()
+            .map(|s| {
+                let e = &s.entry;
+                let cwd = cwd_of(e.shell_child_pid).map(|p| p.to_string_lossy().into_owned());
+                (e.id, cwd.unwrap_or_else(|| e.cwd.clone()), e.title.clone())
             })
             .collect()
     }
@@ -3491,7 +3490,7 @@ impl ShellApp {
     /// listing and `--send` cannot disagree about what `spg#2` means.
     fn pane_refs() -> Vec<marspot::pane_name::PaneRef> {
         let cells = Self::pane_cells();
-        Self::live_panes()
+        Self::live_panes(&observe::shared().fresh(observe::NOW))
             .into_iter()
             .map(|(sid, cwd, _)| {
                 // `pane_cells` reports (window, x, y); naming sorts in
@@ -3560,7 +3559,7 @@ impl ShellApp {
                 .to_string());
         }
         let sid = self.resolve_target(target)?;
-        let cwd = Self::live_panes()
+        let cwd = Self::live_panes(&observe::shared().fresh(observe::NOW))
             .into_iter()
             .find(|(s, _, _)| *s == sid)
             .map(|(_, cwd, _)| cwd)
@@ -3611,7 +3610,7 @@ impl ShellApp {
         // policy acts on, so "quiet" means one thing in this process.
         let statuses = self.pane_status.snapshot(now);
         let wall = std::time::SystemTime::now();
-        let panes: Vec<(u64, String)> = Self::live_panes()
+        let panes: Vec<(u64, String)> = Self::live_panes(&observe::shared().latest())
             .into_iter()
             .filter(|(_, cwd, _)| self.autorun_panes.contains(cwd))
             .map(|(sid, cwd, _)| (sid, cwd))
