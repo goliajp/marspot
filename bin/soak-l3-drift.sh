@@ -43,17 +43,10 @@ if otool -L "$SESSION_BIN" | grep -qiE 'Metal|AppKit|CoreText'; then
   fail "marspot-session links a GUI framework (RSS floor broken)"
 fi
 
-dev_ensure_shelld || fail "sandbox shelld"
-pkill -9 -f "$DEV_TARGET/marspot-session( |$)" >/dev/null 2>&1 || true
-
 echo "==> L3 sustained-load drift: ${DURATION_S}s (sample ${INTERVAL_S}s)"
-"$DRIFT_PROBE_BIN" "$SESSION_BIN" "$DURATION_S" "$INTERVAL_S"
+# No orphan left behind: the probe's own sessions must end with it.
+dev_run_probe "$DRIFT_PROBE_BIN" "$SESSION_BIN" "$DURATION_S" "$INTERVAL_S"
 rc=$?
-
-# No orphan left behind.
-sleep 0.3
-orphans=$(pgrep -f "$DEV_TARGET/marspot-session( |$)" 2>/dev/null | grep -c . || true)
-(( orphans == 0 )) || fail "left ${orphans} orphan marspot-session proc(s)"
-
+(( rc != 3 )) || fail "the probe left a marspot-session running"
 (( rc == 0 )) || exit "$rc"
 echo "PASS — L3 per-session engine holds the bounded-memory commitment under ${DURATION_S}s sustained load"

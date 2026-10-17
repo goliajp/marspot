@@ -49,12 +49,11 @@ if [[ ! -x "$SHELL_BIN" || ! -x "$CORE_BIN" ]]; then
   ( cd "$ROOT" && cargo build --release --bin marspot-shell --bin marspot-core 2>&1 | tail -3 )
 fi
 
-dev_ensure_shelld || { echo "FAIL: sandbox shelld"; exit 1; }
 cleanup
 dev_wipe_state
 mkdir -p "$(dirname "$SUP_LOG")"
 rm -f "$SUP_LOG" 2>/dev/null || true
-nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 # --- 1. Boot --------------------------------------------------------
@@ -63,7 +62,7 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
-PRE_CORE_PID=$(pgrep -f "$CORE_BIN( |$)" | head -1)
+PRE_CORE_PID=$(dev_core_pids | head -1)
 [[ -n "$PRE_CORE_PID" ]] || fail "boot: no core pid"
 echo "[1/5] boot OK — core pid=$PRE_CORE_PID, HelloAck logged"
 
@@ -110,7 +109,7 @@ grep -q $'\tUPDATE_APPLY\t' "$SUP_LOG" || fail "swap: no UPDATE_APPLY after a pa
 grep -q $'\tACTIVE_SHUTDOWN\t' "$SUP_LOG" || fail "swap: live core was never retired"
 grep -q $'\tCORE_SPAWN\t.*binaries/current/marspot-core' "$SUP_LOG" \
   || fail "swap: replacement core never spawned from binaries/current"
-NEW_CORE_PID=$(pgrep -f "$TREE/current/marspot-core( |$)" | head -1)
+NEW_CORE_PID=$(dev_core_pids | head -1)
 [[ -n "$NEW_CORE_PID" ]] || fail "swap: pgrep didn't find the replacement core process"
 echo "[4/5] swap OK — old core retired, replacement pid=$NEW_CORE_PID from current/"
 

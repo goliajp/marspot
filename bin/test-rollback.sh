@@ -65,12 +65,11 @@ if [[ ! -x "$SHELL_BIN" || ! -x "$CORE_BIN" ]]; then
   ( cd "$ROOT" && cargo build --release --bin marspot-shell --bin marspot-core 2>&1 | tail -3 )
 fi
 
-dev_ensure_shelld || fail "sandbox shelld"
 cleanup
 dev_wipe_state
 mkdir -p "$(dirname "$SUP_LOG")"
 rm -f "$SUP_LOG" 2>/dev/null || true
-nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
 # --- 1. Boot --------------------------------------------------------
@@ -105,7 +104,7 @@ until grep -q $'\tUPDATE_STABLE\t' "$SUP_LOG"; do
 done
 # Capture the live (active) core after the swap — this is the process
 # that must survive the next, failed update completely untouched.
-ACTIVE_PID=$(pgrep -f "$TREE/current/marspot-core( |$)" | head -1)
+ACTIVE_PID=$(dev_core_pids | head -1)
 [[ -n "$ACTIVE_PID" ]] || fail "no active core after first update"
 echo "[2/4] first update OK — current/ holds real binary, active pid=$ACTIVE_PID"
 
@@ -140,7 +139,7 @@ fi
 # step 2 is still the same process — the silent guarantee: the user saw
 # nothing.
 sleep 1
-POST_PID=$(pgrep -f "$TREE/current/marspot-core( |$)" | head -1)
+POST_PID=$(dev_core_pids | head -1)
 [[ -n "$POST_PID" ]] || fail "live core gone after the rejected update (should be untouched)"
 [[ "$POST_PID" == "$ACTIVE_PID" ]] \
   || fail "live core was disturbed by the failed update (pid $ACTIVE_PID → $POST_PID)"

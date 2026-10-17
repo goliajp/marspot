@@ -53,19 +53,34 @@ if [[ ! -x "$SHELL_BIN" || ! -x "$CORE_BIN" ]]; then
   ( cd "$ROOT" && cargo build --release --bin marspot-shell --bin marspot-core 2>&1 | tail -3 )
 fi
 
-dev_ensure_shelld || fail "sandbox shelld"
 dev_wipe_state
 cleanup
 > "$LOG"
 echo -e "t_s\tshell_rss_kib\tcore_rss_kib\tcore_pid" > "$RSS_LOG"
 
-nohup "$SHELL_BIN" >"$LOG" 2>&1 < /dev/null &
+nohup "$SHELL_BIN" >"$LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
-sleep 2
 
-SHELL_PID=$(pgrep -f "$SHELL_BIN( |$)" | head -1)
-CORE_PID=$(pgrep -f "$CORE_BIN( |$)"  | head -1)
-[[ -n "$SHELL_PID" ]] || fail "shell not running after boot"
+# The shell names itself in shell.pid; the core is its child.  Neither
+# is looked up by name: another checkout's shell would match.
+core_of() {
+  local k comm
+  for k in $(pgrep -P "$1" 2>/dev/null); do
+    comm=$(ps -o comm= -p "$k" 2>/dev/null) || continue
+    if [[ ${comm##*/} == marspot-core ]]; then echo "$k"; return 0; fi
+  done
+  return 0
+}
+SHELL_PID="" CORE_PID=""
+for _ in $(seq 1 300); do
+  SHELL_PID=$(cat "$MARSPOT_STATE_DIR/shell.pid" 2>/dev/null)
+  if _dev_is_ours "$SHELL_PID"; then
+    CORE_PID=$(core_of "$SHELL_PID")
+    [[ -n $CORE_PID ]] && break
+  fi
+  sleep 0.1
+done
+_dev_is_ours "$SHELL_PID" || fail "shell not running after boot (shell.pid: '${SHELL_PID}')"
 [[ -n "$CORE_PID"  ]] || fail "core not running after boot"
 echo "soak start: shell=$SHELL_PID core=$CORE_PID for ${DURATION_S}s, sample every ${SAMPLE_S}s"
 INITIAL_CORE_PID="$CORE_PID"
@@ -77,7 +92,7 @@ while (( elapsed < DURATION_S )); do
   elapsed=$(( $(date +%s) - start ))
   shell_rss=$(ps -p "$SHELL_PID" -o rss= 2>/dev/null | tr -d ' ' || true)
   core_rss=$(ps -p "$CORE_PID"  -o rss= 2>/dev/null | tr -d ' ' || true)
-  cur_core_pid=$(pgrep -f "$CORE_BIN( |$)" | head -1)
+  cur_core_pid=$(core_of "$SHELL_PID")
   echo -e "${elapsed}\t${shell_rss:-0}\t${core_rss:-0}\t${cur_core_pid:-0}" >> "$RSS_LOG"
 
   if [[ -z "$shell_rss" ]]; then

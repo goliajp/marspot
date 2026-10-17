@@ -88,13 +88,12 @@ sleep 0.5
 curl -sf "http://127.0.0.1:$PORT/feed.json" >/dev/null \
   || fail "feed server didn't come up on :$PORT"
 
-dev_ensure_shelld || fail "sandbox shelld"
 dev_kill_shell_core
 dev_wipe_state
 mkdir -p "$(dirname "$SUP_LOG")"
 rm -f "$SUP_LOG" 2>/dev/null || true; : > "$RUN_LOG"
 MARSPOT_UPDATE_FEED="http://127.0.0.1:$PORT/feed.json" \
-  nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+  nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 for _ in $(seq 1 50); do grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null && break; sleep 0.1; done
 grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "[equal] boot HelloAck never landed"
@@ -127,11 +126,9 @@ dev_kill_shell_core
 # ====================================================================
 # Case 2: concurrent triggers → apply exactly once.
 # ====================================================================
-export MARSPOT_PROBATION_S=3
-dev_ensure_shelld || fail "sandbox shelld"
 dev_wipe_state
 rm -f "$SUP_LOG" 2>/dev/null || true; : > "$RUN_LOG"
-nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 for _ in $(seq 1 50); do grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null && break; sleep 0.1; done
 grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "[concurrent] boot HelloAck never landed"
@@ -158,7 +155,7 @@ sleep 2
 # counts 2 for a single swap and this assertion could never pass.
 swaps=$(grep -c $'\tUPDATE_SWAP\tsingle-core swap complete' "$SUP_LOG" 2>/dev/null)
 [[ "$swaps" == "1" ]] || fail "[concurrent] $swaps swaps from one pending (expected exactly 1 — double-apply)"
-cores=$(pgrep -f "$TREE/current/marspot-core( |$)" 2>/dev/null | wc -l | tr -d ' ')
+cores=$(dev_core_pids | wc -l | tr -d ' ')
 [[ "$cores" == "1" ]] || fail "[concurrent] $cores live cores (expected 1)"
 [[ ! -f "$TREE/pending/marspot-core" ]] || fail "[concurrent] pending/ not consumed"
 [[ ! -f "$TREE/prev/marspot-core" ]] || fail "[concurrent] prev/ not finalized"
@@ -176,10 +173,9 @@ echo "[concurrent] OK — 3 rapid triggers applied exactly once, one core, tree 
 # quarantined and the live core is never touched.
 # ====================================================================
 dev_kill_shell_core
-dev_ensure_shelld || fail "sandbox shelld"
 dev_wipe_state
 rm -f "$SUP_LOG" 2>/dev/null || true; : > "$RUN_LOG"
-nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
+nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 for _ in $(seq 1 50); do grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null && break; sleep 0.1; done
 grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "[bad-core] boot HelloAck never landed"
@@ -187,7 +183,7 @@ grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "[bad-core] boot HelloAc
 # A cold boot runs the core straight out of target/release; only a swap
 # moves it to current/.  Match the boot path, so "still the same pid"
 # and "never got swapped" are the same observation.
-before_pid=$(pgrep -f "$CORE_BIN( |$)" 2>/dev/null | head -1)
+before_pid=$(dev_core_pids | head -1)
 [[ -n "$before_pid" ]] || fail "[bad-core] no live core after boot"
 
 # Executable, but exits non-zero — which is what the probe exists to
@@ -204,7 +200,7 @@ until grep -q $'\tUPDATE_PROBE_REJECT\t' "$SUP_LOG" 2>/dev/null; do
   sleep 0.3
 done
 
-after_pid=$(pgrep -f "$CORE_BIN( |$)" 2>/dev/null | head -1)
+after_pid=$(dev_core_pids | head -1)
 [[ "$after_pid" == "$before_pid" ]] \
   || fail "[bad-core] live core changed ($before_pid → ${after_pid:-none}) — it must be untouched"
 if grep -q $'\tUPDATE_SWAP\tsingle-core swap complete' "$SUP_LOG" 2>/dev/null; then
