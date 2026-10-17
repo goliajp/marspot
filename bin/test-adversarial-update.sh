@@ -22,8 +22,8 @@
 #      204 s frozen window when Gatekeeper (not a bad binary) was what
 #      held the new core up.
 #
-# Sandbox-only; never touches the installed app.  Run after
-# `cargo build --release`.  Port 6026 is this project's registry
+# Sandbox-only; never touches the installed app.  Builds the release
+# binaries itself, with the test-update-key feature.  Port 6026 is this project's registry
 # allocation for the adversarial feed.
 
 set -uo pipefail
@@ -54,16 +54,43 @@ cleanup() {
 }
 trap cleanup EXIT
 
-RUNNING_VER=$("$SHELL_BIN" --version 2>/dev/null | awk '{print $2}')
-[[ -n "$RUNNING_VER" ]] || fail "could not read running version"
-
 # ====================================================================
 # Case 1: equal-version feed → poll happens, no download, no stage.
 # ====================================================================
-[[ -f "$ROOT/keys/marspot-update.sec" ]] \
-  || fail "no keys/marspot-update.sec — needed to build the feed tarball"
-"$ROOT/bin/build-release-tarball.sh" --output "$SERVE_DIR/$ASSET" --sign >/dev/null \
-  || fail "build-release-tarball.sh --sign failed"
+# A throwaway signing key for this run.  The binaries are built with
+# the `test-update-key` feature, which makes the updater trust the PEM
+# that MARSPOT_TEST_UPDATE_PUBKEY names -- only while MARSPOT_STATE_DIR
+# names a sandbox, as it does here.  The real release key never has to
+# be on the machine that runs the suite.  The build goes to
+# target/release, where the sandbox helpers expect it; install-local
+# rebuilds without the feature, and a feature build outside a sandbox
+# trusts only the real key anyway.
+TEST_KEY="$SERVE_DIR/test-update.sec"
+openssl ecparam -genkey -name prime256v1 -noout -out "$TEST_KEY" 2>/dev/null \
+  || fail "could not generate the test signing key"
+openssl ec -in "$TEST_KEY" -pubout -out "$SERVE_DIR/test-update.pub" 2>/dev/null \
+  || fail "could not derive the test public key"
+export MARSPOT_TEST_UPDATE_PUBKEY="$SERVE_DIR/test-update.pub"
+( cd "$ROOT" && cargo build --release --features test-update-key \
+    --bin marspot-shell --bin marspot-core --bin marspot-session 2>&1 | tail -2 ) \
+  || fail "release build with test-update-key failed"
+LC_ALL=C grep -q MARSPOT_TEST_UPDATE_PUBKEY "$ROOT/target/release/marspot-shell" \
+  || fail "target/release/marspot-shell was built without test-update-key"
+# The release tarball, from exactly those binaries.  Not
+# build-release-tarball.sh: it rebuilds without the feature.
+make_tarball() {
+  local out="$1" stage
+  stage=$(mktemp -d "$SERVE_DIR/stage.XXXXXX")
+  for b in marspot-shell marspot-core marspot-session; do
+    install -m 0755 "$ROOT/target/release/$b" "$stage/$b" || return 1
+  done
+  tar -czf "$out" -C "$stage" marspot-shell marspot-core marspot-session
+}
+make_tarball "$SERVE_DIR/$ASSET" || fail "could not build the release tarball"
+openssl dgst -sha256 -sign "$TEST_KEY" -out "$SERVE_DIR/$ASSET.sig" "$SERVE_DIR/$ASSET" \
+  || fail "could not sign the release tarball"
+RUNNING_VER=$("$SHELL_BIN" --version 2>/dev/null | awk '{print $2}')
+[[ -n "$RUNNING_VER" ]] || fail "could not read running version"
 # That step ran `cargo build --release`, so the binaries this test is
 # about to launch may be brand-new inodes.  Pay their Gatekeeper
 # assessment now, before anything is on a clock.
