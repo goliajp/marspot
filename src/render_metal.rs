@@ -3162,6 +3162,39 @@ mod tests {
         if snapshot_mode() != Some(SnapshotMode::Record) {
             return;
         }
+        encode_png(&baseline_for(path), rgba, w_px, h_px);
+    }
+
+    /// The macOS major version, `27` on 27.0.1.
+    fn macos_major() -> String {
+        let mut buf = [0u8; 32];
+        let mut len = buf.len();
+        let rc = unsafe {
+            libc::sysctlbyname(c"kern.osproductversion".as_ptr(), buf.as_mut_ptr().cast(), &mut len, std::ptr::null_mut(), 0)
+        };
+        assert_eq!(rc, 0, "kern.osproductversion");
+        let v = std::str::from_utf8(&buf[..len]).unwrap_or_default().trim_end_matches('\0');
+        v.split('.').next().unwrap_or(v).to_string()
+    }
+
+    /// `name.png` → `name.macos<N>.png`: the baseline for this macOS
+    /// release alone.  A snapshot that draws with system fonts can
+    /// look different on another release -- the CJK fallback fonts do
+    /// between macOS 14 and 27 -- and gets a baseline per release; the
+    /// rest share one.
+    fn versioned(path: &std::path::Path) -> std::path::PathBuf {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        path.with_file_name(format!("{stem}.macos{}.png", macos_major()))
+    }
+
+    /// The baseline this machine is held to: this release's own when
+    /// there is one, the shared one otherwise.
+    fn baseline_for(path: &std::path::Path) -> std::path::PathBuf {
+        let v = versioned(path);
+        if v.is_file() { v } else { path.to_path_buf() }
+    }
+
+    fn encode_png(path: &std::path::Path, rgba: &[u8], w_px: u32, h_px: u32) {
         let file = std::fs::File::create(path).expect("create png");
         let buf = std::io::BufWriter::new(file);
         let mut encoder = png::Encoder::new(buf, w_px, h_px);
@@ -3186,26 +3219,30 @@ mod tests {
         if snapshot_mode() != Some(SnapshotMode::Check) {
             return;
         }
-        let baseline = load_baseline_rgba(baseline_path, w_px, h_px).unwrap_or_else(|why| {
-            panic!(
-                "no usable baseline at {}: {why}; record one with MARSPOT_FONT_SNAPSHOT=1",
-                baseline_path.display()
-            )
+        let path = baseline_for(baseline_path);
+        let baseline = load_baseline_rgba(&path, w_px, h_px).unwrap_or_else(|why| {
+            let kept = keep_render(baseline_path, rgba, w_px, h_px);
+            panic!("no usable baseline at {}: {why}; record one with MARSPOT_FONT_SNAPSHOT=1{kept}", path.display())
         });
         let s = ssim_luma(rgba, &baseline, w_px, h_px);
-        eprintln!(
-            "[ssim] {} = {:.4} (threshold {:.4})",
-            baseline_path.display(),
-            s,
-            threshold,
-        );
-        assert!(
-            s >= threshold,
-            "SSIM {:.4} < {:.4} — visual regression vs {}",
-            s,
-            threshold,
-            baseline_path.display(),
-        );
+        eprintln!("[ssim] {} = {:.4} (threshold {:.4})", path.display(), s, threshold);
+        if s < threshold {
+            let kept = keep_render(baseline_path, rgba, w_px, h_px);
+            panic!("SSIM {s:.4} < {threshold:.4} — visual regression vs {}{kept}", path.display());
+        }
+    }
+
+    /// A render that did not match, written under `MARSPOT_SNAPSHOT_OUT`
+    /// with the name this release's own baseline would have, so it can
+    /// be looked at -- and, when it is right, committed as that
+    /// baseline.  CI uploads the directory when the tests fail.
+    fn keep_render(baseline_path: &std::path::Path, rgba: &[u8], w_px: u32, h_px: u32) -> String {
+        let Some(dir) = std::env::var_os("MARSPOT_SNAPSHOT_OUT") else { return String::new() };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).expect("create MARSPOT_SNAPSHOT_OUT");
+        let out = dir.join(versioned(baseline_path).file_name().expect("a file name"));
+        encode_png(&out, rgba, w_px, h_px);
+        format!("; this render is at {}", out.display())
     }
 
     /// Font v5 snapshot — renders the dev-panel canvas with the
