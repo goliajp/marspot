@@ -307,7 +307,7 @@ impl Worker {
             Err(why) => {
                 lx_info!("peerbus.refused", &why.reason(), sid = sid, peer_pid = peer_pid.unwrap_or(0));
                 if let Some(to) = &reply_to {
-                    deliver::send_receipt(to, &address, Receipt::Refused, frame.msg_id.as_deref(), &why.reason());
+                    deliver::send_receipt(to, &address, why.receipt(), frame.msg_id.as_deref(), &why.reason());
                 }
                 return;
             }
@@ -328,13 +328,15 @@ impl Worker {
             result = self.call(&home, "thread/queue/add", p);
             via = "thread/queue/add";
         }
-        let (receipt, reason) = match &result {
-            Ok(_) => (Receipt::Delivered, format!("queued for the codex session via {via}")),
-            Err(e) => (Receipt::Refused, format!("codex did not accept it: {e}")),
-        };
-        lx_info!("peerbus.deliver", &reason, sid = sid, peer_pid = peer_pid.unwrap_or(0), ok = result.is_ok());
-        if let Some(to) = &reply_to {
-            deliver::send_receipt(to, &address, receipt, frame.msg_id.as_deref(), &reason);
+        match &result {
+            Ok(_) => lx_info!("peerbus.deliver", "queued for the codex session", sid = sid, via = via, peer_pid = peer_pid.unwrap_or(0)),
+            Err(e) => {
+                let reason = format!("codex did not accept it: {e}");
+                lx_warn!("peerbus.deliver_failed", &reason, sid = sid, via = via);
+                if let Some(to) = &reply_to {
+                    deliver::send_receipt(to, &address, Receipt::Refused, frame.msg_id.as_deref(), &reason);
+                }
+            }
         }
     }
 }
