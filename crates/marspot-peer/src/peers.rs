@@ -98,13 +98,13 @@ pub fn send(me: &Entry, entries: &[Entry], to: &str, body: &str, priority: Prior
     if !body.trim().is_empty() {
         let header = Header { from: from.clone(), from_name: me.name.clone(), from_mode: Some(mode) };
         let content = envelope::encode(&header, body);
-        write_line(&target, &name, &frame::user_line(&content, &from, priority, &msg_id))?;
+        write_line(me.relay.as_deref(), &target, &name, &frame::user_line(&content, &from, priority, &msg_id))?;
     }
     let subscribed = if !notify_idle {
         None
     } else if entry.is_some_and(|e| e.supports("notify_idle")) {
         let id = crate::rand::uuid_v4();
-        write_line(&target, &name, &frame::notify_when_idle_line(&from, mode.as_str(), &id))?;
+        write_line(me.relay.as_deref(), &target, &name, &frame::notify_when_idle_line(&from, mode.as_str(), &id))?;
         Some(true)
     } else {
         Some(false)
@@ -112,7 +112,12 @@ pub fn send(me: &Entry, entries: &[Entry], to: &str, body: &str, priority: Prior
     Ok(Sent { msg_id, to: name, subscribed })
 }
 
-fn write_line(target: &str, name: &str, line: &str) -> Result<(), String> {
+/// Through the sender's relay when it has one, so the peer sees the
+/// connection come from the process its registry record names.
+fn write_line(relay: Option<&str>, target: &str, name: &str, line: &str) -> Result<(), String> {
+    if let Some(r) = relay {
+        return crate::relay::send_via(r, target, line).map_err(|e| format!("cannot reach {name}: {e}"));
+    }
     let mut s = UnixStream::connect(target).map_err(|e| format!("cannot reach {name}: {e}"))?;
     let _ = s.set_write_timeout(Some(Duration::from_secs(10)));
     s.write_all(line.as_bytes()).map_err(|e| format!("cannot write to {name}: {e}"))
@@ -171,6 +176,7 @@ mod tests {
             features: Vec::new(),
             ours: false,
             class: None,
+            relay: None,
             owner: None,
         }
     }
