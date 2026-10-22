@@ -11,6 +11,13 @@
 //! A reader counts a record as live while its pid exists and the pid's
 //! start time still equals `procStart` (see `proc`).  Claude Code
 //! deletes records whose process is gone, ours included.
+//!
+//! Names are the one field marspot also writes into a Claude session's
+//! record (`rename_foreign`): every session is addressed by the name of
+//! its marspot pane.  Claude Code reads a name whose `nameSource` is
+//! `peer` as one somebody else gave the session, and its own updates to
+//! the record merge into what is on disk, so the name stays until the
+//! session renames itself.
 
 use std::fs;
 use std::io;
@@ -46,6 +53,41 @@ impl Status {
     }
 }
 
+/// How many earlier names a record keeps.  They still address the
+/// session, so a name a sender stored before a pane was renumbered
+/// keeps working for a while; the oldest go first.
+pub const MAX_FORMER_NAMES: usize = 5;
+
+/// What this side of the protocol supports beyond plain messages.
+pub const FEATURES: &[&str] = &["notify_idle"];
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FormerName {
+    pub name: String,
+    pub until_ms: i64,
+    pub session_id: String,
+}
+
+impl FormerName {
+    fn to_value(&self) -> Value {
+        obj([
+            ("name", Value::from(self.name.as_str())),
+            ("until", Value::from(self.until_ms)),
+            ("sessionId", Value::from(self.session_id.as_str())),
+        ])
+    }
+}
+
+/// `list` with `old` pushed to the front: deduplicated, never holding
+/// `current`, at most `MAX_FORMER_NAMES` long.
+pub fn push_former(list: &mut Vec<FormerName>, old: FormerName, current: &str) {
+    list.retain(|f| f.name != old.name && f.name != current);
+    if old.name != current && !old.name.is_empty() {
+        list.insert(0, old);
+    }
+    list.truncate(MAX_FORMER_NAMES);
+}
+
 /// A record marspot writes for one Codex session.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Record {
@@ -59,6 +101,8 @@ pub struct Record {
     /// The Codex version.
     pub version: String,
     pub name: String,
+    pub name_since_ms: i64,
+    pub former_names: Vec<FormerName>,
     /// Absolute path of the inbox socket.
     pub socket: String,
     pub status: Status,
@@ -76,16 +120,15 @@ impl Record {
             ("procStart", Value::from(self.proc_start.as_str())),
             ("version", Value::from(self.version.as_str())),
             ("peerProtocol", Value::from(1)),
-            // no features: a peer that advertises none is never sent
-            // subscriptions or notices this side does not handle
-            ("peerFeatures", Value::Arr(Vec::new())),
+            ("peerFeatures", Value::Arr(FEATURES.iter().map(|f| Value::from(*f)).collect())),
             ("kind", Value::from("interactive")),
             ("entrypoint", Value::from(MARKER)),
             ("pidDomain", Value::from("darwin")),
             ("messagingSocketPath", Value::from(self.socket.as_str())),
             ("name", Value::from(self.name.as_str())),
-            ("nameSource", Value::from("derived")),
-            ("nameSince", Value::from(self.started_at_ms)),
+            ("nameSource", Value::from("peer")),
+            ("nameSince", Value::from(self.name_since_ms)),
+            ("formerNames", Value::Arr(self.former_names.iter().map(FormerName::to_value).collect())),
             ("status", Value::from(self.status.as_str())),
             ("updatedAt", Value::from(now_ms)),
             ("statusUpdatedAt", Value::from(now_ms)),
@@ -102,16 +145,29 @@ pub struct Entry {
     pub pid: i32,
     pub session_id: Option<String>,
     pub name: Option<String>,
+    /// Earlier names that still address the session, newest first.
+    pub former_names: Vec<String>,
     pub cwd: Option<String>,
     pub socket: Option<String>,
     pub status: Option<String>,
     pub proc_start: Option<String>,
+    pub started_at_ms: Option<i64>,
+    pub features: Vec<String>,
     pub ours: bool,
     pub class: Option<Mode>,
     pub owner: Option<String>,
 }
 
 impl Entry {
+    /// Whether `name` addresses this session: its name, or one it had.
+    pub fn answers_to(&self, name: &str) -> bool {
+        self.name.as_deref() == Some(name) || self.former_names.iter().any(|n| n == name)
+    }
+
+    pub fn supports(&self, feature: &str) -> bool {
+        self.features.iter().any(|f| f == feature)
+    }
+
     /// Live by the same rule Claude Code applies.
     pub fn is_live(&self) -> bool {
         proc::alive(self.pid) && self.proc_start.as_ref().is_none_or(|s| proc::lstart(self.pid).as_ref() == Some(s))
@@ -129,6 +185,46 @@ pub fn write(dir: &Path, rec: &Record, now_ms: i64) -> io::Result<()> {
     let tmp = dir.join(format!(".marspot-{}.json.tmp", rec.pid));
     fs::write(&tmp, rec.to_json(now_ms))?;
     fs::rename(&tmp, record_path(dir, rec.pid))
+}
+
+/// Give a Claude session's record the name `name`, keeping the name it
+/// had among its former names.  Only the name fields are written; the
+/// rest of the record is written back as it was read.  Returns the old
+/// name when it changed.  A record that is ours, or that is not the
+/// one for `pid`, is left alone.
+pub fn rename_foreign(dir: &Path, pid: i32, name: &str, now_ms: i64) -> io::Result<Option<String>> {
+    let path = record_path(dir, pid);
+    let text = fs::read_to_string(&path)?;
+    let Ok(mut v) = json::parse(&text) else { return Ok(None) };
+    if v.str_at("entrypoint") == Some(MARKER) || v.get("pid").and_then(Value::i64) != Some(i64::from(pid)) {
+        return Ok(None);
+    }
+    let old = v.str_at("name").unwrap_or_default().to_string();
+    if old == name {
+        return Ok(None);
+    }
+    let session = v.str_at("sessionId").unwrap_or_default().to_string();
+    let mut former: Vec<FormerName> = v
+        .get("formerNames")
+        .map_or(&[][..], Value::arr)
+        .iter()
+        .filter_map(|f| {
+            Some(FormerName {
+                name: f.str_at("name")?.to_string(),
+                until_ms: f.get("until").and_then(Value::i64).unwrap_or(0),
+                session_id: f.str_at("sessionId").unwrap_or_default().to_string(),
+            })
+        })
+        .collect();
+    push_former(&mut former, FormerName { name: old.clone(), until_ms: now_ms, session_id: session }, name);
+    v.set("name", Value::from(name));
+    v.set("nameSource", Value::from("peer"));
+    v.set("nameSince", Value::from(now_ms));
+    v.set("formerNames", Value::Arr(former.iter().map(FormerName::to_value).collect()));
+    let tmp = dir.join(format!(".marspot-rename-{pid}.json.tmp"));
+    fs::write(&tmp, v.to_json())?;
+    fs::rename(&tmp, &path)?;
+    Ok(Some(old))
 }
 
 /// Remove the record for `pid` if it is ours.  A record that a Claude
@@ -218,14 +314,28 @@ fn read_entry(path: &Path, pid: i32) -> Option<Entry> {
     let text = fs::read_to_string(path).ok()?;
     let v = json::parse(&text).ok()?;
     let s = |k: &str| v.str_at(k).map(str::to_string);
+    let strs = |k: &str, field: Option<&str>| -> Vec<String> {
+        v.get(k)
+            .map_or(&[][..], Value::arr)
+            .iter()
+            .filter_map(|x| match field {
+                Some(f) => x.str_at(f),
+                None => x.str(),
+            })
+            .map(str::to_string)
+            .collect()
+    };
     Some(Entry {
         pid,
         session_id: s("sessionId"),
         name: s("name"),
+        former_names: strs("formerNames", Some("name")),
         cwd: s("cwd"),
         socket: s("messagingSocketPath"),
         status: s("status"),
         proc_start: s("procStart"),
+        started_at_ms: v.get("startedAt").and_then(Value::i64),
+        features: strs("peerFeatures", None),
         ours: v.str_at("entrypoint") == Some(MARKER),
         class: v.str_at(CLASS_KEY).and_then(Mode::parse),
         owner: s(OWNER_KEY),
@@ -250,7 +360,9 @@ mod tests {
             started_at_ms: 1,
             proc_start: proc::lstart(pid).unwrap_or_default(),
             version: "0.163.0".into(),
-            name: "codex-x".into(),
+            name: "x".into(),
+            name_since_ms: 1,
+            former_names: Vec::new(),
             socket: format!("/tmp/cc-socks/{pid}-0a1b2c3d.sock"),
             status: Status::Idle,
             class: Mode::Bypass,
@@ -317,5 +429,55 @@ mod tests {
         assert_eq!(all.len(), 1, "only the canonical name counts");
         assert!(!all[0].ours);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A Claude record is renamed in place: every other field, and the
+    /// order of the fields, is what Claude Code wrote.
+    #[test]
+    fn a_foreign_rename_touches_only_the_name_fields() {
+        let dir = tmpdir("rename");
+        let theirs = r#"{"pid":7,"sessionId":"s1","cwd":"/w/spg","startedAt":1792674965957,"procStart":"x","peerFeatures":["notify_idle"],"entrypoint":"cli","messagingSocketPath":"/tmp/cc-socks/7.sock","name":"spg-6a","nameSource":"derived","nameSince":1,"status":"busy"}"#;
+        fs::write(record_path(&dir, 7), theirs).unwrap();
+        assert_eq!(rename_foreign(&dir, 7, "spg#2", 100).unwrap().as_deref(), Some("spg-6a"));
+        let v = json::parse(&fs::read_to_string(record_path(&dir, 7)).unwrap()).unwrap();
+        assert_eq!(v.str_at("name"), Some("spg#2"));
+        assert_eq!(v.str_at("nameSource"), Some("peer"));
+        assert_eq!(v.str_at("status"), Some("busy"));
+        assert_eq!(v.get("startedAt").and_then(Value::i64), Some(1792674965957));
+        let Value::Obj(kv) = &v else { panic!() };
+        assert_eq!(kv[0].0, "pid", "fields keep their order");
+        let e = read_entry(&record_path(&dir, 7), 7).unwrap();
+        assert!(e.answers_to("spg#2") && e.answers_to("spg-6a"));
+        assert!(e.supports("notify_idle"));
+        // unchanged name: no write
+        assert_eq!(rename_foreign(&dir, 7, "spg#2", 200).unwrap(), None);
+        // back to the first name: it leaves the former names
+        rename_foreign(&dir, 7, "spg-6a", 300).unwrap();
+        let e = read_entry(&record_path(&dir, 7), 7).unwrap();
+        assert_eq!(e.former_names, vec!["spg#2".to_string()]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn our_own_records_and_mismatched_pids_are_not_renamed() {
+        let dir = tmpdir("rename-no");
+        let me = std::process::id() as i32;
+        write(&dir, &record(me), 2).unwrap();
+        assert_eq!(rename_foreign(&dir, me, "y", 3).unwrap(), None);
+        fs::write(record_path(&dir, 8), r#"{"pid":9,"entrypoint":"cli","name":"a"}"#).unwrap();
+        assert_eq!(rename_foreign(&dir, 8, "y", 3).unwrap(), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn former_names_stay_short_and_never_hold_the_current_one() {
+        let mut l = Vec::new();
+        for i in 0..8 {
+            push_former(&mut l, FormerName { name: format!("n{i}"), until_ms: i, session_id: String::new() }, "now");
+        }
+        assert_eq!(l.len(), MAX_FORMER_NAMES);
+        assert_eq!(l[0].name, "n7");
+        push_former(&mut l, FormerName { name: "n5".into(), until_ms: 9, session_id: String::new() }, "n6");
+        assert_eq!(l.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["n5", "n7", "n4", "n3"]);
     }
 }

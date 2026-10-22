@@ -96,23 +96,24 @@ pub(super) fn admit(f: &UserFrame, ours: Mode, rate: &mut Rate, now: Instant) ->
         return Err(Refusal::RateLimited);
     }
     let reply_to = reply_address(f);
-    // The envelope goes to Codex as it came: it says who the message is
-    // from, and the TUI shows it to the user that way.  The last line
-    // is how Codex answers; it does not otherwise know the command.
-    let mut text = f.content.clone();
-    if let Some(to) = &reply_to {
-        text.push_str(&format!("\n(Reply with: marspot-peer send {to} \"<text>\")"));
-    }
-    Ok(Admitted { text, reply_to })
+    // The envelope goes to Codex as it came, exactly what a Claude
+    // session is shown: who it is from and where to answer.  How to
+    // answer is in the SendMessage tool's description, as in Claude.
+    Ok(Admitted { text: f.content.clone(), reply_to })
 }
 
-/// Tell a sender what happened.  Best effort with a short timeout: a
-/// sender that has gone away has nobody left to tell.
+/// Tell a sender what happened.
 pub(super) fn send_receipt(to: &str, from: &str, r: Receipt, orig_msg_id: Option<&str>, reason: &str) {
+    send_line(to, &frame::receipt_line(r, from, orig_msg_id, reason));
+}
+
+/// One frame to a `uds:` address.  Best effort with a short timeout: a
+/// peer that has gone away has nobody left to tell.
+pub(super) fn send_line(to: &str, line: &str) {
     let Some(path) = to.strip_prefix("uds:") else { return };
     let Ok(mut s) = UnixStream::connect(path) else { return };
     let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
-    let _ = s.write_all(frame::receipt_line(r, from, orig_msg_id, reason).as_bytes());
+    let _ = s.write_all(line.as_bytes());
 }
 
 #[cfg(test)]
@@ -127,11 +128,10 @@ mod tests {
     }
 
     #[test]
-    fn same_class_is_admitted_with_a_reply_line() {
+    fn same_class_is_admitted_as_the_envelope_alone() {
         let f = frame_from(Some(Mode::Bypass), "do the thing");
         let a = admit(&f, Mode::Bypass, &mut Rate::default(), Instant::now()).unwrap();
-        assert!(a.text.starts_with(&f.content));
-        assert!(a.text.ends_with("\n(Reply with: marspot-peer send uds:/tmp/cc-socks/9.sock \"<text>\")"));
+        assert_eq!(a.text, f.content, "what a Claude session would be shown");
         assert_eq!(a.reply_to.as_deref(), Some("uds:/tmp/cc-socks/9.sock"));
     }
 

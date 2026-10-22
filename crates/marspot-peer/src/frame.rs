@@ -102,6 +102,68 @@ pub fn user_line(content: &str, from: &str, priority: Priority, msg_id: &str) ->
     s
 }
 
+/// A `notify_when_idle` control frame, newline-terminated: ask the
+/// recipient to send one `peer_idle_notice` to `from` when it next goes
+/// idle or exits.  `msg_id` comes back as the notice's `orig_msg_id`.
+/// The shape is the one Claude Code 2.1.308 sends:
+///
+/// ```text
+/// {"type":"control","action":"notify_when_idle","from":"uds:…","from_mode":"bypass","msgV":1,"msg_id":"…"}
+/// ```
+pub fn notify_when_idle_line(from: &str, from_mode: &str, msg_id: &str) -> String {
+    let mut s = obj([
+        ("type", Value::from("control")),
+        ("action", Value::from("notify_when_idle")),
+        ("from", Value::from(from)),
+        ("from_mode", Value::from(from_mode)),
+        ("msgV", Value::from(1)),
+        ("msg_id", Value::from(msg_id)),
+    ])
+    .to_json();
+    s.push('\n');
+    s
+}
+
+/// How a session that was asked to report going idle ended up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdleState {
+    Idle,
+    /// It went away before going idle.
+    Exited,
+}
+
+impl IdleState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IdleState::Idle => "idle",
+            IdleState::Exited => "exited",
+        }
+    }
+}
+
+/// A `peer_idle_notice` control frame, newline-terminated, as Claude
+/// Code 2.1.308 sends it to a subscriber:
+///
+/// ```text
+/// {"type":"control","action":"peer_idle_notice","orig_msg_id":"…","state":"idle","finished_at":1792675413813,"from":"uds:…","msgV":1,"msg_id":"…"}
+/// ```
+pub fn idle_notice_line(orig_msg_id: &str, state: IdleState, finished_at_ms: i64, from: &str, from_mode: &str, msg_id: &str) -> String {
+    let mut s = obj([
+        ("type", Value::from("control")),
+        ("action", Value::from("peer_idle_notice")),
+        ("orig_msg_id", Value::from(orig_msg_id)),
+        ("state", Value::from(state.as_str())),
+        ("finished_at", Value::from(finished_at_ms)),
+        ("from", Value::from(from)),
+        ("from_mode", Value::from(from_mode)),
+        ("msgV", Value::from(1)),
+        ("msg_id", Value::from(msg_id)),
+    ])
+    .to_json();
+    s.push('\n');
+    s
+}
+
 /// What happened to a message that did not get through, told back to
 /// its sender.  A message that was accepted gets no receipt: in this
 /// protocol `delivered` means "held, then approved by the recipient's
@@ -224,5 +286,22 @@ mod tests {
         assert_eq!(v.str_at("status"), Some("dropped"));
         assert_eq!(v.str_at("drop_reason"), Some("rate-limited"));
         assert_eq!(v.get("dropped_msg_ids").unwrap().arr()[0].str(), Some("m1"));
+    }
+
+    /// Both control frames read back the way a Claude Code receiver
+    /// reads them: action, correlation id, sender.
+    #[test]
+    fn idle_frames_carry_the_fields_claude_reads() {
+        let sub = notify_when_idle_line("uds:/tmp/cc-socks/1-0a1b2c3d.sock", "bypass", "m1");
+        let Inbound::Control { action, frame } = parse_line(sub.trim_end()).unwrap() else { panic!() };
+        assert_eq!(action, "notify_when_idle");
+        assert_eq!(frame.str_at("msg_id"), Some("m1"));
+        assert_eq!(frame.str_at("from_mode"), Some("bypass"));
+        let note = idle_notice_line("m1", IdleState::Idle, 1792675413813, "uds:/tmp/cc-socks/2.sock", "bypass", "m2");
+        let Inbound::Control { action, frame } = parse_line(note.trim_end()).unwrap() else { panic!() };
+        assert_eq!(action, "peer_idle_notice");
+        assert_eq!(frame.str_at("orig_msg_id"), Some("m1"));
+        assert_eq!(frame.str_at("state"), Some("idle"));
+        assert_eq!(frame.get("finished_at").and_then(Value::i64), Some(1792675413813));
     }
 }

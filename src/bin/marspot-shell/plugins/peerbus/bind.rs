@@ -228,24 +228,6 @@ pub(super) fn argv_override(argv: &[String]) -> ArgvOverride {
     o
 }
 
-/// The registry name for a bound thread: `codex-<project>`, made
-/// unique against names already taken.
-pub(super) fn record_name(cwd: &str, thread: &str, taken: &[String]) -> String {
-    let base: String = cwd
-        .rsplit('/')
-        .find(|s| !s.is_empty())
-        .unwrap_or("session")
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' })
-        .collect();
-    let name = format!("codex-{base}");
-    if !taken.contains(&name) {
-        return name;
-    }
-    let short: String = thread.chars().filter(char::is_ascii_hexdigit).rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
-    format!("{name}-{short}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,13 +366,5 @@ mod tests {
         assert_eq!(argv_override(&a("codex --sandbox=workspace-write")).sandbox.as_deref(), Some("workspace-write"));
         assert!(argv_override(&a("codex -p work")).opaque);
         assert_eq!(argv_override(&a("codex resume 01a1")), ArgvOverride::default());
-    }
-
-    #[test]
-    fn names_are_made_unique() {
-        assert_eq!(record_name("/Users/x/workspace/goliajp/spg", "t", &[]), "codex-spg");
-        let taken = vec!["codex-spg".to_string()];
-        assert_eq!(record_name("/w/spg/", "01a16103-3f4c-7883-b4ee-2a471b88dda9", &taken), "codex-spg-dda9");
-        assert_eq!(record_name("/w/My Proj", "t", &[]), "codex-my-proj");
     }
 }
