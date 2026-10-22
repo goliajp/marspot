@@ -32,7 +32,13 @@ impl Worker {
             };
             let home = home.canonicalize().unwrap_or(home);
             let argv_thread = crate::plugins::codex::argv_thread_id(w.codex.pid);
-            panes.push(Pane { sid: w.sid, home, cwd: cwd.to_string_lossy().into_owned(), argv_thread });
+            panes.push(Pane {
+                sid: w.sid,
+                home,
+                cwd: cwd.to_string_lossy().into_owned(),
+                argv_thread,
+                title_thread: w.title_thread.clone(),
+            });
             procs.insert(w.sid, (w.codex, w.argv.clone()));
         }
 

@@ -36,7 +36,7 @@ fn live_codex_round_trip() {
     let (tx, rx) = sync_channel(CHANNEL);
     let worker = Worker::new(tx.clone(), rx, owner.clone());
     let handle = std::thread::spawn(move || worker.run());
-    tx.send(Event::Want(vec![Want { sid: 1, codex, argv }])).unwrap();
+    tx.send(Event::Want(vec![Want { sid: 1, codex, argv, title_thread: None }])).unwrap();
 
     // the record appears once the worker has bound the thread
     let rec = wait(Duration::from_secs(30), || {
