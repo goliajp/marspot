@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.245"  # a spent pane waits at most five minutes for work under it
+shell   = "0.7.246"  # codex panes get inboxes claude code sessions can message (peerbus)
 core    = "0.12.288"  # asks every reattached session to update, in a window restored later too
 session = "0.11.152"  # takes updates as a frame and closes on SIGHUP; a copy of its own build is not an update
