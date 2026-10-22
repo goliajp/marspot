@@ -7,7 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use marspot_peer::envelope::{self, Mode};
-use marspot_peer::frame::{self, Receipt, UserFrame};
+use marspot_peer::frame::{self, DropReason, Receipt, UserFrame};
 
 /// Messages one Codex session accepts per minute.
 const RATE_PER_MIN: usize = 30;
@@ -26,6 +26,15 @@ pub(super) enum Refusal {
 }
 
 impl Refusal {
+    /// The receipt the sender gets.
+    pub fn receipt(&self) -> Receipt {
+        match self {
+            Refusal::RateLimited => Receipt::Dropped(DropReason::RateLimited),
+            Refusal::TooManyHops => Receipt::Dropped(DropReason::HopRunaway),
+            Refusal::ClassMismatch { .. } => Receipt::Refused,
+        }
+    }
+
     pub fn reason(&self) -> String {
         match self {
             Refusal::RateLimited => format!("recipient accepts at most {RATE_PER_MIN} messages a minute"),
@@ -135,6 +144,15 @@ mod tests {
         }
         let plain = UserFrame { content: "no envelope".into(), from: None, priority: Priority::Next, msg_id: None };
         assert!(admit(&plain, Mode::Bypass, &mut rate, Instant::now()).is_err());
+    }
+
+    /// Only statuses and drop reasons a Claude Code sender understands.
+    #[test]
+    fn refusals_map_to_claude_receipts() {
+        let class = Refusal::ClassMismatch { sender: None, ours: Mode::Bypass };
+        assert_eq!(class.receipt(), Receipt::Refused);
+        assert_eq!(Refusal::RateLimited.receipt(), Receipt::Dropped(DropReason::RateLimited));
+        assert_eq!(Refusal::TooManyHops.receipt(), Receipt::Dropped(DropReason::HopRunaway));
     }
 
     #[test]

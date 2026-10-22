@@ -147,6 +147,22 @@ impl Worker {
 
     pub(super) fn bind(&mut self, p: &Pane, thread: &str, codex: pidtree::ProcId, argv: &[String]) -> Result<(), String> {
         let (class, subscribed) = self.class_for(&p.home, thread, &p.cwd, argv);
+        let r = self.bind_with(p, thread, codex, argv, class, subscribed);
+        if r.is_err() && subscribed {
+            self.unsubscribe(&p.home, thread);
+        }
+        r
+    }
+
+    fn bind_with(
+        &mut self,
+        p: &Pane,
+        thread: &str,
+        codex: pidtree::ProcId,
+        argv: &[String],
+        class: Mode,
+        subscribed: bool,
+    ) -> Result<(), String> {
         let version = self.conns.get(&p.home).map(|c| c.version.clone()).unwrap_or_default();
         let proc_start = marspot_peer::proc::lstart(codex.pid).ok_or("codex exited")?;
         let dir = self.sock_dir().map_err(|e| format!("socket directory: {e}"))?;
@@ -204,8 +220,25 @@ impl Worker {
         for d in registry::default_dirs() {
             let _ = registry::remove_ours(&d, b.codex.pid);
         }
+        if b.subscribed {
+            self.unsubscribe(&b.home, &b.thread);
+        }
         lx_info!("peerbus.unbind", "inbox removed", thread = b.thread.clone(), name = b.record.name.clone());
         b.inbox.close();
+    }
+
+    /// Drop this connection's subscription.  Codex unloads a thread
+    /// only once it has had no subscriber for half an hour; a
+    /// subscription left behind would keep a quit TUI's thread loaded
+    /// for as long as marspot runs, and leave its directory ambiguous
+    /// for the next Codex started there.
+    pub(super) fn unsubscribe(&mut self, home: &Path, thread: &str) {
+        if !self.conns.contains_key(home) {
+            return; // the connection is gone, and its subscriptions with it
+        }
+        if let Err(e) = self.call(home, "thread/unsubscribe", obj([("threadId", Value::from(thread))])) {
+            lx_warn!("peerbus.unsubscribe_failed", &e.to_string(), thread = thread.to_string());
+        }
     }
 
     /// Claude Code checks that a reply address is in the same directory

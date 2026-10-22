@@ -19,7 +19,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use marspot_term::{lx_info, lx_warn};
-use marspot_peer::frame::{self, Inbound, Receipt};
+use marspot_peer::frame::{self, DropReason, Inbound, Receipt};
 
 use super::worker::Event;
 use super::deliver::send_receipt;
@@ -116,7 +116,7 @@ fn serve(conn: UnixStream, peer_pid: Option<i32>, key: u64, address: &str, tx: &
                     Err(TrySendError::Full(_)) => {
                         lx_warn!("peerbus.inbox.backlog_full", "refusing a message", key = key);
                         if let Some(to) = reply_to {
-                            send_receipt(&to, address, Receipt::Refused, msg_id.as_deref(), "recipient inbox is full");
+                            send_receipt(&to, address, Receipt::Dropped(DropReason::QueueFull), msg_id.as_deref(), "recipient inbox is full");
                         }
                     }
                     Err(TrySendError::Disconnected(_)) => return,

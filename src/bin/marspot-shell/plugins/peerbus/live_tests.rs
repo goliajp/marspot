@@ -73,17 +73,13 @@ fn live_codex_round_trip() {
     let line = frame::user_line(&envelope::encode(&h, &body), &from, Priority::Next, &marspot_peer::rand::uuid_v4());
     UnixStream::connect(&inbox).unwrap().write_all(line.as_bytes()).unwrap();
 
-    let mut delivered = false;
+    // an accepted message gets no receipt; any receipt here is a failure
     let mut answer = None;
     let deadline = Instant::now() + Duration::from_secs(120);
-    while (answer.is_none() || !delivered) && Instant::now() < deadline {
+    while answer.is_none() && Instant::now() < deadline {
         let Ok(l) = got_rx.recv_timeout(Duration::from_secs(1)) else { continue };
         match frame::parse_line(&l).unwrap() {
-            Inbound::Control { action, frame } if action == "peer_message_status" => {
-                println!("receipt: {}", frame.to_json());
-                assert_eq!(frame.str_at("status"), Some("delivered"));
-                delivered = true;
-            }
+            Inbound::Control { action, frame } => panic!("unexpected {action}: {}", frame.to_json()),
             Inbound::User(f) => {
                 let env = envelope::parse(&f.content).expect("codex's message is an envelope");
                 println!("from codex: {}", f.content);
@@ -92,7 +88,6 @@ fn live_codex_round_trip() {
             other => println!("other frame: {other:?}"),
         }
     }
-    assert!(delivered, "no delivery receipt");
     let env = answer.expect("codex never answered");
     assert_eq!(env.from.as_deref(), Some(format!("uds:{inbox}").as_str()), "reply address is the codex inbox");
     assert_eq!(env.from_mode, Some(Mode::Bypass));
@@ -103,6 +98,14 @@ fn live_codex_round_trip() {
         println!("holding {secs}s: message {:?} from a Claude session now", rec.name);
         std::thread::sleep(Duration::from_secs(secs));
     }
+
+    // the pane loses its codex: the binding goes, before any shutdown
+    tx.send(Event::Want(Vec::new())).unwrap();
+    let gone = wait(Duration::from_secs(15), || {
+        let left = registry::default_dirs().iter().flat_map(|d| registry::read_all(d)).any(|e| e.owner.as_deref() == Some(owner.as_str()));
+        (!left && !std::path::Path::new(&inbox).exists()).then_some(())
+    });
+    assert!(gone.is_some(), "unbinding left the record or the inbox behind");
 
     tx.send(Event::Stop).unwrap();
     handle.join().unwrap();
