@@ -70,6 +70,12 @@ jobs:
           key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ matrix.os }}-cargo-
 
+      - name: Shells the tests run
+        # The PTY tests start /bin/zsh and /bin/bash.  macOS has both;
+        # the Ubuntu image has no zsh.
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends zsh
+
       - name: Build
         run: cargo build ${{ matrix.scope }} --all-targets
 
@@ -85,10 +91,24 @@ jobs:
         # A runner has no display and no keychain.  Tests that need one
         # skip themselves and say so; a test that needs one and does
         # not skip is a bug in the test, not a reason to weaken this.
+        env:
+          # pixel snapshots that do not match are written here
+          MARSPOT_SNAPSHOT_OUT: ${{ runner.temp }}/snapshots
         run: |
           curl -LsSf https://get.nexte.st/latest/${{ matrix.nextest }} \
             | tar zxf - -C "$HOME/.cargo/bin"
           cargo nextest run ${{ matrix.scope }} --no-fail-fast
+
+      - name: Renders that did not match their snapshot
+        # A snapshot that draws with system fonts needs a baseline per
+        # macOS release (see `versioned` in render_metal.rs); the render
+        # from here is that baseline once someone has looked at it.
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: snapshots-${{ matrix.os }}
+          path: ${{ runner.temp }}/snapshots
+          if-no-files-found: ignore
 
       - name: Clippy
         run: cargo clippy ${{ matrix.scope }} --all-targets -- -D warnings
