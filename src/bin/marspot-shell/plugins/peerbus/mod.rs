@@ -69,11 +69,20 @@ impl Plugin for PeerbusPlugin {
     fn tick(&mut self, host: &dyn PluginHost) {
         let Some(tx) = &self.tx else { return };
         let obs = crate::observe::shared().latest();
+        // The title is read here, not on the worker, because a title
+        // that changes has to reach the worker as a changed set.  It is
+        // shared memory: no file system call, nothing that can block.
         let wants: Vec<Want> = obs
             .live()
             .filter_map(|s| {
                 let p = s.find("codex")?;
-                Some(Want { sid: s.entry.id, codex: p.row.id(), argv: p.argv.as_deref().map(<[String]>::to_vec).unwrap_or_default() })
+                let title = marspot_term::grid_shm::title::read(s.entry.id).ok().flatten();
+                Some(Want {
+                    sid: s.entry.id,
+                    codex: p.row.id(),
+                    argv: p.argv.as_deref().map(<[String]>::to_vec).unwrap_or_default(),
+                    title_thread: title.as_deref().and_then(bind::thread_in_title),
+                })
             })
             .collect();
         if wants == self.sent {
