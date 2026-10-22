@@ -19,6 +19,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use marspot_term::{lx_info, lx_warn};
+use marspot_peer::envelope;
 use marspot_peer::frame::{self, DropReason, Inbound, Receipt};
 
 use super::worker::Event;
@@ -122,7 +123,27 @@ fn serve(conn: UnixStream, peer_pid: Option<i32>, key: u64, address: &str, tx: &
                     Err(TrySendError::Disconnected(_)) => return,
                 }
             }
-            Ok(_) => {} // auth, control and unknown frames: nothing to do
+            Ok(Inbound::Control { action, frame }) => {
+                let from = frame.str_at("from").filter(|a| a.starts_with("uds:") && envelope::is_address(a));
+                let ev = match (action.as_str(), from) {
+                    ("notify_when_idle", Some(from)) => frame
+                        .str_at("msg_id")
+                        .map(|id| Event::Subscribe { key, from: from.to_string(), msg_id: id.to_string() }),
+                    ("peer_idle_notice", Some(from)) => frame.str_at("state").map(|state| Event::Notice {
+                        key,
+                        from: from.to_string(),
+                        state: state.to_string(),
+                        finished_at: frame.get("finished_at").and_then(marspot_peer::json::Value::i64),
+                    }),
+                    _ => None, // receipts and actions this side does not take
+                };
+                if let Some(ev) = ev
+                    && let Err(TrySendError::Disconnected(_)) = tx.try_send(ev)
+                {
+                    return;
+                }
+            }
+            Ok(_) => {} // auth and unknown frames: nothing to do
             Err(e) => lx_warn!("peerbus.inbox.bad_frame", &e),
         }
     }

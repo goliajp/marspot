@@ -12,9 +12,12 @@ use marspot_peer::registry::{self, Record, Status};
 use marspot_peer::rpc::RpcError;
 use marspot_term::{lx_info, lx_warn};
 
+use marspot_peer::frame::IdleState;
+
 use super::bind::{self, Pane};
 use super::deliver::Rate;
 use super::inbox::Inbox;
+use super::idle::send_notices;
 use super::worker::{is_inbox_name, now_ms, write_record, Binding, Worker, RETRY_MIN};
 
 impl Worker {
@@ -70,7 +73,7 @@ impl Worker {
             let same_proc = procs.get(&sid).map(|(c, _)| *c) == Some(b.codex);
             if !(same_thread && same_proc) {
                 let b = self.bindings.remove(&sid).expect("listed above");
-                self.unbind(b);
+                self.unbind(sid, b);
             }
         }
         for p in &panes {
@@ -176,12 +179,11 @@ impl Worker {
         self.next_key += 1;
         let inbox = Inbox::open(&dir, codex.pid, key, self.tx.clone()).map_err(|e| format!("inbox: {e}"))?;
         let dirs = registry::default_dirs();
-        let taken: Vec<String> = dirs
-            .iter()
-            .flat_map(|d| registry::list_live(d))
-            .filter(|e| e.pid != codex.pid)
-            .filter_map(|e| e.name)
-            .collect();
+        // the pane's name, as everywhere; the names check keeps it so
+        let name = super::names::Panes::look()
+            .names
+            .remove(&p.sid)
+            .unwrap_or_else(|| marspot::pane_name::base_name(&p.cwd));
         let record = Record {
             pid: codex.pid,
             session_id: thread.to_string(),
@@ -189,7 +191,9 @@ impl Worker {
             started_at_ms: now_ms(),
             proc_start,
             version,
-            name: bind::record_name(&p.cwd, thread, &taken),
+            name,
+            name_since_ms: now_ms(),
+            former_names: Vec::new(),
             socket: inbox.path.to_string_lossy().into_owned(),
             status: Status::Idle,
             class,
@@ -217,12 +221,15 @@ impl Worker {
             inbox,
             record,
             rate: Rate::default(),
+            subs: Vec::new(),
+            last_delivered: None,
         };
         self.bindings.insert(p.sid, b);
         Ok(())
     }
 
-    pub(super) fn unbind(&mut self, b: Binding) {
+    pub(super) fn unbind(&mut self, sid: u64, mut b: Binding) {
+        send_notices(sid, &mut b, IdleState::Exited);
         for d in registry::default_dirs() {
             let _ = registry::remove_ours(&d, b.codex.pid);
         }
@@ -285,7 +292,7 @@ impl Worker {
         let sids: Vec<u64> = self.bindings.keys().copied().collect();
         for sid in sids {
             if let Some(b) = self.bindings.remove(&sid) {
-                self.unbind(b);
+                self.unbind(sid, b);
             }
         }
         for c in self.conns.values() {
