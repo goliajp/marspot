@@ -330,7 +330,14 @@ mod tests {
         let home = TempDir::new("norc-home");
         let mut env = EnvGuard::new();
         env.set("HOME", home.path()).remove("ZDOTDIR");
-        for (shell, rc) in [("/bin/zsh", ".zshrc"), ("/bin/bash", ".bashrc")] {
+        // The control reads the user's rc file and not the system's:
+        // Ubuntu's /etc/zsh/zshrc runs compinit, which stops to ask
+        // about group-writable completion directories and takes the
+        // first letter of `exit` as its answer.
+        for (shell, control, rc) in [("/bin/zsh", "-d", ".zshrc"), ("/bin/bash", "", ".bashrc")] {
+            // a shell that cannot start reads nothing, and would pass
+            // the second half for that reason alone
+            assert!(std::path::Path::new(shell).is_file(), "{shell} is not installed, and this test runs it");
             let marker = home.join("rc-was-read");
             std::fs::write(home.join(rc), format!(": > {}\n", marker.display())).unwrap();
             let run = |program: String, args: Vec<String>| {
@@ -352,18 +359,24 @@ mod tests {
                 pty.write(b"exit\r").unwrap();
                 let pid = pty.child_pid();
                 let mut buf = [0u8; 4096];
-                // the shell's output is read and dropped, so it never
-                // blocks writing its prompt
+                // the shell's output is read, so it never blocks writing
+                // its prompt; the tail is kept to say what it was doing
+                let mut tail: Vec<u8> = Vec::new();
                 let exited = wait_until(|| {
-                    while matches!(pty.read(&mut buf), Ok(n) if n > 0) {}
+                    while let Ok(n @ 1..) = pty.read(&mut buf) {
+                        tail.extend_from_slice(&buf[..n]);
+                        let excess = tail.len().saturating_sub(2048);
+                        tail.drain(..excess);
+                    }
                     let mut st = 0;
                     let reaped = unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) };
                     reaped != 0
                 });
-                assert!(exited, "{shell} did not exit");
+                assert!(exited, "{shell} did not exit; it last showed:\n{}", String::from_utf8_lossy(&tail).escape_debug());
             };
-            run(shell.into(), vec!["-i".into()]);
-            assert!(marker.exists(), "the control: {shell} -i reads {rc}");
+            let args = [control, "-i"].iter().filter(|a| !a.is_empty()).map(|a| a.to_string()).collect();
+            run(shell.into(), args);
+            assert!(marker.exists(), "the control: {shell} {control} -i reads {rc}");
             std::fs::remove_file(&marker).unwrap();
             run(
                 shell_without_rc_files(home.path(), shell)

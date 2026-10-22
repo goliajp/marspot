@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.250"  # a relay process serves each codex inbox, so claude code accepts idle subscriptions both ways
-core    = "0.12.290"  # a copy on a program-scrolled pane takes the columns picked, after wide glyphs too
+core    = "0.12.291"  # a fallback font met at one size is no longer reused at another: cjk text stops drawing a size too big
 session = "0.11.153"  # publishes the window title beside the frame
