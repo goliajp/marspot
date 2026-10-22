@@ -11,11 +11,17 @@ Usage: _peerbus_claude_side.py <inbox-socket> <seconds> <expected-text> <tag> [n
 The message carries <tag>, so a test can find it on a screen.  An empty
 <expected-text> sends a message that asks for no reply.
 
+With PEERBUS_REGISTRY set to the registry directory it also makes the
+checks Claude Code makes on the other end of a socket: the process
+serving the inbox, and every process that writes back, must be the pid
+in the inbox's registry record.
+
 Prints what arrived as JSON lines and exits 0 once the reply body
 contains <expected-text> and, with `notify`, a peer_idle_notice for the
 subscription has come.  Exits 1 on a receipt (the message was refused
 or dropped), on a reply without the text, or when time runs out.
 """
+import glob
 import json
 import os
 import re
@@ -32,9 +38,48 @@ listener.bind(me)
 listener.listen(4)
 
 
+SOL_LOCAL, LOCAL_PEERPID = 0, 2  # <sys/un.h>
+
+
+def peer_pid(s):
+    return s.getsockopt(SOL_LOCAL, LOCAL_PEERPID)
+
+
+def record_pid():
+    reg = os.environ.get("PEERBUS_REGISTRY")
+    if not reg:
+        return None
+    for p in glob.glob(os.path.join(reg, "*.json")):
+        r = json.load(open(p))
+        if r.get("messagingSocketPath") == inbox:
+            return r["pid"]
+    print(json.dumps({"error": "no record for the inbox"}))
+    sys.exit(1)
+
+
+EXPECT = record_pid()
+
+
+def check_peer(s, what, required=True):
+    """Claude Code asks the kernel who is on the other end; a peer that
+    has already hung up cannot be asked, and is then not checked."""
+    if EXPECT is None:
+        return
+    try:
+        pid = peer_pid(s)
+    except OSError:
+        if required:
+            raise
+        return
+    if pid != EXPECT:
+        print(json.dumps({"error": "%s is pid %d, the record says %d" % (what, pid, EXPECT)}))
+        sys.exit(1)
+
+
 def write(frame):
     out = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     out.connect(inbox)
+    check_peer(out, "the process serving the inbox")
     out.sendall((json.dumps(frame) + "\n").encode())
     out.close()
 
@@ -61,6 +106,7 @@ try:
         except socket.timeout:
             continue
         data = b""
+        check_peer(conn, "the process writing back", required=False)
         conn.settimeout(5.0)
         while not data.endswith(b"\n"):
             chunk = conn.recv(65536)
