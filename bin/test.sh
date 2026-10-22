@@ -69,6 +69,8 @@ export MARSPOT_STATE_DIR
 # Cost the first time this was noticed (2026-09-01): a wire change
 # visible in L3's own log, invisible to the assertion watching for it.
 cargo build --bin marspot-session
+# Same for the peerbus inbox tests, which start a real relay.
+cargo build -p marspot-peer --bin marspot-peer
 # The pixel snapshots compare against a committed baseline only under
 # `check`.  Without it they render, assert nothing, and report green —
 # which is how a layout change could have moved every row in the dev

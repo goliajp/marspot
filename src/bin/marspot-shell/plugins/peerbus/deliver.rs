@@ -2,12 +2,12 @@
 //! let in, what text Codex is given, and the receipt the sender gets.
 
 use std::collections::VecDeque;
-use std::io::Write;
-use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use marspot_peer::envelope::{self, Mode};
 use marspot_peer::frame::{self, DropReason, Receipt, UserFrame};
+use marspot_term::lx_info;
 
 /// Messages one Codex session accepts per minute.
 const RATE_PER_MIN: usize = 30;
@@ -103,17 +103,17 @@ pub(super) fn admit(f: &UserFrame, ours: Mode, rate: &mut Rate, now: Instant) ->
 }
 
 /// Tell a sender what happened.
-pub(super) fn send_receipt(to: &str, from: &str, r: Receipt, orig_msg_id: Option<&str>, reason: &str) {
-    send_line(to, &frame::receipt_line(r, from, orig_msg_id, reason));
+pub(super) fn send_receipt(relay: &Path, to: &str, from: &str, r: Receipt, orig_msg_id: Option<&str>, reason: &str) {
+    send_line(relay, to, &frame::receipt_line(r, from, orig_msg_id, reason));
 }
 
-/// One frame to a `uds:` address.  Best effort with a short timeout: a
-/// peer that has gone away has nobody left to tell.
-pub(super) fn send_line(to: &str, line: &str) {
+/// One frame to a `uds:` address, through the session's relay.  Best
+/// effort: a peer that has gone away has nobody left to tell.
+pub(super) fn send_line(relay: &Path, to: &str, line: &str) {
     let Some(path) = to.strip_prefix("uds:") else { return };
-    let Ok(mut s) = UnixStream::connect(path) else { return };
-    let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
-    let _ = s.write_all(line.as_bytes());
+    if let Err(e) = marspot_peer::relay::send_via(&relay.to_string_lossy(), path, line) {
+        lx_info!("peerbus.send_failed", &e, to = to.to_string());
+    }
 }
 
 #[cfg(test)]
