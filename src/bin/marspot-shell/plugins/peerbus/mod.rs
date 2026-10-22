@@ -5,15 +5,19 @@
 //! gives every Codex pane the same: a record naming it and an inbox
 //! socket in the Claude protocol, with what arrives there delivered
 //! into the Codex thread through the Codex app-server.  Codex sends the
-//! other way with the `marspot-peer` CLI.
+//! other way with the `marspot-peer` MCP tools.  Every session in a
+//! pane, Claude's included, is named after its pane (`names`).
 //!
 //! The main thread only says which panes run Codex; everything that
 //! touches a socket, a file or a daemon happens on the worker thread.
 
 mod bind;
+mod daemon;
 mod deliver;
+mod idle;
 mod inbox;
 mod lifecycle;
+mod names;
 #[cfg(test)]
 mod live_tests;
 mod worker;

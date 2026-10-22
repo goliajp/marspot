@@ -3451,8 +3451,14 @@ impl ShellApp {
     /// where it sits.  One place builds this, so the title strip, the
     /// listing and `--send` cannot disagree about what `spg#2` means.
     fn pane_refs() -> Vec<marspot::pane_name::PaneRef> {
+        Self::pane_refs_in(&observe::shared().fresh(observe::NOW))
+    }
+
+    /// `pane_refs` over a given observation.  Reads the saved layout,
+    /// so not for the main thread's hot paths.
+    pub(crate) fn pane_refs_in(obs: &observe::Observation) -> Vec<marspot::pane_name::PaneRef> {
         let cells = Self::pane_cells();
-        Self::live_panes(&observe::shared().fresh(observe::NOW))
+        Self::live_panes(obs)
             .into_iter()
             .map(|(sid, cwd, _)| {
                 // `pane_cells` reports (window, x, y); naming sorts in
