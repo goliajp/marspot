@@ -132,9 +132,9 @@ fi
 
 # ── 1. Build ──────────────────────────────────────────────────────
 if (( BUILD )); then
-  echo "==> building release (shell + core + session)"
+  echo "==> building release (shell + core + session + peer cli)"
   ( cd "$ROOT" && cargo build --release \
-      --bin marspot-shell --bin marspot-core --bin marspot-session 2>&1 | tail -3 )
+      --bin marspot-shell --bin marspot-core --bin marspot-session --bin marspot-peer 2>&1 | tail -3 )
 fi
 # marspot-session is the per-pane L3 engine: core spawns it as its
 # sibling, so it must ship in the bundle (and ride updates) or L3 silently
@@ -235,6 +235,24 @@ else
   [[ -n "${MARSPOT_ALLOW_ADHOC:-}" ]] \
     || adhoc_bail "No 'Developer ID Application' certificate found."
   echo "    WARN: no cert; binaries stay adhoc (MARSPOT_ALLOW_ADHOC=1)" >&2
+fi
+
+# ── 1c. marspot-peer CLI ──────────────────────────────────────────
+# Not part of the app: Codex sessions run it to message other agent
+# sessions.  It lives on PATH, outside the bundle and its update swap.
+# `install` writes a new inode; copying over a binary in place keeps
+# the old inode's cached signature and the next exec is killed.
+PEER="$TARGET/marspot-peer"
+if [[ -x "$PEER" ]]; then
+  if [[ -n "$SIGN_ID" ]] && ! out=$(codesign --force --sign "$SIGN_ID" --timestamp=none "$PEER" 2>&1); then
+    echo "$out" | sed "s/^/    /" >&2
+    [[ -n "${MARSPOT_ALLOW_ADHOC:-}" ]] || adhoc_bail "codesign failed for marspot-peer."
+  fi
+  mkdir -p "$HOME/.local/bin"
+  install -m 0755 "$PEER" "$HOME/.local/bin/marspot-peer"
+  echo "==> installed ~/.local/bin/marspot-peer"
+else
+  echo "==> marspot-peer not built (--no-build): ~/.local/bin/marspot-peer left as it was"
 fi
 
 # ── 2. Scaffold the bundle ────────────────────────────────────────
