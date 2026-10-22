@@ -24,6 +24,10 @@ pub const MARKER: &str = "marspot-codex";
 /// Our own field: the Codex session's permission class, which the
 /// sender CLI reads back to fill `from-mode`.  Claude Code ignores it.
 const CLASS_KEY: &str = "marspotPermissionClass";
+/// Our own field: which marspot wrote the record (its state root).  A
+/// restarting marspot clears its own leftovers and nobody else's — a
+/// sandbox instance and the installed app share this directory.
+const OWNER_KEY: &str = "marspotOwner";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -59,6 +63,7 @@ pub struct Record {
     pub socket: String,
     pub status: Status,
     pub class: Mode,
+    pub owner: String,
 }
 
 impl Record {
@@ -85,6 +90,7 @@ impl Record {
             ("updatedAt", Value::from(now_ms)),
             ("statusUpdatedAt", Value::from(now_ms)),
             (CLASS_KEY, Value::from(self.class.as_str())),
+            (OWNER_KEY, Value::from(self.owner.as_str())),
         ])
         .to_json()
     }
@@ -102,6 +108,7 @@ pub struct Entry {
     pub proc_start: Option<String>,
     pub ours: bool,
     pub class: Option<Mode>,
+    pub owner: Option<String>,
 }
 
 impl Entry {
@@ -169,6 +176,44 @@ pub fn sweep_ours(dir: &Path) -> usize {
         .count()
 }
 
+/// Remove every record `owner` wrote, live or not: what a restarting
+/// marspot does before binding again, since its old inbox sockets died
+/// with the process that listened on them.  Returns the removed
+/// records, so the caller can delete their socket files too.
+pub fn remove_owned_by(dir: &Path, owner: &str) -> Vec<Entry> {
+    read_all(dir)
+        .into_iter()
+        .filter(|e| e.ours && e.owner.as_deref() == Some(owner))
+        .filter(|e| remove_ours(dir, e.pid).unwrap_or(false))
+        .collect()
+}
+
+/// The registry directories this user has: `sessions/` under
+/// `$CLAUDE_CONFIG_DIR`, `~/.claude` and every `~/.claude-profile-*`,
+/// resolved through symlinks so a shared directory appears once.
+/// Only directories that exist; none are created.
+pub fn default_dirs() -> Vec<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let mut cands: Vec<PathBuf> = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).into_iter().collect();
+    cands.push(home.join(".claude"));
+    if let Ok(rd) = fs::read_dir(&home) {
+        let mut profiles: Vec<PathBuf> = rd
+            .flatten()
+            .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with(".claude-profile-")))
+            .map(|e| e.path())
+            .collect();
+        profiles.sort();
+        cands.extend(profiles);
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    for dir in cands.into_iter().filter_map(|c| c.join("sessions").canonicalize().ok()) {
+        if dir.is_dir() && !out.contains(&dir) {
+            out.push(dir);
+        }
+    }
+    out
+}
+
 fn read_entry(path: &Path, pid: i32) -> Option<Entry> {
     let text = fs::read_to_string(path).ok()?;
     let v = json::parse(&text).ok()?;
@@ -183,6 +228,7 @@ fn read_entry(path: &Path, pid: i32) -> Option<Entry> {
         proc_start: s("procStart"),
         ours: v.str_at("entrypoint") == Some(MARKER),
         class: v.str_at(CLASS_KEY).and_then(Mode::parse),
+        owner: s(OWNER_KEY),
     })
 }
 
@@ -208,6 +254,7 @@ mod tests {
             socket: format!("/tmp/cc-socks/{pid}-0a1b2c3d.sock"),
             status: Status::Idle,
             class: Mode::Bypass,
+            owner: "/tmp/owner-a".into(),
         }
     }
 
@@ -237,6 +284,23 @@ mod tests {
         assert!(list_live(&dir).is_empty());
         assert_eq!(sweep_ours(&dir), 1);
         assert!(read_all(&dir).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn removal_by_owner_spares_other_owners() {
+        let dir = tmpdir("owner");
+        let me = std::process::id() as i32;
+        let parent = std::os::unix::process::parent_id() as i32;
+        write(&dir, &record(me), 2).unwrap();
+        let mut other = record(parent);
+        other.owner = "/tmp/owner-b".into();
+        write(&dir, &other, 2).unwrap();
+        let gone = remove_owned_by(&dir, "/tmp/owner-a");
+        assert_eq!(gone.iter().map(|e| e.pid).collect::<Vec<_>>(), vec![me]);
+        let left = read_all(&dir);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].owner.as_deref(), Some("/tmp/owner-b"));
         fs::remove_dir_all(&dir).unwrap();
     }
 
