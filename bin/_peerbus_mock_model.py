@@ -3,11 +3,17 @@
 
 Speaks just enough of the Responses API (POST <base>/responses, answered
 as server-sent events) for a Codex TUI to run a turn without an account.
-When the latest user message carries a reply line of the form
-`(Reply with: marspot-peer send <addr> "<text>")`, the turn calls the
-shell tool to run that command with REPLY_TEXT in place of <text>; once
-the tool has run, the turn ends with a short message.  Anything else is
-answered with a short message.
+It messages peers only through the marspot MCP tools (the `mcp__marspot`
+namespace), the way a real model would:
+
+- a <cross-session-message from="ADDR"> whose body asks for a reply is
+  answered with SendMessage(to=ADDR, message=REPLY_TEXT);
+- a body saying `Send NAME the text TEXT` becomes SendMessage(to=NAME,
+  message=TEXT);
+- once a tool has run, the turn ends with a short message.
+
+Anything else is answered with a short message.  Without the marspot
+tools on offer the turn says so, and the test sees no reply.
 
 Usage: _peerbus_mock_model.py <port-file> <log-file>
 Binds an ephemeral port on 127.0.0.1 and writes it to <port-file>.
@@ -15,12 +21,13 @@ Every request body is appended to <log-file>, one JSON line each.
 """
 import json
 import re
-import shlex
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REPLY_TEXT = "PEERBUS-E2E-REPLY"
-REPLY_LINE = re.compile(r'\(Reply with: marspot-peer send (\S+) "<text>"\)')
+ENVELOPE = re.compile(r'<cross-session-message from="(uds:[^"]+)"')
+FORWARD = re.compile(r"Send (\S+) the text (\S+)")
+NAMESPACE = "mcp__marspot"
 
 PORT_FILE, LOG_FILE = sys.argv[1], sys.argv[2]
 counter = [0]
@@ -38,28 +45,30 @@ def text_of(item):
     return "".join(p.get("text", "") for p in parts if isinstance(p, dict))
 
 
-def shell_call(tools, command):
-    """The function_call item that runs `command` with whichever shell
-    tool this Codex offers."""
-    names = {t.get("name") for t in tools if isinstance(t, dict)}
-    if "exec_command" in names:
-        return "exec_command", {"cmd": command}
-    if "shell_command" in names:
-        return "shell_command", {"command": command}
-    return "shell", {"command": ["bash", "-lc", command]}
+def has_marspot_tools(tools):
+    for t in tools:
+        if isinstance(t, dict) and t.get("name") == NAMESPACE:
+            names = {x.get("name") for x in t.get("tools") or []}
+            return {"ListAgents", "SendMessage"} <= names
+    return False
 
 
 def plan(body):
     items = [i for i in body.get("input") or [] if isinstance(i, dict)]
     last = items[-1] if items else {}
     if last.get("type") == "function_call_output":
-        return ("message", "reply sent")
-    users = [i for i in items if i.get("type") == "message" and i.get("role") == "user"]
-    m = REPLY_LINE.search(text_of(users[-1])) if users else None
-    if m and last.get("type") == "message":
-        command = "marspot-peer send %s %s" % (m.group(1), shlex.quote(REPLY_TEXT))
-        name, args = shell_call(body.get("tools") or [], command)
-        return ("call", name, args)
+        return ("message", "sent")
+    if last.get("type") != "message" or last.get("role") != "user":
+        return ("message", "ok")
+    text = text_of(last)
+    if not has_marspot_tools(body.get("tools") or []):
+        return ("message", "no marspot tools on offer")
+    fwd = FORWARD.search(text)
+    if fwd:
+        return ("call", {"to": fwd.group(1), "message": fwd.group(2)})
+    env = ENVELOPE.search(text)
+    if env and "Reply to this message" in text:
+        return ("call", {"to": env.group(1), "message": REPLY_TEXT})
     return ("message", "ok")
 
 
@@ -92,8 +101,8 @@ class Handler(BaseHTTPRequestHandler):
         rid = next_id("resp")
         step = plan(body)
         if step[0] == "call":
-            item = {"type": "function_call", "call_id": next_id("call"), "name": step[1],
-                    "arguments": json.dumps(step[2])}
+            item = {"type": "function_call", "call_id": next_id("call"), "namespace": NAMESPACE,
+                    "name": "SendMessage", "arguments": json.dumps(step[1])}
         else:
             item = {"type": "message", "role": "assistant", "id": next_id("msg"),
                     "content": [{"type": "output_text", "text": step[1]}]}
