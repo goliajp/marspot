@@ -330,7 +330,11 @@ mod tests {
         let home = TempDir::new("norc-home");
         let mut env = EnvGuard::new();
         env.set("HOME", home.path()).remove("ZDOTDIR");
-        for (shell, rc) in [("/bin/zsh", ".zshrc"), ("/bin/bash", ".bashrc")] {
+        // The control reads the user's rc file and not the system's:
+        // Ubuntu's /etc/zsh/zshrc runs compinit, which stops to ask
+        // about group-writable completion directories and takes the
+        // first letter of `exit` as its answer.
+        for (shell, control, rc) in [("/bin/zsh", "-d", ".zshrc"), ("/bin/bash", "", ".bashrc")] {
             // a shell that cannot start reads nothing, and would pass
             // the second half for that reason alone
             assert!(std::path::Path::new(shell).is_file(), "{shell} is not installed, and this test runs it");
@@ -370,8 +374,9 @@ mod tests {
                 });
                 assert!(exited, "{shell} did not exit; it last showed:\n{}", String::from_utf8_lossy(&tail).escape_debug());
             };
-            run(shell.into(), vec!["-i".into()]);
-            assert!(marker.exists(), "the control: {shell} -i reads {rc}");
+            let args = [control, "-i"].iter().filter(|a| !a.is_empty()).map(|a| a.to_string()).collect();
+            run(shell.into(), args);
+            assert!(marker.exists(), "the control: {shell} {control} -i reads {rc}");
             std::fs::remove_file(&marker).unwrap();
             run(
                 shell_without_rc_files(home.path(), shell)
