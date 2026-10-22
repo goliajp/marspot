@@ -56,6 +56,8 @@ pub(crate) struct Want {
     pub sid: u64,
     pub codex: pidtree::ProcId,
     pub argv: Vec<String>,
+    /// From the pane's window title -- see `bind::thread_in_title`.
+    pub title_thread: Option<String>,
 }
 
 pub(crate) enum Event {

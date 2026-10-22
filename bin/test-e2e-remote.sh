@@ -51,6 +51,7 @@ DEFAULT_SUITES=(
   test-cc-profile-switch.sh
   test-codex-profile-switch.sh
   test-agent-handoff.sh
+  test-peerbus.sh
   test-real-update.sh
   test-negative-update.sh
   test-adversarial-update.sh
@@ -149,7 +150,8 @@ remote_sync "$HOST" --name "$REMOTE_NAME"
 echo "==> building release on $HOST"
 remote_tracked "source ~/.cargo/env && cd ~/$REMOTE_DIR && \
   /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT bin/_bounded.sh $BUILD_TIMEOUT \
-  cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session" \
+  sh -c 'cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session \
+    && cargo build --release -p marspot-peer'" \
   2>&1 | tail -2 || { echo "FAIL: release build on $HOST" >&2; exit 1; }
 # macOS assesses a freshly built executable on its first exec, for an
 # unbounded time on a busy host; pay that here, outside every suite's
