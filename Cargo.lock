@@ -165,6 +165,7 @@ dependencies = [
  "foreign-types",
  "golia-ui-core",
  "libc",
+ "marspot-peer",
  "marspot-term",
  "objc2",
  "objc2-app-kit",
@@ -177,6 +178,13 @@ dependencies = [
 [[package]]
 name = "marspot-linkify"
 version = "0.1.0"
+
+[[package]]
+name = "marspot-peer"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "marspot-session"

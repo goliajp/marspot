@@ -43,6 +43,7 @@ use marspot::{lx_debug, lx_error, lx_event, lx_warn};
 pub mod autorun;
 pub mod claudecode;
 pub mod codex;
+pub mod peerbus;
 pub mod handoff;
 pub mod host;
 pub mod dispatch;
