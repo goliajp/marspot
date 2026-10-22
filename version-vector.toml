@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.246"  # codex panes get inboxes claude code sessions can message (peerbus)
-core    = "0.12.288"  # asks every reattached session to update, in a window restored later too
-session = "0.11.152"  # takes updates as a frame and closes on SIGHUP; a copy of its own build is not an update
+core    = "0.12.289"  # removes a closed session's title region with its other regions
+session = "0.11.153"  # publishes the window title beside the frame

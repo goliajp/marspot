@@ -44,7 +44,9 @@ use crate::grid::{Cell, Grid};
 pub mod clusters;
 mod hash;
 mod peek;
+pub mod title;
 pub use clusters::{ClusterTable, ClusterTableReader, ClusterTableWriter};
+pub use title::TitleWriter;
 pub use peek::{Frame, peek, peek_frame};
 use hash::compute_publish_hash;
 
@@ -305,11 +307,17 @@ pub fn open_region(name: &std::ffi::CStr) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-/// Remove both regions a session publishes through: the grid region
-/// named `main`, and session `id`'s cluster region.
+/// Remove every region a session publishes through: the grid region
+/// named `main`, and session `id`'s cluster and title regions.
 pub fn delete_session_regions(main: &std::ffi::CStr, id: u64) {
     delete_region(main);
+    delete_side_regions(id);
+}
+
+/// Remove session `id`'s cluster and title regions.
+pub fn delete_side_regions(id: u64) {
     clusters::delete(id);
+    title::delete(id);
 }
 
 /// Best-effort `shm_unlink` of a region by name.  Called when a
@@ -514,6 +522,8 @@ pub struct GridShmWriter {
     /// One scrollback row's clusters, refilled per row while a
     /// scrolled view is published.
     row_clusters: Vec<(u16, String)>,
+    /// Where the window title goes, once attached.
+    title: Option<TitleWriter>,
 }
 
 // The raw pointer is into a private mmap this struct solely owns; it is
@@ -554,6 +564,7 @@ impl GridShmWriter {
             last_publish_hash: 0,
             clusters: None,
             row_clusters: Vec::new(),
+            title: None,
         })
     }
 
@@ -568,6 +579,24 @@ impl GridShmWriter {
                 self.last_publish_hash = 0;
             }
             Err(e) => crate::lx_warn!("grid_shm.clusters.open_failed", &format!("{e}"), session_id = id),
+        }
+    }
+
+    /// Publish the window title for session `id` from now on -- see
+    /// [`title`]. Nothing draws it, so a failure is logged and the
+    /// session runs without it.
+    pub fn attach_title(&mut self, id: u64) {
+        match TitleWriter::open(id) {
+            Ok(w) => self.title = Some(w),
+            Err(e) => crate::lx_warn!("grid_shm.title.open_failed", &format!("{e}"), session_id = id),
+        }
+    }
+
+    /// Publish `title` when it changed. Apart from the frame: a title
+    /// can change while every cell stays the same.
+    pub fn publish_title(&mut self, title: &str) {
+        if let Some(t) = self.title.as_mut() {
+            t.update(title);
         }
     }
 
