@@ -6,12 +6,14 @@
 //! marspot-peer whoami
 //! marspot-peer send [--now] <name | uds:address> <text… | ->
 //! marspot-peer mcp
+//! marspot-peer relay <inbox> <upstream> <send>
 //! ```
 //!
 //! On the command line the sender is the Codex session this runs
 //! under, found by `CODEX_THREAD_ID` (Codex sets it for every command
 //! it runs).  `mcp` serves the same over stdio as MCP tools, where each
-//! call names its thread instead.
+//! call names its thread instead.  `relay` is started by marspot, one
+//! per Codex session (see `marspot_peer::relay`).
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -24,7 +26,8 @@ const USAGE: &str = "usage:
   marspot-peer list
   marspot-peer whoami
   marspot-peer send [--now] <name | uds:address> <text... | ->
-  marspot-peer mcp";
+  marspot-peer mcp
+  marspot-peer relay <inbox> <upstream> <send>";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -36,6 +39,11 @@ fn main() -> ExitCode {
             marspot_peer::mcp::serve(std::io::stdin().lock(), std::io::stdout().lock());
             Ok(())
         }
+        Some("relay") => match &args[1..] {
+            [public, upstream, send] => marspot_peer::relay::run(public.as_ref(), upstream.as_ref(), send.as_ref())
+                .map_err(|e| Fail::Msg(1, format!("relay: {e}"))),
+            _ => Err(Fail::Usage),
+        },
         _ => Err(Fail::Usage),
     };
     match result {

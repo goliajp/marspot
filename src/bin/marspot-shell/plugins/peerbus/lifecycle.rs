@@ -173,11 +173,16 @@ impl Worker {
         subscribed: bool,
     ) -> Result<(), String> {
         let version = self.conns.get(&p.home).map(|c| c.version.clone()).unwrap_or_default();
-        let proc_start = marspot_peer::proc::lstart(codex.pid).ok_or("codex exited")?;
         let dir = self.sock_dir().map_err(|e| format!("socket directory: {e}"))?;
+        let private = private_dir().map_err(|e| format!("private socket directory: {e}"))?;
         let key = self.next_key;
         self.next_key += 1;
-        let inbox = Inbox::open(&dir, codex.pid, key, self.tx.clone()).map_err(|e| format!("inbox: {e}"))?;
+        let inbox = Inbox::open(&dir, &private, codex.pid, key, self.tx.clone()).map_err(|e| format!("inbox: {e}"))?;
+        // the record names the relay: it is the process on the inbox
+        let Some(proc_start) = marspot_peer::proc::lstart(inbox.relay_pid()) else {
+            inbox.close();
+            return Err("the relay exited".into());
+        };
         let dirs = registry::default_dirs();
         // the pane's name, as everywhere; the names check keeps it so
         let name = super::names::Panes::look()
@@ -185,7 +190,9 @@ impl Worker {
             .remove(&p.sid)
             .unwrap_or_else(|| marspot::pane_name::base_name(&p.cwd));
         let record = Record {
-            pid: codex.pid,
+            pid: inbox.relay_pid(),
+            codex_pid: codex.pid,
+            relay: inbox.relay.to_string_lossy().into_owned(),
             session_id: thread.to_string(),
             cwd: p.cwd.clone(),
             started_at_ms: now_ms(),
@@ -231,7 +238,7 @@ impl Worker {
     pub(super) fn unbind(&mut self, sid: u64, mut b: Binding) {
         send_notices(sid, &mut b, IdleState::Exited);
         for d in registry::default_dirs() {
-            let _ = registry::remove_ours(&d, b.codex.pid);
+            let _ = registry::remove_ours(&d, b.record.pid);
         }
         if b.subscribed {
             self.unsubscribe(&b.home, &b.thread);
@@ -280,11 +287,17 @@ impl Worker {
     pub(super) fn clear_leftovers(&mut self) {
         for d in registry::default_dirs() {
             for e in registry::remove_owned_by(&d, &self.owner) {
-                if let Some(sock) = e.socket.filter(|s| is_inbox_name(s, e.pid)) {
+                if let Some(sock) = e.socket.filter(|s| is_inbox_name(s)) {
                     let _ = std::fs::remove_file(sock);
                 }
             }
             registry::sweep_ours(&d);
+        }
+        // the private sockets are this marspot's alone
+        if let Ok(rd) = private_dir().and_then(std::fs::read_dir) {
+            for e in rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "sock")) {
+                let _ = std::fs::remove_file(e.path());
+            }
         }
     }
 
@@ -300,4 +313,12 @@ impl Worker {
         }
         self.conns.clear();
     }
+}
+
+/// Where this marspot keeps the sockets its relays talk to it on.
+fn private_dir() -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = marspot_term::paths::state_root().join("peerbus");
+    std::fs::DirBuilder::new().mode(0o700).recursive(true).create(&dir)?;
+    Ok(dir)
 }
