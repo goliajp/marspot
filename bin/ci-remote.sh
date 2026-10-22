@@ -52,6 +52,20 @@ if [[ ${1:-} == --job ]]; then
   exit
 fi
 
+# This runs the workflow's steps on our machines, not on GitHub's
+# images (an older macOS, an Ubuntu without zsh), so a pass here does
+# not mean the runners pass.  Say so when the runners' last word on
+# this branch was a failure.
+if command -v gh >/dev/null; then
+  branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
+  last="$(cd "$ROOT" && gh run list --branch "$branch" --workflow ci --status completed --limit 1 \
+    --json conclusion,databaseId,headSha --jq '.[0] | "\(.conclusion) \(.databaseId) \(.headSha[0:9])"' 2>/dev/null)" || last=""
+  read -r verdict run sha <<<"$last"
+  if [[ "${verdict:-}" == failure ]]; then
+    echo "==> GitHub CI's last run on $branch FAILED (commit $sha): gh run view $run --log-failed" >&2
+  fi
+fi
+
 MAC="${MAC:-mini}"
 LINUX="${LINUX:-lx64}"
 NAME=ci-marspot
