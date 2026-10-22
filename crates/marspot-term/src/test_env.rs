@@ -331,6 +331,9 @@ mod tests {
         let mut env = EnvGuard::new();
         env.set("HOME", home.path()).remove("ZDOTDIR");
         for (shell, rc) in [("/bin/zsh", ".zshrc"), ("/bin/bash", ".bashrc")] {
+            // a shell that cannot start reads nothing, and would pass
+            // the second half for that reason alone
+            assert!(std::path::Path::new(shell).is_file(), "{shell} is not installed, and this test runs it");
             let marker = home.join("rc-was-read");
             std::fs::write(home.join(rc), format!(": > {}\n", marker.display())).unwrap();
             let run = |program: String, args: Vec<String>| {
