@@ -66,6 +66,17 @@ impl Value {
     pub fn str_at(&self, key: &str) -> Option<&str> {
         self.get(key).and_then(Value::str)
     }
+    /// Replace `key`'s value in an object, or append it; anything else
+    /// is left as it is.  Keys keep their order, so a file another
+    /// program wrote reads the same after a one-field edit.
+    pub fn set(&mut self, key: &str, v: Value) {
+        if let Self::Obj(kv) = self {
+            match kv.iter_mut().find(|(k, _)| k == key) {
+                Some((_, old)) => *old = v,
+                None => kv.push((key.to_string(), v)),
+            }
+        }
+    }
 
     pub fn to_json(&self) -> String {
         let mut out = String::new();
