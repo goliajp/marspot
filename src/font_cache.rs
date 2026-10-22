@@ -152,10 +152,20 @@ pub struct CoreTextFontTable {
 
 struct FontTableInner {
     fonts: Vec<CTFont>,
-    /// Postscript name (or a caller's own key) to index.  CoreText
-    /// hands out a fresh font object on every lookup even when the
-    /// underlying font is the same, so identity is the name.
+    /// `table_key` (or a caller's own key) to index.  CoreText hands
+    /// out a fresh font object on every lookup even when the
+    /// underlying font is the same, so identity is the name -- and the
+    /// size: the same fallback font is found again at every size text
+    /// is shaped in.
     by_name: HashMap<String, usize>,
+}
+
+/// A font's identity in the table: postscript name and quantised point
+/// size.  By name alone, a fallback font met first in a 36 pt title
+/// came back for 18 pt body text too, drawing its glyphs a size too big
+/// and over their neighbours.
+fn table_key(font: &CTFont) -> String {
+    format!("{}@{}", font.postscript_name(), crate::glyph_atlas::GlyphKey::size_q_for(font.pt_size()))
 }
 
 impl CoreTextFontTable {
@@ -167,14 +177,15 @@ impl CoreTextFontTable {
 
     fn new(base: CTFont) -> Self {
         let mut by_name = HashMap::new();
-        by_name.insert(base.postscript_name(), 0);
+        by_name.insert(table_key(&base), 0);
         Self { inner: std::sync::RwLock::new(FontTableInner { fonts: vec![base], by_name }) }
     }
 
-    /// The id for `font`, adding it if no font of that name is here.
+    /// The id for `font`, adding it if no font of that name and size
+    /// is here.
     pub fn intern(&self, font: CTFont) -> usize {
-        let name = font.postscript_name();
-        self.intern_with_key(name, font)
+        let key = table_key(&font);
+        self.intern_with_key(key, font)
     }
 
     /// The id for `font` under `key` rather than its own name.
@@ -1074,6 +1085,19 @@ fn build_weight_variant(base: &CTFont, pt_size: f64, weight_ct: f64) -> Option<C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One font met at two sizes is two entries; met again at the same
+    /// size, it is the entry already there.
+    #[test]
+    fn a_font_is_interned_per_size() {
+        let t = CoreTextFontTable::new(new_from_name("Menlo", 13.0).expect("Menlo"));
+        let big = t.intern(new_from_name("Helvetica", 36.0).expect("Helvetica"));
+        let small = t.intern(new_from_name("Helvetica", 18.0).expect("Helvetica"));
+        assert_ne!(big, small, "18 pt must not come back as the 36 pt font");
+        assert_eq!(t.intern(new_from_name("Helvetica", 18.0).unwrap()), small);
+        assert_eq!(t.get(small).unwrap().pt_size(), 18.0);
+        assert_eq!(t.intern(new_from_name("Menlo", 13.0).unwrap()), 0, "the base font is found by the same key");
+    }
 
     /// Eviction drops the coldest entry, and only that one.
     ///
