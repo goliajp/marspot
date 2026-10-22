@@ -1,0 +1,394 @@
+//! The peerbus worker: one thread that owns every inbox, every
+//! registry record marspot writes, and one app-server connection per
+//! `CODEX_HOME`.
+//!
+//! Event-driven, no timer: it wakes when the set of Codex panes
+//! changes, when a message arrives, or when a daemon reports something.
+//! The one exception is a retry after a daemon could not be reached.
+//! Calls to a daemon block this thread for up to `CALL_TIMEOUT`; events
+//! that arrive meanwhile are set aside and handled after.
+
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use marspot::pidtree;
+use marspot_peer::envelope::Mode;
+use marspot_peer::frame::{Priority, Receipt, UserFrame};
+use marspot_peer::json::{obj, Value};
+use marspot_peer::registry::{self, Record, Status};
+use marspot_peer::rpc::{self, Rpc, RpcError, RpcSender};
+use marspot_term::{lx_info, lx_warn};
+
+use super::bind::Unbound;
+use super::deliver::{self, Rate};
+use super::inbox::Inbox;
+
+pub(super) const CHANNEL: usize = 256;
+const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Events set aside during calls.  Bounded like everything else; past
+/// this the oldest are dropped and logged.
+const MAX_STASH: usize = 4096;
+pub(super) const RETRY_MIN: Duration = Duration::from_secs(2);
+const RETRY_MAX: Duration = Duration::from_secs(60);
+/// Streaming notifications this client has no use for.  Without the
+/// opt-out every token a subscribed thread prints would cross into L1.
+const OPT_OUT: &[&str] = &[
+    "item/agentMessage/delta",
+    "item/plan/delta",
+    "command/exec/outputDelta",
+    "process/outputDelta",
+    "item/commandExecution/outputDelta",
+    "item/fileChange/outputDelta",
+    "item/reasoning/summaryTextDelta",
+    "item/reasoning/textDelta",
+    "thread/realtime/item/transcript/delta",
+    "thread/realtime/transcript/delta",
+    "thread/realtime/outputAudio/delta",
+    "thread/tokenUsage/updated",
+    "account/rateLimits/updated",
+];
+
+/// A pane with a Codex process, as the main thread saw it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Want {
+    pub sid: u64,
+    pub codex: pidtree::ProcId,
+    pub argv: Vec<String>,
+}
+
+pub(crate) enum Event {
+    Want(Vec<Want>),
+    Inbound { key: u64, frame: UserFrame, peer_pid: Option<i32> },
+    Rpc { home: PathBuf, msg: Value },
+    RpcClosed { home: PathBuf },
+    Stop,
+}
+
+pub(super) struct Conn {
+    pub tx: RpcSender,
+    /// Codex version, from the daemon's user agent.
+    pub version: String,
+}
+
+pub(super) struct Binding {
+    /// Unique per inbox, so a frame from a closed inbox finds nothing.
+    pub(super) key: u64,
+    pub(super) codex: pidtree::ProcId,
+    pub(super) home: PathBuf,
+    pub(super) thread: String,
+    pub(super) class: Mode,
+    /// The TUI's argv: its overrides decide the class until the thread
+    /// has run a turn and can be asked directly.
+    pub(super) argv: Vec<String>,
+    /// `thread/resume` succeeded: turn events arrive for this thread.
+    pub(super) subscribed: bool,
+    pub(super) active_turn: Option<String>,
+    pub(super) inbox: Inbox,
+    pub(super) record: Record,
+    pub(super) rate: Rate,
+}
+
+pub(crate) struct Worker {
+    pub(super) tx: SyncSender<Event>,
+    pub(super) rx: Receiver<Event>,
+    pub(super) stash: VecDeque<Event>,
+    pub(super) owner: String,
+    pub(super) sock_dir: Option<PathBuf>,
+    pub(super) conns: HashMap<PathBuf, Conn>,
+    pub(super) bindings: HashMap<u64, Binding>,
+    pub(super) wants: Vec<Want>,
+    /// `(home, thread) → cwd`, None for a thread that is not a user's
+    /// (see `bind::user_thread_cwd`).  Neither ever changes.
+    pub(super) cwds: HashMap<(PathBuf, String), Option<String>>,
+    /// Last reason logged per unbound pane, so it is logged once.
+    pub(super) unbound: HashMap<u64, Unbound>,
+    pub(super) next_key: u64,
+    pub(super) retry_at: Option<Instant>,
+    pub(super) backoff: Duration,
+}
+
+impl Worker {
+    pub fn new(tx: SyncSender<Event>, rx: Receiver<Event>, owner: String) -> Worker {
+        Worker {
+            tx,
+            rx,
+            stash: VecDeque::new(),
+            owner,
+            sock_dir: None,
+            conns: HashMap::new(),
+            bindings: HashMap::new(),
+            wants: Vec::new(),
+            cwds: HashMap::new(),
+            unbound: HashMap::new(),
+            next_key: 1,
+            retry_at: None,
+            backoff: RETRY_MIN,
+        }
+    }
+
+    pub fn run(mut self) {
+        self.clear_leftovers();
+        loop {
+            let ev = match self.stash.pop_front() {
+                Some(e) => e,
+                None => match self.retry_at {
+                    Some(t) => match self.rx.recv_timeout(t.saturating_duration_since(Instant::now())) {
+                        Ok(e) => e,
+                        Err(RecvTimeoutError::Timeout) => {
+                            self.retry_at = None;
+                            self.refresh();
+                            continue;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    },
+                    None => match self.rx.recv() {
+                        Ok(e) => e,
+                        Err(_) => break,
+                    },
+                },
+            };
+            match ev {
+                Event::Want(w) => {
+                    if w != self.wants {
+                        self.wants = w;
+                        self.refresh();
+                    }
+                }
+                Event::Inbound { key, frame, peer_pid } => self.deliver(key, frame, peer_pid),
+                Event::Rpc { home, msg } => self.on_note(&home, &msg),
+                Event::RpcClosed { home } => {
+                    if self.conns.remove(&home).is_some() {
+                        lx_warn!("peerbus.daemon.closed", "app-server connection closed", home = home.display().to_string());
+                        self.bindings.values_mut().filter(|b| b.home == home).for_each(|b| b.subscribed = false);
+                        self.schedule_retry();
+                    }
+                }
+                Event::Stop => break,
+            }
+        }
+        self.teardown();
+    }
+
+    // ── daemon connections ────────────────────────────────────────
+
+    fn conn(&mut self, home: &Path) -> Result<&Conn, RpcError> {
+        if !self.conns.contains_key(home) {
+            let sock = home.join("app-server-control/app-server-control.sock");
+            let rpc = Rpc::connect(&sock, "marspot-peerbus", env!("CARGO_PKG_VERSION"), OPT_OUT, CALL_TIMEOUT)?;
+            // "codex-tui/0.163.0 (…)" → "0.163.0"
+            let version = rpc.user_agent.split([' ', '/']).nth(1).unwrap_or_default().to_string();
+            let (tx, mut events) = rpc.into_split();
+            events.set_read_timeout(None)?;
+            let (wtx, h) = (self.tx.clone(), home.to_path_buf());
+            // Detached: `teardown` shuts the socket down, which ends the
+            // read, and the send after it fails once the worker is gone.
+            std::thread::Builder::new()
+                .name("peerbus-daemon".into())
+                .spawn(move || loop {
+                    match events.recv() {
+                        Ok(msg) => {
+                            if wtx.send(Event::Rpc { home: h.clone(), msg }).is_err() {
+                                return;
+                            }
+                        }
+                        Err(_) => {
+                            let _ = wtx.send(Event::RpcClosed { home: h });
+                            return;
+                        }
+                    }
+                })
+                .map_err(RpcError::Io)?;
+            lx_info!("peerbus.daemon.connected", "app-server connected", home = home.display().to_string(), version = version.clone());
+            self.conns.insert(home.to_path_buf(), Conn { tx, version });
+        }
+        Ok(&self.conns[home])
+    }
+
+    pub(super) fn call(&mut self, home: &Path, method: &str, params: Value) -> Result<Value, RpcError> {
+        let id = self.conn(home)?.tx.request(method, params)?;
+        let deadline = Instant::now() + CALL_TIMEOUT;
+        loop {
+            match self.rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(Event::Rpc { home: h, msg }) if h == home => match rpc::answer(&msg) {
+                    Some((got, result)) if got == id => return result,
+                    Some(_) => {} // the answer to a call that already timed out
+                    None => self.set_aside(Event::Rpc { home: h, msg }),
+                },
+                Ok(Event::RpcClosed { home: h }) if h == home => {
+                    self.set_aside(Event::RpcClosed { home: h });
+                    return Err(RpcError::Closed);
+                }
+                Ok(ev) => self.set_aside(ev),
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(RpcError::Protocol(format!("{method}: no answer in {}s", CALL_TIMEOUT.as_secs())));
+                }
+                Err(RecvTimeoutError::Disconnected) => return Err(RpcError::Closed),
+            }
+        }
+    }
+
+    fn set_aside(&mut self, ev: Event) {
+        if self.stash.len() == MAX_STASH {
+            self.stash.pop_front();
+            lx_warn!("peerbus.stash.full", "dropped an event set aside during a call");
+        }
+        self.stash.push_back(ev);
+    }
+
+    pub(super) fn schedule_retry(&mut self) {
+        self.retry_at = Some(Instant::now() + self.backoff);
+        self.backoff = (self.backoff * 2).min(RETRY_MAX);
+    }
+
+    // ── daemon notifications ──────────────────────────────────────
+
+    fn on_note(&mut self, home: &Path, msg: &Value) {
+        let Some(method) = msg.str_at("method") else { return }; // stale answers
+        if msg.get("id").is_some() {
+            return; // a request meant for the TUI; the TUI answers it
+        }
+        let params = msg.get("params");
+        let thread = params.and_then(|p| p.str_at("threadId")).map(str::to_string);
+        match method {
+            "thread/started" => self.refresh(),
+            "thread/status/changed" => {
+                let Some(thread) = thread else { return };
+                let status = params.and_then(|p| p.get("status"));
+                if status.and_then(|s| s.str_at("type")) == Some("notLoaded") {
+                    self.refresh();
+                    return;
+                }
+                let Some(new) = status.and_then(status_of) else { return };
+                let Some(sid) = self.find(home, &thread) else { return };
+                // a thread that has now run a turn can be subscribed
+                if new == Status::Idle && !self.bindings[&sid].subscribed {
+                    let b = &self.bindings[&sid];
+                    let (cwd, argv) = (b.record.cwd.clone(), b.argv.clone());
+                    let (class, subscribed) = self.class_for(home, &thread, &cwd, &argv);
+                    let b = self.bindings.get_mut(&sid).expect("found above");
+                    b.subscribed = subscribed;
+                    b.class = class;
+                    b.record.class = class;
+                }
+                let b = self.bindings.get_mut(&sid).expect("found above");
+                if b.record.status != new || b.record.class != b.class {
+                    b.record.status = new;
+                    write_record(&registry::default_dirs(), &b.record);
+                }
+            }
+            "turn/started" | "turn/completed" => {
+                let Some(sid) = thread.and_then(|t| self.find(home, &t)) else { return };
+                let turn = params.and_then(|p| p.at(&["turn", "id"])).and_then(Value::str).map(str::to_string);
+                let b = self.bindings.get_mut(&sid).expect("found above");
+                b.active_turn = if method == "turn/started" { turn } else { None };
+            }
+            _ => {}
+        }
+    }
+
+    fn find(&self, home: &Path, thread: &str) -> Option<u64> {
+        self.bindings.iter().find(|(_, b)| b.home == home && b.thread == thread).map(|(sid, _)| *sid)
+    }
+
+    // ── delivery ──────────────────────────────────────────────────
+
+    fn deliver(&mut self, key: u64, frame: UserFrame, peer_pid: Option<i32>) {
+        let reply_to = deliver::reply_address(&frame);
+        let Some((sid, b)) = self.bindings.iter_mut().find(|(_, b)| b.key == key) else {
+            return; // the inbox closed after the frame was read
+        };
+        let sid = *sid;
+        let address = format!("uds:{}", b.inbox.path.display());
+        let admitted = deliver::admit(&frame, b.class, &mut b.rate, Instant::now());
+        let a = match admitted {
+            Ok(a) => a,
+            Err(why) => {
+                lx_info!("peerbus.refused", &why.reason(), sid = sid, peer_pid = peer_pid.unwrap_or(0));
+                if let Some(to) = &reply_to {
+                    deliver::send_receipt(to, &address, why.receipt(), frame.msg_id.as_deref(), &why.reason());
+                }
+                return;
+            }
+        };
+        let (home, thread) = (b.home.clone(), b.thread.clone());
+        let steer_turn = b.active_turn.clone().filter(|_| frame.priority == Priority::Now && b.subscribed);
+        let input = Value::Arr(vec![obj([("type", Value::from("text")), ("text", Value::from(a.text))])]);
+        let mut result = Err(RpcError::Protocol("not tried".into()));
+        let mut via = "thread/queue/add";
+        if let Some(turn) = steer_turn {
+            let p = obj([("threadId", Value::from(thread.as_str())), ("expectedTurnId", Value::from(turn)), ("input", input.clone())]);
+            result = self.call(&home, "turn/steer", p);
+            via = "turn/steer";
+        }
+        if result.is_err() {
+            let id = frame.msg_id.clone().unwrap_or_else(marspot_peer::rand::uuid_v4);
+            let p = obj([("threadId", Value::from(thread.as_str())), ("clientUserMessageId", Value::from(id)), ("input", input)]);
+            result = self.call(&home, "thread/queue/add", p);
+            via = "thread/queue/add";
+        }
+        match &result {
+            Ok(_) => lx_info!("peerbus.deliver", "queued for the codex session", sid = sid, via = via, peer_pid = peer_pid.unwrap_or(0)),
+            Err(e) => {
+                let reason = format!("codex did not accept it: {e}");
+                lx_warn!("peerbus.deliver_failed", &reason, sid = sid, via = via);
+                if let Some(to) = &reply_to {
+                    deliver::send_receipt(to, &address, Receipt::Refused, frame.msg_id.as_deref(), &reason);
+                }
+            }
+        }
+    }
+}
+
+fn status_of(s: &Value) -> Option<Status> {
+    match s.str_at("type")? {
+        "idle" => Some(Status::Idle),
+        "active" => {
+            let waiting = s.get("activeFlags").map_or(&[][..], Value::arr).iter().filter_map(Value::str).any(|f| f.starts_with("waiting"));
+            Some(if waiting { Status::Waiting } else { Status::Busy })
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn write_record(dirs: &[PathBuf], r: &Record) {
+    for d in dirs {
+        if let Err(e) = registry::write(d, r, now_ms()) {
+            lx_warn!("peerbus.registry.write_failed", &e.to_string(), dir = d.display().to_string());
+        }
+    }
+}
+
+/// `<pid>-<8 hex>.sock`: only files of this shape are ours to delete.
+pub(super) fn is_inbox_name(path: &str, pid: i32) -> bool {
+    let Some(name) = Path::new(path).file_name().and_then(|n| n.to_str()) else { return false };
+    let Some(rest) = name.strip_prefix(&format!("{pid}-")).and_then(|r| r.strip_suffix(".sock")) else { return false };
+    rest.len() == 8 && rest.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+pub(super) fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use marspot_peer::json::parse;
+
+    #[test]
+    fn statuses_map_to_registry_words() {
+        assert_eq!(status_of(&parse(r#"{"type":"idle"}"#).unwrap()), Some(Status::Idle));
+        assert_eq!(status_of(&parse(r#"{"type":"active","activeFlags":[]}"#).unwrap()), Some(Status::Busy));
+        assert_eq!(status_of(&parse(r#"{"type":"active","activeFlags":["waitingOnApproval"]}"#).unwrap()), Some(Status::Waiting));
+        assert_eq!(status_of(&parse(r#"{"type":"systemError"}"#).unwrap()), None);
+    }
+
+    #[test]
+    fn only_inbox_shaped_names_are_deleted() {
+        assert!(is_inbox_name("/tmp/cc-socks/42-0a1b2c3d.sock", 42));
+        assert!(!is_inbox_name("/tmp/cc-socks/42.sock", 42));
+        assert!(!is_inbox_name("/tmp/cc-socks/43-0a1b2c3d.sock", 42));
+        assert!(!is_inbox_name("/tmp/cc-socks/42-0a1b2c3dx.sock", 42));
+    }
+}
