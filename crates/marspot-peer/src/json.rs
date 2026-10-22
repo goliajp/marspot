@@ -1,14 +1,12 @@
-//! A small JSON reader for agent history records.
+//! A small JSON reader and writer for agent records and wire frames.
 //!
-//! The rest of this module used to be written as substring matches
+//! The handoff code used to read records with substring matches
 //! (`"\"cwd\":\""` and so on), which is fine for one flat field on a
 //! hot path and wrong for anything nested: a user message that QUOTES a
 //! record matches the pattern, and escaped quotes end a value early.
-//! Handing a conversation over means reading nested content blocks, so
-//! it gets a parser.
 //!
-//! Read-only, whole-value, no streaming.  Records are one line each and
-//! the largest seen in the field is ~7 MB (a message carrying base64
+//! Whole-value, no streaming.  Records are one line each and the
+//! largest seen in the field is ~7 MB (a message carrying base64
 //! images), so a line is parsed at once and then dropped.
 
 /// A parsed JSON value.  Objects keep their key order and duplicate
@@ -58,7 +56,6 @@ impl Value {
             _ => None,
         }
     }
-    #[cfg(test)]
     pub fn i64(&self) -> Option<i64> {
         match self {
             Self::Num(n) if n.fract() == 0.0 => Some(*n as i64),
@@ -69,6 +66,101 @@ impl Value {
     pub fn str_at(&self, key: &str) -> Option<&str> {
         self.get(key).and_then(Value::str)
     }
+
+    pub fn to_json(&self) -> String {
+        let mut out = String::new();
+        self.write(&mut out);
+        out
+    }
+
+    pub fn write(&self, out: &mut String) {
+        match self {
+            Self::Null => out.push_str("null"),
+            Self::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Self::Num(n) => write_num(out, *n),
+            Self::Str(s) => write_str(out, s),
+            Self::Arr(a) => {
+                out.push('[');
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    v.write(out);
+                }
+                out.push(']');
+            }
+            Self::Obj(kv) => {
+                out.push('{');
+                for (i, (k, v)) in kv.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write_str(out, k);
+                    out.push(':');
+                    v.write(out);
+                }
+                out.push('}');
+            }
+        }
+    }
+}
+
+/// An object from key/value pairs, in order.
+pub fn obj<const N: usize>(kv: [(&str, Value); N]) -> Value {
+    Value::Obj(kv.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+}
+
+impl From<&str> for Value {
+    fn from(s: &str) -> Self {
+        Self::Str(s.to_string())
+    }
+}
+impl From<String> for Value {
+    fn from(s: String) -> Self {
+        Self::Str(s)
+    }
+}
+impl From<bool> for Value {
+    fn from(b: bool) -> Self {
+        Self::Bool(b)
+    }
+}
+impl From<i64> for Value {
+    fn from(n: i64) -> Self {
+        Self::Num(n as f64)
+    }
+}
+
+/// Integers print without a fraction (a pid must read back as `42`,
+/// not `42.0`); non-finite numbers have no JSON form and print as null.
+fn write_num(out: &mut String, n: f64) {
+    use std::fmt::Write as _;
+    if !n.is_finite() {
+        out.push_str("null");
+    } else if n.fract() == 0.0 && n.abs() < 9_007_199_254_740_992.0 {
+        let _ = write!(out, "{}", n as i64);
+    } else {
+        let _ = write!(out, "{n}");
+    }
+}
+
+pub fn write_str(out: &mut String, s: &str) {
+    use std::fmt::Write as _;
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 /// Parse one complete JSON value; trailing whitespace is allowed,
@@ -284,6 +376,24 @@ mod tests {
         for bad in ["", "{", "{\"a\":}", "[1,]", "\"open", "{\"a\" 1}", "tru", "1 2", "\"\\x\""] {
             assert!(parse(bad).is_err(), "{bad:?} should not parse");
         }
+    }
+
+    #[test]
+    fn written_values_parse_back_unchanged() {
+        let v = obj([
+            ("pid", Value::from(42)),
+            ("s", Value::from("q\"\\\n\t\u{1}中😀")),
+            ("f", Value::Num(1.5)),
+            ("a", Value::Arr(vec![Value::Null, Value::from(true)])),
+        ]);
+        let text = v.to_json();
+        assert!(text.contains("\"pid\":42,"), "{text}");
+        assert_eq!(parse(&text).unwrap(), v);
+    }
+
+    #[test]
+    fn non_finite_numbers_write_as_null() {
+        assert_eq!(Value::Num(f64::NAN).to_json(), "null");
     }
 
     /// Stack use is bounded whatever the file says.

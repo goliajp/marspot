@@ -3,7 +3,7 @@
 mod claude;
 mod codex;
 pub(crate) mod history;
-pub(crate) mod json;
+pub(crate) use marspot_peer::json;
 mod ledger;
 mod switch;
 mod transcript;

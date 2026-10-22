@@ -9,13 +9,13 @@ license = "Apache-2.0 OR MIT"
 publish = false
 
 [workspace]
-members = ["crates/marspot-term", "crates/marspot-session", "crates/marspot-linkify", "crates/ui/core"]
+members = ["crates/marspot-term", "crates/marspot-session", "crates/marspot-linkify", "crates/marspot-peer", "crates/ui/core"]
 # Without this, a bare `cargo build` builds only the root `marspot`
 # package (+ its marspot-term dep) and silently SKIPS marspot-session
 # (nothing depends on it) — so iterating on L3 with `cargo build` runs a
 # stale session binary. List every member + the root so bare cargo
 # commands cover the whole workspace; scripts still pass --workspace.
-default-members = [".", "crates/marspot-term", "crates/marspot-session", "crates/marspot-linkify", "crates/ui/core"]
+default-members = [".", "crates/marspot-term", "crates/marspot-session", "crates/marspot-linkify", "crates/marspot-peer", "crates/ui/core"]
 
 # Clippy's bar, written down rather than argued about.
 #
@@ -89,6 +89,10 @@ marspot-term = { path = "crates/marspot-term" }
 # comment for that reason.  The renderer reads its published byte
 # layout rather than a parallel struct that happens to agree.
 golia-ui-core = { path = "crates/ui/core" }
+
+# Session-to-session messaging protocols (Claude Code inbox sockets,
+# Codex app-server client).  In-tree, ours, zero deps beyond libc.
+marspot-peer = { path = "crates/marspot-peer" }
 libc = "0.2"
 objc2 = "0.6"
 # 0.3 framework crates dropped the "all" feature — the defaults now

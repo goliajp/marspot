@@ -1,0 +1,20 @@
+[package]
+name = "marspot-peer"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+
+# Messaging between agent sessions over their own sockets: the
+# cross-session protocol Claude Code sessions speak on their inbox
+# sockets (NDJSON frames, the message envelope, the session registry),
+# and a client for the Codex app-server control socket (WebSocket over
+# a unix socket, JSON-RPC).  Zero GUI, zero dependencies beyond std +
+# libc (proc_pidinfo, getentropy).  Knows nothing about panes: the
+# shell maps sessions to panes and decides what to deliver where.
+
+[dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true
