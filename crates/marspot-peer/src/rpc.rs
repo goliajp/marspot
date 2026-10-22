@@ -11,10 +11,12 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use crate::json::{self, Value, obj};
-use crate::ws::{Msg, Ws};
+use crate::ws::{Msg, Ws, WsReader, WsWriter};
 
 /// Notifications kept while a call waits for its answer.  Past this the
 /// oldest are dropped and counted: a stalled reader must not grow
@@ -59,11 +61,15 @@ pub struct Rpc {
 }
 
 impl Rpc {
-    pub fn connect(path: &Path, client: &str, version: &str, timeout: Duration) -> Result<Rpc, RpcError> {
+    /// `opt_out`: notification methods the server should not send on
+    /// this connection — the streaming deltas, for a client that only
+    /// needs to know when a turn starts and ends.
+    pub fn connect(path: &Path, client: &str, version: &str, opt_out: &[&str], timeout: Duration) -> Result<Rpc, RpcError> {
         let ws = Ws::connect(path, timeout)?;
         let mut rpc = Rpc { ws, next_id: 0, held: VecDeque::new(), dropped: 0, user_agent: String::new() };
         let info = obj([("name", Value::from(client)), ("version", Value::from(version))]);
-        let caps = obj([("experimentalApi", Value::from(true))]);
+        let opt_out = Value::Arr(opt_out.iter().map(|m| Value::from(*m)).collect());
+        let caps = obj([("experimentalApi", Value::from(true)), ("optOutNotificationMethods", opt_out)]);
         let r = rpc.call("initialize", obj([("clientInfo", info), ("capabilities", caps)]))?;
         rpc.user_agent = r.str_at("userAgent").unwrap_or_default().to_string();
         rpc.ws.send_text(&obj([("jsonrpc", Value::from("2.0")), ("method", Value::from("initialized"))]).to_json())?;
@@ -82,17 +88,10 @@ impl Rpc {
         self.ws.send_text(&req.to_json())?;
         loop {
             let v = self.read()?;
-            let is_answer = v.get("method").is_none() && v.get("id").and_then(Value::i64) == Some(id);
-            if !is_answer {
-                self.hold(v);
-                continue;
+            match answer(&v) {
+                Some((got, result)) if got == id => return result,
+                _ => self.hold(v),
             }
-            if let Some(e) = v.get("error") {
-                let code = e.get("code").and_then(Value::i64).unwrap_or(0);
-                let message = e.str_at("message").unwrap_or_default().to_string();
-                return Err(RpcError::Remote { code, message });
-            }
-            return Ok(v.get("result").cloned().unwrap_or(Value::Null));
         }
     }
 
@@ -128,6 +127,81 @@ impl Rpc {
         }
         self.held.push_back(v);
     }
+
+    /// Hand the connection to two threads: one sends requests, one
+    /// reads everything that comes back (answers, notifications,
+    /// server requests) in arrival order.  The caller pairs answers
+    /// with requests by id.
+    pub fn into_split(self) -> (RpcSender, RpcEvents) {
+        let (r, w) = self.ws.into_split();
+        (RpcSender { w, next_id: Arc::new(AtomicI64::new(self.next_id)) }, RpcEvents { r, held: self.held })
+    }
+}
+
+#[derive(Clone)]
+pub struct RpcSender {
+    w: WsWriter,
+    next_id: Arc<AtomicI64>,
+}
+
+impl RpcSender {
+    /// Send a request; returns the id its answer will carry.
+    pub fn request(&self, method: &str, params: Value) -> io::Result<i64> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let req = obj([
+            ("jsonrpc", Value::from("2.0")),
+            ("id", Value::from(id)),
+            ("method", Value::from(method)),
+            ("params", params),
+        ]);
+        self.w.send_text(&req.to_json())?;
+        Ok(id)
+    }
+
+    /// Close the connection; the reader's next read returns an error.
+    pub fn shutdown(&self) {
+        self.w.shutdown();
+    }
+}
+
+pub struct RpcEvents {
+    r: WsReader,
+    held: VecDeque<Value>,
+}
+
+impl RpcEvents {
+    /// None blocks until the server sends something or the connection
+    /// is shut down — what a dedicated reader thread wants.
+    pub fn set_read_timeout(&self, d: Option<Duration>) -> io::Result<()> {
+        self.r.set_read_timeout(d)
+    }
+
+    /// The next message from the server.
+    pub fn recv(&mut self) -> Result<Value, RpcError> {
+        if let Some(v) = self.held.pop_front() {
+            return Ok(v);
+        }
+        match self.r.recv()? {
+            Msg::Text(t) => json::parse(&t).map_err(RpcError::Protocol),
+            Msg::Closed => Err(RpcError::Closed),
+        }
+    }
+}
+
+/// An answer message: `Some(Ok(result))`, `Some(Err(..))` for an error
+/// answer, `None` when `v` is not an answer (a notification or a
+/// server request).
+pub fn answer(v: &Value) -> Option<(i64, Result<Value, RpcError>)> {
+    if v.get("method").is_some() {
+        return None;
+    }
+    let id = v.get("id").and_then(Value::i64)?;
+    if let Some(e) = v.get("error") {
+        let code = e.get("code").and_then(Value::i64).unwrap_or(0);
+        let message = e.str_at("message").unwrap_or_default().to_string();
+        return Some((id, Err(RpcError::Remote { code, message })));
+    }
+    Some((id, Ok(v.get("result").cloned().unwrap_or(Value::Null))))
 }
 
 #[cfg(test)]
@@ -142,7 +216,7 @@ mod tests {
     fn live_daemon_initializes_and_lists_threads() {
         let home = std::env::var("CODEX_HOME").unwrap_or_else(|_| format!("{}/.codex", std::env::var("HOME").unwrap()));
         let sock = Path::new(&home).join("app-server-control/app-server-control.sock");
-        let mut rpc = Rpc::connect(&sock, "marspot-peer-test", "0", Duration::from_secs(10)).unwrap();
+        let mut rpc = Rpc::connect(&sock, "marspot-peer-test", "0", &["item/agentMessage/delta"], Duration::from_secs(10)).unwrap();
         assert!(rpc.user_agent.starts_with("codex"), "{}", rpc.user_agent);
         let r = rpc.call("thread/loaded/list", obj([])).unwrap();
         assert!(matches!(r.get("data"), Some(Value::Arr(_))), "{}", r.to_json());

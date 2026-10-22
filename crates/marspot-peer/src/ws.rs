@@ -6,6 +6,7 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::sha1::{base64, sha1};
@@ -18,8 +19,24 @@ pub const MAX_MESSAGE: usize = 32 << 20;
 const MAX_HANDSHAKE: usize = 16 << 10;
 
 pub struct Ws {
+    r: WsReader,
+    w: WsWriter,
+}
+
+/// The receiving half.  Answers pings itself, through the shared
+/// writer, so a reader on its own thread keeps the connection alive.
+pub struct WsReader {
     s: UnixStream,
     buf: Vec<u8>,
+    partial: Option<Vec<u8>>,
+    w: WsWriter,
+}
+
+/// The sending half.  Cloneable; whole frames are written under one
+/// lock, so frames from two threads never interleave on the wire.
+#[derive(Clone)]
+pub struct WsWriter {
+    s: Arc<Mutex<UnixStream>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -41,13 +58,14 @@ impl Ws {
         let mut nonce = [0u8; 16];
         crate::rand::fill(&mut nonce);
         let key = base64(&nonce);
-        let mut ws = Ws { s, buf: Vec::new() };
+        let w = WsWriter { s: Arc::new(Mutex::new(s.try_clone()?)) };
+        let mut ws = Ws { r: WsReader { s, buf: Vec::new(), partial: None, w: w.clone() }, w };
         let req = format!(
             "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
              Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
         );
-        ws.s.write_all(req.as_bytes())?;
-        let head = ws.read_head()?;
+        ws.w.write_raw(req.as_bytes())?;
+        let head = ws.r.read_head()?;
         let mut lines = head.split("\r\n");
         if !lines.next().is_some_and(|l| l.starts_with("HTTP/1.1 101")) {
             return Err(proto("handshake refused"));
@@ -62,6 +80,60 @@ impl Ws {
         Ok(ws)
     }
 
+    pub fn set_read_timeout(&self, d: Option<Duration>) -> io::Result<()> {
+        self.r.s.set_read_timeout(d)
+    }
+
+    pub fn send_text(&mut self, text: &str) -> io::Result<()> {
+        self.w.send_text(text)
+    }
+
+    pub fn recv(&mut self) -> io::Result<Msg> {
+        self.r.recv()
+    }
+
+    pub fn into_split(self) -> (WsReader, WsWriter) {
+        (self.r, self.w)
+    }
+}
+
+impl WsWriter {
+    pub fn send_text(&self, text: &str) -> io::Result<()> {
+        self.send_frame(0x1, text.as_bytes())
+    }
+
+    fn write_raw(&self, bytes: &[u8]) -> io::Result<()> {
+        self.s.lock().unwrap_or_else(|p| p.into_inner()).write_all(bytes)
+    }
+
+    /// Client frames are always masked (RFC 6455 5.3).
+    fn send_frame(&self, opcode: u8, payload: &[u8]) -> io::Result<()> {
+        let mut out = Vec::with_capacity(payload.len() + 14);
+        out.push(0x80 | opcode);
+        let n = payload.len();
+        if n < 126 {
+            out.push(0x80 | n as u8);
+        } else if n <= 0xFFFF {
+            out.push(0x80 | 126);
+            out.extend_from_slice(&(n as u16).to_be_bytes());
+        } else {
+            out.push(0x80 | 127);
+            out.extend_from_slice(&(n as u64).to_be_bytes());
+        }
+        let mut mask = [0u8; 4];
+        crate::rand::fill(&mut mask);
+        out.extend_from_slice(&mask);
+        out.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+        self.write_raw(&out)
+    }
+
+    /// Stop both halves: a reader blocked on this connection returns.
+    pub fn shutdown(&self) {
+        let _ = self.s.lock().unwrap_or_else(|p| p.into_inner()).shutdown(std::net::Shutdown::Both);
+    }
+}
+
+impl WsReader {
     fn read_head(&mut self) -> io::Result<String> {
         loop {
             if let Some(end) = self.buf.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -91,31 +163,6 @@ impl Ws {
         }
         self.buf.extend_from_slice(&chunk[..n]);
         Ok(())
-    }
-
-    pub fn send_text(&mut self, text: &str) -> io::Result<()> {
-        self.send_frame(0x1, text.as_bytes())
-    }
-
-    /// Client frames are always masked (RFC 6455 5.3).
-    fn send_frame(&mut self, opcode: u8, payload: &[u8]) -> io::Result<()> {
-        let mut out = Vec::with_capacity(payload.len() + 14);
-        out.push(0x80 | opcode);
-        let n = payload.len();
-        if n < 126 {
-            out.push(0x80 | n as u8);
-        } else if n <= 0xFFFF {
-            out.push(0x80 | 126);
-            out.extend_from_slice(&(n as u16).to_be_bytes());
-        } else {
-            out.push(0x80 | 127);
-            out.extend_from_slice(&(n as u64).to_be_bytes());
-        }
-        let mut mask = [0u8; 4];
-        crate::rand::fill(&mut mask);
-        out.extend_from_slice(&mask);
-        out.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
-        self.s.write_all(&out)
     }
 
     /// One frame from the buffer, if a whole one is there:
@@ -155,28 +202,30 @@ impl Ws {
         Ok(Some((fin, opcode, payload)))
     }
 
+    /// The next whole text message.  A fragment read before a timeout
+    /// is kept in `partial`, so the next call carries on where this one
+    /// stopped instead of returning the tail as a message of its own.
     pub fn recv(&mut self) -> io::Result<Msg> {
-        let mut msg: Option<Vec<u8>> = None;
         loop {
             let Some((fin, opcode, payload)) = self.take_frame()? else {
                 self.fill()?;
                 continue;
             };
             match opcode {
-                0x9 => self.send_frame(0xA, &payload)?,
+                0x9 => self.w.send_frame(0xA, &payload)?,
                 0xA => {}
                 0x8 => {
-                    let _ = self.send_frame(0x8, &payload);
+                    let _ = self.w.send_frame(0x8, &payload);
                     return Ok(Msg::Closed);
                 }
                 0x1 | 0x0 => {
-                    let acc = msg.get_or_insert_with(Vec::new);
+                    let acc = self.partial.get_or_insert_with(Vec::new);
                     acc.extend_from_slice(&payload);
                     if acc.len() > MAX_MESSAGE {
                         return Err(proto("message too large"));
                     }
                     if fin {
-                        let bytes = msg.take().unwrap_or_default();
+                        let bytes = self.partial.take().unwrap_or_default();
                         return String::from_utf8(bytes).map(Msg::Text).map_err(|_| proto("text is not UTF-8"));
                     }
                 }
@@ -248,6 +297,38 @@ mod tests {
         assert_eq!(t[0], 0x81);
         assert_eq!(t[1], 0x80 | 2);
         assert_eq!([t[6] ^ t[2], t[7] ^ t[3]], *b"hi");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A timeout between two fragments must not lose the first one.
+    #[test]
+    fn a_fragment_survives_a_read_timeout() {
+        let path = sock("slow");
+        let l = UnixListener::bind(&path).unwrap();
+        let h = std::thread::spawn(move || {
+            let (mut c, _) = l.accept().unwrap();
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while !req.ends_with(b"\r\n\r\n") {
+                c.read_exact(&mut byte).unwrap();
+                req.push(byte[0]);
+            }
+            let req = String::from_utf8(req).unwrap();
+            let key = req.lines().find_map(|l| l.strip_prefix("Sec-WebSocket-Key: ")).unwrap().trim().to_string();
+            let accept = base64(&sha1(format!("{key}{GUID}").as_bytes()));
+            write!(c, "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").unwrap();
+            c.write_all(&[0x01, 2, b'a', b'b']).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            c.write_all(&[0x80, 2, b'c', b'd']).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        let mut ws = Ws::connect(&path, Duration::from_secs(5)).unwrap();
+        ws.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        let err = ws.recv().unwrap_err();
+        assert!(matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut), "{err}");
+        ws.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(ws.recv().unwrap(), Msg::Text("abcd".into()));
+        h.join().unwrap();
         let _ = std::fs::remove_file(&path);
     }
 

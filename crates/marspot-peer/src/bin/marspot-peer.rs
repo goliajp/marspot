@@ -15,7 +15,6 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -61,34 +60,9 @@ fn fail<T>(code: u8, m: impl Into<String>) -> Result<T, Fail> {
     Err(Fail::Msg(code, m.into()))
 }
 
-/// Registry directories that may hold records: the Claude config dirs
-/// this user has, resolved through symlinks so a shared directory is
-/// read once.
-fn registry_dirs() -> Vec<PathBuf> {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let mut cands: Vec<PathBuf> = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).into_iter().collect();
-    cands.push(home.join(".claude"));
-    if let Ok(rd) = std::fs::read_dir(&home) {
-        let mut profiles: Vec<PathBuf> = rd
-            .flatten()
-            .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with(".claude-profile-")))
-            .map(|e| e.path())
-            .collect();
-        profiles.sort();
-        cands.extend(profiles);
-    }
-    let mut out: Vec<PathBuf> = Vec::new();
-    for dir in cands.into_iter().filter_map(|c| c.join("sessions").canonicalize().ok()) {
-        if !out.contains(&dir) {
-            out.push(dir);
-        }
-    }
-    out
-}
-
 fn live_entries() -> Vec<Entry> {
     let mut out: Vec<Entry> = Vec::new();
-    for dir in registry_dirs() {
+    for dir in registry::default_dirs() {
         for e in registry::list_live(&dir) {
             if !out.iter().any(|o| o.pid == e.pid) {
                 out.push(e);
