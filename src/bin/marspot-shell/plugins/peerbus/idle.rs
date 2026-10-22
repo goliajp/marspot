@@ -3,7 +3,7 @@
 //! away; a `peer_idle_notice` for a subscription the Codex session
 //! placed is shown to it in the words Claude Code uses.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use marspot_peer::frame::{self, IdleState};
 use marspot_peer::registry::Status;
@@ -14,9 +14,9 @@ use super::worker::{now_ms, Binding, Worker};
 
 /// Subscriptions one inbox holds at once.
 const MAX_SUBS: usize = 32;
-/// A subscription that arrives this soon after a message was handed to
-/// the session waits for the turn that message starts.
-const QUIET_FOR: Duration = Duration::from_secs(5);
+/// How long a subscription placed while the session is idle waits
+/// before it is answered.
+const QUIET_FOR: Duration = Duration::from_secs(2);
 
 impl Worker {
     pub(super) fn subscribe(&mut self, key: u64, from: String, msg_id: String) {
@@ -28,10 +28,27 @@ impl Worker {
         }
         b.subs.retain(|(to, _)| *to != from);
         b.subs.push((from, msg_id));
-        // idle with nothing just handed to it: no turn is coming to end
-        let quiet = b.last_delivered.is_none_or(|t| t.elapsed() >= QUIET_FOR);
-        if b.record.status == Status::Idle && b.active_turn.is_none() && quiet {
-            self.fire(sid, IdleState::Idle);
+        // Idle now: look again shortly.  The message a subscription
+        // usually comes with may still be on its way (the two travel on
+        // separate connections), and the turn it starts ends in a
+        // notice of its own.
+        if b.record.status == Status::Idle && b.active_turn.is_none() {
+            self.idle_checks.push((sid, Instant::now() + QUIET_FOR));
+        }
+    }
+
+    /// Subscriptions placed while idle, whose wait is over: still idle
+    /// and nothing handed over since means no turn is coming.
+    pub(super) fn idle_checks_due(&mut self, now: Instant) {
+        let (due, later): (Vec<_>, Vec<_>) = self.idle_checks.drain(..).partition(|(_, t)| *t <= now);
+        self.idle_checks = later;
+        for (sid, at) in due {
+            let Some(b) = self.bindings.get(&sid) else { continue };
+            let since = at - QUIET_FOR;
+            let quiet = b.last_delivered.is_none_or(|t| t < since);
+            if b.record.status == Status::Idle && b.active_turn.is_none() && quiet {
+                self.fire(sid, IdleState::Idle);
+            }
         }
     }
 
@@ -71,7 +88,7 @@ pub(super) fn send_notices(sid: u64, b: &mut Binding, state: IdleState) {
     let mode = b.class.as_str();
     for (to, orig) in b.subs.drain(..) {
         let line = frame::idle_notice_line(&orig, state, now_ms(), &from, mode, &marspot_peer::rand::uuid_v4());
-        deliver::send_line(&to, &line);
+        deliver::send_line(&b.inbox.relay, &to, &line);
         lx_info!("peerbus.idle_notice", "sent", sid = sid, state = state.as_str());
     }
 }

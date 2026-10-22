@@ -3,10 +3,11 @@
 //! `CODEX_HOME`.
 //!
 //! Event-driven: it wakes when the set of Codex panes changes, when a
-//! message arrives, or when a daemon reports something.  Two timers:
-//! a retry after a daemon could not be reached, and the names check
+//! message arrives, or when a daemon reports something.  Three timers:
+//! a retry after a daemon could not be reached, the names check
 //! (`NAMES_EVERY`), since a pane is renamed by a `cd` or a move that
-//! nothing here is told about.
+//! nothing here is told about, and the short wait of an idle
+//! subscription placed while the session was idle (`idle`).
 //! Calls to a daemon block this thread for up to `CALL_TIMEOUT`; events
 //! that arrive meanwhile are set aside and handled after.
 
@@ -123,6 +124,8 @@ pub(crate) struct Worker {
     pub(super) retry_at: Option<Instant>,
     pub(super) backoff: Duration,
     pub(super) names_at: Instant,
+    /// Idle subscriptions waiting to see whether a turn comes (`idle`).
+    pub(super) idle_checks: Vec<(u64, Instant)>,
     /// Panes running two agents, logged once each.
     pub(super) crowded: HashSet<u64>,
 }
@@ -144,6 +147,7 @@ impl Worker {
             retry_at: None,
             backoff: RETRY_MIN,
             names_at: Instant::now(),
+            idle_checks: Vec::new(),
             crowded: HashSet::new(),
         }
     }
@@ -154,7 +158,10 @@ impl Worker {
             let ev = match self.stash.pop_front() {
                 Some(e) => e,
                 None => {
-                    let due = self.retry_at.map_or(self.names_at, |t| t.min(self.names_at));
+                    let due = [self.retry_at, self.idle_checks.iter().map(|(_, t)| *t).min()]
+                        .into_iter()
+                        .flatten()
+                        .fold(self.names_at, Instant::min);
                     match self.rx.recv_timeout(due.saturating_duration_since(Instant::now())) {
                         Ok(e) => e,
                         Err(RecvTimeoutError::Timeout) => {
@@ -163,6 +170,7 @@ impl Worker {
                                 self.retry_at = None;
                                 self.refresh();
                             }
+                            self.idle_checks_due(now);
                             if self.names_at <= now {
                                 self.names_at = now + NAMES_EVERY;
                                 self.rename_pass();
@@ -261,13 +269,14 @@ impl Worker {
         };
         let sid = *sid;
         let address = format!("uds:{}", b.inbox.path.display());
+        let relay = b.inbox.relay.clone();
         let admitted = deliver::admit(&frame, b.class, &mut b.rate, Instant::now());
         let a = match admitted {
             Ok(a) => a,
             Err(why) => {
                 lx_info!("peerbus.refused", &why.reason(), sid = sid, peer_pid = peer_pid.unwrap_or(0));
                 if let Some(to) = &reply_to {
-                    deliver::send_receipt(to, &address, why.receipt(), frame.msg_id.as_deref(), &why.reason());
+                    deliver::send_receipt(&relay, to, &address, why.receipt(), frame.msg_id.as_deref(), &why.reason());
                 }
                 return;
             }
@@ -287,7 +296,7 @@ impl Worker {
                 let reason = format!("codex did not accept it: {e}");
                 lx_warn!("peerbus.deliver_failed", &reason, sid = sid, via = via);
                 if let Some(to) = &reply_to {
-                    deliver::send_receipt(to, &address, Receipt::Refused, frame.msg_id.as_deref(), &reason);
+                    deliver::send_receipt(&relay, to, &address, Receipt::Refused, frame.msg_id.as_deref(), &reason);
                 }
             }
         }
@@ -329,10 +338,10 @@ pub(super) fn write_record(dirs: &[PathBuf], r: &Record) {
 }
 
 /// `<pid>-<8 hex>.sock`: only files of this shape are ours to delete.
-pub(super) fn is_inbox_name(path: &str, pid: i32) -> bool {
+pub(super) fn is_inbox_name(path: &str) -> bool {
     let Some(name) = Path::new(path).file_name().and_then(|n| n.to_str()) else { return false };
-    let Some(rest) = name.strip_prefix(&format!("{pid}-")).and_then(|r| r.strip_suffix(".sock")) else { return false };
-    rest.len() == 8 && rest.bytes().all(|b| b.is_ascii_hexdigit())
+    let Some((pid, rest)) = name.strip_suffix(".sock").and_then(|r| r.split_once('-')) else { return false };
+    !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) && rest.len() == 8 && rest.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 pub(super) fn now_ms() -> i64 {
@@ -354,9 +363,9 @@ mod tests {
 
     #[test]
     fn only_inbox_shaped_names_are_deleted() {
-        assert!(is_inbox_name("/tmp/cc-socks/42-0a1b2c3d.sock", 42));
-        assert!(!is_inbox_name("/tmp/cc-socks/42.sock", 42));
-        assert!(!is_inbox_name("/tmp/cc-socks/43-0a1b2c3d.sock", 42));
-        assert!(!is_inbox_name("/tmp/cc-socks/42-0a1b2c3dx.sock", 42));
+        assert!(is_inbox_name("/tmp/cc-socks/42-0a1b2c3d.sock"));
+        assert!(!is_inbox_name("/tmp/cc-socks/42.sock"));
+        assert!(!is_inbox_name("/tmp/cc-socks/x42-0a1b2c3d.sock"));
+        assert!(!is_inbox_name("/tmp/cc-socks/42-0a1b2c3dx.sock"));
     }
 }

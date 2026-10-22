@@ -31,6 +31,10 @@ pub const MARKER: &str = "marspot-codex";
 /// Our own field: the Codex session's permission class, which the
 /// sender CLI reads back to fill `from-mode`.  Claude Code ignores it.
 const CLASS_KEY: &str = "marspotPermissionClass";
+/// Our own fields: the Codex process the record stands for (the
+/// record's `pid` is its relay), and the relay's send socket.
+const CODEX_PID_KEY: &str = "marspotCodexPid";
+const RELAY_KEY: &str = "marspotRelay";
 /// Our own field: which marspot wrote the record (its state root).  A
 /// restarting marspot clears its own leftovers and nobody else's — a
 /// sandbox instance and the installed app share this directory.
@@ -91,7 +95,11 @@ pub fn push_former(list: &mut Vec<FormerName>, old: FormerName, current: &str) {
 /// A record marspot writes for one Codex session.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Record {
+    /// The session's relay process (`relay`), which serves its inbox.
     pub pid: i32,
+    pub codex_pid: i32,
+    /// The relay's send socket.
+    pub relay: String,
     /// The Codex thread id.
     pub session_id: String,
     pub cwd: String,
@@ -133,6 +141,8 @@ impl Record {
             ("updatedAt", Value::from(now_ms)),
             ("statusUpdatedAt", Value::from(now_ms)),
             (CLASS_KEY, Value::from(self.class.as_str())),
+            (CODEX_PID_KEY, Value::from(i64::from(self.codex_pid))),
+            (RELAY_KEY, Value::from(self.relay.as_str())),
             (OWNER_KEY, Value::from(self.owner.as_str())),
         ])
         .to_json()
@@ -155,6 +165,8 @@ pub struct Entry {
     pub features: Vec<String>,
     pub ours: bool,
     pub class: Option<Mode>,
+    /// The relay's send socket, for a record of ours.
+    pub relay: Option<String>,
     pub owner: Option<String>,
 }
 
@@ -338,6 +350,7 @@ fn read_entry(path: &Path, pid: i32) -> Option<Entry> {
         features: strs("peerFeatures", None),
         ours: v.str_at("entrypoint") == Some(MARKER),
         class: v.str_at(CLASS_KEY).and_then(Mode::parse),
+        relay: s(RELAY_KEY),
         owner: s(OWNER_KEY),
     })
 }
@@ -355,6 +368,8 @@ mod tests {
     fn record(pid: i32) -> Record {
         Record {
             pid,
+            codex_pid: pid,
+            relay: "/tmp/r.sock".into(),
             session_id: "01a16103-3f4c-7883-b4ee-2a471b88dda9".into(),
             cwd: "/tmp/x".into(),
             started_at_ms: 1,
@@ -380,6 +395,7 @@ mod tests {
         let e = &live[0];
         assert!(e.ours);
         assert_eq!(e.class, Some(Mode::Bypass));
+        assert_eq!(e.relay.as_deref(), Some("/tmp/r.sock"));
         assert_eq!(e.socket.as_deref(), Some(format!("/tmp/cc-socks/{me}-0a1b2c3d.sock").as_str()));
         assert!(remove_ours(&dir, me).unwrap());
         assert!(read_all(&dir).is_empty());
