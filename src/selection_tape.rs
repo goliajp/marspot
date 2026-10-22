@@ -26,6 +26,46 @@
 
 use std::collections::VecDeque;
 
+/// One screen row as the tape keeps it: the text, and where in it each
+/// column starts.  Columns and characters part ways on a wide glyph
+/// (two columns, one character) and on a cluster (one column, several
+/// characters), so a selection's columns cannot index the text
+/// directly.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Row {
+    pub text: String,
+    /// Byte offset of each column's glyph in `text`; a wide glyph's
+    /// trail column repeats its lead's.  Columns past the end are not
+    /// listed.  Empty when every column is one byte of `text`, which
+    /// is most rows and costs nothing to keep.
+    pub starts: Vec<u32>,
+}
+
+impl Row {
+    /// A row in which every column is one byte.
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self { text: text.into(), starts: Vec::new() }
+    }
+
+    /// The bytes of `text` that columns `from..=to` cover.  A column
+    /// on either half of a wide glyph takes the whole glyph.
+    fn byte_range(&self, from: usize, to: usize) -> (usize, usize) {
+        let len = self.text.len();
+        if self.starts.is_empty() {
+            return (from.min(len), (to + 1).min(len));
+        }
+        let start = self.starts.get(from).map_or(len, |&s| s as usize);
+        let end = match self.starts.get(to) {
+            None => len,
+            Some(&at) => self.starts[to + 1..]
+                .iter()
+                .find(|&&s| s > at)
+                .map_or(len, |&s| s as usize),
+        };
+        (start, end.max(start))
+    }
+}
+
 /// Rows the tape will hold.  ~1.5 MB of text at 73 columns, and far
 /// more than a drag can reach: a selection that has travelled 20,000
 /// lines is not one anybody made by hand.  The half further from the
@@ -59,7 +99,7 @@ pub struct SelectionTape {
     base: i64,
     /// Virtual line number of `lines[0]`.
     origin: i64,
-    lines: VecDeque<String>,
+    lines: VecDeque<Row>,
     /// Row hashes of the newest frame, for the next alignment.
     prev: Vec<u64>,
     /// Selection ends as (column, virtual line).
@@ -153,13 +193,13 @@ fn best_shift(prev: &[u64], cur: &[u64], blank: u64) -> Alignment {
 impl SelectionTape {
     /// Start a tape from the frame the drag began on.  `anchor_row` is
     /// a screen row, `rows` the whole visible picture top to bottom.
-    pub fn new(pane_idx: usize, rows: &[String], anchor_col: u16, anchor_row: u16) -> Self {
+    pub fn new(pane_idx: usize, rows: &[Row], anchor_col: u16, anchor_row: u16) -> Self {
         let mut t = Self {
             pane_idx,
             base: 0,
             origin: 0,
             lines: VecDeque::new(),
-            prev: rows.iter().map(|r| hash_row(r)).collect(),
+            prev: rows.iter().map(|r| hash_row(&r.text)).collect(),
             anchor: (anchor_col, anchor_row as i64),
             focus: (anchor_col, anchor_row as i64),
             broken: false,
@@ -183,11 +223,11 @@ impl SelectionTape {
     /// frame that is not a shift of the one before breaks the tape and
     /// returns `None`; an unchanged frame returns `Some(0)` and costs
     /// one hash pass.
-    pub fn fold(&mut self, rows: &[String]) -> Option<i64> {
+    pub fn fold(&mut self, rows: &[Row]) -> Option<i64> {
         if self.broken {
             return None;
         }
-        let cur: Vec<u64> = rows.iter().map(|r| hash_row(r)).collect();
+        let cur: Vec<u64> = rows.iter().map(|r| hash_row(&r.text)).collect();
         if cur == self.prev {
             return Some(0);
         }
@@ -243,23 +283,15 @@ impl SelectionTape {
         let mut out: Vec<String> = Vec::new();
         for virt in a.1..=b.1 {
             let Some(line) = self.line(virt) else { continue };
-            let chars: Vec<char> = line.chars().collect();
             let (from, to) = if blockwise {
-                (lo as usize, (hi as usize + 1).min(chars.len()))
+                (lo as usize, hi as usize)
             } else {
                 let from = if virt == a.1 { a.0 as usize } else { 0 };
-                let to = if virt == b.1 {
-                    (b.0 as usize + 1).min(chars.len())
-                } else {
-                    chars.len()
-                };
+                let to = if virt == b.1 { b.0 as usize } else { usize::MAX - 1 };
                 (from, to)
             };
-            let slice: String = if from >= to || from >= chars.len() {
-                String::new()
-            } else {
-                chars[from..to.min(chars.len())].iter().collect()
-            };
+            let (start, end) = line.byte_range(from, to);
+            let slice = &line.text[start..end];
             out.push(slice.trim_end().to_string());
         }
         while out.last().is_some_and(|l| l.is_empty()) {
@@ -275,32 +307,32 @@ impl SelectionTape {
         }
     }
 
-    fn line(&self, virt: i64) -> Option<&String> {
+    fn line(&self, virt: i64) -> Option<&Row> {
         if virt < self.origin {
             return None;
         }
         self.lines.get((virt - self.origin) as usize)
     }
 
-    fn write_frame(&mut self, rows: &[String]) {
+    fn write_frame(&mut self, rows: &[Row]) {
         for (r, text) in rows.iter().enumerate() {
             self.write_line(self.base + r as i64, text);
         }
         self.trim();
     }
 
-    fn write_line(&mut self, virt: i64, text: &str) {
+    fn write_line(&mut self, virt: i64, row: &Row) {
         if self.lines.is_empty() {
             self.origin = virt;
-            self.lines.push_back(text.to_string());
+            self.lines.push_back(row.clone());
             return;
         }
         while virt < self.origin {
-            self.lines.push_front(String::new());
+            self.lines.push_front(Row::default());
             self.origin -= 1;
         }
         while virt >= self.origin + self.lines.len() as i64 {
-            self.lines.push_back(String::new());
+            self.lines.push_back(Row::default());
         }
         let slot = &mut self.lines[(virt - self.origin) as usize];
         // A blank row never erases text the tape already holds.  A
@@ -310,10 +342,10 @@ impl SelectionTape {
         // half still lines up) and would otherwise punch holes in
         // exactly the lines a copy is about to be taken from.  What
         // the user saw is the thing worth keeping.
-        if text.is_empty() && !slot.is_empty() {
+        if row.text.is_empty() && !slot.text.is_empty() {
             return;
         }
-        *slot = text.to_string();
+        slot.clone_from(row);
     }
 
     /// Bounded growth: drop from whichever end is further from the
@@ -336,8 +368,67 @@ impl SelectionTape {
 mod tests {
     use super::*;
 
-    fn frame(first: usize, rows: usize) -> Vec<String> {
-        (first..first + rows).map(|i| format!("line {i}")).collect()
+    fn frame(first: usize, rows: usize) -> Vec<Row> {
+        (first..first + rows).map(|i| Row::plain(format!("line {i}"))).collect()
+    }
+
+    fn rows(texts: impl IntoIterator<Item = String>) -> Vec<Row> {
+        texts.into_iter().map(Row::plain).collect()
+    }
+
+    /// A row the way `Pane::screen_rows` builds it, from cells: `None`
+    /// is a wide glyph's trail column.
+    fn cells(cells: &[Option<&str>]) -> Row {
+        let mut text = String::new();
+        let mut starts = Vec::new();
+        for c in cells {
+            match c {
+                Some(s) => {
+                    starts.push(text.len() as u32);
+                    text.push_str(s);
+                }
+                None => starts.push(starts.last().copied().unwrap_or(0)),
+            }
+        }
+        Row { text, starts }
+    }
+
+    fn wide(s: &str) -> Vec<Option<&str>> {
+        s.char_indices()
+            .flat_map(|(i, ch)| {
+                let g = &s[i..i + ch.len_utf8()];
+                if ch.is_ascii() { vec![Some(g)] } else { vec![Some(g), None] }
+            })
+            .collect()
+    }
+
+    /// The selection's columns are screen columns.  Ahead of the pick
+    /// sit 25 columns but only 15 characters, and the copy used to
+    /// come out ten characters to the right of what was picked.
+    #[test]
+    fn a_copy_after_wide_glyphs_takes_the_columns_that_were_picked() {
+        let line = "刚站住，但 10x 目标需要的事件循环状态机，多线程和产物目标";
+        let mut f0 = frame(0, 4);
+        f0[1] = cells(&wide(line));
+        let mut t = SelectionTape::new(0, &f0, 25, 1);
+        t.set_focus(38, 1);
+        assert_eq!(t.text(false).as_deref(), Some("事件循环状态机"));
+        // an end on either half of a glyph takes the whole glyph
+        t.anchor = (26, 1);
+        t.set_focus(39, 1);
+        assert_eq!(t.text(false).as_deref(), Some("事件循环状态机，"));
+        t.set_focus(24, 1);
+        t.anchor = (0, 1);
+        assert_eq!(t.text(true).as_deref(), Some("刚站住，但 10x 目标需要的"));
+    }
+
+    #[test]
+    fn a_cluster_is_one_column_of_several_characters() {
+        let mut f0 = frame(0, 4);
+        f0[2] = cells(&[Some("a"), Some("e\u{301}"), Some("b"), Some("c")]);
+        let mut t = SelectionTape::new(0, &f0, 1, 2);
+        t.set_focus(2, 2);
+        assert_eq!(t.text(false).as_deref(), Some("e\u{301}b"));
     }
 
     #[test]
@@ -347,12 +438,12 @@ mod tests {
         let anchored = t.anchor.1;
         // The program uncovers older text: everything moves down 2.
         let f1 = frame(0, 10 - 2);
-        let mut shifted = vec!["older a".to_string(), "older b".to_string()];
+        let mut shifted = vec![Row::plain("older a"), Row::plain("older b")];
         shifted.extend(f1);
         assert_eq!(t.fold(&shifted), Some(-2));
         assert_eq!(t.anchor.1, anchored, "the anchor is a virtual line");
         assert_eq!(
-            t.line(anchored).map(String::as_str),
+            t.line(anchored).map(|r| r.text.as_str()),
             Some("line 3"),
             "and it still names the text it was put on"
         );
@@ -380,8 +471,7 @@ mod tests {
     fn a_repaint_that_is_not_a_scroll_breaks_the_tape_instead_of_guessing() {
         let f0 = frame(0, 10);
         let mut t = SelectionTape::new(0, &f0, 0, 0);
-        let unrelated: Vec<String> =
-            (0..10).map(|i| format!("something else {i}")).collect();
+        let unrelated = rows((0..10).map(|i| format!("something else {i}")));
         for _ in 0..MAX_CONSECUTIVE_MISSES {
             assert_eq!(t.fold(&unrelated), None);
         }
@@ -396,22 +486,22 @@ mod tests {
         let anchored = t.anchor.1;
         // A frame published mid-repaint with nothing recognisable in
         // it at all.
-        let garbage: Vec<String> = (0..10).map(|i| format!("~{i}~")).collect();
+        let garbage = rows((0..10).map(|i| format!("~{i}~")));
         assert_eq!(t.fold(&garbage), None);
         assert!(!t.broken, "one bad frame is not a redraw");
         // The next whole frame is measured against the last whole one,
         // not against the half — so the shift is still right.
-        let mut shifted = vec!["older".to_string()];
+        let mut shifted = vec![Row::plain("older")];
         shifted.extend(frame(0, 9));
         assert_eq!(t.fold(&shifted), Some(-1));
-        assert_eq!(t.line(anchored).map(String::as_str), Some("line 3"));
+        assert_eq!(t.line(anchored).map(|r| r.text.as_str()), Some("line 3"));
     }
 
     #[test]
     fn a_blank_screen_still_breaks_it_if_it_keeps_coming() {
         let f0 = frame(0, 10);
         let mut t = SelectionTape::new(0, &f0, 0, 0);
-        let blanks: Vec<String> = (0..10).map(|_| String::new()).collect();
+        let blanks = rows((0..10).map(|_| String::new()));
         for _ in 0..MAX_CONSECUTIVE_MISSES {
             t.fold(&blanks);
         }
@@ -423,12 +513,10 @@ mod tests {
         let f0 = frame(0, 10);
         let mut t = SelectionTape::new(0, &f0, 0, 0);
         // The top half is painted, the bottom half has not been yet.
-        let half: Vec<String> = (0..10)
-            .map(|i| if i < 5 { format!("line {i}") } else { String::new() })
-            .collect();
+        let half = rows((0..10).map(|i| if i < 5 { format!("line {i}") } else { String::new() }));
         assert_eq!(t.fold(&half), Some(0), "the painted half still lines up");
         assert_eq!(
-            t.line(7).map(String::as_str),
+            t.line(7).map(|r| r.text.as_str()),
             Some("line 7"),
             "and the rows it had not reached yet keep their text"
         );
@@ -438,21 +526,15 @@ mod tests {
     fn a_mostly_blank_screen_still_reads_its_own_scroll() {
         // Eight lines of text in a 40-row screen, the shape of a
         // conversation with space between its messages.
-        let sparse = |first: usize| -> Vec<String> {
-            (0..40)
-                .map(|r| {
-                    if r % 5 == 0 {
-                        format!("line {}", first + r / 5)
-                    } else {
-                        String::new()
-                    }
-                })
-                .collect()
+        let sparse = |first: usize| -> Vec<Row> {
+            rows((0..40).map(|r| {
+                if r % 5 == 0 { format!("line {}", first + r / 5) } else { String::new() }
+            }))
         };
         let mut t = SelectionTape::new(0, &sparse(0), 0, 0);
         // Scroll by five rows: seven of the eight lines are still there.
-        let mut moved: Vec<String> = sparse(0)[5..].to_vec();
-        moved.extend((0..5).map(|_| String::new()));
+        let mut moved: Vec<Row> = sparse(0)[5..].to_vec();
+        moved.extend((0..5).map(|_| Row::default()));
         assert_eq!(
             t.fold(&moved),
             Some(5),
@@ -472,7 +554,7 @@ mod tests {
     fn a_blank_screen_cannot_align_and_does_not_pretend_to() {
         let f0 = frame(0, 10);
         let mut t = SelectionTape::new(0, &f0, 0, 0);
-        let blanks: Vec<String> = (0..10).map(|_| String::new()).collect();
+        let blanks = rows((0..10).map(|_| String::new()));
         assert_eq!(t.fold(&blanks), None, "no shift is readable from it");
     }
 

@@ -31,6 +31,7 @@ use crate::grid_shm::{
 };
 use crate::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use crate::render::SessionView;
+use crate::selection_tape;
 use crate::session::{Session, SessionState};
 use crate::shell_proto::{
     encode_get_selection_text, encode_grid_resize, encode_grid_scroll, encode_key_event,
@@ -1875,24 +1876,30 @@ impl Pane {
         ) != WheelRoute::Scrollback
     }
 
-    /// The visible picture as one string per row, top to bottom —
-    /// what a `SelectionTape` folds to find the program's scroll.
-    /// NUL is the wide-glyph trail half and is skipped, as it is when
-    /// a selection is serialised, so a CJK row hashes the same both
-    /// ways.
-    pub fn screen_rows(&self) -> Vec<String> {
+    /// The visible picture as one row per screen row, top to bottom —
+    /// what a `SelectionTape` folds to find the program's scroll and
+    /// copies text out of.  NUL is the wide-glyph trail half: it adds
+    /// no text, so a CJK row hashes the same both ways, and its column
+    /// points back at the glyph it belongs to.
+    pub fn screen_rows(&self) -> Vec<selection_tape::Row> {
         let g = self.session.grid();
         let (cols, rows) = (g.cols(), g.rows());
         (0..rows)
             .map(|r| {
                 let mut line = String::with_capacity(cols as usize);
+                let mut starts: Vec<u32> = Vec::with_capacity(cols as usize);
+                let mut plain = true;
                 let mut row_clusters = Vec::new();
                 g.row_clusters_at_view(0, r, &mut row_clusters);
                 for c in 0..cols {
                     let cell = g.cell_at_view(0, c, r);
                     if cell.ch == '\0' {
+                        starts.push(starts.last().copied().unwrap_or(0));
+                        plain = false;
                         continue;
                     }
+                    let at = line.len();
+                    starts.push(at as u32);
                     // A cluster cell's `ch` is a pool index, not text;
                     // one that has scrolled off holds the base
                     // codepoint and its text is keyed by position.
@@ -1903,9 +1910,16 @@ impl Pane {
                         Some(text) => line.push_str(text),
                         None => line.push(cell.ch),
                     }
+                    plain &= line.len() == at + 1;
                 }
                 line.truncate(line.trim_end().len());
-                line
+                if plain {
+                    starts = Vec::new();
+                } else {
+                    let len = line.len() as u32;
+                    starts.truncate(starts.partition_point(|&s| s < len));
+                }
+                selection_tape::Row { text: line, starts }
             })
             .collect()
     }
