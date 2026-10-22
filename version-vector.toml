@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.247"  # peerbus binds a codex pane by the thread id in its window title
-core    = "0.12.289"  # removes a closed session's title region with its other regions
+core    = "0.12.290"  # a copy on a program-scrolled pane takes the columns picked, after wide glyphs too
 session = "0.11.153"  # publishes the window title beside the frame

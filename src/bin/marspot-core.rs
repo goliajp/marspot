@@ -2432,7 +2432,7 @@ mod boot_assembly_tests {
             std::time::Instant::now() + std::time::Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
             pane.pump();
-            let screen = pane.screen_rows().join("\n");
+            let screen = pane.screen_rows().into_iter().map(|r| r.text).collect::<Vec<_>>().join("\n");
             if screen.contains("TERM=[xterm-256color]") {
                 assert!(
                     !screen.contains("TERM=[screen-256color]"),
@@ -2442,7 +2442,7 @@ mod boot_assembly_tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        panic!("the shell never reported its TERM:\n{}", pane.screen_rows().join("\n"));
+        panic!("the shell never reported its TERM:\n{}", pane.screen_rows().into_iter().map(|r| r.text).collect::<Vec<_>>().join("\n"));
     }
 
     /// A new pane opens where the shell actually is.
@@ -2646,13 +2646,13 @@ mod boot_assembly_tests {
             std::time::Instant::now() + std::time::Duration::from_secs(15);
         while std::time::Instant::now() < deadline {
             pane.pump();
-            let screen = pane.screen_rows().join("\n");
+            let screen = pane.screen_rows().into_iter().map(|r| r.text).collect::<Vec<_>>().join("\n");
             if screen.contains("[<0;12;3M") && screen.contains("[<0;12;3m") {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        let screen = pane.screen_rows().join("\n");
+        let screen = pane.screen_rows().into_iter().map(|r| r.text).collect::<Vec<_>>().join("\n");
         panic!("the press and release never reached the program; screen was:\n{screen}");
     }
 
