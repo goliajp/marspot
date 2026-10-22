@@ -192,15 +192,18 @@ mod tests {
         let pid = child.id() as i32;
         let want = vec!["/bin/sh", "-c", "sleep 30; :", "", "x"];
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut got = None;
+        // Both reads are retried: the arguments of a process that is in
+        // the middle of forking can briefly not be read, and a single
+        // read then fails the test now and then for no fault here.
+        let (mut got, mut cmdline) = (None, None);
         while Instant::now() < deadline {
             got = proc_argv(pid);
-            if got.as_deref().is_some_and(|a| a.len() == want.len()) {
+            cmdline = proc_cmdline(pid);
+            if got.as_deref().is_some_and(|a| a.len() == want.len()) && cmdline.is_some() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        let cmdline = proc_cmdline(pid);
         // Wait for the sleep, so the guard always has a grandchild to
         // take: dropped before the shell forks, the test passes
         // whether or not the guard kills the group.
