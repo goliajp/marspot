@@ -544,6 +544,7 @@ fn publish(shm: &mut GridShmWriter, session: &SessionImpl, view_offset: u16) -> 
     // scrollback can shrink (alt-screen enter / reset) between L2's request
     // and this publish, so never hand the writer an out-of-range offset.
     let off = view_offset.min(term.grid().scrollback_len() as u16);
+    shm.publish_title(term.osc_title());
     shm.publish_if_changed(term.grid(), off, flags)
 }
 
@@ -1199,6 +1200,7 @@ fn main() {
         rows = rows
     );
     shm.attach_clusters(session.id());
+    shm.attach_title(session.id());
 
     // SIGTERM and SIGHUP become events on the main loop; see
     // `signal_events`.  Best-effort: if installing fails the L3 still
@@ -2312,12 +2314,12 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 session_id = id,
                 pid = std::process::id()
             );
-            marspot_term::grid_shm::clusters::delete(id);
+            marspot_term::grid_shm::delete_side_regions(id);
             std::process::exit(0);
         }
     }
     // the session is over and no image follows it
-    marspot_term::grid_shm::clusters::delete(session.id());
+    marspot_term::grid_shm::delete_side_regions(session.id());
 }
 
 // B3 integration tests.  These exercise the L3-side surface of the
