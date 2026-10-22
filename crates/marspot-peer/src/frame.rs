@@ -102,27 +102,57 @@ pub fn user_line(content: &str, from: &str, priority: Priority, msg_id: &str) ->
     s
 }
 
-/// What happened to a message, told back to its sender.
+/// What happened to a message that did not get through, told back to
+/// its sender.  A message that was accepted gets no receipt: in this
+/// protocol `delivered` means "held, then approved by the recipient's
+/// user", and saying it for an ordinary message tells the sender's
+/// model that a person approved something nobody saw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Receipt {
-    Delivered,
+    /// The recipient does not take this message (a setting, a policy,
+    /// or it cannot be reached).
     Refused,
+    /// Dropped at the recipient's inbox.
+    Dropped(DropReason),
 }
 
-/// A `peer_message_status` control frame, newline-terminated.  The
-/// sender shows it to its model, so a message that did not arrive is
-/// not mistaken for one that did.  Claude Code encodes "refused" as
-/// status `expired` with detail `refused`; this follows it.
+/// The reasons the receiving side may give for a drop; a sender only
+/// understands these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropReason {
+    RateLimited,
+    HopRunaway,
+    QueueFull,
+}
+
+impl DropReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            DropReason::RateLimited => "rate-limited",
+            DropReason::HopRunaway => "hop-runaway",
+            DropReason::QueueFull => "queue-full",
+        }
+    }
+}
+
+/// A `peer_message_status` control frame, newline-terminated.  Claude
+/// Code encodes "refused" as status `expired` with detail `refused`;
+/// this follows it.
 pub fn receipt_line(r: Receipt, from: &str, orig_msg_id: Option<&str>, reason: &str) -> String {
     let mut kv = vec![
         ("type".to_string(), Value::from("control")),
         ("action".to_string(), Value::from("peer_message_status")),
     ];
     match r {
-        Receipt::Delivered => kv.push(("status".into(), Value::from("delivered"))),
         Receipt::Refused => {
             kv.push(("status".into(), Value::from("expired")));
             kv.push(("status_detail".into(), Value::from("refused")));
+        }
+        Receipt::Dropped(why) => {
+            kv.push(("status".into(), Value::from("dropped")));
+            kv.push(("drop_reason".into(), Value::from(why.as_str())));
+            let ids = orig_msg_id.map(|id| vec![Value::from(id)]).unwrap_or_default();
+            kv.push(("dropped_msg_ids".into(), Value::Arr(ids)));
         }
     }
     kv.push(("reason".into(), Value::from(reason)));
@@ -185,8 +215,14 @@ mod tests {
         assert_eq!(v.str_at("status"), Some("expired"));
         assert_eq!(v.str_at("status_detail"), Some("refused"));
         assert_eq!(v.str_at("orig_msg_id"), Some("m1"));
-        let d = json::parse(receipt_line(Receipt::Delivered, "uds:/a.sock", None, "ok").trim_end()).unwrap();
-        assert_eq!(d.str_at("status"), Some("delivered"));
-        assert_eq!(d.get("orig_msg_id"), None);
+    }
+
+    #[test]
+    fn dropped_receipt_names_a_known_reason() {
+        let line = receipt_line(Receipt::Dropped(DropReason::RateLimited), "uds:/a.sock", Some("m1"), "why");
+        let v = json::parse(line.trim_end()).unwrap();
+        assert_eq!(v.str_at("status"), Some("dropped"));
+        assert_eq!(v.str_at("drop_reason"), Some("rate-limited"));
+        assert_eq!(v.get("dropped_msg_ids").unwrap().arr()[0].str(), Some("m1"));
     }
 }
