@@ -46,6 +46,8 @@ SB=/tmp/marspot-peerbus
 RUNLOG=$SB/run.log
 # the Claude Code registry, under this test's HOME
 REGISTRY="$SB/home/.claude"/sessions
+# the Claude side checks socket peers against the records, as Claude does
+export PEERBUS_REGISTRY="$REGISTRY"
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
@@ -201,14 +203,14 @@ send_once() { # pane, text: retried only while refused, which queues nothing
   fail "--send to pane $1 was refused 40 times"
 }
 
-records() { # name<TAB>pid<TAB>thread<TAB>socket<TAB>former names, one per bound Codex pane
+records() { # name<TAB>codex pid<TAB>thread<TAB>socket<TAB>former names, one per bound Codex pane
   python3 - "$REGISTRY" <<'PY'
 import glob, json, os, sys
 for p in sorted(glob.glob(os.path.join(sys.argv[1], "*.json"))):
     r = json.load(open(p))
     if r.get("marspotOwner"):
         former = ",".join(f.get("name", "") for f in r.get("formerNames") or [])
-        print("\t".join(str(r.get(k, "")) for k in ("name", "pid", "sessionId", "messagingSocketPath")) + "\t" + former)
+        print("\t".join(str(r.get(k, "")) for k in ("name", "marspotCodexPid", "sessionId", "messagingSocketPath")) + "\t" + former)
 PY
 }
 name_of_pid() { # pid → name<TAB>former names<TAB>status, from any record
