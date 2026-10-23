@@ -12,12 +12,8 @@
 //! start time still equals `procStart` (see `proc`).  Claude Code
 //! deletes records whose process is gone, ours included.
 //!
-//! Names are the one field marspot also writes into a Claude session's
-//! record (`rename_foreign`): every session is addressed by the name of
-//! its marspot pane.  Claude Code reads a name whose `nameSource` is
-//! `peer` as one somebody else gave the session, and its own updates to
-//! the record merge into what is on disk, so the name stays until the
-//! session renames itself.
+//! A Claude session's own record is never written, with one exception:
+//! `restore_foreign` undoes the renames an earlier marspot made there.
 
 use std::fs;
 use std::io;
@@ -199,44 +195,34 @@ pub fn write(dir: &Path, rec: &Record, now_ms: i64) -> io::Result<()> {
     fs::rename(&tmp, record_path(dir, rec.pid))
 }
 
-/// Give a Claude session's record the name `name`, keeping the name it
-/// had among its former names.  Only the name fields are written; the
-/// rest of the record is written back as it was read.  Returns the old
-/// name when it changed.  A record that is ours, or that is not the
-/// one for `pid`, is left alone.
-pub fn rename_foreign(dir: &Path, pid: i32, name: &str, now_ms: i64) -> io::Result<Option<String>> {
-    let path = record_path(dir, pid);
-    let text = fs::read_to_string(&path)?;
-    let Ok(mut v) = json::parse(&text) else { return Ok(None) };
-    if v.str_at("entrypoint") == Some(MARKER) || v.get("pid").and_then(Value::i64) != Some(i64::from(pid)) {
-        return Ok(None);
+/// Undo a rename an earlier marspot made in a Claude session's own
+/// record (`nameSource` `peer`, the old name first among the former
+/// names): marspot keeps pane names in a table of its own now, and a
+/// session should be called what it calls itself.  Returns the pids put
+/// back, with the names they got.
+pub fn restore_foreign(dir: &Path, now_ms: i64) -> Vec<(i32, String)> {
+    let mut out = Vec::new();
+    for e in read_all(dir).into_iter().filter(|e| !e.ours) {
+        let path = record_path(dir, e.pid);
+        let Some(mut v) = fs::read_to_string(&path).ok().and_then(|t| json::parse(&t).ok()) else { continue };
+        if v.str_at("nameSource") != Some("peer") {
+            continue;
+        }
+        let former = v.get("formerNames").map_or(&[][..], Value::arr).to_vec();
+        let Some(old) = former.first().and_then(|f| f.str_at("name")).map(str::to_string) else { continue };
+        // `<dir>-<2 hex>` is the name Claude Code derives; anything
+        // else was given, by `/rename` or at launch
+        let derived = old.rsplit_once('-').is_some_and(|(_, t)| t.len() == 2 && t.bytes().all(|b| b.is_ascii_hexdigit()));
+        v.set("name", Value::from(old.as_str()));
+        v.set("nameSource", Value::from(if derived { "derived" } else { "user" }));
+        v.set("nameSince", Value::from(now_ms));
+        v.set("formerNames", Value::Arr(former[1..].to_vec()));
+        let tmp = dir.join(format!(".marspot-restore-{}.json.tmp", e.pid));
+        if fs::write(&tmp, v.to_json()).and_then(|()| fs::rename(&tmp, &path)).is_ok() {
+            out.push((e.pid, old));
+        }
     }
-    let old = v.str_at("name").unwrap_or_default().to_string();
-    if old == name {
-        return Ok(None);
-    }
-    let session = v.str_at("sessionId").unwrap_or_default().to_string();
-    let mut former: Vec<FormerName> = v
-        .get("formerNames")
-        .map_or(&[][..], Value::arr)
-        .iter()
-        .filter_map(|f| {
-            Some(FormerName {
-                name: f.str_at("name")?.to_string(),
-                until_ms: f.get("until").and_then(Value::i64).unwrap_or(0),
-                session_id: f.str_at("sessionId").unwrap_or_default().to_string(),
-            })
-        })
-        .collect();
-    push_former(&mut former, FormerName { name: old.clone(), until_ms: now_ms, session_id: session }, name);
-    v.set("name", Value::from(name));
-    v.set("nameSource", Value::from("peer"));
-    v.set("nameSince", Value::from(now_ms));
-    v.set("formerNames", Value::Arr(former.iter().map(FormerName::to_value).collect()));
-    let tmp = dir.join(format!(".marspot-rename-{pid}.json.tmp"));
-    fs::write(&tmp, v.to_json())?;
-    fs::rename(&tmp, &path)?;
-    Ok(Some(old))
+    out
 }
 
 /// Remove the record for `pid` if it is ours.  A record that a Claude
@@ -447,41 +433,27 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A Claude record is renamed in place: every other field, and the
-    /// order of the fields, is what Claude Code wrote.
+    /// A rename an earlier marspot made is undone in place: the old
+    /// name back, every other field as Claude Code wrote it.
     #[test]
-    fn a_foreign_rename_touches_only_the_name_fields() {
-        let dir = tmpdir("rename");
-        let theirs = r#"{"pid":7,"sessionId":"s1","cwd":"/w/spg","startedAt":1792674965957,"procStart":"x","peerFeatures":["notify_idle"],"entrypoint":"cli","messagingSocketPath":"/tmp/cc-socks/7.sock","name":"spg-6a","nameSource":"derived","nameSince":1,"status":"busy"}"#;
-        fs::write(record_path(&dir, 7), theirs).unwrap();
-        assert_eq!(rename_foreign(&dir, 7, "spg#2", 100).unwrap().as_deref(), Some("spg-6a"));
+    fn an_earlier_rename_is_undone() {
+        let dir = tmpdir("restore");
+        let renamed = r#"{"pid":7,"sessionId":"s1","procStart":"x","entrypoint":"cli","name":"spg","nameSource":"peer","nameSince":5,"formerNames":[{"name":"spg-6a","until":5,"sessionId":"s1"}],"status":"busy"}"#;
+        fs::write(record_path(&dir, 7), renamed).unwrap();
+        let given = r#"{"pid":8,"entrypoint":"cli","name":"x","nameSource":"peer","formerNames":[{"name":"my-review","until":1}]}"#;
+        fs::write(record_path(&dir, 8), given).unwrap();
+        let own = r#"{"pid":9,"entrypoint":"cli","name":"luna-1a","nameSource":"derived"}"#;
+        fs::write(record_path(&dir, 9), own).unwrap();
+        let mut back = restore_foreign(&dir, 100);
+        back.sort();
+        assert_eq!(back, vec![(7, "spg-6a".to_string()), (8, "my-review".to_string())]);
         let v = json::parse(&fs::read_to_string(record_path(&dir, 7)).unwrap()).unwrap();
-        assert_eq!(v.str_at("name"), Some("spg#2"));
-        assert_eq!(v.str_at("nameSource"), Some("peer"));
-        assert_eq!(v.str_at("status"), Some("busy"));
-        assert_eq!(v.get("startedAt").and_then(Value::i64), Some(1792674965957));
-        let Value::Obj(kv) = &v else { panic!() };
-        assert_eq!(kv[0].0, "pid", "fields keep their order");
-        let e = read_entry(&record_path(&dir, 7), 7).unwrap();
-        assert!(e.answers_to("spg#2") && e.answers_to("spg-6a"));
-        assert!(e.supports("notify_idle"));
-        // unchanged name: no write
-        assert_eq!(rename_foreign(&dir, 7, "spg#2", 200).unwrap(), None);
-        // back to the first name: it leaves the former names
-        rename_foreign(&dir, 7, "spg-6a", 300).unwrap();
-        let e = read_entry(&record_path(&dir, 7), 7).unwrap();
-        assert_eq!(e.former_names, vec!["spg#2".to_string()]);
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn our_own_records_and_mismatched_pids_are_not_renamed() {
-        let dir = tmpdir("rename-no");
-        let me = std::process::id() as i32;
-        write(&dir, &record(me), 2).unwrap();
-        assert_eq!(rename_foreign(&dir, me, "y", 3).unwrap(), None);
-        fs::write(record_path(&dir, 8), r#"{"pid":9,"entrypoint":"cli","name":"a"}"#).unwrap();
-        assert_eq!(rename_foreign(&dir, 8, "y", 3).unwrap(), None);
+        assert_eq!((v.str_at("name"), v.str_at("nameSource"), v.str_at("status")), (Some("spg-6a"), Some("derived"), Some("busy")));
+        assert!(v.get("formerNames").unwrap().arr().is_empty());
+        let v = json::parse(&fs::read_to_string(record_path(&dir, 8)).unwrap()).unwrap();
+        assert_eq!(v.str_at("nameSource"), Some("user"));
+        assert_eq!(fs::read_to_string(record_path(&dir, 9)).unwrap(), own, "a session's own name is not touched");
+        assert!(restore_foreign(&dir, 200).is_empty(), "and once is enough");
         fs::remove_dir_all(&dir).unwrap();
     }
 

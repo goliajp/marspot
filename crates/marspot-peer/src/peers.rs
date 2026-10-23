@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use crate::envelope::{self, Header, Mode};
 use crate::frame::{self, Priority};
+use crate::panes::{self, Pane};
 use crate::registry::{self, Entry};
 
 /// Longest message body, in characters; the receiver's own cap.
@@ -41,12 +42,16 @@ pub fn me_by_thread<'a>(entries: &'a [Entry], thread: &str) -> Result<&'a Entry,
     }
 }
 
-/// The inbox `to` means: a `uds:` address, a session's name, or a name
-/// it had.  A current name wins over a former one, so a name that has
-/// moved to another pane reaches that pane.
-pub fn resolve<'a>(entries: &'a [Entry], to: &str) -> Result<(String, Option<&'a Entry>), String> {
+/// The inbox `to` means: a `uds:` address, the name of a marspot pane,
+/// a session's own name, or a name it had.  A pane name wins: it is the
+/// name the user sees.  A current name wins over a former one, so a
+/// name that has moved to another pane reaches that pane.
+pub fn resolve<'a>(entries: &'a [Entry], panes: &[Pane], to: &str) -> Result<(String, Option<&'a Entry>), String> {
     if let Some(path) = to.strip_prefix("uds:") {
         return Ok((path.to_string(), entries.iter().find(|e| e.socket.as_deref() == Some(path))));
+    }
+    if let Some(p) = panes::find(panes, to)? {
+        return Ok((p.socket.clone(), entries.iter().find(|e| e.pid == p.pid)));
     }
     let current: Vec<&Entry> = entries.iter().filter(|e| e.name.as_deref() == Some(to)).collect();
     let hits = if current.is_empty() { entries.iter().filter(|e| e.answers_to(to)).collect() } else { current };
@@ -76,7 +81,7 @@ pub struct Sent {
 /// Send `body` from `me` to `to`.  With `notify_idle`, also ask the
 /// recipient for one notice when it next goes idle.  An empty body with
 /// `notify_idle` is a subscription alone.
-pub fn send(me: &Entry, entries: &[Entry], to: &str, body: &str, priority: Priority, notify_idle: bool) -> Result<Sent, String> {
+pub fn send(me: &Entry, entries: &[Entry], panes: &[Pane], to: &str, body: &str, priority: Priority, notify_idle: bool) -> Result<Sent, String> {
     if body.trim().is_empty() && !notify_idle {
         return Err("empty message".into());
     }
@@ -84,11 +89,11 @@ pub fn send(me: &Entry, entries: &[Entry], to: &str, body: &str, priority: Prior
         return Err(format!("message longer than {MAX_BODY} characters"));
     }
     let my_socket = me.socket.clone().unwrap_or_default();
-    let (target, entry) = resolve(entries, to)?;
+    let (target, entry) = resolve(entries, panes, to)?;
     if target == my_socket {
         return Err("that address is this session's own inbox".into());
     }
-    let name = entry.and_then(|e| e.name.clone()).unwrap_or_else(|| to.to_string());
+    let name = entry.map(|e| display_name(e, panes)).unwrap_or_else(|| to.to_string());
     let from = format!("uds:{my_socket}");
     // a record without a class is reported as prompting: claiming
     // bypass for a session we cannot vouch for would get it delivered
@@ -96,7 +101,7 @@ pub fn send(me: &Entry, entries: &[Entry], to: &str, body: &str, priority: Prior
     let mode = me.class.unwrap_or(Mode::Prompting);
     let msg_id = crate::rand::uuid_v4();
     if !body.trim().is_empty() {
-        let header = Header { from: from.clone(), from_name: me.name.clone(), from_mode: Some(mode) };
+        let header = Header { from: from.clone(), from_name: Some(display_name(me, panes)), from_mode: Some(mode) };
         let content = envelope::encode(&header, body);
         write_line(me.relay.as_deref(), &target, &name, &frame::user_line(&content, &from, priority, &msg_id))?;
     }
@@ -123,26 +128,39 @@ fn write_line(relay: Option<&str>, target: &str, name: &str, line: &str) -> Resu
     s.write_all(line.as_bytes()).map_err(|e| format!("cannot write to {name}: {e}"))
 }
 
+/// What a session is called here: its pane's name when it is in a
+/// marspot pane, its own name otherwise.
+pub fn display_name(e: &Entry, panes: &[Pane]) -> String {
+    panes::of_pid(panes, e.pid)
+        .map(|p| p.name.clone())
+        .or_else(|| e.name.clone())
+        .unwrap_or_else(|| "?".into())
+}
+
 /// The session list in the shape Claude Code's `ListAgents` prints, so
-/// a model reads the same thing in either tool.
-pub fn listing(entries: &[Entry], me: Option<&Entry>, now_ms: i64) -> String {
+/// a model reads the same thing in either tool.  A session in a pane is
+/// listed by the pane's name, with its own name after it when the two
+/// differ.
+pub fn listing(entries: &[Entry], panes: &[Pane], me: Option<&Entry>, now_ms: i64) -> String {
     let mut out = String::new();
-    if let Some(name) = me.and_then(|m| m.name.as_deref()) {
+    if let Some(m) = me {
         out.push_str(&format!(
-            "This session is {name} — the name other sessions use to message it (it is not listed below; a message to it would be a message to yourself).\n\n"
+            "This session is {} — the name other sessions use to message it (it is not listed below; a message to it would be a message to yourself).\n\n",
+            display_name(m, panes)
         ));
     }
     let peers: Vec<&Entry> = entries.iter().filter(|e| me.is_none_or(|m| m.pid != e.pid)).collect();
+    let names: Vec<String> = peers.iter().map(|e| display_name(e, panes)).collect();
     out.push_str(&format!("Peer sessions ({}):\n", peers.len()));
-    for e in &peers {
-        let name = e.name.as_deref().unwrap_or("?");
-        let shared = peers.iter().filter(|o| o.name.as_deref() == Some(name)).count() > 1;
+    for (e, name) in peers.iter().zip(&names) {
+        let own = e.name.as_deref().filter(|n| n != name).map(|n| format!("  ·  session {n}")).unwrap_or_default();
+        let shared = names.iter().filter(|n| *n == name).count() > 1;
         let addr = match (&e.socket, shared) {
             (Some(s), true) => format!("  ·  uds:{s}"),
             _ => String::new(),
         };
         let started = e.started_at_ms.map(|t| format!("  ·  started {}", ago(now_ms - t))).unwrap_or_default();
-        out.push_str(&format!("  {name}  ·  interactive  ·  {}{started}{addr}\n", e.status.as_deref().unwrap_or("?")));
+        out.push_str(&format!("  {name}  ·  interactive  ·  {}{started}{own}{addr}\n", e.status.as_deref().unwrap_or("?")));
     }
     out
 }
@@ -184,21 +202,34 @@ mod tests {
     #[test]
     fn names_former_names_and_addresses_resolve() {
         let es = vec![entry(1, "gds", &["codex-gds"]), entry(2, "spg#1", &["spg"]), entry(3, "spg", &[])];
-        assert_eq!(resolve(&es, "gds").unwrap().0, "/tmp/cc-socks/1.sock");
-        assert_eq!(resolve(&es, "codex-gds").unwrap().0, "/tmp/cc-socks/1.sock");
+        assert_eq!(resolve(&es, &[], "gds").unwrap().0, "/tmp/cc-socks/1.sock");
+        assert_eq!(resolve(&es, &[], "codex-gds").unwrap().0, "/tmp/cc-socks/1.sock");
         // `spg` is a current name of 3 and a former one of 2: the current wins
-        assert_eq!(resolve(&es, "spg").unwrap().0, "/tmp/cc-socks/3.sock");
-        assert_eq!(resolve(&es, "uds:/tmp/cc-socks/2.sock").unwrap().1.map(|e| e.pid), Some(2));
-        assert!(resolve(&es, "nobody").is_err());
+        assert_eq!(resolve(&es, &[], "spg").unwrap().0, "/tmp/cc-socks/3.sock");
+        assert_eq!(resolve(&es, &[], "uds:/tmp/cc-socks/2.sock").unwrap().1.map(|e| e.pid), Some(2));
+        assert!(resolve(&es, &[], "nobody").is_err());
         let twins = vec![entry(1, "x", &[]), entry(2, "x", &[])];
-        let err = resolve(&twins, "x").unwrap_err();
+        let err = resolve(&twins, &[], "x").unwrap_err();
         assert!(err.contains("uds:/tmp/cc-socks/1.sock") && err.contains("uds:/tmp/cc-socks/2.sock"));
+    }
+
+    /// A pane's name reaches the session in it, and wins over a session
+    /// that happens to call itself the same.
+    #[test]
+    fn a_pane_name_wins() {
+        let es = vec![entry(1, "inputx-6a", &[]), entry(2, "inputx", &[])];
+        let panes = vec![Pane { name: "inputx".into(), pid: 1, socket: "/tmp/cc-socks/1.sock".into() }];
+        let (sock, e) = resolve(&es, &panes, "inputx").unwrap();
+        assert_eq!((sock.as_str(), e.map(|e| e.pid)), ("/tmp/cc-socks/1.sock", Some(1)));
+        assert_eq!(resolve(&es, &panes, "inputx-6a").unwrap().0, "/tmp/cc-socks/1.sock", "its own name still works");
+        let text = listing(&es, &panes, None, 0);
+        assert!(text.contains("  inputx  ·  interactive  ·  idle  ·  started 1m ago  ·  session inputx-6a"), "{text}");
     }
 
     #[test]
     fn the_listing_reads_like_claude_codes() {
         let es = vec![entry(1, "gds", &[]), entry(2, "luna", &[]), entry(3, "luna", &[])];
-        let text = listing(&es, Some(&es[0]), 26 * 60 * 1000);
+        let text = listing(&es, &[], Some(&es[0]), 26 * 60 * 1000);
         assert!(text.starts_with("This session is gds — "));
         assert!(text.contains("Peer sessions (2):\n"));
         assert!(text.contains("  luna  ·  interactive  ·  idle  ·  started 26m ago  ·  uds:/tmp/cc-socks/2.sock\n"));

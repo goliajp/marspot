@@ -18,6 +18,7 @@ use super::bind::{self, Pane};
 use super::deliver::Rate;
 use super::inbox::Inbox;
 use super::idle::send_notices;
+use super::records::private_dir;
 use super::worker::{is_inbox_name, now_ms, write_record, Binding, Worker, RETRY_MIN};
 
 impl Worker {
@@ -261,27 +262,6 @@ impl Worker {
         }
     }
 
-    /// Claude Code checks that a reply address is in the same directory
-    /// as its own socket, so the inbox goes where live Claude sessions
-    /// put theirs.
-    pub(super) fn sock_dir(&mut self) -> std::io::Result<PathBuf> {
-        if let Some(d) = &self.sock_dir {
-            return Ok(d.clone());
-        }
-        let from_claude = registry::default_dirs()
-            .iter()
-            .flat_map(|d| registry::list_live(d))
-            .filter(|e| !e.ours)
-            .find_map(|e| e.socket.and_then(|s| Path::new(&s).parent().map(Path::to_path_buf)));
-        let dir = from_claude.unwrap_or_else(|| PathBuf::from("/tmp/cc-socks"));
-        if !dir.exists() {
-            use std::os::unix::fs::DirBuilderExt;
-            std::fs::DirBuilder::new().mode(0o700).recursive(true).create(&dir)?;
-        }
-        self.sock_dir = Some(dir.clone());
-        Ok(dir)
-    }
-
     /// Records a previous run of this marspot left (an execv'd shell
     /// does not stop its plugins), and their dead sockets.
     pub(super) fn clear_leftovers(&mut self) {
@@ -292,6 +272,13 @@ impl Worker {
                 }
             }
             registry::sweep_ours(&d);
+        }
+        // an earlier marspot renamed Claude sessions in their own
+        // records; their names are their own again
+        for d in registry::default_dirs() {
+            for (pid, name) in registry::restore_foreign(&d, now_ms()) {
+                lx_info!("peerbus.names.restored", "claude session has its own name back", pid = pid, name = name);
+            }
         }
         // the private sockets are this marspot's alone
         if let Ok(rd) = private_dir().and_then(std::fs::read_dir) {
@@ -312,13 +299,6 @@ impl Worker {
             c.tx.shutdown();
         }
         self.conns.clear();
+        marspot_peer::panes::remove(&self.owner);
     }
-}
-
-/// Where this marspot keeps the sockets its relays talk to it on.
-fn private_dir() -> std::io::Result<PathBuf> {
-    use std::os::unix::fs::DirBuilderExt;
-    let dir = marspot_term::paths::state_root().join("peerbus");
-    std::fs::DirBuilder::new().mode(0o700).recursive(true).create(&dir)?;
-    Ok(dir)
 }
