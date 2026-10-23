@@ -14,7 +14,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use marspot::pidtree;
 use marspot_peer::envelope::Mode;
@@ -27,6 +27,7 @@ use marspot_term::{lx_info, lx_warn};
 use super::bind::Unbound;
 use super::deliver::{self, Rate};
 use super::inbox::Inbox;
+pub(super) use super::records::{is_inbox_name, now_ms, write_record};
 
 pub(super) const CHANNEL: usize = 256;
 pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -37,6 +38,8 @@ pub(super) const RETRY_MIN: Duration = Duration::from_secs(2);
 /// How often names are checked against the panes.  A file listing and
 /// one small read per agent; a rename shows up this late at worst.
 const NAMES_EVERY: Duration = Duration::from_secs(10);
+/// The Claude Code hooks are checked every this many names passes.
+const HOOKS_EVERY_PASSES: u64 = 6;
 
 pub(super) const RETRY_MAX: Duration = Duration::from_secs(60);
 /// Streaming notifications this client has no use for.  Without the
@@ -128,6 +131,9 @@ pub(crate) struct Worker {
     pub(super) idle_checks: Vec<(u64, Instant)>,
     /// Panes running two agents, logged once each.
     pub(super) crowded: HashSet<u64>,
+    pub(super) names_passes: u64,
+    /// The pane names last written (`names`).
+    pub(super) pane_table: Vec<marspot_peer::panes::Pane>,
 }
 
 impl Worker {
@@ -149,11 +155,14 @@ impl Worker {
             names_at: Instant::now(),
             idle_checks: Vec::new(),
             crowded: HashSet::new(),
+            pane_table: Vec::new(),
+            names_passes: 0,
         }
     }
 
     pub fn run(mut self) {
         self.clear_leftovers();
+        self.reconcile_hooks();
         loop {
             let ev = match self.stash.pop_front() {
                 Some(e) => e,
@@ -174,6 +183,12 @@ impl Worker {
                             if self.names_at <= now {
                                 self.names_at = now + NAMES_EVERY;
                                 self.rename_pass();
+                                self.names_passes += 1;
+                                // Claude Code rewrites its settings on a
+                                // `/config` change; look again now and then
+                                if self.names_passes.is_multiple_of(HOOKS_EVERY_PASSES) {
+                                    self.reconcile_hooks();
+                                }
                             }
                             continue;
                         }
@@ -329,25 +344,6 @@ fn status_of(s: &Value) -> Option<Status> {
     }
 }
 
-pub(super) fn write_record(dirs: &[PathBuf], r: &Record) {
-    for d in dirs {
-        if let Err(e) = registry::write(d, r, now_ms()) {
-            lx_warn!("peerbus.registry.write_failed", &e.to_string(), dir = d.display().to_string());
-        }
-    }
-}
-
-/// `<pid>-<8 hex>.sock`: only files of this shape are ours to delete.
-pub(super) fn is_inbox_name(path: &str) -> bool {
-    let Some(name) = Path::new(path).file_name().and_then(|n| n.to_str()) else { return false };
-    let Some((pid, rest)) = name.strip_suffix(".sock").and_then(|r| r.split_once('-')) else { return false };
-    !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) && rest.len() == 8 && rest.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-pub(super) fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,11 +357,4 @@ mod tests {
         assert_eq!(status_of(&parse(r#"{"type":"systemError"}"#).unwrap()), None);
     }
 
-    #[test]
-    fn only_inbox_shaped_names_are_deleted() {
-        assert!(is_inbox_name("/tmp/cc-socks/42-0a1b2c3d.sock"));
-        assert!(!is_inbox_name("/tmp/cc-socks/42.sock"));
-        assert!(!is_inbox_name("/tmp/cc-socks/x42-0a1b2c3d.sock"));
-        assert!(!is_inbox_name("/tmp/cc-socks/42-0a1b2c3dx.sock"));
-    }
 }
