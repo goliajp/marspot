@@ -1,15 +1,17 @@
 //! Every agent session in a marspot pane is addressed by that pane's
-//! name — the one drawn on the pane (`spg`, `spg#2`) — whether it is a
-//! Codex session marspot keeps the record for or a Claude session that
-//! keeps its own.  Names follow the panes: a `cd`, or a second pane
-//! opening in the same directory, renames the sessions in them, and
-//! the name a session had stays among its former names.
+//! name -- the one drawn on the pane (`spg`, `spg#2`) -- whether it is
+//! a Codex session or a Claude one.  The names live in a table marspot
+//! writes (`marspot_peer::panes`), read by the Codex MCP tools and the
+//! Claude Code hooks; no session's own record is renamed.  The Codex
+//! records are marspot's own, so they carry the pane's name too, and
+//! the name a Codex session had stays among its former names.
 //!
 //! A pane running two agents (one started inside the other) would give
-//! both the same name, so such a pane renames neither.
+//! both the same name, so such a pane is left out of the table.
 
 use std::collections::{HashMap, HashSet};
 
+use marspot_peer::panes::{self, Pane, Table};
 use marspot_peer::registry::{self, FormerName};
 use marspot_term::{lx_info, lx_warn};
 
@@ -36,9 +38,8 @@ impl Panes {
     }
 }
 
-/// Which records to rename: `(pane, pid)` pairs for the Claude
-/// sessions, and whether each pane holds exactly one agent.  Pure, for
-/// the tests.
+/// Which Claude sessions go in the table: `(pane, pid)` pairs, and the
+/// panes holding more than one agent.  Pure, for the tests.
 pub(super) fn plan(claude_pids: &[i32], codex_panes: &[u64], pane_of: impl Fn(i32) -> Option<u64>) -> (Vec<(u64, i32)>, HashSet<u64>) {
     let claude: Vec<(u64, i32)> = claude_pids.iter().filter_map(|&pid| pane_of(pid).map(|sid| (sid, pid))).collect();
     let mut count: HashMap<u64, usize> = HashMap::new();
@@ -53,48 +54,43 @@ pub(super) fn plan(claude_pids: &[i32], codex_panes: &[u64], pane_of: impl Fn(i3
 }
 
 impl Worker {
-    /// Bring every name in line with its pane.
+    /// Bring every name in line with its pane: the table, and the Codex
+    /// records.
     pub(super) fn rename_pass(&mut self) {
-        let panes = Panes::look();
+        let look = Panes::look();
         let dirs = registry::default_dirs();
         let mut claude: Vec<(i32, Option<String>)> = Vec::new();
         for d in &dirs {
             for e in registry::list_live(d) {
                 if !e.ours && !claude.iter().any(|(p, _)| *p == e.pid) {
-                    claude.push((e.pid, e.name));
+                    claude.push((e.pid, e.socket));
                 }
             }
         }
         let pids: Vec<i32> = claude.iter().map(|(p, _)| *p).collect();
         let codex: Vec<u64> = self.bindings.keys().copied().collect();
-        let (rename, crowded) = plan(&pids, &codex, |pid| panes.pane_of(pid));
+        let (named, crowded) = plan(&pids, &codex, |pid| look.pane_of(pid));
         for sid in &crowded {
             if self.crowded.insert(*sid) {
-                lx_info!("peerbus.names.crowded", "a pane runs two agents; neither is renamed", sid = *sid);
+                lx_info!("peerbus.names.crowded", "a pane runs two agents; it is left out of the names", sid = *sid);
             }
         }
         self.crowded.retain(|sid| crowded.contains(sid));
         let now = now_ms();
 
-        for (sid, pid) in rename {
-            let Some(want) = panes.names.get(&sid) else { continue };
-            if claude.iter().any(|(p, n)| *p == pid && n.as_deref() == Some(want.as_str())) {
+        let mut table: Vec<Pane> = Vec::new();
+        for (sid, pid) in named {
+            let (Some(name), Some((_, Some(socket)))) = (look.names.get(&sid), claude.iter().find(|(p, _)| *p == pid)) else {
                 continue;
-            }
-            for d in dirs.iter().filter(|d| registry::record_path(d, pid).exists()) {
-                match registry::rename_foreign(d, pid, want, now) {
-                    Ok(Some(old)) => lx_info!("peerbus.names.claude", "claude session renamed after its pane", sid = sid, pid = pid, old = old, new = want.clone()),
-                    Ok(None) => {}
-                    Err(e) => lx_warn!("peerbus.names.write_failed", &e.to_string(), pid = pid),
-                }
-            }
+            };
+            table.push(Pane { name: name.clone(), pid, socket: socket.clone() });
         }
-
         for (sid, b) in self.bindings.iter_mut() {
             if crowded.contains(sid) {
                 continue;
             }
-            let Some(want) = panes.names.get(sid) else { continue };
+            let Some(want) = look.names.get(sid) else { continue };
+            table.push(Pane { name: want.clone(), pid: b.record.pid, socket: b.record.socket.clone() });
             if b.record.name == *want {
                 continue;
             }
@@ -104,6 +100,23 @@ impl Worker {
             b.record.name = want.clone();
             b.record.name_since_ms = now;
             write_record(&dirs, &b.record);
+        }
+        table.sort_by(|a, b| (&a.name, a.pid).cmp(&(&b.name, b.pid)));
+        if table != self.pane_table {
+            self.write_pane_table(&table);
+        }
+    }
+
+    fn write_pane_table(&mut self, table: &[Pane]) {
+        let me = std::process::id() as i32;
+        let Some(proc_start) = marspot_peer::proc::lstart(me) else { return };
+        let t = Table { owner: self.owner.clone(), pid: me, proc_start, panes: table.to_vec() };
+        match panes::write(&t) {
+            Ok(()) => {
+                lx_info!("peerbus.names.table", "pane names written", panes = table.len());
+                self.pane_table = table.to_vec();
+            }
+            Err(e) => lx_warn!("peerbus.names.write_failed", &e.to_string()),
         }
     }
 }
