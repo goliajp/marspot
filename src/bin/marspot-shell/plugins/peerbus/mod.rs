@@ -12,12 +12,14 @@
 //! touches a socket, a file or a daemon happens on the worker thread.
 
 mod bind;
+mod claude_hooks;
 mod daemon;
 mod deliver;
 mod idle;
 mod inbox;
 mod lifecycle;
 mod names;
+mod records;
 #[cfg(test)]
 mod live_tests;
 mod worker;

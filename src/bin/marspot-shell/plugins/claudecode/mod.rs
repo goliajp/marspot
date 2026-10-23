@@ -41,6 +41,8 @@ use argv::argv_session_uuid;
 #[cfg(test)]
 use argv::{flag_uuid, is_uuid};
 pub use statusline::statusline_ingest;
+// the settings-file plumbing the peerbus hooks share with the status line
+pub(crate) use statusline::{cc_settings_files, sh_quote, write_through_symlink};
 use idle::*;
 use model::*;
 use statusline::*;

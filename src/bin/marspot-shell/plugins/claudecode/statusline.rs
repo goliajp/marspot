@@ -258,7 +258,7 @@ pub(super) const MIN_HOOK_SHELL: (u32, u32, u32) = (0, 7, 116);
 /// The profile directories commonly symlink one shared file;
 /// canonicalising means it is read and written once rather than once
 /// per profile.
-pub(super) fn cc_settings_files() -> Vec<PathBuf> {
+pub(crate) fn cc_settings_files() -> Vec<PathBuf> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Vec::new();
     };
@@ -334,7 +334,7 @@ pub(super) fn shell_at_least(bin: &std::path::Path, min: (u32, u32, u32)) -> boo
 ///
 /// Needed because the state root's path contains a space
 /// ("Application Support"); unquoted, claude never invokes it at all.
-pub(super) fn sh_quote(s: &str) -> String {
+pub(crate) fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -636,7 +636,7 @@ pub(super) fn json_parses(text: &str) -> bool {
 /// renaming onto the link path would replace the link itself, so the
 /// caller passes the canonical path and the temp file is made beside
 /// it.
-pub(super) fn write_through_symlink(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+pub(crate) fn write_through_symlink(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(std::path::Path::new("."));
     let tmp = dir.join(format!(".marspot-settings-{}.tmp", std::process::id()));
     fs::write(&tmp, text)?;

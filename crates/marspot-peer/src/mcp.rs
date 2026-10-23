@@ -105,13 +105,14 @@ fn call(params: Option<&Value>, now_ms: i64) -> Value {
     let args = params.and_then(|p| p.get("arguments"));
     let thread = params.and_then(|p| p.at(&["_meta", "threadId"])).and_then(Value::str);
     let entries = peers::live_entries();
+    let panes = crate::panes::live(&entries);
     let me = thread.map(|t| peers::me_by_thread(&entries, t));
     let outcome = match params.and_then(|p| p.str_at("name")).unwrap_or_default() {
-        "ListAgents" => Ok(peers::listing(&entries, me.as_ref().and_then(|m| m.as_ref().ok().copied()), now_ms)),
+        "ListAgents" => Ok(peers::listing(&entries, &panes, me.as_ref().and_then(|m| m.as_ref().ok().copied()), now_ms)),
         "SendMessage" => match me {
             None => Err("the call carried no thread id, so the sending session is unknown and nothing was sent".to_string()),
             Some(Err(e)) => Err(e),
-            Some(Ok(me)) => send(me, &entries, args),
+            Some(Ok(me)) => send(me, &entries, &panes, args),
         },
         other => Err(format!("unknown tool {other:?}")),
     };
@@ -125,12 +126,12 @@ fn call(params: Option<&Value>, now_ms: i64) -> Value {
     ])
 }
 
-fn send(me: &crate::registry::Entry, entries: &[crate::registry::Entry], args: Option<&Value>) -> Result<String, String> {
+fn send(me: &crate::registry::Entry, entries: &[crate::registry::Entry], panes: &[crate::panes::Pane], args: Option<&Value>) -> Result<String, String> {
     let to = args.and_then(|a| a.str_at("to")).filter(|t| !t.trim().is_empty()).ok_or("`to` is required")?;
     let message = args.and_then(|a| a.str_at("message")).unwrap_or_default();
     let notify = args.and_then(|a| a.get("notify_when_idle")).and_then(Value::bool).unwrap_or(false);
     let label = args.and_then(|a| a.str_at("summary")).unwrap_or(to);
-    let sent = peers::send(me, entries, to, message, Priority::Next, notify)?;
+    let sent = peers::send(me, entries, panes, to, message, Priority::Next, notify)?;
     let mut text = if message.trim().is_empty() {
         format!("Nothing sent to {}", sent.to)
     } else {

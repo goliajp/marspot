@@ -7,13 +7,16 @@
 //! marspot-peer send [--now] <name | uds:address> <text… | ->
 //! marspot-peer mcp
 //! marspot-peer relay <inbox> <upstream> <send>
+//! marspot-peer claude-hook
 //! ```
 //!
 //! On the command line the sender is the Codex session this runs
 //! under, found by `CODEX_THREAD_ID` (Codex sets it for every command
 //! it runs).  `mcp` serves the same over stdio as MCP tools, where each
 //! call names its thread instead.  `relay` is started by marspot, one
-//! per Codex session (see `marspot_peer::relay`).
+//! per Codex session (see `marspot_peer::relay`).  `claude-hook` is the
+//! Claude Code hook that lets a Claude session use pane names
+//! (`marspot_peer::claude_hook`).
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -27,7 +30,8 @@ const USAGE: &str = "usage:
   marspot-peer whoami
   marspot-peer send [--now] <name | uds:address> <text... | ->
   marspot-peer mcp
-  marspot-peer relay <inbox> <upstream> <send>";
+  marspot-peer relay <inbox> <upstream> <send>
+  marspot-peer claude-hook";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -37,6 +41,17 @@ fn main() -> ExitCode {
         Some("send") => send(&args[1..]),
         Some("mcp") => {
             marspot_peer::mcp::serve(std::io::stdin().lock(), std::io::stdout().lock());
+            Ok(())
+        }
+        Some("claude-hook") => {
+            // a hook that fails must not get in the session's way: no
+            // answer leaves the call as it was
+            let mut input = String::new();
+            if std::io::stdin().read_to_string(&mut input).is_ok()
+                && let Some(out) = marspot_peer::claude_hook::answer(&input)
+            {
+                println!("{out}");
+            }
             Ok(())
         }
         Some("relay") => match &args[1..] {
@@ -73,8 +88,9 @@ fn me(entries: &[Entry]) -> Result<&Entry, Fail> {
 
 fn list() -> Result<(), Fail> {
     let entries = peers::live_entries();
+    let panes = marspot_peer::panes::live(&entries);
     let me = me(&entries).ok();
-    print!("{}", peers::listing(&entries, me, now_ms()));
+    print!("{}", peers::listing(&entries, &panes, me, now_ms()));
     Ok(())
 }
 
@@ -106,8 +122,9 @@ fn send(args: &[String]) -> Result<(), Fail> {
         words.join(" ")
     };
     let entries = peers::live_entries();
+    let panes = marspot_peer::panes::live(&entries);
     let me = me(&entries)?;
-    let sent = peers::send(me, &entries, to, &body, priority, false).map_err(|m| Fail::Msg(3, m))?;
+    let sent = peers::send(me, &entries, &panes, to, &body, priority, false).map_err(|m| Fail::Msg(3, m))?;
     println!("sent {} to {}", sent.msg_id, sent.to);
     Ok(())
 }

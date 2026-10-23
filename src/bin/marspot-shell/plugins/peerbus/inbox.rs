@@ -118,7 +118,7 @@ impl Inbox {
 
 /// The `marspot-peer` binary: `MARSPOT_PEER_BIN`, then `PATH`, then
 /// where `install-local` puts it.
-fn peer_bin() -> Option<PathBuf> {
+pub(super) fn peer_bin() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("MARSPOT_PEER_BIN") {
         return Some(PathBuf::from(p));
     }
