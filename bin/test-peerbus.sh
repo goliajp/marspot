@@ -11,10 +11,12 @@
 #     alone cannot settle -- Codex quit and reopened in the same pane
 #     while the thread it left is still loaded, and a second Codex in
 #     the same directory.  Each message appears on its own pane only;
-#   - names: every session is named after its pane (`proj`, then
-#     `proj#1` and `proj#2` once two panes share the directory), Codex
-#     sessions and a Claude-registered process alike, and Codex sends
-#     to another Codex by that name;
+#   - names: every session is addressed by its pane's name (`proj`,
+#     then `proj#1` and `proj#2` once two panes share the directory):
+#     Codex sessions are named so, a Claude-registered process keeps
+#     its own name and is found through marspot's pane table, Codex
+#     sends to another Codex by pane name, and the Claude Code hook
+#     turns a pane name into the right inbox;
 #   - idle notices: a subscription placed with a message comes back as
 #     one `peer_idle_notice` once the Codex session is idle again.
 #
@@ -318,15 +320,37 @@ for (( i = 0; i < 20; i++ )); do
   sleep 0.5
 done
 [[ -n "$FAKE_PID" ]] || fail "the stand-in Claude session never registered"
+pane_socket() { # pane name → the socket marspot's pane table gives it
+  python3 - "$REGISTRY" "$1" <<'PY'
+import glob, json, os, sys
+for p in glob.glob(os.path.join(sys.argv[1], ".marspot-panes-*.json")):
+    for e in json.load(open(p)).get("panes", []):
+        if e["name"] == sys.argv[2]:
+            print(e["socket"])
+PY
+}
+FAKE_SOCK="/tmp/cc-socks/e2e-fake-$FAKE_PID.sock"
 for (( i = 0; i < 50; i++ )); do
-  [[ "$(name_of_pid "$FAKE_PID" | cut -f1)" == "proj#2" ]] && break
+  [[ "$(pane_socket "proj#2")" == "$FAKE_SOCK" ]] && break
   sleep 0.5
 done
+[[ "$(pane_socket "proj#2")" == "$FAKE_SOCK" ]] || fail "the pane table does not send proj#2 to the Claude session in pane $P2: $(pane_socket "proj#2")"
 FAKE="$(name_of_pid "$FAKE_PID")"
-[[ "$(cut -f1 <<<"$FAKE")" == "proj#2" ]] || fail "the Claude session in pane $P2 was not renamed proj#2: $FAKE"
-[[ "$(cut -f2 <<<"$FAKE")" == fake-claude-6a ]] || fail "its own name is not kept among its former names: $FAKE"
-[[ "$(cut -f3 <<<"$FAKE")" == idle ]] || fail "renaming changed another field of its record: $FAKE"
-ok "a Claude session in pane $P2 is renamed proj#2, keeping its own name as a former one"
+[[ "$(cut -f1 <<<"$FAKE")" == fake-claude-6a ]] || fail "the Claude session's own record was renamed: $FAKE"
+ok "pane $P2 is proj#2 in marspot's pane table, and the Claude session there keeps its own name"
+
+# The Claude Code hook, given what Claude Code gives it.
+HOOK_OUT="$(printf '{"hook_event_name":"PreToolUse","tool_name":"SendMessage","session_id":"x","tool_input":{"to":"proj#1","message":"hi"}}' \
+  | "$SB/bin/marspot-peer" claude-hook)"
+want="uds:$(cut -f4 <<<"$(record_of_pane "$P1")")"
+[[ "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["hookSpecificOutput"]["updatedInput"]["to"])' "$HOOK_OUT")" == "$want" ]] \
+  || fail "the SendMessage hook did not turn proj#1 into $want: $HOOK_OUT"
+SID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sessionId"])' "$REGISTRY/$FAKE_PID.json")"
+CTX="$(printf '{"hook_event_name":"PostToolUse","tool_name":"ListAgents","session_id":"%s","tool_input":{}}' "$SID" \
+  | "$SB/bin/marspot-peer" claude-hook)"
+grep -qF 'proj#1 → Codex session' <<<"$CTX" && grep -qF 'proj#2 → this session' <<<"$CTX" \
+  || fail "the ListAgents hook did not name the panes: $CTX"
+ok "the Claude Code hooks send proj#1 to pane $P1's inbox and list the pane names"
 
 # ── 3. marspot killed, then started again ────────────────────────
 #
