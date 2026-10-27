@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.251"  # pane names are a table marspot keeps; claude code reaches them through hooks, and claude records keep their own names
-core    = "0.12.291"  # a fallback font met at one size is no longer reused at another: cjk text stops drawing a size too big
+shell   = "0.7.252"  # codex panes follow codex updates: the cli is installed when its daemon moves past it, and an idle pane on an older cli is resumed on the new one
+core    = "0.12.292"  # settings know codex.follow_updates
 session = "0.11.153"  # publishes the window title beside the frame

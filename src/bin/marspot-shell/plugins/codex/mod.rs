@@ -16,7 +16,10 @@
 
 mod badge;
 mod pane;
+mod hand_off;
+mod refresh;
 mod rollout;
+mod update;
 
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata,
             PLUGIN_API_VERSION};
@@ -56,6 +59,10 @@ pub struct CodexPlugin {
     panes: std::collections::HashMap<u64, PaneCodex>,
     /// `CODEX_HOME` of each codex process, read once per process.
     env: crate::observe::EnvCache,
+    follower: update::Follower,
+    refresher: update::Refresher,
+    /// The pane with the cursor; None until marspot has said.
+    focused: Option<u64>,
 }
 
 impl CodexPlugin {
@@ -66,38 +73,9 @@ impl CodexPlugin {
             rollouts: RolloutIndex::default(),
             panes: std::collections::HashMap::new(),
             env: crate::observe::EnvCache::default(),
-        }
-    }
-}
-
-impl CodexPlugin {
-    /// Move this pane's conversation to claude profile `n` (RFC-009).
-    fn hand_off(&mut self, host: &dyn PluginHost, sid: u64, n: u8) {
-        let Some(pane) = self.panes.get(&sid).cloned() else {
-            host.log(LogLevel::Warn, "handoff.no_codex", &format!("pane {sid}: no codex to hand off from"));
-            return;
-        };
-        let Some((_, dir)) = handoff::profiles(handoff::Agent::Claude).into_iter().find(|(p, _)| *p == n) else {
-            host.log(LogLevel::Warn, "handoff.profile_gone", &format!("claude profile {n} no longer exists"));
-            return;
-        };
-        let pid = pane.codex.pid;
-        let Some(home) = home_of(pid) else { return };
-        let leaving = handoff::Leaving {
-            agent: handoff::Agent::Codex,
-            proc: pane.codex,
-            shell_pid: pane.shell_pid,
-            home,
-            session_id: argv_thread_id(pid),
-            cwd: pidtree::proc_cwd(pid).map(|c| c.to_string_lossy().into_owned()),
-        };
-        host.log(LogLevel::Info, "handoff.start", &format!("pane {sid} codex → claude P{n}: {leaving:?}"));
-        let Some(op) = handoff::switch_op(sid, leaving, handoff::Agent::Claude, n, dir) else {
-            host.log(LogLevel::Warn, "handoff.no_command", &format!("pane {sid}: cannot build the claude line"));
-            return;
-        };
-        if let Err(e) = host.submit_pty_op(sid, op) {
-            host.log(LogLevel::Warn, "handoff.submit_failed", &format!("pane {sid}: {e}"));
+            follower: update::Follower::default(),
+            refresher: update::Refresher::default(),
+            focused: None,
         }
     }
 }
@@ -123,6 +101,10 @@ impl Plugin for CodexPlugin {
     fn init(&mut self, _host: &dyn PluginHost) -> Result<(), PluginError> {
         self.initialised = true;
         Ok(())
+    }
+
+    fn on_pane_focused(&mut self, _host: &dyn PluginHost, shelld_session_id: u64) {
+        self.focused = Some(shelld_session_id);
     }
 
     /// Right-click on the badge: pick the account profile.
@@ -237,7 +219,12 @@ impl Plugin for CodexPlugin {
         // codex anywhere and none left to clear there is nothing to do.
         let obs = crate::observe::shared().latest();
         self.env.prune(&obs);
+        // the CLI follows the daemon whether or not a pane runs codex
+        if let Some(home) = codex_home() {
+            self.follower.tick(&home);
+        }
         if self.last_badge.is_empty() && !obs.live().any(|s| s.find("codex").is_some()) {
+            self.refresh_stale(host, &[]);
             return;
         }
         let Some(home) = codex_home() else { return };
@@ -246,6 +233,7 @@ impl Plugin for CodexPlugin {
         // what a fresh codex would start with.  Each pane's own
         // session is asked below.
         let (cfg_model, cfg_effort) = read_model_and_effort(&home);
+        let mut codex_panes = Vec::new();
 
         // Sessions come from the registry, not from pane indices: a
         // pane index is a position in a layout that moves when panes
@@ -286,6 +274,9 @@ impl Plugin for CodexPlugin {
             };
             let profile = codex_env.and_then(profile_from);
             let text = badge_text(profile, model.as_deref(), effort.as_deref());
+            if let Some(p) = codex {
+                codex_panes.push((sid, p.row.id(), p.argv.as_deref().map(<[String]>::to_vec)));
+            }
             if let Some(id) = codex_id {
                 self.panes.insert(
                     sid,
@@ -389,6 +380,7 @@ impl Plugin for CodexPlugin {
                 let _ = host.set_pane_badge(sid, "");
             }
         }
+        self.refresh_stale(host, &codex_panes);
     }
 }
 

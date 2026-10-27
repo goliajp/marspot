@@ -151,6 +151,51 @@ pub(super) fn profile_switch_op(pane: &PaneCodex, profile: u8, dir: &std::path::
     )
 }
 
+/// Take an outdated codex TUI down and bring the same thread back
+/// under the codex now installed (see `update`).
+///
+/// `codex` from the shell's PATH, which is where the installer puts the
+/// current release; the thread by id, never `--last`, which picks the
+/// newest thread in the directory and a directory can hold two.  The
+/// daemon keeps the thread and anything it is running while no TUI is
+/// attached, so nothing but the screen is redrawn.
+pub(super) fn refresh_op(
+    pane: &PaneCodex,
+    home: &std::path::Path,
+    thread: &str,
+    cwd: Option<String>,
+    to: super::update::Release,
+) -> Option<pty_op::PtyOp> {
+    let line = pty_op::PtyCommand::new("codex")
+        .env("CODEX_HOME", home.to_str()?)
+        .arg("resume")
+        .arg(thread)
+        .in_dir(cwd)
+        .clear_screen_first(true)
+        .to_bytes()?;
+    let held = pty_op::Job::new();
+    Some(
+        pty_op::PtyOp::new("codex.refresh")
+            .hold_screen(true)
+            .badge(format!("↻ {to}"))
+            .step(pty_op::Step::capture_composer(std::sync::Arc::clone(&held)))
+            .step(pty_op::Step::settle(Duration::from_millis(250)).named("hold_settle"))
+            .step(
+                pty_op::Step::terminate(pane.codex, libc::SIGTERM)
+                    .escalate_after(Duration::from_secs(3), libc::SIGKILL),
+            )
+            .step(pty_op::Step::send(line).named("resume"))
+            .step(
+                pty_op::Step::await_quiet(Duration::from_millis(1500))
+                    .after_bytes(2048)
+                    .timeout(Duration::from_secs(30))
+                    .named("first_frame"),
+            )
+            .step(pty_op::Step::await_process(pane.shell_pid, looks_like_codex).timeout(Duration::from_secs(5)))
+            .step(pty_op::Step::restore_composer(held)),
+    )
+}
+
 #[cfg(test)]
 mod profile_menu_tests {
     use super::{profile_switch_op, PaneCodex, CODEX_PROFILE_PREFIX};
@@ -208,6 +253,36 @@ mod profile_menu_tests {
             )),
             "the running codex must be signalled"
         );
+    }
+
+    #[test]
+    fn a_refresh_resumes_the_same_thread_by_id_and_keeps_the_draft() {
+        let release = super::super::update::Release::parse("0.164.0").unwrap();
+        let op = super::refresh_op(
+            &pane(1),
+            Path::new("/Users/x/.codex-profile-1"),
+            "01a133f4-8e7b-7331-9630-9c40ff4b467f",
+            Some("/Users/x/work/alt".into()),
+            release,
+        )
+        .expect("op builds");
+        let line = line_of(&op);
+        assert!(line.contains("CODEX_HOME='/Users/x/.codex-profile-1'"), "{line}");
+        assert!(line.contains("codex resume 01a133f4-8e7b-7331-9630-9c40ff4b467f"), "{line}");
+        assert!(!line.contains("--last"), "{line}");
+        assert!(line.contains("cd '/Users/x/work/alt'"), "{line}");
+        let kinds: Vec<&str> = op.steps.iter().map(|s| s.label).collect();
+        let at = |l: &str| kinds.iter().position(|k| *k == l).unwrap_or_else(|| panic!("{l} in {kinds:?}"));
+        assert!(at("capture_composer") < at("resume"), "{kinds:?}");
+        assert_eq!(kinds.last(), Some(&"restore_composer"), "{kinds:?}");
+        assert_eq!(op.badge.as_deref(), Some("↻ 0.164.0"));
+    }
+
+    #[test]
+    fn a_thread_that_cannot_go_on_a_command_line_gets_no_refresh() {
+        let release = super::super::update::Release::parse("0.164.0").unwrap();
+        let op = super::refresh_op(&pane(1), Path::new("/Users/x/.codex-profile-1"), "x; rm -rf ~", None, release);
+        assert!(op.is_none());
     }
 
     #[test]
