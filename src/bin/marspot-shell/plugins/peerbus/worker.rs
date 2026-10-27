@@ -178,6 +178,7 @@ impl Worker {
                             if self.retry_at.is_some_and(|t| t <= now) {
                                 self.retry_at = None;
                                 self.refresh();
+                                self.publish();
                             }
                             self.idle_checks_due(now);
                             if self.names_at <= now {
@@ -217,8 +218,23 @@ impl Worker {
                 }
                 Event::Stop => break,
             }
+            self.publish();
         }
         self.teardown();
+        super::publish_threads(HashMap::new());
+    }
+
+    /// What other plugins may read of the bindings: see `ThreadView`.
+    fn publish(&self) {
+        let views = self
+            .bindings
+            .iter()
+            .map(|(sid, b)| {
+                let idle = b.subscribed && b.record.status == Status::Idle && b.active_turn.is_none();
+                (*sid, super::ThreadView { codex: b.codex, home: b.home.clone(), thread: b.thread.clone(), idle })
+            })
+            .collect();
+        super::publish_threads(views);
     }
 
     // ── daemon notifications ──────────────────────────────────────

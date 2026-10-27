@@ -117,6 +117,15 @@ pub struct Settings {
     /// A status line the user already wrote is not taken away; it is
     /// chained, and put back when this goes off again.
     pub cc_statusline_hook: bool,
+    /// Keep codex current: install its CLI when codex's own daemon
+    /// updater has moved past it, and move panes still running an older
+    /// CLI onto the installed one.
+    ///
+    /// On, because the alternative is what happened: the daemon updated
+    /// itself hourly while the panes ran a CLI four releases behind until
+    /// someone ran the installer by hand.  A setting because it fetches
+    /// and runs codex's installer unattended, which is the user's call.
+    pub codex_follow_updates: bool,
 }
 
 impl Default for Settings {
@@ -130,6 +139,7 @@ impl Default for Settings {
             dim_scale: 1.0,
             scroll_factor: 1.0,
             cc_statusline_hook: false,
+            codex_follow_updates: true,
         }
     }
 }
@@ -277,6 +287,7 @@ fn value_of(s: &Settings, key: &str) -> String {
         "appearance.dim_scale" => fmt_f32(s.dim_scale),
         "input.scroll_factor" => fmt_f32(s.scroll_factor),
         "claudecode.statusline_hook" => s.cc_statusline_hook.to_string(),
+        "codex.follow_updates" => s.codex_follow_updates.to_string(),
         _ => String::new(),
     }
 }
@@ -312,6 +323,9 @@ pub fn parse(body: &str) -> Settings {
             "input.scroll_factor" => s.scroll_factor = parse_f32(v, s.scroll_factor, 0.1, 8.0),
             "claudecode.statusline_hook" => {
                 s.cc_statusline_hook = parse_bool(v, s.cc_statusline_hook)
+            }
+            "codex.follow_updates" => {
+                s.codex_follow_updates = parse_bool(v, s.codex_follow_updates)
             }
             // Anything else is a key this build does not know.  Left
             // alone here and preserved verbatim by `render` — a newer
@@ -442,6 +456,17 @@ mod tests {
         assert!((odd.dim_scale - 0.85).abs() < 1e-6);
         assert!((odd.scroll_factor - 3.0).abs() < 1e-6);
         assert_eq!(parse(&render(&odd, "")), odd, "and it survives a rewrite");
+    }
+
+    /// Following codex updates is on unless the file says otherwise,
+    /// and saying otherwise survives a rewrite.
+    #[test]
+    fn codex_updates_are_followed_unless_switched_off() {
+        assert!(Settings::default().codex_follow_updates);
+        let off = parse("codex.follow_updates = false\n");
+        assert!(!off.codex_follow_updates);
+        let kept = parse(&render(&off, "codex.follow_updates = false\n"));
+        assert!(!kept.codex_follow_updates, "a rewrite keeps it off");
     }
 
     /// Out of range is a typo, not a wish: honouring a clamped tenth
