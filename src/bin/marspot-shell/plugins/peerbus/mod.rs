@@ -24,11 +24,38 @@ mod records;
 mod live_tests;
 mod worker;
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
+use std::sync::Mutex;
 use std::thread::JoinHandle;
 
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_API_VERSION};
 use worker::{Event, Want, Worker, CHANNEL};
+
+/// A pane's codex thread as the worker knows it, for other plugins:
+/// the codex plugin restarts a pane's TUI onto the same thread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ThreadView {
+    pub codex: marspot::pidtree::ProcId,
+    pub home: PathBuf,
+    pub thread: String,
+    /// The daemon says the thread is idle, with no turn running and no
+    /// prompt waiting.  Only known for a thread this worker subscribed
+    /// to; an unsubscribed one hears no status and reads as not idle.
+    pub idle: bool,
+}
+
+static THREADS: Mutex<Option<HashMap<u64, ThreadView>>> = Mutex::new(None);
+
+/// Every bound codex pane's thread, by session id.
+pub(crate) fn threads() -> HashMap<u64, ThreadView> {
+    THREADS.lock().unwrap().clone().unwrap_or_default()
+}
+
+pub(super) fn publish_threads(views: HashMap<u64, ThreadView>) {
+    *THREADS.lock().unwrap() = Some(views);
+}
 
 #[derive(Default)]
 pub struct PeerbusPlugin {

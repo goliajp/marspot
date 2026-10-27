@@ -50,6 +50,9 @@ DEFAULT_SUITES=(
   test-bundle-lander.sh
   test-cc-profile-switch.sh
   test-codex-profile-switch.sh
+  test-codex-refresh.sh
+  test-codex-refresh-real.sh
+  test-codex-follow.sh
   test-agent-handoff.sh
   test-peerbus.sh
   test-real-update.sh
