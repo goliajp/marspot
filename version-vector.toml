@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.252"  # codex panes follow codex updates: the cli is installed when its daemon moves past it, and an idle pane on an older cli is resumed on the new one
-core    = "0.12.292"  # settings know codex.follow_updates
+shell   = "0.7.253"  # ultra accounts are not moved off for a full 5h; a session or weekly refusal seen in a pane now counts
+core    = "0.12.293"  # the usage panel draws no 5h row for ultra accounts
 session = "0.11.153"  # publishes the window title beside the frame
