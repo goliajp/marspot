@@ -6939,6 +6939,30 @@ mod tests {
         assert_eq!(last_quota_refusal(&credits).map(|r| r.model), Some("opus-5-5".into()));
     }
 
+    /// Running out of the account's own windows names no model, so it
+    /// covers every pane. These went unread until 2026-10-31: 389
+    /// session and 103 weekly refusals sat in the transcripts.
+    #[test]
+    fn the_account_window_wording_counts_for_every_model() {
+        for text in [
+            "You've hit your session limit · resets 4:50pm (Asia/Tokyo)",
+            "You've hit your weekly limit · resets Oct 14 at 2pm (Asia/Tokyo)",
+        ] {
+            let line = REFUSAL.replace(
+                "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.",
+                text,
+            );
+            let r = last_quota_refusal(&line).expect(text);
+            assert!(r.model.is_empty(), "{text}: names no model");
+            assert!(!r.logged_out);
+        }
+        let fast = REFUSAL.replace(
+            "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.",
+            "You've hit your fast limit",
+        );
+        assert_eq!(last_quota_refusal(&fast), None, "fast mode is not the account");
+    }
+
     /// The record the CLI writes when it cannot log in, as it was
     /// written on 2026-09-28 (trimmed).
     const LOGIN_EXPIRED: &str = concat!(
