@@ -21,8 +21,10 @@ use super::quota::{Refusal, Room};
 /// only timely evidence there is, because the usage feed is collected
 /// behind what a session is actually spending.
 ///
-/// Two texts are matched, both read out of the CLI's own templates
-/// rather than guessed: the model-limit branch and the credits branch.
+/// Three texts are matched, all read out of the CLI's own templates
+/// rather than guessed: the model-limit branch, the credits branch,
+/// and the account-window branch ("You've hit your session limit",
+/// "… weekly limit"), which names no model.
 /// Deliberately not `rate_limit` or `429`, which a loaded server
 /// produces too -- being overloaded is not being out of quota, and
 /// moving a pane for it costs a restart for nothing.
@@ -70,11 +72,23 @@ pub(super) fn refused_since(refusal: Option<Refusal>, started: SystemTime) -> Op
     refusal.filter(|r| r.at >= start)
 }
 
-/// The two ways the CLI says "this account cannot serve you".
+/// The ways the CLI says "this account cannot serve you".
 fn says_out_of_quota(line: &str) -> bool {
     (line.contains("You've reached your") && line.contains("limit"))
         || line.contains("requires usage credits")
+        || ACCOUNT_WINDOWS.iter().any(|w| line.contains(w))
 }
+
+/// The account-wide windows, as the CLI words running out of them.
+///
+/// Not "You've hit your" alone: the same opening is used for a fast
+/// mode limit and a monthly spend limit, neither of which shuts the
+/// account out.
+const ACCOUNT_WINDOWS: [&str; 3] = [
+    "You've hit your session limit",
+    "You've hit your 5-hour limit",
+    "You've hit your weekly limit",
+];
 
 /// The `timestamp` field of one transcript record.
 fn record_timestamp(line: &str) -> Option<i64> {

@@ -64,7 +64,13 @@ pub struct CcAccount {
     /// sat on an account whose model cap had been carried for 94
     /// minutes while the API refused it sixteen times.
     pub limits_as_of: Option<i64>,
+    /// Plan tier as the feed writes it (`default_claude_max_20x`);
+    /// empty on an older feed.
+    pub tier: String,
 }
+
+/// The tier of the Ultra plan, formerly Max 20x, which kept the name.
+const ULTRA_TIER: &str = "default_claude_max_20x";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CcUsage {
@@ -164,6 +170,7 @@ pub fn parse(body: &str) -> Option<CcUsage> {
                 .and_then(parse_iso_utc)
                 .unwrap_or(0),
             limits_as_of: str_field(obj, "limits_as_of").and_then(parse_iso_utc),
+            tier: str_field(obj, "tier").unwrap_or_default(),
         })
         .collect();
     let mut accounts = accounts;
@@ -479,23 +486,38 @@ pub struct CcWindow {
 const WEEK_SECS: i64 = 7 * 86_400;
 
 impl CcAccount {
-    /// The account's windows in reading order: its own two, then one
-    /// per model cap.  A model cap is weekly on this provider.
+    /// Does the 5h window limit this account?
+    ///
+    /// Ultra dropped its 5h limit on 2026-10-30 and the API went on
+    /// reporting the window anyway: the next day an account told by
+    /// mail that its limit was gone still read 23% of 5h, with
+    /// `five_hour` as the binding claim in the rate-limit headers.
+    /// The number is still metered but no longer enforced, so on that
+    /// tier it says nothing about whether the account has room.
+    /// Unverified Ultra accounts keep the limit for a while; a refusal
+    /// a pane sees is what catches those.
+    pub fn has_five_hour_limit(&self) -> bool {
+        self.tier != ULTRA_TIER
+    }
+
+    /// The account's windows in reading order: its own, then one per
+    /// model cap.  A model cap is weekly on this provider.
     pub fn windows(&self) -> Vec<CcWindow> {
-        let mut out = vec![
-            CcWindow {
+        let mut out = Vec::new();
+        if self.has_five_hour_limit() {
+            out.push(CcWindow {
                 label: "5h".into(),
                 util: self.util_5h,
                 reset: (self.reset_5h > 0).then_some(self.reset_5h),
                 span_secs: 5 * 3_600,
-            },
-            CcWindow {
-                label: "7d".into(),
-                util: self.util_7d,
-                reset: (self.reset_7d > 0).then_some(self.reset_7d),
-                span_secs: WEEK_SECS,
-            },
-        ];
+            });
+        }
+        out.push(CcWindow {
+            label: "7d".into(),
+            util: self.util_7d,
+            reset: (self.reset_7d > 0).then_some(self.reset_7d),
+            span_secs: WEEK_SECS,
+        });
         out.extend(self.model_limits.iter().map(|m| CcWindow {
             label: m.label.to_ascii_lowercase(),
             util: m.util,
@@ -770,6 +792,24 @@ mod tests {
         assert_eq!(w[1].span_secs, WEEK_SECS);
         assert!(w.len() > 2, "the model caps follow the account's own");
         assert_eq!(w[2].label, w[2].label.to_lowercase(), "panel labels are lower case");
+    }
+
+    /// An Ultra account still reports a 5h it is no longer held to; the
+    /// panel does not draw a limit that does not apply.
+    #[test]
+    fn an_ultra_account_has_no_5h_row() {
+        let feed = NESTED_FEED.replacen(
+            "\"status\"",
+            "\"tier\": \"default_claude_max_20x\", \"status\"",
+            2,
+        );
+        let u = parse(&feed).expect("parses");
+        let a = &u.accounts[1];
+        assert_eq!(a.tier, "default_claude_max_20x");
+        assert!(!a.has_five_hour_limit());
+        let w = a.windows();
+        assert_eq!(w[0].label, "7d");
+        assert!(w.iter().all(|w| w.label != "5h"));
     }
 
     use super::*;

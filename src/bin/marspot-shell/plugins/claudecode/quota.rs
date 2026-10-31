@@ -269,8 +269,10 @@ pub(super) fn rooms_for(
             let room = email_of(p)
                 .and_then(|mail| accounts.iter().find(|a| a.email == mail))
                 .map(|a| Room::Known {
-                    status: a.status.clone(),
-                    util_5h: a.util_5h,
+                    status: status_of(a),
+                    // a window that is not enforced cannot shut the
+                    // account out, nor rank it below another
+                    util_5h: if a.has_five_hour_limit() { a.util_5h } else { 0.0 },
                     util_7d: a.util_7d,
                     reset_7d: a.reset_7d,
                     models: a
@@ -288,6 +290,20 @@ pub(super) fn rooms_for(
             (p, room)
         })
         .collect()
+}
+
+/// The feed's status word, without the part an unenforced 5h put in.
+///
+/// The collector writes `rejected` when any window is full, the 5h
+/// included. On an account whose 5h is not enforced, a full 5h with
+/// every other window short of full is that and nothing else.
+fn status_of(a: &CcAccount) -> String {
+    let only_5h_full = !a.has_five_hour_limit()
+        && a.status == "rejected"
+        && a.util_5h >= 1.0
+        && a.util_7d < 1.0
+        && a.model_limits.iter().all(|m| m.util < 1.0);
+    if only_5h_full { "allowed".into() } else { a.status.clone() }
 }
 
 /// The profile to move a pane to, or `None` when there is nowhere
@@ -853,6 +869,7 @@ mod tests {
             model_limits: Vec::new(),
             collected_at: 0,
             limits_as_of: None,
+            tier: "default_claude_max_5x".into(),
         }
     }
 
@@ -907,6 +924,36 @@ mod tests {
         ];
         let rooms = rooms_for(&[1, 2, 3], &accounts, |p| Some(format!("p{p}")));
         assert_eq!(best_profile(&rooms, 1, None), Some(2));
+    }
+
+    fn ultra(email: &str, status: &str, u5: f64, u7: f64, reset7: i64) -> CcAccount {
+        CcAccount { tier: "default_claude_max_20x".into(), ..acct(email, status, u5, u7, reset7) }
+    }
+
+    /// Ultra lost its 5h limit on 2026-10-30, but the API still
+    /// meters the window: a full 5h there shuts nothing out, and does
+    /// not rank the account below another.
+    #[test]
+    fn an_ultra_account_is_not_out_on_its_5h() {
+        let accounts = vec![
+            ultra("p1", "rejected", 1.0, 0.40, 500),
+            ultra("p2", "allowed", 0.0, 0.40, 500),
+        ];
+        let rooms = rooms_for(&[1, 2], &accounts, |p| Some(format!("p{p}")));
+        assert!(!rooms[0].1.refused_for(None), "full 5h, room in the week");
+        assert_eq!(best_profile(&rooms, 0, None), Some(1), "the 5h does not break the tie");
+
+        let week_spent = ultra("p3", "rejected", 1.0, 1.0, 500);
+        let rooms = rooms_for(&[3], &[week_spent], |p| Some(format!("p{p}")));
+        assert!(rooms[0].1.refused_for(None), "its week still counts");
+    }
+
+    /// Every other plan keeps the limit.
+    #[test]
+    fn a_max_account_is_still_out_on_its_5h() {
+        let accounts = vec![acct("p1", "allowed_warning", 0.99, 0.40, 500)];
+        let rooms = rooms_for(&[1], &accounts, |p| Some(format!("p{p}")));
+        assert!(rooms[0].1.refused_for(None));
     }
 
     /// Nowhere else to go.
