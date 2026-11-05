@@ -126,6 +126,42 @@ pub struct Settings {
     /// someone ran the installer by hand.  A setting because it fetches
     /// and runs codex's installer unattended, which is the user's call.
     pub codex_follow_updates: bool,
+    /// Move idle claudecode panes onto the account whose quota runs
+    /// out soonest, and panes not on Fable onto accounts whose Fable is
+    /// spent.
+    ///
+    /// A setting because a move restarts the pane's claude: the
+    /// conversation resumes, but its prompt cache does not come along.
+    /// `DryRun` logs what would be moved and moves nothing.
+    pub cc_rebalance: Rebalance,
+}
+
+/// What the claudecode plugin does with an idle pane that has a better
+/// account to be on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rebalance {
+    Off,
+    DryRun,
+    On,
+}
+
+impl Rebalance {
+    fn parse(v: &str, fallback: Self) -> Self {
+        match v.to_ascii_lowercase().as_str() {
+            "on" | "true" => Self::On,
+            "dryrun" | "dry_run" | "dry-run" => Self::DryRun,
+            "off" | "false" => Self::Off,
+            _ => fallback,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::DryRun => "dryrun",
+            Self::On => "on",
+        }
+    }
 }
 
 impl Default for Settings {
@@ -140,6 +176,7 @@ impl Default for Settings {
             scroll_factor: 1.0,
             cc_statusline_hook: false,
             codex_follow_updates: true,
+            cc_rebalance: Rebalance::On,
         }
     }
 }
@@ -288,6 +325,7 @@ fn value_of(s: &Settings, key: &str) -> String {
         "input.scroll_factor" => fmt_f32(s.scroll_factor),
         "claudecode.statusline_hook" => s.cc_statusline_hook.to_string(),
         "codex.follow_updates" => s.codex_follow_updates.to_string(),
+        "claudecode.rebalance" => s.cc_rebalance.as_str().to_string(),
         _ => String::new(),
     }
 }
@@ -327,6 +365,7 @@ pub fn parse(body: &str) -> Settings {
             "codex.follow_updates" => {
                 s.codex_follow_updates = parse_bool(v, s.codex_follow_updates)
             }
+            "claudecode.rebalance" => s.cc_rebalance = Rebalance::parse(v, s.cc_rebalance),
             // Anything else is a key this build does not know.  Left
             // alone here and preserved verbatim by `render` — a newer
             // marspot's settings must survive an older one reading
@@ -467,6 +506,19 @@ mod tests {
         assert!(!off.codex_follow_updates);
         let kept = parse(&render(&off, "codex.follow_updates = false\n"));
         assert!(!kept.codex_follow_updates, "a rewrite keeps it off");
+    }
+
+    /// The three rebalance modes read back as written, a rewrite keeps
+    /// them, and a word that is none of them leaves the default.
+    #[test]
+    fn rebalance_takes_three_words_and_ignores_others() {
+        for (word, want) in [("on", Rebalance::On), ("dryrun", Rebalance::DryRun), ("off", Rebalance::Off)] {
+            let body = format!("claudecode.rebalance = {word}\n");
+            let s = parse(&body);
+            assert_eq!(s.cc_rebalance, want, "{word}");
+            assert_eq!(parse(&render(&s, &body)).cc_rebalance, want, "{word} after a rewrite");
+        }
+        assert_eq!(parse("claudecode.rebalance = maybe\n").cc_rebalance, Rebalance::On);
     }
 
     /// Out of range is a typo, not a wish: honouring a clamped tenth

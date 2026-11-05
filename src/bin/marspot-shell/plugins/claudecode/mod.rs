@@ -20,6 +20,9 @@
 
 mod idle;
 mod quota;
+mod rooms;
+mod rebalance;
+mod switching;
 mod refusal;
 mod model;
 mod statusline;
@@ -212,6 +215,13 @@ pub struct ClaudecodePlugin {
     stranded: HashMap<u64, Stranding>,
     /// When each pane was last moved off a refused account.
     moved_at: HashMap<u64, Instant>,
+    /// Resting panes moved onto a better account: when, and to which
+    /// profile, so a move on its way is not made twice and a pane is
+    /// not moved again within `rebalance::COOLDOWN`.
+    rebalanced: HashMap<u64, (Instant, u8)>,
+    /// What was last logged about moving each resting pane, so a
+    /// steady answer is said once.
+    rebalance_said: HashMap<u64, String>,
     /// Panes left out of the sweep because their model or effort could
     /// not be confirmed, kept so the reason is logged once rather than
     /// every pass.
@@ -515,6 +525,8 @@ impl ClaudecodePlugin {
             last_model: HashMap::new(),
             stranded: HashMap::new(),
             moved_at: HashMap::new(),
+            rebalanced: HashMap::new(),
+            rebalance_said: HashMap::new(),
             unjudged: std::collections::HashSet::new(),
             logged_out: HashMap::new(),
             dormant: Vec::new(),
@@ -1292,9 +1304,12 @@ impl ClaudecodePlugin {
         let needs = self.needs_model_for(shelld_sid);
         let picked = match (&usage, &home) {
             (Some(u), Some(home)) => {
-                let mut rooms = quota::rooms_for(&profiles, &u.accounts, |p| {
-                    quota::profile_email(home, p)
-                });
+                let mut rooms = quota::rooms_for(
+                    &profiles,
+                    &u.accounts,
+                    |p| quota::profile_email(home, p),
+                    rooms::unix_now(),
+                );
                 refusal::mark_logged_out(&mut rooms, &self.logged_out);
                 host.log(
                     LogLevel::Info,
@@ -1331,200 +1346,6 @@ impl ClaudecodePlugin {
         self.switch_by_hand(host, shelld_sid, meta, next_profile);
     }
 
-
-    /// Every pane sitting on an account that cannot answer moves to
-    /// one that can.
-    ///
-    /// Driven by what the accounts say about themselves, not by
-    /// reading the screen or the transcript for the words a refusal
-    /// happens to print.  Those words move, they arrive as an agent's
-    /// failure as readily as a turn's, and the record carrying them is
-    /// pushed out of any window worth reading — one session's sat
-    /// 125 KiB deep in a 755 MB file while the CLI wrote menus after
-    /// it.  The account's own status has none of those problems: it is
-    /// one field, it is true for every pane on that account at once,
-    /// and it is already on this machine.
-    fn sweep_unusable_profiles(&mut self, host: &dyn PluginHost, result: &ScanResult) {
-        if result.new_meta.is_empty() {
-            return;
-        }
-        if std::env::var_os("HOME").is_none() {
-            return;
-        }
-        let Some(usage) = marspot::cc_usage::read() else {
-            // No feed is not "all clear" — it is "no answer", and a
-            // pane is not moved on no answer.
-            return;
-        };
-        // read by the worker, so this sweep touches no profile on disk
-        let profiles: Vec<u8> = result.profiles.iter().map(|(n, _)| *n).collect();
-        let email = |p: u8| result.profiles.iter().find(|(n, _)| *n == p).and_then(|(_, e)| e.clone());
-        let mut rooms = quota::rooms_for(&profiles, &usage.accounts, email);
-        for meta in result.new_meta.values() {
-            if let Some(r) = meta.refused_at.as_ref().filter(|r| r.logged_out)
-                && self.logged_out.get(&meta.profile_num).is_none_or(|seen| r.at > *seen)
-            {
-                self.logged_out.insert(meta.profile_num, r.at);
-                host.log(
-                    LogLevel::Info,
-                    "quota.logged_out",
-                    &format!("P{} could not log in at {}", meta.profile_num, r.at),
-                );
-            }
-        }
-        refusal::mark_logged_out(&mut rooms, &self.logged_out);
-        // Whether a profile is out is a question about a pane, not
-        // about a profile: a pane pinned to a model can be shut out of
-        // an account whose week is fine, and a pane that has just been
-        // refused knows something the feed has not collected yet.
-        let is_out = |profile: u8, model: Option<&str>, refusal: Option<&quota::Refusal>| -> bool {
-            rooms
-                .iter()
-                .find(|(p, _)| *p == profile)
-                .is_some_and(|(_, r)| r.refused_for_now(model, refusal))
-        };
-        // However the pane got where it is -- by hand, by a move, or
-        // started there -- one rule: what it is running against what its
-        // profile has left for that model.
-        let out_for = |sid: &u64, meta: &BindMeta| -> bool {
-            let model = result.new_models.get(sid).map(String::as_str);
-            is_out(meta.profile_num, model, meta.refused_at.as_ref())
-        };
-        // Forget what was tried for a pane that is out of trouble —
-        // but not for one that is merely between bindings.  A cycle
-        // kills the CLI and the scan cannot bind the pane again until
-        // the new process exists, so for a tick or two `new_meta` has
-        // nothing to say about it.  Dropping the tally there loses the
-        // fact that a move is already on its way, and the next pass
-        // starts a second one on top of the first (seen on pane 442,
-        // 2026-09-29: three cycles in 40 seconds).
-        self.stranded.retain(|sid, _| {
-            if !result.sessions_seen.contains(sid) {
-                return false;
-            }
-            match result.new_meta.get(sid) {
-                Some(m) => out_for(sid, m),
-                None => true,
-            }
-        });
-        // Bounded with the panes, like everything else here.
-        self.moved_at.retain(|sid, _| result.sessions_seen.contains(sid));
-        self.unjudged.retain(|sid| result.sessions_seen.contains(sid));
-        let sids: Vec<u64> = result.new_meta.keys().copied().collect();
-        for sid in sids {
-            let Some(meta) = result.new_meta.get(&sid).cloned() else { continue };
-            // What the pane is running comes first. A pane whose model
-            // and effort cannot both be confirmed takes no part: it is
-            // not judged and not moved, and nothing about it is assumed.
-            let model = result.new_models.get(&sid).cloned();
-            let choice = pushed_choice(&meta.uuid);
-            if let Err(why) = confirm_choice(model.as_deref(), &choice) {
-                if self.unjudged.insert(sid) {
-                    host.log(
-                        LogLevel::Info,
-                        "quota.unjudged",
-                        &format!(
-                            "sid={sid} on P{} takes no part in switching: {why} (scan={model:?} hook={:?}/{:?})",
-                            meta.profile_num, choice.model, choice.effort
-                        ),
-                    );
-                }
-                continue;
-            }
-            self.unjudged.remove(&sid);
-            if !out_for(&sid, &meta) {
-                continue;
-            }
-            let first_time = !self.stranded.contains_key(&sid);
-            self.stranded.entry(sid).or_default();
-            if first_time {
-                host.log(
-                    LogLevel::Info,
-                    "quota.stranded",
-                    &format!("sid={sid} is on P{}, which is out", meta.profile_num),
-                );
-            }
-            self.move_off_refused(host, sid, &rooms, meta, result, choice);
-        }
-    }
-
-    /// Move one pane off an account that has stopped answering.
-    fn move_off_refused(
-        &mut self,
-        host: &dyn PluginHost,
-        sid: u64,
-        rooms: &[(u8, quota::Room)],
-        meta: BindMeta,
-        result: &ScanResult,
-        // the model and effort the sweep confirmed for this pane
-        choice: CliChoice,
-    ) {
-        // One question, answered from structure: is a command of the
-        // user's running on this machine right now — then leave the
-        // pane alone until it finishes, because moving kills the
-        // process and takes the command with it.
-        //
-        // There used to be a second question — was this pane working,
-        // so should it be told to carry on.  It is gone, and the
-        // sentence now goes to every pane that is moved.  The reading
-        // was wrong half the time in the direction that costs the
-        // most: of six panes moved in silence on 2026-09-30, three had
-        // a turn killed mid-flight by the very refusal that triggered
-        // the move.  They look idle because they are: the CLI printed
-        // its error, closed the turn, and the transcript's last record
-        // is a finished one.  Nothing in the structure separates
-        // "finished" from "cut off" after the fact.
-        //
-        // Saying it to a pane that really was idle costs one line,
-        // which is what the sentence is worded for — it asks the
-        // session to continue *if* something was interrupted.
-        let activity = result.new_activity.get(&sid);
-        let tool_executing = matches!(activity, Some(CcActivity::ToolPending { executing: true }));
-        // Read before the Situation so the borrow ends here: the
-        // model is a fact about this pane, and the decision is about
-        // where it can go next.
-        let needs_model = result.new_models.get(&sid).cloned();
-        // The idle policy's rule too: a process of its own under claude
-        // (unknown counts as one) is work a move would kill.
-        let work_running = result.new_vetoes.get(&sid).is_none_or(|v| v.0);
-        let decision = quota::next_move(&quota::Situation {
-            rooms,
-            current: meta.profile_num,
-            needs_model: needs_model.as_deref(),
-            tool_executing,
-            work_running,
-            moves_this_episode: self.stranded.get(&sid).map(|s| s.moves).unwrap_or(0),
-            last_target: self.stranded.get(&sid).and_then(|s| s.last_target),
-            stranded_for: self.stranded.get(&sid).map(|s| s.since.elapsed()),
-            since_last_move: self.moved_at.get(&sid).map(|at| at.elapsed()),
-        });
-        match decision {
-            quota::Move::Hold(why) => {
-                let tally = self.stranded.entry(sid).or_default();
-                if tally.hold_said != Some(why) {
-                    tally.hold_said = Some(why);
-                    host.log(
-                        LogLevel::Info,
-                        "quota.hold",
-                        &format!("sid={sid} stays on P{}: {why}", meta.profile_num),
-                    );
-                }
-            }
-            quota::Move::To(target) => {
-                host.log(
-                    LogLevel::Info,
-                    "quota.moving",
-                    &format!("sid={sid} P{} → P{target}", meta.profile_num),
-                );
-                if self.start_profile_cycle_to(host, sid, meta, target, true, choice) {
-                    self.moved_at.insert(sid, Instant::now());
-                    let tally = self.stranded.entry(sid).or_default();
-                    tally.moves += 1;
-                    tally.last_target = Some(target);
-                }
-            }
-        }
-    }
 
     /// A switch someone asked for, remembered so the sweep leaves the
     /// pane where they put it.
@@ -2661,9 +2482,9 @@ mod tests {
             format!(
                 r#"{{"generated_at": "2026-09-29T00:00:00+00:00", "accounts": [
                    {{"name":"A","email":"{tag}1@example","status":"rejected","utilization_5h":0.0,
-                    "utilization_7d":1.0,"reset_5h":1,"reset_7d":2}},
+                    "utilization_7d":1.0,"reset_5h":1,"reset_7d":4102444800}},
                    {{"name":"B","email":"{tag}2@example","status":"allowed","utilization_5h":0.0,
-                    "utilization_7d":0.2,"reset_5h":1,"reset_7d":3}}]}}"#
+                    "utilization_7d":0.2,"reset_5h":1,"reset_7d":4102444900}}]}}"#
             ),
         )
         .unwrap();
@@ -2834,9 +2655,9 @@ mod tests {
             home.join(".local/state/devops/claude-usage.json"),
             r#"{"generated_at": "2026-09-29T00:00:00+00:00", "accounts": [
                {"name":"A","email":"hold1@example","status":"rejected","utilization_5h":0.0,
-                "utilization_7d":1.0,"reset_5h":1,"reset_7d":2},
+                "utilization_7d":1.0,"reset_5h":1,"reset_7d":4102444800},
                {"name":"B","email":"hold2@example","status":"rejected","utilization_5h":0.0,
-                "utilization_7d":1.0,"reset_5h":1,"reset_7d":3}]}"#,
+                "utilization_7d":1.0,"reset_5h":1,"reset_7d":4102444900}]}"#,
         )
         .unwrap();
         let sid = 80u64;
@@ -2900,6 +2721,73 @@ mod tests {
             1,
             "a pane between bindings is still a pane that was just moved"
         );
+    }
+
+    /// A resting Opus pane on an account that still has Fable moves to
+    /// one whose Fable is spent: logged only under `dryrun`, moved
+    /// under `on`, and moved without being told to carry on, because
+    /// nothing was interrupted.  Then it is not moved again while the
+    /// move is on its way.
+    #[test]
+    fn a_resting_pane_moves_where_its_quota_is_worth_least_to_others() {
+        let home = quota_home("rest");
+        fs::write(
+            home.join(".local/state/devops/claude-usage.json"),
+            r#"{"generated_at": "2026-11-05T00:00:00+00:00", "accounts": [
+               {"name":"A","email":"rest1@example","status":"rejected","utilization_5h":null,
+                "utilization_7d":0.98,"reset_5h":null,"reset_7d":4102444800,"tier":"default_claude_max_20x",
+                "model_limits":[{"label":"Fable","utilization":1.0,"reset":4102444800}]},
+               {"name":"B","email":"rest2@example","status":"allowed","utilization_5h":null,
+                "utilization_7d":0.02,"reset_5h":null,"reset_7d":4102444900,"tier":"default_claude_max_20x",
+                "model_limits":[{"label":"Fable","utilization":0.0,"reset":4102444900}]}]}"#,
+        )
+        .unwrap();
+        let host = FakeHost::new(home.join("state"));
+        let sid = 81u64;
+        let mut on_p2 = pane_on_p1(&home, "u-81");
+        on_p2.profile_num = 2;
+        on_p2.config_dir = Some(home.join(".claude-profile-2").to_string_lossy().into_owned());
+        let mut plugin = stranded_plugin(on_p2, sid);
+        host.status.lock().unwrap().insert(
+            sid,
+            crate::plugins::PaneStatusView {
+                status: marspot::pane_state::PaneStatus::AwaitingUser,
+                held: Duration::from_secs(600),
+                quiescent: true,
+            },
+        );
+        let mut result = scan_of(sid, CcActivity::AwaitingUser);
+        let mode = |m| {
+            marspot::settings::set_for_test(marspot::settings::Settings {
+                cc_rebalance: m,
+                ..Default::default()
+            })
+        };
+
+        mode(marspot::settings::Rebalance::DryRun);
+        sweep(&mut plugin, &host, &mut result);
+        assert!(host.submitted.lock().unwrap().is_empty(), "dryrun moves nothing");
+
+        mode(marspot::settings::Rebalance::Off);
+        sweep(&mut plugin, &host, &mut result);
+        assert!(host.submitted.lock().unwrap().is_empty());
+
+        // the user is in it
+        mode(marspot::settings::Rebalance::On);
+        plugin.focused_sid = Some(sid);
+        sweep(&mut plugin, &host, &mut result);
+        assert!(host.submitted.lock().unwrap().is_empty(), "not under the user's cursor");
+        plugin.focused_sid = None;
+
+        sweep(&mut plugin, &host, &mut result);
+        assert_eq!(host.submitted.lock().unwrap().len(), 1, "moved");
+        let sent = host.sent.lock().unwrap().clone();
+        assert!(sent[0].1.contains(".claude-profile-1"), "to P1: {:?}", sent[0].1);
+        assert!(!sent[0].1.contains(&resume_word()), "nothing to carry on with: {:?}", sent[0].1);
+        assert_eq!(plugin.rebalanced.get(&sid).map(|(_, to)| *to), Some(1));
+
+        sweep(&mut plugin, &host, &mut result);
+        assert_eq!(host.submitted.lock().unwrap().len(), 1, "not again while it lands");
     }
 
     /// A turn visibly in flight gets the same treatment — the point of
