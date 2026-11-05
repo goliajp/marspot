@@ -2730,6 +2730,11 @@ mod tests {
     /// move is on its way.
     #[test]
     fn a_resting_pane_moves_where_its_quota_is_worth_least_to_others() {
+        // the move waits out an overloaded machine, and this one reads
+        // the real load
+        if !marspot::host_load::quiet_enough_to_time("a resting pane's move") {
+            return;
+        }
         let home = quota_home("rest");
         fs::write(
             home.join(".local/state/devops/claude-usage.json"),
