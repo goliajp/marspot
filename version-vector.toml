@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.254"  # idle panes move onto the quota that lapses first, panes off fable onto accounts whose fable is spent; a week or model cap counts as spent only at 100%
+shell   = "0.7.255"  # an idle pane is not moved onto better quota while the machine is overloaded
 core    = "0.12.294"  # settings know claudecode.rebalance
 session = "0.11.153"  # publishes the window title beside the frame

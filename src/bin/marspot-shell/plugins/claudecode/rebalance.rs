@@ -96,6 +96,8 @@ pub(super) struct Pane {
     pub since_last: Option<Duration>,
     /// A move of any kind is on its way and has not landed.
     pub move_in_flight: bool,
+    /// The machine's one-minute load average, when it says.
+    pub host_load: Option<f64>,
 }
 
 /// Why the pane is not to be touched now, or `None` when it may be.
@@ -123,6 +125,15 @@ pub(super) fn not_now(p: &Pane) -> Option<&'static str> {
     if p.since_last.is_some_and(|d| d < COOLDOWN) {
         return Some("it was moved within the half hour");
     }
+    // On a saturated machine the restart outruns the checks that watch
+    // it: on 2026-11-05, at load 22 to 48, four moves in a row waited
+    // thirty seconds for a first byte the new claude had already
+    // written, and each pane stood frozen for those thirty seconds.
+    // Ten days earlier the same stall hit three refused panes at once.
+    // A move that is only an improvement can wait for a quieter minute.
+    if p.host_load.is_some_and(|l| l > marspot::host_load::BUSY) {
+        return Some("the machine is overloaded");
+    }
     None
 }
 
@@ -141,6 +152,7 @@ mod tests {
             idle_for: Duration::from_secs(600),
             since_last: None,
             move_in_flight: false,
+            host_load: Some(4.0),
         }
     }
 
@@ -155,11 +167,13 @@ mod tests {
             (Pane { own_timer: true, ..resting() }, "it waits on its own timer"),
             (Pane { idle_for: Duration::from_secs(59), ..resting() }, "it wrote within the last minute"),
             (Pane { since_last: Some(Duration::from_secs(1799)), ..resting() }, "it was moved within the half hour"),
+            (Pane { host_load: Some(22.5), ..resting() }, "the machine is overloaded"),
         ];
         for (pane, why) in cases {
             assert_eq!(not_now(&pane), Some(why));
         }
         assert_eq!(not_now(&Pane { since_last: Some(COOLDOWN), ..resting() }), None);
+        assert_eq!(not_now(&Pane { host_load: None, ..resting() }), None, "no answer is not busy");
     }
 
     /// The feed at 2026-11-05 05:33 UTC, addresses replaced.  All
