@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.253"  # ultra accounts are not moved off for a full 5h; a session or weekly refusal seen in a pane now counts
-core    = "0.12.293"  # the usage panel draws no 5h row for ultra accounts
+shell   = "0.7.254"  # idle panes move onto the quota that lapses first, panes off fable onto accounts whose fable is spent; a week or model cap counts as spent only at 100%
+core    = "0.12.294"  # settings know claudecode.rebalance
 session = "0.11.153"  # publishes the window title beside the frame
