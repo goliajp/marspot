@@ -58,6 +58,12 @@ fn integrations_are_opt_in() {
     assert!(!Settings::default().cc_statusline_hook);
 }
 
+#[test]
+fn idle_panes_follow_the_quota_by_default() {
+    // asked for on 2026-11-05: spend the quota that is about to lapse
+    assert_eq!(Settings::default().cc_rebalance, marspot_term::settings::Rebalance::On);
+}
+
 /// Never is expressible two ways and they have to agree.
 #[test]
 fn the_switch_and_the_zero_both_mean_never() {
