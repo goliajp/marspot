@@ -137,3 +137,22 @@ fn a_move_with_nothing_running_says_only_the_usual_sentence() {
     assert!(sent[0].1.contains(&resume_word()));
     assert!(!sent[0].1.contains("后台任务"), "{:?}", sent[0].1);
 }
+
+#[test]
+fn who_was_told_is_still_known_after_the_shell_restarts() {
+    off();
+    let home = quota_home("hp");
+    feed(&home, "hp", ("allowed", 0.99), ("allowed", 0.2));
+    let host = FakeHost::new(home.join("state"));
+    let sid = 94u64;
+    confirmed("u-94");
+    let mut plugin = stranded_plugin(pane_on_p1(&home, "u-94"), sid);
+    let mut result = scan_of(sid, CcActivity::Working);
+    sweep(&mut plugin, &host, &mut result);
+    assert!(plugin.heads_up.contains_key(&sid));
+
+    // a new process, as after a silent update: read back, not told again
+    let mut again = stranded_plugin(pane_on_p1(&home, "u-94"), sid);
+    again.load_heads_up(&host);
+    assert!(again.heads_up.get(&sid).is_some_and(|h| h.is_for(1, 4102444800)));
+}
