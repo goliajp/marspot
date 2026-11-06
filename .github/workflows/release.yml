@@ -83,6 +83,12 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+          # the macos-15 image has rustup but no ~/.cargo, which is where
+          # `cargo install` and the nextest download put binaries
+          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+          mkdir -p "$cargo_home/bin"
+          echo "CARGO_HOME=$cargo_home" >> "$GITHUB_ENV"
+          echo "$cargo_home/bin" >> "$GITHUB_PATH"
           rustc -V
 
       - name: Every secret this needs is present
@@ -137,7 +143,7 @@ jobs:
         # A tag is not a reason to skip the gate; it is the one moment
         # it matters most, so it has to be the gate and not a lookalike.
         run: |
-          curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C "$HOME/.cargo/bin"
+          curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C "$CARGO_HOME/bin"
           cargo build --workspace --all-targets
           cargo nextest run --workspace --no-fail-fast
 
