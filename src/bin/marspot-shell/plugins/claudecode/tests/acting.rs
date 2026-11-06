@@ -8,7 +8,7 @@ use super::*;
 /// types, as the reclaim does.
 #[test]
 fn a_cycle_checks_for_a_claude_right_before_typing() {
-    let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), Some(fid(5151)), 4200, None, &CliChoice::default())
+    let op = profile_cycle_op(Some(&resume_word()), "u-1", true, 4, fid(4242), Some(fid(5151)), 4200, None, &CliChoice::default())
         .expect("cycle");
     let labels: Vec<&str> = op.steps.iter().map(|s| s.label).collect();
     let stop = labels.iter().position(|l| *l == "stop_background").expect("stop step");
