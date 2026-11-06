@@ -57,6 +57,12 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+          # the macos-15 image has rustup but no ~/.cargo, which is where
+          # `cargo install` and the nextest download put binaries
+          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+          mkdir -p "$cargo_home/bin"
+          echo "CARGO_HOME=$cargo_home" >> "$GITHUB_ENV"
+          echo "$cargo_home/bin" >> "$GITHUB_PATH"
           rustup component add clippy
           rustc -V
 
@@ -64,8 +70,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ${{ env.CARGO_HOME }}/registry
+            ${{ env.CARGO_HOME }}/git
             target
           key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ matrix.os }}-cargo-
@@ -96,7 +102,7 @@ jobs:
           MARSPOT_SNAPSHOT_OUT: ${{ runner.temp }}/snapshots
         run: |
           curl -LsSf https://get.nexte.st/latest/${{ matrix.nextest }} \
-            | tar zxf - -C "$HOME/.cargo/bin"
+            | tar zxf - -C "$CARGO_HOME/bin"
           cargo nextest run ${{ matrix.scope }} --no-fail-fast
 
       - name: Renders that did not match their snapshot
@@ -120,9 +126,9 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            ~/.cargo/bin/cargo-audit
-            ~/.cargo/bin/cargo-deny
-            ~/.cargo/bin/cargo-machete
+            ${{ env.CARGO_HOME }}/bin/cargo-audit
+            ${{ env.CARGO_HOME }}/bin/cargo-deny
+            ${{ env.CARGO_HOME }}/bin/cargo-machete
           key: ${{ matrix.os }}-deptools-1
 
       - name: Dependency policy
@@ -132,7 +138,7 @@ jobs:
         # manifest is the same on both.
         run: |
           for t in cargo-audit cargo-deny cargo-machete; do
-            [[ -x "$HOME/.cargo/bin/$t" ]] || cargo install --locked "$t"
+            [[ -x "$CARGO_HOME/bin/$t" ]] || cargo install --locked "$t"
           done
           bin/lint-deps.sh
 
