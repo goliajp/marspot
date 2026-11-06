@@ -267,8 +267,10 @@ impl ClaudecodePlugin {
             None if dry => format!("sid={sid} P{} → P{target} ({why}) model={model:?}", meta.profile_num),
             None => format!("sid={sid} P{} → P{target}: {why}", meta.profile_num),
         };
-        // one line per change of answer; the pass runs every two seconds
-        let key = format!("{target}|{why}|{held:?}");
+        // one line when a pane starts waiting for a target and one when it
+        // moves; the reason it waits flips every pass or two and the
+        // hours ahead tick up, neither of which is news
+        let key = format!("{target}|{}", held.is_some());
         let new_answer = self.rebalance_said.get(&sid) != Some(&key);
         if new_answer {
             self.rebalance_said.insert(sid, key);

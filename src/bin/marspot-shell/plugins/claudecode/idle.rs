@@ -66,7 +66,8 @@ pub(super) const KILL_GRACE: Duration = Duration::from_secs(15);
 
 /// Processes a resting claude keeps around, measured on this host:
 /// an MCP server per session (`smix-mcp`), a language server it
-/// started (`rust-analyzer` and its proc-macro helper), and
+/// started (`rust-analyzer` and its proc-macro helper, `sourcekit-lsp`,
+/// `clangd`), and
 /// `caffeinate` (short-lived, respawned).  None of them is work.
 ///
 /// Anything else under claude IS work: a background task, a watcher,
@@ -84,7 +85,13 @@ pub(super) fn is_resting_helper(row: &pidtree::ProcRow, has_children: bool) -> b
     if name.contains("-mcp") || name.starts_with("mcp-") {
         return true;
     }
-    if name.starts_with("rust-analyzer") || name.ends_with("-language-server") {
+    // language servers live as long as the session: the editor tooling
+    // claude starts for code intelligence, not a task of anyone's
+    if name.starts_with("rust-analyzer")
+        || name.ends_with("-language-server")
+        || name.ends_with("-lsp")
+        || name == "clangd"
+    {
         return true;
     }
     if name == "caffeinate" {

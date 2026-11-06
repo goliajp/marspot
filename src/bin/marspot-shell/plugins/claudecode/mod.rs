@@ -5920,6 +5920,8 @@ mod tests {
             row(103, 102, "rust-analyzer-proc-macro-srv"),
             row(104, claude, "caffeinate"),
             row(105, claude, "zsh"),
+            row(108, claude, "sourcekit-lsp"),
+            row(109, claude, "clangd"),
         ];
         assert!(work_in_flight(claude, &pidtree::ProcTable::from_rows(resting.clone())).is_empty(), "none of that is work");
 
