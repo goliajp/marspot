@@ -84,6 +84,7 @@ impl ClaudecodePlugin {
         self.moved_at.retain(|sid, _| result.sessions_seen.contains(sid));
         self.rebalanced.retain(|sid, _| result.sessions_seen.contains(sid));
         self.rebalance_said.retain(|sid, _| result.sessions_seen.contains(sid));
+        self.heads_up.retain(|sid, _| result.sessions_seen.contains(sid));
         let mode = marspot::settings::get().cc_rebalance;
         let mut rebalanced_this_pass = false;
         self.unjudged.retain(|sid| result.sessions_seen.contains(sid));
@@ -111,6 +112,7 @@ impl ClaudecodePlugin {
             self.unjudged.remove(&sid);
             let in_flight = self.rebalance_in_flight(sid, meta.profile_num);
             if !out_for(&sid, &meta) {
+                self.heads_up_if_due(host, sid, &rooms, &meta, result);
                 if mode != marspot::settings::Rebalance::Off
                     && self.rebalance(host, sid, &rooms, &meta, result, &choice, in_flight, mode, rebalanced_this_pass)
                 {
@@ -175,6 +177,7 @@ impl ClaudecodePlugin {
         // The idle policy's rule too: a process of its own under claude
         // (unknown counts as one) is work a move would kill.
         let work_running = result.new_vetoes.get(&sid).is_none_or(|v| v.0);
+        let warned = self.heads_up.get(&sid).is_some_and(|h| h.landed_on(meta.profile_num));
         let decision = quota::next_move(&quota::Situation {
             rooms,
             current: meta.profile_num,
@@ -185,6 +188,7 @@ impl ClaudecodePlugin {
             last_target: self.stranded.get(&sid).and_then(|s| s.last_target),
             stranded_for: self.stranded.get(&sid).map(|s| s.since.elapsed()),
             since_last_move: self.moved_at.get(&sid).map(|at| at.elapsed()),
+            warned,
         });
         match decision {
             quota::Move::Hold(why) => {
@@ -204,7 +208,10 @@ impl ClaudecodePlugin {
                     "quota.moving",
                     &format!("sid={sid} P{} → P{target}", meta.profile_num),
                 );
-                if self.start_profile_cycle_to(host, sid, meta, target, true, choice) {
+                // the move ends what runs under claude; the session is
+                // told, or it waits on background shells that are gone
+                let word = if work_running { heads_up::after_ended_work(&resume_word()) } else { resume_word() };
+                if self.start_profile_cycle_to(host, sid, meta, target, Some(word), choice) {
                     self.moved_at.insert(sid, Instant::now());
                     let tally = self.stranded.entry(sid).or_default();
                     tally.moves += 1;
@@ -212,6 +219,44 @@ impl ClaudecodePlugin {
                 }
             }
         }
+    }
+
+    /// Tell a busy pane, once a week, that its account is one step from
+    /// refusing it -- while it can still answer -- when there is
+    /// somewhere else for it to go.
+    ///
+    /// A resting pane is not told: moving it ends nothing, and the
+    /// message would start a turn of its own.
+    fn heads_up_if_due(
+        &mut self,
+        host: &dyn PluginHost,
+        sid: u64,
+        rooms: &[(u8, quota::Room)],
+        meta: &BindMeta,
+        result: &ScanResult,
+    ) {
+        let model = result.new_models.get(&sid).map(String::as_str);
+        let Some((_, room)) = rooms.iter().find(|(p, _)| *p == meta.profile_num) else { return };
+        let week = room.reset_7d();
+        if self.heads_up.get(&sid).is_some_and(|h| h.is_for(meta.profile_num, week))
+            || !heads_up::nearly_out(room, model)
+            || !rooms.iter().any(|(p, r)| *p != meta.profile_num && !r.refused_for(model) && *r != quota::Room::Unknown)
+        {
+            return;
+        }
+        let resting = host.pane_status(sid).ok().flatten().is_some_and(|v| {
+            v.quiescent && matches!(v.status, marspot::pane_state::PaneStatus::AwaitingUser)
+        });
+        let tool_executing =
+            matches!(result.new_activity.get(&sid), Some(CcActivity::ToolPending { executing: true }));
+        let work_running = result.new_vetoes.get(&sid).is_none_or(|v| v.0);
+        if resting && !tool_executing && !work_running {
+            return;
+        }
+        let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        host.log(LogLevel::Info, "quota.heads_up", &format!("sid={sid} P{} is nearly out; telling it", meta.profile_num));
+        heads_up::send(sid, meta.claude.pid, meta.profile_num, Arc::clone(&delivered));
+        self.heads_up.insert(sid, heads_up::Sent { profile: meta.profile_num, week, delivered });
     }
 
     /// A resting-pane move aimed at a profile the pane is not bound to
@@ -287,7 +332,7 @@ impl ClaudecodePlugin {
             return false;
         }
         // nothing interrupted, so nothing to carry on with
-        if self.start_profile_cycle_to(host, sid, meta.clone(), target, false, choice.clone()) {
+        if self.start_profile_cycle_to(host, sid, meta.clone(), target, None, choice.clone()) {
             self.rebalanced.insert(sid, (Instant::now(), target));
             return true;
         }

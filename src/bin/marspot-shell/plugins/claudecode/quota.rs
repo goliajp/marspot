@@ -108,7 +108,7 @@ pub(super) enum Room {
 /// pane on it was being refused and had to be moved by hand.  Waiting
 /// for the word is waiting for something that arrives late or not at
 /// all.
-const FIVE_HOUR_SPENT: f64 = 0.98;
+pub(super) const FIVE_HOUR_SPENT: f64 = 0.98;
 
 /// The week and the per-model caps are over only when the API says
 /// they are full.
@@ -234,7 +234,7 @@ impl Room {
     /// pair means the ordering rule does not change -- the week
     /// first, the five hours to break ties -- which is the whole
     /// point of folding it in here instead of beside it.
-    fn headroom_for(&self, model: Option<&str>) -> (f64, f64) {
+    pub(super) fn headroom_for(&self, model: Option<&str>) -> (f64, f64) {
         match self {
             Room::Known { util_5h, util_7d, .. } => {
                 let week = 1.0 - util_7d;
@@ -364,6 +364,10 @@ pub(super) struct Situation<'a> {
     pub since_last_move: Option<Duration>,
     /// How long this pane has been stuck on an account that is out.
     pub stranded_for: Option<Duration>,
+    /// The session was told, while this account could still answer,
+    /// that it was about to run out, and it had the last of the
+    /// account to bring its work to a point it can be stopped at.
+    pub warned: bool,
     /// Where the last move was aimed, if there was one.  A pane is
     /// bound to a profile by the scan, which happens after the
     /// process it names exists — so between the move and the binding
@@ -425,7 +429,14 @@ pub(super) fn next_move(s: &Situation) -> Move {
     // watchdog -- so a pane whose account had run out sat on it, idle,
     // until someone moved it by hand (pane 482, 2026-10-17).  The
     // account cannot answer whatever that work comes back with.
-    if (s.tool_executing || s.work_running)
+    //
+    // A session that was told in time has already done what the wait
+    // was for, so its background work no longer holds it: the account
+    // cannot answer anything that work comes back with, and the pane
+    // only stands still. A command in the foreground still does, until
+    // it ends -- cut off halfway it can leave a write half done.
+    let work_holds = s.work_running && !s.warned;
+    if (s.tool_executing || work_holds)
         && s.stranded_for.map(|d| d < TOOL_HOLD_MAX).unwrap_or(true)
     {
         return Move::Hold(if s.tool_executing {
@@ -752,6 +763,7 @@ mod tests {
             since_last_move: None,
             last_target: None,
             stranded_for: None,
+            warned: false,
         }
     }
 
@@ -784,6 +796,13 @@ mod tests {
             ..situation(&r)
         };
         assert_eq!(next_move(&s), Move::To(3), "past five minutes");
+
+        // Told in time, it does not wait on its background work at all;
+        // a command in the foreground still holds it until it ends.
+        let s = Situation { work_running: true, warned: true, ..situation(&r) };
+        assert_eq!(next_move(&s), Move::To(3), "warned: background work does not hold");
+        let s = Situation { tool_executing: true, work_running: true, warned: true, ..situation(&r) };
+        assert_eq!(next_move(&s), Move::Hold("a tool is running here"));
 
         // But that hold is not forever.  A CLI parked until its window
         // reopens reads exactly like a running tool, and held one pane
