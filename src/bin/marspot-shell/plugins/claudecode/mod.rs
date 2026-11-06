@@ -222,7 +222,7 @@ pub struct ClaudecodePlugin {
     /// What was last logged about moving each resting pane.
     rebalance_said: HashMap<u64, String>,
     /// Busy panes told their account was nearly out, so each is told once a week.
-    heads_up: HashMap<u64, heads_up::Sent>,
+    heads_up: heads_up::Ledger,
     /// Panes left out of the sweep because their model or effort could not be
     /// confirmed, kept so the reason is logged once, not every pass.
     unjudged: std::collections::HashSet<u64>,
@@ -527,7 +527,7 @@ impl ClaudecodePlugin {
             moved_at: HashMap::new(),
             rebalanced: HashMap::new(),
             rebalance_said: HashMap::new(),
-            heads_up: HashMap::new(),
+            heads_up: heads_up::Ledger::default(),
             unjudged: std::collections::HashSet::new(),
             logged_out: HashMap::new(),
             dormant: Vec::new(),
@@ -1237,8 +1237,7 @@ impl ClaudecodePlugin {
         }
     }
 
-    /// Write the dormant set to the plugin's state dir.  Best-effort:
-    /// losing it costs a wake path, not a session.
+    /// Write the dormant set to the plugin's state dir; losing it costs a wake path.
     fn persist_dormant(&self, host: &dyn PluginHost) {
         let Ok(dir) = host.state_dir() else { return };
         let path = dir.join("dormant.tsv");
@@ -1902,6 +1901,7 @@ impl Plugin for ClaudecodePlugin {
         // Anything an earlier process left dormant still has its
         // scrollback and its uuid; the next scan re-arms the wake path.
         self.load_dormant(host);
+        self.load_heads_up(host);
         // Resolve ~/.claude/projects.  Without HOME there's nothing
         // to do — disable cleanly via a soft Err.
         let home = std::env::var_os("HOME").ok_or_else(|| {

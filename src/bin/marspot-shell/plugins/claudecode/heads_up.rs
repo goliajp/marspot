@@ -9,7 +9,9 @@
 //! background. The message goes to the session's own inbox, never
 //! into the composer, so what the person is typing is not touched.
 
+use std::collections::HashMap;
 use std::io::Write;
+use std::ops::{Deref, DerefMut};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,6 +64,75 @@ impl Sent {
     }
     pub(super) fn landed_on(&self, profile: u8) -> bool {
         self.profile == profile && self.delivered.load(Ordering::Relaxed)
+    }
+}
+
+/// Every pane told, by session, kept on disk so a restart of the shell
+/// -- every silent update is one -- neither tells a pane twice in a
+/// week nor forgets that it was told, which is what lets it leave at
+/// once when the account runs out.
+#[derive(Default)]
+pub(super) struct Ledger {
+    sent: HashMap<u64, Sent>,
+    /// What was last written, so a pass writes only on a change. The
+    /// delivered flag is set by the sending thread, so a change can
+    /// arrive between passes without the map itself being touched.
+    written: String,
+}
+
+impl Deref for Ledger {
+    type Target = HashMap<u64, Sent>;
+    fn deref(&self) -> &Self::Target {
+        &self.sent
+    }
+}
+
+impl DerefMut for Ledger {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.sent
+    }
+}
+
+impl Ledger {
+    /// One line per pane: `sid profile week delivered`, by sid.
+    fn encode(&self) -> String {
+        let mut sids: Vec<&u64> = self.sent.keys().collect();
+        sids.sort();
+        sids.iter()
+            .map(|sid| {
+                let s = &self.sent[sid];
+                let delivered = u8::from(s.delivered.load(Ordering::Relaxed));
+                format!("{sid}\t{}\t{}\t{delivered}\n", s.profile, s.week)
+            })
+            .collect()
+    }
+
+    /// Read back what `encode` wrote; a line that does not parse is
+    /// dropped, and costs that pane at most a second message.
+    pub(super) fn decode(text: &str) -> Self {
+        let sent = text
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split('\t');
+                let sid = f.next()?.parse().ok()?;
+                let profile = f.next()?.parse().ok()?;
+                let week = f.next()?.parse().ok()?;
+                let delivered = f.next()? == "1";
+                Some((sid, Sent { profile, week, delivered: Arc::new(AtomicBool::new(delivered)) }))
+            })
+            .collect();
+        let mut ledger = Self { sent, written: String::new() };
+        ledger.written = ledger.encode();
+        ledger
+    }
+
+    /// The text to write, when it differs from what was last written.
+    pub(super) fn changed(&mut self) -> Option<String> {
+        let now = self.encode();
+        (now != self.written).then(|| {
+            self.written.clone_from(&now);
+            now
+        })
     }
 }
 
@@ -174,6 +245,26 @@ mod tests {
         assert!(env.from.as_deref().is_some_and(|a| a.ends_with("/marspot-quota.sock")));
         assert!(env.body.contains("P8"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_ledger_survives_a_restart_and_is_written_only_on_a_change() {
+        let mut ledger = Ledger::default();
+        assert_eq!(ledger.changed(), None, "nothing told, nothing to write");
+        let delivered = Arc::new(AtomicBool::new(false));
+        ledger.insert(7, Sent { profile: 8, week: 1_794_373_200, delivered: Arc::clone(&delivered) });
+        let first = ledger.changed().expect("a new pane is written");
+        assert_eq!(ledger.changed(), None, "and not again");
+        delivered.store(true, Ordering::Relaxed);
+        let second = ledger.changed().expect("delivery, set by the sending thread, is written too");
+        assert_ne!(first, second);
+
+        let back = Ledger::decode(&second);
+        assert!(back[&7].is_for(8, 1_794_373_200));
+        assert!(back[&7].landed_on(8));
+        let mut back = back;
+        assert_eq!(back.changed(), None, "what was read is what is on disk");
+        assert!(Ledger::decode("garbage\n7\tx\n").is_empty());
     }
 
     #[test]
