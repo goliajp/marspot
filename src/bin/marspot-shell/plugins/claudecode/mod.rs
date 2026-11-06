@@ -23,6 +23,7 @@ mod quota;
 mod rooms;
 mod rebalance;
 mod switching;
+mod heads_up;
 mod refusal;
 mod model;
 mod statusline;
@@ -215,16 +216,15 @@ pub struct ClaudecodePlugin {
     stranded: HashMap<u64, Stranding>,
     /// When each pane was last moved off a refused account.
     moved_at: HashMap<u64, Instant>,
-    /// Resting panes moved onto a better account: when, and to which
-    /// profile, so a move on its way is not made twice and a pane is
-    /// not moved again within `rebalance::COOLDOWN`.
+    /// Resting panes moved onto a better account: when, and to which profile,
+    /// so a move on its way is not made twice nor repeated within `COOLDOWN`.
     rebalanced: HashMap<u64, (Instant, u8)>,
-    /// What was last logged about moving each resting pane, so a
-    /// steady answer is said once.
+    /// What was last logged about moving each resting pane.
     rebalance_said: HashMap<u64, String>,
-    /// Panes left out of the sweep because their model or effort could
-    /// not be confirmed, kept so the reason is logged once rather than
-    /// every pass.
+    /// Busy panes told their account was nearly out, so each is told once a week.
+    heads_up: HashMap<u64, heads_up::Sent>,
+    /// Panes left out of the sweep because their model or effort could not be
+    /// confirmed, kept so the reason is logged once, not every pass.
     unjudged: std::collections::HashSet<u64>,
     /// Per profile, the newest time a pane there was told it could not
     /// log in. Outlives the panes that saw it: they move off, and the
@@ -527,6 +527,7 @@ impl ClaudecodePlugin {
             moved_at: HashMap::new(),
             rebalanced: HashMap::new(),
             rebalance_said: HashMap::new(),
+            heads_up: HashMap::new(),
             unjudged: std::collections::HashSet::new(),
             logged_out: HashMap::new(),
             dormant: Vec::new(),
@@ -1371,7 +1372,7 @@ impl ClaudecodePlugin {
             let _ = host.submit_pty_op(sid, cycle_blocked_op("⚠ model unknown"));
             return;
         }
-        if self.start_profile_cycle_to(host, sid, meta, target, false, choice) {
+        if self.start_profile_cycle_to(host, sid, meta, target, None, choice) {
             self.stranded.entry(sid).or_default().last_target = Some(target);
         }
     }
@@ -1391,7 +1392,7 @@ impl ClaudecodePlugin {
         shelld_sid: u64,
         meta: BindMeta,
         next_profile: u8,
-        say_continue: bool,
+        say: Option<String>,
         // the model and effort the new claude is started with
         choice: CliChoice,
     ) -> bool {
@@ -1455,7 +1456,7 @@ impl ClaudecodePlugin {
             );
         }
         let Some(op) = profile_cycle_op(
-            say_continue,
+            say.as_deref(),
             &meta.uuid,
             meta.has_transcript,
             next_profile,
@@ -1602,7 +1603,7 @@ fn confirm_choice(pane_model: Option<&str>, choice: &CliChoice) -> Result<(), &'
 /// script sets the variable the alias would have set — same effect,
 /// without depending on that file still defining it.
 fn profile_cycle_op(
-    say_continue: bool,
+    say: Option<&str>,
     uuid: &str,
     has_transcript: bool,
     next_profile: u8,
@@ -1673,8 +1674,8 @@ fn profile_cycle_op(
     // an interactive claude started this way answers the prompt
     // without the composer ever holding it, and it combines with
     // `--resume`.
-    if say_continue {
-        cmd = cmd.quoted_arg(resume_word());
+    if let Some(word) = say {
+        cmd = cmd.quoted_arg(word);
     }
     let line = cmd.to_bytes()?;
     // What the person had typed and not sent. Read before claude is
@@ -1685,10 +1686,9 @@ fn profile_cycle_op(
     let mut op = pty_op::PtyOp::new("cc.profile_cycle")
         .hold_screen(true)
         .badge(format!("→ P{next_profile}"))
-        // Whatever the person had typed travels; the sentence this
-        // script says does not. It is on the command line now and
-        // never reaches the composer -- but a copy left there by an
-        // older build would otherwise be carried forward for ever.
+        // Whatever the person had typed travels; the sentence this script
+        // says does not. It is on the command line now and never reaches
+        // the composer, but a copy an older build left there would travel.
         .step(pty_op::Step::capture_composer(Arc::clone(&held)).disowning(resume_word()))
         .step(pty_op::Step::settle(HOLD_SETTLE).named("hold_settle"))
         .step(
@@ -2274,6 +2274,7 @@ mod tests {
     use super::*;
 
     mod acting;
+    mod telling;
 
     use marspot_term::test_env::{sandbox_state_dir, ChildGuard, EnvGuard, TempDir};
 
@@ -2410,7 +2411,7 @@ mod tests {
             has_transcript: true,
         };
 
-        plugin.start_profile_cycle_to(&host, 7, meta, 2, false, CliChoice::default());
+        plugin.start_profile_cycle_to(&host, 7, meta, 2, None, CliChoice::default());
         host.pump_ops();
 
         // The badge rides the PaneSession, so it takes a tick to
@@ -2936,7 +2937,7 @@ mod tests {
             has_transcript: true,
         };
 
-        plugin.start_profile_cycle_to(&host, 7, meta, 2, false, CliChoice::default());
+        plugin.start_profile_cycle_to(&host, 7, meta, 2, None, CliChoice::default());
         host.pump_ops();
 
         struct Recording(std::sync::Mutex<Vec<String>>);
@@ -2970,7 +2971,7 @@ mod tests {
     /// `claude --resume` checks for a live holder the moment it starts.
     #[test]
     fn a_cycle_through_a_background_hold_stops_it_before_resuming() {
-        let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), Some(fid(5151)), 4200, None, &CliChoice::default()).expect("cycle");
+        let op = profile_cycle_op(Some(&resume_word()), "u-1", true, 4, fid(4242), Some(fid(5151)), 4200, None, &CliChoice::default()).expect("cycle");
         let labels: Vec<&str> = op.steps.iter().map(|s| s.label).collect();
         let stop = labels.iter().position(|l| *l == "stop_background").expect("stop step present");
         let resume = labels.iter().position(|l| *l == "resume").expect("resume step present");
@@ -2980,10 +2981,10 @@ mod tests {
             pty_op::StepKind::Terminate { target: pidtree::ProcId { pid: 5151, .. }, .. }
         ));
         // No holder: no extra step.
-        let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).unwrap();
+        let op = profile_cycle_op(Some(&resume_word()), "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).unwrap();
         assert!(!op.steps.iter().any(|s| s.label == "stop_background"));
         // A holder that is the pane's own claude is not stopped twice.
-        let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), Some(fid(4242)), 4200, None, &CliChoice::default()).unwrap();
+        let op = profile_cycle_op(Some(&resume_word()), "u-1", true, 4, fid(4242), Some(fid(4242)), 4200, None, &CliChoice::default()).unwrap();
         assert!(!op.steps.iter().any(|s| s.label == "stop_background"));
     }
 
@@ -3004,7 +3005,7 @@ mod tests {
     /// no second path: nothing in the run types the sentence.
     #[test]
     fn a_cycle_says_continue_on_the_command_line() {
-        let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).expect("cycle");
+        let op = profile_cycle_op(Some(&resume_word()), "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).expect("cycle");
         let labels: Vec<&str> = op.steps.iter().map(|s| s.label).collect();
         let resume = labels.iter().position(|l| *l == "resume").expect("resume");
         let line = match &op.steps[resume].kind {
@@ -3052,7 +3053,7 @@ mod tests {
             model: Some("claude-fable-5-1[1m]".into()),
             effort: Some("medium".into()),
         };
-        let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, None, &choice).expect("cycle");
+        let op = profile_cycle_op(Some(&resume_word()), "u-1", true, 4, fid(4242), None, 4200, None, &choice).expect("cycle");
         let line = op
             .steps
             .iter()
@@ -3066,7 +3067,7 @@ mod tests {
         assert!(line.contains("--model 'claude-fable-5-1[1m]'"), "quoted, or the shell globs it: {line}");
         assert!(line.contains("--effort medium"), "{line}");
 
-        let plain = profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default())
+        let plain = profile_cycle_op(Some(&resume_word()), "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default())
             .expect("cycle");
         let sent: String = plain
             .steps
@@ -3135,7 +3136,7 @@ mod tests {
     /// the person sent by hand: median 7.6 ms, up to 25.9 ms, measured.
     #[test]
     fn a_resumed_pane_gets_no_hook_on_the_persons_keystrokes() {
-        let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).expect("cycle");
+        let op = profile_cycle_op(Some(&resume_word()), "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).expect("cycle");
         let line = match &op.steps.iter().find(|s| s.label == "resume").unwrap().kind {
             pty_op::StepKind::Send(b) => String::from_utf8_lossy(b).into_owned(),
             _ => unreachable!(),
@@ -3162,7 +3163,7 @@ mod tests {
     #[test]
     fn a_cycle_resumes_the_session_where_it_lives() {
         let op = profile_cycle_op(
-            true,
+            Some(&resume_word()),
             "u-1",
             true,
             4,
@@ -3207,7 +3208,7 @@ mod tests {
         // Without one, the line is what it has always been: run where
         // the shell stands. Not knowing where a session lives is not a
         // reason to refuse to move it off a spent account.
-        let plain = profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).expect("cycle");
+        let plain = profile_cycle_op(Some(&resume_word()), "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).expect("cycle");
         let line = match &plain.steps.iter().find(|s| s.label == "resume").unwrap().kind {
             pty_op::StepKind::Send(b) => String::from_utf8_lossy(b).into_owned(),
             _ => unreachable!(),
@@ -3221,7 +3222,7 @@ mod tests {
     #[test]
     fn a_directory_that_cannot_be_quoted_is_not_guessed_at() {
         assert!(
-            !profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, Some("/tmp/it's here"), &CliChoice::default())
+            !profile_cycle_op(Some(&resume_word()), "u-1", true, 4, fid(4242), None, 4200, Some("/tmp/it's here"), &CliChoice::default())
                 .map(|op| op.steps.iter().any(|s| s.label == "resume"))
                 .unwrap_or(false),
             "a path with a quote in it produces no resume line at all"
@@ -3239,7 +3240,7 @@ mod tests {
     /// went black for as long as the new process took to draw.
     #[test]
     fn a_cycle_outlasts_the_first_frame_of_the_new_claude() {
-        let op = profile_cycle_op(true, "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).expect("cycle");
+        let op = profile_cycle_op(Some(&resume_word()), "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).expect("cycle");
         let labels: Vec<&str> = op.steps.iter().map(|s| s.label).collect();
         let at = |n: &str| labels.iter().position(|l| *l == n);
         let ready = at("await_tui_ready").expect("the terminal is asked first");
@@ -5078,13 +5079,13 @@ mod tests {
             "no uuid ⇒ no resume line ⇒ claude must not be taken down"
         );
         assert!(
-            profile_cycle_op(true, "", false, 3, fid(4242), None, 4200, None, &CliChoice::default()).is_none(),
+            profile_cycle_op(Some(&resume_word()), "", false, 3, fid(4242), None, 4200, None, &CliChoice::default()).is_none(),
             "…and the badge-click cycle refuses for the same reason"
         );
         // The same call with a uuid is the normal path, so the guard
         // above is the only thing being tested here.
         assert!(reclaim_op("u-1", None, Some(fid(4242)), 4200, None, &CliChoice::default()).is_some());
-        assert!(profile_cycle_op(true, "u-1", true, 3, fid(4242), None, 4200, None, &CliChoice::default()).is_some());
+        assert!(profile_cycle_op(Some(&resume_word()), "u-1", true, 3, fid(4242), None, 4200, None, &CliChoice::default()).is_some());
     }
 
     /// The record the hook leaves is found by the pid of the claude
@@ -5165,7 +5166,7 @@ mod tests {
     /// answered something.
     #[test]
     fn a_session_with_no_turn_yet_cycles_by_starting_fresh() {
-        let op = profile_cycle_op(true, "u-1", false, 3, fid(4242), None, 4200, None, &CliChoice::default())
+        let op = profile_cycle_op(Some(&resume_word()), "u-1", false, 3, fid(4242), None, 4200, None, &CliChoice::default())
             .expect("a named session with no transcript can still cycle");
         let sent = sent_text(&op);
         assert!(
@@ -5179,7 +5180,7 @@ mod tests {
 
         // The counter-case: once the transcript exists, the session
         // travels with the switch.
-        let op = profile_cycle_op(true, "u-1", true, 3, fid(4242), None, 4200, None, &CliChoice::default()).expect("normal path");
+        let op = profile_cycle_op(Some(&resume_word()), "u-1", true, 3, fid(4242), None, 4200, None, &CliChoice::default()).expect("normal path");
         let sent = sent_text(&op);
         assert!(sent.contains("--resume"), "{sent:?}");
         assert!(sent.contains("u-1"), "{sent:?}");
