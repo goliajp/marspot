@@ -4,6 +4,8 @@
 
 use super::*;
 
+const HEADS_UP_FILE: &str = "heads_up.tsv";
+
 impl ClaudecodePlugin {
     /// Every pane sitting on an account that cannot answer moves to
     /// one that can.
@@ -135,6 +137,22 @@ impl ClaudecodePlugin {
                 );
             }
             self.move_off_refused(host, sid, &rooms, meta, result, choice);
+        }
+        self.persist_heads_up(host);
+    }
+
+    pub(super) fn load_heads_up(&mut self, host: &dyn PluginHost) {
+        let Ok(dir) = host.state_dir() else { return };
+        if let Ok(text) = fs::read_to_string(dir.join(HEADS_UP_FILE)) {
+            self.heads_up = heads_up::Ledger::decode(&text);
+        }
+    }
+
+    fn persist_heads_up(&mut self, host: &dyn PluginHost) {
+        let Some(text) = self.heads_up.changed() else { return };
+        let Ok(dir) = host.state_dir() else { return };
+        if let Err(e) = fs::write(dir.join(HEADS_UP_FILE), text) {
+            host.log(LogLevel::Warn, "quota.heads_up_persist_failed", &format!("{e}"));
         }
     }
 
