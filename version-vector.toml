@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.255"  # an idle pane is not moved onto better quota while the machine is overloaded
+shell   = "0.7.256"  # language servers under claude are not work; one wait line per target
 core    = "0.12.294"  # settings know claudecode.rebalance
 session = "0.11.153"  # publishes the window title beside the frame
