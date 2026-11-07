@@ -92,44 +92,37 @@ fn a_refusal_naming_another_model_leaves_this_one_alone() {
 
 #[test]
 fn an_account_that_refused_a_pane_is_no_destination() {
-    let home = quota_home("rd");
-    feed(&home, "rd");
-    let host = FakeHost::new(home.join("state"));
-    confirmed("u-97");
-    let mut on_p2 = pane_on_p1(&home, "u-97");
-    on_p2.profile_num = 2;
-    on_p2.config_dir = Some(home.join(".claude-profile-2").to_string_lossy().into_owned());
-    host.status.lock().unwrap().insert(
-        97,
-        crate::plugins::PaneStatusView {
-            status: marspot::pane_state::PaneStatus::AwaitingUser,
-            held: Duration::from_secs(600),
-            quiescent: true,
-        },
-    );
-    rebalance(marspot::settings::Rebalance::On);
+    let room = |util_7d: f64, reset_7d: i64| quota::Room::Known {
+        status: "allowed".into(),
+        util_5h: 0.0,
+        util_7d,
+        reset_7d,
+        models: Vec::new(),
+        models_measured_at: 1_793_836_800,
+        measured_at: 1_793_836_800,
+    };
+    let feed = vec![(1u8, room(0.99, 4102444800)), (2u8, room(0.2, 4103049600))];
+    let opus = Some("opus-5-5");
+    let target = |seen: &refusal::Seen| {
+        let mut rooms = feed.clone();
+        seen.mark(&mut rooms);
+        super::super::rebalance::better_home(&rooms, 2, opus).map(|(t, _)| t)
+    };
 
-    // with nothing known against it, P1 renews first and a resting pane goes there
-    let mut plugin = stranded_plugin(on_p2.clone(), 97);
-    let mut result = scan_of(97, CcActivity::AwaitingUser);
-    sweep(&mut plugin, &host, &mut result);
-    let to = moved(&host, 97);
-    assert!(to.len() == 1 && to[0].contains(".claude-profile-1"), "control: {to:?}");
+    // with nothing known against it, P1 renews first and is where a resting pane goes
+    let mut seen = refusal::Seen::default();
+    assert_eq!(target(&seen), Some(1));
 
-    // once a pane there has been refused, it does not
-    let host = FakeHost::new(home.join("state2"));
-    host.status.lock().unwrap().insert(
-        97,
-        crate::plugins::PaneStatusView {
-            status: marspot::pane_state::PaneStatus::AwaitingUser,
-            held: Duration::from_secs(600),
-            quiescent: true,
-        },
-    );
-    let mut plugin = stranded_plugin(on_p2, 97);
-    plugin.refused.out.insert((1, String::new()), AFTER);
-    let mut result = scan_of(97, CcActivity::AwaitingUser);
-    sweep(&mut plugin, &host, &mut result);
-    assert!(moved(&host, 97).is_empty(), "{:?}", host.sent.lock().unwrap());
-    rebalance(marspot::settings::Rebalance::Off);
+    // a Fable cap spent there says nothing about Opus
+    seen.out.insert((1, "fable".into()), AFTER);
+    assert_eq!(target(&seen), Some(1));
+
+    // once a pane there has been refused outright, it is no destination
+    seen.out.insert((1, String::new()), AFTER);
+    assert_eq!(target(&seen), None);
+
+    // until the feed measures it again, after the refusal
+    seen.out.clear();
+    seen.out.insert((1, String::new()), BEFORE);
+    assert_eq!(target(&seen), Some(1));
 }
