@@ -53,6 +53,7 @@ use statusline::*;
 use worker::*;
 use records::*;
 use refusal::{last_quota_refusal, refused_since};
+use super::handoff::resume_word;
 
 use std::collections::HashMap;
 use std::fs;
@@ -1341,8 +1342,6 @@ impl ClaudecodePlugin {
             "cycle.profiles",
             &format!("discovered={profiles:?} current=P{} next=P{next_profile}", meta.profile_num),
         );
-        // A hand click is someone who is right here: they can say
-        // whatever they meant to say.
         self.switch_by_hand(host, shelld_sid, meta, next_profile);
     }
 
@@ -1371,7 +1370,10 @@ impl ClaudecodePlugin {
             let _ = host.submit_pty_op(sid, cycle_blocked_op("⚠ model unknown"));
             return;
         }
-        if self.start_profile_cycle_to(host, sid, meta, target, None, choice) {
+        // The person may switch away from a turn that was cut off by the
+        // quota and walk off; the new claude is told the same as after
+        // an automatic move, and an idle one stays idle.
+        if self.start_profile_cycle_to(host, sid, meta, target, Some(resume_word()), choice) {
             self.stranded.entry(sid).or_default().last_target = Some(target);
         }
     }
@@ -1761,25 +1763,6 @@ fn profile_cycle_op(
             // it does not also need to be told the quota came back.
             .step(pty_op::Step::restore_composer(held)),
     )
-}
-
-/// What to say to a session that has just been resumed on another
-/// account.
-///
-/// Said to every pane the sweep moves, because no reading of the
-/// transcript separates "finished" from "cut off" after the fact.
-///
-/// It carries both branches so that it can be said in either state:
-/// carry on if something was interrupted, stay put if nothing was.
-/// Tried by hand across every agent pane on 2026-09-30 — nothing was
-/// woken that should have stayed asleep, and nothing that had been
-/// cut off was missed.  Naming the idle case is what buys that;
-/// without it the earlier wording still nudged an idle session into
-/// finding something to continue.
-fn resume_word() -> String {
-    std::env::var("MARSPOT_CC_RESUME_WORD").unwrap_or_else(|_| {
-        "额度恢复了，如果有刚被打断的工作请继续，如果是 idle 状态请保持".to_string()
-    })
 }
 
 /// Build the badge right-click menu rows: one "switch to Px" per
@@ -2851,6 +2834,10 @@ mod tests {
         assert!(
             host.sent.lock().unwrap().iter().any(|(_, l)| l.contains("--model 'claude-opus-5-5'")),
             "started on the model it was on"
+        );
+        assert!(
+            host.sent.lock().unwrap().iter().any(|(_, l)| l.contains(&resume_word())),
+            "told the same as after an automatic move"
         );
 
         // Landed on P1, which has no room for it: it moves on, to P2.

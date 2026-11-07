@@ -126,12 +126,17 @@ pub(crate) struct PaneCodex {
 /// so resuming under a DIFFERENT profile finds that profile's most
 /// recent session in this cwd — which is the honest meaning of
 /// switching accounts, not a bug to paper over.
+///
+/// The session is told the same sentence an automatic claude move
+/// carries, as the prompt `--last` takes in place of a session id: a
+/// switch is often made because the turn was cut off by the quota.
 pub(super) fn profile_switch_op(pane: &PaneCodex, profile: u8, dir: &std::path::Path) -> Option<pty_op::PtyOp> {
     let dir = dir.to_str()?;
     let line = pty_op::PtyCommand::new("codex")
         .env("CODEX_HOME", dir)
         .arg("resume")
         .arg("--last")
+        .quoted_arg(crate::plugins::handoff::resume_word())
         .clear_screen_first(true)
         .to_bytes()?;
     Some(
@@ -233,6 +238,9 @@ mod profile_menu_tests {
             "{line}"
         );
         assert!(line.contains("codex resume --last"), "{line}");
+        // after --last, so codex reads it as the prompt, not a session id
+        let word = crate::plugins::handoff::resume_word();
+        assert!(line.contains(&format!("--last '{word}'")), "{line}");
         // The pane's own screen is cleared first so the new session
         // does not paint over the old one's tail.  It goes out as a
         // shell `printf`, not a raw escape — the line is typed at a
