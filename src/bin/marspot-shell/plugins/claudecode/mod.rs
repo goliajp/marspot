@@ -227,11 +227,8 @@ pub struct ClaudecodePlugin {
     /// Panes left out of the sweep because their model or effort could not be
     /// confirmed, kept so the reason is logged once, not every pass.
     unjudged: std::collections::HashSet<u64>,
-    /// Per profile, the newest time a pane there was told it could not
-    /// log in. Outlives the panes that saw it: they move off, and the
-    /// next pane to be moved must not be sent back. One entry per
-    /// profile at most.
-    logged_out: HashMap<u8, i64>,
+    /// What panes have been told about their accounts.
+    refused: refusal::Seen,
 
     /// Panes whose claude has been reclaimed and that are waiting for a
     /// keypress.  Persisted (`dormant.tsv`) because an L1 self-execv
@@ -530,7 +527,7 @@ impl ClaudecodePlugin {
             rebalance_said: HashMap::new(),
             heads_up: heads_up::Ledger::default(),
             unjudged: std::collections::HashSet::new(),
-            logged_out: HashMap::new(),
+            refused: refusal::Seen::default(),
             dormant: Vec::new(),
             armed: std::collections::HashSet::new(),
             held: HashMap::new(),
@@ -1311,7 +1308,7 @@ impl ClaudecodePlugin {
                     |p| quota::profile_email(home, p),
                     rooms::unix_now(),
                 );
-                refusal::mark_logged_out(&mut rooms, &self.logged_out);
+                self.refused.mark(&mut rooms);
                 host.log(
                     LogLevel::Info,
                     "cycle.rooms",
@@ -2257,6 +2254,7 @@ mod tests {
     use super::*;
 
     mod acting;
+    mod refused;
     mod telling;
 
     use marspot_term::test_env::{sandbox_state_dir, ChildGuard, EnvGuard, TempDir};
@@ -2622,7 +2620,7 @@ mod tests {
         result.new_models.insert(79, "opus-5-5".into());
 
         sweep(&mut plugin, &host, &mut result);
-        assert_eq!(plugin.logged_out.get(&2), Some(&1_000));
+        assert_eq!(plugin.refused.logged_out.get(&2), Some(&1_000));
         assert!(host.submitted.lock().unwrap().is_empty(), "P1 is spent and P2 cannot log in");
         assert_eq!(plugin.stranded.get(&79).and_then(|s| s.hold_said), Some("every account is out"));
         assert_eq!(plugin.stranded.get(&78).and_then(|s| s.hold_said), Some("every account is out"));

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::SystemTime;
 
 use super::model::short_model;
-use super::quota::{Refusal, Room};
+use super::quota::{same_model, Refusal, Room};
 
 /// When this session was last told by the API that it had reached a
 /// limit, as unix seconds.
@@ -113,6 +113,72 @@ pub(super) fn mark_logged_out(rooms: &mut [(u8, Room)], seen: &HashMap<u8, i64>)
             && seen.get(p).is_some_and(|at| at > measured_at)
         {
             *status = "auth_error".into();
+        }
+    }
+}
+
+/// What panes have learnt about their accounts, kept past the panes.
+///
+/// A refusal is a fact about the account, not about the pane that met
+/// it: every pane there on the same model is shut out at the same
+/// moment. Kept per pane, it moved only the panes that happened to
+/// send something; on 2026-11-07 P1 refused its first pane at 17:39
+/// while the feed still read it as short of full, and ten panes left
+/// one by one over the next three and a half minutes, each after a
+/// refusal of its own -- an idle one only once someone spoke to it.
+/// The panes that saw it move off, so it has to outlive them; the
+/// next pane to be moved must not be sent back there either.
+#[derive(Debug, Default)]
+pub(super) struct Seen {
+    /// Per profile, the newest login failure a pane met there.
+    pub logged_out: HashMap<u8, i64>,
+    /// Per profile and the model a refusal named (empty: the account's
+    /// own windows), the newest refusal a pane met there. Bounded by
+    /// profiles times models.
+    pub out: HashMap<(u8, String), i64>,
+}
+
+impl Seen {
+    /// Take in what one pane on `profile` was told. True when it is
+    /// newer than anything already known for that account and model.
+    pub(super) fn note(&mut self, profile: u8, r: &Refusal) -> bool {
+        let at = if r.logged_out {
+            self.logged_out.entry(profile).or_insert(i64::MIN)
+        } else {
+            self.out.entry((profile, r.model.clone())).or_insert(i64::MIN)
+        };
+        let news = r.at > *at;
+        *at = (*at).max(r.at);
+        news
+    }
+
+    /// Mark every account a pane has been refused by since the feed
+    /// last measured it.
+    ///
+    /// The window the refusal names is set full: the account's when it
+    /// names no model, that model's cap when it does, so a Fable
+    /// refusal shuts out Fable panes only. A newer measurement is
+    /// believed instead, as with a failed login.
+    pub(super) fn mark(&self, rooms: &mut [(u8, Room)]) {
+        mark_logged_out(rooms, &self.logged_out);
+        for ((p, model), at) in &self.out {
+            let Some((_, Room::Known { util_5h, models, models_measured_at, measured_at, .. })) =
+                rooms.iter_mut().find(|(n, _)| n == p)
+            else {
+                continue;
+            };
+            if model.is_empty() {
+                // "session", "5-hour" and "weekly" are not told apart;
+                // any of them shuts the account until it is measured again
+                if at > measured_at {
+                    *util_5h = util_5h.max(1.0);
+                }
+            } else if at > models_measured_at {
+                match models.iter_mut().find(|(label, _)| same_model(model, label)) {
+                    Some((_, u)) => *u = u.max(1.0),
+                    None => models.push((model.clone(), 1.0)),
+                }
+            }
         }
     }
 }
