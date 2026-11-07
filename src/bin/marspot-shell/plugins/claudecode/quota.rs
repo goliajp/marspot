@@ -268,7 +268,7 @@ pub(super) fn needs_fable(model: Option<&str>) -> bool {
 ///
 /// The badge says `fable-5`, the feed says `fable`. Neither is a prefix
 /// of the other in general, so match on whichever side is shorter.
-fn same_model(want: &str, label: &str) -> bool {
+pub(super) fn same_model(want: &str, label: &str) -> bool {
     want.starts_with(label) || label.starts_with(want)
 }
 
