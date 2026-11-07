@@ -36,18 +36,23 @@ impl ClaudecodePlugin {
         let email = |p: u8| result.profiles.iter().find(|(n, _)| *n == p).and_then(|(_, e)| e.clone());
         let mut rooms = quota::rooms_for(&profiles, &usage.accounts, email, rooms::unix_now());
         for meta in result.new_meta.values() {
-            if let Some(r) = meta.refused_at.as_ref().filter(|r| r.logged_out)
-                && self.logged_out.get(&meta.profile_num).is_none_or(|seen| r.at > *seen)
-            {
-                self.logged_out.insert(meta.profile_num, r.at);
+            let Some(r) = meta.refused_at.as_ref() else { continue };
+            if self.refused.note(meta.profile_num, r) {
+                let what = if r.logged_out {
+                    "could not log in".to_string()
+                } else if r.model.is_empty() {
+                    "refused every model".to_string()
+                } else {
+                    format!("refused {}", r.model)
+                };
                 host.log(
                     LogLevel::Info,
-                    "quota.logged_out",
-                    &format!("P{} could not log in at {}", meta.profile_num, r.at),
+                    if r.logged_out { "quota.logged_out" } else { "quota.refused" },
+                    &format!("P{} {what} at {}", meta.profile_num, r.at),
                 );
             }
         }
-        refusal::mark_logged_out(&mut rooms, &self.logged_out);
+        self.refused.mark(&mut rooms);
         // Whether a profile is out is a question about a pane, not
         // about a profile: a pane pinned to a model can be shut out of
         // an account whose week is fine, and a pane that has just been
