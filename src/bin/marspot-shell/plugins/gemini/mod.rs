@@ -21,6 +21,7 @@
 
 mod badge;
 mod hand_off;
+mod model;
 mod pane;
 mod peer;
 mod session;
@@ -36,6 +37,7 @@ use badge::{badge_text, publish_badge};
 use pane::{argv_facts, profile_of, profile_switch_op, root_from, ArgvFacts, PaneGemini};
 use session::{Asker, SessionIndex};
 
+pub(crate) use model::is_model;
 pub(crate) use pane::{config_dir, handoff_homes, launch, profile_dirs, profile_dirs_in};
 pub(crate) use peer::{peers, Peer, Peers};
 pub(crate) use session::{by_id as session_by_id, head_id as session_id_of};
@@ -119,8 +121,11 @@ pub struct GeminiPlugin {
     sessions: SessionIndex,
     /// What each gemini pane is running, for the badge menu.
     panes: std::collections::HashMap<u64, PaneGemini>,
-    /// `GEMINI_CLI_HOME` of each gemini process, read once per process.
+    /// What each gemini process's environment says about its home and
+    /// its model, read once per process.
     env: crate::observe::EnvCache,
+    /// The model each gemini process started with.
+    starts: model::Starts,
 }
 
 impl GeminiPlugin {
@@ -131,6 +136,7 @@ impl GeminiPlugin {
             sessions: SessionIndex::default(),
             panes: std::collections::HashMap::new(),
             env: crate::observe::EnvCache::default(),
+            starts: model::Starts::default(),
         }
     }
 
@@ -142,15 +148,33 @@ impl GeminiPlugin {
         let (outer, worker) = agent_in(&s.descendants)?;
         // one read per process: its environment does not change
         let root = root_from(self.env.value(&outer.row, "GEMINI_CLI_HOME"), user_home);
+        let cwd = pidtree::proc_cwd(outer.row.pid);
+        let args = argv_facts(outer.argv.as_deref().unwrap_or_default());
+        let started = SystemTime::UNIX_EPOCH + Duration::from_micros(outer.row.start_us);
+        if !self.starts.has(outer.row.id()) {
+            let mut env = |key: &'static str| self.env.value(&outer.row, key);
+            let (system_settings, system_defaults) =
+                model::system_paths(env("GEMINI_CLI_SYSTEM_SETTINGS_PATH"), env("GEMINI_CLI_SYSTEM_DEFAULTS_PATH"));
+            let launch = model::Launch {
+                flag: args.model.clone(),
+                env: env("GEMINI_MODEL"),
+                root: root.clone(),
+                cwd: cwd.clone(),
+                started,
+                system_settings,
+                system_defaults,
+            };
+            self.starts.resolve(outer.row.id(), launch);
+        }
         Some(Seen {
             sid: s.entry.id,
             shell_pid,
             gemini: outer.row.id(),
             worker,
-            started: SystemTime::UNIX_EPOCH + Duration::from_micros(outer.row.start_us),
+            started,
             root,
-            cwd: pidtree::proc_cwd(outer.row.pid).map(|c| c.to_string_lossy().into_owned()),
-            args: argv_facts(outer.argv.as_deref().unwrap_or_default()),
+            cwd: cwd.map(|c| c.to_string_lossy().into_owned()),
+            args,
         })
     }
 }
@@ -256,6 +280,7 @@ impl Plugin for GeminiPlugin {
         let seen: Vec<Seen> = obs.sessions.iter().filter_map(|s| self.see(s, &user_home)).collect();
         let live: Vec<pidtree::ProcId> = seen.iter().map(|s| s.gemini).collect();
         self.sessions.retain(&live);
+        self.starts.retain(&live);
         self.panes.retain(|sid, _| seen.iter().any(|s| s.sid == *sid));
         let mut peers = Peers { bound: Vec::new(), all_known: true };
 
@@ -285,8 +310,18 @@ impl Plugin for GeminiPlugin {
                 _ => peers.all_known = false,
             }
             let profile = profile_of(&s.root);
-            let model = s.args.model.as_deref().or_else(|| facts.as_ref().and_then(|f| f.model.as_deref()));
-            publish_badge(host, &mut self.last_badge, s.sid, &badge_text(profile, model));
+            // What the process started with holds until its session file
+            // says otherwise, so it is used alone only while a file is
+            // still to come: not for a process whose file cannot be told,
+            // and not while a file is only partly read.
+            let started = self.starts.of(s.gemini);
+            let (shown, carried) = match facts.as_ref().map(|f| f.said.as_ref()) {
+                Some(Some(said)) => (model::shown(started, Some(said)), model::carried(started, Some(said))),
+                Some(None) => (None, None),
+                None if lone || s.args.session.is_some() => (model::shown(started, None), model::carried(started, None)),
+                None => (None, None),
+            };
+            publish_badge(host, &mut self.last_badge, s.sid, &badge_text(profile, shown.as_deref()));
             self.panes.insert(
                 s.sid,
                 PaneGemini {
@@ -296,6 +331,7 @@ impl Plugin for GeminiPlugin {
                     profile,
                     cwd: s.cwd.clone(),
                     session: facts.map(|f| f.session),
+                    model: carried,
                 },
             );
         }

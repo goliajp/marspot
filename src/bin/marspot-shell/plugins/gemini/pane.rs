@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::looks_like_gemini;
+use super::model::{is_model, Named};
 use crate::plugins::{pidtree, pty_op};
 
 /// What a gemini command line says about its session and model.
@@ -15,7 +16,7 @@ pub(super) struct ArgvFacts {
     /// no session by themselves and leave this empty.
     pub session: Option<String>,
     /// `-m` / `--model`, as typed: an alias (`flash`) stays an alias.
-    pub model: Option<String>,
+    pub model: Named,
 }
 
 /// An id that can go on a command line and into a file-name match:
@@ -31,10 +32,6 @@ fn is_uuid(s: &str) -> bool {
     s.len() == 36 && s.bytes().filter(|b| *b == b'-').count() == 4 && is_session_id(s)
 }
 
-fn is_model(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 64 && !s.starts_with('-') && s.bytes().all(|b| b.is_ascii_graphic())
-}
-
 /// Read the flags off `argv`.  Both spellings yargs accepts: the value
 /// as the next argument, or after `=`.
 pub(super) fn argv_facts(argv: &[String]) -> ArgvFacts {
@@ -46,13 +43,24 @@ pub(super) fn argv_facts(argv: &[String]) -> ArgvFacts {
             _ => (arg, None),
         };
         if !matches!(flag, "--session-id" | "--resume" | "-r" | "--model" | "-m") {
+            // several short flags written as one word may hold `-m`
+            if flag.len() > 2 && !flag.starts_with("--") && flag.starts_with('-') && flag.contains('m') {
+                facts.model = Named::Unknown;
+            }
             continue;
         }
-        let Some(value) = inline.or_else(|| it.next()) else { break };
+        let Some(value) = inline.or_else(|| it.next()) else {
+            if matches!(flag, "--model" | "-m") {
+                facts.model = Named::Unknown;
+            }
+            break;
+        };
         match flag {
             "--session-id" if is_session_id(value) => facts.session = Some(value.to_string()),
             "--resume" | "-r" if is_uuid(value) => facts.session = Some(value.to_string()),
-            "--model" | "-m" if is_model(value) => facts.model = Some(value.to_string()),
+            // the last one given is the one gemini takes
+            "--model" | "-m" if is_model(value) => facts.model = Named::As(value.to_string()),
+            "--model" | "-m" => facts.model = Named::Unknown,
             _ => {}
         }
     }
@@ -162,6 +170,9 @@ pub(crate) struct PaneGemini {
     /// named.  `None` leaves the pane with nothing to resume or hand
     /// over, and both then do nothing.
     pub session: Option<String>,
+    /// The model to start this session's next process with: what the
+    /// user set it to, when that is known.
+    pub model: Option<String>,
 }
 
 /// Take gemini down and bring the SAME session back under another
@@ -176,6 +187,10 @@ pub(crate) struct PaneGemini {
 /// From gemini's own directory, because that is the project gemini
 /// looks the session up under, and the pane's shell may have moved.
 ///
+/// With the model the session was set to, when that is known: a resumed
+/// session does not remember it, and without the flag the new process
+/// takes whatever the other home's settings name.
+///
 /// The worker is the one signalled.  The waiting parent follows its
 /// child down whichever signal ends it, while a parent killed after the
 /// escalation would leave the child running on the pane's terminal.
@@ -186,7 +201,12 @@ pub(super) fn profile_switch_op(
     session: &str,
     user_home: &Path,
 ) -> Option<pty_op::PtyOp> {
-    let line = launch_in(root, user_home)?
+    let cmd = launch_in(root, user_home)?;
+    let cmd = match pane.model.as_deref().filter(|m| is_model(m)) {
+        Some(model) => cmd.arg("-m").arg(model),
+        None => cmd,
+    };
+    let line = cmd
         .arg("--resume")
         .arg(session)
         .arg("-i")
@@ -229,13 +249,15 @@ mod tests {
         let child = argv(&["/opt/gem/bin/gemini", "/opt/gem/bin/gemini", "-m", "flash", "--session-id", ID]);
         assert_eq!(
             argv_facts(&child),
-            ArgvFacts { session: Some(ID.into()), model: Some("flash".into()) }
+            ArgvFacts { session: Some(ID.into()), model: Named::As("flash".into()) }
         );
         let resumed = argv(&["gemini", &format!("--resume={ID}"), "--model=gemini-3-pro"]);
         assert_eq!(
             argv_facts(&resumed),
-            ArgvFacts { session: Some(ID.into()), model: Some("gemini-3-pro".into()) }
+            ArgvFacts { session: Some(ID.into()), model: Named::As("gemini-3-pro".into()) }
         );
+        let twice = argv(&["gemini", "-m", "flash", "--model", "pro"]);
+        assert_eq!(argv_facts(&twice).model, Named::As("pro".into()), "the last one given");
         assert_eq!(argv_facts(&argv(&["gemini", "-r", ID])).session.as_deref(), Some(ID));
     }
 
@@ -247,7 +269,17 @@ mod tests {
         }
         assert_eq!(argv_facts(&argv(&["gemini", "--resume"])), ArgvFacts::default());
         assert_eq!(argv_facts(&argv(&["gemini", "--session-id", "a b"])).session, None);
-        assert_eq!(argv_facts(&argv(&["gemini", "-m", "two words"])).model, None);
+    }
+
+    /// A flag that is there but cannot be read is not the same as no
+    /// flag: it still outranks the environment and the settings.
+    #[test]
+    fn a_model_flag_that_cannot_be_read_is_not_an_absent_one() {
+        assert_eq!(argv_facts(&argv(&["gemini"])).model, Named::Absent);
+        assert_eq!(argv_facts(&argv(&["gemini", "--resume", ID, "-p", "use model x"])).model, Named::Absent);
+        for words in [&["gemini", "-m", "two words"][..], &["gemini", "-m"], &["gemini", "--model="], &["gemini", "-ym", "flash"]] {
+            assert_eq!(argv_facts(&argv(words)).model, Named::Unknown, "{words:?}");
+        }
     }
 
     #[test]
@@ -294,6 +326,7 @@ mod tests {
             profile: Some(1),
             cwd: Some("/w/a".into()),
             session: Some(ID.into()),
+            model: None,
         }
     }
 
@@ -327,6 +360,20 @@ mod tests {
             )),
             "the worker is signalled, not typed at and not its waiting parent"
         );
+    }
+
+    /// The account changes; the model the session was set to does not.
+    #[test]
+    fn the_switch_keeps_the_model_the_session_was_set_to() {
+        let user = Path::new("/Users/x");
+        let to = Path::new("/Users/x/.gemini-profile-2");
+        let set = |model: &str| PaneGemini { model: Some(model.into()), ..pane() };
+        let line = line_of(&profile_switch_op(&set("auto"), 2, to, ID, user).expect("op builds"));
+        assert!(line.contains(&format!(" exec gemini -m auto --resume {ID} -i ")), "{line}");
+        let line = line_of(&profile_switch_op(&set("gemini-2.5-pro"), 2, to, ID, user).expect("op builds"));
+        assert!(line.contains(&format!(" exec gemini -m gemini-2.5-pro --resume {ID} -i ")), "{line}");
+        let line = line_of(&profile_switch_op(&set("x; rm -rf ~"), 2, to, ID, user).expect("op builds"));
+        assert!(line.contains(&format!(" exec gemini --resume {ID} -i ")), "a name that is not one is left off: {line}");
     }
 
     #[test]
