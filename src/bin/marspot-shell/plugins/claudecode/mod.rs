@@ -26,6 +26,7 @@ mod switching;
 mod heads_up;
 mod refusal;
 mod seen;
+mod profile_tag;
 mod model;
 mod statusline;
 mod settings_hook;
@@ -56,6 +57,7 @@ use statusline::*;
 use settings_hook::*;
 use worker::*;
 use scan_result::*;
+use profile_tag::*;
 use records::*;
 use refusal::{last_quota_refusal, refused_since};
 use super::handoff::resume_word;
@@ -1298,6 +1300,12 @@ impl ClaudecodePlugin {
             return;
         };
         let profiles = discover_profiles();
+        // One account, or none numbered: there is nowhere to switch to,
+        // and that is not a fault to flag on the pane.
+        if profiles.len() < 2 || meta.config_dir.is_none() {
+            host.log(LogLevel::Info, "cycle.single_account", &format!("pane {shelld_sid}: no other account to switch to"));
+            return;
+        }
         // The best account for the model this pane is on, from what the
         // accounts say about themselves. Without that there is no
         // choice to make: walking to the next number was a guess, and
@@ -1787,46 +1795,6 @@ fn badge_menu_for(
         .collect()
 }
 
-
-/// Read `CLAUDE_CONFIG_DIR` off the running `claude` pid and parse a
-/// short profile tag.  Returns:
-///   * `Some("P1")` for `/Users/.../.claude-profile-1`
-///   * `Some("P0")` for the default `/Users/.../.claude` (no -profile-N)
-///   * `None`       when the env var isn't set / the read failed
-///
-/// The profile tag for a pane, from the config dir it was started
-/// with.
-///
-/// Takes the directory rather than the pid because everything a pane
-/// says about its profile — the tag, where its transcripts live, the
-/// `--config-dir` a resume line has to quote — has to come from **one
-/// read**.  Three separate reads is how the tag came to say `P3`
-/// while the transcript walk looked under the default profile and
-/// found nothing (2026-08-10).
-fn profile_tag_from(config_dir: Option<&str>) -> Option<String> {
-    let dir = config_dir?;
-    // Trailing slash tolerant; basename only.
-    let base = std::path::Path::new(dir).file_name()?.to_string_lossy().into_owned();
-    if let Some(num) = base.strip_prefix(".claude-profile-") {
-        return Some(format!("P{}", num));
-    }
-    if base == ".claude" {
-        return Some("P0".to_string());
-    }
-    // Unknown shape — fall back to "P?" so the user can still tell
-    // "the badge is missing" from "the badge is unrecognised".
-    Some("P?".to_string())
-}
-
-/// Where this pane keeps its transcripts, from the same one read as
-/// [`profile_tag_from`].
-fn projects_root_from(config_dir: Option<&str>) -> Option<PathBuf> {
-    let dir = config_dir?.trim();
-    if dir.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(dir).join("projects"))
-}
 
 /// Encode a filesystem path into claude's project directory naming
 /// convention (`/Users/foo/bar` → `-Users-foo-bar`).

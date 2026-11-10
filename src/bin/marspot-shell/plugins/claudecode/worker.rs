@@ -507,6 +507,7 @@ impl WorkerCtx {
             /// same env var, the model was missing because this did
             /// not).
             projects_root: PathBuf,
+            env_read: bool,
         }
         let mut facts: Vec<PaneFacts> = Vec::new();
         for s in obs.live() {
@@ -519,6 +520,9 @@ impl WorkerCtx {
                 continue;
             };
             let config_dir = self.caches.env.value(&claude.row, "CLAUDE_CONFIG_DIR");
+            // every process has a HOME; reading it back is how an
+            // absent config dir is told from an unreadable environment
+            let env_read = config_dir.is_some() || self.caches.env.value(&claude.row, "HOME").is_some();
             let projects_root = projects_root_from(config_dir.as_deref())
                 .unwrap_or_else(|| self.projects_root.clone());
             facts.push(PaneFacts {
@@ -530,6 +534,7 @@ impl WorkerCtx {
                 cwd,
                 argv_uuid: argv_session_uuid(claude, &s.descendants),
                 config_dir,
+                env_read,
                 projects_root,
             });
         }
@@ -691,16 +696,7 @@ impl WorkerCtx {
                 Some((uuid, path, by)) => (uuid.clone(), path.clone(), *by),
                 None => (String::new(), None, "unbound"),
             };
-            let (tag, profile_num) = match profile_tag_from(f.config_dir.as_deref()) {
-                Some(t) => {
-                    let n = t
-                        .strip_prefix('P')
-                        .and_then(|d| d.parse::<u8>().ok())
-                        .unwrap_or(u8::MAX);
-                    (Some(t), n)
-                }
-                None => (None, u8::MAX),
-            };
+            let (tag, profile_num) = tag_and_profile(f.config_dir.as_deref(), f.env_read);
             // Active model, tailed from the session jsonl: the
             // newest of (assistant record's authoritative
             // `"model"` field, `/model` local_command output) —
@@ -787,7 +783,7 @@ impl WorkerCtx {
             work.sort();
             if self.caches.work.get(&f.shelld_sid) != Some(&work) {
                 log_lines.push((
-                    LogLevel::Info,
+                    LogLevel::Debug,
                     "work.changed",
                     format!("sid={} work under claude: {work:?}", f.shelld_sid),
                 ));
