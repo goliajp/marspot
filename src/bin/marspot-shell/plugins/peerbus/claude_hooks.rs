@@ -56,7 +56,13 @@ pub(super) fn reconcile() -> Vec<String> {
 }
 
 fn reconcile_file(path: &Path, command: &str) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        // a config dir with no settings file yet, as after a fresh
+        // install of Claude Code: the hooks start one
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}\n".to_string(),
+        Err(_) => return None,
+    };
     let mut v = json::parse(&text).ok()?;
     // another program's file: `with_hooks` edits objects only
     let hooks_fit = v.get("hooks").is_none_or(|h| {
@@ -248,5 +254,16 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&f).unwrap(), odd);
         }
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_config_dir_with_no_settings_file_gets_one_with_the_hooks() {
+        let f = dir().join("settings.json");
+        assert_eq!(reconcile_file(&f, "'/a/marspot-peer' claude-hook").as_deref(), Some("pane-name hooks installed"));
+        let text = std::fs::read_to_string(&f).unwrap();
+        assert!(text.ends_with("}\n"), "{text}");
+        let v = json::parse(&text).unwrap();
+        assert!(v.at(&["hooks", "PreToolUse"]).is_some_and(|l| l.arr().len() == 1));
+        assert_eq!(reconcile_file(&f, "'/a/marspot-peer' claude-hook"), None, "and then it is left alone");
     }
 }

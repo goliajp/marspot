@@ -53,11 +53,14 @@ const CLAUDE_INSTALLER: &str = "https://claude.ai/install.sh";
 /// After start, so the first look does not compete with the panes
 /// coming up.
 const FIRST_AFTER: Duration = Duration::from_secs(15);
-const EVERY: Duration = Duration::from_secs(6 * 3600);
+const EVERY: Duration = Duration::from_secs(3600);
 /// After a failed install, how long before the same CLI is tried
-/// again: a machine that is offline, or a vendor whose download is
-/// down, is not asked four times a day.
-const RETRY_AFTER: Duration = Duration::from_secs(24 * 3600);
+/// again.  An hour: the usual failure is a machine that was offline
+/// when marspot started, and it should not wait a day for its CLIs.
+const RETRY_AFTER: Duration = Duration::from_secs(3600);
+/// A login shell that has not said where it looks for commands by now
+/// is not going to.
+const SHELL_WITHIN: Duration = Duration::from_secs(15);
 /// A newly signed binary's first run is checked by the system before
 /// it starts, which has taken most of a minute.
 const VERSION_WITHIN: Duration = Duration::from_secs(120);
@@ -96,12 +99,53 @@ impl Places {
     fn of_this_process() -> Option<Places> {
         let home = PathBuf::from(std::env::var_os("HOME")?);
         Some(Places {
-            path: std::env::var_os("PATH").unwrap_or_default(),
+            path: login_path().unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default()),
             codex_home: std::env::var_os("CODEX_HOME").map_or_else(|| home.join(".codex"), PathBuf::from),
             state: marspot_term::paths::state_root(),
             home,
         })
     }
+}
+
+/// The PATH the user's own shell ends up with.
+///
+/// An app opened from Finder has the system's bare PATH, which knows
+/// nothing of Homebrew, npm or anything a shell profile adds: a CLI
+/// the user installed there would read as missing and be installed a
+/// second time.  The shell is asked the way a pane starts it, login
+/// and interactive, and answers between markers because a profile may
+/// print whatever it likes.
+fn login_path() -> Option<OsString> {
+    const MARK: &str = "__marspot_path__";
+    let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
+    let mut child = Command::new(shell)
+        .args(["-ilc", &format!("printf '{MARK}%s{MARK}' \"$PATH\"")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + SHELL_WITHIN;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    path_between_marks(&out, MARK).map(OsString::from)
+}
+
+fn path_between_marks(out: &str, mark: &str) -> Option<String> {
+    let rest = &out[out.find(mark)? + mark.len()..];
+    let path = &rest[..rest.find(mark)?];
+    (!path.is_empty()).then(|| path.to_string())
 }
 
 fn on_path(command: &str, path: &OsStr) -> bool {
@@ -289,7 +333,7 @@ mod tests {
         let t0 = Instant::now();
         assert!(failed.due(Cli::Gemini, t0));
         failed.record(Cli::Gemini, t0, false);
-        assert!(!failed.due(Cli::Gemini, t0 + EVERY));
+        assert!(!failed.due(Cli::Gemini, t0 + RETRY_AFTER / 2));
         assert!(!failed.due(Cli::Gemini, t0 + RETRY_AFTER - Duration::from_secs(1)));
         assert!(failed.due(Cli::Gemini, t0 + RETRY_AFTER));
         // one CLI's failure holds back no other
@@ -297,5 +341,14 @@ mod tests {
         // a success forgets the failure
         failed.record(Cli::Gemini, t0 + RETRY_AFTER, true);
         assert!(failed.due(Cli::Gemini, t0 + RETRY_AFTER));
+    }
+
+    /// A shell profile prints what it likes around the answer.
+    #[test]
+    fn the_path_is_read_from_between_the_marks() {
+        let out = "Welcome!\n\u{1b}[0m__m__/opt/homebrew/bin:/usr/bin__m__\nbye";
+        assert_eq!(path_between_marks(out, "__m__").as_deref(), Some("/opt/homebrew/bin:/usr/bin"));
+        assert_eq!(path_between_marks("no marks at all", "__m__"), None);
+        assert_eq!(path_between_marks("__m____m__", "__m__"), None);
     }
 }
