@@ -1,4 +1,4 @@
-//! Moving a pane from one agent to the other: the menu rows, and the
+//! Moving a pane from one agent to another: the menu rows, and the
 //! script that does it.
 //!
 //! The order is the design (RFC-009): the document is written BEFORE
@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use super::ledger::{self, Ledger, Side};
 use super::transcript::{self, Agent};
-use super::{claude, codex as codex_history, history};
+use super::{claude, codex as codex_history, gemini as gemini_history, history};
 use crate::plugins::pty_op::{self, PtyCommand, PtyOp, Step};
-use crate::plugins::{claudecode, codex};
+use crate::plugins::{claudecode, codex, gemini, pidtree};
 
 /// Badge-menu tags this module owns: `TAG_BASE | agent << 8 | profile`.
 /// Well above the `u8` range the profile-cycle rows use, so the two
@@ -27,6 +27,7 @@ fn code(a: Agent) -> u32 {
     match a {
         Agent::Claude => 1,
         Agent::Codex => 2,
+        Agent::Gemini => 3,
     }
 }
 
@@ -42,12 +43,14 @@ pub fn parse_tag(tag: u32) -> Option<(Agent, u8)> {
     let agent = match (tag >> 8) & 0xFF {
         1 => Agent::Claude,
         2 => Agent::Codex,
+        3 => Agent::Gemini,
         _ => return None,
     };
     Some((agent, (tag & 0xFF) as u8))
 }
 
-/// An agent's account profiles: number and directory.
+/// An agent's account profiles: number and directory.  gemini with no
+/// numbered profile has its default home, as number 0.
 pub fn profiles(a: Agent) -> Vec<(u8, PathBuf)> {
     match a {
         Agent::Claude => {
@@ -58,20 +61,29 @@ pub fn profiles(a: Agent) -> Vec<(u8, PathBuf)> {
                 .collect()
         }
         Agent::Codex => codex::profile_dirs(),
+        Agent::Gemini => gemini::handoff_homes(),
     }
 }
 
-/// The rows a pane running `from` offers: one per profile of the other
+/// How a target reads in a menu row and on the badge: `codex P2`, or
+/// the bare name for gemini's default home.
+fn target_name(to: Agent, profile: u8) -> String {
+    match (to, profile) {
+        (Agent::Gemini, 0) => to.key().to_string(),
+        _ => format!("{} P{profile}", to.key()),
+    }
+}
+
+/// The rows a pane running `from` offers: one per profile of each other
 /// agent.
 pub fn menu_rows(from: Agent) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
-    let to = from.other();
-    profiles(to)
-        .into_iter()
-        .map(|(n, _)| marspot::shell_proto::PaneBadgeMenuItem {
+    let rows = |to: Agent| {
+        profiles(to).into_iter().map(move |(n, _)| marspot::shell_proto::PaneBadgeMenuItem {
             tag: tag_for(to, n),
-            label: format!("hand off to {} P{n}", to.key()),
+            label: format!("hand off to {}", target_name(to, n)),
         })
-        .collect()
+    };
+    from.others().into_iter().flat_map(rows).collect()
 }
 
 /// The agent a pane is leaving.
@@ -82,7 +94,7 @@ pub struct Leaving {
     /// switch stops this one and never a process that took its pid.
     pub proc: marspot::pidtree::ProcId,
     pub shell_pid: i32,
-    /// `CLAUDE_CONFIG_DIR` / `CODEX_HOME` it runs under.
+    /// `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GEMINI_CLI_HOME` it runs under.
     pub home: PathBuf,
     /// The session, when the plugin knows it (claude's binding does;
     /// codex's is found on the job thread — see [`history_of`]).
@@ -99,16 +111,19 @@ fn history_of(l: &Leaving) -> Option<PathBuf> {
             Some(id) => history::codex_rollout(&l.home, id),
             None => codex::newest_rollout_for_cwd(&l.home, l.cwd.as_deref()?),
         },
+        Agent::Gemini => gemini::session_by_id(&gemini::config_dir(&l.home), l.cwd.as_deref()?, l.session_id.as_deref()?),
     }
 }
 
 /// The session the pane already has with `to`, if it can be resumed
-/// from `to_home`.
-fn resumable(ledger: &Ledger, to: Agent, to_home: &Path) -> Option<String> {
+/// from `to_home`.  gemini keeps sessions per project, so one of its
+/// sessions is resumable only from the directory the line is typed in.
+fn resumable(ledger: &Ledger, to: Agent, to_home: &Path, shell_cwd: Option<&str>) -> Option<String> {
     let side = ledger.side(to)?;
     let found = match to {
         Agent::Claude => history::claude_transcript(to_home, &side.id),
         Agent::Codex => history::codex_rollout(to_home, &side.id),
+        Agent::Gemini => gemini::session_by_id(&gemini::config_dir(to_home), shell_cwd?, &side.id),
     };
     found.map(|_| side.id.clone())
 }
@@ -130,6 +145,13 @@ fn command(to: Agent, to_home: &Path, resume: Option<&str>) -> Option<Vec<u8>> {
             let c = PtyCommand::new("codex").env("CODEX_HOME", home);
             match resume {
                 Some(id) => c.arg("resume").arg(id),
+                None => c,
+            }
+        }
+        Agent::Gemini => {
+            let c = gemini::launch(to_home)?;
+            match resume {
+                Some(id) => c.arg("--resume").arg(id),
                 None => c,
             }
         }
@@ -183,6 +205,10 @@ fn prepare_in(
             let id = history::codex_id_of(&path).unwrap_or_default();
             codex_history::read(&path, ledger.watermark(Agent::Codex, &id)).map_err(io)?
         }
+        Agent::Gemini => {
+            let id = leaving.session_id.clone().unwrap_or_default();
+            gemini_history::read(&path, ledger.watermark(Agent::Gemini, &id)).map_err(io)?
+        }
     };
     next.set(leaving.agent, Some(Side { id: x.session_id.clone(), offset: x.end_offset }));
     if x.turns.is_empty() {
@@ -205,7 +231,9 @@ const PREPARE_TIMEOUT: Duration = Duration::from_secs(60);
 pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home: PathBuf) -> Option<PtyOp> {
     let dir = ledger::dir();
     let ledger = Ledger::load(&dir, sid);
-    let resume = resumable(&ledger, to, &to_home);
+    let shell_cwd = (to == Agent::Gemini).then(|| pidtree::proc_cwd(leaving.shell_pid)).flatten();
+    let shell_cwd = shell_cwd.as_deref().and_then(Path::to_str);
+    let resume = resumable(&ledger, to, &to_home, shell_cwd);
     let line = command(to, &to_home, resume.as_deref())?;
 
     // What the person was typing, carried across the switch.
@@ -235,11 +263,12 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
     let predicate = match to {
         Agent::Claude => claudecode::looks_like_claudecode,
         Agent::Codex => codex::looks_like_codex,
+        Agent::Gemini => gemini::looks_like_gemini,
     };
     Some(
         PtyOp::new("handoff.switch")
             .hold_screen(true)
-            .badge(format!("→ {} P{to_profile}", to.key()))
+            .badge(format!("→ {}", target_name(to, to_profile)))
             // Read before the agent is taken down. Without this the
             // handoff text pastes onto the end of whatever the person
             // had typed and the two go as one prompt -- their sentence
@@ -283,7 +312,7 @@ mod tests {
 
     #[test]
     fn tags_round_trip_and_stay_clear_of_profile_rows() {
-        for (a, n) in [(Agent::Claude, 1u8), (Agent::Codex, 7), (Agent::Codex, 255)] {
+        for (a, n) in [(Agent::Claude, 1u8), (Agent::Codex, 7), (Agent::Codex, 255), (Agent::Gemini, 0), (Agent::Gemini, 2)] {
             assert_eq!(parse_tag(tag_for(a, n)), Some((a, n)));
             assert!(u8::try_from(tag_for(a, n)).is_err(), "a profile-cycle plugin must ignore it");
         }
@@ -436,12 +465,69 @@ mod tests {
     }
 
     #[test]
+    fn the_gemini_command_sets_its_home_and_resumes_by_id() {
+        let h = Path::new("/Users/x/.gemini-profile-2");
+        let id = "11111111-2222-4333-8444-555555555555";
+        let s = |b: Vec<u8>| String::from_utf8(b).unwrap();
+        assert_eq!(
+            s(command(Agent::Gemini, h, Some(id)).unwrap()),
+            format!("printf '\\033[H\\033[2J'; GEMINI_CLI_HOME='/Users/x/.gemini-profile-2' gemini --resume {id}\r")
+        );
+        assert!(s(command(Agent::Gemini, h, None).unwrap()).ends_with("GEMINI_CLI_HOME='/Users/x/.gemini-profile-2' gemini\r"));
+        assert!(command(Agent::Gemini, Path::new("/Users/x/it's"), None).is_none());
+        assert_eq!(target_name(Agent::Gemini, 0), "gemini", "the default home has no number to show");
+        assert_eq!(target_name(Agent::Gemini, 2), "gemini P2");
+        assert_eq!(target_name(Agent::Codex, 1), "codex P1");
+    }
+
+    /// Leaving gemini: the session the plugin bound is found under the
+    /// home's config directory by project and id, and read into the
+    /// same document the other two agents produce.
+    #[test]
+    fn a_gemini_pane_hands_over_the_session_it_was_bound_to() {
+        use gemini::fixture::{context, file_name, head, project, reply, user};
+        let id = "11111111-2222-4333-8444-555555555555";
+        let home = tmp("switch-gemini");
+        let chats = project(&gemini::config_dir(&home), "/w/a", "a");
+        let body = [head(id), context(), user("u1", "port the parser"), reply("g1", "Ported; tests pass.", "gemini-3-pro")].concat();
+        let file = chats.join(file_name(id));
+        std::fs::write(&file, &body).unwrap();
+        let leaving = |session: Option<&str>, cwd: &str| Leaving {
+            agent: Agent::Gemini,
+            proc: marspot::pidtree::ProcId { pid: 1, start_us: 0 },
+            shell_pid: 1,
+            home: home.clone(),
+            session_id: session.map(str::to_string),
+            cwd: Some(cwd.into()),
+        };
+        assert_eq!(history_of(&leaving(None, "/w/a")), None, "no session named, none guessed");
+        assert_eq!(history_of(&leaving(Some(id), "/w/other")), None);
+        let found = history_of(&leaving(Some(id), "/w/a"));
+        assert_eq!(found.as_deref(), Some(file.as_path()));
+
+        let state = home.join("handoff");
+        std::fs::create_dir_all(&state).unwrap();
+        let o = prepare_in(6, &state, &leaving(Some(id), "/w/a"), Agent::Claude, None, &Ledger::default(), found).unwrap();
+        let msg = o.message.expect("gemini's turn is handed over");
+        assert!(msg.starts_with(transcript::MARKER) && msg.contains("Gemini CLI"), "{msg}");
+        let doc = std::fs::read_to_string(ledger::doc_path(&state, 6)).unwrap();
+        assert!(doc.contains("port the parser") && doc.contains("Ported; tests pass."), "{doc}");
+        assert!(!doc.contains("session_context"), "gemini's own preamble is not the user talking");
+        assert_eq!(o.next.gemini, Some(Side { id: id.into(), offset: body.len() as u64 }));
+
+        // and back: the ledger's session is resumable from that project only
+        assert_eq!(resumable(&o.next, Agent::Gemini, &home, Some("/w/a")).as_deref(), Some(id));
+        assert_eq!(resumable(&o.next, Agent::Gemini, &home, Some("/w/other")), None);
+        assert_eq!(resumable(&o.next, Agent::Gemini, &home, None), None);
+    }
+
+    #[test]
     fn resume_needs_the_history_to_be_reachable() {
         let d = tmp("switch-resume");
         let mut led = Ledger::default();
         led.set(Agent::Claude, Some(Side { id: "u-1".into(), offset: 0 }));
-        assert_eq!(resumable(&led, Agent::Claude, &d), None);
+        assert_eq!(resumable(&led, Agent::Claude, &d, None), None);
         claude_history(&d, "u-1", "");
-        assert_eq!(resumable(&led, Agent::Claude, &d).as_deref(), Some("u-1"));
+        assert_eq!(resumable(&led, Agent::Claude, &d, None).as_deref(), Some("u-1"));
     }
 }

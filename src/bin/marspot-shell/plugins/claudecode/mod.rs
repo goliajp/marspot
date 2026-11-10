@@ -1508,15 +1508,15 @@ impl ClaudecodePlugin {
 
 
 impl ClaudecodePlugin {
-    /// Move this pane's conversation to codex profile `n` (RFC-009).
-    fn hand_off(&mut self, host: &dyn PluginHost, sid: u64, n: u8) {
+    /// Move this pane's conversation to profile `n` of `to` (RFC-009).
+    fn hand_off(&mut self, host: &dyn PluginHost, sid: u64, to: crate::plugins::handoff::Agent, n: u8) {
         use crate::plugins::handoff;
         let Some(meta) = self.last_meta.get(&sid).cloned() else {
             host.log(LogLevel::Warn, "handoff.no_bind", &format!("pane {sid}: no claude to hand off from"));
             return;
         };
-        let Some((_, dir)) = handoff::profiles(handoff::Agent::Codex).into_iter().find(|(p, _)| *p == n) else {
-            host.log(LogLevel::Warn, "handoff.profile_gone", &format!("codex profile {n} no longer exists"));
+        let Some((_, dir)) = handoff::profiles(to).into_iter().find(|(p, _)| *p == n) else {
+            host.log(LogLevel::Warn, "handoff.profile_gone", &format!("{} profile {n} no longer exists", to.key()));
             return;
         };
         if !still_claude(meta.claude) {
@@ -1532,9 +1532,9 @@ impl ClaudecodePlugin {
             session_id: Some(meta.uuid.clone()),
             cwd: None,
         };
-        host.log(LogLevel::Info, "handoff.start", &format!("pane {sid} claude → codex P{n}: {leaving:?}"));
-        let Some(op) = handoff::switch_op(sid, leaving, handoff::Agent::Codex, n, dir) else {
-            host.log(LogLevel::Warn, "handoff.no_command", &format!("pane {sid}: cannot build the codex line"));
+        host.log(LogLevel::Info, "handoff.start", &format!("pane {sid} claude → {} P{n}: {leaving:?}", to.key()));
+        let Some(op) = handoff::switch_op(sid, leaving, to, n, dir) else {
+            host.log(LogLevel::Warn, "handoff.no_command", &format!("pane {sid}: cannot build the {} line", to.key()));
             return;
         };
         if let Err(e) = host.submit_pty_op(sid, op) {
@@ -2178,8 +2178,8 @@ impl Plugin for ClaudecodePlugin {
         tag: u32,
     ) {
         if let Some((to, n)) = crate::plugins::handoff::parse_tag(tag) {
-            if to == crate::plugins::handoff::Agent::Codex {
-                self.hand_off(host, shelld_session_id, n);
+            if to != crate::plugins::handoff::Agent::Claude && self.last_meta.contains_key(&shelld_session_id) {
+                self.hand_off(host, shelld_session_id, to, n);
             }
             return;
         }

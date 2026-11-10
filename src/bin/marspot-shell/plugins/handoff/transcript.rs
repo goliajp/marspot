@@ -15,6 +15,7 @@ use std::path::PathBuf;
 pub enum Agent {
     Claude,
     Codex,
+    Gemini,
 }
 
 impl Agent {
@@ -22,6 +23,7 @@ impl Agent {
         match self {
             Self::Claude => "Claude Code",
             Self::Codex => "codex",
+            Self::Gemini => "Gemini CLI",
         }
     }
     /// The word used in ledgers and menu labels.
@@ -29,12 +31,15 @@ impl Agent {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Gemini => "gemini",
         }
     }
-    pub fn other(self) -> Self {
+    /// The agents a pane running this one can be handed to.
+    pub fn others(self) -> [Self; 2] {
         match self {
-            Self::Claude => Self::Codex,
-            Self::Codex => Self::Claude,
+            Self::Claude => [Self::Codex, Self::Gemini],
+            Self::Codex => [Self::Claude, Self::Gemini],
+            Self::Gemini => [Self::Claude, Self::Codex],
         }
     }
 }
