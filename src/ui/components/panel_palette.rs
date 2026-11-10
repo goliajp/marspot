@@ -83,8 +83,8 @@ pub fn with_alpha(mut c: [f32; 4], alpha: f32) -> [f32; 4] {
     c
 }
 /// A panel's own surface and the line around it.
-pub fn frame_bg() -> [f32; 4] { crate::ui::components::modal_frame::MODAL_FRAME_BG }
-pub fn frame_border() -> [f32; 4] { crate::ui::components::modal_frame::MODAL_FRAME_BORDER }
+pub fn frame_bg() -> [f32; 4] { color::BG_PANEL.to_rgba_f32() }
+pub fn frame_border() -> [f32; 4] { color::BORDER_STRONG.to_rgba_f32() }
 /// What the rest of the window is covered with while a panel is open.
 pub fn backdrop() -> [f32; 4] {
     with_alpha(color::SHADOW.to_rgba_f32(), spec::panel::BACKDROP_ALPHA)
@@ -108,8 +108,10 @@ pub fn faded(c: [f32; 4]) -> [f32; 4] {
 }
 /// Behind the header's close button while the pointer is on it.
 pub fn close_hover_bg() -> [f32; 4] { color::SURFACE_4.to_rgba_f32() }
-/// A table row under the pointer, and the selected one.
-pub fn row_hover() -> [f32; 4] { color::BG_HOVER.to_rgba_f32() }
+/// A table row under the pointer, and the selected one.  A row lies
+/// on a card, so its hover is the step above the card: the general
+/// hover token is darker than a card and vanished on one.
+pub fn row_hover() -> [f32; 4] { color::SURFACE_4.to_rgba_f32() }
 pub fn row_selected() -> [f32; 4] { with_alpha(accent(), spec::table::SELECTED_ALPHA) }
 /// Behind the × of a danger icon button at rest.
 pub fn danger_rest_bg() -> [f32; 4] { with_alpha(danger(), spec::control::DANGER_REST_ALPHA) }

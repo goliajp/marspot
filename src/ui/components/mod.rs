@@ -13,7 +13,6 @@ pub mod panel_palette;
 pub mod settings_modal;
 pub mod settings_paint;
 pub mod scroll_view;
-pub mod modal_frame;
 pub mod process_panel;
 pub mod process_panel_paint;
 pub mod search_overlay;
@@ -35,7 +34,6 @@ pub mod dev_panel;
 mod panel_snapshot_tests;
 
 pub use scroll_view::ScrollView;
-pub use modal_frame::{ModalFrame, ModalLayoutSpec};
 pub use panel_chrome::PanelChrome;
 pub use search_overlay::{SearchOverlayParams, paint_search_overlay};
 pub use panel::Panel;
