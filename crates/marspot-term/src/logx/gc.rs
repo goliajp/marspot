@@ -68,18 +68,6 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
-    fn tmpdir() -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        let p = std::env::temp_dir().join(format!(
-            "marspot-logx-gc-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
-    }
-
     fn set_mtime_secs_ago(path: &Path, secs_ago: i64) {
         let cstr = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
         let now = SystemTime::now()
@@ -103,7 +91,8 @@ mod tests {
 
     #[test]
     fn sweep_rotated_unlinks_files_past_age_cap() {
-        let dir = tmpdir();
+        let tmp = crate::test_env::TempDir::new("logx-gc");
+        let dir = tmp.path().to_path_buf();
         let old = dir.join("marspot.00000000000000000001.log.gz");
         let young = dir.join("marspot.00000000000000000002.log.gz");
         let active = dir.join("marspot.log");
@@ -121,7 +110,8 @@ mod tests {
 
     #[test]
     fn sweep_rotated_ignores_non_marspot_files() {
-        let dir = tmpdir();
+        let tmp = crate::test_env::TempDir::new("logx-gc");
+        let dir = tmp.path().to_path_buf();
         let stranger = dir.join("not-ours.log.gz");
         std::fs::write(&stranger, b"x").unwrap();
         set_mtime_secs_ago(&stranger, 30 * 86400);

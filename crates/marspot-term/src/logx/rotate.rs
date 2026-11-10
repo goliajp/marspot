@@ -206,18 +206,6 @@ mod tests {
     use super::*;
     use std::io::Write as _;
 
-    fn tmpdir() -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        let p = std::env::temp_dir().join(format!(
-            "marspot-logx-rot-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
-    }
-
     fn pad(byte: u8, n: usize) -> Vec<u8> {
         let mut v = vec![byte; n];
         // Make the bytes look like a TSV line so the GZ encoder sees
@@ -229,7 +217,8 @@ mod tests {
 
     #[test]
     fn rotate_renames_active_at_size_cap_and_creates_fresh() {
-        let dir = tmpdir();
+        let tmp = crate::test_env::TempDir::new("logx-rot");
+        let dir = tmp.path().to_path_buf();
         let mut sink = Sink::open_at_dir(dir.clone(), 1024).expect("open sink");
         // Push past 1 KiB so the next write triggers rotate.
         sink.file.write_all(&pad(b'x', 2048)).unwrap();
@@ -245,7 +234,8 @@ mod tests {
 
     #[test]
     fn rotate_skips_when_under_cap_and_recent() {
-        let dir = tmpdir();
+        let tmp = crate::test_env::TempDir::new("logx-rot");
+        let dir = tmp.path().to_path_buf();
         let mut sink = Sink::open_at_dir(dir.clone(), 4096).expect("open sink");
         sink.file.write_all(&pad(b'x', 1000)).unwrap();
         sink.bytes = 1000;
@@ -266,7 +256,8 @@ mod tests {
 
     #[test]
     fn retention_prune_keeps_n_newest_by_mtime() {
-        let dir = tmpdir();
+        let tmp = crate::test_env::TempDir::new("logx-rot");
+        let dir = tmp.path().to_path_buf();
         // Plant 5 fake rotated files with distinct mtimes.
         for i in 0..5u32 {
             let path = dir.join(format!("marspot.{:020}.log.gz", i));
