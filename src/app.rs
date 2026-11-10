@@ -1872,6 +1872,7 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     // (~74 KB) and self-update keeps the icon in lockstep with the
     // codebase.
     set_dock_icon_from_bundle(&nsapp);
+    crate::app_menu::install(&nsapp, mtm);
 
     let (window, view, delegate) = build_window(mtm, window_id, &attrs);
     // RFC-003 §6 Amendment 15 — the boot window's delegate also wears
