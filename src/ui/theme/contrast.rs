@@ -31,7 +31,7 @@ mod tests {
     use super::*;
     use crate::ui::theme::spec;
     use crate::ui::theme::table::{Theme, CONTRAST, DARK, LIGHT};
-    use marspot_term::palette::ThemeId;
+    use marspot_term::palette::{Palette, ThemeId};
 
     #[derive(Clone, Copy, PartialEq, Debug)]
     enum Kind {
@@ -79,6 +79,11 @@ mod tests {
     /// Every (what is drawn, what it is drawn on) the interface has,
     /// by the roles `panel_palette` hands out.
     fn pairs(t: &Theme) -> Vec<(Kind, String, Color, Color)> {
+        pairs_with(t, marspot_term::palette::of(t.id))
+    }
+
+    /// The same, over terminal colours that need not be the theme's.
+    fn pairs_with(t: &Theme, term: &Palette) -> Vec<(Kind, String, Color, Color)> {
         let unit = |c: (f64, f64, f64)| Color::from_rgba_f32([c.0 as f32, c.1 as f32, c.2 as f32, 1.0]);
         let (frame, card, raised) = (t.bg_panel, t.surface_3, t.surface_4);
         let (chrome, canvas) = (t.chrome, t.canvas);
@@ -86,7 +91,7 @@ mod tests {
         let selected = spec::table::SELECTED_ALPHA as f64;
         let chip = spec::control::CHIP_FILL_ALPHA as f64;
         let rest = spec::control::DANGER_REST_ALPHA as f64;
-        let (term_fg, term_bg) = (unit(t.term.fg), unit(t.term.bg));
+        let (term_fg, term_bg) = (unit(term.fg), unit(term.bg));
         use Kind::*;
         let mut out: Vec<(Kind, String, Color, Color)> = [
             (Text, "text on a panel", t.fg, frame),
@@ -144,7 +149,7 @@ mod tests {
             if ansi_is_the_ground(t.id, i) {
                 continue;
             }
-            let c = unit(t.term.ansi[i]);
+            let c = unit(term.ansi[i]);
             out.push((Ansi, format!("ansi {name} in the pane in use"), c, canvas));
             out.push((Ansi, format!("ansi {name} in a pane not in use"), c, chrome));
         }
@@ -153,7 +158,11 @@ mod tests {
 
     /// The pairs of `t` that fall below their floor.
     fn failures(t: &Theme) -> Vec<String> {
-        pairs(t)
+        failing(t, pairs(t))
+    }
+
+    fn failing(t: &Theme, pairs: Vec<(Kind, String, Color, Color)>) -> Vec<String> {
+        pairs
             .into_iter()
             .filter(|(kind, _, fg, on)| ratio(*fg, *on) < floor(t.id, *kind))
             .map(|(_, what, ..)| what)
@@ -207,16 +216,9 @@ mod tests {
         let paper = &marspot_term::palette::LIGHT;
         let mut ansi = paper.ansi;
         ansi[3] = (1.0, 0.9, 0.2);
-        let yellow_on_white: &'static _ = Box::leak(Box::new(marspot_term::palette::Palette {
-            id: paper.id,
-            bg: paper.bg,
-            fg: paper.fg,
-            cursor: paper.cursor,
-            ansi,
-        }));
-        let bad_ansi = Theme { term: yellow_on_white, ..copy(&LIGHT) };
+        let yellow_on_white = Palette { id: paper.id, bg: paper.bg, fg: paper.fg, cursor: paper.cursor, ansi };
         assert_eq!(
-            failures(&bad_ansi),
+            failing(&LIGHT, pairs_with(&LIGHT, &yellow_on_white)),
             ["ansi yellow in the pane in use", "ansi yellow in a pane not in use"],
         );
     }
