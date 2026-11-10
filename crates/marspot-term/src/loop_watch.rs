@@ -516,16 +516,22 @@ mod tests {
         assert!(t.cpu < Duration::from_millis(20), "{t:?}");
         assert!(t.window >= Duration::from_millis(200), "{t:?}");
 
+        // Spun until this thread has had its CPU, whatever the wall
+        // clock made of it: a busy machine gives a spinning thread a
+        // fraction of a core, and a wall-clock spin then proves less
+        // than it means to.
         w.begin();
         w.phase("spinning");
-        let t0 = Instant::now();
-        let mut x = 0u64;
-        while t0.elapsed() < Duration::from_millis(400) {
-            x = x.wrapping_mul(31).wrapping_add(1);
+        let cpu = || probe::Probe::this_thread().look().unwrap().cpu;
+        let (c0, mut x) = (cpu(), 0u64);
+        while cpu() - c0 < Duration::from_millis(400) {
+            for _ in 0..200_000 {
+                x = x.wrapping_mul(31).wrapping_add(1);
+            }
         }
         std::hint::black_box(x);
         let _ = w.end();
-        let (phase, t) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let (phase, t) = rx.recv_timeout(Duration::from_secs(30)).unwrap();
         assert_eq!(phase, "spinning");
         assert!(t.runnable > t.waiting, "{t:?}");
         assert!(t.cpu >= Duration::from_millis(150), "{t:?}");
