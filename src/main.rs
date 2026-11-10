@@ -2167,8 +2167,9 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
             }));
         }
         Some("process") => {
+            let (cell_w, cell_h) = renderer.cell_dims();
             renderer.set_process_panel(Some(demo_process_panel(
-                phys_w as f64, phys_h as f64, layout.top_inset,
+                phys_w as f64, phys_h as f64, layout.top_inset, cell_w, cell_h,
             )));
         }
         Some(other) => {
@@ -2262,28 +2263,12 @@ fn demo_process_panel(
     w_phys: f64,
     h_phys: f64,
     top_inset: f64,
+    cell_w: f64,
+    cell_h: f64,
 ) -> marspot::ui::components::process_panel::ProcessPanelRender {
     use marspot::ui::components::process_panel::{
-        ProcessPanelPaneRow, ProcessPanelRender, ProcessPanelRow,
+        self as pp, ProcessPanelPaneRow, ProcessPanelRender, ProcessPanelRow,
     };
-    use marspot::ui::components::modal_frame::{ModalFrame, ModalLayoutSpec};
-    let frame = ModalFrame::layout(
-        w_phys,
-        h_phys,
-        ModalLayoutSpec {
-            default_w: 760.0 * shot_scale(),
-            default_h: 460.0 * shot_scale(),
-            title_bar_h: 56.0,
-            tab_strip_h: 0.0,
-            maximized: false,
-            max_w_ratio: 0.95,
-            max_h_ratio: 0.90,
-            minimized: false,
-            with_tab_strip: false,
-            pos_offset: (0.0, 0.0),
-            top_obstruction: top_inset,
-        },
-    );
     let pane = |name: &str, sid: u64, n: u32, cpu: f32, rss: u64, busy: &str| {
         ProcessPanelPaneRow {
             name: name.to_string(),
@@ -2294,51 +2279,28 @@ fn demo_process_panel(
             busy: busy.to_string(),
         }
     };
-    let row = |depth: u8, pid: i32, comm: &str, cpu: f32, rss: u64, header: bool| {
-        ProcessPanelRow {
-            depth,
-            pid,
-            comm: comm.to_string(),
-            cpu_pct: cpu,
-            rss_kb: rss,
-            is_header: header,
-        }
+    let row = |depth: u8, pid: i32, comm: &str, cpu: f32, rss: u64| {
+        ProcessPanelRow { depth, pid, comm: comm.to_string(), cpu_pct: cpu, rss_kb: rss }
     };
+    let pane_rows = vec![
+        pane("torajs", 102, 9, 34.5, 512_000, "cargo test"),
+        pane("marspot", 101, 4, 1.2, 86_000, ""),
+        pane("kevy", 103, 2, 0.0, 12_400, ""),
+    ];
+    let rows = vec![
+        row(0, 4211, "zsh", 0.0, 3_200),
+        row(1, 4288, "cargo", 2.1, 48_000),
+        row(2, 4301, "rustc", 32.4, 460_000),
+        row(2, 4302, "rustc", 0.0, 900),
+    ];
+    let frame = pp::panel_rect(w_phys, h_phys, cell_h, top_inset, (0.0, 0.0));
     ProcessPanelRender {
-        rect: frame.frame,
-        title: "Process Monitor".to_string(),
-        pane_rows: vec![
-            pane("marspot", 101, 4, 1.2, 86_000, ""),
-            pane("torajs", 102, 9, 34.5, 512_000, "cargo test"),
-            pane("kevy", 103, 2, 0.0, 12_400, ""),
-        ],
-        selected_pane: 1,
-        rows: vec![
-            row(0, 0, "PID  COMMAND", 0.0, 0, true),
-            row(0, 4211, "zsh", 0.0, 3_200, false),
-            row(1, 4288, "cargo", 2.1, 48_000, false),
-            row(2, 4301, "rustc", 32.4, 460_000, false),
-            row(2, 4302, "rustc", 0.0, 900, false),
-        ],
-        minimized: false,
-        // Traffic lights: small circles in the title bar.  Passing the
-        // whole frame here (the first cut) paints one enormous pill
-        // over the body — a snapshot that looks broken while the
-        // panel is fine.
-        light_rects: {
-            let d = 24.0;
-            let y = frame.frame.y_top + (56.0 - d) * 0.5;
-            let mk = |n: f64| marspot_term::layout::Rect {
-                x: frame.frame.x + 20.0 + n * (d + 12.0),
-                y_top: y,
-                w: d,
-                h: d,
-            };
-            [mk(0.0), mk(1.0), mk(2.0)]
-        },
-        title_bar_hovered: false,
-        scroll_y: 0.0,
-        draw_backdrop: true,
+        layout: pp::layout(frame, top_inset, pane_rows.len(), rows.len(), 0.0, cell_w, cell_h),
+        pane_rows,
+        selected_pane: 0,
+        detail: "torajs · sid 102 · shell pid 4211".to_string(),
+        rows,
+        hover: pp::Hover::None,
     }
 }
 

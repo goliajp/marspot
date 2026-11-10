@@ -1,480 +1,509 @@
-//! The Process Monitor modal: the data a frame of it is drawn from,
-//! and how it is painted.
+//! The process monitor: the data a frame of it is drawn from, and
+//! where everything in it is.
 //!
-//! Painted through a `ViewPainter` into the overlay scratches, so the
-//! modal is above everything else in the frame by construction.
+//! Two groups side by side under the shared panel chrome: the panes on
+//! the left, the selected pane's process tree on the right, each a
+//! table on a card.
+//!
+//! [`layout`] is the one place that knows where things are.  The click
+//! handler keeps the [`Layout`] of the frame on screen and asks it
+//! what the pointer is on; the painter draws that same `Layout` and
+//! computes nothing of its own, so a button is clickable exactly where
+//! it is drawn.
+//!
+//! All rects are physical pixels.
 
-use marspot_term::layout::{Alignment, Rect};
+use marspot_term::layout::Rect;
 
-use crate::font_cache::FontCache;
-use crate::glyph_atlas::GlyphAtlas;
-use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance, UiRectInstance};
-use crate::ui::components::modal_frame::{MODAL_FRAME_BG, MODAL_FRAME_BORDER, MODAL_FRAME_CORNER_RADIUS};
+use crate::ui::components::controls;
+use crate::ui::components::panel_chrome::{self, PanelChrome};
+use crate::ui::components::table::{self, Align, Column, ColumnWidth, SortDir, TableGeometry};
+use crate::ui::theme::spec::{self, header, space};
 
-/// F3+4 — one row in the detail process-tree panel (right column of
-/// the redesigned Process Monitor).  Pure data; L2 builds these every
-/// frame for the selected pane.  Includes per-pid resource cols so
-/// the renderer can lay out a proper sortable table.
-#[derive(Debug, Clone)]
-pub struct ProcessPanelRow {
-    /// Indent depth (0 = pane header / shell-root, 1+ = tree
-    /// descendants).  Cosmetic only — the leftmost column.
-    pub depth: u8,
-    /// Process pid.  0 if `is_header` (panel header row).
-    pub pid: i32,
-    /// Process comm (16 chars max on macOS — what `ps` shows).
-    pub comm: String,
-    /// Sampled CPU% (delta of two task_info samples / wall-clock dt
-    /// × 100).  May exceed 100 for multi-threaded procs (a `rustc`
-    /// pinning one P-core reads ~100; a parallel `cargo build` walks
-    /// up to ncpu × 100).  0 for header rows.
-    pub cpu_pct: f32,
-    /// Resident set size in KB at the latest sample.
-    pub rss_kb: u64,
-    /// True when this is the synthetic header row for the pane (no
-    /// kill button drawn, slightly heavier FG).  False for tree rows.
-    pub is_header: bool,
+/// The panel's name, in its header.
+pub const TITLE: &str = "Process monitor";
+pub const PANES_HEADING: &str = "Panes";
+pub const PROCESSES_HEADING: &str = "Processes";
+
+/// The panel's own measurements.  Widths of table columns are in
+/// terminal cells, like everything else about a table.
+pub mod metric {
+    /// The panel's width: the wide step.
+    pub const PANEL_W: f64 = 720.0;
+    /// Rows each card has room for.  The height is fixed so the panel
+    /// does not resize under the pointer as processes come and go; a
+    /// longer process list scrolls.
+    pub const VISIBLE_ROWS: usize = 16;
+    /// Characters of a pane's name the left card is sized to show.
+    pub const PANE_NAME_CELLS: f64 = 22.0;
+    /// The most of the content's width the left card may take, however
+    /// large the terminal font is.
+    pub const PANES_MAX_FRAC: f64 = 0.5;
+    /// `pids`: a count of processes.
+    pub const COUNT_CELLS: f64 = 4.0;
+    /// `▼ CPU%`, and a value up to `1600.0`.
+    pub const CPU_CELLS: f64 = 6.0;
+    /// `1023M`, `12.3G`.
+    pub const RSS_CELLS: f64 = 5.0;
+    /// A process id.
+    pub const PID_CELLS: f64 = 6.0;
 }
 
-/// F3+4 — one row in the MASTER pane list (left column of the
-/// redesigned Process Monitor).  Each row summarises one pane: name +
-/// aggregate process count / CPU% / RSS over the pane's pid tree.
+/// Column indices of the two tables, for the painter.
+pub mod col {
+    pub const NAME: usize = 0;
+    pub const PANE_PIDS: usize = 1;
+    pub const PANE_CPU: usize = 2;
+    pub const PANE_RSS: usize = 3;
+    pub const PID: usize = 1;
+    pub const CPU: usize = 2;
+    pub const RSS: usize = 3;
+}
+
+/// The left table.  The panes arrive ordered by CPU, busiest first.
+pub fn pane_columns() -> [Column; 4] {
+    use metric::*;
+    [
+        Column { header: "Pane", width: ColumnWidth::Flex, align: Align::Left, sort: None },
+        Column { header: "pids", width: ColumnWidth::Cells(COUNT_CELLS), align: Align::Right, sort: None },
+        Column {
+            header: "CPU%",
+            width: ColumnWidth::Cells(CPU_CELLS),
+            align: Align::Right,
+            sort: Some(SortDir::Desc),
+        },
+        Column { header: "RSS", width: ColumnWidth::Cells(RSS_CELLS), align: Align::Right, sort: None },
+    ]
+}
+
+/// The right table.  Its last column holds the kill button, `kill_w`
+/// wide.
+pub fn process_columns(kill_w: f64) -> [Column; 5] {
+    use metric::*;
+    [
+        Column { header: "Process", width: ColumnWidth::Flex, align: Align::Left, sort: None },
+        Column { header: "pid", width: ColumnWidth::Cells(PID_CELLS), align: Align::Right, sort: None },
+        Column { header: "CPU%", width: ColumnWidth::Cells(CPU_CELLS), align: Align::Right, sort: None },
+        Column { header: "RSS", width: ColumnWidth::Cells(RSS_CELLS), align: Align::Right, sort: None },
+        Column { header: "", width: ColumnWidth::Px(kill_w), align: Align::Right, sort: None },
+    ]
+}
+
+/// One process of the selected pane's tree.
+#[derive(Debug, Clone)]
+pub struct ProcessPanelRow {
+    /// Levels below the pane's shell, which is 0.
+    pub depth: u8,
+    pub pid: i32,
+    /// The command name, as `ps` shows it.
+    pub comm: String,
+    /// Share of one core over the last sample; above 100 for a process
+    /// running on several.
+    pub cpu_pct: f32,
+    /// Resident memory, in KB.
+    pub rss_kb: u64,
+}
+
+/// One pane, summed over its process tree.
 #[derive(Debug, Clone)]
 pub struct ProcessPanelPaneRow {
-    /// Pane name as the user sees it elsewhere — custom title >
-    /// cwd basename > ordinal.  Already truncated by L2 to fit the
-    /// master column width.
+    /// The pane's name as it appears elsewhere.
     pub name: String,
     pub sid: u64,
-    /// Number of pids in the pane's tree (including the shell root).
     pub n_pids: u32,
-    /// Sum of `ProcessPanelRow.cpu_pct` across the tree.
     pub cpu_pct: f32,
-    /// Sum of `ProcessPanelRow.rss_kb` across the tree.
     pub rss_kb: u64,
-    /// "What's busy" hint: comm of the top non-shell process by CPU%,
-    /// or "(idle)" / "" when the pane is quiet.  Pre-truncated.
+    /// The busiest non-shell process, or empty when the pane is quiet.
     pub busy: String,
 }
 
-/// F3+1.4 — full data for one render of the centered Process Monitor
-/// modal.  Renderer pulls this via `set_process_panel`.  `None` =
-/// closed, nothing drawn.
+/// Everything one frame of the panel is drawn from.
 #[derive(Debug, Clone)]
 pub struct ProcessPanelRender {
-    /// Modal frame rectangle (physical px), centered by L2 over the
-    /// window.  Includes title bar + master/detail body.
-    pub rect: Rect,
-    /// Title bar text — currently always "Process Monitor".  Kept
-    /// a String so a future plugin could rename per-pane modals.
-    pub title: String,
-    /// F3+4 — MASTER column: one row per pane (left side).
-    /// Pre-sorted by L2; renderer paints in order.  Empty Vec
-    /// (no live panes) draws an "(no panes)" placeholder.
+    /// Where everything is — the same value the click handler holds.
+    pub layout: Layout,
     pub pane_rows: Vec<ProcessPanelPaneRow>,
-    /// Which pane row in `pane_rows` is currently selected; the
-    /// `rows` field below is the process tree of that pane.  Out-
-    /// of-range silently clamped to 0 by the renderer.
+    /// The row of `pane_rows` whose processes are in `rows`.
     pub selected_pane: usize,
-    /// F3+4 — DETAIL column: rows of the selected pane's process
-    /// tree (header + flatten_pre_order).  Empty Vec OK.
+    /// Which pane the right table is about: its name, session id and
+    /// shell pid, shown at the right of the group's heading.
+    pub detail: String,
     pub rows: Vec<ProcessPanelRow>,
-    /// F3+1.5 — collapse body so only the title bar paints.  When
-    /// `true`, `pane_rows` + `rows` are NOT rendered (still walked
-    /// for hit-rect bookkeeping on the L2 side).
-    pub minimized: bool,
-    /// The three traffic-light discs, in physical px.
-    ///
-    /// Computed once in `marspot-core` (which owns the real backing
-    /// scale) and drawn verbatim here.  The painter used to recompute
-    /// them from `scale_hint`, a *font-derived* factor — so the dots
-    /// scaled with the terminal's point size while the hit rects scaled
-    /// with the display, and the two disagreed: 12 px drawn against a
-    /// 15 px click target.  System chrome tracks the system, not the
-    /// font.
-    pub light_rects: [Rect; 3],
-    /// Cursor is over the panel's title bar.
-    ///
-    /// macOS reveals the ×/−/+ glyphs inside its window buttons while
-    /// the pointer is anywhere in the title bar — not just over one
-    /// button — so the affordance is "these are clickable", not "this
-    /// one is". Mirrored here.
-    pub title_bar_hovered: bool,
-    /// F3+1.5 — body scroll offset (physical px) for the DETAIL
-    /// column.  Renderer paints rows starting at
-    /// `body_top + body_pad_top - scroll_y`, clipped at body bottom.
-    pub scroll_y: f64,
-    /// F3+1.5 — semi-transparent backdrop covering the rest of the
-    /// window so the modal reads as focused.  Painted as one
-    /// `UiRectInstance` before the modal frame.
-    pub draw_backdrop: bool,
+    /// What the pointer is on.
+    pub hover: Hover,
 }
 
-const PROCESS_PANEL_TITLE_BAR_BG: [f32; 4] = [0.18, 0.19, 0.23, 1.0];
-const PROCESS_PANEL_SEPARATOR: [f32; 4] = [0.06, 0.07, 0.09, 1.0];
-const PROCESS_PANEL_TITLE_FG: [f32; 4] = [0.92, 0.94, 0.97, 1.0];
-const PROCESS_PANEL_TAB_BG_ACTIVE: [f32; 4] = [0.20, 0.30, 0.55, 1.0];
-const PROCESS_PANEL_TAB_FG_ACTIVE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-const PROCESS_PANEL_ROW_FG: [f32; 4] = [0.86, 0.88, 0.92, 1.0];
-const PROCESS_PANEL_HEADER_FG: [f32; 4] = [0.65, 0.78, 0.95, 1.0];
+/// What the pointer is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Hover {
+    #[default]
+    None,
+    /// The header's close button.
+    Close,
+    /// A row of the left table.
+    Pane(usize),
+    /// A row of the right table, off its kill button.
+    Process(usize),
+    /// The kill button of a row of the right table.
+    Kill(usize),
+}
 
-const PROCESS_PANEL_TITLE_BAR_H_LOGICAL: f32 = 28.0;
-// Traffic-light geometry and colour live in
-// `ui::system::macos::traffic_lights` — the panel used to carry its own
-// copy of both, which is why two rounds of "make the dots match the
-// system" edited constants this painter never read.
-/// Inset between the panel's frame and its content on every side.
-///
-/// The tables used to be laid out from the panel's own edges, so the
-/// first column sat on the left border, the kill buttons sat on the
-/// right one, and rows ran to the bottom edge with nothing under them —
-/// the content read as spilling out of its frame.  One value for all
-/// four sides, same rule the cc modal's cards follow.
-pub const PROCESS_PANEL_SIDE_PAD_LOGICAL: f32 = 10.0;
-/// Fraction of the padded content width given to the master (pane)
-/// table; the detail table gets the rest.
-///
-/// Public because the hit-test geometry is computed a second time in
-/// `marspot-core` — the two derivations have to agree or the kill
-/// buttons stop landing where they are drawn, so at minimum they share
-/// the numbers.
-pub const PROCESS_PANEL_MASTER_FRAC: f64 = 0.38;
-const PROCESS_PANEL_KILL_W_LOGICAL: f32 = 18.0;
+/// A group heading: its line starts at `top`, from `x`, over `w`.
+#[derive(Debug, Clone, Copy)]
+pub struct Heading {
+    pub x: f64,
+    pub top: f64,
+    pub w: f64,
+}
 
-/// F3+1.7 — paint the Process Monitor modal via the `View` component.
-/// The modal's frame chrome (BG, border, shadow, backdrop) is owned
-/// by `View::paint`; only the modal-specific content (title bar fill,
-/// traffic lights, tabs, body rows) lives in the closure below.  All
-/// drawing routes through `ViewPainter` into overlay scratches, so
-/// the modal is always-on-top by construction — no filter pass on
-/// the grid scratches needed.
-pub(crate) fn push_process_panel_via_view(
-    panel: &ProcessPanelRender,
-    top_inset: f64,
-    cell_w: f32,
-    cell_h: f32,
-    ascent: f32,
-    atlas_w: f32,
-    atlas_h: f32,
+/// Where everything in the panel is.
+#[derive(Debug, Clone)]
+pub struct Layout {
+    pub chrome: PanelChrome,
+    pub panes_heading: Heading,
+    pub processes_heading: Heading,
+    pub panes: TableGeometry,
+    pub processes: TableGeometry,
+    /// `(row, rect)` of the kill button of every row of `processes`
+    /// that is laid out.
+    pub kills: Vec<(usize, Rect)>,
+}
+
+/// The panel's frame: its fixed size centred in the window, moved by
+/// `offset` — how far its header has been dragged.
+///
+/// The header stays reachable wherever it is dragged: at most half the
+/// frame leaves the window sideways, and the header neither goes under
+/// the window's own chrome nor off the bottom.
+pub fn panel_rect(
     window_w: f64,
     window_h: f64,
-    font: &mut FontCache,
-    atlas: &mut GlyphAtlas,
-    cells: &mut Vec<CellInstance>,
-    glyphs: &mut Vec<GlyphInstance>,
-    ui_rects: &mut Vec<UiRectInstance>,
-) {
-    use crate::ui::core::view::{View, ViewStyle, ViewPainter, Backdrop};
-    let mut painter = ViewPainter {
-        cell_w, cell_h, ascent, atlas_w, atlas_h,
-        window_w, window_h,
-        font, atlas, cells, glyphs, ui_rects,
-    };
-    let view = View {
-        rect: panel.rect,
-        style: ViewStyle {
-            bg: MODAL_FRAME_BG,
-            border_color: MODAL_FRAME_BORDER,
-            border_width: 1.0,
-            corner_radius: MODAL_FRAME_CORNER_RADIUS,
-            shadow_blur: 16.0,
-            shadow_alpha: 0.45,
-            padding: 0.0,
-            backdrop: if panel.draw_backdrop {
-                Backdrop::Dim {
-                    color: [0.0, 0.0, 0.0, 0.45],
-                    exclude_above_y: top_inset,
-                }
-            } else {
-                Backdrop::None
-            },
-        },
-    };
-    view.paint(&mut painter, |p| {
-        paint_process_panel_content(panel, p);
-    });
+    cell_h: f64,
+    top_inset: f64,
+    offset: (f64, f64),
+) -> Rect {
+    // Whole pixels, here and for the origin below: on a fractional
+    // frame the header's text and close button round a pixel away from
+    // where every other panel has them.
+    let content_h =
+        (panel_chrome::heading_height() + table::card_height(metric::VISIBLE_ROWS, cell_h)).ceil();
+    let r = panel_chrome::frame_rect(
+        window_w,
+        window_h,
+        spec::px(metric::PANEL_W),
+        panel_chrome::frame_height(content_h),
+        top_inset,
+    );
+    let half = r.w * 0.5;
+    let lowest = (window_h - spec::px(header::H)).max(top_inset);
+    Rect {
+        x: (r.x + offset.0).clamp(-half, window_w - half).round(),
+        y_top: (r.y_top + offset.1).clamp(top_inset, lowest).round(),
+        ..r
+    }
 }
 
-/// Internal: the content of the Process Monitor modal (title bar
-/// fill, traffic lights, title text, tab strip, body rows + [×]
-/// kill buttons).  Called from `push_process_panel_via_view` with
-/// a `ViewPainter` routing to overlay scratches.
-fn paint_process_panel_content(
-    panel: &ProcessPanelRender,
-    p: &mut crate::ui::core::view::ViewPainter,
-) {
-    let px = panel.rect.x as f32;
-    let py = panel.rect.y_top as f32;
-    let pw = panel.rect.w as f32;
-    let ph = panel.rect.h as f32;
-    // The original push_process_panel inferred scale from cell_h;
-    // keep that heuristic so glyph sizes stay in proportion.
-    let scale_hint = (p.cell_h / 20.0).max(0.5);
-    let title_h = PROCESS_PANEL_TITLE_BAR_H_LOGICAL * scale_hint;
-    use crate::ui::system::macos::traffic_lights as tl;
+/// Where everything is, for a panel at `frame` showing `n_panes` panes
+/// and `n_rows` processes, the process list pushed up by `scroll`.
+pub fn layout(
+    frame: Rect,
+    top_inset: f64,
+    n_panes: usize,
+    n_rows: usize,
+    scroll: f64,
+    cell_w: f64,
+    cell_h: f64,
+) -> Layout {
+    let chrome = PanelChrome::new(frame, top_inset);
+    let content = chrome.content;
+    let gap = spec::px(space::CARD_TO_CARD);
+    let (kill_w, kill_h) = controls::danger_button_size_in_row(table::row_height(cell_h));
+    let pane_cols = pane_columns();
+    let process_cols = process_columns(kill_w);
 
+    // The left card is as wide as its columns; the right one takes the
+    // rest, and its name column with it.
+    let between = (content.w - gap).max(0.0);
+    let left_w = table::natural_width(&pane_cols, metric::PANE_NAME_CELLS, cell_w)
+        .min(between * metric::PANES_MAX_FRAC);
+    let right_x = content.x + left_w + gap;
+    let right_w = between - left_w;
 
-    // Title bar fill (flat over the rounded chrome).
-    p.fill_rect(
-        Rect { x: px as f64, y_top: py as f64, w: pw as f64, h: title_h as f64 },
-        PROCESS_PANEL_TITLE_BAR_BG,
-    );
-    // 1 px separator below title bar.
-    p.fill_rect(
-        Rect { x: px as f64, y_top: (py + title_h) as f64, w: pw as f64, h: 1.0 },
-        PROCESS_PANEL_SEPARATOR,
-    );
-    // Traffic lights (3 SDF discs anchored title-bar left).
+    // On a whole pixel, so the rows under it are too.
+    let card_top = (content.y_top + panel_chrome::heading_height()).round();
+    let card_h = (content.y_top + content.h - card_top).max(0.0);
+    let left = Rect { x: content.x, y_top: card_top, w: left_w, h: card_h };
+    let right = Rect { x: right_x, y_top: card_top, w: right_w, h: card_h };
 
-    tl::paint_discs(p.ui_rects, &panel.light_rects, panel.title_bar_hovered);
-    // Centred title text, in the shared panel role — a panel's name
-    // is set the same way in every panel.  The body below stays mono:
-    // it is a process table, and columns line up for free there.
-    p.panel_text_in(
-        crate::ui::theme::PanelText::Title,
-        Rect { x: px as f64, y_top: py as f64, w: pw as f64, h: title_h as f64 },
-        &panel.title,
-        PROCESS_PANEL_TITLE_FG,
-        Alignment::Center,
-    );
+    let panes = TableGeometry::new(left, &pane_cols, n_panes, 0.0, cell_w, cell_h);
+    let processes = TableGeometry::new(right, &process_cols, n_rows, scroll, cell_w, cell_h);
+    // Against the right end of the row's content, centred in the row.
+    let kill_right = processes.columns.last().map_or(right.x, |(x, w)| x + w);
+    let kills = processes
+        .rows
+        .iter()
+        .map(|&(i, row)| {
+            let rect = Rect {
+                x: kill_right - kill_w,
+                y_top: row.y_top + (row.h - kill_h) * 0.5,
+                w: kill_w,
+                h: kill_h,
+            };
+            (i, rect)
+        })
+        .collect();
 
-    if panel.minimized {
-        return;
+    Layout {
+        chrome,
+        panes_heading: Heading { x: left.x, top: content.y_top, w: left.w },
+        processes_heading: Heading { x: right.x, top: content.y_top, w: right.w },
+        panes,
+        processes,
+        kills,
+    }
+}
+
+impl Layout {
+    /// What `(x, y)` is on.  The painter highlights it and a click
+    /// acts on it.
+    pub fn hover_at(&self, x: f64, y: f64) -> Hover {
+        if self.chrome.hit_close(x, y) {
+            return Hover::Close;
+        }
+        if let Some(&(i, _)) = self.kills.iter().find(|(_, r)| r.contains(x, y)) {
+            return Hover::Kill(i);
+        }
+        if let Some(i) = self.panes.row_at(x, y) {
+            return Hover::Pane(i);
+        }
+        self.processes.row_at(x, y).map_or(Hover::None, Hover::Process)
     }
 
-    // F3+4.1 — master / detail rendered via the new `Table`
-    // component.  The kill [×] is layered on top of the detail
-    // Table after paint() since Table is text-only.
-    use crate::ui::components::TableStyle;
+    /// Is `(x, y)` on the header where it is a drag handle?
+    pub fn hit_header(&self, x: f64, y: f64) -> bool {
+        self.chrome.hit_header(x, y)
+    }
 
-    let pad = PROCESS_PANEL_SIDE_PAD_LOGICAL * scale_hint;
-    let body_top = py + title_h + pad;
-    let body_bottom = py + ph - pad;
-    // Content width is the frame minus a pad on each outer edge; the
-    // master/detail split lands inside that, not on the frame.
-    let content_x = px + pad;
-    let content_w = pw - pad * 2.0;
-    let master_w = content_w * PROCESS_PANEL_MASTER_FRAC as f32;
-    let split_x = content_x + master_w;
+    /// Is `(x, y)` anywhere on the panel?
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        self.chrome.frame.contains(x, y)
+    }
 
-    // Vertical separator between master and detail spans full body.
-    p.fill_rect(
-        Rect { x: split_x as f64, y_top: body_top as f64,
-               w: 1.0, h: (body_bottom - body_top) as f64 },
-        PROCESS_PANEL_SEPARATOR,
-    );
-
-    // Shared Table style with marspot's panel palette.
-    let style = TableStyle {
-        header_h:           (p.cell_h * 1.4) as f64,
-        row_h:              (p.cell_h * 1.3) as f64,
-        indent_px:          12.0 * scale_hint as f64,
-        col_pad:            10.0 * scale_hint as f64,
-        header_bg:          PROCESS_PANEL_TITLE_BAR_BG,
-        header_fg:          PROCESS_PANEL_HEADER_FG,
-        header_separator:   PROCESS_PANEL_SEPARATOR,
-        row_bg:             [0.0; 4],
-        row_bg_alt:         [0.0; 4],
-        row_bg_selected:    PROCESS_PANEL_TAB_BG_ACTIVE,
-        row_fg:             PROCESS_PANEL_ROW_FG,
-        row_fg_selected:    PROCESS_PANEL_TAB_FG_ACTIVE,
-        section_fg:         PROCESS_PANEL_HEADER_FG,
-    };
-
-    let geo = BodyGeometry {
-        scale_hint, pad, body_top, body_bottom, content_x, content_w, master_w, split_x,
-    };
-    paint_master_table(panel, p, &geo, style);
-    paint_detail_table(panel, p, &geo, style);
+    /// How far the process list is pushed up, and how far it can be.
+    pub fn scroll(&self) -> (f64, f64) {
+        (self.processes.scroll, self.processes.max_scroll)
+    }
 }
 
-/// Where the two tables go, worked out once for both.
-#[derive(Clone, Copy)]
-struct BodyGeometry {
-    scale_hint: f32,
-    pad: f32,
-    body_top: f32,
-    body_bottom: f32,
-    content_x: f32,
-    content_w: f32,
-    master_w: f32,
-    split_x: f32,
+/// Resident memory for the RSS column: `512K`, `86M`, `1.2G`.
+pub fn format_rss(kb: u64) -> String {
+    const K: u64 = 1024;
+    if kb >= K * K {
+        format!("{:.1}G", kb as f64 / (K * K) as f64)
+    } else if kb >= K {
+        format!("{:.0}M", kb as f64 / K as f64)
+    } else {
+        format!("{kb}K")
+    }
 }
 
-/// The master table: one row per pane.
-fn paint_master_table(
-    panel: &ProcessPanelRender,
-    p: &mut crate::ui::core::view::ViewPainter,
-    geo: &BodyGeometry,
-    style: crate::ui::components::TableStyle,
-) {
-    use crate::ui::components::{ColumnWidth, RowKind, Table, TableColumn, TableRow};
-    let BodyGeometry { pad, body_top, body_bottom, content_x, master_w, .. } = *geo;
-    let m_cols = vec![
-        TableColumn {
-            header: "Pane".into(),
-            width: ColumnWidth::Flex(1.0),
-            align: Alignment::CenterLeft,
-            sort: None, sortable: false,
-        },
-        TableColumn {
-            header: "pids".into(),
-            width: ColumnWidth::Px((p.cell_w * 6.0) as f64),
-            align: Alignment::CenterRight,
-            sort: None, sortable: false,
-        },
-        TableColumn {
-            header: "CPU%".into(),
-            width: ColumnWidth::Px((p.cell_w * 7.0) as f64),
-            align: Alignment::CenterRight,
-            sort: Some(crate::ui::components::SortDir::Desc),
-            sortable: false,
-        },
-        TableColumn {
-            header: "RSS".into(),
-            width: ColumnWidth::Px((p.cell_w * 8.0) as f64),
-            align: Alignment::CenterRight,
-            sort: None, sortable: false,
-        },
-    ];
-    let m_rows: Vec<TableRow> = panel.pane_rows.iter().map(|r| TableRow {
-        cells: vec![
-            r.name.clone(),
-            r.n_pids.to_string(),
-            format!("{:.1}", r.cpu_pct),
-            format_rss(r.rss_kb),
-        ],
-        depth: 0,
-        kind: RowKind::Data,
-    }).collect();
-    let master_table = Table {
-        rect: Rect {
-            x: content_x as f64, y_top: body_top as f64,
-            w: (master_w - pad * 0.5) as f64,
-            h: (body_bottom - body_top) as f64,
-        },
-        columns: &m_cols,
-        rows: &m_rows,
-        style,
-        selected: Some(panel.selected_pane),
-        scroll_y: 0.0,
-        show_header: true,
-    };
-    master_table.paint(p);
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::theme::spec::{card, content, table as t};
 
-/// The detail table -- the selected pane's process tree -- and the
-/// kill [×] buttons laid over its last column.
-fn paint_detail_table(
-    panel: &ProcessPanelRender,
-    p: &mut crate::ui::core::view::ViewPainter,
-    geo: &BodyGeometry,
-    style: crate::ui::components::TableStyle,
-) {
-    use crate::ui::components::{
-        Button, ButtonStyle, ColumnWidth, IconPosition, IconSpec, RowKind, Table, TableColumn, TableRow,
-    };
-    let BodyGeometry { scale_hint, pad, body_top, body_bottom, content_w, master_w, split_x, .. } = *geo;
-    let d_cols = vec![
-        TableColumn {
-            header: "Process".into(),
-            width: ColumnWidth::Flex(1.0),
-            align: Alignment::CenterLeft,
-            sort: None, sortable: false,
-        },
-        TableColumn {
-            header: "pid".into(),
-            width: ColumnWidth::Px((p.cell_w * 7.0) as f64),
-            align: Alignment::CenterRight,
-            sort: None, sortable: false,
-        },
-        TableColumn {
-            header: "CPU%".into(),
-            width: ColumnWidth::Px((p.cell_w * 7.0) as f64),
-            align: Alignment::CenterRight,
-            sort: None, sortable: false,
-        },
-        TableColumn {
-            header: "RSS".into(),
-            width: ColumnWidth::Px((p.cell_w * 8.0) as f64),
-            align: Alignment::CenterRight,
-            sort: None, sortable: false,
-        },
-        TableColumn {
-            header: "".into(),
-            width: ColumnWidth::Px(
-                (PROCESS_PANEL_KILL_W_LOGICAL * scale_hint + 8.0) as f64,
-            ),
-            align: Alignment::Center,
-            sort: None, sortable: false,
-        },
-    ];
-    let d_rows: Vec<TableRow> = panel.rows.iter().map(|r| TableRow {
-        cells: if r.is_header {
-            vec![r.comm.clone(), String::new(), String::new(), String::new(), String::new()]
-        } else {
-            vec![
-                r.comm.clone(),
-                r.pid.to_string(),
-                if r.cpu_pct > 0.05 { format!("{:.1}", r.cpu_pct) } else { "·".into() },
-                format_rss(r.rss_kb),
-                String::new(),
-            ]
-        },
-        depth: r.depth,
-        kind: if r.is_header { RowKind::Section } else { RowKind::Data },
-    }).collect();
-    let detail_table = Table {
-        rect: Rect {
-            x: (split_x + pad * 0.5) as f64, y_top: body_top as f64,
-            w: (content_w - master_w - pad * 0.5) as f64,
-            h: (body_bottom - body_top) as f64,
-        },
-        columns: &d_cols,
-        rows: &d_rows,
-        style,
-        selected: None,
-        scroll_y: panel.scroll_y,
-        show_header: true,
-    };
-    detail_table.paint(p);
+    const CELL_W: f64 = 7.0;
+    const CELL_H: f64 = 16.0;
+    const WINDOW: (f64, f64) = (1600.0, 1000.0);
 
-    // Kill buttons overlay the Table's last column for non-header rows.
-    let kill_w = PROCESS_PANEL_KILL_W_LOGICAL * scale_hint;
-    let kill_h = (style.row_h as f32 - 4.0).max(8.0);
-    let col_xw = detail_table.column_x_widths();
-    let kill_col = col_xw.last().copied();
-    if let Some((kx, kw)) = kill_col {
-        for (i, row) in panel.rows.iter().enumerate() {
-            if row.is_header { continue; }
-            let row_rect = detail_table.row_rect(i);
-            if row_rect.y_top + row_rect.h <= detail_table.body_rect().y_top { continue; }
-            if row_rect.y_top >= detail_table.body_rect().y_top
-                + detail_table.body_rect().h { break; }
-            let bx = kx + (kw - kill_w as f64) * 0.5;
-            let by = row_rect.y_top + (row_rect.h - kill_h as f64) * 0.5;
-            let btn = Button {
-                rect: Rect { x: bx, y_top: by, w: kill_w as f64, h: kill_h as f64 },
-                label: None,
-                icon: Some(IconSpec::Glyph("×")),
-                icon_position: IconPosition::Only,
-                hovered: false,
-                style: ButtonStyle::destructive(),
-            };
-            btn.paint(p);
+    fn frame() -> Rect {
+        panel_rect(WINDOW.0, WINDOW.1, CELL_H, 0.0, (0.0, 0.0))
+    }
+
+    fn laid_out(n_panes: usize, n_rows: usize, scroll: f64) -> Layout {
+        layout(frame(), 0.0, n_panes, n_rows, scroll, CELL_W, CELL_H)
+    }
+
+    fn centre(r: Rect) -> (f64, f64) {
+        (r.x + r.w * 0.5, r.y_top + r.h * 0.5)
+    }
+
+    #[test]
+    fn process_panel_is_the_wide_step_and_as_tall_as_its_rows() {
+        let f = frame();
+        assert_eq!(f.w, spec::px(metric::PANEL_W));
+        assert_eq!((f.x, f.y_top), ((WINDOW.0 - f.w) * 0.5, ((WINDOW.1 - f.h) * 0.5).round()));
+        assert_eq!((f.x.fract(), f.y_top.fract(), f.h.fract()), (0.0, 0.0, 0.0), "on whole pixels");
+        let l = laid_out(4, metric::VISIBLE_ROWS, 0.0);
+        assert_eq!(l.processes.rows.len(), metric::VISIBLE_ROWS);
+        assert_eq!(l.processes.max_scroll, 0.0);
+        // A window too small for it gets what the window allows.
+        let small = panel_rect(900.0, 400.0, CELL_H, 0.0, (0.0, 0.0));
+        assert_eq!(small.w, 900.0 * spec::panel::MAX_W_FRAC);
+        assert_eq!(small.h, 400.0 * spec::panel::MAX_H_FRAC);
+    }
+
+    /// The title used to be drawn above the frame.
+    #[test]
+    fn process_panel_title_baseline_is_inside_the_frame() {
+        let l = laid_out(4, 10, 0.0);
+        let (f, c) = (l.chrome.frame, l.chrome);
+        let baseline = c.title_baseline();
+        let cap = spec::px(header::TITLE.cap());
+        assert!(baseline - cap > f.y_top, "the title's top {} is above the frame's {}", baseline - cap, f.y_top);
+        assert!(baseline < c.header.y_top + c.header.h, "the title sits in the header");
+        assert!(c.title_x() > f.x && c.title_x() < f.x + f.w);
+        // Wherever the panel is dragged, too.
+        let moved = panel_rect(WINDOW.0, WINDOW.1, CELL_H, 0.0, (-300.0, 120.0));
+        let c = PanelChrome::new(moved, 0.0);
+        assert!(c.title_baseline() - cap > moved.y_top);
+        assert!(c.title_baseline() < moved.y_top + moved.h);
+    }
+
+    #[test]
+    fn process_panel_close_hit_box_is_where_the_chrome_draws_it() {
+        let l = laid_out(4, 10, 0.0);
+        let close = PanelChrome::new(frame(), 0.0).close;
+        assert_eq!(
+            (l.chrome.close.x, l.chrome.close.y_top, l.chrome.close.w, l.chrome.close.h),
+            (close.x, close.y_top, close.w, close.h),
+        );
+        let (cx, cy) = centre(close);
+        assert_eq!(l.hover_at(cx, cy), Hover::Close);
+        assert_eq!(l.hover_at(close.x + 0.5, close.y_top + 0.5), Hover::Close);
+        assert_eq!(l.hover_at(close.x - 1.0, cy), Hover::None);
+        assert_eq!(l.hover_at(cx, close.y_top + close.h + 1.0), Hover::None);
+        assert!(!l.hit_header(cx, cy), "the close button is not a drag handle");
+        assert!(l.hit_header(l.chrome.title_x(), cy));
+    }
+
+    #[test]
+    fn process_panel_kill_hit_box_is_the_rect_it_is_painted_in() {
+        let l = laid_out(4, 10, 0.0);
+        assert_eq!(l.kills.len(), 10, "every laid-out row has a button");
+        let (side, _) = controls::danger_button_size_in_row(table::row_height(CELL_H));
+        for &(i, k) in &l.kills {
+            let row = l.processes.rows.iter().find(|(r, _)| *r == i).unwrap().1;
+            assert_eq!((k.w, k.h), (side, side));
+            assert!(k.y_top > row.y_top && k.y_top + k.h < row.y_top + row.h, "inside its row");
+            assert!((k.y_top - row.y_top - (row.y_top + row.h - k.y_top - k.h)).abs() < 1e-9, "centred");
+            let right = l.processes.card.x + l.processes.card.w - spec::px(card::ROW_PAD_X);
+            assert!((k.x + k.w - right).abs() < 1e-9, "at the right end of the row");
+            // Every corner of the rect is the button; a pixel outside
+            // it is the row.
+            for (x, y) in [
+                (k.x, k.y_top),
+                (k.x + k.w - 0.01, k.y_top),
+                (k.x, k.y_top + k.h - 0.01),
+                (k.x + k.w - 0.01, k.y_top + k.h - 0.01),
+            ] {
+                assert_eq!(l.hover_at(x, y), Hover::Kill(i));
+            }
+            assert_eq!(l.hover_at(k.x - 0.5, k.y_top), Hover::Process(i));
+            assert_eq!(l.hover_at(k.x, k.y_top - 0.5), Hover::Process(i));
+            assert_eq!(l.hover_at(k.x, k.y_top + k.h + 0.01), Hover::Process(i));
         }
     }
-}
 
-/// F3+4 — pretty-print RSS bytes (KB units) as a `X.Y M` / `X.Y G`
-/// style human-readable string for the master/detail rss column.
-/// Pre-formatted by L2 so the renderer doesn't pull format helpers.
-fn format_rss(kb: u64) -> String {
-    if kb >= 1024 * 1024 {
-        format!("{:.1}G", kb as f64 / (1024.0 * 1024.0))
-    } else if kb >= 1024 {
-        format!("{:.0}M", kb as f64 / 1024.0)
-    } else {
-        format!("{}K", kb)
+    #[test]
+    fn process_panel_long_name_is_cut_before_the_pid_column() {
+        let l = laid_out(4, 10, 0.0);
+        let g = &l.processes;
+        let row = g.rows[0].1;
+        let long = "a-command-name-that-goes-on-".repeat(12);
+        let (rect, text) = g.cell_text(row, col::NAME, 4, &long);
+        assert!(text.chars().count() < long.chars().count());
+        assert!(text.ends_with('…'));
+        let end = rect.x + text.chars().count() as f64 * CELL_W;
+        let pid_x = g.columns[col::PID].0;
+        assert!(
+            end <= pid_x - t::COLUMN_GAP_CELLS * CELL_W + 1e-9,
+            "the name ends at {end}, the pid column starts at {pid_x}",
+        );
+        // A name that fits is left alone.
+        assert_eq!(g.cell_text(row, col::NAME, 4, "rust-analyzer-p").1, "rust-analyzer-p");
+    }
+
+    #[test]
+    fn process_panel_rows_beyond_the_card_are_not_laid_out() {
+        let n = metric::VISIBLE_ROWS + 30;
+        let l = laid_out(4, n, 0.0);
+        let g = &l.processes;
+        assert_eq!(g.rows.len(), metric::VISIBLE_ROWS);
+        assert_eq!(l.kills.len(), g.rows.len(), "no button without its row");
+        let bottom = g.card.y_top + g.card.h;
+        for &(_, r) in &g.rows {
+            assert!(r.y_top >= g.header.y_top + g.header.h && r.y_top + r.h <= bottom);
+        }
+        // Below the card there is nothing to click.
+        assert_eq!(l.hover_at(g.card.x + 20.0, bottom + 5.0), Hover::None);
+        // Scrolled to the end, the last row is the one at the bottom
+        // and the first ones are gone.
+        let (_, max) = l.scroll();
+        assert!((max - 30.0 * table::row_height(CELL_H)).abs() < 1.0);
+        let l = laid_out(4, n, max + 500.0);
+        assert_eq!(l.scroll(), (max, max));
+        assert_eq!(l.processes.rows.first().unwrap().0, 30);
+        assert_eq!(l.processes.rows.last().unwrap().0, n - 1);
+        // More panes than fit are left out the same way.
+        let l = laid_out(metric::VISIBLE_ROWS + 5, 3, 0.0);
+        assert_eq!(l.panes.rows.len(), metric::VISIBLE_ROWS);
+    }
+
+    #[test]
+    fn process_panel_cards_share_a_top_and_a_height_and_fill_the_content() {
+        let l = laid_out(4, 10, 0.0);
+        let (a, b, c) = (l.panes.card, l.processes.card, l.chrome.content);
+        assert_eq!((a.y_top, a.h), (b.y_top, b.h));
+        assert_eq!(a.x, c.x);
+        assert!((b.x - (a.x + a.w) - spec::px(space::CARD_TO_CARD)).abs() < 1e-9);
+        assert!((b.x + b.w - (c.x + c.w)).abs() < 1e-9);
+        assert!((a.y_top + a.h - (c.y_top + c.h)).abs() < 1e-9);
+        assert_eq!(a.y_top, (c.y_top + panel_chrome::heading_height()).round());
+        assert_eq!((l.panes_heading.x, l.panes_heading.w), (a.x, a.w));
+        assert_eq!((l.processes_heading.x, l.processes_heading.w), (b.x, b.w));
+        assert_eq!(c.x - l.chrome.frame.x, spec::px(content::PAD_X));
+        // The left card shows a whole pane name at this font.
+        assert!((l.panes.columns[col::NAME].1 - metric::PANE_NAME_CELLS * CELL_W).abs() < 1e-9);
+    }
+
+    #[test]
+    fn process_panel_rows_select_and_the_pointer_finds_them() {
+        let l = laid_out(4, 10, 0.0);
+        for &(i, r) in &l.panes.rows {
+            assert_eq!(l.hover_at(r.x + 30.0, r.y_top + r.h * 0.5), Hover::Pane(i));
+        }
+        let (_, r) = l.processes.rows[3];
+        assert_eq!(l.hover_at(r.x + 30.0, r.y_top + 1.0), Hover::Process(3));
+        // The headings, the table headers and the gap between the
+        // cards are nothing.
+        let (hx, hy) = centre(l.panes.header);
+        assert_eq!(l.hover_at(hx, hy), Hover::None);
+        assert_eq!(l.hover_at(l.panes_heading.x + 4.0, l.panes_heading.top + 4.0), Hover::None);
+        let between = l.panes.card.x + l.panes.card.w + 2.0;
+        assert_eq!(l.hover_at(between, r.y_top + 1.0), Hover::None);
+        assert!(l.contains(between, r.y_top + 1.0));
+        assert!(!l.contains(l.chrome.frame.x - 1.0, r.y_top));
+    }
+
+    #[test]
+    fn process_panel_dragged_keeps_its_header_reachable() {
+        let top_inset = 60.0;
+        let at = |dx: f64, dy: f64| panel_rect(WINDOW.0, WINDOW.1, CELL_H, top_inset, (dx, dy));
+        let home = at(0.0, 0.0);
+        let moved = at(50.0, 30.0);
+        assert_eq!((moved.x - home.x, moved.y_top - home.y_top), (50.0, 30.0));
+        assert_eq!((moved.w, moved.h), (home.w, home.h));
+        assert_eq!(at(0.0, -1e6).y_top, top_inset, "never under the window's own chrome");
+        assert_eq!(at(0.0, 1e6).y_top, WINDOW.1 - spec::px(header::H));
+        assert_eq!(at(-1e6, 0.0).x, (-home.w * 0.5).round());
+        assert_eq!(at(1e6, 0.0).x, (WINDOW.0 - home.w * 0.5).round());
+    }
+
+    #[test]
+    fn process_panel_formats_memory_by_magnitude() {
+        assert_eq!(format_rss(512), "512K");
+        assert_eq!(format_rss(86 * 1024), "86M");
+        assert_eq!(format_rss(1024 * 1024 + 512 * 1024), "1.5G");
     }
 }

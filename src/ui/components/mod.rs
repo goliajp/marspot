@@ -1,6 +1,6 @@
 //! marspot UI `components` — composite widgets that pair geometry +
 //! paint.  Each is the smallest unit a feature would reach for when
-//! it needs more than a bare `View`: a tab strip, a scroll viewport,
+//! it needs more than a bare `View`: a table, a scroll viewport,
 //! a modal frame layout, etc.  Built on top of `core::View` /
 //! `system::macos::*` primitives.
 
@@ -11,10 +11,10 @@ pub mod panel_chrome;
 pub mod panel_palette;
 pub mod settings_modal;
 pub mod settings_paint;
-pub mod tab_strip;
 pub mod scroll_view;
 pub mod modal_frame;
 pub mod process_panel;
+pub mod process_panel_paint;
 pub mod search_overlay;
 pub mod panel;
 pub mod text_input;
@@ -33,7 +33,6 @@ pub mod dev_panel;
 #[cfg(test)]
 mod panel_snapshot_tests;
 
-pub use tab_strip::TabStrip;
 pub use scroll_view::ScrollView;
 pub use modal_frame::{ModalFrame, ModalLayoutSpec};
 pub use panel_chrome::PanelChrome;
@@ -46,7 +45,7 @@ pub use grid_seams::{GridSeams, SeamStyle};
 pub use grid::{Grid, GridStyle};
 pub use grid_item::{GridItem, GridEdges, Outline};
 pub use sidebar::{Sidebar, SidebarRow, SidebarStyle};
-pub use table::{Table, TableColumn, TableRow, TableStyle, ColumnWidth, RowKind, SortDir};
+pub use table::{Align, Column, ColumnWidth, SortDir, TableGeometry};
 pub use layout_modal::{LayoutModal, LayoutModalHit, GRID_MIN, GRID_MAX};
 pub use context_menu::{ContextMenu, ContextMenuHit, MenuItem};
 pub use dev_panel::{DevPanelState, DevPanelHit, build_dev_panel_canvas, hit_test, DEV_PANEL_MODEL_SCROLL_ID, scroll_id_for_section};

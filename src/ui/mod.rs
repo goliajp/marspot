@@ -12,9 +12,9 @@
 ///   `core/`    — foundation primitives every UI reaches for first
 ///                (the `View` overlay surface, painter, backdrop)
 ///   `system/`  — platform-specific chrome
-///                (`system::macos::traffic_lights`, `::title_bar`)
+///                (`system::macos::icons`)
 ///   `components/` — composite widgets built on top of core + system
-///                (tab strip, scroll view, modal frame, search
+///                (table, scroll view, modal frame, search
 ///                overlay, …)
 ///
 /// Scene-private rendering (e.g. the Process Monitor's body row layout)
