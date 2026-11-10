@@ -2087,12 +2087,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
         Some("settings") => {
             let settings = marspot::settings::get();
             let rect = {
-                let font = renderer.font_mut();
-                let mut measure = |s: &str, pt: f64, weight: u16| {
-                    font.measure_ui_text_at_size(
-                        s, weight, marspot::font_shape::ShapeOptions::default(), pt,
-                    )
-                };
+                let mut measure = marspot::ui::components::controls::font_measure(renderer.font_mut());
                 marspot::ui::components::settings_modal::panel_rect(
                     phys_w as f64, phys_h as f64, &settings, &mut measure, layout.top_inset,
                 )
@@ -2102,6 +2097,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
                 scroll: 0.0,
                 settings: (*settings).clone(),
                 path: marspot::settings::path().display().to_string(),
+                hover: Default::default(),
             }));
         }
         Some("cc") => {
