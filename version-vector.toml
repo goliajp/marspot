@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.265"  # a handoff reaches a freshly started agent, stops codex behind it, and says so
-core    = "0.12.303"  # panels log what opened, closed and moved
+core    = "0.12.304"  # the main window chrome takes its colours and sizes from the theme
 session = "0.11.156"  # a pane does not inherit a gemini session id
