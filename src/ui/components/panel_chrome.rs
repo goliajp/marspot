@@ -479,7 +479,7 @@ mod tests {
         const EXEMPT: [&str; 3] = ["panel_palette.rs", "dev_panel.rs", "color.rs"];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut scanned = 0;
-        for dir in ["frame_build", "ui/components", "ui/view", "ui/core"] {
+        for dir in ["frame_build", "ui/components", "ui/view", "ui/core", "bin/marspot-shell"] {
             for (name, src) in sources(&root.join(dir)) {
                 if EXEMPT.contains(&name.as_str()) {
                     continue;
@@ -494,7 +494,7 @@ mod tests {
         assert!(found.is_empty(), "render_metal.rs writes colours out by hand: {found:?}");
         // A wrong path scans nothing and passes; the directories
         // together hold far more files than this.
-        assert!(scanned >= 55, "only {scanned} files were scanned");
+        assert!(scanned >= 140, "only {scanned} files were scanned");
         // The exemptions are still what they claim to be.
         let palette = std::fs::read_to_string(root.join("ui/components/panel_palette.rs")).expect("the palette");
         assert!(!colour_literals(&palette).is_empty(), "the palette no longer needs its exemption");
