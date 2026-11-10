@@ -21,6 +21,14 @@ pub fn path() -> PathBuf {
     crate::paths::state_root().join("system-theme")
 }
 
+/// The terminal palette of the theme the settings name, for a caller
+/// that may run before anything else has read the settings: the first
+/// window is created in the right colour, not corrected a tick later.
+pub fn startup_palette() -> &'static palette::Palette {
+    let _ = crate::settings::get();
+    palette::current()
+}
+
 /// The mtime of the file as last read, so an unchanged file is one
 /// `stat` and no read.
 static SEEN: Mutex<Option<SystemTime>> = Mutex::new(None);

@@ -1043,7 +1043,7 @@ impl ShellApp {
             width_logical: DEFAULT_W_PT,
             height_logical: DEFAULT_H_PT,
             frame_pt,
-            bg: marspot::settings::palette().bg,
+            bg: marspot::system_theme::startup_palette().bg,
         };
         marspot::app::open_window(window_id, &attrs);
     }
@@ -5222,7 +5222,7 @@ Usage:\n\
         // Terminal-black from the first paint: a core (L2) swap that
         // briefly uncovers the layer must show steady black, never a
         // lighter chrome flash.
-        bg: marspot::settings::palette().bg,
+        bg: marspot::system_theme::startup_palette().bg,
     };
     let proxy = EventProxy::new();
     let app = ShellApp::new(proxy.clone());
