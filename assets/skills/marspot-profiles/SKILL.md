@@ -1,6 +1,6 @@
 ---
 name: marspot-profiles
-description: Use when the user wants several accounts of Claude Code (claude), OpenAI Codex CLI (codex) or Gemini CLI (gemini) side by side on this machine — "set me up with several accounts", "add another account", "second login", "switch accounts when I run out of quota", claude2 / codex2 / gemini2 aliases, or a check of an existing ~/.<agent>-profile-N layout. Converts the default config directory into one shared directory plus one numbered directory per account, adds accounts, installs the shell aliases and audits the result.
+description: Use when the user wants several accounts of Claude Code (claude), OpenAI Codex CLI (codex), Gemini CLI (gemini) or Kimi Code CLI (kimi) side by side on this machine — "set me up with several accounts", "add another account", "second login", "switch accounts when I run out of quota", claude2 / codex2 / gemini2 / kimi2 aliases, or a check of an existing ~/.<agent>-profile-N layout. Converts the default config directory into one shared directory plus one numbered directory per account, adds accounts, installs the shell aliases and audits the result.
 ---
 
 # marspot-profiles
@@ -20,11 +20,14 @@ one runs out of quota, and it can only do that with this layout.
 claudeN  = CLAUDE_CONFIG_DIR=~/.claude-profile-N claude
 codexN   = CODEX_HOME=~/.codex-profile-N codex
 geminiN  = GEMINI_CLI_HOME=~/.gemini-profile-N gemini
+kimiN    = KIMI_CODE_HOME=~/.kimi-code-profile-N kimi
 ```
 
-The same three pieces exist for `codex` and `gemini`. Gemini's config
+The same three pieces exist for `codex`, `gemini` and `kimi`. Gemini's config
 directory is `.gemini` inside `GEMINI_CLI_HOME`, so its symlinks live in
-`~/.gemini-profile-N/.gemini/` and `~/.gemini` points there.
+`~/.gemini-profile-N/.gemini/` and `~/.gemini` points there. Kimi's directory
+is named `.kimi-code`, not after its command: `~/.kimi-code-shared`,
+`~/.kimi-code-profile-N`, and `~/.kimi-code` pointing at profile 1.
 
 All of it is done by `profiles.sh`, which sits next to this file. Run it with
 `bash <directory of this file>/profiles.sh ...`. Do not reproduce its steps by
@@ -32,7 +35,7 @@ hand.
 
 ## Set up several accounts (first time)
 
-For each agent the user asked for (`claude`, `codex`, `gemini`):
+For each agent the user asked for (`claude`, `codex`, `gemini`, `kimi`):
 
 1. Ask the user to quit every running session of that agent, including the one
    you are running in if it is the same agent. `init` refuses while a process
@@ -63,11 +66,13 @@ Logging in cannot be scripted. Tell the user, per new account:
 - Claude Code: run `claudeN`, then `/login`
 - Codex: run `codexN login`
 - Gemini: run `geminiN` and authenticate when it asks (`/auth`)
+- Kimi: run `kimiN login`; for an account on kimi.ai rather than kimi.com,
+  `kimiN login --region global`
 
 After `init`, account 1 differs by agent:
 
-- Codex and Gemini: the login file moved with account 1, so `codex1` /
-  `gemini1` and the bare command stay logged in.
+- Codex, Gemini and Kimi: the login file moved with account 1, so `codex1` /
+  `gemini1` / `kimi1` and the bare command stay logged in.
 - Claude Code: `claude1` needs `/login` once. Claude Code keeps its login in
   the macOS keychain under a name derived from the config directory path, so a
   login does not follow a directory to a new path. The bare `claude` keeps its
@@ -106,6 +111,10 @@ account sets `GEMINI_API_KEY` for that account instead.
   extensions, sessions (`tmp/`) and checkpoints (`history/`). Per account:
   `oauth_creds.json`, `google_accounts.json`, the other token files,
   `installation_id`, `projects.json`.
+- Kimi: `AGENTS.md`, `tui.toml`, skills. Per account: `credentials/`,
+  `config.toml` (logging in writes the provider, the models and the default
+  model into it), `mcp.json`, `device_id`, sessions, and the `bin/` its
+  installer and updater use, which stays with account 1.
 
 ## Verify
 

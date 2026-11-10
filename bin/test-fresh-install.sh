@@ -79,14 +79,18 @@ env -i HOME="$FRESH" USER="$(id -un)" LOGNAME="$(id -un)" SHELL="$FRESH/pane-she
 SHELL_PID=$!
 
 codex_bin() { [ -x "$FRESH/.local/bin/codex" ] || ls "$FRESH"/.codex/packages/standalone/current/bin/codex >/dev/null 2>&1; }
-clis() { [ -x "$FRESH/.local/bin/claude" ] && codex_bin; }
-hooks() { grep -q 'cc-statusline' "$SETTINGS" 2>/dev/null && grep -q 'claude-hook' "$SETTINGS" 2>/dev/null; }
+clis() { [ -x "$FRESH/.local/bin/claude" ] && codex_bin && [ -x "$FRESH/.kimi-code/bin/kimi" ]; }
+kimi_peer() { grep -q '"marspot"' "$FRESH/.kimi-code/mcp.json" 2>/dev/null && grep -q 'kimi-hook' "$FRESH/.kimi-code/config.toml" 2>/dev/null; }
+hooks() { grep -q 'cc-statusline' "$SETTINGS" 2>/dev/null && grep -q 'claude-hook' "$SETTINGS" 2>/dev/null && kimi_peer; }
 deadline=$(( $(date +%s) + WAIT ))
 until { clis && hooks; } || [ "$(date +%s)" -ge "$deadline" ] || ! kill -0 $SHELL_PID 2>/dev/null; do sleep 5; done
 
 runs() { env -i HOME="$FRESH" PATH="$FRESH/.local/bin:/usr/bin:/bin" "$1" --version >/dev/null 2>&1; }
 pane_shells() { for s in $(ours | awk '$2 ~ /marspot-session$/ {print $1}'); do pgrep -P "$s"; done; }
 pane_path() { grep -q "^PATH=$FRESH/.local/bin:" "$FRESH/pane.env"; }
+pane_path_kimi() { grep -q "^PATH=.*:$FRESH/.kimi-code/bin:" "$FRESH/pane.env"; }
+kimi_runs() { env -i HOME="$FRESH" PATH=/usr/bin:/bin "$FRESH/.kimi-code/bin/kimi" --version >/dev/null 2>&1; }
+kimi_doctor() { env -i HOME="$FRESH" PATH=/usr/bin:/bin "$FRESH/.kimi-code/bin/kimi" doctor >/dev/null 2>&1; }
 # a gemini the machine already had is left alone, and that counts
 gemini_there() { runs gemini || /bin/zsh -ilc 'command -v gemini' >/dev/null 2>&1; }
 no_panic() { ! grep -qi 'panic' "$LOG" "$FRESH/stdout.log"; }
@@ -103,8 +107,12 @@ check "state is under Application Support" test -d "$STATE/sessions"
 check "nothing under Caches" test ! -e "$FRESH/Library/Caches/marspot"
 check "a pane has a shell" one_pane
 check "the pane's PATH has ~/.local/bin" pane_path
+check "the pane's PATH has ~/.kimi-code/bin" pane_path_kimi
 for cli in claude codex; do check "$cli installed and runs" runs "$cli"; done
 check "gemini installed, or already on this machine" gemini_there
+check "kimi installed and runs" kimi_runs
+check "kimi has the peer server and the inbox hooks" kimi_peer
+check "kimi accepts the configuration it was given" kimi_doctor
 check "status-line hook in the new claude config" grep -q 'cc-statusline' "$SETTINGS"
 check "pane-name hooks in the new claude config" grep -q 'claude-hook' "$SETTINGS"
 check "claude settings still parse" plutil -convert xml1 -o /dev/null "$SETTINGS"
