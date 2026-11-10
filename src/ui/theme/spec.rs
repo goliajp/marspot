@@ -232,6 +232,15 @@ pub mod control {
     pub const CHIP_TEXT: PanelText = PanelText::Caption;
     /// A chip label's weight: the caption role, set bold.
     pub const CHIP_WEIGHT: u16 = 700;
+
+    /// A key cap's inset left and right of its glyphs.
+    pub const KEYCAP_PAD_X: f64 = 6.0;
+    /// A key cap's inset above and below its line of glyphs.
+    pub const KEYCAP_PAD_Y: f64 = 2.0;
+    /// Corner radius of a key cap.
+    pub const KEYCAP_RADIUS: f64 = 4.0;
+    /// Between two key caps on one row.
+    pub const KEYCAP_GAP: f64 = super::space::CONTROL_TO_CONTROL;
 }
 
 #[cfg(test)]
@@ -268,6 +277,7 @@ mod tests {
             ("chrome::MENU_DIVIDER_H", chrome::MENU_DIVIDER_H),
             ("chrome::MENU_PAD_X", chrome::MENU_PAD_X),
             ("chrome::MENU_PAD_Y", chrome::MENU_PAD_Y),
+            ("control::KEYCAP_GAP", control::KEYCAP_GAP),
         ];
         for (name, v) in gaps {
             assert!(space::LADDER.contains(&v), "{name} = {v} is not on the ladder");

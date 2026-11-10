@@ -57,6 +57,7 @@ use crate::layout::Layout;
 use crate::ui::components::process_panel::ProcessPanelRender;
 use crate::ui::components::cc_usage_modal::CcUsageRender;
 use crate::ui::components::settings_paint::SettingsRender;
+use crate::ui::components::shortcuts_paint::ShortcutsRender;
 use crate::ui::components::layout_modal_paint::LayoutModalRender;
 use crate::ui::components::{chrome_hover::ChromeHover, context_menu_paint::ContextMenuRender};
 use crate::render::{SessionView, SidebarEntry};
@@ -64,7 +65,7 @@ use crate::render::{SessionView, SidebarEntry};
 use crate::render::HighlightSpan;
 
 use crate::ui::theme::terminal::*;
-use crate::frame_build::frame::build_instances;
+use crate::frame_build::frame::{build_instances, FormPanel};
 use crate::frame_build::canvas_runs::{build_canvas_runs, CanvasRunKind};
 use crate::frame_build::pane_cache::PaneInstanceCache;
 use crate::frame_build::glyph_resolve::resolve_cell_glyph;
@@ -510,6 +511,7 @@ pub struct MetalRenderer {
     process_panel: Option<ProcessPanelRender>,
     cc_usage: Option<CcUsageRender>,
     settings_panel: Option<SettingsRender>,
+    shortcuts_panel: Option<ShortcutsRender>,
     /// F3+3.0 / 3.3 — LayoutModal render state.  `Some(_)` when
     /// open, `None` when closed.  See `layout_modal_paint::LayoutModalRender`.
     layout_modal_state: Option<LayoutModalRender>,
@@ -688,7 +690,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, cc_usage: None, settings_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
+            process_panel: None, cc_usage: None, settings_panel: None, shortcuts_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
             last_render_split: RenderSplit::default(),
             top_inset_phys: 0.0,
             frame_id: 0,
@@ -757,7 +759,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, cc_usage: None, settings_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
+            process_panel: None, cc_usage: None, settings_panel: None, shortcuts_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
             last_render_split: RenderSplit::default(),
             top_inset_phys: 0.0,
             frame_id: 0,
@@ -782,6 +784,10 @@ impl MetalRenderer {
 
     pub fn set_settings_panel(&mut self, data: Option<SettingsRender>) {
         self.settings_panel = data;
+    }
+
+    pub fn set_shortcuts_panel(&mut self, data: Option<ShortcutsRender>) {
+        self.shortcuts_panel = data;
     }
 
     pub fn set_process_panel(&mut self, data: Option<ProcessPanelRender>) {
@@ -1130,6 +1136,7 @@ impl MetalRenderer {
             ref process_panel,
             ref cc_usage,
             ref settings_panel,
+            ref shortcuts_panel,
             width_px,
             height_px,
             ..
@@ -1153,7 +1160,7 @@ impl MetalRenderer {
             hover_chrome_btn,
             process_panel.as_ref(),
             cc_usage.as_ref(),
-            settings_panel.as_ref(),
+            FormPanel::open(settings_panel.as_ref(), shortcuts_panel.as_ref()),
             self.layout_modal_state.as_ref(),
             self.drop_preview,
             self.drag_source,
@@ -1393,6 +1400,7 @@ impl MetalRenderer {
             ref process_panel,
             ref cc_usage,
             ref settings_panel,
+            ref shortcuts_panel,
             ..
         } = *self;
 
@@ -1417,7 +1425,7 @@ impl MetalRenderer {
             hover_chrome_btn,
             process_panel.as_ref(),
             cc_usage.as_ref(),
-            settings_panel.as_ref(),
+            FormPanel::open(settings_panel.as_ref(), shortcuts_panel.as_ref()),
             self.layout_modal_state.as_ref(),
             self.drop_preview,
             self.drag_source,

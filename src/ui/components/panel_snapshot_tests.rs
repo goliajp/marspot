@@ -1,8 +1,8 @@
 //! One offscreen picture per panel, compared with a committed PNG.
 //!
-//! The four panels are meant to look like one program: same header,
+//! The panels are meant to look like one program: same header,
 //! same paddings, same controls.  These tests draw each of them over a
-//! terminal full of text, with fixed data, so the four pictures can be
+//! terminal full of text, with fixed data, so the pictures can be
 //! put side by side and so a change to one panel shows up as a changed
 //! picture rather than as a remark weeks later.
 //!
@@ -35,8 +35,9 @@
 //! tests.  Only one `test-remote.sh` runs at a time per machine, so a
 //! second one started meanwhile exits at once and has to be retried.
 //!
-//! The names are `panel_snapshot_{settings,layout,process,accounts}`
-//! and the files `{settings,layout,process,accounts}.png`;
+//! The names are
+//! `panel_snapshot_{settings,layout,process,accounts,shortcuts}` and
+//! the files `{settings,layout,process,accounts,shortcuts}.png`;
 //! `panel_snapshot_accounts_narrow` / `accounts_narrow.png` is the
 //! accounts panel in a window where its cards take two rows, and
 //! `panel_snapshot_accounts_empty` / `accounts_empty.png` the same
@@ -173,6 +174,19 @@ fn panel_snapshot_settings() {
             settings,
             path: "/Users/you/Library/Application Support/marspot/settings.toml".to_string(),
             hover: settings_modal::Hover::None,
+        }));
+    });
+}
+
+#[test]
+fn panel_snapshot_shortcuts() {
+    snapshot("shortcuts", 1600, 1200, |renderer, layout| {
+        let rect = crate::ui::components::shortcuts_panel::panel_rect(
+            layout.window_w, layout.window_h, renderer.cell_dims(), layout.top_inset,
+        );
+        renderer.set_shortcuts_panel(Some(crate::ui::components::shortcuts_paint::ShortcutsRender {
+            rect,
+            close_hovered: false,
         }));
     });
 }

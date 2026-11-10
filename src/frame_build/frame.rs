@@ -17,6 +17,7 @@ use crate::ui::components::context_menu_paint::ContextMenuRender;
 use crate::ui::components::layout_modal_paint::LayoutModalRender;
 use crate::ui::components::process_panel::ProcessPanelRender;
 use crate::ui::components::settings_paint::SettingsRender;
+use crate::ui::components::shortcuts_paint::ShortcutsRender;
 use crate::ui::core::view::ViewPainter;
 
 /// What `build_instances` measured about itself.
@@ -25,6 +26,24 @@ pub(crate) struct BuildStats {
     pub(crate) panes_us: u64,
     pub(crate) rebuilt: u32,
     pub(crate) considered: u32,
+}
+
+/// The settings panel or the shortcuts panel.  One slot for both:
+/// only one panel is open at a time.
+#[derive(Clone, Copy)]
+pub(crate) enum FormPanel<'a> {
+    Settings(&'a SettingsRender),
+    Shortcuts(&'a ShortcutsRender),
+}
+
+impl<'a> FormPanel<'a> {
+    /// Whichever of the two is open.
+    pub(crate) fn open(
+        settings: Option<&'a SettingsRender>,
+        shortcuts: Option<&'a ShortcutsRender>,
+    ) -> Option<Self> {
+        settings.map(Self::Settings).or(shortcuts.map(Self::Shortcuts))
+    }
 }
 
 /// Lay out one frame -- every pane, the chrome around them, and the
@@ -39,7 +58,7 @@ pub(crate) fn build_instances(
     chrome_hover: Option<ChromeHover>,
     process_panel: Option<&ProcessPanelRender>,
     cc_usage: Option<&CcUsageRender>,
-    settings_panel: Option<&SettingsRender>,
+    form_panel: Option<FormPanel<'_>>,
     layout_modal_state: Option<&LayoutModalRender>,
     drop_preview: Option<((f64, f64, f64, f64), bool)>,
     drag_source: Option<usize>,
@@ -99,9 +118,12 @@ pub(crate) fn build_instances(
             process_panel.is_some(),
             false,
             cc_usage.is_some(),
-            settings_panel.is_some(),
+            matches!(form_panel, Some(FormPanel::Settings(_))),
         ];
-        let panel_open = on[1..].contains(&true) || context_menu_state.is_some();
+        // The shortcuts panel has no button to light, and covers the
+        // sidebar like the rest.
+        let panel_open =
+            on[1..].contains(&true) || form_panel.is_some() || context_menu_state.is_some();
         let hover = chrome_hover.filter(|h| !panel_open || h.on_toolbar());
         let mut painter = ViewPainter {
             cell_w, cell_h, ascent,
@@ -116,7 +138,7 @@ pub(crate) fn build_instances(
     }
 
     paint_overlays(
-        layout, views, process_panel, cc_usage, settings_panel, layout_modal_state,
+        layout, views, process_panel, cc_usage, form_panel, layout_modal_state,
         cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
         font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
     );
@@ -205,7 +227,7 @@ fn paint_overlays(
     views: &[SessionView],
     process_panel: Option<&ProcessPanelRender>,
     cc_usage: Option<&CcUsageRender>,
-    settings_panel: Option<&SettingsRender>,
+    form_panel: Option<FormPanel<'_>>,
     layout_modal_state: Option<&LayoutModalRender>,
     cell_w: f32,
     cell_h: f32,
@@ -280,9 +302,19 @@ fn paint_overlays(
     }
 
     // The settings panel.  Same overlay + backdrop treatment.
-    if let Some(sp) = settings_panel {
+    if let Some(FormPanel::Settings(sp)) = form_panel {
         crate::ui::components::settings_paint::push_settings_panel_via_view(
             sp,
+            layout.top_inset,
+            cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
+            layout.window_w, layout.window_h,
+            font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
+        );
+    }
+
+    if let Some(FormPanel::Shortcuts(panel)) = form_panel {
+        crate::ui::components::shortcuts_paint::push_shortcuts_panel_via_view(
+            panel,
             layout.top_inset,
             cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
             layout.window_w, layout.window_h,

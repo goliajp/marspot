@@ -120,14 +120,28 @@ Everything not listed goes to the program in the pane, unchanged.
 
 | | |
 |---|---|
-| `⌘N` | New window |
-| `⌘C` | Copy the selection |
+| `⌘,` | Settings… |
+| `⌘H` | Hide Marspot |
+| `⌥⌘H` | Hide Others |
+| `⌘Q` | Quit Marspot |
+| `⌘N` | New Window |
+| `⌘T` | New Pane |
+| `⌘W, Esc` | Close Panel |
+| `⌘C` | Copy |
 | `⌘V` | Paste |
-| `⌘F` | Search this pane's scrollback |
-| `⌘B` | Show or hide the sidebar |
-| `⇧⌘C` | Agent usage for this account |
-| `⌘W` | Close the panel that is open |
-| `Esc` | Close the panel that is open; three times in five seconds ends a stuck agent session |
+| `⌘F` | Find |
+| `⌘B` | Show or Hide Sidebar |
+| `⇧⌘L` | Layout |
+| `⇧⌘P` | Process Monitor |
+| `⇧⌘C` | Agent Accounts |
+| `⌃⌘F` | Enter or Exit Full Screen |
+| `⌘M` | Minimise |
+| `⌘[` | Previous Pane |
+| `⌘]` | Next Pane |
+| `⌘1 – ⌘9` | Pane 1 – 9 |
+| `⌘/` | Keyboard Shortcuts |
+
+The same commands are in the menu bar, and ⌘/ lists them in the app. Closing a pane ends its session, so no key does it. Esc pressed three times in five seconds ends a stuck agent session.
 
 ## Known gaps
 
