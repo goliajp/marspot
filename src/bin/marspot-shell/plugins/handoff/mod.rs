@@ -1,7 +1,8 @@
-//! Handing a pane's conversation between claude and codex (RFC-009).
+//! Handing a pane's conversation between claude, codex and gemini (RFC-009).
 
 mod claude;
 mod codex;
+mod gemini;
 pub(crate) mod history;
 pub(crate) use marspot_peer::json;
 mod ledger;
