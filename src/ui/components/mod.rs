@@ -34,6 +34,8 @@ pub mod context_menu_paint;
 pub mod dev_panel;
 #[cfg(test)]
 mod panel_snapshot_tests;
+#[cfg(test)]
+mod chrome_snapshot_tests;
 
 pub use scroll_view::ScrollView;
 pub use panel_chrome::PanelChrome;
