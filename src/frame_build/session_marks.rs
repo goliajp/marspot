@@ -1,9 +1,8 @@
 //! What is drawn over a pane's grid: its title strip, the selection,
 //! link underlines, the cursor and an IME composition.
 
-use crate::font_cache::{FontCache, BG};
+use crate::font_cache::FontCache;
 use crate::frame_build::glyph_resolve::{resolve_cell_glyph, resolve_cluster_glyph};
-use crate::ui::theme::terminal::*;
 use crate::frame_build::text_run::push_text_run;
 use crate::glyph_atlas::{GlyphAtlas, SlotMetrics};
 use crate::layout::CellRect;
@@ -153,7 +152,7 @@ pub(crate) fn paint_selection(g: &PaneGeom, o: &mut PaneOut) {
                             inner_y + r as f32 * cell_h,
                         ],
                         size: [w, cell_h],
-                        color: rgba8_of_f32([SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0]),
+                        color: g.colors.selection,
                     });
                 }
             }
@@ -183,7 +182,7 @@ pub(crate) fn paint_selection(g: &PaneGeom, o: &mut PaneOut) {
                 cells.push(CellInstance {
                     origin: [x, y],
                     size: [w, cell_h],
-                    color: rgba8_of_f32([SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0]),
+                    color: g.colors.selection,
                 });
             }
         }
@@ -201,6 +200,8 @@ pub(crate) fn paint_link_underlines(g: &PaneGeom, o: &mut PaneOut) {
     // pass above, so a link sitting on already-underlined text just
     // paints the link colour over the same row.
     {
+        let (lr, lg, lb) = g.colors.link;
+        let color = rgba8_of_f32([lr as f32, lg as f32, lb as f32, 1.0]);
         for link in g.links {
             let row_y = inner_y + (link.row as f32) * cell_h;
             let underline_y = row_y + cell_h - (cell_h - ascent) * 0.45;
@@ -212,12 +213,7 @@ pub(crate) fn paint_link_underlines(g: &PaneGeom, o: &mut PaneOut) {
                     underline_y,
                 ],
                 size: [cols_in_span as f32 * cell_w, underline_h],
-                color: rgba8_of_f32([
-                    LINK_UNDERLINE_FG.0,
-                    LINK_UNDERLINE_FG.1,
-                    LINK_UNDERLINE_FG.2,
-                    1.0,
-                ]),
+                color,
             });
         }
     }
@@ -282,7 +278,7 @@ pub(crate) fn paint_cursor_glyph(g: &PaneGeom, o: &mut PaneOut) {
                     size,
                     uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
                     uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
-                    color: rgba8_of_f32([BG.0 as f32, BG.1 as f32, BG.2 as f32, 1.0]),
+                    color: g.colors.bg,
                 });
             }
         }
@@ -300,7 +296,7 @@ pub(crate) fn paint_cursor(g: &PaneGeom, o: &mut PaneOut) {
         let cx = inner_x + col as f32 * cell_w;
         let cy = inner_y + row as f32 * cell_h;
         let solid = view.focused && window_focused;
-        let color = [CURSOR_FG.0, CURSOR_FG.1, CURSOR_FG.2, 1.0];
+        let color = g.colors.cursor;
         if solid {
             let color = rgba8_of_f32(color);
             cells.push(CellInstance {
@@ -352,7 +348,7 @@ pub(crate) fn paint_preedit(g: &PaneGeom, o: &mut PaneOut) {
             cells.push(CellInstance {
                 origin: [dest_x, dest_y],
                 size: [slot_w, cell_h],
-                color: rgba8_of_f32([IME_PREEDIT_BG.0, IME_PREEDIT_BG.1, IME_PREEDIT_BG.2, 1.0]),
+                color: g.colors.ime_bg,
             });
             // Glyph — same atlas path the cell-render uses, so the
             // preedit text is rendered at the EXACT same px size as
@@ -371,7 +367,7 @@ pub(crate) fn paint_preedit(g: &PaneGeom, o: &mut PaneOut) {
                         size,
                         uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
                         uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
-                        color: rgba8_of_f32([IME_PREEDIT_FG.0, IME_PREEDIT_FG.1, IME_PREEDIT_FG.2, 1.0]),
+                        color: g.colors.ime_fg,
                     });
                 }
             // Underline — 2× the old hairline so it actually reads
@@ -382,7 +378,7 @@ pub(crate) fn paint_preedit(g: &PaneGeom, o: &mut PaneOut) {
             cells.push(CellInstance {
                 origin: [dest_x, dest_y + cell_h - underline_h],
                 size: [slot_w, underline_h],
-                color: rgba8_of_f32([IME_PREEDIT_FG.0, IME_PREEDIT_FG.1, IME_PREEDIT_FG.2, 1.0]),
+                color: g.colors.ime_fg,
             });
         }
     }

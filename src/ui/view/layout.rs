@@ -8,7 +8,8 @@
 
 use crate::ui::core::Length;
 use super::types::{AlignCross, Anchor, Distribute, Edges, FrameSpec};
-use super::view::{Modifier, View, TextSize, TextFontSpec, TextLines, Truncate};
+use super::view::{role, Modifier, View, TextSize, TextFontSpec, TextLines, Truncate};
+use crate::ui::components::panel_palette as palette;
 
 /// Two-axis (min, max) constraints handed down to a node.
 /// Equivalent to Flutter's `BoxConstraints`.
@@ -1062,7 +1063,7 @@ fn layout_modified<'a>(
             Modifier::BackgroundMaterial(_m) => {
                 // v1: render as semi-opaque BG_PANEL.  Real macOS
                 // vibrancy = v2+ NSVisualEffectView wiring.
-                let mut c = crate::ui::theme::color::BG_PANEL;
+                let mut c = role(palette::frame_bg());
                 c.a = 0.85;
                 bake.bg = Some(c);
             }

@@ -280,31 +280,33 @@ impl Default for DevPanelState {
     }
 }
 
-/// Tokens used by the dev panel chrome itself.  These are the colors
-/// the panel paints with — separate from the SAMPLES it shows in the
-/// Colors section.  Once P3 adds a real theme module these move there.
+/// Colours the dev panel's own chrome paints with — separate from the
+/// SAMPLES it shows in the Colors section.  They are the theme's; the
+/// four tones the table has no entry for are kept for the dark theme.
 pub mod tokens {
-    use crate::ui::core::Color;
-
-    pub const PANEL_BG: Color = Color::rgba(20, 22, 28, 1.0);
-    pub const TAB_BAR_BG: Color = Color::rgba(28, 31, 39, 1.0);
-    pub const TAB_ACTIVE_BG: Color = Color::rgba(20, 22, 28, 1.0);
-    pub const TAB_ACTIVE_ACCENT: Color = Color::rgba(91, 162, 250, 1.0);
-    pub const TAB_INACTIVE_FG: Color = Color::rgba(140, 153, 168, 1.0);
-    pub const TAB_ACTIVE_FG: Color = Color::rgba(232, 238, 248, 1.0);
-    pub const MENU_BG: Color = Color::rgba(24, 27, 34, 1.0);
-    pub const MENU_ROW_ACTIVE_BG: Color = Color::rgba(51, 107, 173, 1.0);
-    pub const MENU_ROW_FG: Color = Color::rgba(180, 190, 205, 1.0);
-    pub const MENU_ROW_ACTIVE_FG: Color = Color::rgba(245, 248, 252, 1.0);
-    /// SubGroup header row(non-clickable label sitting above its
-    /// Item rows).  Lower contrast than `MENU_ROW_FG` so the eye
-    /// reads the Item rows as "the things you can pick" and the
-    /// Headers as "what they're grouped under".
-    pub const MENU_HEADER_FG: Color = Color::rgba(140, 153, 168, 1.0);
-    pub const DIVIDER: Color = Color::rgba(255, 255, 255, 0.08);
-    pub const SECTION_HEADER_FG: Color = Color::rgba(170, 190, 230, 1.0);
-    pub const SECTION_BODY_FG: Color = Color::rgba(200, 208, 220, 1.0);
-    pub const SAMPLE_HINT_FG: Color = Color::rgba(130, 140, 156, 1.0);
+    use crate::ui::{core::Color, theme::table::{color, current}};
+    /// A tone of the dark theme that is no table entry: itself there,
+    /// the nearest entry in the other themes.
+    fn own(dark: Color, entry: Color) -> Color {
+        if current().id == marspot_term::palette::ThemeId::Dark { dark } else { entry }
+    }
+    pub fn panel_bg() -> Color { color::bg() }
+    pub fn tab_bar_bg() -> Color { color::bg_raised() }
+    pub fn tab_active_bg() -> Color { color::bg() }
+    pub fn tab_active_accent() -> Color { color::accent() }
+    pub fn tab_inactive_fg() -> Color { color::fg_muted() }
+    pub fn tab_active_fg() -> Color { color::fg() }
+    pub fn menu_bg() -> Color { own(Color::rgba(24, 27, 34, 1.0), color::bg_raised()) }
+    pub fn menu_row_active_bg() -> Color { color::bg_selected() }
+    pub fn menu_row_fg() -> Color { own(Color::rgba(180, 190, 205, 1.0), color::fg_secondary()) }
+    pub fn menu_row_active_fg() -> Color { own(Color::rgba(245, 248, 252, 1.0), color::fg_on_accent()) }
+    /// A sub-group's header row sits above its items at lower contrast,
+    /// so the items read as what can be picked.
+    pub fn menu_header_fg() -> Color { color::fg_muted() }
+    pub fn divider() -> Color { color::divider() }
+    pub fn section_header_fg() -> Color { color::accent_dim() }
+    pub fn section_body_fg() -> Color { own(Color::rgba(200, 208, 220, 1.0), color::fg_secondary()) }
+    pub fn sample_hint_fg() -> Color { color::hint() }
 }
 
 /// Build a Canvas of dev-panel primitives for the dev window.  The
@@ -330,7 +332,7 @@ pub fn build_dev_panel_canvas(
     canvas.rect()
         .at(Length::Pt(0.0), Length::Pt(0.0))
         .size(Length::Pct(1.0), Length::Pct(1.0))
-        .fill(tokens::PANEL_BG)
+        .fill(tokens::panel_bg())
         .draw();
 
     // Layout constants come from module-level `pub const`s so
@@ -350,7 +352,7 @@ pub fn build_dev_panel_canvas(
     canvas.rect()
         .at(Length::Pt(0.0), Length::Pt(0.0))
         .size(Length::Pct(1.0), Length::Pt(tab_bar_h))
-        .fill(tokens::TAB_BAR_BG)
+        .fill(tokens::tab_bar_bg())
         .draw();
 
     let mut tab_x: f64 = 0.0;
@@ -362,12 +364,12 @@ pub fn build_dev_panel_canvas(
             canvas.rect()
                 .at(Length::Pt(tab_x), Length::Pt(0.0))
                 .size(Length::Pt(tab_w), Length::Pt(tab_bar_h))
-                .fill(tokens::TAB_ACTIVE_BG)
+                .fill(tokens::tab_active_bg())
                 .draw();
             canvas.rect()
                 .at(Length::Pt(tab_x), Length::Pt(tab_bar_h - 2.0))
                 .size(Length::Pt(tab_w), Length::Pt(2.0))
-                .fill(tokens::TAB_ACTIVE_ACCENT)
+                .fill(tokens::tab_active_accent())
                 .draw();
         }
         canvas.text(
@@ -375,7 +377,7 @@ pub fn build_dev_panel_canvas(
             Length::Pt(tab_text_y),
             label,
         )
-        .color(if is_active { tokens::TAB_ACTIVE_FG } else { tokens::TAB_INACTIVE_FG })
+        .color(if is_active { tokens::tab_active_fg() } else { tokens::tab_inactive_fg() })
         .ui()
         .ui_size(crate::ui::view::UiSize::Body)
         .weight(400)
@@ -388,7 +390,7 @@ pub fn build_dev_panel_canvas(
         (Length::Pt(0.0), Length::Pt(tab_bar_h)),
         (Length::Pct(1.0), Length::Pt(tab_bar_h)),
     )
-    .stroke(Pt(1.0), tokens::DIVIDER)
+    .stroke(Pt(1.0), tokens::divider())
     .draw();
 
     // Tabs that have at least one clickable `Item` render the
@@ -407,7 +409,7 @@ pub fn build_dev_panel_canvas(
             Length::Pt(tab_bar_h + 24.0),
             "(placeholder — coming next)",
         )
-        .color(tokens::SAMPLE_HINT_FG)
+        .color(tokens::sample_hint_fg())
         .draw();
         return canvas;
     }
@@ -419,14 +421,14 @@ pub fn build_dev_panel_canvas(
     canvas.rect()
         .at(Length::Pt(0.0), Length::Pt(body_y))
         .size(Length::Pt(menu_w), Length::Pct(1.0))
-        .fill(tokens::MENU_BG)
+        .fill(tokens::menu_bg())
         .draw();
     // Menu / content divider.
     canvas.line(
         (Length::Pt(menu_w), Length::Pt(body_y)),
         (Length::Pt(menu_w), Length::Pct(1.0)),
     )
-    .stroke(Pt(1.0), tokens::DIVIDER)
+    .stroke(Pt(1.0), tokens::divider())
     .draw();
 
     // Menu rows — Header vs Item per `MenuRow` enum.  Header rows are
@@ -462,7 +464,7 @@ pub fn build_dev_panel_canvas(
                     Text::new(*label)
                         .ui_size(UiSize::Mini)
                         .ui_weight(400)
-                        .color(tokens::MENU_HEADER_FG)
+                        .color(tokens::menu_header_fg())
                         .build()
                         .padding(Edges::xy(header_pad_x, L::Pt(0.0)))
                         .frame(FrameSpec {
@@ -475,16 +477,16 @@ pub fn build_dev_panel_canvas(
                 MenuRow::Item(label, id) => {
                     let is_active = *id == state.active_section;
                     let fg = if is_active {
-                        tokens::MENU_ROW_ACTIVE_FG
+                        tokens::menu_row_active_fg()
                     } else {
-                        tokens::MENU_ROW_FG
+                        tokens::menu_row_fg()
                     };
                     // Menu 全用 Regular(400)— user 2026-06-25 反馈
                     // 粗体看着不舒服.active 状态靠 BG + FG 颜色区分,
                     // 不用 weight 区分.
                     let weight = 400u16;
                     let bg = if is_active {
-                        tokens::MENU_ROW_ACTIVE_BG
+                        tokens::menu_row_active_bg()
                     } else {
                         Color::TRANSPARENT
                     };
@@ -627,7 +629,7 @@ pub fn build_dev_panel_canvas(
         _ => {
             canvas.text(Length::Pt(content_x), Length::Pt(y),
                 "(unknown section — internal active_section out of range)")
-                .color(tokens::SAMPLE_HINT_FG)
+                .color(tokens::sample_hint_fg())
                 .draw();
         }
     }
@@ -639,13 +641,13 @@ pub fn build_dev_panel_canvas(
 /// new y cursor (header_y + header_h).  Header height ~22 pt.
 fn draw_section_header(canvas: &mut Canvas, x: f64, y: f64, label: &str) -> f64 {
     canvas.text(Length::Pt(x), Length::Pt(y), label)
-        .color(tokens::SECTION_HEADER_FG)
+        .color(tokens::section_header_fg())
         .draw();
     canvas.line(
         (Length::Pt(x), Length::Pt(y + 18.0)),
         (Length::Pct(1.0), Length::Pt(y + 18.0)),
     )
-    .stroke(Pt(1.0), tokens::DIVIDER)
+    .stroke(Pt(1.0), tokens::divider())
     .draw();
     y + 26.0
 }
@@ -684,10 +686,10 @@ fn build_model_view() -> crate::ui::view::View {
     use crate::ui::core::{Length, Color};
 
     // Helpers using TextStyle tokens (P3l) ----------------------
-    let h1   = |s: &str| Text::new(s).style(text::HEADER).build();
-    let body = |s: &str| Text::new(s).style(text::BODY).build();
-    let mono = |s: &str| Text::new(s).style(text::CODE).build();
-    let hint = |s: &str| Text::new(s).style(text::HINT).build();
+    let h1   = |s: &str| Text::new(s).style(text::header()).build();
+    let body = |s: &str| Text::new(s).style(text::body()).build();
+    let mono = |s: &str| Text::new(s).style(text::code()).build();
+    let hint = |s: &str| Text::new(s).style(text::hint()).build();
 
     let mk_swatch = |c| {
         filled(c).corner_radius(radius::SM).frame(FrameSpec {
@@ -699,9 +701,9 @@ fn build_model_view() -> crate::ui::view::View {
 
     // Status hints — colored tags so reader sees what's live vs
     // planned at a glance.  Mark per line with [✓] / [v1 待补] / [v2+].
-    let ok      = |s: &str| Text::new(s).color(color::SUCCESS).build();
-    let todo_v1 = |s: &str| Text::new(s).color(color::WARN).build();
-    let todo_v2 = |s: &str| Text::new(s).style(text::HINT).build();
+    let ok      = |s: &str| Text::new(s).color(color::success()).build();
+    let todo_v1 = |s: &str| Text::new(s).color(color::warn()).build();
+    let todo_v2 = |s: &str| Text::new(s).style(text::hint()).build();
 
     // ── Visual demo helpers — used multiple times below ──────
     // Length demo bar of given width pt + label.
@@ -718,7 +720,7 @@ fn build_model_view() -> crate::ui::view::View {
     // Space ruler at the given pt width.
     let space_ruler = |w: Length, label: &'static str| {
         hstack(vec![
-            filled(color::ACCENT_DIM).frame(FrameSpec {
+            filled(color::accent_dim()).frame(FrameSpec {
                 width: Some(w),
                 height: Some(Length::Pt(6.0)),
                 ..Default::default()
@@ -729,7 +731,7 @@ fn build_model_view() -> crate::ui::view::View {
     // Radius demo dot.
     let radius_chip = |r: Length, label: &'static str| {
         hstack(vec![
-            filled(color::ACCENT).corner_radius(r).frame(FrameSpec {
+            filled(color::accent()).corner_radius(r).frame(FrameSpec {
                 width: Some(Length::Pt(24.0)),
                 height: Some(Length::Pt(24.0)),
                 ..Default::default()
@@ -740,7 +742,7 @@ fn build_model_view() -> crate::ui::view::View {
     // Opacity demo column.
     let opacity_chip = |o: f64, label: &'static str| {
         vstack(vec![
-            filled(color::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
+            filled(color::accent()).corner_radius(radius::SM).frame(FrameSpec {
                 width: Some(Length::Pt(28.0)),
                 height: Some(Length::Pt(28.0)),
                 ..Default::default()
@@ -751,9 +753,9 @@ fn build_model_view() -> crate::ui::view::View {
     // Elevation card.
     let elev_card = |s, label: &'static str| {
         vstack(vec![
-            Text::new("E").style(text::BODY).build()
+            Text::new("E").style(text::body()).build()
                 .padding(Edges::all(Length::Pt(8.0)))
-                .background(color::BG_RAISED)
+                .background(color::bg_raised())
                 .corner_radius(radius::MD)
                 .shadow(s)
                 .frame(FrameSpec {
@@ -769,7 +771,7 @@ fn build_model_view() -> crate::ui::view::View {
         use crate::ui::view::Distribute;
         let _ = d;
         let _ = Distribute::Start;
-        let small = || filled(color::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
+        let small = || filled(color::accent()).corner_radius(radius::SM).frame(FrameSpec {
             width: Some(Length::Pt(12.0)),
             height: Some(Length::Pt(12.0)),
             ..Default::default()
@@ -781,7 +783,7 @@ fn build_model_view() -> crate::ui::view::View {
                 height: Some(Length::Pt(14.0)),
                 ..Default::default()
             })
-            .background(color::BG_PANEL)
+            .background(color::bg_panel())
             .corner_radius(radius::SM);
         vstack(vec![row, hint(label)]).vstack_gap(Length::Pt(4.0)).align_cross_center()
     };
@@ -803,20 +805,20 @@ fn build_model_view() -> crate::ui::view::View {
         hstack(vec![
             ok("[✓]"),
             mono("Tokens:"),
-            mk_swatch(color::FG),
-            mk_swatch(color::ACCENT),
-            mk_swatch(color::SUCCESS),
-            mk_swatch(color::WARN),
-            mk_swatch(color::DANGER),
+            mk_swatch(color::fg()),
+            mk_swatch(color::accent()),
+            mk_swatch(color::success()),
+            mk_swatch(color::warn()),
+            mk_swatch(color::danger()),
             hint("FG/ACCENT/SUCCESS/WARN/DANGER"),
         ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
         hint("    space:: XS(4) SM(8) MD(12) LG(16) XL(24)"),
         hint("    radius:: SM(3) MD(6) LG(10) PILL(9999)"),
         // Length 视觉 demo —— 三种单位实际宽度对比.
         hint("    实际 Length 渲染对比 ↓"),
-        len_bar(40.0, color::ACCENT, "Pt(40)"),
-        len_bar(80.0, color::SUCCESS, "Pt(80)"),
-        len_bar(120.0, color::WARN,   "Pt(120)"),
+        len_bar(40.0, color::accent(), "Pt(40)"),
+        len_bar(80.0, color::success(), "Pt(80)"),
+        len_bar(120.0, color::warn(),   "Pt(120)"),
         hint("    Pct(F) 跟容器宽自动算,Ch(N) = N × cell_w"),
         // space 标尺
         hint("    space 标尺(横条宽 = 标记尺度):"),
@@ -846,15 +848,15 @@ fn build_model_view() -> crate::ui::view::View {
 
     // ── L2 Box Model — actual box demo ───────────────────────
     use crate::ui::view::Shadow;
-    let box_demo = Text::new("content").color(color::FG).build()
+    let box_demo = Text::new("content").color(color::fg()).build()
         .padding(Edges::all(space::MD))
-        .background(color::BG_PANEL)
-        .border(Length::Pt(1.0), color::BORDER)
+        .background(color::bg_panel())
+        .border(Length::Pt(1.0), color::border())
         .corner_radius(radius::MD)
         .shadow(Shadow {
             blur: Length::Pt(6.0),
             offset: (Length::Pt(0.0), Length::Pt(2.0)),
-            color: color::SHADOW,
+            color: color::shadow(),
         });
     let l2 = vstack(vec![
         h1("L2 — Box Model"),
@@ -897,9 +899,9 @@ fn build_model_view() -> crate::ui::view::View {
         // Gradient demo
         hint("    LinearGradient(TopToBottom + LeftToRight, 16 bands):"),
         hstack(vec![
-            filled(color::BG_PANEL).corner_radius(radius::MD)
+            filled(color::bg_panel()).corner_radius(radius::MD)
                 .background_gradient(LinearGradient {
-                    stops: vec![(0.0, color::ACCENT), (1.0, color::SUCCESS)],
+                    stops: vec![(0.0, color::accent()), (1.0, color::success())],
                     direction: GradientDir::TopToBottom,
                 })
                 .frame(FrameSpec {
@@ -907,9 +909,9 @@ fn build_model_view() -> crate::ui::view::View {
                     height: Some(Length::Pt(40.0)),
                     ..Default::default()
                 }),
-            filled(color::BG_PANEL).corner_radius(radius::MD)
+            filled(color::bg_panel()).corner_radius(radius::MD)
                 .background_gradient(LinearGradient {
-                    stops: vec![(0.0, color::DANGER), (0.5, color::WARN), (1.0, color::SUCCESS)],
+                    stops: vec![(0.0, color::danger()), (0.5, color::warn()), (1.0, color::success())],
                     direction: GradientDir::LeftToRight,
                 })
                 .frame(FrameSpec {
@@ -921,31 +923,31 @@ fn build_model_view() -> crate::ui::view::View {
         // Material demo (placeholder)
         hint("    Material backdrop(v1 半透明 BG;真 vibrancy = v2+):"),
         hstack(vec![
-            Text::new("Regular").style(text::CAPTION).build()
+            Text::new("Regular").style(text::caption()).build()
                 .padding(Edges::all(space::SM))
                 .background_material(MaterialStyle::Regular)
                 .corner_radius(radius::MD),
-            Text::new("Thick").style(text::CAPTION).build()
+            Text::new("Thick").style(text::caption()).build()
                 .padding(Edges::all(space::SM))
                 .background_material(MaterialStyle::Thick)
                 .corner_radius(radius::MD),
-            Text::new("Thin").style(text::CAPTION).build()
+            Text::new("Thin").style(text::caption()).build()
                 .padding(Edges::all(space::SM))
                 .background_material(MaterialStyle::Thin)
                 .corner_radius(radius::MD),
         ]).hstack_gap(Length::Pt(12.0)).align_cross_center(),
         // Elevation ladder
-        hint("    Elevation(elev::E0..E3 token shadow ladder):"),
+        hint("    Elevation(elev::e0()..E3 token shadow ladder):"),
         hstack(vec![
-            elev_card(elev::E0, "E0"),
-            elev_card(elev::E1, "E1"),
-            elev_card(elev::E2, "E2"),
-            elev_card(elev::E3, "E3"),
+            elev_card(elev::e0(), "E0"),
+            elev_card(elev::e1(), "E1"),
+            elev_card(elev::e2(), "E2"),
+            elev_card(elev::e3(), "E3"),
         ]).hstack_gap(Length::Pt(20.0)).align_cross_center(),
         // AspectRatio demo
         hint("    .aspect_ratio(2.0, Fit) — 2:1 比:"),
         hstack(vec![
-            filled(color::ACCENT_DIM).corner_radius(radius::SM)
+            filled(color::accent_dim()).corner_radius(radius::SM)
                 .aspect_ratio(2.0, AspectMode::Fit)
                 .frame(FrameSpec {
                     width: Some(Length::Pt(80.0)),
@@ -974,17 +976,17 @@ fn build_model_view() -> crate::ui::view::View {
         // Shape 视觉 demo
         hint("    Shape views(Circle / Capsule / RoundedRect):"),
         hstack(vec![
-            shape_circle(color::DANGER).frame(FrameSpec {
+            shape_circle(color::danger()).frame(FrameSpec {
                 width: Some(Length::Pt(28.0)),
                 height: Some(Length::Pt(28.0)),
                 ..Default::default()
             }),
-            shape_capsule(color::SUCCESS).frame(FrameSpec {
+            shape_capsule(color::success()).frame(FrameSpec {
                 width: Some(Length::Pt(56.0)),
                 height: Some(Length::Pt(20.0)),
                 ..Default::default()
             }),
-            shape_rounded_rect(Length::Pt(8.0), color::ACCENT).frame(FrameSpec {
+            shape_rounded_rect(Length::Pt(8.0), color::accent()).frame(FrameSpec {
                 width: Some(Length::Pt(40.0)),
                 height: Some(Length::Pt(28.0)),
                 ..Default::default()
@@ -999,24 +1001,24 @@ fn build_model_view() -> crate::ui::view::View {
         ..Default::default()
     });
     let vstack_demo = vstack(vec![
-        mini(color::DANGER),
-        mini(color::SUCCESS),
-        mini(color::ACCENT),
+        mini(color::danger()),
+        mini(color::success()),
+        mini(color::accent()),
     ]).vstack_gap(Length::Pt(4.0));
     let hstack_demo = hstack(vec![
-        mini(color::DANGER),
-        mini(color::SUCCESS),
-        mini(color::ACCENT),
+        mini(color::danger()),
+        mini(color::success()),
+        mini(color::accent()),
     ]).hstack_gap(Length::Pt(4.0));
     // ZStack: 3 overlapping squares with offset.
     let zstack_demo = zstack(vec![
-        mini(color::DANGER).frame(FrameSpec {
+        mini(color::danger()).frame(FrameSpec {
             width: Some(Length::Pt(28.0)),
             height: Some(Length::Pt(28.0)),
             ..Default::default()
         }),
-        mini(color::SUCCESS).offset(Length::Pt(8.0), Length::Pt(8.0)),
-        mini(color::ACCENT).offset(Length::Pt(16.0), Length::Pt(16.0)),
+        mini(color::success()).offset(Length::Pt(8.0), Length::Pt(8.0)),
+        mini(color::accent()).offset(Length::Pt(16.0), Length::Pt(16.0)),
     ]);
 
     let l4 = vstack(vec![
@@ -1062,10 +1064,10 @@ fn build_model_view() -> crate::ui::view::View {
         grid(
             (0..8).map(|i| {
                 let c = match i % 4 {
-                    0 => color::ACCENT,
-                    1 => color::SUCCESS,
-                    2 => color::WARN,
-                    _ => color::DANGER,
+                    0 => color::accent(),
+                    1 => color::success(),
+                    2 => color::warn(),
+                    _ => color::danger(),
                 };
                 filled(c).corner_radius(radius::SM)
             }).collect(),
@@ -1157,7 +1159,7 @@ fn build_model_view() -> crate::ui::view::View {
     ]).vstack_gap(Length::Pt(2.0));
 
     // ── Hairline separators between layers ───────────────────
-    let sep = || hairline_horiz(color::DIVIDER)
+    let sep = || hairline_horiz(color::divider())
         .frame(FrameSpec {
             height: Some(Length::Pt(1.0)),
             width: Some(Length::Pct(1.0)),
@@ -1254,28 +1256,28 @@ mod h {
     // 文本 still 用,这里 dev panel chrome 内部统一 SF Pro).
 
     pub fn h2(s: &str) -> View {
-        Text::new(s).ui_size(UiSize::Heading).ui_weight(700).color(color::FG).build()
+        Text::new(s).ui_size(UiSize::Heading).ui_weight(700).color(color::fg()).build()
     }
     pub fn h3(s: &str) -> View {
-        Text::new(s).ui_size(UiSize::Body).ui_weight(600).color(color::ACCENT_DIM).build()
+        Text::new(s).ui_size(UiSize::Body).ui_weight(600).color(color::accent_dim()).build()
     }
     pub fn body(s: &str) -> View {
-        Text::new(s).ui_size(UiSize::Body).color(color::FG).build()
+        Text::new(s).ui_size(UiSize::Body).color(color::fg()).build()
     }
     pub fn mono(s: &str) -> View {
-        Text::new(s).ui_size(UiSize::Body).ui_opts(ShapeOptions::code()).color(color::ACCENT_DIM).build()
+        Text::new(s).ui_size(UiSize::Body).ui_opts(ShapeOptions::code()).color(color::accent_dim()).build()
     }
     pub fn hint(s: &str) -> View {
-        Text::new(s).ui_size(UiSize::Small).color(color::HINT).build()
+        Text::new(s).ui_size(UiSize::Small).color(color::hint()).build()
     }
     pub fn ok(s: &str) -> View {
-        Text::new(s).ui_size(UiSize::Body).color(color::SUCCESS).build()
+        Text::new(s).ui_size(UiSize::Body).color(color::success()).build()
     }
     pub fn todo_v1(s: &str) -> View {
-        Text::new(s).ui_size(UiSize::Body).color(color::WARN).build()
+        Text::new(s).ui_size(UiSize::Body).color(color::warn()).build()
     }
     pub fn todo_v2(s: &str) -> View {
-        Text::new(s).ui_size(UiSize::Small).color(color::HINT).build()
+        Text::new(s).ui_size(UiSize::Small).color(color::hint()).build()
     }
 
     /// `[✓] label` row.
@@ -1352,7 +1354,7 @@ fn build_l1_view() -> crate::ui::view::View {
     };
     let space_ruler = |w, lab: &'static str| {
         hstack(vec![
-            filled(color::ACCENT_DIM).frame(FrameSpec {
+            filled(color::accent_dim()).frame(FrameSpec {
                 width: Some(w), height: Some(Length::Pt(6.0)),
                 ..Default::default()
             }),
@@ -1361,7 +1363,7 @@ fn build_l1_view() -> crate::ui::view::View {
     };
     let radius_chip = |r, lab: &'static str| {
         vstack(vec![
-            filled(color::ACCENT).corner_radius(r).frame(FrameSpec {
+            filled(color::accent()).corner_radius(r).frame(FrameSpec {
                 width: Some(Length::Pt(28.0)), height: Some(Length::Pt(28.0)),
                 ..Default::default()
             }),
@@ -1376,9 +1378,9 @@ fn build_l1_view() -> crate::ui::view::View {
         h::sub("Pct(F) = F × 父轴.scale-independent."),
         h::sub("Ch(N) = N × chrome cell_w(terminal 域专用)"),
         h::hint("    实际渲染对比 ↓"),
-        len_bar(40.0,  color::ACCENT,  "Pt(40)"),
-        len_bar(80.0,  color::SUCCESS, "Pt(80)"),
-        len_bar(120.0, color::WARN,    "Pt(120)"),
+        len_bar(40.0,  color::accent(),  "Pt(40)"),
+        len_bar(80.0,  color::success(), "Pt(80)"),
+        len_bar(120.0, color::warn(),    "Pt(120)"),
 
         h::h2("Color"),
         h::done_row("Color::rgba(r, g, b, a) ≡ CSS rgba()"),
@@ -1390,16 +1392,16 @@ fn build_l1_view() -> crate::ui::view::View {
         h::done_row("状态色 SUCCESS / WARN / DANGER"),
         hstack(vec![
             h::mono("color::"),
-            h::swatch(color::FG),
-            h::swatch(color::FG_MUTED),
-            h::swatch(color::BG),
-            h::swatch(color::BG_RAISED),
-            h::swatch(color::BORDER),
-            h::swatch(color::ACCENT),
-            h::swatch(color::ACCENT_DIM),
-            h::swatch(color::SUCCESS),
-            h::swatch(color::WARN),
-            h::swatch(color::DANGER),
+            h::swatch(color::fg()),
+            h::swatch(color::fg_muted()),
+            h::swatch(color::bg()),
+            h::swatch(color::bg_raised()),
+            h::swatch(color::border()),
+            h::swatch(color::accent()),
+            h::swatch(color::accent_dim()),
+            h::swatch(color::success()),
+            h::swatch(color::warn()),
+            h::swatch(color::danger()),
         ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
         h::hint("    FG/FG_MUTED/BG/BG_RAISED/BORDER/ACCENT/ACCENT_DIM/SUCCESS/WARN/DANGER"),
         hstack(vec![
@@ -1446,15 +1448,15 @@ fn build_l2_view() -> crate::ui::view::View {
     };
     use crate::ui::theme::{color, space, radius, text, elev};
     use crate::ui::core::Length;
-    let box_demo = Text::new("content").color(color::FG).build()
+    let box_demo = Text::new("content").color(color::fg()).build()
         .padding(Edges::all(space::MD))
-        .background(color::BG_PANEL)
-        .border(Length::Pt(1.0), color::BORDER)
+        .background(color::bg_panel())
+        .border(Length::Pt(1.0), color::border())
         .corner_radius(radius::MD)
-        .shadow(elev::E2);
+        .shadow(elev::e2());
     let opacity_chip = |o: f64, lab: &'static str| {
         vstack(vec![
-            filled(color::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
+            filled(color::accent()).corner_radius(radius::SM).frame(FrameSpec {
                 width: Some(Length::Pt(32.0)), height: Some(Length::Pt(32.0)),
                 ..Default::default()
             }).opacity(o),
@@ -1463,9 +1465,9 @@ fn build_l2_view() -> crate::ui::view::View {
     };
     let elev_card = |s, lab: &'static str| {
         vstack(vec![
-            Text::new("E").style(text::BODY).build()
+            Text::new("E").style(text::body()).build()
                 .padding(Edges::all(Length::Pt(8.0)))
-                .background(color::BG_RAISED)
+                .background(color::bg_raised())
                 .corner_radius(radius::MD)
                 .shadow(s)
                 .frame(FrameSpec {
@@ -1502,7 +1504,7 @@ fn build_l2_view() -> crate::ui::view::View {
         h::h2("Aspect ratio"),
         h::done_row(".aspect_ratio(w/h, Fit | Fill)"),
         hstack(vec![
-            filled(color::ACCENT_DIM).corner_radius(radius::SM)
+            filled(color::accent_dim()).corner_radius(radius::SM)
                 .aspect_ratio(2.0, AspectMode::Fit)
                 .frame(FrameSpec {
                     width: Some(Length::Pt(80.0)),
@@ -1512,7 +1514,7 @@ fn build_l2_view() -> crate::ui::view::View {
             h::hint("80×60 + aspect 2:1 Fit → 80×40 实际"),
         ]).hstack_gap(Length::Pt(12.0)).align_cross_center(),
         hstack(vec![
-            filled(color::SUCCESS).corner_radius(radius::SM)
+            filled(color::success()).corner_radius(radius::SM)
                 .aspect_ratio(0.5, AspectMode::Fit)
                 .frame(FrameSpec {
                     width: Some(Length::Pt(80.0)),
@@ -1526,9 +1528,9 @@ fn build_l2_view() -> crate::ui::view::View {
         h::done_row(".background_gradient(LinearGradient { stops, direction })"),
         h::sub("v1 = 16-band approx;真 Gradient primitive = v2+ Metal pipeline"),
         hstack(vec![
-            filled(color::BG_PANEL).corner_radius(radius::MD)
+            filled(color::bg_panel()).corner_radius(radius::MD)
                 .background_gradient(LinearGradient {
-                    stops: vec![(0.0, color::ACCENT), (1.0, color::SUCCESS)],
+                    stops: vec![(0.0, color::accent()), (1.0, color::success())],
                     direction: GradientDir::TopToBottom,
                 })
                 .frame(FrameSpec {
@@ -1536,12 +1538,12 @@ fn build_l2_view() -> crate::ui::view::View {
                     height: Some(Length::Pt(48.0)),
                     ..Default::default()
                 }),
-            filled(color::BG_PANEL).corner_radius(radius::MD)
+            filled(color::bg_panel()).corner_radius(radius::MD)
                 .background_gradient(LinearGradient {
                     stops: vec![
-                        (0.0, color::DANGER),
-                        (0.5, color::WARN),
-                        (1.0, color::SUCCESS),
+                        (0.0, color::danger()),
+                        (0.5, color::warn()),
+                        (1.0, color::success()),
                     ],
                     direction: GradientDir::LeftToRight,
                 })
@@ -1556,15 +1558,15 @@ fn build_l2_view() -> crate::ui::view::View {
         h::done_row(".background_material(Regular | Thick | Thin)"),
         h::sub("v1 = 半透明 BG_PANEL fallback;真 NSVisualEffectView vibrancy = v2+"),
         hstack(vec![
-            Text::new("Regular").style(text::CAPTION).build()
+            Text::new("Regular").style(text::caption()).build()
                 .padding(Edges::all(space::SM))
                 .background_material(MaterialStyle::Regular)
                 .corner_radius(radius::MD),
-            Text::new("Thick").style(text::CAPTION).build()
+            Text::new("Thick").style(text::caption()).build()
                 .padding(Edges::all(space::SM))
                 .background_material(MaterialStyle::Thick)
                 .corner_radius(radius::MD),
-            Text::new("Thin").style(text::CAPTION).build()
+            Text::new("Thin").style(text::caption()).build()
                 .padding(Edges::all(space::SM))
                 .background_material(MaterialStyle::Thin)
                 .corner_radius(radius::MD),
@@ -1573,10 +1575,10 @@ fn build_l2_view() -> crate::ui::view::View {
         h::h2("Elevation ladder"),
         h::done_row("token::elev::{E0, E1, E2, E3} — Material-style shadow"),
         hstack(vec![
-            elev_card(elev::E0, "E0"),
-            elev_card(elev::E1, "E1"),
-            elev_card(elev::E2, "E2"),
-            elev_card(elev::E3, "E3"),
+            elev_card(elev::e0(), "E0"),
+            elev_card(elev::e1(), "E1"),
+            elev_card(elev::e2(), "E2"),
+            elev_card(elev::e3(), "E3"),
         ]).hstack_gap(Length::Pt(20.0)).align_cross_center(),
 
         h::h2("Hidden / Collapsed"),
@@ -1612,21 +1614,21 @@ fn build_l3_view() -> crate::ui::view::View {
         h::sub("v1 走 rounded-rect 近似;真 SDF Path = v2+ Metal pipeline"),
         hstack(vec![
             vstack(vec![
-                shape_circle(color::DANGER).frame(FrameSpec {
+                shape_circle(color::danger()).frame(FrameSpec {
                     width: Some(Length::Pt(36.0)), height: Some(Length::Pt(36.0)),
                     ..Default::default()
                 }),
                 h::hint("Circle"),
             ]).vstack_gap(Length::Pt(4.0)).align_cross_center(),
             vstack(vec![
-                shape_capsule(color::SUCCESS).frame(FrameSpec {
+                shape_capsule(color::success()).frame(FrameSpec {
                     width: Some(Length::Pt(72.0)), height: Some(Length::Pt(24.0)),
                     ..Default::default()
                 }),
                 h::hint("Capsule"),
             ]).vstack_gap(Length::Pt(4.0)).align_cross_center(),
             vstack(vec![
-                shape_rounded_rect(Length::Pt(8.0), color::ACCENT).frame(FrameSpec {
+                shape_rounded_rect(Length::Pt(8.0), color::accent()).frame(FrameSpec {
                     width: Some(Length::Pt(56.0)), height: Some(Length::Pt(36.0)),
                     ..Default::default()
                 }),
@@ -1658,20 +1660,20 @@ fn build_l4_view() -> crate::ui::view::View {
         height: Some(Length::Pt(16.0)),
         ..Default::default()
     });
-    let vs_demo = vstack(vec![mini(color::DANGER), mini(color::SUCCESS), mini(color::ACCENT)])
+    let vs_demo = vstack(vec![mini(color::danger()), mini(color::success()), mini(color::accent())])
         .vstack_gap(Length::Pt(4.0));
-    let hs_demo = hstack(vec![mini(color::DANGER), mini(color::SUCCESS), mini(color::ACCENT)])
+    let hs_demo = hstack(vec![mini(color::danger()), mini(color::success()), mini(color::accent())])
         .hstack_gap(Length::Pt(4.0));
     let zs_demo = zstack(vec![
-        mini(color::DANGER).frame(FrameSpec {
+        mini(color::danger()).frame(FrameSpec {
             width: Some(Length::Pt(28.0)), height: Some(Length::Pt(28.0)),
             ..Default::default()
         }),
-        mini(color::SUCCESS).offset(Length::Pt(8.0), Length::Pt(8.0)),
-        mini(color::ACCENT).offset(Length::Pt(16.0), Length::Pt(16.0)),
+        mini(color::success()).offset(Length::Pt(8.0), Length::Pt(8.0)),
+        mini(color::accent()).offset(Length::Pt(16.0), Length::Pt(16.0)),
     ]);
     let dist_demo = |d, lab: &'static str| {
-        let small = || filled(color::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
+        let small = || filled(color::accent()).corner_radius(radius::SM).frame(FrameSpec {
             width: Some(Length::Pt(12.0)), height: Some(Length::Pt(12.0)),
             ..Default::default()
         });
@@ -1682,7 +1684,7 @@ fn build_l4_view() -> crate::ui::view::View {
                     width: Some(Length::Pt(110.0)), height: Some(Length::Pt(16.0)),
                     ..Default::default()
                 })
-                .background(color::BG_PANEL)
+                .background(color::bg_panel())
                 .corner_radius(radius::SM),
             h::hint(lab),
         ]).vstack_gap(Length::Pt(4.0)).align_cross_center()
@@ -1729,8 +1731,8 @@ fn build_l4_view() -> crate::ui::view::View {
         grid(
             (0..8).map(|i| {
                 let c = match i % 4 {
-                    0 => color::ACCENT, 1 => color::SUCCESS,
-                    2 => color::WARN,   _ => color::DANGER,
+                    0 => color::accent(), 1 => color::success(),
+                    2 => color::warn(),   _ => color::danger(),
                 };
                 filled(c).corner_radius(radius::SM)
             }).collect(),
@@ -1743,7 +1745,7 @@ fn build_l4_view() -> crate::ui::view::View {
         crate::ui::view::variable_grid(
             (0..6).map(|i| {
                 let c = match i % 3 {
-                    0 => color::ACCENT, 1 => color::SUCCESS, _ => color::WARN,
+                    0 => color::accent(), 1 => color::success(), _ => color::warn(),
                 };
                 filled(c).corner_radius(radius::SM)
             }).collect(),
@@ -1815,11 +1817,11 @@ fn build_l5_view() -> crate::ui::view::View {
         h::h3("Badge"),
         h::sub("pill-shape;color::* 区分语义状态"),
         hstack(vec![
-            crate::ui::view::badge("New", color::ACCENT),
-            crate::ui::view::badge("Done", color::SUCCESS),
-            crate::ui::view::badge("Warn", color::WARN),
-            crate::ui::view::badge("Fail", color::DANGER),
-            crate::ui::view::badge("v2+", color::FG_MUTED),
+            crate::ui::view::badge("New", color::accent()),
+            crate::ui::view::badge("Done", color::success()),
+            crate::ui::view::badge("Warn", color::warn()),
+            crate::ui::view::badge("Fail", color::danger()),
+            crate::ui::view::badge("v2+", color::fg_muted()),
         ]).hstack_gap(Length::Pt(10.0)).align_cross_center(),
 
         h::h3("Tooltip"),
@@ -1870,7 +1872,7 @@ fn build_l5_view() -> crate::ui::view::View {
 
 fn build_l6_view() -> crate::ui::view::View {
     use crate::ui::view::{FrameSpec, vstack, hstack, filled, AnimCurve};
-    use crate::ui::theme::{color, radius};
+    use crate::ui::theme::{color, radius, table::{Theme, CONTRAST, DARK, LIGHT}};
     use crate::ui::core::Length;
 
     let easing_demo = |curve: AnimCurve, lab: &'static str| {
@@ -1878,12 +1880,12 @@ fn build_l6_view() -> crate::ui::view::View {
         // — visual cue of the easing shape.
         let mid: f64 = curve.ease(0.5);
         vstack(vec![
-            filled(color::BG_PANEL).corner_radius(radius::SM).frame(FrameSpec {
+            filled(color::bg_panel()).corner_radius(radius::SM).frame(FrameSpec {
                 width: Some(Length::Pt(60.0)),
                 height: Some(Length::Pt(8.0)),
                 ..Default::default()
             }),
-            filled(color::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
+            filled(color::accent()).corner_radius(radius::SM).frame(FrameSpec {
                 width: Some(Length::Pt((60.0 * mid).max(2.0))),
                 height: Some(Length::Pt(8.0)),
                 ..Default::default()
@@ -1891,6 +1893,16 @@ fn build_l6_view() -> crate::ui::view::View {
             h::hint(lab),
             h::hint(&format!("    mid t=0.5 → {:.2}", mid)),
         ]).vstack_gap(Length::Pt(2.0)).align_cross_start()
+    };
+
+    // One theme's ground, accent and text, straight from its table.
+    let theme_swatches = |label: &str, t: &Theme| {
+        let swatch = |c| filled(c).corner_radius(radius::SM).frame(FrameSpec {
+            width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
+            ..Default::default()
+        });
+        hstack(vec![h::hint(label), swatch(t.bg), swatch(t.accent), swatch(t.fg)])
+            .hstack_gap(Length::Pt(6.0)).align_cross_center()
     };
 
     h::scrollable_page(0xDE7_0060, vec![
@@ -1901,53 +1913,10 @@ fn build_l6_view() -> crate::ui::view::View {
         h::v2_row("真接 NSAccessibility(VoiceOver / 自动 AX tree)"),
 
         h::h2("Theme"),
-        h::v2_row("切换主题(现在组件都用 Dark 常量,Light / HC 只有下面几个样色)"),
-        hstack(vec![
-            h::hint("    Dark = "),
-            filled(color::BG).corner_radius(radius::SM).frame(FrameSpec {
-                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
-                ..Default::default()
-            }),
-            filled(color::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
-                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
-                ..Default::default()
-            }),
-            filled(color::FG).corner_radius(radius::SM).frame(FrameSpec {
-                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
-                ..Default::default()
-            }),
-        ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
-        hstack(vec![
-            h::hint("    Light = "),
-            filled(crate::ui::theme::color::light::BG).corner_radius(radius::SM).frame(FrameSpec {
-                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
-                ..Default::default()
-            }),
-            filled(crate::ui::theme::color::light::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
-                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
-                ..Default::default()
-            }),
-            filled(crate::ui::theme::color::light::FG).corner_radius(radius::SM).frame(FrameSpec {
-                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
-                ..Default::default()
-            }),
-        ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
-        h::done_row("HighContrast 样色(BG / ACCENT / FG)"),
-        hstack(vec![
-            h::hint("    HighContrast = "),
-            filled(crate::ui::theme::color::hc::BG).corner_radius(radius::SM).frame(FrameSpec {
-                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
-                ..Default::default()
-            }),
-            filled(crate::ui::theme::color::hc::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
-                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
-                ..Default::default()
-            }),
-            filled(crate::ui::theme::color::hc::FG).corner_radius(radius::SM).frame(FrameSpec {
-                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
-                ..Default::default()
-            }),
-        ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
+        h::done_row("三套主题:设置面板 Appearance → Theme 切换,下面是各自的 bg / accent / fg"),
+        theme_swatches("    Dark = ", &DARK),
+        theme_swatches("    Light = ", &LIGHT),
+        theme_swatches("    HighContrast = ", &CONTRAST),
 
         h::h2("Animation"),
         h::done_row("Anim<T> + Lerp + AnimCurve 5 curves(含 Spring)"),
@@ -1995,13 +1964,13 @@ fn draw_colors_sample(canvas: &mut Canvas, x: f64, y: f64, cell_w_pt: f64) -> f6
             .size(Length::Pt(sw_w), Length::Pt(sw_h))
             .fill(*c)
             .radius(Pt(3.0))
-            .border(Pt(1.0), tokens::DIVIDER)
+            .border(Pt(1.0), tokens::divider())
             .draw();
         // Truncate label to swatch width so it doesn't overflow.
         let max_chars = (sw_w / cell_w_pt).floor() as usize;
         let trimmed: String = name.chars().take(max_chars.max(3)).collect();
         canvas.text(Length::Pt(sx), Length::Pt(y + sw_h + 4.0), &trimmed)
-            .color(tokens::SAMPLE_HINT_FG)
+            .color(tokens::sample_hint_fg())
             .draw();
     }
     y + sw_h + 22.0
@@ -2033,7 +2002,7 @@ fn draw_units_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
             .radius(Pt(2.0))
             .draw();
         canvas.text(Length::Pt(x + 220.0), Length::Pt(row_y + 1.0), label)
-            .color(tokens::SAMPLE_HINT_FG)
+            .color(tokens::sample_hint_fg())
             .draw();
     }
     y + (entries.len() as f64) * row_h
@@ -2055,7 +2024,7 @@ fn draw_rects_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
         .fill(fill_color)
         .draw();
     canvas.text(Length::Pt(x), Length::Pt(y + label_y_off), "fill")
-        .color(tokens::SAMPLE_HINT_FG)
+        .color(tokens::sample_hint_fg())
         .draw();
 
     // 2. Border only (transparent fill).
@@ -2067,7 +2036,7 @@ fn draw_rects_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
         .border(Pt(1.0), fill_color)
         .draw();
     canvas.text(Length::Pt(x2), Length::Pt(y + label_y_off), "border")
-        .color(tokens::SAMPLE_HINT_FG)
+        .color(tokens::sample_hint_fg())
         .draw();
 
     // 3. Rounded corners.
@@ -2079,7 +2048,7 @@ fn draw_rects_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
         .radius(Pt(10.0))
         .draw();
     canvas.text(Length::Pt(x3), Length::Pt(y + label_y_off), "radius(10)")
-        .color(tokens::SAMPLE_HINT_FG)
+        .color(tokens::sample_hint_fg())
         .draw();
 
     // 4. Shadow.
@@ -2092,7 +2061,7 @@ fn draw_rects_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
         .shadow(Pt(10.0), (Pt(0.0), Pt(2.0)), Color::rgba(0, 0, 0, 0.6))
         .draw();
     canvas.text(Length::Pt(x4), Length::Pt(y + label_y_off), "shadow")
-        .color(tokens::SAMPLE_HINT_FG)
+        .color(tokens::sample_hint_fg())
         .draw();
 
     y + label_y_off + 16.0
@@ -2118,7 +2087,7 @@ fn draw_lines_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
         .stroke(Pt(*w), *color)
         .draw();
         canvas.text(Length::Pt(x + 220.0), Length::Pt(row_y - 5.0), label)
-            .color(tokens::SAMPLE_HINT_FG)
+            .color(tokens::sample_hint_fg())
             .draw();
     }
     // A diagonal accent — uncommon usage; shows that `line` isn't
@@ -2130,7 +2099,7 @@ fn draw_lines_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
     .stroke(Pt(1.0), Color::rgba(91, 162, 250, 0.85))
     .draw();
     canvas.text(Length::Pt(x + 220.0), Length::Pt(y + row_h * 4.0 + 6.0), "diagonal")
-        .color(tokens::SAMPLE_HINT_FG)
+        .color(tokens::sample_hint_fg())
         .draw();
     y + row_h * 4.0 + 24.0
 }
@@ -2141,10 +2110,10 @@ fn draw_lines_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
 fn draw_text_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
     let row_h = 20.0;
     let entries: &[(&str, Color)] = &[
-        ("Default — SECTION_BODY_FG (rgba 200 208 220)", tokens::SECTION_BODY_FG),
-        ("Hint — SAMPLE_HINT_FG (rgba 130 140 156)",      tokens::SAMPLE_HINT_FG),
-        ("Accent — TAB_ACTIVE_ACCENT (blue 91 162 250)",  tokens::TAB_ACTIVE_ACCENT),
-        ("Header — SECTION_HEADER_FG (light blue)",       tokens::SECTION_HEADER_FG),
+        ("Default — SECTION_BODY_FG (rgba 200 208 220)", tokens::section_body_fg()),
+        ("Hint — SAMPLE_HINT_FG (rgba 130 140 156)",      tokens::sample_hint_fg()),
+        ("Accent — TAB_ACTIVE_ACCENT (blue 91 162 250)",  tokens::tab_active_accent()),
+        ("Header — SECTION_HEADER_FG (light blue)",       tokens::section_header_fg()),
         ("Red — explicit Color::rgba(220, 60, 60)",       Color::rgba(220, 60, 60, 1.0)),
     ];
     for (i, (content, color)) in entries.iter().enumerate() {
@@ -2178,11 +2147,11 @@ mod chrome_text {
 
     #[inline]
     pub fn caption(s: &str) -> Text {
-        Text::new(s).ui_size(UiSize::Small).color(color::FG_MUTED)
+        Text::new(s).ui_size(UiSize::Small).color(color::fg_muted())
     }
     #[inline]
     pub fn title(s: &str) -> Text {
-        Text::new(s).ui_size(UiSize::Heading).ui_weight(600).color(color::FG)
+        Text::new(s).ui_size(UiSize::Heading).ui_weight(600).color(color::fg())
     }
 }
 
@@ -2203,7 +2172,7 @@ fn build_typography_view() -> crate::ui::view::View {
     let size_row = |name: &'static str, size: UiSize, sample: &'static str| {
         hstack(vec![
             chrome_text::caption(name).build(),
-            Text::new(sample).ui_size(size).color(color::FG).build(),
+            Text::new(sample).ui_size(size).color(color::fg()).build(),
         ])
         .hstack_gap(Length::Pt(chrome_text::HSTACK_GAP))
         .align_cross_end()
@@ -2212,7 +2181,7 @@ fn build_typography_view() -> crate::ui::view::View {
     let weight_row = |name: &'static str, weight: u16, sample: &'static str| {
         hstack(vec![
             chrome_text::caption(name).build(),
-            Text::new(sample).ui_size(UiSize::Body).ui_weight(weight).color(color::FG).build(),
+            Text::new(sample).ui_size(UiSize::Body).ui_weight(weight).color(color::fg()).build(),
         ])
         .hstack_gap(Length::Pt(chrome_text::HSTACK_GAP))
         .align_cross_end()
@@ -2244,14 +2213,14 @@ fn build_typography_view() -> crate::ui::view::View {
         weight_row("700 ", 700, "The quick brown fox jumps"),
 
         chrome_text::title("Named chrome tokens").build(),
-        token_row("FOOTNOTE  ", UiSize::Mini,    400, color::FG_MUTED, ShapeOptions::full(), "Footnote sample"),
-        token_row("CAPTION   ", UiSize::Small,   400, color::FG_MUTED, ShapeOptions::full(), "Caption sample"),
-        token_row("BODY      ", UiSize::Body,    400, color::FG,       ShapeOptions::full(), "Body sample"),
-        token_row("EMPHASIZED", UiSize::Body,    500, color::FG,       ShapeOptions::full(), "Emphasized sample"),
-        token_row("TITLE     ", UiSize::Heading, 600, color::FG,       ShapeOptions::full(), "Title sample"),
-        token_row("CODE      ", UiSize::Body,    400, color::FG,       ShapeOptions::code(), "fn quick_fox()"),
-        token_row("LINK      ", UiSize::Body,    400, color::FG_LINK,  ShapeOptions::full(), "https://marspot.com"),
-        token_row("ERROR     ", UiSize::Body,    400, color::DANGER,   ShapeOptions::full(), "Sample error"),
+        token_row("FOOTNOTE  ", UiSize::Mini,    400, color::fg_muted(), ShapeOptions::full(), "Footnote sample"),
+        token_row("CAPTION   ", UiSize::Small,   400, color::fg_muted(), ShapeOptions::full(), "Caption sample"),
+        token_row("BODY      ", UiSize::Body,    400, color::fg(),       ShapeOptions::full(), "Body sample"),
+        token_row("EMPHASIZED", UiSize::Body,    500, color::fg(),       ShapeOptions::full(), "Emphasized sample"),
+        token_row("TITLE     ", UiSize::Heading, 600, color::fg(),       ShapeOptions::full(), "Title sample"),
+        token_row("CODE      ", UiSize::Body,    400, color::fg(),       ShapeOptions::code(), "fn quick_fox()"),
+        token_row("LINK      ", UiSize::Body,    400, color::fg_link(),  ShapeOptions::full(), "https://marspot.com"),
+        token_row("ERROR     ", UiSize::Body,    400, color::danger(),   ShapeOptions::full(), "Sample error"),
     ])
     .vstack_gap(Length::Pt(chrome_text::VSTACK_GAP))
 }
@@ -2270,12 +2239,12 @@ fn build_architecture_view() -> crate::ui::view::View {
     let kv = |label: &'static str, value: &'static str| {
         hstack(vec![
             Text::new(label)
-                .style(text_token::CAPTION)
-                .color(color::FG_MUTED)
+                .style(text_token::caption())
+                .color(color::fg_muted())
                 .build(),
             Text::new(value)
-                .style(text_token::CODE)
-                .color(color::FG)
+                .style(text_token::code())
+                .color(color::fg())
                 .build(),
         ])
         .hstack_gap(Length::Pt(16.0))
@@ -2285,13 +2254,13 @@ fn build_architecture_view() -> crate::ui::view::View {
     let process = |layer: &'static str, role: &'static str| {
         hstack(vec![
             Text::new(layer)
-                .style(text_token::BODY)
-                .color(color::FG)
+                .style(text_token::body())
+                .color(color::fg())
                 .weight(crate::ui::view::TextWeight::Bold)
                 .build(),
             Text::new(role)
-                .style(text_token::CAPTION)
-                .color(color::FG_MUTED)
+                .style(text_token::caption())
+                .color(color::fg_muted())
                 .build(),
         ])
         .hstack_gap(Length::Pt(12.0))
@@ -2300,31 +2269,31 @@ fn build_architecture_view() -> crate::ui::view::View {
 
     vstack(vec![
         Text::new("Process tree(RFC-003)")
-            .style(text_token::HEADER)
-            .color(color::FG)
+            .style(text_token::header())
+            .color(color::fg())
             .build(),
         process("L1 shell  ", "AppKit / NSWindow / Metal layer / IME / clipboard"),
         process("L2 core   ", "marspot-core — input dispatch / layout / panes / sidebar"),
         process("L3 session", "marspot-session × N — PTY + Terminal + bytelog + UDS"),
         Text::new("L4 shelld 由 RFC-003 退役,L3 自持 PTY 与 listener fd + 自 execv.")
-            .style(text_token::HINT)
-            .color(color::FG_MUTED)
+            .style(text_token::hint())
+            .color(color::fg_muted())
             .build(),
 
         Text::new("Plugins(RFC-001)")
-            .style(text_token::HEADER)
-            .color(color::FG)
+            .style(text_token::header())
+            .color(color::fg())
             .build(),
         process("claudecode", "exit-loop guard + API-error monitor + 状态机 badge"),
         process("pidtree   ", "pane PID tree + cwd discovery"),
         Text::new("Static-linked in L1 shell;  capability gates per pane via PaneSession.")
-            .style(text_token::HINT)
-            .color(color::FG_MUTED)
+            .style(text_token::hint())
+            .color(color::fg_muted())
             .build(),
 
         Text::new("Hard caps")
-            .style(text_token::HEADER)
-            .color(color::FG)
+            .style(text_token::header())
+            .color(color::fg())
             .build(),
         kv("Max sessions  ", "9(L1 SESSION_COUNT_HARD_CAP)"),
         kv("Default cols  ", "80"),
@@ -2332,8 +2301,8 @@ fn build_architecture_view() -> crate::ui::view::View {
         kv("Scrollback cap", "Memory: 10 000 lines / File: 不限(per session bin)"),
 
         Text::new("Wire protocol")
-            .style(text_token::HEADER)
-            .color(color::FG)
+            .style(text_token::header())
+            .color(color::fg())
             .build(),
         kv("L1↔L2", "shell-proto frames over inherited stdin/stdout"),
         kv("L2↔L3", "control_stream_fd UDS + grid shm + bytelog mmap"),
@@ -2357,12 +2326,12 @@ fn build_build_identity_view() -> crate::ui::view::View {
     let kv = |label: &'static str, value: String| {
         hstack(vec![
             Text::new(label)
-                .style(text_token::CAPTION)
-                .color(color::FG_MUTED)
+                .style(text_token::caption())
+                .color(color::fg_muted())
                 .build(),
             Text::new(value)
-                .style(text_token::CODE)
-                .color(color::FG)
+                .style(text_token::code())
+                .color(color::fg())
                 .build(),
         ])
         .hstack_gap(Length::Pt(16.0))
@@ -2377,31 +2346,31 @@ fn build_build_identity_view() -> crate::ui::view::View {
 
     vstack(vec![
         Text::new("Layer versions")
-            .style(text_token::HEADER)
-            .color(color::FG)
+            .style(text_token::header())
+            .color(color::fg())
             .build(),
         kv("L1 shell  ", env!("MARSPOT_VERSION_SHELL").into()),
         kv("L2 core   ", env!("MARSPOT_VERSION_CORE").into()),
         kv("L3 session", env!("MARSPOT_VERSION_SESSION").into()),
 
         Text::new("Build provenance")
-            .style(text_token::HEADER)
-            .color(color::FG)
+            .style(text_token::header())
+            .color(color::fg())
             .build(),
         kv("git sha   ", env!("MARSPOT_GIT_SHA").into()),
         kv("build ts  ", env!("MARSPOT_BUILD_TS").into()),
         kv("profile   ", cargo_profile.into()),
 
         Text::new("Runtime")
-            .style(text_token::HEADER)
-            .color(color::FG)
+            .style(text_token::header())
+            .color(color::fg())
             .build(),
         kv("state dir ", state_dir),
         kv("session id", session_id),
 
         Text::new("install-local.sh 把这串 git_sha + build_ts 写进\n二进制 rodata 作 fingerprint(`MARSPOT_FP=...|END`),\n供 silent-update 决定要不要 swap.")
-            .style(text_token::HINT)
-            .color(color::FG_MUTED)
+            .style(text_token::hint())
+            .color(color::fg_muted())
             .build(),
     ])
     .vstack_gap(Length::Pt(8.0))
@@ -2426,14 +2395,14 @@ fn build_baselines_view() -> crate::ui::view::View {
     // Three-column row: name / dims / coverage tag.
     let baseline_row = |name: &'static str, dims: &'static str, tag: &'static str| {
         hstack(vec![
-            Text::new(name).style(text_token::BODY).color(color::FG).build(),
+            Text::new(name).style(text_token::body()).color(color::fg()).build(),
             Text::new(dims)
-                .style(text_token::CAPTION)
-                .color(color::FG_MUTED)
+                .style(text_token::caption())
+                .color(color::fg_muted())
                 .build(),
             Text::new(tag)
-                .style(text_token::CAPTION)
-                .color(color::ACCENT_DIM)
+                .style(text_token::caption())
+                .color(color::accent_dim())
                 .build(),
         ])
         .hstack_gap(Length::Pt(20.0))
@@ -2442,8 +2411,8 @@ fn build_baselines_view() -> crate::ui::view::View {
 
     vstack(vec![
         Text::new("threshold ≥ 0.98")
-            .style(text_token::CAPTION)
-            .color(color::FG_MUTED)
+            .style(text_token::caption())
+            .color(color::fg_muted())
             .build(),
 
         baseline_row("font_v5_showcase",
@@ -2468,12 +2437,12 @@ fn build_baselines_view() -> crate::ui::view::View {
                      "1400×500",  "rounded rect + shadow + border + depth stack"),
 
         Text::new("10/12 baseline locked.  Remaining 2 待补.")
-            .style(text_token::CAPTION)
-            .color(color::FG_MUTED)
+            .style(text_token::caption())
+            .color(color::fg_muted())
             .build(),
         Text::new("Workflow: `bin/font-snapshot.sh` 锁基线;`bin/font-snapshot-check.sh` 跑 SSIM check.")
-            .style(text_token::HINT)
-            .color(color::FG_MUTED)
+            .style(text_token::hint())
+            .color(color::fg_muted())
             .build(),
     ])
     .vstack_gap(Length::Pt(8.0))
@@ -2491,16 +2460,16 @@ fn build_components_catalog_view() -> crate::ui::view::View {
 
     let group_header = |label: &'static str| {
         Text::new(label)
-            .style(text_token::HEADER)
-            .color(color::FG)
+            .style(text_token::header())
+            .color(color::fg())
             .build()
     };
 
     let row = |label: &'static str, sample: View| {
         hstack(vec![
             Text::new(label)
-                .style(text_token::CAPTION)
-                .color(color::FG_MUTED)
+                .style(text_token::caption())
+                .color(color::fg_muted())
                 .build(),
             sample,
         ])
@@ -2517,10 +2486,10 @@ fn build_components_catalog_view() -> crate::ui::view::View {
 
     vstack(vec![
         group_header("Status badges"),
-        row("Success",   crate::ui::view::badge("OK",     color::SUCCESS)),
-        row("Warning",   crate::ui::view::badge("WARN",   color::WARN)),
-        row("Danger",    crate::ui::view::badge("FAIL",   color::DANGER)),
-        row("Accent",    crate::ui::view::badge("v0.11",  color::ACCENT)),
+        row("Success",   crate::ui::view::badge("OK",     color::success())),
+        row("Warning",   crate::ui::view::badge("WARN",   color::warn())),
+        row("Danger",    crate::ui::view::badge("FAIL",   color::danger())),
+        row("Accent",    crate::ui::view::badge("v0.11",  color::accent())),
 
         group_header("Interactive"),
         row("Toggle (off)", crate::ui::view::toggle(toggle_id_off)),
@@ -2533,11 +2502,11 @@ fn build_components_catalog_view() -> crate::ui::view::View {
         group_header("Containers"),
         row("Card",   crate::ui::view::card(
             Text::new("Card body — Edges::all(MD), BG_RAISED, BORDER, MD radius, E1 shadow")
-                .style(text_token::BODY).build(),
+                .style(text_token::body()).build(),
         )),
         row("Panel",  crate::ui::view::panel(
             Text::new("Panel body — flatter than Card.  BG_PANEL.")
-                .style(text_token::BODY).build(),
+                .style(text_token::body()).build(),
         )),
         row("Tooltip", crate::ui::view::tooltip("Tooltip hint")),
 
@@ -2588,13 +2557,13 @@ fn build_font_v5_view() -> crate::ui::view::View {
     // each line via `FontMetricsProvider` so the break points track
     // the SF Pro variant + weight in use.  Emoji stays single-line
     // because the glyphs are already cell-pitched.
-    let title = |s: &str| Text::new(s).color(color::FG).ui(TITLE, 700, full).wrap(0).build();
-    let header = |s: &str| Text::new(s).color(color::ACCENT_DIM).ui(H, 600, full).wrap(0).build();
-    let hint = |s: &str| Text::new(s).color(color::FG_MUTED).ui(BODY, 400, full).wrap(0).build();
-    let body = |s: &str| Text::new(s).color(color::FG).ui(BODY, 400, full).wrap(0).build();
-    let body_w = |s: &str, w: u16| Text::new(s).color(color::FG).ui(BODY, w, full).wrap(0).build();
-    let body_off = |s: &str| Text::new(s).color(color::FG).ui(BODY, 400, off).wrap(0).build();
-    let emoji = |s: &str| Text::new(s).color(color::FG).ui(EMOJI, 400, full).build();
+    let title = |s: &str| Text::new(s).color(color::fg()).ui(TITLE, 700, full).wrap(0).build();
+    let header = |s: &str| Text::new(s).color(color::accent_dim()).ui(H, 600, full).wrap(0).build();
+    let hint = |s: &str| Text::new(s).color(color::fg_muted()).ui(BODY, 400, full).wrap(0).build();
+    let body = |s: &str| Text::new(s).color(color::fg()).ui(BODY, 400, full).wrap(0).build();
+    let body_w = |s: &str, w: u16| Text::new(s).color(color::fg()).ui(BODY, w, full).wrap(0).build();
+    let body_off = |s: &str| Text::new(s).color(color::fg()).ui(BODY, 400, off).wrap(0).build();
+    let emoji = |s: &str| Text::new(s).color(color::fg()).ui(EMOJI, 400, full).build();
 
     let kv = |label: &str, content: crate::ui::view::View| -> crate::ui::view::View {
         hstack(vec![hint(label), content]).hstack_gap(Length::Pt(10.0))
