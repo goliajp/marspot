@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::SystemTime;
 
 use super::model::short_model;
-use super::quota::{same_model, Refusal, Room};
+use super::quota::{same_model, Room};
 
 /// When this session was last told by the API that it had reached a
 /// limit, as unix seconds.
@@ -37,10 +37,12 @@ pub(super) fn last_quota_refusal(tail: &str) -> Option<Refusal> {
         l.contains("\"isApiErrorMessage\":true") && (says_out_of_quota(l) || says_logged_out(l))
     })?;
     let logged_out = says_logged_out(line);
+    let five_hour = ACCOUNT_WINDOWS[..2].iter().any(|w| line.contains(w));
     Some(Refusal {
         at: record_timestamp(line)?,
         model: if logged_out { String::new() } else { refused_model(line) },
         logged_out,
+        window: if five_hour { Window::FiveHour } else { Window::Week },
     })
 }
 
@@ -84,6 +86,7 @@ fn says_out_of_quota(line: &str) -> bool {
 /// Not "You've hit your" alone: the same opening is used for a fast
 /// mode limit and a monthly spend limit, neither of which shuts the
 /// account out.
+/// The first two are the five-hour window under its two names.
 const ACCOUNT_WINDOWS: [&str; 3] = [
     "You've hit your session limit",
     "You've hit your 5-hour limit",
@@ -117,68 +120,51 @@ pub(super) fn mark_logged_out(rooms: &mut [(u8, Room)], seen: &HashMap<u8, i64>)
     }
 }
 
-/// What panes have learnt about their accounts, kept past the panes.
-///
-/// A refusal is a fact about the account, not about the pane that met
-/// it: every pane there on the same model is shut out at the same
-/// moment. Kept per pane, it moved only the panes that happened to
-/// send something; on 2026-11-07 P1 refused its first pane at 17:39
-/// while the feed still read it as short of full, and ten panes left
-/// one by one over the next three and a half minutes, each after a
-/// refusal of its own -- an idle one only once someone spoke to it.
-/// The panes that saw it move off, so it has to outlive them; the
-/// next pane to be moved must not be sent back there either.
-#[derive(Debug, Default)]
-pub(super) struct Seen {
-    /// Per profile, the newest login failure a pane met there.
-    pub logged_out: HashMap<u8, i64>,
-    /// Per profile and the model a refusal named (empty: the account's
-    /// own windows), the newest refusal a pane met there. Bounded by
-    /// profiles times models.
-    pub out: HashMap<(u8, String), i64>,
+/// A pane was told by the API that it had run out.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Refusal {
+    /// Unix seconds, from the record's own timestamp.
+    pub at: i64,
+    /// The model the refusal names, as `short_model` spells it, or
+    /// empty when it could not be read.
+    ///
+    /// Every refusal the CLI writes names one: "You've reached your
+    /// Fable limit." or "Opus 5.5 requires usage credits.". It says
+    /// nothing about any other model on the same account: on
+    /// 2026-10-03 a Fable refusal moved a pane that had just been
+    /// switched to Opus, onto an account where it ran out again.
+    pub model: String,
+    /// The account could not log in at all, rather than being out of
+    /// quota.
+    ///
+    /// The feed cannot tell a logged-out account from an idle one:
+    /// both show as an access token that has expired and was never
+    /// refreshed. Only a claude that tried to use it finds out, and
+    /// that is the only place this is learnt. It names no model.
+    pub logged_out: bool,
+    /// Which of the account's windows ran out.
+    pub window: Window,
 }
 
-impl Seen {
-    /// Take in what one pane on `profile` was told. True when it is
-    /// newer than anything already known for that account and model.
-    pub(super) fn note(&mut self, profile: u8, r: &Refusal) -> bool {
-        let at = if r.logged_out {
-            self.logged_out.entry(profile).or_insert(i64::MIN)
-        } else {
-            self.out.entry((profile, r.model.clone())).or_insert(i64::MIN)
-        };
-        let news = r.at > *at;
-        *at = (*at).max(r.at);
-        news
-    }
+/// The window a refusal is about, which is how long it stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Window {
+    /// "session" and "5-hour": over within five hours.
+    FiveHour,
+    /// The week, a model's cap, or credits.
+    Week,
+}
 
-    /// Mark every account a pane has been refused by since the feed
-    /// last measured it.
+impl Refusal {
+    /// Does this refusal shut out a pane working in `model`?
     ///
-    /// The window the refusal names is set full: the account's when it
-    /// names no model, that model's cap when it does, so a Fable
-    /// refusal shuts out Fable panes only. A newer measurement is
-    /// believed instead, as with a failed login.
-    pub(super) fn mark(&self, rooms: &mut [(u8, Room)]) {
-        mark_logged_out(rooms, &self.logged_out);
-        for ((p, model), at) in &self.out {
-            let Some((_, Room::Known { util_5h, models, models_measured_at, measured_at, .. })) =
-                rooms.iter_mut().find(|(n, _)| n == p)
-            else {
-                continue;
-            };
-            if model.is_empty() {
-                // "session", "5-hour" and "weekly" are not told apart;
-                // any of them shuts the account until it is measured again
-                if at > measured_at {
-                    *util_5h = util_5h.max(1.0);
-                }
-            } else if at > models_measured_at {
-                match models.iter_mut().find(|(label, _)| same_model(model, label)) {
-                    Some((_, u)) => *u = u.max(1.0),
-                    None => models.push((model.clone(), 1.0)),
-                }
-            }
+    /// One that names no model covers every pane. One that names a
+    /// model covers only panes on it: with no model given, nothing is
+    /// assumed, Fable included.
+    pub(super) fn applies_to(&self, model: Option<&str>) -> bool {
+        if self.model.is_empty() {
+            return true;
         }
+        model.is_some_and(|m| same_model(&m.to_ascii_lowercase(), &self.model))
     }
 }
