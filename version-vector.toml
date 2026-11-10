@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.261"  # the quota sweep reads no file on the main thread; settings.json escapes read right
-core    = "0.12.294"  # settings know claudecode.rebalance
-session = "0.11.153"  # publishes the window title beside the frame
+core    = "0.12.295"  # a stall is traced: what the loop thread did after the alarm
+session = "0.11.154"  # a stall is traced: what the loop thread did after the alarm

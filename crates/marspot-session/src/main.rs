@@ -1359,14 +1359,20 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     // log for exactly this reason.
     {
         let sid = session.id();
-        watch.spawn_watchdog(move |elapsed, phase| {
-            lx_warn!(
+        watch.spawn_watchdog(move |ev| match ev {
+            marspot_term::loop_watch::Watch::Stalling { elapsed, phase } => lx_warn!(
                 "l3.loop.stalling",
                 "main loop iteration STILL running — the pane is frozen right now",
                 session_id = sid,
                 phase = phase,
                 elapsed_ms = elapsed.as_millis()
-            );
+            ),
+            marspot_term::loop_watch::Watch::Over { phase, trace } => lx_warn!(
+                "l3.loop.stall_trace",
+                &trace.summary(),
+                session_id = sid,
+                phase = phase
+            ),
         });
     }
     let snapshot_writer = SnapshotWriter::spawn(session.id());
