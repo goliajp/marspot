@@ -9,6 +9,7 @@
 //! marspot-peer relay <inbox> <upstream> <send>
 //! marspot-peer claude-hook
 //! marspot-peer gemini-hook
+//! marspot-peer kimi-hook
 //! ```
 //!
 //! On the command line the sender is the Codex session this runs
@@ -19,7 +20,8 @@
 //! Claude Code hook that lets a Claude session use pane names
 //! (`marspot_peer::claude_hook`).  `gemini-hook` is the Gemini CLI hook
 //! that hands a Gemini session its waiting messages
-//! (`marspot_peer::gemini_hook`).
+//! (`marspot_peer::gemini_hook`), and `kimi-hook` the same for Kimi
+//! Code (`marspot_peer::kimi_hook`).
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -35,7 +37,8 @@ const USAGE: &str = "usage:
   marspot-peer mcp
   marspot-peer relay <inbox> <upstream> <send>
   marspot-peer claude-hook
-  marspot-peer gemini-hook";
+  marspot-peer gemini-hook
+  marspot-peer kimi-hook";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -66,6 +69,24 @@ fn main() -> ExitCode {
                 && let Some(out) = marspot_peer::gemini_hook::answer(&input)
             {
                 println!("{out}");
+            }
+            Ok(())
+        }
+        Some("kimi-hook") => {
+            use marspot_peer::kimi_hook::Answer;
+            let mut input = String::new();
+            let answer = match std::io::stdin().read_to_string(&mut input) {
+                Ok(_) => marspot_peer::kimi_hook::answer(&input),
+                Err(_) => Answer::Nothing,
+            };
+            match answer {
+                Answer::Nothing => {}
+                Answer::Context(text) => println!("{text}"),
+                // exit 2 is how a Stop hook keeps the turn going
+                Answer::Continue(text) => {
+                    eprintln!("{text}");
+                    return ExitCode::from(2);
+                }
             }
             Ok(())
         }

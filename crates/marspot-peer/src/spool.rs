@@ -1,8 +1,9 @@
-//! The file a Gemini session's mail waits in.
+//! The file a Gemini or Kimi session's mail waits in.
 //!
-//! Nothing can put text into a running Gemini session from outside, so
-//! what arrives at its inbox is kept here until the session's own hook
-//! asks for it at a turn boundary (`gemini_hook`).  One file per
+//! Nothing can put text into a running Gemini or Kimi session from
+//! outside, so what arrives at its inbox is kept here until the
+//! session's own hook asks for it at a turn boundary (`gemini_hook`,
+//! `kimi_hook`).  One file per
 //! session, one JSON object per line: `{"text": …}`, the text being
 //! what the session is to be shown.
 //!
@@ -25,7 +26,7 @@ use crate::json::{self, Value, obj};
 pub const MAX_PENDING: usize = 64;
 
 /// A session id that can be a file name: what Gemini itself accepts
-/// for `--session-id`.
+/// for `--session-id`, which Kimi's `session_<uuid>` fits too.
 pub fn is_session_name(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && !s.starts_with('-') && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }

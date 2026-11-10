@@ -3,7 +3,7 @@
 //! (and optionally an idle subscription) into a peer's inbox.
 //!
 //! The sender is always a session marspot keeps a record for: a Codex
-//! session found by its thread id, or a Gemini session found as an
+//! session found by its thread id, or a Gemini or Kimi session found as an
 //! ancestor of the sending process.  Without such a record there is no
 //! reply address and nothing is sent: an anonymous message could not
 //! be answered and could not say who it is from.
@@ -43,14 +43,15 @@ pub fn me_by_thread<'a>(entries: &'a [Entry], thread: &str) -> Result<&'a Entry,
     }
 }
 
-/// The record marspot keeps for the Gemini session `pid` runs under.
+/// The record marspot keeps for the Gemini or Kimi session `pid` runs
+/// under.
 ///
-/// Gemini puts no session id in a tool call, but it starts its MCP
-/// servers itself, so the session is the nearest ancestor that a
-/// Gemini record names.  Only Gemini records count: a Codex call says
-/// which thread it is, and one Codex process can hold several.
+/// Neither puts a session id in a tool call, but each starts its MCP
+/// servers itself, so the session is the nearest ancestor that such a
+/// record names.  Codex records do not count: a Codex call says which
+/// thread it is, and one Codex process can hold several.
 pub fn me_by_ancestor(entries: &[Entry], pid: i32, parent_of: impl Fn(i32) -> Option<i32>) -> Option<&Entry> {
-    let gemini = |e: &&Entry| e.ours && e.agent == Some(Agent::Gemini) && e.socket.is_some();
+    let gemini = |e: &&Entry| e.ours && matches!(e.agent, Some(Agent::Gemini | Agent::Kimi)) && e.socket.is_some();
     let found = crate::proc::nearest_ancestor(pid, parent_of, |p| entries.iter().filter(gemini).any(|e| e.agent_pid == Some(p)))?;
     entries.iter().filter(gemini).find(|e| e.agent_pid == Some(found))
 }
@@ -233,6 +234,9 @@ mod tests {
         assert_eq!(me_by_ancestor(&es, 30, table), None, "under codex and claude only: neither is found this way");
         let no_inbox = vec![Entry { socket: None, ..ours(900, Agent::Gemini, 30) }];
         assert_eq!(me_by_ancestor(&no_inbox, 50, table), None);
+        // kimi starts its servers as direct children
+        let kimi = vec![ours(902, Agent::Kimi, 40)];
+        assert_eq!(me_by_ancestor(&kimi, 50, table).map(|e| e.pid), Some(902));
     }
 
     #[test]

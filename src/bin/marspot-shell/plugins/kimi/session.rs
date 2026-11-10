@@ -104,6 +104,9 @@ pub(crate) fn wire_of(home: &Path, id: &str) -> Option<PathBuf> {
 pub(crate) struct Failure {
     /// `turn.ended.error.code`.
     pub code: String,
+    /// `turn.ended.error.name`: the code is shared by errors of
+    /// different kinds, and the name is what tells them apart.
+    pub name: Option<String>,
     /// `turn.ended.turnId`, so one failure is acted on once.
     pub turn: i64,
 }
@@ -111,7 +114,14 @@ pub(crate) struct Failure {
 /// What the tail of a record says.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Facts {
+    /// The model the next request goes to, by the name kimi's
+    /// configuration has for it (`kimi-code/k3`).
+    pub alias: Option<String>,
+    /// The provider's own name for it, when a request made under this
+    /// alias has said it.
     pub model: Option<String>,
+    /// `off`, `on`, or an effort the model declares.
+    pub thinking: Option<String>,
     pub status: Status,
     pub class: Mode,
     /// Set while the last turn is one that failed.
@@ -130,27 +140,65 @@ fn typed(line: &str, ty: &str) -> Option<Value> {
     (rest.strip_prefix(ty)?.starts_with('"')).then(|| json::parse(line).ok()).flatten()
 }
 
-/// The model as the badge shows it: kimi's alias without the provider
-/// it is filed under, or the model's own name for one that was defined
-/// by environment variables and has no alias of its own.
-fn model_name(request: &Value) -> Option<String> {
-    let alias = request.str_at("modelAlias").filter(|a| !a.is_empty() && !a.starts_with("__"));
-    let name = alias.or_else(|| request.str_at("model").filter(|m| !m.is_empty()))?;
-    let name = name.strip_prefix("kimi-code/").unwrap_or(name);
-    (name.len() <= 64 && name.bytes().all(|b| b.is_ascii_graphic())).then(|| name.to_string())
+/// The alias kimi gives a model defined by `KIMI_MODEL_*` variables,
+/// which names nothing a person would recognise.
+pub(super) const ENV_ALIAS: &str = "__kimi_env_model__";
+
+/// The model and the thinking setting, folded over the records that
+/// carry them.
+///
+/// `profile.bind` opens a session with both, `config.update` is written
+/// when the user changes either (`/model`, `/effort`) and carries only
+/// what changed, and every request says what it was sent with.  kimi
+/// rebuilds its own state from the first two in order, so the last
+/// record to name a field is what the next request uses; a request's
+/// own word is taken too, because in a long session the tail may hold
+/// nothing else.
+#[derive(Default)]
+struct Setting {
+    alias: Option<String>,
+    /// The provider's name for the model, and the alias it was said under.
+    model: Option<(String, String)>,
+    thinking: Option<String>,
+}
+
+impl Setting {
+    fn take(&mut self, v: &Value, request: bool) {
+        let named = |key: &str| v.str_at(key).filter(|s| super::config::plain(s) || *s == ENV_ALIAS).map(str::to_string);
+        if let Some(alias) = named("modelAlias") {
+            if request && let Some(model) = named("model") {
+                self.model = Some((model, alias.clone()));
+            }
+            self.alias = Some(alias);
+        }
+        // `thinkingLevel` is what older records call it
+        if let Some(effort) = named("thinkingEffort").or_else(|| named("thinkingLevel")) {
+            self.thinking = Some(effort);
+        }
+    }
+
+    fn model(&self) -> Option<String> {
+        let (model, under) = self.model.as_ref()?;
+        (Some(under) == self.alias.as_ref()).then(|| model.clone())
+    }
 }
 
 /// Read `text`, the end of a record, into facts.  None when nothing in
 /// it says what the session is doing, in which case nothing is assumed.
 pub(super) fn facts_in(text: &str) -> Option<Facts> {
-    let mut model = None;
+    let mut setting = Setting::default();
     let mut status = None;
     let mut class = Mode::Prompting;
     let mut failure = None;
     let mut asked: Vec<String> = Vec::new();
     for line in text.lines() {
         if let Some(v) = typed(line, "llm.request") {
-            model = model_name(&v).or(model);
+            // a compaction may run on another model than the turn's
+            if v.str_at("kind") == Some("loop") {
+                setting.take(&v, true);
+            }
+        } else if let Some(v) = typed(line, "profile.bind").or_else(|| typed(line, "config.update")) {
+            setting.take(&v, false);
         } else if typed(line, "turn.prompt").is_some() || line.starts_with(r#"{"type":"context.append_loop_event""#) {
             if status != Some(Status::Busy) {
                 asked.clear();
@@ -163,7 +211,8 @@ pub(super) fn facts_in(text: &str) -> Option<Facts> {
             failure = (v.str_at("reason") == Some("failed"))
                 .then(|| {
                     let code = v.at(&["error", "code"]).and_then(Value::str)?;
-                    Some(Failure { code: code.to_string(), turn: v.get("turnId").and_then(Value::i64)? })
+                    let name = v.at(&["error", "name"]).and_then(Value::str).map(str::to_string);
+                    Some(Failure { code: code.to_string(), name, turn: v.get("turnId").and_then(Value::i64)? })
                 })
                 .flatten();
         } else if let Some(v) = typed(line, "interaction.request") {
@@ -179,7 +228,7 @@ pub(super) fn facts_in(text: &str) -> Option<Facts> {
         Status::Busy if !asked.is_empty() => Status::Waiting,
         s => s,
     };
-    Some(Facts { model, status, class, failure })
+    Some(Facts { model: setting.model(), alias: setting.alias, thinking: setting.thinking, status, class, failure })
 }
 
 struct Bound {
@@ -245,28 +294,6 @@ impl SessionIndex {
     }
 }
 
-/// `default_model` in `<home>/config.toml`, for a kimi with no session
-/// yet.  One top-level key read by line; the file is the user's and is
-/// not parsed further.
-pub(super) fn default_model(home: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(home.join("config.toml")).ok()?;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            return None; // top-level keys come before the first table
-        }
-        let Some((key, value)) = line.split_once('=') else { continue };
-        if key.trim() != "default_model" {
-            continue;
-        }
-        let name = value.trim().trim_matches('"');
-        let name = name.strip_prefix("kimi-code/").unwrap_or(name);
-        return (!name.is_empty() && name.len() <= 64 && name.bytes().all(|b| b.is_ascii_graphic() && b != b'"'))
-            .then(|| name.to_string());
-    }
-    None
-}
-
 #[cfg(test)]
 pub(crate) mod fixture {
     use std::path::{Path, PathBuf};
@@ -316,13 +343,14 @@ mod tests {
     fn a_turn_in_flight_is_busy_and_an_ended_one_is_idle() {
         let all = facts_in(CANCELLED_THEN_COMPLETED).expect("facts");
         assert_eq!(all.status, Status::Idle);
-        assert_eq!(all.model.as_deref(), Some("mock-model"), "an environment-defined model has no alias worth showing");
+        assert_eq!((all.alias.as_deref(), all.model.as_deref()), (Some(ENV_ALIAS), Some("mock-model")));
+        assert_eq!(all.thinking.as_deref(), Some("on"), "what the requests were sent with");
         assert_eq!(all.failure, None);
         assert_eq!(all.class, Mode::Bypass, "the last record switched the session to yolo");
 
         let first_prompt = upto(CANCELLED_THEN_COMPLETED, r#""type":"turn.prompt""#);
         let f = facts_in(&first_prompt).expect("facts");
-        assert_eq!((f.status, f.class, f.model), (Status::Busy, Mode::Prompting, None));
+        assert_eq!((f.status, f.class, f.model, f.thinking), (Status::Busy, Mode::Prompting, None, None));
 
         let cancelled = upto(CANCELLED_THEN_COMPLETED, r#""reason":"cancelled""#);
         assert_eq!(facts_in(&cancelled).unwrap().status, Status::Idle, "an interrupted turn is over");
@@ -363,9 +391,43 @@ mod tests {
         let failed = r#"{"type":"turn.ended","agentId":"main","turnId":3,"reason":"failed","error":{"code":"provider.quota_exhausted","message":"x","retryable":false},"durationMs":10,"time":1}"#;
         let f = facts_in(&format!("{TOOL_CALL}{failed}\n")).unwrap();
         assert_eq!(f.status, Status::Idle);
-        assert_eq!(f.failure, Some(Failure { code: "provider.quota_exhausted".into(), turn: 3 }));
+        assert_eq!(f.failure, Some(Failure { code: "provider.quota_exhausted".into(), name: None, turn: 3 }));
         let next = format!("{TOOL_CALL}{failed}\n{}\n", r#"{"type":"turn.prompt","agentId":"main","input":[],"origin":{"kind":"user"},"turnId":4,"time":2}"#);
         assert_eq!(facts_in(&next).unwrap().failure, None, "the next turn is not the one that failed");
+    }
+
+    /// The records kimi writes when a session is bound and when the
+    /// user changes its model or its effort, by the fields its record
+    /// manifest gives them.
+    #[test]
+    fn a_change_of_model_or_effort_shows_before_the_next_request() {
+        let bind = r#"{"type":"profile.bind","agentId":"main","modelAlias":"kimi-code/k3","profileName":"agent","thinkingEffort":"high","systemPrompt":"…","disallowedTools":[],"time":1}"#;
+        let request = r#"{"type":"llm.request","agentId":"main","kind":"loop","provider":"kimi","model":"k3","modelAlias":"kimi-code/k3","thinkingEffort":"high","thinkingKeep":"all","toolSelect":false,"messageCount":2,"turnStep":"0.1","time":2}"#;
+        let prompt = r#"{"type":"turn.prompt","agentId":"main","input":[],"origin":{"kind":"user"},"turnId":0,"time":2}"#;
+        let ended = r#"{"type":"turn.ended","agentId":"main","turnId":0,"reason":"completed","durationMs":1,"time":3}"#;
+        let got = |lines: &[&str]| {
+            let f = facts_in(&lines.join("\n")).expect("facts");
+            (f.alias, f.model, f.thinking)
+        };
+        let s = |a: &str, m: Option<&str>, t: &str| (Some(a.to_string()), m.map(str::to_string), Some(t.to_string()));
+        assert_eq!(got(&[bind, prompt]), s("kimi-code/k3", None, "high"), "bound, nothing sent yet");
+        assert_eq!(got(&[bind, prompt, request, ended]), s("kimi-code/k3", Some("k3"), "high"));
+
+        let effort = r#"{"type":"config.update","agentId":"main","thinkingEffort":"low","time":4}"#;
+        assert_eq!(got(&[bind, prompt, request, ended, effort]), s("kimi-code/k3", Some("k3"), "low"), "only the effort changed");
+
+        let model = r#"{"type":"config.update","agentId":"main","modelAlias":"kimi-code/kimi-for-coding","thinkingEffort":"max","time":5}"#;
+        assert_eq!(
+            got(&[bind, prompt, request, ended, effort, model]),
+            s("kimi-code/kimi-for-coding", None, "max"),
+            "the provider's name for the old model is not the new one's"
+        );
+        // a resumed session whose tail no longer reaches its binding
+        assert_eq!(got(&[prompt, request, ended]), s("kimi-code/k3", Some("k3"), "high"));
+        let compaction = request.replace(r#""kind":"loop""#, r#""kind":"compaction""#).replace("kimi-code/k3", "kimi-code/small");
+        assert_eq!(got(&[prompt, request, &compaction, ended]), s("kimi-code/k3", Some("k3"), "high"));
+        let legacy = r#"{"type":"config.update","agentId":"main","thinkingLevel":"off","time":6}"#;
+        assert_eq!(got(&[prompt, request, ended, legacy]).2.as_deref(), Some("off"));
     }
 
     #[test]
@@ -411,15 +473,5 @@ mod tests {
         assert_eq!(facts.unwrap().status, Status::Idle);
         idx.retain(|_| false);
         assert!(idx.bound.is_empty() && idx.searched_at.is_empty());
-    }
-
-    #[test]
-    fn the_default_model_is_the_top_level_key() {
-        let home = tmp("kimi-default-model");
-        assert_eq!(default_model(&home), None);
-        std::fs::write(home.join("config.toml"), "default_model = \"kimi-code/k3\"\n\n[[hooks]]\nevent = \"Stop\"\n").unwrap();
-        assert_eq!(default_model(&home).as_deref(), Some("k3"));
-        std::fs::write(home.join("config.toml"), "[models.x]\ndefault_model = \"inner\"\n").unwrap();
-        assert_eq!(default_model(&home), None, "a key of the same name inside a table is another key");
     }
 }
