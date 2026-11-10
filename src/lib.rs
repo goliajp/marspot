@@ -86,11 +86,13 @@ pub static MARSPOT_LAYER_VERS: &str = concat!(
 
 // GUI-coupled modules (AppKit / Metal / CoreText) — these stay here.
 pub mod app;
+mod app_keys;
 pub mod app_menu;
 pub mod cc;
 pub mod cc_usage;
 pub mod dev_window;
 pub mod chrome_measure;
+pub mod commands;
 pub mod font_cache;
 pub mod font_shape;
 pub mod font_trait;
@@ -119,7 +121,6 @@ pub mod pidtree;
 pub mod png;
 pub mod qos;
 pub mod session_signal;
-pub mod shortcuts;
 pub mod render_metal;
 /// Shared with L3, so it lives in the stone crate — every layer
 /// reads the same file, and only one of them parses it.

@@ -11,6 +11,8 @@
 
 use std::collections::HashMap;
 
+use marspot::ui::strings::t;
+
 const SITE: &str = include_str!("../../site/index.html");
 const README: &str = include_str!("../../README.md");
 const BASELINE: &str = include_str!("../../bench/baseline.json");
@@ -213,65 +215,62 @@ fn a_gap_that_closed_comes_off_the_page() {
     }
 }
 
-/// The README and the page keep the same key table.
+/// The README's key table is the command table.
 ///
-/// They are two documents with the same list in them, which is two
-/// places for it to go stale.  Both are built from `shortcuts`, so
-/// both are checked against it.
+/// The README, the page and the guide each carry the list, which is
+/// three places for it to go stale.  Each is held to
+/// `commands::reference`, the same rows the shortcuts panel draws.
 #[test]
 fn the_readme_keeps_the_same_keys() {
-    use marspot::shortcuts::SHORTCUTS;
-    for s in SHORTCUTS {
-        assert!(README.contains(s.chord), "the README does not mention {}", s.chord);
-        assert!(
-            README.contains(s.action),
-            "{} is in the README, described as something else",
-            s.chord
-        );
+    let rows = marspot::commands::reference();
+    for r in &rows {
+        let line = format!("| `{}` | {} |", r.keys, t(r.title));
+        assert!(README.contains(&line), "the README has no line {line:?}");
+    }
+    let chord_line = |l: &&str| ["| `⌘", "| `⌥⌘", "| `⇧⌘", "| `⌃⌘"].iter().any(|p| l.starts_with(p));
+    let listed = README.lines().filter(chord_line).count();
+    assert_eq!(listed, rows.len(), "the README lists a chord the table does not have");
+}
+
+/// The key table under the Keys heading of `html`.
+fn key_table(html: &'static str, what: &str) -> &'static str {
+    let heading = html.find("<h2>Keys</h2>").unwrap_or_else(|| panic!("{what} has no Keys section"));
+    let start = html[heading..]
+        .find("<table class=\"keys\">")
+        .map(|i| heading + i)
+        .unwrap_or_else(|| panic!("{what} has no key table"));
+    let end = html[start..].find("</table>").map(|i| start + i).expect("the key table is not closed");
+    &html[start..end]
+}
+
+fn assert_key_table_is_the_reference(html: &'static str, what: &str) {
+    let table = key_table(html, what);
+    let rows = marspot::commands::reference();
+    assert_eq!(
+        table.matches("<tr>").count(),
+        rows.len(),
+        "{what} lists a different number of shortcuts than the command table"
+    );
+    let mut from = 0;
+    for r in &rows {
+        let row = format!("<tr><td>{}</td><td>{}</td></tr>", r.keys, t(r.title));
+        let at = table[from..]
+            .find(&row)
+            .unwrap_or_else(|| panic!("{what}: no row {row:?}, or not in the table's order"));
+        from += at + row.len();
     }
 }
 
 /// The keyboard reference on the page is the list the code keeps.
 ///
 /// A key table is the part of a page that goes wrong quietly: a chord
-/// is removed or renamed and the page keeps promising it.  The list in
-/// `marspot::shortcuts` is already tied to the handlers by
-/// `shortcuts_are_real`; this ties the page to the list, so the chain
+/// is removed or renamed and the page keeps promising it.  The command
+/// table is tied to the code that runs each command by
+/// `shortcuts_are_real`; this ties the page to the table, so the chain
 /// runs from what the page says to the code that does it.
 #[test]
 fn the_pages_key_table_is_the_list_the_code_keeps() {
-    use marspot::shortcuts::SHORTCUTS;
-
-    let table_start = SITE
-        .find("<table class=\"keys\">")
-        .expect("the page has no key table");
-    let table_end = SITE[table_start..]
-        .find("</table>")
-        .map(|i| table_start + i)
-        .expect("the key table is not closed");
-    let table = &SITE[table_start..table_end];
-
-    let rows = table.matches("<tr>").count();
-    assert_eq!(
-        rows,
-        SHORTCUTS.len(),
-        "the page lists {rows} shortcuts and the code keeps {}",
-        SHORTCUTS.len()
-    );
-
-    for s in SHORTCUTS {
-        assert!(
-            table.contains(s.chord),
-            "the page's key table does not mention {}",
-            s.chord
-        );
-        assert!(
-            table.contains(s.action),
-            "{} is on the page, but described as something other than {:?}",
-            s.chord,
-            s.action
-        );
-    }
+    assert_key_table_is_the_reference(SITE, "the page");
 }
 
 const GUIDE: &str = include_str!("../../site/guide.html");
@@ -280,11 +279,7 @@ const SHELL_MAIN: &str = include_str!("../../src/bin/marspot-shell/main.rs");
 /// The guide's key table is the same list as everywhere else.
 #[test]
 fn the_guide_keeps_the_same_keys() {
-    use marspot::shortcuts::SHORTCUTS;
-    for s in SHORTCUTS {
-        assert!(GUIDE.contains(s.chord), "the guide does not mention {}", s.chord);
-        assert!(GUIDE.contains(s.action), "{} is in the guide, described as something else", s.chord);
-    }
+    assert_key_table_is_the_reference(GUIDE, "the guide");
 }
 
 /// Every command the guide documents is one the binary has.
