@@ -18,7 +18,7 @@ pub(crate) fn discover_profiles() -> Vec<u8> {
     discover_profiles_in(Path::new(&home))
 }
 
-pub(super) fn discover_profiles_in(home: &Path) -> Vec<u8> {
+pub(crate) fn discover_profiles_in(home: &Path) -> Vec<u8> {
     let Ok(rd) = std::fs::read_dir(home) else {
         return Vec::new();
     };
@@ -42,7 +42,12 @@ pub(super) fn discover_profiles_in(home: &Path) -> Vec<u8> {
 /// The feed is keyed by address, the pane is keyed by directory, and
 /// this is the only thing on the machine that ties the two together.
 pub(super) fn profile_email(home: &Path, profile: u8) -> Option<String> {
-    let body = std::fs::read_to_string(config_of(home, profile)).ok()?;
+    email_in(&config_of(home, profile))
+}
+
+/// The account address in one `.claude.json`.
+pub(crate) fn email_in(config: &Path) -> Option<String> {
+    let body = std::fs::read_to_string(config).ok()?;
     let at = body.find("\"oauthAccount\"")?;
     // The file is pretty-printed, so the colon has a space after it —
     // matching `"emailAddress":"` found nothing on the real thing,
