@@ -25,6 +25,7 @@
 //! - `mod.rs` (this file) — public trait + types + `PluginRegistry`
 //! - `host.rs` — `PluginHost` impl backed by the shell's state
 //! - `claudecode.rs` — the first plugin, always-on
+//! - `usage/` — collects the account usage feed when nothing else does
 //!
 //! ## API versioning
 //!
@@ -44,6 +45,7 @@ pub mod autorun;
 pub mod claudecode;
 pub mod codex;
 pub mod peerbus;
+pub mod usage;
 pub mod handoff;
 pub mod host;
 pub mod dispatch;
