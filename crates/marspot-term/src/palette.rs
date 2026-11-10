@@ -257,16 +257,6 @@ pub fn xterm_rgb(c: (f64, f64, f64)) -> String {
     format!("rgb:{:04x}/{:04x}/{:04x}", q(c.0), q(c.1), q(c.2))
 }
 
-// The dark table under its old names, for the renderer until it
-// takes the table itself.
-pub const BG: (f64, f64, f64) = DARK.bg;
-pub const FG: (f64, f64, f64) = DARK.fg;
-pub const CURSOR: (u8, u8, u8) = DARK.cursor;
-pub const ANSI_16: [(f64, f64, f64); 16] = DARK.ansi;
-pub fn indexed(idx: u8) -> (f64, f64, f64) {
-    DARK.indexed(idx)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

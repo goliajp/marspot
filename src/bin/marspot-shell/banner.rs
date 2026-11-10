@@ -12,9 +12,9 @@
 //! `MTLTexture`.  The `ShellPresenter` owns the **GPU-side** blend
 //! pipeline that draws the resulting texture as an overlay.
 //!
-//! Each `BannerKind` rasterises once at first use and the texture is
-//! cached for the life of the shell — they're a few KB each and the
-//! upload is the only nontrivial cost.
+//! A banner is rasterised when it goes up and again when the theme
+//! changes under it — a few KB, and the upload is the only nontrivial
+//! cost.
 
 use core_foundation::attributed_string::CFMutableAttributedString;
 use core_foundation::base::{CFRange, TCFType};
@@ -144,18 +144,19 @@ pub fn rasterise(
         &color_space,
         kCGImageAlphaPremultipliedLast,
     );
-    // Background: dark grey with ~85 % alpha so terminal content
-    // shows through.  Chosen warmer than the cell BG so it reads
-    // as "a notice" rather than "the terminal".
-    ctx.set_rgb_fill_color(0.18, 0.20, 0.24, 0.85);
+    // Background: the theme's notice plate, translucent where the
+    // theme lets terminal content show through, and never the cell BG
+    // so it reads as "a notice" rather than "the terminal".
+    let [r, g, b, a] = marspot::ui::components::panel_palette::notice_bg();
+    ctx.set_rgb_fill_color(r as f64, g as f64, b as f64, a as f64);
     ctx.fill_rect(CGRect::new(
         &CGPoint::new(0.0, 0.0),
         &CGSize::new(img_w as f64, img_h as f64),
     ));
 
-    // Foreground: near-white with a slight warmth so it reads as
-    // "marspot accent" rather than "system error".
-    ctx.set_rgb_fill_color(0.97, 0.95, 0.91, 1.0);
+    // Foreground: the theme's notice text.
+    let [r, g, b, a] = marspot::ui::components::panel_palette::notice_fg();
+    ctx.set_rgb_fill_color(r as f64, g as f64, b as f64, a as f64);
     // CoreText's baseline is from the bottom of the bitmap; this
     // origin puts ink ~descent + pad above bottom.
     ctx.set_text_position(pad_x, pad_y + descent);
