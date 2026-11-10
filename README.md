@@ -135,7 +135,7 @@ Everything not listed goes to the program in the pane, unchanged.
 | `⇧⌘P` | Process Monitor |
 | `⇧⌘C` | Agent Accounts |
 | `⌃⌘F` | Enter or Exit Full Screen |
-| `⌘M` | Minimise |
+| `⌘M` | Minimize |
 | `⌘[` | Previous Pane |
 | `⌘]` | Next Pane |
 | `⌘1 – ⌘9` | Pane 1 – 9 |

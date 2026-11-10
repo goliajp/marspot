@@ -241,6 +241,10 @@ pub mod control {
     pub const KEYCAP_RADIUS: f64 = 4.0;
     /// Between two key caps on one row.
     pub const KEYCAP_GAP: f64 = super::space::CONTROL_TO_CONTROL;
+    /// A key cap's glyphs: the size of a menu item, a step heavier so
+    /// the thin modifier signs hold up on the cap's fill.
+    pub const KEYCAP_TEXT: PanelText = PanelText::Item;
+    pub const KEYCAP_WEIGHT: u16 = 500;
 }
 
 #[cfg(test)]
