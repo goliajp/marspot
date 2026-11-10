@@ -359,6 +359,12 @@ mod tests {
         // Assembled, so that this file does not contain one itself.
         let literal = format!("bg: [{}.13, 0.14, 0.17, 1.0],", 0);
         assert_eq!(colour_literals(&literal), 1, "the search finds a literal when there is one");
-        assert_eq!(colour_literals(include_str!("panel_chrome.rs")), 0);
+        for (file, src) in [
+            ("panel_chrome.rs", include_str!("panel_chrome.rs")),
+            ("layout_modal.rs", include_str!("layout_modal.rs")),
+            ("layout_modal_paint.rs", include_str!("layout_modal_paint.rs")),
+        ] {
+            assert_eq!(colour_literals(src), 0, "{file} writes a colour out by hand");
+        }
     }
 }

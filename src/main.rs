@@ -2115,7 +2115,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
                     .ok().and_then(|v| v.parse().ok()).unwrap_or(6),
                 rows: std::env::var("MARSPOT_SHOT_ROWS")
                     .ok().and_then(|v| v.parse().ok()).unwrap_or(2),
-                scale: shot_scale(),
+                hover: Default::default(),
                 slot_titles: {
                     let names = [
                         "marspot", "torajs", "spg", "smix", "devops", "insight",
