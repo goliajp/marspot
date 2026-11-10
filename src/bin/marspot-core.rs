@@ -38,8 +38,9 @@ use marspot::pane::{L3Conn, L3Spawn, Pane};
 use marspot::render::{SessionView, SidebarEntry};
 use marspot::render_metal::MetalRenderer;
 use marspot::ui::components::surface_stack::{
-    self, Change, Key as SurfaceKey, KeyAction, Press, SurfaceKind, SurfaceStack,
+    self, Change, CloseBy, Key as SurfaceKey, KeyAction, Press, SurfaceKind, SurfaceStack,
 };
+use marspot::ui::components::panel_script::{Input as DevInput, Scene, Script as PanelScript};
 use marspot::ui::components::{PanelChrome, GRID_MAX, GRID_MIN};
 use marspot::ui::strings::{t, Msg};
 use marspot::session::SessionState;
@@ -657,6 +658,7 @@ mod window_state_tests {
             dev_close_panes_at: None,
             dev_open_settings_at: None,
             dev_drag: None,
+            dev_panels: None,
             layout_discarded: false,
             windows,
             key_window: 0,
@@ -4163,6 +4165,9 @@ struct CoreApp {
     /// Dev seam only (`MARSPOT_DEV_DRAG`): one scripted pane drag, and
     /// the earliest moment to perform it.
     dev_drag: Option<(DevDrag, Instant)>,
+    /// Dev seam only (`MARSPOT_DEV_PANELS`): a script of panel input
+    /// still being played.  See `dev_drive_panels`.
+    dev_panels: Option<PanelScript>,
     /// Set once the user closed the last pane of the last window.  The
     /// saved layout has been deleted at that point and the app is on
     /// its way out; any later save would resurrect what they just
@@ -4751,6 +4756,37 @@ impl CoreApp {
         self.dev_open_settings_at = None;
         let wi = self.key_window.min(self.windows.len().saturating_sub(1));
         self.toggle_panel(wi, SurfaceKind::Settings);
+    }
+
+    /// Dev seam (`MARSPOT_DEV_PANELS`): queues the next step of the
+    /// script as the events the window would have sent for it, so they
+    /// are routed and handled like any others.
+    fn dev_drive_panels(&mut self) {
+        let now = Instant::now();
+        if !self.dev_panels.as_ref().is_some_and(|s| s.due(now)) {
+            return;
+        }
+        let wi = self.key_window.min(self.windows.len().saturating_sub(1));
+        let top = win!(self, wi).layout.top_inset;
+        let chrome =
+            win!(self, wi).panels.open().map(|k| PanelChrome::new(self.panel_frame(wi, k), top));
+        let cell = self.renderer.cell_dims();
+        let w = &win!(self, wi);
+        let id = w.window_id;
+        let Some(script) = self.dev_panels.as_mut() else { return };
+        for input in script.play(now, &Scene { layout: &w.layout, chrome, cell }) {
+            let _ = self.event_tx.send(match input {
+                DevInput::Move(x, y) => CoreEvent::MouseMove(x, y, id),
+                DevInput::Down(x, y, mods) => CoreEvent::MouseDown(x, y, mods, id),
+                DevInput::Drag(x, y) => CoreEvent::MouseDrag(x, y, id, id, x, y),
+                DevInput::Up(x, y) => CoreEvent::MouseUp(id, id, x, y),
+                DevInput::Scroll(dy) => CoreEvent::Scroll(dy, true, id),
+                DevInput::Key(event, mods) => CoreEvent::Key(event, mods, id),
+            });
+        }
+        if script.finished() {
+            self.dev_panels = None;
+        }
     }
 
     /// Dev seam (`MARSPOT_DEV_CLOSE_PANES=n`) — see the call site.
@@ -6711,8 +6747,8 @@ impl CoreApp {
                 LogicalKey::Char('w') if modifiers.super_ => SurfaceKey::CmdW,
                 _ => SurfaceKey::Other,
             };
-            if let KeyAction::Close(kind) = win!(self, wi).panels.on_key(key) {
-                self.apply_surface_change(wi, Change { closed: Some(kind), opened: None });
+            if let KeyAction::Close(change) = win!(self, wi).panels.on_key(key) {
+                self.apply_surface_change(wi, change);
             }
             return;
         }
@@ -7235,7 +7271,8 @@ impl CoreApp {
     fn apply_surface_change(&mut self, wi: usize, change: Change) {
         let w = &mut win!(self, wi);
         w.needs_render = true;
-        match change.closed {
+        w.panels.log_change(w.window_id, change);
+        match change.closed.map(|(kind, _)| kind) {
             Some(SurfaceKind::Processes) => w.process_panel = None,
             Some(SurfaceKind::Accounts) => w.cc_usage_modal = None,
             Some(SurfaceKind::Layout) => w.layout_drag = None,
@@ -7370,7 +7407,7 @@ impl CoreApp {
                         });
                     }
                     Hover::Apply => {
-                        let change = win!(self, wi).panels.close();
+                        let change = win!(self, wi).panels.close(CloseBy::Content);
                         self.apply_surface_change(wi, change);
                         win!(self, wi).grid_cols = win!(self, wi).pending_grid_cols;
                         win!(self, wi).grid_rows = win!(self, wi).pending_grid_rows;
@@ -8035,9 +8072,7 @@ impl CoreApp {
         if let Some(kind) = win!(self, wi).panels.open() {
             let chrome = PanelChrome::new(self.panel_frame(wi, kind), win!(self, wi).layout.top_inset);
             match win!(self, wi).panels.on_press(x_phys, y_phys, &chrome) {
-                Some(Press::Close(kind)) => {
-                    self.apply_surface_change(wi, Change { closed: Some(kind), opened: None });
-                }
+                Some(Press::Close(change)) => self.apply_surface_change(wi, change),
                 Some(Press::Content(kind)) => self.panel_content_press(wi, kind, x_phys, y_phys),
                 Some(Press::BeginDrag) | None => {}
             }
@@ -8551,7 +8586,9 @@ impl CoreApp {
             win!(self, wi).needs_render = true;
             return;
         }
-        win!(self, wi).panels.on_release();
+        if let Some(moved) = win!(self, wi).panels.on_release() {
+            moved.log();
+        }
         // A click without movement leaves anchor == focus → treat as
         // "no selection" so a stray single-click doesn't ghost a
         // single-cell highlight.
@@ -10062,6 +10099,7 @@ fn main() {
             .ok()
             .and_then(|v| DevDrag::parse(&v))
             .map(|d| (d, Instant::now() + Duration::from_secs(3))),
+        dev_panels: PanelScript::from_env(),
         layout_discarded: false,
         windows: vec![{
             let mut w = WindowState::new(
@@ -10272,7 +10310,7 @@ fn main() {
                 )
                 .min()
                 .unwrap_or(Duration::from_secs(1));
-            let recv_timeout = if app.any_prediction_pending() {
+            let recv_timeout = if app.any_prediction_pending() || app.dev_panels.is_some() {
                 recv_timeout.min(Duration::from_millis(10))
             } else {
                 recv_timeout
@@ -10313,6 +10351,7 @@ fn main() {
         // endings were otherwise pinned only by unit tests that build
         // their own windows.  Unset in the installed app.
         app.dev_drive_drag();
+        app.dev_drive_panels();
         for wi in 0..app.windows.len() {
             app.tick_process_panel_kills(wi);
             let due = win!(app, wi)
