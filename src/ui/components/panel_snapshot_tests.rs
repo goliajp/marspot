@@ -19,16 +19,26 @@
 //! someone is typing on.  From the repository root:
 //!
 //! ```text
-//! # draw it and overwrite the baseline on the runner
-//! MARSPOT_FONT_SNAPSHOT=1 bin/test-remote.sh -E 'test(panel_snapshot_settings)'
-//! # bring the picture back and look at it
-//! scp mini:work/test-marspot/bench/ui/snapshots/settings.png bench/ui/snapshots/settings.png
+//! # draw it, overwriting the baseline on the runner, and bring the
+//! # picture back to look at
+//! export REMOTE_NAME=test-marspot-settings
+//! MARSPOT_FONT_SNAPSHOT=1 bin/test-remote.sh -E 'test(panel_snapshot_settings)' \
+//!   && scp mini:work/$REMOTE_NAME/bench/ui/snapshots/settings.png bench/ui/snapshots/
 //! # compare with the committed baseline instead (what the suite does)
 //! bin/test-remote.sh -E 'test(panel_snapshot)'
 //! ```
 //!
+//! `REMOTE_NAME` gives the run its own tree on the runner
+//! (`~/work/<name>`).  Without it every checkout syncs into the same
+//! one, and a sync deletes what is not in the tree it came from: a
+//! PNG recorded there is gone as soon as another checkout runs its
+//! tests.  Only one `test-remote.sh` runs at a time per machine, so a
+//! second one started meanwhile exits at once and has to be retried.
+//!
 //! The names are `panel_snapshot_{settings,layout,process,accounts}`
-//! and the files `{settings,layout,process,accounts}.png`.  A check
+//! and the files `{settings,layout,process,accounts}.png`;
+//! `panel_snapshot_controls` / `controls.png` is every shared control
+//! in every state, in a panel drawn by the shared chrome.  A check
 //! that fails keeps its render only where `MARSPOT_SNAPSHOT_OUT` names
 //! a directory; recording is the way to see one.
 
@@ -40,6 +50,11 @@ use crate::snapshot_kit::{assert_snapshot_ssim, snapshot_mode_in, write_snapshot
 use crate::ui::components::cc_usage_modal::{
     self, CcUsageAccountRender, CcUsageRender, CcUsageWindowRender,
 };
+use crate::ui::components::controls;
+use crate::ui::components::panel_chrome::{self, PanelChrome};
+use crate::ui::core::ViewPainter;
+use crate::ui::theme::spec;
+use marspot_term::layout::Rect;
 use crate::ui::components::layout_modal_paint::LayoutModalRender;
 use crate::ui::components::modal_frame::{ModalFrame, ModalLayoutSpec};
 use crate::ui::components::process_panel::{
@@ -133,7 +148,7 @@ fn snapshot(name: &str, w: u32, h: u32, open: impl FnOnce(&mut MetalRenderer, &L
 
 #[test]
 fn panel_snapshot_settings() {
-    snapshot("settings", 1000, 1000, |renderer, layout| {
+    snapshot("settings", 1000, 1200, |renderer, layout| {
         let settings = crate::settings::Settings {
             reclaim_enabled: false,
             reclaim_prefetch: false,
@@ -144,12 +159,7 @@ fn panel_snapshot_settings() {
             ..Default::default()
         };
         let rect = {
-            let font = renderer.font_mut();
-            let mut measure = |s: &str, pt: f64, weight: u16| {
-                font.measure_ui_text_at_size(
-                    s, weight, crate::font_shape::ShapeOptions::default(), pt,
-                )
-            };
+            let mut measure = controls::font_measure(renderer.font_mut());
             settings_modal::panel_rect(
                 layout.window_w, layout.window_h, &settings, &mut measure, layout.top_inset,
             )
@@ -159,6 +169,7 @@ fn panel_snapshot_settings() {
             scroll: 0.0,
             settings,
             path: "/Users/you/Library/Application Support/marspot/settings.toml".to_string(),
+            hover: settings_modal::Hover::None,
         }));
     });
 }
@@ -327,5 +338,80 @@ fn panel_snapshot_accounts() {
             now_unix: ACCOUNTS_NOW,
             feed_missing: false,
         }));
+    });
+}
+
+/// Every shared control in every state, in a panel drawn by the
+/// shared chrome: the one picture where a secondary button, a stepper
+/// at its limit and a hovered close button can be seen at all.
+fn controls_sheet(p: &mut ViewPainter<'_>) {
+    use controls::{ButtonKind, StepperPart};
+    let frame = panel_chrome::frame_rect(
+        p.window_w, p.window_h, spec::px(640.0), panel_chrome::frame_height(spec::px(268.0)), 0.0,
+    );
+    PanelChrome::new(frame, 0.0).paint(p, "Controls", Some("updated 11/10 18:00"), true, |p, content| {
+        let gap = spec::px(spec::space::CONTROL_TO_CONTROL);
+        let pad_x = spec::px(spec::card::ROW_PAD_X);
+        let pad_y = spec::px(spec::card::ROW_PAD_Y);
+        // One group: heading, then a card one row tall.  Returns the
+        // card's inner left edge, the row's top, and where the next
+        // group starts.
+        let group = |p: &mut ViewPainter<'_>, top: f64, title: &str, trailing: Option<&str>, row_h: f64| {
+            let card_top = panel_chrome::section_heading(p, content.x, top, content.w, title, trailing);
+            let card = Rect { x: content.x, y_top: card_top, w: content.w, h: row_h + 2.0 * pad_y };
+            panel_chrome::card(p, card);
+            (card.x + pad_x, card.y_top + pad_y, card.y_top + card.h + spec::px(spec::space::CARD_TO_HEADING))
+        };
+
+        let (w, h) = controls::button_size("Apply", &mut controls::font_measure(&mut *p.font));
+        let (mut x, y, next) = group(p, content.y_top, "Buttons", Some("rest · hover · disabled"), h);
+        for (label, kind, hovered, disabled) in [
+            ("Apply", ButtonKind::Primary, false, false),
+            ("Apply", ButtonKind::Primary, true, false),
+            ("Apply", ButtonKind::Primary, false, true),
+            ("Cancel", ButtonKind::Secondary, false, false),
+            ("Cancel", ButtonKind::Secondary, true, false),
+            ("Cancel", ButtonKind::Secondary, false, true),
+        ] {
+            controls::paint_button(p, Rect { x, y_top: y, w, h }, label, kind, hovered, disabled);
+            x += w + gap;
+        }
+
+        let labels = ["Off", "Light", "Normal", "Deep"];
+        let (w, h) = controls::segmented_size(&labels, &mut controls::font_measure(&mut *p.font));
+        let (x, y, next) = group(p, next, "Segmented control", Some("selected · hover · disabled"), h);
+        controls::paint_segmented(p, Rect { x, y_top: y, w, h }, &labels, Some(2), Some(0), false);
+        let x = x + w + 4.0 * gap;
+        controls::paint_segmented(p, Rect { x, y_top: y, w, h }, &labels, Some(2), None, true);
+
+        let (sw, sh) = controls::stepper_size();
+        let (tw, th) = controls::toggle_size();
+        let (mut x, y, next) = group(p, next, "Toggle and stepper", None, sh);
+        for (on, disabled) in [(false, false), (true, false), (false, true), (true, true)] {
+            let rect = Rect { x, y_top: y + (sh - th) * 0.5, w: tw, h: th };
+            controls::paint_toggle(p, rect, on, disabled);
+            x += tw + gap;
+        }
+        x += 3.0 * gap;
+        controls::paint_stepper(p, x, y, "4", true, true, Some(StepperPart::Plus));
+        controls::paint_stepper(p, x + sw + 4.0 * gap, y, "1", false, true, None);
+
+        let (dw, dh) = controls::danger_button_size();
+        let (mut x, y, _) = group(p, next, "Status and danger", Some("rest · hover"), dh);
+        for (label, severity) in [("OK", 0), ("NEAR", 1), ("LIMIT", 2)] {
+            let (w, h) = controls::chip_size(label, &mut controls::font_measure(&mut *p.font));
+            controls::paint_chip(p, Rect { x, y_top: y + (dh - h) * 0.5, w, h }, label, severity);
+            x += w + gap;
+        }
+        x += 3.0 * gap;
+        controls::paint_danger_button(p, Rect { x, y_top: y, w: dw, h: dh }, false);
+        controls::paint_danger_button(p, Rect { x: x + dw + gap, y_top: y, w: dw, h: dh }, true);
+    });
+}
+
+#[test]
+fn panel_snapshot_controls() {
+    snapshot("controls", 1400, 900, |_, _| {
+        *crate::frame_build::frame::TEST_OVERLAY.lock().unwrap() = Some(controls_sheet);
     });
 }

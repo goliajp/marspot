@@ -296,7 +296,27 @@ fn paint_overlays(
             font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
         );
     }
+
+    #[cfg(test)]
+    if let Some(paint) = *TEST_OVERLAY.lock().unwrap_or_else(|e| e.into_inner()) {
+        paint(&mut crate::ui::core::view::ViewPainter {
+            cell_w, cell_h, ascent,
+            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
+            window_w: layout.window_w, window_h: layout.window_h,
+            font, atlas,
+            cells: overlay_cells,
+            glyphs: overlay_glyphs,
+            ui_rects: overlay_ui_rects,
+        });
+    }
 }
+
+/// An overlay a test paints after the panels, to get a picture of
+/// components that no panel in the app shows in every state.
+#[cfg(test)]
+pub(crate) static TEST_OVERLAY: std::sync::Mutex<
+    Option<fn(&mut crate::ui::core::view::ViewPainter<'_>)>,
+> = std::sync::Mutex::new(None);
 
 /// The attention ladder: how present a pane is, from whether the user
 /// is in it and how far its session has receded.

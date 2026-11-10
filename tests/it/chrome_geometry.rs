@@ -262,6 +262,7 @@ mod modal_frame {
 /// So the rects go here as numbers.
 mod settings_modal {
     use marspot::settings::Settings;
+    use marspot::ui::components::panel_chrome::row_separator_rect;
     use marspot::ui::components::settings_modal::{
         Slot, hit_test, max_scroll, panel_rect, walk, walk_visible,
     };
@@ -300,9 +301,8 @@ mod settings_modal {
         let mut out = format!("panel {}\n", r(&rect));
         let mut m = measure();
         walk(rect, 0.0, s, &mut m, |slot| match slot {
-            Slot::Title { baseline } => out += &format!("title base {baseline:.1}\n"),
-            Slot::Group { heading, baseline } => {
-                out += &format!("group {heading:?} base {baseline:.1}\n")
+            Slot::Group { heading, x, top, w } => {
+                out += &format!("group {heading:?} at {x:.1},{top:.1} w {w:.1}\n")
             }
             Slot::Card { rect } => out += &format!("card {}\n", r(&rect)),
             Slot::Row { row, band, label_baseline, desc_baseline, control, .. } => {
@@ -312,7 +312,9 @@ mod settings_modal {
                     r(&control)
                 )
             }
-            Slot::Separator { rect } => out += &format!("sep {}\n", r(&rect)),
+            Slot::Separator { card, y } => {
+                out += &format!("sep {}\n", r(&row_separator_rect(card, y)))
+            }
             Slot::Footer { baseline } => out += &format!("footer base {baseline:.1}\n"),
         });
         out
@@ -324,32 +326,31 @@ mod settings_modal {
         at_scale_1(|| {
             assert_eq!(
                 dump(1600.0, 1200.0, &Settings::default()),
-                "panel 360.0,152.4 880.0x895.2\n\
-                 title base 198.4\n\
-                 group \"Idle reclamation\" base 238.4\n\
-                 card 396.0,252.4 808.0x245.7\n\
-                 row ReclaimEnabled band 396.0,252.4 808.0x81.9 label 289.9 desc 315.4 ctl 1138.0,272.4 42.0x24.0\n\
-                 sep 420.0,334.3 784.0x1.0\n\
-                 row ReclaimIdleMinutes band 396.0,334.3 808.0x81.9 label 371.8 desc 397.3 ctl 897.0,350.3 283.0x32.0\n\
-                 sep 420.0,416.2 784.0x1.0\n\
-                 row ReclaimPrefetch band 396.0,416.2 808.0x81.9 label 453.7 desc 479.2 ctl 1138.0,436.2 42.0x24.0\n\
-                 group \"Appearance\" base 534.1\n\
-                 card 396.0,548.1 808.0x163.8\n\
-                 row DimScale band 396.0,548.1 808.0x81.9 label 585.6 desc 611.1 ctl 915.2,564.1 264.8x32.0\n\
-                 sep 420.0,630.0 784.0x1.0\n\
-                 row CircledWide band 396.0,630.0 808.0x81.9 label 667.5 desc 693.0 ctl 1138.0,650.0 42.0x24.0\n\
-                 group \"Claude Code\" base 747.9\n\
-                 card 396.0,761.9 808.0x81.9\n\
-                 row CcStatuslineHook band 396.0,761.9 808.0x81.9 label 799.4 desc 824.9 ctl 1138.0,781.9 42.0x24.0\n\
-                 group \"Scrolling\" base 879.8\n\
-                 card 396.0,893.8 808.0x81.9\n\
-                 row ScrollFactor band 396.0,893.8 808.0x81.9 label 931.3 desc 956.8 ctl 902.0,909.8 278.0x32.0\n\
-                 footer base 1016.7\n"
+                "panel 360.0,71.8 880.0x1056.3\n\
+                 group \"Idle reclamation\" at 396.0,151.8 w 808.0\n\
+                 card 396.0,178.8 808.0x287.7\n\
+                 row ReclaimEnabled band 396.0,178.8 808.0x95.9 label 222.3 desc 255.8 ctl 1112.0,196.8 68.0x40.0\n\
+                 sep 420.0,274.7 760.0x1.0\n\
+                 row ReclaimIdleMinutes band 396.0,274.7 808.0x95.9 label 318.2 desc 351.7 ctl 833.0,290.7 347.0x44.0\n\
+                 sep 420.0,370.6 760.0x1.0\n\
+                 row ReclaimPrefetch band 396.0,370.6 808.0x95.9 label 414.1 desc 447.6 ctl 1112.0,388.6 68.0x40.0\n\
+                 group \"Appearance\" at 396.0,506.5 w 808.0\n\
+                 card 396.0,533.5 808.0x191.8\n\
+                 row DimScale band 396.0,533.5 808.0x95.9 label 577.0 desc 610.5 ctl 865.2,549.5 314.8x44.0\n\
+                 sep 420.0,629.5 760.0x1.0\n\
+                 row CircledWide band 396.0,629.5 808.0x95.9 label 673.0 desc 706.5 ctl 1112.0,647.5 68.0x40.0\n\
+                 group \"Claude Code\" at 396.0,765.4 w 808.0\n\
+                 card 396.0,792.4 808.0x95.9\n\
+                 row CcStatuslineHook band 396.0,792.4 808.0x95.9 label 835.9 desc 869.4 ctl 1112.0,810.4 68.0x40.0\n\
+                 group \"Scrolling\" at 396.0,928.3 w 808.0\n\
+                 card 396.0,955.3 808.0x95.9\n\
+                 row ScrollFactor band 396.0,955.3 808.0x95.9 label 998.8 desc 1032.3 ctl 852.0,971.3 328.0x44.0\n\
+                 footer base 1092.2\n"
             );
         });
     }
 
-    /// Narrow: the width clamps to 94% of the window and everything
+    /// Narrow: the width clamps to 96% of the window and everything
     /// inside follows it -- the cards narrow, the separators narrow,
     /// and the right-aligned controls move left by the same amount.
     /// The vertical rhythm does not move, because nothing in it
@@ -359,27 +360,26 @@ mod settings_modal {
         at_scale_1(|| {
             assert_eq!(
                 dump(800.0, 1200.0, &Settings::default()),
-                "panel 24.0,152.4 752.0x895.2\n\
-                 title base 198.4\n\
-                 group \"Idle reclamation\" base 238.4\n\
-                 card 60.0,252.4 680.0x245.7\n\
-                 row ReclaimEnabled band 60.0,252.4 680.0x81.9 label 289.9 desc 315.4 ctl 674.0,272.4 42.0x24.0\n\
-                 sep 84.0,334.3 656.0x1.0\n\
-                 row ReclaimIdleMinutes band 60.0,334.3 680.0x81.9 label 371.8 desc 397.3 ctl 433.0,350.3 283.0x32.0\n\
-                 sep 84.0,416.2 656.0x1.0\n\
-                 row ReclaimPrefetch band 60.0,416.2 680.0x81.9 label 453.7 desc 479.2 ctl 674.0,436.2 42.0x24.0\n\
-                 group \"Appearance\" base 534.1\n\
-                 card 60.0,548.1 680.0x163.8\n\
-                 row DimScale band 60.0,548.1 680.0x81.9 label 585.6 desc 611.1 ctl 451.2,564.1 264.8x32.0\n\
-                 sep 84.0,630.0 656.0x1.0\n\
-                 row CircledWide band 60.0,630.0 680.0x81.9 label 667.5 desc 693.0 ctl 674.0,650.0 42.0x24.0\n\
-                 group \"Claude Code\" base 747.9\n\
-                 card 60.0,761.9 680.0x81.9\n\
-                 row CcStatuslineHook band 60.0,761.9 680.0x81.9 label 799.4 desc 824.9 ctl 674.0,781.9 42.0x24.0\n\
-                 group \"Scrolling\" base 879.8\n\
-                 card 60.0,893.8 680.0x81.9\n\
-                 row ScrollFactor band 60.0,893.8 680.0x81.9 label 931.3 desc 956.8 ctl 438.0,909.8 278.0x32.0\n\
-                 footer base 1016.7\n"
+                "panel 16.0,71.8 768.0x1056.3\n\
+                 group \"Idle reclamation\" at 52.0,151.8 w 696.0\n\
+                 card 52.0,178.8 696.0x287.7\n\
+                 row ReclaimEnabled band 52.0,178.8 696.0x95.9 label 222.3 desc 255.8 ctl 656.0,196.8 68.0x40.0\n\
+                 sep 76.0,274.7 648.0x1.0\n\
+                 row ReclaimIdleMinutes band 52.0,274.7 696.0x95.9 label 318.2 desc 351.7 ctl 377.0,290.7 347.0x44.0\n\
+                 sep 76.0,370.6 648.0x1.0\n\
+                 row ReclaimPrefetch band 52.0,370.6 696.0x95.9 label 414.1 desc 447.6 ctl 656.0,388.6 68.0x40.0\n\
+                 group \"Appearance\" at 52.0,506.5 w 696.0\n\
+                 card 52.0,533.5 696.0x191.8\n\
+                 row DimScale band 52.0,533.5 696.0x95.9 label 577.0 desc 610.5 ctl 409.2,549.5 314.8x44.0\n\
+                 sep 76.0,629.5 648.0x1.0\n\
+                 row CircledWide band 52.0,629.5 696.0x95.9 label 673.0 desc 706.5 ctl 656.0,647.5 68.0x40.0\n\
+                 group \"Claude Code\" at 52.0,765.4 w 696.0\n\
+                 card 52.0,792.4 696.0x95.9\n\
+                 row CcStatuslineHook band 52.0,792.4 696.0x95.9 label 835.9 desc 869.4 ctl 656.0,810.4 68.0x40.0\n\
+                 group \"Scrolling\" at 52.0,928.3 w 696.0\n\
+                 card 52.0,955.3 696.0x95.9\n\
+                 row ScrollFactor band 52.0,955.3 696.0x95.9 label 998.8 desc 1032.3 ctl 396.0,971.3 328.0x44.0\n\
+                 footer base 1092.2\n"
             );
         });
     }
@@ -408,7 +408,7 @@ mod settings_modal {
                     drew += 1;
                     let r = match slot {
                         Slot::Card { rect } => rect,
-                        Slot::Separator { rect } => rect,
+                        Slot::Separator { card, y } => row_separator_rect(card, y),
                         Slot::Row { band, .. } => band,
                         _ => return,
                     };

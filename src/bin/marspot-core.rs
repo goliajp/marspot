@@ -3975,6 +3975,8 @@ struct WindowState {
     /// How far the settings panel's content is pushed up inside its
     /// rect.  Only ever nonzero on a window too short to show it whole.
     settings_modal_scroll: f64,
+    /// What the pointer is on in the settings panel.
+    settings_modal_hover: marspot::ui::components::settings_modal::Hover,
     ime_preedit: String,
     /// Window physical dims, updated by Resize frames.
     w_phys: f64,
@@ -4063,6 +4065,7 @@ impl WindowState {
             cc_usage_modal: None,
             settings_modal_open: false,
             settings_modal_scroll: 0.0,
+            settings_modal_hover: Default::default(),
             drop_preview: None,
             ime_preedit: String::new(),
             w_phys,
@@ -7377,6 +7380,7 @@ impl CoreApp {
     fn toggle_settings_modal(&mut self, wi: usize) {
         win!(self, wi).settings_modal_open = !win!(self, wi).settings_modal_open;
         win!(self, wi).settings_modal_scroll = 0.0;
+        win!(self, wi).settings_modal_hover = Default::default();
         if win!(self, wi).settings_modal_open {
             // Pick up anything edited by hand since the last look, so
             // the panel never shows a value the file disagrees with.
@@ -7453,15 +7457,19 @@ impl CoreApp {
             win!(self, wi).h_phys,
             win!(self, wi).layout.top_inset,
         );
-        let settings = marspot::settings::get();
-        let font = self.renderer.font_mut();
-        let mut measure = |s: &str, pt: f64, weight: u16| {
-            font.measure_ui_text_at_size(
-                s, weight, marspot::font_shape::ShapeOptions::default(), pt,
-            )
-        };
+        let mut measure = marspot::ui::components::controls::font_measure(self.renderer.font_mut());
         marspot::ui::components::settings_modal::panel_rect(
-            w_phys, h_phys, &settings, &mut measure, top_inset,
+            w_phys, h_phys, &marspot::settings::get(), &mut measure, top_inset,
+        )
+    }
+
+    /// What `(x, y)` is on in the open settings panel.
+    fn settings_hover_at(&mut self, wi: usize, x: f64, y: f64) -> marspot::ui::components::settings_modal::Hover {
+        let rect = self.settings_modal_rect(wi);
+        let scroll = win!(self, wi).settings_modal_scroll;
+        let mut measure = marspot::ui::components::controls::font_measure(self.renderer.font_mut());
+        marspot::ui::components::settings_modal::hover_at(
+            rect, scroll, &marspot::settings::get(), &mut measure, x, y,
         )
     }
 
@@ -8003,6 +8011,7 @@ impl CoreApp {
         let chrome_owns_pointer = {
             let w = &win!(self, wi);
             w.context_menu.is_some()
+                || w.settings_modal_open
                 || w.process_panel
                     .as_ref()
                     .is_some_and(|p| p.modal_rect.contains(x_phys, y_phys))
@@ -8027,6 +8036,13 @@ impl CoreApp {
             return;
         }
 
+        if win!(self, wi).settings_modal_open {
+            let on = self.settings_hover_at(wi, x_phys, y_phys);
+            if on != win!(self, wi).settings_modal_hover {
+                win!(self, wi).settings_modal_hover = on;
+                win!(self, wi).needs_render = true;
+            }
+        }
         // Reveal the traffic-light glyphs while the cursor is anywhere
         // in the panel's title bar, matching the system's affordance.
         let w = &mut win!(self, wi);
@@ -8289,28 +8305,14 @@ impl CoreApp {
             return;
         }
         // Settings panel: hit-test its controls, swallow anything else
-        // inside the frame, close on a click outside.
+        // inside the frame, close on its close button or a click
+        // outside.
         if win!(self, wi).settings_modal_open {
-            let rect = self.settings_modal_rect(wi);
-            if !rect.contains(x_phys, y_phys) {
+            use marspot::ui::components::settings_modal::Hover;
+            let on = self.settings_hover_at(wi, x_phys, y_phys);
+            if on == Hover::Close || !self.settings_modal_rect(wi).contains(x_phys, y_phys) {
                 win!(self, wi).settings_modal_open = false;
-                win!(self, wi).needs_render = true;
-                return;
-            }
-            let cur_settings = marspot::settings::get();
-            let scroll = win!(self, wi).settings_modal_scroll;
-            let hit = {
-                let font = self.renderer.font_mut();
-                let mut measure = |s: &str, pt: f64, weight: u16| {
-                    font.measure_ui_text_at_size(
-                        s, weight, marspot::font_shape::ShapeOptions::default(), pt,
-                    )
-                };
-                marspot::ui::components::settings_modal::hit_test(
-                    rect, scroll, &cur_settings, &mut measure, x_phys, y_phys,
-                )
-            };
-            if let Some((row, seg)) = hit {
+            } else if let Hover::Control(row, seg) = on {
                 let cur = marspot::settings::get();
                 if let Some(next) = row.apply(&cur, seg) {
                     // Write, then adopt.  If the disk write fails the
@@ -9030,15 +9032,9 @@ impl CoreApp {
         // would otherwise be unreachable.
         if win!(self, wi).settings_modal_open {
             let rect = self.settings_modal_rect(wi);
-            let settings = marspot::settings::get();
-            let font = self.renderer.font_mut();
-            let mut measure = |s: &str, pt: f64, weight: u16| {
-                font.measure_ui_text_at_size(
-                    s, weight, marspot::font_shape::ShapeOptions::default(), pt,
-                )
-            };
+            let mut measure = marspot::ui::components::controls::font_measure(self.renderer.font_mut());
             let max = marspot::ui::components::settings_modal::max_scroll(
-                rect, &settings, &mut measure,
+                rect, &marspot::settings::get(), &mut measure,
             );
             let y = (win!(self, wi).settings_modal_scroll + dy_phys).clamp(0.0, max);
             if y != win!(self, wi).settings_modal_scroll {
@@ -9640,6 +9636,7 @@ impl CoreApp {
                 scroll: win!(self, wi).settings_modal_scroll,
                 settings: (*marspot::settings::get()).clone(),
                 path: marspot::settings::path().display().to_string(),
+                hover: win!(self, wi).settings_modal_hover,
             })
         } else {
             None

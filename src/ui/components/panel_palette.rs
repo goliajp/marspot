@@ -10,6 +10,7 @@
 //! Every colour is a theme token.  The only local decisions are which
 //! token plays which role.
 
+use crate::ui::theme::spec;
 use crate::ui::theme::token::color;
 /// Primary — account names, headings, percentages.
 pub fn fg() -> [f32; 4] { color::FG.to_rgba_f32() }
@@ -60,7 +61,7 @@ pub fn grid() -> [f32; 4] { [0.62, 0.66, 0.74, 0.14] }
 /// solid block competing with the bars.
 pub fn chip_bg(severity: u8) -> [f32; 4] {
     let mut c = severity_color(severity);
-    c[3] = 0.16;
+    c[3] = spec::control::CHIP_FILL_ALPHA;
     c
 }
 
@@ -73,3 +74,42 @@ pub fn severity_color(severity: u8) -> [f32; 4] {
         _ => danger(),
     }
 }
+
+/// No colour at all — the border of something that has none.
+pub fn none() -> [f32; 4] { [0.0; 4] }
+/// `c` at opacity `alpha`.
+pub fn with_alpha(mut c: [f32; 4], alpha: f32) -> [f32; 4] {
+    c[3] = alpha;
+    c
+}
+/// A panel's own surface and the line around it.
+pub fn frame_bg() -> [f32; 4] { crate::ui::components::modal_frame::MODAL_FRAME_BG }
+pub fn frame_border() -> [f32; 4] { crate::ui::components::modal_frame::MODAL_FRAME_BORDER }
+/// What the rest of the window is covered with while a panel is open.
+pub fn backdrop() -> [f32; 4] {
+    with_alpha(color::SHADOW.to_rgba_f32(), spec::panel::BACKDROP_ALPHA)
+}
+/// Selected, on, primary.  The one colour that means "this one";
+/// `ok` / `warn` / `danger` say how something is doing and are never
+/// used for it.
+pub fn accent() -> [f32; 4] { color::BG_SELECTED.to_rgba_f32() }
+pub fn accent_hover() -> [f32; 4] { hover(accent()) }
+/// A fill under the pointer: the same colour, a step towards white.
+pub fn hover(c: [f32; 4]) -> [f32; 4] {
+    let k = spec::control::HOVER_LIGHTEN;
+    [c[0] + (1.0 - c[0]) * k, c[1] + (1.0 - c[1]) * k, c[2] + (1.0 - c[2]) * k, c[3]]
+}
+/// The label of a control that cannot be used.
+pub fn disabled_fg() -> [f32; 4] { color::FG_DISABLED.to_rgba_f32() }
+/// A whole control that cannot be used, where it is drawn rather than
+/// written: the same colours at reduced opacity.
+pub fn faded(c: [f32; 4]) -> [f32; 4] {
+    with_alpha(c, c[3] * spec::control::DISABLED_ALPHA)
+}
+/// Behind the header's close button while the pointer is on it.
+pub fn close_hover_bg() -> [f32; 4] { color::SURFACE_4.to_rgba_f32() }
+/// A table row under the pointer, and the selected one.
+pub fn row_hover() -> [f32; 4] { color::BG_HOVER.to_rgba_f32() }
+pub fn row_selected() -> [f32; 4] { with_alpha(accent(), spec::table::SELECTED_ALPHA) }
+/// Behind the × of a danger icon button at rest.
+pub fn danger_rest_bg() -> [f32; 4] { with_alpha(danger(), spec::control::DANGER_REST_ALPHA) }
