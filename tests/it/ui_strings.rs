@@ -28,7 +28,7 @@ fn every_message_has_text() {
 /// touching either fails here.
 #[test]
 fn every_message_is_listed() {
-    const EXPECTED: usize = 22;
+    const EXPECTED: usize = 58;
     assert_eq!(
         ALL.len(),
         EXPECTED,

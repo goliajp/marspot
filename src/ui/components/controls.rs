@@ -358,6 +358,29 @@ pub fn paint_chip(p: &mut ViewPainter, rect: Rect, label: &str, severity: u8) {
     );
 }
 
+// ─── Key cap ────────────────────────────────────────────────────
+
+/// `(width, height)` of a key cap holding `label` — a chord such as
+/// `⇧⌘L`.  Set in the terminal's font, where every glyph is a whole
+/// number of cells wide, so the cap is sized from the cell.
+pub fn keycap_size(label: &str, cell_w: f64, cell_h: f64) -> (f64, f64) {
+    let cells: usize = label.chars().map(|ch| crate::grid::char_width(ch).max(1) as usize).sum();
+    (cells as f64 * cell_w + 2.0 * spec::px(c::KEYCAP_PAD_X), cell_h + 2.0 * spec::px(c::KEYCAP_PAD_Y))
+}
+
+pub fn paint_keycap(p: &mut ViewPainter, rect: Rect, label: &str) {
+    fill(p, rect, palette::keycap_bg(), c::KEYCAP_RADIUS);
+    paint_keycap_text(p, rect, label);
+}
+
+/// A key cap's glyphs with no cap behind them — what joins two caps,
+/// on their line.
+pub fn paint_keycap_text(p: &mut ViewPainter, rect: Rect, label: &str) {
+    let x = rect.x + spec::px(c::KEYCAP_PAD_X);
+    let baseline = rect.y_top + spec::px(c::KEYCAP_PAD_Y) + p.ascent as f64;
+    p.text(x as f32, baseline as f32, label, palette::fg_muted());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,6 +466,14 @@ mod tests {
         assert_eq!(r.hit(r.plus.x + 1.0, mid), Some(StepperPart::Plus));
         assert_eq!(r.hit(r.value.x + 1.0, mid), None, "the value is not a button");
         assert_eq!(r.hit(r.minus.x + 1.0, 30.0 + h + 1.0), None);
+    }
+
+    #[test]
+    fn controls_keycap_is_its_glyphs_plus_its_padding() {
+        let (w, h) = keycap_size("⇧⌘L", 10.0, 20.0);
+        assert_eq!(w, 30.0 + 2.0 * spec::px(c::KEYCAP_PAD_X));
+        assert_eq!(h, 20.0 + 2.0 * spec::px(c::KEYCAP_PAD_Y));
+        assert_eq!(keycap_size("Esc", 10.0, 20.0).0 - keycap_size("⌘W", 10.0, 20.0).0, 10.0);
     }
 
     #[test]

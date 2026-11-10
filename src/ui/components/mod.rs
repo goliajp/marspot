@@ -15,6 +15,8 @@ pub mod panel_script;
 pub mod surface_stack;
 pub mod settings_modal;
 pub mod settings_paint;
+pub mod shortcuts_panel;
+pub mod shortcuts_paint;
 pub mod scroll_view;
 pub mod process_panel;
 pub mod process_panel_paint;

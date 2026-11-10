@@ -35,11 +35,14 @@ pub enum SurfaceKind {
     Layout,
     Processes,
     Accounts,
+    /// The keyboard reference.  It has no toolbar button: a key and
+    /// the Help menu open it.
+    Shortcuts,
 }
 
 impl SurfaceKind {
-    pub const PANELS: [SurfaceKind; 4] =
-        [Self::Settings, Self::Layout, Self::Processes, Self::Accounts];
+    pub const PANELS: [SurfaceKind; 5] =
+        [Self::Settings, Self::Layout, Self::Processes, Self::Accounts, Self::Shortcuts];
 
     /// The name the log knows it by.
     pub fn name(self) -> &'static str {
@@ -48,6 +51,7 @@ impl SurfaceKind {
             Self::Layout => "layout",
             Self::Processes => "process",
             Self::Accounts => "accounts",
+            Self::Shortcuts => "shortcuts",
         }
     }
 }
