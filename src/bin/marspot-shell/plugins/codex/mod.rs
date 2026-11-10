@@ -32,7 +32,6 @@ use rollout::{codex_home, read_model_and_effort, RolloutIndex};
 
 pub(crate) use pane::{argv_thread_id, home_of, profile_dirs};
 pub(crate) use rollout::newest_rollout_for_cwd;
-pub(crate) use update::installed_cli;
 
 /// Is this descendant the `codex` CLI?
 ///
