@@ -11,6 +11,9 @@
 #   bin/test-remote.sh                      # whole suite (default host=mini)
 #   bin/test-remote.sh -E 'test(idle)'      # args pass through to nextest
 #   HOST=other-mini bin/test-remote.sh
+#   MARSPOT_FONT_SNAPSHOT=1 bin/test-remote.sh -E 'test(panel_snapshot)'
+#                                           # record baselines on the host;
+#                                           # fetch them with scp afterwards
 #
 # Contract:
 #   - exclusive  : mkdir lock locally (atomic; macOS has no flock(1)),
@@ -106,6 +109,7 @@ set +e
 # group that has since been reused.
 ssh "$HOST" "echo \$\$ > $REMOTE_PIDF; cd ~/$REMOTE_DIR && \
   MARSPOT_TEST_JOBS=${MARSPOT_TEST_JOBS:-14} \
+  ${MARSPOT_FONT_SNAPSHOT:+MARSPOT_FONT_SNAPSHOT=$(printf '%q' "$MARSPOT_FONT_SNAPSHOT")} \
   /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT bin/_bounded.sh $TIMEOUT bin/test.sh$args; \
   rc=\$?; rm -f $REMOTE_PIDF; exit \$rc" </dev/null
 rc=$?

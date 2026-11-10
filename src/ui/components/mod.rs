@@ -6,6 +6,8 @@
 
 pub mod cc_usage_modal;
 pub mod cc_usage_paint;
+pub mod controls;
+pub mod panel_chrome;
 pub mod panel_palette;
 pub mod settings_modal;
 pub mod settings_paint;
@@ -28,10 +30,13 @@ pub mod layout_modal_paint;
 pub mod context_menu;
 pub mod context_menu_paint;
 pub mod dev_panel;
+#[cfg(test)]
+mod panel_snapshot_tests;
 
 pub use tab_strip::TabStrip;
 pub use scroll_view::ScrollView;
 pub use modal_frame::{ModalFrame, ModalLayoutSpec};
+pub use panel_chrome::PanelChrome;
 pub use search_overlay::{SearchOverlayParams, paint_search_overlay};
 pub use panel::Panel;
 pub use text_input::{TextInput, TextInputStyle};
