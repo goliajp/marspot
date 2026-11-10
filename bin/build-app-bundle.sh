@@ -15,7 +15,8 @@
 #   bin/build-app-bundle.sh --out "$HOME/.local/Marspot.app"   # bin-dir defaults
 #
 # Options:
-#   --bin-dir DIR   where marspot-shell / marspot-core / marspot-session are
+#   --bin-dir DIR   where marspot-shell / marspot-core / marspot-session /
+#                   marspot-peer are
 #   --out PATH      the .app to create or refresh
 #   --version V     override the product version (default: read from Cargo.toml)
 #   --scaffold-only write the plist and icon but do NOT place binaries
@@ -39,7 +40,7 @@ while (( $# )); do
     --out)     OUT="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
     --scaffold-only) SCAFFOLD_ONLY=1; shift ;;
-    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -55,7 +56,10 @@ if [[ -z "$VERSION" ]]; then
 fi
 [[ -n "$VERSION" ]] || { echo "could not read the product version from Cargo.toml" >&2; exit 1; }
 
-BINARIES=(marspot-shell marspot-core marspot-session)
+# marspot-peer is not a layer of the app: agent sessions run it to
+# message each other.  It ships here so a machine that has only the
+# app has it, and the shell looks beside itself for it first.
+BINARIES=(marspot-shell marspot-core marspot-session marspot-peer)
 if (( SCAFFOLD_ONLY == 0 )); then
   for b in "${BINARIES[@]}"; do
     [[ -f "$BIN_DIR/$b" ]] || { echo "missing $BIN_DIR/$b — build first" >&2; exit 1; }

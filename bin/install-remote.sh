@@ -50,7 +50,7 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
-for b in marspot-shell marspot-core marspot-session; do
+for b in marspot-shell marspot-core marspot-session marspot-peer; do
   install -m 0755 "$TARGET/$b" "$STAGE/Contents/MacOS/$b"
   xattr -c "$STAGE/Contents/MacOS/$b" 2>/dev/null || true
   codesign -f -s "$SIGN_ID" --timestamp=none "$STAGE/Contents/MacOS/$b" >/dev/null
@@ -63,7 +63,7 @@ codesign -v --deep --strict "$STAGE"
 # grep exits at the first match, codesign takes SIGPIPE writing into a
 # closed pipe, and under `set -o pipefail` the whole pipeline reads as
 # a failure — so a perfectly signed binary gets rejected.
-for b in marspot-shell marspot-core marspot-session; do
+for b in marspot-shell marspot-core marspot-session marspot-peer; do
   info=$(codesign -dv "$STAGE/Contents/MacOS/$b" 2>&1 || true)
   case "$info" in
     *TeamIdentifier=*) ;;

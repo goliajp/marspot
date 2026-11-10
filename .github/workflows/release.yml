@@ -196,7 +196,7 @@ jobs:
           fi
           # Inside out: nested binaries first, the bundle last, or the
           # outer signature is invalidated by signing what it covers.
-          for b in marspot-core marspot-session marspot-shell; do
+          for b in marspot-peer marspot-core marspot-session marspot-shell; do
             codesign --force --timestamp --options runtime \
               --sign "$CODESIGN_IDENTITY" "$app/Contents/MacOS/$b"
           done
