@@ -5,6 +5,7 @@
 use super::*;
 
 const HEADS_UP_FILE: &str = "heads_up.tsv";
+const REFUSED_FILE: &str = "refused.tsv";
 
 impl ClaudecodePlugin {
     /// Every pane sitting on an account that cannot answer moves to
@@ -34,7 +35,7 @@ impl ClaudecodePlugin {
         // read by the worker, so this sweep touches no profile on disk
         let profiles: Vec<u8> = result.profiles.iter().map(|(n, _)| *n).collect();
         let email = |p: u8| result.profiles.iter().find(|(n, _)| *n == p).and_then(|(_, e)| e.clone());
-        let mut rooms = quota::rooms_for(&profiles, &usage.accounts, email, rooms::unix_now());
+        let mut rooms = quota::rooms_for(&profiles, &usage.accounts, &email, rooms::unix_now());
         for meta in result.new_meta.values() {
             let Some(r) = meta.refused_at.as_ref() else { continue };
             if self.refused.note(meta.profile_num, r) {
@@ -52,7 +53,9 @@ impl ClaudecodePlugin {
                 );
             }
         }
-        self.refused.mark(&mut rooms);
+        let resets = seen::resets_for(&profiles, &usage.accounts, email);
+        self.refused.mark(&mut rooms, &resets, rooms::unix_now());
+        self.persist_refused(host);
         // Whether a profile is out is a question about a pane, not
         // about a profile: a pane pinned to a model can be shut out of
         // an account whose week is fine, and a pane that has just been
@@ -150,6 +153,21 @@ impl ClaudecodePlugin {
         let Ok(dir) = host.state_dir() else { return };
         if let Ok(text) = fs::read_to_string(dir.join(HEADS_UP_FILE)) {
             self.heads_up = heads_up::Ledger::decode(&text);
+        }
+    }
+
+    pub(super) fn load_refused(&mut self, host: &dyn PluginHost) {
+        let Ok(dir) = host.state_dir() else { return };
+        if let Ok(text) = fs::read_to_string(dir.join(REFUSED_FILE)) {
+            self.refused = seen::Seen::decode(&text);
+        }
+    }
+
+    fn persist_refused(&mut self, host: &dyn PluginHost) {
+        let Some(text) = self.refused.changed() else { return };
+        let Ok(dir) = host.state_dir() else { return };
+        if let Err(e) = fs::write(dir.join(REFUSED_FILE), text) {
+            host.log(LogLevel::Warn, "quota.refused_persist_failed", &format!("{e}"));
         }
     }
 

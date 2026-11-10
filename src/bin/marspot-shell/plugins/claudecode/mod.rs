@@ -25,6 +25,7 @@ mod rebalance;
 mod switching;
 mod heads_up;
 mod refusal;
+mod seen;
 mod model;
 mod statusline;
 mod settings_hook;
@@ -232,7 +233,7 @@ pub struct ClaudecodePlugin {
     /// confirmed, kept so the reason is logged once, not every pass.
     unjudged: std::collections::HashSet<u64>,
     /// What panes have been told about their accounts.
-    refused: refusal::Seen,
+    refused: seen::Seen,
 
     /// Panes whose claude has been reclaimed and that are waiting for a
     /// keypress.  Persisted (`dormant.tsv`) because an L1 self-execv
@@ -531,7 +532,7 @@ impl ClaudecodePlugin {
             rebalance_said: HashMap::new(),
             heads_up: heads_up::Ledger::default(),
             unjudged: std::collections::HashSet::new(),
-            refused: refusal::Seen::default(),
+            refused: seen::Seen::default(),
             dormant: Vec::new(),
             armed: std::collections::HashSet::new(),
             held: HashMap::new(),
@@ -1312,7 +1313,8 @@ impl ClaudecodePlugin {
                     |p| quota::profile_email(home, p),
                     rooms::unix_now(),
                 );
-                self.refused.mark(&mut rooms);
+                let resets = seen::resets_for(&profiles, &u.accounts, |p| quota::profile_email(home, p));
+                self.refused.mark(&mut rooms, &resets, rooms::unix_now());
                 host.log(
                     LogLevel::Info,
                     "cycle.rooms",
@@ -1886,6 +1888,7 @@ impl Plugin for ClaudecodePlugin {
         // scrollback and its uuid; the next scan re-arms the wake path.
         self.load_dormant(host);
         self.load_heads_up(host);
+        self.load_refused(host);
         // Resolve ~/.claude/projects.  Without HOME there's nothing
         // to do — disable cleanly via a soft Err.
         let home = std::env::var_os("HOME").ok_or_else(|| {
@@ -2622,7 +2625,7 @@ mod tests {
         let mut on_p2 = pane_on_p1(&home, "u-78");
         on_p2.profile_num = 2;
         on_p2.config_dir = Some(home.join(".claude-profile-2").to_string_lossy().into_owned());
-        on_p2.refused_at = Some(quota::Refusal { at: 1_000, model: String::new(), logged_out: true });
+        on_p2.refused_at = Some(quota::Refusal { at: 1_000, model: String::new(), logged_out: true, window: quota::Window::Week });
         let mut plugin = stranded_plugin(on_p2, 78);
         plugin.last_meta.insert(79, pane_on_p1(&home, "u-79"));
         let mut result = scan_of(78, CcActivity::AwaitingUser);
@@ -6682,7 +6685,7 @@ mod tests {
     #[test]
     fn only_a_refusal_after_this_claude_started_counts() {
         let started = SystemTime::UNIX_EPOCH + Duration::from_secs(1_791_002_529);
-        let at = |at| Some(quota::Refusal { at, model: "fable".into(), logged_out: false });
+        let at = |at| Some(quota::Refusal { at, model: "fable".into(), logged_out: false, window: quota::Window::Week });
         assert_eq!(refused_since(at(1_790_966_543), started), None, "the day before");
         assert_eq!(refused_since(at(1_791_002_600), started), at(1_791_002_600));
         assert_eq!(refused_since(None, started), None);

@@ -22,44 +22,8 @@
 
 use std::time::Duration;
 
+pub(super) use super::refusal::{Refusal, Window};
 
-/// A pane was told by the API that it had run out.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct Refusal {
-    /// Unix seconds, from the record's own timestamp.
-    pub at: i64,
-    /// The model the refusal names, as `short_model` spells it, or
-    /// empty when it could not be read.
-    ///
-    /// Every refusal the CLI writes names one: "You've reached your
-    /// Fable limit." or "Opus 5.5 requires usage credits.". It says
-    /// nothing about any other model on the same account: on
-    /// 2026-10-03 a Fable refusal moved a pane that had just been
-    /// switched to Opus, onto an account where it ran out again.
-    pub model: String,
-    /// The account could not log in at all, rather than being out of
-    /// quota.
-    ///
-    /// The feed cannot tell a logged-out account from an idle one:
-    /// both show as an access token that has expired and was never
-    /// refreshed. Only a claude that tried to use it finds out, and
-    /// that is the only place this is learnt. It names no model.
-    pub logged_out: bool,
-}
-
-impl Refusal {
-    /// Does this refusal shut out a pane working in `model`?
-    ///
-    /// One that names no model covers every pane. One that names a
-    /// model covers only panes on it: with no model given, nothing is
-    /// assumed, Fable included.
-    pub(super) fn applies_to(&self, model: Option<&str>) -> bool {
-        if self.model.is_empty() {
-            return true;
-        }
-        model.is_some_and(|m| same_model(&m.to_ascii_lowercase(), &self.model))
-    }
-}
 
 /// What is known about a profile when choosing.
 #[derive(Debug, Clone, PartialEq)]
@@ -514,7 +478,7 @@ mod tests {
     }
 
     fn fable_refusal(at: i64) -> Refusal {
-        Refusal { at, model: "fable".into(), logged_out: false }
+        Refusal { at, model: "fable".into(), logged_out: false, window: Window::Week }
     }
 
     /// The pane had just been switched to Opus when the Fable refusal
@@ -527,10 +491,10 @@ mod tests {
         assert!(r.refused_for_now(Some("fable-5-1"), Some(&fable)));
         assert!(!r.refused_for_now(Some("opus-5-5"), Some(&fable)), "an Opus pane was not refused");
         assert!(!r.refused_for_now(None, Some(&fable)), "no model given: Fable is not assumed");
-        let credits = Refusal { at: 2_000, model: "opus-5-5".into(), logged_out: false };
+        let credits = Refusal { at: 2_000, model: "opus-5-5".into(), logged_out: false, window: Window::Week };
         assert!(r.refused_for_now(Some("opus-5-5"), Some(&credits)));
         assert!(!r.refused_for_now(Some("fable-5-1"), Some(&credits)));
-        let unnamed = Refusal { at: 2_000, model: String::new(), logged_out: false };
+        let unnamed = Refusal { at: 2_000, model: String::new(), logged_out: false, window: Window::Week };
         assert!(r.refused_for_now(Some("opus-5-5"), Some(&unnamed)), "unread is taken as covering it");
     }
 
