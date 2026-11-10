@@ -58,12 +58,12 @@ use crate::ui::components::process_panel::ProcessPanelRender;
 use crate::ui::components::cc_usage_modal::CcUsageRender;
 use crate::ui::components::settings_paint::SettingsRender;
 use crate::ui::components::layout_modal_paint::LayoutModalRender;
-use crate::ui::components::context_menu_paint::ContextMenuRender;
+use crate::ui::components::{chrome_hover::ChromeHover, context_menu_paint::ContextMenuRender};
 use crate::render::{SessionView, SidebarEntry};
 #[cfg(test)]
 use crate::render::HighlightSpan;
 
-use crate::frame_build::palette::*;
+use crate::ui::theme::terminal::*;
 use crate::frame_build::frame::build_instances;
 use crate::frame_build::canvas_runs::{build_canvas_runs, CanvasRunKind};
 use crate::frame_build::pane_cache::PaneInstanceCache;
@@ -499,11 +499,10 @@ pub struct MetalRenderer {
     /// Window-level focus.  Mirror of the AppKit renderer's flag —
     /// drives whether the focused-session cursor is filled or hollow.
     window_focused: bool,
-    /// Hovered chrome icon button, if any.  Encoded as u8 to stay
-    /// agnostic of the L2-side enum:  0 = sidebar toggle,  1 =
-    /// layout picker,  2 = process-tree panel toggle,  `None` = no
-    /// hover.  Renderer reads this to darken the hovered button's BG.
-    hover_chrome_btn: Option<u8>,
+    /// What the pointer is on in the window's chrome, if anything: a
+    /// toolbar button, a sidebar row or one of the sidebar's buttons.
+    /// The chrome is drawn with that control lit.
+    hover_chrome_btn: Option<ChromeHover>,
     /// F3+1.3 — process-tree panel render data.  `None` = panel
     /// closed (renderer paints nothing).  Pushed by L2 every frame
     /// while the panel is open; cheap because rows are typically
@@ -823,12 +822,9 @@ impl MetalRenderer {
         self.dev_panel_state = state;
     }
 
-    /// L2 — set which chrome icon button (if any) is under the
-    /// cursor.  `None` clears; `Some(0)` = sidebar toggle, `Some(1)`
-    /// = layout picker.  Renderer uses this in `push_layout_chrome`
-    /// to darken the hovered button's BG.  L2's `CoreApp` calls this
-    /// from its `mouse_moved` after a chrome hit-test.
-    pub fn set_hover_chrome_btn(&mut self, h: Option<u8>) {
+    /// What the pointer is on in the window's chrome; `None` clears.
+    /// Set per window right before it is painted.
+    pub fn set_hover_chrome_btn(&mut self, h: Option<ChromeHover>) {
         self.hover_chrome_btn = h;
     }
 

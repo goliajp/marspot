@@ -50,6 +50,23 @@ pub mod color {
     // ─── Effects ──────────────────────────────────────────────
     pub const SHADOW:       Color = Color::rgba(  0,   0,   0, 0.55);
 
+    // ─── Main window ──────────────────────────────────────────
+    // The window is darker than a panel: a panel floats over it.
+    pub const CHROME:       Color = Color::rgba( 10,  13,  19, 1.0);  // sidebar, header, a pane not in use
+    pub const CANVAS:       Color = Color::rgba(  0,   0,   0, 1.0);  // the pane in use
+    // Opaque, unlike DIVIDER: seams are drawn in the pass that does not blend.
+    pub const SEAM:         Color = Color::rgba( 29,  33,  40, 1.0);
+    pub const FOCUS_RING:   Color = Color::rgba(184, 194, 209, 1.0);
+    pub const AGENT:        Color = Color::rgba(217, 120,  87, 1.0);  // an agent's badge on a pane title
+
+    // ─── Terminal marks ───────────────────────────────────────
+    pub const SELECTION:    Color = Color::rgba( 41,  56,  87, 1.0);
+    pub const SEARCH_HIT:   Color = Color::rgba(235, 199,  51, 1.0);
+    pub const IME_BG:       Color = Color::rgba( 26,  33,  46, 1.0);
+    pub const IME_FG:       Color = Color::rgba(204, 219, 235, 1.0);
+    pub const CURSOR_TEXT:  Color = Color::rgba(235, 235, 235, 1.0);
+    pub const LINK:         Color = Color::rgba(102, 178, 242, 1.0);
+
     // ─── Helper hints ────────────────────────────────────────
     pub const HINT:         Color = Color::rgba(130, 140, 156, 1.0);
 

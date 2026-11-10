@@ -55,7 +55,7 @@ pub struct Outline {
 
 impl Outline {
     pub fn none() -> Self {
-        Self { color: [0.0; 4], width: 0.0 }
+        Self { color: crate::ui::components::panel_palette::none(), width: 0.0 }
     }
 }
 

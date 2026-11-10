@@ -22,11 +22,14 @@
 //!   red say how something is doing, never that it is picked.
 //!
 //! Everything is in logical points; [`px`] takes a value to physical
-//! pixels.  The one exception is [`table`], which is measured in
+//! pixels.  The exceptions are [`table`], which is measured in
 //! terminal cells because tabular data is set in the terminal's own
-//! font, where columns line up for free.
+//! font, where columns line up for free, and [`chrome`], the main
+//! window's own chrome, which says what its units are.
 
 use super::PanelText;
+
+pub mod chrome;
 
 /// Physical pixels for `pt` logical points.
 pub fn px(pt: f64) -> f64 {
@@ -254,6 +257,17 @@ mod tests {
             ("card::SEPARATOR_INSET", card::SEPARATOR_INSET),
             ("table::SELECTED_INSET", table::SELECTED_INSET),
             ("control::SEGMENT_GAP", control::SEGMENT_GAP),
+            ("chrome::TOOLBAR_GAP", chrome::TOOLBAR_GAP),
+            ("chrome::VERSION_PAD_RIGHT", chrome::VERSION_PAD_RIGHT),
+            ("chrome::SIDEBAR_ROW_INSET", chrome::SIDEBAR_ROW_INSET),
+            ("chrome::SIDEBAR_PAD_X", chrome::SIDEBAR_PAD_X),
+            ("chrome::SIDEBAR_DOT_GAP", chrome::SIDEBAR_DOT_GAP),
+            ("chrome::SIDEBAR_LABEL_GAP", chrome::SIDEBAR_LABEL_GAP),
+            ("chrome::TITLE_GAP", chrome::TITLE_GAP),
+            ("chrome::POPOVER_ROW_INSET", chrome::POPOVER_ROW_INSET),
+            ("chrome::MENU_DIVIDER_H", chrome::MENU_DIVIDER_H),
+            ("chrome::MENU_PAD_X", chrome::MENU_PAD_X),
+            ("chrome::MENU_PAD_Y", chrome::MENU_PAD_Y),
         ];
         for (name, v) in gaps {
             assert!(space::LADDER.contains(&v), "{name} = {v} is not on the ladder");
@@ -279,6 +293,15 @@ mod tests {
         // The close button and the knob have to fit what holds them.
         const { assert!(header::CLOSE_SIZE < header::H) };
         const { assert!(control::TOGGLE_KNOB < control::TOGGLE_H) };
+        // The window's chrome: what the layout crate defines is what
+        // the spec names, and a control fits what holds it.
+        assert_eq!((chrome::TOOLBAR_BUTTON, chrome::TOOLBAR_GAP), (22.0, 6.0));
+        assert_eq!((chrome::SIDEBAR_ROW_H, chrome::TITLE_H), (22.0, 22.0));
+        assert_eq!((chrome::MENU_ROW_H, chrome::MENU_PAD_X, chrome::MENU_PAD_Y), (26.0, 12.0, 6.0));
+        const { assert!(chrome::TOOLBAR_ICON < chrome::TOOLBAR_BUTTON) };
+        const { assert!(chrome::SIDEBAR_DOT < chrome::SIDEBAR_ROW_H) };
+        // A row's fill is concentric with the menu's own corner.
+        const { assert!(chrome::POPOVER_ROW_RADIUS + chrome::MENU_PAD_Y == chrome::POPOVER_RADIUS) };
         assert_eq!(table::row_h(20.0), 27.0);
         assert_eq!(table::header_h(20.0), 30.0);
     }

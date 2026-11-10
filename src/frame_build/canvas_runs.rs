@@ -5,6 +5,7 @@ use crate::font_cache::FontCache;
 use crate::frame_build::color::{rgba8_of, rgba8_of_f32};
 use crate::frame_build::text_run::{push_text_run_kind, push_text_run_ui_shaped, FontKind};
 use crate::glyph_atlas::GlyphAtlas;
+use crate::ui::components::panel_palette as palette;
 use golia_ui_core::scene::{GlyphInstance, UiRectInstance};
 
 /// Convert a `RectPrim` to a `UiRectInstance` for the ui_rects
@@ -13,7 +14,7 @@ use golia_ui_core::scene::{GlyphInstance, UiRectInstance};
 fn ui_rect_instance_from_rect(r: &crate::ui::core::canvas::RectPrim) -> UiRectInstance {
     let (border_w, border_c) = r.border
         .map(|(w, c)| (w as f32, c.to_rgba_f32()))
-        .unwrap_or((0.0, [0.0; 4]));
+        .unwrap_or((0.0, palette::none()));
     // Intensity once, in the colour's alpha. This used to pass `c.a`
     // here as well, and the fragment multiplies the two -- so a rect
     // asking for a 45% shadow was drawn at 20%. The shader now holds
@@ -21,7 +22,7 @@ fn ui_rect_instance_from_rect(r: &crate::ui::core::canvas::RectPrim) -> UiRectIn
     // rule on the older path.
     let (shadow_blur, shadow_alpha, shadow_color) = r.shadow
         .map(|(blur, _offset, c)| (blur as f32, 1.0f32, c.to_rgba_f32()))
-        .unwrap_or((0.0, 0.0, [0.0; 4]));
+        .unwrap_or((0.0, 0.0, palette::none()));
     let _ = shadow_alpha;
     UiRectInstance {
         origin: [r.x as f32, r.y as f32],

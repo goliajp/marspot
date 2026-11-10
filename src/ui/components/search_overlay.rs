@@ -13,6 +13,8 @@
 use marspot_term::layout::Rect;
 use marspot_term::render::SearchOverlayView;
 use crate::ui::core::{ViewPainter, ViewStyle, Backdrop};
+use crate::ui::theme::spec::{chrome, panel};
+use super::panel_palette as palette;
 use super::{
     Panel, TextInput, TextInputStyle, ListView, ListRow, ListViewStyle,
     Button, ButtonStyle, IconSpec, IconPosition,
@@ -26,18 +28,9 @@ pub struct SearchOverlayParams<'a> {
     pub grid_rows: u16,
 }
 
-// Palette
-const PANEL_BG:        [f32; 4] = [0.13, 0.14, 0.17, 1.0];
-const PANEL_BORDER:    [f32; 4] = [0.30, 0.32, 0.38, 1.0];
-const TEXT_FG:         [f32; 4] = [0.95, 0.96, 0.97, 1.0];
-const DIM_FG:          [f32; 4] = [0.60, 0.63, 0.70, 1.0];
-const ACCENT_FG:       [f32; 4] = [0.40, 0.62, 1.00, 1.0];
-const FOCUSED_BG:      [f32; 4] = [0.18, 0.28, 0.48, 1.0];
-const DIVIDER_FG:      [f32; 4] = [0.22, 0.24, 0.28, 1.0];
-const PANEL_RADIUS_PX: f32 = 10.0;
-const ROW_RADIUS_PX: f32 = 5.0;
-const SHADOW_BLUR_PX: f32 = 18.0;
-const SHADOW_ALPHA: f32 = 0.45;
+// The overlay is framed like a panel (`spec::chrome`'s popover) and
+// laid out in the pane's own cells: it covers whole cells of the grid
+// under it, and its query and hits are terminal text.
 
 pub const OVERLAY_COLS: u16 = 40;
 pub const LIST_MAX_ROWS: u16 = 10;
@@ -75,12 +68,12 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
             h: panel_h as f64,
         },
         ViewStyle {
-            bg: PANEL_BG,
-            border_color: PANEL_BORDER,
-            border_width: 1.0,
-            corner_radius: PANEL_RADIUS_PX,
-            shadow_blur: SHADOW_BLUR_PX,
-            shadow_alpha: SHADOW_ALPHA,
+            bg: palette::frame_bg(),
+            border_color: palette::frame_border(),
+            border_width: panel::BORDER_PX,
+            corner_radius: chrome::px(chrome::POPOVER_RADIUS) as f32,
+            shadow_blur: chrome::px(chrome::POPOVER_SHADOW_BLUR) as f32,
+            shadow_alpha: panel::SHADOW_ALPHA,
             backdrop: Backdrop::None,
             padding: 0.0,
         },
@@ -107,8 +100,8 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
             value: &overlay.query,
             cursor: overlay.query_cursor,
             style: TextInputStyle {
-                fg: TEXT_FG,
-                caret_color: ACCENT_FG,
+                fg: palette::fg(),
+                caret_color: palette::now(),
                 caret_w: 2.0,
                 caret_inset_y: 2.0,
             },
@@ -150,8 +143,8 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
         let aa_x = close_x - aa_gap - aa_w;
         let mut aa_style = ButtonStyle::ghost();
         if overlay.case_sensitive {
-            aa_style.fg = ACCENT_FG;
-            aa_style.fg_hover = ACCENT_FG;
+            aa_style.fg = palette::now();
+            aa_style.fg_hover = palette::now();
         }
         let aa_btn = Button {
             rect: Rect {
@@ -171,7 +164,7 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
             let counter_text = format!("{c}/{t}");
             let counter_w_chars = counter_text.chars().count() as f32;
             let counter_x = aa_x - (counter_w_chars + 1.0) * cell_w;
-            p.text(counter_x, query_baseline, &counter_text, DIM_FG);
+            p.text(counter_x, query_baseline, &counter_text, palette::fg_muted());
         }
 
         // Divider hairline + list rows.
@@ -184,9 +177,9 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
                     w: (panel_w - 2.0 * panel_inner_pad) as f64,
                     h: 1.0,
                 },
-                DIVIDER_FG,
-                0.5,
-                ([0.0, 0.0, 0.0, 0.0], 0.0),
+                palette::separator(),
+                0.0,
+                (palette::none(), 0.0),
             );
             let list_top = divider_y + (panel_inner_pad * 0.5).round();
             let list_h = (grid_bottom - list_top).max(0.0);
@@ -206,11 +199,11 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
                 // with the query text.
                 text_pad_left: panel_inner_pad,
                 style: ListViewStyle {
-                    fg: DIM_FG,
-                    fg_focused: TEXT_FG,
-                    focused_bg: FOCUSED_BG,
-                    focused_radius: ROW_RADIUS_PX,
-                    focused_inset_x: 4.0,
+                    fg: palette::fg_sec(),
+                    fg_focused: palette::fg(),
+                    focused_bg: palette::row_selected(),
+                    focused_radius: chrome::px(chrome::POPOVER_ROW_RADIUS) as f32,
+                    focused_inset_x: chrome::px(chrome::POPOVER_ROW_INSET) as f32,
                 },
             };
             list_view.paint(p);

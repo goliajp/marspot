@@ -2,7 +2,7 @@
 //! them, and the overlays on top.
 
 use crate::font_cache::FontCache;
-use crate::frame_build::chrome::paint_chrome;
+use crate::frame_build::chrome::{paint_chrome, ChromeState};
 use crate::frame_build::pane_cache::{push_panes, PaneInstanceCache};
 use crate::glyph_atlas::GlyphAtlas;
 use crate::layout::Layout;
@@ -10,6 +10,9 @@ use crate::render::{SessionView, SidebarEntry};
 use crate::frame_build::color::rgba8_of_f32;
 use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance, UiRectInstance};
 use crate::ui::components::cc_usage_modal::CcUsageRender;
+use crate::ui::components::chrome_hover::ChromeHover;
+use crate::ui::components::panel_palette as palette;
+use crate::ui::theme::spec::chrome as chrome_spec;
 use crate::ui::components::context_menu_paint::ContextMenuRender;
 use crate::ui::components::layout_modal_paint::LayoutModalRender;
 use crate::ui::components::process_panel::ProcessPanelRender;
@@ -33,7 +36,7 @@ pub(crate) fn build_instances(
     sidebar: &[SidebarEntry],
     focused_idx: usize,
     window_focused: bool,
-    hover_chrome_btn: Option<u8>,
+    chrome_hover: Option<ChromeHover>,
     process_panel: Option<&ProcessPanelRender>,
     cc_usage: Option<&CcUsageRender>,
     settings_panel: Option<&SettingsRender>,
@@ -85,8 +88,21 @@ pub(crate) fn build_instances(
 
     // Everything after the panes in the main layers goes through one
     // painter: seams and focus ring, empty seats, sidebar, toolbar,
-    // close and add buttons, version label.
+    // version label.
     {
+        // A toolbar button reads as on while what it opens is open.
+        // A panel lies over the sidebar, so under one the pointer is
+        // on the panel, not on a row it happens to cover.
+        let on = [
+            layout.sidebar_w > 0.0,
+            layout_modal_state.is_some(),
+            process_panel.is_some(),
+            false,
+            cc_usage.is_some(),
+            settings_panel.is_some(),
+        ];
+        let panel_open = on[1..].contains(&true) || context_menu_state.is_some();
+        let hover = chrome_hover.filter(|h| !panel_open || h.on_toolbar());
         let mut painter = ViewPainter {
             cell_w, cell_h, ascent,
             atlas_w: atlas_w_f, atlas_h: atlas_h_f,
@@ -94,7 +110,7 @@ pub(crate) fn build_instances(
             font, atlas, cells, glyphs, ui_rects,
         };
         paint_chrome(
-            &mut painter, layout, views.len(), sidebar, focused_idx, hover_chrome_btn,
+            &mut painter, layout, views.len(), sidebar, focused_idx, ChromeState { hover, on },
             overlay_ui_rects,
         );
     }
@@ -105,12 +121,8 @@ pub(crate) fn build_instances(
         font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
     );
 
-    // F3+9 / P2c — right-click ContextMenu render is NOT routed
-    // through the shared overlay scratches; it builds a `Canvas`
-    // in render_layout AFTER the main encode_passes and uses
-    // `encode_canvas` to draw in submission-order.  The variable
-    // is consumed there.
-    let _ = context_menu_state;
+    // The context menu itself is not drawn here: the renderer builds
+    // its canvas after the main passes, so it lands on top of them.
 
     stats
 }
@@ -126,19 +138,14 @@ fn push_drop_preview(
     // content it previews.  What lights up is exactly what release
     // does.
     if let Some(((gx, gy, gw, gh), outline_only)) = drop_preview {
-        let accent = crate::ui::theme::token::color::ACCENT.to_rgba_f32();
-        let fill = if outline_only {
-            [0.0, 0.0, 0.0, 0.0]
-        } else {
-            [accent[0] * 0.25, accent[1] * 0.25, accent[2] * 0.25, 0.25]
-        };
+        let fill = if outline_only { palette::none() } else { palette::drop_target_fill() };
         overlay_ui_rects.push(UiRectInstance {
             origin: [gx as f32, gy as f32],
             size: [gw as f32, gh as f32],
             fill: rgba8_of_f32(fill),
-            border: rgba8_of_f32(accent),
-            radius: 4.0,
-            border_width: 2.0,
+            border: rgba8_of_f32(palette::drop_target_border()),
+            radius: chrome_spec::DROP_TARGET_RADIUS as f32,
+            border_width: chrome_spec::DROP_TARGET_BORDER as f32,
             shadow_offset: [0.0, 0.0],
             shadow_color: golia_ui_core::Rgba8::TRANSPARENT,
             shadow_blur: 0.0,
@@ -180,7 +187,7 @@ fn push_scrims(
         overlay_ui_rects.push(UiRectInstance {
             origin: [rect.x as f32, rect.y_top as f32],
             size: [rect.w as f32, rect.h as f32],
-            fill: rgba8_of_f32([0.0, 0.0, 0.0, alpha]),
+            fill: rgba8_of_f32(palette::scrim(alpha)),
             border: golia_ui_core::Rgba8::TRANSPARENT,
             radius: 0.0,
             border_width: 0.0,

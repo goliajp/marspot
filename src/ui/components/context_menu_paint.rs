@@ -57,7 +57,8 @@ pub(crate) fn build_context_menu_canvas(
     chrome_cell_h: f32,
 ) -> crate::ui::core::Canvas {
     use crate::ui::core::{Canvas, Color, Length, Pt, ParentRect};
-    use crate::ui::components::{ContextMenu, MenuItem};
+    use crate::ui::components::{panel_palette as palette, ContextMenu, MenuItem};
+    use crate::ui::theme::spec::chrome;
 
     let menu_items: Vec<MenuItem> = state
         .items
@@ -79,22 +80,20 @@ pub(crate) fn build_context_menu_canvas(
 
     let mut canvas = Canvas::new(state.scale, ParentRect::window(window_w, window_h));
 
-    // ── Style tokens (will move to a theme module in P3) ──
-    let bg          = Color::rgba(33, 36, 43, 1.0);     // MODAL_FRAME_BG
-    let border      = Color::rgba(56, 60, 70, 1.0);     // approx MODAL_FRAME_BORDER
-    let shadow      = Color::rgba(0, 0, 0, 0.45);
-    let label_fg    = Color::rgba(217, 224, 235, 1.0);
-    let label_disab = Color::rgba(115, 122, 133, 1.0);
-    let hint_fg     = Color::rgba(140, 153, 168, 1.0);
-    let hover_bg    = Color::rgba(51, 107, 173, 1.0);
-    // Web `border: 1px solid` semantics: 1pt thick + alpha tuned for
-    // clear visibility on the menu BG.  alpha=0.5 lands the rendered
-    // pixel ≈ rgb(144, 145, 149) over bg rgb(33, 36, 43) — the kind
-    // of contrast Chrome / Safari show for `rgba(255,255,255,0.5)`
-    // on a near-black panel.  Earlier 0.22 was a misjudgement (line
-    // showed but user reported "几乎看不清").
-    let divider_c   = Color::rgba(255, 255, 255, 0.50);
-    let side_pad_pt = 12.0_f64;
+    // A panel's frame at the window's density, and a table's rows:
+    // the row under the pointer takes the hover role, as it does on a
+    // card.  The divider is the frame's own border colour — the
+    // fainter separator between a card's rows was reported as barely
+    // visible here.
+    let bg          = Color::from_rgba_f32(palette::frame_bg());
+    let border      = Color::from_rgba_f32(palette::frame_border());
+    let shadow      = Color::from_rgba_f32(palette::frame_shadow());
+    let label_fg    = Color::from_rgba_f32(palette::fg());
+    let label_disab = Color::from_rgba_f32(palette::disabled_fg());
+    let hint_fg     = Color::from_rgba_f32(palette::fg_muted());
+    let hover_bg    = Color::from_rgba_f32(palette::row_hover());
+    let divider_c   = border;
+    let side_pad_pt = chrome::MENU_PAD_X;
 
     // Helper: phys → Pt via `/ scale` so existing layout output
     // (which is already physical px) plugs cleanly into the
@@ -102,6 +101,7 @@ pub(crate) fn build_context_menu_canvas(
     // so this round-trips bit-perfectly at every scale.
     let pt_phys = |phys: f64| Length::Pt(phys / state.scale);
     let side_pad_phys = side_pad_pt * state.scale;
+    let row_inset_phys = chrome::POPOVER_ROW_INSET * state.scale;
     let label_w_phys  = |s: &str| s.chars().count() as f64 * chrome_cell_w as f64;
 
     // 1. Menu frame: BG + border + shadow.
@@ -109,9 +109,9 @@ pub(crate) fn build_context_menu_canvas(
         .at(pt_phys(menu.frame.x), pt_phys(menu.frame.y_top))
         .size(pt_phys(menu.frame.w), pt_phys(menu.frame.h))
         .fill(bg)
-        .radius(Pt(6.0))
+        .radius(Pt(chrome::POPOVER_RADIUS))
         .border(Pt(1.0), border)
-        .shadow(Pt(16.0), (Pt(0.0), Pt(0.0)), shadow)
+        .shadow(Pt(chrome::POPOVER_SHADOW_BLUR), (Pt(0.0), Pt(0.0)), shadow)
         .draw();
 
     // 2. Per-row primitives.  All sub-row arithmetic done in
@@ -131,10 +131,10 @@ pub(crate) fn build_context_menu_canvas(
         }
         if state.hovered_idx == Some(i) {
             canvas.rect()
-                .at(pt_phys(item.x + side_pad_phys * 0.5), pt_phys(item.y_top))
-                .size(pt_phys(item.w - side_pad_phys), pt_phys(item.h))
+                .at(pt_phys(item.x + row_inset_phys), pt_phys(item.y_top))
+                .size(pt_phys(item.w - 2.0 * row_inset_phys), pt_phys(item.h))
                 .fill(hover_bg)
-                .radius(Pt(4.0))
+                .radius(Pt(chrome::POPOVER_ROW_RADIUS))
                 .draw();
         }
         let fg = if row.enabled { label_fg } else { label_disab };

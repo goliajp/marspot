@@ -93,16 +93,14 @@ pub struct ContextMenu {
     pub item_rects: Vec<Rect>,
 }
 
-/// All physical-pixel constants are LOGICAL — multiplied by `scale`
-/// in `layout` so the menu stays the same physical size at every
-/// display density.
-const MENU_MIN_W_LOGICAL: f64 = 180.0;
-const MENU_MAX_W_LOGICAL: f64 = 360.0;
-const ROW_H_LOGICAL: f64 = 26.0;
-const DIVIDER_H_LOGICAL: f64 = 8.0;
-const SIDE_PAD_LOGICAL: f64 = 12.0;
-const TOP_PAD_LOGICAL: f64 = 6.0;
-const BOT_PAD_LOGICAL: f64 = 6.0;
+// The menu's sizes are the spec's, in window units: multiplied by
+// `scale` in `layout` so the menu stays the same physical size at
+// every display density.
+use crate::ui::theme::spec::chrome::{
+    MENU_DIVIDER_H as DIVIDER_H_LOGICAL, MENU_MAX_W as MENU_MAX_W_LOGICAL,
+    MENU_MIN_W as MENU_MIN_W_LOGICAL, MENU_PAD_X as SIDE_PAD_LOGICAL, MENU_PAD_Y as TOP_PAD_LOGICAL,
+    MENU_PAD_Y as BOT_PAD_LOGICAL, MENU_ROW_H as ROW_H_LOGICAL,
+};
 /// Margin from anchor point to menu edge — keeps the menu from
 /// covering the exact pixel under the cursor.
 const ANCHOR_OFFSET_LOGICAL: f64 = 2.0;
