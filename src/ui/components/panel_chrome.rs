@@ -360,5 +360,8 @@ mod tests {
         let literal = format!("bg: [{}.13, 0.14, 0.17, 1.0],", 0);
         assert_eq!(colour_literals(&literal), 1, "the search finds a literal when there is one");
         assert_eq!(colour_literals(include_str!("panel_chrome.rs")), 0);
+        assert_eq!(colour_literals(include_str!("process_panel.rs")), 0);
+        assert_eq!(colour_literals(include_str!("process_panel_paint.rs")), 0);
+        assert_eq!(colour_literals(include_str!("table.rs")), 0);
     }
 }
