@@ -10,6 +10,7 @@ pub mod cc_usage_paint;
 pub mod controls;
 pub mod panel_chrome;
 pub mod panel_palette;
+pub mod surface_stack;
 pub mod settings_modal;
 pub mod settings_paint;
 pub mod scroll_view;
