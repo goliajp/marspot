@@ -21,6 +21,10 @@
 //! reports; the caller logs.  Keeping the logging macro out of here is
 //! what lets L2 and L3 share it.
 
+mod probe;
+
+pub use probe::{State, Trace};
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -43,6 +47,15 @@ pub struct StallReport {
     /// caller log the full breakdown when one phase isn't the whole
     /// story.
     pub phases: Vec<(&'static str, Duration)>,
+}
+
+/// What the watchdog has to say about an iteration past the threshold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Watch {
+    /// Still running, `elapsed` in, inside `phase`.
+    Stalling { elapsed: Duration, phase: &'static str },
+    /// Finished (or left the loop); `phase` is where the alarm found it.
+    Over { phase: &'static str, trace: Trace },
 }
 
 /// State the watchdog thread reads while the loop is still inside an
@@ -199,12 +212,21 @@ impl LoopWatch {
     ///
     /// The thread ends when the `LoopWatch` is dropped (it holds only a
     /// `Weak`), so a caller never has to shut it down.
+    ///
+    /// Once it has fired it keeps looking at the loop's thread until
+    /// the iteration ends, and reports a second time with what that
+    /// thread did meanwhile (`Watch::Over`): a phase name says where
+    /// the time went, the trace says whether the loop was computing,
+    /// waiting for a core, or asleep on a lock or the disk.
+    ///
+    /// Call it from the loop's own thread: that is the thread watched.
     pub fn spawn_watchdog<F>(&self, on_stall: F)
     where
-        F: Fn(Duration, &'static str) + Send + 'static,
+        F: Fn(Watch) + Send + 'static,
     {
         let weak = Arc::downgrade(&self.shared);
         let threshold = self.threshold;
+        let probe = probe::Probe::this_thread();
         // Poll fast enough that a "the pane is frozen" report and the
         // log line land in the same breath, cheap enough to be free:
         // one atomic load per tick on an otherwise sleeping thread.
@@ -213,16 +235,37 @@ impl LoopWatch {
             .name("loop-watchdog".into())
             .spawn(move || {
                 let mut warned_for: u64 = 0;
+                // the stall being traced: its phase at the alarm, when
+                // the alarm went, the first look and counters, the trace
+                let mut open: Option<(&'static str, Instant, Option<probe::Look>, probe::Counts, Trace)> = None;
                 loop {
                     std::thread::sleep(tick);
                     let Some(shared) = weak.upgrade() else {
                         return; // owner dropped
                     };
                     let started = shared.started_nanos.load(Ordering::Relaxed);
+                    let iter_gen = shared.generation.load(Ordering::Relaxed);
+                    if let Some((phase, at, first, counts, mut trace)) = open.take() {
+                        let look = probe.look();
+                        if started != 0 && iter_gen == warned_for {
+                            if let Some(l) = look {
+                                trace.count(l.state);
+                            }
+                            open = Some((phase, at, first, counts, trace));
+                            continue;
+                        }
+                        trace.window = at.elapsed();
+                        if let (Some(a), Some(b)) = (first, look) {
+                            trace.cpu = b.cpu.saturating_sub(a.cpu);
+                        }
+                        let now = probe::Counts::now();
+                        trace.major_faults = now.major_faults - counts.major_faults;
+                        trace.preempted = now.preempted - counts.preempted;
+                        on_stall(Watch::Over { phase, trace });
+                    }
                     if started == 0 {
                         continue; // parked between iterations
                     }
-                    let iter_gen = shared.generation.load(Ordering::Relaxed);
                     if iter_gen == warned_for {
                         continue; // already reported this one
                     }
@@ -235,7 +278,14 @@ impl LoopWatch {
                     if elapsed >= threshold {
                         warned_for = iter_gen;
                         let phase = *shared.phase.lock().unwrap_or_else(|p| p.into_inner());
-                        on_stall(elapsed, phase);
+                        let counts = probe::Counts::now();
+                        let first = probe.look();
+                        let mut trace = Trace::default();
+                        if let Some(l) = first {
+                            trace.count(l.state);
+                        }
+                        open = Some((phase, Instant::now(), first, counts, trace));
+                        on_stall(Watch::Stalling { elapsed, phase });
                     }
                 }
             })
@@ -365,8 +415,10 @@ mod tests {
         use std::sync::mpsc::channel;
         let mut w = LoopWatch::new(Duration::from_millis(100));
         let (tx, rx) = channel();
-        w.spawn_watchdog(move |elapsed, phase| {
-            let _ = tx.send((elapsed, phase));
+        w.spawn_watchdog(move |ev| {
+            if let Watch::Stalling { elapsed, phase } = ev {
+                let _ = tx.send((elapsed, phase));
+            }
         });
 
         w.begin();
@@ -391,8 +443,10 @@ mod tests {
         use std::sync::mpsc::channel;
         let mut w = LoopWatch::new(Duration::from_millis(60));
         let (tx, rx) = channel();
-        w.spawn_watchdog(move |e, p| {
-            let _ = tx.send((e, p));
+        w.spawn_watchdog(move |ev| {
+            if let Watch::Stalling { elapsed, phase } = ev {
+                let _ = tx.send((elapsed, phase));
+            }
         });
         w.begin();
         w.phase("stuck");
@@ -414,8 +468,10 @@ mod tests {
         use std::sync::mpsc::channel;
         let mut w = LoopWatch::new(Duration::from_millis(60));
         let (tx, rx) = channel();
-        w.spawn_watchdog(move |e, p| {
-            let _ = tx.send((e, p));
+        w.spawn_watchdog(move |ev| {
+            if let Watch::Stalling { elapsed, phase } = ev {
+                let _ = tx.send((elapsed, phase));
+            }
         });
         w.begin();
         w.phase("quick");
@@ -433,5 +489,46 @@ mod tests {
         assert_eq!(fmt_dur(Duration::from_micros(250)), "250us");
         assert_eq!(fmt_dur(Duration::from_millis(12)), "12ms");
         assert_eq!(fmt_dur(Duration::from_millis(9_610)), "9.61s");
+    }
+
+    /// After the alarm the watchdog says what the loop's thread did:
+    /// asleep reads as waiting with no CPU, a spin as runnable and
+    /// burning it.  The two causes a phase name cannot tell apart.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_stall_is_traced_as_asleep_or_computing() {
+        use std::sync::mpsc::channel;
+        let mut w = LoopWatch::new(Duration::from_millis(60));
+        let (tx, rx) = channel();
+        w.spawn_watchdog(move |ev| {
+            if let Watch::Over { phase, trace } = ev {
+                let _ = tx.send((phase, trace));
+            }
+        });
+
+        w.begin();
+        w.phase("asleep");
+        std::thread::sleep(Duration::from_millis(400));
+        let _ = w.end();
+        let (phase, t) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(phase, "asleep");
+        assert!(t.waiting > t.runnable, "{t:?}");
+        assert!(t.cpu < Duration::from_millis(20), "{t:?}");
+        assert!(t.window >= Duration::from_millis(200), "{t:?}");
+
+        w.begin();
+        w.phase("spinning");
+        let t0 = Instant::now();
+        let mut x = 0u64;
+        while t0.elapsed() < Duration::from_millis(400) {
+            x = x.wrapping_mul(31).wrapping_add(1);
+        }
+        std::hint::black_box(x);
+        let _ = w.end();
+        let (phase, t) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(phase, "spinning");
+        assert!(t.runnable > t.waiting, "{t:?}");
+        assert!(t.cpu >= Duration::from_millis(150), "{t:?}");
+        assert!(rx.try_recv().is_err(), "one trace per stall");
     }
 }
