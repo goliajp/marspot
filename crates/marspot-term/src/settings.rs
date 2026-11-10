@@ -175,7 +175,7 @@ impl Default for Settings {
             render_u_tags: false,
             dim_scale: 1.0,
             scroll_factor: 1.0,
-            cc_statusline_hook: false,
+            cc_statusline_hook: true,
             codex_follow_updates: true,
             cc_rebalance: Rebalance::On,
             dev_panel_button: false,
