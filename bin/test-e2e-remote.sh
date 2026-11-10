@@ -48,6 +48,7 @@ DEFAULT_SUITES=(
   test-close-last-pane.sh
   test-multi-window.sh
   test-panel-behaviour.sh
+  test-commands.sh
   test-bundle-lander.sh
   test-cc-profile-switch.sh
   test-codex-profile-switch.sh
