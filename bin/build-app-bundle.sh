@@ -67,6 +67,11 @@ RES="$OUT/Contents/Resources"
 PLIST="$OUT/Contents/Info.plist"
 mkdir -p "$MACOS" "$RES"
 
+# The usage strings are for the programs run inside: macOS charges a
+# child's request for the microphone, another app, or a protected
+# folder to the terminal, and without the matching string the request
+# is denied without a prompt.
+#
 # Written in full every time, not patched.  A plist that is created
 # once and then only ever amended is how a field goes stale without
 # anyone noticing: this one claimed 0.2.0 while the app was on 0.4.0.
@@ -85,6 +90,15 @@ cat > "$PLIST" <<PLIST
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>NSAppleEventsUsageDescription</key><string>A program running in Marspot wants to control another app.</string>
+  <key>NSMicrophoneUsageDescription</key><string>A program running in Marspot wants to use the microphone.</string>
+  <key>NSCameraUsageDescription</key><string>A program running in Marspot wants to use the camera.</string>
+  <key>NSDesktopFolderUsageDescription</key><string>A program running in Marspot wants to read files on your Desktop.</string>
+  <key>NSDocumentsFolderUsageDescription</key><string>A program running in Marspot wants to read files in your Documents folder.</string>
+  <key>NSDownloadsFolderUsageDescription</key><string>A program running in Marspot wants to read files in your Downloads folder.</string>
+  <key>NSRemovableVolumesUsageDescription</key><string>A program running in Marspot wants to read files on a removable volume.</string>
+  <key>NSNetworkVolumesUsageDescription</key><string>A program running in Marspot wants to read files on a network volume.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>A program running in Marspot wants to reach devices on your local network.</string>
 </dict>
 </plist>
 PLIST

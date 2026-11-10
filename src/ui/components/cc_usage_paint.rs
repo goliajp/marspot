@@ -154,7 +154,7 @@ fn paint_usage_title(
 
     if cc.feed_missing {
         y += lh;
-        text(p, inner_x, y, "no usage feed at ~/.local/state/devops/{claude,codex}-usage.json", panel_palette::fg_sec());
+        text(p, inner_x, y, "No usage read yet. Sign in to claude or codex in a pane; this fills in within a few minutes.", panel_palette::fg_sec());
         return None;
     }
     Some(y)

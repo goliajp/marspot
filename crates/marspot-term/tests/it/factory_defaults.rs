@@ -52,10 +52,10 @@ fn the_attention_ladder_ships_at_full_strength() {
 }
 
 #[test]
-fn integrations_are_opt_in() {
-    // Writing into someone's claude statusline config is not something
-    // to do because they installed a terminal.
-    assert!(!Settings::default().cc_statusline_hook);
+fn the_status_line_hook_is_on() {
+    // Parking and moving a pane restart claude on the model the hook
+    // reported; off, neither can go ahead.
+    assert!(Settings::default().cc_statusline_hook);
 }
 
 #[test]

@@ -55,7 +55,16 @@ pub(crate) fn cc_settings_files() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for d in dirs {
         let f = d.join("settings.json");
-        let Ok(real) = f.canonicalize() else { continue };
+        // A config dir with no settings file yet is how every fresh
+        // install of Claude Code looks; it is named all the same, so
+        // that what belongs in the file can be put there.
+        let real = match f.canonicalize() {
+            Ok(real) => real,
+            Err(_) => match d.canonicalize() {
+                Ok(dir) => dir.join("settings.json"),
+                Err(_) => continue,
+            },
+        };
         if !out.contains(&real) {
             out.push(real);
         }
@@ -272,8 +281,11 @@ pub(super) fn reconcile_statusline_in(
     let mut notes = Vec::new();
     for path in files {
         let path = path.as_path();
-        let Ok(text) = fs::read_to_string(path) else {
-            continue;
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            // no file yet: there is one to write only when the hook is wanted
+            Err(e) if want && e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(_) => continue,
         };
         let span = status_line_span(&text);
         let found = span.as_ref().map(|(at, _, cmd)| (*at, cmd.clone()));
@@ -316,13 +328,20 @@ pub(super) fn reconcile_statusline_in(
                     ));
                     continue;
                 };
-                let Some(i) = text.find('{') else { continue };
-                let block = format!(
-                    "\n  \"statusLine\": {{ \"type\": \"command\", \"command\": {} }},",
+                // the member as Claude Code itself would write it, so a
+                // file in its form stays in its form
+                let member = format!(
+                    "\n  \"statusLine\": {{\n    \"type\": \"command\",\n    \"command\": {}\n  }}",
                     json_quote(&hook_command(bin, ""))
                 );
                 notes.push(format!("{}: installed", path.display()));
-                format!("{}{}{}", &text[..=i], block, &text[i + 1..])
+                let bare: String = text.split_whitespace().collect();
+                match text.find('{') {
+                    // nothing in the file, or nothing in the object
+                    _ if bare.is_empty() || bare == "{}" => format!("{{{member}\n}}\n"),
+                    Some(i) => format!("{}{member},{}", &text[..=i], &text[i + 1..]),
+                    None => continue,
+                }
             }
             // Not wanted, and ours is there: give the slot back.
             (false, Some((at, cmd)), true) => {
