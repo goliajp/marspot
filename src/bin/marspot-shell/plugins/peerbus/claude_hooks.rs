@@ -22,6 +22,7 @@ impl super::worker::Worker {
         let mut notes = reconcile();
         notes.extend(super::codex_config::reconcile());
         notes.extend(super::gemini_config::reconcile());
+        notes.extend(super::kimi_config::reconcile());
         if notes == self.hook_notes {
             return;
         }

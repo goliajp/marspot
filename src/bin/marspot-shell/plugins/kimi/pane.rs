@@ -22,6 +22,26 @@ pub(crate) fn default_home(user_home: &Path) -> PathBuf {
 /// agents' profiles follow.
 const KIMI_PROFILE_PREFIX: &str = ".kimi-code-profile-";
 
+/// Every numbered profile under `user_home`, in order.  Profile 0 is
+/// not a profile: that number stands for the default home.
+pub(crate) fn profile_dirs_in(user_home: &Path) -> Vec<(u8, PathBuf)> {
+    let mut out: Vec<(u8, PathBuf)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(user_home) {
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(KIMI_PROFILE_PREFIX)) else {
+                continue;
+            };
+            let Ok(n) = rest.parse::<u8>() else { continue };
+            if n > 0 && e.path().is_dir() {
+                out.push((n, e.path()));
+            }
+        }
+    }
+    out.sort_by_key(|(n, _)| *n);
+    out
+}
+
 /// Which profile a home is: `None` for the default one.  Resolved
 /// through symlinks, so a home that links to a profile reads as it.
 pub(super) fn profile_of(home: &Path) -> Option<u8> {
@@ -49,6 +69,8 @@ mod tests {
         for name in [".kimi-code-profile-2", ".kimi-code-profile-0", ".kimi-code"] {
             std::fs::create_dir_all(home.join(name)).unwrap();
         }
+        std::fs::write(home.join(".kimi-code-profile-7"), "a file, not a home").unwrap();
+        assert_eq!(profile_dirs_in(&home), vec![(2, home.join(".kimi-code-profile-2"))]);
         assert_eq!(profile_of(&home.join(".kimi-code-profile-2")), Some(2));
         assert_eq!(profile_of(&home.join(".kimi-code-profile-0")), None, "0 stands for the default home");
         assert_eq!(profile_of(&home.join(".kimi-code")), None);

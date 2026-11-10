@@ -74,6 +74,8 @@ pub(crate) enum Event {
     Want(Vec<Want>),
     /// The panes running Gemini, as the gemini plugin resolved them.
     Gemini(crate::plugins::gemini::Peers),
+    /// The same for Kimi, with what each session is doing.
+    Kimi(crate::plugins::kimi::Peers),
     Inbound { key: u64, frame: UserFrame, peer_pid: Option<i32> },
     /// `notify_when_idle`: tell `from` once, when the session next goes idle.
     Subscribe { key: u64, from: String, msg_id: String },
@@ -119,7 +121,8 @@ pub(crate) struct Worker {
     pub(super) sock_dir: Option<PathBuf>,
     pub(super) conns: HashMap<PathBuf, Conn>,
     pub(super) bindings: HashMap<u64, Binding>,
-    /// The Gemini panes' inboxes (`gemini_bind`), by pane like `bindings`.
+    /// The Gemini and Kimi panes' inboxes (`gemini_bind`), by pane like
+    /// `bindings`.
     pub(super) gemini: HashMap<u64, super::gemini_bind::GeminiBinding>,
     pub(super) wants: Vec<Want>,
     /// `(home, thread) → cwd`, None for a thread that is not a user's
@@ -234,6 +237,10 @@ impl Worker {
                 }
                 Event::Gemini(peers) => {
                     self.apply_gemini(&peers);
+                    self.rename_pass();
+                }
+                Event::Kimi(peers) => {
+                    self.apply_kimi(&peers);
                     self.rename_pass();
                 }
                 Event::Inbound { key, frame, peer_pid } => self.deliver(key, frame, peer_pid),

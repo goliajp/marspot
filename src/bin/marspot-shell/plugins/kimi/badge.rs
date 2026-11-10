@@ -2,13 +2,21 @@
 
 use super::super::{LogLevel, PluginHost};
 
-/// `P2@k3` — the shape the other agents' badges have.  With no model
+/// `P2@k3·high` — the shape the claude and codex badges have for
+/// profile, model and effort.  The effort is kimi's own word for it:
+/// one of the model's levels, `on` for a model that thinks without
+/// levels, `off`.  What is not known is left out, and with no model
 /// known the badge still says which agent and which account.
-pub(super) fn badge_text(profile: Option<u8>, model: Option<&str>) -> String {
-    let what = model.unwrap_or("kimi");
+pub(super) fn badge_text(profile: Option<u8>, model: Option<&str>, thinking: Option<&str>) -> String {
+    let what = match (model, thinking) {
+        (Some(m), Some(t)) => format!("{m}·{t}"),
+        (Some(m), None) => m.to_string(),
+        (None, Some(t)) => format!("kimi·{t}"),
+        (None, None) => "kimi".to_string(),
+    };
     match profile {
         Some(p) => format!("P{p}@{what}"),
-        None => what.to_string(),
+        None => what,
     }
 }
 
@@ -37,9 +45,11 @@ mod tests {
 
     #[test]
     fn the_badge_leads_with_the_profile_and_names_the_model() {
-        assert_eq!(badge_text(Some(2), Some("k3")), "P2@k3");
-        assert_eq!(badge_text(None, Some("k3")), "k3");
-        assert_eq!(badge_text(Some(1), None), "P1@kimi");
-        assert_eq!(badge_text(None, None), "kimi");
+        assert_eq!(badge_text(Some(2), Some("k3"), Some("high")), "P2@k3·high");
+        assert_eq!(badge_text(None, Some("k3"), None), "k3");
+        assert_eq!(badge_text(None, Some("kimi-for-coding-highspeed"), Some("on")), "kimi-for-coding-highspeed·on");
+        assert_eq!(badge_text(Some(1), None, None), "P1@kimi");
+        assert_eq!(badge_text(None, None, Some("off")), "kimi·off");
+        assert_eq!(badge_text(None, None, None), "kimi");
     }
 }

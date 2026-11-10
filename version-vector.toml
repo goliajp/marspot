@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.269"  # kimi's input box is read like the other agents'
+shell   = "0.7.270"  # kimi panes are peers; their badge shows the model and the thinking effort
 core    = "0.12.305"  # one command table drives the keys, the menus and a shortcuts panel
 session = "0.11.157"  # a pane has ~/.kimi-code/bin on its PATH
