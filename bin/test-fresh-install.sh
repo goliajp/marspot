@@ -64,7 +64,16 @@ check "app is notarised" notarised --type execute "$APP"
 check "bundle carries marspot-peer" test -x "$APP/Contents/MacOS/marspot-peer"
 
 echo "==> first launch, empty HOME"
-env -i HOME="$FRESH" USER="$(id -un)" LOGNAME="$(id -un)" SHELL=/bin/zsh \
+# The pane's shell, with a note of the environment it was started in:
+# `ps` cannot read a login zsh's, so the shell writes it down itself.
+# Only the pane starts it with no arguments.
+cat > "$FRESH/pane-shell" <<'SH'
+#!/bin/sh
+[ $# -eq 0 ] && env > "$HOME/pane.env"
+exec /bin/zsh "$@"
+SH
+chmod +x "$FRESH/pane-shell"
+env -i HOME="$FRESH" USER="$(id -un)" LOGNAME="$(id -un)" SHELL="$FRESH/pane-shell" \
   PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="$FRESH/tmp" LANG=en_US.UTF-8 \
   "$APP/Contents/MacOS/marspot-shell" >"$FRESH/stdout.log" 2>&1 &
 SHELL_PID=$!
@@ -76,16 +85,8 @@ deadline=$(( $(date +%s) + WAIT ))
 until { clis && hooks; } || [ "$(date +%s)" -ge "$deadline" ] || ! kill -0 $SHELL_PID 2>/dev/null; do sleep 5; done
 
 runs() { env -i HOME="$FRESH" PATH="$FRESH/.local/bin:/usr/bin:/bin" "$1" --version >/dev/null 2>&1; }
-# the shell a pane runs: a child of a session process of ours
 pane_shells() { for s in $(ours | awk '$2 ~ /marspot-session$/ {print $1}'); do pgrep -P "$s"; done; }
-pane_path() {
-  local p env
-  for p in $(pane_shells); do
-    env="$(ps -ww -E -o command= -p "$p")"
-    [[ "$env" == *"PATH=$FRESH/.local/bin:"* ]] && return 0
-  done
-  return 1
-}
+pane_path() { grep -q "^PATH=$FRESH/.local/bin:" "$FRESH/pane.env"; }
 # a gemini the machine already had is left alone, and that counts
 gemini_there() { runs gemini || /bin/zsh -ilc 'command -v gemini' >/dev/null 2>&1; }
 no_panic() { ! grep -qi 'panic' "$LOG" "$FRESH/stdout.log"; }
