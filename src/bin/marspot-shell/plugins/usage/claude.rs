@@ -201,6 +201,9 @@ impl Waits {
 
 /// What one request to the usage endpoint came to.
 #[derive(Debug, PartialEq)]
+// one of these per account per pass, held for a moment: boxing the
+// reading would add an allocation to save nothing
+#[allow(clippy::large_enum_variant)]
 pub(super) enum Outcome {
     Read(Reading),
     /// Refused for now; do not ask again before this unix time.
