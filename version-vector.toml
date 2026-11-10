@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.261"  # the quota sweep reads no file on the main thread; settings.json escapes read right
+shell   = "0.7.262"  # a refused account stays shut until the window it ran out of renews
 core    = "0.12.297"  # core runs as an application, so its UI QoS is honoured
 session = "0.11.154"  # a stall is traced: what the loop thread did after the alarm
