@@ -28,6 +28,7 @@ use control_writer::ControlWriter;
 use snapshot_writer::SnapshotWriter;
 mod handoff;
 mod local_session;
+mod pane_env;
 mod pty_reader;
 mod signal_events;
 mod reply_guard;
