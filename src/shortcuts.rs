@@ -58,7 +58,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
         chord: "⇧⌘C",
         action: "Agent usage for this account",
         handler_file: "src/bin/marspot-core.rs",
-        handler_match: "toggle_cc_usage_modal",
+        handler_match: "toggle_panel(wi, SurfaceKind::Accounts)",
     },
     Shortcut {
         chord: "⌘W",

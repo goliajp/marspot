@@ -18,6 +18,7 @@ use marspot_term::layout::Rect;
 
 use crate::ui::components::controls::{self, Measure, StepperPart, StepperRects};
 use crate::ui::components::panel_chrome::{self, PanelChrome};
+use crate::ui::components::surface_stack;
 use crate::ui::theme::spec::{self, card, content, space};
 
 /// How far the steppers go.
@@ -140,6 +141,22 @@ impl LayoutModal {
         label_w: f64,
         m: Measure<'_>,
     ) -> Self {
+        Self::layout_moved(window_w, window_h, top_inset, cols, rows, label_w, m, (0.0, 0.0))
+    }
+
+    /// [`Self::layout`] for a panel whose header has been dragged
+    /// `offset` from the middle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn layout_moved(
+        window_w: f64,
+        window_h: f64,
+        top_inset: f64,
+        cols: usize,
+        rows: usize,
+        label_w: f64,
+        m: Measure<'_>,
+        offset: (f64, f64),
+    ) -> Self {
         let (cols, rows) = (cols.max(1), rows.max(1));
         let (gaps_x, gaps_y) = ((cols - 1) as f64, (rows - 1) as f64);
         let gap = spec::px(metric::CARD_GAP);
@@ -172,6 +189,7 @@ impl LayoutModal {
             panel_chrome::frame_height(fixed_h + block_h),
             top_inset,
         );
+        let frame = surface_stack::place(frame, offset, window_w, window_h, top_inset);
         let chrome = PanelChrome::new(frame, top_inset);
         let c = chrome.content;
 
