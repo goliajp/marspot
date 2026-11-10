@@ -35,7 +35,7 @@ impl ClaudecodePlugin {
         // read by the worker, so this sweep touches no profile on disk
         let profiles: Vec<u8> = result.profiles.iter().map(|(n, _)| *n).collect();
         let email = |p: u8| result.profiles.iter().find(|(n, _)| *n == p).and_then(|(_, e)| e.clone());
-        let mut rooms = quota::rooms_for(&profiles, &usage.accounts, &email, rooms::unix_now());
+        let mut rooms = quota::rooms_for(&profiles, &usage.accounts, email, rooms::unix_now());
         for meta in result.new_meta.values() {
             let Some(r) = meta.refused_at.as_ref() else { continue };
             if self.refused.note(meta.profile_num, r) {
