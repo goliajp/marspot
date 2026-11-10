@@ -134,6 +134,9 @@ pub struct Settings {
     /// conversation resumes, but its prompt cache does not come along.
     /// `DryRun` logs what would be moved and moves nothing.
     pub cc_rebalance: Rebalance,
+    /// Show the toolbar button for the UI workbench panel. Off: it is
+    /// a tool for working on marspot, not for using it.
+    pub dev_panel_button: bool,
 }
 
 /// What the claudecode plugin does with an idle pane that has a better
@@ -177,6 +180,7 @@ impl Default for Settings {
             cc_statusline_hook: false,
             codex_follow_updates: true,
             cc_rebalance: Rebalance::On,
+            dev_panel_button: false,
         }
     }
 }
@@ -326,6 +330,7 @@ fn value_of(s: &Settings, key: &str) -> String {
         "claudecode.statusline_hook" => s.cc_statusline_hook.to_string(),
         "codex.follow_updates" => s.codex_follow_updates.to_string(),
         "claudecode.rebalance" => s.cc_rebalance.as_str().to_string(),
+        "developer.dev_panel" => s.dev_panel_button.to_string(),
         _ => String::new(),
     }
 }
@@ -366,6 +371,7 @@ pub fn parse(body: &str) -> Settings {
                 s.codex_follow_updates = parse_bool(v, s.codex_follow_updates)
             }
             "claudecode.rebalance" => s.cc_rebalance = Rebalance::parse(v, s.cc_rebalance),
+            "developer.dev_panel" => s.dev_panel_button = parse_bool(v, s.dev_panel_button),
             // Anything else is a key this build does not know.  Left
             // alone here and preserved verbatim by `render` — a newer
             // marspot's settings must survive an older one reading
