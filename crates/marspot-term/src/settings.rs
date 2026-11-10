@@ -259,6 +259,14 @@ pub fn get() -> Arc<Settings> {
     Arc::clone(&cache().read().unwrap_or_else(|p| p.into_inner()).settings)
 }
 
+/// The terminal palette of the theme the settings name, for a caller
+/// that may run before anything else has read the settings: the first
+/// window is created in the right colour, not corrected a tick later.
+pub fn palette() -> &'static crate::palette::Palette {
+    let _ = cache();
+    crate::palette::current()
+}
+
 /// Per-byte mirror of `appearance.circled_wide`.
 ///
 /// `char_width` runs once per character of everything the terminal

@@ -436,7 +436,7 @@ struct ShellWindow {
     presenter: Option<ShellPresenter>,
     /// True after the core has confirmed at least one SurfaceReady for
     /// THIS window.  Until then `redraw` skips `present()` so the user
-    /// sees the NSWindow's BG colour (font_cache::BG) instead of an
+    /// sees the NSWindow's BG colour (the terminal's) instead of an
     /// unfilled black IOSurface — kills the cold-start flash.
     first_frame_ready: bool,
     /// `redraw()` only calls `present()` when this is true.  Set by
@@ -1042,7 +1042,7 @@ impl ShellApp {
             width_logical: DEFAULT_W_PT,
             height_logical: DEFAULT_H_PT,
             frame_pt,
-            bg: marspot::font_cache::BG,
+            bg: marspot::settings::palette().bg,
         };
         marspot::app::open_window(window_id, &attrs);
     }
@@ -5222,7 +5222,7 @@ Usage:\n\
         // Terminal-black from the first paint: a core (L2) swap that
         // briefly uncovers the layer must show steady black, never a
         // lighter chrome flash.
-        bg: marspot::font_cache::BG,
+        bg: marspot::settings::palette().bg,
     };
     let proxy = EventProxy::new();
     let app = ShellApp::new(proxy.clone());
