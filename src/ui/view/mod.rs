@@ -30,6 +30,14 @@ pub use view::{
     TextFontSpec, pack_shape_opts, unpack_shape_opts,
 };
 pub use type_scale::UiSize;
+
+use crate::ui::components::panel_palette as palette;
+
+/// A palette role as the colour type views carry.
+fn role(c: [f32; 4]) -> crate::ui::core::Color {
+    crate::ui::core::Color::from_rgba_f32(c)
+}
+
 pub use view::{
     View, Modifier, Text, TextSize, TextWeight, TextStyle,
     TextLines, Truncate, ClipShape, AspectMode,

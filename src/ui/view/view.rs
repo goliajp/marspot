@@ -7,12 +7,7 @@
 //! continuity (none in v1 — modifier is forward-compat reserve).
 
 use crate::ui::core::{Color, Length};
-use crate::ui::components::panel_palette as palette;
-
-/// A palette role as the colour type views carry.
-pub(super) fn role(c: [f32; 4]) -> Color {
-    Color::from_rgba_f32(c)
-}
+use super::{palette, role};
 use super::types::{
     AlignCross, Distribute, Edges, FrameSpec, Shadow,
     ActionId, HoverId, ViewId,
