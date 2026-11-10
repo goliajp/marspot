@@ -14,43 +14,13 @@ use std::time::Duration;
 
 use super::ledger::{self, Ledger, Side};
 use super::transcript::{self, Agent};
-use super::{claude, codex as codex_history, gemini as gemini_history, history};
+use super::tags::tag_for;
+use super::{claude, codex as codex_history, gemini as gemini_history, history, kimi as kimi_history};
 use crate::plugins::pty_op::{self, PtyCommand, PtyOp, Step};
-use crate::plugins::{claudecode, codex, gemini, pidtree};
+use crate::plugins::{claudecode, codex, gemini, kimi, pidtree};
 
-/// Badge-menu tags this module owns: `TAG_BASE | agent << 8 | profile`.
-/// Well above the `u8` range the profile-cycle rows use, so the two
-/// kinds of row cannot be mistaken for each other.
-const TAG_BASE: u32 = 0x4F48_0000;
-
-fn code(a: Agent) -> u32 {
-    match a {
-        Agent::Claude => 1,
-        Agent::Codex => 2,
-        Agent::Gemini => 3,
-    }
-}
-
-pub fn tag_for(to: Agent, profile: u8) -> u32 {
-    TAG_BASE | code(to) << 8 | profile as u32
-}
-
-/// The target a tag names, if it is one of ours.
-pub fn parse_tag(tag: u32) -> Option<(Agent, u8)> {
-    if tag & 0xFFFF_0000 != TAG_BASE {
-        return None;
-    }
-    let agent = match (tag >> 8) & 0xFF {
-        1 => Agent::Claude,
-        2 => Agent::Codex,
-        3 => Agent::Gemini,
-        _ => return None,
-    };
-    Some((agent, (tag & 0xFF) as u8))
-}
-
-/// An agent's account profiles: number and directory.  gemini with no
-/// numbered profile has its default home, as number 0.
+/// An agent's account profiles: number and directory.  gemini or kimi
+/// with no numbered profile has its default home, as number 0.
 pub fn profiles(a: Agent) -> Vec<(u8, PathBuf)> {
     match a {
         Agent::Claude => {
@@ -62,6 +32,7 @@ pub fn profiles(a: Agent) -> Vec<(u8, PathBuf)> {
         }
         Agent::Codex => codex::profile_dirs(),
         Agent::Gemini => gemini::handoff_homes(),
+        Agent::Kimi => kimi::handoff_homes(),
     }
 }
 
@@ -69,7 +40,7 @@ pub fn profiles(a: Agent) -> Vec<(u8, PathBuf)> {
 /// the bare name for gemini's default home.
 fn target_name(to: Agent, profile: u8) -> String {
     match (to, profile) {
-        (Agent::Gemini, 0) => to.key().to_string(),
+        (Agent::Gemini | Agent::Kimi, 0) => to.key().to_string(),
         _ => format!("{} P{profile}", to.key()),
     }
 }
@@ -94,7 +65,7 @@ pub struct Leaving {
     /// switch stops this one and never a process that took its pid.
     pub proc: marspot::pidtree::ProcId,
     pub shell_pid: i32,
-    /// `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GEMINI_CLI_HOME` it runs under.
+    /// `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GEMINI_CLI_HOME` / `KIMI_CODE_HOME` it runs under.
     pub home: PathBuf,
     /// The session, when the plugin knows it (claude's binding does;
     /// codex's is found on the job thread — see [`history_of`]).
@@ -112,6 +83,7 @@ fn history_of(l: &Leaving) -> Option<PathBuf> {
             None => codex::newest_rollout_for_cwd(&l.home, l.cwd.as_deref()?),
         },
         Agent::Gemini => gemini::session_by_id(&gemini::config_dir(&l.home), l.cwd.as_deref()?, l.session_id.as_deref()?),
+        Agent::Kimi => kimi::wire_of(&l.home, l.session_id.as_deref()?),
     }
 }
 
@@ -124,6 +96,7 @@ fn resumable(ledger: &Ledger, to: Agent, to_home: &Path, shell_cwd: Option<&str>
         Agent::Claude => history::claude_transcript(to_home, &side.id),
         Agent::Codex => history::codex_rollout(to_home, &side.id),
         Agent::Gemini => gemini::session_by_id(&gemini::config_dir(to_home), shell_cwd?, &side.id),
+        Agent::Kimi => kimi::wire_of(to_home, &side.id),
     };
     found.map(|_| side.id.clone())
 }
@@ -155,6 +128,7 @@ fn command(to: Agent, to_home: &Path, resume: Option<&str>) -> Option<Vec<u8>> {
                 None => c,
             }
         }
+        Agent::Kimi => kimi::launch(to_home, resume)?,
     };
     cmd.clear_screen_first(true).to_bytes()
 }
@@ -241,6 +215,10 @@ fn prepare_in(
             let id = leaving.session_id.clone().unwrap_or_default();
             gemini_history::read(&path, ledger.watermark(Agent::Gemini, &id)).map_err(io)?
         }
+        Agent::Kimi => {
+            let id = leaving.session_id.clone().unwrap_or_default();
+            kimi_history::read(&path, ledger.watermark(Agent::Kimi, &id)).map_err(io)?
+        }
     };
     next.set(leaving.agent, Some(Side { id: x.session_id.clone(), offset: x.end_offset }));
     if x.turns.is_empty() {
@@ -296,6 +274,7 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
         Agent::Claude => claudecode::looks_like_claudecode,
         Agent::Codex => codex::looks_like_codex,
         Agent::Gemini => gemini::looks_like_gemini,
+        Agent::Kimi => kimi::looks_like_kimi,
     };
     Some(
         PtyOp::new("handoff.switch")
@@ -354,13 +333,32 @@ mod tests {
     }
     use crate::plugins::handoff::history::tmp;
 
+    /// Leaving kimi, and coming back to the session the pane had there.
     #[test]
-    fn tags_round_trip_and_stay_clear_of_profile_rows() {
-        for (a, n) in [(Agent::Claude, 1u8), (Agent::Codex, 7), (Agent::Codex, 255), (Agent::Gemini, 0), (Agent::Gemini, 2)] {
-            assert_eq!(parse_tag(tag_for(a, n)), Some((a, n)));
-            assert!(u8::try_from(tag_for(a, n)).is_err(), "a profile-cycle plugin must ignore it");
-        }
-        assert_eq!(parse_tag(3), None);
+    fn a_kimi_pane_hands_over_its_session_and_is_resumed_in_the_same_home() {
+        use kimi::fixture::{session, ID, STOP_HOOK};
+        let home = tmp("switch-kimi");
+        session(&home, ID, STOP_HOOK, None);
+        let leaving = Leaving {
+            agent: Agent::Kimi,
+            proc: marspot::pidtree::ProcId { pid: 1, start_us: 1 },
+            shell_pid: 1,
+            home: home.clone(),
+            session_id: Some(ID.into()),
+            cwd: Some("/w/a".into()),
+        };
+        let dir = tmp("switch-kimi-ledger");
+        let o = prepare_in(7, &dir, &leaving, Agent::Claude, None, &Ledger::default(), history_of(&leaving), &switched()).unwrap();
+        assert!(o.message.expect("kimi's turn is handed over").contains("Kimi Code"));
+        let doc = std::fs::read_to_string(ledger::doc_path(&dir, 7)).unwrap();
+        assert!(doc.contains("say hi") && doc.contains("mock reply done") && !doc.contains("hook_result"), "{doc}");
+        assert_eq!(o.next.kimi, Some(Side { id: ID.into(), offset: STOP_HOOK.len() as u64 }));
+        assert_eq!(resumable(&o.next, Agent::Kimi, &home, None).as_deref(), Some(ID));
+        assert_eq!(resumable(&o.next, Agent::Kimi, &tmp("switch-kimi-other"), None), None, "another account's home does not hold it");
+        let s = |b: Vec<u8>| String::from_utf8(b).unwrap();
+        let line = s(command(Agent::Kimi, Path::new("/Users/x/.kimi-code-profile-2"), Some(ID)).unwrap());
+        assert!(line.contains("KIMI_CODE_HOME='/Users/x/.kimi-code-profile-2'") && line.ends_with(&format!(" kimi --session {ID}\r")), "{line}");
+        assert_eq!(target_name(Agent::Kimi, 0), "kimi");
     }
 
     #[test]
