@@ -923,6 +923,9 @@ fn main() {
     // RFC-004 D.1 — must precede logx / any path computation.
     marspot_term::paths::migrate_legacy_state_root();
     marspot_term::logx::init("session");
+    // before the first byte is parsed: a colour query has to be
+    // answered from the theme the settings name
+    marspot_term::system_theme::startup_palette();
     lx_event!(
         "SESSION_BOOT",
         "marspot-session starting",
@@ -1425,13 +1428,10 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     // it.  One `stat` a second per session is nothing next to the
     // parse loop it sits beside.
     //
-    // A wire frame from the panel would be instant rather than
-    // ≤1 s, and was deliberately not built: the file is the single
-    // source of truth (it is also hand-editable), and a frame that
-    // carried values would be a second path that can disagree with
-    // it.  Every unit bug this codebase has had was two paths
-    // answering one question.
-    let mut last_settings_check = Instant::now() - SETTINGS_CHECK_INTERVAL;
+    // A wire frame from the panel would be instant rather than ≤1 s,
+    // and was deliberately not built: the file is the single source
+    // of truth, and a frame carrying values could disagree with it.
+    let mut last_settings_check = Instant::now();
     const SETTINGS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
     loop {
         // A gate that is holding a frame owes a flush even if the PTY
@@ -1477,10 +1477,10 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 lx_event!(
                     "SETTINGS_RELOADED",
                     "settings.toml changed on disk",
-                    circled_wide = marspot_term::settings::get().appearance_circled_wide as u64,
-                    theme = marspot_term::palette::current_id().as_str()
+                    circled_wide = marspot_term::settings::get().appearance_circled_wide as u64
                 );
             }
+            marspot_term::system_theme::changed("colour queries are answered from the theme now in force");
         }
         if last_entry_check.elapsed() >= entry_check_interval {
             last_entry_check = Instant::now();

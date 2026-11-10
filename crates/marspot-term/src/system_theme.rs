@@ -11,6 +11,7 @@
 
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -27,6 +28,24 @@ pub fn path() -> PathBuf {
 pub fn startup_palette() -> &'static palette::Palette {
     let _ = crate::settings::get();
     palette::current()
+}
+
+/// Whether the theme in force has changed since this was last asked,
+/// logging `THEME_CHANGED` when it has: every process says it the
+/// same way, with `what` being what that process does about it.
+pub fn changed(what: &str) -> bool {
+    static SEEN: AtomicU32 = AtomicU32::new(0);
+    let version = palette::version();
+    if SEEN.swap(version, Ordering::Relaxed) == version {
+        return false;
+    }
+    crate::lx_event!(
+        "THEME_CHANGED",
+        what,
+        theme = palette::current_id().as_str(),
+        by = if palette::follows_system() { "system" } else { "setting" }
+    );
+    true
 }
 
 /// The mtime of the file as last read, so an unchanged file is one

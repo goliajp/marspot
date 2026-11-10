@@ -10,15 +10,10 @@
 //! change lands in the palette's version counter, and that is what
 //! every pass of the loop checks: one atomic load.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use marspot::lx_event;
-use marspot_term::palette;
-
-/// The theme version the windows were last drawn for.
-static SEEN: AtomicU32 = AtomicU32::new(0);
 /// When the files are next looked at, in milliseconds of uptime.  Zero
 /// at start: the first pass of the loop looks, so the first frame is
 /// already drawn in the theme the file names.
@@ -41,18 +36,10 @@ impl super::CoreApp {
             LOOK_AT_MS.store(now + LOOK_EVERY_MS, Ordering::Relaxed);
             marspot::settings::reload_if_changed();
         }
-        let version = palette::version();
-        if SEEN.swap(version, Ordering::Relaxed) == version {
-            return;
+        if marspot::system_theme::changed("every window is drawn again in the theme now in force") {
+            for w in self.windows.iter_mut() {
+                w.needs_render = true;
+            }
         }
-        for w in self.windows.iter_mut() {
-            w.needs_render = true;
-        }
-        lx_event!(
-            "THEME_CHANGED",
-            "every window is drawn again in the theme now in force",
-            theme = palette::current_id().as_str(),
-            by = if palette::follows_system() { "system" } else { "setting" }
-        );
     }
 }
