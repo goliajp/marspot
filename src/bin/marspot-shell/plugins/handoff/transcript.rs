@@ -96,11 +96,42 @@ fn quoted(s: &str) -> String {
         .join("\n")
 }
 
+/// What the receiving agent is told about the switch itself: that
+/// there was one, when, and what became of the agent it came from.
+///
+/// Without it the new agent has a transcript and no way to know why it
+/// is reading it: asked "do you know why you are here", one answered
+/// that it did not, and then went looking for whether the other agent
+/// was still running (2026-11-10).
+#[derive(Debug, Clone)]
+pub struct Switch {
+    /// Local time of the switch, already formatted.
+    pub at: String,
+    /// What was done to the agent left behind, as a clause after "it":
+    /// "has exited", "has exited and its goal was paused".
+    pub left: String,
+    /// False when the agent left behind may still be at work.
+    pub stopped: bool,
+}
+
+impl Switch {
+    fn paragraph(&self, from: Agent) -> String {
+        let src = from.display();
+        let state = if self.stopped {
+            format!("{src} was stopped as part of the switch: it {}. Nothing is still working on its behalf, and you are the only agent in this pane.", self.left)
+        } else {
+            format!("{src} could not be confirmed stopped: it {}. Find out whether it is still working before you change anything it may be changing.", self.left)
+        };
+        format!("The user switched this pane from {src} to you at {}. {state}\n\n", self.at)
+    }
+}
+
 /// The document.  `continuing` = the receiving agent already has this
 /// conversation up to where it left it.
-pub fn render(x: &Extract, continuing: bool) -> String {
+pub fn render(x: &Extract, continuing: bool, switch: &Switch) -> String {
     let src = x.source.display();
     let mut out = format!("# Handoff from {src}\n\n");
+    out.push_str(&switch.paragraph(x.source));
     out.push_str(if continuing {
         "You had this conversation before it moved to the other agent; these are \
          the latest exchanges there since you left."
@@ -129,13 +160,14 @@ pub fn render(x: &Extract, continuing: bool) -> String {
 
 /// The message typed into the receiving agent: one line, the substance
 /// is in the document.
-pub fn message(from: Agent, doc: &std::path::Path, continuing: bool) -> String {
+pub fn message(from: Agent, doc: &std::path::Path, continuing: bool, switch: &Switch) -> String {
+    let src = from.display();
     format!(
-        "{MARKER} This pane just moved here from {} — {} is in {}. Read it, tell me in a few \
-         sentences where things stand, then wait for my next instruction. Do not run commands \
-         or change files until I ask.",
-        from.display(),
-        if continuing { "what happened there since you left" } else { "the conversation so far" },
+        "{MARKER} I just switched this pane from {src} to you; {src} {}. {} is in {}. Read it, \
+         tell me in a few sentences where things stand, then wait for my next instruction. \
+         Do not run commands or change files until I ask.",
+        if switch.stopped { "has been stopped" } else { "may still be running, the file says why" },
+        if continuing { "What happened there since you left" } else { "The conversation so far" },
         doc.display()
     )
 }
@@ -146,6 +178,28 @@ mod tests {
 
     fn turn(user: &str, reply: &str) -> Turn {
         Turn { user: user.into(), reply: reply.into() }
+    }
+
+    fn switched() -> Switch {
+        Switch { at: "11/10 18:09".into(), left: "has exited and its goal was paused".into(), stopped: true }
+    }
+
+    /// The reader is told there was a switch, when, and that nothing
+    /// is still running behind it -- or that something may be.
+    #[test]
+    fn the_document_opens_with_the_switch_and_what_became_of_the_other_agent() {
+        let doc = render(&extract(vec![turn("go", "done")]), false, &switched());
+        let first = doc.lines().nth(2).unwrap();
+        assert!(first.starts_with("The user switched this pane from Claude Code to you at 11/10 18:09."), "{first}");
+        assert!(first.contains("it has exited and its goal was paused"), "{first}");
+        assert!(first.contains("you are the only agent in this pane"), "{first}");
+
+        let unsure = Switch { stopped: false, left: "has exited, but its background thread could not be reached (timeout) and may be carrying on".into(), ..switched() };
+        let doc = render(&extract(vec![turn("go", "done")]), false, &unsure);
+        assert!(doc.contains("could not be confirmed stopped"), "{doc}");
+        assert!(!doc.contains("only agent in this pane"), "{doc}");
+        let m = message(Agent::Codex, std::path::Path::new("/d.md"), false, &unsure);
+        assert!(m.contains("may still be running"), "{m}");
     }
 
     fn extract(turns: Vec<Turn>) -> Extract {
@@ -174,7 +228,7 @@ mod tests {
         let big = "x".repeat(50_000);
         let mut turns: Vec<Turn> = (0..400).map(|i| turn(&format!("ask {i} {big}"), &big)).collect();
         turns.push(turn("the last ask", "the last reply"));
-        let doc = render(&extract(turns), true);
+        let doc = render(&extract(turns), true, &switched());
         assert!(doc.contains("the last ask") && doc.contains("the last reply"));
         assert!(doc.contains("ask 398") && !doc.contains("ask 397"), "exactly {RECENT}");
         assert!(doc.contains("398 earlier exchanges not included"));
@@ -185,14 +239,14 @@ mod tests {
     /// A reply's own headings must not become this document's sections.
     #[test]
     fn replies_are_quoted() {
-        let doc = render(&extract(vec![turn("go", "## Done\n\n- one")]), false);
+        let doc = render(&extract(vec![turn("go", "## Done\n\n- one")]), false, &switched());
         assert!(doc.contains("> ## Done\n>\n> - one"), "{doc}");
         assert!(!doc.contains("\n## Done"));
     }
 
     #[test]
     fn the_message_is_marked_and_says_to_wait() {
-        let m = message(Agent::Codex, std::path::Path::new("/s/handoff/7.md"), true);
+        let m = message(Agent::Codex, std::path::Path::new("/s/handoff/7.md"), true, &switched());
         assert!(m.starts_with(MARKER));
         assert!(m.contains("/s/handoff/7.md") && m.contains("codex") && m.contains("wait"));
         assert!(!m.contains('\n'), "one line: it is typed into a TUI's input box");

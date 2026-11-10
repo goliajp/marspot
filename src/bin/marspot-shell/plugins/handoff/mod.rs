@@ -2,6 +2,7 @@
 
 mod claude;
 mod codex;
+mod codex_stop;
 mod gemini;
 pub(crate) mod history;
 pub(crate) use marspot_peer::json;
