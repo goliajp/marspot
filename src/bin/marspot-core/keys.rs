@@ -285,7 +285,7 @@ impl CoreApp {
             | Command::Quit
             | Command::NewWindow
             | Command::FullScreen
-            | Command::Minimise => {}
+            | Command::Minimize => {}
         }
         true
     }
