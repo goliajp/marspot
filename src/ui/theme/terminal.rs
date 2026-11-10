@@ -24,8 +24,9 @@ pub(crate) struct TermColors {
     pub(crate) id: ThemeId,
     pal: &'static Palette,
     dim_towards_bg: bool,
-    /// Behind a search hit; the glyph keeps its own colour on top.
+    /// Behind a search hit, and what a glyph on one is drawn in.
     pub(crate) search_hit: Rgba8,
+    pub(crate) search_hit_fg: (f64, f64, f64),
     /// Behind selected cells.
     pub(crate) selection: Rgba8,
     /// An IME composition that has not been committed yet.
@@ -45,12 +46,14 @@ impl TermColors {
         let unit = |c: Color| (c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0);
         let cursor = unit(t.cursor_text);
         let link = unit(t.link);
+        let hit_fg = unit(t.search_hit_fg);
         let bg = t.term.bg;
         Self {
             id: t.id,
             pal: t.term,
             dim_towards_bg: bg.1 > 0.5,
             search_hit: rgba8(t.search_hit),
+            search_hit_fg: (hit_fg.0 as f64, hit_fg.1 as f64, hit_fg.2 as f64),
             selection: rgba8(t.selection),
             ime_bg: rgba8(t.ime_bg),
             ime_fg: rgba8(t.ime_fg),

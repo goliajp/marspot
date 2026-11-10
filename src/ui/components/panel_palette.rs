@@ -79,6 +79,16 @@ pub fn severity_color(severity: u8) -> [f32; 4] {
     }
 }
 
+/// Severity as text: a chip's label, a percentage, a mark on the
+/// severity's own tint.  `severity_color` is the fill.
+pub fn severity_text(severity: u8) -> [f32; 4] {
+    match severity {
+        0 => rgba::success_text(),
+        1 => rgba::warn_text(),
+        _ => rgba::danger_text(),
+    }
+}
+
 /// No colour at all — the border of something that has none.
 pub fn none() -> [f32; 4] { [0.0; 4] }
 /// `c` at opacity `alpha`.

@@ -301,9 +301,9 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
         }
 
         // C4 — search-hit highlight BG.  Drawn AFTER cell BG so it
-        // wins z-order, BEFORE glyphs so they paint on top with
-        // their original FG (the "highlight yellow BG, original fg
-        // preserved" rule from §6.8).  Bounded by grid cols — a
+        // wins z-order, BEFORE glyphs so they paint on top, in the
+        // theme's ink for a hit: the program's own foreground was
+        // chosen for its own background, not for this one.  Bounded by grid cols — a
         // span fed with `col_end_inclusive >= cols` is clamped to
         // the right edge.  Per-row loop: O(spans) work scoped to
         // rows where the highlight lives; renderer p99 delta on a
@@ -332,6 +332,7 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
         // we re-emit it after with BG colour so the glyph reads
         // inverted on the white cursor block (mirrors render.rs).
         grid.row_clusters_at_view(view.view_offset, r, &mut row_clusters);
+        let row_has_hit = view.highlight_spans.iter().any(|s| s.view_row == r);
         let cursor = grid.cursor();
         let solid_cursor = view.view_offset == 0
             && view.cursor_visible
@@ -389,7 +390,13 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
                     None => continue,
                 },
             };
-            let fg = if g.in_link(r, c as u16) {
+            let on_hit = row_has_hit
+                && view.highlight_spans.iter().any(|s| {
+                    s.view_row == r && c as u16 >= s.col_start && c as u16 <= s.col_end_inclusive
+                });
+            let fg = if on_hit {
+                colors.search_hit_fg
+            } else if g.in_link(r, c as u16) {
                 colors.link
             } else {
                 colors.resolve_attrs(cell.attrs).0

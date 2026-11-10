@@ -314,7 +314,7 @@ pub fn paint_danger_button(p: &mut ViewPainter, rect: Rect, hovered: bool) {
     let (bg, fg) = if hovered {
         (palette::danger(), palette::on_accent())
     } else {
-        (palette::danger_rest_bg(), palette::danger())
+        (palette::danger_rest_bg(), palette::severity_text(2))
     };
     // A button cut down to fit a row keeps its proportions.
     let k = rect.w / spec::px(c::DANGER_SIZE);
@@ -358,7 +358,7 @@ pub fn chip_size(label: &str, m: Measure<'_>) -> (f64, f64) {
 pub fn paint_chip(p: &mut ViewPainter, rect: Rect, label: &str, severity: u8) {
     fill(p, rect, palette::chip_bg(severity), c::CHIP_RADIUS);
     centred_text(
-        p, rect, label, c::CHIP_TEXT.pt(), c::CHIP_WEIGHT, palette::severity_color(severity),
+        p, rect, label, c::CHIP_TEXT.pt(), c::CHIP_WEIGHT, palette::severity_text(severity),
     );
 }
 

@@ -37,8 +37,7 @@ mod tests {
     enum Kind {
         /// Text that has to be read.
         Text,
-        /// Text that recedes on purpose, and a status word in its own
-        /// colour.
+        /// Text that recedes on purpose.
         Secondary,
         /// Not text: a cursor, a ring, a dot, a knob, a cross.
         Mark,
@@ -77,13 +76,6 @@ mod tests {
         }
     }
 
-    /// Pairs the dark theme does not meet.  It is today's look and is
-    /// not being changed here; they are named so that no further pair
-    /// joins them unnoticed and so that fixing one means deleting it
-    /// from this list.
-    const DARK_GAPS: [&str; 3] =
-        ["terminal text on a search hit", "danger chip", "danger mark on its resting fill"];
-
     /// Every (what is drawn, what it is drawn on) the interface has,
     /// by the roles `panel_palette` hands out.
     fn pairs(t: &Theme) -> Vec<(Kind, String, Color, Color)> {
@@ -113,7 +105,7 @@ mod tests {
             (Text, "terminal text in the pane in use", term_fg, canvas),
             (Text, "terminal text in a pane not in use", term_fg, chrome),
             (Text, "terminal text on a selection", term_fg, t.selection),
-            (Text, "terminal text on a search hit", term_fg, t.search_hit),
+            (Text, "text on a search hit", t.search_hit_fg, t.search_hit),
             (Text, "input method text", t.ime_fg, t.ime_bg),
             (Text, "link in the pane in use", t.link, canvas),
             (Text, "link in a pane not in use", t.link, chrome),
@@ -125,11 +117,14 @@ mod tests {
             (Secondary, "muted text on a panel", t.fg_muted, frame),
             (Secondary, "muted text on a card", t.fg_muted, card),
             (Secondary, "muted text and icons on the window", t.fg_muted, chrome),
-            (Secondary, "ok chip", t.success, over(t.success, chip, card)),
-            (Secondary, "warn chip", t.warn, over(t.warn, chip, card)),
-            (Secondary, "danger chip", t.danger, over(t.danger, chip, card)),
-            (Secondary, "agent badge in the pane in use", t.agent, canvas),
-            (Secondary, "agent badge on the window", t.agent, chrome),
+            (Text, "ok chip", t.success_text, over(t.success, chip, card)),
+            (Text, "warn chip", t.warn_text, over(t.warn, chip, card)),
+            (Text, "danger chip", t.danger_text, over(t.danger, chip, card)),
+            (Text, "ok percentage on a card", t.success_text, card),
+            (Text, "warn percentage on a card", t.warn_text, card),
+            (Text, "danger percentage on a card", t.danger_text, card),
+            (Text, "agent badge in the pane in use", t.agent, canvas),
+            (Text, "agent badge on the window", t.agent, chrome),
             (Mark, "cursor on the terminal's background", t.cursor_text, term_bg),
             (Mark, "focus ring on the window", t.focus_ring, chrome),
             (Mark, "knob on a toggle that is on", t.knob, accent),
@@ -137,7 +132,7 @@ mod tests {
             (Mark, "accent bar on a card", t.accent, card),
             (Mark, "ok dot on the window", t.success, chrome),
             (Mark, "danger dot on the window", t.danger, chrome),
-            (Mark, "danger mark on its resting fill", t.danger, over(t.danger, rest, card)),
+            (Mark, "danger mark on its resting fill", t.danger_text, over(t.danger, rest, card)),
             (Mark, "mark on the danger fill", t.fg_on_accent, t.danger),
             (Disabled, "disabled label on a card", t.fg_disabled, card),
             (Disabled, "disabled label on a segment", t.fg_disabled, raised),
@@ -194,7 +189,7 @@ mod tests {
         for (_, what, fg, on) in tables[1].iter().filter(|(_, w, ..)| !tables[0].iter().any(|(_, d, ..)| d == w)) {
             println!("{what:<60} {:>7} {:>7.2} {:>9}", "—", ratio(*fg, *on), "—");
         }
-        assert_eq!(failures(&DARK), DARK_GAPS, "the dark theme's known gaps, and no others");
+        assert_eq!(failures(&DARK), Vec::<String>::new(), "dark");
         assert_eq!(failures(&LIGHT), Vec::<String>::new(), "light");
         assert_eq!(failures(&CONTRAST), Vec::<String>::new(), "high contrast");
     }
