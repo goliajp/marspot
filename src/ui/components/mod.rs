@@ -28,6 +28,8 @@ pub mod layout_modal_paint;
 pub mod context_menu;
 pub mod context_menu_paint;
 pub mod dev_panel;
+#[cfg(test)]
+mod panel_snapshot_tests;
 
 pub use tab_strip::TabStrip;
 pub use scroll_view::ScrollView;
