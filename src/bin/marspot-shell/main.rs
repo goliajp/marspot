@@ -52,6 +52,7 @@ mod present;
 mod receipts;
 mod sup_log;
 mod supervisor;
+mod theme_follow;
 use banner::BannerKind;
 use launch::*;
 use plugins::host::ShellPluginHost;
@@ -2381,6 +2382,7 @@ impl ShellApp {
                 prefetch = s.reclaim_prefetch as u32
             );
         }
+        self.follow_theme();
         lap!(1);
         self.sweep_pane_status();
         lap!(2);
@@ -2741,9 +2743,7 @@ impl ShellApp {
             }
         }
 
-        // 6. Recompute the banner once per tick — whatever (no-op if nothing changed).
-        // transition happened above, the visible banner should
-        // reflect it.
+        // 6. Recompute the banner once per tick (no-op if nothing changed).
         self.refresh_banner(ctx);
         lap!(7);
         if prof {

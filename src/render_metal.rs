@@ -3928,7 +3928,7 @@ mod tests {
         // Cursor cell — block at end of last log line (focused/live).
         let cursor_row = lines.len() - 1;
         let cursor_col = lines[cursor_row].len();
-        // The colour is `palette::CURSOR` because `OSC 12 ; ? ST`
+        // The colour is the palette's cursor because `OSC 12 ; ? ST`
         // asks for it; the alpha stays here, because how solid the
         // block looks is a drawing decision and not part of the
         // answer.

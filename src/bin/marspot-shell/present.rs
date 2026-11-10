@@ -136,7 +136,7 @@ fn terminal_bg() -> (f64, f64, f64) {
 
 /// `layer.backgroundColor`, set when the layer is made and again when
 /// the theme changes.
-fn set_layer_background(layer: &Retained<CAMetalLayer>) {
+pub(crate) fn set_layer_background(layer: &Retained<CAMetalLayer>) {
     let (r, g, b) = terminal_bg();
     let cgcolor = CGColor::rgb(r, g, b, 1.0);
     let cgcolor_ref = cgcolor.as_concrete_TypeRef() as *const OpaqueCGColor;
@@ -150,7 +150,7 @@ pub struct ShellPresenter {
     /// re-discovering the device.
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    layer: Retained<CAMetalLayer>,
+    pub(crate) layer: Retained<CAMetalLayer>,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
     /// PROTO_VERSION=2 double-buffer: two MTLTextures wrap a pair of
