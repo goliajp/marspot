@@ -15,7 +15,8 @@
 //! | step | what it does |
 //! |---|---|
 //! | `button:<settings\|layout\|process\|accounts>` | clicks that panel's toolbar button |
-//! | `esc`, `key:cmd-w` | the key, pressed and released |
+//! | `key:<chord>` | the chord, pressed and released: any of `cmd-`, `shift-`, `ctrl-`, `alt-`, then one character or `esc`, `enter`, `tab`, `up`, `down`, `left`, `right`, `f1`–`f12` (`key:cmd-,`, `key:cmd-shift-l`, `key:ctrl-c`, `key:f5`) |
+//! | `esc` | short for `key:esc` |
 //! | `type:<char>` | that character, pressed and released |
 //! | `click:close` | clicks the open panel's close button |
 //! | `click:header` | clicks the open panel's header |
@@ -55,8 +56,7 @@ pub enum Target {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Step {
     Button(SurfaceKind),
-    Esc,
-    CmdW,
+    Key(ChordKey, Modifiers),
     Type(char),
     Click(Target),
     ShiftClick(Target),
@@ -64,6 +64,16 @@ pub enum Step {
     Scroll(f64),
     Wait(u64),
 }
+
+/// The key of a `key:` step.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChordKey {
+    Char(char),
+    Named(NamedKey),
+}
+
+pub const ESC: Step = Step::Key(ChordKey::Named(NamedKey::Escape), NO_MODIFIERS);
+const NO_MODIFIERS: Modifiers = Modifiers { shift: false, control: false, alt: false, super_: false };
 
 /// One event for the front-end to queue as if the window had sent it.
 #[derive(Debug, Clone)]
@@ -94,8 +104,8 @@ fn parse_step(text: &str) -> Result<Step, String> {
     let bad = || format!("unknown step `{text}`");
     let (verb, arg) = text.split_once(':').unwrap_or((text, ""));
     Ok(match (verb, arg) {
-        ("esc", "") => Step::Esc,
-        ("key", "cmd-w") => Step::CmdW,
+        ("esc", "") => ESC,
+        ("key", chord) => parse_chord(chord).ok_or_else(bad)?,
         ("button", "settings") => Step::Button(SurfaceKind::Settings),
         ("button", "layout") => Step::Button(SurfaceKind::Layout),
         ("button", "process") => Step::Button(SurfaceKind::Processes),
@@ -118,6 +128,42 @@ fn parse_step(text: &str) -> Result<Step, String> {
         ("wait", ms) => Step::Wait(ms.parse().map_err(|_| bad())?),
         _ => return Err(bad()),
     })
+}
+
+fn parse_chord(text: &str) -> Option<Step> {
+    let mut mods = NO_MODIFIERS;
+    let mut rest = text;
+    // A lone `-` after the modifiers is the key itself.
+    while let Some((name, after)) = rest.split_once('-').filter(|(_, after)| !after.is_empty()) {
+        match name {
+            "cmd" => mods.super_ = true,
+            "shift" => mods.shift = true,
+            "ctrl" => mods.control = true,
+            "alt" => mods.alt = true,
+            _ => return None,
+        }
+        rest = after;
+    }
+    let named = match rest {
+        "esc" => Some(NamedKey::Escape),
+        "enter" => Some(NamedKey::Enter),
+        "tab" => Some(NamedKey::Tab),
+        "up" => Some(NamedKey::ArrowUp),
+        "down" => Some(NamedKey::ArrowDown),
+        "left" => Some(NamedKey::ArrowLeft),
+        "right" => Some(NamedKey::ArrowRight),
+        _ => rest.strip_prefix('f').and_then(|n| n.parse::<usize>().ok()).and_then(|n| {
+            use NamedKey::*;
+            [F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12].get(n.checked_sub(1)?).copied()
+        }),
+    };
+    let mut chars = rest.chars();
+    let key = match (named, chars.next(), chars.next()) {
+        (Some(n), _, _) => ChordKey::Named(n),
+        (None, Some(c), None) => ChordKey::Char(c.to_ascii_lowercase()),
+        _ => return None,
+    };
+    Some(Step::Key(key, mods))
 }
 
 fn parse_target(text: &str) -> Option<Target> {
@@ -222,9 +268,14 @@ impl Scene<'_> {
                 }
                 click(centre(rect), Modifiers::default())
             }
-            Step::Esc => key(LogicalKey::Named(NamedKey::Escape), None, Modifiers::default()),
-            Step::CmdW => {
-                key(LogicalKey::Char('w'), None, Modifiers { super_: true, ..Default::default() })
+            Step::Key(ChordKey::Named(n), mods) => key(LogicalKey::Named(n), None, mods),
+            Step::Key(ChordKey::Char(c), mods) => {
+                // What the window reports the key as typing: nothing
+                // the encoder reads under Cmd or Ctrl, the capital
+                // under shift.
+                let typed = if mods.shift { c.to_ascii_uppercase() } else { c };
+                let text = (!mods.super_ && !mods.control).then(|| typed.to_string());
+                key(LogicalKey::Char(c), text, mods)
             }
             Step::Type(c) => key(LogicalKey::Char(c), Some(c.to_string()), Modifiers::default()),
             Step::Click(target) => click(self.point(target)?, Modifiers::default()),
@@ -342,8 +393,8 @@ mod tests {
             steps,
             [
                 Step::Button(SurfaceKind::Settings),
-                Step::Esc,
-                Step::CmdW,
+                ESC,
+                Step::Key(ChordKey::Char('w'), cmd()),
                 Step::Click(Target::Close),
                 Step::Click(Target::Outside),
                 Step::Click(Target::PaneUnder),
@@ -362,11 +413,40 @@ mod tests {
         assert_eq!(parse(""), Ok(Vec::new()));
     }
 
+    fn cmd() -> Modifiers {
+        Modifiers { super_: true, ..Default::default() }
+    }
+
+    #[test]
+    fn a_chord_is_its_modifiers_then_its_key() {
+        let chord = |text: &str| match parse(&format!("key:{text}")).unwrap()[..] {
+            [Step::Key(key, m)] => (key, (m.super_, m.shift, m.control, m.alt)),
+            ref other => panic!("{text}: {other:?}"),
+        };
+        let c = ChordKey::Char;
+        assert_eq!(chord("cmd-,"), (c(','), (true, false, false, false)));
+        assert_eq!(chord("cmd-shift-l"), (c('l'), (true, true, false, false)));
+        assert_eq!(chord("cmd-shift-L"), chord("cmd-shift-l"));
+        assert_eq!(chord("cmd-2"), (c('2'), (true, false, false, false)));
+        assert_eq!(chord("cmd-]"), (c(']'), (true, false, false, false)));
+        assert_eq!(chord("cmd--"), (c('-'), (true, false, false, false)));
+        assert_eq!(chord("-"), (c('-'), (false, false, false, false)));
+        assert_eq!(chord("ctrl-c"), (c('c'), (false, false, true, false)));
+        assert_eq!(chord("alt-b"), (c('b'), (false, false, false, true)));
+        assert_eq!(chord("ctrl-cmd-f"), (c('f'), (true, false, true, false)));
+        assert_eq!(chord("f"), (c('f'), (false, false, false, false)));
+        assert_eq!(chord("f5").0, ChordKey::Named(NamedKey::F5));
+        assert_eq!(chord("f12").0, ChordKey::Named(NamedKey::F12));
+        assert_eq!(chord("up").0, ChordKey::Named(NamedKey::ArrowUp));
+        assert_eq!(parse("key:esc").unwrap(), [ESC]);
+    }
+
     #[test]
     fn a_step_it_does_not_know_rejects_the_whole_script() {
         for bad in [
             "button:nope", "click", "click:middle", "shift-click:", "drag:120,40", "drag:header:1", "type:",
-            "type:xy", "scroll:x", "key:cmd-q", "esc:1", "wait:soon",
+            "type:xy", "scroll:x", "key:", "key:cmd-", "key:hyper-x", "key:cmd-xy", "key:f13", "key:f0", "esc:1",
+            "wait:soon",
         ] {
             let script = format!("esc;{bad};esc");
             assert_eq!(parse(&script), Err(format!("unknown step `{bad}`")), "{bad}");
@@ -462,8 +542,13 @@ mod tests {
                 .map(|s| (s, logical.clone(), text.map(str::to_string), cmd))
                 .to_vec()
         };
-        assert_eq!(keys(Step::Esc), pair(LogicalKey::Named(NamedKey::Escape), None, false));
-        assert_eq!(keys(Step::CmdW), pair(LogicalKey::Char('w'), None, true));
+        let step = |text: &str| parse(text).unwrap()[0];
+        assert_eq!(keys(ESC), pair(LogicalKey::Named(NamedKey::Escape), None, false));
+        assert_eq!(keys(step("key:cmd-w")), pair(LogicalKey::Char('w'), None, true));
+        assert_eq!(keys(step("key:ctrl-c")), pair(LogicalKey::Char('c'), None, false));
+        assert_eq!(keys(step("key:alt-b")), pair(LogicalKey::Char('b'), Some("b"), false));
+        assert_eq!(keys(step("key:shift-a")), pair(LogicalKey::Char('a'), Some("A"), false));
+        assert_eq!(keys(step("key:f5")), pair(LogicalKey::Named(NamedKey::F5), None, false));
         assert_eq!(keys(Step::Type('x')), pair(LogicalKey::Char('x'), Some("x"), false));
         assert!(matches!(scene.resolve(Step::Scroll(3.0)).unwrap()[..], [Input::Scroll(dy)] if dy == 48.0));
     }
