@@ -26,6 +26,11 @@ APP="${1:-$HOME/.local/Marspot.app}"
 PROFILE="${NOTARY_PROFILE:-marspot}"
 IDENTITY="${CODESIGN_IDENTITY:-Developer ID Application: GOLIA K.K. (KF79DRC524)}"
 
+# Under Hardened Runtime a program run inside the terminal can only be
+# offered the microphone, the camera or another app's automation if the
+# terminal itself is entitled to ask.
+ENTITLEMENTS="$(cd "$(dirname "$0")/.." && pwd)/assets/Marspot.entitlements"
+
 [[ -d "$APP" ]] || { echo "no such app bundle: $APP" >&2; exit 1; }
 
 if ! xcrun notarytool history --keychain-profile "$PROFILE" >/dev/null 2>&1; then
@@ -46,9 +51,9 @@ echo "==> signing $APP (Hardened Runtime + timestamp)"
 # invalidates the outer one.
 while IFS= read -r bin; do
   echo "    $(basename "$bin")"
-  codesign -f -s "$IDENTITY" --options runtime --timestamp "$bin"
+  codesign -f -s "$IDENTITY" --options runtime --timestamp --entitlements "$ENTITLEMENTS" "$bin"
 done < <(find "$APP/Contents/MacOS" -type f -perm -u+x)
-codesign -f -s "$IDENTITY" --options runtime --timestamp "$APP"
+codesign -f -s "$IDENTITY" --options runtime --timestamp --entitlements "$ENTITLEMENTS" "$APP"
 codesign -v --deep --strict "$APP"
 
 ZIP="$(mktemp -d)/$(basename "$APP" .app).zip"
