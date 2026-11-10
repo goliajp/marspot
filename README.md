@@ -50,12 +50,14 @@ log has not been written there since.
 The log is where macOS keeps logs: `~/Library/Logs/Marspot/marspot.log`,
 holding what every layer wrote, rotated and bounded.
 
-The app itself installs to `~/.local/Marspot.app`.
+The app itself is wherever you put it — `/Applications` when it came
+from the disk image, `~/.local/Marspot.app` when it was installed from
+a source checkout.
 
-One LaunchAgent may exist: `com.marspot.land-bundle`. It is armed only
-when an update has been staged and the running app is holding the old
-binary open; it waits for the app to quit, swaps the bundle, and
-reopens. Nothing is installed to keep the app running or to start it at
+A source install may also leave one LaunchAgent,
+`com.marspot.land-bundle`. It is armed only when an update has been
+staged and the running app is holding the old binary open; it waits
+for the app to quit, swaps the bundle, and reopens. Nothing is installed to keep the app running or to start it at
 login.
 
 ## Uninstalling

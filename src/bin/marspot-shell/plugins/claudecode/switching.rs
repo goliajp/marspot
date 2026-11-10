@@ -101,6 +101,12 @@ impl ClaudecodePlugin {
         let sids: Vec<u64> = result.new_meta.keys().copied().collect();
         for sid in sids {
             let Some(meta) = result.new_meta.get(&sid).cloned() else { continue };
+            // Started with no config dir, it is on the CLI's default
+            // login, which is no numbered profile's: there is nothing
+            // to compare it with and nowhere to resume it as itself.
+            if meta.config_dir.is_none() {
+                continue;
+            }
             // What the pane is running comes first. A pane whose model
             // and effort cannot both be confirmed takes no part: it is
             // not judged and not moved, and nothing about it is assumed.

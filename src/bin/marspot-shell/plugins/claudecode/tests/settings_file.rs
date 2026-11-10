@@ -166,3 +166,42 @@ fn an_escaped_value_is_replaced_and_handed_back_in_place() {
     assert_eq!(status_line_command(&off).unwrap().1, "~/bin/mine é");
     assert!(reconcile_statusline_in(false, Some(new), &files).is_empty());
 }
+
+/// A fresh install of Claude Code has a config dir and no settings
+/// file. The hook goes in all the same, in the form Claude Code writes.
+#[test]
+fn a_missing_or_empty_settings_file_gets_the_hook_in_claude_codes_form() {
+    let tmp = TempDir::new("cc-statusline-fresh-test");
+    let bin = std::path::Path::new("/Apps/M.app/marspot-shell");
+    let want = "{\n  \"statusLine\": {\n    \"type\": \"command\",\n    \"command\": \"'/Apps/M.app/marspot-shell' --cc-statusline\"\n  }\n}\n";
+
+    let missing = tmp.path().join("settings.json");
+    let notes = reconcile_statusline_in(true, Some(bin), std::slice::from_ref(&missing));
+    assert!(notes[0].ends_with("installed"), "{notes:?}");
+    assert_eq!(fs::read_to_string(&missing).unwrap(), want);
+    assert!(reconcile_statusline_in(true, Some(bin), std::slice::from_ref(&missing)).is_empty());
+
+    let empty = tmp.path().join("empty.json");
+    fs::write(&empty, "{}\n").unwrap();
+    reconcile_statusline_in(true, Some(bin), std::slice::from_ref(&empty));
+    assert_eq!(fs::read_to_string(&empty).unwrap(), want);
+
+    // not wanted: a file that is not there is not made
+    let absent = tmp.path().join("absent.json");
+    assert!(reconcile_statusline_in(false, Some(bin), std::slice::from_ref(&absent)).is_empty());
+    assert!(!absent.exists());
+}
+
+/// Beside other keys the member is written as Claude Code would, so a
+/// file in its two-space form is still in it afterwards.
+#[test]
+fn the_hook_keeps_a_file_in_claude_codes_form() {
+    let tmp = TempDir::new("cc-statusline-form-test");
+    let path = tmp.path().join("settings.json");
+    fs::write(&path, "{\n  \"model\": \"opus\"\n}\n").unwrap();
+    reconcile_statusline_in(true, Some(std::path::Path::new("/a/marspot-shell")), std::slice::from_ref(&path));
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "{\n  \"statusLine\": {\n    \"type\": \"command\",\n    \"command\": \"'/a/marspot-shell' --cc-statusline\"\n  },\n  \"model\": \"opus\"\n}\n"
+    );
+}
