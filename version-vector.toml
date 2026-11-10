@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.266"  # a full menu bar built from the command table
+shell   = "0.7.267"  # the gemini badge names the model the session is set to and the one it ran on
 core    = "0.12.305"  # one command table drives the keys, the menus and a shortcuts panel
 session = "0.11.156"  # a pane does not inherit a gemini session id
