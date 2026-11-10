@@ -10627,13 +10627,18 @@ fn main() {
     // while it is wedged the whole window is frozen and the user is
     // looking at it right then.  `end()` cannot speak until the
     // iteration completes.
-    watch.spawn_watchdog(|elapsed, phase| {
-        lx_warn!(
+    watch.spawn_watchdog(|ev| match ev {
+        marspot_term::loop_watch::Watch::Stalling { elapsed, phase } => lx_warn!(
             "l2.loop.stalling",
             "main loop iteration STILL running — every pane is frozen right now",
             phase = phase,
             elapsed_ms = elapsed.as_millis()
-        );
+        ),
+        marspot_term::loop_watch::Watch::Over { phase, trace } => lx_warn!(
+            "l2.loop.stall_trace",
+            &trace.summary(),
+            phase = phase
+        ),
     });
 
     let start = Instant::now();
