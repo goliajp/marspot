@@ -28,7 +28,7 @@ fn every_message_has_text() {
 /// touching either fails here.
 #[test]
 fn every_message_is_listed() {
-    const EXPECTED: usize = 58;
+    const EXPECTED: usize = 60;
     assert_eq!(
         ALL.len(),
         EXPECTED,
@@ -81,15 +81,15 @@ fn migrated_files_do_not_grow_new_literals() {
         // Not user-visible: type names that happen to be capitalised.
         &["Msg", "Row", "Control", "Segmented", "RowSpec", "Section"],
     )];
-    // The three `Control::Segmented` option arrays are not migrated yet,
+    // The `Control::Segmented` option arrays are not migrated yet,
     // and the exemption is by name rather than by file so the rest of the
-    // file stays covered. Two of them are prose and belong in the
-    // catalogue; the third is durations ("15m", "1h"), which is a number
+    // file stays covered. Three of them are prose and belong in the
+    // catalogue; the other is durations ("15m", "1h"), which is a number
     // and a unit to format rather than a string to translate -- S7-03.
     //
     // `the_deferred_arrays_still_exist` below fails when they go, which is
     // what stops this exemption from outliving its reason.
-    const DEFERRED: &[&str] = &["IDLE_LABELS", "DIM_LABELS", "SCROLL_LABELS"];
+    const DEFERRED: &[&str] = &["IDLE_LABELS", "DIM_LABELS", "SCROLL_LABELS", "THEME_LABELS"];
     for (path, allowed) in MIGRATED {
         let text = std::fs::read_to_string(path).expect("a migrated file is readable");
         // Production code only: a test fixture may hold whatever it likes.
@@ -162,7 +162,7 @@ fn literals(line: &str) -> Vec<&str> {
 fn the_deferred_arrays_still_exist() {
     let text = std::fs::read_to_string("src/ui/components/settings_modal.rs")
         .expect("the settings panel is readable");
-    for name in ["IDLE_LABELS", "DIM_LABELS", "SCROLL_LABELS"] {
+    for name in ["IDLE_LABELS", "DIM_LABELS", "SCROLL_LABELS", "THEME_LABELS"] {
         assert!(
             text.contains(&format!("pub const {name}: &[&str]")),
             "{name} is no longer a `&[&str]`, so the ratchet's exemption for it in              `migrated_files_do_not_grow_new_literals` has outlived its reason --              remove it from DEFERRED"

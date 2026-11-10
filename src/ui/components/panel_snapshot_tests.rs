@@ -48,6 +48,10 @@
 //! in every state, in a panel drawn by the shared chrome.  A check
 //! that fails keeps its render only where `MARSPOT_SNAPSHOT_OUT` names
 //! a directory; recording is the way to see one.
+//!
+//! Six of them are drawn again under the light and the high-contrast
+//! theme: `panel_snapshot_<panel>_{light,contrast}` and
+//! `<panel>.{light,contrast}.png`.
 
 use crate::grid::{Cell, Grid};
 use crate::layout::Layout;
@@ -86,6 +90,7 @@ pub(super) fn terminal_text(cols: u16, rows: u16) -> Grid {
 /// Draw one frame of a `w × h` px window with whatever `open` put on
 /// the renderer, and hold it to `bench/ui/snapshots/<name>.png`.
 fn snapshot(name: &str, w: u32, h: u32, open: impl FnOnce(&mut MetalRenderer, &Layout)) {
+    let name = &crate::snapshot_kit::themed(name);
     let dir = std::path::Path::new(UI_SNAPSHOT_DIR);
     if snapshot_mode_in(dir).is_none() {
         return;
@@ -152,7 +157,7 @@ fn snapshot(name: &str, w: u32, h: u32, open: impl FnOnce(&mut MetalRenderer, &L
 
 #[test]
 fn panel_snapshot_settings() {
-    snapshot("settings", 1000, 1200, |renderer, layout| {
+    snapshot("settings", 1000, 1360, |renderer, layout| {
         let settings = crate::settings::Settings {
             reclaim_enabled: false,
             reclaim_prefetch: false,
@@ -160,6 +165,8 @@ fn panel_snapshot_settings() {
             dim_scale: 1.0,
             scroll_factor: 1.0,
             cc_statusline_hook: true,
+            // The Theme row shows the theme the picture is drawn in.
+            appearance_theme: crate::settings::get().appearance_theme,
             ..Default::default()
         };
         let rect = {
@@ -475,4 +482,13 @@ fn panel_snapshot_controls() {
     snapshot("controls", 1400, 900, |_, _| {
         *crate::frame_build::frame::TEST_OVERLAY.lock().unwrap() = Some(controls_sheet);
     });
+}
+
+crate::snapshot_kit::snapshots_in_other_themes! {
+    panel_snapshot_settings_light, panel_snapshot_settings_contrast = panel_snapshot_settings;
+    panel_snapshot_layout_light, panel_snapshot_layout_contrast = panel_snapshot_layout;
+    panel_snapshot_process_light, panel_snapshot_process_contrast = panel_snapshot_process;
+    panel_snapshot_accounts_light, panel_snapshot_accounts_contrast = panel_snapshot_accounts;
+    panel_snapshot_shortcuts_light, panel_snapshot_shortcuts_contrast = panel_snapshot_shortcuts;
+    panel_snapshot_controls_light, panel_snapshot_controls_contrast = panel_snapshot_controls;
 }

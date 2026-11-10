@@ -60,6 +60,7 @@ pub enum Msg {
     ReclaimIdlePanes,
     IdleFor,
     WarmUpOnReturn,
+    Theme,
     DimOtherPanes,
     CircledDigitsWide,
     ClaudeCodeReportsModel,
@@ -68,6 +69,7 @@ pub enum Msg {
     CostReclaimIdlePanes,
     CostIdleFor,
     CostWarmUpOnReturn,
+    CostTheme,
     CostDimOtherPanes,
     CostCircledDigitsWide,
     CostClaudeCodeReportsModel,
@@ -137,6 +139,7 @@ fn en(m: Msg) -> &'static str {
         Msg::ReclaimIdlePanes => "Reclaim idle claude panes",
         Msg::IdleFor => "Idle for",
         Msg::WarmUpOnReturn => "Warm up on return",
+        Msg::Theme => "Theme",
         Msg::DimOtherPanes => "Dim the panes you are not in",
         Msg::CircledDigitsWide => "Circled digits take two cells",
         Msg::ClaudeCodeReportsModel => "Let Claude Code report its model",
@@ -145,6 +148,7 @@ fn en(m: Msg) -> &'static str {
         Msg::CostReclaimIdlePanes => "coming back to one costs ~3s while its session reloads",
         Msg::CostIdleFor => "measured by the session transcript's age, not terminal quiet",
         Msg::CostWarmUpOnReturn => "wakes parked panes one per second as you come back",
+        Msg::CostTheme => "a program that asked for the old colours keeps them until it asks again",
         Msg::CostDimOtherPanes => {
             "deeper tells you at a glance what has drifted; too deep and you stop reading them"
         }
@@ -215,6 +219,7 @@ pub const ALL: &[Msg] = &[
     Msg::ReclaimIdlePanes,
     Msg::IdleFor,
     Msg::WarmUpOnReturn,
+    Msg::Theme,
     Msg::DimOtherPanes,
     Msg::CircledDigitsWide,
     Msg::ClaudeCodeReportsModel,
@@ -222,6 +227,7 @@ pub const ALL: &[Msg] = &[
     Msg::CostReclaimIdlePanes,
     Msg::CostIdleFor,
     Msg::CostWarmUpOnReturn,
+    Msg::CostTheme,
     Msg::CostDimOtherPanes,
     Msg::CostCircledDigitsWide,
     Msg::CostClaudeCodeReportsModel,
