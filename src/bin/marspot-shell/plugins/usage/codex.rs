@@ -130,6 +130,9 @@ fn ask(bin: &Path, codex_home: &Path) -> Replies {
 
 /// What one home's answers came to.
 #[derive(Debug, PartialEq)]
+// one of these per account per pass, held for a moment: boxing the
+// reading would add an allocation to save nothing
+#[allow(clippy::large_enum_variant)]
 pub(super) enum Outcome {
     Read { email: String, tier: String, reading: Reading },
     /// Nobody is logged in there, or the login is refused.
