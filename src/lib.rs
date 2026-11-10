@@ -101,6 +101,7 @@ pub mod frame_scene;
 pub mod glyph_atlas;
 pub mod input;
 pub mod keyboard_layout;
+pub mod link_open;
 pub mod link_probe;
 pub mod iosurface;
 pub mod pane;
