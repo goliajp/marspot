@@ -97,7 +97,9 @@ pub struct PtyConfig {
 /// An agent the user starts INSIDE a pane still sets its own vars for
 /// its own children — that happens below this boundary and is
 /// untouched.
-pub const SESSION_ENV_PREFIXES: &[&str] = &["MARSPOT_", "CLAUDE_CODE_", "CLAUDECODE", "CODEX_"];
+// gemini marks its children with the session id alone; `GEMINI_API_KEY`
+// and the like are the user's own and stay
+pub const SESSION_ENV_PREFIXES: &[&str] = &["MARSPOT_", "CLAUDE_CODE_", "CLAUDECODE", "CODEX_", "GEMINI_SESSION_ID"];
 
 /// Owned handle to a spawned child process attached to a pseudo-terminal.
 ///
