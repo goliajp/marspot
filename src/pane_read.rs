@@ -72,6 +72,16 @@ pub fn composer_text(
 
 /// Claude Code draws U+276F, Codex U+203A.
 const PROMPTS: [char; 2] = ['\u{276f}', '\u{203a}'];
+
+/// Where Kimi Code's prompt is on `row`, if the row is the first of
+/// its box.  The prompt is a plain `>`, which a shell or a quoted line
+/// draws too, so it counts only as the first thing inside a box's left
+/// side: `│ > `.
+fn kimi_prompt_col(grid: &marspot_term::grid::Grid, row: u16) -> Option<u16> {
+    let mut drawn = (0..grid.cols()).filter(|&c| !matches!(grid.cell(c, row).ch, ' ' | '\0'));
+    let (side, glyph) = (drawn.next()?, drawn.next()?);
+    (grid.cell(side, row).ch == '│' && grid.cell(glyph, row).ch == '>' && glyph == side + 2).then_some(glyph)
+}
 /// The box's own sides, when it is drawn as a box.
 const SIDES: [char; 3] = ['│', '┃', '|'];
 
@@ -85,6 +95,12 @@ type Glyph = (u16, u16, String);
 /// Not knowing reads as nothing throughout: pasting a guess into
 /// someone's input is worse than losing a line they can retype.
 fn composer_of(grid: &marspot_term::grid::Grid) -> Option<String> {
+    box_of(grid).filter(|t| !t.is_empty())
+}
+
+/// What the input box holds, empty for an empty one; None when the
+/// cursor is not in a box.
+fn box_of(grid: &marspot_term::grid::Grid) -> Option<String> {
     use marspot_term::grid::Color;
     let bg = |r: u16| grid.cell(0, r).attrs.bg;
     let bare = |r: u16| {
@@ -95,16 +111,17 @@ fn composer_of(grid: &marspot_term::grid::Grid) -> Option<String> {
     // change of shade on the way means the cursor is not in the box.
     let (_, cursor_row) = grid.cursor();
     let mut row = cursor_row;
-    while !bare(row).starts_with(PROMPTS) {
+    while !bare(row).starts_with(PROMPTS) && kimi_prompt_col(grid, row).is_none() {
         if row == 0 || is_rule(&bare(row)) || bg(row) != bg(cursor_row) {
             return None;
         }
         row -= 1;
     }
-    let glyph_col = (0..grid.cols()).find(|&c| PROMPTS.contains(&grid.cell(c, row).ch))?;
-    let codex = grid.cell(glyph_col, row).ch == '\u{203a}';
-    // Claude Code rules the box off above; Codex shades it.  A prompt
-    // glyph without either is a message drawn in the transcript.
+    let kimi = kimi_prompt_col(grid, row);
+    let glyph_col = kimi.or_else(|| (0..grid.cols()).find(|&c| PROMPTS.contains(&grid.cell(c, row).ch)))?;
+    let codex = kimi.is_none() && grid.cell(glyph_col, row).ch == '\u{203a}';
+    // Claude Code and Kimi rule the box off above; Codex shades it.  A
+    // prompt glyph without either is a message drawn in the transcript.
     let boxed = if codex { bg(row) != Color::DEFAULT } else { row > 0 && is_rule(&bare(row - 1)) };
     if !boxed {
         return None;
@@ -120,8 +137,7 @@ fn composer_of(grid: &marspot_term::grid::Grid) -> Option<String> {
         }
         line.iter().for_each(|g| out.push_str(&g.2));
     }
-    let out = out.trim();
-    (!out.is_empty()).then(|| out.to_string())
+    Some(out.trim().to_string())
 }
 
 /// A row of the box from `from` on, dim cells blanked, without the
@@ -244,6 +260,17 @@ pub fn composer(sid: u64) -> std::io::Result<Option<String>> {
         return composer_text(&bytelog_of(sid), entry.cols, entry.rows);
     };
     Ok(composer_in_frame(&frame))
+}
+
+/// What pane `sid`'s input box holds, when one is on its live screen:
+/// `Some("")` for a box with nothing typed in it, None when no box is
+/// shown, the pane is scrolled back, or what is typed cannot be read
+/// exactly.  For a caller about to type into the pane, which may only
+/// do so into an empty box.
+pub fn composer_box(sid: u64) -> std::io::Result<Option<String>> {
+    let entry = marspot_term::session_registry::read_session_entry(sid)?;
+    let frame = live_frame(&entry.shm_name, sid)?;
+    Ok(frame.and_then(|f| box_of(&grid_of(&f))).filter(|t| !t.contains(marspot_term::grid::UNKNOWN_CLUSTER)))
 }
 
 fn composer_in_frame(frame: &marspot_term::grid_shm::Frame) -> Option<String> {
@@ -523,6 +550,37 @@ mod tests {
         assert_eq!(composer_of("codex-empty", &placeholder), None);
         let typed = screen("还没发的");
         assert_eq!(composer_of("codex-typed", &typed).as_deref(), Some("还没发的"));
+    }
+
+    /// Kimi Code as a 2.5.3 build draws it: a sent message above, the
+    /// box with its sides, two footer lines, and the terminal cursor
+    /// put back on the prompt row (kimi draws its own in reverse video).
+    fn kimi(typed: &str) -> Vec<u8> {
+        let rule = "─".repeat(36);
+        format!(
+            "\x1b[1;1H  ❯  sent before\x1b[3;1H \x1b[38;5;240m╭{rule}╮\x1b[39m\
+             \x1b[4;1H \x1b[38;5;240m│\x1b[39m > {typed}\x1b[7m \x1b[27m\x1b[4;39H\x1b[38;5;240m│\x1b[39m\
+             \x1b[5;1H \x1b[38;5;240m╰{rule}╯\x1b[39m\x1b[6;1H \x1b[38;5;244m…/w/a\x1b[39m\
+             \x1b[7;20H\x1b[38;5;253mcontext: 0%\x1b[39m\x1b[3A\x1b[6G"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn kimi_s_box_is_read_and_an_empty_one_is_known_to_be_empty() {
+        assert_eq!(composer_of("kimi-empty", &kimi("")), None);
+        assert_eq!(composer_of("kimi-typed", &kimi("not sent yet")).as_deref(), Some("not sent yet"));
+        let mut term = Terminal::new(40, 10);
+        term.feed(&kimi(""));
+        assert_eq!(box_of(term.grid()).as_deref(), Some(""), "the box is there and nothing is typed in it");
+        // a quoted line in a shell is not a box
+        let mut term = Terminal::new(40, 10);
+        term.feed(b"\x1b[1;1H$ cat notes\x1b[2;1H> quoted\x1b[3;1H$ ");
+        assert_eq!(box_of(term.grid()), None);
+        // nor is a box whose first cell is not the prompt
+        let mut term = Terminal::new(40, 10);
+        term.feed("\x1b[1;1H╭──────╮\x1b[2;1H│ Trust this folder? > yes │\x1b[3;1H╰──────╯\x1b[2;3H".as_bytes());
+        assert_eq!(box_of(term.grid()), None);
     }
 
     /// A Claude Code box at the real panes' width, holding `rows`,
