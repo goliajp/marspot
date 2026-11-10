@@ -164,3 +164,83 @@ fn a_terminal_frame_allocates_nothing_once_warm() {
     let (n, ()) = counted(|| frame(3));
     assert_eq!(n, 0, "a warm terminal frame allocated {n} times");
 }
+
+/// What one frame of the settings panel costs when it is painted
+/// directly, every frame, as it is today: the number a retained panel
+/// has to be compared with.
+///
+/// Nothing is asserted about the count beyond the meter having seen
+/// the path; the reading is printed.
+#[test]
+fn settings_immediate_frame() {
+    use crate::font_cache::FontCache;
+    use crate::render_metal::{new_atlas, system_default_device};
+    use crate::ui::components::settings_paint::{SettingsRender, push_settings_panel_via_view};
+    use crate::ui::components::{controls, settings_modal};
+
+    let Ok(device) = system_default_device() else {
+        eprintln!("SKIPPED: no Metal device");
+        return;
+    };
+    let mut font = FontCache::build().expect("font");
+    let mut atlas =
+        new_atlas(&device, 2048, 2048, false, font.font_table()).map(|(a, _)| a).expect("atlas");
+    let (atlas_w, atlas_h) = atlas.dims();
+
+    let (window_w, window_h) = (1000.0, 1200.0);
+    let settings = crate::settings::Settings {
+        reclaim_enabled: false,
+        reclaim_prefetch: false,
+        appearance_circled_wide: false,
+        dim_scale: 1.0,
+        scroll_factor: 1.0,
+        cc_statusline_hook: true,
+        ..Default::default()
+    };
+    let rect = {
+        let mut measure = controls::font_measure(&mut font);
+        settings_modal::panel_rect(window_w, window_h, &settings, &mut measure, 0.0)
+    };
+    let panel = SettingsRender {
+        rect,
+        scroll: 0.0,
+        settings,
+        path: "/Users/you/Library/Application Support/app/settings.toml".to_string(),
+        hover: settings_modal::Hover::None,
+    };
+
+    let (cell_w, cell_h, ascent) = (font.cell_w as f32, font.cell_h as f32, font.ascent as f32);
+    let (mut cells, mut glyphs, mut ui_rects) = (Vec::new(), Vec::new(), Vec::new());
+    let mut frame = |font: &mut FontCache, atlas: &mut crate::glyph_atlas::GlyphAtlas| {
+        cells.clear();
+        glyphs.clear();
+        ui_rects.clear();
+        push_settings_panel_via_view(
+            &panel, 0.0, cell_w, cell_h, ascent, atlas_w as f32, atlas_h as f32,
+            window_w, window_h, font, atlas, &mut cells, &mut glyphs, &mut ui_rects,
+        );
+        (cells.len(), glyphs.len(), ui_rects.len())
+    };
+    for _ in 0..3 {
+        frame(&mut font, &mut atlas);
+    }
+    let (n, (n_cells, n_glyphs, n_rects)) = counted(|| frame(&mut font, &mut atlas));
+
+    let mut times: Vec<u128> = (0..30)
+        .map(|_| {
+            let t = std::time::Instant::now();
+            std::hint::black_box(frame(&mut font, &mut atlas));
+            t.elapsed().as_nanos()
+        })
+        .collect();
+    times.sort_unstable();
+    let median_us = times[times.len() / 2] as f64 / 1000.0;
+
+    eprintln!(
+        "[frame-alloc] settings panel, painted directly: {n} allocations a frame, \
+         {median_us:.1} us median of 30, for {n_cells} flat rects, {n_rects} rounded rects, \
+         {n_glyphs} glyphs"
+    );
+    assert!(n_glyphs > 50 && n_rects > 3, "the panel has to have been painted");
+    assert!(n > 0, "a path that collects its slots into a Vec read as allocation-free");
+}

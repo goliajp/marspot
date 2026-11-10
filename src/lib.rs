@@ -106,6 +106,8 @@ pub mod keyboard_layout;
 pub mod link_open;
 pub mod link_probe;
 pub mod iosurface;
+#[cfg(test)]
+mod paint_parity_tests;
 pub mod pane;
 pub mod pane_name;
 pub mod pane_read;
