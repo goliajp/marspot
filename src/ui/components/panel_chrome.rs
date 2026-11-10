@@ -354,6 +354,47 @@ mod tests {
         assert_eq!((s.y_top, s.h), (150.0, card_spec::SEPARATOR_PX));
     }
 
+    /// `src` without its comments and without its tests module.  A
+    /// `#[cfg(test)]` on anything but a module is not the end of the
+    /// file's code.
+    fn code_of(src: &str) -> String {
+        let end = ["#[cfg(test)]\nmod ", "#[cfg(test)]\npub(crate) mod ", "#[cfg(test)]\npub mod "]
+            .iter()
+            .filter_map(|m| src.find(m))
+            .min()
+            .unwrap_or(src.len());
+        src[..end].lines().map(|l| l.split("//").next().unwrap_or_default()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Where `src` reaches into the theme table itself instead of
+    /// asking `panel_palette` for a role.
+    fn table_reads(src: &str) -> Vec<String> {
+        let code = code_of(src);
+        ["token::color", "theme::color", "theme::table", "theme::current", "table::color"]
+            .iter()
+            .filter(|path| code.contains(*path))
+            .map(|path| path.to_string())
+            .collect()
+    }
+
+    /// Every `.rs` file under `dir`, with its path from `dir`.
+    fn sources(dir: &std::path::Path) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).expect("the source directory") {
+                let path = entry.expect("a directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let name = path.strip_prefix(dir).expect("under the directory").display().to_string();
+                    out.push((name, std::fs::read_to_string(&path).expect("a source file")));
+                }
+            }
+        }
+        out
+    }
+
     /// A number written with a decimal point, as a colour channel is.
     fn float(tok: &str) -> Option<f64> {
         let tok = tok.trim().trim_end_matches("f32").trim_end_matches("f64").trim_end_matches('_');
@@ -368,12 +409,14 @@ mod tests {
     /// three numbers and has none outside 0..=1 — an RGB triple or an
     /// RGBA array, whichever way it is spelled.
     fn colour_literals(src: &str) -> Vec<String> {
-        let src = src.split("#[cfg(test)]").next().unwrap_or_default();
-        let code: String =
-            src.lines().map(|l| l.split("//").next().unwrap_or_default()).collect::<Vec<_>>().join("\n");
+        let code = code_of(src);
         let mut found = Vec::new();
         for ctor in ["Color::rgba(", "Color::rgb(", "Color::hex("] {
-            found.extend(code.match_indices(ctor).map(|(i, _)| code[i..].chars().take(32).collect()));
+            // `CGColor::rgb(` is another type's constructor.
+            let own = |i: usize| !code[..i].ends_with(|c: char| c.is_alphanumeric() || c == '_');
+            found.extend(
+                code.match_indices(ctor).filter(|(i, _)| own(*i)).map(|(i, _)| code[i..].chars().take(32).collect()),
+            );
         }
         for (open, _) in code.match_indices(['[', '(']) {
             let close = if code.as_bytes()[open] == b'[' { ']' } else { ')' };
@@ -425,35 +468,63 @@ mod tests {
         }
     }
 
-    /// Every file that lays a frame out or paints a component takes its
-    /// colours from `panel_palette`, the one place a theme token turns
-    /// into a role.
+    /// Every file that lays a frame out, paints a component or a view,
+    /// or draws for the renderer takes its colours from `panel_palette`,
+    /// the one place an entry of the theme table turns into a role.
     #[test]
     fn panel_chrome_source_has_no_colour_literals() {
-        // The palette itself holds the few roles that are not tokens.
+        // The palette holds the one colour that is no theme's: none.
         // The dev panel is a workbench that demonstrates the colour
-        // API with its own swatches and has not been moved yet.
-        const EXEMPT: [&str; 2] = ["panel_palette.rs", "dev_panel.rs"];
+        // API with its own swatches.  `Color` defines the constructors.
+        const EXEMPT: [&str; 3] = ["panel_palette.rs", "dev_panel.rs", "color.rs"];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut scanned = 0;
-        for dir in ["frame_build", "ui/components"] {
-            for entry in std::fs::read_dir(root.join(dir)).expect("the source directory") {
-                let path = entry.expect("a directory entry").path();
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-                if !name.ends_with(".rs") || EXEMPT.contains(&name.as_str()) {
+        for dir in ["frame_build", "ui/components", "ui/view", "ui/core"] {
+            for (name, src) in sources(&root.join(dir)) {
+                if EXEMPT.contains(&name.as_str()) {
                     continue;
                 }
-                let src = std::fs::read_to_string(&path).expect("a source file");
                 let found = colour_literals(&src);
                 assert!(found.is_empty(), "{dir}/{name} writes colours out by hand: {found:?}");
                 scanned += 1;
             }
         }
-        // A wrong path scans nothing and passes; both directories
+        let renderer = std::fs::read_to_string(root.join("render_metal.rs")).expect("the renderer");
+        let found = colour_literals(&renderer);
+        assert!(found.is_empty(), "render_metal.rs writes colours out by hand: {found:?}");
+        // A wrong path scans nothing and passes; the directories
         // together hold far more files than this.
-        assert!(scanned >= 30, "only {scanned} files were scanned");
+        assert!(scanned >= 55, "only {scanned} files were scanned");
         // The exemptions are still what they claim to be.
         let palette = std::fs::read_to_string(root.join("ui/components/panel_palette.rs")).expect("the palette");
         assert!(!colour_literals(&palette).is_empty(), "the palette no longer needs its exemption");
+    }
+
+    /// The theme table is read in two places: the theme's own module
+    /// and the role functions.  Everything else asks for a role, so a
+    /// colour that does not follow the theme has nowhere to come from.
+    #[test]
+    fn panel_chrome_only_the_palette_reads_the_theme_table() {
+        // Assembled, so that this file does not contain one itself.
+        let direct = format!("let c = crate::ui::{}::color::fg();", "theme");
+        assert_eq!(table_reads(&direct), ["theme::color"], "the search has to be able to find one");
+        assert!(table_reads("// theme::table in a comment\nlet c = palette::fg();").is_empty());
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut scanned = 0;
+        for (name, src) in sources(&root) {
+            let allowed = name.starts_with("ui/theme/")
+                || name == "ui/components/panel_palette.rs"
+                || name == "ui/components/dev_panel.rs";
+            if allowed {
+                continue;
+            }
+            let found = table_reads(&src);
+            assert!(found.is_empty(), "{name} reads the theme table directly: {found:?}");
+            scanned += 1;
+        }
+        assert!(scanned >= 150, "only {scanned} files were scanned");
+        let palette = std::fs::read_to_string(root.join("ui/components/panel_palette.rs")).expect("the palette");
+        assert!(!table_reads(&palette).is_empty(), "the palette is where the table is read");
     }
 }

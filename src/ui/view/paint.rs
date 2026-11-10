@@ -8,7 +8,8 @@
 
 use crate::ui::core::{Canvas, Color, Length};
 use super::layout::{Decoration, LaidOut, LayoutCtx};
-use super::view::View;
+use super::view::{role, View};
+use crate::ui::components::panel_palette as palette;
 
 /// Build a Canvas covering the laid-out subtree.  Caller hands
 /// the result to `MetalRenderer::encode_canvas_into` or similar.
@@ -118,7 +119,7 @@ fn paint_gradient_bands<'a>(canvas: &mut Canvas, rect: &super::layout::Rect, g: 
 }
 
 fn sample_gradient(stops: &[(f64, Color)], t: f64) -> Color {
-    if stops.is_empty() { return Color::rgba(0, 0, 0, 0.0); }
+    if stops.is_empty() { return Color::TRANSPARENT; }
     if t <= stops[0].0 { return stops[0].1; }
     if t >= stops.last().unwrap().0 { return stops.last().unwrap().1; }
     for w in stops.windows(2) {
@@ -157,7 +158,7 @@ fn paint_decoration<'a>(canvas: &mut Canvas, rect: &super::layout::Rect, deco: &
         .at(r_x, r_y)
         .size(r_w, r_h);
     if let Some(c) = deco.bg { b = b.fill(mul_alpha(c, opacity)); }
-    else { b = b.fill(Color::rgba(0, 0, 0, 0.0)); }
+    else { b = b.fill(Color::TRANSPARENT); }
     if deco.radius > 0.0 {
         b = b.radius(crate::ui::core::Pt(deco.radius / ctx.scale));
     }
@@ -273,11 +274,11 @@ fn paint_toggle<'a>(canvas: &mut Canvas, rect: &super::layout::Rect, id: super::
         s.get::<super::ToggleState>(id).map(|t| t.on).unwrap_or(false)
     });
     let track_color = if on {
-        crate::ui::theme::color::ACCENT
+        role(palette::now())
     } else {
-        crate::ui::theme::color::BG_HOVER
+        role(palette::chrome_hover())
     };
-    let knob_color = crate::ui::theme::color::FG;
+    let knob_color = role(palette::fg());
     let r = rect.h * 0.5;
     canvas.rect()
         .at(phys_to_pt(rect.x), phys_to_pt(rect.y))
@@ -311,7 +312,7 @@ fn paint_picker<'a>(canvas: &mut Canvas, rect: &super::layout::Rect, id: super::
     canvas.rect()
         .at(phys_to_pt(rect.x), phys_to_pt(rect.y))
         .size(phys_to_pt(rect.w), phys_to_pt(rect.h))
-        .fill(mul_alpha(crate::ui::theme::color::BG_PANEL, opacity))
+        .fill(mul_alpha(role(palette::frame_bg()), opacity))
         .radius(crate::ui::core::Pt(4.0))
         .draw();
     // Selected segment highlight.
@@ -319,7 +320,7 @@ fn paint_picker<'a>(canvas: &mut Canvas, rect: &super::layout::Rect, id: super::
         canvas.rect()
             .at(phys_to_pt(rect.x + selected as f64 * seg_w), phys_to_pt(rect.y))
             .size(phys_to_pt(seg_w), phys_to_pt(rect.h))
-            .fill(mul_alpha(crate::ui::theme::color::ACCENT, opacity))
+            .fill(mul_alpha(role(palette::now()), opacity))
             .radius(crate::ui::core::Pt(4.0))
             .draw();
     }
@@ -331,9 +332,9 @@ fn paint_picker<'a>(canvas: &mut Canvas, rect: &super::layout::Rect, id: super::
         let tx = seg_left + (seg_w - w) * 0.5;
         let ty = rect.y + (rect.h - ctx.cell_h_phys) * 0.5;
         let color = if i == selected {
-            crate::ui::theme::color::BG
+            role(palette::surface_base())
         } else {
-            crate::ui::theme::color::FG
+            role(palette::fg())
         };
         canvas.text(phys_to_pt(tx), phys_to_pt(ty), label)
             .color(mul_alpha(color, opacity))

@@ -55,9 +55,12 @@ fn pane_fingerprint(
     window_focused: bool,
     cell_w: f32,
     cell_h: f32,
+    theme: marspot_term::palette::ThemeId,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = marspot_term::fast_hash::FxHasher::default();
+    // Every colour in the cached instances is the theme's.
+    theme.hash(&mut h);
     view.seq.hash(&mut h);
     view.view_offset.hash(&mut h);
     view.cursor_visible.hash(&mut h);
@@ -138,6 +141,9 @@ pub(crate) fn push_panes(
         pane_caches.push(PaneInstanceCache::default());
     }
 
+    // The one place a frame asks which theme is in force for what it
+    // draws inside a pane; everything below is handed the answer.
+    let colors = crate::ui::theme::terminal::TermColors::current();
     let t_panes0 = std::time::Instant::now();
     let mut rebuilt = 0u32;
     let mut considered = 0u32;
@@ -154,7 +160,7 @@ pub(crate) fn push_panes(
         // into the cache so the NEXT idle frame for this pane is
         // a hit.  ui_rects are NOT cached (only one pane has the
         // search overlay at a time, and rebuilding it is cheap).
-        let fp = pane_fingerprint(view, rect, window_focused, cell_w, cell_h);
+        let fp = pane_fingerprint(view, rect, window_focused, cell_w, cell_h, colors.id);
         let cur_atlas_gen = atlas.rebuild_count;
         let cur_color_gen = color_atlas.rebuild_count;
         let cur_link_gen = crate::link_probe::generation();
@@ -194,6 +200,7 @@ pub(crate) fn push_panes(
             layout.padding as f32,
             layout.cell_title_h as f32,
             &mut pane_caches[i].links,
+            colors,
         );
         // Snapshot this pane's contributions into the cache.
         // Re-read atlas gens after the call: a glyph miss during
