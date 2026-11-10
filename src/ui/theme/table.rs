@@ -13,31 +13,47 @@
 //! cell takes [`current`] once per frame and passes the reference down.
 
 use crate::ui::core::Color;
-use marspot_term::palette::{self, Palette, ThemeId};
+use marspot_term::palette::{self, ThemeId};
 
 macro_rules! theme_table {
     ($($(#[$doc:meta])* $name:ident),* $(,)?) => {
         pub struct Theme {
+            /// Also names the terminal's own colours under this theme:
+            /// `marspot_term::palette::of(id)`.  A reference to them
+            /// here would be a pointer in the table, and a table with
+            /// a pointer in it is relocated data, not constant data.
             pub id: ThemeId,
-            /// The terminal's own colours under this theme.
-            pub term: &'static Palette,
             $($(#[$doc])* pub $name: Color,)*
+        }
+
+        /// A colour of the table by position, so that one function
+        /// can fetch any of them.
+        #[derive(Clone, Copy)]
+        #[allow(non_camel_case_types)] // the variants are the field names
+        pub enum Field { $($name,)* }
+
+        impl Theme {
+            fn field(&self, f: Field) -> Color {
+                match f { $(Field::$name => self.$name,)* }
+            }
         }
 
         /// The current theme's colours by name.
         ///
-        /// Not inlined, here and in `rgba`: there are hundreds of call
-        /// sites, and the load, the index and the conversion repeated
-        /// at each of them cost the binary tens of kilobytes for a
+        /// Each is a call into one shared function, here and in
+        /// `rgba`.  There are hundreds of call sites; the atomic load,
+        /// the index and the float conversion inlined into each cost
+        /// the binary tens of kilobytes, and an accessor function per
+        /// colour cost several more in code and unwind tables, for a
         /// call that happens a few dozen times a frame.
         pub mod color {
             use crate::ui::core::Color;
-            $(#[inline(never)] pub fn $name() -> Color { super::current().$name })*
+            $(#[inline(always)] pub fn $name() -> Color { super::color_of(super::Field::$name) })*
         }
 
         /// The same, as the unit floats painters take.
         pub mod rgba {
-            $(#[inline(never)] pub fn $name() -> [f32; 4] { super::current().$name.to_rgba_f32() })*
+            $(#[inline(always)] pub fn $name() -> [f32; 4] { super::rgba_of(super::Field::$name) })*
         }
     };
 }
@@ -142,7 +158,6 @@ const fn c(r: u8, g: u8, b: u8) -> Color {
 /// Today's look, and the default.
 pub static DARK: Theme = Theme {
     id: ThemeId::Dark,
-    term: &palette::DARK,
     fg: c(232, 238, 248),
     fg_secondary: c(179, 191, 209),
     fg_muted: c(140, 153, 168),
@@ -199,7 +214,6 @@ pub static DARK: Theme = Theme {
 /// pane in use is its blackest.
 pub static LIGHT: Theme = Theme {
     id: ThemeId::Light,
-    term: &palette::LIGHT,
     fg: c(28, 32, 40),
     fg_secondary: c(66, 74, 88),
     fg_muted: c(92, 100, 114),
@@ -258,7 +272,6 @@ pub static LIGHT: Theme = Theme {
 /// told apart by their borders, not by steps of grey.
 pub static CONTRAST: Theme = Theme {
     id: ThemeId::Contrast,
-    term: &palette::CONTRAST,
     fg: c(255, 255, 255),
     fg_secondary: c(230, 230, 230),
     fg_muted: c(204, 204, 204),
@@ -320,4 +333,14 @@ pub fn of(id: ThemeId) -> &'static Theme {
 /// The theme in force: one atomic load and an index.
 pub fn current() -> &'static Theme {
     of(palette::current_id())
+}
+
+#[inline(never)]
+fn color_of(f: Field) -> Color {
+    current().field(f)
+}
+
+#[inline(never)]
+fn rgba_of(f: Field) -> [f32; 4] {
+    current().field(f).to_rgba_f32()
 }

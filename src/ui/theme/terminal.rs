@@ -47,10 +47,11 @@ impl TermColors {
         let cursor = unit(t.cursor_text);
         let link = unit(t.link);
         let hit_fg = unit(t.search_hit_fg);
-        let bg = t.term.bg;
+        let pal = marspot_term::palette::of(t.id);
+        let bg = pal.bg;
         Self {
             id: t.id,
-            pal: t.term,
+            pal,
             dim_towards_bg: bg.1 > 0.5,
             search_hit: rgba8(t.search_hit),
             search_hit_fg: (hit_fg.0 as f64, hit_fg.1 as f64, hit_fg.2 as f64),
