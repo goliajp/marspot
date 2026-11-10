@@ -152,19 +152,28 @@ impl Trace {
 mod tests {
     use super::*;
 
+    /// Spins until the thread itself has used the CPU, not until the
+    /// clock says it must have: on a busy machine thirty milliseconds
+    /// of wall time is no promise of twenty on a core, and this failed
+    /// there for that reason alone.
     #[test]
     fn a_busy_thread_reads_as_runnable_and_burning_cpu() {
         let p = Probe::this_thread();
         let before = p.look().unwrap();
         let t = std::time::Instant::now();
         let mut x = 0u64;
-        while t.elapsed() < Duration::from_millis(30) {
-            x = x.wrapping_mul(31).wrapping_add(1);
-        }
+        let after = loop {
+            for _ in 0..200_000 {
+                x = x.wrapping_mul(31).wrapping_add(1);
+            }
+            let now = p.look().unwrap();
+            if now.cpu - before.cpu >= Duration::from_millis(20) {
+                break now;
+            }
+            assert!(t.elapsed() < Duration::from_secs(30), "20 ms of CPU never came: {before:?} → {now:?}");
+        };
         std::hint::black_box(x);
-        let after = p.look().unwrap();
         assert_eq!(after.state, State::Runnable);
-        assert!(after.cpu - before.cpu >= Duration::from_millis(20), "{before:?} → {after:?}");
     }
 
     #[test]
