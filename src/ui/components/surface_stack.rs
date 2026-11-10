@@ -40,6 +40,48 @@ pub enum SurfaceKind {
 impl SurfaceKind {
     pub const PANELS: [SurfaceKind; 4] =
         [Self::Settings, Self::Layout, Self::Processes, Self::Accounts];
+
+    /// The name the log knows it by.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Settings => "settings",
+            Self::Layout => "layout",
+            Self::Processes => "process",
+            Self::Accounts => "accounts",
+        }
+    }
+}
+
+/// What closed a panel.  Set where the decision is made, so the log
+/// says which rule fired and not which one a reader would guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseBy {
+    CloseButton,
+    Escape,
+    CmdW,
+    /// A press outside its frame.
+    Outside,
+    /// Its own toolbar button or shortcut.
+    Toggle,
+    /// Another panel opened in its place.
+    Replaced,
+    /// Something in its own content that finishes it — the layout
+    /// panel's apply button.
+    Content,
+}
+
+impl CloseBy {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::CloseButton => "close_button",
+            Self::Escape => "escape",
+            Self::CmdW => "cmd_w",
+            Self::Outside => "outside",
+            Self::Toggle => "toggle",
+            Self::Replaced => "replaced",
+            Self::Content => "content",
+        }
+    }
 }
 
 /// The keys the stack tells apart.
@@ -58,7 +100,7 @@ pub enum KeyAction {
     /// A panel is open and has no use for the key; it goes nowhere.
     Swallow,
     /// The panel closed.
-    Close(SurfaceKind),
+    Close(Change),
 }
 
 /// What a press of the primary button does while a panel is open.
@@ -67,7 +109,7 @@ pub enum Press {
     /// On the close button or outside the frame: the panel closed.
     /// Consumed either way — a press that dismisses a panel does not
     /// also land on what was under it.
-    Close(SurfaceKind),
+    Close(Change),
     /// On the header: a drag began.
     BeginDrag,
     /// On the panel's content, which decides what it means.
@@ -78,8 +120,17 @@ pub enum Press {
 /// tear down the panels' own data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Change {
-    pub closed: Option<SurfaceKind>,
+    pub closed: Option<(SurfaceKind, CloseBy)>,
     pub opened: Option<SurfaceKind>,
+}
+
+/// A header drag that ended somewhere other than where it began.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Moved {
+    pub kind: SurfaceKind,
+    /// How far the panel went, which a window edge can make less than
+    /// how far the pointer did.
+    pub by: (f64, f64),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -119,7 +170,7 @@ impl SurfaceStack {
     /// A toolbar button or a shortcut: closes `kind` if it is open,
     /// otherwise opens it in place of whatever was.
     pub fn on_toggle(&mut self, kind: SurfaceKind) -> Change {
-        if self.open == Some(kind) { self.close() } else { self.show(kind) }
+        if self.open == Some(kind) { self.close(CloseBy::Toggle) } else { self.show(kind) }
     }
 
     /// Opens `kind` in place of whatever was open.  Nothing changes if
@@ -128,25 +179,23 @@ impl SurfaceStack {
         if self.open == Some(kind) {
             return Change::default();
         }
-        let closed = self.close().closed;
+        let closed = self.close(CloseBy::Replaced).closed;
         self.open = Some(kind);
         Change { closed, opened: Some(kind) }
     }
 
-    /// Closes whatever is open.
-    pub fn close(&mut self) -> Change {
+    /// Closes whatever is open, `by` being what asked.
+    pub fn close(&mut self, by: CloseBy) -> Change {
         self.offset = (0.0, 0.0);
         self.grab = None;
-        Change { closed: self.open.take(), opened: None }
+        Change { closed: self.open.take().map(|kind| (kind, by)), opened: None }
     }
 
     pub fn on_key(&mut self, key: Key) -> KeyAction {
         match (self.open, key) {
             (None, _) => KeyAction::PassThrough,
-            (Some(kind), Key::Esc | Key::CmdW) => {
-                self.close();
-                KeyAction::Close(kind)
-            }
+            (Some(_), Key::Esc) => KeyAction::Close(self.close(CloseBy::Escape)),
+            (Some(_), Key::CmdW) => KeyAction::Close(self.close(CloseBy::CmdW)),
             (Some(_), Key::Other) => KeyAction::Swallow,
         }
     }
@@ -155,9 +204,10 @@ impl SurfaceStack {
     /// `None` when nothing is open and the press is the panes'.
     pub fn on_press(&mut self, x: f64, y: f64, chrome: &PanelChrome) -> Option<Press> {
         let kind = self.open?;
-        Some(if chrome.hit_close(x, y) || !chrome.frame.contains(x, y) {
-            self.close();
-            Press::Close(kind)
+        Some(if chrome.hit_close(x, y) {
+            Press::Close(self.close(CloseBy::CloseButton))
+        } else if !chrome.frame.contains(x, y) {
+            Press::Close(self.close(CloseBy::Outside))
         } else if chrome.hit_header(x, y) {
             let f = chrome.frame;
             let home = Rect { x: f.x - self.offset.0, y_top: f.y_top - self.offset.1, ..f };
@@ -182,13 +232,51 @@ impl SurfaceStack {
         true
     }
 
-    /// The button came up.
-    pub fn on_release(&mut self) {
-        self.grab = None;
+    /// The button came up.  Says where a header drag left the panel,
+    /// when it left it somewhere new.
+    pub fn on_release(&mut self) -> Option<Moved> {
+        let g = self.grab.take()?;
+        let by = (self.offset.0 - g.offset.0, self.offset.1 - g.offset.1);
+        (by != (0.0, 0.0)).then_some(Moved { kind: self.open?, by })
     }
 
     pub fn dragging(&self) -> bool {
         self.grab.is_some()
+    }
+
+    /// Writes `change`, which this stack just made in window `window`,
+    /// to the log: what closed and why, what opened and where.
+    pub fn log_change(&self, window: u32, change: Change) {
+        if let Some((kind, by)) = change.closed {
+            crate::lx_event!(
+                "PANEL_CLOSE",
+                "a panel closed",
+                kind = kind.name(),
+                by = by.name(),
+                window = window
+            );
+        }
+        if let Some(kind) = change.opened {
+            crate::lx_event!(
+                "PANEL_OPEN",
+                "a panel opened",
+                kind = kind.name(),
+                window = window,
+                offset = format!("{},{}", self.offset.0, self.offset.1)
+            );
+        }
+    }
+}
+
+impl Moved {
+    pub fn log(&self) {
+        crate::lx_event!(
+            "PANEL_MOVE",
+            "a panel was dragged by its header",
+            kind = self.kind.name(),
+            dx = self.by.0,
+            dy = self.by.1
+        );
     }
 }
 
@@ -247,7 +335,7 @@ mod tests {
         }
         assert_eq!(s.on_press(500.0, 500.0, &chrome(&s)), None);
         assert!(!drag(&mut s, 1.0, 1.0));
-        assert_eq!(s.close(), Change::default());
+        assert_eq!(s.close(CloseBy::Escape), Change::default());
     }
 
     #[test]
@@ -257,14 +345,17 @@ mod tests {
             assert_eq!(s.on_toggle(kind), Change { closed: None, opened: Some(kind) });
             assert_eq!(s.open(), Some(kind));
             assert!(s.owns_pointer());
-            assert_eq!(s.on_toggle(kind), Change { closed: Some(kind), opened: None });
+            assert_eq!(
+                s.on_toggle(kind),
+                Change { closed: Some((kind, CloseBy::Toggle)), opened: None }
+            );
             assert_eq!(s.open(), None);
 
             for other in SurfaceKind::PANELS.into_iter().filter(|o| *o != kind) {
                 let mut s = opened(other);
                 assert_eq!(
                     s.on_toggle(kind),
-                    Change { closed: Some(other), opened: Some(kind) },
+                    Change { closed: Some((other, CloseBy::Replaced)), opened: Some(kind) },
                     "{kind:?} over {other:?}"
                 );
                 assert_eq!(s.open(), Some(kind), "one panel at a time");
@@ -279,23 +370,29 @@ mod tests {
         drag(&mut s, 650.0, 240.0);
         assert_eq!(s.show(Layout), Change::default());
         assert_eq!(s.offset(), (50.0, 30.0), "it stays where it was dragged");
-        assert_eq!(s.show(Settings), Change { closed: Some(Layout), opened: Some(Settings) });
+        assert_eq!(
+            s.show(Settings),
+            Change { closed: Some((Layout, CloseBy::Replaced)), opened: Some(Settings) }
+        );
         assert_eq!(s.offset(), (0.0, 0.0));
     }
 
     #[test]
     fn keys_close_or_go_nowhere() {
         let table = [
-            (Key::Esc, true),
-            (Key::CmdW, true),
-            (Key::Other, false),
+            (Key::Esc, Some(CloseBy::Escape)),
+            (Key::CmdW, Some(CloseBy::CmdW)),
+            (Key::Other, None),
         ];
         for kind in SurfaceKind::PANELS {
-            for (key, closes) in table {
+            for (key, by) in table {
                 let mut s = opened(kind);
-                let want = if closes { KeyAction::Close(kind) } else { KeyAction::Swallow };
+                let want = match by {
+                    Some(by) => KeyAction::Close(Change { closed: Some((kind, by)), opened: None }),
+                    None => KeyAction::Swallow,
+                };
                 assert_eq!(s.on_key(key), want, "{kind:?} {key:?}");
-                assert_eq!(s.open().is_none(), closes, "{kind:?} {key:?}");
+                assert_eq!(s.open().is_none(), by.is_some(), "{kind:?} {key:?}");
             }
         }
     }
@@ -304,17 +401,21 @@ mod tests {
     fn a_press_closes_drags_or_is_the_contents() {
         let c = PanelChrome::new(home(), TOP);
         let close = (c.close.x + c.close.w * 0.5, c.close.y_top + c.close.h * 0.5);
-        let table: [(&str, (f64, f64), fn(SurfaceKind) -> Press); 7] = [
-            ("close button", close, Press::Close),
-            ("left of the frame", (399.0, 500.0), Press::Close),
-            ("above the frame", (800.0, 199.0), Press::Close),
-            ("on the toolbar strip", (800.0, 10.0), Press::Close),
-            ("header", (600.0, 210.0), |_| Press::BeginDrag),
-            ("content", (800.0, 500.0), Press::Content),
-            ("bottom padding", (800.0, 799.0), Press::Content),
+        fn closed(by: CloseBy) -> Box<dyn Fn(SurfaceKind) -> Press> {
+            Box::new(move |kind| Press::Close(Change { closed: Some((kind, by)), opened: None }))
+        }
+        let table: [(&str, (f64, f64), Box<dyn Fn(SurfaceKind) -> Press>); 7] = [
+            ("close button", close, closed(CloseBy::CloseButton)),
+            ("left of the frame", (399.0, 500.0), closed(CloseBy::Outside)),
+            ("above the frame", (800.0, 199.0), closed(CloseBy::Outside)),
+            ("on the toolbar strip", (800.0, 10.0), closed(CloseBy::Outside)),
+            ("header", (600.0, 210.0), Box::new(|_| Press::BeginDrag)),
+            ("content", (800.0, 500.0), Box::new(Press::Content)),
+            ("bottom padding", (800.0, 799.0), Box::new(Press::Content)),
         ];
         for kind in SurfaceKind::PANELS {
-            for (what, (x, y), want) in table {
+            for (what, (x, y), want) in &table {
+                let (x, y) = (*x, *y);
                 let mut s = opened(kind);
                 let want = want(kind);
                 assert_eq!(s.on_press(x, y, &c), Some(want), "{kind:?} {what}");
@@ -329,7 +430,10 @@ mod tests {
         let mut s = opened(Processes);
         let c = chrome(&s);
         assert!(c.header.contains(c.close.x + 1.0, c.close.y_top + 1.0));
-        assert_eq!(s.on_press(c.close.x + 1.0, c.close.y_top + 1.0, &c), Some(Press::Close(Processes)));
+        assert_eq!(
+            s.on_press(c.close.x + 1.0, c.close.y_top + 1.0, &c),
+            Some(Press::Close(Change { closed: Some((Processes, CloseBy::CloseButton)), opened: None }))
+        );
         assert!(!s.dragging());
     }
 
@@ -340,8 +444,9 @@ mod tests {
             assert_eq!(s.on_press(600.0, 210.0, &chrome(&s)), Some(Press::BeginDrag));
             assert!(drag(&mut s, 650.4, 239.6));
             assert_eq!(s.offset(), (50.0, 30.0), "whole pixels");
-            s.on_release();
+            assert_eq!(s.on_release(), Some(Moved { kind, by: (50.0, 30.0) }));
             assert!(!s.dragging());
+            assert_eq!(s.on_release(), None, "one release, one report");
             assert!(!drag(&mut s, 900.0, 900.0), "the button is up");
 
             // A second drag starts from where the first one ended.
@@ -350,8 +455,13 @@ mod tests {
             assert_eq!(s.on_press(650.0, 240.0, &c), Some(Press::BeginDrag));
             drag(&mut s, 640.0, 240.0);
             assert_eq!(s.offset(), (40.0, 30.0));
+            assert_eq!(s.on_release(), Some(Moved { kind, by: (-10.0, 0.0) }), "this drag's share");
 
-            assert_eq!(s.on_key(Key::Esc), KeyAction::Close(kind));
+            // A press on the header that goes nowhere is not a move.
+            assert_eq!(s.on_press(640.0, 240.0, &chrome(&s)), Some(Press::BeginDrag));
+            assert_eq!(s.on_release(), None);
+
+            assert!(matches!(s.on_key(Key::Esc), KeyAction::Close(_)));
             assert_eq!(s.offset(), (0.0, 0.0), "{kind:?} reopens in the middle");
             assert!(!s.dragging());
             s.show(kind);
