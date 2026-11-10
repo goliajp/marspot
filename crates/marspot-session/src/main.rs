@@ -1431,7 +1431,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     // carried values would be a second path that can disagree with
     // it.  Every unit bug this codebase has had was two paths
     // answering one question.
-    let mut last_settings_check = Instant::now();
+    let mut last_settings_check = Instant::now() - SETTINGS_CHECK_INTERVAL;
     const SETTINGS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
     loop {
         // A gate that is holding a frame owes a flush even if the PTY
@@ -1477,8 +1477,8 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 lx_event!(
                     "SETTINGS_RELOADED",
                     "settings.toml changed on disk",
-                    circled_wide =
-                        marspot_term::settings::get().appearance_circled_wide as u64
+                    circled_wide = marspot_term::settings::get().appearance_circled_wide as u64,
+                    theme = marspot_term::palette::current_id().as_str()
                 );
             }
         }

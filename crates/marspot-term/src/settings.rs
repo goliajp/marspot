@@ -36,6 +36,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
+use crate::palette::ThemeId;
+
 /// Every user-owned decision, resolved.
 ///
 /// Plain values, not `Option`s: a missing key means the default, and
@@ -143,6 +145,19 @@ pub struct Settings {
     /// Show the toolbar button for the UI workbench panel. Off: it is
     /// a tool for working on marspot, not for using it.
     pub dev_panel_button: bool,
+    /// Which colours everything is drawn in: a named theme, or `None`
+    /// to follow the system's appearance.
+    ///
+    /// Dark unless the file says otherwise, so an upgrade changes
+    /// nothing a user can see; following the system is opted into.
+    pub appearance_theme: Option<ThemeId>,
+}
+
+fn parse_theme(v: &str, fallback: Option<ThemeId>) -> Option<ThemeId> {
+    if v.eq_ignore_ascii_case("system") {
+        return None;
+    }
+    ThemeId::parse(v).map_or(fallback, Some)
 }
 
 /// What the claudecode plugin does with an idle pane that has a better
@@ -188,6 +203,7 @@ impl Default for Settings {
             agents_install: true,
             cc_rebalance: Rebalance::On,
             dev_panel_button: false,
+            appearance_theme: Some(ThemeId::Dark),
         }
     }
 }
@@ -223,10 +239,10 @@ struct Cache {
 fn cache() -> &'static RwLock<Cache> {
     static CACHE: std::sync::OnceLock<RwLock<Cache>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| {
-        RwLock::new(Cache {
-            settings: Arc::new(parse(&std::fs::read_to_string(path()).unwrap_or_default())),
-            seen: mtime(),
-        })
+        let settings = Arc::new(parse(&std::fs::read_to_string(path()).unwrap_or_default()));
+        publish_mirrors(&settings);
+        crate::system_theme::poll();
+        RwLock::new(Cache { settings, seen: mtime() })
     })
 }
 
@@ -274,6 +290,7 @@ pub fn circled_wide() -> bool {
 /// installed, so a mirror can never be staler than the snapshot.
 fn publish_mirrors(s: &Settings) {
     CIRCLED_WIDE.store(1 + s.appearance_circled_wide as u8, Ordering::Relaxed);
+    crate::palette::set_choice(s.appearance_theme);
 }
 
 /// Re-read the file if it has changed on disk.  Returns true when the
@@ -283,7 +300,16 @@ fn publish_mirrors(s: &Settings) {
 /// One `stat` per call.  Deliberately cheap enough to sit on an
 /// existing once-a-second sweep: that is what makes hand-editing the
 /// file take effect without restarting a layer.
+///
+/// The same sweep follows the system's appearance when the theme
+/// setting says to, which is a second `stat` and only then.
 pub fn reload_if_changed() -> bool {
+    let changed = reload_file_if_changed();
+    crate::system_theme::poll();
+    changed
+}
+
+fn reload_file_if_changed() -> bool {
     let now = mtime();
     {
         let c = cache().read().unwrap_or_else(|p| p.into_inner());
@@ -317,6 +343,7 @@ const KEYS: &[&str] = &[
     "reclaim.enabled",
     "reclaim.idle_minutes",
     "reclaim.prefetch_on_return",
+    "appearance.theme",
     "appearance.circled_wide",
     "appearance.dim_scale",
     "input.scroll_factor",
@@ -328,6 +355,7 @@ fn value_of(s: &Settings, key: &str) -> String {
         "reclaim.enabled" => s.reclaim_enabled.to_string(),
         "reclaim.idle_minutes" => s.reclaim_idle_minutes.to_string(),
         "reclaim.prefetch_on_return" => s.reclaim_prefetch.to_string(),
+        "appearance.theme" => s.appearance_theme.map_or("system", ThemeId::as_str).to_string(),
         "appearance.circled_wide" => s.appearance_circled_wide.to_string(),
         "appearance.render_u_tags" => s.render_u_tags.to_string(),
         "appearance.dim_scale" => fmt_f32(s.dim_scale),
@@ -364,6 +392,7 @@ pub fn parse(body: &str) -> Settings {
                 s.reclaim_idle_minutes = v.parse().unwrap_or(s.reclaim_idle_minutes)
             }
             "reclaim.prefetch_on_return" => s.reclaim_prefetch = parse_bool(v, s.reclaim_prefetch),
+            "appearance.theme" => s.appearance_theme = parse_theme(v, s.appearance_theme),
             "appearance.circled_wide" => {
                 s.appearance_circled_wide = parse_bool(v, s.appearance_circled_wide)
             }
@@ -544,6 +573,34 @@ mod tests {
             assert_eq!(parse(&render(&s, &body)).cc_rebalance, want, "{word} after a rewrite");
         }
         assert_eq!(parse("claudecode.rebalance = maybe\n").cc_rebalance, Rebalance::On);
+    }
+
+    /// The theme is dark until the file names another, `system` is a
+    /// value like the rest, and a word that is no theme changes nothing.
+    #[test]
+    fn the_theme_is_dark_unless_the_file_names_another() {
+        assert_eq!(Settings::default().appearance_theme, Some(ThemeId::Dark));
+        for (word, want) in [
+            ("dark", Some(ThemeId::Dark)),
+            ("light", Some(ThemeId::Light)),
+            ("contrast", Some(ThemeId::Contrast)),
+            ("system", None),
+        ] {
+            let body = format!("appearance.theme = {word}\n");
+            let s = parse(&body);
+            assert_eq!(s.appearance_theme, want, "{word}");
+            assert!(render(&s, &body).starts_with(&body), "{word} is written back as it was read");
+        }
+        assert_eq!(parse("appearance.theme = sepia\n"), Settings::default());
+    }
+
+    /// Whatever installs a settings value puts its theme in force.
+    #[test]
+    fn installing_settings_switches_the_theme() {
+        set_for_test(Settings { appearance_theme: Some(ThemeId::Light), ..Settings::default() });
+        assert_eq!(crate::palette::current_id(), ThemeId::Light);
+        set_for_test(Settings::default());
+        assert_eq!(crate::palette::current_id(), ThemeId::Dark);
     }
 
     /// Out of range is a typo, not a wish: honouring a clamped tenth
