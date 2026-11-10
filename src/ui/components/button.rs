@@ -16,6 +16,8 @@
 
 use marspot_term::layout::Rect;
 use crate::ui::core::{ViewPainter, IconComponent};
+use crate::ui::components::panel_palette as palette;
+use crate::ui::theme::spec::{chrome, space};
 use crate::ui::theme::PanelText;
 
 /// Every button label in the app, one role.  A button says a word to
@@ -43,79 +45,38 @@ pub struct ButtonStyle {
     pub icon_size: f32,
 }
 
-impl Default for ButtonStyle {
-    fn default() -> Self {
-        Self {
-            bg:           [0.18, 0.19, 0.23, 1.0],
-            bg_hover:     [0.26, 0.28, 0.34, 1.0],
-            fg:           [0.92, 0.94, 0.97, 1.0],
-            fg_hover:     [1.00, 1.00, 1.00, 1.0],
-            border_color: [0.30, 0.32, 0.38, 1.0],
-            border_width: 1.0,
-            corner_radius: 6.0,
-            padding_x: 8.0,
-            icon_gap: 6.0,
-            icon_size: 12.0,
-        }
-    }
-}
-
 impl ButtonStyle {
-    /// Ghost button — no fill / no border at idle; subtle fill on
-    /// hover.  Used for icon-only controls sitting INSIDE an already-
-    /// opaque parent surface (search bar's × / Aa, toolbar icons,
-    /// inline chrome).  The "no transparent overlay" invariant
-    /// applies to `View` chrome (outer surface vs grid), not to
-    /// buttons stacked on an already-opaque parent.
+    /// Ghost button — nothing at rest but its glyph; a fill under the
+    /// pointer.  For icon-only controls on a surface that is already
+    /// opaque: the search overlay's × and `Aa`.
     pub fn ghost() -> Self {
         Self {
-            bg:           [0.0, 0.0, 0.0, 0.0],
-            bg_hover:     [1.0, 1.0, 1.0, 0.08],
-            fg:           [0.60, 0.63, 0.70, 1.0],
-            fg_hover:     [1.00, 1.00, 1.00, 1.0],
-            border_color: [0.0, 0.0, 0.0, 0.0],
+            bg: palette::none(),
+            bg_hover: palette::chrome_hover(),
+            fg: palette::chrome_icon(),
+            fg_hover: palette::fg(),
+            border_color: palette::none(),
             border_width: 0.0,
-            corner_radius: 4.0,
-            padding_x: 4.0,
-            icon_gap: 4.0,
-            icon_size: 12.0,
+            corner_radius: chrome::px(chrome::TOOLBAR_RADIUS) as f32,
+            padding_x: chrome::px(space::S4) as f32,
+            icon_gap: chrome::px(space::S4) as f32,
+            icon_size: chrome::px(chrome::TOOLBAR_ICON) as f32,
         }
     }
 
-    /// Toolbar chrome — quiet raised surface on idle, slightly deeper
-    /// on hover.  Pairs with the chrome icons (sidebar / grid /
-    /// list-tree) to make the toolbar buttons visually one family.
-    pub fn chrome() -> Self {
-        Self {
-            bg:           [0.085, 0.095, 0.115, 1.0],
-            bg_hover:     [0.130, 0.140, 0.165, 1.0],
-            fg:           [0.55, 0.60, 0.65, 1.0],
-            fg_hover:     [0.75, 0.80, 0.85, 1.0],
-            border_color: [0.18, 0.20, 0.23, 1.0],
-            border_width: 1.0,
-            corner_radius: 4.0,
-            padding_x: 4.0,
-            icon_gap: 4.0,
-            icon_size: 14.0,
+    /// A toolbar button: a ghost at rest, and the accent's tint while
+    /// what it opens is open (`on`) — the same fill as the sidebar row
+    /// of the pane in use.
+    pub fn toolbar(on: bool) -> Self {
+        let ghost = Self::ghost();
+        if !on {
+            return ghost;
         }
-    }
-
-    /// Destructive / kill button — red-tinted variant for "you sure?"
-    /// affordances like the process panel row [×] or sidebar close-
-    /// session [×].  Same shape as the default filled button, just
-    /// red fills.
-    pub fn destructive() -> Self {
         Self {
-            bg:           [0.30, 0.10, 0.11, 1.0],
-            bg_hover:     [0.45, 0.16, 0.18, 1.0],
-            fg:           [0.96, 0.70, 0.70, 1.0],
-            fg_hover:     [1.00, 0.85, 0.85, 1.0],
-            border_color: [0.0, 0.0, 0.0, 0.0],
-            border_width: 0.0,
-            corner_radius: 4.0,
-            padding_x: 4.0,
-            icon_gap: 4.0,
-            icon_size: 12.0,
+            bg: palette::chrome_on(),
+            bg_hover: palette::hover(palette::chrome_on()),
+            fg: palette::fg(),
+            ..ghost
         }
     }
 }
@@ -295,21 +256,12 @@ mod tests {
             icon: None,
             icon_position: IconPosition::Only,
             hovered: false,
-            style: ButtonStyle::default(),
+            style: ButtonStyle::ghost(),
         };
         assert!(b.hit_test(50.0, 30.0));
         assert!(!b.hit_test(5.0, 30.0));
         assert!(!b.hit_test(115.0, 30.0));
         assert!(!b.hit_test(50.0, 60.0));
-    }
-
-    #[test]
-    fn default_style_is_opaque() {
-        let s = ButtonStyle::default();
-        assert_eq!(s.bg[3], 1.0, "button BG must be opaque");
-        assert_eq!(s.fg[3], 1.0);
-        assert_eq!(s.bg_hover[3], 1.0);
-        assert_eq!(s.fg_hover[3], 1.0);
     }
 
     #[test]
@@ -329,13 +281,11 @@ mod tests {
     }
 
     #[test]
-    fn destructive_style_uses_red_tones() {
-        let s = ButtonStyle::destructive();
-        assert!(s.bg[0] > s.bg[1] && s.bg[0] > s.bg[2],
-            "destructive BG must be red-dominant");
-        assert!(s.fg[0] > s.fg[1] && s.fg[0] > s.fg[2],
-            "destructive FG must be red-dominant");
-        assert_eq!(s.bg[3], 1.0);
-        assert_eq!(s.fg[3], 1.0);
+    fn toolbar_style_differs_from_a_ghost_only_when_on() {
+        let (off, on, ghost) = (ButtonStyle::toolbar(false), ButtonStyle::toolbar(true), ButtonStyle::ghost());
+        assert_eq!((off.bg, off.bg_hover, off.fg), (ghost.bg, ghost.bg_hover, ghost.fg));
+        assert!(on.bg[3] > 0.0, "an on button is filled at rest");
+        assert_ne!(on.bg, on.bg_hover, "and still answers the pointer");
+        assert_eq!(on.corner_radius, off.corner_radius);
     }
 }

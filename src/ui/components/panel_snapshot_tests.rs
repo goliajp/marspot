@@ -71,7 +71,7 @@ use crate::ui::components::settings_paint::SettingsRender;
 
 /// A terminal's worth of text for the panel to sit on, so the dimmed
 /// backdrop and the frame's shadow are in the picture.
-fn terminal_text(cols: u16, rows: u16) -> Grid {
+pub(super) fn terminal_text(cols: u16, rows: u16) -> Grid {
     const LINE: &str = "the quick brown fox jumps over the lazy dog  0123456789  ";
     let mut g = Grid::new(cols, rows);
     for r in 0..rows {

@@ -133,6 +133,13 @@ impl Color {
     /// Alpha is clamped to [0, 1] at this boundary so a
     /// caller's intermediate `1.5` doesn't reach the GPU.
     #[inline]
+    /// The colour a `[r, g, b, a]` in 0..1 names — what the palette
+    /// roles return — for the canvas, which takes a `Color`.
+    pub fn from_rgba_f32(c: [f32; 4]) -> Self {
+        let ch = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        Self { r: ch(c[0]), g: ch(c[1]), b: ch(c[2]), a: c[3] as f64 }
+    }
+
     pub fn to_rgba_f32(self) -> [f32; 4] {
         [
             (self.r as f32) / 255.0,
@@ -257,6 +264,14 @@ mod tests {
         assert_eq!(v[1], 0.0);
         assert!((v[2] - 128.0 / 255.0).abs() < 1e-6);
         assert_eq!(v[3], 1.0);
+    }
+
+    #[test]
+    fn from_rgba_f32_is_the_inverse_of_to_rgba_f32() {
+        let c = Color::rgba(51, 107, 173, 0.35);
+        let back = Color::from_rgba_f32(c.to_rgba_f32());
+        assert_eq!((back.r, back.g, back.b), (51, 107, 173));
+        assert!((back.a - 0.35).abs() < 1e-6);
     }
 
     #[test]

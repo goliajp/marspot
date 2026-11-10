@@ -23,17 +23,6 @@ pub struct TextInputStyle {
     pub caret_inset_y: f32,
 }
 
-impl Default for TextInputStyle {
-    fn default() -> Self {
-        Self {
-            fg: [0.95, 0.96, 0.97, 1.0],
-            caret_color: [0.40, 0.62, 1.00, 0.95],
-            caret_w: 2.0,
-            caret_inset_y: 2.0,
-        }
-    }
-}
-
 pub struct TextInput<'a> {
     pub rect: Rect,
     pub value: &'a str,
@@ -71,18 +60,5 @@ impl<'a> TextInput<'a> {
             },
             self.style.caret_color,
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_style_is_visible() {
-        let s = TextInputStyle::default();
-        assert!(s.caret_w > 0.0);
-        assert!(s.caret_inset_y >= 0.0);
-        assert_eq!(s.fg[3], 1.0, "input text must be opaque");
     }
 }
