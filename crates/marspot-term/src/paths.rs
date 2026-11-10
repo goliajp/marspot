@@ -157,6 +157,24 @@ pub fn shell_pid_file() -> PathBuf {
     state_root().join("shell.pid")
 }
 
+/// PATH for a process that has none: the one launchd gives an app.
+pub const DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// `path` with `<home>/.local/bin` in front, unless it is already an
+/// element.
+///
+/// The agent CLIs' installers put their commands there, and a stock
+/// macOS shell does not search it.  Putting it on the PATH a pane
+/// starts with makes the commands found without editing a shell
+/// profile, which is the user's file.
+pub fn path_with_local_bin(path: &str, home: &std::path::Path) -> String {
+    let local = home.join(".local/bin");
+    match local.to_str() {
+        Some(l) if !path.split(':').any(|p| p == l) => format!("{l}:{path}"),
+        _ => path.to_string(),
+    }
+}
+
 /// Any marspot process other than this one alive?  Asks the platform
 /// for the pid table and each pid's executable — no fork, no shell.
 /// Conservative: a question the platform cannot answer reads as
@@ -238,6 +256,17 @@ mod tests {
         // Idempotent at the public entry (barrier + exists-check):
         migrate_legacy_state_root();
         assert!(std::fs::symlink_metadata(&new).unwrap().is_dir());
+    }
+
+    #[test]
+    fn local_bin_goes_in_front_unless_it_is_already_an_element() {
+        let home = std::path::Path::new("/Users/x");
+        assert_eq!(path_with_local_bin(DEFAULT_PATH, home), format!("/Users/x/.local/bin:{DEFAULT_PATH}"));
+        let has = "/usr/bin:/Users/x/.local/bin";
+        assert_eq!(path_with_local_bin(has, home), has);
+        // another directory that merely starts the same is not it
+        let near = "/Users/x/.local/bin2:/usr/bin";
+        assert_eq!(path_with_local_bin(near, home), format!("/Users/x/.local/bin:{near}"));
     }
 
     #[test]
