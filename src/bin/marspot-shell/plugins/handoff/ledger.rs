@@ -15,7 +15,7 @@ use super::transcript::Agent;
 /// One agent's session in this pane.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Side {
-    /// claude's session uuid, codex's thread id.
+    /// claude's session uuid, codex's thread id, gemini's session id.
     pub id: String,
     /// How far into that session's history has been handed over.
     pub offset: u64,
@@ -25,6 +25,7 @@ pub struct Side {
 pub struct Ledger {
     pub claude: Option<Side>,
     pub codex: Option<Side>,
+    pub gemini: Option<Side>,
 }
 
 impl Ledger {
@@ -32,12 +33,14 @@ impl Ledger {
         match a {
             Agent::Claude => self.claude.as_ref(),
             Agent::Codex => self.codex.as_ref(),
+            Agent::Gemini => self.gemini.as_ref(),
         }
     }
     pub fn set(&mut self, a: Agent, s: Option<Side>) {
         match a {
             Agent::Claude => self.claude = s,
             Agent::Codex => self.codex = s,
+            Agent::Gemini => self.gemini = s,
         }
     }
 
@@ -50,7 +53,7 @@ impl Ledger {
 
     fn encode(&self) -> String {
         let mut out = String::new();
-        for (a, s) in [(Agent::Claude, &self.claude), (Agent::Codex, &self.codex)] {
+        for (a, s) in [(Agent::Claude, &self.claude), (Agent::Codex, &self.codex), (Agent::Gemini, &self.gemini)] {
             if let Some(s) = s {
                 out.push_str(&format!("{} {} {}\n", a.key(), s.id, s.offset));
             }
@@ -68,6 +71,7 @@ impl Ledger {
             match k {
                 "claude" => l.claude = side,
                 "codex" => l.codex = side,
+                "gemini" => l.gemini = side,
                 _ => {}
             }
         }
@@ -84,8 +88,8 @@ impl Ledger {
     }
 }
 
-/// `<state>/handoff` — shared by both agent plugins, so not either
-/// one's plugin state dir.
+/// `<state>/handoff` — shared by the agent plugins, so not any one's
+/// plugin state dir.
 pub fn dir() -> PathBuf {
     marspot::paths::state_root().join("handoff")
 }
@@ -140,6 +144,7 @@ mod tests {
         let mut l = Ledger::default();
         l.set(Agent::Claude, Some(Side { id: "u-1".into(), offset: 42 }));
         l.set(Agent::Codex, Some(Side { id: "t-9".into(), offset: 7 }));
+        l.set(Agent::Gemini, Some(Side { id: "g-3".into(), offset: 9 }));
         l.save(&d, 5).unwrap();
         assert_eq!(Ledger::load(&d, 5), l);
         assert_eq!(Ledger::load(&d, 6), Ledger::default(), "a pane never switched has none");

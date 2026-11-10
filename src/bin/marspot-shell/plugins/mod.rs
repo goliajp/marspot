@@ -43,16 +43,16 @@ use marspot::{lx_debug, lx_error, lx_event, lx_warn};
 pub mod autorun;
 pub mod claudecode;
 pub mod codex;
+pub mod gemini;
 pub mod peerbus;
 pub mod handoff;
 pub mod host;
 pub mod dispatch;
 pub mod pty_op;
 pub mod pty_command;
-// F3+1 — pidtree moved to marspot lib (`src/pidtree.rs`) so L2
-// (marspot-core) can use the same libproc walker for the process-
-// tree panel.  Re-export under the old path keeps L1 plugin code
-// unchanged (`crate::plugins::pidtree::list_all_procs(...)`).
+// F3+1 — pidtree moved to marspot lib (`src/pidtree.rs`) so L2 (marspot-core)
+// can use the same libproc walker for the process-tree panel.  Re-export under
+// the old path keeps L1 plugin code unchanged (`crate::plugins::pidtree::…`).
 pub use marspot::pidtree;
 
 /// Packed `MAJOR:MINOR` u32.  v0.1.0 ⇒ `0x0001_0001` (MAJOR=1, MINOR=1).
