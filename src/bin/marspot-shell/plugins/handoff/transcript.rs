@@ -16,6 +16,7 @@ pub enum Agent {
     Claude,
     Codex,
     Gemini,
+    Kimi,
 }
 
 impl Agent {
@@ -24,6 +25,7 @@ impl Agent {
             Self::Claude => "Claude Code",
             Self::Codex => "codex",
             Self::Gemini => "Gemini CLI",
+            Self::Kimi => "Kimi Code",
         }
     }
     /// The word used in ledgers and menu labels.
@@ -32,14 +34,16 @@ impl Agent {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Gemini => "gemini",
+            Self::Kimi => "kimi",
         }
     }
     /// The agents a pane running this one can be handed to.
-    pub fn others(self) -> [Self; 2] {
+    pub fn others(self) -> [Self; 3] {
         match self {
-            Self::Claude => [Self::Codex, Self::Gemini],
-            Self::Codex => [Self::Claude, Self::Gemini],
-            Self::Gemini => [Self::Claude, Self::Codex],
+            Self::Claude => [Self::Codex, Self::Gemini, Self::Kimi],
+            Self::Codex => [Self::Claude, Self::Gemini, Self::Kimi],
+            Self::Gemini => [Self::Claude, Self::Codex, Self::Kimi],
+            Self::Kimi => [Self::Claude, Self::Codex, Self::Gemini],
         }
     }
 }

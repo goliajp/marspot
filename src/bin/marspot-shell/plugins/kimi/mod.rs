@@ -12,6 +12,7 @@
 
 mod badge;
 mod config;
+mod hand_off;
 mod pane;
 mod peer;
 mod session;
@@ -27,14 +28,17 @@ use marspot_peer::registry::Status;
 
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_API_VERSION};
 use crate::observe::Proc;
-use crate::plugins::{pidtree, pty_op};
+use crate::plugins::{handoff, pidtree, pty_op};
 
 use badge::{badge_text, publish_badge};
 use pane::{home_from, profile_of};
 use session::{Facts, SessionIndex, ENV_ALIAS};
 
-pub(crate) use pane::{default_home, profile_dirs_in};
+pub(crate) use pane::{default_home, handoff_homes, launch, profile_dirs_in};
 pub(crate) use peer::{peers, Peer, Peers};
+#[cfg(test)]
+pub(crate) use session::fixture;
+pub(crate) use session::wire_of;
 
 /// The name the kernel has for the process.  Not argv[0]: that reads
 /// `kimi-code` once kimi has retitled itself, and `kimi` before.
@@ -42,6 +46,11 @@ const COMM: &str = "kimi";
 
 fn is_kimi(p: &Proc) -> bool {
     p.row.comm == COMM
+}
+
+/// Is this descendant the kimi CLI?
+pub fn looks_like_kimi(d: &pidtree::ProcRow) -> bool {
+    d.comm == COMM
 }
 
 /// The kimi a pane is running.  One that runs under another agent is
@@ -131,7 +140,9 @@ fn shown_before_a_session(bare: bool, env_model: Option<&str>, home: &Path) -> S
 #[derive(Clone, Debug, PartialEq)]
 struct PaneKimi {
     proc: pidtree::ProcId,
+    shell_pid: i32,
     home: PathBuf,
+    profile: Option<u8>,
     cwd: Option<String>,
     session: Option<String>,
     facts: Option<Facts>,
@@ -186,10 +197,11 @@ impl KimiPlugin {
                 self.before.entry(proc).or_insert_with(|| shown_before_a_session(bare, env_model.as_deref(), &home)).clone()
             }
         };
-        let text = badge_text(profile_of(&home), shown.model.as_deref(), shown.thinking.as_deref());
+        let profile = profile_of(&home);
+        let text = badge_text(profile, shown.model.as_deref(), shown.thinking.as_deref());
         publish_badge(host, &mut self.last_badge, sid, &text);
         let cwd = pidtree::proc_cwd(proc.pid).map(|c| c.to_string_lossy().into_owned());
-        let now = PaneKimi { proc, home, cwd, session, facts, shown };
+        let now = PaneKimi { proc, shell_pid: s.entry.shell_child_pid, home, profile, cwd, session, facts, shown };
         if self.panes.get(&sid) != Some(&now) {
             host.log(LogLevel::Info, "pane", &format!("sid={sid} pid={} {}", proc.pid, describe(&now)));
             self.panes.insert(sid, now);
@@ -277,6 +289,37 @@ impl Plugin for KimiPlugin {
     fn init(&mut self, _host: &dyn PluginHost) -> Result<(), PluginError> {
         self.initialised = true;
         Ok(())
+    }
+
+    /// Right-click on the badge: the account profiles, then the other
+    /// agents this conversation can be handed to.  A pane that is not
+    /// kimi's gets no rows from here; every plugin is asked about every
+    /// pane.
+    fn pane_badge_menu(&mut self, _host: &dyn PluginHost, shelld_session_id: u64) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
+        let Some(pane) = self.panes.get(&shelld_session_id) else {
+            return Vec::new();
+        };
+        let mut rows: Vec<_> = pane::profile_dirs()
+            .iter()
+            .map(|(n, _)| marspot::shell_proto::PaneBadgeMenuItem {
+                tag: handoff::tag_for(handoff::Agent::Kimi, *n),
+                label: if pane.profile == Some(*n) { format!("● profile {n}") } else { format!("   profile {n}") },
+            })
+            .collect();
+        rows.extend(handoff::menu_rows(handoff::Agent::Kimi));
+        rows
+    }
+
+    fn on_pane_badge_menu_action(&mut self, host: &dyn PluginHost, shelld_session_id: u64, tag: u32) {
+        // every plugin hears every pick; one on another agent's pane is not ours
+        let Some(pane) = self.panes.get(&shelld_session_id).cloned() else {
+            return;
+        };
+        let Some((to, n)) = handoff::parse_tag(tag) else { return };
+        if to == handoff::Agent::Kimi && pane.profile == Some(n) {
+            return; // already there; a stale menu is not a request
+        }
+        self.hand_off(host, shelld_session_id, &pane, to, n);
     }
 
     fn tick(&mut self, host: &dyn PluginHost) {
