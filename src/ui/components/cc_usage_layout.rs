@@ -430,7 +430,8 @@ mod tests {
     }
 
     /// The frame is as tall as what is drawn in it: the timeline card
-    /// ends exactly on the content's bottom edge.
+    /// ends on the content's bottom edge, to within the pixel the frame
+    /// is rounded up to.
     #[test]
     fn the_panel_is_as_tall_as_its_content() {
         for (n, window_rows, window_w) in [(10, 2, 2800.0), (10, 2, 1700.0), (2, 4, 1700.0), (1, 1, 900.0)] {
@@ -440,7 +441,7 @@ mod tests {
             let t = l.timeline.expect("room for the timeline");
             assert_eq!(t.rows, n);
             assert!(
-                (t.card.y_top + t.card.h - (c.y_top + c.h)).abs() < 1e-3,
+                (0.0..1.0).contains(&(c.y_top + c.h - (t.card.y_top + t.card.h))),
                 "n={n} w={window_w}: card ends at {}, content at {}",
                 t.card.y_top + t.card.h,
                 c.y_top + c.h,

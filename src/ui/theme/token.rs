@@ -36,6 +36,7 @@ pub mod color {
 
     // ─── Lines ────────────────────────────────────────────────
     pub const BORDER:       Color = Color::rgba( 56,  60,  70, 1.0);
+    pub const BORDER_STRONG: Color = Color::rgba( 82,  87, 102, 1.0);  // a panel's own edge
     pub const DIVIDER:      Color = Color::rgba(255, 255, 255, 0.08);
     pub const HAIRLINE:     Color = Color::rgba(255, 255, 255, 0.18);
 

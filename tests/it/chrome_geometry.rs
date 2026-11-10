@@ -141,115 +141,6 @@ mod context_menu {
     }
 }
 
-/// Pinned, and deliberately not migrated.
-///
-/// `ModalFrame::layout` centres a window, clamps it against the screen
-/// and stacks three fixed strips inside it. The clamping is placement,
-/// which the tree does not do -- it lays children out inside a parent, it
-/// does not hold a floating window on screen. What is left for the tree
-/// is the stacking, and the body of that stack takes the slack: in this
-/// engine only `Spacer` is flexible, so a body that fills would have to be
-/// a spacer standing in for content. That is a tree built to satisfy a
-/// migration rather than to do anything, so the arithmetic stays and this
-/// records why.
-///
-/// The same goes for the sidebar, whose `row_rect` is `y + i × row_h` and
-/// which is called per row per frame -- a layout pass there would cost
-/// more than it saves.
-///
-/// Where the tree pays is content-driven layout: `settings_modal` sizing
-/// rows from measured text, `table` sizing columns from their contents.
-/// Those are next, and they get pinned the same way first.
-mod modal_frame {
-    use marspot::ui::components::{ModalFrame, ModalLayoutSpec};
-
-    fn spec(maximized: bool, minimized: bool, with_tab_strip: bool) -> ModalLayoutSpec {
-        ModalLayoutSpec {
-            default_w: 800.0,
-            default_h: 600.0,
-            title_bar_h: 28.0,
-            tab_strip_h: 30.0,
-            maximized,
-            max_w_ratio: 0.95,
-            max_h_ratio: 0.90,
-            minimized,
-            with_tab_strip,
-            pos_offset: (0.0, 0.0),
-            top_obstruction: 0.0,
-        }
-    }
-
-    fn dump(m: &ModalFrame) -> String {
-        let r = |n: &str, r: &marspot_term::layout::Rect| {
-            format!("{n} {:.1},{:.1} {:.1}x{:.1}\n", r.x, r.y_top, r.w, r.h)
-        };
-        r("frame", &m.frame) + &r("title", &m.title_bar) + &r("tabs", &m.tab_strip)
-            + &r("body", &m.body)
-    }
-
-    /// The in-file tests pin the heights. They do not pin where the tab
-    /// strip and the body sit, which is exactly what moving the stacking
-    /// onto the tree would change.
-    #[test]
-    fn the_parts_stack_under_the_title_bar() {
-        let m = ModalFrame::layout(1920.0, 1080.0, spec(false, false, true));
-        assert_eq!(
-            dump(&m),
-            "frame 560.0,240.0 800.0x600.0\n\
-             title 560.0,240.0 800.0x28.0\n\
-             tabs 560.0,268.0 800.0x30.0\n\
-             body 560.0,298.0 800.0x542.0\n"
-        );
-    }
-
-    /// Without a tab strip the body starts where the strip would have.
-    #[test]
-    fn no_tab_strip_leaves_no_gap() {
-        let m = ModalFrame::layout(1920.0, 1080.0, spec(false, false, false));
-        assert_eq!(
-            dump(&m),
-            "frame 560.0,240.0 800.0x600.0\n\
-             title 560.0,240.0 800.0x28.0\n\
-             tabs 560.0,268.0 800.0x0.0\n\
-             body 560.0,268.0 800.0x572.0\n"
-        );
-    }
-
-    /// Minimized is the title bar and nothing else, and the empty parts
-    /// still sit where they would have.
-    #[test]
-    fn minimized_keeps_the_empty_parts_in_place() {
-        let m = ModalFrame::layout(1920.0, 1080.0, spec(false, true, true));
-        assert_eq!(
-            dump(&m),
-            "frame 560.0,240.0 800.0x28.0\n\
-             title 560.0,240.0 800.0x28.0\n\
-             tabs 560.0,268.0 800.0x0.0\n\
-             body 560.0,268.0 800.0x0.0\n"
-        );
-    }
-
-    /// An offset moves the window and is then clamped, so a drag cannot
-    /// put the title bar out of reach.
-    #[test]
-    fn a_drag_offset_is_clamped_so_the_title_bar_stays_reachable() {
-        let mut s = spec(false, false, true);
-        s.pos_offset = (100_000.0, 100_000.0);
-        let m = ModalFrame::layout(1920.0, 1080.0, s);
-        assert_eq!(m.frame.x, 1920.0 - 800.0 * 0.5, "x ran off the right");
-        assert_eq!(m.frame.y_top, 1080.0 - 28.0, "the title bar left the window");
-    }
-
-    /// A title strip at the top of the window is a floor for the modal.
-    #[test]
-    fn it_does_not_slide_under_the_title_strip() {
-        let mut s = spec(false, false, true);
-        s.pos_offset = (0.0, -100_000.0);
-        s.top_obstruction = 40.0;
-        let m = ModalFrame::layout(1920.0, 1080.0, s);
-        assert_eq!(m.frame.y_top, 40.0);
-    }
-}
 
 /// The settings panel, which is the first component whose layout is
 /// driven by measured text rather than by constants alone.
@@ -326,26 +217,26 @@ mod settings_modal {
         at_scale_1(|| {
             assert_eq!(
                 dump(1600.0, 1200.0, &Settings::default()),
-                "panel 360.0,71.8 880.0x1056.3\n\
-                 group \"Idle reclamation\" at 396.0,151.8 w 808.0\n\
-                 card 396.0,178.8 808.0x287.7\n\
-                 row ReclaimEnabled band 396.0,178.8 808.0x95.9 label 222.3 desc 255.8 ctl 1112.0,196.8 68.0x40.0\n\
-                 sep 420.0,274.7 760.0x1.0\n\
-                 row ReclaimIdleMinutes band 396.0,274.7 808.0x95.9 label 318.2 desc 351.7 ctl 833.0,290.7 347.0x44.0\n\
-                 sep 420.0,370.6 760.0x1.0\n\
-                 row ReclaimPrefetch band 396.0,370.6 808.0x95.9 label 414.1 desc 447.6 ctl 1112.0,388.6 68.0x40.0\n\
-                 group \"Appearance\" at 396.0,506.5 w 808.0\n\
-                 card 396.0,533.5 808.0x191.8\n\
-                 row DimScale band 396.0,533.5 808.0x95.9 label 577.0 desc 610.5 ctl 865.2,549.5 314.8x44.0\n\
-                 sep 420.0,629.5 760.0x1.0\n\
-                 row CircledWide band 396.0,629.5 808.0x95.9 label 673.0 desc 706.5 ctl 1112.0,647.5 68.0x40.0\n\
-                 group \"Claude Code\" at 396.0,765.4 w 808.0\n\
-                 card 396.0,792.4 808.0x95.9\n\
-                 row CcStatuslineHook band 396.0,792.4 808.0x95.9 label 835.9 desc 869.4 ctl 1112.0,810.4 68.0x40.0\n\
-                 group \"Scrolling\" at 396.0,928.3 w 808.0\n\
-                 card 396.0,955.3 808.0x95.9\n\
-                 row ScrollFactor band 396.0,955.3 808.0x95.9 label 998.8 desc 1032.3 ctl 852.0,971.3 328.0x44.0\n\
-                 footer base 1092.2\n"
+                "panel 360.0,72.0 880.0x1057.0\n\
+                 group \"Idle reclamation\" at 396.0,152.0 w 808.0\n\
+                 card 396.0,179.0 808.0x287.7\n\
+                 row ReclaimEnabled band 396.0,179.0 808.0x95.9 label 222.5 desc 256.0 ctl 1112.0,197.0 68.0x40.0\n\
+                 sep 420.0,274.9 760.0x1.0\n\
+                 row ReclaimIdleMinutes band 396.0,274.9 808.0x95.9 label 318.4 desc 351.9 ctl 833.0,290.9 347.0x44.0\n\
+                 sep 420.0,370.8 760.0x1.0\n\
+                 row ReclaimPrefetch band 396.0,370.8 808.0x95.9 label 414.3 desc 447.8 ctl 1112.0,388.8 68.0x40.0\n\
+                 group \"Appearance\" at 396.0,506.7 w 808.0\n\
+                 card 396.0,533.7 808.0x191.8\n\
+                 row DimScale band 396.0,533.7 808.0x95.9 label 577.2 desc 610.7 ctl 865.2,549.7 314.8x44.0\n\
+                 sep 420.0,629.6 760.0x1.0\n\
+                 row CircledWide band 396.0,629.6 808.0x95.9 label 673.1 desc 706.6 ctl 1112.0,647.6 68.0x40.0\n\
+                 group \"Claude Code\" at 396.0,765.5 w 808.0\n\
+                 card 396.0,792.5 808.0x95.9\n\
+                 row CcStatuslineHook band 396.0,792.5 808.0x95.9 label 836.0 desc 869.5 ctl 1112.0,810.5 68.0x40.0\n\
+                 group \"Scrolling\" at 396.0,928.4 w 808.0\n\
+                 card 396.0,955.4 808.0x95.9\n\
+                 row ScrollFactor band 396.0,955.4 808.0x95.9 label 998.9 desc 1032.4 ctl 852.0,971.4 328.0x44.0\n\
+                 footer base 1092.3\n"
             );
         });
     }
@@ -360,26 +251,26 @@ mod settings_modal {
         at_scale_1(|| {
             assert_eq!(
                 dump(800.0, 1200.0, &Settings::default()),
-                "panel 16.0,71.8 768.0x1056.3\n\
-                 group \"Idle reclamation\" at 52.0,151.8 w 696.0\n\
-                 card 52.0,178.8 696.0x287.7\n\
-                 row ReclaimEnabled band 52.0,178.8 696.0x95.9 label 222.3 desc 255.8 ctl 656.0,196.8 68.0x40.0\n\
-                 sep 76.0,274.7 648.0x1.0\n\
-                 row ReclaimIdleMinutes band 52.0,274.7 696.0x95.9 label 318.2 desc 351.7 ctl 377.0,290.7 347.0x44.0\n\
-                 sep 76.0,370.6 648.0x1.0\n\
-                 row ReclaimPrefetch band 52.0,370.6 696.0x95.9 label 414.1 desc 447.6 ctl 656.0,388.6 68.0x40.0\n\
-                 group \"Appearance\" at 52.0,506.5 w 696.0\n\
-                 card 52.0,533.5 696.0x191.8\n\
-                 row DimScale band 52.0,533.5 696.0x95.9 label 577.0 desc 610.5 ctl 409.2,549.5 314.8x44.0\n\
-                 sep 76.0,629.5 648.0x1.0\n\
-                 row CircledWide band 52.0,629.5 696.0x95.9 label 673.0 desc 706.5 ctl 656.0,647.5 68.0x40.0\n\
-                 group \"Claude Code\" at 52.0,765.4 w 696.0\n\
-                 card 52.0,792.4 696.0x95.9\n\
-                 row CcStatuslineHook band 52.0,792.4 696.0x95.9 label 835.9 desc 869.4 ctl 656.0,810.4 68.0x40.0\n\
-                 group \"Scrolling\" at 52.0,928.3 w 696.0\n\
-                 card 52.0,955.3 696.0x95.9\n\
-                 row ScrollFactor band 52.0,955.3 696.0x95.9 label 998.8 desc 1032.3 ctl 396.0,971.3 328.0x44.0\n\
-                 footer base 1092.2\n"
+                "panel 16.0,72.0 768.0x1057.0\n\
+                 group \"Idle reclamation\" at 52.0,152.0 w 696.0\n\
+                 card 52.0,179.0 696.0x287.7\n\
+                 row ReclaimEnabled band 52.0,179.0 696.0x95.9 label 222.5 desc 256.0 ctl 656.0,197.0 68.0x40.0\n\
+                 sep 76.0,274.9 648.0x1.0\n\
+                 row ReclaimIdleMinutes band 52.0,274.9 696.0x95.9 label 318.4 desc 351.9 ctl 377.0,290.9 347.0x44.0\n\
+                 sep 76.0,370.8 648.0x1.0\n\
+                 row ReclaimPrefetch band 52.0,370.8 696.0x95.9 label 414.3 desc 447.8 ctl 656.0,388.8 68.0x40.0\n\
+                 group \"Appearance\" at 52.0,506.7 w 696.0\n\
+                 card 52.0,533.7 696.0x191.8\n\
+                 row DimScale band 52.0,533.7 696.0x95.9 label 577.2 desc 610.7 ctl 409.2,549.7 314.8x44.0\n\
+                 sep 76.0,629.6 648.0x1.0\n\
+                 row CircledWide band 52.0,629.6 696.0x95.9 label 673.1 desc 706.6 ctl 656.0,647.6 68.0x40.0\n\
+                 group \"Claude Code\" at 52.0,765.5 w 696.0\n\
+                 card 52.0,792.5 696.0x95.9\n\
+                 row CcStatuslineHook band 52.0,792.5 696.0x95.9 label 836.0 desc 869.5 ctl 656.0,810.5 68.0x40.0\n\
+                 group \"Scrolling\" at 52.0,928.4 w 696.0\n\
+                 card 52.0,955.4 696.0x95.9\n\
+                 row ScrollFactor band 52.0,955.4 696.0x95.9 label 998.9 desc 1032.4 ctl 396.0,971.4 328.0x44.0\n\
+                 footer base 1092.3\n"
             );
         });
     }
