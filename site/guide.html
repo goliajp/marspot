@@ -130,13 +130,15 @@ cargo build --release</pre>
       <span class="mono">~/Library/Application&nbsp;Support/marspot</span> — one
       directory per pane, and <span class="mono">settings.toml</span>,
       which is read live: edit it and the next sweep is already using it. The
-      app installs to <span class="mono">~/.local/Marspot.app</span>, and the log
-      to <span class="mono">~/Library/Logs/Marspot</span>. To remove it, delete
-      those three and the one LaunchAgent an update may have armed:
+      app is wherever you put it (<span class="mono">/Applications</span> from the
+      disk image, <span class="mono">~/.local/Marspot.app</span> from a source
+      install), and the log is in <span class="mono">~/Library/Logs/Marspot</span>.
+      To remove it, delete those three and the one LaunchAgent a source install
+      may have armed:
     </p>
     <pre class="mono">launchctl bootout "gui/$(id -u)/com.marspot.land-bundle"
 rm -f  ~/Library/LaunchAgents/com.marspot.land-bundle.plist
-rm -rf ~/.local/Marspot.app
+rm -rf /Applications/Marspot.app ~/.local/Marspot.app
 rm -rf ~/Library/Application\ Support/marspot ~/Library/Caches/marspot
 rm -rf ~/Library/Logs/Marspot</pre>
   </div>
