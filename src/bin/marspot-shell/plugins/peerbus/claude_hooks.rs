@@ -21,6 +21,7 @@ impl super::worker::Worker {
     pub(super) fn reconcile_hooks(&mut self) {
         let mut notes = reconcile();
         notes.extend(super::codex_config::reconcile());
+        notes.extend(super::gemini_config::reconcile());
         if notes == self.hook_notes {
             return;
         }
@@ -124,7 +125,7 @@ fn is_ours(entry: &Value) -> bool {
 /// The text `JSON.stringify(value, null, 2)` gives, which is how
 /// Claude Code writes its settings: a file in that form reads back
 /// byte for byte after an edit made through this.
-fn pretty(v: &Value) -> String {
+pub(super) fn pretty(v: &Value) -> String {
     let mut out = String::new();
     write_pretty(v, &mut out, 0);
     out
@@ -167,7 +168,7 @@ fn write_pretty(v: &Value, out: &mut String, depth: usize) {
 }
 
 /// The value at `key` of object `v`, created with `make` when missing.
-fn slot<'a>(v: &'a mut Value, key: &str, make: impl FnOnce() -> Value) -> &'a mut Value {
+pub(super) fn slot<'a>(v: &'a mut Value, key: &str, make: impl FnOnce() -> Value) -> &'a mut Value {
     if v.get(key).is_none() {
         v.set(key, make());
     }

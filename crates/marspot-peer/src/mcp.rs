@@ -1,12 +1,14 @@
 //! `marspot-peer mcp`: the sending side as an MCP server over stdio, so
-//! a Codex session messages its peers with tools of the same names,
-//! parameters and wording Claude Code's own `ListAgents` and
+//! a Codex or Gemini session messages its peers with tools of the same
+//! names, parameters and wording Claude Code's own `ListAgents` and
 //! `SendMessage` have.
 //!
 //! Codex starts one server per session and puts the calling thread's
 //! id in every `tools/call` (`_meta.threadId`); that is how a call
-//! knows which session is sending.  Messages are newline-delimited
-//! JSON-RPC 2.0.
+//! knows which session is sending.  Gemini sends no such id; a call
+//! without one comes from the Gemini session this server runs under
+//! (`peers::me_by_ancestor`).  Messages are newline-delimited JSON-RPC
+//! 2.0.
 
 use std::io::{BufRead, Write};
 
@@ -14,9 +16,9 @@ use crate::frame::Priority;
 use crate::json::{self, Value, obj};
 use crate::peers;
 
-const LIST_DESCRIPTION: &str = "List the agent sessions on this machine that you can message: Claude Code and Codex sessions running in marspot panes. Every row leads with the session's name, which is the name of its marspot pane, and that name IS the address for SendMessage; there is no separate address syntax. The first line says what this session is called.";
+const LIST_DESCRIPTION: &str = "List the agent sessions on this machine that you can message: Claude Code, Codex and Gemini sessions running in marspot panes. Every row leads with the session's name, which is the name of its marspot pane, and that name IS the address for SendMessage; there is no separate address syntax. The first line says what this session is called.";
 
-const SEND_DESCRIPTION: &str = "Send a message to another agent session on this machine (Claude Code or Codex; each is named after its marspot pane).
+const SEND_DESCRIPTION: &str = "Send a message to another agent session on this machine (Claude Code, Codex or Gemini; each is named after its marspot pane).
 
 Use ListAgents to discover targets and pass a name from it as `to`. **To reply to an incoming <cross-session-message from=\"...\">, copy its `from` attribute as your `to`.**
 
@@ -106,11 +108,14 @@ fn call(params: Option<&Value>, now_ms: i64) -> Value {
     let thread = params.and_then(|p| p.at(&["_meta", "threadId"])).and_then(Value::str);
     let entries = peers::live_entries();
     let panes = crate::panes::live(&entries);
-    let me = thread.map(|t| peers::me_by_thread(&entries, t));
+    let me = match thread {
+        Some(t) => Some(peers::me_by_thread(&entries, t)),
+        None => peers::me_by_ancestor(&entries, std::process::id() as i32, crate::proc::ppid).map(Ok),
+    };
     let outcome = match params.and_then(|p| p.str_at("name")).unwrap_or_default() {
         "ListAgents" => Ok(peers::listing(&entries, &panes, me.as_ref().and_then(|m| m.as_ref().ok().copied()), now_ms)),
         "SendMessage" => match me {
-            None => Err("the call carried no thread id, so the sending session is unknown and nothing was sent".to_string()),
+            None => Err("the call carried no thread id and this server does not run under a session marspot has bound to a pane, so the sending session is unknown and nothing was sent".to_string()),
             Some(Err(e)) => Err(e),
             Some(Ok(me)) => send(me, &entries, &panes, args),
         },
@@ -142,7 +147,7 @@ fn send(me: &crate::registry::Entry, entries: &[crate::registry::Entry], panes: 
             "\nSubscribed — \"{}\" will send one notice when it is next idle (or exits). Carry on; do not poll.",
             sent.to
         )),
-        Some(false) => text.push_str("\nnotify_when_idle: that session runs a version without idle notices — nothing was subscribed."),
+        Some(false) => text.push_str("\nnotify_when_idle: that session does not report when it goes idle — nothing was subscribed, and no notice will come."),
         None => {}
     }
     Ok(text)
