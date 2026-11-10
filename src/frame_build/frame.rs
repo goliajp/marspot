@@ -252,9 +252,8 @@ fn paint_overlays(
     // sites only see the painter; backdrop / frame / always-on-top
     // are configured up front and applied automatically.
     if let Some(panel) = process_panel {
-        crate::ui::components::process_panel::push_process_panel_via_view(
+        crate::ui::components::process_panel_paint::push_process_panel_via_view(
             panel,
-            layout.top_inset,
             cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
             layout.window_w, layout.window_h,
             font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,

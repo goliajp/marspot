@@ -59,12 +59,16 @@ fn fill(p: &mut ViewPainter, rect: Rect, color: [f32; 4], radius_pt: f64) {
 /// letter-× sits visibly off the middle of a small button, and its
 /// size is the font's to decide rather than the button's.
 pub fn paint_cross(p: &mut ViewPainter, rect: Rect, mark_pt: f64, color: [f32; 4]) {
+    cross(p, rect, mark_pt, c::CROSS_STROKE, color);
+}
+
+fn cross(p: &mut ViewPainter, rect: Rect, mark_pt: f64, stroke_pt: f64, color: [f32; 4]) {
     let size = spec::px(mark_pt).round();
     let x0 = (rect.x + (rect.w - size) * 0.5).round();
     let y0 = (rect.y_top + (rect.h - size) * 0.5).round();
     // A stroke of this thickness crossing a row at 45° covers the row
     // for √2 times as far.
-    let half = spec::px(c::CROSS_STROKE) * std::f64::consts::FRAC_1_SQRT_2;
+    let half = spec::px(stroke_pt) * std::f64::consts::FRAC_1_SQRT_2;
     for row in 0..size as usize {
         let along = row as f64 + 0.5;
         for centre in [along, size - along] {
@@ -291,14 +295,27 @@ pub fn danger_button_size() -> (f64, f64) {
     (spec::px(c::DANGER_SIZE), spec::px(c::DANGER_SIZE))
 }
 
+/// `(width, height)` of the danger icon button at the end of a table
+/// row `row_h` tall: its own size where the row has room for it,
+/// otherwise the largest square that leaves clear space above and
+/// below.  A table row is measured in terminal cells and at the usual
+/// font is shorter than the button.
+pub fn danger_button_size_in_row(row_h: f64) -> (f64, f64) {
+    let fits = (row_h - 2.0 * spec::px(spec::space::S2)).floor().max(0.0);
+    let side = spec::px(c::DANGER_SIZE).min(fits);
+    (side, side)
+}
+
 pub fn paint_danger_button(p: &mut ViewPainter, rect: Rect, hovered: bool) {
     let (bg, fg) = if hovered {
         (palette::danger(), palette::fg())
     } else {
         (palette::danger_rest_bg(), palette::danger())
     };
-    fill(p, rect, bg, c::DANGER_RADIUS);
-    paint_cross(p, rect, c::DANGER_MARK, fg);
+    // A button cut down to fit a row keeps its proportions.
+    let k = rect.w / spec::px(c::DANGER_SIZE);
+    fill(p, rect, bg, c::DANGER_RADIUS * k);
+    cross(p, rect, c::DANGER_MARK * k, c::CROSS_STROKE * k, fg);
 }
 
 // ─── Status chip ────────────────────────────────────────────────
@@ -411,6 +428,20 @@ mod tests {
         assert_eq!(w, 30.0 + 2.0 * spec::px(c::CHIP_PAD_X));
         assert_eq!(h, spec::px(c::CHIP_H));
         assert_eq!(danger_button_size(), (spec::px(c::DANGER_SIZE), spec::px(c::DANGER_SIZE)));
+    }
+
+    #[test]
+    fn controls_danger_button_fits_the_row_it_ends() {
+        let full = spec::px(c::DANGER_SIZE);
+        let clear = 2.0 * spec::px(spec::space::S2);
+        // A row with room to spare gets the button at its own size.
+        assert_eq!(danger_button_size_in_row(full + clear + 10.0), (full, full));
+        // A shorter one gets a square that leaves the clear space.
+        let (w, h) = danger_button_size_in_row(21.6);
+        assert_eq!(w, h);
+        assert_eq!(w, (21.6 - clear).floor());
+        assert!(w < full);
+        assert_eq!(danger_button_size_in_row(1.0), (0.0, 0.0));
     }
 
     /// How many colours a source file writes out by hand: an opening

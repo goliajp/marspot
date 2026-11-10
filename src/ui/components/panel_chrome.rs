@@ -365,6 +365,9 @@ mod tests {
             ("cc_usage_modal.rs", include_str!("cc_usage_modal.rs")),
             ("cc_usage_layout.rs", include_str!("cc_usage_layout.rs")),
             ("cc_usage_paint.rs", include_str!("cc_usage_paint.rs")),
+            ("process_panel.rs", include_str!("process_panel.rs")),
+            ("process_panel_paint.rs", include_str!("process_panel_paint.rs")),
+            ("table.rs", include_str!("table.rs")),
         ] {
             assert_eq!(colour_literals(src), 0, "{file} writes a colour out by hand");
         }
