@@ -318,6 +318,29 @@ pub fn paint_danger_button(p: &mut ViewPainter, rect: Rect, hovered: bool) {
     cross(p, rect, c::DANGER_MARK * k, c::CROSS_STROKE * k, fg);
 }
 
+/// The danger button's × alone, in `color`: how the button is drawn
+/// where a column of them at rest would be a column of red, until the
+/// pointer is on one.
+pub fn paint_danger_mark(p: &mut ViewPainter, rect: Rect, color: [f32; 4]) {
+    let k = rect.w / spec::px(c::DANGER_SIZE);
+    cross(p, rect, c::DANGER_MARK * k, c::CROSS_STROKE * k, color);
+}
+
+/// A + `size` physical px across with strokes `stroke` px thick,
+/// centred in `rect`: the glyph of a ghost add button.  Drawn, for the
+/// reason the × is.
+pub fn paint_plus(p: &mut ViewPainter, rect: Rect, size: f64, stroke: f64, color: [f32; 4]) {
+    let x0 = (rect.x + (rect.w - size) * 0.5).round();
+    let y0 = (rect.y_top + (rect.h - size) * 0.5).round();
+    let mid = (size - stroke) * 0.5;
+    for bar in [
+        Rect { x: x0, y_top: y0 + mid, w: size, h: stroke },
+        Rect { x: x0 + mid, y_top: y0, w: stroke, h: size },
+    ] {
+        p.fill_rounded_rect(bar, color, 0.0, (palette::none(), 0.0));
+    }
+}
+
 // ─── Status chip ────────────────────────────────────────────────
 
 /// `(width, height)` of a status chip holding `label`.

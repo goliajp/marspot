@@ -7,6 +7,7 @@
 pub mod cc_usage_layout;
 pub mod cc_usage_modal;
 pub mod cc_usage_paint;
+pub mod chrome_hover;
 pub mod controls;
 pub mod panel_chrome;
 pub mod panel_palette;
@@ -47,7 +48,7 @@ pub use button::{Button, ButtonStyle, IconSpec, IconPosition};
 pub use grid_seams::{GridSeams, SeamStyle};
 pub use grid::{Grid, GridStyle};
 pub use grid_item::{GridItem, GridEdges, Outline};
-pub use sidebar::{Sidebar, SidebarRow, SidebarStyle};
+pub use sidebar::Sidebar;
 pub use table::{Align, Column, ColumnWidth, SortDir, TableGeometry};
 pub use layout_modal::{LayoutModal, GRID_MIN, GRID_MAX};
 pub use context_menu::{ContextMenu, ContextMenuHit, MenuItem};

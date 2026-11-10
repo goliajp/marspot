@@ -234,8 +234,8 @@ pub struct Layout {
 /// Square icon-button side length (logical pt). Both chrome buttons
 /// (sidebar toggle, layout picker) are now true squares — Lucide-
 /// style monochrome line icons sit inside a 22×22 hit-target.
-const ICON_BUTTON_LOGICAL_SIZE: f64 = 22.0;
-const ICON_BUTTON_LOGICAL_GAP: f64 = 6.0;
+pub const ICON_BUTTON_LOGICAL_SIZE: f64 = 22.0;
+pub const ICON_BUTTON_LOGICAL_GAP: f64 = 6.0;
 
 /// Vertical center of the macOS traffic-light row, in logical pt from
 /// the window's top edge.  AppKit draws the window buttons itself at a

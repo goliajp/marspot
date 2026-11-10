@@ -3,13 +3,14 @@
 
 use crate::font_cache::{resolve_attrs, FontCache, BG};
 use crate::frame_build::glyph_resolve::{resolve_cell_glyph_routed, resolve_cluster_glyph_routed};
-use crate::frame_build::palette::*;
+use crate::ui::theme::terminal::*;
 use crate::frame_build::text_run::preedit_placements;
 use crate::glyph_atlas::{GlyphAtlas, SlotMetrics};
 use crate::grid::Grid;
 use crate::layout::CellRect;
 use crate::render::SessionView;
 use crate::frame_build::color::rgba8_of_f32;
+use crate::ui::components::panel_palette as palette;
 use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance, UiRectInstance};
 use crate::frame_build::session_marks::*;
 
@@ -107,25 +108,18 @@ pub(crate) fn push_session(
     let (color_atlas_w, color_atlas_h) = color_atlas.dims();
     let color_atlas_w = color_atlas_w as f32;
     let color_atlas_h = color_atlas_h as f32;
-    // Cell-rect BG: BG_FOCUSED (deeper) for the active pane,
-    // BG_PANEL for everyone else.  The DROP into deeper black is
-    // the focus indicator — focused reads as "the canvas I'm
-    // typing into", surrounding cells stay at the chrome tone.
-    let pane_focused = view.focused && window_focused;
-    let pane_bg = if pane_focused {
-        [BG_FOCUSED.0, BG_FOCUSED.1, BG_FOCUSED.2, 1.0]
-    } else {
-        [BG_PANEL.0, BG_PANEL.1, BG_PANEL.2, 1.0]
-    };
+    // The pane in use drops to the terminal's own black and the rest
+    // stay at the window's surface: that drop is the focus indicator.
+    let in_use = view.focused && window_focused;
     cells.push(CellInstance {
         origin: [rect.x as f32, rect.y_top as f32],
         size: [rect.w as f32, rect.h as f32],
-        color: rgba8_of_f32(pane_bg),
+        color: rgba8_of_f32(palette::pane_bg(in_use)),
     });
 
     paint_title_strip(
-        rect, view, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, cells, glyphs, gutter,
-        padding, title_h,
+        rect, view, in_use, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, cells, glyphs,
+        gutter, padding, title_h,
     );
 
     let grid = view.grid;
@@ -250,38 +244,11 @@ pub(crate) fn push_session(
     paint_cursor(&g, &mut o);
     paint_preedit(&g, &mut o);
 
-    // No darken overlay.  No FOCUS_OUTLINE blue frame.  The focus
-    // affordance is the BG_FOCUSED tint applied to the cell rect at
-    // the top of this fn, plus the solid-vs-hollow cursor — both
-    // already done above.  iTerm2 reads exactly this way: no
-    // chrome, no border, just a quiet BG lift on the active pane.
     let _ = gutter; // pane-internal layout doesn't use it any more
 
-    // F1+11 — true pixel-mode UI overlay.  Drawn via the new
-    // `ui_rect_pipeline`: a SDF-based rounded rectangle with
-    // anti-aliased corners, optional stroke, and a soft drop shadow
-    // — NOT cell-grid characters.  Pixel-precise positioning, freed
-    // from the box-drawing approximation.  Text inside still goes
-    // through the cell glyph atlas (proportional UI font is Phase 2),
-    // but everything BEHIND the text — panel, borders, focused-row
-    // selection — is real GPU-side vector chrome.
-    //
-    // Layout:
-    //   ┌── panel(rounded rect + shadow + 1px stroke)
-    //   │  query row : query text + caret
-    //   │  divider line (thin rounded rect, dim color)
-    //   │  list rows : focused row is a separate rounded rect
-    //   │              behind the snippet text
-    //   └──
-    //
-    // Palette: Darcula-ish dark gray-blue panel, JetBrains-style
-    // indigo selection (NOT the yellow grid-side HIGHLIGHT_BG —
-    // those have distinct semantic meanings and must not collide).
-    // F3+1.8 — search overlay rendering moved to
-    // `ui::components::search_overlay::paint_search_overlay`, called
-    // from `build_instances` post-pane-loop into the overlay
-    // scratches.  push_session no longer touches it; the per-pane
-    // instance cache stays purely grid content.
+    // The search overlay is not drawn here: `build_instances` paints
+    // it after the panes, so the per-pane instance cache stays purely
+    // grid content.
 }
 
 /// The grid, row by row: run-length backgrounds, search-hit highlights,

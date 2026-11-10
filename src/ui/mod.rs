@@ -46,12 +46,13 @@ pub const SIDEBAR_W_LOGICAL: f64 = 200.0;
 /// 12-pt monospace line plus 6 pt of breathing room.
 pub const CELL_TITLE_PT: f64 = 22.0;
 
-/// Sidebar label cap — at the default 200-pt sidebar with Monaco
-/// 12-pt metrics, ~22 ASCII glyphs fit between the dot+gap and the
-/// right edge.  Anything longer is truncated with `...` (three
-/// ASCII dots — same monospace cell width as the rest of the
-/// label, plays nicer with the user's preference than `…`).
-pub const MAX_SIDEBAR_LABEL_CHARS: usize = 22;
+/// Sidebar label cap — at the default 200-pt sidebar and terminal
+/// font, 18 cells fit between the status dot and the row's close
+/// button (`theme::spec::chrome`).  Anything longer is truncated with
+/// `...` (three ASCII dots — same monospace cell width as the rest of
+/// the label, plays nicer with the user's preference than `…`).  The
+/// sidebar cuts whatever still does not fit, without a mark.
+pub const MAX_SIDEBAR_LABEL_CHARS: usize = 18;
 
 /// Hard cap on how many sessions marspot permits at once.
 ///

@@ -1,4 +1,4 @@
-//! The palette every panel draws from.
+//! The palette every panel and the main window draw from.
 //!
 //! It started life as the `Cc` panel's private colours and was named
 //! for it; the settings panel then grew a second, near-identical set
@@ -85,6 +85,10 @@ pub fn with_alpha(mut c: [f32; 4], alpha: f32) -> [f32; 4] {
 /// A panel's own surface and the line around it.
 pub fn frame_bg() -> [f32; 4] { color::BG_PANEL.to_rgba_f32() }
 pub fn frame_border() -> [f32; 4] { color::BORDER_STRONG.to_rgba_f32() }
+/// The shadow under a panel's frame, and under a popover's.
+pub fn frame_shadow() -> [f32; 4] {
+    with_alpha(color::SHADOW.to_rgba_f32(), spec::panel::SHADOW_ALPHA)
+}
 /// What the rest of the window is covered with while a panel is open.
 pub fn backdrop() -> [f32; 4] {
     with_alpha(color::SHADOW.to_rgba_f32(), spec::panel::BACKDROP_ALPHA)
@@ -115,3 +119,46 @@ pub fn row_hover() -> [f32; 4] { color::SURFACE_4.to_rgba_f32() }
 pub fn row_selected() -> [f32; 4] { with_alpha(accent(), spec::table::SELECTED_ALPHA) }
 /// Behind the × of a danger icon button at rest.
 pub fn danger_rest_bg() -> [f32; 4] { with_alpha(danger(), spec::control::DANGER_REST_ALPHA) }
+
+// ─── Main window ────────────────────────────────────────────────
+//
+// The window's own surface is darker than a panel's, so what lies on
+// it takes the general hover token where a card takes the step above.
+
+/// The pane in use is the terminal's own black; the others sit at the
+/// window's surface, with the sidebar and the header.
+pub fn pane_bg(in_use: bool) -> [f32; 4] {
+    if in_use { color::CANVAS.to_rgba_f32() } else { color::CHROME.to_rgba_f32() }
+}
+/// The line between two regions of the window: pane and pane, sidebar
+/// and grid, header and grid, title strip and terminal.
+pub fn seam() -> [f32; 4] { color::SEAM.to_rgba_f32() }
+/// Around the pane in use, in place of its seams.
+pub fn focus_ring() -> [f32; 4] { color::FOCUS_RING.to_rgba_f32() }
+/// A pane's name where it is not the one in use — a sidebar row, a
+/// title strip.  The one in use takes `fg`.
+pub fn chrome_fg() -> [f32; 4] { fg_sec() }
+/// A toolbar icon or a ghost button's glyph at rest, and the version
+/// label: there, readable, not asking to be read.
+pub fn chrome_icon() -> [f32; 4] { color::FG_MUTED.to_rgba_f32() }
+/// Behind a toolbar button, a sidebar row or a ghost button under the
+/// pointer.
+pub fn chrome_hover() -> [f32; 4] { color::BG_HOVER.to_rgba_f32() }
+/// Behind the sidebar row of the pane in use and a toolbar button
+/// whose panel is open: the accent, tinted, as on a selected table row.
+pub fn chrome_on() -> [f32; 4] { row_selected() }
+/// An agent's badge at the right of a pane's title strip.
+pub fn badge_fg() -> [f32; 4] { color::AGENT.to_rgba_f32() }
+/// Over a seat nothing runs in, and the `+` drawn on it.
+pub fn empty_seat_bg() -> [f32; 4] { with_alpha(color::CHROME.to_rgba_f32(), spec::chrome::EMPTY_SEAT_ALPHA) }
+pub fn empty_seat_fg() -> [f32; 4] { faded(disabled_fg()) }
+/// What dims a pane that has stepped back, at opacity `alpha`.
+pub fn scrim(alpha: f32) -> [f32; 4] { with_alpha(color::SHADOW.to_rgba_f32(), alpha) }
+/// Where a dragged pane would land: the accent as the outline, and
+/// inside it at low opacity when the drop takes half a pane.
+pub fn drop_target_border() -> [f32; 4] { color::ACCENT.to_rgba_f32() }
+pub fn drop_target_fill() -> [f32; 4] {
+    let k = spec::chrome::DROP_TARGET_ALPHA;
+    let c = drop_target_border();
+    [c[0] * k, c[1] * k, c[2] * k, k]
+}

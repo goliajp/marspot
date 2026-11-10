@@ -1,18 +1,33 @@
 //! The window's chrome, laid out as instances: the seams between
-//! panes and the focus ring, empty seats, the sidebar, the toolbar,
-//! the close and add buttons, and the version label.
+//! panes and the focus ring, empty seats, the sidebar, the toolbar and
+//! the version label.
+//!
+//! Sizes are `spec::chrome`'s and colours `panel_palette`'s; where a
+//! thing is, and so where a click lands on it, is the layout's.
 
-use crate::frame_build::palette::*;
 use crate::layout::{Layout, Rect};
 use crate::render::SidebarEntry;
 use crate::frame_build::color::rgba8_of_f32;
 use golia_ui_core::scene::UiRectInstance;
-use crate::session::SessionState;
+use crate::ui::components::chrome_hover::ChromeHover;
+use crate::ui::components::panel_palette as palette;
 use crate::ui::components::{
-    Button, ButtonStyle, GridEdges, GridItem, GridSeams, IconPosition, IconSpec, Outline,
-    SeamStyle, Sidebar, SidebarRow, SidebarStyle,
+    controls, Button, ButtonStyle, GridEdges, GridItem, GridSeams, IconPosition, IconSpec,
+    Outline, SeamStyle, Sidebar,
 };
 use crate::ui::core::view::ViewPainter;
+use crate::ui::theme::spec::chrome;
+use crate::ui::SESSION_COUNT_HARD_CAP;
+
+/// What the chrome shows beyond where things are.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ChromeState {
+    pub(crate) hover: Option<ChromeHover>,
+    /// Per toolbar button, in `Layout::toolbar_buttons` order: whether
+    /// what it opens is open.  The dev panel is another window, owned
+    /// by another process, so its button never reads as on.
+    pub(crate) on: [bool; 6],
+}
 
 /// Everything drawn over the panes and under the overlays, in the
 /// order it stacks.
@@ -22,15 +37,14 @@ pub(crate) fn paint_chrome(
     n_views: usize,
     sidebar: &[SidebarEntry],
     focused_idx: usize,
-    hover_chrome_btn: Option<u8>,
+    state: ChromeState,
     overlay_ui_rects: &mut Vec<UiRectInstance>,
 ) {
     paint_grid_seams(painter, layout, n_views, focused_idx, overlay_ui_rects);
     paint_empty_seats(painter, layout, n_views);
-    paint_sidebar(painter, layout, sidebar, focused_idx);
-    // Toolbar buttons + picker overlay + close/add BGs.
-    push_layout_chrome(layout, hover_chrome_btn, painter);
-    paint_button_glyphs(painter, layout);
+    paint_sidebar(painter, layout, sidebar, focused_idx, state.hover);
+    paint_region_seams(painter, layout);
+    paint_toolbar(painter, layout, state);
     paint_version_label(painter, layout);
 }
 
@@ -41,21 +55,12 @@ fn paint_grid_seams(
     focused_idx: usize,
     overlay_ui_rects: &mut Vec<UiRectInstance>,
 ) {
-    // F3+1.19 — grid base seams FIRST (gray dividers between
-    // panes), then per-pane GridItem outline.  Both go through
-    // the BG pipeline (fill_rect, no SDF AA), so push order =
-    // z order: pane BG (pushed by pane loop above) → base seams
-    // → focus outline on the focused pane.  All boundaries are
-    // pixel-perfect — rasterizer assigns each pixel to one rect
-    // by sample-center rule, no AA seams.
+    // Seams first, then the ring: both are plain fills in submission
+    // order, after the pane backgrounds, so the ring replaces the seam
+    // pixel for pixel on the sides of the pane in use.
     if layout.gutter > 0.0 && !layout.cells.is_empty() {
-        // F3+1.14 — pane grid seams thickened to 4× gutter so the
-        // grid reads as deliberate panes, not gutters-as-margin.
-        let seam_thickness = (layout.gutter * 4.0).max(2.0);
-        let seam_style = SeamStyle {
-            color: [SEAM.0, SEAM.1, SEAM.2, 1.0],
-            thickness: seam_thickness,
-        };
+        let seam_thickness = (layout.gutter * chrome::SEAM_GUTTERS).max(2.0);
+        let seam_style = SeamStyle { color: palette::seam(), thickness: seam_thickness };
         let pane_rects: Vec<Rect> = layout.cells.iter().map(|c| Rect {
             x: c.x, y_top: c.y_top, w: c.w, h: c.h,
         }).collect();
@@ -68,16 +73,9 @@ fn paint_grid_seams(
         }
         .paint(painter);
 
-        // F3+1.20 — per-pane focus outline.  RN-style outline
-        // (doesn't shrink pane content), width + gutter passed
-        // so GridItem places the 8 ring rects at exactly where
-        // the GridSeams base seams sit — outline pixel-for-pixel
-        // REPLACES the gray seam color on the focused side, no
-        // overshoot beyond the seam footprint.
-        let focus_outline = Outline {
-            color: [0.72, 0.76, 0.82, 1.0],
-            width: seam_thickness,
-        };
+        // An outline, not a border: it lies where the seams are and
+        // takes nothing from the pane's content.
+        let focus_outline = Outline { color: palette::focus_ring(), width: seam_thickness };
         let cols = layout.grid_cols.max(1);
         let rows = layout.grid_rows.max(1);
         for (idx, rect) in pane_rects.iter().enumerate().take(n_views) {
@@ -124,30 +122,24 @@ fn paint_grid_seams(
 }
 
 fn paint_empty_seats(painter: &mut ViewPainter, layout: &Layout, n_views: usize) {
-    let cell_h = painter.cell_h;
-    // Empty-cell BG overlay + [+] hint.  Each empty cell becomes
-    // a low-key ghost Button with a "+" glyph centered inside.
-    let n_visible = n_views;
-    let empty_style = ButtonStyle {
-        bg:           [EMPTY_CELL_OVERLAY[0], EMPTY_CELL_OVERLAY[1],
-                       EMPTY_CELL_OVERLAY[2], EMPTY_CELL_OVERLAY[3]],
-        bg_hover:     [EMPTY_CELL_OVERLAY[0], EMPTY_CELL_OVERLAY[1],
-                       EMPTY_CELL_OVERLAY[2], EMPTY_CELL_OVERLAY[3]],
-        fg:           EMPTY_CELL_GLYPH_FG,
-        fg_hover:     EMPTY_CELL_GLYPH_FG,
-        border_color: [0.0, 0.0, 0.0, 0.0],
-        border_width: 0.0,
+    // A seat nothing runs in: the window's surface over it and a `+`.
+    let style = ButtonStyle {
+        bg: palette::empty_seat_bg(),
+        bg_hover: palette::empty_seat_bg(),
+        fg: palette::empty_seat_fg(),
+        fg_hover: palette::empty_seat_fg(),
         corner_radius: 0.0,
         padding_x: 0.0,
         icon_gap: 0.0,
-        icon_size: cell_h,
+        icon_size: painter.cell_h,
+        ..ButtonStyle::ghost()
     };
-    for cell_rect in layout.cells.iter().skip(n_visible) {
-        let inner_top = cell_rect.y_top + layout.cell_title_h;
-        let inner_h = (cell_rect.h - layout.cell_title_h).max(0.0);
+    for cell_rect in layout.cells.iter().skip(n_views) {
         let inner = Rect {
-            x: cell_rect.x, y_top: inner_top,
-            w: cell_rect.w, h: inner_h,
+            x: cell_rect.x,
+            y_top: cell_rect.y_top + layout.cell_title_h,
+            w: cell_rect.w,
+            h: (cell_rect.h - layout.cell_title_h).max(0.0),
         };
         Button {
             rect: inner,
@@ -155,164 +147,86 @@ fn paint_empty_seats(painter: &mut ViewPainter, layout: &Layout, n_views: usize)
             icon: Some(IconSpec::Glyph("+")),
             icon_position: IconPosition::Only,
             hovered: false,
-            style: empty_style,
+            style,
         }.paint(painter);
     }
 }
 
-fn paint_sidebar(painter: &mut ViewPainter, layout: &Layout, sidebar: &[SidebarEntry], focused_idx: usize) {
-    // Sidebar — rows + status dot + label.  Replaces push_sidebar.
-    if !sidebar.is_empty() && layout.sidebar_w > 0.0 {
-        let rows: Vec<SidebarRow> = sidebar.iter().map(|e| {
-            let dot = match e.state {
-                SessionState::Active => STATE_ACTIVE,
-                SessionState::Idle   => STATE_IDLE,
-                SessionState::Exited => STATE_EXITED,
-            };
-            SidebarRow {
-                label: e.label,
-                dot_color: [dot.0, dot.1, dot.2, 1.0],
-            }
-        }).collect();
-        Sidebar {
-            rect: Rect {
-                x: 0.0,
-                y_top: layout.top_inset,
-                w: layout.sidebar_w,
-                h: (layout.window_h - layout.top_inset).max(0.0),
-            },
-            rows: &rows,
-            focused_idx,
-            style: SidebarStyle {
-                focused_bg: [BG_FOCUSED.0, BG_FOCUSED.1, BG_FOCUSED.2, 1.0],
-                label_fg:   [SIDEBAR_TEXT_FG.0, SIDEBAR_TEXT_FG.1, SIDEBAR_TEXT_FG.2, 1.0],
-                row_h: SIDEBAR_ROW_H,
-                top_pad: layout.sidebar_top_pad_phys as f32,
-                left_pad: SIDEBAR_LEFT_PAD,
-                dot_radius: SIDEBAR_DOT_R,
-                dot_label_gap: SIDEBAR_DOT_LABEL_GAP,
-            },
-        }
-        .paint(painter);
-    }
-}
-
-fn paint_button_glyphs(painter: &mut ViewPainter, layout: &Layout) {
-    let (cell_w, cell_h, ascent) = (painter.cell_w, painter.cell_h, painter.ascent);
-    // Close-[×] glyph per close button — `painter.text("×", ...)`
-    // centred in each close_session_rect.  Replaces push_close_glyphs.
-    if !layout.close_session_rects.is_empty() {
-        let close_disabled = layout.close_session_rects.len() == 1;
-        let color = if close_disabled { CLOSE_BTN_FG_DISABLED } else { CLOSE_BTN_FG };
-        for r in &layout.close_session_rects {
-            let x = (r.x + (r.w - cell_w as f64) * 0.5) as f32;
-            let y_baseline = (r.y_top + (r.h - cell_h as f64) * 0.5) as f32 + ascent;
-            painter.text(x, y_baseline, "×", color);
-        }
-    }
-    // Add-[+] glyph in the sidebar add button.  Replaces
-    // push_add_button_glyph.
-    if layout.add_session_button_rect.w > 0.0 {
-        let add_disabled =
-            layout.close_session_rects.len() >= SESSION_COUNT_HARD_CAP;
-        let color = if add_disabled { ADD_BTN_FG_DISABLED } else { ADD_BTN_FG };
-        let r = layout.add_session_button_rect;
-        let x = (r.x + (r.w - cell_w as f64) * 0.5) as f32;
-        let y_baseline = (r.y_top + (r.h - cell_h as f64) * 0.5) as f32 + ascent;
-        painter.text(x, y_baseline, "+", color);
-    }
-}
-
-fn paint_version_label(painter: &mut ViewPainter, layout: &Layout) {
-    let (cell_w, cell_h, ascent) = (painter.cell_w, painter.cell_h, painter.ascent);
-    // Header version label — quiet metadata flush right, on the
-    // same row as the traffic lights and the toolbar buttons.
-    if layout.top_inset > 0.0 {
-        let label = version_label();
-        let text_w = label.chars().count() as f32 * cell_w;
-        let scale_approx = (layout.top_inset as f32) / crate::HEADER_PT as f32;
-        let right_margin_logical_pt: f32 = 10.0;
-        let right_margin_phys = right_margin_logical_pt * scale_approx;
-        let x =
-            ((layout.window_w as f32) - right_margin_phys - text_w).max(cell_w);
-        let row_center = marspot_term::layout::TRAFFIC_LIGHT_CENTER_Y_LOGICAL as f32
-            * scale_approx;
-        let baseline_y = (row_center - cell_h * 0.5).max(0.0) + ascent;
-        painter.text(
-            x, baseline_y, &label,
-            [HEADER_VERSION_FG.0, HEADER_VERSION_FG.1, HEADER_VERSION_FG.2, 1.0],
-        );
-    }
-}
-
-/// Empty-cell BG tint.  Painted over `layout.cells[views.len()..]`
-/// when sessions count is less than layout cell count so the
-/// "open slot" reads as a softer, slightly elevated area.  Low-
-/// alpha black-ish overlay over the existing cell BG keeps the
-/// terminal palette intact.
-const EMPTY_CELL_OVERLAY: [f32; 4] = [0.04, 0.05, 0.07, 0.6];
-const EMPTY_CELL_GLYPH_FG: [f32; 4] = [0.30, 0.34, 0.38, 0.85];
-
-// Close-[×] button colours.  Subtle red-tinted BG so the user
-// reads "destructive action zone" without it screaming; the
-// actual `×` glyph is rasterised via the FG pass so it's a
-// true diagonal cross (NOT the axis-aligned `+` an earlier
-// attempt drew, which read as "add" — wrong affordance).
-// When this is the only session (close_session_rects.len() == 1)
-// a softer gray pair is used so the user sees the affordance
-// is disabled.
-const CLOSE_BTN_BG: [f32; 4] = [0.18, 0.07, 0.08, 0.85];
-const CLOSE_BTN_FG: [f32; 4] = [0.92, 0.62, 0.62, 1.0];
-const CLOSE_BTN_BG_DISABLED: [f32; 4] = [0.10, 0.10, 0.11, 0.65];
-const CLOSE_BTN_FG_DISABLED: [f32; 4] = [0.45, 0.45, 0.47, 0.8];
-
-// Add-[+] button colours.  Green-tinted BG to read as
-// "constructive action".  Disabled (N == SESSION_COUNT_HARD_CAP)
-// drops to gray — `mouse_down` ignores the click but the dim look
-// explains why.
-const ADD_BTN_BG: [f32; 4] = [0.07, 0.16, 0.10, 0.85];
-const ADD_BTN_FG: [f32; 4] = [0.65, 0.92, 0.72, 1.0];
-const ADD_BTN_BG_DISABLED: [f32; 4] = [0.10, 0.10, 0.11, 0.65];
-const ADD_BTN_FG_DISABLED: [f32; 4] = [0.45, 0.45, 0.47, 0.8];
-
-// RFC-004 E.1 (B11) — this was a private `= 9` that predated the
-// cap raise to 36 in ui::mod; the [+] button greyed out at 9 panes
-// while spawn paths honoured 36.  One constant, one truth.
-use crate::ui::SESSION_COUNT_HARD_CAP;
-
-fn push_layout_chrome(
+fn paint_sidebar(
+    painter: &mut ViewPainter,
     layout: &Layout,
-    hover_chrome_btn: Option<u8>,
-    p: &mut crate::ui::core::view::ViewPainter,
+    sidebar: &[SidebarEntry],
+    focused_idx: usize,
+    hover: Option<ChromeHover>,
 ) {
-    use crate::ui::components::{Button, ButtonStyle, IconSpec, IconPosition};
-    use crate::ui::system::macos::icons::{SidebarIcon, GridIcon, ListTreeIcon, DevPanelIcon, UsageBarsIcon, SlidersIcon};
-
-    // F3+1.12 — chrome hairline seams (sidebar↔grid + header↔grid).
-    // Same SEAM tone as GridSeams; routed through the painter (UI
-    // pipeline) so they layer over pane BG like the rest of the
-    // chrome.  There used to be a third seam splitting the header into
-    // title strip + toolbar; the header is one band now, so drawing a
-    // line through it would cut the row the lights sit on.
-    if layout.gutter > 0.0 {
-        let g = layout.gutter;
-        let seam = [SEAM.0, SEAM.1, SEAM.2, 1.0];
-        let ui_fill = |p: &mut crate::ui::core::ViewPainter, r: Rect| {
-            p.fill_rounded_rect(r, seam, 0.0, ([0.0, 0.0, 0.0, 0.0], 0.0));
-        };
-        if layout.sidebar_w > 0.0 {
-            ui_fill(p, Rect {
-                x: layout.sidebar_w, y_top: layout.top_inset,
-                w: g, h: layout.window_h - layout.top_inset,
-            });
-        }
-        if layout.top_inset > 0.0 {
-            ui_fill(p, Rect {
-                x: 0.0, y_top: layout.top_inset - g,
-                w: layout.window_w, h: g,
-            });
-        }
+    if layout.sidebar_w <= 0.0 {
+        return;
     }
+    // The add button: a ghost — its `+`, and a fill only under the
+    // pointer.  At the pane limit it is drawn disabled and a click on
+    // it does nothing.
+    let add = layout.add_session_button_rect;
+    if add.w > 0.0 {
+        let full = layout.close_session_rects.len() >= SESSION_COUNT_HARD_CAP;
+        let hovered = hover == Some(ChromeHover::Add) && !full;
+        if hovered {
+            // As wide as a row's fill, so the two line up; the button
+            // itself is where the layout put it.
+            let fill = Rect {
+                x: chrome::SIDEBAR_ROW_INSET,
+                w: (layout.sidebar_w - 2.0 * chrome::SIDEBAR_ROW_INSET).max(0.0),
+                ..add
+            };
+            painter.fill_rounded_rect(
+                fill, palette::chrome_hover(), chrome::SIDEBAR_ROW_RADIUS as f32, (palette::none(), 0.0),
+            );
+        }
+        let fg = if full {
+            palette::disabled_fg()
+        } else if hovered {
+            palette::fg()
+        } else {
+            palette::chrome_icon()
+        };
+        controls::paint_plus(painter, add, chrome::SIDEBAR_ADD_MARK, chrome::SIDEBAR_ADD_STROKE, fg);
+    }
+    Sidebar {
+        rect: Rect {
+            x: 0.0,
+            y_top: layout.top_inset,
+            w: layout.sidebar_w,
+            h: (layout.window_h - layout.top_inset).max(0.0),
+        },
+        top_pad: layout.sidebar_top_pad_phys,
+        rows: sidebar,
+        close_rects: &layout.close_session_rects,
+        focused_idx,
+        hover,
+    }
+    .paint(painter);
+}
+
+/// The lines between the sidebar and the grid and under the header, in
+/// the seam colour the panes are divided by.  The header itself is one
+/// band — the row the window's own buttons sit on — and has no line
+/// through it.
+fn paint_region_seams(p: &mut ViewPainter, layout: &Layout) {
+    let g = layout.gutter;
+    if g <= 0.0 {
+        return;
+    }
+    if layout.sidebar_w > 0.0 {
+        let r = Rect { x: layout.sidebar_w, y_top: layout.top_inset, w: g, h: layout.window_h - layout.top_inset };
+        p.fill_rounded_rect(r, palette::seam(), 0.0, (palette::none(), 0.0));
+    }
+    if layout.top_inset > 0.0 {
+        let r = Rect { x: 0.0, y_top: layout.top_inset - g, w: layout.window_w, h: g };
+        p.fill_rounded_rect(r, palette::seam(), 0.0, (palette::none(), 0.0));
+    }
+}
+
+fn paint_toolbar(p: &mut ViewPainter, layout: &Layout, state: ChromeState) {
+    use crate::ui::system::macos::icons::{SidebarIcon, GridIcon, ListTreeIcon, DevPanelIcon, UsageBarsIcon, SlidersIcon};
 
     // Every toolbar button, painted from one list.
     //
@@ -322,58 +236,46 @@ fn push_layout_chrome(
     // without this and shipped invisible: the rect was laid out and
     // the hit-test worked, so clicking the empty space opened a panel
     // nobody could see a button for.
-    let sidebar_collapsed = layout.sidebar_w == 0.0;
-    let sidebar_icon = SidebarIcon { collapsed: sidebar_collapsed };
+    let sidebar_icon = SidebarIcon { collapsed: layout.sidebar_w == 0.0 };
     let grid_icon = GridIcon { cols: layout.grid_cols, rows: layout.grid_rows };
-    let list_tree_icon = ListTreeIcon;
-    let dev_panel_icon = DevPanelIcon;
-    let usage_icon = UsageBarsIcon;
-    let sliders_icon = SlidersIcon;
     let icons: [&dyn crate::ui::core::IconComponent; 6] = [
         &sidebar_icon,
         &grid_icon,
-        &list_tree_icon,
-        &dev_panel_icon,
-        &usage_icon,
-        &sliders_icon,
+        &ListTreeIcon,
+        &DevPanelIcon,
+        &UsageBarsIcon,
+        &SlidersIcon,
     ];
-    let chrome = ButtonStyle::chrome();
     for (i, (rect, icon)) in layout.toolbar_buttons().into_iter().zip(icons).enumerate() {
         // A zero-width rect is a button this layout does not show
         // (snapshot / bench paths build a chrome-less layout).
         if rect.w <= 0.0 {
             continue;
         }
-        let btn = Button {
+        Button {
             rect,
             label: None,
             icon: Some(IconSpec::Component(icon)),
             icon_position: IconPosition::Only,
-            hovered: hover_chrome_btn == Some(i as u8),
-            style: chrome,
-        };
-        btn.paint(p);
+            hovered: state.hover == Some(ChromeHover::Toolbar(i as u8)),
+            style: ButtonStyle::toolbar(state.on[i]),
+        }
+        .paint(p);
     }
+}
 
-    // F3+3.0 — picker popup removed; `LayoutModal` (separate
-    // component) replaces it.
-
-    // Sidebar close-[×] BG tints (FG `×` glyph laid down later in
-    // `push_close_glyphs`).  Painted as plain rounded rects via the
-    // UI pipeline so they layer correctly on top of sidebar BG.
-    let n_sessions = layout.close_session_rects.len();
-    let close_disabled = n_sessions == 1;
-    let close_bg = if close_disabled { CLOSE_BTN_BG_DISABLED } else { CLOSE_BTN_BG };
-    for rect in &layout.close_session_rects {
-        p.fill_rounded_rect(*rect, close_bg, 0.0,
-            ([0.0, 0.0, 0.0, 0.0], 0.0));
-    }
-    // Sidebar [+] add-session BG.  Same pipeline reasoning.
-    if layout.add_session_button_rect.w > 0.0 {
-        let add_disabled = n_sessions >= SESSION_COUNT_HARD_CAP;
-        let add_bg = if add_disabled { ADD_BTN_BG_DISABLED } else { ADD_BTN_BG };
-        p.fill_rounded_rect(layout.add_session_button_rect, add_bg, 0.0,
-            ([0.0, 0.0, 0.0, 0.0], 0.0));
+fn paint_version_label(painter: &mut ViewPainter, layout: &Layout) {
+    let (cell_w, cell_h, ascent) = (painter.cell_w, painter.cell_h, painter.ascent);
+    // Quiet metadata flush right, on the same row as the traffic
+    // lights and the toolbar buttons.
+    if layout.top_inset > 0.0 {
+        let label = version_label();
+        let text_w = label.chars().count() as f32 * cell_w;
+        let scale = (layout.top_inset / crate::HEADER_PT) as f32;
+        let x = (layout.window_w as f32 - chrome::VERSION_PAD_RIGHT as f32 * scale - text_w).max(cell_w);
+        let row_center = marspot_term::layout::TRAFFIC_LIGHT_CENTER_Y_LOGICAL as f32 * scale;
+        let baseline_y = (row_center - cell_h * 0.5).max(0.0) + ascent;
+        painter.text(x, baseline_y, &label, palette::chrome_icon());
     }
 }
 

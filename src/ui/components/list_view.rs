@@ -21,18 +21,6 @@ pub struct ListViewStyle {
     pub focused_inset_x: f32,
 }
 
-impl Default for ListViewStyle {
-    fn default() -> Self {
-        Self {
-            fg:           [0.60, 0.63, 0.70, 1.0],
-            fg_focused:   [0.95, 0.96, 0.97, 1.0],
-            focused_bg:   [0.18, 0.28, 0.48, 1.0],
-            focused_radius: 5.0,
-            focused_inset_x: 4.0,
-        }
-    }
-}
-
 pub struct ListRow<'a> {
     pub label: &'a str,
     pub is_focused: bool,
@@ -80,7 +68,7 @@ impl<'a> ListView<'a> {
                     },
                     self.style.focused_bg,
                     self.style.focused_radius,
-                    ([0.0, 0.0, 0.0, 0.0], 0.0),
+                    (crate::ui::components::panel_palette::none(), 0.0),
                 );
             }
             // Ellipsised, not chopped: a snippet that ran out of room
@@ -111,6 +99,7 @@ impl<'a> ListView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::components::panel_palette as palette;
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
         Rect { x, y_top: y, w, h }
@@ -124,20 +113,18 @@ mod tests {
             rows: &rows,
             row_h: 20.0,
             text_pad_left: 4.0,
-            style: ListViewStyle::default(),
+            style: ListViewStyle {
+                fg: palette::fg_sec(),
+                fg_focused: palette::fg(),
+                focused_bg: palette::row_selected(),
+                focused_radius: 4.0,
+                focused_inset_x: 4.0,
+            },
         };
         let r0 = lv.row_rect(0);
         assert_eq!(r0.y_top, 50.0);
         assert_eq!(r0.h, 20.0);
         let r3 = lv.row_rect(3);
         assert_eq!(r3.y_top, 50.0 + 3.0 * 20.0);
-    }
-
-    #[test]
-    fn default_style_focused_bg_opaque() {
-        let s = ListViewStyle::default();
-        assert_eq!(s.focused_bg[3], 1.0, "focused row BG must be opaque");
-        assert_eq!(s.fg[3], 1.0);
-        assert_eq!(s.fg_focused[3], 1.0);
     }
 }
