@@ -2251,8 +2251,8 @@ fn demo_cc_usage(rect: marspot_term::layout::Rect) -> marspot::ui::components::c
             account("primary", "one@example.com", "ok", 0, 0.42, 0.61),
             account("spare", "two@example.com", "near limit", 1, 0.88, 0.35),
         ],
-        now_unix: now,
-        feed_missing: false,
+        clock: marspot::ui::components::cc_usage_modal::Clock::fixed(now, 0),
+        hover: Default::default(),
     }
 }
 

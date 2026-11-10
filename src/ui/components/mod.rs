@@ -4,6 +4,7 @@
 //! a modal frame layout, etc.  Built on top of `core::View` /
 //! `system::macos::*` primitives.
 
+pub mod cc_usage_layout;
 pub mod cc_usage_modal;
 pub mod cc_usage_paint;
 pub mod controls;

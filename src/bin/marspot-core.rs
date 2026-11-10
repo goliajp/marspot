@@ -2785,6 +2785,7 @@ struct CcUsageModalState {
     data: Option<marspot::cc_usage::CcUsage>,
     codex: Option<marspot::cc_usage::CodexUsage>,
     loaded_at: Instant,
+    hover: marspot::ui::components::cc_usage_modal::Hover,
 }
 
 struct ContextMenuState {
@@ -7358,9 +7359,6 @@ impl CoreApp {
         None
     }
 
-    /// cc — modal frame rect for the `Cc` usage modal.  Width scales
-    /// with the account count (cards row); height with accounts
-    /// (timeline rows).  Centered under the title strip.
     /// cc — open the Claude usage modal, or close it if it's already
     /// up.  Shared by the toolbar button and the Cmd+Shift+C binding
     /// so the two can't drift apart.  Opening re-reads the feed, so a
@@ -7372,6 +7370,7 @@ impl CoreApp {
                 data: marspot::cc_usage::read(),
                 codex: marspot::cc_usage::read_codex(),
                 loaded_at: Instant::now(),
+                hover: Default::default(),
             }),
         };
         win!(self, wi).needs_render = true;
@@ -7476,39 +7475,21 @@ impl CoreApp {
     fn cc_usage_modal_rect(&self, wi: usize) -> marspot_term::layout::Rect {
         // Both feeds share the panel, so both feed its geometry.
         let modal = win!(self, wi).cc_usage_modal.as_ref();
-        let claude = modal.and_then(|m| m.data.as_ref());
-        let codex = modal.and_then(|m| m.codex.as_ref());
-        let n = (claude.map_or(0, |d| d.accounts.len())
-            + codex.map_or(0, |d| d.accounts.len()))
-            .max(1);
-        let window_rows = claude
-            .into_iter()
-            .flat_map(|d| d.accounts.iter().map(|a| a.windows().len()))
-            .chain(
-                codex
-                    .into_iter()
-                    .flat_map(|d| d.accounts.iter().map(|a| a.windows.len())),
-            )
-            .max()
-            .unwrap_or(2);
+        let (n, window_rows) = marspot::ui::components::cc_usage_modal::feed_shape(
+            modal.and_then(|m| m.data.as_ref()),
+            modal.and_then(|m| m.codex.as_ref()),
+        );
         let (cell_w, cell_h) = self.renderer.cell_dims();
-        // Geometry lives with the rest of the modal's metrics so the
-        // painter and this rect can't disagree about how tall a card is.
+        let w = &win!(self, wi);
         marspot::ui::components::cc_usage_modal::panel_rect(
-            n,
-            window_rows,
-            win!(self, wi).w_phys,
-            win!(self, wi).h_phys,
-            cell_w,
-            cell_h,
-            win!(self, wi).layout.top_inset,
+            n, window_rows, w.w_phys, w.h_phys, cell_w, cell_h, w.layout.top_inset,
         )
     }
 
     /// cc — build the `Cc` usage modal render data.  Re-reads the
     /// feed at most every 5 s while the modal is open.
     fn build_cc_usage_render(&mut self, wi: usize) -> Option<marspot::ui::components::cc_usage_modal::CcUsageRender> {
-        use marspot::ui::components::cc_usage_modal::{CcUsageAccountRender, CcUsageRender};
+        use marspot::ui::components::cc_usage_modal::{CcUsageAccountRender, CcUsageRender, Clock};
         let modal = win!(self, wi).cc_usage_modal.as_mut()?;
         if modal.loaded_at.elapsed() > std::time::Duration::from_secs(5) {
             modal.data = marspot::cc_usage::read();
@@ -7584,8 +7565,8 @@ impl CoreApp {
                 rect,
                 updated_label: String::new(),
                 accounts,
-                now_unix,
-                feed_missing: true,
+                clock: Clock::local(now_unix),
+                hover: modal.hover,
             });
         }
         // Two feeds, two generation stamps. The panel shows the older
@@ -7602,8 +7583,8 @@ impl CoreApp {
         Some(CcUsageRender {
             rect,
             updated_label: format!("updated {}", fmt_md_hm(generated_at)),
-            now_unix,
-            feed_missing: false,
+            clock: Clock::local(now_unix),
+            hover: modal.hover,
             accounts,
         })
     }
@@ -8043,6 +8024,13 @@ impl CoreApp {
                 win!(self, wi).needs_render = true;
             }
         }
+        if win!(self, wi).cc_usage_modal.is_some() {
+            let on = marspot::ui::components::cc_usage_modal::hover_at(self.cc_usage_modal_rect(wi), x_phys, y_phys);
+            let modal = win!(self, wi).cc_usage_modal.as_mut().expect("checked above");
+            if std::mem::replace(&mut modal.hover, on) != on {
+                win!(self, wi).needs_render = true;
+            }
+        }
         // Reveal the traffic-light glyphs while the cursor is anywhere
         // in the panel's title bar, matching the system's affordance.
         let w = &mut win!(self, wi);
@@ -8342,12 +8330,13 @@ impl CoreApp {
             win!(self, wi).needs_render = true;
             return;
         }
-        // cc — while the usage modal is open, any click outside its
-        // frame closes it; clicks inside are swallowed (display-only
-        // modal, nothing interactive yet).
+        // cc — while the usage modal is open, a click on its close
+        // button or outside its frame closes it; any other click
+        // inside is swallowed.
         if win!(self, wi).cc_usage_modal.is_some() {
+            use marspot::ui::components::cc_usage_modal::{hover_at, Hover};
             let rect = self.cc_usage_modal_rect(wi);
-            if !rect.contains(x_phys, y_phys) {
+            if !rect.contains(x_phys, y_phys) || hover_at(rect, x_phys, y_phys) == Hover::Close {
                 win!(self, wi).cc_usage_modal = None;
             }
             win!(self, wi).needs_render = true;
