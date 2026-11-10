@@ -368,6 +368,8 @@ mod tests {
             ("process_panel.rs", include_str!("process_panel.rs")),
             ("process_panel_paint.rs", include_str!("process_panel_paint.rs")),
             ("table.rs", include_str!("table.rs")),
+            ("layout_modal.rs", include_str!("layout_modal.rs")),
+            ("layout_modal_paint.rs", include_str!("layout_modal_paint.rs")),
         ] {
             assert_eq!(colour_literals(src), 0, "{file} writes a colour out by hand");
         }

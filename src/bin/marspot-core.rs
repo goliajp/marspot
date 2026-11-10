@@ -3888,16 +3888,12 @@ struct WindowState {
     /// yet must keep clear of where the buttons normally are, or its
     /// first frames draw the toolbar on top of them.
     lights_right_phys: Option<f64>,
-    /// Width the widest layout-modal card label needed, physical px,
-    /// as of the last published frame.
-    ///
-    /// Cards size themselves to their labels, so the hit-test has to
-    /// use the same number the painter did — and the number the
-    /// painter used is the one on screen right now, which is exactly
-    /// what a click is aimed at.  Recomputing it here from a
-    /// different pass would be a second opinion about geometry the
-    /// user can see.
+    /// Width of the widest layout-panel card label, physical px, as of
+    /// the last published frame.  The panel picks its width from it, so
+    /// the hit-test uses the number that produced what is on screen.
     layout_modal_label_w: f64,
+    /// What the pointer is on in the open layout panel.
+    layout_modal_hover: marspot::ui::components::layout_modal::Hover,
     /// F3+9 — right-click ContextMenu live state.  `None` when closed.
     /// Set by `mouse_right_down`; cleared by `mouse_down` outside
     /// the menu, Esc key, or after dispatching an action.
@@ -4019,6 +4015,7 @@ impl WindowState {
             layout_modal_open: false,
             lights_right_phys: None,
             layout_modal_label_w: 0.0,
+            layout_modal_hover: Default::default(),
             context_menu: None,
             pending_grid_cols: grid_cols,
             pending_grid_rows: grid_rows,
@@ -7436,6 +7433,17 @@ impl CoreApp {
         )
     }
 
+    /// The open layout panel's geometry, as last drawn.
+    fn layout_modal_geometry(&mut self, wi: usize) -> marspot::ui::components::LayoutModal {
+        let w = &win!(self, wi);
+        let (w_phys, h_phys, top_inset) = (w.w_phys, w.h_phys, w.layout.top_inset);
+        let (cols, rows, label_w) = (w.pending_grid_cols, w.pending_grid_rows, w.layout_modal_label_w);
+        let mut measure = marspot::ui::components::controls::font_measure(self.renderer.font_mut());
+        marspot::ui::components::LayoutModal::layout(
+            w_phys, h_phys, top_inset, cols, rows, label_w, &mut measure,
+        )
+    }
+
     fn cc_usage_modal_rect(&self, wi: usize) -> marspot_term::layout::Rect {
         // Both feeds share the panel, so both feed its geometry.
         let modal = win!(self, wi).cc_usage_modal.as_ref();
@@ -7801,6 +7809,7 @@ impl CoreApp {
             let w = &win!(self, wi);
             w.context_menu.is_some()
                 || w.settings_modal_open
+                || w.layout_modal_open
                 || w.process_panel
                     .as_ref()
                     .and_then(|p| p.layout.as_ref())
@@ -7837,6 +7846,13 @@ impl CoreApp {
             let on = marspot::ui::components::cc_usage_modal::hover_at(self.cc_usage_modal_rect(wi), x_phys, y_phys);
             let modal = win!(self, wi).cc_usage_modal.as_mut().expect("checked above");
             if std::mem::replace(&mut modal.hover, on) != on {
+                win!(self, wi).needs_render = true;
+            }
+        }
+        if win!(self, wi).layout_modal_open {
+            let on = self.layout_modal_geometry(wi).hover_at(x_phys, y_phys);
+            if on != win!(self, wi).layout_modal_hover {
+                win!(self, wi).layout_modal_hover = on;
                 win!(self, wi).needs_render = true;
             }
         }
@@ -8094,109 +8110,64 @@ impl CoreApp {
             win!(self, wi).needs_render = true;
             return;
         }
-        // F3+3.0 — when the LayoutModal is open, intercept ALL
-        // clicks: hit-test its controls first, swallow non-control
-        // clicks landing inside the frame so the modal feels modal
-        // (doesn't punch through to the grid).
+        // While the layout panel is open it takes every click: its
+        // controls act, anything else inside the frame is swallowed so
+        // it does not reach the grid underneath, and a click outside
+        // closes the panel.
         if win!(self, wi).layout_modal_open {
-            use marspot::ui::components::{LayoutModal, LayoutModalHit, GRID_MIN, GRID_MAX};
-            let modal = LayoutModal::layout(
-                win!(self, wi).w_phys, win!(self, wi).h_phys, win!(self, wi).scale,
-                HEADER_PT * win!(self, wi).scale,
-                win!(self, wi).pending_grid_cols, win!(self, wi).pending_grid_rows,
-                win!(self, wi).layout_modal_label_w,
-            );
-            // F3+3.3 — card drag start has priority over the
-            // generic hit_test below (which would otherwise classify
-            // a card click as `LayoutModalHit::Frame` and swallow it).
-            if let Some(card_idx) = modal.hit_test_card(x_phys, y_phys) {
-                let card = modal.cards[card_idx];
-                win!(self, wi).layout_drag = Some(LayoutModalDrag {
-                    from_slot: card_idx,
-                    grab_offset_phys: (
-                        x_phys - card.x,
-                        y_phys - card.y_top,
-                    ),
-                    mouse_phys: (x_phys, y_phys),
-                });
-                win!(self, wi).needs_render = true;
-                return;
-            }
-            match modal.hit_test(x_phys, y_phys) {
-                Some(LayoutModalHit::Close) => {
-                    win!(self, wi).layout_modal_open = false;
-                    win!(self, wi).needs_render = true;
-                    return;
+            use marspot::ui::components::layout_modal::{step, Axis, Hover};
+            let modal = self.layout_modal_geometry(wi);
+            win!(self, wi).needs_render = true;
+            match modal.hover_at(x_phys, y_phys) {
+                Hover::Card(slot) => {
+                    let card = modal.cards[slot];
+                    win!(self, wi).layout_drag = Some(LayoutModalDrag {
+                        from_slot: slot,
+                        grab_offset_phys: (x_phys - card.x, y_phys - card.y_top),
+                        mouse_phys: (x_phys, y_phys),
+                    });
                 }
-                Some(LayoutModalHit::Apply) => {
+                Hover::Close => win!(self, wi).layout_modal_open = false,
+                Hover::Apply => {
                     win!(self, wi).layout_modal_open = false;
                     win!(self, wi).grid_cols = win!(self, wi).pending_grid_cols;
                     win!(self, wi).grid_rows = win!(self, wi).pending_grid_rows;
-                    // F3+3.3 — apply card_slots permutation to
-                    // win!(self, wi).panes so the modal's drag-reordered
-                    // arrangement lands in the actual grid.  Only
-                    // the in-cells portion is reordered (panes past
-                    // grid cells stay in sidebar order).  Identity
-                    // mapping = no-op.
+                    // The drag-reordered arrangement lands in the
+                    // actual grid.  Only the in-cells portion is
+                    // reordered (panes past the grid cells stay in
+                    // sidebar order).
                     let cells = win!(self, wi).grid_cols * win!(self, wi).grid_rows;
                     self.apply_card_slot_permutation(wi, cells);
-                    // shrink-guard — if focused pane slot is
-                    // beyond the new cell count, jump focus to the
-                    // last surviving cell so the user sees a focused
-                    // pane in-grid.  Overflowed sessions stay alive
-                    // in the sidebar (n_sessions > cells handling
-                    // is already preserved by `take(cell_count)`).
+                    // If the focused pane's slot is beyond the new
+                    // cell count, focus the last surviving cell so the
+                    // user sees a focused pane in the grid.  Overflowed
+                    // sessions stay alive in the sidebar.
                     if cells > 0 && win!(self, wi).focused_idx >= cells {
                         win!(self, wi).focused_idx = cells - 1;
                     }
                     self.rebuild_layout(wi);
                     self.save_session_state();
-                    return;
                 }
-                Some(LayoutModalHit::ColsDec) => {
-                    if win!(self, wi).pending_grid_cols > GRID_MIN {
-                        win!(self, wi).pending_grid_cols -= 1;
+                Hover::Step(axis, part) => {
+                    let w = &mut win!(self, wi);
+                    let value = match axis {
+                        Axis::Columns => &mut w.pending_grid_cols,
+                        Axis::Rows => &mut w.pending_grid_rows,
+                    };
+                    if let Some(next) = step(*value, part) {
+                        *value = next;
                         self.reset_card_slots(wi);
-                        win!(self, wi).needs_render = true;
                     }
-                    return;
                 }
-                Some(LayoutModalHit::ColsInc) => {
-                    if win!(self, wi).pending_grid_cols < GRID_MAX {
-                        win!(self, wi).pending_grid_cols += 1;
-                        self.reset_card_slots(wi);
-                        win!(self, wi).needs_render = true;
-                    }
-                    return;
-                }
-                Some(LayoutModalHit::RowsDec) => {
-                    if win!(self, wi).pending_grid_rows > GRID_MIN {
-                        win!(self, wi).pending_grid_rows -= 1;
-                        self.reset_card_slots(wi);
-                        win!(self, wi).needs_render = true;
-                    }
-                    return;
-                }
-                Some(LayoutModalHit::RowsInc) => {
-                    if win!(self, wi).pending_grid_rows < GRID_MAX {
-                        win!(self, wi).pending_grid_rows += 1;
-                        self.reset_card_slots(wi);
-                        win!(self, wi).needs_render = true;
-                    }
-                    return;
-                }
-                Some(_) => {
-                    // TitleBar / Frame: swallow.
-                    return;
-                }
-                None => {
-                    // Click outside the modal closes it without
-                    // any other side effect.
+                Hover::None if !modal.contains(x_phys, y_phys) => {
                     win!(self, wi).layout_modal_open = false;
-                    win!(self, wi).needs_render = true;
-                    return;
                 }
+                Hover::None => {}
             }
+            if !win!(self, wi).layout_modal_open {
+                win!(self, wi).layout_modal_hover = Default::default();
+            }
+            return;
         }
         // F3+3.0 — toolbar layout button toggles the LayoutModal.
         // Re-init pending values from current grid_* every open so
@@ -8710,22 +8681,10 @@ impl CoreApp {
         // destination slot under the cursor, swap, redraw.  No
         // animation (V2.0); settle = single-frame jump.
         if let Some(d) = win!(self, wi).layout_drag.take() {
-            use marspot::ui::components::LayoutModal;
-            let modal = LayoutModal::layout(
-                win!(self, wi).w_phys, win!(self, wi).h_phys, win!(self, wi).scale,
-                HEADER_PT * win!(self, wi).scale,
-                win!(self, wi).pending_grid_cols, win!(self, wi).pending_grid_rows,
-                win!(self, wi).layout_modal_label_w,
-            );
-            // Drop position = card origin (mouse - grab_offset),
-            // plus card center offset so the lookup tracks visual
-            // intent (cursor pointing at the dragged card's CENTER).
-            let card_w = modal.cards.first().map(|c| c.w).unwrap_or(0.0);
-            let card_h = modal.cards.first().map(|c| c.h).unwrap_or(0.0);
-            let cx = d.mouse_phys.0 - d.grab_offset_phys.0 + card_w * 0.5;
-            let cy = d.mouse_phys.1 - d.grab_offset_phys.1 + card_h * 0.5;
-            if let Some(to_slot) = modal.nearest_card(cx, cy)
-                && to_slot != d.from_slot
+            // The slot under the dragged card's centre, which is what
+            // the panel highlighted while it was held.
+            let modal = self.layout_modal_geometry(wi);
+            if let Some(to_slot) = modal.drop_target(d.from_slot, d.mouse_phys, d.grab_offset_phys)
                     && to_slot < win!(self, wi).card_slots.len()
                     && d.from_slot < win!(self, wi).card_slots.len()
                 {
@@ -9418,7 +9377,7 @@ impl CoreApp {
         // Per-slot titles built from card_slots → resolved title
         // chain (custom > cwd basename > ordinal).  Empty slot if
         // the slot points at a pane index past the live count.
-        self.renderer.set_layout_modal(if win!(self, wi).layout_modal_open {
+        let layout_modal = if win!(self, wi).layout_modal_open {
             use marspot::ui::components::layout_modal_paint::{LayoutModalRender, LayoutModalDragRender};
             let cells = win!(self, wi).pending_grid_cols * win!(self, wi).pending_grid_rows;
             let slot_titles: Vec<String> = (0..cells)
@@ -9430,17 +9389,14 @@ impl CoreApp {
                         .unwrap_or_default()
                 })
                 .collect();
-            let (cell_w, _) = self.renderer.cell_dims();
-            win!(self, wi).layout_modal_label_w = slot_titles
-                .iter()
-                .map(|t| t.chars().count())
-                .max()
-                .unwrap_or(0) as f64
-                * cell_w;
+            win!(self, wi).layout_modal_label_w = marspot::ui::components::layout_modal::widest_label(
+                &slot_titles,
+                &mut marspot::ui::components::controls::font_measure(self.renderer.font_mut()),
+            );
             Some(LayoutModalRender {
                 cols: win!(self, wi).pending_grid_cols,
                 rows: win!(self, wi).pending_grid_rows,
-                scale: win!(self, wi).scale,
+                hover: win!(self, wi).layout_modal_hover,
                 slot_titles,
                 drag: win!(self, wi).layout_drag.map(|d| LayoutModalDragRender {
                     from_slot: d.from_slot,
@@ -9450,7 +9406,8 @@ impl CoreApp {
             })
         } else {
             None
-        });
+        };
+        self.renderer.set_layout_modal(layout_modal);
         // Cap views to the layout's cell count — sessions past it
         // stay alive in the sidebar without a main-area cell.
         let cell_count = win!(self, wi).layout.cells.len();
