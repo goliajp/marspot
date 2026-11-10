@@ -173,7 +173,38 @@ fn prepare(sid: u64, dir: &Path, leaving: &Leaving, to: Agent, resume: Option<&s
     let obs = crate::observe::shared().latest();
     let live: Vec<u64> = obs.sessions.iter().map(|s| s.entry.id).chain(std::iter::once(sid)).collect();
     ledger::prune(dir, &live);
-    prepare_in(sid, dir, leaving, to, resume, ledger, history_of(leaving))
+    let history = history_of(leaving);
+    let switch = switch_note(leaving, history.as_deref());
+    prepare_in(sid, dir, leaving, to, resume, ledger, history, &switch)
+}
+
+/// What the receiving agent is told about the switch.  Stopping codex
+/// happens here, before its TUI is taken down: the note has to say
+/// what became of it.
+fn switch_note(leaving: &Leaving, history: Option<&Path>) -> transcript::Switch {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let (month, day, hour, minute) = marspot::cc_usage::local_mdhm(now);
+    let at = format!("{month}/{day} {hour:02}:{minute:02}");
+    let thread = history.filter(|_| leaving.agent == Agent::Codex).and_then(history::codex_id_of);
+    let (left, stopped) = match thread.map(|t| super::codex_stop::stop_thread(&leaving.home, &t)) {
+        // claude and gemini are their process; so is a codex with no thread yet
+        None => ("has exited".to_string(), true),
+        Some(Ok(s)) => (left_codex(&s), true),
+        Some(Err(e)) => (format!("has exited, but its background thread could not be reached ({e}) and may be carrying on"), false),
+    };
+    transcript::Switch { at, left, stopped }
+}
+
+fn left_codex(s: &super::codex_stop::Stopped) -> String {
+    match (s.goal_paused, s.turn_interrupted) {
+        (true, true) => "has exited, its goal was paused and the turn it was running was interrupted",
+        (true, false) => "has exited and its goal was paused",
+        (false, true) => "has exited and the turn it was running was interrupted",
+        (false, false) => "has exited; it had no active goal and no turn running",
+    }
+    .to_string()
 }
 
 fn prepare_in(
@@ -184,6 +215,7 @@ fn prepare_in(
     resume: Option<&str>,
     ledger: &Ledger,
     history_path: Option<PathBuf>,
+    switch: &transcript::Switch,
 ) -> Result<Outcome, String> {
     let mut next = ledger.clone();
     if resume.is_none() {
@@ -216,9 +248,9 @@ fn prepare_in(
     }
     let continuing = resume.is_some();
     let doc = ledger::doc_path(dir, sid);
-    ledger::write_atomic(&doc, transcript::render(&x, continuing).as_bytes())
+    ledger::write_atomic(&doc, transcript::render(&x, continuing, switch).as_bytes())
         .map_err(|e| format!("{}: {e}", doc.display()))?;
-    Ok(Outcome { message: Some(transcript::message(leaving.agent, &doc, continuing)), next })
+    Ok(Outcome { message: Some(transcript::message(leaving.agent, &doc, continuing, switch)), next })
 }
 
 /// How long reading the history may take.  A 1.1 GB rollout is real;
@@ -287,9 +319,17 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
             // leave nothing to count, and the wait would run out on a
             // screen that finished drawing long ago.  A first frame is
             // kilobytes; the echoed command line is a few hundred bytes.
+            //
+            // Unless the agent starts on a new conversation: its whole
+            // first screen is a banner and an input box, under the
+            // floor, and the wait ran out on a claude that had been
+            // ready for half a minute (2026-11-10, codex to claude).
+            // The line clears the screen before it starts the agent, so
+            // an input box on it is the new agent's, and is enough.
             .step(
                 Step::await_quiet(Duration::from_millis(1500))
                     .after_bytes(2048)
+                    .or_composer()
                     .timeout(Duration::from_secs(30))
                     .named("first_frame"),
             )
@@ -308,6 +348,10 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn switched() -> transcript::Switch {
+        transcript::Switch { at: "11/10 18:09".into(), left: "has exited".into(), stopped: true }
+    }
     use crate::plugins::handoff::history::tmp;
 
     #[test]
@@ -376,7 +420,7 @@ mod tests {
         let p = claude_history(&d, "u-1", &first);
         let l = leaving_claude(&d, "u-1");
 
-        let o = prepare_in(9, &state, &l, Agent::Codex, None, &Ledger::default(), Some(p.clone())).unwrap();
+        let o = prepare_in(9, &state, &l, Agent::Codex, None, &Ledger::default(), Some(p.clone()), &switched()).unwrap();
         let msg = o.message.expect("something to hand over");
         assert!(msg.starts_with(transcript::MARKER) && msg.contains("9.md"));
         let doc = std::fs::read_to_string(ledger::doc_path(&state, 9)).unwrap();
@@ -386,7 +430,7 @@ mod tests {
         // Back in claude later: the handoff turn from codex, then a new ask.
         let more = format!("{first}{}{}", ask("b", Some("a"), "[marspot handoff] from codex"), ask("c", Some("b"), "second ask"));
         std::fs::write(&p, &more).unwrap();
-        let o2 = prepare_in(9, &state, &l, Agent::Codex, Some("t-1"), &o.next, Some(p)).unwrap();
+        let o2 = prepare_in(9, &state, &l, Agent::Codex, Some("t-1"), &o.next, Some(p), &switched()).unwrap();
         assert!(o2.message.unwrap().contains("since you left"));
         let doc = std::fs::read_to_string(ledger::doc_path(&state, 9)).unwrap();
         assert!(doc.contains("second ask"));
@@ -404,9 +448,9 @@ mod tests {
         let p = claude_history(&d, "u-1", &body);
         let mut led = Ledger::default();
         led.set(Agent::Claude, Some(Side { id: "u-1".into(), offset: body.len() as u64 }));
-        let o = prepare_in(1, &d, &leaving_claude(&d, "u-1"), Agent::Codex, None, &led, Some(p)).unwrap();
+        let o = prepare_in(1, &d, &leaving_claude(&d, "u-1"), Agent::Codex, None, &led, Some(p), &switched()).unwrap();
         assert!(o.message.is_none());
-        let o = prepare_in(1, &d, &leaving_claude(&d, "u-9"), Agent::Codex, None, &led, None).unwrap();
+        let o = prepare_in(1, &d, &leaving_claude(&d, "u-9"), Agent::Codex, None, &led, None, &switched()).unwrap();
         assert!(o.message.is_none(), "an agent with no history hands nothing over");
     }
 
@@ -417,9 +461,9 @@ mod tests {
         let d = tmp("switch-forget");
         let mut led = Ledger::default();
         led.set(Agent::Codex, Some(Side { id: "t-old".into(), offset: 5 }));
-        let o = prepare_in(1, &d, &leaving_claude(&d, "u"), Agent::Codex, None, &led, None).unwrap();
+        let o = prepare_in(1, &d, &leaving_claude(&d, "u"), Agent::Codex, None, &led, None, &switched()).unwrap();
         assert_eq!(o.next.codex, None);
-        let o = prepare_in(1, &d, &leaving_claude(&d, "u"), Agent::Codex, Some("t-old"), &led, None).unwrap();
+        let o = prepare_in(1, &d, &leaving_claude(&d, "u"), Agent::Codex, Some("t-old"), &led, None, &switched()).unwrap();
         assert_eq!(o.next.codex, led.codex);
     }
 
@@ -458,7 +502,7 @@ mod tests {
 
         let state = home.join("handoff");
         std::fs::create_dir_all(&state).unwrap();
-        let o = prepare_in(4, &state, &leaving(&home), Agent::Claude, Some("u-1"), &Ledger::default(), found).unwrap();
+        let o = prepare_in(4, &state, &leaving(&home), Agent::Claude, Some("u-1"), &Ledger::default(), found, &switched()).unwrap();
         assert!(o.message.expect("codex's turn is handed over").contains("since you left"));
         assert!(std::fs::read_to_string(ledger::doc_path(&state, 4)).unwrap().contains("second ask"));
         assert!(o.next.codex.is_some(), "the codex side is recorded for next time");
@@ -507,7 +551,7 @@ mod tests {
 
         let state = home.join("handoff");
         std::fs::create_dir_all(&state).unwrap();
-        let o = prepare_in(6, &state, &leaving(Some(id), "/w/a"), Agent::Claude, None, &Ledger::default(), found).unwrap();
+        let o = prepare_in(6, &state, &leaving(Some(id), "/w/a"), Agent::Claude, None, &Ledger::default(), found, &switched()).unwrap();
         let msg = o.message.expect("gemini's turn is handed over");
         assert!(msg.starts_with(transcript::MARKER) && msg.contains("Gemini CLI"), "{msg}");
         let doc = std::fs::read_to_string(ledger::doc_path(&state, 6)).unwrap();
