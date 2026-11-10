@@ -83,8 +83,8 @@ fn the_forwarding_is_actually_guarded_by_it() {
 fn the_wheel_asks_the_same_question_first() {
     let b = body_of("scroll");
     let panel = b
-        .find("process_panel")
-        .expect("scroll no longer checks the process panel");
+        .find("panels.open()")
+        .expect("scroll no longer asks which panel is open");
     let forward = b.find("focused_pane_active_session").unwrap_or(usize::MAX);
     assert!(
         panel < forward,

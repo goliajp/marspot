@@ -17,8 +17,9 @@ use marspot_term::layout::Rect;
 
 use crate::ui::components::controls;
 use crate::ui::components::panel_chrome::{self, PanelChrome};
+use crate::ui::components::surface_stack;
 use crate::ui::components::table::{self, Align, Column, ColumnWidth, SortDir, TableGeometry};
-use crate::ui::theme::spec::{self, header, space};
+use crate::ui::theme::spec::{self, space};
 
 /// The panel's name, in its header.
 pub const TITLE: &str = "Process monitor";
@@ -171,10 +172,6 @@ pub struct Layout {
 
 /// The panel's frame: its fixed size centred in the window, moved by
 /// `offset` — how far its header has been dragged.
-///
-/// The header stays reachable wherever it is dragged: at most half the
-/// frame leaves the window sideways, and the header neither goes under
-/// the window's own chrome nor off the bottom.
 pub fn panel_rect(
     window_w: f64,
     window_h: f64,
@@ -194,13 +191,7 @@ pub fn panel_rect(
         panel_chrome::frame_height(content_h),
         top_inset,
     );
-    let half = r.w * 0.5;
-    let lowest = (window_h - spec::px(header::H)).max(top_inset);
-    Rect {
-        x: (r.x + offset.0).clamp(-half, window_w - half).round(),
-        y_top: (r.y_top + offset.1).clamp(top_inset, lowest).round(),
-        ..r
-    }
+    surface_stack::place(r, offset, window_w, window_h, top_inset)
 }
 
 /// Where everything is, for a panel at `frame` showing `n_panes` panes
@@ -310,7 +301,7 @@ pub fn format_rss(kb: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::theme::spec::{card, content, table as t};
+    use crate::ui::theme::spec::{card, content, header, table as t};
 
     const CELL_W: f64 = 7.0;
     const CELL_H: f64 = 16.0;
@@ -496,8 +487,8 @@ mod tests {
         assert_eq!((moved.w, moved.h), (home.w, home.h));
         assert_eq!(at(0.0, -1e6).y_top, top_inset, "never under the window's own chrome");
         assert_eq!(at(0.0, 1e6).y_top, WINDOW.1 - spec::px(header::H));
-        assert_eq!(at(-1e6, 0.0).x, (-home.w * 0.5).round());
-        assert_eq!(at(1e6, 0.0).x, (WINDOW.0 - home.w * 0.5).round());
+        assert_eq!(at(-1e6, 0.0).x, 0.0);
+        assert_eq!(at(1e6, 0.0).x, WINDOW.0 - home.w);
     }
 
     #[test]

@@ -221,6 +221,7 @@ fn panel_snapshot_layout_grid() {
                 mouse_phys: (over.x - over.w * 0.2 + grab.0, over.y_top + over.h * 0.4 + grab.1),
             }),
             hover: layout_modal::Hover::None,
+            offset: (0.0, 0.0),
         }));
     });
 }

@@ -32,6 +32,8 @@ pub struct LayoutModalRender {
     pub drag: Option<LayoutModalDragRender>,
     /// What the pointer is on, from `LayoutModal::hover_at`.
     pub hover: Hover,
+    /// How far the panel's header has been dragged from the middle.
+    pub offset: (f64, f64),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -69,7 +71,9 @@ pub(crate) fn push_layout_modal_via_view(
     let modal = {
         let mut m = controls::font_measure(&mut *painter.font);
         let label_w = lm::widest_label(&state.slot_titles, &mut m);
-        LayoutModal::layout(window_w, window_h, top_inset, state.cols, state.rows, label_w, &mut m)
+        LayoutModal::layout_moved(
+            window_w, window_h, top_inset, state.cols, state.rows, label_w, &mut m, state.offset,
+        )
     };
     modal.chrome.paint(&mut painter, lm::TITLE, None, state.hover == Hover::Close, |p, content| {
         paint_grid_group(p, &modal, state, content);
