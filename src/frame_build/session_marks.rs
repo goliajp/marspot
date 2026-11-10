@@ -3,12 +3,15 @@
 
 use crate::font_cache::{FontCache, BG};
 use crate::frame_build::glyph_resolve::{resolve_cell_glyph, resolve_cluster_glyph};
-use crate::frame_build::palette::*;
+use crate::ui::theme::terminal::*;
 use crate::frame_build::text_run::push_text_run;
 use crate::glyph_atlas::{GlyphAtlas, SlotMetrics};
 use crate::layout::CellRect;
 use crate::render::SessionView;
 use crate::frame_build::color::rgba8_of_f32;
+use crate::ui::components::panel_palette as palette;
+use crate::ui::components::sidebar::clip_chars;
+use crate::ui::theme::spec::chrome;
 use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance};
 use crate::frame_build::session::{PaneGeom, PaneOut};
 
@@ -17,6 +20,7 @@ use crate::frame_build::session::{PaneGeom, PaneOut};
 pub(crate) fn paint_title_strip(
     rect: &CellRect,
     view: &SessionView,
+    in_use: bool,
     cell_w: f32,
     cell_h: f32,
     ascent: f32,
@@ -30,34 +34,38 @@ pub(crate) fn paint_title_strip(
     padding: f32,
     title_h: f32,
 ) {
-    // Title strip — band at the top of the cell hosting the
-    // session label.  BG sits flush with the cell BG; a single
-    // SEAM hairline along the bottom of the strip separates it
-    // from the terminal content area below.  Glyphs in the strip
-    // use SIDEBAR_TEXT_FG (dim greyish-blue) so the title reads
-    // as quiet metadata, not as content competing with the
-    // terminal text.
+    // The strip sits flush with the pane's background; one seam along
+    // its bottom separates it from the terminal below.  The name is
+    // set as a sidebar row's is: primary on the pane in use, a step
+    // back on the others.
     if title_h > 0.0 && !view.title.is_empty() {
         let strip_bottom = rect.y_top as f32 + title_h;
-        // Bottom seam (1 phys-px line just inside the strip's
-        // bottom edge — sits exactly where padding starts).
         cells.push(CellInstance {
             origin: [rect.x as f32, strip_bottom - gutter.max(1.0)],
             size: [rect.w as f32, gutter.max(1.0)],
-            color: rgba8_of_f32([SEAM.0, SEAM.1, SEAM.2, 1.0]),
+            color: rgba8_of_f32(palette::seam()),
         });
-        // Title text — same monospace metrics as the terminal
-        // body; vertically centred in the strip, left-aligned
-        // with the same padding the terminal uses.
+        // Same monospace metrics as the terminal body; vertically
+        // centred in the strip, starting at the terminal's own inset.
         let label_x = rect.x as f32 + padding;
         let label_baseline_y = rect.y_top as f32
             + (title_h - cell_h) * 0.5
             + ascent;
+        let badge_chars = view.right_badge.chars().count() as f32;
+        let badge_x = rect.x as f32 + rect.w as f32 - padding - badge_chars * cell_w;
+        let badge_shown = !view.right_badge.is_empty() && badge_x > label_x;
+        // The name gives way to the badge, and to the pane's edge.
+        let title_right = if badge_shown {
+            badge_x - chrome::px(chrome::TITLE_GAP) as f32
+        } else {
+            rect.x as f32 + rect.w as f32 - padding
+        };
+        let room = ((title_right - label_x) / cell_w).floor().max(0.0) as usize;
         push_text_run(
-            view.title,
+            clip_chars(view.title, room),
             label_x,
             label_baseline_y,
-            [SIDEBAR_TEXT_FG.0, SIDEBAR_TEXT_FG.1, SIDEBAR_TEXT_FG.2, 1.0],
+            if in_use { palette::fg() } else { palette::chrome_fg() },
             cell_w,
             cell_h,
             ascent,
@@ -74,48 +82,38 @@ pub(crate) fn paint_title_strip(
         // user reads it as actionable; whatever follows is rendered
         // plain (the sessionId).  The plugin (L1) — not the renderer
         // — owns the meaning of the prefix; this just decorates it.
-        if !view.right_badge.is_empty() {
-            let badge_chars = view.right_badge.chars().count() as f32;
-            // Right anchor: hug the right edge with a single padding.
-            let badge_x = rect.x as f32 + rect.w as f32 - padding - badge_chars * cell_w;
-            if badge_x > label_x {
-                push_text_run(
-                    view.right_badge,
-                    badge_x,
-                    label_baseline_y,
-                    [PLUGIN_BADGE_FG.0, PLUGIN_BADGE_FG.1, PLUGIN_BADGE_FG.2, 1.0],
-                    cell_w,
-                    cell_h,
-                    ascent,
-                    atlas_w,
-                    atlas_h,
-                    font,
-                    atlas,
-                    glyphs,
-                );
-                // Hairline underline under the prefix (text before the
-                // first space).  Width = prefix_chars × cell_w; sits
-                // 1 phys-px below the baseline so it doesn't clip
-                // descenders that won't appear in `P<digit>` anyway.
-                let prefix_chars = view
-                    .right_badge
-                    .split(' ')
-                    .next()
-                    .map(|s| s.chars().count())
-                    .unwrap_or(0);
-                if prefix_chars > 0 {
-                    let underline_y = label_baseline_y + gutter.max(1.0);
-                    cells.push(CellInstance {
-                        origin: [badge_x, underline_y],
-                        size: [prefix_chars as f32 * cell_w, gutter.max(1.0)],
-                        color: rgba8_of_f32([
-                            PLUGIN_BADGE_FG.0,
-                            PLUGIN_BADGE_FG.1,
-                            PLUGIN_BADGE_FG.2,
-                            1.0,
-                        ]),
-                    });
-                }
+        if badge_shown {
+            push_text_run(
+                view.right_badge,
+                badge_x,
+                label_baseline_y,
+                palette::badge_fg(),
+                cell_w,
+                cell_h,
+                ascent,
+                atlas_w,
+                atlas_h,
+                font,
+                atlas,
+                glyphs,
+            );
+            // Hairline underline under the prefix (text before the
+            // first space).  Width = prefix_chars × cell_w; sits
+            // 1 phys-px below the baseline so it doesn't clip
+            // descenders that won't appear in `P<digit>` anyway.
+            let prefix_chars = view
+                .right_badge
+                .split(' ')
+                .next()
+                .map(|s| s.chars().count())
+                .unwrap_or(0);
+            if prefix_chars > 0 {
+                let underline_y = label_baseline_y + gutter.max(1.0);
+                cells.push(CellInstance {
+                    origin: [badge_x, underline_y],
+                    size: [prefix_chars as f32 * cell_w, gutter.max(1.0)],
+                    color: rgba8_of_f32(palette::badge_fg()),
+                });
             }
         }
     }

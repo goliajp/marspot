@@ -27,7 +27,7 @@ pub struct SeamStyle {
 impl SeamStyle {
     /// "No seam" — paint() short-circuits when thickness is zero.
     pub fn none() -> Self {
-        Self { color: [0.0; 4], thickness: 0.0 }
+        Self { color: crate::ui::components::panel_palette::none(), thickness: 0.0 }
     }
 }
 

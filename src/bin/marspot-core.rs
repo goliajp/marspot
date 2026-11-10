@@ -41,7 +41,7 @@ use marspot::ui::components::surface_stack::{
     self, Change, CloseBy, Key as SurfaceKey, KeyAction, Press, SurfaceKind, SurfaceStack,
 };
 use marspot::ui::components::panel_script::{Input as DevInput, Scene, Script as PanelScript};
-use marspot::ui::components::{PanelChrome, GRID_MAX, GRID_MIN};
+use marspot::ui::components::{chrome_hover::ChromeHover, PanelChrome, GRID_MAX, GRID_MIN};
 use marspot::ui::strings::{t, Msg};
 use marspot::session::SessionState;
 use marspot::session_registry::{
@@ -142,38 +142,6 @@ fn env_required<T: std::str::FromStr>(name: &str) -> T {
 /// Input event the reader thread converts each control-socket frame
 /// into.  The main loop drains a channel of these once per render
 /// frame and dispatches them into `CoreApp`.
-/// Which chrome icon button the cursor is hovering over.  Lives at
-/// module scope so render code can name it without a layer crossing.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum ChromeBtn {
-    Sidebar,
-    Layout,
-    /// F3+1 — process-tree panel toggle.
-    ProcessTree,
-    /// UI-system dev panel toggle.
-    DevPanel,
-    /// cc — Claude usage modal toggle.
-    CcUsage,
-    /// The settings panel.
-    Settings,
-}
-
-/// Convert the typed hover-button to the renderer's wire shape
-/// (Option<u8>, 0 = Sidebar, 1 = Layout, 2 = ProcessTree).  Stays a
-/// free function so render-side picks up no knowledge of the L2-side
-/// enum.
-fn map_hover_to_u8(h: Option<ChromeBtn>) -> Option<u8> {
-    match h {
-        Some(ChromeBtn::Sidebar) => Some(0),
-        Some(ChromeBtn::Layout) => Some(1),
-        Some(ChromeBtn::ProcessTree) => Some(2),
-        Some(ChromeBtn::DevPanel) => Some(3),
-        Some(ChromeBtn::CcUsage) => Some(4),
-        Some(ChromeBtn::Settings) => Some(5),
-        None => None,
-    }
-}
-
 /// F3+1 — open process-tree panel state.  Holds per-pane trees +
 /// a last-refresh timestamp so the main loop can decide when to
 /// re-walk libproc (≥2 s gap = stale, refresh on next render).
@@ -3826,12 +3794,12 @@ struct WindowState {
     /// Active drag, if any.  None while no drag in progress.
     layout_drag: Option<LayoutModalDrag>,
     sidebar_collapsed: bool,
-    /// Which chrome icon button (if any) the cursor is currently
-    /// hovering over.  Updated on every `MouseMove` frame; drives a
-    /// darker BG fill in the toolbar render.  `None` outside both
-    /// buttons.  Kept on `CoreApp` (not Layout) so mouse-move never
-    /// rebuilds the grid math.
-    hover_chrome_btn: Option<ChromeBtn>,
+    /// What the pointer is on in the window's chrome — a toolbar
+    /// button, a sidebar row, its close button, the add button.
+    /// Updated on every `MouseMove`; the renderer lights that control.
+    /// Kept here (not on Layout) so mouse-move never rebuilds the grid
+    /// math.
+    hover_chrome_btn: Option<ChromeHover>,
     /// The process monitor's data while it is open; libproc is only
     /// walked while this is `Some`.
     process_panel: Option<ProcessPanelState>,
@@ -7968,21 +7936,8 @@ impl CoreApp {
             }
         }
 
-        let new_hover = if win!(self, wi).layout.hit_test_sidebar_button(x_phys, y_phys) {
-            Some(ChromeBtn::Sidebar)
-        } else if win!(self, wi).layout.hit_test_layout_button(x_phys, y_phys) {
-            Some(ChromeBtn::Layout)
-        } else if win!(self, wi).layout.hit_test_process_button(x_phys, y_phys) {
-            Some(ChromeBtn::ProcessTree)
-        } else if win!(self, wi).layout.hit_test_dev_panel_button(x_phys, y_phys) {
-            Some(ChromeBtn::DevPanel)
-        } else if win!(self, wi).layout.hit_test_settings_button(x_phys, y_phys) {
-            Some(ChromeBtn::Settings)
-        } else if win!(self, wi).layout.hit_test_cc_button(x_phys, y_phys) {
-            Some(ChromeBtn::CcUsage)
-        } else {
-            None
-        };
+        let w = &win!(self, wi);
+        let new_hover = ChromeHover::at(&w.layout, w.panes.len(), x_phys, y_phys);
         if new_hover != win!(self, wi).hover_chrome_btn {
             win!(self, wi).hover_chrome_btn = new_hover;
             // Published in `render`, not here: the renderer is shared,
@@ -9242,7 +9197,7 @@ impl CoreApp {
         // Per-window, like every overlay below it: the renderer holds
         // one copy and each window sets its own right before painting.
         self.renderer
-            .set_hover_chrome_btn(map_hover_to_u8(win!(self, wi).hover_chrome_btn));
+            .set_hover_chrome_btn(win!(self, wi).hover_chrome_btn);
         // RFC-006 — this window's drop-preview ghost (usually None),
         // and the index of its pane mid-drag (dimmed by the renderer).
         self.renderer.set_drop_preview(win!(self, wi).drop_preview);

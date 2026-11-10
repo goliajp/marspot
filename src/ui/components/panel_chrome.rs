@@ -354,30 +354,106 @@ mod tests {
         assert_eq!((s.y_top, s.h), (150.0, card_spec::SEPARATOR_PX));
     }
 
-    /// An opening bracket straight into `0.` or `1.` is the start of
-    /// an RGBA array written out by hand.
-    fn colour_literals(src: &str) -> usize {
-        ['0', '1'].iter().map(|d| src.matches(&format!("[{d}.")).count()).sum()
+    /// A number written with a decimal point, as a colour channel is.
+    fn float(tok: &str) -> Option<f64> {
+        let tok = tok.trim().trim_end_matches("f32").trim_end_matches("f64").trim_end_matches('_');
+        (tok.contains('.') && tok.chars().all(|c| c.is_ascii_digit() || c == '.'))
+            .then(|| tok.parse().ok())
+            .flatten()
     }
 
+    /// The colours `src` writes out by hand, outside its tests and its
+    /// comments: a `Color` built from numbers, and a bracketed or
+    /// parenthesised group of three or four values that starts with
+    /// three numbers and has none outside 0..=1 — an RGB triple or an
+    /// RGBA array, whichever way it is spelled.
+    fn colour_literals(src: &str) -> Vec<String> {
+        let src = src.split("#[cfg(test)]").next().unwrap_or_default();
+        let code: String =
+            src.lines().map(|l| l.split("//").next().unwrap_or_default()).collect::<Vec<_>>().join("\n");
+        let mut found = Vec::new();
+        for ctor in ["Color::rgba(", "Color::rgb(", "Color::hex("] {
+            found.extend(code.match_indices(ctor).map(|(i, _)| code[i..].chars().take(32).collect()));
+        }
+        for (open, _) in code.match_indices(['[', '(']) {
+            let close = if code.as_bytes()[open] == b'[' { ']' } else { ')' };
+            let rest = &code[open + 1..];
+            let Some(end) = rest.find(['[', ']', '(', ')']) else { continue };
+            if !rest[end..].starts_with(close) {
+                continue;
+            }
+            let body = &rest[..end];
+            let unit = |v: f64| (0.0..=1.0).contains(&v);
+            let is_colour = if let Some((value, count)) = body.split_once(';') {
+                close == ']' && float(value).is_some_and(unit) && matches!(count.trim(), "3" | "4")
+            } else {
+                let parts: Vec<&str> = body.split(',').filter(|part| !part.trim().is_empty()).collect();
+                matches!(parts.len(), 3 | 4)
+                    && parts[..3].iter().all(|part| float(part).is_some())
+                    && parts.iter().filter_map(|part| float(part)).all(unit)
+            };
+            if is_colour {
+                found.push(body.split_whitespace().collect::<Vec<_>>().join(" "));
+            }
+        }
+        found
+    }
+
+    /// The search has to be able to find one, in each spelling.
+    #[test]
+    fn panel_chrome_colour_search_finds_every_spelling() {
+        // Assembled, so that this file does not contain one itself.
+        let (o, c) = ('[', ']');
+        for literal in [
+            format!("bg: {o}0.13, 0.14, 0.17, 1.0{c},"),
+            format!("fill: rgba8_of_f32({o}0.0, 0.0, 0.0, alpha{c}),"),
+            format!("color: {o}0.0; 4{c}"),
+            format!("const SEAM: (f32, f32, f32) = {}0.115, 0.130, 0.155{};", '(', ')'),
+            format!("let bg = Color::{}(33, 36, 43, 1.0);", "rgba"),
+        ] {
+            assert_eq!(colour_literals(&literal).len(), 1, "missed: {literal}");
+        }
+        // And what is not a colour is left alone: a pair, a list of
+        // choices that leaves 0..=1, a comment, a test.
+        for clean in [
+            format!("shadow_offset: {o}0.0, 0.0{c},"),
+            format!("const CHOICES: &{o}f32{c} = &{o}0.5, 1.0, 1.5, 2.5{c};"),
+            format!("// was {o}0.13, 0.14, 0.17, 1.0{c}"),
+            format!("fn f() {{}}\n#{o}cfg(test){c}\nmod tests {{ const C: {o}f32; 4{c} = {o}1.0; 4{c}; }}"),
+        ] {
+            assert!(colour_literals(&clean).is_empty(), "false alarm: {clean}");
+        }
+    }
+
+    /// Every file that lays a frame out or paints a component takes its
+    /// colours from `panel_palette`, the one place a theme token turns
+    /// into a role.
     #[test]
     fn panel_chrome_source_has_no_colour_literals() {
-        // Assembled, so that this file does not contain one itself.
-        let literal = format!("bg: [{}.13, 0.14, 0.17, 1.0],", 0);
-        assert_eq!(colour_literals(&literal), 1, "the search finds a literal when there is one");
-        // The chrome, and every panel that has been moved onto it.
-        for (file, src) in [
-            ("panel_chrome.rs", include_str!("panel_chrome.rs")),
-            ("cc_usage_modal.rs", include_str!("cc_usage_modal.rs")),
-            ("cc_usage_layout.rs", include_str!("cc_usage_layout.rs")),
-            ("cc_usage_paint.rs", include_str!("cc_usage_paint.rs")),
-            ("process_panel.rs", include_str!("process_panel.rs")),
-            ("process_panel_paint.rs", include_str!("process_panel_paint.rs")),
-            ("table.rs", include_str!("table.rs")),
-            ("layout_modal.rs", include_str!("layout_modal.rs")),
-            ("layout_modal_paint.rs", include_str!("layout_modal_paint.rs")),
-        ] {
-            assert_eq!(colour_literals(src), 0, "{file} writes a colour out by hand");
+        // The palette itself holds the few roles that are not tokens.
+        // The dev panel is a workbench that demonstrates the colour
+        // API with its own swatches and has not been moved yet.
+        const EXEMPT: [&str; 2] = ["panel_palette.rs", "dev_panel.rs"];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut scanned = 0;
+        for dir in ["frame_build", "ui/components"] {
+            for entry in std::fs::read_dir(root.join(dir)).expect("the source directory") {
+                let path = entry.expect("a directory entry").path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+                if !name.ends_with(".rs") || EXEMPT.contains(&name.as_str()) {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path).expect("a source file");
+                let found = colour_literals(&src);
+                assert!(found.is_empty(), "{dir}/{name} writes colours out by hand: {found:?}");
+                scanned += 1;
+            }
         }
+        // A wrong path scans nothing and passes; both directories
+        // together hold far more files than this.
+        assert!(scanned >= 30, "only {scanned} files were scanned");
+        // The exemptions are still what they claim to be.
+        let palette = std::fs::read_to_string(root.join("ui/components/panel_palette.rs")).expect("the palette");
+        assert!(!colour_literals(&palette).is_empty(), "the palette no longer needs its exemption");
     }
 }

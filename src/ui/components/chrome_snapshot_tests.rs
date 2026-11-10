@@ -4,10 +4,10 @@
 //!
 //! Same machinery and the same way of recording and fetching as the
 //! panel pictures (see `panel_snapshot_tests`); the tests are
-//! `chrome_snapshot_{window,search,menu}` and the baselines
-//! `bench/ui/snapshots/chrome_{window,search,menu}.png`.  `before/`
-//! beside them holds the same three scenes as they were drawn before
-//! the chrome took its colours and sizes from the theme.
+//! `chrome_snapshot_{window,search,menu,close}` and the baselines
+//! `bench/ui/snapshots/chrome_{window,search,menu,close}.png`.
+//! `before/` beside them holds the first three scenes as they were
+//! drawn before the chrome took its colours and sizes from the theme.
 
 use super::panel_snapshot_tests::terminal_text;
 use crate::grid::Grid;
@@ -16,6 +16,7 @@ use crate::render::{SearchHitView, SearchOverlayView, SessionView, SidebarEntry}
 use crate::render_metal::{make_readback_texture, MetalRenderer, WindowRender};
 use crate::session::SessionState;
 use crate::snapshot_kit::{assert_snapshot_ssim, snapshot_mode_in, write_snapshot_png, UI_SNAPSHOT_DIR};
+use crate::ui::components::chrome_hover::ChromeHover;
 use crate::ui::components::context_menu_paint::{ContextMenuRender, ContextMenuRow};
 
 /// One pane of a scene.
@@ -132,16 +133,17 @@ fn four_panes() -> [PaneSpec; 4] {
 
 /// The whole window: toolbar, sidebar with four panes, a two by two
 /// grid with title strips and badges, the second pane in use, the
-/// pointer on a toolbar button.
+/// pointer in the fourth pane's sidebar row.
 #[test]
 fn chrome_snapshot_window() {
     snapshot("chrome_window", (1600, 1000), (2, 2), &four_panes(), 1, |renderer, _| {
-        renderer.set_hover_chrome_btn(Some(2));
+        renderer.set_hover_chrome_btn(Some(ChromeHover::Row(3)));
     });
 }
 
 /// One pane with the search overlay open: a query, a match count and
-/// three hits, the second of them picked.
+/// three hits, the second of them picked.  The pointer is on the
+/// sidebar's add button, and the only pane cannot be closed.
 #[test]
 fn chrome_snapshot_search() {
     let hit = |snippet: &str, is_focused| SearchHitView { snippet: snippet.to_string(), is_focused };
@@ -159,11 +161,14 @@ fn chrome_snapshot_search() {
         }),
         ..pane("smix", "", SessionState::Active)
     }];
-    snapshot("chrome_search", (1200, 640), (1, 1), &panes, 0, |_, _| {});
+    snapshot("chrome_search", (1200, 640), (1, 1), &panes, 0, |renderer, _| {
+        renderer.set_hover_chrome_btn(Some(ChromeHover::Add));
+    });
 }
 
 /// The context menu over a two by two grid, the pointer on its second
-/// row; one row disabled, one divider.
+/// row; one row disabled, one divider.  The process monitor's toolbar
+/// button is the one last hovered.
 #[test]
 fn chrome_snapshot_menu() {
     snapshot("chrome_menu", (1200, 760), (2, 2), &four_panes(), 0, |renderer, layout| {
@@ -179,6 +184,7 @@ fn chrome_snapshot_menu() {
             enabled: false,
             divider: true,
         };
+        renderer.set_hover_chrome_btn(Some(ChromeHover::Toolbar(2)));
         renderer.set_context_menu(Some(ContextMenuRender {
             scale: crate::ui::chrome_scale(),
             anchor_phys: (420.0, 150.0),
@@ -193,5 +199,18 @@ fn chrome_snapshot_menu() {
             ],
             hovered_idx: Some(1),
         }));
+    });
+}
+
+/// The pointer on a sidebar row's close button, in a window narrow
+/// enough that a pane's name has to give way to its badge.
+#[test]
+fn chrome_snapshot_close() {
+    let panes = [
+        pane("smix", "P1 3f9c2a1e", SessionState::Active),
+        pane("a-name-longer-than-the-pane-it-titles", "P2 77d0e4b2", SessionState::Idle),
+    ];
+    snapshot("chrome_close", (800, 300), (2, 1), &panes, 0, |renderer, _| {
+        renderer.set_hover_chrome_btn(Some(ChromeHover::Close(1)));
     });
 }
