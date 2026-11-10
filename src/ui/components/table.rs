@@ -1,426 +1,413 @@
-//! `Table` — devops-grade tabular display component.  Used wherever
-//! marspot needs a real grid of (column, row) cells: the Process
-//! Monitor master pane list + detail process tree, future stats /
-//! settings panes, anything where alignment + sortable headers
-//! + indented hierarchies matter.
+//! A table of data on a card: a muted header row, a line under it,
+//! and rows of text in the terminal's own font.
 //!
-//! Design notes:
+//! Tabular data is measured in terminal cells (`spec::table`), so a
+//! column is a whole number of characters wide and its numbers line up
+//! without measuring anything.
 //!
-//! - **No scroll, no state.**  Caller owns selection / hovered_row /
-//!   scroll_y / sort key.  Table is a pure renderer over these snap-
-//!   shots.  Scroll affects the BODY only — header stays sticky.
-//! - **Column widths** mix fixed (`Px`) and proportional (`Flex`).
-//!   Layout solves for column rects given the table's `rect.w` minus
-//!   the sum of fixed widths; remainder splits proportionally.
-//! - **Alignment** is per column, applied via
-//!   `ViewPainter::text_in(rect, …, align)` so character-perfect
-//!   right-alignment of numeric columns "just works".
-//! - **Tree-style indentation** is supported via `TableRow.depth` —
-//!   shifts the FIRST column's text only, leaves the others square.
-//! - **Sort indicator** ▲/▼ glyph painted in the column header
-//!   when `TableColumn.sort` is `Some(…)`.  Clickable headers light
-//!   up only when both `sortable: true` and `hovered_header == i`.
+//! [`TableGeometry`] is where everything is — built with no painter,
+//! so a click handler holds the same rects the painter draws — and its
+//! `paint_*` methods draw what it describes.  The caller owns the data,
+//! the selection and the scroll offset; the body scrolls and the header
+//! does not.
 //!
-//! Hit testing is exposed via `hit_test_row` / `hit_test_header` so
-//! `mouse_down` can dispatch without re-doing layout math.
+//! There is no scissor in the UI paint path, so a row is laid out only
+//! if it fits the body whole: a row that straddles the card's edge
+//! would be drawn onto whatever the card sits on.
+//!
+//! All rects are physical pixels.
 
-use marspot_term::layout::{Rect, Alignment};
+use marspot_term::layout::{Alignment, Rect};
+
+use crate::ui::components::panel_chrome;
+use crate::ui::components::panel_palette as palette;
+use crate::ui::core::text_fit::fit_mono;
 use crate::ui::core::ViewPainter;
+use crate::ui::theme::spec::{self, card as card_spec, space, table as t};
 
-/// Strategy for sizing one column.
-#[derive(Debug, Clone, Copy)]
+/// How wide a column is.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ColumnWidth {
-    /// Fixed pixels.  Used for numeric columns where header / value
-    /// width is bounded (e.g. "CPU%" header + "999.9" → ~7 cells).
+    /// This many characters.
+    Cells(f64),
+    /// Physical pixels — a column that holds a control, not text.
     Px(f64),
-    /// Proportional share of leftover space after the Px columns
-    /// are taken.  Two `Flex(1.0)` cols split the rest 50/50; one
-    /// `Flex(2.0)` next to one `Flex(1.0)` gives 2:1.
-    Flex(f64),
+    /// What the other columns leave, shared equally between the flex
+    /// columns.
+    Flex,
+}
+
+/// Names go left, numbers go right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Right,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortDir { Asc, Desc }
-
-/// Differentiates section-header rows (no selection, heavier text)
-/// from regular data rows.  Tables without sections only emit `Data`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RowKind {
-    /// Normal selectable row.
-    Data,
-    /// Section / pane / group header — drawn with `style.section_fg`,
-    /// not selectable, no selection highlight.
-    Section,
-}
-
-#[derive(Debug, Clone)]
-pub struct TableColumn {
-    pub header: String,
-    pub width: ColumnWidth,
-    pub align: Alignment,
-    /// Current sort direction, if this column drives the row order.
-    /// Caller pre-sorts rows; Table just paints the indicator.
-    pub sort: Option<SortDir>,
-    /// True = clicking the header sorts by this column (caller
-    /// observes via `hit_test_header`).
-    pub sortable: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct TableRow {
-    /// One string per column.  Length should match the columns
-    /// slice; missing cells render blank.
-    pub cells: Vec<String>,
-    /// Indentation depth for tree-style display — shifts the FIRST
-    /// column's text by `depth * style.indent_px`.  Other columns
-    /// unaffected.
-    pub depth: u8,
-    pub kind: RowKind,
+pub enum SortDir {
+    Asc,
+    Desc,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct TableStyle {
-    pub header_h: f64,
-    pub row_h: f64,
-    pub indent_px: f64,
-    pub col_pad: f64,
-    pub header_bg: [f32; 4],
-    pub header_fg: [f32; 4],
-    /// 1-px line under the header band.
-    pub header_separator: [f32; 4],
-    pub row_bg: [f32; 4],
-    /// Alternate row BG for zebra striping; equal to `row_bg` to
-    /// disable stripes.
-    pub row_bg_alt: [f32; 4],
-    pub row_bg_selected: [f32; 4],
-    pub row_fg: [f32; 4],
-    pub row_fg_selected: [f32; 4],
-    pub section_fg: [f32; 4],
+pub struct Column {
+    pub header: &'static str,
+    pub width: ColumnWidth,
+    pub align: Align,
+    /// Set on the column the rows are ordered by.  The caller sorts;
+    /// the header shows which way.
+    pub sort: Option<SortDir>,
 }
 
-impl Default for TableStyle {
-    fn default() -> Self {
-        Self {
-            header_h: 24.0,
-            row_h: 22.0,
-            indent_px: 12.0,
-            col_pad: 8.0,
-            header_bg: [0.12, 0.13, 0.16, 1.0],
-            header_fg: [0.55, 0.60, 0.66, 1.0],
-            header_separator: [0.20, 0.22, 0.26, 1.0],
-            row_bg: [0.0; 4], // transparent
-            row_bg_alt: [0.0; 4],
-            row_bg_selected: [0.18, 0.28, 0.48, 1.0],
-            row_fg: [0.78, 0.82, 0.87, 1.0],
-            row_fg_selected: [0.96, 0.97, 0.99, 1.0],
-            section_fg: [0.85, 0.88, 0.92, 1.0],
-        }
-    }
+/// Clear space between the header's line and the first row, and under
+/// the last row: the selected row's fill touches neither.
+fn body_pad() -> f64 {
+    spec::px(space::S4)
 }
 
-pub struct Table<'a> {
-    /// Total bounding rect: header + body (no scrollbar painted).
-    pub rect: Rect,
-    pub columns: &'a [TableColumn],
-    pub rows: &'a [TableRow],
-    pub style: TableStyle,
-    /// Currently selected row.  None = no highlight.  Section rows
-    /// can't be selected (caller skips them when computing).
-    pub selected: Option<usize>,
-    /// Body scroll offset in physical px.  Header stays sticky.
-    pub scroll_y: f64,
-    pub show_header: bool,
+/// Height of a data row, on whole pixels: a fractional row height
+/// puts every other row's text a pixel off the rhythm of the rest.
+pub fn row_height(cell_h: f64) -> f64 {
+    t::row_h(cell_h).round()
 }
 
-impl<'a> Table<'a> {
-    /// Header band rect (zero-height when `show_header == false`).
-    pub fn header_rect(&self) -> Rect {
-        if !self.show_header {
-            return Rect { x: self.rect.x, y_top: self.rect.y_top, w: self.rect.w, h: 0.0 };
-        }
-        Rect {
-            x: self.rect.x,
-            y_top: self.rect.y_top,
-            w: self.rect.w,
-            h: self.style.header_h,
-        }
-    }
+/// Height of the header row, on whole pixels.
+pub fn header_height(cell_h: f64) -> f64 {
+    t::header_h(cell_h).round()
+}
 
-    /// Body viewport rect (everything below the header).
-    pub fn body_rect(&self) -> Rect {
-        let head = self.header_rect().h;
-        Rect {
-            x: self.rect.x,
-            y_top: self.rect.y_top + head,
-            w: self.rect.w,
-            h: (self.rect.h - head).max(0.0),
-        }
-    }
+/// Height of the card that shows `n_rows` rows without scrolling.
+pub fn card_height(n_rows: usize, cell_h: f64) -> f64 {
+    header_height(cell_h) + card_spec::SEPARATOR_PX + 2.0 * body_pad() + n_rows as f64 * row_height(cell_h)
+}
 
-    /// Solve column rects via the Px/Flex layout.  Returned widths
-    /// are `(x, w)` pairs in physical pixels; height is the table's
-    /// header_h or row_h depending on the row context.
-    pub fn column_x_widths(&self) -> Vec<(f64, f64)> {
-        let mut fixed_total = 0.0;
-        let mut flex_total = 0.0;
-        for col in self.columns {
-            match col.width {
-                ColumnWidth::Px(w) => fixed_total += w,
-                ColumnWidth::Flex(f) => flex_total += f,
-            }
-        }
-        let available = (self.rect.w - fixed_total).max(0.0);
-        // Px columns adding up to more than the table used to be handed
-        // out at full width regardless, so the last ones sat past the
-        // right edge -- two 300px columns in a 400px table reached 700
-        // against an edge at 500.  They shrink in proportion, which
-        // keeps every column a share of the table instead of giving the
-        // first ones everything and the rest nothing.
-        let squeeze = if fixed_total > self.rect.w && fixed_total > 0.0 {
-            self.rect.w / fixed_total
-        } else {
-            1.0
-        };
-        let mut out = Vec::with_capacity(self.columns.len());
-        let mut cx = self.rect.x;
-        for col in self.columns {
-            let w = match col.width {
-                ColumnWidth::Px(w) => w * squeeze,
-                ColumnWidth::Flex(f) => {
-                    if flex_total > 0.0 { available * (f / flex_total) } else { 0.0 }
-                }
-            };
-            out.push((cx, w));
-            cx += w;
-        }
-        out
-    }
-
-    /// Top-left y of the i-th visible row WITH scroll applied.  Rows
-    /// outside the body rect are still returned (caller decides to
-    /// skip or clip).
-    fn row_y(&self, i: usize) -> f64 {
-        self.body_rect().y_top + (i as f64) * self.style.row_h - self.scroll_y
-    }
-
-    /// Rect of the i-th data row at its current scroll position.
-    pub fn row_rect(&self, i: usize) -> Rect {
-        Rect {
-            x: self.rect.x,
-            y_top: self.row_y(i),
-            w: self.rect.w,
-            h: self.style.row_h,
-        }
-    }
-
-    /// The rows `paint` may draw: those whose rect fits the body
-    /// whole.
-    ///
-    /// `paint` used to cull only rows *entirely* outside the body, so
-    /// the one straddling the edge was drawn whole -- fourteen pixels
-    /// onto whatever the table sits on, at the process monitor's own
-    /// geometry.  There is no scissor in the UI paint path (`View::
-    /// paint`: "no automatic clipping"), so the choice is between a
-    /// half-drawn row and a row that waits until it fits; a scrolled
-    /// list that gains and loses its edge row is the normal one.
-    pub fn drawable_rows(&self) -> impl Iterator<Item = usize> + '_ {
-        let body = self.body_rect();
-        let bottom = body.y_top + body.h;
-        (0..self.rows.len()).filter(move |&i| {
-            let r = self.row_rect(i);
-            r.y_top >= body.y_top - 1e-9 && r.y_top + r.h <= bottom + 1e-9
+/// Width of the card that gives every column its width, a flex column
+/// counting as `flex_cells` characters.
+pub fn natural_width(columns: &[Column], flex_cells: f64, cell_w: f64) -> f64 {
+    let cols: f64 = columns
+        .iter()
+        .map(|c| match c.width {
+            ColumnWidth::Cells(n) => n * cell_w,
+            ColumnWidth::Px(w) => w,
+            ColumnWidth::Flex => flex_cells * cell_w,
         })
-    }
+        .sum();
+    let gaps = columns.len().saturating_sub(1) as f64 * t::COLUMN_GAP_CELLS * cell_w;
+    cols + gaps + 2.0 * spec::px(card_spec::ROW_PAD_X)
+}
 
-    /// Index of the row containing `(px, py)`, or None.  Section
-    /// rows are returned too — caller decides whether to treat
-    /// them as selectable.  Out-of-body coords return None.
-    pub fn hit_test_row(&self, px: f64, py: f64) -> Option<usize> {
-        let body = self.body_rect();
-        if !body.contains(px, py) { return None; }
-        let rel = py - body.y_top + self.scroll_y;
-        let idx = (rel / self.style.row_h).floor() as i64;
-        if idx < 0 { return None; }
-        let i = idx as usize;
-        if i < self.rows.len() { Some(i) } else { None }
-    }
+/// Where a table's parts are.
+#[derive(Debug, Clone)]
+pub struct TableGeometry {
+    /// The card the table is drawn on.
+    pub card: Rect,
+    /// The header row, across the top of the card.
+    pub header: Rect,
+    /// Top edge of the line under the header.
+    pub separator_y: f64,
+    /// Where rows may be.
+    pub body: Rect,
+    /// `(x, width)` of each column's text.
+    pub columns: Vec<(f64, f64)>,
+    /// `(index, rect)` of every row that fits the body whole, top to
+    /// bottom.  A row's rect spans the card's width.
+    pub rows: Vec<(usize, Rect)>,
+    /// The scroll offset in force: the one asked for, held to what the
+    /// rows allow.
+    pub scroll: f64,
+    /// How far the rows can be pushed up before the last one is at the
+    /// body's bottom.
+    pub max_scroll: f64,
+    pub cell_w: f64,
+}
 
-    /// Index of the header column containing `(px, py)`, or None.
-    /// Only returns Some when the column is `sortable: true` so a
-    /// caller can blindly use it for sort-key updates.
-    pub fn hit_test_header(&self, px: f64, py: f64) -> Option<usize> {
-        let head = self.header_rect();
-        if head.h == 0.0 || !head.contains(px, py) { return None; }
-        for (i, (cx, cw)) in self.column_x_widths().iter().enumerate() {
-            if px >= *cx && px < cx + cw && self.columns[i].sortable {
-                return Some(i);
-            }
+impl TableGeometry {
+    pub fn new(
+        card: Rect,
+        columns: &[Column],
+        n_rows: usize,
+        scroll: f64,
+        cell_w: f64,
+        cell_h: f64,
+    ) -> Self {
+        let header = Rect { h: header_height(cell_h).min(card.h), ..card };
+        let separator_y = header.y_top + header.h;
+        let body_top = separator_y + card_spec::SEPARATOR_PX + body_pad();
+        let body_bottom = card.y_top + card.h - body_pad();
+        let body = Rect { y_top: body_top, h: (body_bottom - body_top).max(0.0), ..card };
+
+        let row_h = row_height(cell_h);
+        // A card sized for exactly its rows comes out a rounding error
+        // short of them; that is not something to scroll by.
+        let overflow = n_rows as f64 * row_h - body.h;
+        let max_scroll = if overflow > 1e-6 { overflow } else { 0.0 };
+        let scroll = scroll.clamp(0.0, max_scroll);
+        let rows = (0..n_rows)
+            .map(|i| (i, Rect { y_top: body.y_top + i as f64 * row_h - scroll, h: row_h, ..card }))
+            .filter(|(_, r)| r.y_top >= body.y_top - 1e-9 && r.y_top + r.h <= body_bottom + 1e-9)
+            .collect();
+
+        Self {
+            card,
+            header,
+            separator_y,
+            body,
+            columns: column_spans(card, columns, cell_w),
+            rows,
+            scroll,
+            max_scroll,
+            cell_w,
         }
-        None
     }
 
-    pub fn paint(&self, p: &mut ViewPainter) {
-        if self.columns.is_empty() { return; }
-        let col_xw = self.column_x_widths();
-        let style = self.style;
+    /// The row `(x, y)` is on.  Rows that are not laid out are not
+    /// there to be clicked.
+    pub fn row_at(&self, x: f64, y: f64) -> Option<usize> {
+        self.rows.iter().find(|(_, r)| r.contains(x, y)).map(|(i, _)| *i)
+    }
 
-        // ── Header band ──────────────────────────────────────────
-        if self.show_header && self.style.header_h > 0.0 {
-            let head = self.header_rect();
-            p.fill_rect(head, style.header_bg);
-            // 1-px separator under the header.
-            p.fill_rect(
-                Rect { x: head.x, y_top: head.y_top + head.h - 1.0,
-                       w: head.w, h: 1.0 },
-                style.header_separator,
-            );
-            for (i, (cx, cw)) in col_xw.iter().enumerate() {
-                let col = &self.columns[i];
-                let inset = self.style.col_pad;
-                let txt_rect = Rect {
-                    x: cx + inset,
-                    y_top: head.y_top,
-                    w: (cw - 2.0 * inset).max(0.0),
-                    h: head.h,
-                };
-                // Compose "Header ▲" / "Header ▼" when sorted.
-                let glyph = match col.sort {
-                    Some(SortDir::Asc) => " ▲",
-                    Some(SortDir::Desc) => " ▼",
-                    None => "",
-                };
-                let label = if glyph.is_empty() {
-                    col.header.clone()
-                } else {
-                    format!("{}{}", col.header, glyph)
-                };
-                p.text_in(txt_rect, &label, style.header_fg, col.align);
-            }
-        }
+    /// The fill behind a selected or hovered `row`: short of the
+    /// card's edges on both sides.
+    pub fn highlight_rect(&self, row: Rect) -> Rect {
+        let inset = spec::px(t::SELECTED_INSET);
+        Rect { x: row.x + inset, w: (row.w - 2.0 * inset).max(0.0), ..row }
+    }
 
-        // ── Body rows ────────────────────────────────────────────
-        for i in self.drawable_rows() {
-            let row = &self.rows[i];
-            let row_rect = self.row_rect(i);
-            let is_selected = self.selected == Some(i)
-                && row.kind == RowKind::Data;
-            // Row BG: selection > stripe > default.
-            let bg = if is_selected {
-                style.row_bg_selected
-            } else if i % 2 == 1 {
-                style.row_bg_alt
-            } else {
-                style.row_bg
+    /// Where `text` goes in column `col` of `row`, `indent` tree
+    /// levels in, and what is left of it once it is cut to fit: a cell
+    /// never runs into the next column.
+    pub fn cell_text(&self, row: Rect, col: usize, indent: u8, text: &str) -> (Rect, String) {
+        let (x, w) = self.columns[col];
+        let shift = (indent as f64 * t::INDENT_CELLS * self.cell_w).min(w);
+        let rect = Rect { x: x + shift, y_top: row.y_top, w: w - shift, h: row.h };
+        (rect, fit_mono(text, rect.w, self.cell_w, 0.0))
+    }
+
+    /// The card, the header's labels and the line under them.
+    pub fn paint_frame(&self, p: &mut ViewPainter, columns: &[Column]) {
+        panel_chrome::card(p, self.card);
+        for (col, c) in columns.iter().enumerate() {
+            // The arrow goes on the side away from the edge the column
+            // is aligned to, so the label still lines up with its data.
+            let label = match (c.sort, c.align) {
+                (None, _) => c.header.to_string(),
+                (Some(dir), Align::Left) => format!("{} {}", c.header, arrow(dir)),
+                (Some(dir), Align::Right) => format!("{} {}", arrow(dir), c.header),
             };
-            if bg[3] > 0.001 {
-                p.fill_rect(row_rect, bg);
-            }
-            let fg = match row.kind {
-                RowKind::Section => style.section_fg,
-                RowKind::Data if is_selected => style.row_fg_selected,
-                RowKind::Data => style.row_fg,
-            };
-
-            for (col_idx, (cx, cw)) in col_xw.iter().enumerate() {
-                let col = &self.columns[col_idx];
-                let inset_l = style.col_pad
-                    + if col_idx == 0 {
-                        (row.depth as f64) * style.indent_px
-                    } else { 0.0 };
-                let inset_r = style.col_pad;
-                let txt_rect = Rect {
-                    x: cx + inset_l,
-                    y_top: row_rect.y_top,
-                    w: (cw - inset_l - inset_r).max(0.0),
-                    h: row_rect.h,
-                };
-                let cell = row.cells.get(col_idx).map(|s| s.as_str()).unwrap_or("");
-                if !cell.is_empty() {
-                    p.text_in(txt_rect, cell, fg, col.align);
-                }
-            }
+            self.paint_cell(p, self.header, col, c.align, 0, &label, palette::fg_muted());
         }
+        panel_chrome::row_separator(p, self.card, self.separator_y);
     }
+
+    /// The fill behind `row`, in `color`.
+    pub fn paint_highlight(&self, p: &mut ViewPainter, row: Rect, color: [f32; 4]) {
+        p.fill_rounded_rect(
+            self.highlight_rect(row),
+            color,
+            spec::px(t::SELECTED_RADIUS) as f32,
+            (palette::none(), 0.0),
+        );
+    }
+
+    /// One cell's text, vertically centred in `row`.
+    pub fn paint_cell(
+        &self,
+        p: &mut ViewPainter,
+        row: Rect,
+        col: usize,
+        align: Align,
+        indent: u8,
+        text: &str,
+        color: [f32; 4],
+    ) {
+        let (rect, text) = self.cell_text(row, col, indent, text);
+        let anchor = match align {
+            Align::Left => Alignment::CenterLeft,
+            Align::Right => Alignment::CenterRight,
+        };
+        p.text_in(rect, &text, color, anchor);
+    }
+}
+
+fn arrow(dir: SortDir) -> char {
+    match dir {
+        SortDir::Asc => '▲',
+        SortDir::Desc => '▼',
+    }
+}
+
+/// `(x, width)` of each column inside `card`'s row padding.  Columns
+/// that ask for more than the card has shrink in proportion, gaps
+/// included, so the last one still ends inside the card.
+fn column_spans(card: Rect, columns: &[Column], cell_w: f64) -> Vec<(f64, f64)> {
+    let pad = spec::px(card_spec::ROW_PAD_X);
+    let inner_w = (card.w - 2.0 * pad).max(0.0);
+    let gaps = columns.len().saturating_sub(1) as f64 * t::COLUMN_GAP_CELLS * cell_w;
+    let fixed: f64 = columns
+        .iter()
+        .map(|c| match c.width {
+            ColumnWidth::Cells(n) => n * cell_w,
+            ColumnWidth::Px(w) => w,
+            ColumnWidth::Flex => 0.0,
+        })
+        .sum();
+    let n_flex = columns.iter().filter(|c| c.width == ColumnWidth::Flex).count();
+    let wanted = fixed + gaps;
+    let squeeze = if wanted > inner_w && wanted > 0.0 { inner_w / wanted } else { 1.0 };
+    let flex_w = if n_flex > 0 { (inner_w - wanted).max(0.0) / n_flex as f64 } else { 0.0 };
+    let gap = t::COLUMN_GAP_CELLS * cell_w * squeeze;
+
+    let mut x = card.x + pad;
+    columns
+        .iter()
+        .map(|c| {
+            let w = match c.width {
+                ColumnWidth::Cells(n) => n * cell_w * squeeze,
+                ColumnWidth::Px(w) => w * squeeze,
+                ColumnWidth::Flex => flex_w,
+            };
+            let span = (x, w);
+            x += w + gap;
+            span
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn col(header: &str, width: ColumnWidth, align: Alignment) -> TableColumn {
-        TableColumn {
-            header: header.into(),
-            width,
-            align,
-            sort: None,
-            sortable: false,
+    const CELL_W: f64 = 10.0;
+    const CELL_H: f64 = 20.0;
+
+    fn columns() -> [Column; 3] {
+        [
+            Column { header: "Name", width: ColumnWidth::Flex, align: Align::Left, sort: None },
+            Column { header: "pid", width: ColumnWidth::Cells(6.0), align: Align::Right, sort: None },
+            Column {
+                header: "CPU%",
+                width: ColumnWidth::Cells(6.0),
+                align: Align::Right,
+                sort: Some(SortDir::Desc),
+            },
+        ]
+    }
+
+    fn table(w: f64, n_visible: usize, n_rows: usize, scroll: f64) -> TableGeometry {
+        let card = Rect { x: 100.0, y_top: 50.0, w, h: card_height(n_visible, CELL_H) };
+        TableGeometry::new(card, &columns(), n_rows, scroll, CELL_W, CELL_H)
+    }
+
+    #[test]
+    fn table_header_and_rows_take_their_spec_heights() {
+        let g = table(600.0, 4, 4, 0.0);
+        assert_eq!(g.header.h, t::header_h(CELL_H));
+        // A cell height that gives a fractional row is put on whole
+        // pixels.
+        assert_eq!((row_height(16.0), header_height(16.0)), (22.0, 24.0));
+        assert_eq!(row_height(CELL_H), t::row_h(CELL_H));
+        assert_eq!(g.separator_y, g.header.y_top + g.header.h);
+        assert_eq!(g.rows.len(), 4);
+        for (i, r) in &g.rows {
+            assert_eq!(r.h, t::row_h(CELL_H));
+            assert_eq!(r.y_top, g.body.y_top + *i as f64 * t::row_h(CELL_H));
+            assert_eq!((r.x, r.w), (g.card.x, g.card.w));
         }
+        // The card is exactly as tall as its rows need.
+        let last = g.rows.last().unwrap().1;
+        assert!((g.card.y_top + g.card.h - (last.y_top + last.h) - body_pad()).abs() < 1e-9);
+        assert_eq!(g.max_scroll, 0.0);
     }
 
     #[test]
-    fn flex_columns_share_remaining_width() {
-        let cols = vec![
-            col("a", ColumnWidth::Px(100.0), Alignment::CenterLeft),
-            col("b", ColumnWidth::Flex(1.0), Alignment::CenterLeft),
-            col("c", ColumnWidth::Flex(1.0), Alignment::CenterRight),
-        ];
-        let t = Table {
-            rect: Rect { x: 0.0, y_top: 0.0, w: 500.0, h: 100.0 },
-            columns: &cols,
-            rows: &[],
-            style: TableStyle::default(),
-            selected: None,
-            scroll_y: 0.0,
-            show_header: true,
-        };
-        let xw = t.column_x_widths();
-        assert_eq!(xw[0].0, 0.0);
-        assert_eq!(xw[0].1, 100.0);
-        assert!((xw[1].1 - 200.0).abs() < 1e-6);
-        assert!((xw[2].1 - 200.0).abs() < 1e-6);
+    fn table_columns_keep_the_gap_and_end_at_the_row_padding() {
+        let g = table(600.0, 4, 4, 0.0);
+        let pad = spec::px(card_spec::ROW_PAD_X);
+        let gap = t::COLUMN_GAP_CELLS * CELL_W;
+        assert_eq!(g.columns[0].0, g.card.x + pad);
+        for w in g.columns.windows(2) {
+            assert!((w[1].0 - (w[0].0 + w[0].1) - gap).abs() < 1e-9);
+        }
+        let (x, w) = g.columns[2];
+        assert!((x + w - (g.card.x + g.card.w - pad)).abs() < 1e-9);
+        assert_eq!((g.columns[1].1, g.columns[2].1), (6.0 * CELL_W, 6.0 * CELL_W));
+        // A card of the natural width gives the flex column what was
+        // asked for it.
+        let natural = natural_width(&columns(), 20.0, CELL_W);
+        let g = table(natural, 4, 4, 0.0);
+        assert!((g.columns[0].1 - 20.0 * CELL_W).abs() < 1e-9);
     }
 
     #[test]
-    fn hit_test_row_skips_scrolled_out() {
-        let cols = vec![col("a", ColumnWidth::Flex(1.0), Alignment::CenterLeft)];
-        let rows: Vec<TableRow> = (0..10).map(|i| TableRow {
-            cells: vec![format!("row{i}")],
-            depth: 0, kind: RowKind::Data,
-        }).collect();
-        let t = Table {
-            rect: Rect { x: 0.0, y_top: 0.0, w: 200.0, h: 100.0 },
-            columns: &cols,
-            rows: &rows,
-            style: TableStyle::default(),
-            selected: None,
-            scroll_y: 0.0,
-            show_header: false,
-        };
-        // Click at y=10 → row index 0 with default row_h=22.
-        let body_top = t.body_rect().y_top;
-        assert_eq!(t.hit_test_row(50.0, body_top + 10.0), Some(0));
-        // Click way past last row → None.
-        assert_eq!(t.hit_test_row(50.0, body_top + 1000.0), None);
+    fn table_columns_too_wide_for_the_card_shrink_inside_it() {
+        let g = table(120.0, 4, 4, 0.0);
+        let right = g.card.x + g.card.w - spec::px(card_spec::ROW_PAD_X);
+        let (x, w) = *g.columns.last().unwrap();
+        assert!(x + w <= right + 1e-9, "the last column ends at {} past {right}", x + w);
+        assert_eq!(g.columns[0].1, 0.0);
     }
 
     #[test]
-    fn header_hit_test_filters_unsortable() {
-        let cols = vec![
-            TableColumn { header: "a".into(), width: ColumnWidth::Flex(1.0),
-                align: Alignment::CenterLeft, sort: None, sortable: true },
-            TableColumn { header: "b".into(), width: ColumnWidth::Flex(1.0),
-                align: Alignment::CenterLeft, sort: None, sortable: false },
-        ];
-        let t = Table {
-            rect: Rect { x: 0.0, y_top: 0.0, w: 200.0, h: 100.0 },
-            columns: &cols, rows: &[],
-            style: TableStyle::default(),
-            selected: None, scroll_y: 0.0, show_header: true,
-        };
-        let head = t.header_rect();
-        let hit_a = t.hit_test_header(50.0, head.y_top + 5.0);
-        let hit_b = t.hit_test_header(150.0, head.y_top + 5.0);
-        assert_eq!(hit_a, Some(0));   // sortable
-        assert_eq!(hit_b, None);      // not sortable
+    fn table_rows_that_do_not_fit_are_not_laid_out() {
+        let g = table(600.0, 4, 10, 0.0);
+        assert_eq!(g.rows.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+        let row_h = t::row_h(CELL_H);
+        assert!((g.max_scroll - 6.0 * row_h).abs() < 1e-9);
+        // Part of the way to the next row, the top one no longer fits
+        // and the next one down has no room yet.
+        let g = table(600.0, 4, 10, 8.0);
+        assert_eq!(g.rows.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1, 2, 3]);
+        let g = table(600.0, 4, 10, row_h);
+        assert_eq!(g.rows.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        // Asking for more than there is stops at the last row.
+        let g = table(600.0, 4, 10, 1e9);
+        assert_eq!(g.scroll, g.max_scroll);
+        assert_eq!(g.rows.last().unwrap().0, 9);
+        for (_, r) in &g.rows {
+            assert!(r.y_top >= g.body.y_top - 1e-9);
+            assert!(r.y_top + r.h <= g.body.y_top + g.body.h + 1e-9);
+        }
+        // The header does not move.
+        assert_eq!(g.header.y_top, g.card.y_top);
+    }
+
+    #[test]
+    fn table_row_at_finds_only_laid_out_rows() {
+        let g = table(600.0, 4, 10, 0.0);
+        let (_, r) = g.rows[2];
+        assert_eq!(g.row_at(r.x + 5.0, r.y_top + 1.0), Some(2));
+        assert_eq!(g.row_at(r.x + 5.0, g.header.y_top + 1.0), None, "the header is not a row");
+        assert_eq!(g.row_at(r.x + 5.0, g.card.y_top + g.card.h + 30.0), None);
+        assert_eq!(g.row_at(g.card.x - 1.0, r.y_top + 1.0), None);
+    }
+
+    #[test]
+    fn table_cell_text_is_cut_to_its_column_and_indented_by_level() {
+        let g = table(400.0, 4, 4, 0.0);
+        let row = g.rows[0].1;
+        let (x, w) = g.columns[0];
+        let (rect, text) = g.cell_text(row, 0, 0, "short");
+        assert_eq!((rect.x, rect.w, text.as_str()), (x, w, "short"));
+        let (rect, text) = g.cell_text(row, 0, 2, "short");
+        assert_eq!(rect.x, x + 2.0 * t::INDENT_CELLS * CELL_W);
+        assert_eq!(text, "short");
+        let long = "a-process-name-far-longer-than-the-column-it-is-shown-in";
+        let (rect, text) = g.cell_text(row, 0, 1, long);
+        assert!(text.ends_with('…'), "a cut has to show: {text:?}");
+        let end = rect.x + text.chars().count() as f64 * CELL_W;
+        assert!(end <= x + w + 1e-9, "the text ends at {end}, the column at {}", x + w);
+        assert!(end <= g.columns[1].0 - t::COLUMN_GAP_CELLS * CELL_W + 1e-9);
+    }
+
+    #[test]
+    fn table_highlight_stops_short_of_the_card_on_both_sides() {
+        let g = table(600.0, 4, 4, 0.0);
+        let row = g.rows[1].1;
+        let h = g.highlight_rect(row);
+        let inset = spec::px(t::SELECTED_INSET);
+        assert_eq!(h.x - g.card.x, inset);
+        assert_eq!(g.card.x + g.card.w - (h.x + h.w), inset);
+        assert_eq!((h.y_top, h.h), (row.y_top, row.h));
     }
 }

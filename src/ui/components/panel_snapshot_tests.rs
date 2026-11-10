@@ -60,15 +60,11 @@ use crate::ui::core::ViewPainter;
 use crate::ui::theme::spec;
 use marspot_term::layout::Rect;
 use crate::ui::components::layout_modal_paint::LayoutModalRender;
-use crate::ui::components::modal_frame::{ModalFrame, ModalLayoutSpec};
 use crate::ui::components::process_panel::{
-    ProcessPanelPaneRow, ProcessPanelRender, ProcessPanelRow,
+    self, ProcessPanelPaneRow, ProcessPanelRender, ProcessPanelRow,
 };
 use crate::ui::components::settings_modal;
 use crate::ui::components::settings_paint::SettingsRender;
-use crate::ui::system::macos::traffic_lights::{
-    TrafficLights, LIGHT_GAP_LOGICAL, LIGHT_LEFT_PAD_LOGICAL, LIGHT_SIZE_LOGICAL,
-};
 
 /// A terminal's worth of text for the panel to sit on, so the dimmed
 /// backdrop and the frame's shadow are in the picture.
@@ -193,82 +189,55 @@ fn panel_snapshot_layout() {
 
 #[test]
 fn panel_snapshot_process() {
-    snapshot("process", 1200, 900, |renderer, layout| {
-        let scale = crate::ui::chrome_scale();
-        let frame = ModalFrame::layout(
-            layout.window_w,
-            layout.window_h,
-            ModalLayoutSpec {
-                default_w: 800.0 * scale,
-                default_h: 600.0 * scale,
-                title_bar_h: 28.0 * scale,
-                tab_strip_h: 0.0,
-                maximized: false,
-                max_w_ratio: 0.95,
-                max_h_ratio: 0.90,
-                minimized: false,
-                with_tab_strip: false,
-                pos_offset: (0.0, 0.0),
-                top_obstruction: layout.top_inset,
-            },
-        );
-        let lights = TrafficLights::layout(
-            frame.title_bar,
-            LIGHT_SIZE_LOGICAL * scale,
-            LIGHT_GAP_LOGICAL * scale,
-            LIGHT_LEFT_PAD_LOGICAL * scale,
-        );
-        let pane = |name: &str, sid: u64, n_pids: u32, rss_mb: u64| ProcessPanelPaneRow {
+    snapshot("process", 1600, 1000, |renderer, layout| {
+        let pane = |name: &str, sid: u64, n_pids: u32, cpu_pct: f32, rss_mb: u64| ProcessPanelPaneRow {
             name: name.to_string(),
             sid,
             n_pids,
-            cpu_pct: 0.0,
+            cpu_pct,
             rss_kb: rss_mb * 1024,
             busy: String::new(),
         };
-        let row = |depth: u8, pid: i32, comm: &str, rss_mb: u64| ProcessPanelRow {
+        let row = |depth: u8, pid: i32, comm: &str, cpu_pct: f32, rss_mb: u64| ProcessPanelRow {
             depth,
             pid,
             comm: comm.to_string(),
-            cpu_pct: 0.0,
+            cpu_pct,
             rss_kb: rss_mb * 1024,
-            is_header: false,
         };
+        let pane_rows = vec![
+            pane("smix", 479, 10, 14.6, 682),
+            pane("devops", 480, 3, 0.4, 345),
+            pane("insight-mono", 481, 3, 0.0, 527),
+            pane("alt", 482, 2, 0.0, 69),
+        ];
+        let rows = vec![
+            row(0, 1544, "zsh", 0.0, 2),
+            row(1, 26121, "2.1.322", 2.3, 491),
+            row(2, 26409, "smix-mcp", 0.0, 6),
+            row(2, 42371, "sourcekit-lsp", 0.0, 23),
+            row(2, 47273, "caffeinate", 0.0, 2),
+            row(2, 49143, "rust-analyzer", 0.2, 34),
+            row(3, 49169, "rust-analyzer-p", 12.1, 50),
+            row(3, 49170, "rust-analyzer-p", 0.0, 52),
+            row(2, 60271, "zsh", 0.0, 3),
+            row(3, 61997, "smix", 0.0, 21),
+        ];
+        let (cell_w, cell_h) = renderer.cell_dims();
+        let frame = process_panel::panel_rect(
+            layout.window_w, layout.window_h, cell_h, layout.top_inset, (0.0, 0.0),
+        );
         renderer.set_process_panel(Some(ProcessPanelRender {
-            rect: frame.frame,
-            title: "Process Monitor".to_string(),
-            pane_rows: vec![
-                pane("smix", 479, 10, 682),
-                pane("devops", 480, 3, 345),
-                pane("insight-mono", 481, 3, 527),
-                pane("alt", 482, 2, 69),
-            ],
+            layout: process_panel::layout(
+                frame, layout.top_inset, pane_rows.len(), rows.len(), 0.0, cell_w, cell_h,
+            ),
+            pane_rows,
             selected_pane: 0,
-            rows: vec![
-                ProcessPanelRow {
-                    depth: 0,
-                    pid: 0,
-                    comm: "smix · sid 479 · shell pid 1544".to_string(),
-                    cpu_pct: 0.0,
-                    rss_kb: 0,
-                    is_header: true,
-                },
-                row(1, 1544, "zsh", 2),
-                row(2, 26121, "2.1.322", 491),
-                row(3, 26409, "smix-mcp", 6),
-                row(3, 42371, "sourcekit-lsp", 23),
-                row(3, 47273, "caffeinate", 2),
-                row(3, 49143, "rust-analyzer", 34),
-                row(4, 49169, "rust-analyzer-p", 50),
-                row(4, 49170, "rust-analyzer-p", 52),
-                row(3, 60271, "zsh", 3),
-                row(4, 61997, "smix", 21),
-            ],
-            minimized: false,
-            light_rects: [lights.close, lights.min, lights.max],
-            title_bar_hovered: false,
-            scroll_y: 0.0,
-            draw_backdrop: true,
+            detail: "smix · sid 479 · shell pid 1544".to_string(),
+            rows,
+            // The pointer on one kill button, so the picture has the
+            // hovered row and the hovered button in it.
+            hover: process_panel::Hover::Kill(6),
         }));
     });
 }
