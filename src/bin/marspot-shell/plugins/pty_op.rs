@@ -185,9 +185,9 @@ pub enum StepKind {
     /// per second, measured) and the pane never goes still. With it,
     /// "still" means no more than a spinner's trickle over `still`
     /// ([`TRICKLE_BYTES_PER_SEC`]), and it counts only while an input
-    /// box is on screen. The trickle bound keeps a resume that is still
-    /// repainting -- bursts of tens of KB -- from counting as settled;
-    /// the box keeps a loading spinner, which has no box, from it.
+    /// box is on screen, whatever the byte floor: a new conversation's
+    /// first screen is a few hundred bytes. The trickle bound keeps a
+    /// resume still repainting from counting; the box, a loading spinner.
     AwaitQuiet { still: Duration, min_bytes: u64, or_composer: bool },
     /// Wait for work running on another thread, and fail the run with
     /// its error if it fails.
@@ -1528,7 +1528,7 @@ impl OpRunner {
                 // all -- and the floor above is what says how many.
                 let painted = self.drew || drawn > 0;
                 let done = painted && drawn >= min_bytes && quiet >= still;
-                if !done && or_composer && painted && drawn >= min_bytes && self.sample(len) {
+                if !done && or_composer && painted && self.sample(len) {
                     let allowance = TRICKLE_BYTES_PER_SEC * still.as_millis() as u64 / 1000;
                     let trickle = self.grown_over(still, len).filter(|&g| g <= allowance);
                     if let Some(grew) = trickle
@@ -3450,6 +3450,25 @@ mod tests {
         assert!(!*host.ended.lock().unwrap(), "the paint is still inside the window");
         run_spinning(&mut r, &host, &state, 2_000);
         assert!(*host.ended.lock().unwrap(), "the box is up and only the spinner moves");
+        assert!(matches!(r.finished, Some(OpOutcome::Done)), "{:?}", r.finished);
+    }
+
+    /// An agent started on a new conversation draws a banner and its
+    /// input box and stops, well under the floor a first frame of a
+    /// resumed one is measured by. The box is what says it is ready.
+    #[test]
+    fn a_new_conversations_small_first_screen_ends_the_wait_once_its_box_is_up() {
+        let (state, env, host) = setup();
+        let op = PtyOp::new("test.handoff").step(
+            Step::await_quiet(Duration::from_millis(1_500)).after_bytes(2048).or_composer(),
+        );
+        let mut r = OpRunner::new(op, env);
+        run(&mut r, &host, &state, 50);
+        *state.out_len.lock().unwrap() += 600;
+        run_spinning(&mut r, &host, &state, 3_000);
+        assert!(!*host.ended.lock().unwrap(), "600 bytes and no box is startup noise");
+        *state.screen.lock().unwrap() = CLAUDE_BOX.into();
+        run_spinning(&mut r, &host, &state, 2_500);
         assert!(matches!(r.finished, Some(OpOutcome::Done)), "{:?}", r.finished);
     }
 
