@@ -13,6 +13,7 @@
 
 mod bind;
 mod claude_hooks;
+mod codex_config;
 mod daemon;
 mod deliver;
 mod idle;
