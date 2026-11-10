@@ -66,7 +66,7 @@ pub fn pane_context(entries: &[Entry], panes: &[Pane], me: Option<&Entry>) -> St
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     for p in rows {
         let Some(e) = entries.iter().find(|e| e.pid == p.pid) else { continue };
-        let kind = if e.ours { "Codex" } else { "Claude Code" };
+        let kind = e.agent.map_or("Claude Code", crate::registry::Agent::label);
         let what = if me.is_some_and(|m| m.pid == e.pid) {
             "this session".to_string()
         } else {
@@ -83,6 +83,7 @@ pub fn pane_context(entries: &[Entry], panes: &[Pane], me: Option<&Entry>) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::Agent;
 
     fn pane(name: &str, pid: i32) -> Pane {
         Pane { name: name.into(), pid, socket: format!("/tmp/cc-socks/{pid}.sock") }
@@ -107,7 +108,7 @@ mod tests {
 
     #[test]
     fn the_context_maps_pane_names_to_listed_names() {
-        let e = |pid: i32, name: &str, ours: bool| Entry {
+        let e = |pid: i32, name: &str, agent: Option<Agent>| Entry {
             pid,
             session_id: None,
             name: Some(name.into()),
@@ -118,15 +119,19 @@ mod tests {
             proc_start: None,
             started_at_ms: None,
             features: Vec::new(),
-            ours,
+            ours: agent.is_some(),
             class: None,
             relay: None,
             owner: None,
+            agent,
+            agent_pid: None,
+            spool: None,
         };
-        let entries = vec![e(1, "gds", true), e(2, "inputx-6a", false), e(3, "marspot-03", false)];
-        let panes = vec![pane("gds", 1), pane("inputx", 2), pane("marspot", 3)];
+        let entries = vec![e(1, "gds", Some(Agent::Codex)), e(2, "inputx-6a", None), e(3, "marspot-03", None), e(4, "gem", Some(Agent::Gemini))];
+        let panes = vec![pane("gds", 1), pane("inputx", 2), pane("marspot", 3), pane("gem", 4)];
         let text = pane_context(&entries, &panes, Some(&entries[2]));
         assert!(text.contains("  gds → Codex session\n"), "{text}");
+        assert!(text.contains("  gem → Gemini session\n"), "{text}");
         assert!(text.contains("  inputx → Claude Code session, listed above as \"inputx-6a\"\n"), "{text}");
         assert!(text.contains("  marspot → this session\n"), "{text}");
     }

@@ -20,7 +20,9 @@ const QUIET_FOR: Duration = Duration::from_secs(2);
 
 impl Worker {
     pub(super) fn subscribe(&mut self, key: u64, from: String, msg_id: String) {
-        let Some((sid, b)) = self.bindings.iter_mut().find(|(_, b)| b.key == key) else { return };
+        let Some((sid, b)) = self.bindings.iter_mut().find(|(_, b)| b.key == key) else {
+            return self.subscribe_gemini(key);
+        };
         let sid = *sid;
         if b.subs.len() >= MAX_SUBS {
             lx_warn!("peerbus.subscribe.full", "idle subscription refused: too many held", sid = sid);
@@ -63,22 +65,30 @@ impl Worker {
     /// way Claude Code shows one.  Only from a live registered session,
     /// named by its registry name.
     pub(super) fn notice(&mut self, key: u64, from: &str, state: &str, finished_at: Option<i64>) {
-        let Some((sid, b)) = self.bindings.iter().find(|(_, b)| b.key == key) else { return };
-        let sid = *sid;
-        let entries = marspot_peer::peers::live_entries();
-        let Some(sender) = entries.iter().find(|e| e.socket.as_deref().map(|s| format!("uds:{s}")).as_deref() == Some(from)) else {
-            lx_info!("peerbus.notice.unknown_sender", "dropped an idle notice from an unregistered address", sid = sid);
-            return;
+        let codex = self.bindings.iter().find(|(_, b)| b.key == key).map(|(sid, b)| (*sid, b.home.clone(), b.thread.clone()));
+        let Some((sid, home, thread)) = codex else {
+            return self.notice_gemini(key, from, state, finished_at);
         };
-        let label = sender.name.clone().unwrap_or_else(|| from.to_string());
-        let Some(text) = marspot_peer::notice::idle_text(&label, state, finished_at) else { return };
-        let (home, thread) = (b.home.clone(), b.thread.clone());
+        let Some(text) = notice_text(sid, from, state, finished_at) else { return };
         let (result, via) = self.hand_over(&home, &thread, text, None, marspot_peer::rand::uuid_v4());
         match result {
             Ok(_) => lx_info!("peerbus.notice", "idle notice queued for the codex session", sid = sid, via = via),
             Err(e) => lx_warn!("peerbus.notice_failed", &e.to_string(), sid = sid),
         }
     }
+}
+
+/// What the session in pane `sid` is shown for an idle notice from
+/// `from`; None for a sender that is not a live registered session, or
+/// a state this side does not know.
+pub(super) fn notice_text(sid: u64, from: &str, state: &str, finished_at: Option<i64>) -> Option<String> {
+    let entries = marspot_peer::peers::live_entries();
+    let Some(sender) = entries.iter().find(|e| e.socket.as_deref().map(|s| format!("uds:{s}")).as_deref() == Some(from)) else {
+        lx_info!("peerbus.notice.unknown_sender", "dropped an idle notice from an unregistered address", sid = sid);
+        return None;
+    };
+    let label = sender.name.clone().unwrap_or_else(|| from.to_string());
+    marspot_peer::notice::idle_text(&label, state, finished_at)
 }
 
 /// Tell every subscriber how the session ended up; each subscription

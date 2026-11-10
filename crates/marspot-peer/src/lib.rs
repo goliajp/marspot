@@ -11,10 +11,13 @@
 //!   sockets.
 //! - `panes`, `claude_hook`: marspot's pane names, and the Claude Code
 //!   hooks that let a Claude session address peers by them.
+//! - `spool`, `gemini_hook`: the file a Gemini session's mail waits
+//!   in, and the Gemini hook that hands it over at a turn boundary.
 
 pub mod claude_hook;
 pub mod envelope;
 pub mod frame;
+pub mod gemini_hook;
 pub mod json;
 pub mod mcp;
 pub mod notice;
@@ -26,4 +29,5 @@ pub mod registry;
 pub mod relay;
 pub mod rpc;
 mod sha1;
+pub mod spool;
 pub mod ws;
