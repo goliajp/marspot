@@ -12,9 +12,9 @@
 //! already runs once a second on the main thread, which is as soon as
 //! anything else here reacts, and a read cannot miss a notification.
 
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use marspot::{lx_event, lx_warn};
+use marspot::lx_warn;
 use marspot_term::palette::{self, ThemeId};
 use objc2::rc::Retained;
 use objc2_app_kit::{
@@ -24,8 +24,6 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{MainThreadMarker, NSArray};
 
-/// The theme version this process last drew its own surfaces for.
-static SEEN: AtomicU32 = AtomicU32::new(0);
 /// What was last published as the system's theme; `u8::MAX` before
 /// the first tick.
 static PUBLISHED: AtomicU8 = AtomicU8::new(u8::MAX);
@@ -73,8 +71,7 @@ impl super::ShellApp {
             lx_warn!("shell.system_theme.publish_failed", &e.to_string());
         }
 
-        let version = palette::version();
-        if SEEN.swap(version, Ordering::Relaxed) == version {
+        if !marspot_term::system_theme::changed("the shell's windows, present layer and banner follow the theme") {
             return;
         }
         let (r, g, b) = palette::current().bg;
@@ -97,11 +94,11 @@ impl super::ShellApp {
         // A banner on screen is a raster in the old theme's colours;
         // forgetting which one is up makes the tick draw it again.
         self.banner_kind = None;
-        lx_event!(
-            "THEME_CHANGED",
-            "the shell's window, present layer and banner follow the theme",
-            theme = palette::current_id().as_str(),
-            by = if palette::follows_system() { "system" } else { "setting" }
-        );
+        // The dev panel's window is the app's too, and is made once.
+        let [r, g, b, _] = marspot::ui::components::panel_palette::surface_base();
+        let dev_bg = NSColor::colorWithSRGBRed_green_blue_alpha(r as f64, g as f64, b as f64, 1.0);
+        for window in windows.iter().filter(|w| w.title().to_string() == "DevPanel") {
+            window.setBackgroundColor(Some(&dev_bg));
+        }
     }
 }
