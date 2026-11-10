@@ -2,10 +2,10 @@
 
 use super::super::{LogLevel, PluginHost};
 
-/// `P2@gemini-3-pro` — the shape the claude and codex badges use, so
-/// the three read as one system.  gemini has no effort setting to show.
-/// The model is written as gemini names it; with none known the badge
-/// still says which agent and which account the pane is on.
+/// `P2@gemini-3-pro-preview` — the shape the claude and codex badges
+/// use, so the three read as one system.  gemini has no effort setting
+/// to show.  `model` is already worded for the badge; with none known
+/// the badge still says which agent and which account the pane is on.
 pub(super) fn badge_text(profile: Option<u8>, model: Option<&str>) -> String {
     let what = model.unwrap_or("gemini");
     match profile {
@@ -46,6 +46,7 @@ mod tests {
     #[test]
     fn the_badge_leads_with_the_profile_and_names_the_model() {
         assert_eq!(badge_text(Some(2), Some("gemini-3-pro")), "P2@gemini-3-pro");
+        assert_eq!(badge_text(Some(1), Some("Auto→gemini-3-flash-preview")), "P1@Auto→gemini-3-flash-preview");
         assert_eq!(badge_text(None, Some("flash")), "flash");
         assert_eq!(badge_text(Some(1), None), "P1@gemini");
         assert_eq!(badge_text(None, None), "gemini");

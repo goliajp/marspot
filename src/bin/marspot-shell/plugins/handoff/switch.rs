@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use super::ledger::{self, Ledger, Side};
 use super::transcript::{self, Agent};
-use super::{claude, codex as codex_history, gemini as gemini_history, history};
+use super::{carried, claude, codex as codex_history, gemini as gemini_history, history};
 use crate::plugins::pty_op::{self, PtyCommand, PtyOp, Step};
 use crate::plugins::{claudecode, codex, gemini, pidtree};
 
@@ -128,7 +128,9 @@ fn resumable(ledger: &Ledger, to: Agent, to_home: &Path, shell_cwd: Option<&str>
     found.map(|_| side.id.clone())
 }
 
-fn command(to: Agent, to_home: &Path, resume: Option<&str>) -> Option<Vec<u8>> {
+/// The line that starts `to`.  `gemini_model` is what the gemini
+/// session being resumed was set to when the pane left it.
+fn command(to: Agent, to_home: &Path, resume: Option<&str>, gemini_model: Option<&str>) -> Option<Vec<u8>> {
     let home = to_home.to_str()?;
     let cmd = match to {
         Agent::Claude => {
@@ -150,6 +152,10 @@ fn command(to: Agent, to_home: &Path, resume: Option<&str>) -> Option<Vec<u8>> {
         }
         Agent::Gemini => {
             let c = gemini::launch(to_home)?;
+            let c = match gemini_model {
+                Some(model) => c.arg("-m").arg(model),
+                None => c,
+            };
             match resume {
                 Some(id) => c.arg("--resume").arg(id),
                 None => c,
@@ -266,7 +272,9 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
     let shell_cwd = (to == Agent::Gemini).then(|| pidtree::proc_cwd(leaving.shell_pid)).flatten();
     let shell_cwd = shell_cwd.as_deref().and_then(Path::to_str);
     let resume = resumable(&ledger, to, &to_home, shell_cwd);
-    let line = command(to, &to_home, resume.as_deref())?;
+    let gemini_model =
+        resume.as_deref().filter(|_| to == Agent::Gemini).and_then(|id| carried::gemini_model(&dir, sid, id));
+    let line = command(to, &to_home, resume.as_deref(), gemini_model.as_deref())?;
 
     // What the person was typing, carried across the switch.
 
@@ -367,10 +375,10 @@ mod tests {
     fn the_command_resumes_by_id_or_starts_fresh() {
         let h = Path::new("/Users/x/.codex-profile-2");
         let s = |b: Vec<u8>| String::from_utf8(b).unwrap();
-        assert!(s(command(Agent::Codex, h, Some("t-1")).unwrap()).contains("CODEX_HOME='/Users/x/.codex-profile-2' codex resume t-1\r"));
-        assert!(s(command(Agent::Codex, h, None).unwrap()).ends_with("codex\r"));
+        assert!(s(command(Agent::Codex, h, Some("t-1"), None).unwrap()).contains("CODEX_HOME='/Users/x/.codex-profile-2' codex resume t-1\r"));
+        assert!(s(command(Agent::Codex, h, None, None).unwrap()).ends_with("codex\r"));
         let c = Path::new("/Users/x/.claude-profile-3");
-        let claude = s(command(Agent::Claude, c, Some("u-1")).unwrap());
+        let claude = s(command(Agent::Claude, c, Some("u-1"), None).unwrap());
         assert!(
             claude.contains("CLAUDE_CONFIG_DIR='/Users/x/.claude-profile-3' claude "),
             "{claude}"
@@ -381,7 +389,7 @@ mod tests {
         // hook so its submits could be confirmed; nothing reads a
         // receipt now, and the hook forked marspot on every prompt
         // they sent by hand.
-        for line in [&claude, &s(command(Agent::Codex, h, None).unwrap())] {
+        for line in [&claude, &s(command(Agent::Codex, h, None, None).unwrap())] {
             assert!(!line.contains("--settings"), "{line}");
             assert!(!line.contains("UserPromptSubmit"), "{line}");
         }
@@ -514,11 +522,16 @@ mod tests {
         let id = "11111111-2222-4333-8444-555555555555";
         let s = |b: Vec<u8>| String::from_utf8(b).unwrap();
         assert_eq!(
-            s(command(Agent::Gemini, h, Some(id)).unwrap()),
+            s(command(Agent::Gemini, h, Some(id), None).unwrap()),
             format!("printf '\\033[H\\033[2J'; GEMINI_CLI_HOME='/Users/x/.gemini-profile-2' gemini --resume {id}\r")
         );
-        assert!(s(command(Agent::Gemini, h, None).unwrap()).ends_with("GEMINI_CLI_HOME='/Users/x/.gemini-profile-2' gemini\r"));
-        assert!(command(Agent::Gemini, Path::new("/Users/x/it's"), None).is_none());
+        assert!(s(command(Agent::Gemini, h, None, None).unwrap()).ends_with("GEMINI_CLI_HOME='/Users/x/.gemini-profile-2' gemini\r"));
+        // back to a session the pane left: on the model it was set to then
+        assert!(
+            s(command(Agent::Gemini, h, Some(id), Some("auto")).unwrap())
+                .ends_with(&format!("GEMINI_CLI_HOME='/Users/x/.gemini-profile-2' gemini -m auto --resume {id}\r"))
+        );
+        assert!(command(Agent::Gemini, Path::new("/Users/x/it's"), None, None).is_none());
         assert_eq!(target_name(Agent::Gemini, 0), "gemini", "the default home has no number to show");
         assert_eq!(target_name(Agent::Gemini, 2), "gemini P2");
         assert_eq!(target_name(Agent::Codex, 1), "codex P1");
