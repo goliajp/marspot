@@ -304,6 +304,18 @@ fn account(
 
 #[test]
 fn panel_snapshot_accounts() {
+    // The date axis is drawn in local time, and the baseline was
+    // recorded in this zone: a runner in another one drew different
+    // tick labels and failed the comparison.  nextest runs each test
+    // in its own process, so the zone is this test's alone.
+    // SAFETY: nothing else in this process reads the environment yet.
+    unsafe extern "C" {
+        fn tzset();
+    }
+    unsafe {
+        std::env::set_var("TZ", "Asia/Tokyo");
+        tzset();
+    }
     snapshot("accounts", 2100, 1100, |renderer, layout| {
         let accounts = vec![
             account("Claude 1", "dev@example.com", true, "11/13 11:59",
