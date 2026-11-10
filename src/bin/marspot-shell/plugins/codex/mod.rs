@@ -169,8 +169,8 @@ impl Plugin for CodexPlugin {
         tag: u32,
     ) {
         if let Some((to, n)) = handoff::parse_tag(tag) {
-            if to == handoff::Agent::Claude {
-                self.hand_off(host, shelld_session_id, n);
+            if to != handoff::Agent::Codex && self.panes.contains_key(&shelld_session_id) {
+                self.hand_off(host, shelld_session_id, to, n);
             }
             return;
         }
