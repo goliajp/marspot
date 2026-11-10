@@ -83,7 +83,7 @@ const GEMINI_PROFILE_PREFIX: &str = ".gemini-profile-";
 /// Every numbered profile under `user_home`, in order.  Profile 0 is
 /// not a profile: that number stands for the default home in a handoff
 /// row.
-pub(super) fn profile_dirs_in(user_home: &Path) -> Vec<(u8, PathBuf)> {
+pub(crate) fn profile_dirs_in(user_home: &Path) -> Vec<(u8, PathBuf)> {
     let mut out: Vec<(u8, PathBuf)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(user_home) {
         for e in rd.flatten() {

@@ -8,6 +8,7 @@
 //! marspot-peer mcp
 //! marspot-peer relay <inbox> <upstream> <send>
 //! marspot-peer claude-hook
+//! marspot-peer gemini-hook
 //! ```
 //!
 //! On the command line the sender is the Codex session this runs
@@ -16,7 +17,9 @@
 //! call names its thread instead.  `relay` is started by marspot, one
 //! per Codex session (see `marspot_peer::relay`).  `claude-hook` is the
 //! Claude Code hook that lets a Claude session use pane names
-//! (`marspot_peer::claude_hook`).
+//! (`marspot_peer::claude_hook`).  `gemini-hook` is the Gemini CLI hook
+//! that hands a Gemini session its waiting messages
+//! (`marspot_peer::gemini_hook`).
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -31,7 +34,8 @@ const USAGE: &str = "usage:
   marspot-peer send [--now] <name | uds:address> <text... | ->
   marspot-peer mcp
   marspot-peer relay <inbox> <upstream> <send>
-  marspot-peer claude-hook";
+  marspot-peer claude-hook
+  marspot-peer gemini-hook";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -49,6 +53,17 @@ fn main() -> ExitCode {
             let mut input = String::new();
             if std::io::stdin().read_to_string(&mut input).is_ok()
                 && let Some(out) = marspot_peer::claude_hook::answer(&input)
+            {
+                println!("{out}");
+            }
+            Ok(())
+        }
+        Some("gemini-hook") => {
+            // the same rule: whatever goes wrong here, the user's turn
+            // goes on as if the hook were not installed
+            let mut input = String::new();
+            if std::io::stdin().read_to_string(&mut input).is_ok()
+                && let Some(out) = marspot_peer::gemini_hook::answer(&input)
             {
                 println!("{out}");
             }

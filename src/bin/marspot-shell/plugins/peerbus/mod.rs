@@ -8,14 +8,20 @@
 //! other way with the `marspot-peer` MCP tools.  Every session in a
 //! pane, Claude's included, is named after its pane (`names`).
 //!
-//! The main thread only says which panes run Codex; everything that
-//! touches a socket, a file or a daemon happens on the worker thread.
+//! Gemini panes get the same record, inbox and MCP tools; what arrives
+//! for one waits in a file until its next turn (`gemini_bind`).
+//!
+//! The main thread only says which panes run Codex or Gemini;
+//! everything that touches a socket, a file or a daemon happens on the
+//! worker thread.
 
 mod bind;
 mod claude_hooks;
 mod codex_config;
 mod daemon;
 mod deliver;
+mod gemini_bind;
+mod gemini_config;
 mod idle;
 mod inbox;
 mod lifecycle;
@@ -64,6 +70,8 @@ pub struct PeerbusPlugin {
     worker: Option<JoinHandle<()>>,
     /// The last set the worker accepted; resent only when it changes.
     sent: Vec<Want>,
+    /// The same for the gemini panes; None until the first is accepted.
+    sent_gemini: Option<crate::plugins::gemini::Peers>,
 }
 
 impl PeerbusPlugin {
@@ -122,17 +130,33 @@ impl Plugin for PeerbusPlugin {
                 })
             })
             .collect();
-        if wants == self.sent {
-            return;
-        }
-        match tx.try_send(Event::Want(wants.clone())) {
-            Ok(()) => self.sent = wants,
-            // busy with a slow daemon: the next tick offers it again
-            Err(TrySendError::Full(_)) => {}
-            Err(TrySendError::Disconnected(_)) => {
-                host.log(LogLevel::Warn, "worker_gone", "peerbus worker exited; inboxes are down");
-                self.tx = None;
+        // busy with a slow daemon: the next tick offers it again
+        let offer = |ev: Event| match tx.try_send(ev) {
+            Ok(()) => Some(true),
+            Err(TrySendError::Full(_)) => Some(false),
+            Err(TrySendError::Disconnected(_)) => None,
+        };
+        let mut gone = false;
+        if wants != self.sent {
+            match offer(Event::Want(wants.clone())) {
+                Some(true) => self.sent = wants,
+                Some(false) => {}
+                None => gone = true,
             }
+        }
+        // what the gemini plugin last published: memory, like the title
+        if !gone
+            && let Some(gemini) = crate::plugins::gemini::peers().filter(|g| self.sent_gemini.as_ref() != Some(g))
+        {
+            match offer(Event::Gemini(gemini.clone())) {
+                Some(true) => self.sent_gemini = Some(gemini),
+                Some(false) => {}
+                None => gone = true,
+            }
+        }
+        if gone {
+            host.log(LogLevel::Warn, "worker_gone", "peerbus worker exited; inboxes are down");
+            self.tx = None;
         }
     }
 

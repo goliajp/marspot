@@ -192,7 +192,8 @@ impl Worker {
             .unwrap_or_else(|| marspot::pane_name::base_name(&p.cwd));
         let record = Record {
             pid: inbox.relay_pid(),
-            codex_pid: codex.pid,
+            agent: registry::Agent::Codex,
+            agent_pid: codex.pid,
             relay: inbox.relay.to_string_lossy().into_owned(),
             session_id: thread.to_string(),
             cwd: p.cwd.clone(),
@@ -206,6 +207,7 @@ impl Worker {
             status: Status::Idle,
             class,
             owner: self.owner.clone(),
+            spool: None,
         };
         write_record(&dirs, &record);
         lx_info!(
@@ -294,6 +296,10 @@ impl Worker {
             if let Some(b) = self.bindings.remove(&sid) {
                 self.unbind(sid, b);
             }
+        }
+        // marspot is going, not the sessions: their mail stays
+        for (_, g) in self.gemini.drain() {
+            g.unbind(false);
         }
         for c in self.conns.values() {
             c.tx.shutdown();
