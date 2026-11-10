@@ -47,6 +47,8 @@ pub fn separator() -> [f32; 4] { color::HAIRLINE.to_rgba_f32() }
 /// An unpicked segment of a segmented control — one level above
 /// the card it sits on.
 pub fn segment_bg() -> [f32; 4] { color::SURFACE_4.to_rgba_f32() }
+/// A key cap — the same step above the card as an unpicked segment.
+pub fn keycap_bg() -> [f32; 4] { color::SURFACE_4.to_rgba_f32() }
 pub fn now() -> [f32; 4] { color::ACCENT.to_rgba_f32() }
 /// Day rules running up through the plot.  Low alpha rather than a
 /// dim solid colour so the rule reads as behind the bars on both

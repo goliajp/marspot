@@ -465,7 +465,7 @@ mod sup_log_tests {
 mod window_state_tests {
     use super::*;
 
-    fn win(id: u32, panes: Vec<Pane>) -> WindowState {
+    pub(super) fn win(id: u32, panes: Vec<Pane>) -> WindowState {
         WindowState::new(id, panes, 0, 1, 1, 800.0, 600.0)
     }
 
@@ -588,7 +588,7 @@ mod window_state_tests {
     /// up with one 1×1 window and every session re-adopted as an
     /// orphan.  The sessions survived (their dirs are the real store);
     /// the layout did not.
-    fn app_with(sandbox: &StateSandbox, windows: Vec<WindowState>) -> CoreApp {
+    pub(super) fn app_with(sandbox: &StateSandbox, windows: Vec<WindowState>) -> CoreApp {
         assert_sandboxed(sandbox);
         let (event_tx, _rx) = mpsc::channel();
         CoreApp {
@@ -3811,6 +3811,8 @@ struct WindowState {
     settings_modal_scroll: f64,
     /// What the pointer is on in the settings panel.
     settings_modal_hover: marspot::ui::components::settings_modal::Hover,
+    /// Is the pointer on the shortcuts panel's close button?
+    shortcuts_close_hover: bool,
     ime_preedit: String,
     /// Window physical dims, updated by Resize frames.
     w_phys: f64,
@@ -3900,6 +3902,7 @@ impl WindowState {
             cc_usage_modal: None,
             settings_modal_scroll: 0.0,
             settings_modal_hover: Default::default(),
+            shortcuts_close_hover: false,
             drop_preview: None,
             ime_preedit: String::new(),
             w_phys,
@@ -3963,6 +3966,9 @@ macro_rules! win {
         $s.windows[$i]
     };
 }
+
+#[path = "marspot-core/keys.rs"]
+mod keys;
 
 struct CoreApp {
     renderer: MetalRenderer,
@@ -5073,6 +5079,7 @@ impl CoreApp {
         region: ContextRegion,
     ) -> Vec<marspot::ui::components::MenuItem> {
         use marspot::ui::components::MenuItem;
+        use marspot::commands::{hint, Command};
         match region {
             ContextRegion::Pane(_) => {
                 // Never disabled: closing a window's last pane closes
@@ -5082,11 +5089,11 @@ impl CoreApp {
                 );
                 let copy = MenuItem::entry(
                     t(Msg::MenuCopy), ContextMenuAction::CopySelection.tag(),
-                ).with_shortcut("⌘C");
+                ).with_shortcut(&hint(Command::Copy));
                 let mut items = vec![
                     if win!(self, wi).selection.is_some() { copy } else { copy.disabled() },
                     MenuItem::entry(t(Msg::MenuPaste), ContextMenuAction::Paste.tag())
-                        .with_shortcut("⌘V"),
+                        .with_shortcut(&hint(Command::Paste)),
                     MenuItem::divider(),
                     MenuItem::entry(t(Msg::MenuClearScrollback),
                         ContextMenuAction::ClearScrollback.tag()),
@@ -5114,7 +5121,7 @@ impl CoreApp {
             ContextRegion::TitleStrip => vec![
                 MenuItem::entry("Toggle sidebar",
                     ContextMenuAction::ToggleSidebar.tag())
-                    .with_shortcut("⌘B"),
+                    .with_shortcut(&hint(Command::ToggleSidebar)),
                 MenuItem::entry("Open layout…",
                     ContextMenuAction::OpenLayout.tag()),
             ],
@@ -5686,16 +5693,8 @@ impl CoreApp {
                     }
                 }
             }
-            ContextMenuAction::SplitNewPane => {
-                if win!(self, wi).panes.len() < marspot::ui::SESSION_COUNT_HARD_CAP {
-                    self.spawn_session(wi);
-                    self.rebuild_layout(wi);
-                }
-            }
-            ContextMenuAction::ToggleSidebar => {
-                win!(self, wi).sidebar_collapsed = !win!(self, wi).sidebar_collapsed;
-                self.rebuild_layout(wi);
-            }
+            ContextMenuAction::SplitNewPane => self.add_pane(wi),
+            ContextMenuAction::ToggleSidebar => self.toggle_sidebar(wi),
             ContextMenuAction::OpenLayout => {
                 let change = win!(self, wi).panels.show(SurfaceKind::Layout);
                 self.apply_surface_change(wi, change);
@@ -6669,305 +6668,6 @@ impl CoreApp {
         }
     }
 
-    fn key(&mut self, wi: usize, event: MarspotKeyEvent, modifiers: Modifiers) {
-        use marspot::input::{KeyState, LogicalKey, NamedKey};
-
-        // RFC-006 §7 — Esc cancels an in-flight pane drag outright:
-        // state cleared, ghost cleared, the release that follows is a
-        // plain mouse-up.  Swallowed; a drag is modal.
-        if event.state == KeyState::Pressed
-            && self.pane_drag.is_some()
-            && matches!(event.logical, LogicalKey::Named(NamedKey::Escape))
-        {
-            if let Some(d) = self.pane_drag.take() {
-                let from = d.from_wi;
-                if from < self.windows.len() {
-                    win!(self, from).needs_render = true;
-                }
-            }
-            self.drop_target = None;
-            self.clear_drop_preview();
-            return;
-        }
-
-        // F3+9 — Esc closes the context menu if open.  Swallowed so the
-        // \e doesn't reach the focused pane.
-        if event.state == KeyState::Pressed && win!(self, wi).context_menu.is_some()
-            && let LogicalKey::Named(NamedKey::Escape) = event.logical {
-                win!(self, wi).context_menu = None;
-                win!(self, wi).needs_render = true;
-                return;
-            }
-
-        // An open panel has the keyboard: Esc and Cmd-W close it and
-        // nothing else gets through to the pane under it.  Its own
-        // shortcut is the one exception — a toggle has to work in both
-        // directions.
-        let accounts_chord = modifiers.super_
-            && modifiers.shift
-            && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'c'));
-        if win!(self, wi).panels.owns_pointer() && !accounts_chord {
-            if event.state != KeyState::Pressed {
-                return;
-            }
-            let key = match event.logical {
-                LogicalKey::Named(NamedKey::Escape) => SurfaceKey::Esc,
-                LogicalKey::Char('w') if modifiers.super_ => SurfaceKey::CmdW,
-                _ => SurfaceKey::Other,
-            };
-            if let KeyAction::Close(change) = win!(self, wi).panels.on_key(key) {
-                self.apply_surface_change(wi, change);
-            }
-            return;
-        }
-
-        // cc — Cmd+Shift+C toggles the usage modal.
-        //
-        // Placement is load-bearing twice over.  It sits ahead of the
-        // LOCK_KEYS routing below because this is a window-global
-        // overlay, not pane content — it has to work even while a
-        // plugin-held session (claudecode) owns the keyboard.  And it
-        // sits ahead of the Cmd-C copy handler because that one tests
-        // only `super_key()` and would happily swallow the shifted
-        // chord as a copy.
-        if event.state == KeyState::Pressed && accounts_chord {
-            self.toggle_panel(wi, SurfaceKind::Accounts);
-            return;
-        }
-
-        // RFC-003 LOCK_KEYS: if the focused pane is in a plugin-held
-        // PaneSession that asked for the keyboard, route the event up
-        // to L1 instead of forwarding to the PTY.  Also count Esc
-        // presses against the force-end window; 3 in 5 s force-ends
-        // the session via PaneSessionUserEscape.
-        //
-        // Sits ahead of Cmd-C / Cmd-B / title-edit because the
-        // user might genuinely need Esc to force-end a stuck session,
-        // and we don't want any L2 shortcut to swallow it first.
-        if event.state == KeyState::Pressed
-            && let Some(active_sid) = self.focused_pane_active_session(wi) {
-                let has_lock = self
-                    .pane_session_for(active_sid)
-                    .is_some_and(|s| s.has(marspot::shell_proto::PANE_SESSION_CAP_LOCK_KEYS));
-                let is_esc = matches!(
-                    event.logical,
-                    LogicalKey::Named(NamedKey::Escape)
-                );
-                if is_esc {
-                    let force_end = self
-                        .note_escape_for_pane_session(active_sid, std::time::Instant::now());
-                    if force_end {
-                        let payload = marspot::shell_proto::encode_pane_session_user_escape(
-                            active_sid,
-                        );
-                        self.pending_to_shell
-                            .push((MsgType::PaneSessionUserEscape, payload));
-                        // Also drop the L2 mirror immediately so the
-                        // pane goes back to normal even if L1 lags.
-                        self.pane_session_end(active_sid);
-                        return;
-                    }
-                }
-                if has_lock {
-                    let wire = marspot::shell_proto::event_to_wire(&event, modifiers);
-                    let payload = marspot::shell_proto::encode_pane_session_key(
-                        active_sid, &wire,
-                    );
-                    self.pending_to_shell
-                        .push((MsgType::PaneSessionKey, payload));
-                    return;
-                }
-            }
-
-        // C5 — Cmd+F intercept (env-gated on `MARSPOT_SEARCH=1`).
-        // Sits ahead of all PTY routing + Cmd-C / Cmd-B so an open
-        // search bar gets the keys; falls through silently when the
-        // env gate is off.  F1 flips by removing the env check inside
-        // `handle_cmd_f` and `search_consume_key` / opening on every
-        // session.
-        if event.state == KeyState::Pressed
-            && modifiers.super_key()
-            && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'f'))
-            && self.handle_cmd_f(wi) {
-                return;
-            }
-        if event.state == KeyState::Pressed && self.search_consume_key(wi, &event, modifiers) {
-            return;
-        }
-        // F1+12 — F1+9 had a too-wide guard here that returned early
-        // for ALL events when search was open, swallowing Cmd-C / Cmd-B
-        // before their dedicated handlers below could fire.  User
-        // could navigate hits but Cmd-C wouldn't copy without Esc'ing
-        // out of search first.
-        //
-        // The actual bouncer F1+9 was trying to defuse lives inside
-        // the L3 forward path (`snap_to_live` + `forward_key`).  We
-        // moved the guard there (further down) so Cmd-C / Cmd-B /
-        // Cmd-V keep working while search is open.
-
-        // Cmd-C: copy current text selection to the macOS clipboard.
-        if event.state == KeyState::Pressed
-            && modifiers.super_key()
-            && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'c'))
-            && self.copy_selection_to_clipboard(wi) {
-                return;
-            }
-
-        // Cmd-B: toggle the sidebar (VSCode / Cursor convention).
-        if event.state == KeyState::Pressed
-            && modifiers.super_key()
-            && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'b'))
-        {
-            win!(self, wi).sidebar_collapsed = !win!(self, wi).sidebar_collapsed;
-            self.rebuild_layout(wi);
-            return;
-        }
-
-        let Some(pane) = win!(self, wi).try_focused_pane() else { return };
-
-        // RFC-003 Phase 4 (frozen reattach minimum): an exited L3 pane
-        // shows whatever was last published; on key press we revive it
-        // by spawning a fresh L3 at the same session id.  The bytelog
-        // opens in append mode so the new shell's output continues the
-        // same on-disk record.  Only revive on a key press the user
-        // would actually mean as "wake up" (any printable / Enter /
-        // arrow / Tab etc); modifier-only key transitions don't fire.
-        //
-        // RFC-004 B.2 — vacant slots (boot-time assembly failures)
-        // revive through the exact same path: they hold their sid and
-        // report is_exited() = true.  A vacant slot with sid 0 (id
-        // allocation itself failed at boot) allocates one now.
-        if (pane.is_l3() || pane.is_vacant())
-            && !pane.is_dormant()
-            && pane.is_exited()
-            && event.state == KeyState::Pressed
-        {
-            let sid_opt = pane
-                .session()
-                .shelld_session_id()
-                .filter(|&s| s != 0)
-                .or_else(|| allocate_next_session_id().ok());
-            if let Some(sid) = sid_opt {
-                // Layout already sized the pane — keep its current
-                // cell dims so the new L3 boots at the same shape.
-                let (cols, rows) = win!(self, wi)
-                    .layout
-                    .cells
-                    .get(win!(self, wi).focused_idx)
-                    .map(|c| (c.cols, c.rows))
-                    .unwrap_or((INITIAL_COLS, INITIAL_ROWS));
-                // Off-loop, same as [+]: a keystroke into a dead slot
-                // must not freeze the other fifteen panes while the
-                // replacement boots.
-                *win!(self, wi).focused_pane_mut() =
-                    spawn_l3_pane_async(cols, rows, sid, String::new(), &self.event_tx);
-                win!(self, wi).needs_render = true;
-                lx_event!(
-                    "L3_REVIVING",
-                    "user keystroke started an off-loop respawn at same id",
-                    session_id = sid
-                );
-                return;
-            }
-        }
-
-        // L3-backed pane: forward the key *event* to the session process,
-        // which encodes with its own modes + local-echoes, then republishes
-        // the grid (we re-read it on the GridReady wake).  No local write /
-        // predict here.
-        if pane.is_l3() {
-            // F1+12 — when the search overlay owns the keyboard, any key
-            // that fell through to here must not (a) snap_to_live (the
-            // F1+9 bouncer) or (b) forward_key into the PTY (would type
-            // search-bar shortcuts into the shell).  Cmd-C / Cmd-B
-            // already ran above; bar-bound printable / arrows / Enter
-            // were already consumed by search_consume_key on the press
-            // event.  Anything left (e.g. KeyState::Released, or a
-            // Cmd-? we don't recognise) is dropped silently.
-            if win!(self, wi).focused_pane_mut()
-                .search
-                .as_ref()
-                .is_some_and(|s| s.bar.focused)
-            {
-                return;
-            }
-            // Cmd-V: L3 is GUI-free and can't read the macOS pasteboard, so
-            // L2 resolves it here and forwards the text; the session
-            // bracketed-wraps it and writes the PTY.  (Without this, Cmd-V
-            // was forwarded as a raw keystroke and silently did nothing —
-            // paste was broken the moment L3 became the default.)
-            if event.state == KeyState::Pressed
-                && modifiers.super_key()
-                && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'v'))
-            {
-                if let Some(text) = marspot::input::read_clipboard_text() {
-                    if win!(self, wi).focused_pane_mut().snap_to_live() {
-                        win!(self, wi).needs_render = true;
-                    }
-                    win!(self, wi).focused_pane_mut().session_mut().forward_paste(&text);
-                }
-                return;
-            }
-            if win!(self, wi).focused_pane_mut().snap_to_live() {
-                win!(self, wi).needs_render = true;
-            }
-            if win!(self, wi).selection.is_some() {
-                win!(self, wi).selection = None;
-                win!(self, wi).selection_dragging = false;
-                win!(self, wi).needs_render = true;
-            }
-            win!(self, wi).focused_pane_mut()
-                .session_mut()
-                .forward_key(&event, modifiers);
-            return;
-        }
-
-        let modes = pane.session().terminal().input_modes();
-        if let Some(bytes) = key_event_to_bytes(
-            &event,
-            modifiers,
-            modes,
-            marspot::input::read_clipboard_text,
-        ) {
-            // Typing snaps the focused pane's view back to live.
-            if win!(self, wi).focused_pane_mut().snap_to_live() {
-                win!(self, wi).needs_render = true;
-            }
-            // Typing into the PTY clears any text selection.
-            if win!(self, wi).selection.is_some() {
-                win!(self, wi).selection = None;
-                win!(self, wi).selection_dragging = false;
-                win!(self, wi).needs_render = true;
-            }
-            let session = win!(self, wi).focused_pane_mut().session_mut();
-            let _ = session.write(&bytes);
-            // Local-echo: paint each printable-ASCII byte to the grid
-            // immediately, ahead of the PTY round trip — but only
-            // for plain text runs.  An escape sequence (ESC-leading)
-            // is a control code: the leading 0x1b isn't printable so
-            // predict_byte rejects it, but the sequence's tail
-            // (`[C`, `[A`, …) is ASCII printable and would smear
-            // literally into the grid.  Skip the whole run when it
-            // starts with ESC.
-            let mut predicted = false;
-            if !bytes.starts_with(&[0x1b]) {
-                for &b in bytes.as_ref() {
-                    if session.terminal_mut().predict_byte(b) {
-                        predicted = true;
-                    }
-                }
-            }
-            if predicted {
-                win!(self, wi).needs_render = true;
-            }
-            // No cwd refresh here on purpose: an Enter fires *before*
-            // the shell has run the line it submits, so reading the cwd
-            // on Enter can only ever report the directory the pane was
-            // in before the `cd`.  `sweep_pane_cwds` reads it after the
-            // fact instead.
-        }
-    }
-
     /// Hit-test an auto-detected link span on pane `idx`.  Scans the
     /// pane's visible grid (cheap — bounded by visible cells) and
     /// returns the first span containing the clicked (col, row).
@@ -7244,6 +6944,7 @@ impl CoreApp {
             Some(SurfaceKind::Processes) => w.process_panel = None,
             Some(SurfaceKind::Accounts) => w.cc_usage_modal = None,
             Some(SurfaceKind::Layout) => w.layout_drag = None,
+            Some(SurfaceKind::Shortcuts) => w.shortcuts_close_hover = false,
             Some(SurfaceKind::Settings) | None => {}
         }
         match change.opened {
@@ -7291,7 +6992,7 @@ impl CoreApp {
                     hover: Default::default(),
                 });
             }
-            None => {}
+            Some(SurfaceKind::Shortcuts) | None => {}
         }
     }
 
@@ -7301,6 +7002,7 @@ impl CoreApp {
             SurfaceKind::Settings => self.settings_modal_rect(wi),
             SurfaceKind::Layout => self.layout_modal_geometry(wi).chrome.frame,
             SurfaceKind::Accounts => self.cc_usage_modal_rect(wi),
+            SurfaceKind::Shortcuts => self.shortcuts_panel_rect(wi),
             SurfaceKind::Processes => {
                 let (_, cell_h) = self.renderer.cell_dims();
                 let w = &win!(self, wi);
@@ -7315,7 +7017,7 @@ impl CoreApp {
     /// frame, on neither its header nor its close button.
     fn panel_content_press(&mut self, wi: usize, kind: SurfaceKind, x_phys: f64, y_phys: f64) {
         match kind {
-            SurfaceKind::Accounts => {}
+            SurfaceKind::Accounts | SurfaceKind::Shortcuts => {}
             SurfaceKind::Processes => {
                 use marspot::ui::components::process_panel::Hover;
                 let Some(panel) = win!(self, wi).process_panel.as_mut() else { return };
@@ -7904,6 +7606,12 @@ impl CoreApp {
                 win!(self, wi).needs_render = true;
             }
         }
+        if win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts) {
+            let on = PanelChrome::new(self.shortcuts_panel_rect(wi), 0.0).hit_close(x_phys, y_phys);
+            if std::mem::replace(&mut win!(self, wi).shortcuts_close_hover, on) != on {
+                win!(self, wi).needs_render = true;
+            }
+        }
         if win!(self, wi).panels.open() == Some(SurfaceKind::Layout) {
             let on = self.layout_modal_geometry(wi).hover_at(x_phys, y_phys);
             if on != win!(self, wi).layout_modal_hover {
@@ -8041,8 +7749,7 @@ impl CoreApp {
         let add_session_hit = layout.hit_test_add_session_button(x_phys, y_phys);
 
         if sidebar_btn_hit {
-            win!(self, wi).sidebar_collapsed = !win!(self, wi).sidebar_collapsed;
-            self.rebuild_layout(wi);
+            self.toggle_sidebar(wi);
             return;
         }
         // UI-system dev panel toggle.  L2 doesn't own dev panel
@@ -8068,10 +7775,7 @@ impl CoreApp {
 
         // Sidebar [+] add-session.
         if add_session_hit {
-            if win!(self, wi).panes.len() < SESSION_COUNT_HARD_CAP {
-                self.spawn_session(wi);
-                self.rebuild_layout(wi);
-            }
+            self.add_pane(wi);
             return;
         }
 
@@ -8116,7 +7820,7 @@ impl CoreApp {
                 return;
             }
             if idx < win!(self, wi).panes.len() {
-                win!(self, wi).focused_idx = idx;
+                self.set_focus(wi, idx);
                 let _ = win!(self, wi).focused_pane_mut().snap_to_live();
                 win!(self, wi).selection = None;
                 win!(self, wi).selection_dragging = false;
@@ -8212,7 +7916,7 @@ impl CoreApp {
                 .map(|p| p.session().l3_mouse_tracking_active())
                 .unwrap_or(false)
         {
-            win!(self, wi).focused_idx = idx;
+            self.set_focus(wi, idx);
             win!(self, wi).needs_render = true;
             let (c1, r1) = (col as u32 + 1, row as u32 + 1);
             if let Some(pane) = win!(self, wi).panes.get_mut(idx) {
@@ -8259,9 +7963,7 @@ impl CoreApp {
                 });
                 win!(self, wi).selection_dragging = true;
                 win!(self, wi).selection_tape = tape;
-                if idx != win!(self, wi).focused_idx {
-                    win!(self, wi).focused_idx = idx;
-                }
+                self.set_focus(wi, idx);
                 win!(self, wi).needs_render = true;
                 return;
             }
@@ -8286,11 +7988,7 @@ impl CoreApp {
                 }
                 return;
             }
-            if idx < win!(self, wi).panes.len() && idx != win!(self, wi).focused_idx {
-                win!(self, wi).focused_idx = idx;
-                let _ = win!(self, wi).focused_pane_mut().snap_to_live();
-                win!(self, wi).needs_render = true;
-            }
+            self.focus_pane(wi, idx);
         }
     }
 
@@ -8322,9 +8020,7 @@ impl CoreApp {
         }
         // Same focus motion as a click — the pane receiving the text
         // becomes the pane the user is typing into next.
-        if idx != win!(self, wi).focused_idx {
-            win!(self, wi).focused_idx = idx;
-        }
+        self.set_focus(wi, idx);
         if win!(self, wi).panes[idx].snap_to_live() {
             win!(self, wi).needs_render = true;
         }
@@ -8585,7 +8281,7 @@ impl CoreApp {
                 }
                 return;
             }
-            Some(SurfaceKind::Layout | SurfaceKind::Accounts) => return,
+            Some(SurfaceKind::Layout | SurfaceKind::Accounts | SurfaceKind::Shortcuts) => return,
             None => {}
         }
         // A plugin-held PaneSession that took the keyboard owns the
@@ -9187,6 +8883,13 @@ impl CoreApp {
             None
         };
         self.renderer.set_settings_panel(settings_data);
+        let shortcuts = (win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts)).then(|| {
+            marspot::ui::components::shortcuts_paint::ShortcutsRender {
+                rect: self.shortcuts_panel_rect(wi),
+                close_hovered: win!(self, wi).shortcuts_close_hover,
+            }
+        });
+        self.renderer.set_shortcuts_panel(shortcuts);
         // F3+9 — publish ContextMenu render state every frame.
         // Dev panel renders into its own NSWindow, owned by L1
         // (marspot-shell), not by L2.  L2's only job re: dev panel

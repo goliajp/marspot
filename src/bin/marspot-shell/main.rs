@@ -4312,26 +4312,11 @@ impl MarspotApp for ShellApp {
             mods_byte = struct_to_mods_byte(mods),
             state = format!("{:?}", event.state)
         );
-        // Cmd-N — open another window.  Handled here rather than being
-        // forwarded to the core: L1 owns windows.
-        //
-        // This was disabled from 2026-07-26 until RFC-005 steps 4d/6/4e
-        // landed.  What made it unsafe was not the keystroke but what
-        // the rest of the system did with a second window: the core
-        // saved only the key window's panes, and a new window becomes
-        // key the instant it appears, so sixteen panes were written out
-        // of the file boot assembly reads.  The sessions survived
-        // (their dirs and bytelogs are the real store) but the layout
-        // did not.  `shell-state.bin` v2 saves every window, so opening
-        // one can no longer narrow what gets persisted.
-        if mods.super_
-            && !mods.control
-            && !mods.alt
-            && event.state == marspot::input::KeyState::Pressed
-            && matches!(
-                event.logical,
-                marspot::input::LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'n')
-            )
+        // The shell owns the windows, so the one command that opens
+        // one runs here; every other key is the core's to dispatch.
+        if event.state == marspot::input::KeyState::Pressed
+            && let Some(row) = marspot::commands::for_key(&event.logical, mods)
+            && row.command == marspot::commands::Command::NewWindow
         {
             self.open_new_window();
             return;

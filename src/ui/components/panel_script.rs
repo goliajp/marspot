@@ -262,6 +262,7 @@ impl Scene<'_> {
                     SurfaceKind::Layout => l.layout_button_rect,
                     SurfaceKind::Processes => l.process_button_rect,
                     SurfaceKind::Accounts => l.cc_button_rect,
+                    SurfaceKind::Shortcuts => Rect { x: 0.0, y_top: 0.0, w: 0.0, h: 0.0 },
                 };
                 if rect.w <= 0.0 || rect.h <= 0.0 {
                     return Err("the toolbar has no such button".to_string());

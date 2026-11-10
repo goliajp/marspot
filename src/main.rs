@@ -2,6 +2,7 @@ use objc2_app_kit::NSScreen;
 use objc2_foundation::MainThreadMarker;
 
 use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
+use marspot::commands::{hint, Command};
 use marspot::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers as MarspotModifiers};
 use marspot::layout::Layout;
 use marspot::render::{SessionView, SidebarEntry};
@@ -421,36 +422,23 @@ impl MarspotApp for Marspot {
                 return;
             }
 
-        // Cmd-C: copy current text selection to the macOS clipboard.
-        // Must run before the title-edit fall-through so a selection
-        // captured before opening the title editor can still be
-        // copied without losing focus to the editor.  No-op when
-        // there's no selection — falls through to the PTY mapper
-        // which discards Cmd-* anyway.
+        // The two commands this single-process build answers.  A copy
+        // with nothing selected falls through to the encoder, which
+        // sends no Cmd chord to the program.
         if event.state == KeyState::Pressed
-            && modifiers.super_key()
-            && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'c'))
-            && self.copy_selection_to_clipboard() {
-                return;
-            }
-
-        // Cmd-B: toggle the sidebar.  Collapsed sidebar reclaims its
-        // width for the cell grid (VSCode / Cursor convention).  Cmd-*
-        // is swallowed by the app layer here — it never reaches the
-        // PTY mapper — so there's no risk of conflicting with a shell
-        // binding.  Sidebar-only buttons ([+] add-session, [×] close)
-        // are unreachable while collapsed; the user re-opens with the
-        // same Cmd-B before using them.
-        if event.state == KeyState::Pressed
-            && modifiers.super_key()
-            && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'b'))
+            && let Some(row) = marspot::commands::for_key(&event.logical, modifiers)
         {
-            self.sidebar_collapsed = !self.sidebar_collapsed;
-            self.rebuild_layout(ctx);
-            ctx.request_redraw();
-            return;
+            match row.command {
+                Command::Copy if self.copy_selection_to_clipboard() => return,
+                Command::ToggleSidebar => {
+                    self.sidebar_collapsed = !self.sidebar_collapsed;
+                    self.rebuild_layout(ctx);
+                    ctx.request_redraw();
+                    return;
+                }
+                _ => {}
+            }
         }
-
 
         let modes = self.panes[self.focused_idx].session().terminal().input_modes();
         if let Some(bytes) = key_event_to_bytes(
@@ -1085,10 +1073,10 @@ impl Marspot {
             ContextRegion::Pane(_) => {
                 let copy = if has_selection {
                     MenuItem::entry("Copy", ContextMenuAction::CopySelection.tag())
-                        .with_shortcut("⌘C")
+                        .with_shortcut(&hint(Command::Copy))
                 } else {
                     MenuItem::entry("Copy", ContextMenuAction::CopySelection.tag())
-                        .with_shortcut("⌘C")
+                        .with_shortcut(&hint(Command::Copy))
                         .disabled()
                 };
                 let close_disabled = self.panes.len() <= 1;
@@ -1099,7 +1087,7 @@ impl Marspot {
                 vec![
                     copy,
                     MenuItem::entry("Paste", ContextMenuAction::Paste.tag())
-                        .with_shortcut("⌘V"),
+                        .with_shortcut(&hint(Command::Paste)),
                     MenuItem::divider(),
                     MenuItem::entry("Clear scrollback", ContextMenuAction::ClearScrollback.tag()),
                     MenuItem::divider(),
@@ -1120,7 +1108,7 @@ impl Marspot {
             }
             ContextRegion::TitleStrip => vec![
                 MenuItem::entry("Toggle sidebar", ContextMenuAction::ToggleSidebar.tag())
-                    .with_shortcut("⌘B"),
+                    .with_shortcut(&hint(Command::ToggleSidebar)),
                 MenuItem::entry("Open layout…", ContextMenuAction::OpenLayout.tag()),
             ],
         }
