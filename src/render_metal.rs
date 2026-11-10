@@ -2346,12 +2346,7 @@ impl MetalRenderer {
             color.setTexture(Some(&texture));
             color.setLoadAction(MTLLoadAction::Clear);
             color.setStoreAction(MTLStoreAction::Store);
-            color.setClearColor(MTLClearColor {
-                red: 0.0,
-                green: 0.0,
-                blue: 0.0,
-                alpha: 1.0,
-            });
+            color.setClearColor(OFFSCREEN_CLEAR);
         }
 
         let cmd = self
@@ -2625,6 +2620,10 @@ pub(crate) fn system_default_device() -> Result<Retained<ProtocolObject<dyn MTLD
         .ok_or_else(|| "MTLCreateSystemDefaultDevice returned nil — no Metal device".into())
 }
 
+/// What an offscreen render for a test or a tool starts from: black,
+/// whatever the theme, so its pictures do not depend on one.
+const OFFSCREEN_CLEAR: MTLClearColor = MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 };
+
 fn clear_color(c: [f32; 4]) -> MTLClearColor {
     MTLClearColor { red: c[0] as f64, green: c[1] as f64, blue: c[2] as f64, alpha: 1.0 }
 }
@@ -2858,7 +2857,7 @@ impl MetalRenderer {
             let color = pass.colorAttachments().objectAtIndexedSubscript(0);
             color.setTexture(Some(ProtocolObject::from_ref(&*texture)));
             color.setLoadAction(MTLLoadAction::Clear);
-            color.setClearColor(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 });
+            color.setClearColor(OFFSCREEN_CLEAR);
             color.setStoreAction(MTLStoreAction::Store);
         }
         if let Some(enc) = cmd.renderCommandEncoderWithDescriptor(&pass) {
@@ -2932,7 +2931,7 @@ impl MetalRenderer {
             canvas,
             ProtocolObject::from_ref(&*texture),
             ProtocolObject::from_ref(&*cmd),
-            Some(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 }),
+            Some(OFFSCREEN_CLEAR),
             &viewport_px,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
             ui_font,

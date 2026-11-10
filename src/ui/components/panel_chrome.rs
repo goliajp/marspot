@@ -418,6 +418,14 @@ mod tests {
                 code.match_indices(ctor).filter(|(i, _)| own(*i)).map(|(i, _)| code[i..].chars().take(32).collect()),
             );
         }
+        // A clear colour spelled as a struct: `ClearColor { red: 0.1, .. }`.
+        for (i, _) in code.match_indices("ClearColor {") {
+            let body = code[i..].split('}').next().unwrap_or_default();
+            let red = body.split("red:").nth(1).and_then(|rest| rest.split(',').next());
+            if red.is_some_and(|v| float(v).is_some()) {
+                found.push(body.split_whitespace().collect::<Vec<_>>().join(" "));
+            }
+        }
         for (open, _) in code.match_indices(['[', '(']) {
             let close = if code.as_bytes()[open] == b'[' { ']' } else { ')' };
             let rest = &code[open + 1..];
@@ -453,6 +461,7 @@ mod tests {
             format!("color: {o}0.0; 4{c}"),
             format!("const SEAM: (f32, f32, f32) = {}0.115, 0.130, 0.155{};", '(', ')'),
             format!("let bg = Color::{}(33, 36, 43, 1.0);", "rgba"),
+            format!("color.setClearColor(MTL{} {{ red: 0.078, green: 0.086, blue: 0.110, alpha: 1.0 }});", "ClearColor"),
         ] {
             assert_eq!(colour_literals(&literal).len(), 1, "missed: {literal}");
         }
@@ -462,6 +471,7 @@ mod tests {
             format!("shadow_offset: {o}0.0, 0.0{c},"),
             format!("const CHOICES: &{o}f32{c} = &{o}0.5, 1.0, 1.5, 2.5{c};"),
             format!("// was {o}0.13, 0.14, 0.17, 1.0{c}"),
+            format!("MTL{} {{ red: c{o}0{c} as f64, green, blue, alpha: 1.0 }}", "ClearColor"),
             format!("fn f() {{}}\n#{o}cfg(test){c}\nmod tests {{ const C: {o}f32; 4{c} = {o}1.0; 4{c}; }}"),
         ] {
             assert!(colour_literals(&clean).is_empty(), "false alarm: {clean}");
@@ -490,8 +500,11 @@ mod tests {
             }
         }
         let renderer = std::fs::read_to_string(root.join("render_metal.rs")).expect("the renderer");
+        // One, by name: what an offscreen render for a test starts from.
+        let named = "const OFFSCREEN_CLEAR: MTLClearColor = MTLClearColor {";
         let found = colour_literals(&renderer);
-        assert!(found.is_empty(), "render_metal.rs writes colours out by hand: {found:?}");
+        assert_eq!(found.len(), 1, "render_metal.rs writes colours out by hand: {found:?}");
+        assert!(renderer.contains(named), "the renderer's one literal is not the offscreen clear");
         // A wrong path scans nothing and passes; the directories
         // together hold far more files than this.
         assert!(scanned >= 140, "only {scanned} files were scanned");
