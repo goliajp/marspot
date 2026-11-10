@@ -134,6 +134,8 @@ pub(crate) struct Worker {
     pub(super) names_passes: u64,
     /// The pane names last written (`names`).
     pub(super) pane_table: Vec<marspot_peer::panes::Pane>,
+    /// What the last hook reconcile reported (`claude_hooks`).
+    pub(super) hook_notes: Vec<String>,
 }
 
 impl Worker {
@@ -156,6 +158,7 @@ impl Worker {
             idle_checks: Vec::new(),
             crowded: HashSet::new(),
             pane_table: Vec::new(),
+            hook_notes: Vec::new(),
             names_passes: 0,
         }
     }
