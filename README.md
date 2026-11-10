@@ -28,7 +28,7 @@ idle and bring it back on a keystroke.
 
 ## Requirements
 
-macOS 14.0 or newer, Apple silicon. Intel Macs are not supported and
+macOS 15.0 or newer, Apple silicon. Intel Macs are not supported and
 are not planned: the renderer targets Metal on Apple silicon and the
 performance numbers below are what the design is for.
 

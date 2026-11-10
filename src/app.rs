@@ -1922,7 +1922,7 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     }
 
     // Show + focus + activate.  `activate()` replaces the deprecated
-    // `activateIgnoringOtherApps(true)`; macOS 14+ is our target floor.
+    // `activateIgnoringOtherApps(true)`; macOS 15+ is our target floor.
     nsapp.activate();
     window.makeKeyAndOrderFront(None);
 
