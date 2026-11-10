@@ -8,8 +8,8 @@
 
 use crate::ui::core::{Canvas, Color, Length};
 use super::layout::{Decoration, LaidOut, LayoutCtx};
-use super::view::{role, View};
-use crate::ui::components::panel_palette as palette;
+use super::view::View;
+use super::{palette, role};
 
 /// Build a Canvas covering the laid-out subtree.  Caller hands
 /// the result to `MetalRenderer::encode_canvas_into` or similar.
