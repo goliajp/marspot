@@ -136,6 +136,8 @@ pub(crate) struct Worker {
     pub(super) pane_table: Vec<marspot_peer::panes::Pane>,
     /// What the last hook reconcile reported (`claude_hooks`).
     pub(super) hook_notes: Vec<String>,
+    /// What the last skills reconcile reported.
+    skill_notes: Vec<String>,
 }
 
 impl Worker {
@@ -159,13 +161,29 @@ impl Worker {
             crowded: HashSet::new(),
             pane_table: Vec::new(),
             hook_notes: Vec::new(),
+            skill_notes: Vec::new(),
             names_passes: 0,
         }
+    }
+
+    /// The shipped agent skills ride on this thread: it is the one
+    /// that already looks at the agents' directories now and then.
+    /// Logged when the outcome changes, as the hooks are.
+    fn reconcile_skills(&mut self) {
+        let notes = crate::plugins::skills::reconcile();
+        if notes == self.skill_notes {
+            return;
+        }
+        for note in &notes {
+            lx_info!("skills.install", note);
+        }
+        self.skill_notes = notes;
     }
 
     pub fn run(mut self) {
         self.clear_leftovers();
         self.reconcile_hooks();
+        self.reconcile_skills();
         loop {
             let ev = match self.stash.pop_front() {
                 Some(e) => e,
@@ -192,6 +210,7 @@ impl Worker {
                                 // `/config` change; look again now and then
                                 if self.names_passes.is_multiple_of(HOOKS_EVERY_PASSES) {
                                     self.reconcile_hooks();
+                                    self.reconcile_skills();
                                 }
                             }
                             continue;
