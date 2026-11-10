@@ -68,7 +68,7 @@ pub fn looks_like_gemini(d: &pidtree::ProcRow) -> bool {
     pidtree::proc_argv(d.pid).is_some_and(|argv| argv_is_gemini(&argv))
 }
 
-fn is_gemini(p: &Proc) -> bool {
+pub(crate) fn is_gemini(p: &Proc) -> bool {
     p.argv.as_deref().is_some_and(argv_is_gemini)
 }
 
@@ -78,7 +78,7 @@ fn is_gemini(p: &Proc) -> bool {
 /// gemini relaunches itself as a child of the same name, so a pane
 /// normally holds two; they are one agent, bound once.  A gemini that
 /// runs under claude or codex is that agent's tool, not the pane's
-/// agent, and is left alone.
+/// agent, and is left alone; so is one that runs under kimi.
 fn agent_in(descendants: &[Proc]) -> Option<(&Proc, pidtree::ProcId)> {
     let by_pid = |pid: i32| descendants.iter().find(|p| p.row.pid == pid);
     let outer = descendants
@@ -86,7 +86,7 @@ fn agent_in(descendants: &[Proc]) -> Option<(&Proc, pidtree::ProcId)> {
         .find(|p| is_gemini(p) && !by_pid(p.row.ppid).is_some_and(is_gemini))?;
     let mut above = by_pid(outer.row.ppid);
     while let Some(p) = above {
-        if matches!(p.name(), "claude" | "codex") {
+        if matches!(p.name(), "claude" | "codex") || p.row.comm == "kimi" {
             return None;
         }
         above = by_pid(p.row.ppid);

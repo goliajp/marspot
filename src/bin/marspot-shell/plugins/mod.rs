@@ -46,6 +46,7 @@ pub mod autorun;
 pub mod claudecode;
 pub mod codex;
 pub mod gemini;
+pub mod kimi;
 pub mod peerbus;
 pub mod usage;
 pub mod handoff;
