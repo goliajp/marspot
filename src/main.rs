@@ -236,9 +236,6 @@ struct Marspot {
     /// `LayoutModal` (toolbar layout button → modal).
     grid_cols: usize,
     grid_rows: usize,
-    /// True while the `LayoutModal` is open; toolbar layout button
-    /// click toggles it.
-    layout_modal_open: bool,
     /// F3+9 — right-click context menu state.  `None` when the menu
     /// is closed.  Right-mouse-down resolves the click region (a
     /// pane, a sidebar slot, …) and stashes the items + anchor here;
@@ -580,10 +577,9 @@ impl MarspotApp for Marspot {
             ctx.request_redraw();
             return;
         }
-        // F3+3.0 — layout button toggles the modal.
+        // The layout panel is the windowed front-end's; here the
+        // button only keeps the press off the pane under it.
         if layout_btn_hit {
-            self.layout_modal_open = !self.layout_modal_open;
-            ctx.request_redraw();
             return;
         }
         // UI-system dev panel toggle.
@@ -1194,9 +1190,7 @@ impl Marspot {
                 self.sidebar_collapsed = !self.sidebar_collapsed;
                 self.rebuild_layout(ctx);
             }
-            ContextMenuAction::OpenLayout => {
-                self.layout_modal_open = true;
-            }
+            ContextMenuAction::OpenLayout => {}
         }
         ctx.request_redraw();
     }
@@ -1883,7 +1877,6 @@ fn main() {
         selection_dragging: false,
         grid_cols: initial_cols,
         grid_rows: initial_rows,
-        layout_modal_open: false,
         context_menu: None,
         dev_panel: marspot::ui::components::DevPanelState::default(),
         sidebar_collapsed: true,
@@ -2115,7 +2108,6 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
                     .ok().and_then(|v| v.parse().ok()).unwrap_or(6),
                 rows: std::env::var("MARSPOT_SHOT_ROWS")
                     .ok().and_then(|v| v.parse().ok()).unwrap_or(2),
-                hover: Default::default(),
                 slot_titles: {
                     let names = [
                         "marspot", "torajs", "spg", "smix", "devops", "insight",
@@ -2128,7 +2120,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
                             .ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(2);
                     (0..n).map(|i| names[i % names.len()].to_string()).collect()
                 },
-                drag: None,
+                ..Default::default()
             }));
         }
         Some("menu") => {
@@ -2586,7 +2578,6 @@ fn bench_rss_format_dump(arg: &str) {
         selection_dragging: false,
         grid_cols: 3,
         grid_rows: 3,
-        layout_modal_open: false,
         context_menu: None,
         dev_panel: marspot::ui::components::DevPanelState::default(),
         sidebar_collapsed: true,
