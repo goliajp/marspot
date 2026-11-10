@@ -37,6 +37,10 @@
 //!
 //! The names are `panel_snapshot_{settings,layout,process,accounts}`
 //! and the files `{settings,layout,process,accounts}.png`;
+//! `panel_snapshot_accounts_narrow` / `accounts_narrow.png` is the
+//! accounts panel in a window where its cards take two rows, and
+//! `panel_snapshot_accounts_empty` / `accounts_empty.png` the same
+//! panel before any usage has been read;
 //! `panel_snapshot_controls` / `controls.png` is every shared control
 //! in every state, in a panel drawn by the shared chrome.  A check
 //! that fails keeps its render only where `MARSPOT_SNAPSHOT_OUT` names
@@ -48,7 +52,7 @@ use crate::render::SessionView;
 use crate::render_metal::{make_readback_texture, MetalRenderer, WindowRender};
 use crate::snapshot_kit::{assert_snapshot_ssim, snapshot_mode_in, write_snapshot_png, UI_SNAPSHOT_DIR};
 use crate::ui::components::cc_usage_modal::{
-    self, CcUsageAccountRender, CcUsageRender, CcUsageWindowRender,
+    self, CcUsageAccountRender, CcUsageRender, CcUsageWindowRender, Clock,
 };
 use crate::ui::components::controls;
 use crate::ui::components::panel_chrome::{self, PanelChrome};
@@ -272,6 +276,11 @@ fn panel_snapshot_process() {
 /// 2026-11-10 09:00 UTC, so the timeline lands in the same place
 /// every run.
 const ACCOUNTS_NOW: i64 = 1_794_301_200;
+/// The time zone the accounts panel's dates are read in: nine hours
+/// east, where 09:00 UTC is the 18:00 of the "updated" line.  Handed
+/// to the panel rather than taken from the machine, so the day rules
+/// and their dates are the same picture wherever the test runs.
+const ACCOUNTS_UTC_OFFSET: i64 = 9 * 3_600;
 
 /// `(label, utilisation, hours until reset, reset clock time)`.
 type Window = (&'static str, f32, i64, &'static str);
@@ -286,7 +295,7 @@ fn account(
     CcUsageAccountRender {
         name: name.to_string(),
         email: email.to_string(),
-        status_label: if limited { "LIMIT" } else { "OK" }.to_string(),
+        status_label: if limited { "limit" } else { "ok" }.to_string(),
         status_severity: if limited { 2 } else { 0 },
         reset_label: format!("reset: {reset_label}"),
         windows: windows
@@ -302,41 +311,71 @@ fn account(
     }
 }
 
+/// Ten accounts, some at their limit, one with an address too long
+/// for its card.
+fn accounts_panel(renderer: &mut MetalRenderer, layout: &Layout) {
+    let accounts = vec![
+        account("Claude 1", "dev@example.com", true, "11/13 11:59",
+            &[("7d", 1.0, 66, "11:59"), ("fable", 0.91, 66, "11:59")]),
+        account("Claude 2", "admin@example.com", false, "11/16 06:00",
+            &[("7d", 0.35, 132, "06:00"), ("fable", 0.28, 132, "06:00")]),
+        account("Claude 3", "ops@example.com", true, "11/15 13:59",
+            &[("7d", 1.0, 116, "13:59"), ("fable", 0.72, 116, "13:59")]),
+        account("Claude 4", "claude@example.com", true, "11/14 00:00",
+            &[("7d", 1.0, 78, "00:00"), ("fable", 0.82, 78, "00:00")]),
+        account("Claude 5", "lab@example.com", true, "11/12 10:59",
+            &[("7d", 1.0, 41, "10:59"), ("fable", 0.33, 41, "10:59")]),
+        account("Claude 6", "ceo@example.com", true, "11/13 13:59",
+            &[("7d", 1.0, 68, "13:59"), ("fable", 0.94, 68, "13:59")]),
+        account("Claude 7", "research.platform.team@example.com", false, "11/17 13:00",
+            &[("7d", 0.0, 163, "13:00"), ("fable", 0.0, 163, "13:00")]),
+        account("Claude 8", "manage@example.com", true, "11/11 13:59",
+            &[("7d", 1.0, 20, "14:00"), ("fable", 0.47, 20, "13:59")]),
+        account("Codex 1", "dev@example.com", true, "11/12 05:02",
+            &[("astra", 1.0, 35, "05:02")]),
+        account("Codex 2", "ops@example.com", false, "11/16 03:08",
+            &[("astra", 0.64, 129, "03:08")]),
+    ];
+    let (cell_w, cell_h) = renderer.cell_dims();
+    let rect = cc_usage_modal::panel_rect(
+        accounts.len(), 2, layout.window_w, layout.window_h, cell_w, cell_h, layout.top_inset,
+    );
+    renderer.set_cc_usage(Some(CcUsageRender {
+        rect,
+        updated_label: "updated 11/10 18:00".to_string(),
+        accounts,
+        clock: Clock::fixed(ACCOUNTS_NOW, ACCOUNTS_UTC_OFFSET),
+        hover: cc_usage_modal::Hover::None,
+    }));
+}
+
+/// Wide enough for the ten cards to sit in one row.
 #[test]
 fn panel_snapshot_accounts() {
-    snapshot("accounts", 2100, 1100, |renderer, layout| {
-        let accounts = vec![
-            account("Claude 1", "dev@example.com", true, "11/13 11:59",
-                &[("7d", 1.0, 66, "11:59"), ("fable", 0.91, 66, "11:59")]),
-            account("Claude 2", "admin@example.com", false, "11/16 06:00",
-                &[("7d", 0.35, 132, "06:00"), ("fable", 0.28, 132, "06:00")]),
-            account("Claude 3", "ops@example.com", true, "11/15 13:59",
-                &[("7d", 1.0, 116, "13:59"), ("fable", 0.72, 116, "13:59")]),
-            account("Claude 4", "claude@example.com", true, "11/14 00:00",
-                &[("7d", 1.0, 78, "00:00"), ("fable", 0.82, 78, "00:00")]),
-            account("Claude 5", "lab@example.com", true, "11/12 10:59",
-                &[("7d", 1.0, 41, "10:59"), ("fable", 0.33, 41, "10:59")]),
-            account("Claude 6", "ceo@example.com", true, "11/13 13:59",
-                &[("7d", 1.0, 68, "13:59"), ("fable", 0.94, 68, "13:59")]),
-            account("Claude 7", "research@example.com", false, "11/17 13:00",
-                &[("7d", 0.0, 163, "13:00"), ("fable", 0.0, 163, "13:00")]),
-            account("Claude 8", "manage@example.com", true, "11/11 13:59",
-                &[("7d", 1.0, 20, "14:00"), ("fable", 0.47, 20, "13:59")]),
-            account("Codex 1", "dev@example.com", true, "11/12 05:02",
-                &[("astra", 1.0, 35, "05:02")]),
-            account("Codex 2", "ops@example.com", false, "11/16 03:08",
-                &[("astra", 0.64, 129, "03:08")]),
-        ];
+    snapshot("accounts", 2800, 1300, accounts_panel);
+}
+
+/// The same panel where one row would make the cards too narrow: two
+/// rows of five.
+#[test]
+fn panel_snapshot_accounts_narrow() {
+    snapshot("accounts_narrow", 1700, 1500, accounts_panel);
+}
+
+/// Before either feed has been read: the header, the close button
+/// under the pointer, and one sentence.
+#[test]
+fn panel_snapshot_accounts_empty() {
+    snapshot("accounts_empty", 1700, 700, |renderer, layout| {
         let (cell_w, cell_h) = renderer.cell_dims();
-        let rect = cc_usage_modal::panel_rect(
-            accounts.len(), 2, layout.window_w, layout.window_h, cell_w, cell_h, layout.top_inset,
-        );
         renderer.set_cc_usage(Some(CcUsageRender {
-            rect,
-            updated_label: "updated 11/10 18:00".to_string(),
-            accounts,
-            now_unix: ACCOUNTS_NOW,
-            feed_missing: false,
+            rect: cc_usage_modal::panel_rect(
+                0, 0, layout.window_w, layout.window_h, cell_w, cell_h, layout.top_inset,
+            ),
+            updated_label: String::new(),
+            accounts: Vec::new(),
+            clock: Clock::fixed(ACCOUNTS_NOW, ACCOUNTS_UTC_OFFSET),
+            hover: cc_usage_modal::Hover::Close,
         }));
     });
 }
