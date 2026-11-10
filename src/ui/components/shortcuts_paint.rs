@@ -11,6 +11,7 @@ use crate::ui::components::panel_chrome::{self, PanelChrome};
 use crate::ui::components::panel_palette;
 use crate::ui::components::shortcuts_panel::{self as sp, Slot};
 use crate::ui::core::view::ViewPainter;
+use crate::ui::theme::spec;
 use crate::ui::strings::{t, Msg};
 use golia_ui_core::scene::{GlyphInstance, RectInstance as CellInstance, UiRectInstance};
 
@@ -62,12 +63,18 @@ pub(crate) fn push_shortcuts_panel_via_view(
                     t(title),
                     panel_palette::fg(),
                 );
-                for cap in &caps {
-                    if cap.filled {
-                        controls::paint_keycap(p, cap.rect, &cap.label);
-                    } else {
-                        controls::paint_keycap_text(p, cap.rect, &cap.label);
+                // right to left from the last cap's right edge: a cap is
+                // as wide as its glyphs measure, which the layout, sized
+                // in cells, does not know
+                let gap = spec::px(spec::control::KEYCAP_GAP);
+                let mut right = caps.last().map_or(0.0, |c| c.rect.x + c.rect.w);
+                let mut after_filled = false;
+                for cap in caps.iter().rev() {
+                    if after_filled && cap.filled {
+                        right -= gap;
                     }
+                    right = controls::paint_keycap_ending_at(p, right, cap.rect.y_top, cap.rect.h, &cap.label, cap.filled);
+                    after_filled = cap.filled;
                 }
             }
         });
