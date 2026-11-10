@@ -13,11 +13,16 @@
 //! the same thing — a list of named windows — so the panel has one way
 //! to draw a bar rather than one per provider.
 //!
+//! A machine without the devops collector has no such file.  The shell
+//! then collects the same numbers itself and writes them, in the same
+//! schema, under marspot's own state directory; [`read`] and
+//! [`read_codex`] pick whichever of the two is being kept up to date.
+//!
 //! Everything here is read-only and cold-path: the file is touched
 //! only while the modal is open (open + 5 s refresh), never on the
 //! render hot path.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A per-model cap the feed reports alongside the rolling windows.
 ///
@@ -138,11 +143,57 @@ pub fn feed_path() -> PathBuf {
         .join(".local/state/devops/claude-usage.json")
 }
 
+/// Where marspot writes the Claude feed it collects itself.
+pub fn own_feed_path() -> PathBuf {
+    marspot_term::paths::state_root().join("usage/claude-usage.json")
+}
+
+/// Where marspot writes the Codex feed it collects itself.
+pub fn own_codex_feed_path() -> PathBuf {
+    marspot_term::paths::state_root().join("usage/codex-usage.json")
+}
+
+/// How old the devops feed may be and still count as being collected.
+/// The devops collector writes every few minutes; three missed rounds
+/// is a collector that is not running.
+pub const DEVOPS_FRESH_SECS: i64 = 15 * 60;
+
+/// Was this feed body generated less than [`DEVOPS_FRESH_SECS`] ago?
+pub fn feed_is_fresh(body: &str, now: i64) -> bool {
+    str_field(body, "generated_at")
+        .and_then(parse_iso_utc)
+        .is_some_and(|at| now - at < DEVOPS_FRESH_SECS)
+}
+
+/// Is the devops collector keeping the feed at `devops` up to date?
+/// While it is, marspot neither collects nor reads its own.
+pub fn devops_is_collecting(devops: &Path, now: i64) -> bool {
+    std::fs::read_to_string(devops).is_ok_and(|body| feed_is_fresh(&body, now))
+}
+
+/// The feed to believe: the devops one while it is fresh, marspot's
+/// own otherwise.  A stale devops feed is still returned when marspot
+/// has written nothing, which is every sandbox and every test: the
+/// collector does not run there, and an old reading is what the reader
+/// always got.
+pub fn authoritative_body(devops: &Path, own: &Path, now: i64) -> Option<String> {
+    let devops = std::fs::read_to_string(devops).ok();
+    if devops.as_deref().is_some_and(|body| feed_is_fresh(body, now)) {
+        return devops;
+    }
+    std::fs::read_to_string(own).ok().or(devops)
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
 /// Read + parse the feed.  `None` on missing file / parse failure —
 /// the modal shows a "no usage feed" placeholder instead of erroring.
 pub fn read() -> Option<CcUsage> {
-    let body = std::fs::read_to_string(feed_path()).ok()?;
-    parse(&body)
+    parse(&authoritative_body(&feed_path(), &own_feed_path(), now_unix())?)
 }
 
 /// Parse the fixed-schema feed.  Tolerant of field order and
@@ -552,8 +603,7 @@ pub fn codex_feed_path() -> PathBuf {
 
 /// Read + parse the Codex feed. `None` on missing file / parse failure.
 pub fn read_codex() -> Option<CodexUsage> {
-    let body = std::fs::read_to_string(codex_feed_path()).ok()?;
-    parse_codex(&body)
+    parse_codex(&authoritative_body(&codex_feed_path(), &own_codex_feed_path(), now_unix())?)
 }
 
 /// The Codex feed, parsed.
@@ -1154,6 +1204,44 @@ mod tests {
             a.limits_as_of,
             Some(1_785_531_600),
             "its model caps are an hour and a half older than that"
+        );
+    }
+
+    /// The devops feed is believed while it is being written; once it
+    /// stops, or on a machine that never had one, marspot's own is.
+    #[test]
+    fn a_fresh_devops_feed_wins_and_a_stale_or_missing_one_loses() {
+        let dir = crate::test_env::TempDir::new("cc-usage-authority");
+        let (devops, own) = (dir.join("devops.json"), dir.join("own.json"));
+        let feed = |who: &str| {
+            format!(
+                r#"{{"generated_at":"2026-07-19T01:13:59+00:00","accounts":[{{"name":"{who}","email":"a@b"}}]}}"#
+            )
+        };
+        let generated = 1_784_423_639;
+        let name = |now: i64| {
+            let body = authoritative_body(&devops, &own, now)?;
+            Some(parse(&body)?.accounts[0].name.clone())
+        };
+        assert_eq!(name(generated), None, "neither feed exists");
+
+        std::fs::write(&own, feed("own")).unwrap();
+        assert_eq!(name(generated).as_deref(), Some("own"), "a missing devops feed loses");
+        assert!(!devops_is_collecting(&devops, generated));
+
+        std::fs::write(&devops, feed("devops")).unwrap();
+        let last_fresh = generated + DEVOPS_FRESH_SECS - 1;
+        assert_eq!(name(last_fresh).as_deref(), Some("devops"), "a fresh devops feed wins");
+        assert!(devops_is_collecting(&devops, last_fresh));
+        let stale = generated + DEVOPS_FRESH_SECS;
+        assert_eq!(name(stale).as_deref(), Some("own"), "a stale devops feed loses");
+        assert!(!devops_is_collecting(&devops, stale));
+
+        std::fs::remove_file(&own).unwrap();
+        assert_eq!(
+            name(stale).as_deref(),
+            Some("devops"),
+            "with nothing of marspot's own, the old reading is still a reading"
         );
     }
 

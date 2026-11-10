@@ -43,8 +43,7 @@ use transcript::{activity_of, has_conversation, parse_session_id, tail_last_mess
 #[cfg(test)]
 use transcript::{tail_activity, tail_window};
 pub(crate) use profiles::discover_profiles;
-#[cfg(test)]
-use profiles::discover_profiles_in;
+pub(crate) use profiles::{discover_profiles_in, email_in};
 use argv::argv_session_uuid;
 #[cfg(test)]
 use argv::{flag_uuid, is_uuid};

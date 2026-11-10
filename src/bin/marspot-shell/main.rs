@@ -4185,6 +4185,10 @@ impl MarspotApp for ShellApp {
             // Codex panes as messaging peers of Claude Code sessions.
             self.plugin_registry
                 .register(Box::new(plugins::peerbus::PeerbusPlugin::new()));
+            // The account usage feed, when no external collector
+            // writes one.
+            self.plugin_registry
+                .register(Box::new(plugins::usage::UsagePlugin::new()));
             self.plugin_registry.init_all_with(&self.plugin_host);
             self.plugin_registry.start_all_with(&self.plugin_host);
         }
