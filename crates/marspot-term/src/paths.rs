@@ -175,6 +175,18 @@ pub fn path_with_local_bin(path: &str, home: &std::path::Path) -> String {
     }
 }
 
+/// `path` with the directories the agent CLIs are installed into in
+/// front: `<home>/.local/bin`, and `<home>/.kimi-code/bin`, where
+/// kimi's own installer puts it and from where it updates itself.
+pub fn path_with_agent_bins(path: &str, home: &std::path::Path) -> String {
+    let kimi = home.join(".kimi-code/bin");
+    let with_kimi = match kimi.to_str() {
+        Some(k) if !path.split(':').any(|p| p == k) => format!("{k}:{path}"),
+        _ => path.to_string(),
+    };
+    path_with_local_bin(&with_kimi, home)
+}
+
 /// Any marspot process other than this one alive?  Asks the platform
 /// for the pid table and each pid's executable — no fork, no shell.
 /// Conservative: a question the platform cannot answer reads as
@@ -265,6 +277,12 @@ mod tests {
         let has = "/usr/bin:/Users/x/.local/bin";
         assert_eq!(path_with_local_bin(has, home), has);
         // another directory that merely starts the same is not it
+        assert_eq!(
+            path_with_agent_bins(DEFAULT_PATH, home),
+            format!("/Users/x/.local/bin:/Users/x/.kimi-code/bin:{DEFAULT_PATH}")
+        );
+        let both = "/Users/x/.kimi-code/bin:/usr/bin:/Users/x/.local/bin";
+        assert_eq!(path_with_agent_bins(both, home), both);
         let near = "/Users/x/.local/bin2:/usr/bin";
         assert_eq!(path_with_local_bin(near, home), format!("/Users/x/.local/bin:{near}"));
     }
