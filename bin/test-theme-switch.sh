@@ -16,8 +16,8 @@
 #      dark background.
 #   2. dark -> light -> contrast -> dark, each by editing the file: the
 #      shell and the core each log THEME_CHANGED with that theme and
-#      by=setting within 2 s of the write, and the program's next
-#      answers are the new background.
+#      by=setting within 2 s of the write, the session within 4 s, and
+#      the program's next answers are the new background.
 #   3. `system`: the setting is switched to follow the system, and the
 #      system's appearance is changed.  The real appearance of the
 #      machine is not touched: the shell reads a stand-in file instead
@@ -137,14 +137,16 @@ wait_answer() { # theme, seconds
   return 1
 }
 
-# Wait until the shell and the core have each logged THEME_CHANGED for
-# theme $1 chosen by $2, after line $3 of the log; print how long the
-# later of the two took, in milliseconds since $4 (epoch ms).
+# Wait until the shell, the core and the session have each logged
+# THEME_CHANGED for theme $1 chosen by $2, after line $3 of the log;
+# print how long each took, in milliseconds since $4 (epoch ms).  The
+# shell and the core have $5 seconds; the session two more.
 wait_theme() { # theme, by, after_line, since_ms, seconds
   python3 - "$APPLOG" "$1" "$2" "$3" "$4" "$5" <<'PY'
 import sys, time
 path, theme, by, after, since, secs = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5]), float(sys.argv[6])
 deadline = time.time() + secs
+SESSION_GRACE = 2.0
 while True:
     seen = {}
     try:
@@ -158,10 +160,13 @@ while True:
         f = dict(c.split('=', 1) for c in cols[8:] if '=' in c)
         if f.get('theme') == theme and f.get('by') == by:
             seen.setdefault(cols[3], int(cols[1]))
-    if 'shell' in seen and 'core' in seen:
-        print(f"shell {seen['shell'] - since} ms, core {seen['core'] - since} ms")
-        sys.exit(0)
-    if time.time() > deadline:
+    if all(c in seen for c in ('shell', 'core', 'session')):
+        took = {c: seen[c] - since for c in ('shell', 'core', 'session')}
+        print(', '.join(f"{c} {ms} ms" for c, ms in took.items()))
+        # the session is given the grace: it looks once a second, and
+        # only when its loop wakes
+        sys.exit(0 if max(took['shell'], took['core']) <= secs * 1000 else 1)
+    if time.time() > deadline + SESSION_GRACE:
         print(f"only {sorted(seen)} logged it")
         sys.exit(1)
     time.sleep(0.05)
@@ -190,7 +195,7 @@ for theme in light contrast dark; do
   since=$(now_ms)
   set_theme "$theme"
   took="$(wait_theme "$theme" setting "$after" "$since" 2)" \
-    || fail "$theme: not logged by both the shell and the core within 2 s ($took)"
+    || fail "$theme: not logged in time by the shell, the core and the session ($took)"
   wait_answer "$theme" 5 \
     || fail "$theme: the program is still told $(last_answer), not $(bg_of "$theme")"
   echo "==> $theme by the settings file: $took; the program is told $(bg_of "$theme")"
@@ -210,7 +215,7 @@ for theme in light contrast; do
   since=$(now_ms)
   echo "$theme" > "$APPEARANCE"
   took="$(wait_theme "$theme" system "$after" "$since" 3)" \
-    || fail "system -> $theme: not logged by both the shell and the core within 3 s ($took)"
+    || fail "system -> $theme: not logged in time by the shell, the core and the session ($took)"
   wait_answer "$theme" 5 \
     || fail "system -> $theme: the program is still told $(last_answer), not $(bg_of "$theme")"
   echo "==> $theme by the system's appearance (stand-in file): $took; the program is told $(bg_of "$theme")"
