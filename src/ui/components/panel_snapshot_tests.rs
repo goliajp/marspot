@@ -41,6 +41,8 @@
 //! accounts panel in a window where its cards take two rows, and
 //! `panel_snapshot_accounts_empty` / `accounts_empty.png` the same
 //! panel before any usage has been read;
+//! `panel_snapshot_layout_grid` / `layout_grid.png` is the layout
+//! panel at three by three, mid-drag, with a name too long for a card;
 //! `panel_snapshot_controls` / `controls.png` is every shared control
 //! in every state, in a panel drawn by the shared chrome.  A check
 //! that fails keeps its render only where `MARSPOT_SNAPSHOT_OUT` names
@@ -59,7 +61,8 @@ use crate::ui::components::panel_chrome::{self, PanelChrome};
 use crate::ui::core::ViewPainter;
 use crate::ui::theme::spec;
 use marspot_term::layout::Rect;
-use crate::ui::components::layout_modal_paint::LayoutModalRender;
+use crate::ui::components::layout_modal::{self, LayoutModal};
+use crate::ui::components::layout_modal_paint::{LayoutModalDragRender, LayoutModalRender};
 use crate::ui::components::process_panel::{
     self, ProcessPanelPaneRow, ProcessPanelRender, ProcessPanelRow,
 };
@@ -180,9 +183,44 @@ fn panel_snapshot_layout() {
         renderer.set_layout_modal(Some(LayoutModalRender {
             cols: 4,
             rows: 1,
-            scale: crate::ui::chrome_scale(),
             slot_titles: ["smix", "devops", "insight-mono", "alt"].map(String::from).to_vec(),
-            drag: None,
+            ..Default::default()
+        }));
+    });
+}
+
+/// Three by three with a name no card can hold, mid-drag: the cut
+/// label, the hole the dragged card left, the slot it would land in
+/// and the card under the pointer.
+#[test]
+fn panel_snapshot_layout_grid() {
+    snapshot("layout_grid", 1600, 900, |renderer, layout| {
+        let slot_titles = [
+            "smix", "lab38-golialab-experiments-with-a-very-long-directory-name-that-keeps-on-going", "insight-mono",
+            "alt", "devops", "marspot",
+            "torajs", "", "",
+        ]
+        .map(String::from)
+        .to_vec();
+        let modal = {
+            let mut m = controls::font_measure(renderer.font_mut());
+            let label_w = layout_modal::widest_label(&slot_titles, &mut m);
+            LayoutModal::layout(layout.window_w, layout.window_h, layout.top_inset, 3, 3, label_w, &mut m)
+        };
+        // The first card, held by its middle, most of the way onto the
+        // sixth slot.
+        let (from, over) = (modal.cards[0], modal.cards[5]);
+        let grab = (from.w * 0.5, from.h * 0.5);
+        renderer.set_layout_modal(Some(LayoutModalRender {
+            cols: 3,
+            rows: 3,
+            slot_titles,
+            drag: Some(LayoutModalDragRender {
+                from_slot: 0,
+                grab_offset_phys: grab,
+                mouse_phys: (over.x - over.w * 0.2 + grab.0, over.y_top + over.h * 0.4 + grab.1),
+            }),
+            hover: layout_modal::Hover::None,
         }));
     });
 }
