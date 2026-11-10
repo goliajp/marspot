@@ -105,14 +105,12 @@ pub struct Settings {
     /// Let Claude Code tell marspot which model each pane is on, by
     /// registering a status-line hook in Claude Code's own settings.
     ///
-    /// Off, and the reason is whose file it is.  Turning it on edits
-    /// `~/.claude*/settings.json` — somebody else's configuration —
-    /// so it is a thing the user asks for, never a thing installing
-    /// marspot does to them.  Off, the badge still names the model:
-    /// it reads the session transcript and the pane's own startup
-    /// banner.  On, it stops being a turn behind in the cases those
-    /// two are silent about — a `/model` switch on a parked pane, and
-    /// the moment just after a profile cycle.
+    /// On: parking an idle pane and moving one between accounts both
+    /// restart claude, and it is restarted on the model and effort
+    /// this hook reported or not at all.  Without it neither works.
+    /// It edits `~/.claude*/settings.json`, which is the user's file,
+    /// so it is also a switch: off, the hook is taken out again and
+    /// the badge reads the model from the transcript alone.
     ///
     /// A status line the user already wrote is not taken away; it is
     /// chained, and put back when this goes off again.
@@ -196,16 +194,14 @@ impl Settings {
     }
 }
 
-/// `<state>/settings.toml`.
+/// `<state>/settings.toml`, beside everything else marspot keeps.
+///
+/// It used to be spelled out as `~/Library/Caches/marspot`, which on a
+/// machine that has been through the state-root migration is a symlink
+/// to the real root, and on a fresh one is a directory of its own that
+/// the system may purge.
 pub fn path() -> PathBuf {
-    let base: PathBuf = match std::env::var_os("MARSPOT_STATE_DIR") {
-        Some(d) => PathBuf::from(d),
-        None => {
-            let home = std::env::var("HOME").unwrap_or_default();
-            PathBuf::from(home).join("Library/Caches/marspot")
-        }
-    };
-    base.join("settings.toml")
+    crate::paths::state_root().join("settings.toml")
 }
 
 struct Cache {
