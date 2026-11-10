@@ -9,7 +9,7 @@
 //! thread and every tool run, so taking a TUI down loses no work.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -131,7 +131,7 @@ impl Follower {
 /// release removes the CLI's `auto-update-version`, and codex then
 /// reports the CLI as pinned.  The daemon updater follows the same
 /// channel, so the two land on the same release.
-fn install(home: &Path) -> Result<(), String> {
+pub(crate) fn install(home: &Path) -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("marspot-codex-install-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let script = dir.join("install.sh");
@@ -165,16 +165,16 @@ fn install(home: &Path) -> Result<(), String> {
     r
 }
 
-fn path_with_local_bin() -> String {
-    let local = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/bin"));
-    let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into());
-    match local.and_then(|l| l.to_str().map(str::to_string)) {
-        Some(l) if !path.split(':').any(|p| p == l) => format!("{l}:{path}"),
-        _ => path,
+/// This process's PATH with `~/.local/bin` on it, for an installer.
+pub(crate) fn path_with_local_bin() -> String {
+    let path = std::env::var("PATH").unwrap_or_else(|_| marspot_term::paths::DEFAULT_PATH.into());
+    match std::env::var_os("HOME") {
+        Some(h) => marspot_term::paths::path_with_local_bin(&path, Path::new(&h)),
+        None => path,
     }
 }
 
-fn tail(bytes: &[u8]) -> String {
+pub(crate) fn tail(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);
     let lines: Vec<&str> = s.lines().rev().take(3).collect();
     lines.into_iter().rev().collect::<Vec<_>>().join(" | ")

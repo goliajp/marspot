@@ -116,11 +116,21 @@ impl Inbox {
     }
 }
 
-/// The `marspot-peer` binary: `MARSPOT_PEER_BIN`, then `PATH`, then
-/// where `install-local` puts it.
+/// The `marspot-peer` binary: `MARSPOT_PEER_BIN`, then the one the app
+/// bundle ships beside this shell, then `PATH`, then where
+/// `install-local` puts it.
+///
+/// The bundle's first: on a machine that has only the app, nothing
+/// else has put the helper anywhere.  A shell that updated itself runs
+/// from outside the bundle and is told where the bundle is.
 pub(super) fn peer_bin() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("MARSPOT_PEER_BIN") {
         return Some(PathBuf::from(p));
+    }
+    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf));
+    let bundle_dir = std::env::var_os("MARSPOT_BUNDLE_DIR").map(PathBuf::from);
+    if let Some(p) = exe_dir.into_iter().chain(bundle_dir).map(|d| d.join("marspot-peer")).find(|p| p.is_file()) {
+        return Some(p);
     }
     let on_path = std::env::var_os("PATH")
         .into_iter()

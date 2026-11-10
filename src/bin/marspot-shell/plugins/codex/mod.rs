@@ -20,6 +20,7 @@ mod hand_off;
 mod refresh;
 mod rollout;
 mod update;
+pub(crate) use update::{install as install_cli, installed_cli, path_with_local_bin, tail};
 
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata,
             PLUGIN_API_VERSION};

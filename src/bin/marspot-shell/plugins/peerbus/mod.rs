@@ -13,6 +13,7 @@
 
 mod bind;
 mod claude_hooks;
+mod codex_config;
 mod daemon;
 mod deliver;
 mod idle;
@@ -96,6 +97,9 @@ impl Plugin for PeerbusPlugin {
         self.tx = Some(tx);
         self.worker = Some(handle);
         host.log(LogLevel::Info, "start", "worker running");
+        // the other background worker of the agent plugins; it has no
+        // pane state, so it needs no plugin of its own to tick it
+        super::agents::start();
         Ok(())
     }
 

@@ -4,10 +4,11 @@
 //!
 //! Two entries, both ours and nobody else's: before `SendMessage` and
 //! after `ListAgents`.  Every other entry, and the rest of the file, is
-//! left as it was.  The file is edited only when it is in the form
-//! Claude Code itself writes (`JSON.stringify(…, null, 2)`), so the
-//! edit changes nothing but our entries; a hand-formatted file is left
-//! alone and logged.
+//! left as it was, value for value.  The file is written in the form
+//! Claude Code itself writes (`JSON.stringify(…, null, 2)`): one
+//! already in that form changes in nothing but our entries, and a
+//! hand-formatted one is laid out the way Claude Code would lay it out
+//! on its own next save.  A file that does not parse is never written.
 
 use std::path::Path;
 
@@ -18,7 +19,8 @@ impl super::worker::Worker {
     /// Logged when the outcome changes, not on every look: a file left
     /// alone says so again each pass.
     pub(super) fn reconcile_hooks(&mut self) {
-        let notes = reconcile();
+        let mut notes = reconcile();
+        notes.extend(super::codex_config::reconcile());
         if notes == self.hook_notes {
             return;
         }
@@ -56,8 +58,12 @@ pub(super) fn reconcile() -> Vec<String> {
 fn reconcile_file(path: &Path, command: &str) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut v = json::parse(&text).ok()?;
-    if format!("{}\n", pretty(&v)) != text && pretty(&v) != text {
-        return Some("not in the form Claude Code writes; hooks left out".into());
+    // another program's file: `with_hooks` edits objects only
+    let hooks_fit = v.get("hooks").is_none_or(|h| {
+        matches!(h, Value::Obj(_)) && HOOKS.iter().all(|(event, _)| h.get(event).is_none_or(|l| matches!(l, Value::Arr(_))))
+    });
+    if !matches!(v, Value::Obj(_)) || !hooks_fit {
+        return Some("not the shape of Claude Code settings; hooks left out".into());
     }
     if !with_hooks(&mut v, command) {
         return None;
@@ -211,13 +217,36 @@ mod tests {
     }
 
     #[test]
-    fn a_hand_formatted_file_is_left_alone() {
+    fn a_hand_formatted_file_gets_the_hooks_and_keeps_its_values() {
         let d = dir();
         let f = d.join("settings.json");
-        let hand = "{ \"model\": \"opus\" }\n";
+        let hand = "{ \"model\": \"opus\",\n\t\"env\": {\"A\": \"1\", \"n\": [1, 2.5, true, null]},\n \"hooks\": {\"Stop\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"say done\"}]}]} }\n";
         std::fs::write(&f, hand).unwrap();
-        assert!(reconcile_file(&f, "x claude-hook marspot-peer").unwrap().contains("left out"));
-        assert_eq!(std::fs::read_to_string(&f).unwrap(), hand);
+        let before = json::parse(hand).unwrap();
+        assert_eq!(reconcile_file(&f, "'/a/marspot-peer' claude-hook").as_deref(), Some("pane-name hooks installed"));
+        let text = std::fs::read_to_string(&f).unwrap();
+        let after = json::parse(&text).unwrap();
+        for key in ["model", "env"] {
+            assert_eq!(after.get(key), before.get(key), "{key}");
+        }
+        assert_eq!(after.at(&["hooks", "Stop"]), before.at(&["hooks", "Stop"]));
+        assert_eq!(after.at(&["hooks", "PreToolUse"]).unwrap().arr()[0].str_at("matcher"), Some("SendMessage"));
+        assert_eq!(after.at(&["hooks", "PostToolUse"]).unwrap().arr()[0].str_at("matcher"), Some("ListAgents"));
+        // now in Claude Code's own layout, trailing newline kept
+        assert_eq!(text, format!("{}\n", pretty(&after)));
+        assert_eq!(reconcile_file(&f, "'/a/marspot-peer' claude-hook"), None);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_is_not_settings_is_never_written() {
+        let d = dir();
+        let f = d.join("settings.json");
+        for odd in ["{ \"model\": ", "[1, 2]\n", "{\"hooks\": []}", "{\"hooks\": {\"PreToolUse\": {}}}"] {
+            std::fs::write(&f, odd).unwrap();
+            reconcile_file(&f, "'/a/marspot-peer' claude-hook");
+            assert_eq!(std::fs::read_to_string(&f).unwrap(), odd);
+        }
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

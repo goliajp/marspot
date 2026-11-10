@@ -124,6 +124,14 @@ pub struct Settings {
     /// someone ran the installer by hand.  A setting because it fetches
     /// and runs codex's installer unattended, which is the user's call.
     pub codex_follow_updates: bool,
+    /// Install the agent CLIs a pane is expected to have (claude,
+    /// codex, gemini) when they are missing, and keep the ones marspot
+    /// installed current.
+    ///
+    /// On, because a machine that has only marspot on it should need
+    /// nothing typed before an agent runs.  A setting because it
+    /// fetches and runs each vendor's installer unattended.
+    pub agents_install: bool,
     /// Move idle claudecode panes onto the account whose quota runs
     /// out soonest, and panes not on Fable onto accounts whose Fable is
     /// spent.
@@ -177,6 +185,7 @@ impl Default for Settings {
             scroll_factor: 1.0,
             cc_statusline_hook: true,
             codex_follow_updates: true,
+            agents_install: true,
             cc_rebalance: Rebalance::On,
             dev_panel_button: false,
         }
@@ -325,6 +334,7 @@ fn value_of(s: &Settings, key: &str) -> String {
         "input.scroll_factor" => fmt_f32(s.scroll_factor),
         "claudecode.statusline_hook" => s.cc_statusline_hook.to_string(),
         "codex.follow_updates" => s.codex_follow_updates.to_string(),
+        "agents.install" => s.agents_install.to_string(),
         "claudecode.rebalance" => s.cc_rebalance.as_str().to_string(),
         "developer.dev_panel" => s.dev_panel_button.to_string(),
         _ => String::new(),
@@ -366,6 +376,7 @@ pub fn parse(body: &str) -> Settings {
             "codex.follow_updates" => {
                 s.codex_follow_updates = parse_bool(v, s.codex_follow_updates)
             }
+            "agents.install" => s.agents_install = parse_bool(v, s.agents_install),
             "claudecode.rebalance" => s.cc_rebalance = Rebalance::parse(v, s.cc_rebalance),
             "developer.dev_panel" => s.dev_panel_button = parse_bool(v, s.dev_panel_button),
             // Anything else is a key this build does not know.  Left
@@ -508,6 +519,18 @@ mod tests {
         assert!(!off.codex_follow_updates);
         let kept = parse(&render(&off, "codex.follow_updates = false\n"));
         assert!(!kept.codex_follow_updates, "a rewrite keeps it off");
+    }
+
+    /// Installing the agent CLIs is on unless the file says otherwise,
+    /// and saying otherwise survives a rewrite.
+    #[test]
+    fn agents_are_installed_unless_switched_off() {
+        assert!(Settings::default().agents_install);
+        let off = parse("agents.install = false\n");
+        assert!(!off.agents_install);
+        assert_eq!(value_of(&off, "agents.install"), "false");
+        let kept = parse(&render(&off, "agents.install = false\n"));
+        assert!(!kept.agents_install, "a rewrite keeps it off");
     }
 
     /// The three rebalance modes read back as written, a rewrite keeps
