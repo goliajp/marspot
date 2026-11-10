@@ -11,10 +11,12 @@
 //! consumer of that tree, and the shape every other panel is going to
 //! take.
 //!
-//! No budget is asserted yet.  A budget invented before the number is
-//! known is a number about nothing; this establishes the number, and
-//! the ceiling gets set from it.  What *is* asserted is that the meter
-//! works: a control region with a known allocation in it must register,
+//! No budget is asserted for that tree.  A budget invented before the
+//! number is known is a number about nothing; those readings establish
+//! the number.  The arena tree at the end of this file is the one held
+//! to a budget, and its budget is zero.  What is asserted throughout
+//! is that the meter works: a control region with a known allocation
+//! in it must register,
 //! or a silently broken counter would read as "zero allocations" —
 //! which is exactly the answer we want to be true, and therefore the
 //! one we must not be able to fake.
@@ -433,4 +435,195 @@ fn what_building_a_tree_costs() {
          [frame-alloc]   &'static str, 2 modifiers   {two_n:>5} allocs {two_b:>8} B"
     );
     assert!(bare_n > 0, "the bare tree has to have been built");
+}
+
+mod arena {
+    use golia_ui_core::{
+        Action, Edges, FakeMeasure, FontSpec, Ink, Inputs, Length as L, Metrics, Recording,
+        Surface, TextFont, Ui, WidgetId,
+    };
+
+    pub const MEASURE: FakeMeasure = FakeMeasure::new(2.0);
+    const BODY: TextFont = TextFont::Ui(FontSpec { size_q: 32, weight: 400, features: 0 });
+    const MINI: TextFont = TextFont::Ui(FontSpec { size_q: 20, weight: 400, features: 0 });
+
+    pub const ROWS: u32 = 40;
+
+    /// The tree `where_a_frames_allocations_come_from` builds, on the
+    /// arena: a column of rows, each a label, a spacer and a detail,
+    /// padded and framed.  The detail is formatted at build time from
+    /// `salt`, so two builds with different salts are a change of data
+    /// and not the same strings again.
+    pub fn describe(ui: &mut Ui<'_>, rows: u32, salt: u32) {
+        ui.vstack(|ui| {
+            for i in 0..rows {
+                ui.hstack(|ui| {
+                    ui.text(BODY, Ink::Role(0), "label");
+                    ui.spacer();
+                    ui.text_fmt(MINI, Ink::Role(1), format_args!("detail {:02}", (i + salt) % 100));
+                })
+                .padding(Edges::xy(L::Pt(6.0), L::Pt(2.0)))
+                .width(L::Pct(1.0))
+                .height(L::Pt(if i % 7 == 0 { 24.0 } else { 20.0 }))
+                .fill(Ink::Role(2))
+                .fill_hover(Ink::Role(3))
+                .widget(WidgetId(i), Action::new(1, i));
+            }
+        });
+    }
+
+    pub fn inputs(data_rev: u64) -> Inputs {
+        Inputs {
+            data_rev,
+            theme_rev: 1,
+            origin: (0.0, 0.0),
+            avail: (800.0, 2000.0),
+            metrics: Metrics { px_per_pt: 2.0, cell_w: 16.0, cell_h: 32.0, cell_ascent: 24.0 },
+            font_rev: 1,
+            atlas_gen: 1,
+        }
+    }
+
+    /// A surface that has been through enough frames for its buffers
+    /// to have reached the size this tree needs.
+    pub fn warm() -> Surface<Recording> {
+        let mut s = Surface::new(Recording::new());
+        for rev in 1..=3 {
+            s.frame(&inputs(rev), &MEASURE, |ui| describe(ui, ROWS, rev as u32));
+        }
+        s
+    }
+}
+
+/// The decision the arena tree rests on: describing, laying out and
+/// painting a tree again takes nothing from the heap.
+///
+/// The same 40 rows as `where_a_frames_allocations_come_from`, whose
+/// three phases on the previous tree are 201, 402 and 166 allocations.
+/// Each phase is measured on its own, after three warm-up frames, with
+/// different data from the frame before.
+#[test]
+fn arena_tree_rebuild_is_free() {
+    use arena::{MEASURE, ROWS, describe, inputs, warm};
+    use golia_ui_core::{Node, Rect, TextBox};
+
+    let mut s = warm();
+    let before = s.counters();
+
+    let (build_n, build_b, ()) = measured(|| s.describe(|ui| describe(ui, ROWS, 57)));
+    let (layout_n, layout_b, ()) = measured(|| s.lay_out(&inputs(4), &MEASURE));
+    let (paint_n, paint_b, ()) = measured(|| s.paint());
+
+    let after = s.counters();
+    let nodes = s.tree().len();
+    let ops = s.output().ops.len();
+    let node_bytes = std::mem::size_of::<Node>();
+    let layout_bytes = 2 * std::mem::size_of::<Rect>() + std::mem::size_of::<TextBox>();
+
+    // the whole frame through the entry point a panel would call
+    let (frame_n, _, ()) = measured(|| {
+        s.frame(&inputs(5), &MEASURE, |ui| describe(ui, ROWS, 91));
+    });
+    let after_frame = s.counters();
+
+    let mut times: Vec<u128> = (0..30u32)
+        .map(|k| {
+            let t = std::time::Instant::now();
+            s.describe(|ui| describe(ui, ROWS, k));
+            s.lay_out(&inputs(6), &MEASURE);
+            s.paint();
+            t.elapsed().as_nanos()
+        })
+        .collect();
+    times.sort_unstable();
+    let median_us = times[times.len() / 2] as f64 / 1000.0;
+
+    eprintln!(
+        "[frame-alloc] arena tree, {ROWS} rows → {nodes} nodes, {ops} paint ops\n\
+         [frame-alloc]   build  {build_n:>6} allocs {build_b:>8} B\n\
+         [frame-alloc]   layout {layout_n:>6} allocs {layout_b:>8} B\n\
+         [frame-alloc]   paint  {paint_n:>6} allocs {paint_b:>8} B\n\
+         [frame-alloc]   {node_bytes} B a node, {layout_bytes} B of layout a node, \
+         {} B of text; rebuild + layout + paint {median_us:.1} us (median of 30)",
+        s.tree().text_bytes(),
+    );
+
+    // each phase was entered, and did the work of a whole tree
+    assert_eq!(nodes, 1 + ROWS as usize * 4);
+    assert_eq!(ops, ROWS as usize * 3, "a fill and two runs of text a row");
+    assert_eq!(
+        (after.build - before.build, after.layout - before.layout, after.paint - before.paint),
+        (1, 1, 1)
+    );
+
+    assert_eq!((build_n, build_b), (0, 0), "describing a warm tree allocated");
+    assert_eq!((layout_n, layout_b), (0, 0), "laying out a warm tree allocated");
+    assert_eq!((paint_n, paint_b), (0, 0), "painting a warm tree allocated");
+    assert_eq!(frame_n, 0, "a frame with new data allocated");
+    assert_eq!(
+        (after_frame.build, after_frame.layout, after_frame.paint),
+        (after.build + 1, after.layout + 1, after.paint + 1),
+        "and that frame did describe, lay out and paint"
+    );
+
+    // the meter sees this path: a tree twice the size has to grow the
+    // buffers, and that is counted
+    let (grow_n, _, ()) = measured(|| s.describe(|ui| describe(ui, ROWS * 2, 0)));
+    assert!(grow_n > 0, "growing the arena read as free, so the zeros above mean nothing");
+    let (one, _, _) = measured(|| Box::new([0u8; 64]));
+    assert!(one >= 1, "a deliberate allocation was not counted");
+}
+
+/// The frames a surface sees most: nothing changed, the pointer moved
+/// onto another widget, the window was resized.  None allocates, and
+/// each runs only the stages its change made stale.
+#[test]
+fn arena_surface_frames_run_only_what_is_stale_and_allocate_nothing() {
+    use arena::{MEASURE, ROWS, describe, inputs, warm};
+    use golia_ui_core::{Counters, Inputs};
+
+    let mut s = warm();
+    let same = inputs(3);
+    // one pass through each kind of frame first, as a surface in use has had
+    s.pointer_move((10.0, 10.0));
+    s.frame(&same, &MEASURE, |ui| describe(ui, ROWS, 3));
+    s.frame(&Inputs { avail: (700.0, 2000.0), ..same }, &MEASURE, |ui| describe(ui, ROWS, 3));
+    s.frame(&same, &MEASURE, |ui| describe(ui, ROWS, 3));
+    let c0 = s.counters();
+    let kept = s.output().clone();
+
+    let (idle_n, _, ()) = measured(|| {
+        s.frame(&same, &MEASURE, |ui| describe(ui, ROWS, 3));
+    });
+    assert_eq!(idle_n, 0, "an idle frame allocated");
+    assert_eq!(s.counters(), c0, "an idle frame built, laid out or painted");
+    assert_eq!(*s.output(), kept, "an idle frame is the kept output");
+
+    assert!(s.pointer_move((10.0, 100.0)), "the pointer has to have reached another row");
+    let (hover_n, _, ()) = measured(|| {
+        s.frame(&same, &MEASURE, |ui| describe(ui, ROWS, 3));
+    });
+    let c1 = s.counters();
+    assert_eq!(hover_n, 0, "a hover frame allocated");
+    assert_eq!(c1, Counters { paint: c0.paint + 1, ..c0 }, "a hover is a repaint and no more");
+    assert_ne!(*s.output(), kept, "and the picture did change");
+
+    let resized = Inputs { avail: (640.0, 2000.0), ..same };
+    let (size_n, _, ()) = measured(|| {
+        s.frame(&resized, &MEASURE, |ui| describe(ui, ROWS, 3));
+    });
+    let c2 = s.counters();
+    assert_eq!(size_n, 0, "a resize frame allocated");
+    assert_eq!(
+        c2,
+        Counters { layout: c1.layout + 1, paint: c1.paint + 1, ..c1 },
+        "a resize lays out and paints the tree it already has"
+    );
+
+    // the build counter is not stuck: new data moves it
+    s.frame(&Inputs { data_rev: 9, ..resized }, &MEASURE, |ui| describe(ui, ROWS, 9));
+    assert_eq!(s.counters().build, c2.build + 1);
+
+    let (one, _, _) = measured(|| Box::new([0u8; 64]));
+    assert!(one >= 1, "a deliberate allocation was not counted");
 }
