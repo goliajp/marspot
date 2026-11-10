@@ -2,10 +2,11 @@
 //! MCP server: who is live, who a name means, and putting a message
 //! (and optionally an idle subscription) into a peer's inbox.
 //!
-//! The sender is always a Codex session marspot keeps a record for,
-//! found by its thread id.  Without such a record there is no reply
-//! address and nothing is sent: an anonymous message could not be
-//! answered and could not say who it is from.
+//! The sender is always a session marspot keeps a record for: a Codex
+//! session found by its thread id, or a Gemini session found as an
+//! ancestor of the sending process.  Without such a record there is no
+//! reply address and nothing is sent: an anonymous message could not
+//! be answered and could not say who it is from.
 
 use std::io::Write;
 use std::os::unix::net::UnixStream;
@@ -14,7 +15,7 @@ use std::time::Duration;
 use crate::envelope::{self, Header, Mode};
 use crate::frame::{self, Priority};
 use crate::panes::{self, Pane};
-use crate::registry::{self, Entry};
+use crate::registry::{self, Agent, Entry};
 
 /// Longest message body, in characters; the receiver's own cap.
 pub const MAX_BODY: usize = 1_000_000;
@@ -40,6 +41,18 @@ pub fn me_by_thread<'a>(entries: &'a [Entry], thread: &str) -> Result<&'a Entry,
             "this Codex session ({thread}) has no inbox: marspot has not bound it to a pane, so it cannot send or be replied to"
         )),
     }
+}
+
+/// The record marspot keeps for the Gemini session `pid` runs under.
+///
+/// Gemini puts no session id in a tool call, but it starts its MCP
+/// servers itself, so the session is the nearest ancestor that a
+/// Gemini record names.  Only Gemini records count: a Codex call says
+/// which thread it is, and one Codex process can hold several.
+pub fn me_by_ancestor(entries: &[Entry], pid: i32, parent_of: impl Fn(i32) -> Option<i32>) -> Option<&Entry> {
+    let gemini = |e: &&Entry| e.ours && e.agent == Some(Agent::Gemini) && e.socket.is_some();
+    let found = crate::proc::nearest_ancestor(pid, parent_of, |p| entries.iter().filter(gemini).any(|e| e.agent_pid == Some(p)))?;
+    entries.iter().filter(gemini).find(|e| e.agent_pid == Some(found))
 }
 
 /// The inbox `to` means: a `uds:` address, the name of a marspot pane,
@@ -196,7 +209,30 @@ mod tests {
             class: None,
             relay: None,
             owner: None,
+            agent: None,
+            agent_pid: None,
+            spool: None,
         }
+    }
+
+    /// The MCP server gemini started is told which session it sends
+    /// for by where it sits in the process tree.
+    #[test]
+    fn a_gemini_sender_is_the_ancestor_with_a_gemini_record() {
+        let ours = |pid: i32, agent: Agent, agent_pid: i32| Entry {
+            ours: true,
+            agent: Some(agent),
+            agent_pid: Some(agent_pid),
+            ..entry(pid, "x", &[])
+        };
+        // records are keyed by relay pid; the agent's pid is beside it
+        let es = vec![ours(900, Agent::Gemini, 30), ours(901, Agent::Codex, 20), entry(10, "claude", &[])];
+        // 50 (this server) → 40 (gemini worker) → 30 (gemini) → 20 (codex) → 10 (claude)
+        let table = |pid: i32| [(50, 40), (40, 30), (30, 20), (20, 10)].iter().find(|(p, _)| *p == pid).map(|(_, pp)| *pp);
+        assert_eq!(me_by_ancestor(&es, 50, table).map(|e| e.pid), Some(900));
+        assert_eq!(me_by_ancestor(&es, 30, table), None, "under codex and claude only: neither is found this way");
+        let no_inbox = vec![Entry { socket: None, ..ours(900, Agent::Gemini, 30) }];
+        assert_eq!(me_by_ancestor(&no_inbox, 50, table), None);
     }
 
     #[test]

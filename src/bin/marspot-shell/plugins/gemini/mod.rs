@@ -22,6 +22,7 @@
 mod badge;
 mod hand_off;
 mod pane;
+mod peer;
 mod session;
 
 use std::path::{Path, PathBuf};
@@ -35,7 +36,8 @@ use badge::{badge_text, publish_badge};
 use pane::{argv_facts, profile_of, profile_switch_op, root_from, ArgvFacts, PaneGemini};
 use session::{Asker, SessionIndex};
 
-pub(crate) use pane::{config_dir, handoff_homes, launch, profile_dirs};
+pub(crate) use pane::{config_dir, handoff_homes, launch, profile_dirs, profile_dirs_in};
+pub(crate) use peer::{peers, Peer, Peers};
 pub(crate) use session::{by_id as session_by_id, head_id as session_id_of};
 #[cfg(test)]
 pub(crate) use session::fixture;
@@ -255,6 +257,7 @@ impl Plugin for GeminiPlugin {
         let live: Vec<pidtree::ProcId> = seen.iter().map(|s| s.gemini).collect();
         self.sessions.retain(&live);
         self.panes.retain(|sid, _| seen.iter().any(|s| s.sid == *sid));
+        let mut peers = Peers { bound: Vec::new(), all_known: true };
 
         for s in &seen {
             let cfg = config_dir(&s.root);
@@ -275,6 +278,12 @@ impl Plugin for GeminiPlugin {
                     lone,
                 })
             });
+            match (&facts, &s.cwd) {
+                (Some(f), Some(cwd)) => {
+                    peers.bound.push(Peer { sid: s.sid, gemini: s.gemini, session: f.session.clone(), cwd: cwd.clone() });
+                }
+                _ => peers.all_known = false,
+            }
             let profile = profile_of(&s.root);
             let model = s.args.model.as_deref().or_else(|| facts.as_ref().and_then(|f| f.model.as_deref()));
             publish_badge(host, &mut self.last_badge, s.sid, &badge_text(profile, model));
@@ -290,6 +299,7 @@ impl Plugin for GeminiPlugin {
                 },
             );
         }
+        peer::publish(peers);
         // gemini left these panes: clear the badge this plugin set, and
         // only that one — another plugin may own the pane now.
         let gone: Vec<u64> = self.last_badge.keys().copied().filter(|sid| !self.panes.contains_key(sid)).collect();

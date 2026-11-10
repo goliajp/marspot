@@ -21,6 +21,33 @@ pub fn start_secs(pid: i32) -> Option<i64> {
     (n == size).then_some(info.pbi_start_tvsec as i64)
 }
 
+/// The parent of a live pid.
+pub fn ppid(pid: i32) -> Option<i32> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let n = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    (n == size).then_some(info.pbi_ppid as i32)
+}
+
+/// How far up a process tree `nearest_ancestor` climbs.  A shell tool
+/// sits a handful of levels under its agent; the bound only keeps a
+/// table that names a cycle from being walked forever.
+const MAX_CLIMB: usize = 64;
+
+/// The nearest ancestor of `pid` that `known` holds, `pid` itself not
+/// counted.  `parent_of` is the process table; the climb ends at init,
+/// at a pid the table does not have, or after `MAX_CLIMB` levels.
+pub fn nearest_ancestor(pid: i32, parent_of: impl Fn(i32) -> Option<i32>, known: impl Fn(i32) -> bool) -> Option<i32> {
+    let mut at = pid;
+    for _ in 0..MAX_CLIMB {
+        at = parent_of(at).filter(|p| *p > 1)?;
+        if known(at) {
+            return Some(at);
+        }
+    }
+    None
+}
+
 /// The registry's start-time string for a live pid.
 pub fn lstart(pid: i32) -> Option<String> {
     start_secs(pid).map(lstart_utc)
@@ -83,6 +110,35 @@ mod tests {
             .unwrap();
         let ps = String::from_utf8(out.stdout).unwrap();
         assert_eq!(lstart(pid).unwrap(), ps.trim());
+    }
+
+    #[test]
+    fn the_nearest_known_ancestor_is_found() {
+        // 50 (tool) → 40 (gemini worker) → 30 (gemini) → 20 (shell) → 10 → 1
+        let table = |pid: i32| match pid {
+            50 => Some(40),
+            40 => Some(30),
+            30 => Some(20),
+            20 => Some(10),
+            10 => Some(1),
+            // a table that names a cycle
+            70 => Some(71),
+            71 => Some(70),
+            _ => None,
+        };
+        assert_eq!(nearest_ancestor(50, table, |p| p == 30), Some(30));
+        assert_eq!(nearest_ancestor(50, table, |p| p == 30 || p == 10), Some(30), "the nearest one");
+        assert_eq!(nearest_ancestor(50, table, |p| p == 50), None, "the process itself is not its ancestor");
+        assert_eq!(nearest_ancestor(50, table, |p| p == 1), None, "init is nobody's session");
+        assert_eq!(nearest_ancestor(50, table, |p| p == 99), None);
+        assert_eq!(nearest_ancestor(60, table, |_| true), None, "a pid the table does not have");
+        assert_eq!(nearest_ancestor(70, table, |p| p == 99), None, "a cycle ends");
+    }
+
+    #[test]
+    fn the_parent_of_this_process_is_what_the_system_says() {
+        let me = std::process::id() as i32;
+        assert_eq!(ppid(me), Some(std::os::unix::process::parent_id() as i32));
     }
 
     #[test]

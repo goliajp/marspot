@@ -2,9 +2,9 @@
 //! one record per live session, read by every session to list its
 //! peers and find their inbox sockets.
 //!
-//! marspot writes records here for Codex sessions, keyed by the Codex
-//! process's pid, so Claude sessions list them and message them like
-//! any peer.  Those records carry `entrypoint = MARKER`; that marker is
+//! marspot writes records here for Codex and Gemini sessions, keyed by
+//! the pid of each session's relay, so Claude sessions list them and
+//! message them like any peer.  Those records carry `entrypoint = MARKER`; that marker is
 //! the only thing that makes a record ours, and only ours are ever
 //! rewritten or removed.
 //!
@@ -24,13 +24,16 @@ use crate::json::{self, Value, obj};
 use crate::proc;
 
 pub const MARKER: &str = "marspot-codex";
-/// Our own field: the Codex session's permission class, which the
-/// sender CLI reads back to fill `from-mode`.  Claude Code ignores it.
+/// Our own field: the session's permission class, which the sender
+/// CLI reads back to fill `from-mode`.  Claude Code ignores it.
 const CLASS_KEY: &str = "marspotPermissionClass";
-/// Our own fields: the Codex process the record stands for (the
-/// record's `pid` is its relay), and the relay's send socket.
-const CODEX_PID_KEY: &str = "marspotCodexPid";
+/// Our own fields: which agent the record stands for and its process
+/// (the record's `pid` is its relay), and the relay's send socket.
+const AGENT_KEY: &str = "marspotAgent";
+const AGENT_PID_KEY: &str = "marspotAgentPid";
 const RELAY_KEY: &str = "marspotRelay";
+/// Our own field: the file a Gemini session's mail waits in (`spool`).
+const SPOOL_KEY: &str = "marspotSpool";
 /// Our own field: which marspot wrote the record (its state root).  A
 /// restarting marspot clears its own leftovers and nobody else's — a
 /// sandbox instance and the installed app share this directory.
@@ -41,14 +44,53 @@ pub enum Status {
     Idle,
     Busy,
     Waiting,
+    /// Nothing reports it, and the record then carries no status at
+    /// all: a guess would read to a sender as the session's own word.
+    Unknown,
 }
 
 impl Status {
+    fn as_str(self) -> Option<&'static str> {
+        match self {
+            Status::Idle => Some("idle"),
+            Status::Busy => Some("busy"),
+            Status::Waiting => Some("waiting"),
+            Status::Unknown => None,
+        }
+    }
+}
+
+/// Which agent a record of ours stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Agent {
+    Codex,
+    Gemini,
+}
+
+impl Agent {
     fn as_str(self) -> &'static str {
         match self {
-            Status::Idle => "idle",
-            Status::Busy => "busy",
-            Status::Waiting => "waiting",
+            Agent::Codex => "codex",
+            Agent::Gemini => "gemini",
+        }
+    }
+
+    /// The agent's name as a listing prints it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Agent::Codex => "Codex",
+            Agent::Gemini => "Gemini",
+        }
+    }
+
+    /// What a session of this agent supports beyond plain messages.
+    /// Nothing tells marspot when a Gemini session goes idle, so it
+    /// does not offer the notice: a sender is told that nothing was
+    /// subscribed instead of waiting for a notice that cannot come.
+    pub fn features(self) -> &'static [&'static str] {
+        match self {
+            Agent::Codex => FEATURES,
+            Agent::Gemini => &[],
         }
     }
 }
@@ -88,21 +130,23 @@ pub fn push_former(list: &mut Vec<FormerName>, old: FormerName, current: &str) {
     list.truncate(MAX_FORMER_NAMES);
 }
 
-/// A record marspot writes for one Codex session.
+/// A record marspot writes for one Codex or Gemini session.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Record {
     /// The session's relay process (`relay`), which serves its inbox.
     pub pid: i32,
-    pub codex_pid: i32,
+    pub agent: Agent,
+    /// The agent's own process; for Gemini the one nearest the shell.
+    pub agent_pid: i32,
     /// The relay's send socket.
     pub relay: String,
-    /// The Codex thread id.
+    /// The Codex thread id, or the Gemini session id.
     pub session_id: String,
     pub cwd: String,
     pub started_at_ms: i64,
     /// `proc::lstart` of `pid`.
     pub proc_start: String,
-    /// The Codex version.
+    /// The agent's version, empty when it is not known.
     pub version: String,
     pub name: String,
     pub name_since_ms: i64,
@@ -112,11 +156,13 @@ pub struct Record {
     pub status: Status,
     pub class: Mode,
     pub owner: String,
+    /// Where a Gemini session's mail waits for its next turn.
+    pub spool: Option<String>,
 }
 
 impl Record {
     pub fn to_json(&self, now_ms: i64) -> String {
-        obj([
+        let mut v = obj([
             ("pid", Value::from(i64::from(self.pid))),
             ("sessionId", Value::from(self.session_id.as_str())),
             ("cwd", Value::from(self.cwd.as_str())),
@@ -124,7 +170,7 @@ impl Record {
             ("procStart", Value::from(self.proc_start.as_str())),
             ("version", Value::from(self.version.as_str())),
             ("peerProtocol", Value::from(1)),
-            ("peerFeatures", Value::Arr(FEATURES.iter().map(|f| Value::from(*f)).collect())),
+            ("peerFeatures", Value::Arr(self.agent.features().iter().map(|f| Value::from(*f)).collect())),
             ("kind", Value::from("interactive")),
             ("entrypoint", Value::from(MARKER)),
             ("pidDomain", Value::from("darwin")),
@@ -133,15 +179,21 @@ impl Record {
             ("nameSource", Value::from("peer")),
             ("nameSince", Value::from(self.name_since_ms)),
             ("formerNames", Value::Arr(self.former_names.iter().map(FormerName::to_value).collect())),
-            ("status", Value::from(self.status.as_str())),
             ("updatedAt", Value::from(now_ms)),
-            ("statusUpdatedAt", Value::from(now_ms)),
             (CLASS_KEY, Value::from(self.class.as_str())),
-            (CODEX_PID_KEY, Value::from(i64::from(self.codex_pid))),
+            (AGENT_KEY, Value::from(self.agent.as_str())),
+            (AGENT_PID_KEY, Value::from(i64::from(self.agent_pid))),
             (RELAY_KEY, Value::from(self.relay.as_str())),
             (OWNER_KEY, Value::from(self.owner.as_str())),
-        ])
-        .to_json()
+        ]);
+        if let Some(status) = self.status.as_str() {
+            v.set("status", Value::from(status));
+            v.set("statusUpdatedAt", Value::from(now_ms));
+        }
+        if let Some(spool) = &self.spool {
+            v.set(SPOOL_KEY, Value::from(spool.as_str()));
+        }
+        v.to_json()
     }
 }
 
@@ -164,6 +216,10 @@ pub struct Entry {
     /// The relay's send socket, for a record of ours.
     pub relay: Option<String>,
     pub owner: Option<String>,
+    /// For a record of ours: the agent, its process, its mail file.
+    pub agent: Option<Agent>,
+    pub agent_pid: Option<i32>,
+    pub spool: Option<String>,
 }
 
 impl Entry {
@@ -311,6 +367,7 @@ pub fn default_dirs() -> Vec<PathBuf> {
 fn read_entry(path: &Path, pid: i32) -> Option<Entry> {
     let text = fs::read_to_string(path).ok()?;
     let v = json::parse(&text).ok()?;
+    let ours = v.str_at("entrypoint") == Some(MARKER);
     let s = |k: &str| v.str_at(k).map(str::to_string);
     let strs = |k: &str, field: Option<&str>| -> Vec<String> {
         v.get(k)
@@ -334,10 +391,14 @@ fn read_entry(path: &Path, pid: i32) -> Option<Entry> {
         proc_start: s("procStart"),
         started_at_ms: v.get("startedAt").and_then(Value::i64),
         features: strs("peerFeatures", None),
-        ours: v.str_at("entrypoint") == Some(MARKER),
+        ours,
         class: v.str_at(CLASS_KEY).and_then(Mode::parse),
         relay: s(RELAY_KEY),
         owner: s(OWNER_KEY),
+        // a record written before the field existed is a Codex one
+        agent: ours.then(|| if v.str_at(AGENT_KEY) == Some("gemini") { Agent::Gemini } else { Agent::Codex }),
+        agent_pid: v.get(AGENT_PID_KEY).and_then(Value::i64).and_then(|p| i32::try_from(p).ok()),
+        spool: s(SPOOL_KEY),
     })
 }
 
@@ -354,7 +415,8 @@ mod tests {
     fn record(pid: i32) -> Record {
         Record {
             pid,
-            codex_pid: pid,
+            agent: Agent::Codex,
+            agent_pid: pid,
             relay: "/tmp/r.sock".into(),
             session_id: "01a16103-3f4c-7883-b4ee-2a471b88dda9".into(),
             cwd: "/tmp/x".into(),
@@ -368,6 +430,7 @@ mod tests {
             status: Status::Idle,
             class: Mode::Bypass,
             owner: "/tmp/owner-a".into(),
+            spool: None,
         }
     }
 
@@ -385,6 +448,32 @@ mod tests {
         assert_eq!(e.socket.as_deref(), Some(format!("/tmp/cc-socks/{me}-0a1b2c3d.sock").as_str()));
         assert!(remove_ours(&dir, me).unwrap());
         assert!(read_all(&dir).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A Gemini record says what marspot knows and no more: no status,
+    /// no idle notices, and where its mail waits.
+    #[test]
+    fn a_gemini_record_claims_no_status_and_no_idle_notice() {
+        let dir = tmpdir("gemini");
+        let me = std::process::id() as i32;
+        let mut r = record(me);
+        write(&dir, &r, 2).unwrap();
+        let e = &list_live(&dir)[0];
+        assert_eq!((e.agent, e.agent_pid, e.status.as_deref()), (Some(Agent::Codex), Some(me), Some("idle")));
+        assert!(e.supports("notify_idle"));
+        r.agent = Agent::Gemini;
+        r.agent_pid = 4242;
+        r.status = Status::Unknown;
+        r.spool = Some("/tmp/spool/s1.jsonl".into());
+        write(&dir, &r, 2).unwrap();
+        let v = json::parse(&fs::read_to_string(record_path(&dir, me)).unwrap()).unwrap();
+        assert!(v.get("status").is_none() && v.get("statusUpdatedAt").is_none());
+        assert!(v.get("peerFeatures").unwrap().arr().is_empty());
+        let e = &list_live(&dir)[0];
+        assert!(e.ours && !e.supports("notify_idle"));
+        assert_eq!((e.agent, e.agent_pid, e.status.as_deref()), (Some(Agent::Gemini), Some(4242), None));
+        assert_eq!(e.spool.as_deref(), Some("/tmp/spool/s1.jsonl"));
         fs::remove_dir_all(&dir).unwrap();
     }
 

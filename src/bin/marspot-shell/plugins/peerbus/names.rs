@@ -1,10 +1,11 @@
 //! Every agent session in a marspot pane is addressed by that pane's
 //! name -- the one drawn on the pane (`spg`, `spg#2`) -- whether it is
-//! a Codex session or a Claude one.  The names live in a table marspot
-//! writes (`marspot_peer::panes`), read by the Codex MCP tools and the
-//! Claude Code hooks; no session's own record is renamed.  The Codex
-//! records are marspot's own, so they carry the pane's name too, and
-//! the name a Codex session had stays among its former names.
+//! a Codex session, a Gemini session or a Claude one.  The names live
+//! in a table marspot writes (`marspot_peer::panes`), read by the MCP
+//! tools and the Claude Code hooks; no session's own record is renamed.
+//! The Codex and Gemini records are marspot's own, so they carry the
+//! pane's name too, and the name such a session had stays among its
+//! former names.
 //!
 //! A pane running two agents (one started inside the other) would give
 //! both the same name, so such a pane is left out of the table.
@@ -68,8 +69,8 @@ impl Worker {
             }
         }
         let pids: Vec<i32> = claude.iter().map(|(p, _)| *p).collect();
-        let codex: Vec<u64> = self.bindings.keys().copied().collect();
-        let (named, crowded) = plan(&pids, &codex, |pid| look.pane_of(pid));
+        let ours: Vec<u64> = self.bindings.keys().chain(self.gemini.keys()).copied().collect();
+        let (named, crowded) = plan(&pids, &ours, |pid| look.pane_of(pid));
         for sid in &crowded {
             if self.crowded.insert(*sid) {
                 lx_info!("peerbus.names.crowded", "a pane runs two agents; it is left out of the names", sid = *sid);
@@ -85,21 +86,23 @@ impl Worker {
             };
             table.push(Pane { name: name.clone(), pid, socket: socket.clone() });
         }
-        for (sid, b) in self.bindings.iter_mut() {
+        let codex = self.bindings.iter_mut().map(|(sid, b)| (sid, &mut b.record));
+        let gemini = self.gemini.iter_mut().map(|(sid, g)| (sid, &mut g.record));
+        for (sid, record) in codex.chain(gemini) {
             if crowded.contains(sid) {
                 continue;
             }
             let Some(want) = look.names.get(sid) else { continue };
-            table.push(Pane { name: want.clone(), pid: b.record.pid, socket: b.record.socket.clone() });
-            if b.record.name == *want {
+            table.push(Pane { name: want.clone(), pid: record.pid, socket: record.socket.clone() });
+            if record.name == *want {
                 continue;
             }
-            let old = FormerName { name: b.record.name.clone(), until_ms: now, session_id: b.thread.clone() };
-            registry::push_former(&mut b.record.former_names, old, want);
-            lx_info!("peerbus.names.codex", "codex session renamed after its pane", sid = *sid, old = b.record.name.clone(), new = want.clone());
-            b.record.name = want.clone();
-            b.record.name_since_ms = now;
-            write_record(&dirs, &b.record);
+            let old = FormerName { name: record.name.clone(), until_ms: now, session_id: record.session_id.clone() };
+            registry::push_former(&mut record.former_names, old, want);
+            lx_info!("peerbus.names.codex", "session renamed after its pane", sid = *sid, old = record.name.clone(), new = want.clone());
+            record.name = want.clone();
+            record.name_since_ms = now;
+            write_record(&dirs, record);
         }
         table.sort_by(|a, b| (&a.name, a.pid).cmp(&(&b.name, b.pid)));
         if table != self.pane_table {
