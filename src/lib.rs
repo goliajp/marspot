@@ -108,6 +108,8 @@ pub mod pane_name;
 pub mod pane_read;
 pub mod pane_state;
 pub mod selection_tape;
+#[cfg(test)]
+mod snapshot_kit;
 pub mod wheel_marker;
 pub mod pidtree;
 /// PNG writer for `--snapshot`; see the `snapshot` feature in
