@@ -20,7 +20,7 @@ mod session;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use marspot::pane_state::Activity;
 use marspot_peer::envelope::Mode;
@@ -32,7 +32,7 @@ use crate::plugins::{handoff, pidtree, pty_op};
 
 use badge::{badge_text, publish_badge};
 use pane::{home_from, profile_of};
-use session::{Facts, SessionIndex, ENV_ALIAS};
+use session::{Asker, Facts, SessionIndex, ENV_ALIAS};
 
 pub(crate) use pane::{default_home, handoff_homes, launch, profile_dirs_in};
 pub(crate) use peer::{peers, Peer, Peers};
@@ -178,7 +178,7 @@ impl KimiPlugin {
         }
     }
 
-    fn see(&mut self, host: &dyn PluginHost, s: &crate::observe::Session, user_home: &Path) -> Option<u64> {
+    fn see(&mut self, host: &dyn PluginHost, s: &crate::observe::Session, user_home: &Path, crowded: &[(PathBuf, String)]) -> Option<u64> {
         if s.entry.shell_child_pid <= 0 {
             return None;
         }
@@ -186,7 +186,10 @@ impl KimiPlugin {
         let (sid, proc) = (s.entry.id, kimi.row.id());
         let home = home_from(self.env.value(&kimi.row, "KIMI_CODE_HOME"), user_home);
         let env_model = self.env.value(&kimi.row, "KIMI_MODEL_NAME").filter(|m| config::plain(m));
-        let (session, facts) = match self.sessions.look(proc, &home) {
+        let cwd = pidtree::proc_cwd(proc.pid).map(|c| c.to_string_lossy().into_owned());
+        let lone = cwd.as_ref().is_some_and(|c| crowded.iter().filter(|(h, d)| *h == home && d == c).count() == 1);
+        let started = SystemTime::UNIX_EPOCH + Duration::from_micros(kimi.row.start_us);
+        let (session, facts) = match self.sessions.look(&Asker { proc, started, home: &home, cwd: cwd.as_deref(), lone }) {
             Some((id, facts)) => (Some(id), facts),
             None => (None, None),
         };
@@ -200,7 +203,6 @@ impl KimiPlugin {
         let profile = profile_of(&home);
         let text = badge_text(profile, shown.model.as_deref(), shown.thinking.as_deref());
         publish_badge(host, &mut self.last_badge, sid, &text);
-        let cwd = pidtree::proc_cwd(proc.pid).map(|c| c.to_string_lossy().into_owned());
         let now = PaneKimi { proc, shell_pid: s.entry.shell_child_pid, home, profile, cwd, session, facts, shown };
         if self.panes.get(&sid) != Some(&now) {
             host.log(LogLevel::Info, "pane", &format!("sid={sid} pid={} {}", proc.pid, describe(&now)));
@@ -331,7 +333,17 @@ impl Plugin for KimiPlugin {
         let obs = crate::observe::shared().latest();
         self.env.prune(&obs);
         let Some(user_home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
-        let seen: Vec<u64> = obs.sessions.iter().filter_map(|s| self.see(host, s, &user_home)).collect();
+        // every kimi's home and directory, to tell the ones that share both
+        let mut crowded: Vec<(PathBuf, String)> = Vec::new();
+        for s in &obs.sessions {
+            if let Some(kimi) = agent_in(&s.descendants)
+                && let Some(cwd) = pidtree::proc_cwd(kimi.row.pid)
+            {
+                let home = home_from(self.env.value(&kimi.row, "KIMI_CODE_HOME"), &user_home);
+                crowded.push((home, cwd.to_string_lossy().into_owned()));
+            }
+        }
+        let seen: Vec<u64> = obs.sessions.iter().filter_map(|s| self.see(host, s, &user_home, &crowded)).collect();
         self.sessions.retain(|id| obs.has(id));
         self.before.retain(|id, _| obs.has(*id));
         self.panes.retain(|sid, _| seen.contains(sid));

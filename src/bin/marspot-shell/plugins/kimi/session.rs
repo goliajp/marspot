@@ -1,14 +1,18 @@
 //! Which session a kimi process has open, and what its record says.
 //!
-//! kimi holds `<home>/locks/sessions/<session id>.lock` for as long as
-//! it has a session open; the file names its pid.  That is the binding:
-//! no guess about which process wrote the newest file.  A session
-//! exists only once its first prompt was submitted, so a kimi that has
-//! just started has none.
+//! Two things say which session is a process's.  While a turn runs,
+//! kimi holds `<home>/locks/sessions/<session id>.lock`, and the file
+//! names its pid: that is certain, but it is there only for the length
+//! of the turn.  Between turns the session is the one in the
+//! process's directory that was written since the process started,
+//! which `<home>/session_index.jsonl` answers: it lists every session
+//! with the directory it was opened in.  That second answer is taken
+//! only for a kimi that shares its home and directory with no other.
+//! A session exists only once its first prompt was submitted, so a
+//! kimi that has just started has none.
 //!
-//! `<home>/session_index.jsonl` says where each session's directory
-//! is, and `agents/main/wire.jsonl` in it is the record: one JSON
-//! object per line, read here from its tail only.
+//! `agents/main/wire.jsonl` in the session's directory is the record:
+//! one JSON object per line, read here from its tail only.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -73,24 +77,50 @@ fn plain(name: &str) -> bool {
     !name.is_empty() && name.len() <= 255 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// The directory of session `id` under `home`.
+/// The directory an index line gives its session, with the session's
+/// id.
 ///
 /// The index records an absolute path; only its last two components
 /// are taken from it and joined under this home, so what a file
 /// another program writes can name is a directory inside
 /// `<home>/sessions` and nothing else.
+fn indexed(home: &Path, line: &Value) -> Option<(String, PathBuf)> {
+    let id = line.str_at("sessionId").filter(|id| is_session_id(id))?;
+    let recorded = Path::new(line.str_at("sessionDir")?);
+    let session = recorded.file_name()?.to_str()?;
+    let workspace = recorded.parent()?.file_name()?.to_str()?;
+    (session == id && plain(workspace)).then(|| (id.to_string(), home.join("sessions").join(workspace).join(session)))
+}
+
+/// The directory of session `id` under `home`.
 pub(crate) fn session_dir(home: &Path, id: &str) -> Option<PathBuf> {
     let index = tail(&home.join("session_index.jsonl"), INDEX_BYTES)?;
     let needle = format!("\"{id}\"");
     let line = index.lines().rev().find(|l| l.contains(&needle))?;
-    let v = json::parse(line).ok()?;
-    if v.str_at("sessionId") != Some(id) {
-        return None;
-    }
-    let recorded = Path::new(v.str_at("sessionDir")?);
-    let session = recorded.file_name()?.to_str()?;
-    let workspace = recorded.parent()?.file_name()?.to_str()?;
-    (session == id && plain(workspace)).then(|| home.join("sessions").join(workspace).join(session))
+    indexed(home, &json::parse(line).ok()?).filter(|(found, _)| found == id).map(|(_, dir)| dir)
+}
+
+/// How far a record's last write may trail the start of the process
+/// that wrote it: the two clocks are not read at the same instant.
+const START_SLACK: Duration = Duration::from_secs(2);
+
+/// The session opened in `cwd` whose record was written last, among
+/// those written since `started`.
+fn newest_in(home: &Path, cwd: &str, started: SystemTime) -> Option<String> {
+    let index = tail(&home.join("session_index.jsonl"), INDEX_BYTES)?;
+    let real = std::fs::canonicalize(cwd).ok();
+    let here = |dir: &str| dir == cwd || real.as_deref().is_some_and(|r| Path::new(dir) == r);
+    index
+        .lines()
+        .filter_map(|l| json::parse(l).ok())
+        .filter(|v| v.str_at("workDir").is_some_and(here))
+        .filter_map(|v| indexed(home, &v))
+        .filter_map(|(id, dir)| {
+            let written = std::fs::metadata(dir.join("agents/main/wire.jsonl")).and_then(|m| m.modified()).ok()?;
+            (written + START_SLACK >= started).then_some((written, id))
+        })
+        .max_by_key(|(written, _)| *written)
+        .map(|(_, id)| id)
 }
 
 /// The main agent's record of session `id` under `home`, if it exists.
@@ -231,6 +261,17 @@ pub(super) fn facts_in(text: &str) -> Option<Facts> {
     Some(Facts { model: setting.model(), alias: setting.alias, thinking: setting.thinking, status, class, failure })
 }
 
+/// A kimi process asking for its session.
+pub(super) struct Asker<'a> {
+    pub proc: ProcId,
+    pub started: SystemTime,
+    pub home: &'a Path,
+    pub cwd: Option<&'a str>,
+    /// No other kimi shares this home and directory.  When one does,
+    /// the newest session there could be either one's.
+    pub lone: bool,
+}
+
 struct Bound {
     id: String,
     wire: PathBuf,
@@ -251,31 +292,31 @@ pub(super) struct SessionIndex {
 }
 
 impl SessionIndex {
-    /// How often a process's lock is looked for again.  Not only while
-    /// it has none: `/new` opens another session under the same
-    /// process.
-    const SEARCH_EVERY: Duration = Duration::from_secs(6);
+    /// How often a process's session is looked for again.  Not only
+    /// while it has none: `/new` opens another session under the same
+    /// process.  Short, because a lock is there only while a turn runs.
+    const SEARCH_EVERY: Duration = Duration::from_secs(2);
 
     pub(super) fn retain(&mut self, live: impl Fn(ProcId) -> bool) {
         self.bound.retain(|id, _| live(*id));
         self.searched_at.retain(|id, _| live(*id));
     }
 
-    /// The session `proc` has open under `home` and its facts; None
-    /// while it has none.
-    pub(super) fn look(&mut self, proc: ProcId, home: &Path) -> Option<(String, Option<Facts>)> {
+    /// The session `who` has open and its facts; None while it has
+    /// none, or while it cannot be told which is its own.
+    pub(super) fn look(&mut self, who: &Asker) -> Option<(String, Option<Facts>)> {
+        let proc = who.proc;
         if self.searched_at.get(&proc).is_none_or(|t| t.elapsed() >= Self::SEARCH_EVERY) {
             self.searched_at.insert(proc, Instant::now());
-            let found = session_of_pid(home, proc.pid).and_then(|id| Some((wire_of(home, &id)?, id)));
-            match found {
-                Some((wire, id)) => {
-                    if self.bound.get(&proc).is_none_or(|b| b.id != id) {
-                        self.bound.insert(proc, Bound { id, wire, read_at: None, facts: None });
-                    }
-                }
-                None => {
-                    self.bound.remove(&proc);
-                }
+            // the lock is certain; without one a lone kimi's session is
+            // the newest in its directory, and one that is not alone
+            // keeps what a lock last said
+            let id = session_of_pid(who.home, proc.pid)
+                .or_else(|| who.cwd.filter(|_| who.lone).and_then(|cwd| newest_in(who.home, cwd, who.started)));
+            if let Some((wire, id)) = id.and_then(|id| Some((wire_of(who.home, &id)?, id)))
+                && self.bound.get(&proc).is_none_or(|b| b.id != id)
+            {
+                self.bound.insert(proc, Bound { id, wire, read_at: None, facts: None });
             }
         }
         let bound = self.bound.get_mut(&proc)?;
@@ -386,19 +427,20 @@ mod tests {
         assert_eq!(facts_in(&answered).unwrap().status, Status::Busy);
     }
 
+    /// The record a 2.5.3 build wrote when the model server answered
+    /// 429 with `exceeded_current_quota_error`.  The code is the one
+    /// every provider error carries; the name is what says quota.
     #[test]
     fn a_failed_turn_names_its_error() {
-        let failed = r#"{"type":"turn.ended","agentId":"main","turnId":3,"reason":"failed","error":{"code":"provider.quota_exhausted","message":"x","retryable":false},"durationMs":10,"time":1}"#;
+        let failed = r#"{"type":"turn.ended","agentId":"main","turnId":1,"reason":"failed","error":{"code":"provider.api_error","message":"You have exceeded your current quota.","name":"APIProviderQuotaExhaustedError","details":{"statusCode":429,"requestId":null,"traceId":null,"diagnostics":{}},"retryable":false},"durationMs":35,"time":1794354224601}"#;
         let f = facts_in(&format!("{TOOL_CALL}{failed}\n")).unwrap();
         assert_eq!(f.status, Status::Idle);
-        assert_eq!(f.failure, Some(Failure { code: "provider.quota_exhausted".into(), name: None, turn: 3 }));
-        let next = format!("{TOOL_CALL}{failed}\n{}\n", r#"{"type":"turn.prompt","agentId":"main","input":[],"origin":{"kind":"user"},"turnId":4,"time":2}"#);
+        let quota = Failure { code: "provider.api_error".into(), name: Some("APIProviderQuotaExhaustedError".into()), turn: 1 };
+        assert_eq!(f.failure, Some(quota));
+        let next = format!("{TOOL_CALL}{failed}\n{}\n", r#"{"type":"turn.prompt","agentId":"main","input":[],"origin":{"kind":"user"},"turnId":2,"time":2}"#);
         assert_eq!(facts_in(&next).unwrap().failure, None, "the next turn is not the one that failed");
     }
 
-    /// The records kimi writes when a session is bound and when the
-    /// user changes its model or its effort, by the fields its record
-    /// manifest gives them.
     #[test]
     fn a_change_of_model_or_effort_shows_before_the_next_request() {
         let bind = r#"{"type":"profile.bind","agentId":"main","modelAlias":"kimi-code/k3","profileName":"agent","thinkingEffort":"high","systemPrompt":"…","disallowedTools":[],"time":1}"#;
@@ -460,18 +502,46 @@ mod tests {
         assert_eq!(session_dir(&home, "session_d"), Some(home.join("sessions/wd_d_1/session_d")));
     }
 
+    fn asker<'a>(home: &'a Path, cwd: Option<&'a str>, lone: bool) -> Asker<'a> {
+        Asker { proc: ProcId { pid: 4242, start_us: 1 }, started: SystemTime::now() - Duration::from_secs(1), home, cwd, lone }
+    }
+
     #[test]
     fn the_index_follows_the_lock_and_keeps_only_live_processes() {
         let home = tmp("kimi-look");
-        let proc = ProcId { pid: 4242, start_us: 1 };
         let mut idx = SessionIndex::default();
-        assert_eq!(idx.look(proc, &home), None, "no session before the first prompt");
+        assert_eq!(idx.look(&asker(&home, Some("/w/a"), true)), None, "no session before the first prompt");
         session(&home, ID, CANCELLED_THEN_COMPLETED, Some(4242));
         let mut idx = SessionIndex::default();
-        let (id, facts) = idx.look(proc, &home).expect("bound");
+        let (id, facts) = idx.look(&asker(&home, None, false)).expect("bound by the lock alone");
         assert_eq!(id, ID);
         assert_eq!(facts.unwrap().status, Status::Idle);
+        // the turn ends and the lock goes; the session stays the process's
+        std::fs::remove_file(home.join("locks/sessions").join(format!("{ID}.lock"))).unwrap();
+        idx.searched_at.clear();
+        assert_eq!(idx.look(&asker(&home, None, false)).map(|(id, _)| id).as_deref(), Some(ID));
         idx.retain(|_| false);
         assert!(idx.bound.is_empty() && idx.searched_at.is_empty());
+    }
+
+    /// Between turns there is no lock.  The session is then the one in
+    /// the process's directory written since the process started.
+    #[test]
+    fn an_idle_kimi_is_bound_to_the_session_written_in_its_directory_since_it_started() {
+        let home = tmp("kimi-newest");
+        let old = session(&home, "session_old", STOP_HOOK, None);
+        let before = SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(before).unwrap();
+        let mut idx = SessionIndex::default();
+        assert_eq!(idx.look(&asker(&home, Some("/w/a"), true)), None, "a session older than the process is not its own");
+        session(&home, ID, CANCELLED_THEN_COMPLETED, None);
+        let mut idx = SessionIndex::default();
+        assert_eq!(idx.look(&asker(&home, Some("/w/a"), true)).map(|(id, _)| id).as_deref(), Some(ID));
+        let mut idx = SessionIndex::default();
+        assert_eq!(idx.look(&asker(&home, Some("/w/elsewhere"), true)), None, "a session of another directory");
+        let mut idx = SessionIndex::default();
+        assert_eq!(idx.look(&asker(&home, Some("/w/a"), false)), None, "two kimis in one directory: neither is guessed at");
+        let mut idx = SessionIndex::default();
+        assert_eq!(idx.look(&asker(&home, None, true)), None, "a process whose directory cannot be read");
     }
 }
