@@ -27,7 +27,9 @@ mod heads_up;
 mod refusal;
 mod model;
 mod statusline;
+mod settings_hook;
 mod worker;
+mod scan_result;
 mod binding;
 mod transcript;
 mod profiles;
@@ -46,11 +48,13 @@ use argv::argv_session_uuid;
 use argv::{flag_uuid, is_uuid};
 pub use statusline::statusline_ingest;
 // the settings-file plumbing the peerbus hooks share with the status line
-pub(crate) use statusline::{cc_settings_files, sh_quote, write_through_symlink};
+pub(crate) use settings_hook::{cc_settings_files, sh_quote, write_through_symlink};
 use idle::*;
 use model::*;
 use statusline::*;
+use settings_hook::*;
 use worker::*;
+use scan_result::*;
 use records::*;
 use refusal::{last_quota_refusal, refused_since};
 use super::handoff::resume_word;
@@ -838,7 +842,7 @@ impl ClaudecodePlugin {
             // Reclaiming restarts claude, and it comes back on what it
             // is told: without its model and effort it would wake on
             // the profile's default. Same rule as a switch.
-            let choice = pushed_choice(&meta.uuid);
+            let choice = result.choices.get(sid).cloned().unwrap_or_default();
             if let Err(why) = confirm_choice(result.new_models.get(sid).map(String::as_str), &choice) {
                 if self.blocked_reason.get(sid).map(String::as_str) != Some("model_unconfirmed") {
                     host.log(
@@ -1955,6 +1959,7 @@ impl Plugin for ClaudecodePlugin {
         let mut t_looks = 0u128;
         let mut t_activity = 0u128;
         let mut t_idle = 0u128;
+        let mut t_sweep = 0u128;
         let mut t_rearm = 0u128;
         // (1) Drain any results the worker delivered since last tick.
         // Apply only the newest — older results are stale (the worker
@@ -2043,6 +2048,8 @@ impl Plugin for ClaudecodePlugin {
             // it compares were taken by the worker in the same pass
             // that produced these bindings.
             self.sweep_unusable_profiles(host, &result);
+            t_sweep = t0.elapsed().as_micros();
+            let t0 = std::time::Instant::now();
             self.run_idle_policy(host, &result);
             t_idle = t0.elapsed().as_micros();
             let t0 = std::time::Instant::now();
@@ -2098,7 +2105,7 @@ impl Plugin for ClaudecodePlugin {
                 "tick.slow",
                 &format!(
                     "total={total} drain={t_drain} apply={t_apply} looks={t_looks} \
-                     activity={t_activity} idle={t_idle} rearm={t_rearm} \
+                     activity={t_activity} sweep={t_sweep} idle={t_idle} rearm={t_rearm} \
                      monitors={t_monitors} (µs)"
                 ),
             );
@@ -2255,6 +2262,7 @@ mod tests {
 
     mod acting;
     mod refused;
+    mod settings_file;
     mod telling;
 
     use marspot_term::test_env::{sandbox_state_dir, ChildGuard, EnvGuard, TempDir};
@@ -2513,6 +2521,8 @@ mod tests {
             sessions_seen: vec![sid],
             log_lines: Vec::new(),
             profiles: profiles::ProfileCache::default().read(),
+            usage: None,
+            choices: HashMap::new(),
         };
         result.new_activity.insert(sid, activity);
         result.new_vetoes.insert(sid, (false, false));
@@ -2569,6 +2579,8 @@ mod tests {
         for (sid, m) in &plugin.last_meta {
             scan.new_meta.insert(*sid, m.clone());
         }
+        // what the worker reads alongside the bindings
+        (scan.usage, scan.choices) = quota_inputs(&scan.new_meta);
         plugin.sweep_unusable_profiles(host, scan);
     }
 
@@ -3472,126 +3484,6 @@ mod tests {
         .unwrap();
         assert_eq!(rendered(ctx.model_for(&other, 222, 0)).as_deref(), Some("sonnet-5"));
 
-    }
-
-    /// Registering the hook with Claude Code, on and off again.
-    ///
-    /// The file is the user's, so what is asserted is not just that
-    /// the key appears and disappears but that everything around it
-    /// comes back byte for byte — across the shapes a settings.json
-    /// actually turns up in.
-    #[test]
-    fn the_hook_registers_and_unregisters_leaving_the_file_as_it_was() {
-        let tmp = TempDir::new("cc-statusline-reconcile-test");
-        let dir = tmp.path().to_path_buf();
-        let bin = std::path::Path::new("/Apps/Marspot.app/Contents/MacOS/marspot-shell");
-
-        let shapes = [
-            // One line, several members.
-            "{\"a\":1,\"b\":{\"c\":2}}",
-            // Indented, statusLine would not be the last member.
-            "{\n  \"a\": 1,\n  \"b\": { \"c\": 2 }\n}\n",
-            // Indented, one member — so the comma to remove is the one
-            // in front, not the one behind.
-            "{\n  \"a\": 1\n}\n",
-        ];
-        for (i, before) in shapes.iter().enumerate() {
-            let path = dir.join(format!("settings{i}.json"));
-            fs::write(&path, before).unwrap();
-            let files = vec![path.clone()];
-
-            // Off and nothing of ours present: not one byte touched.
-            assert!(reconcile_statusline_in(false, Some(bin), &files).is_empty());
-            assert_eq!(fs::read_to_string(&path).unwrap(), *before);
-
-            let notes = reconcile_statusline_in(true, Some(bin), &files);
-            assert!(notes[0].ends_with("installed"), "{notes:?}");
-            let on = fs::read_to_string(&path).unwrap();
-            assert!(on.contains("--cc-statusline"));
-            assert!(json_parses(&on), "{on}");
-            // Same again is a no-op — the switch does not rewrite the
-            // file on every scan.
-            assert!(reconcile_statusline_in(true, Some(bin), &files).is_empty());
-            assert_eq!(fs::read_to_string(&path).unwrap(), on);
-
-            reconcile_statusline_in(false, Some(bin), &files);
-            assert_eq!(
-                fs::read_to_string(&path).unwrap(),
-                *before,
-                "shape {i} did not come back as it was"
-            );
-        }
-    }
-
-    /// A status line the user already wrote is borrowed, not taken.
-    ///
-    /// Claude Code allows exactly one, and the people most likely to
-    /// want the model in the badge are the ones who already cared
-    /// enough to write one.
-    #[test]
-    fn an_existing_status_line_is_chained_and_handed_back() {
-        let tmp = TempDir::new("cc-statusline-chain-test");
-        let dir = tmp.path().to_path_buf();
-        let path = dir.join("settings.json");
-        let bin = std::path::Path::new("/Apps/M.app/marspot-shell");
-        // Theirs has a space in it, and a quote, because both are
-        // things a status line command really contains.
-        let theirs = "~/bin/my line.sh --say \\\"hi\\\"";
-        let before =
-            format!("{{\n  \"statusLine\": {{ \"type\": \"command\", \"command\": \"{theirs}\" }},\n  \"a\": 1\n}}\n");
-        fs::write(&path, &before).unwrap();
-        let files = vec![path.clone()];
-
-        let notes = reconcile_statusline_in(true, Some(bin), &files);
-        assert!(notes[0].contains("chaining"), "{notes:?}");
-        let on = fs::read_to_string(&path).unwrap();
-        assert!(json_parses(&on), "{on}");
-        let (_, cmd) = status_line_command(&on).unwrap();
-        assert!(cmd.starts_with("'/Apps/M.app/marspot-shell' --cc-statusline --chain "));
-        // What comes back out of `--chain` is what went in, quotes and
-        // spaces intact — it is handed to `sh -c` exactly as claude
-        // would have handed it.
-        assert_eq!(chained_out_of(&cmd), "~/bin/my line.sh --say \"hi\"");
-
-        reconcile_statusline_in(false, Some(bin), &files);
-        assert_eq!(fs::read_to_string(&path).unwrap(), before);
-    }
-
-    /// An installed hook follows the binary.
-    ///
-    /// `install-local` leaves the bundle's copy alone while the app
-    /// holds it open, so a hook registered then names
-    /// `binaries/current/`; the cold launch that refreshes the bundle
-    /// is when it should move back.
-    #[test]
-    fn an_installed_hook_is_repointed_when_the_binary_moves() {
-        let tmp = TempDir::new("cc-statusline-repoint-test");
-        let dir = tmp.path().to_path_buf();
-        let path = dir.join("settings.json");
-        let files = vec![path.clone()];
-        fs::write(&path, "{\n  \"a\": 1\n}\n").unwrap();
-
-        let old = std::path::Path::new("/state/binaries/current/marspot-shell");
-        reconcile_statusline_in(true, Some(old), &files);
-        let new = std::path::Path::new("/Apps/Marspot.app/Contents/MacOS/marspot-shell");
-        let notes = reconcile_statusline_in(true, Some(new), &files);
-        assert!(notes[0].ends_with("repointed"), "{notes:?}");
-        let (_, cmd) = status_line_command(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(cmd, "'/Apps/Marspot.app/Contents/MacOS/marspot-shell' --cc-statusline");
-    }
-
-    /// The guard that stands between an edit and the user's tool.
-    #[test]
-    fn a_settings_edit_that_would_not_parse_is_refused() {
-        assert!(json_parses("{\"a\":1}"));
-        assert!(json_parses("{\n  \"a\": [1, 2],\n  \"b\": {}\n}\n"));
-        // The two shapes a mis-cut member leaves behind.
-        assert!(!json_parses("{\"a\":1,}"));
-        assert!(!json_parses("{\"a\":1,,\"b\":2}"));
-        assert!(!json_parses("{\"a\":1"));
-        // A brace or a comma inside a string is not structure.
-        assert!(json_parses("{\"a\":\"},{\"}"));
-        assert!(json_parses("{\"a\":\"\\\\\"}"));
     }
 
     /// The transcript names the effort on the same record as the
@@ -4576,6 +4468,8 @@ mod tests {
             sessions_seen: vec![1],
             log_lines: Vec::new(),
             profiles: Vec::new(),
+            usage: None,
+            choices: HashMap::new(),
         };
         // The stand-in is a system binary, and macOS redacts the
         // environment of hardened ones — `proc_cmdline` works on it,
@@ -4612,6 +4506,8 @@ mod tests {
             sessions_seen: vec![1],
             log_lines: Vec::new(),
             profiles: Vec::new(),
+            usage: None,
+            choices: quota_inputs(&first.new_meta).1,
         };
         second.new_cpu.insert(
             1,
@@ -5034,6 +4930,7 @@ mod tests {
         );
         let mut new_cpu = HashMap::new();
         new_cpu.insert(sid, (1_000u64, SystemTime::now()));
+        let choices = quota_inputs(&new_meta).1;
         ScanResult {
             new_mapping: HashMap::new(),
             new_models: HashMap::from([(sid, "opus-5-5".to_string())]),
@@ -5045,6 +4942,8 @@ mod tests {
             sessions_seen: vec![sid],
             log_lines: Vec::new(),
             profiles: Vec::new(),
+            usage: None,
+            choices,
         }
     }
 
@@ -5268,6 +5167,8 @@ mod tests {
             sessions_seen: Vec::new(),
             log_lines: Vec::new(),
             profiles: Vec::new(),
+            usage: None,
+            choices: HashMap::new(),
         }
     }
 

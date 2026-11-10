@@ -15,10 +15,17 @@ use marspot_peer::json::{self, Value, obj};
 use marspot_term::lx_info;
 
 impl super::worker::Worker {
-    pub(super) fn reconcile_hooks(&self) {
-        for note in reconcile() {
-            lx_info!("peerbus.claude_hooks", &note);
+    /// Logged when the outcome changes, not on every look: a file left
+    /// alone says so again each pass.
+    pub(super) fn reconcile_hooks(&mut self) {
+        let notes = reconcile();
+        if notes == self.hook_notes {
+            return;
         }
+        for note in &notes {
+            lx_info!("peerbus.claude_hooks", note);
+        }
+        self.hook_notes = notes;
     }
 }
 
