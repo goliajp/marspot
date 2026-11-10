@@ -35,7 +35,7 @@ pub enum Command {
     Processes,
     Accounts,
     FullScreen,
-    Minimise,
+    Minimize,
     PrevPane,
     NextPane,
     /// The pane at this index, counted from zero.
@@ -267,7 +267,7 @@ pub const TABLE: &[Row] = &[
         "toggleFullScreen:",
         Window,
     )),
-    system(C::Minimise, Msg::CmdMinimise, cmd('m'), M::Window, "performMiniaturize:", Window),
+    system(C::Minimize, Msg::CmdMinimize, cmd('m'), M::Window, "performMiniaturize:", Window),
     sep(row(C::PrevPane, Msg::CmdPrevPane, cmd('['), M::Window, NoPanel, Core)),
     row(C::NextPane, Msg::CmdNextPane, cmd(']'), M::Window, NoPanel, Core),
     sep(pane(0, Msg::CmdPane1)),
@@ -396,7 +396,7 @@ mod tests {
             ('1', CMD, C::FocusPane(0)),
             ('5', CMD, C::FocusPane(4)),
             ('9', CMD, C::FocusPane(8)),
-            ('m', CMD, C::Minimise),
+            ('m', CMD, C::Minimize),
             ('/', CMD, C::Shortcuts),
         ];
         for (c, bits, cmd) in want {
@@ -475,7 +475,7 @@ mod tests {
     fn availability_follows_what_is_on_top() {
         let when = |c: Command| row_of(c).when;
         for c in [
-            C::NewWindow, C::Quit, C::Hide, C::HideOthers, C::Minimise, C::FullScreen, C::Settings,
+            C::NewWindow, C::Quit, C::Hide, C::HideOthers, C::Minimize, C::FullScreen, C::Settings,
             C::Layout, C::Processes, C::Accounts, C::Shortcuts, C::Find,
         ] {
             assert_eq!(when(c), Always, "{c:?}");
@@ -537,7 +537,7 @@ mod tests {
         let window = menu(M::Window);
         assert_eq!(
             window[..4],
-            ["Minimise ⌘M -> performMiniaturize:", "| Previous Pane ⌘[", "Next Pane ⌘]", "| Pane 1 ⌘1"]
+            ["Minimize ⌘M -> performMiniaturize:", "| Previous Pane ⌘[", "Next Pane ⌘]", "| Pane 1 ⌘1"]
         );
         assert_eq!((window.len(), window[11].as_str()), (12, "Pane 9 ⌘9"));
         assert_eq!(menu(M::Help), ["Keyboard Shortcuts ⌘/"]);

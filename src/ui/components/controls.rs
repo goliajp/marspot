@@ -368,17 +368,25 @@ pub fn keycap_size(label: &str, cell_w: f64, cell_h: f64) -> (f64, f64) {
     (cells as f64 * cell_w + 2.0 * spec::px(c::KEYCAP_PAD_X), cell_h + 2.0 * spec::px(c::KEYCAP_PAD_Y))
 }
 
-pub fn paint_keycap(p: &mut ViewPainter, rect: Rect, label: &str) {
-    fill(p, rect, palette::keycap_bg(), c::KEYCAP_RADIUS);
-    paint_keycap_text(p, rect, label);
-}
-
-/// A key cap's glyphs with no cap behind them — what joins two caps,
-/// on their line.
-pub fn paint_keycap_text(p: &mut ViewPainter, rect: Rect, label: &str) {
-    let x = rect.x + spec::px(c::KEYCAP_PAD_X);
-    let baseline = rect.y_top + spec::px(c::KEYCAP_PAD_Y) + p.ascent as f64;
-    p.text(x as f32, baseline as f32, label, palette::fg_muted());
+/// Paint a key cap whose right edge is `right`, `h` tall from `top`,
+/// and return its left edge, so a row of caps is set right to left.
+///
+/// The glyphs are in the interface font, measured here.  In the
+/// terminal's font the modifier signs are squeezed into one cell each
+/// and came out too small to tell apart; the cap's slot is still sized
+/// from the cell (`keycap_size`), which is what fixes the row's height.
+/// `filled` false draws the glyphs alone: what joins two caps.
+pub fn paint_keycap_ending_at(p: &mut ViewPainter, right: f64, top: f64, h: f64, label: &str, filled: bool) -> f64 {
+    let pt = c::KEYCAP_TEXT.pt();
+    let text_w = p.ui_text_width_at(label, pt, c::KEYCAP_WEIGHT) as f64;
+    // never narrower than tall: a one-glyph cap is a square key
+    let w = (text_w + 2.0 * spec::px(c::KEYCAP_PAD_X)).max(h).round();
+    let rect = Rect { x: right - w, y_top: top, w, h };
+    if filled {
+        fill(p, rect, palette::keycap_bg(), c::KEYCAP_RADIUS);
+    }
+    centred_text(p, rect, label, pt, c::KEYCAP_WEIGHT, palette::fg_sec());
+    rect.x
 }
 
 #[cfg(test)]
