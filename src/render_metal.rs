@@ -3180,7 +3180,7 @@ mod tests {
     /// `name.png` → `name.macos<N>.png`: the baseline for this macOS
     /// release alone.  A snapshot that draws with system fonts can
     /// look different on another release -- the CJK fallback fonts do
-    /// between macOS 14 and 27 -- and gets a baseline per release; the
+    /// between macOS 15 and 27 -- and gets a baseline per release; the
     /// rest share one.
     fn versioned(path: &std::path::Path) -> std::path::PathBuf {
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
