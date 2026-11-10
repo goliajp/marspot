@@ -4182,9 +4182,9 @@ impl MarspotApp for ShellApp {
             // recognises, so all can be registered unconditionally.
             self.plugin_registry.register(Box::new(plugins::codex::CodexPlugin::new()));
             self.plugin_registry.register(Box::new(plugins::gemini::GeminiPlugin::new()));
+            self.plugin_registry.register(Box::new(plugins::kimi::KimiPlugin::new()));
             // Codex panes as messaging peers of Claude Code sessions.
-            self.plugin_registry
-                .register(Box::new(plugins::peerbus::PeerbusPlugin::new()));
+            self.plugin_registry.register(Box::new(plugins::peerbus::PeerbusPlugin::new()));
             // The account usage feed, when no external collector
             // writes one.
             self.plugin_registry

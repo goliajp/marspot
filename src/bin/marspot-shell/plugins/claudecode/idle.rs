@@ -314,7 +314,7 @@ pub(super) fn activity_for_unbound(sid: u64, dormant: &[DormantRecord]) -> CcAct
     if dormant.iter().any(|d| d.shelld_sid == sid) {
         CcActivity::Dormant
     } else {
-        CcActivity::Absent
+        crate::plugins::kimi::activity(sid).unwrap_or(CcActivity::Absent)
     }
 }
 
