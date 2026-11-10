@@ -28,4 +28,4 @@
 
 shell   = "0.7.267"  # the environment of a process that zeroed its argv is read
 core    = "0.12.305"  # one command table drives the keys, the menus and a shortcuts panel
-session = "0.11.156"  # a pane does not inherit a gemini session id
+session = "0.11.157"  # a pane has ~/.kimi-code/bin on its PATH
