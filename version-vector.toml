@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.262"  # a refused account stays shut until the window it ran out of renews
-core    = "0.12.298"  # the dev panel button shows only when developer.dev_panel is on
-session = "0.11.154"  # a stall is traced: what the loop thread did after the alarm
+shell   = "0.7.263"  # installs the agent CLIs, collects usage itself, configures peer messaging and the profiles skill
+core    = "0.12.299"  # an application menu; settings in the state root; own usage feed read when the other is stale
+session = "0.11.155"  # every pane has ~/.local/bin on its PATH
