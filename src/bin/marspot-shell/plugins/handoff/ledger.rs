@@ -122,7 +122,7 @@ pub fn prune(dir: &Path, live: &[u64]) -> usize {
         let name = e.file_name();
         let Some(name) = name.to_str() else { continue };
         let Some((stem, ext)) = name.split_once('.') else { continue };
-        if !matches!(ext, "ledger" | "md" | "tmp") {
+        if !matches!(ext, "ledger" | "md" | "tmp" | "model") {
             continue;
         }
         let Ok(sid) = stem.parse::<u64>() else { continue };

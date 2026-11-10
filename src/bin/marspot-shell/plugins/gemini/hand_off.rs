@@ -26,9 +26,13 @@ impl GeminiPlugin {
             proc: pane.worker,
             shell_pid: pane.shell_pid,
             home: pane.root.clone(),
-            session_id: Some(session),
+            session_id: Some(session.clone()),
             cwd: pane.cwd.clone(),
         };
+        // read back if the pane is handed to gemini again and resumes this session
+        if let Err(e) = handoff::remember_gemini_model(sid, &session, pane.model.as_deref()) {
+            host.log(LogLevel::Warn, "handoff.model_not_kept", &format!("pane {sid}: {e}"));
+        }
         host.log(LogLevel::Info, "handoff.start", &format!("pane {sid} gemini → {} P{n}: {leaving:?}", to.key()));
         let Some(op) = handoff::switch_op(sid, leaving, to, n, dir) else {
             host.log(LogLevel::Warn, "handoff.no_command", &format!("pane {sid}: cannot build the {} line", to.key()));
