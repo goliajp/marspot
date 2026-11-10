@@ -121,14 +121,7 @@ const WINDOW_MAGIC: u32 = 0xA5505011;
 const WINDOW_VERSION: u32 = 2;
 
 pub fn window_state_file_path() -> PathBuf {
-    let base: PathBuf = match std::env::var_os("MARSPOT_STATE_DIR") {
-        Some(d) => PathBuf::from(d),
-        None => {
-            let home = std::env::var("HOME").unwrap_or_default();
-            PathBuf::from(home).join("Library/Caches/marspot")
-        }
-    };
-    base.join("window-state.bin")
+    marspot_term::paths::state_root().join("window-state.bin")
 }
 
 /// Best-effort read of every window's frame, in creation order.  Same
@@ -260,14 +253,7 @@ const DEV_WINDOW_MAGIC: u32 = 0xA5505012;
 const DEV_WINDOW_VERSION: u32 = 1;
 
 pub fn dev_window_state_file_path() -> PathBuf {
-    let base: PathBuf = match std::env::var_os("MARSPOT_STATE_DIR") {
-        Some(d) => PathBuf::from(d),
-        None => {
-            let home = std::env::var("HOME").unwrap_or_default();
-            PathBuf::from(home).join("Library/Caches/marspot")
-        }
-    };
-    base.join("dev-window-state.bin")
+    marspot_term::paths::state_root().join("dev-window-state.bin")
 }
 
 pub fn read_dev_window() -> Option<SavedDevWindow> {
@@ -313,14 +299,7 @@ pub fn write_dev_window(s: &SavedDevWindow) -> io::Result<()> {
 /// Resolve `~/Library/Caches/marspot/shell-state.bin`, respecting
 /// `MARSPOT_STATE_DIR` for dev sandbox / test paths.
 pub fn state_file_path() -> PathBuf {
-    let base: PathBuf = match std::env::var_os("MARSPOT_STATE_DIR") {
-        Some(d) => PathBuf::from(d),
-        None => {
-            let home = std::env::var("HOME").unwrap_or_default();
-            PathBuf::from(home).join("Library/Caches/marspot")
-        }
-    };
-    base.join("shell-state.bin")
+    marspot_term::paths::state_root().join("shell-state.bin")
 }
 
 /// Best-effort read.  Returns None on any failure: missing file,
