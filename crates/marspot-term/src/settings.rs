@@ -35,7 +35,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
-
 use crate::palette::ThemeId;
 
 /// Every user-owned decision, resolved.
@@ -145,19 +144,9 @@ pub struct Settings {
     /// Show the toolbar button for the UI workbench panel. Off: it is
     /// a tool for working on marspot, not for using it.
     pub dev_panel_button: bool,
-    /// Which colours everything is drawn in: a named theme, or `None`
-    /// to follow the system's appearance.
-    ///
-    /// Dark unless the file says otherwise, so an upgrade changes
-    /// nothing a user can see; following the system is opted into.
+    /// The theme everything is drawn in; `None` follows the system.
+    /// Dark by default, so an upgrade changes nothing a user can see.
     pub appearance_theme: Option<ThemeId>,
-}
-
-fn parse_theme(v: &str, fallback: Option<ThemeId>) -> Option<ThemeId> {
-    if v.eq_ignore_ascii_case("system") {
-        return None;
-    }
-    ThemeId::parse(v).map_or(fallback, Some)
 }
 
 /// What the claudecode plugin does with an idle pane that has a better
@@ -259,14 +248,6 @@ pub fn get() -> Arc<Settings> {
     Arc::clone(&cache().read().unwrap_or_else(|p| p.into_inner()).settings)
 }
 
-/// The terminal palette of the theme the settings name, for a caller
-/// that may run before anything else has read the settings: the first
-/// window is created in the right colour, not corrected a tick later.
-pub fn palette() -> &'static crate::palette::Palette {
-    let _ = cache();
-    crate::palette::current()
-}
-
 /// Per-byte mirror of `appearance.circled_wide`.
 ///
 /// `char_width` runs once per character of everything the terminal
@@ -312,18 +293,10 @@ fn publish_mirrors(s: &Settings) {
 /// The same sweep follows the system's appearance when the theme
 /// setting says to, which is a second `stat` and only then.
 pub fn reload_if_changed() -> bool {
-    let changed = reload_file_if_changed();
-    crate::system_theme::poll();
-    changed
-}
-
-fn reload_file_if_changed() -> bool {
     let now = mtime();
-    {
-        let c = cache().read().unwrap_or_else(|p| p.into_inner());
-        if c.seen == now {
-            return false;
-        }
+    if cache().read().unwrap_or_else(|p| p.into_inner()).seen == now {
+        crate::system_theme::poll();
+        return false;
     }
     let parsed = Arc::new(parse(&std::fs::read_to_string(path()).unwrap_or_default()));
     let mut c = cache().write().unwrap_or_else(|p| p.into_inner());
@@ -331,6 +304,8 @@ fn reload_file_if_changed() -> bool {
     let changed = *c.settings != *parsed;
     publish_mirrors(&parsed);
     c.settings = parsed;
+    drop(c);
+    crate::system_theme::poll();
     changed
 }
 
@@ -400,7 +375,7 @@ pub fn parse(body: &str) -> Settings {
                 s.reclaim_idle_minutes = v.parse().unwrap_or(s.reclaim_idle_minutes)
             }
             "reclaim.prefetch_on_return" => s.reclaim_prefetch = parse_bool(v, s.reclaim_prefetch),
-            "appearance.theme" => s.appearance_theme = parse_theme(v, s.appearance_theme),
+            "appearance.theme" => s.appearance_theme = ThemeId::parse_setting(v, s.appearance_theme),
             "appearance.circled_wide" => {
                 s.appearance_circled_wide = parse_bool(v, s.appearance_circled_wide)
             }

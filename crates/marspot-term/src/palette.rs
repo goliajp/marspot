@@ -42,6 +42,15 @@ impl ThemeId {
         Self::ALL.into_iter().find(|t| t.as_str().eq_ignore_ascii_case(v.trim()))
     }
 
+    /// The value of the theme setting: a theme's name, `system` for
+    /// none, and anything else leaves what was there.
+    pub fn parse_setting(v: &str, fallback: Option<Self>) -> Option<Self> {
+        if v.trim().eq_ignore_ascii_case("system") {
+            return None;
+        }
+        Self::parse(v).map_or(fallback, Some)
+    }
+
     fn from_u8(v: u8) -> Self {
         Self::ALL.get(v as usize).copied().unwrap_or(Self::Dark)
     }

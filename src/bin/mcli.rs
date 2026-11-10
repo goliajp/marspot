@@ -160,7 +160,7 @@ fn main() {
         width_logical: 960.0,
         height_logical: 600.0,
         frame_pt: None,
-        bg: marspot::settings::palette().bg, // the terminal's own ground
+        bg: marspot::system_theme::startup_palette().bg, // the terminal's own ground
     };
     run_app(app, proxy, attrs);
 }

@@ -1880,7 +1880,7 @@ fn main() {
         width_logical: DEFAULT_WIN_W,
         height_logical: DEFAULT_WIN_H,
         frame_pt: None,
-        bg: marspot::settings::palette().bg, // the terminal's own ground
+        bg: marspot::system_theme::startup_palette().bg, // the terminal's own ground
     };
     run_app(app, proxy, attrs);
 }
