@@ -199,7 +199,7 @@ pub struct Layout {
     pub process_button_rect: Rect,
     /// Dev-panel toggle — fourth chrome icon button,  immediately
     /// right of the process-tree button.  Toggles the UI-system
-    /// workbench panel.  Always present.
+    /// workbench panel.  Zero unless `developer.dev_panel` is on.
     pub dev_panel_button_rect: Rect,
     /// cc — toolbar `Cc` button (Claude profile usage modal).
     pub cc_button_rect: Rect,
@@ -414,11 +414,19 @@ impl Layout {
     /// to the historical constant, which is right for the overwhelming
     /// case (a normal window) and wrong only until the first frame
     /// arrives.
-    pub fn with_chrome(
+    pub fn with_chrome(self, scale: f64, n_sessions: usize, lights_right_phys: Option<f64>) -> Self {
+        let dev_panel = crate::settings::get().dev_panel_button;
+        self.with_chrome_showing(scale, n_sessions, lights_right_phys, dev_panel)
+    }
+
+    /// `with_chrome`, told whether the dev-panel button is shown
+    /// rather than reading the setting.
+    pub fn with_chrome_showing(
         mut self,
         scale: f64,
         n_sessions: usize,
         lights_right_phys: Option<f64>,
+        dev_panel: bool,
     ) -> Self {
         let btn_size = ICON_BUTTON_LOGICAL_SIZE * scale;
         let btn_gap = ICON_BUTTON_LOGICAL_GAP * scale;
@@ -457,8 +465,9 @@ impl Layout {
         // affordances clustered so the user's eye can scan them in one
         // movement.
         let process_btn_x = layout_btn_x + btn_size + btn_gap;
+        // hidden unless asked for; the buttons after it close the gap
         let dev_panel_btn_x = process_btn_x + btn_size + btn_gap;
-        let cc_btn_x = dev_panel_btn_x + btn_size + btn_gap;
+        let cc_btn_x = if dev_panel { dev_panel_btn_x + btn_size + btn_gap } else { dev_panel_btn_x };
         let settings_btn_x = cc_btn_x + btn_size + btn_gap;
         self.sidebar_button_rect = Rect {
             x: sidebar_btn_x,
@@ -478,11 +487,10 @@ impl Layout {
             w: btn_w,
             h: btn_h,
         };
-        self.dev_panel_button_rect = Rect {
-            x: dev_panel_btn_x,
-            y_top: btn_y,
-            w: btn_w,
-            h: btn_h,
+        self.dev_panel_button_rect = if dev_panel {
+            Rect { x: dev_panel_btn_x, y_top: btn_y, w: btn_w, h: btn_h }
+        } else {
+            Rect::ZERO
         };
         self.cc_button_rect = Rect {
             x: cc_btn_x,
@@ -753,11 +761,8 @@ mod tests {
     fn every_toolbar_button_is_laid_out_and_listed() {
         // `with_chrome` is what lays the toolbar out; `build` alone
         // makes the chrome-less layout the bench and snapshot paths use.
-        let l = Layout::build(1400.0, 900.0, 0.0, 40.0, 20.0, 2, 2, 8.0, 16.0).with_chrome(
-            2.0,
-            2,
-            Some(138.0),
-        );
+        let l = Layout::build(1400.0, 900.0, 0.0, 40.0, 20.0, 2, 2, 8.0, 16.0)
+            .with_chrome_showing(2.0, 2, Some(138.0), true);
         let btns = l.toolbar_buttons();
         assert_eq!(btns.len(), 6, "add the icon too, or it will not be painted");
         for (i, b) in btns.iter().enumerate() {
@@ -780,6 +785,23 @@ mod tests {
         let (x, y) = mid(btns[4]);
         assert!(l.hit_test_cc_button(x, y), "cc");
         assert!(!l.hit_test_settings_button(x, y));
+    }
+
+    /// Without the dev-panel button nothing is drawn or hit for it,
+    /// and the buttons after it move up: no hole in the row.
+    #[test]
+    fn a_hidden_dev_panel_button_leaves_no_gap() {
+        let build = |dev| {
+            Layout::build(1400.0, 900.0, 0.0, 40.0, 20.0, 2, 2, 8.0, 16.0)
+                .with_chrome_showing(2.0, 2, Some(138.0), dev)
+        };
+        let (shown, hidden) = (build(true), build(false));
+        let (s, h) = (shown.toolbar_buttons(), hidden.toolbar_buttons());
+        assert_eq!(h[3].w, 0.0, "the painter skips a zero-width button");
+        assert!(!hidden.hit_test_dev_panel_button(s[3].x + 1.0, s[3].y_top + 1.0));
+        assert_eq!(h[4].x, s[3].x, "the next button takes its place");
+        assert_eq!(h[5].x, s[4].x);
+        assert_eq!(h[..3], s[..3]);
     }
     use super::*;
 
@@ -871,7 +893,7 @@ mod tests {
         let wb = windowed.toolbar_buttons();
         let fb = full.toolbar_buttons();
         let shift = wb[0].x - fb[0].x;
-        for (a, b) in wb.iter().zip(fb.iter()) {
+        for (a, b) in wb.iter().zip(fb.iter()).filter(|(a, _)| a.w > 0.0) {
             assert!((a.x - b.x - shift).abs() < 1e-6, "the toolbar came apart");
             assert!((a.y_top - b.y_top).abs() < 1e-6, "and it stays on its row");
         }
