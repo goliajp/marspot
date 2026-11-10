@@ -82,13 +82,14 @@ fn mono(p: &mut ViewPainter, cell: Cell, x: f64, top: f64, h: f64, s: &str, colo
     p.text(x as f32, cell.baseline_in(top, h) as f32, s, color);
 }
 
-fn util_color(util: f32) -> [f32; 4] {
+/// How a utilisation is doing: fine, approaching the cap, at it.
+fn util_severity(util: f32) -> u8 {
     if util < metric::WARN_AT {
-        palette::ok()
+        0
     } else if util < metric::DANGER_AT {
-        palette::warn()
+        1
     } else {
-        palette::danger()
+        2
     }
 }
 
@@ -105,7 +106,7 @@ fn paint_bar(p: &mut ViewPainter, rect: Rect, used: f64, util: f32) {
     fill(p, rect, palette::track());
     let w = rect.w * used.clamp(0.0, 1.0);
     if w >= metric::BAR_MIN_PX {
-        fill(p, Rect { w, ..rect }, util_color(util));
+        fill(p, Rect { w, ..rect }, palette::severity_color(util_severity(util)));
     }
 }
 
@@ -152,7 +153,7 @@ fn paint_card(p: &mut ViewPainter, a: &CcUsageAccountRender, card: Rect, cell: C
         let row = rows.bar_row(i, label_cols, cell);
         mono(p, cell, rows.left, row.top, row.h, &w.label, palette::fg_muted());
         let pct = format!("{:.0}%", w.util * 100.0);
-        mono(p, cell, row.pct_right - cell.text_w(&pct), row.top, row.h, &pct, util_color(w.util));
+        mono(p, cell, row.pct_right - cell.text_w(&pct), row.top, row.h, &pct, palette::severity_text(util_severity(w.util)));
         paint_bar(p, row.bar, w.util as f64, w.util);
     }
 

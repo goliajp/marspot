@@ -85,6 +85,12 @@ theme_table! {
     success,
     warn,
     danger,
+    /// The same three where they are text: a chip's label, a
+    /// percentage, the cross of a danger button at rest.  A fill can
+    /// be a mid tone; text on a tint of it cannot.
+    success_text,
+    warn_text,
+    danger_text,
 
     // Effects.  The opacity of each is the caller's.
     shadow,
@@ -115,6 +121,10 @@ theme_table! {
     // Terminal marks
     selection,
     search_hit,
+    /// What a glyph on a search hit is drawn in, whatever colour the
+    /// program gave it: the hit's background is the theme's, so the
+    /// ink that reads on it is too.
+    search_hit_fg,
     ime_bg,
     ime_fg,
     cursor_text,
@@ -158,6 +168,9 @@ pub static DARK: Theme = Theme {
     success: c(80, 190, 110),
     warn: c(230, 200, 80),
     danger: c(220, 60, 60),
+    success_text: c(86, 198, 116),
+    warn_text: c(230, 200, 80),
+    danger_text: c(248, 128, 128),
     shadow: c(0, 0, 0),
     backdrop: c(0, 0, 0),
     scrim: c(0, 0, 0),
@@ -172,6 +185,7 @@ pub static DARK: Theme = Theme {
     agent: c(217, 120, 87),
     selection: c(41, 56, 87),
     search_hit: c(235, 199, 51),
+    search_hit_fg: c(20, 22, 28),
     ime_bg: c(26, 33, 46),
     ime_fg: c(204, 219, 235),
     cursor_text: c(235, 235, 235),
@@ -211,6 +225,9 @@ pub static LIGHT: Theme = Theme {
     success: c(22, 122, 52),
     warn: c(146, 96, 0),
     danger: c(196, 38, 38),
+    success_text: c(20, 116, 49),
+    warn_text: c(140, 92, 0),
+    danger_text: c(190, 36, 36),
     // Slate, not black: black at a panel's shadow opacity is a smear
     // on a light ground.
     shadow: c(96, 108, 128),
@@ -226,6 +243,7 @@ pub static LIGHT: Theme = Theme {
     agent: c(178, 78, 46),
     selection: c(184, 214, 255),
     search_hit: c(255, 214, 10),
+    search_hit_fg: c(28, 32, 40),
     ime_bg: c(228, 238, 255),
     ime_fg: c(20, 60, 150),
     cursor_text: c(40, 44, 52),
@@ -266,6 +284,9 @@ pub static CONTRAST: Theme = Theme {
     success: c(80, 255, 130),
     warn: c(255, 214, 0),
     danger: c(255, 140, 140),
+    success_text: c(80, 255, 130),
+    warn_text: c(255, 214, 0),
+    danger_text: c(255, 140, 140),
     shadow: c(0, 0, 0),
     backdrop: c(0, 0, 0),
     scrim: c(0, 0, 0),
@@ -278,7 +299,8 @@ pub static CONTRAST: Theme = Theme {
     focus_ring: c(255, 255, 255),
     agent: c(255, 170, 130),
     selection: c(0, 64, 160),
-    search_hit: c(110, 80, 0),
+    search_hit: c(255, 214, 0),
+    search_hit_fg: c(0, 0, 0),
     ime_bg: c(0, 40, 90),
     ime_fg: c(255, 255, 255),
     cursor_text: c(255, 255, 255),
