@@ -33,12 +33,14 @@ use marspot::grid_shm::{self, ENV_SHM_FD, GridShmReader};
 use marspot::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use marspot::iosurface::IOSurface;
 use marspot::layout::Layout;
+use marspot::link_open::open_arg_for;
 use marspot::pane::{L3Conn, L3Spawn, Pane};
 use marspot::render::{SessionView, SidebarEntry};
 use marspot::render_metal::MetalRenderer;
 use marspot::ui::components::surface_stack::{
-    self, Change, Key as SurfaceKey, KeyAction, Press, SurfaceKind, SurfaceStack,
+    self, Change, CloseBy, Key as SurfaceKey, KeyAction, Press, SurfaceKind, SurfaceStack,
 };
+use marspot::ui::components::panel_script::{Input as DevInput, Scene, Script as PanelScript};
 use marspot::ui::components::{PanelChrome, GRID_MAX, GRID_MIN};
 use marspot::ui::strings::{t, Msg};
 use marspot::session::SessionState;
@@ -68,139 +70,11 @@ use marspot::HEADER_PT;
 const INITIAL_COLS: u16 = 40;
 const INITIAL_ROWS: u16 = 12;
 
-/// Does this raw scanned-IP text look like a bare, unbracketed IPv6
-/// address that needs `[...]` wrapping before it can appear in an
-/// `http://` URL?  Bracketed input (`[::1]:8080`) is already URL-safe
-/// and returns false.  Bare IPv4 (`1.2.3.4`, `1.2.3.4:8080`) has at
-/// most one `:` and returns false.  Bare IPv6 (`::1`, `2001:db8::1`)
-/// has `::` or `≥3` colons and returns true.
-fn ip_text_is_bare_ipv6(text: &str) -> bool {
-    if text.starts_with('[') || !text.contains(':') {
-        return false;
-    }
-    if text.contains("::") {
-        return true;
-    }
-    text.chars().filter(|&c| c == ':').count() >= 3
-}
-
-#[cfg(test)]
-mod ip_bracket_tests {
-    use super::ip_text_is_bare_ipv6;
-    #[test]
-    fn bracketed_and_ipv4_do_not_need_wrapping() {
-        assert!(!ip_text_is_bare_ipv6("[::1]:8080"));
-        assert!(!ip_text_is_bare_ipv6("47.96.114.231"));
-        assert!(!ip_text_is_bare_ipv6("192.168.1.1:8080"));
-        assert!(!ip_text_is_bare_ipv6("10.0.0.5/status"));
-    }
-    #[test]
-    fn bare_ipv6_needs_wrapping() {
-        assert!(ip_text_is_bare_ipv6("::1"));
-        assert!(ip_text_is_bare_ipv6("2001:db8::1"));
-        assert!(ip_text_is_bare_ipv6(
-            "2001:0db8:85a3:0000:0000:8a2e:0370:7334"
-        ));
-    }
-}
-
 /// Hand `arg` off to macOS `open(1)` so the system routes it to the
 /// right helper: URL → default browser, directory → Finder, file →
 /// default app for the file's UTI.  Fire and forget; we don't wait
 /// on the child.  Stderr inherited so a malformed arg surfaces in
 /// marspot.log via the usual stderr pipe instead of vanishing.
-/// What `open(1)` should be handed for a clicked link, or `None` when
-/// the kind has no open action.
-///
-/// A free function so it can be tested: the caller is buried in the
-/// context-menu event path, and the one case that actually broke was
-/// invisible from there.
-fn open_arg_for(kind: marspot::grid_links::LinkKind, text: &str) -> Option<String> {
-    let link_text = text;
-    match kind {
-        marspot::grid_links::LinkKind::Email => {
-            Some(format!("mailto:{}", link_text))
-        }
-        // Bare IP (`47.96.114.231`, `::1`,
-        // `2001:db8::1`, `[fe80::1]:8080/foo`) needs an
-        // `http://` scheme so `open(1)` routes it —
-        // defaults to port 80.  Bare IPv6 without
-        // brackets gets wrapped so URL parsers accept
-        // it (colons in a hostname are ambiguous with
-        // `host:port` otherwise).
-        marspot::grid_links::LinkKind::Ip => {
-            Some(if link_text.starts_with('[')
-                || !ip_text_is_bare_ipv6(link_text)
-            {
-                format!("http://{}", link_text)
-            } else {
-                format!("http://[{}]", link_text)
-            })
-        }
-        marspot::grid_links::LinkKind::Url => {
-            let head: String = link_text
-                .chars()
-                .take(8)
-                .flat_map(char::to_lowercase)
-                .collect();
-            Some(
-                if head.starts_with("http://")
-                    || head.starts_with("https://")
-                {
-                    link_text.to_string()
-                } else {
-                    format!("http://{}", link_text)
-                },
-            )
-        }
-        // UUID has no Open action (menu doesn't offer
-        // it); if a stale click reaches here, no-op.
-        marspot::grid_links::LinkKind::Uuid => None,
-        // Expand `~` here, not at the call site: `open(1)` does not do
-        // shell expansion, so it read `~` as a directory name under the
-        // process cwd and reported the file missing — silently, since
-        // `spawn` only fails when the process cannot START.  Every
-        // `~/…` file link underlined correctly (linkify expands for its
-        // stat) and then did nothing when clicked.
-        marspot::grid_links::LinkKind::File => {
-            // A `file://` link carries the scheme in its text so the
-            // selection matches what is drawn; `open(1)` wants the
-            // path, and percent escapes have to come back off first
-            // (`file://…/a%20b` names `a b`).
-            let raw = link_text
-                .strip_prefix("file://")
-                .map(percent_decode)
-                .unwrap_or_else(|| link_text.to_string());
-            marspot::grid_links::expand_user_path(&raw)
-                .map(|p| p.to_string_lossy().into_owned())
-        }
-    }
-}
-
-/// Undo percent-escapes in a `file://` URL's path.
-///
-/// Only `%XX` is handled, and an invalid escape is left as written —
-/// a filename may legitimately contain a bare `%`, and mangling it
-/// would turn a working link into a missing file.
-fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok();
-            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
-}
-
 fn spawn_open(arg: &str) {
     // `spawn` only reports that the process could not START.  When
     // `open(1)` itself fails — the usual reason being a path that no
@@ -784,6 +658,7 @@ mod window_state_tests {
             dev_close_panes_at: None,
             dev_open_settings_at: None,
             dev_drag: None,
+            dev_panels: None,
             layout_discarded: false,
             windows,
             key_window: 0,
@@ -4290,6 +4165,9 @@ struct CoreApp {
     /// Dev seam only (`MARSPOT_DEV_DRAG`): one scripted pane drag, and
     /// the earliest moment to perform it.
     dev_drag: Option<(DevDrag, Instant)>,
+    /// Dev seam only (`MARSPOT_DEV_PANELS`): a script of panel input
+    /// still being played.  See `dev_drive_panels`.
+    dev_panels: Option<PanelScript>,
     /// Set once the user closed the last pane of the last window.  The
     /// saved layout has been deleted at that point and the app is on
     /// its way out; any later save would resurrect what they just
@@ -4878,6 +4756,37 @@ impl CoreApp {
         self.dev_open_settings_at = None;
         let wi = self.key_window.min(self.windows.len().saturating_sub(1));
         self.toggle_panel(wi, SurfaceKind::Settings);
+    }
+
+    /// Dev seam (`MARSPOT_DEV_PANELS`): queues the next step of the
+    /// script as the events the window would have sent for it, so they
+    /// are routed and handled like any others.
+    fn dev_drive_panels(&mut self) {
+        let now = Instant::now();
+        if !self.dev_panels.as_ref().is_some_and(|s| s.due(now)) {
+            return;
+        }
+        let wi = self.key_window.min(self.windows.len().saturating_sub(1));
+        let top = win!(self, wi).layout.top_inset;
+        let chrome =
+            win!(self, wi).panels.open().map(|k| PanelChrome::new(self.panel_frame(wi, k), top));
+        let cell = self.renderer.cell_dims();
+        let w = &win!(self, wi);
+        let id = w.window_id;
+        let Some(script) = self.dev_panels.as_mut() else { return };
+        for input in script.play(now, &Scene { layout: &w.layout, chrome, cell }) {
+            let _ = self.event_tx.send(match input {
+                DevInput::Move(x, y) => CoreEvent::MouseMove(x, y, id),
+                DevInput::Down(x, y, mods) => CoreEvent::MouseDown(x, y, mods, id),
+                DevInput::Drag(x, y) => CoreEvent::MouseDrag(x, y, id, id, x, y),
+                DevInput::Up(x, y) => CoreEvent::MouseUp(id, id, x, y),
+                DevInput::Scroll(dy) => CoreEvent::Scroll(dy, true, id),
+                DevInput::Key(event, mods) => CoreEvent::Key(event, mods, id),
+            });
+        }
+        if script.finished() {
+            self.dev_panels = None;
+        }
     }
 
     /// Dev seam (`MARSPOT_DEV_CLOSE_PANES=n`) — see the call site.
@@ -6838,8 +6747,8 @@ impl CoreApp {
                 LogicalKey::Char('w') if modifiers.super_ => SurfaceKey::CmdW,
                 _ => SurfaceKey::Other,
             };
-            if let KeyAction::Close(kind) = win!(self, wi).panels.on_key(key) {
-                self.apply_surface_change(wi, Change { closed: Some(kind), opened: None });
+            if let KeyAction::Close(change) = win!(self, wi).panels.on_key(key) {
+                self.apply_surface_change(wi, change);
             }
             return;
         }
@@ -7362,7 +7271,8 @@ impl CoreApp {
     fn apply_surface_change(&mut self, wi: usize, change: Change) {
         let w = &mut win!(self, wi);
         w.needs_render = true;
-        match change.closed {
+        w.panels.log_change(w.window_id, change);
+        match change.closed.map(|(kind, _)| kind) {
             Some(SurfaceKind::Processes) => w.process_panel = None,
             Some(SurfaceKind::Accounts) => w.cc_usage_modal = None,
             Some(SurfaceKind::Layout) => w.layout_drag = None,
@@ -7497,7 +7407,7 @@ impl CoreApp {
                         });
                     }
                     Hover::Apply => {
-                        let change = win!(self, wi).panels.close();
+                        let change = win!(self, wi).panels.close(CloseBy::Content);
                         self.apply_surface_change(wi, change);
                         win!(self, wi).grid_cols = win!(self, wi).pending_grid_cols;
                         win!(self, wi).grid_rows = win!(self, wi).pending_grid_rows;
@@ -8162,9 +8072,7 @@ impl CoreApp {
         if let Some(kind) = win!(self, wi).panels.open() {
             let chrome = PanelChrome::new(self.panel_frame(wi, kind), win!(self, wi).layout.top_inset);
             match win!(self, wi).panels.on_press(x_phys, y_phys, &chrome) {
-                Some(Press::Close(kind)) => {
-                    self.apply_surface_change(wi, Change { closed: Some(kind), opened: None });
-                }
+                Some(Press::Close(change)) => self.apply_surface_change(wi, change),
                 Some(Press::Content(kind)) => self.panel_content_press(wi, kind, x_phys, y_phys),
                 Some(Press::BeginDrag) | None => {}
             }
@@ -8678,7 +8586,9 @@ impl CoreApp {
             win!(self, wi).needs_render = true;
             return;
         }
-        win!(self, wi).panels.on_release();
+        if let Some(moved) = win!(self, wi).panels.on_release() {
+            moved.log();
+        }
         // A click without movement leaves anchor == focus → treat as
         // "no selection" so a stray single-click doesn't ghost a
         // single-cell highlight.
@@ -10189,6 +10099,7 @@ fn main() {
             .ok()
             .and_then(|v| DevDrag::parse(&v))
             .map(|d| (d, Instant::now() + Duration::from_secs(3))),
+        dev_panels: PanelScript::from_env(),
         layout_discarded: false,
         windows: vec![{
             let mut w = WindowState::new(
@@ -10399,7 +10310,7 @@ fn main() {
                 )
                 .min()
                 .unwrap_or(Duration::from_secs(1));
-            let recv_timeout = if app.any_prediction_pending() {
+            let recv_timeout = if app.any_prediction_pending() || app.dev_panels.is_some() {
                 recv_timeout.min(Duration::from_millis(10))
             } else {
                 recv_timeout
@@ -10440,6 +10351,7 @@ fn main() {
         // endings were otherwise pinned only by unit tests that build
         // their own windows.  Unset in the installed app.
         app.dev_drive_drag();
+        app.dev_drive_panels();
         for wi in 0..app.windows.len() {
             app.tick_process_panel_kills(wi);
             let due = win!(app, wi)
