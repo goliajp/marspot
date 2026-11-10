@@ -10610,10 +10610,12 @@ fn main() {
     // thread simply stopped being scheduled.  Raising it to
     // USER_INTERACTIVE, same machine and load, seconds apart, both
     // orderings: p99 325 µs — the tail is gone.  See `marspot::qos`.
+    let role_ok = marspot::qos::take_application_role();
     let qos_ok = marspot::qos::raise_current_thread_to_user_interactive();
     lx_event!(
         "CORE_LOOP",
         "entering event loop (event-driven, no fixed cadence)",
+        app_role = role_ok as u32,
         qos_user_interactive = qos_ok as u32
     );
     // Self-reporting stalls.  A blocked iteration here freezes *every*
