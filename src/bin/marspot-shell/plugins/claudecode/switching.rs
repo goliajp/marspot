@@ -26,7 +26,7 @@ impl ClaudecodePlugin {
         if std::env::var_os("HOME").is_none() {
             return;
         }
-        let Some(usage) = marspot::cc_usage::read() else {
+        let Some(usage) = result.usage.as_ref() else {
             // No feed is not "all clear" — it is "no answer", and a
             // pane is not moved on no answer.
             return;
@@ -102,7 +102,7 @@ impl ClaudecodePlugin {
             // and effort cannot both be confirmed takes no part: it is
             // not judged and not moved, and nothing about it is assumed.
             let model = result.new_models.get(&sid).cloned();
-            let choice = pushed_choice(&meta.uuid);
+            let choice = result.choices.get(&sid).cloned().unwrap_or_default();
             if let Err(why) = confirm_choice(model.as_deref(), &choice) {
                 if self.unjudged.insert(sid) {
                     host.log(
