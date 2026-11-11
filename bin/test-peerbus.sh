@@ -212,7 +212,7 @@ for p in sorted(glob.glob(os.path.join(sys.argv[1], "*.json"))):
     r = json.load(open(p))
     if r.get("marspotOwner"):
         former = ",".join(f.get("name", "") for f in r.get("formerNames") or [])
-        print("\t".join(str(r.get(k, "")) for k in ("name", "marspotCodexPid", "sessionId", "messagingSocketPath")) + "\t" + former)
+        print("\t".join(str(r.get(k, "")) for k in ("name", "marspotAgentPid", "sessionId", "messagingSocketPath")) + "\t" + former)
 PY
 }
 name_of_pid() { # pid → name<TAB>former names<TAB>status, from any record
