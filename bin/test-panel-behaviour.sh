@@ -153,6 +153,13 @@ wait_for() { # tag, seconds
   return 1
 }
 
+wait_for CORE_BOOT 60 || fail "the core never booted"
+# Before the script has opened anything: what a first launch puts on
+# screen is the main window and nothing beside it.
+for (( i = 0; i < 50; i++ )); do dev_one_main_window && break; sleep 0.2; done
+dev_one_main_window || fail "on screen at launch, as '<layer> <size>' (want one line, layer 0): $(dev_windows_of "$(dev_shell_pid)" | tr '\n' ';')"
+echo "    one window on screen, the main one: $(dev_windows_of "$(dev_shell_pid)")"
+
 wait_for DEV_PANELS_DONE 90 || fail "the script never finished"
 # The last key has been queued, not yet delivered through the PTY.
 sleep 2
