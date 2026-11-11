@@ -74,6 +74,31 @@ const K_UC_KEY_TRANSLATE_NO_DEAD_KEYS_MASK: u32 = 1;
 /// `shift+1` is the `1` key, and `1` is what a program binding to it
 /// has to see.
 pub fn unshifted_char(key_code: u16) -> Option<char> {
+    typed_now(key_code, 0)
+}
+
+/// Carbon's Shift and Option, as `UCKeyTranslate` takes them.
+pub const SHIFT: u32 = 2;
+pub const OPTION: u32 = 8;
+
+/// The character a Cmd chord is named by.
+///
+/// With Cmd held the system reports what the key types as if Shift
+/// were not (`cmd_level`: `7` for Cmd-Shift-7), which is right for a
+/// letter a chord can name and hides every character a layout keeps
+/// on a shifted key.  For anything else, with Shift held, the chord is
+/// named by what the key types with Shift (`shifted`: `/` on a German
+/// layout, `9` on the AZERTY key that types `ç`).
+pub fn chord_char(cmd_level: Option<char>, shift: bool, shifted: impl FnOnce() -> Option<char>) -> Option<char> {
+    match cmd_level {
+        Some(c) if c.is_ascii_alphabetic() || !shift => Some(c),
+        other => shifted().or(other),
+    }
+}
+
+/// What this physical key types under the layout in use right now
+/// with `modifiers` held.
+pub fn typed_now(key_code: u16, modifiers: u32) -> Option<char> {
     /// See the module docs: concurrent Carbon calls here abort.
     static CARBON: Mutex<()> = Mutex::new(());
     // A poisoned lock would mean a previous caller panicked between
@@ -91,14 +116,17 @@ pub fn unshifted_char(key_code: u16) -> Option<char> {
         if source.is_null() {
             return None;
         }
-        let out = unshifted_from_source(source, key_code);
+        let out = typed_from_source(source, key_code, modifiers, LMGetKbdType() as u32);
         CFRelease(source.cast());
         out
     }
 }
 
+/// What `key_code` types under `source` with `modifiers` held (Carbon's
+/// modifier bits, shifted down a byte) on a keyboard of `kbd_type`.
+///
 /// SAFETY: `source` must be a live TIS input source.
-unsafe fn unshifted_from_source(source: *mut c_void, key_code: u16) -> Option<char> {
+unsafe fn typed_from_source(source: *mut c_void, key_code: u16, modifiers: u32, kbd_type: u32) -> Option<char> {
     // SAFETY: the property is a borrowed CFDataRef owned by `source`;
     // its bytes stay valid for as long as the caller holds `source`.
     unsafe {
@@ -119,8 +147,8 @@ unsafe fn unshifted_from_source(source: *mut c_void, key_code: u16) -> Option<ch
             layout,
             key_code,
             K_UC_KEY_ACTION_DISPLAY,
-            0, // no modifiers: this is the whole point
-            LMGetKbdType() as u32,
+            modifiers,
+            kbd_type,
             K_UC_KEY_TRANSLATE_NO_DEAD_KEYS_MASK,
             &mut dead_state,
             buf.len(),
@@ -203,6 +231,56 @@ pub const fn us_layout_char(key_code: u16) -> Option<char> {
         0x31 => ' ',
         _ => return None,
     })
+}
+
+/// The layouts Apple ships, read by name: what a key types under one
+/// of them, whatever layout the machine running the tests is set to.
+#[cfg(test)]
+pub(crate) mod installed {
+    use core_foundation::base::TCFType;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+
+    use super::*;
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        fn TISCreateInputSourceList(properties: *const c_void, include_all_installed: u8) -> *const c_void;
+        static kTISPropertyInputSourceID: *const c_void;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFArrayGetCount(array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
+    }
+
+    /// Carbon's Cmd, as `UCKeyTranslate` takes it.
+    pub const CMD: u32 = 1;
+    /// `LMGetKbdType` values of Apple's ANSI, ISO and JIS keyboards.
+    pub const ANSI: u32 = 40;
+    pub const ISO: u32 = 41;
+    pub const JIS: u32 = 42;
+
+    /// What `key_code` types under the layout `source_id` with
+    /// `modifiers` held.  Panics when the layout is not installed.
+    pub fn typed(source_id: &str, kbd_type: u32, key_code: u16, modifiers: u32) -> Option<char> {
+        static CARBON: Mutex<()> = Mutex::new(());
+        let _guard = CARBON.lock().unwrap_or_else(|e| e.into_inner());
+        let id = CFString::new(source_id);
+        // SAFETY: the list is a +1 array released below; the source is
+        // borrowed from it and used only while it is alive.
+        unsafe {
+            let key = CFString::wrap_under_get_rule(kTISPropertyInputSourceID.cast());
+            let filter = CFDictionary::from_CFType_pairs(&[(key, id)]);
+            let list = TISCreateInputSourceList(filter.as_concrete_TypeRef().cast(), 1);
+            assert!(!list.is_null() && CFArrayGetCount(list) > 0, "layout {source_id} is not installed");
+            let source = CFArrayGetValueAtIndex(list, 0) as *mut c_void;
+            let out = typed_from_source(source, key_code, modifiers, kbd_type);
+            CFRelease(list);
+            out
+        }
+    }
 }
 
 #[cfg(test)]

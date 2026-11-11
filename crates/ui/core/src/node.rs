@@ -120,6 +120,10 @@ pub mod flag {
     /// The fill is a plain hard-edged rectangle, painted through
     /// `PaintOut::solid_rect`.
     pub const FLAT: u16 = 1 << 7;
+    /// Interface text placed as a control's label is: by the rows
+    /// `TextMeasure::centring` gives for it instead of the cap height,
+    /// and a whole number of pixels from the top of its box.
+    pub const BY_INK: u16 = 1 << 8;
 }
 
 /// What positions, sizes and decorates a node.

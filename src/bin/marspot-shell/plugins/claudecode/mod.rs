@@ -58,7 +58,7 @@ use worker::*;
 use scan_result::*;
 use profile_tag::*;
 use records::*;
-use refusal::{last_quota_refusal, refused_since};
+use refusal::{last_agent_refusal, refused_since};
 use super::handoff::resume_word;
 
 use std::collections::HashMap;
@@ -2229,6 +2229,7 @@ type CcActivity = marspot::pane_state::Activity;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::refusal::last_quota_refusal;
 
     mod acting;
     mod refused;
@@ -2487,6 +2488,7 @@ mod tests {
             new_activity: HashMap::new(),
             new_cpu: HashMap::new(),
             new_vetoes: HashMap::new(),
+            agent_refused: HashMap::new(),
             scanned_at: SystemTime::now(),
             sessions_seen: vec![sid],
             log_lines: Vec::new(),
@@ -4434,6 +4436,7 @@ mod tests {
             new_activity: scan.new_activity.clone(),
             new_cpu: HashMap::new(),
             new_vetoes: HashMap::from([(1, (false, false))]),
+            agent_refused: HashMap::new(),
             scanned_at: SystemTime::now(),
             sessions_seen: vec![1],
             log_lines: Vec::new(),
@@ -4472,6 +4475,7 @@ mod tests {
             new_activity: first.new_activity.clone(),
             new_cpu: HashMap::new(),
             new_vetoes: HashMap::from([(1, (false, false))]),
+            agent_refused: HashMap::new(),
             scanned_at: SystemTime::now(),
             sessions_seen: vec![1],
             log_lines: Vec::new(),
@@ -4908,6 +4912,7 @@ mod tests {
             new_activity: HashMap::new(),
             new_cpu,
             new_vetoes: HashMap::from([(sid, (false, false))]),
+            agent_refused: HashMap::new(),
             scanned_at: SystemTime::now(),
             sessions_seen: vec![sid],
             log_lines: Vec::new(),
@@ -5133,6 +5138,7 @@ mod tests {
             new_activity: HashMap::new(),
             new_cpu: HashMap::new(),
             new_vetoes: HashMap::new(),
+            agent_refused: HashMap::new(),
             scanned_at: SystemTime::now(),
             sessions_seen: Vec::new(),
             log_lines: Vec::new(),

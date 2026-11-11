@@ -24,6 +24,8 @@
 //! | `click:pane-under` | clicks inside the open panel's frame, over a pane |
 //! | `click:pane` | clicks in the first pane |
 //! | `shift-click:<target>` | any of those clicks with shift held, the click a program that asked for mouse reports is sent |
+//! | `move:<target>` | moves the pointer there, pressing nothing |
+//! | `pointer-exit` | moves the pointer out of the window |
 //! | `drag:header:<dx>,<dy>` | drags the open panel by its header |
 //! | `scroll:<lines>` | turns the wheel |
 //! | `wait:<ms>` | does nothing for that long |
@@ -60,6 +62,8 @@ pub enum Step {
     Type(char),
     Click(Target),
     ShiftClick(Target),
+    Move(Target),
+    PointerExit,
     DragHeader(f64, f64),
     Scroll(f64),
     Wait(u64),
@@ -112,6 +116,8 @@ fn parse_step(text: &str) -> Result<Step, String> {
         ("button", "accounts") => Step::Button(SurfaceKind::Accounts),
         ("click", t) => Step::Click(parse_target(t).ok_or_else(bad)?),
         ("shift-click", t) => Step::ShiftClick(parse_target(t).ok_or_else(bad)?),
+        ("move", t) => Step::Move(parse_target(t).ok_or_else(bad)?),
+        ("pointer-exit", "") => Step::PointerExit,
         ("type", c) => {
             let mut chars = c.chars();
             match (chars.next(), chars.next()) {
@@ -283,6 +289,14 @@ impl Scene<'_> {
             Step::ShiftClick(target) => {
                 click(self.point(target)?, Modifiers { shift: true, ..Default::default() })
             }
+            Step::Move(target) => {
+                let (x, y) = self.point(target)?;
+                vec![Input::Move(x, y)]
+            }
+            Step::PointerExit => {
+                let (x, y) = crate::app_pointer::OUTSIDE;
+                vec![Input::Move(x, y)]
+            }
             Step::DragHeader(dx, dy) => {
                 let (x, y) = self.point(Target::Header)?;
                 vec![
@@ -440,6 +454,23 @@ mod tests {
         assert_eq!(chord("f12").0, ChordKey::Named(NamedKey::F12));
         assert_eq!(chord("up").0, ChordKey::Named(NamedKey::ArrowUp));
         assert_eq!(parse("key:esc").unwrap(), [ESC]);
+    }
+
+    #[test]
+    fn the_pointer_can_be_moved_onto_a_target_and_out_of_the_window() {
+        let l = layout();
+        let scene = Scene { layout: &l, chrome: Some(panel()), cell: CELL };
+        let steps = parse("move:close;pointer-exit").unwrap();
+        assert_eq!(steps, [Step::Move(Target::Close), Step::PointerExit]);
+        let at = |step| match scene.resolve(step).unwrap()[..] {
+            [Input::Move(x, y)] => (x, y),
+            ref other => panic!("{other:?}"),
+        };
+        let (x, y) = at(steps[0]);
+        assert!(panel().close.contains(x, y));
+        let (x, y) = at(steps[1]);
+        assert!(!(0.0..l.window_w).contains(&x) && !(0.0..l.window_h).contains(&y));
+        assert!(parse("pointer-exit:now").is_err() && parse("move:nowhere").is_err());
     }
 
     #[test]

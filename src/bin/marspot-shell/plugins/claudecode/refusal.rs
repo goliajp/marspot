@@ -3,10 +3,13 @@
 //! could not log in.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use super::model::short_model;
 use super::quota::{same_model, Room};
+use super::transcript::{record_type, top_level_str};
+use super::worker::WorkerCtx;
 
 /// When this session was last told by the API that it had reached a
 /// limit, as unix seconds.
@@ -44,6 +47,63 @@ pub(super) fn last_quota_refusal(tail: &str) -> Option<Refusal> {
         logged_out,
         window: if five_hour { Window::FiveHour } else { Window::Week },
     })
+}
+
+impl WorkerCtx {
+    /// The newest refusal known for this transcript: what the window
+    /// shows now, or what it showed when it was still in there.
+    ///
+    /// Kept rather than re-derived because the window moves -- see
+    /// `last_refusal` for how fast.
+    pub(super) fn remember_refusal(&mut self, path: &PathBuf, window: &str) -> Option<Refusal> {
+        if let Some(seen) = last_quota_refusal(window) {
+            let kept = self.last_refusal.entry(path.clone()).or_insert_with(|| seen.clone());
+            if seen.at > kept.at {
+                *kept = seen;
+            }
+        }
+        self.last_refusal.get(path).cloned()
+    }
+}
+
+/// The quota refusal a background agent of this session ended on, when
+/// that is the newest thing any of its background agents reported.
+///
+/// An agent runs inside claude and writes its own transcript; what the
+/// session's transcript gets is the notice the CLI queues when one
+/// stops: `<status>failed</status>` and, for an API error, the CLI's
+/// text for it with the model the request named. Only that queued
+/// record is read, never the same words quoted in a message.
+///
+/// A later notice from an agent that did not end this way -- finished,
+/// or waiting on work of its own -- is that work making progress, and
+/// then there is nothing to report. The model is empty when the notice
+/// names none.
+pub(super) fn last_agent_refusal(tail: &str) -> Option<Refusal> {
+    let (line, notice) = tail.lines().rev().find_map(|l| Some((l, agent_notice(l)?)))?;
+    if !(notice.contains("<status>failed</status>") && says_out_of_quota(notice)) {
+        return None;
+    }
+    const SENT: &str = "model sent to the API: ";
+    let model = notice.find(SENT).map(|i| &notice[i + SENT.len()..]).map_or(String::new(), |rest| {
+        short_model(&rest[..rest.find(')').unwrap_or(rest.len())])
+    });
+    let five_hour = ACCOUNT_WINDOWS[..2].iter().any(|w| notice.contains(w));
+    Some(Refusal {
+        at: record_timestamp(line)?,
+        model,
+        logged_out: false,
+        window: if five_hour { Window::FiveHour } else { Window::Week },
+    })
+}
+
+/// The text of a queued notice that a background agent stopped.
+fn agent_notice(line: &str) -> Option<&str> {
+    if record_type(line)? != "queue-operation" || top_level_str(line, "operation")? != "enqueue" {
+        return None;
+    }
+    top_level_str(line, "content")
+        .filter(|c| c.starts_with("<task-notification>") && c.contains("<summary>Agent "))
 }
 
 /// The CLI's error code for an account it could not log in to.

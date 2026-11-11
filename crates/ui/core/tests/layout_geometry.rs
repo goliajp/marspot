@@ -19,7 +19,7 @@ use golia_ui_core::{
 
 const METRICS: Metrics = Metrics { px_per_pt: 2.0, cell_w: 16.0, cell_h: 32.0, cell_ascent: 24.0 };
 const MEASURE: FakeMeasure =
-    FakeMeasure { px_per_pt: 2.0, advance_em: 0.5, cap_em: 1.6, line_em: 1.6, ascent_em: 1.2 };
+    FakeMeasure { advance_em: 0.5, cap_em: 1.6, line_em: 1.6, ascent_em: 1.2, ..FakeMeasure::new(2.0) };
 const BODY: TextFont = TextFont::Ui(FontSpec { size_q: 32, weight: 400, features: 0 });
 const INK: Ink = Ink::Role(0);
 

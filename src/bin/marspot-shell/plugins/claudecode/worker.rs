@@ -417,27 +417,6 @@ impl WorkerCtx {
     }
 }
 
-impl WorkerCtx {
-    /// The newest refusal known for this transcript: what the window
-    /// shows now, or what it showed when it was still in there.
-    ///
-    /// Kept rather than re-derived because the window moves -- see
-    /// `last_refusal` for how fast.
-    pub(super) fn remember_refusal(
-        &mut self,
-        path: &PathBuf,
-        window: &str,
-    ) -> Option<super::quota::Refusal> {
-        if let Some(seen) = super::last_quota_refusal(window) {
-            let kept = self.last_refusal.entry(path.clone()).or_insert_with(|| seen.clone());
-            if seen.at > kept.at {
-                *kept = seen;
-            }
-        }
-        self.last_refusal.get(path).cloned()
-    }
-}
-
 /// Worker thread entry.  Lives until the request channel is dropped
 /// (which `stop()` triggers by clearing `scan_req_tx`).
 pub(super) fn worker_main(
@@ -478,6 +457,7 @@ impl WorkerCtx {
         let scanned_at = SystemTime::now();
         let mut new_cpu: HashMap<u64, (u64, SystemTime)> = HashMap::new();
         let mut new_vetoes: HashMap<u64, (bool, bool)> = HashMap::new();
+        let mut agent_refused: HashMap<u64, super::quota::Refusal> = HashMap::new();
         self.caches.env.prune(obs);
         // Pass 1 — the per-pane facts, gathered before anything is
         // bound.  Binding needs to be a decision over the whole set:
@@ -779,6 +759,10 @@ impl WorkerCtx {
                 (Some(path), None) => self.last_refusal.get(path).cloned(),
                 (None, _) => None,
             };
+            // only what an agent of this process was told, as for the pane itself
+            if let Some(r) = super::refused_since(tail.as_deref().and_then(super::last_agent_refusal), f.claude_start) {
+                agent_refused.insert(f.shelld_sid, r);
+            }
             let mut work = work_in_flight(f.claude.pid, &obs.table);
             work.sort();
             if self.caches.work.get(&f.shelld_sid) != Some(&work) {
@@ -861,7 +845,7 @@ impl WorkerCtx {
         let (usage, choices) = quota_inputs(&new_meta);
         ScanResult {
             new_mapping, new_meta, new_activity, new_models, new_cpu, new_vetoes,
-            scanned_at, sessions_seen, log_lines, profiles, usage, choices,
+            scanned_at, sessions_seen, log_lines, profiles, usage, choices, agent_refused,
         }
     }
 }

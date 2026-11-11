@@ -680,7 +680,7 @@ struct ShellApp {
     /// the shell so `poll_supervisor` can recompute it from state
     /// transitions and call `presenter.set_banner` only when it
     /// actually changes.
-    banner_kind: Option<BannerKind>,
+    banner_kind: Option<banner::Shown>,
     /// This boot came up under the crash-loop brake: reattach only,
     /// spawn nothing fresh, restore no extra windows.  Read once from
     /// `MARSPOT_SAFE_MODE` (set in `main`, inherited by the core).
@@ -2019,20 +2019,20 @@ impl ShellApp {
         } else if self.auto_restart_disabled {
             Some(BannerKind::RestartsPaused)
         } else if !self.core_alive() && any_attached {
-            // Active core process is gone (just SIGKILL'd or died and we
-            // haven't respawned yet).  Show the recovering banner while
-            // the gap lasts.
+            // the active core is gone (killed, or died and not yet
+            // respawned): shown while the gap lasts
             Some(BannerKind::Recovering)
         } else {
             None
         };
+        let scale = ctx.scale();
+        let want = want.map(|kind| banner::Shown { kind, scale });
         if want == self.banner_kind {
             return;
         }
-        let scale = ctx.scale();
         for w in self.windows.iter_mut() {
             let Some(p) = w.presenter.as_mut() else { continue };
-            if let Err(e) = p.set_banner(want, scale) {
+            if let Err(e) = p.set_banner(want.map(|shown| shown.kind), scale) {
                 lx_warn!("shell.set_banner_failed", &e.to_string());
                 return;
             }
@@ -4224,7 +4224,7 @@ impl MarspotApp for ShellApp {
         // The shell owns the windows, so the one command that opens
         // one runs here; every other key is the core's to dispatch.
         if event.state == marspot::input::KeyState::Pressed
-            && let Some(row) = marspot::commands::for_key(&event.logical, mods)
+            && let Some(row) = marspot::commands::for_key(&event, mods)
             && row.command == marspot::commands::Command::NewWindow
         {
             self.open_new_window();

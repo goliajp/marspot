@@ -110,6 +110,7 @@ mod tests {
             warned: false,
             last_target: None,
             needs_model: None,
+            background_refused: None,
         }
     }
 

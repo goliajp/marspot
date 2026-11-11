@@ -269,6 +269,11 @@ impl At<'_, '_> {
         NodeId(self.n)
     }
 
+    /// Place the text as the label of a control: see `flag::BY_INK`.
+    pub fn by_ink(self) -> Self {
+        self.flag(flag::BY_INK, true)
+    }
+
     pub fn padding(self, e: Edges) -> Self {
         self.set(|n| n.style.padding = e)
     }
