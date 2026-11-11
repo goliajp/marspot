@@ -77,7 +77,7 @@ pub(crate) fn push_settings_panel_via_view(
 
 /// One slot of the settings panel: a group heading, its card, a row's
 /// label, cost and control, or the footer.
-fn paint_slot(p: &mut ViewPainter, sp: &SettingsRender, slot: Slot) {
+pub(crate) fn paint_slot(p: &mut ViewPainter, sp: &SettingsRender, slot: Slot) {
     match slot {
         Slot::Group { heading, x, top, w } => {
             panel_chrome::section_heading(p, x, top, w, heading, None);
