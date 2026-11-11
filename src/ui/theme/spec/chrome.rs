@@ -36,7 +36,7 @@ pub const TOOLBAR_GAP: f64 = window::ICON_BUTTON_LOGICAL_GAP;
 /// Corner radius of a toolbar button's hover and on fill.
 pub const TOOLBAR_RADIUS: f64 = 4.0;
 /// Side of the icon in a toolbar button.
-pub const TOOLBAR_ICON: f64 = 14.0;
+pub const TOOLBAR_ICON: f64 = 16.0;
 /// The version label's right edge to the window's.
 pub const VERSION_PAD_RIGHT: f64 = space::S12;
 
