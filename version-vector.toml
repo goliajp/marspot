@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.274"  # an idle notice follows a kimi turn too short to be seen running
+shell   = "0.7.275"  # a pane leaves a kimi account whose quota is used up
 core    = "0.12.305"  # one command table drives the keys, the menus and a shortcuts panel
 session = "0.11.157"  # a pane has ~/.kimi-code/bin on its PATH

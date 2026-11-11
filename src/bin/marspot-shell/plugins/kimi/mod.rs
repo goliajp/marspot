@@ -15,12 +15,13 @@ mod config;
 mod hand_off;
 mod pane;
 mod peer;
+mod quota;
 mod session;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use marspot::pane_state::Activity;
 use marspot_peer::envelope::Mode;
@@ -163,6 +164,9 @@ pub struct KimiPlugin {
     /// Panes that were woken for the mail now waiting, so one inbox is
     /// one line typed.
     woken: HashSet<u64>,
+    /// The accounts the service has refused, and the failed turns
+    /// already answered.
+    refusals: quota::Refusals,
 }
 
 impl KimiPlugin {
@@ -175,6 +179,7 @@ impl KimiPlugin {
             env: crate::observe::EnvCache::default(),
             before: HashMap::new(),
             woken: HashSet::new(),
+            refusals: quota::Refusals::default(),
         }
     }
 
@@ -239,6 +244,38 @@ impl KimiPlugin {
             }
         }
         self.woken.retain(|sid| self.panes.contains_key(sid));
+    }
+}
+
+impl KimiPlugin {
+    /// Move every pane whose last turn failed because its account's
+    /// quota is used up to another kimi account, once per failed turn.
+    /// With no other account open the pane stays, and that is said
+    /// once.
+    fn leave_refused_accounts(&mut self, host: &dyn PluginHost) {
+        let failed: Vec<(u64, PaneKimi, i64)> = self
+            .panes
+            .iter()
+            .filter_map(|(sid, p)| {
+                let failure = p.facts.as_ref()?.failure.as_ref().filter(|f| quota::is_quota(f))?;
+                Some((*sid, p.clone(), failure.turn))
+            })
+            .collect();
+        for (sid, pane, turn) in failed {
+            let Some(session) = pane.session.as_deref() else { continue };
+            let accounts = handoff::profiles(handoff::Agent::Kimi);
+            match self.refusals.verdict(sid, &pane.home, session, turn, &accounts, Instant::now()) {
+                quota::Verdict::Seen => {}
+                quota::Verdict::Stay => {
+                    host.log(LogLevel::Info, "quota.stay", &format!("sid={sid}: the account's quota is used up and no other kimi account is open"));
+                }
+                quota::Verdict::Move(n) => {
+                    host.log(LogLevel::Info, "quota.move", &format!("sid={sid}: the account's quota is used up; moving to profile {n}"));
+                    self.hand_off(host, sid, &pane, handoff::Agent::Kimi, n);
+                }
+            }
+        }
+        self.refusals.retain(|sid| self.panes.contains_key(&sid));
     }
 }
 
@@ -369,6 +406,7 @@ impl Plugin for KimiPlugin {
         }
         peers.bound.sort_by_key(|p| p.sid);
         peer::publish(peers);
+        self.leave_refused_accounts(host);
         self.wake(host);
 
         // kimi left these panes: clear the badge this plugin set, and
