@@ -18,6 +18,8 @@ impl super::super::CoreApp {
             // glyph choices, shaped lines and widths were made for the old language
             self.renderer.font_mut().follow_language();
             for w in self.windows.iter_mut() {
+                // an empty pane wrote its message into its grid in the old language
+                w.panes.iter_mut().for_each(|p| p.repaint_placeholder());
                 w.needs_render = true;
             }
         }

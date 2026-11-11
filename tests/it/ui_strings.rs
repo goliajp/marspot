@@ -197,6 +197,18 @@ fn typography_fault(s: &str, label: bool) -> Option<String> {
     None
 }
 
+/// The first place `s` puts a space between a kana or kanji and a
+/// half-width letter or digit, either way round.
+fn spaced_latin(s: &str) -> Option<String> {
+    let kana_or_kanji = |c: char| matches!(c as u32, 0x3041..=0x3096 | 0x30A1..=0x30FA | 0x30FC | 0x4E00..=0x9FFF);
+    let chars: Vec<char> = s.chars().collect();
+    chars.windows(3).find_map(|w| {
+        let apart = (kana_or_kanji(w[0]) && w[2].is_ascii_alphanumeric())
+            || (w[0].is_ascii_alphanumeric() && kana_or_kanji(w[2]));
+        (w[1] == ' ' && apart).then(|| w.iter().collect())
+    })
+}
+
 #[test]
 fn every_message_has_text_in_every_language() {
     for lang in LangId::ALL {
@@ -257,7 +269,23 @@ fn translations_follow_cjk_typography() {
             }
         }
     }
+    // Japanese sets no space between kana or kanji and half-width
+    // letters or digits inside a phrase; the one place it does is
+    // before a date and time.
+    for m in ALL {
+        if let Some(pair) = spaced_latin(text_in(LangId::Ja, *m)) {
+            faults.push(format!("Ja {m:?}: a space in {pair:?}"));
+        }
+    }
+    for (arg, _, _) in SAMPLES {
+        let dated = matches!(arg, Arg::ResetAt(_) | Arg::UpdatedAt(_));
+        if let Some(pair) = spaced_latin(&written_in(LangId::Ja, *arg)).filter(|_| !dated) {
+            faults.push(format!("Ja {arg:?}: a space in {pair:?}"));
+        }
+    }
     assert!(faults.is_empty(), "\n  {}", faults.join("\n  "));
+    assert!(spaced_latin("ペイン 1").is_some() && spaced_latin("Marspot について").is_some());
+    assert!(spaced_latin("ペイン1").is_none() && spaced_latin("4 × 1 = 4ペイン").is_none());
 
     // the check finds what it is for
     assert!(typography_fault("设置。", true).is_some(), "a label with a full stop");

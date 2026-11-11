@@ -10,14 +10,14 @@ pub(super) static LANG: Lang = Lang { text, write };
 
 fn text(m: Msg) -> &'static str {
     match m {
-        Msg::SettingsIdleReclamation => "闲置回收",
+        Msg::SettingsIdleReclamation => "闲置休眠",
         Msg::SettingsAppearance => "外观",
         Msg::SettingsClaudeCode => "Claude Code",
         Msg::SettingsScrolling => "滚动",
 
-        Msg::ReclaimIdlePanes => "回收闲置的 claude 窗格",
+        Msg::ReclaimIdlePanes => "休眠闲置的 Claude 窗格",
         Msg::IdleFor => "闲置时长",
-        Msg::WarmUpOnReturn => "返回时预热",
+        Msg::WarmUpOnReturn => "返回时依次恢复",
         Msg::Theme => "主题",
         Msg::DimOtherPanes => "调暗非当前窗格",
         Msg::CircledDigitsWide => "带圈数字占两格",
@@ -26,18 +26,16 @@ fn text(m: Msg) -> &'static str {
 
         Msg::CostReclaimIdlePanes => "返回窗格时，重新载入会话约需 3 秒。",
         Msg::CostIdleFor => "按会话记录的更新时间判断，而非终端是否安静。",
-        Msg::CostWarmUpOnReturn => "返回时，每秒唤醒一个已休眠的窗格。",
+        Msg::CostWarmUpOnReturn => "返回时，每秒恢复一个已休眠的窗格。",
         Msg::CostTheme => "已取得旧颜色的程序会沿用旧颜色，直到再次查询。",
         Msg::CostDimOtherPanes => "调得越暗，越容易一眼看出差别；过暗则难以阅读。",
         Msg::CostCircledDigitsWide => "宽度与中日韩文字一致，但换行位置可能提前一列。",
-        Msg::CostClaudeCodeReportsModel => {
-            "在 Claude Code 的设置中添加状态行；已有的状态行会保留并可恢复。"
-        }
+        Msg::CostClaudeCodeReportsModel => "在 Claude Code 的设置中添加状态行；原有的状态行继续生效，关闭此项后恢复原状。",
         Msg::CostWheelSpeed => "越快越省滑动次数，但也越容易滚过头。",
 
         Msg::MenuCopy => "拷贝",
         Msg::MenuPaste => "粘贴",
-        Msg::MenuClearScrollback => "清除回滚内容",
+        Msg::MenuClearScrollback => "清除回滚",
         Msg::MenuClosePane => "关闭窗格",
 
         Msg::CmdAbout => "关于 Marspot",
@@ -53,7 +51,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CmdToggleSidebar => "显示或隐藏边栏",
         Msg::CmdLayout => "布局",
         Msg::CmdProcesses => "进程监视器",
-        Msg::CmdAccounts => "智能体账户",
+        Msg::CmdAccounts => "Agent 账户",
         Msg::CmdFullScreen => "进入或退出全屏幕",
         Msg::CmdMinimize => "最小化",
         Msg::CmdPrevPane => "上一个窗格",
@@ -78,7 +76,7 @@ fn text(m: Msg) -> &'static str {
         Msg::PanelShortcuts => "键盘快捷键",
         Msg::PanelSettings => "设置",
         Msg::PanelProcesses => "进程监视器",
-        Msg::PanelAccounts => "智能体账户",
+        Msg::PanelAccounts => "Agent 账户",
 
         Msg::Idle15m => "15 分钟",
         Msg::Idle30m => "30 分钟",
@@ -91,7 +89,7 @@ fn text(m: Msg) -> &'static str {
         Msg::DimNormal => "标准",
         Msg::DimDeep => "明显",
 
-        Msg::ThemeSystem => "跟随系统",
+        Msg::ThemeSystem => "系统",
         Msg::ThemeDark => "深色",
         Msg::ThemeLight => "浅色",
         Msg::ThemeContrast => "高对比度",
@@ -133,13 +131,11 @@ fn text(m: Msg) -> &'static str {
 
         Msg::AccountsHeading => "账户",
         Msg::AccountsAvailability => "可用时间",
-        Msg::AccountsEmpty => {
-            "尚未读取到用量。在窗格中登录 claude 或 codex 后，几分钟内会显示在这里。"
-        }
+        Msg::AccountsEmpty => "暂无用量数据。在窗格中登录 Claude 或 Codex 后，几分钟内会在此显示。",
         Msg::TimelineNow => "现在",
         Msg::StatusOk => "正常",
-        Msg::StatusNear => "将满",
-        Msg::StatusLimit => "已满",
+        Msg::StatusNear => "快用完",
+        Msg::StatusLimit => "已用完",
         Msg::StatusNoKey => "未登录",
 
         Msg::PaneEmpty => "点按以启动 Shell",
@@ -169,12 +165,12 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::ProcessDetail { pane, sid, shell_pid } => {
             write!(out, "{pane} · sid {sid} · Shell pid {shell_pid}")
         }
-        Arg::ResetAt(at) => write!(out, "重置 {at}"),
+        Arg::ResetAt(at) => write!(out, "重置：{at}"),
         Arg::UpdatedAt(at) => write!(out, "更新于 {at}"),
         Arg::SessionStarting(id) => write!(out, "会话 {id} 正在启动…"),
         Arg::SessionUnavailable(id) => write!(out, "会话 {id} 不可用，按任意键重试"),
-        Arg::ProfileRow { n, current: true } => write!(out, "● 配置 {n}"),
-        Arg::ProfileRow { n, current: false } => write!(out, "   配置 {n}"),
+        Arg::ProfileRow { n, current: true } => write!(out, "● 账户 {n}"),
+        Arg::ProfileRow { n, current: false } => write!(out, "   账户 {n}"),
         Arg::HandOffTo(target) => write!(out, "交接给 {target}"),
         Arg::SwitchToProfile(n) => write!(out, "切换到 P{n}"),
     }

@@ -149,7 +149,7 @@ impl VacantPane {
         let mut grid = Grid::new(cols.max(20), rows.max(3));
         let msg = t(Msg::PaneEmpty);
         let row = (grid.rows() / 2).min(grid.rows().saturating_sub(1));
-        let start = grid.cols().saturating_sub(crate::pane_message::width(msg)) / 2;
+        let start = grid.cols().saturating_sub(crate::pane_message::centring_width(msg)) / 2;
         crate::pane_message::put(&mut grid, start, row, msg);
         Self {
             session_id: 0,
@@ -185,6 +185,11 @@ impl VacantPane {
         let mut grid = Grid::new(cols.max(20), rows.max(3));
         Self::paint_message(&mut grid, self.session_id, self.pending);
         self.grid = grid;
+    }
+
+    fn repaint(&mut self) {
+        let (cols, rows) = (self.grid.cols(), self.grid.rows());
+        if self.dormant { self.grid = Self::new_dormant(cols, rows).grid } else { self.resize(cols, rows) }
     }
 }
 
@@ -1621,6 +1626,11 @@ impl Pane {
     }
 
     /// RFC-006 — the placeholder a moved-out pane leaves behind.
+    /// An empty pane's placeholder again, after a language change.
+    pub fn repaint_placeholder(&mut self) {
+        if let PaneBackend::Vacant(v) = &mut self.session { v.repaint() }
+    }
+
     pub fn new_dormant(cols: u16, rows: u16) -> Self {
         Self {
             session: PaneBackend::Vacant(VacantPane::new_dormant(cols, rows)),

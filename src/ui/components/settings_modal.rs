@@ -890,6 +890,23 @@ mod tests {
     /// than failed if the font stack will not build.
     #[test]
     fn the_real_font_fits_the_boxes_drawn_for_it() {
+        real_font_fits();
+    }
+
+    /// The same in Japanese and in Chinese: a description a translator
+    /// wrote one clause too long runs out of its card, and only real
+    /// metrics of the real font can say so.
+    #[test]
+    fn the_real_font_fits_the_boxes_drawn_for_it_in_japanese() {
+        crate::snapshot_kit::in_language(marspot_term::language::LangId::Ja, real_font_fits);
+    }
+
+    #[test]
+    fn the_real_font_fits_the_boxes_drawn_for_it_in_chinese() {
+        crate::snapshot_kit::in_language(marspot_term::language::LangId::ZhHans, real_font_fits);
+    }
+
+    fn real_font_fits() {
         let _scale = scale_guard();
         let Ok(mut font) = crate::font_cache::FontCache::build() else {
             eprintln!("no font stack; skipping");
@@ -915,14 +932,22 @@ mod tests {
                     let text_left = card.x + ui_spec::card::ROW_PAD_X * px;
                     // The cost line is the long text in this panel: it
                     // must fit the card, or it runs out of the box.
-                    let cost_w = m(t(spec.cost), metric::DESC.pt(), metric::DESC.weight());
-                    assert!(
-                        text_left + cost_w <= card.x + card.w - ui_spec::card::ROW_PAD_X * px,
-                        "{:?}: cost line needs {:.0}pt and the card gives {:.0}pt",
-                        row,
-                        cost_w / px,
-                        (card.w - 2.0 * ui_spec::card::ROW_PAD_X * px) / px,
-                    );
+                    let room = card.w - 2.0 * ui_spec::card::ROW_PAD_X * px;
+                    // the language row has a second line it can show
+                    let costs = [Some(spec.cost), (*row == Row::Language).then_some(Msg::CostLanguageRelaunch)];
+                    for cost in costs.into_iter().flatten() {
+                        let cost_w = m(t(cost), metric::DESC.pt(), metric::DESC.weight());
+                        assert!(
+                            cost_w <= room,
+                            "{row:?}: {:?} needs {:.0}pt and the card gives {:.0}pt",
+                            t(cost),
+                            cost_w / px,
+                            room / px,
+                        );
+                    }
+                    // the check can fail: a line and a half does not fit
+                    let long = format!("{0}{0}", t(Msg::CostClaudeCodeReportsModel));
+                    assert!(m(&long, metric::DESC.pt(), metric::DESC.weight()) > room, "{long:?} fits");
                     // The label and the control share one line and must
                     // not collide.
                     let label_w = m(t(spec.label), metric::LABEL.pt(), metric::LABEL.weight());

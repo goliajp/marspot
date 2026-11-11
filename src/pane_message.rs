@@ -7,6 +7,15 @@ pub fn width(text: &str) -> u16 {
     text.chars().map(|ch| char_width(ch) as u16).sum()
 }
 
+/// The width a line of `text` is centred by.  Cells, for text with a
+/// wide character in it.  Text without one keeps the width it has
+/// always been centred by, its length in bytes, so a line that was on
+/// screen before wide text could be does not move.
+pub fn centring_width(text: &str) -> u16 {
+    let cells = width(text);
+    if cells as usize == text.chars().count() { text.len() as u16 } else { cells }
+}
+
 /// Write `text` into `row` from `col`, stopping at the last column a
 /// whole character fits in.  A wide character takes its cell and the
 /// one after it, as it does when a program prints it.
