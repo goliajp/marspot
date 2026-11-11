@@ -686,25 +686,22 @@ fn build_model_view() -> crate::ui::view::View {
     let color = crate::ui::theme::current();
     use crate::ui::core::{Length, Color};
 
-    // Helpers using TextStyle tokens (P3l) ----------------------
-    let h1   = |s: &str| Text::new(s).style(text::header()).build();
-    let body = |s: &str| Text::new(s).style(text::body()).build();
-    let mono = |s: &str| Text::new(s).style(text::code()).build();
-    let hint = |s: &str| Text::new(s).style(text::hint()).build();
-
-    let mk_swatch = |c| {
-        filled(c).corner_radius(radius::SM).frame(FrameSpec {
-            width:  Some(Length::Pt(14.0)),
-            height: Some(Length::Pt(14.0)),
-            ..Default::default()
-        })
-    };
+    // every label below goes through one copy of its construction
+    #[inline(never)]
+    fn styled(s: &str, style: crate::ui::view::TextStyle) -> crate::ui::view::View { Text::new(s).style(style).build() }
+    #[inline(never)]
+    fn tinted(s: &str, c: Color) -> crate::ui::view::View { Text::new(s).color(c).build() }
+    let h1   = |s: &str| styled(s, text::header());
+    let body = |s: &str| styled(s, text::body());
+    let mono = |s: &str| styled(s, text::code());
+    let hint = |s: &str| styled(s, text::hint());
+    let mk_swatch = h::swatch;
 
     // Status hints — colored tags so reader sees what's live vs
     // planned at a glance.  Mark per line with [✓] / [v1 待补] / [v2+].
-    let ok      = |s: &str| Text::new(s).color(color.success).build();
-    let todo_v1 = |s: &str| Text::new(s).color(color.warn).build();
-    let todo_v2 = |s: &str| Text::new(s).style(text::hint()).build();
+    let ok      = |s: &str| tinted(s, color.success);
+    let todo_v1 = |s: &str| tinted(s, color.warn);
+    let todo_v2 = hint;
 
     // ── Visual demo helpers — used multiple times below ──────
     // Length demo bar of given width pt + label.
