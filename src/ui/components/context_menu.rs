@@ -477,4 +477,26 @@ mod tests {
         // Wide label hits the MENU_MAX_W cap.
         assert!((m.frame.w - MENU_MAX_W_LOGICAL).abs() < 0.5);
     }
+
+    /// The menu has one unit of length, the window unit — half a panel
+    /// point — whatever the canvas it is drawn on calls it, and its
+    /// labels are in points: a row holds the same label, with the same
+    /// room around it, at every scale.
+    #[test]
+    fn a_menu_unit_is_a_window_unit_at_every_scale() {
+        use crate::ui::core::{Canvas, Length, ParentRect};
+        use crate::ui::theme::spec::{self, chrome};
+        for scale in [1.0, 2.0] {
+            crate::ui::components::density_kit::at_scale(scale, || {
+                let canvas = Canvas::new(crate::ui::chrome_scale(), ParentRect::window(100.0, 100.0));
+                assert_eq!(Length::Pt(1.0).resolve_for_axis(0.0, canvas.scale), chrome::px(1.0));
+                assert_eq!(2.0 * chrome::px(1.0), spec::px(1.0), "two window units to the panel point");
+                let m = ContextMenu::layout(4000.0, 4000.0, crate::ui::chrome_scale(), 100.0, 100.0, 0.0, &sample_items());
+                assert_eq!(m.item_rects[0].h, chrome::px(chrome::MENU_ROW_H));
+                // a label's capitals, in points, against the row, in window units
+                let cap = spec::px(crate::ui::theme::PanelText::Item.cap());
+                assert_eq!(m.item_rects[0].h / cap, chrome::MENU_ROW_H / (2.0 * crate::ui::theme::PanelText::Item.cap()));
+            });
+        }
+    }
 }
