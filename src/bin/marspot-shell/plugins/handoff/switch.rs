@@ -364,7 +364,7 @@ mod tests {
         assert_eq!(resumable(&o.next, Agent::Kimi, &home, None).as_deref(), Some(ID));
         assert_eq!(resumable(&o.next, Agent::Kimi, &tmp("switch-kimi-other"), None), None, "another account's home does not hold it");
         let s = |b: Vec<u8>| String::from_utf8(b).unwrap();
-        let line = s(command(Agent::Kimi, Path::new("/Users/x/.kimi-code-profile-2"), Some(ID)).unwrap());
+        let line = s(command(Agent::Kimi, Path::new("/Users/x/.kimi-code-profile-2"), Some(ID), None).unwrap());
         assert!(line.contains("KIMI_CODE_HOME='/Users/x/.kimi-code-profile-2'") && line.ends_with(&format!(" kimi --session {ID}\r")), "{line}");
         assert_eq!(target_name(Agent::Kimi, 0), "kimi");
     }
