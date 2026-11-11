@@ -19,12 +19,13 @@ use crate::ui::components::controls;
 use crate::ui::components::panel_chrome::{self, PanelChrome};
 use crate::ui::components::surface_stack;
 use crate::ui::components::table::{self, Align, Column, ColumnWidth, SortDir, TableGeometry};
+use crate::ui::strings::{t, Msg};
 use crate::ui::theme::spec::{self, space};
 
 /// The panel's name, in its header.
-pub const TITLE: &str = "Process monitor";
-pub const PANES_HEADING: &str = "Panes";
-pub const PROCESSES_HEADING: &str = "Processes";
+pub const TITLE: Msg = Msg::PanelProcesses;
+pub const PANES_HEADING: Msg = Msg::ProcessPanes;
+pub const PROCESSES_HEADING: Msg = Msg::ProcessProcesses;
 
 /// The panel's own measurements.  Widths of table columns are in
 /// terminal cells, like everything else about a table.
@@ -65,15 +66,15 @@ pub mod col {
 pub fn pane_columns() -> [Column; 4] {
     use metric::*;
     [
-        Column { header: "Pane", width: ColumnWidth::Flex, align: Align::Left, sort: None },
-        Column { header: "pids", width: ColumnWidth::Cells(COUNT_CELLS), align: Align::Right, sort: None },
+        Column { header: t(Msg::ColPane), width: ColumnWidth::Flex, align: Align::Left, sort: None },
+        Column { header: t(Msg::ColPids), width: ColumnWidth::Cells(COUNT_CELLS), align: Align::Right, sort: None },
         Column {
-            header: "CPU%",
+            header: t(Msg::ColCpu),
             width: ColumnWidth::Cells(CPU_CELLS),
             align: Align::Right,
             sort: Some(SortDir::Desc),
         },
-        Column { header: "RSS", width: ColumnWidth::Cells(RSS_CELLS), align: Align::Right, sort: None },
+        Column { header: t(Msg::ColRss), width: ColumnWidth::Cells(RSS_CELLS), align: Align::Right, sort: None },
     ]
 }
 
@@ -82,10 +83,10 @@ pub fn pane_columns() -> [Column; 4] {
 pub fn process_columns(kill_w: f64) -> [Column; 5] {
     use metric::*;
     [
-        Column { header: "Process", width: ColumnWidth::Flex, align: Align::Left, sort: None },
-        Column { header: "pid", width: ColumnWidth::Cells(PID_CELLS), align: Align::Right, sort: None },
-        Column { header: "CPU%", width: ColumnWidth::Cells(CPU_CELLS), align: Align::Right, sort: None },
-        Column { header: "RSS", width: ColumnWidth::Cells(RSS_CELLS), align: Align::Right, sort: None },
+        Column { header: t(Msg::ColProcess), width: ColumnWidth::Flex, align: Align::Left, sort: None },
+        Column { header: t(Msg::ColPid), width: ColumnWidth::Cells(PID_CELLS), align: Align::Right, sort: None },
+        Column { header: t(Msg::ColCpu), width: ColumnWidth::Cells(CPU_CELLS), align: Align::Right, sort: None },
+        Column { header: t(Msg::ColRss), width: ColumnWidth::Cells(RSS_CELLS), align: Align::Right, sort: None },
         Column { header: "", width: ColumnWidth::Px(kill_w), align: Align::Right, sort: None },
     ]
 }

@@ -18,6 +18,7 @@ use crate::ui::components::controls;
 use crate::ui::components::panel_chrome::{self, PanelChrome};
 use crate::ui::components::panel_palette as palette;
 use crate::ui::core::view::ViewPainter;
+use crate::ui::strings::{self, Msg};
 use crate::ui::theme::{spec, PanelText};
 use golia_ui_core::scene::{GlyphInstance, RectInstance as CellInstance, UiRectInstance};
 
@@ -48,7 +49,7 @@ pub(crate) fn push_cc_usage_via_view(
     let cell = Cell { w: cell_w as f64, h: cell_h as f64, ascent: ascent as f64 };
     let chrome = PanelChrome::new(cc.rect, top_inset);
     let meta = (!cc.updated_label.is_empty()).then_some(cc.updated_label.as_str());
-    chrome.paint(&mut painter, metric::TITLE, meta, cc.hover == Hover::Close, |p, content| {
+    chrome.paint(&mut painter, strings::t(metric::TITLE), meta, cc.hover == Hover::Close, |p, content| {
         if cc.accounts.is_empty() {
             paint_empty(p, content);
             return;
@@ -57,14 +58,14 @@ pub(crate) fn push_cc_usage_via_view(
         let l = layout(content, cell, &shape);
         let count = cc.accounts.len().to_string();
         panel_chrome::section_heading(
-            p, content.x, l.heading_top, content.w, metric::ACCOUNTS_HEADING, Some(&count),
+            p, content.x, l.heading_top, content.w, strings::t(metric::ACCOUNTS_HEADING), Some(&count),
         );
         for (account, card) in cc.accounts.iter().zip(&l.cards) {
             paint_card(p, account, *card, cell, shape.window_rows);
         }
         if let Some(t) = &l.timeline {
             panel_chrome::section_heading(
-                p, content.x, t.heading_top, content.w, metric::TIMELINE_HEADING, None,
+                p, content.x, t.heading_top, content.w, strings::t(metric::TIMELINE_HEADING), None,
             );
             paint_timeline(p, cc, t, cell);
         }
@@ -113,7 +114,7 @@ fn paint_bar(p: &mut ViewPainter, rect: Rect, used: f64, util: f32) {
 /// The sentence shown before either feed has been read, in the middle
 /// of the content area.
 fn paint_empty(p: &mut ViewPainter, content: Rect) {
-    let text = fit_role(p, metric::EMPTY, metric::EMPTY_TEXT, content.w);
+    let text = fit_role(p, metric::EMPTY, strings::t(metric::EMPTY_TEXT), content.w);
     let w = p.panel_text_width(metric::EMPTY, &text) as f64;
     let baseline = p.ui_baseline_centred(content.y_top as f32, content.h as f32, metric::EMPTY.pt());
     p.panel_text(
@@ -204,7 +205,7 @@ fn paint_timeline(p: &mut ViewPainter, cc: &CcUsageRender, t: &Timeline, cell: C
         Rect { x: now_x, y_top: line_top, w: spec::px(metric::NOW_W), h: t.rows_bottom() - line_top },
         palette::now(), 0.0, (palette::none(), 0.0),
     );
-    let label = "NOW";
+    let label = strings::t(Msg::TimelineNow);
     let w = cell.text_w(label);
     let x = (now_x - w * 0.5).clamp(t.left, (t.right - w).max(t.left));
     mono(p, cell, x, t.now_top, cell.h, label, palette::now());

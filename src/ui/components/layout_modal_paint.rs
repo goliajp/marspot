@@ -16,6 +16,7 @@ use crate::ui::components::layout_modal::{
 use crate::ui::components::panel_chrome;
 use crate::ui::components::panel_palette as palette;
 use crate::ui::core::view::ViewPainter;
+use crate::ui::strings::t;
 use crate::ui::theme::spec::{self, card};
 use golia_ui_core::scene::{GlyphInstance, RectInstance as CellInstance, UiRectInstance};
 
@@ -75,10 +76,10 @@ pub(crate) fn push_layout_modal_via_view(
             window_w, window_h, top_inset, state.cols, state.rows, label_w, &mut m, state.offset,
         )
     };
-    modal.chrome.paint(&mut painter, lm::TITLE, None, state.hover == Hover::Close, |p, content| {
+    modal.chrome.paint(&mut painter, t(lm::TITLE), None, state.hover == Hover::Close, |p, content| {
         paint_grid_group(p, &modal, state, content);
         panel_chrome::section_heading(
-            p, content.x, modal.arrangement_heading_top, content.w, lm::ARRANGEMENT_HEADING, None,
+            p, content.x, modal.arrangement_heading_top, content.w, t(lm::ARRANGEMENT_HEADING), None,
         );
         paint_cards(p, &modal, state);
         let baseline = p.ui_baseline_centred(
@@ -92,7 +93,7 @@ pub(crate) fn push_layout_modal_via_view(
             palette::fg_muted(),
         );
         controls::paint_button(
-            p, modal.apply_btn, lm::APPLY, ButtonKind::Primary, state.hover == Hover::Apply, false,
+            p, modal.apply_btn, t(lm::APPLY), ButtonKind::Primary, state.hover == Hover::Apply, false,
         );
         paint_lifted_card(p, &modal, state);
     });
@@ -102,7 +103,7 @@ pub(crate) fn push_layout_modal_via_view(
 /// axis.
 fn paint_grid_group(p: &mut ViewPainter, modal: &LayoutModal, state: &LayoutModalRender, content: Rect) {
     panel_chrome::section_heading(
-        p, content.x, modal.grid_heading_top, content.w, lm::GRID_HEADING, None,
+        p, content.x, modal.grid_heading_top, content.w, t(lm::GRID_HEADING), None,
     );
     panel_chrome::card(p, modal.grid_card);
     for (row, value) in modal.rows.iter().zip([state.cols, state.rows]) {
@@ -113,7 +114,7 @@ fn paint_grid_group(p: &mut ViewPainter, modal: &LayoutModal, state: &LayoutModa
             metric::ROW_LABEL,
             (row.band.x + spec::px(card::ROW_PAD_X)) as f32,
             baseline,
-            row.axis.label(),
+            t(row.axis.label()),
             palette::fg(),
         );
         let hovered = match state.hover {
