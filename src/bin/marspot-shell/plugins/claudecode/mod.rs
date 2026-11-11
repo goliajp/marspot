@@ -178,8 +178,8 @@ impl ShelldClient {
     }
 }
 
-use crate::plugins::pidtree;
-use crate::plugins::pty_op;
+use crate::plugins::{pidtree, pty_op};
+use marspot::ui::strings::{self, t, Arg, Msg};
 use crate::plugins::{
     LogLevel, Plugin, PluginError, PluginHost, PluginMetadata,
     PLUGIN_API_VERSION,
@@ -1343,7 +1343,7 @@ impl ClaudecodePlugin {
                 "cycle.no_target",
                 &format!("pane {shelld_sid} stays on P{}: {why}", meta.profile_num),
             );
-            let badge = if usage.is_some() { "⚠ no account free" } else { "⚠ no usage data" };
+            let badge = t(if usage.is_some() { Msg::BadgeNoAccountFree } else { Msg::BadgeNoUsageData });
             let _ = host.submit_pty_op(shelld_sid, cycle_blocked_op(badge));
             return;
         };
@@ -1377,7 +1377,7 @@ impl ClaudecodePlugin {
                     choice.model
                 ),
             );
-            let _ = host.submit_pty_op(sid, cycle_blocked_op("⚠ model unknown"));
+            let _ = host.submit_pty_op(sid, cycle_blocked_op(t(Msg::BadgeModelUnknown)));
             return;
         }
         // The person may switch away from a turn that was cut off by the
@@ -1446,7 +1446,7 @@ impl ClaudecodePlugin {
                     meta.uuid, h.id.pid
                 ),
             );
-            if let Err(e) = host.submit_pty_op(shelld_sid, cycle_blocked_op("⚠ held by bg job")) {
+            if let Err(e) = host.submit_pty_op(shelld_sid, cycle_blocked_op(t(Msg::BadgeHeldByBgJob))) {
                 host.log(
                     LogLevel::Warn,
                     "cycle.blocked_badge_failed",
@@ -1789,7 +1789,7 @@ fn badge_menu_for(
         .filter(|&n| n != current)
         .map(|n| marspot::shell_proto::PaneBadgeMenuItem {
             tag: n as u32,
-            label: format!("switch to P{}", n),
+            label: strings::text(Arg::SwitchToProfile(n)),
         })
         .collect()
 }

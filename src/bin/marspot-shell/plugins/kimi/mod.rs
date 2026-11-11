@@ -30,6 +30,7 @@ use marspot_peer::registry::Status;
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_API_VERSION};
 use crate::observe::Proc;
 use crate::plugins::{handoff, pidtree, pty_op};
+use marspot::ui::strings::{self, Arg};
 
 use badge::{badge_text, publish_badge};
 use pane::{home_from, profile_of};
@@ -342,7 +343,7 @@ impl Plugin for KimiPlugin {
             .iter()
             .map(|(n, _)| marspot::shell_proto::PaneBadgeMenuItem {
                 tag: handoff::tag_for(handoff::Agent::Kimi, *n),
-                label: if pane.profile == Some(*n) { format!("● profile {n}") } else { format!("   profile {n}") },
+                label: strings::text(Arg::ProfileRow { n: *n, current: pane.profile == Some(*n) }),
             })
             .collect();
         rows.extend(handoff::menu_rows(handoff::Agent::Kimi));

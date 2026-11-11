@@ -18,6 +18,7 @@ use super::tags::tag_for;
 use super::{carried, claude, codex as codex_history, gemini as gemini_history, history, kimi as kimi_history};
 use crate::plugins::pty_op::{self, PtyCommand, PtyOp, Step};
 use crate::plugins::{claudecode, codex, gemini, kimi, pidtree};
+use marspot::ui::strings::{self, Arg};
 
 /// An agent's account profiles: number and directory.  gemini or kimi
 /// with no numbered profile has its default home, as number 0.
@@ -51,7 +52,7 @@ pub fn menu_rows(from: Agent) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
     let rows = |to: Agent| {
         profiles(to).into_iter().map(move |(n, _)| marspot::shell_proto::PaneBadgeMenuItem {
             tag: tag_for(to, n),
-            label: format!("hand off to {}", target_name(to, n)),
+            label: strings::text(Arg::HandOffTo(&target_name(to, n))),
         })
     };
     from.others().into_iter().flat_map(rows).collect()

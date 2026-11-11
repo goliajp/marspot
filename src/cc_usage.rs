@@ -124,10 +124,10 @@ impl CcStatusKind {
     /// email to its left.
     pub fn label(self, raw: &str) -> String {
         match self {
-            Self::Ok => "ok".into(),
-            Self::Warn => "near".into(),
-            Self::Limited => "limit".into(),
-            Self::NoToken => "no key".into(),
+            Self::Ok => crate::ui::strings::t(crate::ui::strings::Msg::StatusOk).into(),
+            Self::Warn => crate::ui::strings::t(crate::ui::strings::Msg::StatusNear).into(),
+            Self::Limited => crate::ui::strings::t(crate::ui::strings::Msg::StatusLimit).into(),
+            Self::NoToken => crate::ui::strings::t(crate::ui::strings::Msg::StatusNoKey).into(),
             // Unknown status: surface the source string, truncated to
             // the reserved slot so a future value can't break layout.
             Self::Other => raw.chars().take(7).collect(),

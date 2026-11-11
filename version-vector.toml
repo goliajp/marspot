@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.276"  # kimi panes are recognised, badged, handed over and reachable by other agents
-core    = "0.12.308"  # panel, menu and placeholder text comes from the string catalogue
+shell   = "0.7.277"  # badge warnings and badge-menu rows come from the string catalogue
+core    = "0.12.309"  # account status words come from the string catalogue
 session = "0.11.158"  # a pane has ~/.kimi-code/bin on its PATH
