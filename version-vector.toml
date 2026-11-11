@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.285"  # a window moved to a display of another density is redrawn for it
-core    = "0.12.317"  # text and every size are the same at any display scale, and a label sits in the middle of its control
+shell   = "0.7.286"  # the developer panel is hidden until its toolbar button shows it
+core    = "0.12.318"  # the developer panel is hidden until its toolbar button shows it
 session = "0.11.159"  # a long log line of non-ASCII text is cut between characters
