@@ -83,8 +83,15 @@ def row(metric, value, unit, limit, lower_better, gating=True, trials=None,
                 r["verdict"] = "pass"
             elif not gating:
                 r["verdict"] = "below"
-            # a failure the run's own trials straddle is not a finding
-            elif trials and min(trials) <= limit <= max(trials):
+            # A failure the run's own trials do not agree on is not a
+            # finding: unsure when more than a third of them are on the
+            # passing side.  One trial on the passing side is not
+            # enough -- with seven trials there nearly always is one,
+            # and a change that added 5 % came back unsure on eight of
+            # twelve rows while every median was over its ceiling.
+            elif trials and 3 * sum(
+                1 for t in trials if (t <= limit if lower_better else t >= limit)
+            ) > len(trials):
                 r["verdict"] = "unsure"
             else:
                 r["verdict"] = "fail"
