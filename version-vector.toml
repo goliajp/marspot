@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.276"  # kimi panes are recognised, badged, handed over and reachable by other agents
-core    = "0.12.307"  # toolbar icons are 16 units, up from 14
+shell   = "0.7.279"  # the pane table carries each pane's code and agent
+core    = "0.12.308"  # panes that share a name show their codes, whole in the sidebar
 session = "0.11.158"  # a pane has ~/.kimi-code/bin on its PATH

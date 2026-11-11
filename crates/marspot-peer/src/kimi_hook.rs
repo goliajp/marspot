@@ -121,7 +121,6 @@ mod tests {
             pid: 1,
             session_id: Some(session.into()),
             name: None,
-            former_names: Vec::new(),
             cwd: None,
             socket: None,
             status: None,

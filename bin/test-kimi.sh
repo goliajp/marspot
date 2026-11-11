@@ -191,6 +191,15 @@ for (( i = 0; i < 60; i++ )); do [[ "$(record status)" == idle ]] && break; slee
 SOCK="$(record messagingSocketPath)"
 [[ -S "$SOCK" ]] || fail "the kimi record names no inbox socket"
 ok "the session has a record with a status and an inbox"
+hook_to() { # recipient → the address the Claude Code SendMessage hook turns it into
+  printf '{"hook_event_name":"PreToolUse","tool_name":"SendMessage","session_id":"x","tool_input":{"to":"%s","message":"hi"}}' "$1" \
+    | "$PEER_BIN" claude-hook \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["updatedInput"]["to"])' 2>/dev/null
+}
+for (( i = 0; i < 50; i++ )); do [[ "$(hook_to kimi:proj)" == "uds:$SOCK" ]] && break; sleep 0.5; done
+[[ "$(hook_to kimi:proj)" == "uds:$SOCK" ]] || fail "kimi:proj is not the kimi pane's inbox: $(hook_to kimi:proj)"
+[[ -z "$(hook_to codex:proj)" ]] || fail "codex:proj reached the kimi pane"
+ok "the pane is addressed as kimi:proj, and not as another agent's"
 
 # ── 4. a message to an idle kimi wakes it; kimi answers by MCP ────
 woken=$(count 'kimi.*wake.*mail is waiting')
