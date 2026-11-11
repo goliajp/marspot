@@ -85,7 +85,7 @@ mod tests {
         // In a pane, below the last row, and on the button the layout
         // does not show.
         assert_eq!(ChromeHover::at(&l, 3, 700.0, 400.0), None);
-        let below = l.close_session_rects[2].y_top + 2.0 * marspot_term::layout::SIDEBAR_ROW_H_PHYS;
+        let below = l.close_session_rects[2].y_top + 2.0 * marspot_term::layout::SIDEBAR_ROW_H;
         assert_eq!(ChromeHover::at(&l, 3, 40.0, below), None);
         assert_eq!(l.dev_panel_button_rect.w, 0.0);
         assert_eq!(ChromeHover::at(&l, 3, 0.0, 0.0), None);

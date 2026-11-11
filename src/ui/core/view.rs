@@ -368,22 +368,17 @@ impl<'a> ViewPainter<'a> {
         box_top + (box_h + cap) * 0.5
     }
 
-    /// [`Self::ui_baseline_centred`] for the label `s`.
-    ///
-    /// A line with Han or kana in it is centred on the ideographic
-    /// face, not on a capital letter: the face stands taller on the
-    /// baseline than a capital does, so on the capital's baseline it
-    /// sits above the middle of its box.
-    pub fn ui_baseline_centred_for(&self, s: &str, box_top: f32, box_h: f32, size_pt: f64) -> f32 {
-        // how far the face's middle is above a capital's, in em
-        const FACE_OVER_CAP_EM: f64 = 0.07;
-        let base = self.ui_baseline_centred(box_top, box_h, size_pt);
+    /// The baseline that puts the label `s` in the middle of a box, to
+    /// the pixel: by its capitals' height for Latin letters, by its
+    /// own ink for a line with Han or kana in it (see `ink`).  Both
+    /// are taken in whole pixels, as they are drawn, so the rows left
+    /// above the ink and below it differ by one at most.
+    pub fn ui_baseline_centred_for(&mut self, s: &str, box_top: f32, box_h: f32, size_pt: f64, weight: u16) -> f32 {
+        let cap = (crate::ui::view::type_scale::sf_pro_cap_height(size_pt) * Self::px_per_pt()) as f32;
         let ideographic = s.chars().any(|c| matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF));
-        if ideographic {
-            base + (size_pt * Self::px_per_pt() * FACE_OVER_CAP_EM).round() as f32
-        } else {
-            base
-        }
+        let ink = if ideographic { super::ink::rows(self.font, s, size_pt, weight) } else { None };
+        let (above, below) = ink.unwrap_or((cap, 0.0));
+        box_top + ((box_h + above.round() - below.round()) * 0.5).round()
     }
 
     /// Physical pixels per point, for panels laid out in points.
@@ -393,7 +388,7 @@ impl<'a> ViewPainter<'a> {
     /// top of that (`marspot::ui::chrome_scale`).  At `scale == 1` this
     /// is the 2.0 it has always been.
     pub fn px_per_pt() -> f64 {
-        2.0 * crate::ui::chrome_scale()
+        crate::ui::px_per_pt()
     }
 
     /// Ascent of the system UI font in physical px — for turning a

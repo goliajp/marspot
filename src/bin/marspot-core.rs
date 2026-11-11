@@ -1260,7 +1260,7 @@ mod window_state_tests {
 
         // Ending 2 — travel past the slop, release over window 2.
         let mut app = mk();
-        app.mouse_drag(0, 100.0 + PANE_DRAG_SLOP_PHYS + 1.0, 10.0, 0, 0.0, 0.0);
+        app.mouse_drag(0, 100.0 + PANE_DRAG_SLOP + 1.0, 10.0, 0, 0.0, 0.0);
         assert!(app.pane_drag.unwrap().active, "slop exceeded arms the drag");
         app.mouse_up(0, 2, 0.0, 0.0);
         assert_eq!(app.windows[0].panes.len(), 2, "placeholder holds the slot");
@@ -2893,10 +2893,10 @@ impl DevDrag {
     }
 }
 
-/// How far (physical px) the pointer must travel from the press
+/// How far (window units) the pointer must travel from the press
 /// before a title-bar hold becomes a pane drag.  Generous enough
 /// that an ordinary click never trips it on a shaky hand.
-const PANE_DRAG_SLOP_PHYS: f64 = 10.0;
+const PANE_DRAG_SLOP: f64 = 10.0;
 
 /// RFC-006 §1 — where inside a hovered pane a drop would land.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2948,8 +2948,8 @@ enum DropOutcome {
 /// never vanishes).  Corners resolve to the axis with the deeper
 /// penetration.
 fn drop_zone_at(rect: &marspot::layout::CellRect, px: f64, py: f64) -> DropZone {
-    let band_w = (rect.w * 0.25).max(48.0).min(rect.w / 3.0);
-    let band_h = (rect.h * 0.25).max(48.0).min(rect.h / 3.0);
+    let band_w = (rect.w * 0.25).max(48.0 * marspot::ui::chrome_scale()).min(rect.w / 3.0);
+    let band_h = (rect.h * 0.25).max(48.0 * marspot::ui::chrome_scale()).min(rect.h / 3.0);
     let from_l = px - rect.x;
     let from_r = rect.x + rect.w - px;
     let from_t = py - rect.y_top;
@@ -4703,7 +4703,7 @@ impl CoreApp {
         let Some(wi) = self.focus_window(from_id) else { return };
         self.drag_window = Some(from_id);
         self.mouse_down(wi, press.0, press.1, Modifiers::default());
-        let past_slop = press.0 + 2.0 * PANE_DRAG_SLOP_PHYS;
+        let past_slop = press.0 + 2.0 * PANE_DRAG_SLOP * marspot::ui::chrome_scale();
         self.mouse_drag(wi, past_slop, press.1, from_id, past_slop, press.1);
         self.mouse_drag(wi, drop.0, drop.1, drop_id, drop.0, drop.1);
         lx_event!(
@@ -8051,7 +8051,7 @@ impl CoreApp {
         if let Some(d) = self.pane_drag.as_mut() {
             if !d.active {
                 let (sx, sy) = d.start;
-                if (x_phys - sx).hypot(y_phys - sy) > PANE_DRAG_SLOP_PHYS {
+                if (x_phys - sx).hypot(y_phys - sy) > PANE_DRAG_SLOP * marspot::ui::chrome_scale() {
                     d.active = true;
                     let from = d.from_wi;
                     win!(self, from).needs_render = true;

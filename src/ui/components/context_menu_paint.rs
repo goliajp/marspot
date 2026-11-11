@@ -58,7 +58,7 @@ pub(crate) fn build_context_menu_canvas(
 ) -> crate::ui::core::Canvas {
     use crate::ui::core::{Canvas, Color, Length, Pt, ParentRect};
     use crate::ui::components::{panel_palette as palette, ContextMenu, MenuItem};
-    use crate::ui::theme::spec::chrome;
+    use crate::ui::theme::spec::{card, chrome, panel};
 
     let menu_items: Vec<MenuItem> = state
         .items
@@ -93,14 +93,15 @@ pub(crate) fn build_context_menu_canvas(
     let hint_fg     = Color::from_rgba_f32(palette::fg_muted());
     let hover_bg    = Color::from_rgba_f32(palette::row_hover());
     let divider_c   = border;
-    let side_pad_pt = chrome::MENU_PAD_X;
 
     // Helper: phys → Pt via `/ scale` so existing layout output
     // (which is already physical px) plugs cleanly into the
     // logical Pt API.  Length::Pt(x) resolves back to `x * scale`,
     // so this round-trips bit-perfectly at every scale.
     let pt_phys = |phys: f64| Length::Pt(phys / state.scale);
-    let side_pad_phys = side_pad_pt * state.scale;
+    // a line that is so many physical pixels at any scale
+    let hairline = |px: f64| Pt(px / state.scale);
+    let side_pad_phys = chrome::MENU_PAD_X * state.scale;
     let row_inset_phys = chrome::POPOVER_ROW_INSET * state.scale;
     let label_w_phys  = |s: &str| s.chars().count() as f64 * chrome_cell_w as f64;
 
@@ -110,7 +111,7 @@ pub(crate) fn build_context_menu_canvas(
         .size(pt_phys(menu.frame.w), pt_phys(menu.frame.h))
         .fill(bg)
         .radius(Pt(chrome::POPOVER_RADIUS))
-        .border(Pt(1.0), border)
+        .border(hairline(panel::BORDER_PX as f64), border)
         .shadow(Pt(chrome::POPOVER_SHADOW_BLUR), (Pt(0.0), Pt(0.0)), shadow)
         .draw();
 
@@ -125,7 +126,7 @@ pub(crate) fn build_context_menu_canvas(
                 (pt_phys(item.x + side_pad_phys), pt_phys(cy)),
                 (pt_phys(item.x + item.w - side_pad_phys), pt_phys(cy)),
             )
-            .stroke(Pt(1.0), divider_c)
+            .stroke(hairline(card::SEPARATOR_PX), divider_c)
             .draw();
             continue;
         }

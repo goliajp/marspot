@@ -359,15 +359,14 @@ impl ShellPresenter {
         }
     }
 
-    /// Update the CAMetalLayer drawable size after the window resizes.
-    /// Cheap on Apple Silicon — the layer pools drawables.
-    pub fn set_drawable_size(&self, w_phys: f64, h_phys: f64) {
+    /// Update the CAMetalLayer drawable size after the window resizes,
+    /// and its scale: a window moved to a display of another density
+    /// has the same size in points and a different one in pixels.
+    pub fn set_drawable_size(&self, w_phys: f64, h_phys: f64, scale: f64) {
         let w = w_phys.max(1.0);
         let h = h_phys.max(1.0);
-        {
-            self.layer
-                .setDrawableSize(objc2_foundation::NSSize::new(w, h));
-        }
+        self.layer.setContentsScale(scale);
+        self.layer.setDrawableSize(objc2_foundation::NSSize::new(w, h));
     }
 
     /// Render the IOSurface to the next CAMetalLayer drawable and
