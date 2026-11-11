@@ -159,7 +159,7 @@ mod tests {
         assert_eq!(from, child.id() as i32, "the sender is the process that called kill");
         child.wait().unwrap();
         assert_eq!(name(libc::SIGHUP), "HUP");
-        assert_eq!(sender_name(std::process::id() as i32).is_empty(), false);
+        assert!(!sender_name(std::process::id() as i32).is_empty());
     }
 
     #[test]
