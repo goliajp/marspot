@@ -56,6 +56,9 @@ pub(super) struct GeminiBinding {
     /// Idle subscriptions, for an agent whose record offers the
     /// notice: (reply address, subscription msg_id).
     pub(super) subs: Vec<(String, String)>,
+    /// The session's last ended turn, where the agent's record numbers
+    /// them.
+    pub(super) ended: Option<i64>,
 }
 
 impl GeminiBinding {
@@ -251,7 +254,7 @@ impl Worker {
             class = class.as_str()
         );
         let subs = Vec::new();
-        self.gemini.insert(p.sid, GeminiBinding { key, gemini: p.gemini, class, inbox, record, rate: Rate::default(), spool, subs });
+        self.gemini.insert(p.sid, GeminiBinding { key, gemini: p.gemini, class, inbox, record, rate: Rate::default(), spool, subs, ended: None });
         Ok(())
     }
 

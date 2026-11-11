@@ -52,7 +52,7 @@ pub(super) fn reconcile() -> Vec<String> {
 fn account_home() -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
     let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut buf = vec![0 as libc::c_char; 4096];
+    let mut buf: Vec<libc::c_char> = vec![0; 4096];
     let mut found: *mut libc::passwd = std::ptr::null_mut();
     let r = unsafe { libc::getpwuid_r(libc::getuid(), &mut pw, buf.as_mut_ptr(), buf.len(), &mut found) };
     if r != 0 || found.is_null() || pw.pw_dir.is_null() {

@@ -69,7 +69,10 @@ impl Worker {
         self.apply_spooled(Agent::Kimi, &shaped, class);
         for p in &peers.bound {
             let Some(g) = self.gemini.get_mut(&p.sid).filter(|g| g.record.agent == Agent::Kimi) else { continue };
-            let went_idle = p.status == Status::Idle && g.record.status != Status::Idle;
+            // a turn shorter than the plugin's tick is never seen
+            // running; the number of the last ended turn still moves
+            let turn_ended = p.status == Status::Idle && (g.record.status != Status::Idle || p.ended != g.ended);
+            g.ended = p.ended;
             if g.record.status != p.status || g.class != p.class {
                 g.class = p.class;
                 g.record.class = p.class;
@@ -78,7 +81,7 @@ impl Worker {
             }
             // with mail waiting the pane is about to be woken for it,
             // and the turn that follows ends in a notice of its own
-            if went_idle && !waiting(&g.spool) {
+            if turn_ended && !waiting(&g.spool) {
                 g.notify(IdleState::Idle);
             }
         }

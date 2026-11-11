@@ -156,6 +156,9 @@ pub(crate) struct Facts {
     pub class: Mode,
     /// Set while the last turn is one that failed.
     pub failure: Option<Failure>,
+    /// The number of the last turn that ended.  It moves with every
+    /// turn, however short, which a state sampled now and then does not.
+    pub ended: Option<i64>,
 }
 
 /// How much of a record's end is read.  Every model request is one
@@ -220,6 +223,7 @@ pub(super) fn facts_in(text: &str) -> Option<Facts> {
     let mut status = None;
     let mut class = Mode::Prompting;
     let mut failure = None;
+    let mut ended = None;
     let mut asked: Vec<String> = Vec::new();
     for line in text.lines() {
         if let Some(v) = typed(line, "llm.request") {
@@ -237,6 +241,7 @@ pub(super) fn facts_in(text: &str) -> Option<Facts> {
             status = Some(Status::Busy);
         } else if let Some(v) = typed(line, "turn.ended") {
             status = Some(Status::Idle);
+            ended = v.get("turnId").and_then(Value::i64).or(ended);
             asked.clear();
             failure = (v.str_at("reason") == Some("failed"))
                 .then(|| {
@@ -258,7 +263,7 @@ pub(super) fn facts_in(text: &str) -> Option<Facts> {
         Status::Busy if !asked.is_empty() => Status::Waiting,
         s => s,
     };
-    Some(Facts { model: setting.model(), alias: setting.alias, thinking: setting.thinking, status, class, failure })
+    Some(Facts { model: setting.model(), alias: setting.alias, thinking: setting.thinking, status, class, failure, ended })
 }
 
 /// A kimi process asking for its session.
@@ -387,6 +392,7 @@ mod tests {
         assert_eq!((all.alias.as_deref(), all.model.as_deref()), (Some(ENV_ALIAS), Some("mock-model")));
         assert_eq!(all.thinking.as_deref(), Some("on"), "what the requests were sent with");
         assert_eq!(all.failure, None);
+        assert_eq!(all.ended, Some(1), "the second turn is the last that ended");
         assert_eq!(all.class, Mode::Bypass, "the last record switched the session to yolo");
 
         let first_prompt = upto(CANCELLED_THEN_COMPLETED, r#""type":"turn.prompt""#);

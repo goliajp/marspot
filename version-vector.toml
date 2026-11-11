@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.273"  # the profiles skill sets up kimi accounts and is kept in every kimi home
+shell   = "0.7.274"  # an idle notice follows a kimi turn too short to be seen running
 core    = "0.12.305"  # one command table drives the keys, the menus and a shortcuts panel
 session = "0.11.157"  # a pane has ~/.kimi-code/bin on its PATH
