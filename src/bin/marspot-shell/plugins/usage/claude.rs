@@ -188,6 +188,10 @@ impl Waits {
         Value::Obj(self.0.iter().map(|(email, until)| (email.clone(), Value::from(*until))).collect()).to_json()
     }
 
+    pub(super) fn wait(&mut self, account: &str, until: i64) {
+        self.0.insert(account.to_string(), until);
+    }
+
     pub(super) fn blocked(&self, email: &str, now: i64) -> bool {
         self.0.get(email).is_some_and(|until| now < *until)
     }
@@ -214,8 +218,14 @@ pub(super) enum Outcome {
 }
 
 pub(super) fn outcome(resp: Option<&Response>, now: i64) -> Outcome {
+    outcome_with(resp, now, parse_usage)
+}
+
+/// The same reading of a status for any provider's usage endpoint;
+/// `parse` reads that provider's body.
+pub(super) fn outcome_with(resp: Option<&Response>, now: i64, parse: impl Fn(&str, i64) -> Option<Reading>) -> Outcome {
     match resp {
-        Some(r) if r.status == 200 => parse_usage(&r.body, now).map_or(Outcome::Nothing, Outcome::Read),
+        Some(r) if r.status == 200 => parse(&r.body, now).map_or(Outcome::Nothing, Outcome::Read),
         Some(r) if r.status == 429 => Outcome::Wait(now + r.retry_after.unwrap_or(DEFAULT_RETRY_SECS)),
         Some(r) if r.status == 401 || r.status == 403 => Outcome::AuthError,
         _ => Outcome::Nothing,
@@ -225,9 +235,7 @@ pub(super) fn outcome(resp: Option<&Response>, now: i64) -> Outcome {
 pub(super) fn apply(account: &mut Account, waits: &mut Waits, outcome: Outcome, now: i64) {
     match outcome {
         Outcome::Read(reading) => account.absorb(reading, now),
-        Outcome::Wait(until) => {
-            waits.0.insert(account.email.clone(), until);
-        }
+        Outcome::Wait(until) => waits.wait(&account.email, until),
         Outcome::AuthError => account.auth_error = true,
         Outcome::Nothing => {}
     }

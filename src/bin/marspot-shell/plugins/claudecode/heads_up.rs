@@ -35,7 +35,7 @@ const LAST_OF_FIVE_HOURS: f64 = 1.0 - quota::FIVE_HOUR_SPENT + 0.01;
 const EPS: f64 = 1e-9;
 
 /// Is this account, for a pane on `model`, one step from refusing it?
-pub(super) fn nearly_out(room: &Room, model: Option<&str>) -> bool {
+pub(in crate::plugins) fn nearly_out(room: &Room, model: Option<&str>) -> bool {
     if room.refused_for(model) {
         return false;
     }
@@ -49,17 +49,17 @@ pub(super) fn nearly_out(room: &Room, model: Option<&str>) -> bool {
 }
 
 /// One warning, for one pane, about one account's week.
-pub(super) struct Sent {
-    pub(super) profile: u8,
+pub(in crate::plugins) struct Sent {
+    pub(in crate::plugins) profile: u8,
     /// The week it was about, by when that week renews.
-    pub(super) week: i64,
+    pub(in crate::plugins) week: i64,
     /// Set once the session's inbox took the message. Until then the
     /// pane is treated as never told.
-    pub(super) delivered: Arc<AtomicBool>,
+    pub(in crate::plugins) delivered: Arc<AtomicBool>,
 }
 
 impl Sent {
-    pub(super) fn is_for(&self, profile: u8, week: i64) -> bool {
+    pub(in crate::plugins) fn is_for(&self, profile: u8, week: i64) -> bool {
         self.profile == profile && self.week == week
     }
     pub(super) fn landed_on(&self, profile: u8) -> bool {
@@ -72,7 +72,7 @@ impl Sent {
 /// week nor forgets that it was told, which is what lets it leave at
 /// once when the account runs out.
 #[derive(Default)]
-pub(super) struct Ledger {
+pub(in crate::plugins) struct Ledger {
     sent: HashMap<u64, Sent>,
     /// What was last written, so a pass writes only on a change. The
     /// delivered flag is set by the sending thread, so a change can
@@ -109,7 +109,7 @@ impl Ledger {
 
     /// Read back what `encode` wrote; a line that does not parse is
     /// dropped, and costs that pane at most a second message.
-    pub(super) fn decode(text: &str) -> Self {
+    pub(in crate::plugins) fn decode(text: &str) -> Self {
         let sent = text
             .lines()
             .filter_map(|l| {
@@ -127,7 +127,7 @@ impl Ledger {
     }
 
     /// The text to write, when it differs from what was last written.
-    pub(super) fn changed(&mut self) -> Option<String> {
+    pub(in crate::plugins) fn changed(&mut self) -> Option<String> {
         let now = self.encode();
         (now != self.written).then(|| {
             self.written.clone_from(&now);
@@ -178,8 +178,19 @@ fn inbox_of(claude_pid: i32) -> Option<String> {
 
 /// Off the drawing thread: it reads the registry and writes a socket.
 pub(super) fn send(sid: u64, claude_pid: i32, profile: u8, delivered: Arc<AtomicBool>) {
+    send_to(sid, profile, delivered, "claudecode.quota.heads_up", move || inbox_of(claude_pid));
+}
+
+/// The same message for a session whose inbox is found by `inbox`.
+pub(in crate::plugins) fn send_to(
+    sid: u64,
+    profile: u8,
+    delivered: Arc<AtomicBool>,
+    tag: &'static str,
+    inbox: impl FnOnce() -> Option<String> + Send + 'static,
+) {
     std::thread::spawn(move || {
-        let outcome = match inbox_of(claude_pid) {
+        let outcome = match inbox() {
             None => "the session has no inbox".to_string(),
             Some(inbox) => match deliver(&inbox, &frame_line(&inbox, &body(profile))) {
                 Ok(()) => {
@@ -189,7 +200,7 @@ pub(super) fn send(sid: u64, claude_pid: i32, profile: u8, delivered: Arc<Atomic
                 Err(e) => format!("not delivered: {e}"),
             },
         };
-        lx_info!("claudecode.quota.heads_up", &format!("sid={sid} P{profile}: {outcome}"));
+        lx_info!(tag, &format!("sid={sid} P{profile}: {outcome}"));
     });
 }
 
