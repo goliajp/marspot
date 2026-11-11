@@ -1742,14 +1742,14 @@ fn marspot_pointer_in_window() -> (u32, f64, f64) {
     })
 }
 
-/// A key the menu bar took before any view saw it, delivered to the
-/// key window as that view would have delivered it.  False when the
-/// key window is not one of ours.
-pub(crate) fn key_from_menu(event: MarspotKeyEvent, mods: Modifiers) -> bool {
+/// A key the menu bar took before any view saw it, delivered to the key window (with
+/// `any_window`, failing that the first) as its view would have.  False when none is ours.
+pub(crate) fn key_from_menu(event: MarspotKeyEvent, mods: Modifiers, any_window: bool) -> bool {
     let id = APP_STATE.with(|cell| {
         let slot = cell.borrow();
         let windows = &slot.as_ref()?.windows;
-        windows.iter().find(|c| c.nswindow.isKeyWindow()).map(|c| c.window_id)
+        let first = windows.first().filter(|_| any_window);
+        windows.iter().find(|c| c.nswindow.isKeyWindow()).or(first).map(|c| c.window_id)
     });
     let Some(id) = id else { return false };
     dispatch_event_for(id, EventKind::Key(event, mods));
