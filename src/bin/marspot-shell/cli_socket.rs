@@ -310,8 +310,8 @@ pub enum Target {
     /// The session id — the one address that is never reused and never
     /// moves.  Everything else is a way of not having to know it.
     Id(u64),
-    /// A display name (`spg`, `ada#2`) or a path tail
-    /// (`goliajp/spg`).
+    /// A pane's name: `spg`, its full name `spg#3381`, or either with
+    /// the agent in front (`claude:spg`).
     Name(String),
     /// The cell a pane occupies: window `w`, column `x`, row `y`, all
     /// 1-based because a person counting panes starts at one.  Survives
@@ -350,10 +350,18 @@ pub fn parse_target(target: &str) -> Result<Target, String> {
     Ok(Target::Name(t.to_string()))
 }
 
-/// Naming and name resolution live in the library — L1 resolves
-/// `--send spg#2` and L2 draws the name on the pane, and two
-/// implementations of a naming rule is two naming rules.
-pub use marspot::pane_name::{assign as assign_names, resolve as resolve_name};
+/// Naming lives in the library — L1 resolves `--send spg#3381` and L2
+/// draws the name on the pane, and two implementations of a naming
+/// rule is two naming rules.
+pub use marspot::pane_name::assign as assign_names;
+
+/// Which pane a name means, in the forms agents use between
+/// themselves.  Which agent a pane runs is read from the pane tables
+/// the peer plugin writes, by the pane's code.
+pub fn resolve_name(target: &str, panes: &[marspot::pane_name::PaneRef]) -> Result<u64, String> {
+    let table = marspot_peer::panes::live(&marspot_peer::peers::live_entries());
+    marspot::pane_name::resolve(target, panes, |code| table.iter().find(|p| p.code == Some(code)).and_then(|p| p.agent.clone()))
+}
 
 #[cfg(test)]
 mod tests {
@@ -364,8 +372,11 @@ mod tests {
     fn every_address_form_parses() {
         assert_eq!(parse_target("390"), Ok(Target::Id(390)));
         assert_eq!(parse_target("#390"), Ok(Target::Id(390)));
-        assert_eq!(parse_target("spg#2"), Ok(Target::Name("spg#2".into())));
-        assert_eq!(parse_target("goliajp/spg"), Ok(Target::Name("goliajp/spg".into())));
+        assert_eq!(parse_target("spg#3381"), Ok(Target::Name("spg#3381".into())));
+        assert_eq!(parse_target("claude:spg"), Ok(Target::Name("claude:spg".into())));
+        // a code only follows a name: a bare number is a session id
+        // whatever its length
+        assert_eq!(parse_target("#3381"), Ok(Target::Id(3381)));
         assert_eq!(parse_target("w(2,1,3)"), Ok(Target::Cell { w: 2, x: 1, y: 3 }));
         assert_eq!(parse_target(" W( 1 , 2 , 2 ) "), Ok(Target::Cell { w: 1, x: 2, y: 2 }));
         // Counting starts at one, so zero is a mistake worth naming.
