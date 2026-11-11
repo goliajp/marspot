@@ -1,12 +1,12 @@
 //! `marspot-peer mcp`: the sending side as an MCP server over stdio, so
-//! a Codex or Gemini session messages its peers with tools of the same
+//! a Codex, Gemini or Kimi session messages its peers with tools of the same
 //! names, parameters and wording Claude Code's own `ListAgents` and
 //! `SendMessage` have.
 //!
 //! Codex starts one server per session and puts the calling thread's
 //! id in every `tools/call` (`_meta.threadId`); that is how a call
-//! knows which session is sending.  Gemini sends no such id; a call
-//! without one comes from the Gemini session this server runs under
+//! knows which session is sending.  Gemini and Kimi send no such id; a
+//! call without one comes from the session this server runs under
 //! (`peers::me_by_ancestor`).  Messages are newline-delimited JSON-RPC
 //! 2.0.
 
@@ -16,9 +16,9 @@ use crate::frame::Priority;
 use crate::json::{self, Value, obj};
 use crate::peers;
 
-const LIST_DESCRIPTION: &str = "List the agent sessions on this machine that you can message: Claude Code, Codex and Gemini sessions running in marspot panes. Every row leads with the session's name, which is the name of its marspot pane, and that name IS the address for SendMessage; there is no separate address syntax. The first line says what this session is called.";
+const LIST_DESCRIPTION: &str = "List the agent sessions on this machine that you can message: Claude Code, Codex, Gemini and Kimi sessions running in marspot panes. Every row leads with the session's name, which is the name of its marspot pane, and that name IS the address for SendMessage; there is no separate address syntax. The first line says what this session is called.";
 
-const SEND_DESCRIPTION: &str = "Send a message to another agent session on this machine (Claude Code, Codex or Gemini; each is named after its marspot pane).
+const SEND_DESCRIPTION: &str = "Send a message to another agent session on this machine (Claude Code, Codex, Gemini or Kimi; each is named after its marspot pane).
 
 Use ListAgents to discover targets and pass a name from it as `to`. **To reply to an incoming <cross-session-message from=\"...\">, copy its `from` attribute as your `to`.**
 

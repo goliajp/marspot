@@ -45,9 +45,10 @@ pub(crate) fn reconcile() -> Vec<String> {
 /// canonicalising means it is written once rather than once per
 /// profile.
 fn skills_dirs(home: &Path, gemini_home: Option<&Path>) -> Vec<PathBuf> {
-    // `CLAUDE_CONFIG_DIR` and `CODEX_HOME` name the config directory
-    // itself; `GEMINI_CLI_HOME` names a home with `.gemini` inside
-    let mut configs = vec![home.join(".claude"), home.join(".codex"), home.join(".gemini")];
+    // `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `KIMI_CODE_HOME` name the
+    // config directory itself; `GEMINI_CLI_HOME` names a home with
+    // `.gemini` inside
+    let mut configs = vec![home.join(".claude"), home.join(".codex"), home.join(".gemini"), home.join(".kimi-code")];
     if let Some(g) = gemini_home {
         configs.push(g.join(".gemini"));
     }
@@ -55,7 +56,7 @@ fn skills_dirs(home: &Path, gemini_home: Option<&Path>) -> Vec<PathBuf> {
         for e in rd.flatten() {
             let name = e.file_name();
             let Some(name) = name.to_str() else { continue };
-            if name.starts_with(".claude-profile-") || name.starts_with(".codex-profile-") {
+            if name.starts_with(".claude-profile-") || name.starts_with(".codex-profile-") || name.starts_with(".kimi-code-profile-") {
                 configs.push(e.path());
             } else if name.starts_with(".gemini-profile-") {
                 configs.push(e.path().join(".gemini"));
@@ -207,6 +208,19 @@ mod tests {
         // reached through either profile, and still a symlink
         assert!(h.join(".claude-profile-2/skills").join(SKILL_NAME).join("profiles.sh").is_file());
         assert!(h.join(".claude-profile-1/skills").symlink_metadata().unwrap().file_type().is_symlink());
+        fs::remove_dir_all(&h).unwrap();
+    }
+
+    #[test]
+    fn skills_for_kimi_sit_in_each_kimi_home() {
+        let h = home();
+        for d in [".kimi-code", ".kimi-code-profile-2"] {
+            fs::create_dir_all(h.join(d)).unwrap();
+        }
+        let dirs = skills_dirs(&h, None);
+        assert_eq!(dirs, vec![h.join(".kimi-code/skills"), h.join(".kimi-code-profile-2/skills")]);
+        install_into(&dirs);
+        assert!(installed(&h.join(".kimi-code-profile-2/skills")).0.is_file());
         fs::remove_dir_all(&h).unwrap();
     }
 

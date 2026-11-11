@@ -13,15 +13,15 @@ use super::deliver;
 use super::worker::{now_ms, Binding, Worker};
 
 /// Subscriptions one inbox holds at once.
-const MAX_SUBS: usize = 32;
+pub(super) const MAX_SUBS: usize = 32;
 /// How long a subscription placed while the session is idle waits
 /// before it is answered.
-const QUIET_FOR: Duration = Duration::from_secs(2);
+pub(super) const QUIET_FOR: Duration = Duration::from_secs(2);
 
 impl Worker {
     pub(super) fn subscribe(&mut self, key: u64, from: String, msg_id: String) {
         let Some((sid, b)) = self.bindings.iter_mut().find(|(_, b)| b.key == key) else {
-            return self.subscribe_gemini(key);
+            return self.subscribe_gemini(key, from, msg_id);
         };
         let sid = *sid;
         if b.subs.len() >= MAX_SUBS {
@@ -45,7 +45,10 @@ impl Worker {
         let (due, later): (Vec<_>, Vec<_>) = self.idle_checks.drain(..).partition(|(_, t)| *t <= now);
         self.idle_checks = later;
         for (sid, at) in due {
-            let Some(b) = self.bindings.get(&sid) else { continue };
+            let Some(b) = self.bindings.get(&sid) else {
+                self.kimi_quiet(sid);
+                continue;
+            };
             let since = at - QUIET_FOR;
             let quiet = b.last_delivered.is_none_or(|t| t < since);
             if b.record.status == Status::Idle && b.active_turn.is_none() && quiet {

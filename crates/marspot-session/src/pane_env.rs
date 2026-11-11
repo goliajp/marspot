@@ -11,8 +11,9 @@
 /// no token has no receipts, and the submit path reads the screen
 /// instead.
 ///
-/// `PATH` with `~/.local/bin` on it: that is where the agent CLIs are
-/// installed, and an app started by launchd does not have it.
+/// `PATH` with `~/.local/bin` and `~/.kimi-code/bin` on it: that is
+/// where the agent CLIs are installed, and an app started by launchd
+/// has neither.
 pub(crate) fn for_pane(id: u64) -> Vec<(String, String)> {
     let mut set = Vec::new();
     if let Some(t) = marspot_term::submit_receipt::token_for(id) {
@@ -25,7 +26,7 @@ pub(crate) fn for_pane(id: u64) -> Vec<(String, String)> {
 }
 
 fn path(inherited: Option<&str>, home: &std::path::Path) -> String {
-    marspot_term::paths::path_with_local_bin(inherited.unwrap_or(marspot_term::paths::DEFAULT_PATH), home)
+    marspot_term::paths::path_with_agent_bins(inherited.unwrap_or(marspot_term::paths::DEFAULT_PATH), home)
 }
 
 #[cfg(test)]
@@ -34,10 +35,13 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn the_pane_path_gains_local_bin_once_and_in_front() {
+    fn the_pane_path_gains_the_agent_directories_once_and_in_front() {
         let home = Path::new("/Users/x");
-        assert_eq!(path(Some("/usr/bin:/bin"), home), "/Users/x/.local/bin:/usr/bin:/bin");
-        assert_eq!(path(Some("/usr/bin:/Users/x/.local/bin:/bin"), home), "/usr/bin:/Users/x/.local/bin:/bin");
-        assert_eq!(path(None, home), "/Users/x/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+        assert_eq!(path(Some("/usr/bin:/bin"), home), "/Users/x/.local/bin:/Users/x/.kimi-code/bin:/usr/bin:/bin");
+        assert_eq!(
+            path(Some("/usr/bin:/Users/x/.local/bin:/bin"), home),
+            "/Users/x/.kimi-code/bin:/usr/bin:/Users/x/.local/bin:/bin"
+        );
+        assert_eq!(path(None, home), "/Users/x/.local/bin:/Users/x/.kimi-code/bin:/usr/bin:/bin:/usr/sbin:/sbin");
     }
 }

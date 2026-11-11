@@ -2,7 +2,7 @@
 //! one record per live session, read by every session to list its
 //! peers and find their inbox sockets.
 //!
-//! marspot writes records here for Codex and Gemini sessions, keyed by
+//! marspot writes records here for Codex, Gemini and Kimi sessions, keyed by
 //! the pid of each session's relay, so Claude sessions list them and
 //! message them like any peer.  Those records carry `entrypoint = MARKER`; that marker is
 //! the only thing that makes a record ours, and only ours are ever
@@ -32,7 +32,7 @@ const CLASS_KEY: &str = "marspotPermissionClass";
 const AGENT_KEY: &str = "marspotAgent";
 const AGENT_PID_KEY: &str = "marspotAgentPid";
 const RELAY_KEY: &str = "marspotRelay";
-/// Our own field: the file a Gemini session's mail waits in (`spool`).
+/// Our own field: the file a Gemini or Kimi session's mail waits in (`spool`).
 const SPOOL_KEY: &str = "marspotSpool";
 /// Our own field: which marspot wrote the record (its state root).  A
 /// restarting marspot clears its own leftovers and nobody else's — a
@@ -65,6 +65,7 @@ impl Status {
 pub enum Agent {
     Codex,
     Gemini,
+    Kimi,
 }
 
 impl Agent {
@@ -72,6 +73,7 @@ impl Agent {
         match self {
             Agent::Codex => "codex",
             Agent::Gemini => "gemini",
+            Agent::Kimi => "kimi",
         }
     }
 
@@ -80,6 +82,7 @@ impl Agent {
         match self {
             Agent::Codex => "Codex",
             Agent::Gemini => "Gemini",
+            Agent::Kimi => "Kimi",
         }
     }
 
@@ -87,9 +90,10 @@ impl Agent {
     /// Nothing tells marspot when a Gemini session goes idle, so it
     /// does not offer the notice: a sender is told that nothing was
     /// subscribed instead of waiting for a notice that cannot come.
+    /// A Kimi session's record says when each turn ends.
     pub fn features(self) -> &'static [&'static str] {
         match self {
-            Agent::Codex => FEATURES,
+            Agent::Codex | Agent::Kimi => FEATURES,
             Agent::Gemini => &[],
         }
     }
@@ -396,7 +400,11 @@ fn read_entry(path: &Path, pid: i32) -> Option<Entry> {
         relay: s(RELAY_KEY),
         owner: s(OWNER_KEY),
         // a record written before the field existed is a Codex one
-        agent: ours.then(|| if v.str_at(AGENT_KEY) == Some("gemini") { Agent::Gemini } else { Agent::Codex }),
+        agent: ours.then(|| match v.str_at(AGENT_KEY) {
+            Some("gemini") => Agent::Gemini,
+            Some("kimi") => Agent::Kimi,
+            _ => Agent::Codex,
+        }),
         agent_pid: v.get(AGENT_PID_KEY).and_then(Value::i64).and_then(|p| i32::try_from(p).ok()),
         spool: s(SPOOL_KEY),
     })
@@ -474,6 +482,28 @@ mod tests {
         assert!(e.ours && !e.supports("notify_idle"));
         assert_eq!((e.agent, e.agent_pid, e.status.as_deref()), (Some(Agent::Gemini), Some(4242), None));
         assert_eq!(e.spool.as_deref(), Some("/tmp/spool/s1.jsonl"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A Kimi record reads back as one, offers the idle notice and
+    /// carries a status; a record with no agent field stays a Codex
+    /// one, as records written before the field existed are.
+    #[test]
+    fn a_kimi_record_reads_back_as_kimi_and_an_unmarked_one_as_codex() {
+        let dir = tmpdir("kimi");
+        let me = std::process::id() as i32;
+        let mut r = record(me);
+        r.agent = Agent::Kimi;
+        r.agent_pid = 4242;
+        r.status = Status::Busy;
+        r.spool = Some("/tmp/spool/session_1.jsonl".into());
+        write(&dir, &r, 2).unwrap();
+        let e = &list_live(&dir)[0];
+        assert_eq!((e.agent, e.agent_pid, e.status.as_deref()), (Some(Agent::Kimi), Some(4242), Some("busy")));
+        assert!(e.supports("notify_idle"));
+        let text = fs::read_to_string(record_path(&dir, me)).unwrap().replace(r#""marspotAgent":"kimi","#, "");
+        fs::write(record_path(&dir, me), text).unwrap();
+        assert_eq!(list_live(&dir)[0].agent, Some(Agent::Codex));
         fs::remove_dir_all(&dir).unwrap();
     }
 

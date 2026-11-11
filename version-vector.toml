@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.268"  # the window, the present layer and the banner follow the theme
+shell   = "0.7.276"  # kimi panes are recognised, badged, handed over and reachable by other agents
 core    = "0.12.306"  # dark, light and high-contrast themes, switchable while running
-session = "0.11.157"  # colour queries are answered from the current theme
+session = "0.11.158"  # a pane has ~/.kimi-code/bin on its PATH

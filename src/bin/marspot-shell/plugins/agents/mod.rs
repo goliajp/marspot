@@ -1,20 +1,21 @@
 //! The agent CLIs a pane is expected to have, installed when missing.
 //!
-//! A machine that has only marspot on it has no `claude`, `codex` or
-//! `gemini`, and nothing a vendor's installer could lean on: no Node,
-//! no package manager.  Each one is fetched the way its vendor ships a
-//! standalone build, into `~/.local/bin`, which every pane has on its
-//! PATH.  A CLI that is already there, however it got there, is left
-//! alone.
+//! A machine that has only marspot on it has no `claude`, `codex`,
+//! `gemini` or `kimi`, and nothing a vendor's installer could lean on:
+//! no Node, no package manager.  Each one is fetched the way its vendor
+//! ships a standalone build, into `~/.local/bin` (kimi's into
+//! `~/.kimi-code/bin`), which every pane has on its PATH.  A CLI that
+//! is already there, however it got there, is left alone.
 //!
 //! Staying current is each CLI's own business where it has a way:
-//! claude's native build updates itself, codex is followed by the codex
-//! plugin.  gemini has none, so the one installed here is replaced when
-//! a newer release is out.
+//! claude's native build and kimi update themselves, codex is followed
+//! by the codex plugin.  gemini has none, so the one installed here is
+//! replaced when a newer release is out.
 //!
 //! Everything runs on one background thread, a few times a day.
 
 mod gemini;
+mod kimi;
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -33,16 +34,18 @@ pub(crate) enum Cli {
     Claude,
     Codex,
     Gemini,
+    Kimi,
 }
 
 impl Cli {
-    const ALL: [Cli; 3] = [Cli::Claude, Cli::Codex, Cli::Gemini];
+    const ALL: [Cli; 4] = [Cli::Claude, Cli::Codex, Cli::Gemini, Cli::Kimi];
 
     fn command(self) -> &'static str {
         match self {
             Cli::Claude => "claude",
             Cli::Codex => "codex",
             Cli::Gemini => "gemini",
+            Cli::Kimi => "kimi",
         }
     }
 }
@@ -158,6 +161,7 @@ pub(crate) fn present(cli: Cli, at: &Places) -> bool {
     on_path(cli.command(), &at.path)
         || at.home.join(".local/bin").join(cli.command()).is_file()
         || (cli == Cli::Codex && codex::installed_cli(&at.codex_home).is_some())
+        || (cli == Cli::Kimi && kimi::bin(&at.home).is_file())
 }
 
 pub(crate) fn missing(at: &Places) -> Vec<Cli> {
@@ -200,6 +204,7 @@ fn pass(failed: &mut Failures) {
                 Ok(None) => continue,
                 Err(e) => Err(e),
             },
+            Cli::Kimi if absent => kimi::install(&at.home),
             _ => continue,
         };
         match &result {
@@ -307,12 +312,24 @@ mod tests {
     fn agents_found_on_path_or_in_local_bin_are_not_missing() {
         let at = places("found");
         std::fs::write(at.home.join(".local/bin/claude"), "").unwrap();
-        assert_eq!(missing(&at), [Cli::Codex, Cli::Gemini]);
+        assert_eq!(missing(&at), [Cli::Codex, Cli::Gemini, Cli::Kimi]);
         std::fs::write(Path::new(&at.path).join("gemini"), "").unwrap();
-        assert_eq!(missing(&at), [Cli::Codex]);
+        assert_eq!(missing(&at), [Cli::Codex, Cli::Kimi]);
         // a directory of that name is not the command
         std::fs::create_dir(Path::new(&at.path).join("codex")).unwrap();
-        assert_eq!(missing(&at), [Cli::Codex]);
+        assert_eq!(missing(&at), [Cli::Codex, Cli::Kimi]);
+        cleanup(&at);
+    }
+
+    /// kimi's installer keeps the command in kimi's own directory,
+    /// which the PATH of an app need not include.
+    #[test]
+    fn agents_count_kimi_where_its_installer_puts_it() {
+        let at = places("kimi");
+        std::fs::create_dir_all(at.home.join(".kimi-code/bin")).unwrap();
+        assert!(missing(&at).contains(&Cli::Kimi), "a home with no command in it");
+        std::fs::write(kimi::bin(&at.home), "").unwrap();
+        assert_eq!(missing(&at), [Cli::Claude, Cli::Codex, Cli::Gemini]);
         cleanup(&at);
     }
 
@@ -323,7 +340,7 @@ mod tests {
         let release = root.join("releases/0.164.0-aarch64-apple-darwin");
         std::fs::create_dir_all(&release).unwrap();
         std::os::unix::fs::symlink(&release, root.join("current")).unwrap();
-        assert_eq!(missing(&at), [Cli::Claude, Cli::Gemini]);
+        assert_eq!(missing(&at), [Cli::Claude, Cli::Gemini, Cli::Kimi]);
         cleanup(&at);
     }
 

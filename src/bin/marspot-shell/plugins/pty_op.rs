@@ -772,14 +772,14 @@ const SAMPLES_KEPT: usize = 8;
 ///
 /// Claude Code rules the box off above its prompt line, which is what
 /// tells it from the messages already sent: those carry the same glyph
-/// but no rule.
+/// but no rule.  Kimi's prompt is a plain `>` under a box's top edge.
 fn composer_on_screen(screen: &str) -> bool {
     let bare = |l: &str| l.trim().trim_matches(['│', '┃', '|']).trim().to_string();
     let lines: Vec<String> = screen.lines().map(bare).collect();
     lines.windows(2).any(|w| {
         !w[0].is_empty()
             && w[0].chars().all(|c| matches!(c, '─' | '━' | '╭' | '╮'))
-            && w[1].starts_with(['\u{276f}', '\u{203a}'])
+            && (w[1].starts_with(['\u{276f}', '\u{203a}']) || (w[0].starts_with('╭') && w[1].starts_with('>')))
     })
 }
 
