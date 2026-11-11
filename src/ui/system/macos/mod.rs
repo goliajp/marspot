@@ -1,8 +1,6 @@
-//! macOS-style window chrome.  Currently: the toolbar icons.  Add
-//! anything else here that's visually tied to Aqua / Sonoma
-//! conventions (sheets, popovers, segmented controls when we want
-//! them).
+//! What the chrome takes from macOS itself.  Currently: its icons,
+//! drawn from SF Symbols.
 
 pub mod icons;
 
-pub use icons::{GridIcon, SidebarIcon, ListTreeIcon};
+pub use icons::Symbol;

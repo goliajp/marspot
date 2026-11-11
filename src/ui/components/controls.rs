@@ -19,6 +19,7 @@ use crate::font_cache::FontCache;
 use crate::ui::components::panel_palette as palette;
 use crate::ui::core::ViewPainter;
 use crate::ui::strings::{t, Msg};
+use crate::ui::system::macos::icons::{self, Symbol};
 use crate::ui::theme::spec::{self, control as c};
 use crate::ui::theme::PanelText;
 
@@ -53,34 +54,10 @@ fn fill(p: &mut ViewPainter, rect: Rect, color: [f32; 4], radius_pt: f64) {
     p.fill_rounded_rect(rect, color, spec::px(radius_pt) as f32, (palette::none(), 0.0));
 }
 
-/// A × `mark_pt` across, centred in `rect`.
-///
-/// Drawn as two diagonal strokes, one pixel row at a time, rather than
-/// as a glyph: a glyph's ink is not centred on its advance, so a
-/// letter-× sits visibly off the middle of a small button, and its
-/// size is the font's to decide rather than the button's.
+/// A × `mark_pt` across, centred in `rect`: the system's close symbol,
+/// at the point size whose ink is that wide.
 pub fn paint_cross(p: &mut ViewPainter, rect: Rect, mark_pt: f64, color: [f32; 4]) {
-    cross(p, rect, mark_pt, c::CROSS_STROKE, color);
-}
-
-fn cross(p: &mut ViewPainter, rect: Rect, mark_pt: f64, stroke_pt: f64, color: [f32; 4]) {
-    let size = spec::px(mark_pt).round();
-    let x0 = (rect.x + (rect.w - size) * 0.5).round();
-    let y0 = (rect.y_top + (rect.h - size) * 0.5).round();
-    // A stroke of this thickness crossing a row at 45° covers the row
-    // for √2 times as far.
-    let half = spec::px(stroke_pt) * std::f64::consts::FRAC_1_SQRT_2;
-    for row in 0..size as usize {
-        let along = row as f64 + 0.5;
-        for centre in [along, size - along] {
-            // Kept inside the mark's square, so the four tips end on
-            // its corners instead of poking out sideways.
-            let left = (centre - half).max(0.0);
-            let right = (centre + half).min(size);
-            let run = Rect { x: x0 + left, y_top: y0 + row as f64, w: right - left, h: 1.0 };
-            p.fill_rounded_rect(run, color, 0.0, (palette::none(), 0.0));
-        }
-    }
+    icons::paint(p, Symbol::Close, rect, spec::px(mark_pt) / icons::MARK_INK, color);
 }
 
 // ─── Buttons ────────────────────────────────────────────────────
@@ -321,7 +298,7 @@ pub fn paint_danger_button(p: &mut ViewPainter, rect: Rect, hovered: bool) {
     // A button cut down to fit a row keeps its proportions.
     let k = rect.w / spec::px(c::DANGER_SIZE);
     fill(p, rect, bg, c::DANGER_RADIUS * k);
-    cross(p, rect, c::DANGER_MARK * k, c::CROSS_STROKE * k, fg);
+    paint_cross(p, rect, c::DANGER_MARK * k, fg);
 }
 
 /// The danger button's × alone, in `color`: how the button is drawn
@@ -329,22 +306,7 @@ pub fn paint_danger_button(p: &mut ViewPainter, rect: Rect, hovered: bool) {
 /// pointer is on one.
 pub fn paint_danger_mark(p: &mut ViewPainter, rect: Rect, color: [f32; 4]) {
     let k = rect.w / spec::px(c::DANGER_SIZE);
-    cross(p, rect, c::DANGER_MARK * k, c::CROSS_STROKE * k, color);
-}
-
-/// A + `size` physical px across with strokes `stroke` px thick,
-/// centred in `rect`: the glyph of a ghost add button.  Drawn, for the
-/// reason the × is.
-pub fn paint_plus(p: &mut ViewPainter, rect: Rect, size: f64, stroke: f64, color: [f32; 4]) {
-    let x0 = (rect.x + (rect.w - size) * 0.5).round();
-    let y0 = (rect.y_top + (rect.h - size) * 0.5).round();
-    let mid = (size - stroke) * 0.5;
-    for bar in [
-        Rect { x: x0, y_top: y0 + mid, w: size, h: stroke },
-        Rect { x: x0 + mid, y_top: y0, w: stroke, h: size },
-    ] {
-        p.fill_rounded_rect(bar, color, 0.0, (palette::none(), 0.0));
-    }
+    paint_cross(p, rect, c::DANGER_MARK * k, color);
 }
 
 // ─── Status chip ────────────────────────────────────────────────
