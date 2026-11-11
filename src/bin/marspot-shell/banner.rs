@@ -112,6 +112,7 @@ pub fn rasterise(
             &ct_font,
         );
     }
+    marspot::font_shape::tag_language(&mut attr, char_len);
     let line = CTLine::new_with_attributed_string(attr.as_concrete_TypeRef());
 
     let bounds = line.get_typographic_bounds();
