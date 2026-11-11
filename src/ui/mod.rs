@@ -25,6 +25,7 @@ pub mod system;
 pub mod components;
 pub mod strings;
 pub mod theme;
+pub mod tree;
 mod units;
 pub use units::Units;
 
