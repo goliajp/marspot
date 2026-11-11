@@ -360,6 +360,7 @@ impl Plugin for KimiPlugin {
                     cwd: cwd.clone(),
                     status: p.facts.as_ref().map_or(Status::Unknown, |f| f.status),
                     class: p.facts.as_ref().map_or(Mode::Prompting, |f| f.class),
+                    ended: p.facts.as_ref().and_then(|f| f.ended),
                 }),
                 // no session before the first prompt: nothing to bind
                 (None, _) => {}
@@ -439,6 +440,7 @@ mod tests {
             status: Status::Idle,
             class: Mode::Prompting,
             failure: None,
+            ended: None,
         }
     }
 

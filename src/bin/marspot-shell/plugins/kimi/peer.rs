@@ -20,6 +20,8 @@ pub(crate) struct Peer {
     pub cwd: String,
     pub status: Status,
     pub class: Mode,
+    /// The number of the session's last ended turn.
+    pub ended: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
