@@ -14,7 +14,7 @@ use marspot::{lx_debug, lx_error, lx_event};
 use marspot::ui::{
     scroll_lines, selection_text, selection_view_for_pane, truncate_for_sidebar,
     Selection, SelectionMode, CELL_TITLE_PT, MAX_SIDEBAR_LABEL_CHARS,
-    SESSION_COUNT_HARD_CAP, SIDEBAR_W_LOGICAL,
+    SESSION_COUNT_HARD_CAP, SIDEBAR_W_LOGICAL, strings::{t, Msg},
 };
 use marspot::ui::components::{ContextMenu, ContextMenuHit, MenuItem};
 
@@ -1072,33 +1072,33 @@ impl Marspot {
         match region {
             ContextRegion::Pane(_) => {
                 let copy = if has_selection {
-                    MenuItem::entry("Copy", ContextMenuAction::CopySelection.tag())
+                    MenuItem::entry(t(Msg::MenuCopy), ContextMenuAction::CopySelection.tag())
                         .with_shortcut(&hint(Command::Copy))
                 } else {
-                    MenuItem::entry("Copy", ContextMenuAction::CopySelection.tag())
+                    MenuItem::entry(t(Msg::MenuCopy), ContextMenuAction::CopySelection.tag())
                         .with_shortcut(&hint(Command::Copy))
                         .disabled()
                 };
                 let close_disabled = self.panes.len() <= 1;
                 let close = {
-                    let mi = MenuItem::entry("Close pane", ContextMenuAction::ClosePane.tag());
+                    let mi = MenuItem::entry(t(Msg::MenuClosePane), ContextMenuAction::ClosePane.tag());
                     if close_disabled { mi.disabled() } else { mi }
                 };
                 vec![
                     copy,
-                    MenuItem::entry("Paste", ContextMenuAction::Paste.tag())
+                    MenuItem::entry(t(Msg::MenuPaste), ContextMenuAction::Paste.tag())
                         .with_shortcut(&hint(Command::Paste)),
                     MenuItem::divider(),
-                    MenuItem::entry("Clear scrollback", ContextMenuAction::ClearScrollback.tag()),
+                    MenuItem::entry(t(Msg::MenuClearScrollback), ContextMenuAction::ClearScrollback.tag()),
                     MenuItem::divider(),
-                    MenuItem::entry("New pane", ContextMenuAction::SplitNewPane.tag()),
+                    MenuItem::entry(t(Msg::MenuNewPane), ContextMenuAction::SplitNewPane.tag()),
                     close,
                 ]
             }
             ContextRegion::SidebarSlot(_) => {
                 let close_disabled = self.panes.len() <= 1;
                 let close = {
-                    let mi = MenuItem::entry("Close pane", ContextMenuAction::ClosePane.tag());
+                    let mi = MenuItem::entry(t(Msg::MenuClosePane), ContextMenuAction::ClosePane.tag());
                     if close_disabled { mi.disabled() } else { mi }
                 };
                 vec![
@@ -1107,9 +1107,9 @@ impl Marspot {
                 ]
             }
             ContextRegion::TitleStrip => vec![
-                MenuItem::entry("Toggle sidebar", ContextMenuAction::ToggleSidebar.tag())
+                MenuItem::entry(t(Msg::MenuToggleSidebar), ContextMenuAction::ToggleSidebar.tag())
                     .with_shortcut(&hint(Command::ToggleSidebar)),
-                MenuItem::entry("Open layout…", ContextMenuAction::OpenLayout.tag()),
+                MenuItem::entry(t(Msg::MenuOpenLayout), ContextMenuAction::OpenLayout.tag()),
             ],
         }
     }

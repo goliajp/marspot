@@ -1,0 +1,9 @@
+"NSAppleEventsUsageDescription" = "Marspotで実行中のプログラムが、ほかのアプリを制御しようとしています。";
+"NSMicrophoneUsageDescription" = "Marspotで実行中のプログラムが、マイクを使用しようとしています。";
+"NSCameraUsageDescription" = "Marspotで実行中のプログラムが、カメラを使用しようとしています。";
+"NSDesktopFolderUsageDescription" = "Marspotで実行中のプログラムが、デスクトップフォルダ内のファイルを読み込もうとしています。";
+"NSDocumentsFolderUsageDescription" = "Marspotで実行中のプログラムが、書類フォルダ内のファイルを読み込もうとしています。";
+"NSDownloadsFolderUsageDescription" = "Marspotで実行中のプログラムが、ダウンロードフォルダ内のファイルを読み込もうとしています。";
+"NSRemovableVolumesUsageDescription" = "Marspotで実行中のプログラムが、リムーバブルボリューム上のファイルを読み込もうとしています。";
+"NSNetworkVolumesUsageDescription" = "Marspotで実行中のプログラムが、ネットワークボリューム上のファイルを読み込もうとしています。";
+"NSLocalNetworkUsageDescription" = "Marspotで実行中のプログラムが、ローカルネットワーク上のデバイスに接続しようとしています。";

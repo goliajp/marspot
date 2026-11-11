@@ -148,7 +148,7 @@ impl crate::ui::view::FontMetricsProvider for FixedAdvance {
         self.line_h
     }
     fn advance_phys(&self, text: &str, _font: crate::ui::view::TextFontSpec) -> f64 {
-        text.chars().count() as f64 * self.ch_w
+        crate::ui::core::text_fit::cells(text) as f64 * self.ch_w
     }
 }
 

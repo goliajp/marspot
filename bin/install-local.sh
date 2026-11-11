@@ -276,7 +276,14 @@ plist_is_current() {
   want="$(sed -n '/^\[package\]/,/^\[/p' "$ROOT/Cargo.toml" \
           | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
   have="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST" 2>/dev/null || echo "")"
-  [[ -n "$want" && "$want" == "$have" ]]
+  [[ -n "$want" && "$want" == "$have" ]] || return 1
+  # The per-language resources are written by the same builder and
+  # sealed by the same signature; a change to them alone is a bundle
+  # that is not current either.
+  local d
+  for d in "$ROOT"/assets/lproj/*.lproj; do
+    diff -rq "$d" "$APP/Contents/Resources/${d##*/}" >/dev/null 2>&1 || return 1
+  done
 }
 
 # ── 3. Decide the silent update BEFORE overwriting the bundle ─────
@@ -592,6 +599,9 @@ if (( ${ARM_LANDER:-0} )); then
   # produces a bundle macOS will not launch.  One moment, both.
   "$ROOT/bin/build-app-bundle.sh" --scaffold-only --out "$LANDER_DIR/stage.app" >/dev/null
   install -m 0644 "$LANDER_DIR/stage.app/Contents/Info.plist" "$LANDER_DIR/Info.plist"
+  # And the per-language resources the plist declares.
+  rm -rf "$LANDER_DIR"/*.lproj
+  cp -R "$LANDER_DIR/stage.app/Contents/Resources/"*.lproj "$LANDER_DIR/"
   rm -rf "$LANDER_DIR/stage.app"
   cat > "$LANDER_DIR/land.sh" <<'LANDER'
 #!/bin/sh
@@ -670,6 +680,11 @@ done
 # The plist the binaries were staged with.  Landing one without the
 # other leaves a bundle whose seal does not match its contents.
 [ -f "$STAGE/Info.plist" ] && /usr/bin/install -m 0644 "$STAGE/Info.plist" "$APP/Contents/Info.plist"
+for d in "$STAGE"/*.lproj; do
+  [ -d "$d" ] || continue
+  /bin/rm -rf "$APP/Contents/Resources/${d##*/}"
+  /bin/cp -R "$d" "$APP/Contents/Resources/" && echo "installed ${d##*/}"
+done
 # Changing any bundle content invalidates the outer signature, and the
 # Developer Tools TCC grant is matched against it — so re-sign the
 # binaries AND the bundle, innermost first.

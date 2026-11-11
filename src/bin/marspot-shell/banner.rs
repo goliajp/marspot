@@ -26,6 +26,7 @@ use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use core_text::font;
 use core_text::line::CTLine;
 use core_text::string_attributes::kCTFontAttributeName;
+use marspot::ui::strings::{t, Msg};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
@@ -61,17 +62,13 @@ pub enum BannerKind {
 }
 
 impl BannerKind {
-    /// The string we rasterise for this banner.  Hard-coded English
-    /// for now; matches marspot's existing convention of being a
-    /// developer tool first, polished UI later.
+    /// The string we rasterise for this banner.
     pub fn text(self) -> &'static str {
-        match self {
-            BannerKind::RestartsPaused => "Marspot's core keeps stopping — it will retry on its own",
-            BannerKind::Recovering => "Marspot is recovering…",
-            BannerKind::CrashLoop => {
-                "Marspot crashed repeatedly — safe mode (sessions kept, nothing new spawned)"
-            }
-        }
+        t(match self {
+            BannerKind::RestartsPaused => Msg::BannerRestartsPaused,
+            BannerKind::Recovering => Msg::BannerRecovering,
+            BannerKind::CrashLoop => Msg::BannerCrashLoop,
+        })
     }
 }
 
@@ -115,6 +112,7 @@ pub fn rasterise(
             &ct_font,
         );
     }
+    marspot::font_shape::tag_language(&mut attr, char_len);
     let line = CTLine::new_with_attributed_string(attr.as_concrete_TypeRef());
 
     let bounds = line.get_typographic_bounds();

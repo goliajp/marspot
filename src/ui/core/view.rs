@@ -410,7 +410,7 @@ impl<'a> ViewPainter<'a> {
         let cell_w = self.cell_w;
         let cell_h = self.cell_h;
         let ascent = self.ascent;
-        let text_w = s.chars().count() as f32 * cell_w;
+        let text_w = crate::ui::core::text_fit::cells(s) as f32 * cell_w;
         let box_rect = rect.place(text_w as f64, cell_h as f64, align);
         let baseline_y = box_rect.y_top as f32 + ascent;
         self.text(box_rect.x as f32, baseline_y, s, color);

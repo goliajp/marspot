@@ -1,12 +1,11 @@
-//! The catalogue is complete, and the files that use it stay migrated.
+//! The catalogue is complete and says what it said.
 //!
-//! S7-01. The first two tests are about the catalogue itself; the third is
-//! a ratchet — it fails if a bare English literal comes back into a file
-//! that has already been migrated. Without it the migration un-does itself
-//! one convenient literal at a time, and nobody notices until a translator
-//! asks why half the settings panel is still in English.
+//! The tests here are about the catalogue itself. What keeps a bare
+//! literal from coming back into the code that draws is the ratchet in
+//! `ui_strings_ratchet`.
 
-use marspot::ui::strings::{ALL, t};
+use marspot::ui::strings::{self, t, Arg, MonthDayTime, Msg, ALL};
+use marspot_term::language::LangId;
 
 /// Every message resolves to something, and nothing resolves to nothing.
 ///
@@ -28,7 +27,7 @@ fn every_message_has_text() {
 /// touching either fails here.
 #[test]
 fn every_message_is_listed() {
-    const EXPECTED: usize = 60;
+    const EXPECTED: usize = 128;
     assert_eq!(
         ALL.len(),
         EXPECTED,
@@ -44,128 +43,285 @@ fn every_message_is_listed() {
     }
 }
 
-/// Two ids may not carry the same English text.
+/// Two ids may not carry the same English text, unless the pair is named
+/// here as two meanings that only English spells alike.
 ///
-/// Where they genuinely should differ in another language -- "Normal" as a
-/// dimming level and "Normal" as a scroll speed -- they are separate ids
-/// with separate text, and if the English coincides the pair has to be
-/// looked at rather than left to a translator to guess.
+/// "Normal" as a dimming level and "Normal" as a wheel speed are two
+/// words in a language that has two; so are "Light" as a dimming level
+/// and "Light" as a theme. Any other coincidence has to be looked at
+/// rather than left to a translator to guess.
 #[test]
 fn no_two_messages_share_their_english() {
-    let mut by_text: std::collections::HashMap<&str, Vec<String>> = Default::default();
+    const TWO_MEANINGS: &[(&str, &[Msg])] = &[
+        ("Normal", &[Msg::DimNormal, Msg::ScrollNormal]),
+        ("Light", &[Msg::DimLight, Msg::ThemeLight]),
+    ];
+    let mut by_text: std::collections::HashMap<&str, Vec<Msg>> = Default::default();
     for m in ALL {
-        by_text.entry(t(*m)).or_default().push(format!("{m:?}"));
+        by_text.entry(t(*m)).or_default().push(*m);
     }
     let clashes: Vec<String> = by_text
         .iter()
-        .filter(|(_, ids)| ids.len() > 1)
-        .map(|(text, ids)| format!("{text:?} is {}", ids.join(" and ")))
+        .filter(|(text, ids)| {
+            ids.len() > 1 && !TWO_MEANINGS.iter().any(|(en, pair)| en == *text && pair == &ids.as_slice())
+        })
+        .map(|(text, ids)| format!("{text:?} is {ids:?}"))
         .collect();
     assert!(
         clashes.is_empty(),
         "two messages share their English, so a translator cannot tell them apart:\n  {}",
         clashes.join("\n  ")
     );
+    for (en, pair) in TWO_MEANINGS {
+        assert_eq!(by_text.get(en).map(Vec::as_slice), Some(*pair), "{en:?} is no longer shared: drop it from the list");
+    }
 }
 
-/// The migrated files hold no user-visible English literal any more.
-///
-/// Source shape, because the point is the absence of a thing. A literal is
-/// "user-visible" here if it starts with a capital and reads like a
-/// sentence -- which also matches some identifiers, so the ones that are
-/// not text are listed rather than guessed at.
+/// One of each sentence built around a value: what English makes of
+/// it, and the values that have to appear in it whatever the language.
+const SAMPLES: &[(Arg<'static>, &str, &[&str])] = &[
+    (Arg::MoveToWindow(2), "Move to Window 2", &["2"]),
+    (Arg::PaneCount { cols: 4, rows: 1 }, "4 × 1 = 4 panes", &["4 × 1 = 4"]),
+    (Arg::PaneCount { cols: 1, rows: 1 }, "1 × 1 = 1 pane", &["1 × 1 = 1"]),
+    (
+        Arg::ProcessDetail { pane: "api", sid: 7, shell_pid: 4242 },
+        "api · sid 7 · shell pid 4242",
+        &["api", "7", "4242"],
+    ),
+    (
+        Arg::ResetAt(MonthDayTime { month: 1, day: 2, hour: 6, minute: 0 }),
+        "reset: 1/2 06:00",
+        &["1/2 06:00"],
+    ),
+    (
+        Arg::UpdatedAt(MonthDayTime { month: 11, day: 10, hour: 18, minute: 5 }),
+        "updated 11/10 18:05",
+        &["11/10 18:05"],
+    ),
+    (Arg::SessionStarting(12), "session 12 starting…", &["12"]),
+    (Arg::SessionUnavailable(12), "session 12 unavailable — press any key to retry", &["12"]),
+    (Arg::ProfileRow { n: 2, current: true }, "● profile 2", &["●", "2"]),
+    (Arg::ProfileRow { n: 3, current: false }, "   profile 3", &["3"]),
+    (Arg::HandOffTo("codex P2"), "hand off to codex P2", &["codex P2"]),
+    (Arg::SwitchToProfile(4), "switch to P4", &["P4"]),
+];
+
+/// The sentences built around a value read as they did when each call
+/// site glued its own together.
 #[test]
-fn migrated_files_do_not_grow_new_literals() {
-    const MIGRATED: &[(&str, &[&str])] = &[(
-        "src/ui/components/settings_modal.rs",
-        // Not user-visible: type names that happen to be capitalised.
-        &["Msg", "Row", "Control", "Segmented", "RowSpec", "Section"],
-    )];
-    // The `Control::Segmented` option arrays are not migrated yet,
-    // and the exemption is by name rather than by file so the rest of the
-    // file stays covered. Three of them are prose and belong in the
-    // catalogue; the other is durations ("15m", "1h"), which is a number
-    // and a unit to format rather than a string to translate -- S7-03.
-    //
-    // `the_deferred_arrays_still_exist` below fails when they go, which is
-    // what stops this exemption from outliving its reason.
-    const DEFERRED: &[&str] = &["IDLE_LABELS", "DIM_LABELS", "SCROLL_LABELS", "THEME_LABELS"];
-    for (path, allowed) in MIGRATED {
-        let text = std::fs::read_to_string(path).expect("a migrated file is readable");
-        // Production code only: a test fixture may hold whatever it likes.
-        // Cut at the test module, not at the first test-only item.
-        let prod = text
-            .match_indices("#[cfg(test)]")
-            .find(|(i, m)| text[i + m.len()..].trim_start().starts_with("mod "))
-            .map_or(text.as_str(), |(i, _)| &text[..i]);
-        let mut offenders = Vec::new();
-        for (n, line) in prod.lines().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") || trimmed.starts_with("///") {
-                continue;
-            }
-            if DEFERRED.iter().any(|d| line.contains(d)) {
-                continue;
-            }
-            for lit in literals(line) {
-                if lit.len() < 3 || !lit.starts_with(|c: char| c.is_ascii_uppercase()) {
-                    continue;
-                }
-                if allowed.contains(&lit) {
-                    continue;
-                }
-                offenders.push(format!("{path}:{}: {lit:?}", n + 1));
-            }
-        }
-        assert!(
-            offenders.is_empty(),
-            "a user-visible literal is back in a migrated file; it belongs in \
-             `ui::strings`:\n  {}",
-            offenders.join("\n  ")
-        );
+fn sentences_with_values_read_as_before() {
+    for (arg, want, _) in SAMPLES {
+        assert_eq!(strings::text(*arg), *want, "{arg:?}");
     }
 }
 
-/// String literals on one line, without their quotes. Good enough for a
-/// source-shape check: it does not try to span lines, and a literal that
-/// spans one is already unusual enough to want looking at.
-fn literals(line: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let b = line.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'"' {
-            let start = i + 1;
-            let mut j = start;
-            while j < b.len() && b[j] != b'"' {
-                if b[j] == b'\\' {
-                    j += 1;
-                }
-                j += 1;
-            }
-            if j <= b.len() {
-                if let Some(s) = line.get(start..j.min(b.len())) {
-                    out.push(s);
-                }
-            }
-            i = j + 1;
-        } else {
-            i += 1;
-        }
-    }
+/// A caller that keeps its buffer gets the sentence appended to it and
+/// nothing else done to it.
+#[test]
+fn a_sentence_is_written_into_the_callers_buffer() {
+    let mut out = String::with_capacity(64);
+    let before = out.capacity();
+    strings::write(&mut out, Arg::MoveToWindow(3)).expect("a String takes any text");
+    out.push('|');
+    strings::write(&mut out, Arg::SwitchToProfile(1)).expect("a String takes any text");
+    assert_eq!(out, "Move to Window 3|switch to P1");
+    assert_eq!(out.capacity(), before, "the buffer was big enough and was not replaced");
+}
+
+// ─── the translations ────────────────────────────────────────────
+
+const TRANSLATED: [LangId; 2] = [LangId::Ja, LangId::ZhHans];
+
+fn text_in(lang: LangId, m: Msg) -> &'static str {
+    (strings::table(lang).text)(m)
+}
+
+fn written_in(lang: LangId, a: Arg<'_>) -> String {
+    let mut out = String::new();
+    (strings::table(lang).write)(a, &mut out).expect("a String takes any text");
     out
 }
 
-/// The exemption above names three arrays. When they are migrated this
-/// fails, and the exemption goes with them.
+/// The messages that are sentences: the line under a settings row, and
+/// what an empty panel says. Everything else is a label — a title, a
+/// menu item, a button, a segment, a table header, a status word, a
+/// banner — and a label takes no full stop.
+fn is_sentence(m: Msg) -> bool {
+    matches!(
+        m,
+        Msg::CostReclaimIdlePanes
+            | Msg::CostIdleFor
+            | Msg::CostWarmUpOnReturn
+            | Msg::CostTheme
+            | Msg::CostDimOtherPanes
+            | Msg::CostCircledDigitsWide
+            | Msg::CostClaudeCodeReportsModel
+            | Msg::CostWheelSpeed
+            | Msg::CostLanguage
+            | Msg::CostLanguageRelaunch
+            | Msg::AccountsEmpty
+    )
+}
+
+/// Text that reads the same in every language: names, and units nobody
+/// translates.
+const SAME_EVERYWHERE: &[&str] = &["Marspot", "Claude Code", "CPU%", "RSS", "pid", "English"];
+
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x3040..=0x30FF     // kana
+        | 0x3400..=0x4DBF | 0x4E00..=0x9FFF // Han
+        | 0x3000..=0x303F   // CJK punctuation
+        | 0xFF00..=0xFFEF)  // full-width forms
+}
+
+/// What is wrong with `s` as Japanese or Chinese interface text, if
+/// anything.
+fn typography_fault(s: &str, label: bool) -> Option<String> {
+    if label && s.ends_with(['。', '.', '！', '!']) {
+        return Some("a label ends with a full stop".into());
+    }
+    if !label && !s.ends_with('。') {
+        return Some("a sentence does not end with 。".into());
+    }
+    if s.contains("...") {
+        return Some("three dots instead of …".into());
+    }
+    let chars: Vec<char> = s.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        let beside_cjk = (i > 0 && is_cjk(chars[i - 1])) || chars.get(i + 1).is_some_and(|n| is_cjk(*n));
+        if beside_cjk && ",;:!?()".contains(*c) {
+            return Some(format!("half-width {c:?} beside a CJK character"));
+        }
+    }
+    None
+}
+
+/// The first place `s` puts a space between a kana or kanji and a
+/// half-width letter or digit, either way round.
+fn spaced_latin(s: &str) -> Option<String> {
+    let kana_or_kanji = |c: char| matches!(c as u32, 0x3041..=0x3096 | 0x30A1..=0x30FA | 0x30FC | 0x4E00..=0x9FFF);
+    let chars: Vec<char> = s.chars().collect();
+    chars.windows(3).find_map(|w| {
+        let apart = (kana_or_kanji(w[0]) && w[2].is_ascii_alphanumeric())
+            || (w[0].is_ascii_alphanumeric() && kana_or_kanji(w[2]));
+        (w[1] == ' ' && apart).then(|| w.iter().collect())
+    })
+}
+
 #[test]
-fn the_deferred_arrays_still_exist() {
-    let text = std::fs::read_to_string("src/ui/components/settings_modal.rs")
-        .expect("the settings panel is readable");
-    for name in ["IDLE_LABELS", "DIM_LABELS", "SCROLL_LABELS", "THEME_LABELS"] {
-        assert!(
-            text.contains(&format!("pub const {name}: &[&str]")),
-            "{name} is no longer a `&[&str]`, so the ratchet's exemption for it in              `migrated_files_do_not_grow_new_literals` has outlived its reason --              remove it from DEFERRED"
-        );
+fn every_message_has_text_in_every_language() {
+    for lang in LangId::ALL {
+        for m in ALL {
+            assert!(!text_in(lang, *m).trim().is_empty(), "{m:?} is empty in {lang:?}");
+        }
+        for (arg, _, _) in SAMPLES {
+            assert!(!written_in(lang, *arg).trim().is_empty(), "{arg:?} is empty in {lang:?}");
+        }
+    }
+}
+
+/// A value handed to a sentence appears in it, in every language: a
+/// translation that drops the window number still reads fluently.
+#[test]
+fn every_value_appears_in_its_sentence_in_every_language() {
+    for lang in LangId::ALL {
+        for (arg, _, values) in SAMPLES {
+            let out = written_in(lang, *arg);
+            for v in *values {
+                assert!(out.contains(v), "{lang:?}: {arg:?} reads {out:?}, without {v:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn translations_are_translated() {
+    for lang in TRANSLATED {
+        for m in ALL {
+            let s = text_in(lang, *m);
+            let same = SAME_EVERYWHERE.contains(&s) || matches!(m, Msg::LangJapanese | Msg::LangChinese);
+            assert!(same || !s.is_ascii(), "{lang:?}: {m:?} is still {s:?}");
+        }
+        for (arg, _, _) in SAMPLES {
+            let out = written_in(lang, *arg);
+            assert!(!out.is_ascii(), "{lang:?}: {arg:?} is still {out:?}");
+        }
+    }
+}
+
+/// Labels take no full stop, sentences end with 。, punctuation beside
+/// CJK text is full-width, and an ellipsis is one character.
+#[test]
+fn translations_follow_cjk_typography() {
+    let mut faults = Vec::new();
+    for lang in TRANSLATED {
+        for m in ALL {
+            let s = text_in(lang, *m);
+            if let Some(why) = typography_fault(s, !is_sentence(*m)) {
+                faults.push(format!("{lang:?} {m:?} {s:?}: {why}"));
+            }
+        }
+        for (arg, _, _) in SAMPLES {
+            let out = written_in(lang, *arg);
+            if let Some(why) = typography_fault(&out, true) {
+                faults.push(format!("{lang:?} {arg:?} {out:?}: {why}"));
+            }
+        }
+    }
+    // Japanese sets no space between kana or kanji and half-width
+    // letters or digits inside a phrase; the one place it does is
+    // before a date and time.
+    for m in ALL {
+        if let Some(pair) = spaced_latin(text_in(LangId::Ja, *m)) {
+            faults.push(format!("Ja {m:?}: a space in {pair:?}"));
+        }
+    }
+    for (arg, _, _) in SAMPLES {
+        let dated = matches!(arg, Arg::ResetAt(_) | Arg::UpdatedAt(_));
+        if let Some(pair) = spaced_latin(&written_in(LangId::Ja, *arg)).filter(|_| !dated) {
+            faults.push(format!("Ja {arg:?}: a space in {pair:?}"));
+        }
+    }
+    assert!(faults.is_empty(), "\n  {}", faults.join("\n  "));
+    assert!(spaced_latin("ペイン 1").is_some() && spaced_latin("Marspot について").is_some());
+    assert!(spaced_latin("ペイン1").is_none() && spaced_latin("4 × 1 = 4ペイン").is_none());
+
+    // the check finds what it is for
+    assert!(typography_fault("设置。", true).is_some(), "a label with a full stop");
+    assert!(typography_fault("設定.", true).is_some());
+    assert!(typography_fault("设置", true).is_none());
+    assert!(typography_fault("立即应用", false).is_some(), "a sentence without one");
+    assert!(typography_fault("立即应用。", false).is_none());
+    assert!(typography_fault("已进入安全模式(保留会话)", true).is_some(), "half-width brackets");
+    assert!(typography_fault("返回时,唤醒", true).is_some(), "a half-width comma");
+    assert!(typography_fault("正在恢复...", true).is_some(), "three dots");
+    assert!(typography_fault("Marspot 正在恢复…", true).is_none());
+}
+
+/// The whole catalogue as `key<TAB>en<TAB>ja<TAB>zh-Hans`, for whoever
+/// reviews the translations: written to the file `MARSPOT_CATALOGUE_TSV`
+/// names, when it names one.
+#[test]
+fn the_catalogue_can_be_listed_for_review() {
+    let mut out = String::from("key\ten\tja\tzh-Hans\n");
+    for m in ALL {
+        out += &format!("{m:?}");
+        for lang in LangId::ALL {
+            out += &format!("\t{}", text_in(lang, *m));
+        }
+        out.push('\n');
+    }
+    for (arg, _, _) in SAMPLES {
+        out += &format!("{arg:?}");
+        for lang in LangId::ALL {
+            out += &format!("\t{}", written_in(lang, *arg));
+        }
+        out.push('\n');
+    }
+    assert_eq!(out.lines().count(), 1 + ALL.len() + SAMPLES.len());
+    assert!(out.lines().all(|l| l.split('\t').count() == 4), "a tab or a line break inside a message");
+    if let Some(path) = std::env::var_os("MARSPOT_CATALOGUE_TSV") {
+        std::fs::write(path, out).expect("the listing is writable");
     }
 }

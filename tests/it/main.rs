@@ -10,4 +10,5 @@ mod shortcuts_are_real;
 mod site_claims;
 mod text_layer_is_portable;
 mod ui_strings;
+mod ui_strings_ratchet;
 mod version_identity;

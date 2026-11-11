@@ -42,7 +42,7 @@ use marspot::ui::components::surface_stack::{
 };
 use marspot::ui::components::panel_script::{Input as DevInput, Scene, Script as PanelScript};
 use marspot::ui::components::{chrome_hover::ChromeHover, PanelChrome, GRID_MAX, GRID_MIN};
-use marspot::ui::strings::{t, Msg};
+use marspot::ui::strings::{self, t, Arg, Msg};
 use marspot::session::SessionState;
 use marspot::session_registry::{
     self, allocate_next_session_id, list_session_entries,
@@ -389,20 +389,20 @@ fn link_menu_items_for(
     // kind surfaces both Copy and Open.
     if link.kind == LinkKind::Uuid {
         return vec![MenuItem::entry(
-            "Copy UUID",
+            t(Msg::LinkCopyUuid),
             ContextMenuAction::CopyLink.tag(),
         )];
     }
     let (open_label, copy_label) = match link.kind {
-        LinkKind::Url => ("Open URL", "Copy URL"),
-        LinkKind::File => ("Open file", "Copy path"),
-        LinkKind::Email => ("Send email", "Copy email"),
-        LinkKind::Ip => ("Open in browser", "Copy IP"),
+        LinkKind::Url => (Msg::LinkOpenUrl, Msg::LinkCopyUrl),
+        LinkKind::File => (Msg::LinkOpenFile, Msg::LinkCopyPath),
+        LinkKind::Email => (Msg::LinkSendEmail, Msg::LinkCopyEmail),
+        LinkKind::Ip => (Msg::LinkOpenInBrowser, Msg::LinkCopyIp),
         LinkKind::Uuid => unreachable!("handled above"),
     };
     vec![
-        MenuItem::entry(copy_label, ContextMenuAction::CopyLink.tag()),
-        MenuItem::entry(open_label, ContextMenuAction::OpenLink.tag()),
+        MenuItem::entry(t(copy_label), ContextMenuAction::CopyLink.tag()),
+        MenuItem::entry(t(open_label), ContextMenuAction::OpenLink.tag()),
     ]
 }
 
@@ -5100,7 +5100,7 @@ impl CoreApp {
                     MenuItem::entry(t(Msg::MenuClearScrollback),
                         ContextMenuAction::ClearScrollback.tag()),
                     MenuItem::divider(),
-                    MenuItem::entry("New pane",
+                    MenuItem::entry(t(Msg::MenuNewPane),
                         ContextMenuAction::SplitNewPane.tag()),
                     close,
                 ];
@@ -5121,10 +5121,10 @@ impl CoreApp {
                 items
             }
             ContextRegion::TitleStrip => vec![
-                MenuItem::entry("Toggle sidebar",
+                MenuItem::entry(t(Msg::MenuToggleSidebar),
                     ContextMenuAction::ToggleSidebar.tag())
                     .with_shortcut(&hint(Command::ToggleSidebar)),
-                MenuItem::entry("Open layout…",
+                MenuItem::entry(t(Msg::MenuOpenLayout),
                     ContextMenuAction::OpenLayout.tag()),
             ],
             // Badge menus never come through here — their items
@@ -5159,7 +5159,7 @@ impl CoreApp {
                 continue;
             }
             items.push(MenuItem::entry(
-                &format!("Move to Window {}", ti + 1),
+                &strings::text(Arg::MoveToWindow(ti + 1)),
                 MOVE_TO_WINDOW_TAG_BASE + ti as u32,
             ));
             let _ = w;
@@ -5168,7 +5168,7 @@ impl CoreApp {
         // would just rebuild the same state with a window flash.
         let pointless =
             self.windows.len() == 1 && win!(self, wi).panes.len() <= 1;
-        let mi = MenuItem::entry("Move to New Window", MOVE_TO_NEW_WINDOW_TAG);
+        let mi = MenuItem::entry(t(Msg::MenuMoveToNewWindow), MOVE_TO_NEW_WINDOW_TAG);
         items.push(if pointless { mi.disabled() } else { mi });
     }
 
@@ -7238,9 +7238,9 @@ impl CoreApp {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let fmt_md_hm = |unix: i64| -> String {
-            let (mo, d, h, mi) = marspot::cc_usage::local_mdhm(unix);
-            format!("{mo}/{d} {h:02}:{mi:02}")
+        let md_hm = |unix: i64| {
+            let (month, day, hour, minute) = marspot::cc_usage::local_mdhm(unix);
+            strings::MonthDayTime { month, day, hour, minute }
         };
         let fmt_hm = |unix: i64| -> String {
             let (_, _, h, mi) = marspot::cc_usage::local_mdhm(unix);
@@ -7260,7 +7260,7 @@ impl CoreApp {
         // be used again.
         let soonest_reset = |ws: &[marspot::cc_usage::CcWindow]| -> String {
             match ws.iter().filter_map(|w| w.reset).min() {
-                Some(t) => format!("reset: {}", fmt_md_hm(t)),
+                Some(at) => strings::text(Arg::ResetAt(md_hm(at))),
                 None => String::new(),
             }
         };
@@ -7318,7 +7318,7 @@ impl CoreApp {
         .unwrap_or(0);
         Some(CcUsageRender {
             rect,
-            updated_label: format!("updated {}", fmt_md_hm(generated_at)),
+            updated_label: strings::text(Arg::UpdatedAt(md_hm(generated_at))),
             clock: Clock::local(now_unix),
             hover: modal.hover,
             accounts,
@@ -7370,10 +7370,8 @@ impl CoreApp {
         let mut detail = String::new();
         let mut rows: Vec<ProcessPanelRow> = Vec::new();
         if let Some(pane) = order.get(selected_pane).and_then(|&i| panel.panes.get(i)) {
-            detail = format!(
-                "{} · sid {} · shell pid {}",
-                pane.name, pane.shelld_session_id, pane.shell_child_pid.unwrap_or(0),
-            );
+            let (sid, shell_pid) = (pane.shelld_session_id, pane.shell_child_pid.unwrap_or(0));
+            detail = strings::text(Arg::ProcessDetail { pane: &pane.name, sid, shell_pid });
             if let Some(tree) = pane.tree.as_ref() {
                 for (depth, node) in marspot::pidtree::flatten_pre_order(tree) {
                     // `prev_pid_stats` holds each pid's cumulative CPU

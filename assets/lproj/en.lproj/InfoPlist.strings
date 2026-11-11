@@ -1,0 +1,9 @@
+"NSAppleEventsUsageDescription" = "A program running in Marspot wants to control another app.";
+"NSMicrophoneUsageDescription" = "A program running in Marspot wants to use the microphone.";
+"NSCameraUsageDescription" = "A program running in Marspot wants to use the camera.";
+"NSDesktopFolderUsageDescription" = "A program running in Marspot wants to read files on your Desktop.";
+"NSDocumentsFolderUsageDescription" = "A program running in Marspot wants to read files in your Documents folder.";
+"NSDownloadsFolderUsageDescription" = "A program running in Marspot wants to read files in your Downloads folder.";
+"NSRemovableVolumesUsageDescription" = "A program running in Marspot wants to read files on a removable volume.";
+"NSNetworkVolumesUsageDescription" = "A program running in Marspot wants to read files on a network volume.";
+"NSLocalNetworkUsageDescription" = "A program running in Marspot wants to reach devices on your local network.";

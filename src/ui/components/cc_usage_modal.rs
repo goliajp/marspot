@@ -20,6 +20,7 @@ use crate::ui::theme::spec;
 /// because it is set in the terminal's font and has to keep step with
 /// it.
 pub mod metric {
+    use crate::ui::strings::Msg;
     use crate::ui::theme::spec::{card, space};
     use crate::ui::theme::PanelText;
 
@@ -28,12 +29,11 @@ pub mod metric {
     /// "Agent", not "Claude": the panel carries every provider whose
     /// feed is on disk, and naming it after one of them is how a reader
     /// concludes the other is missing rather than absent.
-    pub const TITLE: &str = "Agent accounts";
-    pub const ACCOUNTS_HEADING: &str = "Accounts";
-    pub const TIMELINE_HEADING: &str = "Availability";
+    pub const TITLE: Msg = Msg::PanelAccounts;
+    pub const ACCOUNTS_HEADING: Msg = Msg::AccountsHeading;
+    pub const TIMELINE_HEADING: Msg = Msg::AccountsAvailability;
     /// Shown instead of the cards while neither feed has been read.
-    pub const EMPTY_TEXT: &str =
-        "No usage read yet. Sign in to claude or codex in a pane; this fills in within a few minutes.";
+    pub const EMPTY_TEXT: Msg = Msg::AccountsEmpty;
 
     pub const NAME: PanelText = PanelText::Label;
     pub const EMAIL: PanelText = PanelText::Secondary;
