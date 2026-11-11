@@ -187,14 +187,8 @@ pub fn drop_target_fill() -> [f32; 4] {
 
 // ─── Presets and the shell ──────────────────────────────────────
 
-/// The lowest surface, and the one a step above it: what the view
-/// presets (card, tooltip, list row) are filled with.
+/// The lowest surface.
 pub fn surface_base() -> [f32; 4] { rgba::bg() }
-pub fn surface_raised() -> [f32; 4] { rgba::bg_raised() }
-/// Between two items of a preset's list.
-pub fn divider() -> [f32; 4] { rgba::divider() }
-/// A label on a selected preset row.
-pub fn fg_inverse() -> [f32; 4] { rgba::fg_inverse() }
 /// The shell's status banner: its plate and its text.
 pub fn notice_bg() -> [f32; 4] { rgba::notice_bg() }
 pub fn notice_fg() -> [f32; 4] { rgba::notice_fg() }

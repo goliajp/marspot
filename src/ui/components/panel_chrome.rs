@@ -370,7 +370,7 @@ mod tests {
     /// asking `panel_palette` for a role.
     fn table_reads(src: &str) -> Vec<String> {
         let code = code_of(src);
-        ["token::color", "theme::color", "theme::table", "theme::current", "table::color"]
+        ["theme::color", "theme::table", "theme::current", "table::color"]
             .iter()
             .filter(|path| code.contains(*path))
             .map(|path| path.to_string())
@@ -484,12 +484,11 @@ mod tests {
     #[test]
     fn panel_chrome_source_has_no_colour_literals() {
         // The palette holds the one colour that is no theme's: none.
-        // The dev panel is a workbench that demonstrates the colour
-        // API with its own swatches.  `Color` defines the constructors.
-        const EXEMPT: [&str; 3] = ["panel_palette.rs", "dev_panel.rs", "color.rs"];
+        // `Color` defines the constructors.
+        const EXEMPT: [&str; 2] = ["panel_palette.rs", "color.rs"];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut scanned = 0;
-        for dir in ["frame_build", "ui/components", "ui/view", "ui/core", "bin/marspot-shell"] {
+        for dir in ["frame_build", "ui/components", "ui/core", "bin/marspot-shell"] {
             for (name, src) in sources(&root.join(dir)) {
                 if EXEMPT.contains(&name.as_str()) {
                     continue;
@@ -526,9 +525,7 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut scanned = 0;
         for (name, src) in sources(&root) {
-            let allowed = name.starts_with("ui/theme/")
-                || name == "ui/components/panel_palette.rs"
-                || name == "ui/components/dev_panel.rs";
+            let allowed = name.starts_with("ui/theme/") || name == "ui/components/panel_palette.rs";
             if allowed {
                 continue;
             }

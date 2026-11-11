@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.290"  # the dev window is built only by the binaries that show it
-core    = "0.12.321"  # a reattached session's exit status is made in place, not by running a helper
+shell   = "0.7.291"  # the shell hosts no developer window
+core    = "0.12.322"  # the developer panel and the view tree it was drawn with are gone
 session = "0.11.163"  # a repair reads the terminal settings and writes them back with nothing in between

@@ -230,33 +230,3 @@ pictures_at_scale_2! {
     panel_snapshot_accounts_2x = panel::panel_snapshot_accounts;
     panel_snapshot_controls_2x = panel::panel_snapshot_controls;
 }
-
-/// The developer panel is a canvas in a window of its own, drawn in
-/// the shell: every rectangle, line and text origin of its first page
-/// at scale 2 is where it is at scale 1, doubled.
-#[test]
-fn the_developer_panels_canvas_doubles() {
-    use crate::ui::components::{build_dev_panel_canvas, DevPanelState};
-    use crate::ui::core::Primitive;
-    let page = |scale: f64| {
-        super::density_kit::at_scale(scale, || {
-            let state = DevPanelState { scale, size_pt: (900.0, 700.0), origin_pt: (0.0, 0.0), ..Default::default() };
-            let fonts = crate::ui::view::MockFontMetrics { cell_w_phys: 8.0 * scale, cell_h_phys: 16.0 * scale };
-            let (cw, ch, ascent) = ((8.0 * scale) as f32, (16.0 * scale) as f32, (12.0 * scale) as f32);
-            build_dev_panel_canvas(&state, 900.0 * scale, 700.0 * scale, cw, ch, ascent, &fonts).primitives().to_vec()
-        })
-    };
-    let (one, two) = (page(1.0), page(2.0));
-    assert_eq!(one.len(), two.len(), "the page holds another number of things at scale 2");
-    assert!(one.len() > 20);
-    let boxes = |p: &Primitive| match p {
-        Primitive::Rect(r) => vec![r.x, r.y, r.w, r.h, r.radius, r.border.map_or(0.0, |b| b.0)],
-        Primitive::Line(l) => vec![l.from.0, l.from.1, l.to.0, l.to.1, l.width],
-        Primitive::Text(t) => vec![t.x, t.y],
-    };
-    for (n, (a, b)) in one.iter().zip(&two).enumerate() {
-        for (va, vb) in boxes(a).iter().zip(boxes(b)) {
-            assert!((vb - 2.0 * va).abs() <= 1.0, "primitive {n} is not scaled: {a:?} at scale 1, {b:?} at scale 2");
-        }
-    }
-}
