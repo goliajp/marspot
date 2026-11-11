@@ -346,6 +346,10 @@ pub(in crate::plugins) struct Situation<'a> {
     /// both the account and the model have room. For every other pane
     /// this is `None` and nothing about the decision changes.
     pub needs_model: Option<&'a str>,
+    /// The newest thing a background agent of this session reported is
+    /// that the API refused it for quota, under the claude on this
+    /// account.
+    pub background_refused: Option<&'a Refusal>,
 }
 
 /// What to do with a pane its account has refused.
@@ -399,7 +403,21 @@ pub(in crate::plugins) fn next_move(s: &Situation) -> Move {
     // cannot answer anything that work comes back with, and the pane
     // only stands still. A command in the foreground still does, until
     // it ends -- cut off halfway it can leave a write half done.
-    let work_holds = s.work_running && !s.warned;
+    //
+    // Nor does background work the account has stopped answering. An
+    // agent in the background needs the account for every step, and
+    // one that has just been refused on a model this account is out
+    // for is the evidence that such work is failing, not running: the
+    // processes still under claude belong to agents about to meet the
+    // same refusal, each failure waking a conversation that cannot
+    // answer either (four panes, 2026-11-11, two to five minutes
+    // each). An agent refused on a model the account still serves is
+    // not that evidence, and no report of a refusal is no evidence.
+    let work_stuck = s.background_refused.is_some_and(|r| {
+        let model = (!r.model.is_empty()).then_some(r.model.as_str());
+        s.rooms.iter().any(|(p, room)| *p == s.current && room.refused_for(model))
+    });
+    let work_holds = s.work_running && !s.warned && !work_stuck;
     if (s.tool_executing || work_holds)
         && s.stranded_for.map(|d| d < TOOL_HOLD_MAX).unwrap_or(true)
     {
@@ -728,7 +746,64 @@ mod tests {
             last_target: None,
             stranded_for: None,
             warned: false,
+            background_refused: None,
         }
+    }
+
+    /// Background agents hold a refused pane only while they can get
+    /// an answer from its account.
+    #[test]
+    fn background_work_the_account_refuses_does_not_hold_the_pane() {
+        let out_of_fable = room(0.10, 0.50, 100, &[("fable", 1.0)]);
+        let r = vec![(1, out_of_fable.clone()), (2, room(0.10, 0.20, 900, &[("fable", 0.2)]))];
+        let fable = Refusal { model: "fable-5-2".into(), ..fable_refusal(2_000) };
+        let opus = Refusal { model: "opus-5-5".into(), ..fable_refusal(2_000) };
+        let busy = || Situation { needs_model: Some("fable-5-2"), work_running: true, ..situation(&r) };
+
+        // an agent was refused Fable, and this account is out of Fable
+        let s = Situation { background_refused: Some(&fable), ..busy() };
+        assert_eq!(next_move(&s), Move::To(2));
+
+        // no agent reported a refusal: the work is taken to be running
+        assert_eq!(next_move(&busy()), Move::Hold("work is in flight here"));
+
+        // refused on a model this account still serves: other agents
+        // there can go on
+        let s = Situation { background_refused: Some(&opus), ..busy() };
+        assert_eq!(next_move(&s), Move::Hold("work is in flight here"));
+
+        // a refusal that names no model is about the account's own
+        // windows, which here have room
+        let unnamed = Refusal { model: String::new(), ..fable_refusal(2_000) };
+        let s = Situation { background_refused: Some(&unnamed), ..busy() };
+        assert_eq!(next_move(&s), Move::Hold("work is in flight here"));
+
+        // a command in the foreground holds the pane whatever its agents met
+        let s = Situation { tool_executing: true, background_refused: Some(&fable), ..busy() };
+        assert_eq!(next_move(&s), Move::Hold("a tool is running here"));
+
+        // nowhere with Fable left: it stays, for the reason it always did
+        let shut = vec![(1, out_of_fable.clone()), (2, out_of_fable)];
+        let s = Situation { rooms: &shut, background_refused: Some(&fable), ..busy() };
+        assert_eq!(next_move(&s), Move::Hold("every account is out"));
+    }
+
+    /// An account one step from full is not out: a pane there with
+    /// work in the background is held, whatever an agent reported.
+    #[test]
+    fn a_nearly_spent_account_still_holds_a_pane_for_its_background_work() {
+        let r = vec![
+            (1, room(0.10, 0.99, 100, &[("fable", 0.99)])),
+            (2, room(0.10, 0.20, 900, &[("fable", 0.2)])),
+        ];
+        let fable = Refusal { model: "fable-5-2".into(), ..fable_refusal(2_000) };
+        let s = Situation {
+            needs_model: Some("fable-5-2"),
+            work_running: true,
+            background_refused: Some(&fable),
+            ..situation(&r)
+        };
+        assert_eq!(next_move(&s), Move::Hold("work is in flight here"));
     }
 
     /// The whole policy, as a table.
