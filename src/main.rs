@@ -1880,7 +1880,7 @@ fn main() {
         width_logical: DEFAULT_WIN_W,
         height_logical: DEFAULT_WIN_H,
         frame_pt: None,
-        bg: (0.022, 0.028, 0.042), // chrome panel tone (BG_PANEL)
+        bg: marspot::system_theme::startup_palette().bg, // the terminal's own ground
     };
     run_app(app, proxy, attrs);
 }

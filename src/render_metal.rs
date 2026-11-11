@@ -64,7 +64,6 @@ use crate::render::{SessionView, SidebarEntry};
 #[cfg(test)]
 use crate::render::HighlightSpan;
 
-use crate::ui::theme::terminal::*;
 use crate::frame_build::frame::{build_instances, FormPanel};
 use crate::frame_build::canvas_runs::{build_canvas_runs, CanvasRunKind};
 use crate::frame_build::pane_cache::PaneInstanceCache;
@@ -650,12 +649,8 @@ impl MetalRenderer {
             // first repaint reads as the same colour, not the system
             // window BG.  Mirrors the AppKit renderer.
             if let Some(window) = view.window() {
-                let bg = NSColor::colorWithSRGBRed_green_blue_alpha(
-                    crate::font_cache::BG.0,
-                    crate::font_cache::BG.1,
-                    crate::font_cache::BG.2,
-                    1.0,
-                );
+                let (r, g, b) = marspot_term::palette::current().bg;
+                let bg = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0);
                 window.setBackgroundColor(Some(&bg));
             }
         }
@@ -1070,7 +1065,7 @@ impl MetalRenderer {
             self.color_atlas_texture.texture(),
             &self.device,
             &mut self.font,
-            Some(MTLClearColor { red: 0.078, green: 0.086, blue: 0.110, alpha: 1.0 }),
+            Some(clear_color(crate::ui::components::panel_palette::surface_base())),
             &viewport_px,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
             ui_font,
@@ -1669,12 +1664,9 @@ fn encode_passes(
         color.setTexture(Some(target));
         color.setStoreAction(MTLStoreAction::Store);
         color.setLoadAction(MTLLoadAction::Clear);
-        color.setClearColor(MTLClearColor {
-            red: SIDEBAR_BG_F.0 as f64,
-            green: SIDEBAR_BG_F.1 as f64,
-            blue: SIDEBAR_BG_F.2 as f64,
-            alpha: 1.0,
-        });
+        // The window's own surface, which the sidebar and the header
+        // never paint over.
+        color.setClearColor(clear_color(crate::ui::components::panel_palette::pane_bg(false)));
     }
     let enc = cmd.renderCommandEncoderWithDescriptor(&pass).expect("frame encoder");
     unsafe { enc.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1) };
@@ -2354,12 +2346,7 @@ impl MetalRenderer {
             color.setTexture(Some(&texture));
             color.setLoadAction(MTLLoadAction::Clear);
             color.setStoreAction(MTLStoreAction::Store);
-            color.setClearColor(MTLClearColor {
-                red: 0.0,
-                green: 0.0,
-                blue: 0.0,
-                alpha: 1.0,
-            });
+            color.setClearColor(OFFSCREEN_CLEAR);
         }
 
         let cmd = self
@@ -2633,6 +2620,14 @@ pub(crate) fn system_default_device() -> Result<Retained<ProtocolObject<dyn MTLD
         .ok_or_else(|| "MTLCreateSystemDefaultDevice returned nil — no Metal device".into())
 }
 
+/// What an offscreen render for a test or a tool starts from: black,
+/// whatever the theme, so its pictures do not depend on one.
+const OFFSCREEN_CLEAR: MTLClearColor = MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 };
+
+fn clear_color(c: [f32; 4]) -> MTLClearColor {
+    MTLClearColor { red: c[0] as f64, green: c[1] as f64, blue: c[2] as f64, alpha: 1.0 }
+}
+
 /// Free-function `encode_canvas` — composes with caller's
 /// destructured `&mut self` borrows (render_layout style).  The
 /// method wrapper below is for tests / one-shot callers.
@@ -2862,7 +2857,7 @@ impl MetalRenderer {
             let color = pass.colorAttachments().objectAtIndexedSubscript(0);
             color.setTexture(Some(ProtocolObject::from_ref(&*texture)));
             color.setLoadAction(MTLLoadAction::Clear);
-            color.setClearColor(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 });
+            color.setClearColor(OFFSCREEN_CLEAR);
             color.setStoreAction(MTLStoreAction::Store);
         }
         if let Some(enc) = cmd.renderCommandEncoderWithDescriptor(&pass) {
@@ -2936,7 +2931,7 @@ impl MetalRenderer {
             canvas,
             ProtocolObject::from_ref(&*texture),
             ProtocolObject::from_ref(&*cmd),
-            Some(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 }),
+            Some(OFFSCREEN_CLEAR),
             &viewport_px,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
             ui_font,
@@ -3932,11 +3927,11 @@ mod tests {
         // Cursor cell — block at end of last log line (focused/live).
         let cursor_row = lines.len() - 1;
         let cursor_col = lines[cursor_row].len();
-        // The colour is `palette::CURSOR` because `OSC 12 ; ? ST`
+        // The colour is the palette's cursor because `OSC 12 ; ? ST`
         // asks for it; the alpha stays here, because how solid the
         // block looks is a drawing decision and not part of the
         // answer.
-        let (cr, cg, cb) = marspot_term::palette::CURSOR;
+        let (cr, cg, cb) = marspot_term::palette::current().cursor;
         let cursor_color = Color::rgba(cr, cg, cb, 0.90);
         canvas
             .rect()
@@ -4461,8 +4456,8 @@ mod tests {
             let sample: Vec<_> = distinct.iter().take(4).collect();
             assert!(
                 distinct.len() > 1,
-                "frame has one colour only: {sample:?} (SIDEBAR_BG is {:?})",
-                SIDEBAR_BG_F,
+                "frame has one colour only: {sample:?} (the window clears to {:?})",
+                crate::ui::components::panel_palette::pane_bg(false),
             );
         }
 
@@ -5928,7 +5923,7 @@ mod tests {
             .iter()
             // Eight bits now, so the colour is matched as the byte it
             // becomes rather than as the float it was written as.
-            .filter(|c| c.color.r == (HIGHLIGHT_BG.0 * 255.0).round() as u8)
+            .filter(|c| c.color == crate::ui::theme::terminal::TermColors::current().search_hit)
             .collect();
         assert_eq!(highlight.len(), 2);
         // Each highlight cell sits one cell_h below the previous (consecutive rows).
@@ -6030,7 +6025,7 @@ mod tests {
             .iter()
             // Eight bits now, so the colour is matched as the byte it
             // becomes rather than as the float it was written as.
-            .filter(|c| c.color.r == (HIGHLIGHT_BG.0 * 255.0).round() as u8)
+            .filter(|c| c.color == crate::ui::theme::terminal::TermColors::current().search_hit)
             .count();
         assert_eq!(highlight_count, 0);
     }

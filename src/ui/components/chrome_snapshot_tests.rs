@@ -4,13 +4,16 @@
 //!
 //! Same machinery and the same way of recording and fetching as the
 //! panel pictures (see `panel_snapshot_tests`); the tests are
-//! `chrome_snapshot_{window,search,menu,close}` and the baselines
-//! `bench/ui/snapshots/chrome_{window,search,menu,close}.png`.
+//! `chrome_snapshot_{window,search,menu,close,terminal}` and the
+//! baselines `bench/ui/snapshots/chrome_{window,search,menu,close,terminal}.png`.
 //! `before/` beside them holds the first three scenes as they were
 //! drawn before the chrome took its colours and sizes from the theme.
+//! All but `close` are drawn again under the light and the
+//! high-contrast theme, as `chrome_<scene>.{light,contrast}.png`.
 
 use super::panel_snapshot_tests::terminal_text;
-use crate::grid::Grid;
+use crate::grid::{Cell, CellAttrs, Color, Grid};
+use crate::render::{HighlightSpan, SelectionView};
 use crate::layout::Layout;
 use crate::render::{SearchHitView, SearchOverlayView, SessionView, SidebarEntry};
 use crate::render_metal::{make_readback_texture, MetalRenderer, WindowRender};
@@ -25,10 +28,62 @@ struct PaneSpec {
     badge: &'static str,
     state: SessionState,
     search: Option<SearchOverlayView>,
+    /// What the pane's grid holds, at its size in cells.
+    content: fn(u16, u16) -> Grid,
+    selection: Option<SelectionView>,
+    hits: &'static [HighlightSpan],
 }
 
 fn pane(title: &'static str, badge: &'static str, state: SessionState) -> PaneSpec {
-    PaneSpec { title, badge, state, search: None }
+    PaneSpec { title, badge, state, search: None, content: terminal_text, selection: None, hits: &[] }
+}
+
+/// A screen that uses every terminal colour: the sixteen as text and
+/// as backgrounds, the SGR attributes, and a line each for a
+/// selection, a search hit and a link to land on.
+fn ansi_scene(cols: u16, rows: u16) -> Grid {
+    const NAMES: [&str; 8] = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
+    let mut g = Grid::new(cols, rows);
+    let mut put = |row: u16, col: u16, text: &str, attrs: CellAttrs| {
+        for (i, ch) in text.chars().enumerate() {
+            g.set_cell(col + i as u16, row, Cell { ch, attrs });
+        }
+        col + text.chars().count() as u16
+    };
+    let plain = CellAttrs::default();
+    put(0, 0, "$ colours", plain);
+    for bright in [0u8, 8] {
+        let row = 1 + bright as u16 / 8;
+        let mut col = 0;
+        for (i, name) in NAMES.iter().enumerate() {
+            let fg = Color::indexed(bright + i as u8);
+            col = put(row, col, name, CellAttrs { fg, ..plain }) + 1;
+        }
+    }
+    for i in 0..16u8 {
+        put(3, i as u16 * 3, "   ", CellAttrs { bg: Color::indexed(i), ..plain });
+    }
+    let mut col = put(4, 0, "bold", CellAttrs { bold: true, ..plain }) + 1;
+    col = put(4, col, "dim", CellAttrs { dim: true, ..plain }) + 1;
+    col = put(4, col, "underline", CellAttrs { underline: true, ..plain }) + 1;
+    col = put(4, col, "reverse", CellAttrs { reverse: true, ..plain }) + 1;
+    put(4, col, "red on yellow", CellAttrs { fg: Color::indexed(1), bg: Color::indexed(3), ..plain });
+    put(5, 0, "select: the quick brown fox", plain);
+    put(6, 0, "search: a needle in a haystack", plain);
+    put(7, 0, "link: https://example.com/docs/themes", plain);
+    put(8, 0, "$ ", plain);
+    g.set_cursor(2, 8);
+    g
+}
+
+/// `ansi_scene` with "quick brown" selected and "needle" a search hit.
+fn ansi_pane(title: &'static str) -> PaneSpec {
+    PaneSpec {
+        content: ansi_scene,
+        selection: Some(SelectionView { anchor: (12, 5), focus: (22, 5), blockwise: false }),
+        hits: &[HighlightSpan { view_row: 6, col_start: 10, col_end_inclusive: 15 }],
+        ..pane(title, "", SessionState::Active)
+    }
 }
 
 /// Draw one frame of a `w × h` px window laid out as `cols × rows`
@@ -43,6 +98,7 @@ fn snapshot(
     focused: usize,
     open: impl FnOnce(&mut MetalRenderer, &Layout),
 ) {
+    let name = &crate::snapshot_kit::themed(name);
     let dir = std::path::Path::new(UI_SNAPSHOT_DIR);
     if snapshot_mode_in(dir).is_none() {
         return;
@@ -73,7 +129,7 @@ fn snapshot(
     .with_chrome_showing(scale, panes.len(), None, false);
 
     let grids: Vec<Grid> =
-        (0..panes.len()).map(|i| terminal_text(layout.cells[i].cols, layout.cells[i].rows)).collect();
+        (0..panes.len()).map(|i| (panes[i].content)(layout.cells[i].cols, layout.cells[i].rows)).collect();
     let views: Vec<SessionView> = panes
         .iter()
         .zip(&grids)
@@ -84,7 +140,7 @@ fn snapshot(
             cursor_visible: i == focused,
             focused: i == focused,
             title: p.title,
-            selection: None,
+            selection: p.selection,
             ime_preedit: "",
             dormant: false,
             recede: 0,
@@ -94,7 +150,7 @@ fn snapshot(
             cwd: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
-            highlight_spans: &[],
+            highlight_spans: p.hits,
             search_overlay: p.search.clone(),
             seq: 1 + i as u64,
         })
@@ -213,4 +269,20 @@ fn chrome_snapshot_close() {
     snapshot("chrome_close", (800, 300), (2, 1), &panes, 0, |renderer, _| {
         renderer.set_hover_chrome_btn(Some(ChromeHover::Close(1)));
     });
+}
+
+/// Two panes of terminal content, the upper one in use: the sixteen
+/// colours, bold, dim, underline and reverse, a selection, a search
+/// hit and a link, on the pane in use's ground and on the window's.
+#[test]
+fn chrome_snapshot_terminal() {
+    let panes = [ansi_pane("colours"), ansi_pane("colours, not in use")];
+    snapshot("chrome_terminal", (1600, 900), (1, 2), &panes, 0, |_, _| {});
+}
+
+crate::snapshot_kit::snapshots_in_other_themes! {
+    chrome_snapshot_window_light, chrome_snapshot_window_contrast = chrome_snapshot_window;
+    chrome_snapshot_search_light, chrome_snapshot_search_contrast = chrome_snapshot_search;
+    chrome_snapshot_menu_light, chrome_snapshot_menu_contrast = chrome_snapshot_menu;
+    chrome_snapshot_terminal_light, chrome_snapshot_terminal_contrast = chrome_snapshot_terminal;
 }

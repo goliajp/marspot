@@ -1,9 +1,9 @@
 //! One pane, laid out as instances: the background, the title strip,
 //! the grid row by row, and the marks drawn over it.
 
-use crate::font_cache::{resolve_attrs, FontCache, BG};
+use crate::font_cache::FontCache;
 use crate::frame_build::glyph_resolve::{resolve_cell_glyph_routed, resolve_cluster_glyph_routed};
-use crate::ui::theme::terminal::*;
+use crate::ui::theme::terminal::TermColors;
 use crate::frame_build::text_run::preedit_placements;
 use crate::glyph_atlas::{GlyphAtlas, SlotMetrics};
 use crate::grid::Grid;
@@ -38,6 +38,8 @@ pub(crate) struct PaneGeom<'a> {
     /// Where each cluster of an IME composition goes.
     pub(crate) preedit_cells: Vec<(u16, u16, u16, &'a str)>,
     pub(crate) links: &'a [marspot_term::grid_links::LinkRange],
+    /// The frame's terminal colours, taken once when its build started.
+    pub(crate) colors: TermColors,
 }
 
 /// A pane's link scan, kept between frames so a rescan reuses what
@@ -104,6 +106,7 @@ pub(crate) fn push_session(
     padding: f32,
     title_h: f32,
     links: &mut LinkBufs,
+    colors: TermColors,
 ) {
     let (color_atlas_w, color_atlas_h) = color_atlas.dims();
     let color_atlas_w = color_atlas_w as f32;
@@ -235,6 +238,7 @@ pub(crate) fn push_session(
         overlay_mask,
         preedit_cells,
         links: &links.out,
+        colors,
     };
     let mut o = PaneOut { font, atlas, color_atlas, cells, glyphs, color_glyphs };
     paint_rows(&g, &mut o);
@@ -254,7 +258,8 @@ pub(crate) fn push_session(
 /// The grid, row by row: run-length backgrounds, search-hit highlights,
 /// glyphs and SGR underlines.
 pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
-    let PaneGeom { view, grid, cols, cell_w, cell_h, ascent, atlas_w, atlas_h, color_atlas_w, color_atlas_h, inner_x, inner_y, window_focused, .. } = *g;
+    let PaneGeom { view, grid, cols, cell_w, cell_h, ascent, atlas_w, atlas_h, color_atlas_w, color_atlas_h, inner_x, inner_y, window_focused, colors, .. } = *g;
+    let default_bg = colors.default_bg();
     let font = &mut *o.font;
     let atlas = &mut *o.atlas;
     let color_atlas = &mut *o.color_atlas;
@@ -274,8 +279,8 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
         let mut c = 0usize;
         while c < cols {
             let cell = grid.cell_at_view(view.view_offset, c as u16, r);
-            let bg = resolve_attrs(cell.attrs).1;
-            if bg == BG {
+            let bg = colors.resolve_attrs(cell.attrs).1;
+            if bg == default_bg {
                 c += 1;
                 continue;
             }
@@ -283,7 +288,7 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
             c += 1;
             while c < cols {
                 let cur = grid.cell_at_view(view.view_offset, c as u16, r);
-                if resolve_attrs(cur.attrs).1 != bg {
+                if colors.resolve_attrs(cur.attrs).1 != bg {
                     break;
                 }
                 c += 1;
@@ -296,9 +301,9 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
         }
 
         // C4 — search-hit highlight BG.  Drawn AFTER cell BG so it
-        // wins z-order, BEFORE glyphs so they paint on top with
-        // their original FG (the "highlight yellow BG, original fg
-        // preserved" rule from §6.8).  Bounded by grid cols — a
+        // wins z-order, BEFORE glyphs so they paint on top, in the
+        // theme's ink for a hit: the program's own foreground was
+        // chosen for its own background, not for this one.  Bounded by grid cols — a
         // span fed with `col_end_inclusive >= cols` is clamped to
         // the right edge.  Per-row loop: O(spans) work scoped to
         // rows where the highlight lives; renderer p99 delta on a
@@ -319,7 +324,7 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
             cells.push(CellInstance {
                 origin: [inner_x + span.col_start as f32 * cell_w, row_y],
                 size: [n_cols * cell_w, cell_h],
-                color: rgba8_of_f32([HIGHLIGHT_BG.0, HIGHLIGHT_BG.1, HIGHLIGHT_BG.2, 1.0]),
+                color: colors.search_hit,
             });
         }
 
@@ -327,6 +332,7 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
         // we re-emit it after with BG colour so the glyph reads
         // inverted on the white cursor block (mirrors render.rs).
         grid.row_clusters_at_view(view.view_offset, r, &mut row_clusters);
+        let row_has_hit = view.highlight_spans.iter().any(|s| s.view_row == r);
         let cursor = grid.cursor();
         let solid_cursor = view.view_offset == 0
             && view.cursor_visible
@@ -384,14 +390,16 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
                     None => continue,
                 },
             };
-            let fg = if g.in_link(r, c as u16) {
-                (
-                    LINK_UNDERLINE_FG.0 as f64,
-                    LINK_UNDERLINE_FG.1 as f64,
-                    LINK_UNDERLINE_FG.2 as f64,
-                )
+            let on_hit = row_has_hit
+                && view.highlight_spans.iter().any(|s| {
+                    s.view_row == r && c as u16 >= s.col_start && c as u16 <= s.col_end_inclusive
+                });
+            let fg = if on_hit {
+                colors.search_hit_fg
+            } else if g.in_link(r, c as u16) {
+                colors.link
             } else {
-                resolve_attrs(cell.attrs).0
+                colors.resolve_attrs(cell.attrs).0
             };
             // Phase 1.1 bearing formula — see `AtlasEntry::quad`.
             // pen_x = cell origin; baseline_y = slot top + ascent (use
@@ -433,12 +441,12 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
                 u += 1;
                 continue;
             }
-            let fg = resolve_attrs(cell.attrs).0;
+            let fg = colors.resolve_attrs(cell.attrs).0;
             let start = u;
             u += 1;
             while u < cols {
                 let cur = grid.cell_at_view(view.view_offset, u as u16, r);
-                if !cur.attrs.underline || resolve_attrs(cur.attrs).0 != fg {
+                if !cur.attrs.underline || colors.resolve_attrs(cur.attrs).0 != fg {
                     break;
                 }
                 u += 1;

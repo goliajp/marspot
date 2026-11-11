@@ -12,10 +12,8 @@
 //! fallback selection, or palette values — important during the A/B
 //! integration phase where pixels need to match.
 
-use crate::grid::{CellAttrs, Color, ColorKind};
 use core_foundation::base::TCFType;
 use core_foundation::string::{CFString, CFStringRef};
-use core_graphics::base::CGFloat;
 use core_graphics::font::CGGlyph;
 use core_graphics::geometry::CGSize;
 use core_text::font::{new_from_name, CTFont, CTFontRef};
@@ -51,70 +49,6 @@ pub const UI_FONT_NAMES: &[&str] = &[
     "Helvetica",
 ];
 pub const UI_FONT_POINT: f64 = 13.0;
-
-/// Background color for the terminal.  The values live in
-/// `marspot_term::palette` because a program can ask for them
-/// (`OSC 11 ; ? BEL`) and the emulator has to be able to answer;
-/// these aliases keep the renderer's call sites unchanged.
-///
-/// Near-pure-black with a
-/// near-imperceptible navy tint — the user's preferred direction
-/// after seeing iTerm2's #14191e default felt too grey in marspot's
-/// 9-grid layout.  Both renderers paint with this constant so the
-/// BG matches across the AppKit / Metal switch.
-pub const BG: (CGFloat, CGFloat, CGFloat) = marspot_term::palette::BG;
-/// Default foreground.  Matches iTerm2's "Foreground Color (Dark)"
-/// — slightly off-white (`#dbdbdb`), softer than pure 0.92 grey on
-/// the eyes for long-running sessions.
-pub const FG: (CGFloat, CGFloat, CGFloat) = marspot_term::palette::FG;
-
-/// ANSI 16-colour palette and the 256-colour table.  Both live in
-/// `marspot_term::palette` — a program can ASK for these with
-/// `OSC 4 ; n ; ? ST`, and a colour that can be asked about cannot
-/// have a second copy for the renderer.
-pub use marspot_term::palette::ANSI_16;
-
-pub fn palette_color(idx: u8) -> (CGFloat, CGFloat, CGFloat) {
-    marspot_term::palette::indexed(idx)
-}
-
-pub fn resolve_color(
-    c: Color,
-    default_rgb: (CGFloat, CGFloat, CGFloat),
-) -> (CGFloat, CGFloat, CGFloat) {
-    match c.kind() {
-        ColorKind::Default => default_rgb,
-        ColorKind::Indexed(i) => palette_color(i),
-        ColorKind::Rgb(r, g, b) => (
-            r as f64 / 255.0,
-            g as f64 / 255.0,
-            b as f64 / 255.0,
-        ),
-    }
-}
-
-/// Resolve a cell's attrs to (fg, bg) RGB, honouring SGR reverse + dim.
-pub fn resolve_attrs(
-    attrs: CellAttrs,
-) -> (
-    (CGFloat, CGFloat, CGFloat),
-    (CGFloat, CGFloat, CGFloat),
-) {
-    let mut fg = resolve_color(attrs.fg, FG);
-    let mut bg = resolve_color(attrs.bg, BG);
-    if attrs.reverse {
-        std::mem::swap(&mut fg, &mut bg);
-    }
-    if attrs.dim {
-        // SGR 2 — half-intensity. xterm-style multiply by ~0.55 in
-        // sRGB; close enough to "secondary text" weight without
-        // tinting hues. Applied AFTER reverse so a reversed-dim cell
-        // still reads correctly (rare combo but spec-clean).
-        const DIM: CGFloat = 0.55;
-        fg = (fg.0 * DIM, fg.1 * DIM, fg.2 * DIM);
-    }
-    (fg, bg)
-}
 
 // CoreText's per-string font fallback resolver — not in the
 // `core-text` crate so we declare it directly.

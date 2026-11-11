@@ -111,7 +111,11 @@ pub fn paint_button(
         _ => palette::segment_bg(),
     };
     let bg = if hovered && !disabled { palette::hover(base) } else { base };
-    let fg = if disabled { palette::disabled_fg() } else { palette::fg() };
+    let fg = match kind {
+        _ if disabled => palette::disabled_fg(),
+        ButtonKind::Primary => palette::on_accent(),
+        _ => palette::fg(),
+    };
     fill(p, rect, bg, c::BUTTON_RADIUS);
     centred_text(p, rect, label, c::BUTTON_TEXT.pt(), c::BUTTON_TEXT.weight(), fg);
 }
@@ -173,7 +177,7 @@ pub fn paint_segmented(
         let fg = if disabled {
             palette::disabled_fg()
         } else if picked {
-            palette::fg()
+            palette::on_accent()
         } else {
             palette::fg_sec()
         };
@@ -202,8 +206,8 @@ pub fn toggle_knob_rect(rect: Rect, on: bool) -> Rect {
 }
 
 pub fn paint_toggle(p: &mut ViewPainter, rect: Rect, on: bool, disabled: bool) {
-    let track = if on { palette::accent() } else { palette::track() };
-    let knob = palette::fg();
+    let track = if on { palette::accent() } else { palette::toggle_off() };
+    let knob = palette::knob();
     let (track, knob) = if disabled {
         (palette::faded(track), palette::faded(knob))
     } else {
@@ -308,9 +312,9 @@ pub fn danger_button_size_in_row(row_h: f64) -> (f64, f64) {
 
 pub fn paint_danger_button(p: &mut ViewPainter, rect: Rect, hovered: bool) {
     let (bg, fg) = if hovered {
-        (palette::danger(), palette::fg())
+        (palette::danger(), palette::on_accent())
     } else {
-        (palette::danger_rest_bg(), palette::danger())
+        (palette::danger_rest_bg(), palette::severity_text(2))
     };
     // A button cut down to fit a row keeps its proportions.
     let k = rect.w / spec::px(c::DANGER_SIZE);
@@ -354,7 +358,7 @@ pub fn chip_size(label: &str, m: Measure<'_>) -> (f64, f64) {
 pub fn paint_chip(p: &mut ViewPainter, rect: Rect, label: &str, severity: u8) {
     fill(p, rect, palette::chip_bg(severity), c::CHIP_RADIUS);
     centred_text(
-        p, rect, label, c::CHIP_TEXT.pt(), c::CHIP_WEIGHT, palette::severity_color(severity),
+        p, rect, label, c::CHIP_TEXT.pt(), c::CHIP_WEIGHT, palette::severity_text(severity),
     );
 }
 

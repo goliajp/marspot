@@ -39,6 +39,7 @@ use marspot_term::layout::{Rect, Alignment};
 use crate::frame_build::color::rgba8_of_f32;
 use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance, UiRectInstance};
 use crate::font_cache::FontCache;
+use crate::ui::components::panel_palette as palette;
 use crate::glyph_atlas::GlyphAtlas;
 
 /// Visual style for a `View`.  All colors are RGBA; alpha **should be
@@ -73,8 +74,8 @@ pub enum Backdrop {
 impl Default for ViewStyle {
     fn default() -> Self {
         Self {
-            bg:          [0.13, 0.14, 0.17, 1.0],
-            border_color:[0.32, 0.34, 0.40, 1.0],
+            bg:          palette::frame_bg(),
+            border_color: palette::frame_border(),
             border_width: 1.0,
             corner_radius: 10.0,
             shadow_blur: 16.0,
@@ -194,7 +195,7 @@ impl View {
             // field and leaves the colour opaque. The format has one
             // number for it, so the two fold here: black at that
             // strength.
-            shadow_color: rgba8_of_f32([0.0, 0.0, 0.0, self.style.shadow_alpha]),
+            shadow_color: rgba8_of_f32(palette::shadow(self.style.shadow_alpha)),
             shadow_blur: self.style.shadow_blur,
         });
         // 3. Caller content.

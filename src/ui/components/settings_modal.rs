@@ -23,6 +23,7 @@
 //! way to break them.
 
 use crate::settings::Settings;
+use marspot_term::palette::ThemeId;
 use crate::ui::strings::Msg;
 
 /// What is this panel's own, in **typographic points**.  Everything
@@ -52,6 +53,7 @@ pub enum Row {
     ReclaimEnabled,
     ReclaimIdleMinutes,
     ReclaimPrefetch,
+    Theme,
     DimScale,
     CircledWide,
     ScrollFactor,
@@ -68,18 +70,20 @@ pub enum Control {
 
 /// The minutes offered by the idle-threshold row, in order.
 ///
-/// `0` is "never" and is offered as a value rather than only as the
-/// switch above it: a user who is turning reclamation off by dragging
-/// the number down should find the end of the range where they expect
-/// it, not have to notice a different control.
+/// `0` is "never", offered as a value and not only as the switch above
+/// it: the end of the range is where a user turning it down looks.
 pub const IDLE_CHOICES: &[u32] = &[15, 30, 60, 120, 0];
 pub const IDLE_LABELS: &[&str] = &["15m", "30m", "1h", "2h", "Never"];
 
 /// How far an inactive pane steps back, as a multiplier on the
-/// attention ladder.  `0` is off — offered as a value rather than a
-/// second switch, same reasoning as `Never` above.
+/// attention ladder.  `0` is off, a value for the reason `Never` is.
 pub const DIM_CHOICES: &[f32] = &[0.0, 0.6, 1.0, 1.4];
 pub const DIM_LABELS: &[&str] = &["Off", "Light", "Normal", "Deep"];
+
+/// The themes, with following the system first: `None` in the setting.
+pub const THEME_CHOICES: &[Option<ThemeId>] =
+    &[None, Some(ThemeId::Dark), Some(ThemeId::Light), Some(ThemeId::Contrast)];
+pub const THEME_LABELS: &[&str] = &["System", "Dark", "Light", "High contrast"];
 
 /// Wheel / trackpad multiplier.
 pub const SCROLL_CHOICES: &[f32] = &[0.5, 1.0, 1.5, 2.5];
@@ -127,20 +131,16 @@ pub const SECTIONS: &[Section] = &[
     Section {
         heading: Msg::SettingsAppearance,
         rows: &[
+            RowSpec { row: Row::Theme, label: Msg::Theme, cost: Msg::CostTheme },
+            // The ladder's *order* is not offered — it says what
+            // marspot knows about each pane.  Only its volume is.
+            RowSpec { row: Row::DimScale, label: Msg::DimOtherPanes, cost: Msg::CostDimOtherPanes },
+            // Shipped as a default once, reverted within the hour — so
+            // it is offered with what it costs written next to it, off.
             RowSpec {
-                row: Row::DimScale,
-                label: Msg::DimOtherPanes,
-                // The ladder's *order* is not offered — it says what
-                // marspot knows about each pane.  Only its volume is.
-                cost: Msg::CostDimOtherPanes,
-            },
-            RowSpec {
-            row: Row::CircledWide,
-            label: Msg::CircledDigitsWide,
-            // The line this whole day bought.  Shipped as a default
-            // once, reverted within the hour — so it is offered with
-            // what it costs written next to it, and off.
-            cost: Msg::CostCircledDigitsWide,
+                row: Row::CircledWide,
+                label: Msg::CircledDigitsWide,
+                cost: Msg::CostCircledDigitsWide,
             },
         ],
     },
@@ -199,6 +199,10 @@ impl Row {
             Row::ReclaimPrefetch => Control::Toggle(s.reclaim_prefetch),
             Row::CcStatuslineHook => Control::Toggle(s.cc_statusline_hook),
             Row::CircledWide => Control::Toggle(s.appearance_circled_wide),
+            Row::Theme => Control::Segmented {
+                options: THEME_LABELS,
+                chosen: THEME_CHOICES.iter().position(|t| *t == s.appearance_theme).unwrap_or(usize::MAX),
+            },
             Row::DimScale => Control::Segmented {
                 options: DIM_LABELS,
                 chosen: chosen_f32(DIM_CHOICES, s.dim_scale),
@@ -220,6 +224,7 @@ impl Row {
             // A different section: reclamation being off says nothing
             // about how text is drawn.
             Row::ReclaimEnabled
+            | Row::Theme
             | Row::CircledWide
             | Row::DimScale
             | Row::ScrollFactor
@@ -244,6 +249,7 @@ impl Row {
             Row::ReclaimIdleMinutes => {
                 next.reclaim_idle_minutes = *IDLE_CHOICES.get(seg)?;
             }
+            Row::Theme => next.appearance_theme = *THEME_CHOICES.get(seg)?,
             Row::DimScale => next.dim_scale = *DIM_CHOICES.get(seg)?,
             Row::ScrollFactor => next.scroll_factor = *SCROLL_CHOICES.get(seg)?,
         }
@@ -310,14 +316,8 @@ fn row_h() -> f64 {
 /// chrome's content rect.
 ///
 /// `scroll` is how far the content has been pushed up under the
-/// header.  It is a parameter rather than a field on the rect because
-/// the panel used to have no such notion at all: `panel_rect` clamped
-/// its height to the window and the walk laid out from the top
-/// regardless, so a window shorter than the content drew the last
-/// groups over the terminal, off the bottom, still clickable where
-/// nobody could reach them. Threading it through the one walker the
-/// painter and the hit-test share is what keeps those two from
-/// disagreeing about it.
+/// header.  It goes through the one walker the painter and the
+/// hit-test share, so the two cannot disagree about it.
 pub fn walk(rect: Rect, scroll: f64, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) {
     let content = PanelChrome::new(rect, 0.0).content;
     let (card_x, card_w) = (content.x, content.w);

@@ -52,6 +52,7 @@ mod present;
 mod receipts;
 mod sup_log;
 mod supervisor;
+mod theme_follow;
 use banner::BannerKind;
 use launch::*;
 use plugins::host::ShellPluginHost;
@@ -436,7 +437,7 @@ struct ShellWindow {
     presenter: Option<ShellPresenter>,
     /// True after the core has confirmed at least one SurfaceReady for
     /// THIS window.  Until then `redraw` skips `present()` so the user
-    /// sees the NSWindow's BG colour (font_cache::BG) instead of an
+    /// sees the NSWindow's BG colour (the terminal's) instead of an
     /// unfilled black IOSurface — kills the cold-start flash.
     first_frame_ready: bool,
     /// `redraw()` only calls `present()` when this is true.  Set by
@@ -1042,7 +1043,7 @@ impl ShellApp {
             width_logical: DEFAULT_W_PT,
             height_logical: DEFAULT_H_PT,
             frame_pt,
-            bg: marspot::font_cache::BG,
+            bg: marspot::system_theme::startup_palette().bg,
         };
         marspot::app::open_window(window_id, &attrs);
     }
@@ -2381,6 +2382,7 @@ impl ShellApp {
                 prefetch = s.reclaim_prefetch as u32
             );
         }
+        self.follow_theme();
         lap!(1);
         self.sweep_pane_status();
         lap!(2);
@@ -2741,9 +2743,7 @@ impl ShellApp {
             }
         }
 
-        // 6. Recompute the banner once per tick — whatever (no-op if nothing changed).
-        // transition happened above, the visible banner should
-        // reflect it.
+        // 6. Recompute the banner once per tick (no-op if nothing changed).
         self.refresh_banner(ctx);
         lap!(7);
         if prof {
@@ -5222,7 +5222,7 @@ Usage:\n\
         // Terminal-black from the first paint: a core (L2) swap that
         // briefly uncovers the layer must show steady black, never a
         // lighter chrome flash.
-        bg: marspot::font_cache::BG,
+        bg: marspot::system_theme::startup_palette().bg,
     };
     let proxy = EventProxy::new();
     let app = ShellApp::new(proxy.clone());
