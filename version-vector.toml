@@ -28,4 +28,4 @@
 
 shell   = "0.7.293"  # the log names who sent a fatal signal
 core    = "0.12.324"  # the log names who sent a fatal signal
-session = "0.11.165"  # a line repair waits for the shell to read the line, and holds under bash after a failed exit
+session = "0.11.167"  # output gets its carriage returns as read while a repair owes them; a repair ends by commands, not by a clock
