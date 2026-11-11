@@ -45,8 +45,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{ProtocolObject, Sel};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSApplicationTerminateReply, NSBackingStoreType, NSColor, NSDragOperation, NSDraggingInfo,
+    NSApplication, NSApplicationActivationPolicy,
+    NSBackingStoreType, NSColor, NSDragOperation, NSDraggingInfo,
     NSEvent, NSImage, NSPasteboardTypeFileURL, NSTextInputClient,
     NSTitlebarSeparatorStyle, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
     NSWindowTitleVisibility,
@@ -1131,29 +1131,6 @@ define_class!(
             dispatch_event_for(self.ivars().window_id.get(), EventKind::Focused(false));
         }
     }
-
-    unsafe impl NSApplicationDelegate for MarspotWindowDelegate {
-        /// RFC-003 §6 Amendment 15 — route Cmd-Q / Quit Marspot menu /
-        /// dock Quit through the same `CloseRequested` path as the
-        /// window's red close button.  Returning `NSTerminateCancel`
-        /// stops AppKit's own teardown (which would deadlock against
-        /// `windowShouldClose:`'s `false` return below) and lets our
-        /// `close_requested` handler shut down cleanly, then call
-        /// `ctx.exit()` so the run loop drains naturally.  Without
-        /// this redirect AppKit's `terminate:` runs straight to
-        /// `exit(0)` and the L1 cleanup (SIGTERM L3s + drain
-        /// fd-vault + pgrep sweep) never gets a chance to fire —
-        /// that's the 2026-06-17 "user Cmd-Q'd but the 9 L3s lived
-        /// on" surprise.
-        #[unsafe(method(applicationShouldTerminate:))]
-        fn application_should_terminate(
-            &self,
-            _sender: &NSApplication,
-        ) -> NSApplicationTerminateReply {
-            dispatch_event_for(self.ivars().window_id.get(), EventKind::QuitRequested);
-            NSApplicationTerminateReply::TerminateCancel
-        }
-    }
 );
 
 /// Ask AppKit to quit, exactly as the dock's Quit item and Cmd-Q do.
@@ -1300,10 +1277,12 @@ fn dispatch_event_for(window_id: u32, kind: EventKind) {
         // window is the one that closed stops the app draining the
         // core at all: the windows still open freeze on their last
         // frame, and the supervisor stops ticking.  Any live window
-        // can carry it, so use whichever is still here.
+        // can carry it, so use whichever is still here.  A request to
+        // quit is about the process in the same way.
         let i = match state.window_index(window_id) {
             Some(i) => i,
-            None if matches!(kind, EventKind::UserEvent) && !state.windows.is_empty() => 0,
+            None if matches!(kind, EventKind::UserEvent | EventKind::QuitRequested)
+                && !state.windows.is_empty() => 0,
             None => return,
         };
         let AppState { app, windows } = state;
@@ -1859,15 +1838,9 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     crate::app_menu::install(&nsapp, mtm);
 
     let (window, view, delegate) = build_window(mtm, window_id, &attrs);
-    // RFC-003 §6 Amendment 15 — the boot window's delegate also wears
-    // the NSApplicationDelegate hat so Cmd-Q / Quit menu / dock Quit
-    // run through `close_requested`.  Only one object can hold that
-    // role, so later windows never take it.
-    {
-        let app_proto: &ProtocolObject<dyn NSApplicationDelegate> =
-            ProtocolObject::from_ref(&*delegate);
-        nsapp.setDelegate(Some(app_proto));
-    }
+    // quit requests arrive on a delegate of their own, which outlives
+    // every window
+    crate::app_delegate::install(&nsapp, mtm);
 
     // 4. Register the proxy's source on the main run loop.  Wakes
     //    posted before this point are sticky on the source and fire
