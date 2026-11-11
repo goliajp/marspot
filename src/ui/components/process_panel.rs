@@ -184,7 +184,7 @@ pub fn panel_rect(
     // frame the header's text and close button round a pixel away from
     // where every other panel has them.
     let content_h =
-        (panel_chrome::heading_height() + table::card_height(metric::VISIBLE_ROWS, cell_h)).ceil();
+        spec::snap_up(panel_chrome::heading_height() + table::card_height(metric::VISIBLE_ROWS, cell_h));
     let r = panel_chrome::frame_rect(
         window_w,
         window_h,
@@ -222,7 +222,7 @@ pub fn layout(
     let right_w = between - left_w;
 
     // On a whole pixel, so the rows under it are too.
-    let card_top = (content.y_top + panel_chrome::heading_height()).round();
+    let card_top = spec::snap(content.y_top + panel_chrome::heading_height());
     let card_h = (content.y_top + content.h - card_top).max(0.0);
     let left = Rect { x: content.x, y_top: card_top, w: left_w, h: card_h };
     let right = Rect { x: right_x, y_top: card_top, w: right_w, h: card_h };
@@ -324,7 +324,7 @@ mod tests {
     fn process_panel_is_the_wide_step_and_as_tall_as_its_rows() {
         let f = frame();
         assert_eq!(f.w, spec::px(metric::PANEL_W));
-        assert_eq!((f.x, f.y_top), ((WINDOW.0 - f.w) * 0.5, ((WINDOW.1 - f.h) * 0.5).round()));
+        assert_eq!((f.x, f.y_top), ((WINDOW.0 - f.w) * 0.5, spec::snap((WINDOW.1 - f.h) * 0.5)));
         assert_eq!((f.x.fract(), f.y_top.fract(), f.h.fract()), (0.0, 0.0, 0.0), "on whole pixels");
         let l = laid_out(4, metric::VISIBLE_ROWS, 0.0);
         assert_eq!(l.processes.rows.len(), metric::VISIBLE_ROWS);
@@ -451,7 +451,7 @@ mod tests {
         assert!((b.x - (a.x + a.w) - spec::px(space::CARD_TO_CARD)).abs() < 1e-9);
         assert!((b.x + b.w - (c.x + c.w)).abs() < 1e-9);
         assert!((a.y_top + a.h - (c.y_top + c.h)).abs() < 1e-9);
-        assert_eq!(a.y_top, (c.y_top + panel_chrome::heading_height()).round());
+        assert_eq!(a.y_top, spec::snap(c.y_top + panel_chrome::heading_height()));
         assert_eq!((l.panes_heading.x, l.panes_heading.w), (a.x, a.w));
         assert_eq!((l.processes_heading.x, l.processes_heading.w), (b.x, b.w));
         assert_eq!(c.x - l.chrome.frame.x, spec::px(content::PAD_X));

@@ -102,7 +102,7 @@ pub fn walk(rect: Rect, cell: (f64, f64), mut on: impl FnMut(Slot)) {
     let content = PanelChrome::new(rect, 0.0).content;
     let bottom = content.y_top + content.h + 1e-9;
     let gap = spec::px(metric::COLUMN_GAP);
-    let col_w = ((content.w - gap) * 0.5).floor().max(0.0);
+    let col_w = spec::snap_down((content.w - gap) * 0.5).max(0.0);
     let row_h = row_h(cell.1);
     let pad_x = spec::px(card::ROW_PAD_X);
     let rows = commands::reference();

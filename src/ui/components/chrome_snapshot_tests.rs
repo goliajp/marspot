@@ -11,6 +11,7 @@
 //! All but `close` are drawn again under the light and the
 //! high-contrast theme, as `chrome_<scene>.{light,contrast}.png`.
 
+use super::density_kit;
 use super::panel_snapshot_tests::terminal_text;
 use crate::grid::{Cell, CellAttrs, Color, Grid};
 use crate::render::{HighlightSpan, SelectionView};
@@ -99,9 +100,7 @@ fn snapshot(
     focused: usize,
     open: impl FnOnce(&mut MetalRenderer, &Layout),
 ) {
-    let name = &crate::snapshot_kit::themed(name);
-    let dir = std::path::Path::new(UI_SNAPSHOT_DIR);
-    if snapshot_mode_in(dir).is_none() {
+    if !density_kit::capturing() && snapshot_mode_in(std::path::Path::new(UI_SNAPSHOT_DIR)).is_none() {
         return;
     }
     let mut renderer = match MetalRenderer::new_headless() {
@@ -111,9 +110,28 @@ fn snapshot(
             return;
         }
     };
+    snapshot_on(&mut renderer, &mut WindowRender::new(), name, (w, h), (cols, rows), panes, focused, open);
+}
+
+/// [`snapshot`] on a renderer and a window that may have drawn before,
+/// at another display scale.
+#[allow(clippy::too_many_arguments)]
+fn snapshot_on(
+    renderer: &mut MetalRenderer,
+    wr: &mut WindowRender,
+    name: &str,
+    (w, h): (u32, u32),
+    (cols, rows): (usize, usize),
+    panes: &[PaneSpec],
+    focused: usize,
+    open: impl FnOnce(&mut MetalRenderer, &Layout),
+) {
+    let name = &density_kit::scaled_name(&crate::snapshot_kit::themed(name));
+    let (w, h) = density_kit::scaled_size(w, h);
+    let dir = std::path::Path::new(UI_SNAPSHOT_DIR);
     let target = make_readback_texture(renderer.device(), w, h).expect("a readback texture");
     let (cell_w, cell_h) = renderer.cell_dims();
-    // The app's own numbers at display scale 1.
+    // The app's own numbers at the display scale in force.
     let scale = crate::ui::chrome_scale();
     let title_h = if panes.len() > 1 { crate::ui::CELL_TITLE_PT * scale } else { 0.0 };
     let layout = Layout::build(
@@ -159,13 +177,15 @@ fn snapshot(
     let sidebar: Vec<SidebarEntry> =
         panes.iter().map(|p| SidebarEntry { label: p.title, state: p.state }).collect();
     renderer.set_window_focused(true);
-    open(&mut renderer, &layout);
+    open(renderer, &layout);
 
-    let mut wr = WindowRender::new();
     // Twice: glyphs rasterised during the first frame land in the
     // atlas texture the second one samples.
-    renderer.render_layout_to_texture(&mut wr, &target, &layout, &views, &sidebar, focused);
-    renderer.render_layout_to_texture(&mut wr, &target, &layout, &views, &sidebar, focused);
+    renderer.render_layout_to_texture(wr, &target, &layout, &views, &sidebar, focused);
+    renderer.render_layout_to_texture(wr, &target, &layout, &views, &sidebar, focused);
+    if density_kit::deliver(name, renderer, &layout, panes.len()) {
+        return;
+    }
     let mut rgba = renderer.read_target(&target).expect("readback");
     for px in rgba.chunks_exact_mut(4) {
         px.swap(0, 2);
@@ -195,6 +215,14 @@ fn four_panes() -> [PaneSpec; 4] {
 pub(super) fn chrome_snapshot_window() {
     snapshot("chrome_window", (1600, 1000), (2, 2), &four_panes(), 1, |renderer, _| {
         renderer.set_hover_chrome_btn(Some(ChromeHover::Row(3)));
+    });
+}
+
+/// The window of `chrome_snapshot_window` with the pointer on `hover`,
+/// on a renderer that may have drawn it before at another scale.
+pub(super) fn window_on(renderer: &mut MetalRenderer, wr: &mut WindowRender, hover: Option<ChromeHover>) {
+    snapshot_on(renderer, wr, "chrome_window", (1600, 1000), (2, 2), &four_panes(), 1, |renderer, _| {
+        renderer.set_hover_chrome_btn(hover);
     });
 }
 
@@ -229,6 +257,22 @@ pub(super) fn chrome_snapshot_search() {
 #[test]
 pub(super) fn chrome_snapshot_menu() {
     snapshot("chrome_menu", (1200, 760), (2, 2), &four_panes(), 0, |renderer, layout| {
+        open_menu(renderer, layout, Some(1));
+    });
+}
+
+/// `chrome_snapshot_menu` with the pointer on row `hovered`, on a
+/// renderer of the caller's.
+pub(super) fn menu_on(renderer: &mut MetalRenderer, wr: &mut WindowRender, hovered: Option<usize>) -> ContextMenuRender {
+    let mut state = None;
+    snapshot_on(renderer, wr, "chrome_menu", (1200, 760), (2, 2), &four_panes(), 0, |renderer, layout| {
+        state = Some(open_menu(renderer, layout, hovered));
+    });
+    state.expect("the scene was drawn")
+}
+
+fn open_menu(renderer: &mut MetalRenderer, layout: &Layout, hovered: Option<usize>) -> ContextMenuRender {
+    {
         let row = |label: &str, hint: &str, enabled| ContextMenuRow {
             label: label.to_string(),
             shortcut_hint: hint.to_string(),
@@ -242,9 +286,9 @@ pub(super) fn chrome_snapshot_menu() {
             divider: true,
         };
         renderer.set_hover_chrome_btn(Some(ChromeHover::Toolbar(2)));
-        renderer.set_context_menu(Some(ContextMenuRender {
+        let state = ContextMenuRender {
             scale: crate::ui::chrome_scale(),
-            anchor_phys: (420.0, 150.0),
+            anchor_phys: (420.0 * crate::ui::chrome_scale(), 150.0 * crate::ui::chrome_scale()),
             top_inset: layout.top_inset,
             items: vec![
                 row(t(Msg::MenuCopy), "⌘C", false),
@@ -254,15 +298,17 @@ pub(super) fn chrome_snapshot_menu() {
                 row(t(Msg::MenuClearScrollback), "⌘K", true),
                 row(t(Msg::MenuClosePane), "⌘W", true),
             ],
-            hovered_idx: Some(1),
-        }));
-    });
+            hovered_idx: hovered,
+        };
+        renderer.set_context_menu(Some(state.clone()));
+        state
+    }
 }
 
 /// The pointer on a sidebar row's close button, in a window narrow
 /// enough that a pane's name has to give way to its badge.
 #[test]
-fn chrome_snapshot_close() {
+pub(super) fn chrome_snapshot_close() {
     let panes = [
         pane("smix", "P1 3f9c2a1e", SessionState::Active),
         pane("a-name-longer-than-the-pane-it-titles", "P2 77d0e4b2", SessionState::Idle),
@@ -276,7 +322,7 @@ fn chrome_snapshot_close() {
 /// colours, bold, dim, underline and reverse, a selection, a search
 /// hit and a link, on the pane in use's ground and on the window's.
 #[test]
-fn chrome_snapshot_terminal() {
+pub(super) fn chrome_snapshot_terminal() {
     let panes = [ansi_pane("colours"), ansi_pane("colours, not in use")];
     snapshot("chrome_terminal", (1600, 900), (1, 2), &panes, 0, |_, _| {});
 }

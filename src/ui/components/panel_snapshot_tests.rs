@@ -10,8 +10,9 @@
 //! them holds how each panel looked before it was moved onto the shared
 //! chrome, for reference only (nothing compares against it).
 //!
-//! The scale is the default one: a logical point is two pixels
-//! (`ViewPainter::px_per_pt()` at `chrome_scale() == 1`).
+//! A scene's size is given in pixels at display scale 1, where a
+//! logical point is two pixels (`ViewPainter::px_per_pt()`); at scale 2
+//! the window is twice that and the baseline is `<panel>.2x.png`.
 //!
 //! ## Working on one panel
 //!
@@ -62,6 +63,7 @@ use crate::ui::components::cc_usage_modal::{
     self, CcUsageAccountRender, CcUsageRender, CcUsageWindowRender, Clock,
 };
 use crate::ui::components::controls;
+use crate::ui::components::density_kit;
 use crate::ui::components::panel_chrome::{self, PanelChrome};
 use crate::ui::core::ViewPainter;
 use crate::ui::strings::{self, t, Arg, MonthDayTime, Msg};
@@ -91,9 +93,7 @@ pub(super) fn terminal_text(cols: u16, rows: u16) -> Grid {
 /// Draw one frame of a `w × h` px window with whatever `open` put on
 /// the renderer, and hold it to `bench/ui/snapshots/<name>.png`.
 pub(super) fn snapshot(name: &str, w: u32, h: u32, open: impl FnOnce(&mut MetalRenderer, &Layout)) {
-    let name = &crate::snapshot_kit::themed(name);
-    let dir = std::path::Path::new(UI_SNAPSHOT_DIR);
-    if snapshot_mode_in(dir).is_none() {
+    if !density_kit::capturing() && snapshot_mode_in(std::path::Path::new(UI_SNAPSHOT_DIR)).is_none() {
         return;
     }
     let mut renderer = match MetalRenderer::new_headless() {
@@ -103,6 +103,22 @@ pub(super) fn snapshot(name: &str, w: u32, h: u32, open: impl FnOnce(&mut MetalR
             return;
         }
     };
+    snapshot_on(&mut renderer, &mut WindowRender::new(), name, w, h, open);
+}
+
+/// [`snapshot`] on a renderer and a window that may have drawn before,
+/// at another display scale.
+pub(super) fn snapshot_on(
+    renderer: &mut MetalRenderer,
+    wr: &mut WindowRender,
+    name: &str,
+    w: u32,
+    h: u32,
+    open: impl FnOnce(&mut MetalRenderer, &Layout),
+) {
+    let name = &density_kit::scaled_name(&crate::snapshot_kit::themed(name));
+    let (w, h) = density_kit::scaled_size(w, h);
+    let dir = std::path::Path::new(UI_SNAPSHOT_DIR);
     let target = make_readback_texture(renderer.device(), w, h).expect("a readback texture");
     let (cell_w, cell_h) = renderer.cell_dims();
     let layout = Layout::build(w as f64, h as f64, 0.0, 0.0, 0.0, 1, 1, cell_w, cell_h);
@@ -130,17 +146,22 @@ pub(super) fn snapshot(name: &str, w: u32, h: u32, open: impl FnOnce(&mut MetalR
         search_overlay: None,
         seq: 1,
     };
-    open(&mut renderer, &layout);
+    open(renderer, &layout);
 
-    let mut wr = WindowRender::new();
     let views = std::slice::from_ref(&view);
     // Twice: glyphs rasterised during the first frame land in the
     // atlas texture the second one samples.
-    renderer.render_layout_to_texture(&mut wr, &target, &layout, views, &[], 0);
-    renderer.render_layout_to_texture(&mut wr, &target, &layout, views, &[], 0);
+    renderer.render_layout_to_texture(wr, &target, &layout, views, &[], 0);
+    renderer.render_layout_to_texture(wr, &target, &layout, views, &[], 0);
+    if density_kit::deliver(name, renderer, &layout, 1) {
+        return;
+    }
     let mut rgba = renderer.read_target(&target).expect("readback");
     for px in rgba.chunks_exact_mut(4) {
         px.swap(0, 2);
+    }
+    if density_kit::deliver_pixels(&rgba, w, h) {
+        return;
     }
     // A picture of nothing passes any comparison with a picture of
     // nothing, so the frame has to have something in it.
@@ -159,6 +180,18 @@ pub(super) fn snapshot(name: &str, w: u32, h: u32, open: impl FnOnce(&mut MetalR
 #[test]
 pub(super) fn panel_snapshot_settings() {
     snapshot("settings", 1000, 1360, |renderer, layout| {
+        open_settings(renderer, layout, settings_modal::Hover::None);
+    });
+}
+
+/// The settings panel as the picture has it, with the pointer on
+/// `hover`.  Returns the panel's frame and the settings it shows.
+pub(super) fn open_settings(
+    renderer: &mut MetalRenderer,
+    layout: &Layout,
+    hover: settings_modal::Hover,
+) -> (Rect, crate::settings::Settings) {
+    {
         let settings = crate::settings::Settings {
             reclaim_enabled: false,
             reclaim_prefetch: false,
@@ -180,11 +213,12 @@ pub(super) fn panel_snapshot_settings() {
         renderer.set_settings_panel(Some(SettingsRender {
             rect,
             scroll: 0.0,
-            settings,
+            settings: settings.clone(),
             path: "/Users/you/Library/Application Support/marspot/settings.toml".to_string(),
-            hover: settings_modal::Hover::None,
+            hover,
         }));
-    });
+        (rect, settings)
+    }
 }
 
 #[test]
@@ -202,21 +236,29 @@ pub(super) fn panel_snapshot_shortcuts() {
 
 #[test]
 pub(super) fn panel_snapshot_layout() {
-    snapshot("layout", 1000, 760, |renderer, _| {
-        renderer.set_layout_modal(Some(LayoutModalRender {
-            cols: 4,
-            rows: 1,
-            slot_titles: ["smix", "devops", "insight-mono", "alt"].map(String::from).to_vec(),
-            ..Default::default()
-        }));
+    snapshot("layout", 1000, 760, |renderer, layout| {
+        open_layout(renderer, layout, layout_modal::Hover::None);
     });
+}
+
+/// The layout panel as the picture has it, with the pointer on
+/// `hover`.  Returns where its parts are.
+pub(super) fn open_layout(renderer: &mut MetalRenderer, layout: &Layout, hover: layout_modal::Hover) -> LayoutModal {
+    let slot_titles = ["smix", "devops", "insight-mono", "alt"].map(String::from).to_vec();
+    let modal = {
+        let mut m = controls::font_measure(renderer.font_mut());
+        let label_w = layout_modal::widest_label(&slot_titles, &mut m);
+        LayoutModal::layout(layout.window_w, layout.window_h, layout.top_inset, 4, 1, label_w, &mut m)
+    };
+    renderer.set_layout_modal(Some(LayoutModalRender { cols: 4, rows: 1, slot_titles, hover, ..Default::default() }));
+    modal
 }
 
 /// Three by three with a name no card can hold, mid-drag: the cut
 /// label, the hole the dragged card left, the slot it would land in
 /// and the card under the pointer.
 #[test]
-fn panel_snapshot_layout_grid() {
+pub(super) fn panel_snapshot_layout_grid() {
     snapshot("layout_grid", 1600, 900, |renderer, layout| {
         let slot_titles = [
             "smix", "lab38-golialab-experiments-with-a-very-long-directory-name-that-keeps-on-going", "insight-mono",
@@ -251,7 +293,22 @@ fn panel_snapshot_layout_grid() {
 
 #[test]
 pub(super) fn panel_snapshot_process() {
+    // The pointer on one kill button, so the picture has the hovered
+    // row and the hovered button in it.
     snapshot("process", 1600, 1000, |renderer, layout| {
+        open_process(renderer, layout, process_panel::Hover::Kill(6));
+    });
+}
+
+/// The process monitor as the picture has it, with the pointer on
+/// `hover`.  Returns the panel's frame and how many panes and
+/// processes it lists.
+pub(super) fn open_process(
+    renderer: &mut MetalRenderer,
+    layout: &Layout,
+    hover: process_panel::Hover,
+) -> (Rect, usize, usize) {
+    {
         let pane = |name: &str, sid: u64, n_pids: u32, cpu_pct: f32, rss_mb: u64| ProcessPanelPaneRow {
             name: name.to_string(),
             sid,
@@ -289,6 +346,7 @@ pub(super) fn panel_snapshot_process() {
         let frame = process_panel::panel_rect(
             layout.window_w, layout.window_h, cell_h, layout.top_inset, (0.0, 0.0),
         );
+        let counts = (pane_rows.len(), rows.len());
         renderer.set_process_panel(Some(ProcessPanelRender {
             layout: process_panel::layout(
                 frame, layout.top_inset, pane_rows.len(), rows.len(), 0.0, cell_w, cell_h,
@@ -297,11 +355,10 @@ pub(super) fn panel_snapshot_process() {
             selected_pane: 0,
             detail: strings::text(Arg::ProcessDetail { pane: "smix", sid: 479, shell_pid: 1544 }),
             rows,
-            // The pointer on one kill button, so the picture has the
-            // hovered row and the hovered button in it.
-            hover: process_panel::Hover::Kill(6),
+            hover,
         }));
-    });
+        (frame, counts.0, counts.1)
+    }
 }
 
 /// 2026-11-10 09:00 UTC, so the timeline lands in the same place
@@ -346,6 +403,12 @@ fn account(
 /// Ten accounts, some at their limit, one with an address too long
 /// for its card.
 fn accounts_panel(renderer: &mut MetalRenderer, layout: &Layout) {
+    open_accounts(renderer, layout, cc_usage_modal::Hover::None);
+}
+
+/// The accounts panel as the picture has it, with the pointer on
+/// `hover`.  Returns the panel's frame.
+pub(super) fn open_accounts(renderer: &mut MetalRenderer, layout: &Layout, hover: cc_usage_modal::Hover) -> Rect {
     let accounts = vec![
         account("Claude 1", "dev@example.com", true, (11, 13, 11, 59),
             &[("7d", 1.0, 66, "11:59"), ("fable", 0.91, 66, "11:59")]),
@@ -377,8 +440,9 @@ fn accounts_panel(renderer: &mut MetalRenderer, layout: &Layout) {
         updated_label: strings::text(Arg::UpdatedAt(MonthDayTime { month: 11, day: 10, hour: 18, minute: 0 })),
         accounts,
         clock: Clock::fixed(ACCOUNTS_NOW, ACCOUNTS_UTC_OFFSET),
-        hover: cc_usage_modal::Hover::None,
+        hover,
     }));
+    rect
 }
 
 /// Wide enough for the ten cards to sit in one row.
@@ -390,7 +454,7 @@ pub(super) fn panel_snapshot_accounts() {
 /// The same panel where one row would make the cards too narrow: two
 /// rows of five.
 #[test]
-fn panel_snapshot_accounts_narrow() {
+pub(super) fn panel_snapshot_accounts_narrow() {
     snapshot("accounts_narrow", 1700, 1500, accounts_panel);
 }
 

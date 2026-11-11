@@ -283,8 +283,8 @@ impl DevWindow {
 
         // ── 3. MetalRenderer ── attaches a CAMetalLayer to the
         // view.  Same code path the main window uses.  Scale is
-        // the device pixel ratio at construction; later commits
-        // will track the window's backingScaleFactor live.
+        // the display's at construction; `render` follows the window
+        // from one display to another.
         let scale = nswindow.screen()
             .map(|s| s.backingScaleFactor() as f32)
             .unwrap_or(2.0);
@@ -375,9 +375,11 @@ impl DevWindow {
         if !self.is_visible() {
             return;
         }
-        let scale = self.nswindow.screen()
-            .map(|s| s.backingScaleFactor())
-            .unwrap_or(2.0);
+        let scale = self.nswindow.screen().map(|s| s.backingScaleFactor()).unwrap_or(2.0);
+        // this process draws nothing else at the interface's scale, so
+        // the scale is this window's: the display it is on now
+        crate::ui::set_chrome_scale(scale);
+        self.renderer.rebuild_fonts_if_scale_changed();
         // Pull the actual content-area size off the NSWindow each
         // frame.  Autoresizing on the content view is unreliable in
         // some macOS configs (especially when the window starts
@@ -397,9 +399,7 @@ impl DevWindow {
         let h_pt = content_rect.size.height;
         // Sync the view's frame so subsequent `bounds()` calls and
         // hit-tests see the right size.
-        {
-            self.view.setFrameSize(NSSize { width: w_pt, height: h_pt });
-        }
+        self.view.setFrameSize(NSSize { width: w_pt, height: h_pt });
         let width_phys = w_pt * scale;
         let height_phys = h_pt * scale;
         self.last_frame_pt = (

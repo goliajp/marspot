@@ -110,7 +110,7 @@ const INITIAL_ROWS: u16 = 12;
 use marspot::HEADER_PT;
 
 // Sidebar row geometry now lives on `Layout` itself
-// (`Layout::sidebar_top_pad_phys` + `layout::SIDEBAR_ROW_H_PHYS`),
+// (`Layout::sidebar_top_pad_phys` + `layout::SIDEBAR_ROW_H`),
 // so render*.rs paint and main.rs hit-test consume the same source
 // of truth.  The earlier scaled-logical-point constants sat on
 // values that didn't actually match the renderer (40 logical-pt at

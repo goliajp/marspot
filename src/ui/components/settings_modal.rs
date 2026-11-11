@@ -283,7 +283,7 @@ use crate::ui::theme::spec::{self, card, content, space};
 
 /// One row's height — constant across a card whatever control it
 /// holds, so the card does not step.
-fn row_h() -> f64 {
+fn row_h_pt() -> f64 {
     card::ROW_PAD_Y * 2.0
         + metric::ROW_BAND_H
         + space::LABEL_TO_DESC
@@ -308,7 +308,7 @@ fn row_h() -> f64 {
 pub fn walk(rect: Rect, scroll: f64, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) {
     let content = PanelChrome::new(rect, 0.0).content;
     let (card_x, card_w) = (content.x, content.w);
-    let row_h = spec::px(row_h());
+    let row_h = spec::px(row_h_pt());
     let band_h = spec::px(metric::ROW_BAND_H);
 
     let mut y = content.y_top - scroll;

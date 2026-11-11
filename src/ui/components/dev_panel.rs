@@ -267,7 +267,7 @@ pub struct DevPanelState {
 impl Default for DevPanelState {
     fn default() -> Self {
         Self {
-            visible: true,
+            visible: false,
             origin_pt: (60.0, 80.0),
             size_pt: (420.0, 520.0),
             active_tab: TAB_UI,
@@ -2637,9 +2637,9 @@ mod tests {
     use crate::ui::core::Primitive;
 
     #[test]
-    fn default_state_is_visible_and_centred_ish() {
+    fn default_state_is_hidden_and_centred_ish() {
         let s = DevPanelState::default();
-        assert!(s.visible);
+        assert!(!s.visible, "the panel is shown by its toolbar button, never by starting up");
         assert_eq!(s.active_tab, TAB_UI);
         assert_eq!(s.active_section, SECTION_UI_FOUNDATION_MODEL);
         assert!(s.size_pt.0 > 200.0);

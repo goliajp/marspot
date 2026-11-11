@@ -50,7 +50,7 @@ impl<'a> TextInput<'a> {
         let caret_col = (self.cursor as usize).min(max_chars) as f32;
         let caret_x = self.rect.x as f32 + caret_col * cell_w;
         let caret_y = self.rect.y_top as f32 + self.style.caret_inset_y;
-        let caret_h = (self.rect.h as f32 - 2.0 * self.style.caret_inset_y).max(2.0);
+        let caret_h = (self.rect.h as f32 - 2.0 * self.style.caret_inset_y).max(self.style.caret_w);
         p.fill_rect(
             Rect {
                 x: caret_x as f64,

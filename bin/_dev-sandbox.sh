@@ -79,6 +79,28 @@ dev_shell_pid() {
   return 0
 }
 
+# The windows process $1 has on screen, one per line as
+# "<layer> <width>x<height>", as the window server lists them.  An
+# ordinary window is on layer 0; the developer panel floats, on 3.
+# Needs the console session and no permission: a window's title would
+# need Screen Recording, so it is not read.
+dev_windows_of() {
+  /usr/bin/osascript -l JavaScript -e 'function run(argv) {
+  ObjC.import("CoreGraphics");
+  var all = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0)));
+  return all.filter(function (w) { return String(w.kCGWindowOwnerPID) === argv[0]; })
+    .map(function (w) { return w.kCGWindowLayer + " " + w.kCGWindowBounds.Width + "x" + w.kCGWindowBounds.Height; })
+    .join("\n");
+}' "$1"
+}
+
+# True when the sandbox's app shows one window, the main one.
+dev_one_main_window() {
+  local w
+  w="$(dev_windows_of "$(dev_shell_pid)")"
+  [[ $(grep -c . <<<"$w") -eq 1 && $w == "0 "* ]]
+}
+
 # The shell's core children (normally one), one per line.
 dev_core_pids() {
   local s k comm

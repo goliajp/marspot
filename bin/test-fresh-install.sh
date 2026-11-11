@@ -12,7 +12,8 @@
 # the environment, and checks what it is supposed to do unasked:
 # install the three CLIs, keep its state where the docs say, put
 # ~/.local/bin on the pane's PATH, and write its hooks and skill into
-# the config dirs the installers create.
+# the config dirs the installers create.  And what it must not do: put
+# anything on screen but its main window.
 #
 # It reaches the network (three vendor downloads) and takes a few
 # minutes.  Everything it starts carries the scratch HOME in its
@@ -96,12 +97,29 @@ gemini_there() { runs gemini || /bin/zsh -ilc 'command -v gemini' >/dev/null 2>&
 no_panic() { ! grep -qi 'panic' "$LOG" "$FRESH/stdout.log"; }
 no_errors() { ! awk -F'\t' '$3=="ERROR"' "$LOG" | grep -q .; }
 one_pane() { [ "$(ls "$STATE/sessions" 2>/dev/null | wc -l)" -ge 1 ]; }
+# The windows the app has on screen, one per line as
+# "<layer> <width>x<height>", as the window server lists them: an
+# ordinary window is on layer 0, the developer panel floats on 3.  This
+# much needs no permission; a title would need Screen Recording.
+app_windows() {
+  /usr/bin/osascript -l JavaScript -e 'function run(argv) {
+  ObjC.import("CoreGraphics");
+  var all = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0)));
+  return all.filter(function (w) { return String(w.kCGWindowOwnerPID) === argv[0]; })
+    .map(function (w) { return w.kCGWindowLayer + " " + w.kCGWindowBounds.Width + "x" + w.kCGWindowBounds.Height; })
+    .join("\n");
+}' "$SHELL_PID"
+}
+one_main_window() { local w; w="$(app_windows)"; [ "$(grep -c . <<<"$w")" -eq 1 ] && [[ $w == "0 "* ]]; }
 
 echo "==> what is running"
 ours | awk '{n=split($2,a,"/"); print "  " $1 "  " a[n]}'
 for p in $(pane_shells); do echo "  $p  $(ps -o comm= -p "$p") (pane shell)"; done
+echo "==> what is on screen"
+app_windows | sed 's/^/  /'
 echo "==> what it did"
 check "shell is still running" kill -0 $SHELL_PID
+check "one window on screen, the main one" one_main_window
 check "core booted" grep -q CORE_BOOT "$LOG"
 check "state is under Application Support" test -d "$STATE/sessions"
 check "nothing under Caches" test ! -e "$FRESH/Library/Caches/marspot"

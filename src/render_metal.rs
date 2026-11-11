@@ -899,8 +899,8 @@ impl MetalRenderer {
             return false;
         };
         self.font = font;
-        self.atlas.drop_all_glyphs();
-        self.color_atlas.drop_all_glyphs();
+        self.atlas.refont(self.font.font_table());
+        self.color_atlas.refont(self.font.font_table());
         self.fonts_built_at_scale = want;
         true
     }
@@ -975,12 +975,7 @@ impl MetalRenderer {
         self.width_px = width_px;
         self.height_px = height_px;
         if let Some(layer) = &self.layer {
-            {
-                layer.setDrawableSize(NSSize {
-                    width: width_px,
-                    height: height_px,
-                });
-            }
+            layer.setDrawableSize(NSSize { width: width_px, height: height_px });
         }
     }
 
@@ -1033,14 +1028,10 @@ impl MetalRenderer {
         ui_font: bool,
     ) {
         let Some(layer) = self.layer.as_ref() else { return };
-        // Size the layer to match the view.  drawableSize is in
-        // physical pixels.
-        {
-            layer.setDrawableSize(NSSize {
-                width: width_px as f64,
-                height: height_px as f64,
-            });
-        }
+        // Size the layer to match the view, in physical pixels, at the
+        // scale of the display the window is on now.
+        layer.setContentsScale(crate::ui::chrome_scale());
+        layer.setDrawableSize(NSSize { width: width_px as f64, height: height_px as f64 });
         let drawable = match layer.nextDrawable() {
             Some(d) => d,
             None => return,
@@ -2962,6 +2953,8 @@ impl MetalRenderer {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod probe;
 #[cfg(test)]
 mod tests {
     use super::*;

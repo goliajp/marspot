@@ -1039,10 +1039,6 @@ fn nsobject_string_to_string(string: &NSObject) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// NSWindowDelegate subclass
-// ---------------------------------------------------------------------------
-
 pub struct MarspotWindowDelegateIvars {
     /// RFC-005 — the window this delegate speaks for.
     window_id: Cell<u32>,
@@ -1065,15 +1061,19 @@ define_class!(
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, _sender: &NSWindow) -> bool {
             dispatch_event_for(self.ivars().window_id.get(), EventKind::CloseRequested);
-            // Returning false lets the app handle the close; if the
-            // app calls ctx.exit() inside close_requested, the run
-            // loop stops and we return.  Marspot's current behaviour is
-            // "close = exit", but we honour the indirection cleanly.
+            // the app decides: `ctx.exit()` in `close_requested` ends the run loop
             false
         }
 
         #[unsafe(method(windowDidResize:))]
         fn window_did_resize(&self, _notification: &NSNotification) {
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::Resized);
+        }
+
+        // a display of another density: the window keeps its size in
+        // points, so no resize is sent, and every pixel of it changed
+        #[unsafe(method(windowDidChangeBackingProperties:))]
+        fn window_did_change_backing(&self, _notification: &NSNotification) {
             dispatch_event_for(self.ivars().window_id.get(), EventKind::Resized);
         }
 

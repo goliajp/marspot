@@ -172,11 +172,11 @@ pub fn frame_rect(window_w: f64, window_h: f64, w: f64, h: f64, top_inset: f64) 
     // panels that only differ in height.
     // Up, not to nearest: a frame a fraction shorter than its content
     // loses its last row to the cull.
-    let w = w.min(window_w * panel::MAX_W_FRAC).ceil();
-    let h = h.min(window_h * panel::MAX_H_FRAC).ceil();
+    let w = spec::snap_up(w.min(window_w * panel::MAX_W_FRAC));
+    let h = spec::snap_up(h.min(window_h * panel::MAX_H_FRAC));
     Rect {
-        x: ((window_w - w) * 0.5).round(),
-        y_top: ((window_h - h) * 0.5).max(top_inset + spec::px(panel::TOP_CLEARANCE)).round(),
+        x: spec::snap((window_w - w) * 0.5),
+        y_top: spec::snap(((window_h - h) * 0.5).max(top_inset + spec::px(panel::TOP_CLEARANCE))),
         w,
         h,
     }

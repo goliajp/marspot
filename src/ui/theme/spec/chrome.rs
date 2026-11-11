@@ -4,11 +4,18 @@
 //!
 //! **Units.**  The window is laid out at the terminal's density, not a
 //! panel's: these numbers are *window units*, one physical pixel at
-//! display scale 1 — half a panel point.  [`px`] takes one to physical
-//! pixels.  The spacing ladder applies to them as it does to points.
-//! The sidebar is the exception inside the exception: the layout gives
-//! its rows a fixed height in physical pixels, so everything drawn in a
-//! row is in physical pixels too.
+//! display scale 1 and two at scale 2 — half a panel point at any
+//! scale.  [`px`] takes one to physical pixels.  The spacing ladder
+//! applies to them as it does to points.  Nothing here is a number of
+//! physical pixels.
+//!
+//! **The context menu** is chrome and is measured in window units like
+//! the rest; its labels are words and take a panel type role, which is
+//! in points.  Both go through the display's scale, so the menu is the
+//! same size in window units on every display.  The canvas it is drawn
+//! on calls its unit `Pt`: there that is a window unit, not a panel
+//! point (`a_menu_unit_is_a_window_unit_at_every_scale` holds it to
+//! that).
 //!
 //! **One definition.**  `marspot_term::layout` places the toolbar
 //! buttons and the sidebar's rows and buttons, and click handling asks
@@ -42,24 +49,24 @@ pub const TOOLBAR_ICON: f64 = 13.0;
 /// The version label's right edge to the window's.
 pub const VERSION_PAD_RIGHT: f64 = space::S12;
 
-/// Height of a sidebar row, physical px.  Defined by the layout.
-pub const SIDEBAR_ROW_H: f64 = window::SIDEBAR_ROW_H_PHYS;
+/// Height of a sidebar row.  Defined by the layout.
+pub const SIDEBAR_ROW_H: f64 = window::SIDEBAR_ROW_H;
 /// The hover and selected fill of a row stops this far short of the
-/// sidebar's edges, physical px.
+/// sidebar's edges.
 pub const SIDEBAR_ROW_INSET: f64 = space::S4;
-/// Corner radius of that fill and of the add button's, physical px.
+/// Corner radius of that fill and of the add button's.
 pub const SIDEBAR_ROW_RADIUS: f64 = 4.0;
-/// The status dot's left edge from the sidebar's, physical px.
+/// The status dot's left edge from the sidebar's.
 pub const SIDEBAR_PAD_X: f64 = space::S12;
-/// Diameter of the status dot, physical px.
+/// Diameter of the status dot.
 pub const SIDEBAR_DOT: f64 = 8.0;
-/// The dot to the pane's name, physical px.
+/// The dot to the pane's name.
 pub const SIDEBAR_DOT_GAP: f64 = space::S8;
-/// The name ends at least this far before the close button, physical
-/// px, whether or not the button is showing: a name must not jump when
-/// the pointer arrives.
+/// The name ends at least this far before the close button, whether
+/// or not the button is showing: a name must not jump when the pointer
+/// arrives.
 pub const SIDEBAR_LABEL_GAP: f64 = space::S4;
-/// Point size of the `+` in the add button, physical px.
+/// Point size of the `+` in the add button.
 pub const SIDEBAR_ADD_ICON: f64 = 13.0;
 
 /// Height of a pane's title strip.  Its text starts at the terminal's
@@ -86,6 +93,14 @@ pub const POPOVER_SHADOW_BLUR: f64 = panel::SHADOW_BLUR;
 pub const POPOVER_ROW_RADIUS: f64 = 4.0;
 /// That fill stops this far short of the popover's left and right edges.
 pub const POPOVER_ROW_INSET: f64 = space::S4;
+
+/// Least inset of the search overlay's content from its frame; the
+/// inset is a fraction of the terminal's line above that.
+pub const SEARCH_PAD_MIN: f64 = space::S6;
+/// Width of the caret in the search field, and how far it stops short
+/// of the field's top and bottom.
+pub const SEARCH_CARET_W: f64 = 2.0;
+pub const SEARCH_CARET_INSET: f64 = 2.0;
 
 /// Height of a context menu row.
 pub const MENU_ROW_H: f64 = 26.0;

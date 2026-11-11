@@ -297,8 +297,8 @@ pub fn place(home: Rect, offset: (f64, f64), window_w: f64, window_h: f64, top_i
     let right = (window_w - home.w).max(0.0);
     let bottom = (window_h - header_h).max(top_inset);
     Rect {
-        x: (home.x + offset.0).clamp(0.0, right).round(),
-        y_top: (home.y_top + offset.1).clamp(top_inset, bottom).round(),
+        x: crate::ui::theme::spec::snap((home.x + offset.0).clamp(0.0, right)),
+        y_top: crate::ui::theme::spec::snap((home.y_top + offset.1).clamp(top_inset, bottom)),
         ..home
     }
 }
