@@ -320,11 +320,7 @@ pub enum MsgType {
     // discriminant is left as a hole so a future L3 (briefly on the
     // old binary across an install) sending a PaneCwd frame just
     // falls into the unknown-msg-type silent-skip path.
-    /// L2 → L1: user clicked the toolbar's dev-panel toggle icon.
-    /// Empty payload.  L1 owns the dev panel's NSWindow (built in
-    /// `run_app`), L2 just routes the click — L2 doesn't keep its
-    /// own visibility state, L1 is the single source of truth.
-    DevPanelToggle = 55,
+    // 55 was an L2→L1 toggle with an empty payload: a hole the same way
     /// L1 plugin → L2: set a pane's title text(insert into the title
     /// resolution chain ABOVE cwd basename, BELOW user-set custom title
     /// + edit buffer).Payload mirrors `PaneBadge`:
@@ -604,7 +600,6 @@ impl MsgType {
             51 => MsgType::SearchResults,
             52 => MsgType::SearchMore,
             53 => MsgType::SearchCancel,
-            55 => MsgType::DevPanelToggle,
             56 => MsgType::PaneTitle,
             57 => MsgType::FileDrop,
             58 => MsgType::PaneBadgeMenuRequest,
@@ -3385,6 +3380,9 @@ mod tests {
         // Forward-compat hole between 48 and 50: 49 stays None per
         // the silently-skip rule.
         assert_eq!(MsgType::from_u32(49), None);
+        // retired ids stay holes
+        assert_eq!(MsgType::from_u32(54), None);
+        assert_eq!(MsgType::from_u32(55), None);
     }
 
     #[test]

@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.291"  # the shell hosts no developer window
-core    = "0.12.322"  # the developer panel and the view tree it was drawn with are gone
+shell   = "0.7.292"  # the developer panel's message, setting and saved window are retired
+core    = "0.12.323"  # the developer panel's message, setting and saved window are retired
 session = "0.11.163"  # a repair reads the terminal settings and writes them back with nothing in between
