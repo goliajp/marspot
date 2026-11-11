@@ -1685,9 +1685,7 @@ impl Marspot {
         // menu is open.  Re-builds the row list from the items Vec
         // so the renderer doesn't share a borrow back into Marspot
         // (mirrors set_layout_modal's per-frame publish shape).
-        // Dev panel lives in its own NSWindow — keep the main
-        // renderer's dev_panel slot empty.
-        renderer.set_dev_panel(None);
+        // Dev panel lives in its own NSWindow.
         marspot::dev_window::with_dev_window(|w| {
             w.set_visible_deferred(self.dev_panel.visible);
             if self.dev_panel.visible {
@@ -1882,6 +1880,7 @@ fn main() {
         frame_pt: None,
         bg: marspot::system_theme::startup_palette().bg, // the terminal's own ground
     };
+    marspot::dev_window::enable();
     run_app(app, proxy, attrs);
 }
 
@@ -2424,12 +2423,7 @@ fn bench_scrollaccess(arg: &str) {
     depths.sort_unstable();
     depths.dedup();
 
-    let rss_kib = std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok())
-        .unwrap_or(-1);
+    let rss_kib = read_self_rss_kib();
 
     let cols = GRID_COLS;
     let rows = GRID_ROWS as usize;

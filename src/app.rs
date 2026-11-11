@@ -1235,7 +1235,23 @@ enum WindowOp {
     SetCaretRect(u32, Option<(f64, f64, f64, f64)>),
 }
 
+/// For a binary with a window of its own; call before `run_app`.
+/// Function pointers: a binary that sets none links none of that window.
+pub fn set_loop_hooks(before_resumed: fn(MainThreadMarker), after_dispatch: fn()) {
+    LOOP_HOOKS.set(Some((before_resumed, after_dispatch)));
+}
+
+fn after_dispatch() {
+    if let Some((_, after)) = LOOP_HOOKS.get() {
+        after();
+    }
+}
+
 thread_local! {
+    /// One runs once before `resumed`, the other after every event,
+    /// outside the `APP_STATE` borrow, where a window notification can re-enter.
+    static LOOP_HOOKS: Cell<Option<(fn(MainThreadMarker), fn())>> = const { Cell::new(None) };
+
     /// Owns the user's `MarspotApp` and the per-window context.
     /// Populated by `run_app`; accessed from every event handler.
     static APP_STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
@@ -1356,12 +1372,7 @@ fn dispatch_event_for(window_id: u32, kind: EventKind) {
             post_dummy_event(&ctx.nsapp);
         }
     });
-    // Apply any AppKit window operations queued from inside the
-    // APP_STATE borrow (dev panel show/hide).  Running here means
-    // `makeKeyAndOrderFront:` can synchronously fire window
-    // notifications back through `dispatch_event` without
-    // tripping a re-entrant `borrow_mut`.
-    crate::dev_window::drain_pending_actions();
+    after_dispatch();
     drain_pending_windows();
 }
 
@@ -1893,15 +1904,9 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
         });
     });
 
-    // Build the independent dev-panel window BEFORE handing control
-    // to the app's `resumed` handler — `resumed` is where L1 reads
-    // `dev-window-state.bin` and calls `apply_saved_frame`, which
-    // needs `with_dev_window` to actually find a built window.
-    // Reverse order silently drops the saved frame (real bug observed
-    // 2026-06-23: dev panel always opened at default 420×552 after
-    // every install/restart, ignoring the persisted geometry).
-    if let Err(e) = crate::dev_window::ensure_built(mtm) {
-        eprintln!("[marspot] dev_window init failed: {e}; toolbar toggle will be a no-op");
+    // before `resumed`, which applies a saved frame to that window
+    if let Some((before_resumed, _)) = LOOP_HOOKS.get() {
+        before_resumed(mtm);
     }
 
     APP_STATE.with(|cell| {
@@ -1918,13 +1923,8 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
             state.app.redraw(ctx);
         }
     });
-    // Drain anything `resumed` / `redraw` queued via the dev_window
-    // deferral path (e.g. `apply_saved_frame` from L1).  Same reason
-    // `dispatch_event` drains after its borrow drops — AppKit calls
-    // here fire `windowDidMove:` etc. into our delegate, which
-    // dispatch_event_pub's into APP_STATE → if APP_STATE were still
-    // borrowed we'd re-enter and panic.
-    crate::dev_window::drain_pending_actions();
+    // for what `resumed` / `redraw` queued
+    after_dispatch();
 
     // 6. Run.  Returns after dispatch_event sees an exit request.
     nsapp.run();

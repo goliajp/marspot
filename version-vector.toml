@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.288"  # one instance per state directory; the window follows its display's scale
-core    = "0.12.318"  # every size and all text scale with the display
+shell   = "0.7.290"  # the dev window is built only by the binaries that show it
+core    = "0.12.321"  # a reattached session's exit status is made in place, not by running a helper
 session = "0.11.161"  # a repair of the terminal settings always ends, even when its command was never seen
