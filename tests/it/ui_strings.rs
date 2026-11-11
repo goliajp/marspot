@@ -178,11 +178,11 @@ fn is_cjk(c: char) -> bool {
 /// What is wrong with `s` as Japanese or Chinese interface text, if
 /// anything.
 fn typography_fault(s: &str, label: bool) -> Option<String> {
-    if label && s.ends_with(['。', '.', '！', '!']) {
-        return Some("a label ends with a full stop".into());
-    }
-    if !label && !s.ends_with('。') {
-        return Some("a sentence does not end with 。".into());
+    // nothing ends with a full stop, a sentence included: a line
+    // under a setting is a short sentence, not a paragraph
+    let _ = label;
+    if s.ends_with(['。', '.', '！', '!']) {
+        return Some("ends with a full stop".into());
     }
     if s.contains("...") {
         return Some("three dots instead of …".into());
@@ -250,7 +250,7 @@ fn translations_are_translated() {
     }
 }
 
-/// Labels take no full stop, sentences end with 。, punctuation beside
+/// Nothing ends with a full stop, punctuation beside
 /// CJK text is full-width, and an ellipsis is one character.
 #[test]
 fn translations_follow_cjk_typography() {
@@ -291,8 +291,8 @@ fn translations_follow_cjk_typography() {
     assert!(typography_fault("设置。", true).is_some(), "a label with a full stop");
     assert!(typography_fault("設定.", true).is_some());
     assert!(typography_fault("设置", true).is_none());
-    assert!(typography_fault("立即应用", false).is_some(), "a sentence without one");
-    assert!(typography_fault("立即应用。", false).is_none());
+    assert!(typography_fault("立即应用。", false).is_some(), "a sentence with a full stop");
+    assert!(typography_fault("立即应用", false).is_none());
     assert!(typography_fault("已进入安全模式(保留会话)", true).is_some(), "half-width brackets");
     assert!(typography_fault("返回时,唤醒", true).is_some(), "a half-width comma");
     assert!(typography_fault("正在恢复...", true).is_some(), "three dots");

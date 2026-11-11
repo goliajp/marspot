@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.282"  # the menu bar is built in the saved language from the start
-core    = "0.12.312"  # an empty pane's message follows a language change; reviewed Japanese and Chinese wording
+shell   = "0.7.283"  # japanese and chinese lines carry no closing full stop
+core    = "0.12.313"  # japanese and chinese lines carry no closing full stop
 session = "0.11.159"  # a long log line of non-ASCII text is cut between characters
