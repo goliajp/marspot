@@ -197,10 +197,6 @@ pub struct Layout {
     /// layout button.  Toggles the right-side process-tree panel.
     /// Always present so the user can pop the panel any time.
     pub process_button_rect: Rect,
-    /// Dev-panel toggle — fourth chrome icon button,  immediately
-    /// right of the process-tree button.  Toggles the UI-system
-    /// workbench panel.  Zero unless `developer.dev_panel` is on.
-    pub dev_panel_button_rect: Rect,
     /// cc — toolbar `Cc` button (Claude profile usage modal).
     pub cc_button_rect: Rect,
     /// Toolbar button #6 — the settings panel.
@@ -395,7 +391,6 @@ impl Layout {
             layout_button_rect: Rect::ZERO,
             sidebar_button_rect: Rect::ZERO,
             process_button_rect: Rect::ZERO,
-            dev_panel_button_rect: Rect::ZERO,
             cc_button_rect: Rect::ZERO,
             settings_button_rect: Rect::ZERO,
             close_session_rects: Vec::new(),
@@ -424,20 +419,7 @@ impl Layout {
     /// to the historical constant, which is right for the overwhelming
     /// case (a normal window) and wrong only until the first frame
     /// arrives.
-    pub fn with_chrome(self, scale: f64, n_sessions: usize, lights_right_phys: Option<f64>) -> Self {
-        let dev_panel = crate::settings::get().dev_panel_button;
-        self.with_chrome_showing(scale, n_sessions, lights_right_phys, dev_panel)
-    }
-
-    /// `with_chrome`, told whether the dev-panel button is shown
-    /// rather than reading the setting.
-    pub fn with_chrome_showing(
-        mut self,
-        scale: f64,
-        n_sessions: usize,
-        lights_right_phys: Option<f64>,
-        dev_panel: bool,
-    ) -> Self {
+    pub fn with_chrome(mut self, scale: f64, n_sessions: usize, lights_right_phys: Option<f64>) -> Self {
         let btn_size = ICON_BUTTON_LOGICAL_SIZE * scale;
         let btn_gap = ICON_BUTTON_LOGICAL_GAP * scale;
         // Buttons center on the traffic-light row, NOT inside the
@@ -475,9 +457,7 @@ impl Layout {
         // affordances clustered so the user's eye can scan them in one
         // movement.
         let process_btn_x = layout_btn_x + btn_size + btn_gap;
-        // hidden unless asked for; the buttons after it close the gap
-        let dev_panel_btn_x = process_btn_x + btn_size + btn_gap;
-        let cc_btn_x = if dev_panel { dev_panel_btn_x + btn_size + btn_gap } else { dev_panel_btn_x };
+        let cc_btn_x = process_btn_x + btn_size + btn_gap;
         let settings_btn_x = cc_btn_x + btn_size + btn_gap;
         self.sidebar_button_rect = Rect {
             x: sidebar_btn_x,
@@ -496,11 +476,6 @@ impl Layout {
             y_top: btn_y,
             w: btn_w,
             h: btn_h,
-        };
-        self.dev_panel_button_rect = if dev_panel {
-            Rect { x: dev_panel_btn_x, y_top: btn_y, w: btn_w, h: btn_h }
-        } else {
-            Rect::ZERO
         };
         self.cc_button_rect = Rect {
             x: cc_btn_x,
@@ -574,11 +549,6 @@ impl Layout {
         self.process_button_rect.contains(px, py)
     }
 
-    /// True when `(px, py)` falls inside the dev-panel toggle button.
-    pub fn hit_test_dev_panel_button(&self, px: f64, py: f64) -> bool {
-        self.dev_panel_button_rect.contains(px, py)
-    }
-
     /// cc — true when `(px, py)` falls inside the toolbar `Cc`
     /// (Claude usage modal) button.
     pub fn hit_test_cc_button(&self, px: f64, py: f64) -> bool {
@@ -598,12 +568,11 @@ impl Layout {
     /// hit-test worked, and nothing was painted, so the toolbar had an
     /// invisible sixth button for an hour).  A mismatched icon list
     /// now fails to compile.
-    pub fn toolbar_buttons(&self) -> [Rect; 6] {
+    pub fn toolbar_buttons(&self) -> [Rect; 5] {
         [
             self.sidebar_button_rect,
             self.layout_button_rect,
             self.process_button_rect,
-            self.dev_panel_button_rect,
             self.cc_button_rect,
             self.settings_button_rect,
         ]
@@ -772,9 +741,9 @@ mod tests {
         // `with_chrome` is what lays the toolbar out; `build` alone
         // makes the chrome-less layout the bench and snapshot paths use.
         let l = Layout::build(1400.0, 900.0, 0.0, 40.0, 20.0, 2, 2, 8.0, 16.0)
-            .with_chrome_showing(2.0, 2, Some(138.0), true);
+            .with_chrome(2.0, 2, Some(138.0));
         let btns = l.toolbar_buttons();
-        assert_eq!(btns.len(), 6, "add the icon too, or it will not be painted");
+        assert_eq!(btns.len(), 5, "add the icon too, or it will not be painted");
         for (i, b) in btns.iter().enumerate() {
             assert!(b.w > 0.0 && b.h > 0.0, "button {i} has no area");
             assert!(b.x >= 0.0, "button {i} starts off-screen");
@@ -789,30 +758,14 @@ mod tests {
         }
         // Each one's own hit-test agrees with its rect in the list.
         let mid = |r: Rect| (r.x + r.w / 2.0, r.y_top + r.h / 2.0);
-        let (x, y) = mid(btns[5]);
+        let (x, y) = mid(btns[4]);
         assert!(l.hit_test_settings_button(x, y), "settings");
         assert!(!l.hit_test_cc_button(x, y), "and only settings");
-        let (x, y) = mid(btns[4]);
+        let (x, y) = mid(btns[3]);
         assert!(l.hit_test_cc_button(x, y), "cc");
         assert!(!l.hit_test_settings_button(x, y));
     }
 
-    /// Without the dev-panel button nothing is drawn or hit for it,
-    /// and the buttons after it move up: no hole in the row.
-    #[test]
-    fn a_hidden_dev_panel_button_leaves_no_gap() {
-        let build = |dev| {
-            Layout::build(1400.0, 900.0, 0.0, 40.0, 20.0, 2, 2, 8.0, 16.0)
-                .with_chrome_showing(2.0, 2, Some(138.0), dev)
-        };
-        let (shown, hidden) = (build(true), build(false));
-        let (s, h) = (shown.toolbar_buttons(), hidden.toolbar_buttons());
-        assert_eq!(h[3].w, 0.0, "the painter skips a zero-width button");
-        assert!(!hidden.hit_test_dev_panel_button(s[3].x + 1.0, s[3].y_top + 1.0));
-        assert_eq!(h[4].x, s[3].x, "the next button takes its place");
-        assert_eq!(h[5].x, s[4].x);
-        assert_eq!(h[..3], s[..3]);
-    }
     use super::*;
 
     #[test]

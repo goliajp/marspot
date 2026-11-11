@@ -32,8 +32,6 @@ pub enum Symbol {
     Usage,
     /// Settings.
     Settings,
-    /// The developer panel.
-    DevPanel,
     /// Add: a pane, a seat.
     Plus,
     /// Close: a pane, a panel, the search bar; end a process.
@@ -41,13 +39,12 @@ pub enum Symbol {
 }
 
 impl Symbol {
-    pub const ALL: [Symbol; 8] = [
+    pub const ALL: [Symbol; 7] = [
         Symbol::Sidebar,
         Symbol::Layout,
         Symbol::Processes,
         Symbol::Usage,
         Symbol::Settings,
-        Symbol::DevPanel,
         Symbol::Plus,
         Symbol::Close,
     ];
@@ -61,7 +58,6 @@ impl Symbol {
             Symbol::Processes => "list.bullet.indent",
             Symbol::Usage => "chart.bar",
             Symbol::Settings => "slider.horizontal.3",
-            Symbol::DevPanel => "sidebar.right",
             Symbol::Plus => "plus",
             Symbol::Close => "xmark",
         }

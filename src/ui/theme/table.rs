@@ -66,15 +66,11 @@ theme_table! {
     fg_secondary,
     fg_muted,
     fg_disabled,
-    fg_inverse,
-    fg_link,
     /// A label on the accent or on a status colour used as a fill.
     fg_on_accent,
-    hint,
 
     // Surfaces, lowest first
     bg,
-    bg_raised,
     bg_panel,
     bg_hover,
     /// A card on a panel, a popover.
@@ -89,7 +85,6 @@ theme_table! {
     border,
     /// A panel's own edge.
     border_strong,
-    divider,
     hairline,
     /// Rules running through a plot, behind its bars.
     grid,
@@ -97,7 +92,6 @@ theme_table! {
     // Accent and status.  The accent says "this one"; the other three
     // say how something is doing and are never used for it.
     accent,
-    accent_dim,
     success,
     warn,
     danger,
@@ -127,8 +121,7 @@ theme_table! {
     chrome,
     /// The pane in use.
     canvas,
-    /// Opaque, unlike `divider`: seams are drawn in the pass that does
-    /// not blend.
+    /// Opaque: seams are drawn in the pass that does not blend.
     seam,
     focus_ring,
     /// An agent's badge on a pane title.
@@ -162,12 +155,8 @@ pub static DARK: Theme = Theme {
     fg_secondary: c(179, 191, 209),
     fg_muted: c(140, 153, 168),
     fg_disabled: c(115, 122, 133),
-    fg_inverse: c(20, 22, 28),
-    fg_link: c(106, 175, 255),
     fg_on_accent: c(232, 238, 248),
-    hint: c(130, 140, 156),
     bg: c(20, 22, 28),
-    bg_raised: c(28, 31, 39),
     bg_panel: c(33, 36, 43),
     bg_hover: c(41, 45, 55),
     surface_3: c(44, 47, 56),
@@ -175,11 +164,9 @@ pub static DARK: Theme = Theme {
     bg_selected: c(51, 107, 173),
     border: c(56, 60, 70),
     border_strong: c(82, 87, 102),
-    divider: Color::rgba(255, 255, 255, 0.08),
     hairline: Color::rgba(255, 255, 255, 0.18),
     grid: Color::rgba(158, 168, 189, 0.14),
     accent: c(91, 162, 250),
-    accent_dim: c(170, 190, 230),
     success: c(80, 190, 110),
     warn: c(230, 200, 80),
     danger: c(220, 60, 60),
@@ -218,12 +205,8 @@ pub static LIGHT: Theme = Theme {
     fg_secondary: c(66, 74, 88),
     fg_muted: c(92, 100, 114),
     fg_disabled: c(150, 157, 168),
-    fg_inverse: c(255, 255, 255),
-    fg_link: c(10, 90, 200),
     fg_on_accent: c(255, 255, 255),
-    hint: c(104, 112, 128),
     bg: c(248, 249, 251),
-    bg_raised: c(255, 255, 255),
     bg_panel: c(244, 245, 248),
     bg_hover: c(224, 228, 235),
     surface_3: c(255, 255, 255),
@@ -231,11 +214,9 @@ pub static LIGHT: Theme = Theme {
     bg_selected: c(37, 99, 201),
     border: c(214, 218, 226),
     border_strong: c(176, 183, 194),
-    divider: Color::rgba(0, 0, 0, 0.08),
     hairline: Color::rgba(0, 0, 0, 0.14),
     grid: Color::rgba(60, 70, 90, 0.16),
     accent: c(30, 100, 210),
-    accent_dim: c(70, 96, 150),
     success: c(22, 122, 52),
     warn: c(146, 96, 0),
     danger: c(196, 38, 38),
@@ -276,12 +257,8 @@ pub static CONTRAST: Theme = Theme {
     fg_secondary: c(230, 230, 230),
     fg_muted: c(204, 204, 204),
     fg_disabled: c(150, 150, 150),
-    fg_inverse: c(0, 0, 0),
-    fg_link: c(140, 210, 255),
     fg_on_accent: c(0, 0, 0),
-    hint: c(204, 204, 204),
     bg: c(0, 0, 0),
-    bg_raised: c(20, 20, 20),
     bg_panel: c(0, 0, 0),
     bg_hover: c(44, 44, 44),
     surface_3: c(0, 0, 0),
@@ -289,11 +266,9 @@ pub static CONTRAST: Theme = Theme {
     bg_selected: c(102, 204, 255),
     border: c(170, 170, 170),
     border_strong: c(255, 255, 255),
-    divider: Color::rgba(255, 255, 255, 0.40),
     hairline: Color::rgba(255, 255, 255, 0.55),
     grid: Color::rgba(255, 255, 255, 0.30),
     accent: c(102, 204, 255),
-    accent_dim: c(170, 220, 255),
     success: c(80, 255, 130),
     warn: c(255, 214, 0),
     danger: c(255, 140, 140),

@@ -7752,14 +7752,6 @@ impl CoreApp {
             self.toggle_sidebar(wi);
             return;
         }
-        // UI-system dev panel toggle.  L2 doesn't own dev panel
-        // visibility — L1 (marspot-shell) hosts the NSWindow.  Route
-        // the click via `DevPanelToggle` wire frame; L1 flips state
-        // + drives the AppKit show/hide on its main loop.
-        if win!(self, wi).layout.hit_test_dev_panel_button(x_phys, y_phys) {
-            self.pending_to_shell.push((MsgType::DevPanelToggle, Vec::new()));
-            return;
-        }
 
         // Sidebar close-[×]: refuse to close the last session.
         if let Some(idx) = close_session_hit {
@@ -8878,11 +8870,6 @@ impl CoreApp {
         });
         self.renderer.set_shortcuts_panel(shortcuts);
         // F3+9 — publish ContextMenu render state every frame.
-        // Dev panel renders into its own NSWindow, owned by L1
-        // (marspot-shell), not by L2.  L2's only job re: dev panel
-        // is to (a) hit-test the toolbar toggle icon and (b) emit
-        // a `DevPanelToggle` wire frame on click; L1 takes it from
-        // there.  No call here.
         // Per-window, like every overlay below it: the renderer holds
         // one copy and each window sets its own right before painting.
         self.renderer

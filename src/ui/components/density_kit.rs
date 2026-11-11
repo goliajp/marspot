@@ -216,7 +216,7 @@ fn regions_of(layout: &Layout, n_panes: usize) -> Vec<(String, [f64; 4])> {
     let edges = |x: f64, y: f64, w: f64, h: f64| [x, y, x + w, y + h];
     let of = |r: crate::layout::Rect| edges(r.x, r.y_top, r.w, r.h);
     let mut out = Vec::new();
-    const TOOLBAR: [&str; 6] = ["sidebar", "layout", "process monitor", "developer panel", "accounts", "settings"];
+    const TOOLBAR: [&str; 5] = ["sidebar", "layout", "process monitor", "accounts", "settings"];
     for (name, rect) in TOOLBAR.iter().zip(layout.toolbar_buttons()) {
         if rect.w > 0.0 {
             out.push((format!("the toolbar's {name} button"), of(rect)));

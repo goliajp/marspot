@@ -92,8 +92,6 @@ pub mod app_menu;
 pub mod cc;
 pub mod cc_usage;
 pub mod kimi_usage;
-pub mod dev_window;
-pub mod chrome_measure;
 pub mod commands;
 pub mod font_cache;
 pub mod font_shape;
