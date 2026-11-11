@@ -717,8 +717,8 @@ struct ShellApp {
     /// Dev seam only (`MARSPOT_DEV_QUIT_AFTER_PAINT=<n>`): once `n`
     /// windows have painted, quit the way the dock's Quit item does.
     /// A script cannot open a dock menu, and what has to be tested is
-    /// the route — `terminate:` lands on the boot window's delegate,
-    /// and reading that as "close that window" is what left every
+    /// the route — `terminate:` used to land on the boot window, and
+    /// reading that as "close that window" is what left every
     /// other window on screen (2026-09-28 report).  Unset in the
     /// installed app.
     dev_quit_after_paint: Option<usize>,
@@ -4637,21 +4637,17 @@ impl MarspotApp for ShellApp {
     }
 
     fn quit_requested(&mut self, ctx: &MarspotAppCtx) {
-        // Quit means the app.  It arrives on the boot window's
-        // delegate, which is the one wearing the NSApplicationDelegate
-        // hat, and reading it as "close that window" is how quitting
-        // from the dock used to leave every other window on screen
-        // (2026-09-28 report).
+        // Quit means the app.  It arrives with whichever window is
+        // still open, and reading it as "close that window" is how
+        // quitting from the dock used to leave every other window on
+        // screen (2026-09-28 report).
         self.quit(ctx);
     }
 
     fn close_requested(&mut self, ctx: &MarspotAppCtx) {
         // RFC-005 — closing one of several windows closes THAT window
         // and the panes it holds; only the last window closing is a
-        // quit.  Cmd-Q arrives through the same callback but via the
-        // NSApplicationDelegate, which the boot window's delegate
-        // wears, so it always lands on the boot window and falls
-        // through to the quit path below when it is the only one left.
+        // quit.  Cmd-Q is `quit_requested`, not this.
         if marspot::app::window_count() > 1 {
             // The red button / Cmd-W: putting a window away, not
             // dismantling it.  Its slot is kept so the layout and
