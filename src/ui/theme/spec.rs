@@ -174,8 +174,6 @@ pub mod control {
     pub const HOVER_LIGHTEN: f32 = 0.08;
     /// Opacity of a disabled toggle.
     pub const DISABLED_ALPHA: f32 = 0.5;
-    /// Stroke thickness of the × in a close or danger button.
-    pub const CROSS_STROKE: f64 = 1.5;
 
     /// Height of a primary or secondary button.
     pub const BUTTON_H: f64 = 28.0;
