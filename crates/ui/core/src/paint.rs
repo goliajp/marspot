@@ -128,7 +128,12 @@ impl<O: PaintOut> Painter<'_, O> {
         }
         if n.kind == Kind::Text {
             let tb = self.layout.text[i as usize];
-            let at = self.layout.inner[i as usize].translated(dx, dy).place(tb.w, tb.h, s.align);
+            let room = self.layout.inner[i as usize].translated(dx, dy);
+            let mut at = room.place(tb.w, tb.h, s.align);
+            if n.has(flag::BY_INK) {
+                // the rows of ink are whole, and so is where they start
+                at.y = room.y + (at.y - room.y + 0.5).floor();
+            }
             let text = &self.tree.text_of(n)[..tb.len as usize];
             self.out.text_run(at.x, at.y + tb.baseline, text, n.font, n.ink);
             if tb.ellipsis {
