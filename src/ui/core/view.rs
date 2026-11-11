@@ -374,11 +374,8 @@ impl<'a> ViewPainter<'a> {
     /// are taken in whole pixels, as they are drawn, so the rows left
     /// above the ink and below it differ by one at most.
     pub fn ui_baseline_centred_for(&mut self, s: &str, box_top: f32, box_h: f32, size_pt: f64, weight: u16) -> f32 {
-        let cap = (crate::ui::theme::type_scale::sf_pro_cap_height(size_pt) * Self::px_per_pt()) as f32;
-        let ideographic = s.chars().any(|c| matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF));
-        let ink = if ideographic { super::ink::rows(self.font, s, size_pt, weight) } else { None };
-        let (above, below) = ink.unwrap_or((cap, 0.0));
-        box_top + ((box_h + above.round() - below.round()) * 0.5).round()
+        let (above, below) = super::ink::centring(self.font, s, size_pt, weight);
+        box_top + ((box_h + above - below) * 0.5).round()
     }
 
     /// Physical pixels per point, for panels laid out in points.

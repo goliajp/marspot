@@ -225,6 +225,11 @@ impl Pass<'_> {
                 tb.w = self.measure.advance(s, font);
                 tb.h = fm.cap_h;
                 tb.baseline = fm.cap_h;
+                if n.has(flag::BY_INK) {
+                    let by = self.measure.centring(s, font);
+                    tb.h = by.above + by.below;
+                    tb.baseline = by.above;
+                }
                 if cut && tb.w > c.max_w {
                     let fit = self.measure.fit_prefix(s, font, c.max_w);
                     tb.len = fit.len as u32;

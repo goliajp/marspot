@@ -268,3 +268,56 @@ fn arena_surface_frames_run_only_what_is_stale_and_allocate_nothing() {
     let (one, _, _) = measured(|| Box::new([0u8; 64]));
     assert!(one >= 1, "a deliberate allocation was not counted");
 }
+
+/// What a tree's layout asks of the fonts, asked a second time: every
+/// answer is already known, and none of them touches the heap.
+///
+/// The first asking is the control: it shapes each string and reads
+/// its ink, and has to be seen allocating.  So does a cut at a width
+/// nobody asked for before.
+#[test]
+fn text_measured_again_for_a_tree_is_free() {
+    use golia_ui_core::{FontSpec, TextMeasure};
+    use marspot::font_cache::FontCache;
+    use marspot::ui::theme::PanelText;
+    use marspot::ui::tree::FontMeasure;
+
+    let mut font = FontCache::build().expect("font");
+    let m = FontMeasure::new(&mut font);
+    let roles = [PanelText::Title, PanelText::Label, PanelText::Item, PanelText::Caption]
+        .map(|r| FontSpec::new(r.pt(), r.weight()));
+    let strings = ["Reclaim idle panes", "Wheel speed", "日本語", "简体中文", "アイドル状態"];
+    let long = "Give an idle pane's memory back after it has sat unused for a while";
+    let narrow = m.advance(long, roles[1]) * 0.4;
+
+    let ask = |m: &FontMeasure<'_>| {
+        let mut sum = 0.0;
+        for font in roles {
+            for s in strings {
+                let by = m.centring(s, font);
+                sum += m.advance(s, font) + by.above + by.below;
+            }
+            let fm = m.metrics(font);
+            let fit = m.fit_prefix(long, font, narrow);
+            sum += fm.cap_h + fm.line_h + fit.width + fit.len as f64;
+        }
+        sum + m.mono_cells("a日b") as f64
+    };
+    let (cold, _, first) = measured(|| ask(&m));
+    let (warm, bytes, again) = measured(|| ask(&m));
+    assert!(cold > 0, "the first measurement shapes every string, and the meter read nothing");
+    assert_eq!(again, first, "the second asking got other answers");
+    assert_eq!((warm, bytes), (0, 0), "measuring text already measured allocated");
+
+    let (cut, _, fit) = measured(|| m.fit_prefix(long, roles[1], narrow * 0.5));
+    assert!(fit.len < long.len() && cut > 0, "a cut never made before read as free: {fit:?}, {cut} allocations");
+    let (cut_again, _, same) = measured(|| m.fit_prefix(long, roles[1], narrow * 0.5));
+    assert_eq!((cut_again, same), (0, fit), "the same cut a second time");
+
+    eprintln!(
+        "[frame-alloc] text measured for a tree: {cold} allocations the first time, {warm} the second, \
+         over {} strings in {} roles with a cut each",
+        strings.len(),
+        roles.len()
+    );
+}
