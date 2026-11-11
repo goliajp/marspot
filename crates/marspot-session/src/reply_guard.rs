@@ -119,6 +119,19 @@ impl ReplyGuard {
         self.watch = None;
     }
 
+    /// [`Self::check`], saying so in the log when it flushed.
+    pub fn check_and_log(&mut self, master: RawFd, shell_pgrp: libc::pid_t, delivered: bool, session_id: u64) {
+        if let Some(n) = self.check(master, shell_pgrp, delivered) {
+            marspot_term::lx_info!(
+                "l3.replies_flushed",
+                "the program that asked left the foreground; flushed the input queue, \
+                 which held nothing but its replies (at most this many bytes)",
+                session_id = session_id,
+                bytes = n as u64
+            );
+        }
+    }
+
     /// Look at the queue, and flush it if a job has held the foreground
     /// and given it back to the shell, and the queue held nothing but
     /// replies. A shell's own query -- a prompt asking the terminal
