@@ -40,6 +40,6 @@ pub use node::{AlignCross, Distribute, GroupKind, Ink, Kind as NodeKind, Node, N
 pub use paint::{Op, PaintOut, Recording, WidgetState, paint};
 pub use scene::{Kind, Layer, Run, Scene};
 pub use surface::{Counters, Inputs, Surface};
-pub use text::{FakeMeasure, Fit, FontMetrics, FontSpec, TextFont, TextMeasure};
+pub use text::{Extent, FakeMeasure, Fit, FontMetrics, FontSpec, TextFont, TextMeasure};
 pub use tree::{At, Tree, Ui};
 pub use units::{Px, RectPx};
