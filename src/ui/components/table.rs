@@ -88,7 +88,7 @@ pub fn natural_width(columns: &[Column], flex_cells: f64, cell_w: f64) -> f64 {
     let cols: f64 = columns
         .iter()
         .map(|c| match c.width {
-            ColumnWidth::Cells(n) => n * cell_w,
+            ColumnWidth::Cells(n) => cells_of(c, n) * cell_w,
             ColumnWidth::Px(w) => w,
             ColumnWidth::Flex => flex_cells * cell_w,
         })
@@ -230,6 +230,14 @@ impl TableGeometry {
     }
 }
 
+/// The cells a column asked for, or what its header needs when that
+/// is more: a translated header is not cut to the width of the English
+/// one.
+fn cells_of(c: &Column, asked: f64) -> f64 {
+    let header = crate::ui::core::text_fit::cells(c.header) + if c.sort.is_some() { 2 } else { 0 };
+    asked.max(header as f64)
+}
+
 fn arrow(dir: SortDir) -> char {
     match dir {
         SortDir::Asc => '▲',
@@ -247,7 +255,7 @@ fn column_spans(card: Rect, columns: &[Column], cell_w: f64) -> Vec<(f64, f64)> 
     let fixed: f64 = columns
         .iter()
         .map(|c| match c.width {
-            ColumnWidth::Cells(n) => n * cell_w,
+            ColumnWidth::Cells(n) => cells_of(c, n) * cell_w,
             ColumnWidth::Px(w) => w,
             ColumnWidth::Flex => 0.0,
         })
@@ -263,7 +271,7 @@ fn column_spans(card: Rect, columns: &[Column], cell_w: f64) -> Vec<(f64, f64)> 
         .iter()
         .map(|c| {
             let w = match c.width {
-                ColumnWidth::Cells(n) => n * cell_w * squeeze,
+                ColumnWidth::Cells(n) => cells_of(c, n) * cell_w * squeeze,
                 ColumnWidth::Px(w) => w * squeeze,
                 ColumnWidth::Flex => flex_w,
             };

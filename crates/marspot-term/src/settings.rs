@@ -36,6 +36,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
+use crate::language::LangId;
 use crate::palette::ThemeId;
 use values::{fmt_f32, parse_bool, parse_f32};
 
@@ -151,6 +152,9 @@ pub struct Settings {
     /// The theme everything is drawn in; `None` follows the system.
     /// Dark by default, so an upgrade changes nothing a user can see.
     pub appearance_theme: Option<ThemeId>,
+    /// The language the interface is in; `None` follows the system's
+    /// language list.
+    pub appearance_language: Option<LangId>,
 }
 
 /// What the claudecode plugin does with an idle pane that has a better
@@ -197,6 +201,7 @@ impl Default for Settings {
             cc_rebalance: Rebalance::On,
             dev_panel_button: false,
             appearance_theme: Some(ThemeId::Dark),
+            appearance_language: None,
         }
     }
 }
@@ -284,6 +289,7 @@ pub fn circled_wide() -> bool {
 fn publish_mirrors(s: &Settings) {
     CIRCLED_WIDE.store(1 + s.appearance_circled_wide as u8, Ordering::Relaxed);
     crate::palette::set_choice(s.appearance_theme);
+    crate::language::set_choice(s.appearance_language);
 }
 
 /// Re-read the file if it has changed on disk.  Returns true when the
@@ -331,6 +337,7 @@ const KEYS: &[&str] = &[
     "reclaim.idle_minutes",
     "reclaim.prefetch_on_return",
     "appearance.theme",
+    "appearance.language",
     "appearance.circled_wide",
     "appearance.dim_scale",
     "input.scroll_factor",
@@ -343,6 +350,7 @@ fn value_of(s: &Settings, key: &str) -> String {
         "reclaim.idle_minutes" => s.reclaim_idle_minutes.to_string(),
         "reclaim.prefetch_on_return" => s.reclaim_prefetch.to_string(),
         "appearance.theme" => s.appearance_theme.map_or("system", ThemeId::as_str).to_string(),
+        "appearance.language" => s.appearance_language.map_or("system", LangId::as_str).to_string(),
         "appearance.circled_wide" => s.appearance_circled_wide.to_string(),
         "appearance.render_u_tags" => s.render_u_tags.to_string(),
         "appearance.dim_scale" => fmt_f32(s.dim_scale),
@@ -380,6 +388,9 @@ pub fn parse(body: &str) -> Settings {
             }
             "reclaim.prefetch_on_return" => s.reclaim_prefetch = parse_bool(v, s.reclaim_prefetch),
             "appearance.theme" => s.appearance_theme = ThemeId::parse_setting(v, s.appearance_theme),
+            "appearance.language" => {
+                s.appearance_language = LangId::parse_setting(v, s.appearance_language)
+            }
             "appearance.circled_wide" => {
                 s.appearance_circled_wide = parse_bool(v, s.appearance_circled_wide)
             }

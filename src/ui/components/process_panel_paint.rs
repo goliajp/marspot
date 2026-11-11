@@ -17,6 +17,7 @@ use crate::ui::components::process_panel::{
 };
 use crate::ui::components::table::{Align, TableGeometry};
 use crate::ui::core::view::ViewPainter;
+use crate::ui::strings::t;
 use crate::ui::theme::spec::{self, content, space};
 
 /// Below this a process counts as idle: it would print as `0.0`.
@@ -45,7 +46,7 @@ pub(crate) fn push_process_panel_via_view(
         font, atlas, cells, glyphs, ui_rects,
     };
     let close_hovered = panel.hover == Hover::Close;
-    panel.layout.chrome.paint(&mut painter, TITLE, None, close_hovered, |p, _content| {
+    panel.layout.chrome.paint(&mut painter, t(TITLE), None, close_hovered, |p, _content| {
         paint_panes(p, panel);
         paint_processes(p, panel);
     });
@@ -65,7 +66,7 @@ fn paint_row_state(p: &mut ViewPainter, g: &TableGeometry, row: Rect, selected: 
 fn paint_panes(p: &mut ViewPainter, panel: &ProcessPanelRender) {
     let l = &panel.layout;
     let h = l.panes_heading;
-    panel_chrome::section_heading(p, h.x, h.top, h.w, PANES_HEADING, None);
+    panel_chrome::section_heading(p, h.x, h.top, h.w, t(PANES_HEADING), None);
     let g = &l.panes;
     g.paint_frame(p, &pane_columns());
     for &(i, row) in &g.rows {
@@ -86,7 +87,7 @@ fn paint_processes(p: &mut ViewPainter, panel: &ProcessPanelRender) {
     let l = &panel.layout;
     let h = l.processes_heading;
     let detail = fit_heading_trailing(p, &panel.detail, h.w);
-    panel_chrome::section_heading(p, h.x, h.top, h.w, PROCESSES_HEADING, Some(&detail));
+    panel_chrome::section_heading(p, h.x, h.top, h.w, t(PROCESSES_HEADING), Some(&detail));
     let g = &l.processes;
     // Only the headers are read here; the kill column has none, and
     // its width is already in the layout.
@@ -117,7 +118,7 @@ fn paint_processes(p: &mut ViewPainter, panel: &ProcessPanelRender) {
 /// `text` cut, with an ellipsis, to what a heading `w` wide has left
 /// beside its title.
 fn fit_heading_trailing(p: &mut ViewPainter, text: &str, w: f64) -> String {
-    let title_w = p.panel_text_width(content::HEADING, PROCESSES_HEADING) as f64;
+    let title_w = p.panel_text_width(content::HEADING, t(PROCESSES_HEADING)) as f64;
     let room = w - title_w - spec::px(space::S12);
     let fits =
         |p: &mut ViewPainter, s: &str| p.panel_text_width(content::HEADING_TRAILING, s) as f64 <= room;

@@ -262,7 +262,12 @@ fn format_line(
     if buf.len() > MAX_LINE {
         // Replace the tail with a marker so a grep/cut consumer can see
         // the line was capped and the missing bytes are explained.
-        buf.truncate(MAX_LINE - TRUNC_TAIL.len());
+        // at a character boundary: the cap is in bytes and the text need not be ASCII
+        let mut cut = MAX_LINE - TRUNC_TAIL.len();
+        while !buf.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        buf.truncate(cut);
         buf.push_str(TRUNC_TAIL);
     }
 }
@@ -548,6 +553,19 @@ mod tests {
         let count = buf.matches('\t').count();
         // Expected separators: ISO/unix/lvl/comp/pid/tid/tag = 7 separators before msg + 0 after for empty fields.
         assert_eq!(count, 7, "unexpected tab count in {:?}", buf);
+    }
+
+    #[test]
+    fn an_oversize_line_of_wide_text_is_cut_between_characters() {
+        let _ = COMPONENT.set("test");
+        // three bytes a character, at every offset the cap can land on
+        for lead in ["", "a", "ab"] {
+            let mut buf = String::new();
+            let msg = format!("{lead}{}", "窓".repeat(400));
+            format_line(&mut buf, Level::Info, "TAG", &msg, &[]);
+            assert!(buf.len() <= MAX_LINE, "line was {} bytes", buf.len());
+            assert!(buf.ends_with(TRUNC_TAIL), "{lead:?}: the cut is marked");
+        }
     }
 
     #[test]

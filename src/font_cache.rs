@@ -52,6 +52,9 @@ pub const UI_FONT_POINT: f64 = 13.0;
 
 // CoreText's per-string font fallback resolver — not in the
 // `core-text` crate so we declare it directly.
+#[path = "font_language.rs"]
+mod language;
+
 #[link(name = "CoreText", kind = "framework")]
 unsafe extern "C" {
     fn CTFontCreateForString(
@@ -461,39 +464,7 @@ impl FontCache {
         let italic_idx = fonts.intern(italic);
         let bold_italic_idx = fonts.intern(bold_italic);
 
-        // Curated text-font cascade.  We deliberately enumerate
-        // mono-leaning text fonts first so a 1-cell glyph is more
-        // likely to land than a 2-cell-wide emoji bitmap.  Fonts
-        // that aren't installed on this system just fail to load
-        // and are skipped.
-        // Order matters: the FIRST font in this list whose `get_glyphs`
-        // returns a non-zero CGGlyph for the codepoint wins.  For CJK
-        // codepoints we want the Han-script font that matches the
-        // user's locale — PingFang SC (Chinese) before Hiragino
-        // (Japanese) before Apple SD Gothic Neo (Korean), because the
-        // user-visible "字变小了" complaint on 2026-06-15 came from
-        // routing Chinese chars to Apple SD Gothic Neo (Korean
-        // metrics: thinner, smaller-looking glyphs).  We don't have
-        // a runtime locale-aware ordering yet, so this is "best
-        // common-case" tuned for the user's predominantly-Chinese
-        // workload.
-        const TEXT_FALLBACK_NAMES: &[&str] = &[
-            "Menlo",
-            "SFMono-Regular",
-            "Monaco",
-            "PingFangSC-Regular",
-            "HiraginoSans-W3",
-            "AppleSDGothicNeo-Regular",
-            "HelveticaNeue",
-            "Helvetica",
-        ];
-        let mut text_fallback_idxs: Vec<usize> = Vec::new();
-        for name in TEXT_FALLBACK_NAMES {
-            if let Ok(f) = new_from_name(name, font_point) {
-                let idx = fonts.intern(f);
-                text_fallback_idxs.push(idx);
-            }
-        }
+        let text_fallback_idxs = language::text_fallback(&mut fonts, font_point);
 
         // ─── UI font — system default for chrome ─────────────
         // Try the cascade in UI_FONT_NAMES.  First successful load

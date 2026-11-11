@@ -32,6 +32,7 @@ use std::time::{Duration, SystemTime};
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_API_VERSION};
 use crate::observe::Proc;
 use crate::plugins::{handoff, pidtree};
+use marspot::ui::strings::{self, Arg};
 
 use badge::{badge_text, publish_badge};
 use pane::{argv_facts, profile_of, profile_switch_op, root_from, ArgvFacts, PaneGemini};
@@ -219,7 +220,7 @@ impl Plugin for GeminiPlugin {
                 // the tag IS the profile number, so a profile created
                 // between the menu and the click cannot shift the rows
                 tag: *n as u32,
-                label: if pane.profile == Some(*n) { format!("● profile {n}") } else { format!("   profile {n}") },
+                label: strings::text(Arg::ProfileRow { n: *n, current: pane.profile == Some(*n) }),
             })
             .collect();
         rows.extend(handoff::menu_rows(handoff::Agent::Gemini));

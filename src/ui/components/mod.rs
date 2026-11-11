@@ -13,6 +13,7 @@ pub mod panel_chrome;
 pub mod panel_palette;
 pub mod panel_script;
 pub mod surface_stack;
+pub mod settings_choices;
 pub mod settings_modal;
 pub mod settings_paint;
 pub mod shortcuts_panel;
@@ -39,6 +40,8 @@ pub mod dev_panel;
 mod panel_snapshot_tests;
 #[cfg(test)]
 mod chrome_snapshot_tests;
+#[cfg(test)]
+mod language_snapshot_tests;
 
 pub use scroll_view::ScrollView;
 pub use panel_chrome::PanelChrome;

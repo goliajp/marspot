@@ -15,7 +15,50 @@ use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
 use objc2_foundation::NSString;
 
 use crate::commands::{self, Command, Menu, Row, Runs, TABLE};
-use crate::ui::strings::t;
+use crate::ui::strings::{t, Msg};
+
+thread_local! {
+    /// Every item and menu this module titled, with the message its
+    /// title is.  AppKit adds items of its own to these menus and tags
+    /// nothing, so the ones that are ours are remembered, not searched
+    /// for.
+    static TITLED: std::cell::RefCell<Vec<(Titled, Msg)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+enum Titled {
+    Item(Retained<NSMenuItem>),
+    Menu(Retained<NSMenu>),
+}
+
+/// Give every item and menu this module made its title in the language
+/// now in force.  Titles only: key equivalents, targets, actions and
+/// the items AppKit added are left as they are.
+pub fn retitle() {
+    TITLED.with_borrow(|titled| {
+        for (what, msg) in titled {
+            let title = NSString::from_str(t(*msg));
+            match what {
+                Titled::Item(item) => item.setTitle(&title),
+                Titled::Menu(menu) => menu.setTitle(&title),
+            }
+        }
+    });
+}
+
+/// The menu bar as it stands, read back from the application's main
+/// menu: each menu's title, then its items' titles, AppKit's included.
+pub fn titles(nsapp: &NSApplication) -> Vec<(String, Vec<String>)> {
+    let Some(bar) = nsapp.mainMenu() else { return Vec::new() };
+    bar.itemArray()
+        .iter()
+        .filter_map(|holder| holder.submenu())
+        .map(|menu| {
+            let items = menu.itemArray();
+            let titles = items.iter().filter(|i| !i.isSeparatorItem()).map(|i| i.title().to_string());
+            (menu.title().to_string(), titles.collect())
+        })
+        .collect()
+}
 
 define_class!(
     // SAFETY:
@@ -97,6 +140,7 @@ fn item(index: usize, row: &Row, target: &MenuTarget, mtm: MainThreadMarker) -> 
         unsafe { item.setTarget(Some(target)) };
         item.setTag(index as isize);
     }
+    TITLED.with_borrow_mut(|titled| titled.push((Titled::Item(item.clone()), row.title)));
     item
 }
 
@@ -119,6 +163,7 @@ pub fn install(nsapp: &NSApplication, mtm: MainThreadMarker) {
         // whatever its own title says.
         let holder = NSMenuItem::new(mtm);
         holder.setSubmenu(Some(&menu));
+        TITLED.with_borrow_mut(|titled| titled.push((Titled::Menu(menu.clone()), which.title())));
         bar.addItem(&holder);
         match which {
             Menu::Window => nsapp.setWindowsMenu(Some(&menu)),

@@ -38,9 +38,9 @@ use crate::shell_proto::{
     encode_paste, encode_search_cancel, encode_search_more, encode_search_scrollback,
     event_to_wire, Frame, MsgType,
 };
-use crate::tools::search_bar::SearchBar;
-use crate::tools::search_list::SearchList;
+use crate::tools::{search_bar::SearchBar, search_list::SearchList};
 use crate::terminal::Terminal;
+use crate::ui::strings::{self, t, Arg, Msg};
 
 /// One pane's backend: a locally forked PTY (the legacy / mcli /
 /// bench path) or a shelld-managed session (marspot's live-update
@@ -147,14 +147,10 @@ impl VacantPane {
     /// RFC-006 — the placeholder a moved-out pane leaves behind.
     pub fn new_dormant(cols: u16, rows: u16) -> Self {
         let mut grid = Grid::new(cols.max(20), rows.max(3));
-        let msg = "empty — click to start a shell";
+        let msg = t(Msg::PaneEmpty);
         let row = (grid.rows() / 2).min(grid.rows().saturating_sub(1));
-        let start = (grid.cols().saturating_sub(msg.len() as u16)) / 2;
-        for (i, ch) in msg.chars().enumerate() {
-            let col = start + i as u16;
-            if col >= grid.cols() { break; }
-            grid.set_cell(col, row, Cell { ch, ..Cell::default() });
-        }
+        let start = grid.cols().saturating_sub(crate::pane_message::centring_width(msg)) / 2;
+        crate::pane_message::put(&mut grid, start, row, msg);
         Self {
             session_id: 0,
             grid,
@@ -176,25 +172,24 @@ impl VacantPane {
     }
 
     fn paint_message(grid: &mut Grid, session_id: u64, pending: bool) {
-        let msg = if pending {
-            format!("session {session_id} starting…")
+        let msg = strings::text(if pending {
+            Arg::SessionStarting(session_id)
         } else {
-            format!("session {session_id} unavailable — press any key to retry")
-        };
+            Arg::SessionUnavailable(session_id)
+        });
         let row = 1u16.min(grid.rows().saturating_sub(1));
-        for (i, ch) in msg.chars().enumerate() {
-            let col = 2 + i as u16;
-            if col >= grid.cols() {
-                break;
-            }
-            grid.set_cell(col, row, Cell { ch, ..Default::default() });
-        }
+        crate::pane_message::put(grid, 2, row, &msg);
     }
 
     fn resize(&mut self, cols: u16, rows: u16) {
         let mut grid = Grid::new(cols.max(20), rows.max(3));
         Self::paint_message(&mut grid, self.session_id, self.pending);
         self.grid = grid;
+    }
+
+    fn repaint(&mut self) {
+        let (cols, rows) = (self.grid.cols(), self.grid.rows());
+        if self.dormant { self.grid = Self::new_dormant(cols, rows).grid } else { self.resize(cols, rows) }
     }
 }
 
@@ -1631,6 +1626,11 @@ impl Pane {
     }
 
     /// RFC-006 — the placeholder a moved-out pane leaves behind.
+    /// An empty pane's placeholder again, after a language change.
+    pub fn repaint_placeholder(&mut self) {
+        if let PaneBackend::Vacant(v) = &mut self.session { v.repaint() }
+    }
+
     pub fn new_dormant(cols: u16, rows: u16) -> Self {
         Self {
             session: PaneBackend::Vacant(VacantPane::new_dormant(cols, rows)),

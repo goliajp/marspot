@@ -94,6 +94,8 @@ cat > "$PLIST" <<PLIST
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleLocalizations</key><array><string>en</string><string>ja</string><string>zh-Hans</string></array>
   <key>NSAppleEventsUsageDescription</key><string>A program running in Marspot wants to control another app.</string>
   <key>NSMicrophoneUsageDescription</key><string>A program running in Marspot wants to use the microphone.</string>
   <key>NSCameraUsageDescription</key><string>A program running in Marspot wants to use the camera.</string>
@@ -110,6 +112,14 @@ PLIST
 if [[ -f "$ROOT/assets/AppIcon.icns" ]]; then
   cp "$ROOT/assets/AppIcon.icns" "$RES/AppIcon.icns"
 fi
+
+# The usage strings again, per language.  Declaring the localizations
+# is also what makes the items AppKit provides -- the Window menu's
+# own entries, the About panel, permission prompts -- come up in the
+# user's language, and what lists the app under Language & Region.
+# Replaced whole, so a language dropped from assets/ leaves the bundle.
+rm -rf "$RES"/*.lproj
+cp -R "$ROOT"/assets/lproj/*.lproj "$RES/"
 
 # `install` rather than `cp`: an in-place overwrite of a binary that is
 # about to be exec'd keeps the old inode, and macOS kills the process

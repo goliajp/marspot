@@ -50,6 +50,7 @@ DEFAULT_SUITES=(
   test-panel-behaviour.sh
   test-commands.sh
   test-theme-switch.sh
+  test-language-switch.sh
   test-bundle-lander.sh
   test-cc-profile-switch.sh
   test-codex-profile-switch.sh

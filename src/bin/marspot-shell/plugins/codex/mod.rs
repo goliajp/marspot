@@ -25,6 +25,7 @@ pub(crate) use update::{install as install_cli, installed_cli, path_with_local_b
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata,
             PLUGIN_API_VERSION};
 use crate::plugins::{handoff, pidtree};
+use marspot::ui::strings::{self, Arg};
 
 use badge::{badge_text, publish_badge};
 use pane::{home_from, profile_from, profile_switch_op, PaneCodex};
@@ -151,11 +152,7 @@ impl Plugin for CodexPlugin {
                 // (a profile created between the two) cannot pick the
                 // wrong row by index.
                 tag: *n as u32,
-                label: if current == Some(*n) {
-                    format!("● profile {n}")
-                } else {
-                    format!("   profile {n}")
-                },
+                label: strings::text(Arg::ProfileRow { n: *n, current: current == Some(*n) }),
             })
             .collect();
         rows.extend(handoff::menu_rows(handoff::Agent::Codex));

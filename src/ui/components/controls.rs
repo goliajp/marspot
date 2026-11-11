@@ -18,6 +18,7 @@ use marspot_term::layout::Rect;
 use crate::font_cache::FontCache;
 use crate::ui::components::panel_palette as palette;
 use crate::ui::core::ViewPainter;
+use crate::ui::strings::{t, Msg};
 use crate::ui::system::macos::icons::{self, Symbol};
 use crate::ui::theme::spec::{self, control as c};
 use crate::ui::theme::PanelText;
@@ -102,31 +103,31 @@ pub fn paint_button(
 /// Width of the segment holding `label` — each is sized to its own
 /// label, so a long option is not squeezed and a short one not padded
 /// out.
-pub fn segment_width(label: &str, m: Measure<'_>) -> f64 {
-    role_width(m, c::SEGMENT_TEXT, label) + 2.0 * spec::px(c::SEGMENT_PAD_X)
+pub fn segment_width(label: Msg, m: Measure<'_>) -> f64 {
+    role_width(m, c::SEGMENT_TEXT, t(label)) + 2.0 * spec::px(c::SEGMENT_PAD_X)
 }
 
 /// `(width, height)` of a whole segmented control.
-pub fn segmented_size(labels: &[&str], m: Measure<'_>) -> (f64, f64) {
+pub fn segmented_size(labels: &[Msg], m: Measure<'_>) -> (f64, f64) {
     let gaps = spec::px(c::SEGMENT_GAP) * labels.len().saturating_sub(1) as f64;
-    let w = labels.iter().map(|l| segment_width(l, m)).sum::<f64>() + gaps;
+    let w = labels.iter().map(|l| segment_width(*l, m)).sum::<f64>() + gaps;
     (w, spec::px(c::SEGMENT_H))
 }
 
 /// The `n`th segment of the control at `control`.
-pub fn segment_rect(control: Rect, n: usize, labels: &[&str], m: Measure<'_>) -> Rect {
+pub fn segment_rect(control: Rect, n: usize, labels: &[Msg], m: Measure<'_>) -> Rect {
     let gap = spec::px(c::SEGMENT_GAP);
-    let x = labels.iter().take(n).map(|l| segment_width(l, m) + gap).sum::<f64>();
+    let x = labels.iter().take(n).map(|l| segment_width(*l, m) + gap).sum::<f64>();
     Rect {
         x: control.x + x,
         y_top: control.y_top,
-        w: labels.get(n).map(|l| segment_width(l, m)).unwrap_or(0.0),
+        w: labels.get(n).map(|l| segment_width(*l, m)).unwrap_or(0.0),
         h: control.h,
     }
 }
 
 /// Which segment `(x, y)` is on.
-pub fn segment_at(control: Rect, labels: &[&str], m: Measure<'_>, x: f64, y: f64) -> Option<usize> {
+pub fn segment_at(control: Rect, labels: &[Msg], m: Measure<'_>, x: f64, y: f64) -> Option<usize> {
     (0..labels.len()).find(|&n| segment_rect(control, n, labels, m).contains(x, y))
 }
 
@@ -136,7 +137,7 @@ pub fn segment_at(control: Rect, labels: &[&str], m: Measure<'_>, x: f64, y: f64
 pub fn paint_segmented(
     p: &mut ViewPainter,
     control: Rect,
-    labels: &[&str],
+    labels: &[Msg],
     selected: Option<usize>,
     hovered: Option<usize>,
     disabled: bool,
@@ -145,6 +146,7 @@ pub fn paint_segmented(
     let pad = 2.0 * spec::px(c::SEGMENT_PAD_X);
     let mut x = control.x;
     for (n, label) in labels.iter().enumerate() {
+        let label = t(*label);
         let w = p.ui_text_width_at(label, pt, weight) as f64 + pad;
         let seg = Rect { x, y_top: control.y_top, w, h: control.h };
         x += w + spec::px(c::SEGMENT_GAP);
@@ -377,7 +379,7 @@ mod tests {
 
     #[test]
     fn controls_segments_tile_the_control_with_the_gap_between() {
-        let labels = ["15m", "30m", "1h", "Never"];
+        let labels = [Msg::Idle15m, Msg::Idle30m, Msg::Idle1h, Msg::IdleNever];
         let (w, h) = segmented_size(&labels, &mut fake);
         let control = Rect { x: 100.0, y_top: 40.0, w, h };
         let gap = spec::px(c::SEGMENT_GAP);
@@ -393,7 +395,7 @@ mod tests {
 
     #[test]
     fn controls_segment_hit_is_the_segment_drawn_there() {
-        let labels = ["Off", "Light", "Normal", "Deep"];
+        let labels = [Msg::DimOff, Msg::DimLight, Msg::DimNormal, Msg::DimDeep];
         let (w, h) = segmented_size(&labels, &mut fake);
         let control = Rect { x: 10.0, y_top: 10.0, w, h };
         for n in 0..labels.len() {

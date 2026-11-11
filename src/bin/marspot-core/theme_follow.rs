@@ -14,6 +14,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 
+#[path = "language_follow.rs"]
+mod language_follow;
+
 /// When the files are next looked at, in milliseconds of uptime.  Zero
 /// at start: the first pass of the loop looks, so the first frame is
 /// already drawn in the theme the file names.
@@ -32,10 +35,13 @@ impl super::CoreApp {
     /// for rebuilds them.
     pub(super) fn follow_theme(&mut self) {
         let now = uptime_ms();
-        if now >= LOOK_AT_MS.load(Ordering::Relaxed) {
+        let looked = now >= LOOK_AT_MS.load(Ordering::Relaxed);
+        if looked {
             LOOK_AT_MS.store(now + LOOK_EVERY_MS, Ordering::Relaxed);
             marspot::settings::reload_if_changed();
         }
+        // the language rides the same look
+        self.follow_language(looked);
         if marspot::system_theme::changed("every window is drawn again in the theme now in force") {
             for w in self.windows.iter_mut() {
                 w.needs_render = true;
