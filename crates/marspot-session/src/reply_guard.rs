@@ -214,16 +214,20 @@ pub fn raw_mode(master: RawFd) -> bool {
 /// The slave side, opened for one look. Not kept: while this process
 /// holds the slave open, the master never sees the EIO that says the
 /// shell has gone.
-struct Slave(RawFd);
+pub(crate) struct Slave(RawFd);
 
 impl Slave {
-    fn open(master: RawFd) -> Option<Self> {
+    pub(crate) fn open(master: RawFd) -> Option<Self> {
         let mut name = [0 as libc::c_char; 128];
         if unsafe { libc::ioctl(master, libc::TIOCPTYGNAME as _, name.as_mut_ptr()) } != 0 {
             return None;
         }
         let fd = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK) };
         (fd >= 0).then_some(Self(fd))
+    }
+
+    pub(crate) fn fd(&self) -> RawFd {
+        self.0
     }
 }
 

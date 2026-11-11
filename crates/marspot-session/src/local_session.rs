@@ -519,7 +519,7 @@ impl LocalSession {
         }
         self.replies.wrote_other();
         let queued = self.enqueue(bytes);
-        self.line.wrote_input(self.pty.raw_master(), bytes);
+        self.line.wrote_input(self.pty.raw_master(), self.shell_pgrp(), bytes);
         queued
     }
 

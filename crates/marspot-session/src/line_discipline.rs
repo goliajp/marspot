@@ -60,6 +60,12 @@ const HOT_POLL: Duration = Duration::from_millis(1);
 /// Longest the session waits, on Enter with a repair pending, for the
 /// shell to hand the terminal over.
 const HAND_OVER_WAIT: Duration = Duration::from_millis(3);
+/// Longest a write to a canonical terminal is held back for the shell to
+/// be done with the settings; see `put_back`. For an empty line or a
+/// builtin zsh is back in its editor 0.3 ms after applying its copy, nine
+/// times in ten; a command it starts has the terminal after 0.6 ms at
+/// the earliest and prints after 2.4 ms (measured).
+const SETTLE_FOR: Duration = Duration::from_millis(1);
 /// A repair is dropped after this many commands that left the shell's
 /// copy damaged: a shell that hands over a terminal already in raw mode
 /// (bash, after a program that exited non-zero) never gives it the
@@ -164,7 +170,7 @@ impl LineGuard {
     /// command it starts prints a few milliseconds later. Waiting for
     /// the loop's next wake lost that race under load, so this waits
     /// here, briefly, for the shell's copy to appear.
-    pub fn wrote_input(&mut self, master: RawFd, bytes: &[u8]) {
+    pub fn wrote_input(&mut self, master: RawFd, shell_pgrp: libc::pid_t, bytes: &[u8]) {
         let is_enter = |b: &u8| *b == b'\r' || *b == b'\n';
         if self.owed.is_some() && self.job.is_none() && !bytes.iter().all(is_enter) {
             self.typed = true;
@@ -185,7 +191,7 @@ impl LineGuard {
             if let Some(t) = termios(master)
                 && t.c_lflag & libc::ICANON != 0
             {
-                self.shell_applied(master, t, owed, false);
+                self.shell_applied(master, shell_pgrp, t, owed, false);
                 return;
             }
             std::thread::sleep(Duration::from_micros(100));
@@ -287,10 +293,14 @@ impl LineGuard {
             }
         }
         let canon = t.c_lflag & libc::ICANON != 0;
+        // the editor turned out to be back while a write was held back
+        let mut back = false;
         if let Some(owed) = self.owed {
             let missing = !owed.missing_from(now).is_empty();
             match self.entered {
-                Some(Entered::Waiting { until }) if canon => self.shell_applied(master, t, owed, at >= until),
+                Some(Entered::Waiting { until }) if canon => {
+                    back = self.shell_applied(master, shell_pgrp, t, owed, at >= until);
+                }
                 // a prompt that has just started again shows the shell's copy
                 Some(_) if !canon && missing => {
                     set(master, &mut t, owed);
@@ -299,12 +309,15 @@ impl LineGuard {
                 Some(Entered::Waiting { until }) if at >= until => self.end_repair(),
                 Some(Entered::HandedOver) if !canon => self.end_repair(),
                 _ if missing => {
-                    set(master, &mut t, owed);
+                    back = put_back(master, shell_pgrp, owed) == Some(false) && canon;
+                    if back && self.entered.is_some() {
+                        self.copy_still_damaged();
+                    }
                 }
                 _ => {}
             }
         }
-        self.edited = !canon;
+        self.edited = !canon || back;
         if self.owed.is_none() {
             self.kept = Some(now);
             self.kept_at = Some(at);
@@ -312,17 +325,36 @@ impl LineGuard {
     }
 
     /// The shell is running the line entered, with its copy of the
-    /// settings applied.
-    fn shell_applied(&mut self, master: RawFd, mut t: libc::termios, owed: Flags, waited: bool) {
-        if !owed.missing_from(Flags::of(&t)).is_empty() {
-            set(master, &mut t, owed);
-            self.entered = Some(Entered::HandedOver);
-        } else if self.edited || waited {
-            // after a line editor's prompt, `ICANON` on with nothing
-            // missing is the shell's copy; a shell without an editor
-            // keeps none, and what was put back has stayed
-            self.end_repair();
+    /// settings applied. True when the line was done and the editor back
+    /// before anything could be written.
+    fn shell_applied(
+        &mut self,
+        master: RawFd,
+        shell_pgrp: libc::pid_t,
+        t: libc::termios,
+        owed: Flags,
+        waited: bool,
+    ) -> bool {
+        if owed.missing_from(Flags::of(&t)).is_empty() {
+            if self.edited || waited {
+                // after a line editor's prompt, `ICANON` on with nothing
+                // missing is the shell's copy; a shell without an editor
+                // keeps none, and what was put back has stayed
+                self.end_repair();
+            }
+            return false;
         }
+        match put_back(master, shell_pgrp, owed) {
+            Some(true) => self.entered = Some(Entered::HandedOver),
+            // a builtin or an empty line: the editor started again from
+            // the same copy
+            Some(false) => {
+                self.copy_still_damaged();
+                return true;
+            }
+            None => {}
+        }
+        false
     }
 
     /// A line was run and the shell's copy still lacks what is owed.
@@ -411,6 +443,41 @@ fn hand_over(master: RawFd, owed: Flags) -> bool {
     t.c_lflag & libc::ICANON != 0 && set(master, &mut t, owed)
 }
 
+/// Puts `owed` back while the shell is in front, and says whether the
+/// terminal was canonical when it did.
+///
+/// Reading the settings and writing them back are two calls, and what
+/// the shell writes between them is undone. For a builtin or an empty
+/// line zsh writes twice within microseconds -- its copy for the
+/// command, then its editor's settings -- and a write made on first
+/// sight of the copy left the editor reading a canonical, echoing
+/// terminal after one such line in twenty (measured). So a canonical
+/// terminal is written to once a job has it, when the shell waits and
+/// writes nothing, or after `SETTLE_FOR`, when the shell is busy with
+/// something of its own. If the editor comes back first, the write is
+/// made on its settings instead.
+fn put_back(master: RawFd, shell_pgrp: libc::pid_t, owed: Flags) -> Option<bool> {
+    let give_up = Instant::now() + SETTLE_FOR;
+    loop {
+        // SAFETY: tcgetpgrp on the pty master this session owns.
+        let front = unsafe { libc::tcgetpgrp(master) };
+        let mut t = termios(master)?;
+        if owed.missing_from(Flags::of(&t)).is_empty() {
+            return None;
+        }
+        let canon = t.c_lflag & libc::ICANON != 0;
+        let job = front > 0 && front != shell_pgrp;
+        if job && !canon {
+            // a job already in raw mode: its settings are its own
+            return None;
+        }
+        if job || !canon || Instant::now() >= give_up {
+            return set(master, &mut t, owed).then_some(canon);
+        }
+        std::thread::sleep(Duration::from_micros(100));
+    }
+}
+
 fn termios(master: RawFd) -> Option<libc::termios> {
     // SAFETY: an all-zero termios is a valid value for tcgetattr to fill.
     let mut t: libc::termios = unsafe { std::mem::zeroed() };
@@ -418,13 +485,17 @@ fn termios(master: RawFd) -> Option<libc::termios> {
     (unsafe { libc::tcgetattr(master, &mut t) } == 0).then_some(t)
 }
 
+/// Through the slave side: set through the master, the pty driver
+/// throws away whatever output is still queued for it, and a prompt the
+/// shell had just printed never arrived.
 fn set(master: RawFd, t: &mut libc::termios, flags: Flags) -> bool {
     t.c_iflag |= flags.input;
     t.c_oflag |= flags.output;
     t.c_lflag |= flags.local;
-    // SAFETY: tcsetattr on the pty master this session owns, with the
-    // settings just read from it.
-    unsafe { libc::tcsetattr(master, libc::TCSANOW, t) == 0 }
+    let Some(slave) = crate::reply_guard::Slave::open(master) else { return false };
+    // SAFETY: tcsetattr on the slave of the pty this session owns, with
+    // the settings just read from it.
+    unsafe { libc::tcsetattr(slave.fd(), libc::TCSANOW, t) == 0 }
 }
 
 #[cfg(test)]
@@ -471,10 +542,51 @@ mod tests {
         rows(s).windows(2).any(|w| w[0].trim_end() == first && w[1].trim_end() == second)
     }
 
-    fn shell(id: u64) -> LocalSession {
-        let mut s = LocalSession::spawn(id, 100, 30, "", || {}).expect("spawn");
-        assert!(pump_until(&mut s, |s| s.terminal().grid().cursor() != (0, 0)), "shell should come up");
+    /// The shell is in its line editor with nothing typed: the cursor
+    /// sits after a bare prompt, and the terminal is out of canonical
+    /// mode, which both shells' editors see to before they print one.
+    fn at_prompt(s: &LocalSession) -> bool {
+        let (col, row) = s.terminal().grid().cursor();
+        let all = rows(s);
+        let text = all[row as usize].trim_end();
+        s.pty_in_raw_mode()
+            && text.chars().count() >= 2
+            && (text.ends_with('%') || text.ends_with('$'))
+            && col as usize == text.chars().count() + 1
+    }
+
+    /// Type `line` and Enter at the prompt, and wait for the prompt
+    /// after it.
+    fn run(s: &mut LocalSession, line: &str) {
+        let row = s.terminal().grid().cursor().1;
+        s.write(format!("{line}\r").as_bytes()).unwrap();
+        assert!(
+            pump_until(s, |s| s.terminal().grid().cursor().1 > row && at_prompt(s)),
+            "the prompt came back after {line:?}:\n{}",
+            screen(s)
+        );
+    }
+
+    fn shell_of(id: u64, rows: u16) -> LocalSession {
+        let mut s = LocalSession::spawn(id, 100, rows, "", || {}).expect("spawn");
+        assert!(pump_until(&mut s, at_prompt), "shell should come up:\n{}", screen(&s));
         s
+    }
+
+    fn shell(id: u64) -> LocalSession {
+        shell_of(id, 30)
+    }
+
+    /// Kill the raw-mode program and wait for the shell to be back at
+    /// its prompt -- and, when `repaired`, for the repair to have begun.
+    fn kill_and_wait(s: &mut LocalSession, pid: libc::pid_t, signal: libc::c_int, repaired: bool) {
+        // SAFETY: the pid the program in this test's own pane printed.
+        unsafe { libc::kill(pid, signal) };
+        assert!(
+            pump_until(s, |s| at_prompt(s) && (!repaired || s.line_repairs().1)),
+            "the shell is back at its prompt:\n{}",
+            screen(s)
+        );
     }
 
     /// Start a program that puts the terminal in raw mode and stays,
@@ -504,10 +616,8 @@ mod tests {
         let mut s = shell(id);
         let pid = raw_program(&mut s);
         assert_eq!(s.pty_flags().1 & libc::OPOST, 0, "the program has the terminal raw");
-        // SAFETY: the pid the program in this test's own pane printed.
-        unsafe { libc::kill(pid, signal) };
-        // long enough for the shell to be back at its prompt
-        pump_for(&mut s, Duration::from_millis(700));
+        // bash puts its own settings back, and nothing is repaired
+        kill_and_wait(&mut s, pid, signal, shell_path.ends_with("zsh"));
         // the first command after it, as a person would type it
         s.write(b"/usr/bin/printf 'one\\ntwo\\n'\r").unwrap();
         assert!(
@@ -516,7 +626,11 @@ mod tests {
             screen(&s)
         );
         assert!(stacked(&s, "one", "two"), "newline returns the carriage again:\n{}", screen(&s));
-        assert!(pump_until(&mut s, |s| !s.line_repairs().1), "the repair ended with that command");
+        assert!(
+            pump_until(&mut s, |s| !s.line_repairs().1 && at_prompt(s)),
+            "the repair ended with that command:\n{}",
+            screen(&s)
+        );
         // and it holds without the session doing anything more
         s.write(b"/usr/bin/printf 'three\\nfour\\n'\r").unwrap();
         assert!(pump_until(&mut s, |s| stacked(s, "three", "four")), "later commands too:\n{}", screen(&s));
@@ -548,11 +662,11 @@ mod tests {
     fn settings_changed_on_purpose_are_left_alone() {
         let _env = test_pane_env("/bin/zsh");
         let mut s = shell(0xE4);
-        s.write(b"stty -opost -isig\r").unwrap();
-        assert!(pump_until(&mut s, |s| s.pty_flags().1 & libc::OPOST == 0), "stty ran:\n{}", screen(&s));
-        pump_for(&mut s, Duration::from_millis(500));
-        s.write(b"/usr/bin/true\r").unwrap();
-        pump_for(&mut s, Duration::from_millis(500));
+        run(&mut s, "stty -opost -isig");
+        assert_eq!(s.pty_flags().1 & libc::OPOST, 0, "stty ran:\n{}", screen(&s));
+        run(&mut s, "/usr/bin/true");
+        // what is tested: nothing puts the flags back afterwards either
+        pump_for(&mut s, Duration::from_millis(300));
         let (_, oflag, lflag) = s.pty_flags();
         assert_eq!(oflag & libc::OPOST, 0, "-opost was asked for");
         assert_eq!(lflag & libc::ISIG, 0, "-isig was asked for");
@@ -566,17 +680,19 @@ mod tests {
         let _env = test_pane_env("/bin/zsh");
         let mut s = shell(0xE6);
         let pid = raw_program(&mut s);
-        // SAFETY: the pid the program in this test's own pane printed.
-        unsafe { libc::kill(pid, libc::SIGTERM) };
-        pump_for(&mut s, Duration::from_millis(700));
+        kill_and_wait(&mut s, pid, libc::SIGTERM, true);
         s.write(b"/usr/bin/printf 'one\\ntwo\\n'\r").unwrap();
         assert!(pump_until(&mut s, |s| stacked(s, "one", "two")), "the first command ran:\n{}", screen(&s));
-        assert!(pump_until(&mut s, |s| !s.line_repairs().1), "the repair ended with that command");
-        s.write(b"stty -opost\r").unwrap();
-        assert!(pump_until(&mut s, |s| s.pty_flags().1 & libc::OPOST == 0), "stty ran:\n{}", screen(&s));
-        pump_for(&mut s, Duration::from_millis(500));
-        s.write(b"/usr/bin/true\r").unwrap();
-        pump_for(&mut s, Duration::from_millis(500));
+        assert!(
+            pump_until(&mut s, |s| !s.line_repairs().1 && at_prompt(s)),
+            "the repair ended with that command:\n{}",
+            screen(&s)
+        );
+        run(&mut s, "stty -opost");
+        assert_eq!(s.pty_flags().1 & libc::OPOST, 0, "stty ran:\n{}", screen(&s));
+        run(&mut s, "/usr/bin/true");
+        // what is tested: nothing puts the flag back afterwards either
+        pump_for(&mut s, Duration::from_millis(300));
         assert_eq!(s.pty_flags().1 & libc::OPOST, 0, "-opost was asked for");
         assert_eq!(s.line_repairs(), (1, false));
     }
@@ -588,15 +704,33 @@ mod tests {
         let _env = test_pane_env("/bin/zsh");
         let mut s = shell(0xE7);
         let pid = raw_program(&mut s);
-        // SAFETY: the pid the program in this test's own pane printed.
-        unsafe { libc::kill(pid, libc::SIGTERM) };
-        pump_for(&mut s, Duration::from_millis(700));
-        s.write(b"cd /\r").unwrap();
-        pump_for(&mut s, Duration::from_millis(500));
+        kill_and_wait(&mut s, pid, libc::SIGTERM, true);
+        run(&mut s, "cd /");
         assert!(s.line_repairs().1, "zsh still holds the damaged settings");
         s.write(b"/usr/bin/printf 'one\\ntwo\\n'\r").unwrap();
         assert!(pump_until(&mut s, |s| stacked(s, "one", "two")), "newline returns the carriage:\n{}", screen(&s));
         assert!(pump_until(&mut s, |s| !s.line_repairs().1), "the repair ended with that command");
+    }
+
+    /// zsh writes the terminal's settings twice within microseconds for
+    /// a line that runs no job. A repair written between the two undid
+    /// the second, and the editor was left reading a canonical, echoing
+    /// terminal: the next line showed twice and ran unrepaired.
+    #[test]
+    fn empty_lines_after_a_kill_leave_the_prompt_its_line_editor() {
+        let _env = test_pane_env("/bin/zsh");
+        let mut s = shell_of(0xE8, 100);
+        let pid = raw_program(&mut s);
+        kill_and_wait(&mut s, pid, libc::SIGTERM, true);
+        for _ in 0..60 {
+            // a person's pace: it took a shell asleep in its read, not
+            // one still busy with the last line, to lose its write
+            pump_for(&mut s, Duration::from_millis(30));
+            run(&mut s, "");
+        }
+        assert!(s.line_repairs().1, "Enter alone runs nothing");
+        s.write(b"/usr/bin/printf 'one\\ntwo\\n'\r").unwrap();
+        assert!(pump_until(&mut s, |s| stacked(s, "one", "two")), "newline returns the carriage:\n{}", screen(&s));
     }
 
     mod unseen {
@@ -663,6 +797,41 @@ mod tests {
             g
         }
 
+        /// The shell's next write may be microseconds away, and a write
+        /// made across it undoes it.
+        #[test]
+        fn a_canonical_terminal_is_not_written_to_at_first_sight() {
+            let (m, _slave) = pty();
+            let m = m.as_raw_fd();
+            let mut g = after_a_kill(m);
+            put(m, true, false);
+            let typed = Instant::now();
+            g.wrote_input(m, SHELL, b"cd /\r");
+            assert!(typed.elapsed() >= SETTLE_FOR, "written after {:?}", typed.elapsed());
+            assert!(processed(m), "and written once the shell had its time");
+        }
+
+        #[test]
+        fn output_the_shell_has_just_written_survives_the_repair() {
+            let (m, slave) = pty();
+            let m = m.as_raw_fd();
+            put(m, false, true);
+            let prompt = b"prompt% ";
+            // SAFETY: a write to the pty this test opened.
+            let n = unsafe { libc::write(slave.as_raw_fd(), prompt.as_ptr().cast(), prompt.len()) };
+            assert_eq!(n, prompt.len() as isize);
+            let mut t = termios(m).unwrap();
+            assert!(set(m, &mut t, ALL));
+            let mut got = [0u8; 64];
+            // SAFETY: the same pty, read into a buffer of that size without
+            // waiting for output that is gone.
+            let n = unsafe {
+                libc::fcntl(m, libc::F_SETFL, libc::O_NONBLOCK);
+                libc::read(m, got.as_mut_ptr().cast(), got.len())
+            };
+            assert_eq!(&got[..n.max(0) as usize], prompt);
+        }
+
         #[test]
         fn a_command_gone_before_any_look_still_ends_the_repair() {
             let (m, _slave) = pty();
@@ -670,7 +839,7 @@ mod tests {
             let mut g = after_a_kill(m);
             // the shell applies its damaged copy for the command
             put(m, true, false);
-            g.wrote_input(m, b"ls\r");
+            g.wrote_input(m, SHELL, b"ls\r");
             assert!(processed(m), "the command got the flags");
             // it ran and ended unseen; the shell copied what it left and
             // its editor started again
@@ -690,7 +859,7 @@ mod tests {
             let (m, _slave) = pty();
             let m = m.as_raw_fd();
             let mut g = after_a_kill(m);
-            g.wrote_input(m, b"ls\r");
+            g.wrote_input(m, SHELL, b"ls\r");
             g.saw(m, SHELL, SHELL, 0, Instant::now());
             assert!(g.pending(), "the shell may not have read the line yet");
             g.saw(m, SHELL, SHELL, 0, Instant::now() + HOT_FOR);
@@ -704,7 +873,7 @@ mod tests {
             let mut g = after_a_kill(m);
             let line = |g: &mut LineGuard, typed: &[u8]| {
                 put(m, true, false);
-                g.wrote_input(m, typed);
+                g.wrote_input(m, SHELL, typed);
                 // back at the prompt, from the same damaged copy
                 put(m, false, false);
                 g.saw(m, SHELL, SHELL, 0, Instant::now());
@@ -730,7 +899,11 @@ mod tests {
         let _env = test_pane_env("/bin/zsh");
         let mut s = shell(0xE5);
         s.write(b"sh -c 'stty raw -echo; sleep 0.2; exit 3'\r").unwrap();
-        assert!(pump_until(&mut s, |s| s.line_repairs().0 == 1), "the repair started:\n{}", screen(&s));
+        assert!(
+            pump_until(&mut s, |s| s.line_repairs().0 == 1 && at_prompt(s)),
+            "the repair started:\n{}",
+            screen(&s)
+        );
         s.write(b"/usr/bin/printf 'one\\ntwo\\n'\r").unwrap();
         assert!(pump_until(&mut s, |s| stacked(s, "one", "two")), "output is processed again:\n{}", screen(&s));
         assert_eq!(s.pty_flags().2 & libc::ISIG, 0, "the signal flag is not ours to guess");

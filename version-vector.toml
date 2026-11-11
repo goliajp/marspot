@@ -28,4 +28,4 @@
 
 shell   = "0.7.290"  # the dev window is built only by the binaries that show it
 core    = "0.12.321"  # a reattached session's exit status is made in place, not by running a helper
-session = "0.11.161"  # a repair of the terminal settings always ends, even when its command was never seen
+session = "0.11.162"  # a repair of the terminal settings neither undoes the shell's own write nor drops its output
