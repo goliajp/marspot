@@ -8883,7 +8883,6 @@ impl CoreApp {
         // is to (a) hit-test the toolbar toggle icon and (b) emit
         // a `DevPanelToggle` wire frame on click; L1 takes it from
         // there.  No call here.
-        self.renderer.set_dev_panel(None);
         // Per-window, like every overlay below it: the renderer holds
         // one copy and each window sets its own right before painting.
         self.renderer
