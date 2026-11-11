@@ -19,11 +19,17 @@ spoke, so one message is answered once:
 - once a tool has run, and for anything else, the turn ends with a short
   message.
 
-Usage: _kimi_mock_model.py <port-file> <log-file>
+It also stands in for the account service: GET <base>/usages and
+GET <base>/me are answered with the file <accounts-dir>/<token>.usages.json
+or <token>.me.json, as written by the test, for the bearer token the
+request carries; 401 when there is no such file.
+
+Usage: _kimi_mock_model.py <port-file> <log-file> [<accounts-dir>]
 Binds an ephemeral port on 127.0.0.1 and writes it to <port-file>.
 Every request body is appended to <log-file>, one JSON line each.
 """
 import json
+import os
 import re
 import sys
 import time
@@ -33,7 +39,9 @@ REPLY_TEXT = "KIMI-E2E-REPLY"
 SLOW_SECONDS = 8
 ENVELOPE = re.compile(r'<cross-session-message from="(uds:[^"]+)"')
 FORWARD = re.compile(r"Send (\S+) the text (\S+)")
+TOKEN = re.compile(r"Bearer ([A-Za-z0-9-]+)$")
 port_file, log_file = sys.argv[1], sys.argv[2]
+accounts_dir = sys.argv[3] if len(sys.argv) > 3 else None
 
 
 def text_of(message):
@@ -96,6 +104,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        what = self.path.split("?")[0].rsplit("/", 1)[-1]
+        if accounts_dir and what in ("usages", "me"):
+            token = TOKEN.match(self.headers.get("Authorization", ""))
+            path = os.path.join(accounts_dir, "%s.%s.json" % (token.group(1), what)) if token else ""
+            if not os.path.isfile(path):
+                return self.reply_json(401, {"error": {"message": "unauthorized"}})
+            with open(path) as f:
+                return self.reply_json(200, json.load(f))
         self.reply_json(200, {"object": "list", "data": [{"id": "mock-model", "object": "model"}]})
 
     def do_POST(self):
