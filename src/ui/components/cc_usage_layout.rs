@@ -35,7 +35,7 @@ impl Cell {
     }
 
     pub fn text_w(&self, s: &str) -> f64 {
-        s.chars().count() as f64 * self.w
+        crate::ui::core::text_fit::cells(s) as f64 * self.w
     }
 }
 

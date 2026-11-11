@@ -22,6 +22,27 @@ use core_text::line::CTLine;
 use core_text::string_attributes::kCTFontAttributeName;
 use core_graphics::font::CGGlyph;
 use marspot_term::fast_hash::FxHashMap;
+use marspot_term::language::{self, LangId};
+
+// not exported by the `core-text` crate
+#[link(name = "CoreText", kind = "framework")]
+unsafe extern "C" {
+    static kCTLanguageAttributeName: core_foundation::string::CFStringRef;
+}
+
+/// Tag `attr` with the interface language, so a Han code point is
+/// drawn in that language's form whatever the system's own language
+/// is.  English is left untagged: it has no form of its own to ask for.
+pub fn tag_language(attr: &mut CFMutableAttributedString, len: isize) {
+    let lang = language::current_id();
+    if lang == LangId::En {
+        return;
+    }
+    let tag = CFString::new(lang.as_str());
+    unsafe {
+        attr.set_attribute(CFRange::init(0, len), kCTLanguageAttributeName, &tag);
+    }
+}
 
 /// One shaped glyph — what the chrome renderer needs to push a
 /// `GlyphInstance` at its real proportional position.
@@ -134,6 +155,7 @@ pub fn measure_line(text: &str, base_font: &CTFont, opts: ShapeOptions) -> f64 {
     unsafe {
         attr.set_attribute(CFRange::init(0, len), kCTFontAttributeName, base_font);
     }
+    tag_language(&mut attr, len);
     if !opts.liga {
         use core_foundation::number::CFNumber;
         use core_text::string_attributes::kCTLigatureAttributeName;
@@ -162,6 +184,7 @@ pub fn shape_line<F: FnMut(CTFont) -> u32>(
     unsafe {
         attr.set_attribute(CFRange::init(0, len), kCTFontAttributeName, base_font);
     }
+    tag_language(&mut attr, len);
     // Phase 8 — disable ligatures by setting `kCTLigatureAttributeName`
     // to the CFNumber 0; CT's default is 1 (standard ligatures on),
     // which folds `fi` / `==>` etc. into their composed glyphs.

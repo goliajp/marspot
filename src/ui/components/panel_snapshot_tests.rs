@@ -64,7 +64,7 @@ use crate::ui::components::cc_usage_modal::{
 use crate::ui::components::controls;
 use crate::ui::components::panel_chrome::{self, PanelChrome};
 use crate::ui::core::ViewPainter;
-use crate::ui::strings::Msg;
+use crate::ui::strings::{self, t, Arg, MonthDayTime, Msg};
 use crate::ui::theme::spec;
 use marspot_term::layout::Rect;
 use crate::ui::components::layout_modal::{self, LayoutModal};
@@ -90,7 +90,7 @@ pub(super) fn terminal_text(cols: u16, rows: u16) -> Grid {
 
 /// Draw one frame of a `w × h` px window with whatever `open` put on
 /// the renderer, and hold it to `bench/ui/snapshots/<name>.png`.
-fn snapshot(name: &str, w: u32, h: u32, open: impl FnOnce(&mut MetalRenderer, &Layout)) {
+pub(super) fn snapshot(name: &str, w: u32, h: u32, open: impl FnOnce(&mut MetalRenderer, &Layout)) {
     let name = &crate::snapshot_kit::themed(name);
     let dir = std::path::Path::new(UI_SNAPSHOT_DIR);
     if snapshot_mode_in(dir).is_none() {
@@ -157,7 +157,7 @@ fn snapshot(name: &str, w: u32, h: u32, open: impl FnOnce(&mut MetalRenderer, &L
 }
 
 #[test]
-fn panel_snapshot_settings() {
+pub(super) fn panel_snapshot_settings() {
     snapshot("settings", 1000, 1360, |renderer, layout| {
         let settings = crate::settings::Settings {
             reclaim_enabled: false,
@@ -168,6 +168,7 @@ fn panel_snapshot_settings() {
             cc_statusline_hook: true,
             // The Theme row shows the theme the picture is drawn in.
             appearance_theme: crate::settings::get().appearance_theme,
+            appearance_language: crate::settings::get().appearance_language,
             ..Default::default()
         };
         let rect = {
@@ -187,7 +188,7 @@ fn panel_snapshot_settings() {
 }
 
 #[test]
-fn panel_snapshot_shortcuts() {
+pub(super) fn panel_snapshot_shortcuts() {
     snapshot("shortcuts", 1600, 1200, |renderer, layout| {
         let rect = crate::ui::components::shortcuts_panel::panel_rect(
             layout.window_w, layout.window_h, renderer.cell_dims(), layout.top_inset,
@@ -200,7 +201,7 @@ fn panel_snapshot_shortcuts() {
 }
 
 #[test]
-fn panel_snapshot_layout() {
+pub(super) fn panel_snapshot_layout() {
     snapshot("layout", 1000, 760, |renderer, _| {
         renderer.set_layout_modal(Some(LayoutModalRender {
             cols: 4,
@@ -249,7 +250,7 @@ fn panel_snapshot_layout_grid() {
 }
 
 #[test]
-fn panel_snapshot_process() {
+pub(super) fn panel_snapshot_process() {
     snapshot("process", 1600, 1000, |renderer, layout| {
         let pane = |name: &str, sid: u64, n_pids: u32, cpu_pct: f32, rss_mb: u64| ProcessPanelPaneRow {
             name: name.to_string(),
@@ -294,7 +295,7 @@ fn panel_snapshot_process() {
             ),
             pane_rows,
             selected_pane: 0,
-            detail: "smix · sid 479 · shell pid 1544".to_string(),
+            detail: strings::text(Arg::ProcessDetail { pane: "smix", sid: 479, shell_pid: 1544 }),
             rows,
             // The pointer on one kill button, so the picture has the
             // hovered row and the hovered button in it.
@@ -319,15 +320,16 @@ fn account(
     name: &str,
     email: &str,
     limited: bool,
-    reset_label: &str,
+    reset: (u32, u32, u32, u32),
     windows: &[Window],
 ) -> CcUsageAccountRender {
+    let (month, day, hour, minute) = reset;
     CcUsageAccountRender {
         name: name.to_string(),
         email: email.to_string(),
-        status_label: if limited { "limit" } else { "ok" }.to_string(),
+        status_label: t(if limited { Msg::StatusLimit } else { Msg::StatusOk }).to_string(),
         status_severity: if limited { 2 } else { 0 },
-        reset_label: format!("reset: {reset_label}"),
+        reset_label: strings::text(Arg::ResetAt(MonthDayTime { month, day, hour, minute })),
         windows: windows
             .iter()
             .map(|&(label, util, hours, hm)| CcUsageWindowRender {
@@ -345,25 +347,25 @@ fn account(
 /// for its card.
 fn accounts_panel(renderer: &mut MetalRenderer, layout: &Layout) {
     let accounts = vec![
-        account("Claude 1", "dev@example.com", true, "11/13 11:59",
+        account("Claude 1", "dev@example.com", true, (11, 13, 11, 59),
             &[("7d", 1.0, 66, "11:59"), ("fable", 0.91, 66, "11:59")]),
-        account("Claude 2", "admin@example.com", false, "11/16 06:00",
+        account("Claude 2", "admin@example.com", false, (11, 16, 6, 0),
             &[("7d", 0.35, 132, "06:00"), ("fable", 0.28, 132, "06:00")]),
-        account("Claude 3", "ops@example.com", true, "11/15 13:59",
+        account("Claude 3", "ops@example.com", true, (11, 15, 13, 59),
             &[("7d", 1.0, 116, "13:59"), ("fable", 0.72, 116, "13:59")]),
-        account("Claude 4", "claude@example.com", true, "11/14 00:00",
+        account("Claude 4", "claude@example.com", true, (11, 14, 0, 0),
             &[("7d", 1.0, 78, "00:00"), ("fable", 0.82, 78, "00:00")]),
-        account("Claude 5", "lab@example.com", true, "11/12 10:59",
+        account("Claude 5", "lab@example.com", true, (11, 12, 10, 59),
             &[("7d", 1.0, 41, "10:59"), ("fable", 0.33, 41, "10:59")]),
-        account("Claude 6", "ceo@example.com", true, "11/13 13:59",
+        account("Claude 6", "ceo@example.com", true, (11, 13, 13, 59),
             &[("7d", 1.0, 68, "13:59"), ("fable", 0.94, 68, "13:59")]),
-        account("Claude 7", "research.platform.team@example.com", false, "11/17 13:00",
+        account("Claude 7", "research.platform.team@example.com", false, (11, 17, 13, 0),
             &[("7d", 0.0, 163, "13:00"), ("fable", 0.0, 163, "13:00")]),
-        account("Claude 8", "manage@example.com", true, "11/11 13:59",
+        account("Claude 8", "manage@example.com", true, (11, 11, 13, 59),
             &[("7d", 1.0, 20, "14:00"), ("fable", 0.47, 20, "13:59")]),
-        account("Codex 1", "dev@example.com", true, "11/12 05:02",
+        account("Codex 1", "dev@example.com", true, (11, 12, 5, 2),
             &[("astra", 1.0, 35, "05:02")]),
-        account("Codex 2", "ops@example.com", false, "11/16 03:08",
+        account("Codex 2", "ops@example.com", false, (11, 16, 3, 8),
             &[("astra", 0.64, 129, "03:08")]),
     ];
     let (cell_w, cell_h) = renderer.cell_dims();
@@ -372,7 +374,7 @@ fn accounts_panel(renderer: &mut MetalRenderer, layout: &Layout) {
     );
     renderer.set_cc_usage(Some(CcUsageRender {
         rect,
-        updated_label: "updated 11/10 18:00".to_string(),
+        updated_label: strings::text(Arg::UpdatedAt(MonthDayTime { month: 11, day: 10, hour: 18, minute: 0 })),
         accounts,
         clock: Clock::fixed(ACCOUNTS_NOW, ACCOUNTS_UTC_OFFSET),
         hover: cc_usage_modal::Hover::None,
@@ -381,7 +383,7 @@ fn accounts_panel(renderer: &mut MetalRenderer, layout: &Layout) {
 
 /// Wide enough for the ten cards to sit in one row.
 #[test]
-fn panel_snapshot_accounts() {
+pub(super) fn panel_snapshot_accounts() {
     snapshot("accounts", 2800, 1300, accounts_panel);
 }
 
@@ -395,7 +397,7 @@ fn panel_snapshot_accounts_narrow() {
 /// Before either feed has been read: the header, the close button
 /// under the pointer, and one sentence.
 #[test]
-fn panel_snapshot_accounts_empty() {
+pub(super) fn panel_snapshot_accounts_empty() {
     snapshot("accounts_empty", 1700, 700, |renderer, layout| {
         let (cell_w, cell_h) = renderer.cell_dims();
         renderer.set_cc_usage(Some(CcUsageRender {
@@ -479,7 +481,7 @@ fn controls_sheet(p: &mut ViewPainter<'_>) {
 }
 
 #[test]
-fn panel_snapshot_controls() {
+pub(super) fn panel_snapshot_controls() {
     snapshot("controls", 1400, 900, |_, _| {
         *crate::frame_build::frame::TEST_OVERLAY.lock().unwrap() = Some(controls_sheet);
     });

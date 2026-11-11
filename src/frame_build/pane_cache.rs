@@ -61,6 +61,8 @@ fn pane_fingerprint(
     let mut h = marspot_term::fast_hash::FxHasher::default();
     // Every colour in the cached instances is the theme's.
     theme.hash(&mut h);
+    // Which font draws a Han code point follows the interface language.
+    marspot_term::language::version().hash(&mut h);
     view.seq.hash(&mut h);
     view.view_offset.hash(&mut h);
     view.cursor_visible.hash(&mut h);

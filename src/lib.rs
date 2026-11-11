@@ -110,6 +110,7 @@ pub mod iosurface;
 #[cfg(test)]
 mod paint_parity_tests;
 pub mod pane;
+pub mod pane_message;
 pub mod pane_name;
 pub mod pane_read;
 pub mod pane_state;

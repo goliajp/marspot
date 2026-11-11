@@ -20,6 +20,7 @@ use crate::render_metal::{make_readback_texture, MetalRenderer, WindowRender};
 use crate::session::SessionState;
 use crate::snapshot_kit::{assert_snapshot_ssim, snapshot_mode_in, write_snapshot_png, UI_SNAPSHOT_DIR};
 use crate::ui::components::chrome_hover::ChromeHover;
+use crate::ui::strings::{t, Msg};
 use crate::ui::components::context_menu_paint::{ContextMenuRender, ContextMenuRow};
 
 /// One pane of a scene.
@@ -191,7 +192,7 @@ fn four_panes() -> [PaneSpec; 4] {
 /// grid with title strips and badges, the second pane in use, the
 /// pointer in the fourth pane's sidebar row.
 #[test]
-fn chrome_snapshot_window() {
+pub(super) fn chrome_snapshot_window() {
     snapshot("chrome_window", (1600, 1000), (2, 2), &four_panes(), 1, |renderer, _| {
         renderer.set_hover_chrome_btn(Some(ChromeHover::Row(3)));
     });
@@ -201,7 +202,7 @@ fn chrome_snapshot_window() {
 /// three hits, the second of them picked.  The pointer is on the
 /// sidebar's add button, and the only pane cannot be closed.
 #[test]
-fn chrome_snapshot_search() {
+pub(super) fn chrome_snapshot_search() {
     let hit = |snippet: &str, is_focused| SearchHitView { snippet: snippet.to_string(), is_focused };
     let panes = [PaneSpec {
         search: Some(SearchOverlayView {
@@ -226,7 +227,7 @@ fn chrome_snapshot_search() {
 /// row; one row disabled, one divider.  The process monitor's toolbar
 /// button is the one last hovered.
 #[test]
-fn chrome_snapshot_menu() {
+pub(super) fn chrome_snapshot_menu() {
     snapshot("chrome_menu", (1200, 760), (2, 2), &four_panes(), 0, |renderer, layout| {
         let row = |label: &str, hint: &str, enabled| ContextMenuRow {
             label: label.to_string(),
@@ -246,12 +247,12 @@ fn chrome_snapshot_menu() {
             anchor_phys: (420.0, 150.0),
             top_inset: layout.top_inset,
             items: vec![
-                row("Copy", "⌘C", false),
-                row("Paste", "⌘V", true),
-                row("Search", "⌘F", true),
+                row(t(Msg::MenuCopy), "⌘C", false),
+                row(t(Msg::MenuPaste), "⌘V", true),
+                row(t(Msg::CmdFind), "⌘F", true),
                 divider,
-                row("Clear scrollback", "⌘K", true),
-                row("Close pane", "⌘W", true),
+                row(t(Msg::MenuClearScrollback), "⌘K", true),
+                row(t(Msg::MenuClosePane), "⌘W", true),
             ],
             hovered_idx: Some(1),
         }));

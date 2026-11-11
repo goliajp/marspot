@@ -43,7 +43,11 @@
 use std::fmt;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
+use marspot_term::language::{self, LangId};
+
 mod en;
+mod ja;
+mod zh_hans;
 
 /// A string a user reads.
 ///
@@ -195,6 +199,14 @@ pub enum Msg {
     BadgeNoUsageData,
     BadgeModelUnknown,
     BadgeHeldByBgJob,
+    // Settings — the interface language.  A language is named in itself,
+    // whatever language the rest is in
+    Language,
+    CostLanguage,
+    CostLanguageRelaunch,
+    LangEnglish,
+    LangJapanese,
+    LangChinese,
 }
 
 /// A month, day and time of day, local. Written `M/D HH:mm` in every
@@ -257,6 +269,23 @@ static CURRENT: AtomicPtr<Lang> = AtomicPtr::new(&en::LANG as *const Lang as *mu
 fn lang() -> &'static Lang {
     // SAFETY: every value stored is the address of a `static Lang`
     unsafe { &*CURRENT.load(Ordering::Relaxed) }
+}
+
+/// One language's table.  Only this and [`follow_language`] name the
+/// tables other than English.
+pub fn table(id: LangId) -> &'static Lang {
+    match id {
+        LangId::En => &en::LANG,
+        LangId::Ja => &ja::LANG,
+        LangId::ZhHans => &zh_hans::LANG,
+    }
+}
+
+/// Point [`t`] and [`write`] at the language now in force.  Called by
+/// the processes that follow the language setting; one that never
+/// calls it stays in English and links no other table.
+pub fn follow_language() {
+    CURRENT.store(table(language::current_id()) as *const Lang as *mut Lang, Ordering::Relaxed);
 }
 
 /// The text for `m` in the language the user reads.
@@ -409,4 +438,10 @@ pub const ALL: &[Msg] = &[
     Msg::BadgeNoUsageData,
     Msg::BadgeModelUnknown,
     Msg::BadgeHeldByBgJob,
+    Msg::Language,
+    Msg::CostLanguage,
+    Msg::CostLanguageRelaunch,
+    Msg::LangEnglish,
+    Msg::LangJapanese,
+    Msg::LangChinese,
 ];

@@ -50,7 +50,7 @@ pub(crate) fn paint_title_strip(
         let label_baseline_y = rect.y_top as f32
             + (title_h - cell_h) * 0.5
             + ascent;
-        let badge_chars = view.right_badge.chars().count() as f32;
+        let badge_chars = crate::ui::core::text_fit::cells(view.right_badge) as f32;
         let badge_x = rect.x as f32 + rect.w as f32 - padding - badge_chars * cell_w;
         let badge_shown = !view.right_badge.is_empty() && badge_x > label_x;
         // The name gives way to the badge, and to the pane's edge.
