@@ -189,8 +189,18 @@ mod tests {
         let Ok(spec) = std::env::var(CHILD_ENV) else { return };
         let (path, first) = spec.rsplit_once(':').unwrap();
         let first: u64 = first.parse().unwrap();
+        // a caller that finds the lock held asks again on its next
+        // tick; two processes allocating back to back can keep one of
+        // them waiting past the timeout on a slow machine
+        let give_up = Instant::now() + Duration::from_secs(120);
         for sid in first..first + PER_CHILD {
-            code_in(Path::new(path), sid, PRUNE_GRACE, Vec::new, entropy).unwrap();
+            loop {
+                match code_in(Path::new(path), sid, PRUNE_GRACE, Vec::new, entropy) {
+                    Ok(_) => break,
+                    Err(e) if e.kind() == io::ErrorKind::TimedOut && Instant::now() < give_up => {}
+                    Err(e) => panic!("{e}"),
+                }
+            }
         }
     }
 
