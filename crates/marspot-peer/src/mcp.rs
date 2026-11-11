@@ -16,7 +16,7 @@ use crate::frame::Priority;
 use crate::json::{self, Value, obj};
 use crate::peers;
 
-const LIST_DESCRIPTION: &str = "List the agent sessions on this machine that you can message: Claude Code, Codex, Gemini and Kimi sessions running in marspot panes. Every row leads with the session's name, which is the name of its marspot pane, and that name IS the address for SendMessage; there is no separate address syntax. The first line says what this session is called.";
+const LIST_DESCRIPTION: &str = "List the agent sessions on this machine that you can message: Claude Code, Codex, Gemini and Kimi sessions running in marspot panes. Every row leads with the session's name, which is the name of its marspot pane, and that name IS the address for SendMessage. Each row also says which agent the session is, and ends with the pane's full name when the row leads with the plain one. The first line says what this session is called.";
 
 const SEND_DESCRIPTION: &str = "Send a message to another agent session on this machine (Claude Code, Codex, Gemini or Kimi; each is named after its marspot pane).
 
@@ -33,12 +33,12 @@ fn tools() -> Value {
     Value::Arr(vec![
         obj([
             ("name", Value::from("ListAgents")),
-            ("description", Value::from(LIST_DESCRIPTION)),
+            ("description", Value::from(format!("{LIST_DESCRIPTION} {}", crate::resolve::FORMS))),
             ("inputSchema", obj([("type", Value::from("object")), ("properties", obj([]))])),
         ]),
         obj([
             ("name", Value::from("SendMessage")),
-            ("description", Value::from(SEND_DESCRIPTION)),
+            ("description", Value::from(format!("{SEND_DESCRIPTION}\n\n{}", crate::resolve::FORMS))),
             (
                 "inputSchema",
                 obj([
@@ -46,7 +46,7 @@ fn tools() -> Value {
                     (
                         "properties",
                         obj([
-                            ("to", string("Recipient: a name from ListAgents, or the `from` address of a message you are answering")),
+                            ("to", string("Recipient: a name from ListAgents (plain, `name#code` or `kind:name`), or the `from` address of a message you are answering")),
                             ("message", string("Plain text message content")),
                             ("summary", string("A 5-10 word label for your own record; not transmitted")),
                             (
@@ -150,6 +150,9 @@ fn send(me: &crate::registry::Entry, entries: &[crate::registry::Entry], panes: 
         Some(false) => text.push_str("\nnotify_when_idle: that session does not report when it goes idle — nothing was subscribed, and no notice will come."),
         None => {}
     }
+    if let Some(note) = sent.note {
+        text.push_str(&format!("\nNote: {note}."));
+    }
     Ok(text)
 }
 
@@ -177,6 +180,9 @@ mod tests {
         let r = handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#, 0).unwrap();
         let names: Vec<&str> = r.at(&["result", "tools"]).unwrap().arr().iter().filter_map(|t| t.str_at("name")).collect();
         assert_eq!(names, vec!["ListAgents", "SendMessage"]);
+        for t in r.at(&["result", "tools"]).unwrap().arr() {
+            assert!(t.str_at("description").unwrap().contains("`name#code`") && t.str_at("description").unwrap().contains("`kind:name`"));
+        }
         let r = handle(r#"{"jsonrpc":"2.0","id":2,"method":"nope"}"#, 0).unwrap();
         assert_eq!(r.at(&["error", "code"]).and_then(Value::i64), Some(-32601));
     }
