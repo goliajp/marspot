@@ -129,6 +129,12 @@ fi
 # default behaviour without --delete-excluded.
 remote_sync "$HOST" --name "$REMOTE_NAME"
 
+# The copy on the host is not a repository, so the tree it was made from
+# is named here and travels with the run into every record it writes.
+BENCH_COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
+BENCH_DIRTY=0
+[[ -z "$(git -C "$ROOT" status --porcelain)" ]] || BENCH_DIRTY=1
+
 # ---- run -------------------------------------------------------------
 # Quote args once locally so the remote shell can re-tokenise them
 # without word-splitting surprises. Empty $@ must produce empty
@@ -188,6 +194,7 @@ ssh "$HOST" "
   cd ~/$REMOTE_DIR
   export CARGO_TARGET_DIR=\$HOME/$REMOTE_DIR/target
   $STALE_PASS
+  export MARSPOT_BENCH_COMMIT=$BENCH_COMMIT MARSPOT_BENCH_DIRTY=$BENCH_DIRTY
   echo \$\$ > $REMOTE_PIDF
   if [ -n \"$LOCK_CMD\" ] && [ ! -x /usr/local/bin/bench-lock ]; then
     echo 'bench-remote: /usr/local/bin/bench-lock is not on the runner' >&2
@@ -228,7 +235,16 @@ set -e
 # ---- retrieve --------------------------------------------------------
 mkdir -p "$OUT_DIR"
 echo "==> retrieving → $OUT_DIR"
-rsync -a --quiet "$HOST:$REMOTE_DIR/bench/results/" "$OUT_DIR/" 2>/dev/null || true
+rsync -a --quiet --exclude history/ "$HOST:$REMOTE_DIR/bench/results/" "$OUT_DIR/" 2>/dev/null || true
+# The run's rows go into this machine's history, next to every earlier
+# run's: `bin/_bench_record.py show <metric>` answers what a commit read.
+# A record older than this run was left by an earlier one and is not
+# appended twice.
+if [[ -f "$OUT_DIR/gate-record.json" ]] \
+   && [[ "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['commit'])" "$OUT_DIR/gate-record.json")" == "$BENCH_COMMIT" ]] \
+   && [[ "$OUT_DIR/gate-record.json" -nt "$LOCK_LOCAL/pid" ]]; then
+  python3 "$ROOT/bin/_bench_record.py" append "$OUT_DIR/gate-record.json"
+fi
 
 # ---- bounded growth: prune remote target/ ----------------------------
 ssh "$HOST" "cd ~/$REMOTE_DIR && cargo sweep --time 30 2>&1 | tail -2" \

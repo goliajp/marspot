@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# bin/measure-l3.sh — single-session cat throughput of marspot-session,
-# for each cross-terminal cat-* scenario.
+# bin/measure-l3.sh — what marspot-session costs to absorb each
+# cross-terminal cat-* scenario: instructions per byte first, wall-clock
+# throughput beside it.
+#
+#   bin/measure-l3.sh                      one session, all four scenarios
+#                                          -> bench/results/l3-throughput.json
+#   bin/measure-l3.sh --sessions 9 --scenario cat-mixed
+#                                          nine sessions absorbing the same
+#                                          scenario at once
+#                                          -> bench/results/l3-multi.json
 #
 # Why this exists: bin/measure.sh drives the standalone `mcli` binary (one
-# in-process session, no IPC/shm hop), and the marspot number in
-# baseline.json's competitors_snapshot was hand-captured via Screen Sharing
-# on the pre-L3 app.  Neither is the architecture the product ships: every
-# pane's bytes go through its own marspot-session process (parser → grid →
-# shm publish), ~0.90× the in-process bulk-cat rate.
+# in-process session, no IPC/shm hop).  That is not the architecture the
+# product ships: every pane's bytes go through its own marspot-session
+# process (parser → grid → shm publish).
 #
 # What it drives: the `l3_throughput` example spawns marspot-session
 # directly and feeds it the scenario.  The shell and the core are not on
@@ -15,13 +21,27 @@
 # these numbers -- worth knowing before reading a red row as a regression
 # in something else.
 #
+# Why instructions: the wall clock of one unchanged build read 101.7 to
+# 139.8 MB/s on cat-emoji across six runs in one day while the session
+# retired 209 to 213 instructions per byte in every one of them.  The
+# session was not doing more work in the slow runs, it was waiting.  A
+# count of the work is what a change to the code moves, so that is what
+# the gate judges; the wall clock is reported with its spread.
+#
+# With --sessions N a trial starts N probes together.  Instructions and
+# bytes are summed over the sessions; the wall clock is the slowest
+# session's, so the rate is what the N of them absorbed together.
+#
+# A trial taken while the host was busy is not a slower reading, it is
+# not a reading: it is recorded as invalid and run again, up to REQUEUE
+# extra trials per scenario.  bin/_l3_aggregate.py holds the thresholds.
+#
 # It runs in a sandbox of its own (its own MARSPOT_STATE_DIR); it never
-# touches the installed app.  Output: bench/results/l3-throughput.json,
-# one entry per scenario with median_ns / bytes_per_sec / per-trial samples.
+# touches the installed app.
 #
 # Each scenario file is `cat`-ed REPEATS times in one command so the drain
-# window clears the 10 ms poll / 300 ms plateau resolution floor (a 32 MiB
-# file drains in ~0.2 s — too short to time honestly).  Repeating the path
+# window clears the 10 ms resolution of the trial's clock (a 32 MiB file
+# drains in ~0.2 s — too short to time honestly).  Repeating the path
 # keeps the content mix identical; bytes credited = REPEATS × file_bytes.
 
 set -uo pipefail
@@ -42,25 +62,67 @@ SCENARIOS_DIR="$ROOT/bench/scenarios"
 RESULTS_DIR="$ROOT/bench/results"
 SESSION_BIN="$(marspot_bin marspot-session)"
 PROBE_BIN="$(dirname "$SESSION_BIN")/examples/l3_throughput"
-OUT_JSON="$RESULTS_DIR/l3-throughput.json"
 mkdir -p "$RESULTS_DIR"
 
-SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji)
-# Five, not three.  The probe keeps the fastest trial (load can only
-# add time), so trials are lottery tickets for an uncontended window on
-# a host that has a permanent tenant.  Measured 2026-08-19: with three,
-# one batch came back 28.7 / 72.3 / 160.0 MiB/s for the same scenario —
-# it took all three to find one clean run — and the next batch missed
-# entirely on cjk (127.8 vs the 162-172 the same build reaches when it
-# gets a window).  Two more tickets cost ~50 % of this script's wall
-# clock and buy back a metric that otherwise reports the neighbours.
-TRIALS="${TRIALS:-5}"
-# Target drain payload per trial.  ~128 MiB → ~0.3-0.9 s window on Apple
-# Silicon: long enough that 10 ms polling resolves it to ~1-3 %, short
-# enough to keep the whole gate run under a minute.
-TARGET_MIB="${TARGET_MIB:-128}"
-
 fail() { echo "measure-l3: $*" >&2; exit 1; }
+
+SESSIONS=1
+SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji)
+PICKED=()
+while (( $# )); do
+  case "$1" in
+    --sessions) SESSIONS="${2:?--sessions N}"; shift 2 ;;
+    --scenario) PICKED+=("${2:?--scenario ID}"); shift 2 ;;
+    -h|--help)  sed -n '2,11p' "$0"; exit 0 ;;
+    *)          fail "unknown arg: $1" ;;
+  esac
+done
+[[ $SESSIONS =~ ^[1-9][0-9]*$ ]] || fail "--sessions wants a count, got '$SESSIONS'"
+(( ${#PICKED[@]} == 0 )) || SCENARIOS=("${PICKED[@]}")
+if (( SESSIONS == 1 )); then
+  OUT_JSON="$RESULTS_DIR/l3-throughput.json"
+else
+  OUT_JSON="$RESULTS_DIR/l3-multi.json"
+fi
+# a result left by an earlier run must not be read as this one's
+rm -f "$OUT_JSON"
+
+# Started over ssh, this has to run while that ssh session is still
+# open.  One build read 170-171 instructions per byte on cat-mixed when
+# the session that started it had ended and 178-182 while it was open,
+# minutes apart and repeatedly, with the same environment, the same nice
+# value and the same bytes written to scrollback and bytelog -- and it
+# is the session being open that decides, not whose child the probe is:
+# a probe detached with nohup under an open session reads the higher
+# level too.  Why is not known.  The ceilings in bench/baseline.json
+# were measured with the session open, which is how bin/bench-remote.sh
+# runs this, so the other level is refused rather than compared.
+if [[ -n "${SSH_CONNECTION:-}" ]]; then
+  _p=$$
+  _under_sshd=0
+  while [[ -n "$_p" && "$_p" != "0" && "$_p" != "1" ]]; do
+    case "$(ps -o comm= -p "$_p" 2>/dev/null)" in
+      *sshd*) _under_sshd=1; break ;;
+    esac
+    _p="$(ps -o ppid= -p "$_p" 2>/dev/null | tr -d ' ')"
+  done
+  (( _under_sshd )) || fail "the ssh session that started this has ended; the instruction count is 4-6 % lower in that state than the ceilings were measured in.  Run it with the session kept open."
+fi
+
+# More than three.  Trials are lottery tickets for an uncontended window
+# on a host that has a permanent tenant.  Measured 2026-08-19: with
+# three, one batch came back 28.7 / 72.3 / 160.0 MiB/s for the same
+# scenario — it took all three to find one clean run — and the next
+# batch missed entirely on cjk.  Seven since the instruction count is
+# what is judged: it is the median of the trials, and seven is what the
+# ceilings in bench/baseline.json were measured with.
+TRIALS="${TRIALS:-7}"
+# Extra trials a scenario may run to replace the ones the host spoiled.
+REQUEUE="${REQUEUE:-$TRIALS}"
+# Target drain payload per session and trial.  ~128 MiB → ~0.7-1.3 s on
+# Apple Silicon: long enough that the 10 ms clock resolves it to ~1 %,
+# short enough to keep the whole gate run to a few minutes.
+TARGET_MIB="${TARGET_MIB:-128}"
 
 # Build session bin + probe together (version-skew guard: a stale probe
 # would create a grid_shm region an updated marspot-session refuses).
@@ -88,31 +150,57 @@ reap_trial() {
   rm -rf "$sandbox"
 }
 
-run_one() {
-  # echoes "<wall_ns> <user_ns> <sys_ns> <wakeups> <instructions> <cycles>"
-  # on success, empty on failure.
-  # The CPU fields are `-` if the kernel would not report them.
-  local scenario_path=$1 repeats=$2 pid rc
-  # stderr carries the probe's witness line (what the session actually
-  # wrote this trial).  It used to go to /dev/null, which is why a run
-  # that cost 20% less per byte than its siblings could not be asked
-  # whether it had also written less.
-  "$PROBE_BIN" "$SESSION_BIN" "$scenario_path" "$repeats" 2>"$RUN_DIR/stderr" &
-  pid=$!
-  echo "$pid" >> "$RUN_DIR/probe-pids"
-  wait "$pid"
-  rc=$?
-  reap_trial "$pid"
-  return "$rc"
+load1() { sysctl -n vm.loadavg | awk '{print $2}'; }
+
+# One trial: SESSIONS probes started together, each with a session of
+# its own.  Leaves in $RUN_DIR what bin/_l3_aggregate.py judges it by:
+# probe.<i>.out (the probe's reading), probe.<i>.err (its witness line,
+# what the session actually wrote), trial.load (the load average before,
+# every second during, and after) and a CPU snapshot of every process on
+# the host from either side of it.
+#
+# The load is sampled through the trial and not once before it: a
+# reading taken before the first trial says nothing about what arrives
+# during the next minutes.  2026-10-01 this probe recorded 4.16 while
+# two jobs started a minute in and ran to the end, and reported a 45%
+# "regression" on cjk that was entirely the tenant.
+run_trial() {
+  local scenario_path=$1 repeats=$2 i p pids=() sampler
+  rm -f "$RUN_DIR"/probe.*.out "$RUN_DIR"/probe.*.err
+  load1 > "$RUN_DIR/trial.load"
+  python3 "$ROOT/bin/_bench_record.py" cpu-snapshot > "$RUN_DIR/cpu.before"
+  ( while sleep 1; do load1; done ) >> "$RUN_DIR/trial.load" 2>/dev/null &
+  sampler=$!
+  echo "$sampler" > "$RUN_DIR/live-pids"
+  for ((i = 0; i < SESSIONS; i++)); do
+    "$PROBE_BIN" "$SESSION_BIN" "$scenario_path" "$repeats" \
+      > "$RUN_DIR/probe.$i.out" 2> "$RUN_DIR/probe.$i.err" &
+    pids+=($!)
+    echo "$!" >> "$RUN_DIR/probe-pids"
+    echo "$!" >> "$RUN_DIR/live-pids"
+  done
+  for p in "${pids[@]}"; do
+    wait "$p"
+    reap_trial "$p"
+  done
+  kill "$sampler" 2>/dev/null
+  wait "$sampler" 2>/dev/null
+  : > "$RUN_DIR/live-pids"
+  python3 "$ROOT/bin/_bench_record.py" cpu-snapshot > "$RUN_DIR/cpu.after"
+  load1 >> "$RUN_DIR/trial.load"
 }
 
 RUN_DIR=$(mktemp -d)
 cleanup() {
   local p
+  # stopped mid-trial: the load sampler and the probes of that trial
+  # are still running and would outlive this script
+  for p in $(cat "$RUN_DIR/live-pids" 2>/dev/null); do kill "$p" 2>/dev/null; done
   for p in $(cat "$RUN_DIR/probe-pids" 2>/dev/null); do reap_trial "$p"; done
   rm -rf "$RUN_DIR"
 }
 trap cleanup EXIT
+trap 'exit 143' TERM INT HUP
 
 for scenario in "${SCENARIOS[@]}"; do
   spath="$SCENARIOS_DIR/$scenario.bin"
@@ -122,201 +210,24 @@ for scenario in "${SCENARIOS[@]}"; do
   repeats=$(python3 -c "import math; print(max(1, math.ceil($TARGET_MIB*1048576/$fbytes)))")
   total_bytes=$((fbytes * repeats))
 
-  : > "$RUN_DIR/$scenario.ns"
-  for trial in $(seq 1 "$TRIALS"); do
-    # Sample the load before every trial, not once before the batch.
-    # A reading taken before the first trial says nothing about what
-    # arrived during the next seven minutes: 2026-10-01 this probe
-    # recorded 4.16 (under the 5.0 skip threshold) while two jobs
-    # started a minute in and ran to the end, and reported a 45%
-    # "regression" on cjk that was entirely the tenant.
-    uptime | sed 's/.*averages: //' | awk '{print $1}' >> "$RUN_DIR/load"
-    # Per scenario and in trial order as well, so a reading can be paired
-    # with the load that was on the host while it was taken.  The
-    # run-wide file above answers "was this run clean"; this one answers
-    # "does the cost move WITH the load", which is a different question
-    # and the only one that can say whether the work itself is
-    # load-dependent.
-    uptime | sed 's/.*averages: //' | awk '{print $1}' >> "$RUN_DIR/$scenario.load"
-
-    echo "==> $scenario ×$repeats ($((total_bytes/1048576)) MiB) trial $trial/$TRIALS"
-    read -r ns user sys wk insn cyc <<<"$(run_one "$spath" "$repeats")"
-    if [[ -z "$ns" || "$ns" == "0" ]]; then
-      # One retry; run_one has already stopped the failed trial's session.
-      echo "    probe failed — retrying" >&2
-      read -r ns user sys wk insn cyc <<<"$(run_one "$spath" "$repeats")"
-    fi
-    if [[ -z "$ns" || "$ns" == "0" ]]; then
-      echo "    trial failed (no timing)" >&2
-      continue
-    fi
-    sed -n 's/^witness: //p' "$RUN_DIR/stderr" | tail -1 \
-      >> "$RUN_DIR/$scenario.witness"
-    echo "$ns" >> "$RUN_DIR/$scenario.ns"
-    echo "${user:--}" >> "$RUN_DIR/$scenario.user"
-    echo "${sys:--}" >> "$RUN_DIR/$scenario.sys"
-    echo "${wk:--}" >> "$RUN_DIR/$scenario.wk"
-    echo "${insn:--}" >> "$RUN_DIR/$scenario.insn"
-    echo "${cyc:--}" >> "$RUN_DIR/$scenario.cyc"
-    mibps=$(python3 -c "print(f'{$total_bytes/1048576/($ns/1e9):.1f}')")
-    if [[ "${user:--}" == "-" ]]; then
-      printf "    %.3fs  %s MiB/s  (no cpu reading)\n" "$(python3 -c "print($ns/1e9)")" "$mibps"
-    else
-      printf "    %.3fs  %s MiB/s   user %.3fs sys %.3fs  %s MiB/user-s\n" \
-        "$(python3 -c "print($ns/1e9)")" "$mibps" \
-        "$(python3 -c "print($user/1e9)")" "$(python3 -c "print($sys/1e9)")" \
-        "$(python3 -c "print(f'{$total_bytes/1048576/($user/1e9):.1f}')")"
+  echo "==> $scenario ×$repeats ($((total_bytes / 1000000)) MB) into $SESSIONS session(s)"
+  python3 "$ROOT/bin/_bench_record.py" lock-waiters > "$RUN_DIR/$scenario.waiters"
+  valid=0
+  attempt=0
+  while (( valid < TRIALS && attempt < TRIALS + REQUEUE )); do
+    attempt=$((attempt + 1))
+    echo "  trial $attempt ($valid of $TRIALS valid so far)"
+    (( attempt > 1 )) || python3 "$ROOT/bin/_l3_aggregate.py" settle 240 3.0
+    run_trial "$spath" "$repeats"
+    if python3 "$ROOT/bin/_l3_aggregate.py" trial "$RUN_DIR" "$scenario" "$total_bytes" "$SESSIONS"; then
+      valid=$((valid + 1))
     fi
   done
-  echo "$total_bytes" > "$RUN_DIR/$scenario.bytes"
 done
 
-python3 - "$RUN_DIR" "$OUT_JSON" "${SCENARIOS[*]}" <<'PY'
-import json, os, sys
-run_dir, out_json, scenarios_str = sys.argv[1:4]
-# Record what the host was doing, so a consumer can tell "marspot got
-# slower" from "the bench host was busy".  Without it a contended run
-# is indistinguishable from a regression, and this host has a permanent
-# tenant.
-try:
-    load1 = os.getloadavg()[0]
-except OSError:
-    load1 = -1.0
-samples = []
-load_path = os.path.join(run_dir, "load")
-if os.path.exists(load_path):
-    samples = [float(x) for x in open(load_path).read().split() if x.strip()]
-# `_host_load1` stays the name every consumer already reads, and now
-# carries the WORST moment of the measurement rather than the calm
-# before it -- a quiet start followed by a busy middle has to read as
-# busy, or the gate measures the tenant and blames the code.
-out = {
-    "_host_load1": round(max(samples), 2) if samples else round(load1, 2),
-    "_host_load1_first": round(samples[0], 2) if samples else None,
-    "_host_load1_last": round(samples[-1], 2) if samples else None,
-    "_host_load1_trials": len(samples),
-}
-for scenario in scenarios_str.split():
-    ns_path = os.path.join(run_dir, f"{scenario}.ns")
-    by_path = os.path.join(run_dir, f"{scenario}.bytes")
-    if not (os.path.exists(ns_path) and os.path.exists(by_path)):
-        continue
-    def read_ns(suffix):
-        # Trial order, NOT sorted: these are read alongside each other to
-        # ask whether they move together, and sorting each independently
-        # throws the pairing away.
-        path = os.path.join(run_dir, f"{scenario}.{suffix}")
-        if not os.path.exists(path):
-            return []
-        return [
-            int(x) for x in open(path).read().split() if x.strip() and x.strip() != "-"
-        ]
-    user_samples = read_ns("user")
-    sys_samples = read_ns("sys")
-    wk_samples = read_ns("wk")
-    insn_samples = read_ns("insn")
-    cyc_samples = read_ns("cyc")
-    wit_path = os.path.join(run_dir, f"{scenario}.witness")
-    witness = []
-    if os.path.exists(wit_path):
-        for line in open(wit_path):
-            fields = dict(
-                kv.split("=", 1) for kv in line.split() if "=" in kv
-            )
-            witness.append({k: int(v) for k, v in fields.items() if v.isdigit()})
-    load_path = os.path.join(run_dir, f"{scenario}.load")
-    load_samples = (
-        [float(x) for x in open(load_path).read().split() if x.strip()]
-        if os.path.exists(load_path) else []
-    )
-    in_order = [int(x) for x in open(ns_path).read().split() if x.strip()]
-    samples = sorted(in_order)
-    if not samples:
-        out[scenario] = {"bytes": 0, "median_ns": 0, "bytes_per_sec": 0, "samples": []}
-        continue
-    total_bytes = int(open(by_path).read().strip())
-    # MINIMUM, not median.  Load can only ADD time, so the fastest
-    # trial is the least-contaminated one, while a median still carries
-    # whatever else the host was doing.  The bench notes argue this
-    # for A/B comparisons; it matters at least as much here, because
-    # this host has a permanent tenant — the same build read 194.5 and
-    # 106.5 MB/s on ascii within one afternoon, and a median of three
-    # trials taken during the bad half reports the tenant, not marspot.
-    #
-    # `median_ns` keeps its name because bench.sh and the JSON's
-    # consumers read that key; the value is now the best trial.  Every
-    # sample is still recorded, so a wide spread stays visible instead
-    # of being averaged into a plausible-looking number.
-    best = samples[0]
-    bps = total_bytes * 1_000_000_000 // best if best > 0 else 0
-    out[scenario] = {
-        "bytes": total_bytes,
-        "median_ns": best,
-        "stat": "min-of-%d" % len(samples),
-        "bytes_per_sec": bps,
-        "samples": samples,
-    }
-    # Throughput per second of user CPU, next to the wall figure so the
-    # two can be compared trial by trial.  System time is recorded but
-    # not turned into a rate: it falls when the host is busy (bytes pool
-    # in the pty, reads get chunkier), so a rate built on it flatters a
-    # contended run.  Which gauge the gate should believe is a question
-    # the numbers answer, not this script.
-    # Per-round overhead, instructions per (wakeup per MB), fitted over 164
-    # trials across four runs on 2026-10-02.  It lands in 17.6-22.6 for four
-    # workloads with nothing in common but the code that absorbs them, which
-    # is what a cost per round rather than per byte should look like, and it
-    # is why the raw figure above moves: a starved session is chopped into
-    # far more rounds for the same bytes.  Subtracting it leaves the per-byte
-    # cost.  On the one run that spent its whole length starved (emoji,
-    # wakeups 1003 against a normal 28-37) this pulls a 70% disagreement with
-    # its sibling runs down to 4.5%.
-    ROUND_OVERHEAD = {
-        "cat-ascii": 22.58, "cat-mixed": 19.69, "cat-cjk": 17.57, "cat-emoji": 18.87,
-    }
-    # Normal rounds land at 0.19-0.41 wakeups/MB, starved at 4.7-10.2, so this
-    # separates the two populations with an order of magnitude to spare.  An
-    # ABSOLUTE line, not one relative to the run's own median: a run that is
-    # starved from end to end moves its own median, and a relative test then
-    # calls every trial in it normal.  That happened -- emoji's starved run
-    # kept all seven trials.
-    STARVED_WAKEUPS_PER_MB = 1.5
-    if user_samples:
-        best_user = min(user_samples)
-        out[scenario]["user_ns"] = best_user
-        out[scenario]["user_samples"] = user_samples
-        out[scenario]["sys_samples"] = sys_samples
-        out[scenario]["wakeup_samples"] = wk_samples
-        out[scenario]["instruction_samples"] = insn_samples
-        out[scenario]["cycle_samples"] = cyc_samples
-        out[scenario]["load_samples"] = load_samples
-        if witness:
-            out[scenario]["witness"] = witness
-        mib = total_bytes / 1048576
-        if insn_samples and wk_samples and mib:
-            n_pair = min(len(insn_samples), len(wk_samples))
-            per_mb = [wk_samples[i] / mib for i in range(n_pair)]
-            per_byte = [insn_samples[i] / total_bytes for i in range(n_pair)]
-            b = ROUND_OVERHEAD.get(scenario)
-            out[scenario]["wakeups_per_mb"] = [round(x, 3) for x in per_mb]
-            out[scenario]["starved_trials"] = sum(
-                1 for x in per_mb if x > STARVED_WAKEUPS_PER_MB
-            )
-            if b:
-                norm = sorted(
-                    per_byte[i] - b * per_mb[i] for i in range(n_pair)
-                )
-                out[scenario]["insn_per_byte_normalised"] = [round(x, 2) for x in norm]
-                out[scenario]["insn_per_byte_normalised_median"] = round(
-                    norm[len(norm) // 2], 2
-                )
-        out[scenario]["wall_samples_in_order"] = in_order
-        out[scenario]["bytes_per_user_sec"] = (
-            total_bytes * 1_000_000_000 // best_user if best_user > 0 else 0
-        )
-json.dump(out, open(out_json, "w"), indent=2)
-PY
+python3 "$ROOT/bin/_l3_aggregate.py" finish "$RUN_DIR" "$OUT_JSON" "$SESSIONS" "${SCENARIOS[@]}" \
+  || fail "could not write $OUT_JSON"
 
 echo
 echo "==> $OUT_JSON"
-cat "$OUT_JSON"
+python3 "$ROOT/bin/_l3_aggregate.py" table "$OUT_JSON"
