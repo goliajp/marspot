@@ -18,7 +18,8 @@
 #     answer arrives at the sender's own socket;
 #   - a refused account: when the service answers 429 with
 #     `exceeded_current_quota_error`, kimi records the failed turn the
-#     way marspot reads it.
+#     way marspot reads it, and the pane is moved to the second kimi
+#     account, where the conversation is handed over and goes on.
 #
 # No account and no model: kimi talks to `_kimi_mock_model.py` through
 # the KIMI_MODEL_* variables.  The other session is played by
@@ -224,5 +225,14 @@ echo "    $(cut -c1-400 "$SB/failed-turn.jsonl")"
 grep -q '"name":"APIProviderQuotaExhaustedError"' "$SB/failed-turn.jsonl" || fail "the failed turn does not carry the error name marspot reads"
 wait_for "sid=$P1 pid=[0-9]+ .*failure=APIProviderQuotaExhaustedError@turn" 30 || fail "marspot did not read the refusal out of the record"
 ok "a 429 exceeded_current_quota_error is recorded as APIProviderQuotaExhaustedError, and marspot reads it"
+
+# ── 7. the pane leaves the refused account ────────────────────────
+wait_for "kimi.*quota.move.*sid=$P1: .*moving to profile 2" 20 || fail "the pane was not moved off the refused account"
+wait_for "sid=$P1 pid=[0-9]+ home=$HOME/.kimi-code-profile-2 session=none" 90 || fail "no kimi came up under the second account"
+wait_for "sid=$P1 pid=[0-9]+ home=$HOME/.kimi-code-profile-2 session=session_" 90 || fail "the handed-over conversation started no session under the second account"
+for (( i = 0; i < 60; i++ )); do grep -qF '[marspot handoff]' "$REQUESTS" && break; sleep 0.5; done
+grep -qF '[marspot handoff]' "$REQUESTS" || fail "the handoff never reached the model under the second account"
+[[ $(count "kimi.*quota.move.*sid=$P1") == 1 ]] || fail "the pane was moved more than once for one refusal"
+ok "the pane moves to the second kimi account once, and the conversation is handed over there"
 
 echo "PASS"
