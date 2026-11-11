@@ -24,6 +24,9 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{MainThreadMarker, NSArray};
 
+#[path = "language_follow.rs"]
+mod language_follow;
+
 /// What was last published as the system's theme; `u8::MAX` before
 /// the first tick.
 static PUBLISHED: AtomicU8 = AtomicU8::new(u8::MAX);
@@ -63,6 +66,8 @@ impl super::ShellApp {
     /// Publish the system's theme if it changed, then bring the
     /// shell's own surfaces to the theme in force if that changed.
     pub(super) fn follow_theme(&mut self) {
+        // the language is followed on the same tick
+        self.follow_language();
         let Some(mtm) = MainThreadMarker::new() else { return };
         let system = sandbox_system_theme().unwrap_or_else(|| system_theme(mtm));
         if PUBLISHED.swap(system as u8, Ordering::Relaxed) != system as u8
