@@ -101,7 +101,6 @@ fn record_for(p: &Peer, at: Endpoint, name: String, class: Mode, owner: &str, no
         version: String::new(),
         name,
         name_since_ms: now,
-        former_names: Vec::new(),
         socket: at.socket,
         status: Status::Unknown,
         class,

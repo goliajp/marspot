@@ -16,6 +16,7 @@ use crate::envelope::{self, Header, Mode};
 use crate::frame::{self, Priority};
 use crate::panes::{self, Pane};
 use crate::registry::{self, Agent, Entry};
+use crate::resolve::Target;
 
 /// Longest message body, in characters; the receiver's own cap.
 pub const MAX_BODY: usize = 1_000_000;
@@ -56,29 +57,44 @@ pub fn me_by_ancestor(entries: &[Entry], pid: i32, parent_of: impl Fn(i32) -> Op
     entries.iter().filter(gemini).find(|e| e.agent_pid == Some(found))
 }
 
-/// The inbox `to` means: a `uds:` address, the name of a marspot pane,
-/// a session's own name, or a name it had.  A pane name wins: it is the
-/// name the user sees.  A current name wins over a former one, so a
-/// name that has moved to another pane reaches that pane.
-pub fn resolve<'a>(entries: &'a [Entry], panes: &[Pane], to: &str) -> Result<(String, Option<&'a Entry>), String> {
+/// Who a recipient string reached.
+pub struct Recipient<'a> {
+    pub socket: String,
+    pub entry: Option<&'a Entry>,
+    /// Set when a full name found a pane that is called something else
+    /// now.
+    pub note: Option<String>,
+}
+
+/// The inbox `to` means: a `uds:` address, a marspot pane in any of the
+/// forms `resolve` takes, or the own name of a session that is in no
+/// pane.
+pub fn resolve<'a>(entries: &'a [Entry], panes: &[Pane], to: &str) -> Result<Recipient<'a>, String> {
     if let Some(path) = to.strip_prefix("uds:") {
-        return Ok((path.to_string(), entries.iter().find(|e| e.socket.as_deref() == Some(path))));
+        return Ok(Recipient { socket: path.to_string(), entry: entries.iter().find(|e| e.socket.as_deref() == Some(path)), note: None });
     }
-    if let Some(p) = panes::find(panes, to)? {
-        return Ok((p.socket.clone(), entries.iter().find(|e| e.pid == p.pid)));
+    let targets: Vec<Target> = panes.iter().map(Pane::target).collect();
+    let miss = match crate::resolve::resolve(to, &targets) {
+        Ok(hit) => {
+            let p = &panes[hit.index];
+            return Ok(Recipient { socket: p.socket.clone(), entry: entries.iter().find(|e| e.pid == p.pid), note: hit.note });
+        }
+        Err(miss) => miss,
+    };
+    if !miss.unknown {
+        return Err(miss.text);
     }
-    let current: Vec<&Entry> = entries.iter().filter(|e| e.name.as_deref() == Some(to)).collect();
-    let hits = if current.is_empty() { entries.iter().filter(|e| e.answers_to(to)).collect() } else { current };
-    match hits.as_slice() {
+    let outside: Vec<&Entry> = entries.iter().filter(|e| e.name.as_deref() == Some(to) && panes::of_pid(panes, e.pid).is_none()).collect();
+    match outside.as_slice() {
         [e] => match &e.socket {
-            Some(s) => Ok((s.clone(), Some(e))),
+            Some(s) => Ok(Recipient { socket: s.clone(), entry: Some(e), note: None }),
             None => Err(format!("{to} has no inbox socket")),
         },
-        [] => Err(format!("no live session named {to:?}; list the sessions to see who is there")),
+        [] => Err(miss.text),
         _ => Err(format!(
             "{} live sessions are named {to:?}; use one of their addresses instead: {}",
-            hits.len(),
-            hits.iter().filter_map(|e| e.socket.as_deref()).map(|s| format!("uds:{s}")).collect::<Vec<_>>().join(", ")
+            outside.len(),
+            outside.iter().filter_map(|e| e.socket.as_deref()).map(|s| format!("uds:{s}")).collect::<Vec<_>>().join(", ")
         )),
     }
 }
@@ -90,6 +106,8 @@ pub struct Sent {
     /// `Some(true)` when an idle subscription was placed, `Some(false)`
     /// when one was asked for and the recipient does not support it.
     pub subscribed: Option<bool>,
+    /// What the sender should know about the name it used.
+    pub note: Option<String>,
 }
 
 /// Send `body` from `me` to `to`.  With `notify_idle`, also ask the
@@ -103,7 +121,7 @@ pub fn send(me: &Entry, entries: &[Entry], panes: &[Pane], to: &str, body: &str,
         return Err(format!("message longer than {MAX_BODY} characters"));
     }
     let my_socket = me.socket.clone().unwrap_or_default();
-    let (target, entry) = resolve(entries, panes, to)?;
+    let Recipient { socket: target, entry, note } = resolve(entries, panes, to)?;
     if target == my_socket {
         return Err("that address is this session's own inbox".into());
     }
@@ -128,7 +146,7 @@ pub fn send(me: &Entry, entries: &[Entry], panes: &[Pane], to: &str, body: &str,
     } else {
         Some(false)
     };
-    Ok(Sent { msg_id, to: name, subscribed })
+    Ok(Sent { msg_id, to: name, subscribed, note })
 }
 
 /// Through the sender's relay when it has one, so the peer sees the
@@ -151,10 +169,9 @@ pub fn display_name(e: &Entry, panes: &[Pane]) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
-/// The session list in the shape Claude Code's `ListAgents` prints, so
-/// a model reads the same thing in either tool.  A session in a pane is
-/// listed by the pane's name, with its own name after it when the two
-/// differ.
+/// The session list: one row per peer with the name to send to, the
+/// agent, and whether it is busy.  A pane shown under its plain name
+/// has its full name at the end of the row.
 pub fn listing(entries: &[Entry], panes: &[Pane], me: Option<&Entry>, now_ms: i64) -> String {
     let mut out = String::new();
     if let Some(m) = me {
@@ -167,6 +184,8 @@ pub fn listing(entries: &[Entry], panes: &[Pane], me: Option<&Entry>, now_ms: i6
     let names: Vec<String> = peers.iter().map(|e| display_name(e, panes)).collect();
     out.push_str(&format!("Peer sessions ({}):\n", peers.len()));
     for (e, name) in peers.iter().zip(&names) {
+        let pane = panes::of_pid(panes, e.pid);
+        let kind = pane.and_then(|p| p.agent.as_deref()).unwrap_or(e.kind());
         let own = e.name.as_deref().filter(|n| n != name).map(|n| format!("  ·  session {n}")).unwrap_or_default();
         let shared = names.iter().filter(|n| *n == name).count() > 1;
         let addr = match (&e.socket, shared) {
@@ -174,7 +193,8 @@ pub fn listing(entries: &[Entry], panes: &[Pane], me: Option<&Entry>, now_ms: i6
             _ => String::new(),
         };
         let started = e.started_at_ms.map(|t| format!("  ·  started {}", ago(now_ms - t))).unwrap_or_default();
-        out.push_str(&format!("  {name}  ·  interactive  ·  {}{started}{own}{addr}\n", e.status.as_deref().unwrap_or("?")));
+        let full = pane.and_then(Pane::full_name_if_not_shown).map(|f| format!("  ({f})")).unwrap_or_default();
+        out.push_str(&format!("  {name}  ·  {kind}  ·  {}{started}{own}{addr}{full}\n", e.status.as_deref().unwrap_or("?")));
     }
     out
 }
@@ -194,12 +214,11 @@ fn ago(ms: i64) -> String {
 mod tests {
     use super::*;
 
-    fn entry(pid: i32, name: &str, former: &[&str]) -> Entry {
+    fn entry(pid: i32, name: &str) -> Entry {
         Entry {
             pid,
             session_id: Some(format!("s{pid}")),
             name: Some(name.into()),
-            former_names: former.iter().map(|s| s.to_string()).collect(),
             cwd: None,
             socket: Some(format!("/tmp/cc-socks/{pid}.sock")),
             status: Some("idle".into()),
@@ -224,10 +243,10 @@ mod tests {
             ours: true,
             agent: Some(agent),
             agent_pid: Some(agent_pid),
-            ..entry(pid, "x", &[])
+            ..entry(pid, "x")
         };
         // records are keyed by relay pid; the agent's pid is beside it
-        let es = vec![ours(900, Agent::Gemini, 30), ours(901, Agent::Codex, 20), entry(10, "claude", &[])];
+        let es = vec![ours(900, Agent::Gemini, 30), ours(901, Agent::Codex, 20), entry(10, "claude")];
         // 50 (this server) → 40 (gemini worker) → 30 (gemini) → 20 (codex) → 10 (claude)
         let table = |pid: i32| [(50, 40), (40, 30), (30, 20), (20, 10)].iter().find(|(p, _)| *p == pid).map(|(_, pp)| *pp);
         assert_eq!(me_by_ancestor(&es, 50, table).map(|e| e.pid), Some(900));
@@ -239,40 +258,59 @@ mod tests {
         assert_eq!(me_by_ancestor(&kimi, 50, table).map(|e| e.pid), Some(902));
     }
 
-    #[test]
-    fn names_former_names_and_addresses_resolve() {
-        let es = vec![entry(1, "gds", &["codex-gds"]), entry(2, "spg#1", &["spg"]), entry(3, "spg", &[])];
-        assert_eq!(resolve(&es, &[], "gds").unwrap().0, "/tmp/cc-socks/1.sock");
-        assert_eq!(resolve(&es, &[], "codex-gds").unwrap().0, "/tmp/cc-socks/1.sock");
-        // `spg` is a current name of 3 and a former one of 2: the current wins
-        assert_eq!(resolve(&es, &[], "spg").unwrap().0, "/tmp/cc-socks/3.sock");
-        assert_eq!(resolve(&es, &[], "uds:/tmp/cc-socks/2.sock").unwrap().1.map(|e| e.pid), Some(2));
-        assert!(resolve(&es, &[], "nobody").is_err());
-        let twins = vec![entry(1, "x", &[]), entry(2, "x", &[])];
-        let err = resolve(&twins, &[], "x").unwrap_err();
-        assert!(err.contains("uds:/tmp/cc-socks/1.sock") && err.contains("uds:/tmp/cc-socks/2.sock"));
-    }
-
-    /// A pane's name reaches the session in it, and wins over a session
-    /// that happens to call itself the same.
-    #[test]
-    fn a_pane_name_wins() {
-        let es = vec![entry(1, "inputx-6a", &[]), entry(2, "inputx", &[])];
-        let panes = vec![Pane { name: "inputx".into(), pid: 1, socket: "/tmp/cc-socks/1.sock".into() }];
-        let (sock, e) = resolve(&es, &panes, "inputx").unwrap();
-        assert_eq!((sock.as_str(), e.map(|e| e.pid)), ("/tmp/cc-socks/1.sock", Some(1)));
-        assert_eq!(resolve(&es, &panes, "inputx-6a").unwrap().0, "/tmp/cc-socks/1.sock", "its own name still works");
-        let text = listing(&es, &panes, None, 0);
-        assert!(text.contains("  inputx  ·  interactive  ·  idle  ·  started 1m ago  ·  session inputx-6a"), "{text}");
+    fn pane(base: &str, code: u16, agent: &str, shown: &str, pid: i32) -> Pane {
+        Pane { name: shown.into(), pid, socket: format!("/tmp/cc-socks/{pid}.sock"), code: Some(code), base: Some(base.into()), agent: Some(agent.into()) }
     }
 
     #[test]
-    fn the_listing_reads_like_claude_codes() {
-        let es = vec![entry(1, "gds", &[]), entry(2, "luna", &[]), entry(3, "luna", &[])];
-        let text = listing(&es, &[], Some(&es[0]), 26 * 60 * 1000);
+    fn addresses_and_sessions_outside_any_pane_resolve() {
+        let es = vec![entry(1, "gds"), entry(2, "luna"), entry(3, "luna")];
+        assert_eq!(resolve(&es, &[], "gds").ok().unwrap().socket, "/tmp/cc-socks/1.sock");
+        assert_eq!(resolve(&es, &[], "uds:/tmp/cc-socks/2.sock").ok().unwrap().entry.map(|e| e.pid), Some(2));
+        assert_eq!(resolve(&es, &[], "nobody").err().unwrap(), "no pane is named \"nobody\"");
+        let err = resolve(&es, &[], "luna").err().unwrap();
+        assert!(err.contains("uds:/tmp/cc-socks/2.sock") && err.contains("uds:/tmp/cc-socks/3.sock"));
+    }
+
+    /// A session in a pane is reached by the pane's forms and not by
+    /// the name it gives itself, which another pane may carry.
+    #[test]
+    fn a_pane_is_reached_by_its_name_code_and_agent() {
+        let es = vec![entry(1, "inputx-6a"), Entry { ours: true, agent: Some(Agent::Codex), ..entry(2, "inputx#9906") }];
+        let panes = vec![pane("inputx", 1024, "claude", "inputx#1024", 1), pane("inputx", 9906, "codex", "inputx#9906", 2)];
+        let to = |to: &str| resolve(&es, &panes, to).map(|r| r.entry.map(|e| e.pid));
+        assert_eq!(to("claude:inputx"), Ok(Some(1)));
+        assert_eq!(to("codex:inputx"), Ok(Some(2)));
+        assert_eq!(to("inputx#1024"), Ok(Some(1)));
+        assert_eq!(to("inputx#9906"), Ok(Some(2)));
+        assert!(to("inputx").unwrap_err().contains("inputx#1024 (claude), inputx#9906 (codex)"));
+        assert!(to("inputx-6a").unwrap_err().starts_with("no pane is named"));
+        let moved = vec![pane("alt", 1024, "claude", "alt", 1)];
+        let r = resolve(&es, &moved, "inputx#1024").ok().unwrap();
+        assert_eq!((r.socket.as_str(), r.note.as_deref()), ("/tmp/cc-socks/1.sock", Some("inputx#1024 is now called alt#1024")));
+    }
+
+    #[test]
+    fn the_listing_names_agent_and_full_name() {
+        let es = vec![
+            entry(1, "gds"),
+            entry(2, "marspot-03"),
+            Entry { ours: true, agent: Some(Agent::Codex), status: Some("busy".into()), ..entry(3, "marspot#9906") },
+            Entry { ours: true, agent: Some(Agent::Kimi), ..entry(4, "alt") },
+            entry(5, "luna"),
+            entry(6, "luna"),
+        ];
+        let panes = vec![pane("marspot", 1024, "claude", "marspot#1024", 2), pane("marspot", 9906, "codex", "marspot#9906", 3), pane("alt", 3381, "kimi", "alt", 4)];
+        let text = listing(&es, &panes, Some(&es[0]), 26 * 60 * 1000);
         assert!(text.starts_with("This session is gds — "));
-        assert!(text.contains("Peer sessions (2):\n"));
-        assert!(text.contains("  luna  ·  interactive  ·  idle  ·  started 26m ago  ·  uds:/tmp/cc-socks/2.sock\n"));
+        assert!(text.contains("Peer sessions (5):\n"));
+        assert!(text.contains("  marspot#1024  ·  claude  ·  idle  ·  started 26m ago  ·  session marspot-03\n"), "{text}");
+        assert!(text.contains("  marspot#9906  ·  codex  ·  busy  ·  started 26m ago\n"), "{text}");
+        assert!(text.contains("  alt  ·  kimi  ·  idle  ·  started 26m ago  (alt#3381)\n"), "{text}");
+        assert!(text.contains("  luna  ·  claude  ·  idle  ·  started 26m ago  ·  uds:/tmp/cc-socks/5.sock\n"), "{text}");
         assert!(!text.contains("  gds  ·"), "this session is not among its peers");
+        // the name a message carries as its sender is the one drawn
+        assert_eq!(display_name(&es[1], &panes), "marspot#1024");
+        assert_eq!(display_name(&es[3], &panes), "alt");
     }
 }

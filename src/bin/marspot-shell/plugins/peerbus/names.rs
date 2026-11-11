@@ -4,8 +4,7 @@
 //! in a table marspot writes (`marspot_peer::panes`), read by the MCP
 //! tools and the Claude Code hooks; no session's own record is renamed.
 //! The Codex and Gemini records are marspot's own, so they carry the
-//! pane's name too, and the name such a session had stays among its
-//! former names.
+//! pane's name too.
 //!
 //! A pane running two agents (one started inside the other) would give
 //! both the same name, so such a pane is left out of the table.
@@ -13,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 
 use marspot_peer::panes::{self, Pane, Table};
-use marspot_peer::registry::{self, FormerName};
+use marspot_peer::registry;
 use marspot_term::{lx_info, lx_warn};
 
 use super::worker::{now_ms, write_record, Worker};
@@ -84,7 +83,7 @@ impl Worker {
             let (Some(name), Some((_, Some(socket)))) = (look.names.get(&sid), claude.iter().find(|(p, _)| *p == pid)) else {
                 continue;
             };
-            table.push(Pane { name: name.clone(), pid, socket: socket.clone() });
+            table.push(Pane { name: name.clone(), pid, socket: socket.clone(), code: None, base: None, agent: Some("claude".into()) });
         }
         let codex = self.bindings.iter_mut().map(|(sid, b)| (sid, &mut b.record));
         let gemini = self.gemini.iter_mut().map(|(sid, g)| (sid, &mut g.record));
@@ -93,12 +92,10 @@ impl Worker {
                 continue;
             }
             let Some(want) = look.names.get(sid) else { continue };
-            table.push(Pane { name: want.clone(), pid: record.pid, socket: record.socket.clone() });
+            table.push(Pane { name: want.clone(), pid: record.pid, socket: record.socket.clone(), code: None, base: None, agent: Some(record.agent.as_str().into()) });
             if record.name == *want {
                 continue;
             }
-            let old = FormerName { name: record.name.clone(), until_ms: now, session_id: record.session_id.clone() };
-            registry::push_former(&mut record.former_names, old, want);
             lx_info!("peerbus.names.codex", "session renamed after its pane", sid = *sid, old = record.name.clone(), new = want.clone());
             record.name = want.clone();
             record.name_since_ms = now;
