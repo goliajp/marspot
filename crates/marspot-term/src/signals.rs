@@ -146,6 +146,43 @@ pub fn log_fatal_senders(tag: &'static str) {
 mod tests {
     use super::*;
 
+    /// What `the_log_names_who_ended_the_process` runs as its child.
+    #[test]
+    #[ignore = "a helper process, not a test"]
+    fn helper_logs_senders_and_waits() {
+        if std::env::var_os("MARSPOT_TEST_SIGNAL_HELPER").is_none() {
+            return;
+        }
+        crate::logx::init("test");
+        log_fatal_senders("T_SIGNAL");
+        println!("ready");
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    /// What L1 and L2 do: the signal still ends the process as a signal,
+    /// and the log says which one and who sent it.
+    #[test]
+    fn the_log_names_who_ended_the_process() {
+        use std::io::BufRead;
+        use std::os::unix::process::ExitStatusExt;
+        let sandbox = crate::test_env::sandbox_state_dir();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["signals::tests::helper_logs_senders_and_waits", "--exact", "--ignored", "--nocapture"])
+            .env("MARSPOT_TEST_SIGNAL_HELPER", "1")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = std::io::BufReader::new(child.stdout.take().unwrap());
+        assert!(out.lines().any(|l| l.unwrap().contains("ready")), "the helper armed its watcher");
+        // SAFETY: signals the child this test just started.
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM), "it died of the signal");
+        let log = std::fs::read_to_string(sandbox.path().join("logs/marspot.log")).unwrap();
+        let line = log.lines().find(|l| l.contains("\tT_SIGNAL\t")).expect("the signal is logged");
+        assert!(line.contains("sig=TERM"), "{line}");
+        assert!(line.contains(&format!("from_pid={}", std::process::id())), "{line}");
+    }
+
     /// One test for the whole watcher: its pipe is one per process.
     #[test]
     fn a_watched_signal_carries_its_sender() {
