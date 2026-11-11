@@ -20,6 +20,11 @@ pub mod out;
 pub mod preset;
 pub mod tone;
 
+#[cfg(test)]
+mod row_replica_tests;
+#[cfg(test)]
+mod text_parity_tests;
+
 pub use measure::{FontMeasure, exact_pt};
 pub use out::TreeOut;
 pub use tone::Tone;

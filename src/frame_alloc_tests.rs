@@ -244,3 +244,83 @@ fn settings_immediate_frame() {
     assert!(n_glyphs > 50 && n_rects > 3, "the panel has to have been painted");
     assert!(n > 0, "a path that collects its slots into a Vec read as allocation-free");
 }
+
+/// A run of text drawn as a tree node costs what the same run costs
+/// drawn by hand, and describing and laying the node out costs
+/// nothing: the tree adds no allocation of its own to a frame.
+#[test]
+fn a_tree_text_node_adds_no_allocation_to_the_run_it_draws() {
+    use crate::font_cache::FontCache;
+    use crate::render_metal::{new_atlas, system_default_device};
+    use crate::ui::core::ViewPainter;
+    use crate::ui::theme::PanelText;
+    use crate::ui::tree::{FontMeasure, Tone, TreeOut, font_of, metrics};
+    use golia_ui_core::{Align, Constraints, Interaction, Layout as TreeLayout, Length, Tree, paint};
+    use marspot_term::layout::{Alignment, Rect};
+
+    let Ok(device) = system_default_device() else {
+        eprintln!("SKIPPED: no Metal device");
+        return;
+    };
+    let mut font = FontCache::build().expect("font");
+    let mut atlas =
+        new_atlas(&device, 2048, 2048, false, font.font_table()).map(|(a, _)| a).expect("atlas");
+    let (atlas_w, atlas_h) = atlas.dims();
+    let (cell_w, cell_h, ascent) = (font.cell_w as f32, font.cell_h as f32, font.ascent as f32);
+    let (mut cells, mut glyphs, mut ui_rects) = (Vec::new(), Vec::new(), Vec::new());
+    macro_rules! painter {
+        () => {
+            ViewPainter {
+                cell_w,
+                cell_h,
+                ascent,
+                atlas_w: atlas_w as f32,
+                atlas_h: atlas_h as f32,
+                window_w: 2000.0,
+                window_h: 1000.0,
+                font: &mut font,
+                atlas: &mut atlas,
+                cells: &mut cells,
+                glyphs: &mut glyphs,
+                ui_rects: &mut ui_rects,
+            }
+        };
+    }
+
+    let (role, s) = (PanelText::Label, "Reclaim idle panes 日本語");
+    let rect = Rect { x: 40.0, y_top: 60.0, w: 900.0, h: 44.0 };
+    let by_hand = |p: &mut ViewPainter<'_>| p.panel_text_in(role, rect, s, Tone::Fg.rgba(), Alignment::CenterLeft);
+    let (mut tree, mut layout, state) = (Tree::new(), TreeLayout::new(), Interaction::default());
+    let mut lay_out = |p: &mut ViewPainter<'_>| {
+        tree.build(|ui| {
+            ui.text(font_of(role), Tone::Fg.into(), s)
+                .width(Length::Px(rect.w))
+                .height(Length::Px(rect.h))
+                .align(Align::Leading);
+        });
+        let m = metrics(p.font);
+        layout.run(&tree, (rect.x, rect.y_top), Constraints::loose(2000.0, 1000.0), &m, &FontMeasure::new(&mut *p.font));
+        m
+    };
+
+    for _ in 0..3 {
+        by_hand(&mut painter!());
+        lay_out(&mut painter!());
+    }
+    glyphs.clear();
+    let (hand_n, ()) = counted(|| by_hand(&mut painter!()));
+    let drawn_by_hand = std::mem::take(&mut glyphs);
+    glyphs.reserve(drawn_by_hand.len());
+
+    let (layout_n, m) = counted(|| lay_out(&mut painter!()));
+    let (paint_n, ()) = counted(|| paint(&tree, &layout, &state, &m, &mut TreeOut::new(&mut painter!())));
+
+    eprintln!(
+        "[frame-alloc] one run of {} glyphs: {hand_n} allocations drawn by hand; as a tree node \
+         {layout_n} to describe and lay out, {paint_n} to paint",
+        drawn_by_hand.len()
+    );
+    assert!(!drawn_by_hand.is_empty() && glyphs == drawn_by_hand, "the node drew another run");
+    assert_eq!(layout_n, 0, "describing and laying out a warm tree allocated");
+    assert_eq!(paint_n, hand_n, "painting the node cost more than drawing the run by hand");
+}
