@@ -5216,7 +5216,7 @@ Usage:\n\
         // Terminal-black from the first paint: a core (L2) swap that
         // briefly uncovers the layer must show steady black, never a
         // lighter chrome flash.
-        bg: marspot::system_theme::startup_palette().bg,
+        bg: theme_follow::at_launch(),
     };
     let proxy = EventProxy::new();
     let app = ShellApp::new(proxy.clone());

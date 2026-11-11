@@ -72,6 +72,15 @@ fn name_for_next_launch(choice: Option<LangId>) {
     }
 }
 
+/// Put the language in force before anything is titled: the setting,
+/// and what `system` resolves to.  The menu bar is built once, at
+/// launch, and has to be built in the language the user reads.
+pub(super) fn at_launch() {
+    let _ = marspot::settings::get();
+    language::set_system(sandboxed().then(sandbox_system_language).flatten().unwrap_or_else(system_language));
+    marspot::ui::strings::follow_language();
+}
+
 impl super::super::ShellApp {
     /// Publish the system's language if it changed, then bring the
     /// shell's own text to the language in force if that changed.

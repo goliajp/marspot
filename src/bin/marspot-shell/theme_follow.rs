@@ -62,6 +62,13 @@ fn sandbox_system_theme() -> Option<ThemeId> {
     ThemeId::parse(&std::fs::read_to_string(path).ok()?)
 }
 
+/// What has to be in force before the first window and the menu bar
+/// exist: the interface language, and the ground the window opens on.
+pub(crate) fn at_launch() -> (f64, f64, f64) {
+    language_follow::at_launch();
+    marspot::system_theme::startup_palette().bg
+}
+
 impl super::ShellApp {
     /// Publish the system's theme if it changed, then bring the
     /// shell's own surfaces to the theme in force if that changed.
