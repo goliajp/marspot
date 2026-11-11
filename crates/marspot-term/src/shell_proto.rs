@@ -2819,8 +2819,8 @@ mod tests {
 
     #[test]
     fn cli_read_frames_round_trip() {
-        let (t, n) = decode_cli_read_pane(&encode_cli_read_pane("spg#2", 40)).unwrap();
-        assert_eq!((t.as_str(), n), ("spg#2", 40));
+        let (t, n) = decode_cli_read_pane(&encode_cli_read_pane("spg#3381", 40)).unwrap();
+        assert_eq!((t.as_str(), n), ("spg#3381", 40));
         assert_eq!(
             decode_cli_text(&encode_cli_text("hello\nworld")).unwrap(),
             "hello\nworld"

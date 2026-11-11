@@ -162,6 +162,9 @@ fn send(args: &[String]) -> Result<(), Fail> {
     let me = me(&entries)?;
     let sent = peers::send(me, &entries, &panes, to, &body, priority, false).map_err(|m| Fail::Msg(3, m))?;
     println!("sent {} to {}", sent.msg_id, sent.to);
+    if let Some(note) = sent.note {
+        println!("{note}");
+    }
     Ok(())
 }
 

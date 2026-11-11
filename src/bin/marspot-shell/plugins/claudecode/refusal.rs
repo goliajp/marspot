@@ -122,7 +122,7 @@ pub(super) fn mark_logged_out(rooms: &mut [(u8, Room)], seen: &HashMap<u8, i64>)
 
 /// A pane was told by the API that it had run out.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct Refusal {
+pub(in crate::plugins) struct Refusal {
     /// Unix seconds, from the record's own timestamp.
     pub at: i64,
     /// The model the refusal names, as `short_model` spells it, or
@@ -148,7 +148,7 @@ pub(super) struct Refusal {
 
 /// The window a refusal is about, which is how long it stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Window {
+pub(in crate::plugins) enum Window {
     /// "session" and "5-hour": over within five hours.
     FiveHour,
     /// The week, a model's cap, or credits.

@@ -6989,7 +6989,7 @@ impl CoreApp {
             Some(SurfaceKind::Accounts) => {
                 w.cc_usage_modal = Some(CcUsageModalState {
                     data: marspot::cc_usage::read(),
-                    codex: marspot::cc_usage::read_codex(),
+                    codex: marspot::kimi_usage::read_codex_and_kimi(),
                     loaded_at: Instant::now(),
                     hover: Default::default(),
                 });
@@ -7229,7 +7229,7 @@ impl CoreApp {
         let modal = win!(self, wi).cc_usage_modal.as_mut()?;
         if modal.loaded_at.elapsed() > std::time::Duration::from_secs(5) {
             modal.data = marspot::cc_usage::read();
-            modal.codex = marspot::cc_usage::read_codex();
+            modal.codex = marspot::kimi_usage::read_codex_and_kimi();
             modal.loaded_at = Instant::now();
             win!(self, wi).needs_render = true;
         }
@@ -7523,7 +7523,7 @@ impl CoreApp {
                 }
             }
             // Resolve the pane's name the same way the title strip
-            // does: its directory, numbered when shared.
+            // does: its directory.
             let name = {
                 if let Some(p) = self.pane_cwds.get(&sid) {
                     std::path::Path::new(p).file_name()
@@ -8782,36 +8782,23 @@ impl CoreApp {
             .collect();
 
         // Resolved label per cell: the pane's own name (its directory,
-        // numbered when shared — `marspot::pane_name`) → plugin-set
+        // with its code when shared — `marspot::pane_name`) → plugin-set
         // title (MsgType::PaneTitle, cc/...) → ordinal fallback.
         //
         // There is no user-set title any more: a pane's name is derived,
         // never stored, so it cannot disagree with what `--send` will
         // accept.  A rename would have made the name a second source of
         // truth about which pane is which.
-        // Every pane in every window, with where it sits: the number
-        // in `spg#2` is the pane's position, so a name cannot be
-        // computed from one window alone.
+        // Every pane in every window: whether a name is shared cannot
+        // be known from one window alone.
         let refs: Vec<marspot::pane_name::PaneRef> = self
             .windows
             .iter()
-            .enumerate()
-            .flat_map(|(w, win)| {
-                let cols = win.grid_cols.max(1);
-                win.panes.iter().enumerate().filter_map(move |(i, p)| {
-                    let sid = p.shelld_session_id()?;
-                    // Panes past the grid overflow into the sidebar and
-                    // have no cell of their own.
-                    let at = (i < cols * win.grid_rows.max(1))
-                        .then(|| (w + 1, i / cols + 1, i % cols + 1));
-                    Some((sid, at))
-                })
-            })
-            .map(|(sid, at)| {
+            .flat_map(|win| win.panes.iter().filter_map(|p| p.shelld_session_id()))
+            .map(|sid| {
                 marspot::pane_name::PaneRef::new(
                     sid,
                     self.pane_cwds.get(&sid).cloned().unwrap_or_default(),
-                    at,
                 )
             })
             .collect();

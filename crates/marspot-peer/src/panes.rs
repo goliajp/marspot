@@ -1,13 +1,17 @@
 //! marspot's pane names, as every messaging party reads them.
 //!
 //! A session in a marspot pane can be addressed by the pane's name
-//! (`gds`, `spg#2`) whatever the session calls itself.  marspot keeps
+//! (`gds`, `spg#3381`) whatever the session calls itself.  marspot keeps
 //! that table and nobody else writes it: one file per marspot, in each
 //! registry directory, beside the records -- the one place the Codex
 //! MCP server, the Claude Code hook and the command line all look,
 //! whatever state directory marspot itself was started with.  The dot
 //! keeps Claude Code, which reads `<pid>.json`, from taking it for a
 //! session.
+//!
+//! An entry's `code`, `base` and `agent` are optional: a reader that
+//! does not know them matches on `name`, and an entry without them is
+//! matched on `name` alone.
 //!
 //! The file names the marspot that wrote it.  A reader drops a table
 //! whose writer is gone, and an entry whose session is gone, so a quit
@@ -20,6 +24,7 @@ use std::path::{Path, PathBuf};
 use crate::json::{self, Value, obj};
 use crate::proc;
 use crate::registry::{self, Entry};
+use crate::resolve::Target;
 
 const PREFIX: &str = ".marspot-panes-";
 
@@ -32,6 +37,28 @@ pub struct Pane {
     pub pid: i32,
     /// The session's inbox socket.
     pub socket: String,
+    /// The pane's identity code and its directory's name; `base#code`
+    /// is its full name.
+    pub code: Option<u16>,
+    pub base: Option<String>,
+    /// The agent in it: `claude`, `codex`, `gemini` or `kimi`.
+    pub agent: Option<String>,
+}
+
+impl Pane {
+    /// The pane as name resolution sees it.
+    pub fn target(&self) -> Target<'_> {
+        match (&self.base, self.code) {
+            (Some(base), Some(_)) => Target { base, code: self.code, kind: self.agent.as_deref() },
+            _ => Target { base: &self.name, code: None, kind: self.agent.as_deref() },
+        }
+    }
+
+    /// `base#code`, when the name drawn on the pane is the base alone.
+    pub fn full_name_if_not_shown(&self) -> Option<String> {
+        let full = self.target().full_name();
+        (full != self.name).then_some(full)
+    }
 }
 
 /// The table one marspot writes.
@@ -50,11 +77,21 @@ impl Table {
             .panes
             .iter()
             .map(|p| {
-                obj([
+                let mut v = obj([
                     ("name", Value::from(p.name.as_str())),
                     ("pid", Value::from(i64::from(p.pid))),
                     ("socket", Value::from(p.socket.as_str())),
-                ])
+                ]);
+                if let Some(code) = p.code {
+                    v.set("code", Value::from(i64::from(code)));
+                }
+                if let Some(base) = &p.base {
+                    v.set("base", Value::from(base.as_str()));
+                }
+                if let Some(agent) = &p.agent {
+                    v.set("agent", Value::from(agent.as_str()));
+                }
+                v
             })
             .collect();
         obj([
@@ -77,6 +114,9 @@ impl Table {
                     name: p.str_at("name")?.to_string(),
                     pid: i32::try_from(p.get("pid")?.i64()?).ok()?,
                     socket: p.str_at("socket")?.to_string(),
+                    code: p.get("code").and_then(Value::i64).and_then(|c| u16::try_from(c).ok()),
+                    base: p.str_at("base").map(str::to_string),
+                    agent: p.str_at("agent").map(str::to_string),
                 })
             })
             .collect();
@@ -149,21 +189,6 @@ pub fn live(entries: &[Entry]) -> Vec<Pane> {
     out
 }
 
-/// The pane `name` means, when exactly one live pane has it.  Two live
-/// marspots can each have a `spg`; then the name means neither.
-pub fn find<'a>(panes: &'a [Pane], name: &str) -> Result<Option<&'a Pane>, String> {
-    let hits: Vec<&Pane> = panes.iter().filter(|p| p.name == name).collect();
-    match hits.as_slice() {
-        [] => Ok(None),
-        [p] => Ok(Some(p)),
-        many => Err(format!(
-            "{} panes are named {name:?}; use one of their addresses instead: {}",
-            many.len(),
-            many.iter().map(|p| format!("uds:{}", p.socket)).collect::<Vec<_>>().join(", ")
-        )),
-    }
-}
-
 /// The pane a session sits in, by its record's pid.
 pub fn of_pid(panes: &[Pane], pid: i32) -> Option<&Pane> {
     panes.iter().find(|p| p.pid == pid)
@@ -173,30 +198,57 @@ pub fn of_pid(panes: &[Pane], pid: i32) -> Option<&Pane> {
 mod tests {
     use super::*;
 
+    fn pane(name: &str, pid: i32) -> Pane {
+        Pane { name: name.into(), pid, socket: format!("/tmp/cc-socks/{pid}.sock"), code: None, base: None, agent: None }
+    }
+
     #[test]
     fn a_table_reads_back_and_names_its_writer() {
         let me = std::process::id() as i32;
-        let t = Table {
-            owner: "/tmp/owner".into(),
-            pid: me,
-            proc_start: proc::lstart(me).unwrap(),
-            panes: vec![Pane { name: "spg#2".into(), pid: 7, socket: "/tmp/cc-socks/7.sock".into() }],
-        };
+        let coded = Pane { code: Some(3381), base: Some("spg".into()), agent: Some("codex".into()), ..pane("spg#3381", 7) };
+        let t = Table { owner: "/tmp/owner".into(), pid: me, proc_start: proc::lstart(me).unwrap(), panes: vec![coded, pane("gds", 8)] };
         let back = Table::parse(&t.to_json()).unwrap();
         assert_eq!(back, t);
         assert!(back.writer_alive());
+        assert_eq!(back.panes[0].target(), Target { base: "spg", code: Some(3381), kind: Some("codex") });
+        assert_eq!(back.panes[0].full_name_if_not_shown(), None);
+        let lone = Pane { code: Some(3381), base: Some("spg".into()), ..pane("spg", 7) };
+        assert_eq!(lone.full_name_if_not_shown().as_deref(), Some("spg#3381"));
         let gone = Table { proc_start: "Thu Jan  1 00:00:00 1970".into(), ..t };
         assert!(!gone.writer_alive(), "a recycled pid is not the writer");
     }
 
+    /// A table written before entries had a code is read, each entry
+    /// matched on the name it was listed under.
     #[test]
-    fn a_shared_name_means_no_pane() {
-        let p = |n: &str, pid| Pane { name: n.into(), pid, socket: format!("/tmp/cc-socks/{pid}.sock") };
-        let panes = vec![p("gds", 1), p("spg", 2), p("spg", 3)];
-        assert_eq!(find(&panes, "gds").unwrap().map(|p| p.pid), Some(1));
-        assert_eq!(find(&panes, "nope").unwrap(), None);
-        assert!(find(&panes, "spg").unwrap_err().contains("uds:/tmp/cc-socks/2.sock"));
-        assert_eq!(of_pid(&panes, 3).map(|p| p.name.as_str()), Some("spg"));
+    fn a_table_without_the_newer_fields_is_read() {
+        let old = r#"{"owner":"/o","pid":1,"procStart":"x","panes":[{"name":"spg#2","pid":7,"socket":"/tmp/cc-socks/7.sock"}]}"#;
+        let t = Table::parse(old).unwrap();
+        assert_eq!(t.panes, vec![pane("spg#2", 7)]);
+        assert_eq!(t.panes[0].target(), Target { base: "spg#2", code: None, kind: None });
+        assert_eq!(of_pid(&t.panes, 7).map(|p| p.name.as_str()), Some("spg#2"));
+    }
+
+    /// The reader of the version before codes took `name`, `pid` and
+    /// `socket` from each entry and nothing else; it accepts a table
+    /// with the newer fields and finds the pane by the name drawn.
+    #[test]
+    fn a_reader_that_knows_three_fields_reads_the_newer_table() {
+        let t = Table {
+            owner: "/o".into(),
+            pid: 1,
+            proc_start: "x".into(),
+            panes: vec![Pane { code: Some(3381), base: Some("spg".into()), agent: Some("claude".into()), ..pane("spg#3381", 7) }],
+        };
+        let v = json::parse(&t.to_json()).unwrap();
+        let old_reader: Vec<(String, i32, String)> = v
+            .get("panes")
+            .map_or(&[][..], Value::arr)
+            .iter()
+            .filter_map(|p| Some((p.str_at("name")?.to_string(), i32::try_from(p.get("pid")?.i64()?).ok()?, p.str_at("socket")?.to_string())))
+            .collect();
+        assert_eq!(old_reader, vec![("spg#3381".to_string(), 7, "/tmp/cc-socks/7.sock".to_string())]);
+        assert!(v.str_at("owner").is_some() && v.get("pid").is_some() && v.str_at("procStart").is_some());
     }
 
     #[test]

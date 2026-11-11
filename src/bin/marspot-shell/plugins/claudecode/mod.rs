@@ -19,13 +19,13 @@
 //! it's needed.
 
 mod idle;
-mod quota;
-mod rooms;
+pub(in crate::plugins) mod quota;
+pub(in crate::plugins) mod rooms;
 mod rebalance;
 mod switching;
-mod heads_up;
+pub(in crate::plugins) mod heads_up;
 mod refusal;
-mod seen;
+pub(in crate::plugins) mod seen;
 mod profile_tag;
 mod model;
 mod statusline;

@@ -137,7 +137,9 @@ pub(crate) struct Failure {
     /// `turn.ended.error.name`: the code is shared by errors of
     /// different kinds, and the name is what tells them apart.
     pub name: Option<String>,
-    /// `turn.ended.turnId`, so one failure is acted on once.
+    /// `turn.ended.time`, as unix seconds.
+    pub at: i64,
+    /// `turn.ended.turnId`.
     pub turn: i64,
 }
 
@@ -247,7 +249,8 @@ pub(super) fn facts_in(text: &str) -> Option<Facts> {
                 .then(|| {
                     let code = v.at(&["error", "code"]).and_then(Value::str)?;
                     let name = v.at(&["error", "name"]).and_then(Value::str).map(str::to_string);
-                    Some(Failure { code: code.to_string(), name, turn: v.get("turnId").and_then(Value::i64)? })
+                    let at = v.get("time").and_then(Value::i64)? / 1000;
+                    Some(Failure { code: code.to_string(), name, at, turn: v.get("turnId").and_then(Value::i64)? })
                 })
                 .flatten();
         } else if let Some(v) = typed(line, "interaction.request") {
@@ -441,7 +444,7 @@ mod tests {
         let failed = r#"{"type":"turn.ended","agentId":"main","turnId":1,"reason":"failed","error":{"code":"provider.api_error","message":"You have exceeded your current quota.","name":"APIProviderQuotaExhaustedError","details":{"statusCode":429,"requestId":null,"traceId":null,"diagnostics":{}},"retryable":false},"durationMs":35,"time":1794354224601}"#;
         let f = facts_in(&format!("{TOOL_CALL}{failed}\n")).unwrap();
         assert_eq!(f.status, Status::Idle);
-        let quota = Failure { code: "provider.api_error".into(), name: Some("APIProviderQuotaExhaustedError".into()), turn: 1 };
+        let quota = Failure { code: "provider.api_error".into(), name: Some("APIProviderQuotaExhaustedError".into()), at: 1_794_354_224, turn: 1 };
         assert_eq!(f.failure, Some(quota));
         let next = format!("{TOOL_CALL}{failed}\n{}\n", r#"{"type":"turn.prompt","agentId":"main","input":[],"origin":{"kind":"user"},"turnId":2,"time":2}"#);
         assert_eq!(facts_in(&next).unwrap().failure, None, "the next turn is not the one that failed");

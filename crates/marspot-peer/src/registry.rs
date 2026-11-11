@@ -69,7 +69,7 @@ pub enum Agent {
 }
 
 impl Agent {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Agent::Codex => "codex",
             Agent::Gemini => "gemini",
@@ -99,40 +99,8 @@ impl Agent {
     }
 }
 
-/// How many earlier names a record keeps.  They still address the
-/// session, so a name a sender stored before a pane was renumbered
-/// keeps working for a while; the oldest go first.
-pub const MAX_FORMER_NAMES: usize = 5;
-
 /// What this side of the protocol supports beyond plain messages.
 pub const FEATURES: &[&str] = &["notify_idle"];
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct FormerName {
-    pub name: String,
-    pub until_ms: i64,
-    pub session_id: String,
-}
-
-impl FormerName {
-    fn to_value(&self) -> Value {
-        obj([
-            ("name", Value::from(self.name.as_str())),
-            ("until", Value::from(self.until_ms)),
-            ("sessionId", Value::from(self.session_id.as_str())),
-        ])
-    }
-}
-
-/// `list` with `old` pushed to the front: deduplicated, never holding
-/// `current`, at most `MAX_FORMER_NAMES` long.
-pub fn push_former(list: &mut Vec<FormerName>, old: FormerName, current: &str) {
-    list.retain(|f| f.name != old.name && f.name != current);
-    if old.name != current && !old.name.is_empty() {
-        list.insert(0, old);
-    }
-    list.truncate(MAX_FORMER_NAMES);
-}
 
 /// A record marspot writes for one Codex or Gemini session.
 #[derive(Clone, Debug, PartialEq)]
@@ -154,7 +122,6 @@ pub struct Record {
     pub version: String,
     pub name: String,
     pub name_since_ms: i64,
-    pub former_names: Vec<FormerName>,
     /// Absolute path of the inbox socket.
     pub socket: String,
     pub status: Status,
@@ -182,7 +149,8 @@ impl Record {
             ("name", Value::from(self.name.as_str())),
             ("nameSource", Value::from("peer")),
             ("nameSince", Value::from(self.name_since_ms)),
-            ("formerNames", Value::Arr(self.former_names.iter().map(FormerName::to_value).collect())),
+            // a record always has the key; these sessions have no earlier names
+            ("formerNames", Value::Arr(Vec::new())),
             ("updatedAt", Value::from(now_ms)),
             (CLASS_KEY, Value::from(self.class.as_str())),
             (AGENT_KEY, Value::from(self.agent.as_str())),
@@ -207,8 +175,6 @@ pub struct Entry {
     pub pid: i32,
     pub session_id: Option<String>,
     pub name: Option<String>,
-    /// Earlier names that still address the session, newest first.
-    pub former_names: Vec<String>,
     pub cwd: Option<String>,
     pub socket: Option<String>,
     pub status: Option<String>,
@@ -227,9 +193,9 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// Whether `name` addresses this session: its name, or one it had.
-    pub fn answers_to(&self, name: &str) -> bool {
-        self.name.as_deref() == Some(name) || self.former_names.iter().any(|n| n == name)
+    /// The agent the session runs, as a recipient string names it.
+    pub fn kind(&self) -> &'static str {
+        self.agent.map_or("claude", Agent::as_str)
     }
 
     pub fn supports(&self, feature: &str) -> bool {
@@ -388,7 +354,6 @@ fn read_entry(path: &Path, pid: i32) -> Option<Entry> {
         pid,
         session_id: s("sessionId"),
         name: s("name"),
-        former_names: strs("formerNames", Some("name")),
         cwd: s("cwd"),
         socket: s("messagingSocketPath"),
         status: s("status"),
@@ -433,7 +398,6 @@ mod tests {
             version: "0.163.0".into(),
             name: "x".into(),
             name_since_ms: 1,
-            former_names: Vec::new(),
             socket: format!("/tmp/cc-socks/{pid}-0a1b2c3d.sock"),
             status: Status::Idle,
             class: Mode::Bypass,
@@ -574,17 +538,5 @@ mod tests {
         assert_eq!(fs::read_to_string(record_path(&dir, 9)).unwrap(), own, "a session's own name is not touched");
         assert!(restore_foreign(&dir, 200).is_empty(), "and once is enough");
         fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn former_names_stay_short_and_never_hold_the_current_one() {
-        let mut l = Vec::new();
-        for i in 0..8 {
-            push_former(&mut l, FormerName { name: format!("n{i}"), until_ms: i, session_id: String::new() }, "now");
-        }
-        assert_eq!(l.len(), MAX_FORMER_NAMES);
-        assert_eq!(l[0].name, "n7");
-        push_former(&mut l, FormerName { name: "n5".into(), until_ms: 9, session_id: String::new() }, "n6");
-        assert_eq!(l.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["n5", "n7", "n4", "n3"]);
     }
 }

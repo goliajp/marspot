@@ -3447,25 +3447,19 @@ impl ShellApp {
             .collect()
     }
 
-    /// Every pane with the two things naming needs: its directory and
-    /// where it sits.  One place builds this, so the title strip, the
-    /// listing and `--send` cannot disagree about what `spg#2` means.
+    /// Every pane with what naming needs: its directory and its code.
+    /// One place builds this, so the listing and `--send` cannot
+    /// disagree about which pane a name means.
     fn pane_refs() -> Vec<marspot::pane_name::PaneRef> {
         Self::pane_refs_in(&observe::shared().fresh(observe::NOW))
     }
 
-    /// `pane_refs` over a given observation.  Reads the saved layout,
+    /// `pane_refs` over a given observation.  May read the code file,
     /// so not for the main thread's hot paths.
     pub(crate) fn pane_refs_in(obs: &observe::Observation) -> Vec<marspot::pane_name::PaneRef> {
-        let cells = Self::pane_cells();
         Self::live_panes(obs)
             .into_iter()
-            .map(|(sid, cwd, _)| {
-                // `pane_cells` reports (window, x, y); naming sorts in
-                // reading order, which is (window, y, x).
-                let at = cells.get(&sid).map(|(w, x, y)| (*w, *y, *x));
-                marspot::pane_name::PaneRef::new(sid, cwd, at)
-            })
+            .map(|(sid, cwd, _)| marspot::pane_name::PaneRef::new(sid, cwd))
             .collect()
     }
 
@@ -5072,9 +5066,9 @@ Usage:\n\
   marspot-shell --send <pane> <text…>\n\
                                Type text into a pane and press Enter.  The pane\n\
                                is named by its working directory's last component\n\
-                               (e.g. `spg`), a path tail (`goliajp/spg`), or a\n\
-                               session id.  An ambiguous name is refused, and\n\
-                               the error lists the candidates with their ids.\n\
+                               (`spg`), its full name (`spg#3381`), its agent and\n\
+                               name (`claude:spg`), or a session id.  A name that\n\
+                               fits several panes is refused with their names.\n\
   marspot-shell --trigger      Apply a staged pending update on a running shell\n\
                                (sends SIGUSR1 to the supervisor process).\n\
   marspot-shell --rollback-shell   Quarantine current/marspot-shell, restore prev/.\n\
