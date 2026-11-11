@@ -35,6 +35,7 @@ use badge::{badge_text, publish_badge};
 use pane::{home_from, profile_of};
 use session::{Asker, Facts, SessionIndex, ENV_ALIAS};
 
+pub(crate) use config::managed;
 pub(crate) use pane::{default_home, handoff_homes, launch, profile_dirs_in};
 pub(crate) use peer::{peers, Peer, Peers};
 #[cfg(test)]

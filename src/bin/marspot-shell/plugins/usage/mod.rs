@@ -5,7 +5,8 @@
 //! without that collector, or once it has stopped, this plugin collects
 //! the same numbers and writes them in the same schema under marspot's
 //! state directory, where `marspot::cc_usage` looks next.  While the
-//! external feed is fresh it does nothing.
+//! external feed is fresh it does nothing.  Kimi accounts have no
+//! external collector; their feed is always marspot's own.
 //!
 //! Everything happens on the plugin's own thread: a pass reads the
 //! keychain, runs curl and starts an app-server per codex home, any of
@@ -15,6 +16,7 @@ mod claude;
 mod codex;
 mod feed;
 mod http;
+mod kimi;
 mod sha256;
 
 use std::path::{Path, PathBuf};
@@ -51,8 +53,10 @@ impl Plugin for UsagePlugin {
 
     fn start(&mut self, host: &dyn PluginHost) -> Result<(), PluginError> {
         // a sandbox shares the developer's HOME: its keychain, its
-        // logins and its rate limits are not a test's to spend
-        if std::env::var_os("MARSPOT_DEV_SANDBOX").is_some() {
+        // logins and its rate limits are not a test's to spend.  What
+        // it may ask is a kimi API on this machine, a test's stand-in.
+        let sandbox = std::env::var_os("MARSPOT_DEV_SANDBOX").is_some();
+        if sandbox && !std::env::var("KIMI_CODE_BASE_URL").is_ok_and(|base| kimi::is_local(&base)) {
             return Ok(());
         }
         let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
@@ -61,7 +65,7 @@ impl Plugin for UsagePlugin {
         let (tx, rx) = channel();
         std::thread::Builder::new()
             .name("usage-feed".into())
-            .spawn(move || run(home, rx))
+            .spawn(move || run(home, rx, sandbox))
             .map_err(|e| PluginError::Other(format!("usage collector: {e}")))?;
         self.stop = Some(tx);
         host.log(LogLevel::Info, "start", "collector running");
@@ -73,16 +77,19 @@ impl Plugin for UsagePlugin {
     }
 }
 
-fn run(home: PathBuf, stop: Receiver<()>) {
+fn run(home: PathBuf, stop: Receiver<()>, sandbox: bool) {
     let mut collector = Collector::new(
         Sources { claude: cc_usage::feed_path(), codex: cc_usage::codex_feed_path() },
         cc_usage::own_feed_path(),
         cc_usage::own_codex_feed_path(),
     );
+    collector.kimi_only = sandbox;
+    // a test cannot wait five minutes for the second pass
+    let every = std::env::var("MARSPOT_USAGE_PASS_SECS").ok().filter(|_| sandbox).and_then(|s| s.parse().ok());
     let mut wait = FIRST_PASS_AFTER;
     while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(wait) {
         collector.pass(&home, now_unix());
-        wait = PASS_EVERY;
+        wait = every.map_or(PASS_EVERY, Duration::from_secs);
     }
 }
 
@@ -104,6 +111,12 @@ struct Collector {
     own_codex: PathBuf,
     claude: Vec<Account>,
     codex: Vec<Account>,
+    /// Beside the other two feeds, as `kimi-usage.json`.
+    own_kimi: PathBuf,
+    kimi: Vec<Account>,
+    kimi_state: kimi::Kimi,
+    /// Ask only a kimi API on this machine, and nothing else.
+    kimi_only: bool,
 }
 
 impl Collector {
@@ -111,12 +124,33 @@ impl Collector {
     /// be read right now still has its last numbers.
     fn new(sources: Sources, own_claude: PathBuf, own_codex: PathBuf) -> Collector {
         let held = |path: &Path| feed::load(&std::fs::read_to_string(path).unwrap_or_default());
-        Collector { claude: held(&own_claude), codex: held(&own_codex), sources, own_claude, own_codex }
+        // where `marspot::kimi_usage` reads it
+        let own_kimi = own_claude.with_file_name("kimi-usage.json");
+        Collector {
+            claude: held(&own_claude),
+            codex: held(&own_codex),
+            kimi: held(&own_kimi),
+            kimi_state: kimi::Kimi::default(),
+            kimi_only: false,
+            sources,
+            own_claude,
+            own_codex,
+            own_kimi,
+        }
     }
 
     /// Each provider on its own: the external collector may be writing
     /// one feed and not the other.
     fn pass(&mut self, home: &Path, now: i64) {
+        let waits = self.own_kimi.with_file_name("kimi-waits.json");
+        self.kimi = self.kimi_state.pass(home, &waits, std::mem::take(&mut self.kimi), now, self.kimi_only);
+        // a machine with no kimi home gets no kimi feed
+        if !self.kimi.is_empty() {
+            write("kimi", &self.own_kimi, &self.kimi, now);
+        }
+        if self.kimi_only {
+            return;
+        }
         if !cc_usage::devops_is_collecting(&self.sources.claude, now) {
             let waits = self.own_claude.with_file_name("claude-waits.json");
             self.claude = claude::pass(home, &waits, std::mem::take(&mut self.claude), now);
@@ -159,6 +193,8 @@ mod tests {
         let mut c = Collector::new(sources, own_claude.clone(), own_codex.clone());
         c.pass(&home, NOW);
         assert!(!own_claude.exists() && !own_codex.exists(), "the external collector is at work");
+        assert!(!c.own_kimi.exists(), "and there is no kimi home to write about");
+        assert_eq!(c.own_kimi, dir.join("usage/kimi-usage.json"));
 
         // the codex feed goes stale; the claude one is still written
         let stale = format!(r#"{{"generated_at":"{}","accounts":[]}}"#, feed::iso_utc(NOW - 900));

@@ -57,6 +57,27 @@ fn strings(v: &str) -> Option<Vec<&str>> {
     inner.trim_end_matches(',').split(',').map(|s| string(s.trim())).collect()
 }
 
+/// What a login wrote about the managed service: the API it talks to
+/// and the name its token is kept under.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Managed {
+    pub base_url: Option<String>,
+    /// `oauth/<slot>`: the token is `<home>/credentials/<slot>.json`.
+    pub oauth_key: Option<String>,
+}
+
+pub(crate) fn managed(home: &Path) -> Managed {
+    std::fs::read_to_string(home.join("config.toml")).map(|t| managed_in(&t)).unwrap_or_default()
+}
+
+pub(super) fn managed_in(text: &str) -> Managed {
+    let at = |header: &str, key: &str| value(table(text, header), key).and_then(string).map(str::to_string);
+    Managed {
+        base_url: at("[providers.\"managed:kimi-code\"]", "base_url"),
+        oauth_key: at("[providers.\"managed:kimi-code\".oauth]", "key"),
+    }
+}
+
 /// An alias or an effort short and plain enough for a badge and a
 /// command line.
 pub(super) fn plain(s: &str) -> bool {
@@ -168,6 +189,14 @@ effort = "max"
         assert_eq!(got(&unset).1, Some("max"), "the model's declared default");
         let k3_unset = with(&LOGGED_IN.replace("\neffort = \"max\"\n", "\n"), "default_model = \"kimi-code/kimi-for-coding\"", "default_model = \"kimi-code/k3\"");
         assert_eq!(got(&k3_unset).1, Some("high"));
+    }
+
+    #[test]
+    fn a_login_names_its_api_and_its_token() {
+        let login = "[providers.\"managed:kimi-code\"]\ntype = \"kimi\"\nbase_url = \"https://api.kimi.ai/coding/v1\"\n\n[providers.\"managed:kimi-code\".oauth]\nstorage = \"file\"\nkey = \"oauth/kimi-code\"\n\n[providers.other]\nbase_url = \"https://elsewhere.test\"\n";
+        let m = managed_in(login);
+        assert_eq!((m.base_url.as_deref(), m.oauth_key.as_deref()), (Some("https://api.kimi.ai/coding/v1"), Some("oauth/kimi-code")));
+        assert_eq!(managed_in(LOGGED_IN), Managed::default(), "a file whose login wrote neither");
     }
 
     #[test]
