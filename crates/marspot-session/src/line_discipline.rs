@@ -92,12 +92,6 @@ const ENTER_WATCH: Duration = Duration::from_millis(3);
 /// line whose outcome has not shown. Past it the repair stays pending
 /// and is taken up again by the next output.
 const WAIT_POLL_FOR: Duration = Duration::from_secs(2);
-/// Longest a write to a canonical terminal is held back for the shell to
-/// be done with the settings; see `put_back`. For an empty line or a
-/// builtin zsh is back in its editor within this of applying its copy,
-/// nine times in ten; a command it starts has the terminal after 0.6 ms
-/// at the earliest and prints after 2.4 ms (measured).
-const SETTLE_FOR: Duration = Duration::from_micros(300);
 /// A repair is dropped after this many commands that left the shell's
 /// copy damaged: a shell whose copy never heals must not keep the
 /// repair for good.
@@ -123,8 +117,6 @@ enum Entered {
     /// The shell has not been seen applying its copy yet; `read` once
     /// the line was seen gone from the terminal's input queue.
     Waiting { since: Instant, read: bool },
-    /// The shell applied a damaged copy and the flags were put back.
-    HandedOver,
 }
 
 #[derive(Default)]
@@ -175,11 +167,7 @@ impl LineGuard {
                 return;
             }
         }
-        // a second Enter while the first line's command has the
-        // terminal says nothing new about the shell's copy
-        if self.entered != Some(Entered::HandedOver) {
-            self.entered = Some(Entered::Waiting { since: at, read: false });
-        }
+        self.entered = Some(Entered::Waiting { since: at, read: false });
         while at.elapsed() < ENTER_WATCH {
             // SAFETY: tcgetpgrp on the pty master this session owns.
             let front = unsafe { libc::tcgetpgrp(master) };
@@ -188,11 +176,13 @@ impl LineGuard {
                 return;
             }
             let Some(t) = termios(master) else { return };
-            if t.c_lflag & libc::ICANON != 0 {
-                self.shell_applied(master, shell_pgrp, t, owed);
+            let canon = t.c_lflag & libc::ICANON != 0;
+            let missing = !owed.missing_from(Flags::of(&t)).is_empty();
+            if canon && !missing {
+                self.end_repair();
                 return;
             }
-            if !owed.missing_from(Flags::of(&t)).is_empty() {
+            if !canon && missing {
                 // readline put back what it saved, or zsh's editor is
                 // back already from a damaged copy
                 put_back(master, shell_pgrp, owed, false);
@@ -317,9 +307,10 @@ impl LineGuard {
         if let Some(owed) = self.owed {
             let missing = !owed.missing_from(now).is_empty();
             match self.entered {
-                Some(Entered::Waiting { .. }) if canon => {
-                    self.shell_applied(master, shell_pgrp, t, owed);
-                }
+                // after a line editor's prompt, `ICANON` on with nothing
+                // missing is the shell's copy; a shell without an editor
+                // keeps none, and what was put back has stayed
+                Some(Entered::Waiting { .. }) if canon && !missing => self.end_repair(),
                 // a prompt that has just started again shows the shell's copy
                 Some(_) if !canon && missing => {
                     put_back(master, shell_pgrp, owed, false);
@@ -330,12 +321,8 @@ impl LineGuard {
                 {
                     self.entered = Some(Entered::Waiting { since, read: true });
                 }
-                Some(Entered::HandedOver) if !canon => self.end_repair(),
                 _ if missing => {
-                    // the editor turned out to be back while the write was held
-                    if put_back(master, shell_pgrp, owed, false) == Some(false) && canon && self.entered.is_some() {
-                        self.copy_still_damaged();
-                    }
+                    put_back(master, shell_pgrp, owed, false);
                 }
                 _ => {}
             }
@@ -343,25 +330,6 @@ impl LineGuard {
         if self.owed.is_none() {
             self.kept = Some(now);
             self.kept_at = Some(at);
-        }
-    }
-
-    /// The shell is running the line entered, with its copy of the
-    /// settings applied.
-    fn shell_applied(&mut self, master: RawFd, shell_pgrp: libc::pid_t, t: libc::termios, owed: Flags) {
-        if owed.missing_from(Flags::of(&t)).is_empty() {
-            // after a line editor's prompt, `ICANON` on with nothing
-            // missing is the shell's copy; a shell without an editor
-            // keeps none, and what was put back has stayed
-            self.end_repair();
-            return;
-        }
-        match put_back(master, shell_pgrp, owed, false) {
-            Some(true) => self.entered = Some(Entered::HandedOver),
-            // a builtin or an empty line: the editor started again from
-            // the same copy
-            Some(false) => self.copy_still_damaged(),
-            None => {}
         }
     }
 
@@ -423,13 +391,11 @@ pub fn with_carriage_returns(bytes: Vec<u8>) -> Vec<u8> {
 /// Reading the settings and writing them back are two calls, and what
 /// the shell writes between them is undone. For a builtin or an empty
 /// line zsh writes twice within microseconds -- its copy for the
-/// command, then its editor's settings -- and a write made on first
-/// sight of the copy left the editor reading a canonical, echoing
-/// terminal after one such line in twenty (measured). So a canonical
-/// terminal is written to once a job has it, when the shell waits and
-/// writes nothing, or after `SETTLE_FOR` -- spent spinning, a command's
-/// first output being only a few of those away. If the editor comes back
-/// first, the write is made on its settings instead.
+/// command, then its editor's settings -- and a write made across the
+/// second left the editor reading a canonical, echoing terminal. So a
+/// canonical terminal is only written to once a job has it, when the
+/// shell waits and writes nothing; with the shell in front, only when
+/// its editor's settings are on it.
 ///
 /// Read and written through the slave side, opened before either so
 /// that nothing slow comes between the two: set through the master, the
@@ -440,30 +406,21 @@ pub fn with_carriage_returns(bytes: Vec<u8>) -> Vec<u8> {
 /// shell's doing.
 fn put_back(master: RawFd, shell_pgrp: libc::pid_t, owed: Flags, unstarted: bool) -> Option<bool> {
     let slave = crate::reply_guard::Slave::open(master)?;
-    let give_up = Instant::now() + SETTLE_FOR;
-    loop {
-        // SAFETY: tcgetpgrp on the pty master this session owns.
-        let front = unsafe { libc::tcgetpgrp(master) };
-        let mut t = termios(slave.fd())?;
-        if owed.missing_from(Flags::of(&t)).is_empty() {
-            return None;
-        }
-        let canon = t.c_lflag & libc::ICANON != 0;
-        let job = front > 0 && front != shell_pgrp;
-        if job && !canon && !unstarted {
-            // a job already in raw mode: its settings are its own
-            return None;
-        }
-        if job || !canon || Instant::now() >= give_up {
-            t.c_iflag |= owed.input;
-            t.c_oflag |= owed.output;
-            t.c_lflag |= owed.local;
-            // SAFETY: tcsetattr on the slave of the pty this session
-            // owns, with the settings just read from it.
-            return (unsafe { libc::tcsetattr(slave.fd(), libc::TCSANOW, &t) } == 0).then_some(canon);
-        }
-        std::hint::spin_loop();
+    // SAFETY: tcgetpgrp on the pty master this session owns.
+    let front = unsafe { libc::tcgetpgrp(master) };
+    let mut t = termios(slave.fd())?;
+    let canon = t.c_lflag & libc::ICANON != 0;
+    let job = front > 0 && front != shell_pgrp;
+    // a job in raw mode after its exec has settings of its own
+    if owed.missing_from(Flags::of(&t)).is_empty() || job != canon && !(job && unstarted) {
+        return None;
     }
+    t.c_iflag |= owed.input;
+    t.c_oflag |= owed.output;
+    t.c_lflag |= owed.local;
+    // SAFETY: tcsetattr on the slave of the pty this session owns, with
+    // the settings just read from it.
+    (unsafe { libc::tcsetattr(slave.fd(), libc::TCSANOW, &t) } == 0).then_some(canon)
 }
 
 /// The settings of the pty this session owns, read from either side.
@@ -587,6 +544,28 @@ mod tests {
         pid
     }
 
+    /// The first commands after the kill, as a person would type them,
+    /// each printing as it should. A command the session saw holding the
+    /// terminal ends the repair; one that came and went between two looks
+    /// is counted, and that many end it too.
+    fn commands_until_the_repair_is_over(s: &mut LocalSession) {
+        for (first, second) in [("one", "two"), ("three", "four"), ("five", "six")] {
+            s.write(format!("/usr/bin/printf '{first}\\n{second}\\n'\r").as_bytes()).unwrap();
+            assert!(
+                pump_until(s, |s| rows(s).iter().any(|r| r.trim() == second) && at_prompt(s)),
+                "the command ran:\n{}",
+                screen(s)
+            );
+            assert!(
+                stacked(s, first, second),
+                "newline returns the carriage again, repairs {:?}:\n{}",
+                s.line_repairs(),
+                screen(s)
+            );
+        }
+        assert!(pump_until(s, |s| !s.line_repairs().1 && at_prompt(s)), "the repair is over:\n{}", screen(s));
+    }
+
     fn killed_in_raw_mode(shell_path: &str, id: u64, signal: libc::c_int) {
         let _env = test_pane_env(shell_path);
         let mut s = shell(id);
@@ -594,27 +573,10 @@ mod tests {
         assert_eq!(s.pty_flags().1 & libc::OPOST, 0, "the program has the terminal raw");
         // bash puts its own settings back, and nothing is repaired
         kill_and_wait(&mut s, pid, signal, shell_path.ends_with("zsh"));
-        // the first command after it, as a person would type it
-        s.write(b"/usr/bin/printf 'one\\ntwo\\n'\r").unwrap();
-        assert!(
-            pump_until(&mut s, |s| rows(s).iter().any(|r| r.trim() == "two")),
-            "the command ran:\n{}",
-            screen(&s)
-        );
-        assert!(
-            stacked(&s, "one", "two"),
-            "newline returns the carriage again, repairs {:?}:\n{}",
-            s.line_repairs(),
-            screen(&s)
-        );
-        assert!(
-            pump_until(&mut s, |s| !s.line_repairs().1 && at_prompt(s)),
-            "the repair ended with that command:\n{}",
-            screen(&s)
-        );
+        commands_until_the_repair_is_over(&mut s);
         // and it holds without the session doing anything more
-        s.write(b"/usr/bin/printf 'three\\nfour\\n'\r").unwrap();
-        assert!(pump_until(&mut s, |s| stacked(s, "three", "four")), "later commands too:\n{}", screen(&s));
+        s.write(b"/usr/bin/printf 'seven\\neight\\n'\r").unwrap();
+        assert!(pump_until(&mut s, |s| stacked(s, "seven", "eight")), "later commands too:\n{}", screen(&s));
         let (_, oflag, lflag) = s.pty_flags();
         assert_ne!(oflag & libc::OPOST, 0);
         assert_ne!(lflag & libc::ISIG, 0, "Ctrl-C interrupts again");
@@ -662,13 +624,7 @@ mod tests {
         let mut s = shell(0xE6);
         let pid = raw_program(&mut s);
         kill_and_wait(&mut s, pid, libc::SIGTERM, true);
-        s.write(b"/usr/bin/printf 'one\\ntwo\\n'\r").unwrap();
-        assert!(pump_until(&mut s, |s| stacked(s, "one", "two")), "the first command ran:\n{}", screen(&s));
-        assert!(
-            pump_until(&mut s, |s| !s.line_repairs().1 && at_prompt(s)),
-            "the repair ended with that command:\n{}",
-            screen(&s)
-        );
+        commands_until_the_repair_is_over(&mut s);
         run(&mut s, "stty -opost");
         assert_eq!(s.pty_flags().1 & libc::OPOST, 0, "stty ran:\n{}", screen(&s));
         run(&mut s, "/usr/bin/true");
@@ -690,7 +646,6 @@ mod tests {
         assert!(s.line_repairs().1, "zsh still holds the damaged settings");
         s.write(b"/usr/bin/printf 'one\\ntwo\\n'\r").unwrap();
         assert!(pump_until(&mut s, |s| stacked(s, "one", "two")), "newline returns the carriage:\n{}", screen(&s));
-        assert!(pump_until(&mut s, |s| !s.line_repairs().1), "the repair ended with that command");
     }
 
     /// zsh writes the terminal's settings twice within microseconds for
@@ -777,17 +732,18 @@ mod tests {
         }
 
         /// The shell's next write may be microseconds away, and a write
-        /// made across it undoes it.
+        /// made across it undoes it: with the shell in front, a canonical
+        /// terminal is left to it.
         #[test]
-        fn a_canonical_terminal_is_not_written_to_at_first_sight() {
+        fn a_canonical_terminal_is_not_written_to_under_the_shell() {
             let (m, _slave) = pty();
             let m = m.as_raw_fd();
             let mut g = after_a_kill(m);
             put(m, true, false);
-            let typed = Instant::now();
             g.wrote_input(m, SHELL, b"cd /\r");
-            assert!(typed.elapsed() >= SETTLE_FOR, "written after {:?}", typed.elapsed());
-            assert!(processed(m), "and written once the shell had its time");
+            g.saw(m, SHELL, SHELL, 0, Instant::now());
+            assert!(!processed(m) && g.pending());
+            assert!(g.output_is_raw(m, SHELL), "what a command prints meanwhile is put right as read");
         }
 
         #[test]
@@ -811,25 +767,19 @@ mod tests {
         }
 
         #[test]
-        fn a_command_gone_before_any_look_still_ends_the_repair() {
+        fn a_command_gone_before_any_look_is_counted_and_the_prompt_repaired() {
             let (m, _slave) = pty();
             let m = m.as_raw_fd();
             let mut g = after_a_kill(m);
             // the shell applies its damaged copy for the command
             put(m, true, false);
             g.wrote_input(m, SHELL, b"ls\r");
-            assert!(processed(m), "the command got the flags");
             // it ran and ended unseen; the shell copied what it left and
             // its editor started again
-            put(m, false, true);
-            g.saw(m, SHELL, SHELL, 0, Instant::now());
-            assert!(!g.pending(), "the repair ended with that command");
-            // `stty -opost`, also gone before any look
             put(m, false, false);
-            g.saw(m, SHELL, SHELL, 0, Instant::now() + KEEP_EVERY);
-            g.saw(m, SHELL, SHELL, 0, Instant::now() + 2 * KEEP_EVERY);
-            assert!(!processed(m), "-opost was asked for");
-            assert_eq!(g.repairs(), 1);
+            g.saw(m, SHELL, SHELL, 0, Instant::now());
+            assert!(processed(m) && g.pending());
+            assert_eq!(g.missed, 1);
         }
 
         /// A loaded machine: the shell reads the line long after it was
@@ -851,7 +801,7 @@ mod tests {
             assert_eq!(unsafe { libc::read(slave.as_raw_fd(), got.as_mut_ptr().cast(), got.len()) }, 3);
             put(m, true, false);
             g.saw(m, SHELL, SHELL, 0, Instant::now() + 101 * HOT_FOR);
-            assert!(processed(m), "the command got the flags");
+            assert!(g.pending() && g.output_is_raw(m, SHELL), "the command's output is still put right");
         }
 
         /// A shell that keeps no copy never shows one: the lines it read
@@ -949,13 +899,13 @@ mod tests {
         let under = |s: &LocalSession, first: &str, second: &str| {
             rows(s).windows(2).any(|w| w[0].trim_end().ends_with(first) && w[1].trim_end() == second)
         };
-        s.write(b"/usr/bin/printf 'one\\ntwo\\n'\r").unwrap();
-        assert!(pump_until(&mut s, |s| under(s, "$ one", "two")), "the first command:\n{}", screen(&s));
-        assert!(pump_until(&mut s, |s| !s.line_repairs().1 && at_prompt(s)), "the repair ended:\n{}", screen(&s));
-        s.write(b"/usr/bin/printf 'three\\nfour\\n'\r").unwrap();
         // on a loaded machine bash 3.2 can print "child setpgid ...: Operation
         // not permitted" on the prompt's row first: its child and it both
         // set the job's group, and the loser of that race says so
+        let first = |s: &LocalSession| under(s, "$ one", "two") || stacked(s, "one", "two");
+        s.write(b"/usr/bin/printf 'one\\ntwo\\n'\r").unwrap();
+        assert!(pump_until(&mut s, |s| first(s) && at_prompt(s)), "the first command:\n{}", screen(&s));
+        s.write(b"/usr/bin/printf 'three\\nfour\\n'\r").unwrap();
         let later = |s: &LocalSession| under(s, "$ three", "four") || stacked(s, "three", "four");
         assert!(pump_until(&mut s, later), "later commands too:\n{}", screen(&s));
     }
