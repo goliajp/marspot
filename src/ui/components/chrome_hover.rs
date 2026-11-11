@@ -4,7 +4,7 @@
 //! read by the painter, so a control lights up exactly where a click
 //! would land on it.
 
-use marspot_term::layout::{Layout, SIDEBAR_ROW_H_PHYS};
+use marspot_term::layout::Layout;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChromeHover {
@@ -32,7 +32,7 @@ impl ChromeHover {
             return Some(Self::Close(i));
         }
         let rows_top = layout.top_inset + layout.sidebar_top_pad_phys;
-        layout.hit_test_sidebar_row(x, y, rows_top, SIDEBAR_ROW_H_PHYS, n_rows).map(Self::Row)
+        layout.hit_test_sidebar_row(x, y, rows_top, marspot_term::layout::sidebar_row_h(), n_rows).map(Self::Row)
     }
 
     /// The sidebar row the pointer is in, on its close button or not.
@@ -85,7 +85,7 @@ mod tests {
         // In a pane, below the last row, and on the button the layout
         // does not show.
         assert_eq!(ChromeHover::at(&l, 3, 700.0, 400.0), None);
-        let below = l.close_session_rects[2].y_top + 2.0 * SIDEBAR_ROW_H_PHYS;
+        let below = l.close_session_rects[2].y_top + 2.0 * marspot_term::layout::SIDEBAR_ROW_H_PHYS;
         assert_eq!(ChromeHover::at(&l, 3, 40.0, below), None);
         assert_eq!(l.dev_panel_button_rect.w, 0.0);
         assert_eq!(ChromeHover::at(&l, 3, 0.0, 0.0), None);

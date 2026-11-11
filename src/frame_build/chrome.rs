@@ -174,12 +174,12 @@ fn paint_sidebar(
             // As wide as a row's fill, so the two line up; the button
             // itself is where the layout put it.
             let fill = Rect {
-                x: chrome::SIDEBAR_ROW_INSET,
-                w: (layout.sidebar_w - 2.0 * chrome::SIDEBAR_ROW_INSET).max(0.0),
+                x: chrome::px(chrome::SIDEBAR_ROW_INSET),
+                w: (layout.sidebar_w - 2.0 * chrome::px(chrome::SIDEBAR_ROW_INSET)).max(0.0),
                 ..add
             };
             painter.fill_rounded_rect(
-                fill, palette::chrome_hover(), chrome::SIDEBAR_ROW_RADIUS as f32, (palette::none(), 0.0),
+                fill, palette::chrome_hover(), chrome::px(chrome::SIDEBAR_ROW_RADIUS) as f32, (palette::none(), 0.0),
             );
         }
         let fg = if full {
@@ -189,7 +189,7 @@ fn paint_sidebar(
         } else {
             palette::chrome_icon()
         };
-        icons::paint(painter, Symbol::Plus, add, chrome::SIDEBAR_ADD_ICON, fg);
+        icons::paint(painter, Symbol::Plus, add, chrome::px(chrome::SIDEBAR_ADD_ICON), fg);
     }
     Sidebar {
         rect: Rect {

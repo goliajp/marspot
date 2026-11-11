@@ -43,9 +43,9 @@ impl Sidebar<'_> {
     pub fn row_rect(&self, i: usize) -> Rect {
         Rect {
             x: self.rect.x,
-            y_top: self.rect.y_top + self.top_pad + i as f64 * chrome::SIDEBAR_ROW_H,
+            y_top: self.rect.y_top + self.top_pad + i as f64 * chrome::px(chrome::SIDEBAR_ROW_H),
             w: self.rect.w,
-            h: chrome::SIDEBAR_ROW_H,
+            h: chrome::px(chrome::SIDEBAR_ROW_H),
         }
     }
 
@@ -54,14 +54,14 @@ impl Sidebar<'_> {
     pub fn fill_rect(&self, i: usize) -> Rect {
         let row = self.row_rect(i);
         Rect {
-            x: row.x + chrome::SIDEBAR_ROW_INSET,
-            w: (row.w - 2.0 * chrome::SIDEBAR_ROW_INSET).max(0.0),
+            x: row.x + chrome::px(chrome::SIDEBAR_ROW_INSET),
+            w: (row.w - 2.0 * chrome::px(chrome::SIDEBAR_ROW_INSET)).max(0.0),
             ..row
         }
     }
 
     pub fn paint(&self, p: &mut ViewPainter) {
-        let radius = chrome::SIDEBAR_ROW_RADIUS as f32;
+        let radius = chrome::px(chrome::SIDEBAR_ROW_RADIUS) as f32;
         // The last pane cannot be closed.
         let can_close = self.rows.len() > 1;
         for (i, row) in self.rows.iter().enumerate() {
@@ -75,23 +75,23 @@ impl Sidebar<'_> {
             }
 
             let dot = Rect {
-                x: rect.x + chrome::SIDEBAR_PAD_X,
-                y_top: rect.y_top + (rect.h - chrome::SIDEBAR_DOT) * 0.5,
-                w: chrome::SIDEBAR_DOT,
-                h: chrome::SIDEBAR_DOT,
+                x: rect.x + chrome::px(chrome::SIDEBAR_PAD_X),
+                y_top: rect.y_top + (rect.h - chrome::px(chrome::SIDEBAR_DOT)) * 0.5,
+                w: chrome::px(chrome::SIDEBAR_DOT),
+                h: chrome::px(chrome::SIDEBAR_DOT),
             };
             let dot_color = match row.state {
                 SessionState::Active => palette::ok(),
                 SessionState::Idle => palette::chrome_icon(),
                 SessionState::Exited => palette::danger(),
             };
-            p.fill_rounded_rect(dot, dot_color, (chrome::SIDEBAR_DOT * 0.5) as f32, (palette::none(), 0.0));
+            p.fill_rounded_rect(dot, dot_color, (chrome::px(chrome::SIDEBAR_DOT) * 0.5) as f32, (palette::none(), 0.0));
 
             // The name stops short of where the close button goes,
             // shown or not.
-            let label_x = dot.x + dot.w + chrome::SIDEBAR_DOT_GAP;
+            let label_x = dot.x + dot.w + chrome::px(chrome::SIDEBAR_DOT_GAP);
             let close = self.close_rects.get(i);
-            let label_right = close.map_or(rect.x + rect.w, |c| c.x) - chrome::SIDEBAR_LABEL_GAP;
+            let label_right = close.map_or(rect.x + rect.w, |c| c.x) - chrome::px(chrome::SIDEBAR_LABEL_GAP);
             let room = ((label_right - label_x) / p.cell_w as f64).floor().max(0.0) as usize;
             let baseline = (rect.y_top + (rect.h - p.cell_h as f64) * 0.5) as f32 + p.ascent;
             let fg = if selected { palette::fg() } else { palette::chrome_fg() };

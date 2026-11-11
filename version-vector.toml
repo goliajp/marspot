@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.283"  # japanese and chinese lines carry no closing full stop
-core    = "0.12.313"  # japanese and chinese lines carry no closing full stop
+shell   = "0.7.284"  # the developer panel stays hidden on a machine that never saved its window
+core    = "0.12.314"  # the sidebar scales with the display, as the rest of the window does
 session = "0.11.159"  # a long log line of non-ASCII text is cut between characters

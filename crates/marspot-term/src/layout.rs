@@ -262,10 +262,28 @@ const TOOLBAR_LIGHTS_GAP_LOGICAL: f64 = 15.0;
 /// room the cluster itself gets from the window edge.
 const TOOLBAR_EDGE_MARGIN_LOGICAL: f64 = 9.0;
 
-/// Sidebar geometry, all in physical pixels.  Renderer reads
+static DENSITY_BITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1.0f64.to_bits());
+
+/// Physical pixels per window unit: the display's backing scale.  The
+/// sidebar's sizes below are window units and are multiplied by it; a
+/// row drawn 22 physical pixels high is half its size on a 2× display.
+pub fn density() -> f64 {
+    f64::from_bits(DENSITY_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+pub fn set_density(scale: f64) {
+    DENSITY_BITS.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Height of a sidebar row in physical pixels.
+pub fn sidebar_row_h() -> f64 {
+    SIDEBAR_ROW_H_PHYS * density()
+}
+
+/// Sidebar geometry, in window units.  Renderer reads
 /// `Layout::sidebar_top_pad_phys` (computed at build time so the
 /// header band reserved for the [+] add-session button is accounted
-/// for); session-row height stays a fixed phys constant.
+/// for).
 pub const SIDEBAR_ROW_H_PHYS: f64 = 22.0;
 const SIDEBAR_HEADER_GAP_PHYS: f64 = 8.0;
 const SIDEBAR_ADD_BTN_H_PHYS: f64 = 22.0;
@@ -363,7 +381,7 @@ impl Layout {
         // (not in `with_chrome`) because the renderer's row math
         // reads it whether or not chrome was layered on.
         let sidebar_top_pad_phys = if sidebar_w > 0.0 {
-            SIDEBAR_HEADER_GAP_PHYS + SIDEBAR_ADD_BTN_H_PHYS + SIDEBAR_BODY_GAP_PHYS
+            (SIDEBAR_HEADER_GAP_PHYS + SIDEBAR_ADD_BTN_H_PHYS + SIDEBAR_BODY_GAP_PHYS) * density()
         } else {
             0.0
         };
@@ -511,12 +529,12 @@ impl Layout {
         // (snapshot / 1-pane bench paths).
         if self.sidebar_w > 0.0 && n_sessions > 0 {
             let mut rects = Vec::with_capacity(n_sessions);
-            let close_size = SIDEBAR_CLOSE_PHYS_SIZE;
-            let close_x = self.sidebar_w - SIDEBAR_CLOSE_PHYS_MARGIN_RIGHT - close_size;
+            let close_size = SIDEBAR_CLOSE_PHYS_SIZE * density();
+            let close_x = self.sidebar_w - SIDEBAR_CLOSE_PHYS_MARGIN_RIGHT * density() - close_size;
             for i in 0..n_sessions {
                 let row_top =
-                    self.top_inset + self.sidebar_top_pad_phys + i as f64 * SIDEBAR_ROW_H_PHYS;
-                let close_y = row_top + (SIDEBAR_ROW_H_PHYS - close_size) / 2.0;
+                    self.top_inset + self.sidebar_top_pad_phys + i as f64 * sidebar_row_h();
+                let close_y = row_top + (sidebar_row_h() - close_size) / 2.0;
                 rects.push(Rect {
                     x: close_x,
                     y_top: close_y,
@@ -532,14 +550,14 @@ impl Layout {
         // when sidebar exists; renderer paints it disabled when
         // n_sessions >= 9 and `mouse_down` ignores the click.
         if self.sidebar_w > 0.0 {
-            let x = SIDEBAR_ADD_BTN_X_PAD_PHYS;
-            let w = (self.sidebar_w - 2.0 * SIDEBAR_ADD_BTN_X_PAD_PHYS).max(1.0);
-            let y = self.top_inset + SIDEBAR_HEADER_GAP_PHYS;
+            let x = SIDEBAR_ADD_BTN_X_PAD_PHYS * density();
+            let w = (self.sidebar_w - 2.0 * x).max(1.0);
+            let y = self.top_inset + SIDEBAR_HEADER_GAP_PHYS * density();
             self.add_session_button_rect = Rect {
                 x,
                 y_top: y,
                 w,
-                h: SIDEBAR_ADD_BTN_H_PHYS,
+                h: SIDEBAR_ADD_BTN_H_PHYS * density(),
             };
         }
 

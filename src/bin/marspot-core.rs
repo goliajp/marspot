@@ -5063,7 +5063,7 @@ impl CoreApp {
     fn resolve_context_region(&self, wi: usize, x_phys: f64, y_phys: f64) -> ContextRegion {
         // Sidebar row check first — wins over the cell-area hit when
         // both overlap (the sidebar overlays the title-strip band).
-        let row_phys = marspot_term::layout::SIDEBAR_ROW_H_PHYS;
+        let row_phys = marspot_term::layout::sidebar_row_h();
         let top_pad_phys = win!(self, wi).layout.top_inset + win!(self, wi).layout.sidebar_top_pad_phys;
         if let Some(idx) = win!(self, wi).layout.hit_test_sidebar_row(
             x_phys, y_phys, top_pad_phys, row_phys, win!(self, wi).panes.len(),
@@ -7794,7 +7794,7 @@ impl CoreApp {
             }
 
         let layout = &win!(self, wi).layout;
-        let row_phys = marspot::layout::SIDEBAR_ROW_H_PHYS;
+        let row_phys = marspot::layout::sidebar_row_h();
         let top_pad_phys = layout.top_inset + layout.sidebar_top_pad_phys;
         let title_hit = layout.hit_test_cell_title(x_phys, y_phys);
         let sidebar_hit = layout.hit_test_sidebar_row(
@@ -8006,7 +8006,7 @@ impl CoreApp {
         // Target the pane under the drop point (body cells or its
         // sidebar row); a drop on chrome/padding goes to the focused
         // pane — dropping "at the terminal" should never be a no-op.
-        let row_phys = marspot_term::layout::SIDEBAR_ROW_H_PHYS;
+        let row_phys = marspot_term::layout::sidebar_row_h();
         let top_pad_phys = win!(self, wi).layout.top_inset + win!(self, wi).layout.sidebar_top_pad_phys;
         let sidebar_hit = win!(self, wi).layout.hit_test_sidebar_row(
             x_phys, y_phys, top_pad_phys, row_phys, win!(self, wi).panes.len(),
