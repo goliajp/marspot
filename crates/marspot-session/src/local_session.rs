@@ -109,6 +109,8 @@ pub struct LocalSession {
     writer: PtyWriter,
     /// Replies written for programs that may never read them.
     replies: crate::reply_guard::ReplyGuard,
+    /// Terminal settings a killed program left behind.
+    line: crate::line_discipline::LineGuard,
     exited: Arc<AtomicBool>,
     last_output: Option<Instant>,
     pending_scrollback_pages: Vec<PendingPage>,
@@ -277,6 +279,7 @@ impl LocalSession {
             reader,
             writer,
             replies: Default::default(),
+            line: Default::default(),
             exited,
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -386,27 +389,19 @@ impl LocalSession {
             }
         }
         self.flush_capability_responses();
-        self.check_unread_replies();
+        // see `reply_guard`: on every pump while replies are unaccounted
+        // for -- any output, the shell's prompt included, or the loop's
+        // short wake while watching
+        if self.replies.is_watching() {
+            let delivered = self.writer.backlog() == 0;
+            self.replies.check_and_log(self.pty.raw_master(), self.shell_pgrp(), delivered, self.id);
+        }
+        // see `line_discipline`: on output, which is when a job starts
+        // drawing and when the shell prints its prompt again
+        if total > 0 || self.line.wants_look() {
+            self.line.look(self.pty.raw_master(), self.shell_pgrp(), self.id);
+        }
         (total, more)
-    }
-
-    /// See [`crate::reply_guard`]. Runs on every pump while replies are
-    /// unaccounted for -- any output, the shell's prompt included, or
-    /// the loop's short wake while watching.
-    fn check_unread_replies(&mut self) {
-        if !self.replies.is_watching() {
-            return;
-        }
-        let delivered = self.writer.backlog() == 0;
-        if let Some(n) = self.replies.check(self.pty.raw_master(), self.shell_pgrp(), delivered) {
-            marspot_term::lx_info!(
-                "l3.replies_flushed",
-                "the program that asked left the foreground; flushed the input queue, \
-                 which held nothing but its replies (at most this many bytes)",
-                session_id = self.id,
-                bytes = n as u64
-            );
-        }
     }
 
     /// The shell's process group: the foreground whenever no job is.
@@ -420,9 +415,11 @@ impl LocalSession {
         self.replies.is_watching()
     }
 
-    /// How soon the loop should wake while replies are being watched.
+    /// How soon the loop should wake while replies are being watched or
+    /// the terminal's settings are being put back.
     pub fn reply_poll_every(&self) -> Option<std::time::Duration> {
-        self.replies.poll_every()
+        let line = self.line.poll_every();
+        self.replies.poll_every().map_or(line, |r| Some(line.map_or(r, |l| l.min(r))))
     }
 
     #[cfg(test)]
@@ -521,7 +518,9 @@ impl LocalSession {
             return Ok(0);
         }
         self.replies.wrote_other();
-        self.enqueue(bytes)
+        let queued = self.enqueue(bytes);
+        self.line.wrote_input(self.pty.raw_master(), bytes);
+        queued
     }
 
     fn enqueue(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -642,6 +641,7 @@ impl LocalSession {
             reader,
             writer,
             replies: Default::default(),
+            line: Default::default(),
             exited,
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -749,6 +749,21 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::time::{Duration, Instant};
+
+    /// What the `line_discipline` tests read off a pane.
+    impl LocalSession {
+        /// Repairs started so far, and whether one is pending.
+        pub(crate) fn line_repairs(&self) -> (u64, bool) {
+            (self.line.repairs(), self.line.pending())
+        }
+
+        /// The tty's input, output and local flags.
+        pub(crate) fn pty_flags(&self) -> (libc::tcflag_t, libc::tcflag_t, libc::tcflag_t) {
+            let mut t: libc::termios = unsafe { std::mem::zeroed() };
+            unsafe { libc::tcgetattr(self.pty.raw_master(), &mut t) };
+            (t.c_iflag, t.c_oflag, t.c_lflag)
+        }
+    }
 
     /// A held pane keeps its picture while its PTY keeps talking.
     ///
@@ -989,6 +1004,7 @@ mod tests {
             reader: None,
             writer: PtyWriter::new("l3-pty-writer-1", io::sink(), marspot_term::frame_writer::cap::PTY),
             replies: Default::default(),
+            line: Default::default(),
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -1055,6 +1071,7 @@ mod tests {
             reader: None,
             writer: PtyWriter::new("l3-pty-writer-1", io::sink(), marspot_term::frame_writer::cap::PTY),
             replies: Default::default(),
+            line: Default::default(),
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -1103,6 +1120,7 @@ mod tests {
             reader: None,
             writer: PtyWriter::new("l3-pty-writer-2", io::sink(), marspot_term::frame_writer::cap::PTY),
             replies: Default::default(),
+            line: Default::default(),
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -1164,6 +1182,7 @@ mod tests {
             reader: None,
             writer: PtyWriter::new("l3-pty-writer-0", io::sink(), marspot_term::frame_writer::cap::PTY),
             replies: Default::default(),
+            line: Default::default(),
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),

@@ -42,6 +42,7 @@ use marspot::shell_proto::{
 mod banner;
 mod launch;
 mod cli_socket;
+mod instance;
 mod observe;
 mod orphans;
 mod pane_decls;
@@ -52,6 +53,7 @@ mod present;
 mod receipts;
 mod sup_log;
 mod supervisor;
+mod supervisor_profile;
 mod theme_follow;
 use banner::BannerKind;
 use launch::*;
@@ -715,8 +717,8 @@ struct ShellApp {
     /// Dev seam only (`MARSPOT_DEV_QUIT_AFTER_PAINT=<n>`): once `n`
     /// windows have painted, quit the way the dock's Quit item does.
     /// A script cannot open a dock menu, and what has to be tested is
-    /// the route — `terminate:` lands on the boot window's delegate,
-    /// and reading that as "close that window" is what left every
+    /// the route — `terminate:` used to land on the boot window, and
+    /// reading that as "close that window" is what left every
     /// other window on screen (2026-09-28 report).  Unset in the
     /// installed app.
     dev_quit_after_paint: Option<usize>,
@@ -1175,6 +1177,8 @@ impl ShellApp {
         if let Err(e) = cli_socket::serve(cli_tx, wake_for_cli) {
             lx_warn!("shell.cli.bind_failed", &format!("{e}"));
         }
+        let wake_for_front = proxy.clone();
+        instance::serve_front(move || wake_for_front.wake());
         // Best-effort like the command socket above: a shell that
         // cannot bind this one still runs the terminal, and submits
         // fall back to reading the pane.
@@ -2398,6 +2402,7 @@ impl ShellApp {
         self.plugin_registry.tick_all_with(&self.plugin_host);
         lap!(6);
 
+        instance::answer_front();
         // Answer the command socket.  Before the submit drain, so a
         // request that arrives this pass runs this pass.
         while let Ok(req) = self.cli_rx.try_recv() {
@@ -4632,21 +4637,17 @@ impl MarspotApp for ShellApp {
     }
 
     fn quit_requested(&mut self, ctx: &MarspotAppCtx) {
-        // Quit means the app.  It arrives on the boot window's
-        // delegate, which is the one wearing the NSApplicationDelegate
-        // hat, and reading it as "close that window" is how quitting
-        // from the dock used to leave every other window on screen
-        // (2026-09-28 report).
+        // Quit means the app.  It arrives with whichever window is
+        // still open, and reading it as "close that window" is how
+        // quitting from the dock used to leave every other window on
+        // screen (2026-09-28 report).
         self.quit(ctx);
     }
 
     fn close_requested(&mut self, ctx: &MarspotAppCtx) {
         // RFC-005 — closing one of several windows closes THAT window
         // and the panes it holds; only the last window closing is a
-        // quit.  Cmd-Q arrives through the same callback but via the
-        // NSApplicationDelegate, which the boot window's delegate
-        // wears, so it always lands on the boot window and falls
-        // through to the quit path below when it is the only one left.
+        // quit.  Cmd-Q is `quit_requested`, not this.
         if marspot::app::window_count() > 1 {
             // The red button / Cmd-W: putting a window away, not
             // dismantling it.  Its slot is kept so the layout and
@@ -4905,6 +4906,13 @@ fn main() {
     // and points at a different file than us, re-exec into it.  This
     // is what lets a silent shell update land — the bundle's
     // MacOS/marspot-shell hands off to the current/ slot.
+    // One shell per state dir, settled before the redirect: a launch
+    // that loses never execs and never reaches the launch journal the
+    // crash-loop checks count from.  Subcommands talk to the running
+    // shell and take no lock.
+    if !std::env::args().nth(1).is_some_and(|a| a.starts_with('-')) {
+        instance::hold_or_exit();
+    }
     maybe_redirect_to_current_shell();
     if std::env::var_os("MARSPOT_SHELL_SELF_UPDATE").is_some() {
         // Take it out of the environment before anything else is
@@ -5222,107 +5230,3 @@ Usage:\n\
     let app = ShellApp::new(proxy.clone());
     run_app(app, proxy, attrs);
 }
-
-/// Where the supervisor's wake goes, when anyone asks.
-///
-/// The supervisor wakes at least once a second forever
-/// (`start_redraw_pump`; four times a second when the numbers below were
-/// taken), and at idle that is the only thing waking it -- so whatever
-/// it costs per wake is paid on every one of those wakes for as long as
-/// the app is open.  On a machine with seventeen panes the process was measured at
-/// 4.4% of a core while all seventeen panes together used 1.1%, and no
-/// instrument said where it went.
-///
-/// Turned on by `MARSPOT_SUPERVISOR_PROFILE=1`, or by creating the file
-/// `<state>/supervisor-profile` -- the file, because the question is
-/// about a running app with real panes in it, and an env var would mean
-/// relaunching the thing being measured.  The file is looked at once
-/// every ten seconds, never on the wake path.  Off, each phase costs
-/// one relaxed atomic load.
-mod supervisor_profile {
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::time::Instant;
-
-    pub const PHASES: [&str; 8] = [
-        "activity_drain",
-        "settings_stat",
-        "sweep_pane_status",
-        "sweep_autorun",
-        "dev_drivers",
-        "wake_queue",
-        "plugin_tick",
-        "rest",
-    ];
-    static ON: AtomicBool = AtomicBool::new(false);
-    static READY: AtomicBool = AtomicBool::new(false);
-    static NEXT_LOOK: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
-    static NANOS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
-    static WAKES: AtomicU64 = AtomicU64::new(0);
-    static SINCE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
-
-    fn marker() -> std::path::PathBuf {
-        marspot_term::paths::state_root().join("supervisor-profile")
-    }
-
-    pub fn on() -> bool {
-        if !READY.load(Ordering::Relaxed) {
-            if std::env::var("MARSPOT_SUPERVISOR_PROFILE").as_deref() == Ok("1") {
-                ON.store(true, Ordering::Relaxed);
-            }
-            READY.store(true, Ordering::Relaxed);
-        }
-        // The marker file, at most once every ten seconds.  Off, this
-        // is a clock read and a comparison; it is never a stat on the
-        // wake path.
-        let mut next = NEXT_LOOK.lock().unwrap_or_else(|p| p.into_inner());
-        let due = next.map(|t| Instant::now() >= t).unwrap_or(true);
-        if due {
-            *next = Some(Instant::now() + std::time::Duration::from_secs(10));
-            let present = marker().exists();
-            if present != ON.load(Ordering::Relaxed) {
-                ON.store(present, Ordering::Relaxed);
-                crate::lx_info!(
-                    "supervisor.profile.toggled",
-                    "supervisor phase timing",
-                    on = present as u32,
-                    marker = marker().display()
-                );
-            }
-        }
-        ON.load(Ordering::Relaxed)
-    }
-
-    pub fn add(phase: usize, d: std::time::Duration) {
-        NANOS[phase].fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
-    }
-
-    /// Call once per wake, after the phases.  Prints every ten seconds.
-    pub fn wake_done() {
-        WAKES.fetch_add(1, Ordering::Relaxed);
-        let mut since = SINCE.lock().unwrap_or_else(|p| p.into_inner());
-        let start = since.get_or_insert_with(Instant::now);
-        let elapsed = start.elapsed();
-        if elapsed < std::time::Duration::from_secs(10) {
-            return;
-        }
-        let wakes = WAKES.swap(0, Ordering::Relaxed).max(1);
-        let secs = elapsed.as_secs_f64();
-        let mut total = 0u64;
-        let mut parts = String::new();
-        for (i, name) in PHASES.iter().enumerate() {
-            let n = NANOS[i].swap(0, Ordering::Relaxed);
-            total += n;
-            parts.push_str(&format!(" {name}={:.0}us", n as f64 / wakes as f64 / 1000.0));
-        }
-        *since = Some(Instant::now());
-        crate::lx_info!(
-            "supervisor.profile",
-            "where the wake went",
-            wakes_per_s = format!("{:.1}", wakes as f64 / secs),
-            per_wake_us = format!("{:.0}", total as f64 / wakes as f64 / 1000.0),
-            core_pct = format!("{:.2}", total as f64 / 1e9 / secs * 100.0),
-            parts = parts.trim().to_string()
-        );
-    }
-}
-

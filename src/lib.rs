@@ -86,6 +86,7 @@ pub static MARSPOT_LAYER_VERS: &str = concat!(
 
 // GUI-coupled modules (AppKit / Metal / CoreText) — these stay here.
 pub mod app;
+mod app_delegate;
 mod app_keys;
 pub mod app_menu;
 pub mod cc;
