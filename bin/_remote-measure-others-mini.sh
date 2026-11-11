@@ -550,6 +550,7 @@ for t in TERMS:
     if version: rec["version"] = version
     if bundle:  rec["bundle_id"] = bundle
     rec["captured_at"] = today
+    rec["unit"] = "MB/s"  # 10^6 bytes per second
     rec["method"] = ("ssh→LaunchAgent (com.marspot.bench-trigger)"
                      if os.environ.get("XPC_SERVICE_NAME", "").startswith("com.marspot")
                      else "console / Screen Sharing")
@@ -565,7 +566,7 @@ for t in TERMS:
         size = os.path.getsize(f"{ROOT}/bench/scenarios/{s}.bin")
         reps = max(1, -(-LIVE_MIN_BYTES // size))
         bps = size * reps * 1_000_000_000 // med
-        rec[f"{s}_MBps"] = round(bps / 1048576, 1)
+        rec[f"{s}_MBps"] = round(bps / 1e6, 1)  # MB = 10^6 bytes
     # Only emit if we got at least one MBps measurement; metadata alone
     # isn't worth surfacing.
     if any(k.endswith("_MBps") for k in rec):

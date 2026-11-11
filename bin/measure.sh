@@ -217,7 +217,7 @@ for scenario in "${SCENARIOS[@]}"; do
       bytes_per_sec=$((scenario_bytes * 1000000000 / ns))
       printf "    real=%.3fs  %.1f MB/s\n" \
         "$(echo "scale=3; $ns/1000000000" | bc)" \
-        "$(echo "scale=1; $bytes_per_sec/1048576" | bc)"
+        "$(echo "scale=1; $bytes_per_sec/1000000" | bc)"
     done
   done
 done
