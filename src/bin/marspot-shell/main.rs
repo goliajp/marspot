@@ -4460,7 +4460,7 @@ impl MarspotApp for ShellApp {
         // Read the gate before taking `&mut` on the same window.
         let ready = self.windows[wi].first_frame_ready;
         if let Some(p) = self.windows[wi].presenter.as_mut() {
-            p.set_drawable_size(w_phys, h_phys);
+            p.set_drawable_size(w_phys, h_phys, scale);
             // Present *synchronously* inside the resize callback so
             // our drawable lands in the SAME CATransaction AppKit is
             // about to commit for the window-bounds change.  Coupled

@@ -264,9 +264,10 @@ const TOOLBAR_EDGE_MARGIN_LOGICAL: f64 = 9.0;
 
 static DENSITY_BITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1.0f64.to_bits());
 
-/// Physical pixels per window unit: the display's backing scale.  The
-/// sidebar's sizes below are window units and are multiplied by it; a
-/// row drawn 22 physical pixels high is half its size on a 2× display.
+/// Physical pixels per window unit: the display's backing scale.
+/// Every size this module names is in window units and is multiplied
+/// by it; a row drawn 22 physical pixels high is half its size on a 2×
+/// display.  What comes out of `Layout` is physical pixels.
 pub fn density() -> f64 {
     f64::from_bits(DENSITY_BITS.load(std::sync::atomic::Ordering::Relaxed))
 }
@@ -277,20 +278,24 @@ pub fn set_density(scale: f64) {
 
 /// Height of a sidebar row in physical pixels.
 pub fn sidebar_row_h() -> f64 {
-    SIDEBAR_ROW_H_PHYS * density()
+    SIDEBAR_ROW_H * density()
 }
 
 /// Sidebar geometry, in window units.  Renderer reads
 /// `Layout::sidebar_top_pad_phys` (computed at build time so the
 /// header band reserved for the [+] add-session button is accounted
 /// for).
-pub const SIDEBAR_ROW_H_PHYS: f64 = 22.0;
-const SIDEBAR_HEADER_GAP_PHYS: f64 = 8.0;
-const SIDEBAR_ADD_BTN_H_PHYS: f64 = 22.0;
-const SIDEBAR_BODY_GAP_PHYS: f64 = 8.0;
-const SIDEBAR_ADD_BTN_X_PAD_PHYS: f64 = 8.0;
-const SIDEBAR_CLOSE_PHYS_SIZE: f64 = 14.0;
-const SIDEBAR_CLOSE_PHYS_MARGIN_RIGHT: f64 = 8.0;
+pub const SIDEBAR_ROW_H: f64 = 22.0;
+const SIDEBAR_HEADER_GAP: f64 = 8.0;
+const SIDEBAR_ADD_BTN_H: f64 = 22.0;
+const SIDEBAR_BODY_GAP: f64 = 8.0;
+const SIDEBAR_ADD_BTN_X_PAD: f64 = 8.0;
+const SIDEBAR_CLOSE_SIZE: f64 = 14.0;
+const SIDEBAR_CLOSE_MARGIN_RIGHT: f64 = 8.0;
+/// Width of the line between two panes and between the sidebar and
+/// the grid, and a pane's inner padding, in window units.
+const SEAM: f64 = 1.0;
+const PANE_PADDING: f64 = 8.0;
 
 impl Layout {
     /// Build a layout for `grid_cols × grid_rows` sessions inside a
@@ -312,30 +317,17 @@ impl Layout {
         cell_h: f64,
     ) -> Self {
         assert!(grid_cols > 0 && grid_rows > 0);
-        // When a sidebar is present, reserve one 1 px strip between
-        // it and the 9-grid for the SEAM hairline.  Same physical
-        // width as inter-cell seams — iTerm2 reads as a 1-pixel
-        // hairline; anything wider looks like chrome.
-        let sidebar_seam = if sidebar_w > 0.0 { 1.0 } else { 0.0 };
+        // With a sidebar, one seam's width is kept between it and the
+        // grid for the line that divides them.
+        let sidebar_seam = if sidebar_w > 0.0 { SEAM * density() } else { 0.0 };
         let avail_w = (window_w - sidebar_w - sidebar_seam).max(0.0);
         let avail_h = (window_h - top_inset).max(0.0);
-        // Inter-cell gutter in physical pixels — a thin strip of
-        // chrome (the GUTTER color cleared by the renderer) shows
-        // between sessions so the 3×3 grid reads as a grid, not as a
-        // single sea of identical-looking shells.  2 px = 1 logical
-        // point at 2× retina; iTerm2-style hairline.  Skipped when
-        // the grid is 1×1 (single session, nothing to divide).
-        let gutter = if grid_cols > 1 || grid_rows > 1 {
-            1.0
-        } else {
-            0.0
-        };
-        // Inner padding (physical px) — breathing room between the
-        // cell rect's edge and the first/last terminal column / row.
-        // Without this, "Last login: ..." crowds the very top-left
-        // pixel of the cell.  ~8 px ≈ 4 logical points at 2× retina,
-        // matches iTerm2's default leftmargin/topmargin feel.
-        let padding = 8.0;
+        // The strip between two panes, so a grid reads as a grid.
+        // None when there is one pane and nothing to divide.
+        let gutter = if grid_cols > 1 || grid_rows > 1 { SEAM * density() } else { 0.0 };
+        // Room between a pane's edge and its first and last column and
+        // row, so the text does not start in the pane's corner pixel.
+        let padding = PANE_PADDING * density();
 
         // Cells flush to the available area's outer edges — gutters
         // appear ONLY between cells, never around the outside.  Old
@@ -381,7 +373,7 @@ impl Layout {
         // (not in `with_chrome`) because the renderer's row math
         // reads it whether or not chrome was layered on.
         let sidebar_top_pad_phys = if sidebar_w > 0.0 {
-            (SIDEBAR_HEADER_GAP_PHYS + SIDEBAR_ADD_BTN_H_PHYS + SIDEBAR_BODY_GAP_PHYS) * density()
+            (SIDEBAR_HEADER_GAP + SIDEBAR_ADD_BTN_H + SIDEBAR_BODY_GAP) * density()
         } else {
             0.0
         };
@@ -529,8 +521,8 @@ impl Layout {
         // (snapshot / 1-pane bench paths).
         if self.sidebar_w > 0.0 && n_sessions > 0 {
             let mut rects = Vec::with_capacity(n_sessions);
-            let close_size = SIDEBAR_CLOSE_PHYS_SIZE * density();
-            let close_x = self.sidebar_w - SIDEBAR_CLOSE_PHYS_MARGIN_RIGHT * density() - close_size;
+            let close_size = SIDEBAR_CLOSE_SIZE * density();
+            let close_x = self.sidebar_w - SIDEBAR_CLOSE_MARGIN_RIGHT * density() - close_size;
             for i in 0..n_sessions {
                 let row_top =
                     self.top_inset + self.sidebar_top_pad_phys + i as f64 * sidebar_row_h();
@@ -550,14 +542,14 @@ impl Layout {
         // when sidebar exists; renderer paints it disabled when
         // n_sessions >= 9 and `mouse_down` ignores the click.
         if self.sidebar_w > 0.0 {
-            let x = SIDEBAR_ADD_BTN_X_PAD_PHYS * density();
+            let x = SIDEBAR_ADD_BTN_X_PAD * density();
             let w = (self.sidebar_w - 2.0 * x).max(1.0);
-            let y = self.top_inset + SIDEBAR_HEADER_GAP_PHYS * density();
+            let y = self.top_inset + SIDEBAR_HEADER_GAP * density();
             self.add_session_button_rect = Rect {
                 x,
                 y_top: y,
                 w,
-                h: SIDEBAR_ADD_BTN_H_PHYS * density(),
+                h: SIDEBAR_ADD_BTN_H * density(),
             };
         }
 
