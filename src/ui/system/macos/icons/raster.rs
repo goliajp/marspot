@@ -71,25 +71,44 @@ pub(super) fn rasterise(name: &str, point_px: u32, side: u32, mask: &mut [u8]) {
         };
         let x = (side as f64 - align.size.width) * 0.5 - align.origin.x;
         let y = (side as f64 - align.size.height) * 0.5 - align.origin.y;
-        let whole = CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(side as f64, side as f64));
         let mut sharpest = 0u64;
         for dx in NUDGES {
             for dy in NUDGES {
-                bitmap.clear_rect(whole);
-                NSGraphicsContext::saveGraphicsState_class();
-                NSGraphicsContext::setCurrentContext(Some(&context));
-                image.drawInRect(NSRect::new(NSPoint::new(x + dx, y + dy), size));
-                NSGraphicsContext::restoreGraphicsState_class();
-                // the same ink gathered into fewer pixels sums to more
-                let alpha = bitmap.data().iter().skip(3).step_by(4);
-                let sharpness: u64 = alpha.clone().map(|&a| a as u64 * a as u64).sum();
-                if sharpness > sharpest {
-                    sharpest = sharpness;
-                    for (out, &a) in mask.iter_mut().zip(alpha) {
-                        *out = a;
-                    }
-                }
+                let rect = NSRect::new(NSPoint::new(x + dx, y + dy), size);
+                draw_keeping_sharpest(&mut bitmap, &context, &image, rect, mask, &mut sharpest);
             }
         }
     });
+}
+
+/// Draw `image` at `rect` into the cleared bitmap; when the result is
+/// sharper than `sharpest`, it becomes the mask.
+// one copy of the body: inlined, each of the four placements gets its own
+#[inline(never)]
+fn draw_keeping_sharpest(
+    bitmap: &mut CGContext,
+    context: &NSGraphicsContext,
+    image: &NSImage,
+    rect: NSRect,
+    mask: &mut [u8],
+    sharpest: &mut u64,
+) {
+    let whole = CGRect::new(
+        &CGPoint::new(0.0, 0.0),
+        &CGSize::new(bitmap.width() as f64, bitmap.height() as f64),
+    );
+    bitmap.clear_rect(whole);
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(context));
+    image.drawInRect(rect);
+    NSGraphicsContext::restoreGraphicsState_class();
+    // the same ink gathered into fewer pixels sums to more
+    let alpha = bitmap.data().iter().skip(3).step_by(4);
+    let sharpness: u64 = alpha.clone().map(|&a| a as u64 * a as u64).sum();
+    if sharpness > *sharpest {
+        *sharpest = sharpness;
+        for (out, &a) in mask.iter_mut().zip(alpha) {
+            *out = a;
+        }
+    }
 }
