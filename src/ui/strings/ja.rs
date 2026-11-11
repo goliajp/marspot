@@ -10,28 +10,28 @@ pub(super) static LANG: Lang = Lang { text, write };
 
 fn text(m: Msg) -> &'static str {
     match m {
-        Msg::SettingsIdleReclamation => "アイドル時の回収",
+        Msg::SettingsIdleReclamation => "未使用ペインの休止",
         Msg::SettingsAppearance => "外観",
         Msg::SettingsClaudeCode => "Claude Code",
         Msg::SettingsScrolling => "スクロール",
 
-        Msg::ReclaimIdlePanes => "アイドル中のclaudeペインを回収",
-        Msg::IdleFor => "回収までの時間",
-        Msg::WarmUpOnReturn => "復帰時にウォームアップ",
+        Msg::ReclaimIdlePanes => "未使用のClaudeペインを休止",
+        Msg::IdleFor => "休止までの時間",
+        Msg::WarmUpOnReturn => "戻ったときに順次再開",
         Msg::Theme => "テーマ",
         Msg::DimOtherPanes => "操作中でないペインを暗くする",
         Msg::CircledDigitsWide => "丸数字を2セル幅で表示",
-        Msg::ClaudeCodeReportsModel => "Claude Codeにモデルを報告させる",
+        Msg::ClaudeCodeReportsModel => "Claude Codeから使用モデルを取得",
         Msg::WheelSpeed => "ホイールの速度",
 
-        Msg::CostReclaimIdlePanes => "戻ると、セッションの再読み込みに約3秒かかります。",
-        Msg::CostIdleFor => "端末の静止時間ではなく、会話記録の更新時刻で判定します。",
-        Msg::CostWarmUpOnReturn => "戻ったときに、休止中のペインを1秒に1つずつ起こします。",
+        Msg::CostReclaimIdlePanes => "ペインに戻ると、セッションの再開に約3秒かかります。",
+        Msg::CostIdleFor => "ターミナルの無操作時間ではなく、セッション記録の最終更新時刻で判定します。",
+        Msg::CostWarmUpOnReturn => "ペインに戻ったとき、休止中のペインを1秒に1つずつ再開します。",
         Msg::CostTheme => "以前の色を取得したプログラムは、再取得するまでその色のままです。",
-        Msg::CostDimOtherPanes => "濃いほど違いがひと目で分かりますが、濃すぎると読みにくくなります。",
+        Msg::CostDimOtherPanes => "暗くするほど見分けやすくなりますが、暗すぎると読みにくくなります。",
         Msg::CostCircledDigitsWide => "全角と同じ幅になりますが、折り返しが1桁早まることがあります。",
         Msg::CostClaudeCodeReportsModel => {
-            "Claude Codeの設定にステータスラインを追加し、既存のものは保持します。"
+            "Claude Codeの設定にステータスラインを追加します。既存の設定は引き継がれ、オフにすると元に戻ります。"
         }
         Msg::CostWheelSpeed => "速いほど少ない操作で届きますが、行き過ぎやすくなります。",
 
@@ -99,7 +99,7 @@ fn text(m: Msg) -> &'static str {
         Msg::ScrollSlow => "遅い",
         Msg::ScrollNormal => "標準",
         Msg::ScrollFast => "速い",
-        Msg::ScrollFaster => "最速",
+        Msg::ScrollFaster => "さらに速い",
 
         Msg::MenuNewPane => "新規ペイン",
         Msg::MenuToggleSidebar => "サイドバーを表示/非表示",
@@ -133,14 +133,11 @@ fn text(m: Msg) -> &'static str {
 
         Msg::AccountsHeading => "アカウント",
         Msg::AccountsAvailability => "利用可能になる時刻",
-        Msg::AccountsEmpty => {
-            "使用状況はまだ取得されていません。ペインでclaudeまたはcodexにサインインすると、\
-             数分以内に表示されます。"
-        }
+        Msg::AccountsEmpty => "使用状況データはまだありません。ペインでClaudeまたはCodexにサインインすると、数分以内に表示されます。",
         Msg::TimelineNow => "現在",
         Msg::StatusOk => "利用可",
         Msg::StatusNear => "残りわずか",
-        Msg::StatusLimit => "上限",
+        Msg::StatusLimit => "上限到達",
         Msg::StatusNoKey => "未サインイン",
 
         Msg::PaneEmpty => "クリックしてシェルを開始",
@@ -173,7 +170,7 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::MoveToWindow(n) => write!(out, "ウインドウ{n}に移動"),
         Arg::PaneCount { cols, rows } => write!(out, "{cols} × {rows} = {}ペイン", cols * rows),
         Arg::ProcessDetail { pane, sid, shell_pid } => {
-            write!(out, "{pane} · sid {sid} · シェルpid {shell_pid}")
+            write!(out, "{pane} · sid {sid} · シェルPID {shell_pid}")
         }
         Arg::ResetAt(at) => write!(out, "リセット {at}"),
         Arg::UpdatedAt(at) => write!(out, "更新 {at}"),
@@ -181,8 +178,8 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::SessionUnavailable(id) => {
             write!(out, "セッション{id}を利用できません（任意のキーで再試行）")
         }
-        Arg::ProfileRow { n, current: true } => write!(out, "● プロファイル{n}"),
-        Arg::ProfileRow { n, current: false } => write!(out, "   プロファイル{n}"),
+        Arg::ProfileRow { n, current: true } => write!(out, "● アカウント{n}"),
+        Arg::ProfileRow { n, current: false } => write!(out, "   アカウント{n}"),
         Arg::HandOffTo(target) => write!(out, "{target}に引き継ぐ"),
         Arg::SwitchToProfile(n) => write!(out, "P{n}に切り替える"),
     }
