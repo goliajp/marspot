@@ -65,6 +65,7 @@ def row(metric, value, unit, limit, lower_better, gating=True, trials=None,
         "limit_kind": "max" if lower_better else "min", "stat": stat,
         "trials": trials, "trial_count": len(trials),
         "load1": host.get("load1"), "foreign_cores": host.get("foreign_cores"),
+        "sysmond_cores": host.get("sysmond_cores"), "lock_waiters": host.get("lock_waiters"),
     }
     if note:
         r["note"] = note
@@ -101,6 +102,8 @@ def l3_host(entry):
         "load1": {"start": entry.get("load1_start"), "max": entry.get("load1_max"),
                   "end": entry.get("load1_end")},
         "foreign_cores": entry.get("foreign_cores_max"),
+        "sysmond_cores": entry.get("sysmond_cores_max"),
+        "lock_waiters": entry.get("lock_waiters"),
         "invalid": entry.get("invalid"),
     }
 

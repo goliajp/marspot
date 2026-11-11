@@ -87,6 +87,28 @@ fi
 # a result left by an earlier run must not be read as this one's
 rm -f "$OUT_JSON"
 
+# Started over ssh, this has to run while that ssh session is still
+# open.  One build read 170-171 instructions per byte on cat-mixed when
+# the session that started it had ended and 178-182 while it was open,
+# minutes apart and repeatedly, with the same environment, the same nice
+# value and the same bytes written to scrollback and bytelog -- and it
+# is the session being open that decides, not whose child the probe is:
+# a probe detached with nohup under an open session reads the higher
+# level too.  Why is not known.  The ceilings in bench/baseline.json
+# were measured with the session open, which is how bin/bench-remote.sh
+# runs this, so the other level is refused rather than compared.
+if [[ -n "${SSH_CONNECTION:-}" ]]; then
+  _p=$$
+  _under_sshd=0
+  while [[ -n "$_p" && "$_p" != "0" && "$_p" != "1" ]]; do
+    case "$(ps -o comm= -p "$_p" 2>/dev/null)" in
+      *sshd*) _under_sshd=1; break ;;
+    esac
+    _p="$(ps -o ppid= -p "$_p" 2>/dev/null | tr -d ' ')"
+  done
+  (( _under_sshd )) || fail "the ssh session that started this has ended; the instruction count is 4-6 % lower in that state than the ceilings were measured in.  Run it with the session kept open."
+fi
+
 # More than three.  Trials are lottery tickets for an uncontended window
 # on a host that has a permanent tenant.  Measured 2026-08-19: with
 # three, one batch came back 28.7 / 72.3 / 160.0 MiB/s for the same
@@ -149,11 +171,13 @@ run_trial() {
   python3 "$ROOT/bin/_bench_record.py" cpu-snapshot > "$RUN_DIR/cpu.before"
   ( while sleep 1; do load1; done ) >> "$RUN_DIR/trial.load" 2>/dev/null &
   sampler=$!
+  echo "$sampler" > "$RUN_DIR/live-pids"
   for ((i = 0; i < SESSIONS; i++)); do
     "$PROBE_BIN" "$SESSION_BIN" "$scenario_path" "$repeats" \
       > "$RUN_DIR/probe.$i.out" 2> "$RUN_DIR/probe.$i.err" &
     pids+=($!)
     echo "$!" >> "$RUN_DIR/probe-pids"
+    echo "$!" >> "$RUN_DIR/live-pids"
   done
   for p in "${pids[@]}"; do
     wait "$p"
@@ -161,6 +185,7 @@ run_trial() {
   done
   kill "$sampler" 2>/dev/null
   wait "$sampler" 2>/dev/null
+  : > "$RUN_DIR/live-pids"
   python3 "$ROOT/bin/_bench_record.py" cpu-snapshot > "$RUN_DIR/cpu.after"
   load1 >> "$RUN_DIR/trial.load"
 }
@@ -168,10 +193,14 @@ run_trial() {
 RUN_DIR=$(mktemp -d)
 cleanup() {
   local p
+  # stopped mid-trial: the load sampler and the probes of that trial
+  # are still running and would outlive this script
+  for p in $(cat "$RUN_DIR/live-pids" 2>/dev/null); do kill "$p" 2>/dev/null; done
   for p in $(cat "$RUN_DIR/probe-pids" 2>/dev/null); do reap_trial "$p"; done
   rm -rf "$RUN_DIR"
 }
 trap cleanup EXIT
+trap 'exit 143' TERM INT HUP
 
 for scenario in "${SCENARIOS[@]}"; do
   spath="$SCENARIOS_DIR/$scenario.bin"
@@ -182,6 +211,7 @@ for scenario in "${SCENARIOS[@]}"; do
   total_bytes=$((fbytes * repeats))
 
   echo "==> $scenario ×$repeats ($((total_bytes / 1000000)) MB) into $SESSIONS session(s)"
+  python3 "$ROOT/bin/_bench_record.py" lock-waiters > "$RUN_DIR/$scenario.waiters"
   valid=0
   attempt=0
   while (( valid < TRIALS && attempt < TRIALS + REQUEUE )); do

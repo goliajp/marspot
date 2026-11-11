@@ -21,7 +21,7 @@ import time
 
 sys.dont_write_bytecode = True  # no __pycache__ next to the scripts
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _bench_record import FOREIGN_MAX, LOAD_MAX, foreign_cores  # noqa: E402
+from _bench_record import FOREIGN_MAX, LOAD_MAX, foreign_cores, foreign_detail  # noqa: E402
 
 # A trial of one session is judged on every load sample taken while it
 # ran and on what other processes used over it.  Trials of several
@@ -31,6 +31,9 @@ from _bench_record import FOREIGN_MAX, LOAD_MAX, foreign_cores  # noqa: E402
 MIN_VALID = int(os.environ.get("MARSPOT_BENCH_MIN_VALID", "3"))
 
 UNITS = {
+    "nice": "nice value the sessions ran at",
+    "sysmond_cores": "cores used by sysmond, which answers every ps on the host",
+    "lock_waiters": "processes queued behind the bench lock when the scenario started",
     "insn_per_byte": "instructions retired per byte, all sessions",
     "cycles_per_byte": "CPU cycles per byte, all sessions",
     "MB_per_s": "10^6 bytes per second of wall clock, all sessions together",
@@ -87,9 +90,11 @@ def trial(run_dir, scenario, bytes_per_session, sessions):
     after = json.load(open(os.path.join(run_dir, "cpu.after")))
     rec = {
         "load1_samples": loads,
+        "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "foreign_cores": foreign_cores(before, after),
         "sessions": sessions,
     }
+    rec.update(foreign_detail(before, after))
     if probes is None:
         rec["status"] = "failed"
     else:
@@ -147,10 +152,15 @@ def trial(run_dir, scenario, bytes_per_session, sessions):
 
 
 def finish(run_dir, out_json, sessions, scenarios):
-    out = {"_units": UNITS, "_sessions": sessions,
+    out = {"_units": UNITS, "_sessions": sessions, "_nice": os.nice(0),
            "_load_max": LOAD_MAX, "_foreign_cores_max": FOREIGN_MAX}
     all_loads = []
+    waiters = {}
     for scenario in scenarios:
+        wp = os.path.join(run_dir, f"{scenario}.waiters")
+        if os.path.exists(wp):
+            text = open(wp).read().strip()
+            waiters[scenario] = int(text) if text.isdigit() else None
         path = os.path.join(run_dir, f"{scenario}.trials")
         if not os.path.exists(path):
             continue
@@ -171,6 +181,9 @@ def finish(run_dir, out_json, sessions, scenarios):
                 (t["foreign_cores"] for t in trials if t["foreign_cores"] is not None),
                 default=None,
             ),
+            "sysmond_cores_max": max(
+                (t["sysmond_cores"] for t in trials if "sysmond_cores" in t), default=None),
+            "lock_waiters": waiters.get(scenario),
             "trials": trials,
         }
         if len(valid) < MIN_VALID:
@@ -192,13 +205,12 @@ def finish(run_dir, out_json, sessions, scenarios):
             # One session: the median.  A trial's count moves by a few
             # percent in both directions with how the session's reads
             # happened to be chopped up; over eight runs of one build
-            # the median of seven trials stayed within 0.2-1.8 % and
-            # their minimum within 0.2-4.6 %.
+            # the median of seven trials stayed within 0.4-1.9 % and
+            # their minimum within 0.4-3.3 %.
             # Several sessions: the minimum.  They get in each other's
-            # way by a different amount every trial (213-386 for one
-            # build), contention only adds work, and over the same
-            # eight runs the minimum stayed within 8.6 % where the
-            # median moved 35 %.
+            # way by a different amount every trial (193-368 for one
+            # build) and contention only adds work.  Even so the
+            # minimum moved 17 % over the same eight runs.
             "insn_per_byte": round(median(ipb) if sessions == 1 else min(ipb), 3),
             "insn_per_byte_stat": f"{'median' if sessions == 1 else 'min'}-of-{len(ipb)}",
             "insn_per_byte_samples": ipb,
