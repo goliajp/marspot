@@ -399,7 +399,7 @@ impl LocalSession {
         // see `line_discipline`: on output, which is when a job starts
         // drawing and when the shell prints its prompt again
         if total > 0 || self.line.wants_look() {
-            self.line.look(self.pty.raw_master(), self.shell_pgrp(), self.id);
+            self.line.look(self.pty.raw_master(), self.shell_pgrp(), self.id, self.writer.backlog() == 0);
         }
         (total, more)
     }
@@ -519,7 +519,7 @@ impl LocalSession {
         }
         self.replies.wrote_other();
         let queued = self.enqueue(bytes);
-        self.line.wrote_input(self.pty.raw_master(), self.shell_pgrp(), bytes);
+        self.line.wrote_input(self.pty.raw_master(), self.shell_pgrp(), bytes, &|| self.writer.backlog() == 0);
         queued
     }
 
