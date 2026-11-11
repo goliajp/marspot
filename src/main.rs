@@ -1685,9 +1685,7 @@ impl Marspot {
         // menu is open.  Re-builds the row list from the items Vec
         // so the renderer doesn't share a borrow back into Marspot
         // (mirrors set_layout_modal's per-frame publish shape).
-        // Dev panel lives in its own NSWindow — keep the main
-        // renderer's dev_panel slot empty.
-        renderer.set_dev_panel(None);
+        // Dev panel lives in its own NSWindow.
         marspot::dev_window::with_dev_window(|w| {
             w.set_visible_deferred(self.dev_panel.visible);
             if self.dev_panel.visible {
