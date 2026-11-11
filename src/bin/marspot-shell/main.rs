@@ -807,10 +807,9 @@ struct ShellApp {
     active_pane_sessions:
         std::collections::HashMap<u64, ActivePaneSession>,
     /// UI-system dev panel state.  L1 owns this because L1 hosts the
-    /// dev panel's independent NSWindow (built in `run_app` →
-    /// `dev_window::ensure_built`).  L2 sends `DevPanelToggle`
-    /// wire frames on icon click; L1 flips `visible` and the redraw
-    /// path drives the AppKit show/hide.
+    /// dev panel's independent NSWindow (`dev_window::enable`).  L2
+    /// sends `DevPanelToggle` wire frames on icon click; L1 flips
+    /// `visible` and the redraw path drives the AppKit show/hide.
     dev_panel: marspot::ui::components::DevPanelState,
     /// Last persisted dev-window geometry, used to dedup writes the
     /// same way `last_saved_window` does for the main window.
@@ -5228,5 +5227,6 @@ Usage:\n\
     };
     let proxy = EventProxy::new();
     let app = ShellApp::new(proxy.clone());
+    marspot::dev_window::enable();
     run_app(app, proxy, attrs);
 }
