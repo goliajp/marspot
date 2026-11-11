@@ -55,6 +55,11 @@ if [[ -z "$VERSION" ]]; then
              | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
 fi
 [[ -n "$VERSION" ]] || { echo "could not read the product version from Cargo.toml" >&2; exit 1; }
+# which build of that version this is: the number of commits it was
+# made from.  Two bundles of one version are told apart by it; a tree
+# without its history has only the version to give.
+BUILD="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || true)"
+[[ -n "$BUILD" ]] || BUILD="$VERSION"
 
 # marspot-peer is not a layer of the app: agent sessions run it to
 # message each other.  It ships here so a machine that has only the
@@ -90,7 +95,7 @@ cat > "$PLIST" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>marspot-shell</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
-  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$BUILD</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleIconFile</key><string>AppIcon</string>
