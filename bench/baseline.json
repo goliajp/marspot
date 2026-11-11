@@ -31,10 +31,10 @@
       "_live_note": "mars_vs_best_other_min compares the SHIPPED path (L3) against the best other terminal measured, and is set to 1.0 flat: the requirement is that the product is faster, and a requirement does not get a tolerance band.  That makes this the one floor in the file that can go red from load alone - it divides a number that swings with the host (L3 ascii read 194.5 idle and 134.2 at load1 5.3) by a competitor figure frozen in the snapshot.  Treat a failure here the way bin/bench-remote.sh's load gate says to: valid when idle, re-measure otherwise.  The job of catching a real regression belongs to mars_l3_MBps_min, which carries the margin.  Idle headroom as of 2026-08-19: ascii 1.91x, mixed 1.65x, cjk 1.14x, emoji 1.06x - emoji is the thin one and the next thing worth widening.",
       "mars_parse_file_MBps_min": 118.5,
       "_parse_file_note": "mars_parse_file_MBps_min: the SAME headless parse with the scrollback a real pane has. `--bench parse` builds a Terminal with no MARSPOT_SESSION_ID and gets the in-RAM scrollback; every L3 pane sets it and gets the file-backed one, which trims, encodes and writes every scrolled line and keeps a RAM ring besides. Measured on mini 2026-09-07, median of 5: RAM 371.7 / 240.7 / 263.8 / 174.1 against file-backed 126.8 / 121.3 / 122.4 / 113.2 - the write dominates so completely that it flattens four very different corpora into 113-127. The fast gate had only ever shown the RAM number, so a whole afternoon of comparing against Alacritty was done against a path no user runs. (mars_l3_MBps_min covers the shipped path end to end but only under --full; this one isolates parse+scrollback without the L3 IPC.) Floors are min-of-5 x0.95 - this metric's spread is wide (ascii 119.6-155.6 in one batch) and its job is catching a regression, not holding a line.",
-      "mars_l3_insn_per_byte_max": 151.7,
+      "mars_l3_insn_per_byte_max": 150.45,
       "mars_parse_insn_per_byte_max": 47.93,
       "mars_parse_file_insn_per_byte_max": 121.79,
-      "_insn_note": "Instruction ceilings, set 2026-11-12 from eight runs of one build (a63c4c4, rustc 1.99.1, mini, under the bench lock, load1 at most 3.2 during the single-session trials).  Each is the worst of the eight readings plus a margin sized to that metric's own run-to-run range, (max-min)/median.  mars_l3_insn_per_byte_max: median of 7 trials per run, eight runs read 146.11-148.72 / 171.09-171.50 / 166.95-168.93 / 210.92-211.31 (range 1.8 / 0.2 / 1.2 / 0.2 %), ceiling = worst x 1.02.  A change that adds 5 % lifts the lowest of those readings above its ceiling on every scenario (146.11 x 1.05 = 153.4 against 151.7).  mars_parse_insn_per_byte_max: median of 5, eight runs within 0.07 %, ceiling = worst x 1.01.  mars_parse_file_insn_per_byte_max: median of 5, eight runs within 1.0 %, ceiling = worst x 1.02.  One earlier run of the same binary, taken two minutes after a build, read the single-session counts 2-6 % higher (mixed 182.4, emoji 215.8) with nothing else measurably different; it was not reproduced in the eight runs that followed and is not inside these ceilings."
+      "_insn_note": "Instruction ceilings, set 2026-11-12 from runs of one build (a63c4c4, rustc 1.99.1, mini, under the bench lock, load1 at most 3.2 during the single-session trials).  Each is the worst reading plus a margin sized to that metric's own run-to-run range, (max-min)/median.  mars_l3_insn_per_byte_max: median of 7 trials per run; eight runs read 143.99-146.36 / 178.35-181.83 / 171.76-172.38 / 212.61-215.17 for ascii / mixed / cjk / emoji (range 1.6 / 1.9 / 0.4 / 1.2 %), and two more runs of the same binary earlier the same night read 144.10-147.50 / 182.06-182.40 / 172.67-172.82 / 215.47-215.76.  Ceiling = the worst of the ten x 1.02.  A change that adds 5 % lifts even the lowest of the ten above its ceiling (ascii 143.99 x 1.05 = 151.19 against 150.45, the thinnest of the four).  All ten were taken the way bin/bench-remote.sh runs the probe, over an ssh session that stays open: with the session that started it already closed the same binary reads 4-6 % lower (mixed 170-171), for a reason not yet known, and bin/measure-l3.sh refuses to measure in that state.  mars_parse_insn_per_byte_max: median of 5, eight runs within 0.07 %, ceiling = worst x 1.01.  mars_parse_file_insn_per_byte_max: median of 5, eight runs within 1.0 %, ceiling = worst x 1.02; both are the same to the second decimal however the run is started."
     },
     {
       "id": "cat-mixed",
@@ -44,7 +44,7 @@
       "mars_vs_best_other_min": 1.0,
       "mars_l3_MBps_min": 134.2,
       "mars_parse_file_MBps_min": 100.7,
-      "mars_l3_insn_per_byte_max": 174.92,
+      "mars_l3_insn_per_byte_max": 186.05,
       "mars_parse_insn_per_byte_max": 86.8,
       "mars_parse_file_insn_per_byte_max": 175.52
     },
@@ -56,7 +56,7 @@
       "mars_vs_best_other_min": 1.0,
       "mars_l3_MBps_min": 152.9,
       "mars_parse_file_MBps_min": 115.3,
-      "mars_l3_insn_per_byte_max": 172.31,
+      "mars_l3_insn_per_byte_max": 176.28,
       "mars_parse_insn_per_byte_max": 93.03,
       "mars_parse_file_insn_per_byte_max": 166.28
     },
@@ -69,7 +69,7 @@
       "_note": "Relocked 2026-08-18 after the emoji fast-path attack: floor = 135.  Two mini runs an hour apart gave 153.2 (idle) and 145.0 (load1 4.3); 135 is the loaded run x 0.93, so the gate reports a real regression rather than whoever else happens to be compiling on the bench host.  This REPLACES the 2026-07-11 note, whose reasoning was disproved rather than merely outgrown.  That note read: 'pictographic codepoints cannot take the batch lanes (a following VS16/ZWJ changes width), so they pay the segmenter... the honest ceiling is ~66 MB/s'.  The premise is right and the conclusion does not follow: the fast class already guarantees that a batch commit leaves the LAST character buffered, so a following VS16 / ZWJ / skin-tone modifier still meets an OPEN cluster on the slow path and re-decides its width there.  What genuinely cannot be admitted is a character whose boundary depends on a neighbour - regional indicators (GB12/13) and skin-tone modifiers (GBP=Extend) - and those are two ranges, pinned against the tables by `the_fast_pictograph_class_never_outruns_the_tables` over the whole codepoint space.  Measured 61 -> 153.2 MB/s = 2.15x, with ascii / mixed / cjk unchanged or better.  Full decomposition and the per-change prices are in the perf notes.  mars_live_MBps_min / vs_best_other for this scenario are STILL stale (locked against the wrong-width parser) - re-measure on the next --full run before trusting.",
       "mars_l3_MBps_min": 111.9,
       "mars_parse_file_MBps_min": 101.7,
-      "mars_l3_insn_per_byte_max": 215.53,
+      "mars_l3_insn_per_byte_max": 220.08,
       "mars_parse_insn_per_byte_max": 142.52,
       "mars_parse_file_insn_per_byte_max": 214.58
     },
@@ -220,9 +220,9 @@
     }
   },
   "multi_session_l3": {
-    "_comment": "Nine marspot-session processes absorbing the same scenario at once, run by the gate itself (bin/measure-l3.sh --sessions 9).  insn_per_byte_max judges the LOWEST of the trials: instructions summed over the nine sessions, divided by the bytes they absorbed together.  One session alone costs 171 per byte on this scenario; nine at once cost 213-386 depending on how much they get in each other's way, and that difference is what this row shows.  Eight runs of one build read a minimum of 213.27-232.00 (range 8.6 %; the median of the same trials moved 35 %), ceiling = worst x 1.05.  It therefore cannot see a change smaller than about 14 %; the single-session rows are the ones that see 5 %.  The aggregate wall-clock rate (116-126 MB/s best trial in the same runs) is reported and does not gate.",
+    "_comment": "Nine marspot-session processes absorbing the same scenario at once, run by the gate itself (bin/measure-l3.sh --sessions 9).  insn_per_byte_max judges the LOWEST of the trials: instructions summed over the nine sessions, divided by the bytes they absorbed together.  One session alone costs about 181 per byte on this scenario; nine at once cost 193-368 from trial to trial, depending on how much they get in each other's way, and that difference is what this row shows.  Nine runs of one build read a minimum of 192.61-227.85 (range 17 %; the trials inside one run span far more), ceiling = worst x 1.05.  It therefore cannot see a change smaller than about a quarter; the single-session rows are the ones that see 5 %.  The aggregate wall-clock rate (112-130 MB/s best trial in the same runs) is reported and does not gate.",
     "sessions": 9,
     "scenario": "cat-mixed",
-    "insn_per_byte_max": 243.6
+    "insn_per_byte_max": 239.2
   }
 }
