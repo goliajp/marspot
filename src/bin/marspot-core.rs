@@ -3969,6 +3969,8 @@ macro_rules! win {
 
 #[path = "marspot-core/keys.rs"]
 mod keys;
+#[path = "marspot-core/theme_follow.rs"]
+mod theme_follow;
 
 struct CoreApp {
     renderer: MetalRenderer,
@@ -10021,13 +10023,11 @@ fn main() {
                 win!(app, wi).needs_render = true;
             }
         }
-        //   3) re-read every pane's shell cwd every
-        //      CWD_SWEEP_INTERVAL so the title-strip placeholder
-        //      follows `cd` on its own clock — the keyboard cannot
-        //      tell us a directory changed (see CWD_SWEEP_INTERVAL).
-        //      Interval-gated inside, and only repaints the windows
-        //      whose cwds actually moved.
+        //   3) re-read every pane's shell cwd so the title-strip
+        //      placeholder follows `cd` (see CWD_SWEEP_INTERVAL:
+        //      gated inside, repaints only the windows that moved).
         app.sweep_pane_cwds();
+        app.follow_theme();
         // Drain pending control-socket events.  Attach coalescing:
         // keep only the latest SurfaceAttach *per window* (resize
         // fires fast in a live drag — old attach payloads are stale by

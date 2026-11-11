@@ -7,6 +7,7 @@
 //! continuity (none in v1 — modifier is forward-compat reserve).
 
 use crate::ui::core::{Color, Length};
+use super::{palette, role};
 use super::types::{
     AlignCross, Distribute, Edges, FrameSpec, Shadow,
     ActionId, HoverId, ViewId,
@@ -211,7 +212,7 @@ pub enum TextWeight {
 
 /// Bundle of `size` + `weight` + `color` used by `Text::style()`.
 /// Tokens in `crate::ui::theme::text::*` are typed `TextStyle`
-/// constants — components reach for them by name rather than
+/// values — components reach for them by name rather than
 /// composing primitives ad-hoc.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextStyle {
@@ -234,7 +235,7 @@ impl Text {
         let size = TextSize::Body;
         Self {
             content: content.into(),
-            color: crate::ui::theme::color::FG,
+            color: role(palette::fg()),
             size,
             weight: TextWeight::Regular,
             lines: TextLines::Single { truncate: Truncate::End },
@@ -441,30 +442,30 @@ pub fn shape_rounded_rect(radius: Length, fill: Color) -> View {
 /// Card preset — raised background + border + radius + soft shadow.
 /// `child` is the content laid inside MD padding.
 pub fn card(child: View) -> View {
-    use crate::ui::theme::{color, space, radius, elev};
+    use crate::ui::theme::{space, radius, elev};
     child
         .padding(Edges::all(space::MD))
-        .background(color::BG_RAISED)
-        .border(Length::Pt(1.0), color::BORDER)
+        .background(role(palette::surface_raised()))
+        .border(Length::Pt(1.0), role(palette::card_border()))
         .corner_radius(radius::MD)
-        .shadow(elev::E1)
+        .shadow(elev::e1())
 }
 
 /// Panel preset — flatter than Card.  Used for sidebars / form
 /// sections / supporting content blocks.
 pub fn panel(child: View) -> View {
-    use crate::ui::theme::{color, space, radius};
+    use crate::ui::theme::{space, radius};
     child
         .padding(Edges::all(space::MD))
-        .background(color::BG_PANEL)
+        .background(role(palette::frame_bg()))
         .corner_radius(radius::MD)
 }
 
 /// Pill-shaped status tag.  Color carries the semantic role
-/// (token::color::SUCCESS / WARN / DANGER / ACCENT / ...).
+/// (success / warn / danger / accent / ...).
 pub fn badge(label: &str, c: Color) -> View {
-    use crate::ui::theme::{color, radius, text};
-    Text::new(label).style(text::CAPTION).color(color::BG).build()
+    use crate::ui::theme::{radius, text};
+    Text::new(label).style(text::caption()).color(role(palette::surface_base())).build()
         .padding(Edges::xy(Length::Pt(10.0), Length::Pt(2.0)))
         .background(c)
         .corner_radius(radius::PILL)
@@ -473,30 +474,30 @@ pub fn badge(label: &str, c: Color) -> View {
 /// Tooltip / hint popup preset.  Use with hover-trigger logic at
 /// the call site;  v1 just emits the visual.
 pub fn tooltip(label: &str) -> View {
-    use crate::ui::theme::{color, radius, text, elev};
-    Text::new(label).style(text::CAPTION).color(color::FG).build()
+    use crate::ui::theme::{radius, text, elev};
+    Text::new(label).style(text::caption()).color(role(palette::fg())).build()
         .padding(Edges::xy(Length::Pt(10.0), Length::Pt(6.0)))
-        .background(color::BG)
-        .border(Length::Pt(1.0), color::BORDER)
+        .background(role(palette::surface_base()))
+        .border(Length::Pt(1.0), role(palette::card_border()))
         .corner_radius(radius::SM)
-        .shadow(elev::E2)
+        .shadow(elev::e2())
 }
 
 /// Context menu — vertical list of clickable items inside a Card.
 /// `divider_after_idx` inserts a hairline divider after the N-th
 /// item (None for no divider).  Each item carries an `ActionId`.
 pub fn context_menu(items: Vec<&str>, divider_after_idx: Option<usize>, action_base: super::types::ActionId) -> View {
-    use crate::ui::theme::{color, radius, text, elev};
+    use crate::ui::theme::{radius, text, elev};
     let mut rows: Vec<View> = Vec::with_capacity(items.len() + 1);
     for (i, label) in items.iter().enumerate() {
-        let row = Text::new(*label).style(text::BODY).build()
+        let row = Text::new(*label).style(text::body()).build()
             .padding(Edges::xy(Length::Pt(12.0), Length::Pt(6.0)))
             .frame(FrameSpec { width: Some(Length::Pct(1.0)), ..Default::default() })
             .on_click(super::types::ActionId(action_base.0.wrapping_add(i as u32)));
         rows.push(row);
         if let Some(d) = divider_after_idx
             && i == d {
-                rows.push(hairline_horiz(color::DIVIDER).frame(FrameSpec {
+                rows.push(hairline_horiz(role(palette::divider())).frame(FrameSpec {
                     height: Some(Length::Pt(1.0)),
                     width: Some(Length::Pct(1.0)),
                     ..Default::default()
@@ -505,26 +506,26 @@ pub fn context_menu(items: Vec<&str>, divider_after_idx: Option<usize>, action_b
     }
     vstack(rows)
         .vstack_gap(Length::Pt(0.0))
-        .background(color::BG_RAISED)
-        .border(Length::Pt(1.0), color::BORDER)
+        .background(role(palette::surface_raised()))
+        .border(Length::Pt(1.0), role(palette::card_border()))
         .corner_radius(radius::MD)
-        .shadow(elev::E3)
+        .shadow(elev::e3())
 }
 
 /// Breadcrumb — `Home > Section > Subsection > Detail` style
 /// navigation trail.  Last item is rendered emphasised (FG colour),
 /// others muted.  Caret separators are unstyled `>` text.
 pub fn breadcrumb(segments: Vec<&str>) -> View {
-    use crate::ui::theme::{color, text};
+    use crate::ui::theme::text;
     let last_idx = segments.len().saturating_sub(1);
     let mut items: Vec<View> = Vec::with_capacity(segments.len() * 2);
     for (i, s) in segments.iter().enumerate() {
-        let color_for = if i == last_idx { color::FG } else { color::FG_MUTED };
+        let color_for = if i == last_idx { role(palette::fg()) } else { role(palette::fg_muted()) };
         items.push(
-            Text::new(*s).style(text::CAPTION).color(color_for).build()
+            Text::new(*s).style(text::caption()).color(color_for).build()
         );
         if i < last_idx {
-            items.push(Text::new("›").style(text::CAPTION).color(color::FG_DISABLED).build());
+            items.push(Text::new("›").style(text::caption()).color(role(palette::disabled_fg())).build());
         }
     }
     hstack(items).hstack_gap(Length::Pt(6.0)).align_cross_center()
@@ -534,18 +535,18 @@ pub fn breadcrumb(segments: Vec<&str>) -> View {
 /// icon-or-empty slot, label, trailing detail.  Selected = accent
 /// background;  click fires `action`.
 pub fn list_row(label: &str, trailing: Option<&str>, selected: bool, action: super::types::ActionId) -> View {
-    use crate::ui::theme::{color, radius, text};
-    let bg = if selected { color::BG_SELECTED } else { color::BG };
+    use crate::ui::theme::{radius, text};
+    let bg = if selected { role(palette::accent()) } else { role(palette::surface_base()) };
     // FG_INVERSE is the one that stays readable on BG_SELECTED — in the
     // high-contrast theme both FG and BG_SELECTED are pure white.
-    let fg = if selected { color::FG_INVERSE } else { color::FG };
+    let fg = if selected { role(palette::fg_inverse()) } else { role(palette::fg()) };
     let mut content = vec![
-        Text::new(label).style(text::BODY).color(fg).build(),
+        Text::new(label).style(text::body()).color(fg).build(),
         spacer(),
     ];
     if let Some(t) = trailing {
         content.push(
-            Text::new(t).style(text::CAPTION).color(color::FG_MUTED).build()
+            Text::new(t).style(text::caption()).color(role(palette::fg_muted())).build()
         );
     }
     hstack(content)
@@ -562,12 +563,12 @@ pub fn list_row(label: &str, trailing: Option<&str>, selected: bool, action: sup
 /// highlights one as active.  Each tab carries an `ActionId` so
 /// reducers can pick up clicks.
 pub fn tab_strip(labels: Vec<&str>, selected: usize, action_base: super::types::ActionId) -> View {
-    use crate::ui::theme::{color, radius, text};
+    use crate::ui::theme::{radius, text};
     let tabs: Vec<View> = labels.into_iter().enumerate().map(|(i, lab)| {
         let is_sel = i == selected;
-        let bg = if is_sel { color::ACCENT } else { color::BG_PANEL };
-        let fg = if is_sel { color::BG }     else { color::FG };
-        Text::new(lab).style(text::BODY).color(fg).build()
+        let bg = if is_sel { role(palette::now()) } else { role(palette::frame_bg()) };
+        let fg = if is_sel { role(palette::surface_base()) }     else { role(palette::fg()) };
+        Text::new(lab).style(text::body()).color(fg).build()
             .padding(Edges::xy(Length::Pt(14.0), Length::Pt(6.0)))
             .background(bg)
             .corner_radius(radius::SM)
@@ -806,12 +807,11 @@ impl From<Text> for View {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::theme::color;
 
     #[test]
     fn text_new_defaults_match_token_fg() {
         let t = Text::new("hi");
-        assert_eq!(t.color, color::FG);
+        assert_eq!(t.color, role(palette::fg()));
         assert_eq!(t.size, TextSize::Body);
     }
 
@@ -819,8 +819,8 @@ mod tests {
     fn modifier_chain_accumulates() {
         let v = Text::new("hi").build()
             .padding(Edges::all(Length::Pt(8.0)))
-            .background(color::BG_RAISED)
-            .border(Length::Pt(1.0), color::BORDER);
+            .background(role(palette::surface_raised()))
+            .border(Length::Pt(1.0), role(palette::card_border()));
         match v {
             View::Modified { mods, .. } => assert_eq!(mods.len(), 3),
             _ => panic!("expected modified view"),

@@ -3543,11 +3543,10 @@ impl<'a> Handler<'a> {
             }
             // 1015 / 1004 / 2031 — silently accept but no-op.
             // 2031 (colour-scheme change notification) is accepted and
-            // not reported on: marspot has one palette and it never
-            // changes, so there is no event to send.  A reporting path
-            // with nothing to report would be invented work — and the
-            // real session never queried the scheme either (one `CSI 6
-            // n` in 22 MB, which is a cursor-position request).
+            // not reported on yet.  The palette does change with the
+            // theme; a program that wants the new colours asks again
+            // with OSC 10 / 11 / 4 / 12 and is answered from the
+            // palette then in force.
             1015 | 2031 => {}
             _ => {} // unhandled DEC private mode — silently skip
         }
@@ -4354,7 +4353,8 @@ impl<'a> ParserCallbacks for Handler<'a> {
             // xterm's own form, and echo the OSC number back so a
             // batched query is unambiguous.
             Some(n @ (10 | 11)) if rest.starts_with(b"?") => {
-                let c = if n == 10 { crate::palette::FG } else { crate::palette::BG };
+                let p = crate::palette::current();
+                let c = if n == 10 { p.fg } else { p.bg };
                 let reply = format!("\x1b]{n};{}\x07", crate::palette::xterm_rgb(c));
                 self.pending_response.extend_from_slice(reply.as_bytes());
                 self.record_response("OSC-COLOR");
@@ -4427,16 +4427,15 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 while let (Some(idx), Some(val)) = (fields.next(), fields.next()) {
                     if val != b"?" {
                         // Setting a palette entry, not asking about
-                        // one.  marspot's palette is fixed, so this
-                        // is declined by not answering it — see
-                        // `palette::ANSI_16`.
+                        // one.  The palette is the theme's, so this
+                        // is declined by not answering it.
                         continue;
                     }
                     let Some(i) = std::str::from_utf8(idx).ok().and_then(|s| s.parse::<u8>().ok())
                     else {
                         continue;
                     };
-                    let c = crate::palette::indexed(i);
+                    let c = crate::palette::current().indexed(i);
                     reply.push_str(&format!("\x1b]4;{i};{}\x07", crate::palette::xterm_rgb(c)));
                 }
                 if !reply.is_empty() {
@@ -4447,7 +4446,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
             // OSC 12 — the cursor's colour.  Same shape as 10 and 11,
             // and asked by the same programs for the same reason.
             Some(12) if rest.starts_with(b"?") => {
-                let c = crate::palette::unit(crate::palette::CURSOR);
+                let c = crate::palette::unit(crate::palette::current().cursor);
                 let reply = format!("\x1b]12;{}\x07", crate::palette::xterm_rgb(c));
                 self.pending_response.extend_from_slice(reply.as_bytes());
                 self.record_response("OSC-COLOR");
@@ -7588,7 +7587,7 @@ mod osc_tests {
         let mut t = Terminal::new(20, 5);
         t.feed(b"\x1b]11;?\x07");
         let r = String::from_utf8(t.take_response()).unwrap();
-        assert_eq!(r, format!("\x1b]11;{}\x07", crate::palette::xterm_rgb(crate::palette::BG)));
+        assert_eq!(r, format!("\x1b]11;{}\x07", crate::palette::xterm_rgb(crate::palette::DARK.bg)));
 
         t.feed(b"\x1b]10;?\x07");
         let r = String::from_utf8(t.take_response()).unwrap();

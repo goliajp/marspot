@@ -97,7 +97,7 @@ struct VertexOut {
 // lands at the texture's natural pixel size inside the drawable,
 // anchored top-left.  Stale IOSurface during a window resize stays at
 // its native pixel size; the drawable's exposed band is filled with
-// `font_cache::BG` (set as `clearColor`), which is the *exact* same
+// the terminal's background (set as `clearColor`), which is the *exact* same
 // colour as the terminal cell BG — so the seam between the
 // IOSurface region and the fill is invisible to the eye.
 struct ViewParams {
@@ -127,15 +127,22 @@ fragment float4 shell_quad_fs(VertexOut in [[stage_in]],
 }
 "#;
 
-/// Exact terminal-cell BG colour (`font_cache::BG`).  Hardcoded here
-/// — duplicated rather than imported so the shell never accidentally
-/// pulls in the rest of the lib's font/render surface area, but
-/// any change to `font_cache::BG` must mirror here.  Same constants
-/// drive `layer.backgroundColor`, `window.backgroundColor`, and the
+/// The terminal's background under the theme in force.  The same value
+/// drives `layer.backgroundColor`, `window.backgroundColor`, and the
 /// render-pass clear colour so the resize fill seam is invisible.
-const BG_R: f64 = 0.006;
-const BG_G: f64 = 0.008;
-const BG_B: f64 = 0.014;
+fn terminal_bg() -> (f64, f64, f64) {
+    marspot_term::palette::current().bg
+}
+
+/// `layer.backgroundColor`, set when the layer is made and again when
+/// the theme changes.
+pub(crate) fn set_layer_background(layer: &Retained<CAMetalLayer>) {
+    let (r, g, b) = terminal_bg();
+    let cgcolor = CGColor::rgb(r, g, b, 1.0);
+    let cgcolor_ref = cgcolor.as_concrete_TypeRef() as *const OpaqueCGColor;
+    let layer_ptr: *mut AnyObject = Retained::as_ptr(layer) as *mut AnyObject;
+    let _: () = unsafe { msg_send![layer_ptr, setBackgroundColor: cgcolor_ref] };
+}
 
 pub struct ShellPresenter {
     /// Retained so `set_pair` can rebuild the IOSurface-backed
@@ -143,7 +150,7 @@ pub struct ShellPresenter {
     /// re-discovering the device.
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    layer: Retained<CAMetalLayer>,
+    pub(crate) layer: Retained<CAMetalLayer>,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
     /// PROTO_VERSION=2 double-buffer: two MTLTextures wrap a pair of
@@ -241,15 +248,12 @@ impl ShellPresenter {
             // `commandBuffer.waitUntilScheduled()` + `drawable.present()`
             // by hand instead of letting `presentDrawable` schedule.
             layer.setPresentsWithTransaction(true);
-            // Layer BG = exact font_cache::BG so the fill band between
+            // Layer BG = the terminal's background so the fill band between
             // the IOSurface (its native pixel size) and the drawable
             // edge is *colour-matched* with the terminal cell BG.
             // Visually the IOSurface looks like it extends beyond its
             // real pixels — no seam, no ghost outline.
-            let cgcolor = CGColor::rgb(BG_R, BG_G, BG_B, 1.0);
-            let cgcolor_ref = cgcolor.as_concrete_TypeRef() as *const OpaqueCGColor;
-            let layer_ptr: *mut AnyObject = Retained::as_ptr(&layer) as *mut AnyObject;
-            let _: () = msg_send![layer_ptr, setBackgroundColor: cgcolor_ref];
+            set_layer_background(&layer);
         }
         view.setWantsLayer(true);
         {
@@ -271,8 +275,8 @@ impl ShellPresenter {
             view.setLayer(Some(&layer));
             // NSWindow BG mirrors layer BG for the same reason.
             if let Some(window) = view.window() {
-                let bg =
-                    NSColor::colorWithSRGBRed_green_blue_alpha(BG_R, BG_G, BG_B, 1.0);
+                let (r, g, b) = terminal_bg();
+                let bg = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0);
                 window.setBackgroundColor(Some(&bg));
             }
         }
@@ -396,16 +400,12 @@ impl ShellPresenter {
         color0.setTexture(Some(&texture));
         color0.setLoadAction(MTLLoadAction::Clear);
         color0.setStoreAction(MTLStoreAction::Store);
-        // Clear = exact font_cache::BG.  The IOSurface quad covers
+        // Clear = the terminal's background.  The IOSurface quad covers
         // (0,0)-(tex_w,tex_h); everything else in the drawable is this
         // colour, which matches what the terminal grid would have
         // painted there if it were still part of the rendered view.
-        color0.setClearColor(MTLClearColor {
-            red: BG_R,
-            green: BG_G,
-            blue: BG_B,
-            alpha: 1.0,
-        });
+        let (red, green, blue) = terminal_bg();
+        color0.setClearColor(MTLClearColor { red, green, blue, alpha: 1.0 });
 
         // Top-left anchored ratio so the IOSurface is shown at its
         // own pixel size, not stretched.  Combined with the BG-matched

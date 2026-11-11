@@ -36,6 +36,11 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
+use crate::palette::ThemeId;
+use values::{fmt_f32, parse_bool, parse_f32};
+
+mod values;
+
 /// Every user-owned decision, resolved.
 ///
 /// Plain values, not `Option`s: a missing key means the default, and
@@ -143,6 +148,9 @@ pub struct Settings {
     /// Show the toolbar button for the UI workbench panel. Off: it is
     /// a tool for working on marspot, not for using it.
     pub dev_panel_button: bool,
+    /// The theme everything is drawn in; `None` follows the system.
+    /// Dark by default, so an upgrade changes nothing a user can see.
+    pub appearance_theme: Option<ThemeId>,
 }
 
 /// What the claudecode plugin does with an idle pane that has a better
@@ -188,6 +196,7 @@ impl Default for Settings {
             agents_install: true,
             cc_rebalance: Rebalance::On,
             dev_panel_button: false,
+            appearance_theme: Some(ThemeId::Dark),
         }
     }
 }
@@ -223,10 +232,10 @@ struct Cache {
 fn cache() -> &'static RwLock<Cache> {
     static CACHE: std::sync::OnceLock<RwLock<Cache>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| {
-        RwLock::new(Cache {
-            settings: Arc::new(parse(&std::fs::read_to_string(path()).unwrap_or_default())),
-            seen: mtime(),
-        })
+        let settings = Arc::new(parse(&std::fs::read_to_string(path()).unwrap_or_default()));
+        publish_mirrors(&settings);
+        crate::system_theme::poll();
+        RwLock::new(Cache { settings, seen: mtime() })
     })
 }
 
@@ -274,6 +283,7 @@ pub fn circled_wide() -> bool {
 /// installed, so a mirror can never be staler than the snapshot.
 fn publish_mirrors(s: &Settings) {
     CIRCLED_WIDE.store(1 + s.appearance_circled_wide as u8, Ordering::Relaxed);
+    crate::palette::set_choice(s.appearance_theme);
 }
 
 /// Re-read the file if it has changed on disk.  Returns true when the
@@ -283,13 +293,14 @@ fn publish_mirrors(s: &Settings) {
 /// One `stat` per call.  Deliberately cheap enough to sit on an
 /// existing once-a-second sweep: that is what makes hand-editing the
 /// file take effect without restarting a layer.
+///
+/// The same sweep follows the system's appearance when the theme
+/// setting says to, which is a second `stat` and only then.
 pub fn reload_if_changed() -> bool {
     let now = mtime();
-    {
-        let c = cache().read().unwrap_or_else(|p| p.into_inner());
-        if c.seen == now {
-            return false;
-        }
+    if cache().read().unwrap_or_else(|p| p.into_inner()).seen == now {
+        crate::system_theme::poll();
+        return false;
     }
     let parsed = Arc::new(parse(&std::fs::read_to_string(path()).unwrap_or_default()));
     let mut c = cache().write().unwrap_or_else(|p| p.into_inner());
@@ -297,6 +308,8 @@ pub fn reload_if_changed() -> bool {
     let changed = *c.settings != *parsed;
     publish_mirrors(&parsed);
     c.settings = parsed;
+    drop(c);
+    crate::system_theme::poll();
     changed
 }
 
@@ -317,6 +330,7 @@ const KEYS: &[&str] = &[
     "reclaim.enabled",
     "reclaim.idle_minutes",
     "reclaim.prefetch_on_return",
+    "appearance.theme",
     "appearance.circled_wide",
     "appearance.dim_scale",
     "input.scroll_factor",
@@ -328,6 +342,7 @@ fn value_of(s: &Settings, key: &str) -> String {
         "reclaim.enabled" => s.reclaim_enabled.to_string(),
         "reclaim.idle_minutes" => s.reclaim_idle_minutes.to_string(),
         "reclaim.prefetch_on_return" => s.reclaim_prefetch.to_string(),
+        "appearance.theme" => s.appearance_theme.map_or("system", ThemeId::as_str).to_string(),
         "appearance.circled_wide" => s.appearance_circled_wide.to_string(),
         "appearance.render_u_tags" => s.render_u_tags.to_string(),
         "appearance.dim_scale" => fmt_f32(s.dim_scale),
@@ -364,6 +379,7 @@ pub fn parse(body: &str) -> Settings {
                 s.reclaim_idle_minutes = v.parse().unwrap_or(s.reclaim_idle_minutes)
             }
             "reclaim.prefetch_on_return" => s.reclaim_prefetch = parse_bool(v, s.reclaim_prefetch),
+            "appearance.theme" => s.appearance_theme = ThemeId::parse_setting(v, s.appearance_theme),
             "appearance.circled_wide" => {
                 s.appearance_circled_wide = parse_bool(v, s.appearance_circled_wide)
             }
@@ -387,38 +403,6 @@ pub fn parse(body: &str) -> Settings {
         }
     }
     s
-}
-
-/// A float, clamped to a range the rest of the program can survive.
-///
-/// Out of range is treated as a typo and ignored rather than clamped:
-/// `scroll_factor = 100` is far more likely a slip than a wish, and
-/// silently honouring a tenth of it teaches nothing.
-fn parse_f32(v: &str, fallback: f32, lo: f32, hi: f32) -> f32 {
-    match v.parse::<f32>() {
-        Ok(f) if f.is_finite() && f >= lo && f <= hi => f,
-        _ => fallback,
-    }
-}
-
-/// Trailing-zero-free, so `1.0` writes as `1` and a hand-edited file
-/// does not grow noise every time the panel rewrites it.
-fn fmt_f32(f: f32) -> String {
-    let s = format!("{f:.2}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s.is_empty() {
-        "0".to_string()
-    } else {
-        s.to_string()
-    }
-}
-
-fn parse_bool(v: &str, fallback: bool) -> bool {
-    match v.to_ascii_lowercase().as_str() {
-        "true" | "yes" | "on" | "1" => true,
-        "false" | "no" | "off" | "0" => false,
-        _ => fallback,
-    }
 }
 
 const HEADER: &str = "\
@@ -544,6 +528,34 @@ mod tests {
             assert_eq!(parse(&render(&s, &body)).cc_rebalance, want, "{word} after a rewrite");
         }
         assert_eq!(parse("claudecode.rebalance = maybe\n").cc_rebalance, Rebalance::On);
+    }
+
+    /// The theme is dark until the file names another, `system` is a
+    /// value like the rest, and a word that is no theme changes nothing.
+    #[test]
+    fn the_theme_is_dark_unless_the_file_names_another() {
+        assert_eq!(Settings::default().appearance_theme, Some(ThemeId::Dark));
+        for (word, want) in [
+            ("dark", Some(ThemeId::Dark)),
+            ("light", Some(ThemeId::Light)),
+            ("contrast", Some(ThemeId::Contrast)),
+            ("system", None),
+        ] {
+            let body = format!("appearance.theme = {word}\n");
+            let s = parse(&body);
+            assert_eq!(s.appearance_theme, want, "{word}");
+            assert!(render(&s, &body).starts_with(&body), "{word} is written back as it was read");
+        }
+        assert_eq!(parse("appearance.theme = sepia\n"), Settings::default());
+    }
+
+    /// Whatever installs a settings value puts its theme in force.
+    #[test]
+    fn installing_settings_switches_the_theme() {
+        set_for_test(Settings { appearance_theme: Some(ThemeId::Light), ..Settings::default() });
+        assert_eq!(crate::palette::current_id(), ThemeId::Light);
+        set_for_test(Settings::default());
+        assert_eq!(crate::palette::current_id(), ThemeId::Dark);
     }
 
     /// Out of range is a typo, not a wish: honouring a clamped tenth

@@ -1062,7 +1062,7 @@ fn layout_modified<'a>(
             Modifier::BackgroundMaterial(_m) => {
                 // v1: render as semi-opaque BG_PANEL.  Real macOS
                 // vibrancy = v2+ NSVisualEffectView wiring.
-                let mut c = crate::ui::theme::color::BG_PANEL;
+                let mut c = super::role(super::palette::frame_bg());
                 c.a = 0.85;
                 bake.bg = Some(c);
             }

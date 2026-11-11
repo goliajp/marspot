@@ -78,6 +78,42 @@ pub(crate) const FONT_SNAPSHOT_DIR: &str =
 /// Where the panel baselines live.
 pub(crate) const UI_SNAPSHOT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bench/ui/snapshots");
 
+/// A baseline's name under the theme in force: `<name>` in the dark
+/// theme, `<name>.light` and `<name>.contrast` in the others.
+pub(crate) fn themed(name: &str) -> String {
+    match marspot_term::palette::current_id() {
+        marspot_term::palette::ThemeId::Dark => name.to_string(),
+        other => format!("{name}.{}", other.as_str()),
+    }
+}
+
+/// Run a snapshot test with `theme` in force.  It is put in force the
+/// way the app does it, through the settings, so that nothing the
+/// test goes on to read from them puts the dark theme back.
+pub(crate) fn in_theme(theme: marspot_term::palette::ThemeId, shot: fn()) {
+    crate::settings::set_for_test(crate::settings::Settings {
+        appearance_theme: Some(theme),
+        ..Default::default()
+    });
+    shot();
+}
+
+/// The same scenes under the light and the high-contrast theme: each
+/// `light, contrast = scene;` is two tests that run `scene` again.
+macro_rules! snapshots_in_other_themes {
+    ($($light:ident, $contrast:ident = $shot:ident;)*) => {$(
+        #[test]
+        fn $light() {
+            crate::snapshot_kit::in_theme(marspot_term::palette::ThemeId::Light, $shot);
+        }
+        #[test]
+        fn $contrast() {
+            crate::snapshot_kit::in_theme(marspot_term::palette::ThemeId::Contrast, $shot);
+        }
+    )*};
+}
+pub(crate) use snapshots_in_other_themes;
+
 /// What a pixel snapshot test does this run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SnapshotMode {

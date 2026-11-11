@@ -74,6 +74,7 @@ pub mod host_load;
 pub mod inherited_fds;
 pub mod platform;
 pub mod submit_receipt;
+pub mod system_theme;
 pub mod pty;
 pub mod render;
 pub mod scrollback;

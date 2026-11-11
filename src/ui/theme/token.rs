@@ -1,95 +1,11 @@
-//! Semantic tokens v4 — color / space / radius / typography /
-//! elevation.
+//! Semantic tokens — space / radius / typography / elevation.
 //!
-//! Single source of truth.  Components reference tokens by name
-//! (`color::ACCENT`, `space::MD`); literal `Color::rgba(...)` in
-//! component code is an anti-pattern.
-//!
-//! The constants are the Dark palette.  `light::*` and `hc::*`
-//! (high-contrast) hold only the few colours the dev panel shows as
-//! swatches; nothing picks between palettes at runtime.
+//! Components reference tokens by name (`space::MD`, `text::body()`).
+//! Colours are not here: they are the theme table's (`super::table`),
+//! and the text styles and shadows below read the theme in force each
+//! time they are asked for.
 
-use crate::ui::core::{Color, Length};
-
-// ═════════════════════════════════════════════════════════════
-// UI Chrome — color::*  (Dark + light::* + hc::*)
-// ═════════════════════════════════════════════════════════════
-
-pub mod color {
-    use super::Color;
-
-    // ─── Foreground ───────────────────────────────────────────
-    pub const FG:           Color = Color::rgba(232, 238, 248, 1.0);
-    pub const FG_MUTED:     Color = Color::rgba(140, 153, 168, 1.0);
-    pub const FG_DISABLED:  Color = Color::rgba(115, 122, 133, 1.0);
-    pub const FG_INVERSE:   Color = Color::rgba( 20,  22,  28, 1.0);  // on BG_SELECTED
-    pub const FG_LINK:      Color = Color::rgba(106, 175, 255, 1.0);
-
-    // ─── Background / Surface levels ──────────────────────────
-    pub const BG:           Color = Color::rgba( 20,  22,  28, 1.0);
-    pub const BG_RAISED:    Color = Color::rgba( 28,  31,  39, 1.0);
-    pub const BG_PANEL:     Color = Color::rgba( 33,  36,  43, 1.0);
-    pub const BG_SELECTED:  Color = Color::rgba( 51, 107, 173, 1.0);
-    pub const BG_HOVER:     Color = Color::rgba( 41,  45,  55, 1.0);
-    pub const SURFACE_3:    Color = Color::rgba( 44,  47,  56, 1.0);  // popover
-    pub const SURFACE_4:    Color = Color::rgba( 54,  57,  68, 1.0);  // tooltip
-
-    // ─── Lines ────────────────────────────────────────────────
-    pub const BORDER:       Color = Color::rgba( 56,  60,  70, 1.0);
-    pub const BORDER_STRONG: Color = Color::rgba( 82,  87, 102, 1.0);  // a panel's own edge
-    pub const DIVIDER:      Color = Color::rgba(255, 255, 255, 0.08);
-    pub const HAIRLINE:     Color = Color::rgba(255, 255, 255, 0.18);
-
-    // ─── Accent / status ─────────────────────────────────────
-    pub const ACCENT:       Color = Color::rgba( 91, 162, 250, 1.0);
-    pub const ACCENT_DIM:   Color = Color::rgba(170, 190, 230, 1.0);
-    pub const SUCCESS:      Color = Color::rgba( 80, 190, 110, 1.0);
-    pub const WARN:         Color = Color::rgba(230, 200,  80, 1.0);
-    pub const DANGER:       Color = Color::rgba(220,  60,  60, 1.0);
-
-    // ─── Effects ──────────────────────────────────────────────
-    pub const SHADOW:       Color = Color::rgba(  0,   0,   0, 0.55);
-
-    // ─── Main window ──────────────────────────────────────────
-    // The window is darker than a panel: a panel floats over it.
-    pub const CHROME:       Color = Color::rgba( 10,  13,  19, 1.0);  // sidebar, header, a pane not in use
-    pub const CANVAS:       Color = Color::rgba(  0,   0,   0, 1.0);  // the pane in use
-    // Opaque, unlike DIVIDER: seams are drawn in the pass that does not blend.
-    pub const SEAM:         Color = Color::rgba( 29,  33,  40, 1.0);
-    pub const FOCUS_RING:   Color = Color::rgba(184, 194, 209, 1.0);
-    pub const AGENT:        Color = Color::rgba(217, 120,  87, 1.0);  // an agent's badge on a pane title
-
-    // ─── Terminal marks ───────────────────────────────────────
-    pub const SELECTION:    Color = Color::rgba( 41,  56,  87, 1.0);
-    pub const SEARCH_HIT:   Color = Color::rgba(235, 199,  51, 1.0);
-    pub const IME_BG:       Color = Color::rgba( 26,  33,  46, 1.0);
-    pub const IME_FG:       Color = Color::rgba(204, 219, 235, 1.0);
-    pub const CURSOR_TEXT:  Color = Color::rgba(235, 235, 235, 1.0);
-    pub const LINK:         Color = Color::rgba(102, 178, 242, 1.0);
-
-    // ─── Helper hints ────────────────────────────────────────
-    pub const HINT:         Color = Color::rgba(130, 140, 156, 1.0);
-
-    // ─── High-contrast palette ───────────────────────────────
-    pub mod hc {
-        use super::Color;
-        pub const FG:           Color = Color::rgba(255, 255, 255, 1.0);
-        pub const BG:           Color = Color::rgba(  0,   0,   0, 1.0);
-        pub const ACCENT:       Color = Color::rgba(255, 220,   0, 1.0);
-    }
-
-    // ─── Light theme palette ─────────────────────────────────
-    pub mod light {
-        use super::Color;
-        pub const FG:           Color = Color::rgba( 30,  35,  45, 1.0);
-        pub const BG:           Color = Color::rgba(248, 249, 251, 1.0);
-        pub const ACCENT:       Color = Color::rgba( 51, 107, 220, 1.0);
-    }
-}
-
-// ═════════════════════════════════════════════════════════════
-// Space / Radius / Text / Elev
-// ═════════════════════════════════════════════════════════════
+use crate::ui::core::Length;
 
 pub mod space {
     use super::Length;
@@ -112,70 +28,40 @@ pub mod radius {
 
 /// Semantic text styles — size + weight + color preset.
 pub mod text {
+    use crate::ui::core::Color;
+    use crate::ui::theme::table::color;
     use crate::ui::view::{TextSize, TextWeight, TextStyle};
-    use super::color;
 
-    pub const CAPTION: TextStyle = TextStyle {
-        size:   TextSize::Caption,
-        weight: TextWeight::Regular,
-        color:  color::FG_MUTED,
-    };
-    pub const BODY: TextStyle = TextStyle {
-        size:   TextSize::Body,
-        weight: TextWeight::Regular,
-        color:  color::FG,
-    };
-    pub const HEADER: TextStyle = TextStyle {
-        size:   TextSize::Header,
-        weight: TextWeight::Bold,
-        color:  color::ACCENT_DIM,
-    };
-    pub const HINT: TextStyle = TextStyle {
-        size:   TextSize::Caption,
-        weight: TextWeight::Regular,
-        color:  color::HINT,
-    };
-    pub const CODE: TextStyle = TextStyle {
-        size:   TextSize::Body,
-        weight: TextWeight::Regular,
-        color:  color::ACCENT_DIM,
-    };
-    pub const LINK: TextStyle = TextStyle {
-        size:   TextSize::Body,
-        weight: TextWeight::Regular,
-        color:  color::FG_LINK,
-    };
-    pub const ERROR: TextStyle = TextStyle {
-        size:   TextSize::Body,
-        weight: TextWeight::Regular,
-        color:  color::DANGER,
-    };
+    fn style(size: TextSize, weight: TextWeight, color: Color) -> TextStyle {
+        TextStyle { size, weight, color }
+    }
+
+    pub fn caption() -> TextStyle { style(TextSize::Caption, TextWeight::Regular, color::fg_muted()) }
+    pub fn body() -> TextStyle { style(TextSize::Body, TextWeight::Regular, color::fg()) }
+    pub fn header() -> TextStyle { style(TextSize::Header, TextWeight::Bold, color::accent_dim()) }
+    pub fn hint() -> TextStyle { style(TextSize::Caption, TextWeight::Regular, color::hint()) }
+    pub fn code() -> TextStyle { style(TextSize::Body, TextWeight::Regular, color::accent_dim()) }
+    pub fn link() -> TextStyle { style(TextSize::Body, TextWeight::Regular, color::fg_link()) }
+    pub fn error() -> TextStyle { style(TextSize::Body, TextWeight::Regular, color::danger()) }
 }
 
 /// Semantic elevation shadows — Material-style E0..E3.
 pub mod elev {
-    use crate::ui::view::Shadow;
     use crate::ui::core::Length;
-    use super::color;
+    use crate::ui::theme::table::color;
+    use crate::ui::view::Shadow;
 
-    pub const E0: Shadow = Shadow {
-        blur: Length::Pt(0.0),
-        offset: (Length::Pt(0.0), Length::Pt(0.0)),
-        color: color::SHADOW,
-    };
-    pub const E1: Shadow = Shadow {
-        blur: Length::Pt(3.0),
-        offset: (Length::Pt(0.0), Length::Pt(1.0)),
-        color: color::SHADOW,
-    };
-    pub const E2: Shadow = Shadow {
-        blur: Length::Pt(6.0),
-        offset: (Length::Pt(0.0), Length::Pt(2.0)),
-        color: color::SHADOW,
-    };
-    pub const E3: Shadow = Shadow {
-        blur: Length::Pt(12.0),
-        offset: (Length::Pt(0.0), Length::Pt(4.0)),
-        color: color::SHADOW,
-    };
+    /// How opaque an elevation's shadow is.
+    const ALPHA: f64 = 0.55;
+
+    fn shadow(blur: f64, dy: f64) -> Shadow {
+        let mut color = color::shadow();
+        color.a = ALPHA;
+        Shadow { blur: Length::Pt(blur), offset: (Length::Pt(0.0), Length::Pt(dy)), color }
+    }
+
+    pub fn e0() -> Shadow { shadow(0.0, 0.0) }
+    pub fn e1() -> Shadow { shadow(3.0, 1.0) }
+    pub fn e2() -> Shadow { shadow(6.0, 2.0) }
+    pub fn e3() -> Shadow { shadow(12.0, 4.0) }
 }

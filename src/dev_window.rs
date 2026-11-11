@@ -265,9 +265,8 @@ impl DevWindow {
         // BG matches the panel's own BG so the title bar reads as
         // one continuous surface with the content beneath it.
         {
-            let bg = NSColor::colorWithSRGBRed_green_blue_alpha(
-                20.0 / 255.0, 22.0 / 255.0, 28.0 / 255.0, 1.0,
-            );
+            let [r, g, b, _] = crate::ui::components::panel_palette::surface_base();
+            let bg = NSColor::colorWithSRGBRed_green_blue_alpha(r as f64, g as f64, b as f64, 1.0);
             nswindow.setBackgroundColor(Some(&bg));
         }
         nswindow.setContentView(Some(&view));
