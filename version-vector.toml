@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.294"  # background agents the account refuses no longer hold a pane on it
-core    = "0.12.324"  # the log names who sent a fatal signal
+shell   = "0.7.298"  # a banner is drawn again for the display the window moved to
+core    = "0.12.328"  # a chord is matched by the character the keyboard layout types
 session = "0.11.167"  # output gets its carriage returns as read while a repair owes them; a repair ends by commands, not by a clock

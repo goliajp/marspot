@@ -195,6 +195,87 @@ fn a_panel_moved_between_densities_draws_as_one_made_there() {
     same_frame(&back, &first, "after a move to scale 2 and back");
 }
 
+/// A panel left dragged and scrolled, and a menu left open, while the
+/// window changes display: what says where they are is kept in window
+/// units, so the frame at scale 2 is the one a window that was dragged
+/// and scrolled there draws, and the frame back at scale 1 is the
+/// first.
+#[test]
+fn a_panel_dragged_and_scrolled_keeps_its_place_between_densities() {
+    use super::density_kit::at_scale;
+    use super::panel_chrome::PanelChrome;
+    use super::settings_paint::SettingsRender;
+    use super::surface_stack::{self, Press, SurfaceKind, SurfaceStack};
+    use crate::ui::Units;
+
+    // The state a window holds: set by a drag of 60 x 40 window units
+    // and a scroll of 30, on a display of scale `k`.
+    struct Held {
+        stack: SurfaceStack,
+        scroll: Units,
+        menu: (Units, Units),
+    }
+    let held_at = |k: f64| {
+        at_scale(k, || {
+            let mut stack = SurfaceStack::default();
+            stack.show(SurfaceKind::Settings);
+            let at = Rect { x: 100.0 * k, y_top: 100.0 * k, w: 400.0 * k, h: 300.0 * k };
+            let press = stack.on_press(150.0 * k, 104.0 * k, &PanelChrome::new(at, 0.0));
+            assert_eq!(press, Some(Press::BeginDrag));
+            assert!(stack.on_drag(210.0 * k, 144.0 * k, 4000.0 * k, 4000.0 * k, 0.0));
+            stack.on_release();
+            let menu = (Units::from_px(300.0 * k), Units::from_px(200.0 * k));
+            Held { stack, scroll: Units::from_px(30.0 * k), menu }
+        })
+    };
+    let draw = |renderer: &mut MetalRenderer, wr: &mut WindowRender, held: &Held| {
+        renderer.rebuild_fonts_if_scale_changed();
+        // too short to show the panel whole, so there is somewhere to scroll
+        panel::snapshot_on(renderer, wr, "settings_moved", 1000, 520, |renderer, layout| {
+            let (home, settings) = panel::open_settings(renderer, layout, settings_modal::Hover::None);
+            let rect =
+                surface_stack::place(home, held.stack.offset(), layout.window_w, layout.window_h, layout.top_inset);
+            renderer.set_settings_panel(Some(SettingsRender {
+                rect,
+                scroll: held.scroll.px(),
+                settings,
+                path: "/Users/you/Library/Application Support/marspot/settings.toml".to_string(),
+                hover: settings_modal::Hover::None,
+            }));
+        });
+    };
+    let Ok(mut renderer) = MetalRenderer::new_headless() else {
+        eprintln!("SKIPPED: no Metal device");
+        return;
+    };
+    let mut wr = WindowRender::new();
+    let held = held_at(1.0);
+    let mut moved_to = |scale: f64| capture(scale, || draw(&mut renderer, &mut wr, &held)).expect("a frame");
+    let (first, at_two, back) = (moved_to(1.0), moved_to(2.0), moved_to(1.0));
+
+    let there = held_at(2.0);
+    let mut fresh = (MetalRenderer::new_headless().expect("a second renderer"), WindowRender::new());
+    let fresh_at_two = capture(2.0, || draw(&mut fresh.0, &mut fresh.1, &there)).expect("a frame");
+    same_frame(&at_two, &fresh_at_two, "after a move from scale 1 to 2");
+    same_frame(&back, &first, "after a move to scale 2 and back");
+
+    // The check can fail: the same panel left where it opens is another frame.
+    let at_rest = Held { stack: SurfaceStack::default(), scroll: Units::default(), menu: held.menu };
+    let plain = capture(1.0, || draw(&mut fresh.0, &mut fresh.1, &at_rest)).expect("a frame");
+    let moved = plain.elems.iter().zip(&first.elems).filter(|(a, b)| a.edges != b.edges).count();
+    assert!(
+        moved > 10 || plain.elems.len() != first.elems.len(),
+        "a drag and a scroll moved only {moved} elements of the frame"
+    );
+
+    // The menu's anchor: the same point of the window on both displays.
+    let anchor = |k: f64, m: &(Units, Units)| at_scale(k, || (m.0.px(), m.1.px()));
+    assert_eq!(anchor(1.0, &held.menu), (300.0, 200.0));
+    assert_eq!(anchor(2.0, &held.menu), (600.0, 400.0));
+    assert_eq!(anchor(2.0, &held.menu), anchor(2.0, &there.menu));
+    assert_eq!(anchor(1.0, &held.menu), (300.0, 200.0));
+}
+
 /// Two frames that must be the same frame, element for element.
 fn same_frame(got: &Capture, want: &Capture, when: &str) {
     assert_eq!(got.elems.len(), want.elems.len(), "{}: {when}, the frame holds another number of elements", want.scene);
