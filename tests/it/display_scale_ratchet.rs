@@ -28,9 +28,8 @@ use std::path::Path;
 /// visible width, which is a threshold in pixels and not a size.
 const PHYSICAL: &[&str] = &["BORDER_PX", "SEPARATOR_PX", "DAY_RULE_PX", "BAR_MIN_PX"];
 
-/// Component files that draw through a canvas whose lengths carry
-/// their own unit, or draw nothing.
-const NOT_SCANNED: &[&str] = &["dev_panel.rs", "_tests.rs", "density_kit.rs", "panel_script.rs"];
+/// Component files that draw nothing.
+const NOT_SCANNED: &[&str] = &["_tests.rs", "density_kit.rs", "panel_script.rs"];
 
 /// What an `f64` constant is when it is not a length.
 const NOT_A_LENGTH: &[&str] =

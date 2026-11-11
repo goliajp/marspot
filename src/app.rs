@@ -166,20 +166,6 @@ pub trait MarspotApp: 'static {
     /// Fired when a previous `ctx.request_redraw()` is being honoured.
     /// Repaint the window here.
     fn redraw(&mut self, ctx: &MarspotAppCtx);
-
-    /// The dev panel's independent `NSWindow` was moved / resized /
-    /// changed displays.  Apps that persist dev-window geometry hook
-    /// this to save state.  Default no-op so non-dev-panel apps don't
-    /// have to care.  The `dev_window` module is the data source —
-    /// query `dev_window::with_dev_window(|w| w.frame_pt())` etc.
-    fn dev_window_changed(&mut self, _ctx: &MarspotAppCtx) {}
-
-    /// User clicked inside the dev panel NSWindow's content area.
-    /// Coords are logical pt (view-local, `isFlipped` → y=0 top).
-    /// Default no-op; L1 overrides to hit-test against tab strip /
-    /// menu and mutate `DevPanelState`.
-    fn dev_panel_click(&mut self, _ctx: &MarspotAppCtx, _x_pt: f64, _y_pt: f64) {}
-    fn dev_panel_scroll(&mut self, _ctx: &MarspotAppCtx, _delta_y_pt: f64) {}
 }
 
 /// Handle passed to every `MarspotApp` callback.  Owns the NSWindow /
@@ -1194,20 +1180,6 @@ pub enum EventKind {
     /// IOSurface pair here: a window on another display can have a
     /// different backing scale from the key one.
     WindowOpened,
-    /// Dev panel NSWindow was resized / moved / changed visibility.
-    /// Signals that the next redraw needs to recompute dev panel
-    /// dimensions and re-paint into the new layer size.
-    DevWindowChanged,
-    /// User clicked inside the dev panel NSWindow's content area.
-    /// Coords are logical pt in view-local (`isFlipped` so y=0 at top).
-    /// L1 hit-tests against the dev panel layout to update active
-    /// tab / section, then re-draws.
-    DevPanelClick { x_pt: f64, y_pt: f64 },
-    /// Trackpad / scroll wheel inside the dev panel.  Already
-    /// sign-inverted at the source: positive = content scrolls down
-    /// (offset_y increases).  In logical pt; multiply by current
-    /// scale at apply time to get phys.
-    DevPanelScroll { delta_y_pt: f64 },
 }
 
 struct AppState {
@@ -1235,23 +1207,7 @@ enum WindowOp {
     SetCaretRect(u32, Option<(f64, f64, f64, f64)>),
 }
 
-/// For a binary with a window of its own; call before `run_app`.
-/// Function pointers: a binary that sets none links none of that window.
-pub fn set_loop_hooks(before_resumed: fn(MainThreadMarker), after_dispatch: fn()) {
-    LOOP_HOOKS.set(Some((before_resumed, after_dispatch)));
-}
-
-fn after_dispatch() {
-    if let Some((_, after)) = LOOP_HOOKS.get() {
-        after();
-    }
-}
-
 thread_local! {
-    /// One runs once before `resumed`, the other after every event,
-    /// outside the `APP_STATE` borrow, where a window notification can re-enter.
-    static LOOP_HOOKS: Cell<Option<(fn(MainThreadMarker), fn())>> = const { Cell::new(None) };
-
     /// Owns the user's `MarspotApp` and the per-window context.
     /// Populated by `run_app`; accessed from every event handler.
     static APP_STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
@@ -1262,8 +1218,7 @@ thread_local! {
     /// so touching it again from a handler is an instant
     /// "RefCell already borrowed" panic — and `makeKeyAndOrderFront:` /
     /// `close` make it worse by synchronously firing delegate
-    /// notifications straight back into `dispatch_event_for`.  Same
-    /// hazard, same remedy as the dev window's deferred actions.
+    /// notifications straight back into `dispatch_event_for`.
     static PENDING_WINDOW_OPS: RefCell<Vec<WindowOp>> =
         const { RefCell::new(Vec::new()) };
 
@@ -1273,8 +1228,7 @@ thread_local! {
 }
 
 /// Dispatch an event that is about the app rather than a particular
-/// window — the dev panel's own NSWindow raises these.  Routed to the
-/// first window, which is the one the dev panel is anchored against.
+/// window.  Routed to the first window.
 pub(crate) fn dispatch_event_pub(kind: EventKind) {
     dispatch_event_for(marspot_term::shell_proto::FIRST_WINDOW_ID, kind);
 }
@@ -1343,23 +1297,6 @@ fn dispatch_event_for(window_id: u32, kind: EventKind) {
             EventKind::CloseRequested => app.close_requested(ctx),
             EventKind::QuitRequested => app.quit_requested(ctx),
             EventKind::WindowOpened => app.window_opened(ctx),
-            EventKind::DevWindowChanged => {
-                // The dev window's NSWindowDelegate noticed a resize
-                // / move / etc.  Hand the event to the App impl so
-                // L1 can persist the new geometry, then drive a
-                // redraw so the dev panel recomputes against the
-                // new content area.
-                app.dev_window_changed(ctx);
-                ctx.request_redraw();
-            }
-            EventKind::DevPanelClick { x_pt, y_pt } => {
-                app.dev_panel_click(ctx, x_pt, y_pt);
-                ctx.request_redraw();
-            }
-            EventKind::DevPanelScroll { delta_y_pt } => {
-                app.dev_panel_scroll(ctx, delta_y_pt);
-                ctx.request_redraw();
-            }
         }
 
         if ctx.redraw_pending.replace(false) {
@@ -1372,7 +1309,6 @@ fn dispatch_event_for(window_id: u32, kind: EventKind) {
             post_dummy_event(&ctx.nsapp);
         }
     });
-    after_dispatch();
     drain_pending_windows();
 }
 
@@ -1904,11 +1840,6 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
         });
     });
 
-    // before `resumed`, which applies a saved frame to that window
-    if let Some((before_resumed, _)) = LOOP_HOOKS.get() {
-        before_resumed(mtm);
-    }
-
     APP_STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let state = slot.as_mut().unwrap();
@@ -1923,9 +1854,6 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
             state.app.redraw(ctx);
         }
     });
-    // for what `resumed` / `redraw` queued
-    after_dispatch();
-
     // 6. Run.  Returns after dispatch_event sees an exit request.
     nsapp.run();
 

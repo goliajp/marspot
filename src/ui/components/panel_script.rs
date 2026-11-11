@@ -376,7 +376,7 @@ mod tests {
 
     fn layout() -> Layout {
         Layout::build(1600.0, 1000.0, 200.0, 56.0, 24.0, 2, 1, CELL.0, CELL.1)
-            .with_chrome_showing(2.0, 2, None, false)
+            .with_chrome(2.0, 2, None)
     }
 
     fn panel() -> PanelChrome {

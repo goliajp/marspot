@@ -243,10 +243,6 @@ struct Marspot {
     /// the renderer reads it and paints; mouse_down + key_event Esc
     /// dismiss it.
     context_menu: Option<ContextMenuState>,
-    /// UI-system dev panel state.  Default-open so a fresh launch
-    /// of `bin/run.sh` shows the workbench immediately.  Toggle
-    /// via toolbar button (added in a later commit) / Cmd-shortcut.
-    dev_panel: marspot::ui::components::DevPanelState,
     /// `true` when the user has collapsed the sidebar (Cmd-B).  The
     /// next `rebuild_layout_at` zeroes `sidebar_phys`, handing the
     /// reclaimed width to the cell grid.  `Layout::build` already
@@ -545,14 +541,12 @@ impl MarspotApp for Marspot {
         let (
             layout_btn_hit,
             sidebar_btn_hit,
-            dev_panel_btn_hit,
             close_session_hit,
         ) = {
             let Some(layout) = &self.layout else { return };
             (
                 layout.hit_test_layout_button(x_phys, y_phys),
                 layout.hit_test_sidebar_button(x_phys, y_phys),
-                layout.hit_test_dev_panel_button(x_phys, y_phys),
                 layout.hit_test_close_session(x_phys, y_phys),
             )
         };
@@ -568,12 +562,6 @@ impl MarspotApp for Marspot {
         // The layout panel is the windowed front-end's; here the
         // button only keeps the press off the pane under it.
         if layout_btn_hit {
-            return;
-        }
-        // UI-system dev panel toggle.
-        if dev_panel_btn_hit {
-            self.dev_panel.visible = !self.dev_panel.visible;
-            ctx.request_redraw();
             return;
         }
 
@@ -1685,14 +1673,6 @@ impl Marspot {
         // menu is open.  Re-builds the row list from the items Vec
         // so the renderer doesn't share a borrow back into Marspot
         // (mirrors set_layout_modal's per-frame publish shape).
-        // Dev panel lives in its own NSWindow.
-        marspot::dev_window::with_dev_window(|w| {
-            w.set_visible_deferred(self.dev_panel.visible);
-            if self.dev_panel.visible {
-                w.render(&self.dev_panel);
-            }
-        });
-
         renderer.set_context_menu(self.context_menu.as_ref().map(|state| {
             use marspot::ui::components::context_menu_paint::{ContextMenuRender, ContextMenuRow};
             ContextMenuRender {
@@ -1864,7 +1844,6 @@ fn main() {
         grid_cols: initial_cols,
         grid_rows: initial_rows,
         context_menu: None,
-        dev_panel: marspot::ui::components::DevPanelState::default(),
         sidebar_collapsed: true,
         ime_preedit: String::new(),
         profile_rss_path,
@@ -1880,7 +1859,6 @@ fn main() {
         frame_pt: None,
         bg: marspot::system_theme::startup_palette().bg, // the terminal's own ground
     };
-    marspot::dev_window::enable();
     run_app(app, proxy, attrs);
 }
 
@@ -2561,7 +2539,6 @@ fn bench_rss_format_dump(arg: &str) {
         grid_cols: 3,
         grid_rows: 3,
         context_menu: None,
-        dev_panel: marspot::ui::components::DevPanelState::default(),
         sidebar_collapsed: true,
         ime_preedit: String::new(),
         profile_rss_path,

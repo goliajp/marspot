@@ -8,8 +8,7 @@ pub mod panel_type;
 pub mod spec;
 pub mod table;
 pub mod terminal;
-pub mod token;
+pub mod type_scale;
 
 pub use panel_type::PanelText;
 pub use table::{color, current, Theme};
-pub use token::*;

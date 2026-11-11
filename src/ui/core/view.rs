@@ -312,7 +312,7 @@ impl<'a> ViewPainter<'a> {
         align: Alignment,
     ) {
         let w = self.panel_text_width(role, s) as f64;
-        let cap = crate::ui::view::type_scale::sf_pro_cap_height(role.pt())
+        let cap = crate::ui::theme::type_scale::sf_pro_cap_height(role.pt())
             * Self::px_per_pt();
         let box_rect = rect.place(w, cap, align);
         // `place` gave the cap box; the baseline is its bottom.
@@ -361,9 +361,9 @@ impl<'a> ViewPainter<'a> {
     /// top and height are given, in physical px.
     ///
     /// Centres on **cap height**, not the em box — see
-    /// [`crate::ui::view::type_scale::sf_pro_cap_height`].
+    /// [`crate::ui::theme::type_scale::sf_pro_cap_height`].
     pub fn ui_baseline_centred(&self, box_top: f32, box_h: f32, size_pt: f64) -> f32 {
-        let cap = (crate::ui::view::type_scale::sf_pro_cap_height(size_pt)
+        let cap = (crate::ui::theme::type_scale::sf_pro_cap_height(size_pt)
             * Self::px_per_pt()) as f32;
         box_top + (box_h + cap) * 0.5
     }
@@ -374,7 +374,7 @@ impl<'a> ViewPainter<'a> {
     /// are taken in whole pixels, as they are drawn, so the rows left
     /// above the ink and below it differ by one at most.
     pub fn ui_baseline_centred_for(&mut self, s: &str, box_top: f32, box_h: f32, size_pt: f64, weight: u16) -> f32 {
-        let cap = (crate::ui::view::type_scale::sf_pro_cap_height(size_pt) * Self::px_per_pt()) as f32;
+        let cap = (crate::ui::theme::type_scale::sf_pro_cap_height(size_pt) * Self::px_per_pt()) as f32;
         let ideographic = s.chars().any(|c| matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF));
         let ink = if ideographic { super::ink::rows(self.font, s, size_pt, weight) } else { None };
         let (above, below) = ink.unwrap_or((cap, 0.0));

@@ -116,7 +116,6 @@ pub(crate) fn build_instances(
             layout.sidebar_w > 0.0,
             layout_modal_state.is_some(),
             process_panel.is_some(),
-            false,
             cc_usage.is_some(),
             matches!(form_panel, Some(FormPanel::Settings(_))),
         ];

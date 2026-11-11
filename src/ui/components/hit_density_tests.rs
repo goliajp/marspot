@@ -52,8 +52,8 @@ fn the_windows_controls_are_hit_where_they_are_drawn() {
         // not in use and its close mark, and the close mark of the row
         // in use
         let on = [
-            ChromeHover::Toolbar(0), ChromeHover::Toolbar(1), ChromeHover::Toolbar(2), ChromeHover::Toolbar(4),
-            ChromeHover::Toolbar(5), ChromeHover::Add, ChromeHover::Row(0), ChromeHover::Row(3),
+            ChromeHover::Toolbar(0), ChromeHover::Toolbar(1), ChromeHover::Toolbar(2), ChromeHover::Toolbar(3),
+            ChromeHover::Toolbar(4), ChromeHover::Add, ChromeHover::Row(0), ChromeHover::Row(3),
             ChromeHover::Close(0), ChromeHover::Close(1), ChromeHover::Close(3),
         ];
         for hover in on {
