@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.284"  # a sandbox run logs the menu bar a menu a line
-core    = "0.12.312"  # a long log line of non-ASCII text is cut between characters
+shell   = "0.7.281"  # the menu bar, the banner and badge text follow the interface language
+core    = "0.12.311"  # the interface is in English, Japanese or Simplified Chinese
 session = "0.11.159"  # a long log line of non-ASCII text is cut between characters
