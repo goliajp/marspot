@@ -1,80 +1,61 @@
 //! The signals an L3 takes, turned into events for its main loop.
 //!
-//! - SIGTERM: an update from a sender that predates `SessionUpdate`
-//!   when `current/` holds another build, otherwise "end" (logout,
-//!   `kill`).
 //! - SIGHUP: the app retired this session.  Exit, whatever is staged.
 //!   An L3 has no controlling terminal, so nothing else sends it.
+//! - SIGTERM: an update from a sender that predates `SessionUpdate`
+//!   when `current/` holds another build, otherwise nothing.  It is not
+//!   a close: every process started from a pane shares the app's
+//!   coalition, and macOS sends SIGTERM to the members of a coalition
+//!   when the user force-quits any one of them from the Dock.  On
+//!   2026-11-11 that ended six panes whose app was never asked to close
+//!   them.  Only launchd's SIGTERM ends the session: the machine is
+//!   shutting down, and the exit saves the screen first.
 //!
-//! The handlers only write a byte to a self-pipe, the one thing a
-//! handler can safely do; a thread turns each byte into an event.
+//! Every signal is logged with its sender, so an unexpected one names
+//! its source.
 
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::Sender;
+
+use marspot_term::signals;
 
 use crate::SessionEvent;
 
-static PIPE_W: AtomicI32 = AtomicI32::new(-1);
+const LAUNCHD: i32 = 1;
 
-const TERM: u8 = 1;
-const HUP: u8 = 2;
-
-extern "C" fn on_signal(sig: libc::c_int) {
-    let fd = PIPE_W.load(Ordering::Relaxed);
-    if fd >= 0 {
-        let byte = [if sig == libc::SIGHUP { HUP } else { TERM }];
-        unsafe { libc::write(fd, byte.as_ptr().cast(), 1) };
+/// What `sig` from `from_pid` asks of the session, and the word the
+/// log uses for it.
+fn event_for(sig: libc::c_int, from_pid: i32) -> (SessionEvent, &'static str) {
+    if sig == libc::SIGHUP {
+        (SessionEvent::CloseRequested, "close")
+    } else if from_pid == LAUNCHD {
+        (SessionEvent::ShutdownRequested, "end")
+    } else {
+        (SessionEvent::UpdateRequested, "update")
     }
 }
 
 pub(crate) fn install(ev_tx: Sender<SessionEvent>) -> std::io::Result<()> {
-    let mut fds = [0i32; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let (r_fd, w_fd) = (fds[0], fds[1]);
-    for fd in [r_fd, w_fd] {
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags >= 0 {
-                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
-            }
-        }
-    }
-    PIPE_W.store(w_fd, Ordering::Relaxed);
+    signals::watch(&[libc::SIGTERM, libc::SIGHUP], move |sig, from_pid| {
+        let (ev, taken_as) = event_for(sig, from_pid);
+        marspot_term::lx_event!(
+            "L3_SIGNAL",
+            "signal received",
+            sig = signals::name(sig),
+            from_pid = from_pid,
+            from = signals::sender_name(from_pid),
+            taken_as = taken_as
+        );
+        let _ = ev_tx.send(ev);
+    })
+}
 
-    std::thread::Builder::new()
-        .name("l3-signal-watcher".to_string())
-        .spawn(move || {
-            let mut buf = [0u8; 1];
-            loop {
-                let n = unsafe { libc::read(r_fd, buf.as_mut_ptr().cast(), 1) };
-                if n <= 0 {
-                    break;
-                }
-                let ev = if buf[0] == HUP {
-                    SessionEvent::CloseRequested
-                } else {
-                    SessionEvent::ShutdownRequested
-                };
-                if ev_tx.send(ev).is_err() {
-                    break;
-                }
-            }
-        })?;
-
-    for sig in [libc::SIGTERM, libc::SIGHUP] {
-        unsafe {
-            let mut sa: libc::sigaction = std::mem::zeroed();
-            sa.sa_sigaction = on_signal as *const () as usize;
-            libc::sigemptyset(&mut sa.sa_mask);
-            sa.sa_flags = libc::SA_RESTART;
-            if libc::sigaction(sig, &sa, std::ptr::null_mut()) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-        }
-    }
-    Ok(())
+/// Lead a session of our own, so a signal sent to the process group of
+/// the app that started this L3 does not reach it.  Fails, harmlessly,
+/// after an execv and under a parent that already made us a group
+/// leader.
+pub(crate) fn leave_the_spawner_group() {
+    // SAFETY: setsid takes no arguments and only changes this process.
+    unsafe { libc::setsid() };
 }
 
 /// Consume a SIGTERM that is pending while SIGTERM is blocked; true if
@@ -83,9 +64,10 @@ pub(crate) fn install(ev_tx: Sender<SessionEvent>) -> std::io::Result<()> {
 /// After an execv: SIGTERM stays blocked across the handover, so one
 /// sent meanwhile is still pending in the new image.  It was sent for
 /// the update that just happened -- two senders asking for the same
-/// update -- and delivered now, with this build in `current/`, it would
-/// end the pane it was meant to move.
+/// update.
 pub(crate) fn drop_pending_sigterm() -> bool {
+    // SAFETY: signal-set calls on local sets; sigwait returns at once
+    // because the signal is known to be pending.
     unsafe {
         let mut pending: libc::sigset_t = std::mem::zeroed();
         libc::sigpending(&mut pending);
@@ -98,5 +80,19 @@ pub(crate) fn drop_pending_sigterm() -> bool {
         let mut got = 0;
         libc::sigwait(&set, &mut got);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_hangup_or_launchd_ends_the_session() {
+        let stranger = 4242;
+        assert!(matches!(event_for(libc::SIGHUP, stranger).0, SessionEvent::CloseRequested));
+        assert!(matches!(event_for(libc::SIGTERM, stranger).0, SessionEvent::UpdateRequested));
+        assert!(matches!(event_for(libc::SIGTERM, 0).0, SessionEvent::UpdateRequested));
+        assert!(matches!(event_for(libc::SIGTERM, LAUNCHD).0, SessionEvent::ShutdownRequested));
     }
 }

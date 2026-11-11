@@ -28,4 +28,4 @@
 
 shell   = "0.7.290"  # the dev window is built only by the binaries that show it
 core    = "0.12.321"  # a reattached session's exit status is made in place, not by running a helper
-session = "0.11.163"  # a repair reads the terminal settings and writes them back with nothing in between
+session = "0.11.164"  # a sigterm from anyone but launchd no longer ends the pane, and the session leads its own process group
