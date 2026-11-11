@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.276"  # kimi panes are recognised, badged, handed over and reachable by other agents
-core    = "0.12.306"  # dark, light and high-contrast themes, switchable while running
+core    = "0.12.307"  # toolbar icons are 16 units, up from 14
 session = "0.11.158"  # a pane has ~/.kimi-code/bin on its PATH
