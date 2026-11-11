@@ -11,12 +11,15 @@
 #     alone cannot settle -- Codex quit and reopened in the same pane
 #     while the thread it left is still loaded, and a second Codex in
 #     the same directory.  Each message appears on its own pane only;
-#   - names: every session is addressed by its pane's name (`proj`,
-#     then `proj#1` and `proj#2` once two panes share the directory):
-#     Codex sessions are named so, a Claude-registered process keeps
-#     its own name and is found through marspot's pane table, Codex
-#     sends to another Codex by pane name, and the Claude Code hook
-#     turns a pane name into the right inbox;
+#   - names: every session is addressed by its pane's name.  A pane
+#     alone in its directory is `proj`; once two panes share it each
+#     shows its full name, `proj#<four-digit code>`.  On both sending
+#     paths -- the MCP tools a Codex calls and the Claude Code hook --
+#     a shared plain name is refused with the candidates, `kind:name`
+#     picks the pane by its agent unless two panes run the same one, a
+#     full name reaches its pane after the pane changed agent or
+#     directory, and the name of a pane whose session is gone is
+#     unknown;
 #   - idle notices: a subscription placed with a message comes back as
 #     one `peer_idle_notice` once the Codex session is idle again.
 #
@@ -205,27 +208,26 @@ send_once() { # pane, text: retried only while refused, which queues nothing
   fail "--send to pane $1 was refused 40 times"
 }
 
-records() { # name<TAB>codex pid<TAB>thread<TAB>socket<TAB>former names, one per bound Codex pane
+records() { # name<TAB>codex pid<TAB>thread<TAB>socket, one per bound Codex pane
   python3 - "$REGISTRY" <<'PY'
 import glob, json, os, sys
 for p in sorted(glob.glob(os.path.join(sys.argv[1], "*.json"))):
     r = json.load(open(p))
     if r.get("marspotOwner"):
-        former = ",".join(f.get("name", "") for f in r.get("formerNames") or [])
-        print("\t".join(str(r.get(k, "")) for k in ("name", "marspotAgentPid", "sessionId", "messagingSocketPath")) + "\t" + former)
+        print("\t".join(str(r.get(k, "")) for k in ("name", "marspotAgentPid", "sessionId", "messagingSocketPath")))
 PY
 }
-name_of_pid() { # pid → name<TAB>former names<TAB>status, from any record
+name_of_pid() { # pid → name<TAB>status, from any record
   python3 - "$REGISTRY/$1.json" <<'PY' 2>/dev/null
 import json, sys
 r = json.load(open(sys.argv[1]))
-print("%s\t%s\t%s" % (r.get("name"), ",".join(f.get("name", "") for f in r.get("formerNames") or []), r.get("status")))
+print("%s\t%s" % (r.get("name"), r.get("status")))
 PY
 }
-wait_name() { # pane, name, seconds → the pane's record once it carries that name
+wait_name() { # pane, regex, seconds → the pane's record once its name matches
   local i line
   for (( i = 0; i < $3 * 2; i++ )); do
-    line="$(record_of_pane "$1")" && [[ "$(cut -f1 <<<"$line")" == "$2" ]] && { echo "$line"; return 0; }
+    line="$(record_of_pane "$1")" && [[ "$(cut -f1 <<<"$line")" =~ $2 ]] && { echo "$line"; return 0; }
     sleep 0.5
   done
   return 1
@@ -299,58 +301,185 @@ round_trip "$P2" "$R2" PEERBUS-TAG-THREE
 (( $(seen "$P2" PEERBUS-TAG-TWO) == 0 )) || fail "pane $P1's message showed on pane $P2"
 ok "each message showed only on its own pane"
 
-# ── names follow the panes, and Codex sends by them ───────────────
-R1C="$(wait_name "$P1" "proj#1" 25)" || fail "pane $P1's session was not renamed proj#1: $(record_of_pane "$P1")"
-wait_name "$P2" "proj#2" 25 >/dev/null || fail "pane $P2's session was not named proj#2: $(record_of_pane "$P2")"
-grep -qF proj <<<"$(cut -f5 <<<"$R1C")" || fail "the old name is not among pane $P1's former names: $R1C"
-ok "two panes in one directory: proj#1 and proj#2, and proj#1 still answers to proj"
-python3 "$ROOT/bin/_peerbus_claude_side.py" "$(cut -f4 <<<"$R2")" 30 "" "Send proj#1 the text PEERBUS-C2C-ONE" >/dev/null \
-  || fail "the forwarding request did not reach pane $P2"
-for (( i = 0; i < 60; i++ )); do (( $(seen "$P1" PEERBUS-C2C-ONE) > 0 )) && break; sleep 0.5; done
-(( $(seen "$P1" PEERBUS-C2C-ONE) > 0 )) || fail "Codex in pane $P2 sent to proj#1, and nothing showed on pane $P1"
-ok "Codex in pane $P2 messaged the Codex in pane $P1 by its pane name"
-
-# ── a Claude session is renamed after its pane ────────────────────
-send_once "$P2" "/quit"
-shell_ready "$P2"
-send_once "$P2" "python3 $ROOT/bin/_peerbus_fake_claude.py $REGISTRY 120"
-for (( i = 0; i < 20; i++ )); do
-  FAKE_PID="$(grep -lE '"entrypoint": *"cli"' "$REGISTRY"/*.json 2>/dev/null | head -1 | xargs -n1 basename 2>/dev/null | sed 's/\.json$//')"
-  [[ -n "$FAKE_PID" ]] && break
-  sleep 0.5
-done
-[[ -n "$FAKE_PID" ]] || fail "the stand-in Claude session never registered"
-pane_socket() { # pane name → the socket marspot's pane table gives it
+# ── names: two Codex panes in one directory ───────────────────────
+mcp_send() { # sending thread, recipient, text → the tool's answer; fails when the tool reports an error
+  python3 - "$SB/bin/marspot-peer" "$1" "$2" "$3" <<'PY'
+import json, subprocess, sys
+req = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+    "name": "SendMessage", "arguments": {"to": sys.argv[3], "message": sys.argv[4]}, "_meta": {"threadId": sys.argv[2]}}}
+out = subprocess.run([sys.argv[1], "mcp"], input=json.dumps(req) + "\n", capture_output=True, text=True).stdout
+r = json.loads(out.splitlines()[0])["result"]
+print(r["content"][0]["text"])
+sys.exit(1 if r["isError"] else 0)
+PY
+}
+hook_send() { # recipient → what the Claude Code SendMessage hook answers
+  printf '{"hook_event_name":"PreToolUse","tool_name":"SendMessage","session_id":"x","tool_input":{"to":"%s","message":"hi"}}' "$1" \
+    | "$SB/bin/marspot-peer" claude-hook
+}
+hook_field() { # hook answer, field of hookSpecificOutput ("updatedInput.to" for the rewritten recipient)
+  python3 - "$1" "$2" <<'PY' 2>/dev/null
+import json, sys
+v = json.loads(sys.argv[1])["hookSpecificOutput"]
+for k in sys.argv[2].split("."):
+    v = v[k]
+print(v)
+PY
+}
+hook_to() { hook_field "$(hook_send "$1")" updatedInput.to; }
+hook_refusal() { hook_field "$(hook_send "$1")" permissionDecisionReason; }
+shows() { # pane, text, what
+  local i
+  for (( i = 0; i < 60; i++ )); do (( $(seen "$1" "$2") > 0 )) && return 0; sleep 0.5; done
+  fail "$3: $2 never showed on pane $1"
+}
+pane_entry() { # socket → name<TAB>code<TAB>base<TAB>agent, from marspot's pane table
   python3 - "$REGISTRY" "$1" <<'PY'
 import glob, json, os, sys
 for p in glob.glob(os.path.join(sys.argv[1], ".marspot-panes-*.json")):
     for e in json.load(open(p)).get("panes", []):
-        if e["name"] == sys.argv[2]:
-            print(e["socket"])
+        if e["socket"] == sys.argv[2]:
+            print("\t".join(str(e.get(k, "")) for k in ("name", "code", "base", "agent")))
 PY
 }
-FAKE_SOCK="/tmp/cc-socks/e2e-fake-$FAKE_PID.sock"
-for (( i = 0; i < 50; i++ )); do
-  [[ "$(pane_socket "proj#2")" == "$FAKE_SOCK" ]] && break
-  sleep 0.5
-done
-[[ "$(pane_socket "proj#2")" == "$FAKE_SOCK" ]] || fail "the pane table does not send proj#2 to the Claude session in pane $P2: $(pane_socket "proj#2")"
-FAKE="$(name_of_pid "$FAKE_PID")"
-[[ "$(cut -f1 <<<"$FAKE")" == fake-claude-6a ]] || fail "the Claude session's own record was renamed: $FAKE"
-ok "pane $P2 is proj#2 in marspot's pane table, and the Claude session there keeps its own name"
+wait_entry() { # socket, regex for the name, seconds → the pane-table entry once its name matches
+  local i line
+  for (( i = 0; i < $3 * 2; i++ )); do
+    line="$(pane_entry "$1")"; [[ "$(cut -f1 <<<"$line")" =~ $2 ]] && { echo "$line"; return 0; }
+    sleep 0.5
+  done
+  return 1
+}
 
-# The Claude Code hook, given what Claude Code gives it.
-HOOK_OUT="$(printf '{"hook_event_name":"PreToolUse","tool_name":"SendMessage","session_id":"x","tool_input":{"to":"proj#1","message":"hi"}}' \
-  | "$SB/bin/marspot-peer" claude-hook)"
-want="uds:$(cut -f4 <<<"$(record_of_pane "$P1")")"
-[[ "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["hookSpecificOutput"]["updatedInput"]["to"])' "$HOOK_OUT")" == "$want" ]] \
-  || fail "the SendMessage hook did not turn proj#1 into $want: $HOOK_OUT"
+FULL='^proj#[1-9][0-9]{3}$'
+R1C="$(wait_name "$P1" "$FULL" 25)" || fail "pane $P1's session does not show a full name: $(record_of_pane "$P1")"
+R2C="$(wait_name "$P2" "$FULL" 25)" || fail "pane $P2's session does not show a full name: $(record_of_pane "$P2")"
+N1="$(cut -f1 <<<"$R1C")"; N2="$(cut -f1 <<<"$R2C")"
+S1="$(cut -f4 <<<"$R1C")"; S2="$(cut -f4 <<<"$R2C")"
+TH1="$(cut -f3 <<<"$R1C")"; TH2="$(cut -f3 <<<"$R2C")"
+[[ "$N1" != "$N2" ]] || fail "both panes carry one code: $N1"
+ok "two panes in one directory show their full names: $N1 and $N2"
+
+python3 "$ROOT/bin/_peerbus_claude_side.py" "$S2" 30 "" "Send $N1 the text PEERBUS-C2C-ONE" >/dev/null \
+  || fail "the forwarding request did not reach pane $P2"
+shows "$P1" PEERBUS-C2C-ONE "Codex in pane $P2 sent to $N1"
+ok "Codex in pane $P2 messaged the Codex in pane $P1 by its full name"
+
+# the shared plain name, and an agent both run, are refused with the candidates
+for to in proj codex:proj; do
+  out="$(mcp_send "$TH2" "$to" PEERBUS-REFUSED)" && fail "the MCP tool sent to $to although two panes fit: $out"
+  grep -qF "2 panes are named \"$to\"" <<<"$out" && grep -qF "$N1 (codex)" <<<"$out" && grep -qF "$N2 (codex)" <<<"$out" \
+    || fail "the MCP refusal of $to does not list both panes: $out"
+  out="$(hook_refusal "$to")"
+  grep -qF "2 panes are named \"$to\"" <<<"$out" && grep -qF "$N1 (codex)" <<<"$out" && grep -qF "$N2 (codex)" <<<"$out" \
+    || fail "the hook's refusal of $to does not list both panes: $(hook_send "$to")"
+done
+(( $(seen "$P1" PEERBUS-REFUSED) == 0 )) || fail "a refused message was delivered"
+ok "proj and codex:proj are refused on both paths, each listing $N1 and $N2 as codex"
+[[ "$(hook_to "$N1")" == "uds:$S1" && "$(hook_to "$N2")" == "uds:$S2" ]] || fail "the hook does not send each full name to its pane: $(hook_send "$N1") $(hook_send "$N2")"
+mcp_send "$TH2" "$N1" PEERBUS-MCP-FULL >/dev/null || fail "the MCP tool refused $N1"
+shows "$P1" PEERBUS-MCP-FULL "an MCP send to $N1"
+ok "each full name reaches its own pane on both paths"
+
+# ── a Claude session beside a Codex one, in one directory ─────────
+start_fake() { # → FAKE_PID and FAKE_SOCK of a stand-in Claude session started in pane $P2
+  local before="${FAKE_PID:-}" i
+  send_once "$P2" "python3 $ROOT/bin/_peerbus_fake_claude.py $REGISTRY 240 $SB/fake-inbox.log"
+  for (( i = 0; i < 40; i++ )); do
+    FAKE_PID="$(grep -lE '"entrypoint": *"cli"' "$REGISTRY"/*.json 2>/dev/null | head -1 | xargs -n1 basename 2>/dev/null | sed 's/\.json$//')"
+    [[ -n "$FAKE_PID" && "$FAKE_PID" != "$before" ]] && break
+    sleep 0.5
+  done
+  [[ -n "$FAKE_PID" && "$FAKE_PID" != "$before" ]] || fail "the stand-in Claude session never registered"
+  FAKE_SOCK="/tmp/cc-socks/e2e-fake-$FAKE_PID.sock"
+}
+stop_fake() { # by its recorded pid; gone once its record is
+  local i
+  kill "$FAKE_PID" 2>/dev/null
+  for (( i = 0; i < 40; i++ )); do [[ -e "$REGISTRY/$FAKE_PID.json" ]] || return 0; sleep 0.25; done
+  fail "the stand-in Claude session did not leave"
+}
+got() { # text → whether the stand-in Claude's inbox received it
+  local i
+  for (( i = 0; i < 40; i++ )); do grep -qF "$1" "$SB/fake-inbox.log" 2>/dev/null && return 0; sleep 0.25; done
+  return 1
+}
+send_once "$P2" "/quit"
+shell_ready "$P2"
+start_fake
+E2="$(wait_entry "$FAKE_SOCK" "$FULL" 25)" || fail "the Claude session in pane $P2 is not in the pane table under a full name: $(pane_entry "$FAKE_SOCK")"
+[[ "$(cut -f1 <<<"$E2")" == "$N2" ]] || fail "pane $P2 changed its code when its agent changed: was $N2, is $(cut -f1 <<<"$E2")"
+[[ "$(cut -f4 <<<"$E2")" == claude ]] || fail "the pane table does not say pane $P2 runs claude: $E2"
+[[ "$(cut -f1 <<<"$(name_of_pid "$FAKE_PID")")" == fake-claude-6a ]] || fail "the Claude session's own record was renamed: $(name_of_pid "$FAKE_PID")"
+ok "pane $P2 keeps $N2 with a Claude session in it, and that session keeps its own name"
+
+out="$(mcp_send "$TH1" proj PEERBUS-REFUSED-TWO)" && fail "the MCP tool sent to proj although two panes fit: $out"
+grep -qF "$N1 (codex)" <<<"$out" && grep -qF "$N2 (claude)" <<<"$out" && grep -qF "or to" <<<"$out" && grep -qF "claude:proj" <<<"$out" && grep -qF "codex:proj" <<<"$out" \
+  || fail "the MCP refusal of proj does not name both panes, their agents and the two ways out: $out"
+out="$(hook_refusal proj)"
+grep -qF "$N1 (codex)" <<<"$out" && grep -qF "$N2 (claude)" <<<"$out" && grep -qF "claude:proj" <<<"$out" \
+  || fail "the hook's refusal of proj does not name both panes and their agents: $(hook_send proj)"
+[[ "$(hook_to codex:proj)" == "uds:$S1" && "$(hook_to claude:proj)" == "uds:$FAKE_SOCK" ]] \
+  || fail "the hook does not pick the pane by its agent: $(hook_send codex:proj) $(hook_send claude:proj)"
+[[ "$(hook_to "$N1")" == "uds:$S1" && "$(hook_to "$N2")" == "uds:$FAKE_SOCK" ]] || fail "the hook does not send each full name to its pane"
+mcp_send "$TH1" claude:proj PEERBUS-MCP-KIND >/dev/null || fail "the MCP tool refused claude:proj"
+got PEERBUS-MCP-KIND || fail "an MCP send to claude:proj did not reach the Claude session in pane $P2"
+mcp_send "$TH1" "$N2" PEERBUS-MCP-FULL-TWO >/dev/null || fail "the MCP tool refused $N2"
+got PEERBUS-MCP-FULL-TWO || fail "an MCP send to $N2 did not reach the Claude session in pane $P2"
+grep -qF "from-name=\\\"$N1\\\"" "$SB/fake-inbox.log" || fail "the message does not carry the sender's display name $N1: $(tail -c 600 "$SB/fake-inbox.log")"
+ok "a claude and a codex in one directory: proj is refused with both, claude:proj and codex:proj and the full names each reach the right one"
+
+LIST="$(python3 - "$SB/bin/marspot-peer" "$TH1" <<'PY'
+import json, subprocess, sys
+req = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "ListAgents", "arguments": {}, "_meta": {"threadId": sys.argv[2]}}}
+out = subprocess.run([sys.argv[1], "mcp"], input=json.dumps(req) + "\n", capture_output=True, text=True).stdout
+print(json.loads(out.splitlines()[0])["result"]["content"][0]["text"])
+PY
+)"
+grep -qF "This session is $N1" <<<"$LIST" && grep -qE "^  $N2  ·  claude  ·  idle" <<<"$LIST" || fail "the MCP listing does not show $N2 as claude: $LIST"
 SID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sessionId"])' "$REGISTRY/$FAKE_PID.json")"
 CTX="$(printf '{"hook_event_name":"PostToolUse","tool_name":"ListAgents","session_id":"%s","tool_input":{}}' "$SID" \
   | "$SB/bin/marspot-peer" claude-hook)"
-grep -qF 'proj#1 → Codex session' <<<"$CTX" && grep -qF 'proj#2 → this session' <<<"$CTX" \
-  || fail "the ListAgents hook did not name the panes: $CTX"
-ok "the Claude Code hooks send proj#1 to pane $P1's inbox and list the pane names"
+grep -qF "$N1  codex  " <<<"$CTX" && grep -qF "$N2  claude  idle → this session" <<<"$CTX" && grep -qF 'kind:name' <<<"$CTX" \
+  || fail "the ListAgents hook did not list the panes with their agents and the recipient forms: $CTX"
+ok "both listings give each pane's name and agent"
+
+# ── the pane changes directory: one of each name again ────────────
+stop_fake
+mkdir -p "$SB/other"
+send_once "$P2" "cd $SB/other"
+start_fake
+E2="$(wait_entry "$FAKE_SOCK" '^other$' 25)" || fail "pane $P2 is not shown as other after changing directory: $(pane_entry "$FAKE_SOCK")"
+[[ "other#$(cut -f2 <<<"$E2")" == "other#${N2#proj#}" ]] || fail "pane $P2 changed its code when it changed directory: was $N2, is $E2"
+NEW2="other#${N2#proj#}"
+wait_name "$P1" '^proj$' 25 >/dev/null || fail "pane $P1 does not show the plain name once it is the only proj: $(record_of_pane "$P1")"
+ok "pane $P2 is other with its code unchanged, and pane $P1 shows proj again"
+for to in proj "$N1" codex:proj; do
+  [[ "$(hook_to "$to")" == "uds:$S1" ]] || fail "the hook does not send $to to the only proj: $(hook_send "$to")"
+done
+for to in other "$NEW2" claude:other; do
+  mcp_send "$TH1" "$to" "PEERBUS-LONE-$to" >/dev/null || fail "the MCP tool refused $to"
+  got "PEERBUS-LONE-$to" || fail "an MCP send to $to did not reach pane $P2"
+done
+ok "a pane alone under its name answers to the plain name, the full name and kind:name on both paths"
+out="$(mcp_send "$TH1" "$N2" PEERBUS-MOVED)" || fail "the MCP tool refused the full name $N2 the pane had before it moved: $out"
+got PEERBUS-MOVED || fail "an MCP send to $N2 did not follow the pane to its new directory"
+grep -qF "$N2 is now called $NEW2" <<<"$out" || fail "the MCP answer does not say what $N2 is called now: $out"
+[[ "$(hook_to "$N2")" == "uds:$FAKE_SOCK" ]] || fail "the hook does not send $N2 to the pane that moved: $(hook_send "$N2")"
+grep -qF "$N2 is now called $NEW2" <<<"$(hook_send "$N2")" || fail "the hook does not say what $N2 is called now: $(hook_send "$N2")"
+ok "the full name $N2 still reaches the pane as $NEW2, and the answer says so"
+
+# ── the session is gone: its names are unknown ────────────────────
+stop_fake
+for (( i = 0; i < 50; i++ )); do [[ -z "$(pane_entry "$FAKE_SOCK")" ]] && break; sleep 0.5; done
+for to in "$N2" "$NEW2"; do
+  out="$(mcp_send "$TH1" "$to" PEERBUS-GONE)" && fail "the MCP tool sent to $to, whose session is gone: $out"
+  grep -qF "no pane is named \"$to\"" <<<"$out" || fail "the MCP refusal of $to is not that no pane has the name: $out"
+  grep -qF "no pane is named \"$to\"" <<<"$(hook_refusal "$to")" || fail "the hook did not refuse $to as unknown: $(hook_send "$to")"
+done
+[[ "$(hook_to "$N1")" == "uds:$S1" ]] || fail "the remaining pane's full name $N1 stopped working"
+ok "the names of the pane whose session ended are unknown on both paths, and $N1 still reaches pane $P1"
+FAKE_PID=""
 
 # ── 3. marspot killed, then started again ────────────────────────
 #

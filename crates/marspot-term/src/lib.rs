@@ -69,6 +69,7 @@ pub mod input_core;
 pub mod layout;
 pub mod parser;
 pub mod palette;
+pub mod pane_code;
 pub mod paths;
 pub mod host_load;
 pub mod inherited_fds;
