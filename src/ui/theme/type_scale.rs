@@ -8,13 +8,10 @@
 //!
 //! At identical pt size, SF Pro and Monaco render at noticeably
 //! different visual heights (cap-height ratio 0.682 vs ~0.74; x-height
-//! gap is wider still).  In a mixed-font UI (dev panel SF Pro chrome +
-//! Monaco code samples next to it), "size 11pt" means two different
-//! things.  Switching every caller to write `.size(UiSize::Body)`
-//! removes the per-zone hacking that grew up around the inconsistency
-//! (multiple `SIZE_*` consts + a `DEV_PANEL_FONT_SCALE` multiplier +
-//! per-zone overrides — all chasing the same target through different
-//! ad-hoc dials).
+//! gap is wider still).  In a mixed-font UI (SF Pro chrome with
+//! Monaco next to it), "size 11pt" means two different things.  A
+//! caller that names a token instead needs no per-zone size constants
+//! or multipliers chasing the same target.
 //!
 //! ## How calibration works
 //!

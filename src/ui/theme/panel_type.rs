@@ -9,8 +9,8 @@
 //! which is what "字太大了" was describing: not one number too big, but
 //! two panels measuring from different rulers.
 //!
-//! So the roles are named and the sizes derived from [`UiSize`] — the
-//! cap-height ladder the dev panel already draws from.  A panel asks
+//! So the roles are named and the sizes derived from [`UiSize`], a
+//! cap-height ladder.  A panel asks
 //! for a *role*, never a number, and two panels showing the same kind
 //! of thing come out the same size because they asked for the same
 //! word.
@@ -21,7 +21,7 @@
 //! everything that is prose: titles, labels, the sentence under a
 //! label.
 
-use super::super::view::type_scale::UiSize;
+use super::type_scale::UiSize;
 
 /// What a run of panel text *is*, rather than how big it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,9 +94,9 @@ impl PanelText {
     }
 
     /// Cap height in pt — what optical centring and line spacing
-    /// measure from.  See [`crate::ui::view::type_scale`].
+    /// measure from.  See [`crate::ui::theme::type_scale`].
     pub fn cap(self) -> f64 {
-        crate::ui::view::type_scale::sf_pro_cap_height(self.pt())
+        crate::ui::theme::type_scale::sf_pro_cap_height(self.pt())
     }
 
     /// Rough descender depth in pt, for the space under a last line.

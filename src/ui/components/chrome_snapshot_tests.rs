@@ -145,7 +145,7 @@ fn snapshot_on(
         cell_w,
         cell_h,
     )
-    .with_chrome_showing(scale, panes.len(), None, false);
+    .with_chrome(scale, panes.len(), None);
 
     let grids: Vec<Grid> =
         (0..panes.len()).map(|i| (panes[i].content)(layout.cells[i].cols, layout.cells[i].rows)).collect();
