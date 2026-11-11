@@ -24,16 +24,16 @@ fn text(m: Msg) -> &'static str {
         Msg::ClaudeCodeReportsModel => "Claude Codeから使用モデルを取得",
         Msg::WheelSpeed => "ホイールの速度",
 
-        Msg::CostReclaimIdlePanes => "ペインに戻ると、セッションの再開に約3秒かかります。",
-        Msg::CostIdleFor => "ターミナルの無操作時間ではなく、セッション記録の最終更新時刻で判定します。",
-        Msg::CostWarmUpOnReturn => "ペインに戻ったとき、休止中のペインを1秒に1つずつ再開します。",
-        Msg::CostTheme => "以前の色を取得したプログラムは、再取得するまでその色のままです。",
-        Msg::CostDimOtherPanes => "暗くするほど見分けやすくなりますが、暗すぎると読みにくくなります。",
-        Msg::CostCircledDigitsWide => "全角と同じ幅になりますが、折り返しが1桁早まることがあります。",
+        Msg::CostReclaimIdlePanes => "ペインに戻ると、セッションの再開に約3秒かかります",
+        Msg::CostIdleFor => "ターミナルの無操作時間ではなく、セッション記録の最終更新時刻で判定します",
+        Msg::CostWarmUpOnReturn => "ペインに戻ったとき、休止中のペインを1秒に1つずつ再開します",
+        Msg::CostTheme => "以前の色を取得したプログラムは、再取得するまでその色のままです",
+        Msg::CostDimOtherPanes => "暗くするほど見分けやすくなりますが、暗すぎると読みにくくなります",
+        Msg::CostCircledDigitsWide => "全角と同じ幅になりますが、折り返しが1桁早まることがあります",
         Msg::CostClaudeCodeReportsModel => {
-            "Claude Codeの設定にステータスラインを追加します。既存の設定は引き継がれ、オフにすると元に戻ります。"
+            "Claude Codeの設定にステータスラインを追加します。既存の設定は引き継がれ、オフにすると元に戻ります"
         }
-        Msg::CostWheelSpeed => "速いほど少ない操作で届きますが、行き過ぎやすくなります。",
+        Msg::CostWheelSpeed => "速いほど少ない操作で届きますが、行き過ぎやすくなります",
 
         Msg::MenuCopy => "コピー",
         Msg::MenuPaste => "ペースト",
@@ -133,7 +133,7 @@ fn text(m: Msg) -> &'static str {
 
         Msg::AccountsHeading => "アカウント",
         Msg::AccountsAvailability => "利用可能になる時刻",
-        Msg::AccountsEmpty => "使用状況データはまだありません。ペインでClaudeまたはCodexにサインインすると、数分以内に表示されます。",
+        Msg::AccountsEmpty => "使用状況データはまだありません。ペインでClaudeまたはCodexにサインインすると、数分以内に表示されます",
         Msg::TimelineNow => "現在",
         Msg::StatusOk => "利用可",
         Msg::StatusNear => "残りわずか",
@@ -155,9 +155,9 @@ fn text(m: Msg) -> &'static str {
         Msg::BadgeHeldByBgJob => "⚠ バックグラウンドジョブ実行中",
 
         Msg::Language => "言語",
-        Msg::CostLanguage => "Marspotのパネルとメニューにすぐ反映されます。",
+        Msg::CostLanguage => "Marspotのパネルとメニューにすぐ反映されます",
         Msg::CostLanguageRelaunch => {
-            "システムが提供するメニュー項目は、Marspotの再起動後に切り替わります。"
+            "システムが提供するメニュー項目は、Marspotの再起動後に切り替わります"
         }
         Msg::LangEnglish => "English",
         Msg::LangJapanese => "日本語",
