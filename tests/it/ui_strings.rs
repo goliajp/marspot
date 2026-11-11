@@ -1,12 +1,10 @@
-//! The catalogue is complete, and the files that use it stay migrated.
+//! The catalogue is complete and says what it said.
 //!
-//! S7-01. The first two tests are about the catalogue itself; the third is
-//! a ratchet — it fails if a bare English literal comes back into a file
-//! that has already been migrated. Without it the migration un-does itself
-//! one convenient literal at a time, and nobody notices until a translator
-//! asks why half the settings panel is still in English.
+//! The tests here are about the catalogue itself. What keeps a bare
+//! literal from coming back into the code that draws is the ratchet in
+//! `ui_strings_ratchet`.
 
-use marspot::ui::strings::{ALL, t};
+use marspot::ui::strings::{self, t, Arg, MonthDayTime, Msg, ALL};
 
 /// Every message resolves to something, and nothing resolves to nothing.
 ///
@@ -28,7 +26,7 @@ fn every_message_has_text() {
 /// touching either fails here.
 #[test]
 fn every_message_is_listed() {
-    const EXPECTED: usize = 60;
+    const EXPECTED: usize = 122;
     assert_eq!(
         ALL.len(),
         EXPECTED,
@@ -44,128 +42,75 @@ fn every_message_is_listed() {
     }
 }
 
-/// Two ids may not carry the same English text.
+/// Two ids may not carry the same English text, unless the pair is named
+/// here as two meanings that only English spells alike.
 ///
-/// Where they genuinely should differ in another language -- "Normal" as a
-/// dimming level and "Normal" as a scroll speed -- they are separate ids
-/// with separate text, and if the English coincides the pair has to be
-/// looked at rather than left to a translator to guess.
+/// "Normal" as a dimming level and "Normal" as a wheel speed are two
+/// words in a language that has two; so are "Light" as a dimming level
+/// and "Light" as a theme. Any other coincidence has to be looked at
+/// rather than left to a translator to guess.
 #[test]
 fn no_two_messages_share_their_english() {
-    let mut by_text: std::collections::HashMap<&str, Vec<String>> = Default::default();
+    const TWO_MEANINGS: &[(&str, &[Msg])] = &[
+        ("Normal", &[Msg::DimNormal, Msg::ScrollNormal]),
+        ("Light", &[Msg::DimLight, Msg::ThemeLight]),
+    ];
+    let mut by_text: std::collections::HashMap<&str, Vec<Msg>> = Default::default();
     for m in ALL {
-        by_text.entry(t(*m)).or_default().push(format!("{m:?}"));
+        by_text.entry(t(*m)).or_default().push(*m);
     }
     let clashes: Vec<String> = by_text
         .iter()
-        .filter(|(_, ids)| ids.len() > 1)
-        .map(|(text, ids)| format!("{text:?} is {}", ids.join(" and ")))
+        .filter(|(text, ids)| {
+            ids.len() > 1 && !TWO_MEANINGS.iter().any(|(en, pair)| en == *text && pair == &ids.as_slice())
+        })
+        .map(|(text, ids)| format!("{text:?} is {ids:?}"))
         .collect();
     assert!(
         clashes.is_empty(),
         "two messages share their English, so a translator cannot tell them apart:\n  {}",
         clashes.join("\n  ")
     );
+    for (en, pair) in TWO_MEANINGS {
+        assert_eq!(by_text.get(en).map(Vec::as_slice), Some(*pair), "{en:?} is no longer shared: drop it from the list");
+    }
 }
 
-/// The migrated files hold no user-visible English literal any more.
-///
-/// Source shape, because the point is the absence of a thing. A literal is
-/// "user-visible" here if it starts with a capital and reads like a
-/// sentence -- which also matches some identifiers, so the ones that are
-/// not text are listed rather than guessed at.
+/// One of each sentence built around a value, with what English makes of
+/// it. A language added later is run over the same values.
+const SAMPLES: &[(Arg<'static>, &str)] = &[
+    (Arg::MoveToWindow(2), "Move to Window 2"),
+    (Arg::PaneCount { cols: 4, rows: 1 }, "4 × 1 = 4 panes"),
+    (Arg::PaneCount { cols: 1, rows: 1 }, "1 × 1 = 1 pane"),
+    (Arg::ProcessDetail { pane: "api", sid: 7, shell_pid: 4242 }, "api · sid 7 · shell pid 4242"),
+    (Arg::ResetAt(MonthDayTime { month: 1, day: 2, hour: 6, minute: 0 }), "reset: 1/2 06:00"),
+    (Arg::UpdatedAt(MonthDayTime { month: 11, day: 10, hour: 18, minute: 5 }), "updated 11/10 18:05"),
+    (Arg::SessionStarting(12), "session 12 starting…"),
+    (Arg::SessionUnavailable(12), "session 12 unavailable — press any key to retry"),
+    (Arg::ProfileRow { n: 2, current: true }, "● profile 2"),
+    (Arg::ProfileRow { n: 3, current: false }, "   profile 3"),
+    (Arg::HandOffTo("codex P2"), "hand off to codex P2"),
+    (Arg::SwitchToProfile(4), "switch to P4"),
+];
+
+/// The sentences built around a value read as they did when each call
+/// site glued its own together.
 #[test]
-fn migrated_files_do_not_grow_new_literals() {
-    const MIGRATED: &[(&str, &[&str])] = &[(
-        "src/ui/components/settings_modal.rs",
-        // Not user-visible: type names that happen to be capitalised.
-        &["Msg", "Row", "Control", "Segmented", "RowSpec", "Section"],
-    )];
-    // The `Control::Segmented` option arrays are not migrated yet,
-    // and the exemption is by name rather than by file so the rest of the
-    // file stays covered. Three of them are prose and belong in the
-    // catalogue; the other is durations ("15m", "1h"), which is a number
-    // and a unit to format rather than a string to translate -- S7-03.
-    //
-    // `the_deferred_arrays_still_exist` below fails when they go, which is
-    // what stops this exemption from outliving its reason.
-    const DEFERRED: &[&str] = &["IDLE_LABELS", "DIM_LABELS", "SCROLL_LABELS", "THEME_LABELS"];
-    for (path, allowed) in MIGRATED {
-        let text = std::fs::read_to_string(path).expect("a migrated file is readable");
-        // Production code only: a test fixture may hold whatever it likes.
-        // Cut at the test module, not at the first test-only item.
-        let prod = text
-            .match_indices("#[cfg(test)]")
-            .find(|(i, m)| text[i + m.len()..].trim_start().starts_with("mod "))
-            .map_or(text.as_str(), |(i, _)| &text[..i]);
-        let mut offenders = Vec::new();
-        for (n, line) in prod.lines().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") || trimmed.starts_with("///") {
-                continue;
-            }
-            if DEFERRED.iter().any(|d| line.contains(d)) {
-                continue;
-            }
-            for lit in literals(line) {
-                if lit.len() < 3 || !lit.starts_with(|c: char| c.is_ascii_uppercase()) {
-                    continue;
-                }
-                if allowed.contains(&lit) {
-                    continue;
-                }
-                offenders.push(format!("{path}:{}: {lit:?}", n + 1));
-            }
-        }
-        assert!(
-            offenders.is_empty(),
-            "a user-visible literal is back in a migrated file; it belongs in \
-             `ui::strings`:\n  {}",
-            offenders.join("\n  ")
-        );
+fn sentences_with_values_read_as_before() {
+    for (arg, want) in SAMPLES {
+        assert_eq!(strings::text(*arg), *want, "{arg:?}");
     }
 }
 
-/// String literals on one line, without their quotes. Good enough for a
-/// source-shape check: it does not try to span lines, and a literal that
-/// spans one is already unusual enough to want looking at.
-fn literals(line: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let b = line.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'"' {
-            let start = i + 1;
-            let mut j = start;
-            while j < b.len() && b[j] != b'"' {
-                if b[j] == b'\\' {
-                    j += 1;
-                }
-                j += 1;
-            }
-            if j <= b.len() {
-                if let Some(s) = line.get(start..j.min(b.len())) {
-                    out.push(s);
-                }
-            }
-            i = j + 1;
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-/// The exemption above names three arrays. When they are migrated this
-/// fails, and the exemption goes with them.
+/// A caller that keeps its buffer gets the sentence appended to it and
+/// nothing else done to it.
 #[test]
-fn the_deferred_arrays_still_exist() {
-    let text = std::fs::read_to_string("src/ui/components/settings_modal.rs")
-        .expect("the settings panel is readable");
-    for name in ["IDLE_LABELS", "DIM_LABELS", "SCROLL_LABELS", "THEME_LABELS"] {
-        assert!(
-            text.contains(&format!("pub const {name}: &[&str]")),
-            "{name} is no longer a `&[&str]`, so the ratchet's exemption for it in              `migrated_files_do_not_grow_new_literals` has outlived its reason --              remove it from DEFERRED"
-        );
-    }
+fn a_sentence_is_written_into_the_callers_buffer() {
+    let mut out = String::with_capacity(64);
+    let before = out.capacity();
+    strings::write(&mut out, Arg::MoveToWindow(3)).expect("a String takes any text");
+    out.push('|');
+    strings::write(&mut out, Arg::SwitchToProfile(1)).expect("a String takes any text");
+    assert_eq!(out, "Move to Window 3|switch to P1");
+    assert_eq!(out.capacity(), before, "the buffer was big enough and was not replaced");
 }

@@ -65,7 +65,7 @@ pub enum Control {
     /// On / off.
     Toggle(bool),
     /// One of N, with the chosen index.
-    Segmented { options: &'static [&'static str], chosen: usize },
+    Segmented { options: &'static [Msg], chosen: usize },
 }
 
 /// The minutes offered by the idle-threshold row, in order.
@@ -73,21 +73,21 @@ pub enum Control {
 /// `0` is "never", offered as a value and not only as the switch above
 /// it: the end of the range is where a user turning it down looks.
 pub const IDLE_CHOICES: &[u32] = &[15, 30, 60, 120, 0];
-pub const IDLE_LABELS: &[&str] = &["15m", "30m", "1h", "2h", "Never"];
+pub const IDLE_LABELS: &[Msg] = &[Msg::Idle15m, Msg::Idle30m, Msg::Idle1h, Msg::Idle2h, Msg::IdleNever];
 
 /// How far an inactive pane steps back, as a multiplier on the
 /// attention ladder.  `0` is off, a value for the reason `Never` is.
 pub const DIM_CHOICES: &[f32] = &[0.0, 0.6, 1.0, 1.4];
-pub const DIM_LABELS: &[&str] = &["Off", "Light", "Normal", "Deep"];
+pub const DIM_LABELS: &[Msg] = &[Msg::DimOff, Msg::DimLight, Msg::DimNormal, Msg::DimDeep];
 
 /// The themes, with following the system first: `None` in the setting.
 pub const THEME_CHOICES: &[Option<ThemeId>] =
     &[None, Some(ThemeId::Dark), Some(ThemeId::Light), Some(ThemeId::Contrast)];
-pub const THEME_LABELS: &[&str] = &["System", "Dark", "Light", "High contrast"];
+pub const THEME_LABELS: &[Msg] = &[Msg::ThemeSystem, Msg::ThemeDark, Msg::ThemeLight, Msg::ThemeContrast];
 
 /// Wheel / trackpad multiplier.
 pub const SCROLL_CHOICES: &[f32] = &[0.5, 1.0, 1.5, 2.5];
-pub const SCROLL_LABELS: &[&str] = &["Slow", "Normal", "Fast", "Faster"];
+pub const SCROLL_LABELS: &[Msg] = &[Msg::ScrollSlow, Msg::ScrollNormal, Msg::ScrollFast, Msg::ScrollFaster];
 
 pub struct RowSpec {
     pub row: Row,
@@ -805,7 +805,7 @@ mod tests {
                     if let Control::Segmented { options, .. } = row.control(&s) {
                         for (n, label) in options.iter().enumerate() {
                             let sr = controls::segment_rect(*control, n, options, &mut m);
-                            let ink = fake_measure()(label, ui_spec::control::SEGMENT_TEXT.pt(), ui_spec::control::SEGMENT_TEXT.weight());
+                            let ink = fake_measure()(t(*label), ui_spec::control::SEGMENT_TEXT.pt(), ui_spec::control::SEGMENT_TEXT.weight());
                             assert!(sr.w > ink, "{label:?} needs {ink:.1}, button is {:.1}", sr.w);
                         }
                         let last =
@@ -947,7 +947,7 @@ mod tests {
                     if let Control::Segmented { options, .. } = row.control(&s) {
                         for (n, label) in options.iter().enumerate() {
                             let seg = controls::segment_rect(*control, n, options, &mut m);
-                            let ink = m(label, ui_spec::control::SEGMENT_TEXT.pt(), ui_spec::control::SEGMENT_TEXT.weight());
+                            let ink = m(t(*label), ui_spec::control::SEGMENT_TEXT.pt(), ui_spec::control::SEGMENT_TEXT.weight());
                             assert!(
                                 seg.w >= ink + 2.0 * ui_spec::control::SEGMENT_PAD_X * px - 0.5,
                                 "{label:?} ink {:.0}pt vs button {:.0}pt",

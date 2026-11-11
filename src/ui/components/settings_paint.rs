@@ -14,6 +14,7 @@ use crate::ui::components::panel_chrome::{self, PanelChrome};
 use crate::ui::components::panel_palette;
 use crate::ui::components::settings_modal::{self as sm, Control, Hover, Slot};
 use crate::ui::core::view::ViewPainter;
+use crate::ui::strings::Msg;
 
 #[derive(Debug, Clone)]
 /// The settings panel's render data — its rect and the values in
@@ -58,7 +59,7 @@ pub(crate) fn push_settings_panel_via_view(
         font, atlas, cells, glyphs, ui_rects,
     };
     let chrome = PanelChrome::new(sp.rect, top_inset);
-    chrome.paint(&mut painter, "Settings", None, sp.hover == Hover::Close, |p, _content| {
+    chrome.paint(&mut painter, crate::ui::strings::t(Msg::PanelSettings), None, sp.hover == Hover::Close, |p, _content| {
         // The walker needs a measurer and the painter owns the font,
         // so collect the geometry first and paint from it.  Both this
         // and the hit-test measure through the same path, which is

@@ -64,6 +64,7 @@ use crate::ui::components::cc_usage_modal::{
 use crate::ui::components::controls;
 use crate::ui::components::panel_chrome::{self, PanelChrome};
 use crate::ui::core::ViewPainter;
+use crate::ui::strings::Msg;
 use crate::ui::theme::spec;
 use marspot_term::layout::Rect;
 use crate::ui::components::layout_modal::{self, LayoutModal};
@@ -445,7 +446,7 @@ fn controls_sheet(p: &mut ViewPainter<'_>) {
             x += w + gap;
         }
 
-        let labels = ["Off", "Light", "Normal", "Deep"];
+        let labels = [Msg::DimOff, Msg::DimLight, Msg::DimNormal, Msg::DimDeep];
         let (w, h) = controls::segmented_size(&labels, &mut controls::font_measure(&mut *p.font));
         let (x, y, next) = group(p, next, "Segmented control", Some("selected · hover · disabled"), h);
         controls::paint_segmented(p, Rect { x, y_top: y, w, h }, &labels, Some(2), Some(0), false);

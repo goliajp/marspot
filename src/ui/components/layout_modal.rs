@@ -19,6 +19,7 @@ use marspot_term::layout::Rect;
 use crate::ui::components::controls::{self, Measure, StepperPart, StepperRects};
 use crate::ui::components::panel_chrome::{self, PanelChrome};
 use crate::ui::components::surface_stack;
+use crate::ui::strings::{self, t, Arg, Msg};
 use crate::ui::theme::spec::{self, card, content, space};
 
 /// How far the steppers go.
@@ -31,10 +32,11 @@ use crate::ui::theme::spec::{self, card, content, space};
 pub const GRID_MIN: usize = 1;
 pub const GRID_MAX: usize = 9;
 
-pub const TITLE: &str = "Layout";
-pub const GRID_HEADING: &str = "Grid";
-pub const ARRANGEMENT_HEADING: &str = "Arrangement";
-pub const APPLY: &str = "Apply";
+// titled by its command: the panel and the menu item are one name
+pub const TITLE: Msg = Msg::CmdLayout;
+pub const GRID_HEADING: Msg = Msg::LayoutGrid;
+pub const ARRANGEMENT_HEADING: Msg = Msg::LayoutArrangement;
+pub const APPLY: Msg = Msg::LayoutApply;
 
 /// What is this panel's own, in points.  Everything else — header,
 /// paddings, card, control sizes — is the shared spec's.
@@ -73,10 +75,10 @@ pub enum Axis {
 }
 
 impl Axis {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> Msg {
         match self {
-            Axis::Columns => "Columns",
-            Axis::Rows => "Rows",
+            Axis::Columns => Msg::LayoutColumns,
+            Axis::Rows => Msg::LayoutRows,
         }
     }
 }
@@ -162,7 +164,7 @@ impl LayoutModal {
         let gap = spec::px(metric::CARD_GAP);
         let row_h = spec::px(metric::ROW_H);
         let heading_h = panel_chrome::heading_height();
-        let (apply_w, apply_h) = controls::button_size(APPLY, m);
+        let (apply_w, apply_h) = controls::button_size(t(APPLY), m);
 
         let pad_x = 2.0 * spec::px(content::PAD_X);
         let want_card_w =
@@ -303,8 +305,7 @@ pub fn step(value: usize, part: StepperPart) -> Option<usize> {
 
 /// The footer's caption: `4 × 1 = 4 panes`.
 pub fn caption(cols: usize, rows: usize) -> String {
-    let total = cols * rows;
-    format!("{cols} × {rows} = {total} pane{}", if total == 1 { "" } else { "s" })
+    strings::text(Arg::PaneCount { cols, rows })
 }
 
 fn label_width(s: &str, m: Measure<'_>) -> f64 {
@@ -433,7 +434,7 @@ mod tests {
     fn layout_modal_apply_sits_at_the_right_of_the_footer() {
         let m = modal(ROOMY, 4, 1, 0.0);
         let c = m.chrome.content;
-        let (w, h) = controls::button_size(APPLY, &mut fake);
+        let (w, h) = controls::button_size(t(APPLY), &mut fake);
         assert_eq!((m.apply_btn.w, m.apply_btn.h), (w, h));
         assert!(m.apply_btn.w < c.w * 0.5);
         assert!(same(m.apply_btn.x + m.apply_btn.w, c.x + c.w));
