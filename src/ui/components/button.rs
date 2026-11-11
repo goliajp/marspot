@@ -152,8 +152,8 @@ impl<'a> Button<'a> {
                 // off-centre by however much the two disagree.
                 let label_w = p.panel_text_width(BUTTON_LABEL, label).min(inner_w);
                 let label_x = inner_x + (inner_w - label_w) * 0.5;
-                let baseline = p.ui_baseline_centred(
-                    self.rect.y_top as f32, self.rect.h as f32, BUTTON_LABEL.pt(),
+                let baseline = p.ui_baseline_centred_for(
+                    label, self.rect.y_top as f32, self.rect.h as f32, BUTTON_LABEL.pt(),
                 );
                 p.panel_text(BUTTON_LABEL, label_x, baseline, label, fg);
             }
@@ -187,8 +187,8 @@ impl<'a> Button<'a> {
                     h: icon_size as f64,
                 };
                 icons::paint(p, *icon, icon_rect, icon_size as f64, fg);
-                let baseline = p.ui_baseline_centred(
-                    self.rect.y_top as f32, self.rect.h as f32, BUTTON_LABEL.pt(),
+                let baseline = p.ui_baseline_centred_for(
+                    label, self.rect.y_top as f32, self.rect.h as f32, BUTTON_LABEL.pt(),
                 );
                 p.panel_text(BUTTON_LABEL, label_x, baseline, label, fg);
             }

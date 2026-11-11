@@ -46,7 +46,7 @@ fn role_width(m: Measure<'_>, role: PanelText, s: &str) -> f64 {
 /// `s` centred in `rect`, on its cap height.
 fn centred_text(p: &mut ViewPainter, rect: Rect, s: &str, pt: f64, weight: u16, color: [f32; 4]) {
     let w = p.ui_text_width_at(s, pt, weight) as f64;
-    let baseline = p.ui_baseline_centred(rect.y_top as f32, rect.h as f32, pt);
+    let baseline = p.ui_baseline_centred_for(s, rect.y_top as f32, rect.h as f32, pt);
     p.ui_text_at((rect.x + (rect.w - w) * 0.5) as f32, baseline, s, pt, weight, color);
 }
 

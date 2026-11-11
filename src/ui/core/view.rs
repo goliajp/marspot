@@ -368,6 +368,24 @@ impl<'a> ViewPainter<'a> {
         box_top + (box_h + cap) * 0.5
     }
 
+    /// [`Self::ui_baseline_centred`] for the label `s`.
+    ///
+    /// A line with Han or kana in it is centred on the ideographic
+    /// face, not on a capital letter: the face stands taller on the
+    /// baseline than a capital does, so on the capital's baseline it
+    /// sits above the middle of its box.
+    pub fn ui_baseline_centred_for(&self, s: &str, box_top: f32, box_h: f32, size_pt: f64) -> f32 {
+        // how far the face's middle is above a capital's, in em
+        const FACE_OVER_CAP_EM: f64 = 0.07;
+        let base = self.ui_baseline_centred(box_top, box_h, size_pt);
+        let ideographic = s.chars().any(|c| matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF));
+        if ideographic {
+            base + (size_pt * Self::px_per_pt() * FACE_OVER_CAP_EM).round() as f32
+        } else {
+            base
+        }
+    }
+
     /// Physical pixels per point, for panels laid out in points.
     ///
     /// Two parts: the atlas rasterises at 2×, which is the unit the
