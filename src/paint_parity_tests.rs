@@ -28,6 +28,12 @@ pub(crate) const H: u32 = 400;
 /// RGBA of one `W × H` frame with `paint` drawn over an empty
 /// terminal.  `None` where there is no Metal device to draw with.
 pub(crate) fn render(paint: Paint) -> Option<Vec<u8>> {
+    render_sized(paint, W, H)
+}
+
+/// [`render`] for a frame of `W × H` pixels, built at the display
+/// scale in force.
+pub(crate) fn render_sized(paint: Paint, w: u32, h: u32) -> Option<Vec<u8>> {
     let mut renderer = match MetalRenderer::new_headless() {
         Ok(r) => r,
         Err(e) => {
@@ -35,10 +41,10 @@ pub(crate) fn render(paint: Paint) -> Option<Vec<u8>> {
             return None;
         }
     };
-    let target = make_readback_texture(renderer.device(), W, H).expect("a readback texture");
+    let target = make_readback_texture(renderer.device(), w, h).expect("a readback texture");
     let (cell_w, cell_h) = renderer.cell_dims();
-    let layout = Layout::build(W as f64, H as f64, 0.0, 0.0, 0.0, 1, 1, cell_w, cell_h);
-    let grid = Grid::new(((W as f64 / cell_w) as u16).max(8), ((H as f64 / cell_h) as u16).max(4));
+    let layout = Layout::build(w as f64, h as f64, 0.0, 0.0, 0.0, 1, 1, cell_w, cell_h);
+    let grid = Grid::new(((w as f64 / cell_w) as u16).max(8), ((h as f64 / cell_h) as u16).max(4));
     let view = SessionView {
         grid: &grid,
         view_offset: 0,
@@ -77,13 +83,18 @@ pub(crate) fn render(paint: Paint) -> Option<Vec<u8>> {
 /// `(x, y)` of the first pixel the two buffers disagree on, and how
 /// many disagree in all.
 pub(crate) fn first_difference(a: &[u8], b: &[u8]) -> Option<((u32, u32), usize)> {
+    first_difference_in(a, b, W)
+}
+
+/// [`first_difference`] for frames `w` pixels wide.
+pub(crate) fn first_difference_in(a: &[u8], b: &[u8], w: u32) -> Option<((u32, u32), usize)> {
     assert_eq!(a.len(), b.len(), "the two frames are different sizes");
     let mut first = None;
     let mut count = 0usize;
     for (i, (pa, pb)) in a.chunks_exact(4).zip(b.chunks_exact(4)).enumerate() {
         if pa != pb {
             count += 1;
-            first.get_or_insert((i as u32 % W, i as u32 / W));
+            first.get_or_insert((i as u32 % w, i as u32 / w));
         }
     }
     first.map(|at| (at, count))
@@ -93,13 +104,18 @@ pub(crate) fn first_difference(a: &[u8], b: &[u8]) -> Option<((u32, u32), usize)
 /// comparison could not run at all, so a caller can tell "equal" from
 /// "skipped".
 pub(crate) fn assert_same_pixels(name: &str, a: Paint, b: Paint) -> bool {
-    let (Some(pa), Some(pb)) = (render(a), render(b)) else { return false };
+    assert_same_pixels_sized(name, a, b, W, H)
+}
+
+/// [`assert_same_pixels`] on frames of `w × h` pixels.
+pub(crate) fn assert_same_pixels_sized(name: &str, a: Paint, b: Paint, w: u32, h: u32) -> bool {
+    let (Some(pa), Some(pb)) = (render_sized(a, w, h), render_sized(b, w, h)) else { return false };
     let flat = [pa[0], pa[1], pa[2], pa[3]];
     assert!(
         pa.chunks_exact(4).any(|px| px != flat),
         "{name}: the frame is one flat colour, so equal frames would prove nothing",
     );
-    if let Some(((x, y), n)) = first_difference(&pa, &pb) {
+    if let Some(((x, y), n)) = first_difference_in(&pa, &pb, w) {
         panic!("{name}: {n} pixels differ, the first at ({x}, {y})");
     }
     true
