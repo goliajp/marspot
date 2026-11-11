@@ -95,14 +95,12 @@ impl super::super::ShellApp {
         if sandboxed() {
             let bar = marspot::app_menu::titles(&NSApplication::sharedApplication(mtm));
             let top: Vec<&str> = bar.iter().map(|(title, _)| title.as_str()).collect();
-            let items: Vec<String> = bar.iter().map(|(title, items)| format!("{title}[{}]", items.join("|"))).collect();
-            lx_event!(
-                "MENU_BAR",
-                "the menu bar as read back from the application",
-                lang = language::current_id().as_str(),
-                top = top.join(","),
-                items = items.join(" ")
-            );
+            let lang = language::current_id().as_str();
+            lx_event!("MENU_BAR", "the menu bar as read back from the application", lang = lang, top = top.join(","));
+            // a line a menu: one line holds only so much
+            for (title, items) in &bar {
+                lx_event!("MENU_BAR_ITEMS", "one menu's items", lang = lang, menu = title.as_str(), items = items.join("|"));
+            }
         }
     }
 }
