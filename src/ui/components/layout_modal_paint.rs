@@ -155,7 +155,7 @@ fn card_label(p: &mut ViewPainter, rect: Rect, title: &str, color: [f32; 4], lif
     };
     let w = p.panel_text_width(role, &fitted) as f64;
     let x = rect.x + (rect.w - w) * 0.5;
-    let baseline = p.ui_baseline_centred(rect.y_top as f32, rect.h as f32, role.pt());
+    let baseline = p.ui_baseline_centred_for(&fitted, rect.y_top as f32, rect.h as f32, role.pt());
     let top = baseline as f64 - spec::px(role.cap());
     let covered = lifted.is_some_and(|l| {
         x < l.x + l.w && l.x < x + w && top < l.y_top + l.h && l.y_top < top + line_h
