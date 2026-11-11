@@ -343,6 +343,7 @@ impl LocalSession {
     fn drain(&mut self, deadline: Option<Instant>) -> (usize, bool) {
         let mut total = 0;
         let mut more = false;
+        let raw = self.line.output_is_raw(self.pty.raw_master(), self.shell_pgrp());
         loop {
             if total > 0 && deadline.is_some_and(|d| Instant::now() >= d) {
                 more = true;
@@ -350,10 +351,10 @@ impl LocalSession {
             }
             match self.rx.try_recv() {
                 Ok(bytes) => {
-                    // The bytelog is written either way: it is the
-                    // record of what the PTY produced, and holding the
-                    // *picture* must not make the pane look silent to
-                    // everything that reads that record.
+                    // see `line_discipline`: false unless a repair is pending
+                    let bytes = if raw { crate::line_discipline::with_carriage_returns(bytes) } else { bytes };
+                    // The bytelog is written whether or not the picture is
+                    // held: everything that reads it must see the pane talk.
                     if let Some(b) = self.bytelog.as_mut() {
                         let _ = b.append(&bytes);
                     }
@@ -396,10 +397,9 @@ impl LocalSession {
             let delivered = self.writer.backlog() == 0;
             self.replies.check_and_log(self.pty.raw_master(), self.shell_pgrp(), delivered, self.id);
         }
-        // see `line_discipline`: on output, which is when a job starts
-        // drawing and when the shell prints its prompt again
+        // see `line_discipline`: a job starts drawing, or the prompt is back
         if total > 0 || self.line.wants_look() {
-            self.line.look(self.pty.raw_master(), self.shell_pgrp(), self.id);
+            self.line.look(self.pty.raw_master(), self.shell_pgrp(), self.id, self.writer.backlog() == 0);
         }
         (total, more)
     }

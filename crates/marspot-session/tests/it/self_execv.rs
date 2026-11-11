@@ -416,19 +416,52 @@ fn an_update_to_the_running_build_does_nothing() {
     s.kill();
 }
 
-/// Nothing staged: SIGTERM ends the L3, as it ends any process, and the
-/// L3 takes its shell with it.  The session directory stays, for the
-/// next L2 to resurrect or retire; what must not stay is a live process.
+/// The log line of the `n`th signal the L3 received.
+fn signal_line(state: &Path, n: usize) -> Option<String> {
+    std::fs::read_to_string(state.join("logs/marspot.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains("\tL3_SIGNAL\t"))
+        .nth(n)
+        .map(str::to_string)
+}
+
+/// A SIGTERM from a process that is not launchd ends nothing, with
+/// nothing staged or with the running build staged: the Dock sends one
+/// to every process in the app's coalition when the user force-quits
+/// any program started from a pane, and on 2026-11-11 that ended six
+/// panes.  The L3 logs who sent it, and a close still closes: the L3
+/// goes, its shell with it, and no live process is left for the
+/// session directory to point at.
 #[test]
-fn with_nothing_staged_sigterm_quits() {
+fn a_sigterm_from_a_stranger_does_not_end_the_pane() {
     let mut sandbox = Sandbox::new();
     let mut s = start(&mut sandbox);
-    let shell = shell_pid(&s, "sh");
+    let state = sandbox.path().to_path_buf();
+    let shell = shell_pid(&s, "before");
     let entry = read_session_entry(ID).expect("the L3 registered itself");
     assert_eq!(entry.pid, s.pid() as i32);
+
     sigterm(s.pid());
+    let line = wait_for(10, "the first signal to be logged", || signal_line(&state, 0));
+    assert!(line.contains("sig=TERM"), "{line}");
+    assert!(line.contains(&format!("from_pid={}\t", std::process::id())), "{line}");
+    assert!(line.contains("taken_as=update"), "{line}");
+    stage(&state, false);
+    sigterm(s.pid());
+    wait_for(10, "the second signal to be logged", || signal_line(&state, 1));
+    wait_for(10, "the L3 to find nothing to update to", || {
+        (count_in_log(&state, "L3_UPDATE_NOOP") == 2).then_some(())
+    });
+    assert_eq!(s.child.try_wait().unwrap(), None, "still running");
+    assert_eq!(count_in_log(&state, "L3_EXECV_PROBE_START"), 0, "no move was started");
+    assert_eq!(shell_pid(&s, "after"), shell, "the same shell");
+
+    signal(s.pid(), libc::SIGHUP);
     let status = wait_for(20, "the L3 to exit", || s.child.try_wait().unwrap());
     assert_eq!(status.code(), Some(0), "a clean exit");
+    let line = signal_line(&state, 2).expect("the close is logged");
+    assert!(line.contains("sig=HUP") && line.contains("taken_as=close"), "{line}");
     wait_for(10, "the shell to go with it", || (!alive(shell)).then_some(()));
     assert!(
         !marspot_term::session_registry::pid_is_live_session(entry.pid),
@@ -436,21 +469,40 @@ fn with_nothing_staged_sigterm_quits() {
     );
 }
 
-/// With its own build staged, SIGTERM is not an update either: it ends
-/// the L3.  A copy of the running build used to count as an update, so
-/// this re-execed.
+/// The process group, session and controlling terminal of `pid`.
+fn group_session_tty(pid: i32) -> (i32, i32, String) {
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-o", "tty=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let tty = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    unsafe { (libc::getpgid(pid), libc::getsid(pid), tty) }
+}
+
+/// An L3 shares no process group and no session with whatever started
+/// it, so a signal sent to the app's group passes it by; and leading a
+/// session does not make the pane's terminal its controlling terminal,
+/// which would send it the hangups meant for the shell.  An update
+/// keeps all three.
 #[test]
-fn with_the_same_build_staged_sigterm_quits() {
+fn the_l3_leads_its_own_session_and_has_no_terminal() {
     let mut sandbox = Sandbox::new();
     let mut s = start(&mut sandbox);
     let state = sandbox.path().to_path_buf();
+    let pid = s.pid() as i32;
+    let own = (pid, pid, "??".to_string());
+    assert_ne!(unsafe { libc::getpgid(0) }, pid, "the test is in another group");
+    assert_eq!(group_session_tty(pid), own);
     let shell = shell_pid(&s, "sh");
-    stage(&state, false);
-    sigterm(s.pid());
-    let status = wait_for(20, "the L3 to exit", || s.child.try_wait().unwrap());
-    assert_eq!(status.code(), Some(0), "a clean exit");
-    assert_eq!(count_in_log(&state, "L3_EXECV_INVOKE"), 0, "no execv");
-    wait_for(10, "the shell to go with it", || (!alive(shell)).then_some(()));
+    assert_ne!(group_session_tty(shell).1, pid, "the shell leads the terminal's session");
+
+    stage(&state, true);
+    s.send_frame(MsgType::SessionUpdate, Vec::new());
+    wait_for(20, "the new image to arm its handlers", || {
+        (count_in_log(&state, "L3_SIGTERM_INSTALLED") == 2).then_some(())
+    });
+    assert_eq!(group_session_tty(pid), own, "after an update");
+    s.kill();
 }
 
 /// A close is a close whatever is staged.  It was a SIGTERM, which with
