@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.291"  # the log names who sent a fatal signal
-core    = "0.12.322"  # the log names who sent a fatal signal
+shell   = "0.7.293"  # the log names who sent a fatal signal
+core    = "0.12.324"  # the log names who sent a fatal signal
 session = "0.11.165"  # a line repair waits for the shell to read the line, and holds under bash after a failed exit

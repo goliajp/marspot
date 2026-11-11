@@ -81,7 +81,7 @@ dev_shell_pid() {
 
 # The windows process $1 has on screen, one per line as
 # "<layer> <width>x<height>", as the window server lists them.  An
-# ordinary window is on layer 0; the developer panel floats, on 3.
+# ordinary window is on layer 0.
 # Needs the console session and no permission: a window's title would
 # need Screen Recording, so it is not read.
 dev_windows_of() {

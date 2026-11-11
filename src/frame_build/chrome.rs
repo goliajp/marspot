@@ -25,9 +25,8 @@ use crate::ui::SESSION_COUNT_HARD_CAP;
 pub(crate) struct ChromeState {
     pub(crate) hover: Option<ChromeHover>,
     /// Per toolbar button, in `Layout::toolbar_buttons` order: whether
-    /// what it opens is open.  The dev panel is another window, owned
-    /// by another process, so its button never reads as on.
-    pub(crate) on: [bool; 6],
+    /// what it opens is open.
+    pub(crate) on: [bool; 5],
 }
 
 /// Everything drawn over the panes and under the overlays, in the
@@ -242,7 +241,6 @@ fn paint_toolbar(p: &mut ViewPainter, layout: &Layout, state: ChromeState) {
         Symbol::Sidebar,
         Symbol::Layout,
         Symbol::Processes,
-        Symbol::DevPanel,
         Symbol::Usage,
         Symbol::Settings,
     ];

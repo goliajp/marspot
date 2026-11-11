@@ -2,7 +2,7 @@
 //!
 //! The PTY render path lays glyphs at mono `cell_w` advance — every
 //! cell is independent, no kerning, no ligature, no fallback within
-//! a run.  Chrome (dev panel, tab strip, sidebar) wants the opposite:
+//! a run.  Chrome (panels, tab strip, sidebar) wants the opposite:
 //! a system font (SF Pro), real kerning so `Ta` reads tight, real
 //! ligatures so `fi` / `==>` join up, and CT's automatic font
 //! fallback so a CJK word in an otherwise-English sentence renders
@@ -100,9 +100,17 @@ pub struct ShapeOptions {
     pub contextual: bool,
 }
 
+/// The options as four bits, for a cache key.
+pub fn pack_shape_opts(opts: ShapeOptions) -> u8 {
+    (opts.kerning as u8)
+        | ((opts.liga as u8) << 1)
+        | ((opts.calt as u8) << 2)
+        | ((opts.contextual as u8) << 3)
+}
+
 impl ShapeOptions {
     /// Body text — kerning + every ligature class on.  Default
-    /// CTLine behaviour; chrome dev panel, tab titles, sidebar.
+    /// CTLine behaviour; chrome panels, tab titles, sidebar.
     pub fn full() -> Self {
         Self { kerning: true, liga: true, calt: true, contextual: true }
     }

@@ -146,9 +146,6 @@ pub struct Settings {
     /// conversation resumes, but its prompt cache does not come along.
     /// `DryRun` logs what would be moved and moves nothing.
     pub cc_rebalance: Rebalance,
-    /// Show the toolbar button for the UI workbench panel. Off: it is
-    /// a tool for working on marspot, not for using it.
-    pub dev_panel_button: bool,
     /// The theme everything is drawn in; `None` follows the system.
     /// Dark by default, so an upgrade changes nothing a user can see.
     pub appearance_theme: Option<ThemeId>,
@@ -199,7 +196,6 @@ impl Default for Settings {
             codex_follow_updates: true,
             agents_install: true,
             cc_rebalance: Rebalance::On,
-            dev_panel_button: false,
             appearance_theme: Some(ThemeId::Dark),
             appearance_language: None,
         }
@@ -359,7 +355,6 @@ fn value_of(s: &Settings, key: &str) -> String {
         "codex.follow_updates" => s.codex_follow_updates.to_string(),
         "agents.install" => s.agents_install.to_string(),
         "claudecode.rebalance" => s.cc_rebalance.as_str().to_string(),
-        "developer.dev_panel" => s.dev_panel_button.to_string(),
         _ => String::new(),
     }
 }
@@ -405,7 +400,6 @@ pub fn parse(body: &str) -> Settings {
             }
             "agents.install" => s.agents_install = parse_bool(v, s.agents_install),
             "claudecode.rebalance" => s.cc_rebalance = Rebalance::parse(v, s.cc_rebalance),
-            "developer.dev_panel" => s.dev_panel_button = parse_bool(v, s.dev_panel_button),
             // Anything else is a key this build does not know.  Left
             // alone here and preserved verbatim by `render` — a newer
             // marspot's settings must survive an older one reading
@@ -639,6 +633,8 @@ reclaim.idle_minutes = 15
 
 # a key from a newer build
 appearance.font_size = 13
+# and one an older build wrote
+developer.dev_panel = true
 reclaim.enabled = true
 ";
         let mut s = parse(existing);
@@ -652,6 +648,7 @@ reclaim.enabled = true
             out.contains("appearance.font_size = 13"),
             "unknown key lost — a downgrade would eat it:\n{out}"
         );
+        assert!(out.contains("developer.dev_panel = true"), "retired key lost:\n{out}");
         assert!(out.contains("reclaim.idle_minutes = 45"), "{out}");
         assert!(out.contains("reclaim.enabled = false"), "{out}");
         // In place, not appended: the user's ordering is theirs.
