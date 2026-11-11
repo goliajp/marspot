@@ -12,10 +12,11 @@ use golia_ui_core::scene::UiRectInstance;
 use crate::ui::components::chrome_hover::ChromeHover;
 use crate::ui::components::panel_palette as palette;
 use crate::ui::components::{
-    controls, Button, ButtonStyle, GridEdges, GridItem, GridSeams, IconPosition, IconSpec,
+    Button, ButtonStyle, GridEdges, GridItem, GridSeams, IconPosition,
     Outline, SeamStyle, Sidebar,
 };
 use crate::ui::core::view::ViewPainter;
+use crate::ui::system::macos::icons::{self, Symbol};
 use crate::ui::theme::spec::chrome;
 use crate::ui::SESSION_COUNT_HARD_CAP;
 
@@ -144,7 +145,7 @@ fn paint_empty_seats(painter: &mut ViewPainter, layout: &Layout, n_views: usize)
         Button {
             rect: inner,
             label: None,
-            icon: Some(IconSpec::Glyph("+")),
+            icon: Some(Symbol::Plus),
             icon_position: IconPosition::Only,
             hovered: false,
             style,
@@ -188,7 +189,7 @@ fn paint_sidebar(
         } else {
             palette::chrome_icon()
         };
-        controls::paint_plus(painter, add, chrome::SIDEBAR_ADD_MARK, chrome::SIDEBAR_ADD_STROKE, fg);
+        icons::paint(painter, Symbol::Plus, add, chrome::SIDEBAR_ADD_ICON, fg);
     }
     Sidebar {
         rect: Rect {
@@ -226,8 +227,6 @@ fn paint_region_seams(p: &mut ViewPainter, layout: &Layout) {
 }
 
 fn paint_toolbar(p: &mut ViewPainter, layout: &Layout, state: ChromeState) {
-    use crate::ui::system::macos::icons::{SidebarIcon, GridIcon, ListTreeIcon, DevPanelIcon, UsageBarsIcon, SlidersIcon};
-
     // Every toolbar button, painted from one list.
     //
     // `layout.toolbar_buttons()` is the layout's own order, zipped
@@ -236,17 +235,18 @@ fn paint_toolbar(p: &mut ViewPainter, layout: &Layout, state: ChromeState) {
     // without this and shipped invisible: the rect was laid out and
     // the hit-test worked, so clicking the empty space opened a panel
     // nobody could see a button for.
-    let sidebar_icon = SidebarIcon { collapsed: layout.sidebar_w == 0.0 };
-    let grid_icon = GridIcon { cols: layout.grid_cols, rows: layout.grid_rows };
-    let icons: [&dyn crate::ui::core::IconComponent; 6] = [
-        &sidebar_icon,
-        &grid_icon,
-        &ListTreeIcon,
-        &DevPanelIcon,
-        &UsageBarsIcon,
-        &SlidersIcon,
+    //
+    // A hidden sidebar's button is the symbol at rest, like any button
+    // whose panel is closed; showing, it is on.
+    let symbols = [
+        Symbol::Sidebar,
+        Symbol::Layout,
+        Symbol::Processes,
+        Symbol::DevPanel,
+        Symbol::Usage,
+        Symbol::Settings,
     ];
-    for (i, (rect, icon)) in layout.toolbar_buttons().into_iter().zip(icons).enumerate() {
+    for (i, (rect, icon)) in layout.toolbar_buttons().into_iter().zip(symbols).enumerate() {
         // A zero-width rect is a button this layout does not show
         // (snapshot / bench paths build a chrome-less layout).
         if rect.w <= 0.0 {
@@ -255,7 +255,7 @@ fn paint_toolbar(p: &mut ViewPainter, layout: &Layout, state: ChromeState) {
         Button {
             rect,
             label: None,
-            icon: Some(IconSpec::Component(icon)),
+            icon: Some(icon),
             icon_position: IconPosition::Only,
             hovered: state.hover == Some(ChromeHover::Toolbar(i as u8)),
             style: ButtonStyle::toolbar(state.on[i]),

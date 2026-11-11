@@ -13,11 +13,12 @@
 use marspot_term::layout::Rect;
 use marspot_term::render::SearchOverlayView;
 use crate::ui::core::{ViewPainter, ViewStyle, Backdrop};
+use crate::ui::system::macos::icons::Symbol;
 use crate::ui::theme::spec::{chrome, panel};
 use super::panel_palette as palette;
 use super::{
     Panel, TextInput, TextInputStyle, ListView, ListRow, ListViewStyle,
-    Button, ButtonStyle, IconSpec, IconPosition,
+    Button, ButtonStyle, IconPosition,
 };
 
 pub struct SearchOverlayParams<'a> {
@@ -122,7 +123,7 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
                 h: cell_h as f64,
             },
             label: None,
-            icon: Some(IconSpec::Glyph("×")),
+            icon: Some(Symbol::Close),
             icon_position: IconPosition::Only,
             hovered: false,
             style: ButtonStyle::ghost(),
