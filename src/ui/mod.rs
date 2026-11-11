@@ -172,6 +172,7 @@ pub fn chrome_scale() -> f64 {
 pub fn set_chrome_scale(scale: f64) {
     if scale.is_finite() && (0.5..=4.0).contains(&scale) {
         CHROME_SCALE_BITS.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        marspot_term::layout::set_density(scale);
         // the first thing the process learns about its display, and so
         // the earliest the chrome's icons can be got ready for it
         system::macos::icons::warm();

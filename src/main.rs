@@ -615,7 +615,7 @@ impl MarspotApp for Marspot {
         // were misaligned with what was visually rendered.  Reading
         // from `layout.sidebar_top_pad_phys` (set by Layout::build
         // to reserve the [+] header band) fixes that.
-        let row_phys = marspot::layout::SIDEBAR_ROW_H_PHYS;
+        let row_phys = marspot::layout::sidebar_row_h();
         let top_pad_phys = layout.top_inset + layout.sidebar_top_pad_phys;
 
         // In tmux mode, sidebar rows map to tmux windows; a click
@@ -1044,7 +1044,7 @@ impl Marspot {
         // Sidebar row check first — sidebar overlaps the same y-band
         // as panes in the title-strip area, and we want sidebar
         // priority.
-        let row_phys = marspot_term::layout::SIDEBAR_ROW_H_PHYS;
+        let row_phys = marspot_term::layout::sidebar_row_h();
         let top_pad_phys = layout.top_inset + layout.sidebar_top_pad_phys;
         if let Some(idx) = layout.hit_test_sidebar_row(
             x_phys, y_phys, row_phys, top_pad_phys, self.panes.len(),

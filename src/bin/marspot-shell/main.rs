@@ -1291,7 +1291,7 @@ impl ShellApp {
             .with_receipts(Some(std::sync::Arc::clone(&receipts))),
             inject_input_rx,
             active_pane_sessions: std::collections::HashMap::new(),
-            dev_panel: marspot::ui::components::DevPanelState::default(),
+            dev_panel: marspot::ui::components::DevPanelState { visible: false, ..Default::default() },
             last_saved_dev_window: None,
             dev_panel_dirty: true,   // 0.6.26 — render once on first frame
         }
