@@ -46,7 +46,7 @@ pub use search_overlay::{SearchOverlayParams, paint_search_overlay};
 pub use panel::Panel;
 pub use text_input::{TextInput, TextInputStyle};
 pub use list_view::{ListView, ListRow, ListViewStyle};
-pub use button::{Button, ButtonStyle, IconSpec, IconPosition};
+pub use button::{Button, ButtonStyle, IconPosition};
 pub use grid_seams::{GridSeams, SeamStyle};
 pub use grid::{Grid, GridStyle};
 pub use grid_item::{GridItem, GridEdges, Outline};

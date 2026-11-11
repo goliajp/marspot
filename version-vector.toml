@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.280"  # kimi panes leave an account that is out and are told when it is nearly out
-core    = "0.12.309"  # the accounts panel lists kimi accounts
+core    = "0.12.310"  # the chrome's icons are SF Symbols
 session = "0.11.158"  # a pane has ~/.kimi-code/bin on its PATH
