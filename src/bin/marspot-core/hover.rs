@@ -48,7 +48,7 @@ impl CoreApp {
             use marspot::ui::components::ContextMenu;
             let menu = ContextMenu::layout(
                 w.layout.window_w, w.layout.window_h, w.scale,
-                state.anchor_x, state.anchor_y,
+                state.anchor_x.px(), state.anchor_y.px(),
                 w.layout.top_inset,
                 &state.items,
             );
