@@ -165,7 +165,7 @@ pub fn measure_line(text: &str, base_font: &CTFont, opts: ShapeOptions) -> f64 {
         }
     }
     let line = CTLine::new_with_attributed_string(attr.as_concrete_TypeRef());
-    line.get_typographic_bounds().width * 2.0
+    line.get_typographic_bounds().width * crate::ui::px_per_pt()
 }
 
 pub fn shape_line<F: FnMut(CTFont) -> u32>(
@@ -202,7 +202,7 @@ pub fn shape_line<F: FnMut(CTFont) -> u32>(
     // Apple Silicon Retina = 2× contents scale (`set_contents_scale(2)`
     // in render_metal.rs).  Bake it in here so the renderer can use
     // `x_position` as a screen-space offset directly.
-    let px_scale: f32 = 2.0;
+    let px_scale = crate::ui::px_per_pt() as f32;
 
     let runs = line.glyph_runs();
     let mut out = Vec::with_capacity(text.len());

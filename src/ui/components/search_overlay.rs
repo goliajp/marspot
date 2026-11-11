@@ -14,7 +14,7 @@ use marspot_term::layout::Rect;
 use marspot_term::render::SearchOverlayView;
 use crate::ui::core::{ViewPainter, ViewStyle, Backdrop};
 use crate::ui::system::macos::icons::Symbol;
-use crate::ui::theme::spec::{chrome, panel};
+use crate::ui::theme::spec::{self, card, chrome, panel};
 use super::panel_palette as palette;
 use super::{
     Panel, TextInput, TextInputStyle, ListView, ListRow, ListViewStyle,
@@ -53,11 +53,11 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
     let divider_rows: f32 = if has_list { 0.4 } else { 0.0 };
     let list_rows: f32 = if has_list { n_list as f32 } else { 0.0 };
     let total_rows_f = chrome_rows + divider_rows + list_rows;
-    let panel_inner_pad = (cell_h * 0.4).max(6.0);
-    let panel_h_uncapped = (total_rows_f * cell_h).round() + 2.0 * panel_inner_pad;
+    let panel_inner_pad = (cell_h * 0.4).max(chrome::px(chrome::SEARCH_PAD_MIN) as f32);
+    let panel_h_uncapped = spec::snap((total_rows_f * cell_h) as f64) as f32 + 2.0 * panel_inner_pad;
     let bar_left_col = params.grid_cols - OVERLAY_COLS - 1;
     let bar_x = inner_x + (bar_left_col as f32) * cell_w;
-    let panel_y = inner_y + (cell_h * 0.5).round();
+    let panel_y = inner_y + spec::snap((cell_h * 0.5) as f64) as f32;
     let panel_w = (OVERLAY_COLS as f32) * cell_w;
     let panel_h = panel_h_uncapped.min((grid_bottom - panel_y).max(0.0));
 
@@ -103,8 +103,8 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
             style: TextInputStyle {
                 fg: palette::fg(),
                 caret_color: palette::now(),
-                caret_w: 2.0,
-                caret_inset_y: 2.0,
+                caret_w: chrome::px(chrome::SEARCH_CARET_W) as f32,
+                caret_inset_y: chrome::px(chrome::SEARCH_CARET_INSET) as f32,
             },
         };
         input.paint(p);
@@ -170,19 +170,19 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
 
         // Divider hairline + list rows.
         if has_list {
-            let divider_y = inner_top + cell_h + (panel_inner_pad * 0.5).round();
+            let divider_y = inner_top + cell_h + spec::snap((panel_inner_pad * 0.5) as f64) as f32;
             p.fill_rounded_rect(
                 Rect {
                     x: inner_left as f64,
                     y_top: divider_y as f64,
                     w: (panel_w - 2.0 * panel_inner_pad) as f64,
-                    h: 1.0,
+                    h: card::SEPARATOR_PX,
                 },
                 palette::separator(),
                 0.0,
                 (palette::none(), 0.0),
             );
-            let list_top = divider_y + (panel_inner_pad * 0.5).round();
+            let list_top = divider_y + spec::snap((panel_inner_pad * 0.5) as f64) as f32;
             let list_h = (grid_bottom - list_top).max(0.0);
             let rows: Vec<ListRow> = overlay.hits.iter().map(|h| {
                 ListRow { label: &h.snippet, is_focused: h.is_focused }

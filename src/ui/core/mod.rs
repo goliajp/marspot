@@ -7,6 +7,7 @@
 //! chrome, composite widgets) is built on top of it.
 
 pub mod view;
+mod ink;
 pub mod units;
 pub mod color;
 pub mod canvas;

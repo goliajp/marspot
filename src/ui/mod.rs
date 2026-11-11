@@ -158,12 +158,21 @@ pub enum SelectionMode {
 /// single `FontCache` and a single terminal cell size, so two windows
 /// on displays of different densities are already outside what this
 /// architecture expresses.  Set it before the renderer is built.
-static CHROME_SCALE_BITS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1.0f64.to_bits());
-
-/// Physical pixels per logical point.
+///
+/// The value is kept by the layout (`marspot_term::layout::density`),
+/// which sizes the window with it; this is the same number under the
+/// name the interface uses.
+///
+/// Physical pixels per window unit.
 pub fn chrome_scale() -> f64 {
-    f64::from_bits(CHROME_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
+    marspot_term::layout::density()
+}
+
+/// Physical pixels per point of a panel and of interface text: two
+/// window units.  At scale 1 this is the 2 that panels were drawn at
+/// before the display's scale was taken into account.
+pub fn px_per_pt() -> f64 {
+    2.0 * chrome_scale()
 }
 
 /// Adopt the display's backing scale.  Ignores nonsense (0, negative,
@@ -171,7 +180,6 @@ pub fn chrome_scale() -> f64 {
 /// collapses every rect in the app to nothing.
 pub fn set_chrome_scale(scale: f64) {
     if scale.is_finite() && (0.5..=4.0).contains(&scale) {
-        CHROME_SCALE_BITS.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
         marspot_term::layout::set_density(scale);
         // the first thing the process learns about its display, and so
         // the earliest the chrome's icons can be got ready for it

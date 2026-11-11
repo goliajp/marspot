@@ -451,21 +451,29 @@ const PAD: u32 = 1;
 /// stale, while still suppressing 7-of-8 stores on the steady-state
 /// hit path.
 const LAST_USED_RESOLUTION: u64 = 8;
+type FontTable = std::sync::Arc<crate::font_cache::CoreTextFontTable>;
 
 impl GlyphAtlas {
     /// An atlas over `sink`, rasterising through CoreText: the alpha-only
     /// mono path when the sink holds one byte a pixel, the colour path
     /// (Apple Color Emoji) when it holds four.
-    pub fn new(
-        sink: std::rc::Rc<dyn AtlasSink>,
-        fonts: std::sync::Arc<crate::font_cache::CoreTextFontTable>,
-    ) -> Result<Self, String> {
-        let rasteriser: Box<dyn crate::font_trait::Rasteriser> = if sink.bytes_per_pixel() == 4 {
+    pub fn new(sink: std::rc::Rc<dyn AtlasSink>, fonts: FontTable) -> Result<Self, String> {
+        let rasteriser = Self::coretext(sink.bytes_per_pixel(), fonts);
+        Self::new_with_rasteriser(sink, rasteriser)
+    }
+
+    fn coretext(bpp: u32, fonts: FontTable) -> Box<dyn crate::font_trait::Rasteriser> {
+        if bpp == 4 {
             Box::new(crate::font_trait::CoreTextColorRasteriser { fonts })
         } else {
             Box::new(crate::font_trait::CoreTextMonoRasteriser { fonts })
-        };
-        Self::new_with_rasteriser(sink, rasteriser)
+        }
+    }
+
+    /// The fonts were rebuilt (a display of another scale): draw from the new ones.
+    pub fn refont(&mut self, fonts: FontTable) {
+        self.rasteriser = Self::coretext(self.bpp, fonts);
+        self.drop_all_glyphs();
     }
 
     /// Same, with a caller-supplied rasteriser.  Headless tests use this
@@ -877,15 +885,15 @@ pub struct SlotMetrics {
 }
 
 /// Output of the CT-rasterise pass.
-struct Raster {
-    bytes: Vec<u8>,
-    px_w: u32,
+pub(crate) struct Raster {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) px_w: u32,
     px_h: u32,
     n_cells: u16,
     /// Per-glyph bearing — see [`AtlasEntry::bearing_x`].  Includes
     /// PAD offset bookkeeping so renderer can do a single subtract.
     bearing_x: i16,
-    bearing_y: i16,
+    pub(crate) bearing_y: i16,
 }
 
 /// Rasterise one glyph into an **alpha-only bitmap sized to the
@@ -1231,7 +1239,7 @@ fn raster_out(r: Raster) -> crate::font_trait::RasterOutput {
     }
 }
 
-fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> Option<Raster> {
+pub(crate) fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> Option<Raster> {
     let bbox = font.get_bounding_rects_for_glyphs(
         core_text::font_descriptor::kCTFontOrientationDefault,
         &[glyph],
@@ -1239,16 +1247,12 @@ fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> Option
     if bbox.size.width <= 0.0 || bbox.size.height <= 0.0 {
         return None;
     }
-    // Phase 10c — CTFont's bbox is in user-space pt; shape_line bakes
-    // a 2× retina scale into glyph pen positions, so the raster must
-    // bake the same scale into the bitmap dims and the CGContext
-    // CTM.  Without this scale the bitmap was sized in pt while the
-    // pen advance was in phys px — Bold 24pt looked OK (glyph and
-    // gap roughly matched) but Regular 24pt rendered at half the
-    // expected width, reading as evenly-spaced "mono cell" layout.
-    const RETINA_SCALE: f64 = 2.0;
-    let scaled_w = bbox.size.width * RETINA_SCALE;
-    let scaled_h = bbox.size.height * RETINA_SCALE;
+    // The bbox is in points and `shape_line` places glyphs in pixels,
+    // `ui::px_per_pt` to the point: the bitmap and the context take
+    // that scale, or a glyph is drawn smaller than the room left for it.
+    let scale = crate::ui::px_per_pt();
+    let scaled_w = bbox.size.width * scale;
+    let scaled_h = bbox.size.height * scale;
     // +1 column right of the natural bbox to fit `subpx_x = 3` shift.
     let px_w = (scaled_w.ceil() as u32) + 2 * PAD + 1;
     let px_h = (scaled_h.ceil() as u32) + 2 * PAD;
@@ -1278,14 +1282,11 @@ fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> Option
     ctx.set_allows_font_subpixel_positioning(true);
     ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
     ctx.set_gray_fill_color(1.0, 1.0);
-    // Scale CTM so `draw_glyphs` (pt-space) rasterises at retina dims.
-    ctx.scale(RETINA_SCALE, RETINA_SCALE);
-    // Phase 4 — sub-pixel x shift inside the bitmap.  pen coords are
-    // now in USER (pre-scale) space; PAD is phys px, so divide by
-    // scale to get the equivalent pt offset.
-    let subpx_offset = (subpx_x as f64).min(3.0) * 0.25 / RETINA_SCALE;
-    let pen_x = (PAD as f64) / RETINA_SCALE - bbox.origin.x + subpx_offset;
-    let pen_y = (px_h as f64) / RETINA_SCALE - (PAD as f64) / RETINA_SCALE
+    ctx.scale(scale, scale);
+    // pen coordinates are in points; PAD and the sub-pixel shift are pixels
+    let subpx_offset = (subpx_x as f64).min(3.0) * 0.25 / scale;
+    let pen_x = (PAD as f64) / scale - bbox.origin.x + subpx_offset;
+    let pen_y = (px_h as f64) / scale - (PAD as f64) / scale
         - bbox.origin.y - bbox.size.height;
     font.draw_glyphs(&[glyph], &[CGPoint::new(pen_x, pen_y)], ctx);
     // bearings stay in phys px (renderer's quad formula is phys px).
@@ -1295,17 +1296,13 @@ fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> Option
         px_h,
         n_cells: 1,
         bearing_x: -(PAD as i16),
-        bearing_y: ((bbox.origin.y + bbox.size.height) * RETINA_SCALE).ceil() as i16
+        bearing_y: ((bbox.origin.y + bbox.size.height) * scale).ceil() as i16
             + (PAD as i16),
     })
 }
 
-/// Phase 3 — colour-glyph natural-size variant of
-/// `rasterise_glyph_natural`.  Same geometry, BGRA pixel format.
-/// Phase 4 — accepts the same `subpx_x` shift; emoji rarely cluster
-/// tight enough for sub-pixel positioning to matter visually, but
-/// the path supports it for consistency with the mono path so the
-/// atlas key shape stays uniform.
+/// `rasterise_glyph_natural` for a colour glyph: the same geometry and
+/// sub-pixel shift, in BGRA.
 fn rasterise_glyph_color_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> Option<Raster> {
     let bbox = font.get_bounding_rects_for_glyphs(
         core_text::font_descriptor::kCTFontOrientationDefault,
@@ -1314,8 +1311,10 @@ fn rasterise_glyph_color_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> 
     if bbox.size.width <= 0.0 || bbox.size.height <= 0.0 {
         return None;
     }
-    let px_w = (bbox.size.width.ceil() as u32) + 2 * PAD + 1;
-    let px_h = (bbox.size.height.ceil() as u32) + 2 * PAD;
+    // a pixel per point at scale 1, as it has always been drawn
+    let scale = crate::ui::chrome_scale();
+    let px_w = ((bbox.size.width * scale).ceil() as u32) + 2 * PAD + 1;
+    let px_h = ((bbox.size.height * scale).ceil() as u32) + 2 * PAD;
     let bytes_per_row = (px_w * 4) as usize;
     let buf_len = bytes_per_row * px_h as usize;
     let mut bytes: Vec<u8> = vec![0u8; buf_len];
@@ -1340,9 +1339,10 @@ fn rasterise_glyph_color_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> 
     ctx.set_should_antialias(true);
     ctx.set_allows_antialiasing(true);
     ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
-    let subpx_offset = (subpx_x as f64).min(3.0) * 0.25;
-    let pen_x = (PAD as f64) - bbox.origin.x + subpx_offset;
-    let pen_y = (px_h as f64) - (PAD as f64) - bbox.origin.y - bbox.size.height;
+    ctx.scale(scale, scale);
+    let subpx_offset = (subpx_x as f64).min(3.0) * 0.25 / scale;
+    let pen_x = (PAD as f64) / scale - bbox.origin.x + subpx_offset;
+    let pen_y = (px_h as f64 - PAD as f64) / scale - bbox.origin.y - bbox.size.height;
     font.draw_glyphs(&[glyph], &[CGPoint::new(pen_x, pen_y)], ctx);
     Some(Raster {
         bytes,
@@ -1350,7 +1350,7 @@ fn rasterise_glyph_color_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> 
         px_h,
         n_cells: 1,
         bearing_x: -(PAD as i16),
-        bearing_y: ((bbox.origin.y + bbox.size.height).ceil() as i16) + (PAD as i16),
+        bearing_y: (((bbox.origin.y + bbox.size.height) * scale).ceil() as i16) + (PAD as i16),
     })
 }
 

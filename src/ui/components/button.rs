@@ -127,7 +127,7 @@ impl<'a> Button<'a> {
         let inner_right = (self.rect.x + self.rect.w) as f32 - self.style.padding_x;
         let inner_w = (inner_right - inner_x).max(0.0);
         let cy = self.rect.y_top as f32 + (self.rect.h as f32) * 0.5;
-        let icon_size = self.style.icon_size.min(self.rect.h as f32 - 2.0).max(0.0);
+        let icon_size = self.style.icon_size.min(self.rect.h as f32 - chrome::px(2.0) as f32).max(0.0);
 
         match (&self.icon, self.icon_position, self.label) {
             (Some(icon), IconPosition::Only, _) | (Some(icon), _, None) => {
@@ -153,7 +153,7 @@ impl<'a> Button<'a> {
                 let label_w = p.panel_text_width(BUTTON_LABEL, label).min(inner_w);
                 let label_x = inner_x + (inner_w - label_w) * 0.5;
                 let baseline = p.ui_baseline_centred_for(
-                    label, self.rect.y_top as f32, self.rect.h as f32, BUTTON_LABEL.pt(),
+                    label, self.rect.y_top as f32, self.rect.h as f32, BUTTON_LABEL.pt(), BUTTON_LABEL.weight(),
                 );
                 p.panel_text(BUTTON_LABEL, label_x, baseline, label, fg);
             }
@@ -188,7 +188,7 @@ impl<'a> Button<'a> {
                 };
                 icons::paint(p, *icon, icon_rect, icon_size as f64, fg);
                 let baseline = p.ui_baseline_centred_for(
-                    label, self.rect.y_top as f32, self.rect.h as f32, BUTTON_LABEL.pt(),
+                    label, self.rect.y_top as f32, self.rect.h as f32, BUTTON_LABEL.pt(), BUTTON_LABEL.weight(),
                 );
                 p.panel_text(BUTTON_LABEL, label_x, baseline, label, fg);
             }

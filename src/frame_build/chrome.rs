@@ -60,7 +60,7 @@ fn paint_grid_seams(
     // order, after the pane backgrounds, so the ring replaces the seam
     // pixel for pixel on the sides of the pane in use.
     if layout.gutter > 0.0 && !layout.cells.is_empty() {
-        let seam_thickness = (layout.gutter * chrome::SEAM_GUTTERS).max(2.0);
+        let seam_thickness = layout.gutter * chrome::SEAM_GUTTERS;
         let seam_style = SeamStyle { color: palette::seam(), thickness: seam_thickness };
         let pane_rects: Vec<Rect> = layout.cells.iter().map(|c| Rect {
             x: c.x, y_top: c.y_top, w: c.w, h: c.h,
