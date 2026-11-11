@@ -3,14 +3,24 @@
 # The keyboard commands, pressed in a real window: which chords are
 # commands, when each answers, and that every key that is not a command
 # reaches the program in the pane exactly as it did before there was a
-# command table.
+# command table.  Then the same commands chosen from the menu bar.
 #
 # A script cannot press keys in the sandbox app, so the core plays them
 # itself (`MARSPOT_DEV_PANELS`, sandbox only): each `key:<chord>` step
 # is queued as the press and release the window would have sent, and
-# handled like any other.  That is the path from the core inward.  The
-# menu bar lives in the shell and is not driven here: choosing a menu
-# item is not exercised by this suite.
+# handled like any other.  That is the path from the core inward.
+#
+# Nor can a script pull a menu down on a machine with nobody at it, so
+# in a second launch the shell chooses its own items
+# (`MARSPOT_DEV_MENU`, sandbox only): each step finds the item in the
+# application's installed main menu and has AppKit perform it, which
+# sends the item's action to its target as a choice by pointer does.
+# Covered: the menu item, its target and action, `runCommand:`, the
+# chord replayed as a key, and that key's dispatch to a window.  Not
+# covered: the pointer, the menu opening and its tracking, and finding
+# the key window -- the app is not the active one on a machine nobody
+# is at, so it has no key window and a script's choice is sent to the
+# first window instead.
 #
 # What this asserts, from the structured log and from what the panes'
 # programs were sent (each pane runs a recorder that writes down every
@@ -31,6 +41,16 @@
 #      search bar in place of an open panel, and Cmd-T adds a pane that
 #      Cmd-3 then focuses.  Where typing lands shows where focus is.
 #   5. The app is still up, with no panic and no error logged.
+#   6. The installed menu bar is the command table: every row has one
+#      item a person can see, under its own title in its own menu, and
+#      no item that runs a command lacks a row.  Items AppKit keeps
+#      hidden beside one of ours are printed, not counted.
+#   7. Every item that runs a command of ours, chosen from the menu,
+#      reaches a window and logs what its chord logged in 2-4.  The
+#      seven items that are AppKit's own actions (About, Hide, Hide
+#      Others, Show All, Quit, Minimize, Full Screen) are held to the
+#      table in 6 and not chosen: they act on the machine's whole
+#      session, which other suites share.
 #
 # The paste check puts a marker on the general pasteboard and puts the
 # text that was there back afterwards.
@@ -50,7 +70,7 @@ SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
 SESSION_BIN="$ROOT/target/release/marspot-session"
 MARKER="marspot-paste-$$"
-EVENTS=$'\t(PANEL_|PANE_FOCUS|PANE_ADDED|L2_SEARCH_OPEN|DEV_PANELS_)'
+EVENTS=$'\t(PANEL_|PANE_FOCUS|PANE_ADDED|L2_SEARCH_OPEN|DEV_PANELS_|DEV_MENU_|MENU_COMMAND)'
 
 fail() {
   echo "FAIL: $*"
@@ -85,6 +105,7 @@ rm -f "$APPLOG"
 
 # One window, two panes side by side, the first focused.  sid 0 = every
 # pane spawns fresh.
+seed_state() {
 python3 - "$MARSPOT_STATE_DIR" <<'PY' || exit 1
 import struct, sys, pathlib
 d = pathlib.Path(sys.argv[1]); d.mkdir(parents=True, exist_ok=True)
@@ -98,6 +119,8 @@ frames  = struct.pack('<IIH', 0xA5505011, 2, 1)
 frames += struct.pack('<Idddd', 0, 100.0, 200.0, 1400.0, 800.0)
 (d / 'window-state.bin').write_bytes(frames)
 PY
+}
+seed_state
 
 # What each pane runs instead of a shell: it writes down every byte it
 # is sent, unbuffered and unechoed.
@@ -192,7 +215,8 @@ played=$(grep -c $'\tDEV_PANELS_STEP\t' "$APPLOG")
 (( played == ${#STEPS[@]} )) || fail "played $played of ${#STEPS[@]} steps"
 
 # --- 2-4. what opened, closed, took focus and was added, in order -----
-events="$(python3 - "$APPLOG" <<'PY'
+command_events() {
+python3 - "$APPLOG" <<'PY'
 import sys
 for line in open(sys.argv[1], errors='replace'):
     cols = line.rstrip('\n').split('\t')
@@ -211,7 +235,8 @@ for line in open(sys.argv[1], errors='replace'):
     elif tag == 'L2_SEARCH_OPEN':
         print(tag, f.get('pane_idx'))
 PY
-)"
+}
+events="$(command_events)"
 echo "==> command events, in order:"
 printf '%s\n' "$events" | sed 's/^/    /'
 
@@ -263,8 +288,102 @@ errors="$(grep -c $'\tERROR\t' "$APPLOG")"
   fail "$errors error line(s) in the log"
 }
 
+# --- 6, 7. the same commands, chosen from the menu bar ------------------
+dev_kill_shell_core
+dev_wipe_state
+rm -rf "$MARSPOT_STATE_DIR/sessions" "$MARSPOT_STATE_DIR/retired" "$REC_DIR"
+mkdir -p "$MARSPOT_STATE_DIR/logs" "$REC_DIR"
+rm -f "$APPLOG"
+seed_state
+printf '%s' "$MARKER" | pbcopy || fail "could not set the pasteboard"
+
+MENU=(
+  # the script starts with the menu bar, well before the panes are up
+  'wait:8000'
+  # each panel over the one before, the last closed by its own item
+  'Settings' 'Layout' 'Processes' 'Accounts' 'Shortcuts' 'Shortcuts'
+  'Settings' 'ClosePanel'
+  # focus: the second pane, round the end, back, the first
+  'FocusPane(1)' 'NextPane' 'PrevPane' 'FocusPane(0)'
+  'Paste' 'Copy' 'ToggleSidebar' 'ToggleSidebar'
+  'NewPane' 'wait:6000' 'FocusPane(2)'
+  # there is no fourth pane or later
+  'FocusPane(3)' 'FocusPane(4)' 'FocusPane(5)' 'FocusPane(6)' 'FocusPane(7)' 'FocusPane(8)'
+  'Find' 'NewWindow' 'wait:3000'
+)
+MENU_SCRIPT="$(IFS=';'; echo "${MENU[*]}")"
+MENU_EXPECTED="PANEL_OPEN settings
+PANEL_CLOSE settings replaced
+PANEL_OPEN layout
+PANEL_CLOSE layout replaced
+PANEL_OPEN process
+PANEL_CLOSE process replaced
+PANEL_OPEN accounts
+PANEL_CLOSE accounts replaced
+PANEL_OPEN shortcuts
+PANEL_CLOSE shortcuts toggle
+PANEL_OPEN settings
+PANEL_CLOSE settings cmd_w
+PANE_FOCUS 1
+PANE_FOCUS 0
+PANE_FOCUS 1
+PANE_FOCUS 0
+PANE_ADDED 3
+PANE_FOCUS 2
+L2_SEARCH_OPEN 2"
+
+echo "==> launching with the menu script: $MENU_SCRIPT"
+SHELL="$RECORDER" MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
+  MARSPOT_DEV_MENU="$MENU_SCRIPT" \
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
+disown
+
+wait_for DEV_MENU_DONE 120 || fail "the menu script never finished"
+sleep 2
+
+field() { # tag, key -- the value of key in the first line tagged tag
+  grep -m1 $'\t'"$1"$'\t' "$APPLOG" | tr '\t' '\n' | sed -n "s/^$2=//p"
+}
+[[ -n "$(field DEV_MENU_AUDIT rows)" ]] || fail "the menu bar was never held to the table"
+echo "==> the menu bar against the table: $(grep -m1 $'\tDEV_MENU_AUDIT\t' "$APPLOG" | cut -f9- | tr '\t' ' ')"
+echo "==> hidden items AppKit added: $(field DEV_MENU_AUDIT hidden)"
+[[ -z "$(field DEV_MENU_AUDIT wrong)" ]] || fail "the menu bar is not the table: $(field DEV_MENU_AUDIT wrong)"
+[[ "$(field DEV_MENU_AUDIT strays)" == 0 ]] || fail "an item runs a command that has no row"
+commands="$(field DEV_MENU_AUDIT commands)"
+(( $(field DEV_MENU_AUDIT rows) == commands + 7 )) || fail "the table is not $commands commands of ours and AppKit's seven"
+
+grep -q $'\tDEV_MENU_STEP_FAILED\t' "$APPLOG" && fail "a step named an item the menu bar does not have"
+grep $'\tDEV_MENU_STEP\t' "$APPLOG" | grep -Eqv $'\tenabled=1(\t|$)' && fail "an item was greyed out when chosen"
+chosen="$(grep $'\tMENU_COMMAND\t' "$APPLOG" | tr '\t' '\n' | sed -n 's/^command=//p')"
+want_chosen="$(printf '%s\n' "${MENU[@]}" | grep -v '^wait:')"
+[[ "$chosen" == "$want_chosen" ]] || fail "the items that ran are not the ones chosen: $(printf '%s' "$chosen" | tr '\n' ' ')"
+grep $'\tMENU_COMMAND\t' "$APPLOG" | grep -Eqv $'\tdelivered=1(\t|$)' && fail "a chosen item reached no window"
+echo "==> chosen with a key window: $(grep $'\tDEV_MENU_STEP\t' "$APPLOG" | grep -c $'\tkey_window=1') of $(grep -c $'\tDEV_MENU_STEP\t' "$APPLOG") (without one the key-window lookup is not exercised: a script's choice goes to the first window)"
+(( $(printf '%s\n' "$chosen" | sort -u | wc -l) == commands )) \
+  || fail "chose $(printf '%s\n' "$chosen" | sort -u | wc -l | tr -d ' ') different commands; the menu bar has $commands"
+
+menu_events="$(command_events)"
+echo "==> command events from the menu, in order:"
+printf '%s\n' "$menu_events" | sed 's/^/    /'
+[[ "$menu_events" == "$MENU_EXPECTED" ]] || {
+  echo "  --- expected:"
+  printf '%s\n' "$MENU_EXPECTED" | sed 's/^/    /'
+  fail "choosing from the menu did not do what the chords do"
+}
+pasted="$(cat "$REC_DIR"/pane.*.bytes | grep -c "$MARKER")"
+(( pasted == 1 )) || fail "Paste from the menu reached a pane $pasted times"
+windows="$(dev_windows_of "$(dev_shell_pid)" | grep -c '^0 ')"
+(( windows == 2 )) || fail "New Window from the menu left $windows windows on screen"
+
+[[ -n "$(dev_shell_pid)" ]] || fail "the shell is gone after the menu script"
+[[ -n "$(dev_core_pids)" ]] || fail "the core is gone after the menu script"
+grep -qi 'panicked' "$APPLOG" "$RUNLOG" && fail "something panicked during the menu script"
+errors="$(grep -c $'\tERROR\t' "$APPLOG")"
+(( errors == 0 )) || fail "$errors error line(s) in the log during the menu script"
+
 echo
 echo "PASS — the program's own keys arrive unchanged; every panel opens"
 echo "       by its chord and is replaced by the next; pane commands do"
 echo "       nothing under a panel and move focus, paste and add a pane"
-echo "       with none open."
+echo "       with none open; the menu bar is the command table, and each"
+echo "       of its $commands commands chosen there does what its chord does."

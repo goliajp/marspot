@@ -46,7 +46,8 @@ pub fn retitle() {
 }
 
 /// The menu bar as it stands, read back from the application's main
-/// menu: each menu's title, then its items' titles, AppKit's included.
+/// menu: each menu's title, then the titles of the items it shows,
+/// AppKit's included.
 pub fn titles(nsapp: &NSApplication) -> Vec<(String, Vec<String>)> {
     let Some(bar) = nsapp.mainMenu() else { return Vec::new() };
     bar.itemArray()
@@ -54,7 +55,7 @@ pub fn titles(nsapp: &NSApplication) -> Vec<(String, Vec<String>)> {
         .filter_map(|holder| holder.submenu())
         .map(|menu| {
             let items = menu.itemArray();
-            let titles = items.iter().filter(|i| !i.isSeparatorItem()).map(|i| i.title().to_string());
+            let titles = items.iter().filter(|i| !i.isSeparatorItem() && !i.isHidden()).map(|i| i.title().to_string());
             (menu.title().to_string(), titles.collect())
         })
         .collect()
@@ -80,7 +81,16 @@ define_class!(
                 return;
             };
             let Some(chord) = row.chord else { return };
-            if crate::app::key_from_menu(chord.key_event(), chord.modifiers()) {
+            // an app nobody is at has no key window; a script's choice goes to the first
+            let scripted = crate::app_menu_script::playing();
+            let delivered = crate::app::key_from_menu(chord.key_event(), chord.modifiers(), scripted);
+            crate::lx_event!(
+                "MENU_COMMAND",
+                "a menu item replayed its chord",
+                command = format!("{:?}", row.command),
+                delivered = delivered as u32
+            );
+            if delivered {
                 return;
             }
             // A window that is not a terminal — the About panel — has
@@ -90,6 +100,12 @@ define_class!(
             {
                 window.performClose(None);
             }
+        }
+
+        /// Sandbox only: the next step of a script of menu choices.
+        #[unsafe(method(playMenuScript:))]
+        fn play_menu_script(&self, _arg: Option<&NSObject>) {
+            crate::app_menu_script::play(self, &NSApplication::sharedApplication(self.mtm()));
         }
     }
 );
@@ -172,6 +188,17 @@ pub fn install(nsapp: &NSApplication, mtm: MainThreadMarker) {
         }
     }
     nsapp.setMainMenu(Some(&bar));
+    let top: Vec<String> = titles(nsapp).into_iter().map(|(title, _)| title).collect();
+    let lang = marspot_term::language::current_id().as_str();
+    let count: usize = titles(nsapp).iter().map(|(_, items)| items.len()).sum();
+    crate::lx_event!(
+        "MENU_BAR_INSTALLED",
+        "the menu bar as first installed",
+        lang = lang,
+        top = top.join(","),
+        items = count as u32
+    );
+    crate::app_menu_script::start(&target);
     // A menu item holds its target weakly, and the menu lives as long
     // as the process does.
     std::mem::forget(target);
