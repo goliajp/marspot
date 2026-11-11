@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.279"  # the pane table carries each pane's code and agent
-core    = "0.12.308"  # panes that share a name show their codes, whole in the sidebar
+shell   = "0.7.280"  # kimi panes leave an account that is out and are told when it is nearly out
+core    = "0.12.309"  # the accounts panel lists kimi accounts
 session = "0.11.158"  # a pane has ~/.kimi-code/bin on its PATH

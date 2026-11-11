@@ -19,7 +19,12 @@
 #   - a refused account: when the service answers 429 with
 #     `exceeded_current_quota_error`, kimi records the failed turn the
 #     way marspot reads it, and the pane is moved to the second kimi
-#     account, where the conversation is handed over and goes on.
+#     account, where the conversation is handed over and goes on;
+#   - quota: marspot reads each account's usage from the service and
+#     writes it where the accounts panel looks; an account that
+#     refused a pane is remembered across a restart and not chosen
+#     again; a resting pane leaves an account whose window the usage
+#     shows spent.
 #
 # No account and no model: kimi talks to `_kimi_mock_model.py` through
 # the KIMI_MODEL_* variables.  The other session is played by
@@ -99,9 +104,10 @@ fi
 
 # ── this test's own HOME: a default kimi home and a second account ─
 rm -rf "$SB"; mkdir -p "$SB/proj" "$REGISTRY" "$SB/home/.kimi-code/bin" "$SB/home/.kimi-code-profile-2"
+mkdir -p "$SB/home/.kimi-code-profile-3" "$SB/home/.kimi-code-profile-4" # the quota steps' accounts
 cp "$KIMI_CACHE/.kimi-code/bin/kimi" "$SB/home/.kimi-code/bin/kimi"
 
-python3 "$ROOT/bin/_kimi_mock_model.py" "$SB/port" "$REQUESTS" > "$SB/mock.log" 2>&1 &
+python3 "$ROOT/bin/_kimi_mock_model.py" "$SB/port" "$REQUESTS" "$SB/accounts" > "$SB/mock.log" 2>&1 &
 echo $! > "$SB/mock.pid"
 for (( i = 0; i < 50; i++ )); do [[ -s "$SB/port" ]] && break; sleep 0.1; done
 [[ -s "$SB/port" ]] || { echo "the model stand-in did not start"; cat "$SB/mock.log"; exit 1; }
@@ -111,14 +117,53 @@ export KIMI_MODEL_NAME=mock-model KIMI_MODEL_API_KEY=e2e
 export KIMI_MODEL_BASE_URL="http://127.0.0.1:$(cat "$SB/port")/v1"
 export KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_DISABLE_TELEMETRY=1 KIMI_CODE_TRUST_WORKSPACE=1
 KIMI="$HOME/.kimi-code/bin/kimi"
+
+# ── quota: four accounts the stand-in answers for ─────────────────
+# Each home holds a login that never runs out, with a made-up token;
+# the stand-in serves that token's usage from a file this test writes.
+# The week of account 2 renews first, so it is the first choice of
+# every move until it has refused a pane.
+export KIMI_CODE_BASE_URL="http://127.0.0.1:$(cat "$SB/port")/coding/v1"
+export MARSPOT_USAGE_PASS_SECS=5
+USAGE_FEED="$MARSPOT_STATE_DIR/usage/kimi-usage.json"
+REFUSED="$MARSPOT_STATE_DIR/plugins/kimi/refused.tsv"
+usage_of() { # account, 5h ratio, 7d ratio, days until the week renews
+  python3 - "$SB/accounts/e2e-token-$1.usages.json" "$2" "$3" "$4" <<'PY'
+import datetime, json, os, sys
+path, five, week, days = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4])
+now = datetime.datetime.now(datetime.timezone.utc)
+stamp = lambda d: (now + d).strftime("%Y-%m-%dT%H:%M:%SZ")
+body = {"usages": {"limit_5h": {"used_ratio": five, "reset_time": stamp(datetime.timedelta(hours=3))},
+                   "limit_7d": {"used_ratio": week, "reset_time": stamp(datetime.timedelta(days=days))}}}
+with open(path + ".tmp", "w") as f:
+    json.dump(body, f)
+os.replace(path + ".tmp", path)
+PY
+}
+mkdir -p "$SB/accounts"
+for n in 0 2 3 4; do
+  home="$HOME/.kimi-code-profile-$n"; (( n == 0 )) && home="$HOME/.kimi-code"
+  mkdir -p "$home/credentials"
+  printf '{"access_token":"e2e-token-%s","refresh_token":"","expires_at":4102444800,"scope":"","token_type":"Bearer","expires_in":900}\n' "$n" \
+    > "$home/credentials/kimi-code.json"
+  printf '{"user_id":"u_e2e_%s","nickname":"e2e-account-%s"}\n' "$n" "$n" > "$SB/accounts/e2e-token-$n.me.json"
+done
+usage_of 0 0.10 0.20 6
+usage_of 2 0.10 0.30 1
+usage_of 3 0.10 0.30 3
+usage_of 4 0.10 0.30 5
+# ── quota: end of setup ───────────────────────────────────────────
 echo "==> kimi $("$KIMI" --version 2>&1 | head -1)"
 
+launch() {
+  MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
+    nohup "$SHELL_BIN" >>"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
+  disown
+}
 echo "==> launching"
 dev_kill_shell_core
 rm -rf "$MARSPOT_STATE_DIR"; mkdir -p "$MARSPOT_STATE_DIR/logs"
-MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
-  nohup "$SHELL_BIN" >>"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
-disown
+launch
 
 wait_for 'L3_SPAWNED' 90 || fail "no pane session was ever spawned"
 P1=""
@@ -243,5 +288,80 @@ for (( i = 0; i < 60; i++ )); do grep -qF '[marspot handoff]' "$REQUESTS" && bre
 grep -qF '[marspot handoff]' "$REQUESTS" || fail "the handoff never reached the model under the second account"
 [[ $(count "kimi.*quota.move.*sid=$P1") == 1 ]] || fail "the pane was moved more than once for one refusal"
 ok "the pane moves to the second kimi account once, and the conversation is handed over there"
+
+# ── quota ─────────────────────────────────────────────────────────
+feed() { # account name, field → its value in the usage feed
+  python3 - "$USAGE_FEED" "$1" "$2" <<'PY'
+import json, sys
+try:
+    rows = json.load(open(sys.argv[1]))["accounts"]
+except (OSError, ValueError, KeyError):
+    rows = []
+for r in rows:
+    if r.get("name") == sys.argv[2]:
+        print(r.get(sys.argv[3]))
+PY
+}
+kimi_idle_on() { # profile, seconds: a kimi with a session rests under that account
+  wait_for "sid=$P1 pid=[0-9]+ home=$HOME/.kimi-code-profile-$1 session=session_.*status=idle" "$2" || return 1
+  wait_screen "│ >" 60
+}
+
+# 8. the collector writes what the service says about each account
+for (( i = 0; i < 120; i++ )); do [[ "$(feed 'Kimi 4' utilization_7d)" == 0.3 ]] && break; sleep 0.5; done
+[[ "$(feed Kimi utilization_5h)/$(feed Kimi utilization_7d)" == 0.1/0.2 ]] || fail "no usage for the default account in the feed: $(cat "$USAGE_FEED" 2>&1)"
+[[ "$(feed 'Kimi 2' utilization_5h)/$(feed 'Kimi 2' utilization_7d)" == 0.1/0.3 ]] || fail "no usage for account 2 in the feed: $(cat "$USAGE_FEED" 2>&1)"
+[[ "$(feed 'Kimi 2' status)" == allowed && "$(feed 'Kimi 2' reset_7d)" =~ ^[0-9]+$ ]] || fail "account 2's row has no status or no reset: $(cat "$USAGE_FEED")"
+[[ "$(feed 'Kimi 2' email)" == e2e-account-2 ]] || fail "account 2 is not labelled with the name the service gave: $(feed 'Kimi 2' email)"
+ok "the usage feed has the five-hour and seven-day windows of every kimi account, labelled"
+
+# 9. a refusal is recorded against the account, and the next goes elsewhere
+grep -q $'^out\t0\t' "$REFUSED" 2>/dev/null || fail "the default account's refusal was not written down: $(cat "$REFUSED" 2>&1)"
+kimi_idle_on 2 90 || fail "the kimi under account 2 never came to rest"
+send_once "QUOTA-EXHAUSTED again"
+wait_for "kimi.*quota.move.*sid=$P1: account 2 is out .*moving to profile 3" 60 || fail "the pane did not leave account 2 for account 3"
+grep -q $'^out\t2\t' "$REFUSED" || fail "account 2's refusal was not written down: $(cat "$REFUSED")"
+kimi_idle_on 3 180 || fail "the kimi under account 3 never came to rest"
+ok "a second refusal is written down, and the pane moves on to account 3"
+
+# 10. after a restart, a resting pane leaves a spent account, and not
+#     for account 2, whose week renews first but which refused a pane
+#     The sandbox's panes end with the app, so kimi is started again
+#     under the account the pane had reached.
+dev_kill_shell_core
+launch
+P1=""
+for (( i = 0; i < 150; i++ )); do
+  P1="$("$SHELL_BIN" --panes 2>/dev/null | awk 'NR>1 {print $1}' | sort -n | head -1)"
+  [[ -n "$P1" ]] && break
+  sleep 0.4
+done
+[[ -n "$P1" ]] || fail "no pane came up after the restart"
+rested=$(count "sid=$P1 pid=[0-9]+ home=$HOME/.kimi-code-profile-3 session=session_.*status=idle")
+boxes=$(on_screen "│ >")
+rm -f "$MARK"
+for (( i = 0; i < 10; i++ )); do
+  "$SHELL_BIN" --send "$P1" "echo reading > $MARK" >/dev/null 2>&1
+  for (( j = 0; j < 15; j++ )); do [[ -f "$MARK" ]] && break 2; sleep 0.2; done
+done
+[[ -f "$MARK" ]] || fail "the pane's shell ran nothing after the restart"
+send_once "cd $SB/proj && KIMI_CODE_HOME=$HOME/.kimi-code-profile-3 kimi --yolo"
+for (( i = 0; i < 120; i++ )); do (( $(on_screen "│ >") > boxes )) && break; sleep 0.5; done
+(( $(on_screen "│ >") > boxes )) || fail "kimi's input box never appeared after the restart"
+send_once "say hi again"
+for (( i = 0; i < 300; i++ )); do
+  (( $(count "sid=$P1 pid=[0-9]+ home=$HOME/.kimi-code-profile-3 session=session_.*status=idle") > rested )) && break
+  sleep 0.2
+done
+(( $(count "sid=$P1 pid=[0-9]+ home=$HOME/.kimi-code-profile-3 session=session_.*status=idle") > rested )) \
+  || fail "the kimi started after the restart never came to rest under account 3"
+usage_of 3 0.99 0.30 3
+wait_for "kimi.*quota.move.*sid=$P1: account 3 is out \(the usage feed shows a window spent\); moving to profile 4" 90 \
+  || fail "the resting pane did not leave the spent account for account 4"
+[[ $(count "kimi.*quota.move.*sid=$P1: .*moving to profile 2") == 1 ]] || fail "the pane was sent back to account 2, which had refused it"
+[[ "$(feed 'Kimi 3' utilization_5h)" == 0.99 ]] || fail "the feed does not show account 3's five hours as spent: $(feed 'Kimi 3' utilization_5h)"
+wait_for "sid=$P1 pid=[0-9]+ home=$HOME/.kimi-code-profile-4 session=session_" 180 || fail "the conversation did not go on under account 4"
+ok "after a restart a resting pane leaves the spent account for one with room, and the refused one stays shut"
+# ── quota: end ────────────────────────────────────────────────────
 
 echo "PASS"
