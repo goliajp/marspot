@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.284"  # the developer panel stays hidden on a machine that never saved its window
+shell   = "0.7.286"  # a quit asked for from outside is not lost once the boot window is closed
 core    = "0.12.315"  # a chinese or japanese label sits in the middle of its button
-session = "0.11.159"  # a long log line of non-ASCII text is cut between characters
+session = "0.11.160"  # a program killed in raw mode no longer leaves the pane staircasing

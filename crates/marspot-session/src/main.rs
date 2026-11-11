@@ -27,6 +27,7 @@ use control_reader::ControlReaders;
 use control_writer::ControlWriter;
 use snapshot_writer::SnapshotWriter;
 mod handoff;
+mod line_discipline;
 mod local_session;
 mod pane_env;
 mod pty_reader;
@@ -1453,8 +1454,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
             // Never sleep past the beat that has to fire.
             entry_check_interval.min(Duration::from_secs(5))
         };
-        // replies a program has not read are watched until it reads
-        // them or is done with the terminal -- see `reply_guard`
+        // see `reply_guard` and `line_discipline`: both look often for a while
         let wait = session.reply_poll_every().map_or(wait, |p| wait.min(p));
         // the reader's wakes for what is still queued were taken by
         // the drain below last time round
