@@ -1880,6 +1880,7 @@ fn main() {
         frame_pt: None,
         bg: marspot::system_theme::startup_palette().bg, // the terminal's own ground
     };
+    marspot::dev_window::enable();
     run_app(app, proxy, attrs);
 }
 
