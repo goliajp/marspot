@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.295"  # the view hears the pointer leave its window
-core    = "0.12.326"  # nothing stays lit once the pointer has left the window or the app resigned
+core    = "0.12.327"  # a panel's drag and scroll and a menu's anchor are kept in window units
 session = "0.11.167"  # output gets its carriage returns as read while a repair owes them; a repair ends by commands, not by a clock

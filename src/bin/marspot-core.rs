@@ -178,7 +178,7 @@ struct ProcessPanelState {
     /// What the pointer is on.
     hover: marspot::ui::components::process_panel::Hover,
     /// How far the process list is pushed up, in physical pixels.
-    scroll_y: f64,
+    scroll_y: marspot::ui::Units,
 }
 
 struct PanePidTree {
@@ -2633,8 +2633,8 @@ struct CcUsageModalState {
 
 struct ContextMenuState {
     items: Vec<marspot::ui::components::MenuItem>,
-    anchor_x: f64,
-    anchor_y: f64,
+    anchor_x: marspot::ui::Units,
+    anchor_y: marspot::ui::Units,
     region: ContextRegion,
     hovered_idx: Option<usize>,
     /// Set when the menu was opened on top of an actionable link
@@ -3808,7 +3808,7 @@ struct WindowState {
     cc_usage_modal: Option<CcUsageModalState>,
     /// How far the settings panel's content is pushed up inside its
     /// rect.  Only ever nonzero on a window too short to show it whole.
-    settings_modal_scroll: f64,
+    settings_modal_scroll: marspot::ui::Units,
     /// What the pointer is on in the settings panel.
     settings_modal_hover: marspot::ui::components::settings_modal::Hover,
     /// Is the pointer on the shortcuts panel's close button?
@@ -3900,7 +3900,7 @@ impl WindowState {
             hover_chrome_btn: None,
             process_panel: None,
             cc_usage_modal: None,
-            settings_modal_scroll: 0.0,
+            settings_modal_scroll: Default::default(),
             settings_modal_hover: Default::default(),
             shortcuts_close_hover: false,
             drop_preview: None,
@@ -5018,8 +5018,8 @@ impl CoreApp {
         }
         win!(self, wi).context_menu = Some(ContextMenuState {
             items,
-            anchor_x: x_phys,
-            anchor_y: y_phys,
+            anchor_x: marspot::ui::Units::from_px(x_phys),
+            anchor_y: marspot::ui::Units::from_px(y_phys),
             region,
             hovered_idx: None,
             link,
@@ -5053,8 +5053,8 @@ impl CoreApp {
             .collect();
         win!(self, wi).context_menu = Some(ContextMenuState {
             items,
-            anchor_x,
-            anchor_y,
+            anchor_x: marspot::ui::Units::from_px(anchor_x),
+            anchor_y: marspot::ui::Units::from_px(anchor_y),
             region: ContextRegion::PaneBadge(sid),
             hovered_idx: None,
             link: None,
@@ -6953,7 +6953,7 @@ impl CoreApp {
         }
         match change.opened {
             Some(SurfaceKind::Settings) => {
-                w.settings_modal_scroll = 0.0;
+                w.settings_modal_scroll = Default::default();
                 w.settings_modal_hover = Default::default();
                 // Pick up anything edited by hand since the last look, so
                 // the panel never shows a value the file disagrees with.
@@ -6983,7 +6983,7 @@ impl CoreApp {
                     prev_pid_stats: std::collections::HashMap::new(),
                     layout: None,
                     hover: Default::default(),
-                    scroll_y: 0.0,
+                    scroll_y: Default::default(),
                 });
                 // Walked now so the first frame already has its rows.
                 self.refresh_process_panel(wi);
@@ -7035,7 +7035,7 @@ impl CoreApp {
                     }
                     Hover::Pane(row) => {
                         panel.selected_pane = row;
-                        panel.scroll_y = 0.0;
+                        panel.scroll_y = Default::default();
                     }
                     Hover::Process(_) | Hover::Close | Hover::None => {}
                 }
@@ -7190,7 +7190,7 @@ impl CoreApp {
     /// What `(x, y)` is on in the open settings panel.
     fn settings_hover_at(&mut self, wi: usize, x: f64, y: f64) -> marspot::ui::components::settings_modal::Hover {
         let rect = self.settings_modal_rect(wi);
-        let scroll = win!(self, wi).settings_modal_scroll;
+        let scroll = win!(self, wi).settings_modal_scroll.px();
         let mut measure = marspot::ui::components::controls::font_measure(self.renderer.font_mut());
         marspot::ui::components::settings_modal::hover_at(
             rect, scroll, &marspot::settings::get(), &mut measure, x, y,
@@ -7403,9 +7403,9 @@ impl CoreApp {
 
         let frame = pp::panel_rect(w_phys, h_phys, cell_h, top_inset, offset);
         let layout = pp::layout(
-            frame, top_inset, pane_rows.len(), rows.len(), panel.scroll_y, cell_w, cell_h,
+            frame, top_inset, pane_rows.len(), rows.len(), panel.scroll_y.px(), cell_w, cell_h,
         );
-        panel.scroll_y = layout.scroll().0;
+        panel.scroll_y = marspot::ui::Units::from_px(layout.scroll().0);
         panel.row_pids = rows.iter().map(|r| r.pid).collect();
         panel.layout = Some(layout.clone());
         Some(ProcessPanelRender {
@@ -7619,7 +7619,7 @@ impl CoreApp {
                 let state = win!(self, wi).context_menu.as_ref().unwrap();
                 let menu = ContextMenu::layout(
                     win!(self, wi).layout.window_w, win!(self, wi).layout.window_h, win!(self, wi).scale,
-                    state.anchor_x, state.anchor_y,
+                    state.anchor_x.px(), state.anchor_y.px(),
                     win!(self, wi).layout.top_inset,
                     &state.items,
                 );
@@ -7797,8 +7797,8 @@ impl CoreApp {
                 let region = self.resolve_context_region(wi, x_phys, y_phys);
                 win!(self, wi).context_menu = Some(ContextMenuState {
                     items,
-                    anchor_x: x_phys,
-                    anchor_y: y_phys,
+                    anchor_x: marspot::ui::Units::from_px(x_phys),
+                    anchor_y: marspot::ui::Units::from_px(y_phys),
                     region,
                     hovered_idx: None,
                     link: Some(link),
@@ -8207,7 +8207,7 @@ impl CoreApp {
                 if let Some(panel) = win!(self, wi).process_panel.as_mut() {
                     // Held to what the frame on screen can scroll.
                     let max = panel.layout.as_ref().map_or(0.0, |l| l.scroll().1);
-                    panel.scroll_y = (panel.scroll_y + dy_phys).clamp(0.0, max);
+                    panel.scroll_y = marspot::ui::Units::from_px((panel.scroll_y.px() + dy_phys).clamp(0.0, max));
                     win!(self, wi).needs_render = true;
                 }
                 return;
@@ -8221,7 +8221,7 @@ impl CoreApp {
                 let max = marspot::ui::components::settings_modal::max_scroll(
                     rect, &marspot::settings::get(), &mut measure,
                 );
-                let y = (win!(self, wi).settings_modal_scroll + dy_phys).clamp(0.0, max);
+                let y = marspot::ui::Units::from_px((win!(self, wi).settings_modal_scroll.px() + dy_phys).clamp(0.0, max));
                 if y != win!(self, wi).settings_modal_scroll {
                     win!(self, wi).settings_modal_scroll = y;
                     win!(self, wi).needs_render = true;
@@ -8808,7 +8808,7 @@ impl CoreApp {
         let settings_data = if win!(self, wi).panels.open() == Some(SurfaceKind::Settings) {
             Some(marspot::ui::components::settings_paint::SettingsRender {
                 rect: self.settings_modal_rect(wi),
-                scroll: win!(self, wi).settings_modal_scroll,
+                scroll: win!(self, wi).settings_modal_scroll.px(),
                 settings: (*marspot::settings::get()).clone(),
                 path: marspot::settings::path().display().to_string(),
                 hover: win!(self, wi).settings_modal_hover,
@@ -8842,7 +8842,7 @@ impl CoreApp {
             use marspot::ui::components::context_menu_paint::{ContextMenuRender, ContextMenuRow};
             ContextMenuRender {
                 scale: win!(self, wi).scale,
-                anchor_phys: (state.anchor_x, state.anchor_y),
+                anchor_phys: (state.anchor_x.px(), state.anchor_y.px()),
                 top_inset: win!(self, wi).layout.top_inset,
                 items: state.items.iter().map(|it| ContextMenuRow {
                     label: it.label.clone(),
