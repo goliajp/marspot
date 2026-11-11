@@ -246,7 +246,7 @@ with open(timeseries_path, "a") as f:
 print(f"==> snapshot:    {snapshot_path}")
 print(f"==> timeseries:  {timeseries_path} (+{sum(len(t) for t in snapshot['scenarios'].values())} row(s))")
 
-# Maintain `cross-terminal.json` symlink for back-compat with bench.sh's gate.
+# `cross-terminal.json` names the latest snapshot.
 link_path = os.path.join(os.path.dirname(snapshot_path), "cross-terminal.json")
 try:
     if os.path.islink(link_path) or os.path.exists(link_path):

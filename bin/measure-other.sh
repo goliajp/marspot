@@ -334,7 +334,7 @@ for t in "${OTHER_TERMINALS[@]}"; do
       bytes=$(( $(stat -f%z "$SCENARIOS_DIR/$scenario.bin") \
                 * $(live_repeat "$SCENARIOS_DIR/$scenario.bin") ))
       bps=$(( bytes * 1000000000 / ns ))
-      mb=$(echo "scale=1; $bps/1048576" | bc)
+      mb=$(echo "scale=1; $bps/1000000" | bc)
       [[ $inner -eq 0 ]] && printf "," >> "$OUT_JSON"
       inner=0
       printf '"%s":{"median_ns":%s,"bytes_per_sec":%s}' "$scenario" "$ns" "$bps" >> "$OUT_JSON"

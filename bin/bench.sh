@@ -26,10 +26,16 @@
 #       intentional perf-affecting change.  Skips the SSIM chain.
 #
 # Reads bench/baseline.json + bench/font-rendering/snapshots/*.png.
-# Exits non-zero on any regression (perf OR SSIM).  Per-line PASS/FAIL
-# / current/floor goes to stdout; one-line summary at the end says
-# GATE PASSED or GATE FAILED for perf, plus SSIM GATE PASSED / FAILED
-# when --ssim is on.
+# Exits non-zero on any regression (perf OR SSIM).  One row per metric
+# goes to stdout with its unit, limit, the span of its trials and the
+# host's load while it was measured; a one-line summary at the end says
+# GATE PASSED, GATE FAILED or GATE INCONCLUSIVE for perf, plus SSIM GATE
+# PASSED / FAILED when --ssim is on.
+#
+# Every run leaves bench/results/gate-record.json (the whole table with
+# the commit, toolchain, runner and load it belongs to) and appends each
+# row to bench/results/history/<metric>.jsonl;
+# `bin/_bench_record.py show [metric]` reads that back.
 
 set -euo pipefail
 
@@ -179,18 +185,23 @@ if [[ "$BENCH_SETTLE_S" != "0" ]]; then
   # not the code.  Wait for load to actually come down, bounded so a
   # busy host still gets measured (the load gate refuses the hopeless
   # ones before we get here).
+  #
+  # Up to four minutes: the load average is a one-minute mean, and from
+  # the 8 a nine-session trial leaves behind it takes about a minute
+  # and a half to fall under 3.  Whatever is measured before that is
+  # thrown away as "the host was busy" by the checks below.
   _settle_waited=0
-  while [[ "$_settle_waited" -lt 45 ]]; do
+  while [[ "$_settle_waited" -lt 240 ]]; do
     _l1="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')"
     [[ -z "$_l1" ]] && break
-    if awk -v l="$_l1" 'BEGIN { exit !(l < 2.5) }'; then
+    if awk -v l="$_l1" 'BEGIN { exit !(l < 3.0) }'; then
       [[ "$_settle_waited" -gt 0 ]] && echo "    load down to $_l1 after ${_settle_waited}s"
       break
     fi
     sleep 3
     _settle_waited=$((_settle_waited + 3))
   done
-  if [[ "$_settle_waited" -ge 45 ]]; then
+  if [[ "$_settle_waited" -ge 240 ]]; then
     echo "    still warm after ${_settle_waited}s (load1=$_l1) — measuring anyway"
   fi
 fi
@@ -198,7 +209,56 @@ fi
 # ---- collect current measurements ---------------------------------------
 
 CUR_DIR=$(mktemp -d)
-trap 'rm -rf "$CUR_DIR"' EXIT
+MARSPOT="$(marspot_bin marspot)"
+load1() { sysctl -n vm.loadavg | awk '{print $2}'; }
+
+# The host's load through the whole run, one "<epoch> <load1>" line
+# every two seconds: each block of trials below is judged on the samples
+# that fall inside it, not on one reading taken before it started.
+( while :; do echo "$(date +%s) $(load1)"; sleep 2; done ) > "$CUR_DIR/load.samples" 2>/dev/null &
+LOAD_SAMPLER=$!
+disown "$LOAD_SAMPLER" 2>/dev/null || true
+trap 'kill "$LOAD_SAMPLER" 2>/dev/null; rm -rf "$CUR_DIR"' EXIT
+
+# run_block <name> <function> — run a block of trials, and run it again
+# (up to BLOCK_REQUEUE more times) when the host was busy while it ran.
+# A reading taken next to someone else's work is not reported as a
+# number: what is left after the last attempt is a block marked invalid,
+# and the gate says so for every row that comes from it.
+BLOCK_REQUEUE="${BLOCK_REQUEUE:-2}"
+run_block() {
+  local name=$1 fn=$2 attempt
+  for ((attempt = 0; attempt <= BLOCK_REQUEUE; attempt++)); do
+    if (( attempt > 0 )); then
+      echo "    $name: measuring again ($attempt of $BLOCK_REQUEUE)"
+      python3 "$ROOT/bin/_l3_aggregate.py" settle 120 3.0
+    fi
+    echo "$(date +%s) $(load1)" >> "$CUR_DIR/load.samples"
+    date +%s > "$CUR_DIR/$name.begin"
+    python3 "$ROOT/bin/_bench_record.py" cpu-snapshot > "$CUR_DIR/$name.cpu0"
+    "$fn"
+    python3 "$ROOT/bin/_bench_record.py" cpu-snapshot > "$CUR_DIR/$name.cpu1"
+    echo "$(date +%s) $(load1)" >> "$CUR_DIR/load.samples"
+    date +%s > "$CUR_DIR/$name.end"
+    if python3 "$ROOT/bin/_bench_record.py" judge "$CUR_DIR" "$name"; then
+      return 0
+    fi
+  done
+  return 0
+}
+
+# One `--bench parse` run under time(1), which on macOS also reports the
+# instructions the process retired.  Appends the rate to <prefix>.samples
+# and the instructions per byte to <prefix>.insn.  Environment passes
+# through, which is how the file-backed variant is selected.
+parse_trial() {
+  local prefix=$1 scenario=$2 bps ipb
+  /usr/bin/time -l "$MARSPOT" --bench "parse:$scenario" \
+    > "$CUR_DIR/parse.out" 2> "$CUR_DIR/parse.err"
+  read -r bps ipb < <(python3 "$ROOT/bin/_bench_record.py" time-l "$CUR_DIR/parse.out" "$CUR_DIR/parse.err")
+  echo "$bps" >> "$prefix.samples"
+  echo "$ipb" >> "$prefix.insn"
+}
 
 # N=5 trials per parse measurement; we take the median.  Single-run
 # numbers vary ~5–8 % on the same code (thermal / scheduler / kernel
@@ -210,16 +270,19 @@ trap 'rm -rf "$CUR_DIR"' EXIT
 # atlas data dir touches — that drags the median by ~20% and
 # manufactures false gate failures.  The warm-up trial pre-pays
 # those costs; the recorded trials measure steady-state.
-echo "==> headless parse (5 trials each, taking median)"
-for s in cat-ascii cat-mixed cat-cjk cat-emoji cat-clusters; do
-  : > "$CUR_DIR/parse-$s.samples"
-  "$(marspot_bin marspot)" --bench "parse:$SCENARIOS_DIR/$s.bin" >/dev/null
-  for i in 1 2 3 4 5; do
-    "$(marspot_bin marspot)" --bench "parse:$SCENARIOS_DIR/$s.bin" \
-      | python3 -c "import sys,json; print(json.load(sys.stdin)['bytes_per_sec'])" \
-      >> "$CUR_DIR/parse-$s.samples"
+measure_parse() {
+  local s i
+  for s in cat-ascii cat-mixed cat-cjk cat-emoji cat-clusters; do
+    : > "$CUR_DIR/parse-$s.samples"
+    : > "$CUR_DIR/parse-$s.insn"
+    "$MARSPOT" --bench "parse:$SCENARIOS_DIR/$s.bin" >/dev/null
+    for i in 1 2 3 4 5; do
+      parse_trial "$CUR_DIR/parse-$s" "$SCENARIOS_DIR/$s.bin"
+    done
   done
-done
+}
+echo "==> headless parse (5 trials each, taking median)"
+run_block parse measure_parse
 
 # The SAME parse, with the scrollback a real pane actually has.
 #
@@ -235,61 +298,60 @@ done
 # Recorded alongside the RAM numbers rather than replacing them: the
 # existing series stays comparable, and a regression that only shows
 # in one of the two is worth seeing as exactly that.
-echo "==> headless parse, file-backed scrollback (5 trials, taking median)"
-# What the box was doing while this ran.  Measured 2026-09-28 on a busy
-# mini: the same binary, interleaved with itself, scored 26-125 MB/s on
-# cat-mixed — a five-fold spread that no threshold can read.  The L3 and
-# live rows already refuse to judge above load1 5; these rows are just
-# as disk-bound and were still reporting reds.
-sysctl -n vm.loadavg | awk '{print $2}' > "$CUR_DIR/parsefile.load1"
-PARSE_FILE_DIR="$(mktemp -d)"
-for s in cat-ascii cat-mixed cat-cjk cat-emoji; do
-  : > "$CUR_DIR/parsefile-$s.samples"
-  rm -rf "$PARSE_FILE_DIR/sessions"; mkdir -p "$PARSE_FILE_DIR/sessions/1"
-  MARSPOT_STATE_DIR="$PARSE_FILE_DIR" MARSPOT_SESSION_ID=1     "$(marspot_bin marspot)" --bench "parse:$SCENARIOS_DIR/$s.bin" >/dev/null
-  for i in 1 2 3 4 5; do
-    rm -rf "$PARSE_FILE_DIR/sessions"; mkdir -p "$PARSE_FILE_DIR/sessions/1"
-    MARSPOT_STATE_DIR="$PARSE_FILE_DIR" MARSPOT_SESSION_ID=1       "$(marspot_bin marspot)" --bench "parse:$SCENARIOS_DIR/$s.bin"       | python3 -c "import sys,json; print(json.load(sys.stdin)['bytes_per_sec'])"       >> "$CUR_DIR/parsefile-$s.samples"
+# What the box was doing while this ran decides whether it is a reading.
+# Measured 2026-09-28 on a busy mini: the same binary, interleaved with
+# itself, scored 26-125 MB/s on cat-mixed — a five-fold spread that no
+# threshold can read.
+measure_parsefile() {
+  local s i dir
+  dir="$(mktemp -d)"
+  for s in cat-ascii cat-mixed cat-cjk cat-emoji; do
+    : > "$CUR_DIR/parsefile-$s.samples"
+    : > "$CUR_DIR/parsefile-$s.insn"
+    rm -rf "$dir/sessions"; mkdir -p "$dir/sessions/1"
+    MARSPOT_STATE_DIR="$dir" MARSPOT_SESSION_ID=1 \
+      "$MARSPOT" --bench "parse:$SCENARIOS_DIR/$s.bin" >/dev/null
+    for i in 1 2 3 4 5; do
+      rm -rf "$dir/sessions"; mkdir -p "$dir/sessions/1"
+      MARSPOT_STATE_DIR="$dir" MARSPOT_SESSION_ID=1 \
+        parse_trial "$CUR_DIR/parsefile-$s" "$SCENARIOS_DIR/$s.bin"
+    done
   done
-done
-rm -rf "$PARSE_FILE_DIR"
+  rm -rf "$dir"
+}
+echo "==> headless parse, file-backed scrollback (5 trials, taking median)"
+run_block parsefile measure_parsefile
 
+# p99_trials <kind> <arg> <n> <out> — n runs of `--bench <kind>:<arg>`
+# after one discarded warm-up, the p99 of each appended to <out>
+p99_trials() {
+  local kind=$1 arg=$2 n=$3 out=$4 i
+  : > "$out"
+  "$MARSPOT" --bench "$kind:$arg" >/dev/null 2>&1
+  for ((i = 0; i < n; i++)); do
+    "$MARSPOT" --bench "$kind:$arg" 2>/dev/null \
+      | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" >> "$out"
+  done
+}
+
+measure_render() { p99_trials render 1000 3 "$CUR_DIR/render.samples"; }
 echo "==> headless render (3 trials, taking median p99)"
-: > "$CUR_DIR/render.samples"
-"$(marspot_bin marspot)" --bench render:1000 >/dev/null
-for trial in 1 2 3; do
-  "$(marspot_bin marspot)" --bench render:1000 \
-    | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
-    >> "$CUR_DIR/render.samples"
-done
+run_block render measure_render
 
 # Scroll-down read-path gate, over the in-memory scrollback a process
 # without a session id gets (the file-backed one belongs to L3s).
-echo "==> headless scroll (5 trials, taking median p99)"
-sysctl -n vm.loadavg | awk '{print $2}' > "$CUR_DIR/scroll.load1"
-: > "$CUR_DIR/scroll.samples"
-"$(marspot_bin marspot)" --bench scroll:"$SCENARIOS_DIR/scroll-history.bin" >/dev/null
-for trial in 1 2 3 4 5; do
-  "$(marspot_bin marspot)" --bench scroll:"$SCENARIOS_DIR/scroll-history.bin" \
-    | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
-    >> "$CUR_DIR/scroll.samples"
-done
-
-# Cold-cache scroll.  It used to force the disk-backed scrollback through
-# an env switch and evict its pages first; that switch and the disk
-# variant are gone (the file-backed scrollback is on for every L3, off
+#
+# Cold-cache scroll used to force the disk-backed scrollback through an
+# env switch and evict its pages first; that switch and the disk variant
+# are gone (the file-backed scrollback is on for every L3, off
 # elsewhere), and `--bench scroll-cold` now walks the same in-memory
 # scrollback as `scroll`.  Kept so its baseline key keeps a reading.
-echo "==> headless scroll-cold (5 trials, taking median p99)"
-: > "$CUR_DIR/scroll-cold.samples"
-"$(marspot_bin marspot)" \
-  --bench scroll-cold:"$SCENARIOS_DIR/scroll-history.bin" >/dev/null 2>&1
-for trial in 1 2 3 4 5; do
-  "$(marspot_bin marspot)" \
-    --bench scroll-cold:"$SCENARIOS_DIR/scroll-history.bin" 2>/dev/null \
-    | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
-    >> "$CUR_DIR/scroll-cold.samples"
-done
+measure_scroll() {
+  p99_trials scroll "$SCENARIOS_DIR/scroll-history.bin" 5 "$CUR_DIR/scroll.samples"
+  p99_trials scroll-cold "$SCENARIOS_DIR/scroll-history.bin" 5 "$CUR_DIR/scroll-cold.samples"
+}
+echo "==> headless scroll and scroll-cold (5 trials each, taking median p99)"
+run_block scroll measure_scroll
 
 # ---- binary size + idle memory ----------------------------------------
 # Cheap (sub-second) so we can include them in the fast gate.  Catches
@@ -365,545 +427,34 @@ if [[ $MODE == "full" ]]; then
   # entirely.  Running it here closes that loop.
   echo "==> live PTY through L3 (the shipped path)"
   (cd "$ROOT" && ./bin/measure-l3.sh > "$CUR_DIR/measure-l3.log" 2>&1) || true
+  tail -6 "$CUR_DIR/measure-l3.log"
   cp "$ROOT/bench/results/l3-throughput.json" "$CUR_DIR/l3.json" || true
+
+  # Nine panes producing output at once.  One session alone cannot show
+  # what sessions cost each other: shared caches, the disk they all
+  # write their scrollback to, cores they compete for.  The instructions
+  # are summed over the nine and gate; the rate is what the nine
+  # absorbed together.
+  #
+  # This replaces a check that read a nine-window snapshot of three
+  # terminals from a file no gate path produced, and so failed on every
+  # run.
+  MULTI_N="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('multi_session_l3',{}).get('sessions',0))" "$BASELINE")"
+  MULTI_S="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('multi_session_l3',{}).get('scenario',''))" "$BASELINE")"
+  if [[ "$MULTI_N" != "0" && -n "$MULTI_S" ]]; then
+    echo "==> $MULTI_N sessions absorbing $MULTI_S at once"
+    (cd "$ROOT" && ./bin/measure-l3.sh --sessions "$MULTI_N" --scenario "$MULTI_S" \
+      > "$CUR_DIR/measure-l3-multi.log" 2>&1) || true
+    tail -3 "$CUR_DIR/measure-l3-multi.log"
+    cp "$ROOT/bench/results/l3-multi.json" "$CUR_DIR/l3-multi.json" || true
+  fi
 fi
 
 # ---- gate evaluation ---------------------------------------------------
 
+# Verdicts, the table, the kept record and the history: bin/_bench_gate.py.
 set +e
-python3 - "$BASELINE" "$CUR_DIR" "$MODE" "$UPDATE" <<'PY'
-import json, os, sys, glob
-
-baseline_path, cur_dir, mode, update_str = sys.argv[1:5]
-do_update = update_str == "1"
-
-baseline = json.load(open(baseline_path))
-results = {"pass": [], "fail": [], "current": {}, "inconclusive": set()}
-
-def block_load1(name):
-    """Host load while a block ran, or -1 when it was not recorded
-    (an older result directory)."""
-    p = os.path.join(cur_dir, f"{name}.load1")
-    if not os.path.exists(p):
-        return -1.0
-    try:
-        return float(open(p).read().strip())
-    except ValueError:
-        return -1.0
-
-def load_parse_file(scenario):
-    """The same parse with the scrollback a real pane has — see the
-    `parsefile` section above for why this is measured separately."""
-    p = os.path.join(cur_dir, f"parsefile-{scenario}.samples")
-    if not os.path.exists(p): return None
-    samples = sorted(int(x) for x in open(p).read().split() if x.strip())
-    if not samples: return None
-    _remember(f"parse-file {scenario:10}", samples, 1 / 1024 / 1024)
-    return samples[len(samples) // 2] / 1024 / 1024
-
-# What each metric's trials actually spanned this run.
-#
-# Every number in the table below is the median of five trials and the
-# other four were thrown away with the temp directory. So a run that
-# read 33.6 against a floor of 35.0 could not say whether that was a
-# regression or the machine, and the only way to find out was to run it
-# again -- three times, on 2026-10-01, before the answer came back
-# "the machine". The spread was measured each time and discarded each
-# time.
-#
-# Keyed by the same label `check` is given.
-SPREADS = {}
-
-def _remember(label, samples, scale=1.0):
-    if not samples:
-        return
-    SPREADS[label] = (min(samples) * scale, max(samples) * scale)
-
-def load_parse(scenario):
-    p = os.path.join(cur_dir, f"parse-{scenario}.samples")
-    if not os.path.exists(p): return None
-    samples = sorted(int(x) for x in open(p).read().split() if x.strip())
-    if not samples: return None
-    _remember(f"parse {scenario:10}", samples, 1 / 1024 / 1024)
-    median = samples[len(samples) // 2]
-    return median / 1024 / 1024  # MB/s
-
-def load_render():
-    p = os.path.join(cur_dir, "render.samples")
-    if not os.path.exists(p): return None
-    samples = sorted(int(x) for x in open(p).read().split() if x.strip())
-    if not samples: return None
-    _remember("render p99 (µs)", samples, 1 / 1000.0)
-    return {"p99_ns": samples[len(samples) // 2]}
-
-def load_scroll():
-    p = os.path.join(cur_dir, "scroll.samples")
-    if not os.path.exists(p): return None
-    samples = sorted(int(x) for x in open(p).read().split() if x.strip())
-    if not samples: return None
-    _remember("scroll p99 (µs)", samples, 1 / 1000.0)
-    return {"p99_ns": samples[len(samples) // 2]}
-
-def load_scroll_cold():
-    p = os.path.join(cur_dir, "scroll-cold.samples")
-    if not os.path.exists(p): return None
-    samples = sorted(int(x) for x in open(p).read().split() if x.strip())
-    if not samples: return None
-    _remember("scroll-cold p99 (µs)", samples, 1 / 1000.0)
-    return {"p99_ns": samples[len(samples) // 2]}
-
-_L3_THROUGHPUT = None
-_L3_LOADED = False
-
-def _l3_throughput():
-    # bench/results/l3-throughput.json — the L3 PARSE rate (shell→core→L3
-    # scroll_push throughput), produced by bin/measure-l3.sh. INFORMATIONAL
-    # ONLY — printed by --full, NOT fed into the live / vs-best gate.
-    #
-    # It used to say here that this could not be gated: the competitor
-    # numbers were `time cat` ABSORPTION rates (cat dumps into buffers
-    # and returns, parse catches up async) while this is the PARSE rate,
-    # ~0.4x of it — apples-to-oranges, and true at the time.
-    #
-    # It stopped being true on 2026-08-19, when every live trial (all
-    # terminals, this probe included) grew a DSR round-trip: `CSI 6 n`
-    # cannot be answered until everything queued ahead of it has been
-    # processed, so both sides now report work the terminal has
-    # CONFIRMED it consumed.  Same metric, so it gates — see
-    # `mars_l3_MBps_min` in the baseline.
-    #
-    # The 0.4x did not go away.  It is the real distance between mcli
-    # and a shipped pane, and the shipped pane is the number a user
-    # lives with.  Stale guard 7 days; gitignored/transient so absence
-    # just means "skip".
-    global _L3_THROUGHPUT, _L3_LOADED
-    if _L3_LOADED:
-        return _L3_THROUGHPUT
-    _L3_LOADED = True
-    p = os.path.normpath(os.path.join(os.path.dirname(baseline_path), "results", "l3-throughput.json"))
-    if os.path.exists(p):
-        import time
-        age_days = (time.time() - os.path.getmtime(p)) / 86400.0
-        if age_days <= 7:
-            try:
-                _L3_THROUGHPUT = json.load(open(p))
-            except Exception:
-                _L3_THROUGHPUT = None
-    return _L3_THROUGHPUT
-
-# Above this, a measurement has company. It is not a reason to refuse
-# to measure -- see `check` -- only a reason to read a failure as
-# "unreadable" rather than as a regression.
-LOAD_CEILING = 5.0
-
-def live_measurement_is_trustworthy():
-    # `vs_best_other` divides the L3 number by a frozen competitor
-    # figure, so it inherits the L3 measurement's conditions exactly.
-    l3 = _l3_throughput()
-    if l3 is None:
-        return True
-    hl = l3.get("_host_load1", -1.0)
-    return not (isinstance(hl, (int, float)) and hl > LOAD_CEILING)
-
-def load_live(scenario):
-    # The SHIPPED path first.  `vs_best_other` asks "how does marspot
-    # compare to the best other terminal", and the honest subject of
-    # that question is what a user's pane does (core -> L3, file-backed
-    # scrollback), not mcli.  Until 2026-08-19 this could only be the
-    # mcli number, because the L3 probe was broken and the two metrics
-    # were not comparable anyway; both are fixed now — same certified
-    # protocol on both sides.
-    l3 = _l3_throughput()
-    if l3 is not None:
-        bps = l3.get(scenario, {}).get("bytes_per_sec", 0)
-        if bps > 0:
-            return bps / 1e6
-    return _load_live_mcli(scenario)
-
-def _load_live_mcli(scenario):
-    # marspot's live cat-* number for the vs-best-other comparison.  MUST
-    # be the same metric as the competitors it's compared against — the
-    # `time cat` ABSORPTION rate co-measured in competitors_snapshot. (The
-    # L3 parse rate in l3-throughput.json is a different, slower metric;
-    # see _l3_throughput — it is NOT used here.)  Falls back to measure.sh's
-    # standalone-mcli live.json only when the snapshot lacks marspot.
-    marspot_snap = baseline.get("competitors_snapshot", {}).get("marspot", {})
-    co = marspot_snap.get(f"{scenario}_MBps")
-    if isinstance(co, (int, float)) and co > 0:
-        return float(co)
-    p = os.path.join(cur_dir, "live.json")
-    if not os.path.exists(p): return None
-    j = json.load(open(p))
-    s = j.get(scenario, {}).get("marspot", {})
-    bps = s.get("bytes_per_sec", 0)
-    if bps <= 0: return None
-    return bps / 1024 / 1024
-
-def best_other_mbps(baseline, sid):
-    # Best competitor throughput for a scenario, across every recorded
-    # competitor (iterm2, warp, ghostty, …).  Single source of truth
-    # for BOTH the gate check and --update-baseline floor relocking —
-    # they diverged once before (update used max(iterm2, warp) while
-    # the gate included ghostty), which locks floors the very next
-    # gate run fails.  Excluded by design:
-    #   - terminal: OS-vendor reference floor, not a competitor.
-    #   - marspot:  the subject; it lives in this dict only because
-    #               the refresh script measures it in the same
-    #               sequential cycle as the competitors (fair load
-    #               conditions), but it can't compete with itself.
-    cs = baseline["competitors_snapshot"]
-    key = f"{sid}_MBps"
-    excluded = {"terminal", "marspot"}
-    vals = [
-        v[key] for name, v in cs.items()
-        if isinstance(v, dict) and name not in excluded and key in v
-    ]
-    return max(vals) if vals else 0
-
-def check(label, current, floor, lower_better=False, host_load=None):
-    if current is None:
-        results["pass"].append(("skip", label, "no measurement", None))
-        return
-    ok = (current <= floor) if lower_better else (current >= floor)
-    bucket = "pass" if ok else "fail"
-    results[bucket].append((bucket, label, current, floor))
-    results["current"][label] = current
-    # A failure the run's own trials cannot distinguish from a pass is
-    # not a finding. If the floor sits inside what the five trials
-    # spanned, this run measured both sides of it.
-    lo, hi = SPREADS.get(label, (None, None))
-    if not ok and lo is not None and lo <= floor <= hi:
-        results["inconclusive"].add(label)
-    # And a failure on a busy host is the same kind of non-finding, for
-    # a reason that runs one way only: company can make a measurement
-    # slower, never faster. So a PASS carrying that handicap is a pass
-    # and worth having -- which is why these are measured rather than
-    # skipped. Skipping threw away every valid pass to avoid reading
-    # one unreadable failure, and ten of them went unmeasured for as
-    # long as the fleet was busy, which is most of the time.
-    if not ok and isinstance(host_load, (int, float)) and host_load > LOAD_CEILING:
-        results["inconclusive"].add(label)
-
-def fmt_num(n):
-    if n is None: return "-"
-    if isinstance(n, str): return n
-    return f"{n:.1f}"
-
-# The shipped path.  Gated since 2026-08-19 (see `_l3_throughput` for why
-# it could not be before): this is what a user's pane does, and it had
-# been invisible to the gate for two months.
-if mode == "full":
-    l3 = _l3_throughput()
-    if l3 is not None:
-        # A contended host cannot measure this.  The probe keeps the
-        # fastest of five trials precisely to survive a busy machine,
-        # but past a point every window is contended and the number
-        # stops being about marspot: the same build read 169.9 MB/s at
-        # load1 4.5 and 115.7 at load1 6.3 on cjk.  Report that as
-        # "not measured", not as a regression — a red that means
-        # "someone else was compiling" trains people to ignore reds.
-        # `_host_load1` is the WORST moment of the measurement, not
-        # the calm before it: the probe samples before every trial.
-        # It used to read once, and 2026-10-01 that reported 4.16 --
-        # under this threshold -- for a run two other jobs shared from
-        # the first minute to the last, which came out as a 45% cjk
-        # "regression" with all five trials below the floor.
-        host_load = l3.get("_host_load1", -1.0)
-        too_busy = isinstance(host_load, (int, float)) and host_load > LOAD_CEILING
-        for entry in baseline["scenarios"]:
-            sid = entry["id"]
-            floor = entry.get("mars_l3_MBps_min")
-            if not isinstance(floor, (int, float)) or floor <= 0:
-                continue
-            bps = l3.get(sid, {}).get("bytes_per_sec", 0)
-            cur = bps / 1e6 if bps > 0 else None
-            # The probe keeps its per-trial times; turn them into the
-            # same spread every other row carries.  It reports the
-            # MINIMUM of its trials rather than the median -- load can
-            # only add time -- so the spread here reads the other way
-            # round: the fastest trial is the right edge.
-            trials = l3.get(sid, {}).get("samples") or []
-            nbytes = l3.get(sid, {}).get("bytes", 0)
-            if trials and nbytes:
-                rates = sorted(nbytes / (ns / 1e9) / 1e6 for ns in trials if ns > 0)
-                if rates:
-                    SPREADS[f"L3 {sid}"] = (rates[0], rates[-1])
-            check(f"L3 {sid}", cur, float(floor),
-                  host_load=host_load if too_busy else None)
-        parts = []
-        for sid in ("cat-ascii", "cat-mixed", "cat-cjk", "cat-emoji"):
-            bps = l3.get(sid, {}).get("bytes_per_sec", 0)
-            if bps > 0:
-                parts.append(f"{sid.removeprefix('cat-')} {bps/1024/1024:.0f}")
-        if parts:
-            print("L3 parse rate (MiB/s, informational, not gated): " + ", ".join(parts))
-    print("live gate source: competitors_snapshot.marspot (`time cat` absorption rate, "
-          "competitor-comparable)")
-
-# Parse + ratio per scenario
-for entry in baseline["scenarios"]:
-    sid = entry["id"]
-    cur_parse = load_parse(sid)
-    check(f"parse {sid:10}", cur_parse, entry["mars_parse_MBps_min"])
-    floor_file = entry.get("mars_parse_file_MBps_min")
-    if floor_file is not None:
-        pf_load = block_load1("parsefile")
-        check(f"parse-file {sid:10}", load_parse_file(sid), floor_file,
-              host_load=pf_load)
-
-    # A scenario may exist only to exercise a code path; it has no
-    # competitor measurement and no live number, and asking for one
-    # would fail on a key that was never meant to be there.
-    if mode == "full" and "mars_live_MBps_min" in entry:
-        cur_live = load_live(sid)
-        live_load = None if live_measurement_is_trustworthy() else (
-            (_l3_throughput() or {}).get("_host_load1")
-        )
-        check(f"live  {sid:10}", cur_live, entry["mars_live_MBps_min"],
-              host_load=live_load)
-        best_other = best_other_mbps(baseline, sid)
-        if cur_live is not None and best_other > 0:
-            ratio = cur_live / best_other
-            check(f"vs-best {sid:10}", ratio, entry["mars_vs_best_other_min"],
-                  host_load=live_load)
-
-# Render
-render = load_render()
-if render is not None:
-    p99_us = render["p99_ns"] / 1000
-    check("render p99 (µs)", p99_us, baseline["render_full_repaint"]["p99_us_max"], lower_better=True)
-
-# Scroll (read-path under simulated downward scrolling).  A p99 is the
-# tail, and the tail is the first thing another process's disk traffic
-# lengthens — 3.0 µs on a quiet box, 4.2-4.9 with company, against a
-# 4.0 ceiling.  Same rule as the rows above: measured either way, and
-# above load1 5 a failure is called unreadable rather than a
-# regression.
-scroll_load = block_load1("scroll")
-scroll = load_scroll()
-scroll_cold = load_scroll_cold()
-if scroll is not None and "scroll_repaint" in baseline:
-    p99_us = scroll["p99_ns"] / 1000
-    check("scroll p99 (µs)", p99_us, baseline["scroll_repaint"]["p99_us_max"],
-          lower_better=True, host_load=scroll_load)
-
-# Scroll-cold (disk-backed, post-MADV_DONTNEED)
-if scroll_cold is not None and "scroll_cold_repaint" in baseline:
-    p99_us = scroll_cold["p99_ns"] / 1000
-    check("scroll-cold p99 (µs)", p99_us, baseline["scroll_cold_repaint"]["p99_us_max"],
-          lower_better=True, host_load=scroll_load)
-
-# Binary size: lower-better, ceiling = baseline value
-for bin_name, ceiling in baseline.get("binary_size_bytes_max", {}).items():
-    if bin_name.startswith("_"):
-        continue
-    p = os.path.join(cur_dir, f"size-{bin_name}.txt")
-    if not os.path.exists(p):
-        continue
-    bytes_now = int(open(p).read().strip())
-    check(f"size {bin_name:6} (bytes)", bytes_now, ceiling, lower_better=True)
-
-# Idle memory (KiB): lower-better
-for bin_name, ceiling in baseline.get("memory_idle_kb_max", {}).items():
-    if bin_name.startswith("_"):
-        continue
-    p = os.path.join(cur_dir, f"rss-{bin_name}.samples")
-    if not os.path.exists(p):
-        continue
-    samples = sorted(int(x) for x in open(p).read().split() if x.strip())
-    if not samples:
-        continue
-    median = samples[len(samples) // 2]
-    _remember(f"rss  {bin_name:6} (KiB)", samples)
-    check(f"rss  {bin_name:6} (KiB)", median, ceiling, lower_better=True)
-
-# Multi-session vs-best-other ratio gate (the structural protection
-# against silent competitive slippage — marspot and competitors can both
-# slow down and the parse/render gate would still pass; this catches
-# it).  Reads the latest bench-run.sh snapshot (cross-terminal.json
-# symlink); doesn't run anything itself.  Sub-millisecond.
-#
-# **--full only.**  The numbers in the snapshot are single-trial
-# multi-session-9x / scrollback-1m measurements; per perf.md and
-# baseline.json's own _comment, they're ±10–20 % volatile to thermal /
-# foreground-load on the dev box.  Floors are locked clean-machine
-# (≥3-trial median outside the harness), so dev-box pre-push runs flap
-# even when nothing regressed.  Gate them at `--full` (intended to run
-# on `ssh mini` via bench-remote.sh — clean idle Apple Silicon) and
-# leave fast pre-push deterministic.
-multi_cfg = baseline.get("multi_session_thresholds")
-if multi_cfg and mode == "full":
-    snap_path = os.path.join(os.path.dirname(baseline_path), "..", "bench", "results", "cross-terminal.json")
-    snap_path = os.path.normpath(snap_path)
-    snap = None
-    snap_age_hours = None
-    if os.path.exists(snap_path):
-        try:
-            snap = json.load(open(snap_path))
-            mtime = os.path.getmtime(snap_path)
-            import datetime, time
-            snap_age_hours = (time.time() - mtime) / 3600.0
-        except Exception:
-            snap = None
-
-    max_age = multi_cfg.get("snapshot_max_age_hours", 168)
-    if snap is None:
-        results["fail"].append((
-            "fail",
-            "multi-session snapshot",
-            "missing",
-            "bench-run.sh first",
-        ))
-    elif snap_age_hours is not None and snap_age_hours > max_age:
-        results["fail"].append((
-            "fail",
-            "multi-session snapshot",
-            f"{snap_age_hours:.0f}h old",
-            f"≤{max_age}h",
-        ))
-    else:
-        for sid, cfg in multi_cfg.get("scenarios", {}).items():
-            metric = cfg["metric"]
-            scen = snap.get("scenarios", {}).get(sid, {})
-            mars_v = scen.get("marspot", {}).get("metrics", {}).get(metric)
-            others = []
-            for tid in ("iterm", "terminal"):
-                v = scen.get(tid, {}).get("metrics", {}).get(metric)
-                if v is not None:
-                    others.append(v)
-            if mars_v is None or not others:
-                results["pass"].append((
-                    "skip",
-                    f"vs-best {sid:14}",
-                    "no data",
-                    None,
-                ))
-                continue
-            check(f"throughput {sid:10}", mars_v, cfg["mars_throughput_min"])
-            ratio = mars_v / max(others)
-            check(f"vs-best   {sid:10}", ratio, cfg["mars_vs_best_other_min"])
-
-# Print
-print()
-header = f"{'metric':<24} {'current':>10} {'floor':>10} {'trials':>17}   {'verdict'}"
-print(header)
-print("-" * len(header))
-all_rows = results["pass"] + results["fail"]
-for verdict, label, current, floor in all_rows:
-    cur_s = fmt_num(current)
-    floor_s = fmt_num(floor)
-    verdict_s = {"pass": "✓ pass", "fail": "✗ FAIL", "skip": "- skip"}[verdict]
-    lo, hi = SPREADS.get(label, (None, None))
-    span = f"{lo:.1f}-{hi:.1f}" if lo is not None else ""
-    if label in results["inconclusive"]:
-        verdict_s = "? UNSURE"
-    print(f"{label:<24} {cur_s:>10} {floor_s:>10} {span:>17}   {verdict_s}")
-print()
-
-n_fail = len(results["fail"])
-n_unsure = len(results["inconclusive"])
-n_real = n_fail - n_unsure
-if n_fail == 0:
-    print(f"GATE PASSED ({len(results['pass'])} checks)")
-elif n_real == 0:
-    print(
-        f"GATE INCONCLUSIVE ({n_unsure} of {len(results['pass']) + n_fail} checks read "
-        f"below the floor and cannot be read as regressions: either this run's own "
-        f"trials span the floor, or the host had company -- which can only make a "
-        f"number worse. Re-run on a quiet machine.)"
-    )
-else:
-    extra = f", {n_unsure} inconclusive" if n_unsure else ""
-    print(
-        f"GATE FAILED ({n_real} regression(s){extra} of "
-        f"{len(results['pass']) + n_fail} checks)"
-    )
-
-if do_update:
-    if n_fail > 0:
-        print()
-        print("--update-baseline refused: gate already failing, fix the regressions first")
-        sys.exit(1)
-    # Update baseline floors based on current measurements.
-    print()
-    print("==> updating baseline floors with 7% headless / 10% live safety margin")
-    for entry in baseline["scenarios"]:
-        sid = entry["id"]
-        cp = load_parse(sid)
-        if cp is not None:
-            entry["mars_parse_MBps_min"] = round(cp * 0.93)
-        if mode == "full":
-            cl = load_live(sid)
-            if cl is not None:
-                entry["mars_live_MBps_min"] = round(cl * 0.90)
-                best_other = best_other_mbps(baseline, sid)
-                if best_other > 0:
-                    entry["mars_vs_best_other_min"] = round(cl / best_other * 0.90, 2)
-    # Lower-better ceilings: use math.ceil so the noise margin actually
-    # carries.  round() on something like 1.9 * 1.30 = 2.47 → 2 wipes
-    # the margin out and the gate flaps on identical code; ceil → 3.
-    # Per-metric multipliers reflect observed run-to-run noise:
-    #   - parse: ~5 % noise → 1.07 margin (handled in scenarios loop)
-    #   - render: ~30 % noise (GPU thermal) → 1.50 to absorb worst case
-    #   - scroll / scroll-cold: ~30 % noise (low-µs regime, one cache
-    #     eviction skews p99) → 1.30
-    # If a metric needs a different margin than auto-derived, edit
-    # baseline.json directly and skip --update-baseline for that field.
-    import math
-    if render is not None:
-        baseline["render_full_repaint"]["p99_us_max"] = math.ceil(render["p99_ns"] / 1000 * 1.50)
-    if scroll is not None and "scroll_repaint" in baseline:
-        baseline["scroll_repaint"]["p99_us_max"] = math.ceil(scroll["p99_ns"] / 1000 * 1.30)
-    if scroll_cold is not None and "scroll_cold_repaint" in baseline:
-        baseline["scroll_cold_repaint"]["p99_us_max"] = math.ceil(scroll_cold["p99_ns"] / 1000 * 1.30)
-    # Size: 10 % ceiling above current.
-    if "binary_size_bytes_max" in baseline:
-        for bin_name in list(baseline["binary_size_bytes_max"].keys()):
-            if bin_name.startswith("_"): continue
-            p = os.path.join(cur_dir, f"size-{bin_name}.txt")
-            if os.path.exists(p):
-                cur = int(open(p).read().strip())
-                baseline["binary_size_bytes_max"][bin_name] = round(cur * 1.10)
-    # Memory: 20 % ceiling above current (more variance than size).
-    if "memory_idle_kb_max" in baseline:
-        for bin_name in list(baseline["memory_idle_kb_max"].keys()):
-            if bin_name.startswith("_"): continue
-            p = os.path.join(cur_dir, f"rss-{bin_name}.samples")
-            if os.path.exists(p):
-                samples = sorted(int(x) for x in open(p).read().split() if x.strip())
-                if samples:
-                    median = samples[len(samples) // 2]
-                    baseline["memory_idle_kb_max"][bin_name] = round(median * 1.20)
-    # Multi-session thresholds: refresh from latest cross-terminal.json
-    # snapshot.  10 % safety margin on marspot throughput AND on the
-    # vs-best ratio — the ratio is what protects against silent slip,
-    # so re-locking it from the same observation is the right move.
-    #
-    # `snap` is only loaded in `--full` mode (see line ~430); in fast
-    # tier the variable name doesn't exist at all, so the bare
-    # `is not None` check used to NameError out and abort the whole
-    # baseline write.  Guard by checking `mode == "full"` here too.
-    multi_cfg = baseline.get("multi_session_thresholds")
-    snap_local = locals().get("snap") if mode == "full" else None
-    if multi_cfg and snap_local is not None:
-        snap = snap_local
-        for sid, cfg in multi_cfg.get("scenarios", {}).items():
-            metric = cfg["metric"]
-            scen = snap.get("scenarios", {}).get(sid, {})
-            mars_v = scen.get("marspot", {}).get("metrics", {}).get(metric)
-            others = []
-            for tid in ("iterm", "terminal"):
-                v = scen.get(tid, {}).get("metrics", {}).get(metric)
-                if v is not None:
-                    others.append(v)
-            if mars_v is not None and others:
-                cfg["mars_throughput_min"] = round(mars_v * 0.90)
-                cfg["mars_vs_best_other_min"] = round(mars_v / max(others) * 0.90, 2)
-    json.dump(baseline, open(baseline_path, "w"), indent=2)
-    print("==> wrote", baseline_path)
-
-sys.exit(1 if n_fail > 0 else 0)
-PY
+python3 "$ROOT/bin/_bench_gate.py" "$BASELINE" "$CUR_DIR" "$MODE" "$UPDATE" "$ROOT"
 PERF_RC=$?
 set -e
 
@@ -924,9 +475,9 @@ else
   SSIM_RC=0
 fi
 
-# Combined exit: any failure → 1.  Perf gate's row-by-row PASS/FAIL
-# already printed above; SSIM gate prints its own per-snapshot lines.
-if (( PERF_RC != 0 || SSIM_RC != 0 )); then
+# Combined exit: a regression or an SSIM failure → 1; nothing over its
+# limit but a gating row without a valid reading → 3.
+if (( PERF_RC == 1 || SSIM_RC != 0 )); then
   exit 1
 fi
-exit 0
+exit "$PERF_RC"
