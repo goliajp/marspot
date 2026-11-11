@@ -715,15 +715,17 @@ define_class!(
 
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
-            // AppKit only delivers mouseMoved: when the window is key
-            // AND setAcceptsMouseMovedEvents is true (set in
-            // build_window).  Coords match mouse_down.
-            let loc_window = { event.locationInWindow() };
-            let loc_view = self.convertPoint_fromView(loc_window, None);
+            // Only while the window is key.  Coords match mouse_down.
+            let loc_view = self.convertPoint_fromView(event.locationInWindow(), None);
             let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
-            let x_phys = loc_view.x * scale;
-            let y_phys = loc_view.y * scale;
-            dispatch_event_for(self.ivars().window_id.get(), EventKind::MouseMove { x: x_phys, y: y_phys });
+            let (x, y) = (loc_view.x * scale, loc_view.y * scale);
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::MouseMove { x, y });
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            let (x, y) = crate::app_pointer::OUTSIDE;
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::MouseMove { x, y });
         }
 
         // ── NSDraggingDestination ──
@@ -1482,11 +1484,9 @@ fn build_window(
     window.setContentView(Some(unsafe {
         &*(Retained::as_ptr(&view) as *const NSView)
     }));
-    // Mouse-moved delivery: enabled so chrome hover affordances
-    // (icon button BG darkens under cursor) update without a click.
-    // High-frequency but the dispatch path is cheap: NSView →
-    // EventKind::MouseMove → MarspotApp::mouse_moved (default no-op).
+    // chrome lights under the pointer, and goes dark when it leaves
     window.setAcceptsMouseMovedEvents(true);
+    crate::app_pointer::track(&view, mtm);
     window.makeFirstResponder(Some(&view));
 
     // Window delegate.

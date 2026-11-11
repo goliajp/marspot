@@ -3967,6 +3967,8 @@ macro_rules! win {
     };
 }
 
+#[path = "marspot-core/hover.rs"]
+mod hover;
 #[path = "marspot-core/keys.rs"]
 mod keys;
 #[path = "marspot-core/theme_follow.rs"]
@@ -7555,6 +7557,9 @@ impl CoreApp {
     }
 
     fn mouse_moved(&mut self, wi: usize, x_phys: f64, y_phys: f64) {
+        if self.pointer_left(wi, x_phys, y_phys) {
+            return;
+        }
         // Motion, for a program that asked to hear about it.
         //
         // Only the mode it asked for: `?1002` wants travel while a
@@ -7592,57 +7597,7 @@ impl CoreApp {
             return;
         }
 
-        if win!(self, wi).panels.open() == Some(SurfaceKind::Settings) {
-            let on = self.settings_hover_at(wi, x_phys, y_phys);
-            if on != win!(self, wi).settings_modal_hover {
-                win!(self, wi).settings_modal_hover = on;
-                win!(self, wi).needs_render = true;
-            }
-        }
-        if win!(self, wi).cc_usage_modal.is_some() {
-            let on = marspot::ui::components::cc_usage_modal::hover_at(self.cc_usage_modal_rect(wi), x_phys, y_phys);
-            let modal = win!(self, wi).cc_usage_modal.as_mut().expect("checked above");
-            if std::mem::replace(&mut modal.hover, on) != on {
-                win!(self, wi).needs_render = true;
-            }
-        }
-        if win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts) {
-            let on = PanelChrome::new(self.shortcuts_panel_rect(wi), 0.0).hit_close(x_phys, y_phys);
-            if std::mem::replace(&mut win!(self, wi).shortcuts_close_hover, on) != on {
-                win!(self, wi).needs_render = true;
-            }
-        }
-        if win!(self, wi).panels.open() == Some(SurfaceKind::Layout) {
-            let on = self.layout_modal_geometry(wi).hover_at(x_phys, y_phys);
-            if on != win!(self, wi).layout_modal_hover {
-                win!(self, wi).layout_modal_hover = on;
-                win!(self, wi).needs_render = true;
-            }
-        }
-        // The process monitor highlights what the pointer is on.
-        let w = &mut win!(self, wi);
-        if let Some(panel) = w.process_panel.as_mut() {
-            let on = panel.layout.as_ref().map(|l| l.hover_at(x_phys, y_phys)).unwrap_or_default();
-            if on != panel.hover {
-                panel.hover = on;
-                w.needs_render = true;
-            }
-        }
-        // F3+9 — drive context menu hover highlight when open.
-        if let Some(state) = w.context_menu.as_mut() {
-            use marspot::ui::components::ContextMenu;
-            let menu = ContextMenu::layout(
-                w.layout.window_w, w.layout.window_h, w.scale,
-                state.anchor_x, state.anchor_y,
-                w.layout.top_inset,
-                &state.items,
-            );
-            let new_hover = menu.hover_index(&state.items, x_phys, y_phys);
-            if new_hover != state.hovered_idx {
-                state.hovered_idx = new_hover;
-                w.needs_render = true;
-            }
-        }
+        self.hover_panels(wi, x_phys, y_phys);
 
         let w = &win!(self, wi);
         let new_hover = ChromeHover::at(&w.layout, w.panes.len(), x_phys, y_phys);
@@ -10136,11 +10091,11 @@ fn main() {
                     // active — drop any latched hover so the
                     // affordance doesn't linger when the user
                     // alt-tabs away mid-hover.
-                    for w in app.windows.iter_mut() {
+                    for wi in 0..app.windows.len() {
                         if !focused {
-                            w.hover_chrome_btn = None;
+                            app.clear_hover(wi);
                         }
-                        w.needs_render = true;
+                        app.windows[wi].needs_render = true;
                     }
                 }
                 CoreEvent::Closed => *closed = true,

@@ -88,6 +88,7 @@ pub static MARSPOT_LAYER_VERS: &str = concat!(
 pub mod app;
 mod app_delegate;
 mod app_keys;
+pub mod app_pointer;
 pub mod app_menu;
 pub mod cc;
 pub mod cc_usage;
