@@ -24,7 +24,7 @@ const WEEK: i64 = 7 * 24 * 3600;
 /// When an account's windows end, as the feed last gave them. Zero
 /// where it gave none.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(super) struct Resets {
+pub(in crate::plugins) struct Resets {
     pub five_hour: i64,
     pub week: i64,
     /// Per capped model, label lower-cased.
@@ -59,7 +59,7 @@ pub(super) fn resets_for(
 }
 
 #[derive(Debug, Default)]
-pub(super) struct Seen {
+pub(in crate::plugins) struct Seen {
     /// Per profile, the newest login failure a pane met there.
     pub logged_out: HashMap<u8, i64>,
     /// Per profile and the model a refusal named (empty: the account's
@@ -72,7 +72,7 @@ pub(super) struct Seen {
 impl Seen {
     /// Take in what one pane on `profile` was told. True when it is
     /// newer than anything already known for that account and model.
-    pub(super) fn note(&mut self, profile: u8, r: &Refusal) -> bool {
+    pub(in crate::plugins) fn note(&mut self, profile: u8, r: &Refusal) -> bool {
         let news = if r.logged_out {
             let at = self.logged_out.entry(profile).or_insert(i64::MIN);
             let news = r.at > *at;
@@ -133,9 +133,19 @@ impl Seen {
         }
     }
 
+    /// Does a refusal of `profile`'s own windows still stand?  For a
+    /// caller whose accounts are measured seldom or never: a five-hour
+    /// end the feed gave, since passed, ends the refusal it followed.
+    pub(in crate::plugins) fn shut(&self, profile: u8, resets: &Resets, now: i64) -> bool {
+        self.out.get(&(profile, String::new())).is_some_and(|(at, window)| {
+            let renewed = *window == Window::FiveHour && resets.five_hour > *at && resets.five_hour <= now;
+            !renewed && stands(*at, *window, "", resets, now)
+        })
+    }
+
     /// One line per fact, for the file that carries this across a
     /// restart; None when nothing changed since the last call.
-    pub(super) fn changed(&mut self) -> Option<String> {
+    pub(in crate::plugins) fn changed(&mut self) -> Option<String> {
         if !std::mem::take(&mut self.dirty) {
             return None;
         }
@@ -153,7 +163,7 @@ impl Seen {
     }
 
     /// What `changed` wrote. A line that does not read is dropped.
-    pub(super) fn decode(text: &str) -> Self {
+    pub(in crate::plugins) fn decode(text: &str) -> Self {
         let mut seen = Self::default();
         for line in text.lines() {
             let f: Vec<&str> = line.split('\t').collect();

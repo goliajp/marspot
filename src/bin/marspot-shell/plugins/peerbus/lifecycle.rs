@@ -202,7 +202,6 @@ impl Worker {
             version,
             name,
             name_since_ms: now_ms(),
-            former_names: Vec::new(),
             socket: inbox.path.to_string_lossy().into_owned(),
             status: Status::Idle,
             class,

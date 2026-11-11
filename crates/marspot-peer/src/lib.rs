@@ -9,8 +9,9 @@
 //!   and for Codex as an MCP server.
 //! - `relay`: the process that stands for a Codex session on the inbox
 //!   sockets.
-//! - `panes`, `claude_hook`: marspot's pane names, and the Claude Code
-//!   hooks that let a Claude session address peers by them.
+//! - `panes`, `resolve`, `claude_hook`: marspot's pane names, which
+//!   pane a recipient string means, and the Claude Code hooks that let
+//!   a Claude session address peers by them.
 //! - `spool`, `gemini_hook`, `kimi_hook`: the file a Gemini or Kimi
 //!   session's mail waits in, and the hooks that hand it over at a
 //!   turn boundary.
@@ -29,6 +30,7 @@ pub mod proc;
 pub mod rand;
 pub mod registry;
 pub mod relay;
+pub mod resolve;
 pub mod rpc;
 mod sha1;
 pub mod spool;

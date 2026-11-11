@@ -50,7 +50,8 @@ pub const CELL_TITLE_PT: f64 = 22.0;
 /// font, 18 cells fit between the status dot and the row's close
 /// button (`theme::spec::chrome`).  Anything longer is truncated with
 /// `...` (three ASCII dots — same monospace cell width as the rest of
-/// the label, plays nicer with the user's preference than `…`).  The
+/// the label, plays nicer with the user's preference than `…`).  A
+/// pane's code (`#3381`) is never cut: the name in front of it is.  The
 /// sidebar cuts whatever still does not fit, without a mark.
 pub const MAX_SIDEBAR_LABEL_CHARS: usize = 18;
 
@@ -90,8 +91,12 @@ pub fn truncate_for_sidebar(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
     }
-    let head: String = s.chars().take(max_chars - 3).collect();
-    format!("{head}...")
+    // of two panes with one name the code is the only difference, so
+    // the dots go before it
+    let code = s.rsplit_once('#').map(|(_, c)| c).filter(|c| c.len() == 4 && c.bytes().all(|b| b.is_ascii_digit()));
+    let tail = code.map(|c| format!("#{c}")).unwrap_or_default();
+    let head: String = s.chars().take(max_chars - 3 - tail.len()).collect();
+    format!("{head}...{tail}")
 }
 
 /// Live text selection inside one session's grid.  Column is the
@@ -302,4 +307,28 @@ pub fn selection_text(pane: &Pane, sel: &Selection) -> Option<String> {
         sel.focus,
         sel.mode == SelectionMode::Blockwise,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Panes that share a long name differ only in their codes, and
+    /// each code is whole in the sidebar.
+    #[test]
+    fn a_shared_long_name_keeps_each_code_in_the_sidebar() {
+        let panes = [
+            crate::pane_name::PaneRef { sid: 1, cwd: "/w/golia-claude-configs".into(), code: Some(1024) },
+            crate::pane_name::PaneRef { sid: 2, cwd: "/x/golia-claude-configs".into(), code: Some(9906) },
+            crate::pane_name::PaneRef { sid: 3, cwd: "/w/marspot".into(), code: Some(3381) },
+        ];
+        let labels: Vec<String> = crate::pane_name::assign(&panes).into_iter().map(|(_, n)| truncate_for_sidebar(&n, MAX_SIDEBAR_LABEL_CHARS)).collect();
+        assert_eq!(labels, ["golia-clau...#1024", "golia-clau...#9906", "marspot"]);
+        assert!(labels.iter().all(|l| l.chars().count() <= MAX_SIDEBAR_LABEL_CHARS));
+        // a short shared name is drawn whole, and a long name with no
+        // code is cut at its end as before
+        assert_eq!(truncate_for_sidebar("spg#1024", MAX_SIDEBAR_LABEL_CHARS), "spg#1024");
+        assert_eq!(truncate_for_sidebar("golia-claude-configs", MAX_SIDEBAR_LABEL_CHARS), "golia-claude-co...");
+        assert_eq!(truncate_for_sidebar("a-very-long-name#12", MAX_SIDEBAR_LABEL_CHARS), "a-very-long-nam...");
+    }
 }
