@@ -89,11 +89,14 @@ pub mod app;
 mod app_delegate;
 mod app_keys;
 pub mod app_pointer;
+pub mod app_pointer;
 pub mod app_menu;
 pub mod cc;
 pub mod cc_usage;
 pub mod kimi_usage;
 pub mod commands;
+#[cfg(test)]
+mod commands_layout_tests;
 pub mod font_cache;
 pub mod font_shape;
 pub mod font_trait;

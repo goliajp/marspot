@@ -4224,7 +4224,7 @@ impl MarspotApp for ShellApp {
         // The shell owns the windows, so the one command that opens
         // one runs here; every other key is the core's to dispatch.
         if event.state == marspot::input::KeyState::Pressed
-            && let Some(row) = marspot::commands::for_key(&event.logical, mods)
+            && let Some(row) = marspot::commands::for_key(&event, mods)
             && row.command == marspot::commands::Command::NewWindow
         {
             self.open_new_window();
