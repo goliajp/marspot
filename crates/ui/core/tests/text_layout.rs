@@ -74,6 +74,51 @@ fn a_cap_box_centred_in_a_band_has_its_baseline_where_a_control_puts_its_label()
     assert_eq!(l.runs(), [("Hello", 70.0, 21.0)]);
 }
 
+/// What a control does with its own label, `ink` being the rows
+/// above and below the baseline: `top + round((h + above - below) / 2)`.
+fn control_baseline(top: f64, h: f64, above: f64, below: f64) -> f64 {
+    top + ((h + above - below) * 0.5).round()
+}
+
+#[test]
+fn a_label_placed_by_its_ink_has_the_baseline_a_control_gives_it() {
+    let label = |s: &'static str, h: f64, by_ink: bool| {
+        lay(|ui| {
+            let t = ui.text(UI, INK, s).height(L::Px(h)).width(L::Px(120.0)).align(Align::Center);
+            if by_ink {
+                t.by_ink();
+            }
+        })
+        .runs()[0]
+            .2
+    };
+    // capitals: 14 rows above the baseline and none below
+    for h in [27.0, 28.0, 29.0, 44.0] {
+        assert_eq!(label("Hello", h, true), control_baseline(0.0, h, 14.0, 0.0), "in {h} px");
+    }
+    assert_eq!(label("Hello", 27.0, true), 21.0);
+    assert_eq!(label("Hello", 27.0, false), 20.5, "the cap box alone is not put on a row");
+    // Han: 18 above and 2 below, so the ink and not the capitals is in the middle
+    for h in [27.0, 28.0, 44.0] {
+        assert_eq!(label("適用", h, true), control_baseline(0.0, h, 18.0, 2.0), "in {h} px");
+    }
+    assert_eq!(label("適用", 28.0, true), 22.0);
+    assert_ne!(label("適用", 28.0, true), label("適用", 28.0, false));
+}
+
+#[test]
+fn a_label_placed_by_its_ink_is_whole_rows_from_wherever_its_box_is() {
+    let l = lay(|ui| {
+        ui.vstack(|ui| {
+            ui.text(UI, INK, "Hello").height(L::Px(27.0)).align(Align::Center).by_ink();
+        })
+        .padding(golia_ui_core::Edges::all(L::Px(0.25)));
+    });
+    assert_eq!(l.runs()[0].2, 0.25 + 21.0);
+    let tb = l.layout.text_box(NodeId(1));
+    assert_eq!((tb.h, tb.baseline), (14.0, 14.0));
+}
+
 #[test]
 fn monospaced_text_is_on_the_cell_grid_and_wide_characters_take_two_cells() {
     let l = lay(|ui| {
