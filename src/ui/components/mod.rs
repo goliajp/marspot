@@ -16,6 +16,7 @@ pub mod surface_stack;
 pub mod settings_choices;
 pub mod settings_modal;
 pub mod settings_paint;
+pub mod settings_rows;
 pub mod shortcuts_panel;
 pub mod shortcuts_paint;
 pub mod scroll_view;

@@ -282,20 +282,65 @@ pub const TABLE: &[Row] = &[
     row(C::Shortcuts, Msg::CmdShortcuts, cmd('/'), M::Help, Always, Core),
 ];
 
+fn row_for(key: Key, mods: u8) -> Option<&'static Row> {
+    let chord = Some(Chord { key, mods });
+    TABLE.iter().find(|r| r.chord == chord || r.also == chord)
+}
+
 /// The command a key is the chord of.
+///
+/// A chord names a character, and which key types that character is
+/// the keyboard layout's business, so the match is on what the press
+/// typed (`text`: what the layout gives the key under Cmd, or under
+/// Shift where Shift makes it another character), as a menu's key
+/// equivalent is:
+///
+/// 1. A letter keeps every modifier held: Shift does not make it
+///    another key.  Any other character has used up the Shift or
+///    Option that typed it, so Cmd-Shift-7 is Cmd-/ on a German layout
+///    and Cmd-Option-5 is Cmd-[.
+/// 2. With Option or Control held the typed character is not the
+///    key's (`˙`, a control code), and the key's own character stands
+///    in with the modifiers as held.
+/// 3. Cmd-1 to Cmd-9 that nothing above matched go by the physical
+///    digit row, so they need no Shift where digits do (AZERTY).
 ///
 /// Runs on every keystroke: a key without Cmd that is not Esc leaves
 /// after two comparisons, and nothing here allocates.
-pub fn for_key(logical: &LogicalKey, m: Modifiers) -> Option<&'static Row> {
-    let key = match *logical {
-        LogicalKey::Char(c) if m.super_ => Key::Char(c.to_ascii_lowercase()),
-        LogicalKey::Named(NamedKey::Escape) => Key::Esc,
+pub fn for_key(event: &MarspotKeyEvent, m: Modifiers) -> Option<&'static Row> {
+    let bare = match event.logical {
+        LogicalKey::Char(c) if m.super_ => lower(c),
+        LogicalKey::Named(NamedKey::Escape) => {
+            let none = !(m.shift || m.control || m.alt || m.super_);
+            return if none { row_for(Key::Esc, 0) } else { None };
+        }
         _ => return None,
     };
     let bit = |held: bool, bit: u8| if held { bit } else { 0 };
     let mods = bit(m.shift, SHIFT) | bit(m.control, CTRL) | bit(m.alt, OPT) | bit(m.super_, CMD);
-    let chord = Some(Chord { key, mods });
-    TABLE.iter().find(|r| r.chord == chord || r.also == chord)
+    let typed = event.text.as_deref().and_then(only_char).filter(|c| !c.is_control()).map_or(bare, lower);
+    let spent = if typed.is_alphabetic() || typed == bare { 0 } else { SHIFT | OPT };
+    row_for(Key::Char(typed), mods & !spent)
+        .or_else(|| row_for(Key::Char(bare), mods).filter(|_| m.alt || m.control))
+        .or_else(|| {
+            let digit = event.base_layout.filter(|c| ('1'..='9').contains(c) && !typed.is_ascii_digit())?;
+            row_for(Key::Char(digit), mods)
+        })
+}
+
+/// Lowercase without allocating; a character with no single-character
+/// lowercase is itself.
+fn lower(c: char) -> char {
+    let mut l = c.to_lowercase();
+    match (l.next(), l.next()) {
+        (Some(one), None) => one,
+        _ => c,
+    }
+}
+
+fn only_char(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    chars.next().filter(|_| chars.next().is_none())
 }
 
 /// The row of `command`.
@@ -369,8 +414,12 @@ mod tests {
         Chord { key: Key::Esc, mods: bits }.modifiers()
     }
 
+    fn key(logical: LogicalKey) -> MarspotKeyEvent {
+        MarspotKeyEvent { logical, ..Default::default() }
+    }
+
     fn command(c: char, bits: u8) -> Option<Command> {
-        for_key(&LogicalKey::Char(c), mods(bits)).map(|r| r.command)
+        for_key(&key(LogicalKey::Char(c)), mods(bits)).map(|r| r.command)
     }
 
     #[test]
@@ -402,7 +451,7 @@ mod tests {
         for (c, bits, cmd) in want {
             assert_eq!(command(c, bits), Some(cmd), "{c} with {bits:#06b}");
         }
-        let esc = for_key(&LogicalKey::Named(NamedKey::Escape), mods(0)).map(|r| r.command);
+        let esc = for_key(&key(LogicalKey::Named(NamedKey::Escape)), mods(0)).map(|r| r.command);
         assert_eq!(esc, Some(C::ClosePanel));
         // A capital is the same key: caps lock does not unbind a chord.
         assert_eq!(command('C', CMD), Some(C::Copy));
@@ -419,7 +468,7 @@ mod tests {
         assert_eq!(command('f', SHIFT | CMD), None);
         assert_eq!(command('l', CMD), None);
         assert_eq!(command('0', CMD), None);
-        assert_eq!(for_key(&LogicalKey::Named(NamedKey::Escape), mods(SHIFT)).map(|r| r.command), None);
+        assert_eq!(for_key(&key(LogicalKey::Named(NamedKey::Escape)), mods(SHIFT)).map(|r| r.command), None);
     }
 
     /// What the program in the pane is sent has to stay the program's:
@@ -435,10 +484,10 @@ mod tests {
                 NamedKey::Enter, NamedKey::Tab, NamedKey::Backspace, NamedKey::ArrowUp,
                 NamedKey::ArrowLeft, NamedKey::F5, NamedKey::Home, NamedKey::Delete,
             ] {
-                assert!(for_key(&LogicalKey::Named(named), mods(bits)).is_none(), "{named:?}");
+                assert!(for_key(&key(LogicalKey::Named(named)), mods(bits)).is_none(), "{named:?}");
             }
         }
-        assert!(for_key(&LogicalKey::Other, mods(CMD)).is_none());
+        assert!(for_key(&key(LogicalKey::Other), mods(CMD)).is_none());
         for r in TABLE {
             for chord in [r.chord, r.also].into_iter().flatten() {
                 let esc = chord == Chord { key: Key::Esc, mods: 0 };
@@ -466,7 +515,7 @@ mod tests {
     /// Closing a pane ends its session, so no key does it.
     #[test]
     fn cmd_w_closes_a_panel_and_never_a_pane() {
-        let r = for_key(&LogicalKey::Char('w'), mods(CMD)).unwrap();
+        let r = for_key(&key(LogicalKey::Char('w')), mods(CMD)).unwrap();
         assert_eq!((r.command, r.when), (C::ClosePanel, Panel));
         assert!(!r.when.holds(false) && r.when.holds(true));
     }
@@ -563,7 +612,7 @@ mod tests {
                 Runs::System { selector, .. } => assert!(selector.ends_with(':'), "{selector}"),
                 Shell | Core => {
                     let chord = r.chord.unwrap_or_else(|| panic!("{:?} has no chord", r.command));
-                    let replayed = for_key(&chord.key_event().logical, chord.modifiers());
+                    let replayed = for_key(&chord.key_event(), chord.modifiers());
                     assert_eq!(replayed.map(|r| r.command), Some(r.command));
                 }
             }

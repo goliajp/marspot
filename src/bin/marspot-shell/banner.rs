@@ -72,6 +72,16 @@ impl BannerKind {
     }
 }
 
+/// A banner on screen: which, and the display scale its raster was
+/// made for.  A window that moves to a display of another scale shows
+/// another raster of the same banner, so either differing means
+/// drawing it again.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Shown {
+    pub kind: BannerKind,
+    pub scale: f64,
+}
+
 /// CPU-rendered banner with a side car of dimensions, so the GPU
 /// side can position the quad without re-measuring.
 pub struct BannerTexture {
@@ -204,4 +214,35 @@ fn upload_bitmap(
         tex.replaceRegion_mipmapLevel_withBytes_bytesPerRow(region, 0, nn, bytes_per_row);
     }
     Ok(tex)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_banner_drawn_for_another_display_scale_is_not_the_one_shown() {
+        let shown = |kind, scale| Some(Shown { kind, scale });
+        let up = shown(BannerKind::Recovering, 1.0);
+        assert_eq!(up, shown(BannerKind::Recovering, 1.0));
+        assert_ne!(up, shown(BannerKind::Recovering, 2.0), "the window moved to a denser display");
+        assert_ne!(up, shown(BannerKind::CrashLoop, 1.0));
+        assert_ne!(up, None);
+    }
+
+    /// The raster is the size the scale asks for: the same sentence at
+    /// scale 2 is twice as wide and as tall, to the pixel the two
+    /// roundings can differ by.
+    #[test]
+    fn the_raster_is_twice_the_size_at_twice_the_scale() {
+        let Some(device) = objc2_metal::MTLCreateSystemDefaultDevice() else {
+            eprintln!("SKIPPED: no Metal device");
+            return;
+        };
+        let one = rasterise(&device, BannerKind::Recovering.text(), 14.0, 1.0).expect("a banner at scale 1");
+        let two = rasterise(&device, BannerKind::Recovering.text(), 14.0, 2.0).expect("a banner at scale 2");
+        assert!(one.width_px > 40 && one.height_px > 16, "{} x {}", one.width_px, one.height_px);
+        assert!(two.width_px.abs_diff(one.width_px * 2) <= 2, "{} against {}", two.width_px, one.width_px);
+        assert!(two.height_px.abs_diff(one.height_px * 2) <= 2, "{} against {}", two.height_px, one.height_px);
+    }
 }

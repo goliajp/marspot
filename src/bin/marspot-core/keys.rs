@@ -47,7 +47,7 @@ impl CoreApp {
         // panels and windows are not pane content.  What reads from or
         // types into the held pane stays the plugin's.
         let panel_open = win!(self, wi).panels.owns_pointer();
-        if let Some(row) = commands::for_key(&event.logical, modifiers) {
+        if let Some(row) = commands::for_key(&event, modifiers) {
             let held = row.command.acts_on_focused_pane()
                 && self
                     .focused_pane_active_session(wi)
