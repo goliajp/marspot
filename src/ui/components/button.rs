@@ -9,13 +9,12 @@
 //! Hovered state is a separate visual; caller flips `hovered` based
 //! on its own hit-test cycle.
 //!
-//! Custom-shape icons (e.g. the toolbar's sidebar / grid / list-tree
-//! glyphs are tiny stroked rects, not characters) plug in via
-//! `IconSpec::Custom(&dyn Fn(p, icon_rect))` — the closure paints
-//! whatever it wants into the icon box.
+//! An icon is a system symbol from the chrome's one table
+//! (`system::macos::icons`), drawn at `style.icon_size`.
 
 use marspot_term::layout::Rect;
-use crate::ui::core::{ViewPainter, IconComponent};
+use crate::ui::core::ViewPainter;
+use crate::ui::system::macos::icons::{self, Symbol};
 use crate::ui::components::panel_palette as palette;
 use crate::ui::theme::spec::{chrome, space};
 use crate::ui::theme::PanelText;
@@ -40,8 +39,8 @@ pub struct ButtonStyle {
     /// Gap between icon and text (in icon-then-text / text-then-icon
     /// layouts).
     pub icon_gap: f32,
-    /// Square slot reserved for the icon (in both Custom and Glyph
-    /// modes).  Tunes how big the icon "looks" inside the button.
+    /// The icon's point size, physical px, and the side of the slot
+    /// kept for it beside a label.
     pub icon_size: f32,
 }
 
@@ -81,19 +80,6 @@ impl ButtonStyle {
     }
 }
 
-#[derive(Copy, Clone)]
-pub enum IconSpec<'a> {
-    /// Render a short string (typically one char) via the glyph
-    /// atlas.  Centered in the icon slot.  Use for "×", "+", "▸",
-    /// text-like glyphs that already live in the font.
-    Glyph(&'a str),
-    /// A named, tested `IconComponent` impl (e.g. `GridIcon`,
-    /// `SidebarIcon`, `ListTreeIcon`).  No raw paint closures in
-    /// scene code — pick a concrete icon from
-    /// `system/macos/icons/*` or `components/icons/*`, or add a new
-    /// one there with its own unit test.
-    Component(&'a dyn IconComponent),
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconPosition {
@@ -108,7 +94,7 @@ pub enum IconPosition {
 pub struct Button<'a> {
     pub rect: Rect,
     pub label: Option<&'a str>,
-    pub icon: Option<IconSpec<'a>>,
+    pub icon: Option<Symbol>,
     pub icon_position: IconPosition,
     pub hovered: bool,
     pub style: ButtonStyle,
@@ -137,9 +123,6 @@ impl<'a> Button<'a> {
 
         // Layout for label + icon group, horizontally centered with
         // padding_x respected on both sides.
-        let cell_w = p.cell_w;
-        let cell_h = p.cell_h;
-        let ascent = p.ascent;
         let inner_x = self.rect.x as f32 + self.style.padding_x;
         let inner_right = (self.rect.x + self.rect.w) as f32 - self.style.padding_x;
         let inner_w = (inner_right - inner_x).max(0.0);
@@ -158,7 +141,7 @@ impl<'a> Button<'a> {
                     w: icon_size as f64,
                     h: icon_size as f64,
                 };
-                paint_icon(p, icon, icon_rect, fg, cell_w, cell_h, ascent);
+                icons::paint(p, *icon, icon_rect, icon_size as f64, fg);
             }
             (None, _, Some(label)) => {
                 // Text only.  The label is prose — a word the user
@@ -203,7 +186,7 @@ impl<'a> Button<'a> {
                     w: icon_size as f64,
                     h: icon_size as f64,
                 };
-                paint_icon(p, icon, icon_rect, fg, cell_w, cell_h, ascent);
+                icons::paint(p, *icon, icon_rect, icon_size as f64, fg);
                 let baseline = p.ui_baseline_centred(
                     self.rect.y_top as f32, self.rect.h as f32, BUTTON_LABEL.pt(),
                 );
@@ -214,29 +197,6 @@ impl<'a> Button<'a> {
                 // a reason (placeholder while loading?).
             }
         }
-    }
-}
-
-fn paint_icon(
-    p: &mut ViewPainter,
-    icon: &IconSpec<'_>,
-    rect: Rect,
-    fg: [f32; 4],
-    cell_w: f32,
-    cell_h: f32,
-    ascent: f32,
-) {
-    match icon {
-        IconSpec::Glyph(s) => {
-            // Center the glyph inside `rect`.  Glyph width = cell_w
-            // per char; height = cell_h.
-            let chars = s.chars().count() as f32;
-            let text_w = chars * cell_w;
-            let tx = rect.x as f32 + (rect.w as f32 - text_w) * 0.5;
-            let ty = rect.y_top as f32 + (rect.h as f32 - cell_h) * 0.5 + ascent;
-            p.text(tx, ty, s, fg);
-        }
-        IconSpec::Component(c) => c.paint(p, rect, fg),
     }
 }
 

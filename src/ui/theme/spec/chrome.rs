@@ -35,8 +35,10 @@ pub const TOOLBAR_BUTTON: f64 = window::ICON_BUTTON_LOGICAL_SIZE;
 pub const TOOLBAR_GAP: f64 = window::ICON_BUTTON_LOGICAL_GAP;
 /// Corner radius of a toolbar button's hover and on fill.
 pub const TOOLBAR_RADIUS: f64 = 4.0;
-/// Side of the icon in a toolbar button.
-pub const TOOLBAR_ICON: f64 = 16.0;
+/// Point size of the symbol in a toolbar button.  A symbol's frame is
+/// about 1.15 point sizes wide and 0.9 tall, the widest 1.3: at 13 the
+/// widest leaves the button's hover fill two units clear on each side.
+pub const TOOLBAR_ICON: f64 = 13.0;
 /// The version label's right edge to the window's.
 pub const VERSION_PAD_RIGHT: f64 = space::S12;
 
@@ -57,10 +59,8 @@ pub const SIDEBAR_DOT_GAP: f64 = space::S8;
 /// px, whether or not the button is showing: a name must not jump when
 /// the pointer arrives.
 pub const SIDEBAR_LABEL_GAP: f64 = space::S4;
-/// Width and height of the `+` in the add button, physical px.
-pub const SIDEBAR_ADD_MARK: f64 = 9.0;
-/// Stroke of that `+`, physical px.
-pub const SIDEBAR_ADD_STROKE: f64 = 1.0;
+/// Point size of the `+` in the add button, physical px.
+pub const SIDEBAR_ADD_ICON: f64 = 13.0;
 
 /// Height of a pane's title strip.  Its text starts at the terminal's
 /// own inset (`Layout::padding`), above the first column.
