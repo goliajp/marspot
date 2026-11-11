@@ -27,6 +27,17 @@ thread_local! {
     static ROWS: RefCell<FxHashMap<u64, (f32, f32)>> = RefCell::new(FxHashMap::default());
 }
 
+/// `(above, below)` the baseline that the label `s` is centred by, in
+/// whole pixels: the height of its capitals for Latin letters, its own
+/// ink for a line with Han or kana in it.
+pub(crate) fn centring(font: &mut FontCache, s: &str, size_pt: f64, weight: u16) -> (f32, f32) {
+    let cap = (crate::ui::theme::type_scale::sf_pro_cap_height(size_pt) * crate::ui::px_per_pt()) as f32;
+    let ideographic = s.chars().any(|c| matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF));
+    let ink = if ideographic { rows(font, s, size_pt, weight) } else { None };
+    let (above, below) = ink.unwrap_or((cap, 0.0));
+    (above.round(), below.round())
+}
+
 /// `(above, below)` the baseline for `s` at `size_pt` and `weight`, in
 /// whole rows, or `None` for a run that draws nothing.
 pub(crate) fn rows(font: &mut FontCache, s: &str, size_pt: f64, weight: u16) -> Option<(f32, f32)> {

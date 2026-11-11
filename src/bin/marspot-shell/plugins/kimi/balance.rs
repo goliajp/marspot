@@ -169,6 +169,7 @@ impl KimiPlugin {
             stranded_for: Some(tally.since.elapsed()),
             since_last_move: tally.moved.map(|(at, _)| at.elapsed()),
             warned: false,
+            background_refused: None,
         });
         match decision {
             Move::Hold(why) => {

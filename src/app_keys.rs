@@ -79,8 +79,16 @@ pub(crate) fn nsevent_to_mars_key(event: &NSEvent, state: KeyState) -> Option<Ma
     // Resolved text — what the keystroke would type with current
     // modifiers applied.  None for navigation keys / pure modifier
     // presses.
+    let flags = event.modifierFlags();
     let text = if matches!(logical, LogicalKey::Named(_)) {
         None
+    } else if flags.contains(NSEventModifierFlags::Command) {
+        // a chord: named by a character Cmd would otherwise hide
+        use crate::keyboard_layout::{chord_char, typed_now, OPTION, SHIFT};
+        let cmd_level = event.characters().and_then(|s| s.to_string().chars().next());
+        let option = if flags.contains(NSEventModifierFlags::Option) { OPTION } else { 0 };
+        let shift = flags.contains(NSEventModifierFlags::Shift);
+        chord_char(cmd_level, shift, || typed_now(key_code, SHIFT | option)).map(String::from)
     } else {
         { event.characters() }.map(|s| s.to_string())
     };

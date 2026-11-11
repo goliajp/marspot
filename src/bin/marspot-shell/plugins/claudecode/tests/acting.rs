@@ -64,6 +64,38 @@ fn work_in_the_background_holds_a_spent_pane_only_for_a_while() {
     assert_eq!(host.submitted.lock().unwrap().len(), 1, "past the bound it moves, work or not");
 }
 
+/// Background agents the account has stopped answering do not hold the
+/// pane: it moves at once, and the session hears what the move ended.
+#[test]
+fn a_quota_move_does_not_wait_for_agents_the_account_refuses() {
+    let home = quota_home("agents-refused");
+    let host = FakeHost::new(home.join("state"));
+    let sid = 80u64;
+    let mut plugin = stranded_plugin(pane_on_p1(&home, "u-80"), sid);
+    let refusal = |model: &str| quota::Refusal {
+        at: 2_000,
+        model: model.into(),
+        logged_out: false,
+        window: quota::Window::Week,
+    };
+
+    let mut busy = scan_of(sid, CcActivity::AwaitingUser);
+    busy.new_vetoes.insert(sid, (true, false));
+    sweep(&mut plugin, &host, &mut busy);
+    assert!(host.submitted.lock().unwrap().is_empty(), "no agent reported a refusal: held");
+    assert_eq!(plugin.stranded.get(&sid).and_then(|s| s.hold_said), Some("work is in flight here"));
+
+    let mut failing = scan_of(sid, CcActivity::AwaitingUser);
+    failing.new_vetoes.insert(sid, (true, false));
+    failing.agent_refused.insert(sid, refusal("opus-5-5"));
+    sweep(&mut plugin, &host, &mut failing);
+    assert_eq!(host.submitted.lock().unwrap().len(), 1, "its agents are being refused: it moves");
+    let sent = host.sent.lock().unwrap().clone();
+    assert!(sent[0].1.contains(".claude-profile-2"), "{:?}", sent[0].1);
+    assert!(sent[0].1.contains(&resume_word()), "{:?}", sent[0].1);
+    assert!(sent[0].1.contains("子代理"), "told its agents were ended: {:?}", sent[0].1);
+}
+
 /// A pane bound to a claude that has since been replaced is not moved:
 /// the move re-checks the process it decided about.
 #[test]

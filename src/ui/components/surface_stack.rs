@@ -22,6 +22,7 @@
 use marspot_term::layout::Rect;
 
 use crate::ui::components::panel_chrome::PanelChrome;
+use crate::ui::Units;
 
 /// A surface the stack manages.
 ///
@@ -150,8 +151,9 @@ struct Grab {
 pub struct SurfaceStack {
     open: Option<SurfaceKind>,
     /// How far the open panel has been dragged from the middle.  One
-    /// is enough: there is one panel, and it forgets on close.
-    offset: (f64, f64),
+    /// is enough: there is one panel, and it forgets on close.  Kept
+    /// in window units, so it is the same place on any display.
+    offset: (Units, Units),
     grab: Option<Grab>,
 }
 
@@ -166,9 +168,10 @@ impl SurfaceStack {
         self.open.is_some()
     }
 
-    /// How far the open panel has been dragged; feed it to [`place`].
+    /// How far the open panel has been dragged, in pixels of the
+    /// display in use; feed it to [`place`].
     pub fn offset(&self) -> (f64, f64) {
-        self.offset
+        (self.offset.0.px(), self.offset.1.px())
     }
 
     /// A toolbar button or a shortcut: closes `kind` if it is open,
@@ -190,7 +193,7 @@ impl SurfaceStack {
 
     /// Closes whatever is open, `by` being what asked.
     pub fn close(&mut self, by: CloseBy) -> Change {
-        self.offset = (0.0, 0.0);
+        self.offset = Default::default();
         self.grab = None;
         Change { closed: self.open.take().map(|kind| (kind, by)), opened: None }
     }
@@ -214,8 +217,9 @@ impl SurfaceStack {
             Press::Close(self.close(CloseBy::Outside))
         } else if chrome.hit_header(x, y) {
             let f = chrome.frame;
-            let home = Rect { x: f.x - self.offset.0, y_top: f.y_top - self.offset.1, ..f };
-            self.grab = Some(Grab { pointer: (x, y), offset: self.offset, home });
+            let offset = self.offset();
+            let home = Rect { x: f.x - offset.0, y_top: f.y_top - offset.1, ..f };
+            self.grab = Some(Grab { pointer: (x, y), offset, home });
             Press::BeginDrag
         } else {
             Press::Content(kind)
@@ -232,7 +236,7 @@ impl SurfaceStack {
         let Some(g) = self.grab else { return false };
         let asked = (g.offset.0 + x - g.pointer.0, g.offset.1 + y - g.pointer.1);
         let at = place(g.home, asked, window_w, window_h, top_inset);
-        self.offset = (at.x - g.home.x, at.y_top - g.home.y_top);
+        self.offset = (Units::from_px(at.x - g.home.x), Units::from_px(at.y_top - g.home.y_top));
         true
     }
 
@@ -240,7 +244,8 @@ impl SurfaceStack {
     /// when it left it somewhere new.
     pub fn on_release(&mut self) -> Option<Moved> {
         let g = self.grab.take()?;
-        let by = (self.offset.0 - g.offset.0, self.offset.1 - g.offset.1);
+        let now = self.offset();
+        let by = (now.0 - g.offset.0, now.1 - g.offset.1);
         (by != (0.0, 0.0)).then_some(Moved { kind: self.open?, by })
     }
 
@@ -266,7 +271,7 @@ impl SurfaceStack {
                 "a panel opened",
                 kind = kind.name(),
                 window = window,
-                offset = format!("{},{}", self.offset.0, self.offset.1)
+                offset = format!("{},{}", self.offset().0, self.offset().1)
             );
         }
     }
@@ -513,5 +518,42 @@ mod tests {
         s.on_press(200.0, 210.0, &chrome(&s));
         drag(&mut s, 210.0, 210.0);
         assert_eq!(s.offset(), (-390.0, 0.0), "the next drag moves it at once");
+    }
+
+    /// A window moved to a display of another density: the panel is as
+    /// far from the middle as it was, in window units, and where a
+    /// panel dragged that far on the new display would be.
+    #[test]
+    fn a_dragged_panel_keeps_its_place_on_a_display_of_another_density() {
+        use crate::ui::components::density_kit::at_scale;
+        // The same window on a display of scale `k`.
+        let frame_at = |s: &SurfaceStack, k: f64| {
+            at_scale(k, || {
+                let h = home();
+                let home = Rect { x: h.x * k, y_top: h.y_top * k, w: h.w * k, h: h.h * k };
+                place(home, s.offset(), WINDOW.0 * k, WINDOW.1 * k, TOP * k)
+            })
+        };
+        let dragged_at = |k: f64| {
+            let mut s = opened(Settings);
+            at_scale(k, || {
+                let c = PanelChrome::new(frame_at_rest(k), TOP * k);
+                assert_eq!(s.on_press(600.0 * k, 205.0 * k, &c), Some(Press::BeginDrag));
+                assert!(s.on_drag(720.0 * k, 245.0 * k, WINDOW.0 * k, WINDOW.1 * k, TOP * k));
+                s.on_release();
+            });
+            s
+        };
+        fn frame_at_rest(k: f64) -> Rect {
+            let h = home();
+            Rect { x: h.x * k, y_top: h.y_top * k, w: h.w * k, h: h.h * k }
+        }
+        let s = dragged_at(1.0);
+        let first = frame_at(&s, 1.0);
+        assert_eq!((first.x, first.y_top), (520.0, 240.0));
+        let moved = frame_at(&s, 2.0);
+        assert_eq!((moved.x, moved.y_top), (1040.0, 480.0), "twice as far in pixels, not the same 120 x 40");
+        assert_eq!(moved, frame_at(&dragged_at(2.0), 2.0), "where one dragged there is");
+        assert_eq!(frame_at(&s, 1.0), first, "and back exactly");
     }
 }

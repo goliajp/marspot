@@ -422,7 +422,7 @@ impl MarspotApp for Marspot {
         // with nothing selected falls through to the encoder, which
         // sends no Cmd chord to the program.
         if event.state == KeyState::Pressed
-            && let Some(row) = marspot::commands::for_key(&event.logical, modifiers)
+            && let Some(row) = marspot::commands::for_key(&event, modifiers)
         {
             match row.command {
                 Command::Copy if self.copy_selection_to_clipboard() => return,

@@ -103,7 +103,7 @@ chmod +x "$RECORDER"
 # never the program's, so it could not show a leak.
 STEPS=(
   wait:3000
-  button:settings click:close
+  button:settings pointer-exit move:close pointer-exit pointer-exit click:close
   button:layout esc
   button:process shift-click:outside
   button:accounts key:cmd-w
@@ -217,6 +217,13 @@ printf '%s\n' "$events" | grep -A2 '^MOVE layout' | tail -1 | grep -q '^OPEN lay
   printf '%s\n' "$EXPECTED" | sed 's/^/    /'
   fail "the panel events are not the ones the script should produce"
 }
+
+# --- what the pointer lit goes dark when it leaves the window ----------
+# Left from the toolbar button it had pressed, then from the panel's
+# close button, then from nowhere: chrome, panel, context menu.
+left="$(grep $'\tPOINTER_LEFT\t' "$APPLOG" | sed -E 's/.*chrome=([01]).*panel=([01]).*menu=([01]).*/\1 \2 \3/')"
+[[ "$left" == $'1 0 0\n0 1 0\n0 0 0' ]] \
+  || fail "leaving the window cleared (chrome panel menu): $(printf '%s' "$left" | tr '\n' ';') -- want 1 0 0;0 1 0;0 0 0"
 
 # --- 5. nothing got past an open panel --------------------------------
 python3 - "$REC_DIR" <<'PY' || fail "input reached a pane it should not have, or the recorder missed what it should have"

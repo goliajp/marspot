@@ -149,7 +149,10 @@ pub(super) fn body(profile: u8) -> String {
 /// Said after a move to a session that had work running in the
 /// background when its claude was taken down.
 pub(super) fn after_ended_work(resume_word: &str) -> String {
-    format!("{resume_word}。换账号时还在运行的后台任务已经被结束了，请检查它们的状态，需要的话重新启动")
+    format!(
+        "{resume_word}。换账号时还在运行的后台任务和后台子代理已经被结束了，此前因额度用尽而失败的子代理也没有做完，\
+         请检查它们的状态，需要的话重新启动"
+    )
 }
 
 /// The frame for `inbox`, from marspot.

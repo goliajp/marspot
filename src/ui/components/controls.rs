@@ -44,7 +44,7 @@ fn role_width(m: Measure<'_>, role: PanelText, s: &str) -> f64 {
 }
 
 /// `s` centred in `rect`, on its cap height.
-fn centred_text(p: &mut ViewPainter, rect: Rect, s: &str, pt: f64, weight: u16, color: [f32; 4]) {
+pub(crate) fn centred_text(p: &mut ViewPainter, rect: Rect, s: &str, pt: f64, weight: u16, color: [f32; 4]) {
     let w = p.ui_text_width_at(s, pt, weight) as f64;
     let baseline = p.ui_baseline_centred_for(s, rect.y_top as f32, rect.h as f32, pt, weight);
     p.ui_text_at((rect.x + (rect.w - w) * 0.5) as f32, baseline, s, pt, weight, color);
@@ -149,21 +149,26 @@ pub fn paint_segmented(
     for (n, label) in labels.iter().enumerate() {
         let label = t(*label);
         let w = p.ui_text_width_at(label, pt, weight) as f64 + pad;
-        let seg = spec::snap_rect(Rect { x, y_top: control.y_top, w, h: control.h });
+        paint_segment(p, Rect { x, y_top: control.y_top, w, h: control.h }, label, selected == Some(n), hovered == Some(n), disabled);
         x += w + spec::px(c::SEGMENT_GAP);
-        let picked = !disabled && selected == Some(n);
-        let base = if picked { palette::accent() } else { palette::segment_bg() };
-        let bg = if !disabled && hovered == Some(n) { palette::hover(base) } else { base };
-        let fg = if disabled {
-            palette::disabled_fg()
-        } else if picked {
-            palette::on_accent()
-        } else {
-            palette::fg_sec()
-        };
-        fill(p, seg, bg, c::SEGMENT_RADIUS);
-        centred_text(p, seg, label, pt, weight, fg);
     }
+}
+
+/// One segment of a segmented control, in the box `seg`.
+pub fn paint_segment(p: &mut ViewPainter, seg: Rect, label: &str, selected: bool, hovered: bool, disabled: bool) {
+    let seg = spec::snap_rect(seg);
+    let picked = !disabled && selected;
+    let base = if picked { palette::accent() } else { palette::segment_bg() };
+    let bg = if !disabled && hovered { palette::hover(base) } else { base };
+    let fg = if disabled {
+        palette::disabled_fg()
+    } else if picked {
+        palette::on_accent()
+    } else {
+        palette::fg_sec()
+    };
+    fill(p, seg, bg, c::SEGMENT_RADIUS);
+    centred_text(p, seg, label, c::SEGMENT_TEXT.pt(), c::SEGMENT_TEXT.weight(), fg);
 }
 
 // ─── Toggle ─────────────────────────────────────────────────────

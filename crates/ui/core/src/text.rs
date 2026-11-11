@@ -48,6 +48,22 @@ pub struct FontMetrics {
     pub ascent: f64,
     /// Height of a capital letter: what interface text is placed by.
     pub cap_h: f64,
+    /// How far a letter hangs below the baseline: the room a last line
+    /// needs under it.
+    pub descent: f64,
+}
+
+/// The rows of pixels a run is centred by, counted from its baseline.
+///
+/// A label in Latin letters is centred by its capitals, whatever
+/// letters it has; one in Han or kana has no such line and is centred
+/// by the ink it draws.  Which of the two a string is, and how tall
+/// its ink is, only the application's fonts can say.  Both numbers are
+/// whole pixels: they are rows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Extent {
+    pub above: f64,
+    pub below: f64,
 }
 
 pub const ELLIPSIS: &str = "…";
@@ -69,6 +85,9 @@ pub trait TextMeasure {
     fn advance(&self, text: &str, font: FontSpec) -> f64;
 
     fn metrics(&self, font: FontSpec) -> FontMetrics;
+
+    /// What `text` is centred by when it is the label of a control.
+    fn centring(&self, text: &str, font: FontSpec) -> Extent;
 
     /// The longest prefix of `text` that fits in `max_w`: all of it
     /// when it fits, otherwise the longest prefix that still leaves
@@ -92,11 +111,24 @@ pub struct FakeMeasure {
     pub cap_em: f64,
     pub line_em: f64,
     pub ascent_em: f64,
+    pub descent_em: f64,
+    /// Ink of a wide character above and below the baseline.
+    pub wide_above_em: f64,
+    pub wide_below_em: f64,
 }
 
 impl FakeMeasure {
     pub const fn new(px_per_pt: f64) -> Self {
-        Self { px_per_pt, advance_em: 0.5, cap_em: 0.7, line_em: 1.2, ascent_em: 0.95 }
+        Self {
+            px_per_pt,
+            advance_em: 0.5,
+            cap_em: 0.7,
+            line_em: 1.2,
+            ascent_em: 0.95,
+            descent_em: 0.25,
+            wide_above_em: 0.88,
+            wide_below_em: 0.12,
+        }
     }
 
     fn em(&self, font: FontSpec) -> f64 {
@@ -129,6 +161,16 @@ impl TextMeasure for FakeMeasure {
             line_h: em * self.line_em,
             ascent: em * self.ascent_em,
             cap_h: em * self.cap_em,
+            descent: em * self.descent_em,
+        }
+    }
+
+    fn centring(&self, text: &str, font: FontSpec) -> Extent {
+        let em = self.em(font);
+        if text.chars().any(is_wide) {
+            Extent { above: (em * self.wide_above_em).round(), below: (em * self.wide_below_em).round() }
+        } else {
+            Extent { above: (em * self.cap_em).round(), below: 0.0 }
         }
     }
 
@@ -188,6 +230,20 @@ mod tests {
         assert_eq!(n, 9, "three characters and the ellipsis is 40");
         assert!(s.is_char_boundary(n));
         assert_eq!(&s[..n], "日本語");
+    }
+
+    #[test]
+    fn a_label_is_centred_by_its_capitals_or_by_its_ink_in_whole_rows() {
+        let m = FakeMeasure::new(2.0);
+        // 10 pt at 2 px a point: an em of 20
+        assert_eq!(m.centring("Apply", F), Extent { above: 14.0, below: 0.0 });
+        assert_eq!(m.centring("gypsy", F), Extent { above: 14.0, below: 0.0 }, "not by its descenders");
+        assert_eq!(m.centring("適用", F), Extent { above: 18.0, below: 2.0 });
+        assert_eq!(m.centring("Apply 適用", F), Extent { above: 18.0, below: 2.0 });
+        assert_eq!(m.metrics(F).descent, 5.0);
+        // 11 pt: 15.4 of cap, a whole row either way
+        let odd = FontSpec { size_q: 44, weight: 400, features: 0 };
+        assert_eq!(m.centring("Apply", odd).above, 15.0);
     }
 
     #[test]

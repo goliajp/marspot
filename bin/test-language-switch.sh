@@ -25,6 +25,14 @@
 #      by=system within 3 s.
 #   4. The pane's session process is the same pid from start to end.
 #   5. The app is still up, with no panic and no error logged.
+#   6. A language saved before launch is the one the menu bar is first
+#      installed in: with `appearance.language = ja` in the settings
+#      file, the first line the shell logs about its menu bar
+#      (MENU_BAR_INSTALLED, written as the bar is installed) carries
+#      the Japanese titles, and nothing logs English or a change to
+#      any other language.
+#      The English launch above is held to the same line, so the check
+#      tells the two apart.
 #
 # What it cannot assert: the items AppKit provides are in the language
 # the process was launched in.  Each menu's items are printed as read
@@ -154,6 +162,12 @@ set_language() {
   printf 'appearance.language = %s\n' "$1" > "$SETTINGS.new" && mv "$SETTINGS.new" "$SETTINGS"
 }
 
+# The menu bar as first installed: `<lang> <titles>` of every
+# MENU_BAR_INSTALLED line, which a launch has one of.
+installed_bar() {
+  grep $'\tMENU_BAR_INSTALLED\t' "$APPLOG" | tr '\t' '\n' | sed -n 's/^lang=//p;s/^top=//p' | paste -sd' ' -
+}
+
 # --- 1. English at start --------------------------------------------------
 for (( i = 0; i < 600; i++ )); do
   [[ -n "$(dev_session_pids)" && -n "$(dev_core_pids)" ]] && break
@@ -163,6 +177,8 @@ sessions_at_start="$(dev_session_pids | sort | tr '\n' ' ')"
 [[ -n "$sessions_at_start" ]] || fail "no session process is registered"
 sleep 2.5
 grep -q $'\tLANGUAGE_CHANGED\t' "$APPLOG" && fail "a language change was logged before anything changed"
+[[ "$(installed_bar)" == "en $(menus_of en)" ]] \
+  || fail "the menu bar was first installed as '$(installed_bar)', not in English"
 echo "==> English at start; session pid(s): $sessions_at_start"
 
 # --- 2. three switches by the settings file -------------------------------
@@ -211,9 +227,38 @@ errors="$(grep -c $'\tERROR\t' "$APPLOG")"
   fail "$errors error line(s) in the log"
 }
 
+# --- 6. a language saved before launch -------------------------------------
+dev_kill_shell_core
+dev_wipe_state
+rm -rf "$MARSPOT_STATE_DIR/sessions" "$MARSPOT_STATE_DIR/retired"
+mkdir -p "$MARSPOT_STATE_DIR/logs"
+rm -f "$APPLOG" "$MARSPOT_STATE_DIR/system-language"
+echo en-US > "$SYSTEM_LANGUAGE"
+set_language ja
+echo "==> launching again with appearance.language = ja already saved"
+SHELL=/bin/sh MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
+  MARSPOT_DEV_SYSTEM_LANGUAGE="$SYSTEM_LANGUAGE" \
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
+disown
+for (( i = 0; i < 600; i++ )); do
+  [[ -n "$(dev_session_pids)" && -n "$(dev_core_pids)" ]] && break
+  sleep 0.1
+done
+[[ -n "$(dev_core_pids)" ]] || fail "the second launch never brought a core up"
+sleep 2.5
+[[ "$(installed_bar)" == "ja $(menus_of ja)" ]] \
+  || fail "with ja saved before launch the menu bar was first installed as '$(installed_bar)'"
+grep -E $'\t(MENU_BAR|MENU_BAR_ITEMS)\t' "$APPLOG" | grep -Eq $'\tlang=en(\t|$)' \
+  && fail "an English menu bar was logged in a launch that had ja saved"
+grep $'\tLANGUAGE_CHANGED\t' "$APPLOG" | grep -Evq $'\tlang=ja(\t|$)' \
+  && fail "the launch changed to a language other than the one saved"
+grep -qi 'panicked' "$APPLOG" "$RUNLOG" && fail "something panicked in the second launch"
+echo "==> first menu bar of that launch: $(installed_bar)"
+
 echo
 echo "PASS — five language changes reached the shell and the core with"
 echo "       nothing restarted: three by the settings file, two by the"
 echo "       system's language list (stand-in file; the machine's real"
 echo "       setting was not changed).  The menu bar's own titles"
-echo "       followed each one."
+echo "       followed each one, and a launch with ja already saved"
+echo "       installed its first menu bar in Japanese."
