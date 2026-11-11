@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.284"  # the developer panel stays hidden on a machine that never saved its window
-core    = "0.12.315"  # a chinese or japanese label sits in the middle of its button
+shell   = "0.7.285"  # a window moved to a display of another density is redrawn for it
+core    = "0.12.316"  # a pane's padding and the seams between panes scale with the display
 session = "0.11.159"  # a long log line of non-ASCII text is cut between characters
