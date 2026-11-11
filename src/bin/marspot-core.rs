@@ -6989,7 +6989,7 @@ impl CoreApp {
             Some(SurfaceKind::Accounts) => {
                 w.cc_usage_modal = Some(CcUsageModalState {
                     data: marspot::cc_usage::read(),
-                    codex: marspot::cc_usage::read_codex(),
+                    codex: marspot::kimi_usage::read_codex_and_kimi(),
                     loaded_at: Instant::now(),
                     hover: Default::default(),
                 });
@@ -7229,7 +7229,7 @@ impl CoreApp {
         let modal = win!(self, wi).cc_usage_modal.as_mut()?;
         if modal.loaded_at.elapsed() > std::time::Duration::from_secs(5) {
             modal.data = marspot::cc_usage::read();
-            modal.codex = marspot::cc_usage::read_codex();
+            modal.codex = marspot::kimi_usage::read_codex_and_kimi();
             modal.loaded_at = Instant::now();
             win!(self, wi).needs_render = true;
         }

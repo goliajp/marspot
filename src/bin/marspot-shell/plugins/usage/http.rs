@@ -17,20 +17,28 @@ pub(super) struct Response {
     pub body: String,
 }
 
-/// The curl config for one request.  None for a token that could not
-/// sit inside a quoted config value: it came out of a file, and a line
-/// break in it would be read as further curl options.
-pub(super) fn curl_config(url: &str, token: &str) -> Option<String> {
-    let plain = |c: char| c.is_ascii_graphic() && c != '"' && c != '\\';
-    if token.is_empty() || !token.chars().all(plain) {
+/// What Anthropic's usage endpoint asks an OAuth client to send.
+const ANTHROPIC_BETA: &str = "anthropic-beta: oauth-2025-04-20";
+
+/// The curl config for one request.  None for a token or an address
+/// that could not sit inside a quoted config value: both can come out
+/// of a file, and a line break in one would be read as further curl
+/// options.
+fn config(url: &str, token: &str, extra: &[&str]) -> Option<String> {
+    let plain = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_graphic() && c != '"' && c != '\\');
+    if !plain(token) || !plain(url) {
         return None;
     }
-    Some(format!(
-        "url = \"{url}\"\n\
-         header = \"authorization: Bearer {token}\"\n\
-         header = \"anthropic-beta: oauth-2025-04-20\"\n\
-         header = \"accept: application/json\"\n"
-    ))
+    let mut out = format!("url = \"{url}\"\nheader = \"authorization: Bearer {token}\"\n");
+    for header in extra {
+        out.push_str(&format!("header = \"{header}\"\n"));
+    }
+    out.push_str("header = \"accept: application/json\"\n");
+    Some(out)
+}
+
+pub(super) fn curl_config(url: &str, token: &str) -> Option<String> {
+    config(url, token, &[ANTHROPIC_BETA])
 }
 
 /// Split what `curl -i -w '\n%{http_code}'` printed: header blocks, the
@@ -57,7 +65,15 @@ pub(super) fn parse_response(out: &str) -> Option<Response> {
 /// GET `url` with the account's token.  None when curl could not be
 /// run or gave no answer (no network, timeout).
 pub(super) fn get(url: &str, token: &str) -> Option<Response> {
-    let config = curl_config(url, token)?;
+    run(&curl_config(url, token)?)
+}
+
+/// The same request without the header only Anthropic asks for.
+pub(super) fn get_bare(url: &str, token: &str) -> Option<Response> {
+    run(&config(url, token, &[])?)
+}
+
+fn run(config: &str) -> Option<Response> {
     let mut child = Command::new("/usr/bin/curl")
         // -q first: the user's ~/.curlrc is not part of this request
         .args(["-q", "-sS", "-i", "--max-time", TIMEOUT_SECS, "-w", "\\n%{http_code}", "-K", "-"])
@@ -95,6 +111,20 @@ mod tests {
     fn a_token_that_would_break_out_of_its_line_is_refused() {
         for bad in ["", "a\nurl = \"https://evil.test\"", "a\"b", "a\\b", "a b", "a\tb", "é"] {
             assert_eq!(curl_config("https://example.test/u", bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_bare_request_carries_the_token_and_nothing_of_another_provider() {
+        let c = config("http://127.0.0.1:8123/coding/v1/usages", "tok-1", &[]).unwrap();
+        assert_eq!(
+            c,
+            "url = \"http://127.0.0.1:8123/coding/v1/usages\"\n\
+             header = \"authorization: Bearer tok-1\"\n\
+             header = \"accept: application/json\"\n"
+        );
+        for bad in ["", "https://x.test/\"\nheader = \"x: y", "https://x.test/a b"] {
+            assert_eq!(config(bad, "tok-1", &[]), None, "{bad:?}");
         }
     }
 
