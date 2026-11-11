@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.290"  # the dev window is built only by the binaries that show it
-core    = "0.12.321"  # a reattached session's exit status is made in place, not by running a helper
+shell   = "0.7.291"  # the log names who sent a fatal signal
+core    = "0.12.322"  # the log names who sent a fatal signal
 session = "0.11.164"  # a sigterm from anyone but launchd no longer ends the pane, and the session leads its own process group
