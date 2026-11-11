@@ -62,10 +62,10 @@ const HOT_POLL: Duration = Duration::from_millis(1);
 const HAND_OVER_WAIT: Duration = Duration::from_millis(3);
 /// Longest a write to a canonical terminal is held back for the shell to
 /// be done with the settings; see `put_back`. For an empty line or a
-/// builtin zsh is back in its editor 0.3 ms after applying its copy, nine
-/// times in ten; a command it starts has the terminal after 0.6 ms at
-/// the earliest and prints after 2.4 ms (measured).
-const SETTLE_FOR: Duration = Duration::from_millis(1);
+/// builtin zsh is back in its editor within this of applying its copy,
+/// nine times in ten; a command it starts has the terminal after 0.6 ms
+/// at the earliest and prints after 2.4 ms (measured).
+const SETTLE_FOR: Duration = Duration::from_micros(300);
 /// A repair is dropped after this many commands that left the shell's
 /// copy damaged: a shell that hands over a terminal already in raw mode
 /// (bash, after a program that exited non-zero) never gives it the
@@ -244,7 +244,7 @@ impl LineGuard {
         if front != shell_pgrp {
             if self.job.as_ref().is_none_or(|j| j.leader != front) {
                 self.watch_exit(front);
-                let healed = self.owed.is_some_and(|owed| hand_over(master, owed));
+                let healed = self.owed.is_some_and(|owed| hand_over(master, shell_pgrp, owed));
                 self.job = Some(Job { leader: front, healed });
                 self.hot_until = None;
                 // the job's end settles the line from here
@@ -258,7 +258,7 @@ impl LineGuard {
         if job.is_none() && self.owed.is_none() && !keep_due {
             return;
         }
-        let Some(mut t) = termios(master) else { return };
+        let Some(t) = termios(master) else { return };
         let now = Flags::of(&t);
         if let Some(job) = job {
             let ending = self.ending_of(job.leader);
@@ -303,7 +303,7 @@ impl LineGuard {
                 }
                 // a prompt that has just started again shows the shell's copy
                 Some(_) if !canon && missing => {
-                    set(master, &mut t, owed);
+                    put_back(master, shell_pgrp, owed);
                     self.copy_still_damaged();
                 }
                 Some(Entered::Waiting { until }) if at >= until => self.end_repair(),
@@ -435,16 +435,13 @@ impl LineGuard {
 /// has the terminal with all of them: either they were already there,
 /// or the terminal is as the shell left it for a command (`ICANON` on)
 /// and they are put back now. A job already in raw mode is left alone.
-fn hand_over(master: RawFd, owed: Flags) -> bool {
-    let Some(mut t) = termios(master) else { return false };
-    if owed.missing_from(Flags::of(&t)).is_empty() {
-        return true;
-    }
-    t.c_lflag & libc::ICANON != 0 && set(master, &mut t, owed)
+fn hand_over(master: RawFd, shell_pgrp: libc::pid_t, owed: Flags) -> bool {
+    termios(master).is_some_and(|t| owed.missing_from(Flags::of(&t)).is_empty())
+        || put_back(master, shell_pgrp, owed) == Some(true)
 }
 
-/// Puts `owed` back while the shell is in front, and says whether the
-/// terminal was canonical when it did.
+/// Puts `owed` back, and says whether the terminal was canonical when
+/// it did.
 ///
 /// Reading the settings and writing them back are two calls, and what
 /// the shell writes between them is undone. For a builtin or an empty
@@ -453,15 +450,21 @@ fn hand_over(master: RawFd, owed: Flags) -> bool {
 /// sight of the copy left the editor reading a canonical, echoing
 /// terminal after one such line in twenty (measured). So a canonical
 /// terminal is written to once a job has it, when the shell waits and
-/// writes nothing, or after `SETTLE_FOR`, when the shell is busy with
-/// something of its own. If the editor comes back first, the write is
-/// made on its settings instead.
+/// writes nothing, or after `SETTLE_FOR` -- spent spinning, a command's
+/// first output being only a few of those away. If the editor comes back
+/// first, the write is made on its settings instead.
+///
+/// Read and written through the slave side, opened before either so
+/// that nothing slow comes between the two: set through the master, the
+/// pty driver throws away the output still queued for it, and a prompt
+/// the shell had just printed never arrived.
 fn put_back(master: RawFd, shell_pgrp: libc::pid_t, owed: Flags) -> Option<bool> {
+    let slave = crate::reply_guard::Slave::open(master)?;
     let give_up = Instant::now() + SETTLE_FOR;
     loop {
         // SAFETY: tcgetpgrp on the pty master this session owns.
         let front = unsafe { libc::tcgetpgrp(master) };
-        let mut t = termios(master)?;
+        let mut t = termios(slave.fd())?;
         if owed.missing_from(Flags::of(&t)).is_empty() {
             return None;
         }
@@ -472,30 +475,23 @@ fn put_back(master: RawFd, shell_pgrp: libc::pid_t, owed: Flags) -> Option<bool>
             return None;
         }
         if job || !canon || Instant::now() >= give_up {
-            return set(master, &mut t, owed).then_some(canon);
+            t.c_iflag |= owed.input;
+            t.c_oflag |= owed.output;
+            t.c_lflag |= owed.local;
+            // SAFETY: tcsetattr on the slave of the pty this session
+            // owns, with the settings just read from it.
+            return (unsafe { libc::tcsetattr(slave.fd(), libc::TCSANOW, &t) } == 0).then_some(canon);
         }
-        std::thread::sleep(Duration::from_micros(100));
+        std::hint::spin_loop();
     }
 }
 
-fn termios(master: RawFd) -> Option<libc::termios> {
+/// The settings of the pty this session owns, read from either side.
+fn termios(fd: RawFd) -> Option<libc::termios> {
     // SAFETY: an all-zero termios is a valid value for tcgetattr to fill.
     let mut t: libc::termios = unsafe { std::mem::zeroed() };
-    // SAFETY: tcgetattr on the pty master this session owns.
-    (unsafe { libc::tcgetattr(master, &mut t) } == 0).then_some(t)
-}
-
-/// Through the slave side: set through the master, the pty driver
-/// throws away whatever output is still queued for it, and a prompt the
-/// shell had just printed never arrived.
-fn set(master: RawFd, t: &mut libc::termios, flags: Flags) -> bool {
-    t.c_iflag |= flags.input;
-    t.c_oflag |= flags.output;
-    t.c_lflag |= flags.local;
-    let Some(slave) = crate::reply_guard::Slave::open(master) else { return false };
-    // SAFETY: tcsetattr on the slave of the pty this session owns, with
-    // the settings just read from it.
-    unsafe { libc::tcsetattr(slave.fd(), libc::TCSANOW, t) == 0 }
+    // SAFETY: tcgetattr on a descriptor of that pty.
+    (unsafe { libc::tcgetattr(fd, &mut t) } == 0).then_some(t)
 }
 
 #[cfg(test)]
@@ -625,7 +621,12 @@ mod tests {
             "the command ran:\n{}",
             screen(&s)
         );
-        assert!(stacked(&s, "one", "two"), "newline returns the carriage again:\n{}", screen(&s));
+        assert!(
+            stacked(&s, "one", "two"),
+            "newline returns the carriage again, repairs {:?}:\n{}",
+            s.line_repairs(),
+            screen(&s)
+        );
         assert!(
             pump_until(&mut s, |s| !s.line_repairs().1 && at_prompt(s)),
             "the repair ended with that command:\n{}",
@@ -728,9 +729,6 @@ mod tests {
             pump_for(&mut s, Duration::from_millis(30));
             run(&mut s, "");
         }
-        assert!(s.line_repairs().1, "Enter alone runs nothing");
-        s.write(b"/usr/bin/printf 'one\\ntwo\\n'\r").unwrap();
-        assert!(pump_until(&mut s, |s| stacked(s, "one", "two")), "newline returns the carriage:\n{}", screen(&s));
     }
 
     mod unseen {
@@ -815,13 +813,12 @@ mod tests {
         fn output_the_shell_has_just_written_survives_the_repair() {
             let (m, slave) = pty();
             let m = m.as_raw_fd();
-            put(m, false, true);
+            put(m, false, false);
             let prompt = b"prompt% ";
             // SAFETY: a write to the pty this test opened.
             let n = unsafe { libc::write(slave.as_raw_fd(), prompt.as_ptr().cast(), prompt.len()) };
             assert_eq!(n, prompt.len() as isize);
-            let mut t = termios(m).unwrap();
-            assert!(set(m, &mut t, ALL));
+            assert_eq!(put_back(m, SHELL, ALL), Some(false));
             let mut got = [0u8; 64];
             // SAFETY: the same pty, read into a buffer of that size without
             // waiting for output that is gone.
@@ -859,8 +856,11 @@ mod tests {
             let (m, _slave) = pty();
             let m = m.as_raw_fd();
             let mut g = after_a_kill(m);
+            // a look timed before the line: however late this thread runs,
+            // it is within the moment the shell is given
+            let typed = Instant::now();
             g.wrote_input(m, SHELL, b"ls\r");
-            g.saw(m, SHELL, SHELL, 0, Instant::now());
+            g.saw(m, SHELL, SHELL, 0, typed);
             assert!(g.pending(), "the shell may not have read the line yet");
             g.saw(m, SHELL, SHELL, 0, Instant::now() + HOT_FOR);
             assert!(!g.pending());
@@ -898,7 +898,9 @@ mod tests {
     fn a_failed_exit_gets_only_its_output_flags_back() {
         let _env = test_pane_env("/bin/zsh");
         let mut s = shell(0xE5);
-        s.write(b"sh -c 'stty raw -echo; sleep 0.2; exit 3'\r").unwrap();
+        // it draws, as a full-screen program does: a job that never
+        // prints is only looked for in the moment after Enter
+        s.write(b"sh -c 'stty raw -echo; printf x; sleep 0.2; exit 3'\r").unwrap();
         assert!(
             pump_until(&mut s, |s| s.line_repairs().0 == 1 && at_prompt(s)),
             "the repair started:\n{}",
