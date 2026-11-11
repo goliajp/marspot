@@ -21,6 +21,9 @@
 //! record offers no idle notice and carries no status, and a
 //! subscription that arrives anyway is not held: no notice is ever
 //! made up.
+//!
+//! Kimi panes are bound the same way and their mail waits the same
+//! way; what differs for them is in `kimi_bind`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -50,13 +53,20 @@ pub(super) struct GeminiBinding {
     pub(super) rate: Rate,
     /// Where this session's mail waits.
     pub(super) spool: PathBuf,
+    /// Idle subscriptions, for an agent whose record offers the
+    /// notice: (reply address, subscription msg_id).
+    pub(super) subs: Vec<(String, String)>,
+    /// The session's last ended turn, where the agent's record numbers
+    /// them.
+    pub(super) ended: Option<i64>,
 }
 
 impl GeminiBinding {
     /// Remove the record and the inbox.  The waiting mail goes with
     /// them only when the session's process has gone: a marspot that
     /// restarts binds the same session again and finds it there.
-    pub(super) fn unbind(self, session_gone: bool) {
+    pub(super) fn unbind(mut self, session_gone: bool) {
+        self.notify(marspot_peer::frame::IdleState::Exited);
         for d in registry::default_dirs() {
             let _ = registry::remove_ours(&d, self.record.pid);
         }
@@ -131,10 +141,11 @@ fn keep(frame: &UserFrame, class: Mode, rate: &mut Rate, spool: &Path, cap: usiz
     }
 }
 
-/// Where this marspot keeps the Gemini sessions' mail.
-fn spool_dir() -> std::io::Result<PathBuf> {
+/// Where this marspot keeps the mail of `agent`'s sessions.  One
+/// directory per agent: each is swept against that agent's panes only.
+fn spool_dir(agent: Agent) -> std::io::Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
-    let dir = private_dir()?.join("gemini");
+    let dir = private_dir()?.join(if agent == Agent::Kimi { "kimi" } else { "gemini" });
     std::fs::DirBuilder::new().mode(0o700).recursive(true).create(&dir)?;
     Ok(dir)
 }
@@ -153,18 +164,27 @@ fn sweep(dir: &Path, bound: &HashSet<PathBuf>) {
 impl Worker {
     /// Bring the Gemini bindings in line with the panes.
     pub(super) fn apply_gemini(&mut self, peers: &Peers) {
+        self.apply_spooled(Agent::Gemini, peers, |p| class_of(&pidtree::proc_argv(p.gemini.pid).unwrap_or_default()));
+    }
+
+    /// Bring the bindings of `agent`'s panes in line with `peers`;
+    /// `class_of` says what a pane newly bound lets in.
+    pub(super) fn apply_spooled(&mut self, agent: Agent, peers: &Peers, class_of: impl Fn(&Peer) -> Mode) {
         // the plugin's view may be a tick old
         let live: Vec<&Peer> = peers.bound.iter().filter(|p| pidtree::proc_id(p.gemini.pid) == Some(p.gemini)).collect();
-        let sids: Vec<u64> = self.gemini.keys().copied().collect();
+        // a pane another agent's binding still holds runs this agent now
+        let stale = |g: &GeminiBinding, sid: u64| match g.record.agent == agent {
+            true => !live.iter().any(|p| p.sid == sid && p.gemini == g.gemini),
+            false => live.iter().any(|p| p.sid == sid),
+        };
+        let sids: Vec<u64> = self.gemini.iter().filter(|(sid, g)| stale(g, **sid)).map(|(sid, _)| *sid).collect();
         for sid in sids {
-            let gemini = self.gemini[&sid].gemini;
-            if !live.iter().any(|p| p.sid == sid && p.gemini == gemini)
-                && let Some(g) = self.gemini.remove(&sid)
-            {
+            if let Some(g) = self.gemini.remove(&sid) {
+                let gemini = g.gemini;
                 g.unbind(pidtree::proc_id(gemini.pid) != Some(gemini));
             }
         }
-        let dir = match spool_dir() {
+        let dir = match spool_dir(agent) {
             Ok(dir) => dir,
             Err(e) => {
                 lx_warn!("peerbus.gemini.spool_dir", &e.to_string());
@@ -185,8 +205,8 @@ impl Worker {
                     write_record(&registry::default_dirs(), &g.record);
                 }
                 None => {
-                    if let Err(e) = self.bind_gemini(p, &dir) {
-                        lx_warn!("peerbus.gemini.bind_failed", &e, sid = p.sid);
+                    if let Err(e) = self.bind_gemini(agent, p, class_of(p), &dir) {
+                        lx_warn!("peerbus.gemini.bind_failed", &e, sid = p.sid, agent = agent.label());
                     }
                 }
             }
@@ -196,11 +216,10 @@ impl Worker {
         }
     }
 
-    fn bind_gemini(&mut self, p: &Peer, spool_dir: &Path) -> Result<(), String> {
+    fn bind_gemini(&mut self, agent: Agent, p: &Peer, class: Mode, spool_dir: &Path) -> Result<(), String> {
         if !spool::is_session_name(&p.session) {
             return Err("the session id cannot be a file name".into());
         }
-        let class = class_of(&pidtree::proc_argv(p.gemini.pid).unwrap_or_default());
         let dir = self.sock_dir().map_err(|e| format!("socket directory: {e}"))?;
         let private = private_dir().map_err(|e| format!("private socket directory: {e}"))?;
         let key = self.next_key;
@@ -222,17 +241,20 @@ impl Worker {
             .names
             .remove(&p.sid)
             .unwrap_or_else(|| marspot::pane_name::base_name(&p.cwd));
-        let record = record_for(p, at, name, class, &self.owner, now_ms());
+        let mut record = record_for(p, at, name, class, &self.owner, now_ms());
+        record.agent = agent;
         write_record(&registry::default_dirs(), &record);
         lx_info!(
             "peerbus.gemini.bind",
-            "gemini session has an inbox",
+            "session has an inbox",
             sid = p.sid,
+            agent = agent.label(),
             session = p.session.clone(),
             name = record.name.clone(),
             class = class.as_str()
         );
-        self.gemini.insert(p.sid, GeminiBinding { key, gemini: p.gemini, class, inbox, record, rate: Rate::default(), spool });
+        let subs = Vec::new();
+        self.gemini.insert(p.sid, GeminiBinding { key, gemini: p.gemini, class, inbox, record, rate: Rate::default(), spool, subs, ended: None });
         Ok(())
     }
 
@@ -244,7 +266,7 @@ impl Worker {
         };
         match keep(frame, g.class, &mut g.rate, &g.spool, spool::MAX_PENDING) {
             Ok(()) => {
-                lx_info!("peerbus.gemini.kept", "waiting for the gemini session's next turn", sid = *sid, peer_pid = peer_pid.unwrap_or(0));
+                lx_info!("peerbus.gemini.kept", "waiting for the session's next turn", sid = *sid, agent = g.record.agent.label(), peer_pid = peer_pid.unwrap_or(0));
             }
             Err((receipt, reason)) => {
                 lx_info!("peerbus.refused", &reason, sid = *sid, peer_pid = peer_pid.unwrap_or(0));
@@ -259,9 +281,13 @@ impl Worker {
     /// `notify_when_idle` sent to a Gemini inbox.  The record does not
     /// offer it, so a sender that looked was told nothing would come;
     /// one that did not look gets the same nothing.
-    pub(super) fn subscribe_gemini(&mut self, key: u64) {
-        if let Some((sid, _)) = self.gemini.iter().find(|(_, g)| g.key == key) {
-            lx_info!("peerbus.gemini.no_idle_notice", "idle subscription not held: nothing reports when a gemini session goes idle", sid = *sid);
+    pub(super) fn subscribe_gemini(&mut self, key: u64, from: String, msg_id: String) {
+        match self.gemini.iter().find(|(_, g)| g.key == key).map(|(sid, g)| (*sid, g.record.agent)) {
+            Some((sid, Agent::Kimi)) => self.subscribe_kimi(sid, from, msg_id),
+            Some((sid, _)) => {
+                lx_info!("peerbus.gemini.no_idle_notice", "idle subscription not held: nothing reports when a gemini session goes idle", sid = sid);
+            }
+            None => {}
         }
     }
 

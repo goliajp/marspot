@@ -8,10 +8,11 @@
 //! other way with the `marspot-peer` MCP tools.  Every session in a
 //! pane, Claude's included, is named after its pane (`names`).
 //!
-//! Gemini panes get the same record, inbox and MCP tools; what arrives
-//! for one waits in a file until its next turn (`gemini_bind`).
+//! Gemini and Kimi panes get the same record, inbox and MCP tools; what
+//! arrives for one waits in a file until its next turn (`gemini_bind`,
+//! `kimi_bind`).
 //!
-//! The main thread only says which panes run Codex or Gemini;
+//! The main thread only says which panes run Codex, Gemini or Kimi;
 //! everything that touches a socket, a file or a daemon happens on the
 //! worker thread.
 
@@ -24,6 +25,8 @@ mod gemini_bind;
 mod gemini_config;
 mod idle;
 mod inbox;
+mod kimi_bind;
+mod kimi_config;
 mod lifecycle;
 mod names;
 mod records;
@@ -64,6 +67,8 @@ pub(super) fn publish_threads(views: HashMap<u64, ThreadView>) {
     *THREADS.lock().unwrap() = Some(views);
 }
 
+pub(crate) use kimi_bind::mail_waiting as kimi_mail_waiting;
+
 #[derive(Default)]
 pub struct PeerbusPlugin {
     tx: Option<SyncSender<Event>>,
@@ -72,6 +77,7 @@ pub struct PeerbusPlugin {
     sent: Vec<Want>,
     /// The same for the gemini panes; None until the first is accepted.
     sent_gemini: Option<crate::plugins::gemini::Peers>,
+    sent_kimi: Option<crate::plugins::kimi::Peers>,
 }
 
 impl PeerbusPlugin {
@@ -150,6 +156,15 @@ impl Plugin for PeerbusPlugin {
         {
             match offer(Event::Gemini(gemini.clone())) {
                 Some(true) => self.sent_gemini = Some(gemini),
+                Some(false) => {}
+                None => gone = true,
+            }
+        }
+        if !gone
+            && let Some(kimi) = crate::plugins::kimi::peers().filter(|k| self.sent_kimi.as_ref() != Some(k))
+        {
+            match offer(Event::Kimi(kimi.clone())) {
+                Some(true) => self.sent_kimi = Some(kimi),
                 Some(false) => {}
                 None => gone = true,
             }

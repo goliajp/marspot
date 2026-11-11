@@ -85,8 +85,14 @@ fn split_argv(block: &[u8]) -> Option<(Vec<&[u8]>, &[u8])> {
 
 /// The value of `key` in an envp area: NUL-separated `KEY=VALUE`
 /// entries ending at an empty entry.
-fn env_lookup<'a>(mut env: &'a [u8], key: &str) -> Option<&'a [u8]> {
+///
+/// NULs before the first entry are skipped.  A process that writes a
+/// shorter title over its argv leaves argc as it was, so the elements
+/// counted off are fewer bytes than the area held and its zeroed tail
+/// is still in front of the environment.
+fn env_lookup<'a>(env: &'a [u8], key: &str) -> Option<&'a [u8]> {
     let key = key.as_bytes();
+    let mut env = &env[env.iter().position(|&b| b != 0).unwrap_or(env.len())..];
     while !env.is_empty() {
         let end = env.iter().position(|&b| b == 0).unwrap_or(env.len());
         let entry = &env[..end];
@@ -173,6 +179,27 @@ mod tests {
         assert!(split_argv(&block(-1, b"x\0")).is_none());
         let empty = block(3, b"");
         assert!(split_argv(&empty).expect("parse").0.is_empty());
+    }
+
+    /// A process that retitles itself: started as `kimi --yolo --model
+    /// some-model-name`, it wrote `kimi-code` over its argv area and
+    /// zeroed the rest, 36 bytes in all.  argc still says 4, so what
+    /// follows the fourth element is a run of NULs and only then the
+    /// environment.  The layout is the one a 2.5.3 build showed.
+    #[test]
+    fn the_environment_of_a_process_that_zeroed_its_argv_is_still_read() {
+        let mut body = b"/Users/x/.kimi-code/bin/kimi\0".to_vec();
+        body.extend_from_slice(b"kimi-code\0");
+        body.extend_from_slice(&[0; 26]);
+        body.extend_from_slice(b"HOME=/Users/x\0PATH=/usr/bin:/bin\0KIMI_CODE_HOME=/Users/x/.kimi-code-profile-2\0ZZ_LAST=tail\0");
+        body.extend_from_slice(&[0; 100]);
+        body.extend_from_slice(b"ptr_munge=\0");
+        let b = block(4, &body);
+        let (argv, env) = split_argv(&b).expect("parse");
+        assert_eq!(argv, vec![&b"kimi-code"[..], b"", b"", b""]);
+        assert_eq!(env_lookup(env, "KIMI_CODE_HOME"), Some(&b"/Users/x/.kimi-code-profile-2"[..]));
+        assert_eq!(env_lookup(env, "ZZ_LAST"), Some(&b"tail"[..]));
+        assert_eq!(env_lookup(env, "ptr_munge"), None, "what follows the environment is not part of it");
     }
 
     /// Read back the argv of a real process that was started with an

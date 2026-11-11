@@ -5,8 +5,8 @@
 #   ~/.<agent>-profile-N/   account N: its own login, symlinks for the rest
 #   ~/.<agent>              symlink to profile 1, so the bare command still works
 #
-#   profiles.sh init <claude|codex|gemini> [--dry-run]
-#   profiles.sh add  <claude|codex|gemini> [N] [--dry-run]
+#   profiles.sh init <claude|codex|gemini|kimi> [--dry-run]
+#   profiles.sh add  <claude|codex|gemini|kimi> [N] [--dry-run]
 #   profiles.sh aliases
 #   profiles.sh doctor
 #
@@ -57,6 +57,8 @@ exists() {
 agent_vars() {
   AGENT=$1
   SUB=""
+  # what the agent's directories are named after: the command, except kimi's
+  DIR=$1
   case "$AGENT" in
     claude)
       ENTRIES="CLAUDE.md settings.json history.jsonl keybindings.json agents/ commands/ file-history/ image-cache/ paste-cache/ plans/ projects/ rules/ session-env/ sessions/ shell-snapshots/ skills/ tasks/ telemetry/ plugins/blocklist.json plugins/cache/ plugins/marketplaces/"
@@ -78,19 +80,30 @@ agent_vars() {
       ENV_NAME=GEMINI_CLI_HOME
       LOGIN="run gemini%s and authenticate when it asks"
       ;;
-    *) die "unknown agent '$AGENT' (expected claude, codex or gemini)" ;;
+    kimi)
+      # KIMI_CODE_HOME names the directory itself, which is ~/.kimi-code.
+      # config.toml belongs to the account: logging in writes the provider,
+      # the models and the default model into it.  mcp.json is not shared
+      # either; marspot keeps its own entry in each home.
+      DIR="kimi-code"
+      ENTRIES="AGENTS.md tui.toml skills/"
+      ACCOUNT_FILES="config.toml device_id credentials/kimi-code.json"
+      ENV_NAME=KIMI_CODE_HOME
+      LOGIN="run 'kimi%s login' (add --region global for an account on kimi.ai)"
+      ;;
+    *) die "unknown agent '$AGENT' (expected claude, codex, gemini or kimi)" ;;
   esac
-  SHARED="$HOME/.$AGENT-shared"
-  DEFAULT="$HOME/.$AGENT"
+  SHARED="$HOME/.$DIR-shared"
+  DEFAULT="$HOME/.$DIR"
 }
 
 profile_dir() {
-  echo "$HOME/.$AGENT-profile-$1"
+  echo "$HOME/.$DIR-profile-$1"
 }
 
 # the directory the agent reads its config from, for profile $1
 cfg_dir() {
-  echo "$HOME/.$AGENT-profile-$1${SUB:+/$SUB}"
+  echo "$HOME/.$DIR-profile-$1${SUB:+/$SUB}"
 }
 
 is_shared_entry() {
@@ -228,13 +241,14 @@ cmd_init() {
       ;;
     codex) echo "  auth.json moved with account 1, so codex1 and the bare codex stay logged in" ;;
     gemini) echo "  oauth_creds.json moved with account 1, so gemini1 and the bare gemini stay logged in" ;;
+    kimi) echo "  credentials/ moved with account 1, so kimi1 and the bare kimi stay logged in" ;;
   esac
   echo "  next: profiles.sh aliases, then profiles.sh add $AGENT for each further account"
 }
 
 next_number() {
   local d n max=0
-  for d in "$HOME/.$AGENT-profile-"*; do
+  for d in "$HOME/.$DIR-profile-"*; do
     n=${d##*-}
     case "$n" in
       '' | *[!0-9]*) continue ;;
@@ -277,7 +291,7 @@ cmd_add() {
 zsh_block() {
   cat <<'BLOCK'
 # >>> marspot-profiles: derived aliases >>>
-# claudeN / codexN / geminiN exist for every ~/.<agent>-profile-N that exists.
+# claudeN / codexN / geminiN / kimiN exist for every ~/.<agent>-profile-N that exists.
 # Creating the directory creates the alias in the next shell; nothing to edit.
 for _mp_dir in "$HOME"/.claude-profile-*(N); do
   alias "claude${_mp_dir##*-}=CLAUDE_CONFIG_DIR='$_mp_dir' claude"
@@ -288,6 +302,9 @@ done
 for _mp_dir in "$HOME"/.gemini-profile-*(N); do
   alias "gemini${_mp_dir##*-}=GEMINI_CLI_HOME='$_mp_dir' gemini"
 done
+for _mp_dir in "$HOME"/.kimi-code-profile-*(N); do
+  alias "kimi${_mp_dir##*-}=KIMI_CODE_HOME='$_mp_dir' kimi"
+done
 unset _mp_dir
 # <<< marspot-profiles: derived aliases <<<
 BLOCK
@@ -296,7 +313,7 @@ BLOCK
 bash_block() {
   cat <<'BLOCK'
 # >>> marspot-profiles: derived aliases >>>
-# claudeN / codexN / geminiN exist for every ~/.<agent>-profile-N that exists.
+# claudeN / codexN / geminiN / kimiN exist for every ~/.<agent>-profile-N that exists.
 # Creating the directory creates the alias in the next shell; nothing to edit.
 _mp_nullglob=$(shopt -p nullglob)
 shopt -s nullglob
@@ -308,6 +325,9 @@ for _mp_dir in "$HOME"/.codex-profile-*; do
 done
 for _mp_dir in "$HOME"/.gemini-profile-*; do
   alias "gemini${_mp_dir##*-}=GEMINI_CLI_HOME='$_mp_dir' gemini"
+done
+for _mp_dir in "$HOME"/.kimi-code-profile-*; do
+  alias "kimi${_mp_dir##*-}=KIMI_CODE_HOME='$_mp_dir' kimi"
 done
 eval "$_mp_nullglob"
 unset _mp_dir _mp_nullglob
@@ -404,7 +424,7 @@ doctor_profile() {
 # subshell, and the count of problems would stay there
 doctor_agent() {
   local d n found=0
-  for d in "$HOME/.$AGENT-profile-"*; do
+  for d in "$HOME/.$DIR-profile-"*; do
     n=${d##*-}
     case "$n" in
       '' | *[!0-9]*) continue ;;
@@ -424,7 +444,7 @@ doctor_agent() {
 
 cmd_doctor() {
   local a rc
-  for a in claude codex gemini; do
+  for a in claude codex gemini kimi; do
     agent_vars "$a"
     doctor_agent
   done

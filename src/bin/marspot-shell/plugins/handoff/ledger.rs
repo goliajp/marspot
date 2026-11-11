@@ -15,7 +15,7 @@ use super::transcript::Agent;
 /// One agent's session in this pane.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Side {
-    /// claude's session uuid, codex's thread id, gemini's session id.
+    /// claude's session uuid, codex's thread id, gemini's or kimi's session id.
     pub id: String,
     /// How far into that session's history has been handed over.
     pub offset: u64,
@@ -26,6 +26,7 @@ pub struct Ledger {
     pub claude: Option<Side>,
     pub codex: Option<Side>,
     pub gemini: Option<Side>,
+    pub kimi: Option<Side>,
 }
 
 impl Ledger {
@@ -34,6 +35,7 @@ impl Ledger {
             Agent::Claude => self.claude.as_ref(),
             Agent::Codex => self.codex.as_ref(),
             Agent::Gemini => self.gemini.as_ref(),
+            Agent::Kimi => self.kimi.as_ref(),
         }
     }
     pub fn set(&mut self, a: Agent, s: Option<Side>) {
@@ -41,6 +43,7 @@ impl Ledger {
             Agent::Claude => self.claude = s,
             Agent::Codex => self.codex = s,
             Agent::Gemini => self.gemini = s,
+            Agent::Kimi => self.kimi = s,
         }
     }
 
@@ -53,7 +56,8 @@ impl Ledger {
 
     fn encode(&self) -> String {
         let mut out = String::new();
-        for (a, s) in [(Agent::Claude, &self.claude), (Agent::Codex, &self.codex), (Agent::Gemini, &self.gemini)] {
+        let sides = [(Agent::Claude, &self.claude), (Agent::Codex, &self.codex), (Agent::Gemini, &self.gemini), (Agent::Kimi, &self.kimi)];
+        for (a, s) in sides {
             if let Some(s) = s {
                 out.push_str(&format!("{} {} {}\n", a.key(), s.id, s.offset));
             }
@@ -72,6 +76,7 @@ impl Ledger {
                 "claude" => l.claude = side,
                 "codex" => l.codex = side,
                 "gemini" => l.gemini = side,
+                "kimi" => l.kimi = side,
                 _ => {}
             }
         }
@@ -145,9 +150,20 @@ mod tests {
         l.set(Agent::Claude, Some(Side { id: "u-1".into(), offset: 42 }));
         l.set(Agent::Codex, Some(Side { id: "t-9".into(), offset: 7 }));
         l.set(Agent::Gemini, Some(Side { id: "g-3".into(), offset: 9 }));
+        l.set(Agent::Kimi, Some(Side { id: "session_k-4".into(), offset: 11 }));
         l.save(&d, 5).unwrap();
         assert_eq!(Ledger::load(&d, 5), l);
         assert_eq!(Ledger::load(&d, 6), Ledger::default(), "a pane never switched has none");
+    }
+
+    /// A ledger written by a build that knows more agents than this
+    /// one: the line it does not know is skipped, the rest is read.
+    #[test]
+    fn a_side_of_an_agent_this_build_does_not_know_is_skipped() {
+        let l = Ledger::decode("claude u-1 42\nfuture f-1 7\nkimi session_k 3\n");
+        assert_eq!(l.claude, Some(Side { id: "u-1".into(), offset: 42 }));
+        assert_eq!(l.kimi, Some(Side { id: "session_k".into(), offset: 3 }));
+        assert_eq!((l.codex, l.gemini), (None, None));
     }
 
     #[test]

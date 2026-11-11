@@ -37,7 +37,7 @@ case "$H" in
   *) fail "scratch HOME $H is not under $SCRATCH" ;;
 esac
 [ "$(HOME="$H" /bin/bash -c 'echo "$HOME"')" = "$H" ] || fail "HOME override does not reach the child"
-REAL_BEFORE="$(ls -la "$REAL_HOME" | grep -E ' \.(claude|codex|gemini)' || true)"
+REAL_BEFORE="$(ls -la "$REAL_HOME" | grep -E ' \.(claude|codex|gemini|kimi)' || true)"
 
 is_link_to() {
   [ -L "$1" ] || fail "$1 is not a symlink"
@@ -101,13 +101,21 @@ echo acct >"$H/.gemini/google_accounts.json"
 echo reg >"$H/.gemini/projects.json"
 echo id >"$H/.gemini/installation_id"
 echo chat >"$H/.gemini/tmp/app/chats/session-1.jsonl"
+mkdir -p "$H/.kimi-code/bin" "$H/.kimi-code/credentials" "$H/.kimi-code/skills" "$H/.kimi-code/sessions/wd_a/session_1"
+echo bin >"$H/.kimi-code/bin/kimi"
+echo token >"$H/.kimi-code/credentials/kimi-code.json"
+echo 'default_model = "kimi-code/k3"' >"$H/.kimi-code/config.toml"
+echo dev >"$H/.kimi-code/device_id"
+echo '{}' >"$H/.kimi-code/mcp.json"
+echo ui >"$H/.kimi-code/tui.toml"
+echo rules >"$H/.kimi-code/AGENTS.md"
 
 echo '# my rc' >"$H/.zshrc"
 echo '# my bashrc' >"$H/.bashrc"
 
 # a dry run prints the moves and makes none
 before="$(snapshot)"
-for a in claude codex gemini; do
+for a in claude codex gemini kimi; do
   out="$(p init "$a" --dry-run)"
   echo "$out" | grep -q "^would run: mv " || fail "init $a --dry-run printed no moves"
   ok
@@ -126,7 +134,7 @@ echo "$out" | grep -q "codex is running (pid 4242" || fail "no running-agent mes
 [ "$(snapshot)" = "$before" ] || fail "a refused init changed the tree"
 ok
 
-for a in claude codex gemini; do
+for a in claude codex gemini kimi; do
   p init "$a"
 done
 
@@ -177,9 +185,20 @@ done
 has "$H/.gemini/tmp/app/chats/session-1.jsonl" chat
 is_real_dir "$(echo "$H"/.gemini.backup-*)"
 
+# kimi: the directory is .kimi-code, the command and the alias are kimi
+is_link_to "$H/.kimi-code" "$H/.kimi-code-profile-1"
+for e in AGENTS.md tui.toml skills; do
+  is_link_to "$H/.kimi-code-profile-1/$e" "$H/.kimi-code-shared/$e"
+done
+for f in config.toml device_id mcp.json credentials/kimi-code.json bin/kimi; do
+  is_real_file "$H/.kimi-code-profile-1/$f"
+done
+has "$H/.kimi-code/credentials/kimi-code.json" token
+is_real_dir "$H/.kimi-code-profile-1/sessions/wd_a/session_1"
+
 # a second init does nothing
 before="$(snapshot)"
-for a in claude codex gemini; do
+for a in claude codex gemini kimi; do
   out="$(p init "$a")"
   echo "$out" | grep -q "nothing to do" || fail "second init $a did not say it had nothing to do"
   ok
@@ -201,6 +220,12 @@ absent "$H/.codex-profile-5/auth.json"
 p add gemini >/dev/null
 is_link_to "$H/.gemini-profile-2/.gemini/tmp" "$H/.gemini-shared/tmp"
 absent "$H/.gemini-profile-2/.gemini/oauth_creds.json"
+out="$(p add kimi)"
+echo "$out" | grep -q "kimi2 login" || fail "add kimi did not say how to log in: $out"
+echo "$out" | grep -q "KIMI_CODE_HOME=$H/.kimi-code-profile-2" || fail "add kimi did not name its variable: $out"
+is_link_to "$H/.kimi-code-profile-2/skills" "$H/.kimi-code-shared/skills"
+absent "$H/.kimi-code-profile-2/credentials"
+absent "$H/.kimi-code-profile-2/config.toml"
 if p add claude 2 2>/dev/null; then
   fail "add claude 2 succeeded although the profile exists"
 fi
@@ -229,6 +254,10 @@ has "$H/.zshrc.marspot-profiles.bak" '# my rc'
 out="$(HOME="$H" zsh -f -c 'source "$HOME/.zshrc" && alias claude2 codex5 gemini2')"
 echo "$out" | grep -q "claude2='CLAUDE_CONFIG_DIR='\\\\''$H/.claude-profile-2'\\\\'' claude'" || fail "zsh alias claude2 is wrong: $out"
 echo "$out" | grep -q "GEMINI_CLI_HOME=.*$H/.gemini-profile-2" || fail "zsh alias gemini2 is wrong: $out"
+out="$(HOME="$H" zsh -f -c 'source "$HOME/.zshrc" && alias kimi2')"
+echo "$out" | grep -q "KIMI_CODE_HOME=.*$H/.kimi-code-profile-2.* kimi" || fail "zsh alias kimi2 is wrong: $out"
+out="$(HOME="$H" /bin/bash -c 'shopt -s expand_aliases; source "$HOME/.bashrc" && alias kimi2')"
+echo "$out" | grep -q "KIMI_CODE_HOME=.*$H/.kimi-code-profile-2.* kimi" || fail "bash alias kimi2 is wrong: $out"
 ok
 out="$(HOME="$H" /bin/bash -c 'shopt -s expand_aliases; source "$HOME/.bashrc"; alias codex5; shopt nullglob || true')"
 echo "$out" | grep -q "CODEX_HOME=.*$H/.codex-profile-5" || fail "bash alias codex5 is wrong: $out"
@@ -280,7 +309,7 @@ p aliases >/dev/null
 p doctor >/dev/null || fail "doctor still reports problems after the last repair"
 ok
 
-[ "$(ls -la "$REAL_HOME" | grep -E ' \.(claude|codex|gemini)' || true)" = "$REAL_BEFORE" ] \
+[ "$(ls -la "$REAL_HOME" | grep -E ' \.(claude|codex|gemini|kimi)' || true)" = "$REAL_BEFORE" ] \
   || fail "the real HOME changed during the test"
 ok
 
