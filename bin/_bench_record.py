@@ -74,15 +74,17 @@ def meta(root):
 
 
 def cpu_snapshot():
-    """CPU seconds consumed so far by every process, keyed by pid."""
-    procs = {}
-    for line in _out(["ps", "-A", "-o", "pid=,time="]).splitlines():
-        pid, cputime = line.split()
+    """CPU seconds consumed so far by every process, keyed by pid, and
+    each one's command name."""
+    procs, names = {}, {}
+    for line in _out(["ps", "-A", "-o", "pid=,time=,comm="]).splitlines():
+        pid, cputime, comm = line.split(None, 2)
         secs = 0.0
         for part in cputime.split(":"):
             secs = secs * 60 + float(part)
         procs[pid] = secs
-    return {"t": time.time(), "procs": procs}
+        names[pid] = os.path.basename(comm)
+    return {"t": time.time(), "procs": procs, "names": names}
 
 
 def foreign_cores(before, after):
@@ -103,6 +105,40 @@ def foreign_cores(before, after):
         if pid in before["procs"] and secs > before["procs"][pid]:
             busy += secs - before["procs"][pid]
     return round(busy / elapsed, 3)
+
+
+def foreign_detail(before, after):
+    """Who the foreign CPU was: the busiest other process, and sysmond.
+
+    sysmond is named because it is what answers every `ps` on the host:
+    processes queued behind the bench lock poll with it, and four of
+    them once kept it at a fifth of a core through a measurement.
+    """
+    elapsed = after["t"] - before["t"]
+    if elapsed <= 0:
+        return {}
+    used = {
+        pid: secs - before["procs"][pid]
+        for pid, secs in after["procs"].items()
+        if pid in before["procs"] and secs > before["procs"][pid]
+    }
+    names = after.get("names", {})
+    out = {"sysmond_cores": round(
+        sum(v for pid, v in used.items() if names.get(pid) == "sysmond") / elapsed, 3)}
+    if used:
+        top = max(used, key=used.get)
+        out["foreign_top"] = f"{names.get(top, '?')} {used[top] / elapsed:.3f}"
+    return out
+
+
+def lock_waiters():
+    """Processes queued behind the host's bench lock, or None where
+    there is no such lock.  Asked once per block, not per trial: the
+    answer costs a `ps`, which is the noise being counted."""
+    tool = "/usr/local/bin/bench-lock"
+    if not os.path.exists(tool):
+        return None
+    return sum(1 for line in _out([tool, "status"]).splitlines() if "\twaiting " in line)
 
 
 def time_l(out_path, err_path):
@@ -146,8 +182,11 @@ def judge(cur_dir, block):
             "samples": len(loads),
         },
         "foreign_cores": foreign,
+        "lock_waiters": lock_waiters(),
         "invalid": "; ".join(why) or None,
     }
+    host.update(foreign_detail(
+        json.loads(read(f"{block}.cpu0")), json.loads(read(f"{block}.cpu1"))))
     with open(os.path.join(cur_dir, f"{block}.host"), "w") as f:
         json.dump(host, f)
     if why:
@@ -204,6 +243,8 @@ def show(hist_dir, needle, last):
                 f"  {r.get('ts', '?'):20} {commit:10} {value_s:>10} {r.get('unit', ''):9}"
                 f" limit {r.get('limit')}  {r.get('verdict', ''):8}"
                 f" load1 {load.get('start')}/{load.get('max')}/{load.get('end')}"
+                f"  others {r.get('foreign_cores')} sysmond {r.get('sysmond_cores')}"
+                f" waiters {r.get('lock_waiters')}"
                 f"  n={r.get('trial_count')}  {r.get('runner')}"
             )
 
@@ -216,6 +257,8 @@ def main(argv):
         print(json.dumps(cpu_snapshot()))
     elif cmd == "foreign":
         print(foreign_cores(json.load(open(argv[2])), json.load(open(argv[3]))))
+    elif cmd == "lock-waiters":
+        print(lock_waiters())
     elif cmd == "time-l":
         bps, ipb = time_l(argv[2], argv[3])
         print(f"{bps} {ipb:.3f}")
