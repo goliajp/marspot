@@ -1,10 +1,11 @@
 //! Every agent session in a marspot pane is addressed by that pane's
-//! name -- the one drawn on the pane (`spg`, `spg#2`) -- whether it is
-//! a Codex session, a Gemini session or a Claude one.  The names live
-//! in a table marspot writes (`marspot_peer::panes`), read by the MCP
-//! tools and the Claude Code hooks; no session's own record is renamed.
-//! The Codex and Gemini records are marspot's own, so they carry the
-//! pane's name too.
+//! name -- the one drawn on the pane (`spg`, or `spg#3381` when two
+//! panes share the directory name) -- whether it is a Codex, Gemini,
+//! Kimi or Claude session.  The names live in a table marspot writes
+//! (`marspot_peer::panes`) with each pane's code and agent, read by
+//! the MCP tools and the Claude Code hooks; no session's own record is
+//! renamed.  The Codex, Gemini and Kimi records are marspot's own, so
+//! they carry the pane's name too.
 //!
 //! A pane running two agents (one started inside the other) would give
 //! both the same name, so such a pane is left out of the table.
@@ -19,8 +20,10 @@ use super::worker::{now_ms, write_record, Worker};
 
 /// What naming needs from one look at the panes.
 pub(super) struct Panes {
-    /// Pane id → its name.
+    /// Pane id → its name as drawn.
     pub names: HashMap<u64, String>,
+    /// Pane id → its directory's name and its code.
+    ids: HashMap<u64, (String, Option<u16>)>,
     /// Pane id → every process under its shell.
     pub pids: HashMap<u64, HashSet<i32>>,
 }
@@ -28,9 +31,24 @@ pub(super) struct Panes {
 impl Panes {
     pub fn look() -> Panes {
         let obs = crate::observe::shared().latest();
-        let names = marspot::pane_name::assign(&crate::ShellApp::pane_refs_in(&obs)).into_iter().collect();
+        let refs = crate::ShellApp::pane_refs_in(&obs);
+        let names = marspot::pane_name::assign(&refs).into_iter().collect();
+        let ids = refs.into_iter().map(|p| (p.sid, (marspot::pane_name::base_name(&p.cwd), p.code))).collect();
         let pids = obs.live().map(|s| (s.entry.id, s.descendants.iter().map(|p| p.row.id().pid).collect())).collect();
-        Panes { names, pids }
+        Panes { names, ids, pids }
+    }
+
+    /// The table entry for the session `pid` in pane `sid`.
+    fn entry(&self, sid: u64, pid: i32, socket: &str, agent: &str) -> Option<Pane> {
+        let (base, code) = self.ids.get(&sid)?;
+        Some(Pane {
+            name: self.names.get(&sid)?.clone(),
+            pid,
+            socket: socket.to_string(),
+            code: *code,
+            base: Some(base.clone()),
+            agent: Some(agent.to_string()),
+        })
     }
 
     fn pane_of(&self, pid: i32) -> Option<u64> {
@@ -80,10 +98,8 @@ impl Worker {
 
         let mut table: Vec<Pane> = Vec::new();
         for (sid, pid) in named {
-            let (Some(name), Some((_, Some(socket)))) = (look.names.get(&sid), claude.iter().find(|(p, _)| *p == pid)) else {
-                continue;
-            };
-            table.push(Pane { name: name.clone(), pid, socket: socket.clone(), code: None, base: None, agent: Some("claude".into()) });
+            let Some((_, Some(socket))) = claude.iter().find(|(p, _)| *p == pid) else { continue };
+            table.extend(look.entry(sid, pid, socket, "claude"));
         }
         let codex = self.bindings.iter_mut().map(|(sid, b)| (sid, &mut b.record));
         let gemini = self.gemini.iter_mut().map(|(sid, g)| (sid, &mut g.record));
@@ -92,7 +108,7 @@ impl Worker {
                 continue;
             }
             let Some(want) = look.names.get(sid) else { continue };
-            table.push(Pane { name: want.clone(), pid: record.pid, socket: record.socket.clone(), code: None, base: None, agent: Some(record.agent.as_str().into()) });
+            table.extend(look.entry(*sid, record.pid, &record.socket, record.agent.as_str()));
             if record.name == *want {
                 continue;
             }
