@@ -236,14 +236,9 @@ enum SessionEvent {
     /// `poke`.  In owns-pty mode this replaces the inherited-fd
     /// control socket — owns-pty L3s have no fd 3 to read from.
     NewClient(UnixStream),
-    /// RFC-003 §6 Amendment 15 — SIGTERM received.  L1 / L2 told us
-    /// to retire (silent upgrade or user-driven marspot quit).  Main
-    /// loop persists Terminal state to `state.bin`, then `exit(0)` —
-    /// `process::exit` does NOT unwind, so `Pty::Drop` never runs and
-    /// the shell is NOT SIGHUP'd.  L1's fd-vault still holds a duped
-    /// PTY master fd (for the silent-upgrade replacement to withdraw),
-    /// or the user-quit path will close that vault entry too, letting
-    /// the shell exit on its own.
+    /// SIGTERM from launchd: move to another staged build, otherwise
+    /// save `state.bin` and exit.  From anyone else SIGTERM arrives as
+    /// `UpdateRequested`; see `signal_events`.
     ShutdownRequested,
     /// L2 sent `SessionUpdate`: move to the build in `current/` if it
     /// is another one, otherwise nothing.
@@ -924,6 +919,7 @@ fn main() {
     // RFC-004 D.1 — must precede logx / any path computation.
     marspot_term::paths::migrate_legacy_state_root();
     marspot_term::logx::init("session");
+    signal_events::leave_the_spawner_group();
     // before the first byte is parsed: a colour query has to be
     // answered from the theme the settings name
     marspot_term::system_theme::startup_palette();
@@ -1687,8 +1683,8 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     // afterwards is what froze twenty panes for 114 s
                     // on 2026-07-29.
                     //
-                    // SIGTERM without another build staged ends the
-                    // session; an update request then does nothing.
+                    // launchd's SIGTERM without another build staged
+                    // ends the session; an update request does nothing.
                     let is_update = matches!(ev, SessionEvent::UpdateRequested);
                     let probe_stuck = execv_probe_at
                         .is_some_and(|t| t.elapsed() >= EXECV_PROBE_STUCK_AFTER);
@@ -2317,7 +2313,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
             let _ = std::fs::write(&path, &body);
             lx_event!(
                 "L3_SHUTDOWN_EXIT",
-                "exiting on SIGTERM (fingerprint matches; clean exit)",
+                "clean exit: closed by the app, or the machine is shutting down",
                 session_id = id,
                 pid = std::process::id()
             );
