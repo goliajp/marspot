@@ -1,7 +1,7 @@
 //! `ContextMenu` — right-click menu component.  Geometry-only here
 //! (rect layout + hit-test); the caller in `main.rs` owns the items
 //! list, the action dispatch, and the open/close state.  Render goes
-//! through `View` + overlay scratches in `render_metal::push_context_menu_via_view`.
+//! through `context_menu_paint`.
 //!
 //! Why a separate component (and not reuse `LayoutModal`-style modal
 //! frame): a context menu has different shape rules than a modal —
@@ -26,7 +26,7 @@
 //!   5. mouse_down / mouse_moved / key_event each consult `hit_test`
 //!      and emit Close / Item dispatches.
 
-use marspot_term::layout::{Rect, Alignment};
+use marspot_term::layout::Rect;
 
 /// One row in the menu.  `Divider` rows render as a single thin line
 /// separator and ignore clicks; `enabled = false` rows render greyed
@@ -134,24 +134,6 @@ fn label_ch_w_phys() -> f64 {
         * crate::ui::core::ViewPainter::px_per_pt()
 }
 
-/// Fixed advance per character, which is the rule this menu's width has
-/// always used (`label_ch_w_phys`).  The declarative tree measures text
-/// through a provider, so the provider has to say the same thing the
-/// hand-rolled arithmetic did, or the migration moves the width.
-struct FixedAdvance {
-    ch_w: f64,
-    line_h: f64,
-}
-
-impl crate::ui::view::FontMetricsProvider for FixedAdvance {
-    fn line_h_phys(&self, _font: crate::ui::view::TextFontSpec) -> f64 {
-        self.line_h
-    }
-    fn advance_phys(&self, text: &str, _font: crate::ui::view::TextFontSpec) -> f64 {
-        crate::ui::core::text_fit::cells(text) as f64 * self.ch_w
-    }
-}
-
 impl ContextMenu {
     /// Layout a menu anchored at `(anchor_x, anchor_y)` in physical
     /// pixels.  The menu prefers to extend down-right; if it would
@@ -171,18 +153,6 @@ impl ContextMenu {
         top_obstruction: f64,
         items: &[MenuItem],
     ) -> Self {
-        // The geometry comes from the declarative tree now (S3-09).  What
-        // this function returns is unchanged -- a frame and a rect per
-        // item -- so `tests/it/chrome_geometry.rs` is the proof that moving
-        // it moved nothing.
-        //
-        // The tree carries LOGICAL units and resolves them against
-        // `ctx.scale`; this function's callers work in physical pixels.
-        // Keeping that straight is the whole risk here, which is why the
-        // baseline has a scale case.
-        use crate::ui::core::Length;
-        use crate::ui::view::{Constraints, Edges, FrameSpec, LayoutCtx, Text, hstack, vstack};
-
         let row_h = ROW_H_LOGICAL * scale;
         let divider_h = DIVIDER_H_LOGICAL * scale;
         let side_pad = SIDE_PAD_LOGICAL * scale;
@@ -190,70 +160,35 @@ impl ContextMenu {
         let bot_pad = BOT_PAD_LOGICAL * scale;
         let anchor_offset = ANCHOR_OFFSET_LOGICAL * scale;
         let min_w = MENU_MIN_W_LOGICAL * scale;
-        let max_w = MENU_MAX_W_LOGICAL * scale;
+        let max_w = window_w.max(0.0).min(MENU_MAX_W_LOGICAL * scale);
 
-        let fonts = FixedAdvance { ch_w: label_ch_w_phys(), line_h: row_h };
-        let ctx = LayoutCtx {
-            scale,
-            cell_w_phys: fonts.ch_w,
-            cell_h_phys: row_h,
-            ascent_phys: row_h * 0.75,
-            fonts: &fonts,
-        };
-
-        let rows: Vec<crate::ui::view::View> = items
-            .iter()
-            .map(|it| {
-                if it.divider {
-                    return vstack(vec![]).frame(FrameSpec {
-                        height: Some(Length::Pt(DIVIDER_H_LOGICAL)),
-                        ..Default::default()
-                    });
-                }
-                // One child when there is no hint, two when there is: the
-                // gap belongs between a label and a hint, and an empty
-                // second child would add it anyway.
-                let mut kids = vec![Text::new(it.label.clone()).build()];
+        // a row is as wide as its label, its hint, and the padding
+        // between and around them; the menu, as its widest row
+        let ch_w = label_ch_w_phys();
+        let text_w = |s: &str| crate::ui::core::text_fit::cells(s) as f64 * ch_w;
+        let mut widest = 0.0f64;
+        let mut rows_h = 0.0;
+        // each row's top below the menu's, and its height
+        let mut rows: Vec<(f64, f64)> = Vec::with_capacity(items.len());
+        for it in items {
+            let h = if it.divider {
+                divider_h
+            } else {
+                let mut text = text_w(&it.label);
                 if !it.shortcut_hint.is_empty() {
-                    kids.push(Text::new(it.shortcut_hint.clone()).build());
+                    text = text + text_w(&it.shortcut_hint) + side_pad;
                 }
-                let mut row = hstack(kids);
-                if let crate::ui::view::View::HStack { gap, .. } = &mut row {
-                    *gap = Length::Pt(SIDE_PAD_LOGICAL);
-                }
-                row.padding(Edges::horiz(Length::Pt(SIDE_PAD_LOGICAL)))
-                .frame(FrameSpec {
-                    height: Some(Length::Pt(ROW_H_LOGICAL)),
-                    ..Default::default()
-                })
-            })
-            .collect();
-
-        let root = vstack(rows)
-            .padding(Edges::only(
-                Length::Pt(TOP_PAD_LOGICAL),
-                Length::Pt(0.0),
-                Length::Pt(BOT_PAD_LOGICAL),
-                Length::Pt(0.0),
-            ))
-            .frame(FrameSpec {
-                min_w: Some(Length::Pt(MENU_MIN_W_LOGICAL)),
-                max_w: Some(Length::Pt(MENU_MAX_W_LOGICAL)),
-                ..Default::default()
-            });
-
-        // Laid out at the origin first: the flip below needs the size,
-        // and translating the result is exact and costs one pass rather
-        // than two.
-        let laid = crate::ui::view::layout_view(
-            &root,
-            ctx,
-            (0.0, 0.0),
-            Constraints::loose(window_w, window_h),
-        );
-        let menu_w = laid.rect.w;
-        let menu_h = laid.rect.h;
-        let _ = (row_h, divider_h, side_pad, top_pad, bot_pad, min_w, max_w);
+                let text = text.min((max_w - (side_pad + side_pad)).max(0.0));
+                widest = widest.max((text + side_pad + side_pad).min(max_w));
+                row_h
+            };
+            rows.push((top_pad + rows_h, h));
+            rows_h += h;
+        }
+        let menu_w = widest.max(min_w).min(max_w);
+        let menu_h = (rows_h.min((window_h - (top_pad + bot_pad)).max(0.0)) + top_pad + bot_pad)
+            .min(window_h)
+            .max(0.0);
 
         // Anchor + axis flip + window clamp.
         let mut x = anchor_x + anchor_offset;
@@ -281,37 +216,12 @@ impl ContextMenu {
         }
         let frame = Rect { x, y_top: y, w: menu_w, h: menu_h };
 
-        // Per-item rects.
-        // The row rects come off the laid-out tree too, translated to
-        // where the flip put the menu.  Found by child count rather than
-        // by walking a fixed number of levels: each modifier wraps the
-        // node it decorates, so the depth is a property of how the tree
-        // was built and would go stale the first time one is added.
-        fn rows_of(
-            n: &crate::ui::view::LaidOut,
-            want: usize,
-        ) -> Option<&[crate::ui::view::LaidOut]> {
-            if n.children.len() == want {
-                return Some(&n.children);
-            }
-            n.children.iter().find_map(|c| rows_of(c, want))
-        }
-        let item_rects: Vec<Rect> = rows_of(&laid, items.len())
-            .map(|rows| {
-                rows.iter()
-                    .map(|r| Rect {
-                        x: x + r.rect.x,
-                        y_top: y + r.rect.y,
-                        // Full width: the row's own horizontal padding is
-                        // inside it, and the rect is what a hover
-                        // background is drawn to.
-                        w: menu_w,
-                        h: r.rect.h,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let _ = Alignment::Center; // kept for future text alignment
+        // Full width: the row's own horizontal padding is inside it,
+        // and the rect is what a hover background is drawn to.
+        let item_rects = rows
+            .into_iter()
+            .map(|(top, h)| Rect { x, y_top: y + top, w: menu_w, h })
+            .collect();
 
         Self { frame, item_rects }
     }

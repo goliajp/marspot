@@ -56,7 +56,7 @@ mod tests {
 
     fn layout() -> Layout {
         Layout::build(1400.0, 900.0, 200.0, 32.0, 22.0, 2, 2, 8.0, 16.0)
-            .with_chrome_showing(1.0, 3, Some(70.0), false)
+            .with_chrome(1.0, 3, Some(70.0))
     }
 
     fn centre(r: marspot_term::layout::Rect) -> (f64, f64) {
@@ -68,7 +68,7 @@ mod tests {
         let l = layout();
         let at = |(x, y): (f64, f64)| ChromeHover::at(&l, 3, x, y);
         assert_eq!(at(centre(l.sidebar_button_rect)), Some(ChromeHover::Toolbar(0)));
-        assert_eq!(at(centre(l.settings_button_rect)), Some(ChromeHover::Toolbar(5)));
+        assert_eq!(at(centre(l.settings_button_rect)), Some(ChromeHover::Toolbar(4)));
         assert_eq!(at(centre(l.add_session_button_rect)), Some(ChromeHover::Add));
         assert_eq!(at(centre(l.close_session_rects[1])), Some(ChromeHover::Close(1)));
         // Left of the close button, the same row.
@@ -82,12 +82,10 @@ mod tests {
     #[test]
     fn chrome_hover_is_none_off_the_chrome() {
         let l = layout();
-        // In a pane, below the last row, and on the button the layout
-        // does not show.
+        // In a pane, below the last row, and at the window's corner.
         assert_eq!(ChromeHover::at(&l, 3, 700.0, 400.0), None);
         let below = l.close_session_rects[2].y_top + 2.0 * marspot_term::layout::SIDEBAR_ROW_H;
         assert_eq!(ChromeHover::at(&l, 3, 40.0, below), None);
-        assert_eq!(l.dev_panel_button_rect.w, 0.0);
         assert_eq!(ChromeHover::at(&l, 3, 0.0, 0.0), None);
     }
 

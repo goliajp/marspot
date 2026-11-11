@@ -37,7 +37,7 @@ use std::collections::HashMap;
 pub const FONT_NAME: &str = "Monaco";
 pub const FONT_POINT: f64 = 12.0;
 
-/// UI font — used for chrome (dev panel, tab strip, sidebar, etc.).
+/// UI font — used for chrome (panels, tab strip, sidebar, etc.).
 /// PTY/terminal grid keeps `FONT_NAME` mono.  System default on
 /// macOS is SF Pro (introduced 10.11) — when absent we fall back
 /// through Helvetica Neue → terminal font.
@@ -383,7 +383,7 @@ pub struct FontCache {
     pub cell_w: f64,
     pub cell_h: f64,
     pub ascent: f64,
-    /// UI font — used by chrome (dev panel etc.).  Different family
+    /// UI font — used by chrome.  Different family
     /// + size from the mono terminal font.  Falls back to terminal
     ///
     /// font (= same as base) when the system UI font fails to load.
@@ -396,11 +396,7 @@ pub struct FontCache {
     /// `format!` — which the lookup would then pay on every hit, once
     /// per text node per frame.
     ui_variants: FxHashMap<u32, usize>,
-    /// UI font metrics — width of '0' glyph as approximate cell_w;
-    /// ascent + descent + leading for cell_h.  Proportional fonts
-    /// have variable advance, so this is an approximation used by
-    /// the v3 layout system.
-    pub ui_cell_w: f64,
+    /// UI font metrics — ascent + descent + leading for cell_h.
     pub ui_cell_h: f64,
     pub ui_ascent: f64,
     /// Curated text-font cascade consulted BEFORE letting CoreText's
@@ -477,34 +473,16 @@ impl FontCache {
                 break;
             }
         }
-        let (ui_font_idx, ui_cell_w, ui_cell_h, ui_ascent) = match ui_font_opt {
+        let (ui_font_idx, ui_cell_h, ui_ascent) = match ui_font_opt {
             Some(uf) => {
-                // Width-of-'0' approximation — actual glyph advance.
-                let mut g: CGGlyph = 0;
-                let zero: u16 = b'0' as u16;
-                unsafe { uf.get_glyphs_for_characters(&zero, &mut g, 1); }
                 let ua = uf.ascent();
                 let uh = ua + uf.descent() + uf.leading();
-                let uw = if g != 0 {
-                    let mut adv = core_graphics::geometry::CGSize::new(0.0, 0.0);
-                    unsafe {
-                        uf.get_advances_for_glyphs(
-                            core_text::font_descriptor::kCTFontOrientationDefault,
-                            &g,
-                            &mut adv,
-                            1,
-                        );
-                    }
-                    adv.width
-                } else {
-                    UI_FONT_POINT * 0.55  // crude fallback
-                };
                 let idx = fonts.intern(uf);
-                // the font is at its logical size; these three are read as pixels
+                // the font is at its logical size; these two are read as pixels
                 let k = crate::ui::chrome_scale();
-                (idx, uw * k, uh * k, ua * k)
+                (idx, uh * k, ua * k)
             }
-            None => (0, cell_w, cell_h, ascent),
+            None => (0, cell_h, ascent),
         };
 
         let shaper: Box<dyn crate::font_trait::Shaper> =
@@ -522,7 +500,6 @@ impl FontCache {
             ui_font_idx,
             ui_measure: UiMeasureCache::default(),
             ui_variants: FxHashMap::default(),
-            ui_cell_w,
             ui_cell_h,
             ui_ascent,
             text_fallback_idxs,
@@ -681,9 +658,7 @@ impl FontCache {
         self.shape_ui_weighted_opts(text, weight_q, crate::font_shape::ShapeOptions::full())
     }
 
-    /// Phase 10c — measure at an explicit pt size.  Used by
-    /// `chrome_measure::ChromeMeasure` to give the view layout pass
-    /// the right advance for SF Pro at any requested size.
+    /// The advance of `text` in SF Pro at an explicit pt size.
     pub fn measure_ui_text_at_size(
         &mut self,
         text: &str,
@@ -694,7 +669,7 @@ impl FontCache {
         if self.ui_font_idx == 0 || text.is_empty() {
             return 0.0;
         }
-        let opts_bits = crate::ui::view::pack_shape_opts(opts);
+        let opts_bits = crate::font_shape::pack_shape_opts(opts);
         let size_q = (size_pt * 4.0).round() as u16;
         if let Some(a) = self.ui_measure.get(text, weight_q, opts_bits, size_q) {
             return a;
@@ -706,25 +681,6 @@ impl FontCache {
         let advance = crate::font_shape::measure_line(text, &base_font, opts);
         self.ui_measure.put(text, weight_q, opts_bits, size_q, advance);
         advance
-    }
-
-    /// Phase 10c — line-height at an arbitrary SF Pro pt size.
-    /// Materialises the variant if not already interned, reads
-    /// `bounding_box().size.height + leading`, then bakes the 2×
-    /// retina scale so callers can compare directly to physical
-    /// pixel rect heights.
-    pub fn ui_line_h_phys_at_size(&mut self, size_pt: f64) -> f64 {
-        if self.ui_font_idx == 0 {
-            return self.ui_cell_h * 2.0;
-        }
-        // Same intern path as measure / shape so the variant key is
-        // identical and we reuse cached fonts.
-        let idx = self
-            .intern_ui_weighted_at_size(400, size_pt)
-            .unwrap_or(self.ui_font_idx);
-        let Some(f) = self.fonts.fonts.get(idx) else { return 0.0 };
-        let line_h_pt = f.ascent() + f.descent() + f.leading();
-        line_h_pt * crate::ui::px_per_pt()
     }
 
     /// Phase 8 — shape with explicit per-context OpenType feature

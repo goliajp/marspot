@@ -136,7 +136,7 @@ pub struct RenderSplit {
     /// instance buffers, and how many bytes that was.
     pub instbuf_us: u64,
     pub instbuf_bytes: u64,
-    /// The dev-panel and context-menu canvases, built and encoded
+    /// The context-menu canvas, built and encoded
     /// after the passes.  Zero unless one of them is open — which is
     /// itself worth knowing when a frame goes long.
     pub canvas_us: u64,
@@ -860,9 +860,6 @@ impl MetalRenderer {
         self.font.cell_dims()
     }
 
-    /// Phase 10c — borrow the `FontCache` mutably for chrome
-    /// measurement.  Used by `chrome_measure::ChromeMeasure::new`
-    /// to wrap the cache in a `RefCell` for the view layout pass.
     /// Re-derive the fonts for the display scale in force, if it has
     /// changed since they were built.
     ///
@@ -966,96 +963,17 @@ impl MetalRenderer {
         }
     }
 
+    /// Chrome font metrics: (cell_w, cell_h, ascent) in physical
+    /// pixels.
+    pub fn chrome_font_metrics(&self) -> (f32, f32, f32) {
+        (self.font.cell_w as f32, self.font.cell_h as f32, self.font.ascent as f32)
+    }
+
     /// Phase 5b live render — same call shape as
     /// `crate::render::Renderer::render_layout`.  Walks each session's
     /// grid + scrollback, emits BG cell instances + FG glyph
     /// instances, then runs both passes against the next CAMetalLayer
     /// drawable and presents.  No-op in headless mode.
-    /// Chrome font metrics: (cell_w, cell_h, ascent) in physical
-    /// pixels.  Exposed for the dev-window subsystem which builds
-    /// canvases outside the main render flow.
-    pub fn chrome_font_metrics(&self) -> (f32, f32, f32) {
-        (self.font.cell_w as f32, self.font.cell_h as f32, self.font.ascent as f32)
-    }
-
-    /// UI font metrics — the font used for chrome / dev panel / UI
-    /// primitives via the View tree framework.  Reports the system
-    /// UI font(`.AppleSystemUIFont` cascade)cell w/h/ascent when
-    /// loaded (default);  falls back to terminal font when system UI
-    /// font isn't available.  `MARSPOT_UI_FONT_SCALE` env applies a
-    /// multiplier(0.0..4.0).
-    pub fn ui_font_metrics(&self) -> (f32, f32, f32) {
-        let scale = std::env::var("MARSPOT_UI_FONT_SCALE")
-            .ok()
-            .and_then(|s| s.parse::<f32>().ok())
-            .filter(|s| *s > 0.0 && *s < 4.0)
-            .unwrap_or(1.0);
-        // Read UI metrics straight off the FontCache (separate from
-        // terminal mono metrics).
-        let w = self.font.ui_cell_w as f32;
-        let h = self.font.ui_cell_h as f32;
-        let a = self.font.ui_ascent as f32;
-        (w * scale, h * scale, a * scale)
-    }
-
-    /// Render one `Canvas` directly into our CAMetalLayer's next
-    /// drawable.  Used by `DevWindow` which owns this renderer
-    /// and has no `Layout` / sessions to feed into `render_layout`.
-    /// `width_px` / `height_px` size the layer + viewport this
-    /// frame; caller has already informed the renderer of any
-    /// resize.
-    pub fn render_canvas_into_layer(
-        &mut self,
-        canvas: &crate::ui::core::canvas::Canvas,
-        width_px: f32,
-        height_px: f32,
-        chrome_cell_w: f32,
-        chrome_cell_h: f32,
-        chrome_ascent: f32,
-        ui_font: bool,
-    ) {
-        let Some(layer) = self.layer.as_ref() else { return };
-        // Size the layer to match the view, in physical pixels, at the
-        // scale of the display the window is on now.
-        layer.setContentsScale(crate::ui::chrome_scale());
-        layer.setDrawableSize(NSSize { width: width_px as f64, height: height_px as f64 });
-        let drawable = match layer.nextDrawable() {
-            Some(d) => d,
-            None => return,
-        };
-        let texture = { drawable.texture() };
-        let cmd = match self.queue.commandBuffer() {
-            Some(c) => c,
-            None => return,
-        };
-        let viewport_px = [width_px, height_px];
-        encode_canvas_into(
-            canvas,
-            &texture,
-            &cmd,
-            &self.scene_ui_pipeline,
-            &self.fg_pipeline,
-            &self.fg_color_pipeline,
-            &self.fg_sampler,
-            &mut self.atlas,
-            &mut self.color_atlas,
-            self.atlas_texture.texture(),
-            self.color_atlas_texture.texture(),
-            &self.device,
-            &mut self.font,
-            Some(clear_color(crate::ui::components::panel_palette::surface_base())),
-            &viewport_px,
-            chrome_cell_w, chrome_cell_h, chrome_ascent,
-            ui_font,
-        );
-        cmd.commit();
-        cmd.waitUntilScheduled();
-        use objc2_metal::MTLDrawable;
-        let mtl_drawable: &ProtocolObject<dyn objc2_metal::MTLDrawable> =
-            ProtocolObject::from_ref(&*drawable);
-        mtl_drawable.present();
-    }
-
     pub fn render_layout(
         &mut self,
         wr: &mut WindowRender,
@@ -2565,7 +2483,7 @@ fn clear_color(c: [f32; 4]) -> MTLClearColor {
 /// destructured `&mut self` borrows (render_layout style).  The
 /// method wrapper below is for tests / one-shot callers.
 #[allow(clippy::too_many_arguments)]
-pub fn encode_canvas_into(
+fn encode_canvas_into(
     canvas: &crate::ui::core::canvas::Canvas,
     target: &ProtocolObject<dyn MTLTexture>,
     cmd: &ProtocolObject<dyn MTLCommandBuffer>,
@@ -2914,104 +2832,13 @@ mod tests {
         crate::snapshot_kit::snapshot_mode_in(std::path::Path::new(SNAPSHOT_DIR))
     }
 
-    /// Font v5 snapshot — renders the dev-panel canvas with the
-    /// `Font v5` section active, encodes the BGRA framebuffer to a
-    /// PNG, and compares it with the committed baseline (see
-    /// `snapshot_mode` for what `MARSPOT_FONT_SNAPSHOT` changes).
-    ///
-    /// Workflow:
-    ///   MARSPOT_FONT_SNAPSHOT=1 cargo nextest run -p marspot --lib \
-    ///     font_v5_showcase_snapshot
-    ///   open bench/font-rendering/snapshots/font_v5_showcase.png
-    ///
-    /// `bin/font-snapshot.sh` wraps both steps.  Falling back to the
-    /// project default location keeps the workflow muscle-memory
-    /// match the other bench scripts (`bin/bench-remote.sh` writes
-    /// under `bench/remote-runs/`).
-    #[test]
-    fn font_v5_showcase_snapshot() {
-        if snapshot_mode().is_none() {
-            return;
-        }
-        let mut renderer = match MetalRenderer::new_headless() {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("SKIPPED: no Metal device: {e}");
-                return;
-            }
-        };
-        // Production default size: 420 × 520 logical pt → 840 × 1040
-        // px at 2× retina.  Matches what `DevPanelState::default()`
-        // gives the real dev window, so the snapshot reflects the
-        // exact pixels the user sees when they open the panel.
-        let w_px: u32 = 840;
-        let h_px: u32 = 1040;
-        let state = crate::ui::components::DevPanelState {
-            visible: true,
-            origin_pt: (0.0, 0.0),
-            size_pt: (420.0, 520.0),
-            // Post-2026-06-25 hierarchy:Font v5 moved out of UI tab
-            // into its own Font tab.  Snapshot renders the Font tab
-            // with showcase active so the menu highlight + content
-            // both line up on the same section.
-            active_tab: crate::ui::components::dev_panel::TAB_FONT,
-            active_section: crate::ui::components::dev_panel::SECTION_FONT_V5_SHOWCASE,
-            scale: 2.0,
-        };
-        let measure = crate::chrome_measure::ChromeMeasure::new(
-            renderer.font_mut(),
-            16.0,
-            32.0,
-        );
-        let canvas = crate::ui::components::build_dev_panel_canvas(
-            &state,
-            w_px as f64,
-            h_px as f64,
-            16.0, // chrome_cell_w (px) — Monaco 12pt 2×
-            32.0, // chrome_cell_h
-            24.0, // chrome_ascent
-            &measure,
-        );
-        // ui_font = false matches the live dev panel: chrome stays
-        // Monaco mono by default, the showcase rows opt INTO SF Pro
-        // via `.ui()` per text run.  This snapshot is therefore
-        // exactly what a user sees when they navigate to "Font v5".
-        let bytes = renderer
-            .render_canvas_to_bitmap(w_px, h_px, &canvas, 16.0, 32.0, 24.0, false)
-            .expect("canvas render");
-
-        // BGRA → RGBA channel swap for PNG.
-        let mut rgba = vec![0u8; bytes.len()];
-        for i in (0..bytes.len()).step_by(4) {
-            rgba[i] = bytes[i + 2];     // R
-            rgba[i + 1] = bytes[i + 1]; // G
-            rgba[i + 2] = bytes[i];     // B
-            rgba[i + 3] = bytes[i + 3]; // A
-        }
-
-        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
-        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
-        let out_path = out_dir.join("font_v5_showcase.png");
-        // Phase 9 — `=check` runs SSIM vs the committed baseline BEFORE
-        // we overwrite the on-disk PNG; otherwise the on-disk PNG IS
-        // the fresh render and SSIM would be 1.0 by definition.
-        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        write_snapshot_png(&out_path, &rgba, w_px, h_px);
-        eprintln!(
-            "[font v5 snapshot] wrote {} ({} × {})",
-            out_path.display(),
-            w_px,
-            h_px,
-        );
-    }
-
     /// Phase 9 (extended) — visual-regression strings.  Renders the
     /// canonical Mono Monaco workload (ASCII + CJK cascade + emoji
     /// + kerning/ligature lines) as a single PNG so a reviewer can
     ///
     /// eyeball it AND a future SSIM gate can diff it byte-for-byte
-    /// against a frozen baseline.  Same modes as
-    /// `font_v5_showcase_snapshot`.  Output:
+    /// against a frozen baseline (see `snapshot_mode` for what
+    /// `MARSPOT_FONT_SNAPSHOT` changes).  Output:
     ///   bench/font-rendering/snapshots/font_v5_mono_grid.png
     ///
     /// Workflow:
@@ -3929,7 +3756,7 @@ mod tests {
     /// 4 columns × 1 row showcase:
     ///   1.  Solid rounded rect — minimal modal frame
     ///   2.  + Shadow blur 12 / offset (0, 4) — F3+1.7 modal
-    ///   3.  + Hairline border on top of shadow — dev panel card
+    ///   3.  + Hairline border on top of shadow — a card
     ///   4.  Stacked depth — three layered rects with progressive
     ///       shadow blur (modal-on-modal, popover-on-popover)
     #[test]
@@ -4071,212 +3898,6 @@ mod tests {
         write_snapshot_png(&out_path, &rgba, w_px, h_px);
         eprintln!(
             "[font v5 chrome decoration] wrote {} ({} × {})",
-            out_path.display(),
-            w_px,
-            h_px,
-        );
-    }
-
-    /// DevPanel UI > Components > Catalog snapshot.  Locks the
-    /// rendered bytes for the entire view-tree component preset
-    /// catalogue(`card / panel / badge / tooltip / toggle / picker /
-    /// list_row / context_menu / breadcrumb`)so any silent regression
-    /// in a single primitive(corner radius drift, shadow blur change,
-    /// border colour drift, glyph baseline漂)surfaces as an SSIM hit
-    /// across the 14-component column.  Pairs with the showcase /
-    /// chrome_decoration baselines — those cover the visual atoms,
-    /// this covers the composed surface that components live in.
-    #[test]
-    fn devpanel_components_catalog_snapshot() {
-        if snapshot_mode().is_none() {
-            return;
-        }
-        let mut renderer = match MetalRenderer::new_headless() {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("SKIPPED: no Metal device: {e}");
-                return;
-            }
-        };
-        let w_px: u32 = 840;
-        let h_px: u32 = 1040;
-        let state = crate::ui::components::DevPanelState {
-            visible: true,
-            origin_pt: (0.0, 0.0),
-            size_pt: (420.0, 520.0),
-            active_tab: crate::ui::components::dev_panel::TAB_UI,
-            active_section: crate::ui::components::dev_panel::SECTION_UI_COMPONENTS_CATALOG,
-            scale: 2.0,
-        };
-        let measure = crate::chrome_measure::ChromeMeasure::new(
-            renderer.font_mut(),
-            16.0,
-            32.0,
-        );
-        let canvas = crate::ui::components::build_dev_panel_canvas(
-            &state,
-            w_px as f64,
-            h_px as f64,
-            16.0,
-            32.0,
-            24.0,
-            &measure,
-        );
-        let bytes = renderer
-            .render_canvas_to_bitmap(w_px, h_px, &canvas, 16.0, 32.0, 24.0, false)
-            .expect("canvas render");
-
-        let mut rgba = vec![0u8; bytes.len()];
-        for i in (0..bytes.len()).step_by(4) {
-            rgba[i] = bytes[i + 2];
-            rgba[i + 1] = bytes[i + 1];
-            rgba[i + 2] = bytes[i];
-            rgba[i + 3] = bytes[i + 3];
-        }
-
-        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
-        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
-        let out_path = out_dir.join("devpanel_components_catalog.png");
-        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        write_snapshot_png(&out_path, &rgba, w_px, h_px);
-        eprintln!(
-            "[devpanel components catalog] wrote {} ({} × {})",
-            out_path.display(),
-            w_px,
-            h_px,
-        );
-    }
-
-    /// DevPanel UI > Tokens > Typography snapshot.  Locks the Size
-    /// scale(Caption / Body / Header / LargeHeader)+ Weight pair
-    /// (Regular / Bold)+ 7 named TextStyle tokens (CAPTION / BODY /
-    /// HEADER / HINT / CODE / LINK / ERROR).Future
-    /// drift in the Mono Monaco font metrics(advance / line-height /
-    /// cap-height ratio)or theme token registry shows up as an SSIM
-    /// hit instead of going unnoticed for weeks.
-    #[test]
-    fn devpanel_typography_snapshot() {
-        if snapshot_mode().is_none() {
-            return;
-        }
-        let mut renderer = match MetalRenderer::new_headless() {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("SKIPPED: no Metal device: {e}");
-                return;
-            }
-        };
-        let w_px: u32 = 840;
-        let h_px: u32 = 1040;
-        let state = crate::ui::components::DevPanelState {
-            visible: true,
-            origin_pt: (0.0, 0.0),
-            size_pt: (420.0, 520.0),
-            active_tab: crate::ui::components::dev_panel::TAB_UI,
-            active_section: crate::ui::components::dev_panel::SECTION_UI_TOKENS_TYPOGRAPHY,
-            scale: 2.0,
-        };
-        let measure = crate::chrome_measure::ChromeMeasure::new(
-            renderer.font_mut(),
-            16.0,
-            32.0,
-        );
-        let canvas = crate::ui::components::build_dev_panel_canvas(
-            &state,
-            w_px as f64,
-            h_px as f64,
-            16.0,
-            32.0,
-            24.0,
-            &measure,
-        );
-        let bytes = renderer
-            .render_canvas_to_bitmap(w_px, h_px, &canvas, 16.0, 32.0, 24.0, false)
-            .expect("canvas render");
-
-        let mut rgba = vec![0u8; bytes.len()];
-        for i in (0..bytes.len()).step_by(4) {
-            rgba[i] = bytes[i + 2];
-            rgba[i + 1] = bytes[i + 1];
-            rgba[i + 2] = bytes[i];
-            rgba[i + 3] = bytes[i + 3];
-        }
-
-        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
-        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
-        let out_path = out_dir.join("devpanel_typography.png");
-        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        write_snapshot_png(&out_path, &rgba, w_px, h_px);
-        eprintln!(
-            "[devpanel typography] wrote {} ({} × {})",
-            out_path.display(),
-            w_px,
-            h_px,
-        );
-    }
-
-    /// DevPanel Sessions > Architecture snapshot.  Content is fully
-    /// static (process tree text / plugin list / hard caps / wire
-    /// protocol descriptions),so SSIM gate is meaningful — any drift
-    /// surfaces a real visual / text regression instead of just a
-    /// version number bumping.  Pairs with `devpanel_components_catalog`
-    /// (UI Tab visual lock) and `devpanel_typography`(Tokens lock)
-    /// to cover the dev panel design system at 3 different sub-trees.
-    #[test]
-    fn devpanel_architecture_snapshot() {
-        if snapshot_mode().is_none() {
-            return;
-        }
-        let mut renderer = match MetalRenderer::new_headless() {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("SKIPPED: no Metal device: {e}");
-                return;
-            }
-        };
-        let w_px: u32 = 840;
-        let h_px: u32 = 1040;
-        let state = crate::ui::components::DevPanelState {
-            visible: true,
-            origin_pt: (0.0, 0.0),
-            size_pt: (420.0, 520.0),
-            active_tab: crate::ui::components::dev_panel::TAB_SESSIONS,
-            active_section: crate::ui::components::dev_panel::SECTION_SESSIONS_ARCHITECTURE,
-            scale: 2.0,
-        };
-        let measure = crate::chrome_measure::ChromeMeasure::new(
-            renderer.font_mut(),
-            16.0,
-            32.0,
-        );
-        let canvas = crate::ui::components::build_dev_panel_canvas(
-            &state,
-            w_px as f64,
-            h_px as f64,
-            16.0,
-            32.0,
-            24.0,
-            &measure,
-        );
-        let bytes = renderer
-            .render_canvas_to_bitmap(w_px, h_px, &canvas, 16.0, 32.0, 24.0, false)
-            .expect("canvas render");
-
-        let mut rgba = vec![0u8; bytes.len()];
-        for i in (0..bytes.len()).step_by(4) {
-            rgba[i] = bytes[i + 2];
-            rgba[i + 1] = bytes[i + 1];
-            rgba[i + 2] = bytes[i];
-            rgba[i + 3] = bytes[i + 3];
-        }
-
-        let out_dir = std::path::PathBuf::from(SNAPSHOT_DIR);
-        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
-        let out_path = out_dir.join("devpanel_architecture.png");
-        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
-        write_snapshot_png(&out_path, &rgba, w_px, h_px);
-        eprintln!(
-            "[devpanel architecture] wrote {} ({} × {})",
             out_path.display(),
             w_px,
             h_px,

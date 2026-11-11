@@ -99,8 +99,8 @@ no_errors() { ! awk -F'\t' '$3=="ERROR"' "$LOG" | grep -q .; }
 one_pane() { [ "$(ls "$STATE/sessions" 2>/dev/null | wc -l)" -ge 1 ]; }
 # The windows the app has on screen, one per line as
 # "<layer> <width>x<height>", as the window server lists them: an
-# ordinary window is on layer 0, the developer panel floats on 3.  This
-# much needs no permission; a title would need Screen Recording.
+# ordinary window is on layer 0.  This much needs no permission; a
+# title would need Screen Recording.
 app_windows() {
   /usr/bin/osascript -l JavaScript -e 'function run(argv) {
   ObjC.import("CoreGraphics");

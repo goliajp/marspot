@@ -106,11 +106,5 @@ impl super::ShellApp {
         // A banner on screen is a raster in the old theme's colours;
         // forgetting which one is up makes the tick draw it again.
         self.banner_kind = None;
-        // The dev panel's window is the app's too, and is made once.
-        let [r, g, b, _] = marspot::ui::components::panel_palette::surface_base();
-        let dev_bg = NSColor::colorWithSRGBRed_green_blue_alpha(r as f64, g as f64, b as f64, 1.0);
-        for window in windows.iter().filter(|w| w.title().to_string() == "DevPanel") {
-            window.setBackgroundColor(Some(&dev_bg));
-        }
     }
 }

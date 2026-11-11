@@ -35,7 +35,6 @@ pub mod layout_modal;
 pub mod layout_modal_paint;
 pub mod context_menu;
 pub mod context_menu_paint;
-pub mod dev_panel;
 #[cfg(test)]
 pub(crate) mod density_kit;
 #[cfg(test)]
@@ -65,4 +64,3 @@ pub use sidebar::Sidebar;
 pub use table::{Align, Column, ColumnWidth, SortDir, TableGeometry};
 pub use layout_modal::{LayoutModal, GRID_MIN, GRID_MAX};
 pub use context_menu::{ContextMenu, ContextMenuHit, MenuItem};
-pub use dev_panel::{DevPanelState, DevPanelHit, build_dev_panel_canvas, hit_test, DEV_PANEL_MODEL_SCROLL_ID, scroll_id_for_section};

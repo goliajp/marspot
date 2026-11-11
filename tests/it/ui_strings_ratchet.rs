@@ -13,10 +13,10 @@
 use std::path::{Path, PathBuf};
 
 /// Files of the component directories that are not interface: the
-/// developer panel, the test scenes that draw fixtures, and the tests
-/// that hold a scene at one display scale to the same scene at another.
+/// test scenes that draw fixtures, and the tests that hold a scene at
+/// one display scale to the same scene at another.
 const NOT_INTERFACE: &[&str] =
-    &["dev_panel.rs", "_snapshot_tests.rs", "panel_script.rs", "density_kit.rs", "density_tests.rs", "centring_tests.rs"];
+    &["_snapshot_tests.rs", "panel_script.rs", "density_kit.rs", "density_tests.rs", "centring_tests.rs"];
 
 /// Literals in the component directories that are not sentences.
 const NOT_TEXT: &[(&str, &str)] = &[
