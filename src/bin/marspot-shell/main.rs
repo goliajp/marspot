@@ -4724,10 +4724,10 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
-    // Land every supervisor event (via sup_log::log) + future shell-side
-    // structured events into the shared marspot.log stream with
-    // component="shell". Cheap, idempotent across self-exec restarts.
+    // Supervisor and shell events go to the shared marspot.log as
+    // component="shell"; idempotent across self-exec restarts.
     marspot::logx::init("shell");
+    marspot_term::signals::log_fatal_senders("L1_SIGNAL");
 
     // Rollback subcommands dispatch BEFORE the redirect: when
     // current/ is broken, exec'ing into it would eat the command.
