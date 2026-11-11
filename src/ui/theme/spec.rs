@@ -26,6 +26,25 @@
 //! terminal cells because tabular data is set in the terminal's own
 //! font, where columns line up for free, and [`chrome`], the main
 //! window's own chrome, which says what its units are.
+//!
+//! ## What is in physical pixels
+//!
+//! Every length goes through the display's scale: a point is two
+//! pixels on a display of scale 1 and four at scale 2, a window unit
+//! one and two.  These do not, and are the whole list:
+//!
+//! | what | where | why |
+//! |---|---|---|
+//! | a panel's and a popover's border | [`panel::BORDER_PX`] | the thinnest line the display draws: one pixel at any scale |
+//! | a card's border | [`card::BORDER_PX`] | the same |
+//! | the line between a card's rows, under a table's header and under the search field | [`card::SEPARATOR_PX`] | the same |
+//! | a day's dashed rule in the accounts timeline | `cc_usage_modal::metric::DAY_RULE_PX` | the same |
+//! | the least width a usage bar is drawn at | `cc_usage_modal::metric::BAR_MIN_PX` | a threshold of visibility, not a size |
+//! | a terminal's cell | the font's metrics | rounded to whole pixels at each scale, so text in a pane is never between pixels; the cell at scale 2 is twice the cell at scale 1 to within a pixel |
+//! | a pane's underline, cursor outline and composition underline | a fraction of the cell | never thinner than one pixel (two for the composition) |
+//!
+//! `tests/it/display_scale_ratchet.rs` holds the named ones to this
+//! list, and the scenes drawn at both scales count them.
 
 use super::PanelText;
 
@@ -33,7 +52,37 @@ pub mod chrome;
 
 /// Physical pixels for `pt` logical points.
 pub fn px(pt: f64) -> f64 {
-    pt * crate::ui::core::ViewPainter::px_per_pt()
+    pt * crate::ui::px_per_pt()
+}
+
+/// `px` physical pixels, moved to the nearest whole window unit.
+///
+/// A length worked out from a font's metrics or from a division is a
+/// fraction of a pixel.  Rounded to pixels, it comes out differently at
+/// each display scale and a column of rows drifts apart between them;
+/// rounded to window units it is a whole number of pixels at every
+/// scale and the same size in each.
+pub fn snap(px: f64) -> f64 {
+    let unit = crate::ui::chrome_scale();
+    (px / unit).round() * unit
+}
+
+/// [`snap`], never under `px`.
+pub fn snap_up(px: f64) -> f64 {
+    let unit = crate::ui::chrome_scale();
+    (px / unit).ceil() * unit
+}
+
+/// [`snap`], never over `px`.
+pub fn snap_down(px: f64) -> f64 {
+    let unit = crate::ui::chrome_scale();
+    (px / unit).floor() * unit
+}
+
+/// `rect` with each edge on a whole window unit.
+pub fn snap_rect(rect: marspot_term::layout::Rect) -> marspot_term::layout::Rect {
+    let (x, y_top) = (snap(rect.x), snap(rect.y_top));
+    marspot_term::layout::Rect { x, y_top, w: snap(rect.x + rect.w) - x, h: snap(rect.y_top + rect.h) - y_top }
 }
 
 /// The spacing ladder, and the gaps that are always the same step.

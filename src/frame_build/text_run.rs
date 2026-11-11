@@ -273,7 +273,7 @@ pub(crate) fn push_text_run_ui_shaped(
     let real_ascent_pt = font.font_ascent(shaped[0].font_id as usize);
     // CTFont.ascent() returns pt — convert to phys at the 2× retina
     // baked into the atlas raster path (`RETINA_SCALE = 2.0`).
-    let real_ascent_phys = (real_ascent_pt * 2.0) as f32;
+    let real_ascent_phys = (real_ascent_pt * crate::ui::px_per_pt()) as f32;
     let baseline_y = if ui_size_q.is_some() {
         y_top_phys + real_ascent_phys
     } else {

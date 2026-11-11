@@ -69,12 +69,12 @@ fn body_pad() -> f64 {
 /// Height of a data row, on whole pixels: a fractional row height
 /// puts every other row's text a pixel off the rhythm of the rest.
 pub fn row_height(cell_h: f64) -> f64 {
-    t::row_h(cell_h).round()
+    spec::snap(t::row_h(cell_h))
 }
 
 /// Height of the header row, on whole pixels.
 pub fn header_height(cell_h: f64) -> f64 {
-    t::header_h(cell_h).round()
+    spec::snap(t::header_h(cell_h))
 }
 
 /// Height of the card that shows `n_rows` rows without scrolling.

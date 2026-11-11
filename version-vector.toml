@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.285"  # a window moved to a display of another density is redrawn for it
-core    = "0.12.316"  # a pane's padding and the seams between panes scale with the display
+core    = "0.12.317"  # text and every size are the same at any display scale, and a label sits in the middle of its control
 session = "0.11.159"  # a long log line of non-ASCII text is cut between characters

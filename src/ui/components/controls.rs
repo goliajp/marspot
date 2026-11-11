@@ -46,7 +46,7 @@ fn role_width(m: Measure<'_>, role: PanelText, s: &str) -> f64 {
 /// `s` centred in `rect`, on its cap height.
 fn centred_text(p: &mut ViewPainter, rect: Rect, s: &str, pt: f64, weight: u16, color: [f32; 4]) {
     let w = p.ui_text_width_at(s, pt, weight) as f64;
-    let baseline = p.ui_baseline_centred_for(s, rect.y_top as f32, rect.h as f32, pt);
+    let baseline = p.ui_baseline_centred_for(s, rect.y_top as f32, rect.h as f32, pt, weight);
     p.ui_text_at((rect.x + (rect.w - w) * 0.5) as f32, baseline, s, pt, weight, color);
 }
 
@@ -84,6 +84,7 @@ pub fn paint_button(
     hovered: bool,
     disabled: bool,
 ) {
+    let rect = spec::snap_rect(rect);
     let base = match kind {
         ButtonKind::Primary if !disabled => palette::accent(),
         _ => palette::segment_bg(),
@@ -148,7 +149,7 @@ pub fn paint_segmented(
     for (n, label) in labels.iter().enumerate() {
         let label = t(*label);
         let w = p.ui_text_width_at(label, pt, weight) as f64 + pad;
-        let seg = Rect { x, y_top: control.y_top, w, h: control.h };
+        let seg = spec::snap_rect(Rect { x, y_top: control.y_top, w, h: control.h });
         x += w + spec::px(c::SEGMENT_GAP);
         let picked = !disabled && selected == Some(n);
         let base = if picked { palette::accent() } else { palette::segment_bg() };
@@ -185,6 +186,7 @@ pub fn toggle_knob_rect(rect: Rect, on: bool) -> Rect {
 }
 
 pub fn paint_toggle(p: &mut ViewPainter, rect: Rect, on: bool, disabled: bool) {
+    let rect = spec::snap_rect(rect);
     let track = if on { palette::accent() } else { palette::toggle_off() };
     let knob = palette::knob();
     let (track, knob) = if disabled {
@@ -255,7 +257,7 @@ pub fn paint_stepper(
     plus_enabled: bool,
     hovered: Option<StepperPart>,
 ) -> StepperRects {
-    let r = stepper_rects(x, y_top);
+    let r = stepper_rects(spec::snap(x), spec::snap(y_top));
     let mut button = |rect: Rect, glyph: &str, part: StepperPart, enabled: bool| {
         let base = palette::segment_bg();
         let bg = if enabled && hovered == Some(part) { palette::hover(base) } else { base };
@@ -284,12 +286,13 @@ pub fn danger_button_size() -> (f64, f64) {
 /// below.  A table row is measured in terminal cells and at the usual
 /// font is shorter than the button.
 pub fn danger_button_size_in_row(row_h: f64) -> (f64, f64) {
-    let fits = (row_h - 2.0 * spec::px(spec::space::S2)).floor().max(0.0);
+    let fits = spec::snap_down(row_h - 2.0 * spec::px(spec::space::S2)).max(0.0);
     let side = spec::px(c::DANGER_SIZE).min(fits);
     (side, side)
 }
 
 pub fn paint_danger_button(p: &mut ViewPainter, rect: Rect, hovered: bool) {
+    let rect = spec::snap_rect(rect);
     let (bg, fg) = if hovered {
         (palette::danger(), palette::on_accent())
     } else {
@@ -320,6 +323,7 @@ pub fn chip_size(label: &str, m: Measure<'_>) -> (f64, f64) {
 /// `severity`: 0 fine, 1 approaching a limit, anything else a problem
 /// — the same scale as `panel_palette::severity_color`.
 pub fn paint_chip(p: &mut ViewPainter, rect: Rect, label: &str, severity: u8) {
+    let rect = spec::snap_rect(rect);
     fill(p, rect, palette::chip_bg(severity), c::CHIP_RADIUS);
     centred_text(
         p, rect, label, c::CHIP_TEXT.pt(), c::CHIP_WEIGHT, palette::severity_text(severity),
@@ -348,8 +352,8 @@ pub fn paint_keycap_ending_at(p: &mut ViewPainter, right: f64, top: f64, h: f64,
     let pt = c::KEYCAP_TEXT.pt();
     let text_w = p.ui_text_width_at(label, pt, c::KEYCAP_WEIGHT) as f64;
     // never narrower than tall: a one-glyph cap is a square key
-    let w = (text_w + 2.0 * spec::px(c::KEYCAP_PAD_X)).max(h).round();
-    let rect = Rect { x: right - w, y_top: top, w, h };
+    let w = spec::snap((text_w + 2.0 * spec::px(c::KEYCAP_PAD_X)).max(h));
+    let rect = spec::snap_rect(Rect { x: right - w, y_top: top, w, h });
     if filled {
         fill(p, rect, palette::keycap_bg(), c::KEYCAP_RADIUS);
     }
@@ -469,7 +473,7 @@ mod tests {
         // A shorter one gets a square that leaves the clear space.
         let (w, h) = danger_button_size_in_row(21.6);
         assert_eq!(w, h);
-        assert_eq!(w, (21.6 - clear).floor());
+        assert_eq!(w, spec::snap_down(21.6 - clear));
         assert!(w < full);
         assert_eq!(danger_button_size_in_row(1.0), (0.0, 0.0));
     }
