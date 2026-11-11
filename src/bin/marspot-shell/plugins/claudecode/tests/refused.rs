@@ -126,3 +126,51 @@ fn an_account_that_refused_a_pane_is_no_destination() {
     seen.out.insert((1, String::new()), (BEFORE, quota::Window::Week));
     assert_eq!(target(&seen), Some(1));
 }
+
+/// The record the CLI queues when a background agent stops, as written
+/// on 2026-11-11 for an agent the API refused.
+fn agent_notice(at: &str, status: &str, summary: &str) -> String {
+    format!(
+        r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"{at}","sessionId":"a749de4e","content":"<task-notification>\n<task-id>a5b039824ccaa4b85</task-id>\n<tool-use-id>toolu_01Lg</tool-use-id>\n<output-file>/private/tmp/tasks/a5b0.output</output-file>\n<status>{status}</status>\n<summary>{summary}</summary>\n</task-notification>"}}"#
+    )
+}
+
+const AGENT_REFUSED: &str = r#"Agent \"Fable: C7/C8 PE spec route\" failed: Agent terminated early due to an API error: You've reached your Fable limit. Run /usage-credits to continue or switch models with /model. (error type rate_limit, HTTP 429, request id req_011Cgw3k, model sent to the API: claude-fable-5-2)"#;
+
+#[test]
+fn an_agent_the_api_refused_is_read_from_the_notice_of_its_failure() {
+    let failed = agent_notice("2026-11-11T11:17:55.829Z", "failed", AGENT_REFUSED);
+    let r = last_agent_refusal(&failed).expect("a refused agent");
+    assert_eq!(r.at, 1_794_395_875);
+    assert!(quota::same_model(&r.model, "fable"), "{:?}", r.model);
+    assert!(!quota::same_model(&r.model, "opus"), "{:?}", r.model);
+    assert_eq!(last_quota_refusal(&failed), None, "the session itself was not refused");
+
+    // a later agent that got an answer is the background work going on
+    let done = agent_notice("2026-11-11T11:18:40.000Z", "completed", r#"Agent \"reviewer\" finished"#);
+    assert_eq!(last_agent_refusal(&format!("{failed}\n{done}\n")), None);
+    assert!(last_agent_refusal(&format!("{done}\n{failed}\n")).is_some(), "the newest report decides");
+
+    // a background command ending says nothing about the account
+    let command = agent_notice(
+        "2026-11-11T11:18:41.000Z",
+        "completed",
+        r#"Background command \"make\" completed (exit code 0)"#,
+    );
+    assert!(last_agent_refusal(&format!("{failed}\n{command}\n")).is_some());
+
+    // failing for another reason is not the account refusing
+    let overloaded = agent_notice(
+        "2026-11-11T11:19:00.000Z",
+        "failed",
+        r#"Agent \"x\" failed: Agent terminated early due to an API error: Overloaded (error type overloaded_error, HTTP 529, model sent to the API: claude-fable-5-2)"#,
+    );
+    assert_eq!(last_agent_refusal(&overloaded), None);
+
+    // nor are the same words quoted in a message
+    let quoted = format!(
+        r#"{{"parentUuid":"p","isSidechain":false,"type":"user","message":{{"role":"user","content":{}}},"timestamp":"2026-11-11T11:20:00.000Z"}}"#,
+        format_args!("\"{}\"", failed.replace('\\', "\\\\").replace('"', "\\\""))
+    );
+    assert_eq!(last_agent_refusal(&quoted), None);
+}
