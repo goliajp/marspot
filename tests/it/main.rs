@@ -2,6 +2,7 @@
 //! `frame_allocations` stays on its own: it installs a counting global allocator.
 
 mod chrome_geometry;
+mod display_scale_ratchet;
 mod layout_geometry;
 mod plugin_action_funnel;
 mod pointer_ownership;
