@@ -78,14 +78,49 @@ pub(crate) const FONT_SNAPSHOT_DIR: &str =
 /// Where the panel baselines live.
 pub(crate) const UI_SNAPSHOT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bench/ui/snapshots");
 
-/// A baseline's name under the theme in force: `<name>` in the dark
-/// theme, `<name>.light` and `<name>.contrast` in the others.
+/// A baseline's name under the theme and language in force: `<name>`
+/// in the dark theme and English, `<name>.light` and `<name>.contrast`
+/// in the other themes, `<name>.ja` and `<name>.zh` in the other
+/// languages.
 pub(crate) fn themed(name: &str) -> String {
+    use marspot_term::language::LangId;
+    let lang = match marspot_term::language::current_id() {
+        LangId::En => "",
+        LangId::Ja => ".ja",
+        LangId::ZhHans => ".zh",
+    };
     match marspot_term::palette::current_id() {
-        marspot_term::palette::ThemeId::Dark => name.to_string(),
-        other => format!("{name}.{}", other.as_str()),
+        marspot_term::palette::ThemeId::Dark => format!("{name}{lang}"),
+        other => format!("{name}.{}{lang}", other.as_str()),
     }
 }
+
+/// Run a snapshot test with `lang` in force, put in force the way the
+/// app does it: through the settings, then the catalogue follows.
+pub(crate) fn in_language(lang: marspot_term::language::LangId, shot: fn()) {
+    crate::settings::set_for_test(crate::settings::Settings {
+        appearance_language: Some(lang),
+        ..Default::default()
+    });
+    crate::ui::strings::follow_language();
+    shot();
+}
+
+/// The same scenes in Japanese and in Chinese: each `ja, zh = scene;`
+/// is two tests that run `scene` again.
+macro_rules! snapshots_in_other_languages {
+    ($($ja:ident, $zh:ident = $shot:path;)*) => {$(
+        #[test]
+        fn $ja() {
+            crate::snapshot_kit::in_language(marspot_term::language::LangId::Ja, $shot);
+        }
+        #[test]
+        fn $zh() {
+            crate::snapshot_kit::in_language(marspot_term::language::LangId::ZhHans, $shot);
+        }
+    )*};
+}
+pub(crate) use snapshots_in_other_languages;
 
 /// Run a snapshot test with `theme` in force.  It is put in force the
 /// way the app does it, through the settings, so that nothing the

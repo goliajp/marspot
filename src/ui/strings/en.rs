@@ -159,6 +159,13 @@ fn text(m: Msg) -> &'static str {
         Msg::BadgeNoUsageData => "⚠ no usage data",
         Msg::BadgeModelUnknown => "⚠ model unknown",
         Msg::BadgeHeldByBgJob => "⚠ held by bg job",
+
+        Msg::Language => "Language",
+        Msg::CostLanguage => "applies at once to Marspot's own panels and menus",
+        Msg::CostLanguageRelaunch => "items the system provides switch after Marspot is relaunched",
+        Msg::LangEnglish => "English",
+        Msg::LangJapanese => "日本語",
+        Msg::LangChinese => "简体中文",
     }
 }
 

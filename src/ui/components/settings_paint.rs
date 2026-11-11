@@ -98,9 +98,8 @@ fn paint_slot(p: &mut ViewPainter, sp: &SettingsRender, slot: Slot) {
             );
             // Genuinely smaller, not merely dimmer: same size
             // in a paler grey is two competing lines.
-            p.panel_text(
-                sm::metric::DESC, x, desc_baseline as f32, crate::ui::strings::t(spec.cost), sec,
-            );
+            let cost = if row == sm::Row::Language { sm::language_cost() } else { spec.cost };
+            p.panel_text(sm::metric::DESC, x, desc_baseline as f32, crate::ui::strings::t(cost), sec);
             match row.control(&sp.settings) {
                 Control::Toggle(on) => controls::paint_toggle(p, control, on, dim),
                 Control::Segmented { options, chosen } => {

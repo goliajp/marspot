@@ -16,6 +16,12 @@
 //! * a box too small for even one character gets the ellipsis alone,
 //!   never an empty row that reads as a blank result.
 
+/// How many monospace cells `s` takes: two for a wide character, as
+/// the terminal gives it, and never none.
+pub fn cells(s: &str) -> usize {
+    s.chars().map(|ch| marspot_term::grid::char_width(ch).max(1) as usize).sum()
+}
+
 /// Fit `s` into `box_w` physical px of monospace, ellipsised.
 ///
 /// `pad` is per-side, in physical px.
@@ -24,14 +30,21 @@ pub fn fit_mono(s: &str, box_w: f64, cell_w: f64, pad: f64) -> String {
         return String::new();
     }
     let budget = ((box_w - 2.0 * pad) / cell_w).floor().max(0.0) as usize;
-    let n = s.chars().count();
-    if n <= budget {
+    if cells(s) <= budget {
         return s.to_string();
     }
     if budget <= 1 {
         return "…".to_string();
     }
-    s.chars().take(budget - 1).chain(std::iter::once('…')).collect()
+    // whole characters only: a wide one that would straddle the mark is dropped
+    let mut room = budget - 1;
+    let kept = s.chars().take_while(|ch| {
+        let w = marspot_term::grid::char_width(*ch).max(1) as usize;
+        let fits = w <= room;
+        room = room.saturating_sub(w);
+        fits
+    });
+    kept.chain(std::iter::once('…')).collect()
 }
 
 #[cfg(test)]
@@ -56,14 +69,17 @@ mod tests {
         assert_eq!(fit_mono("abcdefghij", 0.0, cell, 0.0), "…");
     }
 
-    /// Multi-byte text is cut by character, not by byte — a snippet of
-    /// CJK cut mid-codepoint would not be text at all.
+    /// Multi-byte text is cut by character, not by byte, and a wide
+    /// character counts as the two cells it is drawn in: four cells
+    /// hold one of them and the mark, not three.
     #[test]
-    fn it_counts_characters_not_bytes() {
+    fn it_counts_cells_not_bytes_or_characters() {
         let out = fit_mono("回收空闲的窗格", 60.0, 10.0, 10.0);
-        assert_eq!(out.chars().count(), 4);
-        assert!(out.ends_with('…'));
-        assert!(out.starts_with("回收空"));
+        assert_eq!(out, "回…");
+        assert_eq!(cells(&out), 3, "the next character would not fit whole");
+        assert_eq!(fit_mono("回收", 60.0, 10.0, 10.0), "回收", "four cells of text in four cells");
+        assert_eq!(fit_mono("a回b", 60.0, 10.0, 10.0), "a回b");
+        assert_eq!(cells("pid数"), 5);
     }
 
     /// A degenerate cell width cannot divide by zero into a panic or a

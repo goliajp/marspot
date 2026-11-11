@@ -23,7 +23,7 @@
 //! way to break them.
 
 use crate::settings::Settings;
-use marspot_term::palette::ThemeId;
+pub use crate::ui::components::settings_choices::*;
 use crate::ui::strings::Msg;
 
 /// What is this panel's own, in **typographic points**.  Everything
@@ -54,6 +54,7 @@ pub enum Row {
     ReclaimIdleMinutes,
     ReclaimPrefetch,
     Theme,
+    Language,
     DimScale,
     CircledWide,
     ScrollFactor,
@@ -67,27 +68,6 @@ pub enum Control {
     /// One of N, with the chosen index.
     Segmented { options: &'static [Msg], chosen: usize },
 }
-
-/// The minutes offered by the idle-threshold row, in order.
-///
-/// `0` is "never", offered as a value and not only as the switch above
-/// it: the end of the range is where a user turning it down looks.
-pub const IDLE_CHOICES: &[u32] = &[15, 30, 60, 120, 0];
-pub const IDLE_LABELS: &[Msg] = &[Msg::Idle15m, Msg::Idle30m, Msg::Idle1h, Msg::Idle2h, Msg::IdleNever];
-
-/// How far an inactive pane steps back, as a multiplier on the
-/// attention ladder.  `0` is off, a value for the reason `Never` is.
-pub const DIM_CHOICES: &[f32] = &[0.0, 0.6, 1.0, 1.4];
-pub const DIM_LABELS: &[Msg] = &[Msg::DimOff, Msg::DimLight, Msg::DimNormal, Msg::DimDeep];
-
-/// The themes, with following the system first: `None` in the setting.
-pub const THEME_CHOICES: &[Option<ThemeId>] =
-    &[None, Some(ThemeId::Dark), Some(ThemeId::Light), Some(ThemeId::Contrast)];
-pub const THEME_LABELS: &[Msg] = &[Msg::ThemeSystem, Msg::ThemeDark, Msg::ThemeLight, Msg::ThemeContrast];
-
-/// Wheel / trackpad multiplier.
-pub const SCROLL_CHOICES: &[f32] = &[0.5, 1.0, 1.5, 2.5];
-pub const SCROLL_LABELS: &[Msg] = &[Msg::ScrollSlow, Msg::ScrollNormal, Msg::ScrollFast, Msg::ScrollFaster];
 
 pub struct RowSpec {
     pub row: Row,
@@ -132,6 +112,7 @@ pub const SECTIONS: &[Section] = &[
         heading: Msg::SettingsAppearance,
         rows: &[
             RowSpec { row: Row::Theme, label: Msg::Theme, cost: Msg::CostTheme },
+            RowSpec { row: Row::Language, label: Msg::Language, cost: Msg::CostLanguage },
             // The ladder's *order* is not offered — it says what
             // marspot knows about each pane.  Only its volume is.
             RowSpec { row: Row::DimScale, label: Msg::DimOtherPanes, cost: Msg::CostDimOtherPanes },
@@ -203,6 +184,10 @@ impl Row {
                 options: THEME_LABELS,
                 chosen: THEME_CHOICES.iter().position(|t| *t == s.appearance_theme).unwrap_or(usize::MAX),
             },
+            Row::Language => Control::Segmented {
+                options: LANGUAGE_LABELS,
+                chosen: LANGUAGE_CHOICES.iter().position(|l| *l == s.appearance_language).unwrap_or(usize::MAX),
+            },
             Row::DimScale => Control::Segmented {
                 options: DIM_LABELS,
                 chosen: chosen_f32(DIM_CHOICES, s.dim_scale),
@@ -225,6 +210,7 @@ impl Row {
             // about how text is drawn.
             Row::ReclaimEnabled
             | Row::Theme
+            | Row::Language
             | Row::CircledWide
             | Row::DimScale
             | Row::ScrollFactor
@@ -250,6 +236,7 @@ impl Row {
                 next.reclaim_idle_minutes = *IDLE_CHOICES.get(seg)?;
             }
             Row::Theme => next.appearance_theme = *THEME_CHOICES.get(seg)?,
+            Row::Language => next.appearance_language = *LANGUAGE_CHOICES.get(seg)?,
             Row::DimScale => next.dim_scale = *DIM_CHOICES.get(seg)?,
             Row::ScrollFactor => next.scroll_factor = *SCROLL_CHOICES.get(seg)?,
         }
@@ -657,7 +644,7 @@ mod tests {
     fn every_control_is_clickable_where_it_is_drawn() {
         let _scale = scale_guard();
         let s = Settings::default();
-        let rect = test_rect(1600.0, 1200.0, &s);
+        let rect = test_rect(1600.0, 1400.0, &s);
         let slots = collect(rect, &s);
         let mut m = fake_measure();
 

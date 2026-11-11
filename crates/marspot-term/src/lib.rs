@@ -66,6 +66,7 @@ pub static MARSPOT_LAYER_VERS_TERM: &str = concat!(
 );
 pub mod grid_shm;
 pub mod input_core;
+pub mod language;
 pub mod layout;
 pub mod parser;
 pub mod palette;
@@ -75,6 +76,7 @@ pub mod host_load;
 pub mod inherited_fds;
 pub mod platform;
 pub mod submit_receipt;
+pub mod system_language;
 pub mod system_theme;
 pub mod pty;
 pub mod render;
