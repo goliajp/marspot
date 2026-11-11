@@ -236,6 +236,7 @@ impl ClaudecodePlugin {
             stranded_for: self.stranded.get(&sid).map(|s| s.since.elapsed()),
             since_last_move: self.moved_at.get(&sid).map(|at| at.elapsed()),
             warned,
+            background_refused: result.agent_refused.get(&sid),
         });
         match decision {
             quota::Move::Hold(why) => {
