@@ -2423,12 +2423,7 @@ fn bench_scrollaccess(arg: &str) {
     depths.sort_unstable();
     depths.dedup();
 
-    let rss_kib = std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok())
-        .unwrap_or(-1);
+    let rss_kib = read_self_rss_kib();
 
     let cols = GRID_COLS;
     let rows = GRID_ROWS as usize;
