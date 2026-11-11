@@ -53,6 +53,9 @@ pub(super) struct ScanResult {
     /// Each bound pane's model and effort as its status-line hook last
     /// pushed them (`pushed_choice`), by pane.
     pub(super) choices: HashMap<u64, CliChoice>,
+    /// Per pane: the quota refusal its newest background-agent report
+    /// ended on, when that agent was refused under this claude.
+    pub(super) agent_refused: HashMap<u64, quota::Refusal>,
 }
 
 /// The files the quota sweep judges by besides the bindings: the usage
