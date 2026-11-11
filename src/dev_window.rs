@@ -483,18 +483,17 @@ impl DevWindow {
     }
 }
 
-/// Build the dev window if it doesn't exist yet and stash it.
-/// Idempotent across calls; main app invokes this once during
-/// `resumed`.
-pub fn ensure_built(mtm: MainThreadMarker) -> Result<(), String> {
-    DEV_WINDOW_HANDLE.with(|cell| {
-        if cell.borrow().is_some() {
-            return Ok(());
-        }
-        let w = DevWindow::build(mtm)?;
-        *cell.borrow_mut() = Some(w);
-        Ok(())
-    })
+/// Give this process the dev window: built as the application starts,
+/// its deferred show / hide / move applied after every event.
+pub fn enable() {
+    crate::app::set_loop_hooks(build, drain_pending_actions);
+}
+
+fn build(mtm: MainThreadMarker) {
+    match DevWindow::build(mtm) {
+        Ok(w) => DEV_WINDOW_HANDLE.with(|cell| *cell.borrow_mut() = Some(w)),
+        Err(e) => eprintln!("[marspot] dev_window init failed: {e}; toolbar toggle will be a no-op"),
+    }
 }
 
 /// Mutate the dev window via a closure.  Returns `None` when the

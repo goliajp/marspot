@@ -526,9 +526,6 @@ pub struct MetalRenderer {
     drag_source: Option<usize>,
     /// F3+9 — right-click context menu state.  `Some` while open.
     context_menu_state: Option<ContextMenuRender>,
-    /// Dev-panel state.  `Some` while visible.  Owned by L2;
-    /// renderer just reads it to build a Canvas and encode.
-    dev_panel_state: Option<crate::ui::components::DevPanelState>,
     /// Where the last IOSurface frame spent its time.  See
     /// [`RenderSplit`].
     last_render_split: RenderSplit,
@@ -685,7 +682,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, cc_usage: None, settings_panel: None, shortcuts_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
+            process_panel: None, cc_usage: None, settings_panel: None, shortcuts_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None,
             last_render_split: RenderSplit::default(),
             top_inset_phys: 0.0,
             frame_id: 0,
@@ -754,7 +751,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, cc_usage: None, settings_panel: None, shortcuts_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
+            process_panel: None, cc_usage: None, settings_panel: None, shortcuts_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None,
             last_render_split: RenderSplit::default(),
             top_inset_phys: 0.0,
             frame_id: 0,
@@ -811,16 +808,6 @@ impl MetalRenderer {
 
     pub fn set_context_menu(&mut self, state: Option<ContextMenuRender>) {
         self.context_menu_state = state;
-    }
-
-    /// Set the dev panel render state.  `Some` when visible,
-    /// `None` when hidden.  Caller (L2) toggles via toolbar
-    /// button / keyboard shortcut; we just paint it.
-    pub fn set_dev_panel(
-        &mut self,
-        state: Option<crate::ui::components::DevPanelState>,
-    ) {
-        self.dev_panel_state = state;
     }
 
     /// What the pointer is on in the window's chrome; `None` clears.
@@ -1209,34 +1196,10 @@ impl MetalRenderer {
             ui_slab,
         );
 
-        // Dev panel — Canvas-based overlay. Encoded BEFORE the
-        // context menu so the menu (if open) sits on top.
         let chrome_cell_w = font.cell_w as f32;
         let chrome_cell_h = font.cell_h as f32;
         let chrome_ascent = font.ascent as f32;
         let viewport_px = [width_px as f32, height_px as f32];
-        if let Some(dev_state) = self.dev_panel_state.as_ref()
-            && dev_state.visible {
-                let measure = crate::chrome_measure::ChromeMeasure::new(
-                    font,
-                    chrome_cell_w as f64,
-                    chrome_cell_h as f64,
-                );
-                let canvas = crate::ui::components::build_dev_panel_canvas(
-                    dev_state,
-                    width_px, height_px,
-                    chrome_cell_w, chrome_cell_h, chrome_ascent,
-                    &measure,
-                );
-                encode_canvas_into(
-                    &canvas, &texture, &cmd,
-                    scene_ui_pipeline, fg_pipeline, fg_color_pipeline, fg_sampler,
-                    atlas, color_atlas, atlas_texture.texture(), color_atlas_texture.texture(), device, font,
-                    None, &viewport_px,
-                    chrome_cell_w, chrome_cell_h, chrome_ascent,
-                    false,
-                );
-            }
 
         // P2c — ContextMenu draws OUT-OF-BAND via the Canvas
         // pipeline: built fresh per frame and encoded with
@@ -1479,32 +1442,11 @@ impl MetalRenderer {
             ui_slab,
         );
         let t_canvas0 = std::time::Instant::now();
-        // Dev panel + ContextMenu canvases (same shape as render_layout).
+        // ContextMenu canvas (same shape as render_layout).
         let chrome_cell_w = font.cell_w as f32;
         let chrome_cell_h = font.cell_h as f32;
         let chrome_ascent = font.ascent as f32;
         let viewport_px = [width_px as f32, height_px as f32];
-        if let Some(dev_state) = self.dev_panel_state.as_ref()
-            && dev_state.visible {
-                let measure = crate::chrome_measure::ChromeMeasure::new(
-                    font,
-                    chrome_cell_w as f64,
-                    chrome_cell_h as f64,
-                );
-                let canvas = crate::ui::components::build_dev_panel_canvas(
-                    dev_state, width_px, height_px,
-                    chrome_cell_w, chrome_cell_h, chrome_ascent,
-                    &measure,
-                );
-                encode_canvas_into(
-                    &canvas, target, &cmd,
-                    scene_ui_pipeline, fg_pipeline, fg_color_pipeline, fg_sampler,
-                    atlas, color_atlas, atlas_texture.texture(), color_atlas_texture.texture(), device, font,
-                    None, &viewport_px,
-                    chrome_cell_w, chrome_cell_h, chrome_ascent,
-                    false,
-                );
-            }
         if let Some(menu_state) = self.context_menu_state.as_ref() {
             let canvas = crate::ui::components::context_menu_paint::build_context_menu_canvas(
                 menu_state, width_px, height_px,
