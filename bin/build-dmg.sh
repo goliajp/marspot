@@ -25,6 +25,12 @@ trap 'rm -rf "$STAGE"' EXIT
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$STAGE/Marspot.app/Contents/Info.plist")"
 DMG="$OUT/Marspot-$VERSION.dmg"
 mkdir -p "$OUT"
+# one version, one disk image: two files of one name that differ are
+# how nobody can say which build someone was given
+if [[ -e "$DMG" && "${MARSPOT_DMG_REBUILD:-0}" != 1 ]]; then
+  echo "$DMG exists: bin/bump-version.sh first (MARSPOT_DMG_REBUILD=1 to replace a build that never left this machine)" >&2
+  exit 1
+fi
 ln -s /Applications "$STAGE/Applications"
 
 echo "==> disk image"
