@@ -762,13 +762,9 @@ impl L3Process {
                 if alive {
                     Ok(None)
                 } else {
-                    // Synthesise a "process gone" status; the only
-                    // caller (`L3Conn::poll`) just needs Some(_).
-                    // Spawn a quickly-exiting helper to obtain a real
-                    // ExitStatus value cheaply.
-                    let st = std::process::Command::new("/usr/bin/true")
-                        .status()?;
-                    Ok(Some(st))
+                    // not ours to reap, so its real status is out of
+                    // reach; the only caller (`L3Conn::poll`) needs Some(_)
+                    Ok(Some(std::os::unix::process::ExitStatusExt::from_raw(0)))
                 }
             }
         }
@@ -790,7 +786,7 @@ impl L3Process {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 // ExitStatus is needed for the API contract; synthesise.
-                std::process::Command::new("/usr/bin/true").status()
+                Ok(std::os::unix::process::ExitStatusExt::from_raw(0))
             }
         }
     }
