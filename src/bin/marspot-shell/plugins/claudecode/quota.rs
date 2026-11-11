@@ -22,12 +22,12 @@
 
 use std::time::Duration;
 
-pub(super) use super::refusal::{Refusal, Window};
+pub(in crate::plugins) use super::refusal::{Refusal, Window};
 
 
 /// What is known about a profile when choosing.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum Room {
+pub(in crate::plugins) enum Room {
     /// The feed answered for this profile.
     Known {
         status: String,
@@ -96,7 +96,7 @@ impl Room {
     /// The model's own cap is an additional way to be out, never a
     /// way to be in: an account whose week is spent is spent whatever
     /// Fable says, because Fable is bounded by that week too.
-    pub(super) fn refused_for(&self, model: Option<&str>) -> bool {
+    pub(in crate::plugins) fn refused_for(&self, model: Option<&str>) -> bool {
         match self {
             Room::Known { status, util_5h, util_7d, .. } => {
                 // The collector could not log in as this account. Its
@@ -198,7 +198,7 @@ impl Room {
     /// pair means the ordering rule does not change -- the week
     /// first, the five hours to break ties -- which is the whole
     /// point of folding it in here instead of beside it.
-    pub(super) fn headroom_for(&self, model: Option<&str>) -> (f64, f64) {
+    pub(in crate::plugins) fn headroom_for(&self, model: Option<&str>) -> (f64, f64) {
         match self {
             Room::Known { util_5h, util_7d, .. } => {
                 let week = 1.0 - util_7d;
@@ -215,7 +215,7 @@ impl Room {
     pub(super) fn fable_spent(&self) -> bool {
         self.model_util(Some(FABLE)).is_some_and(|u| u >= WINDOW_SPENT)
     }
-    pub(super) fn reset_7d(&self) -> i64 {
+    pub(in crate::plugins) fn reset_7d(&self) -> i64 {
         match self {
             Room::Known { reset_7d, .. } => *reset_7d,
             Room::Unknown => i64::MAX,
@@ -265,7 +265,7 @@ pub(super) use super::rooms::rooms_for;
 /// bounded rather than prevented: a pane moves once per refusal and
 /// not again for ten minutes, which is the cost of this order and the
 /// reason no headroom floor is invented here.
-pub(super) fn best_profile(rooms: &[(u8, Room)], current: u8, model: Option<&str>) -> Option<u8> {
+pub(in crate::plugins) fn best_profile(rooms: &[(u8, Room)], current: u8, model: Option<&str>) -> Option<u8> {
     let mut ranked: Vec<&(u8, Room)> = rooms
         .iter()
         .filter(|(p, r)| *p != current && *r != Room::Unknown)
@@ -306,7 +306,7 @@ pub(super) fn best_profile(rooms: &[(u8, Room)], current: u8, model: Option<&str
 ///
 /// Gathered by the caller, decided here: one place says what happens
 /// to a refused pane, and it can be read as a table.
-pub(super) struct Situation<'a> {
+pub(in crate::plugins) struct Situation<'a> {
     /// What the feed says about every profile on the machine.
     pub rooms: &'a [(u8, Room)],
     /// The profile the pane is on — the one that just refused it.
@@ -350,7 +350,7 @@ pub(super) struct Situation<'a> {
 
 /// What to do with a pane its account has refused.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum Move {
+pub(in crate::plugins) enum Move {
     /// Move it to this profile.
     To(u8),
     /// Leave it where it is, for this reason — worth a log line and
@@ -382,7 +382,7 @@ pub(super) const TOOL_HOLD_MAX: Duration = Duration::from_secs(300);
 ///
 /// Mechanical on purpose: no clock of its own, no filesystem, no
 /// side effect.  The caller gathers, this decides, the caller acts.
-pub(super) fn next_move(s: &Situation) -> Move {
+pub(in crate::plugins) fn next_move(s: &Situation) -> Move {
     // Moving kills the process, and a command running under it goes
     // with it.  That one waits; it will finish, and the next pass will
     // move the pane.

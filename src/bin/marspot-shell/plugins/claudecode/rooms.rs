@@ -34,7 +34,7 @@ pub(super) fn rooms_for(
         .collect()
 }
 
-fn room_of(a: &CcAccount, now: i64) -> Room {
+pub(in crate::plugins) fn room_of(a: &CcAccount, now: i64) -> Room {
     let renewed = |reset: i64| reset > 0 && reset <= now;
     // a window that is not enforced cannot shut the account out, nor
     // rank it below another
@@ -80,7 +80,7 @@ fn room_of(a: &CcAccount, now: i64) -> Room {
 }
 
 /// Unix seconds, for `rooms_for`.
-pub(super) fn unix_now() -> i64 {
+pub(in crate::plugins) fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

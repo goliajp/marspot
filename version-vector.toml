@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.277"  # kimi accounts' usage is collected, and kimi panes leave an account that is out
+shell   = "0.7.278"  # kimi panes leave an account that is out and are told when it is nearly out
 core    = "0.12.307"  # the accounts panel lists kimi accounts
 session = "0.11.158"  # a pane has ~/.kimi-code/bin on its PATH
