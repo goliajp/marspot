@@ -297,8 +297,23 @@ impl FileScrollback {
     /// recent rows hit the file directly instead of having to wait
     /// for the next push_line to spill.
     pub fn flush_for_handoff(&self) {
+        // Data before the index that points at it, and the index too:
+        // lines whose index stayed in a buffer are in no file the next
+        // image can find them in.
         self.bin.borrow_mut().flush();
+        self.idx.borrow_mut().flush();
         self.has_unflushed.set(false);
+    }
+
+    /// End of a burst of output: hand what is buffered to the writer
+    /// threads, without waiting for them.
+    ///
+    /// The buffers are sized for a flood, and without this a pane that
+    /// printed a few hundred lines and went quiet would keep them in
+    /// memory until the next flood -- for a kill to take.
+    pub fn hand_off(&self) {
+        self.bin.borrow_mut().hand_off();
+        self.idx.borrow_mut().hand_off();
     }
 
     /// Ensure `self.bin_mmap_*` covers at least `needed_len` bytes.
@@ -387,6 +402,46 @@ mod tests {
     use crate::scrollback::Scrollback;
     use crate::scrollback::format::FILE_HEADER_BYTES;
     use crate::scrollback::testing::*;
+
+    /// An image that replaces itself runs no destructors: after the
+    /// flush every line is in both files, the index as well as the
+    /// data, however little of a buffer they filled.
+    #[test]
+    fn every_line_is_indexed_on_disk_before_a_handoff() {
+        let tmp = TmpDir::new("handoff-idx");
+        let cols = 8usize;
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("create");
+        // more than the ring holds, less than either buffer
+        for i in 0..1000usize {
+            sb.push_line(&fill(b'a' + (i % 26) as u8, cols), false);
+        }
+        sb.flush_for_handoff();
+        std::mem::forget(sb);
+        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("reopen");
+        assert_eq!(sb.len(), 1000);
+        assert_eq!(sb.cell_at(999, 0).map(|c| c.ch), Some((b'a' + (999 % 26) as u8) as char));
+        assert_eq!(sb.cell_at(0, 0).map(|c| c.ch), Some('a'));
+    }
+
+    /// A few lines and then silence: they reach the files without a
+    /// flush and without the buffers filling.
+    #[test]
+    fn a_short_burst_reaches_the_files_once_handed_off() {
+        let tmp = TmpDir::new("burst-end");
+        let cols = 8usize;
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("create");
+        for _ in 0..3 {
+            sb.push_line(&fill(b'x', cols), false);
+        }
+        sb.hand_off();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let on_disk = |p: std::path::PathBuf| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        while on_disk(tmp.idx()) < 3 * 8 || on_disk(tmp.bin()) <= FILE_HEADER_BYTES {
+            assert!(std::time::Instant::now() < deadline, "the burst never reached the files");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(on_disk(tmp.idx()), 3 * 8);
+    }
 
     /// RFC-004 amendment — CSI 3 J reaches the persistent tier:
     /// clear() truncates the hot pair (and drops cold), so a reopen
@@ -642,17 +697,17 @@ mod tests {
         let tmp = TmpDir::new("torn-write");
         let cols = 8usize;
 
-        // Push enough lines that BufWriter is mid-buffer when we
-        // forget — 5000 × 8 cells writes ~170 KB to bin, well past
-        // the 64 KB BufWriter auto-flush boundary so several
-        // chunks have already hit disk and some tail is unflushed.
+        // Push enough lines that the writer is mid-buffer when we
+        // forget — 40 000 × 8 cells writes ~1.4 MB to bin, past the
+        // 512 KiB hand-over size twice, so two buffers have already
+        // hit disk and some tail is unflushed.
         let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 256).expect("create");
-        for i in 0..5000u32 {
+        for i in 0..40_000u32 {
             let ch = b'a' + (i % 26) as u8;
             sb.push_line(&fill(ch, cols), false);
         }
         let pushed = sb.len();
-        assert_eq!(pushed, 5000);
+        assert_eq!(pushed, 40_000);
 
         // SAFETY: leak the FileScrollback — `Drop` (which flushes
         // BufWriters) never runs.  This is exactly what `libc::execv`
@@ -680,8 +735,8 @@ mod tests {
             FileScrollback::open(tmp.bin(), tmp.idx(), cols, 256).expect("reopen after torn close");
         let total = sb2.len();
         assert!(total <= pushed, "reopen total {total} > pushed {pushed}");
-        // BufWriter auto-flush ensures a substantial prefix survived.
-        assert!(total >= 1500, "reopen total {total} suspiciously low");
+        // The buffers handed over ensure a substantial prefix survived.
+        assert!(total >= 12_000, "reopen total {total} suspiciously low");
         for i in 0..total {
             let line = sb2
                 .read_line(i)

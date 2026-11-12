@@ -1849,7 +1849,11 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 );
             }
             watch.phase("publish");
-            let bulk = (n >= FloodGate::BULK_BYTES || queued) && !(predicted || resized || scrolled || modes_changed);
+            let flood = n >= FloodGate::BULK_BYTES || queued;
+            if n > 0 && !flood {
+                session.terminal().grid().scrollback_hand_off();
+            }
+            let bulk = flood && !(predicted || resized || scrolled || modes_changed);
             if !flood_gate.hold(bulk) {
                 publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, &mut blank_gate, poke.as_mut());
             }
