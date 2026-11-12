@@ -28,4 +28,4 @@
 
 shell   = "0.7.308"  # the codex cli follows the daemon while the supervisor rests
 core    = "0.12.342"  # the disk writers take their buffers back to 64 KiB and write what has gathered at once
-session = "0.11.186"  # the disk writers take their buffers back to 64 KiB and write what has gathered at once
+session = "0.11.187"  # a reader hands over what it has for a tenth of a second after a key
