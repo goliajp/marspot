@@ -20,6 +20,8 @@ pub mod bytelog;
 pub mod emoji_presentation;
 pub mod fast_hash;
 pub mod frame_writer;
+#[cfg(target_os = "macos")]
+pub mod fs_watch;
 pub mod grapheme;
 pub mod grid;
 pub mod grid_links;
