@@ -30,6 +30,7 @@ use marspot_term::fs_watch::Watcher;
 use marspot_term::{lx_event, lx_warn, session_registry};
 
 use crate::SessionEvent;
+use crate::owner_watch::OwnerWatch;
 
 /// How often the settings are looked at when they cannot be watched.
 const SETTINGS_EVERY: Duration = Duration::from_secs(1);
@@ -41,6 +42,9 @@ pub(crate) struct Upkeep {
     socket: PathBuf,
     changed: Arc<AtomicBool>,
     watcher: Option<Watcher>,
+    /// Who answers for this session's coalition, followed through the
+    /// same watcher.
+    owner: OwnerWatch,
     /// How often reachability is looked at when it cannot be watched.
     /// Five seconds; a test that deletes an entry to watch the session
     /// leave sets `MARSPOT_SESSION_ENTRY_CHECK_MS` instead of sitting
@@ -63,6 +67,7 @@ impl Upkeep {
             marspot_term::system_theme::path(),
             entry.clone(),
             socket.clone(),
+            marspot_term::owner::path(),
         ];
         let watcher = Watcher::spawn(&files, move || {
             flag.store(true, Ordering::Release);
@@ -91,6 +96,7 @@ impl Upkeep {
             socket,
             changed,
             watcher: watcher.ok(),
+            owner: OwnerWatch::new(sid),
             entry_every,
             settings_looked: now,
             entry_looked: now,
@@ -135,6 +141,7 @@ impl Upkeep {
             return None;
         }
         self.entry_looked = Instant::now();
+        self.owner.look(self.watcher.as_ref());
         if !self.entry.exists() {
             Some("entry.toml removed")
         } else if !self.socket.exists() {

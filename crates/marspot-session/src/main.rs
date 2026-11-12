@@ -1202,7 +1202,6 @@ fn main() {
     );
     shm.attach_clusters(session.id());
     shm.attach_title(session.id());
-    owner_watch::start(session.id());
 
     // SIGTERM and SIGHUP become events on the main loop; see
     // `signal_events`.  Best-effort: if installing fails the L3 still
