@@ -423,7 +423,7 @@ mod tests {
         let dir = std::path::PathBuf::from(dir);
         let cols = 8usize;
         let mut sb = FileScrollback::open(dir.join("sb.bin"), dir.join("sb.idx"), cols, 4).expect("create");
-        for i in 0u64.. {
+        for i in 0u64..=u64::MAX {
             sb.push_line(&fill(b'a' + (i % 26) as u8, cols), false);
             if i % 512 == 511 {
                 // how far it has certainly got
