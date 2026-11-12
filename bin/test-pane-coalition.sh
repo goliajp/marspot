@@ -10,8 +10,8 @@
 # them, so after the app is quit and opened again they sit in a
 # coalition no running app answers for, and the next program that
 # registers with LaunchServices from there is listed as its owner.
-# Only launchd starts a process in a coalition of its own: a pane's
-# shell is a launchd job (unless MARSPOT_PANE_JOB=0), so what the pane
+# Only launchd starts a process in a coalition of its own: with
+# MARSPOT_PANE_JOB=1 a pane's shell is a launchd job, so what the pane
 # starts shares a coalition with that pane and nothing else.
 #
 # The app is opened through LaunchServices here, as a bundle, because

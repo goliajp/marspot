@@ -14,7 +14,7 @@
 #   bin/test-e2e-remote.sh test-window-close-order.sh test-multi-window.sh
 #   E2E_SUITE_TIMEOUT=1800 bin/test-e2e-remote.sh test-multi-window.sh
 #   HOST=other-mini bin/test-e2e-remote.sh
-#   E2E_ENV=MARSPOT_PANE_JOB=0 bin/test-e2e-remote.sh   # panes' shells forked, not launchd jobs
+#   E2E_ENV=MARSPOT_PANE_JOB=1 bin/test-e2e-remote.sh   # panes' shells as launchd jobs
 #
 # The update suites sign their feed with a key generated for the run;
 # the build they test accepts it only with the `test-update-key` feature
