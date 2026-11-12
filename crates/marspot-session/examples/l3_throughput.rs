@@ -51,6 +51,11 @@ const ROWS: u16 = 39;
 /// The session this probe spawned, for `die` to take down with it.
 static SESSION_PID: AtomicU32 = AtomicU32::new(0);
 
+/// The trial's directory, for `die` to take with it too: a failed trial
+/// used to leave its own behind, a third of a gigabyte of scrollback
+/// each, and 25 of them were found on the runner one evening.
+static SANDBOX: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 fn die(msg: &str) -> ! {
     eprintln!("FAIL: {msg}");
     // `process::exit` skips Drop, so the ChildGuard that would have
@@ -65,6 +70,13 @@ fn die(msg: &str) -> ! {
         // SAFETY: a kill to a pid this process spawned; a stale pid can
         // only fail with ESRCH, which is ignored.
         unsafe { libc::kill(pid as libc::c_int, libc::SIGKILL) };
+        // its writer threads must be gone before its files are
+        let mut status = 0;
+        // SAFETY: reaps the child this process spawned; ECHILD is ignored.
+        unsafe { libc::waitpid(pid as libc::c_int, &mut status, 0) };
+    }
+    if let Some(sandbox) = SANDBOX.get() {
+        let _ = std::fs::remove_dir_all(sandbox);
     }
     std::process::exit(1)
 }
@@ -173,6 +185,7 @@ fn main() {
     let pid = std::process::id();
     let sandbox = env::temp_dir().join(format!("l3-throughput-{pid}"));
     let _ = std::fs::remove_dir_all(&sandbox);
+    let _ = SANDBOX.set(sandbox.clone());
     std::fs::create_dir_all(sandbox.join("logs")).expect("mkdir sandbox/logs");
     std::fs::create_dir_all(sandbox.join("sessions")).expect("mkdir sandbox/sessions");
 

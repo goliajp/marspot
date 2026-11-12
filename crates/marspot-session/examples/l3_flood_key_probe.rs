@@ -40,6 +40,14 @@ fn main() {
         .unwrap_or_else(|| die("usage: l3_flood_key_probe <marspot-session>"));
     let sandbox = std::env::temp_dir().join(format!("l3-flood-key-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&sandbox);
+    // gone however this ends: a failure here is a panic, which unwinds
+    struct Sandbox(PathBuf);
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _sandbox = Sandbox(sandbox.clone());
     std::fs::create_dir_all(sandbox.join("logs")).expect("mkdir sandbox/logs");
     std::fs::create_dir_all(sandbox.join("sessions")).expect("mkdir sandbox/sessions");
     let script = sandbox.join("flood.sh");
@@ -93,7 +101,6 @@ fn main() {
     let secs = started.elapsed().as_secs_f64();
     let mut all = vec![session];
     cleanup(&mut all);
-    let _ = std::fs::remove_dir_all(&sandbox);
 
     if samples.len() < KEYS / 2 {
         die(format!("only {} of {KEYS} keys were answered", samples.len()));
