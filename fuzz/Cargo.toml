@@ -24,3 +24,10 @@ path = "fuzz_targets/parse_vt.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "feed_diff"
+path = "fuzz_targets/feed_diff.rs"
+test = false
+doc = false
+bench = false
