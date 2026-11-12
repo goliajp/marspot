@@ -81,6 +81,16 @@ fn skills_dirs(home: &Path, gemini_home: Option<&Path>) -> Vec<PathBuf> {
     out
 }
 
+/// The skill's files wherever `reconcile` keeps them.
+pub(crate) fn files() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let gemini_home = std::env::var_os("GEMINI_CLI_HOME").map(PathBuf::from);
+    let dirs = skills_dirs(&home, gemini_home.as_deref());
+    dirs.iter().flat_map(|d| FILES.iter().map(move |(name, _, _)| d.join(SKILL_NAME).join(name))).collect()
+}
+
 fn install_into(skills_dirs: &[PathBuf]) -> Vec<String> {
     let mut notes = Vec::new();
     for skills in skills_dirs {

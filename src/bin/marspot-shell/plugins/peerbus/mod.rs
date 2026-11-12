@@ -80,11 +80,52 @@ pub struct PeerbusPlugin {
     sent_kimi: Option<crate::plugins::kimi::Peers>,
     /// When the worker is next asked for a names pass; at once if None.
     names_at: Option<std::time::Instant>,
+    /// The noted changes (`agents::changes`) the worker has been asked
+    /// to look at the configuration for.
+    config_seen: u64,
 }
 
 impl PeerbusPlugin {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+/// Hand the worker an event if it has room.  `Some(false)` when it is
+/// busy with a slow daemon, and the next tick offers again; None when
+/// it is gone.
+fn offer(tx: &SyncSender<Event>, ev: Event) -> Option<bool> {
+    match tx.try_send(ev) {
+        Ok(()) => Some(true),
+        Err(TrySendError::Full(_)) => Some(false),
+        Err(TrySendError::Disconnected(_)) => None,
+    }
+}
+
+impl PeerbusPlugin {
+    /// What the worker is asked for that no change of the panes asks
+    /// for: a names pass when one is due, and a look at the agents'
+    /// configuration when a change to it has been noted since the last
+    /// one asked for.  A noted change knocks, so this runs for it even
+    /// when the supervisor's clock was at rest.  False when the worker
+    /// is gone.
+    fn ask(&mut self, now: std::time::Instant, changes: u64) -> bool {
+        let Some(tx) = &self.tx else { return false };
+        if self.names_at.is_none_or(|t| t <= now) {
+            match offer(tx, Event::Names) {
+                Some(true) => self.names_at = Some(now + worker::NAMES_EVERY),
+                Some(false) => {}
+                None => return false,
+            }
+        }
+        if changes != self.config_seen {
+            match offer(tx, Event::Reconcile) {
+                Some(true) => self.config_seen = changes,
+                Some(false) => {}
+                None => return false,
+            }
+        }
+        true
     }
 }
 
@@ -138,12 +179,7 @@ impl Plugin for PeerbusPlugin {
                 })
             })
             .collect();
-        // busy with a slow daemon: the next tick offers it again
-        let offer = |ev: Event| match tx.try_send(ev) {
-            Ok(()) => Some(true),
-            Err(TrySendError::Full(_)) => Some(false),
-            Err(TrySendError::Disconnected(_)) => None,
-        };
+        let offer = |ev: Event| offer(tx, ev);
         let mut gone = false;
         if wants != self.sent {
             match offer(Event::Want(wants.clone())) {
@@ -171,14 +207,7 @@ impl Plugin for PeerbusPlugin {
                 None => gone = true,
             }
         }
-        let now = std::time::Instant::now();
-        if !gone && self.names_at.is_none_or(|t| t <= now) {
-            match offer(Event::Names) {
-                Some(true) => self.names_at = Some(now + worker::NAMES_EVERY),
-                Some(false) => {}
-                None => gone = true,
-            }
-        }
+        gone = gone || !self.ask(std::time::Instant::now(), super::agents::changes::count());
         if gone {
             host.log(LogLevel::Warn, "worker_gone", "peerbus worker exited; inboxes are down");
             self.tx = None;
@@ -194,5 +223,48 @@ impl Plugin for PeerbusPlugin {
         if let Some(h) = self.worker.take() {
             let _ = h.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// A CLI install that finishes while the supervisor's clock rests
+    /// notes a change and knocks; the tick that knock runs is this.
+    #[test]
+    fn a_noted_change_has_the_worker_look_at_the_configuration_once() {
+        let (tx, rx) = sync_channel(CHANNEL);
+        let mut p = PeerbusPlugin { tx: Some(tx), ..Default::default() };
+        let t0 = Instant::now();
+        assert!(p.ask(t0, 0));
+        assert!(matches!(rx.try_recv(), Ok(Event::Names)), "the first names pass");
+        assert!(rx.try_recv().is_err(), "nothing was noted: the worker looked when it started");
+        assert!(p.ask(t0 + Duration::from_secs(1), 1));
+        assert!(matches!(rx.try_recv(), Ok(Event::Reconcile)), "asked on the tick after the change");
+        assert!(p.ask(t0 + Duration::from_secs(3), 1));
+        assert!(rx.try_recv().is_err(), "and asked once");
+    }
+
+    /// A worker with no room is asked again, not told once and forgotten.
+    #[test]
+    fn a_look_the_worker_had_no_room_for_is_asked_for_again() {
+        let (tx, rx) = sync_channel(1);
+        let mut p = PeerbusPlugin { tx: Some(tx), ..Default::default() };
+        let t0 = Instant::now();
+        assert!(p.ask(t0, 1));
+        assert!(matches!(rx.try_recv(), Ok(Event::Names)));
+        assert!(rx.try_recv().is_err(), "the names pass took the only place");
+        assert!(p.ask(t0 + Duration::from_secs(1), 1));
+        assert!(matches!(rx.try_recv(), Ok(Event::Reconcile)));
+    }
+
+    #[test]
+    fn a_worker_that_is_gone_is_reported() {
+        let (tx, rx) = sync_channel(CHANNEL);
+        drop(rx);
+        let mut p = PeerbusPlugin { tx: Some(tx), ..Default::default() };
+        assert!(!p.ask(Instant::now(), 0));
     }
 }
