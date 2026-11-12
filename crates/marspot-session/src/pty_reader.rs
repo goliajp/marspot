@@ -492,6 +492,40 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// Once a flood has stopped the reader sleeps: asking a pty that
+    /// has nothing more to say is for the microseconds between two
+    /// kilobytes, not for the silence after the last.
+    #[test]
+    fn a_reader_whose_flood_has_ended_sleeps() {
+        fn cpu_used() -> Duration {
+            // SAFETY: getrusage fills the struct it is given.
+            let ru = unsafe {
+                let mut ru: libc::rusage = std::mem::zeroed();
+                libc::getrusage(libc::RUSAGE_SELF, &mut ru);
+                ru
+            };
+            let of = |t: libc::timeval| Duration::new(t.tv_sec as u64, t.tv_usec as u32 * 1000);
+            of(ru.ru_utime) + of(ru.ru_stime)
+        }
+        let pty = spawn("head -c 2000000 /dev/zero | tr '\\0' a; sleep 30");
+        let exited = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = channel();
+        let reader = PtyReader::spawn(1, Arc::clone(&pty), exited, tx, || {});
+        let mut total = 0;
+        while total < 2_000_000 {
+            let chunk = rx.recv_timeout(Duration::from_secs(30)).expect("the flood stopped short");
+            total += chunk.bytes().len();
+            reader.recycle(chunk);
+        }
+        // long enough for the flood's last wait to have run out
+        thread::sleep(Duration::from_millis(50));
+        let before = cpu_used();
+        thread::sleep(Duration::from_millis(250));
+        let spent = cpu_used() - before;
+        reader.stop();
+        assert!(spent < Duration::from_millis(5), "the reader used {spent:?} of cpu in a quarter second of silence");
+    }
+
     /// Two megabytes written in one go come through complete, and in
     /// chunks bigger than the kernel's one kilobyte.
     #[test]
