@@ -63,6 +63,7 @@ DEFAULT_SUITES=(
   test-real-update.sh
   test-negative-update.sh
   test-adversarial-update.sh
+  test-idle-wakeups.sh
 )
 
 # One tool does the copying, for every session and every repo: it takes
