@@ -3,11 +3,12 @@
 //! `CODEX_HOME`.
 //!
 //! Event-driven: it wakes when the set of Codex panes changes, when a
-//! message arrives, or when a daemon reports something.  Three timers:
-//! a retry after a daemon could not be reached, the names check
-//! (`NAMES_EVERY`), since a pane is renamed by a `cd` or a move that
-//! nothing here is told about, and the short wait of an idle
-//! subscription placed while the session was idle (`idle`).
+//! message arrives, or when a daemon reports something.  Two timers:
+//! a retry after a daemon could not be reached, and the short wait of
+//! an idle subscription placed while the session was idle (`idle`).
+//! The names check (`NAMES_EVERY`) is asked for by the plugin's tick,
+//! since a pane is renamed by a `cd` or a move that nothing here is
+//! told about.
 //! Calls to a daemon block this thread for up to `CALL_TIMEOUT`; events
 //! that arrive meanwhile are set aside and handled after.
 
@@ -36,8 +37,10 @@ pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const MAX_STASH: usize = 4096;
 pub(super) const RETRY_MIN: Duration = Duration::from_secs(2);
 /// How often names are checked against the panes.  A file listing and
-/// one small read per agent; a rename shows up this late at worst.
-const NAMES_EVERY: Duration = Duration::from_secs(10);
+/// one small read per agent; a rename shows up this late at worst.  The
+/// plugin's tick asks for each pass (`Event::Names`), so the passes
+/// stop when the supervisor's clock rests and nothing can have moved.
+pub(super) const NAMES_EVERY: Duration = Duration::from_secs(10);
 /// The Claude Code hooks are checked every this many names passes.
 const HOOKS_EVERY_PASSES: u64 = 6;
 
@@ -72,6 +75,8 @@ pub(crate) struct Want {
 
 pub(crate) enum Event {
     Want(Vec<Want>),
+    /// Time for a names pass.
+    Names,
     /// The panes running Gemini, as the gemini plugin resolved them.
     Gemini(crate::plugins::gemini::Peers),
     /// The same for Kimi, with what each session is doing.
@@ -133,7 +138,6 @@ pub(crate) struct Worker {
     pub(super) next_key: u64,
     pub(super) retry_at: Option<Instant>,
     pub(super) backoff: Duration,
-    pub(super) names_at: Instant,
     /// Idle subscriptions waiting to see whether a turn comes (`idle`).
     pub(super) idle_checks: Vec<(u64, Instant)>,
     /// Panes running two agents, logged once each.
@@ -164,7 +168,6 @@ impl Worker {
             next_key: 1,
             retry_at: None,
             backoff: RETRY_MIN,
-            names_at: Instant::now(),
             idle_checks: Vec::new(),
             crowded: HashSet::new(),
             pane_table: Vec::new(),
@@ -196,11 +199,13 @@ impl Worker {
             let ev = match self.stash.pop_front() {
                 Some(e) => e,
                 None => {
-                    let due = [self.retry_at, self.idle_checks.iter().map(|(_, t)| *t).min()]
-                        .into_iter()
-                        .flatten()
-                        .fold(self.names_at, Instant::min);
-                    match self.rx.recv_timeout(due.saturating_duration_since(Instant::now())) {
+                    // with nothing owed on a clock, until the next event
+                    let due = [self.retry_at, self.idle_checks.iter().map(|(_, t)| *t).min()].into_iter().flatten().min();
+                    let got = match due {
+                        Some(due) => self.rx.recv_timeout(due.saturating_duration_since(Instant::now())),
+                        None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                    };
+                    match got {
                         Ok(e) => e,
                         Err(RecvTimeoutError::Timeout) => {
                             let now = Instant::now();
@@ -210,17 +215,6 @@ impl Worker {
                                 self.publish();
                             }
                             self.idle_checks_due(now);
-                            if self.names_at <= now {
-                                self.names_at = now + NAMES_EVERY;
-                                self.rename_pass();
-                                self.names_passes += 1;
-                                // Claude Code rewrites its settings on a
-                                // `/config` change; look again now and then
-                                if self.names_passes.is_multiple_of(HOOKS_EVERY_PASSES) {
-                                    self.reconcile_hooks();
-                                    self.reconcile_skills();
-                                }
-                            }
                             continue;
                         }
                         Err(RecvTimeoutError::Disconnected) => break,
@@ -233,6 +227,16 @@ impl Worker {
                         self.wants = w;
                         self.refresh();
                         self.rename_pass();
+                    }
+                }
+                Event::Names => {
+                    self.rename_pass();
+                    self.names_passes += 1;
+                    // Claude Code rewrites its settings on a
+                    // `/config` change; look again now and then
+                    if self.names_passes.is_multiple_of(HOOKS_EVERY_PASSES) {
+                        self.reconcile_hooks();
+                        self.reconcile_skills();
                     }
                 }
                 Event::Gemini(peers) => {
