@@ -108,7 +108,9 @@ impl Scrollback {
             // entry point.  Grid threads its own wrapped flag through
             // `push_line_with_wrapped` instead — that's the path
             // production sessions take.
-            Self::File(f) => f.push_line(line, false),
+            Self::File(f) => {
+                f.push_line(line, false);
+            }
         }
     }
 
@@ -129,9 +131,15 @@ impl Scrollback {
     /// there).  A1's surface for direct tests against FileScrollback;
     /// A3 makes Grid call this so file records carry the right
     /// wrapped value.
-    pub fn push_line_with_wrapped(&mut self, line: &[Cell], wrapped: bool) {
+    ///
+    /// Returns how many leading cells of `line` may differ from
+    /// `Cell::default()`: every cell from there on is one.
+    pub fn push_line_with_wrapped(&mut self, line: &[Cell], wrapped: bool) -> usize {
         match self {
-            Self::Memory(m) => m.push_line(line),
+            Self::Memory(m) => {
+                m.push_line(line);
+                line.len()
+            }
             Self::File(f) => f.push_line(line, wrapped),
         }
     }

@@ -78,8 +78,8 @@ impl FileScrollback {
                 ));
             }
             existing_epoch = u64::from_le_bytes(hdr[24..32].try_into().unwrap());
-            if version == 2 {
-                upgrade_v2_header_in_place(&bin_path)?;
+            if version < FILE_VERSION {
+                upgrade_header_in_place(&bin_path)?;
             }
         }
 
@@ -487,7 +487,7 @@ mod tests {
         let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("open v2");
         assert_eq!(
             header_version_and_abi(&tmp.bin()),
-            (3, 20),
+            (FILE_VERSION, 20),
             "header moved on"
         );
         let old_bytes = std::fs::read(tmp.bin()).unwrap();

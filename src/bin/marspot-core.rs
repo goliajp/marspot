@@ -2207,12 +2207,24 @@ mod boot_assembly_tests {
         // parse it: modes are set by the program's output, and
         // anything injected here is its input.  Retried because the
         // first bytes land before the shell is reading.
+        //
+        // Only the first copy to run prints anything.  A shell that
+        // takes longer to start than one retry has every copy queued,
+        // and the ones still waiting when the reset below arrives
+        // would turn the mode back on behind it: under a full suite's
+        // load this failed that way once, twenty seconds in, where a
+        // run alone takes a quarter of a second.
+        let once = std::env::temp_dir().join(format!("marspot-mouse-once-{}-{sid}", std::process::id()));
+        let _ = std::fs::remove_file(&once);
+        let command = format!(
+            "[ -e '{0}' ] || {{ : > '{0}'; printf '\\033[?1002h\\033[?1006h'; }}\r",
+            once.display()
+        );
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(20);
         let mut on = false;
         while std::time::Instant::now() < deadline {
-            pane.session_mut()
-                .forward_inject_input(b"printf '\\033[?1002h\\033[?1006h'\r");
+            pane.session_mut().forward_inject_input(command.as_bytes());
             for _ in 0..40 {
                 pane.pump();
                 if pane.session().l3_mouse_tracking_active() {
@@ -2247,6 +2259,7 @@ mod boot_assembly_tests {
                     "SGR encoding must go with it, or the next wheel is \
                      still a mouse report — just in the older form"
                 );
+                let _ = std::fs::remove_file(&once);
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
