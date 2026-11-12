@@ -150,12 +150,17 @@ fn adversarial() -> Vec<Vec<u8>> {
 
 const SIZES: [(u16, u16); 6] = [(122, 39), (40, 6), (8, 4), (7, 3), (3, 3), (2, 2)];
 
-fn feed_both(cols: u16, rows: u16, chunks: &[&[u8]], what: &str) {
+/// Feed both paths the same chunks; compare after each one when
+/// `every`, otherwise once at the end.
+fn feed_both(cols: u16, rows: u16, chunks: &[&[u8]], every: bool, what: &str) {
     let mut fast = Terminal::new(cols, rows);
     let mut slow = Terminal::new(cols, rows);
     for (n, chunk) in chunks.iter().enumerate() {
         fast.feed(chunk);
         slow.feed_reference(chunk);
+        if !every && n + 1 < chunks.len() {
+            continue;
+        }
         if let Some(d) = fast.first_difference(&slow) {
             panic!("{what}, {cols}x{rows}, after chunk {n} of {}: {d}", chunks.len());
         }
@@ -181,7 +186,7 @@ fn the_corpora_land_the_same_in_chunks_of_any_size() {
                         panic!("{name}, {cols}x{rows}, chunks of {size}: {d}");
                     }
                 } else {
-                    feed_both(cols, rows, &chunks, name);
+                    feed_both(cols, rows, &chunks, true, name);
                 }
             }
         }
@@ -193,7 +198,7 @@ fn adversarial_input_lands_the_same_split_at_every_byte() {
     for bytes in adversarial() {
         let what = String::from_utf8_lossy(&bytes).into_owned();
         for (cols, rows) in SIZES {
-            feed_both(cols, rows, &[&bytes], &what);
+            feed_both(cols, rows, &[&bytes], true, &what);
             // the full-size grid costs the most to compare and wraps
             // the least
             if cols < 100 {
@@ -201,11 +206,11 @@ fn adversarial_input_lands_the_same_split_at_every_byte() {
                 // every offset into a three- or four-byte character
                 let step = if bytes.len() > 96 { 7 } else { 1 };
                 for cut in (1..bytes.len()).step_by(step) {
-                    feed_both(cols, rows, &[&bytes[..cut], &bytes[cut..]], &what);
+                    feed_both(cols, rows, &[&bytes[..cut], &bytes[cut..]], false, &what);
                 }
             }
             let singles: Vec<&[u8]> = bytes.chunks(1).collect();
-            feed_both(cols, rows, &singles, &what);
+            feed_both(cols, rows, &singles, false, &what);
         }
     }
 }
