@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.308"  # the codex cli follows the daemon while the supervisor rests
-core    = "0.12.340"  # scrolled lines go to their files in larger pieces, and at the end of a burst
-session = "0.11.184"  # a pane that floods alone asks its pty again after a short read
+core    = "0.12.341"  # the ring of scrolled lines is bounded in bytes
+session = "0.11.185"  # the ring of scrolled lines is bounded in bytes

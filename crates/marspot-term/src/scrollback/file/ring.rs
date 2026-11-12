@@ -15,16 +15,23 @@
 //! for the decode instead.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 
 use super::*;
 use crate::grid::Cell;
 
+/// Most the ring's records may take.  256 lines of plain text are a
+/// fifth of this; lines that pack badly -- a colour change every cell
+/// is twenty bytes a cell -- leave the ring early, and are read from the
+/// file like any line older than the ring.
+const MAX_BYTES: usize = 128 * 1024;
+
 pub(super) struct Ring {
     capacity: usize,
-    /// One record body per line, oldest at `head` once full: flags,
-    /// columns, cells.  A slot keeps its allocation from line to line.
-    recs: Vec<Vec<u8>>,
-    head: usize,
+    /// One record body per line, oldest first: flags, columns, cells.
+    /// The allocation of a line that leaves is the next line's.
+    recs: VecDeque<Vec<u8>>,
+    /// What the records' allocations add up to.
     bytes: usize,
     /// Lines ever pushed: what a decoded row is remembered by, so a
     /// slot written again is not mistaken for the line it held.
@@ -37,8 +44,7 @@ impl Ring {
     pub(super) fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            recs: Vec::with_capacity(capacity),
-            head: 0,
+            recs: VecDeque::with_capacity(capacity),
             bytes: 0,
             pushed: 0,
             row: RefCell::new((None, Vec::new())),
@@ -49,7 +55,8 @@ impl Ring {
         self.recs.len()
     }
 
-    /// What the records held add up to.
+    /// What the records held take, never more than [`MAX_BYTES`] unless
+    /// one line alone is.
     pub(super) fn bytes(&self) -> usize {
         self.bytes
     }
@@ -60,28 +67,32 @@ impl Ring {
             return;
         }
         self.pushed += 1;
-        self.bytes += body.len();
-        if self.recs.len() < self.capacity {
-            self.recs.push(body.to_vec());
-            return;
+        let mut rec = Vec::new();
+        while self.recs.len() >= self.capacity || (!self.recs.is_empty() && self.bytes + body.len() > MAX_BYTES) {
+            rec = self.recs.pop_front().expect("a line to make room");
+            self.bytes -= rec.capacity();
         }
-        let rec = &mut self.recs[self.head];
-        self.head = (self.head + 1) % self.capacity;
-        self.bytes -= rec.len();
+        // An allocation grows to the longest line it has held, which
+        // for text is soon every line; one many times too large -- a
+        // line that did not pack came through it -- is not carried on.
+        if rec.capacity() > 4 * body.len() + 256 {
+            rec = Vec::new();
+        }
         rec.clear();
         rec.extend_from_slice(body);
+        self.bytes += rec.capacity();
+        self.recs.push_back(rec);
     }
 
     pub(super) fn clear(&mut self) {
         self.recs.clear();
-        self.head = 0;
         self.bytes = 0;
         self.row.borrow_mut().0 = None;
     }
 
     /// The record of line `i`, counted from the oldest held.
     fn rec(&self, i: usize) -> &[u8] {
-        &self.recs[(self.head + i) % self.recs.len()]
+        &self.recs[i]
     }
 
     pub(super) fn wrapped(&self, i: usize) -> bool {
@@ -166,16 +177,42 @@ mod tests {
     #[test]
     fn the_bytes_held_are_those_of_the_lines_held() {
         let mut ring = Ring::new(2);
-        let (short, long) = (body(&text("ab"), false), body(&text("abcdefgh"), false));
+        let (short, long) = (body(&text("ab"), false), body(&text(&"abcdefgh".repeat(200)), false));
         ring.push(&long);
         ring.push(&short);
-        assert_eq!(ring.bytes(), long.len() + short.len());
+        let held = ring.bytes();
+        assert!(held >= long.len() + short.len() && held < 2 * (long.len() + short.len()), "{held} bytes held");
         ring.push(&short);
-        assert_eq!(ring.bytes(), 2 * short.len());
+        assert!(ring.bytes() < 4 * short.len() + 64, "the long line's allocation left with it: {}", ring.bytes());
         ring.clear();
         assert_eq!((ring.len(), ring.bytes()), (0, 0));
         ring.push(&long);
-        assert_eq!(read(&ring, 0), "abcdefgh");
+        assert_eq!(read(&ring, 0), "abcdefgh".repeat(200));
+    }
+
+    /// Lines that do not pack leave the ring before it holds its count
+    /// of them: the newest are there, the bytes stay under the limit,
+    /// and plain lines afterwards fill it to its count again.
+    #[test]
+    fn the_ring_is_bounded_in_bytes_as_well_as_in_lines() {
+        let striped: Vec<Cell> = (0..200u8)
+            .map(|i| Cell { ch: 'x', attrs: CellAttrs { fg: Color::indexed(i), ..Default::default() } })
+            .collect();
+        let mut raw = vec![0u8];
+        raw.extend_from_slice(&(striped.len() as u16).to_le_bytes());
+        raw.extend_from_slice(Cell::slice_as_bytes(&striped));
+        let mut ring = Ring::new(256);
+        for _ in 0..300 {
+            ring.push(&raw);
+        }
+        assert!(ring.bytes() <= MAX_BYTES, "{} bytes held", ring.bytes());
+        assert!(ring.len() >= MAX_BYTES / raw.len() / 2 && ring.len() < 256, "{} lines held", ring.len());
+        ring.with_row(ring.len() - 1, |cells| assert_eq!(cells, &striped[..]));
+        for _ in 0..300 {
+            ring.push(&body(&text("plain"), false));
+        }
+        assert_eq!(ring.len(), 256);
+        assert!(ring.bytes() < 256 * 300, "{} bytes held by 256 short lines", ring.bytes());
     }
 
     /// Bytes that are not a record read as an empty line.
