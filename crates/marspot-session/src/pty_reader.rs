@@ -1,26 +1,41 @@
 //! The thread that reads a pane's PTY output for the main loop.
 //!
 //! macOS hands back at most 1024 bytes per `read` of a pty master,
-//! whatever the buffer, so a bulk `cat` is 130 000 reads for 134 MB.
-//! Waiting in `poll` before each one put the reader to sleep between
-//! every two kilobytes: it and the writing program took turns being
-//! woken, and that hand-over, not the parser, set the pace -- a reader
-//! that throws the bytes away carries 158 MB/s that way and 390 MB/s
-//! when it asks again instead of sleeping.  So the master is read
-//! without blocking until it runs dry, the kilobytes are gathered into
-//! one chunk, and a reader that has seen a full read asks again a few
-//! times before it goes back to `poll`.
+//! whatever the buffer, and the writing program sleeps after every one
+//! of them: a bulk `cat` is 130 000 hand-overs for 134 MB, and how the
+//! reader takes its side of each sets the pace more than the parser
+//! does.  What was measured, one corpus into N sessions at once, MB/s
+//! of all of them together:
+//!
+//! - wait, read once, queue it (`poll` then `read`): 154 / 159 / 162 /
+//!   134 for N = 1 / 2 / 4 / 9, with a parser woken for every kilobyte;
+//! - read until dry, ask a dry PTY sixteen more times, then wait:
+//!   184 / 210 / 114 / 91 -- every read that finds nothing still goes
+//!   through the kernel's pty path, and with four panes doing it the
+//!   writers spend twice as long in the kernel;
+//! - wait in a kqueue, which says how many bytes are there, and read
+//!   exactly those: 152 / 187 / 198 / 110.
+//!
+//! So the reader waits in a kqueue and never reads a PTY it has not
+//! been told has bytes, except right after a full kilobyte, when the
+//! next one is a few microseconds away and asking again is cheaper
+//! than sleeping.  That asking again is what two panes gain from and
+//! four lose to, which is one of the two reasons readers in bulk output
+//! take turns, two at a time -- see [`lease`].
 
 use std::io::{self, Write};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use marspot_term::pty::Pty;
+
+mod lease;
+use lease::{Lease, Leases};
 
 /// Most one chunk carries.
 const READ_BUF_BYTES: usize = 64 * 1024;
@@ -33,15 +48,14 @@ const CHUNKS: usize = 4;
 /// What one `read` of a pty master returns at most on macOS.
 const KERNEL_READ_BYTES: usize = 1024;
 
-/// How many times a reader that found the PTY dry right after a full
-/// read asks again before it stops to wait.  A full read is a program
-/// writing in bulk with a core of its own, and its next kilobyte is a
-/// few microseconds away: eight retries already carry what sixty-four
-/// do, with four a third of the dry spells end in a wait and the rate
-/// falls by a fifth.  After a short read there is no asking again: the
-/// writer is slower than this reader, and every retry would be a system
-/// call that finds nothing.
+/// How many times a reader that has just taken a full kilobyte asks for
+/// the next before it goes back to waiting.
 const DRY_RETRIES: u32 = 16;
+
+/// Spin-loop hints between two of those asks: about as long as the
+/// writer needs to be woken and fill the PTY again.  Asking with no
+/// pause carried the same bytes with three times the empty reads.
+const RETRY_PAUSE_SPINS: u32 = 64;
 
 /// Longest a chunk the parser is not waiting for is kept open for more.
 const GATHER_FOR: Duration = Duration::from_millis(3);
@@ -61,6 +75,10 @@ const WORTH_PARSING: usize = 8 * 1024;
 /// How long the tail of a bulk write waits for more before it is handed
 /// to an idle parser.  Output shorter than one full read never waits.
 const TAIL_WAIT: Duration = Duration::from_micros(200);
+
+/// How long a reader keeps its turn at bulk output while others may be
+/// waiting for one.  Nine panes flooding get a slice each every 9 ms.
+const TURN: Duration = Duration::from_millis(2);
 
 /// PTY output on its way to the parser: a buffer that keeps its size
 /// from one use to the next, and how much of it this read filled.
@@ -97,8 +115,8 @@ pub(crate) fn channel() -> (SyncSender<Chunk>, Receiver<Chunk>) {
 }
 
 enum Gathered {
-    /// The PTY may have more.
-    Open,
+    /// The PTY may have more; `dry` when the output had stopped.
+    Open { dry: bool },
     /// The PTY has ended.
     Ended,
     /// The reader was told to stop.
@@ -134,20 +152,43 @@ impl PtyReader {
             .spawn(move || {
                 let master = pty.raw_master();
                 set_nonblocking(master, true);
-                // waits here while the loop holds every chunk
-                while let Ok(mut chunk) = empties_rx.recv() {
+                let wakes = Wakes::new(master, stop_rx.as_raw_fd());
+                let mut turn = Turn { leases: Leases::open(), held: None, flooding: false };
+                loop {
+                    let mut chunk = match empties_rx.try_recv() {
+                        Ok(chunk) => chunk,
+                        Err(TryRecvError::Disconnected) => break,
+                        Err(TryRecvError::Empty) => {
+                            // the loop holds every chunk: no reading
+                            // until one comes back, so no turn either
+                            turn.pass();
+                            match empties_rx.recv() {
+                                Ok(chunk) => chunk,
+                                Err(_) => break,
+                            }
+                        }
+                    };
                     if stop_seen.load(Ordering::SeqCst) {
                         break;
                     }
                     // until this chunk has something in it
                     let end = loop {
-                        if wait_readable(master, &stop_rx, -1) == Readable::Stop {
-                            chunk.len = 0;
-                            break Gathered::Stopped;
-                        }
-                        let (len, end) = gather(&pty, &mut chunk.buf, &stop_rx, &in_flight);
+                        // a flood that pauses this long is over, and
+                        // its turn is not kept through the silence
+                        let there = match wakes.wait(turn.in_flood().then_some(TAIL_WAIT)) {
+                            Event::Stop => {
+                                chunk.len = 0;
+                                break Gathered::Stopped;
+                            }
+                            Event::Neither => {
+                                turn.end();
+                                continue;
+                            }
+                            Event::Data(there) => there,
+                        };
+                        let (len, end) = gather(&pty, &mut chunk.buf, &wakes, &in_flight, &mut turn, there);
                         chunk.len = len;
-                        if len > 0 || !matches!(end, Gathered::Open) {
+                        if len > 0 || !matches!(end, Gathered::Open { .. }) {
                             break end;
                         }
                     };
@@ -160,7 +201,8 @@ impl PtyReader {
                         wake();
                     }
                     match end {
-                        Gathered::Open => {}
+                        Gathered::Open { dry: true } => turn.end(),
+                        Gathered::Open { dry: false } => turn.pass_if_spent(),
                         Gathered::Ended => {
                             exited.store(true, Ordering::SeqCst);
                             wake();
@@ -194,8 +236,59 @@ impl PtyReader {
     }
 }
 
+/// This reader's place among the panes reading bulk output.
+struct Turn {
+    leases: Leases,
+    held: Option<(Lease, Instant)>,
+    /// A turn of this flood was used up and passed on: the next one is
+    /// waited for before reading on.
+    flooding: bool,
+}
+
+impl Turn {
+    /// In bulk output that has not paused since it took a turn.
+    fn in_flood(&self) -> bool {
+        self.held.is_some() || self.flooding
+    }
+
+    /// Called with `len` bytes of bulk output in hand.  The start of a
+    /// burst takes a turn only if one is free -- a screenful repainted
+    /// while other panes flood does not queue behind them -- and
+    /// output that keeps coming waits for one.  `true` when a turn
+    /// came out of a queue, which may have taken a while.
+    fn enter(&mut self, len: usize) -> bool {
+        if self.held.is_some() {
+            return false;
+        }
+        let queue = self.flooding || len >= WORTH_PARSING;
+        let lease = if queue { self.leases.take() } else { self.leases.try_take() };
+        self.held = lease.map(|lease| (lease, Instant::now()));
+        queue && self.held.is_some()
+    }
+
+    /// The output stopped.
+    fn end(&mut self) {
+        self.held = None;
+        self.flooding = false;
+    }
+
+    /// Give the turn to whoever waits; this flood is not over.
+    fn pass(&mut self) {
+        if self.held.take().is_some() {
+            self.flooding = true;
+        }
+    }
+
+    fn pass_if_spent(&mut self) {
+        if self.held.as_ref().is_some_and(|(_, since)| since.elapsed() >= TURN) {
+            self.pass();
+        }
+    }
+}
+
 /// Read `pty` into `buf` until it is full or what is in it should not
-/// wait any longer.  Returns the bytes read and how the read ended.
+/// wait any longer.  `there` is how many bytes the kernel said it
+/// holds.  Returns the bytes read and how the read ended.
 ///
 /// Output that comes in less than one full read is handed over at
 /// once.  After a full read the program is writing in bulk, and a dry
@@ -204,62 +297,93 @@ impl PtyReader {
 /// parsed sooner, and a reader that sits waiting for a chunk to come
 /// back lets the writer fall asleep -- and, for [`TAIL_WAIT`], while it
 /// holds too little to be worth a parse of its own.
-fn gather(pty: &Pty, buf: &mut [u8], stop: &UnixStream, unparsed: &AtomicUsize) -> (usize, Gathered) {
-    let started = Instant::now();
+fn gather(
+    pty: &Pty,
+    buf: &mut [u8],
+    wakes: &Wakes,
+    unparsed: &AtomicUsize,
+    turn: &mut Turn,
+    mut there: usize,
+) -> (usize, Gathered) {
+    let mut started = Instant::now();
     let mut len = 0;
-    let mut bulk = false;
-    let mut retried = 0;
-    // a short read, or retries that found nothing, say the PTY is dry
-    let mut dry = false;
-    while len < buf.len() {
-        if !dry {
+    // a short read in the middle of a flood is a writer short of a
+    // core, not a keystroke's echo
+    let mut bulk = turn.in_flood();
+    // the last read was a full one: the writer keeps up with this reader
+    let mut full = false;
+    loop {
+        while there > 0 && len < buf.len() {
             let space = buf.len() - len;
             match pty.read_shared(&mut buf[len..]) {
                 // macOS gives EIO when the slave side fully closes
                 Ok(0) => return (len, Gathered::Ended),
                 Ok(n) => {
                     len += n;
-                    if n >= KERNEL_READ_BYTES.min(space) {
-                        bulk = true;
-                        retried = 0;
-                        continue;
-                    }
-                    if !bulk {
-                        break;
-                    }
-                    dry = true;
+                    there = there.saturating_sub(n);
+                    full = n >= KERNEL_READ_BYTES.min(space);
+                    bulk |= full;
                 }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if !bulk {
-                        break;
-                    }
-                    if retried < DRY_RETRIES {
-                        retried += 1;
-                        std::hint::spin_loop();
-                        continue;
-                    }
-                    dry = true;
-                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => there = 0,
                 Err(_) => return (len, Gathered::Ended),
             }
+        }
+        if !bulk {
+            return (len, Gathered::Open { dry: true });
+        }
+        if len >= buf.len() {
+            break;
+        }
+        if turn.enter(len) {
+            started = Instant::now();
         }
         let idle = unparsed.load(Ordering::SeqCst) == 0;
         if started.elapsed() >= GATHER_FOR || (idle && len >= WORTH_PARSING) {
             break;
         }
-        match wait_briefly(pty.raw_master(), stop, if idle { TAIL_WAIT } else { GATHER_WAIT }) {
-            Readable::Stop => return (len, Gathered::Stopped),
-            Readable::Data => {
-                dry = false;
-                // no asking again until a full read says the writer is fast
-                retried = DRY_RETRIES;
+        if full {
+            match ask_again(pty, &mut buf[len..]) {
+                Asked::Got(n) => {
+                    full = n >= KERNEL_READ_BYTES.min(buf.len() - len);
+                    len += n;
+                    continue;
+                }
+                Asked::Dry => full = false,
+                Asked::Ended => return (len, Gathered::Ended),
             }
-            Readable::Neither if idle => break,
-            Readable::Neither => {}
+        }
+        match wakes.wait(Some(if idle { TAIL_WAIT } else { GATHER_WAIT })) {
+            Event::Stop => return (len, Gathered::Stopped),
+            Event::Data(n) => there = n,
+            Event::Neither if idle => return (len, Gathered::Open { dry: true }),
+            Event::Neither => {}
         }
     }
-    (len, Gathered::Open)
+    (len, Gathered::Open { dry: false })
+}
+
+enum Asked {
+    Got(usize),
+    Dry,
+    Ended,
+}
+
+/// Right after a full read: the writer was woken by it and its next
+/// kilobyte lands within microseconds, sooner than a wait would return.
+fn ask_again(pty: &Pty, buf: &mut [u8]) -> Asked {
+    for _ in 0..DRY_RETRIES {
+        for _ in 0..RETRY_PAUSE_SPINS {
+            std::hint::spin_loop();
+        }
+        match pty.read_shared(buf) {
+            Ok(0) => return Asked::Ended,
+            Ok(n) => return Asked::Got(n),
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => {}
+            Err(_) => return Asked::Ended,
+        }
+    }
+    Asked::Dry
 }
 
 fn set_nonblocking(fd: RawFd, on: bool) {
@@ -275,76 +399,92 @@ fn set_nonblocking(fd: RawFd, on: bool) {
     }
 }
 
-#[derive(PartialEq)]
-enum Readable {
-    Data,
+enum Event {
+    /// The PTY holds this many bytes, or has ended: at least one, so
+    /// the read that follows reports the end.
+    Data(usize),
     Stop,
     Neither,
 }
 
-/// Wait until `fd` has something to read, data or its end, `stop` has,
-/// or `timeout_ms` has passed (never, when negative).  `stop` wins.
-fn wait_readable(fd: RawFd, stop: &UnixStream, timeout_ms: i32) -> Readable {
-    let mut fds = [
-        libc::pollfd { fd, events: libc::POLLIN, revents: 0 },
-        libc::pollfd { fd: stop.as_raw_fd(), events: libc::POLLIN, revents: 0 },
-    ];
-    loop {
-        // SAFETY: two valid pollfds, both fds open for the caller's lifetime.
-        let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout_ms) };
-        if n < 0 {
-            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            // the read reports it
-            return Readable::Data;
-        }
-        if fds[1].revents != 0 {
-            return Readable::Stop;
-        }
-        if fds[0].revents != 0 {
-            return Readable::Data;
-        }
-        if n == 0 {
-            return Readable::Neither;
-        }
-    }
+/// The two things the reader waits for, in one kqueue.  Unlike `poll`
+/// it says how much the PTY holds, so nothing is read to find it dry.
+struct Wakes {
+    kq: OwnedFd,
+    stop: RawFd,
 }
 
-/// [`wait_readable`] for a wait shorter than `poll` can express.
-fn wait_briefly(fd: RawFd, stop: &UnixStream, wait: Duration) -> Readable {
-    let stop_fd = stop.as_raw_fd();
-    let highest = fd.max(stop_fd);
-    if highest < 0 || highest as usize >= libc::FD_SETSIZE {
-        return wait_readable(fd, stop, wait.as_millis().max(1) as i32);
+impl Wakes {
+    fn new(master: RawFd, stop: RawFd) -> Self {
+        let watch = |fd: RawFd| libc::kevent {
+            ident: fd as usize,
+            filter: libc::EVFILT_READ,
+            flags: libc::EV_ADD,
+            fflags: 0,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        let changes = [watch(master), watch(stop)];
+        // SAFETY: a new kqueue, owned from here on; two live changes
+        // in and no events out.
+        let kq = unsafe {
+            let kq = libc::kqueue();
+            assert!(kq >= 0, "a kqueue for the pty reader");
+            libc::kevent(kq, changes.as_ptr(), 2, std::ptr::null_mut(), 0, std::ptr::null());
+            OwnedFd::from_raw_fd(kq)
+        };
+        Self { kq, stop }
     }
-    // SAFETY: an fd_set is plain bits and all-zero is its empty value;
-    // both descriptors are open for the caller's lifetime and below
-    // FD_SETSIZE, checked above, so FD_SET and FD_ISSET stay inside it.
-    unsafe {
-        let mut set: libc::fd_set = std::mem::zeroed();
-        libc::FD_SET(fd, &mut set);
-        libc::FD_SET(stop_fd, &mut set);
-        let mut timeout = libc::timeval { tv_sec: 0, tv_usec: wait.subsec_micros() as libc::suseconds_t };
-        let n = libc::select(highest + 1, &mut set, std::ptr::null_mut(), std::ptr::null_mut(), &mut timeout);
-        if n > 0 {
-            if libc::FD_ISSET(stop_fd, &set) {
-                return Readable::Stop;
-            }
-            return Readable::Data;
+
+    /// Until the PTY has something, `stop` has, or `timeout` has passed
+    /// (never, when `None`).  `stop` wins.
+    fn wait(&self, timeout: Option<Duration>) -> Event {
+        let timeout = timeout.map(|t| libc::timespec {
+            tv_sec: t.as_secs() as libc::time_t,
+            tv_nsec: t.subsec_nanos() as libc::c_long,
+        });
+        // SAFETY: an all-zero kevent is a valid value to be overwritten;
+        // room for both events, and the timeout lives through the call.
+        let (n, events) = unsafe {
+            let mut events: [libc::kevent; 2] = std::mem::zeroed();
+            let n = libc::kevent(
+                self.kq.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                events.as_mut_ptr(),
+                2,
+                timeout.as_ref().map_or(std::ptr::null(), |t| t as *const libc::timespec),
+            );
+            (n, events)
+        };
+        if n <= 0 {
+            // a timeout, or a signal: the caller waits again
+            return Event::Neither;
         }
-        if n < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-            // the read reports it
-            return Readable::Data;
+        let events = &events[..n as usize];
+        if events.iter().any(|e| e.ident == self.stop as usize) {
+            return Event::Stop;
         }
-        Readable::Neither
+        Event::Data((events[0].data.max(0) as usize).max(1))
     }
 }
 
 /// Wait until `fd` has something to read, data or its end; `false`
 /// once `stop` has, whatever `fd` holds.
 pub(crate) fn readable_before_stop(fd: RawFd, stop: &UnixStream) -> bool {
-    wait_readable(fd, stop, -1) != Readable::Stop
+    let mut fds = [
+        libc::pollfd { fd, events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: stop.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+    ];
+    loop {
+        // SAFETY: two valid pollfds, both fds open for the caller's lifetime.
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        // an error is left for the read to report
+        return fds[1].revents == 0;
+    }
 }
 
 #[cfg(test)]
@@ -429,5 +569,45 @@ mod tests {
         }
         reader.stop();
         assert!(!nonblocking(pty.raw_master()));
+    }
+
+    /// A byte into an idle PTY is in the parser's queue about as soon
+    /// as a plain `poll` and `read` would have it: nothing on the way
+    /// waits for more output or for a turn.
+    #[test]
+    fn a_lone_byte_is_not_held_back() {
+        const ROUNDS: usize = 40;
+        // the tty echoes what is typed at `cat`
+        let plain = spawn("cat");
+        let mut plain_best = Duration::MAX;
+        for _ in 0..ROUNDS {
+            let started = Instant::now();
+            plain.write_shared(b"x").expect("type at the plain pty");
+            let mut fds = [libc::pollfd { fd: plain.raw_master(), events: libc::POLLIN, revents: 0 }];
+            // SAFETY: one valid pollfd on a master the test owns.
+            assert_eq!(unsafe { libc::poll(fds.as_mut_ptr(), 1, 5000) }, 1, "no echo");
+            let mut byte = [0u8; 16];
+            assert_eq!(plain.read_shared(&mut byte).expect("read the echo"), 1);
+            plain_best = plain_best.min(started.elapsed());
+        }
+
+        let pty = spawn("cat");
+        let exited = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = channel();
+        let reader = PtyReader::spawn(1, Arc::clone(&pty), exited, tx, || {});
+        let mut best = Duration::MAX;
+        for _ in 0..ROUNDS {
+            let started = Instant::now();
+            pty.write_shared(b"x").expect("type at the pty");
+            let chunk = rx.recv_timeout(Duration::from_secs(5)).expect("no echo");
+            best = best.min(started.elapsed());
+            assert_eq!(chunk.bytes(), b"x");
+            reader.recycle(chunk);
+        }
+        reader.stop();
+        assert!(
+            best < plain_best + TAIL_WAIT / 2,
+            "a lone byte took {best:?} through the reader and {plain_best:?} through a plain read"
+        );
     }
 }

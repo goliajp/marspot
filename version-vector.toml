@@ -28,4 +28,4 @@
 
 shell   = "0.7.302"  # the supervisor's clock does not tick at rest
 core    = "0.12.331"  # a scrolled line is filed as runs of like cells, a byte a cell for plain text
-session = "0.11.171"  # the pty is read until dry and handed to the parser in chunks of up to 64 KiB
+session = "0.11.172"  # the pty reader waits in a kqueue and panes in bulk output take turns, two at a time
