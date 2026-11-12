@@ -15,7 +15,7 @@ impl ParserCallbacks for Sink {
     fn print(&mut self, _ch: char) {}
     fn execute(&mut self, _byte: u8) {}
     fn esc_dispatch(&mut self, _intermediates: &[u8], _byte: u8) {}
-    fn csi_dispatch(&mut self, _params: &[u16], _intermediates: &[u8], _byte: u8) {}
+    fn csi_dispatch(&mut self, _params: &[u16], _subs: &[bool], _intermediates: &[u8], _byte: u8) {}
     fn osc_dispatch(&mut self, _data: &[u8]) {}
 }
 
