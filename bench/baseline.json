@@ -33,7 +33,7 @@
       "_parse_file_note": "mars_parse_file_MBps_min: the SAME headless parse with the scrollback a real pane has. `--bench parse` builds a Terminal with no MARSPOT_SESSION_ID and gets the in-RAM scrollback; every L3 pane sets it and gets the file-backed one, which trims, encodes and writes every scrolled line and keeps a RAM ring besides. Measured on mini 2026-09-07, median of 5: RAM 371.7 / 240.7 / 263.8 / 174.1 against file-backed 126.8 / 121.3 / 122.4 / 113.2 - the write dominates so completely that it flattens four very different corpora into 113-127. The fast gate had only ever shown the RAM number, so a whole afternoon of comparing against Alacritty was done against a path no user runs. (mars_l3_MBps_min covers the shipped path end to end but only under --full; this one isolates parse+scrollback without the L3 IPC.) Floors are min-of-5 x0.95 - this metric's spread is wide (ascii 119.6-155.6 in one batch) and its job is catching a regression, not holding a line.",
       "mars_l3_insn_per_byte_max": 150.45,
       "mars_parse_insn_per_byte_max": 47.93,
-      "mars_parse_file_insn_per_byte_max": 121.79,
+      "mars_parse_file_insn_per_byte_max": 81.73,
       "_insn_note": "Instruction ceilings, set 2026-11-12 from runs of one build (a63c4c4, rustc 1.99.1, mini, under the bench lock, load1 at most 3.2 during the single-session trials).  Each is the worst reading plus a margin sized to that metric's own run-to-run range, (max-min)/median.  mars_l3_insn_per_byte_max: median of 7 trials per run; eight runs read 143.99-146.36 / 178.35-181.83 / 171.76-172.38 / 212.61-215.17 for ascii / mixed / cjk / emoji (range 1.6 / 1.9 / 0.4 / 1.2 %), and two more runs of the same binary earlier the same night read 144.10-147.50 / 182.06-182.40 / 172.67-172.82 / 215.47-215.76.  Ceiling = the worst of the ten x 1.02.  A change that adds 5 % lifts even the lowest of the ten above its ceiling (ascii 143.99 x 1.05 = 151.19 against 150.45, the thinnest of the four).  All ten were taken the way bin/bench-remote.sh runs the probe, over an ssh session that stays open: with the session that started it already closed the same binary reads 4-6 % lower (mixed 170-171), for a reason not yet known, and bin/measure-l3.sh refuses to measure in that state.  mars_parse_insn_per_byte_max: median of 5, eight runs within 0.07 %, ceiling = worst x 1.01.  mars_parse_file_insn_per_byte_max: median of 5, eight runs within 1.0 %, ceiling = worst x 1.02; both are the same to the second decimal however the run is started."
     },
     {
@@ -46,7 +46,7 @@
       "mars_parse_file_MBps_min": 100.7,
       "mars_l3_insn_per_byte_max": 186.05,
       "mars_parse_insn_per_byte_max": 86.8,
-      "mars_parse_file_insn_per_byte_max": 175.52
+      "mars_parse_file_insn_per_byte_max": 135.2
     },
     {
       "id": "cat-cjk",
@@ -58,7 +58,7 @@
       "mars_parse_file_MBps_min": 115.3,
       "mars_l3_insn_per_byte_max": 176.28,
       "mars_parse_insn_per_byte_max": 93.03,
-      "mars_parse_file_insn_per_byte_max": 166.28
+      "mars_parse_file_insn_per_byte_max": 148.07
     },
     {
       "id": "cat-emoji",
@@ -71,7 +71,7 @@
       "mars_parse_file_MBps_min": 101.7,
       "mars_l3_insn_per_byte_max": 220.08,
       "mars_parse_insn_per_byte_max": 142.52,
-      "mars_parse_file_insn_per_byte_max": 214.58
+      "mars_parse_file_insn_per_byte_max": 195.82
     },
     {
       "id": "cat-clusters",
