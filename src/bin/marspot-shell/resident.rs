@@ -33,6 +33,7 @@ use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply,
+    NSRunningApplication,
 };
 
 use crate::supervisor::BinaryTree;
@@ -121,18 +122,26 @@ pub(crate) fn ls_refresh_main() -> ! {
 /// macOS 27.2: without this the members stay on the dead record, and
 /// the user opening the app is what frees them; an instance that exits
 /// without registering changes nothing; a process that registered
-/// before the dead record went is not given the members afterwards;
-/// and one that registers while the instance is on its way out is
-/// given them on some runs and not on others, which is why this waits
-/// for the exit.
+/// before the dead record went is not given the members afterwards.
 ///
-/// Between that instance registering and this process doing so the
+/// The order is what makes it work.  LaunchServices has to have seen
+/// the dead shell exit before the instance is started: under load it
+/// sees that as much as 0.3 s late, an instance that registers before
+/// then replaces nothing, and this process is then given the members
+/// as a related coalition, which does not keep a program registering
+/// from a pane from being given them too.  So this waits until no
+/// record of this app is left for a process that is gone, starts the
+/// instance, and waits for the same again before it registers.
+///
+/// Between the dead record going and this process registering the
 /// coalition is nobody's: some tens of milliseconds, which a program
-/// registering from a pane in that moment does win.  The instance used
-/// to stay for a fifth of a second, and the moment was that much longer.
+/// registering from a pane in that moment does win.
 pub(crate) fn replace_dead_record() {
     let exe = ownership::successor_exe();
     let Some(bundle) = ownership::bundle_of(&exe) else { return };
+    let patience = std::time::Duration::from_secs(2);
+    let asked = std::time::Instant::now();
+    let seen = records_of_the_dead_are_gone(patience);
     let begun = std::time::Instant::now();
     let status = std::process::Command::new("/usr/bin/open")
         .args(["-n", "-g", "-j", "-W"])
@@ -140,12 +149,41 @@ pub(crate) fn replace_dead_record() {
         .args(["--args", LS_REFRESH_ARG])
         .stdin(std::process::Stdio::null())
         .status();
+    let started = begun.elapsed();
+    let gone = records_of_the_dead_are_gone(patience);
     lx_event!(
         "SHELL_RESIDENT_RECORD",
         "had the app started once more so that the dead shell's record is replaced",
         ok = status.is_ok_and(|s| s.success()),
-        ms = begun.elapsed().as_millis()
+        ms = started.as_millis(),
+        exit_seen = seen,
+        exit_seen_ms = (begun - asked).as_millis(),
+        dead_records_gone = gone,
+        waited_ms = (begun.elapsed() - started).as_millis()
     );
+}
+
+/// Wait until LaunchServices lists no record of this app whose process
+/// no longer exists.  Asking does not register this process.
+fn records_of_the_dead_are_gone(patience: std::time::Duration) -> bool {
+    let Some(id) = objc2_foundation::NSBundle::mainBundle().bundleIdentifier() else { return false };
+    let deadline = std::time::Instant::now() + patience;
+    loop {
+        let left = objc2::rc::autoreleasepool(|_| {
+            NSRunningApplication::runningApplicationsWithBundleIdentifier(&id)
+                .iter()
+                // SAFETY: signal 0 only asks whether the pid exists.
+                .filter(|app| unsafe { libc::kill(app.processIdentifier(), 0) } != 0)
+                .count()
+        });
+        if left == 0 {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 /// Set by a quit that keeps sessions: when the app's event loop has
