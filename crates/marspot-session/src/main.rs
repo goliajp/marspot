@@ -32,6 +32,7 @@ mod owner_watch;
 mod local_session;
 mod pane_env;
 mod pty_reader;
+mod shell_end;
 mod signal_events;
 mod reply_guard;
 mod uds_server;
@@ -2240,6 +2241,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 pid = std::process::id()
             );
             marspot_term::grid_shm::delete_side_regions(id);
+            shell_end::end_with_pane(id, local.child_pid());
             std::process::exit(0);
         }
     }

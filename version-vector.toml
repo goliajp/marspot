@@ -28,4 +28,4 @@
 
 shell   = "0.7.311"  # a shell that puts itself away keeps the instance lock through its exec
 core    = "0.12.337"  # a dropped loop watch tells its watchdog to end before waking it
-session = "0.11.185"  # the version probe is an if, now that it is the only early argument
+session = "0.11.186"  # a closed session ends its pane's shell before it exits
