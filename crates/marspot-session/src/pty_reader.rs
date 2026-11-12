@@ -19,15 +19,17 @@
 //! So the reader waits in a kqueue and never reads a PTY it has not
 //! been told has bytes, except right after a full kilobyte, when the
 //! next one is a few microseconds away and asking again is cheaper
-//! than sleeping.  That asking again is what two panes gain from and
-//! four lose to, which is one of the two reasons readers in bulk output
-//! take turns, two at a time -- see [`lease`].
+//! than sleeping -- and, while no other pane floods, after any read of
+//! a flood.  That asking again is what two panes gain from and four
+//! lose to, which is one of the two reasons readers in bulk output take
+//! turns, two at a time -- see [`lease`].
 
 use std::io::{self, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -35,7 +37,9 @@ use std::time::{Duration, Instant};
 use marspot_term::pty::Pty;
 
 mod lease;
+mod wakes;
 use lease::{Lease, Leases};
+use wakes::{Event, Wakes};
 
 /// Most one chunk carries.
 const READ_BUF_BYTES: usize = 64 * 1024;
@@ -83,6 +87,44 @@ const BURST_BYTES: usize = 32 * 1024;
 /// How long a reader keeps its turn at bulk output while others may be
 /// waiting for one.  Nine panes flooding get a slice each every 9 ms.
 const TURN: Duration = Duration::from_millis(2);
+
+/// How long after a key what its program prints is handed over as it
+/// comes, flood or not.
+const ECHO_FOR: Duration = Duration::from_millis(100);
+
+/// When a key was last typed into this pane, on [`clock`]; 0 for never.
+/// One pane to a process, so one of these.
+static TYPED_AT: AtomicU64 = AtomicU64::new(0);
+
+/// Nanoseconds since this process first asked, never 0.
+fn clock() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_nanos() as u64 + 1
+}
+
+/// A key is on its way to the pane's program.
+///
+/// A flood is gathered a full chunk at a time, up to 3 ms of it, and
+/// what a program prints about a key waited in that chunk with the
+/// rest: a key typed into a flooding pane showed 0.8 to 0.9 ms later.
+/// For a moment after a key the reader hands over whatever it has each
+/// time the pty runs dry.
+pub(crate) fn typed() {
+    TYPED_AT.store(clock(), Ordering::Relaxed);
+}
+
+fn echo_expected() -> bool {
+    let at = TYPED_AT.load(Ordering::Relaxed);
+    if at == 0 {
+        return false;
+    }
+    let expected = clock() - at < ECHO_FOR.as_nanos() as u64;
+    if !expected {
+        // so a flood reads no clock until the next key
+        let _ = TYPED_AT.compare_exchange(at, 0, Ordering::Relaxed, Ordering::Relaxed);
+    }
+    expected
+}
 
 /// PTY output on its way to the parser: a buffer that keeps its size
 /// from one use to the next, and how much of it this read filled.
@@ -157,7 +199,7 @@ impl PtyReader {
                 let master = pty.raw_master();
                 set_nonblocking(master, true);
                 let wakes = Wakes::new(master, stop_rx.as_raw_fd());
-                let mut turn = Turn { leases: Leases::open(), held: None, flooding: false };
+                let mut turn = Turn { leases: Leases::open(), held: None, flooding: false, crowded: false };
                 loop {
                     let mut chunk = match empties_rx.try_recv() {
                         Ok(chunk) => chunk,
@@ -247,6 +289,8 @@ struct Turn {
     /// A turn of this flood was used up and passed on: the next one is
     /// waited for before reading on.
     flooding: bool,
+    /// Some other pane held a lease this flood wanted.
+    crowded: bool,
 }
 
 impl Turn {
@@ -265,7 +309,13 @@ impl Turn {
             return false;
         }
         let queue = self.flooding || len >= BURST_BYTES;
-        let lease = if queue { self.leases.take() } else { self.leases.try_take() };
+        let mut lease = self.leases.try_take();
+        if lease.is_none() {
+            self.crowded = true;
+            if queue {
+                lease = self.leases.take();
+            }
+        }
         self.held = lease.map(|lease| (lease, Instant::now()));
         queue && self.held.is_some()
     }
@@ -274,6 +324,12 @@ impl Turn {
     fn end(&mut self) {
         self.held = None;
         self.flooding = false;
+        self.crowded = false;
+    }
+
+    /// No other pane has been in the way of this flood.
+    fn alone(&self) -> bool {
+        !self.crowded
     }
 
     /// Give the turn to whoever waits; this flood is not over.
@@ -336,7 +392,7 @@ fn gather(
         if !bulk {
             return (len, Gathered::Open { dry: true });
         }
-        if len >= buf.len() {
+        if len >= buf.len() || (len > 0 && echo_expected()) {
             break;
         }
         if turn.enter(len) {
@@ -346,7 +402,13 @@ fn gather(
         if started.elapsed() >= GATHER_FOR {
             break;
         }
-        if full {
+        // A short read while this pane floods alone is the end of one
+        // of the program's writes, and its next begins some ten
+        // microseconds later: asking through that gap carried 2 to 3 %
+        // more than sleeping through it.  With other panes flooding a
+        // short read is a writer short of a core, and asking again is
+        // the empty reads that cost them all.
+        if full || turn.alone() {
             match ask_again(pty, &mut buf[len..]) {
                 Asked::Got(n) => {
                     full = n >= KERNEL_READ_BYTES.min(buf.len() - len);
@@ -403,76 +465,6 @@ fn set_nonblocking(fd: RawFd, on: bool) {
     }
 }
 
-enum Event {
-    /// The PTY holds this many bytes, or has ended: at least one, so
-    /// the read that follows reports the end.
-    Data(usize),
-    Stop,
-    Neither,
-}
-
-/// The two things the reader waits for, in one kqueue.  Unlike `poll`
-/// it says how much the PTY holds, so nothing is read to find it dry.
-struct Wakes {
-    kq: OwnedFd,
-    stop: RawFd,
-}
-
-impl Wakes {
-    fn new(master: RawFd, stop: RawFd) -> Self {
-        let watch = |fd: RawFd| libc::kevent {
-            ident: fd as usize,
-            filter: libc::EVFILT_READ,
-            flags: libc::EV_ADD,
-            fflags: 0,
-            data: 0,
-            udata: std::ptr::null_mut(),
-        };
-        let changes = [watch(master), watch(stop)];
-        // SAFETY: a new kqueue, owned from here on; two live changes
-        // in and no events out.
-        let kq = unsafe {
-            let kq = libc::kqueue();
-            assert!(kq >= 0, "a kqueue for the pty reader");
-            libc::kevent(kq, changes.as_ptr(), 2, std::ptr::null_mut(), 0, std::ptr::null());
-            OwnedFd::from_raw_fd(kq)
-        };
-        Self { kq, stop }
-    }
-
-    /// Until the PTY has something, `stop` has, or `timeout` has passed
-    /// (never, when `None`).  `stop` wins.
-    fn wait(&self, timeout: Option<Duration>) -> Event {
-        let timeout = timeout.map(|t| libc::timespec {
-            tv_sec: t.as_secs() as libc::time_t,
-            tv_nsec: t.subsec_nanos() as libc::c_long,
-        });
-        // SAFETY: an all-zero kevent is a valid value to be overwritten;
-        // room for both events, and the timeout lives through the call.
-        let (n, events) = unsafe {
-            let mut events: [libc::kevent; 2] = std::mem::zeroed();
-            let n = libc::kevent(
-                self.kq.as_raw_fd(),
-                std::ptr::null(),
-                0,
-                events.as_mut_ptr(),
-                2,
-                timeout.as_ref().map_or(std::ptr::null(), |t| t as *const libc::timespec),
-            );
-            (n, events)
-        };
-        if n <= 0 {
-            // a timeout, or a signal: the caller waits again
-            return Event::Neither;
-        }
-        let events = &events[..n as usize];
-        if events.iter().any(|e| e.ident == self.stop as usize) {
-            return Event::Stop;
-        }
-        Event::Data((events[0].data.max(0) as usize).max(1))
-    }
-}
-
 /// Wait until `fd` has something to read, data or its end; `false`
 /// once `stop` has, whatever `fd` holds.
 pub(crate) fn readable_before_stop(fd: RawFd, stop: &UnixStream) -> bool {
@@ -513,6 +505,104 @@ mod tests {
     fn nonblocking(fd: RawFd) -> bool {
         // SAFETY: reading the flags of a pty master the test owns.
         unsafe { libc::fcntl(fd, libc::F_GETFL) & libc::O_NONBLOCK != 0 }
+    }
+
+    /// A flood asks again after a short read only while no other pane
+    /// has been in its way, and finds that out afresh with each flood.
+    #[test]
+    fn a_flood_is_alone_until_it_finds_a_lease_taken() {
+        let path = lease::tests::lock_file("alone");
+        let turn = || Turn { leases: Leases::at(&path), held: None, flooding: false, crowded: false };
+        let mut free = turn();
+        free.enter(KERNEL_READ_BYTES);
+        assert!(free.alone(), "every lease was there to take");
+        drop(free);
+
+        let other = lease::tests::holder(&path);
+        let mut turn = turn();
+        turn.enter(KERNEL_READ_BYTES);
+        assert!(!turn.alone(), "another pane holds the leases");
+        lease::tests::release(other);
+        turn.enter(KERNEL_READ_BYTES);
+        assert!(turn.held.is_some());
+        assert!(!turn.alone(), "for as long as this flood lasts");
+        turn.end();
+        assert!(turn.alone());
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A flood comes in full chunks, and for a moment after a key in
+    /// whatever pieces the pty gave: the program's answer to the key is
+    /// somewhere in them and must not wait for a chunk to fill.
+    #[test]
+    fn a_flood_is_handed_over_as_it_comes_while_an_echo_is_expected() {
+        let pty = spawn("yes 0123456789012345678901234567890123456789");
+        let exited = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = channel();
+        let reader = PtyReader::spawn(1, Arc::clone(&pty), exited, tx, || {});
+        // The size in the middle of the next `chunks` chunks.  A chunk
+        // goes back when the one after it has come, the way a parser
+        // that is never idle would have it: gathering is what the
+        // reader does while the parser is busy.
+        let mut parsing: Option<Chunk> = None;
+        let mut typical = |chunks: usize| {
+            let mut sizes: Vec<usize> = (0..chunks)
+                .map(|_| {
+                    let chunk = rx.recv_timeout(Duration::from_secs(30)).expect("the flood stopped");
+                    let len = chunk.bytes().len();
+                    if let Some(parsed) = parsing.replace(chunk) {
+                        reader.recycle(parsed);
+                    }
+                    len
+                })
+                .collect();
+            sizes.sort_unstable();
+            sizes[chunks / 2]
+        };
+        // the first chunks of a flood come as the turns start
+        typical(8);
+        let gathered = typical(21);
+        assert!(gathered >= 8 * KERNEL_READ_BYTES, "a flood is gathered: {gathered} bytes a chunk");
+        typed();
+        // those already gathered when the key was typed
+        typical(CHUNKS);
+        let after = typical(21);
+        assert!(after <= 4 * KERNEL_READ_BYTES, "after a key it comes as the pty gives it: {after} bytes a chunk");
+        reader.stop();
+    }
+
+    /// Once a flood has stopped the reader sleeps: asking a pty that
+    /// has nothing more to say is for the microseconds between two
+    /// kilobytes, not for the silence after the last.
+    #[test]
+    fn a_reader_whose_flood_has_ended_sleeps() {
+        fn cpu_used() -> Duration {
+            // SAFETY: getrusage fills the struct it is given.
+            let ru = unsafe {
+                let mut ru: libc::rusage = std::mem::zeroed();
+                libc::getrusage(libc::RUSAGE_SELF, &mut ru);
+                ru
+            };
+            let of = |t: libc::timeval| Duration::new(t.tv_sec as u64, t.tv_usec as u32 * 1000);
+            of(ru.ru_utime) + of(ru.ru_stime)
+        }
+        let pty = spawn("head -c 2000000 /dev/zero | tr '\\0' a; sleep 30");
+        let exited = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = channel();
+        let reader = PtyReader::spawn(1, Arc::clone(&pty), exited, tx, || {});
+        let mut total = 0;
+        while total < 2_000_000 {
+            let chunk = rx.recv_timeout(Duration::from_secs(30)).expect("the flood stopped short");
+            total += chunk.bytes().len();
+            reader.recycle(chunk);
+        }
+        // long enough for the flood's last wait to have run out
+        thread::sleep(Duration::from_millis(50));
+        let before = cpu_used();
+        thread::sleep(Duration::from_millis(250));
+        let spent = cpu_used() - before;
+        reader.stop();
+        assert!(spent < Duration::from_millis(5), "the reader used {spent:?} of cpu in a quarter second of silence");
     }
 
     /// Two megabytes written in one go come through complete, and in

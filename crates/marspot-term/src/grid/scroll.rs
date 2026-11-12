@@ -4,6 +4,12 @@
 use super::{Cell, Grid, MAX_FILED_BLANK_RUN, MAX_RESERVED_HEADER_ROWS, PromptMark};
 
 impl Grid {
+    /// End of a burst of output: lines that scrolled off go to their
+    /// files now rather than when a buffer fills.
+    pub fn scrollback_hand_off(&self) {
+        self.scrollback.hand_off();
+    }
+
     /// Scroll the visible region up by `lines`.  The displaced top rows are
     /// pushed into scrollback (in order, oldest first) and the bottom
     /// `lines` rows are filled with `fill` — pass a Cell carrying the
