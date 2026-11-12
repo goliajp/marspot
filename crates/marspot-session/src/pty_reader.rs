@@ -28,7 +28,8 @@ use std::io::{self, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -86,6 +87,44 @@ const BURST_BYTES: usize = 32 * 1024;
 /// How long a reader keeps its turn at bulk output while others may be
 /// waiting for one.  Nine panes flooding get a slice each every 9 ms.
 const TURN: Duration = Duration::from_millis(2);
+
+/// How long after a key what its program prints is handed over as it
+/// comes, flood or not.
+const ECHO_FOR: Duration = Duration::from_millis(100);
+
+/// When a key was last typed into this pane, on [`clock`]; 0 for never.
+/// One pane to a process, so one of these.
+static TYPED_AT: AtomicU64 = AtomicU64::new(0);
+
+/// Nanoseconds since this process first asked, never 0.
+fn clock() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_nanos() as u64 + 1
+}
+
+/// A key is on its way to the pane's program.
+///
+/// A flood is gathered a full chunk at a time, up to 3 ms of it, and
+/// what a program prints about a key waited in that chunk with the
+/// rest: a key typed into a flooding pane showed 0.8 to 0.9 ms later.
+/// For a moment after a key the reader hands over whatever it has each
+/// time the pty runs dry.
+pub(crate) fn typed() {
+    TYPED_AT.store(clock(), Ordering::Relaxed);
+}
+
+fn echo_expected() -> bool {
+    let at = TYPED_AT.load(Ordering::Relaxed);
+    if at == 0 {
+        return false;
+    }
+    let expected = clock() - at < ECHO_FOR.as_nanos() as u64;
+    if !expected {
+        // so a flood reads no clock until the next key
+        let _ = TYPED_AT.compare_exchange(at, 0, Ordering::Relaxed, Ordering::Relaxed);
+    }
+    expected
+}
 
 /// PTY output on its way to the parser: a buffer that keeps its size
 /// from one use to the next, and how much of it this read filled.
@@ -353,7 +392,7 @@ fn gather(
         if !bulk {
             return (len, Gathered::Open { dry: true });
         }
-        if len >= buf.len() {
+        if len >= buf.len() || (len > 0 && echo_expected()) {
             break;
         }
         if turn.enter(len) {
@@ -490,6 +529,46 @@ mod tests {
         turn.end();
         assert!(turn.alone());
         let _ = std::fs::remove_file(path);
+    }
+
+    /// A flood comes in full chunks, and for a moment after a key in
+    /// whatever pieces the pty gave: the program's answer to the key is
+    /// somewhere in them and must not wait for a chunk to fill.
+    #[test]
+    fn a_flood_is_handed_over_as_it_comes_while_an_echo_is_expected() {
+        let pty = spawn("yes 0123456789012345678901234567890123456789");
+        let exited = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = channel();
+        let reader = PtyReader::spawn(1, Arc::clone(&pty), exited, tx, || {});
+        // The size in the middle of the next `chunks` chunks.  A chunk
+        // goes back when the one after it has come, the way a parser
+        // that is never idle would have it: gathering is what the
+        // reader does while the parser is busy.
+        let mut parsing: Option<Chunk> = None;
+        let mut typical = |chunks: usize| {
+            let mut sizes: Vec<usize> = (0..chunks)
+                .map(|_| {
+                    let chunk = rx.recv_timeout(Duration::from_secs(30)).expect("the flood stopped");
+                    let len = chunk.bytes().len();
+                    if let Some(parsed) = parsing.replace(chunk) {
+                        reader.recycle(parsed);
+                    }
+                    len
+                })
+                .collect();
+            sizes.sort_unstable();
+            sizes[chunks / 2]
+        };
+        // the first chunks of a flood come as the turns start
+        typical(8);
+        let gathered = typical(21);
+        assert!(gathered >= 8 * KERNEL_READ_BYTES, "a flood is gathered: {gathered} bytes a chunk");
+        typed();
+        // those already gathered when the key was typed
+        typical(CHUNKS);
+        let after = typical(21);
+        assert!(after <= 4 * KERNEL_READ_BYTES, "after a key it comes as the pty gives it: {after} bytes a chunk");
+        reader.stop();
     }
 
     /// Once a flood has stopped the reader sleeps: asking a pty that

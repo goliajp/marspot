@@ -169,6 +169,8 @@ impl FloodGate {
 
     pub(crate) fn typed(&mut self) {
         self.typed = Some(Instant::now());
+        // the reader stops gathering for as long as this gate stops holding
+        crate::pty_reader::typed();
     }
 
     /// Whether the turn of the loop now ending parsed a flood.
