@@ -14,6 +14,7 @@
 #   bin/test-e2e-remote.sh test-window-close-order.sh test-multi-window.sh
 #   E2E_SUITE_TIMEOUT=1800 bin/test-e2e-remote.sh test-multi-window.sh
 #   HOST=other-mini bin/test-e2e-remote.sh
+#   E2E_ENV=MARSPOT_PANE_JOB=1 bin/test-e2e-remote.sh   # panes' shells as launchd jobs
 #
 # The update suites sign their feed with a key generated for the run;
 # the build they test accepts it only with the `test-update-key` feature
@@ -196,10 +197,15 @@ for suite in "${SUITES[@]}"; do
   suite_rc=$?
   set -e
   secs=$(( $(date +%s) - start ))
+  # how the suite's panes got their shells, read while the log is there
+  how="$(ssh -o ConnectTimeout=5 "$HOST" "f=$current_sd/logs/marspot.log; [ -f \$f ] && \
+    echo \"shells: \$(grep -c L3_OWNS_PTY \$f) started, \$(grep -c PANE_JOB_STARTED \$f) by launchd, \$(grep -c PANE_JOB_FALLBACK \$f) refused by it\"" </dev/null || true)"
   reap_sandbox "$current_sd"
   if (( suite_rc == 0 )); then
     ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
-    results+=("PASS  ${secs}s  $suite")
+    results+=("PASS  ${secs}s  $suite${how:+  [$how]}")
+    # said now as well: a run that is cut short prints no summary
+    echo "==> PASS  ${secs}s  $suite${how:+  [$how]}"
   else
     case $suite_rc in
       124) why="timed out after ${SUITE_TIMEOUT}s" ;;
@@ -207,7 +213,7 @@ for suite in "${SUITES[@]}"; do
       *) why="exit $suite_rc" ;;
     esac
     echo "FAIL: $suite: $why (state dir kept: $HOST:$current_sd)" >&2
-    results+=("FAIL  ${secs}s  $suite  ($why)")
+    results+=("FAIL  ${secs}s  $suite  ($why)${how:+  [$how]}")
     rc=1
   fi
   current_sd=""

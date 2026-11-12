@@ -9,28 +9,35 @@
 //! own, so the shell is handed to launchd: what a pane starts then
 //! shares a coalition with that pane and nothing else.
 //!
-//! The job is this binary again, as a host that starts the shell on
-//! the pane's terminal, says which pid it is and exits.  The session
-//! then takes the job off launchd's list: the shell stays, in the
-//! coalition the job was given, and nothing of the job is left for the
-//! system to end when the app quits -- launchd stops the jobs an app
-//! asked for along with the app.
+//! The job is a host that starts the shell on the pane's terminal,
+//! says which pid it is and exits (`marspot_term::pane_host`).  The
+//! session then takes the job off launchd's list: the shell stays, in
+//! the coalition the job was given, and nothing of the job is left for
+//! the system to end when the app quits -- launchd stops the jobs an
+//! app asked for along with the app.
 //!
-//! What it costs: nothing under a launchd job has the app as its
-//! responsible process, so a privacy prompt names the program that
-//! asked, as it does in a pane that outlived the app that opened it.
+//! The host is the app's main executable, where the app that started
+//! this session left word of it: what the pane runs is then charged to
+//! the app by the privacy system, as it is for a forked shell.  When
+//! the app named none, this binary is the host: the coalition without
+//! the app's name.
 //!
-//! Off unless `MARSPOT_PANE_JOB=1`.  When launchd does not take the
-//! job, the shell is forked the way it always was.
+//! What it costs, and why it is off unless `MARSPOT_PANE_JOB=1`: the
+//! scheduler places each coalition's threads by how busy that coalition
+//! is.  A program that only feeds the terminal is not busy, and in a
+//! coalition of its own it is put on the efficiency cores once the
+//! sessions fill the performance cores: four panes printing at full
+//! speed together took in a third less (180 MB/s against 267).  One or
+//! two panes, and programs that compute, run as before.  When launchd
+//! does not take the job, the shell is forked the way it always was.
 
 // built off macOS for its tests only: nothing there starts a job
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::io;
+use std::path::PathBuf;
 
 use marspot_term::pty::{Pty, PtyConfig};
-
-pub(crate) const HOST_ARG: &str = "--pane-host";
 
 /// The session whose pane the shell is for.
 pub(crate) struct ForSession(pub(crate) u64);
@@ -42,60 +49,31 @@ impl ForSession {
     }
 }
 
-#[cfg(target_os = "macos")]
-mod host;
-#[cfg(target_os = "macos")]
-pub(crate) use host::host_main;
+pub(crate) const HOST_ARG: &str = marspot_term::pane_host::ARG;
+
+/// This binary as the host: what `MARSPOT_PANE_JOB=1` falls back to.
+pub(crate) fn host_main() {
+    #[cfg(target_os = "macos")]
+    if let Some(spec) = std::env::args_os().nth(2) {
+        marspot_term::pane_host::run(std::path::Path::new(&spec));
+    }
+}
+
 #[cfg(target_os = "macos")]
 use macos::spawn_shell;
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn host_main() {}
 
 #[cfg(not(target_os = "macos"))]
 fn spawn_shell(_id: u64, config: PtyConfig) -> io::Result<Pty> {
     Pty::spawn(config)
 }
 
-/// What the host needs to start the shell, as the file it is handed.
-#[derive(Debug, PartialEq, Eq, Default)]
-struct Spec {
-    tty: Vec<u8>,
-    reply: Vec<u8>,
-    cwd: Vec<u8>,
-    program: Vec<u8>,
-    argv: Vec<Vec<u8>>,
-    env: Vec<Vec<u8>>,
-}
-
-const SPEC_MAGIC: &[u8] = b"marspot-pane-job 1";
-
-impl Spec {
-    /// NUL-terminated fields: none of them can hold a NUL, and an
-    /// environment value can hold anything else.
-    fn encode(&self) -> Vec<u8> {
-        let argc = self.argv.len().to_string().into_bytes();
-        let head = [SPEC_MAGIC, &self.tty, &self.reply, &self.cwd, &self.program, &argc];
-        let mut out = Vec::new();
-        for field in head.into_iter().chain(self.argv.iter().map(Vec::as_slice)).chain(self.env.iter().map(Vec::as_slice)) {
-            out.extend_from_slice(field);
-            out.push(0);
-        }
-        out
-    }
-
-    fn decode(bytes: &[u8]) -> Option<Spec> {
-        let mut fields = bytes.strip_suffix(&[0])?.split(|b| *b == 0).map(<[u8]>::to_vec);
-        if fields.next()? != SPEC_MAGIC {
-            return None;
-        }
-        let (tty, reply, cwd, program) = (fields.next()?, fields.next()?, fields.next()?, fields.next()?);
-        let argc: usize = std::str::from_utf8(&fields.next()?).ok()?.parse().ok()?;
-        let mut argv = Vec::new();
-        for _ in 0..argc {
-            argv.push(fields.next()?);
-        }
-        Some(Spec { tty, reply, cwd, program, argv, env: fields.collect() })
+/// The executable the job runs, or none when the shell is to be forked.
+/// `switch` is `MARSPOT_PANE_JOB`, `named` what the app left in
+/// `MARSPOT_PANE_HOST`.
+fn host_program(switch: Option<&str>, named: Option<PathBuf>, own: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
+    match switch {
+        Some("1") => named.or_else(own),
+        _ => None,
     }
 }
 
@@ -130,23 +108,16 @@ fn plist(label: &str, exe: &str, spec: &str) -> String {
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <plist version=\"1.0\"><dict>\n\
          <key>Label</key><string>{}</string>\n\
-         <key>ProgramArguments</key><array><string>{}</string><string>{HOST_ARG}</string><string>{}</string></array>\n\
+         <key>ProgramArguments</key><array><string>{}</string><string>{}</string><string>{}</string></array>\n\
          <key>RunAtLoad</key><true/>\n\
          <key>ProcessType</key><string>Interactive</string>\n\
          <key>AbandonProcessGroup</key><true/>\n\
          </dict></plist>\n",
         esc(label),
         esc(exe),
+        marspot_term::pane_host::ARG,
         esc(spec)
     )
-}
-
-/// The host's answer: the shell's pid, or why there is none.
-fn parse_reply(line: &str) -> io::Result<i32> {
-    match line.trim_end().split_once(' ') {
-        Some(("pid", n)) => n.parse().map_err(|_| io::Error::other(format!("pane host said {line:?}"))),
-        _ => Err(io::Error::other(format!("pane host: {}", line.trim_end()))),
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -157,13 +128,15 @@ mod macos {
     use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::OpenOptionsExt;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
+    use marspot_term::pane_host::{self, Spec};
     use marspot_term::pty::{Pty, PtyConfig};
     use marspot_term::{lx_event, lx_warn};
 
-    use super::{Spec, child_env, label_for, parse_reply, plist};
+    use super::{child_env, host_program, label_for, plist};
 
     /// How long launchd and the host get to produce a shell before the
     /// pane is given one the old way.
@@ -171,10 +144,18 @@ mod macos {
     const LAUNCHCTL: &str = "/bin/launchctl";
 
     pub(crate) fn spawn_shell(id: u64, config: PtyConfig) -> io::Result<Pty> {
-        if std::env::var("MARSPOT_PANE_JOB").as_deref() != Ok("1") {
-            return Pty::spawn(config);
-        }
-        match spawn_as_job(id, &config) {
+        // this crate's unit tests are a harness, which is no pane host
+        let host = if cfg!(test) {
+            None
+        } else {
+            host_program(
+                std::env::var("MARSPOT_PANE_JOB").ok().as_deref(),
+                std::env::var_os(pane_host::PROGRAM_ENV).map(PathBuf::from),
+                || std::env::current_exe().ok(),
+            )
+        };
+        let Some(host) = host else { return Pty::spawn(config) };
+        match spawn_as_job(id, &config, &host) {
             Ok(pty) => Ok(pty),
             Err(e) => {
                 lx_warn!("PANE_JOB_FALLBACK", "launchd did not start the pane's shell; forking it", session = id, err = e);
@@ -188,7 +169,7 @@ mod macos {
         format!("gui/{}", unsafe { libc::getuid() })
     }
 
-    fn spawn_as_job(id: u64, config: &PtyConfig) -> io::Result<Pty> {
+    fn spawn_as_job(id: u64, config: &PtyConfig, host: &Path) -> io::Result<Pty> {
         let (master, slave, tty) = open_terminal(config)?;
         let root = marspot_term::paths::state_root();
         let dir = root.join("pane-jobs");
@@ -214,20 +195,23 @@ mod macos {
             reply: reply_path.as_os_str().as_bytes().to_vec(),
             cwd: config.cwd.clone().unwrap_or_default().into_bytes(),
             program: config.program.clone().into_bytes(),
+            limits: pane_host::own_limits(),
             argv,
             env: child_env(config, std::env::vars_os().map(|(k, v)| (k.into_vec(), v.into_vec()))),
         };
         // the environment can hold secrets: the file is ours alone and
         // the host removes it as soon as it has read it
         fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&spec_path)?.write_all(&spec.encode())?;
-        let exe = std::env::current_exe()?;
-        fs::write(&plist_path, plist(&label, &exe.to_string_lossy(), &spec_path.to_string_lossy()))?;
+        fs::write(&plist_path, plist(&label, &host.to_string_lossy(), &spec_path.to_string_lossy()))?;
 
         let begun = Instant::now();
         let out = Command::new(LAUNCHCTL).arg("bootstrap").arg(domain()).arg(&plist_path).stdin(Stdio::null()).output()?;
         let _ = fs::remove_file(&plist_path);
+        let loaded = begun.elapsed();
+        let mut answered = loaded;
         let started = if out.status.success() {
             let pid = read_reply(&mut reply);
+            answered = begun.elapsed();
             remove_job(&label);
             pid
         } else {
@@ -245,9 +229,12 @@ mod macos {
             "launchd started the pane's shell, in a coalition of its own",
             session = id,
             label = label,
+            host = host.display(),
             shell_pid = shell,
             shell_coalition = coalition_of(shell),
             own_coalition = coalition_of(std::process::id() as i32),
+            load_ms = loaded.as_millis(),
+            answer_ms = (answered - loaded).as_millis(),
             ms = begun.elapsed().as_millis()
         );
         Ok(Pty::from_raw_master(master.into_raw_fd(), shell))
@@ -311,7 +298,7 @@ mod macos {
                 Err(e) => return Err(e),
             }
             if line.contains(&b'\n') {
-                return parse_reply(&String::from_utf8_lossy(&line));
+                return pane_host::parse_reply(&String::from_utf8_lossy(&line));
             }
         }
     }
@@ -346,28 +333,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_spec_reads_back_as_written() {
-        let spec = Spec {
-            tty: b"/dev/ttys012".to_vec(),
-            reply: b"/tmp/x/7.reply".to_vec(),
-            cwd: Vec::new(),
-            program: b"/bin/zsh".to_vec(),
-            argv: vec![b"-zsh".to_vec()],
-            env: vec![b"A=1".to_vec(), b"MULTI=line one\nline two".to_vec(), b"EMPTY=".to_vec()],
-        };
-        assert_eq!(Spec::decode(&spec.encode()), Some(spec));
-        assert_eq!(Spec::decode(&Spec::default().encode()), Some(Spec::default()));
-    }
-
-    #[test]
-    fn a_file_that_is_not_a_spec_is_refused() {
-        assert_eq!(Spec::decode(b""), None);
-        assert_eq!(Spec::decode(b"marspot-pane-job 2\0a\0b\0c\0d\x000\0"), None);
-        assert_eq!(Spec::decode(b"marspot-pane-job 1\0a\0b\0c\0d\x003\0only-one\0"), None);
-        assert_eq!(Spec::decode(b"marspot-pane-job 1\0a\0b\0c\0d\0not-a-count\0"), None);
-    }
-
-    #[test]
     fn the_shell_gets_the_inherited_environment_less_the_prefixes_plus_what_is_set() {
         let config = PtyConfig {
             env_remove_prefixes: vec!["MARSPOT_".to_string()],
@@ -394,11 +359,16 @@ mod tests {
         assert!(p.contains("<string>--pane-host</string>"));
     }
 
+    /// Asked for, the app's executable when the app named it and this
+    /// binary when it did not; not asked for, nothing.
     #[test]
-    fn the_host_answers_with_a_pid_or_a_reason() {
-        assert_eq!(parse_reply("pid 4242\n").unwrap(), 4242);
-        assert!(parse_reply("err exec: No such file or directory\n").unwrap_err().to_string().contains("No such file"));
-        assert!(parse_reply("").is_err());
-        assert!(parse_reply("pid x\n").is_err());
+    fn the_host_is_the_app_when_it_named_itself() {
+        let app = || Some(PathBuf::from("/A/Marspot.app/Contents/MacOS/marspot-shell"));
+        let own = || Some(PathBuf::from("/s/marspot-session"));
+        assert_eq!(host_program(None, app(), own), None);
+        assert_eq!(host_program(None, None, own), None);
+        assert_eq!(host_program(Some("1"), None, own), own());
+        assert_eq!(host_program(Some("1"), app(), own), app());
+        assert_eq!(host_program(Some("0"), app(), own), None);
     }
 }

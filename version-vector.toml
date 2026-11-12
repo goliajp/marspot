@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.302"  # the supervisor's clock does not tick at rest
+shell   = "0.7.305"  # an app that took over from an older image of itself names no pane host
 core    = "0.12.337"  # a dropped loop watch tells its watchdog to end before waking it
-session = "0.11.179"  # a dropped loop watch tells its watchdog to end before waking it
+session = "0.11.180"  # a pane job is asked for with MARSPOT_PANE_JOB=1

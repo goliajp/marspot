@@ -26,6 +26,8 @@ use objc2_foundation::{MainThreadMarker, NSArray};
 
 #[path = "language_follow.rs"]
 mod language_follow;
+#[path = "pane_app.rs"]
+mod pane_app;
 
 /// What was last published as the system's theme; `u8::MAX` before
 /// the first tick.
@@ -64,8 +66,10 @@ fn sandbox_system_theme() -> Option<ThemeId> {
 
 /// What has to be in force before the first window and the menu bar
 /// exist: the interface language, and the ground the window opens on.
+/// The watch for applications that panes start begins here too.
 pub(crate) fn at_launch() -> (f64, f64, f64) {
     language_follow::at_launch();
+    pane_app::watch();
     marspot::system_theme::startup_palette().bg
 }
 
