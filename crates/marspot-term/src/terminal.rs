@@ -17,8 +17,10 @@ mod bulk;
 mod diff_tests;
 mod lane;
 mod reference;
+mod trace;
 
 use lane::fast_width;
+use trace::trace_seq;
 #[cfg(test)]
 use lane::{boring_width, fast_pict_width};
 use crate::grid::{Cell, CellAttrs, Color, ColorKind, DEFAULT_SCROLLBACK_LINES, Grid};
@@ -3932,12 +3934,17 @@ impl<'a> Handler<'a> {
     ///
     /// Called wherever the run of printable text ends — a control
     /// byte, an escape sequence — because a tag cannot span one.
+    #[inline(always)]
     fn flush_u_buf(&mut self) {
+        if *self.u_open || !self.u_buf.is_empty() {
+            self.flush_held_u_buf();
+        }
+    }
+
+    #[cold]
+    fn flush_held_u_buf(&mut self) {
         if *self.u_open {
             self.u_bail();
-            return;
-        }
-        if self.u_buf.is_empty() {
             return;
         }
         let held = std::mem::take(self.u_buf);
@@ -4097,48 +4104,6 @@ fn param_raw(params: &[u16], idx: usize, default: u16) -> u16 {
 /// appear (BCE for erase, scroll-fill for the new bottom row).  Apps like
 /// vim and tmux rely on this — clearing or scrolling under a non-default
 /// background must produce colored cells, not transparent ones.
-/// One-shot init: open the trace file path from MARSPOT_TRACE_ESC env.
-/// Set to None when env isn't present so the per-byte dispatch path
-/// pays only the OnceLock load (~1 ns) when tracing is off.
-fn trace_seq(kind: &str, intermediates: &[u8], params: &[u16], byte: u8) {
-    use std::io::Write;
-    use std::sync::{Mutex, OnceLock};
-    static FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
-    let file = FILE.get_or_init(|| {
-        std::env::var("MARSPOT_TRACE_ESC").ok().and_then(|p| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&p)
-                .ok()
-                .map(Mutex::new)
-        })
-    });
-    let Some(file) = file.as_ref() else { return };
-    let mut s = String::with_capacity(64);
-    s.push_str(kind);
-    if !intermediates.is_empty() {
-        s.push(' ');
-        for &b in intermediates {
-            s.push(b as char);
-        }
-    }
-    for (i, p) in params.iter().enumerate() {
-        s.push(if i == 0 { ' ' } else { ';' });
-        s.push_str(&p.to_string());
-    }
-    s.push(' ');
-    if (0x20..=0x7e).contains(&byte) {
-        s.push(byte as char);
-    } else {
-        s.push_str(&format!("0x{:02x}", byte));
-    }
-    s.push('\n');
-    if let Ok(mut f) = file.lock() {
-        let _ = f.write_all(s.as_bytes());
-    }
-}
-
 fn blank_with(attrs: CellAttrs) -> Cell {
     // BCE inherits ONLY the background colour — that is the whole of
     // the xterm contract.  Stamping the full SGR state into erase /

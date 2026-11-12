@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.302"  # the supervisor's clock does not tick at rest
-core    = "0.12.334"  # a run of text that needs no segmenter is written to the row in one pass
-session = "0.11.176"  # a run of text that needs no segmenter is written to the row in one pass
+core    = "0.12.335"  # the parameters of a control sequence are taken from the read in one pass
+session = "0.11.177"  # the parameters of a control sequence are taken from the read in one pass
