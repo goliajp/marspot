@@ -198,13 +198,16 @@ impl Session {
         w.flush().ok();
     }
 
-    /// The character at `(col, row)` of the most recent published frame.
+    /// The character at `(col, row)` of the most recent published frame,
+    /// NUL when this read came up empty: a read that meets the session
+    /// in the middle of publishing has no frame, and whoever polls a
+    /// cell reads again.  Dying on it ended the latency probe on its
+    /// first key, on every build.
     pub fn cell(&self, col: u16, row: u16, cols: u16) -> char {
         let mut buf = Vec::new();
-        let _ = self
-            .reader
-            .read(&mut buf, &mut Vec::new())
-            .unwrap_or_else(|| die("no published frame to read"));
+        if self.reader.read(&mut buf, &mut Vec::new()).is_none() {
+            return '\0';
+        }
         let idx = row as usize * cols as usize + col as usize;
         buf.get(idx).map(|c| c.ch).unwrap_or('\0')
     }
@@ -240,13 +243,20 @@ impl Session {
         Some(rows_of(&buf, cols, rows))
     }
 
+    /// Where the cursor is in the most recent published frame; waits
+    /// up to two seconds for a read that finds one.
     pub fn cursor(&self) -> (u16, u16) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut buf = Vec::new();
-        let f = self
-            .reader
-            .read(&mut buf, &mut Vec::new())
-            .unwrap_or_else(|| die("no published frame to read"));
-        (f.cursor_col, f.cursor_row)
+        loop {
+            if let Some(f) = self.reader.read(&mut buf, &mut Vec::new()) {
+                return (f.cursor_col, f.cursor_row);
+            }
+            if std::time::Instant::now() >= deadline {
+                die("no published frame to read");
+            }
+            std::thread::yield_now();
+        }
     }
 
     pub fn kill(&mut self) {
