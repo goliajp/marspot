@@ -6,7 +6,10 @@
 //! and re-read the command line of every process it looked at.  The
 //! observer does that once per interval on its own thread and
 //! publishes the result as an `Arc<Observation>`; consumers read the
-//! latest one, or ask for one no older than they can accept.
+//! latest one, or ask for one no older than they can accept.  It keeps
+//! to its interval only while somebody reads: with no reader since the
+//! last walk it waits for one, so an app nobody is polling walks no
+//! process table.
 //!
 //! An observation is up to [`INTERVAL`] old.  Anything that acts on a
 //! process (signals it, types at it) must re-check the `ProcId` at the
@@ -296,6 +299,8 @@ struct State {
     latest: Arc<Observation>,
     /// Someone is waiting for an observation newer than `latest`.
     wanted: bool,
+    /// `latest` has been read since it was built.
+    read: bool,
     stop: bool,
     /// The observer thread has ended: no newer observation will come.
     dead: bool,
@@ -361,7 +366,7 @@ impl Observer {
     ) -> Observer {
         let walks = AtomicU64::new(0);
         let first = build(&walks);
-        let state = State { latest: Arc::new(first), wanted: false, stop: false, dead: false };
+        let state = State { latest: Arc::new(first), wanted: false, read: false, stop: false, dead: false };
         let shared = Arc::new(Shared { state: Mutex::new(state), changed: Condvar::new(), walks });
         let theirs = Arc::clone(&shared);
         std::thread::Builder::new()
@@ -374,9 +379,16 @@ impl Observer {
         Observer { shared }
     }
 
-    /// The newest observation, without waiting.
+    /// The newest observation, without waiting.  The first read of an
+    /// observation is what schedules the next; one already older than
+    /// the interval (nobody read for a while) is replaced at once.
     pub fn latest(&self) -> Arc<Observation> {
-        self.shared.state().latest.clone()
+        let mut g = self.shared.state();
+        if !g.read {
+            g.read = true;
+            self.shared.changed.notify_all();
+        }
+        g.latest.clone()
     }
 
     /// An observation taken no more than `max_age` ago, waiting for a
@@ -435,6 +447,10 @@ fn run(shared: &Shared, mut build: impl FnMut(&AtomicU64) -> Observation, interv
                 if g.wanted {
                     break;
                 }
+                if !g.read {
+                    g = shared.changed.wait(g).unwrap_or_else(std::sync::PoisonError::into_inner);
+                    continue;
+                }
                 let due = g.latest.at + interval;
                 let now = Instant::now();
                 if now >= due {
@@ -447,6 +463,7 @@ fn run(shared: &Shared, mut build: impl FnMut(&AtomicU64) -> Observation, interv
                     .0;
             }
             g.wanted = false;
+            g.read = false;
         }
         let obs = Arc::new(build(&shared.walks));
         let old = std::mem::replace(&mut shared.state().latest, obs);
