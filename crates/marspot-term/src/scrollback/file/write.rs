@@ -23,7 +23,6 @@ impl FileScrollback {
         }
         // 1) Flush writer buffers so the rename captures complete data.
         self.bin.borrow_mut().flush();
-        self.idx.borrow_mut().flush();
         // 2) Drop everything that holds an fd / mmap to the hot
         //    files, so rename / unlink can succeed on platforms that
         //    care (we're macOS so unlink-while-open is OK, but a
@@ -59,11 +58,7 @@ impl FileScrollback {
         // Take ownership of the writers' inner BufWriters so they drop here.
         let _ = std::mem::replace(
             &mut *self.bin.borrow_mut(),
-            crate::async_writer::AsyncWriter::new(dev_null_file()?, BIN_BUF_BYTES, 4),
-        );
-        let _ = std::mem::replace(
-            &mut *self.idx.borrow_mut(),
-            crate::async_writer::AsyncWriter::new(dev_null_file()?, IDX_BUF_BYTES, 4),
+            crate::async_writer::AsyncWriter::new(dev_null_file()?, BIN_BUF_BYTES, BIN_DEPTH),
         );
         // Replace read fds with placeholders; we rebuild them post-rename.
         self.bin_for_read = dev_null_file()?;
@@ -93,7 +88,7 @@ impl FileScrollback {
             .append(true)
             .create(true)
             .open(&self.bin_path)?;
-        let mut bin = crate::async_writer::AsyncWriter::new(bin_w, BIN_BUF_BYTES, 4);
+        let mut bin = crate::async_writer::AsyncWriter::new(bin_w, BIN_BUF_BYTES, BIN_DEPTH);
         self.epoch = new_epoch();
         Self::write_header(&mut bin, self.epoch)?;
         bin.flush();
@@ -117,8 +112,8 @@ impl FileScrollback {
         let idx_for_read = std::fs::OpenOptions::new()
             .read(true)
             .open(&self.idx_path)?;
+        bin.pair(idx_w);
         *self.bin.borrow_mut() = bin;
-        *self.idx.borrow_mut() = crate::async_writer::AsyncWriter::new(idx_w, IDX_BUF_BYTES, 4);
         self.bin_for_read = bin_for_read;
         self.idx_for_read = idx_for_read;
         self.bin_tail_offset = FILE_HEADER_BYTES;
@@ -262,7 +257,7 @@ impl FileScrollback {
         // references bytes the data file does not have.  open()'s
         // tail-truncate scan reconciles whatever an unclean kill
         // left behind, as it always has.
-        self.idx.borrow_mut().write(&rec_offset.to_le_bytes());
+        self.bin.borrow_mut().write_side(&rec_offset.to_le_bytes());
         self.has_unflushed.set(true);
 
         self.ring.push(&self.scratch[4..]);
@@ -280,9 +275,7 @@ impl FileScrollback {
         if !self.has_unflushed.get() {
             return;
         }
-        // Order matters: data before the index that points at it.
         self.bin.borrow_mut().flush();
-        self.idx.borrow_mut().flush();
         self.has_unflushed.set(false);
     }
 
@@ -297,23 +290,20 @@ impl FileScrollback {
     /// recent rows hit the file directly instead of having to wait
     /// for the next push_line to spill.
     pub fn flush_for_handoff(&self) {
-        // Data before the index that points at it, and the index too:
-        // lines whose index stayed in a buffer are in no file the next
-        // image can find them in.
+        // The index goes with the records: lines whose index stayed in
+        // a buffer are in no file the next image can find them in.
         self.bin.borrow_mut().flush();
-        self.idx.borrow_mut().flush();
         self.has_unflushed.set(false);
     }
 
     /// End of a burst of output: hand what is buffered to the writer
     /// threads, without waiting for them.
     ///
-    /// The buffers are sized for a flood, and without this a pane that
-    /// printed a few hundred lines and went quiet would keep them in
-    /// memory until the next flood -- for a kill to take.
+    /// Without this a pane that printed a few hundred lines and went
+    /// quiet would keep them in memory until a buffer filled -- for a
+    /// kill to take.
     pub fn hand_off(&self) {
         self.bin.borrow_mut().hand_off();
-        self.idx.borrow_mut().hand_off();
     }
 
     /// Ensure `self.bin_mmap_*` covers at least `needed_len` bytes.
@@ -421,6 +411,73 @@ mod tests {
         assert_eq!(sb.len(), 1000);
         assert_eq!(sb.cell_at(999, 0).map(|c| c.ch), Some((b'a' + (999 % 26) as u8) as char));
         assert_eq!(sb.cell_at(0, 0).map(|c| c.ch), Some('a'));
+    }
+
+    /// What `a_process_killed_mid_flood_loses_a_bounded_tail` runs in a
+    /// process of its own: lines into the files named by the
+    /// environment, as fast as they go, until it is killed.
+    #[test]
+    #[ignore = "run by a_process_killed_mid_flood_loses_a_bounded_tail"]
+    fn pushes_lines_until_killed() {
+        let Ok(dir) = std::env::var("MARSPOT_TEST_KILL_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let cols = 8usize;
+        let mut sb = FileScrollback::open(dir.join("sb.bin"), dir.join("sb.idx"), cols, 4).expect("create");
+        for i in 0u64.. {
+            sb.push_line(&fill(b'a' + (i % 26) as u8, cols), false);
+            if i % 512 == 511 {
+                // how far it has certainly got
+                let _ = std::fs::write(dir.join("pushed"), (i + 1).to_string());
+            }
+        }
+    }
+
+    /// A process killed in the middle of a flood, with no flush and no
+    /// destructor: the files it leaves open cleanly, every line in them
+    /// reads back, and what is missing is no more than the buffers that
+    /// may be in flight -- 256 KiB of records.
+    #[test]
+    fn a_process_killed_mid_flood_loses_a_bounded_tail() {
+        let tmp = TmpDir::new("killed");
+        let dir = tmp.bin().parent().expect("a directory").join(format!("killed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "scrollback::file::write::tests::pushes_lines_until_killed", "--ignored", "--nocapture"])
+            .env("MARSPOT_TEST_KILL_DIR", &dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("run the pusher");
+        let pushed = || std::fs::read_to_string(dir.join("pushed")).ok().and_then(|s| s.parse::<u64>().ok());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut certain = 0;
+        // well past every buffer and queue, several times over
+        while certain < 100_000 {
+            assert!(std::time::Instant::now() < deadline, "the pusher got to {certain} lines");
+            certain = certain.max(pushed().unwrap_or(0));
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        child.kill().expect("kill the pusher");
+        let _ = child.wait();
+        certain = certain.max(pushed().unwrap_or(0));
+
+        let cols = 8usize;
+        let sb = FileScrollback::open(dir.join("sb.bin"), dir.join("sb.idx"), cols, 4).expect("reopen after the kill");
+        let kept = sb.len() as u64;
+        for i in [0, kept / 2, kept - 1] {
+            let line = sb.read_line(i as usize).unwrap_or_else(|| panic!("line {i} of {kept} reads back"));
+            assert_eq!(line[0].ch, (b'a' + (i % 26) as u8) as char, "line {i}");
+        }
+        // a record of these lines: length, flags, columns, one run of eight
+        let record = (FILE_REC_HEADER_BYTES + 2 + 1 + 16 + cols) as u64;
+        let lost = certain.saturating_sub(kept);
+        assert!(
+            lost * record <= ((BIN_DEPTH + 1) * BIN_BUF_BYTES) as u64,
+            "{lost} of {certain} lines lost, {} bytes of records",
+            lost * record
+        );
+        drop(sb);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A few lines and then silence: they reach the files without a
@@ -697,17 +754,17 @@ mod tests {
         let tmp = TmpDir::new("torn-write");
         let cols = 8usize;
 
-        // Push enough lines that the writer is mid-buffer when we
-        // forget — 40 000 × 8 cells writes ~1.4 MB to bin, past the
-        // 512 KiB hand-over size twice, so two buffers have already
-        // hit disk and some tail is unflushed.
+        // Push enough lines that BufWriter is mid-buffer when we
+        // forget — 5000 × 8 cells writes ~170 KB to bin, well past
+        // the 64 KB BufWriter auto-flush boundary so several
+        // chunks have already hit disk and some tail is unflushed.
         let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 256).expect("create");
-        for i in 0..40_000u32 {
+        for i in 0..5000u32 {
             let ch = b'a' + (i % 26) as u8;
             sb.push_line(&fill(ch, cols), false);
         }
         let pushed = sb.len();
-        assert_eq!(pushed, 40_000);
+        assert_eq!(pushed, 5000);
 
         // SAFETY: leak the FileScrollback — `Drop` (which flushes
         // BufWriters) never runs.  This is exactly what `libc::execv`
@@ -735,8 +792,8 @@ mod tests {
             FileScrollback::open(tmp.bin(), tmp.idx(), cols, 256).expect("reopen after torn close");
         let total = sb2.len();
         assert!(total <= pushed, "reopen total {total} > pushed {pushed}");
-        // The buffers handed over ensure a substantial prefix survived.
-        assert!(total >= 12_000, "reopen total {total} suspiciously low");
+        // BufWriter auto-flush ensures a substantial prefix survived.
+        assert!(total >= 1500, "reopen total {total} suspiciously low");
         for i in 0..total {
             let line = sb2
                 .read_line(i)

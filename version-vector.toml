@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.308"  # the codex cli follows the daemon while the supervisor rests
-core    = "0.12.341"  # the ring of scrolled lines is bounded in bytes
-session = "0.11.185"  # the ring of scrolled lines is bounded in bytes
+core    = "0.12.342"  # the disk writers take their buffers back to 64 KiB and write what has gathered at once
+session = "0.11.186"  # the disk writers take their buffers back to 64 KiB and write what has gathered at once

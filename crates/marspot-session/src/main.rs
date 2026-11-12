@@ -1754,9 +1754,13 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         }
         if want_shutdown {
             // Final pump before post-loop dispatcher decides
-            // execv-handoff vs clean-exit.
+            // execv-handoff vs clean-exit.  Bounded: the reader is
+            // still running, and a program that floods faster than the
+            // parser reads would keep an unbounded one here for as long
+            // as it floods.  What is still queued is parsed once the
+            // reader has been stopped.
             watch.phase("resize-pump");
-            let _ = session.pump();
+            let _ = session.pump_within(PUMP_BUDGET);
             watch.phase("resize-publish");
             publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, &mut blank_gate, poke.as_mut());
             break;
@@ -1825,6 +1829,13 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
             lx_event!("SESSION_EXITED", "shelld session exited; exiting cleanly");
             break;
         }
+        // Lines that scrolled off go to their files when a burst ends,
+        // and a flood's last ones on the turn after it.
+        let flood = n >= FloodGate::BULK_BYTES || queued;
+        if !flood {
+            session.terminal().grid().scrollback_hand_off();
+        }
+        flood_gate.turn(flood);
         // Republish on PTY output, a local echo that painted ahead of it,
         // a resize (grid shape changed), or a scroll (window changed) —
         // even when no bytes pumped this tick.
@@ -1849,10 +1860,6 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 );
             }
             watch.phase("publish");
-            let flood = n >= FloodGate::BULK_BYTES || queued;
-            if n > 0 && !flood {
-                session.terminal().grid().scrollback_hand_off();
-            }
             let bulk = flood && !(predicted || resized || scrolled || modes_changed);
             if !flood_gate.hold(bulk) {
                 publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, &mut blank_gate, poke.as_mut());

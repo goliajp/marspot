@@ -83,7 +83,7 @@ impl FileScrollback {
             }
         }
 
-        let mut bin = crate::async_writer::AsyncWriter::new(bin_w, BIN_BUF_BYTES, 4);
+        let mut bin = crate::async_writer::AsyncWriter::new(bin_w, BIN_BUF_BYTES, BIN_DEPTH);
         let epoch = if bin_existed {
             match existing_epoch {
                 0 => {
@@ -169,7 +169,7 @@ impl FileScrollback {
                 .open(&idx_path)?;
             trim_fd.set_len(new_idx_size)?;
         }
-        let idx = idx_w;
+        bin.pair(idx_w);
         let bin_tail_offset = bin_eof.max(FILE_HEADER_BYTES);
 
         // F2+5 — derive cold paths + open cold fds if files exist.
@@ -259,11 +259,6 @@ impl FileScrollback {
             cols,
             ram_capacity,
             bin: std::cell::RefCell::new(bin),
-            idx: std::cell::RefCell::new(crate::async_writer::AsyncWriter::new(
-                idx,
-                IDX_BUF_BYTES,
-                4,
-            )),
             bin_for_read,
             idx_for_read,
             bin_mmap_ptr: std::cell::Cell::new(std::ptr::null_mut()),

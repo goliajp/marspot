@@ -298,7 +298,6 @@ impl FileScrollback {
         // from before the clear must not resurrect past the new end.
         // The fds are append-mode, so later pushes land at the new EOF.
         self.bin.borrow_mut().truncate(FILE_HEADER_BYTES);
-        self.idx.borrow_mut().truncate(0);
         self.bin_tail_offset = FILE_HEADER_BYTES;
         self.total_lines = 0;
         self.hot_first_line = 0;
@@ -362,7 +361,6 @@ impl FileScrollback {
     /// `total_lines`).
     pub fn snapshot_for_search(&self) -> std::io::Result<FileSnapshot> {
         self.bin.borrow_mut().flush();
-        self.idx.borrow_mut().flush();
         let bin = std::fs::OpenOptions::new()
             .read(true)
             .open(&self.bin_path)?;
