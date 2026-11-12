@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.302"  # the supervisor's clock does not tick at rest
-core    = "0.12.331"  # a scrolled line is filed as runs of like cells, a byte a cell for plain text
-session = "0.11.172"  # the pty reader waits in a kqueue and panes in bulk output take turns, two at a time
+core    = "0.12.332"  # a row that scrolls off is blanked only as far as it was written
+session = "0.11.173"  # a row that scrolls off is blanked only as far as it was written

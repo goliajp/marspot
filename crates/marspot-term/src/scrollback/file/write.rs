@@ -177,7 +177,9 @@ impl FileScrollback {
         self.extras.put_clusters(local, clusters);
     }
 
-    pub fn push_line(&mut self, line: &[crate::grid::Cell], wrapped: bool) {
+    ///
+    /// Returns the line's length without its trailing default cells.
+    pub fn push_line(&mut self, line: &[crate::grid::Cell], wrapped: bool) -> usize {
         // F3+11.1 — trim trailing cells equal to `Cell::default()`
         // before encoding.  This is pure disk-size optimisation; the
         // semantic is unchanged from the dumb-store model: every
@@ -265,6 +267,7 @@ impl FileScrollback {
 
         self.push_into_ring(line, wrapped);
         self.total_lines += 1;
+        trimmed_len
     }
 
     /// Cheap idempotent flush: a cold-read path calls this before
