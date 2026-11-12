@@ -4692,6 +4692,7 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
 }
 
 fn main() {
+    marspot_term::pane_host::dispatch(); // launchd runs this program to start a pane's shell
     // RFC-004 D.1 — one-time Caches → Application Support state-root
     // migration.  Must run before logx / any path computation.
     marspot::paths::migrate_legacy_state_root();
@@ -4701,14 +4702,13 @@ fn main() {
     // read-stdin-write-one-file process: no log stream to open, no
     // supervisor bookkeeping, no window.  It needs the migration
     // above only so it computes the same state root the badge reads.
-    if std::env::args().nth(1).as_deref() == Some("--cc-statusline") {
-        std::process::exit(plugins::claudecode::statusline_ingest());
-    }
-    // A pane's agent reporting that it submitted something, for the
-    // same reasons and with the same shape: stdin in, one socket out,
-    // no log stream and no window.  See `receipts`.
-    if std::env::args().nth(1).as_deref() == Some("--submit-receipt") {
-        std::process::exit(receipts::report_from_stdin());
+    match std::env::args().nth(1).as_deref() {
+        Some("--cc-statusline") => std::process::exit(plugins::claudecode::statusline_ingest()),
+        // A pane's agent reporting that it submitted something, for the
+        // same reasons and with the same shape: stdin in, one socket out,
+        // no log stream and no window.  See `receipts`.
+        Some("--submit-receipt") => std::process::exit(receipts::report_from_stdin()),
+        _ => {}
     }
     // Make `println!` to a closed pipe (e.g. `marspot-shell --status |
     // head`) exit cleanly with the standard EPIPE convention instead
