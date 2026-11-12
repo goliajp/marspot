@@ -125,7 +125,7 @@ dev_session_pids() {
 }
 
 # The shells of this sandbox's live sessions, by the session registry,
-# one per line.  A shell that launchd started (the default) is
+# one per line.  A shell that launchd started (MARSPOT_PANE_JOB=1) is
 # not a child of its session, so the process tree does not find it.
 dev_pane_shell_pids() {
   local e p s

@@ -28,4 +28,4 @@
 
 shell   = "0.7.305"  # an app that took over from an older image of itself names no pane host
 core    = "0.12.333"  # a row that scrolls off is blanked only as far as it was written
-session = "0.11.177"  # the pane job line says how long launchd took to load it and to answer
+session = "0.11.178"  # a pane job is asked for with MARSPOT_PANE_JOB=1: several panes printing at once were a third slower
