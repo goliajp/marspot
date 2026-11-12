@@ -285,7 +285,8 @@ two_panes
 FIRST="$L1"; C0="$(coalition "$L1")"
 S1="$(session_pid "$P1")"; S2="$(session_pid "$P2")"; Z1="$(shell_of "$P1")"; Z2="$(shell_of "$P2")"
 # the launcher: started in pane 1, it starts the program when asked, also while the app has no window
-send_once "$P1" "( echo \$\$ > $SB/launcher.pid; while :; do read -r n < $SB/go && { $PROBE gui \$n & echo \$! > $SB/gui.pid; }; done ) &"
+printf 'echo $$ > %s/launcher.pid\nwhile :; do read -r n < %s/go && { %s gui "$n" & echo $! > %s/gui.pid; }; done\n' "$SB" "$SB" "$PROBE" "$SB" > "$SB/launcher.sh"
+send_once "$P1" "/bin/sh $SB/launcher.sh &"
 send_once "$P2" "sleep 100000 & echo \$! > $SB/by.pid"
 wait_file "$SB/launcher.pid" 15 && wait_file "$SB/by.pid" 15 || die "the panes' shells never ran what was typed"
 LAUNCHER="$(cat "$SB/launcher.pid")"; BY="$(cat "$SB/by.pid")"
