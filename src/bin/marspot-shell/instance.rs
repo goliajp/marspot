@@ -10,10 +10,15 @@
 //! The lock belongs to the open file, so it goes when the process does
 //! and there is no stale lock to clean up.  The descriptor is
 //! close-on-exec: no child can keep the lock alive after the shell is
-//! gone, and the shell's own `execv` (self-update, the redirect into
-//! `binaries/current`) drops it and the new image takes it again at the
-//! top of `main`.  A launch that slips into that gap becomes the app
-//! and the re-exec'd shell bows out to it: still one instance.
+//! gone, and the shell's own `execv` for an update drops it and the new
+//! image takes it again at the top of `main`.  A launch that slips into
+//! that gap becomes the app and the re-exec'd shell bows out to it:
+//! still one instance.
+//!
+//! A shell that puts itself away for its sessions, or comes back, must
+//! not bow out: the launch that slipped in would be in another
+//! coalition than the sessions.  Those execs carry the descriptor over
+//! (`carry_lock`), and the lock is held without a gap.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -68,6 +73,55 @@ fn parse_front_request(text: &str) -> Option<(u32, Vec<(String, String)>)> {
 /// The seams of the launch that last asked this shell to come forward.
 pub(crate) fn asked_with() -> Vec<(String, String)> {
     ASKED_WITH.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+/// Names the descriptor of the lock for the image this process is
+/// about to become.
+const LOCK_FD_ENV: &str = "MARSPOT_SHELL_LOCK_FD";
+
+fn set_cloexec(fd: std::os::fd::RawFd, on: bool) {
+    // SAFETY: fcntl on a descriptor this process holds.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        let flags = if on { flags | libc::FD_CLOEXEC } else { flags & !libc::FD_CLOEXEC };
+        libc::fcntl(fd, libc::F_SETFD, flags);
+    }
+}
+
+/// For this process's own exec, right before it: the next image holds
+/// the lock from its first instruction.
+pub(crate) fn carry_lock(cmd: &mut std::process::Command) {
+    if let Some(file) = LOCK.get() {
+        set_cloexec(file.as_raw_fd(), false);
+        cmd.env(LOCK_FD_ENV, file.as_raw_fd().to_string());
+    }
+}
+
+/// After such an exec failed: children must not inherit the lock.
+pub(crate) fn keep_lock_here() {
+    if let Some(file) = LOCK.get() {
+        set_cloexec(file.as_raw_fd(), true);
+    }
+}
+
+/// The lock the previous image of this process handed over, if it did.
+fn inherited_lock(path: &Path) -> Option<File> {
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    use std::os::unix::fs::MetadataExt;
+    let fd: std::os::fd::RawFd = std::env::var(LOCK_FD_ENV).ok()?.parse().ok()?;
+    // SAFETY: startup path in main(), before any thread is spawned.
+    unsafe { std::env::remove_var(LOCK_FD_ENV) };
+    // SAFETY: the number came from this process's previous image, which
+    // left that descriptor open for this one.
+    let file = unsafe { File::from_raw_fd(fd) };
+    let same = file.metadata().ok().zip(std::fs::metadata(path).ok()).is_some_and(|(a, b)| a.dev() == b.dev() && a.ino() == b.ino());
+    if !same {
+        // not the lock: whatever it is, it is not ours to close
+        let _ = file.into_raw_fd();
+        return None;
+    }
+    set_cloexec(fd, true);
+    Some(file)
 }
 
 fn lock_path() -> PathBuf {
@@ -152,6 +206,10 @@ pub(crate) fn hold_or_exit() {
     // SAFETY: startup path in main(), before any thread is spawned.
     unsafe { std::env::remove_var(marspot_term::owner::HEIR_ENV) };
     HEIR.store(heir, Ordering::Relaxed);
+    if let Some(file) = inherited_lock(&path) {
+        let _ = LOCK.set(file);
+        return;
+    }
     let claimed = if heir { claim_as_heir(&path) } else { claim(&path) };
     match claimed {
         Ok(Claim::Ours(file)) => {
@@ -313,6 +371,21 @@ mod tests {
                     .exec();
                 panic!("exec failed: {err}");
             }
+            // hold the lock and hand it to a new image of this binary,
+            // which must find it held without claiming it
+            "carry" => {
+                let Claim::Ours(file) = claim(&path).unwrap() else { panic!("not free") };
+                let _ = LOCK.set(file);
+                let mut cmd = Command::new(std::env::current_exe().unwrap());
+                cmd.args(["--exact", "instance::tests::helper_process", "--nocapture"]).env("MARSPOT_LOCK_ROLE", "carried");
+                carry_lock(&mut cmd);
+                panic!("exec failed: {}", cmd.exec());
+            }
+            "carried" => {
+                let _file = inherited_lock(&path).expect("the lock was handed over");
+                println!("carried={}", std::process::id());
+                std::thread::sleep(Duration::from_secs(60));
+            }
             "after-exec" => {
                 let Claim::Ours(_file) = claim(&path).unwrap() else { panic!("lost it across exec") };
                 println!("held-again={}", std::process::id());
@@ -350,6 +423,20 @@ mod tests {
         // SAFETY: the pid of the sleep the helper started and reported.
         unsafe { libc::kill(child, libc::SIGKILL) };
         assert!(free, "the holder's child kept the lock");
+    }
+
+    /// A launch cannot slip in while a shell that carries its lock
+    /// over is between two images.
+    #[test]
+    fn a_carried_lock_is_held_through_the_exec() {
+        let path = scratch("carry");
+        let mut holder = helper("carry", &path);
+        let pid = said(&mut holder, "carried=");
+        assert_eq!(pid, holder.id(), "exec keeps the pid");
+        assert_eq!(held_by(&path), Some(pid));
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        assert!(matches!(claim(&path).unwrap(), Claim::Ours(_)), "the lock went with the process");
     }
 
     #[test]

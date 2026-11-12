@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.310"  # the shell stays, with no window, for as long as a session is kept, and answers for their coalition
+shell   = "0.7.311"  # a shell that puts itself away keeps the instance lock through its exec
 core    = "0.12.337"  # a dropped loop watch tells its watchdog to end before waking it
-session = "0.11.182"  # a session starts a shell where it is when the one that answered for it dies
+session = "0.11.183"  # the owner watch opens what it holds before the session reports ready
