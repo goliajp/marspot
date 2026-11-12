@@ -21,9 +21,9 @@ use super::snapshot::FileSnapshot;
 //   - `.idx` is a dense `[u64 LE byte_offset]` array PLUS a sentinel
 //     pointing at .bin EOF.  `len(idx) = N + 1` where N = lines in
 //     `.bin`.  `entry_0 = 32` always.
-//   - Most-recent `ram_capacity` lines live in a flat-Vec RAM ring
-//     (mirrors `MemoryScrollback`'s zero-alloc shape).  Reads of these
-//     never touch the file.  Reads of older lines `pread` directly.
+//   - Most-recent `ram_capacity` lines live in a RAM ring, as the
+//     records the file gets.  Reads of these never touch the file.
+//     Reads of older lines `pread` directly.
 //   - Writer-side has a 64 KiB BufWriter; reader-side uses a separate
 //     fd opened read-only so reads never see partially-flushed bytes
 //     from the writer's buffer.  Recent lines are ALWAYS in the RAM
@@ -79,24 +79,8 @@ pub struct FileScrollback {
     /// for a cold read?" probe so we don't pay a syscall when the
     /// user is just reading from the RAM ring.
     has_unflushed: std::cell::Cell<bool>,
-    // RAM ring: zero-alloc flat-Vec mirror of the newest `ram_capacity`
-    // lines, with parallel wrapped flags.
-    ram_cells: Vec<crate::grid::Cell>,
-    /// How many of each slot's `cols` cells were actually written.
-    ///
-    /// The ring stores fixed-width rows, but the rows themselves are
-    /// not: a 122-column grid showing emoji prose fills ~47 of them.
-    /// Padding every slot out to `cols` on the way in costs a memset
-    /// of the remainder per pushed line — on the parse thread, for a
-    /// tier whose whole purpose is to be read *rarely* (it is the
-    /// front-line cache; a miss just goes to the file).  Recording the
-    /// length instead moves that work to the reader, which is the side
-    /// that can afford it.  Stale cells past `ram_lens[slot]` are
-    /// whatever the slot held before and must never be handed out.
-    ram_lens: Vec<u16>,
-    ram_wrapped: Vec<bool>,
-    ram_head: usize,
-    ram_len: usize,
+    /// The newest `ram_capacity` lines, read without touching the file.
+    ring: ring::Ring,
     /// Total lines ever pushed since creation — no eviction in v1 so
     /// this also equals scrollback length.
     total_lines: u64,
@@ -178,6 +162,7 @@ const IDX_BUF_BYTES: usize = 4 * 1024;
 
 mod open;
 mod read;
+mod ring;
 mod write;
 
 impl Drop for FileScrollback {

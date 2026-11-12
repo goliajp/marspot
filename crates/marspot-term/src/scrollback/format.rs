@@ -112,11 +112,7 @@ pub(super) fn read_record_at(
     bin: &std::fs::File,
     offset: u64,
 ) -> std::io::Result<(Vec<crate::grid::Cell>, bool)> {
-    let mut len_buf = [0u8; 4];
-    read_exact_at(bin, &mut len_buf, offset)?;
-    let rec_len = u32::from_le_bytes(len_buf) as usize;
-    let mut body = vec![0u8; rec_len];
-    read_exact_at(bin, &mut body, offset + 4)?;
+    let body = read_body_at(bin, offset)?;
     if body.len() < 3 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -136,6 +132,15 @@ pub(super) fn read_record_at(
         )
     })?;
     Ok((cells, wrapped))
+}
+
+/// The record at `offset` without its length: flags, columns, cells.
+pub(super) fn read_body_at(bin: &std::fs::File, offset: u64) -> std::io::Result<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    read_exact_at(bin, &mut len_buf, offset)?;
+    let mut body = vec![0u8; u32::from_le_bytes(len_buf) as usize];
+    read_exact_at(bin, &mut body, offset + 4)?;
+    Ok(body)
 }
 
 /// A record's cells, at whatever width the record was written.
@@ -288,17 +293,6 @@ pub(super) fn stamp_epoch_in_place(bin_path: &std::path::Path, epoch: u64) -> st
     f.write_all_at(&epoch.to_le_bytes(), 24)?;
     f.sync_data()?;
     Ok(())
-}
-
-pub(super) fn pad_or_clip(line: &[crate::grid::Cell], cols: usize) -> Vec<crate::grid::Cell> {
-    if line.len() == cols {
-        return line.to_vec();
-    }
-    let mut out = Vec::with_capacity(cols);
-    let take = line.len().min(cols);
-    out.extend_from_slice(&line[..take]);
-    out.resize(cols, crate::grid::Cell::default());
-    out
 }
 
 /// A value that changes whenever a local line index in this file stops

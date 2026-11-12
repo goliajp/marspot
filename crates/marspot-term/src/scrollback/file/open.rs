@@ -207,9 +207,7 @@ impl FileScrollback {
         let hot_count = total_lines;
         let total_lines = hot_count.saturating_add(cold_total_lines);
 
-        let mut ram_cells = Vec::with_capacity(ram_capacity.saturating_mul(cols));
-        let mut ram_lens: Vec<u16> = Vec::with_capacity(ram_capacity);
-        let mut ram_wrapped = Vec::with_capacity(ram_capacity);
+        let mut ring = ring::Ring::new(ram_capacity);
         // RAM ring loads the tail of HOT only.  Cold tier is read on
         // demand via cold fds; we don't pre-load it into the hot ring
         // because the user's working scroll-back is almost always in
@@ -232,24 +230,11 @@ impl FileScrollback {
                 // rows + all on-disk history.  This is principled
                 // tolerance for a known mechanism, not blind
                 // defense.
-                let row = match read_idx_at(&idx_for_read, li as u64) {
-                    Ok(off) => match read_record_at(&bin_for_read, off) {
-                        Ok((cells, w)) => {
-                            ram_wrapped.push(w);
-                            pad_or_clip(&cells, cols)
-                        }
-                        Err(_) => {
-                            ram_wrapped.push(false);
-                            pad_or_clip(&[], cols)
-                        }
-                    },
-                    Err(_) => {
-                        ram_wrapped.push(false);
-                        pad_or_clip(&[], cols)
-                    }
-                };
-                ram_cells.extend_from_slice(&row);
-                ram_lens.push(row.len() as u16);
+                let body = read_idx_at(&idx_for_read, li as u64)
+                    .and_then(|off| read_body_at(&bin_for_read, off))
+                    .ok()
+                    .filter(|body| ring::decode_body(body).is_some());
+                ring.push(body.as_deref().unwrap_or(&ring::EMPTY_BODY));
             }
         }
 
@@ -286,11 +271,7 @@ impl FileScrollback {
             idx_mmap_ptr: std::cell::Cell::new(std::ptr::null_mut()),
             idx_mmap_len: std::cell::Cell::new(0),
             has_unflushed: std::cell::Cell::new(false),
-            ram_cells,
-            ram_lens,
-            ram_wrapped,
-            ram_head: 0,
-            ram_len: load_n,
+            ring,
             total_lines,
             bin_tail_offset,
             scratch: Vec::with_capacity(
