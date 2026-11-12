@@ -20,9 +20,9 @@
 //! A pane in that state cannot change without one of the things that
 //! end the rest: a frame from the core (output was drawn), anything the
 //! shell sends the core (a key, the mouse, focus, a resize), a knock
-//! from a plugin thread, the command socket or a second launch, a
-//! signal, the settings file changing, the system's appearance
-//! changing, the core's socket closing.  Each of those runs a pass at
+//! from a plugin thread or a background job ([`knock`]), the command
+//! socket or a second launch, a signal, the settings file changing, the
+//! system's appearance changing, the core's socket closing.  Each of those runs a pass at
 //! once and puts the clock back to once a second, so nothing that
 //! happens while resting is seen later than it would have been.
 //!
@@ -36,7 +36,7 @@
 //! everything about agents runs exactly as before.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use marspot::app::EventProxy;
@@ -61,6 +61,19 @@ struct Shared {
     at_rest: AtomicBool,
 }
 
+/// The running clock's way to the main thread, for [`knock`].
+static DOOR: OnceLock<EventProxy> = OnceLock::new();
+
+/// Ask for a pass now, from any thread: what a background job that has
+/// finished, or a watch that has seen a change, does so that the pass
+/// which acts on it is not left to a clock that may be at rest.  Does
+/// nothing before the clock is started.
+pub(crate) fn knock() {
+    if let Some(p) = DOOR.get() {
+        p.wake();
+    }
+}
+
 pub(crate) struct Pump {
     shared: Arc<Shared>,
     proxy: EventProxy,
@@ -77,6 +90,7 @@ impl Pump {
     /// Start the clock, and the watches that knock for what used to be
     /// polled on it: the settings file, and SIGUSR1.
     pub(crate) fn start(proxy: EventProxy) -> Pump {
+        let _ = DOOR.set(proxy.clone());
         Self::start_with(proxy, Duration::from_millis(super::REDRAW_INTERVAL_MS))
     }
 
