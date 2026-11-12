@@ -76,6 +76,8 @@ struct WatchShared {
     generation: AtomicU64,
     /// Name of the phase currently executing.
     phase: Mutex<&'static str>,
+    /// Times the watchdog thread has looked at this state.
+    looks: AtomicU64,
 }
 
 pub struct LoopWatch {
@@ -92,6 +94,18 @@ pub struct LoopWatch {
     /// Iterations that ran past the threshold since construction.
     /// Cheap to expose and useful in a periodic summary.
     stalls: u64,
+    /// The watchdog thread, once spawned.  It parks while the loop is
+    /// between iterations, and `begin` is what wakes it.
+    watchdog: Option<std::thread::Thread>,
+}
+
+impl Drop for LoopWatch {
+    fn drop(&mut self) {
+        // a parked watchdog has to wake once more to see its owner gone
+        if let Some(t) = &self.watchdog {
+            t.unpark();
+        }
+    }
 }
 
 impl LoopWatch {
@@ -109,6 +123,7 @@ impl LoopWatch {
                 started_nanos: AtomicU64::new(0),
                 generation: AtomicU64::new(0),
                 phase: Mutex::new("start"),
+                looks: AtomicU64::new(0),
             }),
             iter_start: now,
             phase_start: now,
@@ -116,6 +131,7 @@ impl LoopWatch {
             phases: [("", Duration::ZERO); MAX_PHASES],
             n_phases: 0,
             stalls: 0,
+            watchdog: None,
         }
     }
 
@@ -134,7 +150,12 @@ impl LoopWatch {
         // Never store 0 — that is the "between iterations" sentinel.
         self.shared
             .started_nanos
-            .store(since_epoch.max(1), Ordering::Relaxed);
+            .store(since_epoch.max(1), Ordering::Release);
+        // An atomic swap unless the watchdog is parked, which it is only
+        // when the previous iteration ended before it looked.
+        if let Some(t) = &self.watchdog {
+            t.unpark();
+        }
     }
 
     /// Close the current phase and open `name`.
@@ -205,10 +226,13 @@ impl LoopWatch {
     /// loop (session exit — which is how a blocked PTY write commonly
     /// unblocks) skips `end()` altogether and is never reported at all.
     ///
-    /// This thread polls the shared iteration clock and fires
-    /// `on_stall(elapsed, phase)` once per iteration that outlives
-    /// `threshold`, so a live freeze shows up in the log *while the user
-    /// is still staring at it*.
+    /// This thread polls the shared iteration clock while an iteration
+    /// is running and fires `on_stall(elapsed, phase)` once per
+    /// iteration that outlives `threshold`, so a live freeze shows up
+    /// in the log *while the user is still staring at it*.
+    ///
+    /// Between iterations it is parked and `begin` wakes it, so a loop
+    /// blocked waiting for work costs no wake-ups at all.
     ///
     /// The thread ends when the `LoopWatch` is dropped (it holds only a
     /// `Weak`), so a caller never has to shut it down.
@@ -220,7 +244,7 @@ impl LoopWatch {
     /// waiting for a core, or asleep on a lock or the disk.
     ///
     /// Call it from the loop's own thread: that is the thread watched.
-    pub fn spawn_watchdog<F>(&self, on_stall: F)
+    pub fn spawn_watchdog<F>(&mut self, on_stall: F)
     where
         F: Fn(Watch) + Send + 'static,
     {
@@ -228,22 +252,32 @@ impl LoopWatch {
         let threshold = self.threshold;
         let probe = probe::Probe::this_thread();
         // Poll fast enough that a "the pane is frozen" report and the
-        // log line land in the same breath, cheap enough to be free:
-        // one atomic load per tick on an otherwise sleeping thread.
+        // log line land in the same breath.
         let tick = (threshold / 4).max(Duration::from_millis(25));
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("loop-watchdog".into())
             .spawn(move || {
                 let mut warned_for: u64 = 0;
                 // the stall being traced: its phase at the alarm, when
                 // the alarm went, the first look and counters, the trace
                 let mut open: Option<(&'static str, Instant, Option<probe::Look>, probe::Counts, Trace)> = None;
+                // nothing to watch yet, and after a look that found the
+                // loop between iterations with no stall being traced
+                let mut idle = true;
                 loop {
-                    std::thread::sleep(tick);
+                    if idle {
+                        // `begin` leaves a token if it ran since the
+                        // look, so an iteration cannot start unseen
+                        std::thread::park();
+                    } else {
+                        std::thread::sleep(tick);
+                    }
                     let Some(shared) = weak.upgrade() else {
                         return; // owner dropped
                     };
-                    let started = shared.started_nanos.load(Ordering::Relaxed);
+                    shared.looks.fetch_add(1, Ordering::Relaxed);
+                    let started = shared.started_nanos.load(Ordering::Acquire);
+                    idle = started == 0;
                     let iter_gen = shared.generation.load(Ordering::Relaxed);
                     if let Some((phase, at, first, counts, mut trace)) = open.take() {
                         let look = probe.look();
@@ -252,6 +286,7 @@ impl LoopWatch {
                                 trace.count(l.state);
                             }
                             open = Some((phase, at, first, counts, trace));
+                            idle = false;
                             continue;
                         }
                         trace.window = at.elapsed();
@@ -290,6 +325,7 @@ impl LoopWatch {
                 }
             })
             .expect("spawn loop-watchdog thread");
+        self.watchdog = Some(handle.thread().clone());
     }
 }
 
@@ -482,6 +518,52 @@ mod tests {
             rx.try_recv().is_err(),
             "watchdog fired while the loop was parked, not stalled"
         );
+    }
+
+    /// A loop blocked waiting for work must not be paid for: the
+    /// watchdog looks when an iteration begins and while one runs, and
+    /// at no other time.
+    #[test]
+    fn watchdog_does_not_wake_while_the_loop_is_parked() {
+        let mut w = LoopWatch::new(Duration::from_millis(60));
+        w.spawn_watchdog(|_| {});
+        let looks = |w: &LoopWatch| w.shared.looks.load(Ordering::Relaxed);
+        w.begin();
+        w.phase("quick");
+        let _ = w.end();
+        // the look `begin` asked for, and the one that sends it back to park
+        sleep(Duration::from_millis(100));
+        let settled = looks(&w);
+        assert!(settled >= 1, "begin did not wake the watchdog");
+        sleep(Duration::from_millis(500));
+        assert_eq!(looks(&w), settled, "the watchdog woke with no iteration running");
+        // and it is still on duty for the next one
+        w.begin();
+        sleep(Duration::from_millis(200));
+        assert!(looks(&w) >= settled + 3, "the watchdog did not poll a running iteration");
+        let _ = w.end();
+    }
+
+    /// Dropping the watch ends a parked watchdog instead of leaving it
+    /// parked for good.
+    #[test]
+    fn a_parked_watchdog_ends_with_its_owner() {
+        let mut w = LoopWatch::new(Duration::from_millis(60));
+        // the thread owns the callback, so the callback's capture is
+        // released when the thread returns and not before
+        let held = Arc::new(());
+        let in_thread = held.clone();
+        w.spawn_watchdog(move |_| {
+            let _ = &in_thread;
+        });
+        sleep(Duration::from_millis(50));
+        assert_eq!(Arc::strong_count(&held), 2);
+        drop(w);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Arc::strong_count(&held) > 1 && Instant::now() < deadline {
+            sleep(Duration::from_millis(5));
+        }
+        assert_eq!(Arc::strong_count(&held), 1, "the watchdog thread outlived its owner");
     }
 
     #[test]

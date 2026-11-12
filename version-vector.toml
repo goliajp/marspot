@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.298"  # a banner is drawn again for the display the window moved to
-core    = "0.12.329"  # a scrolled line is filed as runs of like cells, a byte a cell for plain text
-session = "0.11.169"  # the pty is read until dry and handed to the parser in chunks of up to 64 KiB
+shell   = "0.7.302"  # the supervisor's clock does not tick at rest
+core    = "0.12.331"  # a scrolled line is filed as runs of like cells, a byte a cell for plain text
+session = "0.11.171"  # the pty is read until dry and handed to the parser in chunks of up to 64 KiB

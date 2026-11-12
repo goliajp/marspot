@@ -3982,6 +3982,8 @@ macro_rules! win {
 
 #[path = "marspot-core/hover.rs"]
 mod hover;
+#[path = "marspot-core/idle.rs"]
+mod idle;
 #[path = "marspot-core/keys.rs"]
 mod keys;
 #[path = "marspot-core/theme_follow.rs"]
@@ -9811,10 +9813,7 @@ fn main() {
     let mut watch = marspot_term::loop_watch::LoopWatch::new(
         L2_LOOP_STALL_THRESHOLD,
     );
-    // A live report, not a post-mortem: this loop drives every pane, so
-    // while it is wedged the whole window is frozen and the user is
-    // looking at it right then.  `end()` cannot speak until the
-    // iteration completes.
+    // A live report: `end()` cannot speak until the iteration completes.
     watch.spawn_watchdog(|ev| match ev {
         marspot_term::loop_watch::Watch::Stalling { elapsed, phase } => lx_warn!(
             "l2.loop.stalling",
@@ -9829,6 +9828,8 @@ fn main() {
         ),
     });
 
+    let wake = event_tx.clone();
+    theme_follow::watch(move || drop(wake.send(CoreEvent::L3Ready)));
     let start = Instant::now();
     let mut frame: u64 = 0;
     // Track when we last saw forward progress (a pump that delivered
@@ -9867,17 +9868,13 @@ fn main() {
         } else {
             // When any window's render is gated by the frame-interval
             // cap, wake the loop in ≤ FRAME_MIN_INTERVAL to flush the
-            // deferred frame; otherwise stay event-driven at the 1 s
-            // idle timeout so CPU at rest stays near zero.  The
-            // deadline is the soonest across the dirty windows — one
-            // window's cap must not delay another's frame.
+            // deferred frame.  The deadline is the soonest across the
+            // dirty windows — one window's cap must not delay another's.
             // A frame on the GPU has to be reaped by a poll — nothing
             // sends us an event when it lands — so while one is in
-            // flight the loop wakes often enough to present it
-            // promptly.  This costs nothing at rest: with no frame
-            // committed there is nothing to poll, and the idle timeout
-            // stays a full second, which is what keeps CPU at rest
-            // near zero (a hard project constraint).
+            // flight the loop wakes often enough to present it.  With
+            // no frame owed the wait is `idle_wait`: no deadline at all
+            // unless some work is pending on a clock.
             const SETTLE_POLL: Duration = Duration::from_millis(1);
             let recv_timeout = app
                 .windows
@@ -9908,13 +9905,13 @@ fn main() {
                         }),
                 )
                 .min()
-                .unwrap_or(Duration::from_secs(1));
+                .or_else(|| app.idle_wait());
             let recv_timeout = if app.any_prediction_pending() || app.dev_panels.is_some() {
-                recv_timeout.min(Duration::from_millis(10))
+                Some(recv_timeout.map_or(Duration::from_millis(10), |t| t.min(Duration::from_millis(10))))
             } else {
                 recv_timeout
             };
-            match event_rx.recv_timeout(recv_timeout) {
+            match recv_timeout.map_or_else(|| event_rx.recv().map_err(|_| RecvTimeoutError::Disconnected), |t| event_rx.recv_timeout(t)) {
                 Ok(ev) => Some(ev),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => break 'main,
@@ -9963,9 +9960,8 @@ fn main() {
             }
         }
         //   3) re-read every pane's shell cwd so the title-strip
-        //      placeholder follows `cd` (see CWD_SWEEP_INTERVAL:
-        //      gated inside, repaints only the windows that moved).
-        app.sweep_pane_cwds();
+        //      placeholder follows `cd` (see `idle`).
+        app.sweep_pane_cwds_when_due();
         app.follow_theme();
         // Drain pending control-socket events.  Attach coalescing:
         // keep only the latest SurfaceAttach *per window* (resize
@@ -10442,6 +10438,7 @@ fn main() {
         watch.phase("pump");
         let pumped = app.pump_all();
         if pumped > 0 {
+            app.note_output();
             bytes_pumped_total = bytes_pumped_total.saturating_add(pumped as u64);
             last_progress = Instant::now();
         }

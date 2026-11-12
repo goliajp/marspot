@@ -16,8 +16,28 @@
 #   IDLE_WINDOW             measured window in seconds (60)
 #   IDLE_PROFILE            after measuring, sample L1 and L2 for this
 #                           many seconds and list their busiest frames
+#   IDLE_READINGS           take this many windows with bin/_idle_wakeups.py
+#                           (timer wake-ups, CPU in nanoseconds, per thread)
+#                           instead of the one `ps` window
+#   IDLE_WAKEUP_BUDGET      with IDLE_READINGS: fail when any window's
+#                           wake-ups per second, summed, are over this
+#   IDLE_MEMORY             also print `footprint` of every process
+#   IDLE_STACKS             sample L1, L2 and one L3 for this many seconds
+#                           and print where each thread sits
+
+#   IDLE_LAYOUTS            "1x1,2x2,4x3": measure each layout in turn, a
+#                           fresh sandbox app for each
 
 set -uo pipefail
+
+if [[ -n ${IDLE_LAYOUTS:-} ]]; then
+  rc=0
+  for layout in ${IDLE_LAYOUTS//,/ }; do
+    echo "════ layout $layout ════"
+    IDLE_LAYOUTS='' IDLE_COLS="${layout%x*}" IDLE_ROWS="${layout#*x}" "$0" || rc=$?
+  done
+  exit $rc
+fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
@@ -93,8 +113,31 @@ done
 echo "==> $N panes up ($(dev_session_pids | wc -l | tr -d ' ') L3), settling ${SETTLE}s"
 sleep "$SETTLE"
 
-"$ROOT/bin/measure-idle.sh" --app marspot-dev --sessions "$N" --window "$WINDOW"
-rc=$?
+if [[ -n ${IDLE_READINGS:-} ]]; then
+  "$ROOT/bin/_idle_wakeups.py" --label "marspot-dev $N panes" --window "$WINDOW" \
+    --readings "$IDLE_READINGS" ${IDLE_WAKEUP_BUDGET:+--budget "$IDLE_WAKEUP_BUDGET"} \
+    --pattern "$ROOT/target/(debug|release)/marspot(-shell|-core|-session)?( |\$)"
+  rc=$?
+  echo "    lock: $(/usr/local/bin/bench-lock status 2>/dev/null | grep -c waiting) waiting"
+else
+  "$ROOT/bin/measure-idle.sh" --app marspot-dev --sessions "$N" --window "$WINDOW"
+  rc=$?
+fi
+if [[ -n ${IDLE_MEMORY:-} ]]; then
+  for pid in $(dev_shell_pid) $(dev_core_pids) $(dev_session_pids); do
+    echo "==> footprint of pid $pid ($(ps -o comm= -p "$pid" | sed 's|.*/||'))"
+    footprint "$pid" 2>/dev/null | sed -n '/Dirty/,/TOTAL/p' | awk '$1 != "0" || /TOTAL/' | head -40
+  done
+fi
+if [[ -n ${IDLE_STACKS:-} ]]; then
+  for pid in $(dev_shell_pid) $(dev_core_pids | head -1) $(dev_session_pids | head -1); do
+    out=/tmp/marspot-idle-stacks-$pid.sample
+    sample "$pid" "$IDLE_STACKS" -file "$out" >/dev/null 2>&1
+    echo "==> stacks of pid $pid ($(ps -o comm= -p "$pid" | sed 's|.*/||')), ${IDLE_STACKS}s"
+    awk '/^Call graph:/{f=1;next} /^Total number in stack/{f=0} f' "$out" | cut -c1-170 | head -400
+    rm -f "$out"
+  done
+fi
 
 # Which layer it is: the result lists processes, this names them.
 OUT="$ROOT/bench/results/idle-marspot-dev-$N-unknown.json"
