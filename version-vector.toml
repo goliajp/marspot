@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.302"  # the supervisor's clock does not tick at rest
+shell   = "0.7.303"  # the app logs which pane a program that registers as an application was started in
 core    = "0.12.330"  # the main loop waits without a deadline when nothing is due
 session = "0.11.172"  # a shell launchd started is killed with its pane when it ignores the hangup
