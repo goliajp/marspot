@@ -105,18 +105,10 @@ impl FileScrollback {
         if line_idx >= self.total_lines as usize {
             return None;
         }
-        let ram_first = (self.total_lines as usize).saturating_sub(self.ram_len);
+        let ram_first = (self.total_lines as usize).saturating_sub(self.ring.len());
         if line_idx >= ram_first {
-            // In RAM ring.
-            let ring_idx = line_idx - ram_first;
-            let slot = (self.ram_head + ring_idx) % self.ram_capacity.max(1);
-            let start = slot * self.cols;
-            // Past what this slot actually holds is a blank, not the
-            // previous occupant's cell.
-            if col >= self.ram_lens.get(slot).copied().unwrap_or(0) as usize {
-                return Some(crate::grid::Cell::default());
-            }
-            return self.ram_cells.get(start + col).copied();
+            // past what the line holds is a blank
+            return Some(self.ring.with_row(line_idx - ram_first, |row| row.get(col).copied().unwrap_or_default()));
         }
         // F2+5 — when the requested line is older than hot's first row,
         // try the cold tier.  Lines older than cold_first_line are
@@ -216,13 +208,9 @@ impl FileScrollback {
         if idx >= self.total_lines as usize {
             return None;
         }
-        let ram_first = (self.total_lines as usize).saturating_sub(self.ram_len);
+        let ram_first = (self.total_lines as usize).saturating_sub(self.ring.len());
         if idx >= ram_first {
-            let ring_idx = idx - ram_first;
-            let slot = (self.ram_head + ring_idx) % self.ram_capacity.max(1);
-            let start = slot * self.cols;
-            let used = self.ram_lens.get(slot).copied().unwrap_or(0) as usize;
-            let mut row = self.ram_cells[start..start + used.min(self.cols)].to_vec();
+            let mut row = self.ring.with_row(idx - ram_first, |row| row[..row.len().min(self.cols)].to_vec());
             row.resize(self.cols, crate::grid::Cell::default());
             return Some(row);
         }
@@ -253,11 +241,9 @@ impl FileScrollback {
         if idx >= self.total_lines as usize {
             return false;
         }
-        let ram_first = (self.total_lines as usize).saturating_sub(self.ram_len);
+        let ram_first = (self.total_lines as usize).saturating_sub(self.ring.len());
         if idx >= ram_first {
-            let ring_idx = idx - ram_first;
-            let slot = (self.ram_head + ring_idx) % self.ram_capacity.max(1);
-            return self.ram_wrapped.get(slot).copied().unwrap_or(false);
+            return self.ring.wrapped(idx - ram_first);
         }
         // F2+5 — cold tier fallthrough.
         if (idx as u64) < self.hot_first_line {
@@ -305,17 +291,13 @@ impl FileScrollback {
         // that ask).  The bytelog is NOT touched: it's the disaster-
         // recovery ground truth, and replaying it re-applies this
         // very 3J, converging on the same cleared state.
-        self.ram_cells.clear();
-        self.ram_wrapped.clear();
-        self.ram_head = 0;
-        self.ram_len = 0;
+        self.ring.clear();
         // Truncate the hot pair to an empty (header-only) state.
         // `truncate` runs on the writer thread behind everything
         // already queued, and drops what is still buffered — records
         // from before the clear must not resurrect past the new end.
         // The fds are append-mode, so later pushes land at the new EOF.
         self.bin.borrow_mut().truncate(FILE_HEADER_BYTES);
-        self.idx.borrow_mut().truncate(0);
         self.bin_tail_offset = FILE_HEADER_BYTES;
         self.total_lines = 0;
         self.hot_first_line = 0;
@@ -365,7 +347,7 @@ impl FileScrollback {
     pub fn approx_bytes(&self) -> usize {
         // RAM ring resident bytes (matches Memory/Disk approx_bytes
         // semantics — what we hold in process, not what's on disk).
-        self.ram_len * self.cols * crate::grid::CELL_MEM_BYTES
+        self.ring.bytes()
     }
 
 }
@@ -379,7 +361,6 @@ impl FileScrollback {
     /// `total_lines`).
     pub fn snapshot_for_search(&self) -> std::io::Result<FileSnapshot> {
         self.bin.borrow_mut().flush();
-        self.idx.borrow_mut().flush();
         let bin = std::fs::OpenOptions::new()
             .read(true)
             .open(&self.bin_path)?;

@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.312"  # a shell that stays for its sessions stays in the image it has
-core    = "0.12.337"  # a dropped loop watch tells its watchdog to end before waking it
-session = "0.11.186"  # a closed session ends its pane's shell before it exits
+shell   = "0.7.313"  # the shell that stays for its sessions is the one that answers for their coalition
+core    = "0.12.343"  # a quit that ends the login session is told apart from one the user asked for
+session = "0.11.189"  # a session follows the shell that answers for it and ends its pane's shell when closed
