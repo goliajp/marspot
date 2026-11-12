@@ -316,8 +316,7 @@ impl MarspotAppCtx {
         self.exiting_full_screen.set(false);
     }
 
-    /// Schedule a `MarspotApp::redraw` after the current event handler
-    /// returns.  Coalesced — multiple calls per event collapse.
+    /// Schedule one `MarspotApp::redraw` after the current handler returns.
     pub fn request_redraw(&self) {
         self.redraw_pending.set(true);
     }
@@ -424,8 +423,6 @@ impl EventProxy {
         // The source's perform callback is a no-op — it just bumps
         // the main run loop.  Actual work happens in our drain pass:
         // anywhere we re-enter user code we also drain the proxy.
-        // (Modeled on winit's macOS proxy: signaling unblocks the
-        // run loop, dispatch happens via a separate observer.)
         let mut ctx = CFRunLoopSourceContext {
             version: 0,
             info: ptr::null_mut(),
@@ -474,12 +471,9 @@ impl Clone for EventProxy {
 }
 
 extern "C" fn source_perform(_info: *const c_void) {
-    // Wake fires user_event.  Any redraws or exits the handler
-    // requests are flushed by `dispatch_event_for`.
-    //
-    // A wake is about the process, not a window — bytes arrived from
-    // the core — so it goes to the first window, whose `user_event`
-    // drains for everyone.
+    // Wake fires user_event; `dispatch_event_for` flushes the redraws
+    // or exits the handler requests.  A wake is about the process, not
+    // a window, so it goes to the first one, which drains for everyone.
     dispatch_event_for(marspot_term::shell_proto::FIRST_WINDOW_ID, EventKind::UserEvent);
 }
 
@@ -555,11 +549,16 @@ define_class!(
             true
         }
 
-        // Flip Y-axis so origin is top-left (matches the rest of the
-        // code base's convention; layout / hit-testing assume top-left).
+        // Top-left origin, which layout and hit-testing assume.
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
             true
+        }
+
+        // The system went light or dark: a wake, so the app looks now.
+        #[unsafe(method(viewDidChangeEffectiveAppearance))]
+        fn appearance_changed(&self) {
+            source_perform(std::ptr::null());
         }
 
         #[unsafe(method(keyDown:))]

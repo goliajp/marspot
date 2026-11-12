@@ -172,15 +172,36 @@ fn two_consumers_in_one_interval_cause_one_walk() {
 }
 
 #[test]
-fn the_observer_rebuilds_on_its_interval() {
+fn the_observer_rebuilds_on_its_interval_while_it_is_read() {
     let obs = Observer::spawn(Duration::from_millis(20));
     let first = obs.latest();
     let deadline = Instant::now() + Duration::from_secs(5);
     while obs.walks() < 3 && Instant::now() < deadline {
+        obs.latest();
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(obs.walks() >= 3, "walks {}", obs.walks());
     assert!(obs.latest().at > first.at);
+}
+
+/// With no reader there is nobody to build for: one walk follows the
+/// last read, and then none until the next.
+#[test]
+fn the_observer_does_not_walk_for_nobody() {
+    let obs = Observer::spawn(Duration::from_millis(20));
+    obs.latest();
+    std::thread::sleep(Duration::from_millis(200));
+    let walks = obs.walks();
+    assert_eq!(walks, 2, "the walk the read asked for, and no more");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(obs.walks(), walks, "walked with nobody reading");
+    // a read after a quiet spell gets a new observation on the next beat
+    let stale = obs.latest();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while obs.walks() == walks && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(obs.latest().at > stale.at);
 }
 
 /// A consumer waiting for a fresh observation must not wait forever
