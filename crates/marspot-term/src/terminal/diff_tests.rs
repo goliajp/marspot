@@ -66,6 +66,14 @@ fn adversarial() -> Vec<Vec<u8>> {
     s("ab🚀cd🎉ef✨gh⭐");
     s("🚀🚀🚀🚀🚀🚀🚀🚀");
     s("x🚀 ✨ 🎉 🌏 🌙 ⭐");
+    // wide runs long enough to be classified sixteen at a time, with
+    // something else in every position of a block
+    s(&"漢字かなカナ한글ＡＢ、。「」ー".repeat(5));
+    for at in [0, 1, 7, 15, 16, 17] {
+        for odd in ["✨", "a", "é", "\u{3099}", "\u{1100}", "🚀", "\u{FF61}", "\n"] {
+            s(&format!("{}{odd}{}", "中".repeat(at), "文".repeat(20)));
+        }
+    }
     // ZWJ sequences, skin tones, flags, with fast-class neighbours
     s("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}!");
     s("\u{1F468}\u{200D}\u{2705}\u{2705}");
@@ -129,6 +137,8 @@ fn adversarial() -> Vec<Vec<u8>> {
         b"\xe4\xb8\xad\xe4\xe4\xb8\xad\xf0\xe4\xb8\xad",
         b"\xf0\x9f\x9a\x80\xf0\xf0\x9f\x9a\x80\xe4\xf0\x9f\x9a\x80",
         b"\xe4\xb8\x1b[31m\xad",
+        b"\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\x87",
+        b"\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\x87\xed\xa0\x80\xe4\xb8\xad\xe6\x96\x87\xe0\x80\xa0\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\x87\xe4\xb8\xad\xe6\x96\x87",
         b"ab\x18cd\x1aef\x7fgh\x00ij",
         b"\x1b[31\x1b[32mab\x1b[3\x18cd\x1b[\ne",
         b"\x1b\x1b[1m\x1b[;;;m\x1b[99999;1m\x1b[1;",
@@ -187,7 +197,10 @@ fn adversarial_input_lands_the_same_split_at_every_byte() {
             // the full-size grid costs the most to compare and wraps
             // the least
             if cols < 100 {
-                for cut in 1..bytes.len() {
+                // a long input is cut at every seventh byte: still
+                // every offset into a three- or four-byte character
+                let step = if bytes.len() > 96 { 7 } else { 1 };
+                for cut in (1..bytes.len()).step_by(step) {
                     feed_both(cols, rows, &[&bytes[..cut], &bytes[cut..]], &what);
                 }
             }

@@ -3,7 +3,7 @@
 //! machine everywhere else.
 
 use super::{Handler, Terminal};
-use crate::parser::Parser;
+use crate::parser::{Parser, ParserCallbacks};
 use std::time::Instant;
 
 impl Terminal {
@@ -145,18 +145,30 @@ impl Terminal {
 
 /// Feed `bytes` with no prediction pending.
 ///
-/// In plain Ground a run of fast-class text is taken whole instead of
-/// a byte at a time, doing exactly what the state machine would have
-/// done with the same bytes.  Everything else, and whatever the lane
-/// leaves unconsumed, goes through `advance`.
+/// In plain Ground three shapes are taken whole instead of a byte at a
+/// time, each doing exactly what the state machine would have done
+/// with the same bytes: a run of fast-class text, the parameter bytes
+/// of a control sequence, and a C0 control.  Everything else, and
+/// whatever those leave unconsumed, goes through `advance`.
 fn feed_bulk(parser: &mut Parser, handler: &mut Handler<'_>, bytes: &[u8]) {
     let mut i = 0;
     while i < bytes.len() {
         let b0 = bytes[i];
-        if b0 >= 0x20 && parser.in_ground_plain() {
-            let n = handler.text_lane(&bytes[i..]);
-            if n > 0 {
-                i += n;
+        if parser.in_ground_plain() {
+            if b0 >= 0x20 {
+                let n = handler.text_lane(&bytes[i..]);
+                if n > 0 {
+                    i += n;
+                    continue;
+                }
+            } else if b0 == 0x1B {
+                if bytes.get(i + 1) == Some(&b'[') {
+                    i += parser.csi_slice(handler, &bytes[i..]);
+                    continue;
+                }
+            } else if b0 != 0x18 && b0 != 0x1A {
+                handler.execute(b0);
+                i += 1;
                 continue;
             }
         }

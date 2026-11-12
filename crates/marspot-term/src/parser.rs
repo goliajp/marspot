@@ -20,6 +20,7 @@
 //! resets the UTF-8 accumulator.
 
 pub(crate) mod scan;
+mod slice;
 
 const MAX_PARAMS: usize = 16;
 const MAX_INTERMEDIATES: usize = 4;
