@@ -149,3 +149,68 @@ impl super::CoreApp {
         wait
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::window_state_tests::{app_with, win};
+    use super::super::*;
+    use super::{LAST_MS, SETTLE, SOON_MS, ms};
+    use marspot_term::test_env::sandbox_state_dir;
+    use std::sync::atomic::Ordering;
+
+    const ELSEWHERE: &str = "/moved/away";
+
+    /// Whether a read happened: a read puts the real directory back.
+    fn read_since_poisoned(app: &mut CoreApp, sid: u64) -> bool {
+        let read = app.pane_cwds.get(&sid).map(String::as_str) != Some(ELSEWHERE);
+        app.pane_cwds.insert(sid, ELSEWHERE.into());
+        read
+    }
+
+    /// The whole schedule: a pane that appears is read at once; with no
+    /// output nothing is read; output is followed by a read 50 ms on,
+    /// which is how soon a `cd` shows in the title, and by one more a
+    /// second after it stops; then nothing again.
+    #[test]
+    fn directories_are_read_after_output_and_not_otherwise() {
+        let sandbox = sandbox_state_dir();
+        let sid = 7801;
+        let dir = marspot_term::session_registry::session_dir(sid);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("entry.toml"), format!("id = {sid}\nshell_child_pid = {}\n", std::process::id())).unwrap();
+        let mut app = app_with(&sandbox, vec![win(1, vec![Pane::new_vacant(sid, 80, 24)])]);
+
+        app.sweep_pane_cwds_when_due();
+        assert!(app.pane_cwds.contains_key(&sid), "a pane not seen before is read at once");
+        app.pane_cwds.insert(sid, ELSEWHERE.into());
+
+        app.sweep_pane_cwds_when_due();
+        assert!(!read_since_poisoned(&mut app, sid), "read with no output and no new pane");
+
+        // output, the last read long enough ago that the rate limit is not what decides
+        app.last_cwd_sweep = Instant::now() - CWD_SWEEP_INTERVAL;
+        app.note_output();
+        // the schedule is kept in whole milliseconds
+        let slack = Duration::from_millis(2);
+        assert!(app.idle_wait().is_some_and(|w| w <= SETTLE + slack), "the loop must wake for the read");
+        app.sweep_pane_cwds_when_due();
+        assert!(!read_since_poisoned(&mut app, sid), "read before the shell could have moved");
+        std::thread::sleep(SETTLE + Duration::from_millis(10));
+        app.sweep_pane_cwds_when_due();
+        assert!(read_since_poisoned(&mut app, sid), "no read 50 ms after output");
+
+        // the read that follows the end of output is still owed
+        assert_eq!(SOON_MS.load(Ordering::Relaxed), 0);
+        assert!(app.idle_wait().is_some_and(|w| w <= CWD_SWEEP_INTERVAL + slack));
+        app.sweep_pane_cwds_when_due();
+        assert!(!read_since_poisoned(&mut app, sid), "read again before the second was up");
+        // a second later, without the test sitting through it
+        LAST_MS.store(ms(Instant::now()), Ordering::Relaxed);
+        app.sweep_pane_cwds_when_due();
+        assert!(read_since_poisoned(&mut app, sid), "no read a second after output stopped");
+
+        assert_eq!((SOON_MS.load(Ordering::Relaxed), LAST_MS.load(Ordering::Relaxed)), (0, 0));
+        app.sweep_pane_cwds_when_due();
+        assert!(!read_since_poisoned(&mut app, sid), "read with nothing scheduled");
+    }
+}
