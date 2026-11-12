@@ -53,6 +53,7 @@ DEFAULT_SUITES=(
   test-language-switch.sh
   test-bundle-lander.sh
   test-single-instance.sh
+  test-pane-coalition.sh
   test-cc-profile-switch.sh
   test-codex-profile-switch.sh
   test-codex-refresh.sh
