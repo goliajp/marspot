@@ -87,7 +87,8 @@ deadline=$(( $(date +%s) + WAIT ))
 until { clis && hooks; } || [ "$(date +%s)" -ge "$deadline" ] || ! kill -0 $SHELL_PID 2>/dev/null; do sleep 5; done
 
 runs() { env -i HOME="$FRESH" PATH="$FRESH/.local/bin:/usr/bin:/bin" "$1" --version >/dev/null 2>&1; }
-pane_shells() { for s in $(ours | awk '$2 ~ /marspot-session$/ {print $1}'); do pgrep -P "$s"; done; }
+# by the registry: launchd starts a pane's shell, so it is not its session's child
+pane_shells() { sed -n 's/^shell_child_pid = \([0-9][0-9]*\)$/\1/p' "$STATE"/sessions/*/entry.toml 2>/dev/null; }
 pane_path() { grep -q "^PATH=$FRESH/.local/bin:" "$FRESH/pane.env"; }
 pane_path_kimi() { grep -q "^PATH=.*:$FRESH/.kimi-code/bin:" "$FRESH/pane.env"; }
 kimi_runs() { env -i HOME="$FRESH" PATH=/usr/bin:/bin "$FRESH/.kimi-code/bin/kimi" --version >/dev/null 2>&1; }
