@@ -201,11 +201,13 @@ impl LineGuard {
             return false;
         }
         // SAFETY: tcgetpgrp on the pty master this session owns.
-        let front = unsafe { libc::tcgetpgrp(master) };
-        front <= 0
-            || front == shell_pgrp
-            || termios(master).is_none_or(|t| t.c_lflag & libc::ICANON != 0)
-            || unstarted(front, shell_pgrp)
+        let front = || unsafe { libc::tcgetpgrp(master) };
+        let job = front();
+        if job <= 0 || job == shell_pgrp {
+            return true;
+        }
+        let canon = termios(master).is_none_or(|t| t.c_lflag & libc::ICANON != 0);
+        !chose_raw(job, canon, unstarted(job, shell_pgrp), front())
     }
 
     /// How soon the session loop should look again.
@@ -350,6 +352,19 @@ impl LineGuard {
         self.entered = None;
         self.typed = false;
     }
+}
+
+/// Whether the job seen in front has the terminal in a raw mode of its
+/// own choosing: not canonical, past its exec, and still in front once
+/// the settings had been read.
+///
+/// Who is in front and what the settings are take two calls.  A command
+/// that ended between them left its name on the first and the shell's
+/// line editor -- never canonical -- on the second, which read as a
+/// program that had asked for raw mode: its output, written under the
+/// damaged settings, was passed on without its carriage returns.
+fn chose_raw(job: libc::pid_t, canon: bool, unstarted: bool, front_after: libc::pid_t) -> bool {
+    !canon && !unstarted && front_after == job
 }
 
 /// A job has just been seen in front while flags are owed. True when it
@@ -580,6 +595,17 @@ mod tests {
         let (_, oflag, lflag) = s.pty_flags();
         assert_ne!(oflag & libc::OPOST, 0);
         assert_ne!(lflag & libc::ISIG, 0, "Ctrl-C interrupts again");
+    }
+
+    /// A command gone by the time the settings were read is not a
+    /// program that chose raw mode, whatever the settings say.
+    #[test]
+    fn a_job_that_ended_between_the_two_reads_did_not_choose_raw_mode() {
+        let (job, shell) = (4242, 4000);
+        assert!(super::chose_raw(job, false, false, job), "raw, exec'd, still in front");
+        assert!(!super::chose_raw(job, false, false, shell), "the editor's settings under the job's name");
+        assert!(!super::chose_raw(job, true, false, job), "canonical is the shell's hand-over");
+        assert!(!super::chose_raw(job, false, true, job), "not exec'd: raw is the shell's doing");
     }
 
     /// The report: codex killed by SIGTERM, `ls` staircasing afterwards.
