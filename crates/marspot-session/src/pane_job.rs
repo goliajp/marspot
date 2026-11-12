@@ -30,6 +30,15 @@
 //! speed together took in a third less (180 MB/s against 267).  One or
 //! two panes, and programs that compute, run as before.  When launchd
 //! does not take the job, the shell is forked the way it always was.
+//!
+//! Starting the session itself under launchd, so that it shares the
+//! pane's coalition with what writes to it, does not undo this.  Each
+//! pane's coalition is then judged on its own, none is busy enough,
+//! and from four panes up the sessions go to the efficiency cores with
+//! their writers: 100 MB/s at four, 83 at nine.  Started as an
+//! application in front (`pane_host::FRONT_ROLE`) four panes keep
+//! their speed, five lose a fifth and nine a half.  The throughput
+//! probe measures both (`MARSPOT_PROBE_SESSION_JOB=1`).
 
 // built off macOS for its tests only: nothing there starts a job
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -89,59 +98,20 @@ fn child_env(config: &PtyConfig, inherited: impl Iterator<Item = (Vec<u8>, Vec<u
     env
 }
 
-/// The job's name: one state directory's sessions never share a label
-/// with another's, so a sandbox cannot touch the installed app's jobs.
-fn label_for(state_root: &[u8], id: u64) -> String {
-    let mut hash: u32 = 0x811c_9dc5;
-    for b in state_root {
-        hash = (hash ^ u32::from(*b)).wrapping_mul(0x0100_0193);
-    }
-    format!("com.marspot.pane.{hash:08x}.{id}")
-}
-
-fn plist(label: &str, exe: &str, spec: &str) -> String {
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    // interactive: launchd otherwise holds a job to less than an app gets.
-    // the process group is left alone when the host goes and when the
-    // job is removed: that is what lets the shell stay
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <plist version=\"1.0\"><dict>\n\
-         <key>Label</key><string>{}</string>\n\
-         <key>ProgramArguments</key><array><string>{}</string><string>{}</string><string>{}</string></array>\n\
-         <key>RunAtLoad</key><true/>\n\
-         <key>ProcessType</key><string>Interactive</string>\n\
-         <key>AbandonProcessGroup</key><true/>\n\
-         </dict></plist>\n",
-        esc(label),
-        esc(exe),
-        marspot_term::pane_host::ARG,
-        esc(spec)
-    )
-}
-
 #[cfg(target_os = "macos")]
 mod macos {
-    use std::ffi::CString;
-    use std::fs;
-    use std::io::{self, Read, Write};
-    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::io;
+    use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStringExt;
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
+    use marspot_term::launchd_job;
     use marspot_term::pane_host::{self, Spec};
     use marspot_term::pty::{Pty, PtyConfig};
     use marspot_term::{lx_event, lx_warn};
 
-    use super::{child_env, host_program, label_for, plist};
-
-    /// How long launchd and the host get to produce a shell before the
-    /// pane is given one the old way.
-    const HOST_WAIT: Duration = Duration::from_secs(5);
-    const LAUNCHCTL: &str = "/bin/launchctl";
+    use super::{child_env, host_program};
 
     pub(crate) fn spawn_shell(id: u64, config: PtyConfig) -> io::Result<Pty> {
         // this crate's unit tests are a harness, which is no pane host
@@ -164,63 +134,22 @@ mod macos {
         }
     }
 
-    fn domain() -> String {
-        // SAFETY: getuid cannot fail and touches nothing.
-        format!("gui/{}", unsafe { libc::getuid() })
-    }
-
     fn spawn_as_job(id: u64, config: &PtyConfig, host: &Path) -> io::Result<Pty> {
         let (master, slave, tty) = open_terminal(config)?;
-        let root = marspot_term::paths::state_root();
-        let dir = root.join("pane-jobs");
-        fs::create_dir_all(&dir)?;
-        let label = label_for(root.as_os_str().as_bytes(), id);
-        let (spec_path, reply_path, plist_path) =
-            (dir.join(format!("{id}.spec")), dir.join(format!("{id}.reply")), dir.join(format!("{id}.plist")));
-
-        let _ = fs::remove_file(&reply_path);
-        let reply_c = CString::new(reply_path.as_os_str().as_bytes()).map_err(io::Error::other)?;
-        // SAFETY: a valid C string; mkfifo only creates the node.
-        if unsafe { libc::mkfifo(reply_c.as_ptr(), 0o600) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // both ends, before the host exists: its write never waits for
-        // a reader, and our read never sees an end of file
-        let mut reply = fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NONBLOCK).open(&reply_path)?;
-
         let mut argv = vec![config.argv0.clone().unwrap_or_else(|| config.program.clone()).into_bytes()];
         argv.extend(config.args.iter().map(|a| a.clone().into_bytes()));
         let spec = Spec {
             tty,
-            reply: reply_path.as_os_str().as_bytes().to_vec(),
+            reply: Vec::new(),
             cwd: config.cwd.clone().unwrap_or_default().into_bytes(),
             program: config.program.clone().into_bytes(),
             limits: pane_host::own_limits(),
             argv,
             env: child_env(config, std::env::vars_os().map(|(k, v)| (k.into_vec(), v.into_vec()))),
         };
-        // the environment can hold secrets: the file is ours alone and
-        // the host removes it as soon as it has read it
-        fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&spec_path)?.write_all(&spec.encode())?;
-        fs::write(&plist_path, plist(&label, &host.to_string_lossy(), &spec_path.to_string_lossy()))?;
-
         let begun = Instant::now();
-        let out = Command::new(LAUNCHCTL).arg("bootstrap").arg(domain()).arg(&plist_path).stdin(Stdio::null()).output()?;
-        let _ = fs::remove_file(&plist_path);
-        let loaded = begun.elapsed();
-        let mut answered = loaded;
-        let started = if out.status.success() {
-            let pid = read_reply(&mut reply);
-            answered = begun.elapsed();
-            remove_job(&label);
-            pid
-        } else {
-            Err(io::Error::other(format!("launchctl bootstrap: {}", String::from_utf8_lossy(&out.stderr).trim())))
-        };
-        let _ = fs::remove_file(&reply_path);
-        let shell = started.inspect_err(|_| {
-            let _ = fs::remove_file(&spec_path);
-        })?;
+        let started = launchd_job::start(&id.to_string(), host, spec)?;
+        let shell = started.pid;
         // the shell holds the terminal open now; ours would keep a
         // hangup from ever reaching us
         drop(slave);
@@ -228,13 +157,13 @@ mod macos {
             "PANE_JOB_STARTED",
             "launchd started the pane's shell, in a coalition of its own",
             session = id,
-            label = label,
+            label = started.label,
             host = host.display(),
             shell_pid = shell,
-            shell_coalition = coalition_of(shell),
-            own_coalition = coalition_of(std::process::id() as i32),
-            load_ms = loaded.as_millis(),
-            answer_ms = (answered - loaded).as_millis(),
+            shell_coalition = launchd_job::coalition_of(shell),
+            own_coalition = launchd_job::coalition_of(std::process::id() as i32),
+            load_ms = started.load_ms,
+            answer_ms = started.answer_ms,
             ms = begun.elapsed().as_millis()
         );
         Ok(Pty::from_raw_master(master.into_raw_fd(), shell))
@@ -279,53 +208,6 @@ mod macos {
             Ok((master, slave, tty))
         }
     }
-
-    fn read_reply(reply: &mut fs::File) -> io::Result<i32> {
-        let deadline = Instant::now() + HOST_WAIT;
-        let mut line = Vec::new();
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            let mut pfd = libc::pollfd { fd: reply.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-            // SAFETY: one pollfd, on a descriptor that is open.
-            let n = unsafe { libc::poll(&mut pfd, 1, left.as_millis() as libc::c_int) };
-            if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "the pane host did not answer"));
-            }
-            let mut buf = [0u8; 256];
-            match reply.read(&mut buf) {
-                Ok(k) => line.extend_from_slice(&buf[..k]),
-                Err(e) if matches!(e.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) => {}
-                Err(e) => return Err(e),
-            }
-            if line.contains(&b'\n') {
-                return pane_host::parse_reply(&String::from_utf8_lossy(&line));
-            }
-        }
-    }
-
-    fn remove_job(label: &str) {
-        let _ = Command::new(LAUNCHCTL).arg("bootout").arg(format!("{}/{label}", domain())).stdin(Stdio::null()).output();
-    }
-
-    /// The jetsam coalition `pid` is in, 0 when the system will not say.
-    /// Read for the log line only.
-    fn coalition_of(pid: i32) -> u64 {
-        // `PROC_PIDCOALITIONINFO` and its struct, from the system's
-        // private half of <sys/proc_info.h>
-        const FLAVOR: libc::c_int = 20;
-        #[repr(C)]
-        #[derive(Default)]
-        struct Info {
-            id: [u64; 2],
-            reserved: [u64; 3],
-        }
-        let mut info = Info::default();
-        let size = std::mem::size_of::<Info>() as libc::c_int;
-        // SAFETY: the buffer is `size` bytes; an unknown flavor fails
-        // without writing.
-        let n = unsafe { libc::proc_pidinfo(pid, FLAVOR, 0, (&raw mut info).cast(), size) };
-        if n == size { info.id[1] } else { 0 }
-    }
 }
 
 #[cfg(test)]
@@ -342,21 +224,6 @@ mod tests {
         let inherited = [("PATH", "/bin"), ("MARSPOT_SESSION_ID", "9"), ("HOME", "/Users/x")];
         let env = child_env(&config, inherited.iter().map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec())));
         assert_eq!(env, vec![b"HOME=/Users/x".to_vec(), b"PATH=/x:/bin".to_vec(), b"MARSPOT_TOKEN=t".to_vec()]);
-    }
-
-    #[test]
-    fn two_state_directories_never_share_a_label() {
-        assert_eq!(label_for(b"/tmp/a", 7), label_for(b"/tmp/a", 7));
-        assert_ne!(label_for(b"/tmp/a", 7), label_for(b"/tmp/b", 7));
-        assert_ne!(label_for(b"/tmp/a", 7), label_for(b"/tmp/a", 8));
-        assert!(label_for(b"/tmp/a", 7).starts_with("com.marspot.pane."));
-    }
-
-    #[test]
-    fn a_path_with_markup_in_it_stays_one_string_in_the_plist() {
-        let p = plist("l", "/a&b/<c>", "/s");
-        assert!(p.contains("<string>/a&amp;b/&lt;c&gt;</string>"));
-        assert!(p.contains("<string>--pane-host</string>"));
     }
 
     /// Asked for, the app's executable when the app named it and this

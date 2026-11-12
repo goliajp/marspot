@@ -40,6 +40,62 @@ use marspot_term::shell_proto::{encode_grid_resize, Frame, MsgType};
 
 /// The session this probe spawned, for `die` to take down with it.
 static SESSION_PID: AtomicU32 = AtomicU32::new(0);
+/// Whether launchd started that session: it is then not this
+/// process's child, and ending it is a signal to its pid.
+static BY_LAUNCHD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn end_job() {
+    let pid = SESSION_PID.load(Ordering::Relaxed);
+    if BY_LAUNCHD.load(Ordering::Relaxed) && pid != 0 {
+        // SAFETY: the pid launchd's host gave for the session this
+        // process had started.
+        unsafe { libc::kill(pid as libc::c_int, libc::SIGKILL) };
+    }
+}
+
+/// How much of a process's CPU time was on performance cores, and the
+/// coalition it is in.
+#[cfg(target_os = "macos")]
+fn placement(pid: i32) -> Option<(u64, f64, u64)> {
+    // `rusage_info_v6` as words: two of uuid, then the counters; user
+    // and system time are words 2 and 3, their performance-core parts
+    // words 38 and 39
+    let mut words = [0u64; 80];
+    // SAFETY: the buffer is larger than the flavor's struct.
+    if unsafe { libc::proc_pid_rusage(pid, 6, words.as_mut_ptr().cast()) } != 0 {
+        return None;
+    }
+    let (all, perf) = (words[2] + words[3], words[38] + words[39]);
+    let mut coalition = [0u64; 5];
+    // SAFETY: flavor 20 fills forty bytes or nothing.
+    unsafe { libc::proc_pidinfo(pid, 20, 0, coalition.as_mut_ptr().cast(), 40) };
+    Some((all, if all == 0 { 0.0 } else { 100.0 * perf as f64 / all as f64 }, coalition[1]))
+}
+
+#[cfg(target_os = "macos")]
+fn children_of(pid: i32) -> Vec<i32> {
+    let mut pids = [0 as libc::pid_t; 64];
+    // SAFETY: the buffer is the size it is said to be.
+    let n = unsafe { libc::proc_listchildpids(pid, pids.as_mut_ptr().cast(), std::mem::size_of_val(&pids) as libc::c_int) };
+    pids[..(n.max(0) as usize).min(pids.len())].to_vec()
+}
+
+/// The busiest program under the session's shell, read while it runs:
+/// the writer is gone by the time the trial is over.
+#[cfg(target_os = "macos")]
+fn sample_writer(shell: i32, best: &mut Option<(u64, f64, u64)>) {
+    let mut level = vec![shell];
+    for _ in 0..4 {
+        level = level.iter().flat_map(|p| children_of(*p)).collect();
+        for pid in &level {
+            if let Some(read) = placement(*pid)
+                && best.is_none_or(|b| read.0 >= b.0)
+            {
+                *best = Some(read);
+            }
+        }
+    }
+}
 
 fn die(msg: &str) -> ! {
     eprintln!("FAIL: {msg}");
@@ -56,6 +112,7 @@ fn die(msg: &str) -> ! {
         // only fail with ESRCH, which is ignored.
         unsafe { libc::kill(pid as libc::c_int, libc::SIGKILL) };
     }
+    end_job();
     std::process::exit(1)
 }
 
@@ -160,6 +217,11 @@ fn main() {
         die(&format!("marspot-session missing at {session_bin:?}"));
     }
 
+    // MARSPOT_PROBE_SESSION_JOB=1: launchd starts the session, in a
+    // coalition of its own with its shell and what the shell runs.
+    // With MARSPOT_FRONT_ROLE=1 beside it the session is started as an
+    // application in front (`marspot_term::pane_host::FRONT_ROLE`)
+    let as_job = cfg!(target_os = "macos") && env::var("MARSPOT_PROBE_SESSION_JOB").is_ok_and(|v| v == "1");
     let pid = std::process::id();
     let sandbox = env::temp_dir().join(format!("l3-throughput-{pid}"));
     let _ = std::fs::remove_dir_all(&sandbox);
@@ -179,9 +241,13 @@ fn main() {
             .join(" ");
         write!(
             f,
-            "#!/bin/bash\nexec 2> {marker}\n/usr/bin/time -lp /bin/bash -c '\n  /bin/cat {cats}\n  stty raw -echo 2>/dev/null\n  printf \"\\033[6n\" > /dev/tty\n  IFS=\"[;\" read -t 5 -srd R _ _row _col < /dev/tty\n  stty sane 2>/dev/null\n  printf \"cpr=%s,%s\\n\" \"$_row\" \"$_col\" >&2\n'\n",
+            "#!/bin/bash\nexec 2> {marker}\n/usr/bin/time -lp /bin/bash -c '\n  /bin/cat {cats}\n  stty raw -echo 2>/dev/null\n  printf \"\\033[6n\" > /dev/tty\n  IFS=\"[;\" read -t 5 -srd R _ _row _col < /dev/tty\n  stty sane 2>/dev/null\n  printf \"cpr=%s,%s\\n\" \"$_row\" \"$_col\" >&2\n'\n{linger}",
             marker = marker.display(),
             cats = cats,
+            // launchd reaps a session it started the moment it ends,
+            // and its counters go with it: the shell stays until they
+            // have been read
+            linger = if as_job { "sleep 0.5\n" } else { "" },
         )
         .expect("write trial script");
     }
@@ -194,21 +260,9 @@ fn main() {
     std::fs::set_permissions(&script, perms).expect("chmod script");
 
     let session_id: u64 = 1;
-    let child = Command::new(&session_bin)
-        .env("MARSPOT_STATE_DIR", &sandbox)
-        .env("MARSPOT_SESSION_ID", session_id.to_string())
-        // `SHELL`, not `MARSPOT_SHELL`: an L3 spawns `$SHELL` directly
-        // (local_session.rs) and never consults the MARSPOT_SHELL
-        // override that `marspot_term::session::Session` — the path
-        // mcli and the L2 in-process backend take — honours.  Pointing
-        // MARSPOT_SHELL at the trial script leaves the session sitting
-        // in an interactive zsh waiting for input, which looks exactly
-        // like a slow terminal until the probe times out.
-        .env("SHELL", &script)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap_or_else(|e| die(&format!("spawn marspot-session: {e}")));
+    // SAFETY: single-threaded at this point; the registry helpers and
+    // the job's label read this to locate the sandbox.
+    unsafe { env::set_var("MARSPOT_STATE_DIR", &sandbox) };
     struct ChildGuard(std::process::Child);
     impl Drop for ChildGuard {
         fn drop(&mut self) {
@@ -216,22 +270,67 @@ fn main() {
             let _ = self.0.wait();
         }
     }
-    let session_pid = child.id();
-    SESSION_PID.store(session_pid, Ordering::Relaxed);
-    // A seam for checking that a failed trial takes its session with it.
-    // `spawn` fails before the session is up, `connected` after it holds a
-    // pty and is absorbing -- the moment the real die sites (handshake,
-    // missing DSR) happen, and the only one where an orphan would have
-    // anything left to do.
     let die_at = env::var("MARSPOT_PROBE_DIE_AT").unwrap_or_default();
-    if die_at == "spawn" {
-        die("asked to die after spawn");
-    }
-    let _guard = ChildGuard(child);
+    let guard = if as_job {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::ffi::{OsStrExt, OsStringExt};
+            let bin = session_bin.as_os_str().as_bytes().to_vec();
+            // this process's environment, as a forked session gets it:
+            // MARSPOT_STATE_DIR is in it already, and MARSPOT_FRONT_ROLE
+            // when the caller set it
+            let mut job_env: Vec<Vec<u8>> = env::vars_os()
+                .filter(|(k, _)| k != "MARSPOT_SESSION_ID" && k != "SHELL")
+                .map(|(k, v)| [k.as_bytes(), b"=", v.as_bytes()].concat())
+                .collect();
+            job_env.push(b"MARSPOT_SESSION_ID=1".to_vec());
+            job_env.push([b"SHELL=", script.as_os_str().as_bytes()].concat());
+            let spec = marspot_term::pane_host::Spec {
+                // a session has no terminal of its own
+                tty: b"/dev/null".to_vec(),
+                reply: Vec::new(),
+                cwd: env::current_dir().map(|d| d.into_os_string().into_vec()).unwrap_or_default(),
+                program: bin.clone(),
+                limits: marspot_term::pane_host::own_limits(),
+                argv: vec![bin],
+                env: job_env,
+            };
+            match marspot_term::launchd_job::start("1", &session_bin, spec) {
+                Ok(started) => {
+                    SESSION_PID.store(started.pid as u32, Ordering::Relaxed);
+                    BY_LAUNCHD.store(true, Ordering::Relaxed);
+                }
+                Err(e) => die(&format!("start the session under launchd: {e}")),
+            }
+        }
+        None
+    } else {
+        let child = Command::new(&session_bin)
+            .env("MARSPOT_SESSION_ID", session_id.to_string())
+            // `SHELL`, not `MARSPOT_SHELL`: an L3 spawns `$SHELL` directly
+            // (local_session.rs) and never consults the MARSPOT_SHELL
+            // override that `marspot_term::session::Session` — the path
+            // mcli and the L2 in-process backend take — honours.  Pointing
+            // MARSPOT_SHELL at the trial script leaves the session sitting
+            // in an interactive zsh waiting for input, which looks exactly
+            // like a slow terminal until the probe times out.
+            .env("SHELL", &script)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| die(&format!("spawn marspot-session: {e}")));
+        SESSION_PID.store(child.id(), Ordering::Relaxed);
+        // A seam for checking that a failed trial takes its session with it.
+        // `spawn` fails before the session is up, `connected` after it holds a
+        // pty and is absorbing -- the moment the real die sites (handshake,
+        // missing DSR) happen, and the only one where an orphan would have
+        // anything left to do.
+        if die_at == "spawn" {
+            die("asked to die after spawn");
+        }
+        Some(ChildGuard(child))
+    };
 
-    // SAFETY: single-threaded at this point; the registry helpers read
-    // this to locate the sandbox.
-    unsafe { env::set_var("MARSPOT_STATE_DIR", &sandbox) };
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if read_session_entry(session_id).is_ok() {
@@ -239,9 +338,11 @@ fn main() {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    if read_session_entry(session_id).is_err() {
-        die("L3 never registered");
-    }
+    let session_pid = match read_session_entry(session_id) {
+        Ok(entry) => entry.pid as u32,
+        Err(_) => die("L3 never registered"),
+    };
+    SESSION_PID.store(session_pid, Ordering::Relaxed);
 
     // An L3 does not open its pty on registration — it waits to be told
     // how big the grid is, because spawning a shell into a
@@ -286,7 +387,19 @@ fn main() {
     // marker to carry a complete `time` record.
     let deadline = Instant::now() + Duration::from_secs(300);
     let mut text = String::new();
+    #[cfg(target_os = "macos")]
+    let (mut writer, mut round) = (None, 0u32);
     while Instant::now() < deadline {
+        #[cfg(target_os = "macos")]
+        {
+            round += 1;
+            if round.is_multiple_of(10)
+                && let Ok(entry) = read_session_entry(session_id)
+                && entry.shell_child_pid > 0
+            {
+                sample_writer(entry.shell_child_pid, &mut writer);
+            }
+        }
         if let Ok(s) = std::fs::read_to_string(&marker)
             && s.contains("real") {
                 text = s;
@@ -342,6 +455,15 @@ fn main() {
         sz("bytelog"),
         sz("state.bin")
     );
+    #[cfg(target_os = "macos")]
+    {
+        let (_, session_perf, session_coalition) = placement(session_pid as i32).unwrap_or_default();
+        let (_, writer_perf, writer_coalition) = writer.unwrap_or_default();
+        eprintln!(
+            "placement: session_p_core_pct={session_perf:.1} session_coalition={session_coalition} writer_p_core_pct={writer_perf:.1} writer_coalition={writer_coalition} probe_coalition={}",
+            placement(std::process::id() as i32).unwrap_or_default().2
+        );
+    }
     // `-` when the kernel would not say (the session died early): the
     // caller has to see a missing reading as missing, not as zero cost.
     let wall_ns = (secs * 1e9) as u64;
@@ -368,6 +490,8 @@ fn main() {
         }
         None => println!("{wall_ns} - - - - -"),
     }
+    drop(guard);
+    end_job();
     let _ = std::fs::remove_dir_all(&sandbox);
 }
 
