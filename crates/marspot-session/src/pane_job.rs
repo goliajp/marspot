@@ -9,11 +9,12 @@
 //! own, so the shell is handed to launchd: what a pane starts then
 //! shares a coalition with that pane and nothing else.
 //!
-//! The job is this binary again, as a host that opens the pane's
-//! terminal, starts the shell under it and waits.  The host stays for
-//! what the session did as the shell's parent and no longer can: it
-//! ends a shell that outlives its session, and it takes the job off
-//! launchd's list.
+//! The job is this binary again, as a host that starts the shell on
+//! the pane's terminal, says which pid it is and exits.  The session
+//! then takes the job off launchd's list: the shell stays, in the
+//! coalition the job was given, and nothing of the job is left for the
+//! system to end when the app quits -- launchd stops the jobs an app
+//! asked for along with the app.
 //!
 //! What it costs: nothing under a launchd job has the app as its
 //! responsible process, so a privacy prompt names the program that
@@ -59,11 +60,8 @@ fn spawn_shell(_id: u64, config: PtyConfig) -> io::Result<Pty> {
 /// What the host needs to start the shell, as the file it is handed.
 #[derive(Debug, PartialEq, Eq, Default)]
 struct Spec {
-    /// The session's pid: the host stops the shell when it is gone.
-    session: i32,
     tty: Vec<u8>,
     reply: Vec<u8>,
-    label: Vec<u8>,
     cwd: Vec<u8>,
     program: Vec<u8>,
     argv: Vec<Vec<u8>>,
@@ -76,8 +74,8 @@ impl Spec {
     /// NUL-terminated fields: none of them can hold a NUL, and an
     /// environment value can hold anything else.
     fn encode(&self) -> Vec<u8> {
-        let (session, argc) = (self.session.to_string().into_bytes(), self.argv.len().to_string().into_bytes());
-        let head = [SPEC_MAGIC, &session, &self.tty, &self.reply, &self.label, &self.cwd, &self.program, &argc];
+        let argc = self.argv.len().to_string().into_bytes();
+        let head = [SPEC_MAGIC, &self.tty, &self.reply, &self.cwd, &self.program, &argc];
         let mut out = Vec::new();
         for field in head.into_iter().chain(self.argv.iter().map(Vec::as_slice)).chain(self.env.iter().map(Vec::as_slice)) {
             out.extend_from_slice(field);
@@ -91,14 +89,13 @@ impl Spec {
         if fields.next()? != SPEC_MAGIC {
             return None;
         }
-        let session: i32 = std::str::from_utf8(&fields.next()?).ok()?.parse().ok()?;
-        let (tty, reply, label, cwd, program) = (fields.next()?, fields.next()?, fields.next()?, fields.next()?, fields.next()?);
+        let (tty, reply, cwd, program) = (fields.next()?, fields.next()?, fields.next()?, fields.next()?);
         let argc: usize = std::str::from_utf8(&fields.next()?).ok()?.parse().ok()?;
         let mut argv = Vec::new();
         for _ in 0..argc {
             argv.push(fields.next()?);
         }
-        Some(Spec { session, tty, reply, label, cwd, program, argv, env: fields.collect() })
+        Some(Spec { tty, reply, cwd, program, argv, env: fields.collect() })
     }
 }
 
@@ -124,16 +121,11 @@ fn label_for(state_root: &[u8], id: u64) -> String {
     format!("com.marspot.pane.{hash:08x}.{id}")
 }
 
-/// `state_dir` is what a sandbox's tools know its processes by; the
-/// host carries it and the shell does not.
-fn plist(label: &str, exe: &str, spec: &str, state_dir: Option<&str>) -> String {
+fn plist(label: &str, exe: &str, spec: &str) -> String {
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    let env = state_dir.map_or(String::new(), |d| {
-        format!("<key>EnvironmentVariables</key><dict><key>MARSPOT_STATE_DIR</key><string>{}</string></dict>\n", esc(d))
-    });
     // interactive: launchd otherwise holds a job to less than an app gets.
-    // the process group is left alone when the host goes: the shell and
-    // its jobs are not the host's to end
+    // the process group is left alone when the host goes and when the
+    // job is removed: that is what lets the shell stay
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <plist version=\"1.0\"><dict>\n\
@@ -142,7 +134,7 @@ fn plist(label: &str, exe: &str, spec: &str, state_dir: Option<&str>) -> String 
          <key>RunAtLoad</key><true/>\n\
          <key>ProcessType</key><string>Interactive</string>\n\
          <key>AbandonProcessGroup</key><true/>\n\
-         {env}</dict></plist>\n",
+         </dict></plist>\n",
         esc(label),
         esc(exe),
         esc(spec)
@@ -176,7 +168,7 @@ mod macos {
     /// How long launchd and the host get to produce a shell before the
     /// pane is given one the old way.
     const HOST_WAIT: Duration = Duration::from_secs(5);
-    pub(super) const LAUNCHCTL: &str = "/bin/launchctl";
+    const LAUNCHCTL: &str = "/bin/launchctl";
 
     pub(crate) fn spawn_shell(id: u64, config: PtyConfig) -> io::Result<Pty> {
         if std::env::var("MARSPOT_PANE_JOB").as_deref() != Ok("1") {
@@ -191,7 +183,7 @@ mod macos {
         }
     }
 
-    pub(super) fn domain() -> String {
+    fn domain() -> String {
         // SAFETY: getuid cannot fail and touches nothing.
         format!("gui/{}", unsafe { libc::getuid() })
     }
@@ -218,10 +210,8 @@ mod macos {
         let mut argv = vec![config.argv0.clone().unwrap_or_else(|| config.program.clone()).into_bytes()];
         argv.extend(config.args.iter().map(|a| a.clone().into_bytes()));
         let spec = Spec {
-            session: std::process::id() as i32,
             tty,
             reply: reply_path.as_os_str().as_bytes().to_vec(),
-            label: label.clone().into_bytes(),
             cwd: config.cwd.clone().unwrap_or_default().into_bytes(),
             program: config.program.clone().into_bytes(),
             argv,
@@ -231,17 +221,14 @@ mod macos {
         // the host removes it as soon as it has read it
         fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&spec_path)?.write_all(&spec.encode())?;
         let exe = std::env::current_exe()?;
-        let state_dir = std::env::var("MARSPOT_STATE_DIR").ok();
-        fs::write(&plist_path, plist(&label, &exe.to_string_lossy(), &spec_path.to_string_lossy(), state_dir.as_deref()))?;
+        fs::write(&plist_path, plist(&label, &exe.to_string_lossy(), &spec_path.to_string_lossy()))?;
 
         let begun = Instant::now();
         let out = Command::new(LAUNCHCTL).arg("bootstrap").arg(domain()).arg(&plist_path).stdin(Stdio::null()).output()?;
         let _ = fs::remove_file(&plist_path);
         let started = if out.status.success() {
             let pid = read_reply(&mut reply);
-            if pid.is_err() {
-                remove_job(&label);
-            }
+            remove_job(&label);
             pid
         } else {
             Err(io::Error::other(format!("launchctl bootstrap: {}", String::from_utf8_lossy(&out.stderr).trim())))
@@ -255,7 +242,7 @@ mod macos {
         drop(slave);
         lx_event!(
             "PANE_JOB_STARTED",
-            "the pane's shell runs as a launchd job",
+            "launchd started the pane's shell, in a coalition of its own",
             session = id,
             label = label,
             shell_pid = shell,
@@ -361,10 +348,8 @@ mod tests {
     #[test]
     fn a_spec_reads_back_as_written() {
         let spec = Spec {
-            session: 4242,
             tty: b"/dev/ttys012".to_vec(),
             reply: b"/tmp/x/7.reply".to_vec(),
-            label: b"com.marspot.pane.0000beef.7".to_vec(),
             cwd: Vec::new(),
             program: b"/bin/zsh".to_vec(),
             argv: vec![b"-zsh".to_vec()],
@@ -377,9 +362,9 @@ mod tests {
     #[test]
     fn a_file_that_is_not_a_spec_is_refused() {
         assert_eq!(Spec::decode(b""), None);
-        assert_eq!(Spec::decode(b"marspot-pane-job 2\x007\0a\0b\0c\0d\0e\x000\0"), None);
-        assert_eq!(Spec::decode(b"marspot-pane-job 1\x007\0a\0b\0c\0d\0e\x003\0only-one\0"), None);
-        assert_eq!(Spec::decode(b"marspot-pane-job 1\0not-a-pid\0a\0b\0c\0d\0e\x000\0"), None);
+        assert_eq!(Spec::decode(b"marspot-pane-job 2\0a\0b\0c\0d\x000\0"), None);
+        assert_eq!(Spec::decode(b"marspot-pane-job 1\0a\0b\0c\0d\x003\0only-one\0"), None);
+        assert_eq!(Spec::decode(b"marspot-pane-job 1\0a\0b\0c\0d\0not-a-count\0"), None);
     }
 
     #[test]
@@ -404,11 +389,9 @@ mod tests {
 
     #[test]
     fn a_path_with_markup_in_it_stays_one_string_in_the_plist() {
-        let p = plist("l", "/a&b/<c>", "/s", None);
+        let p = plist("l", "/a&b/<c>", "/s");
         assert!(p.contains("<string>/a&amp;b/&lt;c&gt;</string>"));
         assert!(p.contains("<string>--pane-host</string>"));
-        assert!(!p.contains("EnvironmentVariables"));
-        assert!(plist("l", "/e", "/s", Some("/tmp/sb")).contains("<key>MARSPOT_STATE_DIR</key><string>/tmp/sb</string>"));
     }
 
     #[test]
