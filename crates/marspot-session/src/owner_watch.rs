@@ -12,23 +12,12 @@
 //! request for a shell that came up outside: it asks for an heir in the
 //! sessions' coalition and leaves.
 //!
-//! Nothing here runs on a timer: the thread sleeps in `kevent` on the
-//! record and on the shell's pid.
+//! Nothing here runs on a timer or on a thread of its own: the record
+//! and the shell's pid are two more things the session's file watcher
+//! waits on (`upkeep`), and `look` runs on the main loop when either
+//! changes.
 
-/// Started once per image: at boot and again after an update replaced
-/// the image.  What the watch holds open is open when this returns.
-pub(crate) fn start(sid: u64) {
-    #[cfg(target_os = "macos")]
-    {
-        let mut watch = macos::Watch::new(sid);
-        let found = watch.open_record();
-        if let Err(e) = std::thread::Builder::new().name("l3-owner".into()).spawn(move || watch.run(found)) {
-            marspot_term::lx_warn!("l3.owner.unwatched", &format!("{e}"), session_id = sid);
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = sid;
-}
+use marspot_term::fs_watch::Watcher;
 
 /// Starts of a shell in the last minute that stop another one: a shell
 /// that dies as it comes up would otherwise be started again for ever.
@@ -46,18 +35,32 @@ fn recent_starts(text: &str, now: u64) -> (Vec<u64>, bool) {
     (recent, allowed)
 }
 
+#[cfg(not(target_os = "macos"))]
+pub(crate) struct OwnerWatch;
+
+#[cfg(not(target_os = "macos"))]
+impl OwnerWatch {
+    pub(crate) fn new(_sid: u64) -> Self {
+        OwnerWatch
+    }
+    pub(crate) fn look(&mut self, _watcher: Option<&Watcher>) {}
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) use macos::OwnerWatch;
+
 #[cfg(target_os = "macos")]
 mod macos {
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom, Write};
-    use std::os::fd::{AsRawFd, RawFd};
+    use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
     use marspot_term::owner::{self, Record};
     use marspot_term::{lx_event, lx_warn, platform, session_registry};
 
-    use super::recent_starts;
+    use super::{Watcher, recent_starts};
 
     /// What the core and this session's own hand-over put in the
     /// environment for a session alone.
@@ -75,73 +78,27 @@ mod macos {
         marspot_term::shell_proto::ENV_CONTROL_FD,
     ];
 
-    pub(super) struct Watch {
+    pub(crate) struct OwnerWatch {
         sid: u64,
-        kq: RawFd,
         coalition: Option<u64>,
-        /// The record, open for as long as it exists.
-        file: Option<File>,
-        /// The state root, watched until the record exists.
-        dir: Option<File>,
+        /// The shell whose exit the watcher was asked to report.
         watched: Option<i32>,
         /// What the last `SESSION_OWNER` line said.
         said: Option<Option<i32>>,
         /// Held from starting a shell until one is on record or the
         /// one started has exited: one session starts it, not each.
         turn: Option<(File, i32)>,
+        /// The shells this session started that have not been
+        /// collected: they are its children for as long as it lives.
+        started: Vec<i32>,
     }
 
-    impl Watch {
-        pub(super) fn new(sid: u64) -> Watch {
-            // SAFETY: kqueue takes no arguments; the flag keeps the
-            // queue out of the image an update moves this process to.
-            let kq = unsafe {
-                let kq = libc::kqueue();
-                libc::fcntl(kq, libc::F_SETFD, libc::FD_CLOEXEC);
-                kq
-            };
-            let coalition = platform::coalition_of(std::process::id() as i32);
+    impl OwnerWatch {
+        pub(crate) fn new(sid: u64) -> OwnerWatch {
             // says that this session can start a shell when asked
             let _ = std::fs::write(session_registry::session_dir(sid).join("guard"), b"1\n");
-            Watch { sid, kq, coalition, file: None, dir: None, watched: None, said: None, turn: None }
-        }
-
-        fn add(&self, ident: usize, filter: i16, fflags: u32) -> bool {
-            let ev = libc::kevent {
-                ident,
-                filter,
-                flags: libc::EV_ADD | libc::EV_CLEAR,
-                fflags,
-                data: 0,
-                udata: std::ptr::null_mut(),
-            };
-            // SAFETY: one change, no events asked for.
-            unsafe { libc::kevent(self.kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) == 0 }
-        }
-
-        /// Open the record if it is there; otherwise watch for it.
-        pub(super) fn open_record(&mut self) -> bool {
-            if self.file.is_some() {
-                return true;
-            }
-            match File::open(owner::path()) {
-                Ok(f) => {
-                    let changes = libc::NOTE_WRITE | libc::NOTE_ATTRIB | libc::NOTE_DELETE | libc::NOTE_RENAME;
-                    self.add(f.as_raw_fd() as usize, libc::EVFILT_VNODE, changes);
-                    self.file = Some(f);
-                    self.dir = None;
-                    true
-                }
-                Err(_) => {
-                    if self.dir.is_none()
-                        && let Ok(d) = File::open(marspot_term::paths::state_root())
-                    {
-                        self.add(d.as_raw_fd() as usize, libc::EVFILT_VNODE, libc::NOTE_WRITE);
-                        self.dir = Some(d);
-                    }
-                    false
-                }
-            }
+            let coalition = platform::coalition_of(std::process::id() as i32);
+            OwnerWatch { sid, coalition, watched: None, said: None, turn: None, started: Vec::new() }
         }
 
         fn say(&mut self, owner_pid: Option<i32>) {
@@ -158,31 +115,45 @@ mod macos {
             );
         }
 
-        fn look(&mut self) {
-            // caught between its truncation and its write: the write is the next event
-            let Some(r) = Record::read() else { return };
-            if r.alive() && (self.watched == Some(r.pid) || self.add(r.pid as usize, libc::EVFILT_PROC, libc::NOTE_EXIT)) {
+        /// Call when the record or a watched pid changed.  `watcher`
+        /// is asked to report the exit of the shell on record.
+        pub(crate) fn look(&mut self, watcher: Option<&Watcher>) {
+            // SAFETY: collects a child of this session, if it has exited.
+            self.started.retain(|pid| unsafe { libc::waitpid(*pid, std::ptr::null_mut(), libc::WNOHANG) } == 0);
+            if self.turn.as_ref().is_some_and(|(_, pid)| !self.started.contains(pid)) {
+                self.turn = None;
+            }
+            let Some(r) = Record::read() else {
+                // no record at all; one caught between its truncation
+                // and its write is reported again when it is written
+                if !owner::path().exists() {
+                    self.say(None);
+                }
+                return;
+            };
+            let watching = |pid: i32| watcher.is_none_or(|w| w.watch_pid(pid).is_ok());
+            if r.alive() && (self.watched == Some(r.pid) || watching(r.pid)) {
                 if self.watched != Some(r.pid) {
                     self.watched = Some(r.pid);
                     self.turn = None;
                 }
                 self.say(owner::owner_of(self.coalition, Some(&r)));
                 if r.heir_in.is_some() && r.heir_in == self.coalition {
-                    self.start_shell(&r, Some(r.pid));
+                    self.start_shell(&r, Some(r.pid), watcher);
                 }
                 return;
             }
             self.watched = None;
             self.say(None);
-            if r.coalition.is_some() && r.coalition == self.coalition {
+            if r.coalition.is_some() && r.coalition == self.coalition && self.turn.is_none() {
                 lx_event!("OWNER_GONE", "the shell that answered for this coalition is gone", sid = self.sid, was = r.pid);
-                self.start_shell(&r, None);
+                self.start_shell(&r, None, watcher);
             }
         }
 
         /// Start a shell here, if no other session is doing so: one
         /// with no window, or the heir of `heir_of`.
-        fn start_shell(&mut self, r: &Record, heir_of: Option<i32>) {
+        fn start_shell(&mut self, r: &Record, heir_of: Option<i32>, watcher: Option<&Watcher>) {
             if self.turn.is_some() {
                 return;
             }
@@ -216,15 +187,14 @@ mod macos {
                     cmd.env_remove(name);
                 }
             }
-            if let Some(pid) = heir_of {
-                cmd.env(owner::HEIR_ENV, pid.to_string());
-            }
             match heir_of {
                 None => cmd.env(owner::RESIDENT_ENV, owner::RESIDENT_STARTED),
-                Some(_) if r.heir_resident => cmd.env(owner::RESIDENT_ENV, "1"),
-                Some(_) => &mut cmd,
+                Some(pid) => cmd.env(owner::HEIR_ENV, pid.to_string()),
             };
-            // a session of its own: the pane's hangup is not for it
+            if heir_of.is_some() && r.heir_resident {
+                cmd.env(owner::RESIDENT_ENV, "1");
+            }
+            // a group of its own: the pane's hangup is not for it
             cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);
             let limit = marspot_term::inherited_fds::close_limit();
             // SAFETY: only fcntl between fork and exec.  The shell must
@@ -237,61 +207,23 @@ mod macos {
             }
             match cmd.spawn() {
                 Ok(child) => {
-                    // its exit is collected here, whether it became the shell or not
-                    self.add(child.id() as usize, libc::EVFILT_PROC, libc::NOTE_EXIT);
+                    let pid = child.id() as i32;
+                    // its exit is collected in `look`, whether it became the shell or not
+                    if let Some(w) = watcher {
+                        let _ = w.watch_pid(pid);
+                    }
                     lx_event!(
                         "OWNER_STARTED",
                         "started a shell in this coalition to answer for it",
                         sid = self.sid,
-                        pid = child.id(),
+                        pid = pid,
                         heir_of = heir_of.unwrap_or(0),
                         exe = r.exe.display()
                     );
-                    self.turn = Some((turn, child.id() as i32));
+                    self.started.push(pid);
+                    self.turn = Some((turn, pid));
                 }
                 Err(e) => lx_warn!("OWNER_START_FAILED", &format!("{e}"), sid = self.sid, exe = r.exe.display()),
-            }
-        }
-
-        pub(super) fn run(mut self, found: bool) {
-            if found {
-                self.look();
-            } else {
-                self.say(None);
-            }
-            loop {
-                // SAFETY: an all-zero kevent is a valid one to be filled in.
-                let mut ev: libc::kevent = unsafe { std::mem::zeroed() };
-                // SAFETY: room for one event, no timeout.
-                let n = unsafe { libc::kevent(self.kq, std::ptr::null(), 0, &mut ev, 1, std::ptr::null()) };
-                if n < 1 {
-                    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                        continue;
-                    }
-                    return lx_warn!("l3.owner.wait_failed", &format!("{}", std::io::Error::last_os_error()), session_id = self.sid);
-                }
-                if ev.filter == libc::EVFILT_PROC {
-                    let pid = ev.ident as i32;
-                    // SAFETY: collects a child of ours that has exited; for any other pid it fails.
-                    unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
-                    if self.watched == Some(pid) {
-                        self.watched = None;
-                    }
-                    if self.turn.as_ref().is_some_and(|(_, started)| *started == pid) {
-                        self.turn = None;
-                    }
-                    if self.open_record() {
-                        self.look();
-                    }
-                } else {
-                    // removed or replaced: the descriptor is of a file nobody writes any more
-                    if ev.fflags & (libc::NOTE_DELETE | libc::NOTE_RENAME) != 0 {
-                        self.file = None;
-                    }
-                    if self.open_record() {
-                        self.look();
-                    }
-                }
             }
         }
     }

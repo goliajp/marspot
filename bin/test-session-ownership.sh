@@ -3,15 +3,12 @@
 # Every session is in a coalition the app answers for, in every state
 # the app can be in.
 #
-# macOS puts an app launch and all it starts into one coalition, for
-# life, and LaunchServices holds one registered application answerable
-# for a coalition's members.  When that application is gone and the app
-# has been started again elsewhere, the coalition belongs to the next
-# program that registers from inside it: on 2026-11-11 that was an
-# emulator started in a pane, its record listed every session, and
-# quitting it from the Dock signalled them all.  Sessions outlive a
-# quit, so the app's shell has to as well: it stays with no window, and
-# when it dies anyway a session starts another one where they are.
+# LaunchServices holds one registered application answerable for the
+# members of a coalition.  With that application gone and the app
+# started again elsewhere, the coalition belongs to the next program
+# that registers from inside it: on 2026-11-11 an emulator started in a
+# pane had every session on its record, and quitting it from the Dock
+# signalled them all.  So the shell stays with its sessions.
 #
 # The app is opened through LaunchServices, as a bundle of its own
 # name, with two panes.  A launcher left in pane 1 starts, on request,
@@ -27,18 +24,14 @@
 #             session and every pane's shell
 #
 # Then: twenty quits leave one shell, the same pid and coalition, no
-# larger than after the first; the end of the login session ends the
-# shell with sessions kept; closing the last kept session ends a
-# resident shell and leaves nothing behind.
+# larger; the end of the login session ends the shell; closing the last
+# kept session ends a resident shell and leaves nothing behind.
 #
-# A failed check is recorded and the walk goes on, so one run says
-# which states hold and which do not; the exit code is non-zero when
-# any failed.  Nothing here clicks a Dock icon or asks for a
-# permission.  Sandbox-only: MARSPOT_STATE_DIR is redirected and the
-# installed app is never touched.
+# A failed check is recorded and the walk goes on; the exit code is
+# non-zero when any failed.  Nothing here clicks a Dock icon or asks
+# for a permission.  Sandbox-only: the installed app is never touched.
 
 set -uo pipefail
-
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 
@@ -72,9 +65,7 @@ cleanup() {
   rm -rf "$SB"
 }
 trap cleanup EXIT
-
 sw_vers | tr '\n' ' '; echo
-
 for b in "$SHELL_BIN" "$CORE_BIN" "$SESSION_BIN" "$ROOT/target/release/marspot-peer"; do
   [[ -x $b ]] || { echo "FAIL: $b is not built (cargo build --release, and -p marspot-peer)"; exit 1; }
 done
@@ -166,7 +157,10 @@ app_env=(--env "MARSPOT_STATE_DIR=$MARSPOT_STATE_DIR" --env "MARSPOT_SESSION_BIN
 # Opens the app the way the Dock does; returns once a shell answers.
 open_app() { # extra `open` flags...
   local i
-  open -g "$@" "$APP" "${app_env[@]}" || die "LaunchServices did not open the sandbox bundle"
+  # refused (-600) for a moment after the app replaced its image
+  for (( i = 0; i < 10; i++ )); do open -g "$@" "$APP" "${app_env[@]}" 2>"$SB/open.err" && break; sleep 0.5; done
+  (( i < 10 )) || die "LaunchServices did not open the sandbox bundle: $(cat "$SB/open.err")"
+  (( i == 0 )) || echo "    (open was refused $i time(s) first: $(head -1 "$SB/open.err"))"
   for (( i = 0; i < 300; i++ )); do
     L1="$(dev_shell_pid)"
     [[ -n $L1 ]] && "$SHELL_BIN" --panes >/dev/null 2>&1 && return 0
@@ -176,11 +170,17 @@ open_app() { # extra `open` flags...
 }
 
 quit_app() {
-  local cleanups answered
+  local cleanups answered i
   cleanups=$(count SHELL_QUIT_CLEANUP)
-  answered="$(osascript -l JavaScript -e "ObjC.import('AppKit');
-    \$.NSRunningApplication.runningApplicationWithProcessIdentifier($L1).terminate" 2>&1)"
+  # not taken for a moment after the app replaced its image
+  for (( i = 0; i < 10; i++ )); do
+    answered="$(osascript -l JavaScript -e "ObjC.import('AppKit');
+      \$.NSRunningApplication.runningApplicationWithProcessIdentifier($L1).terminate" 2>&1)"
+    [[ $answered == true ]] && break
+    sleep 0.5
+  done
   [[ $answered == true ]] || die "the quit request was not delivered: $answered"
+  (( i == 0 )) || echo "    (the quit request was refused $i time(s) first)"
   wait_count SHELL_QUIT_CLEANUP $((cleanups + 1)) 10 || die "the app did not act on the quit"
 }
 
