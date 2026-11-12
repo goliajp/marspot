@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.305"  # an app that took over from an older image of itself names no pane host
+shell   = "0.7.308"  # the codex cli follows the daemon while the supervisor rests
 core    = "0.12.337"  # a dropped loop watch tells its watchdog to end before waking it
 session = "0.11.180"  # a pane job is asked for with MARSPOT_PANE_JOB=1
