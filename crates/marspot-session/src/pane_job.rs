@@ -18,12 +18,11 @@
 //!
 //! The host is the app's main executable, where the app that started
 //! this session left word of it: what the pane runs is then charged to
-//! the app by the privacy system, as it is for a forked shell.  When
-//! the app named none, this binary is the host: the coalition without
-//! the app's name.
-//!
-//! Off unless `MARSPOT_PANE_JOB=1`.  When launchd does not take the
-//! job, the shell is forked the way it always was.
+//! the app by the privacy system, as it is for a forked shell.  Under
+//! an app from before it could be a host, the shell is forked the way
+//! it always was; so it is with `MARSPOT_PANE_JOB=0`, and when launchd
+//! does not take the job.  `MARSPOT_PANE_JOB=1` makes this binary the
+//! host when the app named none: the coalition without the app's name.
 
 // built off macOS for its tests only: nothing there starts a job
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -66,8 +65,9 @@ fn spawn_shell(_id: u64, config: PtyConfig) -> io::Result<Pty> {
 /// `MARSPOT_PANE_HOST`.
 fn host_program(switch: Option<&str>, named: Option<PathBuf>, own: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
     match switch {
+        Some("0") => None,
         Some("1") => named.or_else(own),
-        _ => None,
+        _ => named,
     }
 }
 
@@ -348,13 +348,14 @@ mod tests {
         assert!(p.contains("<string>--pane-host</string>"));
     }
 
-    /// Asked for, the app's executable when the app named it and this
-    /// binary when it did not; not asked for, nothing.
+    /// The app's executable when the app named it; this binary only
+    /// when asked for by name; nothing when switched off or when an
+    /// older app said nothing.
     #[test]
-    fn the_host_is_the_app_when_it_named_itself() {
+    fn the_host_is_the_app_when_it_named_itself_and_the_shell_is_forked_otherwise() {
         let app = || Some(PathBuf::from("/A/Marspot.app/Contents/MacOS/marspot-shell"));
         let own = || Some(PathBuf::from("/s/marspot-session"));
-        assert_eq!(host_program(None, app(), own), None);
+        assert_eq!(host_program(None, app(), own), app());
         assert_eq!(host_program(None, None, own), None);
         assert_eq!(host_program(Some("1"), None, own), own());
         assert_eq!(host_program(Some("1"), app(), own), app());
