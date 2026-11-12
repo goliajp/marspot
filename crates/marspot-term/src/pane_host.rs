@@ -20,6 +20,26 @@ pub const ARG: &str = "--pane-host";
 /// starts.  Unset under an app from before it could be a pane host.
 pub const PROGRAM_ENV: &str = "MARSPOT_PANE_HOST";
 
+/// Set by an app that replaces its own image with a newer one.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const SELF_UPDATE_ENV: &str = "MARSPOT_SHELL_SELF_UPDATE";
+
+/// The executable a starting app names as the pane host, if any.
+///
+/// The system knows a process by the executable it was launched as,
+/// also after it replaced its image: what it forks is still charged to
+/// the bundle.  A job is charged to its own program, so the host has to
+/// be that first executable.  An image that took over from one which
+/// had named it leaves the name alone.  One that took over from an
+/// image too old to name anything names nothing: the bundle's file is
+/// that old image and cannot host, this one is outside the bundle, and
+/// the panes are forked until the app is started afresh.
+// off macOS nothing starts a job: this is built for its tests only
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn program_to_name(named: bool, replaced_an_image: bool, own: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    if named || replaced_an_image { None } else { own }
+}
+
 /// What the host needs to start the shell, as the file it is handed.
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct Spec {
@@ -98,7 +118,7 @@ mod macos {
     use std::os::unix::fs::OpenOptionsExt;
     use std::path::Path;
 
-    use super::{ARG, PROGRAM_ENV, Spec, parse_limits};
+    use super::{ARG, PROGRAM_ENV, SELF_UPDATE_ENV, Spec, parse_limits, program_to_name};
 
     const LIMITS: [libc::c_int; 9] = [
         libc::RLIMIT_CPU,
@@ -136,7 +156,9 @@ mod macos {
             }
             std::process::exit(0);
         }
-        if let Ok(exe) = std::env::current_exe() {
+        let named = std::env::var_os(PROGRAM_ENV).is_some();
+        let replaced = std::env::var_os(SELF_UPDATE_ENV).is_some();
+        if let Some(exe) = program_to_name(named, replaced, std::env::current_exe().ok()) {
             // SAFETY: the first statement of main; no other thread exists.
             unsafe { std::env::set_var(PROGRAM_ENV, exe) };
         }
@@ -268,6 +290,15 @@ mod tests {
         assert_eq!(parse_limits(b"8:2560:9223372036854775807,3:8372224:67104768"), vec![(8, 2560, i64::MAX as u64), (3, 8372224, 67104768)]);
         assert_eq!(parse_limits(b"8:x:1,7:1:2"), vec![(7, 1, 2)]);
         assert!(parse_limits(b"").is_empty());
+    }
+
+    #[test]
+    fn an_app_names_the_executable_it_was_launched_as_and_no_other() {
+        let own = || Some(std::path::PathBuf::from("/A/Marspot.app/Contents/MacOS/marspot-shell"));
+        assert_eq!(program_to_name(false, false, own()), own());
+        assert_eq!(program_to_name(true, false, own()), None, "an earlier image's word stands");
+        assert_eq!(program_to_name(true, true, own()), None);
+        assert_eq!(program_to_name(false, true, own()), None, "the bundle's file is the old image");
     }
 
     #[test]
