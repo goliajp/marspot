@@ -139,6 +139,27 @@ trap interrupted INT TERM
 
 cd "$ROOT"
 install_hook
+
+# One run at a time from this machine.  Every checkout syncs into the
+# same remote tree and builds in the same target dir: a second run that
+# started while the first was testing replaced the files under it, and
+# its build put a session binary of another build where the first run's
+# tests look for theirs (eight self_execv failures, twice).
+LOCK_LOCAL="/tmp/marspot-ci-remote.lock.d"
+said=0
+until mkdir "$LOCK_LOCAL" 2>/dev/null; do
+  if ! kill -0 "$(cat "$LOCK_LOCAL/pid" 2>/dev/null)" 2>/dev/null; then
+    # a run that just made the directory has not written its pid yet
+    sleep 2
+    kill -0 "$(cat "$LOCK_LOCAL/pid" 2>/dev/null)" 2>/dev/null || rm -rf "$LOCK_LOCAL"
+    continue
+  fi
+  (( said )) || echo "==> waiting for another ci-remote run (pid $(cat "$LOCK_LOCAL/pid"))"
+  said=1
+  sleep 5
+done
+echo "$$" > "$LOCK_LOCAL/pid"
+trap 'rm -rf "$LOCK_LOCAL"' EXIT
 clean=1
 [[ -z "$(git status --porcelain)" ]] || clean=0
 tree="$(git rev-parse 'HEAD^{tree}')"

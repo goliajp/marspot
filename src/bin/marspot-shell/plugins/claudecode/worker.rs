@@ -33,7 +33,7 @@ pub(super) struct WorkerCtx {
     /// Last `(switch value, time)` the status-line hook was
     /// reconciled against, so the usual scan does not re-read Claude
     /// Code's settings every two seconds.
-    pub(super) statusline_state: Option<(bool, Instant)>,
+    pub(super) statusline_state: Option<StatuslineLook>,
     /// Same role as the old `ClaudecodePlugin::seen` field, but the
     /// worker owns it now and the plugin never touches it.
     pub(super) seen: HashMap<PathBuf, SessionInfo>,
@@ -243,22 +243,16 @@ impl WorkerCtx {
     /// Keep Claude Code's registration of the hook in line with the
     /// switch.
     ///
-    /// Re-checked on a change of the switch, and otherwise once a
-    /// minute — slowly, because what it catches between switch flips
-    /// is a binary that moved under an installed hook, or a
-    /// settings.json somebody edited by hand.  Reading the switch is a
-    /// map lookup; the minute is what keeps the two small file reads
-    /// off the two-second scan.
+    /// Re-checked when `statusline_due` says so.  Reading the switch
+    /// and the count of changes is two loads; the minute is what keeps
+    /// the two small file reads off the two-second scan.
     pub(super) fn reconcile_statusline(&mut self) -> Vec<String> {
-        const RECHECK: Duration = Duration::from_secs(60);
-        let want = marspot::settings::get().cc_statusline_hook;
-        let now = Instant::now();
-        if let Some((was, at)) = self.statusline_state
-            && was == want && now.duration_since(at) < RECHECK {
-                return Vec::new();
-            }
-        self.statusline_state = Some((want, now));
-        reconcile_statusline_hook(want)
+        let look = (marspot::settings::get().cc_statusline_hook, Instant::now(), crate::plugins::agents::changes::count());
+        if !statusline_due(self.statusline_state, look) {
+            return Vec::new();
+        }
+        self.statusline_state = Some(look);
+        reconcile_statusline_hook(look.0)
     }
 
     /// The model to show for this session, best source first.

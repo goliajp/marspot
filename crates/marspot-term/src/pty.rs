@@ -418,9 +418,11 @@ impl Pty {
             if r > 0 {
                 return true;
             }
-            if r < 0 {
-                // ECHILD = someone else already reaped it.  Done either
-                // way; there is nothing left to wait for.
+            // not ours to reap: a shell launchd started for the pane,
+            // or one already reaped.  it is gone when it no longer
+            // takes a signal; pids are handed out in order, so the
+            // number is not another process's within this budget
+            if r < 0 && unsafe { libc::kill(self.child, 0) } != 0 {
                 return true;
             }
             if std::time::Instant::now() >= deadline {
@@ -472,6 +474,25 @@ mod tests {
             }
         }
         acc
+    }
+
+    /// A shell that is not this process's child and ignores the hangup
+    /// still ends with its pane.
+    #[test]
+    fn a_shell_another_process_started_is_killed_when_it_ignores_the_hangup() {
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", "(trap '' HUP; exec sleep 300) >/dev/null 2>&1 & echo $!"])
+            .output()
+            .unwrap();
+        let pid: i32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the stand-in shell runs");
+        let master = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR) };
+        drop(Pty::from_raw_master(master, pid));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(Instant::now() < deadline, "pid {pid} outlived its pane");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// Reap a PTY's child process and close the master fd manually.  Used in
