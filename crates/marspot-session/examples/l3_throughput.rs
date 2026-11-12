@@ -179,7 +179,7 @@ fn main() {
             .join(" ");
         write!(
             f,
-            "#!/bin/bash\nexec 2> {marker}\n/usr/bin/time -p /bin/bash -c '\n  /bin/cat {cats}\n  stty raw -echo 2>/dev/null\n  printf \"\\033[6n\" > /dev/tty\n  IFS=\"[;\" read -t 5 -srd R _ _row _col < /dev/tty\n  stty sane 2>/dev/null\n  printf \"cpr=%s,%s\\n\" \"$_row\" \"$_col\" >&2\n'\n",
+            "#!/bin/bash\nexec 2> {marker}\n/usr/bin/time -lp /bin/bash -c '\n  /bin/cat {cats}\n  stty raw -echo 2>/dev/null\n  printf \"\\033[6n\" > /dev/tty\n  IFS=\"[;\" read -t 5 -srd R _ _row _col < /dev/tty\n  stty sane 2>/dev/null\n  printf \"cpr=%s,%s\\n\" \"$_row\" \"$_col\" >&2\n'\n",
             marker = marker.display(),
             cats = cats,
         )
@@ -300,6 +300,27 @@ fn main() {
     if !text.lines().any(|l| l.starts_with("cpr=") && l[4..5].chars().next().is_some_and(|c| c.is_ascii_digit())) {
         die("no DSR reply — the session never confirmed it consumed the corpus");
     }
+    // what the writing side spent: `time -l` prints its rusage after
+    // the three clock lines, a few writes later
+    thread::sleep(Duration::from_millis(60));
+    let text = std::fs::read_to_string(&marker).unwrap_or(text);
+    let rusage = |name: &str| {
+        text.lines()
+            .find_map(|l| l.trim().strip_suffix(name).map(|v| v.trim().to_string()))
+            .unwrap_or_else(|| "-".into())
+    };
+    let clock = |name: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(name).map(|v| v.trim().to_string()))
+            .unwrap_or_else(|| "-".into())
+    };
+    eprintln!(
+        "writer: user_s={} sys_s={} vcsw={} ivcsw={}",
+        clock("user"),
+        clock("sys"),
+        rusage("voluntary context switches"),
+        rusage("involuntary context switches"),
+    );
     let secs = text
         .lines()
         .find_map(|l| l.strip_prefix("real"))

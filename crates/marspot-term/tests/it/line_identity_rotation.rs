@@ -122,7 +122,7 @@ fn a_mark_in_the_cold_tier_is_still_read_after_one_handover() {
     let dir = std::env::temp_dir().join(format!("marspot-lineid-cold-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    // 1 MiB of hot file is a few thousand 8-column records, so one pass
+    // 1 MiB of hot file is about 30 000 8-column records, so one pass
     // below hands the file over exactly once.
     let mut env = EnvGuard::new();
     env.set("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1");
@@ -131,7 +131,7 @@ fn a_mark_in_the_cold_tier_is_still_read_after_one_handover() {
     let first_epoch = sb.epoch();
     let mut rotations = 0;
     let mut seen = first_epoch;
-    for i in 0..12_000 {
+    for i in 0..45_000 {
         sb.push_line_with_wrapped(&row(b'a' + (i % 26) as u8, 8), false);
         if i == 10 {
             sb.mark_last_line(PromptMark::CommandEnd(Some(42)));
@@ -175,7 +175,7 @@ fn cluster_text_in_the_cold_tier_is_still_read_after_one_handover() {
     let first_epoch = sb.epoch();
     let mut rotations = 0;
     let mut seen = first_epoch;
-    for i in 0..12_000 {
+    for i in 0..45_000 {
         sb.push_line_with_wrapped(&row(b'a' + (i % 26) as u8, 8), false);
         if i == 10 {
             sb.cluster_last_line(&[(3u16, flag.clone())]);
