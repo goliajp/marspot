@@ -126,6 +126,13 @@ impl Scrollback {
         }
     }
 
+    /// End of a burst of output: see [`FileScrollback::hand_off`].
+    pub fn hand_off(&self) {
+        if let Self::File(f) = self {
+            f.hand_off();
+        }
+    }
+
     /// File variant only: push a line with its DECAWM continuation
     /// flag.  Memory drops the flag (Grid's `sb_wrapped` is the truth
     /// there).  A1's surface for direct tests against FileScrollback;
