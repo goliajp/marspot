@@ -40,19 +40,6 @@ use marspot_term::shell_proto::{encode_grid_resize, Frame, MsgType};
 
 /// The session this probe spawned, for `die` to take down with it.
 static SESSION_PID: AtomicU32 = AtomicU32::new(0);
-/// Whether launchd started that session: it is then not this
-/// process's child, and ending it is a signal to its pid.
-static BY_LAUNCHD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-fn end_job() {
-    let pid = SESSION_PID.load(Ordering::Relaxed);
-    if BY_LAUNCHD.load(Ordering::Relaxed) && pid != 0 {
-        // SAFETY: the pid launchd's host gave for the session this
-        // process had started.
-        unsafe { libc::kill(pid as libc::c_int, libc::SIGKILL) };
-    }
-}
-
 /// How much of a process's CPU time was on performance cores, and the
 /// coalition it is in.
 #[cfg(target_os = "macos")]
@@ -112,7 +99,6 @@ fn die(msg: &str) -> ! {
         // only fail with ESRCH, which is ignored.
         unsafe { libc::kill(pid as libc::c_int, libc::SIGKILL) };
     }
-    end_job();
     std::process::exit(1)
 }
 
@@ -217,11 +203,6 @@ fn main() {
         die(&format!("marspot-session missing at {session_bin:?}"));
     }
 
-    // MARSPOT_PROBE_SESSION_JOB=1: launchd starts the session, in a
-    // coalition of its own with its shell and what the shell runs.
-    // With MARSPOT_FRONT_ROLE=1 beside it the session is started as an
-    // application in front (`marspot_term::pane_host::FRONT_ROLE`)
-    let as_job = cfg!(target_os = "macos") && env::var("MARSPOT_PROBE_SESSION_JOB").is_ok_and(|v| v == "1");
     let pid = std::process::id();
     let sandbox = env::temp_dir().join(format!("l3-throughput-{pid}"));
     let _ = std::fs::remove_dir_all(&sandbox);
@@ -241,13 +222,9 @@ fn main() {
             .join(" ");
         write!(
             f,
-            "#!/bin/bash\nexec 2> {marker}\n/usr/bin/time -lp /bin/bash -c '\n  /bin/cat {cats}\n  stty raw -echo 2>/dev/null\n  printf \"\\033[6n\" > /dev/tty\n  IFS=\"[;\" read -t 5 -srd R _ _row _col < /dev/tty\n  stty sane 2>/dev/null\n  printf \"cpr=%s,%s\\n\" \"$_row\" \"$_col\" >&2\n'\n{linger}",
+            "#!/bin/bash\nexec 2> {marker}\n/usr/bin/time -lp /bin/bash -c '\n  /bin/cat {cats}\n  stty raw -echo 2>/dev/null\n  printf \"\\033[6n\" > /dev/tty\n  IFS=\"[;\" read -t 5 -srd R _ _row _col < /dev/tty\n  stty sane 2>/dev/null\n  printf \"cpr=%s,%s\\n\" \"$_row\" \"$_col\" >&2\n'\n",
             marker = marker.display(),
             cats = cats,
-            // launchd reaps a session it started the moment it ends,
-            // and its counters go with it: the shell stays until they
-            // have been read
-            linger = if as_job { "sleep 0.5\n" } else { "" },
         )
         .expect("write trial script");
     }
@@ -260,8 +237,8 @@ fn main() {
     std::fs::set_permissions(&script, perms).expect("chmod script");
 
     let session_id: u64 = 1;
-    // SAFETY: single-threaded at this point; the registry helpers and
-    // the job's label read this to locate the sandbox.
+    // SAFETY: single-threaded at this point; the registry helpers
+    // read this to locate the sandbox.
     unsafe { env::set_var("MARSPOT_STATE_DIR", &sandbox) };
     struct ChildGuard(std::process::Child);
     impl Drop for ChildGuard {
@@ -271,40 +248,7 @@ fn main() {
         }
     }
     let die_at = env::var("MARSPOT_PROBE_DIE_AT").unwrap_or_default();
-    let guard = if as_job {
-        #[cfg(target_os = "macos")]
-        {
-            use std::os::unix::ffi::{OsStrExt, OsStringExt};
-            let bin = session_bin.as_os_str().as_bytes().to_vec();
-            // this process's environment, as a forked session gets it:
-            // MARSPOT_STATE_DIR is in it already, and MARSPOT_FRONT_ROLE
-            // when the caller set it
-            let mut job_env: Vec<Vec<u8>> = env::vars_os()
-                .filter(|(k, _)| k != "MARSPOT_SESSION_ID" && k != "SHELL")
-                .map(|(k, v)| [k.as_bytes(), b"=", v.as_bytes()].concat())
-                .collect();
-            job_env.push(b"MARSPOT_SESSION_ID=1".to_vec());
-            job_env.push([b"SHELL=", script.as_os_str().as_bytes()].concat());
-            let spec = marspot_term::pane_host::Spec {
-                // a session has no terminal of its own
-                tty: b"/dev/null".to_vec(),
-                reply: Vec::new(),
-                cwd: env::current_dir().map(|d| d.into_os_string().into_vec()).unwrap_or_default(),
-                program: bin.clone(),
-                limits: marspot_term::pane_host::own_limits(),
-                argv: vec![bin],
-                env: job_env,
-            };
-            match marspot_term::launchd_job::start("1", &session_bin, spec) {
-                Ok(started) => {
-                    SESSION_PID.store(started.pid as u32, Ordering::Relaxed);
-                    BY_LAUNCHD.store(true, Ordering::Relaxed);
-                }
-                Err(e) => die(&format!("start the session under launchd: {e}")),
-            }
-        }
-        None
-    } else {
+    let guard = {
         let child = Command::new(&session_bin)
             .env("MARSPOT_SESSION_ID", session_id.to_string())
             // `SHELL`, not `MARSPOT_SHELL`: an L3 spawns `$SHELL` directly
@@ -328,7 +272,7 @@ fn main() {
         if die_at == "spawn" {
             die("asked to die after spawn");
         }
-        Some(ChildGuard(child))
+        ChildGuard(child)
     };
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -491,7 +435,6 @@ fn main() {
         None => println!("{wall_ns} - - - - -"),
     }
     drop(guard);
-    end_job();
     let _ = std::fs::remove_dir_all(&sandbox);
 }
 

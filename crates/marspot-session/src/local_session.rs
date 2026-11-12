@@ -222,7 +222,7 @@ impl LocalSession {
                 .unwrap_or("sh")
         );
 
-        let pty = crate::pane_job::ForSession(id).spawn_shell(PtyConfig {
+        let pty = Pty::spawn(PtyConfig {
             program: shell,
             args: Vec::new(),
             size: TerminalSize {

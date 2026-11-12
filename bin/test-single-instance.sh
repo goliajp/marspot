@@ -17,12 +17,14 @@
 #      still the first shell's.  It logs SHELL_ALREADY_RUNNING with the
 #      holder's pid, and the holder logs SHELL_ACTIVATED_BY with its.
 #   2. `NSRunningApplication.terminate` by pid quits the app the way
-#      Cmd-Q does: SHELL_QUIT_CLEANUP within three seconds, the shell
-#      gone, every session still running.
+#      Cmd-Q does: SHELL_QUIT_CLEANUP within three seconds, every
+#      session still running, and the shell still there for them with
+#      no window and no core.
 #   3. The same with the window the app booted with already closed and
 #      another still open.
 #   4. The lander's reopen and a reopen by hand at the same moment leave
-#      one app; the lander lands once, disarms and does not try again.
+#      one app, the shell that was there; the lander lands once, disarms
+#      and does not try again.
 #
 # Windows are counted from the log: nothing here may ask for
 # accessibility access on the runner.  That the first app's window
@@ -129,15 +131,18 @@ quit_and_check() { # label, sessions that must survive
   [[ $answered == true ]] || fail "[$label] the quit request was not delivered: $answered"
   wait_count SHELL_QUIT_CLEANUP $((cleanups + 1)) 3 \
     || fail "[$label] no SHELL_QUIT_CLEANUP within 3 s of the quit request"
-  local i
-  for (( i = 0; i < 50; i++ )); do
-    kill -0 "$shell" 2>/dev/null || break
-    sleep 0.1
-  done
-  kill -0 "$shell" 2>/dev/null && fail "[$label] the shell is still running after its quit cleanup"
+  # sessions are kept, so the same process stays to answer for them
+  local residents
+  residents=$(count SHELL_RESIDENT)
+  wait_count SHELL_RESIDENT $((residents + 1)) 10 || wait_count SHELL_RESIDENT 1 1 \
+    || fail "[$label] the shell did not become a resident"
+  sleep 1
+  [[ "$(dev_shell_pid)" == "$shell" ]] || fail "[$label] the shell did not stay after its quit cleanup"
+  [[ -z "$(ours marspot-core)" ]] || fail "[$label] a core is still running after the quit"
+  [[ -z "$(dev_windows_of "$shell")" ]] || fail "[$label] the resident shell has a window"
   [[ "$(session_pids)" == "$before" ]] \
     || fail "[$label] sessions changed over the quit: before [$before] after [$(session_pids)]"
-  echo "==> [$label] quit within 3 s, all sessions still running"
+  echo "==> [$label] quit within 3 s, all sessions still running, the shell $shell resident"
 }
 
 dev_kill_shell_core
@@ -246,15 +251,18 @@ launch
 wait "$LANDER"; rc=$?
 (( rc == 0 )) || fail "the lander exited $rc"
 grep -q '^relaunched' "$STAGE/land.log" || fail "the lander did not reopen the app: $(tail -3 "$STAGE/land.log")"
-wait_count SHELL_ALREADY_RUNNING $((STOOD_ASIDE + 1)) 10 \
-  || fail "neither of the two launches stood aside"
+# the shell that stayed after the quit is the app again: both launches stand aside
+RESIDENT="$(dev_shell_pid)"
+wait_count SHELL_ALREADY_RUNNING $((STOOD_ASIDE + 2)) 10 \
+  || fail "the two launches did not both stand aside for the resident shell"
 sleep 6
 n=$(wc -w <<<"$(ours marspot-shell)")
 (( n == 1 )) || fail "expected one shell after the double reopen, found $n: [$(ours marspot-shell)]"
 n=$(wc -w <<<"$(ours marspot-core)")
 (( n == 1 )) || fail "expected one core after the double reopen, found $n"
-(( $(count SHELL_ALREADY_RUNNING) == STOOD_ASIDE + 1 )) \
-  || fail "more than one launch stood aside: the lander tried again"
+[[ "$(ours marspot-shell)" == "$RESIDENT" ]] || fail "the app is not the shell that had stayed ($RESIDENT)"
+(( $(count SHELL_ALREADY_RUNNING) == STOOD_ASIDE + 2 )) \
+  || fail "more than two launches stood aside: the lander tried again"
 [[ ! -e "$STAGE/marspot-shell" && ! -e "$MARSPOT_STATE_DIR/agent.plist" ]] \
   || fail "the lander is still armed after landing"
 (( $(grep -c '^=== .* land.sh ===' "$STAGE/land.log") == 1 )) || fail "the lander ran more than once"
@@ -265,4 +273,4 @@ echo "==> one shell ($(ours marspot-shell)), one core, the lander landed once an
 cleanup
 echo
 echo "PASS — a second launch stands aside and tells the first,"
-echo "       a quit from outside quits, and a double reopen leaves one app."
+echo "       a quit from outside puts the app away, and a double reopen leaves one app."

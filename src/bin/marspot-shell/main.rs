@@ -45,6 +45,7 @@ mod cli_socket;
 mod instance;
 mod observe;
 mod orphans;
+mod ownership;
 mod pane_decls;
 mod pane_status;
 mod pane_tables;
@@ -52,6 +53,7 @@ mod plugins;
 mod present;
 mod pump;
 mod receipts;
+mod resident;
 mod sup_log;
 mod supervisor;
 mod supervisor_profile;
@@ -1363,6 +1365,7 @@ impl ShellApp {
     /// occasional WARN is dwarfed by everything else in `poll_supervisor`.
     fn record_core_boot(&mut self) {
         self.core_generation = self.core_generation.saturating_add(1);
+        ownership::log_sessions();
         let now = Instant::now();
         let window = std::time::Duration::from_secs(30);
         let cutoff = now - window;
@@ -2853,12 +2856,15 @@ impl ShellApp {
         self.dev_close_extra_if_armed(i);
     }
 
-    /// Shut marspot down.
+    /// Put marspot away.
     ///
     /// **The running sessions are deliberately left alone.**  Quitting
     /// is putting marspot away, not ending the work in it: every L3
     /// keeps its PTY, its shell and whatever is running inside, and
-    /// the next launch reattaches to them from the registry.  That is
+    /// the next launch reattaches to them from the registry.  While
+    /// any is kept this process does not exit either: it goes on as a
+    /// resident with no window (`resident`), and opening the app
+    /// brings this same process back.  That is
     /// what makes "close the windows, come back tomorrow" keep the
     /// sessions — and it has to hold whichever window was closed last,
     /// which is why closing a window parks it rather than retiring it.
@@ -2901,61 +2907,16 @@ impl ShellApp {
                 stale.release();
             }
         }
+        // The sessions stay in this process's coalition, and it is what
+        // answers for them: it stays too, as a resident with no window.
+        // The end of the login session is the one quit that is not that.
+        if n_kept > 0 && !marspot::app_delegate::quit_ends_the_login_session() {
+            resident::enter(n_kept); // returns only when the exec failed
+        }
         // Last thing before the process goes: this is the only moment
         // the bundle's own copy of L1 can be replaced.
-        self.land_staged_bundle_on_exit();
+        resident::land_staged_bundle();
         ctx.exit();
-    }
-
-    /// Start the armed bundle lander, if there is one, and hand it the
-    /// one moment it can work in.
-    ///
-    /// `install-local.sh` cannot write `Marspot.app/Contents/MacOS/`
-    /// while a process is running that binary — AMFI kills it when the
-    /// on-disk CDHash stops matching, which is how nine panes went
-    /// blank on 2026-06-16 — and since L1 stopped redirecting, the
-    /// process that runs IS the bundle binary.  So a changed L1 is
-    /// staged instead, behind a one-shot `land.sh`.
-    ///
-    /// Its LaunchAgent runs at login, and that never wins: the app is
-    /// what the user opens at the start of the day, so the lander finds
-    /// it running, waits its half hour and gives up.  The bundle stood
-    /// on 0.7.137 from 2026-09-07 to 09-18 — eight installs, none of
-    /// them landed, and every cold launch went back to the 09-07
-    /// binary.  Started from here it waits for this pid instead, which
-    /// is about to be gone, and lands in about a second.
-    ///
-    /// Detached into its own process group so the exit happening right
-    /// after this does not take it along.  Every failure is silent on
-    /// purpose: nothing about quitting may depend on an update landing.
-    fn land_staged_bundle_on_exit(&self) {
-        use std::os::unix::process::CommandExt;
-        let script = marspot_term::paths::state_root()
-            .join("pending-bundle")
-            .join("land.sh");
-        if !script.exists() {
-            return;
-        }
-        let pid = std::process::id();
-        let spawned = std::process::Command::new(&script)
-            .arg(pid.to_string())
-            .process_group(0)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-        match spawned {
-            Ok(child) => lx_event!(
-                "BUNDLE_LANDER_START",
-                "handed the armed bundle lander this exit to land in",
-                lander_pid = child.id(),
-                waits_for = pid
-            ),
-            Err(e) => lx_warn!(
-                "shell.quit.lander_spawn_failed",
-                &format!("{e} — the stage stays armed for the login backstop")
-            ),
-        }
     }
 
     /// Close ONE window: tell the core, drop our side, ask AppKit.
@@ -4692,7 +4653,10 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
 }
 
 fn main() {
-    marspot_term::pane_host::dispatch(); // launchd runs this program to start a pane's shell
+    // before anything reads or writes the state directory
+    if std::env::args().nth(1).as_deref() == Some(resident::LS_REFRESH_ARG) {
+        resident::ls_refresh_main();
+    }
     // RFC-004 D.1 — one-time Caches → Application Support state-root
     // migration.  Must run before logx / any path computation.
     marspot::paths::migrate_legacy_state_root();
@@ -4930,6 +4894,19 @@ Usage:\n\
             std::process::exit(2);
         }
         _ => {}
+    }
+
+    if resident::asked() {
+        ownership::hand_over_if_outside(true);
+        resident::run();
+    }
+    ownership::hand_over_if_outside(false);
+    ownership::announce();
+    if instance::is_heir() {
+        resident::replace_dead_record();
+    }
+    if resident::update_was_waiting() {
+        SIGUSR1_FLAG.store(true, Ordering::Release);
     }
 
     // The default SIGPIPE above is for the CLI's stdout.  The GUI shell

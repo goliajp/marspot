@@ -113,6 +113,24 @@ if [[ -n ${IDLE_READINGS:-} ]]; then
     --pattern "$ROOT/target/(debug|release)/marspot(-shell|-core|-session)?( |\$)"
   rc=$?
   echo "    lock: $(/usr/local/bin/bench-lock status 2>/dev/null | grep -c waiting) waiting"
+  if [[ -n ${IDLE_RESIDENT:-} ]]; then
+    # the app quit with its sessions kept: the shell stays with no
+    # window and has nothing to wake up for
+    l1="$(dev_shell_pid)"
+    osascript -l JavaScript -e "ObjC.import('AppKit');
+      \$.NSRunningApplication.runningApplicationWithProcessIdentifier($l1).terminate" >/dev/null
+    for (( i = 0; i < 100; i++ )); do grep -q $'\tSHELL_RESIDENT\t' "$APPLOG" && break; sleep 0.1; done
+    grep -q $'\tSHELL_RESIDENT\t' "$APPLOG" && [[ "$(dev_shell_pid)" == "$l1" ]] || fail "the shell did not stay as a resident after the quit"
+    echo "==> quit: shell $l1 resident, $(dev_session_pids | wc -l | tr -d ' ') sessions kept, settling ${IDLE_RESIDENT_SETTLE:-20}s"
+    sleep "${IDLE_RESIDENT_SETTLE:-20}"
+    "$ROOT/bin/_idle_wakeups.py" --label "marspot-dev quit, $N sessions kept, the shell alone" --window "$WINDOW" \
+      --readings "$IDLE_READINGS" --budget "${IDLE_RESIDENT_BUDGET:-0.1}" \
+      --pattern "$ROOT/target/(debug|release)/marspot-shell( |\$)" || rc=1
+    "$ROOT/bin/_idle_wakeups.py" --label "marspot-dev quit, $N sessions kept, shell and sessions" --window "$WINDOW" \
+      --readings "$IDLE_READINGS" ${IDLE_WAKEUP_BUDGET:+--budget "$IDLE_WAKEUP_BUDGET"} \
+      --pattern "$ROOT/target/(debug|release)/marspot(-shell|-core|-session)?( |\$)" || rc=1
+    echo "==> resident shell footprint: $(footprint "$l1" 2>/dev/null | sed -n 's/.*phys_footprint: *//p' | head -1)"
+  fi
 else
   "$ROOT/bin/measure-idle.sh" --app marspot-dev --sessions "$N" --window "$WINDOW"
   rc=$?

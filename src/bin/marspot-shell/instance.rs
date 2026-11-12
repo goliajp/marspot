@@ -29,8 +29,46 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSApplicationActivationOptions, NSRunningApplication};
 
 static LOCK: OnceLock<File> = OnceLock::new();
+/// Whether a session started this shell at the request of one outside
+/// its coalition.
+static HEIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn is_heir() -> bool {
+    HEIR.load(Ordering::Relaxed)
+}
 /// Pid of a launch that asked us to come forward; 0 when none has.
 static ASKED_BY: AtomicU32 = AtomicU32::new(0);
+/// The dev seams (`MARSPOT_DEV_*`) the last such launch was started
+/// with.  A resident shell that becomes the app on its request takes
+/// them over: a test starts the app with a seam set, and the process
+/// that answers is one that was started before it.
+static ASKED_WITH: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+const SEAM_PREFIX: &str = "MARSPOT_DEV_";
+
+/// What a launch that stands aside sends: its pid, then its seams.
+fn front_request(pid: u32, env: impl Iterator<Item = (String, String)>) -> String {
+    let mut text = format!("{pid}\n");
+    for (k, v) in env.filter(|(k, v)| k.starts_with(SEAM_PREFIX) && !v.contains('\n')) {
+        text.push_str(&format!("{k}={v}\n"));
+    }
+    text
+}
+
+fn parse_front_request(text: &str) -> Option<(u32, Vec<(String, String)>)> {
+    let mut lines = text.lines();
+    let pid = lines.next()?.trim().parse().ok()?;
+    let seams = lines
+        .filter_map(|l| l.split_once('='))
+        .filter(|(k, _)| k.starts_with(SEAM_PREFIX))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    Some((pid, seams))
+}
+
+/// The seams of the launch that last asked this shell to come forward.
+pub(crate) fn asked_with() -> Vec<(String, String)> {
+    ASKED_WITH.lock().map(|g| g.clone()).unwrap_or_default()
+}
 
 fn lock_path() -> PathBuf {
     marspot_term::paths::state_root().join("shell.lock")
@@ -81,6 +119,27 @@ pub(crate) fn claim(path: &Path) -> io::Result<Claim> {
     }
 }
 
+/// How long an heir waits for the shell it takes over from to let go.
+const HEIR_PATIENCE: Duration = Duration::from_secs(5);
+
+/// A shell a session started on request: say that it is here, then
+/// take the lock when the shell that asked lets go of it.
+fn claim_as_heir(path: &Path) -> io::Result<Claim> {
+    let heir_file = marspot_term::owner::heir_path();
+    let deadline = std::time::Instant::now() + HEIR_PATIENCE;
+    loop {
+        let claimed = claim(path)?;
+        if matches!(claimed, Claim::Ours(_)) || std::time::Instant::now() >= deadline {
+            let _ = std::fs::remove_file(&heir_file);
+            return Ok(claimed);
+        }
+        if !heir_file.exists() {
+            std::fs::write(&heir_file, std::process::id().to_string())?;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Become the shell of this state dir, or hand over to the one that is
 /// and exit.  Nothing but the log line is written by a launch that
 /// loses.
@@ -89,9 +148,23 @@ pub(crate) fn hold_or_exit() {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    match claim(&path) {
+    let heir = std::env::var_os(marspot_term::owner::HEIR_ENV).is_some();
+    // SAFETY: startup path in main(), before any thread is spawned.
+    unsafe { std::env::remove_var(marspot_term::owner::HEIR_ENV) };
+    HEIR.store(heir, Ordering::Relaxed);
+    let claimed = if heir { claim_as_heir(&path) } else { claim(&path) };
+    match claimed {
         Ok(Claim::Ours(file)) => {
             let _ = LOCK.set(file);
+        }
+        // started by a session to answer for it: another shell does
+        Ok(Claim::Held(holder)) if heir || crate::resident::asked() => {
+            lx_event!(
+                "SHELL_NOT_NEEDED",
+                "started to answer for the sessions, and a shell already does; exiting",
+                holder_pid = holder.unwrap_or(0)
+            );
+            std::process::exit(0);
         }
         Ok(Claim::Held(holder)) => {
             lx_event!(
@@ -102,7 +175,7 @@ pub(crate) fn hold_or_exit() {
             // a holder that is still booting has no socket yet, and
             // will put its own window in front when it gets there
             if let Ok(mut stream) = UnixStream::connect(front_socket_path()) {
-                let _ = stream.write_all(std::process::id().to_string().as_bytes());
+                let _ = stream.write_all(front_request(std::process::id(), std::env::vars()).as_bytes());
             }
             // this launch is the one the system just let come forward;
             // pass that on by name as well
@@ -135,10 +208,13 @@ pub(crate) fn serve_front(wake: impl Fn() + Send + 'static) {
         for mut stream in listener.incoming().flatten() {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
             let mut text = String::new();
-            if (&mut stream).take(16).read_to_string(&mut text).is_err() {
+            if (&mut stream).take(16 * 1024).read_to_string(&mut text).is_err() {
                 continue;
             }
-            if let Ok(pid) = text.trim().parse::<u32>() {
+            if let Some((pid, seams)) = parse_front_request(&text) {
+                if let Ok(mut with) = ASKED_WITH.lock() {
+                    *with = seams;
+                }
                 ASKED_BY.store(pid, Ordering::Release);
                 wake();
             }
@@ -244,6 +320,17 @@ mod tests {
             }
             other => panic!("unknown role {other}"),
         }
+    }
+
+    #[test]
+    fn a_launch_that_stands_aside_passes_on_its_pid_and_its_seams_only() {
+        let env = [("MARSPOT_DEV_CLOSE_SEQUENCE", "2,1"), ("HOME", "/Users/x"), ("MARSPOT_STATE_DIR", "/tmp/s")];
+        let text = front_request(77, env.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        assert_eq!(text, "77\nMARSPOT_DEV_CLOSE_SEQUENCE=2,1\n");
+        assert_eq!(parse_front_request(&text), Some((77, vec![("MARSPOT_DEV_CLOSE_SEQUENCE".into(), "2,1".into())])));
+        // a shell from before the seams were sent
+        assert_eq!(parse_front_request("77"), Some((77, vec![])));
+        assert_eq!(parse_front_request("HOME=/x\n"), None);
     }
 
     /// A second claim is told who holds the lock, and the holder's

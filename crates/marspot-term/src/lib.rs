@@ -71,9 +71,9 @@ pub mod input_core;
 pub mod language;
 pub mod layout;
 pub mod parser;
+pub mod owner;
 pub mod palette;
 pub mod pane_code;
-pub mod pane_host;
 pub mod paths;
 pub mod host_load;
 pub mod inherited_fds;
@@ -88,7 +88,6 @@ pub mod session;
 pub mod tabs;
 #[doc(hidden)]
 pub mod test_env;
-pub mod launchd_job;
 pub mod session_registry;
 pub mod session_state;
 pub mod settings;
