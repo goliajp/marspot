@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.298"  # a banner is drawn again for the display the window moved to
-core    = "0.12.329"  # the loop watchdog parks while the loop waits for work
+core    = "0.12.330"  # the main loop waits without a deadline when nothing is pending
 session = "0.11.169"  # settings and the registry entry are followed by file events, not a five-second beat
