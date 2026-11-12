@@ -67,6 +67,12 @@ fn sandbox_system_theme() -> Option<ThemeId> {
 /// What has to be in force before the first window and the menu bar
 /// exist: the interface language, and the ground the window opens on.
 /// The watch for applications that panes start begins here too.
+/// For the shell that stays after the app was put away: nothing the
+/// app watched the system for is watched any more.
+pub(crate) fn put_away() {
+    pane_app::unwatch();
+}
+
 pub(crate) fn at_launch() -> (f64, f64, f64) {
     language_follow::at_launch();
     pane_app::watch();

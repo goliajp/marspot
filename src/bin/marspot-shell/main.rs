@@ -2911,11 +2911,12 @@ impl ShellApp {
         // answers for them: it stays too, as a resident with no window.
         // The end of the login session is the one quit that is not that.
         if n_kept > 0 && !marspot::app_delegate::quit_ends_the_login_session() {
-            resident::enter(n_kept); // returns only when the exec failed
+            resident::stay(n_kept);
+        } else {
+            // Last thing before the process goes: this is the only
+            // moment the bundle's own copy of L1 can be replaced.
+            resident::land_staged_bundle();
         }
-        // Last thing before the process goes: this is the only moment
-        // the bundle's own copy of L1 can be replaced.
-        resident::land_staged_bundle();
         ctx.exit();
     }
 
@@ -5034,5 +5035,12 @@ Usage:\n\
     };
     let proxy = EventProxy::new();
     let app = ShellApp::new(proxy.clone());
-    run_app(app, proxy, attrs);
+    // in a pool that ends with the app: what AppKit was handed before
+    // its loop ran (the boot window, its view, the layers and surfaces
+    // behind them) is otherwise kept for the life of the process, and
+    // the process may now outlive the app by days
+    objc2::rc::autoreleasepool(|_| run_app(app, proxy, attrs));
+    if resident::staying() {
+        resident::run_in_place();
+    }
 }
