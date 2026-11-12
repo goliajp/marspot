@@ -150,22 +150,19 @@ PY
   # Give the old teardown's SIGTERM + 200 ms grace more than its due.
   sleep 2
 
-  [[ -n "$(dev_shell_pid)" ]] && fail "[$label] the shell is still running"
-
-  # The lander was started, waited for the shell to be gone, and only
-  # then did its work — a landing under a running app is the AMFI kill
-  # the staging exists to avoid.
-  local lander_pid
-  lander_pid="$(grep -o 'waits_for=[0-9]*' "$APPLOG" | tail -1)"
-  [[ -n "$lander_pid" ]] \
-    || fail "[$label] the quit did not start the armed bundle lander"
-  local waited=0
-  while (( waited < 50 )) && [[ ! -e "$MARSPOT_STATE_DIR/landed.txt" ]]; do
-    sleep 0.2; waited=$((waited+1))
-  done
-  [[ -e "$MARSPOT_STATE_DIR/landed.txt" ]] \
-    || fail "[$label] the lander never got past waiting for the shell"
-  echo "==> the lander landed after the shell was gone ($lander_pid)"
+  # Three sessions are kept, so the shell stays to answer for them:
+  # the same process, with no window and no core.  The bundle lander
+  # needs the shell gone and is not started under it.
+  local resident
+  resident="$(dev_shell_pid)"
+  [[ -n "$resident" ]] || fail "[$label] the shell exited with three sessions kept"
+  wait_for SHELL_RESIDENT 10 || fail "[$label] the shell did not become a resident"
+  sleep 1
+  [[ -z "$(dev_windows_of "$resident")" ]] || fail "[$label] the resident shell still has a window"
+  [[ -z "$(dev_core_pids)" ]] || fail "[$label] a core is still running after the quit"
+  [[ ! -e "$MARSPOT_STATE_DIR/landed.txt" ]] && ! grep -q BUNDLE_LANDER_START "$APPLOG" \
+    || fail "[$label] the bundle lander was started under a running shell"
+  echo "==> the shell $resident stays as a resident; the lander waits for a real exit"
 
   # 1 + 2 — nothing was killed on the way out.
   local pair pid dead=""
@@ -185,6 +182,8 @@ PY
   disown
   wait_for WINDOW_RESTORED 40 || fail "[$label] the second window did not come back"
   sleep 3
+  [[ "$(dev_shell_pid)" == "$resident" ]] \
+    || fail "[$label] the relaunch is another process ($(dev_shell_pid)), not the resident $resident"
 
   local after
   after="$(session_pids)"

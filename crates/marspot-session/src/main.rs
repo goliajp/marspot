@@ -28,9 +28,9 @@ use control_writer::ControlWriter;
 use snapshot_writer::SnapshotWriter;
 mod handoff;
 mod line_discipline;
+mod owner_watch;
 mod local_session;
 mod pane_env;
-mod pane_job;
 mod pty_reader;
 mod signal_events;
 mod reply_guard;
@@ -913,7 +913,6 @@ fn main() {
     // in the execv gap: a probe must not migrate state or open the log.
     match std::env::args().nth(1).as_deref() {
         Some("--version") => return println!("{}", env!("MARSPOT_VERSION_SESSION")),
-        Some(pane_job::HOST_ARG) => return pane_job::host_main(),
         _ => {}
     }
 
@@ -1381,6 +1380,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let mut output_queued = false;
     // settings and reachability, by file events: see `upkeep`
     let mut upkeep = upkeep::Upkeep::new(session.id(), ev_tx.clone());
+    owner_watch::start(session.id());
     loop {
         // A gate that is holding a frame owes a flush even if the PTY
         // has gone quiet: without this, a program that wipes the

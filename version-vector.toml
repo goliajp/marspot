@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.309"  # the pane host can start its program as an application in front, for the throughput probe
+shell   = "0.7.310"  # the shell stays, with no window, for as long as a session is kept, and answers for their coalition
 core    = "0.12.337"  # a dropped loop watch tells its watchdog to end before waking it
-session = "0.11.181"  # a launchd job is started from one place; the throughput probe can have launchd start the session
+session = "0.11.182"  # a session starts a shell where it is when the one that answered for it dies

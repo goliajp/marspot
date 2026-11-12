@@ -9,13 +9,6 @@
 #                                          nine sessions absorbing the same
 #                                          scenario at once
 #                                          -> bench/results/l3-multi.json
-#   MARSPOT_PROBE_SESSION_JOB=1 bin/measure-l3.sh --sessions 4 --scenario cat-mixed
-#                                          the same with launchd starting each
-#                                          session, in a coalition of its own
-#                                          with what writes to it; with
-#                                          MARSPOT_FRONT_ROLE=1 as well, as an
-#                                          application in front
-#                                          -> the same files with -job in the name
 #
 # Why this exists: bin/measure.sh drives the standalone `mcli` binary (one
 # in-process session, no IPC/shm hop).  That is not the architecture the
@@ -86,13 +79,10 @@ while (( $# )); do
 done
 [[ $SESSIONS =~ ^[1-9][0-9]*$ ]] || fail "--sessions wants a count, got '$SESSIONS'"
 (( ${#PICKED[@]} == 0 )) || SCENARIOS=("${PICKED[@]}")
-# a reading taken another way is not the gate's reading
-JOB=""
-[[ ${MARSPOT_PROBE_SESSION_JOB:-} == 1 ]] && JOB="-job"
 if (( SESSIONS == 1 )); then
-  OUT_JSON="$RESULTS_DIR/l3-throughput$JOB.json"
+  OUT_JSON="$RESULTS_DIR/l3-throughput.json"
 else
-  OUT_JSON="$RESULTS_DIR/l3-multi$JOB.json"
+  OUT_JSON="$RESULTS_DIR/l3-multi.json"
 fi
 # a result left by an earlier run must not be read as this one's
 rm -f "$OUT_JSON"

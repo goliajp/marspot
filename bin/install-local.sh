@@ -899,6 +899,11 @@ if (( STAGED )) \
   echo "==> session-only update (the core asks each L3 to move)"
   warm_staged_session
   snapshot_l3_pids
+  if [[ -z "$(core_pids)" ]]; then
+    # the app was quit and only its shell stays for the sessions
+    echo "    the app is put away: its next core promotes pending/marspot-session and asks the sessions to move"
+    exit 0
+  fi
   ask_core_to_update_sessions || { echo "WARN: no running core to ask" >&2; exit 1; }
   DEADLINE=$(( $(date +%s) + 30 ))
   while [[ -f "$TREE/pending/marspot-session" ]]; do
@@ -913,7 +918,12 @@ fi
 
 if (( STAGED )); then
   echo "==> triggering silent update (window + sessions survive)"
-  if (( SESSION_CHANGED )); then
+  # With the app quit and its shell staying for the sessions there is
+  # no core: the shell takes its own image and the core's now, and the
+  # session build waits for the core that is started when it is opened.
+  HAVE_CORE=1; [[ -n "$(core_pids)" ]] || HAVE_CORE=0
+  (( HAVE_CORE )) || echo "    the app is put away: pending/marspot-session is taken when it is opened"
+  if (( SESSION_CHANGED && HAVE_CORE )); then
     warm_staged_session
     snapshot_l3_pids
   fi
@@ -939,7 +949,7 @@ if (( STAGED )); then
     left=0
     [[ -f "$TREE/pending/marspot-shell"   ]] && left=1
     [[ -f "$TREE/pending/marspot-core"    ]] && left=1
-    [[ -f "$TREE/pending/marspot-session" ]] && left=1
+    [[ -f "$TREE/pending/marspot-session" ]] && (( HAVE_CORE )) && left=1
     (( left == 0 )) && break
     now=$(date +%s)
     (( now >= DEADLINE )) && { echo "WARN: pending/ not consumed in 60s — see marspot-shell --status" >&2; exit 1; }
@@ -953,7 +963,7 @@ if (( STAGED )); then
 
   # The new core promoted pending/marspot-session at boot and asked
   # every reattached L3 not on it to move; check that they did.
-  if (( SESSION_CHANGED )); then
+  if (( SESSION_CHANGED && HAVE_CORE )); then
     verify_l3_adoption || exit 1
   fi
 else

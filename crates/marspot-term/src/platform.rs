@@ -56,6 +56,36 @@ pub fn pid_exe_path(pid: i32) -> Option<std::path::PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/exe")).ok()
 }
 
+/// The coalition `pid` was born into, or `None` when the system will
+/// not say.  macOS puts an app launch and everything it starts into
+/// one, a process never leaves it, and LaunchServices holds one
+/// registered application answerable for all of its members.  This is
+/// the id `lsappinfo` prints.
+#[cfg(target_os = "macos")]
+pub fn coalition_of(pid: i32) -> Option<u64> {
+    // `PROC_PIDCOALITIONINFO` and its struct are in the private half of
+    // <sys/proc_info.h>; `proc_pidinfo` itself is public, and a system
+    // that drops the flavor answers with another size
+    const FLAVOR: libc::c_int = 20;
+    #[repr(C)]
+    #[derive(Default)]
+    struct Info {
+        id: [u64; 2],
+        reserved: [u64; 3],
+    }
+    let mut info = Info::default();
+    let size = std::mem::size_of::<Info>() as libc::c_int;
+    // SAFETY: the buffer is `size` bytes; an unknown flavor fails
+    // without writing.
+    let n = unsafe { libc::proc_pidinfo(pid, FLAVOR, 0, (&raw mut info).cast(), size) };
+    (n == size && info.id[1] != 0).then_some(info.id[1])
+}
+
+#[cfg(target_os = "linux")]
+pub fn coalition_of(_pid: i32) -> Option<u64> {
+    None
+}
+
 /// When `pid` started, microseconds since the epoch, or `None` when no
 /// process has that pid or we may not ask.
 #[cfg(target_os = "macos")]

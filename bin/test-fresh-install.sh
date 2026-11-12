@@ -33,9 +33,8 @@ scp -q "$DMG" "$HOST:$REMOTE_DMG"
 ssh "$HOST" "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /usr/local/bin/bench-lock heavy --max-wait 1800 /bin/bash -s -- $REMOTE_DMG $RUN_ID $WAIT ${FRESH_ENV:-}" <<'REMOTE'
 set -uo pipefail
 DMG="$1"; RUN_ID="$2"; WAIT="$3"
-# one more NAME=value for the app, e.g. FRESH_ENV=MARSPOT_PANE_JOB=1
+# one more NAME=value for the app
 EXTRA="${4:-MARSPOT_FRESH=1}"
-JOB=0; [[ $EXTRA == MARSPOT_PANE_JOB=1 ]] && JOB=1
 FRESH="$(mktemp -d "/tmp/marspot-$RUN_ID.XXXXXX")"
 MNT="$FRESH/mnt"
 STATE="$FRESH/Library/Application Support/marspot"
@@ -128,12 +127,6 @@ check "core booted" grep -q CORE_BOOT "$LOG"
 check "state is under Application Support" test -d "$STATE/sessions"
 check "nothing under Caches" test ! -e "$FRESH/Library/Caches/marspot"
 check "a pane has a shell" one_pane
-# launchd started it, with the bundle's own executable as the job's
-# program: that is what keeps its programs apart from other panes' and
-# charged to the app
-pane_job() { grep $'\tPANE_JOB_STARTED\t' "$LOG" | grep -q 'host=[^	]*Marspot\.app/Contents/MacOS/marspot-shell' && ! grep -q $'\tPANE_JOB_FALLBACK\t' "$LOG"; }
-(( JOB )) && check "the pane's shell is a launchd job of the app's executable" pane_job
-grep $'\tPANE_JOB_STARTED\t' "$LOG" | grep -oE '(load|answer)_ms=[0-9]+|	ms=[0-9]+' | tr '\n\t' '  ' | sed 's/^/  pane job: /'; echo
 check "the pane's PATH has ~/.local/bin" pane_path
 check "the pane's PATH has ~/.kimi-code/bin" pane_path_kimi
 for cli in claude codex; do check "$cli installed and runs" runs "$cli"; done
