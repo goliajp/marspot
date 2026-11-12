@@ -6,9 +6,13 @@
 //! `marspot-session` (L3) that owns the pty and publishes into shm,
 //! and the number a user actually experiences comes from that path.
 //!
-//! This probe measures it headlessly: spawn one L3 in a sandbox, hand
-//! it a trial script through `MARSPOT_SHELL`, and read the elapsed time
-//! the script's own `/usr/bin/time -p` recorded.
+//! This probe measures it headlessly: spawn one L3 in a sandbox the
+//! way a core does -- its grid region and control socket inherited --
+//! hand it a trial script through `SHELL`, and read the elapsed time
+//! the script took off zsh's `$EPOCHREALTIME` around the trial -- the
+//! clock and the commands `bin/_lib.sh` gives every other terminal.
+//! This used `/usr/bin/time -p`, whose two decimals are a 2 % step on a
+//! trial of half a second.
 //!
 //! The trial ends with a DSR round-trip (`CSI 6 n`) for the same reason
 //! every other live measurement here does: `cat` returning proves the
@@ -29,17 +33,29 @@
 
 use std::env;
 use std::io::Write;
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use marspot_term::session_registry::{read_session_entry, session_socket_path};
-use marspot_term::shell_proto::{encode_grid_resize, Frame, MsgType};
+use marspot_term::grid_shm::create_region;
+use marspot_term::shell_proto::Frame;
+
+/// The pane the trial runs in.
+const COLS: u16 = 122;
+const ROWS: u16 = 39;
 
 /// The session this probe spawned, for `die` to take down with it.
 static SESSION_PID: AtomicU32 = AtomicU32::new(0);
+
+/// The trial's directory, for `die` to take with it too: a failed trial
+/// used to leave its own behind, a third of a gigabyte of scrollback
+/// each, and 25 of them were found on the runner one evening.
+static SANDBOX: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 /// How much of a process's CPU time was on performance cores, and the
 /// coalition it is in.
 #[cfg(target_os = "macos")]
@@ -67,12 +83,12 @@ fn children_of(pid: i32) -> Vec<i32> {
     pids[..(n.max(0) as usize).min(pids.len())].to_vec()
 }
 
-/// The busiest program under the session's shell, read while it runs:
-/// the writer is gone by the time the trial is over.
+/// The busiest program under the session, read while it runs: the
+/// writer is gone by the time the trial is over.
 #[cfg(target_os = "macos")]
-fn sample_writer(shell: i32, best: &mut Option<(u64, f64, u64)>) {
-    let mut level = vec![shell];
-    for _ in 0..4 {
+fn sample_writer(session: i32, best: &mut Option<(u64, f64, u64)>) {
+    let mut level = vec![session];
+    for _ in 0..5 {
         level = level.iter().flat_map(|p| children_of(*p)).collect();
         for pid in &level {
             if let Some(read) = placement(*pid)
@@ -98,6 +114,13 @@ fn die(msg: &str) -> ! {
         // SAFETY: a kill to a pid this process spawned; a stale pid can
         // only fail with ESRCH, which is ignored.
         unsafe { libc::kill(pid as libc::c_int, libc::SIGKILL) };
+        // its writer threads must be gone before its files are
+        let mut status = 0;
+        // SAFETY: reaps the child this process spawned; ECHILD is ignored.
+        unsafe { libc::waitpid(pid as libc::c_int, &mut status, 0) };
+    }
+    if let Some(sandbox) = SANDBOX.get() {
+        let _ = std::fs::remove_dir_all(sandbox);
     }
     std::process::exit(1)
 }
@@ -206,12 +229,21 @@ fn main() {
     let pid = std::process::id();
     let sandbox = env::temp_dir().join(format!("l3-throughput-{pid}"));
     let _ = std::fs::remove_dir_all(&sandbox);
+    let _ = SANDBOX.set(sandbox.clone());
     std::fs::create_dir_all(sandbox.join("logs")).expect("mkdir sandbox/logs");
     std::fs::create_dir_all(sandbox.join("sessions")).expect("mkdir sandbox/sessions");
 
     // The trial script, byte-identical in shape to the one bin/_lib.sh
     // writes for every other terminal: cat the corpus `repeats` times,
     // then make the terminal certify it consumed the lot.
+    //
+    // No pause before the clock starts, though a session is still
+    // finishing its own start when its program begins, and in some
+    // trials the first chunks wait 3 to 12 ms for its loop.  A pause
+    // costs more than that and not to the session: after 0.3 s of
+    // nothing the machine takes 20 ms to start the trial's shell where
+    // it took 4, and the same `cat` runs 6 % slower.  The other
+    // terminals' trials follow each other without one either.
     let marker = sandbox.join("marker.txt");
     let script = sandbox.join("trial.sh");
     {
@@ -222,7 +254,7 @@ fn main() {
             .join(" ");
         write!(
             f,
-            "#!/bin/bash\nexec 2> {marker}\n/usr/bin/time -lp /bin/bash -c '\n  /bin/cat {cats}\n  stty raw -echo 2>/dev/null\n  printf \"\\033[6n\" > /dev/tty\n  IFS=\"[;\" read -t 5 -srd R _ _row _col < /dev/tty\n  stty sane 2>/dev/null\n  printf \"cpr=%s,%s\\n\" \"$_row\" \"$_col\" >&2\n'\n",
+            "#!/bin/zsh\nzmodload zsh/datetime\nexec 2> {marker}\n__s=$EPOCHREALTIME\n/bin/zsh -c '\n  /usr/bin/time -l /bin/cat {cats}\n  stty raw -echo 2>/dev/null\n  printf \"\\033[6n\" > /dev/tty\n  IFS=\"[;\" read -t 5 -srd R _ _row _col < /dev/tty\n  stty sane 2>/dev/null\n  printf \"cpr=%s,%s\\n\" \"$_row\" \"$_col\" >&2\n'\n__e=$EPOCHREALTIME\nprintf 'real %.6f\\n' $((__e - __s)) >&2\n",
             marker = marker.display(),
             cats = cats,
         )
@@ -236,10 +268,50 @@ fn main() {
     }
     std::fs::set_permissions(&script, perms).expect("chmod script");
 
+    // Started the way a core starts a pane: the grid's shared region,
+    // already at the size of the pane, and the control socket are both
+    // inherited, so the session is 122 by 39 before its program runs.
+    //
+    // This probe used to start the session with neither and send the
+    // size over the session's listener once it could connect.  A
+    // session started like that opens its pty at 80 by 24 at once, the
+    // trial was a few milliseconds into its `cat` when the size
+    // arrived, and every trial paid for one reflow of the megabyte or
+    // two of history it had by then: 6 ms of a 450 ms trial with
+    // history in memory, 12 to 31 ms with history in files.  No pane a
+    // core starts does that.
     let session_id: u64 = 1;
-    // SAFETY: single-threaded at this point; the registry helpers
-    // read this to locate the sandbox.
-    unsafe { env::set_var("MARSPOT_STATE_DIR", &sandbox) };
+    let region = create_region(COLS, ROWS).unwrap_or_else(|e| die(&format!("create_region: {e}")));
+    let (control, child_end) = UnixStream::pair().unwrap_or_else(|e| die(&format!("socket pair: {e}")));
+    for fd in [region.as_raw_fd(), child_end.as_raw_fd()] {
+        // SAFETY: fcntl on two fds this process just made; the child
+        // inherits them by number.
+        let cleared = unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            flags >= 0 && libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) >= 0
+        };
+        if !cleared {
+            die(&format!("clear CLOEXEC on fd {fd}: {}", std::io::Error::last_os_error()));
+        }
+    }
+    let child = Command::new(&session_bin)
+        .env("MARSPOT_STATE_DIR", &sandbox)
+        .env("MARSPOT_SESSION_ID", session_id.to_string())
+        .env("MARSPOT_SHELL_CONTROL_FD", child_end.as_raw_fd().to_string())
+        .env("MARSPOT_SHM_FD", region.as_raw_fd().to_string())
+        // `SHELL`, not `MARSPOT_SHELL`: an L3 spawns `$SHELL` directly
+        // (local_session.rs) and never consults the MARSPOT_SHELL
+        // override that `marspot_term::session::Session` — the path
+        // mcli and the L2 in-process backend take — honours.  Pointing
+        // MARSPOT_SHELL at the trial script leaves the session sitting
+        // in an interactive zsh waiting for input, which looks exactly
+        // like a slow terminal until the probe times out.
+        .env("SHELL", &script)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|e| die(&format!("spawn marspot-session: {e}")));
+    drop(child_end);
     struct ChildGuard(std::process::Child);
     impl Drop for ChildGuard {
         fn drop(&mut self) {
@@ -247,81 +319,29 @@ fn main() {
             let _ = self.0.wait();
         }
     }
-    let die_at = env::var("MARSPOT_PROBE_DIE_AT").unwrap_or_default();
-    let guard = {
-        let child = Command::new(&session_bin)
-            .env("MARSPOT_SESSION_ID", session_id.to_string())
-            // `SHELL`, not `MARSPOT_SHELL`: an L3 spawns `$SHELL` directly
-            // (local_session.rs) and never consults the MARSPOT_SHELL
-            // override that `marspot_term::session::Session` — the path
-            // mcli and the L2 in-process backend take — honours.  Pointing
-            // MARSPOT_SHELL at the trial script leaves the session sitting
-            // in an interactive zsh waiting for input, which looks exactly
-            // like a slow terminal until the probe times out.
-            .env("SHELL", &script)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap_or_else(|e| die(&format!("spawn marspot-session: {e}")));
-        SESSION_PID.store(child.id(), Ordering::Relaxed);
-        // A seam for checking that a failed trial takes its session with it.
-        // `spawn` fails before the session is up, `connected` after it holds a
-        // pty and is absorbing -- the moment the real die sites (handshake,
-        // missing DSR) happen, and the only one where an orphan would have
-        // anything left to do.
-        if die_at == "spawn" {
-            die("asked to die after spawn");
-        }
-        ChildGuard(child)
-    };
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if read_session_entry(session_id).is_ok() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    let session_pid = match read_session_entry(session_id) {
-        Ok(entry) => entry.pid as u32,
-        Err(_) => die("L3 never registered"),
-    };
+    let session_pid = child.id();
     SESSION_PID.store(session_pid, Ordering::Relaxed);
-
-    // An L3 does not open its pty on registration — it waits to be told
-    // how big the grid is, because spawning a shell into a
-    // zero-dimensioned terminal would make every app that queries the
-    // window size misbehave.  So the probe has to do what a core does:
-    // connect, Hello, then GridResize.  Without this the session sits
-    // idle forever and the trial "produces no timing".
-    let sock = session_socket_path(session_id);
-    let mut stream = match handshake::connect(&sock) {
-        Ok(s) => s,
-        Err(e) => die(&format!("connect_with_handshake: {e}")),
-    };
-    if let Err(e) = Frame::new(MsgType::GridResize, encode_grid_resize(122, 39))
-        .write_to(&mut stream)
-    {
-        die(&format!("GridResize: {e}"));
+    // A seam for checking that a failed trial takes its session with it.
+    // `spawn` fails before the session is up, `connected` after it holds a
+    // pty and is absorbing -- the moment the real die sites (missing
+    // DSR) happen, and the only one where an orphan would have
+    // anything left to do.
+    let die_at = env::var("MARSPOT_PROBE_DIE_AT").unwrap_or_default();
+    if die_at == "spawn" {
+        die("asked to die after spawn");
     }
+    let _guard = ChildGuard(child);
 
     // Keep reading the control socket, or this probe measures its own
     // backpressure.  An L3 pushes frames at its core (GridReady and
-    // friends); a client that connects and then never reads fills the
-    // socket buffer and every subsequent write from the session blocks
-    // — on the same thread that parses.  The first version of this
-    // probe did exactly that and reported the production path at 26
-    // MB/s with 75 % of the session's samples in `write`, which reads
-    // like a damning finding about L3 and was a bug in the harness.
-    // A real core drains this socket; so does this.
-    match stream.try_clone() {
-        Ok(mut rx) => {
-            thread::spawn(move || {
-                while let Ok(Some(_frame)) = Frame::read_from(&mut rx) {}
-            });
-        }
-        Err(e) => die(&format!("try_clone control stream: {e}")),
-    }
+    // friends); a client that never reads fills the socket buffer.
+    // The first version of this probe did exactly that and reported
+    // the production path at 26 MB/s with 75 % of the session's
+    // samples in `write`, which reads like a damning finding about L3
+    // and was a bug in the harness.  A real core drains this socket;
+    // so does this.
+    let mut rx = control.try_clone().unwrap_or_else(|e| die(&format!("try_clone control stream: {e}")));
+    thread::spawn(move || while let Ok(Some(_frame)) = Frame::read_from(&mut rx) {});
 
     if die_at == "connected" {
         die("asked to die once connected");
@@ -337,15 +357,12 @@ fn main() {
         #[cfg(target_os = "macos")]
         {
             round += 1;
-            if round.is_multiple_of(10)
-                && let Ok(entry) = read_session_entry(session_id)
-                && entry.shell_child_pid > 0
-            {
-                sample_writer(entry.shell_child_pid, &mut writer);
+            if round.is_multiple_of(10) {
+                sample_writer(session_pid as i32, &mut writer);
             }
         }
         if let Ok(s) = std::fs::read_to_string(&marker)
-            && s.contains("real") {
+            && s.lines().any(|l| l.starts_with("real ")) {
                 text = s;
                 break;
             }
@@ -357,18 +374,20 @@ fn main() {
     if !text.lines().any(|l| l.starts_with("cpr=") && l[4..5].chars().next().is_some_and(|c| c.is_ascii_digit())) {
         die("no DSR reply — the session never confirmed it consumed the corpus");
     }
-    // what the writing side spent: `time -l` prints its rusage after
-    // the three clock lines, a few writes later
-    thread::sleep(Duration::from_millis(60));
-    let text = std::fs::read_to_string(&marker).unwrap_or(text);
+    // what the writing side spent: `time -l` around the `cat` alone
     let rusage = |name: &str| {
         text.lines()
             .find_map(|l| l.trim().strip_suffix(name).map(|v| v.trim().to_string()))
             .unwrap_or_else(|| "-".into())
     };
+    // `0.45 real  0.00 user  0.30 sys`, each figure before its name
     let clock = |name: &str| {
         text.lines()
-            .find_map(|l| l.strip_prefix(name).map(|v| v.trim().to_string()))
+            .filter(|l| l.contains(" real") && l.contains(" sys"))
+            .find_map(|l| {
+                let words: Vec<&str> = l.split_whitespace().collect();
+                words.iter().position(|w| *w == name).and_then(|i| i.checked_sub(1)).map(|i| words[i].to_string())
+            })
             .unwrap_or_else(|| "-".into())
     };
     eprintln!(
@@ -380,7 +399,7 @@ fn main() {
     );
     let secs = text
         .lines()
-        .find_map(|l| l.strip_prefix("real"))
+        .find_map(|l| l.strip_prefix("real "))
         .and_then(|v| v.trim().parse::<f64>().ok())
         .unwrap_or_else(|| die("could not parse `real` from the trial marker"));
     // Corroborate with something the timing cannot fake: how much the
@@ -434,44 +453,5 @@ fn main() {
         }
         None => println!("{wall_ns} - - - - -"),
     }
-    drop(guard);
     let _ = std::fs::remove_dir_all(&sandbox);
-}
-
-/// The Hello handshake, inlined because `marspot-session` ships as a
-/// binary with no lib target for an example to link against — the same
-/// reason `l3_uds_handshake_probe` carries its own copy.
-mod handshake {
-    use std::io;
-    use std::os::unix::net::UnixStream;
-    use std::path::Path;
-    use std::time::Duration;
-
-    use marspot_term::shell_proto::{
-        decode_hello_ack, encode_hello, Frame, MsgType, PROTO_VERSION,
-    };
-
-    pub fn connect(socket_path: &Path) -> io::Result<UnixStream> {
-        let mut stream = UnixStream::connect(socket_path)?;
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        Frame::new(MsgType::Hello, encode_hello(PROTO_VERSION)).write_to(&mut stream)?;
-        let reply = Frame::read_from(&mut stream)?.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "server closed before HelloAck")
-        })?;
-        if reply.msg_type != MsgType::HelloAck {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("expected HelloAck, got {:?}", reply.msg_type),
-            ));
-        }
-        let v = decode_hello_ack(&reply.payload)?;
-        if v != PROTO_VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("server proto={v}, expected {PROTO_VERSION}"),
-            ));
-        }
-        stream.set_read_timeout(None)?;
-        Ok(stream)
-    }
 }
