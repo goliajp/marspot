@@ -149,16 +149,27 @@ unsafe impl Send for FileScrollback {}
 /// trusting the index only as far as the data file actually reaches.
 /// So what matters is which buffer holds MORE unwritten lines:
 ///
-///   bin  64 KiB / ~100 B per record  ≈ 640 lines
-///   idx   4 KiB / 8 B per record     =  512 lines
+///   bin  512 KiB / ~100 B per record  ≈ 5000 lines
+///   idx   32 KiB / 8 B per record     =  4096 lines
 ///
 /// Keeping idx's window strictly smaller preserves the invariant the
 /// recovery scan was written against — the index never claims lines the
 /// data file cannot produce — while still amortising the syscall over
 /// hundreds of pushes instead of paying one per line (which, on a bulk
 /// `cat`, was 63 % of the parse thread; see the `idx` field comment).
-const BIN_BUF_BYTES: usize = 64 * 1024;
-const IDX_BUF_BYTES: usize = 4 * 1024;
+///
+/// The sizes are what a flood needs.  Every buffer handed over wakes a
+/// writer thread, and at 64 KiB and 4 KiB a `cat` of 134 MB was 7 000
+/// to 12 000 of those in half a second, and the program writing into
+/// the pty -- which sleeps and is woken once a kilobyte -- was slower
+/// for every one: the session carried 264-279 / 254-258 / 276-278 /
+/// 284-288 MB/s of ascii / mixed / cjk / emoji where it carries
+/// 308-321 / 283-284 / 299-306 / 309-312 with an eighth as many (with
+/// a quarter as many, 316-318 / 266-277 / 298-300 / 305-308).  Output
+/// that is not a flood does not wait for a buffer to fill: see
+/// [`FileScrollback::hand_off`].
+const BIN_BUF_BYTES: usize = 512 * 1024;
+const IDX_BUF_BYTES: usize = 32 * 1024;
 
 mod open;
 mod read;
