@@ -580,11 +580,13 @@ fn updates_do_not_accumulate_descriptors() {
     // two builds in turn, so every request is a real move
     let swap = |s: &mut Session, n: usize| {
         stage(&state, n % 2 == 1);
-        let before = count_in_log(&state, "L3_SIGTERM_INSTALLED");
+        // the last thing a new image does at boot, after its file
+        // watcher has opened what it holds for good
+        let before = count_in_log(&state, "SESSION_OWNER");
         s.send_frame(MsgType::SessionUpdate, Vec::new());
-        wait_for(20, &format!("update {n} to arm its handler"), || {
+        wait_for(20, &format!("update {n} to finish its boot"), || {
             assert_eq!(s.child.try_wait().unwrap(), None, "the L3 exited");
-            (count_in_log(&state, "L3_SIGTERM_INSTALLED") > before).then_some(())
+            (count_in_log(&state, "SESSION_OWNER") > before).then_some(())
         });
     };
     swap(&mut s, 1);
