@@ -25,7 +25,7 @@ mod probe;
 
 pub use probe::{State, Trace};
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -78,6 +78,9 @@ struct WatchShared {
     phase: Mutex<&'static str>,
     /// Times the watchdog thread has looked at this state.
     looks: AtomicU64,
+    /// The owner is being dropped.  Its reference is still alive when
+    /// it wakes the watchdog, so the wake alone would park again.
+    closed: AtomicBool,
 }
 
 pub struct LoopWatch {
@@ -102,6 +105,7 @@ pub struct LoopWatch {
 impl Drop for LoopWatch {
     fn drop(&mut self) {
         // a parked watchdog has to wake once more to see its owner gone
+        self.shared.closed.store(true, Ordering::Release);
         if let Some(t) = &self.watchdog {
             t.unpark();
         }
@@ -124,6 +128,7 @@ impl LoopWatch {
                 generation: AtomicU64::new(0),
                 phase: Mutex::new("start"),
                 looks: AtomicU64::new(0),
+                closed: AtomicBool::new(false),
             }),
             iter_start: now,
             phase_start: now,
@@ -275,6 +280,9 @@ impl LoopWatch {
                     let Some(shared) = weak.upgrade() else {
                         return; // owner dropped
                     };
+                    if shared.closed.load(Ordering::Acquire) {
+                        return;
+                    }
                     shared.looks.fetch_add(1, Ordering::Relaxed);
                     let started = shared.started_nanos.load(Ordering::Acquire);
                     idle = started == 0;
