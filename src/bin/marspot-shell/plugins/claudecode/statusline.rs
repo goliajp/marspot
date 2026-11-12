@@ -38,6 +38,20 @@ pub(super) fn model_push_dir() -> PathBuf {
 /// it left them.
 pub(super) const MODEL_PUSH_TTL: Duration = Duration::from_secs(3 * 24 * 3600);
 
+/// A look at Claude Code's registration of the hook: what the switch
+/// said, when, and how many changes to the agents' configuration had
+/// been noted (`agents::changes`).
+pub(super) type StatuslineLook = (bool, std::time::Instant, u64);
+
+/// Whether the registration is due another look: on a change of the
+/// switch, on a noted change (an install that finished, a settings
+/// file somebody wrote), and otherwise once a minute, which catches a
+/// binary that moved under an installed hook.
+pub(super) fn statusline_due(last: Option<StatuslineLook>, now: StatuslineLook) -> bool {
+    const RECHECK: Duration = Duration::from_secs(60);
+    last.is_none_or(|(want, at, changes)| want != now.0 || changes != now.2 || now.1.duration_since(at) >= RECHECK)
+}
+
 /// `marspot-shell --cc-statusline` — claudecode's status-line hook.
 ///
 /// Every other route to "which model is this pane on" is an inference

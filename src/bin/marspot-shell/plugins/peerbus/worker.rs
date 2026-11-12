@@ -26,6 +26,7 @@ use marspot_peer::rpc::{RpcError, RpcSender};
 use marspot_term::{lx_info, lx_warn};
 
 use super::bind::Unbound;
+use crate::plugins::agents::changes;
 use super::deliver::{self, Rate};
 use super::inbox::Inbox;
 pub(super) use super::records::{is_inbox_name, now_ms, write_record};
@@ -77,6 +78,9 @@ pub(crate) enum Event {
     Want(Vec<Want>),
     /// Time for a names pass.
     Names,
+    /// A change to the agents' configuration was noted
+    /// (`agents::changes`): look at it now.
+    Reconcile,
     /// The panes running Gemini, as the gemini plugin resolved them.
     Gemini(crate::plugins::gemini::Peers),
     /// The same for Kimi, with what each session is doing.
@@ -149,6 +153,8 @@ pub(crate) struct Worker {
     pub(super) hook_notes: Vec<String>,
     /// What the last skills reconcile reported.
     skill_notes: Vec<String>,
+    /// Notes a change to the configuration that nobody here made.
+    config_watch: Option<changes::Watch>,
 }
 
 impl Worker {
@@ -173,6 +179,7 @@ impl Worker {
             pane_table: Vec::new(),
             hook_notes: Vec::new(),
             skill_notes: Vec::new(),
+            config_watch: None,
             names_passes: 0,
         }
     }
@@ -191,10 +198,25 @@ impl Worker {
         self.skill_notes = notes;
     }
 
-    pub fn run(mut self) {
-        self.clear_leftovers();
+    /// Look at everything marspot keeps in the agents' configuration,
+    /// and watch the files it is kept in as they are now.
+    fn reconcile_config(&mut self) {
         self.reconcile_hooks();
         self.reconcile_skills();
+        if let Some(w) = &mut self.config_watch {
+            w.follow(super::claude_hooks::config_files(), changes::note);
+        }
+    }
+
+    pub fn run(mut self) {
+        self.clear_leftovers();
+        // a sandbox shares the developer's HOME and writes none of this
+        if std::env::var_os("MARSPOT_DEV_SANDBOX").is_none()
+            && let Some(home) = std::env::var_os("HOME")
+        {
+            self.config_watch = Some(changes::Watch::of_home(home.into(), changes::note));
+        }
+        self.reconcile_config();
         loop {
             let ev = match self.stash.pop_front() {
                 Some(e) => e,
@@ -232,13 +254,13 @@ impl Worker {
                 Event::Names => {
                     self.rename_pass();
                     self.names_passes += 1;
-                    // Claude Code rewrites its settings on a
-                    // `/config` change; look again now and then
+                    // a file the watch could not follow is still
+                    // looked at now and then
                     if self.names_passes.is_multiple_of(HOOKS_EVERY_PASSES) {
-                        self.reconcile_hooks();
-                        self.reconcile_skills();
+                        self.reconcile_config();
                     }
                 }
+                Event::Reconcile => self.reconcile_config(),
                 Event::Gemini(peers) => {
                     self.apply_gemini(&peers);
                     self.rename_pass();

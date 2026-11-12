@@ -11,8 +11,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use marspot::fs_watch::Watcher;
 use marspot::pidtree::ProcId;
 use marspot_term::{lx_info, lx_warn};
 
@@ -70,6 +73,32 @@ const CHECK_EVERY: Duration = Duration::from_secs(60);
 /// again.  The daemon updater's own cadence.
 const RETRY_AFTER: Duration = Duration::from_secs(3600);
 
+/// A watch on the two packages' `current` links.  The daemon updates
+/// itself whether or not anything else is going on, so with the
+/// supervisor's clock at rest its link being replaced is what asks for
+/// the comparison: the watch knocks, and the tick that follows finds
+/// `moved` set.
+struct Links {
+    moved: Arc<AtomicBool>,
+    watch: Watcher,
+}
+
+impl Links {
+    /// None while either package is not there to watch.
+    fn watch(home: &Path, knock: impl Fn() + Send + 'static) -> Option<Links> {
+        let packages = home.join("packages");
+        let links = [packages.join("app-server-daemon").join("current"), packages.join("standalone").join("current")];
+        let moved = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&moved);
+        let watch = Watcher::spawn(&links, move || {
+            flag.store(true, Ordering::Release);
+            knock();
+        })
+        .ok()?;
+        Some(Links { moved, watch })
+    }
+}
+
 /// Installs the CLI when the daemon has moved past it.
 #[derive(Default)]
 pub(crate) struct Follower {
@@ -77,17 +106,29 @@ pub(crate) struct Follower {
     running: Option<std::thread::JoinHandle<()>>,
     /// The daemon release last installed for, and when.
     tried: Option<(Release, Instant)>,
+    links: Option<Links>,
 }
 
 impl Follower {
+    /// Whether to compare the two packages now: a link was replaced, or
+    /// the last comparison is a minute old.
+    fn due(&mut self, now: Instant) -> bool {
+        let moved = self.links.as_ref().is_some_and(|l| l.moved.swap(false, Ordering::AcqRel));
+        moved || self.next_check.is_none_or(|t| now >= t)
+    }
+
     pub(crate) fn tick(&mut self, home: &Path) {
         let now = Instant::now();
-        if self.next_check.is_some_and(|t| now < t) {
+        if !self.due(now) {
             return;
         }
         self.next_check = Some(now + CHECK_EVERY);
         if !marspot::settings::get().codex_follow_updates {
             return;
+        }
+        // a watch whose directory went away reports nothing more
+        if self.links.as_ref().is_none_or(|l| !l.watch.alive()) {
+            self.links = Links::watch(home, crate::pump::knock);
         }
         if self.running.as_ref().is_some_and(|h| !h.is_finished()) {
             return;
@@ -269,6 +310,47 @@ impl Refresher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The daemon moves on while the supervisor's clock rests: the
+    /// replaced link knocks, and the tick the knock runs compares
+    /// without waiting for a minute that no clock is counting.
+    #[test]
+    fn the_daemon_s_link_being_replaced_knocks_and_makes_the_comparison_due() {
+        use std::os::unix::fs::symlink;
+        let home = std::env::temp_dir().join(format!("marspot-codex-links-{}", marspot_peer::rand::hex(6)));
+        let packages = home.join("packages");
+        for (package, release) in [("app-server-daemon", "0.1.0-x"), ("app-server-daemon", "0.2.0-x"), ("standalone", "0.1.0-x")] {
+            std::fs::create_dir_all(packages.join(package).join("releases").join(release)).unwrap();
+        }
+        let daemon = packages.join("app-server-daemon");
+        symlink(daemon.join("releases/0.1.0-x"), daemon.join("current")).unwrap();
+        symlink(packages.join("standalone/releases/0.1.0-x"), packages.join("standalone/current")).unwrap();
+
+        let (tx, knocks) = std::sync::mpsc::channel();
+        let mut f = Follower::default();
+        let t0 = Instant::now();
+        assert!(f.due(t0), "the first comparison");
+        f.next_check = Some(t0 + CHECK_EVERY);
+        f.links = Links::watch(&home, move || tx.send(()).unwrap());
+        assert!(f.links.is_some());
+        assert!(!f.due(t0 + Duration::from_secs(1)), "nothing moved and the minute is not up");
+
+        symlink(daemon.join("releases/0.2.0-x"), daemon.join("next")).unwrap();
+        std::fs::rename(daemon.join("next"), daemon.join("current")).unwrap();
+        knocks.recv_timeout(Duration::from_secs(5)).expect("no knock for the replaced link");
+        assert_eq!(daemon_selected(&home), Release::parse("0.2.0"));
+        assert!(f.due(t0 + Duration::from_secs(2)), "due on the tick the knock runs");
+        assert!(!f.due(t0 + Duration::from_secs(3)), "and once");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn links_are_not_watched_before_both_packages_exist() {
+        let home = std::env::temp_dir().join(format!("marspot-codex-nolinks-{}", marspot_peer::rand::hex(6)));
+        std::fs::create_dir_all(home.join("packages/standalone")).unwrap();
+        assert!(Links::watch(&home, || {}).is_none());
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn releases_parse_from_versions_and_directories() {
