@@ -201,8 +201,11 @@ mod macos {
         let begun = Instant::now();
         let out = Command::new(LAUNCHCTL).arg("bootstrap").arg(domain()).arg(&plist_path).stdin(Stdio::null()).output()?;
         let _ = fs::remove_file(&plist_path);
+        let loaded = begun.elapsed();
+        let mut answered = loaded;
         let started = if out.status.success() {
             let pid = read_reply(&mut reply);
+            answered = begun.elapsed();
             remove_job(&label);
             pid
         } else {
@@ -224,6 +227,8 @@ mod macos {
             shell_pid = shell,
             shell_coalition = coalition_of(shell),
             own_coalition = coalition_of(std::process::id() as i32),
+            load_ms = loaded.as_millis(),
+            answer_ms = (answered - loaded).as_millis(),
             ms = begun.elapsed().as_millis()
         );
         Ok(Pty::from_raw_master(master.into_raw_fd(), shell))
