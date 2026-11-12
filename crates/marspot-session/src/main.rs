@@ -911,9 +911,8 @@ fn main() {
     // the kernel execs this file while the current image still drives
     // the PTY, and the Gatekeeper assessment is paid then instead of
     // in the execv gap: a probe must not migrate state or open the log.
-    match std::env::args().nth(1).as_deref() {
-        Some("--version") => return println!("{}", env!("MARSPOT_VERSION_SESSION")),
-        _ => {}
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        return println!("{}", env!("MARSPOT_VERSION_SESSION"));
     }
 
     // RFC-004 D.1 — must precede logx / any path computation.
