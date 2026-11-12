@@ -167,10 +167,10 @@ fn unlock(fd: RawFd, byte: libc::off_t) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn lock_file(name: &str) -> std::path::PathBuf {
+    pub(crate) fn lock_file(name: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("marspot-bulk-lease-{name}-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
         path
@@ -178,7 +178,7 @@ mod tests {
 
     /// Another process holding every lease until the returned pipe end
     /// is closed.  Locks belong to a process, so it has to be another.
-    fn holder(path: &Path) -> (libc::pid_t, RawFd) {
+    pub(crate) fn holder(path: &Path) -> (libc::pid_t, RawFd) {
         use std::os::unix::ffi::OsStrExt;
         let path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("a path without NUL");
         let (mut ready, mut done) = ([0; 2], [0; 2]);
@@ -209,7 +209,7 @@ mod tests {
         }
     }
 
-    fn release(holder: (libc::pid_t, RawFd)) {
+    pub(crate) fn release(holder: (libc::pid_t, RawFd)) {
         // SAFETY: the pipe end and the child are this test's own.
         unsafe {
             libc::close(holder.1);
