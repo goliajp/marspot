@@ -9,6 +9,13 @@
 #                                          nine sessions absorbing the same
 #                                          scenario at once
 #                                          -> bench/results/l3-multi.json
+#   MARSPOT_PROBE_SESSION_JOB=1 bin/measure-l3.sh --sessions 4 --scenario cat-mixed
+#                                          the same with launchd starting each
+#                                          session, in a coalition of its own
+#                                          with what writes to it; with
+#                                          MARSPOT_FRONT_ROLE=1 as well, as an
+#                                          application in front
+#                                          -> the same files with -job in the name
 #
 # Why this exists: bin/measure.sh drives the standalone `mcli` binary (one
 # in-process session, no IPC/shm hop).  That is not the architecture the
@@ -73,16 +80,19 @@ while (( $# )); do
   case "$1" in
     --sessions) SESSIONS="${2:?--sessions N}"; shift 2 ;;
     --scenario) PICKED+=("${2:?--scenario ID}"); shift 2 ;;
-    -h|--help)  sed -n '2,11p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '2,18p' "$0"; exit 0 ;;
     *)          fail "unknown arg: $1" ;;
   esac
 done
 [[ $SESSIONS =~ ^[1-9][0-9]*$ ]] || fail "--sessions wants a count, got '$SESSIONS'"
 (( ${#PICKED[@]} == 0 )) || SCENARIOS=("${PICKED[@]}")
+# a reading taken another way is not the gate's reading
+JOB=""
+[[ ${MARSPOT_PROBE_SESSION_JOB:-} == 1 ]] && JOB="-job"
 if (( SESSIONS == 1 )); then
-  OUT_JSON="$RESULTS_DIR/l3-throughput.json"
+  OUT_JSON="$RESULTS_DIR/l3-throughput$JOB.json"
 else
-  OUT_JSON="$RESULTS_DIR/l3-multi.json"
+  OUT_JSON="$RESULTS_DIR/l3-multi$JOB.json"
 fi
 # a result left by an earlier run must not be read as this one's
 rm -f "$OUT_JSON"
@@ -186,6 +196,8 @@ run_trial() {
   kill "$sampler" 2>/dev/null
   wait "$sampler" 2>/dev/null
   : > "$RUN_DIR/live-pids"
+  # which cores the sessions and the programs feeding them ran on
+  grep -h '^placement:' "$RUN_DIR"/probe.*.err 2>/dev/null | sed 's/^/    /'
   python3 "$ROOT/bin/_bench_record.py" cpu-snapshot > "$RUN_DIR/cpu.after"
   load1 >> "$RUN_DIR/trial.load"
 }

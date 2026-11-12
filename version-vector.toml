@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.308"  # the codex cli follows the daemon while the supervisor rests
+shell   = "0.7.309"  # the pane host can start its program as an application in front, for the throughput probe
 core    = "0.12.337"  # a dropped loop watch tells its watchdog to end before waking it
-session = "0.11.180"  # a pane job is asked for with MARSPOT_PANE_JOB=1
+session = "0.11.181"  # a launchd job is started from one place; the throughput probe can have launchd start the session

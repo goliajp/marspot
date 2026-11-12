@@ -88,6 +88,7 @@ pub mod session;
 pub mod tabs;
 #[doc(hidden)]
 pub mod test_env;
+pub mod launchd_job;
 pub mod session_registry;
 pub mod session_state;
 pub mod settings;

@@ -20,6 +20,14 @@ pub const ARG: &str = "--pane-host";
 /// starts.  Unset under an app from before it could be a pane host.
 pub const PROGRAM_ENV: &str = "MARSPOT_PANE_HOST";
 
+/// An environment entry that has the host start its program as an
+/// application in front, in the scheduler's eyes.  A coalition that
+/// holds such a task keeps its threads on the performance cores under
+/// contention where one of its own, judged alone, is moved off them;
+/// no thread's priority changes.  For a program that is to be measured
+/// that way: no pane is started with it.
+pub const FRONT_ROLE: &[u8] = b"MARSPOT_FRONT_ROLE=1";
+
 /// Set by an app that replaces its own image with a newer one.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const SELF_UPDATE_ENV: &str = "MARSPOT_SHELL_SELF_UPDATE";
@@ -118,7 +126,7 @@ mod macos {
     use std::os::unix::fs::OpenOptionsExt;
     use std::path::Path;
 
-    use super::{ARG, PROGRAM_ENV, SELF_UPDATE_ENV, Spec, parse_limits, program_to_name};
+    use super::{ARG, FRONT_ROLE, PROGRAM_ENV, SELF_UPDATE_ENV, Spec, parse_limits, program_to_name};
 
     const LIMITS: [libc::c_int; 9] = [
         libc::RLIMIT_CPU,
@@ -214,6 +222,25 @@ mod macos {
         }
     }
 
+    fn take_front_role() {
+        // `TASK_CATEGORY_POLICY` and `TASK_FOREGROUND_APPLICATION` from
+        // <mach/task_policy.h>
+        const TASK_CATEGORY_POLICY: u32 = 1;
+        const TASK_FOREGROUND_APPLICATION: i32 = 1;
+        unsafe extern "C" {
+            fn task_policy_set(task: libc::mach_port_t, flavor: u32, policy: *const i32, count: u32) -> i32;
+        }
+        let role = TASK_FOREGROUND_APPLICATION;
+        // libc marks its Mach bindings deprecated in favour of the
+        // mach2 crate; one call does not earn a dependency
+        #[allow(deprecated)]
+        // SAFETY: the flavor reads one integer, the role, from
+        // `policy`; the task is this one.
+        unsafe {
+            task_policy_set(libc::mach_task_self(), TASK_CATEGORY_POLICY, &role, 1);
+        }
+    }
+
     /// In the forked child: become the shell.  Returns the errno of
     /// whatever stopped it.
     fn exec_shell(spec: &Spec) -> i32 {
@@ -250,6 +277,10 @@ mod macos {
             let mut none: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut none);
             libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
+            // the role is the task's and stays with it through the exec
+            if spec.env.iter().any(|e| e == FRONT_ROLE) {
+                take_front_role();
+            }
             // execvp searches the PATH of the environment it is given
             crate::platform::set_environ(env_p.as_mut_ptr());
             libc::execvp(program.as_ptr(), argv_p.as_ptr());
