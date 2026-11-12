@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.304"  # the app's executable starts a pane's shell when launchd runs it for that
-core    = "0.12.330"  # the main loop waits without a deadline when nothing is due
-session = "0.11.174"  # a pane's shell is a launchd job of its own unless MARSPOT_PANE_JOB=0
+core    = "0.12.333"  # a row that scrolls off is blanked only as far as it was written
+session = "0.11.176"  # a pane's shell is a launchd job of its own unless MARSPOT_PANE_JOB=0

@@ -206,9 +206,9 @@ impl FileScrollback {
         if body.len() < 3 {
             return None;
         }
-        let wrapped = body[0] != 0;
+        let wrapped = body[0] & REC_WRAPPED != 0;
         let cols = u16::from_le_bytes([body[1], body[2]]) as usize;
-        let cells = decode_record_cells(&body[3..], cols)?;
+        let cells = decode_record_cells(body[0], &body[3..], cols)?;
         Some((cells, wrapped))
     }
 

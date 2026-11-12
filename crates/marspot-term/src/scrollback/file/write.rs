@@ -177,7 +177,9 @@ impl FileScrollback {
         self.extras.put_clusters(local, clusters);
     }
 
-    pub fn push_line(&mut self, line: &[crate::grid::Cell], wrapped: bool) {
+    ///
+    /// Returns the line's length without its trailing default cells.
+    pub fn push_line(&mut self, line: &[crate::grid::Cell], wrapped: bool) -> usize {
         // F3+11.1 — trim trailing cells equal to `Cell::default()`
         // before encoding.  This is pure disk-size optimisation; the
         // semantic is unchanged from the dumb-store model: every
@@ -217,19 +219,27 @@ impl FileScrollback {
         let line = &line[..trimmed_len];
         let cols_u16 = line.len() as u16;
         let cell_bytes = crate::grid::Cell::slice_as_bytes(line);
-        let rec_len = (1 + 2 + cell_bytes.len()) as u32;
-        let total_bytes = 4 + rec_len as usize;
-        // The record is the header plus the row's own memory.  This was
-        // an encode loop — 13 bytes per cell, a match per colour — and
-        // it was the hottest thing the parse thread did once the disk
-        // writes moved off it; replacing it with this copy measured
-        // +13–21 % on file-backed parse.  See FILE_VERSION for how v2
-        // files keep reading.
+        // The record is the header plus the line as runs of cells that
+        // share their attributes, or, for the rare line where that is
+        // no smaller, the row's own memory.  See FILE_VERSION.
         self.scratch.clear();
-        self.scratch.extend_from_slice(&rec_len.to_le_bytes());
-        self.scratch.push(wrapped as u8);
-        self.scratch.extend_from_slice(&cols_u16.to_le_bytes());
-        self.scratch.extend_from_slice(cell_bytes);
+        self.scratch.extend_from_slice(&[0u8; FILE_REC_HEADER_BYTES]);
+        let packed = !line.is_empty() && encode_packed(line, &mut self.scratch);
+        if !packed {
+            self.scratch.extend_from_slice(cell_bytes);
+        }
+        let total_bytes = self.scratch.len();
+        let rec_len = (total_bytes - 4) as u32;
+        let mut flags = 0;
+        if wrapped {
+            flags |= REC_WRAPPED;
+        }
+        if packed {
+            flags |= REC_PACKED;
+        }
+        self.scratch[..4].copy_from_slice(&rec_len.to_le_bytes());
+        self.scratch[4] = flags;
+        self.scratch[5..7].copy_from_slice(&cols_u16.to_le_bytes());
 
         // F2+5 — hot → cold rotation when the next record would
         // overflow the cap.  Failure to rotate is a real I/O error
@@ -257,6 +267,7 @@ impl FileScrollback {
 
         self.push_into_ring(line, wrapped);
         self.total_lines += 1;
+        trimmed_len
     }
 
     /// Cheap idempotent flush: a cold-read path calls this before
@@ -477,7 +488,8 @@ mod tests {
         let mut rec_len_buf = [0u8; 4];
         f.read_exact(&mut rec_len_buf).unwrap();
         let rec_len = u32::from_le_bytes(rec_len_buf) as usize;
-        let expected_trimmed = 1 + 2 + prefix_len * crate::grid::CELL_MEM_BYTES;
+        // one run: count, kind, attributes, then a byte a cell
+        let expected_trimmed = 1 + 2 + (2 + 1 + 16) + prefix_len;
         assert_eq!(
             rec_len, expected_trimmed,
             "first record should hold ONLY the prefix (trim default \
@@ -541,16 +553,16 @@ mod tests {
     fn rotation_writes_cold_and_keeps_old_rows_readable() {
         let tmp = TmpDir::new("rotate");
         let cols = 8usize;
-        // Each record is 4 + 1 + 2 + cols×13 = 111 bytes.  The cap is
+        // Each record is 4 + 1 + 2 + 19 + cols = 34 bytes.  The cap is
         // read in MB, so the smallest one that rotates at all is 1 MB.
         let mut env = crate::test_env::EnvGuard::new();
         env.set("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1");
         let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("create");
-        // 1 MB / ~111 B = ~9450 rows before rotation.  Push 12 000
+        // 1 MB / 34 B = ~30 800 rows before rotation.  Push 45 000
         // distinct rows so at least one rotation happens.  Each row's
         // first cell encodes its sequence number (mod 26) so we can
         // verify the row's identity on read-back.
-        let total_push = 12_000usize;
+        let total_push = 45_000usize;
         for i in 0..total_push {
             let mut row: Vec<Cell> = Vec::with_capacity(cols);
             row.push(Cell {
@@ -666,16 +678,16 @@ mod tests {
         let cols = 8usize;
 
         // Push enough lines that BufWriter is mid-buffer when we
-        // forget — 1000 × 8 cells writes ~100 KB to bin, well past
+        // forget — 5000 × 8 cells writes ~170 KB to bin, well past
         // the 64 KB BufWriter auto-flush boundary so several
         // chunks have already hit disk and some tail is unflushed.
         let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 256).expect("create");
-        for i in 0..1000u32 {
+        for i in 0..5000u32 {
             let ch = b'a' + (i % 26) as u8;
             sb.push_line(&fill(ch, cols), false);
         }
         let pushed = sb.len();
-        assert_eq!(pushed, 1000);
+        assert_eq!(pushed, 5000);
 
         // SAFETY: leak the FileScrollback — `Drop` (which flushes
         // BufWriters) never runs.  This is exactly what `libc::execv`
@@ -704,7 +716,7 @@ mod tests {
         let total = sb2.len();
         assert!(total <= pushed, "reopen total {total} > pushed {pushed}");
         // BufWriter auto-flush ensures a substantial prefix survived.
-        assert!(total >= 500, "reopen total {total} suspiciously low");
+        assert!(total >= 1500, "reopen total {total} suspiciously low");
         for i in 0..total {
             let line = sb2
                 .read_line(i)
