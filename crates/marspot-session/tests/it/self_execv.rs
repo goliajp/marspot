@@ -416,6 +416,51 @@ fn an_update_to_the_running_build_does_nothing() {
     s.kill();
 }
 
+/// A shell launchd started for the pane is nobody's child, and is the
+/// pane's all the same: an update keeps it.
+#[test]
+fn an_update_keeps_a_shell_that_launchd_started() {
+    let mut sandbox = Sandbox::new();
+    sandbox.env.set("MARSPOT_PANE_JOB", "1");
+    hand_over(&mut sandbox, Ask::Frame, false);
+}
+
+/// Such a shell is given the session's limit on open files, not the
+/// 256 a launchd job starts with, and a close ends it with the pane.
+#[test]
+fn a_shell_that_launchd_started_has_the_sessions_limits_and_ends_with_the_pane() {
+    let mut sandbox = Sandbox::new();
+    sandbox.env.set("MARSPOT_PANE_JOB", "1");
+    // a limit that is neither launchd's nor anyone's default; a test
+    // is a process of its own, so this one's limit is its to change
+    let mut ours = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut ours) }, 0);
+    ours.rlim_cur = 1000;
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &ours) }, 0);
+    let mut s = start(&mut sandbox);
+    let state = sandbox.path().to_path_buf();
+    let shell = shell_pid(&s, "before");
+    let parent = String::from_utf8(
+        std::process::Command::new("/bin/ps").args(["-o", "ppid=", "-p", &shell.to_string()]).output().unwrap().stdout,
+    )
+    .unwrap();
+    // a host without a login session's launchd forks the shell instead
+    if count_in_log(&state, "PANE_JOB_FALLBACK") == 0 {
+        assert_eq!(count_in_log(&state, "PANE_JOB_STARTED"), 1, "{}", log_tail(&state));
+        assert_ne!(parent.trim(), s.pid().to_string(), "launchd's, not the session's child");
+    }
+    let f = Frame::new(MsgType::InjectInput, encode_inject_input(0, b"\x15echo files=$(ulimit -n)\r"));
+    s.send_frame(f.msg_type, f.payload);
+    let files = wait_for(10, "files= and the prompt after it", || read_echoed_pid(&s, "files"));
+    // the session may raise its own limit before it starts the shell
+    assert!(files >= 1000, "the shell may open {files} files; the session was started with 1000");
+
+    signal(s.pid(), libc::SIGHUP);
+    let status = wait_for(20, "the L3 to exit", || s.child.try_wait().unwrap());
+    assert_eq!(status.code(), Some(0), "a clean exit");
+    wait_for(10, "the shell to go with it", || (!alive(shell)).then_some(()));
+}
+
 /// The log line of the `n`th signal the L3 received.
 fn signal_line(state: &Path, n: usize) -> Option<String> {
     std::fs::read_to_string(state.join("logs/marspot.log"))

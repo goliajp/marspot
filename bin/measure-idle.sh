@@ -117,9 +117,19 @@ sample() {
 # Shells running under the set, which is how "N panes are open" is
 # checked rather than trusted.  A pane without a shell is not a pane.
 count_shells() {
-  local pids
+  local pids e s n=0
   pids=$(sample | awk '{print $1}' | paste -sd, -)
   [[ -n "$pids" ]] || { echo 0; return; }
+  # marspot has launchd start a pane's shell, so it is nobody's child:
+  # the session registry names it
+  if [[ $APP == marspot* ]]; then
+    for e in "${MARSPOT_STATE_DIR:-$HOME/Library/Application Support/marspot}"/sessions/*/entry.toml; do
+      s=$(sed -n 's/^shell_child_pid = \([0-9][0-9]*\)$/\1/p' "$e" 2>/dev/null)
+      [[ ",$pids," == *",$(sed -n 's/^pid = \([0-9][0-9]*\)$/\1/p' "$e" 2>/dev/null),"* ]] || continue
+      [[ -n $s ]] && kill -0 "$s" 2>/dev/null && n=$((n + 1))
+    done
+    echo "$n"; return
+  fi
   ps -Ao ppid=,command= \
     | awk -v want="$pids" '
         BEGIN { n = split(want, a, ","); for (i = 1; i <= n; i++) p[a[i]] = 1 }

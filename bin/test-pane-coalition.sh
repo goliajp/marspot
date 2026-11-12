@@ -16,7 +16,9 @@
 #
 # The app is opened through LaunchServices here, as a bundle, because
 # that is what gives it a coalition of its own; quit; and opened again.
-# Then, with the switch on and two panes:
+# Then, with two panes:
+#   0. The app names the pane a program that registers as an
+#      application was started in (PANE_APP), switch on or off.
 #   1. Each pane's shell is in a coalition of its own: not the other
 #      pane's, not the one the sessions are in.
 #   2. A program started in pane A that registers as a foreground app
@@ -286,6 +288,9 @@ run_case() { # switch (0|1)
     (( $(count PANE_JOB_FALLBACK) == 0 )) || fail "launchd did not take a pane's shell: $(grep PANE_JOB_FALLBACK "$APPLOG" | tail -1)"
     (( $(count PANE_JOB_STARTED) >= 2 )) || fail "expected a PANE_JOB_STARTED per pane, have $(count PANE_JOB_STARTED)"
     grep $'\tPANE_JOB_STARTED\t' "$APPLOG" | sed 's/^/    /'
+    # what the pane runs is charged to the job's program: the app's own
+    (( $(grep $'\tPANE_JOB_STARTED\t' "$APPLOG" | grep -c 'host=[^	]*Marspot\.app/Contents/MacOS/marspot-shell') >= 2 )) \
+      || fail "a pane's job was not hosted by the app's main executable"
     [[ "$(ps -o tty= -p "$Z1" | tr -d ' ')" == ttys* ]] || fail "pane $P1's shell has no controlling terminal"
   else
     (( $(count PANE_JOB_STARTED) == 0 )) || fail "a pane's shell became a job with the switch off"
@@ -324,6 +329,16 @@ run_case() { # switch (0|1)
   ls_record "$GUI" | sed 's/^/    /'
   listed="$(ls_coalition_pids "$GUI" | tr '\n' ' ')"
   lsid="$(ls_coalition_id "$GUI")"
+  # the app knows which pane the program is of, either way
+  local named=""
+  for (( p = 0; p < 50; p++ )); do
+    named="$(grep $'\tPANE_APP\t' "$APPLOG" | grep -E "(^|[^0-9a-z_])pid=$GUI([^0-9]|\$)" | tail -1)"
+    [[ -n $named ]] && break
+    sleep 0.1
+  done
+  grep -qE "(^|[^0-9a-z_])sid=$P1([^0-9]|\$)" <<<"$named" \
+    || fail "the app did not log the program (pid $GUI) as pane $P1's: ${named:-no PANE_APP line}"
+  echo "ASSERT[$on] owner: PANE_APP names pane $P1 for pid $GUI"
   if (( on )); then
     [[ "$(coalition "$GUI")" == "$c_z1" ]] || fail "the program is in coalition $(coalition "$GUI"), not pane $P1's $c_z1"
     for p in "$L1" "$L2" "$S1" "$S2" "$Z2" "$B2"; do
