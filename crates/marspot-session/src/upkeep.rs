@@ -80,6 +80,9 @@ impl Upkeep {
             .and_then(|s| s.parse::<u64>().ok())
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_secs(5));
+        // What changed between this session registering and the watch
+        // being armed raised no event: the first pass looks once.
+        changed.store(watcher.is_ok(), Ordering::Release);
         let now = Instant::now();
         Self {
             sid,
@@ -101,6 +104,9 @@ impl Upkeep {
     /// The longest the main loop may sleep on this account: without
     /// limit while the files are watched.
     pub(crate) fn wait(&self) -> Option<Duration> {
+        if self.changed.load(Ordering::Acquire) {
+            return Some(Duration::ZERO);
+        }
         (!self.watching()).then(|| self.entry_every.min(Duration::from_secs(5)))
     }
 
