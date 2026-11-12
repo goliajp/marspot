@@ -3,6 +3,7 @@
 #[path = "../../examples/support/mod.rs"]
 mod support;
 
+mod flood_frames;
 mod flood_interrupt;
 mod focus_reporting;
 mod self_execv;
