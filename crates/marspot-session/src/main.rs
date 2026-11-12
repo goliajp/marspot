@@ -30,6 +30,7 @@ mod handoff;
 mod line_discipline;
 mod local_session;
 mod pane_env;
+mod pane_job;
 mod pty_reader;
 mod signal_events;
 mod reply_guard;
@@ -905,15 +906,14 @@ fn setup_shm() -> (GridShmWriter, u16, u16) {
 
 fn main() {
     // `--version` answers before anything else touches the machine.
-    // The execv self-update probes a freshly-staged binary with it for
-    // one reason: to make the kernel exec this file while the current
-    // image is still driving the PTY, so the Gatekeeper assessment is
-    // paid then instead of during the execv gap.  A probe that
-    // migrated state or opened the log would be a probe with side
-    // effects — so this arm comes first and does neither.
-    if std::env::args().nth(1).as_deref() == Some("--version") {
-        println!("{}", env!("MARSPOT_VERSION_SESSION"));
-        return;
+    // The execv self-update probes a freshly-staged binary with it so
+    // the kernel execs this file while the current image still drives
+    // the PTY, and the Gatekeeper assessment is paid then instead of
+    // in the execv gap: a probe must not migrate state or open the log.
+    match std::env::args().nth(1).as_deref() {
+        Some("--version") => return println!("{}", env!("MARSPOT_VERSION_SESSION")),
+        Some(pane_job::HOST_ARG) => return pane_job::host_main(),
+        _ => {}
     }
 
     // RFC-004 D.1 — must precede logx / any path computation.
