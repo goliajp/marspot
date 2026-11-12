@@ -265,7 +265,7 @@ impl FileScrollback {
         self.idx.borrow_mut().write(&rec_offset.to_le_bytes());
         self.has_unflushed.set(true);
 
-        self.push_into_ring(line, wrapped);
+        self.ring.push(&self.scratch[4..]);
         self.total_lines += 1;
         trimmed_len
     }
@@ -378,41 +378,6 @@ impl FileScrollback {
         self.idx_mmap_len.set(file_len as usize);
         Ok(())
     }
-
-    /// Read the byte offset of line `idx` from the idx mmap, falling
-    /// back to pread if mmap isn't covering yet.
-    fn push_into_ring(&mut self, line: &[crate::grid::Cell], wrapped: bool) {
-        if self.ram_capacity == 0 {
-            return;
-        }
-        // Straight into the ring.  This used to go through
-        // `pad_or_clip`, which returns a `Vec` — one allocation and one
-        // extra copy of the row, per pushed line, on the parse thread.
-        // The rule for hot paths is zero allocations; a bulk
-        // `cat` pushes a quarter of a million lines through here.
-        let cols = self.cols;
-        let take = line.len().min(cols);
-        if self.ram_len < self.ram_capacity {
-            self.ram_cells.extend_from_slice(&line[..take]);
-            // The slot still has to BE `cols` wide for the indexing
-            // arithmetic; it just does not have to be written twice.
-            self.ram_cells.resize(
-                self.ram_cells.len() + (cols - take),
-                crate::grid::Cell::default(),
-            );
-            self.ram_lens.push(take as u16);
-            self.ram_wrapped.push(wrapped);
-            self.ram_len += 1;
-            return;
-        }
-        let slot = self.ram_head;
-        self.ram_head = (self.ram_head + 1) % self.ram_capacity;
-        let start = slot * cols;
-        self.ram_cells[start..start + take].copy_from_slice(&line[..take]);
-        self.ram_lens[slot] = take as u16;
-        self.ram_wrapped[slot] = wrapped;
-    }
-
 }
 
 #[cfg(test)]
