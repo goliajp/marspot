@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.302"  # the supervisor's clock does not tick at rest
-core    = "0.12.336"  # a row that scrolls off is blanked with one copy of a blank row
-session = "0.11.178"  # a row that scrolls off is blanked with one copy of a blank row
+core    = "0.12.337"  # a dropped loop watch tells its watchdog to end before waking it
+session = "0.11.179"  # a dropped loop watch tells its watchdog to end before waking it
