@@ -20,7 +20,7 @@
 use std::io;
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -80,6 +80,13 @@ impl marspot_term::frame_writer::Queued for PtyChunk {
                 Ok(0) => break,
                 Ok(n) => off += n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                // the reader keeps the master non-blocking; a full tty
+                // input queue is waited out here, on the writer thread
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    let mut p = libc::pollfd { fd: self.pty.raw_master(), events: libc::POLLOUT, revents: 0 };
+                    // SAFETY: one valid pollfd for the master this chunk's Pty owns.
+                    unsafe { libc::poll(&mut p, 1, 100) };
+                }
                 // Dead fd (child gone).  Abandon this chunk; the session
                 // tears down through the normal exit path.
                 Err(_) => break,
@@ -102,7 +109,7 @@ pub struct LocalSession {
     child_pid: i32,
     terminal: Terminal,
     bytelog: Option<ByteLog>,
-    rx: Receiver<Vec<u8>>,
+    rx: Receiver<crate::pty_reader::Chunk>,
     /// Fills `rx`.  `None` only in tests that drive `rx` themselves.
     reader: Option<PtyReader>,
     /// PTY write half.  Dropping this ends the writer thread.
@@ -262,7 +269,7 @@ impl LocalSession {
             ByteLog::open(id).ok()
         };
 
-        let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
+        let (tx, rx) = crate::pty_reader::channel();
         let exited = Arc::new(AtomicBool::new(false));
 
         let reader = Some(PtyReader::spawn(id, Arc::clone(&pty), Arc::clone(&exited), tx, wake));
@@ -350,18 +357,19 @@ impl LocalSession {
                 break;
             }
             match self.rx.try_recv() {
-                Ok(bytes) => {
+                Ok(chunk) => {
                     // see `line_discipline`: false unless a repair is pending
-                    let bytes = if raw { crate::line_discipline::with_carriage_returns(bytes) } else { bytes };
+                    let converted = raw.then(|| crate::line_discipline::with_carriage_returns(chunk.bytes().to_vec()));
+                    let bytes = converted.as_deref().unwrap_or(chunk.bytes());
                     // The bytelog is written whether or not the picture is
                     // held: everything that reads it must see the pane talk.
                     if let Some(b) = self.bytelog.as_mut() {
-                        let _ = b.append(&bytes);
+                        let _ = b.append(bytes);
                     }
                     total += bytes.len();
                     if self.hold {
                         self.held_bytes += bytes.len();
-                        self.held.push(bytes);
+                        self.held.push(bytes.to_vec());
                         if self.held_bytes >= HOLD_CAP {
                             marspot_term::lx_warn!(
                                 "l3.hold.cap_reached",
@@ -373,7 +381,10 @@ impl LocalSession {
                             self.hold_grid(false);
                         }
                     } else {
-                        self.terminal.feed(&bytes);
+                        self.terminal.feed(bytes);
+                    }
+                    if let Some(r) = self.reader.as_ref() {
+                        r.recycle(chunk);
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -624,7 +635,7 @@ impl LocalSession {
         // landed on disk; the new image appends from here on.
         let bytelog = ByteLog::open(id).ok();
 
-        let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
+        let (tx, rx) = crate::pty_reader::channel();
         let exited = Arc::new(AtomicBool::new(false));
 
         let reader = Some(PtyReader::spawn(id, Arc::clone(&pty), Arc::clone(&exited), tx, wake));
@@ -748,6 +759,7 @@ pub(crate) fn test_pane_env(shell: &str) -> marspot_term::test_env::StateSandbox
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     /// What the `line_discipline` tests read off a pane.
@@ -1084,7 +1096,7 @@ mod tests {
         let chunk = "ab 漢字 \x1b[1mcd\x1b[0m\r\n".repeat(2048).into_bytes();
         let chunks = 64;
         for _ in 0..chunks {
-            tx.send(chunk.clone()).expect("queue a chunk");
+            tx.send(chunk.clone().into()).expect("queue a chunk");
         }
         let all = chunk.len() * chunks;
 
@@ -1193,7 +1205,7 @@ mod tests {
             rows: 24,
         };
         // the reader spawn() starts, on this Pty
-        let (tx, new_rx) = mpsc::channel();
+        let (tx, new_rx) = crate::pty_reader::channel();
         s.rx = new_rx;
         let w2 = Arc::clone(&wake);
         s.reader = Some(PtyReader::spawn(
