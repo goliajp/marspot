@@ -28,4 +28,4 @@
 
 shell   = "0.7.302"  # the supervisor's clock does not tick at rest
 core    = "0.12.330"  # the main loop waits without a deadline when nothing is due
-session = "0.11.171"  # a pane's shell can be started as a launchd job of its own
+session = "0.11.172"  # a shell launchd started is killed with its pane when it ignores the hangup
