@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.302"  # the supervisor's clock does not tick at rest
-core    = "0.12.333"  # a row that scrolls off is blanked only as far as it was written
-session = "0.11.175"  # bulk output is handed to the parser in full chunks, however idle it is
+core    = "0.12.334"  # a run of text that needs no segmenter is written to the row in one pass
+session = "0.11.176"  # a run of text that needs no segmenter is written to the row in one pass

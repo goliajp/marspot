@@ -19,6 +19,8 @@
 //! when complete.  Any malformed sequence emits `print('\u{FFFD}')` and
 //! resets the UTF-8 accumulator.
 
+pub(crate) mod scan;
+
 const MAX_PARAMS: usize = 16;
 const MAX_INTERMEDIATES: usize = 4;
 const MAX_OSC_LEN: usize = 4096;
