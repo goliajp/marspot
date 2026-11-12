@@ -365,6 +365,71 @@ fn hand_over(sandbox: &mut Sandbox, how: Ask, burst: bool) {
     s.kill();
 }
 
+/// A pane replaced while its program floods it keeps every line: what
+/// the old image had read is in the history files before it goes, the
+/// index as well as the records, and the new image carries on from
+/// there.  The program prints the numbers from 1 up, so the last one on
+/// screen says how many lines there were.
+#[test]
+fn an_update_in_the_middle_of_a_flood_loses_no_line() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut sandbox = Sandbox::new();
+    let state = sandbox.path().to_path_buf();
+    let script = state.join("flood.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ni=0\nwhile [ ! -e {stop} ]; do seq $((i * 10000 + 1)) $(((i + 1) * 10000)); i=$((i + 1)); done\nexec sleep 600\n",
+            stop = state.join("stop").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    sandbox.env.set("SHELL", &script);
+    let mut s = Session::spawn_with_id(bin(), COLS, ROWS, Some(ID));
+    let pid = s.pid();
+    let history = |name: &str| std::fs::metadata(state.join(format!("sessions/{ID}/{name}"))).map(|m| m.len()).unwrap_or(0);
+    wait_for(20, "the flood to be well under way", || (history("bytelog") > 1 << 20).then_some(()));
+
+    let staged = stage(&state, true).canonicalize().unwrap();
+    let running = || marspot_term::platform::pid_exe_path(pid as i32).and_then(|p| p.canonicalize().ok());
+    ask(&s, Ask::Frame);
+    wait_for(30, "the pid to run the staged image", || {
+        if let Some(st) = s.child.try_wait().unwrap() {
+            panic!("the L3 exited ({st}) instead of handing over; its log:\n{}", log_tail(&state));
+        }
+        (running().as_deref() == Some(staged.as_path())).then_some(())
+    });
+    let at_swap = history("bytelog");
+    wait_for(20, "the flood to go on in the new image", || (history("bytelog") > at_swap + (1 << 18)).then_some(()));
+    std::fs::write(state.join("stop"), b"").unwrap();
+
+    // the last number, on the row above the cursor, once nothing moves
+    let mut seen = (0u64, Instant::now());
+    let lines: u64 = wait_for(60, "the flood to end", || {
+        let seq = s.reader.seq();
+        if seq != seen.0 {
+            seen = (seq, Instant::now());
+        }
+        if seen.1.elapsed() < Duration::from_millis(500) {
+            return None;
+        }
+        let (rows, (_, row)) = s.try_screen_and_cursor(COLS, ROWS)?;
+        rows[row.checked_sub(1)? as usize].trim().parse().ok()
+    });
+    assert_eq!(lines % 10000, 0, "the program ends on a whole batch");
+    // every line but the ones still on screen is in the history, once
+    let filed = lines - (ROWS as u64 - 1);
+    wait_for_or(
+        10,
+        "every line in the index",
+        || (history("scrollback.idx") == filed * 8).then_some(()),
+        || format!(": {filed} filed, {} indexed", history("scrollback.idx") / 8),
+    );
+    assert_eq!(count_in_log(&state, "L3_EXECV_INVOKE"), 1);
+    s.kill();
+}
+
 /// The running image changes, nothing else does.
 #[test]
 fn an_update_replaces_the_image_and_keeps_the_pane() {

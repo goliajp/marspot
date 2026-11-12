@@ -37,30 +37,13 @@ pub struct FileScrollback {
     idx_path: std::path::PathBuf,
     cols: usize,
     ram_capacity: usize,
-    // A2: `bin` / `idx` writers wrapped in RefCell so cold reads
-    // (via `&self`-only cell_at) can flush BufWriters before reading
-    // the file via mmap/pread.  Without this, a line that aged out
-    // of the RAM ring but is still in BufWriter's user-space buffer
-    // would not be visible to mmap, breaking the "ring miss ⇒ file
-    // hit" invariant.
+    // The writer of both files: the records, and paired with them the
+    // index entries of the same lines.  In a RefCell so cold reads
+    // (via `&self`-only cell_at) can flush it before reading the file
+    // via mmap/pread.  Without this, a line that aged out of the RAM
+    // ring but is still in the writer's buffer would not be visible to
+    // mmap, breaking the "ring miss ⇒ file hit" invariant.
     bin: std::cell::RefCell<crate::async_writer::AsyncWriter>,
-    /// Buffered, like `bin`.  It was a raw `File` until 2026-08-19,
-    /// on the reasoning that 8 B per push is one syscall (~5 µs),
-    /// "well within budget".  The estimate was right and the budget
-    /// was measured on the wrong workload: interactive output pushes
-    /// a few lines a second, a `cat` of a large file pushes 200 000,
-    /// and a profile of the shipped path put **63 % of the parse
-    /// thread's samples** in this write.
-    ///
-    /// What the raw file bought was a narrower crash window for the
-    /// index — but the asymmetry it created was the odd part: `bin`
-    /// has always been a `BufWriter`, so an unclean kill already
-    /// loses its buffered tail, and `open()` already reconciles the
-    /// two by scanning and truncating.  Buffering both makes them
-    /// lose the same tail instead of different ones, and the flush
-    /// order (bin, then idx) keeps the index from ever pointing past
-    /// the data it indexes.
-    idx: std::cell::RefCell<crate::async_writer::AsyncWriter>,
     /// Separate read-only fd for cold reads.  Reads of recent lines
     /// hit the RAM ring, so missing-from-file isn't observable.
     bin_for_read: std::fs::File,
@@ -141,35 +124,13 @@ pub struct FileScrollback {
 // embedded in `Scrollback` (which `Send` is naturally derived for).
 unsafe impl Send for FileScrollback {}
 
-/// Write-buffer sizes for the two files a `FileScrollback` keeps.
-///
-/// They are a pair, not two independent numbers.  An unclean kill
-/// (SIGKILL, a panic, `execv` without the handoff flush) loses whatever
-/// sits in each buffer, and `open()` reconciles the survivors by
-/// trusting the index only as far as the data file actually reaches.
-/// So what matters is which buffer holds MORE unwritten lines:
-///
-///   bin  512 KiB / ~100 B per record  ≈ 5000 lines
-///   idx   32 KiB / 8 B per record     =  4096 lines
-///
-/// Keeping idx's window strictly smaller preserves the invariant the
-/// recovery scan was written against — the index never claims lines the
-/// data file cannot produce — while still amortising the syscall over
-/// hundreds of pushes instead of paying one per line (which, on a bulk
-/// `cat`, was 63 % of the parse thread; see the `idx` field comment).
-///
-/// The sizes are what a flood needs.  Every buffer handed over wakes a
-/// writer thread, and at 64 KiB and 4 KiB a `cat` of 134 MB was 7 000
-/// to 12 000 of those in half a second, and the program writing into
-/// the pty -- which sleeps and is woken once a kilobyte -- was slower
-/// for every one: the session carried 264-279 / 254-258 / 276-278 /
-/// 284-288 MB/s of ascii / mixed / cjk / emoji where it carries
-/// 308-321 / 283-284 / 299-306 / 309-312 with an eighth as many (with
-/// a quarter as many, 316-318 / 266-277 / 298-300 / 305-308).  Output
-/// that is not a flood does not wait for a buffer to fill: see
-/// [`FileScrollback::hand_off`].
-const BIN_BUF_BYTES: usize = 512 * 1024;
-const IDX_BUF_BYTES: usize = 32 * 1024;
+/// How much of the records is handed to the writer thread at once, and
+/// how many such buffers may be queued or being written.  The index
+/// entries of the records in a buffer travel with it, so the two files
+/// lose the same lines to a kill, and with the buffer being filled that
+/// is at most `BIN_BUF_BYTES * (BIN_DEPTH + 1)` of records.
+const BIN_BUF_BYTES: usize = 64 * 1024;
+const BIN_DEPTH: usize = 3;
 
 mod open;
 mod read;

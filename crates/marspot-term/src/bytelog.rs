@@ -77,7 +77,7 @@ impl ByteLog {
         let bytes_written = file.metadata()?.len();
         let mut log = Self {
             path,
-            file: crate::async_writer::AsyncWriter::new(file, BYTELOG_WRITE_BUF, 4),
+            file: crate::async_writer::AsyncWriter::new(file, BYTELOG_WRITE_BUF, 3),
             bytes_written,
         };
         // Logs written by the pre-rotation scheme can be up to the full

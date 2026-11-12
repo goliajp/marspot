@@ -151,6 +151,9 @@ pub(crate) struct FloodGate {
     typed: Option<Instant>,
     /// See `SyncGate::owed`.
     owed: bool,
+    /// The loop's last turn parsed a flood: one more turn is owed, on
+    /// which what the flood left buffered is handed on.
+    flood: bool,
 }
 
 impl FloodGate {
@@ -166,6 +169,11 @@ impl FloodGate {
 
     pub(crate) fn typed(&mut self) {
         self.typed = Some(Instant::now());
+    }
+
+    /// Whether the turn of the loop now ending parsed a flood.
+    pub(crate) fn turn(&mut self, flood: bool) {
+        self.flood = flood;
     }
 
     /// Should the frame after a turn that parsed `bulk` output wait?
@@ -189,13 +197,14 @@ impl FloodGate {
         self.owed
     }
 
-    /// How long until a withheld frame is due.
+    /// How long until a withheld frame is due, or the turn after a
+    /// flood.
     pub(crate) fn due_in(&self) -> Option<Duration> {
         self.due_in_at(Instant::now())
     }
 
     fn due_in_at(&self, now: Instant) -> Option<Duration> {
-        let last = self.last.filter(|_| self.owed)?;
+        let last = self.last.filter(|_| self.owed || self.flood)?;
         Some((last + Self::FRAME).saturating_duration_since(now))
     }
 }
@@ -408,6 +417,20 @@ mod flood_gate_tests {
         // the loop's timer fires with nothing parsed
         assert!(!g.hold_at(false, t0 + Duration::from_millis(8)));
         assert!(!g.owes_a_frame(), "a quiet pane must not keep a timer alive");
+        assert_eq!(g.due_in_at(t0 + Duration::from_millis(9)), None);
+    }
+
+    /// A flood that stops on a full read has one more turn coming even
+    /// when no frame is owed, and a quiet turn asks for no other.
+    #[test]
+    fn the_turn_after_a_flood_is_asked_for_once() {
+        let t0 = Instant::now();
+        let mut g = FloodGate::default();
+        assert!(!g.hold_at(true, t0));
+        g.turn(true);
+        assert!(!g.owes_a_frame());
+        assert_eq!(g.due_in_at(t0 + Duration::from_millis(2)), Some(Duration::from_millis(6)));
+        g.turn(false);
         assert_eq!(g.due_in_at(t0 + Duration::from_millis(9)), None);
     }
 
