@@ -274,13 +274,25 @@ pub(crate) fn serve_front(wake: impl Fn() + Send + 'static) {
                     *with = seams;
                 }
                 ASKED_BY.store(pid, Ordering::Release);
-                wake();
+                match AS_RESIDENT.get() {
+                    Some(resume) => resume(),
+                    None => wake(),
+                }
             }
         }
     };
     if let Err(e) = std::thread::Builder::new().name("l1-front".into()).spawn(serve) {
         lx_warn!("shell.front.thread_failed", &format!("{e}"));
     }
+}
+
+/// What a resident shell does when a launch that stood aside asks; the
+/// app, which has windows, is woken on its main thread instead.
+static AS_RESIDENT: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// From now on a launch that stands aside is answered by `resume`.
+pub(crate) fn answer_as_resident(resume: impl Fn() + Send + Sync + 'static) {
+    let _ = AS_RESIDENT.set(Box::new(resume));
 }
 
 /// Main thread: if a second launch asked, come to the front.

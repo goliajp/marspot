@@ -171,6 +171,14 @@ impl Pump {
     }
 }
 
+impl Drop for Pump {
+    /// The app is gone and the process may stay for its sessions: the
+    /// clock's thread is not ended, it rests for good.
+    fn drop(&mut self) {
+        self.rest(true);
+    }
+}
+
 /// Wake the main thread when `sig` is sent to this process.  The handler
 /// already installed for it still runs; this only makes the pass that
 /// reads its flag happen now.

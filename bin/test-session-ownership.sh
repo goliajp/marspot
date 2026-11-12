@@ -157,10 +157,7 @@ app_env=(--env "MARSPOT_STATE_DIR=$MARSPOT_STATE_DIR" --env "MARSPOT_SESSION_BIN
 # Opens the app the way the Dock does; returns once a shell answers.
 open_app() { # extra `open` flags...
   local i
-  # refused (-600) for a moment after the app replaced its image
-  for (( i = 0; i < 10; i++ )); do open -g "$@" "$APP" "${app_env[@]}" 2>"$SB/open.err" && break; sleep 0.5; done
-  (( i < 10 )) || die "LaunchServices did not open the sandbox bundle: $(cat "$SB/open.err")"
-  (( i == 0 )) || echo "    (open was refused $i time(s) first: $(head -1 "$SB/open.err"))"
+  open -g "$@" "$APP" "${app_env[@]}" 2>"$SB/open.err" || die "LaunchServices did not open the sandbox bundle: $(cat "$SB/open.err")"
   for (( i = 0; i < 300; i++ )); do
     L1="$(dev_shell_pid)"
     [[ -n $L1 ]] && "$SHELL_BIN" --panes >/dev/null 2>&1 && return 0
@@ -168,11 +165,11 @@ open_app() { # extra `open` flags...
   done
   die "the app never came up"
 }
-
 quit_app() {
   local cleanups answered i
   cleanups=$(count SHELL_QUIT_CLEANUP)
-  # not taken for a moment after the app replaced its image
+  # the app answers on its command socket before it takes events:
+  # a quit sent in that moment is not taken
   for (( i = 0; i < 10; i++ )); do
     answered="$(osascript -l JavaScript -e "ObjC.import('AppKit');
       \$.NSRunningApplication.runningApplicationWithProcessIdentifier($L1).terminate" 2>&1)"
@@ -218,7 +215,6 @@ send_once() { # pane, text
 
 # The pids that are the app's or a pane's right now.
 ours() { echo "$(dev_shell_pid) $(dev_core_pids | tr '\n' ' ') $S1 $S2 $Z1 $Z2 $BY $LAUNCHER"; }
-
 check_owner() {
   local sid line want; want="$(dev_shell_pid)"
   for sid in "$P1" "$P2"; do
@@ -271,8 +267,6 @@ reattached() {
   [[ "$(session_pid "$P1")" == "$S1" && "$(shell_of "$P1")" == "$Z1" && "$(session_pid "$P2")" == "$S2" && "$(shell_of "$P2")" == "$Z2" ]] \
     || bad "the app did not attach to the sessions it had (now $(session_pid "$P1")/$(shell_of "$P1") $(session_pid "$P2")/$(shell_of "$P2"))"
 }
-
-# ───────────────────────────── the walk ─────────────────────────────
 STATE=setup
 dev_kill_shell_core
 rm -rf "$MARSPOT_STATE_DIR"; mkdir -p "$MARSPOT_STATE_DIR/logs"
@@ -293,7 +287,6 @@ LAUNCHER="$(cat "$SB/launcher.pid")"; BY="$(cat "$SB/by.pid")"
 echo "==> app $L1 in coalition $C0; panes $P1 $P2: sessions $S1 $S2, shells $Z1 $Z2, launcher $LAUNCHER, bystander $BY"
 
 state "fresh launch"
-
 residents=$(count SHELL_RESIDENT)
 quit_app
 if expect_resident "$residents"; then
@@ -342,16 +335,22 @@ state "shell updated in place"
 residents=$(count SHELL_RESIDENT)
 quit_app
 if expect_resident "$residents"; then
-  updates=$(count SHELL_SELF_UPDATE); residents=$(count SHELL_RESIDENT)
+  # a staged shell waits for the app to be opened: the resident does
+  # not replace its image while it waits for that event
+  updates=$(count SHELL_SELF_UPDATE); waits=$(count SHELL_UPDATE_WAITS)
   stage_shell
   kill -USR1 "$L1"
-  wait_count SHELL_SELF_UPDATE $((updates + 1)) 60 && wait_count SHELL_RESIDENT $((residents + 1)) 10 \
-    || bad "the resident shell did not move to the staged image"
-  sleep 0.5
-  [[ "$(dev_shell_pid)" == "$keep" ]] || bad "the resident's update changed its pid"
-  state "shell updated in place while quit"
+  wait_count SHELL_UPDATE_WAITS $((waits + 1)) 60 || bad "the resident shell did not note the staged shell"
+  [[ "$(dev_shell_pid)" == "$keep" ]] && (( $(count SHELL_SELF_UPDATE) == updates )) || bad "the resident replaced its image while quit"
+  state "shell staged while quit"
+  open_app; reattached
+  (( $(count SHELL_SELF_UPDATE) == updates + 1 )) && [[ ! -e "$MARSPOT_STATE_DIR/binaries/pending/marspot-shell" ]] \
+    || bad "opening the app did not take the staged shell"
+  [[ $L1 == "$keep" ]] || bad "taking the staged shell changed the pid ($keep to $L1)"
+  state "opened as the staged shell"
+else
+  open_app; reattached
 fi
-open_app; reattached
 
 # the sessions move to another build of themselves
 resumed=$(count L3_EXECV_RESUMED)
@@ -393,9 +392,10 @@ if kill_shell; then
   started="$(grep $'\tOWNER_STARTED\t' "$APPLOG" | tail -1 | cut -f2)"
   up="$(grep $'\tSHELL_RESIDENT\t' "$APPLOG" | tail -1 | cut -f2)"
   echo "    the shell was killed at $KILLED_AT; a session started another $(( started - KILLED_AT )) ms later, which answered $(( up - KILLED_AT )) ms after the kill"
-  grep $'\tSHELL_RESIDENT_RECORD\t' "$APPLOG" | tail -1 | cut -f8- | tr '\t' ' ' | sed 's/^/    /'
   [[ "$(coalition "$L1")" == "$(coalition "$S1")" ]] || bad "the shell a session started is in coalition $(coalition "$L1"), the sessions in $(coalition "$S1")"
   sleep 1.5
+  rec_at="$(grep $'\tSHELL_RESIDENT_RECORD\t' "$APPLOG" | tail -1 | cut -f2)"; reg_at="$(grep $'\tSHELL_RESIDENT_REGISTERED\t' "$APPLOG" | tail -1 | cut -f2)"
+  echo "    the dead shell's record was displaced by $(( rec_at - KILLED_AT )) ms and the new shell had registered by $(( reg_at - KILLED_AT )) ms after the kill"
   state "shell killed"
   keep="$L1"
   open_app; reattached
@@ -420,14 +420,16 @@ else bad "the shell that was opened did not hand over to one in the sessions' co
 [[ "$(coalition "$L1")" == "$(coalition "$S1")" ]] || bad "the app runs in coalition $(coalition "$L1"), its sessions are in $(coalition "$S1")"
 state "opened from outside the sessions' coalition"
 
-# twenty quits and openings: one process throughout
+# twenty quits and openings: one process throughout.  The graphics driver hands
+# back what the closed windows held over the next seconds: read when it has
+settled_footprint() { local f i; for (( i = 0; i < 50; i++ )); do f=$("$PROBE" footprint "$1"); (( f <= RESIDENT_KIB )) && break; sleep 0.2; done; echo "$f"; }
+RESIDENT_KIB=32768
 keep="$L1"; c_keep="$(coalition "$L1")"; n_ok=0; foots=""
 for (( round = 1; round <= 20; round++ )); do
   residents=$(count SHELL_RESIDENT)
   quit_app
   wait_count SHELL_RESIDENT $((residents + 1)) 10 || break
-  sleep 0.3
-  foots+=" $("$PROBE" footprint "$L1")"
+  foots+=" $(settled_footprint "$L1")"
   open_app
   [[ $L1 == "$keep" && "$(shells_running | tr '\n' ' ')" == "$keep " ]] || break
   n_ok=$round
@@ -437,10 +439,8 @@ if (( n_ok == 20 )); then
   ok "one shell throughout: pid $keep, coalition $(coalition "$L1")"
   [[ "$(coalition "$L1")" == "$c_keep" && "$(coalition "$S1")" == "$c_keep" ]] || bad "a coalition changed over twenty quits"
   echo "    resident footprint after each quit, KiB:$foots; descriptors open: $(lsof -p "$L1" 2>/dev/null | grep -c .)"
-  # it comes up at one of two sizes, 2 MiB apart, in any round: growth is later rounds above earlier ones
-  early=$(tr ' ' '\n' <<<"$foots" | sed -n '2,11p' | sort -n | tail -1)
-  late=$(tr ' ' '\n' <<<"$foots" | sed -n '12,21p' | sort -n | tail -1)
-  (( late <= early + 1024 )) || bad "the resident shell grew: at most ${early} KiB in the first ten quits, ${late} in the last ten"
+  most=$(tr ' ' '\n' <<<"$foots" | sort -n | tail -1)
+  (( most <= RESIDENT_KIB )) || bad "a resident shell was still at ${most} KiB ten seconds after its quit (budget ${RESIDENT_KIB})"
 else
   bad "round $((n_ok + 1)) of 20 did not come back as the same single shell (shells: $(shells_running | tr '\n' ' '))"
 fi
