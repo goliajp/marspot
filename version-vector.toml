@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.298"  # a banner is drawn again for the display the window moved to
-core    = "0.12.328"  # a chord is matched by the character the keyboard layout types
-session = "0.11.167"  # output gets its carriage returns as read while a repair owes them; a repair ends by commands, not by a clock
+shell   = "0.7.302"  # the supervisor's clock does not tick at rest
+core    = "0.12.330"  # the main loop waits without a deadline when nothing is pending
+session = "0.11.170"  # settings and the registry entry are followed by file events, looked at once when the watch is armed
