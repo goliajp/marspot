@@ -34,6 +34,7 @@ mod pty_reader;
 mod signal_events;
 mod reply_guard;
 mod uds_server;
+mod upkeep;
 
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -1377,59 +1378,9 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         });
     }
     let snapshot_writer = SnapshotWriter::spawn(session.id());
-    // 2026-07-28 incident — registry-liveness deadman.  This process
-    // is DESIGNED to outlive its L2/L1 (that is what makes silent
-    // updates and crash reattach possible), which also means nothing
-    // upstream will ever reap it: after a shell crash its ppid is 1.
-    // The registry entry is therefore its ownership record — every
-    // reaper (boot sweep, retire, dev sandbox wipe) works by removing
-    // the entry or the dir.  A session whose entry is gone is a
-    // session nobody can ever find again; 176 of those accumulated on
-    // 2026-07-28 and helped push the machine into a forced reboot.
-    // So: entry gone → exit.  Checked at most every 5 s off the
-    // existing recv timeout — a stat(2), nothing on the byte path.
-    //
-    // 2026-07-29 — the entry is not the only way to become
-    // unreachable, and the original check missed the other two.  Seven
-    // sessions were found alive with their listener fd still bound and
-    // their socket file unlinked out from under them: L2's fresh-spawn
-    // path (`marspot-core.rs`, the `remove_file(entry) +
-    // cleanup_stale_socket` pair) clears a slot before spawning into
-    // it, and if that spawn never lands — or the core dies first, as
-    // it did that morning — the incumbent is left holding a socket
-    // nobody can dial.  A replacement L3 that *does* land is the third
-    // case: it rewrites entry.toml with its own pid, and from that
-    // moment this process is the stale one.
-    //
-    // All three are the same condition — "nobody can reach me" — so
-    // check the whole reachability contract, not just one file of it.
-    let my_entry_path = marspot_term::session_registry::session_entry_path(session.id());
-    let my_socket_path = marspot_term::session_registry::session_socket_path(session.id());
-    let my_pid = std::process::id() as i32;
-    let mut last_entry_check = Instant::now();
     let mut output_queued = false;
-    // Five seconds in production.  A test that deletes a registry
-    // entry to watch the session leave should not have to sit through
-    // that beat — it was 5.7 s of a 41 s suite, and the beat is not
-    // what it asserts.  Same shape as `MARSPOT_SESSION_CAP`.
-    let entry_check_interval = std::env::var("MARSPOT_SESSION_ENTRY_CHECK_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(Duration::from_secs(5));
-    // The settings stat gets its own, faster beat.
-    //
-    // It used to ride the reachability check, so a setting L3 owns —
-    // character width — took up to five seconds to bite, and the way
-    // you notice a setting is by using it immediately after flipping
-    // it.  One `stat` a second per session is nothing next to the
-    // parse loop it sits beside.
-    //
-    // A wire frame from the panel would be instant rather than ≤1 s,
-    // and was deliberately not built: the file is the single source
-    // of truth, and a frame carrying values could disagree with it.
-    let mut last_settings_check = Instant::now();
-    const SETTINGS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+    // settings and reachability, by file events: see `upkeep`
+    let mut upkeep = upkeep::Upkeep::new(session.id(), ev_tx.clone());
     loop {
         // A gate that is holding a frame owes a flush even if the PTY
         // has gone quiet: without this, a program that wipes the
@@ -1441,21 +1392,32 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         // back on a timer, not on the next byte — a `sudo` password
         // prompt sends no bytes at all until Enter, and the guesses
         // would otherwise sit on screen showing what was typed.
-        let wait = if sync_gate.owes_a_frame()
+        let owed = sync_gate.owes_a_frame()
             || blank_gate.owes_a_frame()
-            || session.terminal().predictions_pending()
-        {
-            Duration::from_millis(10)
-        } else {
-            // Never sleep past the beat that has to fire.
-            entry_check_interval.min(Duration::from_secs(5))
-        };
+            || session.terminal().predictions_pending();
+        let wait = owed.then_some(Duration::from_millis(10));
+        // Nothing else puts a limit on the sleep of an idle session.
+        // What is still owed on a clock is owed for something that
+        // happened: a snapshot of content that changed, a tally of
+        // predictions that were made.
+        let snapshot_due = (session.terminal().generation() != last_snapshot_generation)
+            .then(|| PERIODIC_SNAPSHOT_INTERVAL.saturating_sub(last_snapshot_at.elapsed()));
+        let t = session.terminal();
+        let tally_due = ((t.predictions_hit, t.predictions_miss) != predict_seen)
+            .then(|| PREDICT_REPORT_EVERY.saturating_sub(last_predict_report.elapsed()));
         // see `reply_guard` and `line_discipline`: both look often for a while
-        let wait = session.reply_poll_every().map_or(wait, |p| wait.min(p));
+        let wait = [wait, upkeep.wait(), snapshot_due, tally_due, session.reply_poll_every()]
+            .into_iter()
+            .flatten()
+            .min();
         // the reader's wakes for what is still queued were taken by
         // the drain below last time round
-        let wait = if output_queued { Duration::ZERO } else { wait };
-        let first = match ev_rx.recv_timeout(wait) {
+        let wait = if output_queued { Some(Duration::ZERO) } else { wait };
+        let got = match wait {
+            Some(wait) => ev_rx.recv_timeout(wait),
+            None => ev_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let first = match got {
             Ok(ev) => Some(ev),
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => {
@@ -1463,51 +1425,14 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 break;
             }
         };
-        // A setting L3 owns — character width — bites as soon as the
-        // file says so.  New content is parsed with the new rule;
-        // cells already on screen keep the width they were laid out
-        // with, and heal as the program redraws them.
-        if last_settings_check.elapsed() >= SETTINGS_CHECK_INTERVAL {
-            last_settings_check = Instant::now();
-            if marspot_term::settings::reload_if_changed() {
-                lx_event!(
-                    "SETTINGS_RELOADED",
-                    "settings.toml changed on disk",
-                    circled_wide = marspot_term::settings::get().appearance_circled_wide as u64
-                );
-            }
-            marspot_term::system_theme::changed("colour queries are answered from the theme now in force");
-        }
-        if last_entry_check.elapsed() >= entry_check_interval {
-            last_entry_check = Instant::now();
-            // Same `stat` cadence the reachability check already pays
-            // for.  L3 owns character width, so the settings that
-            // change it have to reach here — new content is parsed
-            // with the new rule; cells already on screen keep the
-            // width they were laid out with, and heal as the program
-            // redraws them.
-            let unreachable = if !my_entry_path.exists() {
-                Some("entry.toml removed")
-            } else if !my_socket_path.exists() {
-                Some("socket unlinked")
-            } else {
-                match marspot_term::session_registry::read_session_entry(session.id()) {
-                    // Someone else owns this sid now.  Note we do NOT
-                    // exit on a read error: a torn read of an entry
-                    // being rewritten must not look like eviction.
-                    Ok(e) if e.pid != my_pid => Some("entry reassigned to another pid"),
-                    _ => None,
-                }
-            };
-            if let Some(reason) = unreachable {
-                lx_event!(
-                    "SESSION_REGISTRY_GONE",
-                    "this session is unreachable; exiting",
-                    session_id = session.id(),
-                    reason = reason
-                );
-                break;
-            }
+        if let Some(reason) = upkeep.look() {
+            lx_event!(
+                "SESSION_REGISTRY_GONE",
+                "this session is unreachable; exiting",
+                session_id = session.id(),
+                reason = reason
+            );
+            break;
         }
         // Time from here, not from before the `recv` above: a loop
         // parked waiting for work is doing its job, not stalling.
@@ -2139,15 +2064,14 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         // death (power loss / kernel panic / SIGKILL) never runs the
         // SIGTERM writer, so pre-C.1 the visible grid + the whole
         // alt-screen conversation (B13: alt scrollback is RAM-only)
-        // evaporated.  Every loop iteration (event or the 5 s
-        // recv_timeout heartbeat) checks: content changed since the
+        // evaporated.  Every loop iteration (an event, or the wake the
+        // wait at the top sets for exactly this) checks: content changed since the
         // last snapshot (terminal generation — bumps once per
         // non-empty feed) AND ≥30 s elapsed → flush scrollback
         // BufWriter, serialize with a small main-tail cap (the flush
         // just made the File complete; only the alt fold needs bulk),
         // tmp + rename atomic.  Idle sessions: generation unchanged →
-        // zero writes, zero extra wakes (the 5 s timeout already
-        // existed).  Worst-case loss window shrinks from "since boot"
+        // zero writes, zero wakes.  Worst-case loss window shrinks from "since boot"
         // to 30 s.
         {
             watch.phase("snapshot-flush");

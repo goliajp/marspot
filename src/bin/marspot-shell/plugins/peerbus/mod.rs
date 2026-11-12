@@ -78,6 +78,8 @@ pub struct PeerbusPlugin {
     /// The same for the gemini panes; None until the first is accepted.
     sent_gemini: Option<crate::plugins::gemini::Peers>,
     sent_kimi: Option<crate::plugins::kimi::Peers>,
+    /// When the worker is next asked for a names pass; at once if None.
+    names_at: Option<std::time::Instant>,
 }
 
 impl PeerbusPlugin {
@@ -165,6 +167,14 @@ impl Plugin for PeerbusPlugin {
         {
             match offer(Event::Kimi(kimi.clone())) {
                 Some(true) => self.sent_kimi = Some(kimi),
+                Some(false) => {}
+                None => gone = true,
+            }
+        }
+        let now = std::time::Instant::now();
+        if !gone && self.names_at.is_none_or(|t| t <= now) {
+            match offer(Event::Names) {
+                Some(true) => self.names_at = Some(now + worker::NAMES_EVERY),
                 Some(false) => {}
                 None => gone = true,
             }

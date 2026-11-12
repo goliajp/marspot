@@ -50,6 +50,7 @@ mod pane_status;
 mod pane_tables;
 mod plugins;
 mod present;
+mod pump;
 mod receipts;
 mod sup_log;
 mod supervisor;
@@ -71,27 +72,16 @@ const DEFAULT_H_PT: f64 = 800.0;
 /// them would be mostly empty.
 const FRESH_W_PT: f64 = 800.0;
 const FRESH_H_PT: f64 = 600.0;
-// How often the supervisor wakes with nothing to do.
+// How often the supervisor wakes with nothing to do, while there is
+// anything to poll for (see `pump` for when there is not).
 //
-// Everything that has to happen promptly now knocks: the core's reader
+// Everything that has to happen promptly knocks: the core's reader
 // thread wakes the loop when a frame or a reply arrives, the command
-// socket wakes it after queueing a request, and the plugin host wakes
-// it after queueing an op.  What is left on this timer is polling, and
-// the fastest poller is the pane sweep at one second
-// (`pane_status::SWEEP_INTERVAL`); the plugins want two, the core
-// healthcheck five, autorun thirty.
-//
-// So the timer runs at the rate of its fastest consumer and no faster.
-// It was 250 ms, which is four wakes for every one that anything
-// wanted -- and the supervisor's cost turned out to be in the waking
-// rather than in the work it does once awake (measured 2026-10-01:
-// every timed thing it does adds up to about a tenth of one percent of
-// a core, against 4.4% for the process).  Before that it was 16 ms, a
-// blind 60 Hz present.
-//
-// The floor on how slow this may go is the pane sweep, not the
-// present: presents ride the poke, and a present that did not happen
-// is retried on the next wake (see `frame_pending`).
+// socket after queueing a request, the plugin host after queueing an
+// op.  What is left on this timer is polling, and the fastest poller
+// is the pane sweep at one second (`pane_status::SWEEP_INTERVAL`); the
+// plugins want two, the core healthcheck five, autorun thirty.  So the
+// timer runs at the rate of its fastest consumer and no faster.
 const REDRAW_INTERVAL_MS: u64 = 1_000;
 
 /// Frames the reader thread parses off the control socket and hands
@@ -640,7 +630,7 @@ struct ShellApp {
     /// `None` before the first spawn and in the brief gap between a
     /// crash (or single-core swap retirement) and the respawn.
     active: Option<CoreConn>,
-    redraw_thread_started: bool,
+    pump: Option<pump::Pump>,
     /// Binary slot manager: current / prev / pending.  Used to find
     /// the core binary at spawn time and to atomic-swap when a
     /// silent update fires.
@@ -1192,7 +1182,7 @@ impl ShellApp {
             pending_frame_index: std::collections::HashMap::new(),
             next_window_id: marspot::shell_proto::FIRST_WINDOW_ID + 1,
             active: None,
-            redraw_thread_started: false,
+            pump: None,
             binaries,
             safe_mode: std::env::var("MARSPOT_SAFE_MODE").is_ok(),
             dev_close_extra: false,
@@ -1418,6 +1408,10 @@ impl ShellApp {
     /// focus all target `active` only — a `pending` core on probation
     /// receives none of them (it rebuilds independently from shelld).
     fn send(&self, msg_type: MsgType, payload: Vec<u8>) {
+        // whatever the core is sent, short of a ping, is something happening
+        if let Some(p) = self.pump.as_ref().filter(|_| msg_type != MsgType::Ping) {
+            p.touch();
+        }
         if let Some(conn) = self.active.as_ref() {
             conn.send(msg_type, payload);
         }
@@ -2578,11 +2572,13 @@ impl ShellApp {
                 c.spawned_at = forgive_stall(c.spawned_at, tick_gap, tick_now);
                 c.last_pong_at = forgive_stall(c.last_pong_at, tick_gap, tick_now);
             }
-            lx_event!(
-                "SUPERVISOR_STALL",
-                "supervisor tick was late — deadlines forgiven, not charged",
-                gap_ms = tick_gap.as_millis() as u64
-            );
+            if !self.pump_rested() {
+                lx_event!(
+                    "SUPERVISOR_STALL",
+                    "supervisor tick was late — deadlines forgiven, not charged",
+                    gap_ms = tick_gap.as_millis() as u64
+                );
+            }
         }
 
         // 0b. Cool-down after a blown crash budget.  Not "until manual
@@ -2733,15 +2729,9 @@ impl ShellApp {
     }
 
     fn start_redraw_pump(&mut self) {
-        if self.redraw_thread_started {
-            return;
+        if self.pump.is_none() {
+            self.pump = Some(pump::Pump::start(self.proxy.clone()));
         }
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(REDRAW_INTERVAL_MS));
-            proxy.wake();
-        });
-        self.redraw_thread_started = true;
     }
 
     /// Honour a `SurfaceReady(id)` ack from the core.  Two cases:
@@ -4198,10 +4188,12 @@ impl MarspotApp for ShellApp {
             Some(conn) => conn.control_rx.try_iter().collect(),
             None => Vec::new(),
         };
+        let knocked = self.knocked(&active_inbox);
         for msg in active_inbox {
             self.handle_active_msg(msg, ctx);
         }
         self.poll_supervisor(ctx);
+        self.settle_pump(knocked);
         ctx.request_redraw();
     }
 
@@ -4433,6 +4425,7 @@ impl MarspotApp for ShellApp {
 
     fn focused(&mut self, _ctx: &MarspotAppCtx, focused: bool) {
         self.send(MsgType::Focus, encode_focus(focused));
+        self.proxy.wake(); // a pass now: what is queued below is driven by the clock
         let returning = focused && !self.app_focused;
         self.app_focused = focused;
         if returning {
@@ -4621,7 +4614,8 @@ impl MarspotApp for ShellApp {
 fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: EventProxy) {
     loop {
         match Frame::read_from(&mut stream) {
-            Ok(None) => return,
+            // the core is gone: a pass finds that out now
+            Ok(None) => return proxy.wake(),
             Ok(Some(frame)) => {
                 let msg = match frame.msg_type {
                     MsgType::SurfaceReady => {
@@ -4691,7 +4685,7 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
             }
             Err(e) => {
                 lx_error!("shell.control_reader.error", &format!("{e}"));
-                return;
+                return proxy.wake();
             }
         }
     }
