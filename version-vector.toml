@@ -28,4 +28,4 @@
 
 shell   = "0.7.302"  # the supervisor's clock does not tick at rest
 core    = "0.12.339"  # scrolled lines go to their files in larger pieces, and at the end of a burst
-session = "0.11.182"  # scrolled lines go to their files in larger pieces, and at the end of a burst
+session = "0.11.183"  # a pane that floods alone asks its pty again after a short read
