@@ -57,24 +57,28 @@ const DRY_RETRIES: u32 = 16;
 /// pause carried the same bytes with three times the empty reads.
 const RETRY_PAUSE_SPINS: u32 = 64;
 
-/// Longest a chunk the parser is not waiting for is kept open for more.
+/// Longest a chunk is kept open for more.
 const GATHER_FOR: Duration = Duration::from_millis(3);
 
 /// How long one wait for more lasts while the parser is busy.
 const GATHER_WAIT: Duration = Duration::from_millis(1);
 
-/// Bulk output worth handing to an idle parser at once.  Less than
-/// this is held for [`TAIL_WAIT`] in case more is on its way.
+/// How long bulk output may pause before what has been gathered is
+/// handed to an idle parser.  Output shorter than one full read never
+/// waits.
 ///
-/// Nine panes writing at once leave each writer waiting for a core, and
-/// their output arrives a hundred bytes at a time.  Handed over as it
-/// came, every scrap was a wake, a parse and a published frame: the
-/// nine cost 405 instructions a byte against 200 before.
-const WORTH_PARSING: usize = 8 * 1024;
-
-/// How long the tail of a bulk write waits for more before it is handed
-/// to an idle parser.  Output shorter than one full read never waits.
+/// A chunk of bulk output is otherwise handed over full, however idle
+/// the parser: every chunk is a wake, a parse and a published frame.
+/// Nine panes writing at once leave each writer waiting for a core,
+/// and their output arrives a hundred bytes at a time -- handed over as
+/// it came the nine cost 405 instructions a byte against 200.  And a
+/// parser that keeps up with one stream is idle at every hand-over:
+/// handing it 8 KiB at a time, a parser made faster made cat-ascii
+/// cost more a byte, not less.
 const TAIL_WAIT: Duration = Duration::from_micros(200);
+
+/// How much of a burst is read before the reader queues for a turn.
+const BURST_BYTES: usize = 32 * 1024;
 
 /// How long a reader keeps its turn at bulk output while others may be
 /// waiting for one.  Nine panes flooding get a slice each every 9 ms.
@@ -260,7 +264,7 @@ impl Turn {
         if self.held.is_some() {
             return false;
         }
-        let queue = self.flooding || len >= WORTH_PARSING;
+        let queue = self.flooding || len >= BURST_BYTES;
         let lease = if queue { self.leases.take() } else { self.leases.try_take() };
         self.held = lease.map(|lease| (lease, Instant::now()));
         queue && self.held.is_some()
@@ -295,8 +299,8 @@ impl Turn {
 /// PTY is not the end of it: the chunk stays open while the parser is
 /// still on an earlier one -- handing it over sooner would not get it
 /// parsed sooner, and a reader that sits waiting for a chunk to come
-/// back lets the writer fall asleep -- and, for [`TAIL_WAIT`], while it
-/// holds too little to be worth a parse of its own.
+/// back lets the writer fall asleep -- and, while the parser is idle,
+/// until the output pauses for [`TAIL_WAIT`].
 fn gather(
     pty: &Pty,
     buf: &mut [u8],
@@ -339,7 +343,7 @@ fn gather(
             started = Instant::now();
         }
         let idle = unparsed.load(Ordering::SeqCst) == 0;
-        if started.elapsed() >= GATHER_FOR || (idle && len >= WORTH_PARSING) {
+        if started.elapsed() >= GATHER_FOR {
             break;
         }
         if full {
