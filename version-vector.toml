@@ -28,4 +28,4 @@
 
 shell   = "0.7.298"  # a banner is drawn again for the display the window moved to
 core    = "0.12.328"  # a chord is matched by the character the keyboard layout types
-session = "0.11.168"  # a pane's shell can run as a launchd job, in a coalition of its own (MARSPOT_PANE_JOB=1)
+session = "0.11.169"  # the launchd job that starts a pane's shell is removed as soon as the shell is up (MARSPOT_PANE_JOB=1)

@@ -1,6 +1,5 @@
 //! The process a pane's job runs: it starts the shell on the pane's
-//! terminal, says which pid it is, outlives it, and takes the job off
-//! launchd's list.
+//! terminal, says which pid it is, and exits.
 
 use std::ffi::CString;
 use std::fs;
@@ -8,20 +7,16 @@ use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::process::Command;
-use std::time::{Duration, Instant};
 
 use super::Spec;
-use super::macos::{LAUNCHCTL, domain};
 
-/// The job: start the shell on the pane's terminal, say which pid
-/// it is, outlive it, then take the job off launchd's list.
+/// The job: start the shell on the pane's terminal and say which pid
+/// it is.
 pub(crate) fn host_main() {
     let Some(spec_path) = std::env::args_os().nth(2) else { return };
     let Ok(bytes) = fs::read(&spec_path) else { return };
     let _ = fs::remove_file(&spec_path);
     let Some(spec) = Spec::decode(&bytes) else { return };
-    ignore_strangers_sigterm();
 
     let mut ends = [0 as libc::c_int; 2];
     // SAFETY: pipe fills the two descriptors; the write end closes
@@ -60,54 +55,6 @@ pub(crate) fn host_main() {
     if let Ok(mut reply) = fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(reply) {
         let _ = reply.write_all(answer.as_bytes());
     }
-    if child > 0 {
-        outlive(child, spec.session);
-    }
-    // a job stays on launchd's list after its process is gone;
-    // asking for the removal is the last thing this process does
-    use std::os::unix::process::CommandExt;
-    let _ = Command::new(LAUNCHCTL).arg("bootout").arg(format!("{}/{}", domain(), String::from_utf8_lossy(&spec.label))).exec();
-}
-
-/// Return once the shell is gone.  A session that ends first has
-/// hung the terminal up; a shell that does not leave on that is
-/// killed, as the session did while the shell was its own child.
-fn outlive(shell: i32, session: i32) {
-    let watch = |pid: i32| libc::kevent {
-        ident: pid as libc::uintptr_t,
-        filter: libc::EVFILT_PROC,
-        flags: libc::EV_ADD,
-        fflags: libc::NOTE_EXIT,
-        data: 0,
-        udata: std::ptr::null_mut(),
-    };
-    // SAFETY: kevent reads two changes and writes at most one
-    // event, all in buffers of that size; waitpid and kill name the
-    // one child this process has.
-    unsafe {
-        let kq = libc::kqueue();
-        let changes = [watch(shell), watch(session)];
-        let mut event = watch(0);
-        // a session that cannot be watched is one that is gone
-        let session_gone = libc::kevent(kq, changes.as_ptr(), 2, std::ptr::null_mut(), 0, std::ptr::null()) < 0
-            || loop {
-                if libc::kevent(kq, std::ptr::null(), 0, &mut event, 1, std::ptr::null()) == 1 {
-                    break event.ident == session as libc::uintptr_t;
-                }
-            };
-        let mut status = 0;
-        if session_gone {
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while libc::waitpid(shell, &mut status, libc::WNOHANG) == 0 {
-                if Instant::now() >= deadline {
-                    libc::kill(shell, libc::SIGKILL);
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
-        while libc::waitpid(shell, &mut status, 0) < 0 && *libc::__error() == libc::EINTR {}
-    }
 }
 
 /// In the forked child: become the shell.  Returns the errno of
@@ -143,7 +90,6 @@ fn exec_shell(spec: &Spec) -> i32 {
         }
         // rust ignores SIGPIPE and an ignored signal survives exec
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-        libc::signal(libc::SIGTERM, libc::SIG_DFL);
         let mut none: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut none);
         libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
@@ -151,29 +97,5 @@ fn exec_shell(spec: &Spec) -> i32 {
         marspot_term::platform::set_environ(env_p.as_mut_ptr());
         libc::execvp(program.as_ptr(), argv_p.as_ptr());
         *libc::__error()
-    }
-}
-
-/// A force quit of something this pane started sends SIGTERM to
-/// everything in the pane's coalition, the host included.  Only
-/// launchd's ends it: the job is being removed.
-fn ignore_strangers_sigterm() {
-    extern "C" fn on_term(_sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
-        // SAFETY: the kernel hands an SA_SIGINFO handler a valid
-        // siginfo; _exit is async-signal-safe.
-        unsafe {
-            if (*info).si_pid() == 1 {
-                libc::_exit(0);
-            }
-        }
-    }
-    // SAFETY: installs a handler that only reads its argument and
-    // may call _exit.
-    unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = on_term as *const () as usize;
-        libc::sigemptyset(&mut sa.sa_mask);
-        sa.sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
-        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
     }
 }
