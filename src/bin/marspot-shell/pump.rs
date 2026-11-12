@@ -26,10 +26,14 @@
 //! once and puts the clock back to once a second, so nothing that
 //! happens while resting is seen later than it would have been.
 //!
-//! Resting is not stopping: a pass still runs every [`REST_BEAT`], which
-//! is also the core's healthcheck while idle.  With any program bound to
-//! any pane the clock never rests, and everything about agents runs
-//! exactly as before.
+//! At rest the clock does not tick at all.  What a tick would have
+//! looked for has an event instead: the core exiting closes its socket,
+//! which knocks; a core that is alive but hung is found when there is
+//! something to deliver to it, since sending it anything ends the rest
+//! and the next pass pings with the usual deadline; the interface
+//! language is read on the pass that the app regaining focus asks for.
+//! With any program bound to any pane the clock never rests, and
+//! everything about agents runs exactly as before.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -41,8 +45,6 @@ use marspot::pane_state::PaneStatus;
 
 use super::{ShellInbox, SupervisorState};
 
-/// Between passes while resting.
-const REST_BEAT: Duration = Duration::from_secs(60);
 /// How long after the last knock the clock may rest.
 const REST_AFTER: Duration = Duration::from_secs(5);
 
@@ -75,10 +77,10 @@ impl Pump {
     /// Start the clock, and the watches that knock for what used to be
     /// polled on it: the settings file, and SIGUSR1.
     pub(crate) fn start(proxy: EventProxy) -> Pump {
-        Self::start_with(proxy, Duration::from_millis(super::REDRAW_INTERVAL_MS), REST_BEAT)
+        Self::start_with(proxy, Duration::from_millis(super::REDRAW_INTERVAL_MS))
     }
 
-    fn start_with(proxy: EventProxy, awake_beat: Duration, rest_beat: Duration) -> Pump {
+    fn start_with(proxy: EventProxy, beat: Duration) -> Pump {
         let shared = Arc::new(Shared {
             resting: Mutex::new((false, 0)),
             changed: Condvar::new(),
@@ -93,7 +95,10 @@ impl Pump {
                 let mut g = theirs.resting.lock().unwrap_or_else(PoisonError::into_inner);
                 loop {
                     let (resting, seen) = *g;
-                    let beat = if resting { rest_beat } else { awake_beat };
+                    if resting {
+                        g = theirs.changed.wait_while(g, |s| s.1 == seen).unwrap_or_else(PoisonError::into_inner);
+                        continue;
+                    }
                     let (next, timeout) = theirs
                         .changed
                         .wait_timeout_while(g, beat, |s| s.1 == seen)
@@ -255,7 +260,7 @@ mod tests {
 
     #[test]
     fn the_clock_stops_at_rest_and_starts_again() {
-        let mut p = Pump::start_with(EventProxy::new(), Duration::from_millis(20), Duration::from_secs(3600));
+        let mut p = Pump::start_with(EventProxy::new(), Duration::from_millis(20));
         assert!(ticks(&p, Duration::from_secs(2)), "no tick while awake");
         p.rest(true);
         // a beat that was already on its way when the rest began
@@ -269,7 +274,7 @@ mod tests {
     /// At rest a touch asks for a pass; awake it only leaves its mark.
     #[test]
     fn a_touch_is_seen_by_the_next_pass() {
-        let mut p = Pump::start_with(EventProxy::new(), Duration::from_secs(3600), Duration::from_secs(3600));
+        let mut p = Pump::start_with(EventProxy::new(), Duration::from_secs(3600));
         p.touch();
         assert!(p.shared.touched.swap(false, Ordering::AcqRel));
         p.rest(true);
