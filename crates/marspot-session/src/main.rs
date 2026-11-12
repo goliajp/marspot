@@ -1202,6 +1202,7 @@ fn main() {
     );
     shm.attach_clusters(session.id());
     shm.attach_title(session.id());
+    owner_watch::start(session.id());
 
     // SIGTERM and SIGHUP become events on the main loop; see
     // `signal_events`.  Best-effort: if installing fails the L3 still
@@ -1380,7 +1381,6 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let mut output_queued = false;
     // settings and reachability, by file events: see `upkeep`
     let mut upkeep = upkeep::Upkeep::new(session.id(), ev_tx.clone());
-    owner_watch::start(session.id());
     loop {
         // A gate that is holding a frame owes a flush even if the PTY
         // has gone quiet: without this, a program that wipes the

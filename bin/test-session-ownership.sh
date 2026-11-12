@@ -16,16 +16,8 @@
 # The app is opened through LaunchServices, as a bundle of its own
 # name, with two panes.  A launcher left in pane 1 starts, on request,
 # a program that registers as a foreground application; pane 2 holds a
-# background process.  Then the app is walked through its states:
-#
-#   fresh launch · quit with the sessions kept · opened again ·
-#   a second instance asked for (running, and quit) · the shell
-#   updated in place (running, and quit) · the sessions updated in
-#   place · the core killed · the shell killed · opened after that ·
-#   the shell killed and opened again with nobody having answered ·
-#   quit and opened twenty times
-#
-# and in each one:
+# background process.  Then the app is walked through its states (the
+# `state` calls below name them), and in each one:
 #   owner     the last SESSION_OWNER line of each session names the
 #             running shell, never `none`
 #   stranger  the program started in pane 1 is listed by LaunchServices
@@ -169,11 +161,9 @@ ls_coalition_pids() { ls_record "$1" | sed -n 's/.*coalition: [0-9]* *{\([^}]*\)
 ls_type() { ls_record "$1" | sed -n 's/.*type="\([^"]*\)".*/\1/p' | head -1; }
 
 app_env=(--env "MARSPOT_STATE_DIR=$MARSPOT_STATE_DIR" --env "MARSPOT_SESSION_BIN=$SESSION_BIN"
-  --env "MARSPOT_CORE_BIN=$CORE_BIN" --env MARSPOT_DEV_SANDBOX=1 --env MARSPOT_DEV_EXTRA_WINDOWS=1
-  --env MARSPOT_MANUAL_UPDATE_ONLY=1)
+  --env "MARSPOT_CORE_BIN=$CORE_BIN" --env MARSPOT_DEV_SANDBOX=1 --env MARSPOT_MANUAL_UPDATE_ONLY=1)
 
-# Opens the app the way the Dock does: no second instance is asked for.
-# Returns once a shell of this sandbox answers on its command socket.
+# Opens the app the way the Dock does; returns once a shell answers.
 open_app() { # extra `open` flags...
   local i
   open -g "$@" "$APP" "${app_env[@]}" || die "LaunchServices did not open the sandbox bundle"
@@ -185,7 +175,6 @@ open_app() { # extra `open` flags...
   die "the app never came up"
 }
 
-# Asks the app to quit as the Dock's Quit and Cmd-Q do.
 quit_app() {
   local cleanups answered
   cleanups=$(count SHELL_QUIT_CLEANUP)
@@ -289,7 +278,8 @@ dev_kill_shell_core
 rm -rf "$MARSPOT_STATE_DIR"; mkdir -p "$MARSPOT_STATE_DIR/logs"
 mkfifo "$SB/go"
 
-open_app
+# a second window, so a second pane, on this first launch only
+open_app --env MARSPOT_DEV_EXTRA_WINDOWS=1
 wait_count L3_SPAWNED 1 90 || die "no pane session was ever spawned"
 two_panes
 FIRST="$L1"; C0="$(coalition "$L1")"
@@ -430,14 +420,13 @@ else bad "the shell that was opened did not hand over to one in the sessions' co
 state "opened from outside the sessions' coalition"
 
 # twenty quits and openings: one process throughout
-keep="$L1"; c_keep="$(coalition "$L1")"; n_ok=0
+keep="$L1"; c_keep="$(coalition "$L1")"; n_ok=0; foots=""
 for (( round = 1; round <= 20; round++ )); do
   residents=$(count SHELL_RESIDENT)
   quit_app
   wait_count SHELL_RESIDENT $((residents + 1)) 10 || break
   sleep 0.3
-  (( round == 1 )) && foot_a="$("$PROBE" footprint "$L1")"
-  (( round == 20 )) && foot_b="$("$PROBE" footprint "$L1")"
+  foots+=" $("$PROBE" footprint "$L1")"
   open_app
   [[ $L1 == "$keep" && "$(shells_running | tr '\n' ' ')" == "$keep " ]] || break
   n_ok=$round
@@ -446,8 +435,11 @@ STATE="quit and opened twenty times"; echo; echo "── $STATE ──"
 if (( n_ok == 20 )); then
   ok "one shell throughout: pid $keep, coalition $(coalition "$L1")"
   [[ "$(coalition "$L1")" == "$c_keep" && "$(coalition "$S1")" == "$c_keep" ]] || bad "a coalition changed over twenty quits"
-  echo "    resident footprint after quit 1: ${foot_a} KiB, after quit 20: ${foot_b} KiB"
-  (( foot_b <= foot_a + 1024 )) || bad "the resident shell grew from ${foot_a} to ${foot_b} KiB over twenty quits"
+  echo "    resident footprint after each quit, KiB:$foots; descriptors open: $(lsof -p "$L1" 2>/dev/null | grep -c .)"
+  # it comes up at one of two sizes, 2 MiB apart, in any round: growth is later rounds above earlier ones
+  early=$(tr ' ' '\n' <<<"$foots" | sed -n '2,11p' | sort -n | tail -1)
+  late=$(tr ' ' '\n' <<<"$foots" | sed -n '12,21p' | sort -n | tail -1)
+  (( late <= early + 1024 )) || bad "the resident shell grew: at most ${early} KiB in the first ten quits, ${late} in the last ten"
 else
   bad "round $((n_ok + 1)) of 20 did not come back as the same single shell (shells: $(shells_running | tr '\n' ' '))"
 fi

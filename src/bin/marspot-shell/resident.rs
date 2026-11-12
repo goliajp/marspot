@@ -76,7 +76,12 @@ fn become_image(exe: &std::path::Path, resident: bool, extra: &[(&str, &str)]) -
     for (k, v) in extra {
         cmd.env(k, v);
     }
-    cmd.exec()
+    // no launch may take the lock between the two images: it would be
+    // an app outside the sessions' coalition
+    crate::instance::carry_lock(&mut cmd);
+    let err = cmd.exec();
+    crate::instance::keep_lock_here();
+    err
 }
 
 fn own_image() -> std::path::PathBuf {
@@ -241,6 +246,8 @@ fn watch(mut sessions: Vec<i32>) {
     // kevent is a valid one to fill in.
     unsafe {
         let kq = libc::kqueue();
+        // not for the image this process becomes when the app is opened
+        libc::fcntl(kq, libc::F_SETFD, libc::FD_CLOEXEC);
         let add = |ident: usize, filter: i16, fflags: u32| {
             let ev = libc::kevent { ident, filter, flags: libc::EV_ADD, fflags, data: 0, udata: std::ptr::null_mut() };
             libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) == 0

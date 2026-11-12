@@ -16,11 +16,15 @@
 //! record and on the shell's pid.
 
 /// Started once per image: at boot and again after an update replaced
-/// the image.
+/// the image.  What the watch holds open is open when this returns.
 pub(crate) fn start(sid: u64) {
     #[cfg(target_os = "macos")]
-    if let Err(e) = std::thread::Builder::new().name("l3-owner".into()).spawn(move || macos::Watch::new(sid).run()) {
-        marspot_term::lx_warn!("l3.owner.unwatched", &format!("{e}"), session_id = sid);
+    {
+        let mut watch = macos::Watch::new(sid);
+        let found = watch.open_record();
+        if let Err(e) = std::thread::Builder::new().name("l3-owner".into()).spawn(move || watch.run(found)) {
+            marspot_term::lx_warn!("l3.owner.unwatched", &format!("{e}"), session_id = sid);
+        }
     }
     #[cfg(not(target_os = "macos"))]
     let _ = sid;
@@ -28,10 +32,13 @@ pub(crate) fn start(sid: u64) {
 
 /// Starts of a shell in the last minute that stop another one: a shell
 /// that dies as it comes up would otherwise be started again for ever.
+// off macOS no shell is started: this is built for its tests only
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const STARTS_A_MINUTE: usize = 3;
 
 /// The start times still inside the minute before `now`, and whether
 /// one more start is allowed.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn recent_starts(text: &str, now: u64) -> (Vec<u64>, bool) {
     let recent: Vec<u64> =
         text.lines().filter_map(|l| l.trim().parse().ok()).filter(|t| now.saturating_sub(*t) < 60 && *t <= now).collect();
@@ -86,8 +93,13 @@ mod macos {
 
     impl Watch {
         pub(super) fn new(sid: u64) -> Watch {
-            // SAFETY: kqueue takes no arguments.
-            let kq = unsafe { libc::kqueue() };
+            // SAFETY: kqueue takes no arguments; the flag keeps the
+            // queue out of the image an update moves this process to.
+            let kq = unsafe {
+                let kq = libc::kqueue();
+                libc::fcntl(kq, libc::F_SETFD, libc::FD_CLOEXEC);
+                kq
+            };
             let coalition = platform::coalition_of(std::process::id() as i32);
             // says that this session can start a shell when asked
             let _ = std::fs::write(session_registry::session_dir(sid).join("guard"), b"1\n");
@@ -108,7 +120,7 @@ mod macos {
         }
 
         /// Open the record if it is there; otherwise watch for it.
-        fn open_record(&mut self) -> bool {
+        pub(super) fn open_record(&mut self) -> bool {
             if self.file.is_some() {
                 return true;
             }
@@ -198,6 +210,12 @@ mod macos {
             for name in SESSION_ONLY_ENV {
                 cmd.env_remove(name);
             }
+            // the dev seams were for the app that started this session
+            for (name, _) in std::env::vars_os() {
+                if name.to_str().is_some_and(|n| n.starts_with("MARSPOT_DEV_") && n != "MARSPOT_DEV_SANDBOX") {
+                    cmd.env_remove(name);
+                }
+            }
             if let Some(pid) = heir_of {
                 cmd.env(owner::HEIR_ENV, pid.to_string());
             }
@@ -235,8 +253,8 @@ mod macos {
             }
         }
 
-        pub(super) fn run(mut self) {
-            if self.open_record() {
+        pub(super) fn run(mut self, found: bool) {
+            if found {
                 self.look();
             } else {
                 self.say(None);
