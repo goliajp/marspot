@@ -183,7 +183,10 @@ STALE_PASS=""
 # Saying the number out loud is the fix -- how long we can wait is
 # something only this side knows.
 MAX_WAIT="${MARSPOT_BENCH_MAX_WAIT:-1200}"
-LOCK_CMD="/usr/local/bin/bench-lock bench --max-wait $MAX_WAIT"
+# A round that may hold the lock past an hour says when it expects to
+# be done, for whoever queues behind it: MARSPOT_BENCH_UNTIL="+90m what".
+UNTIL="${MARSPOT_BENCH_UNTIL:+ --until $(printf '%q' "$MARSPOT_BENCH_UNTIL")}"
+LOCK_CMD="/usr/local/bin/bench-lock bench --max-wait $MAX_WAIT$UNTIL"
 if [[ "${MARSPOT_BENCH_NO_LOCK:-}" == "1" ]]; then
   echo "==> MARSPOT_BENCH_NO_LOCK=1 — measuring without the host lock" >&2
   LOCK_CMD=""
@@ -196,7 +199,7 @@ ssh "$HOST" "
   $STALE_PASS
   export MARSPOT_BENCH_COMMIT=$BENCH_COMMIT MARSPOT_BENCH_DIRTY=$BENCH_DIRTY
   echo \$\$ > $REMOTE_PIDF
-  if [ -n \"$LOCK_CMD\" ] && [ ! -x /usr/local/bin/bench-lock ]; then
+  if [ -n '${LOCK_CMD:+1}' ] && [ ! -x /usr/local/bin/bench-lock ]; then
     echo 'bench-remote: /usr/local/bin/bench-lock is not on the runner' >&2
     exit 1
   fi
