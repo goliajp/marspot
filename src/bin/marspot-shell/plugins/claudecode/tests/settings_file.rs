@@ -205,3 +205,16 @@ fn the_hook_keeps_a_file_in_claude_codes_form() {
         "{\n  \"statusLine\": {\n    \"type\": \"command\",\n    \"command\": \"'/a/marspot-shell' --cc-statusline\"\n  },\n  \"model\": \"opus\"\n}\n"
     );
 }
+
+/// The scan that looks is asked for by the tick, and the first tick
+/// after a rest may come a second after the last look.
+#[test]
+fn the_registration_is_looked_at_again_on_a_noted_change_without_waiting_out_the_minute() {
+    let t0 = std::time::Instant::now();
+    let soon = t0 + Duration::from_secs(1);
+    assert!(statusline_due(None, (true, t0, 0)), "the first look");
+    assert!(!statusline_due(Some((true, t0, 0)), (true, soon, 0)), "nothing moved");
+    assert!(statusline_due(Some((true, t0, 0)), (true, soon, 1)), "an install finished");
+    assert!(statusline_due(Some((true, t0, 0)), (false, soon, 0)), "the switch was flipped");
+    assert!(statusline_due(Some((true, t0, 0)), (true, t0 + Duration::from_secs(60), 0)), "a minute passed");
+}

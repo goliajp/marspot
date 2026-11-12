@@ -36,7 +36,7 @@ pub(super) fn reconcile() -> Vec<String> {
 /// exists, each real file once: profiles that link to one shared
 /// config, or a default home that is a link to a profile, would
 /// otherwise have it edited once per name.
-fn config_files(home: &Path) -> Vec<PathBuf> {
+pub(super) fn config_files(home: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![home.join(".codex")];
     if let Ok(rd) = std::fs::read_dir(home) {
         let mut profiles: Vec<PathBuf> = rd

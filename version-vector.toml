@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.302"  # the supervisor's clock does not tick at rest
-core    = "0.12.339"  # scrolled lines go to their files in larger pieces, and at the end of a burst
-session = "0.11.183"  # a pane that floods alone asks its pty again after a short read
+shell   = "0.7.308"  # the codex cli follows the daemon while the supervisor rests
+core    = "0.12.340"  # scrolled lines go to their files in larger pieces, and at the end of a burst
+session = "0.11.184"  # a pane that floods alone asks its pty again after a short read

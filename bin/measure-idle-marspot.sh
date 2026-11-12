@@ -96,15 +96,9 @@ env SHELL="$IDLE_SHELL" MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CO
   nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
-# Every pane has its shell: count shells whose parent is one of our L3s.
-shells() {
-  local l3
-  l3=$(dev_session_pids | paste -sd, -)
-  [[ -n $l3 ]] || { echo 0; return; }
-  ps -Ao ppid=,command= | awk -v want="$l3" '
-    BEGIN { n = split(want, a, ","); for (i = 1; i <= n; i++) p[a[i]] = 1 }
-    ($1 in p) { c++ } END { print c + 0 }'
-}
+# Every pane has its shell: the live shells the registry names.  Not
+# the sessions' children: a shell launchd started is nobody's child.
+shells() { dev_pane_shell_pids | grep -c .; }
 for (( i = 0; i < 600; i++ )); do
   (( $(shells) >= N )) && break
   sleep 0.1

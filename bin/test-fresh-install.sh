@@ -30,9 +30,12 @@ REMOTE_DMG="/tmp/marspot-$RUN_ID.dmg"
 
 scp -q "$DMG" "$HOST:$REMOTE_DMG"
 
-ssh "$HOST" "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /usr/local/bin/bench-lock heavy --max-wait 1800 /bin/bash -s -- $REMOTE_DMG $RUN_ID $WAIT" <<'REMOTE'
+ssh "$HOST" "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /usr/local/bin/bench-lock heavy --max-wait 1800 /bin/bash -s -- $REMOTE_DMG $RUN_ID $WAIT ${FRESH_ENV:-}" <<'REMOTE'
 set -uo pipefail
 DMG="$1"; RUN_ID="$2"; WAIT="$3"
+# one more NAME=value for the app, e.g. FRESH_ENV=MARSPOT_PANE_JOB=1
+EXTRA="${4:-MARSPOT_FRESH=1}"
+JOB=0; [[ $EXTRA == MARSPOT_PANE_JOB=1 ]] && JOB=1
 FRESH="$(mktemp -d "/tmp/marspot-$RUN_ID.XXXXXX")"
 MNT="$FRESH/mnt"
 STATE="$FRESH/Library/Application Support/marspot"
@@ -75,7 +78,7 @@ exec /bin/zsh "$@"
 SH
 chmod +x "$FRESH/pane-shell"
 env -i HOME="$FRESH" USER="$(id -un)" LOGNAME="$(id -un)" SHELL="$FRESH/pane-shell" \
-  PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="$FRESH/tmp" LANG=en_US.UTF-8 \
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="$FRESH/tmp" LANG=en_US.UTF-8 "$EXTRA" \
   "$APP/Contents/MacOS/marspot-shell" >"$FRESH/stdout.log" 2>&1 &
 SHELL_PID=$!
 
@@ -87,7 +90,8 @@ deadline=$(( $(date +%s) + WAIT ))
 until { clis && hooks; } || [ "$(date +%s)" -ge "$deadline" ] || ! kill -0 $SHELL_PID 2>/dev/null; do sleep 5; done
 
 runs() { env -i HOME="$FRESH" PATH="$FRESH/.local/bin:/usr/bin:/bin" "$1" --version >/dev/null 2>&1; }
-pane_shells() { for s in $(ours | awk '$2 ~ /marspot-session$/ {print $1}'); do pgrep -P "$s"; done; }
+# by the registry: launchd starts a pane's shell, so it is not its session's child
+pane_shells() { sed -n 's/^shell_child_pid = \([0-9][0-9]*\)$/\1/p' "$STATE"/sessions/*/entry.toml 2>/dev/null; }
 pane_path() { grep -q "^PATH=$FRESH/.local/bin:" "$FRESH/pane.env"; }
 pane_path_kimi() { grep -q "^PATH=.*:$FRESH/.kimi-code/bin:" "$FRESH/pane.env"; }
 kimi_runs() { env -i HOME="$FRESH" PATH=/usr/bin:/bin "$FRESH/.kimi-code/bin/kimi" --version >/dev/null 2>&1; }
@@ -124,6 +128,12 @@ check "core booted" grep -q CORE_BOOT "$LOG"
 check "state is under Application Support" test -d "$STATE/sessions"
 check "nothing under Caches" test ! -e "$FRESH/Library/Caches/marspot"
 check "a pane has a shell" one_pane
+# launchd started it, with the bundle's own executable as the job's
+# program: that is what keeps its programs apart from other panes' and
+# charged to the app
+pane_job() { grep $'\tPANE_JOB_STARTED\t' "$LOG" | grep -q 'host=[^	]*Marspot\.app/Contents/MacOS/marspot-shell' && ! grep -q $'\tPANE_JOB_FALLBACK\t' "$LOG"; }
+(( JOB )) && check "the pane's shell is a launchd job of the app's executable" pane_job
+grep $'\tPANE_JOB_STARTED\t' "$LOG" | grep -oE '(load|answer)_ms=[0-9]+|	ms=[0-9]+' | tr '\n\t' '  ' | sed 's/^/  pane job: /'; echo
 check "the pane's PATH has ~/.local/bin" pane_path
 check "the pane's PATH has ~/.kimi-code/bin" pane_path_kimi
 for cli in claude codex; do check "$cli installed and runs" runs "$cli"; done
@@ -141,6 +151,8 @@ check "no ERROR lines" no_errors
 
 echo "==> warnings in the log"
 awk -F'\t' '$3=="WARN"{print "  " $7 "  " substr($8,1,140)}' "$LOG" | sort | uniq -c | sort -rn | head -20
+echo "==> what the plugins that write the configuration logged"
+awk -F'\t' '$7 ~ /peerbus|claudecode|skills|profiles|hook/{print "  " $1 "  " $7 "  " substr($8,1,110)}' "$LOG" | tail -12
 echo "==> installs"
 awk -F'\t' '$7 ~ /agents\./{print "  " $1 "  " $7 "  " $8 "  " $9 "  " $10}' "$LOG"
 echo "==> stdout/stderr of the app (tail)"

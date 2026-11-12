@@ -70,7 +70,7 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// `~/.kimi-code` and every `~/.kimi-code-profile-N` that exists, each
 /// real directory once.  A home that does not exist is not created:
 /// on a machine that never ran kimi there is nothing to do.
-fn homes(home: &Path) -> Vec<PathBuf> {
+pub(super) fn homes(home: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![crate::plugins::kimi::default_home(home)];
     dirs.extend(crate::plugins::kimi::profile_dirs_in(home).into_iter().map(|(_, dir)| dir));
     let mut out: Vec<PathBuf> = Vec::new();

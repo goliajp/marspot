@@ -45,7 +45,7 @@ pub(super) fn reconcile() -> Vec<String> {
 /// `settings.json` of `~/.gemini` and of every `~/.gemini-profile-N/.gemini`
 /// that exists, each real file once: profiles that link to one shared
 /// file would otherwise have it edited once per name.
-fn settings_files(home: &Path) -> Vec<PathBuf> {
+pub(super) fn settings_files(home: &Path) -> Vec<PathBuf> {
     let mut roots = vec![home.to_path_buf()];
     roots.extend(crate::plugins::gemini::profile_dirs_in(home).into_iter().map(|(_, dir)| dir));
     let mut out: Vec<PathBuf> = Vec::new();

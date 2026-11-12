@@ -10,7 +10,7 @@
 //! hand-formatted one is laid out the way Claude Code would lay it out
 //! on its own next save.  A file that does not parse is never written.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use marspot_peer::json::{self, Value, obj};
 use marspot_term::lx_info;
@@ -31,6 +31,19 @@ impl super::worker::Worker {
         }
         self.hook_notes = notes;
     }
+}
+
+/// Every file a reconcile reads and may write, each agent's and the
+/// skill's, for the watch that notes somebody else writing one.
+pub(super) fn config_files() -> Vec<PathBuf> {
+    let mut files = crate::plugins::claudecode::cc_settings_files();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        files.extend(super::codex_config::config_files(&home));
+        files.extend(super::gemini_config::settings_files(&home));
+        files.extend(super::kimi_config::homes(&home).iter().flat_map(|d| [d.join("mcp.json"), d.join("config.toml")]));
+    }
+    files.extend(crate::plugins::skills::files());
+    files
 }
 
 /// The two hook entries: event, the tool it matches.

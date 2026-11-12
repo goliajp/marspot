@@ -14,6 +14,7 @@
 //!
 //! Everything runs on one background thread, a few times a day.
 
+pub(crate) mod changes;
 mod gemini;
 mod kimi;
 
@@ -207,11 +208,22 @@ fn pass(failed: &mut Failures) {
             Cli::Kimi if absent => kimi::install(&at.home),
             _ => continue,
         };
-        match &result {
-            Ok(version) => lx_info!("agents.installed", "installed", cli = cli.command(), version = version),
-            Err(e) => lx_warn!("agents.install_failed", e, cli = cli.command()),
-        }
+        finished(cli, &result);
         failed.record(cli, now, result.is_ok());
+    }
+}
+
+/// An install has ended.  One that worked left a config directory or a
+/// command that the hooks, the peer servers and the skill go into, and
+/// the supervisor may be at rest: say so now rather than leave it to a
+/// tick.
+fn finished(cli: Cli, result: &Result<String, String>) {
+    match result {
+        Ok(version) => {
+            lx_info!("agents.installed", "installed", cli = cli.command(), version = version);
+            changes::note();
+        }
+        Err(e) => lx_warn!("agents.install_failed", e, cli = cli.command()),
     }
 }
 
@@ -358,6 +370,17 @@ mod tests {
         // a success forgets the failure
         failed.record(Cli::Gemini, t0 + RETRY_AFTER, true);
         assert!(failed.due(Cli::Gemini, t0 + RETRY_AFTER));
+    }
+
+    /// The configuration that follows an install is written by workers
+    /// the supervisor's tick asks, and the supervisor may be at rest.
+    #[test]
+    fn an_install_that_finished_is_noted_as_a_change_and_a_failed_one_is_not() {
+        let before = changes::count();
+        finished(Cli::Claude, &Err("curl: (6) could not resolve host".into()));
+        assert_eq!(changes::count(), before);
+        finished(Cli::Claude, &Ok("2.1.0 (Claude Code)".into()));
+        assert_eq!(changes::count(), before + 1);
     }
 
     /// A shell profile prints what it likes around the answer.
