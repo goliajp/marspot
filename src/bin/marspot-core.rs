@@ -76,6 +76,11 @@ const INITIAL_ROWS: u16 = 12;
 /// on the child.  Stderr inherited so a malformed arg surfaces in
 /// marspot.log via the usual stderr pipe instead of vanishing.
 fn spawn_open(arg: &str) {
+    spawn_open_with(arg, false)
+}
+
+/// `reveal` shows the file selected in its folder instead of opening it.
+fn spawn_open_with(arg: &str, reveal: bool) {
     // `spawn` only reports that the process could not START.  When
     // `open(1)` itself fails — the usual reason being a path that no
     // longer exists — it exits non-zero and prints to a stderr nobody
@@ -94,7 +99,11 @@ fn spawn_open(arg: &str) {
             arg = arg
         );
     }
-    if let Err(e) = std::process::Command::new("/usr/bin/open")
+    let mut cmd = std::process::Command::new("/usr/bin/open");
+    if reveal {
+        cmd.arg("-R");
+    }
+    if let Err(e) = cmd
         .arg(arg)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -311,6 +320,8 @@ enum ContextMenuAction {
     OpenLink,
     /// Copy the link text to the clipboard verbatim.
     CopyLink,
+    /// Show a file link's file selected in its folder.
+    RevealLink,
 }
 
 /// Dynamic menu-tag band for "Move to Window N": tag = BASE + target
@@ -333,6 +344,7 @@ impl ContextMenuAction {
             x if x == Self::OpenLayout.tag() => Some(Self::OpenLayout),
             x if x == Self::OpenLink.tag() => Some(Self::OpenLink),
             x if x == Self::CopyLink.tag() => Some(Self::CopyLink),
+            x if x == Self::RevealLink.tag() => Some(Self::RevealLink),
             _ => None,
         }
     }
@@ -400,10 +412,17 @@ fn link_menu_items_for(
         LinkKind::Ip => (Msg::LinkOpenInBrowser, Msg::LinkCopyIp),
         LinkKind::Uuid => unreachable!("handled above"),
     };
-    vec![
+    let mut items = vec![
         MenuItem::entry(t(copy_label), ContextMenuAction::CopyLink.tag()),
         MenuItem::entry(t(open_label), ContextMenuAction::OpenLink.tag()),
-    ]
+    ];
+    if link.kind == LinkKind::File {
+        items.push(MenuItem::entry(
+            t(Msg::LinkRevealFile),
+            ContextMenuAction::RevealLink.tag(),
+        ));
+    }
+    items
 }
 
 /// RFC-004 B.5 — boot-assembly integration tests.  Each test runs in
@@ -2570,9 +2589,11 @@ mod link_menu_tests {
     #[test]
     fn file_yields_copy_path_then_open_file() {
         let items = link_menu_items_for(&ctx(LinkKind::File));
-        assert_eq!(items.len(), 2, "File must surface Copy + Open");
+        assert_eq!(items.len(), 3, "File must surface Copy + Open + Reveal");
         assert_eq!(items[0].label, "Copy path");
         assert_eq!(items[1].label, "Open file");
+        assert_eq!(items[2].label, "Open containing folder");
+        assert_eq!(items[2].action_tag, ContextMenuAction::RevealLink.tag());
     }
 
     #[test]
@@ -2604,6 +2625,7 @@ mod link_menu_tests {
             let items = link_menu_items_for(&ctx(kind));
             let expected = match kind {
                 LinkKind::Uuid => 1, // copy-only
+                LinkKind::File => 3,
                 _ => 2,
             };
             assert_eq!(items.len(), expected, "{kind:?}");
@@ -5718,6 +5740,13 @@ impl CoreApp {
                     let arg = open_arg_for(link.kind, link.actionable());
                     if let Some(a) = arg {
                         spawn_open(&a);
+                    }
+                }
+            }
+            ContextMenuAction::RevealLink => {
+                if let Some(link) = link_snapshot.as_ref() {
+                    if let Some(a) = open_arg_for(link.kind, link.actionable()) {
+                        spawn_open_with(&a, true);
                     }
                 }
             }
