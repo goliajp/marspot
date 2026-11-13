@@ -54,7 +54,13 @@ case "$cmd_word" in
     # Background so the caller's polling loop runs concurrently with
     # the surface. The wrapper file leaks one tiny file per invocation —
     # acceptable for a bench refresh; /tmp is wiped on reboot.
-    "$GHOSTTY_BIN" -e "$wrapper" &
+    # optional: the grid to open with, so two terminals can be compared
+    # at the same size
+    size_args=()
+    if [[ -n "${1:-}" && -n "${2:-}" ]]; then
+      size_args=(--window-width="$1" --window-height="$2")
+    fi
+    "$GHOSTTY_BIN" ${size_args[@]+"${size_args[@]}"} -e "$wrapper" &
     disown 2>/dev/null || true
     ;;
   quit)

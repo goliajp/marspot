@@ -145,19 +145,37 @@ for entry in baseline["scenarios"]:
         rate = e.get("MB_per_s")
         row(f"L3 MB/s {short}", rate, "MB/s", entry.get("mars_l3_MBps_min"), False,
             gating=False, trials=e.get("MB_per_s_samples"), host=host, stat="best")
-        # How the product compares with the best other terminal measured.
-        # It divides a wall-clock reading by a figure frozen in the
-        # snapshot, so it inherits the wall clock's spread and is
-        # reported the same way.
-        if "mars_live_MBps_min" in entry:
-            row(f"live MB/s {short}", rate, "MB/s", entry["mars_live_MBps_min"], False,
-                gating=False, trials=e.get("MB_per_s_samples"), host=host, stat="best")
-            other = best_other_mbps(sid)
-            if rate is not None and other > 0:
-                row(f"vs-best {short}", rate / other, "ratio",
-                    entry["mars_vs_best_other_min"], False, gating=False,
-                    trials=[x / other for x in e.get("MB_per_s_samples", [])],
-                    host=host, stat="best")
+
+# ---- the product in its window, against the best other terminal ----------
+# Shell, core and one session with one pane, read with the trial script
+# the snapshot's terminals were read with.  The requirement is that the
+# product is the fastest.  On 2026-11-13 it is level with the best other
+# terminal, inside the spread between rounds, so the ratio is printed
+# on every run and does not yet decide the exit code.
+app = (l3_doc("app.json") or {}).get("marspot") if mode == "full" else None
+if mode == "full":
+    rounds = (app or {}).get("rounds", [])
+    used = [rd for rd in (rounds[1:] if len(rounds) >= 3 else rounds) if not rd.get("polluted")]
+    loads = [x for rd in rounds for x in rd.get("load1", [])]
+    host = {"load1": {"start": loads[0], "max": max(loads), "end": loads[-1]}} if loads else {}
+    if not rounds:
+        host["invalid"] = "the product produced no reading"
+    elif not used:
+        host["invalid"] = "every round was taken above the load ceiling"
+    for entry in baseline["scenarios"]:
+        sid = entry["id"]
+        if "mars_vs_best_other_min" not in entry:
+            continue
+        short = sid.removeprefix("cat-")
+        per_round = [rd[f"{sid}_MBps"] for rd in used if f"{sid}_MBps" in rd]
+        rate = median(per_round) if per_round else None
+        row(f"app MB/s {short}", rate, "MB/s", entry.get("mars_live_MBps_min"), False,
+            gating=False, trials=per_round, host=host)
+        other = best_other_mbps(sid)
+        row(f"vs-best {short}", rate / other if rate and other > 0 else None, "ratio",
+            entry["mars_vs_best_other_min"], False, gating=False,
+            trials=[x / other for x in per_round] if other > 0 else [], host=host,
+            note=None if rate else "the product produced no certified reading")
 
 # ---- nine sessions absorbing the same scenario at once -------------------
 multi = l3_doc("l3-multi.json") if mode == "full" else None
@@ -269,6 +287,13 @@ else:
     print(f"GATE PASSED ({len(gating)} gating checks)")
 if n_below:
     print(f"{n_below} wall-clock reading(s) are below their floor; they do not gate.")
+vs = [r for r in rows if r["metric"].startswith("vs-best ")]
+if vs:
+    print("PRODUCT vs BEST OTHER TERMINAL (rounds min-max): " + ",  ".join(
+        f"{r['metric'].removeprefix('vs-best ')} "
+        + ("no reading" if r.get("value") is None else
+           f"{r['value']:.2f}x ({min(r['trials']):.2f}-{max(r['trials']):.2f})")
+        for r in vs))
 
 # ---- record ---------------------------------------------------------------
 record = _bench_record.meta(root)
@@ -304,12 +329,11 @@ if do_update:
         short = entry["id"].removeprefix("cat-")
         if f"parse MB/s {short}" in by:
             entry["mars_parse_MBps_min"] = round(by[f"parse MB/s {short}"] * 0.93)
-        live = by.get(f"live MB/s {short}")
+        # mars_vs_best_other_min is a requirement, not a reading: it is
+        # never derived from a run
+        live = by.get(f"app MB/s {short}")
         if live is not None and "mars_live_MBps_min" in entry:
             entry["mars_live_MBps_min"] = round(live * 0.90)
-            other = best_other_mbps(entry["id"])
-            if other > 0:
-                entry["mars_vs_best_other_min"] = round(live / other * 0.90, 2)
     # ceil, not round: 1.9 x 1.30 = 2.47 rounds to 2 and the margin is gone
     for label, key, margin in (("render p99", "render_full_repaint", 1.50),
                                ("scroll p99", "scroll_repaint", 1.30),

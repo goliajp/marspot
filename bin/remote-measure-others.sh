@@ -118,12 +118,32 @@ mkdir -p "$OUT_DIR"
 MEAS_JSON="${REMOTE_MEAS_JSON:-$OUT_DIR/measured.json}"
 
 if [[ -z "${REMOTE_MEAS_JSON:-}" ]]; then
-  echo "==> dispatching iTerm / Warp on $HOST (~1-2 min)"
+  echo "==> measuring on $HOST: the product built from this tree, and the other terminals"
   # Exclusive, like the gate: this is a measurement, and a competitor's
   # throughput read while the machine is busy is not a slower number,
-  # it is not a number.
-  ssh "$HOST" "cd ~/$REMOTE_DIR && /usr/local/bin/bench-lock bench --max-wait ${MARSPOT_BENCH_MAX_WAIT:-1200} bash bin/_remote-measure-others-mini.sh" \
-    </dev/null > "$MEAS_JSON"
+  # it is not a number.  The product's build runs inside the same lock
+  # hold, so nothing else gets between the build and the reading.
+  COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
+  [[ -z "$(git -C "$ROOT" status --porcelain)" ]] || COMMIT+="-dirty"
+  FWD="export MARSPOT_BENCH_COMMIT=$COMMIT; "
+  [[ -z "${MEASURE_TERMS:-}" ]] || FWD+="export MEASURE_TERMS=$(printf '%q' "$MEASURE_TERMS"); "
+  [[ -z "${MEASURE_ROUNDS:-}" ]] || FWD+="export MEASURE_ROUNDS=$(printf '%q' "$MEASURE_ROUNDS"); "
+  INNER="source ~/.cargo/env; cd ~/$REMOTE_DIR && export CARGO_TARGET_DIR=\$HOME/$REMOTE_DIR/target; $FWD
+    /usr/local/bin/bench-lock bench --max-wait ${MARSPOT_BENCH_MAX_WAIT:-1200} \
+      caffeinate -dims bin/_bounded.sh ${MARSPOT_MEASURE_TIMEOUT:-3000} sh -c \
+      'cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session >&2 \
+        && exec bash bin/_remote-measure-others-mini.sh'"
+  # The whole run inside the console user's GUI session when the host
+  # allows it: every terminal, the product included, is then started
+  # the same way, and the AppleScript-driven ones are reachable.
+  GUI_UID="${GUI_UID:-501}"
+  if ssh "$HOST" "sudo -n launchctl asuser $GUI_UID /usr/bin/true" </dev/null 2>/dev/null; then
+    INNER="export MEASURE_METHOD='ssh, run inside the GUI session'; $INNER"
+    ssh "$HOST" "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /bin/bash -lc $(printf '%q' "$INNER")" \
+      </dev/null > "$MEAS_JSON"
+  else
+    ssh "$HOST" "$INNER" </dev/null > "$MEAS_JSON"
+  fi
 else
   echo "==> using pre-captured $MEAS_JSON (manual workflow)"
 fi
@@ -156,6 +176,11 @@ if [[ "${MEASURED_TERMS:-0}" -eq 0 ]]; then
   exit 4
 fi
 
+if [[ "${MEASURE_NO_MERGE:-}" == "1" ]]; then
+  echo "==> MEASURE_NO_MERGE=1: $BASELINE left as it was; the readings are in $MEAS_JSON"
+  exit 0
+fi
+
 # ---- merge into bench/baseline.json ----------------------------------
 TMP="$BASELINE.tmp.$$"
 python3 - "$BASELINE" "$MEAS_JSON" "$TMP" <<'PY'
@@ -168,7 +193,12 @@ cs = baseline.setdefault("competitors_snapshot", {})
 # previously-recorded terminals not in this run (e.g. if warp
 # timed out, its old numbers stay rather than vanish silently).
 for term, scenarios in meas.items():
-    cs.setdefault(term, {}).update(scenarios)
+    # the per-round figures are kept; the raw trial times stay in the
+    # run's own measured.json
+    for rd in scenarios.get("rounds", []):
+        for k in [k for k in rd if k.endswith("_trials_s")]:
+            del rd[k]
+    cs[term] = scenarios
 cs["captured_at"] = datetime.date.today().isoformat()
 with open(tmp_path, "w") as f:
     json.dump(baseline, f, indent=2)

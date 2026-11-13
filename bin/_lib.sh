@@ -389,6 +389,21 @@ TRIAL
 # The whole matrix in one terminal session, appending `==SCN== <id>`
 # headers so one marker can be parsed per scenario.  Ends with
 # `==ALL_DONE==` so a poller knows it is safe to read.
+#
+# What a trial certifies.  After the corpus the script moves the cursor
+# to row 7, column 11 and asks where the cursor is.  A reply of 7;11 can
+# only come from a terminal that applied that move, and the move sits
+# behind the whole corpus in the byte stream: every byte before it has
+# been consumed from the PTY and applied to the terminal's state.  A
+# reply with any other position (answered early, or left over from an
+# earlier trial) is not a certificate, and the reader drops the trial.
+# Drawing is not certified, for any terminal.
+#
+# Before the scenarios: `==GRID==` records the rows and columns the
+# terminal gave the script, and the `overhead` trials run the same
+# sequence with no corpus -- what the instrument itself costs inside
+# each timed region (a shell, two `stty`, one round trip).
+LIVE_SENTINEL_CPR="7,11"
 write_live_matrix_script() {
   local out=$1 marker=$2 trials=$3
   shift 3
@@ -415,17 +430,22 @@ write_live_matrix_script() {
     echo '  print -u2 "no EPOCHREALTIME: zsh/datetime did not load"; exit 1'
     echo 'fi'
     echo "rm -f \"$marker\""
+    echo "echo \"==GRID== \$(stty size < /dev/tty)\" >> \"$marker\""
     local scenario reps args t
-    for scenario in "$@"; do
-      reps=$(live_repeat "$scenario")
-      args=$(live_cat_args "$scenario" "$reps")
+    for scenario in overhead "$@"; do
+      if [[ $scenario == overhead ]]; then
+        args=" /dev/null"
+      else
+        reps=$(live_repeat "$scenario")
+        args=$(live_cat_args "$scenario" "$reps")
+      fi
       for ((t = 1; t <= trials; t++)); do
         echo "echo '==SCN== $(basename "$scenario" .bin)' >> \"$marker\""
         echo '__s=$EPOCHREALTIME'
         echo "{ /bin/zsh -c '"
         echo "  /bin/cat$args"
         echo '  stty raw -echo 2>/dev/null'
-        echo '  printf "\033[6n" > /dev/tty'
+        echo '  printf "\033[7;11H\033[6n" > /dev/tty'
         echo '  IFS="[;" read -t 5 -srd R _ _row _col < /dev/tty'
         echo '  stty sane 2>/dev/null'
         echo '  printf "cpr=%s,%s\n" "$_row" "$_col" >&2'

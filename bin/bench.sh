@@ -398,12 +398,14 @@ done
 rm -rf "$RSS_STATE"
 
 if [[ $MODE == "full" ]]; then
-  echo "==> live PTY (this takes a minute)"
-  # No pkill of the marspot binary by name — friendly-fire risk against
-  # a parallel active-9x-soak / soak run.  measure.sh manages its own
-  # mcli lifecycle by PID; that's sufficient.  perf-attack E7.
-  (cd "$ROOT" && ./bin/measure.sh > "$CUR_DIR/measure.log" 2>&1) || true
-  cp "$ROOT/bench/results/live-cat.json" "$CUR_DIR/live.json" || true
+  # The product in its window: shell, core and one session, one pane,
+  # the same trial script and the same certificate the other terminals
+  # in the snapshot were read with.  This is the figure that is divided
+  # by the best other terminal's.
+  echo "==> live PTY through the product's window (this takes a minute)"
+  (cd "$ROOT" && MEASURE_TERMS=marspot MEASURE_ROUNDS="${BENCH_APP_ROUNDS:-4}" \
+    bash bin/_remote-measure-others-mini.sh > "$CUR_DIR/app.json" 2> "$CUR_DIR/measure-app.log") || true
+  grep -E '^==> (grid|\[marspot)' "$CUR_DIR/measure-app.log" || true
 
   # Same settle between stages, for the same reason as after the build:
   # by this point the run has already pushed a few hundred MB through a
