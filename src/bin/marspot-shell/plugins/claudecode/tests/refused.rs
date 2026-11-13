@@ -94,7 +94,7 @@ fn a_refusal_naming_another_model_leaves_this_one_alone() {
 fn an_account_that_refused_a_pane_is_no_destination() {
     let room = |util_7d: f64, reset_7d: i64| quota::Room::Known {
         status: "allowed".into(),
-        util_5h: 0.0,
+        util_5h: None,
         util_7d,
         reset_7d,
         models: Vec::new(),

@@ -26,7 +26,7 @@ const WEEK_NEARLY_SPENT: f64 = 0.99;
 fn unmeasured(now: i64) -> Room {
     Room::Known {
         status: "allowed".into(),
-        util_5h: 0.0,
+        util_5h: None,
         util_7d: 0.0,
         reset_7d: now + WEEK,
         models: Vec::new(),
@@ -51,12 +51,12 @@ pub(super) fn rooms(numbers: &[u8], usage: Option<&CcUsage>, seen: &Seen, now: i
             let account = row(usage, n);
             let mut room = account.map_or_else(|| unmeasured(now), |a| room_of(a, now));
             let resets = account
-                .map(|a| Resets { five_hour: a.reset_5h, week: a.reset_7d, models: Vec::new() })
+                .map(|a| Resets { five_hour: a.reset_5h.unwrap_or(0), week: a.reset_7d, models: Vec::new() })
                 .unwrap_or_default();
             if seen.shut(n, &resets, now)
                 && let Room::Known { util_5h, .. } = &mut room
             {
-                *util_5h = 1.0;
+                *util_5h = Some(1.0);
             }
             (n, room)
         })
