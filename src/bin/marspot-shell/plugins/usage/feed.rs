@@ -415,7 +415,7 @@ mod tests {
         assert_eq!(u.generated_at, NOW);
         let a = &u.accounts[0];
         assert_eq!((a.name.as_str(), a.email.as_str(), a.status.as_str()), ("Claude 1", "a@b", "allowed"));
-        assert_eq!((a.util_5h, a.reset_5h), (0.0, 0), "a missing 5h window is null, which reads as none");
+        assert_eq!((a.util_5h, a.reset_5h), (None, None), "a missing 5h window is null, which reads as none");
         assert_eq!((a.util_7d, a.reset_7d), (0.42, 1_794_538_799));
         assert_eq!(a.model_limits.len(), 1);
         assert_eq!(a.model_limits[0].label, "Fable");
@@ -427,7 +427,7 @@ mod tests {
 
         let b = &u.accounts[1];
         assert_eq!(b.status, "rejected", "a full window refuses the account");
-        assert_eq!((b.util_5h, b.reset_5h), (1.0, NOW + 600));
+        assert_eq!((b.util_5h, b.reset_5h), (Some(1.0), Some(NOW + 600)));
         assert_eq!(b.limits_as_of, Some(NOW - 3_600), "an older model window says how old");
     }
 

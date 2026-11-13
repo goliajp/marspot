@@ -44,7 +44,7 @@ pub(super) fn resets_for(
             let r = email_of(p)
                 .and_then(|mail| accounts.iter().find(|a| a.email == mail))
                 .map(|a| Resets {
-                    five_hour: a.reset_5h,
+                    five_hour: a.reset_5h.unwrap_or(0),
                     week: a.reset_7d,
                     models: a
                         .model_limits
@@ -122,7 +122,7 @@ impl Seen {
                 // which account window it was does not matter to a
                 // pane: either shuts the account
                 if standing || at > measured_at {
-                    *util_5h = util_5h.max(1.0);
+                    *util_5h = Some(1.0);
                 }
             } else if standing || at > models_measured_at {
                 match models.iter_mut().find(|(label, _)| same_model(model, label)) {
@@ -215,7 +215,7 @@ mod tests {
     fn known(measured_at: i64) -> Room {
         Room::Known {
             status: "allowed".into(),
-            util_5h: 0.1,
+            util_5h: Some(0.1),
             util_7d: 0.97,
             reset_7d: NOW + 3 * 86400,
             models: vec![("fable".into(), 0.5)],

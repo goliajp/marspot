@@ -713,22 +713,37 @@ mod tests {
         assert_eq!(w[2].label, w[2].label.to_lowercase(), "panel labels are lower case");
     }
 
-    /// An Ultra account still reports a 5h it is no longer held to; the
-    /// panel does not draw a limit that does not apply.
+    /// The 5h row follows the reading and nothing else: two accounts
+    /// on the same tier, one with a reading and one without.
     #[test]
-    fn an_ultra_account_has_no_5h_row() {
-        let feed = NESTED_FEED.replacen(
-            "\"status\"",
-            "\"tier\": \"default_claude_max_20x\", \"status\"",
-            2,
-        );
+    fn an_ultra_account_has_a_5h_row_exactly_when_the_feed_reads_one() {
+        let feed = NESTED_FEED
+            .replacen("\"status\"", "\"tier\": \"default_claude_max_20x\", \"status\"", 2)
+            .replace("\"utilization_5h\": 0.3,", "\"utilization_5h\": null,")
+            .replace("\"reset_5h\": 1785544800,", "\"reset_5h\": null,");
         let u = parse(&feed).expect("parses");
-        let a = &u.accounts[1];
-        assert_eq!(a.tier, "default_claude_max_20x");
-        assert!(!a.has_five_hour_limit());
-        let w = a.windows();
+        let (held, free) = (&u.accounts[0], &u.accounts[1]);
+        assert_eq!((held.tier.as_str(), free.tier.as_str()), ("default_claude_max_20x", "default_claude_max_20x"));
+        let w = held.windows();
+        assert_eq!((w[0].label.as_str(), w[0].util, w[0].reset), ("5h", 0.05, Some(1_785_543_600)));
+        assert_eq!((free.util_5h, free.reset_5h), (None, None));
+        let w = free.windows();
         assert_eq!(w[0].label, "7d");
-        assert!(w.iter().all(|w| w.label != "5h"));
+        assert!(w.iter().all(|w| w.label != "5h"), "no reading is no row, not a row at 0%");
+    }
+
+    /// A window that has not started is given as 0 with no reset: the
+    /// account is held to it and has a row at 0%.
+    #[test]
+    fn a_5h_reading_of_zero_is_a_row_and_null_is_none() {
+        let feed = NESTED_FEED
+            .replace("\"utilization_5h\": 0.3,", "\"utilization_5h\": 0,")
+            .replace("\"reset_5h\": 1785544800,", "\"reset_5h\": null,");
+        let a = &parse(&feed).expect("parses").accounts[1];
+        assert_eq!((a.util_5h, a.reset_5h), (Some(0.0), None));
+        let w = a.windows();
+        assert_eq!((w[0].label.as_str(), w[0].util, w[0].reset), ("5h", 0.0, None));
+        assert_eq!(w[1].label, "7d");
     }
 
     use super::*;
@@ -947,7 +962,7 @@ mod tests {
         // Fields still come from the account itself, not from a nested
         // object that happens to share a name.
         assert_eq!(u.accounts[1].status, "allowed");
-        assert!((u.accounts[1].util_5h - 0.3).abs() < 1e-9);
+        assert_eq!(u.accounts[1].util_5h, Some(0.3));
         assert!((u.accounts[1].util_7d - 0.39).abs() < 1e-9);
         assert_eq!(u.accounts[1].reset_7d, 1785704400);
     }
@@ -992,10 +1007,10 @@ mod tests {
         assert_eq!(a.email, "ada@example.jp");
         assert_eq!(a.status, "allowed");
         assert_eq!(a.util_7d, 0.39);
-        assert_eq!(a.reset_5h, 1_784_429_400);
+        assert_eq!(a.reset_5h, Some(1_784_429_400));
         let b = &u.accounts[1];
         assert_eq!(b.email, "ben@example.com");
-        assert_eq!(b.util_5h, 0.04);
+        assert_eq!(b.util_5h, Some(0.04));
     }
 
     #[test]

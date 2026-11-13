@@ -70,7 +70,8 @@ mod tests {
         assert_eq!(got, [("5h", 1.0, Some(1_794_300_000)), ("7d", 0.4, Some(1_794_800_000))]);
         assert_eq!(two.status, "rejected");
         let one = &k.accounts[0];
-        assert_eq!((one.email.as_str(), one.windows[0].reset, one.windows[1].util), ("ada@example.jp", None, 0.25));
+        let got: Vec<(&str, f64)> = one.windows.iter().map(|w| (w.label.as_str(), w.util)).collect();
+        assert_eq!((one.email.as_str(), got), ("ada@example.jp", vec![("7d", 0.25)]), "no 5h reading, no 5h row");
         assert_eq!((account_name(0), account_name(2)), ("Kimi".to_string(), "Kimi 2".to_string()));
     }
 

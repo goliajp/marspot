@@ -216,7 +216,7 @@ mod tests {
     fn room(status: &str, util_5h: f64, util_7d: f64, fable: Option<f64>) -> Room {
         Room::Known {
             status: status.into(),
-            util_5h,
+            util_5h: Some(util_5h),
             util_7d,
             reset_7d: 1000,
             models: fable.map(|u| vec![("fable".to_string(), u)]).unwrap_or_default(),

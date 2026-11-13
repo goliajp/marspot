@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.320"  # the usage feed's account row is a module of its own
-core    = "0.12.350"  # the usage feed's account row is a module of its own
+shell   = "0.7.321"  # an account is held to the 5h window exactly while the feed reads one
+core    = "0.12.351"  # the usage panel draws a 5h row exactly for the accounts the feed reads one for
 session = "0.11.189"  # a session follows the shell that answers for it and ends its pane's shell when closed
