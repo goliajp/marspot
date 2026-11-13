@@ -84,6 +84,7 @@ fn become_image(exe: &std::path::Path, extra: &[(&str, &str)]) -> std::io::Error
     // no launch may take the lock between the two images: it would be
     // an app outside the sessions' coalition
     crate::instance::carry_lock(&mut cmd);
+    crate::reclaim::carry_look(&mut cmd);
     let err = cmd.exec();
     crate::instance::keep_lock_here();
     err
