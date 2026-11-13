@@ -9,10 +9,10 @@ use crate::pty_reader::Chunk;
 
 /// Most that is parsed between two looks at whether a key has arrived:
 /// some 40 to 70 microseconds of parsing.
-const SLICE_BYTES: usize = 16 * 1024;
+pub(super) const SLICE_BYTES: usize = 16 * 1024;
 
 /// How far back from its full length a slice may end, to end on a line.
-const SLICE_SLACK: usize = 1024;
+pub(super) const SLICE_SLACK: usize = 1024;
 
 /// Where the slice of `bytes` that starts at `from` ends: after a line
 /// feed if one of its last bytes is one, since the parser takes a
@@ -66,20 +66,13 @@ impl LocalSession {
     /// already handed over was read before the key was written, and so
     /// was what it has in hand and hands over next: none of it can hold
     /// the program's answer.
-    ///
-    /// A pty lent to this thread goes back to the reader: the answer
-    /// takes the way it always has.  Nothing is in the reader's hand
-    /// then.
+    /// A reader that has lent its pty to this thread has nothing in
+    /// hand.
     pub(crate) fn typed(&mut self) {
-        let Some(r) = self.reader.as_ref() else {
-            self.before_key = 1;
-            return;
+        self.before_key = match self.reader.as_ref() {
+            Some(r) => r.in_flight() + usize::from(!r.lend().lent()),
+            None => 1,
         };
-        let lend = r.lend();
-        let in_hand = usize::from(!lend.lent());
-        lend.welcome(false);
-        lend.give_back();
-        self.before_key = r.in_flight() + in_hand;
     }
 
     fn drain(&mut self, pace: Option<Pace>) -> (usize, bool) {
