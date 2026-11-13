@@ -157,3 +157,52 @@ fn of_two_floats_the_one_described_later_is_on_top_and_a_dragged_surface_takes_t
     assert_eq!(hit(&s, (157.0, 72.0)), Some(9));
     assert_eq!(hit(&s, (212.0, 72.0)), Some(1), "past the float that moved with it");
 }
+
+/// A node lights with its group: a row's fill follows the pointer onto
+/// the button at its end, and the button's own state is its own.
+#[test]
+fn a_node_takes_its_hover_fill_when_the_pointer_is_on_another_node_of_its_group() {
+    const ROW: Ink = Ink::Role(4);
+    const ROW_LIT: Ink = Ink::Role(5);
+    let mut s = Surface::new(Recording::new());
+    s.frame(&inputs(), &MEASURE, |ui| {
+        ui.vstack(|ui| {
+            for row in 0..2u32 {
+                ui.hstack(|ui| {
+                    // the fill is a node of its own, answering nothing
+                    ui.leaf(0, L::Px(150.0), L::Px(40.0)).fill(ROW).fill_hover(ROW_LIT).lit_with(row + 1);
+                    ui.leaf(7, L::Px(50.0), L::Px(40.0))
+                        .lit_with(row + 1)
+                        .pressable(WidgetId(10 + row), Action::new(2, row));
+                })
+                .lit_with(row + 1)
+                .pressable(WidgetId(row), Action::new(1, row));
+            }
+        });
+    });
+    let fills = |s: &Surface<Recording>| -> Vec<Ink> {
+        s.output()
+            .ops
+            .iter()
+            .filter_map(|op| if let Op::Rounded { fill: Some(ink), .. } = op { Some(*ink) } else { None })
+            .collect()
+    };
+    let button_hovered = |s: &Surface<Recording>| -> Vec<bool> {
+        let leaves = s.output().ops.iter();
+        leaves.filter_map(|op| if let Op::Leaf { state, .. } = op { Some(state.hovered) } else { None }).collect()
+    };
+    assert_eq!(fills(&s), [ROW, ROW]);
+
+    // on the second row's button
+    assert!(s.pointer_move((100.0 + 170.0, 50.0 + 60.0)));
+    s.frame(&inputs(), &MEASURE, |_| panic!("a hover describes nothing"));
+    assert_eq!(fills(&s), [ROW, ROW_LIT], "the row did not light with its button");
+    assert_eq!(button_hovered(&s), [false, true]);
+
+    // on the first row, off its button: the button is not under the pointer
+    assert!(s.pointer_move((100.0 + 20.0, 50.0 + 10.0)));
+    s.frame(&inputs(), &MEASURE, |_| panic!("a hover describes nothing"));
+    assert_eq!(fills(&s), [ROW_LIT, ROW]);
+    assert_eq!(button_hovered(&s), [false, false], "a button lit with its row");
+    assert_eq!(s.counters().layout, 1, "lighting a row laid something out");
+}

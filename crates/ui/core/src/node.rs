@@ -215,6 +215,11 @@ pub struct Node {
     pub action: Action,
     pub group: GroupKind,
 
+    /// Nonzero: the node takes its hover fill whenever the pointer is
+    /// on any node of the same group, whichever widget that is.  A
+    /// table row lights with the button at its end.
+    pub lit_group: u32,
+
     /// Where a floating node stands, device pixels from the surface's
     /// top-left corner.
     pub float_at: (f64, f64),
@@ -249,6 +254,7 @@ impl Node {
             item: NO_ITEM,
             action: Action { id: 0, arg: 0 },
             group: GroupKind::None,
+            lit_group: 0,
             float_at: (0.0, 0.0),
             leaf_tag: 0,
             leaf_data: [0, 0],

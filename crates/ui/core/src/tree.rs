@@ -422,6 +422,12 @@ impl At<'_, '_> {
         })
     }
 
+    /// Light this node, with its hover fill, whenever the pointer is
+    /// on a node of `group`; see `Node::lit_group`.
+    pub fn lit_with(self, group: u32) -> Self {
+        self.set(|n| n.lit_group = group)
+    }
+
     /// The item the application's data has selected.
     pub fn current(self, on: bool) -> Self {
         self.flag(flag::CURRENT, on)
