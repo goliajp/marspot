@@ -57,6 +57,7 @@ DEFAULT_SUITES=(
   test-session-ownership.sh
   test-one-app-record.sh
   test-coalition-reclaim.sh
+  test-reseat-bound.sh
   test-reopen-after-quit.sh
   test-cc-profile-switch.sh
   test-codex-profile-switch.sh

@@ -9,6 +9,7 @@
 # Sourced after _dev-sandbox.sh, with OWN_SCRATCH (the scratch
 # directory's name), OWN_BUNDLE_ID and OWN_BUNDLE_NAME set.
 
+RUN_START="${RUN_START:-$(date +%s)}"
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
@@ -29,10 +30,22 @@ die() {
 bad() { echo "  FAIL  [$STATE] $*"; FAILED+=("[$STATE] $*"); }
 ok() { echo "  ok    [$STATE] $*"; }
 
+# Signals a process this run started, and no other: a pid read from a
+# file can have gone to someone else.
+sig() { # -SIG pid
+  local born
+  [[ $2 =~ ^[0-9]+$ ]] && (( $2 > 300 )) || { echo "    (refused to signal '$2')" >&2; return 1; }
+  born="$(LC_ALL=C ps -o lstart= -p "$2" 2>/dev/null)"
+  [[ -n $born ]] || return 1
+  born="$(LC_ALL=C date -j -f '%a %b %d %T %Y' "$born" +%s 2>/dev/null)"
+  [[ $born =~ ^[0-9]+$ ]] && (( born >= RUN_START )) || { echo "    (refused to signal $2: started '$born', this run at $RUN_START)" >&2; return 1; }
+  kill "$1" "$2" 2>/dev/null
+}
+
 cleanup() {
   local p
   for p in ${STRANGERS[@]+"${STRANGERS[@]}"} $(cat "$SB/launcher.pid" "$SB/by.pid" 2>/dev/null); do
-    [[ $p =~ ^[0-9]+$ ]] && (( p > 1 )) && kill -9 "$p" 2>/dev/null
+    sig -9 "$p"
   done
   dev_kill_shell_core
   # a shell a session started while the sandbox was going down
@@ -54,11 +67,15 @@ plutil -replace CFBundleIdentifier -string "$OWN_BUNDLE_ID" "$APP/Contents/Info.
 plutil -replace CFBundleName -string "$OWN_BUNDLE_NAME" "$APP/Contents/Info.plist"
 APP_EXE="$APP/Contents/MacOS/marspot-shell"
 
-# Reads a pid's coalition and footprint, registers as a foreground
-# application, and sends a quit event the way the login window does.
+# Reads a pid's coalition and footprint, registers as an application
+# (`gui` in the Dock, `agent` with no icon there), and sends a quit
+# event the way the login window does.  As an application it runs only
+# under the process limit on file beside it: whatever starts it over
+# and over cannot take the account's process table.
 cat > "$SB/ownprobe.m" <<'EOF'
 #import <AppKit/AppKit.h>
 #include <libproc.h>
+#include <sys/resource.h>
 struct coalinfo { uint64_t id[2]; uint64_t reserved[3]; };
 int main(int argc, char **argv) {
     if (argc < 3) return 2;
@@ -74,10 +91,19 @@ int main(int argc, char **argv) {
         printf("%llu\n", ri.ri_phys_footprint / 1024);
         return 0;
     }
-    if (!strcmp(argv[1], "gui")) {
+    if (!strcmp(argv[1], "gui") || !strcmp(argv[1], "agent")) {
+        char path[PROC_PIDPATHINFO_MAXSIZE + 8] = {0};
+        proc_pidpath(getpid(), path, PROC_PIDPATHINFO_MAXSIZE);
+        char *slash = strrchr(path, '/');
+        if (!slash) return 3;
+        strcpy(slash, "/nproc");
+        FILE *f = fopen(path, "r"); int n = 0;
+        if (f) { if (fscanf(f, "%d", &n) != 1) n = 0; fclose(f); }
+        struct rlimit rl = { n, n };
+        if (n < 50 || setrlimit(RLIMIT_NPROC, &rl)) { fprintf(stderr, "no process limit on file (%s)\n", path); return 3; }
         @autoreleasepool {
             NSApplication *app = [NSApplication sharedApplication];
-            [app setActivationPolicy:NSApplicationActivationPolicyRegular];
+            [app setActivationPolicy:argv[1][0] == 'a' ? NSApplicationActivationPolicyAccessory : NSApplicationActivationPolicyRegular];
             [app finishLaunching];
             NSDate *end = [NSDate dateWithTimeIntervalSinceNow:atof(argv[2])];
             while ([end timeIntervalSinceNow] > 0) {
@@ -105,6 +131,11 @@ int main(int argc, char **argv) {
 EOF
 cc -fobjc-arc -o "$PROBE" "$SB/ownprobe.m" -framework AppKit || { echo "FAIL: could not build the probe"; exit 1; }
 "$PROBE" coalition $$ >/dev/null || { echo "FAIL: this system does not report a pid's coalition"; exit 1; }
+echo $(( $(ps -U "$(id -u)" -o pid= | wc -l) + 300 )) > "$SB/nproc"
+# the same program under two more names: LaunchServices hands a dead
+# record on to the next run of the file it was started from, and a
+# suite that leaves one must be able to run the probe without that
+cp "$PROBE" "$SB/ownagent" && cp "$PROBE" "$SB/ownother" || { echo "FAIL: could not copy the probe"; exit 1; }
 
 count() { local n; n=$(grep -c $'\t'"$1"$'\t' "$APPLOG" 2>/dev/null); echo "${n:-0}"; }
 wait_count() { local i; for (( i = 0; i < $3 * 10; i++ )); do (( $(count "$1") >= $2 )) && return 0; sleep 0.1; done; return 1; }
@@ -222,7 +253,7 @@ check_stranger() {
   for p in $(ours); do [[ " $listed" == *" $p "* ]] && hit+=" $p"; done
   if [[ -z $hit ]]; then ok "stranger: running, its record lists none of ours${listed:+ (lists: $listed)}"
   else bad "stranger: while it runs its record lists our pids:$hit (all listed: $listed)"; fi
-  kill "$gui" 2>/dev/null; sleep 1.5
+  sig -TERM "$gui"; sleep 1.5
   hit=""; listed="$(ls_coalition_pids "$gui" | tr '\n' ' ')"
   for p in $(ours); do [[ " $listed" == *" $p "* ]] && hit+=" $p"; done
   if [[ -z $hit ]]; then ok "stranger: exited, $([[ -z "$(ls_record "$gui")" ]] && echo "its record is gone" || echo "its record lists none of ours")"
@@ -265,9 +296,10 @@ start_walk() {
 echo \$\$ > $SB/launcher.pid
 n=0
 while [ -p $SB/go ] && [ \$n -lt 80 ]; do
-  read -r secs < $SB/go || { sleep 1; continue; }
+  read -r secs kind < $SB/go || { sleep 1; continue; }
   n=\$((n + 1))
-  $PROBE gui "\$secs" & echo \$! > $SB/gui.pid
+  if [ "\$kind" = agent ]; then $SB/ownagent agent "\$secs" & else $PROBE gui "\$secs" & fi
+  echo \$! > $SB/gui.pid
 done
 EOF
   send_once "$P1" "/bin/sh $SB/launcher.sh &"
@@ -282,7 +314,7 @@ stage_shell() { mkdir -p "$MARSPOT_STATE_DIR/binaries/pending"; cp "$SHELL_BIN" 
 kill_shell() { # sets KILLED_AT, and L1 to the shell a session started
   local old="$L1" i
   residents=$(count SHELL_RESIDENT)
-  KILLED_AT="$(now_ms)"; kill -9 "$old"
+  KILLED_AT="$(now_ms)"; sig -9 "$old"
   for (( i = 0; i < 100; i++ )); do
     L1="$(dev_shell_pid)"; [[ -n $L1 && $L1 != "$old" ]] && (( $(count SHELL_RESIDENT) > residents )) && return 0
     sleep 0.1
