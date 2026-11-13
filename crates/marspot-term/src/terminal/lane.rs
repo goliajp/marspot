@@ -225,7 +225,7 @@ impl<'a> Handler<'a> {
             self.wrap_to_next_row(row, rows);
         }
         let attrs = *self.attrs;
-        let plain = attrs == CellAttrs::default();
+        let plain = attrs.is_default();
         let mut idx = 0;
         // the last character written: (char, width, column), in `row`
         let mut last = (head, 1u8, 0u16);
