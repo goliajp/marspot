@@ -92,7 +92,7 @@ pub(super) fn terminal_text(cols: u16, rows: u16) -> Grid {
 
 /// Draw one frame of a `w × h` px window with whatever `open` put on
 /// the renderer, and hold it to `bench/ui/snapshots/<name>.png`.
-pub(super) fn snapshot(name: &str, w: u32, h: u32, open: impl FnOnce(&mut MetalRenderer, &Layout)) {
+pub(crate) fn snapshot(name: &str, w: u32, h: u32, open: impl FnOnce(&mut MetalRenderer, &Layout)) {
     if !density_kit::capturing() && snapshot_mode_in(std::path::Path::new(UI_SNAPSHOT_DIR)).is_none() {
         return;
     }
@@ -479,7 +479,7 @@ pub(super) fn panel_snapshot_accounts_empty() {
 /// Every shared control in every state, in a panel drawn by the
 /// shared chrome: the one picture where a secondary button, a stepper
 /// at its limit and a hovered close button can be seen at all.
-fn controls_sheet(p: &mut ViewPainter<'_>) {
+pub(crate) fn controls_sheet(p: &mut ViewPainter<'_>) {
     use controls::{ButtonKind, StepperPart};
     let frame = panel_chrome::frame_rect(
         p.window_w, p.window_h, spec::px(640.0), panel_chrome::frame_height(spec::px(268.0)), 0.0,
