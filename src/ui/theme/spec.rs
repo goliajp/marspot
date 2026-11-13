@@ -114,6 +114,16 @@ pub mod space {
     pub const LABEL_TO_DESC: f64 = S4;
 }
 
+/// How the keyboard focus is shown: a stroke in the accent colour
+/// round the focused control, clear of its edge.  Drawn only while the
+/// focus is being moved with the keyboard.
+pub mod focus {
+    /// Width of the stroke.
+    pub const RING_W: f64 = 1.0;
+    /// Between the control's edge and the stroke.
+    pub const RING_OUTSET: f64 = 1.0;
+}
+
 /// The frame every panel is drawn in.
 pub mod panel {
     /// Corner radius of the frame.

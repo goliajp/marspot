@@ -324,3 +324,90 @@ fn a_tree_text_node_adds_no_allocation_to_the_run_it_draws() {
     assert_eq!(layout_n, 0, "describing and laying out a warm tree allocated");
     assert_eq!(paint_n, hand_n, "painting the node cost more than drawing the run by hand");
 }
+
+/// A surface that keeps what it painted: a frame in which nothing
+/// changed describes nothing, lays nothing out, paints nothing and
+/// takes nothing from the heap, and is the same instances; a pointer
+/// moving onto a control repaints and does not lay out.
+#[test]
+fn a_kept_surface_frame_does_only_what_went_stale() {
+    use crate::font_cache::FontCache;
+    use crate::render_metal::{new_atlas, system_default_device};
+    use crate::ui::core::ViewPainter;
+    use crate::ui::theme::spec::space;
+    use crate::ui::tree::kept::Place;
+    use crate::ui::tree::KeptSurface;
+    use crate::ui::tree::preset_parity_tests::sheet;
+    use golia_ui_core::Counters;
+
+    let Ok(device) = system_default_device() else {
+        eprintln!("SKIPPED: no Metal device");
+        return;
+    };
+    let mut font = FontCache::build().expect("font");
+    let mut atlas =
+        new_atlas(&device, 2048, 2048, false, font.font_table()).map(|(a, _)| a).expect("atlas");
+    let (atlas_w, atlas_h) = atlas.dims();
+    let (cell_w, cell_h, ascent) = (font.cell_w as f32, font.cell_h as f32, font.ascent as f32);
+    let (mut cells, mut glyphs, mut ui_rects) = (Vec::new(), Vec::new(), Vec::new());
+    let size = (1280.0, 700.0);
+    let mut kept = KeptSurface::new();
+    let mut frame = |kept: &mut KeptSurface, data_rev: u64| {
+        cells.clear();
+        glyphs.clear();
+        ui_rects.clear();
+        let mut p = ViewPainter {
+            cell_w,
+            cell_h,
+            ascent,
+            atlas_w: atlas_w as f32,
+            atlas_h: atlas_h as f32,
+            window_w: 1400.0,
+            window_h: 900.0,
+            font: &mut font,
+            atlas: &mut atlas,
+            cells: &mut cells,
+            glyphs: &mut glyphs,
+            ui_rects: &mut ui_rects,
+        };
+        let at = Place { data_rev, origin: (60.0, 100.0), avail: size };
+        kept.frame(&mut p, at, None, |ui, fm| sheet(ui, fm, size, space::HEADING_TO_CARD));
+        (cells.len(), glyphs.clone(), ui_rects.clone())
+    };
+    let count = |c: Counters| (c.build, c.layout, c.paint);
+
+    // twice with new data: the buffers have grown to what the sheet needs
+    frame(&mut kept, 1);
+    let first = frame(&mut kept, 2);
+    assert_eq!(count(kept.surface.counters()), (2, 2, 2));
+    assert!(first.1.len() > 100 && first.2.len() > 20, "the sheet was painted");
+
+    let (idle_n, idle) = counted(|| frame(&mut kept, 2));
+    // the clones this test takes of the frame are its own
+    let own = 2;
+    assert_eq!(count(kept.surface.counters()), (2, 2, 2), "an idle frame ran a stage");
+    assert_eq!(idle_n, own, "an idle frame allocated {} times", idle_n - own);
+    assert!(idle == first, "the kept instances are not the frame that was painted");
+
+    // the pointer onto the first button
+    let on = kept.surface.tree().nodes().iter().position(|n| n.leaf_tag == crate::ui::tree::preset::BUTTON);
+    let r = kept.surface.layout().rect(golia_ui_core::NodeId(on.expect("a button") as u32));
+    assert!(kept.surface.pointer_move((r.x + 4.0, r.y + 4.0)), "the pointer is on nothing");
+    let (hover_n, hover) = counted(|| frame(&mut kept, 2));
+    assert_eq!(count(kept.surface.counters()), (2, 2, 3), "a hover is a repaint and nothing else");
+    assert!(hover.2 != first.2, "the hovered button kept its fill");
+    assert_eq!(hover.1, first.1, "a hover moved a glyph");
+
+    let (data_n, _) = counted(|| frame(&mut kept, 3));
+    assert_eq!(count(kept.surface.counters()), (3, 3, 4));
+    eprintln!(
+        "[frame-alloc] kept surface, {} nodes, {} glyphs, {} rounded rects: idle frame {} allocations, \
+         hover frame {}, new-data frame {}",
+        kept.surface.tree().len(),
+        first.1.len(),
+        first.2.len(),
+        idle_n - own,
+        hover_n - own,
+        data_n - own,
+    );
+}
