@@ -51,7 +51,8 @@ REMOTE_NAME="${REMOTE_NAME:-bench-marspot}"
 # remote-sync always lands in ~/work/<name>, so that is where the
 # run has to look.
 REMOTE_DIR="work/$REMOTE_NAME"
-LOCK_LOCAL="/tmp/marspot-bench-remote.lock.d"
+# one run per remote copy: two copies do not share a build tree
+LOCK_LOCAL="/tmp/marspot-bench-remote.$REMOTE_NAME.lock.d"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 REMOTE_PIDF="/tmp/marspot-bench-remote-$TS-$$.pgid"
 TIMEOUT="${MARSPOT_BENCH_TIMEOUT:-5400}"
