@@ -33,10 +33,11 @@
 //! leaves its line editor. So what is owed is put back whenever the
 //! shell is in front, and once more when the shell hands the terminal
 //! to its next command -- recognisable because the shell's copy has
-//! `ICANON` on, which a raw-mode program's never has. That command ends
-//! with the flags in place, the shell copies them, and the repair is
-//! over. A job that is already in raw mode when first seen is never
-//! touched.
+//! `ICANON` on, which a raw-mode program's never has. If that command
+//! was still running once the flags were in place, the shell copies
+//! them when it ends and the repair is over; put back to a command that
+//! had already exited, they came after the shell's copy was taken. A
+//! job that is already in raw mode when first seen is never touched.
 //!
 //! A command can come and go between two looks, so the repair cannot
 //! wait to see a job. What the shell's copy holds shows on the terminal
@@ -106,8 +107,8 @@ const LOOK_EVERY: Duration = Duration::from_millis(1);
 
 struct Job {
     leader: libc::pid_t,
-    /// It was given the terminal with everything owed in place, so the
-    /// shell copies good settings when it ends.
+    /// It had the terminal with everything owed in place while it was
+    /// still running, so the shell copies good settings when it ends.
     healed: bool,
 }
 
@@ -254,8 +255,12 @@ impl LineGuard {
     fn saw(&mut self, master: RawFd, front: libc::pid_t, shell_pgrp: libc::pid_t, session_id: u64, at: Instant) {
         if front != shell_pgrp {
             if self.job.as_ref().is_none_or(|j| j.leader != front) {
-                self.exits.watch(front);
-                let healed = self.owed.is_some_and(|owed| hand_over(master, shell_pgrp, front, owed));
+                let watched = self.exits.watch(front);
+                // the shell copies the settings once the job has ended:
+                // what was put back after that it never saw
+                let healed = self.owed.is_some_and(|owed| hand_over(master, shell_pgrp, front, owed))
+                    && watched
+                    && self.exits.ending_of(front) == Ending::Unknown;
                 self.job = Some(Job { leader: front, healed });
                 self.hot_until = None;
                 // the job's end settles the line from here
@@ -790,6 +795,32 @@ mod tests {
             g.saw(master, SHELL, SHELL, 0, Instant::now());
             assert!(g.pending() && processed(master), "the repair began");
             g
+        }
+
+        /// A job first seen once it had exited: zsh may have copied the
+        /// settings already, and its having the terminal in order now
+        /// says nothing about that copy.
+        #[test]
+        fn a_job_seen_in_order_only_after_it_exited_does_not_end_the_repair() {
+            let (m, _slave) = pty();
+            let m = m.as_raw_fd();
+            let mut g = after_a_kill(m);
+            let mut job = Command::new("/usr/bin/true").spawn().unwrap();
+            let pid = job.id() as libc::pid_t;
+            // SAFETY: waits for the child this test started to exit, and
+            // leaves it unreaped, as the shell's job still is when seen.
+            let exited = unsafe {
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT)
+            };
+            assert_eq!(exited, 0);
+            put(m, true, true);
+            g.saw(m, pid, SHELL, 0, Instant::now());
+            job.wait().unwrap();
+            // the editor starts again from the copy taken before
+            put(m, false, false);
+            g.saw(m, SHELL, SHELL, 0, Instant::now());
+            assert!(g.pending() && processed(m), "the prompt is still repaired");
         }
 
         /// The shell's next write may be microseconds away, and a write

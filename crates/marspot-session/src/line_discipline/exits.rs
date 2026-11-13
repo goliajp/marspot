@@ -10,17 +10,19 @@ pub(super) enum Ending {
     Unknown,
 }
 
-/// A kqueue the foreground leaders' exits arrive on.
+/// A kqueue the foreground leaders' exits arrive on, and the last
+/// leader's ending once it has been read from it.
 #[derive(Default)]
-pub(super) struct Exits(Option<OwnedFd>);
+pub(super) struct Exits(Option<OwnedFd>, Option<(libc::pid_t, Ending)>);
 
 impl Exits {
-    pub(super) fn watch(&mut self, pid: libc::pid_t) {
+    /// Whether `pid` is now watched: it had not exited yet.
+    pub(super) fn watch(&mut self, pid: libc::pid_t) -> bool {
         if self.0.is_none() {
             // SAFETY: kqueue returns a new descriptor or -1.
             let kq = unsafe { libc::kqueue() };
             if kq < 0 {
-                return;
+                return false;
             }
             // SAFETY: `kq` is a descriptor nothing else owns, and from
             // here on this field does.
@@ -29,7 +31,7 @@ impl Exits {
                 OwnedFd::from_raw_fd(kq)
             });
         }
-        let Some(kq) = self.0.as_ref() else { return };
+        let Some(kq) = self.0.as_ref() else { return false };
         // SAFETY: an all-zero kevent is a valid value.
         let mut ev: libc::kevent = unsafe { std::mem::zeroed() };
         ev.ident = pid as libc::uintptr_t;
@@ -39,7 +41,7 @@ impl Exits {
         // refused for a process this user may not signal, or one
         // already gone: its ending then reads as unknown
         // SAFETY: one change, no events asked for.
-        unsafe { libc::kevent(kq.as_raw_fd(), &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+        unsafe { libc::kevent(kq.as_raw_fd(), &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) == 0 }
     }
 
     /// How `leader` ended, from the exits queued so far. The exit is
@@ -48,24 +50,24 @@ impl Exits {
     pub(super) fn ending_of(&mut self, leader: libc::pid_t) -> Ending {
         let Some(kq) = self.0.as_ref() else { return Ending::Unknown };
         let zero = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-        let mut ending = Ending::Unknown;
         loop {
             // SAFETY: an all-zero kevent is a valid value.
             let mut ev: libc::kevent = unsafe { std::mem::zeroed() };
             // SAFETY: room for the one event asked for, and a zero timeout.
             let n = unsafe { libc::kevent(kq.as_raw_fd(), std::ptr::null(), 0, &mut ev, 1, &zero) };
             if n != 1 {
-                return ending;
+                return self.1.filter(|(pid, _)| *pid == leader).map_or(Ending::Unknown, |(_, ending)| ending);
             }
             if ev.ident == leader as libc::uintptr_t {
                 let status = ev.data as libc::c_int;
-                ending = if libc::WIFSIGNALED(status) {
+                let ending = if libc::WIFSIGNALED(status) {
                     Ending::Signalled
                 } else if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
                     Ending::Clean
                 } else {
                     Ending::Failed
                 };
+                self.1 = Some((leader, ending));
             }
         }
     }
