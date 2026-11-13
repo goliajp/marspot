@@ -33,6 +33,7 @@ use marspot_term::terminal::Terminal;
 use crate::pty_reader::PtyReader;
 
 mod pump;
+pub(crate) use pump::Pace;
 
 /// How recently we have to have seen PTY output to count as "active".
 /// Mirrors `shelld_client::ACTIVE_WINDOW` so L2's badge state is the
@@ -128,6 +129,11 @@ pub struct LocalSession {
     hold: bool,
     held: Vec<Vec<u8>>,
     held_bytes: usize,
+    /// See [`pump::Unfinished`].
+    unfinished: Option<pump::Unfinished>,
+    /// Chunks the reader handed over before the last key was typed and
+    /// that are not parsed yet.
+    before_key: usize,
     cols: u16,
     rows: u16,
 }
@@ -295,6 +301,8 @@ impl LocalSession {
             hold: false,
             held: Vec::new(),
             held_bytes: 0,
+            unfinished: None,
+            before_key: 0,
             cols,
             rows,
         })
@@ -574,6 +582,8 @@ impl LocalSession {
             hold: false,
             held: Vec::new(),
             held_bytes: 0,
+            unfinished: None,
+            before_key: 0,
             cols,
             rows,
         })
@@ -938,6 +948,8 @@ mod tests {
             hold: false,
             held: Vec::new(),
             held_bytes: 0,
+            unfinished: None,
+            before_key: 0,
             cols: 80,
             rows: 24,
         };
@@ -1005,6 +1017,8 @@ mod tests {
             hold: false,
             held: Vec::new(),
             held_bytes: 0,
+            unfinished: None,
+            before_key: 0,
             cols: 80,
             rows: 24,
         };
@@ -1015,7 +1029,9 @@ mod tests {
         }
         let all = chunk.len() * chunks;
 
-        let (first, more) = s.pump_within(Duration::from_micros(1));
+        let no_key = AtomicBool::new(false);
+        let pace = Pace { budget: Duration::from_micros(1), follow: None, key_waiting: &no_key };
+        let (first, more) = s.pump_within(pace);
         assert!(more, "the budget ran out with chunks still queued");
         assert!(first > 0, "a bounded pump still makes progress");
         assert!(first < all, "it stopped at the budget, not at the end: {first} of {all}");
@@ -1054,6 +1070,8 @@ mod tests {
             hold: false,
             held: Vec::new(),
             held_bytes: 0,
+            unfinished: None,
+            before_key: 0,
             cols: 80,
             rows: 24,
         };
@@ -1116,6 +1134,8 @@ mod tests {
             hold: false,
             held: Vec::new(),
             held_bytes: 0,
+            unfinished: None,
+            before_key: 0,
             cols: 80,
             rows: 24,
         };
