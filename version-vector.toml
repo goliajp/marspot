@@ -28,4 +28,4 @@
 
 shell   = "0.7.321"  # an account is held to the 5h window exactly while the feed reads one
 core    = "0.12.351"  # the usage panel draws a 5h row exactly for the accounts the feed reads one for
-session = "0.11.189"  # a session follows the shell that answers for it and ends its pane's shell when closed
+session = "0.11.192"  # a line repair ends with a command only if the command was still running once the settings were back
