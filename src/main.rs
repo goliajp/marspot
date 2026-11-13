@@ -2050,13 +2050,12 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
                     phys_w as f64, phys_h as f64, &settings, &mut measure, layout.top_inset,
                 )
             };
-            renderer.set_settings_panel(Some(marspot::ui::components::settings_paint::SettingsRender {
+            renderer.set_settings_panel(Some(marspot::ui::components::settings_view::SettingsRender::new(
                 rect,
-                scroll: 0.0,
-                settings: (*settings).clone(),
-                path: marspot::settings::path().display().to_string(),
-                hover: Default::default(),
-            }));
+                0.0,
+                (*settings).clone(),
+                &marspot::settings::path().display().to_string(),
+            )));
         }
         Some("cc") => {
             let rect = marspot::ui::components::cc_usage_modal::panel_rect(

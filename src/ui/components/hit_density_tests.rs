@@ -13,8 +13,8 @@ use super::density_kit::{capture, Capture, Kind};
 use super::panel_snapshot_tests as panel;
 use crate::render_metal::{MetalRenderer, WindowRender};
 use crate::ui::components::chrome_hover::ChromeHover;
-use crate::ui::components::controls::{self, StepperPart};
-use crate::ui::components::{cc_usage_modal, layout_modal, process_panel, settings_modal};
+use crate::ui::components::controls::StepperPart;
+use crate::ui::components::{cc_usage_modal, layout_modal, process_panel};
 use crate::ui::components::{ContextMenu, ContextMenuHit, MenuItem};
 
 const SCALES: [f64; 2] = [1.0, 2.0];
@@ -79,38 +79,50 @@ fn the_windows_controls_are_hit_where_they_are_drawn() {
 
 #[test]
 fn the_settings_panels_controls_are_hit_where_they_are_drawn() {
-    use settings_modal::{Hover, Row};
+    use crate::ui::components::settings_view::SettingsRender;
+    use golia_ui_core::node::flag;
+    use golia_ui_core::{NodeId, Target};
     for scale in SCALES {
         let Some((mut r, mut wr)) = renderer() else { return };
-        fn frame(scale: f64, r: &mut MetalRenderer, wr: &mut WindowRender, hover: Hover) -> (Capture, Placed) {
+        fn frame(
+            scale: f64,
+            r: &mut MetalRenderer,
+            wr: &mut WindowRender,
+            pointer: Option<(f64, f64)>,
+        ) -> (Capture, SettingsRender) {
             let mut placed = None;
             let frame = capture(scale, || {
                 panel::snapshot_on(r, wr, "settings", 1000, 1360, |r, layout| {
-                    placed = Some(panel::open_settings(r, layout, hover));
+                    placed = Some(panel::open_settings(r, layout, pointer));
                 });
             });
             (frame.expect("a frame"), placed.expect("the panel was placed"))
         }
-        type Placed = (marspot_term::layout::Rect, crate::settings::Settings);
-        let (rest, _) = frame(scale, &mut r, &mut wr, Hover::None);
-        let rows = [
-            Row::ReclaimEnabled, Row::ReclaimIdleMinutes, Row::ReclaimPrefetch, Row::Theme, Row::Language,
-            Row::DimScale, Row::CircledWide, Row::ScrollFactor, Row::CcStatuslineHook,
-        ];
-        let hovers = std::iter::once(Hover::Close)
-            .chain(rows.into_iter().flat_map(|row| (0..4).map(move |n| Hover::Control(row, n))));
+        let (rest, sp) = frame(scale, &mut r, &mut wr, None);
+        // every control the panel has, and where its surface put it
+        let controls: Vec<(Target, golia_ui_core::Rect)> = {
+            let s = sp.surface.borrow();
+            let (tree, layout) = (s.kept.surface.tree(), s.kept.surface.layout());
+            tree.nodes()
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| n.leaf_tag != 0 && !n.has(flag::DISABLED))
+                .filter_map(|(i, n)| Some((Target { id: n.widget?, item: n.item }, layout.rect(NodeId(i as u32)))))
+                .collect()
+        };
+        assert!(controls.len() >= 20, "scale {scale}: the surface holds {} controls", controls.len());
         let mut checked = 0;
-        for hover in hovers {
-            // a control with nothing to show for the pointer, or a
-            // segment the row does not have
-            let (lit, (rect, settings)) = frame(scale, &mut r, &mut wr, hover);
+        for (control, at) in controls {
+            let pointer = (at.x + at.w * 0.5, at.y + at.h * 0.5);
+            let (lit, sp) = frame(scale, &mut r, &mut wr, Some(pointer));
+            // a control with nothing to show for the pointer
             let Some((x, y)) = lit_centre(&rest, &lit) else { continue };
-            // measured at the scale the frame was drawn at
-            let got = super::density_kit::at_scale(scale, || {
-                r.rebuild_fonts_if_scale_changed();
-                settings_modal::hover_at(rect, 0.0, &settings, &mut controls::font_measure(r.font_mut()), x, y)
-            });
-            assert_eq!(got, hover, "scale {scale}: {hover:?} is drawn around ({x:.1}, {y:.1}) and a click there lands elsewhere");
+            let got = sp.surface.borrow().kept.surface.hit((x, y)).map(|h| h.target);
+            assert_eq!(
+                got,
+                Some(control),
+                "scale {scale}: {control:?} is drawn around ({x:.1}, {y:.1}) and a click there lands elsewhere"
+            );
             checked += 1;
         }
         assert!(checked >= 10, "scale {scale}: only {checked} controls lit up; the check is not looking at the panel");

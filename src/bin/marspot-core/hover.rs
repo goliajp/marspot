@@ -8,11 +8,7 @@ impl CoreApp {
     /// Follow the pointer over the open panel and the context menu.
     pub(super) fn hover_panels(&mut self, wi: usize, x_phys: f64, y_phys: f64) {
         if win!(self, wi).panels.open() == Some(SurfaceKind::Settings) {
-            let on = self.settings_hover_at(wi, x_phys, y_phys);
-            if on != win!(self, wi).settings_modal_hover {
-                win!(self, wi).settings_modal_hover = on;
-                win!(self, wi).needs_render = true;
-            }
+            self.settings_hover(wi, x_phys, y_phys);
         }
         if win!(self, wi).cc_usage_modal.is_some() {
             let on = marspot::ui::components::cc_usage_modal::hover_at(self.cc_usage_modal_rect(wi), x_phys, y_phys);
@@ -65,7 +61,7 @@ impl CoreApp {
     pub(super) fn clear_hover(&mut self, wi: usize) -> [bool; 3] {
         let w = &mut win!(self, wi);
         let chrome = w.hover_chrome_btn.take().is_some();
-        let mut panel = std::mem::take(&mut w.settings_modal_hover) != Default::default();
+        let mut panel = w.settings_surface.borrow_mut().kept.surface.pointer_leave();
         panel |= std::mem::take(&mut w.layout_modal_hover) != Default::default();
         panel |= std::mem::take(&mut w.shortcuts_close_hover);
         if let Some(modal) = w.cc_usage_modal.as_mut() {
@@ -105,7 +101,7 @@ impl CoreApp {
 #[cfg(test)]
 mod tests {
     use marspot::commands::{Chord, Key, CMD};
-    use marspot::ui::components::{layout_modal, settings_modal};
+    use marspot::ui::components::layout_modal;
     use marspot_term::test_env::sandbox_state_dir;
 
     use super::super::window_state_tests::{app_with, win};
@@ -152,7 +148,7 @@ mod tests {
         let top = app.windows[0].layout.top_inset;
         let lit = |app: &CoreApp| {
             let w = &app.windows[0];
-            w.settings_modal_hover != settings_modal::Hover::default()
+            w.settings_surface.borrow().kept.surface.interaction.hovered.is_some()
                 || w.layout_modal_hover != layout_modal::Hover::default()
         };
         for (c, mods, kind) in [(',', CMD, SurfaceKind::Settings), ('l', CMD | marspot::commands::SHIFT, SurfaceKind::Layout)] {
