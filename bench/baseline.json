@@ -74,6 +74,18 @@
       "mars_parse_file_insn_per_byte_max": 101.70
     },
     {
+      "id": "cat-styled",
+      "bytes": 8388616,
+      "_note": "Added 2026-11-14.  Three attributed runs a line and no cell at the default: what coloured output costs, which cat-mixed (six coloured cells a line) does not say.  L3 ceiling = the worst of three interleaved mini rounds (68.27 / 68.29 / 68.31) x 1.02.",
+      "mars_l3_insn_per_byte_max": 69.68
+    },
+    {
+      "id": "cat-highlighted",
+      "bytes": 8388652,
+      "_note": "Added 2026-11-14.  Twelve colour changes a line with a few characters between them, the shape a syntax highlighter or git diff writes: the cost is entering and leaving text.  L3 ceiling = the worst of three interleaved mini rounds (97.24 / 97.25 / 97.25) x 1.02.",
+      "mars_l3_insn_per_byte_max": 99.2
+    },
+    {
       "id": "cat-clusters",
       "bytes": 8388709,
       "mars_parse_MBps_min": 36.7,
