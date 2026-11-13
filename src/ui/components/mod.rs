@@ -18,7 +18,7 @@ pub mod settings_modal;
 pub mod settings_view;
 pub mod settings_rows;
 pub mod shortcuts_panel;
-pub mod shortcuts_paint;
+pub mod shortcuts_view;
 pub mod scroll_view;
 pub mod process_panel;
 pub mod process_panel_paint;
@@ -50,6 +50,8 @@ pub(crate) mod panel_snapshot_tests;
 mod chrome_snapshot_tests;
 #[cfg(test)]
 mod settings_view_tests;
+#[cfg(test)]
+mod shortcuts_view_tests;
 #[cfg(test)]
 mod language_snapshot_tests;
 

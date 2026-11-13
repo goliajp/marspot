@@ -223,10 +223,7 @@ pub(super) fn panel_snapshot_shortcuts() {
         let rect = crate::ui::components::shortcuts_panel::panel_rect(
             layout.window_w, layout.window_h, renderer.cell_dims(), layout.top_inset,
         );
-        renderer.set_shortcuts_panel(Some(crate::ui::components::shortcuts_paint::ShortcutsRender {
-            rect,
-            close_hovered: false,
-        }));
+        renderer.set_shortcuts_panel(Some(crate::ui::components::shortcuts_view::ShortcutsRender::new(rect)));
     });
 }
 

@@ -57,7 +57,7 @@ use crate::layout::Layout;
 use crate::ui::components::process_panel::ProcessPanelRender;
 use crate::ui::components::cc_usage_modal::CcUsageRender;
 use crate::ui::components::settings_view::SettingsRender;
-use crate::ui::components::shortcuts_paint::ShortcutsRender;
+use crate::ui::components::shortcuts_view::ShortcutsRender;
 use crate::ui::components::layout_modal_paint::LayoutModalRender;
 use crate::ui::components::{chrome_hover::ChromeHover, context_menu_paint::ContextMenuRender};
 use crate::render::{SessionView, SidebarEntry};
