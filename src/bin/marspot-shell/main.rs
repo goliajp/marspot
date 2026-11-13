@@ -4981,17 +4981,11 @@ Usage:\n\
     // `ps` lists first.  execv on self-update keeps the same pid, so
     // the file stays valid across a shell swap.
     write_shell_pid();
-    // Spawn the silent-update poller.  It runs forever in the
-    // background, downloads new `marspot-core` releases, drops them
-    // into `binaries/pending/`.  The supervisor here picks them up on
-    // the next focus-loss trigger.  Returns a flag we don't currently
-    // consult (Step 5's `BinaryTree::has_pending` is the source of
-    // truth); kept alive for the eventual UI affordance.
-    // The product version, not a layer's build number.  Feeding it the
-    // core layer's number is what kept the update channel dead: the
-    // updater compares against a release tag, and no tag was ever
-    // going to be newer than 0.12.x.
-    let _update_flag = marspot::updater::spawn(marspot::PRODUCT_VERSION.to_string());
+    // The silent-update poller: downloads new releases into
+    // `binaries/pending/` in the background, for as long as this is kept.
+    // The product version, not a layer's build number: the updater
+    // compares against a release tag.
+    let updater = marspot::updater::spawn(marspot::PRODUCT_VERSION.to_string());
 
     // Frame restore: the predecessor shell (self-update execv) hands
     // its exact window frame over via env so this process reopens in
@@ -5038,6 +5032,11 @@ Usage:\n\
     // behind them) is otherwise kept for the life of the process, and
     // the process may now outlive the app by days
     objc2::rc::autoreleasepool(|_| run_app(app, proxy, attrs));
+    // what only the open app needs: the release poll, the table of the
+    // host's processes, the megabyte the quit read their arguments into
+    drop(updater);
+    observe::put_away();
+    marspot::pidtree::release_room();
     if resident::staying() {
         resident::run_in_place();
     }

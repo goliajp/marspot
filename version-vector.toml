@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.360"  # the interface language follows the system when the system says its list changed
-core    = "0.12.443"  # a tree lays its floating nodes out without indexing by a counter
+shell   = "0.7.361"  # the shell that stays after a quit keeps no release poll, no CLI installer, no process table
+core    = "0.12.444"  # the settings, shortcuts, layout, accounts and process panels are drawn from interface trees
 session = "0.11.201"  # the reader keeps three chunks, not four, ahead of a key's answer

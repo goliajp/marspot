@@ -226,3 +226,24 @@ fn a_dead_observer_serves_its_last_observation_instead_of_hanging() {
     let again = obs.fresh(Duration::ZERO);
     assert!(Arc::ptr_eq(&again, &first), "and every later call returns at once");
 }
+
+/// Put away, the observer holds no table of the host's processes, and
+/// reading it starts no walk.
+#[test]
+fn a_retired_observer_drops_its_table_and_walks_no_more() {
+    let obs = Observer::spawn(Duration::from_millis(20));
+    let held = Arc::downgrade(&obs.latest());
+    assert!(!obs.latest().table.rows().is_empty(), "the host has processes");
+    obs.retire();
+    assert!(held.upgrade().is_none(), "the last observation is still held");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !obs.shared.state().dead && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(obs.shared.state().dead, "the observer thread did not end");
+    let walks = obs.walks();
+    assert!(obs.latest().table.rows().is_empty());
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(obs.latest().table.rows().is_empty());
+    assert_eq!(obs.walks(), walks, "walked after it was put away");
+}
