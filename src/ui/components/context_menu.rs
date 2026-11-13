@@ -153,6 +153,34 @@ impl ContextMenu {
         top_obstruction: f64,
         items: &[MenuItem],
     ) -> Self {
+        let frame = Self::frame_of(window_w, window_h, scale, anchor_x, anchor_y, top_obstruction, items);
+        let top_pad = TOP_PAD_LOGICAL * scale;
+        let mut rows_h = 0.0;
+        // Full width: the row's own horizontal padding is inside it,
+        // and the rect is what a hover background is drawn to.
+        let item_rects = items
+            .iter()
+            .map(|it| {
+                let h = if it.divider { DIVIDER_H_LOGICAL * scale } else { ROW_H_LOGICAL * scale };
+                let top = top_pad + rows_h;
+                rows_h += h;
+                Rect { x: frame.x, y_top: frame.y_top + top, w: frame.w, h }
+            })
+            .collect();
+        Self { frame, item_rects }
+    }
+
+    /// Where a menu of `items` stands and how large it is: the frame
+    /// of [`Self::layout`], worked out without keeping its rows.
+    pub fn frame_of(
+        window_w: f64,
+        window_h: f64,
+        scale: f64,
+        anchor_x: f64,
+        anchor_y: f64,
+        top_obstruction: f64,
+        items: &[MenuItem],
+    ) -> Rect {
         let row_h = ROW_H_LOGICAL * scale;
         let divider_h = DIVIDER_H_LOGICAL * scale;
         let side_pad = SIDE_PAD_LOGICAL * scale;
@@ -168,8 +196,6 @@ impl ContextMenu {
         let text_w = |s: &str| crate::ui::core::text_fit::cells(s) as f64 * ch_w;
         let mut widest = 0.0f64;
         let mut rows_h = 0.0;
-        // each row's top below the menu's, and its height
-        let mut rows: Vec<(f64, f64)> = Vec::with_capacity(items.len());
         for it in items {
             let h = if it.divider {
                 divider_h
@@ -182,7 +208,6 @@ impl ContextMenu {
                 widest = widest.max((text + side_pad + side_pad).min(max_w));
                 row_h
             };
-            rows.push((top_pad + rows_h, h));
             rows_h += h;
         }
         let menu_w = widest.max(min_w).min(max_w);
@@ -214,16 +239,7 @@ impl ContextMenu {
         if y < top_obstruction {
             y = top_obstruction;
         }
-        let frame = Rect { x, y_top: y, w: menu_w, h: menu_h };
-
-        // Full width: the row's own horizontal padding is inside it,
-        // and the rect is what a hover background is drawn to.
-        let item_rects = rows
-            .into_iter()
-            .map(|(top, h)| Rect { x, y_top: y + top, w: menu_w, h })
-            .collect();
-
-        Self { frame, item_rects }
+        Rect { x, y_top: y, w: menu_w, h: menu_h }
     }
 
     /// Hit-test (`px, py` are physical-pixel coords).  Returns

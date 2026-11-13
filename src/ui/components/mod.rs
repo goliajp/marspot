@@ -37,6 +37,11 @@ pub mod layout_modal;
 pub mod layout_view;
 pub mod context_menu;
 pub mod context_menu_paint;
+pub mod context_menu_view;
+#[cfg(test)]
+mod context_menu_canvas_view_tests;
+#[cfg(test)]
+mod context_menu_view_tests;
 #[cfg(test)]
 pub(crate) mod density_kit;
 #[cfg(test)]

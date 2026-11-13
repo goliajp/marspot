@@ -454,4 +454,13 @@ impl At<'_, '_> {
         self.ui.tree.text.push_str(s);
         self.set(|n| n.text = TextRef::Buf { start, len: s.len() as u32 })
     }
+
+    /// [`Self::label_copy`] for text `write` appends to the tree's
+    /// buffer itself: a label made of several parts.
+    pub fn label_with(self, write: impl FnOnce(&mut String)) -> Self {
+        let start = self.ui.tree.text.len();
+        write(&mut self.ui.tree.text);
+        let len = (self.ui.tree.text.len() - start) as u32;
+        self.set(|n| n.text = TextRef::Buf { start: start as u32, len })
+    }
 }
