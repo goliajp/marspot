@@ -36,9 +36,9 @@ pub(super) fn rooms_for(
 
 pub(in crate::plugins) fn room_of(a: &CcAccount, now: i64) -> Room {
     let renewed = |reset: i64| reset > 0 && reset <= now;
-    // a window that is not enforced cannot shut the account out, nor
-    // rank it below another
-    let util_5h = if a.has_five_hour_limit() && !renewed(a.reset_5h) { a.util_5h } else { 0.0 };
+    // no reading stays none; a reading whose window has ended since
+    // is a limit with nothing used
+    let util_5h = a.util_5h.map(|u| if a.reset_5h.is_some_and(renewed) { 0.0 } else { u });
     let (util_7d, reset_7d) = if a.reset_7d <= 0 {
         // `null`: the week has not started, so a whole one is ahead.
         // Read as 0 it sorted first among accounts by renewal.
@@ -56,11 +56,11 @@ pub(in crate::plugins) fn room_of(a: &CcAccount, now: i64) -> Room {
             (m.label.to_ascii_lowercase(), util)
         })
         .collect();
-    let full_before = a.util_5h >= 1.0 || a.util_7d >= 1.0 || a.model_limits.iter().any(|m| m.util >= 1.0);
-    let full_now = util_5h >= 1.0 || util_7d >= 1.0 || models.iter().any(|(_, u)| *u >= 1.0);
+    let full_before = a.util_5h.is_some_and(|u| u >= 1.0) || a.util_7d >= 1.0 || a.model_limits.iter().any(|m| m.util >= 1.0);
+    let full_now = util_5h.is_some_and(|u| u >= 1.0) || util_7d >= 1.0 || models.iter().any(|(_, u)| *u >= 1.0);
     // The collector writes `rejected` when any window is full, the 5h
-    // included.  A full window that is not enforced, or that has
-    // renewed since, with nothing else full, is that and nothing else.
+    // included.  A full window that has renewed since, with nothing
+    // else full, is that and nothing else.
     let status = if a.status == "rejected" && full_before && !full_now {
         "allowed".to_string()
     } else {
@@ -103,9 +103,9 @@ mod tests {
             name: "a".into(),
             email: "a".into(),
             status: status.into(),
-            util_5h: 0.0,
+            util_5h: None,
             util_7d: u7,
-            reset_5h: 0,
+            reset_5h: None,
             reset_7d: reset7,
             model_limits: vec![CcModelLimit { label: "Fable".into(), util: fable.0, reset: fable.1 }],
             collected_at: 0,

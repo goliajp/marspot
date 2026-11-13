@@ -176,8 +176,8 @@ mod tests {
         assert_eq!(not_now(&Pane { host_load: None, ..resting() }), None, "no answer is not busy");
     }
 
-    /// The feed at 2026-11-05 05:33 UTC, addresses replaced.  All
-    /// eight accounts are Ultra, so their 5h does not count.
+    /// The feed at 2026-11-05 05:33 UTC, addresses replaced.  None of
+    /// the eight accounts has a 5h reading.
     const NOW: i64 = 1_793_856_780;
 
     fn feed() -> Vec<CcAccount> {
@@ -185,9 +185,9 @@ mod tests {
             name: format!("Claude {n}"),
             email: format!("p{n}"),
             status: status.into(),
-            util_5h: 0.0,
+            util_5h: None,
             util_7d: u7,
-            reset_5h: 0,
+            reset_5h: None,
             reset_7d: reset,
             model_limits: vec![CcModelLimit { label: "Fable".into(), util: fable, reset: Some(reset) }],
             collected_at: NOW - 5,
@@ -284,7 +284,7 @@ mod tests {
     fn room(u7: f64, reset: i64, fable: f64) -> Room {
         Room::Known {
             status: "allowed".into(),
-            util_5h: 0.0,
+            util_5h: None,
             util_7d: u7,
             reset_7d: reset,
             models: vec![("fable".into(), fable)],
