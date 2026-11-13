@@ -67,8 +67,22 @@ pub(crate) struct Lease {
 
 impl Leases {
     /// The leases every session of this user shares.
+    #[cfg(not(test))]
     pub(crate) fn open() -> Self {
         Self::at(&std::env::temp_dir().join("marspot-bulk-read.lock"))
+    }
+
+    /// Leases of this reader's own.  A flood in a unit test is not one
+    /// of the user's panes: sharing theirs, it queued behind every
+    /// other test process in bulk output -- up to 146 ms with fourteen
+    /// of them, measured -- and took turns from the panes of whoever
+    /// ran the tests.
+    #[cfg(test)]
+    pub(crate) fn open() -> Self {
+        let path = tests::lock_file("own");
+        let leases = Self::at(&path);
+        let _ = std::fs::remove_file(path);
+        leases
     }
 
     /// Without the file there is nothing to share and no limit.
