@@ -37,6 +37,9 @@ pub const CLOSE: u32 = 8;
 /// A panel's frame and the dimmed window behind it.  `data[0]` is the
 /// bits of the y the dimming starts at, as an `f32`.
 pub const FRAME: u32 = 9;
+/// The key caps of one row of the shortcuts panel: see
+/// `shortcuts_view::paint_keys`.
+pub const KEYS: u32 = 10;
 
 /// A segmented control whose segment `n` emits
 /// `Action { id: action, arg: n }`.
@@ -175,6 +178,7 @@ pub(super) fn paint(p: &mut ViewPainter, tag: u32, data: [u32; 2], label: &str, 
         DANGER => controls::paint_danger_button(p, rect, state.hovered),
         CLOSE => panel_chrome::paint_close(p, rect, state.hovered),
         FRAME => PanelChrome::new(rect, f32::from_bits(data[0]) as f64).frame_view().paint(p, |_| {}),
+        KEYS => crate::ui::components::shortcuts_view::paint_keys(p, rect, label, data[0]),
         _ => unreachable!("a node asked for preset {tag}, which nothing here draws"),
     }
 }

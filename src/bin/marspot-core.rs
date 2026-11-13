@@ -3844,8 +3844,8 @@ struct WindowState {
     settings_surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::settings_view::SettingsSurface>>,
     /// Where the settings file is, as the panel's footer shows it.
     settings_path: std::sync::Arc<str>,
-    /// Is the pointer on the shortcuts panel's close button?
-    shortcuts_close_hover: bool,
+    /// The shortcuts panel's surface.
+    shortcuts_surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::shortcuts_view::ShortcutsSurface>>,
     ime_preedit: String,
     /// Window physical dims, updated by Resize frames.
     w_phys: f64,
@@ -3936,7 +3936,7 @@ impl WindowState {
             settings_modal_scroll: Default::default(),
             settings_surface: Default::default(),
             settings_path: std::sync::Arc::from(marspot::settings::path().display().to_string()),
-            shortcuts_close_hover: false,
+            shortcuts_surface: Default::default(),
             drop_preview: None,
             ime_preedit: String::new(),
             w_phys,
@@ -4007,8 +4007,8 @@ mod hover;
 mod idle;
 #[path = "marspot-core/keys.rs"]
 mod keys;
-#[path = "marspot-core/settings_panel.rs"]
-mod settings_panel;
+#[path = "marspot-core/tree_panels.rs"]
+mod tree_panels;
 #[path = "marspot-core/theme_follow.rs"]
 mod theme_follow;
 
@@ -6993,8 +6993,7 @@ impl CoreApp {
             Some(SurfaceKind::Processes) => w.process_panel = None,
             Some(SurfaceKind::Accounts) => w.cc_usage_modal = None,
             Some(SurfaceKind::Layout) => w.layout_drag = None,
-            Some(SurfaceKind::Shortcuts) => w.shortcuts_close_hover = false,
-            Some(SurfaceKind::Settings) | None => {}
+            Some(SurfaceKind::Shortcuts) | Some(SurfaceKind::Settings) | None => {}
         }
         match change.opened {
             Some(SurfaceKind::Settings) => {
@@ -7041,7 +7040,8 @@ impl CoreApp {
                     hover: Default::default(),
                 });
             }
-            Some(SurfaceKind::Shortcuts) | None => {}
+            Some(SurfaceKind::Shortcuts) => w.shortcuts_surface.borrow_mut().kept.surface.interaction.reset(),
+            None => {}
         }
     }
 
@@ -7066,7 +7066,10 @@ impl CoreApp {
     /// frame, on neither its header nor its close button.
     fn panel_content_press(&mut self, wi: usize, kind: SurfaceKind, x_phys: f64, y_phys: f64) {
         match kind {
-            SurfaceKind::Accounts | SurfaceKind::Shortcuts => {}
+            SurfaceKind::Accounts => {}
+            SurfaceKind::Settings | SurfaceKind::Shortcuts => {
+                self.tree_panel_content_press(wi, kind, x_phys, y_phys);
+            }
             SurfaceKind::Processes => {
                 use marspot::ui::components::process_panel::Hover;
                 let Some(panel) = win!(self, wi).process_panel.as_mut() else { return };
@@ -7084,9 +7087,6 @@ impl CoreApp {
                     }
                     Hover::Process(_) | Hover::Close | Hover::None => {}
                 }
-            }
-            SurfaceKind::Settings => {
-                self.settings_content_press(wi, x_phys, y_phys);
             }
             SurfaceKind::Layout => {
                 use marspot::ui::components::layout_modal::{step, Axis, Hover};
@@ -7686,8 +7686,8 @@ impl CoreApp {
         }
         if let Some(kind) = win!(self, wi).panels.open() {
             let frame = self.panel_frame(wi, kind);
-            let press = if kind == SurfaceKind::Settings {
-                let on = self.settings_press_on(wi, x_phys, y_phys);
+            let press = if matches!(kind, SurfaceKind::Settings | SurfaceKind::Shortcuts) {
+                let on = self.tree_panel_press_on(wi, kind, x_phys, y_phys);
                 win!(self, wi).panels.on_press_on(on, x_phys, y_phys, frame)
             } else {
                 let chrome = PanelChrome::new(frame, win!(self, wi).layout.top_inset);
@@ -8812,12 +8812,8 @@ impl CoreApp {
         let settings_data =
             (win!(self, wi).panels.open() == Some(SurfaceKind::Settings)).then(|| self.settings_render(wi));
         self.renderer.set_settings_panel(settings_data);
-        let shortcuts = (win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts)).then(|| {
-            marspot::ui::components::shortcuts_paint::ShortcutsRender {
-                rect: self.shortcuts_panel_rect(wi),
-                close_hovered: win!(self, wi).shortcuts_close_hover,
-            }
-        });
+        let shortcuts =
+            (win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts)).then(|| self.shortcuts_render(wi));
         self.renderer.set_shortcuts_panel(shortcuts);
         // F3+9 — publish ContextMenu render state every frame.
         // Per-window, like every overlay below it: the renderer holds

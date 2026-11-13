@@ -17,7 +17,7 @@ use crate::ui::components::context_menu_paint::ContextMenuRender;
 use crate::ui::components::layout_modal_paint::LayoutModalRender;
 use crate::ui::components::process_panel::ProcessPanelRender;
 use crate::ui::components::settings_view::SettingsRender;
-use crate::ui::components::shortcuts_paint::ShortcutsRender;
+use crate::ui::components::shortcuts_view::ShortcutsRender;
 use crate::ui::core::view::ViewPainter;
 
 /// What `build_instances` measured about itself.
@@ -315,13 +315,16 @@ fn paint_overlays(
     }
 
     if let Some(FormPanel::Shortcuts(panel)) = form_panel {
-        crate::ui::components::shortcuts_paint::push_shortcuts_panel_via_view(
-            panel,
-            layout.top_inset,
-            cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
-            layout.window_w, layout.window_h,
-            font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
-        );
+        let mut painter = crate::ui::core::view::ViewPainter {
+            cell_w, cell_h, ascent,
+            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
+            window_w: layout.window_w, window_h: layout.window_h,
+            font, atlas,
+            cells: overlay_cells,
+            glyphs: overlay_glyphs,
+            ui_rects: overlay_ui_rects,
+        };
+        panel.surface.borrow_mut().frame(&mut painter, panel, layout.top_inset);
     }
 
     // F3+3.0 — LayoutModal: cols/rows steppers + Apply.  Overlay

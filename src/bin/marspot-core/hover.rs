@@ -8,7 +8,7 @@ impl CoreApp {
     /// Follow the pointer over the open panel and the context menu.
     pub(super) fn hover_panels(&mut self, wi: usize, x_phys: f64, y_phys: f64) {
         if win!(self, wi).panels.open() == Some(SurfaceKind::Settings) {
-            self.settings_hover(wi, x_phys, y_phys);
+            self.tree_panel_hover(wi, SurfaceKind::Settings, x_phys, y_phys);
         }
         if win!(self, wi).cc_usage_modal.is_some() {
             let on = marspot::ui::components::cc_usage_modal::hover_at(self.cc_usage_modal_rect(wi), x_phys, y_phys);
@@ -18,10 +18,7 @@ impl CoreApp {
             }
         }
         if win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts) {
-            let on = PanelChrome::new(self.shortcuts_panel_rect(wi), 0.0).hit_close(x_phys, y_phys);
-            if std::mem::replace(&mut win!(self, wi).shortcuts_close_hover, on) != on {
-                win!(self, wi).needs_render = true;
-            }
+            self.tree_panel_hover(wi, SurfaceKind::Shortcuts, x_phys, y_phys);
         }
         if win!(self, wi).panels.open() == Some(SurfaceKind::Layout) {
             let on = self.layout_modal_geometry(wi).hover_at(x_phys, y_phys);
@@ -63,7 +60,7 @@ impl CoreApp {
         let chrome = w.hover_chrome_btn.take().is_some();
         let mut panel = w.settings_surface.borrow_mut().kept.surface.pointer_leave();
         panel |= std::mem::take(&mut w.layout_modal_hover) != Default::default();
-        panel |= std::mem::take(&mut w.shortcuts_close_hover);
+        panel |= w.shortcuts_surface.borrow_mut().kept.surface.pointer_leave();
         if let Some(modal) = w.cc_usage_modal.as_mut() {
             panel |= std::mem::take(&mut modal.hover) != Default::default();
         }
