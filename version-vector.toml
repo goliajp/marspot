@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.361"  # the shell that stays after a quit keeps no release poll, no CLI installer, no process table
-core    = "0.12.444"  # the settings, shortcuts, layout, accounts and process panels are drawn from interface trees
+core    = "0.12.445"  # a node can light with the others of its group
 session = "0.11.201"  # the reader keeps three chunks, not four, ahead of a key's answer

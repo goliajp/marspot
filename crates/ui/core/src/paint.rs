@@ -88,6 +88,8 @@ struct Painter<'a, O: PaintOut> {
     state: &'a Interaction,
     m: &'a Metrics,
     ring: u32,
+    /// The group of the node the pointer is on, or 0.
+    lit: u32,
     ring_at: Option<(Rect, f64)>,
     out: &'a mut O,
 }
@@ -126,9 +128,11 @@ impl<O: PaintOut> Painter<'_, O> {
         let s = &n.style;
         let radius = s.radius.resolve(0.0, self.m);
 
+        let lit = n.lit_group != 0 && n.lit_group == self.lit && !ws.disabled;
         let fill = match (n.has(flag::ACTS), ws.pressed, ws.hovered) {
             (true, true, _) => s.fill_pressed.or(s.fill_hover).or(s.fill),
             (true, false, true) => s.fill_hover.or(s.fill),
+            _ if lit => s.fill_hover.or(s.fill),
             _ => s.fill,
         };
         // a container half out of a scroll region keeps the part that is in
@@ -202,7 +206,8 @@ pub fn paint<O: PaintOut>(
         .and_then(|t| find_focus_node(tree, t))
         .unwrap_or(NONE);
     let (dx, dy) = state.offset;
-    let mut p = Painter { tree, layout, state, m: metrics, ring, ring_at: None, out };
+    let lit = state.hovered.and_then(|t| find_focus_node(tree, t)).map_or(0, |i| tree.nodes[i as usize].lit_group);
+    let mut p = Painter { tree, layout, state, m: metrics, ring, lit, ring_at: None, out };
     p.node(0, dx, dy, None);
     // over everything, outside every clip and every scroll
     for &f in &layout.floats {
