@@ -7,14 +7,9 @@
 //! is that path, and the differential tests hold the two together.
 
 use super::Handler;
+use super::wide_class::wide_at;
 use crate::grid::{Cell, CellAttrs};
 use crate::parser::scan::printable_run_len;
-
-/// Raw codepoint of a 3-byte UTF-8 sequence (caller checked shape).
-#[inline(always)]
-fn decode3_cp(b: &[u8]) -> u32 {
-    (((b[0] & 0x0F) as u32) << 12) | (((b[1] & 0x3F) as u32) << 6) | (b[2] & 0x3F) as u32
-}
 
 /// The fast-path class for `Handler::print`: codepoints that can
 /// never open, extend, or join a multi-codepoint cluster — GBP=Other,
@@ -111,38 +106,6 @@ pub(super) fn fast_pict_width(ch: char) -> Option<u8> {
         return None;
     }
     Some(2)
-}
-
-/// A multi-byte character at the head of `b` that takes two cells and
-/// is of the fast class, with its encoded length.
-///
-/// The shape test is the parser's own: a lead byte and continuation
-/// bytes, nothing more.  An overlong or out-of-range encoding decodes
-/// to something that is not a two-cell fast-class scalar and is left
-/// to the per-byte path, which prints whatever the parser makes of it.
-#[inline(always)]
-fn wide_at(b: &[u8]) -> Option<(char, usize)> {
-    let b0 = *b.first()?;
-    if (0xE0..=0xEF).contains(&b0) {
-        if b.len() < 3 || b[1] & 0xC0 != 0x80 || b[2] & 0xC0 != 0x80 {
-            return None;
-        }
-        let c = char::from_u32(decode3_cp(b))?;
-        (fast_width(c) == Some(2)).then_some((c, 3))
-    } else if (0xF0..=0xF4).contains(&b0) {
-        if b.len() < 4 || b[1] & 0xC0 != 0x80 || b[2] & 0xC0 != 0x80 || b[3] & 0xC0 != 0x80 {
-            return None;
-        }
-        let cp = (((b0 & 0x07) as u32) << 18)
-            | (((b[1] & 0x3F) as u32) << 12)
-            | (((b[2] & 0x3F) as u32) << 6)
-            | (b[3] & 0x3F) as u32;
-        // nothing past the BMP is in the class but pictographs
-        let c = char::from_u32(cp)?;
-        (fast_pict_width(c) == Some(2)).then_some((c, 4))
-    } else {
-        None
-    }
 }
 
 impl<'a> Handler<'a> {
