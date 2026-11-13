@@ -10,6 +10,20 @@ pub(super) enum Ending {
     Unknown,
 }
 
+/// Whether every process of the group `pgrp` has exited: none is left,
+/// or only ones the shell has not reaped yet. False when it cannot be
+/// told.
+pub(super) fn ended(pgrp: libc::pid_t) -> bool {
+    let mut pids = [0 as libc::pid_t; 64];
+    let size = std::mem::size_of_val(&pids) as libc::c_int;
+    // SAFETY: the buffer is `size` bytes of pids.
+    let listed = unsafe { libc::proc_listpgrppids(pgrp, pids.as_mut_ptr().cast(), size) };
+    if listed < 0 || listed as usize >= pids.len() {
+        return false;
+    }
+    pids.iter().filter(|pid| **pid > 0).all(|&pid| info(pid).is_none_or(|i| i.pbi_status == libc::SZOMB))
+}
+
 /// `PROC_FLAG_EXEC` of <sys/proc_info.h>: the process has called exec.
 const HAS_EXECED: u32 = 0x4000;
 
