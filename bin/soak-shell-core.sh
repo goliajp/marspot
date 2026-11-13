@@ -20,8 +20,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
-LOG=/tmp/marspot-soak-shell-core.log
-RSS_LOG=/tmp/marspot-soak-shell-core.rss.tsv
+LOG="$(dev_run_log soak-shell-core)"
+RSS_LOG="$MARSPOT_STATE_DIR/soak-shell-core.rss.tsv"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
 
