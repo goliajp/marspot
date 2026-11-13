@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.328"  # a week the usage feed has no reading for is not a week with nothing used
-core    = "0.12.487"  # the checks made on every control and every run are a load each
-session = "0.11.327"  # the checks made on every control and every run are a load each
+core    = "0.12.488"  # a row kept in memory is blanked only as far as it was written
+session = "0.11.328"  # a row kept in memory is blanked only as far as it was written

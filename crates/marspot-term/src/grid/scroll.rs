@@ -51,8 +51,11 @@ impl Grid {
             // handed the row without it; the ring wants full rows
             let filed = if self.scrollback.keeps_wrapped_flags() { end } else { cols };
             let hint = RowHint { plain_from: row_mark.plain_from, wide: row_mark.wide };
-            let used = self.scrollback
-                .push_row(&self.cells[start..start + filed], self.wrapped[pr], hint);
+            // whatever was filed, nothing past the bound needs blanking
+            let used = self
+                .scrollback
+                .push_row(&self.cells[start..start + filed], self.wrapped[pr], hint)
+                .min(end);
             let mark = std::mem::take(&mut self.prompt[pr]);
             // The mirrors exist for the in-RAM variant, where there is
             // nowhere else to keep these.  A file-backed pane reads
