@@ -289,7 +289,8 @@ if n_below:
     print(f"{n_below} wall-clock reading(s) are below their floor; they do not gate.")
 vs = [r for r in rows if r["metric"].startswith("vs-best ")]
 if vs:
-    print("PRODUCT vs BEST OTHER TERMINAL (rounds min-max): " + ",  ".join(
+    read_on = baseline["competitors_snapshot"].get("captured_at", "an unknown day")
+    print(f"PRODUCT vs BEST OTHER TERMINAL (rounds min-max; the others were read on {read_on}): " + ",  ".join(
         f"{r['metric'].removeprefix('vs-best ')} "
         + ("no reading" if r.get("value") is None else
            f"{r['value']:.2f}x ({min(r['trials']):.2f}-{max(r['trials']):.2f})")
