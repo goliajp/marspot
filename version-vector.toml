@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.328"  # a week the usage feed has no reading for is not a week with nothing used
-core    = "0.12.358"  # a week the usage feed has no reading for has a row with no figure
+shell   = "0.7.360"  # the interface language follows the system when the system says its list changed
+core    = "0.12.441"  # copy and paste go through the pasteboard a sandbox names
 session = "0.11.201"  # the reader keeps three chunks, not four, ahead of a key's answer

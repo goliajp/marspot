@@ -12,19 +12,27 @@
 //! - [`TreeOut`]: a painted tree written into the instance buffers
 //!   the panels' own painters write;
 //! - [`preset`]: the shared controls as nodes, sized and painted by
-//!   the control's own functions.
+//!   the control's own functions;
+//! - [`panel`]: the frame and header every panel has;
+//! - [`KeptSurface`]: a surface and the instances it last painted,
+//!   which are its frame for as long as nothing it shows has changed.
 
 mod fit;
+pub mod kept;
 pub mod measure;
 pub mod out;
+pub mod panel;
 pub mod preset;
 pub mod tone;
 
+#[cfg(test)]
+pub(crate) mod preset_parity_tests;
 #[cfg(test)]
 mod row_replica_tests;
 #[cfg(test)]
 mod text_parity_tests;
 
+pub use kept::KeptSurface;
 pub use measure::{FontMeasure, exact_pt};
 pub use out::TreeOut;
 pub use tone::Tone;

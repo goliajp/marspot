@@ -46,7 +46,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 
-RUNLOG=/tmp/marspot-test-language-switch.log
+RUNLOG="$(dev_run_log test-language-switch)"
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 SETTINGS="$MARSPOT_STATE_DIR/settings.toml"
 SYSTEM_LANGUAGE="$MARSPOT_STATE_DIR/dev-system-language"

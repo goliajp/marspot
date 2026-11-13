@@ -263,19 +263,30 @@ pub fn paint_stepper(
     hovered: Option<StepperPart>,
 ) -> StepperRects {
     let r = stepper_rects(spec::snap(x), spec::snap(y_top));
-    let mut button = |rect: Rect, glyph: &str, part: StepperPart, enabled: bool| {
-        let base = palette::segment_bg();
-        let bg = if enabled && hovered == Some(part) { palette::hover(base) } else { base };
-        let fg = if enabled { palette::fg() } else { palette::disabled_fg() };
-        fill(p, rect, bg, c::BUTTON_RADIUS);
-        centred_text(p, rect, glyph, c::BUTTON_TEXT.pt(), c::BUTTON_TEXT.weight(), fg);
-    };
-    button(r.minus, "−", StepperPart::Minus, minus_enabled);
-    button(r.plus, "+", StepperPart::Plus, plus_enabled);
-    // The value is a number that changes under the pointer: in the
-    // terminal's fixed-width font it does not shift as digits change.
-    p.text_in(r.value, value, palette::fg(), marspot_term::layout::Alignment::Center);
+    paint_stepper_button(p, r.minus, StepperPart::Minus, minus_enabled, hovered == Some(StepperPart::Minus));
+    paint_stepper_button(p, r.plus, StepperPart::Plus, plus_enabled, hovered == Some(StepperPart::Plus));
+    paint_stepper_value(p, r.value, value);
     r
+}
+
+/// One of a stepper's two buttons, in the box `rect`.
+pub fn paint_stepper_button(p: &mut ViewPainter, rect: Rect, part: StepperPart, enabled: bool, hovered: bool) {
+    let base = palette::segment_bg();
+    let bg = if enabled && hovered { palette::hover(base) } else { base };
+    let fg = if enabled { palette::fg() } else { palette::disabled_fg() };
+    let glyph = match part {
+        StepperPart::Minus => "−",
+        StepperPart::Plus => "+",
+    };
+    fill(p, rect, bg, c::BUTTON_RADIUS);
+    centred_text(p, rect, glyph, c::BUTTON_TEXT.pt(), c::BUTTON_TEXT.weight(), fg);
+}
+
+/// The number between a stepper's buttons.  It changes under the
+/// pointer: in the terminal's fixed-width font it does not shift as
+/// digits change.
+pub fn paint_stepper_value(p: &mut ViewPainter, rect: Rect, value: &str) {
+    p.text_in(rect, value, palette::fg(), marspot_term::layout::Alignment::Center);
 }
 
 // ─── Danger icon button ─────────────────────────────────────────
