@@ -22,7 +22,6 @@ pub mod shortcuts_panel;
 pub mod shortcuts_view;
 pub mod scroll_view;
 pub mod process_panel;
-pub mod process_panel_paint;
 pub mod process_view;
 pub mod search_overlay;
 pub mod panel;
@@ -56,6 +55,8 @@ mod settings_view_tests;
 mod shortcuts_view_tests;
 #[cfg(test)]
 mod layout_view_tests;
+#[cfg(test)]
+mod process_view_tests;
 
 #[cfg(test)]
 mod language_snapshot_tests;
