@@ -395,7 +395,7 @@ fn account(
             .iter()
             .map(|&(label, util, hours, hm)| CcUsageWindowRender {
                 label: label.to_string(),
-                util,
+                util: Some(util),
                 reset_unix: Some(ACCOUNTS_NOW + hours * 3600),
                 span_secs: 7 * 86_400,
                 reset_hm: hm.to_string(),
