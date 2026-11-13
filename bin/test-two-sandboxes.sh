@@ -65,7 +65,11 @@ fi
 
 title() { "$PROBE" title "$1/sessions/$2" 2>/dev/null; }
 # the published frame itself; `screen` may answer from the record
-frame_shows() { "$PROBE" screen "$1/sessions/$2" 2>/dev/null | grep -qF -- "$3"; }
+frame_shows() {
+  local out
+  out=$("$PROBE" screen "$1/sessions/$2" 2>/dev/null)
+  [[ $out == *"$3"* ]]
+}
 
 cleanup
 FLAG_A=$'\360\237\207\257\360\237\207\265'

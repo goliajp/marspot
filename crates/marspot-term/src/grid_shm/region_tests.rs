@@ -84,4 +84,8 @@ fn a_region_without_an_identity_is_taken_only_from_a_session_that_writes_none() 
     assert!(from_old.is_ok(), "{:?}", from_old.err());
     assert!(from_new.is_err(), "an unsigned region passed for a signing session's");
     assert_eq!(after.is_ok(), signed, "a region is the session's exactly when it could be signed");
+    // macOS sizes a region in whole pages, which leaves room past the
+    // capacity an older core asked for
+    #[cfg(target_os = "macos")]
+    assert!(signed, "no room for an identity in a region an older core created");
 }
