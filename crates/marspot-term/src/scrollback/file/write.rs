@@ -23,13 +23,7 @@ impl FileScrollback {
         }
         // 1) Flush writer buffers so the rename captures complete data.
         self.bin.borrow_mut().flush();
-        // 2) Drop everything that holds an fd / mmap to the hot
-        //    files, so rename / unlink can succeed on platforms that
-        //    care (we're macOS so unlink-while-open is OK, but a
-        //    clean ordering makes the contract obvious).  We replace
-        //    fields with placeholders we re-overwrite below.
-        //
-        //    munmap any mmaps held on the hot files; their underlying
+        // 2) munmap any mmaps held on the hot files; their underlying
         //    inode is about to change identity (rename → cold path,
         //    then create fresh hot at the old path).  Reusing the old
         //    mmap pointers would point at the renamed file, which is
@@ -53,16 +47,6 @@ impl FileScrollback {
         // Drop the cold fds before rename overwrites their inodes.
         self.cold_bin_for_read = None;
         self.cold_idx_for_read = None;
-        // Drop hot writers + readers (they hold fds on the soon-to-be-
-        // renamed inode).  We rebuild them after rename.
-        // Take ownership of the writers' inner BufWriters so they drop here.
-        let _ = std::mem::replace(
-            &mut *self.bin.borrow_mut(),
-            crate::async_writer::AsyncWriter::new(dev_null_file()?, BIN_BUF_BYTES, BIN_DEPTH),
-        );
-        // Replace read fds with placeholders; we rebuild them post-rename.
-        self.bin_for_read = dev_null_file()?;
-        self.idx_for_read = dev_null_file()?;
         // 3) Delete any stale cold pair (defence in depth: rename
         //    on most filesystems would clobber, but be explicit).
         let _ = std::fs::remove_file(&self.cold_bin_path);
@@ -82,16 +66,27 @@ impl FileScrollback {
         // unreadable until the pane is reopened.
         self.cold_extras =
             super::super::sidecar::LineExtras::open_cold_for_read(&self.cold_bin_path, self.epoch);
-        // 5) Reopen fresh hot pair.
+        // 5) Reopen fresh hot pair.  The writer thread stays and is
+        //    given the new files: ending it and starting another, as
+        //    this used to, twice, was 0.9 ms of every rotation.
         let bin_w = std::fs::OpenOptions::new()
             .read(true)
             .append(true)
             .create(true)
             .open(&self.bin_path)?;
-        let mut bin = crate::async_writer::AsyncWriter::new(bin_w, BIN_BUF_BYTES, BIN_DEPTH);
+        let idx_w = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(&self.idx_path)?;
         self.epoch = new_epoch();
-        Self::write_header(&mut bin, self.epoch)?;
-        bin.flush();
+        {
+            let mut bin = self.bin.borrow_mut();
+            bin.swap_file(bin_w);
+            bin.pair(idx_w);
+            Self::write_header(&mut bin, self.epoch)?;
+            bin.flush();
+        }
         // The sidecars are keyed by index WITHIN the hot file, and the
         // new hot file starts those indices over.  Reopening against
         // the new epoch resets them; without this, the new file's line
@@ -100,11 +95,6 @@ impl FileScrollback {
         // goes with their file -- `mark_at` already answers "no mark"
         // for anything older than the current hot file.
         self.extras = super::super::sidecar::LineExtras::open_hot(&self.bin_path, self.epoch);
-        let idx_w = std::fs::OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .open(&self.idx_path)?;
         // 6) Reinstall read fds for hot.
         let bin_for_read = std::fs::OpenOptions::new()
             .read(true)
@@ -112,8 +102,6 @@ impl FileScrollback {
         let idx_for_read = std::fs::OpenOptions::new()
             .read(true)
             .open(&self.idx_path)?;
-        bin.pair(idx_w);
-        *self.bin.borrow_mut() = bin;
         self.bin_for_read = bin_for_read;
         self.idx_for_read = idx_for_read;
         self.bin_tail_offset = FILE_HEADER_BYTES;
@@ -619,6 +607,31 @@ mod tests {
             assert!(sb.cell_at(i, 5).is_some(), "row {i}: the tail cell was trimmed");
             assert_eq!(sb.cell_at(i, 6), None, "row {i}: the default cells after it were not");
         }
+    }
+
+    /// A rotation hands the writer thread its new files: it does not
+    /// end that thread and start another.
+    #[test]
+    fn a_rotation_keeps_its_writer_thread() {
+        let tmp = TmpDir::new("rotate-thread");
+        let cols = 8usize;
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1");
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("create");
+        let writer = sb.bin.borrow().thread_id();
+        let row: Vec<Cell> = (0..cols).map(|_| Cell { ch: '.', ..Default::default() }).collect();
+        let (mut epoch, mut rotations) = (sb.epoch, 0);
+        // 34 bytes a record against a cap of 1 MB: three rotations
+        for _ in 0..100_000 {
+            sb.push_line(&row, false);
+            if sb.epoch != epoch {
+                (epoch, rotations) = (sb.epoch, rotations + 1);
+            }
+        }
+        assert!(rotations >= 2, "the fixture has to rotate twice, it did {rotations} times");
+        assert_eq!(sb.bin.borrow().thread_id(), writer, "a rotation started another writer thread");
+        assert_eq!(sb.cell_at(99_999, 0).map(|c| c.ch), Some('.'));
+        assert_eq!(sb.cell_at(99_999 - 20_000, 0).map(|c| c.ch), Some('.'), "a row of the cold file");
     }
 
     /// F2+5 — rotation: when hot exceeds cap, rename hot → cold and
