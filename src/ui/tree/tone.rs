@@ -34,10 +34,13 @@ pub enum Tone {
     Warn,
     Danger,
     SurfaceBase,
+    OkText,
+    WarnText,
+    DangerText,
 }
 
 impl Tone {
-    pub const ALL: [Tone; 23] = [
+    pub const ALL: [Tone; 26] = [
         Tone::Fg,
         Tone::FgSecondary,
         Tone::FgMuted,
@@ -61,6 +64,9 @@ impl Tone {
         Tone::Warn,
         Tone::Danger,
         Tone::SurfaceBase,
+        Tone::OkText,
+        Tone::WarnText,
+        Tone::DangerText,
     ];
 
     /// The colour in the theme in force.
@@ -89,6 +95,9 @@ impl Tone {
             Tone::Warn => palette::warn(),
             Tone::Danger => palette::danger(),
             Tone::SurfaceBase => palette::surface_base(),
+            Tone::OkText => palette::severity_text(0),
+            Tone::WarnText => palette::severity_text(1),
+            Tone::DangerText => palette::severity_text(2),
         }
     }
 }

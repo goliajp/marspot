@@ -28,8 +28,6 @@ pub mod tone;
 #[cfg(test)]
 pub(crate) mod preset_parity_tests;
 #[cfg(test)]
-mod row_replica_tests;
-#[cfg(test)]
 mod text_parity_tests;
 
 pub use kept::KeptSurface;

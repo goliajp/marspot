@@ -54,6 +54,8 @@ pub const UI_FONT_POINT: f64 = 13.0;
 // `core-text` crate so we declare it directly.
 #[path = "font_language.rs"]
 mod language;
+#[path = "font_ui_shape.rs"]
+mod ui_shape;
 
 #[link(name = "CoreText", kind = "framework")]
 unsafe extern "C" {
@@ -694,44 +696,6 @@ impl FontCache {
         opts: crate::font_shape::ShapeOptions,
     ) -> Vec<crate::font_shape::ShapedGlyph> {
         self.shape_ui_weighted_opts_at_size(text, weight_q, opts, UI_FONT_POINT)
-    }
-
-    /// Phase 10c — shape at an explicit pt size, not just the
-    /// startup-time `UI_FONT_POINT`.  Lets the view system request
-    /// "SF Pro Bold at 28pt" for headers, "Body at 16pt" for demos,
-    /// etc.;  the chrome path used to be locked to 13pt because
-    /// `shape_ui_weighted_opts` always read `base_font.pt_size()`
-    /// from the startup-interned font, ignoring per-run requested
-    /// sizes.  Each `(weight, size_pt)` pair gets its own font_id +
-    /// atlas slot via `intern_ui_weighted_at_size`.
-    pub fn shape_ui_weighted_opts_at_size(
-        &mut self,
-        text: &str,
-        weight_q: u16,
-        opts: crate::font_shape::ShapeOptions,
-        size_pt: f64,
-    ) -> Vec<crate::font_shape::ShapedGlyph> {
-        if self.ui_font_idx == 0 || text.is_empty() {
-            return Vec::new();
-        }
-        let base_idx = self
-            .intern_ui_weighted_at_size(weight_q, size_pt)
-            .unwrap_or(self.ui_font_idx);
-        let Some(base_font) = self.fonts.fonts.get(base_idx) else { return Vec::new() };
-        let size_q = crate::glyph_atlas::GlyphKey::size_q_for(base_font.pt_size());
-        let ui_id = base_idx as u32;
-        // The cache and the shaper are both fields; take the cache out
-        // so the shaper can be borrowed while the cache is written.
-        let mut cache = std::mem::take(&mut self.shape_cache);
-        let shaper = &self.shaper;
-        let result = cache
-            .shape_with(text, ui_id, size_q, opts, |t, o| shaper.shape(t, ui_id, o))
-            .to_vec();
-        self.shape_cache = cache;
-        // Shaping may have registered fallback fonts in the table; the
-        // per-cell snapshots catch up before anything asks about them.
-        self.fonts.sync();
-        result
     }
 
     /// Phase 5 — intern (or fetch from cache) the SF Pro variant at

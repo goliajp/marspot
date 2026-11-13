@@ -75,6 +75,8 @@ pub struct Layout {
     pub(crate) inner: Vec<Rect>,
     pub(crate) text: Vec<TextBox>,
     pub(crate) scroll: [ScrollExtent; SCROLL_SLOTS],
+    /// The floating nodes, in the order they were described.
+    pub(crate) floats: Vec<u32>,
 }
 
 impl Layout {
@@ -117,10 +119,22 @@ impl Layout {
         self.text.clear();
         self.text.resize(n, TextBox::default());
         self.scroll = [ScrollExtent::default(); SCROLL_SLOTS];
+        self.floats.clear();
         if n == 0 {
             return;
         }
         Pass { tree, m: metrics, measure, out: self }.node(0, origin, c);
+        // a floating node was laid out wherever its parent happened to
+        // be and moved with it since: put each where it stands, the
+        // outer before one inside it
+        let mut floats = std::mem::take(&mut self.floats);
+        floats.sort_unstable();
+        for &f in &floats {
+            let at = tree.nodes[f as usize].float_at;
+            let r = self.rects[f as usize];
+            self.shift(tree, f, origin.0 + at.0 - r.x, origin.1 + at.1 - r.y);
+        }
+        self.floats = floats;
     }
 
     pub(crate) fn shift(&mut self, tree: &Tree, i: u32, dx: f64, dy: f64) {
@@ -208,6 +222,7 @@ impl Pass<'_> {
             Kind::HStack => self.stack(i, at, c, false),
             Kind::ZStack => self.zstack(i, at, c),
             Kind::Scroll => self.scroll(i, at, c),
+            Kind::Float => self.stack(i, at, c, true),
             Kind::Text => self.text(i, c),
             Kind::Spacer => c.clamp(c.min_w, c.min_h),
             Kind::Leaf | Kind::Rule => c.clamp(0.0, 0.0),
@@ -269,10 +284,23 @@ impl Pass<'_> {
         c.clamp(tb.w, tb.h)
     }
 
+    /// Lay a floating node out at its own size.  It is put in its
+    /// place when everything else has stopped moving.
+    pub(crate) fn float(&mut self, i: u32) {
+        if !self.out.floats.contains(&i) {
+            self.out.floats.push(i);
+        }
+        self.node(i, (0.0, 0.0), Constraints::loose(f64::INFINITY, f64::INFINITY));
+    }
+
     fn zstack(&mut self, i: u32, origin: (f64, f64), c: Constraints) -> Size {
         let tree = self.tree;
         let (mut w, mut h) = (0.0f64, 0.0f64);
         for ch in tree.children(i) {
+            if tree.nodes[ch as usize].kind == Kind::Float {
+                self.float(ch);
+                continue;
+            }
             let s = self.node(ch, origin, c);
             w = w.max(s.w);
             h = h.max(s.h);
@@ -280,6 +308,9 @@ impl Pass<'_> {
         let size = c.clamp(w, h);
         let (fh, fv) = tree.nodes[i as usize].style.align.factors();
         for ch in tree.children(i) {
+            if tree.nodes[ch as usize].kind == Kind::Float {
+                continue;
+            }
             let r = self.out.rects[ch as usize];
             self.out.shift(tree, ch, (size.w - r.w) * fh, (size.h - r.h) * fv);
         }

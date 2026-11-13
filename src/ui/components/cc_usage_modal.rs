@@ -5,6 +5,8 @@
 //! cards and the timeline go is `cc_usage_layout`; drawing them is
 //! `cc_usage_paint`.
 
+use std::fmt::Write;
+
 use marspot_term::layout::Rect;
 
 use crate::ui::components::cc_usage_layout as usage_layout;
@@ -104,10 +106,10 @@ const DAY_SECS: i64 = 86_400;
 /// Deriving the range from the extents makes clamping impossible, which
 /// is what lets the label sit immediately right of a bar end that is
 /// always the truth.
-pub fn timeline_range(now: i64, extents: &[(i64, i64)]) -> (f64, f64) {
+pub fn timeline_range(now: i64, extents: impl IntoIterator<Item = (i64, i64)>) -> (f64, f64) {
     let mut lo = now as f64;
     let mut hi = now as f64;
-    for &(start, end) in extents {
+    for (start, end) in extents {
         lo = lo.min(start as f64);
         hi = hi.max(end as f64);
     }
@@ -197,7 +199,7 @@ impl Clock {
 
 /// One account card.  Pre-formatted by the caller; the renderer only
 /// lays out and paints.
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq)]
 pub struct CcUsageAccountRender {
     pub name: String,
     pub email: String,
@@ -219,7 +221,7 @@ pub struct CcUsageAccountRender {
 }
 
 /// One metered window of an account.
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq)]
 pub struct CcUsageWindowRender {
     /// Row label as printed, lower case ("5h", "fable", "spark").
     pub label: String,
@@ -237,27 +239,95 @@ pub struct CcUsageWindowRender {
     pub reset_hm: String,
 }
 
+// Cloned by hand so that a kept copy is brought up to date in the
+// strings it already has.
+impl Clone for CcUsageAccountRender {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            email: self.email.clone(),
+            status_label: self.status_label.clone(),
+            status_severity: self.status_severity,
+            reset_label: self.reset_label.clone(),
+            windows: self.windows.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, from: &Self) {
+        self.name.clone_from(&from.name);
+        self.email.clone_from(&from.email);
+        self.status_label.clone_from(&from.status_label);
+        self.status_severity = from.status_severity;
+        self.reset_label.clone_from(&from.reset_label);
+        self.windows.clone_from(&from.windows);
+    }
+}
+
+impl Clone for CcUsageWindowRender {
+    fn clone(&self) -> Self {
+        Self {
+            label: self.label.clone(),
+            util: self.util,
+            reset_unix: self.reset_unix,
+            span_secs: self.span_secs,
+            reset_hm: self.reset_hm.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, from: &Self) {
+        self.label.clone_from(&from.label);
+        self.reset_hm.clone_from(&from.reset_hm);
+        (self.util, self.reset_unix, self.span_secs) = (from.util, from.reset_unix, from.span_secs);
+    }
+}
+
 impl CcUsageWindowRender {
     /// The reading as the card and the timeline print it: `42%`, or a
     /// dash where there is none.
+    #[cfg(test)]
     pub fn percent(&self) -> String {
-        self.util.map_or_else(|| "—".to_string(), |u| format!("{:.0}%", u * 100.0))
+        let mut out = String::new();
+        self.write_percent(&mut out);
+        out
+    }
+
+    /// [`Self::percent`] appended to `out`.
+    pub fn write_percent(&self, out: &mut impl Write) {
+        let _ = match self.util {
+            Some(u) => write!(out, "{:.0}%", u * 100.0),
+            None => write!(out, "—"),
+        };
     }
 
     /// What is written right of this window's timeline bar:
     /// `7d 100% 12:00`.
+    #[cfg(test)]
     pub fn tag(&self) -> String {
-        format!("{} {} {}", self.label, self.percent(), self.reset_hm)
+        let mut out = String::new();
+        self.write_tag(&mut out);
+        out
     }
-}
 
-/// What the pointer is on: nothing the panel reacts to, or the
-/// header's close button.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Hover {
-    #[default]
-    None,
-    Close,
+    /// [`Self::tag`] appended to `out`.
+    pub fn write_tag(&self, out: &mut impl Write) {
+        let _ = write!(out, "{} ", self.label);
+        self.write_percent(out);
+        let _ = write!(out, " {}", self.reset_hm);
+    }
+
+    /// How many characters [`Self::tag`] is.
+    pub fn tag_cols(&self) -> usize {
+        struct Count(usize);
+        impl Write for Count {
+            fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                self.0 += s.chars().count();
+                Ok(())
+            }
+        }
+        let mut n = Count(0);
+        self.write_tag(&mut n);
+        n.0
+    }
 }
 
 /// Everything one frame of the panel is drawn from.
@@ -271,18 +341,10 @@ pub struct CcUsageRender {
     /// drawing cards.
     pub accounts: Vec<CcUsageAccountRender>,
     pub clock: Clock,
-    /// From [`hover_at`].
-    pub hover: Hover,
-}
-
-/// What `(x, y)` is on in the panel at `rect`.  The painter highlights
-/// it and a click acts on it, so the two cannot disagree.
-pub fn hover_at(rect: Rect, x: f64, y: f64) -> Hover {
-    if PanelChrome::new(rect, 0.0).hit_close(x, y) {
-        Hover::Close
-    } else {
-        Hover::None
-    }
+    /// Where the pointer is, for a scene drawn without anyone having
+    /// followed the pointer over the surface.
+    pub pointer: Option<(f64, f64)>,
+    pub surface: std::rc::Rc<std::cell::RefCell<crate::ui::components::cc_usage_view::CcUsageSurface>>,
 }
 
 /// How many accounts the two feeds hold between them, and the most
@@ -328,38 +390,66 @@ pub fn panel_rect(
 /// Clip `s` to `cols` monospace columns, marking the cut with `…`.
 /// Returns empty when there isn't room for at least a few glyphs —
 /// a lone ellipsis carries no information and just adds noise.
+#[cfg(test)]
 pub(crate) fn fit_ellipsis(s: &str, cols: f64) -> String {
+    let mut out = s.to_string();
+    cut_to_columns(&mut out, cols);
+    out
+}
+
+/// [`fit_ellipsis`] of what `s` holds, left in `s`.
+pub(crate) fn cut_to_columns(s: &mut String, cols: f64) {
     let fit = cols.floor().max(0.0) as usize;
     if s.chars().count() <= fit {
-        return s.to_string();
+        return;
     }
     if fit < 3 {
-        return String::new();
+        return s.clear();
     }
-    s.chars().take(fit - 1).chain(['…']).collect()
+    let end = s.char_indices().nth(fit - 1).map_or(s.len(), |(at, _)| at);
+    s.truncate(end);
+    s.push('…');
 }
 
 /// Clip `s` to `max_w` as `measure` measures it, marking the cut with
 /// `…`.  For proportional text, where a character count says nothing
 /// about width.  Empty when not even the mark fits.
+#[cfg(test)]
 pub(crate) fn fit_measured(s: &str, max_w: f64, measure: &mut dyn FnMut(&str) -> f64) -> String {
+    let mut out = String::new();
+    fit_measured_into(s, max_w, measure, &mut out);
+    out
+}
+
+/// [`fit_measured`] written into `out`, which is cleared first.
+pub(crate) fn fit_measured_into(s: &str, max_w: f64, measure: &mut dyn FnMut(&str) -> f64, out: &mut String) {
+    out.clear();
     if measure(s) <= max_w {
-        return s.to_string();
+        out.push_str(s);
+        return;
     }
-    let chars: Vec<char> = s.chars().collect();
-    let cut = |keep: usize| -> String { chars[..keep].iter().chain(&['…']).collect() };
+    // the first `keep` characters and the mark
+    fn cut(s: &str, keep: usize, out: &mut String) {
+        let end = s.char_indices().nth(keep).map_or(s.len(), |(at, _)| at);
+        out.clear();
+        out.push_str(&s[..end]);
+        out.push('…');
+    }
     // A longer prefix is never narrower, so the longest one that fits
     // can be searched for rather than walked down to.
-    let (mut fits, mut over) = (0usize, chars.len());
+    let (mut fits, mut over) = (0usize, s.chars().count());
     while over - fits > 1 {
         let mid = (fits + over) / 2;
-        if measure(&cut(mid)) <= max_w { fits = mid } else { over = mid }
+        cut(s, mid, out);
+        if measure(out) <= max_w { fits = mid } else { over = mid }
     }
     // The mark straight after a full stop or a space reads as four
     // dots, or as a mark that has come loose from its word.
-    let keep = chars[..fits].iter().rposition(|c| !matches!(c, '.' | ' ')).map_or(0, |i| i + 1);
-    let out = cut(keep);
-    if measure(&out) <= max_w { out } else { String::new() }
+    let keep = s.chars().take(fits).enumerate().filter(|(_, c)| !matches!(c, '.' | ' ')).last().map_or(0, |(i, _)| i + 1);
+    cut(s, keep, out);
+    if measure(out) > max_w {
+        out.clear();
+    }
 }
 
 #[cfg(test)]
@@ -456,7 +546,7 @@ mod tests {
             .map(|r| (r - 5 * 3_600, *r))
             .chain(resets_7d.iter().map(|r| (r - 7 * 86_400, *r)))
             .collect();
-        let (t0, t1) = timeline_range(now, &extents);
+        let (t0, t1) = timeline_range(now, extents.iter().copied());
         for (start, end) in extents {
             let f0 = (start as f64 - t0) / (t1 - t0);
             let f1 = (end as f64 - t0) / (t1 - t0);
@@ -471,7 +561,7 @@ mod tests {
     #[test]
     fn a_degenerate_feed_falls_back_to_the_fixed_span() {
         let now = 1785538544i64;
-        let (t0, t1) = timeline_range(now, &[(now - 60, now + 60)]);
+        let (t0, t1) = timeline_range(now, [(now - 60, now + 60)]);
         assert!((t1 - t0 - TIMELINE_SPAN_SECS).abs() < 1.0);
     }
 
@@ -515,25 +605,6 @@ mod tests {
             local.snap_to_days(now as f64, (now + 86_400) as f64),
             crate::cc_usage::snap_range_to_local_days(now as f64, (now + 86_400) as f64),
         );
-    }
-
-    /// The header is the shared chrome's: its close button answers
-    /// where the chrome draws it.
-    #[test]
-    fn the_close_button_is_hit_where_the_chrome_draws_it() {
-        let rect = panel_rect(10, 2, 2800.0, 1300.0, 8.0, 16.0, 30.0);
-        let close = PanelChrome::new(rect, 0.0).close;
-        let (cx, cy) = (close.x + close.w / 2.0, close.y_top + close.h / 2.0);
-        assert_eq!(hover_at(rect, cx, cy), Hover::Close);
-        for (x, y) in [
-            (close.x + 0.5, close.y_top + 0.5),
-            (close.x + close.w - 0.5, close.y_top + close.h - 0.5),
-        ] {
-            assert_eq!(hover_at(rect, x, y), Hover::Close, "a corner of the button is the button");
-        }
-        assert_eq!(hover_at(rect, close.x - 4.0, cy), Hover::None, "beside it is the header");
-        assert_eq!(hover_at(rect, cx, close.y_top + close.h + 4.0), Hover::None);
-        assert_eq!(hover_at(rect, rect.x + rect.w + 4.0, cy), Hover::None, "outside the frame");
     }
 
     /// The panel takes the widest step a panel has and never leaves
