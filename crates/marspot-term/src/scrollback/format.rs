@@ -88,15 +88,6 @@ pub(super) fn hot_bytes_cap() -> u64 {
         .unwrap_or(HOT_BYTES_CAP_DEFAULT)
 }
 
-/// Placeholder File handle used during `rotate_to_cold` to hold the
-/// `File`-typed fields while the real files are being renamed +
-/// reopened.  Opening `/dev/null` gives us a real `File` so the
-/// fields stay non-Option without needing `Option<File>` and the
-/// associated unwraps everywhere on the hot read paths.
-pub(super) fn dev_null_file() -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new().read(true).open("/dev/null")
-}
-
 pub(super) fn read_exact_at(f: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
     use std::os::unix::fs::FileExt;
     f.read_exact_at(buf, offset)

@@ -17,11 +17,15 @@
 //! That ran inline in `append`, which runs in the L3 main loop's
 //! `pump`, so crossing the cap froze the pane — measured in the field
 //! at 10+ seconds under IO contention, with the pane recovering on its
-//! own afterwards.  Rotation is a single `rename`, so the same event
-//! now costs microseconds and cannot stall the loop.  It is also
-//! strictly better on retention: the old scheme dropped to exactly
-//! 50 MiB of history at every compaction, this one keeps between 50
-//! and 100 MiB, for the same disk ceiling.
+//! own afterwards.  Rotation moves no data.  It was still 10 to 15 ms
+//! of that loop every 50 MiB while `append` did it itself -- waiting
+//! for the writer thread, then for the system to give back the segment
+//! the renaming replaced -- so `append` only asks for it now: the
+//! writer thread renames, and the replaced segment is deleted on yet
+//! another thread where the process has one (`.1.old` meanwhile).  It
+//! is also strictly better on retention: the old scheme dropped to
+//! exactly 50 MiB of history at every compaction, this one keeps
+//! between 50 and 100 MiB, for the same disk ceiling.
 //!
 //! Disk location: `~/Library/Caches/marspot/sessions/<id>/bytelog`.
 //! Survives daemon restarts so reattach from a fresh process also gets
@@ -62,6 +66,8 @@ pub struct ByteLog {
     /// The bytes still all get written — just not on this thread.
     file: crate::async_writer::AsyncWriter,
     bytes_written: u64,
+    /// Size at which the live segment is retired.
+    segment_bytes: u64,
 }
 
 impl ByteLog {
@@ -69,6 +75,8 @@ impl ByteLog {
         let dir = sessions_dir().join(session_id.to_string());
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("bytelog");
+        // a segment the last process was still deleting when it ended
+        let _ = std::fs::remove_file(crate::async_writer::doomed_path(&path.with_extension("1")));
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -79,6 +87,7 @@ impl ByteLog {
             path,
             file: crate::async_writer::AsyncWriter::new(file, BYTELOG_WRITE_BUF, 3),
             bytes_written,
+            segment_bytes: BYTELOG_SEGMENT_BYTES,
         };
         // Logs written by the pre-rotation scheme can be up to the full
         // 100 MiB ceiling in a single file.  Retire such a segment on
@@ -95,12 +104,15 @@ impl ByteLog {
     pub fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.file.write(bytes);
         self.bytes_written += bytes.len() as u64;
-        if self.bytes_written > BYTELOG_SEGMENT_BYTES {
-            // Best-effort rotation: on failure the live segment just
-            // keeps growing until the next append retries.  Unlike the
-            // copy it replaced, a retry is cheap, so a transient
-            // failure can't turn into a permanent per-append tax.
-            let _ = self.rotate();
+        if self.bytes_written > self.segment_bytes {
+            // The writer thread retires the segment when it gets to
+            // this point of the stream, and this thread does not wait:
+            // waiting for what was queued, and for the segment before
+            // last to be freed, stopped the parser for milliseconds
+            // every 50 MiB of a flood.  If the writer cannot, the live
+            // segment grows by a segment more before it is asked again.
+            self.file.rotate(self.path.clone(), self.path.with_extension("1"));
+            self.bytes_written = 0;
         }
         Ok(())
     }
@@ -311,6 +323,83 @@ mod tests {
                 "the rotating append took {trigger:?} — data is being copied, not renamed"
             );
         }
+    }
+
+    /// The append that retires a segment returns while the writer
+    /// thread is stuck in a write, and the stream is whole across the
+    /// seam once the writer gets on.
+    #[test]
+    fn a_rotating_append_does_not_wait_for_the_writer() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::FileTypeExt;
+
+        let sandbox = crate::test_env::sandbox_state_dir();
+        let id = 13;
+        let dir = sandbox.path().join("sessions").join(id.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        // a live segment that takes a pipe's worth and then blocks
+        // whoever writes to it, until somebody reads
+        let live = dir.join("bytelog");
+        let c_path = std::ffi::CString::new(live.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let mut log = ByteLog::open(id).unwrap();
+        log.segment_bytes = 100 * 1024;
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let appender = std::thread::spawn(move || {
+            log.append(&vec![b'a'; 64 * 1024]).unwrap();
+            // this one crosses the segment size
+            log.append(&vec![b'b'; 64 * 1024]).unwrap();
+            let _ = done_tx.send(());
+            log
+        });
+        assert!(
+            done_rx.recv_timeout(std::time::Duration::from_secs(20)).is_ok(),
+            "the append that retires a segment waited for the writer thread"
+        );
+        let mut log = appender.join().unwrap();
+
+        let mut retired = vec![0u8; 128 * 1024];
+        std::fs::File::open(&live).unwrap().read_exact(&mut retired).unwrap();
+        assert!(retired[..64 * 1024].iter().all(|&b| b == b'a'));
+        assert!(retired[64 * 1024..].iter().all(|&b| b == b'b'));
+
+        log.append(b"after").unwrap();
+        log.flush();
+        assert!(dir.join("bytelog.1").metadata().unwrap().file_type().is_fifo(), "the pipe was not retired");
+        assert_eq!(std::fs::read(&live).unwrap(), b"after");
+    }
+
+    /// Two segments are kept however often the log rotates: the one
+    /// before last is deleted, and so is one a dead process left behind.
+    #[test]
+    fn nothing_is_left_of_the_segment_before_last() {
+        let sandbox = crate::test_env::sandbox_state_dir();
+        let id = 14;
+        let dir = sandbox.path().join("sessions").join(id.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        let doomed = dir.join("bytelog.1.old");
+        std::fs::write(&doomed, b"left behind").unwrap();
+
+        let mut log = ByteLog::open(id).unwrap();
+        assert!(!doomed.exists(), "what a dead process left was not deleted on open");
+        log.segment_bytes = 1024;
+        for part in *b"abcd" {
+            log.append(&vec![part; 1500]).unwrap();
+        }
+        log.append(b"e").unwrap();
+        log.flush();
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        while doomed.exists() {
+            assert!(Instant::now() < deadline, "the segment before last was never deleted");
+            std::thread::yield_now();
+        }
+        assert_eq!(std::fs::read(dir.join("bytelog.1")).unwrap(), vec![b'd'; 1500]);
+        assert_eq!(std::fs::read(dir.join("bytelog")).unwrap(), b"e");
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
     }
 
     /// A legacy oversized log (written by the copy-compaction scheme,

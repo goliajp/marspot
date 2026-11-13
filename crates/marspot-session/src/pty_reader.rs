@@ -52,7 +52,14 @@ const READ_BUF_BYTES: usize = 64 * 1024;
 /// Chunks that exist at all: the reader fills one only when the loop
 /// has handed one back, so a program that writes faster than the
 /// parser reads waits in the PTY instead of filling this process.
-const CHUNKS: usize = 4;
+///
+/// What a parser that cannot keep up has queued is also what stands
+/// between a key and its answer on screen: with four chunks a key typed
+/// into such a flood was answered 0.93 ms later at the median, with
+/// three 0.67 ms and with two 0.43 ms.  Two left the parser waiting for
+/// the reader now and then, 1 to 1.5 % of one stream's throughput;
+/// three cost 0.4 %, inside what one run differs from the next by.
+const CHUNKS: usize = 3;
 
 /// How long bulk output may pause before what has been gathered is
 /// handed to an idle parser.  Output shorter than one full read never
