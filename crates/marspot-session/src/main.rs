@@ -22,6 +22,7 @@
 
 mod control_reader;
 mod control_writer;
+mod frames;
 mod snapshot_writer;
 use control_reader::ControlReaders;
 use control_writer::ControlWriter;
@@ -45,12 +46,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use marspot_term::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
-use marspot_term::grid_shm::{
-    GridShmWriter, ENV_SHM_FD, FLAG_ALT_SCROLL, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE,
-    FLAG_CURSOR_VISIBLE,
-    FLAG_ALT_SCREEN, FLAG_MOUSE_ANY_MOTION, FLAG_MOUSE_DRAG, FLAG_MOUSE_SGR,
-    FLAG_MOUSE_TRACKING,
-};
+use marspot_term::grid_shm::{GridShmWriter, ENV_SHM_FD};
 use marspot_term::input_core::{MarspotKeyEvent, Modifiers};
 use marspot_term::render::grid_selection_text;
 use marspot_term::scrollback_search::{
@@ -67,7 +63,6 @@ use handoff::{
     try_resume_handoff, write_handoff_manifest,
 };
 use local_session::LocalSession;
-use publish_gate::{BlankGate, FloodGate, SyncGate, grid_is_blank};
 
 /// RFC-003 step 1c. Two session backends coexist:
 ///
@@ -500,56 +495,6 @@ fn state_str(s: SessionState) -> &'static str {
     }
 }
 
-/// Publish the session's grid window at `view_offset` (rows up from the
-/// live tail, clamped to the available scrollback) + cursor/mode flags
-/// into the shared framebuffer for L2 to render.  Returns `true` when
-/// the publish actually wrote a new snapshot (i.e. the grid+cursor+
-/// flags differ from the previous publish).  The caller uses the bool
-/// to decide whether to send a GridReady poke — skipping the poke on
-/// a content-identical publish is what keeps idle L2 asleep when a TUI
-/// pumps the PTY at its own redraw cadence without moving any cell.
-fn publish(shm: &mut GridShmWriter, session: &SessionImpl, view_offset: u16) -> bool {
-    let term = session.terminal();
-    let mut flags = 0u32;
-    if term.cursor_visible() {
-        flags |= FLAG_CURSOR_VISIBLE;
-    }
-    if term.cursor_key_application_mode() {
-        flags |= FLAG_APP_CURSOR_KEYS;
-    }
-    if term.bracketed_paste_mode() {
-        flags |= FLAG_BRACKETED_PASTE;
-    }
-    if term.mouse_tracking_mode() != marspot_term::terminal::MouseTrackingMode::Off {
-        flags |= FLAG_MOUSE_TRACKING;
-    }
-    if term.mouse_sgr_encoding() {
-        flags |= FLAG_MOUSE_SGR;
-    }
-    match term.mouse_tracking_mode() {
-        marspot_term::terminal::MouseTrackingMode::ButtonEvent => flags |= FLAG_MOUSE_DRAG,
-        marspot_term::terminal::MouseTrackingMode::AnyEvent => {
-            flags |= FLAG_MOUSE_DRAG | FLAG_MOUSE_ANY_MOTION
-        }
-        _ => {}
-    }
-    if term.in_alt_screen() {
-        flags |= FLAG_ALT_SCREEN;
-    }
-    // The program's own statement that the wheel is the arrow keys
-    // here — see `Terminal::alt_scroll`.  Published so L2 routes on
-    // what it was told, not on what it can infer from the picture.
-    if term.alt_scroll_mode() {
-        flags |= FLAG_ALT_SCROLL;
-    }
-    // Clamp here too: L2 clamps against the scrollback_len it last saw, but
-    // scrollback can shrink (alt-screen enter / reset) between L2's request
-    // and this publish, so never hand the writer an out-of-range offset.
-    let off = view_offset.min(term.grid().scrollback_len() as u16);
-    shm.publish_title(term.osc_title());
-    shm.publish_if_changed(term.grid(), off, flags)
-}
-
 /// Encode one forwarded keystroke with L3's own terminal mode flags,
 /// write it to the PTY, and local-echo printable bytes ahead of the
 /// round trip. Returns whether the echo painted the grid (so the caller
@@ -662,58 +607,6 @@ fn setup_control_socket(readers: &mut ControlReaders, tx: Sender<SessionEvent>) 
     }
 }
 
-/// Publish the grid and, if connected to L2, poke it so it re-reads the
-/// shm — keeps L2 event-driven instead of polling per frame.
-fn publish_and_poke(
-    shm: &mut GridShmWriter,
-    session: &mut SessionImpl,
-    view_offset: u16,
-    gate: &mut SyncGate,
-    blank_gate: &mut BlankGate,
-    mut poke: Option<&mut ControlWriter>,
-) {
-    // A clipboard write goes out before any of the gates below.  It
-    // is not a frame and it is not about the grid: a program that
-    // yanked something should not have to wait for a redraw, and the
-    // sync-output gate can withhold one indefinitely.
-    if let Some(text) = session.terminal_mut().take_osc_clipboard()
-        && let Some(w) = poke.as_deref_mut()
-    {
-        let _ = w.send(Frame::new(MsgType::PaneClipboardWrite, text.into_bytes()));
-    }
-
-    // Withheld frames are not lost: the bytes are already in the grid,
-    // and the publish that follows the closing `l` carries all of them
-    // at once — which is the whole point of the mode.
-    if gate.hold(session.terminal().sync_output_active()) {
-        return;
-    }
-    if blank_gate.hold(grid_is_blank(session.terminal().grid())) {
-        return;
-    }
-    gate.discharged();
-    blank_gate.discharged();
-    let changed = publish(shm, session, view_offset);
-    // F3+3.6 — OSC 7 push-based cwd publish removed; L2 now pull-
-    // fetches cwd via `proc_pidinfo` when the user opens LayoutModal.
-    let _ = &mut poke;
-    // Dedup: a content-identical publish doesn't wake L2.  Without
-    // this, busy TUIs (claudecode, htop, vim cursor) emit redraw
-    // bytes that produced bit-identical shm snapshots, and each one
-    // woke L2 for a full re-render — measured ~30 L3Ready/s at idle
-    // before the gate.  When the grid genuinely changed we still
-    // poke once, same as before.
-    if !changed {
-        return;
-    }
-    if let Some(w) = poke {
-        // Best-effort: a dead socket just means L2 went away; the next
-        // read EOF tears the reader down and the session keeps running.
-        // Queued, never written inline — see `ControlWriter`.
-        let _ = w.send(Frame::new(MsgType::GridReady, Vec::new()));
-    }
-}
-
 /// Bring up the grid framebuffer and report its geometry. When L2 owns
 /// the region (`MARSPOT_SHM_FD` set) we take the writer role on the
 /// inherited fd and adopt the region's dims; standalone we self-create
@@ -804,10 +697,8 @@ fn main() {
     // owns the region it sized it to the on-screen cell rect; we must
     // drive the session at exactly those dims, since the grid we publish
     // has to fit the region (a mismatch would overflow the mapping).
-    let (mut shm, cols, rows) = setup_shm();
-    let mut sync_gate = SyncGate::default();
-    let mut blank_gate = BlankGate::default();
-    let mut flood_gate = FloodGate::default();
+    let (shm, cols, rows) = setup_shm();
+    let mut frames = frames::Frames::new(shm);
 
     // Phase 2c: when we own the PTY, also own the UDS control socket
     // + registry entry so L2 (Phase 3) can discover us after a swap.
@@ -1062,8 +953,8 @@ fn main() {
         cols = cols,
         rows = rows
     );
-    shm.attach_clusters(session.id());
-    shm.attach_title(session.id());
+    frames.shm().attach_clusters(session.id());
+    frames.shm().attach_title(session.id());
 
     // SIGTERM and SIGHUP become events on the main loop; see
     // `signal_events`.  Best-effort: if installing fails the L3 still
@@ -1104,18 +995,8 @@ fn main() {
         Some(s) => Some(s),
         None => setup_control_socket(&mut readers, ev_tx.clone()),
     };
-    // Scrollback view offset L2 last asked us to publish (0 = live tail).
-    let mut view_offset: u16 = 0;
-    // Track the grid's scroll-push counter so we can auto-pin
-    // `view_offset` when the live grid scrolls a line into scrollback
-    // while the user is viewing scrollback (`view_offset > 0`).  Without
-    // this, every PTY line the shell emits while the user is scrolled
-    // back shifts the visible content downward by one row — the
-    // "老内容被新内容覆盖" symptom.  L2's `pump_all` runs the symmetric
-    // bump so the two sides stay in lockstep without an extra
-    // forward_scroll round-trip.
-    let mut last_scroll_push: u64 = session.terminal().grid().scroll_push_count();
-    publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, &mut blank_gate, poke.as_mut());
+    frames.follow_scroll_from(&session);
+    frames.publish(&mut session, poke.as_mut());
 
     // RFC-002 §4 (architectural correction over earlier step 6):
     // shelld (L4) owns the Terminal SoT now.  L3 no longer pushes
@@ -1151,10 +1032,6 @@ fn main() {
 /// no business taking a tenth of a second, so anything past this is
 /// already anomalous and worth a line in the log.
 const LOOP_STALL_THRESHOLD: Duration = Duration::from_millis(150);
-
-/// Most one iteration spends parsing before it goes round again to
-/// publish, take keys and apply a resize. A frame at 120 Hz.
-const PUMP_BUDGET: Duration = Duration::from_millis(8);
 
 
 const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
@@ -1239,24 +1116,14 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         });
     }
     let snapshot_writer = SnapshotWriter::spawn(session.id());
-    let mut output_queued = false;
     // settings and reachability, by file events: see `upkeep`
     let mut upkeep = upkeep::Upkeep::new(session.id(), ev_tx.clone());
     loop {
-        // A gate that is holding a frame owes a flush even if the PTY
-        // has gone quiet: without this, a program that wipes the
-        // screen and then says nothing would leave the pane showing
-        // the content it wiped, forever.  Both gates release inside
-        // their own cap, so waking a little sooner than the shorter
-        // one is enough.
         // A local-echo guess that nothing answers has to be taken
         // back on a timer, not on the next byte — a `sudo` password
         // prompt sends no bytes at all until Enter, and the guesses
         // would otherwise sit on screen showing what was typed.
-        let owed = sync_gate.owes_a_frame()
-            || blank_gate.owes_a_frame()
-            || session.terminal().predictions_pending();
-        let wait = owed.then_some(Duration::from_millis(10));
+        let wait = session.terminal().predictions_pending().then_some(Duration::from_millis(10));
         // Nothing else puts a limit on the sleep of an idle session.
         // What is still owed on a clock is owed for something that
         // happened: a snapshot of content that changed, a tally of
@@ -1267,13 +1134,11 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         let tally_due = ((t.predictions_hit, t.predictions_miss) != predict_seen)
             .then(|| PREDICT_REPORT_EVERY.saturating_sub(last_predict_report.elapsed()));
         // see `reply_guard` and `line_discipline`: both look often for a while
-        let wait = [wait, flood_gate.due_in(), upkeep.wait(), snapshot_due, tally_due, session.reply_poll_every()]
+        let wait = [wait, frames.due_in(), upkeep.wait(), snapshot_due, tally_due, session.reply_poll_every()]
             .into_iter()
             .flatten()
             .min();
-        // the reader's wakes for what is still queued were taken by
-        // the drain below last time round
-        let wait = if output_queued { Some(Duration::ZERO) } else { wait };
+        let wait = if frames.output_queued() { Some(Duration::ZERO) } else { wait };
         let got = match wait {
             Some(wait) => ev_rx.recv_timeout(wait),
             None => ev_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
@@ -1332,7 +1197,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                         );
                         session.hold_grid(false);
                     }
-                    flood_gate.typed();
+                    frames.typed();
                     predicted |= handle_key(&mut session, e, m)
                 }
                 SessionEvent::ResetAttrs => {
@@ -1410,11 +1275,11 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 // back through the normal pump → republish (no local
                 // predict — bulk text isn't latency-sensitive like typing).
                 SessionEvent::Paste(text) => {
-                    flood_gate.typed();
+                    frames.typed();
                     handle_paste(&mut session, &text)
                 }
                 SessionEvent::InjectInput(bytes) => {
-                    flood_gate.typed();
+                    frames.typed();
                     // Raw write to PTY — no bracketed-paste, no key
                     // encoding.  A dead PTY just means the shell exited
                     // and we'll be torn down next, so that stays quiet;
@@ -1728,14 +1593,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                             // L2 sees is whatever the next PTY burst
                             // triggers — until then the pane renders
                             // empty (looks black).
-                            publish_and_poke(
-                                &mut shm,
-                                &mut session,
-                                view_offset,
-                                &mut sync_gate,
-                                &mut blank_gate,
-                                poke.as_mut(),
-                            );
+                            frames.publish(&mut session, poke.as_mut());
                             lx_event!(
                                 "L3_UDS_CLIENT_ADOPTED",
                                 "control reader spawned on UDS stream"
@@ -1752,16 +1610,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
             }
         }
         if want_shutdown {
-            // Final pump before post-loop dispatcher decides
-            // execv-handoff vs clean-exit.  Bounded: the reader is
-            // still running, and a program that floods faster than the
-            // parser reads would keep an unbounded one here for as long
-            // as it floods.  What is still queued is parsed once the
-            // reader has been stopped.
-            watch.phase("resize-pump");
-            let _ = session.pump_within(PUMP_BUDGET);
-            watch.phase("resize-publish");
-            publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, &mut blank_gate, poke.as_mut());
+            frames.last_turn(&mut session, poke.as_mut(), &mut watch);
             break;
         }
         let resized = pending_resize.is_some();
@@ -1778,92 +1627,15 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 );
             }
         }
-        // A scroll changes which window we publish even with no new output.
-        let scrolled = match pending_scroll {
-            Some(off) if off != view_offset => {
-                view_offset = off;
-                true
-            }
-            _ => false,
+        let n = match frames.turn(
+            &mut session,
+            poke.as_mut(),
+            &mut watch,
+            frames::Shown { predicted, resized, modes_changed, scroll: pending_scroll },
+        ) {
+            frames::Turn::Parsed(n) => n,
+            frames::Turn::Exited => break,
         };
-
-        watch.phase("pump");
-        let (n, queued) = session.pump_within(PUMP_BUDGET);
-        output_queued = queued;
-        // Auto-pin view_offset on scrollback push: when the grid scrolls
-        // a row into scrollback while the user is viewing history,
-        // shift view_offset by the same delta so the visible window
-        // tracks the same absolute content instead of sliding down.
-        // L2 runs the symmetric bump in `pump_all` so the two stay in
-        // sync without an extra forward_scroll round-trip.
-        let cur_scroll_push = session.terminal().grid().scroll_push_count();
-        if view_offset > 0 && cur_scroll_push > last_scroll_push {
-            let delta = (cur_scroll_push - last_scroll_push).min(u16::MAX as u64) as u16;
-            let max = session.terminal().grid().scrollback_len() as u16;
-            // F1+8 — `.min(max)` would clamp view_offset DOWN when
-            // the L3 just lost scrollback context (e.g. alt-screen
-            // switch for a TUI like claudecode whose own scrollback
-            // is shorter than the saved-main history we were
-            // viewing).  After every PTY chunk that fired a
-            // scroll_push, view_offset would snap to ~0 — looks
-            // like "Enter 跳完马上弹回".  Skip the bump when max
-            // < view_offset; keep the user's intentional position.
-            if max >= view_offset {
-                view_offset = view_offset.saturating_add(delta).min(max);
-            } else {
-                lx_event!(
-                    "L3_BUMP_SKIP",
-                    "skipping view_offset bump (max < view_offset)",
-                    session_id = session.id(),
-                    view_offset = view_offset as u32,
-                    max_now = max as u32,
-                    delta = delta as u32
-                );
-            }
-        }
-        last_scroll_push = cur_scroll_push;
-        if session.is_exited() {
-            session.pump();
-            publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, &mut blank_gate, poke.as_mut());
-            lx_event!("SESSION_EXITED", "shelld session exited; exiting cleanly");
-            break;
-        }
-        // Lines that scrolled off go to their files when a burst ends,
-        // and a flood's last ones on the turn after it.
-        let flood = n >= FloodGate::BULK_BYTES || queued;
-        if !flood {
-            session.terminal().grid().scrollback_hand_off();
-        }
-        flood_gate.turn(flood);
-        // Republish on PTY output, a local echo that painted ahead of it,
-        // a resize (grid shape changed), or a scroll (window changed) —
-        // even when no bytes pumped this tick.
-        if n > 0
-            || predicted
-            || resized
-            || scrolled
-            || modes_changed
-            // A frame is being withheld; this tick is what discharges
-            // it once its gate's cap has run out.
-            || sync_gate.owes_a_frame()
-            || blank_gate.owes_a_frame()
-            || flood_gate.owes_a_frame()
-        {
-            if scrolled {
-                lx_event!(
-                    "L3_PUBLISH",
-                    "publish_and_poke after scroll",
-                    session_id = session.id(),
-                    view_offset = view_offset as u32,
-                    cause = "scrolled"
-                );
-            }
-            watch.phase("publish");
-            let bulk = flood && !(predicted || resized || scrolled || modes_changed);
-            if !flood_gate.hold(bulk) {
-                publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, &mut blank_gate, poke.as_mut());
-            }
-        }
 
         // RFC-002 §8 (step 8b — fetch side): drain any ScrollbackPage
         // replies L4 sent.  Empty `line_count` means "no more history
