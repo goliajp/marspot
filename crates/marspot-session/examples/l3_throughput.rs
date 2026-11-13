@@ -56,6 +56,50 @@ static SESSION_PID: AtomicU32 = AtomicU32::new(0);
 /// each, and 25 of them were found on the runner one evening.
 static SANDBOX: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+/// How much of a process's CPU time was on performance cores, and the
+/// coalition it is in.
+#[cfg(target_os = "macos")]
+fn placement(pid: i32) -> Option<(u64, f64, u64)> {
+    // `rusage_info_v6` as words: two of uuid, then the counters; user
+    // and system time are words 2 and 3, their performance-core parts
+    // words 38 and 39
+    let mut words = [0u64; 80];
+    // SAFETY: the buffer is larger than the flavor's struct.
+    if unsafe { libc::proc_pid_rusage(pid, 6, words.as_mut_ptr().cast()) } != 0 {
+        return None;
+    }
+    let (all, perf) = (words[2] + words[3], words[38] + words[39]);
+    let mut coalition = [0u64; 5];
+    // SAFETY: flavor 20 fills forty bytes or nothing.
+    unsafe { libc::proc_pidinfo(pid, 20, 0, coalition.as_mut_ptr().cast(), 40) };
+    Some((all, if all == 0 { 0.0 } else { 100.0 * perf as f64 / all as f64 }, coalition[1]))
+}
+
+#[cfg(target_os = "macos")]
+fn children_of(pid: i32) -> Vec<i32> {
+    let mut pids = [0 as libc::pid_t; 64];
+    // SAFETY: the buffer is the size it is said to be.
+    let n = unsafe { libc::proc_listchildpids(pid, pids.as_mut_ptr().cast(), std::mem::size_of_val(&pids) as libc::c_int) };
+    pids[..(n.max(0) as usize).min(pids.len())].to_vec()
+}
+
+/// The busiest program under the session, read while it runs: the
+/// writer is gone by the time the trial is over.
+#[cfg(target_os = "macos")]
+fn sample_writer(session: i32, best: &mut Option<(u64, f64, u64)>) {
+    let mut level = vec![session];
+    for _ in 0..5 {
+        level = level.iter().flat_map(|p| children_of(*p)).collect();
+        for pid in &level {
+            if let Some(read) = placement(*pid)
+                && best.is_none_or(|b| read.0 >= b.0)
+            {
+                *best = Some(read);
+            }
+        }
+    }
+}
+
 fn die(msg: &str) -> ! {
     eprintln!("FAIL: {msg}");
     // `process::exit` skips Drop, so the ChildGuard that would have
@@ -307,7 +351,16 @@ fn main() {
     // marker to carry a complete `time` record.
     let deadline = Instant::now() + Duration::from_secs(300);
     let mut text = String::new();
+    #[cfg(target_os = "macos")]
+    let (mut writer, mut round) = (None, 0u32);
     while Instant::now() < deadline {
+        #[cfg(target_os = "macos")]
+        {
+            round += 1;
+            if round.is_multiple_of(10) {
+                sample_writer(session_pid as i32, &mut writer);
+            }
+        }
         if let Ok(s) = std::fs::read_to_string(&marker)
             && s.lines().any(|l| l.starts_with("real ")) {
                 text = s;
@@ -365,6 +418,15 @@ fn main() {
         sz("bytelog"),
         sz("state.bin")
     );
+    #[cfg(target_os = "macos")]
+    {
+        let (_, session_perf, session_coalition) = placement(session_pid as i32).unwrap_or_default();
+        let (_, writer_perf, writer_coalition) = writer.unwrap_or_default();
+        eprintln!(
+            "placement: session_p_core_pct={session_perf:.1} session_coalition={session_coalition} writer_p_core_pct={writer_perf:.1} writer_coalition={writer_coalition} probe_coalition={}",
+            placement(std::process::id() as i32).unwrap_or_default().2
+        );
+    }
     // `-` when the kernel would not say (the session died early): the
     // caller has to see a missing reading as missing, not as zero cost.
     let wall_ns = (secs * 1e9) as u64;

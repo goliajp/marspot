@@ -104,26 +104,7 @@ done
 
 bundle_bin() { echo "$MACOS/$1"; }
 
-cmd_status() {
-  echo "App bundle:    $APP"
-  if [[ -d "$APP" ]]; then
-    echo "  CFBundleExecutable: $(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$PLIST" 2>/dev/null || echo '?')"
-    for b in marspot-shell marspot-core; do
-      local p; p="$(bundle_bin "$b")"
-      if [[ -f "$p" && ! -L "$p" ]]; then
-        echo "  $b: $(stat -f '%z' "$p") B"
-      elif [[ -L "$p" ]]; then
-        echo "  $b: SYMLINK → $(readlink "$p")  (should be a real copy)"
-      else
-        echo "  $b: (absent)"
-      fi
-    done
-  else
-    echo "  (not installed)"
-  fi
-  echo "Running:"
-  "$MACOS/marspot-shell" --status 2>/dev/null | sed -n '3,6p' | sed 's/^/  /' || echo "  (shell --status unavailable)"
-}
+source "$(dirname "$0")/_install-status.sh"
 
 if [[ "$MODE" == status ]]; then
   cmd_status
@@ -549,7 +530,8 @@ fi
 if codesign --verify --verbose=2 "$APP" >/dev/null 2>&1; then
   echo "    bundle signature: ok"
 else
-  why=$(codesign --verify --verbose=2 "$APP" 2>&1 | head -1)
+  # under pipefail the failed verify would end the script right here
+  why=$(codesign --verify --verbose=2 "$APP" 2>&1 | head -1) || true
   echo "    bundle signature: BROKEN — $why"
   echo "       ↳ the running app is unaffected (it runs from current/), but a"
   echo "         cold launch would be killed.  Quit fully to let the lander repair it."
@@ -871,10 +853,11 @@ warm_staged_session() {
     || echo "    WARN: pending/marspot-session did not start; L3s will refuse it" >&2
 }
 
-# The running core(s), as the supervisor recorded them.
+# The installed app's core(s): the children of its shell, not every
+# marspot-core on the machine (a sandbox's would be sent the signal).
 core_pids() {
-  MARSPOT_NO_REDIRECT=1 "$MACOS/marspot-shell" --status 2>/dev/null \
-    | sed -n 's/^Running core(s): //p' | tr ', ' '\n\n' | grep -E '^[0-9]+$'
+  local shell; shell="$(cat "$PROD_PID_FILE" 2>/dev/null)"
+  [[ $shell =~ ^[0-9]+$ ]] && pgrep -P "$shell" -x marspot-core 2>/dev/null; return 0
 }
 
 # SIGUSR2 makes a core promote pending/marspot-session and ask every L3
@@ -899,6 +882,8 @@ if (( STAGED )) \
   echo "==> session-only update (the core asks each L3 to move)"
   warm_staged_session
   snapshot_l3_pids
+  # quit, with only its shell staying for the sessions: no core to ask
+  [[ -n "$(core_pids)" ]] || { echo "    the app is put away: its next core promotes pending/marspot-session and asks the sessions to move"; exit 0; }
   ask_core_to_update_sessions || { echo "WARN: no running core to ask" >&2; exit 1; }
   DEADLINE=$(( $(date +%s) + 30 ))
   while [[ -f "$TREE/pending/marspot-session" ]]; do
@@ -913,7 +898,11 @@ fi
 
 if (( STAGED )); then
   echo "==> triggering silent update (window + sessions survive)"
-  if (( SESSION_CHANGED )); then
+  # Quit, with its shell staying for the sessions, the app has no core: the
+  # shell promotes the core's binary now, its own and the sessions' when opened.
+  HAVE_CORE=1; [[ -n "$(core_pids)" ]] || HAVE_CORE=0
+  (( HAVE_CORE )) || echo "    the app is put away: the staged shell and session binaries are taken when it is opened"
+  if (( SESSION_CHANGED && HAVE_CORE )); then
     warm_staged_session
     snapshot_l3_pids
   fi
@@ -937,9 +926,9 @@ if (( STAGED )); then
   DEADLINE=$(( $(date +%s) + 60 ))
   while :; do
     left=0
-    [[ -f "$TREE/pending/marspot-shell"   ]] && left=1
+    [[ -f "$TREE/pending/marspot-shell"   ]] && (( HAVE_CORE )) && left=1
     [[ -f "$TREE/pending/marspot-core"    ]] && left=1
-    [[ -f "$TREE/pending/marspot-session" ]] && left=1
+    [[ -f "$TREE/pending/marspot-session" ]] && (( HAVE_CORE )) && left=1
     (( left == 0 )) && break
     now=$(date +%s)
     (( now >= DEADLINE )) && { echo "WARN: pending/ not consumed in 60s — see marspot-shell --status" >&2; exit 1; }
@@ -953,7 +942,7 @@ if (( STAGED )); then
 
   # The new core promoted pending/marspot-session at boot and asked
   # every reattached L3 not on it to move; check that they did.
-  if (( SESSION_CHANGED )); then
+  if (( SESSION_CHANGED && HAVE_CORE )); then
     verify_l3_adoption || exit 1
   fi
 else

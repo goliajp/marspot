@@ -26,4 +26,10 @@ export IDLE_WINDOW=30 IDLE_READINGS=1
 # alike, 2026-11-12, six windows); the two a second of the supervisor's
 # own clock, were it running, is already over this.
 export IDLE_WAKEUP_BUDGET="${IDLE_WAKEUP_BUDGET:-1.2}"
+# and a row of its own for the app quit with its sessions kept.  The
+# shell that stays for them does nothing of its own; what it measures,
+# 0.3 a second, is the graphics driver's memory-pool timer, which runs
+# for the life of a process that has once drawn (the same 0.3 the
+# shell and the core each show above)
+export IDLE_RESIDENT=1 IDLE_RESIDENT_BUDGET="${IDLE_RESIDENT_BUDGET:-0.4}"
 exec "$ROOT/bin/measure-idle-marspot.sh"

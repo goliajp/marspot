@@ -73,7 +73,7 @@ while (( $# )); do
   case "$1" in
     --sessions) SESSIONS="${2:?--sessions N}"; shift 2 ;;
     --scenario) PICKED+=("${2:?--scenario ID}"); shift 2 ;;
-    -h|--help)  sed -n '2,11p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '2,18p' "$0"; exit 0 ;;
     *)          fail "unknown arg: $1" ;;
   esac
 done
@@ -186,6 +186,8 @@ run_trial() {
   kill "$sampler" 2>/dev/null
   wait "$sampler" 2>/dev/null
   : > "$RUN_DIR/live-pids"
+  # which cores the sessions and the programs feeding them ran on
+  grep -h '^placement:' "$RUN_DIR"/probe.*.err 2>/dev/null | sed 's/^/    /'
   python3 "$ROOT/bin/_bench_record.py" cpu-snapshot > "$RUN_DIR/cpu.after"
   load1 >> "$RUN_DIR/trial.load"
 }
