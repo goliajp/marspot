@@ -161,7 +161,7 @@ pub(crate) fn republish(
     if let Some(left) = left.filter(|l| l.as_c_str() != cname.as_c_str()) {
         SessionRegions::new(left, id, true).delete_if_owned();
     }
-    frames.publish(session, poke.as_mut().map(|w| &mut **w));
+    frames.publish(session, poke.as_deref_mut());
     announce(frames.shm(), poke);
     lx_event!(
         "L3_REPUBLISHED",
