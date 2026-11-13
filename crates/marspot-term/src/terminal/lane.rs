@@ -121,8 +121,7 @@ fn write_chars(cells: &mut [Cell], bytes: &[u8]) {
 
 /// One cell per byte, each written whole.
 #[inline(never)]
-fn write_cells(cells: &mut [Cell], bytes: &[u8], attrs: &CellAttrs) {
-    let attrs = *attrs;
+fn write_cells(cells: &mut [Cell], bytes: &[u8], attrs: CellAttrs) {
     for (cell, &b) in cells.iter_mut().zip(bytes) {
         *cell = Cell { ch: b as char, attrs };
     }
@@ -224,11 +223,64 @@ impl<'a> Handler<'a> {
             let (_, row) = self.grid.cursor();
             self.wrap_to_next_row(row, rows);
         }
+        let plain = self.attrs.is_default();
+        // The shape most runs have: ASCII that ends inside the row,
+        // with a control or the end of the input behind it.  Nothing
+        // of the general loop's state is needed for it.
+        // the length of the run at the head, once it has been measured
+        let mut measured = 0;
+        if (head as u32) < 0x80 {
+            let (col0, row) = self.grid.cursor();
+            let col = col0 as usize;
+            let room = cols - col;
+            let n = printable(&bytes[..bytes.len().min(room.max(16))]);
+            // what follows is a control, or nothing: not more text
+            // (the scan stopped short of it) and not a wide character
+            let ends = n == bytes.len() || bytes[n] < 0x20 || bytes[n] == 0x7F || (tags && bytes[n] == b'<');
+            if n <= room && ends {
+                let to = col + n;
+                let (cells, mark) = self.grid.row_and_mark_mut(row);
+                if plain && col >= mark.end as usize {
+                    if n < 8 {
+                        // too short to be worth a call
+                        for (cell, &b) in cells[col..to].iter_mut().zip(bytes) {
+                            cell.ch = b as char;
+                        }
+                    } else {
+                        write_chars(&mut cells[col..to], bytes);
+                    }
+                } else {
+                    write_cells(&mut cells[col..to], bytes, *self.attrs);
+                    if !plain && to > mark.plain_from as usize {
+                        mark.plain_from = to as u16;
+                    }
+                }
+                if to > mark.end as usize {
+                    mark.end = to as u16;
+                }
+                if to < cols {
+                    self.grid.set_cursor(to as u16, row);
+                } else {
+                    self.grid.set_cursor((cols - 1) as u16, row);
+                    *self.pending_wrap = true;
+                }
+                let ch = bytes[n - 1] as char;
+                self.cluster_buf.clear();
+                self.cluster_buf.push(ch);
+                *self.cluster_fast = Some((ch, 1));
+                *self.cluster_anchor = Some(((to - 1) as u16, row, 1));
+                *self.seg_synced = false;
+                return n;
+            }
+            measured = n;
+        }
         let attrs = *self.attrs;
-        let plain = attrs.is_default();
         let mut idx = 0;
-        // the last character written: (char, width, column), in `row`
-        let mut last = (head, 1u8, 0u16);
+        // the last character written: where its bytes start, its width
+        // (0 until one is written) and its column in `row`; a wide
+        // one is kept decoded
+        let (mut last_at, mut last_w, mut last_col) = (0usize, 0u8, 0u16);
+        let mut last_wide = head;
         let row = loop {
             let (col0, row) = self.grid.cursor();
             let mut col = col0 as usize;
@@ -253,18 +305,26 @@ impl<'a> Handler<'a> {
                         // before it ends the row
                         break if tags && b0 == b'<' { 0 } else { 1 };
                     }
-                    let m = printable(&rest[..rest.len().min(room)]);
+                    // sixteen bytes at least, so that a run near the
+                    // row's end is still measured a block at a time
+                    let m = if measured != 0 {
+                        // nothing has moved since the head was measured
+                        std::mem::take(&mut measured)
+                    } else {
+                        printable(&rest[..rest.len().min(room.max(16))])
+                    }
+                    .min(room);
                     if m == 0 {
                         break 0;
                     }
                     if col >= fresh {
                         write_chars(&mut cells[col..col + m], rest);
                     } else {
-                        write_cells(&mut cells[col..col + m], rest, &attrs);
+                        write_cells(&mut cells[col..col + m], rest, attrs);
                     }
                     col += m;
                     idx += m;
-                    last = (rest[m - 1] as char, 1, (col - 1) as u16);
+                    (last_at, last_w, last_col) = (idx - 1, 1, (col - 1) as u16);
                 } else if let Some((c, len)) = wide_at(rest) {
                     if col + 2 > cols {
                         break if col == cols { 1 } else { 2 };
@@ -277,7 +337,8 @@ impl<'a> Handler<'a> {
                         cells[col] = Cell { ch: c, attrs };
                         cells[col + 1] = Cell { ch: '\0', attrs };
                     }
-                    last = (c, 2, col as u16);
+                    (last_at, last_w, last_col) = (idx, 2, col as u16);
+                    last_wide = c;
                     col += 2;
                     idx += len;
                 } else {
@@ -286,11 +347,15 @@ impl<'a> Handler<'a> {
             };
             // one raise for everything written to this row
             let to = if left == 2 { cols } else { col } as u16;
-            mark.end = mark.end.max(to);
-            if !plain {
-                mark.plain_from = mark.plain_from.max(to);
+            if to > mark.end {
+                mark.end = to;
             }
-            mark.wide |= wide;
+            if !plain && to > mark.plain_from {
+                mark.plain_from = to;
+            }
+            if wide {
+                mark.wide = true;
+            }
             if left == 0 {
                 if col < cols {
                     self.grid.set_cursor(col as u16, row);
@@ -307,7 +372,11 @@ impl<'a> Handler<'a> {
             }
             self.wrap_to_next_row(row, rows);
         };
-        let (ch, w, col) = last;
+        let (ch, w, col) = match last_w {
+            0 => (head, 1, 0),
+            1 => (bytes[last_at] as char, 1, last_col),
+            _ => (last_wide, 2, last_col),
+        };
         self.cluster_buf.clear();
         self.cluster_buf.push(ch);
         *self.cluster_fast = Some((ch, w));
