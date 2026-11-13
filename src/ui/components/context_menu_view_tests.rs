@@ -200,3 +200,54 @@ fn menu_surface_frame() {
         assert!(n >= 1, "an allocation made on purpose was not counted");
     });
 }
+
+thread_local! {
+    static SCENE: std::cell::RefCell<Option<MenuRender>> = const { std::cell::RefCell::new(None) };
+}
+
+fn overlay_scene(p: &mut ViewPainter<'_>) {
+    SCENE.with(|s| {
+        let s = s.borrow();
+        let m = s.as_ref().expect("a scene");
+        m.surface.borrow_mut().frame(p, m);
+    });
+}
+
+/// The menu is drawn after the frame, in a pass of its own.  The same
+/// instances added to an empty frame's overlay layers are the same
+/// picture, byte for byte, with the pointer on a row and off it; and a
+/// menu one pixel to the side is not.
+#[test]
+fn the_menus_own_pass_draws_what_the_frames_overlay_layers_would() {
+    use crate::paint_parity_tests::{first_difference_in, render_with};
+    for scale in [1.0, 2.0] {
+        at_scale(scale, || {
+            let (w, h) = ((900.0 * scale) as u32, (560.0 * scale) as u32);
+            let menu = |layout: &crate::layout::Layout, dx: f64, row: Option<usize>| {
+                let mut m = MenuRender::new((300.0 * scale + dx, 120.0 * scale), layout.top_inset, items());
+                let mut font = FontCache::build().expect("font");
+                m.surface.borrow_mut().lay_out(&mut font, &m, (w as f64, h as f64));
+                m.pointer = row.map(|i| m.surface.borrow().row_centre(i).expect("the row"));
+                m
+            };
+            for row in [None, Some(1), Some(4)] {
+                let own = render_with(None, w, h, |r, layout| r.set_context_menu(Some(menu(layout, 0.0, row))));
+                let over = |dx: f64| {
+                    let out = render_with(Some(overlay_scene), w, h, |_, layout| {
+                        SCENE.with(|s| *s.borrow_mut() = Some(menu(layout, dx, row)));
+                    });
+                    SCENE.with(|s| *s.borrow_mut() = None);
+                    out
+                };
+                let (Some(own), Some(same), Some(moved)) = (own, over(0.0), over(1.0)) else { return };
+                let flat = [own[0], own[1], own[2], own[3]];
+                assert!(own.chunks_exact(4).any(|px| px != flat), "scale {scale}: nothing was drawn");
+                if let Some(((x, y), n)) = first_difference_in(&own, &same, w) {
+                    panic!("scale {scale}, pointer on {row:?}: {n} pixels differ, the first at ({x}, {y})");
+                }
+                let (_, n) = first_difference_in(&own, &moved, w).expect("a menu moved a pixel drew the same bytes");
+                assert!(n > 200, "scale {scale}: only {n} pixels differ for a menu moved a pixel");
+            }
+        });
+    }
+}

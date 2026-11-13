@@ -36,10 +36,7 @@ pub mod table;
 pub mod layout_modal;
 pub mod layout_view;
 pub mod context_menu;
-pub mod context_menu_paint;
 pub mod context_menu_view;
-#[cfg(test)]
-mod context_menu_canvas_view_tests;
 #[cfg(test)]
 mod context_menu_view_tests;
 #[cfg(test)]
@@ -81,4 +78,6 @@ pub use grid_item::{GridItem, GridEdges, Outline};
 pub use sidebar::Sidebar;
 pub use table::{Align, Column, ColumnWidth, SortDir, TableGeometry};
 pub use layout_modal::{LayoutModal, GRID_MIN, GRID_MAX};
-pub use context_menu::{ContextMenu, ContextMenuHit, MenuItem};
+#[cfg(test)]
+pub use context_menu::ContextMenu;
+pub use context_menu::{ContextMenuHit, MenuItem};
