@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.360"  # the interface language follows the system when the system says its list changed
-core    = "0.12.360"  # the shared controls and the panel frame can be nodes of an interface tree
+core    = "0.12.441"  # copy and paste go through the pasteboard a sandbox names
 session = "0.11.201"  # the reader keeps three chunks, not four, ahead of a key's answer

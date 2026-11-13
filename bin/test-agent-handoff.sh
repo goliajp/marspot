@@ -33,7 +33,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 
-SB=/tmp/marspot-agent-handoff
+# A scratch directory of this run's own, removed when the run passes:
+# the fixed name was shared by every run of the suite on the machine.
+SB=/tmp/marspot-agent-handoff.$$
 RUNLOG=$SB/run.log
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 AGENT_LOG=$SB/agents.log
@@ -59,6 +61,7 @@ fail() {
 ok() { echo "  ✓ $1"; }
 
 cleanup() {
+  local rc=$?
   dev_kill_shell_core
   # By the pids they recorded, never by name: the stand-ins run as
   # `claude` and `codex`, and a pkill by name would end the user's
@@ -68,6 +71,7 @@ cleanup() {
       [[ -n "$pid" ]] && kill -9 "$pid" 2>/dev/null
     done < <(sed -n 's/^start agent=[a-z]* pid=\([0-9]*\).*/\1/p' "$AGENT_LOG")
   fi
+  (( rc != 0 )) || rm -rf "$SB"
 }
 trap cleanup EXIT
 

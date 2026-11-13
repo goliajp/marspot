@@ -39,6 +39,71 @@ export MARSPOT_DEV_SANDBOX=1
 
 DEV_TARGET="$ROOT/target/release"
 
+# Where a suite keeps the output of what it launches: inside its state
+# dir, which a run has to itself.  A fixed name under /tmp was written
+# by every run of the suite on the machine at once.
+dev_run_log() {
+  mkdir -p "$MARSPOT_STATE_DIR"
+  echo "$MARSPOT_STATE_DIR/$1.run.log"
+}
+
+# Remove the inbox sockets the peer bus suites' stand-ins left in
+# /tmp/cc-socks, each named e2e-…<pid>…: only those whose process is
+# gone.  One still running belongs to a run that is using it.
+dev_sweep_dead_inboxes() {
+  local s pid
+  for s in /tmp/cc-socks/e2e-*.sock; do
+    [[ -e $s ]] || continue
+    pid="$(sed -E 's/^e2e-(fake-)?([0-9]+).*$/\2/' <<<"${s##*/}")"
+    [[ $pid =~ ^[0-9]+$ ]] || continue
+    kill -0 "$pid" 2>/dev/null || rm -f "$s"
+  done
+}
+
+# A port nothing is listening on, for a suite's own local server.
+dev_free_port() {
+  python3 -c 'import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])'
+}
+
+# A pasteboard of this run's own for the sandbox app's copy and paste.
+#
+# The general pasteboard is one per login session: a suite that put a
+# marker on it replaced what the person at the machine had copied, and
+# two runs on one machine read each other's markers.  A suite that
+# copies or pastes calls dev_own_pasteboard before it launches the app,
+# talks to that pasteboard through dev_pasteboard_set / _get, and
+# calls dev_pasteboard_release when it ends: a named pasteboard
+# otherwise stays with the pasteboard server until logout.
+dev_own_pasteboard() {
+  export MARSPOT_PASTEBOARD="marspot-sandbox-$$"
+}
+
+_dev_pasteboard() { # what, [text]
+  /usr/bin/osascript -l JavaScript -e 'function run(argv) {
+  ObjC.import("AppKit");
+  var pb = $.NSPasteboard.pasteboardWithName($(argv[0]));
+  if (argv[1] === "set") { pb.clearContents; return pb.setStringForType($(argv[2]), $.NSPasteboardTypeString) ? "" : "refused"; }
+  if (argv[1] === "release") { pb.releaseGlobally; return ""; }
+  var s = pb.stringForType($.NSPasteboardTypeString);
+  return s.isNil() ? "" : s.js;
+}' "${MARSPOT_PASTEBOARD:?dev_own_pasteboard was not called}" "$@"
+}
+
+dev_pasteboard_set() {
+  [[ -z "$(_dev_pasteboard set "$1")" ]]
+}
+
+dev_pasteboard_get() {
+  _dev_pasteboard get
+}
+
+dev_pasteboard_release() {
+  [[ -z ${MARSPOT_PASTEBOARD:-} ]] || _dev_pasteboard release >/dev/null 2>&1 || true
+}
+
 # Start this sandbox's session ids at a base of its own.
 #
 # Every state directory numbers its sessions from 1, and what a session
