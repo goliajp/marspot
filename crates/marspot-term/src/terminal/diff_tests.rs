@@ -359,3 +359,26 @@ fn a_file_holds_the_lines_a_memory_history_holds() {
         }
     }
 }
+
+/// A line with no line feed in it wraps onto row after row.  Each row
+/// takes what it has room for, and the scan for the printable run must
+/// not go over the rest of the line again every time: on a megabyte
+/// that is the difference between reading it once and reading it four
+/// thousand times.
+#[test]
+fn a_megabyte_line_is_scanned_about_once() {
+    use crate::parser::scan::SCANNED;
+    let line = vec![b'a'; 1 << 20];
+    for (cols, rows) in [(122u16, 39u16), (7, 3)] {
+        let mut t = Terminal::new(cols, rows);
+        let before = SCANNED.with(|c| c.get());
+        t.feed(&line);
+        let scanned = SCANNED.with(|c| c.get()) - before;
+        // each row's scan may look one byte past what it takes
+        assert!(
+            scanned <= (line.len() as u64) * 2,
+            "{cols}x{rows}: {scanned} bytes scanned for a line of {}",
+            line.len()
+        );
+    }
+}

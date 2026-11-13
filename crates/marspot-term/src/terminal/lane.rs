@@ -260,13 +260,18 @@ impl<'a> Handler<'a> {
                 let rest = &bytes[idx..];
                 let Some(&b0) = rest.first() else { break 0 };
                 if b0.wrapping_sub(0x20) < 0x5F {
-                    let n = printable(rest);
-                    if n == 0 {
-                        break 0;
+                    // no further than the row has room for: a line
+                    // that wraps many times would otherwise be scanned
+                    // to its end again on every row
+                    let room = cols - col;
+                    if room == 0 {
+                        // a `<` that may open a tag ends the run
+                        // before it ends the row
+                        break if tags && b0 == b'<' { 0 } else { 1 };
                     }
-                    let m = n.min(cols - col);
+                    let m = printable(&rest[..rest.len().min(room)]);
                     if m == 0 {
-                        break 1;
+                        break 0;
                     }
                     if col >= fresh {
                         for (cell, &b) in cells[col..col + m].iter_mut().zip(rest) {
