@@ -54,7 +54,7 @@ for layer in shell core; do
   seed_layer "$layer" "$good"
   rm -f "$SUP_LOG" 2>/dev/null || true
 
-  "$SHELL_BIN" "--rollback-$layer" >/tmp/marspot-rollback-$layer.out 2>&1
+  "$SHELL_BIN" "--rollback-$layer" >"$MARSPOT_STATE_DIR/rollback-$layer.out" 2>&1
   rc=$?
   [[ $rc -eq 0 ]] || fail "[$layer] --rollback-$layer exited $rc (expected 0)"
 
@@ -78,7 +78,7 @@ done
 # so the next launch falls back to the bundle binary.
 seed_layer shell ""
 : > "$SUP_LOG" 2>/dev/null || true
-"$SHELL_BIN" --rollback-shell >/tmp/marspot-rollback-noprev.out 2>&1
+"$SHELL_BIN" --rollback-shell >"$MARSPOT_STATE_DIR/rollback-noprev.out" 2>&1
 rc=$?
 [[ $rc -eq 0 ]] || fail "[no-prev] exited $rc (expected 0 — empty prev is not an error)"
 [[ ! -e "$TREE/current/marspot-shell" ]] \
