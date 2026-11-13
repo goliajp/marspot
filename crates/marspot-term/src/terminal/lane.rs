@@ -249,11 +249,12 @@ impl<'a> Handler<'a> {
         let row = loop {
             let (col0, row) = self.grid.cursor();
             let mut col = col0 as usize;
-            let (cells, end) = self.grid.row_and_end_mut(row);
+            let (cells, mark) = self.grid.row_and_mark_mut(row);
             // from here on the row holds default cells, and under the
             // default attributes a default cell only needs its
             // character replaced
-            let fresh = if plain { *end as usize } else { usize::MAX };
+            let fresh = if plain { mark.end as usize } else { usize::MAX };
+            let mut wide = false;
             // why the row was left: 0 the run ended, 1 the row is
             // full, 2 a wide glyph is next and one column is left
             let left = loop {
@@ -289,6 +290,7 @@ impl<'a> Handler<'a> {
                     if col + 2 > cols {
                         break if col == cols { 1 } else { 2 };
                     }
+                    wide = true;
                     if col >= fresh {
                         cells[col].ch = c;
                         cells[col + 1].ch = '\0';
@@ -304,7 +306,12 @@ impl<'a> Handler<'a> {
                 }
             };
             // one raise for everything written to this row
-            *end = (*end).max(if left == 2 { cols } else { col } as u16);
+            let to = if left == 2 { cols } else { col } as u16;
+            mark.end = mark.end.max(to);
+            if !plain {
+                mark.plain_from = mark.plain_from.max(to);
+            }
+            mark.wide |= wide;
             if left == 0 {
                 if col < cols {
                     self.grid.set_cursor(col as u16, row);
