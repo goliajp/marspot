@@ -68,7 +68,10 @@ fi
 
 MAC="${MAC:-mini}"
 LINUX="${LINUX:-lx64}"
-NAME=ci-marspot
+# CI_REMOTE_NAME gives a checkout a remote copy of its own, so that two
+# checkouts do not wait for each other; the copy is a full build tree on
+# both runners and is forgotten with `remote-sync <host> --name <it> --forget`
+NAME="${CI_REMOTE_NAME:-ci-marspot}"
 TIMEOUT="${CI_JOB_TIMEOUT:-3600}"
 MAX_WAIT="${CI_MAX_WAIT:-3600}"
 LOGS="$(mktemp -d)"
@@ -145,7 +148,8 @@ install_hook
 # started while the first was testing replaced the files under it, and
 # its build put a session binary of another build where the first run's
 # tests look for theirs (eight self_execv failures, twice).
-LOCK_LOCAL="/tmp/marspot-ci-remote.lock.d"
+# one run per remote copy: two copies do not share a build tree
+LOCK_LOCAL="/tmp/marspot-ci-remote.$NAME.lock.d"
 said=0
 until mkdir "$LOCK_LOCAL" 2>/dev/null; do
   if ! kill -0 "$(cat "$LOCK_LOCAL/pid" 2>/dev/null)" 2>/dev/null; then
