@@ -39,6 +39,35 @@ export MARSPOT_DEV_SANDBOX=1
 
 DEV_TARGET="$ROOT/target/release"
 
+# Where a suite keeps the output of what it launches: inside its state
+# dir, which a run has to itself.  A fixed name under /tmp was written
+# by every run of the suite on the machine at once.
+dev_run_log() {
+  mkdir -p "$MARSPOT_STATE_DIR"
+  echo "$MARSPOT_STATE_DIR/$1.run.log"
+}
+
+# Remove the inbox sockets the peer bus suites' stand-ins left in
+# /tmp/cc-socks, each named e2e-…<pid>…: only those whose process is
+# gone.  One still running belongs to a run that is using it.
+dev_sweep_dead_inboxes() {
+  local s pid
+  for s in /tmp/cc-socks/e2e-*.sock; do
+    [[ -e $s ]] || continue
+    pid="$(sed -E 's/^e2e-(fake-)?([0-9]+).*$/\2/' <<<"${s##*/}")"
+    [[ $pid =~ ^[0-9]+$ ]] || continue
+    kill -0 "$pid" 2>/dev/null || rm -f "$s"
+  done
+}
+
+# A port nothing is listening on, for a suite's own local server.
+dev_free_port() {
+  python3 -c 'import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])'
+}
+
 # A pasteboard of this run's own for the sandbox app's copy and paste.
 #
 # The general pasteboard is one per login session: a suite that put a
