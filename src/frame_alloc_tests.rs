@@ -165,86 +165,6 @@ fn a_terminal_frame_allocates_nothing_once_warm() {
     assert_eq!(n, 0, "a warm terminal frame allocated {n} times");
 }
 
-/// What one frame of the settings panel costs when it is painted
-/// directly, every frame, as it is today: the number a retained panel
-/// has to be compared with.
-///
-/// Nothing is asserted about the count beyond the meter having seen
-/// the path; the reading is printed.
-#[test]
-fn settings_immediate_frame() {
-    use crate::font_cache::FontCache;
-    use crate::render_metal::{new_atlas, system_default_device};
-    use crate::ui::components::settings_paint::{SettingsRender, push_settings_panel_via_view};
-    use crate::ui::components::{controls, settings_modal};
-
-    let Ok(device) = system_default_device() else {
-        eprintln!("SKIPPED: no Metal device");
-        return;
-    };
-    let mut font = FontCache::build().expect("font");
-    let mut atlas =
-        new_atlas(&device, 2048, 2048, false, font.font_table()).map(|(a, _)| a).expect("atlas");
-    let (atlas_w, atlas_h) = atlas.dims();
-
-    let (window_w, window_h) = (1000.0, 1200.0);
-    let settings = crate::settings::Settings {
-        reclaim_enabled: false,
-        reclaim_prefetch: false,
-        appearance_circled_wide: false,
-        dim_scale: 1.0,
-        scroll_factor: 1.0,
-        cc_statusline_hook: true,
-        ..Default::default()
-    };
-    let rect = {
-        let mut measure = controls::font_measure(&mut font);
-        settings_modal::panel_rect(window_w, window_h, &settings, &mut measure, 0.0)
-    };
-    let panel = SettingsRender {
-        rect,
-        scroll: 0.0,
-        settings,
-        path: "/Users/you/Library/Application Support/app/settings.toml".to_string(),
-        hover: settings_modal::Hover::None,
-    };
-
-    let (cell_w, cell_h, ascent) = (font.cell_w as f32, font.cell_h as f32, font.ascent as f32);
-    let (mut cells, mut glyphs, mut ui_rects) = (Vec::new(), Vec::new(), Vec::new());
-    let mut frame = |font: &mut FontCache, atlas: &mut crate::glyph_atlas::GlyphAtlas| {
-        cells.clear();
-        glyphs.clear();
-        ui_rects.clear();
-        push_settings_panel_via_view(
-            &panel, 0.0, cell_w, cell_h, ascent, atlas_w as f32, atlas_h as f32,
-            window_w, window_h, font, atlas, &mut cells, &mut glyphs, &mut ui_rects,
-        );
-        (cells.len(), glyphs.len(), ui_rects.len())
-    };
-    for _ in 0..3 {
-        frame(&mut font, &mut atlas);
-    }
-    let (n, (n_cells, n_glyphs, n_rects)) = counted(|| frame(&mut font, &mut atlas));
-
-    let mut times: Vec<u128> = (0..30)
-        .map(|_| {
-            let t = std::time::Instant::now();
-            std::hint::black_box(frame(&mut font, &mut atlas));
-            t.elapsed().as_nanos()
-        })
-        .collect();
-    times.sort_unstable();
-    let median_us = times[times.len() / 2] as f64 / 1000.0;
-
-    eprintln!(
-        "[frame-alloc] settings panel, painted directly: {n} allocations a frame, \
-         {median_us:.1} us median of 30, for {n_cells} flat rects, {n_rects} rounded rects, \
-         {n_glyphs} glyphs"
-    );
-    assert!(n_glyphs > 50 && n_rects > 3, "the panel has to have been painted");
-    assert!(n > 0, "a path that collects its slots into a Vec read as allocation-free");
-}
-
 /// A run of text drawn as a tree node costs what the same run costs
 /// drawn by hand, and describing and laying the node out costs
 /// nothing: the tree adds no allocation of its own to a frame.
@@ -409,5 +329,148 @@ fn a_kept_surface_frame_does_only_what_went_stale() {
         idle_n - own,
         hover_n - own,
         data_n - own,
+    );
+}
+
+/// What a frame of the settings panel costs drawn through its surface:
+/// nothing at all while nothing changes, a repaint when the pointer
+/// moves onto a control, and all three stages when a setting changes.
+/// The readings are printed beside the counts that are asserted.
+#[test]
+fn settings_surface_frame() {
+    use crate::font_cache::FontCache;
+    use crate::render_metal::{new_atlas, system_default_device};
+    use crate::ui::components::settings_view::SettingsRender;
+    use crate::ui::components::{controls, settings_modal};
+    use crate::ui::core::ViewPainter;
+    use crate::ui::tree::preset;
+    use golia_ui_core::{Counters, NodeId};
+    use std::sync::Arc;
+
+    let Ok(device) = system_default_device() else {
+        eprintln!("SKIPPED: no Metal device");
+        return;
+    };
+    let mut font = FontCache::build().expect("font");
+    let mut atlas =
+        new_atlas(&device, 2048, 2048, false, font.font_table()).map(|(a, _)| a).expect("atlas");
+    let (atlas_w, atlas_h) = atlas.dims();
+
+    let (window_w, window_h) = (1000.0, 1200.0);
+    let settings = crate::settings::Settings {
+        reclaim_enabled: false,
+        reclaim_prefetch: false,
+        appearance_circled_wide: false,
+        dim_scale: 1.0,
+        scroll_factor: 1.0,
+        cc_statusline_hook: true,
+        ..Default::default()
+    };
+    let rect = {
+        let mut measure = controls::font_measure(&mut font);
+        settings_modal::panel_rect(window_w, window_h, &settings, &mut measure, 0.0)
+    };
+    let path = "/Users/you/Library/Application Support/app/settings.toml";
+    let at_rest = SettingsRender::new(rect, 0.0, settings.clone(), path);
+    // the two values the data alternates between once warm
+    let other = SettingsRender {
+        settings: Arc::new(crate::settings::Settings { dim_scale: 0.6, ..settings.clone() }),
+        ..at_rest.clone()
+    };
+
+    let (cell_w, cell_h, ascent) = (font.cell_w as f32, font.cell_h as f32, font.ascent as f32);
+    let (mut cells, mut glyphs, mut ui_rects) = (Vec::new(), Vec::new(), Vec::new());
+    let mut frame = |sp: &SettingsRender| {
+        cells.clear();
+        glyphs.clear();
+        ui_rects.clear();
+        let mut p = ViewPainter {
+            cell_w,
+            cell_h,
+            ascent,
+            atlas_w: atlas_w as f32,
+            atlas_h: atlas_h as f32,
+            window_w,
+            window_h,
+            font: &mut font,
+            atlas: &mut atlas,
+            cells: &mut cells,
+            glyphs: &mut glyphs,
+            ui_rects: &mut ui_rects,
+        };
+        sp.surface.borrow_mut().frame(&mut p, sp, 0.0);
+        (cells.len(), glyphs.len(), ui_rects.len())
+    };
+    let counters = |sp: &SettingsRender| sp.surface.borrow().kept.surface.counters();
+    let stages = |c: Counters| (c.build, c.layout, c.paint);
+
+    // both values twice: every buffer has grown to what either needs
+    for sp in [&at_rest, &other, &at_rest, &other, &at_rest] {
+        frame(sp);
+    }
+    let warm = counters(&at_rest);
+    assert_eq!(stages(warm), (5, 5, 5));
+
+    let (idle_n, drawn) = counted(|| frame(&at_rest));
+    assert_eq!(counters(&at_rest), warm, "a frame with nothing new ran a stage");
+    assert_eq!(idle_n, 0, "a frame with nothing new allocated {idle_n} times");
+    assert!(drawn.1 > 50 && drawn.2 > 3, "the panel has to have been painted");
+
+    // the pointer onto a segment of the first segmented control in use
+    let on = {
+        let s = at_rest.surface.borrow();
+        let tree = s.kept.surface.tree();
+        let i = tree
+            .nodes()
+            .iter()
+            .position(|n| n.leaf_tag == preset::SEGMENT && !n.has(golia_ui_core::node::flag::DISABLED))
+            .expect("a segment");
+        let r = s.kept.surface.layout().rect(NodeId(i as u32));
+        (r.x + r.w * 0.5, r.y + r.h * 0.5)
+    };
+    assert!(at_rest.surface.borrow_mut().kept.surface.pointer_move(on), "the pointer is on nothing");
+    let (hover_n, _) = counted(|| frame(&at_rest));
+    let hovered = counters(&at_rest);
+    assert_eq!(
+        (hovered.build, hovered.layout, hovered.paint),
+        (warm.build, warm.layout, warm.paint + 1),
+        "a hover is a repaint and nothing else"
+    );
+    at_rest.surface.borrow_mut().kept.surface.pointer_leave();
+    frame(&at_rest);
+
+    let (data_n, _) = counted(|| frame(&other));
+    let changed = counters(&at_rest);
+    assert_eq!((changed.build, changed.layout), (hovered.build + 1, hovered.layout + 1));
+
+    let median = |times: &mut Vec<u128>| {
+        times.sort_unstable();
+        times[times.len() / 2] as f64 / 1000.0
+    };
+    let mut idle: Vec<u128> = (0..30)
+        .map(|_| {
+            let t = std::time::Instant::now();
+            std::hint::black_box(frame(&other));
+            t.elapsed().as_nanos()
+        })
+        .collect();
+    let mut rebuilt: Vec<u128> = (0..30)
+        .map(|k| {
+            let sp = if k % 2 == 0 { &at_rest } else { &other };
+            let t = std::time::Instant::now();
+            std::hint::black_box(frame(sp));
+            t.elapsed().as_nanos()
+        })
+        .collect();
+    let nodes = at_rest.surface.borrow().kept.surface.tree().len();
+    eprintln!(
+        "[frame-alloc] settings panel through its surface, {nodes} nodes, {} flat rects, {} rounded \
+         rects, {} glyphs: idle frame {idle_n} allocations, {:.1} us median of 30; hover frame \
+         {hover_n} allocations; new-data frame {data_n} allocations, {:.1} us median of 30",
+        drawn.0,
+        drawn.2,
+        drawn.1,
+        median(&mut idle),
+        median(&mut rebuilt),
     );
 }

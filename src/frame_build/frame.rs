@@ -16,7 +16,7 @@ use crate::ui::theme::spec::chrome as chrome_spec;
 use crate::ui::components::context_menu_paint::ContextMenuRender;
 use crate::ui::components::layout_modal_paint::LayoutModalRender;
 use crate::ui::components::process_panel::ProcessPanelRender;
-use crate::ui::components::settings_paint::SettingsRender;
+use crate::ui::components::settings_view::SettingsRender;
 use crate::ui::components::shortcuts_paint::ShortcutsRender;
 use crate::ui::core::view::ViewPainter;
 
@@ -302,13 +302,16 @@ fn paint_overlays(
 
     // The settings panel.  Same overlay + backdrop treatment.
     if let Some(FormPanel::Settings(sp)) = form_panel {
-        crate::ui::components::settings_paint::push_settings_panel_via_view(
-            sp,
-            layout.top_inset,
-            cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
-            layout.window_w, layout.window_h,
-            font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
-        );
+        let mut painter = crate::ui::core::view::ViewPainter {
+            cell_w, cell_h, ascent,
+            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
+            window_w: layout.window_w, window_h: layout.window_h,
+            font, atlas,
+            cells: overlay_cells,
+            glyphs: overlay_glyphs,
+            ui_rects: overlay_ui_rects,
+        };
+        sp.surface.borrow_mut().frame(&mut painter, sp, layout.top_inset);
     }
 
     if let Some(FormPanel::Shortcuts(panel)) = form_panel {

@@ -15,7 +15,7 @@ pub mod panel_script;
 pub mod surface_stack;
 pub mod settings_choices;
 pub mod settings_modal;
-pub mod settings_paint;
+pub mod settings_view;
 pub mod settings_rows;
 pub mod shortcuts_panel;
 pub mod shortcuts_paint;
@@ -48,6 +48,8 @@ mod centring_tests;
 pub(crate) mod panel_snapshot_tests;
 #[cfg(test)]
 mod chrome_snapshot_tests;
+#[cfg(test)]
+mod settings_view_tests;
 #[cfg(test)]
 mod language_snapshot_tests;
 

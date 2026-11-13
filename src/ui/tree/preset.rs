@@ -78,7 +78,8 @@ pub fn segmented_with(
                 .disabled(disabled);
         }
     })
-    .gap(Length::Pt(c::SEGMENT_GAP));
+    .gap(Length::Pt(c::SEGMENT_GAP))
+    .disabled(disabled);
 }
 
 /// A text button, as wide as its label asks.

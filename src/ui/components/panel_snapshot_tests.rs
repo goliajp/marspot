@@ -75,7 +75,7 @@ use crate::ui::components::process_panel::{
     self, ProcessPanelPaneRow, ProcessPanelRender, ProcessPanelRow,
 };
 use crate::ui::components::settings_modal;
-use crate::ui::components::settings_paint::SettingsRender;
+use crate::ui::components::settings_view::SettingsRender;
 
 /// A terminal's worth of text for the panel to sit on, so the dimmed
 /// backdrop and the frame's shadow are in the picture.
@@ -180,17 +180,17 @@ pub(super) fn snapshot_on(
 #[test]
 pub(super) fn panel_snapshot_settings() {
     snapshot("settings", 1000, 1360, |renderer, layout| {
-        open_settings(renderer, layout, settings_modal::Hover::None);
+        open_settings(renderer, layout, None);
     });
 }
 
-/// The settings panel as the picture has it, with the pointer on
-/// `hover`.  Returns the panel's frame and the settings it shows.
+/// The settings panel as the picture has it, with the pointer at
+/// `pointer`.  Returns what it was drawn from, its surface included.
 pub(super) fn open_settings(
     renderer: &mut MetalRenderer,
     layout: &Layout,
-    hover: settings_modal::Hover,
-) -> (Rect, crate::settings::Settings) {
+    pointer: Option<(f64, f64)>,
+) -> SettingsRender {
     {
         let settings = crate::settings::Settings {
             reclaim_enabled: false,
@@ -210,14 +210,10 @@ pub(super) fn open_settings(
                 layout.window_w, layout.window_h, &settings, &mut measure, layout.top_inset,
             )
         };
-        renderer.set_settings_panel(Some(SettingsRender {
-            rect,
-            scroll: 0.0,
-            settings: settings.clone(),
-            path: "/Users/you/Library/Application Support/marspot/settings.toml".to_string(),
-            hover,
-        }));
-        (rect, settings)
+        let path = "/Users/you/Library/Application Support/marspot/settings.toml";
+        let sp = SettingsRender { pointer, ..SettingsRender::new(rect, 0.0, settings, path) };
+        renderer.set_settings_panel(Some(sp.clone()));
+        sp
     }
 }
 

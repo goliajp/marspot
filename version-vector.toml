@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.327"  # only a shell that took another's place, or that an update made, looks at who has its coalition
-core    = "0.12.357"  # the shared controls and the panel frame can be nodes of an interface tree
+core    = "0.12.358"  # the settings panel is drawn from an interface tree and worked with the keyboard
 session = "0.11.201"  # the reader keeps three chunks, not four, ahead of a key's answer
