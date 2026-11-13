@@ -45,7 +45,7 @@ mod hit_density_tests;
 #[cfg(test)]
 mod centring_tests;
 #[cfg(test)]
-mod panel_snapshot_tests;
+pub(crate) mod panel_snapshot_tests;
 #[cfg(test)]
 mod chrome_snapshot_tests;
 #[cfg(test)]

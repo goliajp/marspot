@@ -101,7 +101,8 @@ RUN_ID="$(date +%H%M%S)$$"
 # an interrupted run can stop exactly that and nothing else.
 REMOTE_PIDF="/tmp/marspot-e2e-$RUN_ID.pgid"
 # Two runs from two checkouts would sync over each other's remote tree.
-LOCK_LOCAL="/tmp/marspot-e2e-remote.lock.d"
+# one run per remote copy: two copies do not share a build tree
+LOCK_LOCAL="/tmp/marspot-e2e-remote.$REMOTE_NAME.lock.d"
 
 SUITES=("$@")
 if [[ ${#SUITES[@]} -eq 0 ]]; then
@@ -195,7 +196,9 @@ for suite in "${SUITES[@]}"; do
   current_sd="/tmp/msp-e2e-$RUN_ID-$i"
   start=$(date +%s)
   set +e
-  remote_gui "cd ~/$REMOTE_DIR && rm -rf $current_sd && env MARSPOT_STATE_DIR=$current_sd$fwd \
+  # created here so the sandbox helpers find it and give its sessions
+  # ids of their own (see dev_seed_session_base)
+  remote_gui "cd ~/$REMOTE_DIR && rm -rf $current_sd && mkdir -p $current_sd && env MARSPOT_STATE_DIR=$current_sd$fwd \
     /usr/local/bin/bench-lock $lock bin/_bounded.sh $SUITE_TIMEOUT bin/$suite"
   suite_rc=$?
   set -e

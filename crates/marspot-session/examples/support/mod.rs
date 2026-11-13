@@ -51,6 +51,20 @@ pub fn clear_cloexec(fd: RawFd) {
     }
 }
 
+/// Where a caller that names its session's id takes it from.
+///
+/// A session names its cluster and title regions by its id alone, in
+/// one namespace for the whole login: sessions of two test processes
+/// with one id, or of a test and an app on the same machine, write the
+/// same regions.  A session left to count for itself is number 1 of
+/// its state directory, and stays so here: its socket sits under that
+/// directory at `sessions/<id>/sock`, and under the system's temp
+/// directory a ten-digit id takes the path past the 104 bytes a socket
+/// path may have.
+pub fn id_base() -> u64 {
+    u64::from(std::process::id()) * 100_000
+}
+
 /// One live session: the child, the control socket's parent end, and a
 /// reader on the region it publishes into.
 pub struct Session {

@@ -30,7 +30,7 @@ SELECTION_PROBE_BIN="$ROOT/target/release/examples/l3_selection_probe"
 LATENCY_PROBE_BIN="$ROOT/target/release/examples/l3_latency_probe"
 CRASH_PROBE_BIN="$ROOT/target/release/examples/l3_crash_probe"
 SWAP_PROBE_BIN="$ROOT/target/release/examples/l3_swap_probe"
-RUN_LOG=/tmp/marspot-soak-l3.log
+RUN_LOG="$(dev_run_log soak-l3)"
 
 ITERATIONS="${ITERATIONS:-10}"
 # N concurrent L3 sessions for the multi-session collision check (4a).

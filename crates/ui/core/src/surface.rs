@@ -15,6 +15,7 @@
 //! can hold an idle frame to having run none of them.
 
 use crate::action::Action;
+use crate::hit::{Hit, hit_test};
 use crate::interact::{Interaction, Key, KeyResult};
 use crate::layout::{Constraints, Layout};
 use crate::metrics::Metrics;
@@ -50,12 +51,6 @@ pub struct Counters {
     pub paint: u64,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct Seen {
-    inputs: Inputs,
-    interaction: u64,
-}
-
 pub struct Surface<O: PaintOut> {
     tree: Tree,
     layout: Layout,
@@ -63,7 +58,16 @@ pub struct Surface<O: PaintOut> {
     out: O,
     counters: Counters,
     metrics: Metrics,
-    seen: Option<Seen>,
+    seen: Option<Inputs>,
+    /// The interaction revision and atlas generation the picture last
+    /// painted was painted for; `None` when the layout moved since.
+    painted: Option<(u64, u64)>,
+}
+
+impl<O: PaintOut + Default> Default for Surface<O> {
+    fn default() -> Self {
+        Self::new(O::default())
+    }
 }
 
 impl<O: PaintOut> Surface<O> {
@@ -76,6 +80,7 @@ impl<O: PaintOut> Surface<O> {
             counters: Counters::default(),
             metrics: Metrics { px_per_pt: 1.0, cell_w: 0.0, cell_h: 0.0, cell_ascent: 0.0 },
             seen: None,
+            painted: None,
         }
     }
 
@@ -87,7 +92,22 @@ impl<O: PaintOut> Surface<O> {
         measure: &dyn TextMeasure,
         describe: impl FnOnce(&mut Ui<'_>),
     ) -> &O {
-        let was = self.seen.map(|s| s.inputs);
+        if self.prepare(inputs, measure, describe) {
+            self.paint();
+        }
+        &self.out
+    }
+
+    /// The first two stages, as far as `inputs` say they are stale.
+    /// True when the picture last painted no longer shows the surface
+    /// and one of the paint stages has to run.
+    pub fn prepare(
+        &mut self,
+        inputs: &Inputs,
+        measure: &dyn TextMeasure,
+        describe: impl FnOnce(&mut Ui<'_>),
+    ) -> bool {
+        let was = self.seen;
         let stale_tree = was.is_none_or(|w| (w.data_rev, w.theme_rev) != (inputs.data_rev, inputs.theme_rev));
         if stale_tree {
             self.describe(describe);
@@ -99,16 +119,10 @@ impl<O: PaintOut> Surface<O> {
             });
         if stale_layout {
             self.lay_out(inputs, measure);
+            self.painted = None;
         }
-        let stale_paint = stale_layout
-            || self.seen.is_none_or(|s| {
-                s.interaction != self.interaction.revision() || s.inputs.atlas_gen != inputs.atlas_gen
-            });
-        if stale_paint {
-            self.paint();
-        }
-        self.seen = Some(Seen { inputs: *inputs, interaction: self.interaction.revision() });
-        &self.out
+        self.seen = Some(*inputs);
+        self.painted != Some((self.interaction.revision(), inputs.atlas_gen))
     }
 
     /// Stage one: write the tree again.
@@ -130,7 +144,25 @@ impl<O: PaintOut> Surface<O> {
     /// and the interaction state.
     pub fn paint(&mut self) {
         paint(&self.tree, &self.layout, &self.interaction, &self.metrics, &mut self.out);
+        self.painted_now();
+    }
+
+    /// Stage three into an output the caller holds only for this
+    /// call: one that writes through a font and an atlas borrowed for
+    /// the frame.  What it wrote is the caller's to keep.
+    pub fn paint_into<P: PaintOut>(&mut self, out: &mut P) {
+        paint(&self.tree, &self.layout, &self.interaction, &self.metrics, out);
+        self.painted_now();
+    }
+
+    fn painted_now(&mut self) {
         self.counters.paint += 1;
+        self.painted = self.seen.map(|s| (self.interaction.revision(), s.atlas_gen));
+    }
+
+    /// The widget at `p`, without changing what is hovered or held.
+    pub fn hit(&self, p: (f64, f64)) -> Option<Hit> {
+        hit_test(&self.tree, &self.layout, &self.interaction.scroll, self.interaction.offset, p)
     }
 
     pub fn output(&self) -> &O {

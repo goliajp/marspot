@@ -43,6 +43,17 @@ impl<'a> FontMeasure<'a> {
     }
 }
 
+impl FontMeasure<'_> {
+    /// The measurer the controls' geometry functions take, over the
+    /// same font cache: a control sized while a tree is described is
+    /// the size it is painted at.
+    pub fn for_controls(&self) -> impl FnMut(&str, f64, u16) -> f64 + '_ {
+        move |s, pt, weight| {
+            self.font.borrow_mut().measure_ui_text_at_size(s, weight, ShapeOptions::default(), pt)
+        }
+    }
+}
+
 impl TextMeasure for FontMeasure<'_> {
     fn advance(&self, text: &str, font: FontSpec) -> f64 {
         // through f32, as the painter takes it

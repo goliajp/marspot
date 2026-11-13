@@ -27,7 +27,9 @@ TARGET=aarch64-apple-darwin
 
 # short: codex puts unix sockets under $HOME/.codex, and a socket path
 # has to fit in 104 bytes
-SB=/tmp/marspot-cxr
+# A scratch directory of this run's own, removed when the run passes:
+# the fixed name was shared by every run of the suite on the machine.
+SB=/tmp/marspot-cxr.$$
 RUNLOG=$SB/run.log
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
@@ -55,6 +57,7 @@ codex_pid_from() {
 }
 
 cleanup() {
+  local rc=$?
   dev_kill_shell_core
   # by recorded pids, never by name: `codex` and `python3` are running
   # for other people on this machine
@@ -64,6 +67,7 @@ cleanup() {
     [[ -n "$p" ]] && kill "$p" 2>/dev/null
   done
   [[ -f "$SB/mock.pid" ]] && kill "$(cat "$SB/mock.pid")" 2>/dev/null
+  (( rc != 0 )) || rm -rf "$SB"
 }
 trap cleanup EXIT
 

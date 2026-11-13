@@ -261,23 +261,31 @@ mod tests {
 
     /// A fork burst while the table is read must not push existing
     /// processes out of it.
+    ///
+    /// Tables are taken back to back until sixteen processes have come
+    /// and gone, and the burst ends there.  A fixed two hundred spawns
+    /// took over a minute on a machine busy with other work, for the
+    /// same overlap of forks and reads.
     #[test]
     fn a_table_taken_during_a_fork_burst_still_lists_us_and_our_parent() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        const BURST: u32 = 16;
+        static SPAWNED: AtomicU32 = AtomicU32::new(0);
+        static STOP: AtomicBool = AtomicBool::new(false);
         let forker = std::thread::spawn(|| {
-            let mut n = 0;
-            for _ in 0..200 {
-                if let Ok(mut c) = std::process::Command::new("/usr/bin/true").spawn() {
-                    let _ = c.wait();
-                    n += 1;
-                }
+            while !STOP.load(Ordering::Relaxed) {
+                let mut c = std::process::Command::new("/usr/bin/true")
+                    .spawn()
+                    .expect("spawn /usr/bin/true");
+                let _ = c.wait();
+                SPAWNED.fetch_add(1, Ordering::Relaxed);
             }
-            n
         });
         let me = std::process::id() as i32;
         let parent = super::super::proc_row(me).expect("own row").ppid;
         let mut takes = 0;
         loop {
-            let done = forker.is_finished();
+            let done = SPAWNED.load(Ordering::Relaxed) >= BURST || forker.is_finished();
             let t = ProcTable::take();
             takes += 1;
             assert!(
@@ -294,11 +302,8 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(
-            forker.join().expect("forker thread"),
-            200,
-            "the burst did not spawn"
-        );
+        STOP.store(true, Ordering::Relaxed);
+        forker.join().expect("the burst did not spawn");
         assert!(takes > 1, "no table was taken while the burst ran");
     }
 }

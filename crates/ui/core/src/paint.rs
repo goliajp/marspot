@@ -66,6 +66,22 @@ pub trait PaintOut {
     fn pop_clip(&mut self);
 }
 
+/// The output of a surface whose picture is kept by its caller: it is
+/// painted through `Surface::paint_into`, never into this.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoOut;
+
+impl PaintOut for NoOut {
+    fn reset(&mut self) {}
+    fn solid_rect(&mut self, _: Rect, _: Ink) {}
+    fn rounded_rect(&mut self, _: Rect, _: f64, _: Option<Ink>, _: Option<(f64, Ink)>) {}
+    fn text_run(&mut self, _: f64, _: f64, _: &str, _: TextFont, _: Ink) {}
+    fn leaf(&mut self, _: u32, _: [u32; 2], _: &str, _: Rect, _: WidgetState) {}
+    fn focus_ring(&mut self, _: Rect, _: f64) {}
+    fn push_clip(&mut self, _: Rect) {}
+    fn pop_clip(&mut self) {}
+}
+
 struct Painter<'a, O: PaintOut> {
     tree: &'a Tree,
     layout: &'a Layout,
