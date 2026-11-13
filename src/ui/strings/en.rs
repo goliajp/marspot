@@ -114,6 +114,7 @@ fn text(m: Msg) -> &'static str {
         Msg::LinkOpenUrl => "Open URL",
         Msg::LinkCopyUrl => "Copy URL",
         Msg::LinkOpenFile => "Open file",
+        Msg::LinkRevealFile => "Open containing folder",
         Msg::LinkCopyPath => "Copy path",
         Msg::LinkSendEmail => "Send email",
         Msg::LinkCopyEmail => "Copy email",

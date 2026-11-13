@@ -108,6 +108,7 @@ fn text(m: Msg) -> &'static str {
         Msg::LinkOpenUrl => "打开 URL",
         Msg::LinkCopyUrl => "拷贝 URL",
         Msg::LinkOpenFile => "打开文件",
+        Msg::LinkRevealFile => "打开所在文件夹",
         Msg::LinkCopyPath => "拷贝路径",
         Msg::LinkSendEmail => "发送电子邮件",
         Msg::LinkCopyEmail => "拷贝电子邮件地址",
