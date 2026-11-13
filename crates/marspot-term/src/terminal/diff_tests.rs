@@ -108,6 +108,16 @@ fn adversarial() -> Vec<Vec<u8>> {
     s("a\x1b7b\x1b8c\x1b[sd\x1b[ue\x1bMf\x1bDg\x1bEh");
     s("\x1b[6n\x1b[c\x1b[>c\x1b[5n");
     s("one<u>two</u>three<u>four<five</u><<u>x");
+    // plain text over cells that are not default cells: coloured text
+    // rewritten from the row's start, a row erased or scrolled in
+    // under a background colour, text running past where the row's
+    // earlier content ended
+    s("\x1b[41mred red\x1b[0m\rab中");
+    s("\x1b[44m\x1b[K\x1b[0mtext 中文\r\nmore");
+    s("\x1b[44m\x1b[2J\x1b[0m\x1b[Hplain 中文 🚀 text");
+    s("\x1b[45m\n\n\n\n\n\n\x1b[0mplain 中文\r\nplain");
+    s("\x1b[4mab\x1b[0m\rabcdef\r\n\x1b[7m \x1b[0m\x08xy中文z");
+    s("\x1b[3;1H\x1b[42m\x1b[1L\x1b[0mab\x1b[2;1H\x1b[43m\x1b[1M\x1b[0m\x1b[3;1Hcd中");
     // SGR with 0..=32 parameters
     let mut sgr = String::new();
     for n in 0..=32 {
