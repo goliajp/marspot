@@ -38,11 +38,14 @@ use marspot_term::pty::Pty;
 mod echo;
 mod gather;
 mod lease;
+mod lend;
 mod turn;
 mod wakes;
 use echo::Echo;
 use gather::{Gathered, gather};
 use lease::Leases;
+use lend::Carried;
+pub(crate) use lend::Lend;
 use turn::Turn;
 use wakes::{Event, Wakes};
 
@@ -122,6 +125,7 @@ pub(crate) struct PtyReader {
     empties: SyncSender<Chunk>,
     /// Chunks handed to the loop and not yet handed back.
     unparsed: Arc<AtomicUsize>,
+    lend: Arc<Lend>,
     thread: JoinHandle<()>,
 }
 
@@ -154,6 +158,8 @@ impl PtyReader {
         }
         let stop_seen = Arc::clone(&stopping);
         let in_flight = Arc::clone(&unparsed);
+        let lend = Arc::new(Lend::new());
+        let lending = Arc::clone(&lend);
         let thread = thread::Builder::new()
             .name(format!("l3-pty-reader-{id}"))
             .spawn(move || {
@@ -161,6 +167,7 @@ impl PtyReader {
                 set_nonblocking(master, true);
                 let wakes = Wakes::new(master, stop_rx.as_raw_fd());
                 let mut turn = Turn::new(Leases::open());
+                let mut carried = Carried::new();
                 loop {
                     let mut chunk = match empties_rx.try_recv() {
                         Ok(chunk) => chunk,
@@ -189,6 +196,8 @@ impl PtyReader {
                             }
                             Event::Neither => {
                                 turn.end();
+                                carried.restart();
+                                lending.flood_over();
                                 continue;
                             }
                             Event::Data(there) => there,
@@ -199,6 +208,7 @@ impl PtyReader {
                             break end;
                         }
                     };
+                    let len = chunk.len;
                     if chunk.len > 0 {
                         in_flight.fetch_add(1, Ordering::SeqCst);
                         if tx.send(chunk).is_err() {
@@ -208,8 +218,26 @@ impl PtyReader {
                         wake();
                     }
                     match end {
-                        Gathered::Open { dry: true } => turn.end(),
-                        Gathered::Open { dry: false } => turn.pass_if_spent(),
+                        Gathered::Open { dry: true } => {
+                            turn.end();
+                            carried.restart();
+                            lending.flood_over();
+                        }
+                        Gathered::Open { dry: false } => {
+                            turn.pass_if_spent();
+                            // see `lend`: a pane flooding alone
+                            let rated = carried.chunk(len, &lending);
+                            if rated && lending.is_welcome() && turn.alone() && turn.renew() && !ECHO.expected() {
+                                lending.offer();
+                                // the loop looks again, now that the
+                                // pty is its to read
+                                wake();
+                                if !lending.wait_back(stop_rx.as_raw_fd(), &mut turn) {
+                                    break;
+                                }
+                                carried.restart();
+                            }
+                        }
                         Gathered::Ended => {
                             exited.store(true, Ordering::SeqCst);
                             wake();
@@ -223,7 +251,12 @@ impl PtyReader {
                 set_nonblocking(master, false);
             })
             .expect("spawn l3-pty-reader thread");
-        Self { stop, stopping, empties, unparsed, thread }
+        Self { stop, stopping, empties, unparsed, lend, thread }
+    }
+
+    /// The pty's loan to the loop: see [`lend`].
+    pub(crate) fn lend(&self) -> &Arc<Lend> {
+        &self.lend
     }
 
     /// Chunks handed to the loop and not yet handed back.
