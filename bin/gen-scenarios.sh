@@ -85,6 +85,32 @@ with open(out, "wb") as f:
 print(f"  {out}: {os.path.getsize(out):,} bytes")
 PY
 
+# ---- cat-highlighted: 8 MiB of short runs between colour changes ----------
+# What a syntax highlighter, `git diff` or `ls --color` writes: a few
+# characters, a colour change, a few more.  Here the cost is not the
+# text but getting into and out of it, twelve times a line — which no
+# other scenario has more than three of.
+echo "==> cat-highlighted (8 MiB)"
+python3 - "$OUT/cat-highlighted.bin" 8 <<'PY'
+import sys, os
+out, mb = sys.argv[1], int(sys.argv[2])
+target = mb * 1024 * 1024
+written = 0
+i = 0
+with open(out, "wb") as f:
+    while written < target:
+        line = (
+            f"\x1b[32m+\x1b[0m    \x1b[35mlet\x1b[0m \x1b[36mrow_{i % 97}\x1b[0m = "
+            f"\x1b[33mgrid\x1b[0m.\x1b[34mcell\x1b[0m(\x1b[31m{i % 122}\x1b[0m, "
+            f"\x1b[31m{i % 39}\x1b[0m)\x1b[2m; // {i:06d}\x1b[0m\n"
+        )
+        b = line.encode("utf-8")
+        f.write(b)
+        written += len(b)
+        i += 1
+print(f"  {out}: {os.path.getsize(out):,} bytes")
+PY
+
 # ---- cat-cjk: 32 MiB of CJK text ------------------------------------------
 echo "==> cat-cjk (8 MiB)"
 python3 - "$OUT/cat-cjk.bin" 8 <<'PY'
