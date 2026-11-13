@@ -99,13 +99,14 @@ fn fill(p: &mut ViewPainter, rect: Rect, color: [f32; 4]) {
 }
 
 /// A usage bar: the track over the whole of `rect`, the colour over
-/// the first `used` of it.
-fn paint_bar(p: &mut ViewPainter, rect: Rect, used: f64, util: f32) {
+/// the used part of it.  No reading leaves the track alone.
+fn paint_bar(p: &mut ViewPainter, rect: Rect, util: Option<f32>) {
     if rect.w < metric::BAR_MIN_PX {
         return;
     }
     fill(p, rect, palette::track());
-    let w = rect.w * used.clamp(0.0, 1.0);
+    let Some(util) = util else { return };
+    let w = rect.w * (util as f64).clamp(0.0, 1.0);
     if w >= metric::BAR_MIN_PX {
         fill(p, Rect { w, ..rect }, palette::severity_color(util_severity(util)));
     }
@@ -153,9 +154,10 @@ fn paint_card(p: &mut ViewPainter, a: &CcUsageAccountRender, card: Rect, cell: C
     for (i, w) in a.windows.iter().enumerate() {
         let row = rows.bar_row(i, label_cols, cell);
         mono(p, cell, rows.left, row.top, row.h, &w.label, palette::fg_muted());
-        let pct = format!("{:.0}%", w.util * 100.0);
-        mono(p, cell, row.pct_right - cell.text_w(&pct), row.top, row.h, &pct, palette::severity_text(util_severity(w.util)));
-        paint_bar(p, row.bar, w.util as f64, w.util);
+        let pct = w.percent();
+        let color = w.util.map_or(palette::fg_muted(), |u| palette::severity_text(util_severity(u)));
+        mono(p, cell, row.pct_right - cell.text_w(&pct), row.top, row.h, &pct, color);
+        paint_bar(p, row.bar, w.util);
     }
 
     let reset = fit_role(p, metric::RESET, &a.reset_label, rows.right - rows.left);
@@ -192,7 +194,7 @@ fn paint_timeline(p: &mut ViewPainter, cc: &CcUsageRender, t: &Timeline, cell: C
             // The track is the window's whole extent; the colour
             // covers the used part of it.
             let bar = t.bar(row, idx, a.windows.len(), cell.h, frac(start), frac(end));
-            paint_bar(p, bar, w.util as f64, w.util);
+            paint_bar(p, bar, w.util);
             let (x, tag) = t.tag(&w.tag(), bar.x + bar.w, cell.w);
             mono(p, cell, x, bar.y_top, bar.h, &tag, palette::fg_sec());
         }

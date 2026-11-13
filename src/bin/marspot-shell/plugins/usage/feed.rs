@@ -416,7 +416,7 @@ mod tests {
         let a = &u.accounts[0];
         assert_eq!((a.name.as_str(), a.email.as_str(), a.status.as_str()), ("Claude 1", "a@b", "allowed"));
         assert_eq!((a.util_5h, a.reset_5h), (None, None), "a missing 5h window is null, which reads as none");
-        assert_eq!((a.util_7d, a.reset_7d), (0.42, 1_794_538_799));
+        assert_eq!((a.util_7d, a.reset_7d), (Some(0.42), Some(1_794_538_799)));
         assert_eq!(a.model_limits.len(), 1);
         assert_eq!(a.model_limits[0].label, "Fable");
         assert_eq!(a.model_limits[0].util, 0.91);
@@ -446,7 +446,7 @@ mod tests {
         let row = &u.accounts[0];
         assert_eq!((row.name.as_str(), row.status.as_str()), ("Codex 1", "rejected"));
         assert_eq!(row.windows.len(), 1);
-        assert_eq!((row.windows[0].util, row.windows[0].reset), (0.5, Some(1_794_427_376)));
+        assert_eq!((row.windows[0].util, row.windows[0].reset), (Some(0.5), Some(1_794_427_376)));
     }
 
     #[test]
@@ -509,6 +509,28 @@ mod tests {
         a.expire(NOW + 3_600);
         assert_eq!(a.five_hour, None);
         assert!(a.seven_day.is_some() && a.models.len() == 1, "their reset is days away");
+    }
+
+    /// A week dropped because its reset passed is written as `null`,
+    /// read by the panel and the chooser as no reading, and still no
+    /// reading after a restart: at no step a week with nothing used.
+    #[test]
+    fn a_week_with_no_reading_is_null_in_the_feed_and_none_to_every_reader() {
+        let mut a = sample();
+        a.expire(1_794_538_799 + PAST_RESET_KEEP_SECS + 1);
+        assert_eq!(a.seven_day, None, "the number described the week that ended");
+        let body = render(std::slice::from_ref(&a), NOW);
+        assert!(body.contains(r#""utilization_7d":null"#) && body.contains(r#""reset_7d":null"#), "{body}");
+        let row = &marspot::cc_usage::parse(&body).expect("one row").accounts[0];
+        assert_eq!((row.util_7d, row.reset_7d), (None, None));
+        assert_eq!(load(&body)[0].seven_day, None);
+
+        // a week read at nothing used is a reading, and stays one
+        a.absorb(Reading { seven_day: Some(Window::new(0.0, None, NOW)), ..Reading::default() }, NOW);
+        let body = render(std::slice::from_ref(&a), NOW);
+        let row = &marspot::cc_usage::parse(&body).expect("one row").accounts[0];
+        assert_eq!((row.util_7d, row.reset_7d), (Some(0.0), None));
+        assert_eq!(load(&body)[0].seven_day, Some(Window::new(0.0, None, NOW)));
     }
 
     #[test]
