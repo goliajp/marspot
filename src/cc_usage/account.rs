@@ -27,11 +27,16 @@ pub struct CcAccount {
     /// Raw status string from the feed ("allowed", …).  The modal
     /// renders "ok" for allowed and the raw string otherwise.
     pub status: String,
-    /// 0.0 ..= 1.0 rolling-window utilization.
-    pub util_5h: f64,
+    /// 0.0 ..= 1.0 of the five-hour window.  The account is held to
+    /// that window exactly while the feed gives a reading: `None` is no
+    /// limit to count, `Some(0.0)` a limit with nothing used.
+    pub util_5h: Option<f64>,
+    /// 0.0 ..= 1.0 of the week.
     pub util_7d: f64,
-    /// Unix seconds when each window resets.
-    pub reset_5h: i64,
+    /// Unix seconds the five-hour window resets; `None` when the feed
+    /// gives none, as for a window that has not started.
+    pub reset_5h: Option<i64>,
+    /// Unix seconds the week resets.
     pub reset_7d: i64,
     /// Per-model caps, in feed order.  Empty on an older feed.
     pub model_limits: Vec<CcModelLimit>,
@@ -79,9 +84,6 @@ pub struct CcWindow {
 
 pub(super) const WEEK_SECS: i64 = 7 * 86_400;
 
-/// The tier of the Ultra plan, formerly Max 20x, which kept the name.
-const ULTRA_TIER: &str = "default_claude_max_20x";
-
 impl CcAccount {
     /// One account object of the feed.
     pub(super) fn from_feed(obj: &str) -> CcAccount {
@@ -89,9 +91,9 @@ impl CcAccount {
             name: str_field(obj, "name").unwrap_or_default(),
             email: str_field(obj, "email").unwrap_or_default(),
             status: str_field(obj, "status").unwrap_or_default(),
-            util_5h: num_field(obj, "utilization_5h").unwrap_or(0.0),
+            util_5h: num_field(obj, "utilization_5h"),
             util_7d: num_field(obj, "utilization_7d").unwrap_or(0.0),
-            reset_5h: num_field(obj, "reset_5h").unwrap_or(0.0) as i64,
+            reset_5h: num_field(obj, "reset_5h").map(|t| t as i64),
             reset_7d: num_field(obj, "reset_7d").unwrap_or(0.0) as i64,
             model_limits: model_limits(obj),
             collected_at: str_field(obj, "collected_at").and_then(parse_iso_utc).unwrap_or(0),
@@ -100,29 +102,16 @@ impl CcAccount {
         }
     }
 
-    /// Does the 5h window limit this account?
-    ///
-    /// Ultra dropped its 5h limit on 2026-10-30 and the API went on
-    /// reporting the window anyway: the next day an account told by
-    /// mail that its limit was gone still read 23% of 5h, with
-    /// `five_hour` as the binding claim in the rate-limit headers.
-    /// The number is still metered but no longer enforced, so on that
-    /// tier it says nothing about whether the account has room.
-    /// Unverified Ultra accounts keep the limit for a while; a refusal
-    /// a pane sees is what catches those.
-    pub fn has_five_hour_limit(&self) -> bool {
-        self.tier != ULTRA_TIER
-    }
-
     /// The account's windows in reading order: its own, then one per
-    /// model cap.  A model cap is weekly on this provider.
+    /// model cap.  A model cap is weekly on this provider.  The 5h row
+    /// is there exactly when the feed gave a reading for it.
     pub fn windows(&self) -> Vec<CcWindow> {
         let mut out = Vec::new();
-        if self.has_five_hour_limit() {
+        if let Some(util) = self.util_5h {
             out.push(CcWindow {
                 label: "5h".into(),
-                util: self.util_5h,
-                reset: (self.reset_5h > 0).then_some(self.reset_5h),
+                util,
+                reset: self.reset_5h,
                 span_secs: 5 * 3_600,
             });
         }

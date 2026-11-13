@@ -31,7 +31,9 @@ pub(in crate::plugins) enum Room {
     /// The feed answered for this profile.
     Known {
         status: String,
-        util_5h: f64,
+        /// The five-hour window's reading; `None` where the account has
+        /// none, which is not a window with nothing used.
+        util_5h: Option<f64>,
         util_7d: f64,
         reset_7d: i64,
         /// Per-model caps the feed reports, label lower-cased.
@@ -106,7 +108,7 @@ impl Room {
                 if status == "auth_error" {
                     return true;
                 }
-                if *util_5h >= FIVE_HOUR_SPENT || *util_7d >= WINDOW_SPENT {
+                if util_5h.is_some_and(|u| u >= FIVE_HOUR_SPENT) || *util_7d >= WINDOW_SPENT {
                     return true;
                 }
                 if status == "rejected" && !self.rejected_only_for_another_model(model) {
@@ -206,7 +208,8 @@ impl Room {
                     Some(u) => week.min(1.0 - u),
                     None => week,
                 };
-                (capped, 1.0 - util_5h)
+                // no five-hour limit leaves all of it
+                (capped, util_5h.map_or(1.0, |u| 1.0 - u))
             }
             Room::Unknown => (0.0, 0.0),
         }
@@ -467,7 +470,7 @@ mod tests {
     fn room(util_5h: f64, util_7d: f64, reset_7d: i64, models: &[(&str, f64)]) -> Room {
         Room::Known {
             status: "allowed".into(),
-            util_5h,
+            util_5h: Some(util_5h),
             util_7d,
             reset_7d,
             models: models.iter().map(|(l, u)| (l.to_string(), *u)).collect(),
@@ -482,7 +485,7 @@ mod tests {
     fn an_account_that_cannot_log_in_is_out_for_every_pane() {
         let logged_out = Room::Known {
             status: "auth_error".into(),
-            util_5h: 0.0,
+            util_5h: Some(0.0),
             util_7d: 0.78,
             reset_7d: 100,
             models: vec![("fable".to_string(), 1.0)],
@@ -521,7 +524,7 @@ mod tests {
     fn roomy_measured_at(measured: i64) -> Room {
         Room::Known {
             status: "allowed_warning".into(),
-            util_5h: 0.85,
+            util_5h: Some(0.85),
             util_7d: 0.88,
             reset_7d: 500,
             models: vec![("fable".to_string(), 0.62)],
@@ -699,7 +702,7 @@ mod tests {
                     *p,
                     Room::Known {
                         status: (*status).into(),
-                        util_5h: 0.0,
+                        util_5h: Some(0.0),
                         util_7d: *util7,
                         reset_7d: *reset7, models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX
                     },
@@ -715,7 +718,7 @@ mod tests {
     fn a_spent_window_is_out_whatever_the_status_says() {
         let warned = Room::Known {
             status: "allowed_warning".into(),
-            util_5h: 0.99,
+            util_5h: Some(0.99),
             util_7d: 0.37,
             reset_7d: 500, models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX
         };
@@ -723,14 +726,14 @@ mod tests {
 
         let fresh = Room::Known {
             status: "allowed_warning".into(),
-            util_5h: 0.10,
+            util_5h: Some(0.10),
             util_7d: 0.80,
             reset_7d: 900, models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX
         };
         assert!(!fresh.refused_for(None), "a warning with room left is still usable");
 
         // And it is not offered as somewhere to go.
-        let r = vec![(1, Room::Known { status: "rejected".into(), util_5h: 0.0, util_7d: 1.0, reset_7d: 100 , models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX}), (7, warned), (2, fresh)];
+        let r = vec![(1, Room::Known { status: "rejected".into(), util_5h: Some(0.0), util_7d: 1.0, reset_7d: 100 , models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX}), (7, warned), (2, fresh)];
         assert_eq!(best_profile(&r, 1, None), Some(2));
     }
 
@@ -896,9 +899,9 @@ mod tests {
             name: email.into(),
             email: email.into(),
             status: status.into(),
-            util_5h: u5,
+            util_5h: Some(u5),
             util_7d: u7,
-            reset_5h: 0,
+            reset_5h: None,
             reset_7d: reset7,
             model_limits: Vec::new(),
             collected_at: 0,
@@ -973,36 +976,6 @@ mod tests {
         assert_eq!(best_profile(&rooms, 1, None), Some(2));
     }
 
-    fn ultra(email: &str, status: &str, u5: f64, u7: f64, reset7: i64) -> CcAccount {
-        CcAccount { tier: "default_claude_max_20x".into(), ..acct(email, status, u5, u7, reset7) }
-    }
-
-    /// Ultra lost its 5h limit on 2026-10-30, but the API still
-    /// meters the window: a full 5h there shuts nothing out, and does
-    /// not rank the account below another.
-    #[test]
-    fn an_ultra_account_is_not_out_on_its_5h() {
-        let accounts = vec![
-            ultra("p1", "rejected", 1.0, 0.40, 500),
-            ultra("p2", "allowed", 0.0, 0.40, 500),
-        ];
-        let rooms = rooms_for(&[1, 2], &accounts, |p| Some(format!("p{p}")), NOW);
-        assert!(!rooms[0].1.refused_for(None), "full 5h, room in the week");
-        assert_eq!(best_profile(&rooms, 0, None), Some(1), "the 5h does not break the tie");
-
-        let week_spent = ultra("p3", "rejected", 1.0, 1.0, 500);
-        let rooms = rooms_for(&[3], &[week_spent], |p| Some(format!("p{p}")), NOW);
-        assert!(rooms[0].1.refused_for(None), "its week still counts");
-    }
-
-    /// Every other plan keeps the limit.
-    #[test]
-    fn a_max_account_is_still_out_on_its_5h() {
-        let accounts = vec![acct("p1", "allowed_warning", 0.99, 0.40, 500)];
-        let rooms = rooms_for(&[1], &accounts, |p| Some(format!("p{p}")), NOW);
-        assert!(rooms[0].1.refused_for(None));
-    }
-
     /// Nowhere else to go.
     #[test]
     fn a_single_profile_has_no_answer() {
@@ -1017,7 +990,7 @@ mod tests {
     fn fable_spent_but_open(reset_7d: i64) -> Room {
         Room::Known {
             status: "rejected".into(),
-            util_5h: 0.0,
+            util_5h: Some(0.0),
             util_7d: 0.77,
             reset_7d,
             models: vec![("fable".to_string(), 1.0)],
@@ -1039,7 +1012,7 @@ mod tests {
     fn a_rejection_no_model_explains_shuts_out_every_pane() {
         let plain = Room::Known {
             status: "rejected".into(),
-            util_5h: 0.10,
+            util_5h: Some(0.10),
             util_7d: 0.50,
             reset_7d: 500,
             models: vec![("fable".to_string(), 0.30)],
@@ -1068,7 +1041,7 @@ mod tests {
             (1, fable_spent_but_open(5_000)),
             (6, Room::Known {
                 status: "rejected".into(),
-                util_5h: 0.08,
+                util_5h: Some(0.08),
                 util_7d: 0.98,
                 reset_7d: 100,
                 models: vec![("fable".to_string(), 1.0)],
@@ -1099,7 +1072,7 @@ mod tests {
         use std::collections::HashMap;
         let read_at = |at| Room::Known {
             status: "allowed".into(),
-            util_5h: 0.18,
+            util_5h: Some(0.18),
             util_7d: 0.32,
             reset_7d: 100,
             models: vec![],
@@ -1195,3 +1168,7 @@ mod home_feed_tests {
         assert_eq!(status(3), None, "an address the feed does not have: {rooms:?}");
     }
 }
+
+#[cfg(test)]
+#[path = "tests/five_hour.rs"]
+mod five_hour_tests;

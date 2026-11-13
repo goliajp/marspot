@@ -234,7 +234,14 @@ pub(super) fn outcome_with(resp: Option<&Response>, now: i64, parse: impl Fn(&st
 
 pub(super) fn apply(account: &mut Account, waits: &mut Waits, outcome: Outcome, now: i64) {
     match outcome {
-        Outcome::Read(reading) => account.absorb(reading, now),
+        Outcome::Read(reading) => {
+            // the endpoint lists the session window exactly while the
+            // account is held to it: one it left out is not carried
+            if reading.five_hour.is_none() {
+                account.five_hour = None;
+            }
+            account.absorb(reading, now)
+        }
         Outcome::Wait(until) => waits.wait(&account.email, until),
         Outcome::AuthError => account.auth_error = true,
         Outcome::Nothing => {}
@@ -332,6 +339,52 @@ mod tests {
         assert_eq!((fable.window.util, fable.window.reset), (0.82, Some(1_785_646_800)));
         assert_eq!((fable.window.severity.as_deref(), fable.window.is_active), (Some("warning"), Some(true)));
         assert!(!r.limit_reached);
+    }
+
+    /// The same body for an account that is not held to the 5h window:
+    /// no `session` item.
+    fn body_without_session() -> String {
+        let session = BODY.lines().find(|l| l.contains(r#""kind": "session""#)).expect("the session item");
+        BODY.replace(session, "")
+    }
+
+    #[test]
+    fn the_5h_window_is_the_session_item_and_nothing_else() {
+        let r = parse_usage(&body_without_session(), NOW).expect("a body with limits");
+        assert_eq!(r.five_hour, None, "the older `five_hour` spelling beside it is not a reading");
+        assert_eq!(r.seven_day.map(|w| w.util), Some(0.62));
+
+        // not started: listed at 0 with no reset, which is a reading
+        let idle = r#"{"limits":[{"kind":"session","percent":0,"resets_at":null}]}"#;
+        assert_eq!(parse_usage(idle, NOW).unwrap().five_hour, Some(Window::new(0.0, None, NOW)));
+    }
+
+    #[test]
+    fn the_feed_carries_the_5h_fields_only_while_the_endpoint_lists_a_session() {
+        let fields = |a: &Account| {
+            let body = super::super::feed::render(std::slice::from_ref(a), NOW);
+            let row = &marspot::cc_usage::parse(&body).expect("one row").accounts[0];
+            (body.contains(r#""utilization_5h":null"#), row.util_5h, row.reset_5h)
+        };
+        let mut account = Account { email: "a@b".into(), ..Account::default() };
+        let mut waits = Waits::default();
+        apply(&mut account, &mut waits, outcome(Some(&answer(200, None, BODY)), NOW), NOW);
+        assert_eq!(fields(&account), (false, Some(0.06), Some(1_785_543_600)));
+
+        // a pass that read nothing keeps what was read
+        apply(&mut account, &mut waits, Outcome::Nothing, NOW + 300);
+        assert_eq!(fields(&account).1, Some(0.06));
+
+        // the endpoint stops listing it: null at once, not the old number
+        let later = NOW + 600;
+        apply(&mut account, &mut waits, outcome(Some(&answer(200, None, &body_without_session())), later), later);
+        assert_eq!(fields(&account), (true, None, None));
+        assert_eq!(account.seven_day.as_ref().map(|w| w.util), Some(0.62));
+
+        // listed but not started: 0 with no reset
+        let idle = r#"{"limits":[{"kind":"session","percent":0,"resets_at":null}]}"#;
+        apply(&mut account, &mut waits, outcome(Some(&answer(200, None, idle)), later), later);
+        assert_eq!(fields(&account), (false, Some(0.0), None));
     }
 
     #[test]
