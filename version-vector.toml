@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.327"  # only a shell that took another's place, or that an update made, looks at who has its coalition
-core    = "0.12.356"  # a scrollback rotation keeps its writer thread
+shell   = "0.7.328"  # a week the usage feed has no reading for is not a week with nothing used
+core    = "0.12.358"  # a week the usage feed has no reading for has a row with no figure
 session = "0.11.201"  # the reader keeps three chunks, not four, ahead of a key's answer

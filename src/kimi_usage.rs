@@ -66,12 +66,12 @@ mod tests {
         let names: Vec<&str> = k.accounts.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["Kimi", "Kimi 2"]);
         let two = &k.accounts[1];
-        let got: Vec<(&str, f64, Option<i64>)> = two.windows.iter().map(|w| (w.label.as_str(), w.util, w.reset)).collect();
-        assert_eq!(got, [("5h", 1.0, Some(1_794_300_000)), ("7d", 0.4, Some(1_794_800_000))]);
+        let got: Vec<(&str, Option<f64>, Option<i64>)> = two.windows.iter().map(|w| (w.label.as_str(), w.util, w.reset)).collect();
+        assert_eq!(got, [("5h", Some(1.0), Some(1_794_300_000)), ("7d", Some(0.4), Some(1_794_800_000))]);
         assert_eq!(two.status, "rejected");
         let one = &k.accounts[0];
-        let got: Vec<(&str, f64)> = one.windows.iter().map(|w| (w.label.as_str(), w.util)).collect();
-        assert_eq!((one.email.as_str(), got), ("ada@example.jp", vec![("7d", 0.25)]), "no 5h reading, no 5h row");
+        let got: Vec<(&str, Option<f64>)> = one.windows.iter().map(|w| (w.label.as_str(), w.util)).collect();
+        assert_eq!((one.email.as_str(), got), ("ada@example.jp", vec![("7d", Some(0.25))]), "no 5h reading, no 5h row");
         assert_eq!((account_name(0), account_name(2)), ("Kimi".to_string(), "Kimi 2".to_string()));
     }
 
