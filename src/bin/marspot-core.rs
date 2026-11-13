@@ -1734,6 +1734,10 @@ mod window_state_tests {
 
 #[cfg(test)]
 mod boot_assembly_tests {
+    mod reattach_tests {
+        include!("marspot-core/reattach_tests.rs");
+    }
+
     use super::*;
     use marspot::state::{SavedPane, SavedWindowLayout};
     use marspot_term::session_registry::{
@@ -1875,6 +1879,7 @@ mod boot_assembly_tests {
             shm_name: String::new(),
             shell_child_pid: 0,
             build: String::new(),
+            stamps_regions: false,
         }
     }
 
@@ -2790,6 +2795,8 @@ enum CoreEvent {
     /// before manifest v2 carried `control_stream_fd`, kernel races
     /// during dual-core swap, plain crashes, etc).
     L3ControlEof(u64),
+    /// A session said which grid region it publishes into.
+    L3Publishes(u64, Vec<u8>),
     /// A background reconnect finished.  `Some(stream)` swaps the
     /// pane's control onto it; `None` means every attempt failed and
     /// the pane stays on its dead stream.
@@ -3169,6 +3176,9 @@ fn l3_reader_loop(
                         marspot::input::write_clipboard_text(text);
                     }
                 }
+                MsgType::SessionPublishes => {
+                    let _ = tx.send(CoreEvent::L3Publishes(session_id, f.payload));
+                }
                 // Reply to a Cmd-C `GetSelectionText`: hand it to whoever is
                 // blocked in `L3Conn::request_selection_text`.  A dropped
                 // receiver (request already timed out) is fine — ignore.
@@ -3304,17 +3314,11 @@ fn spawn_l3_with_cwd(
             format!("{live} live sessions >= hard cap {cap}"),
         ));
     }
-    // RFC-003 Amendment 7 step 3: L2 creates the region under the
-    // deterministic per-session name `/msp-s-<id>` so a post-swap L2
-    // can shm_open(name) and reattach to the surviving L3 instead of
-    // spawning a duplicate.  The L3 carries the name in entry.toml
-    // (via MARSPOT_SHM_NAME env) for that lookup.
-    let shm_name_c = grid_shm::session_shm_name(session_id);
-    let shm_name = shm_name_c
-        .to_str()
-        .map(|s| s.to_string())
-        .unwrap_or_default();
-    let region = grid_shm::create_region_named(cols, rows, &shm_name_c)?;
+    // Under a name, so a core started after this one can find the
+    // session's frames; the L3 repeats the name in entry.toml.
+    let regions = grid_shm::SessionRegions::for_session(session_id);
+    let shm_name = regions.grid_name().to_string_lossy().into_owned();
+    let region = regions.create(cols, rows)?;
     let region_raw = region.as_raw_fd();
 
     // CLOEXEC the shm fd we hold here so it can't leak into a sibling
@@ -3437,6 +3441,7 @@ fn spawn_l3_with_cwd(
         child,
         control,
         reader,
+        regions,
         selection_rx,
     })
 }
@@ -3545,62 +3550,6 @@ fn spawn_l3_pane_with_cwd(
 ) -> std::io::Result<Pane> {
     let spawn = spawn_l3_with_cwd(cols, rows, session_id, initial_cwd, event_tx)?;
     Ok(Pane::new_l3(L3Conn::new(spawn, session_id)))
-}
-
-/// RFC-003 Amendment 7 step 4: reattach to an L3 child that survived
-/// the previous L2's death.  Walks entry.toml → shm_open(name) +
-/// connect_with_handshake(socket).  Returns a Pane that drives the
-/// *existing* L3 process without forking a new one.
-///
-/// Returns Err on any failure (registry entry missing, shm name
-/// missing, shm gone, socket gone, handshake refused) — caller falls
-/// through to `spawn_l3_pane_with_cwd`.
-fn reattach_l3_pane(
-    session_id: u64,
-    event_tx: &Sender<CoreEvent>,
-) -> std::io::Result<Pane> {
-    let entry = marspot_term::session_registry::read_session_entry(session_id)?;
-    if entry.shm_name.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "no shm_name (legacy entry)",
-        ));
-    }
-    let shm_c = std::ffi::CString::new(entry.shm_name.clone())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e}")))?;
-    let shm_fd = grid_shm::open_region(&shm_c)?;
-    let reader = GridShmReader::from_fd(shm_fd.as_raw_fd())?;
-    // GridShmReader keeps its own mmap; once the fd is mapped we can
-    // drop the OwnedFd (kernel keeps the mapping alive).
-    drop(shm_fd);
-
-    // UDS connect + handshake — same wire as the spawn path.
-    // 4 s, explicitly — the effective budget this path had before the
-    // deadline was made single.  Reattach races a live L3 that may be
-    // mid-execv.
-    let control = marspot::uds_session_client::wait_and_connect(
-        session_id,
-        std::time::Duration::from_secs(4),
-    )?;
-    let reader_stream = control.try_clone()?;
-    let tx = event_tx.clone();
-    let (selection_tx, selection_rx) = std::sync::mpsc::channel::<(u32, String)>();
-    std::thread::spawn(move || l3_reader_loop(reader_stream, session_id, tx, selection_tx));
-
-    lx_event!(
-        "L3_REATTACHED",
-        "took over surviving L3 from previous L2 image",
-        session_id = session_id,
-        pid = entry.pid,
-        shm_name = entry.shm_name
-    );
-    Ok(Pane::new_l3(L3Conn::reattach(
-        entry.pid,
-        control,
-        reader,
-        selection_rx,
-        session_id,
-    )))
 }
 
 /// The full multi-pane UI state machine — `Marspot` (src/main.rs)
@@ -4003,6 +3952,9 @@ mod hover;
 mod idle;
 #[path = "marspot-core/keys.rs"]
 mod keys;
+#[path = "marspot-core/reattach.rs"]
+mod reattach;
+use reattach::reattach_l3_pane;
 #[path = "marspot-core/theme_follow.rs"]
 mod theme_follow;
 
@@ -5850,11 +5802,15 @@ impl CoreApp {
             // L3 to update, and with another build staged it would
             // re-exec instead of ending
             let _ = marspot::session_signal::signal_session(id, libc::SIGHUP);
+            // the names it published under, so the kernel frees the
+            // pages once every holder has closed them
+            let regions = session_registry::read_session_entry(id)
+                .ok()
+                .and_then(|e| grid_shm::SessionRegions::of_entry(&e));
             let _ = session_registry::delete_session(id);
-            // Amendment 7 step 3: also drop the named shm region so
-            // the kernel actually frees the pages once every fd-holder
-            // closes.
-            grid_shm::delete_session_regions(&grid_shm::session_shm_name(id), id);
+            if let Some(regions) = regions {
+                regions.delete();
+            }
         }
         // F3+5 — drop cached cwd state so it can't leak past the pane.
         // The same id may eventually be reused; a fresh pane gets a
@@ -9196,11 +9152,11 @@ fn assemble_panes_at_boot(
                     continue;
                 }
                 Err(e) => {
-                    // Live-but-unreachable (shm wiped / UDS dead).
-                    // Identity is verified (A.2) so this SIGKILL
-                    // cannot hit a foreign process.  The dir is
-                    // KEPT and we fall through to resurrection —
-                    // the old path delete_session'd right here.
+                    // Live but it does not answer, or it cannot be
+                    // asked for a region that can be shown (see
+                    // `reattach_l3_pane`).  The process is verified
+                    // to be this session's (A.2), the dir is kept and
+                    // the session is started again in place.
                     lx_warn!(
                         "core.reattach.l3_failed",
                         &format!("{e} — SIGKILL verified L3, resurrect in place"),
@@ -9230,7 +9186,7 @@ fn assemble_panes_at_boot(
         if let Some(entry) = entry_by_id.get(&spawn_sid)
             && !entry.shm_name.is_empty()
                 && let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
-                    grid_shm::delete_session_regions(&c, spawn_sid);
+                    grid_shm::delete_session_regions(&c);
                 }
         // RFC-004 C.2 belt+braces — a resurrect dir still holds the
         // DEAD process's entry.toml; `wait_for_entry` would read it
@@ -9348,7 +9304,7 @@ fn assemble_panes_at_boot(
                 let _ = marspot::session_signal::signal_entry(entry, libc::SIGKILL);
                 if !entry.shm_name.is_empty()
                     && let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
-                        grid_shm::delete_session_regions(&c, id);
+                        grid_shm::delete_session_regions(&c);
                     }
             }
             match session_registry::retire_session_dir(id) {
@@ -9410,7 +9366,7 @@ fn assemble_panes_at_boot(
         if let Some(entry) = entry_by_id.get(&id)
             && !entry.shm_name.is_empty()
                 && let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
-                    grid_shm::delete_session_regions(&c, id);
+                    grid_shm::delete_session_regions(&c);
                 }
         match session_registry::retire_session_dir(id) {
             Ok(_) => retired += 1,
@@ -10196,6 +10152,11 @@ fn main() {
                             }
                             let _ = tx.send(CoreEvent::L3ControlReconnected(sid, got));
                         });
+                    }
+                }
+                CoreEvent::L3Publishes(sid, payload) => {
+                    if let Some((wi, idx)) = app.find_pane_by_sid(sid) {
+                        win!(app, wi).panes[idx].session_mut().l3_session_publishes(&payload);
                     }
                 }
                 CoreEvent::L3ControlReconnected(sid, stream) => {

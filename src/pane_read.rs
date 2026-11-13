@@ -219,11 +219,21 @@ fn joint(prev: &[Glyph], next: &[Glyph], cols: u16, codex: bool) -> &'static str
     }
 }
 
+/// A terminal the tail of pane `sid`'s record was replayed into, at
+/// `cols` x `rows`: what to show for a session that is running while
+/// no frame of it can be read.  Not exact for a full-screen program.
+pub fn replayed(sid: u64, cols: u16, rows: u16) -> std::io::Result<Terminal> {
+    let bytes = tail(&bytelog_of(sid), REPLAY_TAIL)?;
+    let mut term = Terminal::new(cols.max(1), rows.max(1));
+    term.feed(&bytes);
+    Ok(term)
+}
+
 /// What pane `sid` shows: `extra_lines` lines of history, then the
 /// screen, trailing blank lines dropped.
 pub fn screen(sid: u64, extra_lines: u16) -> std::io::Result<String> {
     let entry = marspot_term::session_registry::read_session_entry(sid)?;
-    let Some(frame) = live_frame(&entry.shm_name, sid)? else {
+    let Some(frame) = live_frame(&entry)? else {
         return screen_text(&bytelog_of(sid), entry.cols, entry.rows, extra_lines);
     };
     let grid = grid_of(&frame);
@@ -256,7 +266,7 @@ pub fn screen(sid: u64, extra_lines: u16) -> std::io::Result<String> {
 /// typed is worse than handing back nothing.
 pub fn composer(sid: u64) -> std::io::Result<Option<String>> {
     let entry = marspot_term::session_registry::read_session_entry(sid)?;
-    let Some(frame) = live_frame(&entry.shm_name, sid)? else {
+    let Some(frame) = live_frame(&entry)? else {
         return composer_text(&bytelog_of(sid), entry.cols, entry.rows);
     };
     Ok(composer_in_frame(&frame))
@@ -269,7 +279,7 @@ pub fn composer(sid: u64) -> std::io::Result<Option<String>> {
 /// do so into an empty box.
 pub fn composer_box(sid: u64) -> std::io::Result<Option<String>> {
     let entry = marspot_term::session_registry::read_session_entry(sid)?;
-    let frame = live_frame(&entry.shm_name, sid)?;
+    let frame = live_frame(&entry)?;
     Ok(frame.and_then(|f| box_of(&grid_of(&f))).filter(|t| !t.contains(marspot_term::grid::UNKNOWN_CLUSTER)))
 }
 
@@ -278,16 +288,22 @@ fn composer_in_frame(frame: &marspot_term::grid_shm::Frame) -> Option<String> {
 }
 
 /// The published frame, when it is the live screen. `None` when the
-/// session names no region, when nothing is published yet, or when the
-/// person has scrolled the pane back and the frame is the history they
-/// are looking at.
-fn live_frame(shm_name: &str, sid: u64) -> std::io::Result<Option<marspot_term::grid_shm::Frame>> {
-    if shm_name.is_empty() {
+/// session names no region, when the region under that name is not
+/// this session's, when nothing is published yet, or when the person
+/// has scrolled the pane back and the frame is the history they are
+/// looking at.
+fn live_frame(
+    entry: &marspot_term::session_registry::SessionEntry,
+) -> std::io::Result<Option<marspot_term::grid_shm::Frame>> {
+    let Some(regions) = marspot_term::grid_shm::SessionRegions::of_entry(entry) else {
         return Ok(None);
+    };
+    match marspot_term::grid_shm::peek_frame(&regions) {
+        Ok(frame) => Ok(frame.filter(|f| f.view_offset == 0)),
+        // another session's region: this one's screen is in its record
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Ok(None),
+        Err(e) => Err(e),
     }
-    let name = std::ffi::CString::new(shm_name)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    Ok(marspot_term::grid_shm::peek_frame(&name, sid)?.filter(|f| f.view_offset == 0))
 }
 
 fn bytelog_of(sid: u64) -> std::path::PathBuf {
