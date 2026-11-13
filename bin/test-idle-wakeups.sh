@@ -4,7 +4,9 @@
 # Opens a sandbox window of four panes at shell prompts, lets it settle,
 # and counts the timer wake-ups of all its processes over 30 seconds
 # (the kernel's own per-process counter, see bin/_idle_wakeups.py).
-# Fails when they exceed IDLE_WAKEUP_BUDGET per second.
+# Exits 1 when they exceed IDLE_WAKEUP_BUDGET per second on a quiet
+# host; 3 when they do next to other work, which is no verdict; 2 when
+# there was no reading (the codes of bin/measure-idle-marspot.sh).
 #
 # A timer that fires whether or not there is work is how idle cost comes
 # back: each one is cheap, nothing else notices it, and twelve panes
