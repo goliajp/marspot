@@ -530,7 +530,7 @@ fn codex_windows(obj: &str) -> Vec<CcWindow> {
     let is_sub_day = |b: &&Bucket| b.span > 0 && b.span <= 86_400;
     let row = |label: &str, b: &Bucket| CcWindow {
         label: label.to_string(),
-        util: b.util,
+        util: Some(b.util),
         reset: b.reset,
         span_secs: if b.span > 0 { b.span } else { WEEK_SECS },
     };
@@ -545,11 +545,10 @@ fn codex_windows(obj: &str) -> Vec<CcWindow> {
     }
     // The account-wide weekly has no name of its own in the feed; on
     // this account it is what the default model spends, which is Astra.
-    let reset_7d = num_field(obj, "reset_7d").map(|t| t as i64);
     out.push(CcWindow {
         label: "astra".into(),
-        util: num_field(obj, "utilization_7d").unwrap_or(0.0),
-        reset: reset_7d,
+        util: num_field(obj, "utilization_7d"),
+        reset: num_field(obj, "reset_7d").map(|t| t as i64),
         span_secs: WEEK_SECS,
     });
     if let Some(b) = weekly_named("reserve") {
@@ -648,8 +647,8 @@ mod tests {
         assert_eq!(a.status, "allowed");
         let labels: Vec<&str> = a.windows.iter().map(|w| w.label.as_str()).collect();
         assert_eq!(labels, ["5h", "spark", "astra", "reserve"]);
-        let utils: Vec<f64> = a.windows.iter().map(|w| w.util).collect();
-        assert_eq!(utils, [0.11, 0.5, 0.43, 0.02]);
+        let utils: Vec<Option<f64>> = a.windows.iter().map(|w| w.util).collect();
+        assert_eq!(utils, [0.11, 0.5, 0.43, 0.02].map(Some));
         // Each window keeps its OWN reset and its own length — the 5h
         // row is not the weekly's bar drawn short.
         assert_eq!(a.windows[0].reset, Some(1788813201));
@@ -696,7 +695,7 @@ mod tests {
         let w = &u.accounts[0].windows;
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].label, "astra");
-        assert_eq!(w[0].util, 0.07);
+        assert_eq!(w[0].util, Some(0.07));
     }
 
     /// The Claude side reduces to the same shape, so the panel has one
@@ -725,7 +724,7 @@ mod tests {
         let (held, free) = (&u.accounts[0], &u.accounts[1]);
         assert_eq!((held.tier.as_str(), free.tier.as_str()), ("default_claude_max_20x", "default_claude_max_20x"));
         let w = held.windows();
-        assert_eq!((w[0].label.as_str(), w[0].util, w[0].reset), ("5h", 0.05, Some(1_785_543_600)));
+        assert_eq!((w[0].label.as_str(), w[0].util, w[0].reset), ("5h", Some(0.05), Some(1_785_543_600)));
         assert_eq!((free.util_5h, free.reset_5h), (None, None));
         let w = free.windows();
         assert_eq!(w[0].label, "7d");
@@ -742,7 +741,7 @@ mod tests {
         let a = &parse(&feed).expect("parses").accounts[1];
         assert_eq!((a.util_5h, a.reset_5h), (Some(0.0), None));
         let w = a.windows();
-        assert_eq!((w[0].label.as_str(), w[0].util, w[0].reset), ("5h", 0.0, None));
+        assert_eq!((w[0].label.as_str(), w[0].util, w[0].reset), ("5h", Some(0.0), None));
         assert_eq!(w[1].label, "7d");
     }
 
@@ -963,8 +962,8 @@ mod tests {
         // object that happens to share a name.
         assert_eq!(u.accounts[1].status, "allowed");
         assert_eq!(u.accounts[1].util_5h, Some(0.3));
-        assert!((u.accounts[1].util_7d - 0.39).abs() < 1e-9);
-        assert_eq!(u.accounts[1].reset_7d, 1785704400);
+        assert_eq!(u.accounts[1].util_7d, Some(0.39));
+        assert_eq!(u.accounts[1].reset_7d, Some(1785704400));
     }
 
     /// Accounts are deliberately out of order here, because that is how
@@ -1006,7 +1005,7 @@ mod tests {
         assert_eq!(a.name, "Claude 1");
         assert_eq!(a.email, "ada@example.jp");
         assert_eq!(a.status, "allowed");
-        assert_eq!(a.util_7d, 0.39);
+        assert_eq!(a.util_7d, Some(0.39));
         assert_eq!(a.reset_5h, Some(1_784_429_400));
         let b = &u.accounts[1];
         assert_eq!(b.email, "ben@example.com");

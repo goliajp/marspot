@@ -39,14 +39,13 @@ pub(in crate::plugins) fn room_of(a: &CcAccount, now: i64) -> Room {
     // no reading stays none; a reading whose window has ended since
     // is a limit with nothing used
     let util_5h = a.util_5h.map(|u| if a.reset_5h.is_some_and(renewed) { 0.0 } else { u });
-    let (util_7d, reset_7d) = if a.reset_7d <= 0 {
-        // `null`: the week has not started, so a whole one is ahead.
-        // Read as 0 it sorted first among accounts by renewal.
-        (a.util_7d, now + WEEK)
-    } else if renewed(a.reset_7d) {
-        (0.0, next_renewal(a.reset_7d, now))
-    } else {
-        (a.util_7d, a.reset_7d)
+    let (util_7d, reset_7d) = match a.reset_7d {
+        // `null`: the week has not started, or there is no reading of
+        // it; either way it is ranked as a whole week ahead.  Read as
+        // 0 it sorted first among accounts by renewal.
+        None => (a.util_7d, now + WEEK),
+        Some(reset) if renewed(reset) => (Some(0.0), next_renewal(reset, now)),
+        Some(reset) => (a.util_7d, reset),
     };
     let models: Vec<(String, f64)> = a
         .model_limits
@@ -56,8 +55,8 @@ pub(in crate::plugins) fn room_of(a: &CcAccount, now: i64) -> Room {
             (m.label.to_ascii_lowercase(), util)
         })
         .collect();
-    let full_before = a.util_5h.is_some_and(|u| u >= 1.0) || a.util_7d >= 1.0 || a.model_limits.iter().any(|m| m.util >= 1.0);
-    let full_now = util_5h.is_some_and(|u| u >= 1.0) || util_7d >= 1.0 || models.iter().any(|(_, u)| *u >= 1.0);
+    let full_before = a.util_5h.is_some_and(|u| u >= 1.0) || a.util_7d.is_some_and(|u| u >= 1.0) || a.model_limits.iter().any(|m| m.util >= 1.0);
+    let full_now = util_5h.is_some_and(|u| u >= 1.0) || util_7d.is_some_and(|u| u >= 1.0) || models.iter().any(|(_, u)| *u >= 1.0);
     // The collector writes `rejected` when any window is full, the 5h
     // included.  A full window that has renewed since, with nothing
     // else full, is that and nothing else.
@@ -104,9 +103,9 @@ mod tests {
             email: "a".into(),
             status: status.into(),
             util_5h: None,
-            util_7d: u7,
+            util_7d: Some(u7),
             reset_5h: None,
-            reset_7d: reset7,
+            reset_7d: (reset7 != 0).then_some(reset7),
             model_limits: vec![CcModelLimit { label: "Fable".into(), util: fable.0, reset: fable.1 }],
             collected_at: 0,
             limits_as_of: None,
@@ -116,7 +115,7 @@ mod tests {
 
     fn known(r: Room) -> (String, f64, i64, f64) {
         match r {
-            Room::Known { status, util_7d, reset_7d, models, .. } => (status, util_7d, reset_7d, models[0].1),
+            Room::Known { status, util_7d, reset_7d, models, .. } => (status, util_7d.expect("a reading"), reset_7d, models[0].1),
             Room::Unknown => unreachable!(),
         }
     }

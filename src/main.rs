@@ -2181,7 +2181,7 @@ fn demo_cc_usage(rect: marspot_term::layout::Rect) -> marspot::ui::components::c
     let win = |label: &str, util: f32, reset: i64, hm: &str, span: i64| {
         marspot::ui::components::cc_usage_modal::CcUsageWindowRender {
             label: label.to_string(),
-            util,
+            util: Some(util),
             reset_unix: Some(reset),
             span_secs: span,
             reset_hm: hm.to_string(),
