@@ -118,6 +118,11 @@ fn adversarial() -> Vec<Vec<u8>> {
     s("\x1b[45m\n\n\n\n\n\n\x1b[0mplain 中文\r\nplain");
     s("\x1b[4mab\x1b[0m\rabcdef\r\n\x1b[7m \x1b[0m\x08xy中文z");
     s("\x1b[3;1H\x1b[42m\x1b[1L\x1b[0mab\x1b[2;1H\x1b[43m\x1b[1M\x1b[0m\x1b[3;1Hcd中");
+    // a colour change ends the cluster and the tag before it: what
+    // follows must not join either
+    s("e\x1b[31m\u{0301}x\x1b[m\u{FE0F}");
+    s("\u{26A0}\x1b[1m\u{FE0F}ab\u{1F468}\x1b[0m\u{200D}\u{1F469}");
+    s("a<\x1b[4mu>b</\x1b[0mu>c<u\x1b[31m>d");
     // SGR with 0..=32 parameters
     let mut sgr = String::new();
     for n in 0..=32 {
