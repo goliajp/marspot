@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.321"  # an account is held to the 5h window exactly while the feed reads one
-core    = "0.12.354"  # a write that does not fit starts the disk writer's next buffer
-session = "0.11.197"  # a write that does not fit starts the disk writer's next buffer
+core    = "0.12.355"  # a bytelog rotation no longer stops the parser
+session = "0.11.198"  # a bytelog rotation no longer stops the parser

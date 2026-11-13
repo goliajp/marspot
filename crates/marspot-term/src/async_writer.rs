@@ -40,13 +40,15 @@
 //!   a claude spinner (≈60 bytes a second) look silent for twenty
 //!   minutes and a small first frame never arrive at all (2026-09-22).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::JoinHandle;
 
 mod files;
 mod queue;
-use files::write_all_of;
+pub use files::{delete_with, doomed_path};
+use files::{rotated, write_all_of};
 use queue::{Buf, Msg, Queue};
 
 pub struct AsyncWriter {
@@ -110,6 +112,11 @@ impl AsyncWriter {
                             Msg::Swap(new_file, ack) => {
                                 file = new_file;
                                 let _ = ack.send(());
+                            }
+                            Msg::Rotate { live, retired } => {
+                                if let Some(fresh) = rotated(&live, &retired) {
+                                    file = fresh;
+                                }
                             }
                             Msg::Data(_) | Msg::Barrier(..) => unreachable!("taken above"),
                         }
@@ -281,6 +288,20 @@ impl AsyncWriter {
         let (ack_tx, ack_rx) = sync_channel::<()>(0);
         self.queue.push(Msg::Truncate(len, ack_tx), true);
         let _ = ack_rx.recv();
+    }
+
+    /// Retire the file being written, which is at `live`, to `retired`
+    /// and go on in a fresh file at `live`, without waiting for either.
+    ///
+    /// What was written before this call ends up in the retired file
+    /// and what is written after it in the fresh one; a reader that
+    /// wants to see that calls [`Self::flush`] first.  When the
+    /// renaming fails the old file goes on being written.
+    pub fn rotate(&mut self, live: PathBuf, retired: PathBuf) {
+        if !self.buf.is_empty() {
+            self.hand_over();
+        }
+        self.queue.push(Msg::Rotate { live, retired }, true);
     }
 
     /// Flush, then continue appending to `new_file`.
