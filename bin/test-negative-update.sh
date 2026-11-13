@@ -23,9 +23,7 @@
 # Three boots × (~30 s stagger + verify) → budget ~150 s.  Run after
 # `cargo build --release`.  Exits 0 on success.
 #
-# Port 6025 is this project's second registry allocation (the first,
-# 6024, belongs to test-real-update.sh — keeping them distinct lets the
-# two run back-to-back without socket contention).
+# The feeds are served on a port the system hands out for this run.
 
 set -uo pipefail
 
@@ -34,8 +32,8 @@ source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
-RUN_LOG=/tmp/marspot-test-negative-update.log
-PORT=6025
+RUN_LOG="$(dev_run_log test-negative-update)"
+PORT="$(dev_free_port)"
 ASSET=marspot-aarch64-apple-darwin.tar.gz
 SERVE_DIR=$(mktemp -d /tmp/marspot-negfeed.XXXXXX)
 HTTP_PID=
@@ -157,7 +155,7 @@ HTTP_PID=$!
 disown
 sleep 0.5
 curl -sf "http://127.0.0.1:$PORT/wrongkey/feed.json" >/dev/null \
-  || fail "feed server didn't come up on :$PORT (squatter? check port registry)"
+  || fail "feed server didn't come up on :$PORT"
 echo "[setup] OK — 3 malicious feeds served on :$PORT (wrongkey / tampered / nosig)"
 
 # --- Per-case driver -------------------------------------------------

@@ -197,7 +197,9 @@ for suite in "${SUITES[@]}"; do
   current_sd="/tmp/msp-e2e-$RUN_ID-$i"
   start=$(date +%s)
   set +e
-  remote_gui "cd ~/$REMOTE_DIR && rm -rf $current_sd && env MARSPOT_STATE_DIR=$current_sd$fwd \
+  # created here so the sandbox helpers find it and give its sessions
+  # ids of their own (see dev_seed_session_base)
+  remote_gui "cd ~/$REMOTE_DIR && rm -rf $current_sd && mkdir -p $current_sd && env MARSPOT_STATE_DIR=$current_sd$fwd \
     /usr/local/bin/bench-lock $lock bin/_bounded.sh $SUITE_TIMEOUT bin/$suite"
   suite_rc=$?
   set -e

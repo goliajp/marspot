@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.420"  # a pane's title and mode flags are read only from a region that is that session's
-core    = "0.12.460"  # a session whose grid region cannot be shown is given another, not started again
-session = "0.11.300"  # regions are named per state directory, carry whose they are, and can be left for another
+core    = "0.12.461"  # a session whose grid region cannot be shown is given another, not started again
+session = "0.11.301"  # a session that moves to another region takes its cluster text and title along

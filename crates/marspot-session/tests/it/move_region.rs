@@ -13,14 +13,14 @@ use marspot_term::session_registry::read_session_entry;
 use marspot_term::shell_proto::MsgType;
 
 use crate::self_execv::{
-    ID, Link, Sandbox, echo_pid, read_echoed_pid, shell_pid, stage, start, wait_for,
+    Link, Sandbox, id, echo_pid, read_echoed_pid, shell_pid, stage, start, wait_for,
 };
 use crate::support::{COLS, ROWS, Session};
 
 /// A region made for the session to move to, as the core makes one,
 /// and a reader on it.
 fn region_to_move_to() -> (SessionRegions, GridShmReader) {
-    let regions = SessionRegions::for_session(ID);
+    let regions = SessionRegions::for_session(id());
     let fd = regions.create(COLS, ROWS).expect("a new grid region");
     let reader = GridShmReader::from_fd(fd.as_raw_fd()).expect("a reader on it");
     (regions, reader)
@@ -59,7 +59,7 @@ fn a_session_asked_to_move_publishes_into_the_new_region_with_the_same_shell() {
     assert_eq!(shell_pid(&s, "after"), shell_before, "the same shell is on the PTY");
     assert_eq!(s.child.try_wait().unwrap(), None, "the session ended");
 
-    let entry = read_session_entry(ID).expect("the session's entry");
+    let entry = read_session_entry(id()).expect("the session's entry");
     let named = SessionRegions::of_entry(&entry).expect("the entry names a region");
     let (opens, clusters, title) = (
         GridShmReader::open(&named).map(|r| r.serial()),
@@ -79,15 +79,15 @@ fn a_session_does_not_move_into_a_region_that_is_not_its_own() {
     let mut s = start(&mut sandbox);
     let shell_before = shell_pid(&s, "before");
 
-    let ours = SessionRegions::for_session(ID);
-    let stranger = Identity { session: ID + 1, ..ours.owner() };
+    let ours = SessionRegions::for_session(id());
+    let stranger = Identity { session: id() + 1, ..ours.owner() };
     let fd = grid_shm::create_region_named(COLS, ROWS, ours.grid_name(), stranger).unwrap();
     let theirs = GridShmReader::from_fd(fd.as_raw_fd()).unwrap();
     ask_to_move(&s, &ours);
 
     // the next thing typed is answered where the session was
     assert_eq!(shell_pid(&s, "after"), shell_before);
-    let (seq, entry) = (theirs.seq(), read_session_entry(ID).expect("the session's entry"));
+    let (seq, entry) = (theirs.seq(), read_session_entry(id()).expect("the session's entry"));
     ours.delete();
     assert_eq!(seq, 0, "the session published into another session's region");
     assert_ne!(entry.shm_name.as_bytes(), ours.grid_name().to_bytes(), "the entry names the region it refused");
@@ -125,7 +125,7 @@ fn a_session_that_moved_stays_in_the_new_region_across_its_own_update() {
         },
         || read_echoed_pid(&s, "after"),
     );
-    let named = read_session_entry(ID).ok().and_then(|e| SessionRegions::of_entry(&e));
+    let named = read_session_entry(id()).ok().and_then(|e| SessionRegions::of_entry(&e));
     let opens = named.as_ref().map(|n| GridShmReader::open(n).map(|r| r.serial()).ok());
     regions.delete();
     assert_eq!(shell_after, shell_before, "the same shell is on the PTY");

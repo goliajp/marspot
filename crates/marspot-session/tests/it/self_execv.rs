@@ -19,7 +19,11 @@ use marspot_term::shell_proto::{Frame, MsgType, encode_inject_input};
 use marspot_term::test_env::{EnvGuard, shell_without_rc_files};
 use support::{COLS, ROWS, Session};
 
-pub(crate) const ID: u64 = 4100;
+/// The session's id, of this test process's own: every test here ran
+/// as session 4100 and shared one pair of cluster and title regions.
+pub(crate) fn id() -> u64 {
+    support::id_base() + 4100
+}
 
 /// `MARSPOT_STATE_DIR` at a directory of this test's own under `/tmp`.
 ///
@@ -94,7 +98,7 @@ fn wait_for_or<T>(
 pub(crate) fn start(sandbox: &mut Sandbox) -> Session {
     let shell = shell_without_rc_files(sandbox.path(), "/bin/zsh");
     sandbox.env.set("SHELL", &shell);
-    let mut s = Session::spawn_with_id(bin(), COLS, ROWS, Some(ID));
+    let mut s = Session::spawn_with_id(bin(), COLS, ROWS, Some(id()));
     let state = sandbox.path().to_path_buf();
     wait_for(10, "the session's first frame", || {
         if let Some(st) = s.child.try_wait().unwrap() {
@@ -148,7 +152,7 @@ pub(crate) struct Link {
 
 impl Link {
     pub(crate) fn open() -> Self {
-        let stream = support::reattach(&session_socket_path(ID), 15)
+        let stream = support::reattach(&session_socket_path(id()), 15)
             .expect("the new image accepts a reattach on the session's socket");
         Self { stream }
     }
@@ -386,9 +390,9 @@ fn an_update_in_the_middle_of_a_flood_loses_no_line() {
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     sandbox.env.set("SHELL", &script);
-    let mut s = Session::spawn_with_id(bin(), COLS, ROWS, Some(ID));
+    let mut s = Session::spawn_with_id(bin(), COLS, ROWS, Some(id()));
     let pid = s.pid();
-    let history = |name: &str| std::fs::metadata(state.join(format!("sessions/{ID}/{name}"))).map(|m| m.len()).unwrap_or(0);
+    let history = |name: &str| std::fs::metadata(state.join(format!("sessions/{}/{name}", id()))).map(|m| m.len()).unwrap_or(0);
     wait_for(20, "the flood to be well under way", || (history("bytelog") > 1 << 20).then_some(()));
 
     let staged = stage(&state, true).canonicalize().unwrap();
@@ -504,7 +508,7 @@ fn a_sigterm_from_a_stranger_does_not_end_the_pane() {
     let mut s = start(&mut sandbox);
     let state = sandbox.path().to_path_buf();
     let shell = shell_pid(&s, "before");
-    let entry = read_session_entry(ID).expect("the L3 registered itself");
+    let entry = read_session_entry(id()).expect("the L3 registered itself");
     assert_eq!(entry.pid, s.pid() as i32);
 
     sigterm(s.pid());
@@ -594,13 +598,13 @@ fn the_registry_entry_names_the_running_build() {
     let mut sandbox = Sandbox::new();
     let mut s = start(&mut sandbox);
     let state = sandbox.path().to_path_buf();
-    let entry = read_session_entry(ID).expect("the L3 registered itself");
+    let entry = read_session_entry(id()).expect("the L3 registered itself");
     assert_eq!(entry.build, marspot_term::build::own());
     let staged = stage(&state, true);
     let want = marspot_term::build::of_file(&staged).expect("the staged build");
     s.send_frame(MsgType::SessionUpdate, Vec::new());
     wait_for(20, "the entry to name the staged build", || {
-        read_session_entry(ID).ok().filter(|e| e.build == want).map(|_| ())
+        read_session_entry(id()).ok().filter(|e| e.build == want).map(|_| ())
     });
     s.kill();
 }

@@ -722,10 +722,16 @@ mod tests {
 
     /// Only the tail is read, however long the log has grown — reading
     /// a pane must cost the same on day one and day thirty.
+    ///
+    /// A line written before the tail would still be on the screen if
+    /// the whole log were replayed.  What fills the log in between is
+    /// carriage returns: they move nothing and scroll nothing, so the
+    /// replay is the tail's length in bytes and no more work than that.
     #[test]
     fn only_the_tail_is_read() {
-        let mut b = vec![b'x'; (REPLAY_TAIL as usize) * 2];
-        b.extend_from_slice(b"\x1b[H\x1b[2Jthe end\r\n");
+        let mut b = b"before the tail\r\n".to_vec();
+        b.resize(b.len() + (REPLAY_TAIL as usize) * 2, b'\r');
+        b.extend_from_slice(b"the end");
         let p = write("huge", &b);
         let text = screen_text(&p, 20, 4, 0).unwrap();
         assert_eq!(text, "the end");
