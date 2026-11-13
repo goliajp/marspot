@@ -83,6 +83,17 @@ impl ClusterTableWriter {
         Ok(Self { _fd: fd, base, at: HEADER, count: 0, overflow: false, last_count: 0 })
     }
 
+    /// Start from the table `old` holds: the session is leaving that
+    /// region for this one.  An image that came out of an update has
+    /// the screen's cluster cells and not their text, which is only in
+    /// the region its predecessor wrote.
+    pub(super) fn carry_from(&mut self, old: &Self) {
+        unsafe {
+            std::ptr::copy(old.base, self.base, TABLE_END);
+            self.last_count = get_u32(self.base, 8);
+        }
+    }
+
     pub(super) fn begin(&mut self) {
         self.at = HEADER;
         self.count = 0;
@@ -419,6 +430,21 @@ mod tests {
         assert_eq!(clusters_of(&r1), [FLAG], "the first session's table was written by the second");
         assert_eq!(clusters_of(&r2.expect("the second session's own region")), [FAMILY]);
         assert!(late.is_err(), "the name is the second session's now");
+    }
+
+    #[test]
+    fn a_writer_that_leaves_one_region_for_another_takes_its_table_along() {
+        let from = test_regions();
+        let to = test_regions();
+        let mut old = ClusterTableWriter::open(&from.side_name(Side::Clusters).unwrap(), from.owner()).unwrap();
+        one_cluster(&mut old, FLAG);
+        let mut new = ClusterTableWriter::open(&to.side_name(Side::Clusters).unwrap(), to.owner()).unwrap();
+        new.carry_from(&old);
+        let r = ClusterTableReader::open(&to);
+        from.delete();
+        to.delete();
+        assert_eq!(clusters_of(&r.expect("the new region is still its owner's")), [FLAG]);
+        assert_eq!(new.last_count, 1);
     }
 
     /// A region as an L3 from before identities leaves it.

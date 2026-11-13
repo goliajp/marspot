@@ -62,6 +62,21 @@ impl TitleWriter {
         Ok(Self { _fd: fd, base, last: String::new() })
     }
 
+    /// Start from the title `old` holds: the session is leaving that
+    /// region for this one, and the program's title is only there.
+    pub(super) fn carry_from(&mut self, old: &Self) {
+        self.last.clone_from(&old.last);
+        let seq = self.seq();
+        let s = seq.load(Ordering::Relaxed);
+        seq.store(s.wrapping_add(1) | 1, Ordering::Relaxed);
+        fence(Ordering::Release);
+        unsafe {
+            std::ptr::copy(old.base.add(12), self.base.add(12), CAPACITY - ident::BYTES - 12);
+        }
+        fence(Ordering::Release);
+        seq.store((s | 1).wrapping_add(1), Ordering::Release);
+    }
+
     /// Publish `title` if it differs from the last one seen.
     pub fn update(&mut self, title: &str) {
         if title == self.last {
@@ -168,6 +183,22 @@ mod tests {
         assert_eq!(read(&regions).unwrap().as_deref(), Some("marspot"));
         regions.delete();
         assert_eq!(read(&regions).unwrap(), None);
+    }
+
+    #[test]
+    fn a_writer_that_leaves_one_region_for_another_takes_its_title_along() {
+        let (from, from_name, from_owner) = session();
+        let (to, to_name, to_owner) = session();
+        let mut old = TitleWriter::open(&from_name, from_owner).unwrap();
+        old.update("codex | 01a1");
+        let mut new = TitleWriter::open(&to_name, to_owner).unwrap();
+        new.carry_from(&old);
+        // the terminal's title has not changed, so nothing is written
+        new.update("codex | 01a1");
+        let got = read(&to);
+        from.delete();
+        to.delete();
+        assert_eq!(got.unwrap().as_deref(), Some("codex | 01a1"));
     }
 
     /// A new image of a session starts with an empty terminal title; the
