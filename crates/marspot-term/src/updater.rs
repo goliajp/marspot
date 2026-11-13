@@ -34,8 +34,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
@@ -57,45 +56,41 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// point at a URL with the same JSON shape.
 const DEFAULT_FEED: &str = "https://api.github.com/repos/goliajp/marspot/releases/latest";
 
-/// Set when the background poller has staged a binary that the
-/// foreground process should pick up on next focus loss.  Toggled
-/// in the same `Arc<AtomicBool>` the GUI's title-bar affordance
-/// reads.
-pub type UpdateFlag = Arc<AtomicBool>;
+/// The running background updater.  Dropping it ends the polling: the
+/// thread is gone before its next look.
+pub struct Poller {
+    _stop: Sender<()>,
+}
 
-/// Spawn the background updater.  Returns the shared flag so the
-/// GUI can light up a "↻ refresh available" title-bar button.
-pub fn spawn(version: String) -> UpdateFlag {
-    let flag = Arc::new(AtomicBool::new(false));
-    if pending_already_staged() {
-        flag.store(true, Ordering::Release);
-    }
-    let flag_thread = flag.clone();
+/// Spawn the background updater.
+pub fn spawn(version: String) -> Poller {
+    let (stop, stopped) = channel();
     thread::Builder::new()
         .name("marspot-updater".into())
-        .spawn(move || updater_loop(version, flag_thread))
+        .spawn(move || {
+            // Stagger a touch so we don't race the GUI's first paint on
+            // startup; 30s is enough for shell prompts to land first.
+            poll(&stopped, Duration::from_secs(30), POLL_INTERVAL, || {
+                if let Err(e) = check_and_stage(&version) {
+                    eprintln!("[updater] check failed: {}", e);
+                }
+            })
+        })
         .expect("spawn updater thread");
-    flag
+    Poller { _stop: stop }
 }
 
-fn updater_loop(version: String, flag: UpdateFlag) {
-    // Stagger a touch so we don't race the GUI's first paint on
-    // startup; 30s is enough for shell prompts to land first.
-    thread::sleep(Duration::from_secs(30));
-    loop {
-        match check_and_stage(&version) {
-            Ok(true) => {
-                flag.store(true, Ordering::Release);
-            }
-            Ok(false) => {}
-            Err(e) => {
-                eprintln!("[updater] check failed: {}", e);
-            }
-        }
-        thread::sleep(POLL_INTERVAL);
+/// Run `check` after `first` and then once every `period`, until the
+/// sender of `stopped` is dropped.
+fn poll(stopped: &Receiver<()>, first: Duration, period: Duration, mut check: impl FnMut()) {
+    let mut wait = first;
+    while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(wait) {
+        check();
+        wait = period;
     }
 }
 
+#[cfg(test)]
 fn pending_already_staged() -> bool {
     // Any one of the three binaries having a pending entry counts —
     // the shell will pick them up next focus-loss / SIGUSR1.
@@ -586,5 +581,33 @@ mod tests {
         assert!(verify_signature_with(&pubk, &file, &sig).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// The checks come on the clock until the poller is dropped, and the
+    /// thread is gone after that: it is joined here, which a thread
+    /// still asleep on its period would never let happen.
+    #[test]
+    fn the_polling_ends_when_the_poller_is_dropped() {
+        let (stop, stopped) = channel();
+        let checks = Arc::new(AtomicU32::new(0));
+        let counted = Arc::clone(&checks);
+        let t = thread::spawn(move || {
+            poll(&stopped, Duration::ZERO, Duration::from_secs(3600), || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            });
+        });
+        while checks.load(Ordering::SeqCst) == 0 {
+            thread::yield_now();
+        }
+        drop(stop);
+        t.join().expect("the thread ends");
+        assert_eq!(checks.load(Ordering::SeqCst), 1, "a check ran after the stop");
     }
 }

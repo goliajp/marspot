@@ -22,6 +22,10 @@
 #   IDLE_WAKEUP_BUDGET      with IDLE_READINGS: fail when any window's
 #                           wake-ups per second, summed, are over this
 #   IDLE_MEMORY             also print `footprint` of every process
+#   IDLE_RESIDENT           also quit with the sessions kept and measure
+#                           the shell that stays; IDLE_RESIDENT_BUDGET is
+#                           its wake-ups per second, and
+#                           IDLE_RESIDENT_FOOTPRINT_KIB its footprint
 #   IDLE_STACKS             sample L1, L2 and one L3 for this many seconds
 #                           and print where each thread sits
 
@@ -128,7 +132,20 @@ if [[ -n ${IDLE_READINGS:-} ]]; then
     "$ROOT/bin/_idle_wakeups.py" --label "marspot-dev quit, $N sessions kept, shell and sessions" --window "$WINDOW" \
       --readings "$IDLE_READINGS" ${IDLE_WAKEUP_BUDGET:+--budget "$IDLE_WAKEUP_BUDGET"} \
       --pattern "$ROOT/target/(debug|release)/marspot(-shell|-core|-session)?( |\$)" || rc=1
-    echo "==> resident shell footprint: $(footprint "$l1" 2>/dev/null | sed -n 's/.*phys_footprint: *//p' | head -1)"
+    # the kernel's own figure, the one Activity Monitor shows
+    kib="$(python3 -c 'import ctypes, sys
+buf = (ctypes.c_uint64 * 64)()
+ctypes.CDLL("/usr/lib/libSystem.B.dylib").proc_pid_rusage(int(sys.argv[1]), 4, ctypes.byref(buf)) == 0 or sys.exit(1)
+print(buf[9] // 1024)' "$l1")" || fail "cannot read the resident shell's footprint"
+    echo "==> resident shell footprint: $kib KiB"
+    if [[ -n ${IDLE_RESIDENT_FOOTPRINT_KIB:-} ]]; then
+      if (( kib > IDLE_RESIDENT_FOOTPRINT_KIB )); then
+        echo "FAIL: the resident shell's footprint is $kib KiB, budget $IDLE_RESIDENT_FOOTPRINT_KIB"
+        rc=1
+      else
+        echo "PASS: the resident shell's footprint is $kib KiB, budget $IDLE_RESIDENT_FOOTPRINT_KIB"
+      fi
+    fi
   fi
 else
   "$ROOT/bin/measure-idle.sh" --app marspot-dev --sessions "$N" --window "$WINDOW"
