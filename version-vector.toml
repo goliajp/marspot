@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.328"  # a week the usage feed has no reading for is not a week with nothing used
-core    = "0.12.485"  # a row of plain text that scrolls off is blanked by its characters
-session = "0.11.325"  # a row of plain text that scrolls off is blanked by its characters
+core    = "0.12.486"  # the two loops that write a run of cells are compiled on their own
+session = "0.11.326"  # the two loops that write a run of cells are compiled on their own
