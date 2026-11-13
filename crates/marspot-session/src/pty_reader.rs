@@ -31,15 +31,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use marspot_term::pty::Pty;
 
 mod echo;
+mod gather;
 mod lease;
 mod turn;
 mod wakes;
 use echo::Echo;
+use gather::{Gathered, gather};
 use lease::Leases;
 use turn::Turn;
 use wakes::{Event, Wakes};
@@ -51,24 +53,6 @@ const READ_BUF_BYTES: usize = 64 * 1024;
 /// has handed one back, so a program that writes faster than the
 /// parser reads waits in the PTY instead of filling this process.
 const CHUNKS: usize = 4;
-
-/// What one `read` of a pty master returns at most on macOS.
-const KERNEL_READ_BYTES: usize = 1024;
-
-/// How many times a reader that has just taken a full kilobyte asks for
-/// the next before it goes back to waiting.
-const DRY_RETRIES: u32 = 16;
-
-/// Spin-loop hints between two of those asks: about as long as the
-/// writer needs to be woken and fill the PTY again.  Asking with no
-/// pause carried the same bytes with three times the empty reads.
-const RETRY_PAUSE_SPINS: u32 = 64;
-
-/// Longest a chunk is kept open for more.
-const GATHER_FOR: Duration = Duration::from_millis(3);
-
-/// How long one wait for more lasts while the parser is busy.
-const GATHER_WAIT: Duration = Duration::from_millis(1);
 
 /// How long bulk output may pause before what has been gathered is
 /// handed to an idle parser.  Output shorter than one full read never
@@ -96,8 +80,8 @@ static ECHO: Echo = Echo::new();
 /// And a reader queued for its turn among flooding panes read nothing
 /// until the turn came: with nine of them the key showed 3 to 5 ms
 /// later at the median and 150 ms at the worst.  For a moment after a
-/// key the reader hands over whatever it has each time the pty runs
-/// dry, and waits for no turn.
+/// key the reader hands over what it has as soon as the parser is idle
+/// or the pty runs dry, and for a longer moment waits for no turn.
 ///
 /// Called by the thread that stops the reader.
 pub(crate) fn typed() {
@@ -137,15 +121,6 @@ pub(crate) struct PtyReader {
 /// The queue the reader fills: every chunk in flight fits.
 pub(crate) fn channel() -> (SyncSender<Chunk>, Receiver<Chunk>) {
     mpsc::sync_channel(CHUNKS)
-}
-
-enum Gathered {
-    /// The PTY may have more; `dry` when the output had stopped.
-    Open { dry: bool },
-    /// The PTY has ended.
-    Ended,
-    /// The reader was told to stop.
-    Stopped,
 }
 
 impl PtyReader {
@@ -244,6 +219,11 @@ impl PtyReader {
         Self { stop, stopping, empties, unparsed, thread }
     }
 
+    /// Chunks handed to the loop and not yet handed back.
+    pub(crate) fn in_flight(&self) -> usize {
+        self.unparsed.load(Ordering::SeqCst)
+    }
+
     /// Hand a parsed chunk back to be filled again.
     pub(crate) fn recycle(&self, chunk: Chunk) {
         self.unparsed.fetch_sub(1, Ordering::SeqCst);
@@ -259,118 +239,6 @@ impl PtyReader {
         let _ = self.empties.try_send(Chunk::from(Vec::new()));
         let _ = self.thread.join();
     }
-}
-
-/// Read `pty` into `buf` until it is full or what is in it should not
-/// wait any longer.  `there` is how many bytes the kernel said it
-/// holds.  Returns the bytes read and how the read ended.
-///
-/// Output that comes in less than one full read is handed over at
-/// once.  After a full read the program is writing in bulk, and a dry
-/// PTY is not the end of it: the chunk stays open while the parser is
-/// still on an earlier one -- handing it over sooner would not get it
-/// parsed sooner, and a reader that sits waiting for a chunk to come
-/// back lets the writer fall asleep -- and, while the parser is idle,
-/// until the output pauses for [`TAIL_WAIT`].
-fn gather(
-    pty: &Pty,
-    buf: &mut [u8],
-    wakes: &Wakes,
-    unparsed: &AtomicUsize,
-    turn: &mut Turn,
-    echo: &Echo,
-    mut there: usize,
-) -> (usize, Gathered) {
-    let mut started = Instant::now();
-    let mut len = 0;
-    // a short read in the middle of a flood is a writer short of a
-    // core, not a keystroke's echo
-    let mut bulk = turn.in_flood();
-    // the last read was a full one: the writer keeps up with this reader
-    let mut full = false;
-    loop {
-        while there > 0 && len < buf.len() {
-            let space = buf.len() - len;
-            match pty.read_shared(&mut buf[len..]) {
-                // macOS gives EIO when the slave side fully closes
-                Ok(0) => return (len, Gathered::Ended),
-                Ok(n) => {
-                    len += n;
-                    there = there.saturating_sub(n);
-                    full = n >= KERNEL_READ_BYTES.min(space);
-                    bulk |= full;
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => there = 0,
-                Err(_) => return (len, Gathered::Ended),
-            }
-        }
-        if !bulk {
-            return (len, Gathered::Open { dry: true });
-        }
-        if len >= buf.len() || (len > 0 && echo.expected()) {
-            break;
-        }
-        let queued = turn.enter(len, || echo.expected());
-        // a key was typed while this waited for its turn
-        if len > 0 && echo.expected() {
-            break;
-        }
-        if queued {
-            started = Instant::now();
-        }
-        let idle = unparsed.load(Ordering::SeqCst) == 0;
-        if started.elapsed() >= GATHER_FOR {
-            break;
-        }
-        // A short read while this pane floods alone is the end of one
-        // of the program's writes, and its next begins some ten
-        // microseconds later: asking through that gap carried 2 to 3 %
-        // more than sleeping through it.  With other panes flooding a
-        // short read is a writer short of a core, and asking again is
-        // the empty reads that cost them all.
-        if full || turn.alone() {
-            match ask_again(pty, &mut buf[len..]) {
-                Asked::Got(n) => {
-                    full = n >= KERNEL_READ_BYTES.min(buf.len() - len);
-                    len += n;
-                    continue;
-                }
-                Asked::Dry => full = false,
-                Asked::Ended => return (len, Gathered::Ended),
-            }
-        }
-        match wakes.wait(Some(if idle { TAIL_WAIT } else { GATHER_WAIT })) {
-            Event::Stop => return (len, Gathered::Stopped),
-            Event::Data(n) => there = n,
-            Event::Neither if idle => return (len, Gathered::Open { dry: true }),
-            Event::Neither => {}
-        }
-    }
-    (len, Gathered::Open { dry: false })
-}
-
-enum Asked {
-    Got(usize),
-    Dry,
-    Ended,
-}
-
-/// Right after a full read: the writer was woken by it and its next
-/// kilobyte lands within microseconds, sooner than a wait would return.
-fn ask_again(pty: &Pty, buf: &mut [u8]) -> Asked {
-    for _ in 0..DRY_RETRIES {
-        for _ in 0..RETRY_PAUSE_SPINS {
-            std::hint::spin_loop();
-        }
-        match pty.read_shared(buf) {
-            Ok(0) => return Asked::Ended,
-            Ok(n) => return Asked::Got(n),
-            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => {}
-            Err(_) => return Asked::Ended,
-        }
-    }
-    Asked::Dry
 }
 
 fn set_nonblocking(fd: RawFd, on: bool) {
@@ -406,8 +274,10 @@ pub(crate) fn readable_before_stop(fd: RawFd, stop: &UnixStream) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::gather::KERNEL_READ_BYTES;
     use super::*;
     use marspot_term::pty::{PtyConfig, TerminalSize};
+    use std::time::Instant;
 
     fn spawn(script: &str) -> Arc<Pty> {
         Arc::new(
@@ -428,9 +298,58 @@ mod tests {
         unsafe { libc::fcntl(fd, libc::F_GETFL) & libc::O_NONBLOCK != 0 }
     }
 
+    /// What an awaited answer may be in is not handed to a parser that
+    /// is still on an earlier chunk one dry read at a time: the reader
+    /// reads on, and what it hands over is more than the pty held when
+    /// it woke.
+    #[test]
+    fn a_busy_parser_is_not_handed_an_awaited_answer_in_pieces() {
+        let pty = spawn("yes 0123456789012345678901234567890123456789");
+        let (_stop, stop_rx) = UnixStream::pair().expect("a socket pair");
+        set_nonblocking(pty.raw_master(), true);
+        let wakes = Wakes::new(pty.raw_master(), stop_rx.as_raw_fd());
+        let parser_busy = AtomicUsize::new(1);
+        let echo = Echo::later();
+        let mut turn = Turn::new(Leases::open());
+        let mut buf = vec![0; READ_BUF_BYTES];
+        let mut largest_over = 0;
+        for _ in 0..200 {
+            let Event::Data(there) = wakes.wait(None) else { panic!("the flood stopped") };
+            let (len, end) = gather(&pty, &mut buf, &wakes, &parser_busy, &mut turn, &echo, there);
+            assert!(matches!(end, Gathered::Open { .. }), "the flood ended");
+            largest_over = largest_over.max(len.saturating_sub(there));
+        }
+        assert!(
+            largest_over >= 2 * KERNEL_READ_BYTES,
+            "no hand-over carried more than one read past what the pty held: {largest_over}"
+        );
+    }
+
+    /// Right after a key the parser is handed what the pty gave each
+    /// time it runs dry, busy or not: the answer of a program that read
+    /// the key at once then sits in a chunk of its own.
+    #[test]
+    fn right_after_a_key_a_busy_parser_is_handed_each_piece_too() {
+        let pty = spawn("yes 0123456789012345678901234567890123456789");
+        let (_stop, stop_rx) = UnixStream::pair().expect("a socket pair");
+        set_nonblocking(pty.raw_master(), true);
+        let wakes = Wakes::new(pty.raw_master(), stop_rx.as_raw_fd());
+        let parser_busy = AtomicUsize::new(1);
+        let echo = Echo::always();
+        let mut turn = Turn::new(Leases::open());
+        let mut buf = vec![0; READ_BUF_BYTES];
+        for _ in 0..200 {
+            let Event::Data(there) = wakes.wait(None) else { panic!("the flood stopped") };
+            let (len, end) = gather(&pty, &mut buf, &wakes, &parser_busy, &mut turn, &echo, there);
+            assert!(matches!(end, Gathered::Open { .. }), "the flood ended");
+            assert!(len < there + KERNEL_READ_BYTES, "{len} bytes handed over at once, the pty held {there}");
+        }
+    }
+
     /// A flood comes in full chunks, and for a moment after a key in
-    /// whatever pieces the pty gave: the program's answer to the key is
-    /// somewhere in them and must not wait for a chunk to fill.
+    /// whatever pieces the pty gave while the parser is idle: the
+    /// program's answer to the key is somewhere in them and must not
+    /// wait for a chunk to fill.
     #[test]
     fn a_flood_is_handed_over_as_it_comes_while_an_echo_is_expected() {
         let pty = spawn("yes 0123456789012345678901234567890123456789");

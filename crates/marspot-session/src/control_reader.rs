@@ -78,6 +78,7 @@ fn read_frames(mut reader: UnixStream, stop: &UnixStream, tx: Sender<SessionEven
                         if tx.send(SessionEvent::Key(e, m)).is_err() {
                             break;
                         }
+                        crate::input::arrived();
                     }
                 }
                 MsgType::GridResize => {
@@ -99,10 +100,12 @@ fn read_frames(mut reader: UnixStream, stop: &UnixStream, tx: Sender<SessionEven
                         }
                 }
                 MsgType::Paste => {
-                    if let Ok(text) = decode_paste(&f.payload)
-                        && tx.send(SessionEvent::Paste(text)).is_err() {
+                    if let Ok(text) = decode_paste(&f.payload) {
+                        if tx.send(SessionEvent::Paste(text)).is_err() {
                             break;
                         }
+                        crate::input::arrived();
+                    }
                 }
                 MsgType::PaneHoldGrid => {
                     if let Ok((_sid, on)) =
@@ -129,9 +132,12 @@ fn read_frames(mut reader: UnixStream, stop: &UnixStream, tx: Sender<SessionEven
                 MsgType::InjectInput => {
                     if let Ok((_sid, bytes)) =
                         marspot_term::shell_proto::decode_inject_input(&f.payload)
-                        && tx.send(SessionEvent::InjectInput(bytes)).is_err() {
+                    {
+                        if tx.send(SessionEvent::InjectInput(bytes)).is_err() {
                             break;
                         }
+                        crate::input::arrived();
+                    }
                 }
                 MsgType::PaneTerminalFocus => {
                     if let Ok((_sid, focused)) =
@@ -218,5 +224,27 @@ mod tests {
         let f = Frame::read_from(&mut next_image).unwrap().expect("a frame");
         assert_eq!(f.msg_type, MsgType::InjectInput);
         assert_eq!(marspot_term::shell_proto::decode_inject_input(&f.payload).unwrap().1, b"two");
+    }
+
+    /// What is typed raises the flag the parser looks at between two
+    /// slices, once it is queued for the loop.
+    #[test]
+    fn typed_input_is_flagged_for_the_parser() {
+        use std::sync::atomic::Ordering;
+
+        let (mut l2, l3) = UnixStream::pair().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut readers = ControlReaders::new().unwrap();
+        readers.spawn(l3, tx, 0);
+        crate::input::taken();
+
+        inject("k").write_to(&mut l2).unwrap();
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(SessionEvent::InjectInput(_))));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !crate::input::waiting().load(Ordering::Acquire) {
+            assert!(std::time::Instant::now() < deadline, "the flag was never raised");
+            std::thread::yield_now();
+        }
+        readers.stop();
     }
 }

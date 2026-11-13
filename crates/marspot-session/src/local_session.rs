@@ -20,7 +20,7 @@
 use std::io;
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -31,6 +31,9 @@ use marspot_term::session_state::{PendingPage, SessionState};
 use marspot_term::terminal::Terminal;
 
 use crate::pty_reader::PtyReader;
+
+mod pump;
+pub(crate) use pump::Pace;
 
 /// How recently we have to have seen PTY output to count as "active".
 /// Mirrors `shelld_client::ACTIVE_WINDOW` so L2's badge state is the
@@ -126,6 +129,11 @@ pub struct LocalSession {
     hold: bool,
     held: Vec<Vec<u8>>,
     held_bytes: usize,
+    /// See [`pump::Unfinished`].
+    unfinished: Option<pump::Unfinished>,
+    /// Chunks the reader handed over before the last key was typed and
+    /// that are not parsed yet.
+    before_key: usize,
     cols: u16,
     rows: u16,
 }
@@ -293,6 +301,8 @@ impl LocalSession {
             hold: false,
             held: Vec::new(),
             held_bytes: 0,
+            unfinished: None,
+            before_key: 0,
             cols,
             rows,
         })
@@ -326,93 +336,6 @@ impl LocalSession {
             Some(t) if t.elapsed() <= ACTIVE_WINDOW => SessionState::Active,
             _ => SessionState::Idle,
         }
-    }
-
-    /// Drain every chunk the reader has queued, append each to the
-    /// bytelog, feed it into the terminal parser.  Returns bytes
-    /// consumed this tick (0 = nothing happened).
-    pub fn pump(&mut self) -> usize {
-        self.drain(None).0
-    }
-
-    /// [`Self::pump`], stopping once `budget` has been spent parsing.
-    /// The flag says chunks are still queued.
-    ///
-    /// The reader queues whatever the PTY gives it, and a program can
-    /// write faster than the parser reads -- `cat` of a big file, `yes`.
-    /// Draining to empty then never ends while the program runs, and
-    /// the loop that called it stops publishing frames, applying
-    /// resizes and delivering keys, Ctrl-C included.
-    pub fn pump_within(&mut self, budget: Duration) -> (usize, bool) {
-        self.drain(Some(Instant::now() + budget))
-    }
-
-    fn drain(&mut self, deadline: Option<Instant>) -> (usize, bool) {
-        let mut total = 0;
-        let mut more = false;
-        let raw = self.line.output_is_raw(self.pty.raw_master(), self.shell_pgrp());
-        loop {
-            if total > 0 && deadline.is_some_and(|d| Instant::now() >= d) {
-                more = true;
-                break;
-            }
-            match self.rx.try_recv() {
-                Ok(chunk) => {
-                    // see `line_discipline`: false unless a repair is pending
-                    let converted = raw.then(|| crate::line_discipline::with_carriage_returns(chunk.bytes().to_vec()));
-                    let bytes = converted.as_deref().unwrap_or(chunk.bytes());
-                    // The bytelog is written whether or not the picture is
-                    // held: everything that reads it must see the pane talk.
-                    if let Some(b) = self.bytelog.as_mut() {
-                        let _ = b.append(bytes);
-                    }
-                    total += bytes.len();
-                    if self.hold {
-                        self.held_bytes += bytes.len();
-                        self.held.push(bytes.to_vec());
-                        if self.held_bytes >= HOLD_CAP {
-                            marspot_term::lx_warn!(
-                                "l3.hold.cap_reached",
-                                "held output hit the cap; releasing the freeze \
-                                 mid-paint — the pane will visibly jump",
-                                held_bytes = self.held_bytes as u64,
-                                cap = HOLD_CAP as u64
-                            );
-                            self.hold_grid(false);
-                        }
-                    } else {
-                        self.terminal.feed(bytes);
-                    }
-                    if let Some(r) = self.reader.as_ref() {
-                        r.recycle(chunk);
-                    }
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
-            }
-        }
-        if total > 0 {
-            self.last_output = Some(Instant::now());
-        }
-        // The bytelog's size is what L1 reads to tell whether this pane
-        // is talking; a burst must not wait in a buffer for 64 KiB of
-        // company.  A flood fills buffers by itself, until it ends.
-        if let Some(b) = self.bytelog.as_mut().filter(|_| !more && total < crate::publish_gate::FloodGate::BULK_BYTES) {
-            b.hand_off();
-        }
-        self.flush_capability_responses();
-        // see `reply_guard`: on every pump while replies are unaccounted
-        // for -- any output, the shell's prompt included, or the loop's
-        // short wake while watching
-        if self.replies.is_watching() {
-            let delivered = self.writer.backlog() == 0;
-            self.replies.check_and_log(self.pty.raw_master(), self.shell_pgrp(), delivered, self.id);
-        }
-        // see `line_discipline`: a job starts drawing, or the prompt is back
-        if total > 0 || self.line.wants_look() {
-            self.line.look(self.pty.raw_master(), self.shell_pgrp(), self.id, self.writer.backlog() == 0);
-        }
-        (total, more)
     }
 
     /// The shell's process group: the foreground whenever no job is.
@@ -659,6 +582,8 @@ impl LocalSession {
             hold: false,
             held: Vec::new(),
             held_bytes: 0,
+            unfinished: None,
+            before_key: 0,
             cols,
             rows,
         })
@@ -676,7 +601,7 @@ impl LocalSession {
             r.stop();
         }
         self.hold_grid(false);
-        self.drain(None);
+        self.pump();
         let deadline = Instant::now() + HANDOFF_INPUT_WAIT;
         while self.writer.backlog() > 0 && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(1));
@@ -759,7 +684,7 @@ pub(crate) fn test_pane_env(shell: &str) -> marspot_term::test_env::StateSandbox
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
-    use std::sync::mpsc;
+    use std::sync::mpsc::{self, TryRecvError};
     use std::time::{Duration, Instant};
 
     /// What the `line_discipline` tests read off a pane.
@@ -1023,6 +948,8 @@ mod tests {
             hold: false,
             held: Vec::new(),
             held_bytes: 0,
+            unfinished: None,
+            before_key: 0,
             cols: 80,
             rows: 24,
         };
@@ -1090,6 +1017,8 @@ mod tests {
             hold: false,
             held: Vec::new(),
             held_bytes: 0,
+            unfinished: None,
+            before_key: 0,
             cols: 80,
             rows: 24,
         };
@@ -1100,7 +1029,9 @@ mod tests {
         }
         let all = chunk.len() * chunks;
 
-        let (first, more) = s.pump_within(Duration::from_micros(1));
+        let no_key = AtomicBool::new(false);
+        let pace = Pace { budget: Duration::from_micros(1), follow: None, key_waiting: &no_key };
+        let (first, more) = s.pump_within(pace);
         assert!(more, "the budget ran out with chunks still queued");
         assert!(first > 0, "a bounded pump still makes progress");
         assert!(first < all, "it stopped at the budget, not at the end: {first} of {all}");
@@ -1139,6 +1070,8 @@ mod tests {
             hold: false,
             held: Vec::new(),
             held_bytes: 0,
+            unfinished: None,
+            before_key: 0,
             cols: 80,
             rows: 24,
         };
@@ -1201,6 +1134,8 @@ mod tests {
             hold: false,
             held: Vec::new(),
             held_bytes: 0,
+            unfinished: None,
+            before_key: 0,
             cols: 80,
             rows: 24,
         };
