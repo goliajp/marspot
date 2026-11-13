@@ -46,16 +46,45 @@ pub(crate) fn application_appeared() {
 }
 
 pub(crate) fn watch() {
-    watch_in(std::time::Duration::ZERO);
+    if WANTED.load(std::sync::atomic::Ordering::Acquire) {
+        watch_in(std::time::Duration::ZERO);
+    }
 }
 
+/// Set for the next image of a shell that does not have its
+/// coalition: that image looks again.
+const LOOK_ENV: &str = "MARSPOT_SHELL_LOOK";
+/// Whether this shell is to look at who has its coalition.  A shell
+/// the user started has it by birth, and one that had it keeps it
+/// through its own image changes: neither looks, and the start of the
+/// app is what it was.
+static WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The last look found the coalition under something else.
+static NOT_OURS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// At the top of `main`: take the count out of the environment, so
-/// that nothing this shell starts but its own heir has it.
-pub(crate) fn take_count() {
+/// that nothing this shell starts but its own heir has it, and see
+/// whether this image is one that looks: a shell that took another's
+/// place (`in_passing`), one that an update made (its earlier images
+/// may be from before any of this), one told to by its last image.
+pub(crate) fn take_count(in_passing: bool) {
     let n = std::env::var(RESEATS_ENV).ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let told = std::env::var_os(LOOK_ENV).is_some();
     // SAFETY: startup path in main(), before any thread is spawned.
-    unsafe { std::env::remove_var(RESEATS_ENV) };
+    unsafe {
+        std::env::remove_var(RESEATS_ENV);
+        std::env::remove_var(LOOK_ENV);
+    }
     RESEATS.store(n, std::sync::atomic::Ordering::Release);
+    let updated = std::env::var_os("MARSPOT_SHELL_SELF_UPDATE").is_some();
+    WANTED.store(in_passing || told || updated, std::sync::atomic::Ordering::Release);
+}
+
+/// For the image a shell with no window becomes when it is opened.
+pub(crate) fn carry_look(cmd: &mut std::process::Command) {
+    if NOT_OURS.load(std::sync::atomic::Ordering::Acquire) {
+        cmd.env(LOOK_ENV, "1");
+    }
 }
 
 /// For the next image of this process: it is the same shell.
@@ -225,7 +254,9 @@ fn watch_in(delay: std::time::Duration) {
         if !records.iter().any(|r| r.pid == me && !r.dead) {
             return;
         }
-        let mut gone = match ls_records::holder_of(&records, coalition, me, &id) {
+        let holder = ls_records::holder_of(&records, coalition, me, &id);
+        NOT_OURS.store(holder != Holder::Us, std::sync::atomic::Ordering::Release);
+        let mut gone = match holder {
             Holder::Us => return,
             Holder::Other { pid, dead: false } => {
                 lx_event!(

@@ -125,8 +125,8 @@ fn go_on(left: u32, extra: &[(&str, &str)]) {
 /// here, when that is the same build as this image.  The window is
 /// already gone at this point, as in any update of the shell.
 pub(crate) fn settle() {
-    crate::reclaim::take_count();
     let pass = std::env::var(PASS_ENV).unwrap_or_default();
+    crate::reclaim::take_count(!pass.is_empty());
     // SAFETY: startup path in main(), before any thread is spawned.
     unsafe { std::env::remove_var(PASS_ENV) };
     if pass == NAMED {
@@ -137,7 +137,9 @@ pub(crate) fn settle() {
     {
         go_on(left.parse().unwrap_or(0), &[]);
     }
-    if !pass.is_empty() {
+    // an image that is the bundle's executable is listed as the app,
+    // however this process was first listed: nothing to ask
+    if !pass.is_empty() || ownership::bundle_of(&own_exe()).is_some() {
         return;
     }
     let shell = ownership::successor_exe();
