@@ -54,9 +54,10 @@ const TRIES: u32 = 4;
 static RENAMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether this process was listed outside the bundle until its last
-/// image.  It is the app by name now, and cannot be given the
-/// coalition it is in: `ownership::hand_over_if_outside` has a new
-/// shell started in its place.
+/// image.  It is the app by name now, and when its record does not
+/// have the coalition it is in, it cannot be given it:
+/// `ownership::hand_over_if_outside` has a new shell started in its
+/// place.
 pub(crate) fn renamed() -> bool {
     RENAMED.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -71,7 +72,6 @@ fn become_image(exe: &Path, pass: &str, extra: &[(&str, &str)]) -> std::io::Erro
         cmd.env(k, v);
     }
     crate::instance::carry_lock(&mut cmd);
-    crate::reclaim::carry_count(&mut cmd);
     let err = cmd.exec();
     crate::instance::keep_lock_here();
     err
@@ -83,8 +83,15 @@ fn own_exe() -> std::path::PathBuf {
     marspot_term::owner::resolved(&std::env::current_exe().unwrap_or_default())
 }
 
+/// The app's bundle id.  An image outside the bundle, which is what an
+/// update leaves this process running, has none of its own: it takes
+/// the one LaunchServices lists this process under.
 pub(crate) fn bundle_id() -> Option<String> {
-    objc2_foundation::NSBundle::mainBundle().bundleIdentifier().map(|id| id.to_string())
+    if let Some(id) = objc2_foundation::NSBundle::mainBundle().bundleIdentifier() {
+        return Some(id.to_string());
+    }
+    let listed = NSRunningApplication::runningApplicationWithProcessIdentifier(std::process::id() as libc::pid_t)?;
+    Some(listed.bundleIdentifier()?.to_string())
 }
 
 /// Whether LaunchServices lists this process, and under `bundle`.
@@ -215,11 +222,81 @@ pub(crate) fn ls_refresh_main() -> ! {
 /// registering from a pane in that moment does win.  Nor is anything
 /// done here about a coalition listed under another program's record.
 pub(crate) fn take_coalition_as(extra: &[(&str, &str)]) {
+    if !GIVEN.load(std::sync::atomic::Ordering::Acquire) && register_in_coalition().is_none() {
+        return;
+    }
+    go_on(TRIES, extra);
+}
+
+/// Set when this process registered before it took the instance lock,
+/// and has the coalition.
+static GIVEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the shell that asked for this one is in this one's
+/// coalition: it has a window, or answers for the sessions, and is to
+/// stay unless this process is given the coalition.
+pub(crate) fn asked_from_inside() -> bool {
+    let mine = platform::coalition_of(std::process::id() as i32);
+    marspot_term::owner::Record::read().is_some_and(|r| mine.is_some() && r.heir_in == mine && r.coalition == mine)
+}
+
+/// What a shell that was asked for and not given the coalition writes
+/// where one that takes over writes its pid.
+pub(crate) const REFUSED: &str = "refused";
+
+/// For a shell started in place of one in the same coalition, before
+/// it says that it is there: register, and go on only when that got it
+/// the coalition.  The shell that asked stays until it is told, so one
+/// that is refused exits here and nothing has changed on screen.  A
+/// record another program left, listed or not, is what refuses it.
+pub(crate) fn take_coalition_or_exit() {
+    match register_in_coalition() {
+        // not registered: it goes on as the shell it is, as before
+        None => {}
+        Some(true) => GIVEN.store(true, std::sync::atomic::Ordering::Release),
+        Some(false) => {
+            lx_event!("SHELL_COALITION_REFUSED", "started to be given the sessions' coalition, and was not: leaving the shell that asked in place");
+            let _ = std::fs::write(marspot_term::owner::heir_path(), REFUSED);
+            // a session takes this exit, with the request still on
+            // record, for a reason to start another: stay until the
+            // shell that asked has taken the request back
+            let asks = || marspot_term::owner::Record::read().is_some_and(|r| r.heir_in.is_some());
+            for _ in 0..100 {
+                if !asks() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            std::process::exit(0);
+        }
+    }
+}
+
+/// Whether this process, which has just registered, was given the
+/// coalition.  Asked of `lsappinfo info` for this pid: measured, that
+/// has the answer the moment registering returns (24 of 24 looks, from
+/// 0 to 770 ms after), while the list did not show a second living
+/// process of the app at all for 0.8 s.  A coalition is given when the
+/// record is made or not at all, so a look that shows none is asked
+/// once more, 50 ms on, and then believed.
+fn given(coalition: u64, me: i32) -> bool {
+    let has = || ls_records::of_pid(me).is_some_and(|r| r.coalition == Some(coalition));
+    has() || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        has()
+    }
+}
+
+/// Register this process in the sessions' coalition, with the dead
+/// records of the app out of the way first, and say whether it was
+/// given the coalition.  `None` when it has no bundle or its coalition
+/// is unknown, and nothing was done.
+fn register_in_coalition() -> Option<bool> {
     let exe = ownership::successor_exe();
     let (Some(bundle), Some(id), Some(coalition)) =
         (ownership::bundle_of(&exe), bundle_id(), platform::coalition_of(std::process::id() as i32))
     else {
-        return;
+        return None;
     };
     let me = std::process::id() as i32;
     let began = std::time::Instant::now();
@@ -242,11 +319,13 @@ pub(crate) fn take_coalition_as(extra: &[(&str, &str)]) {
     let cleared = std::time::Instant::now();
     register();
     let nobodys = cleared.elapsed();
+    let given = given(coalition, me);
     let holder = ls_records::holder_of(&ls_records::list(), coalition, me, &id);
     lx_event!(
         "SHELL_COALITION_TAKEN",
         "registered in the sessions' coalition",
         coalition = coalition,
+        given = given,
         listed_under = format!("{holder:?}"),
         instances = instances,
         exit_seen = exit_seen,
@@ -254,7 +333,15 @@ pub(crate) fn take_coalition_as(extra: &[(&str, &str)]) {
         // from the last look or instance to this process being registered
         registered_after_ms = nobodys.as_millis()
     );
-    go_on(TRIES, extra);
+    Some(given)
+}
+
+/// Whether the bundle's shell is the build this image is: a shell
+/// started from it then does what this one would.
+pub(crate) fn bundle_shell_is_this_build() -> bool {
+    let shell = ownership::successor_exe();
+    let build = marspot_term::build::of_file(&shell);
+    ownership::bundle_of(&shell).is_some() && build.is_some() && build == marspot_term::build::of_file(&own_exe())
 }
 
 /// Have LaunchServices start the bundle once more, and return when

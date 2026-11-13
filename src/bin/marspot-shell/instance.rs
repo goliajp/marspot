@@ -210,6 +210,12 @@ pub(crate) fn hold_or_exit() {
         let _ = LOCK.set(file);
         return;
     }
+    // the shell that asked keeps its window until this one says it is
+    // there: one that asked from the same coalition is to keep it for
+    // good unless this process has the coalition by then
+    if heir && crate::identity::asked_from_inside() {
+        crate::identity::take_coalition_or_exit();
+    }
     let claimed = if heir { claim_as_heir(&path) } else { claim(&path) };
     match claimed {
         Ok(Claim::Ours(file)) => {
