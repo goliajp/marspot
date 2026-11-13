@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.308"  # the codex cli follows the daemon while the supervisor rests
-core    = "0.12.342"  # the disk writers take their buffers back to 64 KiB and write what has gathered at once
+core    = "0.12.344"  # the path detector says a path is not all dots in one expression
 session = "0.11.188"  # a job that ends between the two reads did not choose raw mode
