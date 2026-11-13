@@ -65,8 +65,8 @@
 //! holds when its prompt starts -- before any repair of that prompt --
 //! and puts that back on Enter, raw mode and all, for the command. Its
 //! flags go back while the shell is still in front, or while the
-//! command's process is still the shell's own image and cannot have
-//! asked for anything. A command first seen in raw mode after its exec
+//! command's process has not called exec and cannot have asked for
+//! anything. A command first seen in raw mode after its exec
 //! may have asked for it and is left alone, output included: under bash
 //! a first command that is still running when its output is read, and
 //! was never seen before its exec, staircases until it ends.
@@ -139,6 +139,10 @@ pub struct LineGuard {
     look_owed: bool,
     exits: exits::Exits,
     repairs: u64,
+    /// How long Enter is held up before anything is looked at: a
+    /// machine too busy to run this thread until the command started.
+    #[cfg(test)]
+    pub(crate) enter_stalls: Option<Duration>,
 }
 
 impl LineGuard {
@@ -151,6 +155,10 @@ impl LineGuard {
     pub fn wrote_input(&mut self, master: RawFd, shell_pgrp: libc::pid_t, bytes: &[u8]) {
         if !bytes.iter().any(|b| *b == b'\r' || *b == b'\n') {
             return;
+        }
+        #[cfg(test)]
+        if let Some(stall) = self.enter_stalls {
+            std::thread::sleep(stall);
         }
         let at = Instant::now();
         self.hot_until = Some(at + HOT_FOR);
@@ -206,7 +214,7 @@ impl LineGuard {
             return true;
         }
         let canon = termios(master).is_none_or(|t| t.c_lflag & libc::ICANON != 0);
-        !chose_raw(job, canon, unstarted(job, shell_pgrp), front())
+        !chose_raw(job, canon, exits::not_execed(job), front())
     }
 
     /// How soon the session loop should look again.
@@ -360,21 +368,15 @@ fn chose_raw(job: libc::pid_t, canon: bool, unstarted: bool, front_after: libc::
 /// A job has just been seen in front while flags are owed. True when it
 /// has the terminal with all of them: either they were already there,
 /// or the terminal is as the shell left it for a command and they are
-/// put back now. That is `ICANON` on, or a leader still running the
-/// shell's own image: it has not exec'd, so raw mode is what the shell
-/// handed it (bash). Any other job in raw mode is left alone.
+/// put back now. That is `ICANON` on, or a leader that has not exec'd,
+/// so raw mode is what the shell handed it (bash). Any other job in raw
+/// mode is left alone.
 fn hand_over(master: RawFd, shell_pgrp: libc::pid_t, front: libc::pid_t, owed: Flags) -> bool {
     if termios(master).is_some_and(|t| owed.missing_from(Flags::of(&t)).is_empty()) {
         return true;
     }
-    let unstarted = unstarted(front, shell_pgrp);
+    let unstarted = exits::not_execed(front);
     put_back(master, shell_pgrp, owed, unstarted).is_some_and(|canon| canon || unstarted)
-}
-
-/// Whether the job led by `front` still runs the shell's own image.
-fn unstarted(front: libc::pid_t, shell_pgrp: libc::pid_t) -> bool {
-    use marspot_term::platform::pid_exe_path;
-    pid_exe_path(front).is_some_and(|exe| Some(exe) == pid_exe_path(shell_pgrp))
 }
 
 /// `bytes` as the terminal's output processing would have passed them
@@ -955,6 +957,35 @@ mod tests {
         }
     }
 
+    /// A script the shell's own program runs has called exec like any
+    /// other command; only a child that has not is still the shell's.
+    #[test]
+    fn a_process_is_the_shells_own_until_it_calls_exec() {
+        use std::process::Command;
+        // SAFETY: the child only waits to be killed; it runs none of
+        // this process's code past the fork.
+        let forked = unsafe { libc::fork() };
+        if forked == 0 {
+            // SAFETY: async-signal-safe calls in the forked child.
+            unsafe {
+                libc::pause();
+                libc::_exit(0);
+            }
+        }
+        assert!(forked > 0);
+        let own_image = super::exits::not_execed(forked);
+        // SAFETY: the child this test forked.
+        unsafe {
+            libc::kill(forked, libc::SIGKILL);
+            libc::waitpid(forked, std::ptr::null_mut(), 0);
+        }
+        assert!(own_image, "forked and nothing else");
+        let mut other = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        assert!(!super::exits::not_execed(other.id() as libc::pid_t), "another program");
+        other.kill().unwrap();
+        other.wait().unwrap();
+    }
+
     /// A program that exits non-zero with the terminal raw crashed, but
     /// nothing says its other settings were not meant: only the output
     /// side is put back.
@@ -1003,5 +1034,57 @@ mod tests {
         s.write(b"/usr/bin/printf 'three\\nfour\\n'\r").unwrap();
         let later = |s: &LocalSession| under(s, "$ three", "four") || stacked(s, "three", "four");
         assert!(pump_until(&mut s, later), "later commands too:\n{}", screen(&s));
+    }
+
+    /// Up to the prompt after a raw-mode program exited non-zero, with
+    /// no look between its end and that prompt: bash's readline saved
+    /// the raw settings and hands them to every command from here, and
+    /// zsh copied them.
+    fn shell_holding_the_raw_settings(id: u64) -> LocalSession {
+        let mut s = shell(id);
+        s.write(b"sh -c 'stty raw -echo; printf x; sleep 0.2; exit 3'\r").unwrap();
+        assert!(
+            pump_until(&mut s, |s| rows(s).iter().any(|r| r.trim_end() == "x")),
+            "the raw-mode program drew:\n{}",
+            screen(&s)
+        );
+        thread::sleep(Duration::from_millis(700));
+        assert!(
+            pump_until(&mut s, |s| s.line_repairs().0 == 1 && at_prompt(s)),
+            "the repair started:\n{}",
+            screen(&s)
+        );
+        s
+    }
+
+    /// The session looked neither then nor between Enter and the next
+    /// command's exec, and that command is the program that failed,
+    /// started again: it sets raw mode itself, under bash to the
+    /// very settings it was handed. Those are its own, and neither they
+    /// nor what it draws are touched.
+    fn a_raw_program_restarted_before_any_look_keeps_its_raw_mode(shell_path: &str, id: u64) {
+        let _env = test_pane_env(shell_path);
+        let mut s = shell_holding_the_raw_settings(id);
+        s.enter_stalls(Some(Duration::from_millis(150)));
+        s.write(b"sh -c 'stty raw -echo; printf \"UP\\ndown\"; sleep 0.5; exit 3'\r").unwrap();
+        s.enter_stalls(None);
+        assert!(
+            pump_until(&mut s, |s| rows(s).iter().any(|r| r.trim() == "down")),
+            "the program drew:\n{}",
+            screen(&s)
+        );
+        assert_eq!(s.pty_flags().1 & libc::OPOST, 0, "it still has the terminal raw");
+        let stepped = rows(&s).windows(2).any(|w| w[0].trim_end().ends_with("UP") && w[1].starts_with(' ') && w[1].trim() == "down");
+        assert!(stepped, "its line feed moved down and nothing else:\n{}", screen(&s));
+    }
+
+    #[test]
+    fn a_raw_program_restarted_under_bash_before_any_look_keeps_its_raw_mode() {
+        a_raw_program_restarted_before_any_look_keeps_its_raw_mode("/bin/bash", 0xEC);
+    }
+
+    #[test]
+    fn a_raw_program_restarted_under_zsh_before_any_look_keeps_its_raw_mode() {
+        a_raw_program_restarted_before_any_look_keeps_its_raw_mode("/bin/zsh", 0xEF);
     }
 }
