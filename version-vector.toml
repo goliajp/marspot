@@ -28,4 +28,4 @@
 
 shell   = "0.7.321"  # an account is held to the 5h window exactly while the feed reads one
 core    = "0.12.352"  # the menu on a file link opens the folder the file is in
-session = "0.11.193"  # a key typed into a pane ends its reader's wait for a turn among flooding panes
+session = "0.11.195"  # a key ends the parser's turn within 16 KiB, and typing into a flood no longer slows it

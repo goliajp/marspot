@@ -132,6 +132,15 @@ impl BlankGate {
     }
 }
 
+/// What a frame follows while a key's answer is awaited.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Follow {
+    /// Every few kilobytes parsed.
+    Slice,
+    /// Every chunk the reader handed over.
+    Chunk,
+}
+
 /// Spaces out the frames of bulk output.
 ///
 /// A pane absorbing a flood parses one full read per turn of the loop,
@@ -141,9 +150,15 @@ impl BlankGate {
 /// frame goes out per [`FloodGate::FRAME`].
 ///
 /// Nothing else waits: a turn that parsed less than a full read is the
-/// end of a flood or was never one, and for a while after a key was
+/// end of a flood or was never one, and for two frames after a key was
 /// typed every frame goes out as it is ready, so an echo in the middle
-/// of a flood is on screen as soon as it would have been.
+/// of a flood is on screen as soon as it would have been.  An answer
+/// that takes its program longer than that is in the flood's next
+/// frame, 8 ms later at the most.
+///
+/// Following the parser that closely is not free, which is why it
+/// ends: a frame after every kilobyte for 100 ms after each key took
+/// 22 % off cat-mixed and 60 % off cat-ascii at ten keys a second.
 #[derive(Default)]
 pub(crate) struct FloodGate {
     /// When the last frame went out.
@@ -164,13 +179,38 @@ impl FloodGate {
     /// one read buffer.
     pub(crate) const BULK_BYTES: usize = 64 * 1024;
 
-    /// How long after a key its echo may still be on its way.
-    const ECHO_WINDOW: Duration = Duration::from_millis(100);
+    /// How long after a key its answer is taken to be in the very next
+    /// bytes: the reader hands over each time the pty runs dry, and a
+    /// frame follows every slice the parser takes.  A program that
+    /// reads the key at once has answered well inside this.
+    pub(crate) const ECHO_SOON: Duration = Duration::from_millis(1);
+
+    /// How long after a key its answer is still awaited: the reader
+    /// hands over whenever the parser is idle, and a frame follows
+    /// every chunk.
+    pub(crate) const ECHO_WINDOW: Duration = Duration::from_millis(16);
 
     pub(crate) fn typed(&mut self) {
         self.typed = Some(Instant::now());
         // the reader stops gathering for as long as this gate stops holding
         crate::pty_reader::typed();
+    }
+
+    /// How closely the loop follows the parser now, if a key was typed
+    /// recently enough for its answer to be awaited.
+    pub(crate) fn follows(&self) -> Option<Follow> {
+        self.follows_at(Instant::now())
+    }
+
+    fn follows_at(&self, now: Instant) -> Option<Follow> {
+        let since = now.saturating_duration_since(self.typed?);
+        if since < Self::ECHO_SOON {
+            Some(Follow::Slice)
+        } else if since < Self::ECHO_WINDOW {
+            Some(Follow::Chunk)
+        } else {
+            None
+        }
     }
 
     /// Whether the turn of the loop now ending parsed a flood.
@@ -185,8 +225,8 @@ impl FloodGate {
     }
 
     fn hold_at(&mut self, bulk: bool, now: Instant) -> bool {
-        let recent = |t: Option<Instant>, window| t.is_some_and(|t| now.saturating_duration_since(t) < window);
-        let held = bulk && recent(self.last, Self::FRAME) && !recent(self.typed, Self::ECHO_WINDOW);
+        let framed = self.last.is_some_and(|t| now.saturating_duration_since(t) < Self::FRAME);
+        let held = bulk && framed && self.follows_at(now).is_none();
         if !held {
             self.last = Some(now);
         }
@@ -368,7 +408,7 @@ mod blank_cost {
 
 #[cfg(test)]
 mod flood_gate_tests {
-    use super::FloodGate;
+    use super::{FloodGate, Follow};
     use std::time::{Duration, Instant};
 
     /// Turn after turn of full reads puts out one frame per display
@@ -443,8 +483,12 @@ mod flood_gate_tests {
         let t0 = Instant::now();
         assert!(!g.hold_at(true, t0));
         assert!(g.hold_at(true, t0 + Duration::from_millis(1)));
+        assert_eq!(g.follows_at(t0 + Duration::from_millis(1)), None, "no key yet");
         g.typed();
         let typed = Instant::now();
+        assert_eq!(g.follows_at(typed + Duration::from_micros(500)), Some(Follow::Slice));
+        assert_eq!(g.follows_at(typed + FloodGate::ECHO_SOON), Some(Follow::Chunk));
+        assert_eq!(g.follows_at(typed + FloodGate::ECHO_WINDOW), None, "the loop goes back to parsing a frame's worth");
         assert!(!g.hold_at(true, typed + Duration::from_millis(1)));
         assert!(!g.hold_at(true, typed + Duration::from_millis(2)));
         assert!(!g.hold_at(true, typed + FloodGate::ECHO_WINDOW), "a frame is due by now anyway");

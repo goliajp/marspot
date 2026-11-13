@@ -12,9 +12,14 @@
 //! either floods between two keys or sleeps (`idle`).  It floods a
 //! kilobyte at a time (`flooding`), which the parser keeps up with, or
 //! writes a corpus 64 KiB at a time the way `cat` would
-//! (`catting=<corpus>`), which with most corpora it does not.
+//! (`catting=<corpus>`), which with most corpora it does not -- and
+//! then looks for a key only between two of those writes, so up to
+//! 64 KiB of its own output is ahead of its answer.  `streaming=
+//! <corpus>` writes the same corpus a kilobyte at a time and looks
+//! after each: as much output as the pty carries, and an answer that
+//! leaves the program within a kilobyte of the key.
 //!
-//!     l3_keys_under_floods <marspot-session> <neighbours> flooding|idle|catting=<corpus> [keys] [p99-limit-ms]
+//!     l3_keys_under_floods <marspot-session> <neighbours> flooding|idle|catting=<corpus>|streaming=<corpus> [keys] [p99-limit-ms]
 //!
 //! With a limit, a p99 above it or any key left unanswered fails.
 //!
@@ -93,11 +98,12 @@ fn pane(role: &str, rest: &[String]) -> ! {
                 answer(&mut out, n);
             }
         }
-        "catting" => {
+        "catting" | "streaming" => {
             raw_tty(0);
             let corpus = std::fs::read(&rest[0]).unwrap_or_default();
+            let at_once = if role == "catting" { 64 * 1024 } else { 1024 };
             'flood: loop {
-                for piece in corpus.chunks(64 * 1024) {
+                for piece in corpus.chunks(at_once) {
                     if out.write_all(piece).is_err() {
                         break 'flood;
                     }
@@ -302,7 +308,7 @@ fn main() {
     if args.get(1).is_some_and(|a| a == "--pane") {
         pane(args.get(2).map_or("", |r| r.as_str()), &args[3.min(args.len())..]);
     }
-    let usage = "usage: l3_keys_under_floods <marspot-session> <neighbours> flooding|idle|catting=<corpus> [keys] [p99-limit-ms]\n       l3_keys_under_floods <marspot-session> typing <corpus> <repeats> <gap-ms>";
+    let usage = "usage: l3_keys_under_floods <marspot-session> <neighbours> flooding|idle|catting=<corpus>|streaming=<corpus> [keys] [p99-limit-ms]\n       l3_keys_under_floods <marspot-session> typing <corpus> <repeats> <gap-ms>";
     if args.len() < 4 {
         die(usage);
     }
@@ -316,7 +322,8 @@ fn main() {
         return;
     }
     let neighbours: usize = args[2].parse().unwrap_or_else(|_| die(usage));
-    if !matches!(args[3].as_str(), "flooding" | "idle") && !args[3].starts_with("catting=/") {
+    let with_corpus = ["catting=/", "streaming=/"].iter().any(|role| args[3].starts_with(role));
+    if !matches!(args[3].as_str(), "flooding" | "idle") && !with_corpus {
         die(usage);
     }
     let keys = args.get(4).and_then(|k| k.parse().ok()).unwrap_or(100);
