@@ -315,6 +315,13 @@ impl GridShmWriter {
         region::ident_at(self.base, self.len).and_then(|at| unsafe { ident::read_serial(at) })
     }
 
+    /// The cluster table in the region beside the grid: until the
+    /// first frame is published, what the session's previous image
+    /// published with its last one.
+    pub fn published_clusters(&self) -> Option<ClusterTable> {
+        self.clusters.as_ref().map(ClusterTableWriter::table)
+    }
+
     /// Take over the side regions `left` publishes through: this
     /// writer replaces it, and [`Self::attach_side_regions`] then
     /// carries what they hold to wherever this one publishes.

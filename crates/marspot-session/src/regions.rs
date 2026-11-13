@@ -86,9 +86,15 @@ pub(crate) fn sign(shm: &mut GridShmWriter, id: u64) {
 /// Publish cluster text and the window title beside the grid region.
 /// A session whose grid region has no name publishes neither: nobody
 /// could find them.
-pub(crate) fn attach_side_regions(shm: &mut GridShmWriter, id: u64) {
-    if let Some(name) = grid_name() {
-        shm.attach_side_regions(&name, Identity::of_session(id));
+///
+/// An image that came out of an update from a build whose snapshot
+/// has no cluster text finds that text here, where the image before
+/// it published it with its last frame.
+pub(crate) fn attach_side_regions(shm: &mut GridShmWriter, session: &mut SessionImpl) {
+    let Some(name) = grid_name() else { return };
+    shm.attach_side_regions(&name, Identity::of_session(session.id()));
+    if let Some(table) = shm.published_clusters() {
+        session.terminal_mut().adopt_published_clusters(table.iter());
     }
 }
 

@@ -17,6 +17,8 @@ mod bulk;
 mod diff_tests;
 mod lane;
 mod reference;
+mod snapshot_clusters;
+use snapshot_clusters::plausible_cols;
 mod trace;
 
 use lane::fast_width;
@@ -1452,6 +1454,7 @@ impl Terminal {
                 }
             }
         }
+        snapshot_clusters::append(&mut out, main_grid, alt_grid.filter(|_| live));
         out
     }
 
@@ -1795,6 +1798,7 @@ impl Terminal {
         // the serialized ring + cells + cursor + scroll region.  The
         // still-running TUI's incremental repaints then land on the
         // same base they left.
+        let kept_alt = alt_live.is_some();
         if let Some(live) = alt_live {
             let mut alt = Grid::with_scrollback(live.cols, live.rows, DEFAULT_SCROLLBACK_LINES);
             for (line, wrapped) in &live.ring {
@@ -1820,6 +1824,7 @@ impl Terminal {
             self.scroll_top = live.scroll_top;
             self.scroll_bot = live.scroll_bot;
         }
+        self.apply_snapshot_clusters(&mut cur, kept_alt);
         Ok(())
     }
 
@@ -1908,27 +1913,6 @@ impl Terminal {
         }
         decode_legacy_no_wrapped(line_count, body)
     }
-}
-
-/// Can `body` still hold `cols` cells from here?  A length it cannot
-/// is not a length.
-///
-/// A page is written by another process and read back from disk, so
-/// `line_cols` is a claim rather than a fact -- and `with_capacity` on
-/// a claim turns a malformed page into an abort instead of an error.
-/// The Linux CI leg reported exactly that, as SIGABRT, on a runner
-/// with less memory to pretend with than a dev box: the legacy probe
-/// mis-parses by one byte on purpose, so the next line's length is
-/// whatever the cell data happened to spell.
-fn plausible_cols(cur: &Cursor<&[u8]>, cols: usize) -> io::Result<()> {
-    let remaining = cur.get_ref().len().saturating_sub(cur.position() as usize);
-    if cols > remaining / CELL_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("line claims {cols} cells, {remaining} bytes left"),
-        ));
-    }
-    Ok(())
 }
 
 fn decode_with_wrapped(
