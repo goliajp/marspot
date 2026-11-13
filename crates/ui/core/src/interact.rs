@@ -137,6 +137,21 @@ impl Interaction {
         put(&mut self.scroll[slot], to.clamp(0.0, max))
     }
 
+    /// Forget the pointer, the focus and every offset, as for a surface
+    /// that is shown anew.  The revision moves on rather than starting
+    /// again, so a picture painted before is never taken for current.
+    pub fn reset(&mut self) {
+        *self = Self { revision: self.revision + 1, ..Self::default() };
+    }
+
+    /// Put scroll region `slot` at `to` device pixels, for an offset
+    /// the application keeps itself.  Held to what the layout allows
+    /// the next time one is run.
+    pub fn set_scroll(&mut self, slot: usize, to: f64) {
+        let changed = put(&mut self.scroll[slot], to.max(0.0));
+        self.touch(changed);
+    }
+
     /// Pull every offset back inside what the layout now allows.
     pub fn clamp_scroll(&mut self, layout: &Layout) {
         let mut changed = false;

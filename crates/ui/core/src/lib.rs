@@ -37,7 +37,7 @@ pub use interact::{Interaction, Key, KeyResult, SCROLL_SLOTS};
 pub use layout::{Constraints, Layout, ScrollExtent, TextBox};
 pub use metrics::{Edges, Length, Metrics};
 pub use node::{AlignCross, Distribute, GroupKind, Ink, Kind as NodeKind, Node, NodeId, Style, TextRef};
-pub use paint::{Op, PaintOut, Recording, WidgetState, paint};
+pub use paint::{NoOut, Op, PaintOut, Recording, WidgetState, paint};
 pub use scene::{Kind, Layer, Run, Scene};
 pub use surface::{Counters, Inputs, Surface};
 pub use text::{Extent, FakeMeasure, Fit, FontMetrics, FontSpec, TextFont, TextMeasure};
