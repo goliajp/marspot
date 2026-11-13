@@ -168,8 +168,7 @@ pub fn clear_windows() -> io::Result<()> {
     }
 }
 
-/// Refuse to write the real, installed app's state from a test
-/// binary.
+/// Refuse to write the real, installed app's state from a test.
 ///
 /// `MARSPOT_STATE_DIR` unset means "the user's live layout", and a
 /// test that reaches any save path — directly, or through a `CoreApp`
@@ -178,18 +177,16 @@ pub fn clear_windows() -> io::Result<()> {
 /// and the next core boot came up with one window and every session
 /// re-adopted as an orphan.  Sessions survived; the layout did not.
 ///
-/// Cargo builds test executables into `target/{debug,release}/deps/`
-/// and nothing shipped ever runs from there, so the exe path is a
-/// precise signal.  An `Err` here is loud where the write was silent.
+/// Any one of three things makes a process a test: this crate was
+/// compiled for its own tests, nextest started the process, or the
+/// executable is one cargo built for a test target.  An `Err` here is
+/// loud where the write was silent.
 fn refuse_if_test_binary(what: &str) -> io::Result<()> {
     if std::env::var_os("MARSPOT_STATE_DIR").is_some() {
         return Ok(());
     }
     let exe = std::env::current_exe().unwrap_or_default();
-    let looks_like_test = exe
-        .parent()
-        .is_some_and(|d| d.file_name().is_some_and(|n| n == "deps"));
-    if looks_like_test {
+    if cfg!(test) || under_nextest() || is_cargo_test_executable(&exe) {
         return Err(io::Error::other(format!(
             "refusing to write the installed app's {what} from a test \
              binary ({}); set MARSPOT_STATE_DIR to a sandbox",
@@ -197,6 +194,38 @@ fn refuse_if_test_binary(what: &str) -> io::Result<()> {
         )));
     }
     Ok(())
+}
+
+/// nextest started this process, or one above it: it sets `NEXTEST`
+/// for every test it runs, and what a test starts inherits it.
+///
+/// `CARGO_MANIFEST_DIR` is not asked: `cargo run` sets it as well, so
+/// it does not tell a test from a build somebody is trying out.
+fn under_nextest() -> bool {
+    std::env::var_os("NEXTEST").is_some()
+}
+
+/// `exe` is named or kept the way cargo does it for a test target: a
+/// file called `<crate>-<16 hex digits>`, or anything in a `deps/`
+/// directory.  Nothing shipped is either.
+///
+/// This is what speaks for a test binary that nothing else announces —
+/// another target's, run by `cargo test` or by hand.  Cargo promises
+/// neither the name nor the place: `deps/` used to be the whole check,
+/// cargo 1.100 moved test executables to `build/<package>/<hash>/out/`,
+/// and from that day the guard refused nothing.
+fn is_cargo_test_executable(exe: &std::path::Path) -> bool {
+    let in_deps = exe
+        .parent()
+        .is_some_and(|d| d.file_name().is_some_and(|n| n == "deps"));
+    let hashed = exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.rsplit_once('-'))
+        .is_some_and(|(_, hash)| {
+            hash.len() == 16 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        });
+    in_deps || hashed
 }
 
 /// Best-effort atomic write of every window's frame, in creation
@@ -541,13 +570,14 @@ mod tests {
     /// sandbox set, a write from a test binary must be refused rather
     /// than land on the installed app's file.
     ///
-    /// Also the honesty check on the mechanism itself — if cargo ever
-    /// stops building test executables into `deps/`, this fails and
-    /// says so instead of leaving a guard that quietly does nothing.
+    /// `HOME` is a directory of the test's own, so a guard that fails
+    /// to refuse writes there: this test has failed by overwriting the
+    /// very record it is here to protect.
     #[test]
     fn a_test_binary_cannot_write_the_installed_apps_state() {
+        let home = crate::test_env::TempDir::new("state-home");
         let mut env = crate::test_env::EnvGuard::new();
-        env.remove("MARSPOT_STATE_DIR");
+        env.remove("MARSPOT_STATE_DIR").set("HOME", home.path());
 
         let err = write(&SavedState::default()).expect_err("write must be refused");
         assert!(
@@ -555,6 +585,54 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(write_windows(&[]).is_err());
+        assert!(clear().is_err());
+        assert!(clear_windows().is_err());
+        assert!(!home.join("Library").exists(), "a refused write leaves nothing behind");
+    }
+
+    #[test]
+    fn what_nextest_starts_is_a_test() {
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove("NEXTEST");
+        assert!(!under_nextest());
+        env.set("NEXTEST", "1");
+        assert!(under_nextest());
+    }
+
+    /// The honesty check on the part of the guard that reads a path:
+    /// this very executable has to be recognised, so the day cargo
+    /// names or places test executables some other way this fails and
+    /// says so, instead of leaving a check that quietly matches nothing.
+    #[test]
+    fn a_test_executable_is_known_by_its_name_or_its_place() {
+        use std::path::Path;
+        let me = std::env::current_exe().expect("this test's executable");
+        assert!(is_cargo_test_executable(&me), "{} is not taken for a test executable", me.display());
+
+        for test in [
+            // through cargo 1.99
+            "/w/target/debug/deps/marspot-83909a48e552b970",
+            "/w/target/release/deps/marspot_core-8f7d7eeca4da8079",
+            "/w/target/debug/deps/it",
+            // from cargo 1.100
+            "/w/target/debug/build/marspot/10cc83810a0598dc/out/marspot-10cc83810a0598dc",
+            "/w/target/debug/build/marspot/dfaf590f12403b74/out/marspot_core-dfaf590f12403b74",
+            "/copied/elsewhere/marspot_shell-56bc4bd482e84660",
+        ] {
+            assert!(is_cargo_test_executable(Path::new(test)), "{test}");
+        }
+        for shipped in [
+            "/Users/u/.local/Marspot.app/Contents/MacOS/marspot-shell",
+            "/Applications/Marspot.app/Contents/MacOS/marspot-core",
+            "/Users/u/Library/Application Support/marspot/binaries/current/marspot-core",
+            "/Users/u/Library/Application Support/marspot/binaries/pending/marspot-shell",
+            "/w/target/release/marspot-core",
+            "/w/target/debug/build/marspot/0100c0c45907a006/out/marspot_core",
+            "/w/target/debug/mcli",
+            "",
+        ] {
+            assert!(!is_cargo_test_executable(Path::new(shipped)), "{shipped}");
+        }
     }
 
     /// Geometry file: same peer treatment, same v1 tolerance.

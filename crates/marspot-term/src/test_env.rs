@@ -133,6 +133,24 @@ impl Drop for TempDir {
     }
 }
 
+/// The binary `name` as built beside this test: the nearest directory
+/// above the test's executable that holds a file of that name, which
+/// is the profile directory, `target/<profile>/`.
+///
+/// For a binary of another package.  Cargo names those to a test in no
+/// variable -- `CARGO_BIN_EXE_<name>` covers the test's own package,
+/// and only its integration tests -- and how far below the profile
+/// directory a test executable sits is cargo's to change: one level
+/// through 1.99, four from 1.100.
+pub fn built_binary(name: &str) -> PathBuf {
+    let exe = std::env::current_exe().expect("the test's own executable");
+    exe.ancestors()
+        .skip(1)
+        .map(|dir| dir.join(name))
+        .find(|bin| bin.is_file())
+        .unwrap_or_else(|| panic!("no {name} above {}: build it first", exe.display()))
+}
+
 /// `MARSPOT_STATE_DIR` pointed at a directory of this test's own.
 ///
 /// `env` is declared first so it is dropped first: the variable goes
