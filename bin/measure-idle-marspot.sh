@@ -49,7 +49,7 @@ SETTLE="${IDLE_SETTLE:-30}"
 WINDOW="${IDLE_WINDOW:-60}"
 IDLE_SHELL="${IDLE_SHELL:-/bin/sh}"
 
-RUNLOG=/tmp/marspot-measure-idle.log
+RUNLOG="$(dev_run_log measure-idle)"
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
