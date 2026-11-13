@@ -512,7 +512,7 @@ mod tests {
     fn window(reset_hm: &str) -> CcUsageWindowRender {
         CcUsageWindowRender {
             label: "fable".to_string(),
-            util: 1.0,
+            util: Some(1.0),
             reset_unix: None,
             span_secs: 0,
             reset_hm: reset_hm.to_string(),

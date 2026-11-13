@@ -21,13 +21,13 @@ const WEEK: i64 = 7 * 24 * 3600;
 /// the week's end.
 const WEEK_NEARLY_SPENT: f64 = 0.99;
 
-/// An account the feed has no row for.  Its week is taken to end last,
-/// so an account known to have room is chosen first.
+/// An account the feed has no row for: no reading of its week, so an
+/// account known to have room is chosen first.
 fn unmeasured(now: i64) -> Room {
     Room::Known {
         status: "allowed".into(),
         util_5h: None,
-        util_7d: 0.0,
+        util_7d: None,
         reset_7d: now + WEEK,
         models: Vec::new(),
         models_measured_at: 0,
@@ -51,7 +51,7 @@ pub(super) fn rooms(numbers: &[u8], usage: Option<&CcUsage>, seen: &Seen, now: i
             let account = row(usage, n);
             let mut room = account.map_or_else(|| unmeasured(now), |a| room_of(a, now));
             let resets = account
-                .map(|a| Resets { five_hour: a.reset_5h.unwrap_or(0), week: a.reset_7d, models: Vec::new() })
+                .map(|a| Resets { five_hour: a.reset_5h.unwrap_or(0), week: a.reset_7d.unwrap_or(0), models: Vec::new() })
                 .unwrap_or_default();
             if seen.shut(n, &resets, now)
                 && let Room::Known { util_5h, .. } = &mut room
@@ -68,7 +68,7 @@ pub(super) fn rooms(numbers: &[u8], usage: Option<&CcUsage>, seen: &Seen, now: i
 /// running, else the five hours, which is the shorter wait.
 pub(super) fn refused_window(usage: Option<&CcUsage>, n: u8, now: i64) -> Window {
     match row(usage, n) {
-        Some(a) if a.util_7d >= WEEK_NEARLY_SPENT && a.reset_7d > now => Window::Week,
+        Some(a) if a.util_7d.is_some_and(|u| u >= WEEK_NEARLY_SPENT) && a.reset_7d.is_some_and(|r| r > now) => Window::Week,
         _ => Window::FiveHour,
     }
 }
