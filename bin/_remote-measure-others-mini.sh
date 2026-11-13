@@ -47,7 +47,7 @@ ROUNDS=${MEASURE_ROUNDS:-3}
 # of wait-loop dead time. Terminals that don't produce a marker by
 # then are skipped — their previous-day snapshot stays via per-
 # terminal merge in remote-measure-others.sh.
-MARKER_TIMEOUT_S=120
+MARKER_TIMEOUT_S=${MEASURE_MARKER_TIMEOUT_S:-120}
 # Seconds between one terminal's close and the next one's launch.
 # Lets mini cool: GPU thermal, scheduler-cached affinity, page-cache
 # warmth for /tmp scenarios. 3 s is empirically enough for variance
@@ -396,7 +396,7 @@ for t in "${TERMS[@]}"; do
   # (verified 2026-08-19: `tell application "iTerm" to count windows`
   # answered from a plain ssh shell).  So ask instead of assuming: one
   # cheap AppleEvent decides, and the skip message says what failed.
-  if [[ $SSH_MODE -eq 1 && "$t" != "ghostty" && "$t" != "marspot" ]]; then
+  if [[ $SSH_MODE -eq 1 && "$t" != "ghostty" && "$t" != "marspot" && "$t-${MEASURE_WARP_VIA:-}" != "warp-run-launch" ]]; then
     ae_app="$(applescript_name "$t")"
     if ! osascript -e "with timeout of 5 seconds" \
                    -e "tell application \"$ae_app\" to count windows" \
@@ -426,7 +426,7 @@ for t in "${TERMS[@]}"; do
   # shellcheck disable=SC2086
   case "$t" in
     iterm)    WIN_iterm="$(bin/drivers/iterm.sh run-tabs 1 "$cmd" 2>&1)" || launch_rc=$? ;;
-    warp)     bin/drivers/warp.sh run-single "$cmd" || launch_rc=$? ;;
+    warp)     $ASUSER bin/drivers/warp.sh "${MEASURE_WARP_VIA:-run-single}" "$cmd" || launch_rc=$? ;;
     ghostty)  $ASUSER bin/drivers/ghostty.sh run-single "$cmd" $GRID_COLS $GRID_ROWS || launch_rc=$? ;;
     terminal) WIN_terminal="$(bin/drivers/terminal.sh run-single "$cmd" 2>&1)" || launch_rc=$? ;;
     marspot)
