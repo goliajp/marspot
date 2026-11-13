@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.328"  # a week the usage feed has no reading for is not a week with nothing used
-core    = "0.12.482"  # a line that wraps is scanned once, not once for every row it fills
-session = "0.11.322"  # a line that wraps is scanned once, not once for every row it fills
+core    = "0.12.483"  # a row is encoded for its file from what the grid knows of it
+session = "0.11.323"  # a row is encoded for its file from what the grid knows of it

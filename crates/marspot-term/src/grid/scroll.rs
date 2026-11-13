@@ -1,7 +1,8 @@
 //! Scrolling: the whole screen, which is what files rows into history,
 //! and a region inside it.
 
-use super::{Cell, Grid, MAX_FILED_BLANK_RUN, MAX_RESERVED_HEADER_ROWS, PromptMark};
+use super::{Cell, Grid, MAX_FILED_BLANK_RUN, MAX_RESERVED_HEADER_ROWS, PromptMark, RowMark};
+use crate::scrollback::RowHint;
 
 impl Grid {
     /// End of a burst of output: lines that scrolled off go to their
@@ -41,15 +42,17 @@ impl Grid {
             // erring toward "do not collapse" is the safe direction.
             self.filed_blank_run = 0;
             let row_clusters = self.degrade_clusters_in_row(start, cols);
-            let end = self.row_end[pr] as usize;
+            let mark = self.marks[pr];
+            let end = mark.end as usize;
             debug_assert!(
                 self.cells[start + end..start + cols].iter().all(|c| *c == Cell::default())
             );
             // the file variant drops a row's blank tail, so it is
             // handed the row without it; the ring wants full rows
             let filed = if self.scrollback.keeps_wrapped_flags() { end } else { cols };
+            let hint = RowHint { plain_from: mark.plain_from, wide: mark.wide };
             let used = self.scrollback
-                .push_line_with_wrapped(&self.cells[start..start + filed], self.wrapped[pr]);
+                .push_row(&self.cells[start..start + filed], self.wrapped[pr], hint);
             let mark = std::mem::take(&mut self.prompt[pr]);
             // The mirrors exist for the in-RAM variant, where there is
             // nowhere else to keep these.  A file-backed pane reads
@@ -74,12 +77,12 @@ impl Grid {
                 // the cells past what the line used are default
                 // already, and the rest is one copy of a blank row
                 self.cells[start..start + used].copy_from_slice(&self.blank[..used]);
-                self.row_end[pr] = 0;
+                self.marks[pr] = RowMark::default();
             } else {
                 for c in &mut self.cells[start..start + cols] {
                     *c = fill;
                 }
-                self.row_end[pr] = self.cols;
+                self.marks[pr] = RowMark::unknown(self.cols);
             }
             self.top_row += 1;
             if self.top_row >= self.rows {
@@ -172,8 +175,9 @@ impl Grid {
                     self.filed_blank_run =
                         if blank { self.filed_blank_run.saturating_add(1) } else { 0 };
                     let row_clusters = self.degrade_clusters_in_row(start, cols);
+                    let hint = RowHint { plain_from: self.marks[pr].plain_from, wide: self.marks[pr].wide };
                     self.scrollback
-                        .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
+                        .push_row(&self.cells[start..start + cols], self.wrapped[pr], hint);
                     let mark = std::mem::take(&mut self.prompt[pr]);
                     if !self.scrollback.keeps_wrapped_flags() {
                         self.sb_wrapped.push_back(self.wrapped[pr]);
@@ -198,7 +202,7 @@ impl Grid {
                 // be defensive).
                 let row_data: Vec<Cell> = self.cells[src_start..src_start + cols].to_vec();
                 self.cells[dst_start..dst_start + cols].copy_from_slice(&row_data);
-                self.row_end[dst] = self.row_end[src];
+                self.marks[dst] = self.marks[src];
             }
             // Continuation flags travel with their rows.
             //
@@ -235,7 +239,7 @@ impl Grid {
             for c in &mut self.cells[bot_phys * cols..bot_phys * cols + cols] {
                 *c = fill;
             }
-            self.row_end[bot_phys] = if fill == Cell::default() { 0 } else { self.cols };
+            self.marks[bot_phys] = RowMark::filled(fill, self.cols);
         }
         // Mirror ring eviction, exactly as `scroll_up` does: the flags
         // deque must never outgrow what the ring retains.
@@ -272,14 +276,14 @@ impl Grid {
                 let dst_start = dst * cols;
                 let row_data: Vec<Cell> = self.cells[src_start..src_start + cols].to_vec();
                 self.cells[dst_start..dst_start + cols].copy_from_slice(&row_data);
-                self.row_end[dst] = self.row_end[src];
+                self.marks[dst] = self.marks[src];
             }
             // Blank the new top-of-region row.
             let top_phys = self.phys_row(top);
             for c in &mut self.cells[top_phys * cols..top_phys * cols + cols] {
                 *c = fill;
             }
-            self.row_end[top_phys] = if fill == Cell::default() { 0 } else { self.cols };
+            self.marks[top_phys] = RowMark::filled(fill, self.cols);
         }
     }
 }

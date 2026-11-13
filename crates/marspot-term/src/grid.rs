@@ -811,9 +811,9 @@ pub struct Grid {
     /// One row of `Cell::default()`, copied over a row that scrolls
     /// off when nothing but the default background has to be filled.
     blank: Vec<Cell>,
-    /// Per physical row: every cell at or past this column is
-    /// `Cell::default()`.  An upper bound, never an exact length.
-    row_end: Vec<u16>,
+    /// Per physical row: where its default cells and its default
+    /// attributes start.
+    marks: Vec<RowMark>,
 }
 
 /// How many rows of chrome a TUI may reserve above its scrolling
@@ -844,9 +844,10 @@ const MAX_RESERVED_HEADER_ROWS: u16 = 1;
 const MAX_FILED_BLANK_RUN: u16 = 3;
 
 mod cluster_mirror;
-mod row_end;
+mod row_mark;
 mod scroll;
 pub use cluster_mirror::{UNKNOWN_CLUSTER, cluster_in_row};
+pub use row_mark::RowMark;
 
 impl Grid {
     pub fn new(cols: u16, rows: u16) -> Self {
@@ -890,7 +891,7 @@ impl Grid {
             sb_prompt: std::collections::VecDeque::with_capacity(sb_capacity + 1),
             filed_blank_run: 0,
             blank: vec![Cell::default(); cols as usize],
-            row_end: vec![0; rows as usize],
+            marks: vec![RowMark::default(); rows as usize],
         }
     }
 
@@ -1514,7 +1515,7 @@ impl Grid {
             self.prompt = new_prompt;
             self.rows = rows;
             self.top_row = 0;
-            self.forget_row_ends();
+            self.forget_row_marks();
             return;
         }
         // Shrink: prefer dropping blank rows below the cursor; push
@@ -1546,7 +1547,7 @@ impl Grid {
         self.prompt = new_prompt;
         self.rows = rows;
         self.top_row = 0;
-        self.forget_row_ends();
+        self.forget_row_marks();
         self.cursor_row = self.cursor_row.min(rows - 1);
     }
 
@@ -1736,7 +1737,7 @@ impl Grid {
         self.cols = cols;
         self.rows = rows;
         self.top_row = 0;
-        self.forget_row_ends();
+        self.forget_row_marks();
 
         // 4. Cursor follows its logical position; if its segment got
         //    pushed into scrollback (screen shrank under it), clamp to
