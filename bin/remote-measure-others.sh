@@ -104,9 +104,6 @@ if [[ "$HEALTH" == *"-1712"* ]] || [[ "$HEALTH" == *"timed out"* ]] || [[ "$HEAL
   echo "  2. cd ~/$REMOTE_DIR && bash bin/_remote-measure-others-mini.sh > /tmp/measured.json" >&2
   echo "  3. scp $HOST:/tmp/measured.json $OUT_DIR/measured.json" >&2
   echo "  4. Re-run this script with REMOTE_MEAS_JSON=$OUT_DIR/measured.json to merge into baseline." >&2
-  echo "" >&2
-  echo "Or skip the freshness gate for this run:" >&2
-  echo "  MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1 bin/bench-remote.sh --full" >&2
   exit 3
 fi
 
@@ -160,9 +157,8 @@ jq . "$MEAS_JSON"
 # A run that measured nothing must not look like a run that measured
 # everything. The merge below keeps terminals this run did not reach --
 # which is right when one driver times out, and a lie when they all do:
-# it stamps `captured_at` with today, and the gate's seven-day
-# freshness check then believes numbers from a fortnight ago were taken
-# this morning.
+# it stamps `captured_at` with today, and the gate then prints numbers
+# from a fortnight ago as read this morning.
 #
 # Happened on 2026-10-02: every driver's marker timed out, the script
 # exited 0, and the only change to the baseline was the date.
