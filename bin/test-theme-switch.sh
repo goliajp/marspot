@@ -37,7 +37,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 
-RUNLOG=/tmp/marspot-test-theme-switch.log
+RUNLOG="$(dev_run_log test-theme-switch)"
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 REC_DIR="$MARSPOT_STATE_DIR/recorded"
 SETTINGS="$MARSPOT_STATE_DIR/settings.toml"

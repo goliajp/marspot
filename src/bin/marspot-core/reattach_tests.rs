@@ -1,6 +1,6 @@
-// A core taking over a live session whose grid region it cannot show.
-// The session is a real one, with a real shell.  Included into the
-// boot-assembly tests, whose sandbox it uses.
+//! A core taking over a live session whose grid region it cannot show.
+//! The session is a real one, with a real shell, in the boot-assembly
+//! tests' sandbox.
 
 use std::time::{Duration, Instant};
 

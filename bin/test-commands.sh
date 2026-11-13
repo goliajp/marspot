@@ -52,8 +52,8 @@
 #      table in 6 and not chosen: they act on the machine's whole
 #      session, which other suites share.
 #
-# The paste check puts a marker on the general pasteboard and puts the
-# text that was there back afterwards.
+# The paste check puts a marker on a pasteboard of this run's own, which
+# the sandbox app is told to copy and paste through.
 #
 # Sandbox-only: MARSPOT_STATE_DIR is redirected and the installed app
 # is never touched.  Exits 0 on pass, non-zero on the first failure.
@@ -63,7 +63,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 
-RUNLOG=/tmp/marspot-test-commands.log
+RUNLOG="$(dev_run_log test-commands)"
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 REC_DIR="$MARSPOT_STATE_DIR/recorded"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
@@ -83,10 +83,10 @@ fail() {
   exit 1
 }
 
-had_clipboard="$(pbpaste 2>/dev/null || true)"
+dev_own_pasteboard
 cleanup() {
   dev_kill_shell_core
-  printf '%s' "$had_clipboard" | pbcopy 2>/dev/null || true
+  dev_pasteboard_release
 }
 trap cleanup EXIT
 
@@ -134,8 +134,8 @@ exec cat >> "\$out"
 EOF
 chmod +x "$RECORDER"
 
-printf '%s' "$MARKER" | pbcopy || fail "could not set the pasteboard"
-[[ "$(pbpaste)" == "$MARKER" ]] || fail "the pasteboard does not hold what was put on it"
+dev_pasteboard_set "$MARKER" || fail "could not set the pasteboard"
+[[ "$(dev_pasteboard_get)" == "$MARKER" ]] || fail "the pasteboard does not hold what was put on it"
 
 STEPS=(
   wait:3000
@@ -295,7 +295,7 @@ rm -rf "$MARSPOT_STATE_DIR/sessions" "$MARSPOT_STATE_DIR/retired" "$REC_DIR"
 mkdir -p "$MARSPOT_STATE_DIR/logs" "$REC_DIR"
 rm -f "$APPLOG"
 seed_state
-printf '%s' "$MARKER" | pbcopy || fail "could not set the pasteboard"
+dev_pasteboard_set "$MARKER" || fail "could not set the pasteboard"
 
 MENU=(
   # the script starts with the menu bar, well before the panes are up

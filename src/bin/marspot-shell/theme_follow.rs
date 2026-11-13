@@ -71,6 +71,7 @@ fn sandbox_system_theme() -> Option<ThemeId> {
 /// app watched the system for is watched any more.
 pub(crate) fn put_away() {
     pane_app::unwatch();
+    language_follow::unwatch();
 }
 
 pub(crate) fn at_launch() -> (f64, f64, f64) {
