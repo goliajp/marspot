@@ -189,46 +189,6 @@ impl ArgvCache {
     }
 }
 
-/// Environment values of agent processes, one read per process image
-/// and key.
-///
-/// Owned by each consumer rather than shared: the claudecode worker
-/// asks about `claude` processes and codex about `codex` ones, each on
-/// its own thread, so a shared map would guard nothing but add a lock
-/// to the main thread.  Absent values are kept too: a default profile
-/// has no `CLAUDE_CONFIG_DIR`, and that answer does not change either.
-#[derive(Default)]
-pub struct EnvCache {
-    map: HashMap<(ProcId, &'static str), (String, Option<String>)>,
-    reads: u64,
-}
-
-impl EnvCache {
-    pub fn value(&mut self, row: &ProcRow, key: &'static str) -> Option<String> {
-        if let Some((comm, v)) = self.map.get(&(row.id(), key))
-            && *comm == row.comm
-        {
-            return v.clone();
-        }
-        self.reads += 1;
-        let v = pidtree::proc_env_value(row.pid, key);
-        if pidtree::proc_id(row.pid) != Some(row.id()) {
-            return None;
-        }
-        self.map.insert((row.id(), key), (row.comm.clone(), v.clone()));
-        v
-    }
-
-    pub fn prune(&mut self, obs: &Observation) {
-        self.map.retain(|(id, _), _| obs.has(*id));
-    }
-
-    #[cfg(test)]
-    pub fn reads(&self) -> u64 {
-        self.reads
-    }
-}
-
 /// What the observer thread keeps between builds.
 #[derive(Default)]
 struct Builder {
@@ -343,10 +303,21 @@ pub struct Observer {
     shared: Arc<Shared>,
 }
 
+static OBSERVER: OnceLock<Observer> = OnceLock::new();
+
 /// The process-wide observer, started on first use.
 pub fn shared() -> &'static Observer {
-    static OBSERVER: OnceLock<Observer> = OnceLock::new();
     OBSERVER.get_or_init(|| Observer::spawn(INTERVAL))
+}
+
+/// End the process-wide observer, if it was ever started, and let go
+/// of what it holds: the shell that stays after the app was put away
+/// observes nothing, and the last table of every process on the host
+/// would otherwise stay with it for days.
+pub fn put_away() {
+    if let Some(o) = OBSERVER.get() {
+        o.retire();
+    }
 }
 
 impl Observer {
@@ -422,6 +393,18 @@ impl Observer {
         }
     }
 
+    /// Stop observing and drop the last observation and the caches
+    /// behind it.  A reader afterwards gets an empty observation.
+    fn retire(&self) {
+        let empty = Observation::from_parts(Instant::now(), ProcTable::from_rows(Vec::new()), Vec::new(), |_| None);
+        let mut g = self.shared.state();
+        g.stop = true;
+        let old = std::mem::replace(&mut g.latest, Arc::new(empty));
+        drop(g);
+        self.shared.changed.notify_all();
+        drop(old);
+    }
+
     /// Process-table walks this observer has made.
     #[cfg(test)]
     pub fn walks(&self) -> u64 {
@@ -466,11 +449,19 @@ fn run(shared: &Shared, mut build: impl FnMut(&AtomicU64) -> Observation, interv
             g.read = false;
         }
         let obs = Arc::new(build(&shared.walks));
-        let old = std::mem::replace(&mut shared.state().latest, obs);
+        let mut g = shared.state();
+        if g.stop {
+            return;
+        }
+        let old = std::mem::replace(&mut g.latest, obs);
+        drop(g);
         shared.changed.notify_all();
         drop(old);
     }
 }
+
+mod env_cache;
+pub use env_cache::EnvCache;
 
 #[cfg(test)]
 pub(crate) mod tests;
