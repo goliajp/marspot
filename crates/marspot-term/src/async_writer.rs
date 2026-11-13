@@ -205,6 +205,25 @@ impl AsyncWriter {
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
+        // one comparison for the write that stays inside the buffer:
+        // the scrollback makes one of these for every line
+        if self.buf.main.len() + bytes.len() >= self.cap {
+            return self.write_to_the_brim(bytes);
+        }
+        self.buf.main.extend_from_slice(bytes);
+    }
+
+    /// A write that fills the buffer or does not fit in it.
+    ///
+    /// What does not fit goes into the next buffer.  Appended to this
+    /// one it grew it past `cap`, for good: fed 16 KiB at a time a
+    /// bytelog handed over 64 to 80 KiB, and each of its buffers ended
+    /// up twice the size it was made with.
+    #[cold]
+    fn write_to_the_brim(&mut self, bytes: &[u8]) {
+        if !self.buf.main.is_empty() && self.buf.main.len() + bytes.len() > self.cap {
+            self.hand_over();
+        }
         self.buf.main.extend_from_slice(bytes);
         if self.buf.main.len() >= self.cap {
             self.hand_over();
@@ -401,6 +420,27 @@ mod tests {
         let mut got = Vec::new();
         std::fs::File::open(&path).unwrap().read_to_end(&mut got).unwrap();
         assert_eq!(got, want);
+        drop(w);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A write that would take a buffer past its size starts the next
+    /// one: no buffer is ever grown by writes smaller than it.
+    #[test]
+    fn a_write_that_does_not_fit_goes_into_the_next_buffer() {
+        let path = tmp("fit");
+        let f = std::fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+        let mut w = AsyncWriter::new(f, 64, 4);
+        w.write(&[1u8; 40]);
+        w.write(&[2u8; 40]);
+        assert_eq!(w.pending(), 40, "the second write was appended to a buffer it did not fit in");
+        assert!(w.buf.main.capacity() <= 64, "the buffer grew to {}", w.buf.main.capacity());
+        w.write(&[3u8; 24]);
+        assert_eq!(w.pending(), 0, "a full buffer is handed over");
+        w.flush();
+        let mut got = Vec::new();
+        std::fs::File::open(&path).unwrap().read_to_end(&mut got).unwrap();
+        assert_eq!(got, [[1u8; 40].as_slice(), &[2u8; 40], &[3u8; 24]].concat());
         drop(w);
         let _ = std::fs::remove_file(&path);
     }

@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.321"  # an account is held to the 5h window exactly while the feed reads one
-core    = "0.12.353"  # the disk writer's queue and file writes are in files of their own
-session = "0.11.196"  # the disk writer's queue and file writes are in files of their own
+core    = "0.12.354"  # a write that does not fit starts the disk writer's next buffer
+session = "0.11.197"  # a write that does not fit starts the disk writer's next buffer
