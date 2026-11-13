@@ -53,7 +53,8 @@ const RATED_BYTES: u64 = 2 << 20;
 const RATES_BEFORE_AN_OFFER: u32 = 2;
 
 /// Verdicts in the loop's favour after which the pty goes back for the
-/// reader's rate to be taken again.
+/// reader's rate to be taken again, the first time in a flood; twice
+/// as many each time after.
 const KEPT_FOR: u64 = 16;
 
 /// The loop keeps a flood it carries no more than this many percent
@@ -62,8 +63,13 @@ const KEPT_FOR: u64 = 16;
 const SLOWER_PERCENT: u64 = 3;
 
 /// Rates the reader takes of a flood the loop carried slower before it
-/// offers it again: what the flood is made of may have changed.
-const DECLINED_FOR: u32 = 16;
+/// offers it again: what the flood is made of may have changed.  Twice
+/// as many after each time the loop was slower again.  Asking has a
+/// price, two megabytes carried the slower way and the pty changing
+/// hands twice: a flood of slow-parsing text asked about every 32 MiB
+/// went 2 % slower than one never lent (306 MB/s against 312), asked
+/// once in 128 MiB it went as fast (310).
+const DECLINED_FOR: u32 = 32;
 
 /// Bytes a second, from bytes carried and how long it took.
 fn rate(bytes: u64, took: Duration) -> u64 {
@@ -78,11 +84,14 @@ pub(super) struct Carried {
     rates: u32,
     /// Rates taken since the loop gave the flood back as slower.
     declined_for: u32,
+    /// Rates to take before a flood given back as slower is offered
+    /// again.
+    wait: u32,
 }
 
 impl Carried {
     pub(super) fn new() -> Self {
-        Self { since: None, bytes: 0, rates: 0, declined_for: 0 }
+        Self { since: None, bytes: 0, rates: 0, declined_for: 0, wait: DECLINED_FOR }
     }
 
     /// The flood is over, or the pty was away: what was counted is not
@@ -91,6 +100,14 @@ impl Carried {
         self.since = None;
         self.bytes = 0;
         self.rates = 0;
+    }
+
+    /// The flood has ended: the next one is offered afresh.
+    pub(super) fn flood_over(&mut self, lend: &Lend) {
+        self.restart();
+        self.wait = DECLINED_FOR;
+        lend.declined.store(false, Ordering::SeqCst);
+        lend.keep_for.store(KEPT_FOR, Ordering::Relaxed);
     }
 
     /// A chunk of `len` bytes of a flood that goes on has been queued.
@@ -116,9 +133,10 @@ impl Carried {
         }
         if lend.declined.load(Ordering::SeqCst) {
             self.declined_for += 1;
-            if self.declined_for < DECLINED_FOR {
+            if self.declined_for < self.wait {
                 return false;
             }
+            self.wait = self.wait.saturating_mul(2);
             lend.declined.store(false, Ordering::SeqCst);
         }
         self.declined_for = 0;
@@ -141,6 +159,8 @@ pub(crate) struct Lend {
     /// What the loop has carried since its last verdict: bytes, and
     /// nanoseconds; and the verdicts in its favour since the offer.
     here: [AtomicU64; 3],
+    /// Verdicts in the loop's favour it may keep the pty for.
+    keep_for: AtomicU64,
     /// Written by the loop when it gives the pty back.
     back: UnixStream,
     back_rx: UnixStream,
@@ -157,6 +177,7 @@ impl Lend {
             declined: AtomicBool::new(false),
             two_rate: AtomicU64::new(0),
             here: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
+            keep_for: AtomicU64::new(KEPT_FOR),
             back,
             back_rx,
         }
@@ -187,16 +208,15 @@ impl Lend {
         let here = rate(carried, Duration::from_nanos(nanos));
         if here * 100 < self.two_rate.load(Ordering::SeqCst) * (100 - SLOWER_PERCENT) {
             self.declined.store(true, Ordering::SeqCst);
-        } else if self.here[2].fetch_add(1, Ordering::Relaxed) + 1 < KEPT_FOR {
+            self.keep_for.store(KEPT_FOR, Ordering::Relaxed);
+        } else if self.here[2].fetch_add(1, Ordering::Relaxed) + 1 < self.keep_for.load(Ordering::Relaxed) {
             return true;
+        } else {
+            let kept = self.keep_for.load(Ordering::Relaxed);
+            self.keep_for.store(kept.saturating_mul(2), Ordering::Relaxed);
         }
         self.give_back();
         false
-    }
-
-    /// The flood has ended: the next one is offered afresh.
-    pub(super) fn flood_over(&self) {
-        self.declined.store(false, Ordering::SeqCst);
     }
 
     /// The pty is the loop's to read.
@@ -324,7 +344,7 @@ mod tests {
         lend.welcome(true);
         let mut carried = Carried::new();
         // a window carried in two milliseconds
-        let mut window = |lend: &Lend| {
+        let window = |carried: &mut Carried, lend: &Lend| {
             std::thread::sleep(Duration::from_millis(2));
             carried.chunk(WINDOW, lend)
         };
@@ -332,9 +352,9 @@ mod tests {
             let two = lend.two_rate.load(Ordering::SeqCst);
             Duration::from_nanos(WINDOW as u64 * 1_000_000_000 / (two * percent / 100))
         };
-        assert!(!window(&lend), "the first chunk only starts the clock");
-        assert!(!window(&lend), "the first rate is of a flood getting under way");
-        assert!(window(&lend));
+        assert!(!window(&mut carried, &lend), "the first chunk only starts the clock");
+        assert!(!window(&mut carried, &lend), "the first rate is of a flood getting under way");
+        assert!(window(&mut carried, &lend));
         assert!(lend.two_rate.load(Ordering::SeqCst) > 0);
 
         lend.offer();
@@ -349,10 +369,18 @@ mod tests {
         assert!(!lend.is_welcome(), "the loop's next turn undid the verdict");
 
         for rates in 1..DECLINED_FOR {
-            assert!(!window(&lend), "offered again after {rates} rates");
+            assert!(!window(&mut carried, &lend), "offered again after {rates} rates");
         }
-        assert!(window(&lend));
+        assert!(window(&mut carried, &lend));
         assert!(lend.is_welcome());
+
+        // slower again: twice as long before the next offer
+        lend.offer();
+        assert!(!lend.carried_here(WINDOW, took(&lend, 90)));
+        for rates in 1..2 * DECLINED_FOR {
+            assert!(!window(&mut carried, &lend), "offered a second time after {rates} rates");
+        }
+        assert!(window(&mut carried, &lend));
 
         // kept, and still given back for the reader's rate
         lend.offer();
@@ -362,10 +390,27 @@ mod tests {
         assert!(!lend.carried_here(WINDOW, took(&lend, 110)));
         assert!(!lend.lent());
         assert!(lend.is_welcome(), "a flood the loop kept counts as one it carried slower");
+        // kept again: for twice as long
+        lend.offer();
+        for verdict in 1..2 * KEPT_FOR {
+            assert!(lend.carried_here(WINDOW, took(&lend, 110)), "given back a second time after {verdict} verdicts");
+        }
+        assert!(!lend.carried_here(WINDOW, took(&lend, 110)));
         lend.offer();
         assert!(!lend.carried_here(WINDOW, took(&lend, 90)));
-        lend.flood_over();
+        carried.flood_over(&lend);
         assert!(lend.is_welcome(), "the next flood is offered afresh");
+        lend.offer();
+        for verdict in 1..KEPT_FOR {
+            assert!(lend.carried_here(WINDOW, took(&lend, 110)), "the next flood given back after {verdict} verdicts");
+        }
+        assert!(!lend.carried_here(WINDOW, took(&lend, 110)));
+        lend.offer();
+        assert!(!lend.carried_here(WINDOW, took(&lend, 90)));
+        for rates in 1..DECLINED_FOR {
+            assert!(!window(&mut carried, &lend), "the next flood offered again after {rates} rates");
+        }
+        assert!(window(&mut carried, &lend));
     }
 
     /// A reader whose turn has gone to another pane asks for its pty

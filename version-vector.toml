@@ -28,4 +28,4 @@
 
 shell   = "0.7.328"  # a week the usage feed has no reading for is not a week with nothing used
 core    = "0.12.358"  # a week the usage feed has no reading for has a row with no figure
-session = "0.11.261"  # a key typed into a flood the loop reads is answered by the loop
+session = "0.11.262"  # a flood the loop carried slower is offered again half as often each time

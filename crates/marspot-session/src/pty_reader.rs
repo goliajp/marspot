@@ -196,8 +196,7 @@ impl PtyReader {
                             }
                             Event::Neither => {
                                 turn.end();
-                                carried.restart();
-                                lending.flood_over();
+                                carried.flood_over(&lending);
                                 continue;
                             }
                             Event::Data(there) => there,
@@ -220,8 +219,7 @@ impl PtyReader {
                     match end {
                         Gathered::Open { dry: true } => {
                             turn.end();
-                            carried.restart();
-                            lending.flood_over();
+                            carried.flood_over(&lending);
                         }
                         Gathered::Open { dry: false } => {
                             turn.pass_if_spent();
