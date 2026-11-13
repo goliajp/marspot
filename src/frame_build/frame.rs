@@ -14,7 +14,7 @@ use crate::ui::components::chrome_hover::ChromeHover;
 use crate::ui::components::panel_palette as palette;
 use crate::ui::theme::spec::chrome as chrome_spec;
 use crate::ui::components::context_menu_paint::ContextMenuRender;
-use crate::ui::components::layout_modal_paint::LayoutModalRender;
+use crate::ui::components::layout_view::LayoutModalRender;
 use crate::ui::components::process_panel::ProcessPanelRender;
 use crate::ui::components::settings_view::SettingsRender;
 use crate::ui::components::shortcuts_view::ShortcutsRender;
@@ -280,24 +280,31 @@ fn paint_overlays(
     // sites only see the painter; backdrop / frame / always-on-top
     // are configured up front and applied automatically.
     if let Some(panel) = process_panel {
-        crate::ui::components::process_panel_paint::push_process_panel_via_view(
-            panel,
-            cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
-            layout.window_w, layout.window_h,
-            font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
-        );
+        let mut painter = crate::ui::core::view::ViewPainter {
+            cell_w, cell_h, ascent,
+            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
+            window_w: layout.window_w, window_h: layout.window_h,
+            font, atlas,
+            cells: overlay_cells,
+            glyphs: overlay_glyphs,
+            ui_rects: overlay_ui_rects,
+        };
+        panel.surface.borrow_mut().frame(&mut painter, panel);
     }
 
     // cc — `Cc` usage modal (Claude account windows).  Same overlay
     // + backdrop treatment as the process panel.
     if let Some(cc) = cc_usage {
-        crate::ui::components::cc_usage_paint::push_cc_usage_via_view(
-            cc,
-            layout.top_inset,
-            cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
-            layout.window_w, layout.window_h,
-            font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
-        );
+        let mut painter = crate::ui::core::view::ViewPainter {
+            cell_w, cell_h, ascent,
+            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
+            window_w: layout.window_w, window_h: layout.window_h,
+            font, atlas,
+            cells: overlay_cells,
+            glyphs: overlay_glyphs,
+            ui_rects: overlay_ui_rects,
+        };
+        cc.surface.borrow_mut().frame(&mut painter, cc, layout.top_inset);
     }
 
     // The settings panel.  Same overlay + backdrop treatment.
@@ -331,13 +338,16 @@ fn paint_overlays(
     // scratches → renders on top of grid, modal-style backdrop dims
     // everything below the title strip.
     if let Some(modal_state) = layout_modal_state {
-        crate::ui::components::layout_modal_paint::push_layout_modal_via_view(
-            modal_state,
-            layout.top_inset,
-            cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
-            layout.window_w, layout.window_h,
-            font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
-        );
+        let mut painter = crate::ui::core::view::ViewPainter {
+            cell_w, cell_h, ascent,
+            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
+            window_w: layout.window_w, window_h: layout.window_h,
+            font, atlas,
+            cells: overlay_cells,
+            glyphs: overlay_glyphs,
+            ui_rects: overlay_ui_rects,
+        };
+        modal_state.surface.borrow_mut().frame(&mut painter, modal_state, layout.top_inset);
     }
 
     #[cfg(test)]

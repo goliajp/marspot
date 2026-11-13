@@ -1,76 +1,24 @@
-//! The agent-accounts panel: how a frame of it is painted.
+//! The agent-accounts panel: how its cards and its timeline are
+//! painted.
 //!
-//! The frame and header are the shared panel chrome's; every rect
-//! drawn here comes from `cc_usage_layout`, which is also what sizes
-//! the panel.  Prose (names, addresses, the reset line) is set in the
+//! The frame, the header and the group headings are the panel's tree
+//! (`cc_usage_view`); every rect drawn here comes from
+//! `cc_usage_layout`, which is also what sizes the panel.  Prose (names, addresses, the reset line) is set in the
 //! panel type roles; the bars' labels, percentages and the whole
 //! timeline are tabular data and stay in the terminal's font.
 
 use marspot_term::layout::Rect;
 
-use crate::font_cache::FontCache;
-use crate::glyph_atlas::GlyphAtlas;
-use crate::ui::components::cc_usage_layout::{card_rows, layout, Cell, Shape, Timeline};
+use crate::ui::components::cc_usage_layout::{card_rows, Cell, Timeline};
 use crate::ui::components::cc_usage_modal::{
-    fit_ellipsis, fit_measured, metric, timeline_range, CcUsageAccountRender, CcUsageRender, Hover,
+    fit_ellipsis, fit_measured, metric, timeline_range, CcUsageAccountRender, CcUsageRender,
 };
 use crate::ui::components::controls;
-use crate::ui::components::panel_chrome::{self, PanelChrome};
+use crate::ui::components::panel_chrome;
 use crate::ui::components::panel_palette as palette;
 use crate::ui::core::view::ViewPainter;
 use crate::ui::strings::{self, Msg};
 use crate::ui::theme::{spec, PanelText};
-use golia_ui_core::scene::{GlyphInstance, RectInstance as CellInstance, UiRectInstance};
-
-/// The agent-accounts panel: a card per account, then the timeline of
-/// when each account's windows renew.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn push_cc_usage_via_view(
-    cc: &CcUsageRender,
-    top_inset: f64,
-    cell_w: f32,
-    cell_h: f32,
-    ascent: f32,
-    atlas_w: f32,
-    atlas_h: f32,
-    window_w: f64,
-    window_h: f64,
-    font: &mut FontCache,
-    atlas: &mut GlyphAtlas,
-    cells: &mut Vec<CellInstance>,
-    glyphs: &mut Vec<GlyphInstance>,
-    ui_rects: &mut Vec<UiRectInstance>,
-) {
-    let mut painter = ViewPainter {
-        cell_w, cell_h, ascent, atlas_w, atlas_h,
-        window_w, window_h,
-        font, atlas, cells, glyphs, ui_rects,
-    };
-    let cell = Cell { w: cell_w as f64, h: cell_h as f64, ascent: ascent as f64 };
-    let chrome = PanelChrome::new(cc.rect, top_inset);
-    let meta = (!cc.updated_label.is_empty()).then_some(cc.updated_label.as_str());
-    chrome.paint(&mut painter, strings::t(metric::TITLE), meta, cc.hover == Hover::Close, |p, content| {
-        if cc.accounts.is_empty() {
-            paint_empty(p, content);
-            return;
-        }
-        let shape = Shape::of(&cc.accounts);
-        let l = layout(content, cell, &shape);
-        let count = cc.accounts.len().to_string();
-        panel_chrome::section_heading(
-            p, content.x, l.heading_top, content.w, strings::t(metric::ACCOUNTS_HEADING), Some(&count),
-        );
-        for (account, card) in cc.accounts.iter().zip(&l.cards) {
-            paint_card(p, account, *card, cell, shape.window_rows);
-        }
-        if let Some(t) = &l.timeline {
-            panel_chrome::section_heading(
-                p, content.x, t.heading_top, content.w, strings::t(metric::TIMELINE_HEADING), None,
-            );
-            paint_timeline(p, cc, t, cell);
-        }
-    });
-}
 
 /// `s` in `role`, cut to `max_w` with an ellipsis.
 fn fit_role(p: &mut ViewPainter, role: PanelText, s: &str, max_w: f64) -> String {
@@ -113,7 +61,7 @@ fn paint_bar(p: &mut ViewPainter, rect: Rect, used: f64, util: f32) {
 
 /// The sentence shown before either feed has been read, in the middle
 /// of the content area.
-fn paint_empty(p: &mut ViewPainter, content: Rect) {
+pub(crate) fn paint_empty(p: &mut ViewPainter, content: Rect) {
     let text = fit_role(p, metric::EMPTY, strings::t(metric::EMPTY_TEXT), content.w);
     let w = p.panel_text_width(metric::EMPTY, &text) as f64;
     let baseline = p.ui_baseline_centred(content.y_top as f32, content.h as f32, metric::EMPTY.pt());
@@ -124,7 +72,7 @@ fn paint_empty(p: &mut ViewPainter, content: Rect) {
 
 /// One account: name and status, address, a bar per metered window,
 /// when the next window renews.
-fn paint_card(p: &mut ViewPainter, a: &CcUsageAccountRender, card: Rect, cell: Cell, window_rows: usize) {
+pub(crate) fn paint_card(p: &mut ViewPainter, a: &CcUsageAccountRender, card: Rect, cell: Cell, window_rows: usize) {
     panel_chrome::card(p, card);
     let rows = card_rows(card, cell.h, window_rows);
 
@@ -164,7 +112,7 @@ fn paint_card(p: &mut ViewPainter, a: &CcUsageAccountRender, card: Rect, cell: C
 
 /// The timeline: one row per account, each of its windows a bar from
 /// when the window opened to when it renews, on one time axis.
-fn paint_timeline(p: &mut ViewPainter, cc: &CcUsageRender, t: &Timeline, cell: Cell) {
+pub(crate) fn paint_timeline(p: &mut ViewPainter, cc: &CcUsageRender, t: &Timeline, cell: Cell) {
     panel_chrome::card(p, t.card);
     // Scale to what has to be drawn, then out to whole days: that is
     // the plot's margin, and it puts a dated rule on both sides of
