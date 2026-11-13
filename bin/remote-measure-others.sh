@@ -125,6 +125,8 @@ if [[ -z "${REMOTE_MEAS_JSON:-}" ]]; then
   FWD="export MARSPOT_BENCH_COMMIT=$COMMIT; "
   [[ -z "${MEASURE_TERMS:-}" ]] || FWD+="export MEASURE_TERMS=$(printf '%q' "$MEASURE_TERMS"); "
   [[ -z "${MEASURE_ROUNDS:-}" ]] || FWD+="export MEASURE_ROUNDS=$(printf '%q' "$MEASURE_ROUNDS"); "
+  [[ -z "${MEASURE_MARKER_TIMEOUT_S:-}" ]] || FWD+="export MEASURE_MARKER_TIMEOUT_S=$(printf '%q' "$MEASURE_MARKER_TIMEOUT_S"); "
+  [[ -z "${MEASURE_WARP_VIA:-}" ]] || FWD+="export MEASURE_WARP_VIA=$(printf '%q' "$MEASURE_WARP_VIA"); "
   INNER="source ~/.cargo/env; cd ~/$REMOTE_DIR && export CARGO_TARGET_DIR=\$HOME/$REMOTE_DIR/target; $FWD
     /usr/local/bin/bench-lock bench --max-wait ${MARSPOT_BENCH_MAX_WAIT:-1200} \
       caffeinate -dims bin/_bounded.sh ${MARSPOT_MEASURE_TIMEOUT:-3000} sh -c \
