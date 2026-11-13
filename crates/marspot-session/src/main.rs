@@ -910,7 +910,7 @@ fn main() {
         cols = cols,
         rows = rows
     );
-    regions::attach_side_regions(frames.shm(), session.id());
+    regions::attach_side_regions(frames.shm(), &mut session);
 
     // SIGTERM and SIGHUP become events on the main loop; see
     // `signal_events`.  Best-effort: if installing fails the L3 still

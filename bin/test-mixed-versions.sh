@@ -85,14 +85,6 @@ start_app() { # directory of the build to start
   echo "  session $SID pid $PID shell $SHELL_PID region $(entry "$SD" "$SID" shm_name)"
 }
 
-# Print the flag again.  A session's own update does not carry the
-# text of the clusters on its screen to the new image, in any build;
-# what is checked here is where the text is published, not that.
-print_again() {
-  type_in_pane "$SD" "$SID" "clear; cat $SD/work/m.txt"
-  sleep 1
-}
-
 same_pane() {
   check "the session is the same process" test "$(entry "$SD" "$SID" pid)" = "$PID"
   check "the session process is alive" alive "$PID"
@@ -145,6 +137,8 @@ new_readers_read_everything
 
 echo "════ update: the sessions move to the new build ════"
 execs=$(count "$SD" L3_EXECV_INVOKE)
+# whatever the shell's prompt made of it since the file was printed
+title_before=$("$PROBE" title "$SD/sessions/$SID" 2>/dev/null)
 swap_core "$SD" "$NEW/marspot-core" "$NEW/marspot-session"
 wait_count "$SD" L3_EXECV_INVOKE "$execs" 120 || die "the session never moved to the new build"
 for (( i = 0; i < 100; i++ )); do [[ -n $(entry "$SD" "$SID" stamps_regions) ]] && break; sleep 0.2; done
@@ -152,9 +146,8 @@ sleep 1
 same_pane
 check "the session runs the new build" test "$(entry "$SD" "$SID" stamps_regions)" = 1
 check "the session kept its region" test "$(count "$SD" L3_REHOUSE)" -eq 0
-check "the title set before the update is still published" \
-  test "$("$PROBE" title "$SD/sessions/$SID" 2>/dev/null)" = TITLE-M
-print_again
+check "the title from before the update is still published" \
+  test "$("$PROBE" title "$SD/sessions/$SID" 2>/dev/null)" = "$title_before"
 new_readers_read_everything
 check "the frames keep coming" frames_match_old_reader 1
 
@@ -192,17 +185,29 @@ same_pane
 check "the session kept its region" test "$(count "$SD" L3_REHOUSE)" -eq 0
 new_readers_read_everything
 
+echo "════ rollback: the sessions go back to the old build ════"
+execs=$(count "$SD" L3_EXECV_INVOKE)
+swap_core "$SD" "$NEW/marspot-core" "$OLD/marspot-session"
+wait_count "$SD" L3_EXECV_INVOKE "$execs" 120 || die "the session never moved to the old build"
+for (( i = 0; i < 100; i++ )); do [[ -z $(entry "$SD" "$SID" stamps_regions) ]] && break; sleep 0.2; done
+sleep 1
+same_pane
+check "the session runs the old build" test -z "$(entry "$SD" "$SID" stamps_regions)"
+check "no session was started again" lacks_log core.reattach.l3_failed
+check "this build reads the frame" frame_shows MARK-M
+
 echo "════ lost: an old session without its region, a new session build staged ════"
 start_app "$OLD"
+title_before=$("$PROBE" title "$SD/sessions/$SID" 2>/dev/null)
 "$PROBE" unlink "$SD/sessions/$SID"
 swap_core "$SD" "$NEW/marspot-core" "$NEW/marspot-session"
 wait_count "$SD" L3_REHOUSED 0 120
 same_pane
 check "the session updated and moved to a region made for it" test "$(count "$SD" L3_REHOUSED)" -ge 1
 check "no session was started again" lacks_log core.reattach.l3_failed
-check "the title set before the move came along" \
-  test "$("$PROBE" title "$SD/sessions/$SID" 2>/dev/null)" = TITLE-M
-print_again
+check "there was a title before the move" test -n "$title_before"
+check "the title from before the move came along" \
+  test "$("$PROBE" title "$SD/sessions/$SID" 2>/dev/null)" = "$title_before"
 new_readers_read_everything
 
 echo "════ lost: an old session without its region, nothing to update to ════"

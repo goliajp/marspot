@@ -73,14 +73,28 @@ impl ClusterTableWriter {
     /// stay with whoever holds them.
     pub fn open(name: &CStr, owner: Identity) -> io::Result<Self> {
         let (fd, base) = super::ident::open_owned(name, CAPACITY, owner)?;
-        unsafe {
-            put_u32(base, 0, MAGIC);
-            put_u32(base, 4, VERSION);
-            put_u32(base, 8, 0);
-            put_u32(base, 12, 0);
-            put_u32(base, 16, 0);
+        // a table already there is the last frame of this session's
+        // previous image, and stays until the next frame replaces it
+        let kept = unsafe { get_u32(base, 0) == MAGIC && get_u32(base, 4) == VERSION };
+        if !kept {
+            unsafe {
+                put_u32(base, 0, MAGIC);
+                put_u32(base, 4, VERSION);
+                put_u32(base, 8, 0);
+                put_u32(base, 12, 0);
+                put_u32(base, 16, 0);
+            }
         }
-        Ok(Self { _fd: fd, base, at: HEADER, count: 0, overflow: false, last_count: 0 })
+        let last_count = unsafe { get_u32(base, 8) };
+        Ok(Self { _fd: fd, base, at: HEADER, count: 0, overflow: false, last_count })
+    }
+
+    /// The table in the region now: after [`Self::open`], what the
+    /// session's previous image published with its last frame.
+    pub fn table(&self) -> ClusterTable {
+        let mut out = ClusterTable::default();
+        unsafe { read_table(self.base, &mut out) };
+        out
     }
 
     /// Start from the table `old` holds: the session is leaving that
@@ -168,30 +182,36 @@ impl ClusterTableReader {
     /// run past the region or are not UTF-8 end the copy, since only a
     /// torn read produces them.
     pub fn read_into(&self, out: &mut ClusterTable) {
-        out.clear();
-        let (count, overflow) = unsafe { (get_u32(self.base, 8), get_u32(self.base, 16)) };
-        out.overflow = overflow != 0;
-        let mut at = HEADER;
-        for _ in 0..count {
-            if at + ENTRY_HEAD > CAPACITY {
-                break;
-            }
-            let (col, row, len) = unsafe {
-                (get_u16(self.base, at), get_u16(self.base, at + 2), get_u16(self.base, at + 4))
-            };
-            let start = at + ENTRY_HEAD;
-            if start + len as usize > CAPACITY {
-                break;
-            }
-            let text = unsafe { std::slice::from_raw_parts(self.base.add(start), len as usize) };
-            if std::str::from_utf8(text).is_err() {
-                break;
-            }
-            let from = out.bytes.len() as u32;
-            out.bytes.extend_from_slice(text);
-            out.entries.push((col, row, from, len));
-            at = start + len as usize;
+        unsafe { read_table(self.base, out) }
+    }
+}
+
+/// # Safety
+/// `base` maps a cluster region.
+unsafe fn read_table(base: *const u8, out: &mut ClusterTable) {
+    out.clear();
+    let (count, overflow) = unsafe { (get_u32(base, 8), get_u32(base, 16)) };
+    out.overflow = overflow != 0;
+    let mut at = HEADER;
+    for _ in 0..count {
+        if at + ENTRY_HEAD > CAPACITY {
+            break;
         }
+        let (col, row, len) = unsafe {
+            (get_u16(base, at), get_u16(base, at + 2), get_u16(base, at + 4))
+        };
+        let start = at + ENTRY_HEAD;
+        if start + len as usize > CAPACITY {
+            break;
+        }
+        let text = unsafe { std::slice::from_raw_parts(base.add(start), len as usize) };
+        if std::str::from_utf8(text).is_err() {
+            break;
+        }
+        let from = out.bytes.len() as u32;
+        out.bytes.extend_from_slice(text);
+        out.entries.push((col, row, from, len));
+        at = start + len as usize;
     }
 }
 
@@ -376,11 +396,14 @@ mod tests {
     fn a_new_image_of_the_same_session_takes_the_region_over() {
         let regions = test_regions();
         let name = regions.side_name(Side::Clusters).unwrap();
-        let first = ClusterTableWriter::open(&name, regions.owner()).unwrap();
+        let mut first = ClusterTableWriter::open(&name, regions.owner()).unwrap();
+        one_cluster(&mut first, FLAG);
         drop(first);
         let again = ClusterTableWriter::open(&name, regions.owner());
         regions.delete();
-        assert!(again.is_ok(), "{:?}", again.err());
+        let again = again.expect("the next image opens the region");
+        let kept: Vec<String> = again.table().iter().map(|(_, _, t)| t.to_string()).collect();
+        assert_eq!(kept, [FLAG], "the table the image before published is gone");
     }
 
     /// The same name asked for as another session's: what a reader
