@@ -68,6 +68,10 @@ SID="" PID="" SHELL_PID=""
 # started from the app at `$1`.
 start_app() { # directory of the build to start
   cleanup
+  # a fresh sandbox numbers from 1, and an old build names what
+  # session 1 publishes by that alone: whatever an earlier phase or an
+  # earlier run left under those names is not this pane's
+  dev_forget_regions /msp-s-1 /msp-c-1 /msp-t-1
   CLI="$1/marspot-shell"
   launch "$SD" "$1/marspot-shell"
   mkdir -p "$SD/work"
@@ -161,9 +165,6 @@ check "the old readers find the cluster text and title where they look" \
 
 echo "════ rollback: new app, then the old core over new sessions ════"
 start_app "$NEW"
-# what the phases above left under the names an old build gives this
-# session id: their sessions were killed and removed nothing
-dev_forget_regions "/msp-s-$SID" "/msp-c-$SID" "/msp-t-$SID"
 swap_core "$SD" "$OLD/marspot-core"
 sleep 1
 same_pane
