@@ -18,6 +18,7 @@ mod diff_tests;
 mod lane;
 mod reference;
 mod trace;
+mod wide_class;
 
 use lane::fast_width;
 use trace::trace_seq;
