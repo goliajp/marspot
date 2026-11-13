@@ -2,6 +2,7 @@
 //! the two.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
@@ -55,6 +56,10 @@ pub(super) enum Msg {
     /// ahead of it still lands in the old file, which is what makes a
     /// rotation atomic from the producer's point of view.
     Swap(std::fs::File, SyncSender<()>),
+    /// Rename the file being written from `live` to `retired` and go
+    /// on in a fresh file at `live`.  Nobody waits for it: the writer
+    /// does it when it gets here, after everything queued ahead.
+    Rotate { live: PathBuf, retired: PathBuf },
 }
 
 /// What the producer and the writer thread share.
