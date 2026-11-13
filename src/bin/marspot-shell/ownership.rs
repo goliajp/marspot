@@ -14,7 +14,8 @@
 //! A shell that is in the sessions' coalition and is not the process
 //! LaunchServices holds answerable for it cannot become that process:
 //! a coalition is given to a record when the record is made.  It
-//! starts its own heir, a new process, and leaves.
+//! has a new process started, and leaves when that one was given the
+//! coalition (`start_heir_here`).
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -139,12 +140,26 @@ fn coalition_to_join(mine: Option<u64>, sessions: &[(Option<u64>, bool)]) -> Opt
     counts.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|(c, _)| c)
 }
 
-/// How long a shell waits for the heir it started to say it is there.
+/// Wait for the shell that was asked for to say it is there, and
+/// exit when it does.  Returns when none did in time, or when the one
+/// that was started says it was not given the coalition.
 fn leave_to(heir_wanted: &str) {
     let deadline = Instant::now() + HEIR_WAIT;
     while Instant::now() < deadline {
-        let heir = std::fs::read_to_string(owner::heir_path()).ok().and_then(|t| t.trim().parse::<i32>().ok());
-        if let Some(pid) = heir {
+        let said = std::fs::read_to_string(owner::heir_path()).unwrap_or_default();
+        if said.trim() == crate::identity::REFUSED {
+            // the request comes off the record first: the shell that
+            // was refused waits for that before it exits
+            announce();
+            let _ = std::fs::remove_file(owner::heir_path());
+            crate::reclaim::note_refused();
+            return lx_event!(
+                "SHELL_COALITION_UNLISTED",
+                "a shell started here was not given the sessions' coalition: a record that may not be listed has it; leaving it",
+                coalition = own_coalition().unwrap_or(0)
+            );
+        }
+        if let Ok(pid) = said.trim().parse::<i32>() {
             lx_event!("SHELL_HANDOVER", "a shell in the sessions' coalition takes over; exiting", heir = pid);
             // the lock goes with this process, and the heir is waiting for it
             std::process::exit(0);
@@ -164,14 +179,28 @@ fn leave_to(heir_wanted: &str) {
 /// records of the app to take over; one a session started is.  What an
 /// update handed this image (the window's frame, what is still staged)
 /// goes on record for it.
+///
+/// The new shell registers before it answers, and answers that it was
+/// refused when that did not get it the coalition: this shell then
+/// stays as it is.  A shell from another build would answer at once
+/// and take over whatever it is given, so none is asked for.
 pub(crate) fn start_heir_here(resident: bool, sessions: &[Kept]) {
     let mine = own_coalition();
     if mine.is_none() || !sessions.iter().any(|s| s.coalition == mine && s.guards) {
         return;
     }
+    if !crate::identity::bundle_shell_is_this_build() {
+        return lx_event!(
+            "SHELL_COALITION_UNLISTED",
+            "the sessions' coalition is not listed under this shell, and the bundle's shell is another build: no shell is asked for",
+            coalition = mine.unwrap_or(0)
+        );
+    }
     let _ = std::fs::remove_file(owner::heir_path());
+    if !crate::reclaim::note_reseat() {
+        return;
+    }
     let mut wanted = record(mine, resident);
-    wanted.heir_env.push(crate::reclaim::count_for_heir());
     // this image took note of an update that is still to be finished
     if crate::launch::SIGUSR1_FLAG.load(std::sync::atomic::Ordering::Acquire) {
         wanted.heir_env.push((crate::resident::UPDATE_WAITING_ENV.into(), "1".into()));
@@ -197,7 +226,7 @@ pub(crate) fn start_heir_here(resident: bool, sessions: &[Kept]) {
 /// exit when it answers.  Returns when this process is to carry on.
 pub(crate) fn hand_over_if_outside(resident: bool) {
     let sessions = kept_sessions();
-    if crate::identity::renamed() {
+    if crate::identity::renamed() && crate::reclaim::lacks_coalition() {
         start_heir_here(resident, &sessions);
     }
     let census: Vec<(Option<u64>, bool)> = sessions.iter().map(|s| (s.coalition, s.guards)).collect();

@@ -19,6 +19,13 @@
 //! program from being given the sessions.  When the program is run
 //! again its old record goes, and the app is told that an application
 //! appeared: that is when it looks again.
+//!
+//! `lsappinfo` stops listing some dead records that still keep a
+//! coalition, so a coalition listed under nothing is not known to be
+//! free.  The shell that is started to be given it registers before it
+//! says that it is there, and this one leaves only for one that was
+//! given the coalition (`ownership::start_heir_here`): asking costs a
+//! process that comes and goes, and no window.
 
 use marspot::{lx_event, lx_warn};
 use marspot_term::platform;
@@ -26,10 +33,8 @@ use marspot_term::platform;
 use crate::ls_records::{self, Holder};
 use crate::ownership;
 
-/// Counts the shells started one after another to be given the
-/// coalition, for the next one: a state that a new shell does not
-/// change is left alone after the third.
-const RESEATS_ENV: &str = "MARSPOT_SHELL_RESEATS";
+/// Shells asked for, one after another, to be given the coalition,
+/// with none of them given it: read from `reseats_path` at the start.
 static RESEATS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static LOOKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// A dead record of another program has the coalition.
@@ -62,19 +67,80 @@ static WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 /// The last look found the coalition under something else.
 static NOT_OURS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// At the top of `main`: take the count out of the environment, so
-/// that nothing this shell starts but its own heir has it, and see
-/// whether this image is one that looks: a shell that took another's
-/// place (`in_passing`), one that an update made (its earlier images
-/// may be from before any of this), one told to by its last image.
+/// Where the shells asked for in a row are counted: the count, and
+/// when the last was asked for.  The shell that asks writes it and the
+/// one that is started reads it, whatever starts that one.
+fn reseats_path() -> std::path::PathBuf {
+    marspot_term::paths::state_root().join("owner.reseats")
+}
+
+/// For how long a shell that was asked for counts against the next.
+const RESEATS_COUNT_FOR: u64 = 120;
+
+/// The count in `text` that is still in force at `now`.
+fn reseats_in_force(text: &str, now: u64) -> u32 {
+    let mut fields = text.split_whitespace();
+    let n = fields.next().and_then(|f| f.parse::<u32>().ok());
+    let at = fields.next().and_then(|f| f.parse::<u64>().ok());
+    match n.zip(at) {
+        Some((n, at)) if at <= now && now - at < RESEATS_COUNT_FOR => n,
+        _ => 0,
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Before a shell is asked for to take this one's place: count it,
+/// and say whether one more may be asked for.  The count that cannot
+/// be put on file is not exceeded either: nothing is asked for.
+pub(crate) fn note_reseat() -> bool {
+    let n = RESEATS.load(std::sync::atomic::Ordering::Acquire) + 1;
+    if n > RESEATS_MOST {
+        return false;
+    }
+    match std::fs::write(reseats_path(), format!("{n} {}\n", now_secs())) {
+        Ok(()) => true,
+        Err(e) => {
+            lx_warn!("shell.reclaim.count_failed", &format!("{e}"));
+            false
+        }
+    }
+}
+
+/// A shell that was asked for was not given the coalition: none is
+/// asked for again until the count lapses.  What refused it is a
+/// record this app cannot take over, and each one asked for is one
+/// start fewer that the sessions allow a shell that dies.
+pub(crate) fn note_refused() {
+    RESEATS.store(RESEATS_MOST, std::sync::atomic::Ordering::Release);
+    if let Err(e) = std::fs::write(reseats_path(), format!("{RESEATS_MOST} {}\n", now_secs())) {
+        lx_warn!("shell.reclaim.count_failed", &format!("{e}"));
+    }
+}
+
+/// For a shell that is not known to have its coalition, before it
+/// shows a window: whether to ask for one in its place.  One look.
+pub(crate) fn lacks_coalition() -> bool {
+    let me = std::process::id() as i32;
+    let (Some(coalition), Some(id)) = (platform::coalition_of(me), crate::identity::bundle_id()) else {
+        return false;
+    };
+    let holder = ls_records::holder_of(&ls_records::list(), coalition, me, &id);
+    step(holder, 0, false, RESEATS.load(std::sync::atomic::Ordering::Acquire), true) == Step::Ask
+}
+
+/// At the top of `main`: read how many shells in a row were asked for,
+/// and see whether this image is one that looks: a shell that took
+/// another's place (`in_passing`), one that an update made (its earlier
+/// images may be from before any of this), one told to by its last
+/// image.
 pub(crate) fn take_count(in_passing: bool) {
-    let n = std::env::var(RESEATS_ENV).ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let n = std::fs::read_to_string(reseats_path()).map_or(0, |text| reseats_in_force(&text, now_secs()));
     let told = std::env::var_os(LOOK_ENV).is_some();
     // SAFETY: startup path in main(), before any thread is spawned.
-    unsafe {
-        std::env::remove_var(RESEATS_ENV);
-        std::env::remove_var(LOOK_ENV);
-    }
+    unsafe { std::env::remove_var(LOOK_ENV) };
     RESEATS.store(n, std::sync::atomic::Ordering::Release);
     let updated = std::env::var_os("MARSPOT_SHELL_SELF_UPDATE").is_some();
     WANTED.store(in_passing || told || updated, std::sync::atomic::Ordering::Release);
@@ -87,16 +153,6 @@ pub(crate) fn carry_look(cmd: &mut std::process::Command) {
     }
 }
 
-/// For the next image of this process: it is the same shell.
-pub(crate) fn carry_count(cmd: &mut std::process::Command) {
-    cmd.env(RESEATS_ENV, RESEATS.load(std::sync::atomic::Ordering::Acquire).to_string());
-}
-
-/// For the shell started in this one's place.
-pub(crate) fn count_for_heir() -> (String, String) {
-    (RESEATS_ENV.into(), (RESEATS.load(std::sync::atomic::Ordering::Acquire) + 1).to_string())
-}
-
 /// How long LaunchServices is given to see an exit this process saw.
 const EXIT_SEEN_WITHIN: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -107,10 +163,10 @@ const HOLDERS_MOST: u32 = 8;
 const RESEATS_MOST: u32 = 3;
 
 /// How long a shell that was started for the coalition and refused it
-/// waits before it looks once more.  `lsappinfo` stops listing some
-/// dead records that still have a coalition; the one met was the
-/// app's own core's, left by a shell from before this was kept, and
-/// the core this shell starts in its first seconds takes that over.
+/// waits before it looks once more.  One unlisted record that kept it
+/// was the app's own core's, left by a shell from before this was
+/// kept, and the core this shell starts in its first seconds takes
+/// that over.
 const HIDDEN_HOLDER_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Sleep until `pid` is gone.
@@ -157,8 +213,9 @@ enum Step {
     WaitForHidden,
     /// Too many shells in a row were not given it.
     GiveUp,
-    /// It is nobody's: have a new shell started to be given it.
-    Reseat,
+    /// No other program's record is listed with it: ask for a new
+    /// shell, which takes this one's place when it is given it.
+    Ask,
 }
 
 /// `gone` is the program this process saw exit; `past` says that
@@ -171,9 +228,9 @@ fn step(holder: Holder, gone: i32, past: bool, reseats: u32, waited: bool) -> St
         Holder::Other { dead: false, .. } if !past => Step::LookAgain,
         Holder::Other { pid, dead: false } => Step::Stale(pid),
         Holder::Other { pid, dead: true } => Step::Kept(pid),
-        Holder::Nobody | Holder::OurDead if reseats > 0 && !waited => Step::WaitForHidden,
         Holder::Nobody | Holder::OurDead if reseats >= RESEATS_MOST => Step::GiveUp,
-        Holder::Nobody | Holder::OurDead => Step::Reseat,
+        Holder::Nobody if reseats > 0 && !waited => Step::WaitForHidden,
+        Holder::Nobody | Holder::OurDead => Step::Ask,
     }
 }
 
@@ -212,22 +269,25 @@ fn take_back(coalition: u64, bundle_id: &str, gone: i32) -> Option<i32> {
                 return None;
             }
             Step::WaitForHidden => {
-                KEPT_BY_DEAD.store(true, std::sync::atomic::Ordering::Release);
                 std::thread::sleep(HIDDEN_HOLDER_WAIT);
                 waited = true;
             }
             Step::GiveUp => {
-                lx_warn!("SHELL_COALITION_NOT_TAKEN", "three shells in a row were not given the coalition; leaving it", coalition = coalition);
+                lx_warn!(
+                    "SHELL_COALITION_NOT_TAKEN",
+                    "the shells asked for of late were not given the coalition; none is asked for until two minutes have passed",
+                    coalition = coalition
+                );
                 return None;
             }
-            Step::Reseat => {
+            Step::Ask => {
                 lx_event!(
                     "SHELL_COALITION_FREE",
-                    "the sessions' coalition is nobody's: a new shell is started to be given it",
+                    "no other program's record is listed with the sessions' coalition: a new shell is asked for, to be given it",
                     coalition = coalition,
                     was_under = gone
                 );
-                // does not return when the new shell answers
+                // does not return when the new shell takes over
                 ownership::start_heir_here(crate::resident::is_resident(), &ownership::kept_sessions());
                 return None;
             }
@@ -250,10 +310,14 @@ fn watch_in(delay: std::time::Duration) {
     let look = move || {
         std::thread::sleep(delay);
         let me = std::process::id() as i32;
-        let records = ls_records::list();
-        if !records.iter().any(|r| r.pid == me && !r.dead) {
-            return;
+        // asked for this process alone: the list was measured to leave
+        // out, for most of a second, a process that had just registered
+        let Some(mine) = ls_records::of_pid(me) else { return };
+        if mine.coalition == Some(coalition) {
+            // the shells asked for in a row end with one that was given it
+            return drop(std::fs::remove_file(reseats_path()));
         }
+        let records = ls_records::list();
         let holder = ls_records::holder_of(&records, coalition, me, &id);
         NOT_OURS.store(holder != Holder::Us, std::sync::atomic::Ordering::Release);
         let mut gone = match holder {
@@ -306,14 +370,36 @@ mod tests {
     }
 
     #[test]
-    fn a_free_coalition_gets_a_new_shell_a_bounded_number_of_times() {
+    fn a_coalition_no_other_program_is_listed_with_gets_a_shell_asked_for() {
         for free in [Holder::Nobody, Holder::OurDead] {
-            assert_eq!(step(free, 70, false, 0, false), Step::Reseat);
-            // a shell started for it and refused: something unlisted has it
-            assert_eq!(step(free, 0, false, 1, false), Step::WaitForHidden);
-            assert_eq!(step(free, 0, false, 1, true), Step::Reseat);
-            assert_eq!(step(free, 0, false, RESEATS_MOST - 1, true), Step::Reseat);
-            assert_eq!(step(free, 0, false, RESEATS_MOST, true), Step::GiveUp);
+            assert_eq!(step(free, 70, false, 0, false), Step::Ask);
+            assert_eq!(step(free, 0, false, RESEATS_MOST - 1, true), Step::Ask);
         }
+        // a shell started for it and refused: what is not listed may go
+        assert_eq!(step(Holder::Nobody, 0, false, 1, false), Step::WaitForHidden);
+        assert_eq!(step(Holder::OurDead, 0, false, 1, false), Step::Ask);
+    }
+
+    #[test]
+    fn shells_in_a_row_are_bounded_whoever_has_it() {
+        for free in [Holder::Nobody, Holder::OurDead] {
+            for waited in [false, true] {
+                assert_eq!(step(free, 0, false, RESEATS_MOST, waited), Step::GiveUp);
+                assert_eq!(step(free, 0, false, RESEATS_MOST + 4, waited), Step::GiveUp);
+            }
+        }
+    }
+
+    #[test]
+    fn a_count_holds_for_two_minutes_and_no_longer() {
+        let now = 1_000_000;
+        assert_eq!(reseats_in_force(&format!("2 {}\n", now - 5), now), 2);
+        assert_eq!(reseats_in_force(&format!("2 {}\n", now - RESEATS_COUNT_FOR + 1), now), 2);
+        assert_eq!(reseats_in_force(&format!("2 {}\n", now - RESEATS_COUNT_FOR), now), 0);
+        // written by a clock that was ahead
+        assert_eq!(reseats_in_force(&format!("2 {}\n", now + 30), now), 0);
+        assert_eq!(reseats_in_force("", now), 0);
+        assert_eq!(reseats_in_force("junk\n", now), 0);
+        assert_eq!(reseats_in_force("3\n", now), 0);
     }
 }
