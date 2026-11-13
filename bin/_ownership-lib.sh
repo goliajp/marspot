@@ -294,7 +294,7 @@ kill_shell() { # sets KILLED_AT, and L1 to the shell a session started
 # a shell of it: pid, alive or dead, name, bundle id or -, bundle path.
 app_records() {
   local pid state name id path
-  lsappinfo list | awk -v bid="$OWN_BUNDLE_ID" -v app="${APP#/private}" -v sd="${MARSPOT_STATE_DIR#/private}" -v tgt="$ROOT/target/" '
+  lsappinfo list | awk -v app="${APP#/private}" -v sd="${MARSPOT_STATE_DIR#/private}" -v tgt="$ROOT/target/" '
     function val(key,   i, rest) {
       i = index(block, key "=\""); if (!i) return "-"
       rest = substr(block, i + length(key) + 2); return substr(rest, 1, index(rest, "\"") - 1)
@@ -302,7 +302,8 @@ app_records() {
     function flush(   exe, path, name) {
       if (block == "") return
       exe = val("executable path"); path = val("bundle path"); sub(/^\/private/, "", exe); sub(/^\/private/, "", path)
-      if (val("bundleID") == bid || path == app || (exe ~ /\/marspot-shell$/ && (index(exe, app "/") == 1 || index(exe, sd "/") == 1 || index(exe, tgt) == 1))) {
+      # by where it is, not by the bundle id: the same suite run from another tree has the same id
+      if (path == app || (exe ~ /\/marspot-shell$/ && (index(exe, app "/") == 1 || index(exe, sd "/") == 1 || index(exe, tgt) == 1))) {
         name = block; sub(/^[^"]*"/, "", name); sub(/".*/, "", name)
         match(block, /pid = [0-9]+/)
         printf "%s\t%s\t%s\t%s\t%s\n", substr(block, RSTART + 6, RLENGTH - 6), (block ~ /\(exited/ ? "dead" : "alive"), name, val("bundleID"), path
