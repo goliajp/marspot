@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.321"  # an account is held to the 5h window exactly while the feed reads one
+shell   = "0.7.327"  # only a shell that took another's place, or that an update made, looks at who has its coalition
 core    = "0.12.352"  # the menu on a file link opens the folder the file is in
-session = "0.11.195"  # a key ends the parser's turn within 16 KiB, and typing into a flood no longer slows it
+session = "0.11.200"  # a session starts the bundle's shell even when the record names a copy outside it

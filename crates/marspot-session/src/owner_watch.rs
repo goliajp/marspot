@@ -177,7 +177,8 @@ mod macos {
             let _ = turn.seek(SeekFrom::Start(0));
             let _ = turn.write_all(starts.iter().map(|t| format!("{t}\n")).collect::<String>().as_bytes());
 
-            let mut cmd = Command::new(&r.exe);
+            let exe = owner::shell_to_start(&r.exe);
+            let mut cmd = Command::new(&exe);
             for name in SESSION_ONLY_ENV {
                 cmd.env_remove(name);
             }
@@ -193,6 +194,10 @@ mod macos {
             };
             if heir_of.is_some() && r.heir_resident {
                 cmd.env(owner::RESIDENT_ENV, "1");
+            }
+            if heir_of.is_some() {
+                // what the shell that asks hands over: its own settings, nothing else
+                cmd.envs(r.heir_env.iter().filter(|(k, _)| k.starts_with("MARSPOT_")).map(|(k, v)| (k, v)));
             }
             // a group of its own: the pane's hangup is not for it
             cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);
@@ -218,12 +223,12 @@ mod macos {
                         sid = self.sid,
                         pid = pid,
                         heir_of = heir_of.unwrap_or(0),
-                        exe = r.exe.display()
+                        exe = exe.display()
                     );
                     self.started.push(pid);
                     self.turn = Some((turn, pid));
                 }
-                Err(e) => lx_warn!("OWNER_START_FAILED", &format!("{e}"), sid = self.sid, exe = r.exe.display()),
+                Err(e) => lx_warn!("OWNER_START_FAILED", &format!("{e}"), sid = self.sid, exe = exe.display()),
             }
         }
     }

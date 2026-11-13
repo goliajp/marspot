@@ -41,7 +41,9 @@ use marspot::shell_proto::{
 
 mod banner;
 mod launch;
+mod ls_records;
 mod cli_socket;
+mod identity;
 mod instance;
 mod observe;
 mod orphans;
@@ -53,6 +55,7 @@ mod plugins;
 mod present;
 mod pump;
 mod receipts;
+mod reclaim;
 mod resident;
 mod sup_log;
 mod supervisor;
@@ -4655,8 +4658,8 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
 
 fn main() {
     // before anything reads or writes the state directory
-    if std::env::args().nth(1).as_deref() == Some(resident::LS_REFRESH_ARG) {
-        resident::ls_refresh_main();
+    if std::env::args().nth(1).as_deref() == Some(identity::LS_REFRESH_ARG) {
+        identity::ls_refresh_main();
     }
     // RFC-004 D.1 — one-time Caches → Application Support state-root
     // migration.  Must run before logx / any path computation.
@@ -4696,15 +4699,12 @@ fn main() {
         _ => {}
     }
 
-    // Bundle binary check: if `binaries/current/marspot-shell` exists
-    // and points at a different file than us, re-exec into it.  This
-    // is what lets a silent shell update land — the bundle's
-    // MacOS/marspot-shell hands off to the current/ slot.
-    // One shell per state dir, settled before the redirect: a launch
-    // that loses never execs and never reaches the launch journal the
-    // crash-loop checks count from.  Subcommands talk to the running
-    // shell and take no lock.
+    // One shell per state dir, settled before the redirect into
+    // `binaries/current/`: a launch that loses never execs and never
+    // reaches the launch journal the crash-loop checks count from.
+    // Subcommands talk to the running shell and take no lock.
     if !std::env::args().nth(1).is_some_and(|a| a.starts_with('-')) {
+        identity::settle();
         instance::hold_or_exit();
     }
     maybe_redirect_to_current_shell();
@@ -4903,12 +4903,10 @@ Usage:\n\
     }
     ownership::hand_over_if_outside(false);
     ownership::announce();
-    if instance::is_heir() {
-        resident::replace_dead_record();
-    }
     if resident::update_was_waiting() {
         SIGUSR1_FLAG.store(true, Ordering::Release);
     }
+    identity::take_coalition(SIGUSR1_FLAG.load(Ordering::Acquire));
 
     // The default SIGPIPE above is for the CLI's stdout.  The GUI shell
     // writes to its core's socket, and a core that just died makes the

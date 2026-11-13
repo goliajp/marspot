@@ -10,6 +10,11 @@
 //! shell never gets to run.  When it does run and finds every session
 //! elsewhere, it asks for an heir in their coalition and leaves; the
 //! heir is the app from then on.
+//!
+//! A shell that is in the sessions' coalition and is not the process
+//! LaunchServices holds answerable for it cannot become that process:
+//! a coalition is given to a record when the record is made.  It
+//! starts its own heir, a new process, and leaves.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -27,27 +32,37 @@ fn own_coalition() -> Option<u64> {
 }
 
 /// What a session starts to get another shell: the bundle's main
-/// executable, which is what this process was started as.
-/// LaunchServices takes a process for the app by the file it was
-/// started from: opening the app reaches a shell started from the
-/// bundle, and starts a second app beside one started from a copy
-/// outside it, which leaves the sessions' coalition to whoever
-/// registers next.  An image this process moved to since (an update)
-/// keeps the directory it came from in `MARSPOT_BUNDLE_DIR`.
+/// executable (`owner::shell_to_start` says why it has to be that).
+/// It is what this process was started as, or, for an image this
+/// process moved to since (an update), in the directory it came from,
+/// kept in `MARSPOT_BUNDLE_DIR`.  A shell that has neither, one that
+/// was itself started from a copy outside the bundle, takes the bundle
+/// on file.
 pub(crate) fn successor_exe() -> PathBuf {
-    match std::env::var_os("MARSPOT_BUNDLE_DIR") {
-        Some(dir) => PathBuf::from(dir).join("marspot-shell"),
-        None => std::env::current_exe().unwrap_or_default(),
-    }
+    let own = std::env::current_exe().unwrap_or_default();
+    let came_from = std::env::var_os("MARSPOT_BUNDLE_DIR").map(|dir| PathBuf::from(dir).join("marspot-shell"));
+    let exe = [Some(own.clone()), came_from]
+        .into_iter()
+        .flatten()
+        .find(|exe| bundle_of(exe).is_some() && exe.is_file())
+        .or_else(owner::installed_shell)
+        .unwrap_or(own);
+    owner::resolved(&exe)
 }
 
-/// The app bundle `exe` is the main executable of, if it is in one.
-pub(crate) fn bundle_of(exe: &std::path::Path) -> Option<&std::path::Path> {
-    let macos = exe.parent()?;
-    let contents = macos.parent()?;
-    let bundle = contents.parent()?;
-    (macos.ends_with("MacOS") && contents.ends_with("Contents") && bundle.extension().is_some_and(|e| e == "app"))
-        .then_some(bundle)
+pub(crate) use owner::bundle_of;
+
+/// Put the bundle this shell belongs to on file, for a session and for
+/// a later image of this shell that cannot tell by itself.
+fn note_bundle(exe: &std::path::Path) {
+    let Some(bundle) = bundle_of(exe) else { return };
+    let text = format!("{}\n", bundle.display());
+    if std::fs::read_to_string(owner::bundle_file()).is_ok_and(|was| was == text) {
+        return;
+    }
+    if let Err(e) = std::fs::write(owner::bundle_file(), text) {
+        lx_warn!("shell.owner.bundle_file_failed", &format!("{e}"));
+    }
 }
 
 fn record(heir_in: Option<u64>, heir_resident: bool) -> Record {
@@ -57,24 +72,27 @@ fn record(heir_in: Option<u64>, heir_resident: bool) -> Record {
         exe: successor_exe(),
         heir_in,
         heir_resident,
+        heir_env: Vec::new(),
     }
 }
 
 /// Put this process on record as the one that answers.
 pub(crate) fn announce() {
-    if let Err(e) = record(None, false).write() {
+    let r = record(None, false);
+    note_bundle(&r.exe);
+    if let Err(e) = r.write() {
         lx_warn!("shell.owner.record_failed", &format!("{e}"));
     }
 }
 
-struct Kept {
+pub(crate) struct Kept {
     sid: u64,
     coalition: Option<u64>,
     /// Whether it can start a shell when asked.
     guards: bool,
 }
 
-fn kept_sessions() -> Vec<Kept> {
+pub(crate) fn kept_sessions() -> Vec<Kept> {
     session_registry::list_session_entries()
         .into_iter()
         .filter(|e| session_registry::pid_is_live_session(e.pid))
@@ -121,10 +139,67 @@ fn coalition_to_join(mine: Option<u64>, sessions: &[(Option<u64>, bool)]) -> Opt
     counts.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|(c, _)| c)
 }
 
+/// How long a shell waits for the heir it started to say it is there.
+fn leave_to(heir_wanted: &str) {
+    let deadline = Instant::now() + HEIR_WAIT;
+    while Instant::now() < deadline {
+        let heir = std::fs::read_to_string(owner::heir_path()).ok().and_then(|t| t.trim().parse::<i32>().ok());
+        if let Some(pid) = heir {
+            lx_event!("SHELL_HANDOVER", "a shell in the sessions' coalition takes over; exiting", heir = pid);
+            // the lock goes with this process, and the heir is waiting for it
+            std::process::exit(0);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    lx_warn!("shell.owner.no_heir", heir_wanted);
+}
+
+/// For a shell with sessions in its coalition that LaunchServices
+/// does not list the coalition under: have a shell started here, from
+/// the bundle, to take this one's place, and exit when it answers.  A
+/// new process is what LaunchServices gives a coalition to.
+///
+/// A session starts it, as for a shell outside the coalition.  One
+/// this process started itself was, measured, never given the dead
+/// records of the app to take over; one a session started is.  What an
+/// update handed this image (the window's frame, what is still staged)
+/// goes on record for it.
+pub(crate) fn start_heir_here(resident: bool, sessions: &[Kept]) {
+    let mine = own_coalition();
+    if mine.is_none() || !sessions.iter().any(|s| s.coalition == mine && s.guards) {
+        return;
+    }
+    let _ = std::fs::remove_file(owner::heir_path());
+    let mut wanted = record(mine, resident);
+    wanted.heir_env.push(crate::reclaim::count_for_heir());
+    // this image took note of an update that is still to be finished
+    if crate::launch::SIGUSR1_FLAG.load(std::sync::atomic::Ordering::Acquire) {
+        wanted.heir_env.push((crate::resident::UPDATE_WAITING_ENV.into(), "1".into()));
+    }
+    if let Ok(frame) = std::env::var("MARSPOT_RESTORE_FRAME") {
+        wanted.heir_env.push(("MARSPOT_RESTORE_FRAME".into(), frame));
+    }
+    if let Err(e) = wanted.write() {
+        return lx_warn!("shell.owner.record_failed", &format!("{e}"));
+    }
+    lx_event!(
+        "SHELL_HEIR_WANTED",
+        "the coalition is not listed under this shell; asking for a shell to be started here in its place",
+        coalition = mine.unwrap_or(0),
+        own = mine.unwrap_or(0),
+        n_sessions = sessions.len()
+    );
+    leave_to("no session started a shell to take this one's place; carrying on");
+    announce();
+}
+
 /// With every session in another coalition: ask for a shell there and
 /// exit when it answers.  Returns when this process is to carry on.
 pub(crate) fn hand_over_if_outside(resident: bool) {
     let sessions = kept_sessions();
+    if crate::identity::renamed() {
+        start_heir_here(resident, &sessions);
+    }
     let census: Vec<(Option<u64>, bool)> = sessions.iter().map(|s| (s.coalition, s.guards)).collect();
     let Some(target) = coalition_to_join(own_coalition(), &census) else { return };
     let _ = std::fs::remove_file(owner::heir_path());
@@ -138,30 +213,12 @@ pub(crate) fn hand_over_if_outside(resident: bool) {
         own = own_coalition().unwrap_or(0),
         n_sessions = sessions.len()
     );
-    let deadline = Instant::now() + HEIR_WAIT;
-    while Instant::now() < deadline {
-        let heir = std::fs::read_to_string(owner::heir_path()).ok().and_then(|t| t.trim().parse::<i32>().ok());
-        if let Some(pid) = heir {
-            lx_event!("SHELL_HANDOVER", "a shell in the sessions' coalition takes over; exiting", heir = pid);
-            // the lock goes with this process, and the heir is waiting for it
-            std::process::exit(0);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    lx_warn!("shell.owner.no_heir", "no session started a shell; carrying on from outside their coalition");
+    leave_to("no session started a shell; carrying on from outside their coalition");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_a_main_executable_names_its_bundle() {
-        let p = std::path::Path::new;
-        assert_eq!(bundle_of(p("/A B/Marspot.app/Contents/MacOS/marspot-shell")), Some(p("/A B/Marspot.app")));
-        assert_eq!(bundle_of(p("/s/binaries/current/marspot-shell")), None);
-        assert_eq!(bundle_of(p("/w/target/release/marspot-shell")), None);
-    }
 
     #[test]
     fn a_shell_moves_only_when_no_session_is_with_it() {
