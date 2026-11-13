@@ -6,7 +6,8 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use super::LocalSession;
-use super::pump::Pace;
+use super::pump::{Pace, SLICE_BYTES, SLICE_SLACK};
+use crate::publish_gate::Follow;
 
 /// How long the pty may stay dry before it goes back to the reader.
 /// The writing program's own pauses inside a flood are some ten
@@ -33,8 +34,7 @@ impl LocalSession {
     /// Whether this turn may read a lent pty itself.  The reader lends
     /// only while it may.
     pub(super) fn welcomes_the_pty(&self, pace: Option<&Pace>, raw: bool) -> bool {
-        // a key's answer goes the way it always has
-        pace.is_some_and(|p| p.follow.is_none()) && !self.hold && !raw
+        pace.is_some() && !self.hold && !raw
     }
 
     /// Read the lent pty and parse what it gives, a read at a time,
@@ -44,6 +44,13 @@ impl LocalSession {
     /// The pty is given back when it stays dry, when it has ended, and
     /// when the reader asks for it; it stays lent across the end of a
     /// turn, which comes straight back here.
+    ///
+    /// It stays lent across a key too.  Given back for the reader to
+    /// bring the answer, the answer waited for the reader to wake: the
+    /// 99th percentile of a key typed into a pane streaming alone went
+    /// from 0.8-1.2 ms to 1.6-2.7.  While an answer is awaited the turn
+    /// ends after as much output as a frame follows, as it does for
+    /// queued chunks.
     pub(super) fn read_in_place(&mut self, pace: &Pace, deadline: Instant) -> (usize, bool) {
         let Some(lend) = self.reader.as_ref().map(|r| std::sync::Arc::clone(r.lend())) else {
             return (0, false);
@@ -54,6 +61,11 @@ impl LocalSession {
         let mut reads = 0u32;
         // since the last look at the clock
         let (mut looked, mut unlooked) = (Instant::now(), 0usize);
+        // how much may hold a key's answer before a frame is due
+        let a_frame = pace.follow.map(|follow| match follow {
+            Follow::Slice => SLICE_BYTES - SLICE_SLACK,
+            Follow::Chunk => crate::publish_gate::FloodGate::BULK_BYTES,
+        });
         loop {
             if lend.wanted_back() {
                 lend.give_back();
@@ -73,6 +85,9 @@ impl LocalSession {
                     unlooked += n;
                     dry_since = None;
                     reads += 1;
+                    if a_frame.is_some_and(|enough| total >= enough) {
+                        return (total, true);
+                    }
                     if reads.is_multiple_of(READS_A_LOOK) {
                         let now = Instant::now();
                         // slower here than the reader was by itself:
@@ -121,7 +136,6 @@ mod tests {
     use marspot_term::pty::{Pty, PtyConfig, TerminalSize};
     use marspot_term::terminal::Terminal;
 
-    use crate::publish_gate::Follow;
     use crate::pty_reader::PtyReader;
 
     const COLS: u16 = 122;
@@ -250,11 +264,11 @@ mod tests {
         assert!(!lent(&s), "a line of echo is not a flood");
     }
 
-    /// A key ends the turn before another byte is read, and takes the
-    /// pty back to the reader: its answer comes the way it always has,
-    /// and nothing is lent while the answer is awaited.
+    /// A key ends the turn before another byte is read; the pty stays
+    /// with the loop, which reads the answer itself and ends its turn
+    /// after every slice of output that may hold it.
     #[test]
-    fn a_key_ends_the_turn_and_the_reader_brings_its_answer() {
+    fn a_key_ends_the_turn_and_the_loop_reads_its_answer_a_slice_at_a_time() {
         let mut s = session(ENDLESS);
         turn_until(&mut s, None, |s, _| lent(s));
         let key = AtomicBool::new(true);
@@ -262,12 +276,20 @@ mod tests {
         let (_, more) = s.pump_within(pace(None, &key));
         assert!(more, "the flood was taken to be over");
         assert_eq!(READ_HERE.get(), before, "the turn went on reading with a key waiting");
+        // what the reader queued before it lent the pty is parsed
+        turn_until(&mut s, None, |s, _| s.reader.as_ref().is_some_and(|r| r.in_flight() == 0));
+        if !lent(&s) {
+            turn_until(&mut s, None, |s, _| lent(s));
+        }
         s.typed();
-        assert!(!lent(&s), "the pty stayed with the loop after a key");
-        let read_here = turn_until(&mut s, Some(Follow::Chunk), |_, total| total > 1 << 20);
-        assert_eq!(read_here, 0, "the loop read the pty while a key's answer was awaited");
-        // and lent again once it is not
-        turn_until(&mut s, None, |s, _| lent(s));
+        assert!(lent(&s), "the pty went back to the reader at a key");
+        assert_eq!(s.before_key, 0, "nothing was in the reader's hand or queued");
+        let no_key = AtomicBool::new(false);
+        let before = READ_HERE.get();
+        let (n, more) = s.pump_within(pace(Some(Follow::Slice), &no_key));
+        assert!(more);
+        assert_eq!(READ_HERE.get() - before, n, "the answer was not read by the loop");
+        assert!((SLICE_BYTES - SLICE_SLACK..=SLICE_BYTES).contains(&n), "{n} bytes before a frame could follow");
     }
 
     /// Stopping the reader while the loop has its pty -- before an
