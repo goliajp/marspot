@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.361"  # the shell that stays after a quit keeps no release poll, no CLI installer, no process table
-core    = "0.12.446"  # the process monitor's tables are nodes of its tree
+core    = "0.12.447"  # a press on the layout panel is found by its tree alone
 session = "0.11.201"  # the reader keeps three chunks, not four, ahead of a key's answer

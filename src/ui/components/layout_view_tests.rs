@@ -70,6 +70,52 @@ fn the_surface_puts_every_part_where_the_geometry_does() {
     }
 }
 
+fn on(state: &LayoutModalRender, x: f64, y: f64) -> Hover {
+    state.surface.borrow().kept.surface.hit((x, y)).map_or(Hover::None, |h| layout_view::asked(h.action))
+}
+
+fn centre(r: marspot_term::layout::Rect) -> (f64, f64) {
+    (r.x + r.w * 0.5, r.y_top + r.h * 0.5)
+}
+
+/// A press finds each button and card where the geometry has it, and
+/// nothing where it has nothing: the value between a stepper's
+/// buttons, the caption, the gap between two cards, outside the frame.
+#[test]
+fn a_press_finds_the_buttons_and_cards_and_nothing_beside_them() {
+    for scale in [1.0, 2.0] {
+        at_scale(scale, || {
+            let mut font = FontCache::build().expect("font");
+            let (state, m) = laid_out(&mut font, (1600.0 * scale, 1200.0 * scale), 3, 2);
+            let close = m.chrome.close;
+            let (x, y) = centre(close);
+            assert_eq!(on(&state, x, y), Hover::Close, "scale {scale}");
+            assert_eq!(on(&state, close.x + 1.0, close.y_top + 1.0), Hover::Close);
+            assert_eq!(on(&state, close.x - 1.0, y), Hover::None, "left of it is the header");
+            assert_eq!(on(&state, x, close.y_top + close.h + 1.0), Hover::None);
+            for row in &m.rows {
+                let (mx, my) = centre(row.stepper.minus);
+                assert_eq!(on(&state, mx, my), Hover::Step(row.axis, StepperPart::Minus));
+                let (px, py) = centre(row.stepper.plus);
+                assert_eq!(on(&state, px, py), Hover::Step(row.axis, StepperPart::Plus));
+                let (vx, vy) = centre(row.stepper.value);
+                assert_eq!(on(&state, vx, vy), Hover::None, "the value is not a button");
+            }
+            let (x, y) = centre(m.apply_btn);
+            assert_eq!(on(&state, x, y), Hover::Apply);
+            assert_eq!(on(&state, m.chrome.content.x + 1.0, y), Hover::None, "the caption is not a button");
+            assert_eq!(m.cards.len(), 6);
+            for (slot, r) in m.cards.iter().enumerate() {
+                let (x, y) = centre(*r);
+                assert_eq!(on(&state, x, y), Hover::Card(slot), "scale {scale}: card {slot}");
+            }
+            let between = (m.cards[0].x + m.cards[0].w + m.cards[1].x) * 0.5;
+            assert_eq!(on(&state, between, centre(m.cards[0]).1), Hover::None, "between two cards");
+            assert_eq!(on(&state, 1.0, 1.0), Hover::None, "outside the frame");
+        });
+    }
+}
+
 #[test]
 fn the_keyboard_reaches_every_button_and_asks_what_a_press_asks() {
     let mut font = FontCache::build().expect("font");
