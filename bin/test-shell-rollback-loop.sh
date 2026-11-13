@@ -24,7 +24,7 @@ export MARSPOT_REDIRECT=1
 SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
 LAUNCH_LOG="$MARSPOT_STATE_DIR/shell_launches.tsv"
-MARKER=/tmp/marspot-rollback-loop-marker
+MARKER="$MARSPOT_STATE_DIR/rollback-loop-marker"
 
 fail() {
   echo "FAIL: $*"
