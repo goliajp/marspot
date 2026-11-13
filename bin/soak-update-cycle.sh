@@ -30,7 +30,7 @@ SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
 SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
-RUN_LOG=/tmp/marspot-soak-update-cycle.log
+RUN_LOG="$(dev_run_log soak-update-cycle)"
 CYCLES="${CYCLES:-20}"
 RSS_GROWTH_PCT="${RSS_GROWTH_PCT:-25}"
 

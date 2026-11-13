@@ -15,8 +15,8 @@
 # Budget ~90 s.  Builds the release binaries itself, with the
 # test-update-key feature; exits 0 on success.
 #
-# Port 6024 is this project's allocation in the global port
-# registry — don't change it without re-registering.
+# The feed is served on a port the system hands out for this run: a
+# fixed one was shared by every run of the suite on the machine.
 
 set -uo pipefail
 
@@ -25,8 +25,8 @@ source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
-RUN_LOG=/tmp/marspot-test-real-update.log
-PORT=6024
+RUN_LOG="$(dev_run_log test-real-update)"
+PORT="$(dev_free_port)"
 ASSET=marspot-aarch64-apple-darwin.tar.gz
 SERVE_DIR=$(mktemp -d /tmp/marspot-feed.XXXXXX)
 HTTP_PID=
@@ -127,7 +127,7 @@ HTTP_PID=$!
 disown
 sleep 0.5
 curl -sf "http://127.0.0.1:$PORT/feed.json" >/dev/null \
-  || fail "feed server didn't come up on :$PORT (squatter? check port registry)"
+  || fail "feed server didn't come up on :$PORT"
 echo "[1/6] feed OK — signed tarball + feed.json served on :$PORT"
 
 # --- 1. Boot with the fake feed --------------------------------------

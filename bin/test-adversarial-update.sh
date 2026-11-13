@@ -23,8 +23,8 @@
 #      held the new core up.
 #
 # Sandbox-only; never touches the installed app.  Builds the release
-# binaries itself, with the test-update-key feature.  Port 6026 is this project's registry
-# allocation for the adversarial feed.
+# binaries itself, with the test-update-key feature.  The feed is served
+# on a port the system hands out for this run.
 
 set -uo pipefail
 
@@ -34,8 +34,8 @@ SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
 SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
-RUN_LOG=/tmp/marspot-test-adversarial.log
-PORT=6026
+RUN_LOG="$(dev_run_log test-adversarial)"
+PORT="$(dev_free_port)"
 ASSET=marspot-aarch64-apple-darwin.tar.gz
 SERVE_DIR=$(mktemp -d /tmp/marspot-advfeed.XXXXXX)
 ACCESS_LOG="$SERVE_DIR/access.log"
