@@ -41,8 +41,15 @@ impl Grid {
             // erring toward "do not collapse" is the safe direction.
             self.filed_blank_run = 0;
             let row_clusters = self.degrade_clusters_in_row(start, cols);
+            let end = self.row_end[pr] as usize;
+            debug_assert!(
+                self.cells[start + end..start + cols].iter().all(|c| *c == Cell::default())
+            );
+            // the file variant drops a row's blank tail, so it is
+            // handed the row without it; the ring wants full rows
+            let filed = if self.scrollback.keeps_wrapped_flags() { end } else { cols };
             let used = self.scrollback
-                .push_line_with_wrapped(&self.cells[start..start + cols], self.wrapped[pr]);
+                .push_line_with_wrapped(&self.cells[start..start + filed], self.wrapped[pr]);
             let mark = std::mem::take(&mut self.prompt[pr]);
             // The mirrors exist for the in-RAM variant, where there is
             // nowhere else to keep these.  A file-backed pane reads
@@ -67,10 +74,12 @@ impl Grid {
                 // the cells past what the line used are default
                 // already, and the rest is one copy of a blank row
                 self.cells[start..start + used].copy_from_slice(&self.blank[..used]);
+                self.row_end[pr] = 0;
             } else {
                 for c in &mut self.cells[start..start + cols] {
                     *c = fill;
                 }
+                self.row_end[pr] = self.cols;
             }
             self.top_row += 1;
             if self.top_row >= self.rows {
@@ -189,6 +198,7 @@ impl Grid {
                 // be defensive).
                 let row_data: Vec<Cell> = self.cells[src_start..src_start + cols].to_vec();
                 self.cells[dst_start..dst_start + cols].copy_from_slice(&row_data);
+                self.row_end[dst] = self.row_end[src];
             }
             // Continuation flags travel with their rows.
             //
@@ -225,6 +235,7 @@ impl Grid {
             for c in &mut self.cells[bot_phys * cols..bot_phys * cols + cols] {
                 *c = fill;
             }
+            self.row_end[bot_phys] = if fill == Cell::default() { 0 } else { self.cols };
         }
         // Mirror ring eviction, exactly as `scroll_up` does: the flags
         // deque must never outgrow what the ring retains.
@@ -261,12 +272,14 @@ impl Grid {
                 let dst_start = dst * cols;
                 let row_data: Vec<Cell> = self.cells[src_start..src_start + cols].to_vec();
                 self.cells[dst_start..dst_start + cols].copy_from_slice(&row_data);
+                self.row_end[dst] = self.row_end[src];
             }
             // Blank the new top-of-region row.
             let top_phys = self.phys_row(top);
             for c in &mut self.cells[top_phys * cols..top_phys * cols + cols] {
                 *c = fill;
             }
+            self.row_end[top_phys] = if fill == Cell::default() { 0 } else { self.cols };
         }
     }
 }

@@ -248,7 +248,7 @@ impl<'a> Handler<'a> {
         let row = loop {
             let (col0, row) = self.grid.cursor();
             let mut col = col0 as usize;
-            let cells = self.grid.row_cells_mut(0, row, cols);
+            let (cells, end) = self.grid.row_and_end_mut(row);
             // why the row was left: 0 the run ended, 1 the row is
             // full, 2 a wide glyph is next and one column is left
             let left = loop {
@@ -282,6 +282,8 @@ impl<'a> Handler<'a> {
                     break 0;
                 }
             };
+            // one raise for everything written to this row
+            *end = (*end).max(if left == 2 { cols } else { col } as u16);
             if left == 0 {
                 if col < cols {
                     self.grid.set_cursor(col as u16, row);
