@@ -34,7 +34,12 @@ pub(in crate::plugins) enum Room {
         /// The five-hour window's reading; `None` where the account has
         /// none, which is not a window with nothing used.
         util_5h: Option<f64>,
-        util_7d: f64,
+        /// The week's reading; `None` where the feed has none.  Such
+        /// an account is not known to be full and not known to have
+        /// room: nothing moves off it on that account, a refused pane
+        /// goes to it only after every account known to have room, and
+        /// no resting pane is moved to it.
+        util_7d: Option<f64>,
         reset_7d: i64,
         /// Per-model caps the feed reports, label lower-cased.
         ///
@@ -108,7 +113,7 @@ impl Room {
                 if status == "auth_error" {
                     return true;
                 }
-                if util_5h.is_some_and(|u| u >= FIVE_HOUR_SPENT) || *util_7d >= WINDOW_SPENT {
+                if util_5h.is_some_and(|u| u >= FIVE_HOUR_SPENT) || util_7d.is_some_and(|u| u >= WINDOW_SPENT) {
                     return true;
                 }
                 if status == "rejected" && !self.rejected_only_for_another_model(model) {
@@ -200,19 +205,26 @@ impl Room {
     /// pair means the ordering rule does not change -- the week
     /// first, the five hours to break ties -- which is the whole
     /// point of folding it in here instead of beside it.
-    pub(in crate::plugins) fn headroom_for(&self, model: Option<&str>) -> (f64, f64) {
+    ///
+    /// The first figure is `None` where no reading bounds it: a week
+    /// the feed does not give, for a pane no model cap narrows.
+    pub(in crate::plugins) fn headroom_for(&self, model: Option<&str>) -> (Option<f64>, f64) {
         match self {
             Room::Known { util_5h, util_7d, .. } => {
-                let week = 1.0 - util_7d;
+                let week = util_7d.map(|u| 1.0 - u);
                 let capped = match self.model_util(model) {
-                    Some(u) => week.min(1.0 - u),
+                    Some(u) => Some(week.map_or(1.0 - u, |w| w.min(1.0 - u))),
                     None => week,
                 };
                 // no five-hour limit leaves all of it
                 (capped, util_5h.map_or(1.0, |u| 1.0 - u))
             }
-            Room::Unknown => (0.0, 0.0),
+            Room::Unknown => (None, 0.0),
         }
+    }
+    /// Does the feed give a reading for this account's week?
+    pub(super) fn week_known(&self) -> bool {
+        matches!(self, Room::Known { util_7d: Some(_), .. })
     }
     /// Is Fable's own cap spent on this account?
     pub(super) fn fable_spent(&self) -> bool {
@@ -261,6 +273,10 @@ pub(super) use super::rooms::rooms_for;
 ///
 /// A profile the feed cannot speak for is never a destination: a pane
 /// is only moved to an account known to have room for its model.
+/// An account the feed has a row for but no reading of its week comes
+/// after every account known to have room and before the refused: it
+/// may have a whole week or none, and trying it costs one move where
+/// staying costs a pane that cannot work.
 /// Refused accounts last, soonest to come back first, so a caller can
 /// tell "every account is out" from "nowhere else to go".
 ///
@@ -282,8 +298,10 @@ pub(in crate::plugins) fn best_profile(rooms: &[(u8, Room)], current: u8, model:
         // Only among the usable: the refused are ordered by when they
         // come back, and nothing else.
         let keeps_fable = |r: &Room| tier(r) == 0 && !needs_fable && r.fable_spent();
+        let unread = |r: &Room| tier(r) == 0 && !r.week_known();
         tier(&a.1)
             .cmp(&tier(&b.1))
+            .then_with(|| unread(&a.1).cmp(&unread(&b.1)))
             .then_with(|| keeps_fable(&b.1).cmp(&keeps_fable(&a.1)))
             .then_with(|| {
                 // Both ends of the list are ordered by the clock: the
@@ -471,7 +489,7 @@ mod tests {
         Room::Known {
             status: "allowed".into(),
             util_5h: Some(util_5h),
-            util_7d,
+            util_7d: Some(util_7d),
             reset_7d,
             models: models.iter().map(|(l, u)| (l.to_string(), *u)).collect(),
             // Measured now, in the tests that are not about staleness.
@@ -486,7 +504,7 @@ mod tests {
         let logged_out = Room::Known {
             status: "auth_error".into(),
             util_5h: Some(0.0),
-            util_7d: 0.78,
+            util_7d: Some(0.78),
             reset_7d: 100,
             models: vec![("fable".to_string(), 1.0)],
             models_measured_at: i64::MAX,
@@ -525,7 +543,7 @@ mod tests {
         Room::Known {
             status: "allowed_warning".into(),
             util_5h: Some(0.85),
-            util_7d: 0.88,
+            util_7d: Some(0.88),
             reset_7d: 500,
             models: vec![("fable".to_string(), 0.62)],
             models_measured_at: measured,
@@ -703,7 +721,7 @@ mod tests {
                     Room::Known {
                         status: (*status).into(),
                         util_5h: Some(0.0),
-                        util_7d: *util7,
+                        util_7d: Some(*util7),
                         reset_7d: *reset7, models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX
                     },
                 )
@@ -719,7 +737,7 @@ mod tests {
         let warned = Room::Known {
             status: "allowed_warning".into(),
             util_5h: Some(0.99),
-            util_7d: 0.37,
+            util_7d: Some(0.37),
             reset_7d: 500, models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX
         };
         assert!(warned.refused_for(None), "99% of the five-hour window is not a warning");
@@ -727,13 +745,13 @@ mod tests {
         let fresh = Room::Known {
             status: "allowed_warning".into(),
             util_5h: Some(0.10),
-            util_7d: 0.80,
+            util_7d: Some(0.80),
             reset_7d: 900, models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX
         };
         assert!(!fresh.refused_for(None), "a warning with room left is still usable");
 
         // And it is not offered as somewhere to go.
-        let r = vec![(1, Room::Known { status: "rejected".into(), util_5h: Some(0.0), util_7d: 1.0, reset_7d: 100 , models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX}), (7, warned), (2, fresh)];
+        let r = vec![(1, Room::Known { status: "rejected".into(), util_5h: Some(0.0), util_7d: Some(1.0), reset_7d: 100 , models: Vec::new(), models_measured_at: i64::MAX, measured_at: i64::MAX}), (7, warned), (2, fresh)];
         assert_eq!(best_profile(&r, 1, None), Some(2));
     }
 
@@ -900,9 +918,9 @@ mod tests {
             email: email.into(),
             status: status.into(),
             util_5h: Some(u5),
-            util_7d: u7,
+            util_7d: Some(u7),
             reset_5h: None,
-            reset_7d: reset7,
+            reset_7d: Some(reset7),
             model_limits: Vec::new(),
             collected_at: 0,
             limits_as_of: None,
@@ -991,7 +1009,7 @@ mod tests {
         Room::Known {
             status: "rejected".into(),
             util_5h: Some(0.0),
-            util_7d: 0.77,
+            util_7d: Some(0.77),
             reset_7d,
             models: vec![("fable".to_string(), 1.0)],
             models_measured_at: i64::MAX,
@@ -1013,7 +1031,7 @@ mod tests {
         let plain = Room::Known {
             status: "rejected".into(),
             util_5h: Some(0.10),
-            util_7d: 0.50,
+            util_7d: Some(0.50),
             reset_7d: 500,
             models: vec![("fable".to_string(), 0.30)],
             models_measured_at: i64::MAX,
@@ -1042,7 +1060,7 @@ mod tests {
             (6, Room::Known {
                 status: "rejected".into(),
                 util_5h: Some(0.08),
-                util_7d: 0.98,
+                util_7d: Some(0.98),
                 reset_7d: 100,
                 models: vec![("fable".to_string(), 1.0)],
                 models_measured_at: i64::MAX,
@@ -1073,7 +1091,7 @@ mod tests {
         let read_at = |at| Room::Known {
             status: "allowed".into(),
             util_5h: Some(0.18),
-            util_7d: 0.32,
+            util_7d: Some(0.32),
             reset_7d: 100,
             models: vec![],
             models_measured_at: at,
@@ -1092,10 +1110,11 @@ mod tests {
     }
 
     /// The feed writes `null` for a window that has reset since it was
-    /// last read, or that has not started; either way nothing of it is
-    /// used. An account reported that way has room.
+    /// last read, or that has not started.  Nothing is known against an
+    /// account reported that way, and with no account known to have
+    /// room it is where a pane goes.
     #[test]
-    fn an_account_whose_windows_are_all_null_has_room() {
+    fn an_account_whose_windows_are_all_null_is_somewhere_to_go() {
         let feed = r#"{"generated_at":"2026-10-09T03:10:00+00:00","accounts":[
             {"name":"Claude 1","email":"a@x","status":"allowed",
              "utilization_5h":null,"utilization_7d":null,"reset_5h":null,"reset_7d":null,
@@ -1172,3 +1191,7 @@ mod home_feed_tests {
 #[cfg(test)]
 #[path = "tests/five_hour.rs"]
 mod five_hour_tests;
+
+#[cfg(test)]
+#[path = "tests/week_unknown.rs"]
+mod week_unknown_tests;
