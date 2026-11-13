@@ -7291,7 +7291,7 @@ impl CoreApp {
         // formatted per window rather than per account.
         let window = |w: &marspot::cc_usage::CcWindow| marspot::ui::components::cc_usage_modal::CcUsageWindowRender {
             label: w.label.clone(),
-            util: w.util as f32,
+            util: w.util.map(|u| u as f32),
             reset_unix: w.reset,
             span_secs: w.span_secs,
             reset_hm: w.reset.map(fmt_hm).unwrap_or_default(),
