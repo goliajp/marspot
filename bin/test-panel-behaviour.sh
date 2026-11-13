@@ -28,7 +28,8 @@
 #      its close button and Enter closes it; Tab to its first switch
 #      and Enter turns it off and on again; Tab to the control under
 #      it and the arrows choose the next value and the one before.
-#      The shortcuts panel, opened by its chord, closes the same way.
+#      The shortcuts panel, opened by its chord, closes the same way,
+#      and so do the layout, accounts and process panels.
 #      Each is a write of the settings file, logged with its row.
 #   7. The app is still up, with no panic and no error logged.
 #
@@ -124,6 +125,9 @@ STEPS=(
   button:settings key:tab key:tab key:enter key:enter key:tab key:right key:left
   esc
   key:cmd-/ key:tab key:enter
+  button:layout key:tab key:enter
+  button:accounts key:tab key:enter
+  button:process key:tab key:enter
   shift-click:pane scroll:3 type:x
 )
 SCRIPT="$(IFS=';'; echo "${STEPS[*]}")"
@@ -152,7 +156,13 @@ CLOSE settings by=close_button
 OPEN settings offset=0,0
 CLOSE settings by=escape
 OPEN shortcuts offset=0,0
-CLOSE shortcuts by=close_button"
+CLOSE shortcuts by=close_button
+OPEN layout offset=0,0
+CLOSE layout by=close_button
+OPEN accounts offset=0,0
+CLOSE accounts by=close_button
+OPEN process offset=0,0
+CLOSE process by=close_button"
 
 echo "==> launching with the script: $SCRIPT"
 SHELL="$RECORDER" MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \

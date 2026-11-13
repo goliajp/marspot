@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::fmt::Write;
 use std::rc::Rc;
 
-use crate::commands::{self, Keys};
+use crate::commands::{self, Keys, Reference};
 use crate::font_cache::FontCache;
 use crate::ui::components::controls;
 use crate::ui::components::panel_chrome::{self, PanelChrome};
@@ -30,15 +30,17 @@ use marspot_term::layout::Rect;
 const PART: char = '\t';
 
 /// The panel `frame` pixels in size, its key caps set for a terminal
-/// cell `cell` pixels in size.
-pub fn describe(ui: &mut Ui<'_>, frame: (f64, f64), backdrop_top: f64, cell: (f64, f64)) {
+/// cell `cell` pixels in size.  `rows` is what the command table's
+/// reference is read into.
+pub fn describe(ui: &mut Ui<'_>, frame: (f64, f64), backdrop_top: f64, cell: (f64, f64), rows: &mut Vec<Reference>) {
     let area = PanelChrome::new(Rect { x: 0.0, y_top: 0.0, w: frame.0, h: frame.1 }, 0.0).content;
     let bottom = area.y_top + area.h + 1e-9;
     let gap = spec::px(metric::COLUMN_GAP);
     let col_w = spec::snap_down((area.w - gap) * 0.5).max(0.0);
     let cap_h = controls::keycap_size("", 0.0, cell.1).1;
     let row_h = cap_h + 2.0 * spec::px(metric::ROW_PAD_Y);
-    let rows = commands::reference();
+    commands::reference_into(rows);
+    let rows = &*rows;
 
     panel::panel(ui, frame, backdrop_top, t(Msg::PanelShortcuts), None, |ui| {
         ui.hstack(|ui| {
@@ -192,6 +194,7 @@ pub struct ShortcutsSurface {
     /// described for.
     described: Option<((f64, f64), f64, (f64, f64))>,
     data_rev: u64,
+    rows: Vec<Reference>,
 }
 
 impl ShortcutsSurface {
@@ -210,13 +213,15 @@ impl ShortcutsSurface {
         // through f32, as a frame is handed it
         let cell = (font.cell_w as f32 as f64, font.cell_h as f32 as f64);
         let at = self.place(sp, backdrop_top, cell);
-        self.kept.lay_out(font, at, |ui, _| describe(ui, at.avail, backdrop_top, cell));
+        let rows = &mut self.rows;
+        self.kept.lay_out(font, at, |ui, _| describe(ui, at.avail, backdrop_top, cell, rows));
     }
 
     /// Add the panel to the frame `p` is painting.
     pub fn frame(&mut self, p: &mut ViewPainter<'_>, sp: &ShortcutsRender, backdrop_top: f64) {
         let cell = (p.cell_w as f64, p.cell_h as f64);
         let at = self.place(sp, backdrop_top, cell);
-        self.kept.frame(p, at, sp.pointer, |ui, _| describe(ui, at.avail, backdrop_top, cell));
+        let rows = &mut self.rows;
+        self.kept.frame(p, at, sp.pointer, |ui, _| describe(ui, at.avail, backdrop_top, cell, rows));
     }
 }

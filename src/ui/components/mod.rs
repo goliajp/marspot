@@ -57,6 +57,8 @@ mod shortcuts_view_tests;
 mod layout_view_tests;
 #[cfg(test)]
 mod process_view_tests;
+#[cfg(test)]
+mod panel_frames_view_tests;
 
 #[cfg(test)]
 mod language_snapshot_tests;
