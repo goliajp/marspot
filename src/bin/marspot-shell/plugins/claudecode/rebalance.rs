@@ -66,7 +66,8 @@ pub(super) fn better_home(rooms: &[(u8, Room)], current: u8, model: Option<&str>
     }
     let target = best_profile(rooms, current, model)?;
     let there = rooms.iter().find(|(p, _)| *p == target).map(|(_, r)| r)?;
-    if there.refused_for(model) {
+    // a restart is paid for with a reading, not with a guess
+    if there.refused_for(model) || !there.week_known() {
         return None;
     }
     if !needs_fable(model) {
@@ -79,7 +80,7 @@ pub(super) fn better_home(rooms: &[(u8, Room)], current: u8, model: Option<&str>
         }
     }
     let lead = here.reset_7d() - there.reset_7d();
-    (lead >= MIN_LEAD_S).then_some((target, Why::RenewsSooner { hours: lead / 3600 }))
+    (here.week_known() && lead >= MIN_LEAD_S).then_some((target, Why::RenewsSooner { hours: lead / 3600 }))
 }
 
 /// What is known about the pane itself.
@@ -186,9 +187,9 @@ mod tests {
             email: format!("p{n}"),
             status: status.into(),
             util_5h: None,
-            util_7d: u7,
+            util_7d: Some(u7),
             reset_5h: None,
-            reset_7d: reset,
+            reset_7d: Some(reset),
             model_limits: vec![CcModelLimit { label: "Fable".into(), util: fable, reset: Some(reset) }],
             collected_at: NOW - 5,
             limits_as_of: None,
@@ -285,7 +286,7 @@ mod tests {
         Room::Known {
             status: "allowed".into(),
             util_5h: None,
-            util_7d: u7,
+            util_7d: Some(u7),
             reset_7d: reset,
             models: vec![("fable".into(), fable)],
             models_measured_at: i64::MAX,

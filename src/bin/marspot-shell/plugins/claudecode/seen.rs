@@ -45,7 +45,7 @@ pub(super) fn resets_for(
                 .and_then(|mail| accounts.iter().find(|a| a.email == mail))
                 .map(|a| Resets {
                     five_hour: a.reset_5h.unwrap_or(0),
-                    week: a.reset_7d,
+                    week: a.reset_7d.unwrap_or(0),
                     models: a
                         .model_limits
                         .iter()
@@ -216,7 +216,7 @@ mod tests {
         Room::Known {
             status: "allowed".into(),
             util_5h: Some(0.1),
-            util_7d: 0.97,
+            util_7d: Some(0.97),
             reset_7d: NOW + 3 * 86400,
             models: vec![("fable".into(), 0.5)],
             models_measured_at: measured_at,
