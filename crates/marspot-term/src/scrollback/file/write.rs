@@ -163,6 +163,11 @@ impl FileScrollback {
     ///
     /// Returns the line's length without its trailing default cells.
     pub fn push_line(&mut self, line: &[crate::grid::Cell], wrapped: bool) -> usize {
+        self.push_row(line, wrapped, RowHint::NONE)
+    }
+
+    /// [`Self::push_line`], with what the caller knows of the row.
+    pub fn push_row(&mut self, line: &[crate::grid::Cell], wrapped: bool, hint: RowHint) -> usize {
         // F3+11.1 — trim trailing cells equal to `Cell::default()`
         // before encoding.  This is pure disk-size optimisation; the
         // semantic is unchanged from the dumb-store model: every
@@ -207,7 +212,7 @@ impl FileScrollback {
         // no smaller, the row's own memory.  See FILE_VERSION.
         self.scratch.clear();
         self.scratch.extend_from_slice(&[0u8; FILE_REC_HEADER_BYTES]);
-        let packed = !line.is_empty() && encode_packed(line, &mut self.scratch);
+        let packed = !line.is_empty() && encode_packed_with(line, hint, &mut self.scratch);
         if !packed {
             self.scratch.extend_from_slice(cell_bytes);
         }

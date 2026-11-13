@@ -108,6 +108,21 @@ fn adversarial() -> Vec<Vec<u8>> {
     s("a\x1b7b\x1b8c\x1b[sd\x1b[ue\x1bMf\x1bDg\x1bEh");
     s("\x1b[6n\x1b[c\x1b[>c\x1b[5n");
     s("one<u>two</u>three<u>four<five</u><<u>x");
+    // plain text over cells that are not default cells: coloured text
+    // rewritten from the row's start, a row erased or scrolled in
+    // under a background colour, text running past where the row's
+    // earlier content ended
+    s("\x1b[41mred red\x1b[0m\rab中");
+    s("\x1b[44m\x1b[K\x1b[0mtext 中文\r\nmore");
+    s("\x1b[44m\x1b[2J\x1b[0m\x1b[Hplain 中文 🚀 text");
+    s("\x1b[45m\n\n\n\n\n\n\x1b[0mplain 中文\r\nplain");
+    s("\x1b[4mab\x1b[0m\rabcdef\r\n\x1b[7m \x1b[0m\x08xy中文z");
+    s("\x1b[3;1H\x1b[42m\x1b[1L\x1b[0mab\x1b[2;1H\x1b[43m\x1b[1M\x1b[0m\x1b[3;1Hcd中");
+    // a colour change ends the cluster and the tag before it: what
+    // follows must not join either
+    s("e\x1b[31m\u{0301}x\x1b[m\u{FE0F}");
+    s("\u{26A0}\x1b[1m\u{FE0F}ab\u{1F468}\x1b[0m\u{200D}\u{1F469}");
+    s("a<\x1b[4mu>b</\x1b[0mu>c<u\x1b[31m>d");
     // SGR with 0..=32 parameters
     let mut sgr = String::new();
     for n in 0..=32 {
@@ -308,5 +323,67 @@ fn the_history_files_come_out_byte_for_byte_the_same() {
                 b.len()
             );
         }
+    }
+}
+
+/// A row is filed in the file without its blank tail, and where that
+/// tail starts comes from the grid's per-row bound.  The in-memory
+/// history is handed whole rows and knows nothing of the bound, so the
+/// two must still hold the same lines.
+#[test]
+fn a_file_holds_the_lines_a_memory_history_holds() {
+    let dir = TempDir::new("feed-file-mem");
+    let mut inputs = corpora();
+    inputs.push(("adversarial", adversarial().concat()));
+    // trailing blanks that are not default cells, and rows rewritten
+    // shorter than they were
+    let tails = b"abc   \r\n\x1b[44mx  \x1b[0m  \r\nlong line here\rab\x1b[K\r\n\x1b[7m \x1b[0m\r\n";
+    inputs.push(("tails", tails.repeat(40)));
+    for (n, (name, bytes)) in inputs.iter().enumerate() {
+        for (cols, rows) in [(122u16, 39u16), (40, 6), (7, 3)] {
+            let mut file = file_backed(&dir, &format!("f-{n}-{cols}"), cols, rows);
+            let mut mem = Terminal::new(cols, rows);
+            for c in bytes.chunks(61) {
+                file.feed(c);
+                mem.feed(c);
+            }
+            let (f, m) = (file.grid(), mem.grid());
+            assert_eq!(f.scrollback_len(), m.scrollback_len(), "{name}, {cols}x{rows}");
+            for i in 0..m.scrollback_len() {
+                // either may come back padded to the pane's width
+                let trimmed = |mut line: Vec<crate::grid::Cell>| {
+                    while line.last() == Some(&crate::grid::Cell::default()) {
+                        line.pop();
+                    }
+                    line
+                };
+                let want = trimmed(m.scrollback_line(i).expect("line"));
+                let got = trimmed(f.scrollback_line(i).expect("line"));
+                assert_eq!(got, want, "{name}, {cols}x{rows}: history line {i}");
+            }
+        }
+    }
+}
+
+/// A line with no line feed in it wraps onto row after row.  Each row
+/// takes what it has room for, and the scan for the printable run must
+/// not go over the rest of the line again every time: on a megabyte
+/// that is the difference between reading it once and reading it four
+/// thousand times.
+#[test]
+fn a_megabyte_line_is_scanned_about_once() {
+    use crate::parser::scan::SCANNED;
+    let line = vec![b'a'; 1 << 20];
+    for (cols, rows) in [(122u16, 39u16), (7, 3)] {
+        let mut t = Terminal::new(cols, rows);
+        let before = SCANNED.with(|c| c.get());
+        t.feed(&line);
+        let scanned = SCANNED.with(|c| c.get()) - before;
+        // a row's scan may look a block of sixteen bytes ahead
+        assert!(
+            scanned <= (line.len() as u64) * 3,
+            "{cols}x{rows}: {scanned} bytes scanned for a line of {}",
+            line.len()
+        );
     }
 }
