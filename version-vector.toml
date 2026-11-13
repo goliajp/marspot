@@ -28,4 +28,4 @@
 
 shell   = "0.7.321"  # an account is held to the 5h window exactly while the feed reads one
 core    = "0.12.356"  # a scrollback rotation keeps its writer thread
-session = "0.11.199"  # a scrollback rotation keeps its writer thread
+session = "0.11.200"  # the reader keeps three chunks, not four, ahead of a key's answer
