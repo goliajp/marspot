@@ -6,6 +6,7 @@
 //! are cleared, never freed, so a repaint of a picture the same size
 //! takes nothing from the heap either.
 
+use super::out::Custom;
 use super::{FontMeasure, TreeOut, metrics};
 use crate::font_cache::FontCache;
 use crate::glyph_atlas::GlyphAtlas;
@@ -91,6 +92,19 @@ impl KeptSurface {
         pointer: Option<(f64, f64)>,
         describe: impl FnOnce(&mut Ui<'_>, &FontMeasure<'_>),
     ) {
+        self.frame_with(p, at, pointer, describe, &mut |_: &mut ViewPainter<'_>, _, _| {});
+    }
+
+    /// [`Self::frame`] for a tree with nodes its panel draws itself:
+    /// `custom` is called for each when the surface is painted.
+    pub fn frame_with(
+        &mut self,
+        p: &mut ViewPainter<'_>,
+        at: Place,
+        pointer: Option<(f64, f64)>,
+        describe: impl FnOnce(&mut Ui<'_>, &FontMeasure<'_>),
+        custom: &mut Custom<'_>,
+    ) {
         self.atlas_gen = atlas_generation(p.atlas);
         let inputs = self.inputs(p.font, at);
         let mut stale = {
@@ -118,7 +132,7 @@ impl KeptSurface {
                 glyphs: &mut self.glyphs,
                 ui_rects: &mut self.ui_rects,
             };
-            self.surface.paint_into(&mut TreeOut::new(&mut kept));
+            self.surface.paint_into(&mut TreeOut::with_custom(&mut kept, custom));
         }
         p.cells.extend_from_slice(&self.cells);
         p.glyphs.extend_from_slice(&self.glyphs);

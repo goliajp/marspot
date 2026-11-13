@@ -2067,7 +2067,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
         Some("layout") => {
             // Six columns and long project names — the shape that
             // overflowed its own modal (2026-08-11).
-            renderer.set_layout_modal(Some(marspot::ui::components::layout_modal_paint::LayoutModalRender {
+            renderer.set_layout_modal(Some(marspot::ui::components::layout_view::LayoutModalRender {
                 cols: std::env::var("MARSPOT_SHOT_COLS")
                     .ok().and_then(|v| v.parse().ok()).unwrap_or(6),
                 rows: std::env::var("MARSPOT_SHOT_ROWS")
@@ -2209,7 +2209,8 @@ fn demo_cc_usage(rect: marspot_term::layout::Rect) -> marspot::ui::components::c
             account("spare", "two@example.com", "near limit", 1, 0.88, 0.35),
         ],
         clock: marspot::ui::components::cc_usage_modal::Clock::fixed(now, 0),
-        hover: Default::default(),
+        pointer: None,
+        surface: Default::default(),
     }
 }
 
@@ -2256,7 +2257,8 @@ fn demo_process_panel(
         selected_pane: 0,
         detail: "torajs · sid 102 · shell pid 4211".to_string(),
         rows,
-        hover: pp::Hover::None,
+        pointer: None,
+        surface: Default::default(),
     }
 }
 

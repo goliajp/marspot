@@ -197,7 +197,7 @@ impl Clock {
 
 /// One account card.  Pre-formatted by the caller; the renderer only
 /// lays out and paints.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CcUsageAccountRender {
     pub name: String,
     pub email: String,
@@ -219,7 +219,7 @@ pub struct CcUsageAccountRender {
 }
 
 /// One metered window of an account.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CcUsageWindowRender {
     /// Row label as printed, lower case ("5h", "fable", "spark").
     pub label: String,
@@ -244,15 +244,6 @@ impl CcUsageWindowRender {
     }
 }
 
-/// What the pointer is on: nothing the panel reacts to, or the
-/// header's close button.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Hover {
-    #[default]
-    None,
-    Close,
-}
-
 /// Everything one frame of the panel is drawn from.
 pub struct CcUsageRender {
     /// The panel's frame, from [`panel_rect`].
@@ -264,18 +255,10 @@ pub struct CcUsageRender {
     /// drawing cards.
     pub accounts: Vec<CcUsageAccountRender>,
     pub clock: Clock,
-    /// From [`hover_at`].
-    pub hover: Hover,
-}
-
-/// What `(x, y)` is on in the panel at `rect`.  The painter highlights
-/// it and a click acts on it, so the two cannot disagree.
-pub fn hover_at(rect: Rect, x: f64, y: f64) -> Hover {
-    if PanelChrome::new(rect, 0.0).hit_close(x, y) {
-        Hover::Close
-    } else {
-        Hover::None
-    }
+    /// Where the pointer is, for a scene drawn without anyone having
+    /// followed the pointer over the surface.
+    pub pointer: Option<(f64, f64)>,
+    pub surface: std::rc::Rc<std::cell::RefCell<crate::ui::components::cc_usage_view::CcUsageSurface>>,
 }
 
 /// How many accounts the two feeds hold between them, and the most
@@ -490,25 +473,6 @@ mod tests {
             local.snap_to_days(now as f64, (now + 86_400) as f64),
             crate::cc_usage::snap_range_to_local_days(now as f64, (now + 86_400) as f64),
         );
-    }
-
-    /// The header is the shared chrome's: its close button answers
-    /// where the chrome draws it.
-    #[test]
-    fn the_close_button_is_hit_where_the_chrome_draws_it() {
-        let rect = panel_rect(10, 2, 2800.0, 1300.0, 8.0, 16.0, 30.0);
-        let close = PanelChrome::new(rect, 0.0).close;
-        let (cx, cy) = (close.x + close.w / 2.0, close.y_top + close.h / 2.0);
-        assert_eq!(hover_at(rect, cx, cy), Hover::Close);
-        for (x, y) in [
-            (close.x + 0.5, close.y_top + 0.5),
-            (close.x + close.w - 0.5, close.y_top + close.h - 0.5),
-        ] {
-            assert_eq!(hover_at(rect, x, y), Hover::Close, "a corner of the button is the button");
-        }
-        assert_eq!(hover_at(rect, close.x - 4.0, cy), Hover::None, "beside it is the header");
-        assert_eq!(hover_at(rect, cx, close.y_top + close.h + 4.0), Hover::None);
-        assert_eq!(hover_at(rect, rect.x + rect.w + 4.0, cy), Hover::None, "outside the frame");
     }
 
     /// The panel takes the widest step a panel has and never leaves

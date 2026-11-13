@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.327"  # only a shell that took another's place, or that an update made, looks at who has its coalition
-core    = "0.12.362"  # a node can float over its surface
+core    = "0.12.363"  # the layout, accounts and process panels are drawn from interface trees
 session = "0.11.201"  # the reader keeps three chunks, not four, ahead of a key's answer

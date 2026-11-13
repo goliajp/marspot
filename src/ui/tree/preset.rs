@@ -37,6 +37,9 @@ pub const CLOSE: u32 = 8;
 /// A panel's frame and the dimmed window behind it.  `data[0]` is the
 /// bits of the y the dimming starts at, as an `f32`.
 pub const FRAME: u32 = 9;
+/// Tags from here up are a panel's own: nodes it draws itself, through
+/// what it hands `KeptSurface::frame_with`.
+pub const CUSTOM: u32 = 1000;
 /// The key caps of one row of the shortcuts panel: see
 /// `shortcuts_view::paint_keys`.
 pub const KEYS: u32 = 10;

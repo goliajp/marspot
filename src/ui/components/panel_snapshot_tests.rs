@@ -70,7 +70,7 @@ use crate::ui::strings::{self, t, Arg, MonthDayTime, Msg};
 use crate::ui::theme::spec;
 use marspot_term::layout::Rect;
 use crate::ui::components::layout_modal::{self, LayoutModal};
-use crate::ui::components::layout_modal_paint::{LayoutModalDragRender, LayoutModalRender};
+use crate::ui::components::layout_view::{LayoutModalDragRender, LayoutModalRender};
 use crate::ui::components::process_panel::{
     self, ProcessPanelPaneRow, ProcessPanelRender, ProcessPanelRow,
 };
@@ -230,21 +230,21 @@ pub(super) fn panel_snapshot_shortcuts() {
 #[test]
 pub(super) fn panel_snapshot_layout() {
     snapshot("layout", 1000, 760, |renderer, layout| {
-        open_layout(renderer, layout, layout_modal::Hover::None);
+        open_layout(renderer, layout, None);
     });
 }
 
-/// The layout panel as the picture has it, with the pointer on
-/// `hover`.  Returns where its parts are.
-pub(super) fn open_layout(renderer: &mut MetalRenderer, layout: &Layout, hover: layout_modal::Hover) -> LayoutModal {
+/// The layout panel as the picture has it, with the pointer at
+/// `pointer`.  Returns what it was drawn from, its surface included.
+pub(super) fn open_layout(
+    renderer: &mut MetalRenderer,
+    _layout: &Layout,
+    pointer: Option<(f64, f64)>,
+) -> LayoutModalRender {
     let slot_titles = ["smix", "devops", "insight-mono", "alt"].map(String::from).to_vec();
-    let modal = {
-        let mut m = controls::font_measure(renderer.font_mut());
-        let label_w = layout_modal::widest_label(&slot_titles, &mut m);
-        LayoutModal::layout(layout.window_w, layout.window_h, layout.top_inset, 4, 1, label_w, &mut m)
-    };
-    renderer.set_layout_modal(Some(LayoutModalRender { cols: 4, rows: 1, slot_titles, hover, ..Default::default() }));
-    modal
+    let state = LayoutModalRender { cols: 4, rows: 1, slot_titles, pointer, ..Default::default() };
+    renderer.set_layout_modal(Some(state.clone()));
+    state
 }
 
 /// Three by three with a name no card can hold, mid-drag: the cut
@@ -278,8 +278,7 @@ pub(super) fn panel_snapshot_layout_grid() {
                 grab_offset_phys: grab,
                 mouse_phys: (over.x - over.w * 0.2 + grab.0, over.y_top + over.h * 0.4 + grab.1),
             }),
-            hover: layout_modal::Hover::None,
-            offset: (0.0, 0.0),
+            ..Default::default()
         }));
     });
 }
@@ -294,13 +293,12 @@ pub(super) fn panel_snapshot_process() {
 }
 
 /// The process monitor as the picture has it, with the pointer on
-/// `hover`.  Returns the panel's frame and how many panes and
-/// processes it lists.
+/// `hover`.  Returns what it was drawn from, its surface included.
 pub(super) fn open_process(
     renderer: &mut MetalRenderer,
     layout: &Layout,
     hover: process_panel::Hover,
-) -> (Rect, usize, usize) {
+) -> ProcessPanelRender {
     {
         let pane = |name: &str, sid: u64, n_pids: u32, cpu_pct: f32, rss_mb: u64| ProcessPanelPaneRow {
             name: name.to_string(),
@@ -339,18 +337,31 @@ pub(super) fn open_process(
         let frame = process_panel::panel_rect(
             layout.window_w, layout.window_h, cell_h, layout.top_inset, (0.0, 0.0),
         );
-        let counts = (pane_rows.len(), rows.len());
-        renderer.set_process_panel(Some(ProcessPanelRender {
-            layout: process_panel::layout(
-                frame, layout.top_inset, pane_rows.len(), rows.len(), 0.0, cell_w, cell_h,
-            ),
+        let l = process_panel::layout(
+            frame, layout.top_inset, pane_rows.len(), rows.len(), 0.0, cell_w, cell_h,
+        );
+        let middle = |r: Rect| (r.x + r.w * 0.5, r.y_top + r.h * 0.5);
+        let row_of = |rows: &[(usize, Rect)], i: usize| rows.iter().find(|(n, _)| *n == i).map(|(_, r)| *r);
+        // off the kill button at the row's far end
+        let in_row = |r: Rect| (r.x + r.w * 0.25, r.y_top + r.h * 0.5);
+        let pointer = match hover {
+            process_panel::Hover::None => None,
+            process_panel::Hover::Close => Some(middle(l.chrome.close)),
+            process_panel::Hover::Pane(i) => row_of(&l.panes.rows, i).map(in_row),
+            process_panel::Hover::Process(i) => row_of(&l.processes.rows, i).map(in_row),
+            process_panel::Hover::Kill(i) => row_of(&l.kills, i).map(middle),
+        };
+        let panel = ProcessPanelRender {
+            layout: l,
             pane_rows,
             selected_pane: 0,
             detail: strings::text(Arg::ProcessDetail { pane: "smix", sid: 479, shell_pid: 1544 }),
             rows,
-            hover,
-        }));
-        (frame, counts.0, counts.1)
+            pointer,
+            surface: Default::default(),
+        };
+        renderer.set_process_panel(Some(panel.clone()));
+        panel
     }
 }
 
@@ -396,12 +407,12 @@ fn account(
 /// Ten accounts, some at their limit, one with an address too long
 /// for its card.
 fn accounts_panel(renderer: &mut MetalRenderer, layout: &Layout) {
-    open_accounts(renderer, layout, cc_usage_modal::Hover::None);
+    open_accounts(renderer, layout, None);
 }
 
-/// The accounts panel as the picture has it, with the pointer on
-/// `hover`.  Returns the panel's frame.
-pub(super) fn open_accounts(renderer: &mut MetalRenderer, layout: &Layout, hover: cc_usage_modal::Hover) -> Rect {
+/// What the accounts pictures show: ten accounts, when the feed was
+/// written, and the moment it is read at.
+pub(crate) fn accounts_data() -> (Vec<CcUsageAccountRender>, String, Clock) {
     let accounts = vec![
         account("Claude 1", "dev@example.com", true, (11, 13, 11, 59),
             &[("7d", 1.0, 66, "11:59"), ("fable", 0.91, 66, "11:59")]),
@@ -424,18 +435,32 @@ pub(super) fn open_accounts(renderer: &mut MetalRenderer, layout: &Layout, hover
         account("Codex 2", "ops@example.com", false, (11, 16, 3, 8),
             &[("astra", 0.64, 129, "03:08")]),
     ];
+    let updated = strings::text(Arg::UpdatedAt(MonthDayTime { month: 11, day: 10, hour: 18, minute: 0 }));
+    (accounts, updated, Clock::fixed(ACCOUNTS_NOW, ACCOUNTS_UTC_OFFSET))
+}
+
+/// The accounts panel as the picture has it, with the pointer at
+/// `pointer`.  Returns the panel's frame and its surface.
+pub(super) fn open_accounts(
+    renderer: &mut MetalRenderer,
+    layout: &Layout,
+    pointer: Option<(f64, f64)>,
+) -> (Rect, std::rc::Rc<std::cell::RefCell<crate::ui::components::cc_usage_view::CcUsageSurface>>) {
+    let (accounts, updated_label, clock) = accounts_data();
     let (cell_w, cell_h) = renderer.cell_dims();
     let rect = cc_usage_modal::panel_rect(
         accounts.len(), 2, layout.window_w, layout.window_h, cell_w, cell_h, layout.top_inset,
     );
+    let surface = std::rc::Rc::<std::cell::RefCell<crate::ui::components::cc_usage_view::CcUsageSurface>>::default();
     renderer.set_cc_usage(Some(CcUsageRender {
         rect,
-        updated_label: strings::text(Arg::UpdatedAt(MonthDayTime { month: 11, day: 10, hour: 18, minute: 0 })),
+        updated_label,
         accounts,
-        clock: Clock::fixed(ACCOUNTS_NOW, ACCOUNTS_UTC_OFFSET),
-        hover,
+        clock,
+        pointer,
+        surface: surface.clone(),
     }));
-    rect
+    (rect, surface)
 }
 
 /// Wide enough for the ten cards to sit in one row.
@@ -457,14 +482,18 @@ pub(super) fn panel_snapshot_accounts_narrow() {
 pub(super) fn panel_snapshot_accounts_empty() {
     snapshot("accounts_empty", 1700, 700, |renderer, layout| {
         let (cell_w, cell_h) = renderer.cell_dims();
+        let rect = cc_usage_modal::panel_rect(
+            0, 0, layout.window_w, layout.window_h, cell_w, cell_h, layout.top_inset,
+        );
+        // the pointer on the close button
+        let close = PanelChrome::new(rect, 0.0).close;
         renderer.set_cc_usage(Some(CcUsageRender {
-            rect: cc_usage_modal::panel_rect(
-                0, 0, layout.window_w, layout.window_h, cell_w, cell_h, layout.top_inset,
-            ),
+            rect,
             updated_label: String::new(),
             accounts: Vec::new(),
             clock: Clock::fixed(ACCOUNTS_NOW, ACCOUNTS_UTC_OFFSET),
-            hover: cc_usage_modal::Hover::Close,
+            pointer: Some((close.x + close.w * 0.5, close.y_top + close.h * 0.5)),
+            surface: Default::default(),
         }));
     });
 }

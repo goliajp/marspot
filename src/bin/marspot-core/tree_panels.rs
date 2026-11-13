@@ -4,6 +4,7 @@
 
 use golia_ui_core::{Action, Key, KeyResult};
 use marspot::input::{LogicalKey, NamedKey};
+use marspot::ui::components::layout_view::{LayoutModalDragRender, LayoutModalRender};
 use marspot::ui::components::settings_view::{self, SettingsRender};
 use marspot::ui::components::shortcuts_view::ShortcutsRender;
 use marspot::ui::components::surface_stack::PressOn;
@@ -70,7 +71,25 @@ impl CoreApp {
                 s.lay_out(self.renderer.font_mut(), &sp, top_inset);
                 Some(f(&mut s.kept))
             }
-            SurfaceKind::Layout | SurfaceKind::Processes | SurfaceKind::Accounts => None,
+            SurfaceKind::Layout => {
+                let state = self.layout_render(wi);
+                let window = (win!(self, wi).w_phys, win!(self, wi).h_phys);
+                let mut s = state.surface.borrow_mut();
+                s.lay_out(self.renderer.font_mut(), &state, window, top_inset);
+                Some(f(&mut s.kept))
+            }
+            // against the frame last drawn: the feed is read where a
+            // frame is built, not where the pointer moves
+            SurfaceKind::Accounts => {
+                let surface = win!(self, wi).cc_usage_modal.as_ref()?.surface.clone();
+                let mut s = surface.borrow_mut();
+                Some(f(&mut s.kept))
+            }
+            SurfaceKind::Processes => {
+                let surface = win!(self, wi).process_panel.as_ref()?.surface.clone();
+                let mut s = surface.borrow_mut();
+                Some(f(&mut s.kept))
+            }
         }
     }
 
@@ -95,13 +114,105 @@ impl CoreApp {
 
     /// A press on the panel's content: the control under it acts.
     pub(super) fn tree_panel_content_press(&mut self, wi: usize, kind: SurfaceKind, x: f64, y: f64) {
-        let action = self.with_tree_panel(wi, kind, |s| {
-            s.surface.pointer_down((x, y));
-            s.surface.pointer_up((x, y))
-        });
-        if let Some(Some(action)) = action {
+        if let Some(action) = self.tree_panel_action_at(wi, kind, x, y) {
             self.tree_panel_act(wi, action);
         }
+    }
+
+    /// What a press at `(x, y)` on the panel's content asks for.
+    pub(super) fn tree_panel_action_at(&mut self, wi: usize, kind: SurfaceKind, x: f64, y: f64) -> Option<Action> {
+        self.with_tree_panel(wi, kind, |s| {
+            s.surface.pointer_down((x, y));
+            s.surface.pointer_up((x, y))
+        })
+        .flatten()
+    }
+
+    /// Do what a row or a button of the process monitor asked for.
+    pub(super) fn process_panel_do(&mut self, wi: usize, on: ProcessAsk) {
+        let Some(panel) = win!(self, wi).process_panel.as_mut() else { return };
+        match on {
+            ProcessAsk::Kill(row) => {
+                if let Some(pid) = panel.row_pids.get(row).copied() {
+                    self.kill_and_track(wi, pid);
+                    self.refresh_process_panel(wi);
+                }
+            }
+            ProcessAsk::Pane(row) => {
+                panel.selected_pane = row;
+                panel.scroll_y = Default::default();
+            }
+            ProcessAsk::Process(_) | ProcessAsk::Close | ProcessAsk::None => {}
+        }
+        win!(self, wi).needs_render = true;
+    }
+
+    /// What a frame of the open layout panel is drawn from.
+    pub(super) fn layout_render(&mut self, wi: usize) -> LayoutModalRender {
+        let w = &win!(self, wi);
+        LayoutModalRender {
+            cols: w.pending_grid_cols,
+            rows: w.pending_grid_rows,
+            slot_titles: w.layout_titles.clone(),
+            drag: w.layout_drag.map(|d| LayoutModalDragRender {
+                from_slot: d.from_slot,
+                grab_offset_phys: d.grab_offset_phys,
+                mouse_phys: d.mouse_phys,
+            }),
+            pointer: None,
+            offset: w.panels.offset(),
+            surface: w.layout_surface.clone(),
+        }
+    }
+
+    /// Do what a control of the layout panel asked for; `at` is where
+    /// the pointer was, for a card that is picked up.
+    pub(super) fn layout_panel_do(&mut self, wi: usize, on: LayoutAsk, at: (f64, f64)) {
+        use marspot::ui::components::layout_modal::{step, Axis};
+        match on {
+            LayoutAsk::Card(slot) => {
+                let modal = self.layout_modal_geometry(wi);
+                let Some(card) = modal.cards.get(slot) else { return };
+                win!(self, wi).layout_drag = Some(LayoutModalDrag {
+                    from_slot: slot,
+                    grab_offset_phys: (at.0 - card.x, at.1 - card.y_top),
+                    mouse_phys: at,
+                });
+            }
+            LayoutAsk::Apply => {
+                let change = win!(self, wi).panels.close(CloseBy::Content);
+                self.apply_surface_change(wi, change);
+                win!(self, wi).grid_cols = win!(self, wi).pending_grid_cols;
+                win!(self, wi).grid_rows = win!(self, wi).pending_grid_rows;
+                // The drag-reordered arrangement lands in the actual
+                // grid.  Only the in-cells portion is reordered (panes
+                // past the grid cells stay in sidebar order).
+                let cells = win!(self, wi).grid_cols * win!(self, wi).grid_rows;
+                self.apply_card_slot_permutation(wi, cells);
+                // If the focused pane's slot is beyond the new cell
+                // count, focus the last surviving cell so the user sees
+                // a focused pane in the grid.  Overflowed sessions stay
+                // alive in the sidebar.
+                if cells > 0 && win!(self, wi).focused_idx >= cells {
+                    win!(self, wi).focused_idx = cells - 1;
+                }
+                self.rebuild_layout(wi);
+                self.save_session_state();
+            }
+            LayoutAsk::Step(axis, part) => {
+                let w = &mut win!(self, wi);
+                let value = match axis {
+                    Axis::Columns => &mut w.pending_grid_cols,
+                    Axis::Rows => &mut w.pending_grid_rows,
+                };
+                if let Some(next) = step(*value, part) {
+                    *value = next;
+                    self.reset_card_slots(wi);
+                }
+            }
+            LayoutAsk::Close | LayoutAsk::None => {}
+        }
+        win!(self, wi).needs_render = true;
     }
 
     /// A key while a panel has the keyboard: Tab moves the focus,
@@ -147,8 +258,20 @@ impl CoreApp {
             self.apply_surface_change(wi, change);
             return;
         }
-        if action.id != settings_view::CHOOSE || win!(self, wi).panels.open() != Some(SurfaceKind::Settings) {
-            return;
+        match win!(self, wi).panels.open() {
+            Some(SurfaceKind::Settings) if action.id == settings_view::CHOOSE => {}
+            Some(SurfaceKind::Processes) => {
+                self.process_panel_do(wi, process_view::asked(action));
+                return;
+            }
+            Some(SurfaceKind::Layout) => {
+                // by a key: nothing is under the pointer to pick up
+                if !matches!(layout_view::asked(action), LayoutAsk::Card(_)) {
+                    self.layout_panel_do(wi, layout_view::asked(action), (0.0, 0.0));
+                }
+                return;
+            }
+            _ => return,
         }
         let Some((row, seg)) = settings_view::chosen(action.arg) else { return };
         let cur = marspot::settings::get();

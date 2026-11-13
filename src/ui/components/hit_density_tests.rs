@@ -14,7 +14,7 @@ use super::panel_snapshot_tests as panel;
 use crate::render_metal::{MetalRenderer, WindowRender};
 use crate::ui::components::chrome_hover::ChromeHover;
 use crate::ui::components::controls::StepperPart;
-use crate::ui::components::{cc_usage_modal, layout_modal, process_panel};
+use crate::ui::components::{layout_modal, process_panel};
 use crate::ui::components::{ContextMenu, ContextMenuHit, MenuItem};
 
 const SCALES: [f64; 2] = [1.0, 2.0];
@@ -144,14 +144,17 @@ fn the_process_monitors_rows_and_buttons_are_hit_where_they_are_drawn() {
             (frame.expect("a frame"), placed.expect("the panel was placed"))
         };
         let (rest, _) = frame(Hover::None);
-        let (cell_w, cell_h) = rest.cell;
         for hover in [Hover::Close, Hover::Pane(1), Hover::Pane(3), Hover::Process(0), Hover::Process(9), Hover::Kill(2), Hover::Kill(9)] {
-            let (lit, (rect, n_panes, n_rows)) = frame(hover);
+            let (lit, panel) = frame(hover);
             let (x, y) = lit_centre(&rest, &lit)
                 .unwrap_or_else(|| panic!("scale {scale}: nothing is drawn for the pointer on {hover:?}"));
-            let got = super::density_kit::at_scale(scale, || {
-                process_panel::layout(rect, 0.0, n_panes, n_rows, 0.0, cell_w, cell_h).hover_at(x, y)
-            });
+            let got = panel
+                .surface
+                .borrow()
+                .kept
+                .surface
+                .hit((x, y))
+                .map_or(Hover::None, |h| crate::ui::components::process_view::asked(h.action));
             assert_eq!(got, hover, "scale {scale}: {hover:?} is drawn around ({x:.1}, {y:.1}) and a click there lands elsewhere");
         }
     }
@@ -159,31 +162,47 @@ fn the_process_monitors_rows_and_buttons_are_hit_where_they_are_drawn() {
 
 #[test]
 fn the_layout_panels_controls_are_hit_where_they_are_drawn() {
+    use crate::ui::components::layout_view::{self, LayoutModalRender};
+    use golia_ui_core::node::flag;
+    use golia_ui_core::NodeId;
     use layout_modal::{Axis, Hover};
     for scale in SCALES {
         let Some((mut r, mut wr)) = renderer() else { return };
-        let mut frame = |hover| {
+        let mut frame = |pointer| -> (Capture, LayoutModalRender) {
             let mut placed = None;
             let frame = capture(scale, || {
                 panel::snapshot_on(&mut r, &mut wr, "layout", 1000, 760, |r, layout| {
-                    placed = Some(panel::open_layout(r, layout, hover));
+                    placed = Some(panel::open_layout(r, layout, pointer));
                 });
             });
             (frame.expect("a frame"), placed.expect("the panel was placed"))
         };
-        let (rest, _) = frame(Hover::None);
-        let on = [
+        let (rest, state) = frame(None);
+        // everything that answers a press, and where the surface put it
+        let parts: Vec<(Hover, golia_ui_core::Rect)> = {
+            let s = state.surface.borrow();
+            let (tree, layout) = (s.kept.surface.tree(), s.kept.surface.layout());
+            tree.nodes()
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| n.has(flag::ACTS) && !n.has(flag::DISABLED))
+                .map(|(i, n)| (layout_view::asked(n.action), layout.rect(NodeId(i as u32))))
+                .filter(|(on, _)| *on != Hover::None)
+                .collect()
+        };
+        for want in [
             Hover::Close, Hover::Apply, Hover::Step(Axis::Columns, StepperPart::Plus),
-            Hover::Step(Axis::Columns, StepperPart::Minus), Hover::Step(Axis::Rows, StepperPart::Plus),
-            Hover::Card(0), Hover::Card(3),
-        ];
+            Hover::Step(Axis::Rows, StepperPart::Plus), Hover::Card(0), Hover::Card(3),
+        ] {
+            assert!(parts.iter().any(|(on, _)| *on == want), "scale {scale}: the surface has no {want:?}");
+        }
         let mut checked = 0;
-        for hover in on {
-            // a button that cannot be pressed shows nothing for the pointer
-            let (lit, modal) = frame(hover);
+        for (on, at) in parts {
+            let (lit, state) = frame(Some((at.x + at.w * 0.5, at.y + at.h * 0.5)));
+            // a card shows nothing for the pointer
             let Some((x, y)) = lit_centre(&rest, &lit) else { continue };
-            let got = modal.hover_at(x, y);
-            assert_eq!(got, hover, "scale {scale}: {hover:?} is drawn around ({x:.1}, {y:.1}) and a click there lands elsewhere");
+            let got = state.surface.borrow().kept.surface.hit((x, y)).map(|h| layout_view::asked(h.action));
+            assert_eq!(got, Some(on), "scale {scale}: {on:?} is drawn around ({x:.1}, {y:.1}) and a click there lands elsewhere");
             checked += 1;
         }
         assert!(checked >= 4, "scale {scale}: only {checked} controls lit up");
@@ -192,23 +211,28 @@ fn the_layout_panels_controls_are_hit_where_they_are_drawn() {
 
 #[test]
 fn a_panels_close_button_is_hit_where_it_is_drawn() {
-    use cc_usage_modal::Hover;
+    use crate::ui::components::panel_chrome::PanelChrome;
+    use crate::ui::tree::panel as tree_panel;
     for scale in SCALES {
         let Some((mut r, mut wr)) = renderer() else { return };
-        let mut frame = |hover| {
+        let mut frame = |on_close: bool| {
             let mut placed = None;
             let frame = capture(scale, || {
                 panel::snapshot_on(&mut r, &mut wr, "accounts", 2800, 1300, |r, layout| {
-                    placed = Some(panel::open_accounts(r, layout, hover));
+                    // where the chrome's geometry has the button
+                    let (rect, _) = panel::open_accounts(r, layout, None);
+                    let c = PanelChrome::new(rect, 0.0).close;
+                    let pointer = on_close.then_some((c.x + c.w * 0.5, c.y_top + c.h * 0.5));
+                    placed = Some(panel::open_accounts(r, layout, pointer));
                 });
             });
             (frame.expect("a frame"), placed.expect("the panel was placed"))
         };
-        let (rest, _) = frame(Hover::None);
-        let (lit, rect) = frame(Hover::Close);
+        let (rest, _) = frame(false);
+        let (lit, (_, surface)) = frame(true);
         let (x, y) = lit_centre(&rest, &lit).expect("the close button lights up");
-        let got = super::density_kit::at_scale(scale, || cc_usage_modal::hover_at(rect, x, y));
-        assert_eq!(got, Hover::Close, "scale {scale}: the close button is drawn around ({x:.1}, {y:.1})");
+        let got = surface.borrow().kept.surface.hit((x, y)).map(|h| h.action);
+        assert_eq!(got, Some(tree_panel::CLOSE), "scale {scale}: the close button is drawn around ({x:.1}, {y:.1})");
     }
 }
 

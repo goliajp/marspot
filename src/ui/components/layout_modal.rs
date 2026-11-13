@@ -1,16 +1,14 @@
 //! The layout panel: pick the `(columns, rows)` shape of the pane grid
 //! and which pane sits in which slot.
 //!
-//! Geometry and hit-testing here, painting in `layout_modal_paint`.
+//! Geometry here; `layout_view` describes the tree that is drawn.
 //! The frame and header are the shared panel chrome's; under them are
 //! two groups — **Grid**, a card with a stepper per axis, and
 //! **Arrangement**, one small card per slot, dragged to swap — and a
 //! footer with the pane count and the one primary button.
 //!
 //! The panel holds no state.  [`LayoutModal::layout`] returns every
-//! rect from the pending shape; the painter draws those rects and the
-//! click handler asks [`LayoutModal::hover_at`] about the same ones,
-//! so a control reacts exactly where it is drawn.
+//! rect from the pending shape, and the tree fills the frame it gives.
 //!
 //! All rects are physical pixels.
 
@@ -248,8 +246,9 @@ impl LayoutModal {
         }
     }
 
-    /// What `(x, y)` is on.  The painter highlights it and a click
-    /// acts on it, so the two cannot disagree.
+    /// What `(x, y)` is on by this geometry alone: what the tests of
+    /// the geometry ask.  The panel answers the pointer from its tree.
+    #[cfg(test)]
     pub fn hover_at(&self, x: f64, y: f64) -> Hover {
         if self.chrome.hit_close(x, y) {
             return Hover::Close;
@@ -266,6 +265,7 @@ impl LayoutModal {
     }
 
     /// Is `(x, y)` on the panel at all?  A click that is not closes it.
+    #[cfg(test)]
     pub fn contains(&self, x: f64, y: f64) -> bool {
         self.chrome.frame.contains(x, y)
     }
@@ -327,23 +327,38 @@ pub fn label_room(card_w: f64) -> f64 {
 /// nothing still gets the ellipsis — a blank card would say the slot
 /// is empty.
 pub fn fit_label(s: &str, max_w: f64, m: Measure<'_>) -> String {
+    let mut out = String::new();
+    fit_label_into(s, max_w, m, &mut out);
+    out
+}
+
+/// [`fit_label`] written into `out`, which is emptied first: nothing
+/// is taken from the heap once `out` has held a label as long.
+pub fn fit_label_into(s: &str, max_w: f64, m: Measure<'_>, out: &mut String) {
+    out.clear();
     if s.is_empty() || label_width(s, m) <= max_w {
-        return s.to_string();
+        out.push_str(s);
+        return;
     }
-    let ends: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
-    let cut = |n: usize| format!("{}…", &s[..ends[n]]);
+    let end_of = |n: usize| s.char_indices().nth(n).map_or(s.len(), |(i, _)| i);
+    let cut = |n: usize, out: &mut String| {
+        out.clear();
+        out.push_str(&s[..end_of(n)]);
+        out.push('…');
+    };
     // Widths grow with the number of characters kept, so the longest
     // beginning that fits is found by halving.
-    let (mut fits, mut over) = (0, ends.len());
+    let (mut fits, mut over) = (0, s.chars().count());
     while fits + 1 < over {
         let mid = (fits + over) / 2;
-        if label_width(&cut(mid), m) <= max_w {
+        cut(mid, out);
+        if label_width(out, m) <= max_w {
             fits = mid;
         } else {
             over = mid;
         }
     }
-    cut(fits)
+    cut(fits, out);
 }
 
 #[cfg(test)]

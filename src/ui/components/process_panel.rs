@@ -92,7 +92,7 @@ pub fn process_columns(kill_w: f64) -> [Column; 5] {
 }
 
 /// One process of the selected pane's tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProcessPanelRow {
     /// Levels below the pane's shell, which is 0.
     pub depth: u8,
@@ -107,7 +107,7 @@ pub struct ProcessPanelRow {
 }
 
 /// One pane, summed over its process tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProcessPanelPaneRow {
     /// The pane's name as it appears elsewhere.
     pub name: String,
@@ -119,21 +119,7 @@ pub struct ProcessPanelPaneRow {
     pub busy: String,
 }
 
-/// Everything one frame of the panel is drawn from.
-#[derive(Debug, Clone)]
-pub struct ProcessPanelRender {
-    /// Where everything is — the same value the click handler holds.
-    pub layout: Layout,
-    pub pane_rows: Vec<ProcessPanelPaneRow>,
-    /// The row of `pane_rows` whose processes are in `rows`.
-    pub selected_pane: usize,
-    /// Which pane the right table is about: its name, session id and
-    /// shell pid, shown at the right of the group's heading.
-    pub detail: String,
-    pub rows: Vec<ProcessPanelRow>,
-    /// What the pointer is on.
-    pub hover: Hover,
-}
+pub use crate::ui::components::process_view::ProcessPanelRender;
 
 /// What the pointer is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -256,8 +242,9 @@ pub fn layout(
 }
 
 impl Layout {
-    /// What `(x, y)` is on.  The painter highlights it and a click
-    /// acts on it.
+    /// What `(x, y)` is on by this geometry alone: what the tests of
+    /// the geometry ask.  The panel answers the pointer from its tree.
+    #[cfg(test)]
     pub fn hover_at(&self, x: f64, y: f64) -> Hover {
         if self.chrome.hit_close(x, y) {
             return Hover::Close;
@@ -272,11 +259,13 @@ impl Layout {
     }
 
     /// Is `(x, y)` on the header where it is a drag handle?
+    #[cfg(test)]
     pub fn hit_header(&self, x: f64, y: f64) -> bool {
         self.chrome.hit_header(x, y)
     }
 
     /// Is `(x, y)` anywhere on the panel?
+    #[cfg(test)]
     pub fn contains(&self, x: f64, y: f64) -> bool {
         self.chrome.frame.contains(x, y)
     }

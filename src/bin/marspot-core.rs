@@ -184,8 +184,7 @@ struct ProcessPanelState {
     /// pointer and the wheel are all answered from it.  `None` until
     /// the first frame is built.
     layout: Option<marspot::ui::components::process_panel::Layout>,
-    /// What the pointer is on.
-    hover: marspot::ui::components::process_panel::Hover,
+    surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::process_view::ProcessSurface>>,
     /// How far the process list is pushed up, in physical pixels.
     scroll_y: marspot::ui::Units,
 }
@@ -2658,7 +2657,7 @@ struct CcUsageModalState {
     data: Option<marspot::cc_usage::CcUsage>,
     codex: Option<marspot::cc_usage::CodexUsage>,
     loaded_at: Instant,
-    hover: marspot::ui::components::cc_usage_modal::Hover,
+    surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::cc_usage_view::CcUsageSurface>>,
 }
 
 struct ContextMenuState {
@@ -3802,7 +3801,9 @@ struct WindowState {
     /// the hit-test uses the number that produced what is on screen.
     layout_modal_label_w: f64,
     /// What the pointer is on in the open layout panel.
-    layout_modal_hover: marspot::ui::components::layout_modal::Hover,
+    layout_surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::layout_view::LayoutSurface>>,
+    /// What each slot of the layout panel holds, as last drawn.
+    layout_titles: Vec<String>,
     /// F3+9 — right-click ContextMenu live state.  `None` when closed.
     /// Set by `mouse_right_down`; cleared by `mouse_down` outside
     /// the menu, Esc key, or after dispatching an action.
@@ -3923,7 +3924,8 @@ impl WindowState {
             panels: SurfaceStack::default(),
             lights_right_phys: None,
             layout_modal_label_w: 0.0,
-            layout_modal_hover: Default::default(),
+            layout_surface: Default::default(),
+            layout_titles: Vec::new(),
             context_menu: None,
             pending_grid_cols: grid_cols,
             pending_grid_rows: grid_rows,
@@ -4009,6 +4011,9 @@ mod idle;
 mod keys;
 #[path = "marspot-core/tree_panels.rs"]
 mod tree_panels;
+use marspot::ui::components::layout_modal::Hover as LayoutAsk;
+use marspot::ui::components::process_panel::Hover as ProcessAsk;
+use marspot::ui::components::{layout_view, process_view};
 #[path = "marspot-core/theme_follow.rs"]
 mod theme_follow;
 
@@ -7007,7 +7012,7 @@ impl CoreApp {
                 // Staged values start from the live grid on every open.
                 w.pending_grid_cols = w.grid_cols;
                 w.pending_grid_rows = w.grid_rows;
-                w.layout_modal_hover = Default::default();
+                w.layout_surface.borrow_mut().kept.surface.interaction.reset();
                 self.reset_card_slots(wi);
                 // The card labels are directories: read them now, not
                 // up to CWD_SWEEP_INTERVAL ago.
@@ -7026,7 +7031,7 @@ impl CoreApp {
                     selected_pane: 0,
                     prev_pid_stats: std::collections::HashMap::new(),
                     layout: None,
-                    hover: Default::default(),
+                    surface: Default::default(),
                     scroll_y: Default::default(),
                 });
                 // Walked now so the first frame already has its rows.
@@ -7037,7 +7042,7 @@ impl CoreApp {
                     data: marspot::cc_usage::read(),
                     codex: marspot::kimi_usage::read_codex_and_kimi(),
                     loaded_at: Instant::now(),
-                    hover: Default::default(),
+                    surface: Default::default(),
                 });
             }
             Some(SurfaceKind::Shortcuts) => w.shortcuts_surface.borrow_mut().kept.surface.interaction.reset(),
@@ -7071,69 +7076,12 @@ impl CoreApp {
                 self.tree_panel_content_press(wi, kind, x_phys, y_phys);
             }
             SurfaceKind::Processes => {
-                use marspot::ui::components::process_panel::Hover;
-                let Some(panel) = win!(self, wi).process_panel.as_mut() else { return };
-                let Some(layout) = panel.layout.as_ref() else { return };
-                match layout.hover_at(x_phys, y_phys) {
-                    Hover::Kill(row) => {
-                        if let Some(pid) = panel.row_pids.get(row).copied() {
-                            self.kill_and_track(wi, pid);
-                            self.refresh_process_panel(wi);
-                        }
-                    }
-                    Hover::Pane(row) => {
-                        panel.selected_pane = row;
-                        panel.scroll_y = Default::default();
-                    }
-                    Hover::Process(_) | Hover::Close | Hover::None => {}
-                }
+                let on = self.tree_panel_action_at(wi, kind, x_phys, y_phys);
+                self.process_panel_do(wi, on.map_or(ProcessAsk::None, process_view::asked));
             }
             SurfaceKind::Layout => {
-                use marspot::ui::components::layout_modal::{step, Axis, Hover};
-                let modal = self.layout_modal_geometry(wi);
-                match modal.hover_at(x_phys, y_phys) {
-                    Hover::Card(slot) => {
-                        let card = modal.cards[slot];
-                        win!(self, wi).layout_drag = Some(LayoutModalDrag {
-                            from_slot: slot,
-                            grab_offset_phys: (x_phys - card.x, y_phys - card.y_top),
-                            mouse_phys: (x_phys, y_phys),
-                        });
-                    }
-                    Hover::Apply => {
-                        let change = win!(self, wi).panels.close(CloseBy::Content);
-                        self.apply_surface_change(wi, change);
-                        win!(self, wi).grid_cols = win!(self, wi).pending_grid_cols;
-                        win!(self, wi).grid_rows = win!(self, wi).pending_grid_rows;
-                        // The drag-reordered arrangement lands in the
-                        // actual grid.  Only the in-cells portion is
-                        // reordered (panes past the grid cells stay in
-                        // sidebar order).
-                        let cells = win!(self, wi).grid_cols * win!(self, wi).grid_rows;
-                        self.apply_card_slot_permutation(wi, cells);
-                        // If the focused pane's slot is beyond the new
-                        // cell count, focus the last surviving cell so the
-                        // user sees a focused pane in the grid.  Overflowed
-                        // sessions stay alive in the sidebar.
-                        if cells > 0 && win!(self, wi).focused_idx >= cells {
-                            win!(self, wi).focused_idx = cells - 1;
-                        }
-                        self.rebuild_layout(wi);
-                        self.save_session_state();
-                    }
-                    Hover::Step(axis, part) => {
-                        let w = &mut win!(self, wi);
-                        let value = match axis {
-                            Axis::Columns => &mut w.pending_grid_cols,
-                            Axis::Rows => &mut w.pending_grid_rows,
-                        };
-                        if let Some(next) = step(*value, part) {
-                            *value = next;
-                            self.reset_card_slots(wi);
-                        }
-                    }
-                    Hover::Close | Hover::None => {}
-                }
+                let on = self.tree_panel_action_at(wi, kind, x_phys, y_phys);
+                self.layout_panel_do(wi, on.map_or(LayoutAsk::None, layout_view::asked), (x_phys, y_phys));
             }
         }
     }
@@ -7301,7 +7249,8 @@ impl CoreApp {
                 updated_label: String::new(),
                 accounts,
                 clock: Clock::local(now_unix),
-                hover: modal.hover,
+                pointer: None,
+                surface: modal.surface.clone(),
             });
         }
         // Two feeds, two generation stamps. The panel shows the older
@@ -7319,7 +7268,8 @@ impl CoreApp {
             rect,
             updated_label: strings::text(Arg::UpdatedAt(md_hm(generated_at))),
             clock: Clock::local(now_unix),
-            hover: modal.hover,
+            pointer: None,
+            surface: modal.surface.clone(),
             accounts,
         })
     }
@@ -7411,7 +7361,8 @@ impl CoreApp {
             selected_pane,
             detail,
             rows,
-            hover: panel.hover,
+            pointer: None,
+            surface: panel.surface.clone(),
         })
     }
 
@@ -7686,10 +7637,12 @@ impl CoreApp {
         }
         if let Some(kind) = win!(self, wi).panels.open() {
             let frame = self.panel_frame(wi, kind);
-            let press = if matches!(kind, SurfaceKind::Settings | SurfaceKind::Shortcuts) {
+            let press = if matches!(kind, SurfaceKind::Settings | SurfaceKind::Shortcuts | SurfaceKind::Layout | SurfaceKind::Accounts) {
                 let on = self.tree_panel_press_on(wi, kind, x_phys, y_phys);
                 win!(self, wi).panels.on_press_on(on, x_phys, y_phys, frame)
             } else {
+                // the process monitor answers from the frame last
+                // drawn, and has drawn none the moment it opens
                 let chrome = PanelChrome::new(frame, win!(self, wi).layout.top_inset);
                 win!(self, wi).panels.on_press(x_phys, y_phys, &chrome)
             };
@@ -8849,33 +8802,20 @@ impl CoreApp {
         // chain (custom > cwd basename > ordinal).  Empty slot if
         // the slot points at a pane index past the live count.
         let layout_modal = if win!(self, wi).panels.open() == Some(SurfaceKind::Layout) {
-            use marspot::ui::components::layout_modal_paint::{LayoutModalRender, LayoutModalDragRender};
             let cells = win!(self, wi).pending_grid_cols * win!(self, wi).pending_grid_rows;
-            let slot_titles: Vec<String> = (0..cells)
-                .map(|slot| {
-                    let pane_idx = win!(self, wi).card_slots.get(slot).copied().unwrap_or(usize::MAX);
-                    resolved_labels
-                        .get(pane_idx)
-                        .cloned()
-                        .unwrap_or_default()
-                })
-                .collect();
+            let mut titles = std::mem::take(&mut win!(self, wi).layout_titles);
+            titles.resize_with(cells, Default::default);
+            for (slot, title) in titles.iter_mut().enumerate() {
+                let pane_idx = win!(self, wi).card_slots.get(slot).copied().unwrap_or(usize::MAX);
+                title.clear();
+                title.push_str(resolved_labels.get(pane_idx).map_or("", |s| s.as_str()));
+            }
             win!(self, wi).layout_modal_label_w = marspot::ui::components::layout_modal::widest_label(
-                &slot_titles,
+                &titles,
                 &mut marspot::ui::components::controls::font_measure(self.renderer.font_mut()),
             );
-            Some(LayoutModalRender {
-                cols: win!(self, wi).pending_grid_cols,
-                rows: win!(self, wi).pending_grid_rows,
-                hover: win!(self, wi).layout_modal_hover,
-                offset: win!(self, wi).panels.offset(),
-                slot_titles,
-                drag: win!(self, wi).layout_drag.map(|d| LayoutModalDragRender {
-                    from_slot: d.from_slot,
-                    grab_offset_phys: d.grab_offset_phys,
-                    mouse_phys: d.mouse_phys,
-                }),
-            })
+            win!(self, wi).layout_titles = titles;
+            Some(self.layout_render(wi))
         } else {
             None
         };
