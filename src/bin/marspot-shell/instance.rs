@@ -10,10 +10,15 @@
 //! The lock belongs to the open file, so it goes when the process does
 //! and there is no stale lock to clean up.  The descriptor is
 //! close-on-exec: no child can keep the lock alive after the shell is
-//! gone, and the shell's own `execv` (self-update, the redirect into
-//! `binaries/current`) drops it and the new image takes it again at the
-//! top of `main`.  A launch that slips into that gap becomes the app
-//! and the re-exec'd shell bows out to it: still one instance.
+//! gone, and the shell's own `execv` for an update drops it and the new
+//! image takes it again at the top of `main`.  A launch that slips into
+//! that gap becomes the app and the re-exec'd shell bows out to it:
+//! still one instance.
+//!
+//! A shell that puts itself away for its sessions, or comes back, must
+//! not bow out: the launch that slipped in would be in another
+//! coalition than the sessions.  Those execs carry the descriptor over
+//! (`carry_lock`), and the lock is held without a gap.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -29,8 +34,95 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSApplicationActivationOptions, NSRunningApplication};
 
 static LOCK: OnceLock<File> = OnceLock::new();
+/// Whether a session started this shell at the request of one outside
+/// its coalition.
+static HEIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn is_heir() -> bool {
+    HEIR.load(Ordering::Relaxed)
+}
 /// Pid of a launch that asked us to come forward; 0 when none has.
 static ASKED_BY: AtomicU32 = AtomicU32::new(0);
+/// The dev seams (`MARSPOT_DEV_*`) the last such launch was started
+/// with.  A resident shell that becomes the app on its request takes
+/// them over: a test starts the app with a seam set, and the process
+/// that answers is one that was started before it.
+static ASKED_WITH: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+const SEAM_PREFIX: &str = "MARSPOT_DEV_";
+
+/// What a launch that stands aside sends: its pid, then its seams.
+fn front_request(pid: u32, env: impl Iterator<Item = (String, String)>) -> String {
+    let mut text = format!("{pid}\n");
+    for (k, v) in env.filter(|(k, v)| k.starts_with(SEAM_PREFIX) && !v.contains('\n')) {
+        text.push_str(&format!("{k}={v}\n"));
+    }
+    text
+}
+
+fn parse_front_request(text: &str) -> Option<(u32, Vec<(String, String)>)> {
+    let mut lines = text.lines();
+    let pid = lines.next()?.trim().parse().ok()?;
+    let seams = lines
+        .filter_map(|l| l.split_once('='))
+        .filter(|(k, _)| k.starts_with(SEAM_PREFIX))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    Some((pid, seams))
+}
+
+/// The seams of the launch that last asked this shell to come forward.
+pub(crate) fn asked_with() -> Vec<(String, String)> {
+    ASKED_WITH.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+/// Names the descriptor of the lock for the image this process is
+/// about to become.
+const LOCK_FD_ENV: &str = "MARSPOT_SHELL_LOCK_FD";
+
+fn set_cloexec(fd: std::os::fd::RawFd, on: bool) {
+    // SAFETY: fcntl on a descriptor this process holds.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        let flags = if on { flags | libc::FD_CLOEXEC } else { flags & !libc::FD_CLOEXEC };
+        libc::fcntl(fd, libc::F_SETFD, flags);
+    }
+}
+
+/// For this process's own exec, right before it: the next image holds
+/// the lock from its first instruction.
+pub(crate) fn carry_lock(cmd: &mut std::process::Command) {
+    if let Some(file) = LOCK.get() {
+        set_cloexec(file.as_raw_fd(), false);
+        cmd.env(LOCK_FD_ENV, file.as_raw_fd().to_string());
+    }
+}
+
+/// After such an exec failed: children must not inherit the lock.
+pub(crate) fn keep_lock_here() {
+    if let Some(file) = LOCK.get() {
+        set_cloexec(file.as_raw_fd(), true);
+    }
+}
+
+/// The lock the previous image of this process handed over, if it did.
+fn inherited_lock(path: &Path) -> Option<File> {
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    use std::os::unix::fs::MetadataExt;
+    let fd: std::os::fd::RawFd = std::env::var(LOCK_FD_ENV).ok()?.parse().ok()?;
+    // SAFETY: startup path in main(), before any thread is spawned.
+    unsafe { std::env::remove_var(LOCK_FD_ENV) };
+    // SAFETY: the number came from this process's previous image, which
+    // left that descriptor open for this one.
+    let file = unsafe { File::from_raw_fd(fd) };
+    let same = file.metadata().ok().zip(std::fs::metadata(path).ok()).is_some_and(|(a, b)| a.dev() == b.dev() && a.ino() == b.ino());
+    if !same {
+        // not the lock: whatever it is, it is not ours to close
+        let _ = file.into_raw_fd();
+        return None;
+    }
+    set_cloexec(fd, true);
+    Some(file)
+}
 
 fn lock_path() -> PathBuf {
     marspot_term::paths::state_root().join("shell.lock")
@@ -81,6 +173,27 @@ pub(crate) fn claim(path: &Path) -> io::Result<Claim> {
     }
 }
 
+/// How long an heir waits for the shell it takes over from to let go.
+const HEIR_PATIENCE: Duration = Duration::from_secs(5);
+
+/// A shell a session started on request: say that it is here, then
+/// take the lock when the shell that asked lets go of it.
+fn claim_as_heir(path: &Path) -> io::Result<Claim> {
+    let heir_file = marspot_term::owner::heir_path();
+    let deadline = std::time::Instant::now() + HEIR_PATIENCE;
+    loop {
+        let claimed = claim(path)?;
+        if matches!(claimed, Claim::Ours(_)) || std::time::Instant::now() >= deadline {
+            let _ = std::fs::remove_file(&heir_file);
+            return Ok(claimed);
+        }
+        if !heir_file.exists() {
+            std::fs::write(&heir_file, std::process::id().to_string())?;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Become the shell of this state dir, or hand over to the one that is
 /// and exit.  Nothing but the log line is written by a launch that
 /// loses.
@@ -89,9 +202,27 @@ pub(crate) fn hold_or_exit() {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    match claim(&path) {
+    let heir = std::env::var_os(marspot_term::owner::HEIR_ENV).is_some();
+    // SAFETY: startup path in main(), before any thread is spawned.
+    unsafe { std::env::remove_var(marspot_term::owner::HEIR_ENV) };
+    HEIR.store(heir, Ordering::Relaxed);
+    if let Some(file) = inherited_lock(&path) {
+        let _ = LOCK.set(file);
+        return;
+    }
+    let claimed = if heir { claim_as_heir(&path) } else { claim(&path) };
+    match claimed {
         Ok(Claim::Ours(file)) => {
             let _ = LOCK.set(file);
+        }
+        // started by a session to answer for it: another shell does
+        Ok(Claim::Held(holder)) if heir || crate::resident::asked() => {
+            lx_event!(
+                "SHELL_NOT_NEEDED",
+                "started to answer for the sessions, and a shell already does; exiting",
+                holder_pid = holder.unwrap_or(0)
+            );
+            std::process::exit(0);
         }
         Ok(Claim::Held(holder)) => {
             lx_event!(
@@ -102,7 +233,7 @@ pub(crate) fn hold_or_exit() {
             // a holder that is still booting has no socket yet, and
             // will put its own window in front when it gets there
             if let Ok(mut stream) = UnixStream::connect(front_socket_path()) {
-                let _ = stream.write_all(std::process::id().to_string().as_bytes());
+                let _ = stream.write_all(front_request(std::process::id(), std::env::vars()).as_bytes());
             }
             // this launch is the one the system just let come forward;
             // pass that on by name as well
@@ -135,18 +266,33 @@ pub(crate) fn serve_front(wake: impl Fn() + Send + 'static) {
         for mut stream in listener.incoming().flatten() {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
             let mut text = String::new();
-            if (&mut stream).take(16).read_to_string(&mut text).is_err() {
+            if (&mut stream).take(16 * 1024).read_to_string(&mut text).is_err() {
                 continue;
             }
-            if let Ok(pid) = text.trim().parse::<u32>() {
+            if let Some((pid, seams)) = parse_front_request(&text) {
+                if let Ok(mut with) = ASKED_WITH.lock() {
+                    *with = seams;
+                }
                 ASKED_BY.store(pid, Ordering::Release);
-                wake();
+                match AS_RESIDENT.get() {
+                    Some(resume) => resume(),
+                    None => wake(),
+                }
             }
         }
     };
     if let Err(e) = std::thread::Builder::new().name("l1-front".into()).spawn(serve) {
         lx_warn!("shell.front.thread_failed", &format!("{e}"));
     }
+}
+
+/// What a resident shell does when a launch that stood aside asks; the
+/// app, which has windows, is woken on its main thread instead.
+static AS_RESIDENT: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// From now on a launch that stands aside is answered by `resume`.
+pub(crate) fn answer_as_resident(resume: impl Fn() + Send + Sync + 'static) {
+    let _ = AS_RESIDENT.set(Box::new(resume));
 }
 
 /// Main thread: if a second launch asked, come to the front.
@@ -237,6 +383,21 @@ mod tests {
                     .exec();
                 panic!("exec failed: {err}");
             }
+            // hold the lock and hand it to a new image of this binary,
+            // which must find it held without claiming it
+            "carry" => {
+                let Claim::Ours(file) = claim(&path).unwrap() else { panic!("not free") };
+                let _ = LOCK.set(file);
+                let mut cmd = Command::new(std::env::current_exe().unwrap());
+                cmd.args(["--exact", "instance::tests::helper_process", "--nocapture"]).env("MARSPOT_LOCK_ROLE", "carried");
+                carry_lock(&mut cmd);
+                panic!("exec failed: {}", cmd.exec());
+            }
+            "carried" => {
+                let _file = inherited_lock(&path).expect("the lock was handed over");
+                println!("carried={}", std::process::id());
+                std::thread::sleep(Duration::from_secs(60));
+            }
             "after-exec" => {
                 let Claim::Ours(_file) = claim(&path).unwrap() else { panic!("lost it across exec") };
                 println!("held-again={}", std::process::id());
@@ -244,6 +405,17 @@ mod tests {
             }
             other => panic!("unknown role {other}"),
         }
+    }
+
+    #[test]
+    fn a_launch_that_stands_aside_passes_on_its_pid_and_its_seams_only() {
+        let env = [("MARSPOT_DEV_CLOSE_SEQUENCE", "2,1"), ("HOME", "/Users/x"), ("MARSPOT_STATE_DIR", "/tmp/s")];
+        let text = front_request(77, env.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        assert_eq!(text, "77\nMARSPOT_DEV_CLOSE_SEQUENCE=2,1\n");
+        assert_eq!(parse_front_request(&text), Some((77, vec![("MARSPOT_DEV_CLOSE_SEQUENCE".into(), "2,1".into())])));
+        // a shell from before the seams were sent
+        assert_eq!(parse_front_request("77"), Some((77, vec![])));
+        assert_eq!(parse_front_request("HOME=/x\n"), None);
     }
 
     /// A second claim is told who holds the lock, and the holder's
@@ -263,6 +435,20 @@ mod tests {
         // SAFETY: the pid of the sleep the helper started and reported.
         unsafe { libc::kill(child, libc::SIGKILL) };
         assert!(free, "the holder's child kept the lock");
+    }
+
+    /// A launch cannot slip in while a shell that carries its lock
+    /// over is between two images.
+    #[test]
+    fn a_carried_lock_is_held_through_the_exec() {
+        let path = scratch("carry");
+        let mut holder = helper("carry", &path);
+        let pid = said(&mut holder, "carried=");
+        assert_eq!(pid, holder.id(), "exec keeps the pid");
+        assert_eq!(held_by(&path), Some(pid));
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        assert!(matches!(claim(&path).unwrap(), Claim::Ours(_)), "the lock went with the process");
     }
 
     #[test]

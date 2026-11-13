@@ -83,6 +83,16 @@ pub(super) fn watch() {
 /// The session whose pane started `pid`: the pane whose shell is among
 /// its parents, or, for a program that left its parents, the one pane
 /// whose shell shares its coalition.
+/// Stop watching: the app was put away, and the shell that stays for
+/// its sessions is not to be woken by every application the user
+/// starts.
+pub(super) fn unwatch() {
+    if let Some(watch) = WATCH.with(|w| w.borrow_mut().take()) {
+        // SAFETY: removes the observer registered in `watch`.
+        unsafe { NSWorkspace::sharedWorkspace().notificationCenter().removeObserver(&watch) };
+    }
+}
+
 fn pane_of(pid: i32) -> Option<u64> {
     let obs = crate::observe::shared().latest();
     let shells = || obs.sessions.iter().filter(|s| s.live && s.entry.shell_child_pid > 1);

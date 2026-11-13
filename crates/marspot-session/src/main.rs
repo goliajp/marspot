@@ -28,11 +28,12 @@ use control_writer::ControlWriter;
 use snapshot_writer::SnapshotWriter;
 mod handoff;
 mod line_discipline;
+mod owner_watch;
 mod local_session;
 mod pane_env;
-mod pane_job;
 mod publish_gate;
 mod pty_reader;
+mod shell_end;
 mod signal_events;
 mod reply_guard;
 mod uds_server;
@@ -772,10 +773,8 @@ fn main() {
     // the kernel execs this file while the current image still drives
     // the PTY, and the Gatekeeper assessment is paid then instead of
     // in the execv gap: a probe must not migrate state or open the log.
-    match std::env::args().nth(1).as_deref() {
-        Some("--version") => return println!("{}", env!("MARSPOT_VERSION_SESSION")),
-        Some(pane_job::HOST_ARG) => return pane_job::host_main(),
-        _ => {}
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        return println!("{}", env!("MARSPOT_VERSION_SESSION"));
     }
 
     // RFC-004 D.1 — must precede logx / any path computation.
@@ -2124,6 +2123,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 pid = std::process::id()
             );
             marspot_term::grid_shm::delete_side_regions(id);
+            shell_end::end_with_pane(id, local.child_pid());
             std::process::exit(0);
         }
     }

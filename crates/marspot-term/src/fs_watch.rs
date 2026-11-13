@@ -12,6 +12,10 @@
 //! these files replaces by rename, which the file's own descriptor
 //! cannot report for the *next* file of that name, so the directory is
 //! watched too and the files are looked up again when it changes.
+//!
+//! The same wait can report a process exiting ([`Watcher::watch_pid`]):
+//! whoever follows a file that names a process wants both, and a second
+//! thread asleep beside this one would be all a second queue bought.
 
 use std::ffi::CString;
 use std::io;
@@ -152,6 +156,10 @@ impl Watcher {
                     if ev.filter == libc::EVFILT_USER {
                         return;
                     }
+                    if ev.filter == libc::EVFILT_PROC {
+                        fire = true;
+                        continue;
+                    }
                     let udata = ev.udata as usize;
                     if udata & FILE_BIT != 0 {
                         let i = udata & !FILE_BIT;
@@ -188,6 +196,12 @@ impl Watcher {
             on_change();
         })?;
         Ok(Watcher { kq, alive })
+    }
+
+    /// Call `on_change` once more when the process `pid` exits.  An
+    /// error when there is no such process.
+    pub fn watch_pid(&self, pid: i32) -> io::Result<()> {
+        change(&self.kq, pid as libc::uintptr_t, libc::EVFILT_PROC, libc::EV_ADD | libc::EV_ONESHOT, libc::NOTE_EXIT, 0)
     }
 
     /// False once a watched directory is gone and could not be found
@@ -237,6 +251,19 @@ mod tests {
 
     fn quiet(rx: &Receiver<()>) -> bool {
         rx.recv_timeout(Duration::from_millis(300)).is_err()
+    }
+
+    #[test]
+    fn the_exit_of_a_watched_process_is_reported_and_a_missing_one_is_refused() {
+        let d = dir("pid");
+        let (w, rx) = watch(&[d.join("settings.toml")]);
+        let mut child = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        w.watch_pid(child.id() as i32).unwrap();
+        assert!(quiet(&rx), "nothing while it runs");
+        child.kill().unwrap();
+        assert!(reported(&rx), "its exit");
+        child.wait().unwrap();
+        assert!(w.watch_pid(child.id() as i32).is_err(), "a process that is gone cannot be watched");
     }
 
     #[test]

@@ -125,8 +125,7 @@ dev_session_pids() {
 }
 
 # The shells of this sandbox's live sessions, by the session registry,
-# one per line.  A shell that launchd started (MARSPOT_PANE_JOB=1) is
-# not a child of its session, so the process tree does not find it.
+# one per line.
 dev_pane_shell_pids() {
   local e p s
   for e in "$MARSPOT_STATE_DIR"/sessions/*/entry.toml; do
@@ -134,20 +133,6 @@ dev_pane_shell_pids() {
     p=$(sed -n 's/^pid = \([0-9][0-9]*\)$/\1/p' "$e")
     s=$(sed -n 's/^shell_child_pid = \([0-9][0-9]*\)$/\1/p' "$e")
     if [[ -n $p && -n $s ]] && _dev_is_ours "$p" && kill -0 "$s" 2>/dev/null; then echo "$s"; fi
-  done
-  return 0
-}
-
-# The launchd jobs this sandbox's sessions started shells with, one
-# label per line: a job names the spec file it was started with, and
-# that file lives under the state dir.  A session removes its job as
-# soon as the shell is up, so normally there is none.
-dev_pane_job_labels() {
-  local l
-  for l in $(launchctl list 2>/dev/null | awk '$3 ~ /^com\.marspot\.pane\./ {print $3}'); do
-    if launchctl print "gui/$(id -u)/$l" 2>/dev/null | grep -qF "$MARSPOT_STATE_DIR/pane-jobs/"; then
-      echo "$l"
-    fi
   done
   return 0
 }
@@ -194,6 +179,9 @@ dev_kill_shell_core() {
   done
   # kill(1) succeeds when any one pid took the signal, so `kill -0` over
   # the list is "some are still alive"
+  # the sessions start a shell again when the one on record dies: with
+  # no record there is none to replace
+  rm -f "$MARSPOT_STATE_DIR/owner"
   if (( ${#upper[@]} > 0 )); then
     kill -TERM "${upper[@]}" 2>/dev/null || true
     for ((i = 0; i < 25; i++)); do
@@ -207,10 +195,6 @@ dev_kill_shell_core() {
     # shellcheck disable=SC2086
     kill -0 $pids 2>/dev/null || break
     sleep 0.2
-  done
-  # a session killed while starting its shell leaves the job listed
-  for p in $(dev_pane_job_labels); do
-    launchctl bootout "gui/$(id -u)/$p" 2>/dev/null || true
   done
   if [[ -f $MARSPOT_STATE_DIR/dev.pids ]]; then
     : > "$MARSPOT_STATE_DIR/dev.pids"
