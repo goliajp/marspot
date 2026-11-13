@@ -10,14 +10,27 @@
 //! The items the system provides are in the language the process was
 //! launched in and stay there; what this can do is make the next launch
 //! come up in the chosen one, by naming it in the app's own defaults.
+//!
+//! The system's list is read on a supervisor pass, and the supervisor
+//! rests while nothing happens.  The system says when the user's locale
+//! changed, which a change of the preferred languages is; that asks for
+//! a pass, so the change is followed when it is made and not when the
+//! window is next touched.
 
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use marspot::lx_event;
 use marspot::lx_warn;
 use marspot_term::language::{self, LangId};
+use objc2::rc::Retained;
+use objc2::runtime::NSObject;
+use objc2::{AnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_app_kit::NSApplication;
-use objc2_foundation::{MainThreadMarker, NSArray, NSBundle, NSLocale, NSString, NSUserDefaults};
+use objc2_foundation::{
+    MainThreadMarker, NSArray, NSBundle, NSCurrentLocaleDidChangeNotification, NSLocale, NSNotification,
+    NSNotificationCenter, NSString, NSUserDefaults,
+};
 
 /// What was last published as the system's language; `u8::MAX` before
 /// the first tick.
@@ -26,6 +39,58 @@ static PUBLISHED: AtomicU8 = AtomicU8::new(u8::MAX);
 /// `u8::MAX - 1` for nothing; `u8::MAX` before the first tick.
 static NAMED: AtomicU8 = AtomicU8::new(u8::MAX);
 const NOTHING_NAMED: u8 = u8::MAX - 1;
+
+thread_local! {
+    /// The notification center holds its observers unretained.
+    static WATCH: RefCell<Option<Retained<LocaleWatch>>> = const { RefCell::new(None) };
+}
+
+define_class!(
+    // SAFETY:
+    // - NSObject has no subclassing requirements.
+    // - The one ivar is a function pointer; no Drop logic.
+    #[unsafe(super(NSObject))]
+    #[name = "MarspotLocaleWatch"]
+    #[ivars = fn()]
+    struct LocaleWatch;
+
+    impl LocaleWatch {
+        #[unsafe(method(changed:))]
+        fn changed(&self, _note: &NSNotification) {
+            (self.ivars())();
+        }
+    }
+);
+
+/// Call `on_change` whenever the system says the user's locale changed,
+/// on the thread the notification is posted on.  One watch a thread: a
+/// second call replaces the first.
+fn watch(on_change: fn()) {
+    unwatch();
+    let this = LocaleWatch::alloc().set_ivars(on_change);
+    // SAFETY: NSObject's `init`, on a freshly allocated subclass.
+    let watch: Retained<LocaleWatch> = unsafe { msg_send![super(this), init] };
+    // SAFETY: the observer is kept until `unwatch` removes it, and its
+    // selector takes the notification.
+    unsafe {
+        NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+            &watch,
+            sel!(changed:),
+            Some(NSCurrentLocaleDidChangeNotification),
+            None,
+        );
+    }
+    WATCH.with(|w| *w.borrow_mut() = Some(watch));
+}
+
+/// Stop watching: the app was put away, and the shell that stays for
+/// its sessions has no text to bring to another language.
+pub(super) fn unwatch() {
+    if let Some(watch) = WATCH.with(|w| w.borrow_mut().take()) {
+        // SAFETY: removes the observer registered in `watch`.
+        unsafe { NSNotificationCenter::defaultCenter().removeObserver(&watch) };
+    }
+}
 
 fn sandboxed() -> bool {
     std::env::var_os("MARSPOT_DEV_SANDBOX").is_some()
@@ -74,11 +139,13 @@ fn name_for_next_launch(choice: Option<LangId>) {
 
 /// Put the language in force before anything is titled: the setting,
 /// and what `system` resolves to.  The menu bar is built once, at
-/// launch, and has to be built in the language the user reads.
+/// launch, and has to be built in the language the user reads.  From
+/// here on a change of the system's list asks for a pass.
 pub(super) fn at_launch() {
     let _ = marspot::settings::get();
     language::set_system(sandboxed().then(sandbox_system_language).flatten().unwrap_or_else(system_language));
     marspot::ui::strings::follow_language();
+    watch(crate::pump::knock);
 }
 
 impl super::super::ShellApp {
@@ -111,5 +178,50 @@ impl super::super::ShellApp {
                 lx_event!("MENU_BAR_ITEMS", "one menu's items", lang = lang, menu = title.as_str(), items = items.join("|"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    static SEEN: AtomicUsize = AtomicUsize::new(0);
+
+    fn seen() {
+        SEEN.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn post(name: &objc2_foundation::NSNotificationName) {
+        // SAFETY: a notification with no object and no user info.
+        unsafe { NSNotificationCenter::defaultCenter().postNotificationName_object(name, None) };
+    }
+
+    /// The system's notification of a changed locale reaches the watch,
+    /// once for each time it is posted, and nothing else posted to the
+    /// same center does; after `unwatch` it reaches nothing.
+    #[test]
+    fn a_changed_locale_asks_once_and_only_while_watched() {
+        // SAFETY: Foundation's own constant strings, valid for the process.
+        let (locale, other) = unsafe { (NSCurrentLocaleDidChangeNotification, objc2_foundation::NSSystemClockDidChangeNotification) };
+        post(locale);
+        assert_eq!(SEEN.load(Ordering::SeqCst), 0, "nothing watches yet");
+
+        watch(seen);
+        post(locale);
+        assert_eq!(SEEN.load(Ordering::SeqCst), 1);
+        post(other);
+        assert_eq!(SEEN.load(Ordering::SeqCst), 1, "another notification is not a changed locale");
+        post(locale);
+        assert_eq!(SEEN.load(Ordering::SeqCst), 2);
+
+        // a second watch replaces the first: one call a change, not two
+        watch(seen);
+        post(locale);
+        assert_eq!(SEEN.load(Ordering::SeqCst), 3);
+
+        unwatch();
+        post(locale);
+        assert_eq!(SEEN.load(Ordering::SeqCst), 3, "put away: nothing is asked for");
     }
 }
