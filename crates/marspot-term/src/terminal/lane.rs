@@ -108,6 +108,26 @@ pub(super) fn fast_pict_width(ch: char) -> Option<u8> {
     Some(2)
 }
 
+/// One cell per byte, characters only: for cells that already carry
+/// the attributes they are to have.
+// out of line: inside `feed` the loop competes for registers with
+// everything else the lane holds
+#[inline(never)]
+fn write_chars(cells: &mut [Cell], bytes: &[u8]) {
+    for (cell, &b) in cells.iter_mut().zip(bytes) {
+        cell.ch = b as char;
+    }
+}
+
+/// One cell per byte, each written whole.
+#[inline(never)]
+fn write_cells(cells: &mut [Cell], bytes: &[u8], attrs: &CellAttrs) {
+    let attrs = *attrs;
+    for (cell, &b) in cells.iter_mut().zip(bytes) {
+        *cell = Cell { ch: b as char, attrs };
+    }
+}
+
 impl<'a> Handler<'a> {
     /// End the pending cluster ahead of a fast-class head IF a
     /// boundary before that head is unconditional.  Returns false when
@@ -238,13 +258,9 @@ impl<'a> Handler<'a> {
                         break 0;
                     }
                     if col >= fresh {
-                        for (cell, &b) in cells[col..col + m].iter_mut().zip(rest) {
-                            cell.ch = b as char;
-                        }
+                        write_chars(&mut cells[col..col + m], rest);
                     } else {
-                        for (cell, &b) in cells[col..col + m].iter_mut().zip(rest) {
-                            *cell = Cell { ch: b as char, attrs };
-                        }
+                        write_cells(&mut cells[col..col + m], rest, &attrs);
                     }
                     col += m;
                     idx += m;
