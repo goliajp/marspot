@@ -41,7 +41,13 @@ impl Grid {
             // gates the REGION path, so resetting it is enough — and
             // erring toward "do not collapse" is the safe direction.
             self.filed_blank_run = 0;
-            let row_clusters = self.degrade_clusters_in_row(start, cols);
+            // one row in millions holds a cluster: the test is made
+            // here and the calls only for that row
+            let row_clusters = if self.clusters.is_empty() {
+                Vec::new()
+            } else {
+                self.degrade_clusters_in_row(start, cols)
+            };
             let row_mark = self.marks[pr];
             let end = row_mark.end as usize;
             debug_assert!(
@@ -74,7 +80,9 @@ impl Grid {
             if mark != PromptMark::None {
                 self.scrollback.mark_last_line(mark);
             }
-            self.keep_row_clusters(row_clusters);
+            if !row_clusters.is_empty() || !self.scrollback.keeps_cluster_text() {
+                self.keep_row_clusters(row_clusters);
+            }
             self.wrapped[pr] = false;
             if fill.is_default() {
                 // the cells past what the line used are default
