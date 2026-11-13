@@ -32,7 +32,28 @@ impl RowMark {
 
     /// A row every cell of which is `fill`.
     pub(super) fn filled(fill: Cell, cols: u16) -> Self {
-        if fill == Cell::default() { RowMark::default() } else { RowMark::unknown(cols) }
+        if fill.is_default() { RowMark::default() } else { RowMark::unknown(cols) }
+    }
+}
+
+impl CellAttrs {
+    /// Whether these are the default attributes: one compare of the
+    /// sixteen bytes, where `==` goes a field at a time.
+    #[inline(always)]
+    pub fn is_default(&self) -> bool {
+        // SAFETY: `CellAttrs` is `repr(C)`, sixteen bytes, with its
+        // padding spelt out as a field and every byte initialised
+        // (asserted beside `Cell`), and u8 has alignment 1.
+        let bytes = unsafe { &*(self as *const CellAttrs as *const [u8; 16]) };
+        u128::from_ne_bytes(*bytes) == 0
+    }
+}
+
+impl Cell {
+    /// Whether this is `Cell::default()`.
+    #[inline(always)]
+    pub fn is_default(&self) -> bool {
+        self.ch == ' ' && self.attrs.is_default()
     }
 }
 
@@ -46,7 +67,7 @@ impl Grid {
         if col >= mark.end {
             mark.end = col + 1;
         }
-        if col >= mark.plain_from && cell.attrs != CellAttrs::default() {
+        if col >= mark.plain_from && !cell.attrs.is_default() {
             mark.plain_from = col + 1;
         }
         mark.wide |= cell.ch as u32 >= 0x80;
@@ -95,6 +116,29 @@ mod tests {
         *s ^= *s >> 7;
         *s ^= *s << 17;
         *s
+    }
+
+    /// The byte compare answers what `==` answers.
+    #[test]
+    fn the_default_attributes_are_told_from_any_others() {
+        let plain = CellAttrs::default();
+        assert!(plain.is_default() && Cell::default().is_default());
+        let others = [
+            CellAttrs { fg: Color::indexed(0), ..plain },
+            CellAttrs { bg: Color::rgb(0, 0, 0), ..plain },
+            CellAttrs { bold: true, ..plain },
+            CellAttrs { italic: true, ..plain },
+            CellAttrs { underline: true, ..plain },
+            CellAttrs { reverse: true, ..plain },
+            CellAttrs { dim: true, ..plain },
+            CellAttrs { _pad: [super::super::FLAG_CLUSTER, 0, 0], ..plain },
+        ];
+        for attrs in others {
+            assert_ne!(attrs, plain);
+            assert!(!attrs.is_default(), "{attrs:?}");
+            assert!(!Cell { ch: ' ', attrs }.is_default());
+        }
+        assert!(!Cell::from('x').is_default());
     }
 
     #[test]

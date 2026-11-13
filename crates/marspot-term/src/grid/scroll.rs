@@ -73,7 +73,7 @@ impl Grid {
             }
             self.keep_row_clusters(row_clusters);
             self.wrapped[pr] = false;
-            if fill == Cell::default() {
+            if fill.is_default() {
                 // the cells past what the line used are default
                 // already, and the rest is one copy of a blank row
                 if row_mark.plain_from == 0 {
