@@ -42,15 +42,15 @@ impl Grid {
             // erring toward "do not collapse" is the safe direction.
             self.filed_blank_run = 0;
             let row_clusters = self.degrade_clusters_in_row(start, cols);
-            let mark = self.marks[pr];
-            let end = mark.end as usize;
+            let row_mark = self.marks[pr];
+            let end = row_mark.end as usize;
             debug_assert!(
                 self.cells[start + end..start + cols].iter().all(|c| *c == Cell::default())
             );
             // the file variant drops a row's blank tail, so it is
             // handed the row without it; the ring wants full rows
             let filed = if self.scrollback.keeps_wrapped_flags() { end } else { cols };
-            let hint = RowHint { plain_from: mark.plain_from, wide: mark.wide };
+            let hint = RowHint { plain_from: row_mark.plain_from, wide: row_mark.wide };
             let used = self.scrollback
                 .push_row(&self.cells[start..start + filed], self.wrapped[pr], hint);
             let mark = std::mem::take(&mut self.prompt[pr]);
@@ -76,7 +76,15 @@ impl Grid {
             if fill == Cell::default() {
                 // the cells past what the line used are default
                 // already, and the rest is one copy of a blank row
-                self.cells[start..start + used].copy_from_slice(&self.blank[..used]);
+                if row_mark.plain_from == 0 {
+                    // nothing in the row but characters ever differed
+                    // from a default cell
+                    for c in &mut self.cells[start..start + used] {
+                        c.ch = ' ';
+                    }
+                } else {
+                    self.cells[start..start + used].copy_from_slice(&self.blank[..used]);
+                }
                 self.marks[pr] = RowMark::default();
             } else {
                 for c in &mut self.cells[start..start + cols] {

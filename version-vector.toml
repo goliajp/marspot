@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.328"  # a week the usage feed has no reading for is not a week with nothing used
-core    = "0.12.484"  # a wide character is classed by one table lookup
-session = "0.11.324"  # a wide character is classed by one table lookup
+core    = "0.12.485"  # a row of plain text that scrolls off is blanked by its characters
+session = "0.11.325"  # a row of plain text that scrolls off is blanked by its characters
