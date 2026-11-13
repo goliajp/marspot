@@ -170,7 +170,8 @@ impl Plugin for PeerbusPlugin {
             .live()
             .filter_map(|s| {
                 let p = s.find("codex")?;
-                let title = marspot_term::grid_shm::title::read(s.entry.id).ok().flatten();
+                let title = marspot_term::grid_shm::SessionRegions::of_entry(&s.entry)
+                    .and_then(|r| marspot_term::grid_shm::title::read(&r).ok().flatten());
                 Some(Want {
                     sid: s.entry.id,
                     codex: p.row.id(),

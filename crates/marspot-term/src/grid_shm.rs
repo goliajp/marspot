@@ -36,19 +36,26 @@
 //! misinterpret bytes).
 
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::sync::atomic::{AtomicU64, Ordering, fence};
 
 use crate::grid::{Cell, Grid};
 
 pub mod clusters;
 mod hash;
+mod ident;
+mod names;
 mod peek;
+mod region;
 pub mod title;
 pub use clusters::{ClusterTable, ClusterTableReader, ClusterTableWriter};
+pub use ident::{Identity, SessionRegions, delete_session_regions};
+pub use names::{session_shm_name, state_hash};
+pub use region::{create_region, create_region_named, delete_region, open_region};
 pub use title::TitleWriter;
 pub use peek::{Frame, peek, peek_frame};
 use hash::compute_publish_hash;
+use region::attach_and_maybe_upgrade;
 
 const MAGIC: u32 = 0x4d_53_47_31; // "MSG1"
 // VERSION 3 (2026-06-17): per-row DECAWM wrap flags appended after the
@@ -217,289 +224,6 @@ fn fits_capacity(cols: u16, rows: u16) -> bool {
     cols as usize * rows as usize <= MAX_CELLS && rows as usize <= MAX_ROWS
 }
 
-/// Unique-per-process shm name. macOS caps shm names at ~31 bytes
-/// including the leading '/'; `/msp-g-<pid>-<n>` stays well under.
-fn next_shm_name() -> std::ffi::CString {
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::ffi::CString::new(format!("/msp-g-{}-{}", std::process::id(), n)).unwrap()
-}
-
-/// Deterministic shm name for a given session id.  Lets a freshly
-/// spawned L2 reattach to a surviving L3's shm region by name (the
-/// fd doesn't survive the swap; the name does).  Same length budget
-/// as `next_shm_name`: `/msp-s-<u64>` is at most 27 chars including
-/// the leading '/', under macOS's ~31-char cap.
-pub fn session_shm_name(session_id: u64) -> std::ffi::CString {
-    std::ffi::CString::new(format!("/msp-s-{session_id}")).unwrap()
-}
-
-/// Create + size + stamp a fresh shared region under a caller-chosen
-/// name (typically `session_shm_name(id)`), **without** unlinking it
-/// — so a separate process can later `shm_open` the same name.  The
-/// caller is responsible for `delete_region(name)` on retirement.
-///
-/// Used by RFC-003 step 3.5: L2 creates one region per L3 with the
-/// session id baked in the name; a post-silent-update L2 can find a
-/// surviving L3 by scanning `sessions/<id>/entry.toml` and re-opening
-/// the region.
-pub fn create_region_named(cols: u16, rows: u16, name: &std::ffi::CStr) -> io::Result<OwnedFd> {
-    assert!(cols > 0 && rows > 0, "grid_shm: zero dimension");
-    assert!(
-        fits_capacity(cols, rows),
-        "grid_shm: {cols}x{rows} exceeds capacity cap {MAX_CELLS} cells"
-    );
-    let len = capacity_bytes();
-
-    // Best-effort unlink first so a stale name from a prior crashed L3
-    // doesn't block O_EXCL.  ENOENT is the expected case on a fresh
-    // boot — ignore.
-    unsafe { libc::shm_unlink(name.as_ptr()) };
-
-    let fd = unsafe {
-        libc::shm_open(
-            name.as_ptr(),
-            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
-            0o600,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-
-    if unsafe { libc::ftruncate(fd.as_raw_fd(), len as libc::off_t) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    let base = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            len,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            fd.as_raw_fd(),
-            0,
-        )
-    };
-    if base == libc::MAP_FAILED {
-        return Err(io::Error::last_os_error());
-    }
-    unsafe {
-        let h = base as *mut Header;
-        (*h).magic = MAGIC;
-        (*h).version = VERSION;
-        (*h).cell_size = std::mem::size_of::<Cell>() as u32;
-        (*h).cols = cols as u32;
-        (*h).rows = rows as u32;
-        libc::munmap(base, len);
-    }
-    Ok(fd)
-}
-
-/// Re-open an existing shm region by name (RDWR so the caller can use
-/// it as either reader or writer).  Used by L2 boot reattach.
-pub fn open_region(name: &std::ffi::CStr) -> io::Result<OwnedFd> {
-    let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDWR, 0) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
-/// Remove every region a session publishes through: the grid region
-/// named `main`, and session `id`'s cluster and title regions.
-pub fn delete_session_regions(main: &std::ffi::CStr, id: u64) {
-    delete_region(main);
-    delete_side_regions(id);
-}
-
-/// Remove session `id`'s cluster and title regions.
-pub fn delete_side_regions(id: u64) {
-    clusters::delete(id);
-    title::delete(id);
-}
-
-/// Best-effort `shm_unlink` of a region by name.  Called when a
-/// session is retired so the kernel actually frees the memory once
-/// every fd-holder has closed it.
-pub fn delete_region(name: &std::ffi::CStr) {
-    unsafe { libc::shm_unlink(name.as_ptr()) };
-}
-
-/// Map a region and, if needed, upgrade its layout in place to the
-/// current `VERSION`.  Used by both `GridShmWriter::from_fd` and
-/// `GridShmReader::from_fd` so the silent-update path (L3 self-execv
-/// across a shm wire bump) is lossless regardless of which side
-/// attaches first.
-///
-/// Steps:
-///   1. fstat → size.  If smaller than the current capacity, ftruncate
-///      up so the v3 mapping has room for the new wrapped-flag area.
-///   2. mmap RDWR | SHARED at full capacity.
-///   3. Read magic + version + cell_size + dims.  Reject anything
-///      whose magic / cell_size / dims don't match this build, or
-///      whose version is below `VERSION_MIN_COMPAT` or above the
-///      current `VERSION`.
-///   4. If version < `VERSION`, run the per-version upgrade lambda
-///      (currently just v2→v3: zero the wrapped area, atomic-bump
-///      header.version).  After this everyone sees v3.
-///
-/// Returns `(base, len, cols, rows)` on success.
-fn attach_and_maybe_upgrade(fd: RawFd) -> io::Result<(*mut u8, usize, u16, u16)> {
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut st) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let cur_size = st.st_size as usize;
-    if cur_size < HEADER_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "grid_shm: region smaller than header",
-        ));
-    }
-    let want_size = capacity_bytes();
-    if cur_size < want_size {
-        // Best-effort grow.  Failure here is fatal — without the
-        // full v3 capacity we can't safely write wrapped flags.
-        if unsafe { libc::ftruncate(fd, want_size as libc::off_t) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    let len = want_size;
-    let base = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            len,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            fd,
-            0,
-        )
-    };
-    if base == libc::MAP_FAILED {
-        return Err(io::Error::last_os_error());
-    }
-    let base = base as *mut u8;
-
-    let h = base as *const Header;
-    let (magic, version, cell_size, cols, rows) = unsafe {
-        (
-            (*h).magic,
-            (*h).version,
-            (*h).cell_size,
-            (*h).cols,
-            (*h).rows,
-        )
-    };
-    let bad = magic != MAGIC
-        || !(VERSION_MIN_COMPAT..=VERSION).contains(&version)
-        || cell_size != std::mem::size_of::<Cell>() as u32
-        || region_len(cols as u16, rows as u16) > len;
-    if bad {
-        unsafe {
-            libc::munmap(base as *mut libc::c_void, len);
-        }
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "grid_shm: incompatible region (magic/version/cell-size/dims)",
-        ));
-    }
-
-    if version < VERSION {
-        // v2 → v3 upgrade: cell layout unchanged, but the v2 mapping
-        // had no wrapped-flag area.  We've already ftruncate'd to v3
-        // capacity above, so the wrapped area exists as zero pages
-        // by virtue of ftruncate's zero-fill guarantee.  Be defensive
-        // anyway and explicitly zero the wrapped region, then atomic-
-        // bump the version so subsequent attachers stop upgrading.
-        unsafe {
-            let wrapped = base.add(wrapped_offset());
-            std::ptr::write_bytes(wrapped, 0, MAX_ROWS);
-            // Release fence so the wrapped zeros + size are visible
-            // before another process observes version=3.
-            fence(Ordering::Release);
-            let h = base as *mut Header;
-            (*h).version = VERSION;
-        }
-    }
-
-    Ok((base, len, cols as u16, rows as u16))
-}
-
-/// Create + size + stamp a fresh shared region for `cols × rows`, and
-/// return its fd.
-///
-/// The *creator* owns the region's lifecycle and stamps the immutable
-/// header identity (magic / version / cell-size / dims) here, so both
-/// the writer ([`GridShmWriter::from_fd`]) and any readers
-/// ([`GridShmReader::from_fd`]) can map and validate the same fd in
-/// either order — no "map before the first publish" race. This is the
-/// L2-owns-shm split: L2 calls `create_region`, inherits the fd into the
-/// L3 child (the writer), and maps a `dup` as the reader itself. The shm
-/// name is unlinked immediately, so only fd holders can map it.
-pub fn create_region(cols: u16, rows: u16) -> io::Result<OwnedFd> {
-    assert!(cols > 0 && rows > 0, "grid_shm: zero dimension");
-    assert!(
-        fits_capacity(cols, rows),
-        "grid_shm: {cols}x{rows} exceeds capacity cap {MAX_CELLS} cells"
-    );
-    // Always map the full capacity so a later resize within the cap is a
-    // header change, not a remap; lazily faulted so only the live dims
-    // are resident.
-    let len = capacity_bytes();
-    let name = next_shm_name();
-
-    // O_EXCL so a stale name from a crashed peer can't be reused
-    // mid-flight; we unlink right after creating anyway.
-    let fd = unsafe {
-        libc::shm_open(
-            name.as_ptr(),
-            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
-            0o600,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    // Free the name now; the fd + future mappings survive.
-    unsafe {
-        libc::shm_unlink(name.as_ptr());
-    }
-
-    if unsafe { libc::ftruncate(fd.as_raw_fd(), len as libc::off_t) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    // Temporarily map to stamp the immutable header, then unmap; the
-    // writer/readers re-map via `from_fd`. ftruncate zero-fills, so seq
-    // starts at 0 (even = stable, "never published") with no extra work.
-    let base = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            len,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            fd.as_raw_fd(),
-            0,
-        )
-    };
-    if base == libc::MAP_FAILED {
-        return Err(io::Error::last_os_error());
-    }
-    unsafe {
-        let h = base as *mut Header;
-        (*h).magic = MAGIC;
-        (*h).version = VERSION;
-        (*h).cell_size = std::mem::size_of::<Cell>() as u32;
-        (*h).cols = cols as u32;
-        (*h).rows = rows as u32;
-        libc::munmap(base, len);
-    }
-    Ok(fd)
-}
-
 /// Writer side (L3): owns the shm region and publishes grid snapshots.
 pub struct GridShmWriter {
     fd: OwnedFd,
@@ -550,7 +274,7 @@ impl GridShmWriter {
     /// Forward-compat: a v2 region is upgraded to v3 in place (see
     /// `attach_and_maybe_upgrade`).
     pub fn from_fd(fd: OwnedFd) -> io::Result<Self> {
-        let (base, len, cols, rows) = attach_and_maybe_upgrade(fd.as_raw_fd())?;
+        let region::Mapped { base, len, cols, rows } = attach_and_maybe_upgrade(fd.as_raw_fd())?;
         Ok(Self {
             fd,
             base,
@@ -568,27 +292,58 @@ impl GridShmWriter {
         })
     }
 
-    /// Publish the text of each frame's clusters for session `id` from
-    /// now on -- see [`clusters`]. Without it a reader draws a cluster
-    /// cell's pool index, so a failure is logged and the frame goes out
-    /// without its clusters, as frames always did.
-    pub fn attach_clusters(&mut self, id: u64) {
-        match ClusterTableWriter::open(id) {
+    /// Say whose region this is, for a reader that asks; a region
+    /// its creator signed for `owner` is left as it is.  False for a
+    /// region from a build that left no room for it.
+    pub fn stamp(&mut self, owner: Identity) -> bool {
+        let Some(at) = region::ident_at(self.base, self.len) else {
+            return false;
+        };
+        if unsafe { ident::read(at) } != Some(owner) {
+            unsafe { ident::stamp(at, owner, ident::new_serial()) };
+        }
+        true
+    }
+
+    /// Whose region this says it is.
+    pub fn identity(&self) -> Option<Identity> {
+        region::ident_at(self.base, self.len).and_then(|at| unsafe { ident::read(at) })
+    }
+
+    /// Which of its session's regions this is -- see [`ident`].
+    pub fn serial(&self) -> Option<u64> {
+        region::ident_at(self.base, self.len).and_then(|at| unsafe { ident::read_serial(at) })
+    }
+
+    /// Publish the text of each frame's clusters and the window title
+    /// from now on, in the regions named after the grid region `grid`
+    /// -- see [`clusters`] and [`title`].  Without the first a reader
+    /// draws a cluster cell's pool index and nothing reads the second,
+    /// so a failure is logged and the session runs without.
+    pub fn attach_side_regions(&mut self, grid: &std::ffi::CStr, owner: Identity) {
+        use names::{Side, side_name};
+        self.clusters = None;
+        self.title = None;
+        let Some((clusters, title)) = side_name(grid, Side::Clusters).zip(side_name(grid, Side::Title))
+        else {
+            return;
+        };
+        match ClusterTableWriter::open(&clusters, owner) {
             Ok(w) => {
                 self.clusters = Some(w);
                 self.last_publish_hash = 0;
             }
-            Err(e) => crate::lx_warn!("grid_shm.clusters.open_failed", &format!("{e}"), session_id = id),
+            Err(e) => crate::lx_warn!(
+                "grid_shm.clusters.open_failed",
+                &format!("{e}"),
+                session_id = owner.session
+            ),
         }
-    }
-
-    /// Publish the window title for session `id` from now on -- see
-    /// [`title`]. Nothing draws it, so a failure is logged and the
-    /// session runs without it.
-    pub fn attach_title(&mut self, id: u64) {
-        match TitleWriter::open(id) {
+        match TitleWriter::open(&title, owner) {
             Ok(w) => self.title = Some(w),
-            Err(e) => crate::lx_warn!("grid_shm.title.open_failed", &format!("{e}"), session_id = id),
+            Err(e) => {
+                crate::lx_warn!("grid_shm.title.open_failed", &format!("{e}"), session_id = owner.session)
+            }
         }
     }
 
@@ -801,7 +556,7 @@ impl GridShmReader {
     /// read-only, but maps RDWR so a single one-shot upgrade store
     /// on first attach is safe.
     pub fn from_fd(fd: RawFd) -> io::Result<Self> {
-        let (base, len, cols, rows) = attach_and_maybe_upgrade(fd)?;
+        let region::Mapped { base, len, cols, rows } = attach_and_maybe_upgrade(fd)?;
         Ok(Self {
             base: base as *const u8,
             len,
@@ -809,6 +564,24 @@ impl GridShmReader {
             rows,
             clusters: None,
         })
+    }
+
+    /// Map the grid region `regions` names, when it is that session's.
+    pub fn open(regions: &SessionRegions) -> io::Result<Self> {
+        let fd = open_region(regions.grid_name())?;
+        let reader = Self::from_fd(fd.as_raw_fd())?;
+        regions.admit(reader.identity())?;
+        Ok(reader)
+    }
+
+    /// Whose region this says it is.
+    pub fn identity(&self) -> Option<Identity> {
+        region::ident_at(self.base as *mut u8, self.len).and_then(|at| unsafe { ident::read(at) })
+    }
+
+    /// Which of its session's regions this is -- see [`ident`].
+    pub fn serial(&self) -> Option<u64> {
+        region::ident_at(self.base as *mut u8, self.len).and_then(|at| unsafe { ident::read_serial(at) })
     }
 
     pub fn cols(&self) -> u16 {

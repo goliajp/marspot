@@ -6,5 +6,6 @@ mod support;
 mod flood_frames;
 mod flood_interrupt;
 mod focus_reporting;
+mod move_region;
 mod self_execv;
 mod signals_in_the_pane;

@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.328"  # a week the usage feed has no reading for is not a week with nothing used
-core    = "0.12.360"  # the shared controls and the panel frame can be nodes of an interface tree
-session = "0.11.201"  # the reader keeps three chunks, not four, ahead of a key's answer
+shell   = "0.7.420"  # a pane's title and mode flags are read only from a region that is that session's
+core    = "0.12.460"  # a session whose grid region cannot be shown is given another, not started again
+session = "0.11.300"  # regions are named per state directory, carry whose they are, and can be left for another
