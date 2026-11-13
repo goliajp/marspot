@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.361"  # the shell that stays after a quit keeps no release poll, no CLI installer, no process table
-core    = "0.12.451"  # the context menu described as a tree draws what its canvas draws
+core    = "0.12.452"  # the context menu is drawn from its tree, and the canvas is gone
 session = "0.11.201"  # the reader keeps three chunks, not four, ahead of a key's answer

@@ -12,7 +12,7 @@ use std::rc::Rc;
 use crate::font_cache::FontCache;
 use crate::frame_build::color::rgba8_of_f32;
 use crate::glyph_atlas::GlyphKey;
-use crate::ui::components::context_menu::{ContextMenu, ContextMenuHit, MenuItem};
+use crate::ui::components::context_menu::{self, ContextMenuHit, MenuItem};
 use crate::ui::components::panel_palette as palette;
 use crate::ui::core::ViewPainter;
 use crate::ui::theme::PanelText;
@@ -20,7 +20,7 @@ use crate::ui::theme::spec::{card, chrome, panel};
 use crate::ui::tree::kept::Place;
 use crate::ui::tree::{KeptSurface, preset};
 use golia_ui_core::scene::UiRectInstance;
-use golia_ui_core::{Action, Edges, GroupKind, Length, Ui, WidgetId, WidgetState};
+use golia_ui_core::{Action, Edges, GroupKind, Length, NodeId, Ui, WidgetId, WidgetState};
 use marspot_term::layout::Rect;
 
 /// A row was pressed: the argument is its index among the items.
@@ -170,6 +170,8 @@ pub struct MenuSurface {
     frame: Rect,
     /// Moved each time the kept instances are painted again.
     painted_rev: u64,
+    /// The kept instances as the renderer last uploaded them.
+    pub(crate) buffers: crate::render_metal::MenuBuffers,
 }
 
 impl Default for MenuSurface {
@@ -180,6 +182,7 @@ impl Default for MenuSurface {
             data_rev: 0,
             frame: Rect { x: 0.0, y_top: 0.0, w: 0.0, h: 0.0 },
             painted_rev: 0,
+            buffers: Default::default(),
         }
     }
 }
@@ -195,7 +198,7 @@ impl MenuSurface {
                 && d.scale == scale
         });
         if !same {
-            self.frame = ContextMenu::frame_of(
+            self.frame = context_menu::frame_of(
                 window.0, window.1, scale, m.anchor_phys.0, m.anchor_phys.1, m.top_inset, &m.items,
             );
             self.described = Some(Described {
@@ -240,6 +243,15 @@ impl MenuSurface {
     /// Where the menu stands in the window it was last laid out in.
     pub fn frame_rect(&self) -> Rect {
         self.frame
+    }
+
+    /// The middle of row `i` in the layout last made: where to put the
+    /// pointer to have it on that row.
+    pub fn row_centre(&self, i: usize) -> Option<(f64, f64)> {
+        let s = &self.kept.surface;
+        let at = s.tree().nodes().iter().position(|n| n.leaf_tag == preset::MENU_ROW && n.action.arg == i as u32)?;
+        let r = s.layout().rect(NodeId(at as u32));
+        Some((r.x + r.w * 0.5, r.y + r.h * 0.5))
     }
 
     /// Which picture the kept instances are: moves when they change.

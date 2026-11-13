@@ -16,7 +16,8 @@ use marspot::ui::{
     Selection, SelectionMode, CELL_TITLE_PT, MAX_SIDEBAR_LABEL_CHARS,
     SESSION_COUNT_HARD_CAP, SIDEBAR_W_LOGICAL, strings::{t, Msg},
 };
-use marspot::ui::components::{ContextMenu, ContextMenuHit, MenuItem};
+use marspot::ui::components::context_menu_view::{MenuRender, MenuSurface};
+use marspot::ui::components::{ContextMenuHit, MenuItem};
 
 /// F3+9 — which region of the window the user right-clicked.  Used
 /// to pick the menu's items.  Stored on `ContextMenuState` so the
@@ -78,14 +79,27 @@ impl ContextMenuAction {
 /// - the region (so the action dispatcher knows the target pane /
 ///   slot when an item fires).
 ///
-/// `hovered_idx` is the row currently under the cursor (None = no
-/// row hovered, e.g. cursor over the menu frame's padding).
+/// The surface holds the menu's layout and which row the pointer is
+/// on; a press is tested against it.
 struct ContextMenuState {
-    items: Vec<MenuItem>,
+    items: std::rc::Rc<[MenuItem]>,
     anchor_x: f64,
     anchor_y: f64,
     region: ContextRegion,
-    hovered_idx: Option<usize>,
+    surface: std::rc::Rc<std::cell::RefCell<MenuSurface>>,
+}
+
+impl ContextMenuState {
+    /// What a frame of the menu is drawn from, under `top_inset`.
+    fn render(&self, top_inset: f64) -> MenuRender {
+        MenuRender {
+            anchor_phys: (self.anchor_x, self.anchor_y),
+            top_inset,
+            items: self.items.clone(),
+            pointer: None,
+            surface: self.surface.clone(),
+        }
+    }
 }
 
 pub const VERSION: &str = marspot::PRODUCT_VERSION;
@@ -496,18 +510,16 @@ impl MarspotApp for Marspot {
         // menu and fall through so the click also reaches the
         // underlying chrome / pane.
         if self.context_menu.is_some() {
-            let (window_w, window_h) = ctx.inner_size_phys();
-            let scale = ctx.scale();
+            let window = ctx.inner_size_phys();
             let top_inset = self.layout.as_ref().map(|l| l.top_inset).unwrap_or(0.0);
             let (hit, region) = {
                 let state = self.context_menu.as_ref().unwrap();
-                let menu = ContextMenu::layout(
-                    window_w, window_h, scale,
-                    state.anchor_x, state.anchor_y,
-                    top_inset,
-                    &state.items,
-                );
-                (menu.hit_test(&state.items, x_phys, y_phys), state.region)
+                let menu = state.render(top_inset);
+                let mut surface = menu.surface.borrow_mut();
+                if let Some(r) = self.renderer.as_mut() {
+                    surface.lay_out(r.font_mut(), &menu, window);
+                }
+                (surface.press(x_phys, y_phys), state.region)
             };
             match hit {
                 ContextMenuHit::Item(idx) => {
@@ -851,35 +863,25 @@ impl MarspotApp for Marspot {
             return;
         }
         self.context_menu = Some(ContextMenuState {
-            items,
+            items: items.into(),
             anchor_x: x_phys,
             anchor_y: y_phys,
             region,
-            hovered_idx: None,
+            surface: Default::default(),
         });
         ctx.request_redraw();
     }
 
     fn mouse_moved(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64) {
-        // Drive context-menu hover highlight when the menu is open.
-        // Layout has to re-walk so this is `O(items)` per mouse move
-        // — negligible for menus of ~10 rows.
-        if self.context_menu.is_none() {
-            return;
-        }
-        let (window_w, window_h) = ctx.inner_size_phys();
-        let scale = ctx.scale();
+        // The row under the pointer lights while the menu is open.
+        let Some(state) = self.context_menu.as_ref() else { return };
         let top_inset = self.layout.as_ref().map(|l| l.top_inset).unwrap_or(0.0);
-        let Some(state) = self.context_menu.as_mut() else { return };
-        let menu = ContextMenu::layout(
-            window_w, window_h, scale,
-            state.anchor_x, state.anchor_y,
-            top_inset,
-            &state.items,
-        );
-        let new_hover = menu.hover_index(&state.items, x_phys, y_phys);
-        if new_hover != state.hovered_idx {
-            state.hovered_idx = new_hover;
+        let menu = state.render(top_inset);
+        let mut surface = menu.surface.borrow_mut();
+        if let Some(r) = self.renderer.as_mut() {
+            surface.lay_out(r.font_mut(), &menu, ctx.inner_size_phys());
+        }
+        if surface.pointer_move(x_phys, y_phys) {
             ctx.request_redraw();
         }
     }
@@ -1669,25 +1671,8 @@ impl Marspot {
         let renderer = self.renderer.as_mut().unwrap();
         let window_render = &mut self.window_render;
         let (cell_w, cell_h) = renderer.cell_dims();
-        // F3+9 — publish ContextMenu render state every frame the
-        // menu is open.  Re-builds the row list from the items Vec
-        // so the renderer doesn't share a borrow back into Marspot
-        // (mirrors set_layout_modal's per-frame publish shape).
-        renderer.set_context_menu(self.context_menu.as_ref().map(|state| {
-            use marspot::ui::components::context_menu_paint::{ContextMenuRender, ContextMenuRow};
-            ContextMenuRender {
-                scale: ctx.scale(),
-                anchor_phys: (state.anchor_x, state.anchor_y),
-                top_inset: layout.top_inset,
-                items: state.items.iter().map(|it| ContextMenuRow {
-                    label: it.label.clone(),
-                    shortcut_hint: it.shortcut_hint.clone(),
-                    enabled: it.enabled,
-                    divider: it.divider,
-                }).collect(),
-                hovered_idx: state.hovered_idx,
-            }
-        }));
+        // The open menu, published every frame like the panels.
+        renderer.set_context_menu(self.context_menu.as_ref().map(|state| state.render(layout.top_inset)));
         renderer.render_layout(window_render, layout, &views, &entries, sidebar_focus);
 
         // Publish the focused-pane caret rect (view-local physical
@@ -1928,14 +1913,6 @@ fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
     None
 }
 
-/// The chrome unit a snapshot draws with.  Defaults to what the app
-/// uses; `MARSPOT_SHOT_SCALE` overrides it to reproduce the
-/// display-scaled behaviour chrome had before 2026-08-11.
-#[cfg(feature = "snapshot")]
-fn shot_scale() -> f64 {
-    marspot::ui::chrome_scale()
-}
-
 #[cfg(feature = "snapshot")]
 /// Headless render: one frame into an offscreen texture, out as a PNG.
 ///
@@ -2088,39 +2065,27 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
             }));
         }
         Some("menu") => {
-            use marspot::ui::components::context_menu_paint::{ContextMenuRender, ContextMenuRow};
-            let item = |label: &str, hint: &str, enabled: bool| ContextMenuRow {
-                label: label.to_string(),
-                shortcut_hint: hint.to_string(),
-                enabled,
-                divider: false,
+            let item = |label: &str, hint: &str, enabled: bool| {
+                let row = MenuItem::entry(label, 0).with_shortcut(hint);
+                if enabled { row } else { row.disabled() }
             };
-            let divider = || ContextMenuRow {
-                label: String::new(),
-                shortcut_hint: String::new(),
-                enabled: false,
-                divider: true,
-            };
-            renderer.set_context_menu(Some(ContextMenuRender {
-                // The app always lays chrome out in
-                // `marspot::ui::chrome_scale()`; `MARSPOT_SHOT_SCALE`
-                // remains only to reproduce what the display-scaled
-                // version used to draw.
-                scale: shot_scale(),
-                anchor_phys: (420.0, 300.0),
-                top_inset: layout.top_inset,
-                items: vec![
+            let mut menu = MenuRender::new(
+                (420.0, 300.0),
+                layout.top_inset,
+                vec![
                     item("Split right", "⌘D", true),
                     item("Split down", "⇧⌘D", true),
-                    divider(),
+                    MenuItem::divider(),
                     item("Never reclaim this pane", "", true),
                     item("Copy pane title", "", true),
-                    divider(),
+                    MenuItem::divider(),
                     item("Close pane", "⌘W", true),
                     item("Close other panes", "", false),
                 ],
-                hovered_idx: Some(3),
-            }));
+            );
+            menu.surface.borrow_mut().lay_out(renderer.font_mut(), &menu, (phys_w as f64, phys_h as f64));
+            menu.pointer = menu.surface.borrow().row_centre(3);
+            renderer.set_context_menu(Some(menu));
         }
         Some("process") => {
             let (cell_w, cell_h) = renderer.cell_dims();

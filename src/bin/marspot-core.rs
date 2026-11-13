@@ -1857,11 +1857,11 @@ struct CcUsageModalState {
 }
 
 struct ContextMenuState {
-    items: Vec<marspot::ui::components::MenuItem>,
+    items: std::rc::Rc<[marspot::ui::components::MenuItem]>,
     anchor_x: marspot::ui::Units,
     anchor_y: marspot::ui::Units,
     region: ContextRegion,
-    hovered_idx: Option<usize>,
+    surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::context_menu_view::MenuSurface>>,
     /// Set when the menu was opened on top of an actionable link
     /// (URL / file path).  `dispatch_context_action` reads this for
     /// the OpenLink / CopyLink actions before clearing the menu.
@@ -4256,11 +4256,11 @@ impl CoreApp {
             return;
         }
         win!(self, wi).context_menu = Some(ContextMenuState {
-            items,
+            items: items.into(),
             anchor_x: marspot::ui::Units::from_px(x_phys),
             anchor_y: marspot::ui::Units::from_px(y_phys),
             region,
-            hovered_idx: None,
+            surface: Default::default(),
             link,
         });
         win!(self, wi).needs_render = true;
@@ -4295,7 +4295,7 @@ impl CoreApp {
             anchor_x: marspot::ui::Units::from_px(anchor_x),
             anchor_y: marspot::ui::Units::from_px(anchor_y),
             region: ContextRegion::PaneBadge(sid),
-            hovered_idx: None,
+            surface: Default::default(),
             link: None,
         });
         win!(self, wi).needs_render = true;
@@ -6757,18 +6757,9 @@ impl CoreApp {
     fn mouse_down(&mut self, wi: usize, x_phys: f64, y_phys: f64, modifiers: Modifiers) {
         // F3+9 — when context menu is open, a left click first
         // dispatches an item / swallows on frame / closes-on-outside.
-        if win!(self, wi).context_menu.is_some() {
-            use marspot::ui::components::{ContextMenu, ContextMenuHit};
-            let (hit, region) = {
-                let state = win!(self, wi).context_menu.as_ref().unwrap();
-                let menu = ContextMenu::layout(
-                    win!(self, wi).layout.window_w, win!(self, wi).layout.window_h, win!(self, wi).scale,
-                    state.anchor_x.px(), state.anchor_y.px(),
-                    win!(self, wi).layout.top_inset,
-                    &state.items,
-                );
-                (menu.hit_test(&state.items, x_phys, y_phys), state.region)
-            };
+        if let Some(hit) = self.menu_press(wi, x_phys, y_phys) {
+            use marspot::ui::components::ContextMenuHit;
+            let region = win!(self, wi).context_menu.as_ref().unwrap().region;
             match hit {
                 ContextMenuHit::Item(idx) => {
                     let tag = win!(self, wi).context_menu.as_ref().unwrap()
@@ -6949,11 +6940,11 @@ impl CoreApp {
             if !items.is_empty() {
                 let region = self.resolve_context_region(wi, x_phys, y_phys);
                 win!(self, wi).context_menu = Some(ContextMenuState {
-                    items,
+                    items: items.into(),
                     anchor_x: marspot::ui::Units::from_px(x_phys),
                     anchor_y: marspot::ui::Units::from_px(y_phys),
                     region,
-                    hovered_idx: None,
+                    surface: Default::default(),
                     link: Some(link),
                 });
                 win!(self, wi).needs_render = true;
@@ -7964,7 +7955,6 @@ impl CoreApp {
         let shortcuts =
             (win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts)).then(|| self.shortcuts_render(wi));
         self.renderer.set_shortcuts_panel(shortcuts);
-        // F3+9 — publish ContextMenu render state every frame.
         // Per-window, like every overlay below it: the renderer holds
         // one copy and each window sets its own right before painting.
         self.renderer
@@ -7978,21 +7968,8 @@ impl CoreApp {
                 .map(|d| d.idx),
         );
 
-        self.renderer.set_context_menu(win!(self, wi).context_menu.as_ref().map(|state| {
-            use marspot::ui::components::context_menu_paint::{ContextMenuRender, ContextMenuRow};
-            ContextMenuRender {
-                scale: win!(self, wi).scale,
-                anchor_phys: (state.anchor_x.px(), state.anchor_y.px()),
-                top_inset: win!(self, wi).layout.top_inset,
-                items: state.items.iter().map(|it| ContextMenuRow {
-                    label: it.label.clone(),
-                    shortcut_hint: it.shortcut_hint.clone(),
-                    enabled: it.enabled,
-                    divider: it.divider,
-                }).collect(),
-                hovered_idx: state.hovered_idx,
-            }
-        }));
+        let menu = self.menu_render(wi);
+        self.renderer.set_context_menu(menu);
         // F3+3.0 / 3.3 — publish LayoutModal state every frame.
         // Per-slot titles built from card_slots → resolved title
         // chain (custom > cwd basename > ordinal).  Empty slot if

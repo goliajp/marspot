@@ -39,7 +39,6 @@
 use crate::layout::Layout;
 use crate::render_metal::probe::FrameInstances;
 use crate::render_metal::MetalRenderer;
-use crate::ui::core::Primitive;
 use std::cell::{Cell, RefCell};
 
 pub(crate) const RECT_TOL: f64 = 1.0;
@@ -54,8 +53,6 @@ pub(crate) enum Kind {
     Fill,
     Rounded,
     Glyph,
-    /// Where a canvas text run starts; it has no extent yet.
-    TextOrigin,
 }
 
 /// One thing in a frame: its layer, its place in that layer's order,
@@ -280,6 +277,7 @@ fn elems_of(f: &FrameInstances) -> Vec<Elem> {
     };
     rounded("rounded rects", &f.ui_rects);
     rounded("overlay rounded rects", &f.overlay_ui_rects);
+    rounded("menu rounded rects", &f.menu_ui_rects);
     let mut glyphs = |layer: &'static str, list: &[GlyphInstance]| {
         for (n, g) in list.iter().enumerate() {
             out.push(Elem {
@@ -295,30 +293,7 @@ fn elems_of(f: &FrameInstances) -> Vec<Elem> {
     glyphs("glyphs", &f.glyphs);
     glyphs("colour glyphs", &f.color_glyphs);
     glyphs("overlay glyphs", &f.overlay_glyphs);
-    for (n, prim) in f.menu.iter().enumerate() {
-        let layer = "context menu";
-        out.push(match prim {
-            Primitive::Rect(r) => Elem {
-                layer,
-                n,
-                kind: Kind::Rounded,
-                edges: [r.x, r.y, r.x + r.w, r.y + r.h],
-                attrs: [r.radius, r.border.map_or(0.0, |b| b.0), r.shadow.map_or(0.0, |s| s.0)],
-                tint: tint(crate::frame_build::color::rgba8_of_f32(r.fill.to_rgba_f32())),
-            },
-            Primitive::Line(l) => Elem {
-                layer,
-                n,
-                kind: Kind::Rounded,
-                edges: [l.from.0.min(l.to.0), l.from.1.min(l.to.1), l.from.0.max(l.to.0), l.from.1.max(l.to.1)],
-                attrs: [f64::default(), l.width, f64::default()],
-                tint: 0,
-            },
-            Primitive::Text(t) => {
-                Elem { layer, n, kind: Kind::TextOrigin, edges: [t.x, t.y, t.x, t.y], attrs: Default::default(), tint: 0 }
-            }
-        });
-    }
+    glyphs("menu glyphs", &f.menu_glyphs);
     out
 }
 
@@ -448,9 +423,9 @@ pub(crate) fn compare(one: &Capture, two: &Capture, ratio: f64) -> Report {
 /// One physical pixel.
 const HAIRLINE: f64 = 1.0;
 
-const LAYERS: [&str; 8] = [
+const LAYERS: [&str; 9] = [
     "fills", "overlay fills", "rounded rects", "overlay rounded rects",
-    "glyphs", "colour glyphs", "overlay glyphs", "context menu",
+    "glyphs", "colour glyphs", "overlay glyphs", "menu rounded rects", "menu glyphs",
 ];
 
 fn count(c: &Capture, layer: &str) -> usize {
