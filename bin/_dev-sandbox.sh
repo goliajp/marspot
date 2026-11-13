@@ -39,6 +39,42 @@ export MARSPOT_DEV_SANDBOX=1
 
 DEV_TARGET="$ROOT/target/release"
 
+# A pasteboard of this run's own for the sandbox app's copy and paste.
+#
+# The general pasteboard is one per login session: a suite that put a
+# marker on it replaced what the person at the machine had copied, and
+# two runs on one machine read each other's markers.  A suite that
+# copies or pastes calls dev_own_pasteboard before it launches the app,
+# talks to that pasteboard through dev_pasteboard_set / _get, and
+# calls dev_pasteboard_release when it ends: a named pasteboard
+# otherwise stays with the pasteboard server until logout.
+dev_own_pasteboard() {
+  export MARSPOT_PASTEBOARD="marspot-sandbox-$$"
+}
+
+_dev_pasteboard() { # what, [text]
+  /usr/bin/osascript -l JavaScript -e 'function run(argv) {
+  ObjC.import("AppKit");
+  var pb = $.NSPasteboard.pasteboardWithName($(argv[0]));
+  if (argv[1] === "set") { pb.clearContents; return pb.setStringForType($(argv[2]), $.NSPasteboardTypeString) ? "" : "refused"; }
+  if (argv[1] === "release") { pb.releaseGlobally; return ""; }
+  var s = pb.stringForType($.NSPasteboardTypeString);
+  return s.isNil() ? "" : s.js;
+}' "${MARSPOT_PASTEBOARD:?dev_own_pasteboard was not called}" "$@"
+}
+
+dev_pasteboard_set() {
+  [[ -z "$(_dev_pasteboard set "$1")" ]]
+}
+
+dev_pasteboard_get() {
+  _dev_pasteboard get
+}
+
+dev_pasteboard_release() {
+  [[ -z ${MARSPOT_PASTEBOARD:-} ]] || _dev_pasteboard release >/dev/null 2>&1 || true
+}
+
 # Write down a pid this script launched (a shell, a standalone marspot,
 # an mcli), so dev_kill_shell_core can find it again.  shell.pid alone
 # is not enough: each shell overwrites it, and an earlier one that is
