@@ -45,6 +45,15 @@ fn a_session_asked_to_move_publishes_into_the_new_region_with_the_same_shell() {
     let mut sandbox = Sandbox::new();
     let mut s = start(&mut sandbox);
     let shell_before = shell_pid(&s, "before");
+    // a title the program set, which only the title region holds
+    s.send_frame(
+        MsgType::InjectInput,
+        marspot_term::shell_proto::encode_inject_input(0, b"\x15printf '\\033]2;MOVED-TITLE\\007'\r"),
+    );
+    wait_for(10, "the prompt after the title was set", || {
+        let (rows, (col, row)) = s.try_screen_and_cursor(COLS, ROWS)?;
+        (col > 0 && rows.iter().take(row as usize).any(|l| l.contains("printf"))).then_some(())
+    });
     let screen_before = s.screen(COLS, ROWS);
 
     let (regions, reader) = region_to_move_to();
@@ -69,7 +78,7 @@ fn a_session_asked_to_move_publishes_into_the_new_region_with_the_same_shell() {
     regions.delete();
     assert_eq!(opens.ok(), Some(Some(serial)), "the entry names the region the session moved to");
     assert!(clusters, "no cluster region beside the new grid region");
-    assert!(matches!(title, Ok(Some(_))), "no title region beside the new grid region: {title:?}");
+    assert_eq!(title.ok().flatten().as_deref(), Some("MOVED-TITLE"), "the title did not come along");
     s.kill();
 }
 

@@ -24,7 +24,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# numbered from 1, like a state directory on a new machine
+export MARSPOT_DEV_IDS_FROM_ONE=1
 source "$ROOT/bin/_dev-sandbox.sh"
+command rm -f "$MARSPOT_STATE_DIR/sessions/.next_id"
 source "$ROOT/bin/_sandbox-panes.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"

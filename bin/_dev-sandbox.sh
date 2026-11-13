@@ -121,6 +121,8 @@ dev_pasteboard_release() {
 # that removes the directory and lets the app create it starts at 1.
 dev_seed_session_base() {
   local sd=${MARSPOT_STATE_DIR:-} sum
+  # a suite about sandboxes whose ids are the same asks for none
+  [[ -z ${MARSPOT_DEV_IDS_FROM_ONE:-} ]] || return 0
   [[ -n $sd && -d $sd && ! -s $sd/sessions/.next_id ]] || return 0
   sum=$(printf '%s' "$sd" | cksum | cut -d' ' -f1)
   command mkdir -p "$sd/sessions" \
