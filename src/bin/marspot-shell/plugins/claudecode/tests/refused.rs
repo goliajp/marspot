@@ -95,7 +95,7 @@ fn an_account_that_refused_a_pane_is_no_destination() {
     let room = |util_7d: f64, reset_7d: i64| quota::Room::Known {
         status: "allowed".into(),
         util_5h: None,
-        util_7d,
+        util_7d: Some(util_7d),
         reset_7d,
         models: Vec::new(),
         models_measured_at: 1_793_836_800,

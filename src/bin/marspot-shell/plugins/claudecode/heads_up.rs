@@ -42,7 +42,7 @@ pub(in crate::plugins) fn nearly_out(room: &Room, model: Option<&str>) -> bool {
     match room {
         Room::Known { .. } => {
             let (week, five_hours) = room.headroom_for(model);
-            week <= LAST_OF_WEEK + EPS || five_hours <= LAST_OF_FIVE_HOURS + EPS
+            week.is_some_and(|w| w <= LAST_OF_WEEK + EPS) || five_hours <= LAST_OF_FIVE_HOURS + EPS
         }
         Room::Unknown => false,
     }
@@ -217,7 +217,7 @@ mod tests {
         Room::Known {
             status: status.into(),
             util_5h: Some(util_5h),
-            util_7d,
+            util_7d: Some(util_7d),
             reset_7d: 1000,
             models: fable.map(|u| vec![("fable".to_string(), u)]).unwrap_or_default(),
             models_measured_at: 0,
