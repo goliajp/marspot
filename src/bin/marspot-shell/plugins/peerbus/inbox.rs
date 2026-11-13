@@ -248,10 +248,7 @@ mod tests {
 
     /// The relay built with this test binary: `target/<profile>/marspot-peer`.
     fn relay_bin() -> PathBuf {
-        let exe = std::env::current_exe().unwrap();
-        let bin = exe.parent().and_then(Path::parent).unwrap().join("marspot-peer");
-        assert!(bin.is_file(), "{} is missing: build the marspot-peer package first", bin.display());
-        bin
+        marspot_term::test_env::built_binary("marspot-peer")
     }
 
     #[test]

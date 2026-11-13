@@ -427,10 +427,7 @@ pub(crate) fn looks_like_path(chars: &[char]) -> bool {
             break;
         }
     }
-    if all_dots {
-        return false;
-    }
-    true
+    !all_dots
 }
 
 /// Ask the oracle whether the candidate path is real.  Only

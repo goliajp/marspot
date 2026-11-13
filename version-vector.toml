@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.308"  # the codex cli follows the daemon while the supervisor rests
-core    = "0.12.342"  # the disk writers take their buffers back to 64 KiB and write what has gathered at once
+shell   = "0.7.315"  # a test process is refused the installed app's state under cargo 1.100 too
+core    = "0.12.345"  # a test process is refused the installed app's state under cargo 1.100 too
 session = "0.11.188"  # a job that ends between the two reads did not choose raw mode

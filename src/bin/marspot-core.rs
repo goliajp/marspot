@@ -1835,14 +1835,9 @@ mod boot_assembly_tests {
         }
     }
 
-    /// target/<profile>/marspot-session — sibling of the test binary's
-    /// grandparent (test bin lives in target/<profile>/deps/).
+    /// target/<profile>/marspot-session, built beside this test binary.
     fn real_session_bin() -> std::path::PathBuf {
-        let exe = std::env::current_exe().expect("current_exe");
-        exe.parent()
-            .and_then(|d| d.parent())
-            .map(|d| d.join("marspot-session"))
-            .expect("target dir layout")
+        marspot_term::test_env::built_binary("marspot-session")
     }
 
     fn dead_entry(id: u64) -> SessionEntry {
