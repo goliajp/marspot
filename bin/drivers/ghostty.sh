@@ -15,6 +15,10 @@
 #     because Ghostty's -e wants an executable path, not an inline
 #     bash string.
 #
+#   bin/drivers/ghostty.sh run-recorded <pid-file> <executable>
+#     Spawn a fresh Ghostty running <executable> and append its pid to
+#     <pid-file>.
+#
 #   bin/drivers/ghostty.sh quit (refuses)
 #
 # Note on ssh+ssh-driven runs: the caller (e.g.
@@ -61,6 +65,15 @@ case "$cmd_word" in
       size_args=(--window-width="$1" --window-height="$2")
     fi
     "$GHOSTTY_BIN" ${size_args[@]+"${size_args[@]}"} -e "$wrapper" &
+    disown 2>/dev/null || true
+    ;;
+  run-recorded)
+    # as run-single, and the pid of the Ghostty it started is appended
+    # to <pid-file>, so the caller can stop exactly what it started
+    pid_file=${1:?pid-file}
+    script=${2:?executable}
+    "$GHOSTTY_BIN" -e "$script" &
+    echo $! >> "$pid_file"
     disown 2>/dev/null || true
     ;;
   quit)

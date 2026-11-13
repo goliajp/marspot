@@ -2,9 +2,10 @@
 # bin/drivers/marspot.sh — automated marspot launcher.
 #
 # Usage:
-#   bin/drivers/marspot.sh run-app <shell-script-path>
-#     Launch the product (shell, core, one session) in its own state
-#     dir with one window and one pane whose shell is the script.
+#   bin/drivers/marspot.sh run-app <shell-script-path> [windows]
+#     Launch the product (shell, core, one session a pane) in its own
+#     state dir with one window (or <windows>) of one pane each, whose
+#     shell is the script.
 #     `close-app` stops it and removes that state dir.
 #
 #   bin/drivers/marspot.sh run-shell <shell-script-path> [extra-args...]
@@ -95,22 +96,28 @@ case "$cmd" in
     dev_kill_shell_core || true
     rm -rf "$MARSPOT_STATE_DIR"
     mkdir -p "$MARSPOT_STATE_DIR/logs"
-    # one window, one pane, a fixed frame: 99 columns by 35 rows, the
-    # most Ghostty fits at its default font on the bench host's
-    # 1080-wide display (asked for more, it opens at 99 by 35 anyway)
+    # windows of one pane each, a fixed frame: 99 columns by 35 rows,
+    # the most Ghostty fits at its default font on the bench host's
+    # 1080-wide display (asked for more, it opens at 99 by 35 anyway).
+    # More than one window: each a little up and right of the last.
+    windows=${2:-1}
+    [[ $windows =~ ^[1-9][0-9]?$ ]] || { echo "marspot.sh: window count: $windows" >&2; exit 2; }
     python3 -c '
 import struct, sys, pathlib
 d = pathlib.Path(sys.argv[1])
 x, y, w, h = (float(v) for v in sys.argv[2].split(","))
+n = int(sys.argv[3])
 def s(t):
     b = t.encode()
     return struct.pack("<H", len(b)) + b
-body = struct.pack("<II", 0xA5505010, 2) + struct.pack("<HH", 0, 1)
-body += struct.pack("<HHHH", 1, 1, 0, 1) + struct.pack("<Q", 0) + s("") + s("")
+body = struct.pack("<II", 0xA5505010, 2) + struct.pack("<HH", 0, n)
+frames = struct.pack("<IIH", 0xA5505011, 2, n)
+for i in range(n):
+    body += struct.pack("<HHHH", 1, 1, 0, 1) + struct.pack("<Q", 0) + s("") + s("")
+    frames += struct.pack("<Idddd", 0, x + 30 * i, y + 40 * i, w, h)
 (d / "shell-state.bin").write_bytes(body)
-frames = struct.pack("<IIH", 0xA5505011, 2, 1) + struct.pack("<Idddd", 0, x, y, w, h)
 (d / "window-state.bin").write_bytes(frames)
-' "$MARSPOT_STATE_DIR" "${MARSPOT_BENCH_FRAME:-60,400,736,640}"
+' "$MARSPOT_STATE_DIR" "${MARSPOT_BENCH_FRAME:-60,400,736,640}" "$windows"
     (cd "$ROOT" && env SHELL="$shell_script" \
       MARSPOT_SESSION_BIN="$(marspot_bin marspot-session)" \
       MARSPOT_CORE_BIN="$(marspot_bin marspot-core)" \
