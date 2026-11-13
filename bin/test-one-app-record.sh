@@ -180,7 +180,7 @@ STATE="S3"; echo; echo "── $STATE: sessions in two coalitions, one under a d
 had="$("$SHELL_BIN" --panes 2>/dev/null | awk 'NR>1 {print $1}' | sort -n | tr '\n' ' ')"
 rm -f "$MARSPOT_STATE_DIR/owner" "$MARSPOT_STATE_DIR"/sessions/*/guard
 sleep 0.5
-old="$L1"; kill -9 "$old"; sleep 1
+old="$L1"; sig -9 "$old"; sleep 1
 [[ -z "$(dev_shell_pid)" ]] || bad "a shell is running although nothing could start one"
 open_app --env MARSPOT_DEV_EXTRA_WINDOWS=1
 for (( i = 0; i < 100; i++ )); do
@@ -204,7 +204,7 @@ else
     for (( i = 0; i < 100; i++ )); do [[ -n "$(ls_record "$gui")" ]] && break; sleep 0.1; done
     sleep 0.7
     ls_coalition_pids "$gui" | grep -q -x "$S1" && given=1
-    kill "$gui" 2>/dev/null; sleep 1.5
+    sig -TERM "$gui"; sleep 1.5
     [[ -n $given ]] && break
     open -n -g -j -W "$APP" --args --ls-refresh 2>/dev/null; sleep 0.5
   done
