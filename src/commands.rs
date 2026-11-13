@@ -384,7 +384,14 @@ pub struct Reference {
 /// The table as a reader wants it: commands that have a chord, and the
 /// nine numbered panes as one line.
 pub fn reference() -> Vec<Reference> {
-    let mut out: Vec<Reference> = Vec::new();
+    let mut out = Vec::new();
+    reference_into(&mut out);
+    out
+}
+
+/// [`reference`] written into `out`, which is emptied first.
+pub fn reference_into(out: &mut Vec<Reference>) {
+    out.clear();
     for r in TABLE {
         let Some(chord) = r.chord else { continue };
         if let C::FocusPane(n) = r.command {
@@ -402,7 +409,6 @@ pub fn reference() -> Vec<Reference> {
         let keys = r.also.map_or(Keys::One(chord), |also| Keys::Either(chord, also));
         out.push(Reference { menu: r.menu, title: r.title, keys });
     }
-    out
 }
 
 #[cfg(test)]

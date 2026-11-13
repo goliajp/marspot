@@ -38,7 +38,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-fn counted<T>(f: impl FnOnce() -> T) -> (usize, T) {
+pub(crate) fn counted<T>(f: impl FnOnce() -> T) -> (usize, T) {
     ALLOCS.with(|a| a.set(0));
     COUNTING.with(|c| c.set(true));
     let out = f();
