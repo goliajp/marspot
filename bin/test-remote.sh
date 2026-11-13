@@ -97,6 +97,11 @@ set +e
 # this stops.  An earlier sweep that ranked ten and fourteen LAST was
 # reading the load it had made itself; load1 is a lagging average, and
 # each run has to start from a quiet box or the comparison is noise.
+#
+# One per core only when this is the one heavy job there: the cores are
+# divided among the heavy jobs holding the lock when the suite starts
+# (`bin/_runner-jobs.sh`, asked once the lock is held).  A count given
+# in MARSPOT_TEST_JOBS is used as it is.
 # The run holds the host's bench lock, shared.
 #
 # Shared is what heavy work takes: several builds and test runs can hold
@@ -108,9 +113,10 @@ set +e
 # written down only while the run lasts, so the cleanup never signals a
 # group that has since been reused.
 ssh "$HOST" "echo \$\$ > $REMOTE_PIDF; cd ~/$REMOTE_DIR && \
-  MARSPOT_TEST_JOBS=${MARSPOT_TEST_JOBS:-14} \
+  ${MARSPOT_TEST_JOBS:+MARSPOT_TEST_JOBS=$(printf '%q' "$MARSPOT_TEST_JOBS")} \
   ${MARSPOT_FONT_SNAPSHOT:+MARSPOT_FONT_SNAPSHOT=$(printf '%q' "$MARSPOT_FONT_SNAPSHOT")} \
-  /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT bin/_bounded.sh $TIMEOUT bin/test.sh$args; \
+  /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT bin/_bounded.sh $TIMEOUT \
+  sh -c 'MARSPOT_TEST_JOBS=\${MARSPOT_TEST_JOBS:-\$(bin/_runner-jobs.sh)} exec bin/test.sh \"\$@\"' sh$args; \
   rc=\$?; rm -f $REMOTE_PIDF; exit \$rc" </dev/null
 rc=$?
 set -e
