@@ -55,6 +55,8 @@ DEFAULT_SUITES=(
   test-bundle-lander.sh
   test-single-instance.sh
   test-session-ownership.sh
+  test-one-app-record.sh
+  test-coalition-reclaim.sh
   test-reopen-after-quit.sh
   test-cc-profile-switch.sh
   test-codex-profile-switch.sh
