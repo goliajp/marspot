@@ -10,6 +10,7 @@
 use super::{exact_pt, preset, tone};
 use crate::ui::components::panel_palette as palette;
 use crate::ui::core::ViewPainter;
+use crate::ui::theme::spec::{self, focus};
 use golia_ui_core::{Ink, PaintOut, Rect, TextFont, WidgetState};
 use marspot_term::layout::Rect as PxRect;
 
@@ -91,9 +92,14 @@ impl PaintOut for TreeOut<'_, '_> {
         }
     }
 
-    // the ring's width, offset and colour are not in the spec yet;
-    // until they are, focus is not drawn
-    fn focus_ring(&mut self, _rect: Rect, _radius: f64) {}
+    // a stroke round the widget, clear of it, with nothing inside
+    fn focus_ring(&mut self, rect: Rect, radius: f64) {
+        let grow = spec::px(focus::RING_OUTSET + focus::RING_W);
+        let r = spec::snap_rect(px_rect(rect));
+        let ring = PxRect { x: r.x - grow, y_top: r.y_top - grow, w: r.w + 2.0 * grow, h: r.h + 2.0 * grow };
+        let stroke = (palette::accent(), spec::px(focus::RING_W) as f32);
+        self.p.fill_rounded_rect(ring, palette::none(), (radius + grow) as f32, stroke);
+    }
 
     fn push_clip(&mut self, rect: Rect) {
         self.clips[self.depth] = self.clip().map_or(rect, |c| c.intersect(&rect));

@@ -32,7 +32,7 @@ SHELL_BIN="$ROOT/target/release/marspot-shell"
 SESSION_BIN="$ROOT/target/release/marspot-session"
 SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
-RUN_LOG=/tmp/marspot-test-l3-execv-probe.log
+RUN_LOG="$(dev_run_log test-l3-execv-probe)"
 
 fail() {
   echo "FAIL: $*"
