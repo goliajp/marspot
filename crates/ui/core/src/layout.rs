@@ -127,13 +127,14 @@ impl Layout {
         // a floating node was laid out wherever its parent happened to
         // be and moved with it since: put each where it stands, the
         // outer before one inside it
-        self.floats.sort_unstable();
-        for k in 0..self.floats.len() {
-            let f = self.floats[k];
+        let mut floats = std::mem::take(&mut self.floats);
+        floats.sort_unstable();
+        for &f in &floats {
             let at = tree.nodes[f as usize].float_at;
             let r = self.rects[f as usize];
             self.shift(tree, f, origin.0 + at.0 - r.x, origin.1 + at.1 - r.y);
         }
+        self.floats = floats;
     }
 
     pub(crate) fn shift(&mut self, tree: &Tree, i: u32, dx: f64, dy: f64) {
