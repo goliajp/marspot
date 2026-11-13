@@ -69,9 +69,16 @@ impl Pass<'_> {
 
         let (mut cursor, mut edge, mut placed) = (lead, lead, 0usize);
         for ch in tree.children(i) {
-            if tree.nodes[ch as usize].kind == Kind::Rule {
-                self.place_rule(ch, origin, edge, cross_total, vertical);
-                continue;
+            match tree.nodes[ch as usize].kind {
+                Kind::Rule => {
+                    self.place_rule(ch, origin, edge, cross_total, vertical);
+                    continue;
+                }
+                Kind::Float => {
+                    self.float(ch);
+                    continue;
+                }
+                _ => {}
             }
             let child_main = self.place_child(
                 ch, origin, cursor, per_flex, cross_max, cross_total, align, vertical,
@@ -106,7 +113,7 @@ impl Pass<'_> {
         for ch in tree.children(i) {
             let cn = &tree.nodes[ch as usize];
             match cn.kind {
-                Kind::Rule => continue,
+                Kind::Rule | Kind::Float => continue,
                 Kind::Spacer => s.sum_flex += cn.flex as u32,
                 _ if cn.style.grow > 0 => s.sum_flex += cn.style.grow as u32,
                 kind => {
@@ -143,7 +150,7 @@ impl Pass<'_> {
         let tree = self.tree;
         for ch in tree.children(i) {
             let cn = &tree.nodes[ch as usize];
-            if cn.style.grow == 0 || matches!(cn.kind, Kind::Rule | Kind::Spacer) {
+            if cn.style.grow == 0 || matches!(cn.kind, Kind::Rule | Kind::Spacer | Kind::Float) {
                 continue;
             }
             let main = per_flex * cn.style.grow as f64;

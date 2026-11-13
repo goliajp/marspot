@@ -92,8 +92,6 @@ pub(crate) struct Capture {
     pub(crate) regions: Vec<(String, [f64; 4])>,
     /// The window's layout, which is what a click is tested against.
     pub(crate) layout: Option<Layout>,
-    /// The terminal's cell, as the font gives it.
-    pub(crate) cell: (f64, f64),
     /// The frame as drawn, RGBA, when it was asked for with
     /// [`capture_pixels`]: `(bytes, width, height)`.
     pub(crate) pixels: Option<(Vec<u8>, u32, u32)>,
@@ -205,7 +203,6 @@ pub(crate) fn deliver(scene: &str, renderer: &MetalRenderer, layout: &Layout, n_
         panes,
         regions: regions_of(layout, n_panes),
         layout: Some(layout.clone()),
-        cell: (cell_w, cell_h),
         pixels: None,
     };
     CAPTURED.set(Some(capture));

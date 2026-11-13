@@ -47,9 +47,52 @@ pub fn fit_mono(s: &str, box_w: f64, cell_w: f64, pad: f64) -> String {
     kept.chain(std::iter::once('…')).collect()
 }
 
+/// What [`fit_mono`] keeps of `s` in a box with no padding: how many
+/// of its bytes, and whether an ellipsis follows them.  Nothing is
+/// allocated: the caller draws the two pieces.
+pub fn fit_mono_len(s: &str, box_w: f64, cell_w: f64) -> (usize, bool) {
+    if cell_w <= 0.0 {
+        return (0, false);
+    }
+    let budget = (box_w / cell_w).floor().max(0.0) as usize;
+    if cells(s) <= budget {
+        return (s.len(), false);
+    }
+    if budget <= 1 {
+        return (0, true);
+    }
+    let mut room = budget - 1;
+    let mut len = 0;
+    for ch in s.chars() {
+        let w = marspot_term::grid::char_width(ch).max(1) as usize;
+        if w > room {
+            break;
+        }
+        room -= w;
+        len += ch.len_utf8();
+    }
+    (len, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two ways of asking keep the same text.
+    #[test]
+    fn the_length_kept_is_the_string_kept() {
+        for s in ["", "a", "abcdefghij", "日本語のテキスト", "a日b本c語", "rust-analyzer-proc-macro-srv"] {
+            for box_w in [0.0, 9.0, 10.0, 19.0, 20.0, 35.0, 60.0, 61.0, 1000.0] {
+                let (len, cut) = fit_mono_len(s, box_w, 10.0);
+                let mut drawn = s[..len].to_string();
+                if cut {
+                    drawn.push('…');
+                }
+                assert_eq!(drawn, fit_mono(s, box_w, 10.0, 0.0), "{s:?} in {box_w}");
+            }
+        }
+        assert_eq!(fit_mono_len("abc", 100.0, 0.0), (0, false));
+    }
 
     /// The three cases the callers actually hit.
     #[test]
