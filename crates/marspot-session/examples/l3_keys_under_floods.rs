@@ -9,9 +9,12 @@
 //! The typed pane's program switches bracketed paste on or off for
 //! every key it reads -- the mode travels in the frame header, so the
 //! answer is seen wherever the flood has scrolled the screen to -- and
-//! either floods between two keys (`flooding`) or sleeps (`idle`).
+//! either floods between two keys or sleeps (`idle`).  It floods a
+//! kilobyte at a time (`flooding`), which the parser keeps up with, or
+//! writes a corpus 64 KiB at a time the way `cat` would
+//! (`catting=<corpus>`), which with most corpora it does not.
 //!
-//!     l3_keys_under_floods <marspot-session> <neighbours> flooding|idle [keys] [p99-limit-ms]
+//!     l3_keys_under_floods <marspot-session> <neighbours> flooding|idle|catting=<corpus> [keys] [p99-limit-ms]
 //!
 //! With a limit, a p99 above it or any key left unanswered fails.
 //!
@@ -39,8 +42,8 @@ const ROWS: u16 = 39;
 /// Keys come this far apart and up to `GAP_SPREAD_MS` more: past the
 /// moment a key keeps a reader from gathering, so every key finds its
 /// pane back in the queue, at a different point of it each time.
-const GAP_MS: u64 = 150;
-const GAP_SPREAD_MS: u64 = 100;
+const GAP_MS: u64 = 120;
+const GAP_SPREAD_MS: u64 = 60;
 
 const LINE: &[u8] = b"the quick brown fox jumps over the lazy dog, again and again and again and again and again and again and again\r\n";
 
@@ -88,6 +91,19 @@ fn pane(role: &str, rest: &[String]) -> ! {
             while out.write_all(&block).is_ok() {
                 let n = typed_keys(&mut keys);
                 answer(&mut out, n);
+            }
+        }
+        "catting" => {
+            raw_tty(0);
+            let corpus = std::fs::read(&rest[0]).unwrap_or_default();
+            'flood: loop {
+                for piece in corpus.chunks(64 * 1024) {
+                    if out.write_all(piece).is_err() {
+                        break 'flood;
+                    }
+                    let n = typed_keys(&mut keys);
+                    answer(&mut out, n);
+                }
             }
         }
         "idle" => {
@@ -170,7 +186,8 @@ fn drain(s: &Session) {
 
 fn keys_under_floods(bin: &Path, neighbours: usize, typed_role: &str, keys: usize, limit_ms: Option<f64>) {
     let sandbox = Sandbox::new();
-    let typed = sandbox.session(bin, 1, typed_role, "");
+    let (role, corpus) = typed_role.split_once('=').unwrap_or((typed_role, ""));
+    let typed = sandbox.session(bin, 1, role, &format!("'{corpus}'"));
     let mut others: Vec<Session> = (0..neighbours).map(|i| sandbox.session(bin, i as u64 + 2, "flood", "")).collect();
     drain(&typed);
     others.iter().for_each(drain);
@@ -224,7 +241,7 @@ fn keys_under_floods(bin: &Path, neighbours: usize, typed_role: &str, keys: usiz
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let pick = |q: f64| samples[((samples.len() as f64 - 1.0) * q).round() as usize];
     println!(
-        "key→answer, {typed_role} pane beside {neighbours} flooding, {} keys ({lost} lost): p50 {:.2} ms, p90 {:.2} ms, p99 {:.2} ms, max {:.2} ms; load1 {load_low:.1}–{load_high:.1}",
+        "key→answer, {role} pane beside {neighbours} flooding, {} keys ({lost} lost): p50 {:.2} ms, p90 {:.2} ms, p99 {:.2} ms, max {:.2} ms; load1 {load_low:.1}–{load_high:.1}",
         samples.len(),
         pick(0.50),
         pick(0.90),
@@ -285,7 +302,7 @@ fn main() {
     if args.get(1).is_some_and(|a| a == "--pane") {
         pane(args.get(2).map_or("", |r| r.as_str()), &args[3.min(args.len())..]);
     }
-    let usage = "usage: l3_keys_under_floods <marspot-session> <neighbours> flooding|idle [keys] [p99-limit-ms]\n       l3_keys_under_floods <marspot-session> typing <corpus> <repeats> <gap-ms>";
+    let usage = "usage: l3_keys_under_floods <marspot-session> <neighbours> flooding|idle|catting=<corpus> [keys] [p99-limit-ms]\n       l3_keys_under_floods <marspot-session> typing <corpus> <repeats> <gap-ms>";
     if args.len() < 4 {
         die(usage);
     }
@@ -299,7 +316,7 @@ fn main() {
         return;
     }
     let neighbours: usize = args[2].parse().unwrap_or_else(|_| die(usage));
-    if !matches!(args[3].as_str(), "flooding" | "idle") {
+    if !matches!(args[3].as_str(), "flooding" | "idle") && !args[3].starts_with("catting=/") {
         die(usage);
     }
     let keys = args.get(4).and_then(|k| k.parse().ok()).unwrap_or(100);
