@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.325"  # a shell listed outside the bundle becomes the app by name at an update, and a new process takes the coalition
+shell   = "0.7.326"  # a look at who has the coalition ends when a process that is gone stays listed as running
 core    = "0.12.351"  # the usage panel draws a 5h row exactly for the accounts the feed reads one for
 session = "0.11.200"  # a session starts the bundle's shell even when the record names a copy outside it
