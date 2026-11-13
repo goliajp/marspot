@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.327"  # only a shell that took another's place, or that an update made, looks at who has its coalition
-core    = "0.12.351"  # the usage panel draws a 5h row exactly for the accounts the feed reads one for
+core    = "0.12.352"  # the menu on a file link opens the folder the file is in
 session = "0.11.200"  # a session starts the bundle's shell even when the record names a copy outside it

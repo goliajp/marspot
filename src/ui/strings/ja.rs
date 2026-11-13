@@ -110,6 +110,7 @@ fn text(m: Msg) -> &'static str {
         Msg::LinkOpenUrl => "URLを開く",
         Msg::LinkCopyUrl => "URLをコピー",
         Msg::LinkOpenFile => "ファイルを開く",
+        Msg::LinkRevealFile => "内包しているフォルダを開く",
         Msg::LinkCopyPath => "パスをコピー",
         Msg::LinkSendEmail => "メールを送信",
         Msg::LinkCopyEmail => "メールアドレスをコピー",
