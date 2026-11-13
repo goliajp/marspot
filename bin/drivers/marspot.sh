@@ -95,7 +95,9 @@ case "$cmd" in
     dev_kill_shell_core || true
     rm -rf "$MARSPOT_STATE_DIR"
     mkdir -p "$MARSPOT_STATE_DIR/logs"
-    # one window, one pane, a fixed frame
+    # one window, one pane, a fixed frame: 99 columns by 35 rows, the
+    # most Ghostty fits at its default font on the bench host's
+    # 1080-wide display (asked for more, it opens at 99 by 35 anyway)
     python3 -c '
 import struct, sys, pathlib
 d = pathlib.Path(sys.argv[1])
@@ -108,7 +110,7 @@ body += struct.pack("<HHHH", 1, 1, 0, 1) + struct.pack("<Q", 0) + s("") + s("")
 (d / "shell-state.bin").write_bytes(body)
 frames = struct.pack("<IIH", 0xA5505011, 2, 1) + struct.pack("<Idddd", 0, x, y, w, h)
 (d / "window-state.bin").write_bytes(frames)
-' "$MARSPOT_STATE_DIR" "${MARSPOT_BENCH_FRAME:-60,400,880,720}"
+' "$MARSPOT_STATE_DIR" "${MARSPOT_BENCH_FRAME:-60,400,736,640}"
     (cd "$ROOT" && env SHELL="$shell_script" \
       MARSPOT_SESSION_BIN="$(marspot_bin marspot-session)" \
       MARSPOT_CORE_BIN="$(marspot_bin marspot-core)" \
