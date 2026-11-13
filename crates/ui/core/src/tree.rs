@@ -382,6 +382,16 @@ impl At<'_, '_> {
         })
     }
 
+    /// Answers a press with `action` and is no stop for Tab: a drag
+    /// handle, a row the keyboard reaches some other way.
+    pub fn pressable(self, id: WidgetId, action: Action) -> Self {
+        self.set(|n| {
+            n.widget = Some(id);
+            n.action = action;
+            n.flags |= flag::ACTS;
+        })
+    }
+
     /// The next item of the enclosing group.
     pub fn item(self, action: Action) -> Self {
         let group = self.ui.group;
@@ -413,5 +423,13 @@ impl At<'_, '_> {
     /// with the node.
     pub fn label(self, s: &'static str) -> Self {
         self.set(|n| n.text = TextRef::Static(s))
+    }
+
+    /// [`Self::label`] for text made at run time, copied into the
+    /// tree's buffer.
+    pub fn label_copy(self, s: &str) -> Self {
+        let start = self.ui.tree.text.len() as u32;
+        self.ui.tree.text.push_str(s);
+        self.set(|n| n.text = TextRef::Buf { start, len: s.len() as u32 })
     }
 }
