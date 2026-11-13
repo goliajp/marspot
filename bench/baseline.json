@@ -22,7 +22,7 @@
   "scenarios": [
     {
       "id": "cat-ascii",
-      "_insn_note_20261114": "Every instruction ceiling was set again on 2026-11-14, after the parse path stopped looking at each cell of a scrolled row twice (the grid keeps, per row, where its blank tail and its default attributes start), plain text began to store characters only, wide characters were classed by table, and colour changes and short runs got a short way in.  Three runs of one build (d0eca89; mini, macOS 26B131, under the bench lock, load1 1.2-3.5 during the trials) read 41.10-41.16 / 58.68-58.72 / 64.18-64.23 / 64.28-64.31 / 68.31-68.36 / 97.29-97.42 for the session (ascii / mixed / cjk / emoji / styled / highlighted; three more runs of bin/measure-l3.sh on the same engine read 41.01-41.11 / 58.63-58.68 / 64.11-64.16 / 64.15-64.18 / 68.27-68.31 / 97.24-97.25), 65.06-65.19 for nine sessions, 29.78-29.79 / 50.06-50.07 / 53.79-53.97 / 54.36-54.38 / 55.04-55.05 / 71.08-71.10 / 413.23-413.24 (clusters) for the parse in memory and 36.42-36.47 / 70.65-70.74 / 70.21-70.38 / 69.83-69.99 / 77.99-78.00 / 101.00-101.09 for the parse into a file.  Each ceiling is the worst reading x its margin (1.02, nine sessions 1.05, parse in memory 1.01, parse into a file 1.02).  Three runs and not the usual four: the fourth could not get the bench lock within fifty minutes.",
+      "_insn_note_20261114": "Every instruction ceiling was set again on 2026-11-14, after the parse path stopped looking at each cell of a scrolled row twice (the grid keeps, per row, where its blank tail and its default attributes start), plain text began to store characters only, wide characters were classed by table, and colour changes and short runs got a short way in.  Four runs of one build (d0eca89, the fourth of f639051, which differs by this file; mini, macOS 26B131, under the bench lock, load1 1.2-3.5 during the trials) read 41.09-41.16 / 58.66-58.72 / 64.18-64.28 / 64.28-64.34 / 68.31-68.36 / 97.29-97.42 for the session (ascii / mixed / cjk / emoji / styled / highlighted; three more runs of bin/measure-l3.sh on the same engine read 41.01-41.11 / 58.63-58.68 / 64.11-64.16 / 64.15-64.18 / 68.27-68.31 / 97.24-97.25), 65.03-65.19 for nine sessions, 29.78-29.79 / 50.06-50.07 / 53.79-53.97 / 54.36-54.38 / 55.04-55.05 / 71.08-71.10 / 413.23-413.24 (clusters) for the parse in memory and 36.42-36.47 / 70.65-70.74 / 70.21-70.38 / 69.83-69.99 / 77.99-78.00 / 101.00-101.13 for the parse into a file.  Each ceiling is the worst reading x its margin (1.02, nine sessions 1.05, parse in memory 1.01, parse into a file 1.02).",
       "bytes": 33554570,
       "mars_parse_MBps_min": 181.4,
       "mars_live_MBps_min": 94,
@@ -57,7 +57,7 @@
       "mars_vs_best_other_min": 1.0,
       "mars_l3_MBps_min": 152.9,
       "mars_parse_file_MBps_min": 115.3,
-      "mars_l3_insn_per_byte_max": 65.52,
+      "mars_l3_insn_per_byte_max": 65.57,
       "mars_parse_insn_per_byte_max": 54.51,
       "mars_parse_file_insn_per_byte_max": 71.79
     },
@@ -70,7 +70,7 @@
       "_note": "Relocked 2026-08-18 after the emoji fast-path attack: floor = 135.  Two mini runs an hour apart gave 153.2 (idle) and 145.0 (load1 4.3); 135 is the loaded run x 0.93, so the gate reports a real regression rather than whoever else happens to be compiling on the bench host.  This REPLACES the 2026-07-11 note, whose reasoning was disproved rather than merely outgrown.  That note read: 'pictographic codepoints cannot take the batch lanes (a following VS16/ZWJ changes width), so they pay the segmenter... the honest ceiling is ~66 MB/s'.  The premise is right and the conclusion does not follow: the fast class already guarantees that a batch commit leaves the LAST character buffered, so a following VS16 / ZWJ / skin-tone modifier still meets an OPEN cluster on the slow path and re-decides its width there.  What genuinely cannot be admitted is a character whose boundary depends on a neighbour - regional indicators (GB12/13) and skin-tone modifiers (GBP=Extend) - and those are two ranges, pinned against the tables by `the_fast_pictograph_class_never_outruns_the_tables` over the whole codepoint space.  Measured 61 -> 153.2 MB/s = 2.15x, with ascii / mixed / cjk unchanged or better.  Full decomposition and the per-change prices are in the perf notes.  mars_live_MBps_min / vs_best_other for this scenario are STILL stale (locked against the wrong-width parser) - re-measure on the next --full run before trusting.",
       "mars_l3_MBps_min": 111.9,
       "mars_parse_file_MBps_min": 101.7,
-      "mars_l3_insn_per_byte_max": 65.6,
+      "mars_l3_insn_per_byte_max": 65.63,
       "mars_parse_insn_per_byte_max": 54.93,
       "mars_parse_file_insn_per_byte_max": 71.39
     },
@@ -88,7 +88,7 @@
       "_note": "Added 2026-11-14.  Twelve colour changes a line with a few characters between them, the shape a syntax highlighter or git diff writes: the cost is entering and leaving text.  L3 ceiling = the worst of three interleaved mini rounds (97.24 / 97.25 / 97.25) x 1.02.",
       "mars_l3_insn_per_byte_max": 99.37,
       "mars_parse_insn_per_byte_max": 71.82,
-      "mars_parse_file_insn_per_byte_max": 103.12
+      "mars_parse_file_insn_per_byte_max": 103.16
     },
     {
       "id": "cat-clusters",
