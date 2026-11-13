@@ -151,6 +151,18 @@ impl Scrollback {
         }
     }
 
+    /// [`Self::push_line_with_wrapped`], with what the grid knows of
+    /// the row so that the file need not find it out cell by cell.
+    pub fn push_row(&mut self, line: &[Cell], wrapped: bool, hint: RowHint) -> usize {
+        match self {
+            Self::Memory(m) => {
+                m.push_line(line);
+                line.len()
+            }
+            Self::File(f) => f.push_row(line, wrapped, hint),
+        }
+    }
+
     pub fn len(&self) -> usize {
         match self {
             Self::Memory(m) => m.len(),
@@ -391,6 +403,7 @@ pub use file::FileScrollback;
 
 mod clusters;
 mod format;
+pub use format::RowHint;
 mod sidecar;
 
 mod snapshot;
