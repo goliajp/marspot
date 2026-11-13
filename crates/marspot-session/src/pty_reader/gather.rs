@@ -85,12 +85,34 @@ pub(super) fn gather(
         if !bulk {
             return (len, Gathered::Open { dry: true });
         }
-        if len >= buf.len() || (len > 0 && echo.expected()) {
+        if len >= buf.len() {
             break;
+        }
+        if let Some(at_once) = echo.awaited().filter(|_| len > 0) {
+            // A key's answer may be in this chunk.  Right after the key
+            // it goes over as it is, so that the answer of a program
+            // that reads the key at once is in a chunk of its own, and
+            // an idle parser gets it now at any time.  Later, a busy
+            // parser would not parse it sooner for having it sooner,
+            // and a chunk handed over at every dry read is what typing
+            // into a flood used to cost it: so this reads on until the
+            // parser is idle, or the pty is dry.
+            if at_once || unparsed.load(Ordering::SeqCst) == 0 || !(full || turn.alone()) {
+                break;
+            }
+            match ask_again(pty, &mut buf[len..]) {
+                Asked::Got(n) => {
+                    full = n >= KERNEL_READ_BYTES.min(buf.len() - len);
+                    len += n;
+                    continue;
+                }
+                Asked::Dry => break,
+                Asked::Ended => return (len, Gathered::Ended),
+            }
         }
         let queued = turn.enter(len, || echo.expected());
         // a key was typed while this waited for its turn
-        if len > 0 && echo.expected() {
+        if len > 0 && echo.awaited().is_some() {
             break;
         }
         if queued {

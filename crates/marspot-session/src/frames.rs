@@ -15,10 +15,11 @@ use marspot_term::shell_proto::{Frame, MsgType};
 
 use crate::SessionImpl;
 use crate::control_writer::ControlWriter;
+use crate::local_session::Pace;
 use crate::publish_gate::{BlankGate, FloodGate, SyncGate, grid_is_blank};
 
 /// Most one iteration spends parsing before it goes round again to
-/// publish, take keys and apply a resize. A frame at 120 Hz.
+/// publish and apply a resize. A frame at 120 Hz.
 const PUMP_BUDGET: Duration = Duration::from_millis(8);
 
 /// The region the grid is published into and what decides when.
@@ -102,8 +103,21 @@ impl Frames {
     }
 
     /// A key is on its way to the pane's program.
-    pub(crate) fn typed(&mut self) {
+    pub(crate) fn typed(&mut self, session: &mut SessionImpl) {
         self.flood_gate.typed();
+        session.typed();
+    }
+
+    /// How far one turn parses.  A key that arrives ends it within a
+    /// few kilobytes; and while a key's answer is awaited it ends after
+    /// each chunk, or slice, so the frame that shows the answer is not
+    /// kept waiting for what is behind it.
+    fn pace(&self) -> Pace<'static> {
+        Pace {
+            budget: PUMP_BUDGET,
+            follow: self.flood_gate.follows(),
+            key_waiting: crate::input::waiting(),
+        }
     }
 
     /// Publish the grid and, if connected to L2, poke it.
@@ -119,7 +133,7 @@ impl Frames {
     /// reader has been stopped.
     pub(crate) fn last_turn(&mut self, session: &mut SessionImpl, poke: Option<&mut ControlWriter>, watch: &mut LoopWatch) {
         watch.phase("resize-pump");
-        let _ = session.pump_within(PUMP_BUDGET);
+        let _ = session.pump_within(self.pace());
         watch.phase("resize-publish");
         self.publish(session, poke);
     }
@@ -143,7 +157,7 @@ impl Frames {
         };
 
         watch.phase("pump");
-        let (n, queued) = session.pump_within(PUMP_BUDGET);
+        let (n, queued) = session.pump_within(self.pace());
         self.output_queued = queued;
         // Auto-pin view_offset on scrollback push: when the grid scrolls
         // a row into scrollback while the user is viewing history,

@@ -80,8 +80,8 @@ static ECHO: Echo = Echo::new();
 /// And a reader queued for its turn among flooding panes read nothing
 /// until the turn came: with nine of them the key showed 3 to 5 ms
 /// later at the median and 150 ms at the worst.  For a moment after a
-/// key the reader hands over whatever it has each time the pty runs
-/// dry, and waits for no turn.
+/// key the reader hands over what it has as soon as the parser is idle
+/// or the pty runs dry, and for a longer moment waits for no turn.
 ///
 /// Called by the thread that stops the reader.
 pub(crate) fn typed() {
@@ -219,6 +219,11 @@ impl PtyReader {
         Self { stop, stopping, empties, unparsed, thread }
     }
 
+    /// Chunks handed to the loop and not yet handed back.
+    pub(crate) fn in_flight(&self) -> usize {
+        self.unparsed.load(Ordering::SeqCst)
+    }
+
     /// Hand a parsed chunk back to be filled again.
     pub(crate) fn recycle(&self, chunk: Chunk) {
         self.unparsed.fetch_sub(1, Ordering::SeqCst);
@@ -293,9 +298,58 @@ mod tests {
         unsafe { libc::fcntl(fd, libc::F_GETFL) & libc::O_NONBLOCK != 0 }
     }
 
+    /// What an awaited answer may be in is not handed to a parser that
+    /// is still on an earlier chunk one dry read at a time: the reader
+    /// reads on, and what it hands over is more than the pty held when
+    /// it woke.
+    #[test]
+    fn a_busy_parser_is_not_handed_an_awaited_answer_in_pieces() {
+        let pty = spawn("yes 0123456789012345678901234567890123456789");
+        let (_stop, stop_rx) = UnixStream::pair().expect("a socket pair");
+        set_nonblocking(pty.raw_master(), true);
+        let wakes = Wakes::new(pty.raw_master(), stop_rx.as_raw_fd());
+        let parser_busy = AtomicUsize::new(1);
+        let echo = Echo::later();
+        let mut turn = Turn::new(Leases::open());
+        let mut buf = vec![0; READ_BUF_BYTES];
+        let mut largest_over = 0;
+        for _ in 0..200 {
+            let Event::Data(there) = wakes.wait(None) else { panic!("the flood stopped") };
+            let (len, end) = gather(&pty, &mut buf, &wakes, &parser_busy, &mut turn, &echo, there);
+            assert!(matches!(end, Gathered::Open { .. }), "the flood ended");
+            largest_over = largest_over.max(len.saturating_sub(there));
+        }
+        assert!(
+            largest_over >= 2 * KERNEL_READ_BYTES,
+            "no hand-over carried more than one read past what the pty held: {largest_over}"
+        );
+    }
+
+    /// Right after a key the parser is handed what the pty gave each
+    /// time it runs dry, busy or not: the answer of a program that read
+    /// the key at once then sits in a chunk of its own.
+    #[test]
+    fn right_after_a_key_a_busy_parser_is_handed_each_piece_too() {
+        let pty = spawn("yes 0123456789012345678901234567890123456789");
+        let (_stop, stop_rx) = UnixStream::pair().expect("a socket pair");
+        set_nonblocking(pty.raw_master(), true);
+        let wakes = Wakes::new(pty.raw_master(), stop_rx.as_raw_fd());
+        let parser_busy = AtomicUsize::new(1);
+        let echo = Echo::always();
+        let mut turn = Turn::new(Leases::open());
+        let mut buf = vec![0; READ_BUF_BYTES];
+        for _ in 0..200 {
+            let Event::Data(there) = wakes.wait(None) else { panic!("the flood stopped") };
+            let (len, end) = gather(&pty, &mut buf, &wakes, &parser_busy, &mut turn, &echo, there);
+            assert!(matches!(end, Gathered::Open { .. }), "the flood ended");
+            assert!(len < there + KERNEL_READ_BYTES, "{len} bytes handed over at once, the pty held {there}");
+        }
+    }
+
     /// A flood comes in full chunks, and for a moment after a key in
-    /// whatever pieces the pty gave: the program's answer to the key is
-    /// somewhere in them and must not wait for a chunk to fill.
+    /// whatever pieces the pty gave while the parser is idle: the
+    /// program's answer to the key is somewhere in them and must not
+    /// wait for a chunk to fill.
     #[test]
     fn a_flood_is_handed_over_as_it_comes_while_an_echo_is_expected() {
         let pty = spawn("yes 0123456789012345678901234567890123456789");

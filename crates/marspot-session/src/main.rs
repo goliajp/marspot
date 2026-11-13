@@ -28,6 +28,7 @@ use control_reader::ControlReaders;
 use control_writer::ControlWriter;
 use snapshot_writer::SnapshotWriter;
 mod handoff;
+mod input;
 mod line_discipline;
 mod owner_watch;
 mod local_session;
@@ -126,9 +127,14 @@ impl SessionImpl {
             Self::Local(s) => s.pump(),
         }
     }
-    fn pump_within(&mut self, budget: Duration) -> (usize, bool) {
+    fn pump_within(&mut self, pace: local_session::Pace) -> (usize, bool) {
         match self {
-            Self::Local(s) => s.pump_within(budget),
+            Self::Local(s) => s.pump_within(pace),
+        }
+    }
+    fn typed(&mut self) {
+        match self {
+            Self::Local(s) => s.typed(),
         }
     }
     fn reply_poll_every(&self) -> Option<Duration> {
@@ -1179,6 +1185,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         let mut pending_resize: Option<(u16, u16)> = None;
         let mut pending_scroll: Option<u16> = None;
         let mut selection_reqs: Vec<(u32, (u16, u32), (u16, u32), bool)> = Vec::new();
+        input::taken();
         for ev in first.into_iter().chain(std::iter::from_fn(|| ev_rx.try_recv().ok())) {
             match ev {
                 SessionEvent::Key(e, m) => {
@@ -1197,7 +1204,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                         );
                         session.hold_grid(false);
                     }
-                    frames.typed();
+                    frames.typed(&mut session);
                     predicted |= handle_key(&mut session, e, m)
                 }
                 SessionEvent::ResetAttrs => {
@@ -1275,11 +1282,11 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 // back through the normal pump → republish (no local
                 // predict — bulk text isn't latency-sensitive like typing).
                 SessionEvent::Paste(text) => {
-                    frames.typed();
+                    frames.typed(&mut session);
                     handle_paste(&mut session, &text)
                 }
                 SessionEvent::InjectInput(bytes) => {
-                    frames.typed();
+                    frames.typed(&mut session);
                     // Raw write to PTY — no bracketed-paste, no key
                     // encoding.  A dead PTY just means the shell exited
                     // and we'll be torn down next, so that stays quiet;
