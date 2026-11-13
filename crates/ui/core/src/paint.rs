@@ -205,8 +205,8 @@ pub fn paint<O: PaintOut>(
     let mut p = Painter { tree, layout, state, m: metrics, ring, ring_at: None, out };
     p.node(0, dx, dy, None);
     // over everything, outside every clip and every scroll
-    for k in 0..layout.floats.len() {
-        p.node(layout.floats[k], dx, dy, None);
+    for &f in &layout.floats {
+        p.node(f, dx, dy, None);
     }
     // last, and outside every clip: the ring is drawn round the widget,
     // where the widget's own container would cut it
