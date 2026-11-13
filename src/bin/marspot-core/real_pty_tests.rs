@@ -244,23 +244,46 @@ fn the_two_motion_modes_are_told_apart_on_a_real_pty() {
     }
 }
 
+/// A pasteboard only this test process names, selected for the
+/// product's copy and paste, and handed back to the pasteboard server
+/// when dropped: a named pasteboard otherwise lasts until logout.
+struct OwnPasteboard(String);
+
+impl OwnPasteboard {
+    fn new(sb: &mut Sandbox) -> Self {
+        let name = format!("marspot-test-{}", std::process::id());
+        sb.set(marspot::input::PASTEBOARD_ENV, &name);
+        Self(name)
+    }
+}
+
+impl Drop for OwnPasteboard {
+    fn drop(&mut self) {
+        let pb = objc2_app_kit::NSPasteboard::pasteboardWithName(
+            &objc2_foundation::NSString::from_str(&self.0),
+        );
+        let _: () = unsafe { objc2::msg_send![&*pb, releaseGlobally] };
+    }
+}
+
 /// OSC 52 travels from the program to the Mac's pasteboard.
 ///
 /// Three processes are involved and only the last one can touch a
 /// pasteboard: the program writes the escape, L3 parses it and
 /// has no AppKit, L2 receives the frame and writes it.  The unit
 /// tests cover the parse; this covers the journey, by putting a
-/// value on the real pasteboard through a real shell and reading
-/// it back.
+/// value on a real pasteboard through a real shell and reading
+/// it back.  The pasteboard is the test's own: the general one
+/// belongs to whoever is at the machine and to every other run on it.
 #[test]
 fn osc52_reaches_the_pasteboard_from_a_real_shell() {
-    let _sb = Sandbox::new();
+    let mut sb = Sandbox::new();
+    let _pb = OwnPasteboard::new(&mut sb);
     let (tx, _rx) = mpsc::channel();
     let sid = reg::allocate_next_session_id().unwrap();
     let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
         .expect("real L3 spawn (is marspot-session built?)");
 
-    // Something no other test or person would have copied.
     let token = format!("marspot-osc52-{}", std::process::id());
     let b64 = {
         const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -288,8 +311,11 @@ fn osc52_reaches_the_pasteboard_from_a_real_shell() {
         "the test's encoder and the terminal's decoder disagree"
     );
 
-    let before = marspot::input::read_clipboard_text();
-    assert_ne!(before.as_deref(), Some(token.as_str()), "the token is already there");
+    assert_eq!(
+        marspot::input::read_clipboard_text(),
+        None,
+        "a pasteboard nobody has written to holds nothing"
+    );
 
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -303,10 +329,6 @@ fn osc52_reaches_the_pasteboard_from_a_real_shell() {
         }
         pane.pump();
         if marspot::input::read_clipboard_text().as_deref() == Some(token.as_str()) {
-            // Put back whatever the person had.
-            if let Some(prev) = before {
-                marspot::input::write_clipboard_text(&prev);
-            }
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));

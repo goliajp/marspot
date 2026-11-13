@@ -8,29 +8,47 @@
 
 pub use marspot_term::input_core::*;
 
+use objc2::rc::Retained;
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+use objc2_foundation::NSString;
 
-/// Read the current macOS general-pasteboard string, if any.  Used to
+/// Names a pasteboard for copy and paste to go through instead of the
+/// general one.  A sandbox sets it, so a test run neither reads nor
+/// replaces what the person at the machine has copied.
+pub const PASTEBOARD_ENV: &str = "MARSPOT_PASTEBOARD";
+
+/// The pasteboard copy and paste use: the general one unless
+/// [`PASTEBOARD_ENV`] names another.
+pub fn pasteboard() -> Retained<NSPasteboard> {
+    match std::env::var(PASTEBOARD_ENV) {
+        Ok(name) if !name.is_empty() => {
+            NSPasteboard::pasteboardWithName(&NSString::from_str(&name))
+        }
+        _ => NSPasteboard::generalPasteboard(),
+    }
+}
+
+/// Read the pasteboard's string, if any.  Used to
 /// implement Cmd-V → write to PTY.  Returns None if the clipboard
 /// holds non-text content (image, file URLs, etc.).
 pub fn read_clipboard_text() -> Option<String> {
     unsafe {
-        let pb = NSPasteboard::generalPasteboard();
+        let pb = pasteboard();
         let s = pb.stringForType(NSPasteboardTypeString)?;
         Some(s.to_string())
     }
 }
 
-/// Replace the macOS general pasteboard contents with a single
+/// Replace the pasteboard's contents with a single
 /// plain-text string.  Used to implement Cmd-C → copy current
 /// terminal selection.  Returns true on success.
 pub fn write_clipboard_text(text: &str) -> bool {
     unsafe {
-        let pb = NSPasteboard::generalPasteboard();
+        let pb = pasteboard();
         // clearContents must precede setString or AppKit retains
         // any prior reps and the new write may be ignored.
         pb.clearContents();
-        let s = objc2_foundation::NSString::from_str(text);
+        let s = NSString::from_str(text);
         pb.setString_forType(&s, NSPasteboardTypeString)
     }
 }
