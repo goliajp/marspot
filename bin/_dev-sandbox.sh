@@ -104,6 +104,42 @@ dev_pasteboard_release() {
   [[ -z ${MARSPOT_PASTEBOARD:-} ]] || _dev_pasteboard release >/dev/null 2>&1 || true
 }
 
+# Start this sandbox's session ids at a base of its own.
+#
+# Every state directory numbers its sessions from 1, and what a session
+# publishes through shared memory is named by its id alone, in one
+# namespace for the whole login.  Two sandboxes running at once on one
+# host therefore share names, and a core that restarts opens the other
+# sandbox's region or finds the name gone and starts its pane again.
+# Seeding the allocator's counter keeps the ids, and with them the
+# names, of two sandboxes apart: 100 000 ids each, the base taken from
+# the directory's path.
+#
+# The seed lives in `sessions/.next_id`, which goes whenever a script
+# clears the sessions or the whole directory, so `rm` and `mkdir` are
+# wrapped below to put it back while the directory exists.  A script
+# that removes the directory and lets the app create it starts at 1.
+dev_seed_session_base() {
+  local sd=${MARSPOT_STATE_DIR:-} sum
+  [[ -n $sd && -d $sd && ! -s $sd/sessions/.next_id ]] || return 0
+  sum=$(printf '%s' "$sd" | cksum | cut -d' ' -f1)
+  command mkdir -p "$sd/sessions" \
+    && echo $(( (sum % 90000 + 1) * 100000 )) > "$sd/sessions/.next_id"
+}
+rm() {
+  command rm "$@"
+  local rc=$?
+  dev_seed_session_base
+  return $rc
+}
+mkdir() {
+  command mkdir "$@"
+  local rc=$?
+  dev_seed_session_base
+  return $rc
+}
+dev_seed_session_base
+
 # Write down a pid this script launched (a shell, a standalone marspot,
 # an mcli), so dev_kill_shell_core can find it again.  shell.pid alone
 # is not enough: each shell overwrites it, and an earlier one that is
