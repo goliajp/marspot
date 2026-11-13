@@ -10,6 +10,27 @@ pub(super) enum Ending {
     Unknown,
 }
 
+/// `PROC_FLAG_EXEC` of <sys/proc_info.h>: the process has called exec.
+const HAS_EXECED: u32 = 0x4000;
+
+/// Whether `pid` is still the image its parent forked: it has called
+/// exec at no time. The kernel keeps that per process, so it does not
+/// matter which program the parent or the child is.
+pub(super) fn not_execed(pid: libc::pid_t) -> bool {
+    info(pid).is_some_and(|i| i.pbi_flags & HAS_EXECED == 0)
+}
+
+/// What the kernel keeps about `pid`; `None` once it is gone.
+fn info(pid: libc::pid_t) -> Option<libc::proc_bsdinfo> {
+    // SAFETY: an all-zero proc_bsdinfo is a valid value to fill.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: the buffer is `size` bytes; a process that is gone fails
+    // without writing.
+    let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    (got == size).then_some(info)
+}
+
 /// A kqueue the foreground leaders' exits arrive on, and the last
 /// leader's ending once it has been read from it.
 #[derive(Default)]
