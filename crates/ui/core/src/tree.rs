@@ -164,6 +164,12 @@ impl<'t> Ui<'t> {
         self.container(Kind::Scroll, f).set(|n| n.scroll_slot = slot)
     }
 
+    /// A column floating over the surface with its corner `(x, y)`
+    /// device pixels from the surface's: see `Kind::Float`.
+    pub fn float(&mut self, x: f64, y: f64, f: impl FnOnce(&mut Ui<'t>)) -> At<'_, 't> {
+        self.container(Kind::Float, f).set(|n| n.float_at = (x, y))
+    }
+
     /// A widget made of items: one stop on the Tab ring, the arrow
     /// keys move inside it.  Every node marked `.item(..)` in `f`
     /// becomes one of its items, numbered in order.
@@ -212,6 +218,16 @@ impl<'t> Ui<'t> {
         let start = self.tree.text.len();
         // writing to a String cannot fail
         let _ = self.tree.text.write_fmt(args);
+        let len = (self.tree.text.len() - start) as u32;
+        self.text_node(font, ink, TextRef::Buf { start: start as u32, len })
+    }
+
+    /// Text written by `write` straight into the tree's buffer, for
+    /// a sentence a string table composes around a value.  `write`
+    /// only appends.
+    pub fn text_with(&mut self, font: TextFont, ink: Ink, write: impl FnOnce(&mut String)) -> At<'_, 't> {
+        let start = self.tree.text.len();
+        write(&mut self.tree.text);
         let len = (self.tree.text.len() - start) as u32;
         self.text_node(font, ink, TextRef::Buf { start: start as u32, len })
     }

@@ -169,7 +169,10 @@ impl<O: PaintOut> Painter<'_, O> {
         };
         let mut ch = n.first_child;
         while ch != NONE {
-            self.node(ch, dx, child_dy, child_view);
+            // a floating node is painted when everything else has been
+            if self.tree.nodes[ch as usize].kind != Kind::Float {
+                self.node(ch, dx, child_dy, child_view);
+            }
             ch = self.tree.nodes[ch as usize].next_sibling;
         }
         if clip {
@@ -201,6 +204,10 @@ pub fn paint<O: PaintOut>(
     let (dx, dy) = state.offset;
     let mut p = Painter { tree, layout, state, m: metrics, ring, ring_at: None, out };
     p.node(0, dx, dy, None);
+    // over everything, outside every clip and every scroll
+    for k in 0..layout.floats.len() {
+        p.node(layout.floats[k], dx, dy, None);
+    }
     // last, and outside every clip: the ring is drawn round the widget,
     // where the widget's own container would cut it
     if let Some((rect, radius)) = p.ring_at {

@@ -38,6 +38,12 @@ pub enum Kind {
     /// A line across a stack's cross axis that takes no room in it: a
     /// separator drawn over the edge between two children.
     Rule,
+    /// A column that floats over the surface: it takes no room where
+    /// it is described, stands at `Node::float_at` from the surface's
+    /// corner wherever that is, inside the surface or out of it, and
+    /// is drawn after everything else and found before it.  A menu, a
+    /// card being dragged.
+    Float,
 }
 
 /// Where a child goes on a stack's cross axis.
@@ -209,6 +215,10 @@ pub struct Node {
     pub action: Action,
     pub group: GroupKind,
 
+    /// Where a floating node stands, device pixels from the surface's
+    /// top-left corner.
+    pub float_at: (f64, f64),
+
     /// Nonzero: the paint output is asked to draw this node itself,
     /// as the preset with this tag.
     pub leaf_tag: u32,
@@ -239,6 +249,7 @@ impl Node {
             item: NO_ITEM,
             action: Action { id: 0, arg: 0 },
             group: GroupKind::None,
+            float_at: (0.0, 0.0),
             leaf_tag: 0,
             leaf_data: [0, 0],
         }
