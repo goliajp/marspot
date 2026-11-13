@@ -44,6 +44,7 @@ define_class!(
             let app: Option<Retained<NSRunningApplication>> =
                 unsafe { msg_send![info, objectForKey: NSWorkspaceApplicationKey] };
             let Some(app) = app else { return };
+            crate::reclaim::application_appeared();
             let pid = app.processIdentifier();
             let Some(sid) = pane_of(pid) else { return };
             let name = app.localizedName().map(|n| n.to_string()).unwrap_or_default();
