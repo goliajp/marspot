@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.328"  # a week the usage feed has no reading for is not a week with nothing used
-core    = "0.12.480"  # a row is filed without a scan for where its blank tail starts
-session = "0.11.320"  # a row is filed without a scan for where its blank tail starts
+core    = "0.12.481"  # plain text on a blank stretch of a row writes characters only
+session = "0.11.321"  # plain text on a blank stretch of a row writes characters only

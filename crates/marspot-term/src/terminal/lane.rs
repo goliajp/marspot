@@ -7,7 +7,7 @@
 //! is that path, and the differential tests hold the two together.
 
 use super::Handler;
-use crate::grid::Cell;
+use crate::grid::{Cell, CellAttrs};
 use crate::parser::scan::printable_run_len;
 
 /// Raw codepoint of a 3-byte UTF-8 sequence (caller checked shape).
@@ -242,6 +242,7 @@ impl<'a> Handler<'a> {
             self.wrap_to_next_row(row, rows);
         }
         let attrs = *self.attrs;
+        let plain = attrs == CellAttrs::default();
         let mut idx = 0;
         // the last character written: (char, width, column), in `row`
         let mut last = (head, 1u8, 0u16);
@@ -249,6 +250,10 @@ impl<'a> Handler<'a> {
             let (col0, row) = self.grid.cursor();
             let mut col = col0 as usize;
             let (cells, end) = self.grid.row_and_end_mut(row);
+            // from here on the row holds default cells, and under the
+            // default attributes a default cell only needs its
+            // character replaced
+            let fresh = if plain { *end as usize } else { usize::MAX };
             // why the row was left: 0 the run ended, 1 the row is
             // full, 2 a wide glyph is next and one column is left
             let left = loop {
@@ -263,8 +268,14 @@ impl<'a> Handler<'a> {
                     if m == 0 {
                         break 1;
                     }
-                    for (cell, &b) in cells[col..col + m].iter_mut().zip(rest) {
-                        *cell = Cell { ch: b as char, attrs };
+                    if col >= fresh {
+                        for (cell, &b) in cells[col..col + m].iter_mut().zip(rest) {
+                            cell.ch = b as char;
+                        }
+                    } else {
+                        for (cell, &b) in cells[col..col + m].iter_mut().zip(rest) {
+                            *cell = Cell { ch: b as char, attrs };
+                        }
                     }
                     col += m;
                     idx += m;
@@ -273,8 +284,13 @@ impl<'a> Handler<'a> {
                     if col + 2 > cols {
                         break if col == cols { 1 } else { 2 };
                     }
-                    cells[col] = Cell { ch: c, attrs };
-                    cells[col + 1] = Cell { ch: '\0', attrs };
+                    if col >= fresh {
+                        cells[col].ch = c;
+                        cells[col + 1].ch = '\0';
+                    } else {
+                        cells[col] = Cell { ch: c, attrs };
+                        cells[col + 1] = Cell { ch: '\0', attrs };
+                    }
                     last = (c, 2, col as u16);
                     col += 2;
                     idx += len;
