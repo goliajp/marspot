@@ -11,7 +11,8 @@ use crate::test_env::{StateSandbox, sandbox_state_dir};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// A one-thread HTTP server on an ephemeral loopback port, serving
 /// fixed bodies by path and recording every path asked for.

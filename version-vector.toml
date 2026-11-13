@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.328"  # a week the usage feed has no reading for is not a week with nothing used
-core    = "0.12.358"  # a week the usage feed has no reading for has a row with no figure
+shell   = "0.7.361"  # the shell that stays after a quit keeps no release poll, no CLI installer, no process table
+core    = "0.12.442"  # another process's arguments are read into a mapping, not a zeroed megabyte
 session = "0.11.241"  # what a command printed is put right once it has exited, however late the session looks

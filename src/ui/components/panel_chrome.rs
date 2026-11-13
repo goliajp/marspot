@@ -106,23 +106,7 @@ impl PanelChrome {
         close_hovered: bool,
         body: impl FnOnce(&mut ViewPainter, Rect),
     ) {
-        let view = View {
-            rect: self.frame,
-            style: ViewStyle {
-                bg: palette::frame_bg(),
-                border_color: palette::frame_border(),
-                border_width: panel::BORDER_PX,
-                corner_radius: spec::px(panel::RADIUS) as f32,
-                shadow_blur: spec::px(panel::SHADOW_BLUR) as f32,
-                shadow_alpha: panel::SHADOW_ALPHA,
-                padding: 0.0,
-                backdrop: Backdrop::Dim {
-                    color: palette::backdrop(),
-                    exclude_above_y: self.backdrop_top,
-                },
-            },
-        };
-        view.paint(p, |p| {
+        self.frame_view().paint(p, |p| {
             p.panel_text(
                 header::TITLE,
                 self.title_x() as f32,
@@ -145,21 +129,46 @@ impl PanelChrome {
                     palette::fg_muted(),
                 );
             }
-            let mark = if close_hovered {
-                p.fill_rounded_rect(
-                    self.close,
-                    palette::close_hover_bg(),
-                    spec::px(header::CLOSE_RADIUS) as f32,
-                    (palette::none(), 0.0),
-                );
-                palette::fg()
-            } else {
-                palette::fg_muted()
-            };
-            controls::paint_cross(p, self.close, header::CLOSE_MARK, mark);
+            paint_close(p, self.close, close_hovered);
             body(p, self.content);
         });
     }
+
+    /// The dimmed window and the frame, with nothing in it.
+    pub fn frame_view(&self) -> View {
+        View {
+            rect: self.frame,
+            style: ViewStyle {
+                bg: palette::frame_bg(),
+                border_color: palette::frame_border(),
+                border_width: panel::BORDER_PX,
+                corner_radius: spec::px(panel::RADIUS) as f32,
+                shadow_blur: spec::px(panel::SHADOW_BLUR) as f32,
+                shadow_alpha: panel::SHADOW_ALPHA,
+                padding: 0.0,
+                backdrop: Backdrop::Dim {
+                    color: palette::backdrop(),
+                    exclude_above_y: self.backdrop_top,
+                },
+            },
+        }
+    }
+}
+
+/// A panel's close button, in its hit box `rect`.
+pub fn paint_close(p: &mut ViewPainter, rect: Rect, hovered: bool) {
+    let mark = if hovered {
+        p.fill_rounded_rect(
+            rect,
+            palette::close_hover_bg(),
+            spec::px(header::CLOSE_RADIUS) as f32,
+            (palette::none(), 0.0),
+        );
+        palette::fg()
+    } else {
+        palette::fg_muted()
+    };
+    controls::paint_cross(p, rect, header::CLOSE_MARK, mark);
 }
 
 /// The frame for a panel that wants to be `w × h`: centred in the

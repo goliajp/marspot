@@ -19,7 +19,7 @@ mod args;
 mod ident;
 mod table;
 
-pub use args::{proc_argv, proc_cmdline, proc_env_value};
+pub use args::{proc_argv, proc_cmdline, proc_env_value, release_room};
 pub use ident::{ProcId, SignalError, proc_id, signal};
 pub use table::{ProcNode, ProcTable, descendants_of, flatten_pre_order, tree_rooted_at};
 
@@ -793,29 +793,20 @@ mod tests {
         });
 
         pty.write(b"sleep 30\n").expect("write to the pty");
-        let fg = poll(&pty, "the job to take the tty", &|g| {
-            matches!(g, Generic::Foreground { .. })
+        // The shell's forked child takes the tty before it becomes
+        // `sleep`: for that moment the foreground leader is still
+        // called zsh, and on a busy machine an observation lands in it.
+        poll(&pty, "the job we started to take the tty", &|g| {
+            matches!(g, Generic::Foreground { leader: Some(l), .. } if l.comm == "sleep")
         });
-        let Generic::Foreground { leader, .. } = &fg else {
-            unreachable!()
-        };
-        assert_eq!(
-            leader.as_ref().map(|l| l.comm.as_str()),
-            Some("sleep"),
-            "the foreground job should be the one we started"
-        );
 
         // 0x1a = ^Z.  The line discipline turns it into SIGTSTP for
         // the foreground group.
         pty.write(&[0x1a]).expect("send ^Z");
-        let suspended = poll(&pty, "the job to be suspended", &|g| {
-            matches!(g, Generic::PromptWithJobs { .. })
+        // a ^Z'd job must read as one stopped job, not as an idle pane
+        let suspended = poll(&pty, "the job to read as one stopped job", &|g| {
+            *g == Generic::PromptWithJobs { stopped: 1, running: 0 }
         });
-        assert_eq!(
-            suspended,
-            Generic::PromptWithJobs { stopped: 1, running: 0 },
-            "a ^Z'd job must read as one stopped job, not as an idle pane"
-        );
         // …and the composed state must not be quiet.
         let status = crate::pane_state::compose(
             &suspended,
