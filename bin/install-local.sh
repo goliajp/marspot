@@ -539,6 +539,11 @@ else
 fi
 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
   -f "$APP" >/dev/null 2>&1 || true
+# Where the app is, for a shell that runs an image outside the bundle
+# and for the sessions: what they start to get another shell has to be
+# the bundle's own executable, or LaunchServices lists it as a second
+# application under the name of the file.
+mkdir -p "$STATE_ROOT" && printf '%s\n' "$APP" > "$STATE_ROOT/bundle"
 
 # ── 4b. One-shot bundle lander ────────────────────────────────────
 # A bundle binary cannot be overwritten while its own process runs —

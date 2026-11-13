@@ -15,7 +15,7 @@
 //! descriptor keeps seeing it.
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Set for a shell that is to come up with no window and no Dock icon,
 /// only answering for the sessions.
@@ -42,6 +42,8 @@ pub struct Record {
     pub heir_in: Option<u64>,
     /// Whether that heir is to come up with no window.
     pub heir_resident: bool,
+    /// What the shell that asks hands its heir, as environment.
+    pub heir_env: Vec<(String, String)>,
 }
 
 pub fn path() -> PathBuf {
@@ -59,11 +61,59 @@ pub fn spawn_lock_path() -> PathBuf {
     crate::paths::state_root().join("owner.spawn")
 }
 
+/// Where the app's bundle is, written by a shell that was started from
+/// it and by an install.  A shell that runs an image outside the bundle
+/// (an update) and a session both find the bundle through it.
+pub fn bundle_file() -> PathBuf {
+    crate::paths::state_root().join("bundle")
+}
+
+/// The app bundle `exe` is the main executable of, if it is in one.
+pub fn bundle_of(exe: &Path) -> Option<&Path> {
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    (macos.ends_with("MacOS") && contents.ends_with("Contents") && bundle.extension().is_some_and(|e| e == "app"))
+        .then_some(bundle)
+}
+
+/// `exe` with every symbolic link on the way to it resolved.
+/// LaunchServices matches a process to the earlier instances of its
+/// app by the path it was started with, as text: an instance it
+/// started itself has the resolved path, and a shell started as
+/// `/tmp/…/Marspot.app/…` beside it was measured to be taken for
+/// another application's process when the dead records of the app
+/// were handed on.
+pub fn resolved(exe: &Path) -> PathBuf {
+    exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf())
+}
+
+/// The main executable of the bundle on file, when it is there.
+pub fn installed_shell() -> Option<PathBuf> {
+    let text = std::fs::read_to_string(bundle_file()).ok()?;
+    let exe = resolved(&Path::new(text.trim()).join("Contents/MacOS/marspot-shell"));
+    (bundle_of(&exe).is_some() && exe.is_file()).then_some(exe)
+}
+
+/// What to start for another shell, given what the record names.
+/// LaunchServices takes a process for the app by the file it was
+/// started from: a shell started from a copy outside the bundle is
+/// listed under the copy's name, with a Dock tile of its own, and
+/// opening the app starts a second one beside it.  So a recorded path
+/// outside any bundle gives way to the bundle on file.
+pub fn shell_to_start(recorded: &Path) -> PathBuf {
+    if bundle_of(recorded).is_some() {
+        return resolved(recorded);
+    }
+    installed_shell().unwrap_or_else(|| recorded.to_path_buf())
+}
+
 impl Record {
     pub fn encode(&self) -> String {
         let num = |v: Option<u64>| v.map_or_else(String::new, |c| c.to_string());
+        let env: String = self.heir_env.iter().map(|(k, v)| format!("heir_env.{k}={v}\n")).collect();
         format!(
-            "pid={}\ncoalition={}\nheir_in={}\nheir_resident={}\nexe={}\n",
+            "pid={}\ncoalition={}\nheir_in={}\nheir_resident={}\n{env}exe={}\n",
             self.pid,
             num(self.coalition),
             num(self.heir_in),
@@ -85,6 +135,11 @@ impl Record {
             coalition: field("coalition")?.parse().ok(),
             heir_in: field("heir_in")?.parse().ok(),
             heir_resident: field("heir_resident")? == "1",
+            heir_env: text
+                .lines()
+                .filter_map(|l| l.strip_prefix("heir_env.")?.split_once('='))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             exe: exe.into(),
         })
     }
@@ -124,7 +179,22 @@ mod tests {
     use super::*;
 
     fn sample() -> Record {
-        Record { pid: 4242, coalition: Some(7239), exe: "/A B/Marspot.app/Contents/MacOS/marspot-shell".into(), heir_in: None, heir_resident: false }
+        Record {
+            pid: 4242,
+            coalition: Some(7239),
+            exe: "/A B/Marspot.app/Contents/MacOS/marspot-shell".into(),
+            heir_in: None,
+            heir_resident: false,
+            heir_env: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn only_a_main_executable_names_its_bundle() {
+        let p = Path::new;
+        assert_eq!(bundle_of(p("/A B/Marspot.app/Contents/MacOS/marspot-shell")), Some(p("/A B/Marspot.app")));
+        assert_eq!(bundle_of(p("/s/binaries/current/marspot-shell")), None);
+        assert_eq!(bundle_of(p("/w/target/release/marspot-shell")), None);
     }
 
     #[test]
@@ -134,7 +204,11 @@ mod tests {
         r.heir_in = Some(1178);
         r.heir_resident = true;
         r.coalition = None;
+        r.heir_env = vec![("MARSPOT_RESTORE_FRAME".into(), "10,20,800,600".into()), ("MARSPOT_UPDATE_WAITING".into(), "1".into())];
         assert_eq!(Record::parse(&r.encode()), Some(r));
+        // as written by a shell from before an heir was handed anything
+        let old = Record::parse("pid=1\ncoalition=2\nheir_in=2\nheir_resident=0\nexe=/x/marspot-shell\n").unwrap();
+        assert_eq!(old.heir_env, vec![]);
     }
 
     #[test]

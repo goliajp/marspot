@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.321"  # an account is held to the 5h window exactly while the feed reads one
+shell   = "0.7.325"  # a shell listed outside the bundle becomes the app by name at an update, and a new process takes the coalition
 core    = "0.12.351"  # the usage panel draws a 5h row exactly for the accounts the feed reads one for
-session = "0.11.193"  # a key typed into a pane ends its reader's wait for a turn among flooding panes
+session = "0.11.200"  # a session starts the bundle's shell even when the record names a copy outside it
