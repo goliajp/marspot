@@ -426,7 +426,7 @@ mod tests {
         assert!((l.panes.columns[col::NAME].1 - metric::PANE_NAME_CELLS * CELL_W).abs() < 1e-9);
     }
 
-    #[test]    #[test]
+    #[test]
     fn process_panel_dragged_keeps_its_header_reachable() {
         let top_inset = 60.0;
         let at = |dx: f64, dy: f64| panel_rect(WINDOW.0, WINDOW.1, CELL_H, top_inset, (dx, dy));
