@@ -45,7 +45,9 @@ source "$ROOT/bin/_dev-sandbox.sh"
 KIMI_INSTALLER=https://code.kimi.com/kimi-code/install.sh
 KIMI_CACHE="$HOME/.cache/marspot-e2e/kimi"
 
-SB=/tmp/marspot-kimi
+# A scratch directory of this run's own, removed when the run passes:
+# the fixed name was shared by every run of the suite on the machine.
+SB=/tmp/marspot-kimi.$$
 RUNLOG=$SB/run.log
 REGISTRY="$SB/home/.claude"/sessions
 export PEERBUS_REGISTRY="$REGISTRY"
@@ -68,10 +70,12 @@ fail() {
 ok() { echo "  ✓ $1"; }
 
 cleanup() {
+  local rc=$?
   dev_kill_shell_core
   # by recorded pid, never by name
   [[ -f "$SB/mock.pid" ]] && kill "$(cat "$SB/mock.pid")" 2>/dev/null
-  rm -f /tmp/cc-socks/e2e-*.sock
+  dev_sweep_dead_inboxes
+  (( rc != 0 )) || rm -rf "$SB"
 }
 trap cleanup EXIT
 

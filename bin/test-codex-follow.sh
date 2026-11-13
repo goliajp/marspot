@@ -20,7 +20,9 @@ OLD_SHA256=b0344fc2e41f15e0071147e5869008047b8ff4bf2c4a8897975d3bae3f103b34
 DAEMON=0.164.0
 TARGET=aarch64-apple-darwin
 
-SB=/tmp/marspot-cxf
+# A scratch directory of this run's own, removed when the run passes:
+# the fixed name was shared by every run of the suite on the machine.
+SB=/tmp/marspot-cxf.$$
 RUNLOG=$SB/run.log
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
@@ -35,7 +37,11 @@ fail() {
   exit 1
 }
 ok() { echo "  ✓ $1"; }
-cleanup() { dev_kill_shell_core; }
+cleanup() {
+  local rc=$?
+  dev_kill_shell_core
+  (( rc != 0 )) || rm -rf "$SB"
+}
 trap cleanup EXIT
 
 wait_for() { # regex, seconds

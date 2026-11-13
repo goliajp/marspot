@@ -23,7 +23,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 job_mac() {
   set -e
   cargo build --workspace --all-targets
-  MARSPOT_TEST_JOBS=14 bin/test.sh --no-fail-fast
+  # the runner's cores, shared with the heavy jobs holding its lock now
+  MARSPOT_TEST_JOBS="$(bin/_runner-jobs.sh)" bin/test.sh --no-fail-fast
   cargo clippy --workspace --all-targets -- -D warnings
   bin/lint-deps.sh
   cargo build --release --bins

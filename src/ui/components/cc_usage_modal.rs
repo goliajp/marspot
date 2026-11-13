@@ -223,8 +223,9 @@ pub struct CcUsageAccountRender {
 pub struct CcUsageWindowRender {
     /// Row label as printed, lower case ("5h", "fable", "spark").
     pub label: String,
-    /// 0.0 ..= 1.0 utilization of this window.
-    pub util: f32,
+    /// 0.0 ..= 1.0 utilization of this window; `None` when there is no
+    /// reading, which is drawn as a dash over an empty track, never 0%.
+    pub util: Option<f32>,
     /// Unix reset instant.  `None` = nothing used yet / not reported:
     /// the card still draws the row, the timeline draws no bar, because
     /// there is no extent to draw.
@@ -237,10 +238,16 @@ pub struct CcUsageWindowRender {
 }
 
 impl CcUsageWindowRender {
+    /// The reading as the card and the timeline print it: `42%`, or a
+    /// dash where there is none.
+    pub fn percent(&self) -> String {
+        self.util.map_or_else(|| "—".to_string(), |u| format!("{:.0}%", u * 100.0))
+    }
+
     /// What is written right of this window's timeline bar:
     /// `7d 100% 12:00`.
     pub fn tag(&self) -> String {
-        format!("{} {:.0}% {}", self.label, self.util * 100.0, self.reset_hm)
+        format!("{} {} {}", self.label, self.percent(), self.reset_hm)
     }
 }
 
@@ -341,6 +348,24 @@ pub(crate) fn fit_measured(s: &str, max_w: f64, measure: &mut dyn FnMut(&str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No reading is a dash on the card and in the timeline's tag; a
+    /// reading of nothing used is `0%`.  The two are never the same
+    /// text.
+    #[test]
+    fn a_window_without_a_reading_prints_a_dash_and_zero_prints_zero() {
+        let window = |util| CcUsageWindowRender {
+            label: "7d".into(),
+            util,
+            reset_unix: Some(1_794_538_799),
+            span_secs: 7 * 86_400,
+            reset_hm: "12:00".into(),
+        };
+        assert_eq!((window(None).percent(), window(None).tag()), ("—".to_string(), "7d — 12:00".to_string()));
+        assert_eq!((window(Some(0.0)).percent(), window(Some(0.0)).tag()), ("0%".to_string(), "7d 0% 12:00".to_string()));
+        assert_eq!(window(Some(0.424)).tag(), "7d 42% 12:00");
+        assert_eq!(crate::ui::core::text_fit::cells(&window(None).percent()), 1, "one cell in the terminal font");
+    }
 
     #[test]
     fn fit_ellipsis_bounds_every_case() {

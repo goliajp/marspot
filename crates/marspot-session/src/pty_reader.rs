@@ -319,17 +319,20 @@ mod tests {
         let echo = Echo::later();
         let mut turn = Turn::new(Leases::open());
         let mut buf = vec![0; READ_BUF_BYTES];
+        // The reader reads on only for as long as the pty is not dry,
+        // and a writer kept off its core leaves it dry between any two
+        // kilobytes: how often it reads on is the machine's business.
+        // That it does at all is the reader's, so this looks until it
+        // has seen one; the time limit only tells never from not yet.
+        let give_up = Instant::now() + Duration::from_secs(60);
         let mut largest_over = 0;
-        for _ in 0..200 {
+        while largest_over < 2 * KERNEL_READ_BYTES {
+            assert!(Instant::now() < give_up, "no hand-over carried more than one read past what the pty held: {largest_over}");
             let Event::Data(there) = wakes.wait(None) else { panic!("the flood stopped") };
             let (len, end) = gather(&pty, &mut buf, &wakes, &parser_busy, &mut turn, &echo, there);
             assert!(matches!(end, Gathered::Open { .. }), "the flood ended");
             largest_over = largest_over.max(len.saturating_sub(there));
         }
-        assert!(
-            largest_over >= 2 * KERNEL_READ_BYTES,
-            "no hand-over carried more than one read past what the pty held: {largest_over}"
-        );
     }
 
     /// Right after a key the parser is handed what the pty gave each

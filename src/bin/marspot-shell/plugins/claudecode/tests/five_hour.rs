@@ -34,8 +34,8 @@ fn ultra(email: &str, status: &str, five: Option<(f64, Option<i64>)>, u7: f64) -
         name: email.into(),
         email: email.into(),
         status: status.into(),
-        util_7d: u7,
-        reset_7d: NOW + 86_400,
+        util_7d: Some(u7),
+        reset_7d: Some(NOW + 86_400),
         model_limits: Vec::new(),
         collected_at: NOW - 60,
         limits_as_of: None,
@@ -81,7 +81,7 @@ fn an_account_with_no_5h_reading_is_untouched_by_the_5h() {
     let room = one_room(&free, NOW);
     assert!(matches!(&room, Room::Known { util_5h: None, .. }), "none, not zero: {room:?}");
     assert!(!room.refused_for(None) && !nearly_out(&room, None));
-    assert_eq!(room.headroom_for(None), (0.60, 1.0));
+    assert_eq!(room.headroom_for(None), (Some(0.60), 1.0));
 
     // a reset with no reading beside it is not a window either
     let odd = CcAccount { reset_5h: Some(NOW - 60), ..free.clone() };
