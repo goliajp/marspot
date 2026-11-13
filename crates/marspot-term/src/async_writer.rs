@@ -304,6 +304,12 @@ impl AsyncWriter {
         self.queue.push(Msg::Rotate { live, retired }, true);
     }
 
+    /// Which thread writes.
+    #[cfg(test)]
+    pub(crate) fn thread_id(&self) -> std::thread::ThreadId {
+        self.handle.as_ref().expect("a writer thread").thread().id()
+    }
+
     /// Flush, then continue appending to `new_file`.
     pub fn swap_file(&mut self, new_file: std::fs::File) {
         self.flush();
