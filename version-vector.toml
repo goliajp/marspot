@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.327"  # only a shell that took another's place, or that an update made, looks at who has its coalition
+shell   = "0.7.360"  # the interface language follows the system when the system says its list changed
 core    = "0.12.356"  # a scrollback rotation keeps its writer thread
 session = "0.11.201"  # the reader keeps three chunks, not four, ahead of a key's answer
