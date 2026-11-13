@@ -41,11 +41,12 @@ impl CellAttrs {
     /// sixteen bytes, where `==` goes a field at a time.
     #[inline(always)]
     pub fn is_default(&self) -> bool {
+        let words = self as *const CellAttrs as *const u64;
         // SAFETY: `CellAttrs` is `repr(C)`, sixteen bytes, with its
         // padding spelt out as a field and every byte initialised
-        // (asserted beside `Cell`), and u8 has alignment 1.
-        let bytes = unsafe { &*(self as *const CellAttrs as *const [u8; 16]) };
-        u128::from_ne_bytes(*bytes) == 0
+        // (asserted beside `Cell`); the two reads cover exactly those
+        // bytes and make no claim about alignment.
+        unsafe { words.read_unaligned() | words.add(1).read_unaligned() == 0 }
     }
 }
 
@@ -76,6 +77,8 @@ impl Grid {
     /// The whole of `row`, and its marks for the caller to keep: after
     /// writing cells it must leave each bound at least where it wrote.
     /// One ring-index resolve for a run of any length.
+    // as a call it cost seventeen instructions a run of text
+    #[inline(always)]
     pub fn row_and_mark_mut(&mut self, row: u16) -> (&mut [Cell], &mut RowMark) {
         debug_assert!(row < self.rows);
         let pr = self.phys_row(row);

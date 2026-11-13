@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.328"  # a week the usage feed has no reading for is not a week with nothing used
-core    = "0.12.490"  # a colour change takes a short way through the dispatch
-session = "0.11.330"  # a colour change takes a short way through the dispatch
+core    = "0.12.491"  # a run of ASCII that ends inside its row skips the general loop
+session = "0.11.331"  # a run of ASCII that ends inside its row skips the general loop

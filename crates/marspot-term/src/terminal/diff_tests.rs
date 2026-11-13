@@ -374,9 +374,9 @@ fn a_megabyte_line_is_scanned_about_once() {
         let before = SCANNED.with(|c| c.get());
         t.feed(&line);
         let scanned = SCANNED.with(|c| c.get()) - before;
-        // each row's scan may look one byte past what it takes
+        // a row's scan may look a block of sixteen bytes ahead
         assert!(
-            scanned <= (line.len() as u64) * 2,
+            scanned <= (line.len() as u64) * 3,
             "{cols}x{rows}: {scanned} bytes scanned for a line of {}",
             line.len()
         );
