@@ -101,7 +101,8 @@ RUN_ID="$(date +%H%M%S)$$"
 # an interrupted run can stop exactly that and nothing else.
 REMOTE_PIDF="/tmp/marspot-e2e-$RUN_ID.pgid"
 # Two runs from two checkouts would sync over each other's remote tree.
-LOCK_LOCAL="/tmp/marspot-e2e-remote.lock.d"
+# one run per remote copy: two copies do not share a build tree
+LOCK_LOCAL="/tmp/marspot-e2e-remote.$REMOTE_NAME.lock.d"
 
 SUITES=("$@")
 if [[ ${#SUITES[@]} -eq 0 ]]; then
