@@ -545,9 +545,12 @@ mod tests {
         // that is never idle would have it: gathering is what the
         // reader does while the parser is busy.
         let mut parsing: Option<Chunk> = None;
-        let mut typical = |chunks: usize| {
+        let mut typical = |chunks: usize, key_before_each: bool| {
             let mut sizes: Vec<usize> = (0..chunks)
                 .map(|_| {
+                    if key_before_each {
+                        typed();
+                    }
                     let chunk = rx.recv_timeout(Duration::from_secs(30)).expect("the flood stopped");
                     let len = chunk.bytes().len();
                     if let Some(parsed) = parsing.replace(chunk) {
@@ -559,14 +562,29 @@ mod tests {
             sizes.sort_unstable();
             sizes[chunks / 2]
         };
+        // Both sizes say something only while the writer and the reader
+        // each get a core: a starved `yes` fills nothing in 3 ms, and a
+        // reader kept off its core finds the pty full at every read.
+        // On a runner at a load of 30 that is so for seconds at a time,
+        // so each is looked for until it shows, for this long.
+        const PATIENCE: Duration = Duration::from_secs(20);
         // the first chunks of a flood come as the turns start
-        typical(8);
-        let gathered = typical(21);
+        typical(8, false);
+        let began = Instant::now();
+        let mut gathered = typical(21, false);
+        while gathered < 8 * KERNEL_READ_BYTES && began.elapsed() < PATIENCE {
+            gathered = typical(21, false);
+        }
         assert!(gathered >= 8 * KERNEL_READ_BYTES, "a flood is gathered: {gathered} bytes a chunk");
-        typed();
-        // those already gathered when the key was typed
-        typical(CHUNKS);
-        let after = typical(21);
+        // A key before each chunk, so the moment after a key lasts for
+        // as long as this looks, however slowly the chunks come.  The
+        // first few were gathered before the first key.
+        typical(CHUNKS, true);
+        let began = Instant::now();
+        let mut after = typical(21, true);
+        while after > 4 * KERNEL_READ_BYTES && began.elapsed() < PATIENCE {
+            after = typical(21, true);
+        }
         assert!(after <= 4 * KERNEL_READ_BYTES, "after a key it comes as the pty gives it: {after} bytes a chunk");
         reader.stop();
     }
