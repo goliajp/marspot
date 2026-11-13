@@ -176,12 +176,16 @@ mod tests {
         assert_eq!(after.state, State::Runnable);
     }
 
+    /// The thread waits to be let go, not for a time: on a busy runner
+    /// its 300 ms were over before the second look, which then found
+    /// no thread.
     #[test]
     fn a_sleeping_thread_reads_as_waiting_and_idle() {
         let (tx, rx) = std::sync::mpsc::channel();
+        let (let_go, held) = std::sync::mpsc::channel::<()>();
         let h = std::thread::spawn(move || {
             tx.send(Probe::this_thread()).unwrap();
-            std::thread::sleep(Duration::from_millis(300));
+            let _ = held.recv();
         });
         let p = rx.recv().unwrap();
         std::thread::sleep(Duration::from_millis(50));
@@ -190,6 +194,7 @@ mod tests {
         let b = p.look().unwrap();
         assert_eq!(b.state, State::Waiting);
         assert!(b.cpu - a.cpu < Duration::from_millis(5), "{a:?} → {b:?}");
+        drop(let_go);
         h.join().unwrap();
     }
 }
