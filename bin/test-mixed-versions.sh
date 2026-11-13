@@ -68,10 +68,10 @@ SID="" PID="" SHELL_PID=""
 # started from the app at `$1`.
 start_app() { # directory of the build to start
   cleanup
-  # a fresh sandbox numbers from 1, and an old build names what
-  # session 1 publishes by that alone: whatever an earlier phase or an
-  # earlier run left under those names is not this pane's
-  dev_forget_regions /msp-s-1 /msp-c-1 /msp-t-1
+  # every phase gets the same session id, and an old build names what
+  # a session publishes by the id alone: what the last phase's killed
+  # session left under those names is not this pane's
+  if [[ -n $SID ]]; then dev_forget_regions "/msp-s-$SID" "/msp-c-$SID" "/msp-t-$SID"; fi
   CLI="$1/marspot-shell"
   launch "$SD" "$1/marspot-shell"
   mkdir -p "$SD/work"
@@ -83,6 +83,14 @@ start_app() { # directory of the build to start
   PID=$(entry "$SD" "$SID" pid)
   SHELL_PID=$(entry "$SD" "$SID" shell_child_pid)
   echo "  session $SID pid $PID shell $SHELL_PID region $(entry "$SD" "$SID" shm_name)"
+}
+
+# Print the flag again.  A session's own update does not carry the
+# text of the clusters on its screen to the new image, in any build;
+# what is checked here is where the text is published, not that.
+print_again() {
+  type_in_pane "$SD" "$SID" "clear; cat $SD/work/m.txt"
+  sleep 1
 }
 
 same_pane() {
@@ -144,6 +152,9 @@ sleep 1
 same_pane
 check "the session runs the new build" test "$(entry "$SD" "$SID" stamps_regions)" = 1
 check "the session kept its region" test "$(count "$SD" L3_REHOUSE)" -eq 0
+check "the title set before the update is still published" \
+  test "$("$PROBE" title "$SD/sessions/$SID" 2>/dev/null)" = TITLE-M
+print_again
 new_readers_read_everything
 check "the frames keep coming" frames_match_old_reader 1
 
@@ -189,6 +200,9 @@ wait_count "$SD" L3_REHOUSED 0 120
 same_pane
 check "the session updated and moved to a region made for it" test "$(count "$SD" L3_REHOUSED)" -ge 1
 check "no session was started again" lacks_log core.reattach.l3_failed
+check "the title set before the move came along" \
+  test "$("$PROBE" title "$SD/sessions/$SID" 2>/dev/null)" = TITLE-M
+print_again
 new_readers_read_everything
 
 echo "════ lost: an old session without its region, nothing to update to ════"

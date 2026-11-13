@@ -315,6 +315,14 @@ impl GridShmWriter {
         region::ident_at(self.base, self.len).and_then(|at| unsafe { ident::read_serial(at) })
     }
 
+    /// Take over the side regions `left` publishes through: this
+    /// writer replaces it, and [`Self::attach_side_regions`] then
+    /// carries what they hold to wherever this one publishes.
+    pub fn inherit_side_regions(&mut self, left: &mut Self) {
+        self.clusters = left.clusters.take();
+        self.title = left.title.take();
+    }
+
     /// Publish the text of each frame's clusters and the window title
     /// from now on, in the regions named after the grid region `grid`
     /// -- see [`clusters`] and [`title`].  What it published beside the

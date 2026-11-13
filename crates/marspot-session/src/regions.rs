@@ -126,6 +126,7 @@ pub(crate) fn republish(
         return;
     }
     let left = grid_name();
+    shm.inherit_side_regions(frames.shm());
     shm.attach_side_regions(&cname, owner);
     let new_fd = shm.fd();
     // the old writer closes the fd the next image would inherit

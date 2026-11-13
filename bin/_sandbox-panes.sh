@@ -71,9 +71,6 @@ launch() { # state dir, shell binary, extra env…
   shift 2
   rm -rf "$sd"
   mkdir -p "$sd/logs"
-  # numbered from 1, like a state directory on a new machine: these
-  # suites are about sandboxes whose session ids are the same
-  command rm -rf "$sd/sessions"
   (
     export MARSPOT_STATE_DIR="$sd"
     # a core that was swapped in runs from binaries/current, where a
