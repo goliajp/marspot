@@ -310,3 +310,42 @@ fn the_history_files_come_out_byte_for_byte_the_same() {
         }
     }
 }
+
+/// A row is filed in the file without its blank tail, and where that
+/// tail starts comes from the grid's per-row bound.  The in-memory
+/// history is handed whole rows and knows nothing of the bound, so the
+/// two must still hold the same lines.
+#[test]
+fn a_file_holds_the_lines_a_memory_history_holds() {
+    let dir = TempDir::new("feed-file-mem");
+    let mut inputs = corpora();
+    inputs.push(("adversarial", adversarial().concat()));
+    // trailing blanks that are not default cells, and rows rewritten
+    // shorter than they were
+    let tails = b"abc   \r\n\x1b[44mx  \x1b[0m  \r\nlong line here\rab\x1b[K\r\n\x1b[7m \x1b[0m\r\n";
+    inputs.push(("tails", tails.repeat(40)));
+    for (n, (name, bytes)) in inputs.iter().enumerate() {
+        for (cols, rows) in [(122u16, 39u16), (40, 6), (7, 3)] {
+            let mut file = file_backed(&dir, &format!("f-{n}-{cols}"), cols, rows);
+            let mut mem = Terminal::new(cols, rows);
+            for c in bytes.chunks(61) {
+                file.feed(c);
+                mem.feed(c);
+            }
+            let (f, m) = (file.grid(), mem.grid());
+            assert_eq!(f.scrollback_len(), m.scrollback_len(), "{name}, {cols}x{rows}");
+            for i in 0..m.scrollback_len() {
+                // either may come back padded to the pane's width
+                let trimmed = |mut line: Vec<crate::grid::Cell>| {
+                    while line.last() == Some(&crate::grid::Cell::default()) {
+                        line.pop();
+                    }
+                    line
+                };
+                let want = trimmed(m.scrollback_line(i).expect("line"));
+                let got = trimmed(f.scrollback_line(i).expect("line"));
+                assert_eq!(got, want, "{name}, {cols}x{rows}: history line {i}");
+            }
+        }
+    }
+}

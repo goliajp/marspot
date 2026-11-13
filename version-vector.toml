@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.328"  # a week the usage feed has no reading for is not a week with nothing used
-core    = "0.12.360"  # the shared controls and the panel frame can be nodes of an interface tree
-session = "0.11.201"  # the reader keeps three chunks, not four, ahead of a key's answer
+core    = "0.12.480"  # a row is filed without a scan for where its blank tail starts
+session = "0.11.320"  # a row is filed without a scan for where its blank tail starts
