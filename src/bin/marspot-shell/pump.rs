@@ -22,16 +22,18 @@
 //! shell sends the core (a key, the mouse, focus, a resize), a knock
 //! from a plugin thread or a background job ([`knock`]), the command
 //! socket or a second launch, a signal, the settings file changing, the
-//! system's appearance changing, the core's socket closing.  Each of those runs a pass at
-//! once and puts the clock back to once a second, so nothing that
-//! happens while resting is seen later than it would have been.
+//! system's appearance or the user's language list changing, the core's
+//! socket closing.  Each of those runs a pass at once and puts the clock
+//! back to once a second, so nothing that happens while resting is seen
+//! later than it would have been.
 //!
 //! At rest the clock does not tick at all.  What a tick would have
 //! looked for has an event instead: the core exiting closes its socket,
 //! which knocks; a core that is alive but hung is found when there is
 //! something to deliver to it, since sending it anything ends the rest
 //! and the next pass pings with the usual deadline; the interface
-//! language is read on the pass that the app regaining focus asks for.
+//! language is read on the pass the system's notice of a changed locale
+//! asks for.
 //! With any program bound to any pane the clock never rests, and
 //! everything about agents runs exactly as before.
 

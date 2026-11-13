@@ -31,7 +31,7 @@ SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
 SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
-RUN_LOG=/tmp/marspot-test-update-flow.log
+RUN_LOG="$(dev_run_log test-update-flow)"
 
 fail() {
   echo "FAIL: $*"
