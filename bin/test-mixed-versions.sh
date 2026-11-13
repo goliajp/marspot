@@ -88,7 +88,11 @@ same_pane() {
   check "the app reads the pane's text" shows "$SD" "$SID" MARK-M
 }
 lacks_log() { ! logged "$SD" "$1"; }
-frame_shows() { "$PROBE" screen "$SD/sessions/$SID" 2>/dev/null | grep -qF -- "$1"; }
+frame_shows() {
+  local out
+  out=$("$PROBE" screen "$SD/sessions/$SID" 2>/dev/null)
+  [[ $out == *"$1"* ]]
+}
 new_readers_read_everything() {
   check "this build reads the frame" frame_shows MARK-M
   check "this build reads the cluster text" frame_shows "$FLAG"
@@ -157,6 +161,9 @@ check "the old readers find the cluster text and title where they look" \
 
 echo "════ rollback: new app, then the old core over new sessions ════"
 start_app "$NEW"
+# what the phases above left under the names an old build gives this
+# session id: their sessions were killed and removed nothing
+dev_forget_regions "/msp-s-$SID" "/msp-c-$SID" "/msp-t-$SID"
 swap_core "$SD" "$OLD/marspot-core"
 sleep 1
 same_pane

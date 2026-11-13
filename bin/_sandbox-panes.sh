@@ -49,7 +49,13 @@ entry() { # state dir, session id, key
 }
 alive() { kill -0 "$1" 2>/dev/null; }
 screen() { in_sd "$1" "$CLI" --read "$2" 2>/dev/null; }
-shows() { screen "$1" "$2" | grep -qF -- "$3"; }
+# whole output first: under pipefail a reader that stops at the first
+# match fails the writer
+shows() {
+  local out
+  out=$(screen "$1" "$2")
+  [[ $out == *"$3"* ]]
+}
 lacks() { ! shows "$@"; }
 wait_shows() { # state dir, session id, text, seconds
   local i
