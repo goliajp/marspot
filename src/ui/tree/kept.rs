@@ -105,6 +105,34 @@ impl KeptSurface {
         describe: impl FnOnce(&mut Ui<'_>, &FontMeasure<'_>),
         custom: &mut Custom<'_>,
     ) {
+        self.refresh_with(p, at, pointer, describe, custom);
+        p.cells.extend_from_slice(&self.cells);
+        p.glyphs.extend_from_slice(&self.glyphs);
+        p.ui_rects.extend_from_slice(&self.ui_rects);
+    }
+
+    /// [`Self::frame`] that adds nothing to the frame `p` is painting:
+    /// the kept instances are brought up to date and left where they
+    /// are, for a surface drawn in a pass of its own.  True when they
+    /// were painted again.
+    pub fn refresh(
+        &mut self,
+        p: &mut ViewPainter<'_>,
+        at: Place,
+        pointer: Option<(f64, f64)>,
+        describe: impl FnOnce(&mut Ui<'_>, &FontMeasure<'_>),
+    ) -> bool {
+        self.refresh_with(p, at, pointer, describe, &mut |_: &mut ViewPainter<'_>, _, _| {})
+    }
+
+    fn refresh_with(
+        &mut self,
+        p: &mut ViewPainter<'_>,
+        at: Place,
+        pointer: Option<(f64, f64)>,
+        describe: impl FnOnce(&mut Ui<'_>, &FontMeasure<'_>),
+        custom: &mut Custom<'_>,
+    ) -> bool {
         self.atlas_gen = atlas_generation(p.atlas);
         let inputs = self.inputs(p.font, at);
         let mut stale = {
@@ -134,9 +162,13 @@ impl KeptSurface {
             };
             self.surface.paint_into(&mut TreeOut::with_custom(&mut kept, custom));
         }
-        p.cells.extend_from_slice(&self.cells);
-        p.glyphs.extend_from_slice(&self.glyphs);
-        p.ui_rects.extend_from_slice(&self.ui_rects);
+        stale
+    }
+
+    /// The instances kept: plain rectangles, glyphs, rounded
+    /// rectangles.
+    pub fn kept(&self) -> (&[RectInstance], &[GlyphInstance], &[UiRectInstance]) {
+        (&self.cells, &self.glyphs, &self.ui_rects)
     }
 
     /// Instances kept: `(plain rectangles, glyphs, rounded rectangles)`.

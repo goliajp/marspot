@@ -43,6 +43,13 @@ pub const CUSTOM: u32 = 1000;
 /// The key caps of one row of the shortcuts panel: see
 /// `shortcuts_view::paint_keys`.
 pub const KEYS: u32 = 10;
+/// A context menu's frame.
+pub const MENU_FRAME: u32 = 11;
+/// One row of a context menu: its label, then its shortcut after the
+/// mark `context_menu_view` puts between them.
+pub const MENU_ROW: u32 = 12;
+/// The line between two groups of a context menu's rows.
+pub const MENU_DIVIDER: u32 = 13;
 
 /// A segmented control whose segment `n` emits
 /// `Action { id: action, arg: n }`.
@@ -182,6 +189,9 @@ pub(super) fn paint(p: &mut ViewPainter, tag: u32, data: [u32; 2], label: &str, 
         CLOSE => panel_chrome::paint_close(p, rect, state.hovered),
         FRAME => PanelChrome::new(rect, f32::from_bits(data[0]) as f64).frame_view().paint(p, |_| {}),
         KEYS => crate::ui::components::shortcuts_view::paint_keys(p, rect, label, data[0]),
+        MENU_FRAME => crate::ui::components::context_menu_view::paint_frame(p, rect),
+        MENU_ROW => crate::ui::components::context_menu_view::paint_row(p, rect, label, state),
+        MENU_DIVIDER => crate::ui::components::context_menu_view::paint_divider(p, rect),
         _ => unreachable!("a node asked for preset {tag}, which nothing here draws"),
     }
 }
