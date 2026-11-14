@@ -1195,3 +1195,7 @@ mod five_hour_tests;
 #[cfg(test)]
 #[path = "tests/week_unknown.rs"]
 mod week_unknown_tests;
+
+#[cfg(test)]
+#[path = "tests/fable_stranded.rs"]
+mod fable_stranded_tests;
