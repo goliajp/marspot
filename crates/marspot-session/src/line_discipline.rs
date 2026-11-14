@@ -591,12 +591,17 @@ mod tests {
     /// printing as it should, until one the session saw holding the
     /// terminal has ended the repair. One that came and went between
     /// two looks leaves it pending, however many there are.
+    ///
+    /// Each holds the terminal a fifth of a second before it prints: a
+    /// bare `printf` is gone in a millisecond, and on a busy machine
+    /// two hundred of them in a row went by unseen.
     fn commands_until_the_repair_is_over(s: &mut LocalSession) {
         for n in 0.. {
-            assert!(n < 200, "no command was ever seen holding the terminal:\n{}", screen(s));
+            assert!(n < 20, "no command was ever seen holding the terminal:\n{}", screen(s));
             let (first, second) = (format!("a{n}"), format!("b{n}"));
+            let line = format!("/bin/sleep 0.2; /usr/bin/printf '{first}\\n{second}\\n'");
             assert!(
-                prints_stacked(s, &format!("/usr/bin/printf '{first}\\n{second}\\n'"), &first, &second, |_| {}),
+                prints_stacked(s, &line, &first, &second, |_| {}),
                 "newline returns the carriage again, repairs {:?}:\n{}",
                 s.line_repairs(),
                 screen(s)
