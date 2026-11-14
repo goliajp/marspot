@@ -72,6 +72,11 @@ def one_round(prefix, windows, trials, skew, scenarios):
         rd["load1"] = [float(x) for x in open(prefix + ".load").read().split()]
         if max(rd["load1"]) > LOAD_MAX:
             rd["polluted"] = True
+    if os.path.exists(prefix + ".cpu"):
+        before, after = (float(x) for x in open(prefix + ".cpu").read().split())
+        every = sum(scenario_bytes(s) for s in scenarios) * trials * windows
+        # of every process of the terminal, for all the round's bytes
+        rd["cpu_ms_per_128MiB"] = round((after - before) * 1000 * (128 << 20) / every, 1)
     for s in scenarios:
         total = scenario_bytes(s) * windows
         readings, dropped = [], []
@@ -138,6 +143,10 @@ def main(argv):
             if vals:
                 rec[f"{s}_MBps"] = median(vals)
                 rec[f"{s}_MBps_range"] = [min(vals), max(vals)]
+        cpu = [rd["cpu_ms_per_128MiB"] for rd in (clean or used) if "cpu_ms_per_128MiB" in rd]
+        if cpu:
+            rec["cpu_ms_per_128MiB"] = median(cpu)
+            rec["cpu_ms_per_128MiB_range"] = [min(cpu), max(cpu)]
         grids = {json.dumps(rd.get("grid")) for rd in rds if rd.get("grid")}
         if len(grids) == 1:
             rec["grid"] = json.loads(grids.pop())

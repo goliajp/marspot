@@ -102,6 +102,9 @@ write_multi_script() {
   {
     echo '#!/bin/zsh'
     echo 'zmodload zsh/datetime'
+    # a pane whose shell has exited may be given a new one: the round
+    # is over by then, and that one measures nothing
+    echo "[[ ! -e \"$start_file.end\" ]] || exec sleep 20"
     echo "marker=\"$prefix.\$\$\""
     echo 'echo "==GRID== $(stty size < /dev/tty)" >> "$marker"'
     # the first start, written once every window is up
@@ -132,8 +135,24 @@ write_multi_script() {
       done
     done
     echo "echo '==ALL_DONE==' >> \"\$marker\""
+    # the window stays until its terminal's CPU time has been read
+    echo "until [[ -e \"$start_file.end\" ]]; do sleep 0.05; done"
   } > "$out"
   chmod 0755 "$out"
+}
+
+# CPU seconds, user and system, the processes of one terminal have used
+# so far: the product's shell, core and sessions, or the Ghostty
+# processes this run started.
+cpu_s() {
+  local pids
+  case "$1" in
+    marspot) pids="$(bin/drivers/marspot.sh app-pids 2>/dev/null | tr '\n' ',')" ;;
+    ghostty) pids="$(tr '\n' ',' < "$GHOSTTY_PIDS")" ;;
+  esac
+  pids="${pids%,}"
+  [[ -n $pids ]] || { echo 0; return; }
+  ps -o time= -p "$pids" 2>/dev/null | awk '{ n = split($1, t, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + t[i]; sum += s } END { printf "%.2f\n", sum }'
 }
 
 # markers of one terminal and round that contain a line
@@ -190,14 +209,19 @@ for t in "${TERMS[@]}"; do
   if (( up < N )); then
     echo "==> [$t r$round] only $up of $N windows came up; no reading" >&2
   else
+    cpu_before="$(cpu_s "$t")"
     python3 -c 'import time; print(f"{time.time() + 2:.6f}")' > "$start_file.tmp"
     mv "$start_file.tmp" "$start_file"
     for ((i = 0; i < SLOTS * SLOT_S + 30; i++)); do
       (( $(count_with "$prefix" '==ALL_DONE==') >= N )) && break
       sleep 1
     done
+    echo "$cpu_before $(cpu_s "$t")" > "$prefix.cpu"
   fi
   echo "$load_start $(load1)" > "$prefix.load"
+  # the windows may go now
+  : > "$start_file.end"
+  sleep 1
 
   case "$t" in
     marspot) bin/drivers/marspot.sh close-app >&2 || true ;;
