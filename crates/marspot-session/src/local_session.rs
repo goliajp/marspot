@@ -694,6 +694,16 @@ mod tests {
             (self.line.repairs(), self.line.pending())
         }
 
+        /// The pty's master side and the shell's pid.
+        pub(crate) fn tty(&self) -> (std::os::fd::RawFd, libc::pid_t) {
+            (self.pty.raw_master(), self.shell_pgrp())
+        }
+
+        /// Hold Enter up for this long before the line guard looks.
+        pub(crate) fn enter_stalls(&mut self, stall: Option<Duration>) {
+            self.line.enter_stalls = stall;
+        }
+
         /// The tty's input, output and local flags.
         pub(crate) fn pty_flags(&self) -> (libc::tcflag_t, libc::tcflag_t, libc::tcflag_t) {
             let mut t: libc::termios = unsafe { std::mem::zeroed() };
