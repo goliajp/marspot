@@ -114,19 +114,9 @@ pub(crate) fn note_reseat() -> bool {
 
 /// A shell that was asked for was not given the coalition: none is
 /// asked for again until the count lapses.  What refused it is a
-/// record this app cannot take over.
-///
-/// The first refusal in a row is let stand at its count: the app's own
-/// core can be what has the coalition for the moment, on the dead
-/// record of the core this shell's last image started, until the core
-/// it starts now registers and takes that record over (measured: 7 ms
-/// after the shell asked for was refused).  The look that follows waits
-/// for that (`Step::WaitForHidden`) and asks once more.
+/// record this app cannot take over.  (The core never registers, so it
+/// is not one of the app's own.)
 pub(crate) fn note_refused() {
-    if RESEATS.load(std::sync::atomic::Ordering::Acquire) < 2 {
-        WANTED.store(true, std::sync::atomic::Ordering::Release);
-        return;
-    }
     RESEATS.store(RESEATS_MOST, std::sync::atomic::Ordering::Release);
     if let Err(e) = std::fs::write(reseats_path(), format!("{RESEATS_MOST} {}\n", now_secs())) {
         lx_warn!("shell.reclaim.count_failed", &format!("{e}"));
