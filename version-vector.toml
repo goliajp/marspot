@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.361"  # the shell that stays after a quit keeps no release poll, no CLI installer, and no process table
-core    = "0.12.491"  # a run of ASCII that ends inside its row skips the general loop
-session = "0.11.334"  # what a command printed is put right once it has exited, however late the session looks
+core    = "0.12.492"  # a pane whose shell ended closes; the core no longer exits to be restarted when every shell has ended
+session = "0.11.335"  # a session whose shell ended removes its directory instead of keeping it for resurrection

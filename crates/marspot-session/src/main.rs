@@ -706,10 +706,8 @@ fn main() {
     let (shm, cols, rows) = setup_shm();
     let mut frames = frames::Frames::new(shm);
 
-    // Phase 2c: when we own the PTY, also own the UDS control socket
-    // + registry entry so L2 (Phase 3) can discover us after a swap.
-    // Bound for the whole owns-pty branch; Drop on exit unbinds +
-    // prunes the on-disk entry.
+    // The UDS control socket + registry entry, so a later L2 can
+    // discover us after a swap.
     let mut _listener: Option<uds_server::SessionListener> = None;
 
     // Resumed control stream from the pre-execv image, if any —
@@ -1058,10 +1056,10 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     // from a swapped-out L2 socket can't null the poke a newer L2
     // just adopted.
     let mut client_generation: u64 = resumed_client_generation;
-    // RFC-003 §6 Amendment 16: SIGTERM watcher sets this; we break
-    // the loop and the post-loop dispatcher decides between execv
-    // handoff and clean-exit.
+    // SIGTERM watcher sets this; the post-loop dispatcher decides
+    // between execv handoff and clean exit (Amendment 16).
     let mut want_shutdown = false;
+    let mut shell_ended = false;
     // SIGHUP came: exit even if a probe for an execv is under way
     let mut closing = false;
     // What the Gatekeeper probe concluded about `current/marspot-
@@ -1641,7 +1639,10 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
             frames::Shown { predicted, resized, modes_changed, scroll: pending_scroll },
         ) {
             frames::Turn::Parsed(n) => n,
-            frames::Turn::Exited => break,
+            frames::Turn::Exited => {
+                shell_ended = true;
+                break;
+            }
         };
 
         // RFC-002 §8 (step 8b — fetch side): drain any ScrollbackPage
@@ -1860,8 +1861,6 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         }
         let id = session.id();
         let SessionImpl::Local(local) = session;
-        // Only the probe can authorise an execv now; `None` means we
-        // never had a reason to hand over.
         let do_execv = execv_verdict == Some(true);
         if do_execv {
             match _listener.take() { Some(listener_owned) => {
@@ -1890,8 +1889,6 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 std::process::exit(1);
             }}
         } else {
-            // Clean exit: persist snapshot, leave Pty::Drop alone
-            // (it SIGHUPs the shell — that's correct for user-quit).
             let body = local.terminal().serialize_snapshot();
             let path = session_state_bin_path(id);
             let _ = std::fs::write(&path, &body);
@@ -1908,6 +1905,9 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     }
     // the session is over and no image follows it
     marspot_term::grid_shm::delete_side_regions(session.id());
+    if let Some(listener) = _listener.take().filter(|_| shell_ended) {
+        listener.end_with_shell();
+    }
 }
 
 // B3 integration tests.  These exercise the L3-side surface of the
