@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.427"  # the shell draws the core's toolbar icons; a shell started for the coalition takes over only when it was given it
+shell   = "0.7.428"  # the shell draws the core's toolbar icons; a refused shell stops the asking for two minutes
 core    = "0.12.510"  # the toolbar icons are drawn by the shell, so the core never registers with LaunchServices
 session = "0.11.348"  # a shell a living shell asked for is not counted with the starts of one that died
