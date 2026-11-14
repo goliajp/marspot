@@ -123,6 +123,8 @@ const INITIAL_ROWS: u16 = 12;
 // vertical layout (sidebar items, cell rects) starts BELOW that band.
 use marspot::HEADER_PT;
 
+mod bench_chrome;
+
 // Sidebar row geometry now lives on `Layout` itself
 // (`Layout::sidebar_top_pad_phys` + `layout::SIDEBAR_ROW_H`),
 // so render*.rs paint and main.rs hit-test consume the same source
@@ -2308,6 +2310,7 @@ fn run_bench(spec: &str) {
         // `render` and `metal-render` are now aliases — the AppKit
         // CGImage renderer was removed, Metal is the only live path.
         "render" | "metal-render" => bench_metal_render(arg),
+        "chrome-render" => bench_chrome::run(arg),
         "scroll" => bench_scroll(arg, /* cold */ false),
         "scroll-cold" => bench_scroll(arg, /* cold */ true),
         "scrollaccess" => bench_scrollaccess(arg),
