@@ -38,7 +38,9 @@
 /// the path it shows instead of cloning one and formatting the other.
 /// 17 the same day: the layout panel's slot titles are written into strings
 /// the window keeps.
-const CEILING: usize = 17;
+/// 14 the same day: the context menu is no longer a canvas built and
+/// encoded afresh on every frame it is open.
+const CEILING: usize = 14;
 
 fn render_inner_body() -> String {
     let src = std::fs::read_to_string("src/bin/marspot-core.rs")
