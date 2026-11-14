@@ -1,6 +1,6 @@
 //! The window's chrome, laid out as instances: the seams between
-//! panes and the focus ring, empty seats, the sidebar, the toolbar and
-//! the version label.
+//! panes and the focus ring, empty seats and the sidebar, and the
+//! toolbar and the version label, which are drawn from a tree.
 //!
 //! Sizes are `spec::chrome`'s and colours `panel_palette`'s; where a
 //! thing is, and so where a click lands on it, is the layout's.
@@ -19,6 +19,7 @@ use crate::ui::core::view::ViewPainter;
 use crate::ui::system::macos::icons::{self, Symbol};
 use crate::ui::theme::spec::chrome;
 use crate::ui::SESSION_COUNT_HARD_CAP;
+use crate::ui::components::toolbar_view::{Toolbar, ToolbarSurface};
 
 /// What the chrome shows beyond where things are.
 #[derive(Clone, Copy, Debug, Default)]
@@ -39,13 +40,14 @@ pub(crate) fn paint_chrome(
     focused_idx: usize,
     state: ChromeState,
     overlay_ui_rects: &mut Vec<UiRectInstance>,
+    toolbar: &mut ToolbarSurface,
 ) {
     paint_grid_seams(painter, layout, n_views, focused_idx, overlay_ui_rects);
     paint_empty_seats(painter, layout, n_views);
     paint_sidebar(painter, layout, sidebar, focused_idx, state.hover);
     paint_region_seams(painter, layout);
-    paint_toolbar(painter, layout, state);
-    paint_version_label(painter, layout);
+    let cell = (painter.cell_w, painter.cell_h, painter.ascent);
+    toolbar.frame(painter, &Toolbar::of(layout, state.on, state.hover, cell));
 }
 
 fn paint_grid_seams(
@@ -223,71 +225,4 @@ fn paint_region_seams(p: &mut ViewPainter, layout: &Layout) {
         let r = Rect { x: 0.0, y_top: layout.top_inset - g, w: layout.window_w, h: g };
         p.fill_rounded_rect(r, palette::seam(), 0.0, (palette::none(), 0.0));
     }
-}
-
-pub(crate) fn paint_toolbar(p: &mut ViewPainter, layout: &Layout, state: ChromeState) {
-    // Every toolbar button, painted from one list.
-    //
-    // `layout.toolbar_buttons()` is the layout's own order, zipped
-    // against a same-length icon array — so a button the layout knows
-    // about cannot be left unpainted.  The settings button was added
-    // without this and shipped invisible: the rect was laid out and
-    // the hit-test worked, so clicking the empty space opened a panel
-    // nobody could see a button for.
-    //
-    // A hidden sidebar's button is the symbol at rest, like any button
-    // whose panel is closed; showing, it is on.
-    let symbols = [
-        Symbol::Sidebar,
-        Symbol::Layout,
-        Symbol::Processes,
-        Symbol::Usage,
-        Symbol::Settings,
-    ];
-    for (i, (rect, icon)) in layout.toolbar_buttons().into_iter().zip(symbols).enumerate() {
-        // A zero-width rect is a button this layout does not show
-        // (snapshot / bench paths build a chrome-less layout).
-        if rect.w <= 0.0 {
-            continue;
-        }
-        Button {
-            rect,
-            label: None,
-            icon: Some(icon),
-            icon_position: IconPosition::Only,
-            hovered: state.hover == Some(ChromeHover::Toolbar(i as u8)),
-            style: ButtonStyle::toolbar(state.on[i]),
-        }
-        .paint(p);
-    }
-}
-
-pub(crate) fn paint_version_label(painter: &mut ViewPainter, layout: &Layout) {
-    let (cell_w, cell_h, ascent) = (painter.cell_w, painter.cell_h, painter.ascent);
-    // Quiet metadata flush right, on the same row as the traffic
-    // lights and the toolbar buttons.
-    if layout.top_inset > 0.0 {
-        let label = version_label();
-        let text_w = label.chars().count() as f32 * cell_w;
-        let scale = (layout.top_inset / crate::HEADER_PT) as f32;
-        let x = (layout.window_w as f32 - chrome::VERSION_PAD_RIGHT as f32 * scale - text_w).max(cell_w);
-        let row_center = marspot_term::layout::TRAFFIC_LIGHT_CENTER_Y_LOGICAL as f32 * scale;
-        let baseline_y = (row_center - cell_h * 0.5).max(0.0) + ascent;
-        painter.text(x, baseline_y, &label, palette::chrome_icon());
-    }
-}
-
-/// The running binary's version label, e.g. `v0.12.67`.  Bumped on
-/// every commit that changes a binary (project rule), so it still works
-/// as visible proof that a silent update landed — the product name and
-/// the git sha that used to trail it were noise in a corner the user
-/// reads dozens of times a day.  The sha stays available in the window
-/// title and in logs.
-pub fn version_label() -> String {
-    // L2 (marspot-core) is the canonical marspot version — the header
-    // Two numbers, because two questions are being asked.  The
-    // product version says which marspot this is; the core build
-    // number says whether the code someone just wrote is the code
-    // running, which is the only reason that number exists.
-    crate::version_line()
 }
