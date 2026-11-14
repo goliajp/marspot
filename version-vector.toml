@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.424"  # a refusal is lifted once the feed reads its window lower, plus per-state grid regions
-core    = "0.12.508"  # a model cap with no reading draws no figure, plus menus drawn from the tree
-session = "0.11.346"  # history clusters survive an update, and the snapshot for the next image is written last
+core    = "0.12.509"  # a pane whose shell ended closes; the core no longer exits to be restarted when every shell has ended
+session = "0.11.347"  # a session whose shell ended removes its directory instead of keeping it for resurrection

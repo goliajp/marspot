@@ -57,6 +57,9 @@ pub struct SessionListener {
     /// `prepare_for_execv` clears its CLOEXEC + mem::forgets via the
     /// suppress_drop path so ownership carries across the swap.
     dir_lock: Option<std::fs::File>,
+    /// Set by `end_with_shell`: the directory is already gone, and
+    /// Drop has nothing to report.
+    ended: bool,
 }
 
 impl SessionListener {
@@ -157,6 +160,7 @@ impl SessionListener {
             accept_thread: Some(accept_thread),
             keep_listener: Some(listener),
             suppress_drop: false,
+            ended: false,
             dir_lock: Some(dir_lock),
         })
     }
@@ -213,6 +217,7 @@ impl SessionListener {
             accept_thread: Some(accept_thread),
             keep_listener: Some(listener),
             suppress_drop: false,
+            ended: false,
             // RFC-004 A.3 — the pre-execv image's lock fd is still
             // open in this same process (CLOEXEC cleared before the
             // swap), so the flock is already ours; nothing to acquire.
@@ -267,6 +272,20 @@ impl SessionListener {
         self.suppress_drop = true;
         Ok(fd)
     }
+
+    /// The pane's shell ended on its own: the session is over and its
+    /// directory goes, as on any clean end.  Kept, it would let the
+    /// next core resurrect the session, which starts the same shell
+    /// (the same command) again.
+    pub fn end_with_shell(mut self) {
+        let _ = marspot_term::session_registry::delete_session(self.id);
+        lx_event!(
+            "SESSION_DIR_REMOVED",
+            "the shell ended; the session's directory is removed",
+            session_id = self.id
+        );
+        self.ended = true;
+    }
 }
 
 impl Drop for SessionListener {
@@ -290,17 +309,14 @@ impl Drop for SessionListener {
             }
             return;
         }
-        // RFC-004 invariant 4: destroying the session dir (history!)
-        // is reserved for the USER's explicit pane close — and that
-        // path runs in L2 (`close_session` → delete_session).  This
-        // Drop used to call delete_session too, but the only way an
-        // L3 reaches a non-suppressed Drop is an abnormal unwind
-        // (panic in the main loop) — exactly when the user most
-        // needs the on-disk state to survive for resurrection.  So:
-        // unlink only the socket (a dead L3's sock is useless and
-        // blocks nothing thanks to cleanup_stale_socket, but tidy is
-        // tidy), keep entry.toml + bytelog + scrollback + state.bin.
-        // The next L2 boot resurrects or retires the dir.
+        if self.ended {
+            return;
+        }
+        // Reached on an abnormal unwind (a panic in the main loop): a
+        // shell that ended goes through `end_with_shell`, a close
+        // through L2's `delete_session`.  The user needs the on-disk
+        // state to survive, so only the socket goes; the next core
+        // resurrects or retires the dir.
         cleanup_stale_socket(self.id);
         lx_warn!(
             "session.listener.abnormal_drop",
