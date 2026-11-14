@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use marspot::pidtree;
 use marspot_peer::envelope::Mode;
@@ -18,13 +19,55 @@ use super::bind::{self, Pane};
 use super::deliver::Rate;
 use super::inbox::Inbox;
 use super::idle::send_notices;
+use super::others;
 use super::records::private_dir;
 use super::worker::{is_inbox_name, now_ms, write_record, Binding, Worker, RETRY_MIN};
 
+/// Whether this Codex shows its thread id in the window title: what
+/// its command line sets (`-c tui.terminal_title=…`), else its home's
+/// `config.toml`.
+fn title_expected(home: &Path, argv: &[String]) -> bool {
+    let set = argv.iter().find_map(|a| a.strip_prefix("--config=").unwrap_or(a.as_str()).strip_prefix("tui.terminal_title="));
+    match set {
+        Some(list) => bind::title_shows_thread(&format!("tui.terminal_title={list}")),
+        None => std::fs::read_to_string(home.join("config.toml")).is_ok_and(|t| bind::title_shows_thread(&t)),
+    }
+}
+
+/// How old a view of the process table a binding may be decided on.
+const LOOK_AGE: Duration = Duration::from_millis(250);
+
 impl Worker {
+    /// Note which Codex processes are running, in panes or not, from a
+    /// process table no older than `max_age`.
+    pub(super) fn look_at_processes(&mut self, max_age: Duration) {
+        let obs = crate::observe::shared().fresh(max_age);
+        let mut homes: Vec<PathBuf> = std::env::var_os("HOME")
+            .map_or(Vec::new(), |h| super::codex_config::config_files(Path::new(&h)))
+            .iter()
+            .filter_map(|f| f.parent().map(Path::to_path_buf))
+            .collect();
+        homes.extend(self.wants.iter().filter_map(|w| crate::plugins::codex::home_of(w.codex.pid)));
+        let daemons: Vec<pidtree::ProcId> = homes.iter().flat_map(|h| others::daemons_of(h)).collect();
+        let oldest = self.wants.iter().map(|w| w.codex.start_us / 1000).min();
+        self.codexes.look(&obs.table, &daemons, crate::plugins::beside::now_ms(), oldest);
+        // the geminis too: telling one takes its command line, which
+        // its own plugin, on the main thread, does not read for every
+        // process there is
+        if let Some(home) = std::env::var_os("HOME") {
+            crate::plugins::gemini::look_at_processes(&obs.table, &mut self.geminis, Path::new(&home));
+        }
+    }
+
     pub(super) fn refresh(&mut self) {
+        self.look_at_processes(LOOK_AGE);
         let mut panes = Vec::new();
         let mut procs: HashMap<u64, (pidtree::ProcId, Vec<String>)> = HashMap::new();
+        let mut titles = HashMap::new();
+        for w in &self.wants {
+            titles.insert(w.sid, bind::TitleWatch::seen(self.titles.remove(&w.sid), w.codex, &w.title_thread));
+        }
+        self.titles = titles;
         for w in &self.wants {
             // the observation may be two seconds old
             if pidtree::proc_id(w.codex.pid) != Some(w.codex) {
@@ -36,12 +79,18 @@ impl Worker {
             };
             let home = home.canonicalize().unwrap_or(home);
             let argv_thread = crate::plugins::codex::argv_thread_id(w.codex.pid);
+            let cwd = cwd.to_string_lossy().into_owned();
+            let started_ms = w.codex.start_us / 1000;
             panes.push(Pane {
                 sid: w.sid,
+                title_expected: title_expected(&home, &w.argv),
                 home,
-                cwd: cwd.to_string_lossy().into_owned(),
+                alone: self.codexes.alone(w.codex, &cwd, started_ms),
+                cwd,
                 argv_thread,
                 title_thread: w.title_thread.clone(),
+                title_moved: self.titles[&w.sid].moved,
+                started_ms,
             });
             procs.insert(w.sid, (w.codex, w.argv.clone()));
         }
@@ -61,7 +110,14 @@ impl Worker {
             }
         }
 
-        let current: HashMap<u64, String> = self.bindings.iter().map(|(sid, b)| (*sid, b.thread.clone())).collect();
+        // a binding is its process's: the next Codex in the pane does
+        // not inherit the thread of the one before
+        let current: HashMap<u64, String> = self
+            .bindings
+            .iter()
+            .filter(|(sid, b)| procs.get(*sid).is_some_and(|(codex, _)| *codex == b.codex))
+            .map(|(sid, b)| (*sid, b.thread.clone()))
+            .collect();
         let plan = bind::assign(&panes, &threads, &current);
 
         let sids: Vec<u64> = self.bindings.keys().copied().collect();

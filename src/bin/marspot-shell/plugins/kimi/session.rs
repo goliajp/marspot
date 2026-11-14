@@ -100,12 +100,10 @@ pub(crate) fn session_dir(home: &Path, id: &str) -> Option<PathBuf> {
     indexed(home, &json::parse(line).ok()?).filter(|(found, _)| found == id).map(|(_, dir)| dir)
 }
 
-/// How far a record's last write may trail the start of the process
-/// that wrote it: the two clocks are not read at the same instant.
-const START_SLACK: Duration = Duration::from_secs(2);
-
 /// The session opened in `cwd` whose record was written last, among
-/// those written since `started`.
+/// those written since `started`.  Not a moment before: a record last
+/// written just before this process started is the session of the
+/// kimi that was quit there a moment earlier.
 fn newest_in(home: &Path, cwd: &str, started: SystemTime) -> Option<String> {
     let index = tail(&home.join("session_index.jsonl"), INDEX_BYTES)?;
     let real = std::fs::canonicalize(cwd).ok();
@@ -117,7 +115,7 @@ fn newest_in(home: &Path, cwd: &str, started: SystemTime) -> Option<String> {
         .filter_map(|v| indexed(home, &v))
         .filter_map(|(id, dir)| {
             let written = std::fs::metadata(dir.join("agents/main/wire.jsonl")).and_then(|m| m.modified()).ok()?;
-            (written + START_SLACK >= started).then_some((written, id))
+            (written >= started).then_some((written, id))
         })
         .max_by_key(|(written, _)| *written)
         .map(|(_, id)| id)
@@ -543,6 +541,11 @@ mod tests {
         std::fs::File::options().write(true).open(&old).unwrap().set_modified(before).unwrap();
         let mut idx = SessionIndex::default();
         assert_eq!(idx.look(&asker(&home, Some("/w/a"), true)), None, "a session older than the process is not its own");
+        // the kimi that was quit here half a second before this one started
+        let just_before = SystemTime::now() - Duration::from_millis(1500);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(just_before).unwrap();
+        let mut idx = SessionIndex::default();
+        assert_eq!(idx.look(&asker(&home, Some("/w/a"), true)), None, "nor is one last written just before it started");
         session(&home, ID, CANCELLED_THEN_COMPLETED, None);
         let mut idx = SessionIndex::default();
         assert_eq!(idx.look(&asker(&home, Some("/w/a"), true)).map(|(id, _)| id).as_deref(), Some(ID));
