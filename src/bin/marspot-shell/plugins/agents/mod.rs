@@ -24,6 +24,7 @@ use std::io::Read;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use marspot_term::{lx_info, lx_warn};
@@ -69,24 +70,36 @@ const SHELL_WITHIN: Duration = Duration::from_secs(15);
 /// it starts, which has taken most of a minute.
 const VERSION_WITHIN: Duration = Duration::from_secs(120);
 
-/// Start the thread.  Not in a sandbox: it shares the developer's HOME
-/// and the network.
-pub(crate) fn start() {
+/// Start the thread; it ends when what this returns is dropped.  Not in
+/// a sandbox: it shares the developer's HOME and the network.
+pub(crate) fn start() -> Option<Sender<()>> {
     if std::env::var_os("MARSPOT_DEV_SANDBOX").is_some() {
-        return;
+        return None;
     }
-    let spawned = std::thread::Builder::new().name("agents-install".into()).spawn(|| {
-        std::thread::sleep(FIRST_AFTER);
+    let (stop, stopped) = channel();
+    let spawned = std::thread::Builder::new().name("agents-install".into()).spawn(move || {
         let mut failed = Failures::default();
-        loop {
+        every(&stopped, FIRST_AFTER, EVERY, || {
             if marspot::settings::get().agents_install {
                 pass(&mut failed);
             }
-            std::thread::sleep(EVERY);
-        }
+        });
     });
     if let Err(e) = spawned {
         lx_warn!("agents.spawn_failed", &e.to_string());
+    }
+    Some(stop)
+}
+
+/// Run `step` after `first` and then once every `period`, until the
+/// sender of `stopped` is dropped.  The app that is put away while its
+/// sessions stay has no pane to install a CLI for, and a thread asleep
+/// on a clock would wake the process that stays for as long as it does.
+fn every(stopped: &Receiver<()>, first: Duration, period: Duration, mut step: impl FnMut()) {
+    let mut wait = first;
+    while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(wait) {
+        step();
+        wait = period;
     }
 }
 
@@ -299,6 +312,30 @@ fn version(bin: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    /// The passes come on the clock until the app is put away, and the
+    /// thread is gone after that: it is joined here, which a thread
+    /// still asleep on its period would never let happen.
+    #[test]
+    fn the_passes_end_when_the_app_is_put_away() {
+        let (stop, stopped) = channel();
+        let passes = Arc::new(AtomicU32::new(0));
+        let counted = Arc::clone(&passes);
+        let t = std::thread::spawn(move || {
+            every(&stopped, Duration::ZERO, Duration::from_secs(3600), || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            });
+        });
+        while passes.load(Ordering::SeqCst) == 0 {
+            std::thread::yield_now();
+        }
+        drop(stop);
+        t.join().expect("the thread ends");
+        assert_eq!(passes.load(Ordering::SeqCst), 1, "a pass ran after the stop");
+    }
+
     use super::*;
 
     fn places(tag: &str) -> Places {

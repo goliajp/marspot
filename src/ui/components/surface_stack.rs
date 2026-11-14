@@ -108,6 +108,17 @@ pub enum KeyAction {
     Close(Change),
 }
 
+/// Which part of the open panel a press is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PressOn {
+    Close,
+    /// The header where it is a drag handle.
+    Header,
+    Content,
+    /// Not on the panel at all.
+    Outside,
+}
+
 /// What a press of the primary button does while a panel is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Press {
@@ -210,19 +221,32 @@ impl SurfaceStack {
     /// A press at `(x, y)` with the open panel's chrome at `chrome`.
     /// `None` when nothing is open and the press is the panes'.
     pub fn on_press(&mut self, x: f64, y: f64, chrome: &PanelChrome) -> Option<Press> {
-        let kind = self.open?;
-        Some(if chrome.hit_close(x, y) {
-            Press::Close(self.close(CloseBy::CloseButton))
+        let on = if chrome.hit_close(x, y) {
+            PressOn::Close
         } else if !chrome.frame.contains(x, y) {
-            Press::Close(self.close(CloseBy::Outside))
+            PressOn::Outside
         } else if chrome.hit_header(x, y) {
-            let f = chrome.frame;
-            let offset = self.offset();
-            let home = Rect { x: f.x - offset.0, y_top: f.y_top - offset.1, ..f };
-            self.grab = Some(Grab { pointer: (x, y), offset, home });
-            Press::BeginDrag
+            PressOn::Header
         } else {
-            Press::Content(kind)
+            PressOn::Content
+        };
+        self.on_press_on(on, x, y, chrome.frame)
+    }
+
+    /// A press at `(x, y)` that the open panel, whose frame is
+    /// `frame`, found to be on `on`.  `None` when nothing is open.
+    pub fn on_press_on(&mut self, on: PressOn, x: f64, y: f64, frame: Rect) -> Option<Press> {
+        let kind = self.open?;
+        Some(match on {
+            PressOn::Close => Press::Close(self.close(CloseBy::CloseButton)),
+            PressOn::Outside => Press::Close(self.close(CloseBy::Outside)),
+            PressOn::Header => {
+                let offset = self.offset();
+                let home = Rect { x: frame.x - offset.0, y_top: frame.y_top - offset.1, ..frame };
+                self.grab = Some(Grab { pointer: (x, y), offset, home });
+                Press::BeginDrag
+            }
+            PressOn::Content => Press::Content(kind),
         })
     }
 

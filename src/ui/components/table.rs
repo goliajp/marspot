@@ -5,11 +5,10 @@
 //! column is a whole number of characters wide and its numbers line up
 //! without measuring anything.
 //!
-//! [`TableGeometry`] is where everything is — built with no painter,
-//! so a click handler holds the same rects the painter draws — and its
-//! `paint_*` methods draw what it describes.  The caller owns the data,
-//! the selection and the scroll offset; the body scrolls and the header
-//! does not.
+//! [`TableGeometry`] is where everything is; the panel that shows a
+//! table puts a node of its tree on each rect.  The caller owns the
+//! data, the selection and the scroll offset; the body scrolls and the
+//! header does not.
 //!
 //! There is no scissor in the UI paint path, so a row is laid out only
 //! if it fits the body whole: a row that straddles the card's edge
@@ -17,12 +16,9 @@
 //!
 //! All rects are physical pixels.
 
-use marspot_term::layout::{Alignment, Rect};
+use marspot_term::layout::Rect;
 
-use crate::ui::components::panel_chrome;
-use crate::ui::components::panel_palette as palette;
-use crate::ui::core::text_fit::fit_mono;
-use crate::ui::core::ViewPainter;
+use crate::ui::core::text_fit::fit_mono_len;
 use crate::ui::theme::spec::{self, card as card_spec, space, table as t};
 
 /// How wide a column is.
@@ -175,58 +171,22 @@ impl TableGeometry {
     }
 
     /// Where `text` goes in column `col` of `row`, `indent` tree
-    /// levels in, and what is left of it once it is cut to fit: a cell
-    /// never runs into the next column.
-    pub fn cell_text(&self, row: Rect, col: usize, indent: u8, text: &str) -> (Rect, String) {
+    /// levels in, and what is left of it once it is cut to fit: how
+    /// many of its bytes, and whether an ellipsis follows them.  A
+    /// cell never runs into the next column.
+    pub fn cell(&self, row: Rect, col: usize, indent: u8, text: &str) -> (Rect, usize, bool) {
         let (x, w) = self.columns[col];
         let shift = (indent as f64 * t::INDENT_CELLS * self.cell_w).min(w);
         let rect = Rect { x: x + shift, y_top: row.y_top, w: w - shift, h: row.h };
-        (rect, fit_mono(text, rect.w, self.cell_w, 0.0))
+        let (len, cut) = fit_mono_len(text, rect.w, self.cell_w);
+        (rect, len, cut)
     }
 
-    /// The card, the header's labels and the line under them.
-    pub fn paint_frame(&self, p: &mut ViewPainter, columns: &[Column]) {
-        panel_chrome::card(p, self.card);
-        for (col, c) in columns.iter().enumerate() {
-            // The arrow goes on the side away from the edge the column
-            // is aligned to, so the label still lines up with its data.
-            let label = match (c.sort, c.align) {
-                (None, _) => c.header.to_string(),
-                (Some(dir), Align::Left) => format!("{} {}", c.header, arrow(dir)),
-                (Some(dir), Align::Right) => format!("{} {}", arrow(dir), c.header),
-            };
-            self.paint_cell(p, self.header, col, c.align, 0, &label, palette::fg_muted());
-        }
-        panel_chrome::row_separator(p, self.card, self.separator_y);
-    }
-
-    /// The fill behind `row`, in `color`.
-    pub fn paint_highlight(&self, p: &mut ViewPainter, row: Rect, color: [f32; 4]) {
-        p.fill_rounded_rect(
-            self.highlight_rect(row),
-            color,
-            spec::px(t::SELECTED_RADIUS) as f32,
-            (palette::none(), 0.0),
-        );
-    }
-
-    /// One cell's text, vertically centred in `row`.
-    pub fn paint_cell(
-        &self,
-        p: &mut ViewPainter,
-        row: Rect,
-        col: usize,
-        align: Align,
-        indent: u8,
-        text: &str,
-        color: [f32; 4],
-    ) {
-        let (rect, text) = self.cell_text(row, col, indent, text);
-        let anchor = match align {
-            Align::Left => Alignment::CenterLeft,
-            Align::Right => Alignment::CenterRight,
-        };
-        p.text_in(rect, &text, color, anchor);
+    /// [`Self::cell`] with the text as it is shown.
+    #[cfg(test)]
+    pub fn cell_text(&self, row: Rect, col: usize, indent: u8, text: &str) -> (Rect, String) {
+        let (rect, len, cut) = self.cell(row, col, indent, text);
+        (rect, format!("{}{}", &text[..len], if cut { "…" } else { "" }))
     }
 }
 
@@ -236,13 +196,6 @@ impl TableGeometry {
 fn cells_of(c: &Column, asked: f64) -> f64 {
     let header = crate::ui::core::text_fit::cells(c.header) + if c.sort.is_some() { 2 } else { 0 };
     asked.max(header as f64)
-}
-
-fn arrow(dir: SortDir) -> char {
-    match dir {
-        SortDir::Asc => '▲',
-        SortDir::Desc => '▼',
-    }
 }
 
 /// `(x, width)` of each column inside `card`'s row padding.  Columns

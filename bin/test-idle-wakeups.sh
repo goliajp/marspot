@@ -4,7 +4,11 @@
 # Opens a sandbox window of four panes at shell prompts, lets it settle,
 # and counts the timer wake-ups of all its processes over 30 seconds
 # (the kernel's own per-process counter, see bin/_idle_wakeups.py).
-# Fails when they exceed IDLE_WAKEUP_BUDGET per second.
+# Exits 1 when they exceed IDLE_WAKEUP_BUDGET per second on a quiet
+# host; 3 when they do next to other work, which is no verdict; 2 when
+# there was no reading (the codes of bin/measure-idle-marspot.sh).  Then
+# quits the app with its sessions kept and holds the shell that stays to
+# budgets of its own, wake-ups and footprint.
 #
 # A timer that fires whether or not there is work is how idle cost comes
 # back: each one is cheap, nothing else notices it, and twelve panes
@@ -32,4 +36,12 @@ export IDLE_WAKEUP_BUDGET="${IDLE_WAKEUP_BUDGET:-1.2}"
 # for the life of a process that has once drawn (the same 0.3 the
 # shell and the core each show above)
 export IDLE_RESIDENT=1 IDLE_RESIDENT_BUDGET="${IDLE_RESIDENT_BUDGET:-0.4}"
+# What that shell keeps.  16.0 to 16.2 MiB measured (2026-11-14, three
+# quits); an AppKit program of thirty lines that has shown one window
+# and closed it keeps 15.6 MiB, so this is the platform's figure and
+# half a megabyte of the graphics driver's.  A megabyte over is
+# something of the app's that the quit did not put away: the table of
+# the host's processes and the room their arguments are read into were
+# that megabyte.
+export IDLE_RESIDENT_FOOTPRINT_KIB="${IDLE_RESIDENT_FOOTPRINT_KIB:-17000}"
 exec "$ROOT/bin/measure-idle-marspot.sh"
