@@ -15,6 +15,24 @@ pub(super) fn rotated(live: &Path, retired: &Path) -> Option<std::fs::File> {
     std::fs::OpenOptions::new().create(true).append(true).read(true).open(live).ok()
 }
 
+/// Who is told that a writer has room for a hand-over it refused.
+static RETRY: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// Have `wake` called, on a writer's thread, each time a writer that
+/// refused a hand-over has written what kept it busy.  A process says
+/// this once, with what makes its producers hand over again; in one
+/// that never does, refused bytes wait for the next full buffer or
+/// flush.
+pub fn retry_with(wake: impl Fn() + Send + Sync + 'static) {
+    let _ = RETRY.set(Box::new(wake));
+}
+
+pub(super) fn retry() {
+    if let Some(wake) = RETRY.get() {
+        wake();
+    }
+}
+
 /// Who deletes what [`delete_behind`] has moved aside.
 static DELETER: OnceLock<Box<dyn Fn(PathBuf) + Send + Sync>> = OnceLock::new();
 
