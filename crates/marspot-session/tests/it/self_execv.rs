@@ -98,7 +98,18 @@ fn wait_for_or<T>(
 pub(crate) fn start(sandbox: &mut Sandbox) -> Session {
     let shell = shell_without_rc_files(sandbox.path(), "/bin/zsh");
     sandbox.env.set("SHELL", &shell);
-    let mut s = Session::spawn_with_id(bin(), COLS, ROWS, Some(id()));
+    settled(sandbox, Session::spawn_with_id(bin(), COLS, ROWS, Some(id())))
+}
+
+/// [`start`], on regions under the session's names.
+pub(crate) fn start_named(sandbox: &mut Sandbox) -> (Session, marspot_term::grid_shm::SessionRegions) {
+    let shell = shell_without_rc_files(sandbox.path(), "/bin/zsh");
+    sandbox.env.set("SHELL", &shell);
+    let (s, regions) = Session::spawn_named(bin(), COLS, ROWS, id());
+    (settled(sandbox, s), regions)
+}
+
+fn settled(sandbox: &Sandbox, mut s: Session) -> Session {
     let state = sandbox.path().to_path_buf();
     wait_for(10, "the session's first frame", || {
         if let Some(st) = s.child.try_wait().unwrap() {
