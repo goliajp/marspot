@@ -77,6 +77,11 @@ pub fn resolve<'a>(entries: &'a [Entry], panes: &[Pane], to: &str) -> Result<Rec
     let miss = match crate::resolve::resolve(to, &targets) {
         Ok(hit) => {
             let p = &panes[hit.index];
+            // named, and there: but nothing can be handed to it, and
+            // nothing else is to have what was meant for it
+            if !p.has_inbox() {
+                return Err(p.no_inbox_text());
+            }
             return Ok(Recipient { socket: p.socket.clone(), entry: entries.iter().find(|e| e.pid == p.pid), note: hit.note });
         }
         Err(miss) => miss,
@@ -196,6 +201,16 @@ pub fn listing(entries: &[Entry], panes: &[Pane], me: Option<&Entry>, now_ms: i6
         let full = pane.and_then(Pane::full_name_if_not_shown).map(|f| format!("  ({f})")).unwrap_or_default();
         out.push_str(&format!("  {name}  ·  {kind}  ·  {}{started}{own}{addr}{full}\n", e.status.as_deref().unwrap_or("?")));
     }
+    // there, and not to be written to: said, so that a name shared
+    // with one of these is not a surprise when it is refused
+    let waiting: Vec<&Pane> = panes.iter().filter(|p| !p.has_inbox()).collect();
+    if !waiting.is_empty() {
+        out.push_str(&format!("\nPanes that cannot be sent to yet ({}):\n", waiting.len()));
+        for p in waiting {
+            let full = p.full_name_if_not_shown().map(|f| format!("  ({f})")).unwrap_or_default();
+            out.push_str(&format!("  {}  ·  {}  ·  no inbox yet{full}\n", p.name, p.agent.as_deref().unwrap_or("agent")));
+        }
+    }
     out
 }
 
@@ -290,6 +305,43 @@ mod tests {
         assert_eq!((r.socket.as_str(), r.note.as_deref()), ("/tmp/cc-socks/1.sock", Some("inputx#1024 is now called alt#1024")));
     }
 
+    /// Two Codex panes in `proj`; which thread the second runs is not
+    /// known, so it has no inbox.  It is in the table all the same.
+    fn one_bound_one_not() -> (Vec<Entry>, Vec<Pane>) {
+        let es = vec![Entry { ours: true, agent: Some(Agent::Codex), ..entry(2, "proj#1807") }];
+        let unbound = Pane { socket: String::new(), ..pane("proj", 7359, "codex", "proj#7359", 77) };
+        (es, vec![pane("proj", 1807, "codex", "proj#1807", 2), unbound])
+    }
+
+    /// Named in full, the pane without an inbox answers for itself:
+    /// the sender is told why nothing was sent, not that there is no
+    /// such pane.
+    #[test]
+    fn a_pane_without_an_inbox_says_so_when_named_in_full() {
+        let (es, panes) = one_bound_one_not();
+        for to in ["proj#7359", "codex:proj#7359"] {
+            assert_eq!(
+                resolve(&es, &panes, to).err().unwrap(),
+                "proj#7359 has no inbox yet: marspot does not know for certain which codex session that pane runs, so nothing was sent. Try again later"
+            );
+        }
+        assert_eq!(resolve(&es, &panes, "proj#1807").ok().unwrap().socket, "/tmp/cc-socks/2.sock", "the other is reached as ever");
+    }
+
+    /// The name both share stays a question for the sender.  Without
+    /// the second pane in the table it meant the first, and a message
+    /// for the pane that could not take it went to its neighbour.
+    #[test]
+    fn a_name_shared_with_a_pane_without_an_inbox_is_not_taken_for_the_other() {
+        let (es, panes) = one_bound_one_not();
+        for to in ["proj", "codex:proj"] {
+            let err = resolve(&es, &panes, to).err().unwrap();
+            assert!(err.starts_with(&format!("2 panes are named {to:?}: proj#1807 (codex), proj#7359 (codex). Send again to one of them")), "{err}");
+        }
+        // alone in the table, the bound pane is what the name means
+        assert_eq!(resolve(&es, &panes[..1], "proj").ok().unwrap().socket, "/tmp/cc-socks/2.sock");
+    }
+
     #[test]
     fn the_listing_names_agent_and_full_name() {
         let es = vec![
@@ -312,5 +364,16 @@ mod tests {
         // the name a message carries as its sender is the one drawn
         assert_eq!(display_name(&es[1], &panes), "marspot#1024");
         assert_eq!(display_name(&es[3], &panes), "alt");
+        assert!(!text.contains("cannot be sent to"), "nothing is said of panes without inboxes while there are none");
+    }
+
+    /// A pane without an inbox is listed apart from the sessions that
+    /// can be messaged, and is not counted among them.
+    #[test]
+    fn the_listing_sets_panes_without_inboxes_apart() {
+        let (es, panes) = one_bound_one_not();
+        let text = listing(&es, &panes, None, 0);
+        assert!(text.starts_with("Peer sessions (1):\n  proj#1807  ·  codex  ·  idle"), "{text}");
+        assert!(text.ends_with("\nPanes that cannot be sent to yet (1):\n  proj#7359  ·  codex  ·  no inbox yet\n"), "{text}");
     }
 }

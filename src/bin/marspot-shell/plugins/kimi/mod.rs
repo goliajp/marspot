@@ -371,8 +371,11 @@ impl Plugin for KimiPlugin {
         let activity = self.panes.iter().map(|(sid, p)| (*sid, activity_of(p.facts.as_ref().map(|f| f.status)))).collect();
         *ACTIVITY.lock().unwrap() = Some(activity);
 
-        let mut peers = Peers { bound: Vec::new(), all_known: true };
+        let mut peers = Peers { bound: Vec::new(), all_known: true, unbound: Vec::new() };
         for (sid, p) in &self.panes {
+            if p.session.is_none() || p.cwd.is_none() {
+                peers.unbound.push((*sid, p.proc));
+            }
             match (&p.session, &p.cwd) {
                 (Some(session), Some(cwd)) => peers.bound.push(Peer {
                     sid: *sid,
@@ -389,6 +392,7 @@ impl Plugin for KimiPlugin {
             }
         }
         peers.bound.sort_by_key(|p| p.sid);
+        peers.unbound.sort_by_key(|(sid, _)| *sid);
         peer::publish(peers);
         self.keep_on_usable_accounts(host);
         self.wake(host);

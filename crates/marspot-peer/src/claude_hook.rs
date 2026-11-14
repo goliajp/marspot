@@ -46,6 +46,11 @@ fn before_send(input: &Value, panes: &[Pane]) -> Option<Value> {
     }
     let targets: Vec<Target> = panes.iter().map(Pane::target).collect();
     match resolve::resolve(to, &targets) {
+        Ok(hit) if !panes[hit.index].has_inbox() => Some(obj([
+            ("hookEventName", Value::from("PreToolUse")),
+            ("permissionDecision", Value::from("deny")),
+            ("permissionDecisionReason", Value::from(panes[hit.index].no_inbox_text())),
+        ])),
         Ok(hit) => {
             let mut rewritten = input.clone();
             rewritten.set("to", Value::from(format!("uds:{}", panes[hit.index].socket)));
@@ -75,9 +80,13 @@ pub fn pane_context(entries: &[Entry], panes: &[Pane], me: Option<&Entry>) -> St
     let mut rows: Vec<&Pane> = panes.iter().collect();
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     for p in rows {
+        let full = p.full_name_if_not_shown().map(|f| format!("  ({f})")).unwrap_or_default();
+        if !p.has_inbox() {
+            out.push_str(&format!("  {}  {}  no inbox yet{full} → cannot be sent to\n", p.name, p.agent.as_deref().unwrap_or("agent")));
+            continue;
+        }
         let Some(e) = entries.iter().find(|e| e.pid == p.pid) else { continue };
         let kind = p.agent.as_deref().unwrap_or(e.kind());
-        let full = p.full_name_if_not_shown().map(|f| format!("  ({f})")).unwrap_or_default();
         let what = if me.is_some_and(|m| m.pid == e.pid) {
             "this session".to_string()
         } else {
@@ -136,6 +145,27 @@ mod tests {
         // a full name whose pane is gone can only have been a pane
         assert!(refusal(send("spg#4410", &panes)).unwrap().starts_with("no pane is named \"spg#4410\". The panes are: gds#2000 (claude)"));
         assert_eq!(refusal(send("kimi:gds#2000", &panes)).unwrap(), "gds#2000 runs claude, not kimi");
+    }
+
+    /// Claude Code is not left to send where the hook cannot: a pane
+    /// without an inbox is refused by its full name with the reason,
+    /// and the name it shares with a pane that has one is refused as
+    /// two panes, never rewritten to the one that can be reached.
+    #[test]
+    fn a_pane_without_an_inbox_is_refused_and_keeps_its_name_from_meaning_another() {
+        let unbound = Pane { socket: String::new(), ..pane("proj", 7359, "codex", "proj#7359", 77) };
+        let panes = vec![pane("proj", 1807, "codex", "proj#1807", 2), unbound];
+        assert_eq!(
+            refusal(send("proj#7359", &panes)).unwrap(),
+            "proj#7359 has no inbox yet: marspot does not know for certain which codex session that pane runs, so nothing was sent. Try again later"
+        );
+        assert_eq!(
+            refusal(send("proj", &panes)).unwrap(),
+            "2 panes are named \"proj\": proj#1807 (codex), proj#7359 (codex). Send again to one of them."
+        );
+        assert_eq!(address(send("proj#1807", &panes)).as_deref(), Some("uds:/tmp/cc-socks/2.sock"));
+        let context = pane_context(&[], &panes, None);
+        assert!(context.contains("  proj#7359  codex  no inbox yet → cannot be sent to\n"), "{context}");
     }
 
     #[test]
