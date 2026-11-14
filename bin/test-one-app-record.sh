@@ -40,7 +40,16 @@ OWN_SCRATCH=msp-one OWN_BUNDLE_ID=com.goliajp.marspot.e2e-one-record OWN_BUNDLE_
 source "$ROOT/bin/_ownership-lib.sh"
 
 OUTSIDE="$MARSPOT_STATE_DIR/binaries/current/marspot-shell"
-one() { state "$1"; check_one_record; }
+# the core draws no system symbol itself, so LaunchServices has no
+# record of it: a record would let it be given the sessions' coalition
+check_core_unlisted() {
+  local c
+  for c in $(dev_core_pids); do
+    if [[ -n "$(ls_record "$c")" ]]; then bad "the core $c has a LaunchServices record: $(ls_record "$c" | grep -o 'type="[A-Za-z]*"' | head -1)"
+    else ok "the core $c has no LaunchServices record"; fi
+  done
+}
+one() { state "$1"; check_one_record; check_core_unlisted; }
 answers() { local i; for (( i = 0; i < 150; i++ )); do L1="$(dev_shell_pid)"; [[ -n $L1 ]] && "$SHELL_BIN" --panes >/dev/null 2>&1 && return 0; sleep 0.2; done; return 1; }
 
 # The record of who answers, rewritten in place: what a session starts
