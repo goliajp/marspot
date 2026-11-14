@@ -219,7 +219,7 @@ mod tests {
             util_5h: Some(util_5h),
             util_7d: Some(util_7d),
             reset_7d: 1000,
-            models: fable.map(|u| vec![("fable".to_string(), u)]).unwrap_or_default(),
+            models: fable.map(|u| vec![("fable".to_string(), Some(u))]).unwrap_or_default(),
             models_measured_at: 0,
             measured_at: 0,
         }

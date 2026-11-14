@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.362"  # a shell started for the coalition takes over only when it was given it
-core    = "0.12.491"  # a run of ASCII that ends inside its row skips the general loop
-session = "0.11.332"  # a shell a living shell asked for is not counted with the starts of one that died
+shell   = "0.7.425"  # a shell started for the coalition takes over only when it was given it, and the dead record is replaced through NSWorkspace
+core    = "0.12.509"  # a pane whose shell ended closes; the core no longer exits to be restarted when every shell has ended
+session = "0.11.348"  # a shell a living shell asked for is not counted with the starts of one that died
