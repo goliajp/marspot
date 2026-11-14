@@ -70,17 +70,16 @@ pub(crate) fn by_id(config_dir: &Path, cwd: &str, id: &str) -> Option<PathBuf> {
         .find(|p| head_id(p).as_deref() == Some(id))
 }
 
-/// How far a file's last write may trail the start of the process that
-/// wrote it: the two clocks are not read at the same instant.
-const START_SLACK: Duration = Duration::from_secs(2);
-
 /// How many of the newest files are opened before giving up.
 const NEWEST_TRIED: usize = 8;
 
 /// The session written most recently since `started`, with its id.
+/// Not a moment before: a file last written just before this process
+/// started is the session of the gemini that was quit there a moment
+/// earlier.
 fn newest_since(config_dir: &Path, cwd: &str, started: SystemTime) -> Option<(PathBuf, String)> {
     let mut files = session_files(&chats_dir(config_dir, cwd)?);
-    files.retain(|(written, _)| *written + START_SLACK >= started);
+    files.retain(|(written, _)| *written >= started);
     files.sort_by_key(|f| std::cmp::Reverse(f.0));
     files.into_iter().take(NEWEST_TRIED).find_map(|(_, p)| head_id(&p).map(|id| (p, id)))
 }
@@ -415,6 +414,11 @@ mod tests {
         std::fs::File::options().write(true).open(&old).unwrap().set_modified(before).unwrap();
         let mut idx = SessionIndex::default();
         assert_eq!(idx.facts(&asker(&cfg, None, true)), None, "a file older than the process is not its own");
+        // the gemini that was quit here half a second before this one started
+        let just_before = SystemTime::now() - Duration::from_millis(1500);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(just_before).unwrap();
+        let mut idx = SessionIndex::default();
+        assert_eq!(idx.facts(&asker(&cfg, None, true)), None, "nor is one last written just before it started");
 
         std::fs::write(chats.join(file_name(A)), head(A) + &context()).unwrap();
         // the search is on a cadence; a process seen for the first time searches at once

@@ -29,6 +29,7 @@ mod kimi_bind;
 mod kimi_config;
 mod lifecycle;
 mod names;
+mod others;
 mod records;
 #[cfg(test)]
 mod live_tests;
