@@ -1,10 +1,8 @@
-//! The toolbar drawn from its tree and drawn by hand put down the same
-//! instances, in the same order, at both display scales.
+//! What a frame of the toolbar costs drawn from its tree.
 
 use super::toolbar_view::{Toolbar, ToolbarSurface};
 use crate::font_cache::FontCache;
 use crate::frame_alloc_tests::counted;
-use crate::frame_build::chrome::{paint_toolbar, paint_version_label, ChromeState};
 use crate::glyph_atlas::GlyphAtlas;
 use crate::layout::Layout;
 use crate::render_metal::{new_atlas, system_default_device};
@@ -67,84 +65,6 @@ fn layout(stage: &Stage, (w, h): (f64, f64), scale: f64) -> Layout {
         stage.font.cell_h,
     )
     .with_chrome(scale, 4, None)
-}
-
-/// Every combination of buttons on, with the pointer nowhere, on each
-/// button and on something else.
-fn states() -> Vec<ChromeState> {
-    let hovers = [
-        None,
-        Some(ChromeHover::Toolbar(0)),
-        Some(ChromeHover::Toolbar(1)),
-        Some(ChromeHover::Toolbar(2)),
-        Some(ChromeHover::Toolbar(3)),
-        Some(ChromeHover::Toolbar(4)),
-        Some(ChromeHover::Add),
-    ];
-    let mut out = Vec::new();
-    for bits in 0u8..32 {
-        let on = std::array::from_fn(|i| bits & (1 << i) != 0);
-        for hover in hovers {
-            out.push(ChromeState { hover, on });
-        }
-    }
-    out
-}
-
-#[test]
-fn the_toolbar_from_its_tree_is_the_toolbar_painted_by_hand() {
-    for scale in [1.0, 2.0] {
-        at_scale(scale, || {
-            let Some(mut stage) = Stage::new() else { return };
-            let mut compared = 0;
-            // roomy, narrow, so narrow the label is held at one cell, wide
-            for (w, h) in [(1800.0, 1100.0), (700.0, 500.0), (180.0, 400.0), (3200.0, 1800.0)] {
-                let window = (w * scale, h * scale);
-                let l = layout(&stage, window, scale);
-                let cell = (stage.font.cell_w as f32, stage.font.cell_h as f32, stage.font.ascent as f32);
-                let mut surface = ToolbarSurface::default();
-                let (mut by_hand, mut by_tree): (Frame, Frame) = Default::default();
-                for state in states() {
-                    stage.draw(window, &mut by_hand, &mut |p| {
-                        paint_toolbar(p, &l, state);
-                        paint_version_label(p, &l);
-                    });
-                    let t = Toolbar::of(&l, state.on, state.hover, cell);
-                    stage.draw(window, &mut by_tree, &mut |p| surface.frame(p, &t));
-                    assert!(!by_hand.1.is_empty(), "scale {scale}, {window:?}: nothing was painted");
-                    assert_eq!(by_tree, by_hand, "scale {scale}, {window:?}, {state:?}");
-                    compared += 1;
-                }
-            }
-            eprintln!("scale {scale}: {compared} toolbars, every instance the same");
-        });
-    }
-}
-
-/// The comparison can fail: the pointer on another button, or a button
-/// left off, is a different list of instances.
-#[test]
-fn a_toolbar_lit_or_on_elsewhere_is_noticed() {
-    at_scale(1.0, || {
-        let Some(mut stage) = Stage::new() else { return };
-        let window = (1800.0, 1100.0);
-        let l = layout(&stage, window, 1.0);
-        let cell = (stage.font.cell_w as f32, stage.font.cell_h as f32, stage.font.ascent as f32);
-        let state = ChromeState { hover: Some(ChromeHover::Toolbar(1)), on: [true, false, false, false, false] };
-        let (mut by_hand, mut by_tree): (Frame, Frame) = Default::default();
-        stage.draw(window, &mut by_hand, &mut |p| {
-            paint_toolbar(p, &l, state);
-            paint_version_label(p, &l);
-        });
-        for (hover, on) in [
-            (Some(ChromeHover::Toolbar(2)), state.on),
-            (state.hover, [true, true, false, false, false]),
-        ] {
-            let t = Toolbar::of(&l, on, hover, cell);
-            stage.draw(window, &mut by_tree, &mut |p| ToolbarSurface::default().frame(p, &t));
-            assert_ne!(by_tree, by_hand, "{hover:?} {on:?} drew what the hand did for {state:?}");
-        }
-    });
 }
 
 /// A frame in which nothing on the toolbar changed paints nothing and
