@@ -569,6 +569,15 @@ pub enum MsgType {
     /// to a core that connects, by a new image of the session, and
     /// after a move.
     SessionPublishes = 121,
+    /// L2 → L1: draw this toolbar icon for me.  `symbol u16,
+    /// point_px u16`.  Sent only by a core started with
+    /// `MARSPOT_ICONS_FROM_SHELL`: drawing a system symbol registers
+    /// the drawing process with LaunchServices, and the core must not
+    /// be registered.
+    IconMaskWanted = 86,
+    /// L1 → L2: the icon asked for.  `symbol u16, point_px u16,
+    /// side u16`, then `side * side` bytes of coverage.
+    IconMask = 87,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -642,6 +651,8 @@ impl MsgType {
             83 => MsgType::PaneClipboardWrite,
             84 => MsgType::PaneTerminalFocus,
             85 => MsgType::SessionUpdate,
+            86 => MsgType::IconMaskWanted,
+            87 => MsgType::IconMask,
             120 => MsgType::SessionRepublish,
             121 => MsgType::SessionPublishes,
             200 => MsgType::Error,
@@ -1561,6 +1572,48 @@ pub fn decode_window_focus(payload: &[u8]) -> io::Result<u32> {
 /// the default rect and does NOT apply the crash-loop / generation
 /// gates that guard automatic restores.
 pub const WINDOW_OPEN_USER: u32 = u32::MAX;
+
+pub fn encode_icon_mask_wanted(symbol: u16, point_px: u16) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4);
+    v.extend_from_slice(&symbol.to_le_bytes());
+    v.extend_from_slice(&point_px.to_le_bytes());
+    v
+}
+
+pub fn decode_icon_mask_wanted(payload: &[u8]) -> io::Result<(u16, u16)> {
+    if payload.len() < 4 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "ICON_MASK_WANTED payload < 4 bytes"));
+    }
+    Ok((u16::from_le_bytes([payload[0], payload[1]]), u16::from_le_bytes([payload[2], payload[3]])))
+}
+
+pub fn encode_icon_mask(symbol: u16, point_px: u16, side: u16, mask: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(6 + mask.len());
+    v.extend_from_slice(&symbol.to_le_bytes());
+    v.extend_from_slice(&point_px.to_le_bytes());
+    v.extend_from_slice(&side.to_le_bytes());
+    v.extend_from_slice(mask);
+    v
+}
+
+/// `(symbol, point_px, side, mask)`; the mask must be exactly
+/// `side * side` bytes.
+pub fn decode_icon_mask(payload: &[u8]) -> io::Result<(u16, u16, u16, Vec<u8>)> {
+    if payload.len() < 6 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "ICON_MASK payload < 6 bytes"));
+    }
+    let side = u16::from_le_bytes([payload[4], payload[5]]);
+    let mask = &payload[6..];
+    if mask.len() != side as usize * side as usize {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "ICON_MASK mask is not side * side bytes"));
+    }
+    Ok((
+        u16::from_le_bytes([payload[0], payload[1]]),
+        u16::from_le_bytes([payload[2], payload[3]]),
+        side,
+        mask.to_vec(),
+    ))
+}
 
 pub fn encode_window_close_request(window_id: u32) -> Vec<u8> {
     window_id.to_le_bytes().to_vec()
@@ -3714,6 +3767,16 @@ mod msg_type_table_tests {
     /// The table is read out of this file rather than restated here on
     /// purpose: a hand-kept list of variants is the same kind of thing
     /// that drifted in the first place.
+    #[test]
+    fn an_icon_mask_round_trips_and_a_short_one_is_refused() {
+        assert_eq!(decode_icon_mask_wanted(&encode_icon_mask_wanted(4, 26)).unwrap(), (4, 26));
+        assert!(decode_icon_mask_wanted(&[1, 0, 2]).is_err());
+        let mask = vec![7u8; 9];
+        assert_eq!(decode_icon_mask(&encode_icon_mask(2, 13, 3, &mask)).unwrap(), (2, 13, 3, mask.clone()));
+        assert!(decode_icon_mask(&encode_icon_mask(2, 13, 4, &mask)).is_err());
+        assert!(decode_icon_mask(&[0; 5]).is_err());
+    }
+
     #[test]
     fn every_msg_type_decodes_from_its_own_discriminant() {
         let src = include_str!("shell_proto.rs");

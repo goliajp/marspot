@@ -21,18 +21,38 @@ use marspot_term::fs_watch::Watcher;
 
 /// Starts of a shell in the last minute that stop another one: a shell
 /// that dies as it comes up would otherwise be started again for ever.
+/// Two kinds are counted apart.  A shell started because the one that
+/// answered is gone is the kind that can die in a loop.  One that a
+/// living shell asked for comes up, finds whether it is given the
+/// coalition, and leaves quietly when it is not: that is no crash, and
+/// must not cost a shell that dies right after it its successor.
 // off macOS no shell is started: this is built for its tests only
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const STARTS_A_MINUTE: usize = 3;
 
-/// The start times still inside the minute before `now`, and whether
-/// one more start is allowed.
+/// How a start asked for by a living shell is written in the file.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn recent_starts(text: &str, now: u64) -> (Vec<u64>, bool) {
-    let recent: Vec<u64> =
-        text.lines().filter_map(|l| l.trim().parse().ok()).filter(|t| now.saturating_sub(*t) < 60 && *t <= now).collect();
-    let allowed = recent.len() < STARTS_A_MINUTE;
-    (recent, allowed)
+const ASKED_MARK: char = 'a';
+
+/// The lines of `text` still inside the minute before `now`, with one
+/// more for a start of this kind when that is allowed; `None` when it
+/// is not.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn with_one_more_start(text: &str, now: u64, asked: bool) -> Option<String> {
+    let recent: Vec<(bool, u64)> = text
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let asked = l.starts_with(ASKED_MARK);
+            Some((asked, l.trim_start_matches(ASKED_MARK).parse().ok()?))
+        })
+        .filter(|(_, t)| now.saturating_sub(*t) < 60 && *t <= now)
+        .collect();
+    if recent.iter().filter(|(kind, _)| *kind == asked).count() >= STARTS_A_MINUTE {
+        return None;
+    }
+    let line = |(asked, t): &(bool, u64)| if *asked { format!("{ASKED_MARK}{t}\n") } else { format!("{t}\n") };
+    Some(recent.iter().chain(std::iter::once(&(asked, now))).map(line).collect())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -60,7 +80,7 @@ mod macos {
     use marspot_term::owner::{self, Record};
     use marspot_term::{lx_event, lx_warn, platform, session_registry};
 
-    use super::{Watcher, recent_starts};
+    use super::{Watcher, with_one_more_start};
 
     /// What the core and this session's own hand-over put in the
     /// environment for a session alone.
@@ -167,15 +187,18 @@ mod macos {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
             let mut text = String::new();
             let _ = turn.read_to_string(&mut text);
-            let (mut starts, allowed) = recent_starts(&text, now);
-            if !allowed {
-                lx_warn!("OWNER_START_HELD", "a shell was started here three times in a minute; not again", sid = self.sid);
+            let Some(starts) = with_one_more_start(&text, now, heir_of.is_some()) else {
+                lx_warn!(
+                    "OWNER_START_HELD",
+                    "a shell was started here three times in a minute; not again",
+                    sid = self.sid,
+                    asked_for = heir_of.is_some()
+                );
                 return;
-            }
-            starts.push(now);
+            };
             let _ = turn.set_len(0);
             let _ = turn.seek(SeekFrom::Start(0));
-            let _ = turn.write_all(starts.iter().map(|t| format!("{t}\n")).collect::<String>().as_bytes());
+            let _ = turn.write_all(starts.as_bytes());
 
             let exe = owner::shell_to_start(&r.exe);
             let mut cmd = Command::new(&exe);
@@ -241,11 +264,25 @@ mod tests {
     #[test]
     fn a_fourth_start_in_a_minute_is_refused_and_old_ones_are_forgotten() {
         let now = 1_000_000;
-        assert_eq!(recent_starts("", now), (vec![], true));
+        assert_eq!(with_one_more_start("", now, false), Some(format!("{now}\n")));
         let text = format!("{}\n{}\n{}\n", now - 100, now - 30, now - 2);
-        assert_eq!(recent_starts(&text, now), (vec![now - 30, now - 2], true));
+        assert_eq!(with_one_more_start(&text, now, false), Some(format!("{}\n{}\n{now}\n", now - 30, now - 2)));
         let text = format!("{}\n{}\n{}\n", now - 50, now - 30, now - 2);
-        assert_eq!(recent_starts(&text, now), (vec![now - 50, now - 30, now - 2], false));
-        assert_eq!(recent_starts("junk\n\n", now), (vec![], true));
+        assert_eq!(with_one_more_start(&text, now, false), None);
+        assert_eq!(with_one_more_start("junk\n\n", now, false), Some(format!("{now}\n")));
+    }
+
+    #[test]
+    fn shells_a_living_shell_asked_for_do_not_cost_a_dead_one_its_successor() {
+        let now = 1_000_000;
+        let asked = format!("a{}\na{}\na{}\n", now - 9, now - 6, now - 3);
+        // three that were asked for, and the shell dies: one is started
+        assert_eq!(with_one_more_start(&asked, now, false), Some(format!("{asked}{now}\n")));
+        // a fourth that is asked for is not
+        assert_eq!(with_one_more_start(&asked, now, true), None);
+        // and three that died do not stop one that is asked for
+        let died = format!("{}\n{}\n{}\n", now - 9, now - 6, now - 3);
+        assert_eq!(with_one_more_start(&died, now, true), Some(format!("{died}a{now}\n")));
+        assert_eq!(with_one_more_start(&died, now, false), None);
     }
 }

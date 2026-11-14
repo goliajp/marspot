@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.426"  # the last window is told by the shell's own list, so two closes asked for together still quit the app
-core    = "0.12.509"  # a pane whose shell ended closes; the core no longer exits to be restarted when every shell has ended
-session = "0.11.347"  # a session whose shell ended removes its directory instead of keeping it for resurrection
+shell   = "0.7.428"  # the shell draws the core's toolbar icons; a refused shell stops the asking for two minutes
+core    = "0.12.510"  # the toolbar icons are drawn by the shell, so the core never registers with LaunchServices
+session = "0.11.348"  # a shell a living shell asked for is not counted with the starts of one that died
