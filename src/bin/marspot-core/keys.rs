@@ -64,6 +64,9 @@ impl CoreApp {
         // An open panel has the keyboard: nothing else gets through to
         // the pane under it.
         if panel_open {
+            if pressed {
+                self.tree_panel_key(wi, &event, modifiers);
+            }
             return;
         }
 

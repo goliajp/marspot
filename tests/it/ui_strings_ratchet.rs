@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 /// test scenes that draw fixtures, and the tests that hold a scene at
 /// one display scale to the same scene at another.
 const NOT_INTERFACE: &[&str] =
-    &["_snapshot_tests.rs", "panel_script.rs", "density_kit.rs", "density_tests.rs", "centring_tests.rs"];
+    &["_snapshot_tests.rs", "panel_script.rs", "density_kit.rs", "density_tests.rs", "centring_tests.rs", "_view_tests.rs"];
 
 /// Literals in the component directories that are not sentences.
 const NOT_TEXT: &[(&str, &str)] = &[

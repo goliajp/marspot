@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.361"  # the shell that stays after a quit keeps no release poll, no CLI installer, no process table
-core    = "0.12.442"  # another process's arguments are read into a mapping, not a zeroed megabyte
-session = "0.11.241"  # what a command printed is put right once it has exited, however late the session looks
+shell   = "0.7.361"  # the shell that stays after a quit keeps no release poll, no CLI installer, and no process table
+core    = "0.12.491"  # a run of ASCII that ends inside its row skips the general loop
+session = "0.11.334"  # what a command printed is put right once it has exited, however late the session looks
