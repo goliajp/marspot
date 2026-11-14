@@ -315,6 +315,12 @@ impl GridShmWriter {
         region::ident_at(self.base, self.len).and_then(|at| unsafe { ident::read_serial(at) })
     }
 
+    /// How far back the frame in the region is scrolled: until the
+    /// first publish, the last frame of the session's previous image.
+    pub fn published_view_offset(&self) -> u32 {
+        unsafe { (*self.header()).view_offset }
+    }
+
     /// The cluster table in the region beside the grid: until the
     /// first frame is published, what the session's previous image
     /// published with its last one.

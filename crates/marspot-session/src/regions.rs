@@ -89,11 +89,15 @@ pub(crate) fn sign(shm: &mut GridShmWriter, id: u64) {
 ///
 /// An image that came out of an update from a build whose snapshot
 /// has no cluster text finds that text here, where the image before
-/// it published it with its last frame.
+/// it published it with its last frame -- unless that frame was of
+/// history the person had scrolled back to: its table is not the
+/// screen's, and the clusters on screen stay unreadable until the
+/// program draws them again.
 pub(crate) fn attach_side_regions(shm: &mut GridShmWriter, session: &mut SessionImpl) {
     let Some(name) = grid_name() else { return };
     shm.attach_side_regions(&name, Identity::of_session(session.id()));
-    if let Some(table) = shm.published_clusters() {
+    let scrolled_back = shm.published_view_offset() > 0;
+    if let Some(table) = shm.published_clusters().filter(|_| !scrolled_back) {
         session.terminal_mut().adopt_published_clusters(table.iter());
     }
 }
