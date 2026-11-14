@@ -12,10 +12,10 @@
 //! **The context menu** is chrome and is measured in window units like
 //! the rest; its labels are words and take a panel type role, which is
 //! in points.  Both go through the display's scale, so the menu is the
-//! same size in window units on every display.  The canvas it is drawn
-//! on calls its unit `Pt`: there that is a window unit, not a panel
-//! point (`a_menu_unit_is_a_window_unit_at_every_scale` holds it to
-//! that).
+//! same size in window units on every display.  Its tree writes each
+//! of these lengths as half as many points
+//! (`a_menu_unit_is_a_window_unit_at_every_scale` holds the two units
+//! to that ratio).
 //!
 //! **One definition.**  `marspot_term::layout` places the toolbar
 //! buttons and the sidebar's rows and buttons, and click handling asks

@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.423"  # a pane's title and mode flags are read only from a region that is that session's
-core    = "0.12.506"  # grid regions per state dir, and the end of a flood reaches the disk
+core    = "0.12.507"  # grid regions per state dir, the end of a flood reaches the disk, and menus are drawn from the tree
 session = "0.11.346"  # history clusters survive an update, and the snapshot for the next image is written last

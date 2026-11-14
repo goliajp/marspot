@@ -22,7 +22,8 @@ use crate::session::SessionState;
 use crate::snapshot_kit::{assert_snapshot_ssim, snapshot_mode_in, write_snapshot_png, UI_SNAPSHOT_DIR};
 use crate::ui::components::chrome_hover::ChromeHover;
 use crate::ui::strings::{t, Msg};
-use crate::ui::components::context_menu_paint::{ContextMenuRender, ContextMenuRow};
+use crate::ui::components::context_menu_view::MenuRender;
+use crate::ui::components::{ContextMenu, MenuItem};
 
 /// One pane of a scene.
 struct PaneSpec {
@@ -263,7 +264,7 @@ pub(super) fn chrome_snapshot_menu() {
 
 /// `chrome_snapshot_menu` with the pointer on row `hovered`, on a
 /// renderer of the caller's.
-pub(super) fn menu_on(renderer: &mut MetalRenderer, wr: &mut WindowRender, hovered: Option<usize>) -> ContextMenuRender {
+pub(super) fn menu_on(renderer: &mut MetalRenderer, wr: &mut WindowRender, hovered: Option<usize>) -> MenuRender {
     let mut state = None;
     snapshot_on(renderer, wr, "chrome_menu", (1200, 760), (2, 2), &four_panes(), 0, |renderer, layout| {
         state = Some(open_menu(renderer, layout, hovered));
@@ -271,38 +272,36 @@ pub(super) fn menu_on(renderer: &mut MetalRenderer, wr: &mut WindowRender, hover
     state.expect("the scene was drawn")
 }
 
-fn open_menu(renderer: &mut MetalRenderer, layout: &Layout, hovered: Option<usize>) -> ContextMenuRender {
-    {
-        let row = |label: &str, hint: &str, enabled| ContextMenuRow {
-            label: label.to_string(),
-            shortcut_hint: hint.to_string(),
-            enabled,
-            divider: false,
-        };
-        let divider = ContextMenuRow {
-            label: String::new(),
-            shortcut_hint: String::new(),
-            enabled: false,
-            divider: true,
-        };
-        renderer.set_hover_chrome_btn(Some(ChromeHover::Toolbar(2)));
-        let state = ContextMenuRender {
-            scale: crate::ui::chrome_scale(),
-            anchor_phys: (420.0 * crate::ui::chrome_scale(), 150.0 * crate::ui::chrome_scale()),
-            top_inset: layout.top_inset,
-            items: vec![
-                row(t(Msg::MenuCopy), "⌘C", false),
-                row(t(Msg::MenuPaste), "⌘V", true),
-                row(t(Msg::CmdFind), "⌘F", true),
-                divider,
-                row(t(Msg::MenuClearScrollback), "⌘K", true),
-                row(t(Msg::MenuClosePane), "⌘W", true),
-            ],
-            hovered_idx: hovered,
-        };
-        renderer.set_context_menu(Some(state.clone()));
-        state
-    }
+fn open_menu(renderer: &mut MetalRenderer, layout: &Layout, hovered: Option<usize>) -> MenuRender {
+    let row = |label: &str, hint: &str, enabled: bool| {
+        let item = MenuItem::entry(label, 0).with_shortcut(hint);
+        if enabled { item } else { item.disabled() }
+    };
+    renderer.set_hover_chrome_btn(Some(ChromeHover::Toolbar(2)));
+    let scale = crate::ui::chrome_scale();
+    let anchor = (420.0 * scale, 150.0 * scale);
+    let mut state = MenuRender::new(
+        anchor,
+        layout.top_inset,
+        vec![
+            row(t(Msg::MenuCopy), "⌘C", false),
+            row(t(Msg::MenuPaste), "⌘V", true),
+            row(t(Msg::CmdFind), "⌘F", true),
+            MenuItem::divider(),
+            row(t(Msg::MenuClearScrollback), "⌘K", true),
+            row(t(Msg::MenuClosePane), "⌘W", true),
+        ],
+    );
+    // the pointer in the middle of the row it is said to be on
+    state.pointer = hovered.map(|i| {
+        let menu = ContextMenu::layout(
+            layout.window_w, layout.window_h, scale, anchor.0, anchor.1, layout.top_inset, &state.items,
+        );
+        let r = menu.item_rects[i];
+        (r.x + r.w * 0.5, r.y_top + r.h * 0.5)
+    });
+    renderer.set_context_menu(Some(state.clone()));
+    state
 }
 
 /// The pointer on a sidebar row's close button, in a window narrow

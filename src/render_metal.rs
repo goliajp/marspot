@@ -59,13 +59,12 @@ use crate::ui::components::cc_usage_modal::CcUsageRender;
 use crate::ui::components::settings_view::SettingsRender;
 use crate::ui::components::shortcuts_view::ShortcutsRender;
 use crate::ui::components::layout_view::LayoutModalRender;
-use crate::ui::components::{chrome_hover::ChromeHover, context_menu_paint::ContextMenuRender};
+use crate::ui::components::{chrome_hover::ChromeHover, context_menu_view::MenuRender};
 use crate::render::{SessionView, SidebarEntry};
 #[cfg(test)]
 use crate::render::HighlightSpan;
 
 use crate::frame_build::frame::{build_instances, FormPanel};
-use crate::frame_build::canvas_runs::{build_canvas_runs, CanvasRunKind};
 use crate::frame_build::pane_cache::PaneInstanceCache;
 use crate::frame_build::glyph_resolve::resolve_cell_glyph;
 
@@ -136,8 +135,8 @@ pub struct RenderSplit {
     /// instance buffers, and how many bytes that was.
     pub instbuf_us: u64,
     pub instbuf_bytes: u64,
-    /// The context-menu canvas, built and encoded
-    /// after the passes.  Zero unless one of them is open — which is
+    /// The context menu's pass, encoded
+    /// after the others.  Zero unless one of them is open — which is
     /// itself worth knowing when a frame goes long.
     pub canvas_us: u64,
     pub gpu_wait_us: u64,
@@ -525,7 +524,7 @@ pub struct MetalRenderer {
     /// "you are moving THIS one".
     drag_source: Option<usize>,
     /// F3+9 — right-click context menu state.  `Some` while open.
-    context_menu_state: Option<ContextMenuRender>,
+    context_menu_state: Option<MenuRender>,
     /// Where the last IOSurface frame spent its time.  See
     /// [`RenderSplit`].
     last_render_split: RenderSplit,
@@ -806,7 +805,7 @@ impl MetalRenderer {
         self.drag_source = idx;
     }
 
-    pub fn set_context_menu(&mut self, state: Option<ContextMenuRender>) {
+    pub fn set_context_menu(&mut self, state: Option<MenuRender>) {
         self.context_menu_state = state;
     }
 
@@ -1114,41 +1113,21 @@ impl MetalRenderer {
             ui_slab,
         );
 
-        let chrome_cell_w = font.cell_w as f32;
-        let chrome_cell_h = font.cell_h as f32;
-        let chrome_ascent = font.ascent as f32;
         let viewport_px = [width_px as f32, height_px as f32];
 
-        // P2c — ContextMenu draws OUT-OF-BAND via the Canvas
-        // pipeline: built fresh per frame and encoded with
-        // submission-order = z-order semantics, AFTER the main
-        // encode_passes so it sits above every other overlay.
-        if let Some(menu_state) = self.context_menu_state.as_ref() {
-            let canvas = crate::ui::components::context_menu_paint::build_context_menu_canvas(
-                menu_state,
-                width_px,
-                height_px,
-                chrome_cell_w,
-                chrome_cell_h,
-            );
-            encode_canvas_into(
-                &canvas,
+        // The context menu goes over the finished frame, in a pass of
+        // its own: see `menu_pass`.
+        if let Some(menu) = self.context_menu_state.as_ref() {
+            menu_pass::encode_menu(
+                &mut menu.surface.borrow_mut(),
                 &texture,
                 &cmd,
                 scene_ui_pipeline,
                 fg_pipeline,
-                fg_color_pipeline,
                 fg_sampler,
-                atlas,
-                color_atlas,
                 atlas_texture.texture(),
-                color_atlas_texture.texture(),
                 device,
-                font,
-                None, // Load — preserve everything below
                 &viewport_px,
-                chrome_cell_w, chrome_cell_h, chrome_ascent,
-                false,
             );
         }
 
@@ -1360,23 +1339,19 @@ impl MetalRenderer {
             ui_slab,
         );
         let t_canvas0 = std::time::Instant::now();
-        // ContextMenu canvas (same shape as render_layout).
-        let chrome_cell_w = font.cell_w as f32;
-        let chrome_cell_h = font.cell_h as f32;
-        let chrome_ascent = font.ascent as f32;
+        // The context menu, over the finished frame: see `menu_pass`.
         let viewport_px = [width_px as f32, height_px as f32];
-        if let Some(menu_state) = self.context_menu_state.as_ref() {
-            let canvas = crate::ui::components::context_menu_paint::build_context_menu_canvas(
-                menu_state, width_px, height_px,
-                chrome_cell_w, chrome_cell_h,
-            );
-            encode_canvas_into(
-                &canvas, target, &cmd,
-                scene_ui_pipeline, fg_pipeline, fg_color_pipeline, fg_sampler,
-                atlas, color_atlas, atlas_texture.texture(), color_atlas_texture.texture(), device, font,
-                None, &viewport_px,
-                chrome_cell_w, chrome_cell_h, chrome_ascent,
-                false,
+        if let Some(menu) = self.context_menu_state.as_ref() {
+            menu_pass::encode_menu(
+                &mut menu.surface.borrow_mut(),
+                target,
+                &cmd,
+                scene_ui_pipeline,
+                fg_pipeline,
+                fg_sampler,
+                atlas_texture.texture(),
+                device,
+                &viewport_px,
             );
         }
         let t_commit0 = std::time::Instant::now();
@@ -2479,187 +2454,7 @@ fn clear_color(c: [f32; 4]) -> MTLClearColor {
     MTLClearColor { red: c[0] as f64, green: c[1] as f64, blue: c[2] as f64, alpha: 1.0 }
 }
 
-/// Free-function `encode_canvas` — composes with caller's
-/// destructured `&mut self` borrows (render_layout style).  The
-/// method wrapper below is for tests / one-shot callers.
-#[allow(clippy::too_many_arguments)]
-fn encode_canvas_into(
-    canvas: &crate::ui::core::canvas::Canvas,
-    target: &ProtocolObject<dyn MTLTexture>,
-    cmd: &ProtocolObject<dyn MTLCommandBuffer>,
-    scene_ui_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
-    fg_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
-    fg_color_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
-    fg_sampler: &ProtocolObject<dyn MTLSamplerState>,
-    atlas: &mut GlyphAtlas,
-    color_atlas: &mut GlyphAtlas,
-    atlas_texture: &ProtocolObject<dyn MTLTexture>,
-    color_atlas_texture: &ProtocolObject<dyn MTLTexture>,
-    device: &ProtocolObject<dyn MTLDevice>,
-    font: &mut FontCache,
-    clear_color: Option<MTLClearColor>,
-    viewport_px: &[f32; 2],
-    chrome_cell_w: f32,
-    chrome_cell_h: f32,
-    chrome_ascent: f32,
-    ui_font: bool,
-) {
-    // Local to this call: a canvas is encoded a few times a frame at
-    // most, and threading the renderer's slab through every caller
-    // would be more plumbing than the allocation is worth. The frame
-    // path, which runs every frame, uses the reused one.
-    let mut ui_slab: Vec<u8> = Vec::new();
-    let (aw, ah) = atlas.dims();
-    let atlas_w_f = aw as f32;
-    let atlas_h_f = ah as f32;
-    let (caw, cah) = color_atlas.dims();
-    let color_atlas_w_f = caw as f32;
-    let color_atlas_h_f = cah as f32;
-    let mut ui_buf: Vec<UiRectInstance> = Vec::new();
-    let mut gl_buf: Vec<GlyphInstance> = Vec::new();
-    let mut color_gl_buf: Vec<GlyphInstance> = Vec::new();
-    let runs = build_canvas_runs(
-        canvas,
-        chrome_cell_w, chrome_cell_h, chrome_ascent,
-        atlas_w_f, atlas_h_f,
-        color_atlas_w_f, color_atlas_h_f,
-        font, atlas, color_atlas,
-        &mut ui_buf, &mut gl_buf, &mut color_gl_buf,
-        ui_font,
-    );
-
-    let mut ui_cursor = 0usize;
-    let mut gl_cursor = 0usize;
-    let mut color_gl_cursor = 0usize;
-    let mut first_pass = true;
-    let viewport_ptr = NonNull::new(viewport_px.as_ptr() as *mut c_void).unwrap();
-    let viewport_len = std::mem::size_of::<[f32; 2]>();
-
-    for run in &runs {
-        let pass = { MTLRenderPassDescriptor::new() };
-        unsafe {
-            let color = pass.colorAttachments().objectAtIndexedSubscript(0);
-            color.setTexture(Some(target));
-            if let (true, Some(c)) = (first_pass, clear_color) {
-                color.setLoadAction(MTLLoadAction::Clear);
-                color.setClearColor(c);
-            } else {
-                color.setLoadAction(MTLLoadAction::Load);
-            }
-            color.setStoreAction(MTLStoreAction::Store);
-        }
-        first_pass = false;
-
-        let enc = match cmd.renderCommandEncoderWithDescriptor(&pass) {
-            Some(e) => e,
-            None => continue,
-        };
-        unsafe {
-            enc.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
-        }
-        match run.kind {
-            CanvasRunKind::UiRect => {
-                enc.setRenderPipelineState(scene_ui_pipeline);
-                let slice = &ui_buf[ui_cursor..ui_cursor + run.count];
-                let buf =
-                    make_instance_buffer(device, ui_rects_as_bytes(slice, &mut ui_slab));
-                if let Some(b) = &buf {
-                    unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
-                }
-                unsafe {
-                    enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                        MTLPrimitiveType::Triangle, 0, 6, run.count,
-                    );
-                }
-                ui_cursor += run.count;
-            }
-            CanvasRunKind::Glyph => {
-                enc.setRenderPipelineState(fg_pipeline);
-                let slice = &gl_buf[gl_cursor..gl_cursor + run.count];
-                let buf =
-                    make_instance_buffer(device, glyphs_as_bytes(slice, &mut ui_slab));
-                if let Some(b) = &buf {
-                    unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
-                }
-                unsafe {
-                    enc.setFragmentTexture_atIndex(Some(atlas_texture), 0);
-                    enc.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
-                    enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                        MTLPrimitiveType::Triangle, 0, 6, run.count,
-                    );
-                }
-                gl_cursor += run.count;
-            }
-            CanvasRunKind::ColorGlyph => {
-                // Phase 7 — colour-emoji pass: same vertex shader as
-                // mono, different pipeline (`fg_color_pipeline`) so
-                // the fragment shader samples the BGRA atlas and
-                // outputs premultiplied colour instead of tinting
-                // by the per-cell `color` field.
-                enc.setRenderPipelineState(fg_color_pipeline);
-                let slice = &color_gl_buf[color_gl_cursor..color_gl_cursor + run.count];
-                let buf =
-                    make_instance_buffer(device, glyphs_as_bytes(slice, &mut ui_slab));
-                if let Some(b) = &buf {
-                    unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
-                }
-                unsafe {
-                    enc.setFragmentTexture_atIndex(Some(color_atlas_texture), 0);
-                    enc.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
-                    enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                        MTLPrimitiveType::Triangle, 0, 6, run.count,
-                    );
-                }
-                color_gl_cursor += run.count;
-            }
-        }
-        enc.endEncoding();
-    }
-
-    if let (true, Some(cc)) = (first_pass, clear_color) {
-        let pass = { MTLRenderPassDescriptor::new() };
-        unsafe {
-            let color = pass.colorAttachments().objectAtIndexedSubscript(0);
-            color.setTexture(Some(target));
-            color.setLoadAction(MTLLoadAction::Clear);
-            color.setClearColor(cc);
-            color.setStoreAction(MTLStoreAction::Store);
-        }
-        if let Some(enc) = cmd.renderCommandEncoderWithDescriptor(&pass) {
-            enc.endEncoding();
-        }
-    }
-}
-
 impl MetalRenderer {
-    /// Method wrapper — calls the free `encode_canvas_into`
-    /// with the renderer's own state.
-    #[allow(clippy::too_many_arguments)]
-    pub fn encode_canvas(
-        &mut self,
-        canvas: &crate::ui::core::canvas::Canvas,
-        target: &ProtocolObject<dyn MTLTexture>,
-        cmd: &ProtocolObject<dyn MTLCommandBuffer>,
-        clear_color: Option<MTLClearColor>,
-        viewport_px: &[f32; 2],
-        chrome_cell_w: f32,
-        chrome_cell_h: f32,
-        chrome_ascent: f32,
-        ui_font: bool,
-    ) {
-        encode_canvas_into(
-            canvas, target, cmd,
-            &self.scene_ui_pipeline, &self.fg_pipeline, &self.fg_color_pipeline, &self.fg_sampler,
-            &mut self.atlas, &mut self.color_atlas,
-            self.atlas_texture.texture(), self.color_atlas_texture.texture(), &self.device, &mut self.font,
-            clear_color, viewport_px,
-            chrome_cell_w, chrome_cell_h, chrome_ascent,
-            ui_font,
-        );
-    }
-
-
-
     /// Draw one published instance and hand back the pixels.
     pub fn render_scene_rect(
         &mut self,
@@ -2752,66 +2547,12 @@ impl MetalRenderer {
         }
         Ok(bytes)
     }
-
-    pub fn render_canvas_to_bitmap(
-        &mut self,
-        width: u32,
-        height: u32,
-        canvas: &crate::ui::core::canvas::Canvas,
-        chrome_cell_w: f32,
-        chrome_cell_h: f32,
-        chrome_ascent: f32,
-        ui_font: bool,
-    ) -> Result<Vec<u8>, String> {
-        let descriptor = unsafe {
-            objc2_metal::MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-                TARGET_FORMAT, width as usize, height as usize, false,
-            )
-        };
-        descriptor.setUsage(
-            objc2_metal::MTLTextureUsage::RenderTarget | objc2_metal::MTLTextureUsage::ShaderRead,
-        );
-        descriptor.setStorageMode(objc2_metal::MTLStorageMode::Managed);
-        let texture = self.device.newTextureWithDescriptor(&descriptor)
-            .ok_or_else(|| "newTextureWithDescriptor returned nil".to_string())?;
-
-        let cmd = self.queue.commandBuffer()
-            .ok_or_else(|| "commandBuffer returned nil".to_string())?;
-        let viewport_px: [f32; 2] = [width as f32, height as f32];
-        self.encode_canvas(
-            canvas,
-            ProtocolObject::from_ref(&*texture),
-            ProtocolObject::from_ref(&*cmd),
-            Some(OFFSCREEN_CLEAR),
-            &viewport_px,
-            chrome_cell_w, chrome_cell_h, chrome_ascent,
-            ui_font,
-        );
-
-        let blit = cmd.blitCommandEncoder()
-            .ok_or_else(|| "blitCommandEncoder returned nil".to_string())?;
-        let resource: &ProtocolObject<dyn objc2_metal::MTLResource> =
-            ProtocolObject::from_ref(&*texture);
-        blit.synchronizeResource(resource);
-        blit.endEncoding();
-        cmd.commit();
-        cmd.waitUntilCompleted();
-
-        let bytes_per_row = (width as usize) * 4;
-        let mut bytes = vec![0u8; bytes_per_row * height as usize];
-        let region = objc2_metal::MTLRegion {
-            origin: objc2_metal::MTLOrigin { x: 0, y: 0, z: 0 },
-            size: objc2_metal::MTLSize { width: width as usize, height: height as usize, depth: 1 },
-        };
-        unsafe {
-            texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
-                NonNull::new(bytes.as_mut_ptr() as *mut c_void).unwrap(),
-                bytes_per_row, region, 0,
-            );
-        }
-        Ok(bytes)
-    }
 }
+
+mod menu_pass;
+pub use menu_pass::MenuBuffers;
+#[cfg(test)]
+mod sheet;
 
 #[cfg(test)]
 pub(crate) mod probe;
@@ -2873,42 +2614,39 @@ mod tests {
             "Tax  fi  fl  ff  ==>  !=  !==",
             "Bidi placeholder: Hello مرحبا עברית",
         ];
-        use crate::ui::core::{Color, Length};
-        use crate::ui::core::canvas::{Canvas, ParentRect};
-        let mut canvas = Canvas::new(
-            2.0, // 2× retina scale matches the dev-panel snapshot
-            ParentRect::window(w_px as f64, h_px as f64),
-        );
+        use crate::ui::core::Color;
+        use super::sheet::Sheet;
+        let mut sheet = Sheet::new(2.0);
         let line_h_pt = (chrome_cell_h as f64 * 1.6) / 2.0;
         let pad_x_pt = 20.0;
         let pad_y_pt = 16.0;
         // Solid dark BG matches the production terminal BG so the
         // glyphs read at a glance.
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(0.0), Length::Pt(0.0))
-            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .at(0.0, 0.0)
+            .size(w_px as f64 / 2.0, h_px as f64 / 2.0)
             .fill(Color::rgba(15, 18, 23, 1.0))
             .draw();
         let fg = Color::rgba(220, 224, 235, 1.0);
         for (i, line) in lines.iter().enumerate() {
             let y_pt = pad_y_pt + (i as f64) * line_h_pt;
-            canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), line)
+            sheet
+                .text(pad_x_pt, y_pt, line)
                 .color(fg)
                 .draw();
         }
         let bytes = renderer
-            .render_canvas_to_bitmap(
+            .render_sheet_to_bitmap(
                 w_px,
                 h_px,
-                &canvas,
+                &sheet,
                 chrome_cell_w,
                 chrome_cell_h,
                 chrome_ascent,
                 false, // Mono path (Monaco)
             )
-            .expect("canvas render");
+            .expect("sheet render");
 
         // BGRA → RGBA channel swap for PNG.
         let mut rgba = vec![0u8; bytes.len()];
@@ -2977,40 +2715,37 @@ mod tests {
             "█▓▒░  ▀▄  ▌▐  ▔▁  ▍▎▏  ▕",
             "├─┼─┤ ╠═╬═╣ ┝━┿━┥ ┠─╂─┨",
         ];
-        use crate::ui::core::{Color, Length};
-        use crate::ui::core::canvas::{Canvas, ParentRect};
-        let mut canvas = Canvas::new(
-            2.0,
-            ParentRect::window(w_px as f64, h_px as f64),
-        );
+        use crate::ui::core::Color;
+        use super::sheet::Sheet;
+        let mut sheet = Sheet::new(2.0);
         let line_h_pt = (chrome_cell_h as f64 * 1.6) / 2.0;
         let pad_x_pt = 20.0;
         let pad_y_pt = 16.0;
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(0.0), Length::Pt(0.0))
-            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .at(0.0, 0.0)
+            .size(w_px as f64 / 2.0, h_px as f64 / 2.0)
             .fill(Color::rgba(15, 18, 23, 1.0))
             .draw();
         let fg = Color::rgba(220, 224, 235, 1.0);
         for (i, line) in lines.iter().enumerate() {
             let y_pt = pad_y_pt + (i as f64) * line_h_pt;
-            canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), line)
+            sheet
+                .text(pad_x_pt, y_pt, line)
                 .color(fg)
                 .draw();
         }
         let bytes = renderer
-            .render_canvas_to_bitmap(
+            .render_sheet_to_bitmap(
                 w_px,
                 h_px,
-                &canvas,
+                &sheet,
                 chrome_cell_w,
                 chrome_cell_h,
                 chrome_ascent,
                 false,
             )
-            .expect("canvas render");
+            .expect("sheet render");
 
         let mut rgba = vec![0u8; bytes.len()];
         for i in (0..bytes.len()).step_by(4) {
@@ -3081,40 +2816,37 @@ mod tests {
             "a aa aaa aaaa aaaaa aaaaaa aaaaaaa",
             "你好 世界 こんにちは 안녕 a b c",
         ];
-        use crate::ui::core::{Color, Length};
-        use crate::ui::core::canvas::{Canvas, ParentRect};
-        let mut canvas = Canvas::new(
-            2.0,
-            ParentRect::window(w_px as f64, h_px as f64),
-        );
+        use crate::ui::core::Color;
+        use super::sheet::Sheet;
+        let mut sheet = Sheet::new(2.0);
         let line_h_pt = (chrome_cell_h as f64 * 1.6) / 2.0;
         let pad_x_pt = 20.0;
         let pad_y_pt = 16.0;
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(0.0), Length::Pt(0.0))
-            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .at(0.0, 0.0)
+            .size(w_px as f64 / 2.0, h_px as f64 / 2.0)
             .fill(Color::rgba(15, 18, 23, 1.0))
             .draw();
         let fg = Color::rgba(220, 224, 235, 1.0);
         for (i, line) in lines.iter().enumerate() {
             let y_pt = pad_y_pt + (i as f64) * line_h_pt;
-            canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), line)
+            sheet
+                .text(pad_x_pt, y_pt, line)
                 .color(fg)
                 .draw();
         }
         let bytes = renderer
-            .render_canvas_to_bitmap(
+            .render_sheet_to_bitmap(
                 w_px,
                 h_px,
-                &canvas,
+                &sheet,
                 chrome_cell_w,
                 chrome_cell_h,
                 chrome_ascent,
                 false,
             )
-            .expect("canvas render");
+            .expect("sheet render");
 
         let mut rgba = vec![0u8; bytes.len()];
         for i in (0..bytes.len()).step_by(4) {
@@ -3178,29 +2910,26 @@ mod tests {
             (13.0, "13pt  The quick brown fox jumps  你好  fi fl  ⌘C"),
             (14.0, "14pt  The quick brown fox jumps  你好  fi fl  ⌘C"),
         ];
-        use crate::ui::core::{Color, Length};
-        use crate::ui::core::canvas::{Canvas, ParentRect};
+        use crate::ui::core::Color;
+        use super::sheet::Sheet;
         use crate::font_shape::ShapeOptions;
-        let mut canvas = Canvas::new(
-            2.0,
-            ParentRect::window(w_px as f64, h_px as f64),
-        );
+        let mut sheet = Sheet::new(2.0);
         let pad_x_pt = 20.0;
         let pad_y_pt = 16.0;
         let line_gap_pt = 28.0;
         let opts = ShapeOptions::full();
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(0.0), Length::Pt(0.0))
-            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .at(0.0, 0.0)
+            .size(w_px as f64 / 2.0, h_px as f64 / 2.0)
             .fill(Color::rgba(15, 18, 23, 1.0))
             .draw();
         let fg = Color::rgba(220, 224, 235, 1.0);
         for (i, (pt, line)) in lines.iter().enumerate() {
             let y_pt = pad_y_pt + (i as f64) * line_gap_pt;
             let size_q = crate::glyph_atlas::GlyphKey::size_q_for(*pt);
-            canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), line)
+            sheet
+                .text(pad_x_pt, y_pt, line)
                 .color(fg)
                 .ui()
                 .ui_size_q(size_q)
@@ -3221,8 +2950,8 @@ mod tests {
         let weight_pad_y_pt = pad_y_pt + (lines.len() as f64) * line_gap_pt + 16.0;
         for (i, (w, line)) in weight_rows.iter().enumerate() {
             let y_pt = weight_pad_y_pt + (i as f64) * 22.0;
-            canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), line)
+            sheet
+                .text(pad_x_pt, y_pt, line)
                 .color(fg)
                 .ui()
                 .ui_size_q(weight_size_q)
@@ -3231,16 +2960,16 @@ mod tests {
                 .draw();
         }
         let bytes = renderer
-            .render_canvas_to_bitmap(
+            .render_sheet_to_bitmap(
                 w_px,
                 h_px,
-                &canvas,
+                &sheet,
                 chrome_cell_w,
                 chrome_cell_h,
                 chrome_ascent,
                 true, // ui_font=true — emit SF Pro path
             )
-            .expect("canvas render");
+            .expect("sheet render");
 
         let mut rgba = vec![0u8; bytes.len()];
         for i in (0..bytes.len()).step_by(4) {
@@ -3302,30 +3031,27 @@ mod tests {
             (18.0, 400, "18pt mixed 中文 + English + 日本語 + 한국어"),
             (18.0, 400, "Mac 偏好设定 · Mac の環境設定 · Mac 환경설정"),
         ];
-        use crate::ui::core::{Color, Length};
-        use crate::ui::core::canvas::{Canvas, ParentRect};
+        use crate::ui::core::Color;
+        use super::sheet::Sheet;
         use crate::font_shape::ShapeOptions;
-        let mut canvas = Canvas::new(
-            2.0,
-            ParentRect::window(w_px as f64, h_px as f64),
-        );
+        let mut sheet = Sheet::new(2.0);
         let pad_x_pt = 20.0;
         // First row is 36 pt — ascent eats ~30 pt above the baseline,
         // so start the cursor ~36 pt down or the top of "Hello" gets
         // clipped at the image edge.
         let mut y_pt = 36.0;
         let opts = ShapeOptions::full();
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(0.0), Length::Pt(0.0))
-            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .at(0.0, 0.0)
+            .size(w_px as f64 / 2.0, h_px as f64 / 2.0)
             .fill(Color::rgba(15, 18, 23, 1.0))
             .draw();
         let fg = Color::rgba(220, 224, 235, 1.0);
         for (pt, weight, line) in rows.iter() {
             let size_q = crate::glyph_atlas::GlyphKey::size_q_for(*pt);
-            canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), line)
+            sheet
+                .text(pad_x_pt, y_pt, line)
                 .color(fg)
                 .ui()
                 .ui_size_q(size_q)
@@ -3337,16 +3063,16 @@ mod tests {
             y_pt += pt * 1.4;
         }
         let bytes = renderer
-            .render_canvas_to_bitmap(
+            .render_sheet_to_bitmap(
                 w_px,
                 h_px,
-                &canvas,
+                &sheet,
                 chrome_cell_w,
                 chrome_cell_h,
                 chrome_ascent,
                 true, // ui_font=true — SF Pro path
             )
-            .expect("canvas render");
+            .expect("sheet render");
 
         let mut rgba = vec![0u8; bytes.len()];
         for i in (0..bytes.len()).step_by(4) {
@@ -3409,29 +3135,26 @@ mod tests {
             (28.0, "🇯🇵  🇰🇷  🇺🇸  🇨🇳  🇬🇧  🇩🇪  🇫🇷  🇮🇹  🇧🇷  🇮🇳"),
             (22.0, "Hello 👋 World 🌍, deploy 🚀 the 🏗️ build ✅"),
         ];
-        use crate::ui::core::{Color, Length};
-        use crate::ui::core::canvas::{Canvas, ParentRect};
+        use crate::ui::core::Color;
+        use super::sheet::Sheet;
         use crate::font_shape::ShapeOptions;
-        let mut canvas = Canvas::new(
-            2.0,
-            ParentRect::window(w_px as f64, h_px as f64),
-        );
+        let mut sheet = Sheet::new(2.0);
         let pad_x_pt = 20.0;
         // 28pt cap-height is ~22pt;  start the cursor far enough
         // down that the colour atlas slot doesn't run off the top.
         let mut y_pt = 36.0;
         let opts = ShapeOptions::full();
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(0.0), Length::Pt(0.0))
-            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .at(0.0, 0.0)
+            .size(w_px as f64 / 2.0, h_px as f64 / 2.0)
             .fill(Color::rgba(15, 18, 23, 1.0))
             .draw();
         let fg = Color::rgba(220, 224, 235, 1.0);
         for (pt, line) in rows.iter() {
             let size_q = crate::glyph_atlas::GlyphKey::size_q_for(*pt);
-            canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), line)
+            sheet
+                .text(pad_x_pt, y_pt, line)
                 .color(fg)
                 .ui()
                 .ui_size_q(size_q)
@@ -3441,16 +3164,16 @@ mod tests {
             y_pt += pt * 1.55;
         }
         let bytes = renderer
-            .render_canvas_to_bitmap(
+            .render_sheet_to_bitmap(
                 w_px,
                 h_px,
-                &canvas,
+                &sheet,
                 chrome_cell_w,
                 chrome_cell_h,
                 chrome_ascent,
                 true,
             )
-            .expect("canvas render");
+            .expect("sheet render");
 
         let mut rgba = vec![0u8; bytes.len()];
         for i in (0..bytes.len()).step_by(4) {
@@ -3513,21 +3236,18 @@ mod tests {
         ];
         let preset_pt: f64 = 22.0;
         let label_pt: f64 = 12.0;
-        use crate::ui::core::{Color, Length};
-        use crate::ui::core::canvas::{Canvas, ParentRect};
+        use crate::ui::core::Color;
+        use super::sheet::Sheet;
         use crate::font_shape::ShapeOptions;
-        let mut canvas = Canvas::new(
-            2.0,
-            ParentRect::window(w_px as f64, h_px as f64),
-        );
+        let mut sheet = Sheet::new(2.0);
         let pad_x_pt = 20.0;
         let mut y_pt = 28.0;
         let row_gap_pt = preset_pt * 1.4;
         let group_gap_pt = 14.0;
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(0.0), Length::Pt(0.0))
-            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .at(0.0, 0.0)
+            .size(w_px as f64 / 2.0, h_px as f64 / 2.0)
             .fill(Color::rgba(15, 18, 23, 1.0))
             .draw();
         let fg = Color::rgba(220, 224, 235, 1.0);
@@ -3541,8 +3261,8 @@ mod tests {
         let preset_size_q = crate::glyph_atlas::GlyphKey::size_q_for(preset_pt);
         for source in sources.iter() {
             // Group separator label.
-            canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), source)
+            sheet
+                .text(pad_x_pt, y_pt, source)
                 .color(fg_dim)
                 .ui()
                 .ui_size_q(label_size_q)
@@ -3552,8 +3272,8 @@ mod tests {
             y_pt += label_pt * 1.6;
             for (name, opts) in presets.iter() {
                 let line = format!("{}  {}", name, source);
-                canvas
-                    .text(Length::Pt(pad_x_pt + 4.0), Length::Pt(y_pt), &line)
+                sheet
+                    .text(pad_x_pt + 4.0, y_pt, &line)
                     .color(fg)
                     .ui()
                     .ui_size_q(preset_size_q)
@@ -3565,16 +3285,16 @@ mod tests {
             y_pt += group_gap_pt;
         }
         let bytes = renderer
-            .render_canvas_to_bitmap(
+            .render_sheet_to_bitmap(
                 w_px,
                 h_px,
-                &canvas,
+                &sheet,
                 chrome_cell_w,
                 chrome_cell_h,
                 chrome_ascent,
                 true,
             )
-            .expect("canvas render");
+            .expect("sheet render");
 
         let mut rgba = vec![0u8; bytes.len()];
         for i in (0..bytes.len()).step_by(4) {
@@ -3598,7 +3318,7 @@ mod tests {
     }
 
     /// Phase 9 (extended) — terminal scene composite.  Approximates
-    /// the production PTY render path through the canvas:  cell BG
+    /// the production PTY render path through the sheet:  cell BG
     /// rect runs for the selection band, a brighter rect for the
     /// cursor block, plus multi-line mono Monaco text on top.  Tests
     /// the same primitive composition (`Rect` BG → `Text` FG) the
@@ -3606,7 +3326,7 @@ mod tests {
     /// live `Grid`.  Real `Grid` → `render_layout_to_texture` readback
     /// needs a `StorageModeShared` target texture that the renderer
     /// doesn't currently expose;  threading that through is a
-    /// separate refactor.  This canvas approximation locks the
+    /// separate refactor.  This sheet approximation locks the
     /// visual composition contract:  no overflow between cells, no
     /// glyph bleed across the selection edge, BG layering preserved.
     #[test]
@@ -3624,25 +3344,22 @@ mod tests {
         let w_px: u32 = 1200;
         let h_px: u32 = 600;
         let (chrome_cell_w, chrome_cell_h, chrome_ascent) = renderer.chrome_font_metrics();
-        // Each "cell" in the canvas-pt space is half the phys cell
-        // (because Canvas is 2× retina).  Use Monaco cell width via
+        // Each "cell" in the sheet-pt space is half the phys cell
+        // (the sheet is drawn at 2×).  Use Monaco cell width via
         // chrome_font_metrics so the simulated grid sits on the same
         // pitch as the real terminal.
         let cell_w_pt = (chrome_cell_w as f64) / 2.0;
         let cell_h_pt = (chrome_cell_h as f64) / 2.0;
-        use crate::ui::core::{Color, Length};
-        use crate::ui::core::canvas::{Canvas, ParentRect};
-        let mut canvas = Canvas::new(
-            2.0,
-            ParentRect::window(w_px as f64, h_px as f64),
-        );
+        use crate::ui::core::Color;
+        use super::sheet::Sheet;
+        let mut sheet = Sheet::new(2.0);
         let pad_x_pt = 16.0;
         let pad_y_pt = 16.0;
         // Page BG — production terminal dark.
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(0.0), Length::Pt(0.0))
-            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .at(0.0, 0.0)
+            .size(w_px as f64 / 2.0, h_px as f64 / 2.0)
             .fill(Color::rgba(15, 18, 23, 1.0))
             .draw();
         // Simulated terminal lines — log-style output with prompts.
@@ -3678,10 +3395,10 @@ mod tests {
             };
             let w = (col_end - col_start) * cell_w_pt;
             if w > 0.0 {
-                canvas
+                sheet
                     .rect()
-                    .at(Length::Pt(pad_x_pt + col_start * cell_w_pt), Length::Pt(y))
-                    .size(Length::Pt(w), Length::Pt(cell_h_pt))
+                    .at(pad_x_pt + col_start * cell_w_pt, y)
+                    .size(w, cell_h_pt)
                     .fill(sel_color)
                     .draw();
             }
@@ -3695,35 +3412,35 @@ mod tests {
         // answer.
         let (cr, cg, cb) = marspot_term::palette::current().cursor;
         let cursor_color = Color::rgba(cr, cg, cb, 0.90);
-        canvas
+        sheet
             .rect()
             .at(
-                Length::Pt(pad_x_pt + (cursor_col as f64) * cell_w_pt),
-                Length::Pt(pad_y_pt + (cursor_row as f64) * cell_h_pt),
+                pad_x_pt + (cursor_col as f64) * cell_w_pt,
+                pad_y_pt + (cursor_row as f64) * cell_h_pt,
             )
-            .size(Length::Pt(cell_w_pt), Length::Pt(cell_h_pt))
+            .size(cell_w_pt, cell_h_pt)
             .fill(cursor_color)
             .draw();
         // Text layer last so glyphs ride on top of BG rects.
         let fg = Color::rgba(220, 224, 235, 1.0);
         for (i, line) in lines.iter().enumerate() {
             let y = pad_y_pt + (i as f64) * cell_h_pt;
-            canvas
-                .text(Length::Pt(pad_x_pt), Length::Pt(y), line)
+            sheet
+                .text(pad_x_pt, y, line)
                 .color(fg)
                 .draw();
         }
         let bytes = renderer
-            .render_canvas_to_bitmap(
+            .render_sheet_to_bitmap(
                 w_px,
                 h_px,
-                &canvas,
+                &sheet,
                 chrome_cell_w,
                 chrome_cell_h,
                 chrome_ascent,
                 false, // Mono path
             )
-            .expect("canvas render");
+            .expect("sheet render");
 
         let mut rgba = vec![0u8; bytes.len()];
         for i in (0..bytes.len()).step_by(4) {
@@ -3774,17 +3491,14 @@ mod tests {
         let w_px: u32 = 1400;
         let h_px: u32 = 500;
         let (chrome_cell_w, chrome_cell_h, chrome_ascent) = renderer.chrome_font_metrics();
-        use crate::ui::core::{Color, Length, Pt};
-        use crate::ui::core::canvas::{Canvas, ParentRect};
-        let mut canvas = Canvas::new(
-            2.0,
-            ParentRect::window(w_px as f64, h_px as f64),
-        );
+        use crate::ui::core::Color;
+        use super::sheet::Sheet;
+        let mut sheet = Sheet::new(2.0);
         // Page BG — neutral mid so shadows show.
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(0.0), Length::Pt(0.0))
-            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .at(0.0, 0.0)
+            .size(w_px as f64 / 2.0, h_px as f64 / 2.0)
             .fill(Color::rgba(28, 30, 36, 1.0))
             .draw();
         let panel_fill = Color::rgba(35, 38, 46, 1.0);
@@ -3797,91 +3511,91 @@ mod tests {
         let label_y = 170.0;
         let label_color = Color::rgba(170, 178, 195, 1.0);
         // Col 1 — solid rounded rect.
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(40.0), Length::Pt(top_y))
-            .size(Length::Pt(col_w), Length::Pt(col_h))
+            .at(40.0, top_y)
+            .size(col_w, col_h)
             .fill(panel_fill)
-            .radius(Pt(10.0))
+            .radius(10.0)
             .draw();
-        canvas
-            .text(Length::Pt(40.0), Length::Pt(label_y), "1. radius")
+        sheet
+            .text(40.0, label_y, "1. radius")
             .color(label_color)
             .draw();
         // Col 2 — rounded rect with shadow blur.
         let col2_x = 40.0 + col_w + col_gap;
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(col2_x), Length::Pt(top_y))
-            .size(Length::Pt(col_w), Length::Pt(col_h))
+            .at(col2_x, top_y)
+            .size(col_w, col_h)
             .fill(panel_fill)
-            .radius(Pt(10.0))
-            .shadow(Pt(12.0), (Pt(0.0), Pt(4.0)), shadow_color)
+            .radius(10.0)
+            .shadow(12.0, shadow_color)
             .draw();
-        canvas
-            .text(Length::Pt(col2_x), Length::Pt(label_y), "2. + shadow")
+        sheet
+            .text(col2_x, label_y, "2. + shadow")
             .color(label_color)
             .draw();
         // Col 3 — rounded rect with shadow AND border (F3+1.7 modal).
         let col3_x = col2_x + col_w + col_gap;
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(col3_x), Length::Pt(top_y))
-            .size(Length::Pt(col_w), Length::Pt(col_h))
+            .at(col3_x, top_y)
+            .size(col_w, col_h)
             .fill(panel_fill)
-            .radius(Pt(10.0))
-            .border(Pt(1.0), border_color)
-            .shadow(Pt(12.0), (Pt(0.0), Pt(4.0)), shadow_color)
+            .radius(10.0)
+            .border(1.0, border_color)
+            .shadow(12.0, shadow_color)
             .draw();
-        canvas
-            .text(Length::Pt(col3_x), Length::Pt(label_y), "3. + border")
+        sheet
+            .text(col3_x, label_y, "3. + border")
             .color(label_color)
             .draw();
         // Col 4 — stacked depth (3 rects layered with growing shadow).
         let col4_x = col3_x + col_w + col_gap;
         // Back layer — biggest shadow blur,offset down.
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(col4_x + 20.0), Length::Pt(top_y))
-            .size(Length::Pt(col_w - 20.0), Length::Pt(col_h - 30.0))
+            .at(col4_x + 20.0, top_y)
+            .size(col_w - 20.0, col_h - 30.0)
             .fill(Color::rgba(25, 28, 35, 1.0))
-            .radius(Pt(8.0))
-            .shadow(Pt(20.0), (Pt(0.0), Pt(8.0)), shadow_color)
+            .radius(8.0)
+            .shadow(20.0, shadow_color)
             .draw();
         // Middle layer.
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(col4_x + 12.0), Length::Pt(top_y + 12.0))
-            .size(Length::Pt(col_w - 20.0), Length::Pt(col_h - 30.0))
+            .at(col4_x + 12.0, top_y + 12.0)
+            .size(col_w - 20.0, col_h - 30.0)
             .fill(Color::rgba(30, 33, 41, 1.0))
-            .radius(Pt(8.0))
-            .shadow(Pt(14.0), (Pt(0.0), Pt(5.0)), shadow_color)
+            .radius(8.0)
+            .shadow(14.0, shadow_color)
             .draw();
         // Top layer.
-        canvas
+        sheet
             .rect()
-            .at(Length::Pt(col4_x + 4.0), Length::Pt(top_y + 24.0))
-            .size(Length::Pt(col_w - 20.0), Length::Pt(col_h - 30.0))
+            .at(col4_x + 4.0, top_y + 24.0)
+            .size(col_w - 20.0, col_h - 30.0)
             .fill(Color::rgba(38, 42, 52, 1.0))
-            .radius(Pt(8.0))
-            .border(Pt(1.0), border_color)
-            .shadow(Pt(8.0), (Pt(0.0), Pt(2.0)), shadow_color)
+            .radius(8.0)
+            .border(1.0, border_color)
+            .shadow(8.0, shadow_color)
             .draw();
-        canvas
-            .text(Length::Pt(col4_x), Length::Pt(label_y), "4. depth stack")
+        sheet
+            .text(col4_x, label_y, "4. depth stack")
             .color(label_color)
             .draw();
         let bytes = renderer
-            .render_canvas_to_bitmap(
+            .render_sheet_to_bitmap(
                 w_px,
                 h_px,
-                &canvas,
+                &sheet,
                 chrome_cell_w,
                 chrome_cell_h,
                 chrome_ascent,
                 false,
             )
-            .expect("canvas render");
+            .expect("sheet render");
 
         let mut rgba = vec![0u8; bytes.len()];
         for i in (0..bytes.len()).step_by(4) {
@@ -5672,7 +5386,6 @@ mod tests {
         }
     }
 
-    // ── P2b: Canvas → Metal flush, submission-order = z-order ──
 
     /// Semi-transparent fills must land at the alpha they were given.
     ///
@@ -5691,22 +5404,23 @@ mod tests {
     /// edge AA. Sampled at the centre of a full-window rect, far from
     /// any edge, so coverage is exactly 1.
     #[test]
-    fn canvas_alpha_blends_at_the_requested_opacity() {
-        use crate::ui::core::{Canvas, ParentRect, Color, Length};
+    fn sheet_alpha_blends_at_the_requested_opacity() {
+        use super::sheet::Sheet;
+        use crate::ui::core::Color;
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => { eprintln!("SKIPPED: no Metal device: {e}"); return; }
         };
         let (w, h) = (16u32, 16u32);
         for (alpha, want) in [(1.0_f64, 255.0_f64), (0.5, 127.5), (0.25, 63.75)] {
-            let mut canvas = Canvas::new(1.0, ParentRect::window(w as f64, h as f64));
-            canvas.rect()
-                .at(Length::Pt(0.0), Length::Pt(0.0))
-                .size(Length::Pct(1.0), Length::Pct(1.0))
+            let mut sheet = Sheet::new(1.0);
+            sheet.rect()
+                .at(0.0, 0.0)
+                .size(w as f64, h as f64)
                 .fill(Color::rgba(255, 255, 255, alpha))
                 .draw();
             let bytes = renderer
-                .render_canvas_to_bitmap(w, h, &canvas, 48.0, 12.0, 9.0, false)
+                .render_sheet_to_bitmap(w, h, &sheet, 48.0, 12.0, 9.0, false)
                 .expect("render");
             let i = (w as usize / 2 + (h as usize / 2) * w as usize) * 4;
             let got = bytes[i + 2] as f64; // R channel of BGRA8
@@ -5724,34 +5438,35 @@ mod tests {
     /// the screen.  Same pipeline (all rects), so this verifies
     /// the basic "last instance wins" within a single encoder.
     #[test]
-    fn canvas_same_pipeline_submission_order_is_z_order() {
-        use crate::ui::core::{Canvas, ParentRect, Color, Length};
+    fn sheet_same_pipeline_submission_order_is_z_order() {
+        use super::sheet::Sheet;
+        use crate::ui::core::Color;
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => { eprintln!("SKIPPED: no Metal device: {e}"); return; }
         };
         let w = 8u32;
         let h = 8u32;
-        let mut canvas = Canvas::new(1.0, ParentRect::window(w as f64, h as f64));
+        let mut sheet = Sheet::new(1.0);
         // All three at (0, 0) sized full window.  Same pipeline
         // (Rect), so the encoder draws them in array order.
-        canvas.rect()
-            .at(Length::Pt(0.0), Length::Pt(0.0))
-            .size(Length::Pct(1.0), Length::Pct(1.0))
+        sheet.rect()
+            .at(0.0, 0.0)
+            .size(w as f64, h as f64)
             .fill(Color::rgb(255, 0, 0))
             .draw();
-        canvas.rect()
-            .at(Length::Pt(0.0), Length::Pt(0.0))
-            .size(Length::Pct(1.0), Length::Pct(1.0))
+        sheet.rect()
+            .at(0.0, 0.0)
+            .size(w as f64, h as f64)
             .fill(Color::rgb(0, 255, 0))
             .draw();
-        canvas.rect()
-            .at(Length::Pt(0.0), Length::Pt(0.0))
-            .size(Length::Pct(1.0), Length::Pct(1.0))
+        sheet.rect()
+            .at(0.0, 0.0)
+            .size(w as f64, h as f64)
             .fill(Color::rgb(0, 0, 255))
             .draw();
 
-        let bytes = renderer.render_canvas_to_bitmap(w, h, &canvas, 48.0, 12.0, 9.0, false)
+        let bytes = renderer.render_sheet_to_bitmap(w, h, &sheet, 48.0, 12.0, 9.0, false)
             .expect("render");
         // Sample the centre pixel.  BGRA8: bytes are B, G, R, A.
         let px = w as usize / 2 + (h as usize / 2) * w as usize;
@@ -5765,46 +5480,38 @@ mod tests {
         assert!(r < 60,  "red should be near zero, got R={r}");
     }
 
-    /// `build_canvas_runs` correctly merges consecutive same-kind
+    /// `sheet_runs` correctly merges consecutive same-kind
     /// primitives into one run and splits at kind transitions.
     #[test]
-    fn canvas_runs_batch_same_kind_split_on_transition() {
-        use crate::ui::core::{Canvas, ParentRect, Color, Length};
-        let mut canvas = Canvas::new(1.0, ParentRect::window(100.0, 100.0));
-        canvas.rect().fill(Color::WHITE).draw();
-        canvas.rect().fill(Color::BLACK).draw();
-        canvas.text(Length::Pt(0.0), Length::Pt(0.0), "x").color(Color::WHITE).draw();
-        canvas.rect().fill(Color::WHITE).draw();
-        // Minimal headless deps for build_canvas_runs.  This test
-        // doesn't render — it just probes the run-grouping logic.
+    fn sheet_runs_batch_same_kind_split_on_transition() {
+        use super::sheet::{RunKind, Sheet};
+        use crate::ui::core::Color;
+        let mut sheet = Sheet::new(1.0);
+        sheet.rect().fill(Color::WHITE).draw();
+        sheet.rect().fill(Color::BLACK).draw();
+        sheet.text(0.0, 0.0, "x").color(Color::WHITE).draw();
+        sheet.rect().fill(Color::WHITE).draw();
+        // nothing is rendered: only the grouping into runs is read
         let mut renderer = match MetalRenderer::new_headless() {
             Ok(r) => r,
             Err(e) => { eprintln!("SKIPPED: no Metal device: {e}"); return; }
         };
-        let mut ui = Vec::new();
-        let mut gl = Vec::new();
-        let mut color_gl = Vec::new();
-        let runs = build_canvas_runs(
-            &canvas, 48.0, 12.0, 9.0,
-            256.0, 256.0, 256.0, 256.0,
-            &mut renderer.font, &mut renderer.atlas, &mut renderer.color_atlas,
-            &mut ui, &mut gl, &mut color_gl,
-            false,
-        );
+        let drawn = renderer.sheet_runs(&sheet, 48.0, 12.0, 9.0, false);
+        let (runs, gl) = (&drawn.runs, &drawn.glyphs);
         // Expected sequence: UiRect (2 rects) → Glyph (text) →
         // UiRect (final rect).  Text may produce 0 or 1+ glyphs
         // depending on whether 'x' resolves through the chrome
         // font — guard the assertion against the 0-glyph case
         // by collapsing the middle run.
         assert!(runs.len() >= 2, "expected at least 2 runs, got {runs:?}", runs = runs.len());
-        assert_eq!(runs[0].kind, CanvasRunKind::UiRect);
-        assert_eq!(runs[0].count, 2);
-        assert_eq!(runs.last().unwrap().kind, CanvasRunKind::UiRect);
+        assert_eq!(runs[0].0, RunKind::UiRect);
+        assert_eq!(runs[0].1, 2);
+        assert_eq!(runs.last().unwrap().0, RunKind::UiRect);
         // If the text produced glyphs, there's a Glyph run in the middle.
         if !gl.is_empty() {
             assert_eq!(runs.len(), 3);
-            assert_eq!(runs[1].kind, CanvasRunKind::Glyph);
-            assert_eq!(runs[1].count, gl.len());
+            assert_eq!(runs[1].0, RunKind::Glyph);
+            assert_eq!(runs[1].1, gl.len());
         }
     }
 }
