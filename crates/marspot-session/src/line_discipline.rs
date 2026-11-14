@@ -65,11 +65,25 @@
 //! holds when its prompt starts -- before any repair of that prompt --
 //! and puts that back on Enter, raw mode and all, for the command. Its
 //! flags go back while the shell is still in front, or while the
-//! command's process is still the shell's own image and cannot have
-//! asked for anything. A command first seen in raw mode after its exec
-//! may have asked for it and is left alone, output included: under bash
-//! a first command that is still running when its output is read, and
-//! was never seen before its exec, staircases until it ends.
+//! command's process has not called exec and cannot have asked for
+//! anything. A command first seen in raw mode after its exec
+//! may have asked for it and is left alone, output included, for as
+//! long as anything of it is running: once every process of the
+//! foreground group has exited, what it printed is put right, since a
+//! program that is gone chose nothing. The terminal is not written to
+//! then -- the shell is about to, and a write across the shell's own
+//! undoes it -- so only the output is.
+//!
+//! What is left is a limit, not a verdict that can be wrong: under bash,
+//! a command that is still running when its output is read, and was
+//! never seen before its exec, staircases until it ends. Who wrote the
+//! raw settings it runs under cannot be told from the terminal by then:
+//! the shell handing them over and a program setting them again leave
+//! the same state. It takes the session not running between Enter and
+//! the command's exec: bash 3.2 execs about 4 ms after Enter (3.3 to
+//! 6.4 ms over 400 commands on an M4 Pro at a load of 11 to 18), and a
+//! thread that does nothing but look was kept from looking for at most
+//! 0.5 ms there, and for up to 21 ms at a load of 105.
 
 use std::os::fd::RawFd;
 use std::time::{Duration, Instant};
@@ -139,6 +153,10 @@ pub struct LineGuard {
     look_owed: bool,
     exits: exits::Exits,
     repairs: u64,
+    /// How long Enter is held up before anything is looked at: a
+    /// machine too busy to run this thread until the command started.
+    #[cfg(test)]
+    pub(crate) enter_stalls: Option<Duration>,
 }
 
 impl LineGuard {
@@ -151,6 +169,10 @@ impl LineGuard {
     pub fn wrote_input(&mut self, master: RawFd, shell_pgrp: libc::pid_t, bytes: &[u8]) {
         if !bytes.iter().any(|b| *b == b'\r' || *b == b'\n') {
             return;
+        }
+        #[cfg(test)]
+        if let Some(stall) = self.enter_stalls {
+            std::thread::sleep(stall);
         }
         let at = Instant::now();
         self.hot_until = Some(at + HOT_FOR);
@@ -206,7 +228,9 @@ impl LineGuard {
             return true;
         }
         let canon = termios(master).is_none_or(|t| t.c_lflag & libc::ICANON != 0);
-        !chose_raw(job, canon, unstarted(job, shell_pgrp), front())
+        // a group with nobody left in it chooses nothing: what it wrote
+        // is put right whatever the terminal was in when it wrote it
+        !chose_raw(job, canon, exits::not_execed(job), front()) || exits::ended(job)
     }
 
     /// How soon the session loop should look again.
@@ -360,21 +384,15 @@ fn chose_raw(job: libc::pid_t, canon: bool, unstarted: bool, front_after: libc::
 /// A job has just been seen in front while flags are owed. True when it
 /// has the terminal with all of them: either they were already there,
 /// or the terminal is as the shell left it for a command and they are
-/// put back now. That is `ICANON` on, or a leader still running the
-/// shell's own image: it has not exec'd, so raw mode is what the shell
-/// handed it (bash). Any other job in raw mode is left alone.
+/// put back now. That is `ICANON` on, or a leader that has not exec'd,
+/// so raw mode is what the shell handed it (bash). Any other job in raw
+/// mode is left alone.
 fn hand_over(master: RawFd, shell_pgrp: libc::pid_t, front: libc::pid_t, owed: Flags) -> bool {
     if termios(master).is_some_and(|t| owed.missing_from(Flags::of(&t)).is_empty()) {
         return true;
     }
-    let unstarted = unstarted(front, shell_pgrp);
+    let unstarted = exits::not_execed(front);
     put_back(master, shell_pgrp, owed, unstarted).is_some_and(|canon| canon || unstarted)
-}
-
-/// Whether the job led by `front` still runs the shell's own image.
-fn unstarted(front: libc::pid_t, shell_pgrp: libc::pid_t) -> bool {
-    use marspot_term::platform::pid_exe_path;
-    pid_exe_path(front).is_some_and(|exe| Some(exe) == pid_exe_path(shell_pgrp))
 }
 
 /// `bytes` as the terminal's output processing would have passed them
@@ -955,6 +973,127 @@ mod tests {
         }
     }
 
+    /// A script the shell's own program runs has called exec like any
+    /// other command; only a child that has not is still the shell's.
+    #[test]
+    fn a_process_is_the_shells_own_until_it_calls_exec() {
+        use std::process::Command;
+        // SAFETY: the child only waits to be killed; it runs none of
+        // this process's code past the fork.
+        let forked = unsafe { libc::fork() };
+        if forked == 0 {
+            // SAFETY: async-signal-safe calls in the forked child.
+            unsafe {
+                libc::pause();
+                libc::_exit(0);
+            }
+        }
+        assert!(forked > 0);
+        let own_image = super::exits::not_execed(forked);
+        // SAFETY: the child this test forked.
+        unsafe {
+            libc::kill(forked, libc::SIGKILL);
+            libc::waitpid(forked, std::ptr::null_mut(), 0);
+        }
+        assert!(own_image, "forked and nothing else");
+        let mut other = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        assert!(!super::exits::not_execed(other.id() as libc::pid_t), "another program");
+        other.kill().unwrap();
+        other.wait().unwrap();
+    }
+
+    /// A group counts as ended only when nobody is left in it: a leader
+    /// that has exited with another process of the group still running
+    /// (`false | vim`) has not, and that process may hold the terminal
+    /// in a mode it chose.
+    #[test]
+    fn a_group_has_ended_only_when_every_process_in_it_has() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+        let exited = |pid: libc::pid_t| {
+            // SAFETY: waits for a child of this test to exit and leaves
+            // it unreaped, as the shell's job still is when it is seen.
+            let rc = unsafe {
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT)
+            };
+            assert_eq!(rc, 0);
+        };
+        let mut running = Command::new("/bin/sleep").arg("30").process_group(0).spawn().unwrap();
+        let pid = running.id() as libc::pid_t;
+        assert!(!super::exits::ended(pid), "a running program");
+        running.kill().unwrap();
+        exited(pid);
+        assert!(super::exits::ended(pid), "exited and not reaped yet");
+        running.wait().unwrap();
+        assert!(super::exits::ended(pid), "reaped: nobody is left");
+
+        let mut leader =
+            Command::new("/bin/sh").args(["-c", "/bin/sleep 30 & exit 0"]).process_group(0).spawn().unwrap();
+        let group = leader.id() as libc::pid_t;
+        exited(group);
+        assert!(!super::exits::ended(group), "the leader is gone, a process of its group is not");
+        // SAFETY: the group this test started; its leader is not reaped
+        // yet, so the id cannot have been given to anything else.
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !super::exits::ended(group) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(super::exits::ended(group), "and once that one has exited too");
+        leader.wait().unwrap();
+    }
+
+    /// How long bash takes from Enter to the command's exec, as a thread
+    /// that does nothing but look sees it, and how long that thread was
+    /// kept from looking. Prints the distribution; asserts nothing.
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn measure_bash_from_enter_to_exec() {
+        let _env = test_pane_env("/bin/bash");
+        let mut s = shell(0xED);
+        let (master, bash) = s.tty();
+        let (mut to_front, mut to_exec, mut gaps) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..200 {
+            let enter = Instant::now();
+            s.write(b"/bin/sleep 0.02\r").unwrap();
+            let (mut front_at, mut exec_at, mut last) = (None, None, enter);
+            while exec_at.is_none() && enter.elapsed() < Duration::from_secs(5) {
+                // SAFETY: tcgetpgrp on the pty master of this test's pane.
+                let front = unsafe { libc::tcgetpgrp(master) };
+                let now = Instant::now();
+                gaps.push(now.duration_since(last));
+                last = now;
+                if front > 0 && front != bash {
+                    front_at.get_or_insert(now);
+                    if !super::exits::not_execed(front) {
+                        exec_at = Some(now);
+                    }
+                }
+            }
+            if let (Some(f), Some(e)) = (front_at, exec_at) {
+                to_front.push(f.duration_since(enter));
+                to_exec.push(e.duration_since(enter));
+            }
+            assert!(pump_until(&mut s, at_prompt), "the prompt came back:\n{}", screen(&s));
+        }
+        let line = |name: &str, v: &mut Vec<Duration>| {
+            v.sort();
+            let at = |q: f64| v[((v.len() - 1) as f64 * q) as usize].as_micros();
+            println!(
+                "MEASURED {name}: n={} p10={} p50={} p90={} p99={} max={} us",
+                v.len(), at(0.1), at(0.5), at(0.9), at(0.99), at(1.0)
+            );
+        };
+        line("enter to the command in front", &mut to_front);
+        line("enter to the command's exec", &mut to_exec);
+        line("between two looks", &mut gaps);
+        let mut load = [0f64; 1];
+        // SAFETY: room for the one average asked for.
+        unsafe { libc::getloadavg(load.as_mut_ptr(), 1) };
+        println!("MEASURED load1 {:.2}", load[0]);
+    }
+
     /// A program that exits non-zero with the terminal raw crashed, but
     /// nothing says its other settings were not meant: only the output
     /// side is put back.
@@ -1003,5 +1142,93 @@ mod tests {
         s.write(b"/usr/bin/printf 'three\\nfour\\n'\r").unwrap();
         let later = |s: &LocalSession| under(s, "$ three", "four") || stacked(s, "three", "four");
         assert!(pump_until(&mut s, later), "later commands too:\n{}", screen(&s));
+    }
+
+    /// Up to the prompt after a raw-mode program exited non-zero, with
+    /// no look between its end and that prompt: bash's readline saved
+    /// the raw settings and hands them to every command from here, and
+    /// zsh copied them.
+    fn shell_holding_the_raw_settings(id: u64) -> LocalSession {
+        let mut s = shell(id);
+        s.write(b"sh -c 'stty raw -echo; printf x; sleep 0.2; exit 3'\r").unwrap();
+        assert!(
+            pump_until(&mut s, |s| rows(s).iter().any(|r| r.trim_end() == "x")),
+            "the raw-mode program drew:\n{}",
+            screen(&s)
+        );
+        thread::sleep(Duration::from_millis(700));
+        assert!(
+            pump_until(&mut s, |s| s.line_repairs().0 == 1 && at_prompt(s)),
+            "the repair started:\n{}",
+            screen(&s)
+        );
+        s
+    }
+
+    /// A machine too busy for the session to look between Enter and the
+    /// command's exec, and for the shell to take the terminal back when
+    /// the command has ended: the command stops the shell before it
+    /// prints, so its output is read while it is still the foreground
+    /// group and gone. A program that has exited chose nothing.
+    fn a_command_that_ended_before_any_look_does_not_staircase(shell_path: &str, id: u64) {
+        let _env = test_pane_env(shell_path);
+        let mut s = shell_holding_the_raw_settings(id);
+        let pane_shell = s.tty().1;
+        s.enter_stalls(Some(Duration::from_millis(150)));
+        s.write(b"/bin/zsh -c 'kill -STOP $PPID; printf \"three\\nfour\\n\"'\r").unwrap();
+        s.enter_stalls(None);
+        let printed = pump_until(&mut s, |s| rows(s).iter().any(|r| r.trim() == "four"));
+        // SAFETY: the shell of this test's own pane, stopped by the line above.
+        unsafe { libc::kill(pane_shell, libc::SIGCONT) };
+        assert!(printed, "the command printed:\n{}", screen(&s));
+        let under = |s: &LocalSession, first: &str, second: &str| {
+            rows(s).windows(2).any(|w| w[0].trim_end().ends_with(first) && w[1].trim_end() == second)
+        };
+        assert!(
+            under(&s, "$ three", "four") || stacked(&s, "three", "four"),
+            "newline returned the carriage:\n{}",
+            screen(&s)
+        );
+        assert!(pump_until(&mut s, at_prompt), "the prompt came back:\n{}", screen(&s));
+    }
+
+    #[test]
+    fn a_command_that_ended_before_any_look_under_bash_does_not_staircase() {
+        a_command_that_ended_before_any_look_does_not_staircase("/bin/bash", 0xEB);
+    }
+
+    #[test]
+    fn a_command_that_ended_before_any_look_under_zsh_does_not_staircase() {
+        a_command_that_ended_before_any_look_does_not_staircase("/bin/zsh", 0xEE);
+    }
+
+    /// The same two missed looks, and the command is the program that
+    /// failed, started again: it sets raw mode itself, under bash to the
+    /// very settings it was handed. Those are its own, and neither they
+    /// nor what it draws are touched.
+    fn a_raw_program_restarted_before_any_look_keeps_its_raw_mode(shell_path: &str, id: u64) {
+        let _env = test_pane_env(shell_path);
+        let mut s = shell_holding_the_raw_settings(id);
+        s.enter_stalls(Some(Duration::from_millis(150)));
+        s.write(b"sh -c 'stty raw -echo; printf \"UP\\ndown\"; sleep 0.5; exit 3'\r").unwrap();
+        s.enter_stalls(None);
+        assert!(
+            pump_until(&mut s, |s| rows(s).iter().any(|r| r.trim() == "down")),
+            "the program drew:\n{}",
+            screen(&s)
+        );
+        assert_eq!(s.pty_flags().1 & libc::OPOST, 0, "it still has the terminal raw");
+        let stepped = rows(&s).windows(2).any(|w| w[0].trim_end().ends_with("UP") && w[1].starts_with(' ') && w[1].trim() == "down");
+        assert!(stepped, "its line feed moved down and nothing else:\n{}", screen(&s));
+    }
+
+    #[test]
+    fn a_raw_program_restarted_under_bash_before_any_look_keeps_its_raw_mode() {
+        a_raw_program_restarted_before_any_look_keeps_its_raw_mode("/bin/bash", 0xEC);
+    }
+
+    #[test]
+    fn a_raw_program_restarted_under_zsh_before_any_look_keeps_its_raw_mode() {
+        a_raw_program_restarted_before_any_look_keeps_its_raw_mode("/bin/zsh", 0xEF);
     }
 }
