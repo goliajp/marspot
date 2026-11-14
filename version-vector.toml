@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.423"  # a pane's title and mode flags are read only from a region that is that session's
-core    = "0.12.507"  # grid regions per state dir, the end of a flood reaches the disk, and menus are drawn from the tree
+shell   = "0.7.424"  # a refusal is lifted once the feed reads its window lower, plus per-state grid regions
+core    = "0.12.508"  # a model cap with no reading draws no figure, plus menus drawn from the tree
 session = "0.11.346"  # history clusters survive an update, and the snapshot for the next image is written last
