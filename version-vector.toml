@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.363"  # a Fable refusal worded "You've hit your Fable limit" is read
-core    = "0.12.491"  # a run of ASCII that ends inside its row skips the general loop
+shell   = "0.7.364"  # a model cap the usage feed gives no reading for is not a cap with nothing used
+core    = "0.12.492"  # a model cap the usage feed gives no reading for draws no figure
 session = "0.11.331"  # a run of ASCII that ends inside its row skips the general loop

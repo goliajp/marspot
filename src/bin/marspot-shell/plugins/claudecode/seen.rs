@@ -184,8 +184,8 @@ impl Seen {
                 }
             } else if standing || at > models_measured_at {
                 match models.iter_mut().find(|(label, _)| same_model(model, label)) {
-                    Some((_, u)) => *u = u.max(1.0),
-                    None => models.push((model.clone(), 1.0)),
+                    Some((_, u)) => *u = Some(u.map_or(1.0, |u| u.max(1.0))),
+                    None => models.push((model.clone(), Some(1.0))),
                 }
             }
         }
@@ -267,7 +267,7 @@ fn reading(room: &Room, model: &str, window: Window) -> Option<(f64, i64)> {
     };
     if !model.is_empty() {
         let (_, u) = models.iter().find(|(label, _)| same_model(model, label))?;
-        return Some((*u, *models_measured_at));
+        return Some(((*u)?, *models_measured_at));
     }
     let u = if window == Window::FiveHour { *util_5h } else { *util_7d };
     Some((u?, *measured_at))
@@ -303,7 +303,7 @@ mod tests {
             util_5h: Some(0.1),
             util_7d: Some(0.97),
             reset_7d: NOW + 3 * 86400,
-            models: vec![("fable".into(), 0.5)],
+            models: vec![("fable".into(), Some(0.5))],
             models_measured_at: measured_at,
             measured_at,
         }
