@@ -177,6 +177,8 @@ pub(crate) fn settle() {
 /// it has an update to finish), and any shell sees to it that it has
 /// the coalition it is in.
 pub(crate) fn take_coalition(staged: bool) {
+    // one asked for from outside the coalition is the app the user
+    // opened, and registers with its window whatever came of this
     if crate::instance::is_heir() {
         take_coalition_as(if staged { &[(crate::resident::UPDATE_WAITING_ENV, "1")] } else { &[] });
     }
@@ -221,11 +223,20 @@ pub(crate) fn ls_refresh_main() -> ! {
 /// coalition is nobody's: some tens of milliseconds, which a program
 /// registering from a pane in that moment does win.  Nor is anything
 /// done here about a coalition listed under another program's record.
-pub(crate) fn take_coalition_as(extra: &[(&str, &str)]) {
-    if !GIVEN.load(std::sync::atomic::Ordering::Acquire) && register_in_coalition().is_none() {
-        return;
+///
+/// Returns false when it did not register, because a dead record of the
+/// app has the coalition and LaunchServices would not start the app to
+/// take it over: the caller is then not to register either.
+pub(crate) fn take_coalition_as(extra: &[(&str, &str)]) -> bool {
+    if !GIVEN.load(std::sync::atomic::Ordering::Acquire) {
+        match register_in_coalition() {
+            None => return true,
+            Some(Took::NotCleared) => return false,
+            Some(Took::Given | Took::Refused) => {}
+        }
     }
     go_on(TRIES, extra);
+    true
 }
 
 /// Set when this process registered before it took the instance lock,
@@ -253,8 +264,8 @@ pub(crate) fn take_coalition_or_exit() {
     match register_in_coalition() {
         // not registered: it goes on as the shell it is, as before
         None => {}
-        Some(true) => GIVEN.store(true, std::sync::atomic::Ordering::Release),
-        Some(false) => {
+        Some(Took::Given) => GIVEN.store(true, std::sync::atomic::Ordering::Release),
+        Some(Took::Refused | Took::NotCleared) => {
             lx_event!("SHELL_COALITION_REFUSED", "started to be given the sessions' coalition, and was not: leaving the shell that asked in place");
             let _ = std::fs::write(marspot_term::owner::heir_path(), REFUSED);
             // a session takes this exit, with the request still on
@@ -287,11 +298,25 @@ fn given(coalition: u64, me: i32) -> bool {
     }
 }
 
+/// How registering in the sessions' coalition came out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Took {
+    Given,
+    Refused,
+    /// A dead record of the app has the coalition and could not be
+    /// taken over: this process did not register.
+    NotCleared,
+}
+
 /// Register this process in the sessions' coalition, with the dead
 /// records of the app out of the way first, and say whether it was
 /// given the coalition.  `None` when it has no bundle or its coalition
 /// is unknown, and nothing was done.
-fn register_in_coalition() -> Option<bool> {
+///
+/// A start of the app that failed is asked for once more.  When the
+/// second fails too, this process does not register: doing so would
+/// take the dead record over and leave the coalition nobody's.
+fn register_in_coalition() -> Option<Took> {
     let exe = ownership::successor_exe();
     let (Some(bundle), Some(id), Some(coalition)) =
         (ownership::bundle_of(&exe), bundle_id(), platform::coalition_of(std::process::id() as i32))
@@ -307,8 +332,21 @@ fn register_in_coalition() -> Option<bool> {
     let mut instances = 0;
     while ls_records::holder_of(&records, coalition, me, &id) == Holder::OurDead && instances < TRIES {
         let alone = ls_records::our_dead(&records, &id) == 1;
-        replace_dead_record(bundle, &id);
+        let mut started = replace_dead_record(bundle, &id);
         instances += 1;
+        if !started {
+            started = replace_dead_record(bundle, &id);
+            instances += 1;
+        }
+        if !started {
+            lx_warn!(
+                "SHELL_COALITION_NOT_CLEARED",
+                "LaunchServices would not start the app once more to take its dead record over; not registering here",
+                coalition = coalition,
+                instances = instances
+            );
+            return Some(Took::NotCleared);
+        }
         // the only dead record there was is the one that went: the
         // time a look would take is time the coalition is nobody's
         if alone {
@@ -333,7 +371,7 @@ fn register_in_coalition() -> Option<bool> {
         // from the last look or instance to this process being registered
         registered_after_ms = nobodys.as_millis()
     );
-    Some(given)
+    Some(if given { Took::Given } else { Took::Refused })
 }
 
 /// Whether the bundle's shell is the build this image is: a shell
@@ -345,27 +383,56 @@ pub(crate) fn bundle_shell_is_this_build() -> bool {
 }
 
 /// Have LaunchServices start the bundle once more, and return when
-/// that instance has registered and exited.  An instance that exits
-/// without registering changes nothing.
-fn replace_dead_record(bundle: &Path, id: &str) {
+/// that instance has registered and exited; whether it was started.
+/// An instance that exits without registering changes nothing.
+///
+/// Asked through `NSWorkspace` by this process, not through `open`:
+/// `open` registers itself with LaunchServices while it works (measured
+/// on 27.2.1: 50 runs of 50), and started here it is in the sessions'
+/// coalition, so at a moment when no record has the coalition it is
+/// given it and keeps it on a dead record.  The call made here leaves
+/// this process unregistered (measured: 20 of 20).
+fn replace_dead_record(bundle: &Path, id: &str) -> bool {
+    use objc2_app_kit::{NSRunningApplication, NSWorkspace, NSWorkspaceOpenConfiguration};
+    use objc2_foundation::{NSArray, NSError, NSString, NSURL};
     let begun = std::time::Instant::now();
-    let status = std::process::Command::new("/usr/bin/open")
-        .args(["-n", "-g", "-j", "-W"])
-        .arg(bundle)
-        .args(["--args", LS_REFRESH_ARG])
-        .stdin(std::process::Stdio::null())
-        .status();
+    let Some(path) = bundle.to_str() else { return false };
+    let config = NSWorkspaceOpenConfiguration::configuration();
+    config.setCreatesNewApplicationInstance(true);
+    config.setActivates(false);
+    config.setHides(true);
+    config.setAddsToRecentItems(false);
+    config.setArguments(&NSArray::from_retained_slice(&[NSString::from_str(LS_REFRESH_ARG)]));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let done = block2::RcBlock::new(move |app: *mut NSRunningApplication, _err: *mut NSError| {
+        // SAFETY: the handler is given a running application or nil
+        let _ = tx.send(unsafe { app.as_ref() }.map(|app| app.processIdentifier()));
+    });
+    NSWorkspace::sharedWorkspace().openApplicationAtURL_configuration_completionHandler(
+        &NSURL::fileURLWithPath(&NSString::from_str(path)),
+        &config,
+        Some(&done),
+    );
+    let instance = rx.recv_timeout(LAUNCH_ANSWER_WITHIN).ok().flatten();
+    if let Some(pid) = instance {
+        crate::reclaim::wait_for_exit(pid);
+    }
     let started = begun.elapsed();
     let gone = records_of_the_dead_are_gone(id);
     lx_event!(
         "SHELL_RESIDENT_RECORD",
         "had the app started once more so that a dead record of it is taken over",
-        ok = status.is_ok_and(|s| s.success()),
+        ok = instance.is_some(),
+        instance = instance.unwrap_or(0),
         ms = started.as_millis(),
         dead_records_gone = gone,
         waited_ms = (begun.elapsed() - started).as_millis()
     );
+    instance.is_some()
 }
+
+/// How long LaunchServices is given to say that it started the app.
+const LAUNCH_ANSWER_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Wait, for two seconds at most, until LaunchServices lists no
 /// running instance of this app whose process no longer exists.
