@@ -22,7 +22,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
-LOG=/tmp/marspot-test-shell-core.log
+LOG="$(dev_run_log test-shell-core)"
 # The handshake is logged by logx into marspot.log, not to the shell's
 # stdout, and the protocol has been v=2 since the double-buffer
 # IOSurface work.  This test grepped stdout for "HelloAck v=1" and so

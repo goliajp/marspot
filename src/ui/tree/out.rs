@@ -10,14 +10,21 @@
 use super::{exact_pt, preset, tone};
 use crate::ui::components::panel_palette as palette;
 use crate::ui::core::ViewPainter;
+use crate::ui::theme::spec::{self, focus};
 use golia_ui_core::{Ink, PaintOut, Rect, TextFont, WidgetState};
 use marspot_term::layout::Rect as PxRect;
 
 /// Clips nested deeper than this are not something a panel has.
 const CLIP_DEPTH: usize = 8;
 
-pub struct TreeOut<'p, 'a> {
+/// Draws the nodes a panel draws itself: the tag and data of one of
+/// them, and the painter to draw it with.
+pub type Custom<'c> = dyn FnMut(&mut ViewPainter<'_>, u32, [u32; 2]) + 'c;
+
+pub struct TreeOut<'p, 'a, 'c> {
     p: &'p mut ViewPainter<'a>,
+    /// What draws a node tagged `preset::CUSTOM` or above.
+    custom: Option<&'p mut Custom<'c>>,
     /// How long the three buffers were when this output was made:
     /// what `reset` takes them back to.
     start: (usize, usize, usize),
@@ -29,10 +36,15 @@ fn px_rect(r: Rect) -> PxRect {
     PxRect { x: r.x, y_top: r.y, w: r.w, h: r.h }
 }
 
-impl<'p, 'a> TreeOut<'p, 'a> {
+impl<'p, 'a, 'c> TreeOut<'p, 'a, 'c> {
     pub fn new(p: &'p mut ViewPainter<'a>) -> Self {
         let start = (p.cells.len(), p.glyphs.len(), p.ui_rects.len());
-        Self { p, start, clips: [Rect::default(); CLIP_DEPTH], depth: 0 }
+        Self { p, custom: None, start, clips: [Rect::default(); CLIP_DEPTH], depth: 0 }
+    }
+
+    /// An output for a tree with nodes its panel draws itself.
+    pub fn with_custom(p: &'p mut ViewPainter<'a>, custom: &'p mut Custom<'c>) -> Self {
+        Self { custom: Some(custom), ..Self::new(p) }
     }
 
     fn clip(&self) -> Option<Rect> {
@@ -45,7 +57,7 @@ impl<'p, 'a> TreeOut<'p, 'a> {
     }
 }
 
-impl PaintOut for TreeOut<'_, '_> {
+impl PaintOut for TreeOut<'_, '_, '_> {
     fn reset(&mut self) {
         self.p.cells.truncate(self.start.0);
         self.p.glyphs.truncate(self.start.1);
@@ -86,14 +98,24 @@ impl PaintOut for TreeOut<'_, '_> {
     }
 
     fn leaf(&mut self, tag: u32, data: [u32; 2], label: &str, rect: Rect, state: WidgetState) {
-        if self.shows(&rect) {
+        if !self.shows(&rect) {
+            return;
+        }
+        if tag < preset::CUSTOM {
             preset::paint(self.p, tag, data, label, px_rect(rect), state);
+        } else if let Some(custom) = self.custom.as_mut() {
+            custom(self.p, tag, data);
         }
     }
 
-    // the ring's width, offset and colour are not in the spec yet;
-    // until they are, focus is not drawn
-    fn focus_ring(&mut self, _rect: Rect, _radius: f64) {}
+    // a stroke round the widget, clear of it, with nothing inside
+    fn focus_ring(&mut self, rect: Rect, radius: f64) {
+        let grow = spec::px(focus::RING_OUTSET + focus::RING_W);
+        let r = spec::snap_rect(px_rect(rect));
+        let ring = PxRect { x: r.x - grow, y_top: r.y_top - grow, w: r.w + 2.0 * grow, h: r.h + 2.0 * grow };
+        let stroke = (palette::accent(), spec::px(focus::RING_W) as f32);
+        self.p.fill_rounded_rect(ring, palette::none(), (radius + grow) as f32, stroke);
+    }
 
     fn push_clip(&mut self, rect: Rect) {
         self.clips[self.depth] = self.clip().map_or(rect, |c| c.intersect(&rect));

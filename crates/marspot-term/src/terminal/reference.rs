@@ -29,6 +29,9 @@ impl Terminal {
         if a.cursor() != b.cursor() {
             return Some(format!("cursor {:?} / {:?}", a.cursor(), b.cursor()));
         }
+        if !a.row_marks_hold() || !b.row_marks_hold() {
+            return Some("a row has a written cell past its bound".into());
+        }
         if self.pending_wrap != other.pending_wrap {
             return Some("deferred wrap".into());
         }

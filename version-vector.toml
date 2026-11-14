@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.328"  # a week the usage feed has no reading for is not a week with nothing used
-core    = "0.12.358"  # a week the usage feed has no reading for has a row with no figure
-session = "0.11.262"  # a flood the loop carried slower is offered again half as often each time
+shell   = "0.7.361"  # the shell that stays after a quit keeps no release poll, no CLI installer, and no process table
+core    = "0.12.491"  # a run of ASCII that ends inside its row skips the general loop
+session = "0.11.335"  # a pane flooding alone is read by the thread that parses, while that is the faster way

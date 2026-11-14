@@ -21,17 +21,29 @@
 # matched on the paths it runs from.
 #
 # The comparison is only fair if both sides are idle in the same sense,
-# so this refuses rather than guesses:
-#   - the app is not running                    -> exit 2
-#   - fewer shells than `--sessions` asks for   -> exit 3
-#   - the process set changed during the window -> exit 4
-#   - the window did not actually elapse        -> exit 5
-#   - the host was not idle during the window   -> exit 6 (the number is
-#     written anyway: it is still valid for an A/B on one machine, and
-#     only the caller knows which it is doing)
+# so this refuses rather than guesses.  Exit codes, one meaning each,
+# the same four as bin/_idle_wakeups.py and bin/measure-idle-marspot.sh:
+#   0  measured
+#   1  measured, and over a budget -- never from here: this script is
+#      given no budget
+#   2  the instrument failed, there is no reading: bad usage, the app
+#      is not running, fewer shells than `--sessions` asks for, the
+#      process set changed during the window, a pid was reused, the
+#      window did not actually elapse
+#   3  not measured: the host was busy.  The number is written anyway,
+#      with the load beside it -- it is still good for an A/B on one
+#      machine -- but it is not what the app costs when idle, and a
+#      caller must read 3 as neither a pass nor a regression
 # A changed set is the one that matters: a pane opening or a helper
 # dying mid-window makes the CPU delta a number with no meaning, and
 # it is invisible in the result.
+#
+# Busy is load1 over IDLE_BUSY_LOAD (default 5.0, the line
+# bin/bench-remote.sh draws for a host that has company) at any sample
+# of the window.  The line used to be 1.0, which the runner is over
+# whenever anything waits on its lock: the windows taken there under
+# the exclusive lock on 2026-11-12 read load1 1.0 to 3.2, and nearly
+# every one of them would have been refused.
 #
 # Usage:
 #   bin/measure-idle.sh --app marspot --sessions 9 [--window 60]
@@ -71,7 +83,7 @@ app_pattern() {
 
 KNOWN="marspot marspot-dev iterm2 terminal warp ghostty alacritty kitty"
 
-die() { echo "measure-idle: $*" >&2; exit "${2:-1}"; }
+die() { echo "measure-idle: $*" >&2; exit 2; }
 
 while (( $# )); do
   case "$1" in
@@ -81,7 +93,7 @@ while (( $# )); do
     --focused)  FOCUS="focused"; shift ;;
     --unfocused) FOCUS="unfocused"; shift ;;
     --list)     echo "$KNOWN" | tr ' ' '\n'; exit 0 ;;
-    -h|--help)  sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)  sed -n '2,56p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)          die "unknown arg: $1" ;;
   esac
 done
@@ -139,11 +151,11 @@ count_shells() {
 
 mkdir -p "$RESULTS_DIR"
 FIRST="$(sample)"
-[[ -n "$FIRST" ]] || die "no processes match $APP -- is it running?" 2
+[[ -n "$FIRST" ]] || die "no processes match $APP -- is it running?"
 
 SHELLS="$(count_shells)"
 if (( SHELLS < SESSIONS )); then
-  die "found $SHELLS shell(s) under $APP but --sessions says $SESSIONS; open the panes first" 3
+  die "found $SHELLS shell(s) under $APP but --sessions says $SESSIONS; open the panes first"
 fi
 
 echo "==> $APP: ${SESSIONS} pane(s), $(echo "$FIRST" | wc -l | tr -d ' ') process(es), idling ${WINDOW}s ($FOCUS)"
@@ -182,18 +194,19 @@ ELAPSED=$(python3 -c "print(f'{$T1 - $T0:.3f}')")
 # can make `sleep 60` take minutes, and dividing by 60 would then
 # under-report the cost by that factor.
 python3 -c "import sys; sys.exit(0 if $ELAPSED >= $WINDOW * 0.95 else 1)" \
-  || die "window was ${ELAPSED}s, expected ~${WINDOW}s -- the host was not idle enough to measure" 5
+  || die "window was ${ELAPSED}s, expected ~${WINDOW}s -- the host was not idle enough to measure"
 
 PIDS_BEFORE=$(echo "$FIRST" | awk '{print $1}' | sort | paste -sd, -)
 PIDS_AFTER=$(echo "$SECOND" | awk '{print $1}' | sort | paste -sd, -)
 [[ "$PIDS_BEFORE" == "$PIDS_AFTER" ]] \
-  || die "the process set changed during the window (before: $PIDS_BEFORE / after: $PIDS_AFTER) -- the CPU delta would be meaningless" 4
+  || die "the process set changed during the window (before: $PIDS_BEFORE / after: $PIDS_AFTER) -- the CPU delta would be meaningless"
 
 OUT="$RESULTS_DIR/idle-${APP}-${SESSIONS}-${FOCUS}.json"
-python3 - "$APP" "$SESSIONS" "$FOCUS" "$ELAPSED" "$OUT" "$LOADS" <<PY
+python3 - "$APP" "$SESSIONS" "$FOCUS" "$ELAPSED" "$OUT" "${IDLE_BUSY_LOAD:-5.0}" "$LOADS" <<PY
 import json, sys
 app, sessions, focus, elapsed, out = sys.argv[1], int(sys.argv[2]), sys.argv[3], float(sys.argv[4]), sys.argv[5]
-loads = [float(x) for x in sys.argv[6].split()] if len(sys.argv) > 6 and sys.argv[6].strip() else []
+busy_load = float(sys.argv[6])
+loads = [float(x) for x in sys.argv[7].split()] if len(sys.argv) > 7 and sys.argv[7].strip() else []
 
 def parse(block):
     rows = {}
@@ -215,7 +228,7 @@ for pid in sorted(after):
     # the sample is not of the same process.
     if d < 0:
         print(f"measure-idle: pid {pid} reported less CPU than before -- pid reuse", file=sys.stderr)
-        raise SystemExit(4)
+        raise SystemExit(2)
     per.append({"pid": pid, "cpu_secs": round(d, 2), "rss_kib": after[pid][1]})
 
 total_cpu = round(sum(p["cpu_secs"] for p in per), 2)
@@ -242,15 +255,20 @@ with open(out, "w") as f:
 print(f"    CPU {doc['cpu_percent_of_one_core']}% of one core over {doc['window_secs']}s"
       f"  |  RSS {total_rss // 1024} MiB total, {doc['rss_kib_per_session'] and round(doc['rss_kib_per_session']/1024, 1)} MiB per pane")
 print(f"    {out}")
-# A publishable idle number needs an idle host.  Said rather than
-# enforced: the figure is still useful for an A/B on one machine, and
-# the caller is the one who knows which it is doing.
-if loads and max(loads) > 1.0:
+# An idle number needs an idle host.  The figure is written either way:
+# it is still useful for an A/B on one machine.
+if loads and max(loads) > busy_load:
     print(
-        f"    NOT PUBLISHABLE: host load1 peaked at {max(loads)} during the window"
-        f" (first {loads[0]}, last {loads[-1]}).  Idle cost measured next to"
-        f" someone else's work is not idle cost.",
+        f"    NOT MEASURED: host load1 peaked at {max(loads)} during the window"
+        f" (first {loads[0]}, last {loads[-1]}; busy over {busy_load}).  Idle cost"
+        f" measured next to someone else's work is not idle cost.",
         file=sys.stderr,
     )
-    raise SystemExit(6)
+    raise SystemExit(3)
 PY
+rc=$?
+# anything else the summary step left with is a crash of the instrument
+case $rc in
+  0|3) exit $rc ;;
+  *) exit 2 ;;
+esac

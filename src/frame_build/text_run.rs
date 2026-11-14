@@ -199,15 +199,14 @@ pub(crate) fn push_text_run_ui_sized(
     atlas: &mut GlyphAtlas,
     glyphs: &mut Vec<GlyphInstance>,
 ) {
-    let shaped = font.shape_ui_weighted_opts_at_size(
-        text, weight, crate::font_shape::ShapeOptions::default(), size_pt,
-    );
-    if shaped.is_empty() {
-        return;
-    }
+    // read where the cache keeps it: a run drawn every frame is not
+    // copied out of the cache every frame
+    let opts = crate::font_shape::ShapeOptions::default();
+    let Some(at) = font.shape_ui_kept(text, weight, opts, size_pt) else { return };
+    let font = &*font;
     let baseline_y_q = baseline_y.round();
     let x_start_floor = x_start.floor() as i32;
-    for sg in shaped {
+    for sg in font.shaped_ui(text, at, opts) {
         let key = GlyphKey::new(
             sg.font_id,
             sg.glyph_id,
