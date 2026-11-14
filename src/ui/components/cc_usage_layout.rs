@@ -13,7 +13,7 @@
 
 use marspot_term::layout::Rect;
 
-use crate::ui::components::cc_usage_modal::{fit_ellipsis, metric, CcUsageAccountRender};
+use crate::ui::components::cc_usage_modal::{cut_to_columns, metric, CcUsageAccountRender};
 use crate::ui::components::panel_chrome;
 use crate::ui::theme::spec::{self, control, space, table};
 
@@ -60,7 +60,7 @@ impl Shape {
             accounts: accounts.len(),
             window_rows: accounts.iter().map(|a| a.windows.len()).max().unwrap_or(0),
             name_cols: accounts.iter().map(|a| a.name.chars().count()).max().unwrap_or(0),
-            tag_cols: windows().map(|w| w.tag().chars().count()).max().unwrap_or(0),
+            tag_cols: windows().map(|w| w.tag_cols()).max().unwrap_or(0),
         }
     }
 }
@@ -141,13 +141,20 @@ pub struct UsageLayout {
 
 /// The parts of `content` for accounts of `shape`.
 pub fn layout(content: Rect, cell: Cell, shape: &Shape) -> UsageLayout {
+    let (cards, timeline) = cards_and_timeline(content, cell, shape);
+    UsageLayout { heading_top: content.y_top, cards: cards.collect(), timeline }
+}
+
+/// What [`layout`] finds, with the cards one at a time and no list
+/// made of them.
+pub fn cards_and_timeline(content: Rect, cell: Cell, shape: &Shape) -> (impl Iterator<Item = Rect>, Option<Timeline>) {
     let bottom = content.y_top + content.h + SLACK;
     let gap = spec::px(space::CARD_TO_CARD);
     let cols = card_columns(content.w, shape.accounts);
     let card_w = (content.w - gap * (cols as f64 - 1.0)) / cols as f64;
     let card_h = card_height(cell.h, shape.window_rows);
     let cards_top = content.y_top + panel_chrome::heading_height();
-    let card_at = |i: usize| Rect {
+    let card_at = move |i: usize| Rect {
         x: content.x + (i % cols) as f64 * (card_w + gap),
         y_top: cards_top + (i / cols) as f64 * (card_h + gap),
         w: card_w,
@@ -156,13 +163,10 @@ pub fn layout(content: Rect, cell: Cell, shape: &Shape) -> UsageLayout {
     let card_rows = shape.accounts.max(1).div_ceil(cols) as f64;
     let cards_bottom = cards_top + card_rows * card_h + (card_rows - 1.0) * gap;
     let timeline_top = cards_bottom + spec::px(space::CARD_TO_HEADING);
-    UsageLayout {
-        heading_top: content.y_top,
-        // Nothing clips the content, so a card that would cross the
-        // frame's bottom edge is left out whole.
-        cards: (0..shape.accounts).map(card_at).filter(|c| c.y_top + c.h <= bottom).collect(),
-        timeline: Timeline::new(content, timeline_top, cell, shape),
-    }
+    // Nothing clips the content, so a card that would cross the
+    // frame's bottom edge is left out whole.
+    let cards = (0..shape.accounts).map(card_at).filter(move |c| c.y_top + c.h <= bottom);
+    (cards, Timeline::new(content, timeline_top, cell, shape))
 }
 
 /// The inside of one account card.
@@ -346,9 +350,18 @@ impl Timeline {
     /// Where the tag of a bar ending at `bar_end` starts, and as much
     /// of it as fits before the card's inner edge — nothing, when that
     /// is too little to read.
+    #[cfg(test)]
     pub fn tag(&self, tag: &str, bar_end: f64, cell_w: f64) -> (f64, String) {
+        let mut shown = tag.to_string();
+        (self.cut_tag(&mut shown, bar_end, cell_w), shown)
+    }
+
+    /// [`Self::tag`] for a tag held in `tag`, which is cut where it
+    /// is; returns where it starts.
+    pub fn cut_tag(&self, tag: &mut String, bar_end: f64, cell_w: f64) -> f64 {
         let x = bar_end + metric::BAR_GAP_CELLS * cell_w;
-        (x, fit_ellipsis(tag, (self.right - x) / cell_w))
+        cut_to_columns(tag, (self.right - x) / cell_w);
+        x
     }
 
     /// Left edge of a `w` wide label centred on `x`, or `None` when it

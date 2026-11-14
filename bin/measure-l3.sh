@@ -67,7 +67,7 @@ mkdir -p "$RESULTS_DIR"
 fail() { echo "measure-l3: $*" >&2; exit 1; }
 
 SESSIONS=1
-SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji)
+SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji cat-styled cat-highlighted)
 PICKED=()
 while (( $# )); do
   case "$1" in
