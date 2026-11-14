@@ -63,10 +63,50 @@ pub(in crate::plugins) struct Seen {
     /// Per profile, the newest login failure a pane met there.
     pub logged_out: HashMap<u8, i64>,
     /// Per profile and the model a refusal named (empty: the account's
-    /// own windows), the newest refusal a pane met there and the window
-    /// it was about. Bounded by profiles times models.
-    pub out: HashMap<(u8, String), (i64, Window)>,
+    /// own windows), the newest refusal a pane met there. Bounded by
+    /// profiles times models.
+    pub out: HashMap<(u8, String), Out>,
     dirty: bool,
+}
+
+/// The newest refusal one account gave for one model, and what the feed
+/// has read of the window it was about since.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in crate::plugins) struct Out {
+    pub at: i64,
+    pub window: Window,
+    /// The highest reading of that window measured after the refusal,
+    /// and when it was measured.
+    pub peak: Option<(f64, i64)>,
+    /// A later measurement read less than `peak`. What is used of a
+    /// window only grows until it renews, so the one that refused has
+    /// ended, whatever end the feed gives for it.
+    pub renewed: bool,
+}
+
+impl Out {
+    pub(in crate::plugins) fn new(at: i64, window: Window) -> Self {
+        Self { at, window, peak: None, renewed: false }
+    }
+
+    /// Take in a reading of the window measured at `t`; true when that
+    /// changed what is known.
+    fn read(&mut self, util: f64, t: i64) -> bool {
+        if t <= self.at || self.renewed {
+            return false;
+        }
+        match self.peak {
+            Some((peak, peak_at)) if t > peak_at && util < peak => {
+                self.renewed = true;
+                true
+            }
+            Some((peak, _)) if util <= peak => false,
+            _ => {
+                self.peak = Some((util, t));
+                true
+            }
+        }
+    }
 }
 
 impl Seen {
@@ -79,10 +119,10 @@ impl Seen {
             *at = (*at).max(r.at);
             news
         } else {
-            let e = self.out.entry((profile, r.model.clone())).or_insert((i64::MIN, r.window));
-            let news = r.at > e.0;
+            let e = self.out.entry((profile, r.model.clone())).or_insert(Out::new(i64::MIN, r.window));
+            let news = r.at > e.at;
             if news {
-                *e = (r.at, r.window);
+                *e = Out::new(r.at, r.window);
             }
             news
         };
@@ -102,14 +142,32 @@ impl Seen {
     /// Where the feed gives no end for the window, the refusal stands
     /// as it used to: until the account is measured again.
     ///
+    /// Nor does it stand once the feed has read that window lower than
+    /// it read it earlier, both after the refusal: the window has
+    /// renewed. On 2026-11-12 P5 and P8 refused Fable; the feed went on
+    /// to read their Fable caps at 0.45 and 0.42 inside the weeks it
+    /// gave for them, and a Fable pane put on P8 by hand was answered.
+    /// Held to the weeks' ends, both stood until 11-18 and 11-19, and on
+    /// 11-13 every Fable pane on a spent P4 was left there.
+    ///
     /// The window the refusal names is set full: the account's when it
     /// names no model, that model's cap when it does, so a Fable
     /// refusal shuts out Fable panes only. A failed login is different
     /// in kind -- logging in again is all it takes -- and a newer
     /// measurement is still believed there.
-    pub(super) fn mark(&self, rooms: &mut [(u8, Room)], resets: &[(u8, Resets)], now: i64) {
+    pub(super) fn mark(&mut self, rooms: &mut [(u8, Room)], resets: &[(u8, Resets)], now: i64) {
         mark_logged_out(rooms, &self.logged_out);
-        for ((p, model), (at, window)) in &self.out {
+        // what the feed reads, before anything below sets a window full
+        for ((p, model), out) in self.out.iter_mut() {
+            if let Some((util, t)) = rooms.iter().find(|(n, _)| n == p).and_then(|(_, room)| reading(room, model, out.window)) {
+                self.dirty |= out.read(util, t);
+            }
+        }
+        for ((p, model), out) in &self.out {
+            let Out { at, window, renewed, .. } = out;
+            if *renewed {
+                continue;
+            }
             let Some((_, Room::Known { util_5h, models, models_measured_at, measured_at, .. })) =
                 rooms.iter_mut().find(|(n, _)| n == p)
             else {
@@ -137,9 +195,9 @@ impl Seen {
     /// caller whose accounts are measured seldom or never: a five-hour
     /// end the feed gave, since passed, ends the refusal it followed.
     pub(in crate::plugins) fn shut(&self, profile: u8, resets: &Resets, now: i64) -> bool {
-        self.out.get(&(profile, String::new())).is_some_and(|(at, window)| {
-            let renewed = *window == Window::FiveHour && resets.five_hour > *at && resets.five_hour <= now;
-            !renewed && stands(*at, *window, "", resets, now)
+        self.out.get(&(profile, String::new())).is_some_and(|&Out { at, window, .. }| {
+            let renewed = window == Window::FiveHour && resets.five_hour > at && resets.five_hour <= now;
+            !renewed && stands(at, window, "", resets, now)
         })
     }
 
@@ -153,9 +211,14 @@ impl Seen {
             .logged_out
             .iter()
             .map(|(p, at)| format!("login\t{p}\t{at}\n"))
-            .chain(self.out.iter().map(|((p, model), (at, w))| {
-                let w = if *w == Window::FiveHour { "5h" } else { "week" };
-                format!("out\t{p}\t{at}\t{w}\t{model}\n")
+            .chain(self.out.iter().map(|((p, model), out)| {
+                let w = if out.window == Window::FiveHour { "5h" } else { "week" };
+                let at = out.at;
+                // appended, so a reader that knows only the first five fields still reads them
+                let peak = out
+                    .peak
+                    .map_or(String::new(), |(u, t)| format!("\t{u}\t{t}\t{}", u8::from(out.renewed)));
+                format!("out\t{p}\t{at}\t{w}\t{model}{peak}\n")
             }))
             .collect();
         lines.sort();
@@ -179,13 +242,35 @@ impl Seen {
                 }
                 ("out", Some(w), Some(model)) => {
                     let w = if *w == "5h" { Window::FiveHour } else { Window::Week };
-                    seen.out.insert((p, model.to_string()), (at, w));
+                    let mut out = Out::new(at, w);
+                    if let (Some(u), Some(t)) =
+                        (f.get(5).and_then(|s| s.parse::<f64>().ok()), f.get(6).and_then(|s| s.parse::<i64>().ok()))
+                    {
+                        out.peak = Some((u, t));
+                        out.renewed = f.get(7) == Some(&"1");
+                    }
+                    seen.out.insert((p, model.to_string()), out);
                 }
                 _ => {}
             }
         }
         seen
     }
+}
+
+/// What the feed reads of the window a refusal was about, and when it
+/// was measured: the model's cap when the refusal names one, else the
+/// account's window.
+fn reading(room: &Room, model: &str, window: Window) -> Option<(f64, i64)> {
+    let Room::Known { util_5h, util_7d, models, models_measured_at, measured_at, .. } = room else {
+        return None;
+    };
+    if !model.is_empty() {
+        let (_, u) = models.iter().find(|(label, _)| same_model(model, label))?;
+        return Some((*u, *models_measured_at));
+    }
+    let u = if window == Window::FiveHour { *util_5h } else { *util_7d };
+    Some((u?, *measured_at))
 }
 
 /// Is the window a refusal at `at` was about still the current one?
@@ -312,5 +397,22 @@ mod tests {
         let back = Seen::decode(&format!("{text}garbage\nout\tx\ty\n"));
         assert_eq!(back.out, seen.out);
         assert_eq!(back.logged_out, seen.logged_out);
+        // a line written before readings were kept
+        let old = Seen::decode("out\t8\t1794457992\tweek\tfable\n");
+        assert_eq!(old.out[&(8, "fable".to_string())], Out::new(1_794_457_992, Window::Week));
+    }
+
+    /// Only a fall between two readings taken after the refusal, in the
+    /// order they were measured, is a renewal.
+    #[test]
+    fn a_lower_reading_counts_only_after_a_higher_one_measured_before_it() {
+        let mut out = Out::new(100, Window::Week);
+        assert!(!out.read(0.2, 90), "measured before the refusal");
+        assert!(out.read(1.0, 200));
+        assert!(!out.read(0.62, 150), "carried over from an earlier sample");
+        assert!(!out.read(1.0, 300), "the same again");
+        assert!(!out.renewed);
+        assert!(out.read(0.1, 400));
+        assert!(out.renewed);
     }
 }
