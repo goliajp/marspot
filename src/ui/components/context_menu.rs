@@ -1,30 +1,10 @@
-//! `ContextMenu` — right-click menu component.  Geometry-only here
-//! (rect layout + hit-test); the caller in `main.rs` owns the items
-//! list, the action dispatch, and the open/close state.  Render goes
-//! through `context_menu_paint`.
+//! The context menu's rows and where it stands.
 //!
-//! Why a separate component (and not reuse `LayoutModal`-style modal
-//! frame): a context menu has different shape rules than a modal —
-//! sized to its longest item, anchored at the cursor (not centred),
-//! flips to the other side of the cursor when it would overflow the
-//! window, no title bar / close [×] chrome.  Sharing the
-//! `ModalFrame` would make every rule below conditional.
-//!
-//! Wire shape:
-//!   1. Caller computes the click region (Pane / Sidebar / etc.) and
-//!      builds a `Vec<MenuItem>` for it.
-//!   2. Caller calls `ContextMenu::layout(window_w, window_h, scale,
-//!      anchor_x, anchor_y, &items)` to get a `ContextMenu` struct
-//!      with `frame`, `items[i].rect`, etc.  Layout's only side-effect
-//!      is anchor flipping (e.g. cursor too close to right edge
-//!      flips the menu to the left of the cursor).
-//!   3. Caller publishes the menu state into `Marspot::context_menu`.
-//!   4. `render_metal` reads that state, walks `ContextMenu::layout`
-//!      again to get rects, then paints chrome + items via
-//!      `ViewPainter` (1 px **inside** border per F3+3.8 SDF shader
-//!      change, opaque BG per `feedback_overlays_must_be_opaque`).
-//!   5. mouse_down / mouse_moved / key_event each consult `hit_test`
-//!      and emit Close / Item dispatches.
+//! A menu is as wide as its longest row asks, opens down and to the
+//! right of the point it was asked for, flips to the other side of
+//! that point on an axis where it would leave the window, and never
+//! covers the title strip.  What is in it and how it is drawn are
+//! `context_menu_view`'s.
 
 use marspot_term::layout::Rect;
 
@@ -75,9 +55,8 @@ impl MenuItem {
     }
 }
 
-/// Hit-test result.  Caller uses `Item(idx)` to fire the row's
-/// action (skipping disabled / divider rows — `hit_test` already
-/// returns `Frame` for those).
+/// What a press lands on: a row that acts, the menu where nothing acts
+/// (a divider, a disabled row, its padding), or the window outside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextMenuHit {
     Item(usize),
@@ -85,11 +64,11 @@ pub enum ContextMenuHit {
     Outside,
 }
 
+/// The menu's frame and each row's rectangle, worked out by plain
+/// arithmetic: what the tree's layout is held to.  Nothing draws or
+/// hit-tests from it.
 pub struct ContextMenu {
     pub frame: Rect,
-    /// Per-row rect (length == items.len()).  Disabled / divider
-    /// rows still have a rect so the caller can paint them; only
-    /// `hit_test` skips them.
     pub item_rects: Vec<Rect>,
 }
 
@@ -153,123 +132,95 @@ impl ContextMenu {
         top_obstruction: f64,
         items: &[MenuItem],
     ) -> Self {
-        let row_h = ROW_H_LOGICAL * scale;
-        let divider_h = DIVIDER_H_LOGICAL * scale;
-        let side_pad = SIDE_PAD_LOGICAL * scale;
+        let frame = frame_of(window_w, window_h, scale, anchor_x, anchor_y, top_obstruction, items);
         let top_pad = TOP_PAD_LOGICAL * scale;
-        let bot_pad = BOT_PAD_LOGICAL * scale;
-        let anchor_offset = ANCHOR_OFFSET_LOGICAL * scale;
-        let min_w = MENU_MIN_W_LOGICAL * scale;
-        let max_w = window_w.max(0.0).min(MENU_MAX_W_LOGICAL * scale);
-
-        // a row is as wide as its label, its hint, and the padding
-        // between and around them; the menu, as its widest row
-        let ch_w = label_ch_w_phys();
-        let text_w = |s: &str| crate::ui::core::text_fit::cells(s) as f64 * ch_w;
-        let mut widest = 0.0f64;
         let mut rows_h = 0.0;
-        // each row's top below the menu's, and its height
-        let mut rows: Vec<(f64, f64)> = Vec::with_capacity(items.len());
-        for it in items {
-            let h = if it.divider {
-                divider_h
-            } else {
-                let mut text = text_w(&it.label);
-                if !it.shortcut_hint.is_empty() {
-                    text = text + text_w(&it.shortcut_hint) + side_pad;
-                }
-                let text = text.min((max_w - (side_pad + side_pad)).max(0.0));
-                widest = widest.max((text + side_pad + side_pad).min(max_w));
-                row_h
-            };
-            rows.push((top_pad + rows_h, h));
-            rows_h += h;
-        }
-        let menu_w = widest.max(min_w).min(max_w);
-        let menu_h = (rows_h.min((window_h - (top_pad + bot_pad)).max(0.0)) + top_pad + bot_pad)
-            .min(window_h)
-            .max(0.0);
-
-        // Anchor + axis flip + window clamp.
-        let mut x = anchor_x + anchor_offset;
-        if x + menu_w > window_w {
-            // Try flipping to the left of the cursor.
-            let flipped = anchor_x - anchor_offset - menu_w;
-            if flipped >= 0.0 {
-                x = flipped;
-            } else {
-                // Neither side fits cleanly: clamp to right edge.
-                x = (window_w - menu_w).max(0.0);
-            }
-        }
-        let mut y = anchor_y + anchor_offset;
-        if y + menu_h > window_h {
-            let flipped = anchor_y - anchor_offset - menu_h;
-            if flipped >= top_obstruction {
-                y = flipped;
-            } else {
-                y = (window_h - menu_h).max(top_obstruction);
-            }
-        }
-        if y < top_obstruction {
-            y = top_obstruction;
-        }
-        let frame = Rect { x, y_top: y, w: menu_w, h: menu_h };
-
         // Full width: the row's own horizontal padding is inside it,
         // and the rect is what a hover background is drawn to.
-        let item_rects = rows
-            .into_iter()
-            .map(|(top, h)| Rect { x, y_top: y + top, w: menu_w, h })
+        let item_rects = items
+            .iter()
+            .map(|it| {
+                let h = if it.divider { DIVIDER_H_LOGICAL * scale } else { ROW_H_LOGICAL * scale };
+                let top = top_pad + rows_h;
+                rows_h += h;
+                Rect { x: frame.x, y_top: frame.y_top + top, w: frame.w, h }
+            })
             .collect();
-
         Self { frame, item_rects }
     }
+}
 
-    /// Hit-test (`px, py` are physical-pixel coords).  Returns
-    /// `Item(i)` only for **enabled, non-divider** rows; clicks on
-    /// divider / disabled rows resolve to `Frame` (swallowed but
-    /// don't dispatch).  Clicks outside the menu frame return
-    /// `Outside` so the caller can dismiss + fall through to its
-    /// regular click handling.
-    pub fn hit_test(&self, items: &[MenuItem], px: f64, py: f64) -> ContextMenuHit {
-        if !self.frame.contains(px, py) {
-            return ContextMenuHit::Outside;
-        }
-        for (i, rect) in self.item_rects.iter().enumerate() {
-            if rect.contains(px, py) {
-                let it = match items.get(i) {
-                    Some(it) => it,
-                    None => return ContextMenuHit::Frame,
-                };
-                if it.divider || !it.enabled {
-                    return ContextMenuHit::Frame;
-                }
-                return ContextMenuHit::Item(i);
-            }
-        }
-        ContextMenuHit::Frame
-    }
+/// Where a menu of `items` anchored at `(anchor_x, anchor_y)` stands
+/// and how large it is, device pixels.  `top_obstruction` is the y it
+/// must stay under.
+pub fn frame_of(
+    window_w: f64,
+    window_h: f64,
+    scale: f64,
+    anchor_x: f64,
+    anchor_y: f64,
+    top_obstruction: f64,
+    items: &[MenuItem],
+) -> Rect {
+    let row_h = ROW_H_LOGICAL * scale;
+    let divider_h = DIVIDER_H_LOGICAL * scale;
+    let side_pad = SIDE_PAD_LOGICAL * scale;
+    let top_pad = TOP_PAD_LOGICAL * scale;
+    let bot_pad = BOT_PAD_LOGICAL * scale;
+    let anchor_offset = ANCHOR_OFFSET_LOGICAL * scale;
+    let min_w = MENU_MIN_W_LOGICAL * scale;
+    let max_w = window_w.max(0.0).min(MENU_MAX_W_LOGICAL * scale);
 
-    /// Find the hover index for `(px, py)`.  Returns None when the
-    /// cursor isn't over any enabled item (covers divider, disabled,
-    /// frame padding, outside).  Used by mouse_moved to drive the
-    /// hovered-row visual highlight without triggering an action.
-    pub fn hover_index(&self, items: &[MenuItem], px: f64, py: f64) -> Option<usize> {
-        if !self.frame.contains(px, py) {
-            return None;
-        }
-        for (i, rect) in self.item_rects.iter().enumerate() {
-            if rect.contains(px, py) {
-                let it = items.get(i)?;
-                if it.divider || !it.enabled {
-                    return None;
-                }
-                return Some(i);
+    // a row is as wide as its label, its hint, and the padding
+    // between and around them; the menu, as its widest row
+    let ch_w = label_ch_w_phys();
+    let text_w = |s: &str| crate::ui::core::text_fit::cells(s) as f64 * ch_w;
+    let mut widest = 0.0f64;
+    let mut rows_h = 0.0;
+    for it in items {
+        let h = if it.divider {
+            divider_h
+        } else {
+            let mut text = text_w(&it.label);
+            if !it.shortcut_hint.is_empty() {
+                text = text + text_w(&it.shortcut_hint) + side_pad;
             }
-        }
-        None
+            let text = text.min((max_w - (side_pad + side_pad)).max(0.0));
+            widest = widest.max((text + side_pad + side_pad).min(max_w));
+            row_h
+        };
+        rows_h += h;
     }
+    let menu_w = widest.max(min_w).min(max_w);
+    let menu_h = (rows_h.min((window_h - (top_pad + bot_pad)).max(0.0)) + top_pad + bot_pad)
+        .min(window_h)
+        .max(0.0);
+
+    // Anchor + axis flip + window clamp.
+    let mut x = anchor_x + anchor_offset;
+    if x + menu_w > window_w {
+        // Try flipping to the left of the cursor.
+        let flipped = anchor_x - anchor_offset - menu_w;
+        if flipped >= 0.0 {
+            x = flipped;
+        } else {
+            // Neither side fits cleanly: clamp to right edge.
+            x = (window_w - menu_w).max(0.0);
+        }
+    }
+    let mut y = anchor_y + anchor_offset;
+    if y + menu_h > window_h {
+        let flipped = anchor_y - anchor_offset - menu_h;
+        if flipped >= top_obstruction {
+            y = flipped;
+        } else {
+            y = (window_h - menu_h).max(top_obstruction);
+        }
+    }
+    if y < top_obstruction {
+        y = top_obstruction;
+    }
+    Rect { x, y_top: y, w: menu_w, h: menu_h }
 }
 
 #[cfg(test)]
@@ -303,32 +254,6 @@ mod tests {
         // reservation — menu must not cover the strip.
         let m = ContextMenu::layout(1920.0, 1080.0, 1.0, 100.0, 0.0, 60.0, &items);
         assert!(m.frame.y_top >= 60.0);
-    }
-
-    #[test]
-    fn hit_test_returns_item_for_enabled_row() {
-        let items = sample_items();
-        let m = ContextMenu::layout(1920.0, 1080.0, 1.0, 200.0, 200.0, 0.0, &items);
-        let r = &m.item_rects[0]; // Copy
-        let hit = m.hit_test(&items, r.x + r.w * 0.5, r.y_top + r.h * 0.5);
-        assert_eq!(hit, ContextMenuHit::Item(0));
-    }
-
-    #[test]
-    fn hit_test_skips_divider() {
-        let items = sample_items();
-        let m = ContextMenu::layout(1920.0, 1080.0, 1.0, 200.0, 200.0, 0.0, &items);
-        let r = &m.item_rects[2]; // divider
-        let hit = m.hit_test(&items, r.x + r.w * 0.5, r.y_top + r.h * 0.5);
-        assert_eq!(hit, ContextMenuHit::Frame);
-    }
-
-    #[test]
-    fn hit_test_outside_frame() {
-        let items = sample_items();
-        let m = ContextMenu::layout(1920.0, 1080.0, 1.0, 200.0, 200.0, 0.0, &items);
-        let hit = m.hit_test(&items, 1.0, 1.0);
-        assert_eq!(hit, ContextMenuHit::Outside);
     }
 
     /// The menu holds its own rows, and its labels fit, at **both**
@@ -389,17 +314,14 @@ mod tests {
     }
 
     /// The menu has one unit of length, the window unit — half a panel
-    /// point — whatever the canvas it is drawn on calls it, and its
-    /// labels are in points: a row holds the same label, with the same
+    /// point — and its labels are in points: a row holds the same label, with the same
     /// room around it, at every scale.
     #[test]
     fn a_menu_unit_is_a_window_unit_at_every_scale() {
-        use crate::ui::core::{Canvas, Length, ParentRect};
         use crate::ui::theme::spec::{self, chrome};
         for scale in [1.0, 2.0] {
             crate::ui::components::density_kit::at_scale(scale, || {
-                let canvas = Canvas::new(crate::ui::chrome_scale(), ParentRect::window(100.0, 100.0));
-                assert_eq!(Length::Pt(1.0).resolve_for_axis(0.0, canvas.scale), chrome::px(1.0));
+                assert_eq!(chrome::px(1.0), crate::ui::chrome_scale());
                 assert_eq!(2.0 * chrome::px(1.0), spec::px(1.0), "two window units to the panel point");
                 let m = ContextMenu::layout(4000.0, 4000.0, crate::ui::chrome_scale(), 100.0, 100.0, 0.0, &sample_items());
                 assert_eq!(m.item_rects[0].h, chrome::px(chrome::MENU_ROW_H));

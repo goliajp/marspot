@@ -3,7 +3,9 @@
 //! chrome and every panel painter.
 
 use crate::font_cache::FontCache;
-use crate::glyph_atlas::{AtlasEntry, GlyphAtlas, GlyphKey, SlotMetrics};
+#[cfg(test)]
+use crate::glyph_atlas::AtlasEntry;
+use crate::glyph_atlas::{GlyphAtlas, GlyphKey, SlotMetrics};
 use crate::frame_build::glyph_resolve::text_glyph_key;
 use crate::frame_build::color::rgba8_of_f32;
 use golia_ui_core::scene::GlyphInstance;
@@ -177,14 +179,11 @@ pub(crate) fn push_text_run_ui_shaped_mono(
 /// [`push_text_run_ui_shaped_mono`] above is locked to the startup
 /// `UI_FONT_POINT` at weight 600 — one size, one weight, which is why
 /// every chrome surface built on `ViewPainter` had a single type size
-/// and had to signal hierarchy with colour alone.  The canvas path
-/// (`push_text_run_ui_shaped`) has taken a size since Phase 10c; this
-/// is the same capability for the direct painter, minus the colour
-/// atlas the canvas path also routes (chrome labels are latin).
+/// and had to signal hierarchy with colour alone.  This takes a size.
+/// It has no colour atlas to route to: interface labels are words.
 ///
 /// `baseline_y` is a real baseline in physical px — the caller knows
-/// its own line box.  Physical px per pt is the 2× retina scale baked
-/// into the atlas raster path, same as the canvas path assumes.
+/// its own line box.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_text_run_ui_sized(
     text: &str,
@@ -229,13 +228,18 @@ pub(crate) fn push_text_run_ui_sized(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-// y_top_phys = top-of-em-box y in PHYSICAL px (raw `t.y` from canvas
-// Length resolution, NOT a pre-baked baseline).  Function derives the
+// Shaped interface text with colour glyphs routed to the colour
+// atlas.  Nothing the app draws takes this path any more; the font
+// snapshots still do, to hold the shaping and the routing.
+//
+// y_top_phys = top-of-em-box y in PHYSICAL px (NOT a pre-baked
+// baseline).  Function derives the
 // baseline from the SF Pro run's own ascent at the requested pt size,
 // so callers don't need to know chrome cell ascent.
 // fallback_ascent = chrome cell ascent (phys px) — used ONLY when
 // ui_size_q.is_none() (pre-Phase-10c default-size callers).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn push_text_run_ui_shaped(
     text: &str,
     x_start: f32,

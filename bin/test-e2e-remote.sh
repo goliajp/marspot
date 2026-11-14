@@ -50,6 +50,7 @@ DEFAULT_SUITES=(
   test-crash-guard.sh
   test-window-close-order.sh
   test-close-last-pane.sh
+  test-all-shells-exit.sh
   test-multi-window.sh
   test-panel-behaviour.sh
   test-commands.sh
@@ -57,6 +58,7 @@ DEFAULT_SUITES=(
   test-language-switch.sh
   test-bundle-lander.sh
   test-single-instance.sh
+  test-two-sandboxes.sh
   test-session-ownership.sh
   test-one-app-record.sh
   test-coalition-reclaim.sh

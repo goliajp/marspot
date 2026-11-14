@@ -557,6 +557,18 @@ pub enum MsgType {
     /// A frame says only this, and a second one is a no-op.  A session
     /// that understands it says so in its registry entry (`build`).
     SessionUpdate = 85,
+    /// core → session: publish into the grid region named in the
+    /// payload (UTF-8) from now on, and the side regions named after
+    /// it.  Sent when the region the session publishes into is not one
+    /// the core can show.  A session that understands it says so in
+    /// its registry entry (`stamps_regions`); one that does not drops
+    /// the frame.
+    SessionRepublish = 120,
+    /// session → core: the grid region it publishes into: the serial
+    /// written in the region (u64 LE), then its name (UTF-8).  Sent
+    /// to a core that connects, by a new image of the session, and
+    /// after a move.
+    SessionPublishes = 121,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -630,40 +642,16 @@ impl MsgType {
             83 => MsgType::PaneClipboardWrite,
             84 => MsgType::PaneTerminalFocus,
             85 => MsgType::SessionUpdate,
+            120 => MsgType::SessionRepublish,
+            121 => MsgType::SessionPublishes,
             200 => MsgType::Error,
             _ => return None,
         })
     }
 }
 
-/// Encode an `InjectInput` payload: u64 LE session_id + u32 LE len +
-/// raw bytes.  No bracketed-paste markup — the caller controls every
-/// byte that ends up on the PTY.
-pub fn encode_inject_input(session_id: u64, bytes: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(12 + bytes.len());
-    v.extend_from_slice(&session_id.to_le_bytes());
-    v.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    v.extend_from_slice(bytes);
-    v
-}
-
-pub fn decode_inject_input(payload: &[u8]) -> io::Result<(u64, Vec<u8>)> {
-    if payload.len() < 12 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "InjectInput too short",
-        ));
-    }
-    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
-    let len = u32::from_le_bytes(payload[8..12].try_into().unwrap()) as usize;
-    if payload.len() != 12 + len {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("InjectInput len {len} but payload total {}", payload.len()),
-        ));
-    }
-    Ok((sid, payload[12..].to_vec()))
-}
+mod inject;
+pub use inject::{decode_inject_input, encode_inject_input};
 
 // ─── B2: search wire encoders / decoders ───────────────────────────
 // Hand-rolled per D13 — no new bincode dep.  Lengths are bounded by

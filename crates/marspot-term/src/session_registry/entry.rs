@@ -32,6 +32,11 @@ pub struct SessionEntry {
     /// also says the L3 takes updates as a `SessionUpdate` frame; an
     /// entry without it is from an L3 that only knows SIGTERM.
     pub build: String,
+    /// This L3 writes its identity into the regions it publishes
+    /// through, and moves to another grid region when asked
+    /// (`SessionRepublish`).  A region without an identity is then not
+    /// this session's; from an L3 without this, it is all there is.
+    pub stamps_regions: bool,
 }
 
 /// Quote a string value.  `\n` and `\r` are escaped so a value can
@@ -106,6 +111,9 @@ pub fn write_session_entry(entry: &SessionEntry) -> io::Result<()> {
     writeln!(s, "shell_child_pid = {}", entry.shell_child_pid).ok();
     if !entry.build.is_empty() {
         writeln!(s, "build = {}", quote(&entry.build)).ok();
+    }
+    if entry.stamps_regions {
+        writeln!(s, "stamps_regions = 1").ok();
     }
     let mut f = std::fs::File::create(&tmp)?;
     f.write_all(s.as_bytes())?;
@@ -201,6 +209,7 @@ pub fn parse_session_entry_text(contents: &str) -> io::Result<SessionEntry> {
         shm_name: opt_str("shm_name"),
         shell_child_pid: opt_i32("shell_child_pid"),
         build: opt_str("build"),
+        stamps_regions: fields.get("stamps_regions").is_some_and(|v| *v == "1"),
     })
 }
 
