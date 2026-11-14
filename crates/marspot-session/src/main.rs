@@ -403,12 +403,12 @@ fn set_cloexec(fd: RawFd) -> std::io::Result<()> {
 /// reach execv — on success the function does not return.
 fn do_l3_execv_swap(
     id: u64,
-    local: local_session::LocalSession,
+    mut local: local_session::LocalSession,
     mut listener: uds_server::SessionListener,
     poke: Option<ControlWriter>,
+    snapshots: &SnapshotWriter,
 ) -> std::io::Result<()> {
     let started = Instant::now();
-    let mut local = local;
     local.quiesce_for_handoff();
     let (master_fd, child_pid, terminal, cols, rows) = local.extract_for_handoff();
 
@@ -418,8 +418,7 @@ fn do_l3_execv_swap(
     // TUI's incremental repaints (claudecode's input box vanished
     // until its next full repaint).
     let body = terminal.serialize_snapshot_live();
-    let state_path = session_state_bin_path(id);
-    let _ = std::fs::write(&state_path, &body);
+    snapshots.write_last(session_state_bin_path(id), body);
     // F3+10 — flush the FileScrollback BufWriter tail to the kernel
     // page cache before execv.  Drop won't run on `libc::execv` so
     // anything sitting in the writer's 64 KB user-space buffer would
@@ -1121,7 +1120,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
             ),
         });
     }
-    let snapshot_writer = SnapshotWriter::spawn(session.id());
+    let snapshot_writer = SnapshotWriter::spawn(session.id(), ev_tx.clone());
     // settings and reachability, by file events: see `upkeep`
     let mut upkeep = upkeep::Upkeep::new(session.id(), ev_tx.clone());
     loop {
@@ -1870,7 +1869,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     "fingerprint differs from current/marspot-session — execv",
                     session_id = id
                 );
-                match do_l3_execv_swap(id, local, listener_owned, poke.take()) {
+                match do_l3_execv_swap(id, local, listener_owned, poke.take(), &snapshot_writer) {
                     Ok(()) => unreachable!(),
                     Err(e) => {
                         lx_error!(

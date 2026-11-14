@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.361"  # the shell that stays after a quit keeps no release poll, no CLI installer, and no process table
-core    = "0.12.491"  # a run of ASCII that ends inside its row skips the general loop
-session = "0.11.331"  # a run of ASCII that ends inside its row skips the general loop
+core    = "0.12.505"  # the end of a flood reaches the disk without waiting for more output
+session = "0.11.345"  # the end of a flood reaches the disk; the snapshot for the next image is written last

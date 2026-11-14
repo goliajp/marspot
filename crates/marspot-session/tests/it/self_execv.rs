@@ -373,7 +373,8 @@ fn hand_over(sandbox: &mut Sandbox, how: Ask, burst: bool) {
 /// the old image had read is in the history files before it goes, the
 /// index as well as the records, and the new image carries on from
 /// there.  The program prints the numbers from 1 up, so the last one on
-/// screen says how many lines there were.
+/// screen says how many lines there were, and a line of the history
+/// which number it should be.
 #[test]
 fn an_update_in_the_middle_of_a_flood_loses_no_line() {
     use std::os::unix::fs::PermissionsExt;
@@ -397,6 +398,9 @@ fn an_update_in_the_middle_of_a_flood_loses_no_line() {
 
     let staged = stage(&state, true).canonicalize().unwrap();
     let running = || marspot_term::platform::pid_exe_path(pid as i32).and_then(|p| p.canonicalize().ok());
+    // lines filed before the old image was asked, and by the time the
+    // new one is seen: the swap is between the two
+    let before_swap = history("scrollback.idx") as usize / 8;
     ask(&s, Ask::Frame);
     wait_for(30, "the pid to run the staged image", || {
         if let Some(st) = s.child.try_wait().unwrap() {
@@ -404,6 +408,7 @@ fn an_update_in_the_middle_of_a_flood_loses_no_line() {
         }
         (running().as_deref() == Some(staged.as_path())).then_some(())
     });
+    let after_swap = history("scrollback.idx") as usize / 8;
     let at_swap = history("bytelog");
     wait_for(20, "the flood to go on in the new image", || (history("bytelog") > at_swap + (1 << 18)).then_some(()));
     std::fs::write(state.join("stop"), b"").unwrap();
@@ -424,6 +429,8 @@ fn an_update_in_the_middle_of_a_flood_loses_no_line() {
     assert_eq!(lines % 10000, 0, "the program ends on a whole batch");
     // every line but the ones still on screen is in the history, once
     let filed = lines - (ROWS as u64 - 1);
+    // without another byte from the program: the end of a flood does
+    // not wait in memory for the pane to print again
     wait_for_or(
         10,
         "every line in the index",
@@ -432,6 +439,23 @@ fn an_update_in_the_middle_of_a_flood_loses_no_line() {
     );
     assert_eq!(count_in_log(&state, "L3_EXECV_INVOKE"), 1);
     s.kill();
+    // The count would not show a line missing and another filed twice.
+    // Where that could happen is at the swap: there, line n of the
+    // history is the number n + 1.
+    let dir = state.join(format!("sessions/{}", id()));
+    let filed_lines = marspot_term::scrollback::FileScrollback::open(
+        dir.join("scrollback.bin"),
+        dir.join("scrollback.idx"),
+        COLS as usize,
+        4,
+    )
+    .expect("the session's history opens");
+    let around_swap = before_swap.saturating_sub(1024)..(after_swap + 4096).min(filed as usize);
+    assert!(around_swap.len() > 1024, "the swap is inside what is read back: {around_swap:?}");
+    for at in around_swap {
+        let text: String = filed_lines.read_line(at).expect("a filed line").iter().map(|c| c.ch).collect();
+        assert_eq!(text.trim().parse(), Ok(at + 1), "line {at} of the history is {text:?}");
+    }
 }
 
 /// The running image changes, nothing else does.
