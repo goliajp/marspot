@@ -182,6 +182,9 @@ if make_kept; then
   # successor
   STATE="killed after refusals"; echo; echo "── $STATE: shells are asked for and refused, and the shell is then killed ──"
   mark
+  # the states before used starts of their own within the minute; this
+  # one counts from none
+  rm -f "$MARSPOT_STATE_DIR/owner.spawn"
   for (( n = 0; n < 3; n++ )); do
     rm -f "$MARSPOT_STATE_DIR/owner.reseats"
     stage_shell
