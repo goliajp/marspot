@@ -75,6 +75,9 @@ for n in counts:
         for key in sorted(k for k in rec if k.endswith("_MBps")):
             lo, hi = rec[f"{key}_range"]
             cells.append(f"{key.removesuffix('_MBps').removeprefix('cat-')} {rec[key]:.1f} ({lo:.1f}-{hi:.1f})")
+        if "cpu_ms_per_128MiB" in rec:
+            lo, hi = rec["cpu_ms_per_128MiB_range"]
+            cells.append(f"CPU ms per 128 MiB {rec['cpu_ms_per_128MiB']:.0f} ({lo:.0f}-{hi:.0f})")
         print(f"  {term:8} grid {rec.get('grid')}: " + ",  ".join(cells or ["no reading"]))
 PY
 echo "==> $OUT_DIR"
