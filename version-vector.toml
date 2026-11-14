@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.423"  # a pane's title and mode flags are read only from a region that is that session's
-core    = "0.12.493"  # a session whose grid region cannot be shown is given another, not started again
-session = "0.11.338"  # a frame of history left by the image before is not taken for the screen's clusters
+core    = "0.12.506"  # grid regions per state dir, and the end of a flood reaches the disk
+session = "0.11.346"  # history clusters survive an update, and the snapshot for the next image is written last
