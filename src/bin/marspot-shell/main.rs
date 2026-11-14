@@ -2930,6 +2930,16 @@ impl ShellApp {
     /// the bug it guards against (over-released NSWindow) lives in
     /// what happens after `app::close_window`, so a paraphrase would
     /// not have caught it.
+    /// Whether a window other than `window_id` is still open.  Asked of
+    /// the shell's own list, which a close updates at once: the count
+    /// AppKit keeps drops only when the NSWindow is torn down, after
+    /// the dispatch, so two closes asked for together (a core that
+    /// empties two windows in one pump) both saw "more than one" and
+    /// the app stayed up with no window.
+    fn another_window_than(&self, window_id: u32) -> bool {
+        self.windows.iter().any(|w| w.window_id != window_id)
+    }
+
     fn close_window_by_id(&mut self, window_id: u32, discard: bool) {
         // Tell the core first: it parks or discards the window while
         // the surfaces are still alive, so nothing renders into a
@@ -3276,7 +3286,7 @@ impl ShellApp {
                 // the saved layout; drop the saved geometry to match,
                 // so the next launch opens a default window instead of
                 // reusing the frame of what was just dismantled.
-                if marspot::app::window_count() > 1 {
+                if self.another_window_than(window_id) {
                     // The core only asks when the window emptied out:
                     // its panes are gone for good, so its slot goes too.
                     self.close_window_by_id(window_id, true);
@@ -4516,11 +4526,12 @@ impl MarspotApp for ShellApp {
         // RFC-005 — closing one of several windows closes THAT window
         // and the panes it holds; only the last window closing is a
         // quit.  Cmd-Q is `quit_requested`, not this.
-        if marspot::app::window_count() > 1 {
+        let window_id = Self::event_window(ctx);
+        if self.another_window_than(window_id) {
             // The red button / Cmd-W: putting a window away, not
             // dismantling it.  Its slot is kept so the layout and
             // the geometry both come back on the next launch.
-            self.close_window_by_id(Self::event_window(ctx), false);
+            self.close_window_by_id(window_id, false);
             return;
         }
         self.quit(ctx);
