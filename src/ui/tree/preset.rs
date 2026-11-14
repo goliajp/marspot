@@ -50,6 +50,11 @@ pub const MENU_FRAME: u32 = 11;
 pub const MENU_ROW: u32 = 12;
 /// The line between two groups of a context menu's rows.
 pub const MENU_DIVIDER: u32 = 13;
+/// A toolbar button.  `data[0]` is its place in the row, `data[1]` its
+/// state: see `toolbar_view`.
+pub const TOOLBAR_SLOT: u32 = 14;
+/// The version label.  `data` is its x and baseline, as `f32` bits.
+pub const VERSION: u32 = 15;
 
 /// A segmented control whose segment `n` emits
 /// `Action { id: action, arg: n }`.
@@ -192,6 +197,8 @@ pub(super) fn paint(p: &mut ViewPainter, tag: u32, data: [u32; 2], label: &str, 
         MENU_FRAME => crate::ui::components::context_menu_view::paint_frame(p, rect),
         MENU_ROW => crate::ui::components::context_menu_view::paint_row(p, rect, label, state),
         MENU_DIVIDER => crate::ui::components::context_menu_view::paint_divider(p, rect),
+        TOOLBAR_SLOT => crate::ui::components::toolbar_view::paint_button(p, rect, data),
+        VERSION => crate::ui::components::toolbar_view::paint_version(p, data),
         _ => unreachable!("a node asked for preset {tag}, which nothing here draws"),
     }
 }
