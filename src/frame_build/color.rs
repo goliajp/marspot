@@ -15,13 +15,3 @@ pub fn rgba8_of_f32(c: [f32; 4]) -> golia_ui_core::Rgba8 {
         (c[3] * 255.0).round().clamp(0.0, 255.0) as u8,
     )
 }
-
-pub(crate) fn rgba8_of(c: crate::ui::core::Color) -> golia_ui_core::Rgba8 {
-    let [r, g, b, a] = c.to_rgba_f32();
-    golia_ui_core::Rgba8::rgba(
-        (r * 255.0).round().clamp(0.0, 255.0) as u8,
-        (g * 255.0).round().clamp(0.0, 255.0) as u8,
-        (b * 255.0).round().clamp(0.0, 255.0) as u8,
-        (a * 255.0).round().clamp(0.0, 255.0) as u8,
-    )
-}

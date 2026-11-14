@@ -17,6 +17,8 @@ mod bulk;
 mod diff_tests;
 mod lane;
 mod reference;
+mod snapshot_clusters;
+use snapshot_clusters::plausible_cols;
 mod trace;
 mod wide_class;
 
@@ -1453,6 +1455,7 @@ impl Terminal {
                 }
             }
         }
+        snapshot_clusters::append(&mut out, main_grid, alt_grid, live, tail_cap);
         out
     }
 
@@ -1704,6 +1707,7 @@ impl Terminal {
         } else {
             Vec::new()
         };
+        let trailer = snapshot_clusters::Trailer::read(&mut cur);
         // All parsing OK — commit to live state.
         self.grid.resize(cols, rows);
         for r in 0..rows {
@@ -1751,56 +1755,23 @@ impl Terminal {
         self.grapheme_cursor = crate::grapheme::GraphemeCursor::new();
         self.seg_synced = true;
         self.pending_response.clear();
-        // Replay scrollback in arrival order so the ring rebuilds
-        // exactly the same shape it had pre-execv.  Wrapped flag is
-        // carried across so cross-row URL / path link scans on
-        // historic content keep working after execv.
-        //
-        // v3 path (correct by construction): the snapshot tells us
-        // each line's logical index — `start_logical_idx + i` is the
-        // line index of `scrollback_lines[i]`.  We skip indices the
-        // on-disk scrollback already has and push only the suffix.
-        // This dedups against the persistent file AND refills the
-        // BufWriter-tail gap an L3 self-execv used to lose under the
-        // old F2+4 skip (`project_scrollback_execv_gap`).
-        //
-        // v2 path (legacy fallback): no per-line index → fall back
-        // to the F2+4 heuristic "skip replay if disk has anything".
-        // Loses the BufWriter tail same as before, but v2 senders
-        // only exist on pre-rollout images, so this is a transitional
-        // path that disappears once v3 is the floor.
-        let on_disk = self.grid.scrollback_len() as u64;
-        if snapshot_v >= 3 {
-            let start_idx = snapshot_start_logical_idx;
-            let skip = on_disk.saturating_sub(start_idx) as usize;
-            for (line, wrapped) in scrollback_lines.into_iter().skip(skip) {
-                self.grid.push_historic_scrollback_line(&line, wrapped);
-            }
-        } else if on_disk == 0 {
-            for (line, wrapped) in scrollback_lines {
-                self.grid.push_historic_scrollback_line(&line, wrapped);
-            }
-        }
-        // v4 alt fold — the alt grid's ring + final screen existed
-        // only in RAM (B13), so there's nothing to dedup against:
-        // append into scrollback, which (File-backed) also persists
-        // them for every future boot.  A resurrected claudecode pane
-        // thus keeps its conversation as scrollable history above
-        // the restored main screen.
-        for (line, wrapped) in alt_fold_lines {
-            self.grid.push_historic_scrollback_line(&line, wrapped);
-        }
+        self.replay_history(
+            snapshot_v,
+            snapshot_start_logical_idx,
+            scrollback_lines,
+            alt_fold_lines,
+            &trailer,
+        );
         // v5 alt LIVE — rebuild the alt screen exactly as it was at
         // execv time: main grid (just restored above) moves into
         // saved_main, a fresh Memory-backed alt grid takes over with
         // the serialized ring + cells + cursor + scroll region.  The
         // still-running TUI's incremental repaints then land on the
         // same base they left.
+        let kept_alt = alt_live.is_some();
         if let Some(live) = alt_live {
             let mut alt = Grid::with_scrollback(live.cols, live.rows, DEFAULT_SCROLLBACK_LINES);
-            for (line, wrapped) in &live.ring {
-                alt.push_historic_scrollback_line(line, *wrapped);
-            }
+            trailer.push_alt_ring(&mut alt, &live.ring);
             for r in 0..live.rows {
                 for c in 0..live.cols {
                     let idx = r as usize * live.cols as usize + c as usize;
@@ -1821,6 +1792,7 @@ impl Terminal {
             self.scroll_top = live.scroll_top;
             self.scroll_bot = live.scroll_bot;
         }
+        self.apply_snapshot_clusters(&trailer, kept_alt);
         Ok(())
     }
 
@@ -1909,27 +1881,6 @@ impl Terminal {
         }
         decode_legacy_no_wrapped(line_count, body)
     }
-}
-
-/// Can `body` still hold `cols` cells from here?  A length it cannot
-/// is not a length.
-///
-/// A page is written by another process and read back from disk, so
-/// `line_cols` is a claim rather than a fact -- and `with_capacity` on
-/// a claim turns a malformed page into an abort instead of an error.
-/// The Linux CI leg reported exactly that, as SIGABRT, on a runner
-/// with less memory to pretend with than a dev box: the legacy probe
-/// mis-parses by one byte on purpose, so the next line's length is
-/// whatever the cell data happened to spell.
-fn plausible_cols(cur: &Cursor<&[u8]>, cols: usize) -> io::Result<()> {
-    let remaining = cur.get_ref().len().saturating_sub(cur.position() as usize);
-    if cols > remaining / CELL_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("line claims {cols} cells, {remaining} bytes left"),
-        ));
-    }
-    Ok(())
 }
 
 fn decode_with_wrapped(

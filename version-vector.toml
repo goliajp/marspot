@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.481"  # an agent pane without an inbox is in the pane table and refuses what is sent to it
-core    = "0.12.491"  # a run of ASCII that ends inside its row skips the general loop
-session = "0.11.334"  # what a command printed is put right once it has exited, however late the session looks
+shell   = "0.7.482"  # an agent pane without an inbox is in the pane table and refuses what is sent to it, plus the shell draws the core's icons
+core    = "0.12.510"  # the toolbar icons are drawn by the shell, so the core never registers with LaunchServices
+session = "0.11.348"  # a shell a living shell asked for is not counted with the starts of one that died

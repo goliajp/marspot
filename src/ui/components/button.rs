@@ -101,10 +101,6 @@ pub struct Button<'a> {
 }
 
 impl<'a> Button<'a> {
-    pub fn hit_test(&self, x: f64, y: f64) -> bool {
-        self.rect.contains(x, y)
-    }
-
     pub fn paint(&self, p: &mut ViewPainter) {
         // Background (rounded rect via UI pipeline).  Skipped when BG
         // alpha and border are both 0 — that's the "ghost button at
@@ -203,26 +199,6 @@ impl<'a> Button<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
-        Rect { x, y_top: y, w, h }
-    }
-
-    #[test]
-    fn hit_test_inside_outside() {
-        let b = Button {
-            rect: rect(10.0, 20.0, 100.0, 30.0),
-            label: Some("ok"),
-            icon: None,
-            icon_position: IconPosition::Only,
-            hovered: false,
-            style: ButtonStyle::ghost(),
-        };
-        assert!(b.hit_test(50.0, 30.0));
-        assert!(!b.hit_test(5.0, 30.0));
-        assert!(!b.hit_test(115.0, 30.0));
-        assert!(!b.hit_test(50.0, 60.0));
-    }
 
     #[test]
     fn icon_position_variants_are_distinct() {

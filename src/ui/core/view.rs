@@ -325,8 +325,7 @@ impl<'a> ViewPainter<'a> {
     /// a label and its explanatory line come out the same size and can
     /// differ only in colour, which is not a hierarchy — it is two
     /// equal lines, one of them harder to read.  This is the sized
-    /// path the canvas system has had since Phase 10c, exposed to the
-    /// direct painter.
+    /// path.
     ///
     /// `baseline_y` is a real baseline in physical px; see
     /// [`Self::ui_baseline_centred`] for putting one in the middle of

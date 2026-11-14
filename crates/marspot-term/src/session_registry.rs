@@ -406,6 +406,7 @@ pub(crate) mod test_support {
             shm_name: format!("/msp-s-{id}"),
             shell_child_pid: 99000 + id as i32,
             build: format!("MARSPOT_FP=abc{id}|2026-10-17T00:00:00Z"),
+            stamps_regions: true,
         }
     }
 
@@ -530,6 +531,19 @@ mod tests {
         let text = std::fs::read_to_string(session_entry_path(9)).unwrap();
         assert!(!text.contains("build"), "nothing written for an empty build");
         assert_eq!(read_session_entry(9).expect("read").build, "");
+    }
+
+    /// An entry from an L3 that predates region identities says
+    /// nothing about them, and reads as an L3 that writes none.
+    #[test]
+    fn an_entry_that_does_not_say_it_stamps_regions_reads_as_not_stamping() {
+        let _g = sandbox_state_dir();
+        let mut old = sample_entry(10);
+        old.stamps_regions = false;
+        write_session_entry(&old).expect("write");
+        let text = std::fs::read_to_string(session_entry_path(10)).unwrap();
+        assert!(!text.contains("stamps_regions"), "nothing written by an L3 that does not stamp");
+        assert!(!read_session_entry(10).expect("read").stamps_regions);
     }
 
     #[test]

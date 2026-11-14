@@ -182,6 +182,13 @@ fn read_frames(mut reader: UnixStream, stop: &UnixStream, tx: Sender<SessionEven
                         }
                 }
                 MsgType::SessionUpdate if tx.send(SessionEvent::UpdateRequested).is_err() => break,
+                MsgType::SessionRepublish => {
+                    if let Ok(name) = String::from_utf8(f.payload)
+                        && tx.send(SessionEvent::Republish(name)).is_err()
+                    {
+                        break;
+                    }
+                }
                 _ => {}
             },
             Ok(None) | Err(_) => {
