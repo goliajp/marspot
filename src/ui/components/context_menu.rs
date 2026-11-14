@@ -65,8 +65,8 @@ pub enum ContextMenuHit {
 }
 
 /// The menu's frame and each row's rectangle, worked out by plain
-/// arithmetic: what the tree's layout is held to.
-#[cfg(test)]
+/// arithmetic: what the tree's layout is held to.  Nothing draws or
+/// hit-tests from it.
 pub struct ContextMenu {
     pub frame: Rect,
     pub item_rects: Vec<Rect>,
@@ -113,7 +113,6 @@ fn label_ch_w_phys() -> f64 {
         * crate::ui::core::ViewPainter::px_per_pt()
 }
 
-#[cfg(test)]
 impl ContextMenu {
     /// Layout a menu anchored at `(anchor_x, anchor_y)` in physical
     /// pixels.  The menu prefers to extend down-right; if it would
