@@ -33,7 +33,12 @@
 /// caveat in the module docs made concrete -- this counts sites, and sites
 /// are not the heap. Getting the rest out means `Vec<Cow<str>>` or a
 /// scratch buffer on `WindowRender`, which is the next slice.
-const CEILING: usize = 20;
+///
+/// 2026-11-14: 18. The settings panel's frame data shares the settings and
+/// the path it shows instead of cloning one and formatting the other.
+/// 17 the same day: the layout panel's slot titles are written into strings
+/// the window keeps.
+const CEILING: usize = 17;
 
 fn render_inner_body() -> String {
     let src = std::fs::read_to_string("src/bin/marspot-core.rs")

@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.422"  # a pane's title and mode flags are read only from a region that is that session's
-core    = "0.12.463"  # a session whose grid region cannot be shown is given another, not started again
-session = "0.11.304"  # the clusters on screen come through the session's own update with their text
+shell   = "0.7.423"  # a pane's title and mode flags are read only from a region that is that session's
+core    = "0.12.493"  # a session whose grid region cannot be shown is given another, not started again
+session = "0.11.336"  # the clusters on screen come through the session's own update with their text

@@ -83,6 +83,8 @@ pub struct PeerbusPlugin {
     /// The noted changes (`agents::changes`) the worker has been asked
     /// to look at the configuration for.
     config_seen: u64,
+    /// Keeps the CLI installer's thread running; dropped at stop.
+    agents: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl PeerbusPlugin {
@@ -156,7 +158,7 @@ impl Plugin for PeerbusPlugin {
         host.log(LogLevel::Info, "start", "worker running");
         // the other background worker of the agent plugins; it has no
         // pane state, so it needs no plugin of its own to tick it
-        super::agents::start();
+        self.agents = super::agents::start();
         Ok(())
     }
 
@@ -218,6 +220,7 @@ impl Plugin for PeerbusPlugin {
     /// Remove every inbox and record before marspot quits, so no
     /// session is left listing a peer that cannot answer.
     fn stop(&mut self, _host: &dyn PluginHost) {
+        self.agents = None;
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(Event::Stop);
         }

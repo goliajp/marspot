@@ -36,6 +36,11 @@ pub trait ParserCallbacks {
     /// A sequence with no colons in it has every entry false, which is
     /// every sequence this terminal saw before colons were accepted.
     fn csi_dispatch(&mut self, params: &[u16], subs: &[bool], intermediates: &[u8], byte: u8);
+    /// `CSI … m` with no intermediates, which is `csi_dispatch` with
+    /// those arguments unless the receiver has a shorter way there.
+    fn sgr_dispatch(&mut self, params: &[u16], subs: &[bool]) {
+        self.csi_dispatch(params, subs, &[], b'm');
+    }
     /// `data` is the raw OSC payload (between `ESC ]` and the terminator).
     /// Caller splits on `;` if needed; we don't pre-parse to avoid lifetime
     /// noise in the trait.

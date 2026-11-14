@@ -7,7 +7,7 @@
 //! about as tall as the others rather than twice that.
 //!
 //! No painter: [`walk`] says where each piece is, and
-//! `shortcuts_paint` draws what it is told.  All rects are physical
+//! `shortcuts_view` describes a tree that puts each piece there.  All rects are physical
 //! pixels.
 
 use marspot_term::layout::Rect;

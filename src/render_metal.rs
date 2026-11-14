@@ -56,9 +56,9 @@ use crate::glyph_atlas::{GlyphAtlas, SlotMetrics};
 use crate::layout::Layout;
 use crate::ui::components::process_panel::ProcessPanelRender;
 use crate::ui::components::cc_usage_modal::CcUsageRender;
-use crate::ui::components::settings_paint::SettingsRender;
-use crate::ui::components::shortcuts_paint::ShortcutsRender;
-use crate::ui::components::layout_modal_paint::LayoutModalRender;
+use crate::ui::components::settings_view::SettingsRender;
+use crate::ui::components::shortcuts_view::ShortcutsRender;
+use crate::ui::components::layout_view::LayoutModalRender;
 use crate::ui::components::{chrome_hover::ChromeHover, context_menu_paint::ContextMenuRender};
 use crate::render::{SessionView, SidebarEntry};
 #[cfg(test)]
@@ -512,7 +512,7 @@ pub struct MetalRenderer {
     settings_panel: Option<SettingsRender>,
     shortcuts_panel: Option<ShortcutsRender>,
     /// F3+3.0 / 3.3 — LayoutModal render state.  `Some(_)` when
-    /// open, `None` when closed.  See `layout_modal_paint::LayoutModalRender`.
+    /// open, `None` when closed.  See `layout_view::LayoutModalRender`.
     layout_modal_state: Option<LayoutModalRender>,
     /// RFC-006 — drop-preview ghost for the window being rendered:
     /// (x, y_top, w, h) physical px + outline-only flag (an Append

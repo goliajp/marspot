@@ -20,6 +20,7 @@ mod reference;
 mod snapshot_clusters;
 use snapshot_clusters::plausible_cols;
 mod trace;
+mod wide_class;
 
 use lane::fast_width;
 use trace::trace_seq;
@@ -2426,6 +2427,29 @@ impl<'a> Handler<'a> {
         (col, row)
     }
 
+    /// What every control sequence does before it is acted on: ends
+    /// the text run and the open cluster, and leaves its trace.
+    #[inline(always)]
+    fn csi_prologue(&mut self, params: &[u16], intermediates: &[u8], byte: u8) {
+        self.flush_u_buf();
+        self.flush_cluster_for_break();
+        trace_seq("CSI", intermediates, params, byte);
+        // Every CSI through the parser lands a sampled DEBUG line.
+        // 1/64 keeps cost flat under heavy apps (tmux paints ~hundreds
+        // of CSI/s), but bursts above that get truncated logarithmically
+        // — good enough to spot patterns ("this app drives ~50 CUP/s")
+        // without flooding when an SGR-heavy app like btop runs.  Set
+        // `MARSPOT_LOG_TERM=debug` to enable; default INFO is 0 ns.
+        lx_debug_sampled!(
+            "term.csi",
+            64,
+            "CSI dispatch",
+            final_byte = byte as char,
+            intermediates_len = intermediates.len(),
+            param0 = params.first().copied().unwrap_or(0)
+        );
+    }
+
     /// Scroll the grid up by 1 line, honouring DECSTBM. When the
     /// scroll region covers the whole grid (the default) this drops
     /// to `grid.scroll_up` which also pushes to scrollback —
@@ -3076,24 +3100,17 @@ impl<'a> ParserCallbacks for Handler<'a> {
         }
     }
 
+    /// `CSI … m` as the slice path hands it over: what `csi_dispatch`
+    /// does for that final byte, without the walk to it.  Colour
+    /// changes are most of the control sequences coloured output is
+    /// made of.
+    fn sgr_dispatch(&mut self, params: &[u16], subs: &[bool]) {
+        self.csi_prologue(params, &[], b'm');
+        apply_sgr(self.attrs, params, subs);
+    }
+
     fn csi_dispatch(&mut self, params: &[u16], subs: &[bool], intermediates: &[u8], byte: u8) {
-        self.flush_u_buf();
-        self.flush_cluster_for_break();
-        trace_seq("CSI", intermediates, params, byte);
-        // Every CSI through the parser lands a sampled DEBUG line.
-        // 1/64 keeps cost flat under heavy apps (tmux paints ~hundreds
-        // of CSI/s), but bursts above that get truncated logarithmically
-        // — good enough to spot patterns ("this app drives ~50 CUP/s")
-        // without flooding when an SGR-heavy app like btop runs.  Set
-        // `MARSPOT_LOG_TERM=debug` to enable; default INFO is 0 ns.
-        lx_debug_sampled!(
-            "term.csi",
-            64,
-            "CSI dispatch",
-            final_byte = byte as char,
-            intermediates_len = intermediates.len(),
-            param0 = params.first().copied().unwrap_or(0)
-        );
+        self.csi_prologue(params, intermediates, byte);
         // The DECAWM deferred wrap is cancelled per OPERATION, not by
         // every CSI that goes past.  Clearing it here meant an SGR
         // between the glyph that filled the last column and the next

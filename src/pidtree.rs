@@ -19,7 +19,7 @@ mod args;
 mod ident;
 mod table;
 
-pub use args::{proc_argv, proc_cmdline, proc_env_value};
+pub use args::{proc_argv, proc_cmdline, proc_env_value, release_room};
 pub use ident::{ProcId, SignalError, proc_id, signal};
 pub use table::{ProcNode, ProcTable, descendants_of, flatten_pre_order, tree_rooted_at};
 

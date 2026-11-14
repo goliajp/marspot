@@ -74,9 +74,12 @@ impl Walk<'_> {
         }
         let mut ch = n.last_child;
         while ch != NONE {
-            match self.node(ch, dy, view) {
-                Found::Nothing => {}
-                found => return found,
+            // a floating node is not where it was described
+            if self.tree.nodes[ch as usize].kind != Kind::Float {
+                match self.node(ch, dy, view) {
+                    Found::Nothing => {}
+                    found => return found,
+                }
             }
             ch = self.tree.nodes[ch as usize].prev_sibling;
         }
@@ -98,7 +101,18 @@ pub fn hit_test(
         return None;
     }
     let walk = Walk { tree, layout, scroll, p: (p.0 - offset.0, p.1 - offset.1) };
-    let Found::Node(i) = walk.node(0, 0.0, None) else { return None };
+    // what floats is on top: the last described first, then the rest
+    let mut found = Found::Nothing;
+    for &f in layout.floats.iter().rev() {
+        found = walk.node(f, 0.0, None);
+        if !matches!(found, Found::Nothing) {
+            break;
+        }
+    }
+    if matches!(found, Found::Nothing) {
+        found = walk.node(0, 0.0, None);
+    }
+    let Found::Node(i) = found else { return None };
     let n = &tree.nodes[i as usize];
     let id = n.widget?;
     Some(Hit { node: NodeId(i), target: Target { id, item: n.item }, action: n.action })

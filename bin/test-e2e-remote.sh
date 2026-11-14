@@ -34,7 +34,10 @@
 #   - its own sandbox     : each suite gets a state dir of its own, and
 #                           the cleanup stops the processes recorded
 #                           there and nothing else on the host
-#   - honest              : exits non-zero when any suite failed
+#   - honest              : exits 1 when any suite failed; 3 when none
+#                           failed but a measuring suite was read next
+#                           to other work, which is neither a pass nor
+#                           a regression: take it again on a quiet host
 set -euo pipefail
 
 DEFAULT_SUITES=(
@@ -70,7 +73,15 @@ DEFAULT_SUITES=(
   test-negative-update.sh
   test-adversarial-update.sh
   test-idle-wakeups.sh
+  test-idle-exit-codes.sh
 )
+
+# The suites that are measurements.  Their exit codes are the four of
+# bin/measure-idle-marspot.sh: 1 is over budget, 2 the instrument
+# failing, 3 a host too busy to read.
+is_measurement() {
+  [[ $1 == test-idle-wakeups.sh || $1 == measure-idle-marspot.sh ]]
+}
 
 # One tool does the copying, for every session and every repo: it takes
 # the exclude list from git itself, so a path this repo ignores is never
@@ -182,6 +193,7 @@ while IFS= read -r kv; do fwd+=" $(printf '%q' "$kv")"; done < <(env | grep -E '
 for kv in ${E2E_ENV:-}; do fwd+=" $(printf '%q' "$kv")"; done
 
 rc=0
+unmeasured=0
 results=()
 i=0
 for suite in "${SUITES[@]}"; do
@@ -210,12 +222,23 @@ for suite in "${SUITES[@]}"; do
     results+=("PASS  ${secs}s  $suite")
     # said now as well: a run that is cut short prints no summary
     echo "==> PASS  ${secs}s  $suite"
+  elif (( suite_rc == 3 )) && is_measurement "$suite"; then
+    ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
+    results+=("BUSY  ${secs}s  $suite  (not measured: $HOST was busy)")
+    echo "==> BUSY  ${secs}s  $suite: not measured, $HOST was busy; neither a pass nor a regression"
+    unmeasured=1
   else
     case $suite_rc in
       124) why="timed out after ${SUITE_TIMEOUT}s" ;;
       75) why="could not get the host's lock within ${MAX_WAIT}s" ;;
       *) why="exit $suite_rc" ;;
     esac
+    if is_measurement "$suite"; then
+      case $suite_rc in
+        1) why="over budget, measured on a quiet host" ;;
+        2) why="no reading: the sandbox app did not come up as asked, or the instrument failed" ;;
+      esac
+    fi
     echo "FAIL: $suite: $why (state dir kept: $HOST:$current_sd)" >&2
     results+=("FAIL  ${secs}s  $suite  ($why)")
     rc=1
@@ -226,4 +249,5 @@ done
 echo
 echo "════ summary ($HOST) ════"
 printf '  %s\n' "${results[@]}"
+(( rc == 0 && unmeasured )) && rc=3
 exit $rc
