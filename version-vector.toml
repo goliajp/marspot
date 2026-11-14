@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.361"  # the shell that stays after a quit keeps no release poll, no CLI installer, and no process table
-core    = "0.12.494"  # the context menu is drawn from its tree, and the canvas is gone
+core    = "0.12.495"  # the menu's plain geometry stays public for the geometry tests
 session = "0.11.331"  # a run of ASCII that ends inside its row skips the general loop
