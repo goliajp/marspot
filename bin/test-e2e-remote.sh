@@ -50,6 +50,7 @@ DEFAULT_SUITES=(
   test-crash-guard.sh
   test-window-close-order.sh
   test-close-last-pane.sh
+  test-all-shells-exit.sh
   test-multi-window.sh
   test-panel-behaviour.sh
   test-commands.sh

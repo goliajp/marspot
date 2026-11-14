@@ -608,6 +608,12 @@ mod window_state_tests {
     /// the layout did not.
     pub(super) fn app_with(sandbox: &StateSandbox, windows: Vec<WindowState>) -> CoreApp {
         assert_sandboxed(sandbox);
+        app_in(sandbox.path(), windows)
+    }
+
+    /// `app_with` for a state root the test made some other way.
+    pub(super) fn app_in(root: &std::path::Path, windows: Vec<WindowState>) -> CoreApp {
+        assert!(marspot::state::state_file_path().starts_with(root), "state path is not in the test's root");
         let (event_tx, _rx) = mpsc::channel();
         CoreApp {
             renderer: MetalRenderer::new_headless().expect("headless renderer"),
@@ -711,9 +717,9 @@ mod window_state_tests {
         assert_eq!(pair_of(&app, 0), (a_f, a_b, 0));
     }
 
-    /// marspot quits when every shell is gone — "every", across all
-    /// windows.  A live pane in any window keeps the app up, however
-    /// long its window has been out of focus.
+    /// The core exits for a restart only when every pane's session is
+    /// lost, across all windows.  A live pane in any window keeps it
+    /// up, however long its window has been out of focus.
     #[test]
     fn the_app_exits_only_when_every_window_is_dead() {
         let sandbox = sandbox_state_dir();
@@ -1737,6 +1743,9 @@ mod boot_assembly_tests;
 #[cfg(test)]
 #[path = "marspot-core/real_pty_tests.rs"]
 mod real_pty_tests;
+#[cfg(test)]
+#[path = "marspot-core/shell_end_tests.rs"]
+mod shell_end_tests;
 
 #[cfg(test)]
 mod link_menu_tests {
@@ -3203,6 +3212,8 @@ macro_rules! win {
 mod hover;
 #[path = "marspot-core/idle.rs"]
 mod idle;
+#[path = "marspot-core/shell_end.rs"]
+mod shell_end;
 #[path = "marspot-core/keys.rs"]
 mod keys;
 #[path = "marspot-core/tree_panels.rs"]
@@ -3310,9 +3321,8 @@ struct CoreApp {
     /// Sessions with a reconnect already in flight.  Without this, a
     /// burst of EOFs for one session would spawn a thread each.
     reconnecting: std::collections::HashSet<u64>,
-    /// True once every pane's session has exited — the loop exits
-    /// cleanly and the shell respawns a fresh core (which creates a
-    /// fresh session), mirroring "marspot quits when all shells die".
+    /// Every pane's session is lost (see `every_session_lost`): the
+    /// loop exits and L1 starts a core that resurrects them.
     all_exited: bool,
     /// True once a `SurfaceAttachWindow` has arrived.  From then on the
     /// legacy `SurfaceAttach` is ignored as its duplicate — the shell
@@ -5551,7 +5561,7 @@ impl CoreApp {
             return;
         }
         let window_id = win!(self, wi).window_id;
-        if self.windows.len() == 1 {
+        if self.only_window_left(wi) {
             // The app is going away.  Drop the layout first: L1 tears
             // the core down moments after the request lands, and a
             // save racing that would restore an empty window.
@@ -7788,15 +7798,8 @@ impl CoreApp {
                 self.sync_selection_tape(wi);
             }
         }
-        // The app exits when every pane of every window has exited —
-        // one window still holding a live shell keeps marspot up.
-        let has_panes = self.windows.iter().any(|w| !w.panes.is_empty());
-        let all_dead = self
-            .windows
-            .iter()
-            .flat_map(|w| w.panes.iter())
-            .all(|p| p.is_exited());
-        if has_panes && all_dead {
+        self.close_ended_panes();
+        if self.every_session_lost() {
             for p in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
                 p.pump();
             }
@@ -9558,7 +9561,7 @@ fn main() {
         if app.all_exited {
             lx_event!(
                 "CORE_EXIT",
-                "all sessions exited; exiting cleanly",
+                "every pane's session is gone and none ended; exiting for a new core to resurrect them",
                 frames = frame,
                 uptime_s = start.elapsed().as_secs(),
                 bytes_pumped = bytes_pumped_total,
