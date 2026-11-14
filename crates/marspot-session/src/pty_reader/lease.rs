@@ -97,8 +97,8 @@ fn hurried() -> bool {
 
 /// End the wait of this process's reader, if it is queued for a lease:
 /// its [`Leases::take`] returns without one.  Called once what that
-/// `take` was given as `leave` is true, by the thread that would stop
-/// the reader.
+/// `take` was given as `leave` is true, by the thread that stops the
+/// reader -- which is why it does this for a key, and when it stops it.
 pub(crate) fn hurry() {
     let waiter = WAITER.load(Ordering::SeqCst);
     if waiter != 0 {
@@ -135,6 +135,8 @@ pub(crate) struct Leases {
     /// Which lease to queue for when none is free, moved on each time.
     next: usize,
     back_off_until: Option<Instant>,
+    /// [`GATE_WAIT`] and [`TURN_WAIT`], unless a test waits longer.
+    waits: (Duration, Duration),
 }
 
 /// One reader's turn; given up when dropped.
@@ -167,7 +169,15 @@ impl Leases {
     pub(crate) fn at(path: &Path) -> Self {
         hear_hurry();
         let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).ok();
-        Self { file, next: std::process::id() as usize, back_off_until: None }
+        Self { file, next: std::process::id() as usize, back_off_until: None, waits: (GATE_WAIT, TURN_WAIT) }
+    }
+
+    /// Waits no test outlasts: one that ends was ended, it did not run
+    /// out.
+    #[cfg(test)]
+    pub(crate) fn patient(mut self) -> Self {
+        self.waits = (tests::LONG, tests::LONG);
+        self
     }
 
     /// A lease if one is free right now.
@@ -194,9 +204,9 @@ impl Leases {
         let fd = self.usable()?;
         self.next = self.next.wrapping_add(1);
         let slot = self.next % SLOTS;
-        let mut wait = queue(fd, gate(slot), GATE_WAIT, &leave);
+        let mut wait = queue(fd, gate(slot), self.waits.0, &leave);
         if wait == Wait::Got {
-            wait = queue(fd, turn(slot), TURN_WAIT, &leave);
+            wait = queue(fd, turn(slot), self.waits.1, &leave);
             unlock(fd, gate(slot));
         }
         match wait {
@@ -418,7 +428,12 @@ pub(super) mod tests {
 
     /// Far longer than a test may take: a wait that ends in `Left` was
     /// ended, it did not run out.
-    const LONG: Duration = Duration::from_secs(60);
+    pub(crate) const LONG: Duration = Duration::from_secs(60);
+
+    /// A reader of this process is in the queue.
+    pub(crate) fn someone_queued() -> bool {
+        WAITER.load(Ordering::SeqCst) != 0
+    }
 
     /// A reader queued behind leases nobody hands on leaves the queue
     /// when it is hurried.

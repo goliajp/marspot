@@ -110,7 +110,10 @@ pub(super) fn gather(
                 Asked::Ended => return (len, Gathered::Ended),
             }
         }
-        let queued = turn.enter(len, || echo.expected());
+        let queued = turn.enter(len, || echo.expected() || wakes.stopping());
+        if wakes.stopping() {
+            return (len, Gathered::Stopped);
+        }
         // a key was typed while this waited for its turn
         if len > 0 && echo.awaited().is_some() {
             break;
