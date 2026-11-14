@@ -419,7 +419,7 @@ mod tests {
         assert_eq!((a.util_7d, a.reset_7d), (Some(0.42), Some(1_794_538_799)));
         assert_eq!(a.model_limits.len(), 1);
         assert_eq!(a.model_limits[0].label, "Fable");
-        assert_eq!(a.model_limits[0].util, 0.91);
+        assert_eq!(a.model_limits[0].util, Some(0.91));
         assert_eq!(a.model_limits[0].reset, Some(1_794_538_799));
         assert_eq!(a.tier, "default_claude_max_20x");
         assert_eq!(a.collected_at, NOW - 6);

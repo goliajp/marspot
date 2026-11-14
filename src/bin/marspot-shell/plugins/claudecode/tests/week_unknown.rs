@@ -143,3 +143,25 @@ fn a_week_whose_reset_has_passed_is_a_new_one_with_nothing_used() {
         assert!(!room.refused_for(None));
     }
 }
+
+/// A model's cap the feed reports with no reading is no more an empty
+/// cap than an unread week is an empty week: not full, and not known
+/// to have room for a pane on that model. Other panes are not bounded
+/// by it.
+#[test]
+fn a_cap_with_no_reading_is_neither_full_nor_room_for_its_model() {
+    let fable = Some("fable-5-2");
+    let opus = Some("opus-5-5");
+    let r = rooms(&[("rejected", "1", &soon(), "0"), ("allowed", "0.2", &soon(), "null"), ("allowed", "0.5", &late(), "0.5")]);
+    assert!(matches!(&r[1].1, Room::Known { models, .. } if models[0].1.is_none()), "{:?}", r[1].1);
+    assert!(!r[1].1.refused_for(fable));
+    assert!(!r[1].1.known_for(fable) && r[1].1.known_for(opus));
+    assert_eq!(best_profile(&r, 1, fable), Some(3), "a cap read beats one not read");
+    assert_eq!(best_profile(&r, 1, opus), Some(2));
+
+    let only = rooms(&[("rejected", "1", &soon(), "0"), ("allowed", "0.2", &soon(), "null")]);
+    assert_eq!(next_move(&Situation { needs_model: fable, ..situation(&only) }), Move::To(2), "ahead of staying");
+
+    assert_eq!(better_home(&r, 3, fable), None, "no restart for a guess");
+    assert_eq!(better_home(&r, 3, opus), Some((2, Why::RenewsSooner { hours: 96 })));
+}

@@ -228,7 +228,7 @@ fn model_limits(obj: &str) -> Vec<CcModelLimit> {
         .into_iter()
         .map(|m| CcModelLimit {
             label: str_field(m, "label").unwrap_or_default(),
-            util: num_field(m, "utilization").unwrap_or(0.0),
+            util: num_field(m, "utilization"),
             // `"reset": null` is not a time; a model nobody has touched
             // has no window to reset.  `num_field` fails on `null`,
             // which is the answer.
@@ -508,7 +508,7 @@ fn codex_model_name(label: &str) -> String {
 fn codex_windows(obj: &str) -> Vec<CcWindow> {
     struct Bucket {
         name: String,
-        util: f64,
+        util: Option<f64>,
         reset: Option<i64>,
         span: i64,
     }
@@ -520,7 +520,7 @@ fn codex_windows(obj: &str) -> Vec<CcWindow> {
                 let minutes = num_field(m, "window_minutes").unwrap_or(0.0) as i64;
                 Bucket {
                     name: codex_model_name(&str_field(m, "label").unwrap_or_default()),
-                    util: num_field(m, "utilization").unwrap_or(0.0),
+                    util: num_field(m, "utilization"),
                     reset: num_field(m, "reset").map(|t| t as i64),
                     span: minutes * 60,
                 }
@@ -530,7 +530,7 @@ fn codex_windows(obj: &str) -> Vec<CcWindow> {
     let is_sub_day = |b: &&Bucket| b.span > 0 && b.span <= 86_400;
     let row = |label: &str, b: &Bucket| CcWindow {
         label: label.to_string(),
-        util: Some(b.util),
+        util: b.util,
         reset: b.reset,
         span_secs: if b.span > 0 { b.span } else { WEEK_SECS },
     };
@@ -834,12 +834,12 @@ mod tests {
         let m = &u.accounts[1].model_limits;
         assert_eq!(m.len(), 1, "one model cap per account in this feed");
         assert_eq!(m[0].label, "Fable");
-        assert!((m[0].util - 0.66).abs() < 1e-9);
+        assert!((m[0].util.expect("a reading") - 0.66).abs() < 1e-9);
         assert_eq!(m[0].reset, Some(1785704399));
         // `"reset": null` means the window never started — not epoch 0.
         let untouched = &u.accounts[0].model_limits[0];
         assert_eq!(untouched.reset, None);
-        assert_eq!(untouched.util, 0.0);
+        assert_eq!(untouched.util, Some(0.0));
     }
 
     /// The feed is found where the collector writes it, under `HOME`,
