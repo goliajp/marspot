@@ -1980,6 +1980,9 @@ enum CoreEvent {
     Hello(u32),
     /// Shell sent a liveness probe.  We echo the nonce back via PONG.
     Ping(u32),
+    /// The shell drew a toolbar icon this core asked for:
+    /// `(symbol, point_px, side, mask)`.
+    IconMask(u16, u16, u16, Vec<u8>),
     /// Shell closed the control socket — supervisor will tear us down.
     Closed,
     /// An L3 session process published a new grid into
@@ -2317,6 +2320,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
             .map(|(text, win)| CoreEvent::Preedit(text, win)),
         MsgType::Hello => decode_hello(&f.payload).ok().map(CoreEvent::Hello),
         MsgType::Ping => decode_ping(&f.payload).ok().map(CoreEvent::Ping),
+        MsgType::IconMask => marspot::shell_proto::decode_icon_mask(&f.payload)
+            .ok()
+            .map(|(symbol, point_px, side, mask)| CoreEvent::IconMask(symbol, point_px, side, mask)),
         _ => None,
     }
 }
@@ -9336,6 +9342,21 @@ fn main() {
                 CoreEvent::Ping(nonce) => {
                     to_ack.push((MsgType::Pong, encode_pong(nonce)));
                 }
+                CoreEvent::IconMask(symbol, point_px, side, mask) => {
+                    if marspot::ui::system::macos::icons::deliver(symbol, point_px, side, mask) {
+                        for w in app.windows.iter_mut() {
+                            w.needs_render = true;
+                        }
+                    } else {
+                        lx_warn!(
+                            "core.icon.refused",
+                            "an icon from the shell that was not asked for",
+                            symbol = symbol,
+                            point_px = point_px,
+                            side = side
+                        );
+                    }
+                }
                 CoreEvent::PaneBadge(sid, text) => {
                     app.set_pane_badge(sid, text);
                 }
@@ -9446,6 +9467,10 @@ fn main() {
         for (ty, payload) in app.pending_to_shell.drain(..) {
             send_to_shell(&control_writer, Frame::new(ty, payload), "pending_to_shell");
         }
+        for (symbol, point_px) in marspot::ui::system::macos::icons::take_wanted() {
+            let payload = marspot::shell_proto::encode_icon_mask_wanted(symbol, point_px);
+            send_to_shell(&control_writer, Frame::new(MsgType::IconMaskWanted, payload), "icon_mask_wanted");
+        }
         // Apply each window's freshly-attached pair.  Per window:
         // swap the paint target, re-lay out, render one frame into
         // slot 0 and ack `SurfaceReady` so the shell can install the
@@ -9552,6 +9577,13 @@ fn main() {
             // must still only ever be pointed at a settled surface.
             win!(app, wi).pending_caret = caret;
             continue;
+        }
+
+        // icons the frames just built had no mask for: asked for now,
+        // not at the next wake, which may be a while off
+        for (symbol, point_px) in marspot::ui::system::macos::icons::take_wanted() {
+            let payload = marspot::shell_proto::encode_icon_mask_wanted(symbol, point_px);
+            send_to_shell(&control_writer, Frame::new(MsgType::IconMaskWanted, payload), "icon_mask_wanted");
         }
 
         // Frames that finished since the last pass: flip to them and
