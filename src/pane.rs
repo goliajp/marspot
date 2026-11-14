@@ -851,6 +851,9 @@ pub struct L3Conn {
     /// Set once the child process has exited (observed by `poll`'s
     /// `try_wait`).  Read by `is_exited`/`state`, which are `&self`.
     exited: bool,
+    /// …and it exited because its shell ended on its own: an L3
+    /// removes its session dir then, and on no other exit.
+    shell_ended: bool,
     /// Scratch buffer for the snapshot cell copy — reused across polls
     /// so the per-frame read allocates zero.
     scratch: Vec<Cell>,
@@ -917,6 +920,7 @@ impl L3Conn {
             req_view_offset: 0,
             snap_scrollback_len: 0,
             exited: false,
+            shell_ended: false,
             scratch: Vec::new(),
             scratch_wrapped: Vec::new(),
             cluster_table: Default::default(),
@@ -955,6 +959,7 @@ impl L3Conn {
             req_view_offset: 0,
             snap_scrollback_len: 0,
             exited: false,
+            shell_ended: false,
             scratch: Vec::new(),
             scratch_wrapped: Vec::new(),
             cluster_table: Default::default(),
@@ -992,15 +997,14 @@ impl L3Conn {
         // new one. `force_fill` so we re-read the new region even if its
         // first seq coincides with our last.
         let force_fill = false;
-        // Observe exit here (the only `&mut` entry point); `is_exited`
-        // and `state` are `&self` and just read the flag.  Crash isolation:
-        // an L3 dying (panic / kill / shell exit) is one session ending —
-        // log it once and leave the pane showing its last frame (state →
-        // Exited).  The process boundary means it can't take L2 or sibling
-        // L3s down; the container reaps the child via `L3Conn::Drop`.
+        // Observe exit here (the only `&mut` entry point).  An L3 that
+        // crashed leaves the pane frozen at its last frame; one whose
+        // shell ended has removed its dir before exiting, and the
+        // container closes the pane.
         if !self.exited
             && let Ok(Some(status)) = self.child.try_wait() {
                 self.exited = true;
+                self.shell_ended = !crate::session_registry::session_dir(self.session_id).exists();
                 eprintln!(
                     "[core] L3 session pid={} exited ({status}) — pane frozen at last frame, others unaffected",
                     self.child.id()
@@ -1220,30 +1224,11 @@ impl L3Conn {
 
 impl Drop for L3Conn {
     fn drop(&mut self) {
-        // RFC-003 §6 Amendment 12 — DO NOT kill the L3 child here.
-        //
-        // Pre-RFC-003 this Drop killed+reaped the child as "bounded
-        // teardown" because shelld owned the PTY and the L3 helper
-        // was disposable.  RFC-003 reversed that: L3 owns the PTY +
-        // shell, and L3 is the unit users care about preserving
-        // across an L2 lifetime.  Two cases:
-        //
-        //   * close_session (user clicked × on a pane): marspot-core
-        //     already SIGTERMed entry.pid + delete_session() BEFORE
-        //     dropping the pane.  Killing again here is redundant.
-        //   * L2 process exit (user Cmd-Q on marspot.app, supervisor
-        //     restart, panic, crash): this Drop runs on every L3Conn
-        //     during stack unwind.  Killing the child here destroys
-        //     every L3 along with L2 — meaning a single Cmd-Q wipes
-        //     the user's 9 active shells.  THAT is the "原来可以现在
-        //     不行" regression from L4 retirement.
-        //
-        // Instead, drop the file handles (control socket + shm
-        // reader) silently.  L3 sees the EOF, stays alive via
-        // Amendment 11 debug-2/3, and waits for the next L2 boot to
-        // shm_open + connect_with_handshake it (Amendment 7
-        // reattach).  launchd reaps the orphaned L3 if it ever
-        // exits later.
+        // Never kill the L3 child here (RFC-003 Amendment 12): a
+        // pane the user closed was already signalled and its dir
+        // deleted, and on L2's own exit the L3s must outlive it so
+        // the next core can reattach them.  Dropping the handles is
+        // all: the L3 sees EOF and waits for that core.
     }
 }
 
@@ -1724,6 +1709,11 @@ impl Pane {
     /// been pumped through the parser.
     pub fn is_exited(&self) -> bool {
         self.session.is_exited()
+    }
+
+    /// The pane's L3 exited because its shell ended, not in a crash.
+    pub fn shell_ended(&self) -> bool {
+        matches!(&self.session, PaneBackend::L3(c) if c.shell_ended)
     }
 
     /// The shelld session id behind this pane, when it has one. `None`

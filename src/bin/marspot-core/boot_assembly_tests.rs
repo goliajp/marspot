@@ -105,7 +105,7 @@ impl Sandbox {
             root,
         }
     }
-    fn dir(&self) -> &std::path::Path {
+    pub(super) fn dir(&self) -> &std::path::Path {
         &self.root.0
     }
     pub(super) fn set(&mut self, key: &str, value: &str) {
