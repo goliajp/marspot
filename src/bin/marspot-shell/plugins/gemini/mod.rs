@@ -286,7 +286,7 @@ impl Plugin for GeminiPlugin {
         self.sessions.retain(&live);
         self.starts.retain(&live);
         self.panes.retain(|sid, _| seen.iter().any(|s| s.sid == *sid));
-        let mut peers = Peers { bound: Vec::new(), all_known: true };
+        let mut peers = Peers { bound: Vec::new(), all_known: true, unbound: Vec::new() };
 
         for s in &seen {
             let cfg = config_dir(&s.root);
@@ -311,7 +311,10 @@ impl Plugin for GeminiPlugin {
                 (Some(f), Some(cwd)) => {
                     peers.bound.push(Peer { sid: s.sid, gemini: s.gemini, session: f.session.clone(), cwd: cwd.clone() });
                 }
-                _ => peers.all_known = false,
+                _ => {
+                    peers.all_known = false;
+                    peers.unbound.push((s.sid, s.gemini));
+                }
             }
             let profile = profile_of(&s.root);
             // What the process started with holds until its session file

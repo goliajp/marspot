@@ -140,6 +140,10 @@ pub(crate) struct Worker {
     pub(super) codexes: super::others::Codexes,
     /// Which processes are a gemini, for the gemini plugin's look.
     pub(super) geminis: crate::plugins::beside::Kinds,
+    /// The gemini and the kimi panes whose session is not known: in
+    /// the pane table without an inbox (`names`).
+    pub(super) gemini_waiting: Vec<(u64, pidtree::ProcId)>,
+    pub(super) kimi_waiting: Vec<(u64, pidtree::ProcId)>,
     /// `(home, thread) → cwd`, None for a thread that is not a user's
     /// (see `bind::user_thread_cwd`).  Neither ever changes.
     pub(super) cwds: HashMap<(PathBuf, String), Option<String>>,
@@ -178,6 +182,8 @@ impl Worker {
             titles: HashMap::new(),
             codexes: Default::default(),
             geminis: Default::default(),
+            gemini_waiting: Vec::new(),
+            kimi_waiting: Vec::new(),
             cwds: HashMap::new(),
             unbound: HashMap::new(),
             next_key: 1,
