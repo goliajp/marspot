@@ -170,11 +170,120 @@ pub(super) fn decode_record_cells(
     None
 }
 
+/// What the caller already knows about a row it files, so that the
+/// encoder does not have to find it out cell by cell.  Both are
+/// allowed to be loose: the bound may be anywhere at or past the last
+/// cell with attributes of its own, and the guess may be wrong.
+#[derive(Clone, Copy, Debug)]
+pub struct RowHint {
+    /// Every cell at or past this column carries the default attributes.
+    pub plain_from: u16,
+    /// A character past 0x7F may be in the row.
+    pub wide: bool,
+}
+
+impl RowHint {
+    /// Nothing known: every cell is looked at.
+    pub const NONE: RowHint = RowHint { plain_from: u16::MAX, wide: false };
+}
+
 /// Append `line` to `out` as runs of cells that share their attributes.
 ///
 /// `false`, with `out` as it was, when the runs would not be smaller
 /// than the cells themselves — a line that changes colour every cell.
+#[cfg(test)]
 pub(super) fn encode_packed(line: &[crate::grid::Cell], out: &mut Vec<u8>) -> bool {
+    encode_packed_with(line, RowHint::NONE, out)
+}
+
+/// [`encode_packed`] for a row the caller knows something about.  The
+/// bytes are the same whatever the hint says, as long as it is true.
+pub(super) fn encode_packed_with(
+    line: &[crate::grid::Cell],
+    hint: RowHint,
+    out: &mut Vec<u8>,
+) -> bool {
+    const N: usize = crate::grid::CELL_MEM_BYTES;
+    let start = out.len();
+    let (cells, _) = crate::grid::Cell::slice_as_bytes(line).as_chunks::<N>();
+    let raw_len = cells.len() * N;
+    let attrs_of =
+        |c: &[u8; N]| u128::from_ne_bytes(*c.last_chunk::<RUN_ATTR_BYTES>().expect("a cell"));
+    let char_of = |c: &[u8; N]| *c.first_chunk::<4>().expect("a cell");
+    let default_cell = crate::grid::Cell::default();
+    let plain = attrs_of(
+        crate::grid::Cell::slice_as_bytes(std::slice::from_ref(&default_cell))
+            .try_into()
+            .expect("a cell is CELL_MEM_BYTES"),
+    );
+    let plain_from = (hint.plain_from as usize).min(cells.len());
+    debug_assert!(cells[plain_from..].iter().all(|c| attrs_of(c) == plain));
+    let mut wide = hint.wide;
+    let mut i = 0;
+    while i < cells.len() {
+        let attrs = attrs_of(&cells[i]);
+        // Where the run ends.  Only the cells before `plain_from` have
+        // to be asked; a run that reaches it in the default attributes
+        // goes on to the end of the line, and any other stops there.
+        let mut n = 1;
+        while i + n < plain_from && attrs_of(&cells[i + n]) == attrs {
+            n += 1;
+        }
+        if i + n >= plain_from && attrs == plain {
+            n = cells.len() - i;
+        }
+        let run = &cells[i..i + n];
+        // a line is at most u16::MAX cells, so a run is too
+        out.extend_from_slice(&(n as u16).to_le_bytes());
+        let kind = out.len();
+        out.push(RUN_BYTES);
+        out.extend_from_slice(&attrs.to_ne_bytes());
+        // One pass over the run in the width it is expected to need: a
+        // byte a cell for plain text, four once a character past 0x7F
+        // has been seen in the line.  Only a wrong guess writes twice.
+        let body = out.len();
+        loop {
+            let mut any = 0u32;
+            if wide {
+                out.resize(body + 4 * n, 0);
+                let (dst, _) = out[body..].as_chunks_mut::<4>();
+                for (dst, c) in dst.iter_mut().zip(run) {
+                    let ch = char_of(c);
+                    any |= u32::from_ne_bytes(ch);
+                    *dst = ch;
+                }
+                if any >= 0x80 {
+                    out[kind] = RUN_SCALARS;
+                    break;
+                }
+            } else {
+                // an iterator of known length writes straight into the
+                // buffer's spare room, with no fill ahead of it
+                out.extend(run.iter().map(|c| {
+                    any |= u32::from_ne_bytes(char_of(c));
+                    c[0]
+                }));
+                if any < 0x80 {
+                    break;
+                }
+            }
+            wide = !wide;
+            out.truncate(body);
+        }
+        if out.len() - start >= raw_len {
+            out.truncate(start);
+            return false;
+        }
+        i += n;
+    }
+    true
+}
+
+/// The encoder as it was before it took a hint: every cell asked for
+/// its attributes, every run tried at a byte a cell first.  What
+/// [`encode_packed_with`] has to keep writing, byte for byte.
+#[cfg(test)]
+pub(super) fn encode_packed_reference(line: &[crate::grid::Cell], out: &mut Vec<u8>) -> bool {
     const N: usize = crate::grid::CELL_MEM_BYTES;
     let start = out.len();
     let (cells, _) = crate::grid::Cell::slice_as_bytes(line).as_chunks::<N>();
@@ -184,13 +293,9 @@ pub(super) fn encode_packed(line: &[crate::grid::Cell], out: &mut Vec<u8>) -> bo
     let mut i = 0;
     while i < cells.len() {
         let attrs = attrs_of(&cells[i]);
-        // a line is at most u16::MAX cells, so a run is too
         let head = out.len();
         out.extend_from_slice(&[0, 0, RUN_BYTES]);
         out.extend_from_slice(&attrs.to_ne_bytes());
-        // One pass, on the guess that the run is plain text: its low
-        // bytes go straight out, and only a run that turns out to hold
-        // a character past 0x7F is written again at four bytes a cell.
         let body = out.len();
         let rest = &cells[i..];
         out.resize(body + rest.len(), 0);
@@ -410,5 +515,52 @@ mod tests {
         let mut extra = body.clone();
         extra.push(0);
         assert!(decode_record_cells(REC_PACKED, &extra, 5).is_none());
+    }
+
+    /// Whatever a true hint says, the bytes are the ones the encoder
+    /// wrote before it took hints: rows of every mix of attribute runs
+    /// and character widths, under every bound from the tightest to
+    /// the row's length and both guesses about wide characters.
+    #[test]
+    fn a_hint_never_changes_the_bytes() {
+        let mut s = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let plain = crate::grid::Cell::default().attrs;
+        for round in 0..4000u32 {
+            let len = (next() % 41) as usize;
+            let styled = (next() % (len as u64 + 1)) as usize;
+            let mut line = Vec::with_capacity(len);
+            for col in 0..len {
+                let ch = match next() % 8 {
+                    0 if round.is_multiple_of(3) => '\u{4F60}',
+                    1 if round.is_multiple_of(5) => '\u{1F680}',
+                    2 => '\0',
+                    k => (b'a' + k as u8) as char,
+                };
+                // few distinct attributes, so runs of every length occur
+                let fg = if col < styled { (next() % 3) as u8 } else { 0 };
+                let mut c = crate::grid::Cell { ch, ..Default::default() };
+                if fg != 0 {
+                    c.attrs.fg = crate::grid::Color::indexed(fg);
+                }
+                line.push(c);
+            }
+            let tightest = line.iter().rposition(|c| c.attrs != plain).map_or(0, |i| i + 1);
+            let mut want = vec![7u8; 3];
+            let packed = encode_packed_reference(&line, &mut want);
+            for plain_from in (tightest..=len).map(|n| n as u16).chain([u16::MAX]) {
+                for wide in [false, true] {
+                    let mut got = vec![7u8; 3];
+                    let hint = RowHint { plain_from, wide };
+                    assert_eq!(encode_packed_with(&line, hint, &mut got), packed, "{line:?} {hint:?}");
+                    assert_eq!(got, want, "{line:?} {hint:?}");
+                }
+            }
+        }
     }
 }

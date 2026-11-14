@@ -7,14 +7,9 @@
 //! is that path, and the differential tests hold the two together.
 
 use super::Handler;
-use crate::grid::Cell;
+use super::wide_class::wide_at;
+use crate::grid::{Cell, CellAttrs};
 use crate::parser::scan::printable_run_len;
-
-/// Raw codepoint of a 3-byte UTF-8 sequence (caller checked shape).
-#[inline(always)]
-fn decode3_cp(b: &[u8]) -> u32 {
-    (((b[0] & 0x0F) as u32) << 12) | (((b[1] & 0x3F) as u32) << 6) | (b[2] & 0x3F) as u32
-}
 
 /// The fast-path class for `Handler::print`: codepoints that can
 /// never open, extend, or join a multi-codepoint cluster — GBP=Other,
@@ -113,35 +108,22 @@ pub(super) fn fast_pict_width(ch: char) -> Option<u8> {
     Some(2)
 }
 
-/// A multi-byte character at the head of `b` that takes two cells and
-/// is of the fast class, with its encoded length.
-///
-/// The shape test is the parser's own: a lead byte and continuation
-/// bytes, nothing more.  An overlong or out-of-range encoding decodes
-/// to something that is not a two-cell fast-class scalar and is left
-/// to the per-byte path, which prints whatever the parser makes of it.
-#[inline(always)]
-fn wide_at(b: &[u8]) -> Option<(char, usize)> {
-    let b0 = *b.first()?;
-    if (0xE0..=0xEF).contains(&b0) {
-        if b.len() < 3 || b[1] & 0xC0 != 0x80 || b[2] & 0xC0 != 0x80 {
-            return None;
-        }
-        let c = char::from_u32(decode3_cp(b))?;
-        (fast_width(c) == Some(2)).then_some((c, 3))
-    } else if (0xF0..=0xF4).contains(&b0) {
-        if b.len() < 4 || b[1] & 0xC0 != 0x80 || b[2] & 0xC0 != 0x80 || b[3] & 0xC0 != 0x80 {
-            return None;
-        }
-        let cp = (((b0 & 0x07) as u32) << 18)
-            | (((b[1] & 0x3F) as u32) << 12)
-            | (((b[2] & 0x3F) as u32) << 6)
-            | (b[3] & 0x3F) as u32;
-        // nothing past the BMP is in the class but pictographs
-        let c = char::from_u32(cp)?;
-        (fast_pict_width(c) == Some(2)).then_some((c, 4))
-    } else {
-        None
+/// One cell per byte, characters only: for cells that already carry
+/// the attributes they are to have.
+// out of line: inside `feed` the loop competes for registers with
+// everything else the lane holds
+#[inline(never)]
+fn write_chars(cells: &mut [Cell], bytes: &[u8]) {
+    for (cell, &b) in cells.iter_mut().zip(bytes) {
+        cell.ch = b as char;
+    }
+}
+
+/// One cell per byte, each written whole.
+#[inline(never)]
+fn write_cells(cells: &mut [Cell], bytes: &[u8], attrs: CellAttrs) {
+    for (cell, &b) in cells.iter_mut().zip(bytes) {
+        *cell = Cell { ch: b as char, attrs };
     }
 }
 
@@ -241,47 +223,139 @@ impl<'a> Handler<'a> {
             let (_, row) = self.grid.cursor();
             self.wrap_to_next_row(row, rows);
         }
+        let plain = self.attrs.is_default();
+        // The shape most runs have: ASCII that ends inside the row,
+        // with a control or the end of the input behind it.  Nothing
+        // of the general loop's state is needed for it.
+        // the length of the run at the head, once it has been measured
+        let mut measured = 0;
+        if (head as u32) < 0x80 {
+            let (col0, row) = self.grid.cursor();
+            let col = col0 as usize;
+            let room = cols - col;
+            let n = printable(&bytes[..bytes.len().min(room.max(16))]);
+            // what follows is a control, or nothing: not more text
+            // (the scan stopped short of it) and not a wide character
+            let ends = n == bytes.len() || bytes[n] < 0x20 || bytes[n] == 0x7F || (tags && bytes[n] == b'<');
+            if n <= room && ends {
+                let to = col + n;
+                let (cells, mark) = self.grid.row_and_mark_mut(row);
+                if plain && col >= mark.end as usize {
+                    if n < 8 {
+                        // too short to be worth a call
+                        for (cell, &b) in cells[col..to].iter_mut().zip(bytes) {
+                            cell.ch = b as char;
+                        }
+                    } else {
+                        write_chars(&mut cells[col..to], bytes);
+                    }
+                } else {
+                    write_cells(&mut cells[col..to], bytes, *self.attrs);
+                    if !plain && to > mark.plain_from as usize {
+                        mark.plain_from = to as u16;
+                    }
+                }
+                if to > mark.end as usize {
+                    mark.end = to as u16;
+                }
+                if to < cols {
+                    self.grid.set_cursor(to as u16, row);
+                } else {
+                    self.grid.set_cursor((cols - 1) as u16, row);
+                    *self.pending_wrap = true;
+                }
+                let ch = bytes[n - 1] as char;
+                self.cluster_buf.clear();
+                self.cluster_buf.push(ch);
+                *self.cluster_fast = Some((ch, 1));
+                *self.cluster_anchor = Some(((to - 1) as u16, row, 1));
+                *self.seg_synced = false;
+                return n;
+            }
+            measured = n;
+        }
         let attrs = *self.attrs;
         let mut idx = 0;
-        // the last character written: (char, width, column), in `row`
-        let mut last = (head, 1u8, 0u16);
+        // the last character written: where its bytes start, its width
+        // (0 until one is written) and its column in `row`; a wide
+        // one is kept decoded
+        let (mut last_at, mut last_w, mut last_col) = (0usize, 0u8, 0u16);
+        let mut last_wide = head;
         let row = loop {
             let (col0, row) = self.grid.cursor();
             let mut col = col0 as usize;
-            let cells = self.grid.row_cells_mut(0, row, cols);
+            let (cells, mark) = self.grid.row_and_mark_mut(row);
+            // from here on the row holds default cells, and under the
+            // default attributes a default cell only needs its
+            // character replaced
+            let fresh = if plain { mark.end as usize } else { usize::MAX };
+            let mut wide = false;
             // why the row was left: 0 the run ended, 1 the row is
             // full, 2 a wide glyph is next and one column is left
             let left = loop {
                 let rest = &bytes[idx..];
                 let Some(&b0) = rest.first() else { break 0 };
                 if b0.wrapping_sub(0x20) < 0x5F {
-                    let n = printable(rest);
-                    if n == 0 {
+                    // no further than the row has room for: a line
+                    // that wraps many times would otherwise be scanned
+                    // to its end again on every row
+                    let room = cols - col;
+                    if room == 0 {
+                        // a `<` that may open a tag ends the run
+                        // before it ends the row
+                        break if tags && b0 == b'<' { 0 } else { 1 };
+                    }
+                    // sixteen bytes at least, so that a run near the
+                    // row's end is still measured a block at a time
+                    let m = if measured != 0 {
+                        // nothing has moved since the head was measured
+                        std::mem::take(&mut measured)
+                    } else {
+                        printable(&rest[..rest.len().min(room.max(16))])
+                    }
+                    .min(room);
+                    if m == 0 {
                         break 0;
                     }
-                    let m = n.min(cols - col);
-                    if m == 0 {
-                        break 1;
-                    }
-                    for (cell, &b) in cells[col..col + m].iter_mut().zip(rest) {
-                        *cell = Cell { ch: b as char, attrs };
+                    if col >= fresh {
+                        write_chars(&mut cells[col..col + m], rest);
+                    } else {
+                        write_cells(&mut cells[col..col + m], rest, attrs);
                     }
                     col += m;
                     idx += m;
-                    last = (rest[m - 1] as char, 1, (col - 1) as u16);
+                    (last_at, last_w, last_col) = (idx - 1, 1, (col - 1) as u16);
                 } else if let Some((c, len)) = wide_at(rest) {
                     if col + 2 > cols {
                         break if col == cols { 1 } else { 2 };
                     }
-                    cells[col] = Cell { ch: c, attrs };
-                    cells[col + 1] = Cell { ch: '\0', attrs };
-                    last = (c, 2, col as u16);
+                    wide = true;
+                    if col >= fresh {
+                        cells[col].ch = c;
+                        cells[col + 1].ch = '\0';
+                    } else {
+                        cells[col] = Cell { ch: c, attrs };
+                        cells[col + 1] = Cell { ch: '\0', attrs };
+                    }
+                    (last_at, last_w, last_col) = (idx, 2, col as u16);
+                    last_wide = c;
                     col += 2;
                     idx += len;
                 } else {
                     break 0;
                 }
             };
+            // one raise for everything written to this row
+            let to = if left == 2 { cols } else { col } as u16;
+            if to > mark.end {
+                mark.end = to;
+            }
+            if !plain && to > mark.plain_from {
+                mark.plain_from = to;
+            }
+            if wide {
+                mark.wide = true;
+            }
             if left == 0 {
                 if col < cols {
                     self.grid.set_cursor(col as u16, row);
@@ -298,7 +372,11 @@ impl<'a> Handler<'a> {
             }
             self.wrap_to_next_row(row, rows);
         };
-        let (ch, w, col) = last;
+        let (ch, w, col) = match last_w {
+            0 => (head, 1, 0),
+            1 => (bytes[last_at] as char, 1, last_col),
+            _ => (last_wide, 2, last_col),
+        };
         self.cluster_buf.clear();
         self.cluster_buf.push(ch);
         *self.cluster_fast = Some((ch, w));

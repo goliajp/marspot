@@ -17,31 +17,43 @@ impl Parser {
     pub fn csi_slice<C: ParserCallbacks>(&mut self, cb: &mut C, bytes: &[u8]) -> usize {
         debug_assert!(self.in_ground_plain() && bytes.starts_with(b"\x1b["));
         self.reset_seq();
-        self.state = State::CsiEntry;
+        // The parameter being read and the state are kept here and
+        // written back on the way out: a store to the parser for every
+        // digit was a third of what a colour change cost.
+        let mut state = State::CsiEntry;
+        let (mut param, mut pending) = (0u32, false);
         let mut i = 2;
         while i < bytes.len() {
             let b = bytes[i];
             match b {
                 b'0'..=b'9' => {
-                    if self.state == State::CsiEntry {
-                        self.start_param_digit(b);
-                        self.state = State::CsiParam;
-                    } else {
-                        self.continue_param_digit(b);
-                    }
+                    // the first digit of a parameter starts from the
+                    // zero a reset or a `;` left
+                    param = (param * 10 + (b - b'0') as u32).min(u16::MAX as u32);
+                    pending = true;
+                    state = State::CsiParam;
                 }
                 b';' => {
+                    self.current_param = param;
                     self.commit_param();
-                    self.state = State::CsiParam;
+                    (param, pending) = (0, false);
+                    state = State::CsiParam;
                 }
                 0x40..=0x7E => {
-                    self.commit_param_if_pending();
-                    cb.csi_dispatch(
-                        self.params_slice(),
-                        self.subs_slice(),
-                        self.intermediates_slice(),
-                        b,
-                    );
+                    if pending {
+                        self.current_param = param;
+                        self.commit_param();
+                    }
+                    if b == b'm' {
+                        cb.sgr_dispatch(self.params_slice(), self.subs_slice());
+                    } else {
+                        cb.csi_dispatch(
+                            self.params_slice(),
+                            self.subs_slice(),
+                            self.intermediates_slice(),
+                            b,
+                        );
+                    }
                     self.state = State::Ground;
                     return i + 1;
                 }
@@ -49,6 +61,9 @@ impl Parser {
             }
             i += 1;
         }
+        self.state = state;
+        self.current_param = param;
+        self.has_current_param = pending;
         i
     }
 }
