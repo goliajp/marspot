@@ -3633,6 +3633,7 @@ mod tests {
             shm_name: String::new(),
             shell_child_pid: 0,
             build: String::new(),
+            stamps_regions: false,
         })
         .unwrap();
         fs::write(
@@ -4308,6 +4309,7 @@ mod tests {
                 shm_name: String::new(),
                 shell_child_pid: shell_pid,
                 build: String::new(),
+                stamps_regions: false,
             },
         )
         .unwrap();

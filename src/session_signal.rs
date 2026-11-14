@@ -131,6 +131,7 @@ mod tests {
             shm_name: String::new(),
             shell_child_pid: 0,
             build: String::new(),
+            stamps_regions: false,
         };
         write_session_entry(&entry).unwrap();
         let by_entry = signal_entry(&entry, libc::SIGKILL);

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use super::L3Conn;
 use crate::grid::Grid;
-use crate::grid_shm::{ClusterTableReader, GridSnapshot};
+use crate::grid_shm::GridSnapshot;
 
 /// How often to look again for a session's cluster region while it has
 /// none: the L3 creates it after it starts, and an L3 from before
@@ -20,7 +20,7 @@ impl L3Conn {
             && self.clusters_tried_at.is_none_or(|t| t.elapsed() >= RETRY_CLUSTERS_EVERY)
         {
             self.clusters_tried_at = Some(Instant::now());
-            if let Ok(r) = ClusterTableReader::open(self.session_id) {
+            if let Ok(r) = self.open_clusters() {
                 self.reader.attach_clusters(r);
             }
         }
@@ -56,7 +56,7 @@ impl L3Conn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid_shm::{GridShmReader, GridShmWriter};
+    use crate::grid_shm::{GridShmReader, GridShmWriter, SessionRegions};
     use crate::terminal::Terminal;
     use std::os::unix::net::UnixStream;
 
@@ -70,11 +70,20 @@ mod tests {
         let (control, _peer) = UnixStream::pair().expect("socketpair");
         let (_tx, selection_rx) = std::sync::mpsc::channel();
         // our own pid: `reattach` never signals it
-        L3Conn::reattach(std::process::id() as i32, control, reader, selection_rx, id)
+        L3Conn::reattach(std::process::id() as i32, control, reader, regions(id), selection_rx, id)
     }
 
     fn session_id() -> u64 {
         0xC2_0000_0000 + std::process::id() as u64
+    }
+
+    fn regions(id: u64) -> SessionRegions {
+        SessionRegions::for_session(id)
+    }
+
+    fn publish_clusters(writer: &mut GridShmWriter, id: u64) {
+        let r = regions(id);
+        writer.attach_side_regions(r.grid_name(), r.owner());
     }
 
     /// The mirror used to keep L3's pool indices and an empty pool of
@@ -84,7 +93,7 @@ mod tests {
     fn the_mirror_holds_the_text_of_each_cluster_l3_published() {
         let id = session_id();
         let mut writer = GridShmWriter::create(20, 3).expect("shm region");
-        writer.attach_clusters(id);
+        publish_clusters(&mut writer, id);
         let mut term = Terminal::new(20, 3);
         term.feed(format!("{FLAG} {FAMILY}").as_bytes());
         writer.publish(term.grid(), 0, 0);
@@ -93,7 +102,7 @@ mod tests {
         assert!(conn.poll(), "the published frame reaches the mirror");
         let flag = conn.grid.cell(0, 0);
         let family = conn.grid.cell(3, 0);
-        crate::grid_shm::clusters::delete(id);
+        regions(id).delete();
         assert_eq!(conn.grid.cluster_text(&flag), Some(FLAG));
         assert_eq!(conn.grid.cluster_text(&family), Some(FAMILY));
     }
@@ -225,11 +234,11 @@ mod tests {
 
         let id = session_id() + 2;
         let mut with_table = GridShmWriter::create(20, 3).expect("shm region");
-        with_table.attach_clusters(id);
+        publish_clusters(&mut with_table, id);
         with_table.publish(term.grid(), 0, 0);
         let mut conn = conn_on(&with_table, id);
         assert!(conn.poll());
-        crate::grid_shm::clusters::delete(id);
+        regions(id).delete();
         assert_eq!(drawn(&conn.grid), Some(direct.clone()), "the mirror draws what the terminal draws");
 
         let mut without = GridShmWriter::create(20, 3).expect("shm region");

@@ -121,6 +121,8 @@ dev_pasteboard_release() {
 # that removes the directory and lets the app create it starts at 1.
 dev_seed_session_base() {
   local sd=${MARSPOT_STATE_DIR:-} sum
+  # a suite about sandboxes whose ids are the same asks for none
+  [[ -z ${MARSPOT_DEV_IDS_FROM_ONE:-} ]] || return 0
   [[ -n $sd && -d $sd && ! -s $sd/sessions/.next_id ]] || return 0
   sum=$(printf '%s' "$sd" | cksum | cut -d' ' -f1)
   command mkdir -p "$sd/sessions" \
@@ -255,6 +257,35 @@ dev_sandbox_pids() {
   done | awk '!seen[$0]++'
 }
 
+# The names of the shared regions this sandbox's sessions publish
+# under, by the session registry, one per line: each grid region and
+# the cluster and title regions named after it.  Only names that carry
+# the state directory's digest; a name from before that is not this
+# sandbox's alone.
+dev_region_names() {
+  local e n
+  for e in "$MARSPOT_STATE_DIR"/sessions/*/entry.toml; do
+    [[ -f $e ]] || continue
+    n=$(sed -n 's/^shm_name = "\(\/msp-s-[0-9a-f]\{8\}\.[0-9a-z]*\)"$/\1/p' "$e")
+    [[ -n $n ]] || continue
+    printf '%s\n' "$n" "/msp-c-${n#/msp-s-}" "/msp-t-${n#/msp-s-}"
+  done
+  return 0
+}
+
+# Remove shared-region names.  A session that is killed cannot remove
+# its own, and a name outlives every process: left alone, each sandbox
+# run would leave three regions in the kernel until the next reboot.
+dev_forget_regions() {
+  (( $# > 0 )) || return 0
+  python3 -c 'import _posixshmem, sys
+for name in sys.argv[1:]:
+    try:
+        _posixshmem.shm_unlink(name)
+    except OSError:
+        pass' "$@"
+}
+
 # Stop this sandbox's shell, core and sessions, and nothing else.
 #
 # Shells and cores get TERM first and a few seconds to go.  Sessions get
@@ -269,9 +300,11 @@ dev_sandbox_pids() {
 # the L3s by.  So the registry is read here, before anything is removed,
 # and an L3 whose registry entry disappears ends itself.
 dev_kill_shell_core() {
-  local p comm pids upper=() i
+  local p comm pids upper=() i regions
+  regions=$(dev_region_names)
   pids=$(dev_sandbox_pids)
-  [[ -n $pids ]] || return 0
+  # shellcheck disable=SC2086
+  [[ -n $pids ]] || { dev_forget_regions $regions; return 0; }
   for p in $pids; do
     comm=$(ps -o comm= -p "$p" 2>/dev/null) || continue
     case "${comm##*/}" in
@@ -300,6 +333,8 @@ dev_kill_shell_core() {
   if [[ -f $MARSPOT_STATE_DIR/dev.pids ]]; then
     : > "$MARSPOT_STATE_DIR/dev.pids"
   fi
+  # shellcheck disable=SC2086
+  dev_forget_regions $regions
   local left=""
   for p in $pids; do
     if kill -0 "$p" 2>/dev/null; then left+=" $p"; fi

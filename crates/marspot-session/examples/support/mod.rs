@@ -13,13 +13,13 @@
 #![allow(dead_code)]
 
 use std::io::Write;
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use marspot_term::grid_shm::{GridShmReader, create_region};
+use marspot_term::grid_shm::{GridShmReader, SessionRegions, create_region};
 use marspot_term::input_core::{KeyState, LogicalKey, MarspotKeyEvent, Modifiers, NamedKey};
 use marspot_term::shell_proto::{
     FIRST_WINDOW_ID, Frame, MsgType, PROTO_VERSION, decode_hello_ack, encode_hello,
@@ -84,6 +84,20 @@ impl Session {
     pub fn spawn_with_id(bin: &Path, cols: u16, rows: u16, id: Option<u64>) -> Self {
         let region = create_region(cols, rows)
             .unwrap_or_else(|e| die(format!("create_region: {e}")));
+        Self::spawn_on(bin, region, id, None)
+    }
+
+    /// Spawn session `id` on a grid region under its name, as the core
+    /// does, so the session publishes cluster text and a title beside
+    /// it.  The caller deletes the regions.
+    pub fn spawn_named(bin: &Path, cols: u16, rows: u16, id: u64) -> (Self, SessionRegions) {
+        let regions = SessionRegions::for_session(id);
+        let region = regions.create(cols, rows).unwrap_or_else(|e| die(format!("create region: {e}")));
+        let name = regions.grid_name().to_string_lossy().into_owned();
+        (Self::spawn_on(bin, region, Some(id), Some(&name)), regions)
+    }
+
+    fn spawn_on(bin: &Path, region: OwnedFd, id: Option<u64>, name: Option<&str>) -> Self {
         clear_cloexec(region.as_raw_fd());
         let (parent, child_end) =
             UnixStream::pair().unwrap_or_else(|e| die(format!("socket pair: {e}")));
@@ -93,6 +107,9 @@ impl Session {
             .env("MARSPOT_SHM_FD", region.as_raw_fd().to_string());
         if let Some(id) = id {
             cmd.env("MARSPOT_SESSION_ID", id.to_string());
+        }
+        if let Some(name) = name {
+            cmd.env("MARSPOT_SHM_NAME", name);
         }
         let child = cmd
             .spawn()
