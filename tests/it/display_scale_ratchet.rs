@@ -36,7 +36,7 @@ const NOT_A_LENGTH: &[&str] =
     &["_PX", "_FRAC", "_CELLS", "_AT", "_EM", "_RATIO", "_INK", "_GUTTERS", "_SECS", "_ALPHA", "LIGHTEN"];
 
 /// Calls that scale what they are handed: the conversions themselves,
-/// the canvas's unit, and two painters that take a length in points.
+/// the tree's point, and two painters that take a length in points.
 const SCALES_ITS_ARGUMENT: &[&str] = &["px", "snap", "snap_up", "snap_down", "Pt", "fill", "paint_cross"];
 
 fn root() -> &'static Path {

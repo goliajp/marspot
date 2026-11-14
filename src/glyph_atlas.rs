@@ -725,6 +725,11 @@ impl GlyphAtlas {
     ///
     /// The closure form keeps the cache-hit path zero-alloc; only on
     /// miss do we allocate the rasterisation buffer.
+    /// Whether `key` has a slot now, without touching it.
+    pub fn has(&self, key: &GlyphKey) -> bool {
+        self.cache.contains_key(key)
+    }
+
     pub fn get_or_insert_custom_raster<F>(
         &mut self,
         key: GlyphKey,

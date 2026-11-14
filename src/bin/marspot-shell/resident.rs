@@ -245,7 +245,7 @@ fn apply_staged() {
 
 /// Sleep until a session exits or an update is staged; exit with the
 /// last session.
-fn watch(mut sessions: Vec<i32>) {
+fn watch(mut sessions: Vec<i32>) -> ! {
     // SAFETY: plain kqueue calls on a queue made here; an all-zero
     // kevent is a valid one to fill in.
     unsafe {
@@ -336,7 +336,9 @@ pub(crate) fn is_resident() -> bool {
 fn wait(sessions: Vec<i32>, app: &NSApplication, mtm: MainThreadMarker) -> ! {
     RESIDENT.store(true, std::sync::atomic::Ordering::Release);
     crate::reclaim::watch();
-    if let Err(e) = std::thread::Builder::new().name("l1-resident".into()).spawn(move || watch(sessions)) {
+    if let Err(e) = std::thread::Builder::new().name("l1-resident".into()).spawn(move || {
+        watch(sessions);
+    }) {
         lx_warn!("shell.resident.watch_failed", &format!("{e}"));
         leave("cannot watch the sessions");
     }
@@ -359,10 +361,19 @@ pub(crate) fn run() -> ! {
     // SAFETY: startup path in main(), before any thread is spawned.
     unsafe { std::env::remove_var(RESIDENT_ENV) };
     let sessions = announce_and_list();
-    if started_by_a_session || crate::instance::is_heir() {
-        crate::identity::take_coalition_as(&[(RESIDENT_ENV, "1")]);
-    }
+    let registered = !(started_by_a_session || crate::instance::is_heir())
+        || crate::identity::take_coalition_as(&[(RESIDENT_ENV, "1")]);
     crate::instance::serve_front(|| resume("a second launch asked"));
+    if !registered {
+        // registering now would take the dead record over and leave the
+        // coalition nobody's: watch the sessions unregistered, and let
+        // the next start of the app, or a launch that asks, try again
+        lx_warn!(
+            "SHELL_RESIDENT_UNREGISTERED",
+            "a dead record of the app has the sessions' coalition and could not be taken over; staying unregistered until the app is next started"
+        );
+        watch(sessions)
+    }
     let mtm = MainThreadMarker::new().expect("the resident runs on the main thread");
     wait(sessions, &NSApplication::sharedApplication(mtm), mtm)
 }
