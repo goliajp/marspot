@@ -12,6 +12,12 @@
 //!
 //!     cargo run --release -p marspot-session --example l3_mem_probe -- \
 //!       target/release/marspot-session bench/scenarios/cat-mixed.bin 8 9
+//!
+//! The sessions are started together, which is not how a core starts
+//! them: it waits for each before it starts the next.  A fifth
+//! argument, `apart`, does the same here -- sessions that start at once
+//! compete for cores while they start, and what a starting process's
+//! allocator touches depends on which cores its threads ran on.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -45,12 +51,13 @@ fn memory_kib(pid: u32) -> Option<(u64, u64)> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
-        die("usage: l3_mem_probe <marspot-session> <scenario> <repeats> [panes]");
+        die("usage: l3_mem_probe <marspot-session> <scenario> <repeats> [panes] [apart]");
     }
     let bin = PathBuf::from(&args[1]);
     let scenario = std::fs::canonicalize(&args[2]).unwrap_or_else(|e| die(format!("{}: {e}", args[2])));
     let repeats: usize = args[3].parse().unwrap_or(1);
     let panes: usize = args.get(4).and_then(|n| n.parse().ok()).unwrap_or(1);
+    let apart = args.get(5).is_some_and(|a| a == "apart");
 
     let sandbox = std::env::temp_dir().join(format!("l3-mem-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&sandbox);
@@ -78,7 +85,15 @@ fn main() {
         std::env::set_var("SHELL", &script);
     }
 
-    let mut sessions: Vec<Session> = (0..panes).map(|i| Session::spawn_with_id(&bin, COLS, ROWS, Some(i as u64 + 1))).collect();
+    let mut sessions: Vec<Session> = (0..panes)
+        .map(|i| {
+            let s = Session::spawn_with_id(&bin, COLS, ROWS, Some(i as u64 + 1));
+            if apart {
+                s.wait_ready("session");
+            }
+            s
+        })
+        .collect();
     for s in &sessions {
         // a core reads what its session sends
         let mut pokes = s.control.try_clone().unwrap_or_else(|e| die(format!("clone the control stream: {e}")));
@@ -127,6 +142,9 @@ fn main() {
     };
     println!("{panes} pane(s), flood of {:.2} s", flood_secs);
     line("idle", &idle);
+    // a page is 16 KiB: the average hides which panes hold one more
+    let each: Vec<String> = idle.iter().map(|(footprint, _)| footprint.to_string()).collect();
+    println!("idle, each  footprint {} KiB", each.join(" "));
     line("flood peak", &peak);
     line("quiet after", &quiet);
 }

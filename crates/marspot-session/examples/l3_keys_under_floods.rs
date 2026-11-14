@@ -50,6 +50,10 @@ const ROWS: u16 = 39;
 const GAP_MS: u64 = 120;
 const GAP_SPREAD_MS: u64 = 60;
 
+/// An answer later than this is counted on its own: the percentiles of
+/// a hundred keys say little about the few that waited for a stall.
+const SLOW_MS: f64 = 3.0;
+
 const LINE: &[u8] = b"the quick brown fox jumps over the lazy dog, again and again and again and again and again and again and again\r\n";
 
 /// The tty this program was started on, raw; `min` is how many bytes a
@@ -247,12 +251,13 @@ fn keys_under_floods(bin: &Path, neighbours: usize, typed_role: &str, keys: usiz
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let pick = |q: f64| samples[((samples.len() as f64 - 1.0) * q).round() as usize];
     println!(
-        "key→answer, {role} pane beside {neighbours} flooding, {} keys ({lost} lost): p50 {:.2} ms, p90 {:.2} ms, p99 {:.2} ms, max {:.2} ms; load1 {load_low:.1}–{load_high:.1}",
+        "key→answer, {role} pane beside {neighbours} flooding, {} keys ({lost} lost): p50 {:.2} ms, p90 {:.2} ms, p99 {:.2} ms, max {:.2} ms, {} over {SLOW_MS} ms; load1 {load_low:.1}–{load_high:.1}",
         samples.len(),
         pick(0.50),
         pick(0.90),
         pick(0.99),
         samples[samples.len() - 1],
+        samples.iter().filter(|&&ms| ms > SLOW_MS).count(),
     );
     if let Some(limit) = limit_ms
         && (pick(0.99) > limit || lost > 0)
