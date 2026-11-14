@@ -92,7 +92,7 @@ pub fn process_columns(kill_w: f64) -> [Column; 5] {
 }
 
 /// One process of the selected pane's tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq)]
 pub struct ProcessPanelRow {
     /// Levels below the pane's shell, which is 0.
     pub depth: u8,
@@ -107,7 +107,7 @@ pub struct ProcessPanelRow {
 }
 
 /// One pane, summed over its process tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq)]
 pub struct ProcessPanelPaneRow {
     /// The pane's name as it appears elsewhere.
     pub name: String,
@@ -119,21 +119,39 @@ pub struct ProcessPanelPaneRow {
     pub busy: String,
 }
 
-/// Everything one frame of the panel is drawn from.
-#[derive(Debug, Clone)]
-pub struct ProcessPanelRender {
-    /// Where everything is — the same value the click handler holds.
-    pub layout: Layout,
-    pub pane_rows: Vec<ProcessPanelPaneRow>,
-    /// The row of `pane_rows` whose processes are in `rows`.
-    pub selected_pane: usize,
-    /// Which pane the right table is about: its name, session id and
-    /// shell pid, shown at the right of the group's heading.
-    pub detail: String,
-    pub rows: Vec<ProcessPanelRow>,
-    /// What the pointer is on.
-    pub hover: Hover,
+// Cloned by hand so that a kept copy is brought up to date in the
+// strings it already has.
+impl Clone for ProcessPanelRow {
+    fn clone(&self) -> Self {
+        Self { depth: self.depth, pid: self.pid, comm: self.comm.clone(), cpu_pct: self.cpu_pct, rss_kb: self.rss_kb }
+    }
+
+    fn clone_from(&mut self, from: &Self) {
+        self.comm.clone_from(&from.comm);
+        (self.depth, self.pid, self.cpu_pct, self.rss_kb) = (from.depth, from.pid, from.cpu_pct, from.rss_kb);
+    }
 }
+
+impl Clone for ProcessPanelPaneRow {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            sid: self.sid,
+            n_pids: self.n_pids,
+            cpu_pct: self.cpu_pct,
+            rss_kb: self.rss_kb,
+            busy: self.busy.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, from: &Self) {
+        self.name.clone_from(&from.name);
+        self.busy.clone_from(&from.busy);
+        (self.sid, self.n_pids, self.cpu_pct, self.rss_kb) = (from.sid, from.n_pids, from.cpu_pct, from.rss_kb);
+    }
+}
+
+pub use crate::ui::components::process_view::ProcessPanelRender;
 
 /// What the pointer is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -256,31 +274,6 @@ pub fn layout(
 }
 
 impl Layout {
-    /// What `(x, y)` is on.  The painter highlights it and a click
-    /// acts on it.
-    pub fn hover_at(&self, x: f64, y: f64) -> Hover {
-        if self.chrome.hit_close(x, y) {
-            return Hover::Close;
-        }
-        if let Some(&(i, _)) = self.kills.iter().find(|(_, r)| r.contains(x, y)) {
-            return Hover::Kill(i);
-        }
-        if let Some(i) = self.panes.row_at(x, y) {
-            return Hover::Pane(i);
-        }
-        self.processes.row_at(x, y).map_or(Hover::None, Hover::Process)
-    }
-
-    /// Is `(x, y)` on the header where it is a drag handle?
-    pub fn hit_header(&self, x: f64, y: f64) -> bool {
-        self.chrome.hit_header(x, y)
-    }
-
-    /// Is `(x, y)` anywhere on the panel?
-    pub fn contains(&self, x: f64, y: f64) -> bool {
-        self.chrome.frame.contains(x, y)
-    }
-
     /// How far the process list is pushed up, and how far it can be.
     pub fn scroll(&self) -> (f64, f64) {
         (self.processes.scroll, self.processes.max_scroll)
@@ -316,10 +309,6 @@ mod tests {
         layout(frame(), 0.0, n_panes, n_rows, scroll, CELL_W, CELL_H)
     }
 
-    fn centre(r: Rect) -> (f64, f64) {
-        (r.x + r.w * 0.5, r.y_top + r.h * 0.5)
-    }
-
     #[test]
     fn process_panel_is_the_wide_step_and_as_tall_as_its_rows() {
         let f = frame();
@@ -353,24 +342,17 @@ mod tests {
     }
 
     #[test]
-    fn process_panel_close_hit_box_is_where_the_chrome_draws_it() {
+    fn process_panel_close_button_is_where_the_chrome_draws_it() {
         let l = laid_out(4, 10, 0.0);
         let close = PanelChrome::new(frame(), 0.0).close;
         assert_eq!(
             (l.chrome.close.x, l.chrome.close.y_top, l.chrome.close.w, l.chrome.close.h),
             (close.x, close.y_top, close.w, close.h),
         );
-        let (cx, cy) = centre(close);
-        assert_eq!(l.hover_at(cx, cy), Hover::Close);
-        assert_eq!(l.hover_at(close.x + 0.5, close.y_top + 0.5), Hover::Close);
-        assert_eq!(l.hover_at(close.x - 1.0, cy), Hover::None);
-        assert_eq!(l.hover_at(cx, close.y_top + close.h + 1.0), Hover::None);
-        assert!(!l.hit_header(cx, cy), "the close button is not a drag handle");
-        assert!(l.hit_header(l.chrome.title_x(), cy));
     }
 
     #[test]
-    fn process_panel_kill_hit_box_is_the_rect_it_is_painted_in() {
+    fn process_panel_kill_button_is_centred_at_the_right_end_of_its_row() {
         let l = laid_out(4, 10, 0.0);
         assert_eq!(l.kills.len(), 10, "every laid-out row has a button");
         let (side, _) = controls::danger_button_size_in_row(table::row_height(CELL_H));
@@ -381,19 +363,6 @@ mod tests {
             assert!((k.y_top - row.y_top - (row.y_top + row.h - k.y_top - k.h)).abs() < 1e-9, "centred");
             let right = l.processes.card.x + l.processes.card.w - spec::px(card::ROW_PAD_X);
             assert!((k.x + k.w - right).abs() < 1e-9, "at the right end of the row");
-            // Every corner of the rect is the button; a pixel outside
-            // it is the row.
-            for (x, y) in [
-                (k.x, k.y_top),
-                (k.x + k.w - 0.01, k.y_top),
-                (k.x, k.y_top + k.h - 0.01),
-                (k.x + k.w - 0.01, k.y_top + k.h - 0.01),
-            ] {
-                assert_eq!(l.hover_at(x, y), Hover::Kill(i));
-            }
-            assert_eq!(l.hover_at(k.x - 0.5, k.y_top), Hover::Process(i));
-            assert_eq!(l.hover_at(k.x, k.y_top - 0.5), Hover::Process(i));
-            assert_eq!(l.hover_at(k.x, k.y_top + k.h + 0.01), Hover::Process(i));
         }
     }
 
@@ -427,8 +396,6 @@ mod tests {
         for &(_, r) in &g.rows {
             assert!(r.y_top >= g.header.y_top + g.header.h && r.y_top + r.h <= bottom);
         }
-        // Below the card there is nothing to click.
-        assert_eq!(l.hover_at(g.card.x + 20.0, bottom + 5.0), Hover::None);
         // Scrolled to the end, the last row is the one at the bottom
         // and the first ones are gone.
         let (_, max) = l.scroll();
@@ -457,25 +424,6 @@ mod tests {
         assert_eq!(c.x - l.chrome.frame.x, spec::px(content::PAD_X));
         // The left card shows a whole pane name at this font.
         assert!((l.panes.columns[col::NAME].1 - metric::PANE_NAME_CELLS * CELL_W).abs() < 1e-9);
-    }
-
-    #[test]
-    fn process_panel_rows_select_and_the_pointer_finds_them() {
-        let l = laid_out(4, 10, 0.0);
-        for &(i, r) in &l.panes.rows {
-            assert_eq!(l.hover_at(r.x + 30.0, r.y_top + r.h * 0.5), Hover::Pane(i));
-        }
-        let (_, r) = l.processes.rows[3];
-        assert_eq!(l.hover_at(r.x + 30.0, r.y_top + 1.0), Hover::Process(3));
-        // The headings, the table headers and the gap between the
-        // cards are nothing.
-        let (hx, hy) = centre(l.panes.header);
-        assert_eq!(l.hover_at(hx, hy), Hover::None);
-        assert_eq!(l.hover_at(l.panes_heading.x + 4.0, l.panes_heading.top + 4.0), Hover::None);
-        let between = l.panes.card.x + l.panes.card.w + 2.0;
-        assert_eq!(l.hover_at(between, r.y_top + 1.0), Hover::None);
-        assert!(l.contains(between, r.y_top + 1.0));
-        assert!(!l.contains(l.chrome.frame.x - 1.0, r.y_top));
     }
 
     #[test]

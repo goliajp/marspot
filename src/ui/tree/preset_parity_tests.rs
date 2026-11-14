@@ -169,7 +169,7 @@ fn rect_of(tree: &Tree, layout: &Layout, t: Target) -> Rect {
 
 /// An output that shows a preset as hovered wherever one of `at` is.
 struct ManyPointers<'o, 'p, 'a> {
-    out: TreeOut<'p, 'a>,
+    out: TreeOut<'p, 'a, 'static>,
     at: &'o [Rect],
 }
 

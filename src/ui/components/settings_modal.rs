@@ -80,7 +80,7 @@ use crate::ui::theme::spec::{self, card, content, space};
 
 /// One row's height — constant across a card whatever control it
 /// holds, so the card does not step.
-fn row_h_pt() -> f64 {
+pub fn row_h_pt() -> f64 {
     card::ROW_PAD_Y * 2.0
         + metric::ROW_BAND_H
         + space::LABEL_TO_DESC
@@ -246,71 +246,6 @@ pub fn text_x(rect: Rect) -> f64 {
     PanelChrome::new(rect, 0.0).content.x + spec::px(card::ROW_PAD_X)
 }
 
-/// What the pointer is on: nothing the panel reacts to, the header's
-/// close button, or segment `n` of a row's control (0 for a toggle).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Hover {
-    #[default]
-    None,
-    Close,
-    Control(Row, usize),
-}
-
-/// What `(px_x, py)` is on.  The painter highlights it and a click
-/// acts on it, so the two cannot disagree.
-pub fn hover_at(
-    rect: Rect,
-    scroll: f64,
-    s: &Settings,
-    m: Measure<'_>,
-    px_x: f64,
-    py: f64,
-) -> Hover {
-    let chrome = PanelChrome::new(rect, 0.0);
-    if chrome.hit_close(px_x, py) {
-        return Hover::Close;
-    }
-    // A control scrolled out of the content area is not clickable
-    // where it would have been, so the clip the painter applies has to
-    // apply here too -- otherwise a row pushed up under the header
-    // still answers clicks aimed at the title.
-    if !chrome.content.contains(px_x, py) {
-        return Hover::None;
-    }
-    // The control under the pointer first, its segment after: the
-    // walker borrows `m` for the duration, and the segment geometry
-    // needs it again.
-    let mut under: Option<(Row, Rect)> = None;
-    walk(rect, scroll, s, m, |slot| {
-        if let Slot::Row { row, control, .. } = slot
-            && control.contains(px_x, py)
-        {
-            under = Some((row, control));
-        }
-    });
-    let Some((row, control)) = under else { return Hover::None };
-    let seg = match row.control(s) {
-        Control::Toggle(_) => Some(0),
-        Control::Segmented { options, .. } => controls::segment_at(control, options, m, px_x, py),
-    };
-    seg.map_or(Hover::None, |seg| Hover::Control(row, seg))
-}
-
-/// Which row and segment `(px_x, py)` lands on, if any.
-pub fn hit_test(
-    rect: Rect,
-    scroll: f64,
-    s: &Settings,
-    m: Measure<'_>,
-    px_x: f64,
-    py: f64,
-) -> Option<(Row, usize)> {
-    match hover_at(rect, scroll, s, m, px_x, py) {
-        Hover::Control(row, seg) => Some((row, seg)),
-        Hover::None | Hover::Close => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,68 +369,8 @@ mod tests {
         panel_rect(w, h, s, &mut m, 30.0)
     }
 
-    /// The claim `walk` is built on: a control is clickable exactly
-    /// where it is drawn.  Aim at the middle of each control the
-    /// painter would paint, and the hit-test must name that same row.
-    #[test]
-    fn every_control_is_clickable_where_it_is_drawn() {
-        let _scale = scale_guard();
-        let s = Settings::default();
-        let rect = test_rect(1600.0, 1400.0, &s);
-        let slots = collect(rect, &s);
-        let mut m = fake_measure();
-
-        assert_eq!(rows_of(&slots).len(), rows().count(), "every row is walked once");
-
-        for slot in &slots {
-            let Slot::Row { row, control, .. } = slot else { continue };
-            match row.control(&s) {
-                Control::Toggle(_) => {
-                    let hit = hit_test(
-                        rect, 0.0, &s, &mut m,
-                        control.x + control.w / 2.0,
-                        control.y_top + control.h / 2.0,
-                    );
-                    assert_eq!(hit, Some((*row, 0)), "toggle {row:?}");
-                }
-                Control::Segmented { options, .. } => {
-                    for n in 0..options.len() {
-                        let sr = controls::segment_rect(*control, n, options, &mut m);
-                        let hit = hit_test(
-                            rect, 0.0, &s, &mut m,
-                            sr.x + sr.w / 2.0,
-                            sr.y_top + sr.h / 2.0,
-                        );
-                        assert_eq!(hit, Some((*row, n)), "segment {n} of {row:?}");
-                    }
-                }
-            }
-        }
-        // A click in the panel's empty space hits nothing.
-        assert_eq!(hit_test(rect, 0.0, &s, &mut m, rect.x + 2.0, rect.y_top + 2.0), None);
-    }
-
-    /// The header is the shared chrome's: its close button answers
-    /// where the chrome draws it, and is not a row.
-    #[test]
-    fn the_close_button_is_hit_where_the_chrome_draws_it() {
-        let _scale = scale_guard();
-        let s = Settings::default();
-        let rect = test_rect(1600.0, 1400.0, &s);
-        let mut m = fake_measure();
-        let close = PanelChrome::new(rect, 0.0).close;
-        let (cx, cy) = (close.x + close.w / 2.0, close.y_top + close.h / 2.0);
-        assert_eq!(hover_at(rect, 0.0, &s, &mut m, cx, cy), Hover::Close);
-        assert_eq!(hit_test(rect, 0.0, &s, &mut m, cx, cy), None);
-        assert_eq!(
-            hover_at(rect, 0.0, &s, &mut m, close.x - 4.0, cy),
-            Hover::None,
-            "beside the button is the header, not the button",
-        );
-    }
-
     /// Scrolled content goes under the header, and what is under the
-    /// header is neither drawn nor clickable.
+    /// header is not drawn.
     #[test]
     fn a_control_scrolled_under_the_header_is_gone() {
         let _scale = scale_guard();
@@ -517,8 +392,6 @@ mod tests {
         // Push the first control up to the middle of the header.
         let scroll = first.y_top + first.h / 2.0 - (chrome.header.y_top + chrome.header.h / 2.0);
         assert!(scroll <= max, "the header is within reach of the scroll range");
-        let (x, y) = (first.x + first.w / 2.0, chrome.header.y_top + chrome.header.h / 2.0);
-        assert_eq!(hit_test(rect, scroll, &s, &mut m, x, y), None);
         let mut drawn = 0;
         walk_visible(rect, scroll, &s, &mut m, |slot| {
             let (top, bottom) = match slot {

@@ -264,6 +264,7 @@ pub fn shape_line<F: FnMut(CTFont) -> u32>(
 
 /// One cached shaping result plus the stamp that decides when it goes.
 struct ShapeEntry {
+    key: ShapeKey,
     glyphs: Vec<ShapedGlyph>,
     last_used: u64,
 }
@@ -287,7 +288,8 @@ struct ShapeEntry {
 /// eviction, i.e. at most once per miss once the cache is full.
 /// `glyph_atlas` already resolved the same problem the same way.
 pub struct ShapeCache {
-    map: FxHashMap<ShapeKey, ShapeEntry>,
+    /// By [`slot_of`] the run; the entry holds the run itself.
+    map: FxHashMap<u64, ShapeEntry>,
     /// Monotonic access counter; each entry records the value it last
     /// saw.  Wrapping is not a concern (u64 at one bump per lookup).
     tick: u64,
@@ -309,6 +311,22 @@ struct ShapeKey {
     /// and lets the same string at the same size cache one slot per
     /// active opts combination.
     opts_bits: u8,
+}
+
+impl ShapeKey {
+    fn is(&self, text: &str, size_q: u16, base_font_id: u32, opts_bits: u8) -> bool {
+        self.size_q == size_q && self.base_font_id == base_font_id && self.opts_bits == opts_bits && self.text == text
+    }
+}
+
+/// Where a run is kept: a hash of everything that tells two runs
+/// apart, taken from the borrowed text.
+fn slot_of(text: &str, size_q: u16, base_font_id: u32, opts_bits: u8) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = marspot_term::fast_hash::FxHasher::default();
+    text.hash(&mut h);
+    (size_q, base_font_id, opts_bits).hash(&mut h);
+    h.finish()
 }
 
 #[inline]
@@ -367,52 +385,54 @@ impl ShapeCache {
         opts: ShapeOptions,
         shape_fn: S,
     ) -> &[ShapedGlyph] {
-        let key = ShapeKey {
-            text: text.to_owned(),
-            size_q,
-            base_font_id,
-            opts_bits: opts_to_bits(opts),
-        };
-        let opts_for_shape = ShapeOptions {
-            kerning: (key.opts_bits & 0b0001) != 0,
-            liga: (key.opts_bits & 0b0010) != 0,
-            calt: (key.opts_bits & 0b0100) != 0,
-            contextual: (key.opts_bits & 0b1000) != 0,
-        };
+        let bits = opts_to_bits(opts);
+        let slot = slot_of(text, size_q, base_font_id, bits);
         self.tick += 1;
         let now = self.tick;
-        if self.map.contains_key(&key) {
+        // found by a hash of the borrowed text and told apart by the
+        // text itself: a hit copies nothing
+        let hit = self.map.get(&slot).is_some_and(|e| e.key.is(text, size_q, base_font_id, bits));
+        if hit {
             self.hits += 1;
-            let e = self.map.get_mut(&key).unwrap();
+            let e = self.map.get_mut(&slot).unwrap();
             e.last_used = now;
             return &e.glyphs;
         }
         self.misses += 1;
+        let opts_for_shape = ShapeOptions {
+            kerning: (bits & 0b0001) != 0,
+            liga: (bits & 0b0010) != 0,
+            calt: (bits & 0b0100) != 0,
+            contextual: (bits & 0b1000) != 0,
+        };
         let shaped = shape_fn(text, opts_for_shape);
-        if self.map.len() >= self.cap {
+        if self.map.len() >= self.cap && !self.map.contains_key(&slot) {
             // Only reached on a miss into a full cache, so the scan is
             // amortised against a CoreText shaping call that costs far
             // more than reading 1024 integers.
-            if let Some(oldest) = self
-                .map
-                .iter()
-                .min_by_key(|(_, e)| e.last_used)
-                .map(|(k, _)| k.clone())
-            {
+            if let Some(oldest) = self.map.iter().min_by_key(|(_, e)| e.last_used).map(|(k, _)| *k) {
                 self.map.remove(&oldest);
             }
         }
-        self.map.insert(
-            key.clone(),
-            ShapeEntry { glyphs: shaped, last_used: now },
-        );
-        &self.map.get(&key).unwrap().glyphs
+        // two strings in one slot: the newer takes it
+        let key = ShapeKey { text: text.to_owned(), size_q, base_font_id, opts_bits: bits };
+        self.map.insert(slot, ShapeEntry { key, glyphs: shaped, last_used: now });
+        &self.map[&slot].glyphs
+    }
+
+    /// What an earlier `shape_with` of the same run left in the cache,
+    /// without counting as a use of it.
+    pub fn shaped(&self, text: &str, base_font_id: u32, size_q: u16, opts: ShapeOptions) -> &[ShapedGlyph] {
+        let bits = opts_to_bits(opts);
+        match self.map.get(&slot_of(text, size_q, base_font_id, bits)) {
+            Some(e) if e.key.is(text, size_q, base_font_id, bits) => &e.glyphs,
+            _ => &[],
+        }
     }
 
     pub fn approx_bytes(&self) -> usize {
-        let entry_hdr = std::mem::size_of::<ShapeKey>()
-            + std::mem::size_of::<Vec<ShapedGlyph>>();
-        let key_strs: usize = self.map.keys().map(|k| k.text.capacity()).sum();
+        let entry_hdr = std::mem::size_of::<u64>() + std::mem::size_of::<ShapeEntry>();
+        let key_strs: usize = self.map.values().map(|v| v.key.text.capacity()).sum();
         let payloads: usize = self
             .map
             .values()

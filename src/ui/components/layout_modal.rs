@@ -1,16 +1,14 @@
 //! The layout panel: pick the `(columns, rows)` shape of the pane grid
 //! and which pane sits in which slot.
 //!
-//! Geometry and hit-testing here, painting in `layout_modal_paint`.
+//! Geometry here; `layout_view` describes the tree that is drawn.
 //! The frame and header are the shared panel chrome's; under them are
 //! two groups — **Grid**, a card with a stepper per axis, and
 //! **Arrangement**, one small card per slot, dragged to swap — and a
 //! footer with the pane count and the one primary button.
 //!
 //! The panel holds no state.  [`LayoutModal::layout`] returns every
-//! rect from the pending shape; the painter draws those rects and the
-//! click handler asks [`LayoutModal::hover_at`] about the same ones,
-//! so a control reacts exactly where it is drawn.
+//! rect from the pending shape, and the tree fills the frame it gives.
 //!
 //! All rects are physical pixels.
 
@@ -105,6 +103,21 @@ pub struct StepperRow {
     pub stepper: StepperRects,
 }
 
+/// The pane cards' rects, held in place: a panel is laid out every
+/// frame it is open.
+pub struct Cards {
+    rects: [Rect; GRID_MAX * GRID_MAX],
+    len: usize,
+}
+
+impl std::ops::Deref for Cards {
+    type Target = [Rect];
+
+    fn deref(&self) -> &[Rect] {
+        &self.rects[..self.len]
+    }
+}
+
 pub struct LayoutModal {
     pub chrome: PanelChrome,
     /// Top of the "Grid" heading's line.
@@ -117,7 +130,7 @@ pub struct LayoutModal {
     /// Bounding rect of the pane cards.
     pub card_grid: Rect,
     /// One rect per slot, row-major; `cols * rows` of them.
-    pub cards: Vec<Rect>,
+    pub cards: Cards,
     /// The footer row: the caption at its left, Apply at its right.
     pub footer: Rect,
     pub apply_btn: Rect,
@@ -224,14 +237,17 @@ impl LayoutModal {
             h: rows as f64 * card_h + gaps_y * gap_y,
             ..c
         };
-        let cards = (0..rows * cols)
-            .map(|slot| Rect {
+        let mut rects = [Rect { x: 0.0, y_top: 0.0, w: 0.0, h: 0.0 }; GRID_MAX * GRID_MAX];
+        let len = (rows * cols).min(rects.len());
+        for (slot, r) in rects.iter_mut().enumerate().take(len) {
+            *r = Rect {
                 x: card_grid.x + (slot % cols) as f64 * (card_w + gap),
                 y_top: card_grid.y_top + (slot / cols) as f64 * (card_h + gap_y),
                 w: card_w,
                 h: card_h,
-            })
-            .collect();
+            };
+        }
+        let cards = Cards { rects, len };
         // Pinned to the content's bottom edge; with room for the whole
         // panel that is one footer gap under the last row of cards.
         let footer = Rect { y_top: c.y_top + c.h - apply_h, h: apply_h, ..c };
@@ -246,28 +262,6 @@ impl LayoutModal {
             footer,
             apply_btn: Rect { x: footer.x + footer.w - apply_w, w: apply_w, ..footer },
         }
-    }
-
-    /// What `(x, y)` is on.  The painter highlights it and a click
-    /// acts on it, so the two cannot disagree.
-    pub fn hover_at(&self, x: f64, y: f64) -> Hover {
-        if self.chrome.hit_close(x, y) {
-            return Hover::Close;
-        }
-        if self.apply_btn.contains(x, y) {
-            return Hover::Apply;
-        }
-        for row in &self.rows {
-            if let Some(part) = row.stepper.hit(x, y) {
-                return Hover::Step(row.axis, part);
-            }
-        }
-        self.cards.iter().position(|r| r.contains(x, y)).map_or(Hover::None, Hover::Card)
-    }
-
-    /// Is `(x, y)` on the panel at all?  A click that is not closes it.
-    pub fn contains(&self, x: f64, y: f64) -> bool {
-        self.chrome.frame.contains(x, y)
     }
 
     /// The slot whose centre is closest to `(x, y)`.  `None` only when
@@ -327,23 +321,38 @@ pub fn label_room(card_w: f64) -> f64 {
 /// nothing still gets the ellipsis — a blank card would say the slot
 /// is empty.
 pub fn fit_label(s: &str, max_w: f64, m: Measure<'_>) -> String {
+    let mut out = String::new();
+    fit_label_into(s, max_w, m, &mut out);
+    out
+}
+
+/// [`fit_label`] written into `out`, which is emptied first: nothing
+/// is taken from the heap once `out` has held a label as long.
+pub fn fit_label_into(s: &str, max_w: f64, m: Measure<'_>, out: &mut String) {
+    out.clear();
     if s.is_empty() || label_width(s, m) <= max_w {
-        return s.to_string();
+        out.push_str(s);
+        return;
     }
-    let ends: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
-    let cut = |n: usize| format!("{}…", &s[..ends[n]]);
+    let end_of = |n: usize| s.char_indices().nth(n).map_or(s.len(), |(i, _)| i);
+    let cut = |n: usize, out: &mut String| {
+        out.clear();
+        out.push_str(&s[..end_of(n)]);
+        out.push('…');
+    };
     // Widths grow with the number of characters kept, so the longest
     // beginning that fits is found by halving.
-    let (mut fits, mut over) = (0, ends.len());
+    let (mut fits, mut over) = (0, s.chars().count());
     while fits + 1 < over {
         let mid = (fits + over) / 2;
-        if label_width(&cut(mid), m) <= max_w {
+        cut(mid, out);
+        if label_width(out, m) <= max_w {
             fits = mid;
         } else {
             over = mid;
         }
     }
-    cut(fits)
+    cut(fits, out);
 }
 
 #[cfg(test)]
@@ -379,21 +388,16 @@ mod tests {
     /// The close button reacts where the shared chrome draws it, and
     /// nowhere else.
     #[test]
-    fn layout_modal_close_hit_box_is_the_one_chrome_draws() {
+    fn layout_modal_close_button_is_the_one_chrome_draws() {
         let m = modal(ROOMY, 4, 1, 0.0);
         let drawn = PanelChrome::new(m.chrome.frame, 0.0).close;
         assert_eq!(m.chrome.close, drawn);
-        let (x, y) = centre(drawn);
-        assert_eq!(m.hover_at(x, y), Hover::Close);
-        assert_eq!(m.hover_at(drawn.x + 1.0, drawn.y_top + 1.0), Hover::Close);
-        assert_eq!(m.hover_at(drawn.x - 1.0, y), Hover::None, "left of it is the header");
-        assert_eq!(m.hover_at(x, drawn.y_top + drawn.h + 1.0), Hover::None);
     }
 
-    /// A stepper is clickable on the rects `stepper_rects` gives the
-    /// painter for it: right-aligned in its row, centred in the band.
+    /// A stepper is on the rects `stepper_rects` gives for it:
+    /// right-aligned in its row, centred in the band.
     #[test]
-    fn layout_modal_stepper_hit_boxes_are_the_stepper_rects() {
+    fn layout_modal_steppers_are_the_stepper_rects() {
         let m = modal(ROOMY, 4, 1, 0.0);
         let (w, h) = controls::stepper_size();
         for (n, axis) in [Axis::Columns, Axis::Rows].into_iter().enumerate() {
@@ -407,12 +411,6 @@ mod tests {
                 (row.stepper.minus, row.stepper.value, row.stepper.plus),
                 (drawn.minus, drawn.value, drawn.plus),
             );
-            let (mx, my) = centre(drawn.minus);
-            assert_eq!(m.hover_at(mx, my), Hover::Step(axis, StepperPart::Minus));
-            let (px, py) = centre(drawn.plus);
-            assert_eq!(m.hover_at(px, py), Hover::Step(axis, StepperPart::Plus));
-            let (vx, vy) = centre(drawn.value);
-            assert_eq!(m.hover_at(vx, vy), Hover::None, "the value is not a button");
         }
         let last = m.rows[1].band;
         assert!(same(last.y_top + last.h, m.grid_card.y_top + m.grid_card.h), "two rows fill the card");
@@ -442,24 +440,6 @@ mod tests {
         assert_eq!((m.footer.x, m.footer.y_top), (c.x, m.apply_btn.y_top));
         let below_cards = m.footer.y_top - (m.card_grid.y_top + m.card_grid.h);
         assert!(same(below_cards, spec::px(space::CARD_TO_FOOTER)));
-        let (x, y) = centre(m.apply_btn);
-        assert_eq!(m.hover_at(x, y), Hover::Apply);
-        assert_eq!(m.hover_at(c.x + 1.0, y), Hover::None, "the caption is not a button");
-    }
-
-    #[test]
-    fn layout_modal_cards_and_the_outside_hit_apart() {
-        let m = modal(ROOMY, 3, 2, 0.0);
-        assert_eq!(m.cards.len(), 6);
-        for (slot, r) in m.cards.iter().enumerate() {
-            let (x, y) = centre(*r);
-            assert_eq!(m.hover_at(x, y), Hover::Card(slot));
-            assert!(m.contains(x, y));
-        }
-        let between = m.cards[0].x + m.cards[0].w + spec::px(metric::CARD_GAP) * 0.5;
-        assert_eq!(m.hover_at(between, centre(m.cards[0]).1), Hover::None);
-        assert_eq!(m.hover_at(1.0, 1.0), Hover::None);
-        assert!(!m.contains(1.0, 1.0), "a click out here closes the panel");
     }
 
     /// The groups are spaced by the shared gaps, top to bottom.

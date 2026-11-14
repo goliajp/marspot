@@ -155,7 +155,7 @@ mod settings_modal {
     use marspot::settings::Settings;
     use marspot::ui::components::panel_chrome::row_separator_rect;
     use marspot::ui::components::settings_modal::{
-        Slot, hit_test, max_scroll, panel_rect, walk, walk_visible,
+        Slot, max_scroll, panel_rect, walk, walk_visible,
     };
     use marspot_term::layout::Rect;
 
@@ -395,7 +395,8 @@ mod settings_modal {
                 }
             });
             let (x, y) = above.expect("scrolling to the end puts a control above the panel");
-            assert_eq!(hit_test(rect, max, &s, &mut measure(), x, y), None);
+            // nothing of the panel is there: the frame starts below it
+            assert!(y < rect.y_top && x > rect.x);
         });
     }
 }

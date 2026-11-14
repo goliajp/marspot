@@ -135,7 +135,7 @@ fi
 # scroll-history, so adding a scenario meant the remote host — which
 # never has them, they are gitignored and not synced — ran the whole
 # build and then failed on the first read of the new file.
-for _s in cat-ascii cat-mixed cat-cjk cat-emoji cat-clusters scroll-history; do
+for _s in cat-ascii cat-mixed cat-cjk cat-emoji cat-styled cat-highlighted cat-clusters scroll-history; do
   if [[ ! -f "$SCENARIOS_DIR/$_s.bin" ]]; then
     echo "==> generating bench scenarios ($_s missing)"
     "$ROOT/bin/gen-scenarios.sh" >/dev/null
@@ -272,7 +272,7 @@ parse_trial() {
 # those costs; the recorded trials measure steady-state.
 measure_parse() {
   local s i
-  for s in cat-ascii cat-mixed cat-cjk cat-emoji cat-clusters; do
+  for s in cat-ascii cat-mixed cat-cjk cat-emoji cat-styled cat-highlighted cat-clusters; do
     : > "$CUR_DIR/parse-$s.samples"
     : > "$CUR_DIR/parse-$s.insn"
     "$MARSPOT" --bench "parse:$SCENARIOS_DIR/$s.bin" >/dev/null
@@ -305,7 +305,7 @@ run_block parse measure_parse
 measure_parsefile() {
   local s i dir
   dir="$(mktemp -d)"
-  for s in cat-ascii cat-mixed cat-cjk cat-emoji; do
+  for s in cat-ascii cat-mixed cat-cjk cat-emoji cat-styled cat-highlighted; do
     : > "$CUR_DIR/parsefile-$s.samples"
     : > "$CUR_DIR/parsefile-$s.insn"
     rm -rf "$dir/sessions"; mkdir -p "$dir/sessions/1"

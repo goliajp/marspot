@@ -7,6 +7,7 @@
 pub mod cc_usage_layout;
 pub mod cc_usage_modal;
 pub mod cc_usage_paint;
+pub mod cc_usage_view;
 pub mod chrome_hover;
 pub mod controls;
 pub mod panel_chrome;
@@ -15,13 +16,13 @@ pub mod panel_script;
 pub mod surface_stack;
 pub mod settings_choices;
 pub mod settings_modal;
-pub mod settings_paint;
+pub mod settings_view;
 pub mod settings_rows;
 pub mod shortcuts_panel;
-pub mod shortcuts_paint;
+pub mod shortcuts_view;
 pub mod scroll_view;
 pub mod process_panel;
-pub mod process_panel_paint;
+pub mod process_view;
 pub mod search_overlay;
 pub mod panel;
 pub mod text_input;
@@ -33,7 +34,7 @@ pub mod grid_item;
 pub mod sidebar;
 pub mod table;
 pub mod layout_modal;
-pub mod layout_modal_paint;
+pub mod layout_view;
 pub mod context_menu;
 pub mod context_menu_paint;
 #[cfg(test)]
@@ -48,6 +49,17 @@ mod centring_tests;
 pub(crate) mod panel_snapshot_tests;
 #[cfg(test)]
 mod chrome_snapshot_tests;
+#[cfg(test)]
+mod settings_view_tests;
+#[cfg(test)]
+mod shortcuts_view_tests;
+#[cfg(test)]
+mod layout_view_tests;
+#[cfg(test)]
+mod process_view_tests;
+#[cfg(test)]
+mod panel_frames_view_tests;
+
 #[cfg(test)]
 mod language_snapshot_tests;
 

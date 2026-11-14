@@ -24,7 +24,14 @@
 #      byte it is sent and asks for mouse reports; after the run it
 #      holds exactly the click, wheel and key sent once the last panel
 #      had closed -- which also shows the recorder records.
-#   6. The app is still up, with no panic and no error logged.
+#   6. The settings panel is worked with the keyboard alone: Tab to
+#      its close button and Enter closes it; Tab to its first switch
+#      and Enter turns it off and on again; Tab to the control under
+#      it and the arrows choose the next value and the one before.
+#      The shortcuts panel, opened by its chord, closes the same way,
+#      and so do the layout, accounts and process panels.
+#      Each is a write of the settings file, logged with its row.
+#   7. The app is still up, with no panic and no error logged.
 #
 # Sandbox-only: MARSPOT_STATE_DIR is redirected and the installed app
 # is never touched.  Exits 0 on pass, non-zero on the first failure.
@@ -114,6 +121,13 @@ STEPS=(
   button:process
   scroll:3 shift-click:pane-under type:L click:header
   esc
+  button:settings key:tab key:enter
+  button:settings key:tab key:tab key:enter key:enter key:tab key:right key:left
+  esc
+  key:cmd-/ key:tab key:enter
+  button:layout key:tab key:enter
+  button:accounts key:tab key:enter
+  button:process key:tab key:enter
   shift-click:pane scroll:3 type:x
 )
 SCRIPT="$(IFS=';'; echo "${STEPS[*]}")"
@@ -136,7 +150,19 @@ CLOSE layout by=escape
 OPEN layout offset=0,0
 CLOSE layout by=replaced
 OPEN process offset=0,0
-CLOSE process by=escape"
+CLOSE process by=escape
+OPEN settings offset=0,0
+CLOSE settings by=close_button
+OPEN settings offset=0,0
+CLOSE settings by=escape
+OPEN shortcuts offset=0,0
+CLOSE shortcuts by=close_button
+OPEN layout offset=0,0
+CLOSE layout by=close_button
+OPEN accounts offset=0,0
+CLOSE accounts by=close_button
+OPEN process offset=0,0
+CLOSE process by=close_button"
 
 echo "==> launching with the script: $SCRIPT"
 SHELL="$RECORDER" MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
@@ -243,7 +269,13 @@ if not want.fullmatch(heard[0]):
     sys.exit("not exactly: press, release, wheel reports, `x`")
 PY
 
-# --- 6. still up, and quiet --------------------------------------------
+# --- 6. the settings panel by keyboard alone --------------------------
+rows="$(grep $'\tSETTINGS_CHANGED\t' "$APPLOG" | sed -E 's/.*row="?([A-Za-z]+).*/\1/' | tr '\n' ' ')"
+[[ "$rows" == "ReclaimEnabled ReclaimEnabled ReclaimIdleMinutes ReclaimIdleMinutes " ]] \
+  || fail "the keys changed [$rows] -- want the first switch twice, then the control under it twice"
+echo "==> settings changed by keys alone: $rows"
+
+# --- 7. still up, and quiet --------------------------------------------
 [[ -n "$(dev_shell_pid)" ]] || fail "the shell is gone"
 [[ -n "$(dev_core_pids)" ]] || fail "the core is gone"
 grep -qi 'panicked' "$APPLOG" "$RUNLOG" && fail "something panicked"
@@ -256,4 +288,5 @@ errors="$(grep -c $'\tERROR\t' "$APPLOG")"
 echo
 echo "PASS — every panel opens by its button and closes by each of its"
 echo "       rules, one at a time; a drag moves it and a reopen forgets"
-echo "       the move; nothing reaches the panes while one is open."
+echo "       the move; nothing reaches the panes while one is open; the"
+echo "       settings panel closes and changes its values by keys alone."

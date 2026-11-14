@@ -18,7 +18,6 @@ use super::panel_snapshot_tests as panel;
 use crate::render_metal::{MetalRenderer, WindowRender};
 use crate::snapshot_kit::{in_language, in_theme};
 use crate::ui::components::chrome_hover::ChromeHover;
-use crate::ui::components::settings_modal;
 use crate::ui::theme::spec;
 use marspot_term::language::LangId;
 use marspot_term::layout::Rect;
@@ -184,7 +183,7 @@ fn a_panel_moved_between_densities_draws_as_one_made_there() {
         capture(scale, || {
             renderer.rebuild_fonts_if_scale_changed();
             panel::snapshot_on(&mut renderer, &mut wr, "settings", 1000, 1360, |renderer, layout| {
-                panel::open_settings(renderer, layout, settings_modal::Hover::None);
+                panel::open_settings(renderer, layout, None);
             });
         })
         .expect("a frame")
@@ -204,7 +203,7 @@ fn a_panel_moved_between_densities_draws_as_one_made_there() {
 fn a_panel_dragged_and_scrolled_keeps_its_place_between_densities() {
     use super::density_kit::at_scale;
     use super::panel_chrome::PanelChrome;
-    use super::settings_paint::SettingsRender;
+    use super::settings_view::SettingsRender;
     use super::surface_stack::{self, Press, SurfaceKind, SurfaceStack};
     use crate::ui::Units;
 
@@ -232,16 +231,10 @@ fn a_panel_dragged_and_scrolled_keeps_its_place_between_densities() {
         renderer.rebuild_fonts_if_scale_changed();
         // too short to show the panel whole, so there is somewhere to scroll
         panel::snapshot_on(renderer, wr, "settings_moved", 1000, 520, |renderer, layout| {
-            let (home, settings) = panel::open_settings(renderer, layout, settings_modal::Hover::None);
+            let sp = panel::open_settings(renderer, layout, None);
             let rect =
-                surface_stack::place(home, held.stack.offset(), layout.window_w, layout.window_h, layout.top_inset);
-            renderer.set_settings_panel(Some(SettingsRender {
-                rect,
-                scroll: held.scroll.px(),
-                settings,
-                path: "/Users/you/Library/Application Support/marspot/settings.toml".to_string(),
-                hover: settings_modal::Hover::None,
-            }));
+                surface_stack::place(sp.rect, held.stack.offset(), layout.window_w, layout.window_h, layout.top_inset);
+            renderer.set_settings_panel(Some(SettingsRender { rect, scroll: held.scroll.px(), ..sp }));
         });
     };
     let Ok(mut renderer) = MetalRenderer::new_headless() else {
