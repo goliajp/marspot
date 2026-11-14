@@ -50,7 +50,10 @@ pub(in crate::plugins) enum Room {
         /// at 7% of its week and still be shut out of Fable, and for
         /// a pane pinned to that model the account-level numbers are
         /// not the whole answer.
-        models: Vec<(String, f64)>,
+        ///
+        /// `None` where the feed reports the cap with no reading: not
+        /// full and not known to have room, as for the week.
+        models: Vec<(String, Option<f64>)>,
         /// Unix seconds the per-model caps were actually measured.
         ///
         /// Not the same as when the row was collected: the feed
@@ -175,7 +178,7 @@ impl Room {
     fn rejected_only_for_another_model(&self, model: Option<&str>) -> bool {
         match self {
             Room::Known { models, .. } => {
-                let mut spent = models.iter().filter(|(_, u)| *u >= WINDOW_SPENT).peekable();
+                let mut spent = models.iter().filter(|(_, u)| u.is_some_and(|u| u >= WINDOW_SPENT)).peekable();
                 spent.peek().is_some()
                     && spent.all(|(label, _)| {
                         model.is_none_or(|m| !same_model(&m.to_ascii_lowercase(), label))
@@ -193,7 +196,7 @@ impl Room {
             Room::Known { models, .. } => models
                 .iter()
                 .find(|(label, _)| same_model(&want, label))
-                .map(|(_, util)| *util),
+                .and_then(|(_, util)| *util),
             Room::Unknown => None,
         }
     }
@@ -225,6 +228,19 @@ impl Room {
     /// Does the feed give a reading for this account's week?
     pub(super) fn week_known(&self) -> bool {
         matches!(self, Room::Known { util_7d: Some(_), .. })
+    }
+    /// Does the feed give a reading of everything that bounds a pane on
+    /// `model` here: the week, and the model's own cap where it reports
+    /// one?
+    pub(super) fn known_for(&self, model: Option<&str>) -> bool {
+        let unread_cap = match (self, model) {
+            (Room::Known { models, .. }, Some(m)) => {
+                let want = m.to_ascii_lowercase();
+                models.iter().any(|(label, u)| u.is_none() && same_model(&want, label))
+            }
+            _ => false,
+        };
+        self.week_known() && !unread_cap
     }
     /// Is Fable's own cap spent on this account?
     pub(super) fn fable_spent(&self) -> bool {
@@ -298,7 +314,7 @@ pub(in crate::plugins) fn best_profile(rooms: &[(u8, Room)], current: u8, model:
         // Only among the usable: the refused are ordered by when they
         // come back, and nothing else.
         let keeps_fable = |r: &Room| tier(r) == 0 && !needs_fable && r.fable_spent();
-        let unread = |r: &Room| tier(r) == 0 && !r.week_known();
+        let unread = |r: &Room| tier(r) == 0 && !r.known_for(model);
         tier(&a.1)
             .cmp(&tier(&b.1))
             .then_with(|| unread(&a.1).cmp(&unread(&b.1)))
@@ -491,7 +507,7 @@ mod tests {
             util_5h: Some(util_5h),
             util_7d: Some(util_7d),
             reset_7d,
-            models: models.iter().map(|(l, u)| (l.to_string(), *u)).collect(),
+            models: models.iter().map(|(l, u)| (l.to_string(), Some(*u))).collect(),
             // Measured now, in the tests that are not about staleness.
             models_measured_at: i64::MAX, measured_at: i64::MAX,
         }
@@ -506,7 +522,7 @@ mod tests {
             util_5h: Some(0.0),
             util_7d: Some(0.78),
             reset_7d: 100,
-            models: vec![("fable".to_string(), 1.0)],
+            models: vec![("fable".to_string(), Some(1.0))],
             models_measured_at: i64::MAX,
             measured_at: i64::MAX,
         };
@@ -545,7 +561,7 @@ mod tests {
             util_5h: Some(0.85),
             util_7d: Some(0.88),
             reset_7d: 500,
-            models: vec![("fable".to_string(), 0.62)],
+            models: vec![("fable".to_string(), Some(0.62))],
             models_measured_at: measured,
             measured_at: measured,
         }
@@ -1011,7 +1027,7 @@ mod tests {
             util_5h: Some(0.0),
             util_7d: Some(0.77),
             reset_7d,
-            models: vec![("fable".to_string(), 1.0)],
+            models: vec![("fable".to_string(), Some(1.0))],
             models_measured_at: i64::MAX,
             measured_at: i64::MAX,
         }
@@ -1033,7 +1049,7 @@ mod tests {
             util_5h: Some(0.10),
             util_7d: Some(0.50),
             reset_7d: 500,
-            models: vec![("fable".to_string(), 0.30)],
+            models: vec![("fable".to_string(), Some(0.30))],
             models_measured_at: i64::MAX,
             measured_at: i64::MAX,
         };
@@ -1062,7 +1078,7 @@ mod tests {
                 util_5h: Some(0.08),
                 util_7d: Some(0.98),
                 reset_7d: 100,
-                models: vec![("fable".to_string(), 1.0)],
+                models: vec![("fable".to_string(), Some(1.0))],
                 models_measured_at: i64::MAX,
                 measured_at: i64::MAX,
             }),
@@ -1195,3 +1211,7 @@ mod five_hour_tests;
 #[cfg(test)]
 #[path = "tests/week_unknown.rs"]
 mod week_unknown_tests;
+
+#[cfg(test)]
+#[path = "tests/fable_stranded.rs"]
+mod fable_stranded_tests;

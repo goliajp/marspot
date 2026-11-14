@@ -103,7 +103,7 @@ fn an_account_that_refused_a_pane_is_no_destination() {
     };
     let feed = vec![(1u8, room(0.99, 4102444800)), (2u8, room(0.2, 4103049600))];
     let opus = Some("opus-5-5");
-    let target = |seen: &seen::Seen| {
+    let target = |seen: &mut seen::Seen| {
         let mut rooms = feed.clone();
         seen.mark(&mut rooms, &[], AFTER);
         super::super::rebalance::better_home(&rooms, 2, opus).map(|(t, _)| t)
@@ -111,20 +111,20 @@ fn an_account_that_refused_a_pane_is_no_destination() {
 
     // with nothing known against it, P1 renews first and is where a resting pane goes
     let mut seen = seen::Seen::default();
-    assert_eq!(target(&seen), Some(1));
+    assert_eq!(target(&mut seen), Some(1));
 
     // a Fable cap spent there says nothing about Opus
-    seen.out.insert((1, "fable".into()), (AFTER, quota::Window::Week));
-    assert_eq!(target(&seen), Some(1));
+    seen.out.insert((1, "fable".into()), seen::Out::new(AFTER, quota::Window::Week));
+    assert_eq!(target(&mut seen), Some(1));
 
     // once a pane there has been refused outright, it is no destination
-    seen.out.insert((1, String::new()), (AFTER, quota::Window::Week));
-    assert_eq!(target(&seen), None);
+    seen.out.insert((1, String::new()), seen::Out::new(AFTER, quota::Window::Week));
+    assert_eq!(target(&mut seen), None);
 
     // until the feed measures it again, after the refusal
     seen.out.clear();
-    seen.out.insert((1, String::new()), (BEFORE, quota::Window::Week));
-    assert_eq!(target(&seen), Some(1));
+    seen.out.insert((1, String::new()), seen::Out::new(BEFORE, quota::Window::Week));
+    assert_eq!(target(&mut seen), Some(1));
 }
 
 /// The record the CLI queues when a background agent stops, as written

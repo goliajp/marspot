@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use crate::grid::{Cell, Grid};
 
 mod mirror;
+mod regions;
 use crate::grid_shm::{
     GridShmReader, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
     FLAG_ALT_SCREEN, FLAG_ALT_SCROLL, FLAG_MOUSE_ANY_MOTION, FLAG_MOUSE_DRAG,
@@ -597,18 +598,6 @@ impl PaneBackend {
         }
     }
 
-    /// Hot-swap an L3 pane's control stream (after a reader-loop EOF
-    /// → main loop reconnects).  No-op on non-L3 backends.
-    pub fn swap_l3_control(
-        &mut self,
-        new_control: UnixStream,
-        selection_rx: Receiver<(u32, String)>,
-    ) {
-        if let PaneBackend::L3(c) = self {
-            c.swap_control(new_control, selection_rx);
-        }
-    }
-
 
 
     /// Cmd-C on an L3 pane: ask the session process for the selection text
@@ -730,6 +719,7 @@ pub struct L3Spawn {
     pub child: Child,
     pub control: UnixStream,
     pub reader: GridShmReader,
+    pub regions: crate::grid_shm::SessionRegions,
     pub selection_rx: Receiver<(u32, String)>,
 }
 
@@ -876,6 +866,12 @@ pub struct L3Conn {
     /// When attaching to this session's cluster region was last tried;
     /// an L3 from before clusters were published has none.
     clusters_tried_at: Option<Instant>,
+    /// Where `reader`'s region is and whose it has to be; the side
+    /// regions are found from it.
+    regions: crate::grid_shm::SessionRegions,
+    /// `reader` is on a region made for the session to move to, and
+    /// the session has not said it publishes there yet.
+    moving: bool,
     /// Reply channel for `GetSelectionText`: the control-socket reader
     /// thread routes each `SelectionText` frame here, and
     /// `request_selection_text` blocks on it (Cmd-C round-trip).  L3 owns
@@ -897,6 +893,7 @@ impl L3Conn {
         pid: i32,
         control: UnixStream,
         reader: GridShmReader,
+        regions: crate::grid_shm::SessionRegions,
         selection_rx: Receiver<(u32, String)>,
         session_id: u64,
     ) -> Self {
@@ -928,6 +925,8 @@ impl L3Conn {
             scratch_wrapped: Vec::new(),
             cluster_table: Default::default(),
             clusters_tried_at: None,
+            regions,
+            moving: false,
             selection_rx,
             selection_seq: 0,
         }
@@ -965,6 +964,8 @@ impl L3Conn {
             scratch_wrapped: Vec::new(),
             cluster_table: Default::default(),
             clusters_tried_at: None,
+            regions: spawn.regions,
+            moving: false,
             selection_rx: spawn.selection_rx,
             selection_seq: 0,
         }
@@ -1031,34 +1032,6 @@ impl L3Conn {
         // frame.
         self.last_seq = seq;
         true
-    }
-
-    /// Replace this L3Conn's L2↔L3 control stream after a backend
-    /// reconnect (`l3_reader_loop` saw EOF, main loop ran
-    /// `wait_and_connect`, and now we hot-swap the write half so
-    /// subsequent `forward_key`/`forward_resize`/etc go through the
-    /// fresh stream).  Old stream's Drop closes the old fd.
-    /// Both halves move together, and that is the whole point.
-    ///
-    /// This used to swap only `control` (the write half).  The reader
-    /// half lives in a thread that owns the matching `selection_tx`, so
-    /// after a reconnect the old thread was gone — its sender dropped —
-    /// while `selection_rx` still pointed at that dead channel.
-    /// `request_selection_text` then got `Disconnected` immediately and
-    /// returned `None`, so **Cmd-C went permanently silent on that pane
-    /// after any silent-update reconnect**, with no log to say why.
-    /// `try_promote` (the swap path) always replaced both; this one
-    /// didn't, and the asymmetry is what made it a bug.
-    pub fn swap_control(
-        &mut self,
-        new_control: UnixStream,
-        selection_rx: Receiver<(u32, String)>,
-    ) {
-        // Dropping the old writer ends its thread; anything still queued
-        // for the dead socket goes with it, which is correct — those
-        // frames were addressed to an L3 that no longer exists.
-        self.control = new_control_writer(new_control);
-        self.selection_rx = selection_rx;
     }
 
     /// Forward a keystroke to the session process, which encodes it with
@@ -2243,6 +2216,7 @@ mod tests {
             std::process::id() as i32,
             control,
             reader,
+            crate::grid_shm::SessionRegions::for_session(1),
             selection_rx,
             1,
         );

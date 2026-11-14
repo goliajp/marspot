@@ -514,10 +514,16 @@ mod tests {
     /// Type `line` and Enter at the prompt, and wait for the prompt
     /// after it.
     fn run(s: &mut LocalSession, line: &str) {
-        let row = s.terminal().grid().cursor().1;
+        // counted from the top of history, so a screen that scrolls
+        // still shows the prompt coming back below the command
+        let line_of = |s: &LocalSession| {
+            let g = s.terminal().grid();
+            g.scrollback_len() + g.cursor().1 as usize
+        };
+        let at = line_of(s);
         s.write(format!("{line}\r").as_bytes()).unwrap();
         assert!(
-            pump_until(s, |s| s.terminal().grid().cursor().1 > row && at_prompt(s)),
+            pump_until(s, |s| line_of(s) > at && at_prompt(s)),
             "the prompt came back after {line:?}:\n{}",
             screen(s)
         );

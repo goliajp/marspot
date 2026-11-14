@@ -134,7 +134,7 @@ impl Color {
     /// caller's intermediate `1.5` doesn't reach the GPU.
     #[inline]
     /// The colour a `[r, g, b, a]` in 0..1 names — what the palette
-    /// roles return — for the canvas, which takes a `Color`.
+    /// roles return.
     pub fn from_rgba_f32(c: [f32; 4]) -> Self {
         let ch = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
         Self { r: ch(c[0]), g: ch(c[1]), b: ch(c[2]), a: c[3] as f64 }

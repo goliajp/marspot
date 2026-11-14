@@ -144,6 +144,28 @@ mod tests {
         assert!(!Cell::from('x').is_default());
     }
 
+    /// A snapshot carries cells, not marks: the image that applies it
+    /// has to know its rows as well as the one that wrote it, or the
+    /// rows on screen at an update would be filed without their tails.
+    #[test]
+    fn rows_restored_from_a_snapshot_are_filed_whole() {
+        use crate::terminal::Terminal;
+        let mut old = Terminal::new(12, 3);
+        old.feed(b"one\r\n\x1b[31mtwo words\x1b[0m\r\nthree");
+        let mut new = Terminal::new(12, 3);
+        new.apply_snapshot(&old.serialize_snapshot_live()).expect("the snapshot applies");
+        assert!(new.grid().row_marks_hold());
+        new.feed(b"\r\nfour\r\nfive\r\nsix");
+        assert!(new.grid().row_marks_hold());
+        let filed: Vec<String> = (0..new.grid().scrollback_len())
+            .map(|at| new.grid().scrollback_line(at).expect("a filed line").iter().map(|c| c.ch).collect())
+            .map(|line: String| line.trim_end().to_string())
+            .collect();
+        assert_eq!(filed, ["one", "two words", "three"]);
+        let red = new.grid().scrollback_line(1).expect("the second line")[8].attrs;
+        assert!(!red.is_default(), "the colour of a restored row is filed with it");
+    }
+
     #[test]
     fn the_marks_hold_through_writes_scrolls_and_resizes() {
         let mut s = 0x9E37_79B9_7F4A_7C15u64;

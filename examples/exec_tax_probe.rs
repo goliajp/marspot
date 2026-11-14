@@ -29,7 +29,8 @@ fn main() {
     let sid = 970_000u64 + (std::process::id() as u64 % 1000);
     let shm_name = format!("/msp-r7t-{}", std::process::id());
     let cname = CString::new(shm_name.clone()).unwrap();
-    let _region = marspot_term::grid_shm::create_region_named(100, 30, &cname).expect("shm");
+    let owner = marspot_term::grid_shm::Identity::of_session(sid);
+    let _region = marspot_term::grid_shm::create_region_named(100, 30, &cname, owner).expect("shm");
 
     let mut env: Vec<(String, String)> = std::env::vars().collect();
     for (k, v) in [

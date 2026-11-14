@@ -70,6 +70,38 @@ impl Grid {
     }
 }
 
+impl Grid {
+    /// The clusters on scrollback line `line`, 0 = oldest, appended to
+    /// `out`, which is cleared first.
+    pub fn scrollback_clusters(&self, line: usize, out: &mut Vec<(u16, String)>) {
+        out.clear();
+        if self.scrollback.keeps_cluster_text() {
+            self.scrollback.clusters_at(line, out);
+        } else if let Some(row) = self.sb_clusters.get(line) {
+            out.extend(row.iter().cloned());
+        }
+    }
+
+    /// [`Self::push_historic_scrollback_line`], for a line that has
+    /// clusters: `clusters` is their text, by column.
+    pub fn push_historic_line_with_clusters(
+        &mut self,
+        line: &[Cell],
+        wrapped: bool,
+        clusters: Vec<(u16, String)>,
+    ) {
+        self.push_historic_scrollback_line(line, wrapped);
+        if clusters.is_empty() {
+            return;
+        }
+        if self.scrollback.keeps_cluster_text() {
+            self.scrollback.cluster_last_line(&clusters);
+        } else if let Some(last) = self.sb_clusters.back_mut() {
+            *last = clusters;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

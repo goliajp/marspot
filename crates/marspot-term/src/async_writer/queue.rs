@@ -82,6 +82,9 @@ struct State {
     /// The writer is asleep with nothing to do and no deadline.
     idle: bool,
     closed: bool,
+    /// A hand-over was refused while the writer was busy, and the
+    /// producer has not been told that it can be made again.
+    owed: bool,
 }
 
 impl Queue {
@@ -106,14 +109,38 @@ impl Queue {
         self.put(&mut st, msg, now);
     }
 
-    /// Queue `msg` if there is room, without waiting.
+    /// Queue `msg` if there is room, without waiting.  A refusal is
+    /// owed an answer: see [`Self::owe`].
     pub(super) fn try_push(&self, msg: Msg) -> Result<(), Msg> {
         let mut st = self.state.lock().expect("the writer queue");
         if st.queued.len() + st.writing >= self.depth {
+            st.owed = true;
             return Err(msg);
         }
         self.put(&mut st, msg, true);
         Ok(())
+    }
+
+    /// The producer has bytes it could not hand over because the
+    /// writer holds every buffer.  `true` when the writer is at work:
+    /// what it has is written without waiting for more, and
+    /// [`Self::settle`] says so once.  `false` when it has nothing, and
+    /// so holds no buffer either.
+    pub(super) fn owe(&self) -> bool {
+        let mut st = self.state.lock().expect("the writer queue");
+        if st.queued.is_empty() && st.writing == 0 {
+            return false;
+        }
+        st.owed = true;
+        st.now = true;
+        self.work.notify_one();
+        true
+    }
+
+    /// The writer's side, between two batches: whether a hand-over was
+    /// refused since it last asked.
+    pub(super) fn settle(&self) -> bool {
+        std::mem::take(&mut self.state.lock().expect("the writer queue").owed)
     }
 
     fn put(&self, st: &mut State, msg: Msg, now: bool) {
