@@ -2,7 +2,7 @@
 """Wake-ups and CPU of a set of processes over an idle window.
 
     bin/_idle_wakeups.py --pattern ERE [--window 30] [--readings 3] [--json OUT]
-                         [--budget WAKEUPS_PER_SEC]
+                         [--budget WAKEUPS_PER_SEC] [--busy-load LOAD1]
 
 Reads the kernel's own per-process counters (`proc_pid_rusage`: timer
 wake-ups, wake-ups that took the package out of idle, CPU time in
@@ -14,16 +14,43 @@ Two things are read twice by different means so a dead probe cannot pass
 for a quiet process: CPU time also comes from `ps`, and a process whose
 counters went backwards or that disappeared fails the run.
 
-With --budget, exits 1 when any reading's summed wake-ups per second is
-over it.
+Exit codes, one meaning each (bin/measure-idle.sh and
+bin/measure-idle-marspot.sh use the same four):
+
+    0  measured, and within the budget when one was given
+    1  measured on a quiet host, and over the budget
+    2  the instrument failed: there is no reading to judge (bad usage,
+       no matching process, the process set changed, a counter ran
+       backwards, the two CPU clocks disagree, or this script crashed)
+    3  not measured: the host was busy, so the reading is printed and
+       written but is no verdict
+
+The host counts as busy when load1 went over --busy-load (default
+IDLE_BUSY_LOAD, else 5.0, the line bin/bench-remote.sh draws for a host
+that has company) at any sample of any window.  Company can make a
+reading worse and never better, so a reading within its budget stands
+whatever the load was; one over its budget, or one with no budget to
+hold it to, is worth nothing next to someone else's work and comes back
+3, to be taken again on a quiet host.  3 is not a pass and not a
+regression.
 """
 import argparse
 import ctypes
 import json
+import os
 import re
 import subprocess
 import sys
 import time
+import traceback
+
+MEASURED, OVER_BUDGET, INSTRUMENT_FAILED, HOST_BUSY = 0, 1, 2, 3
+
+
+def broken(why):
+    """The instrument failed: say why and leave with no verdict."""
+    print(f"idle-wakeups: {why}", file=sys.stderr)
+    sys.exit(INSTRUMENT_FAILED)
 
 libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
 
@@ -110,7 +137,7 @@ def snapshot(pattern):
     for pid, (ps_cpu, rss, name) in ps_rows(pattern).items():
         r = rusage(pid)
         if r is None:
-            sys.exit(f"idle-wakeups: cannot read counters of pid {pid} ({name}); not this user's process?")
+            broken(f"cannot read counters of pid {pid} ({name}); not this user's process?")
         snap[pid] = {
             "name": name, "ps_cpu": ps_cpu, "rss_kib": rss,
             "cpu": abs_to_secs(r.user_time + r.system_time),
@@ -127,22 +154,22 @@ def load1():
 def reading(pattern, window):
     a, t0, loads = snapshot(pattern), time.time(), [load1()]
     if not a:
-        sys.exit("idle-wakeups: no process matches the pattern")
+        broken("no process matches the pattern")
     while time.time() - t0 < window:
         time.sleep(min(10.0, max(0.05, window - (time.time() - t0))))
         loads.append(load1())
     b, secs = snapshot(pattern), time.time() - t0
     if sorted(a) != sorted(b):
-        sys.exit(f"idle-wakeups: the process set changed during the window ({sorted(a)} -> {sorted(b)})")
+        broken(f"the process set changed during the window ({sorted(a)} -> {sorted(b)})")
     procs = []
     for pid in sorted(b):
         x, y = a[pid], b[pid]
         d = {k: y[k] - x[k] for k in ("cpu", "idle_wk", "intr_wk", "ps_cpu")}
         if min(d.values()) < 0:
-            sys.exit(f"idle-wakeups: a counter of pid {pid} ran backwards")
+            broken(f"a counter of pid {pid} ran backwards")
         # ps counts in hundredths of a second; the two clocks must agree to that
         if abs(d["cpu"] - d["ps_cpu"]) > 0.03 + 0.2 * d["ps_cpu"]:
-            sys.exit(f"idle-wakeups: pid {pid}: rusage says {d['cpu']:.3f}s of CPU, ps says {d['ps_cpu']:.2f}s")
+            broken(f"pid {pid}: rusage says {d['cpu']:.3f}s of CPU, ps says {d['ps_cpu']:.2f}s")
         th = []
         for h, (name, cpu) in y["threads"].items():
             before = x["threads"].get(h, (name, 0.0))[1]
@@ -182,6 +209,21 @@ def by_name(r):
     return groups
 
 
+def verdict(readings, budget, busy_load):
+    """The exit code for these readings and the line that says why."""
+    worst = max(r["intr_wakeups_per_sec"] for r in readings)
+    load = max(r["load1_max"] for r in readings)
+    if budget is not None and worst <= budget:
+        return MEASURED, f"PASS: at most {worst:.1f} timer wake-ups/s, budget {budget}"
+    if load > busy_load:
+        held = "no budget to hold it to" if budget is None else f"budget {budget}"
+        return HOST_BUSY, (f"NOT MEASURED: load1 reached {load} (busy over {busy_load}); {worst:.1f} timer wake-ups/s, "
+                           f"{held}, read next to other work is no verdict")
+    if budget is None:
+        return MEASURED, ""
+    return OVER_BUDGET, f"FAIL: {worst:.1f} timer wake-ups/s, budget {budget}"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pattern", required=True)
@@ -189,6 +231,7 @@ def main():
     ap.add_argument("--readings", type=int, default=3)
     ap.add_argument("--json")
     ap.add_argument("--budget", type=float)
+    ap.add_argument("--busy-load", type=float, default=float(os.environ.get("IDLE_BUSY_LOAD") or 5.0))
     ap.add_argument("--label", default="")
     args = ap.parse_args()
     pattern = re.compile(args.pattern)
@@ -208,13 +251,16 @@ def main():
         with open(args.json, "w") as f:
             json.dump({"label": args.label, "pattern": args.pattern, "readings": readings}, f, indent=1)
             f.write("\n")
-    if args.budget is not None:
-        worst = max(r["intr_wakeups_per_sec"] for r in readings)
-        if worst > args.budget:
-            print(f"FAIL: {worst:.1f} timer wake-ups/s, budget {args.budget}")
-            sys.exit(1)
-        print(f"PASS: at most {worst:.1f} timer wake-ups/s, budget {args.budget}")
+    code, line = verdict(readings, args.budget, args.busy_load)
+    if line:
+        print(line)
+    sys.exit(code)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # an uncaught error would leave with 1, which says "over budget"
+        traceback.print_exc()
+        sys.exit(INSTRUMENT_FAILED)

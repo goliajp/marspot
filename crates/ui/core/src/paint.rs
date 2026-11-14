@@ -66,12 +66,30 @@ pub trait PaintOut {
     fn pop_clip(&mut self);
 }
 
+/// The output of a surface whose picture is kept by its caller: it is
+/// painted through `Surface::paint_into`, never into this.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoOut;
+
+impl PaintOut for NoOut {
+    fn reset(&mut self) {}
+    fn solid_rect(&mut self, _: Rect, _: Ink) {}
+    fn rounded_rect(&mut self, _: Rect, _: f64, _: Option<Ink>, _: Option<(f64, Ink)>) {}
+    fn text_run(&mut self, _: f64, _: f64, _: &str, _: TextFont, _: Ink) {}
+    fn leaf(&mut self, _: u32, _: [u32; 2], _: &str, _: Rect, _: WidgetState) {}
+    fn focus_ring(&mut self, _: Rect, _: f64) {}
+    fn push_clip(&mut self, _: Rect) {}
+    fn pop_clip(&mut self) {}
+}
+
 struct Painter<'a, O: PaintOut> {
     tree: &'a Tree,
     layout: &'a Layout,
     state: &'a Interaction,
     m: &'a Metrics,
     ring: u32,
+    /// The group of the node the pointer is on, or 0.
+    lit: u32,
     ring_at: Option<(Rect, f64)>,
     out: &'a mut O,
 }
@@ -110,9 +128,11 @@ impl<O: PaintOut> Painter<'_, O> {
         let s = &n.style;
         let radius = s.radius.resolve(0.0, self.m);
 
+        let lit = n.lit_group != 0 && n.lit_group == self.lit && !ws.disabled;
         let fill = match (n.has(flag::ACTS), ws.pressed, ws.hovered) {
             (true, true, _) => s.fill_pressed.or(s.fill_hover).or(s.fill),
             (true, false, true) => s.fill_hover.or(s.fill),
+            _ if lit => s.fill_hover.or(s.fill),
             _ => s.fill,
         };
         // a container half out of a scroll region keeps the part that is in
@@ -153,7 +173,10 @@ impl<O: PaintOut> Painter<'_, O> {
         };
         let mut ch = n.first_child;
         while ch != NONE {
-            self.node(ch, dx, child_dy, child_view);
+            // a floating node is painted when everything else has been
+            if self.tree.nodes[ch as usize].kind != Kind::Float {
+                self.node(ch, dx, child_dy, child_view);
+            }
             ch = self.tree.nodes[ch as usize].next_sibling;
         }
         if clip {
@@ -183,8 +206,13 @@ pub fn paint<O: PaintOut>(
         .and_then(|t| find_focus_node(tree, t))
         .unwrap_or(NONE);
     let (dx, dy) = state.offset;
-    let mut p = Painter { tree, layout, state, m: metrics, ring, ring_at: None, out };
+    let lit = state.hovered.and_then(|t| find_focus_node(tree, t)).map_or(0, |i| tree.nodes[i as usize].lit_group);
+    let mut p = Painter { tree, layout, state, m: metrics, ring, lit, ring_at: None, out };
     p.node(0, dx, dy, None);
+    // over everything, outside every clip and every scroll
+    for &f in &layout.floats {
+        p.node(f, dx, dy, None);
+    }
     // last, and outside every clip: the ring is drawn round the widget,
     // where the widget's own container would cut it
     if let Some((rect, radius)) = p.ring_at {

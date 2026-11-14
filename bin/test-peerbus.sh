@@ -47,7 +47,9 @@ CODEX_CACHE="$HOME/.cache/marspot-e2e/codex-$CODEX_VERSION"
 
 # Short on purpose: Codex puts unix sockets under $HOME/.codex, and a
 # socket path has to fit in 104 bytes.
-SB=/tmp/marspot-peerbus
+# A scratch directory of this run's own, removed when the run passes:
+# the fixed name was shared by every run of the suite on the machine.
+SB=/tmp/marspot-peerbus.$$
 RUNLOG=$SB/run.log
 # the Claude Code registry, under this test's HOME
 REGISTRY="$SB/home/.claude"/sessions
@@ -80,6 +82,7 @@ codex_pid_from() {
 }
 
 cleanup() {
+  local rc=$?
   dev_kill_shell_core
   # By recorded pids, never by name: `codex` and `python3` are running
   # for other people on this machine.
@@ -91,7 +94,9 @@ cleanup() {
   [[ -f "$SB/mock.pid" ]] && kill "$(cat "$SB/mock.pid")" 2>/dev/null
   [[ -n "${FAKE_PID:-}" ]] && kill "$FAKE_PID" 2>/dev/null
   # the inboxes this run's records name, and the Claude side's own
-  for p in $(records 2>/dev/null | cut -f4) /tmp/cc-socks/e2e-*.sock; do rm -f "$p"; done
+  for p in $(records 2>/dev/null | cut -f4); do rm -f "$p"; done
+  dev_sweep_dead_inboxes
+  (( rc != 0 )) || rm -rf "$SB"
 }
 trap cleanup EXIT
 

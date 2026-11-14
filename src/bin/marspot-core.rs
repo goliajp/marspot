@@ -184,8 +184,7 @@ struct ProcessPanelState {
     /// pointer and the wheel are all answered from it.  `None` until
     /// the first frame is built.
     layout: Option<marspot::ui::components::process_panel::Layout>,
-    /// What the pointer is on.
-    hover: marspot::ui::components::process_panel::Hover,
+    surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::process_view::ProcessSurface>>,
     /// How far the process list is pushed up, in physical pixels.
     scroll_y: marspot::ui::Units,
 }
@@ -1733,815 +1732,11 @@ mod window_state_tests {
 }
 
 #[cfg(test)]
-mod boot_assembly_tests {
-    use super::*;
-    use marspot::state::{SavedPane, SavedWindowLayout};
-    use marspot_term::session_registry::{
-        self as reg, write_session_entry, SessionEntry,
-    };
-
-    /// The test's own state root and session binary, and every L3 it
-    /// started gone by the time it is dropped.
-    ///
-    /// Dropped in field order: the L3s are killed and reaped while the
-    /// registry that names them is still where the variable points,
-    /// then the variables go back, then the directory goes.
-    struct Sandbox {
-        l3s: L3Reaper,
-        env: marspot_term::test_env::EnvGuard,
-        root: ShortRoot,
-    }
-
-    /// A state root with a short path.  An L3 binds its socket at
-    /// `<root>/sessions/<id>/sock`, macOS caps a socket path at 104
-    /// bytes, and the per-user temp dir alone is half of that: under
-    /// it the L3 dies at `uds_bind_failed` before it registers.
-    struct ShortRoot(std::path::PathBuf);
-
-    impl ShortRoot {
-        fn new() -> Self {
-            use std::sync::atomic::{AtomicU32, Ordering};
-            static N: AtomicU32 = AtomicU32::new(0);
-            let dir = std::path::PathBuf::from(format!(
-                "/tmp/mspt-{}-{}",
-                std::process::id(),
-                N.fetch_add(1, Ordering::Relaxed)
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-    }
-
-    impl Drop for ShortRoot {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// Kills, on drop, every L3 the sandbox's registry names and every
-    /// pid handed to [`Sandbox::own`], and waits until each has exited:
-    /// one still tearing down when the test process exits holds its
-    /// stdout, and the runner reports the test as leaking.
-    struct L3Reaper {
-        extra: std::cell::RefCell<Vec<i32>>,
-    }
-
-    impl Drop for L3Reaper {
-        fn drop(&mut self) {
-            let mut pids: Vec<i32> = reg::list_session_entries()
-                .into_iter()
-                .map(|e| e.pid)
-                .chain(self.extra.borrow().iter().copied())
-                .filter(|&pid| reg::pid_is_live_session(pid))
-                .collect();
-            pids.sort_unstable();
-            pids.dedup();
-            for &pid in &pids {
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-            }
-            for &pid in &pids {
-                // every L3 here is this process's child, so this reaps it
-                let mut st = 0;
-                unsafe { libc::waitpid(pid, &mut st, 0) };
-            }
-        }
-    }
-
-    impl Sandbox {
-        fn new() -> Self {
-            let root = ShortRoot::new();
-            let mut env = marspot_term::test_env::EnvGuard::new();
-            env.set("MARSPOT_STATE_DIR", &root.0)
-                .set("MARSPOT_SESSION_BIN", real_session_bin())
-                .remove("MARSPOT_SESSION_ID");
-            // POSIX shm names (`/msp-s-<id>`) are a GLOBAL namespace:
-            // the sandbox isolates the filesystem but not shm.  With
-            // every sandbox allocating ids from 1, two tests spawning
-            // concurrently raced on `/msp-s-1` — create_region_named
-            // unlink+O_EXCL either detached the other test's live
-            // region or lost the O_EXCL race, and the spawn `expect`
-            // blew up (the suite's one flaky).  Seeding the counter
-            // with a per-process base keeps every test's id space —
-            // and therefore its shm names — disjoint.  Production is
-            // untouched: one state root, one monotonic counter.
-            let sessions = root.0.join("sessions");
-            std::fs::create_dir_all(&sessions).unwrap();
-            std::fs::write(
-                sessions.join(".next_id"),
-                format!("{}", std::process::id() as u64 * 100_000),
-            )
-            .unwrap();
-            Self {
-                l3s: L3Reaper { extra: Default::default() },
-                env,
-                root,
-            }
-        }
-        fn dir(&self) -> &std::path::Path {
-            &self.root.0
-        }
-        fn set(&mut self, key: &str, value: &str) {
-            self.env.set(key, value);
-        }
-        fn break_session_bin(&mut self) {
-            self.set("MARSPOT_SESSION_BIN", "/nonexistent/marspot-session-broken");
-        }
-        /// Kill `pid` with the rest, for an L3 the registry may no
-        /// longer name by the time the test ends.
-        fn own(&self, pid: i32) {
-            self.l3s.extra.borrow_mut().push(pid);
-        }
-    }
-
-    /// target/<profile>/marspot-session, built beside this test binary.
-    fn real_session_bin() -> std::path::PathBuf {
-        marspot_term::test_env::built_binary("marspot-session")
-    }
-
-    fn dead_entry(id: u64) -> SessionEntry {
-        SessionEntry {
-            id,
-            // Far above macOS pid_max (99999) — kill(pid, 0) fails,
-            // guaranteed dead.
-            pid: 3_999_999,
-            socket: reg::session_socket_path(id),
-            cols: 80,
-            rows: 24,
-            title: format!("saved-title-{id}"),
-            cwd: String::new(),
-            proto_version: reg::PROTO_VERSION,
-            created_at_unix: 1,
-            shm_name: String::new(),
-            shell_child_pid: 0,
-            build: String::new(),
-        }
-    }
-
-    fn saved(panes: &[(u64, &str)]) -> SavedWindowLayout {
-        SavedWindowLayout {
-            grid_cols: 3,
-            grid_rows: 3,
-            focused_idx: 0,
-            panes: panes
-                .iter()
-                .map(|(sid, title)| SavedPane {
-                    sid: *sid,
-                    flags: 0,
-                    custom_title: title.to_string(),
-                    last_cwd: String::new(),
-                })
-                .collect(),
-        }
-    }
-
-    fn pane_sids(panes: &[Pane]) -> Vec<u64> {
-        panes
-            .iter()
-            .map(|p| p.session().shelld_session_id().unwrap_or(0))
-            .collect()
-    }
-
-    /// Full-crash restore (the 2026-07-17 field report): every L3
-    /// dead, session dirs on disk in arbitrary readdir order.  Slots
-    /// must come back in SAVED order — not readdir order — with each
-    /// slot's own sid resurrected as a live pane.
-    #[test]
-    fn dead_sessions_resurrect_in_saved_slot_order() {
-        let _sb = Sandbox::new();
-        for id in [12u64, 5, 9] {
-            write_session_entry(&dead_entry(id)).unwrap();
-        }
-        let s = saved(&[(9, "nine"), (12, "twelve"), (5, "five")]);
-        let (tx, _rx) = mpsc::channel();
-        let (panes, reattached) =
-            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, true, &Default::default());
-        assert_eq!(
-            pane_sids(&panes),
-            vec![9, 12, 5],
-            "slots must follow saved order, not readdir order"
-        );
-        assert!(reattached.is_empty(), "nothing was alive to reattach");
-        for (i, p) in panes.iter().enumerate() {
-            assert!(
-                !p.is_vacant(),
-                "slot {i} must be a live resurrected L3, got vacant"
-            );
-        }
-    }
-
-    /// Assembly binds panes to sessions, and nothing else: a pane's
-    /// name is derived from its directory at render time
-    /// (`marspot::pane_name`), so there is no title to carry across a
-    /// boot.  What used to be tested here — saved title beats
-    /// entry.toml — described a feature that no longer exists.
-    #[test]
-    fn assembly_binds_the_saved_slots_to_their_sessions() {
-        let _sb = Sandbox::new();
-        for id in [4u64, 6] {
-            write_session_entry(&dead_entry(id)).unwrap();
-        }
-        let s = saved(&[(4, ""), (6, "")]);
-        let (tx, _rx) = mpsc::channel();
-        let (panes, _) = assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, true, &Default::default());
-        assert_eq!(pane_sids(&panes), vec![4, 6]);
-    }
-
-    /// Spawn failure must hold the slot open as a vacant pane carrying
-    /// the sid — never compact, never shift the neighbours.
-    #[test]
-    fn spawn_failure_yields_vacant_slots_never_compacts() {
-        let mut sb = Sandbox::new();
-        sb.break_session_bin();
-        let s = saved(&[(7, "seven"), (0, ""), (8, "eight")]);
-        let (tx, _rx) = mpsc::channel();
-        let (panes, _) =
-            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, true, &Default::default());
-        assert_eq!(panes.len(), 3, "failed slots must NOT compact away");
-        let sids = pane_sids(&panes);
-        assert_eq!(sids[0], 7, "slot 0 keeps its sid for revive");
-        assert_ne!(sids[1], 0, "anonymous slot got a fresh allocated id");
-        assert_eq!(sids[2], 8, "slot 2 keeps its sid for revive");
-        for (i, p) in panes.iter().enumerate() {
-            assert!(p.is_vacant(), "slot {i} must be vacant");
-            assert!(p.is_exited(), "vacant reports exited → revive path");
-        }
-    }
-
-    /// A live session missing from the saved layout is real user work
-    /// — it must be ADOPTED as an extra pane, not SIGKILLed + deleted
-    /// (the pre-RFC-004 behaviour when a layout shrank).
-    #[test]
-    fn orphan_live_session_adopted_not_killed() {
-        let _sb = Sandbox::new();
-        let (tx, _rx) = mpsc::channel();
-        // Bring up a REAL live L3 outside any saved layout.
-        let orphan_sid = reg::allocate_next_session_id().unwrap();
-        let live = spawn_l3_pane_with_cwd(60, 16, orphan_sid, "", &tx)
-            .expect("real L3 spawn (is marspot-session built?)");
-        // Keep it alive across the assembly; the sandbox kills it via
-        // the registry at test end.
-        std::mem::forget(live);
-
-        let s = saved(&[(0, "")]);
-        let (panes, reattached) =
-            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, true, &Default::default());
-        let sids = pane_sids(&panes);
-        assert_eq!(panes.len(), 2, "slot pane + adopted orphan: {sids:?}");
-        assert!(
-            sids.contains(&orphan_sid),
-            "live orphan {orphan_sid} must be adopted, got {sids:?}"
-        );
-        assert_eq!(reattached, vec![orphan_sid]);
-        // And its dir must still exist (never deleted).
-        assert!(reg::session_dir(orphan_sid).exists());
-    }
-
-    /// A dead dir that no slot references retires to the recycle bin
-    /// (recoverable), never deletes.
-    #[test]
-    fn unreferenced_dead_dir_retires_to_recycle_bin() {
-        let mut sb = Sandbox::new();
-        write_session_entry(&dead_entry(31)).unwrap();
-        // Give it recognisable history so the retired copy is provably
-        // the same dir.
-        std::fs::write(reg::session_dir(31).join("bytelog"), b"HISTORY").unwrap();
-        sb.break_session_bin(); // slots don't matter; keep them vacant
-        let s = saved(&[(700, "")]);
-        let (tx, _rx) = mpsc::channel();
-        let (panes, _) =
-            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, true, &Default::default());
-        assert_eq!(panes.len(), 1);
-        assert!(
-            !reg::session_dir(31).exists(),
-            "unreferenced dead dir must move out of sessions/"
-        );
-        let retired_root = sb.dir().join("retired");
-        let retired: Vec<_> = std::fs::read_dir(&retired_root)
-            .expect("retired/ must exist")
-            .flatten()
-            .filter(|e| {
-                e.file_name().to_string_lossy().starts_with("31-")
-            })
-            .collect();
-        assert_eq!(retired.len(), 1, "dir 31 must be in the recycle bin");
-        let bytelog = retired[0].path().join("bytelog");
-        assert_eq!(std::fs::read(bytelog).unwrap(), b"HISTORY");
-    }
-
-
-    /// RFC-005 step 6b — a restored window runs the same assembly, but
-    /// it must NOT sweep the registry.  It knows only its own saved
-    /// sids, so sweeping would (a) adopt another window's live panes a
-    /// second time and (b) retire the dirs of sessions it never heard
-    /// of.  Both halves are checked here against a sandbox that
-    /// contains exactly one of each.
-    #[test]
-    fn a_restore_assembly_leaves_other_windows_sessions_alone() {
-        let mut sb = Sandbox::new();
-        let (tx, _rx) = mpsc::channel();
-        // A live session belonging to some other window.
-        let other_sid = reg::allocate_next_session_id().unwrap();
-        let live = spawn_l3_pane_with_cwd(60, 16, other_sid, "", &tx)
-            .expect("real L3 spawn (is marspot-session built?)");
-        std::mem::forget(live); // the sandbox kills it via the registry
-        // A dead dir the sweeping assembly would retire.
-        write_session_entry(&dead_entry(31)).unwrap();
-        std::fs::write(reg::session_dir(31).join("bytelog"), b"HISTORY").unwrap();
-
-        sb.break_session_bin(); // this window's own slot stays vacant
-        let s = saved(&[(700, "")]);
-        let (panes, reattached) =
-            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, false, &Default::default());
-
-        let sids = pane_sids(&panes);
-        assert_eq!(panes.len(), 1, "only its own slot: {sids:?}");
-        assert!(
-            !sids.contains(&other_sid),
-            "another window's live session must not be adopted: {sids:?}"
-        );
-        assert!(reattached.is_empty());
-        assert!(
-            reg::session_dir(31).exists(),
-            "a non-sweeping assembly must not retire dirs it knows nothing about"
-        );
-        assert!(reg::session_dir(other_sid).exists());
-    }
-
-    /// A session another window's saved record owns is neither an
-    /// orphan to adopt nor junk to retire — its window just has not
-    /// been opened yet.
-    ///
-    /// This is the core-swap case: the replacement core assembles the
-    /// boot window first, while windows 2..N are still unannounced and
-    /// their L3s very much alive.  Without the reservation the boot
-    /// window swallowed them, and the real window's restore then tried
-    /// to reattach sessions that were already bound elsewhere.
-    #[test]
-    fn sessions_owned_by_another_saved_window_are_left_for_it() {
-        let mut sb = Sandbox::new();
-        let (tx, _rx) = mpsc::channel();
-        // Window 2's live session…
-        let live_sid = reg::allocate_next_session_id().unwrap();
-        let live = spawn_l3_pane_with_cwd(60, 16, live_sid, "", &tx)
-            .expect("real L3 spawn (is marspot-session built?)");
-        std::mem::forget(live);
-        // …and window 2's dead-but-saved session, which must keep its
-        // dir so that window can resurrect it.
-        write_session_entry(&dead_entry(41)).unwrap();
-
-        sb.break_session_bin();
-        let reserved: std::collections::HashSet<u64> = [live_sid, 41].into_iter().collect();
-        let s = saved(&[(700, "")]);
-        let (panes, reattached) =
-            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, true, &reserved);
-
-        let sids = pane_sids(&panes);
-        assert_eq!(panes.len(), 1, "boot window keeps only its own slot: {sids:?}");
-        assert!(!sids.contains(&live_sid), "reserved live session adopted");
-        assert!(reattached.is_empty());
-        assert!(
-            reg::session_dir(41).exists(),
-            "reserved dead session's history must survive for its window"
-        );
-    }
-
-    /// 2026-07-28 incident — the machine died with 176 live session
-    /// processes.  The population cap turns "grow until the OS falls
-    /// over" into "one spawn refuses, loudly".  Cap lowered via env so
-    /// proving the refusal doesn't itself need a process storm.
-    #[test]
-    fn spawning_past_the_session_population_cap_refuses() {
-        let mut sb = Sandbox::new();
-        sb.set("MARSPOT_SESSION_CAP", "1");
-        let (tx, _rx) = mpsc::channel();
-        let first_sid = reg::allocate_next_session_id().unwrap();
-        let _first = spawn_l3_pane_with_cwd(60, 16, first_sid, "", &tx)
-            .expect("first spawn fits under the cap");
-        let second_sid = reg::allocate_next_session_id().unwrap();
-        let err = match spawn_l3_pane_with_cwd(60, 16, second_sid, "", &tx) {
-            Err(e) => e,
-            Ok(_) => panic!("second spawn must refuse at cap 1"),
-        };
-        assert!(
-            err.to_string().contains("hard cap"),
-            "refusal must name the cap, got: {err}"
-        );
-    }
-
-    /// RFC-006 — a dormant slot restores AS a dormant slot: boot
-    /// assembly must not reattach, resurrect, or spawn for it.
-    #[test]
-    fn a_dormant_slot_boots_as_a_placeholder() {
-        let mut sb = Sandbox::new();
-        sb.break_session_bin(); // any spawn attempt would fail loudly
-        let s = SavedWindowLayout {
-            grid_cols: 2,
-            grid_rows: 1,
-            focused_idx: 0,
-            panes: vec![
-                SavedPane { sid: 700, ..Default::default() },
-                SavedPane {
-                    flags: marspot::state::PANE_FLAG_DORMANT,
-                    ..Default::default()
-                },
-            ],
-        };
-        let (tx, _rx) = mpsc::channel();
-        let (panes, reattached) =
-            assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, true, &Default::default());
-        assert_eq!(panes.len(), 2);
-        assert!(!panes[0].is_dormant(), "live slot stays a session slot");
-        assert!(panes[1].is_dormant(), "dormant slot is a placeholder again");
-        assert!(reattached.is_empty());
-    }
-
-    /// 2026-07-28 incident — a session whose registry entry is gone
-    /// must exit on its own.  L3s outlive their L2/L1 by design, so
-    /// the entry is the only ownership record; every reaper works by
-    /// removing it.  Before the deadman, a test script (or anything)
-    /// that deleted the registry out from under live sessions created
-    /// processes NOTHING could ever find or kill — 176 of them helped
-    /// push the machine into a forced reboot.
-    #[test]
-    fn a_session_whose_registry_entry_is_deleted_exits_by_itself() {
-        let mut sb = Sandbox::new();
-        // The deadman's beat is five seconds in production; what this
-        // asserts is that it fires at all, not how often.
-        sb.set("MARSPOT_SESSION_ENTRY_CHECK_MS", "200");
-        let (tx, _rx) = mpsc::channel();
-        let sid = reg::allocate_next_session_id().unwrap();
-        let live = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
-            .expect("real L3 spawn (is marspot-session built?)");
-        let pid = live.session().l3_pid().expect("spawned L3 has a pid");
-        // once its entry is gone the registry no longer names it, so
-        // the sandbox is told about it to kill it if the deadman fails
-        sb.own(pid);
-        std::mem::forget(live);
-        assert!(reg::pid_is_live_session(pid));
-
-        std::fs::remove_file(reg::session_entry_path(sid)).expect("remove entry");
-
-        // Generous: the beat above is 200 ms, and the margin is for a
-        // loaded box, not for the cadence.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while std::time::Instant::now() < deadline {
-            if !reg::pid_is_live_session(pid) {
-                return; // exited on its own — the leak class is closed
-            }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-        panic!("session {pid} outlived its deleted registry entry");
-    }
-
-    /// The whole `PaneResetMouseReporting` chain, against a real L3.
-    ///
-    /// Every piece of this was unit-tested separately — the codec, the
-    /// terminal's reset, the pty_op step that sends it — and the thing
-    /// those cannot tell you is whether the frame reaches the terminal
-    /// that matters.  What went wrong on 2026-09-01 lived between the
-    /// layers, not inside one.
-    ///
-    /// Drives a shell in a real session process into mouse tracking,
-    /// checks the mirror L2 renders from agrees, then sends the frame
-    /// and waits for the mirror to say it is off.
-    #[test]
-    fn a_real_session_gives_up_mouse_reporting_when_told() {
-        // Short tag on purpose: it lands in the sandbox path, and the
-        // L3's socket under it has to fit macOS's 104-byte `sun_path`.
-        // `mouse-reset` overran it by a few bytes and the session died
-        // at `uds_bind_failed` before it could register.
-        let _sb = Sandbox::new();
-        let (tx, _rx) = mpsc::channel();
-        let sid = reg::allocate_next_session_id().unwrap();
-        let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
-            .expect("real L3 spawn (is marspot-session built?)");
-
-        // The shell has to *print* the mode set for the terminal to
-        // parse it: modes are set by the program's output, and
-        // anything injected here is its input.  Retried because the
-        // first bytes land before the shell is reading.
-        //
-        // Only the first copy to run prints anything.  A shell that
-        // takes longer to start than one retry has every copy queued,
-        // and the ones still waiting when the reset below arrives
-        // would turn the mode back on behind it: under a full suite's
-        // load this failed that way once, twenty seconds in, where a
-        // run alone takes a quarter of a second.
-        let once = std::env::temp_dir().join(format!("marspot-mouse-once-{}-{sid}", std::process::id()));
-        let _ = std::fs::remove_file(&once);
-        let command = format!(
-            "[ -e '{0}' ] || {{ : > '{0}'; printf '\\033[?1002h\\033[?1006h'; }}\r",
-            once.display()
-        );
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(20);
-        let mut on = false;
-        while std::time::Instant::now() < deadline {
-            pane.session_mut().forward_inject_input(command.as_bytes());
-            for _ in 0..40 {
-                pane.pump();
-                if pane.session().l3_mouse_tracking_active() {
-                    on = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            if on {
-                break;
-            }
-        }
-        assert!(on, "shell never got as far as turning mouse tracking on");
-        assert!(
-            pane.session().l3_mouse_sgr_active(),
-            "1006 rides with 1002; without it the wheel encodes the old way"
-        );
-
-        // What L1 sends once it has taken a pane's foreground program
-        // down.  Nothing here kills anything — the point is that the
-        // terminal drops the mode on the frame alone, because a signal
-        // gives it nothing else to go on.
-        pane.session_mut().forward_pane_reset_mouse_reporting();
-
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while std::time::Instant::now() < deadline {
-            pane.pump();
-            if !pane.session().l3_mouse_tracking_active() {
-                assert!(
-                    !pane.session().l3_mouse_sgr_active(),
-                    "SGR encoding must go with it, or the next wheel is \
-                     still a mouse report — just in the older form"
-                );
-                let _ = std::fs::remove_file(&once);
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        panic!("L3 kept reporting mouse tracking after being told to stop");
-    }
-
-    /// A pane's shell is told which terminal it is talking to.
-    ///
-    /// TERM used to be replaced only when it looked broken, so a pane
-    /// launched from a session that exported some other terminal's
-    /// name handed that on, and programs addressed a terminal that is
-    /// not here.  This sets a wrong one deliberately and checks the
-    /// shell does not see it.
-    #[test]
-    fn a_pane_is_not_given_the_launchers_idea_of_the_terminal() {
-        let mut sb = Sandbox::new();
-        let (tx, _rx) = mpsc::channel();
-        let sid = reg::allocate_next_session_id().unwrap();
-
-        sb.set("TERM", "screen-256color");
-        let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx).expect("real L3 spawn (is marspot-session built?)");
-
-        pane.session_mut().forward_inject_input(b"printf 'TERM=[%s]\\n' \"$TERM\"\r");
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while std::time::Instant::now() < deadline {
-            pane.pump();
-            let screen = pane.screen_rows().into_iter().map(|r| r.text).collect::<Vec<_>>().join("\n");
-            if screen.contains("TERM=[xterm-256color]") {
-                assert!(
-                    !screen.contains("TERM=[screen-256color]"),
-                    "the launcher's TERM reached the shell:\n{screen}"
-                );
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        panic!("the shell never reported its TERM:\n{}", pane.screen_rows().into_iter().map(|r| r.text).collect::<Vec<_>>().join("\n"));
-    }
-
-    /// A new pane opens where the shell actually is.
-    ///
-    /// The registry records where a session was launched; every pane
-    /// that has since `cd`'d somewhere would open in the wrong place
-    /// if that were the answer.  This drives a real shell into a
-    /// directory it was not started in and asks.
-    #[test]
-    fn a_new_pane_inherits_the_directory_the_shell_is_in_now() {
-        let _sb = Sandbox::new();
-        let (tx, _rx) = mpsc::channel();
-        let sid = reg::allocate_next_session_id().unwrap();
-        let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
-            .expect("real L3 spawn (is marspot-session built?)");
-
-        let launched = live_cwd_of(sid);
-        assert!(!launched.is_empty(), "the shell has to have a directory to begin with");
-
-        // Somewhere it certainly was not started in.
-        pane.session_mut().forward_inject_input(b"cd /usr/lib\r");
-
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while std::time::Instant::now() < deadline {
-            pane.pump();
-            let now = live_cwd_of(sid);
-            if now.ends_with("/usr/lib") {
-                assert_ne!(now, launched, "the answer is the live cwd, not the launch one");
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        panic!("the shell never reported /usr/lib; still {:?}", live_cwd_of(sid));
-    }
-
-    /// `?1002` and `?1003` arrive as different answers.
-    ///
-    /// Press and release are reported by every tracking mode, so they
-    /// needed no knowledge of which was on.  Motion is the half that
-    /// differs, and a program that asked for drag-only and is sent
-    /// every idle pointer move gets buried.  The shm carries two more
-    /// bits for it; this checks they mean what they say against a real
-    /// shell setting each mode.
-    #[test]
-    fn the_two_motion_modes_are_told_apart_on_a_real_pty() {
-        for (mode, want_drag, want_any) in
-            [("1000", false, false), ("1002", true, false), ("1003", true, true)]
-        {
-            let _sb = Sandbox::new();
-            let (tx, _rx) = mpsc::channel();
-            let sid = reg::allocate_next_session_id().unwrap();
-            let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
-                .expect("real L3 spawn (is marspot-session built?)");
-
-            let deadline =
-                std::time::Instant::now() + std::time::Duration::from_secs(20);
-            let mut on = false;
-            while std::time::Instant::now() < deadline && !on {
-                pane.session_mut()
-                    .forward_inject_input(format!("printf '\\033[?{mode}h'\r").as_bytes());
-                for _ in 0..40 {
-                    pane.pump();
-                    if pane.session().l3_mouse_tracking_active() {
-                        on = true;
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-            }
-            assert!(on, "?{mode} never reached the terminal");
-
-            assert_eq!(
-                pane.session().l3_mouse_motion_wanted(true),
-                want_drag,
-                "?{mode}: motion while a button is held"
-            );
-            assert_eq!(
-                pane.session().l3_mouse_motion_wanted(false),
-                want_any,
-                "?{mode}: motion with no button"
-            );
-        }
-    }
-
-    /// OSC 52 travels from the program to the Mac's pasteboard.
-    ///
-    /// Three processes are involved and only the last one can touch a
-    /// pasteboard: the program writes the escape, L3 parses it and
-    /// has no AppKit, L2 receives the frame and writes it.  The unit
-    /// tests cover the parse; this covers the journey, by putting a
-    /// value on the real pasteboard through a real shell and reading
-    /// it back.
-    #[test]
-    fn osc52_reaches_the_pasteboard_from_a_real_shell() {
-        let _sb = Sandbox::new();
-        let (tx, _rx) = mpsc::channel();
-        let sid = reg::allocate_next_session_id().unwrap();
-        let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
-            .expect("real L3 spawn (is marspot-session built?)");
-
-        // Something no other test or person would have copied.
-        let token = format!("marspot-osc52-{}", std::process::id());
-        let b64 = {
-            const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            let src = token.as_bytes();
-            let mut out = String::new();
-            for c in src.chunks(3) {
-                let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
-                let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-                for i in 0..4 {
-                    if i <= c.len() {
-                        out.push(A[((n >> (18 - 6 * i)) & 0x3f) as usize] as char);
-                    } else {
-                        out.push('=');
-                    }
-                }
-            }
-            out
-        };
-        // The encoder above is the test's own; the decoder under test
-        // is the one in the terminal.  Check they agree before relying
-        // on it, or a broken encoder would read as a broken journey.
-        assert_eq!(
-            marspot_term::base64::decode(b64.as_bytes(), 4096).unwrap(),
-            token.as_bytes(),
-            "the test's encoder and the terminal's decoder disagree"
-        );
-
-        let before = marspot::input::read_clipboard_text();
-        assert_ne!(before.as_deref(), Some(token.as_str()), "the token is already there");
-
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(20);
-        let mut sent = false;
-        while std::time::Instant::now() < deadline {
-            if !sent {
-                pane.session_mut().forward_inject_input(
-                    format!("printf '\\033]52;c;{b64}\\007'\r").as_bytes(),
-                );
-                sent = true;
-            }
-            pane.pump();
-            if marspot::input::read_clipboard_text().as_deref() == Some(token.as_str()) {
-                // Put back whatever the person had.
-                if let Some(prev) = before {
-                    marspot::input::write_clipboard_text(&prev);
-                }
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        panic!("the clipboard never got {token:?}");
-    }
-
-    /// A click reaches the program, on a real PTY.
-    ///
-    /// The encoding is unit-tested; this is the other half — that a
-    /// button press forwarded through `l3_inject_mouse_button` comes
-    /// out of the pty as the bytes a program reads.  `cat -v` makes
-    /// them visible, so the assertion is on what the program itself
-    /// received rather than on what we believe we sent.
-    #[test]
-    fn a_click_reaches_the_program_on_a_real_pty() {
-        let _sb = Sandbox::new();
-        let (tx, _rx) = mpsc::channel();
-        let sid = reg::allocate_next_session_id().unwrap();
-        let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
-            .expect("real L3 spawn (is marspot-session built?)");
-
-        // Turn tracking on the same way the other test does — the
-        // shell has to print the mode for the terminal to see it.
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(20);
-        let mut on = false;
-        while std::time::Instant::now() < deadline && !on {
-            pane.session_mut()
-                .forward_inject_input(b"printf '\\033[?1002h\\033[?1006h'\r");
-            for _ in 0..40 {
-                pane.pump();
-                if pane.session().l3_mouse_tracking_active() {
-                    on = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        }
-        assert!(on, "shell never got as far as turning mouse tracking on");
-
-        // Read what the program receives, with the escapes shown.
-        pane.session_mut().forward_inject_input(b"cat -v\r");
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        for _ in 0..20 {
-            pane.pump();
-        }
-
-        pane.session_mut().l3_inject_mouse_button(0, true, 12, 3);
-        pane.session_mut().l3_inject_mouse_button(0, false, 12, 3);
-
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while std::time::Instant::now() < deadline {
-            pane.pump();
-            let screen = pane.screen_rows().into_iter().map(|r| r.text).collect::<Vec<_>>().join("\n");
-            if screen.contains("[<0;12;3M") && screen.contains("[<0;12;3m") {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        let screen = pane.screen_rows().into_iter().map(|r| r.text).collect::<Vec<_>>().join("\n");
-        panic!("the press and release never reached the program; screen was:\n{screen}");
-    }
-
-    /// Duplicate sid in a corrupt saved state must not double-bind one
-    /// session to two panes — the second slot falls back to a fresh id.
-    #[test]
-    fn duplicate_saved_sid_does_not_double_bind() {
-        let mut sb = Sandbox::new();
-        sb.break_session_bin();
-        let s = saved(&[(9, "a"), (9, "b")]);
-        let (tx, _rx) = mpsc::channel();
-        let (panes, _) =
-            assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, true, &Default::default());
-        let sids = pane_sids(&panes);
-        assert_eq!(sids.len(), 2);
-        assert_eq!(sids[0], 9);
-        assert_ne!(sids[1], 9, "second slot must not re-bind sid 9");
-    }
-}
+#[path = "marspot-core/boot_assembly_tests.rs"]
+mod boot_assembly_tests;
+#[cfg(test)]
+#[path = "marspot-core/real_pty_tests.rs"]
+mod real_pty_tests;
 
 #[cfg(test)]
 mod link_menu_tests {
@@ -2658,7 +1853,7 @@ struct CcUsageModalState {
     data: Option<marspot::cc_usage::CcUsage>,
     codex: Option<marspot::cc_usage::CodexUsage>,
     loaded_at: Instant,
-    hover: marspot::ui::components::cc_usage_modal::Hover,
+    surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::cc_usage_view::CcUsageSurface>>,
 }
 
 struct ContextMenuState {
@@ -3802,7 +2997,9 @@ struct WindowState {
     /// the hit-test uses the number that produced what is on screen.
     layout_modal_label_w: f64,
     /// What the pointer is on in the open layout panel.
-    layout_modal_hover: marspot::ui::components::layout_modal::Hover,
+    layout_surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::layout_view::LayoutSurface>>,
+    /// What each slot of the layout panel holds, as last drawn.
+    layout_titles: Vec<String>,
     /// F3+9 — right-click ContextMenu live state.  `None` when closed.
     /// Set by `mouse_right_down`; cleared by `mouse_down` outside
     /// the menu, Esc key, or after dispatching an action.
@@ -3839,10 +3036,13 @@ struct WindowState {
     /// How far the settings panel's content is pushed up inside its
     /// rect.  Only ever nonzero on a window too short to show it whole.
     settings_modal_scroll: marspot::ui::Units,
-    /// What the pointer is on in the settings panel.
-    settings_modal_hover: marspot::ui::components::settings_modal::Hover,
-    /// Is the pointer on the shortcuts panel's close button?
-    shortcuts_close_hover: bool,
+    /// The settings panel's surface: its layout, what the pointer and
+    /// the keyboard have done to it, and what it last painted.
+    settings_surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::settings_view::SettingsSurface>>,
+    /// Where the settings file is, as the panel's footer shows it.
+    settings_path: std::sync::Arc<str>,
+    /// The shortcuts panel's surface.
+    shortcuts_surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::shortcuts_view::ShortcutsSurface>>,
     ime_preedit: String,
     /// Window physical dims, updated by Resize frames.
     w_phys: f64,
@@ -3920,7 +3120,8 @@ impl WindowState {
             panels: SurfaceStack::default(),
             lights_right_phys: None,
             layout_modal_label_w: 0.0,
-            layout_modal_hover: Default::default(),
+            layout_surface: Default::default(),
+            layout_titles: Vec::new(),
             context_menu: None,
             pending_grid_cols: grid_cols,
             pending_grid_rows: grid_rows,
@@ -3931,8 +3132,9 @@ impl WindowState {
             process_panel: None,
             cc_usage_modal: None,
             settings_modal_scroll: Default::default(),
-            settings_modal_hover: Default::default(),
-            shortcuts_close_hover: false,
+            settings_surface: Default::default(),
+            settings_path: std::sync::Arc::from(marspot::settings::path().display().to_string()),
+            shortcuts_surface: Default::default(),
             drop_preview: None,
             ime_preedit: String::new(),
             w_phys,
@@ -4003,6 +3205,11 @@ mod hover;
 mod idle;
 #[path = "marspot-core/keys.rs"]
 mod keys;
+#[path = "marspot-core/tree_panels.rs"]
+mod tree_panels;
+use marspot::ui::components::layout_modal::Hover as LayoutAsk;
+use marspot::ui::components::process_panel::Hover as ProcessAsk;
+use marspot::ui::components::{layout_view, process_view};
 #[path = "marspot-core/theme_follow.rs"]
 mod theme_follow;
 
@@ -6987,13 +6194,12 @@ impl CoreApp {
             Some(SurfaceKind::Processes) => w.process_panel = None,
             Some(SurfaceKind::Accounts) => w.cc_usage_modal = None,
             Some(SurfaceKind::Layout) => w.layout_drag = None,
-            Some(SurfaceKind::Shortcuts) => w.shortcuts_close_hover = false,
-            Some(SurfaceKind::Settings) | None => {}
+            Some(SurfaceKind::Shortcuts) | Some(SurfaceKind::Settings) | None => {}
         }
         match change.opened {
             Some(SurfaceKind::Settings) => {
                 w.settings_modal_scroll = Default::default();
-                w.settings_modal_hover = Default::default();
+                w.settings_surface.borrow_mut().kept.surface.interaction.reset();
                 // Pick up anything edited by hand since the last look, so
                 // the panel never shows a value the file disagrees with.
                 marspot::settings::reload_if_changed();
@@ -7002,7 +6208,7 @@ impl CoreApp {
                 // Staged values start from the live grid on every open.
                 w.pending_grid_cols = w.grid_cols;
                 w.pending_grid_rows = w.grid_rows;
-                w.layout_modal_hover = Default::default();
+                w.layout_surface.borrow_mut().kept.surface.interaction.reset();
                 self.reset_card_slots(wi);
                 // The card labels are directories: read them now, not
                 // up to CWD_SWEEP_INTERVAL ago.
@@ -7021,7 +6227,7 @@ impl CoreApp {
                     selected_pane: 0,
                     prev_pid_stats: std::collections::HashMap::new(),
                     layout: None,
-                    hover: Default::default(),
+                    surface: Default::default(),
                     scroll_y: Default::default(),
                 });
                 // Walked now so the first frame already has its rows.
@@ -7032,10 +6238,11 @@ impl CoreApp {
                     data: marspot::cc_usage::read(),
                     codex: marspot::kimi_usage::read_codex_and_kimi(),
                     loaded_at: Instant::now(),
-                    hover: Default::default(),
+                    surface: Default::default(),
                 });
             }
-            Some(SurfaceKind::Shortcuts) | None => {}
+            Some(SurfaceKind::Shortcuts) => w.shortcuts_surface.borrow_mut().kept.surface.interaction.reset(),
+            None => {}
         }
     }
 
@@ -7060,99 +6267,17 @@ impl CoreApp {
     /// frame, on neither its header nor its close button.
     fn panel_content_press(&mut self, wi: usize, kind: SurfaceKind, x_phys: f64, y_phys: f64) {
         match kind {
-            SurfaceKind::Accounts | SurfaceKind::Shortcuts => {}
-            SurfaceKind::Processes => {
-                use marspot::ui::components::process_panel::Hover;
-                let Some(panel) = win!(self, wi).process_panel.as_mut() else { return };
-                let Some(layout) = panel.layout.as_ref() else { return };
-                match layout.hover_at(x_phys, y_phys) {
-                    Hover::Kill(row) => {
-                        if let Some(pid) = panel.row_pids.get(row).copied() {
-                            self.kill_and_track(wi, pid);
-                            self.refresh_process_panel(wi);
-                        }
-                    }
-                    Hover::Pane(row) => {
-                        panel.selected_pane = row;
-                        panel.scroll_y = Default::default();
-                    }
-                    Hover::Process(_) | Hover::Close | Hover::None => {}
-                }
+            SurfaceKind::Accounts => {}
+            SurfaceKind::Settings | SurfaceKind::Shortcuts => {
+                self.tree_panel_content_press(wi, kind, x_phys, y_phys);
             }
-            SurfaceKind::Settings => {
-                use marspot::ui::components::settings_modal::Hover;
-                let Hover::Control(row, seg) = self.settings_hover_at(wi, x_phys, y_phys) else { return };
-                let cur = marspot::settings::get();
-                let Some(next) = row.apply(&cur, seg) else { return };
-                // Write, then adopt.  If the disk write fails the
-                // panel must keep showing what the file says, not
-                // what the click asked for — a control that lies
-                // about having saved is worse than one that does
-                // not move.
-                match marspot::settings::write(&next) {
-                    Ok(()) => {
-                        marspot::settings::reload_if_changed();
-                        lx_event!(
-                            "SETTINGS_CHANGED",
-                            "settings panel wrote a new value",
-                            row = format!("{:?}", row),
-                            reclaim = next.reclaim_enabled as u32,
-                            idle_min = next.reclaim_idle_minutes as u64,
-                            prefetch = next.reclaim_prefetch as u32
-                        );
-                    }
-                    Err(e) => lx_warn!(
-                        "core.settings.write_failed",
-                        &format!("{e}; the panel keeps showing the file's values")
-                    ),
-                }
+            SurfaceKind::Processes => {
+                let on = self.tree_panel_action_at(wi, kind, x_phys, y_phys);
+                self.process_panel_do(wi, on.map_or(ProcessAsk::None, process_view::asked));
             }
             SurfaceKind::Layout => {
-                use marspot::ui::components::layout_modal::{step, Axis, Hover};
-                let modal = self.layout_modal_geometry(wi);
-                match modal.hover_at(x_phys, y_phys) {
-                    Hover::Card(slot) => {
-                        let card = modal.cards[slot];
-                        win!(self, wi).layout_drag = Some(LayoutModalDrag {
-                            from_slot: slot,
-                            grab_offset_phys: (x_phys - card.x, y_phys - card.y_top),
-                            mouse_phys: (x_phys, y_phys),
-                        });
-                    }
-                    Hover::Apply => {
-                        let change = win!(self, wi).panels.close(CloseBy::Content);
-                        self.apply_surface_change(wi, change);
-                        win!(self, wi).grid_cols = win!(self, wi).pending_grid_cols;
-                        win!(self, wi).grid_rows = win!(self, wi).pending_grid_rows;
-                        // The drag-reordered arrangement lands in the
-                        // actual grid.  Only the in-cells portion is
-                        // reordered (panes past the grid cells stay in
-                        // sidebar order).
-                        let cells = win!(self, wi).grid_cols * win!(self, wi).grid_rows;
-                        self.apply_card_slot_permutation(wi, cells);
-                        // If the focused pane's slot is beyond the new
-                        // cell count, focus the last surviving cell so the
-                        // user sees a focused pane in the grid.  Overflowed
-                        // sessions stay alive in the sidebar.
-                        if cells > 0 && win!(self, wi).focused_idx >= cells {
-                            win!(self, wi).focused_idx = cells - 1;
-                        }
-                        self.rebuild_layout(wi);
-                        self.save_session_state();
-                    }
-                    Hover::Step(axis, part) => {
-                        let w = &mut win!(self, wi);
-                        let value = match axis {
-                            Axis::Columns => &mut w.pending_grid_cols,
-                            Axis::Rows => &mut w.pending_grid_rows,
-                        };
-                        if let Some(next) = step(*value, part) {
-                            *value = next;
-                            self.reset_card_slots(wi);
-                        }
-                    }
-                    Hover::Close | Hover::None => {}
-                }
+                let on = self.tree_panel_action_at(wi, kind, x_phys, y_phys);
+                self.layout_panel_do(wi, on.map_or(LayoutAsk::None, layout_view::asked), (x_phys, y_phys));
             }
         }
     }
@@ -7211,29 +6336,6 @@ impl CoreApp {
             self.rebuild_layout(wi);
             win!(self, wi).needs_render = true;
         }
-    }
-
-    fn settings_modal_rect(&mut self, wi: usize) -> marspot_term::layout::Rect {
-        let (w_phys, h_phys, top_inset) = (
-            win!(self, wi).w_phys,
-            win!(self, wi).h_phys,
-            win!(self, wi).layout.top_inset,
-        );
-        let mut measure = marspot::ui::components::controls::font_measure(self.renderer.font_mut());
-        let home = marspot::ui::components::settings_modal::panel_rect(
-            w_phys, h_phys, &marspot::settings::get(), &mut measure, top_inset,
-        );
-        surface_stack::place(home, win!(self, wi).panels.offset(), w_phys, h_phys, top_inset)
-    }
-
-    /// What `(x, y)` is on in the open settings panel.
-    fn settings_hover_at(&mut self, wi: usize, x: f64, y: f64) -> marspot::ui::components::settings_modal::Hover {
-        let rect = self.settings_modal_rect(wi);
-        let scroll = win!(self, wi).settings_modal_scroll.px();
-        let mut measure = marspot::ui::components::controls::font_measure(self.renderer.font_mut());
-        marspot::ui::components::settings_modal::hover_at(
-            rect, scroll, &marspot::settings::get(), &mut measure, x, y,
-        )
     }
 
     /// The open layout panel's geometry, as last drawn.
@@ -7343,7 +6445,8 @@ impl CoreApp {
                 updated_label: String::new(),
                 accounts,
                 clock: Clock::local(now_unix),
-                hover: modal.hover,
+                pointer: None,
+                surface: modal.surface.clone(),
             });
         }
         // Two feeds, two generation stamps. The panel shows the older
@@ -7361,7 +6464,8 @@ impl CoreApp {
             rect,
             updated_label: strings::text(Arg::UpdatedAt(md_hm(generated_at))),
             clock: Clock::local(now_unix),
-            hover: modal.hover,
+            pointer: None,
+            surface: modal.surface.clone(),
             accounts,
         })
     }
@@ -7453,7 +6557,8 @@ impl CoreApp {
             selected_pane,
             detail,
             rows,
-            hover: panel.hover,
+            pointer: None,
+            surface: panel.surface.clone(),
         })
     }
 
@@ -7727,8 +6832,17 @@ impl CoreApp {
             return;
         }
         if let Some(kind) = win!(self, wi).panels.open() {
-            let chrome = PanelChrome::new(self.panel_frame(wi, kind), win!(self, wi).layout.top_inset);
-            match win!(self, wi).panels.on_press(x_phys, y_phys, &chrome) {
+            let frame = self.panel_frame(wi, kind);
+            let press = if matches!(kind, SurfaceKind::Settings | SurfaceKind::Shortcuts | SurfaceKind::Layout | SurfaceKind::Accounts) {
+                let on = self.tree_panel_press_on(wi, kind, x_phys, y_phys);
+                win!(self, wi).panels.on_press_on(on, x_phys, y_phys, frame)
+            } else {
+                // the process monitor answers from the frame last
+                // drawn, and has drawn none the moment it opens
+                let chrome = PanelChrome::new(frame, win!(self, wi).layout.top_inset);
+                win!(self, wi).panels.on_press(x_phys, y_phys, &chrome)
+            };
+            match press {
                 Some(Press::Close(change)) => self.apply_surface_change(wi, change),
                 Some(Press::Content(kind)) => self.panel_content_press(wi, kind, x_phys, y_phys),
                 Some(Press::BeginDrag) | None => {}
@@ -8844,24 +7958,11 @@ impl CoreApp {
         // The settings panel.  A snapshot per frame — one consistent
         // set of values, so a toggle and a segment can never be drawn
         // from either side of the same click.
-        let settings_data = if win!(self, wi).panels.open() == Some(SurfaceKind::Settings) {
-            Some(marspot::ui::components::settings_paint::SettingsRender {
-                rect: self.settings_modal_rect(wi),
-                scroll: win!(self, wi).settings_modal_scroll.px(),
-                settings: (*marspot::settings::get()).clone(),
-                path: marspot::settings::path().display().to_string(),
-                hover: win!(self, wi).settings_modal_hover,
-            })
-        } else {
-            None
-        };
+        let settings_data =
+            (win!(self, wi).panels.open() == Some(SurfaceKind::Settings)).then(|| self.settings_render(wi));
         self.renderer.set_settings_panel(settings_data);
-        let shortcuts = (win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts)).then(|| {
-            marspot::ui::components::shortcuts_paint::ShortcutsRender {
-                rect: self.shortcuts_panel_rect(wi),
-                close_hovered: win!(self, wi).shortcuts_close_hover,
-            }
-        });
+        let shortcuts =
+            (win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts)).then(|| self.shortcuts_render(wi));
         self.renderer.set_shortcuts_panel(shortcuts);
         // F3+9 — publish ContextMenu render state every frame.
         // Per-window, like every overlay below it: the renderer holds
@@ -8897,33 +7998,20 @@ impl CoreApp {
         // chain (custom > cwd basename > ordinal).  Empty slot if
         // the slot points at a pane index past the live count.
         let layout_modal = if win!(self, wi).panels.open() == Some(SurfaceKind::Layout) {
-            use marspot::ui::components::layout_modal_paint::{LayoutModalRender, LayoutModalDragRender};
             let cells = win!(self, wi).pending_grid_cols * win!(self, wi).pending_grid_rows;
-            let slot_titles: Vec<String> = (0..cells)
-                .map(|slot| {
-                    let pane_idx = win!(self, wi).card_slots.get(slot).copied().unwrap_or(usize::MAX);
-                    resolved_labels
-                        .get(pane_idx)
-                        .cloned()
-                        .unwrap_or_default()
-                })
-                .collect();
+            let mut titles = std::mem::take(&mut win!(self, wi).layout_titles);
+            titles.resize_with(cells, Default::default);
+            for (slot, title) in titles.iter_mut().enumerate() {
+                let pane_idx = win!(self, wi).card_slots.get(slot).copied().unwrap_or(usize::MAX);
+                title.clear();
+                title.push_str(resolved_labels.get(pane_idx).map_or("", |s| s.as_str()));
+            }
             win!(self, wi).layout_modal_label_w = marspot::ui::components::layout_modal::widest_label(
-                &slot_titles,
+                &titles,
                 &mut marspot::ui::components::controls::font_measure(self.renderer.font_mut()),
             );
-            Some(LayoutModalRender {
-                cols: win!(self, wi).pending_grid_cols,
-                rows: win!(self, wi).pending_grid_rows,
-                hover: win!(self, wi).layout_modal_hover,
-                offset: win!(self, wi).panels.offset(),
-                slot_titles,
-                drag: win!(self, wi).layout_drag.map(|d| LayoutModalDragRender {
-                    from_slot: d.from_slot,
-                    grab_offset_phys: d.grab_offset_phys,
-                    mouse_phys: d.mouse_phys,
-                }),
-            })
+            win!(self, wi).layout_titles = titles;
+            Some(self.layout_render(wi))
         } else {
             None
         };
@@ -8981,7 +8069,8 @@ impl CoreApp {
                     agent_tui,
                     pane_cwd,
                 );
-                if i == focused && p.view_offset() == 0 {
+                // a panel has the keyboard: what is being composed is not the pane's
+                if i == focused && p.view_offset() == 0 && !win!(self, wi).panels.owns_pointer() {
                     v.ime_preedit = win!(self, wi).ime_preedit.as_str();
                 }
                 v.selection = win!(self, wi)

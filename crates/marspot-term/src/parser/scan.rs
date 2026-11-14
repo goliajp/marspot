@@ -1,8 +1,23 @@
 //! Byte scans the bulk feed path runs ahead of the state machine.
 
+#[cfg(test)]
+thread_local! {
+    /// Bytes this thread's scans have looked at, for tests that bound
+    /// how often the same input is read.
+    pub(crate) static SCANNED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Length of the leading run of printable ASCII (0x20..=0x7E).
 #[inline]
 pub fn printable_run_len(bytes: &[u8]) -> usize {
+    let n = run_len(bytes);
+    #[cfg(test)]
+    SCANNED.with(|c| c.set(c.get() + n as u64 + 1));
+    n
+}
+
+#[inline(always)]
+fn run_len(bytes: &[u8]) -> usize {
     let mut i = 0;
     #[cfg(target_arch = "aarch64")]
     {
