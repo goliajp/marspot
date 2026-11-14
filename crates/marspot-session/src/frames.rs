@@ -70,6 +70,12 @@ impl Frames {
         &mut self.shm
     }
 
+    /// Publish through `shm` from now on; the writer it replaces
+    /// comes back.
+    pub(crate) fn replace_shm(&mut self, shm: GridShmWriter) -> GridShmWriter {
+        std::mem::replace(&mut self.shm, shm)
+    }
+
     /// Track the grid's scroll-push counter so we can auto-pin
     /// `view_offset` when the live grid scrolls a line into scrollback
     /// while the user is viewing scrollback (`view_offset > 0`).  Without

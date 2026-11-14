@@ -21,7 +21,7 @@ use support::{COLS, ROWS, Session};
 
 /// The session's id, of this test process's own: every test here ran
 /// as session 4100 and shared one pair of cluster and title regions.
-fn id() -> u64 {
+pub(crate) fn id() -> u64 {
     support::id_base() + 4100
 }
 
@@ -30,13 +30,13 @@ fn id() -> u64 {
 /// Not the system temp dir: on macOS that is a long path under
 /// `/var/folders`, and the session's socket inside it overflows the
 /// 104 bytes a socket path may have, so the L3 cannot bind and exits.
-struct Sandbox {
+pub(crate) struct Sandbox {
     env: EnvGuard,
     dir: PathBuf,
 }
 
 impl Sandbox {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
         let dir = PathBuf::from(format!(
@@ -51,7 +51,7 @@ impl Sandbox {
         Self { env, dir }
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.dir
     }
 }
@@ -66,7 +66,7 @@ fn bin() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_marspot-session"))
 }
 
-fn wait_for<T>(secs: u64, what: &str, f: impl FnMut() -> Option<T>) -> T {
+pub(crate) fn wait_for<T>(secs: u64, what: &str, f: impl FnMut() -> Option<T>) -> T {
     wait_for_or(secs, what, f, String::new)
 }
 
@@ -95,10 +95,21 @@ fn wait_for_or<T>(
 }
 
 /// A pane with a plain shell on it, settled at its prompt.
-fn start(sandbox: &mut Sandbox) -> Session {
+pub(crate) fn start(sandbox: &mut Sandbox) -> Session {
     let shell = shell_without_rc_files(sandbox.path(), "/bin/zsh");
     sandbox.env.set("SHELL", &shell);
-    let mut s = Session::spawn_with_id(bin(), COLS, ROWS, Some(id()));
+    settled(sandbox, Session::spawn_with_id(bin(), COLS, ROWS, Some(id())))
+}
+
+/// [`start`], on regions under the session's names.
+pub(crate) fn start_named(sandbox: &mut Sandbox) -> (Session, marspot_term::grid_shm::SessionRegions) {
+    let shell = shell_without_rc_files(sandbox.path(), "/bin/zsh");
+    sandbox.env.set("SHELL", &shell);
+    let (s, regions) = Session::spawn_named(bin(), COLS, ROWS, id());
+    (settled(sandbox, s), regions)
+}
+
+fn settled(sandbox: &Sandbox, mut s: Session) -> Session {
     let state = sandbox.path().to_path_buf();
     wait_for(10, "the session's first frame", || {
         if let Some(st) = s.child.try_wait().unwrap() {
@@ -116,13 +127,13 @@ fn start(sandbox: &mut Sandbox) -> Session {
 
 /// Have the shell print its own pid behind `tag`, and read it back
 /// off the screen.
-fn shell_pid(s: &Session, tag: &str) -> i32 {
+pub(crate) fn shell_pid(s: &Session, tag: &str) -> i32 {
     let f = echo_pid(tag);
     s.send_frame(f.msg_type, f.payload);
     wait_for(10, &format!("{tag}= and the prompt after it"), || read_echoed_pid(s, tag))
 }
 
-fn echo_pid(tag: &str) -> Frame {
+pub(crate) fn echo_pid(tag: &str) -> Frame {
     // Ctrl-U first: whatever was typed on the line goes
     Frame::new(
         MsgType::InjectInput,
@@ -133,7 +144,7 @@ fn echo_pid(tag: &str) -> Frame {
 /// The pid behind `tag=` once the prompt after it is drawn too: a
 /// caller that reads the screen or the cursor right after must not race
 /// the shell drawing it.
-fn read_echoed_pid(s: &Session, tag: &str) -> Option<i32> {
+pub(crate) fn read_echoed_pid(s: &Session, tag: &str) -> Option<i32> {
     let prefix = format!("{tag}=");
     let (rows, (col, row)) = s.try_screen_and_cursor(COLS, ROWS)?;
     let at = rows.iter().position(|l| l.starts_with(&prefix))?;
@@ -146,12 +157,12 @@ fn read_echoed_pid(s: &Session, tag: &str) -> Option<i32> {
 /// A connection accepted just before an execv is not handed over: the
 /// new image closes it.  L2 sees the EOF and reconnects.  What must
 /// never happen is input lost on a connection that stays open.
-struct Link {
+pub(crate) struct Link {
     stream: UnixStream,
 }
 
 impl Link {
-    fn open() -> Self {
+    pub(crate) fn open() -> Self {
         let stream = support::reattach(&session_socket_path(id()), 15)
             .expect("the new image accepts a reattach on the session's socket");
         Self { stream }
@@ -174,7 +185,7 @@ impl Link {
         closed
     }
 
-    fn send_until<T>(
+    pub(crate) fn send_until<T>(
         &mut self,
         s: &Session,
         what: &str,
@@ -203,7 +214,7 @@ impl Link {
 /// fingerprint changed when `differ`.  A changed byte voids the code
 /// signature and macOS will not exec it, so the copy is re-signed
 /// adhoc and verified before anything is signalled.
-fn stage(state: &Path, differ: bool) -> PathBuf {
+pub(crate) fn stage(state: &Path, differ: bool) -> PathBuf {
     let dir = state.join("binaries/current");
     std::fs::create_dir_all(&dir).unwrap();
     let dst = dir.join("marspot-session");

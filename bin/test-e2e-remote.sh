@@ -57,6 +57,7 @@ DEFAULT_SUITES=(
   test-language-switch.sh
   test-bundle-lander.sh
   test-single-instance.sh
+  test-two-sandboxes.sh
   test-session-ownership.sh
   test-one-app-record.sh
   test-coalition-reclaim.sh
