@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.361"  # the shell that stays after a quit keeps no release poll, no CLI installer, no process table
-core    = "0.12.453"  # a chrome button has no hit test of its own, which nothing called
-session = "0.11.201"  # the reader keeps three chunks, not four, ahead of a key's answer
+shell   = "0.7.361"  # the shell that stays after a quit keeps no release poll, no CLI installer, and no process table
+core    = "0.12.494"  # the context menu is drawn from its tree, and the canvas is gone
+session = "0.11.331"  # a run of ASCII that ends inside its row skips the general loop

@@ -2,6 +2,7 @@
 //! the terminal acts on, one line each, appended to that file.
 
 use std::fs::File;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// The trace file, opened on first use; `None` when the variable is
@@ -26,8 +27,21 @@ fn trace_file() -> Option<&'static Mutex<File>> {
 /// off it has to be a load and a branch, not a call.
 #[inline(always)]
 pub(super) fn trace_seq(kind: &str, intermediates: &[u8], params: &[u16], byte: u8) {
-    if let Some(file) = trace_file() {
-        write_line(file, kind, intermediates, params, byte);
+    if !OFF.load(Ordering::Relaxed) {
+        trace(kind, intermediates, params, byte);
+    }
+}
+
+/// Set once the variable has been looked for and not found.  Asking
+/// the `OnceLock` itself is a call and some twenty instructions, four
+/// times a line of coloured output.
+static OFF: AtomicBool = AtomicBool::new(false);
+
+#[cold]
+fn trace(kind: &str, intermediates: &[u8], params: &[u16], byte: u8) {
+    match trace_file() {
+        Some(file) => write_line(file, kind, intermediates, params, byte),
+        None => OFF.store(true, Ordering::Relaxed),
     }
 }
 
