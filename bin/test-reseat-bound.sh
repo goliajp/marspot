@@ -24,6 +24,9 @@
 #             that leaves the same way
 #   appeared  another application starts: the app does not look again
 #   reopened  quit and opened again: the same process, no shell started
+#   killed    three shells asked for and refused within the minute,
+#             then the shell is killed: a session starts its successor
+#             all the same
 # and in each of them the app is one living record with its windows,
 # the sessions name the shell as the one that answers, and a program a
 # pane starts is still not given the sessions.
@@ -173,6 +176,26 @@ if make_kept; then
     expect "times a shell was asked for in the running one's place" "$D_ASKED" 0
     held
   fi
+
+  # a shell that is refused the coalition and leaves is not a shell
+  # that died: one that dies right after three of them still gets its
+  # successor
+  STATE="killed after refusals"; echo; echo "── $STATE: shells are asked for and refused, and the shell is then killed ──"
+  mark
+  for (( n = 0; n < 3; n++ )); do
+    rm -f "$MARSPOT_STATE_DIR/owner.reseats"
+    stage_shell
+    updates=$(count SHELL_SELF_UPDATE)
+    "$SHELL_BIN" --trigger >/dev/null || bad "the update trigger found no shell"
+    wait_count SHELL_SELF_UPDATE $((updates + 1)) 60 || bad "the shell did not move to the staged image"
+    sleep 6
+  done
+  answers; since
+  asked="$(grep -c '^a' "$MARSPOT_STATE_DIR/owner.spawn")"
+  (( asked >= 3 )) && ok "starts asked for by a living shell in the last minute: $asked" \
+    || bad "starts asked for by a living shell in the last minute: $asked, expected three: the state is not the one to test"
+  if kill_shell; then ok "a session started a shell $L1 in place of the one that was killed"
+  else bad "no shell took the place of the one that was killed after the refusals: $(grep -c $'\tOWNER_START_HELD\t' "$APPLOG") start(s) held back"; fi
 fi
 
 echo

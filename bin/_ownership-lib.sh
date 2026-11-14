@@ -44,6 +44,14 @@ sig() { # -SIG pid
 
 cleanup() {
   local p
+  # what LaunchServices did with coalitions during a run that failed
+  if (( ${#FAILED[@]} > 0 )); then
+    echo "  --- launchservicesd on coalitions since the run began:"
+    /usr/bin/log show --start "$(date -r "$RUN_START" '+%Y-%m-%d %H:%M:%S')" --info --debug --style compact \
+      --predicate 'process == "launchservicesd" AND (eventMessage CONTAINS "coalition" OR eventMessage CONTAINS "previously exited")' 2>/dev/null \
+      | grep -E 'Setting coalitionID|Another running|previously exited|ClearCoalitions' \
+      | sed -E 's/launchservicesd\[[^]]*\] \[com.apple.launchservices:cas\] //' | cut -c1-260 | tail -80 | sed 's/^/    ls| /'
+  fi
   for p in ${STRANGERS[@]+"${STRANGERS[@]}"} $(cat "$SB/launcher.pid" "$SB/by.pid" 2>/dev/null); do
     sig -9 "$p"
   done
