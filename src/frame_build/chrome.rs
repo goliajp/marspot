@@ -225,7 +225,7 @@ fn paint_region_seams(p: &mut ViewPainter, layout: &Layout) {
     }
 }
 
-fn paint_toolbar(p: &mut ViewPainter, layout: &Layout, state: ChromeState) {
+pub(crate) fn paint_toolbar(p: &mut ViewPainter, layout: &Layout, state: ChromeState) {
     // Every toolbar button, painted from one list.
     //
     // `layout.toolbar_buttons()` is the layout's own order, zipped
@@ -262,7 +262,7 @@ fn paint_toolbar(p: &mut ViewPainter, layout: &Layout, state: ChromeState) {
     }
 }
 
-fn paint_version_label(painter: &mut ViewPainter, layout: &Layout) {
+pub(crate) fn paint_version_label(painter: &mut ViewPainter, layout: &Layout) {
     let (cell_w, cell_h, ascent) = (painter.cell_w, painter.cell_h, painter.ascent);
     // Quiet metadata flush right, on the same row as the traffic
     // lights and the toolbar buttons.

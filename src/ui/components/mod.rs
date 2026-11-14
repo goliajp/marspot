@@ -37,6 +37,9 @@ pub mod layout_modal;
 pub mod layout_view;
 pub mod context_menu;
 pub mod context_menu_view;
+pub mod toolbar_view;
+#[cfg(test)]
+mod toolbar_view_tests;
 #[cfg(test)]
 mod context_menu_view_tests;
 #[cfg(test)]

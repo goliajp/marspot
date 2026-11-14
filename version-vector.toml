@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.486"  # the claude badge reads how young a pane is from its log's stated length
-core    = "0.12.513"  # a pane's screen without a frame is rebuilt from its log through the log's reader
+core    = "0.12.514"  # the toolbar described as a tree draws what the toolbar painted by hand draws
 session = "0.11.352"  # history and byte log in fixed-size segments written in place: no file made, renamed, grown or deleted while output flows
