@@ -8,41 +8,21 @@ impl CoreApp {
     /// Follow the pointer over the open panel and the context menu.
     pub(super) fn hover_panels(&mut self, wi: usize, x_phys: f64, y_phys: f64) {
         if win!(self, wi).panels.open() == Some(SurfaceKind::Settings) {
-            let on = self.settings_hover_at(wi, x_phys, y_phys);
-            if on != win!(self, wi).settings_modal_hover {
-                win!(self, wi).settings_modal_hover = on;
-                win!(self, wi).needs_render = true;
-            }
+            self.tree_panel_hover(wi, SurfaceKind::Settings, x_phys, y_phys);
         }
         if win!(self, wi).cc_usage_modal.is_some() {
-            let on = marspot::ui::components::cc_usage_modal::hover_at(self.cc_usage_modal_rect(wi), x_phys, y_phys);
-            let modal = win!(self, wi).cc_usage_modal.as_mut().expect("checked above");
-            if std::mem::replace(&mut modal.hover, on) != on {
-                win!(self, wi).needs_render = true;
-            }
+            self.tree_panel_hover(wi, SurfaceKind::Accounts, x_phys, y_phys);
         }
         if win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts) {
-            let on = PanelChrome::new(self.shortcuts_panel_rect(wi), 0.0).hit_close(x_phys, y_phys);
-            if std::mem::replace(&mut win!(self, wi).shortcuts_close_hover, on) != on {
-                win!(self, wi).needs_render = true;
-            }
+            self.tree_panel_hover(wi, SurfaceKind::Shortcuts, x_phys, y_phys);
         }
         if win!(self, wi).panels.open() == Some(SurfaceKind::Layout) {
-            let on = self.layout_modal_geometry(wi).hover_at(x_phys, y_phys);
-            if on != win!(self, wi).layout_modal_hover {
-                win!(self, wi).layout_modal_hover = on;
-                win!(self, wi).needs_render = true;
-            }
+            self.tree_panel_hover(wi, SurfaceKind::Layout, x_phys, y_phys);
         }
-        // The process monitor highlights what the pointer is on.
+        if win!(self, wi).process_panel.is_some() {
+            self.tree_panel_hover(wi, SurfaceKind::Processes, x_phys, y_phys);
+        }
         let w = &mut win!(self, wi);
-        if let Some(panel) = w.process_panel.as_mut() {
-            let on = panel.layout.as_ref().map(|l| l.hover_at(x_phys, y_phys)).unwrap_or_default();
-            if on != panel.hover {
-                panel.hover = on;
-                w.needs_render = true;
-            }
-        }
         // F3+9 — drive context menu hover highlight when open.
         if let Some(state) = w.context_menu.as_mut() {
             use marspot::ui::components::ContextMenu;
@@ -65,14 +45,14 @@ impl CoreApp {
     pub(super) fn clear_hover(&mut self, wi: usize) -> [bool; 3] {
         let w = &mut win!(self, wi);
         let chrome = w.hover_chrome_btn.take().is_some();
-        let mut panel = std::mem::take(&mut w.settings_modal_hover) != Default::default();
-        panel |= std::mem::take(&mut w.layout_modal_hover) != Default::default();
-        panel |= std::mem::take(&mut w.shortcuts_close_hover);
+        let mut panel = w.settings_surface.borrow_mut().kept.surface.pointer_leave();
+        panel |= w.layout_surface.borrow_mut().kept.surface.pointer_leave();
+        panel |= w.shortcuts_surface.borrow_mut().kept.surface.pointer_leave();
         if let Some(modal) = w.cc_usage_modal.as_mut() {
-            panel |= std::mem::take(&mut modal.hover) != Default::default();
+            panel |= modal.surface.borrow_mut().kept.surface.pointer_leave();
         }
         if let Some(p) = w.process_panel.as_mut() {
-            panel |= std::mem::take(&mut p.hover) != Default::default();
+            panel |= p.surface.borrow_mut().kept.surface.pointer_leave();
         }
         let menu = w.context_menu.as_mut().is_some_and(|m| m.hovered_idx.take().is_some());
         w.needs_render |= chrome || panel || menu;
@@ -105,7 +85,6 @@ impl CoreApp {
 #[cfg(test)]
 mod tests {
     use marspot::commands::{Chord, Key, CMD};
-    use marspot::ui::components::{layout_modal, settings_modal};
     use marspot_term::test_env::sandbox_state_dir;
 
     use super::super::window_state_tests::{app_with, win};
@@ -152,8 +131,8 @@ mod tests {
         let top = app.windows[0].layout.top_inset;
         let lit = |app: &CoreApp| {
             let w = &app.windows[0];
-            w.settings_modal_hover != settings_modal::Hover::default()
-                || w.layout_modal_hover != layout_modal::Hover::default()
+            w.settings_surface.borrow().kept.surface.interaction.hovered.is_some()
+                || w.layout_surface.borrow().kept.surface.interaction.hovered.is_some()
         };
         for (c, mods, kind) in [(',', CMD, SurfaceKind::Settings), ('l', CMD | marspot::commands::SHIFT, SurfaceKind::Layout)] {
             press(&mut app, c, mods);

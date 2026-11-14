@@ -25,36 +25,68 @@ fn argmax() -> Option<usize> {
     })
 }
 
+/// Room for the largest block the kernel hands out, mapped rather than
+/// allocated: the kernel takes the block from the end of whatever room
+/// it is given, so the room has to be `kern.argmax` (a megabyte), while
+/// a block is a few kilobytes.  Pages of a mapping that were never
+/// written cost nothing; the same megabyte from the allocator is
+/// written once to zero it and stays the process's for good.
+struct Room {
+    at: *mut u8,
+    len: usize,
+}
+
+impl Room {
+    fn map(len: usize) -> Option<Room> {
+        // SAFETY: an anonymous private mapping of `len` bytes, or MAP_FAILED.
+        let at = unsafe {
+            libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_ANON | libc::MAP_PRIVATE, -1, 0)
+        };
+        (at != libc::MAP_FAILED).then_some(Room { at: at.cast(), len })
+    }
+}
+
+impl Drop for Room {
+    fn drop(&mut self) {
+        // SAFETY: the mapping made in `map`, unmapped once.
+        unsafe { libc::munmap(self.at.cast(), self.len) };
+    }
+}
+
 thread_local! {
-    static BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static ROOM: RefCell<Option<Room>> = const { RefCell::new(None) };
+}
+
+/// Give back the calling thread's room.  For a thread that asked once
+/// and stays for days with nothing more to ask.
+pub fn release_room() {
+    ROOM.with(|cell| cell.borrow_mut().take());
 }
 
 /// Run `f` over `pid`'s raw `KERN_PROCARGS2` block, in a per-thread
-/// buffer that is allocated once and reused.
+/// room that is mapped once and reused.
 fn with_procargs<T>(pid: i32, f: impl FnOnce(&[u8]) -> Option<T>) -> Option<T> {
     const KERN_PROCARGS2: libc::c_int = 49;
     let cap = argmax()?;
-    BUF.with(|cell| {
-        let mut buf = cell.borrow_mut();
-        if buf.len() != cap {
-            buf.resize(cap, 0);
+    ROOM.with(|cell| {
+        let mut room = cell.borrow_mut();
+        if room.is_none() {
+            *room = Some(Room::map(cap)?);
         }
+        let room = room.as_ref()?;
         let mut mib = [libc::CTL_KERN, KERN_PROCARGS2, pid];
-        let mut got: libc::size_t = buf.len();
+        let mut got: libc::size_t = room.len;
+        // SAFETY: the kernel writes at most `got` bytes into the room.
         let r = unsafe {
-            libc::sysctl(
-                mib.as_mut_ptr(),
-                3,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                &mut got,
-                std::ptr::null_mut(),
-                0,
-            )
+            libc::sysctl(mib.as_mut_ptr(), 3, room.at.cast(), &mut got, std::ptr::null_mut(), 0)
         };
         if r != 0 {
             return None;
         }
-        f(&buf[..got.min(buf.len())])
+        // SAFETY: `got` bytes of the room were just written; the rest of
+        // a fresh mapping reads as zero.  Nothing else holds the room
+        // while the cell is borrowed.
+        f(unsafe { std::slice::from_raw_parts(room.at, got.min(room.len)) })
     })
 }
 
@@ -148,6 +180,34 @@ pub fn proc_env_value(pid: i32, key: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    fn footprint() -> u64 {
+        // SAFETY: the kernel fills the struct or fails; all-zero is valid.
+        unsafe {
+            let mut info: libc::rusage_info_v4 = std::mem::zeroed();
+            libc::proc_pid_rusage(libc::getpid(), libc::RUSAGE_INFO_V4, (&raw mut info).cast());
+            info.ri_phys_footprint
+        }
+    }
+
+    /// The room is a megabyte and a block a few kilobytes: asking must
+    /// cost the process the block, not the room.  Asked on a thread of
+    /// its own, whose room is new.
+    #[test]
+    fn asking_costs_the_pages_written_and_not_the_whole_room() {
+        let pid = std::process::id() as i32;
+        std::thread::spawn(move || {
+            let before = footprint();
+            let argv = proc_argv(pid).expect("our own argv");
+            assert!(!argv.is_empty());
+            let grew = footprint().saturating_sub(before);
+            assert!(grew < 512 * 1024, "reading one argv grew the footprint by {grew} bytes");
+            release_room();
+            assert_eq!(proc_argv(pid), Some(argv), "a released room is mapped again when asked");
+        })
+        .join()
+        .expect("the asking thread");
+    }
 
     fn block(argc: i32, body: &[u8]) -> Vec<u8> {
         let mut v = argc.to_ne_bytes().to_vec();
@@ -256,8 +316,8 @@ mod tests {
         let a = proc_cmdline(me).expect("own cmdline");
         let b = proc_cmdline(me).expect("own cmdline");
         assert_eq!(a, b);
-        let cap = BUF.with(|c| c.borrow().len());
-        assert_eq!(Some(cap), argmax(), "the buffer is sized from kern.argmax");
+        let cap = ROOM.with(|c| c.borrow().as_ref().map(|r| r.len));
+        assert_eq!(cap, argmax(), "the room is sized from kern.argmax");
         assert!(proc_argv(i32::MAX).is_none());
     }
 }

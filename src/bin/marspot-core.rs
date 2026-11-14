@@ -184,8 +184,7 @@ struct ProcessPanelState {
     /// pointer and the wheel are all answered from it.  `None` until
     /// the first frame is built.
     layout: Option<marspot::ui::components::process_panel::Layout>,
-    /// What the pointer is on.
-    hover: marspot::ui::components::process_panel::Hover,
+    surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::process_view::ProcessSurface>>,
     /// How far the process list is pushed up, in physical pixels.
     scroll_y: marspot::ui::Units,
 }
@@ -1854,7 +1853,7 @@ struct CcUsageModalState {
     data: Option<marspot::cc_usage::CcUsage>,
     codex: Option<marspot::cc_usage::CodexUsage>,
     loaded_at: Instant,
-    hover: marspot::ui::components::cc_usage_modal::Hover,
+    surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::cc_usage_view::CcUsageSurface>>,
 }
 
 struct ContextMenuState {
@@ -2998,7 +2997,9 @@ struct WindowState {
     /// the hit-test uses the number that produced what is on screen.
     layout_modal_label_w: f64,
     /// What the pointer is on in the open layout panel.
-    layout_modal_hover: marspot::ui::components::layout_modal::Hover,
+    layout_surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::layout_view::LayoutSurface>>,
+    /// What each slot of the layout panel holds, as last drawn.
+    layout_titles: Vec<String>,
     /// F3+9 — right-click ContextMenu live state.  `None` when closed.
     /// Set by `mouse_right_down`; cleared by `mouse_down` outside
     /// the menu, Esc key, or after dispatching an action.
@@ -3035,10 +3036,13 @@ struct WindowState {
     /// How far the settings panel's content is pushed up inside its
     /// rect.  Only ever nonzero on a window too short to show it whole.
     settings_modal_scroll: marspot::ui::Units,
-    /// What the pointer is on in the settings panel.
-    settings_modal_hover: marspot::ui::components::settings_modal::Hover,
-    /// Is the pointer on the shortcuts panel's close button?
-    shortcuts_close_hover: bool,
+    /// The settings panel's surface: its layout, what the pointer and
+    /// the keyboard have done to it, and what it last painted.
+    settings_surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::settings_view::SettingsSurface>>,
+    /// Where the settings file is, as the panel's footer shows it.
+    settings_path: std::sync::Arc<str>,
+    /// The shortcuts panel's surface.
+    shortcuts_surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::shortcuts_view::ShortcutsSurface>>,
     ime_preedit: String,
     /// Window physical dims, updated by Resize frames.
     w_phys: f64,
@@ -3116,7 +3120,8 @@ impl WindowState {
             panels: SurfaceStack::default(),
             lights_right_phys: None,
             layout_modal_label_w: 0.0,
-            layout_modal_hover: Default::default(),
+            layout_surface: Default::default(),
+            layout_titles: Vec::new(),
             context_menu: None,
             pending_grid_cols: grid_cols,
             pending_grid_rows: grid_rows,
@@ -3127,8 +3132,9 @@ impl WindowState {
             process_panel: None,
             cc_usage_modal: None,
             settings_modal_scroll: Default::default(),
-            settings_modal_hover: Default::default(),
-            shortcuts_close_hover: false,
+            settings_surface: Default::default(),
+            settings_path: std::sync::Arc::from(marspot::settings::path().display().to_string()),
+            shortcuts_surface: Default::default(),
             drop_preview: None,
             ime_preedit: String::new(),
             w_phys,
@@ -3199,6 +3205,11 @@ mod hover;
 mod idle;
 #[path = "marspot-core/keys.rs"]
 mod keys;
+#[path = "marspot-core/tree_panels.rs"]
+mod tree_panels;
+use marspot::ui::components::layout_modal::Hover as LayoutAsk;
+use marspot::ui::components::process_panel::Hover as ProcessAsk;
+use marspot::ui::components::{layout_view, process_view};
 #[path = "marspot-core/theme_follow.rs"]
 mod theme_follow;
 
@@ -6183,13 +6194,12 @@ impl CoreApp {
             Some(SurfaceKind::Processes) => w.process_panel = None,
             Some(SurfaceKind::Accounts) => w.cc_usage_modal = None,
             Some(SurfaceKind::Layout) => w.layout_drag = None,
-            Some(SurfaceKind::Shortcuts) => w.shortcuts_close_hover = false,
-            Some(SurfaceKind::Settings) | None => {}
+            Some(SurfaceKind::Shortcuts) | Some(SurfaceKind::Settings) | None => {}
         }
         match change.opened {
             Some(SurfaceKind::Settings) => {
                 w.settings_modal_scroll = Default::default();
-                w.settings_modal_hover = Default::default();
+                w.settings_surface.borrow_mut().kept.surface.interaction.reset();
                 // Pick up anything edited by hand since the last look, so
                 // the panel never shows a value the file disagrees with.
                 marspot::settings::reload_if_changed();
@@ -6198,7 +6208,7 @@ impl CoreApp {
                 // Staged values start from the live grid on every open.
                 w.pending_grid_cols = w.grid_cols;
                 w.pending_grid_rows = w.grid_rows;
-                w.layout_modal_hover = Default::default();
+                w.layout_surface.borrow_mut().kept.surface.interaction.reset();
                 self.reset_card_slots(wi);
                 // The card labels are directories: read them now, not
                 // up to CWD_SWEEP_INTERVAL ago.
@@ -6217,7 +6227,7 @@ impl CoreApp {
                     selected_pane: 0,
                     prev_pid_stats: std::collections::HashMap::new(),
                     layout: None,
-                    hover: Default::default(),
+                    surface: Default::default(),
                     scroll_y: Default::default(),
                 });
                 // Walked now so the first frame already has its rows.
@@ -6228,10 +6238,11 @@ impl CoreApp {
                     data: marspot::cc_usage::read(),
                     codex: marspot::kimi_usage::read_codex_and_kimi(),
                     loaded_at: Instant::now(),
-                    hover: Default::default(),
+                    surface: Default::default(),
                 });
             }
-            Some(SurfaceKind::Shortcuts) | None => {}
+            Some(SurfaceKind::Shortcuts) => w.shortcuts_surface.borrow_mut().kept.surface.interaction.reset(),
+            None => {}
         }
     }
 
@@ -6256,99 +6267,17 @@ impl CoreApp {
     /// frame, on neither its header nor its close button.
     fn panel_content_press(&mut self, wi: usize, kind: SurfaceKind, x_phys: f64, y_phys: f64) {
         match kind {
-            SurfaceKind::Accounts | SurfaceKind::Shortcuts => {}
-            SurfaceKind::Processes => {
-                use marspot::ui::components::process_panel::Hover;
-                let Some(panel) = win!(self, wi).process_panel.as_mut() else { return };
-                let Some(layout) = panel.layout.as_ref() else { return };
-                match layout.hover_at(x_phys, y_phys) {
-                    Hover::Kill(row) => {
-                        if let Some(pid) = panel.row_pids.get(row).copied() {
-                            self.kill_and_track(wi, pid);
-                            self.refresh_process_panel(wi);
-                        }
-                    }
-                    Hover::Pane(row) => {
-                        panel.selected_pane = row;
-                        panel.scroll_y = Default::default();
-                    }
-                    Hover::Process(_) | Hover::Close | Hover::None => {}
-                }
+            SurfaceKind::Accounts => {}
+            SurfaceKind::Settings | SurfaceKind::Shortcuts => {
+                self.tree_panel_content_press(wi, kind, x_phys, y_phys);
             }
-            SurfaceKind::Settings => {
-                use marspot::ui::components::settings_modal::Hover;
-                let Hover::Control(row, seg) = self.settings_hover_at(wi, x_phys, y_phys) else { return };
-                let cur = marspot::settings::get();
-                let Some(next) = row.apply(&cur, seg) else { return };
-                // Write, then adopt.  If the disk write fails the
-                // panel must keep showing what the file says, not
-                // what the click asked for — a control that lies
-                // about having saved is worse than one that does
-                // not move.
-                match marspot::settings::write(&next) {
-                    Ok(()) => {
-                        marspot::settings::reload_if_changed();
-                        lx_event!(
-                            "SETTINGS_CHANGED",
-                            "settings panel wrote a new value",
-                            row = format!("{:?}", row),
-                            reclaim = next.reclaim_enabled as u32,
-                            idle_min = next.reclaim_idle_minutes as u64,
-                            prefetch = next.reclaim_prefetch as u32
-                        );
-                    }
-                    Err(e) => lx_warn!(
-                        "core.settings.write_failed",
-                        &format!("{e}; the panel keeps showing the file's values")
-                    ),
-                }
+            SurfaceKind::Processes => {
+                let on = self.tree_panel_action_at(wi, kind, x_phys, y_phys);
+                self.process_panel_do(wi, on.map_or(ProcessAsk::None, process_view::asked));
             }
             SurfaceKind::Layout => {
-                use marspot::ui::components::layout_modal::{step, Axis, Hover};
-                let modal = self.layout_modal_geometry(wi);
-                match modal.hover_at(x_phys, y_phys) {
-                    Hover::Card(slot) => {
-                        let card = modal.cards[slot];
-                        win!(self, wi).layout_drag = Some(LayoutModalDrag {
-                            from_slot: slot,
-                            grab_offset_phys: (x_phys - card.x, y_phys - card.y_top),
-                            mouse_phys: (x_phys, y_phys),
-                        });
-                    }
-                    Hover::Apply => {
-                        let change = win!(self, wi).panels.close(CloseBy::Content);
-                        self.apply_surface_change(wi, change);
-                        win!(self, wi).grid_cols = win!(self, wi).pending_grid_cols;
-                        win!(self, wi).grid_rows = win!(self, wi).pending_grid_rows;
-                        // The drag-reordered arrangement lands in the
-                        // actual grid.  Only the in-cells portion is
-                        // reordered (panes past the grid cells stay in
-                        // sidebar order).
-                        let cells = win!(self, wi).grid_cols * win!(self, wi).grid_rows;
-                        self.apply_card_slot_permutation(wi, cells);
-                        // If the focused pane's slot is beyond the new
-                        // cell count, focus the last surviving cell so the
-                        // user sees a focused pane in the grid.  Overflowed
-                        // sessions stay alive in the sidebar.
-                        if cells > 0 && win!(self, wi).focused_idx >= cells {
-                            win!(self, wi).focused_idx = cells - 1;
-                        }
-                        self.rebuild_layout(wi);
-                        self.save_session_state();
-                    }
-                    Hover::Step(axis, part) => {
-                        let w = &mut win!(self, wi);
-                        let value = match axis {
-                            Axis::Columns => &mut w.pending_grid_cols,
-                            Axis::Rows => &mut w.pending_grid_rows,
-                        };
-                        if let Some(next) = step(*value, part) {
-                            *value = next;
-                            self.reset_card_slots(wi);
-                        }
-                    }
-                    Hover::Close | Hover::None => {}
-                }
+                let on = self.tree_panel_action_at(wi, kind, x_phys, y_phys);
+                self.layout_panel_do(wi, on.map_or(LayoutAsk::None, layout_view::asked), (x_phys, y_phys));
             }
         }
     }
@@ -6407,29 +6336,6 @@ impl CoreApp {
             self.rebuild_layout(wi);
             win!(self, wi).needs_render = true;
         }
-    }
-
-    fn settings_modal_rect(&mut self, wi: usize) -> marspot_term::layout::Rect {
-        let (w_phys, h_phys, top_inset) = (
-            win!(self, wi).w_phys,
-            win!(self, wi).h_phys,
-            win!(self, wi).layout.top_inset,
-        );
-        let mut measure = marspot::ui::components::controls::font_measure(self.renderer.font_mut());
-        let home = marspot::ui::components::settings_modal::panel_rect(
-            w_phys, h_phys, &marspot::settings::get(), &mut measure, top_inset,
-        );
-        surface_stack::place(home, win!(self, wi).panels.offset(), w_phys, h_phys, top_inset)
-    }
-
-    /// What `(x, y)` is on in the open settings panel.
-    fn settings_hover_at(&mut self, wi: usize, x: f64, y: f64) -> marspot::ui::components::settings_modal::Hover {
-        let rect = self.settings_modal_rect(wi);
-        let scroll = win!(self, wi).settings_modal_scroll.px();
-        let mut measure = marspot::ui::components::controls::font_measure(self.renderer.font_mut());
-        marspot::ui::components::settings_modal::hover_at(
-            rect, scroll, &marspot::settings::get(), &mut measure, x, y,
-        )
     }
 
     /// The open layout panel's geometry, as last drawn.
@@ -6539,7 +6445,8 @@ impl CoreApp {
                 updated_label: String::new(),
                 accounts,
                 clock: Clock::local(now_unix),
-                hover: modal.hover,
+                pointer: None,
+                surface: modal.surface.clone(),
             });
         }
         // Two feeds, two generation stamps. The panel shows the older
@@ -6557,7 +6464,8 @@ impl CoreApp {
             rect,
             updated_label: strings::text(Arg::UpdatedAt(md_hm(generated_at))),
             clock: Clock::local(now_unix),
-            hover: modal.hover,
+            pointer: None,
+            surface: modal.surface.clone(),
             accounts,
         })
     }
@@ -6649,7 +6557,8 @@ impl CoreApp {
             selected_pane,
             detail,
             rows,
-            hover: panel.hover,
+            pointer: None,
+            surface: panel.surface.clone(),
         })
     }
 
@@ -6923,8 +6832,17 @@ impl CoreApp {
             return;
         }
         if let Some(kind) = win!(self, wi).panels.open() {
-            let chrome = PanelChrome::new(self.panel_frame(wi, kind), win!(self, wi).layout.top_inset);
-            match win!(self, wi).panels.on_press(x_phys, y_phys, &chrome) {
+            let frame = self.panel_frame(wi, kind);
+            let press = if matches!(kind, SurfaceKind::Settings | SurfaceKind::Shortcuts | SurfaceKind::Layout | SurfaceKind::Accounts) {
+                let on = self.tree_panel_press_on(wi, kind, x_phys, y_phys);
+                win!(self, wi).panels.on_press_on(on, x_phys, y_phys, frame)
+            } else {
+                // the process monitor answers from the frame last
+                // drawn, and has drawn none the moment it opens
+                let chrome = PanelChrome::new(frame, win!(self, wi).layout.top_inset);
+                win!(self, wi).panels.on_press(x_phys, y_phys, &chrome)
+            };
+            match press {
                 Some(Press::Close(change)) => self.apply_surface_change(wi, change),
                 Some(Press::Content(kind)) => self.panel_content_press(wi, kind, x_phys, y_phys),
                 Some(Press::BeginDrag) | None => {}
@@ -8040,24 +7958,11 @@ impl CoreApp {
         // The settings panel.  A snapshot per frame — one consistent
         // set of values, so a toggle and a segment can never be drawn
         // from either side of the same click.
-        let settings_data = if win!(self, wi).panels.open() == Some(SurfaceKind::Settings) {
-            Some(marspot::ui::components::settings_paint::SettingsRender {
-                rect: self.settings_modal_rect(wi),
-                scroll: win!(self, wi).settings_modal_scroll.px(),
-                settings: (*marspot::settings::get()).clone(),
-                path: marspot::settings::path().display().to_string(),
-                hover: win!(self, wi).settings_modal_hover,
-            })
-        } else {
-            None
-        };
+        let settings_data =
+            (win!(self, wi).panels.open() == Some(SurfaceKind::Settings)).then(|| self.settings_render(wi));
         self.renderer.set_settings_panel(settings_data);
-        let shortcuts = (win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts)).then(|| {
-            marspot::ui::components::shortcuts_paint::ShortcutsRender {
-                rect: self.shortcuts_panel_rect(wi),
-                close_hovered: win!(self, wi).shortcuts_close_hover,
-            }
-        });
+        let shortcuts =
+            (win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts)).then(|| self.shortcuts_render(wi));
         self.renderer.set_shortcuts_panel(shortcuts);
         // F3+9 — publish ContextMenu render state every frame.
         // Per-window, like every overlay below it: the renderer holds
@@ -8093,33 +7998,20 @@ impl CoreApp {
         // chain (custom > cwd basename > ordinal).  Empty slot if
         // the slot points at a pane index past the live count.
         let layout_modal = if win!(self, wi).panels.open() == Some(SurfaceKind::Layout) {
-            use marspot::ui::components::layout_modal_paint::{LayoutModalRender, LayoutModalDragRender};
             let cells = win!(self, wi).pending_grid_cols * win!(self, wi).pending_grid_rows;
-            let slot_titles: Vec<String> = (0..cells)
-                .map(|slot| {
-                    let pane_idx = win!(self, wi).card_slots.get(slot).copied().unwrap_or(usize::MAX);
-                    resolved_labels
-                        .get(pane_idx)
-                        .cloned()
-                        .unwrap_or_default()
-                })
-                .collect();
+            let mut titles = std::mem::take(&mut win!(self, wi).layout_titles);
+            titles.resize_with(cells, Default::default);
+            for (slot, title) in titles.iter_mut().enumerate() {
+                let pane_idx = win!(self, wi).card_slots.get(slot).copied().unwrap_or(usize::MAX);
+                title.clear();
+                title.push_str(resolved_labels.get(pane_idx).map_or("", |s| s.as_str()));
+            }
             win!(self, wi).layout_modal_label_w = marspot::ui::components::layout_modal::widest_label(
-                &slot_titles,
+                &titles,
                 &mut marspot::ui::components::controls::font_measure(self.renderer.font_mut()),
             );
-            Some(LayoutModalRender {
-                cols: win!(self, wi).pending_grid_cols,
-                rows: win!(self, wi).pending_grid_rows,
-                hover: win!(self, wi).layout_modal_hover,
-                offset: win!(self, wi).panels.offset(),
-                slot_titles,
-                drag: win!(self, wi).layout_drag.map(|d| LayoutModalDragRender {
-                    from_slot: d.from_slot,
-                    grab_offset_phys: d.grab_offset_phys,
-                    mouse_phys: d.mouse_phys,
-                }),
-            })
+            win!(self, wi).layout_titles = titles;
+            Some(self.layout_render(wi))
         } else {
             None
         };
@@ -8177,7 +8069,8 @@ impl CoreApp {
                     agent_tui,
                     pane_cwd,
                 );
-                if i == focused && p.view_offset() == 0 {
+                // a panel has the keyboard: what is being composed is not the pane's
+                if i == focused && p.view_offset() == 0 && !win!(self, wi).panels.owns_pointer() {
                     v.ime_preedit = win!(self, wi).ime_preedit.as_str();
                 }
                 v.selection = win!(self, wi)
