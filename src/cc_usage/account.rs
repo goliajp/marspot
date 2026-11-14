@@ -12,8 +12,10 @@ use super::{model_limits, num_field, parse_iso_utc, str_field};
 pub struct CcModelLimit {
     /// Model name as the feed writes it ("Fable").
     pub label: String,
-    /// 0.0 ..= 1.0 utilization of that model's own window.
-    pub util: f64,
+    /// 0.0 ..= 1.0 utilization of that model's own window; `None` when
+    /// the feed has no reading for it, which is not a cap with nothing
+    /// used.
+    pub util: Option<f64>,
     /// Unix seconds when it resets; `None` when nothing has been used
     /// and the window has not started.
     pub reset: Option<i64>,
@@ -126,7 +128,7 @@ impl CcAccount {
         });
         out.extend(self.model_limits.iter().map(|m| CcWindow {
             label: m.label.to_ascii_lowercase(),
-            util: Some(m.util),
+            util: m.util,
             reset: m.reset,
             span_secs: WEEK_SECS,
         }));
