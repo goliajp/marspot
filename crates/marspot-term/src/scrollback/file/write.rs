@@ -406,6 +406,15 @@ mod tests {
         assert_eq!(sb.cell_at(0, 0).map(|c| c.ch), Some('a'));
     }
 
+    /// Line `i` of a flood, saying which it is in its eight columns.
+    fn numbered(i: u64) -> Vec<Cell> {
+        format!("{:08}", i % 100_000_000).chars().map(|ch| Cell { ch, ..Default::default() }).collect()
+    }
+
+    fn number_of(line: &[Cell]) -> u64 {
+        line.iter().map(|c| c.ch).collect::<String>().parse().expect("a numbered line")
+    }
+
     /// What `a_process_killed_mid_flood_loses_a_bounded_tail` runs in a
     /// process of its own: lines into the files named by the
     /// environment, as fast as they go, until it is killed.
@@ -417,7 +426,7 @@ mod tests {
         let cols = 8usize;
         let mut sb = FileScrollback::open(dir.join("sb.bin"), dir.join("sb.idx"), cols, 4).expect("create");
         for i in 0u64..=u64::MAX {
-            sb.push_line(&fill(b'a' + (i % 26) as u8, cols), false);
+            sb.push_line(&numbered(i), false);
             if i % 512 == 511 {
                 // how far it has certainly got
                 let _ = std::fs::write(dir.join("pushed"), (i + 1).to_string());
@@ -426,9 +435,9 @@ mod tests {
     }
 
     /// A process killed in the middle of a flood, with no flush and no
-    /// destructor: the files it leaves open cleanly, every line in them
-    /// reads back, and what is missing is no more than the buffers that
-    /// may be in flight -- 256 KiB of records.
+    /// destructor: the files it leaves open cleanly, the lines in them
+    /// read back in order, and what is missing at the end is no more
+    /// than the buffers that may be in flight -- 256 KiB of records.
     #[test]
     fn a_process_killed_mid_flood_loses_a_bounded_tail() {
         let tmp = TmpDir::new("killed");
@@ -456,11 +465,17 @@ mod tests {
 
         let cols = 8usize;
         let sb = FileScrollback::open(dir.join("sb.bin"), dir.join("sb.idx"), cols, 4).expect("reopen after the kill");
-        let kept = sb.len() as u64;
-        for i in [0, kept / 2, kept - 1] {
-            let line = sb.read_line(i as usize).unwrap_or_else(|| panic!("line {i} of {kept} reads back"));
-            assert_eq!(line[0].ch, (b'a' + (i % 26) as u8) as char, "line {i}");
+        // However far the pusher got before the kill reached it -- a
+        // quick one on a busy machine has rotated its files by then,
+        // and the oldest line kept is no longer the first it pushed --
+        // the lines kept are consecutive up to the last.
+        let first = number_of(&sb.read_line(0).expect("the oldest line reads back"));
+        let len = sb.len() as u64;
+        for i in [len / 3, len / 2, len - 1] {
+            let line = sb.read_line(i as usize).unwrap_or_else(|| panic!("line {i} of {len} reads back"));
+            assert_eq!(number_of(&line), (first + i) % 100_000_000, "line {i}");
         }
+        let kept = first + len;
         // a record of these lines: length, flags, columns, one run of eight
         let record = (FILE_REC_HEADER_BYTES + 2 + 1 + 16 + cols) as u64;
         let lost = certain.saturating_sub(kept);
