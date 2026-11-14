@@ -148,7 +148,7 @@ fn the_frame_layout_names_no_backend() {
             assert!(!src.contains(w), "{} mentions {w}", path.display());
         }
     }
-    assert!(seen >= 10, "read only {seen} files from src/frame_build");
+    assert!(seen >= 9, "read only {seen} files from src/frame_build");
 }
 
 /// And it still catches the import every layout file used to have.

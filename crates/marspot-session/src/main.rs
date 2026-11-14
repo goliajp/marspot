@@ -37,17 +37,17 @@ mod publish_gate;
 mod pty_reader;
 mod shell_end;
 mod signal_events;
+mod regions;
 mod reply_guard;
 mod uds_server;
 mod upkeep;
 
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use marspot_term::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
-use marspot_term::grid_shm::{GridShmWriter, ENV_SHM_FD};
 use marspot_term::input_core::{MarspotKeyEvent, Modifiers};
 use marspot_term::render::grid_selection_text;
 use marspot_term::scrollback_search::{
@@ -249,6 +249,9 @@ enum SessionEvent {
     /// L2 sent `SessionUpdate`: move to the build in `current/` if it
     /// is another one, otherwise nothing.
     UpdateRequested,
+    /// L2 sent `SessionRepublish`: publish into the grid region of
+    /// this name from now on.
+    Republish(String),
     /// SIGHUP: the app retired this session.  Exit, never execv.
     CloseRequested,
     /// The background probe of `current/marspot-session` finished; the
@@ -403,12 +406,12 @@ fn set_cloexec(fd: RawFd) -> std::io::Result<()> {
 /// reach execv — on success the function does not return.
 fn do_l3_execv_swap(
     id: u64,
-    local: local_session::LocalSession,
+    mut local: local_session::LocalSession,
     mut listener: uds_server::SessionListener,
     poke: Option<ControlWriter>,
+    snapshots: &SnapshotWriter,
 ) -> std::io::Result<()> {
     let started = Instant::now();
-    let mut local = local;
     local.quiesce_for_handoff();
     let (master_fd, child_pid, terminal, cols, rows) = local.extract_for_handoff();
 
@@ -418,8 +421,7 @@ fn do_l3_execv_swap(
     // TUI's incremental repaints (claudecode's input box vanished
     // until its next full repaint).
     let body = terminal.serialize_snapshot_live();
-    let state_path = session_state_bin_path(id);
-    let _ = std::fs::write(&state_path, &body);
+    snapshots.write_last(session_state_bin_path(id), body);
     // F3+10 — flush the FileScrollback BufWriter tail to the kernel
     // page cache before execv.  Drop won't run on `libc::execv` so
     // anything sitting in the writer's 64 KB user-space buffer would
@@ -613,59 +615,6 @@ fn setup_control_socket(readers: &mut ControlReaders, tx: Sender<SessionEvent>) 
     }
 }
 
-/// Bring up the grid framebuffer and report its geometry. When L2 owns
-/// the region (`MARSPOT_SHM_FD` set) we take the writer role on the
-/// inherited fd and adopt the region's dims; standalone we self-create
-/// at the placeholder geometry. The returned `(cols, rows)` is what the
-/// session must be sized to so its published grid fits the region.
-fn setup_shm() -> (GridShmWriter, u16, u16) {
-    match std::env::var(ENV_SHM_FD) {
-        Ok(s) => {
-            let fd: RawFd = s.parse().unwrap_or_else(|_| {
-                lx_error!(
-                    "session.shm_fd.parse_failed",
-                    "bad shm fd env",
-                    env_var = ENV_SHM_FD,
-                    value = s
-                );
-                std::process::exit(1);
-            });
-            let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-            let w = GridShmWriter::from_fd(owned).unwrap_or_else(|e| {
-                lx_error!(
-                    "session.grid_shm.from_fd_failed",
-                    &format!("{e}"),
-                    fd = fd
-                );
-                std::process::exit(1);
-            });
-            let (c, r) = (w.cols(), w.rows());
-            lx_info!(
-                "session.grid_shm.attached",
-                "grid framebuffer from inherited fd",
-                fd = fd,
-                cols = c,
-                rows = r
-            );
-            (w, c, r)
-        }
-        Err(_) => {
-            let w = GridShmWriter::create(INITIAL_COLS, INITIAL_ROWS).unwrap_or_else(|e| {
-                lx_error!("session.grid_shm.create_failed", &format!("{e}"));
-                std::process::exit(1);
-            });
-            lx_info!(
-                "session.grid_shm.self_created",
-                "grid framebuffer self-created",
-                fd = w.fd(),
-                cols = INITIAL_COLS,
-                rows = INITIAL_ROWS
-            );
-            (w, INITIAL_COLS, INITIAL_ROWS)
-        }
-    }
-}
-
 fn main() {
     // `--version` answers before anything else touches the machine.
     // The execv self-update probes a freshly-staged binary with it so
@@ -703,7 +652,7 @@ fn main() {
     // owns the region it sized it to the on-screen cell rect; we must
     // drive the session at exactly those dims, since the grid we publish
     // has to fit the region (a mismatch would overflow the mapping).
-    let (shm, cols, rows) = setup_shm();
+    let (shm, cols, rows) = regions::setup_shm();
     let mut frames = frames::Frames::new(shm);
 
     // The UDS control socket + registry entry, so a later L2 can
@@ -733,6 +682,7 @@ fn main() {
                     std::process::exit(1);
                 }),
         };
+        regions::sign(frames.shm(), id);
         // RFC-003 §6 Amendment 16 — two boot modes:
         //   * Resume: env `MARSPOT_L3_HANDOFF_MANIFEST=<path>` set →
         //             we're the post-execv image of a self-update.
@@ -957,8 +907,7 @@ fn main() {
         cols = cols,
         rows = rows
     );
-    frames.shm().attach_clusters(session.id());
-    frames.shm().attach_title(session.id());
+    regions::attach_side_regions(frames.shm(), &mut session);
 
     // SIGTERM and SIGHUP become events on the main loop; see
     // `signal_events`.  Best-effort: if installing fails the L3 still
@@ -1001,6 +950,7 @@ fn main() {
     };
     frames.follow_scroll_from(&session);
     frames.publish(&mut session, poke.as_mut());
+    regions::announce(frames.shm(), poke.as_mut());
 
     // RFC-002 §4 (architectural correction over earlier step 6):
     // shelld (L4) owns the Terminal SoT now.  L3 no longer pushes
@@ -1119,7 +1069,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
             ),
         });
     }
-    let snapshot_writer = SnapshotWriter::spawn(session.id());
+    let snapshot_writer = SnapshotWriter::spawn(session.id(), ev_tx.clone());
     // settings and reachability, by file events: see `upkeep`
     let mut upkeep = upkeep::Upkeep::new(session.id(), ev_tx.clone());
     loop {
@@ -1399,6 +1349,9 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                         want_shutdown = true;
                     }
                 }
+                SessionEvent::Republish(name) => {
+                    regions::republish(&mut frames, &mut session, &name, poke.as_mut());
+                }
                 SessionEvent::CloseRequested => {
                     lx_event!(
                         "L3_CLOSE_REQUESTED",
@@ -1599,6 +1552,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                             // triggers — until then the pane renders
                             // empty (looks black).
                             frames.publish(&mut session, poke.as_mut());
+                            regions::announce(frames.shm(), poke.as_mut());
                             lx_event!(
                                 "L3_UDS_CLIENT_ADOPTED",
                                 "control reader spawned on UDS stream"
@@ -1869,7 +1823,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     "fingerprint differs from current/marspot-session — execv",
                     session_id = id
                 );
-                match do_l3_execv_swap(id, local, listener_owned, poke.take()) {
+                match do_l3_execv_swap(id, local, listener_owned, poke.take(), &snapshot_writer) {
                     Ok(()) => unreachable!(),
                     Err(e) => {
                         lx_error!(
@@ -1898,13 +1852,13 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 session_id = id,
                 pid = std::process::id()
             );
-            marspot_term::grid_shm::delete_side_regions(id);
+            regions::release(id);
             shell_end::end_with_pane(id, local.child_pid());
             std::process::exit(0);
         }
     }
     // the session is over and no image follows it
-    marspot_term::grid_shm::delete_side_regions(session.id());
+    regions::release(session.id());
     if let Some(listener) = _listener.take().filter(|_| shell_ended) {
         listener.end_with_shell();
     }

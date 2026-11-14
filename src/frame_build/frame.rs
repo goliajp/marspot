@@ -13,7 +13,7 @@ use crate::ui::components::cc_usage_modal::CcUsageRender;
 use crate::ui::components::chrome_hover::ChromeHover;
 use crate::ui::components::panel_palette as palette;
 use crate::ui::theme::spec::chrome as chrome_spec;
-use crate::ui::components::context_menu_paint::ContextMenuRender;
+use crate::ui::components::context_menu_view::MenuRender;
 use crate::ui::components::layout_view::LayoutModalRender;
 use crate::ui::components::process_panel::ProcessPanelRender;
 use crate::ui::components::settings_view::SettingsRender;
@@ -62,7 +62,7 @@ pub(crate) fn build_instances(
     layout_modal_state: Option<&LayoutModalRender>,
     drop_preview: Option<((f64, f64, f64, f64), bool)>,
     drag_source: Option<usize>,
-    context_menu_state: Option<&ContextMenuRender>,
+    context_menu_state: Option<&MenuRender>,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
     color_atlas: &mut GlyphAtlas,
@@ -142,8 +142,22 @@ pub(crate) fn build_instances(
         font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
     );
 
-    // The context menu itself is not drawn here: the renderer builds
-    // its canvas after the main passes, so it lands on top of them.
+    // The context menu is not among the overlays: its surface is
+    // brought up to date here, while a glyph it needs can still reach
+    // the atlas before the frame is encoded, and the renderer draws
+    // what the surface keeps in a pass after all the others.
+    if let Some(menu) = context_menu_state {
+        let mut painter = ViewPainter {
+            cell_w, cell_h, ascent,
+            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
+            window_w: layout.window_w, window_h: layout.window_h,
+            font, atlas,
+            cells: overlay_cells,
+            glyphs: overlay_glyphs,
+            ui_rects: overlay_ui_rects,
+        };
+        menu.surface.borrow_mut().refresh(&mut painter, menu);
+    }
 
     stats
 }
