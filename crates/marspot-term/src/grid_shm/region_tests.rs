@@ -36,6 +36,17 @@ fn each_region_made_for_a_session_has_its_own_serial_and_the_writer_keeps_it() {
     assert_eq!(writer.serial(), second.serial(), "the writer replaced its creator's serial");
 }
 
+#[test]
+fn the_next_writer_reads_how_far_back_the_last_frame_was_scrolled() {
+    let fd = create_region(8, 2).unwrap();
+    let mut first = GridShmWriter::from_fd(fd.try_clone().unwrap()).unwrap();
+    let mut grid = crate::grid::Grid::new(8, 2);
+    grid.scroll_up(5, Cell::default());
+    first.publish(&grid, 3, 0);
+    drop(first);
+    assert_eq!(GridShmWriter::from_fd(fd).unwrap().published_view_offset(), 3);
+}
+
 /// A region as a core from before identities creates it: the frame's
 /// capacity and nothing more.
 fn region_without_identity(name: &CStr) -> OwnedFd {
