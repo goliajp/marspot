@@ -1,7 +1,7 @@
 //! Scrolling: the whole screen, which is what files rows into history,
 //! and a region inside it.
 
-use super::{Cell, Grid, MAX_FILED_BLANK_RUN, MAX_RESERVED_HEADER_ROWS, PromptMark, RowMark};
+use super::{Cell, Grid, PackedCell, MAX_FILED_BLANK_RUN, MAX_RESERVED_HEADER_ROWS, PromptMark, RowMark};
 use crate::scrollback::RowHint;
 
 impl Grid {
@@ -51,7 +51,7 @@ impl Grid {
             let row_mark = self.marks[pr];
             let end = row_mark.end as usize;
             debug_assert!(
-                self.cells[start + end..start + cols].iter().all(|c| *c == Cell::default())
+                self.cells[start + end..start + cols].iter().all(|c| *c == PackedCell::BLANK)
             );
             // the file variant drops a row's blank tail, so it is
             // handed the row without it; the ring wants full rows
@@ -60,7 +60,7 @@ impl Grid {
             // whatever was filed, nothing past the bound needs blanking
             let used = self
                 .scrollback
-                .push_row(&self.cells[start..start + filed], self.wrapped[pr], hint)
+                .push_row(&self.cells[start..start + filed], &self.styles, self.wrapped[pr], hint)
                 .min(end);
             let mark = std::mem::take(&mut self.prompt[pr]);
             // The mirrors exist for the in-RAM variant, where there is
@@ -86,17 +86,8 @@ impl Grid {
             self.wrapped[pr] = false;
             if fill.is_default() {
                 // the cells past what the line used are default
-                // already, and the rest is one copy of a blank row
-                if row_mark.plain_from == 0 {
-                    // nothing in the row but characters ever differed
-                    // from a default cell
-                    for c in &mut self.cells[start..start + used] {
-                        c.ch = ' ';
-                    }
-                } else {
-                    self.cells[start..start + used].copy_from_slice(&self.blank[..used]);
-                    self.ids[start..start + used].iter_mut().for_each(|id| *id = 0);
-                }
+                // already, and a blank cell is one repeated word
+                self.cells[start..start + used].fill(PackedCell::BLANK);
                 self.marks[pr] = RowMark::default();
             } else {
                 self.fill(start..start + cols, fill);
@@ -184,7 +175,7 @@ impl Grid {
                 let start = pr * cols;
                 let blank = self.cells[start..start + cols]
                     .iter()
-                    .all(|c| c.ch == ' ' || c.ch == '\0');
+                    .all(|c| c.ch() == ' ' || c.ch() == '\0');
                 // A TUI scrolling an empty content area files nothing
                 // after the run gets long enough to be chrome rather
                 // than spacing — see `MAX_FILED_BLANK_RUN`.  The row
@@ -195,7 +186,7 @@ impl Grid {
                     let row_clusters = self.degrade_clusters_in_row(start, cols);
                     let hint = RowHint { plain_from: self.marks[pr].plain_from, wide: self.marks[pr].wide };
                     self.scrollback
-                        .push_row(&self.cells[start..start + cols], self.wrapped[pr], hint);
+                        .push_row(&self.cells[start..start + cols], &self.styles, self.wrapped[pr], hint);
                     let mark = std::mem::take(&mut self.prompt[pr]);
                     if !self.scrollback.keeps_wrapped_flags() {
                         self.sb_wrapped.push_back(self.wrapped[pr]);

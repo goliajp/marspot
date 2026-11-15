@@ -86,6 +86,31 @@ impl MemoryScrollback {
         self.cells[start..start + self.cols].copy_from_slice(source);
     }
 
+    /// [`Self::push_line`] for a row of the grid's own cells, expanded
+    /// straight into the ring.
+    pub fn push_packed(&mut self, source: &[crate::grid::PackedCell], styles: &crate::grid::StyleTable) {
+        if self.capacity == 0 {
+            return;
+        }
+        let start = if self.len < self.capacity {
+            // reserved whole at construction: no reallocation
+            let start = self.cells.len();
+            self.cells.resize(start + self.cols, Cell::default());
+            self.len += 1;
+            start
+        } else {
+            let line = self.head;
+            self.head = (self.head + 1) % self.capacity;
+            line * self.cols
+        };
+        let row = &mut self.cells[start..start + self.cols];
+        let n = source.len().min(row.len());
+        for (dst, c) in row[..n].iter_mut().zip(source) {
+            *dst = c.expand(styles);
+        }
+        row[n..].fill(Cell::default());
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
@@ -149,6 +174,20 @@ mod tests {
         assert_eq!(sb.len(), 3);
         assert_eq!(sb.line(0).unwrap()[0].ch, 'b');
         assert_eq!(sb.line(2).unwrap()[0].ch, 'd');
+    }
+
+    /// A row of stored cells shorter than the ring's lines reads back
+    /// blank past its end, even over a slot an older line used.
+    #[test]
+    fn a_short_stored_row_reads_blank_past_its_end() {
+        let mut g = crate::grid::Grid::new(4, 1);
+        let mut sb = MemoryScrollback::new(1, 4);
+        sb.push_line(&fill(b'a', 4));
+        g.set_cell(0, 0, Cell::from('z'));
+        let row = g.live_row_at_view(0, 0).unwrap();
+        sb.push_packed(&row[..2], g.styles());
+        let line: String = sb.line(0).unwrap().iter().map(|c| c.ch).collect();
+        assert_eq!(line, "z   ");
     }
 
     #[test]

@@ -79,12 +79,11 @@ impl Grid {
     /// One ring-index resolve for a run of any length.
     // as a call it cost seventeen instructions a run of text
     #[inline(always)]
-    pub fn row_and_mark_mut(&mut self, row: u16) -> (&mut [StoredCell], &mut [u32], &mut RowMark) {
+    pub fn row_and_mark_mut(&mut self, row: u16) -> (&mut [StoredCell], &mut RowMark) {
         debug_assert!(row < self.rows);
         let pr = self.phys_row(row);
         let cols = self.cols as usize;
-        let range = pr * cols..(pr + 1) * cols;
-        (&mut self.cells[range.clone()], &mut self.ids[range], &mut self.marks[pr])
+        (&mut self.cells[pr * cols..(pr + 1) * cols], &mut self.marks[pr])
     }
 
     /// Every row was filled with `fill`.
@@ -110,8 +109,8 @@ impl Grid {
                 let (end, plain) = (mark.end as usize, mark.plain_from as usize);
                 end <= cols
                     && plain <= cols
-                    && row[end..].iter().all(|c| *c == Cell::default())
-                    && row[plain..].iter().all(|c| c.attrs == CellAttrs::default())
+                    && row[end..].iter().all(|c| *c == StoredCell::BLANK)
+                    && row[plain..].iter().all(|c| c.run_key() == 0)
             })
     }
 }
@@ -195,10 +194,9 @@ mod tests {
                     8 => g.set_cell(col, row, Cell::default()),
                     9 => {
                         let id = g.pen_id(&red.attrs).expect("shared numbering");
-                        let (cells, ids, mark) = g.row_and_mark_mut(row);
-                        for (c, i) in cells[..=col as usize].iter_mut().zip(&mut ids[..=col as usize]) {
-                            *c = red;
-                            *i = id;
+                        let (cells, mark) = g.row_and_mark_mut(row);
+                        for c in &mut cells[..=col as usize] {
+                            *c = crate::grid::PackedCell::new(' ', id);
                         }
                         mark.end = mark.end.max(col + 1);
                         mark.plain_from = mark.plain_from.max(col + 1);

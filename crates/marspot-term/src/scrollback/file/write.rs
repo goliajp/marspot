@@ -56,7 +56,6 @@ impl FileScrollback {
             .map(|i| i + 1)
             .unwrap_or(0);
         let line = &line[..trimmed_len];
-        let cols_u16 = line.len() as u16;
         let cell_bytes = crate::grid::Cell::slice_as_bytes(line);
         // The record is the header plus the line as runs of cells that
         // share their attributes, or, for the rare line where that is
@@ -67,6 +66,37 @@ impl FileScrollback {
         if !packed {
             self.scratch.extend_from_slice(cell_bytes);
         }
+        self.file_record(line.len(), wrapped, packed)
+    }
+
+    /// [`Self::push_row`] for a row of the grid's own cells, read
+    /// through its table.  The record is byte for byte the one
+    /// `push_row` writes for the same row expanded.
+    pub fn push_packed_row(
+        &mut self,
+        line: &[crate::grid::PackedCell],
+        styles: &crate::grid::StyleTable,
+        wrapped: bool,
+        hint: RowHint,
+    ) -> usize {
+        let trimmed_len =
+            line.iter().rposition(|c| *c != crate::grid::PackedCell::BLANK).map_or(0, |i| i + 1);
+        let line = &line[..trimmed_len];
+        self.scratch.clear();
+        self.scratch.extend_from_slice(&[0u8; FILE_REC_HEADER_BYTES]);
+        let packed = !line.is_empty()
+            && crate::scrollback::format_packed::encode_packed_cells(line, styles, hint, &mut self.scratch);
+        if !packed {
+            crate::scrollback::format_packed::append_cells(line, styles, &mut self.scratch);
+        }
+        self.file_record(line.len(), wrapped, packed)
+    }
+
+    /// Write the record in `scratch`, whose body is in place: fill in
+    /// its header, append it, and keep it in the ring.  Returns `cols`.
+    fn file_record(&mut self, cols: usize, wrapped: bool, packed: bool) -> usize {
+        let trimmed_len = cols;
+        let cols_u16 = cols as u16;
         let total_bytes = self.scratch.len() as u64;
         let rec_len = (total_bytes - 4) as u32;
         let flags = if wrapped { REC_WRAPPED } else { 0 } | if packed { REC_PACKED } else { 0 };

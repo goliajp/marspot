@@ -176,24 +176,15 @@ fn row_key(g: &PaneGeom, r: u16, row_clusters: &mut Vec<(u16, String)>) -> u64 {
     let view = g.view;
     let grid = g.grid;
     let mut h = FxHasher::default();
-    if let Some(cells) = grid.live_row_at_view(view.view_offset, r).filter(|c| c.len() == g.cols) {
-        // the row's cells in one pass: a scrolling pane changes every
-        // row every frame, and a call and five writes a cell cost more
-        // than the rows it would save
-        // SAFETY: a `Cell` is twenty bytes, aligned to four, and every
-        // one of them is initialised: the grid asserts that layout and
-        // writes its cells to disk as these same bytes.
-        let bytes = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), std::mem::size_of_val(cells)) };
-        h.write(bytes);
-        for cell in cells.iter().filter(|c| c.cluster_index().is_some()) {
-            if let Some(text) = grid.cluster_text(cell) {
-                text.hash(&mut h);
-            }
-        }
-    } else {
+    // a live row in one pass over the grid's own cells: a scrolling
+    // pane changes every row every frame, and a call and five writes a
+    // cell cost more than the rows it would save
+    if grid.cols() as usize != g.cols || !grid.hash_live_row(view.view_offset, r, &mut h) {
         for c in 0..g.cols as u16 {
             let cell = grid.cell_at_view(view.view_offset, c, r);
-            // SAFETY: as above.
+            // SAFETY: a `Cell` is twenty bytes, aligned to four, with no
+            // padding and every byte initialised (the grid asserts that
+            // layout); five words are exactly those bytes.
             let words: [u32; 5] = unsafe { std::mem::transmute(cell) };
             for w in words {
                 h.write_u32(w);
