@@ -33,6 +33,9 @@ pub(crate) struct ChromeSurfaces {
     pub(crate) titles: crate::ui::components::title_strip_view::TitleStripSurface,
     /// The panes' rectangles for the seams, refilled every frame.
     seam_rects: Vec<Rect>,
+    /// The layout generation and row count the toolbar and the sidebar
+    /// were last made ready for input with.
+    ready_for: (u64, usize),
 }
 
 /// What the chrome shows beyond where things are.
@@ -102,10 +105,19 @@ impl ChromeSurfaces {
     /// is a picture to paint again and nothing to lay out.
     pub(crate) fn pointer_move(&mut self, font: &mut FontCache, s: &ChromeShape<'_>, p: (f64, f64)) -> bool {
         // the strips light nothing and are not told
-        self.toolbar.ready(font, s.layout);
-        self.sidebar.ready(font, s.layout, s.rows);
+        if self.ready_for != (s.layout.generation, s.rows) {
+            self.ready_for = (s.layout.generation, s.rows);
+            self.toolbar.ready(font, s.layout);
+            self.sidebar.ready(font, s.layout, s.rows);
+        }
         let toolbar = self.toolbar.kept.surface.pointer_move(p);
-        self.sidebar.kept.surface.pointer_move(p) | toolbar
+        // on a toolbar button, the pointer is on nothing in the sidebar
+        let sidebar = if self.toolbar.kept.surface.interaction.hovered.is_some() {
+            self.sidebar.kept.surface.pointer_leave()
+        } else {
+            self.sidebar.kept.surface.pointer_move(p)
+        };
+        toolbar | sidebar
     }
 
     /// The pointer left the window: nothing is lit.

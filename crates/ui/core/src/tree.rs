@@ -11,13 +11,15 @@ use core::fmt::{self, Write};
 use crate::action::{Action, WidgetId};
 use crate::geom::Align;
 use crate::metrics::{Edges, Length};
-use crate::node::{AlignCross, Distribute, GroupKind, Ink, Kind, NONE, Node, NodeId, TextRef, flag};
+use crate::geom::Rect;
+use crate::node::{AlignCross, Distribute, GroupKind, Ink, Kind, NONE, Node, NodeId, Spot, TextRef, flag};
 use crate::text::TextFont;
 
 #[derive(Default)]
 pub struct Tree {
     pub(crate) nodes: Vec<Node>,
     pub(crate) text: String,
+    pub(crate) spots: Vec<Spot>,
 }
 
 impl Tree {
@@ -30,6 +32,7 @@ impl Tree {
     pub fn build(&mut self, f: impl FnOnce(&mut Ui<'_>)) {
         self.nodes.clear();
         self.text.clear();
+        self.spots.clear();
         let mut ui = Ui { tree: self, parent: NONE, group: None, next_item: 0 };
         f(&mut ui);
     }
@@ -56,6 +59,11 @@ impl Tree {
             TextRef::Static(s) => s,
             TextRef::Buf { start, len } => &self.text[start as usize..(start + len) as usize],
         }
+    }
+
+    /// The node's spot, if it has one.
+    pub fn spot_of(&self, n: &Node) -> Option<Spot> {
+        n.spot.checked_sub(1).map(|i| self.spots[i as usize])
     }
 
     /// Bytes of text the description copied into the buffer.
@@ -406,6 +414,21 @@ impl At<'_, '_> {
             n.action = action;
             n.flags |= flag::ACTS;
         })
+    }
+
+    /// A part of this widget, `rect` from its top-left corner, that
+    /// answers a press with `action` instead of the widget's own: the
+    /// close mark at the end of a row.  The pointer on it is the
+    /// widget's `Target` with `part: SPOT`.
+    pub fn spot(self, rect: Rect, action: Action) -> Self {
+        let index = self.ui.tree.spots.len() as u32;
+        self.ui.tree.spots.push(Spot { rect, action });
+        self.set(|n| n.spot = index + 1)
+    }
+
+    /// A column of rows of one height: see `flag::ROWS`.
+    pub fn rows(self) -> Self {
+        self.flag(flag::ROWS, true)
     }
 
     /// The next item of the enclosing group.

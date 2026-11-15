@@ -113,6 +113,9 @@ pub(crate) fn paint_version(p: &mut ViewPainter<'_>, data: [u32; 2]) {
 pub struct ToolbarSurface {
     pub kept: KeptSurface,
     described: Option<(Toolbar, (f64, f64))>,
+    /// The generation of the last layout input found the buttons in
+    /// the places they were described in.
+    ready_for: u64,
     data_rev: u64,
 }
 
@@ -137,6 +140,10 @@ impl ToolbarSurface {
     /// next frame will draw them.  The buttons keep the states they
     /// were last drawn with until that frame.
     pub fn ready(&mut self, font: &mut FontCache, layout: &Layout) {
+        if self.ready_for == layout.generation {
+            return;
+        }
+        self.ready_for = layout.generation;
         let window = (layout.window_w, layout.window_h);
         // what a press and the pointer are tested against: where the
         // buttons are, in a window this size

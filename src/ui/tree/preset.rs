@@ -57,10 +57,9 @@ pub const TOOLBAR_SLOT: u32 = 14;
 pub const VERSION: u32 = 15;
 /// The sidebar's add button.  See `sidebar_view`.
 pub const SIDEBAR_ADD: u32 = 16;
-/// A sidebar row; its label is the pane's name, cut to fit.
+/// A sidebar row and its close button, which is the row's spot; its
+/// label is the pane's name, cut to fit.
 pub const SIDEBAR_ROW: u32 = 17;
-/// A sidebar row's close button.
-pub const SIDEBAR_CLOSE: u32 = 18;
 /// A pane's title strip; its label is the title, then the badge after
 /// the mark `title_strip_view` puts between them.  See there for `data`.
 pub const TITLE_STRIP: u32 = 19;
@@ -186,7 +185,15 @@ pub fn close_button(ui: &mut Ui<'_>, id: WidgetId, action: Action) {
 }
 
 /// Paint the preset `tag` in `rect`.
-pub(super) fn paint(p: &mut ViewPainter, tag: u32, data: [u32; 2], label: &str, rect: Rect, state: WidgetState) {
+pub(super) fn paint(
+    p: &mut ViewPainter,
+    tag: u32,
+    data: [u32; 2],
+    label: &str,
+    rect: Rect,
+    spot: Option<Rect>,
+    state: WidgetState,
+) {
     let on = data[0] != 0;
     match tag {
         SEGMENT => controls::paint_segment(p, rect, label, on, state.hovered, state.disabled),
@@ -211,8 +218,7 @@ pub(super) fn paint(p: &mut ViewPainter, tag: u32, data: [u32; 2], label: &str, 
         TOOLBAR_SLOT => crate::ui::components::toolbar_view::paint_button(p, rect, data, state),
         VERSION => crate::ui::components::toolbar_view::paint_version(p, data),
         SIDEBAR_ADD => crate::ui::components::sidebar_view::paint_add(p, rect, data, state),
-        SIDEBAR_ROW => crate::ui::components::sidebar_view::paint_row(p, rect, label, data, state),
-        SIDEBAR_CLOSE => crate::ui::components::sidebar_view::paint_close(p, rect, data, state),
+        SIDEBAR_ROW => crate::ui::components::sidebar_view::paint_row(p, rect, spot, label, data, state),
         TITLE_STRIP => crate::ui::components::title_strip_view::paint(p, rect, label, data, false),
         TITLE_STRIP_IN_USE => crate::ui::components::title_strip_view::paint(p, rect, label, data, true),
         _ => unreachable!("a node asked for preset {tag}, which nothing here draws"),

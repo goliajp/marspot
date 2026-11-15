@@ -107,7 +107,7 @@ fn the_settings_panels_controls_are_hit_where_they_are_drawn() {
                 .iter()
                 .enumerate()
                 .filter(|(_, n)| n.leaf_tag != 0 && !n.has(flag::DISABLED))
-                .filter_map(|(i, n)| Some((Target { id: n.widget?, item: n.item }, layout.rect(NodeId(i as u32)))))
+                .filter_map(|(i, n)| Some((Target { id: n.widget?, item: n.item, part: 0 }, layout.rect(NodeId(i as u32)))))
                 .collect()
         };
         assert!(controls.len() >= 20, "scale {scale}: the surface holds {} controls", controls.len());

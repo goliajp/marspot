@@ -135,23 +135,23 @@ pub fn describe(ui: &mut Ui<'_>, s: &TitleStrips<'_>) {
         }
         for (i, rect) in l.cells.iter().take(s.count()).enumerate() {
             let (title, badge) = (s.strips.title(i), s.strips.badge(i));
-            let press = (WidgetId(2 * i as u32), Action::new(TITLE, i as u32));
-            // a strip with no title draws nothing and still takes a press
-            ui.float(rect.x, rect.y_top, |ui| {
-                let strip = ui.leaf(0, Length::Px(rect.w), Length::Px(l.cell_title_h)).pressable(press.0, press.1);
-                if !title.is_empty() {
-                    let tag = if s.strips.in_use(i) && s.window_focused { preset::TITLE_STRIP_IN_USE } else { preset::TITLE_STRIP };
-                    strip.leaf(tag, measures).label_with(|text| {
-                        text.push_str(title);
-                        text.push(BADGE_MARK);
-                        text.push_str(badge);
-                    });
-                }
-            });
-            if let Some((x, w)) = badge_prefix(rect, l.padding, badge, s.cell_w) {
-                ui.float(x, rect.y_top, |ui| {
-                    ui.leaf(0, Length::Px(w), Length::Px(l.cell_title_h))
-                        .pressable(WidgetId(2 * i as u32 + 1), Action::new(BADGE, i as u32));
+            // the strip itself takes a press, with or without a title to
+            // draw; the clickable prefix of its badge is its spot
+            let strip = ui
+                .float(rect.x, rect.y_top, |_| {})
+                .width(Length::Px(rect.w))
+                .height(Length::Px(l.cell_title_h))
+                .pressable(WidgetId(i as u32), Action::new(TITLE, i as u32));
+            let strip = match badge_prefix(rect, l.padding, badge, s.cell_w) {
+                Some((x, w)) => strip.spot(golia_ui_core::Rect::new(x - rect.x, 0.0, w, l.cell_title_h), Action::new(BADGE, i as u32)),
+                None => strip,
+            };
+            if !title.is_empty() {
+                let tag = if s.strips.in_use(i) && s.window_focused { preset::TITLE_STRIP_IN_USE } else { preset::TITLE_STRIP };
+                strip.leaf(tag, measures).label_with(|text| {
+                    text.push_str(title);
+                    text.push(BADGE_MARK);
+                    text.push_str(badge);
                 });
             }
         }

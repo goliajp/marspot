@@ -9,7 +9,7 @@
 //! Interaction state is read here and only here: a hover changes which
 //! fill a node asks for and nothing about where it is.
 
-use crate::action::{NO_ITEM, Target};
+use crate::action::{NO_ITEM, SPOT, Target};
 use crate::geom::Rect;
 use crate::hit::in_view;
 use crate::interact::{Interaction, find_focus_node};
@@ -32,6 +32,8 @@ pub struct WidgetState {
     /// The pointer is on another node of this node's group (see
     /// `Node::lit_group`), for a preset that lights with its group.
     pub lit: bool,
+    /// The pointer is on the widget's spot.
+    pub hovered_spot: bool,
     pub hovered_item: u32,
     pub pressed_item: u32,
     pub focused_item: u32,
@@ -44,6 +46,7 @@ impl WidgetState {
         focused: false,
         disabled: false,
         lit: false,
+        hovered_spot: false,
         hovered_item: NO_ITEM,
         pressed_item: NO_ITEM,
         focused_item: NO_ITEM,
@@ -62,8 +65,9 @@ pub trait PaintOut {
     fn rounded_rect(&mut self, rect: Rect, radius: f64, fill: Option<Ink>, border: Option<(f64, Ink)>);
     /// A run of text starting at `x` with its baseline at `baseline`.
     fn text_run(&mut self, x: f64, baseline: f64, text: &str, font: TextFont, ink: Ink);
-    /// A preset component, drawn by whoever knows what `tag` means.
-    fn leaf(&mut self, tag: u32, data: [u32; 2], label: &str, rect: Rect, state: WidgetState);
+    /// A preset component, drawn by whoever knows what `tag` means;
+    /// `spot` is where its spot is, if it has one.
+    fn leaf(&mut self, tag: u32, data: [u32; 2], label: &str, rect: Rect, spot: Option<Rect>, state: WidgetState);
     /// The keyboard focus, shown round `rect`.
     fn focus_ring(&mut self, rect: Rect, radius: f64);
     fn push_clip(&mut self, rect: Rect);
@@ -80,7 +84,7 @@ impl PaintOut for NoOut {
     fn solid_rect(&mut self, _: Rect, _: Ink) {}
     fn rounded_rect(&mut self, _: Rect, _: f64, _: Option<Ink>, _: Option<(f64, Ink)>) {}
     fn text_run(&mut self, _: f64, _: f64, _: &str, _: TextFont, _: Ink) {}
-    fn leaf(&mut self, _: u32, _: [u32; 2], _: &str, _: Rect, _: WidgetState) {}
+    fn leaf(&mut self, _: u32, _: [u32; 2], _: &str, _: Rect, _: Option<Rect>, _: WidgetState) {}
     fn focus_ring(&mut self, _: Rect, _: f64) {}
     fn push_clip(&mut self, _: Rect) {}
     fn pop_clip(&mut self) {}
@@ -118,6 +122,7 @@ impl<O: PaintOut> Painter<'_, O> {
             focused: focused && self.state.focus_visible,
             disabled,
             lit,
+            hovered_spot: hovered && !disabled && self.state.hovered.is_some_and(|t| t.part == SPOT),
             hovered_item,
             pressed_item,
             focused_item,
@@ -149,7 +154,8 @@ impl<O: PaintOut> Painter<'_, O> {
             _ => self.out.rounded_rect(own, radius, fill, border),
         }
         if n.leaf_tag != 0 {
-            self.out.leaf(n.leaf_tag, n.leaf_data, self.tree.text_of(n), r, ws);
+            let spot = self.tree.spot_of(n).map(|s| s.rect.translated(r.x, r.y));
+            self.out.leaf(n.leaf_tag, n.leaf_data, self.tree.text_of(n), r, spot, ws);
         }
         if n.kind == Kind::Text {
             let tb = self.layout.text[i as usize];
@@ -232,7 +238,7 @@ pub enum Op {
     Rounded { rect: Rect, radius: f64, fill: Option<Ink>, border: Option<(f64, Ink)> },
     /// The text is `start..start + len` of the recording's buffer.
     Text { x: f64, baseline: f64, start: u32, len: u32, font: TextFont, ink: Ink },
-    Leaf { tag: u32, data: [u32; 2], start: u32, len: u32, rect: Rect, state: WidgetState },
+    Leaf { tag: u32, data: [u32; 2], start: u32, len: u32, rect: Rect, spot: Option<Rect>, state: WidgetState },
     FocusRing { rect: Rect, radius: f64 },
     PushClip(Rect),
     PopClip,
@@ -287,9 +293,9 @@ impl PaintOut for Recording {
         self.ops.push(Op::Text { x, baseline, start, len, font, ink });
     }
 
-    fn leaf(&mut self, tag: u32, data: [u32; 2], label: &str, rect: Rect, state: WidgetState) {
+    fn leaf(&mut self, tag: u32, data: [u32; 2], label: &str, rect: Rect, spot: Option<Rect>, state: WidgetState) {
         let (start, len) = self.keep(label);
-        self.ops.push(Op::Leaf { tag, data, start, len, rect, state });
+        self.ops.push(Op::Leaf { tag, data, start, len, rect, spot, state });
     }
 
     fn focus_ring(&mut self, rect: Rect, radius: f64) {

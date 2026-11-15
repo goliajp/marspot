@@ -91,7 +91,13 @@ fn a_press_before_the_next_frame_lands_where_that_frame_draws() {
         let sidebar = c.sidebar.kept.surface.counters();
         assert_eq!(c.at(&mut font, &s3, row_at(&three, 2, 30.0)), Some(ChromeTarget::Row(2)));
         assert_eq!(c.sidebar.kept.surface.counters(), sidebar, "nothing moved, and the sidebar was laid out again");
-        // a fourth pane, and no frame since
+        // a fourth pane, and no frame since: the pointer lights its row
+        // and a press lands on it; first with the layout made for it and
+        // the sidebar still listing three, then listing four
+        let listing_three = ChromeShape { layout: &four, rows: 3, strips: &strips };
+        assert!(!c.pointer_move(&mut font, &listing_three, row_at(&four, 3, 30.0)), "a fourth row lit with three listed");
+        assert!(c.pointer_move(&mut font, &s4, row_at(&four, 3, 30.0)), "the new row did not light");
+        assert_eq!(c.sidebar.kept.surface.interaction.hovered.map(|t| t.id), Some(golia_ui_core::WidgetId(4)));
         assert_eq!(c.at(&mut font, &s4, row_at(&four, 3, 30.0)), Some(ChromeTarget::Row(3)));
         assert_eq!(c.at(&mut font, &s4, mid(four.close_session_rects[3])), Some(ChromeTarget::Close(3)));
         // the sidebar hidden

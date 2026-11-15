@@ -1,5 +1,5 @@
-//! The sidebar as a tree: the add button, then per pane a row and its
-//! close button, each a floating node where the layout puts it.
+//! The sidebar as a tree: the add button where the layout puts it, then
+//! one column of rows, each with its close button as the row's spot.
 //!
 //! Each of them answers a press itself, tested against the kept
 //! layout.  The tree keeps what the sidebar last painted: a row, the
@@ -20,14 +20,14 @@ use golia_ui_core::{Action, Length, Ui, WidgetId, WidgetState};
 use marspot_term::layout::Rect;
 use marspot_term::session::SessionState;
 
-/// `data[0]` of a row or its close button: it is the pane in use.
+/// `data[0]` of a row: it is the pane in use.
 const SELECTED: u32 = 1;
 /// `data[0]` of anything: the pointer is not to light it, because a
 /// panel or a menu lies over the window.
 const QUIET: u32 = 2;
 /// `data[0]` of the add button: no more panes can be added.
 const FULL: u32 = 4;
-/// `data[0]` of a close button: its pane is not the last.
+/// `data[0]` of a row: its pane is not the last, so it can be closed.
 const CAN_CLOSE: u32 = 8;
 /// `data[0]` of a row, from this bit up: its session's state.
 const STATE_SHIFT: u32 = 4;
@@ -41,11 +41,7 @@ pub const CLOSE: u32 = 4;
 const ADD_ID: WidgetId = WidgetId(0);
 
 fn row_id(i: usize) -> WidgetId {
-    WidgetId(1 + 2 * i as u32)
-}
-
-fn close_id(i: usize) -> WidgetId {
-    WidgetId(2 + 2 * i as u32)
+    WidgetId(1 + i as u32)
 }
 
 /// The rows a sidebar lists.
@@ -172,10 +168,6 @@ fn state_of(bits: u32) -> SessionState {
     }
 }
 
-fn at(ui: &mut Ui<'_>, r: Rect, f: impl FnOnce(&mut Ui<'_>)) {
-    ui.float(r.x, r.y_top, f);
-}
-
 pub fn describe(ui: &mut Ui<'_>, f: &SidebarFrame<'_>) {
     let l = f.layout;
     let quiet = if f.quiet { QUIET } else { 0 };
@@ -187,47 +179,48 @@ pub fn describe(ui: &mut Ui<'_>, f: &SidebarFrame<'_>) {
         if add.w > 0.0 {
             let full = l.close_session_rects.len() >= SESSION_COUNT_HARD_CAP;
             let state = if full { FULL } else { 0 } | quiet;
-            at(ui, add, |ui| {
+            ui.float(add.x, add.y_top, |ui| {
                 ui.leaf(preset::SIDEBAR_ADD, Length::Px(add.w), Length::Px(add.h))
                     .leaf(preset::SIDEBAR_ADD, [state, (l.sidebar_w as f32).to_bits()])
                     .pressable(ADD_ID, Action::new(ADD, 0));
             });
         }
+        if f.rows.count() == 0 {
+            return;
+        }
         let column = f.column();
         // the last pane cannot be closed
         let can_close = if f.rows.count() > 1 { CAN_CLOSE } else { 0 };
-        for i in 0..f.rows.count() {
-            let rect = column.row_rect(i);
-            let selected = if i == f.focused_idx { SELECTED } else { 0 };
-            let close = l.close_session_rects.get(i);
-            let name = sidebar::clip_chars(f.rows.label(i), sidebar::name_room(rect, close, f.cell_w));
-            let state = selected | quiet | state_bits(f.rows.state(i)) << STATE_SHIFT;
-            // a row and its close button light together
-            let group = i as u32 + 1;
-            at(ui, rect, |ui| {
-                ui.leaf(preset::SIDEBAR_ROW, Length::Px(rect.w), Length::Px(rect.h))
+        let first = column.row_rect(0);
+        // one column of rows of one height: a point is on the row its
+        // height says, and each row's close button is the row's spot,
+        // there whether it shows or not (it shows on the pane in use and
+        // under the pointer, and takes a press wherever it is)
+        ui.float(first.x, first.y_top, |ui| {
+            for i in 0..f.rows.count() {
+                let rect = column.row_rect(i);
+                let selected = if i == f.focused_idx { SELECTED } else { 0 };
+                let close = l.close_session_rects.get(i);
+                let name = sidebar::clip_chars(f.rows.label(i), sidebar::name_room(rect, close, f.cell_w));
+                let state = selected | quiet | can_close | state_bits(f.rows.state(i)) << STATE_SHIFT;
+                let row = ui
+                    .leaf(preset::SIDEBAR_ROW, Length::Px(rect.w), Length::Px(rect.h))
                     .leaf(preset::SIDEBAR_ROW, [state, 0])
                     .label_copy(name)
-                    .pressable(row_id(i), Action::new(ROW, i as u32))
-                    .lit_with(group);
-            });
-            // there whether it shows or not: it shows on the pane in use
-            // and under the pointer, and takes a press wherever it is
-            if let Some(&close) = close {
-                at(ui, close, |ui| {
-                    ui.leaf(preset::SIDEBAR_CLOSE, Length::Px(close.w), Length::Px(close.h))
-                        .leaf(preset::SIDEBAR_CLOSE, [selected | quiet | can_close, 0])
-                        .pressable(close_id(i), Action::new(CLOSE, i as u32))
-                        .lit_with(group);
-                });
+                    .pressable(row_id(i), Action::new(ROW, i as u32));
+                if let Some(c) = close {
+                    let spot = golia_ui_core::Rect::new(c.x - rect.x, c.y_top - rect.y_top, c.w, c.h);
+                    row.spot(spot, Action::new(CLOSE, i as u32));
+                }
             }
-        }
+        })
+        .rows();
     });
 }
 
 /// Whether the pointer lights a control with this state and these bits.
 fn lit(data: u32, state: WidgetState) -> bool {
-    data & QUIET == 0 && (state.hovered || state.lit)
+    data & QUIET == 0 && state.hovered
 }
 
 pub(crate) fn paint_add(p: &mut ViewPainter<'_>, rect: Rect, data: [u32; 2], state: WidgetState) {
@@ -235,17 +228,16 @@ pub(crate) fn paint_add(p: &mut ViewPainter<'_>, rect: Rect, data: [u32; 2], sta
     sidebar::paint_add(p, rect, sidebar_w, data[0] & FULL != 0, lit(data[0], state));
 }
 
-pub(crate) fn paint_row(p: &mut ViewPainter<'_>, rect: Rect, name: &str, data: [u32; 2], state: WidgetState) {
+/// A row, and its close button where the row's spot is: shown on the
+/// pane in use and on the row under the pointer, hot under the pointer.
+pub(crate) fn paint_row(p: &mut ViewPainter<'_>, rect: Rect, close: Option<Rect>, name: &str, data: [u32; 2], state: WidgetState) {
     let session = state_of(data[0] >> STATE_SHIFT);
-    sidebar::paint_row(p, rect, name, session, data[0] & SELECTED != 0, lit(data[0], state));
-}
-
-pub(crate) fn paint_close(p: &mut ViewPainter<'_>, rect: Rect, data: [u32; 2], state: WidgetState) {
-    if data[0] & SELECTED == 0 && !lit(data[0], state) {
-        return;
+    let (selected, lit) = (data[0] & SELECTED != 0, lit(data[0], state));
+    sidebar::paint_row(p, rect, name, session, selected, lit);
+    if let Some(close) = close.filter(|_| selected || lit) {
+        let hot = lit && state.hovered_spot;
+        sidebar::paint_close(p, close, sidebar::close_look(data[0] & CAN_CLOSE != 0, hot));
     }
-    let hot = data[0] & QUIET == 0 && state.hovered;
-    sidebar::paint_close(p, rect, sidebar::close_look(data[0] & CAN_CLOSE != 0, hot));
 }
 
 /// The sidebar's surface: its tree, its layout and the instances it
@@ -255,6 +247,9 @@ pub struct SidebarSurface {
     pub kept: KeptSurface,
     described: Option<(u64, (f64, f64))>,
     hit: HitShape,
+    /// The generation of the last layout, and the row count, input
+    /// found the rows and buttons in the places they were described in.
+    ready_for: (u64, usize),
     data_rev: u64,
 }
 
@@ -281,6 +276,10 @@ impl SidebarSurface {
     /// frame is tested against where that frame will draw them.  The
     /// rows are laid out blank: that frame describes them again.
     pub fn ready(&mut self, font: &mut FontCache, layout: &Layout, rows: usize) {
+        if self.ready_for == (layout.generation, rows) {
+            return;
+        }
+        self.ready_for = (layout.generation, rows);
         let f = SidebarFrame { layout, rows: &Blank(rows), focused_idx: 0, quiet: false, cell_w: font.cell_w as f32 };
         if self.hit.is(&f) {
             return;

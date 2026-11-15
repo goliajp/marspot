@@ -57,11 +57,11 @@ fn form() -> (Tree, Layout) {
 }
 
 fn on(id: WidgetId) -> Option<Target> {
-    Some(Target { id, item: NO_ITEM })
+    Some(Target { id, item: NO_ITEM, part: 0 })
 }
 
 fn item(id: WidgetId, item: u32) -> Option<Target> {
-    Some(Target { id, item })
+    Some(Target { id, item, part: 0 })
 }
 
 #[test]
