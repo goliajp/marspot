@@ -175,7 +175,7 @@ pub(crate) fn deliver_pixels(rgba: &[u8], w: u32, h: u32) -> bool {
 /// Called by a snapshot harness once its frame is laid out.  Keeps the
 /// frame and returns true when the harness is drawing for `capture`
 /// and is not wanted for its pixels too.
-pub(crate) fn deliver(scene: &str, renderer: &MetalRenderer, layout: &Layout, n_panes: usize) -> bool {
+pub(crate) fn deliver(scene: &str, renderer: &MetalRenderer, wr: &crate::render_metal::WindowRender, layout: &Layout, n_panes: usize) -> bool {
     if !capturing() {
         return false;
     }
@@ -196,7 +196,7 @@ pub(crate) fn deliver(scene: &str, renderer: &MetalRenderer, layout: &Layout, n_
         .collect();
     let capture = Capture {
         scene: scene.to_string(),
-        elems: elems_of(&renderer.frame_instances()),
+        elems: elems_of(&renderer.frame_instances(wr)),
         panes,
         regions: regions_of(layout, n_panes),
         layout: Some(layout.clone()),

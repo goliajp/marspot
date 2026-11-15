@@ -1342,6 +1342,20 @@ impl Grid {
         Cell::default()
     }
 
+    /// The cells of a viewport row, when the row is one of the live
+    /// grid's: one slice, for a reader that takes the whole row.  `None`
+    /// for a row from the history, which [`Self::cell_at_view`] reads a
+    /// cell at a time.
+    pub fn live_row_at_view(&self, view_offset: u16, viewport_row: u16) -> Option<&[Cell]> {
+        let rows = self.rows() as usize;
+        let abs = view_offset as usize + (rows - 1 - viewport_row as usize);
+        if abs >= rows {
+            return None;
+        }
+        let start = self.phys_row((rows - 1 - abs) as u16) * self.cols as usize;
+        Some(&self.cells[start..start + self.cols as usize])
+    }
+
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
     }

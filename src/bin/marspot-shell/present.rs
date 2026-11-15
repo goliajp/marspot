@@ -1,13 +1,10 @@
-//! Shell-side Metal presenter — samples an IOSurface and draws it
-//! full-window to a CAMetalLayer.
+//! The presenter that copies: samples an IOSurface and draws it into a
+//! `CAMetalLayer`'s drawable.
 //!
-//! This is the *only* GPU work the shell does.  It owns its own
-//! `MTLDevice` and command queue (separate from the core's), a tiny
-//! shader library (fullscreen quad + texture sampler), and a single
-//! sampler.  No glyph atlas, no instance buffers — none of the
-//! per-frame allocation budget the renderer thinks about.  Idle cost
-//! is bounded by how often the shell calls `present()`; the redraw
-//! pump in the bin runs at ~60 fps.
+//! Only for a core that cannot be told when its surface has left the
+//! screen (see `frame_layer`), and made only when such a core is met:
+//! it has its own `MTLDevice`, command queue and one small shader, and
+//! the driver's pool that comes with executing anything on the GPU.
 
 use core_foundation::base::TCFType;
 use core_graphics::color::CGColor;
@@ -18,7 +15,7 @@ use objc2::msg_send;
 /// `msg_send!`; CGColorRef's runtime encoding is `^{CGColor=}`.  Wrap
 /// the pointer locally so the macro accepts it.
 #[repr(C)]
-struct OpaqueCGColor {
+pub(crate) struct OpaqueCGColor {
     _p: [u8; 0],
 }
 unsafe impl RefEncode for OpaqueCGColor {
@@ -26,7 +23,6 @@ unsafe impl RefEncode for OpaqueCGColor {
 }
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2_app_kit::{NSColor, NSView, NSViewLayerContentsPlacement};
 use objc2_foundation::NSString;
 use objc2_metal::{
     MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
@@ -38,94 +34,11 @@ use objc2_metal::{
 use objc2_quartz_core::{kCAGravityTopLeft, CAMetalDrawable, CAMetalLayer};
 
 use marspot::iosurface::IOSurface;
+use marspot::latency_trace::{self as trace, Stage};
 
 const TARGET_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
 
-/// Source for the banner overlay quad: a centered, alpha-blended
-/// textured quad whose size in NDC is set by the CPU from the
-/// banner texture's pixel dims divided by the current drawable.
-const BANNER_SHADER_SRC: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-struct BannerVertexOut {
-    float4 position [[position]];
-    float2 uv;
-};
-
-struct BannerParams {
-    float hw; // half-width in NDC
-    float hh; // half-height in NDC
-};
-
-vertex BannerVertexOut shell_banner_vs(uint vid [[vertex_id]],
-                                       constant BannerParams& bp [[buffer(0)]]) {
-    // Same vertex order as the IOSurface quad — two triangles
-    // covering [(-hw, +hh) .. (+hw, -hh)].
-    const float2 corners[6] = {
-        float2(-1.0,  1.0), float2( 1.0,  1.0), float2(-1.0, -1.0),
-        float2(-1.0, -1.0), float2( 1.0,  1.0), float2( 1.0, -1.0),
-    };
-    const float2 uvs[6] = {
-        float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0),
-        float2(0.0, 1.0), float2(1.0, 0.0), float2(1.0, 1.0),
-    };
-    float2 c = corners[vid];
-    BannerVertexOut out;
-    out.position = float4(c.x * bp.hw, c.y * bp.hh, 0.0, 1.0);
-    out.uv = uvs[vid];
-    return out;
-}
-
-fragment float4 shell_banner_fs(BannerVertexOut in [[stage_in]],
-                                texture2d<float> tex [[texture(0)]],
-                                sampler smp [[sampler(0)]]) {
-    return tex.sample(smp, in.uv);
-}
-"#;
-
-const SHADER_SRC: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-struct VertexOut {
-    float4 position [[position]];
-    float2 uv;
-};
-
-// Texture-to-drawable size ratio: the quad's bottom-right corner
-// lands at the texture's natural pixel size inside the drawable,
-// anchored top-left.  Stale IOSurface during a window resize stays at
-// its native pixel size; the drawable's exposed band is filled with
-// the terminal's background (set as `clearColor`), which is the *exact* same
-// colour as the terminal cell BG — so the seam between the
-// IOSurface region and the fill is invisible to the eye.
-struct ViewParams {
-    float ratio_x; // texture_w / drawable_w
-    float ratio_y; // texture_h / drawable_h
-};
-
-vertex VertexOut shell_quad_vs(uint vid [[vertex_id]],
-                               constant ViewParams& vp [[buffer(0)]]) {
-    const float2 uvs[6] = {
-        float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0),
-        float2(0.0, 1.0), float2(1.0, 0.0), float2(1.0, 1.0),
-    };
-    float2 uv = uvs[vid];
-    float ndc_x = uv.x == 0.0 ? -1.0 : (-1.0 + 2.0 * vp.ratio_x);
-    float ndc_y = uv.y == 0.0 ?  1.0 : ( 1.0 - 2.0 * vp.ratio_y);
-    VertexOut out;
-    out.position = float4(ndc_x, ndc_y, 0.0, 1.0);
-    out.uv = uv;
-    return out;
-}
-
-fragment float4 shell_quad_fs(VertexOut in [[stage_in]],
-                              texture2d<float> tex [[texture(0)]],
-                              sampler smp [[sampler(0)]]) {
-    return tex.sample(smp, in.uv);
-}
-"#;
+use crate::present_shaders::SHADER_SRC;
 
 /// The terminal's background under the theme in force.  The same value
 /// drives `layer.backgroundColor`, `window.backgroundColor`, and the
@@ -167,31 +80,27 @@ pub struct ShellPresenter {
     /// `swap_to_id` when the core acks a SurfaceReady whose ID matches
     /// the OTHER slot — i.e. the back has become the new front.
     current_idx: u8,
-    /// Step 7: banner overlay pipeline + sampler.  Sampler is shared
-    /// with the IOSurface path because both want linear filtering.
-    banner_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
-    /// Currently-set banner (rasterised text), or `None` for no
-    /// overlay.  Updated via `set_banner` / `clear_banner`.
-    banner: Option<crate::banner::BannerTexture>,
 }
 
 impl ShellPresenter {
-    pub fn new(
-        view: &NSView,
-        scale: f32,
-        front: &IOSurface,
-        back: &IOSurface,
-    ) -> Result<Self, String> {
+    /// The layer is the caller's to place over the window.
+    pub fn new(scale: f32, front: &IOSurface, back: &IOSurface) -> Result<Self, String> {
         let device = system_default_device()?;
         let queue = device
             .newCommandQueue()
             .ok_or_else(|| "newCommandQueue returned nil".to_string())?;
 
+        let t0 = std::time::Instant::now();
         let library = build_library(&device)?;
+        let t1 = std::time::Instant::now();
         let pipeline = build_pipeline(&device, &library)?;
+        marspot::lx_event!(
+            "PRESENTER_SHADERS",
+            "shader libraries and pipelines built",
+            library_us = (t1 - t0).as_micros() as u64,
+            pipelines_us = t1.elapsed().as_micros() as u64
+        );
         let sampler = build_sampler(&device)?;
-        let banner_library = build_banner_library(&device)?;
-        let banner_pipeline = build_banner_pipeline(&device, &banner_library)?;
 
         let layer = { CAMetalLayer::new() };
         unsafe {
@@ -255,32 +164,6 @@ impl ShellPresenter {
             // real pixels — no seam, no ghost outline.
             set_layer_background(&layer);
         }
-        view.setWantsLayer(true);
-        {
-            // Tell NSView how to *itself* place the layer's contents
-            // during a live resize.  AppKit drives this — distinct
-            // from CAMetalLayer's `contentsGravity`, which only kicks
-            // in once the layer compositor is involved.  When dragging
-            // the bottom edge, AppKit's path takes over and we need
-            // it to anchor top-left (matching the layer-side gravity)
-            // instead of the default `ScaleAxesIndependently`, which
-            // stretches the old layer contents into the new view
-            // bounds and reads as content shifting up/down during the
-            // drag.  We do NOT set
-            // `setLayerContentsRedrawPolicy(.DuringViewResize)` — that
-            // policy tells AppKit to invoke `displayLayer:`/`drawRect:`
-            // each resize step, which fights with our own
-            // `nextDrawable` + `commit` path and blanks the layer.
-            view.setLayerContentsPlacement(NSViewLayerContentsPlacement::TopLeft);
-            view.setLayer(Some(&layer));
-            // NSWindow BG mirrors layer BG for the same reason.
-            if let Some(window) = view.window() {
-                let (r, g, b) = terminal_bg();
-                let bg = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0);
-                window.setBackgroundColor(Some(&bg));
-            }
-        }
-
         let tex0 = front.make_metal_texture(&device)?;
         let tex1 = back.make_metal_texture(&device)?;
         let iosurface_tex = [tex0, tex1];
@@ -295,30 +178,7 @@ impl ShellPresenter {
             iosurface_tex,
             surface_ids,
             current_idx: 0,
-            banner_pipeline,
-            banner: None,
         })
-    }
-
-    /// Replace the active banner (or clear it with `None`).  The
-    /// raster runs on the calling thread; expected to be the main
-    /// thread.  Returns `Err` if rasterisation fails, in which case
-    /// the previous banner is preserved.
-    pub fn set_banner(
-        &mut self,
-        kind: Option<crate::banner::BannerKind>,
-        scale: f64,
-    ) -> Result<(), String> {
-        match kind {
-            Some(k) => {
-                let tex = crate::banner::rasterise(&self.device, k.text(), 14.0, scale)?;
-                self.banner = Some(tex);
-            }
-            None => {
-                self.banner = None;
-            }
-        }
-        Ok(())
     }
 
     /// Rebuild both MTLTexture slots from a fresh IOSurface pair.
@@ -359,6 +219,12 @@ impl ShellPresenter {
         }
     }
 
+    /// The surface the next copy samples.
+    #[cfg(feature = "latency-trace")]
+    pub(crate) fn current_id(&self) -> u32 {
+        self.surface_ids[self.current_idx as usize]
+    }
+
     /// Update the CAMetalLayer drawable size after the window resizes,
     /// and its scale: a window moved to a display of another density
     /// has the same size in points and a different one in pixels.
@@ -374,6 +240,8 @@ impl ShellPresenter {
     /// False when nothing was drawn (no drawable, no command buffer),
     /// so the caller keeps the frame pending.
     pub fn present(&mut self) -> bool {
+        let t_begin = trace::now_ns();
+        trace::mark_at(Stage::PresentBegin, 0, t_begin);
         let drawable = match self.layer.nextDrawable() {
             Some(d) => d,
             None => {
@@ -393,6 +261,7 @@ impl ShellPresenter {
             }
         };
         let texture = { drawable.texture() };
+        let t_drawable = trace::now_ns();
 
         let pass = { MTLRenderPassDescriptor::new() };
         let color0 = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
@@ -444,35 +313,6 @@ impl ShellPresenter {
             encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
         }
 
-        // Banner overlay: centered, alpha-blended.  Drawn after the
-        // IOSurface quad so it lands on top.  `banner_pipeline` has
-        // blending pre-configured (premultiplied source-over).
-        if let Some(banner) = &self.banner {
-            let bw = banner.width_px as f32;
-            let bh = banner.height_px as f32;
-            let hw = if draw_w > 0.0 { bw / draw_w } else { 0.5 };
-            let hh = if draw_h > 0.0 { bh / draw_h } else { 0.1 };
-            let banner_params: [f32; 2] = [hw, hh];
-            encoder.setRenderPipelineState(&self.banner_pipeline);
-            unsafe {
-                let bp_nn = std::ptr::NonNull::new(
-                    banner_params.as_ptr() as *mut std::ffi::c_void,
-                )
-                .expect("banner_params stack ptr non-null");
-                encoder.setVertexBytes_length_atIndex(
-                    bp_nn,
-                    std::mem::size_of_val(&banner_params),
-                    0,
-                );
-                encoder.setFragmentTexture_atIndex(Some(&banner.texture), 0);
-                encoder.setFragmentSamplerState_atIndex(Some(&self.sampler), 0);
-                encoder.drawPrimitives_vertexStart_vertexCount(
-                    MTLPrimitiveType::Triangle,
-                    0,
-                    6,
-                );
-            }
-        }
         encoder.endEncoding();
 
         // `presentsWithTransaction = true` path:
@@ -485,10 +325,22 @@ impl ShellPresenter {
         //      transaction, so window bounds and our pixels land
         //      together
         cmd.commit();
+        let t_commit = trace::now_ns();
         cmd.waitUntilScheduled();
+        let t_scheduled = trace::now_ns();
         let mtl_drawable: &ProtocolObject<dyn objc2_metal::MTLDrawable> =
             ProtocolObject::from_ref(&*drawable);
         mtl_drawable.present();
+        if trace::enabled() {
+            trace::mark(Stage::PresentEnd, 0);
+            trace::mark_at(Stage::DrawableUs, ((t_drawable - t_begin) / 1000) as u32, 0);
+            trace::mark_at(Stage::ScheduledUs, ((t_scheduled - t_commit) / 1000) as u32, 0);
+            #[cfg(feature = "latency-trace")]
+            if let Some(s) = IOSurface::lookup(self.surface_ids[self.current_idx as usize]) {
+                trace::mark_at(Stage::SurfaceHash, s.pixel_hash(), 0);
+            }
+            trace::flush();
+        }
         true
     }
 }
@@ -509,47 +361,6 @@ fn build_library(
     device
         .newLibraryWithSource_options_error(&src, None)
         .map_err(|e| format!("newLibraryWithSource error: {e:?}"))
-}
-
-fn build_banner_library(
-    device: &ProtocolObject<dyn MTLDevice>,
-) -> Result<Retained<ProtocolObject<dyn MTLLibrary>>, String> {
-    let src = NSString::from_str(BANNER_SHADER_SRC);
-    device
-        .newLibraryWithSource_options_error(&src, None)
-        .map_err(|e| format!("banner newLibraryWithSource error: {e:?}"))
-}
-
-fn build_banner_pipeline(
-    device: &ProtocolObject<dyn MTLDevice>,
-    library: &ProtocolObject<dyn MTLLibrary>,
-) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
-    let vfn = library
-        .newFunctionWithName(&NSString::from_str("shell_banner_vs"))
-        .ok_or_else(|| "shell_banner_vs not found".to_string())?;
-    let ffn = library
-        .newFunctionWithName(&NSString::from_str("shell_banner_fs"))
-        .ok_or_else(|| "shell_banner_fs not found".to_string())?;
-
-    let desc = MTLRenderPipelineDescriptor::new();
-    desc.setVertexFunction(Some(&vfn));
-    desc.setFragmentFunction(Some(&ffn));
-    let color0 = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
-    color0.setPixelFormat(TARGET_FORMAT);
-    // Premultiplied-alpha source-over blending so the banner texture
-    // (which we rasterise with premultiplied alpha) drops onto the
-    // IOSurface quad smoothly.
-    color0.setBlendingEnabled(true);
-    color0.setRgbBlendOperation(objc2_metal::MTLBlendOperation::Add);
-    color0.setAlphaBlendOperation(objc2_metal::MTLBlendOperation::Add);
-    color0.setSourceRGBBlendFactor(objc2_metal::MTLBlendFactor::One);
-    color0.setSourceAlphaBlendFactor(objc2_metal::MTLBlendFactor::One);
-    color0.setDestinationRGBBlendFactor(objc2_metal::MTLBlendFactor::OneMinusSourceAlpha);
-    color0.setDestinationAlphaBlendFactor(objc2_metal::MTLBlendFactor::OneMinusSourceAlpha);
-
-    device
-        .newRenderPipelineStateWithDescriptor_error(&desc)
-        .map_err(|e| format!("banner newRenderPipelineState error: {e:?}"))
 }
 
 fn build_pipeline(

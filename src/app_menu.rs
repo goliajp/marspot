@@ -199,6 +199,7 @@ pub fn install(nsapp: &NSApplication, mtm: MainThreadMarker) {
         items = count as u32
     );
     crate::app_menu_script::start(&target);
+    crate::app::key_script::start(mtm);
     // A menu item holds its target weakly, and the menu lives as long
     // as the process does.
     std::mem::forget(target);
