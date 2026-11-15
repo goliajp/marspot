@@ -139,12 +139,12 @@ mod tests {
     use crate::pty_reader::PtyReader;
 
     const COLS: u16 = 122;
-    const LINES: usize = 60_000;
+    const LINES: usize = 120_000;
     const FRAME: Duration = Duration::from_millis(8);
     const LONG: Duration = Duration::from_secs(60);
     const PAD: &str = "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
-    /// `LINES` numbered lines of 108 characters, six megabytes in all.
+    /// `LINES` numbered lines of 108 characters, thirteen megabytes in all.
     fn flood() -> String {
         format!("seq -f '%07.0f {PAD}' 0 {}", LINES - 1)
     }
