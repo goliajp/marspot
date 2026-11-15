@@ -94,3 +94,27 @@ fn toolbar_surface_frame() {
         assert_eq!(surface.kept.surface.counters().paint, warm.paint + 1);
     });
 }
+
+/// A toolbar painted before the shell sent one of its icons left the
+/// icon out; the frame after the icon arrives paints the toolbar again
+/// though nothing on it changed.
+#[test]
+fn a_toolbar_kept_without_an_icon_is_painted_again_when_the_icon_arrives() {
+    use crate::ui::system::macos::icons::{deliver, mask_side, Symbol};
+    at_scale(1.0, || {
+        let Some(mut stage) = Stage::new() else { return };
+        let window = (1800.0, 1100.0);
+        let l = layout(&stage, window, 1.0);
+        let cell = (stage.font.cell_w as f32, stage.font.cell_h as f32, stage.font.ascent as f32);
+        let mut surface = ToolbarSurface::default();
+        let mut out: Frame = Default::default();
+        let t = Toolbar::of(&l, [false; 5], None, cell);
+        stage.draw(window, &mut out, &mut |p| surface.frame(p, &t));
+        stage.draw(window, &mut out, &mut |p| surface.frame(p, &t));
+        let before = surface.kept.surface.counters().paint;
+        let side = mask_side(13);
+        assert!(deliver(Symbol::Usage as u16, 13, side as u16, vec![0; (side * side) as usize]));
+        stage.draw(window, &mut out, &mut |p| surface.frame(p, &t));
+        assert_eq!(surface.kept.surface.counters().paint, before + 1, "the arrival did not repaint the toolbar");
+    });
+}
