@@ -197,15 +197,9 @@ pub enum ColorKind {
 }
 
 impl Color {
-    /// The four bytes as one little-endian word: tag, then payload.
-    #[inline(always)]
-    pub(crate) const fn to_word(self) -> u32 {
-        u32::from_le_bytes([self.tag, self.a, self.b, self.c])
-    }
-
-    /// Back from [`Self::to_word`].  Only ever handed words that came
-    /// out of it, so the tag is one of the three and the unused bytes
-    /// are zero.
+    /// From its four bytes as one little-endian word, tag first.  Only
+    /// ever handed words a `Color` was packed from, so the tag is one of
+    /// the three and the unused bytes are zero.
     #[inline(always)]
     pub(crate) const fn from_word(w: u32) -> Color {
         let [tag, a, b, c] = w.to_le_bytes();

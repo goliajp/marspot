@@ -229,11 +229,16 @@ impl<'a> Handler<'a> {
         // after the wrap, whose fill may have changed the numbering; a
         // grid numbering its cells by position leaves coloured text to
         // the per-character path
-        let Some(pen) = self.grid.pen_id(self.attrs) else {
-            return 0;
+        let plain = self.attrs.is_default();
+        let pen = if plain {
+            0
+        } else {
+            let Some(pen) = self.grid.pen_id(self.attrs) else {
+                return 0;
+            };
+            pen
         };
         debug_assert_eq!(self.grid.styles().get(pen), crate::grid::PackedStyle::pack(self.attrs));
-        let plain = self.attrs.is_default();
         // The shape most runs have: ASCII that ends inside the row,
         // with a control or the end of the input behind it.  Nothing
         // of the general loop's state is needed for it.
@@ -296,7 +301,7 @@ impl<'a> Handler<'a> {
         let mut wrapped_from: Option<u16> = None;
         let row = loop {
             let (col0, row) = self.grid.cursor();
-            if let Some(prev) = wrapped_from {
+            if let Some(prev) = wrapped_from.filter(|_| !plain) {
                 // the wrap may have filled a row in a colour that swept
                 // the table or numbered the grid by position: the number
                 // taken before it is not the pen's any more

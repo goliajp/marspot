@@ -8,23 +8,13 @@
 //! and a run's attributes are looked up once.
 
 use super::format::{RUN_BYTES, RUN_SCALARS, RowHint};
-use crate::grid::{CELL_MEM_BYTES, Cell, CellAttrs, PackedCell, StyleTable};
+use crate::grid::{CELL_MEM_BYTES, Cell, PackedCell, StyleTable};
 
 /// The sixteen bytes a run header carries: the attributes as a `Cell`
 /// holds them in memory, cluster flag included.
-#[inline]
+#[inline(always)]
 fn attr_bytes(cell: PackedCell, styles: &StyleTable) -> [u8; CELL_MEM_BYTES - 4] {
-    let a: CellAttrs = cell.expand(styles).attrs;
-    let mut b = [0u8; CELL_MEM_BYTES - 4];
-    b[0..4].copy_from_slice(&a.fg.to_word().to_le_bytes());
-    b[4..8].copy_from_slice(&a.bg.to_word().to_le_bytes());
-    b[8] = a.bold as u8;
-    b[9] = a.italic as u8;
-    b[10] = a.underline as u8;
-    b[11] = a.reverse as u8;
-    b[12] = a.dim as u8;
-    b[13..16].copy_from_slice(&a._pad);
-    b
+    styles.get(cell.style_id()).mem_bytes(cell.is_cluster())
 }
 
 /// Append `line` to `out` as runs; `false`, with `out` as it was, when

@@ -38,7 +38,7 @@ impl Grid {
                 self.styles.intern(p)?
             }
         };
-        if self.styles.wants_sweep() || (self.styles.is_marking() && self.styles.fresh_since_step()) {
+        if self.styles.step_due() {
             self.sweep_step(id);
         }
         Some(id)
@@ -147,6 +147,9 @@ impl Grid {
         if self.styles.wants_sweep() {
             self.styles.begin_sweep();
             self.sweep_row = 0;
+        } else if !self.styles.is_marking() {
+            // the sweep this step was owed to was given up or reset
+            return;
         }
         self.styles.mark(held);
         let cols = self.cols as usize;

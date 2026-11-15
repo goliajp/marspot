@@ -39,12 +39,31 @@ impl PackedStyle {
 
     #[inline(always)]
     pub fn pack(a: &CellAttrs) -> PackedStyle {
-        let flags = a.bold as u64
-            | (a.italic as u64) << 1
-            | (a.underline as u64) << 2
-            | (a.reverse as u64) << 3
-            | (a.dim as u64) << 4;
-        PackedStyle(a.fg.to_word() as u64 | (a.bg.to_word() as u64) << 32 | flags << FLAGS_SHIFT)
+        let words = a as *const CellAttrs as *const u64;
+        // SAFETY: `CellAttrs` is `repr(C)`, sixteen bytes, its padding
+        // spelt out as a field and every byte initialised (asserted
+        // beside `Cell`); the reads cover exactly those bytes and make
+        // no claim about alignment.
+        let (colours, bools) = unsafe { (words.read_unaligned(), words.add(1).read_unaligned()) };
+        // the two colours are the first eight bytes as they stand; the
+        // five bools (bytes of 0 or 1) gather into five bits with one
+        // multiply, each landing on its own bit with nothing carried
+        let flags = ((bools & 0x01_0101_0101).wrapping_mul(0x1_0204_0810) >> 32) & 0x1F;
+        PackedStyle(colours | flags << FLAGS_SHIFT)
+    }
+
+    /// The sixteen bytes a `CellAttrs` holding this value has in
+    /// memory, with `cluster` in the first byte of its padding.
+    #[inline(always)]
+    pub fn mem_bytes(self, cluster: bool) -> [u8; 16] {
+        let colours = self.0 & !FLAGS_MASK;
+        let flags = (self.0 & FLAGS_MASK) >> FLAGS_SHIFT;
+        // the inverse spread: bit i to byte i
+        let bools = (flags.wrapping_mul(0x1020_4081) & 0x01_0101_0101) | (cluster as u64) << 40;
+        let mut b = [0u8; 16];
+        b[..8].copy_from_slice(&colours.to_le_bytes());
+        b[8..].copy_from_slice(&bools.to_le_bytes());
+        b
     }
 
     #[inline(always)]
@@ -91,9 +110,12 @@ pub struct StyleTable {
     /// How many numbers the shared way may hand out.
     limit: u32,
     positional: bool,
-    /// The last value looked up and its number: a run of cells written
-    /// in one colour asks for the same value again and again.
-    memo: (PackedStyle, u32),
+    /// Values looked up lately and their numbers, by a few bits of the
+    /// value: output changes colour a dozen times a line between the
+    /// same few colours, and a hit here is a load and a compare where
+    /// the index is a probe and a second load.  An empty entry holds
+    /// the default, which is never looked up.
+    recent: [(PackedStyle, u32); RECENT],
     /// `used` when the last sweep ended, and new numbers handed out
     /// since: a sweep starts once there are as many new as there were
     /// left, and never for fewer than [`MIN_SWEEP`].
@@ -106,8 +128,8 @@ pub struct StyleTable {
     marks: Vec<u64>,
     marks_upto: u32,
     marking: bool,
-    /// A new number went out since the grid last took a sweep step.
-    new_since_step: bool,
+    /// The grid owes a sweep step; see [`Self::step_due`].
+    step_due: bool,
     generation: u64,
 }
 
@@ -129,6 +151,13 @@ pub fn limit_for(cells: usize) -> u32 {
     (p / 2).max(1).min(u32::MAX as usize) as u32
 }
 
+const RECENT: usize = 16;
+
+#[inline(always)]
+fn recent_slot(s: PackedStyle) -> usize {
+    (s.0.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 60) as usize
+}
+
 #[inline(always)]
 fn slot_of(s: PackedStyle, mask: usize) -> usize {
     (s.0.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize & mask
@@ -143,13 +172,13 @@ impl StyleTable {
             used: 1,
             limit: limit_for(cells),
             positional: false,
-            memo: (PackedStyle::DEFAULT, 0),
+            recent: [(PackedStyle::DEFAULT, 0); RECENT],
             retained: 1,
             fresh: 0,
             marks: Vec::new(),
             marks_upto: 0,
             marking: false,
-            new_since_step: false,
+            step_due: false,
             generation: 0,
         }
     }
@@ -217,14 +246,16 @@ impl StyleTable {
         if s.is_default() {
             return Some(0);
         }
-        // No mark here while sweeping: a sweep starts right after the
-        // lookup of the number its caller holds, which marks it, so
-        // the memo can only hold a number marked already.
-        if self.memo.0 == s {
-            return Some(self.memo.1);
+        let slot = recent_slot(s);
+        let (held, id) = self.recent[slot];
+        if held == s {
+            if self.marking {
+                self.mark(id);
+            }
+            return Some(id);
         }
         let id = self.intern_slow(s)?;
-        self.memo = (s, id);
+        self.recent[slot] = (s, id);
         Some(id)
     }
 
@@ -262,7 +293,9 @@ impl StyleTable {
         }
         self.used += 1;
         self.fresh += 1;
-        self.new_since_step = true;
+        // the grid owes a sweep step: one is due to start, or one is
+        // running and a new number went out
+        self.step_due = self.marking || self.fresh >= self.retained.max(MIN_SWEEP);
         let mask = self.index.len() - 1;
         let mut i = slot_of(s, mask);
         while self.index[i] != 0 {
@@ -317,14 +350,16 @@ impl StyleTable {
         self.marking
     }
 
-    /// Whether a number went out since [`Self::stepped`].
+    /// Whether the grid owes a sweep step since [`Self::stepped`]: a
+    /// sweep is due to start, or one is running and a new number went
+    /// out.
     #[inline(always)]
-    pub fn fresh_since_step(&self) -> bool {
-        self.new_since_step
+    pub fn step_due(&self) -> bool {
+        self.step_due
     }
 
     pub fn stepped(&mut self) {
-        self.new_since_step = false;
+        self.step_due = false;
     }
 
     pub fn begin_sweep(&mut self) {
@@ -370,16 +405,10 @@ impl StyleTable {
         self.used -= freed;
         self.retained = self.used;
         self.fresh = 0;
-        self.memo = (PackedStyle::DEFAULT, 0);
+        self.recent = [(PackedStyle::DEFAULT, 0); RECENT];
         if freed > 0 {
             self.generation += 1;
         }
-    }
-
-    /// Give up a sweep without freeing anything: the cells were
-    /// rebuilt under it.
-    pub fn abandon_sweep(&mut self) {
-        self.marking = false;
     }
 
     /// Take `id`, holding `s`, out of the index, closing the gap.
@@ -422,8 +451,9 @@ impl StyleTable {
         self.used = 1;
         self.retained = 1;
         self.fresh = 0;
-        self.memo = (PackedStyle::DEFAULT, 0);
+        self.recent = [(PackedStyle::DEFAULT, 0); RECENT];
         self.marking = false;
+        self.step_due = false;
         self.positional = false;
         self.generation += 1;
     }
@@ -443,7 +473,7 @@ impl StyleTable {
         self.free = 0;
         self.marking = false;
         self.positional = true;
-        self.memo = (PackedStyle::DEFAULT, 0);
+        self.recent = [(PackedStyle::DEFAULT, 0); RECENT];
         self.generation += 1;
     }
 
@@ -501,6 +531,8 @@ mod tests {
             let a = attrs_from(next(&mut s));
             let p = PackedStyle::pack(&a);
             assert_eq!(p.unpack(), a);
+            let cell = crate::grid::Cell { ch: ' ', attrs: a };
+            assert_eq!(&p.mem_bytes(false)[..], &crate::grid::Cell::slice_as_bytes(&[cell])[4..]);
             assert_eq!(p.0 & FREE, 0);
             assert_eq!(p.is_default(), a == CellAttrs::default());
             if let Some(prev) = seen.insert(p, a) {
