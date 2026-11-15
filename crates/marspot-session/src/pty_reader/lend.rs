@@ -62,6 +62,14 @@ const KEPT_FOR: u64 = 16;
 /// milliseconds apart differ by about as much.
 const SLOWER_PERCENT: u64 = 3;
 
+/// Rates in a row the loop must carry slower before it gives the flood
+/// back.  One alone is as often the noise between two rates of the same
+/// flood: text that parses fast was given back on one, carried by the
+/// reader for the next 64 MiB, and cost 15-20 % more CPU than never
+/// giving it back.  Text that really parses slower is slower every time,
+/// and pays one window more.
+const SLOWER_IN_A_ROW: u64 = 2;
+
 /// Rates the reader takes of a flood the loop carried slower before it
 /// offers it again: what the flood is made of may have changed.  Twice
 /// as many after each time the loop was slower again.  Asking has a
@@ -158,8 +166,9 @@ pub(crate) struct Lend {
     /// Bytes a second the reader last carried this flood at by itself.
     two_rate: AtomicU64,
     /// What the loop has carried since its last verdict: bytes, and
-    /// nanoseconds; and the verdicts in its favour since the offer.
-    here: [AtomicU64; 3],
+    /// nanoseconds; the verdicts in its favour since the offer; and the
+    /// rates in a row it carried slower.
+    here: [AtomicU64; 4],
     /// Verdicts in the loop's favour it may keep the pty for.
     keep_for: AtomicU64,
     /// Written by the loop when it gives the pty back.
@@ -177,7 +186,7 @@ impl Lend {
             welcome: AtomicBool::new(false),
             declined: AtomicBool::new(false),
             two_rate: AtomicU64::new(0),
-            here: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
+            here: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
             keep_for: AtomicU64::new(KEPT_FOR),
             back,
             back_rx,
@@ -207,7 +216,14 @@ impl Lend {
         self.here[0].store(0, Ordering::Relaxed);
         self.here[1].store(0, Ordering::Relaxed);
         let here = rate(carried, Duration::from_nanos(nanos));
-        if here * 100 < self.two_rate.load(Ordering::SeqCst) * (100 - SLOWER_PERCENT) {
+        let slower = here * 100 < self.two_rate.load(Ordering::SeqCst) * (100 - SLOWER_PERCENT);
+        if !slower {
+            self.here[3].store(0, Ordering::Relaxed);
+        }
+        if slower {
+            if self.here[3].fetch_add(1, Ordering::Relaxed) + 1 < SLOWER_IN_A_ROW {
+                return true;
+            }
             self.declined.store(true, Ordering::SeqCst);
             self.keep_for.store(KEPT_FOR, Ordering::Relaxed);
         } else if self.here[2].fetch_add(1, Ordering::Relaxed) + 1 < self.keep_for.load(Ordering::Relaxed) {
@@ -363,6 +379,7 @@ mod tests {
         assert!(lend.carried_here(WINDOW / 2, took(&lend, 100) / 2), "as fast as the reader");
         assert!(lend.carried_here(WINDOW, took(&lend, 98)), "inside what two rates differ by");
         assert!(lend.lent());
+        assert!(lend.carried_here(WINDOW, took(&lend, 90)), "one rate slower alone is no verdict");
         assert!(!lend.carried_here(WINDOW, took(&lend, 90)), "ten percent slower");
         assert!(!lend.lent());
         assert!(!lend.is_welcome(), "the same flood was offered straight away");
@@ -377,6 +394,7 @@ mod tests {
 
         // slower again: twice as long before the next offer
         lend.offer();
+        assert!(lend.carried_here(WINDOW, took(&lend, 90)), "one rate slower alone is no verdict");
         assert!(!lend.carried_here(WINDOW, took(&lend, 90)));
         for rates in 1..2 * DECLINED_FOR {
             assert!(!window(&mut carried, &lend), "offered a second time after {rates} rates");
@@ -398,6 +416,7 @@ mod tests {
         }
         assert!(!lend.carried_here(WINDOW, took(&lend, 110)));
         lend.offer();
+        assert!(lend.carried_here(WINDOW, took(&lend, 90)), "one rate slower alone is no verdict");
         assert!(!lend.carried_here(WINDOW, took(&lend, 90)));
         carried.flood_over(&lend);
         assert!(lend.is_welcome(), "the next flood is offered afresh");
@@ -409,11 +428,35 @@ mod tests {
         }
         assert!(!lend.carried_here(WINDOW, took(&lend, 110)));
         lend.offer();
+        assert!(lend.carried_here(WINDOW, took(&lend, 90)), "one rate slower alone is no verdict");
         assert!(!lend.carried_here(WINDOW, took(&lend, 90)));
         for rates in 1..DECLINED_FOR {
             assert!(!window(&mut carried, &lend), "the next flood offered again after {rates} rates");
         }
         assert!(window(&mut carried, &lend), "the next flood waits as long as the first did");
+    }
+
+    /// A slower rate between two that are not is the noise between two
+    /// rates of one flood: the pty stays lent.
+    #[test]
+    fn slower_rates_count_only_in_a_row() {
+        const WINDOW: usize = RATED_BYTES as usize;
+        let lend = Lend::new();
+        lend.welcome(true);
+        lend.two_rate.store(300 << 20, Ordering::SeqCst);
+        let took = |percent: u64| Duration::from_nanos(WINDOW as u64 * 1_000_000_000 / ((300 << 20) * percent / 100));
+        lend.offer();
+        for _ in 0..4 {
+            assert!(lend.carried_here(WINDOW, took(90)), "slower once");
+            assert!(lend.carried_here(WINDOW, took(100)), "then not");
+        }
+        assert!(lend.lent());
+        assert!(lend.carried_here(WINDOW, took(90)));
+        assert!(!lend.carried_here(WINDOW, took(90)), "slower twice in a row");
+        assert!(!lend.lent());
+        // a new offer counts from none
+        lend.offer();
+        assert!(lend.carried_here(WINDOW, took(90)), "the count went with the last offer");
     }
 
     /// A reader whose turn has gone to another pane asks for its pty
