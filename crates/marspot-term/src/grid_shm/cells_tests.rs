@@ -166,3 +166,90 @@ fn eight_byte_cells_are_taken_only_with_their_version() {
         assert_eq!(got.is_ok(), ok, "version {version}, {cell_size}-byte cells");
     }
 }
+
+fn next(s: &mut u64) -> u64 {
+    *s ^= *s << 13;
+    *s ^= *s >> 7;
+    *s ^= *s << 17;
+    *s
+}
+
+/// A session's own frames of eight-byte cells, whatever the grid holds
+/// -- colours from a few to one a cell (a grid numbered by position),
+/// wide characters, clusters, wrapped rows -- read back into a mirror
+/// as the same screen.
+#[test]
+fn a_published_frame_of_eight_byte_cells_is_the_screen() {
+    use crate::terminal::Terminal;
+    let mut s = 0xFEED_FACE_CAFE_BEEFu64;
+    let mut positional = 0;
+    for round in 0..if cfg!(miri) { 3 } else { 40 } {
+        let (cols, rows) = (7 + (next(&mut s) % 70) as u16, 2 + (next(&mut s) % 30) as u16);
+        let mut t = Terminal::new(cols, rows);
+        let palette = [1u64, 8, 300, 100_000][round % 4];
+        let mut bytes = Vec::new();
+        for _ in 0..(cols as usize * rows as usize / 2) {
+            let r = next(&mut s);
+            // the widest palette changes colour every character
+            if r % 3 == 0 || palette > 1000 {
+                let c = r % palette;
+                bytes.extend_from_slice(format!("\x1b[38;2;{};{};{}m", c >> 16 & 0xFF, c >> 8 & 0xFF, c & 0xFF).as_bytes());
+            }
+            match r % 11 {
+                0 => bytes.extend_from_slice("漢".as_bytes()),
+                1 => bytes.extend_from_slice("🇯🇵".as_bytes()),
+                2 => bytes.extend_from_slice(b"\r\n"),
+                _ => bytes.push(b'a' + (r % 26) as u8),
+            }
+        }
+        t.feed(&bytes);
+        let grid = t.grid();
+        positional += grid.styles().is_positional() as u32;
+        let mut writer = GridShmWriter::create(cols, rows).expect("region");
+        let reader = GridShmReader::from_fd(dup_fd(writer.fd())).expect("reader");
+        writer.set_reader_frames(VERSION_PACKED);
+        assert!(writer.publish_if_changed(grid, 0, 0));
+        let (mut buf, mut wrapped) = (FrameBuf::default(), Vec::new());
+        reader.read_into(&mut buf, &mut wrapped, &mut ClusterTable::default()).expect("a frame");
+        assert!(buf.is_packed, "round {round}");
+        let mut mirror = Grid::new(cols, rows);
+        mirror.load_frame(&buf.packed, &buf.styles, &mut Vec::new());
+        mirror.check_styles().unwrap();
+        for r in 0..rows {
+            for c in 0..cols {
+                assert_eq!(mirror.cell(c, r), grid.cell(c, r), "round {round} ({c},{r})");
+            }
+            assert_eq!(wrapped[r as usize], grid.row_wrapped(r), "round {round} row {r}");
+        }
+    }
+    assert!(cfg!(miri) || positional > 0, "no grid numbered by position");
+}
+
+/// The reader saying something else, or the view leaving the live
+/// screen, shows in the very next publish, and in the header a reader
+/// from before eight-byte cells checks.
+#[test]
+fn the_layout_follows_the_reader_and_the_view() {
+    let (cols, rows) = (6u16, 3u16);
+    let mut writer = GridShmWriter::create(cols, rows).expect("region");
+    let reader = GridShmReader::from_fd(dup_fd(writer.fd())).expect("reader");
+    let mut grid = Grid::new(cols, rows);
+    grid.set_cell(0, 0, Cell { ch: 'r', attrs: red_bold() });
+    assert!(writer.publish_if_changed(&grid, 0, 0));
+    assert_eq!(reader.layout(), (VERSION, CELL_SIZE_WIDE));
+    writer.set_reader_frames(VERSION_PACKED);
+    assert!(writer.publish_if_changed(&grid, 0, 0), "a new layout is a new frame");
+    assert_eq!(reader.layout(), (VERSION_PACKED, CELL_SIZE_PACKED));
+    assert!(!writer.publish_if_changed(&grid, 0, 0));
+    // a scrolled view is twenty-byte cells, and the version says so
+    assert!(writer.publish_if_changed(&grid, 1, 0));
+    assert_eq!(reader.layout(), (VERSION, CELL_SIZE_WIDE));
+    assert!(writer.publish_if_changed(&grid, 0, 0));
+    assert_eq!(reader.layout(), (VERSION_PACKED, CELL_SIZE_PACKED));
+    writer.set_reader_frames(0);
+    assert!(writer.publish_if_changed(&grid, 0, 0));
+    assert_eq!(reader.layout(), (VERSION, CELL_SIZE_WIDE));
+    let mut cells = Vec::new();
+    reader.read(&mut cells, &mut Vec::new()).expect("a frame");
+    assert_eq!(cells[0], Cell { ch: 'r', attrs: red_bold() });
+}

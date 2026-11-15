@@ -29,6 +29,8 @@ use control_writer::ControlWriter;
 use snapshot_writer::SnapshotWriter;
 mod handoff;
 mod input;
+mod keys;
+use keys::{handle_key, handle_paste};
 mod line_discipline;
 mod owner_watch;
 mod local_session;
@@ -256,6 +258,9 @@ enum SessionEvent {
     /// L2 sent `SessionRepublish`: publish into the grid region of
     /// this name from now on.
     Republish(String),
+    /// The client of this generation said the newest frame layout it
+    /// reads.
+    FrameCells(u64, u32),
     /// SIGHUP: the app retired this session.  Exit, never execv.
     CloseRequested,
     /// The background probe of `current/marspot-session` finished; the
@@ -505,58 +510,6 @@ fn state_str(s: SessionState) -> &'static str {
         SessionState::Idle => "idle",
         SessionState::Exited => "exited",
     }
-}
-
-/// Encode one forwarded keystroke with L3's own terminal mode flags,
-/// write it to the PTY, and local-echo printable bytes ahead of the
-/// round trip. Returns whether the echo painted the grid (so the caller
-/// republishes even when no PTY bytes pumped this tick).
-///
-/// Clipboard reads resolve to `None` here: Cmd-V paste is forwarded by
-/// L2 as already-resolved text in a later step, not pulled from the
-/// pasteboard by the GUI-free L3.
-fn handle_key(session: &mut SessionImpl, event: MarspotKeyEvent, mods: Modifiers) -> bool {
-    let modes = session.terminal().input_modes();
-    let Some(bytes) =
-        marspot_term::input_core::key_event_to_bytes(&event, mods, modes, || None)
-    else {
-        return false;
-    };
-    let _ = session.write(&bytes);
-    // Local-echo predict — but ONLY for plain printable runs.  An
-    // escape sequence (ESC-leading) is a control code; the first
-    // byte 0x1b isn't printable so predict_byte rejects it, but the
-    // sequence's tail (`[`, `C`, …) is ASCII printable and would be
-    // painted literally into the grid, producing the `[C[C[C` smear
-    // the user reported every time they pressed an arrow key.  Just
-    // skip the whole run when it starts with ESC.
-    let mut predicted = false;
-    if !bytes.starts_with(&[0x1b]) {
-        for &b in bytes.as_ref() {
-            if session.terminal_mut().predict_byte(b) {
-                predicted = true;
-            }
-        }
-    }
-    predicted
-}
-
-/// Write pasted text (already resolved from the macOS pasteboard by L2) to
-/// the PTY.  Wrap in bracketed-paste markers iff this terminal turned the
-/// mode on (DECSET 2004) so the receiving app treats it as a single paste
-/// rather than typed input.  No local predict — the PTY echo round-trips
-/// back through the normal pump.
-fn handle_paste(session: &mut SessionImpl, text: &str) {
-    let bracketed = session.terminal().bracketed_paste_mode();
-    let mut bytes: Vec<u8> = Vec::with_capacity(text.len() + 12);
-    if bracketed {
-        bytes.extend_from_slice(b"\x1b[200~");
-    }
-    bytes.extend_from_slice(text.as_bytes());
-    if bracketed {
-        bytes.extend_from_slice(b"\x1b[201~");
-    }
-    let _ = session.write(&bytes);
 }
 
 /// If L2 handed us a control socket (fd `MARSPOT_SHELL_CONTROL_FD`,
@@ -1270,6 +1223,10 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                         );
                     } else {
                         poke = None;
+                        // the next reader may be a core from before
+                        // eight-byte cells: it must find a region it
+                        // attaches to, now, not at the next output
+                        frames.reader_gone(&session);
                         lx_event!(
                             "L3_UDS_CLIENT_GONE",
                             "control client closed; awaiting reattach (owns-pty)",
@@ -1344,6 +1301,11 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 SessionEvent::Republish(name) => {
                     regions::republish(&mut frames, &mut session, &name, poke.as_mut());
                 }
+                SessionEvent::FrameCells(core_gen, version) if core_gen == client_generation => {
+                    frames.shm().set_reader_frames(version);
+                    frames.publish(&mut session, poke.as_mut());
+                }
+                SessionEvent::FrameCells(..) => {}
                 SessionEvent::CloseRequested => {
                     lx_event!(
                         "L3_CLOSE_REQUESTED",
@@ -1532,6 +1494,10 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     // as stale by the time it reaches the loop.
                     client_generation += 1;
                     let this_gen = client_generation;
+                    // a new reader reads twenty-byte frames until it
+                    // says otherwise, and may be reading the region
+                    // already: it goes back to them now, past any gate
+                    frames.reader_gone(&session);
                     match stream.try_clone() {
                         Ok(writer) => {
                             poke = ControlWriter::new(writer).ok();
