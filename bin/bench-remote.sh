@@ -178,9 +178,14 @@ echo "==> running bench on $HOST: bin/bench.sh $ARGS_Q"
 # Saying the number out loud is the fix -- how long we can wait is
 # something only this side knows.
 MAX_WAIT="${MARSPOT_BENCH_MAX_WAIT:-1200}"
-# A round that may hold the lock past an hour says when it expects to
-# be done, for whoever queues behind it: MARSPOT_BENCH_UNTIL="+90m what".
-UNTIL="${MARSPOT_BENCH_UNTIL:+ --until $(printf '%q' "$MARSPOT_BENCH_UNTIL")}"
+# A round says when it expects to be done, for whoever queues behind
+# it.  The full tier has held the lock 8 to 15 minutes once it has it,
+# the fast one a few; MARSPOT_BENCH_UNTIL="+90m what" overrides.
+case " $* " in
+  *" --full "*) BENCH_UNTIL_DEFAULT="+20m marspot full bench" ;;
+  *) BENCH_UNTIL_DEFAULT="+10m marspot bench" ;;
+esac
+UNTIL=" --until $(printf '%q' "${MARSPOT_BENCH_UNTIL:-$BENCH_UNTIL_DEFAULT}")"
 LOCK_CMD="/usr/local/bin/bench-lock bench --max-wait $MAX_WAIT$UNTIL"
 if [[ "${MARSPOT_BENCH_NO_LOCK:-}" == "1" ]]; then
   echo "==> MARSPOT_BENCH_NO_LOCK=1 — measuring without the host lock" >&2
