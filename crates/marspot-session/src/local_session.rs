@@ -32,6 +32,7 @@ use marspot_term::terminal::Terminal;
 
 use crate::pty_reader::PtyReader;
 
+mod direct;
 mod pump;
 pub(crate) use pump::Pace;
 

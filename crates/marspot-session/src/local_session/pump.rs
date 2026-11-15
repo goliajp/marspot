@@ -9,10 +9,10 @@ use crate::pty_reader::Chunk;
 
 /// Most that is parsed between two looks at whether a key has arrived:
 /// some 40 to 70 microseconds of parsing.
-const SLICE_BYTES: usize = 16 * 1024;
+pub(super) const SLICE_BYTES: usize = 16 * 1024;
 
 /// How far back from its full length a slice may end, to end on a line.
-const SLICE_SLACK: usize = 1024;
+pub(super) const SLICE_SLACK: usize = 1024;
 
 /// Where the slice of `bytes` that starts at `from` ends: after a line
 /// feed if one of its last bytes is one, since the parser takes a
@@ -66,8 +66,13 @@ impl LocalSession {
     /// already handed over was read before the key was written, and so
     /// was what it has in hand and hands over next: none of it can hold
     /// the program's answer.
+    /// A reader that has lent its pty to this thread has nothing in
+    /// hand.
     pub(crate) fn typed(&mut self) {
-        self.before_key = self.reader.as_ref().map_or(0, |r| r.in_flight()) + 1;
+        self.before_key = match self.reader.as_ref() {
+            Some(r) => r.in_flight() + usize::from(!r.lend().lent()),
+            None => 1,
+        };
     }
 
     fn drain(&mut self, pace: Option<Pace>) -> (usize, bool) {
@@ -81,12 +86,36 @@ impl LocalSession {
         // enough of them, by what `follow` asks, for a frame
         let mut answered = false;
         let raw = self.line.output_is_raw(self.pty.raw_master(), self.shell_pgrp());
+        let welcome = self.welcomes_the_pty(pace.as_ref(), raw);
+        if let Some(r) = self.reader.as_ref() {
+            r.lend().welcome(welcome);
+        }
         loop {
             let (chunk, mut at) = match self.unfinished.take() {
                 Some(unfinished) => unfinished,
                 None => match self.rx.try_recv() {
                     Ok(chunk) => (chunk, 0),
-                    Err(_) => break,
+                    Err(_) if !self.reader.as_ref().is_some_and(|r| r.lend().lent()) => break,
+                    // the pty is lent: what the reader queued before it
+                    // lent it is all there is, and comes first
+                    Err(_) => match self.rx.try_recv() {
+                        Ok(chunk) => (chunk, 0),
+                        Err(_) => {
+                            match (pace.as_ref(), deadline) {
+                                (Some(pace), Some(deadline)) if welcome => {
+                                    let (read, goes_on) = self.read_in_place(pace, deadline);
+                                    total += read;
+                                    more = goes_on;
+                                }
+                                _ => {
+                                    if let Some(r) = self.reader.as_ref() {
+                                        r.lend().give_back();
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    },
                 },
             };
             let stop = || (follow.is_some() && answered) || key_waiting() || deadline.is_some_and(|d| Instant::now() >= d);
@@ -154,7 +183,9 @@ impl LocalSession {
     }
 
     /// Log `bytes` and parse them, or keep them while the picture is held.
-    fn take_in(&mut self, bytes: &[u8]) {
+    pub(super) fn take_in(&mut self, bytes: &[u8]) {
+        #[cfg(test)]
+        TAKEN.with_borrow_mut(|taken| taken.extend_from_slice(bytes));
         // The bytelog is written whether or not the picture is
         // held: everything that reads it must see the pane talk.
         if let Some(b) = self.bytelog.as_mut() {
@@ -177,6 +208,12 @@ impl LocalSession {
             self.terminal.feed(bytes);
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Every byte this thread has taken in, in the order it did.
+    pub(super) static TAKEN: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// A chunk the pump stopped in the middle of, and how far it got.
