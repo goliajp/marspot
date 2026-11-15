@@ -49,7 +49,8 @@ impl Toolbar {
         let label = (layout.top_inset > 0.0).then(|| {
             let text_w = version_label().chars().count() as f32 * cell_w;
             let scale = (layout.top_inset / crate::HEADER_PT) as f32;
-            let x = (layout.window_w as f32 - chrome::VERSION_PAD_RIGHT as f32 * scale - text_w).max(cell_w);
+            // `scale` is pixels per window unit, two to the point
+            let x = (layout.window_w as f32 - (2.0 * chrome::VERSION_PAD_RIGHT) as f32 * scale - text_w).max(cell_w);
             let row_center = marspot_term::layout::TRAFFIC_LIGHT_CENTER_Y_LOGICAL as f32 * scale;
             (x, (row_center - cell_h * 0.5).max(0.0) + ascent)
         });
