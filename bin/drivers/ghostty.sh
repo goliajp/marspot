@@ -9,11 +9,12 @@
 # boundary).
 #
 # Usage:
-#   bin/drivers/ghostty.sh run-single <cmd>
+#   bin/drivers/ghostty.sh run-single [--pid-file <file>] <cmd> [cols rows]
 #     Spawn a fresh Ghostty surface running <cmd>. <cmd> is the shell
 #     string the surface should execute — we wrap it in a temp script
 #     because Ghostty's -e wants an executable path, not an inline
-#     bash string.
+#     bash string.  With --pid-file, the pid of the Ghostty it started
+#     is appended to <file>, so the caller can stop exactly that.
 #
 #   bin/drivers/ghostty.sh run-recorded <pid-file> <executable>
 #     Spawn a fresh Ghostty running <executable> and append its pid to
@@ -41,6 +42,11 @@ shift || true
 
 case "$cmd_word" in
   run-single)
+    pid_file=""
+    if [[ ${1:-} == --pid-file ]]; then
+      pid_file=${2:?pid-file}
+      shift 2
+    fi
     user_cmd=${1:?cmd}; shift || true
     # Write the user command to a temp script so we can pass an
     # executable path to `-e`. Ghostty does not accept an inline
@@ -65,6 +71,7 @@ case "$cmd_word" in
       size_args=(--window-width="$1" --window-height="$2")
     fi
     "$GHOSTTY_BIN" ${size_args[@]+"${size_args[@]}"} -e "$wrapper" &
+    [[ -z $pid_file ]] || echo $! >> "$pid_file"
     disown 2>/dev/null || true
     ;;
   run-recorded)
@@ -82,7 +89,7 @@ case "$cmd_word" in
     ;;
   *)
     echo "ghostty.sh: unknown sub-command: ${cmd_word:-(none)}" >&2
-    echo "  usage: ghostty.sh run-single <cmd>" >&2
+    echo "  usage: ghostty.sh run-single [--pid-file <file>] <cmd> [cols rows]" >&2
     exit 2
     ;;
 esac

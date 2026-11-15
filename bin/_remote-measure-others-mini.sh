@@ -209,6 +209,32 @@ WIN_ghostty=""
 WIN_terminal=""
 LAUNCHED_TERMS=()
 
+# Ghostty is stopped by the pids its driver recorded at launch, never by
+# a pattern: the bench host is shared, and a pattern reaches every
+# process whose command line happens to match.
+GHOSTTY_BIN_PATH="/Applications/Ghostty.app/Contents/MacOS/ghostty"
+GHOSTTY_PIDS="$SESSION_DIR/ghostty.pids"
+RUN_STARTED=$(date +%s)
+stop_recorded_ghostty() {
+  local p started
+  [[ -s $GHOSTTY_PIDS ]] || return 0
+  # the polite quit reaches the whole app: only when it was not up
+  # before this run
+  if [[ $PRE_GHOSTTY == 0 ]]; then
+    osascript -e 'tell application "Ghostty" to quit' >/dev/null 2>&1 || true
+    sleep 0.5
+  fi
+  # a pid is ours only while it is still that binary and was started
+  # after this run began: a pid can be reused
+  for p in $(cat "$GHOSTTY_PIDS"); do
+    [[ $(ps -o comm= -p "$p" 2>/dev/null) == "$GHOSTTY_BIN_PATH" ]] || continue
+    started=$(date -j -f "%a %b %d %T %Y" "$(ps -o lstart= -p "$p")" +%s 2>/dev/null) || continue
+    (( started >= RUN_STARTED )) || continue
+    kill "$p" 2>/dev/null || true
+  done
+  : > "$GHOSTTY_PIDS"
+}
+
 quit_app_if_we_spawned() {
   # $1=app-display-name, $2=ps-pattern, $3=PRE_<APP> snapshot value.
   # If app was NOT running before our test, quit it now. If it was
@@ -262,7 +288,7 @@ cleanup() {
   [[ $launched != *" iterm "* ]]    || quit_app_if_we_spawned "iTerm"    "iTerm.app/Contents/MacOS"              "$PRE_ITERM"
   [[ $launched != *" terminal "* ]] || quit_app_if_we_spawned "Terminal" "Terminal.app/Contents/MacOS/Terminal"  "$PRE_TERMINAL"
   [[ $launched != *" warp "* ]]     || quit_app_if_we_spawned "Warp"     "Warp.app/Contents/MacOS/stable"        "$PRE_WARP"
-  [[ $launched != *" ghostty "* ]]  || quit_app_if_we_spawned "Ghostty"  "Ghostty.app/Contents/MacOS/ghostty"    "$PRE_GHOSTTY"
+  [[ $launched != *" ghostty "* ]]  || stop_recorded_ghostty
 
   # the product, if a round was interrupted while it was up
   bin/drivers/marspot.sh close-app >/dev/null 2>&1 || true
@@ -331,11 +357,7 @@ close_one() {
       fi
       ;;
     ghostty)
-      if [[ "$PRE_GHOSTTY" == "0" ]]; then
-        osascript -e 'tell application "Ghostty" to quit' >/dev/null 2>&1 || true
-        sleep 0.5
-        pkill -f "Ghostty.app/Contents/MacOS/ghostty" 2>/dev/null || true
-      fi
+      stop_recorded_ghostty
       ;;
     marspot)
       # The app quits when its one pane's shell exits.  This stops what
@@ -427,7 +449,7 @@ for t in "${TERMS[@]}"; do
   case "$t" in
     iterm)    WIN_iterm="$(bin/drivers/iterm.sh run-tabs 1 "$cmd" 2>&1)" || launch_rc=$? ;;
     warp)     $ASUSER bin/drivers/warp.sh "${MEASURE_WARP_VIA:-run-single}" "$cmd" || launch_rc=$? ;;
-    ghostty)  $ASUSER bin/drivers/ghostty.sh run-single "$cmd" $GRID_COLS $GRID_ROWS || launch_rc=$? ;;
+    ghostty)  $ASUSER bin/drivers/ghostty.sh run-single --pid-file "$GHOSTTY_PIDS" "$cmd" $GRID_COLS $GRID_ROWS || launch_rc=$? ;;
     terminal) WIN_terminal="$(bin/drivers/terminal.sh run-single "$cmd" 2>&1)" || launch_rc=$? ;;
     marspot)
       # the pane's shell is a wrapper around the same command every
