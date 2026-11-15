@@ -22,11 +22,11 @@ fn random_cell(s: &mut u64, palette: u64) -> Cell {
     let k = next(s) % palette;
     if k != 0 {
         c.attrs.fg = Color::indexed(k as u8);
-        c.attrs.bg = if k % 3 == 0 { Color::rgb(k as u8, 1, 2) } else { Color::DEFAULT };
-        c.attrs.bold = k % 2 == 0;
-        c.attrs.dim = k % 5 == 0;
+        c.attrs.bg = if k.is_multiple_of(3) { Color::rgb(k as u8, 1, 2) } else { Color::DEFAULT };
+        c.attrs.bold = k.is_multiple_of(2);
+        c.attrs.dim = k.is_multiple_of(5);
     }
-    if r % 97 == 0 {
+    if r.is_multiple_of(97) {
         // a cell that still says it is a cluster: what reaches the
         // file has to say so too, whatever its character
         c.ch = char::from_u32(CLUSTER_INDEX_BASE + 3).unwrap();
@@ -50,7 +50,7 @@ fn a_row_files_the_same_bytes_from_either_form() {
         let tail = (next(&mut s) % cols as u64) as usize;
         let mut row: Vec<Cell> = (0..cols).map(|_| random_cell(&mut s, palette)).collect();
         for c in &mut row[tail..] {
-            *c = if next(&mut s) % 4 == 0 { Cell::from((b'a' + (round % 26) as u8) as char) } else { Cell::default() };
+            *c = if next(&mut s).is_multiple_of(4) { Cell::from((b'a' + (round % 26) as u8) as char) } else { Cell::default() };
         }
         for (c, cell) in row.iter().enumerate() {
             g.set_cell(c as u16, 0, *cell);

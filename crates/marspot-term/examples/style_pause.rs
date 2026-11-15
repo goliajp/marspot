@@ -34,7 +34,7 @@ fn phase(g: &mut Grid, name: &str, n: u64, style: impl Fn(u64) -> u64) {
         times.push((t.elapsed(), k));
     }
     let total = start.elapsed();
-    times.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    times.sort_unstable_by_key(|t| std::cmp::Reverse(t.0));
     let us = |d: Duration| d.as_secs_f64() * 1e6;
     let p999 = times[times.len() / 1000].0;
     println!(

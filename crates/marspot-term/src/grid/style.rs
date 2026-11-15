@@ -524,7 +524,7 @@ mod tests {
                 held.push(id);
             }
             // keep a random half, sweep, and the rest must be gone
-            let keep: Vec<u32> = held.iter().copied().filter(|_| next(&mut s) % 2 == 0).collect();
+            let keep: Vec<u32> = held.iter().copied().filter(|_| next(&mut s).is_multiple_of(2)).collect();
             t.begin_sweep();
             t.mark_all(keep.iter().copied());
             t.end_sweep();
