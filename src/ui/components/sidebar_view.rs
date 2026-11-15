@@ -41,15 +41,11 @@ pub struct SidebarFrame<'a> {
 }
 
 impl SidebarFrame<'_> {
-    fn column(&self) -> Sidebar<'_> {
+    fn column(&self) -> Sidebar {
         let l = self.layout;
         Sidebar {
             rect: Rect { x: 0.0, y_top: l.top_inset, w: l.sidebar_w, h: (l.window_h - l.top_inset).max(0.0) },
             top_pad: l.sidebar_top_pad_phys,
-            rows: self.rows,
-            close_rects: &l.close_session_rects,
-            focused_idx: self.focused_idx,
-            hover: self.hover,
         }
     }
 

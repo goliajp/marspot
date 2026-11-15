@@ -1,6 +1,6 @@
 //! The window's chrome, laid out as instances: the seams between
-//! panes and the focus ring, empty seats and the sidebar, and the
-//! toolbar and the version label, which are drawn from a tree.
+//! panes and the focus ring and the empty seats, and the sidebar, the
+//! toolbar and the version label, which are drawn from trees.
 //!
 //! Sizes are `spec::chrome`'s and colours `panel_palette`'s; where a
 //! thing is, and so where a click lands on it, is the layout's.
@@ -13,13 +13,20 @@ use crate::ui::components::chrome_hover::ChromeHover;
 use crate::ui::components::panel_palette as palette;
 use crate::ui::components::{
     Button, ButtonStyle, GridEdges, GridItem, GridSeams, IconPosition,
-    Outline, SeamStyle, Sidebar,
+    Outline, SeamStyle,
 };
 use crate::ui::core::view::ViewPainter;
 use crate::ui::system::macos::icons::Symbol;
 use crate::ui::theme::spec::chrome;
-use crate::ui::SESSION_COUNT_HARD_CAP;
+use crate::ui::components::sidebar_view::{SidebarFrame, SidebarSurface};
 use crate::ui::components::toolbar_view::{Toolbar, ToolbarSurface};
+
+/// The parts of the chrome drawn from trees, kept from frame to frame.
+#[derive(Default)]
+pub(crate) struct ChromeSurfaces {
+    pub(crate) toolbar: ToolbarSurface,
+    pub(crate) sidebar: SidebarSurface,
+}
 
 /// What the chrome shows beyond where things are.
 #[derive(Clone, Copy, Debug, Default)]
@@ -40,14 +47,15 @@ pub(crate) fn paint_chrome(
     focused_idx: usize,
     state: ChromeState,
     overlay_ui_rects: &mut Vec<UiRectInstance>,
-    toolbar: &mut ToolbarSurface,
+    surfaces: &mut ChromeSurfaces,
 ) {
     paint_grid_seams(painter, layout, n_views, focused_idx, overlay_ui_rects);
     paint_empty_seats(painter, layout, n_views);
-    paint_sidebar(painter, layout, sidebar, focused_idx, state.hover);
+    let cell_w = painter.cell_w;
+    surfaces.sidebar.frame(painter, &SidebarFrame { layout, rows: sidebar, focused_idx, hover: state.hover, cell_w });
     paint_region_seams(painter, layout);
     let cell = (painter.cell_w, painter.cell_h, painter.ascent);
-    toolbar.frame(painter, &Toolbar::of(layout, state.on, state.hover, cell));
+    surfaces.toolbar.frame(painter, &Toolbar::of(layout, state.on, state.hover, cell));
 }
 
 fn paint_grid_seams(
@@ -152,37 +160,6 @@ fn paint_empty_seats(painter: &mut ViewPainter, layout: &Layout, n_views: usize)
             style,
         }.paint(painter);
     }
-}
-
-pub(crate) fn paint_sidebar(
-    painter: &mut ViewPainter,
-    layout: &Layout,
-    sidebar: &[SidebarEntry],
-    focused_idx: usize,
-    hover: Option<ChromeHover>,
-) {
-    if layout.sidebar_w <= 0.0 {
-        return;
-    }
-    let add = layout.add_session_button_rect;
-    if add.w > 0.0 {
-        let full = layout.close_session_rects.len() >= SESSION_COUNT_HARD_CAP;
-        crate::ui::components::sidebar::paint_add(painter, add, layout.sidebar_w, full, hover == Some(ChromeHover::Add));
-    }
-    Sidebar {
-        rect: Rect {
-            x: 0.0,
-            y_top: layout.top_inset,
-            w: layout.sidebar_w,
-            h: (layout.window_h - layout.top_inset).max(0.0),
-        },
-        top_pad: layout.sidebar_top_pad_phys,
-        rows: sidebar,
-        close_rects: &layout.close_session_rects,
-        focused_idx,
-        hover,
-    }
-    .paint(painter);
 }
 
 /// The lines between the sidebar and the grid and under the header, in

@@ -25,7 +25,7 @@ use crate::ui::core::view::ViewPainter;
 #[derive(Default)]
 pub(crate) struct FrameKeep {
     pub(crate) panes: Vec<PaneInstanceCache>,
-    pub(crate) toolbar: crate::ui::components::toolbar_view::ToolbarSurface,
+    pub(crate) chrome: crate::frame_build::chrome::ChromeSurfaces,
 }
 
 /// What `build_instances` measured about itself.
@@ -184,7 +184,7 @@ pub(crate) fn build_frame(
         };
         paint_chrome(
             &mut painter, layout, views.len(), sidebar, focused_idx, ChromeState { hover, on },
-            overlay_ui_rects, &mut kept.toolbar,
+            overlay_ui_rects, &mut kept.chrome,
         );
     }
 

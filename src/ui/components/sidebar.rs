@@ -8,28 +8,20 @@
 //! colours `panel_palette`'s.
 
 use marspot_term::layout::Rect;
-use marspot_term::render::SidebarEntry;
 use marspot_term::session::SessionState;
 
-use crate::ui::components::chrome_hover::ChromeHover;
 use crate::ui::components::controls;
 use crate::ui::components::panel_palette as palette;
 use crate::ui::core::ViewPainter;
 use crate::ui::system::macos::icons::{self, Symbol};
 use crate::ui::theme::spec::chrome;
 
-pub struct Sidebar<'a> {
+pub struct Sidebar {
     /// The sidebar column, from under the window's header to the
     /// window's bottom.
     pub rect: Rect,
     /// From the column's top to the first row.
     pub top_pad: f64,
-    pub rows: &'a [SidebarEntry<'a>],
-    /// Each row's close button, as the layout placed it.
-    pub close_rects: &'a [Rect],
-    /// The row of the pane in use.
-    pub focused_idx: usize,
-    pub hover: Option<ChromeHover>,
 }
 
 /// The longest prefix of `s` that is at most `max_chars` characters.
@@ -40,7 +32,7 @@ pub(crate) fn clip_chars(s: &str, max_chars: usize) -> &str {
     }
 }
 
-impl Sidebar<'_> {
+impl Sidebar {
     pub fn row_rect(&self, i: usize) -> Rect {
         Rect {
             x: self.rect.x,
@@ -54,22 +46,6 @@ impl Sidebar<'_> {
     /// sidebar's edges.
     pub fn fill_rect(&self, i: usize) -> Rect {
         row_fill(self.row_rect(i))
-    }
-
-    pub fn paint(&self, p: &mut ViewPainter) {
-        // The last pane cannot be closed.
-        let can_close = self.rows.len() > 1;
-        for (i, row) in self.rows.iter().enumerate() {
-            let rect = self.row_rect(i);
-            let selected = i == self.focused_idx;
-            let hovered = self.hover.and_then(ChromeHover::row) == Some(i);
-            let close = self.close_rects.get(i);
-            let room = name_room(rect, close, p.cell_w);
-            paint_row(p, rect, clip_chars(row.label, room), row.state, selected, hovered);
-            if let Some(&close) = close.filter(|_| selected || hovered) {
-                paint_close(p, close, close_look(can_close, self.hover == Some(ChromeHover::Close(i))));
-            }
-        }
     }
 }
 
@@ -191,20 +167,13 @@ pub(crate) fn paint_add(p: &mut ViewPainter, add: Rect, sidebar_w: f64, full: bo
 mod tests {
     use super::*;
 
-    fn sidebar<'a>(rows: &'a [SidebarEntry<'a>]) -> Sidebar<'a> {
-        Sidebar {
-            rect: Rect { x: 0.0, y_top: 64.0, w: 200.0, h: 800.0 },
-            top_pad: 38.0,
-            rows,
-            close_rects: &[],
-            focused_idx: 0,
-            hover: None,
-        }
+    fn sidebar() -> Sidebar {
+        Sidebar { rect: Rect { x: 0.0, y_top: 64.0, w: 200.0, h: 800.0 }, top_pad: 38.0 }
     }
 
     #[test]
     fn sidebar_rows_step_by_the_row_height_under_the_top_pad() {
-        let sb = sidebar(&[]);
+        let sb = sidebar();
         assert_eq!(sb.row_rect(0).y_top, 64.0 + 38.0);
         assert_eq!(sb.row_rect(3).y_top - sb.row_rect(0).y_top, 3.0 * chrome::SIDEBAR_ROW_H);
         assert_eq!(sb.row_rect(2).w, 200.0);
@@ -212,7 +181,7 @@ mod tests {
 
     #[test]
     fn sidebar_row_fill_is_inset_from_both_edges() {
-        let sb = sidebar(&[]);
+        let sb = sidebar();
         let (row, fill) = (sb.row_rect(1), sb.fill_rect(1));
         assert_eq!(fill.x - row.x, chrome::SIDEBAR_ROW_INSET);
         assert_eq!(row.x + row.w - (fill.x + fill.w), chrome::SIDEBAR_ROW_INSET);
