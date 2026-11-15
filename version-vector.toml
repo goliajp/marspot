@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.486"  # the claude badge reads how young a pane is from its log's stated length
-core    = "0.12.525"  # the chrome's fingerprints are folded with the fast hash, not SipHash
+core    = "0.12.528"  # a node can have a spot, a column of rows is hit by arithmetic, and a pointer off a surface walks nothing
 session = "0.11.354"  # a read buffer whose pages are given back is read into only as far as it kept them, so keystrokes after a flood take nothing back

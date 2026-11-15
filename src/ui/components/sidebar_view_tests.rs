@@ -6,7 +6,6 @@ use crate::frame_alloc_tests::counted;
 use crate::layout::Layout;
 use crate::render::SidebarEntry;
 use marspot_term::session::SessionState;
-use crate::ui::components::chrome_hover::ChromeHover;
 use crate::ui::components::density_kit::at_scale;
 
 const NAMES: [&str; 9] = [
@@ -47,8 +46,9 @@ fn layout(stage: &Stage, (w, h): (f64, f64), scale: f64, n: usize) -> Layout {
 }
 
 /// A frame in which nothing on the sidebar changed paints nothing and
-/// takes nothing from the heap; one in which a row lights, or a pane is
-/// renamed, repaints without an allocation once the buffers have grown.
+/// takes nothing from the heap; one in which a row lights paints again
+/// and describes nothing, one in which a pane is renamed describes the
+/// sidebar again, and neither allocates once the buffers have grown.
 #[test]
 fn sidebar_surface_frame() {
     at_scale(1.0, || {
@@ -61,21 +61,32 @@ fn sidebar_surface_frame() {
         let cell_w = stage.font.cell_w as f32;
         let mut surface = SidebarSurface::default();
         let mut out: Frame = Default::default();
-        let rest = SidebarFrame { layout: &l, rows: &rows, focused_idx: 4, hover: None, cell_w };
-        let lit = SidebarFrame { hover: Some(ChromeHover::Close(2)), ..rest };
+        let (rows, renamed): (&[SidebarEntry], &[SidebarEntry]) = (&rows, &renamed);
+        let rest = SidebarFrame { layout: &l, rows: &rows, focused_idx: 4, quiet: false, cell_w };
         let other = SidebarFrame { rows: &renamed, ..rest };
-        for f in [&rest, &lit, &other, &rest, &lit, &other, &rest] {
-            stage.draw(window, &mut out, &mut |p| surface.frame(p, f));
+        let c = l.close_session_rects[2];
+        let (on, off) = ((c.x + c.w * 0.5, c.y_top + c.h * 0.5), (900.0, 600.0));
+        for (f, p) in [(&rest, off), (&rest, on), (&other, off), (&rest, off), (&rest, on), (&other, off), (&rest, off)] {
+            surface.kept.surface.pointer_move(p);
+            stage.draw(window, &mut out, &mut |pa| surface.frame(pa, f));
         }
         let warm = surface.kept.surface.counters();
         let (n, _) = counted(|| stage.draw(window, &mut out, &mut |p| surface.frame(p, &rest)));
         assert_eq!(surface.kept.surface.counters(), warm, "a frame with nothing new ran a stage");
         assert_eq!(n, 0, "a frame with nothing new allocated {n} times");
         assert!(out.1.len() >= 9, "the sidebar has to have been painted");
-        let (n, _) = counted(|| stage.draw(window, &mut out, &mut |p| surface.frame(p, &lit)));
+        let (n, _) = counted(|| {
+            surface.kept.surface.pointer_move(on);
+            stage.draw(window, &mut out, &mut |p| surface.frame(p, &rest))
+        });
         assert_eq!(n, 0, "a close button lighting allocated {n} times");
-        let (n, _) = counted(|| stage.draw(window, &mut out, &mut |p| surface.frame(p, &other)));
+        let c = surface.kept.surface.counters();
+        assert_eq!((c.build, c.layout, c.paint), (warm.build, warm.layout, warm.paint + 1), "a hover is a paint");
+        let (n, _) = counted(|| {
+            surface.kept.surface.pointer_move(off);
+            stage.draw(window, &mut out, &mut |p| surface.frame(p, &other))
+        });
         assert_eq!(n, 0, "a renamed pane allocated {n} times");
-        assert_eq!(surface.kept.surface.counters().build, warm.build + 2);
+        assert_eq!(surface.kept.surface.counters().build, warm.build + 1);
     });
 }

@@ -26,9 +26,14 @@ impl Action {
 /// not part of one.
 pub const NO_ITEM: u32 = u32::MAX;
 
-/// A widget, or one item of a group widget.
+/// The part of a widget that is its spot: see `At::spot`.
+pub const SPOT: u8 = 1;
+
+/// A widget, or one item of a group widget, and which part of it:
+/// `0` for the whole, `SPOT` for its spot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Target {
     pub id: WidgetId,
     pub item: u32,
+    pub part: u8,
 }

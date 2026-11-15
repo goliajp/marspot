@@ -35,12 +35,12 @@ const DANGERS: u32 = 50;
 
 /// What the hand-painted sheet shows under the pointer.
 const HOVERED: [Target; 6] = [
-    Target { id: CLOSE_ID, item: NO_ITEM },
-    Target { id: WidgetId(BUTTONS + 1), item: NO_ITEM },
-    Target { id: WidgetId(BUTTONS + 4), item: NO_ITEM },
-    Target { id: SEGMENTS, item: 0 },
-    Target { id: WidgetId(STEPS + 1), item: NO_ITEM },
-    Target { id: WidgetId(DANGERS + 1), item: NO_ITEM },
+    Target { id: CLOSE_ID, item: NO_ITEM, part: 0 },
+    Target { id: WidgetId(BUTTONS + 1), item: NO_ITEM, part: 0 },
+    Target { id: WidgetId(BUTTONS + 4), item: NO_ITEM, part: 0 },
+    Target { id: SEGMENTS, item: 0, part: 0 },
+    Target { id: WidgetId(STEPS + 1), item: NO_ITEM, part: 0 },
+    Target { id: WidgetId(DANGERS + 1), item: NO_ITEM, part: 0 },
 ];
 
 fn act(n: u32) -> Action {
@@ -186,9 +186,9 @@ impl PaintOut for ManyPointers<'_, '_, '_> {
     fn text_run(&mut self, x: f64, baseline: f64, text: &str, font: TextFont, ink: Ink) {
         self.out.text_run(x, baseline, text, font, ink)
     }
-    fn leaf(&mut self, tag: u32, data: [u32; 2], label: &str, rect: Rect, state: WidgetState) {
+    fn leaf(&mut self, tag: u32, data: [u32; 2], label: &str, rect: Rect, spot: Option<Rect>, state: WidgetState) {
         let hovered = state.hovered || (!state.disabled && self.at.contains(&rect));
-        self.out.leaf(tag, data, label, rect, WidgetState { hovered, ..state })
+        self.out.leaf(tag, data, label, rect, spot, WidgetState { hovered, ..state })
     }
     fn focus_ring(&mut self, rect: Rect, radius: f64) {
         self.out.focus_ring(rect, radius)
@@ -276,7 +276,7 @@ fn focused_by_tab(p: &mut ViewPainter<'_>) {
 /// The same, after the pointer pressed that button and let go.
 fn focused_by_press(p: &mut ViewPainter<'_>) {
     let (tree, layout) = laid_out(p, space::HEADING_TO_CARD);
-    let r = rect_of(&tree, &layout, Target { id: WidgetId(BUTTONS), item: NO_ITEM });
+    let r = rect_of(&tree, &layout, Target { id: WidgetId(BUTTONS), item: NO_ITEM, part: 0 });
     let at = (r.x + r.w * 0.5, r.y + r.h * 0.5);
     let mut state = Interaction::default();
     state.key(&tree, &layout, Key::Tab);

@@ -17,7 +17,7 @@ use super::density_kit::{capture, compare, Capture};
 use super::panel_snapshot_tests as panel;
 use crate::render_metal::{MetalRenderer, WindowRender};
 use crate::snapshot_kit::{in_language, in_theme};
-use crate::ui::components::chrome_hover::ChromeHover;
+use crate::ui::components::chrome_target::ChromeTarget;
 use crate::ui::theme::spec;
 use marspot_term::language::LangId;
 use marspot_term::layout::Rect;
@@ -160,7 +160,7 @@ fn a_window_moved_between_densities_draws_as_one_made_there() {
     let mut moved_to = |scale: f64| {
         capture(scale, || {
             renderer.rebuild_fonts_if_scale_changed();
-            chrome::window_on(&mut renderer, &mut wr, Some(ChromeHover::Row(3)));
+            chrome::window_on(&mut renderer, &mut wr, Some(ChromeTarget::Row(3)));
         })
         .expect("a frame")
     };

@@ -10,7 +10,6 @@ use crate::render::{SessionView, SidebarEntry};
 use crate::frame_build::color::rgba8_of_f32;
 use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance, UiRectInstance};
 use crate::ui::components::cc_usage_modal::CcUsageRender;
-use crate::ui::components::chrome_hover::ChromeHover;
 use crate::ui::components::panel_palette as palette;
 use crate::ui::theme::spec::chrome as chrome_spec;
 use crate::ui::components::context_menu_view::MenuRender;
@@ -68,7 +67,6 @@ pub(crate) fn build_instances(
     sidebar: &[SidebarEntry],
     focused_idx: usize,
     window_focused: bool,
-    chrome_hover: Option<ChromeHover>,
     process_panel: Option<&ProcessPanelRender>,
     cc_usage: Option<&CcUsageRender>,
     form_panel: Option<FormPanel<'_>>,
@@ -90,7 +88,7 @@ pub(crate) fn build_instances(
     overlay_ui_rects: &mut Vec<UiRectInstance>,
 ) -> BuildStats {
     build_frame(
-        layout, views, sidebar, focused_idx, window_focused, chrome_hover, process_panel, cc_usage,
+        layout, views, sidebar, focused_idx, window_focused, process_panel, cc_usage,
         form_panel, layout_modal_state, drop_preview, drag_source, context_menu_state, font, atlas,
         color_atlas, cells, glyphs, color_glyphs, dots, ui_rects, kept, overlay_cells,
         overlay_glyphs, overlay_ui_rects, true,
@@ -107,7 +105,6 @@ pub(crate) fn build_frame(
     sidebar: &[SidebarEntry],
     focused_idx: usize,
     window_focused: bool,
-    chrome_hover: Option<ChromeHover>,
     process_panel: Option<&ProcessPanelRender>,
     cc_usage: Option<&CcUsageRender>,
     form_panel: Option<FormPanel<'_>>,
@@ -174,9 +171,9 @@ pub(crate) fn build_frame(
         ];
         // The shortcuts panel has no button to light, and covers the
         // sidebar like the rest.
-        let panel_open =
+        let quiet =
             on[1..].contains(&true) || form_panel.is_some() || context_menu_state.is_some();
-        let hover = chrome_hover.filter(|h| !panel_open || h.on_toolbar());
+        let mono_w = font.cell_w;
         let mut painter = ViewPainter {
             cell_w, cell_h, ascent,
             atlas_w: atlas_w_f, atlas_h: atlas_h_f,
@@ -185,9 +182,9 @@ pub(crate) fn build_frame(
         };
         // after the panes' backgrounds, before the seams that cover
         // the ends of each strip's line
-        kept.chrome.titles.frame(&mut painter, &TitleStrips { layout, views, window_focused });
+        kept.chrome.titles.frame(&mut painter, &TitleStrips { layout, strips: &views, window_focused, cell_w: mono_w });
         paint_chrome(
-            &mut painter, layout, views.len(), sidebar, focused_idx, ChromeState { hover, on },
+            &mut painter, layout, views.len(), sidebar, focused_idx, ChromeState { quiet, on },
             overlay_ui_rects, &mut kept.chrome,
         );
     }

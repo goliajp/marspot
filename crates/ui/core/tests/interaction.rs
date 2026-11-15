@@ -57,11 +57,11 @@ fn form() -> (Tree, Layout) {
 }
 
 fn on(id: WidgetId) -> Option<Target> {
-    Some(Target { id, item: NO_ITEM })
+    Some(Target { id, item: NO_ITEM, part: 0 })
 }
 
 fn item(id: WidgetId, item: u32) -> Option<Target> {
-    Some(Target { id, item })
+    Some(Target { id, item, part: 0 })
 }
 
 #[test]
@@ -210,6 +210,18 @@ fn a_press_that_slides_off_before_release_emits_nothing() {
 
     // and a release with no press before it is not a click
     assert_eq!(s.pointer_up(&tree, &layout, (50.0, 15.0)), None);
+}
+
+#[test]
+fn a_cancelled_press_emits_nothing_and_forgets_the_press() {
+    let (tree, layout) = form();
+    let mut s = Interaction::default();
+    assert!(!s.pointer_cancel(), "nothing was held");
+    s.pointer_down(&tree, &layout, (50.0, 15.0));
+    let r = s.revision();
+    assert!(s.pointer_cancel());
+    assert_eq!((s.pressed, s.revision()), (None, r + 1));
+    assert_eq!(s.pointer_up(&tree, &layout, (50.0, 15.0)), None, "the release after it is no click");
 }
 
 #[test]
