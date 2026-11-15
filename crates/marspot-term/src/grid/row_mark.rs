@@ -10,7 +10,7 @@
 //! resets them, and anything that moves rows about either carries
 //! them along or gives them up for the full width.
 
-use super::{Cell, CellAttrs, Grid};
+use super::{Cell, CellAttrs, Grid, StoredCell};
 
 /// Upper bounds on where a row stops being interesting; never exact.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -79,7 +79,7 @@ impl Grid {
     /// One ring-index resolve for a run of any length.
     // as a call it cost seventeen instructions a run of text
     #[inline(always)]
-    pub fn row_and_mark_mut(&mut self, row: u16) -> (&mut [Cell], &mut RowMark) {
+    pub fn row_and_mark_mut(&mut self, row: u16) -> (&mut [StoredCell], &mut RowMark) {
         debug_assert!(row < self.rows);
         let pr = self.phys_row(row);
         let cols = self.cols as usize;

@@ -8,7 +8,7 @@
 
 use super::Handler;
 use super::wide_class::wide_at;
-use crate::grid::{Cell, CellAttrs};
+use crate::grid::{Cell, CellAttrs, StoredCell};
 use crate::parser::scan::printable_run_len;
 
 /// The fast-path class for `Handler::print`: codepoints that can
@@ -113,7 +113,7 @@ pub(super) fn fast_pict_width(ch: char) -> Option<u8> {
 // out of line: inside `feed` the loop competes for registers with
 // everything else the lane holds
 #[inline(never)]
-fn write_chars(cells: &mut [Cell], bytes: &[u8]) {
+fn write_chars(cells: &mut [StoredCell], bytes: &[u8]) {
     for (cell, &b) in cells.iter_mut().zip(bytes) {
         cell.ch = b as char;
     }
@@ -121,7 +121,7 @@ fn write_chars(cells: &mut [Cell], bytes: &[u8]) {
 
 /// One cell per byte, each written whole.
 #[inline(never)]
-fn write_cells(cells: &mut [Cell], bytes: &[u8], attrs: CellAttrs) {
+fn write_cells(cells: &mut [StoredCell], bytes: &[u8], attrs: CellAttrs) {
     for (cell, &b) in cells.iter_mut().zip(bytes) {
         *cell = Cell { ch: b as char, attrs };
     }
