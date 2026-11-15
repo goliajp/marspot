@@ -130,6 +130,11 @@ pub mod flag {
     /// `TextMeasure::centring` gives for it instead of the cap height,
     /// and a whole number of pixels from the top of its box.
     pub const BY_INK: u16 = 1 << 8;
+    /// A column of rows of one height, one under the next from its
+    /// top: a point is on the row its height says, which is found by
+    /// arithmetic instead of by looking at every row.  Each row is one
+    /// subtree of the same size.
+    pub const ROWS: u16 = 1 << 9;
 }
 
 /// What positions, sizes and decorates a node.
@@ -228,6 +233,18 @@ pub struct Node {
     /// as the preset with this tag.
     pub leaf_tag: u32,
     pub leaf_data: [u32; 2],
+    /// Nonzero: one more than the index of the node's spot in the
+    /// tree's list of them.
+    pub(crate) spot: u32,
+}
+
+/// A part of a widget that answers with an action of its own, such as
+/// the close mark at the end of a row: where it lies in the widget's
+/// box, from the box's top-left corner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spot {
+    pub rect: crate::geom::Rect,
+    pub action: crate::action::Action,
 }
 
 impl Node {
@@ -258,6 +275,7 @@ impl Node {
             float_at: (0.0, 0.0),
             leaf_tag: 0,
             leaf_data: [0, 0],
+            spot: 0,
         }
     }
 

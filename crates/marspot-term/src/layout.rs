@@ -225,6 +225,17 @@ pub struct Layout {
     /// this instead of a hard-coded constant so the row positions
     /// + chrome rects stay in lockstep.
     pub sidebar_top_pad_phys: f64,
+    /// Different for every layout made: by `build`, and again by
+    /// `with_chrome`.  The fields are only ever set there, so two
+    /// layouts with one generation are the same layout, and whoever
+    /// keeps something worked out from one can tell it is still good
+    /// by comparing one number.
+    pub generation: u64,
+}
+
+fn next_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Square icon-button side length (logical pt). Both chrome buttons
@@ -396,6 +407,7 @@ impl Layout {
             close_session_rects: Vec::new(),
             add_session_button_rect: Rect::ZERO,
             sidebar_top_pad_phys,
+            generation: next_generation(),
         }
     }
 
@@ -528,6 +540,7 @@ impl Layout {
             };
         }
 
+        self.generation = next_generation();
         self
     }
 

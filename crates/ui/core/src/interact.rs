@@ -77,7 +77,9 @@ impl Interaction {
     }
 
     fn touch(&mut self, changed: bool) -> bool {
-        self.revision += changed as u64;
+        if changed {
+            self.revision += 1;
+        }
         changed
     }
 
@@ -87,7 +89,10 @@ impl Interaction {
 
     /// True when the hovered widget changed.
     pub fn pointer_move(&mut self, tree: &Tree, layout: &Layout, p: (f64, f64)) -> bool {
-        let over = self.target_at(tree, layout, p).map(|(t, _)| t);
+        // off the whole surface the pointer is on nothing, and no walk
+        // is needed to say so
+        let on_surface = layout.bounds.contains((p.0 - self.offset.0, p.1 - self.offset.1));
+        let over = if on_surface { self.target_at(tree, layout, p).map(|(t, _)| t) } else { None };
         let changed = put(&mut self.hovered, over);
         self.touch(changed)
     }
@@ -207,7 +212,7 @@ impl Interaction {
             _ => landing_item(tree, next),
         };
         let Some(id) = n.widget else { return KeyResult::Ignored };
-        self.focus(tree, layout, Target { id, item });
+        self.focus(tree, layout, Target { id, item, part: 0 });
         KeyResult::Handled
     }
 
@@ -237,7 +242,7 @@ impl Interaction {
             return KeyResult::Handled;
         };
         let moved = item != at.item;
-        self.focus(tree, layout, Target { id: at.id, item });
+        self.focus(tree, layout, Target { id: at.id, item, part: 0 });
         if kind == GroupKind::Segmented && moved {
             KeyResult::Action(tree.nodes[node as usize].action)
         } else {

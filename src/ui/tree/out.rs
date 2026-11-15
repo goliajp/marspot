@@ -97,12 +97,12 @@ impl PaintOut for TreeOut<'_, '_, '_> {
         }
     }
 
-    fn leaf(&mut self, tag: u32, data: [u32; 2], label: &str, rect: Rect, state: WidgetState) {
+    fn leaf(&mut self, tag: u32, data: [u32; 2], label: &str, rect: Rect, spot: Option<Rect>, state: WidgetState) {
         if !self.shows(&rect) {
             return;
         }
         if tag < preset::CUSTOM {
-            preset::paint(self.p, tag, data, label, px_rect(rect), state);
+            preset::paint(self.p, tag, data, label, px_rect(rect), spot.map(px_rect), state);
         } else if let Some(custom) = self.custom.as_mut() {
             custom(self.p, tag, data);
         }

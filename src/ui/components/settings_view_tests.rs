@@ -147,12 +147,12 @@ fn the_keyboard_reaches_every_control_and_does_what_a_press_does() {
                 for _ in 0..options.len() {
                     surface.key(Key::Left);
                 }
-                assert_eq!(surface.interaction.focused, Some(Target { id: at.id, item: 0 }));
+                assert_eq!(surface.interaction.focused, Some(Target { id: at.id, item: 0, part: 0 }));
                 for seg in 1..options.len() {
                     let want = Action::new(CHOOSE, choice(index, seg));
                     assert_eq!(surface.key(Key::Right), KeyResult::Action(want), "{:?} segment {seg}", spec.row);
                     assert_eq!(surface.key(Key::Enter), KeyResult::Action(want));
-                    let here = Target { id: at.id, item: seg as u32 };
+                    let here = Target { id: at.id, item: seg as u32, part: 0 };
                     assert_eq!(press(surface, here), Some(want), "{:?} segment {seg}: a press", spec.row);
                     assert_eq!(chosen(want.arg), Some((spec.row, seg)));
                 }
