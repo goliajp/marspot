@@ -231,3 +231,28 @@ fn under_a_panel_the_sidebar_follows_the_pointer_and_lights_nothing() {
         assert_ne!(lit, draw(&mut s, &closed), "the control under the pointer did not light when the panel closed");
     });
 }
+
+/// A badge wider than its pane is clickable only inside its own pane:
+/// on the strip of the pane to its left, where nothing of it is drawn,
+/// a press is that pane's, not the plugin's of the pane on the right.
+#[test]
+fn a_badge_wider_than_its_pane_stops_at_its_panes_edge() {
+    at_scale(1.0, || {
+        let mut font = FontCache::build().expect("font");
+        let l = layout(&font, 2);
+        // no space, so the clickable prefix is the whole badge, and it
+        // is wider than any pane in the window
+        let wide: String = "P2-".chars().chain(std::iter::repeat_n('x', 400)).collect();
+        let badges = |i: usize| if i == 1 { wide.as_str() } else { "" };
+        let strips = BadgesOnly(2, badges);
+        let shape = ChromeShape { layout: &l, rows: 2, strips: &strips };
+        let mut c = ChromeSurfaces::default();
+        let (left, right) = (l.cells[0], l.cells[1]);
+        let reach = right.x + right.w - l.padding - wide.chars().count() as f64 * font.cell_w;
+        assert!(reach < left.x, "the badge has to reach past the pane on the left for this to show anything");
+        let y = left.y_top + 2.0;
+        assert_eq!(c.at(&mut font, &shape, (left.x + left.w - 5.0, y)), Some(ChromeTarget::Title(0)));
+        assert_eq!(c.at(&mut font, &shape, (left.x + 5.0, y)), Some(ChromeTarget::Title(0)));
+        assert_eq!(c.at(&mut font, &shape, (right.x + 5.0, y)), Some(ChromeTarget::Badge(1)));
+    });
+}

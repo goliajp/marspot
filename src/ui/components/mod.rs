@@ -39,7 +39,7 @@ mod title_strip_view_tests;
 #[cfg(test)]
 mod sidebar_view_tests;
 #[cfg(test)]
-mod chrome_hit_tests;
+mod chrome_hit_view_tests;
 pub mod table;
 pub mod layout_modal;
 pub mod layout_view;
