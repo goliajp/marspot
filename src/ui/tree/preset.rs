@@ -50,6 +50,22 @@ pub const MENU_FRAME: u32 = 11;
 pub const MENU_ROW: u32 = 12;
 /// The line between two groups of a context menu's rows.
 pub const MENU_DIVIDER: u32 = 13;
+/// A toolbar button.  `data[0]` is its place in the row, `data[1]` its
+/// state: see `toolbar_view`.
+pub const TOOLBAR_SLOT: u32 = 14;
+/// The version label.  `data` is its x and baseline, as `f32` bits.
+pub const VERSION: u32 = 15;
+/// The sidebar's add button.  See `sidebar_view`.
+pub const SIDEBAR_ADD: u32 = 16;
+/// A sidebar row; its label is the pane's name, cut to fit.
+pub const SIDEBAR_ROW: u32 = 17;
+/// A sidebar row's close button.
+pub const SIDEBAR_CLOSE: u32 = 18;
+/// A pane's title strip; its label is the title, then the badge after
+/// the mark `title_strip_view` puts between them.  See there for `data`.
+pub const TITLE_STRIP: u32 = 19;
+/// The title strip of the pane in use.
+pub const TITLE_STRIP_IN_USE: u32 = 20;
 
 /// A segmented control whose segment `n` emits
 /// `Action { id: action, arg: n }`.
@@ -192,6 +208,13 @@ pub(super) fn paint(p: &mut ViewPainter, tag: u32, data: [u32; 2], label: &str, 
         MENU_FRAME => crate::ui::components::context_menu_view::paint_frame(p, rect),
         MENU_ROW => crate::ui::components::context_menu_view::paint_row(p, rect, label, state),
         MENU_DIVIDER => crate::ui::components::context_menu_view::paint_divider(p, rect),
+        TOOLBAR_SLOT => crate::ui::components::toolbar_view::paint_button(p, rect, data),
+        VERSION => crate::ui::components::toolbar_view::paint_version(p, data),
+        SIDEBAR_ADD => crate::ui::components::sidebar_view::paint_add(p, rect, data),
+        SIDEBAR_ROW => crate::ui::components::sidebar_view::paint_row(p, rect, label, data),
+        SIDEBAR_CLOSE => crate::ui::components::sidebar_view::paint_close(p, rect, data),
+        TITLE_STRIP => crate::ui::components::title_strip_view::paint(p, rect, label, data, false),
+        TITLE_STRIP_IN_USE => crate::ui::components::title_strip_view::paint(p, rect, label, data, true),
         _ => unreachable!("a node asked for preset {tag}, which nothing here draws"),
     }
 }

@@ -118,7 +118,8 @@ fn a_terminal_frame_allocates_nothing_once_warm() {
         seq,
     };
     let (mut cells, mut glyphs, mut color_glyphs) = (Vec::new(), Vec::new(), Vec::new());
-    let (mut dots, mut ui_rects, mut caches) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut dots, mut ui_rects) = (Vec::new(), Vec::new());
+    let mut caches = crate::frame_build::frame::FrameKeep::default();
     let (mut ov_cells, mut ov_glyphs, mut ov_rects) = (Vec::new(), Vec::new(), Vec::new());
     let mut frame = |seq: u64| {
         // what the renderer does before every build

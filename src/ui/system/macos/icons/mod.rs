@@ -75,7 +75,7 @@ const SYMBOL_FONT_ID: FontId = BOX_DRAWING_FONT_ID - 1;
 /// Side of the square mask a symbol at `point_px` is drawn into.  The
 /// widest symbol in the table is 1.3 point sizes across; even, so the
 /// mask centres on a whole pixel in a button of an even size.
-fn mask_side(point_px: u32) -> u32 {
+pub(crate) fn mask_side(point_px: u32) -> u32 {
     2 * (point_px * 7).div_ceil(8)
 }
 
@@ -145,7 +145,16 @@ pub fn deliver(symbol: u16, point_px: u16, side: u16, mask: Vec<u8>) -> bool {
         s.masks.pop_front();
     }
     s.masks.push_back(((symbol, point_px), mask));
+    ARRIVALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     true
+}
+
+static ARRIVALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many masks the shell has sent so far: what a picture kept from
+/// an earlier frame, which may have left an icon out, is checked by.
+pub fn arrivals() -> u64 {
+    ARRIVALS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The largest point size a mask is drawn at on request.
@@ -249,7 +258,9 @@ mod tests {
         want(1, 20);
         want(1, 20);
         assert_eq!(take_wanted().iter().filter(|k| **k == (1, 20)).count(), 1, "asked for once");
+        let before = arrivals();
         assert!(deliver(1, 20, side, fits));
+        assert!(arrivals() > before, "a picture kept without the icon has to be told it arrived");
         want(1, 20);
         assert!(take_wanted().contains(&(1, 20)), "asked for again once the one asked for has arrived");
     }

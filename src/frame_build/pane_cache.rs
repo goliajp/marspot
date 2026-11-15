@@ -4,7 +4,7 @@
 //!
 //! A pane's instances are kept as three lists (cell rectangles, glyphs,
 //! colour glyphs), each laid out head, row 0, row 1, ..., tail: the head
-//! is the pane's background and title strip, the tail what is drawn
+//! is the pane's background, the tail what is drawn
 //! over the grid (selection, link underlines, cursor, IME composition).
 //! That is the order they were always drawn in, so a pane patched row by
 //! row holds exactly what laying it out from nothing would.
@@ -97,8 +97,6 @@ fn pane_fingerprint(view: &SessionView, window_focused: bool, frame_key: u64) ->
     view.seq.hash(&mut h);
     view.cursor_visible.hash(&mut h);
     view.focused.hash(&mut h);
-    view.title.hash(&mut h);
-    view.right_badge.hash(&mut h);
     view.ime_preedit.hash(&mut h);
     if let Some(sel) = view.selection {
         true.hash(&mut h);
@@ -400,7 +398,7 @@ fn lay_out(
             rows.clear();
             let mut o = PaneOut { font, atlas, color_atlas, cells, glyphs, color_glyphs };
             let lens = |o: &PaneOut| [o.cells.len() as u32, o.glyphs.len() as u32, o.color_glyphs.len() as u32];
-            paint_head(rect, view, window_focused, m, &mut o);
+            paint_head(rect, view, window_focused, &mut o);
             *head_end = lens(&o);
             for r in 0..n_rows as u16 {
                 paint_row(&g, &mut o, r, row_clusters);
@@ -423,7 +421,7 @@ fn lay_out(
         {
             let mut o = PaneOut { font, atlas, color_atlas, cells: p_cells, glyphs: p_glyphs, color_glyphs: p_color };
             let lens = |o: &PaneOut| [o.cells.len() as u32, o.glyphs.len() as u32, o.color_glyphs.len() as u32];
-            paint_head(rect, view, window_focused, m, &mut o);
+            paint_head(rect, view, window_focused, &mut o);
             pieces.push(Some(lens(&o)));
             for r in 0..n_rows {
                 if rows[r].key == keys[r] {

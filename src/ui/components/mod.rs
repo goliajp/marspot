@@ -32,11 +32,20 @@ pub mod grid_seams;
 pub mod grid;
 pub mod grid_item;
 pub mod sidebar;
+pub mod sidebar_view;
+pub mod title_strip_view;
+#[cfg(test)]
+mod title_strip_view_tests;
+#[cfg(test)]
+mod sidebar_view_tests;
 pub mod table;
 pub mod layout_modal;
 pub mod layout_view;
 pub mod context_menu;
 pub mod context_menu_view;
+pub mod toolbar_view;
+#[cfg(test)]
+mod toolbar_view_tests;
 #[cfg(test)]
 mod context_menu_view_tests;
 #[cfg(test)]

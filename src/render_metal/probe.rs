@@ -31,7 +31,7 @@ impl MetalRenderer {
             let (_, glyphs, ui_rects) = surface.kept.kept();
             (ui_rects.to_vec(), glyphs.to_vec())
         });
-        let shown = || wr.pane_caches.iter().filter(|p| p.shown);
+        let shown = || wr.kept.panes.iter().filter(|p| p.shown);
         let with_panes = |pane: fn(&crate::frame_build::pane_cache::PaneInstanceCache) -> &[GlyphInstance], rest: &[GlyphInstance]| {
             shown().flat_map(|p| pane(p).iter().copied()).chain(rest.iter().copied()).collect()
         };
