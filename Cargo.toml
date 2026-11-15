@@ -71,6 +71,15 @@ snapshot = []
 #     cargo build --features bench-pty --bin marspot
 bench-pty = ["marspot-term/bench-pty"]
 
+# Timestamps from a key press to the frame that shows it, written by
+# the shell and the core when `MARSPOT_LATENCY_TRACE` names a path, and
+# a script of key presses for a sandboxed app (`MARSPOT_KEY_SCRIPT`).
+# Without the feature neither exists in the binary: the key and frame
+# paths read no clock and test no flag for it.
+#
+#     cargo build --release --features latency-trace
+latency-trace = []
+
 # The updater also trusts a throwaway signing key in a sandbox — see
 # the feature of the same name in crates/marspot-term.  Only the
 # end-to-end update tests build with it.
@@ -100,9 +109,10 @@ objc2 = "0.6"
 # gnustep / unstable flags we don't want.
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
-# The completion handler of an AppKit call is an Objective-C block, and
-# this is the crate objc2 builds blocks with; it is in the tree already
-# through objc2-app-kit, so writing our own block layout is unreasonable.
+# AppKit's completion handlers and Metal's finished-frame callback are
+# Objective-C blocks, and this is the crate objc2 builds blocks with; it
+# is in the tree already through objc2-app-kit and objc2-metal, so
+# writing our own block layout is unreasonable.
 block2 = "0.6"
 objc2-quartz-core = "0.3"
 objc2-metal = "0.3"

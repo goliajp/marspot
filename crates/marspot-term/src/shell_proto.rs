@@ -557,6 +557,10 @@ pub enum MsgType {
     /// A frame says only this, and a second one is a no-op.  A session
     /// that understands it says so in its registry entry (`build`).
     SessionUpdate = 85,
+    // ── frame pacing (90..=92), see `frame_pace` ──
+    FramePace = 90,
+    FramePaceAck = 91,
+    FrameShown = 92,
     /// core → session: publish into the grid region named in the
     /// payload (UTF-8) from now on, and the side regions named after
     /// it.  Sent when the region the session publishes into is not one
@@ -581,6 +585,9 @@ pub enum MsgType {
     // ── error (200..=255) ──
     Error = 200,
 }
+
+mod frame_pace;
+pub use frame_pace::{decode_frame_shown, decode_surface_ready, encode_frame_shown, encode_surface_ready};
 
 impl MsgType {
     pub fn from_u32(v: u32) -> Option<Self> {
@@ -651,6 +658,9 @@ impl MsgType {
             83 => MsgType::PaneClipboardWrite,
             84 => MsgType::PaneTerminalFocus,
             85 => MsgType::SessionUpdate,
+            90 => MsgType::FramePace,
+            91 => MsgType::FramePaceAck,
+            92 => MsgType::FrameShown,
             86 => MsgType::IconMaskWanted,
             87 => MsgType::IconMask,
             120 => MsgType::SessionRepublish,
@@ -2530,23 +2540,6 @@ pub fn decode_selection_text(payload: &[u8]) -> io::Result<(u32, String)> {
     std::str::from_utf8(&payload[8..8 + len])
         .map(|s| (seq, s.to_string()))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
-}
-
-/// SurfaceReady payload: the IOSurface ID the core has just rendered
-/// to (u32 LE).  The shell uses this to switch its presenter from the
-/// previous (stretched) surface to the new (crisp) one.
-pub fn encode_surface_ready(surface_id: u32) -> Vec<u8> {
-    surface_id.to_le_bytes().to_vec()
-}
-
-pub fn decode_surface_ready(payload: &[u8]) -> io::Result<u32> {
-    if payload.len() < 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "surface_ready payload < 4 bytes",
-        ));
-    }
-    Ok(u32::from_le_bytes(payload[0..4].try_into().unwrap()))
 }
 
 /// CaretRect payload: `[present: u8]` then, when present == 1,

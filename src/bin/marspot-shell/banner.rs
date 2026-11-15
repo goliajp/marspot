@@ -7,32 +7,25 @@
 //! state where the crash budget tripped and we've stopped trying to
 //! restart.
 //!
-//! Architecturally this module owns the **CPU-side** rasterisation
-//! (CoreText into a CGBitmapContext) plus the upload to an
-//! `MTLTexture`.  The `ShellPresenter` owns the **GPU-side** blend
-//! pipeline that draws the resulting texture as an overlay.
+//! This module rasterises the sentence (CoreText into a
+//! CGBitmapContext) and hands back the image; the window shows it in
+//! a layer of its own above the terminal's.
 //!
 //! A banner is rasterised when it goes up and again when the theme
-//! changes under it — a few KB, and the upload is the only nontrivial
-//! cost.
+//! changes under it — a few KB.
 
 use core_foundation::attributed_string::CFMutableAttributedString;
 use core_foundation::base::{CFRange, TCFType};
 use core_foundation::string::CFString;
 use core_graphics::base::kCGImageAlphaPremultipliedLast;
-use core_graphics::color_space::CGColorSpace;
+use core_graphics::color_space::{kCGColorSpaceSRGB, CGColorSpace};
 use core_graphics::context::CGContext;
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+use core_graphics::image::CGImage;
 use core_text::font;
 use core_text::line::CTLine;
 use core_text::string_attributes::kCTFontAttributeName;
 use marspot::ui::strings::{t, Msg};
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_metal::{
-    MTLDevice, MTLPixelFormat, MTLRegion, MTLStorageMode, MTLTexture, MTLTextureDescriptor,
-    MTLTextureUsage,
-};
 
 /// Which banner is currently active.  The shell pushes the active
 /// kind into the presenter; `None` means "no banner, just composite
@@ -82,23 +75,18 @@ pub struct Shown {
     pub scale: f64,
 }
 
-/// CPU-rendered banner with a side car of dimensions, so the GPU
-/// side can position the quad without re-measuring.
-pub struct BannerTexture {
-    pub texture: Retained<ProtocolObject<dyn MTLTexture>>,
-    /// Physical pixel size — used to convert to NDC at present time.
+/// A rasterised banner and its size, so the layer that shows it can be
+/// sized without measuring again.
+pub struct BannerImage {
+    pub image: CGImage,
+    /// Physical pixels.
     pub width_px: u32,
     pub height_px: u32,
 }
 
-/// Rasterise `text` to an MTLTexture using CoreText.  The texture is
-/// premultiplied-alpha RGBA8.  Returns the texture + its pixel dims.
-pub fn rasterise(
-    device: &ProtocolObject<dyn MTLDevice>,
-    text: &str,
-    point_size: f64,
-    scale: f64,
-) -> Result<BannerTexture, String> {
+/// Rasterise `text` with CoreText: premultiplied-alpha RGBA8 in sRGB,
+/// the colour space the terminal's own frames are shown in.
+pub fn rasterise(text: &str, point_size: f64, scale: f64) -> Result<BannerImage, String> {
     // Build a CTFont — system default sans, regular weight.
     let ct_font = font::new_from_name("HelveticaNeue", point_size * scale).map_err(|()| {
         format!("CTFont new_from_name HelveticaNeue {} pt failed", point_size)
@@ -142,8 +130,10 @@ pub fn rasterise(
     }
 
     // CoreGraphics bitmap context to draw into.  RGBA premultiplied.
-    let color_space = CGColorSpace::create_device_rgb();
-    let mut ctx = CGContext::create_bitmap_context(
+    // SAFETY: a constant name CoreGraphics exports for the life of the process.
+    let color_space = CGColorSpace::create_with_name(unsafe { kCGColorSpaceSRGB })
+        .ok_or_else(|| "banner rasterise: no sRGB colour space".to_string())?;
+    let ctx = CGContext::create_bitmap_context(
         None,
         img_w as usize,
         img_h as usize,
@@ -170,50 +160,12 @@ pub fn rasterise(
     ctx.set_text_position(pad_x, pad_y + descent);
     line.draw(&ctx);
 
-    // Hand off to Metal.
-    let texture = upload_bitmap(device, &mut ctx, img_w, img_h)?;
-    Ok(BannerTexture {
-        texture,
+    let image = ctx.create_image().ok_or_else(|| "banner rasterise: no image from the bitmap".to_string())?;
+    Ok(BannerImage {
+        image,
         width_px: img_w,
         height_px: img_h,
     })
-}
-
-fn upload_bitmap(
-    device: &ProtocolObject<dyn MTLDevice>,
-    ctx: &mut CGContext,
-    width: u32,
-    height: u32,
-) -> Result<Retained<ProtocolObject<dyn MTLTexture>>, String> {
-    let descriptor = unsafe {
-        MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-            MTLPixelFormat::RGBA8Unorm,
-            width as usize,
-            height as usize,
-            false,
-        )
-    };
-    descriptor.setUsage(MTLTextureUsage::ShaderRead);
-    descriptor.setStorageMode(MTLStorageMode::Shared);
-    let tex = device
-        .newTextureWithDescriptor(&descriptor)
-        .ok_or_else(|| "newTextureWithDescriptor for banner returned nil".to_string())?;
-    let bytes = ctx.data();
-    let region = MTLRegion {
-        origin: objc2_metal::MTLOrigin { x: 0, y: 0, z: 0 },
-        size: objc2_metal::MTLSize {
-            width: width as usize,
-            height: height as usize,
-            depth: 1,
-        },
-    };
-    let bytes_per_row = (width * 4) as usize;
-    unsafe {
-        let nn = std::ptr::NonNull::new(bytes.as_ptr() as *mut std::ffi::c_void)
-            .ok_or_else(|| "banner bitmap data ptr was null".to_string())?;
-        tex.replaceRegion_mipmapLevel_withBytes_bytesPerRow(region, 0, nn, bytes_per_row);
-    }
-    Ok(tex)
 }
 
 #[cfg(test)]
@@ -235,12 +187,9 @@ mod tests {
     /// roundings can differ by.
     #[test]
     fn the_raster_is_twice_the_size_at_twice_the_scale() {
-        let Some(device) = objc2_metal::MTLCreateSystemDefaultDevice() else {
-            eprintln!("SKIPPED: no Metal device");
-            return;
-        };
-        let one = rasterise(&device, BannerKind::Recovering.text(), 14.0, 1.0).expect("a banner at scale 1");
-        let two = rasterise(&device, BannerKind::Recovering.text(), 14.0, 2.0).expect("a banner at scale 2");
+        let one = rasterise(BannerKind::Recovering.text(), 14.0, 1.0).expect("a banner at scale 1");
+        let two = rasterise(BannerKind::Recovering.text(), 14.0, 2.0).expect("a banner at scale 2");
+        assert_eq!((one.image.width(), one.image.height()), (one.width_px as usize, one.height_px as usize));
         assert!(one.width_px > 40 && one.height_px > 16, "{} x {}", one.width_px, one.height_px);
         assert!(two.width_px.abs_diff(one.width_px * 2) <= 2, "{} against {}", two.width_px, one.width_px);
         assert!(two.height_px.abs_diff(one.height_px * 2) <= 2, "{} against {}", two.height_px, one.height_px);

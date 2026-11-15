@@ -26,6 +26,9 @@
 #                           the shell that stays; IDLE_RESIDENT_BUDGET is
 #                           its wake-ups per second, and
 #                           IDLE_RESIDENT_FOOTPRINT_KIB its footprint
+#   IDLE_WINDOW_STATE       hidden or minimised: put the window out of
+#                           sight three seconds after its first frame
+#                           (the shell's own seam; a script cannot)
 #   IDLE_STACKS             sample L1, L2 and one L3 for this many seconds
 #                           and print where each thread sits
 
@@ -118,6 +121,7 @@ PY
 
 : > "$RUNLOG"
 env SHELL="$IDLE_SHELL" MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
+  ${IDLE_WINDOW_STATE:+MARSPOT_DEV_WINDOW_STATE="$IDLE_WINDOW_STATE"} \
   nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
@@ -129,11 +133,15 @@ for (( i = 0; i < 600; i++ )); do
   sleep 0.1
 done
 (( $(shells) >= N )) || fail "only $(shells) of $N panes have a shell after 60 s"
+if [[ -n ${IDLE_WINDOW_STATE:-} ]]; then
+  for (( i = 0; i < 200; i++ )); do grep -q $'\tDEV_WINDOW_STATE\t' "$APPLOG" && break; sleep 0.1; done
+  grep -q $'\tDEV_WINDOW_STATE\t' "$APPLOG" || fail "the window was not put out of sight ($IDLE_WINDOW_STATE)"
+fi
 echo "==> $N panes up ($(dev_session_pids | wc -l | tr -d ' ') L3), settling ${SETTLE}s"
 sleep "$SETTLE"
 
 if [[ -n ${IDLE_READINGS:-} ]]; then
-  "$ROOT/bin/_idle_wakeups.py" --label "marspot-dev $N panes" --window "$WINDOW" \
+  "$ROOT/bin/_idle_wakeups.py" --label "marspot-dev $N panes${IDLE_WINDOW_STATE:+, window $IDLE_WINDOW_STATE}" --window "$WINDOW" \
     --readings "$IDLE_READINGS" ${IDLE_WAKEUP_BUDGET:+--budget "$IDLE_WAKEUP_BUDGET"} \
     --pattern "$ROOT/target/(debug|release)/marspot(-shell|-core|-session)?( |\$)"
   rc=$?
