@@ -1772,8 +1772,13 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
             }
         }
         let id = session.id();
-        let SessionImpl::Local(local) = session;
         let do_execv = execv_verdict == Some(true);
+        if do_execv {
+            // the image that takes over may be one from before eight-byte
+            // frames: it attaches to the region as it finds it
+            frames.reader_gone(&session);
+        }
+        let SessionImpl::Local(local) = session;
         if do_execv {
             match _listener.take() { Some(listener_owned) => {
                 lx_event!(
