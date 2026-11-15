@@ -49,7 +49,13 @@ check_core_unlisted() {
     else ok "the core $c has no LaunchServices record"; fi
   done
 }
-one() { state "$1"; check_one_record; check_core_unlisted; }
+# and the icons it asked for were drawn for it, by a drawer that has
+# exited since
+check_icons_drawn() {
+  if (( $(count SHELL_ICONS_DRAWN) > 0 )); then ok "a drawer drew the core's icons: $(grep $'\tSHELL_ICONS_DRAWN\t' "$APPLOG" | tail -1 | grep -oE 'drawn=[0-9]+')"
+  else bad "no drawer drew the core's icons"; fi
+}
+one() { state "$1"; check_one_record; check_core_unlisted; check_icons_drawn; }
 answers() { local i; for (( i = 0; i < 150; i++ )); do L1="$(dev_shell_pid)"; [[ -n $L1 ]] && "$SHELL_BIN" --panes >/dev/null 2>&1 && return 0; sleep 0.2; done; return 1; }
 
 # The record of who answers, rewritten in place: what a session starts
