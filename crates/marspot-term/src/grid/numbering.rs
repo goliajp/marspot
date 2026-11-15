@@ -232,12 +232,17 @@ impl Grid {
     /// numbers even after a sweep.
     #[cold]
     fn go_positional(&mut self) {
-        let values: Vec<PackedStyle> = self.cells.iter().map(|c| self.styles.get(c.style_id())).collect();
-        self.styles.make_positional(self.cells.len());
-        for (idx, s) in values.into_iter().enumerate() {
-            let id = self.styles.set_at(idx, s);
-            self.cells[idx] = self.cells[idx].with_style(id);
+        // one pass: each cell's value goes to its own slot as the cell
+        // takes the slot's number
+        let mut values = vec![PackedStyle::DEFAULT; self.cells.len() + 1];
+        for (idx, c) in self.cells.iter_mut().enumerate() {
+            let id = c.style_id();
+            if id != 0 {
+                values[idx + 1] = self.styles.get(id);
+                *c = c.with_style(idx as u32 + 1);
+            }
         }
+        self.styles.make_positional(values);
     }
 
     /// Go back to the shared way if the cells now use no more than a

@@ -48,7 +48,11 @@ fn every_cell_its_own_colour(cols: u16, rows: u16) {
 
 #[test]
 fn a_screen_of_distinct_colours_numbers_by_position_and_comes_back() {
-    every_cell_its_own_colour(122, 39);
+    if cfg!(miri) {
+        every_cell_its_own_colour(12, 6);
+    } else {
+        every_cell_its_own_colour(122, 39);
+    }
 }
 
 #[test]
@@ -94,8 +98,8 @@ fn sweeps_survive_rows_moving_under_them() {
         b"\x1b[5;50r", b"\x1b[r", b"\x1b[3S", b"\x1b[2T", b"\x1b[4L", b"\x1b[3M", b"\x1b[5@", b"\x1b[7P", b"\x1b[K",
         b"\x1b[1J",
     ];
-    let mut t = Terminal::new(200, 60);
-    let steps = if cfg!(miri) { 30 } else { 6000 };
+    let mut t = if cfg!(miri) { Terminal::new(40, 12) } else { Terminal::new(200, 60) };
+    let steps = if cfg!(miri) { 20 } else { 6000 };
     for step in 0..steps {
         let mut chunk = Vec::new();
         for _ in 0..(next(&mut s) % 6) {
