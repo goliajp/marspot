@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.490"  # a core reads frames of eight-byte cells, and tells each session it does
-core    = "0.12.538"  # a session writes eight-byte frames to a core that reads them, and twenty-byte ones the moment it goes
-session = "0.11.366"  # a session writes eight-byte frames to a core that reads them, and twenty-byte ones the moment it goes
+core    = "0.12.539"  # a grid turns to numbering by position in one pass
+session = "0.11.367"  # a grid turns to numbering by position in one pass

@@ -485,14 +485,15 @@ impl StyleTable {
         self.reset();
     }
 
-    /// Number positionally: one slot per cell, every one the default.
-    pub fn make_positional(&mut self, cells: usize) {
-        self.styles.clear();
-        self.styles.resize(cells + 1, PackedStyle::DEFAULT);
+    /// Number positionally from now on, `values` holding slot `i + 1`
+    /// for cell `i` (slot 0 the default).
+    pub fn make_positional(&mut self, values: Vec<PackedStyle>) {
+        self.styles = values;
         self.index = Vec::new();
         self.marks = Vec::new();
         self.free = 0;
         self.marking = false;
+        self.step_due = false;
         self.positional = true;
         self.recent = [(PackedStyle::DEFAULT, 0); RECENT];
         self.generation += 1;
@@ -548,7 +549,8 @@ mod tests {
         let mut s = 0x1234_5678_9ABC_DEF1u64;
         assert_eq!(PackedStyle::pack(&CellAttrs::default()), PackedStyle::DEFAULT);
         let mut seen: HashMap<PackedStyle, CellAttrs> = HashMap::new();
-        for _ in 0..200_000 {
+        // an interpreter runs this a thousand times slower
+        for _ in 0..if cfg!(miri) { 300 } else { 200_000 } {
             let a = attrs_from(next(&mut s));
             let p = PackedStyle::pack(&a);
             assert_eq!(p.unpack(), a);
@@ -588,10 +590,11 @@ mod tests {
         let mut s = 0xDEAD_BEEF_0BAD_F00Du64;
         let mut t = StyleTable::new(1 << 20);
         let mut model: HashMap<PackedStyle, u32> = HashMap::new();
-        for round in 0..200 {
+        let (rounds, writes) = if cfg!(miri) { (6, 300) } else { (200, 2000) };
+        for round in 0..rounds {
             let palette = 1 + next(&mut s) % 600;
             let mut held = Vec::new();
-            for _ in 0..2000 {
+            for _ in 0..writes {
                 let a = attrs_from(next(&mut s) % palette * 0x9E37_79B9 + round);
                 let p = PackedStyle::pack(&a);
                 let id = t.intern(p).expect("room");
@@ -642,7 +645,8 @@ mod tests {
     /// and index within eight bytes a cell.
     #[test]
     fn the_shared_way_stays_within_eight_bytes_a_cell() {
-        for cells in [4usize, 100, 4758, 1 << 15, 262_144] {
+        let sizes: &[usize] = if cfg!(miri) { &[4, 100] } else { &[4, 100, 4758, 1 << 15, 262_144] };
+        for &cells in sizes {
             let mut t = StyleTable::new(cells);
             let mut n = 0u64;
             while t.intern(PackedStyle((n + 1) << 8)).is_some() {
