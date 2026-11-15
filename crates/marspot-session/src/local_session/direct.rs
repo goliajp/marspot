@@ -144,9 +144,20 @@ mod tests {
     const LONG: Duration = Duration::from_secs(60);
     const PAD: &str = "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
-    /// `LINES` numbered lines of 108 characters, thirteen megabytes in all.
+    /// `LINES` numbered lines of 108 characters, thirteen megabytes in
+    /// all, written out by `cat`.  Not by `seq`: it formats line by line,
+    /// and on a machine running other tests it wrote slower than the
+    /// reader read, so no chunk ever came full and the output was never
+    /// a flood at all.
     fn flood() -> String {
-        format!("seq -f '%07.0f {PAD}' 0 {}", LINES - 1)
+        static FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let path = FILE.get_or_init(|| {
+            let path = std::env::temp_dir().join(format!("marspot-direct-flood-{}", std::process::id()));
+            std::fs::write(&path, (0..LINES).flat_map(|i| format!("{i:07} {PAD}\n").into_bytes()).collect::<Vec<u8>>())
+                .expect("write the flood");
+            path
+        });
+        format!("cat '{}'", path.display())
     }
 
     /// What the pty gives for [`flood`].
