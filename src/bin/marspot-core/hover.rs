@@ -62,7 +62,7 @@ impl CoreApp {
     /// its open panel, its context menu, in that order.
     pub(super) fn clear_hover(&mut self, wi: usize) -> [bool; 3] {
         let w = &mut win!(self, wi);
-        let chrome = w.hover_chrome_btn.take().is_some();
+        let chrome = w.render.chrome_pointer_leave();
         let mut panel = w.settings_surface.borrow_mut().kept.surface.pointer_leave();
         panel |= w.layout_surface.borrow_mut().kept.surface.pointer_leave();
         panel |= w.shortcuts_surface.borrow_mut().kept.surface.pointer_leave();
@@ -130,12 +130,15 @@ mod tests {
         let sandbox = sandbox_state_dir();
         let mut app = app(&sandbox);
         let (x, y) = centre(app.windows[0].layout.settings_button_rect);
-        app.mouse_moved(0, x, y);
-        assert!(matches!(app.windows[0].hover_chrome_btn, Some(ChromeHover::Toolbar(_))));
         app.windows[0].needs_render = false;
+        app.mouse_moved(0, x, y);
+        assert!(app.windows[0].needs_render, "the lit button is owed a frame");
+        app.windows[0].needs_render = false;
+        app.mouse_moved(0, x + 1.0, y);
+        assert!(!app.windows[0].needs_render, "the same button under the pointer is owed nothing");
         app.mouse_moved(0, OUTSIDE.0, OUTSIDE.1);
-        assert_eq!(app.windows[0].hover_chrome_btn, None);
         assert!(app.windows[0].needs_render, "the unlit button is owed a frame");
+        assert!(!app.windows[0].render.chrome_pointer_leave(), "nothing was left lit");
         // Just past the far corner is outside too; the corner pixel is not.
         let (w, h) = (app.windows[0].w_phys, app.windows[0].h_phys);
         assert!(app.pointer_left(0, w, h - 1.0) && app.pointer_left(0, w - 1.0, h));

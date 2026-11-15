@@ -184,7 +184,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,

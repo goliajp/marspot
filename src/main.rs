@@ -6,7 +6,7 @@ use marspot::commands::{hint, Command};
 use marspot::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers as MarspotModifiers};
 use marspot::layout::Layout;
 use marspot::render::{SessionView, SidebarEntry};
-use marspot::render_metal::{make_target_texture, MetalRenderer, WindowRender};
+use marspot::render_metal::{make_target_texture, ChromeShape, MetalRenderer, WindowRender};
 use marspot::session::SessionState;
 use marspot::terminal::Terminal;
 use marspot::tmux;
@@ -18,6 +18,8 @@ use marspot::ui::{
 };
 use marspot::ui::components::context_menu_view::{MenuRender, MenuSurface};
 use marspot::ui::components::{ContextMenuHit, MenuItem};
+use marspot::ui::components::chrome_target::ChromeTarget;
+use marspot::ui::components::title_strip_view::BadgesOnly;
 
 /// F3+9 — which region of the window the user right-clicked.  Used
 /// to pick the menu's items.  Stored on `ContextMenuState` so the
@@ -124,6 +126,7 @@ const INITIAL_ROWS: u16 = 12;
 use marspot::HEADER_PT;
 
 mod bench_chrome;
+mod bench_chrome_change;
 
 // Sidebar row geometry now lives on `Layout` itself
 // (`Layout::sidebar_top_pad_phys` + `layout::SIDEBAR_ROW_H`),
@@ -548,86 +551,20 @@ impl MarspotApp for Marspot {
                 }
             }
         }
-        // Layout-button + picker-overlay + close-[×] dispatch: a top-
-        // level intercept that fires before any cell/sidebar handling.
-        // Done in a tight borrow scope so the immutable borrow on
-        // `self.layout` ends before we mutate `self`.
-        let (
-            layout_btn_hit,
-            sidebar_btn_hit,
-            close_session_hit,
-        ) = {
-            let Some(layout) = &self.layout else { return };
-            (
-                layout.hit_test_layout_button(x_phys, y_phys),
-                layout.hit_test_sidebar_button(x_phys, y_phys),
-                layout.hit_test_close_session(x_phys, y_phys),
-            )
-        };
-        // Sidebar toggle: highest-priority chrome action so a click
-        // on the chip never falls through to the cell underneath.
-        // Mirrors the Cmd-B keyboard path.
-        if sidebar_btn_hit {
-            self.sidebar_collapsed = !self.sidebar_collapsed;
-            self.rebuild_layout(ctx);
-            ctx.request_redraw();
+        // The chrome's buttons act when they are let go on (`mouse_up`);
+        // a sidebar row and a title strip act on the press, below.
+        let on = self.press_chrome(x_phys, y_phys);
+        if on.is_some_and(ChromeTarget::acts_on_release) {
             return;
         }
-        // The layout panel is the windowed front-end's; here the
-        // button only keeps the press off the pane under it.
-        if layout_btn_hit {
-            return;
-        }
-
-        // Sidebar close-[×] click: terminate `sessions[idx]`, but
-        // refuse to close the last remaining session (marspot without a
-        // session is a confusing dead-end UI; the user can spawn
-        // again first via the [+] button).
-        if let Some(idx) = close_session_hit {
-            if self.panes.len() > 1 && idx < self.panes.len() {
-                self.close_session(idx);
-                self.rebuild_layout(ctx);
-                ctx.request_redraw();
-            }
-            return;
-        }
-
-        // Sidebar [+] add-session click: spawn a new session up to
-        // the SESSION_COUNT_HARD_CAP of 9.  Reuses the same Session
-        // spawn path as startup.
-        let add_session_hit = self
-            .layout
-            .as_ref()
-            .map(|l| l.hit_test_add_session_button(x_phys, y_phys))
-            .unwrap_or(false);
-        if add_session_hit {
-            if self.panes.len() < SESSION_COUNT_HARD_CAP {
-                self.spawn_session();
-                self.rebuild_layout(ctx);
-                ctx.request_redraw();
-            }
-            return;
-        }
-
         let Some(layout) = &self.layout else { return };
-        // Sidebar row geometry now lives on Layout (so render*.rs
-        // and hit-tests stay in lockstep).  Previous code computed
-        // `SIDEBAR_TOP_PAD_PT * scale` (= 80 phys at 2x) even though
-        // the renderer drew row 0 at top_inset + 14 phys — clicks
-        // were misaligned with what was visually rendered.  Reading
-        // from `layout.sidebar_top_pad_phys` (set by Layout::build
-        // to reserve the [+] header band) fixes that.
-        let row_phys = marspot::layout::sidebar_row_h();
-        let top_pad_phys = layout.top_inset + layout.sidebar_top_pad_phys;
+        let sidebar_hit = on.and_then(ChromeTarget::row);
 
         // In tmux mode, sidebar rows map to tmux windows; a click
         // sends `select-window` to tmux instead of changing
         // focused_idx.
         if self.tmux.is_some() {
-            let n_windows = self.tmux.as_ref().unwrap().windows.len();
-            if let Some(row) = layout.hit_test_sidebar_row(
-                x_phys, y_phys, top_pad_phys, row_phys, n_windows,
-            ) {
+            if let Some(row) = sidebar_hit {
                 let target = self
                     .tmux
                     .as_ref()
@@ -646,14 +583,10 @@ impl MarspotApp for Marspot {
 
         // Resolve all hit-tests up front so the immutable borrow on
         // `layout` is dropped before we mutate self below.
-        let title_hit = layout.hit_test_cell_title(x_phys, y_phys);
-        let sidebar_hit = layout.hit_test_sidebar_row(
-            x_phys,
-            y_phys,
-            top_pad_phys,
-            row_phys,
-            self.panes.len(),
-        );
+        let title_hit = match on {
+            Some(ChromeTarget::Title(i)) => Some(i),
+            _ => None,
+        };
         let cell_hit = layout.hit_test(x_phys, y_phys);
         let cell_pos_hit = self
             .renderer
@@ -832,7 +765,10 @@ impl MarspotApp for Marspot {
         ctx.request_redraw();
     }
 
-    fn mouse_up(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64, _drop_window_id: u32, _dx: f64, _dy: f64) {
+    fn mouse_up(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64, _drop_window_id: u32, _dx: f64, _dy: f64) {
+        if self.release_chrome(ctx, x_phys, y_phys) {
+            return;
+        }
         // A click without movement leaves anchor == focus → treat
         // as "no selection" so a stray single-click doesn't ghost
         // a single-cell highlight.
@@ -1027,7 +963,58 @@ impl Marspot {
     /// `(x_phys, y_phys)` falls into.  The mapping is exclusive: a
     /// point is in exactly one region.  Used by `mouse_right_down`
     /// to pick the menu's items.
-    fn resolve_context_region(&self, x_phys: f64, y_phys: f64) -> ContextRegion {
+    /// Run `f` on the chrome with the shape the next frame draws: a
+    /// sidebar row per pane (per tmux window in tmux mode), a strip per
+    /// pane with a cell, and no badges.  `None` before the first layout.
+    fn with_chrome<T>(
+        &mut self,
+        f: impl FnOnce(&mut WindowRender, &mut marspot::font_cache::FontCache, &ChromeShape<'_>) -> T,
+    ) -> Option<T> {
+        let (layout, renderer) = (self.layout.as_ref()?, self.renderer.as_mut()?);
+        let rows = self.tmux.as_ref().map_or(self.panes.len(), |t| t.windows.len());
+        let strips = BadgesOnly(self.panes.len().min(layout.cells.len()), |_| "");
+        let shape = ChromeShape { layout, rows, strips: &strips };
+        Some(f(&mut self.window_render, renderer.font_mut(), &shape))
+    }
+
+    fn chrome_at(&mut self, x: f64, y: f64) -> Option<ChromeTarget> {
+        self.with_chrome(|r, font, shape| r.chrome_at(font, shape, (x, y))).flatten()
+    }
+
+    fn press_chrome(&mut self, x: f64, y: f64) -> Option<ChromeTarget> {
+        self.with_chrome(|r, font, shape| r.chrome_press(font, shape, (x, y))).flatten()
+    }
+
+    /// The release that ends a press at `(x, y)`: the button pressed
+    /// acts if it is let go on.  True when one did.
+    fn release_chrome(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64) -> bool {
+        let released = self.with_chrome(|r, font, shape| r.chrome_release(font, shape, Some((x, y))));
+        match released.flatten() {
+            // The sidebar toggle mirrors the Cmd-B keyboard path.
+            Some(ChromeTarget::Toolbar(0)) => self.sidebar_collapsed = !self.sidebar_collapsed,
+            // The panels are the windowed front-end's; here a button
+            // only keeps the press off what is under it.
+            Some(ChromeTarget::Toolbar(_)) | Some(ChromeTarget::Badge(_)) => return true,
+            // The last session is not closed: a window with none is a
+            // dead end, and the add button is there to make one first.
+            Some(ChromeTarget::Close(idx)) => {
+                if self.panes.len() > 1 && idx < self.panes.len() {
+                    self.close_session(idx);
+                }
+            }
+            Some(ChromeTarget::Add) => {
+                if self.panes.len() < SESSION_COUNT_HARD_CAP {
+                    self.spawn_session();
+                }
+            }
+            Some(ChromeTarget::Row(_)) | Some(ChromeTarget::Title(_)) | None => return false,
+        }
+        self.rebuild_layout(ctx);
+        ctx.request_redraw();
+        true
+    }
+
+    fn resolve_context_region(&mut self, x_phys: f64, y_phys: f64) -> ContextRegion {
         let Some(layout) = &self.layout else {
             // Headless / mid-resize — fall back to a pane on the
             // focused index so the menu still works.
@@ -1036,15 +1023,12 @@ impl Marspot {
         // Sidebar row check first — sidebar overlaps the same y-band
         // as panes in the title-strip area, and we want sidebar
         // priority.
-        let row_phys = marspot_term::layout::sidebar_row_h();
-        let top_pad_phys = layout.top_inset + layout.sidebar_top_pad_phys;
-        if let Some(idx) = layout.hit_test_sidebar_row(
-            x_phys, y_phys, row_phys, top_pad_phys, self.panes.len(),
-        ) {
+        let cell = layout.hit_test(x_phys, y_phys);
+        if let Some(idx) = self.chrome_at(x_phys, y_phys).and_then(ChromeTarget::row) {
             return ContextRegion::SidebarSlot(idx);
         }
         // Cell area → pane idx.
-        if let Some(idx) = layout.hit_test(x_phys, y_phys) {
+        if let Some(idx) = cell {
             return ContextRegion::Pane(idx);
         }
         // Anywhere in the title strip band (above the cell grid,
@@ -2311,6 +2295,7 @@ fn run_bench(spec: &str) {
         // CGImage renderer was removed, Metal is the only live path.
         "render" | "metal-render" => bench_metal_render(arg),
         "chrome-render" => bench_chrome::run(arg),
+        "chrome-change" => bench_chrome_change::run(arg),
         "scroll" => bench_scroll(arg, /* cold */ false),
         "scroll-cold" => bench_scroll(arg, /* cold */ true),
         "scrollaccess" => bench_scrollaccess(arg),

@@ -12,7 +12,7 @@ use super::chrome_snapshot_tests as chrome;
 use super::density_kit::{capture, Capture, Kind};
 use super::panel_snapshot_tests as panel;
 use crate::render_metal::{MetalRenderer, WindowRender};
-use crate::ui::components::chrome_hover::ChromeHover;
+use crate::ui::components::chrome_target::ChromeTarget;
 use crate::ui::components::controls::StepperPart;
 use crate::ui::components::{layout_modal, process_panel};
 use crate::ui::components::ContextMenuHit;
@@ -45,22 +45,22 @@ fn renderer() -> Option<(MetalRenderer, WindowRender)> {
 fn the_windows_controls_are_hit_where_they_are_drawn() {
     for scale in SCALES {
         let Some((mut r, mut wr)) = renderer() else { return };
-        let mut frame = |hover| capture(scale, || chrome::window_on(&mut r, &mut wr, hover)).expect("a frame");
-        let rest = frame(None);
-        let layout = rest.layout.as_ref().expect("the window's layout");
+        let mut frame =
+            |wr: &mut WindowRender, hover| capture(scale, || chrome::window_on(&mut r, wr, hover)).expect("a frame");
+        let rest = frame(&mut wr, None);
         // every toolbar button the window shows, the add button, a row
         // not in use and its close mark, and the close mark of the row
         // in use
         let on = [
-            ChromeHover::Toolbar(0), ChromeHover::Toolbar(1), ChromeHover::Toolbar(2), ChromeHover::Toolbar(3),
-            ChromeHover::Toolbar(4), ChromeHover::Add, ChromeHover::Row(0), ChromeHover::Row(3),
-            ChromeHover::Close(0), ChromeHover::Close(1), ChromeHover::Close(3),
+            ChromeTarget::Toolbar(0), ChromeTarget::Toolbar(1), ChromeTarget::Toolbar(2), ChromeTarget::Toolbar(3),
+            ChromeTarget::Toolbar(4), ChromeTarget::Add, ChromeTarget::Row(0), ChromeTarget::Row(3),
+            ChromeTarget::Close(0), ChromeTarget::Close(1), ChromeTarget::Close(3),
         ];
         for hover in on {
-            let (x, y) = lit_centre(&rest, &frame(Some(hover)))
+            let (x, y) = lit_centre(&rest, &frame(&mut wr, Some(hover)))
                 .unwrap_or_else(|| panic!("scale {scale}: nothing is drawn for the pointer on {hover:?}"));
             assert_eq!(
-                super::density_kit::at_scale(scale, || ChromeHover::at(layout, 4, x, y)), Some(hover),
+                wr.chrome_hit_painted((x, y)), Some(hover),
                 "scale {scale}: {hover:?} is drawn around ({x:.1}, {y:.1}) and a click there lands elsewhere",
             );
         }
@@ -72,7 +72,7 @@ fn the_windows_controls_are_hit_where_they_are_drawn() {
             };
             let glyph = rest.elems.iter().find(inside).unwrap_or_else(|| panic!("scale {scale}: no name is drawn in {name}"));
             let (x, y) = ((glyph.edges[0] + glyph.edges[2]) * 0.5, (glyph.edges[1] + glyph.edges[3]) * 0.5);
-            assert_eq!(layout.hit_test_cell_title(x, y), Some(i), "scale {scale}: the name in {name} is not on its strip");
+            assert_eq!(wr.chrome_hit_painted((x, y)), Some(ChromeTarget::Title(i)), "scale {scale}: the name in {name} is not on its strip");
         }
     }
 }

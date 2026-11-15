@@ -10,10 +10,13 @@
 use marspot::layout::Layout;
 use marspot::render::{SessionView, SidebarEntry};
 use marspot::render_metal::{make_target_texture, MetalRenderer, WindowRender};
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::MTLTexture;
 use marspot::session::SessionState;
 use marspot::terminal::Terminal;
 
-const NAMES: [(&str, &str); 9] = [
+pub(crate) const NAMES: [(&str, &str); 9] = [
     ("smix", "P1 3f9c2a1e"),
     ("devops", ""),
     ("insight-mono", "P2 77d0e4b2"),
@@ -30,65 +33,10 @@ pub fn run(arg: &str) {
         eprintln!("bench: chrome-render needs an integer iteration count");
         std::process::exit(2);
     });
-    marspot::ui::set_chrome_scale(1.0);
-    let mut renderer = MetalRenderer::new_headless().expect("headless metal renderer");
-    let (phys_w, phys_h) = (1800u32, 1100u32);
-    let target = make_target_texture(renderer.device(), phys_w, phys_h).expect("render-target texture");
-    let (cell_w, cell_h) = renderer.cell_dims();
-    let layout = Layout::build(
-        phys_w as f64,
-        phys_h as f64,
-        marspot::ui::SIDEBAR_W_LOGICAL,
-        marspot::HEADER_PT,
-        marspot::ui::CELL_TITLE_PT,
-        3,
-        3,
-        cell_w,
-        cell_h,
-    )
-    .with_chrome(1.0, NAMES.len(), None);
-
-    let terminals: Vec<Terminal> = (0..NAMES.len())
-        .map(|i| {
-            let cell = &layout.cells[i];
-            let mut t = Terminal::new(cell.cols, cell.rows);
-            let mut text = String::new();
-            for r in 0..cell.rows.saturating_sub(1) {
-                text.push_str(&format!("\x1b[{}m{i}:{r} the quick brown fox jumps over the lazy dog\r\n", 31 + r % 7));
-            }
-            t.feed(text.as_bytes());
-            t
-        })
-        .collect();
+    let (mut renderer, target, layout, terminals) = scene();
+    let views = views(&terminals);
+    let sidebar = sidebar();
     let focused = 4;
-    let views: Vec<SessionView> = terminals
-        .iter()
-        .enumerate()
-        .map(|(i, t)| SessionView {
-            grid: t.grid(),
-            view_offset: 0,
-            cursor_visible: i == focused,
-            focused: i == focused,
-            title: NAMES[i].0,
-            selection: None,
-            ime_preedit: "",
-            dormant: false,
-            recede: 0,
-            scrim: 0.0,
-            right_badge: NAMES[i].1,
-            agent_tui: false,
-            cwd: "",
-            top_fixed_h_cells: 0,
-            bot_fixed_h_cells: 0,
-            highlight_spans: &[],
-            search_overlay: None,
-            seq: 1 + i as u64,
-        })
-        .collect();
-    let states = [SessionState::Active, SessionState::Idle, SessionState::Exited];
-    let sidebar: Vec<SidebarEntry> =
-        NAMES.iter().enumerate().map(|(i, (label, _))| SidebarEntry { label, state: states[i % 3] }).collect();
-    renderer.set_window_focused(true);
 
     let mut wr = WindowRender::new();
     for _ in 0..5 {
@@ -125,4 +73,76 @@ pub fn run(arg: &str) {
         pct(&mut chrome, 0.99),
         rebuilt,
     );
+}
+
+/// The renderer, a target the size of the window, the window's layout
+/// and a terminal per pane with a screen of text.
+#[allow(clippy::type_complexity)]
+pub(crate) fn scene() -> (MetalRenderer, Retained<ProtocolObject<dyn MTLTexture>>, Layout, Vec<Terminal>) {
+    marspot::ui::set_chrome_scale(1.0);
+    let mut renderer = MetalRenderer::new_headless().expect("headless metal renderer");
+    let (phys_w, phys_h) = (1800u32, 1100u32);
+    let target = make_target_texture(renderer.device(), phys_w, phys_h).expect("render-target texture");
+    let (cell_w, cell_h) = renderer.cell_dims();
+    let layout = Layout::build(
+        phys_w as f64,
+        phys_h as f64,
+        marspot::ui::SIDEBAR_W_LOGICAL,
+        marspot::HEADER_PT,
+        marspot::ui::CELL_TITLE_PT,
+        3,
+        3,
+        cell_w,
+        cell_h,
+    )
+    .with_chrome(1.0, NAMES.len(), None);
+    let terminals: Vec<Terminal> = (0..NAMES.len())
+        .map(|i| {
+            let cell = &layout.cells[i];
+            let mut t = Terminal::new(cell.cols, cell.rows);
+            let mut text = String::new();
+            for r in 0..cell.rows.saturating_sub(1) {
+                text.push_str(&format!("\x1b[{}m{i}:{r} the quick brown fox jumps over the lazy dog\r\n", 31 + r % 7));
+            }
+            t.feed(text.as_bytes());
+            t
+        })
+        .collect();
+    renderer.set_window_focused(true);
+    (renderer, target, layout, terminals)
+}
+
+/// A view per pane, the fifth in use.
+pub(crate) fn views(terminals: &[Terminal]) -> Vec<SessionView<'_>> {
+    let focused = 4;
+    terminals
+        .iter()
+        .enumerate()
+        .map(|(i, t)| SessionView {
+            grid: t.grid(),
+            view_offset: 0,
+            cursor_visible: i == focused,
+            focused: i == focused,
+            title: NAMES[i].0,
+            selection: None,
+            ime_preedit: "",
+            dormant: false,
+            recede: 0,
+            scrim: 0.0,
+            right_badge: NAMES[i].1,
+            agent_tui: false,
+            cwd: "",
+            top_fixed_h_cells: 0,
+            bot_fixed_h_cells: 0,
+            highlight_spans: &[],
+            search_overlay: None,
+            seq: 1 + i as u64,
+        })
+        .collect()
+}
+
+/// A sidebar row per pane.
+pub(crate) fn sidebar() -> Vec<SidebarEntry<'static>> {
+    let states = [SessionState::Active, SessionState::Idle, SessionState::Exited];
+    NAMES.iter().enumerate().map(|(i, (label, _))| SidebarEntry { label, state: states[i % 3] }).collect()
 }

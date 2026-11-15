@@ -531,34 +531,6 @@ impl Layout {
         self
     }
 
-    /// True when `(px, py)` falls inside the floating layout button.
-    pub fn hit_test_layout_button(&self, px: f64, py: f64) -> bool {
-        self.layout_button_rect.contains(px, py)
-    }
-
-    /// True when `(px, py)` falls inside the floating sidebar toggle
-    /// button.  Always live (the button stays visible even when the
-    /// sidebar is collapsed, since it's the only way back).
-    pub fn hit_test_sidebar_button(&self, px: f64, py: f64) -> bool {
-        self.sidebar_button_rect.contains(px, py)
-    }
-
-    /// F3+1 — true when `(px, py)` falls inside the floating process-
-    /// tree toggle button.
-    pub fn hit_test_process_button(&self, px: f64, py: f64) -> bool {
-        self.process_button_rect.contains(px, py)
-    }
-
-    /// cc — true when `(px, py)` falls inside the toolbar `Cc`
-    /// (Claude usage modal) button.
-    pub fn hit_test_cc_button(&self, px: f64, py: f64) -> bool {
-        self.cc_button_rect.contains(px, py)
-    }
-
-    pub fn hit_test_settings_button(&self, px: f64, py: f64) -> bool {
-        self.settings_button_rect.contains(px, py)
-    }
-
     /// Every toolbar button, in left-to-right order.
     ///
     /// The painter iterates **this**, zipped against a same-length
@@ -578,34 +550,9 @@ impl Layout {
         ]
     }
 
-    // F3+3.0 — `hit_test_picker_option` / `hit_test_picker_panel`
-    // removed alongside the popup picker.  The toolbar layout
-    // button now opens a `LayoutModal` whose hit-tests live in
-    // its own component (sees the modal rects via the modal
-    // state struct, not via Layout).
-
-    /// Returns the sidebar row index whose close-[×] button
-    /// `(px, py)` falls inside, or `None`.  Hit-target lives on the
-    /// row's right edge; clicks to its left fall through to
-    /// `hit_test_sidebar_row` for normal focus switching.
-    pub fn hit_test_close_session(&self, px: f64, py: f64) -> Option<usize> {
-        self.close_session_rects
-            .iter()
-            .position(|r| r.contains(px, py))
-    }
-
-    /// True when `(px, py)` lands on the sidebar's [+] add-session
-    /// button.  The button is always present when the sidebar is
-    /// shown; the renderer dims it (and `mouse_down` ignores the
-    /// click) when `sessions.len() >= 9`.
-    pub fn hit_test_add_session_button(&self, px: f64, py: f64) -> bool {
-        self.add_session_button_rect.contains(px, py)
-    }
-
     /// Hit-test a click at physical coords `(px, py)`.  Returns the
     /// session index when the click landed inside one of the grid
-    /// cells, else `None` (sidebar hit, or outside the window).  For
-    /// sidebar clicks, see [`hit_test_sidebar_row`](Self::hit_test_sidebar_row).
+    /// cells, else `None` (sidebar hit, or outside the window).
     pub fn hit_test(&self, px: f64, py: f64) -> Option<usize> {
         if px < self.sidebar_w {
             return None;
@@ -687,42 +634,6 @@ impl Layout {
         Some((x, y, cell_w, cell_h))
     }
 
-    /// Hit-test the per-cell title strip — the band at the top of
-    /// each cell where `cell_title_h` reserves space for the
-    /// session label.  Returns `Some(i)` if the click landed in
-    /// cell `i`'s title strip, else `None`.  Used for click-to-edit
-    /// title behaviour without disturbing terminal-area clicks.
-    pub fn hit_test_cell_title(&self, px: f64, py: f64) -> Option<usize> {
-        if self.cell_title_h <= 0.0 || px < self.sidebar_w {
-            return None;
-        }
-        for (i, c) in self.cells.iter().enumerate() {
-            if px >= c.x && px < c.x + c.w && py >= c.y_top && py < c.y_top + self.cell_title_h {
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    /// Map a click in the sidebar to the session-list row index.
-    /// Returns `None` if the click was outside the sidebar or above /
-    /// below the entry list.  `row_height_phys` is the per-entry
-    /// height the renderer used (in physical pixels), and `top_pad`
-    /// is the gap between the window's top edge and the first entry.
-    pub fn hit_test_sidebar_row(
-        &self,
-        px: f64,
-        py: f64,
-        top_pad: f64,
-        row_height_phys: f64,
-        rows: usize,
-    ) -> Option<usize> {
-        if px < 0.0 || px >= self.sidebar_w || py < top_pad {
-            return None;
-        }
-        let idx = ((py - top_pad) / row_height_phys).floor() as usize;
-        if idx >= rows { None } else { Some(idx) }
-    }
 }
 
 #[cfg(test)]
@@ -756,14 +667,8 @@ mod tests {
                 assert!(b.x >= prev.x + prev.w, "button {i} overlaps its neighbour");
             }
         }
-        // Each one's own hit-test agrees with its rect in the list.
-        let mid = |r: Rect| (r.x + r.w / 2.0, r.y_top + r.h / 2.0);
-        let (x, y) = mid(btns[4]);
-        assert!(l.hit_test_settings_button(x, y), "settings");
-        assert!(!l.hit_test_cc_button(x, y), "and only settings");
-        let (x, y) = mid(btns[3]);
-        assert!(l.hit_test_cc_button(x, y), "cc");
-        assert!(!l.hit_test_settings_button(x, y));
+        assert_eq!(btns[3], l.cc_button_rect);
+        assert_eq!(btns[4], l.settings_button_rect);
     }
 
     use super::*;

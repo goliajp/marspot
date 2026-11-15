@@ -3,13 +3,17 @@
 //! toolbar and the version label, which are drawn from trees.
 //!
 //! Sizes are `spec::chrome`'s and colours `panel_palette`'s; where a
-//! thing is, and so where a click lands on it, is the layout's.
+//! thing is, is the layout's.  A click and the pointer are tested
+//! against the trees' kept layouts (`ChromeSurfaces::at`), so what
+//! lights and what is pressed are the nodes the frame was drawn from.
 
 use crate::layout::{Layout, Rect};
 use crate::render::SidebarEntry;
 use crate::frame_build::color::rgba8_of_f32;
 use golia_ui_core::scene::UiRectInstance;
-use crate::ui::components::chrome_hover::ChromeHover;
+use crate::font_cache::FontCache;
+use crate::ui::components::chrome_target::ChromeTarget;
+use crate::ui::components::title_strip_view::Strips;
 use crate::ui::components::panel_palette as palette;
 use crate::ui::components::{
     Button, ButtonStyle, GridEdges, GridItem, GridSeams, IconPosition,
@@ -34,7 +38,8 @@ pub(crate) struct ChromeSurfaces {
 /// What the chrome shows beyond where things are.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ChromeState {
-    pub(crate) hover: Option<ChromeHover>,
+    /// A panel or a menu lies over the sidebar: nothing on it lights.
+    pub(crate) quiet: bool,
     /// Per toolbar button, in `Layout::toolbar_buttons` order: whether
     /// what it opens is open.
     pub(crate) on: [bool; 5],
@@ -55,10 +60,92 @@ pub(crate) fn paint_chrome(
     paint_grid_seams(painter, layout, n_views, focused_idx, overlay_ui_rects, &mut surfaces.seam_rects);
     paint_empty_seats(painter, layout, n_views);
     let cell_w = painter.cell_w;
-    surfaces.sidebar.frame(painter, &SidebarFrame { layout, rows: sidebar, focused_idx, hover: state.hover, cell_w });
+    surfaces.sidebar.frame(painter, &SidebarFrame { layout, rows: &sidebar, focused_idx, quiet: state.quiet, cell_w });
     paint_region_seams(painter, layout);
     let cell = (painter.cell_w, painter.cell_h, painter.ascent);
-    surfaces.toolbar.frame(painter, &Toolbar::of(layout, state.on, state.hover, cell));
+    surfaces.toolbar.frame(painter, &Toolbar::of(layout, state.on, cell));
+}
+
+/// What the chrome's trees are laid out from when input arrives
+/// between frames: where things are, how many rows the sidebar lists,
+/// and the panes' strips (only their badges are read).
+pub struct ChromeShape<'a> {
+    pub layout: &'a Layout,
+    pub rows: usize,
+    pub strips: &'a dyn Strips,
+}
+
+impl ChromeSurfaces {
+    /// Bring each tree's layout to where the next frame will draw it.
+    fn ready(&mut self, font: &mut FontCache, s: &ChromeShape<'_>) {
+        self.toolbar.ready(font, s.layout);
+        self.sidebar.ready(font, s.layout, s.rows);
+        self.titles.ready(font, s.layout, s.strips);
+    }
+
+    /// What `p` is on in the layout the trees were last laid out to;
+    /// the toolbar first, then the sidebar, then the strips.
+    pub(crate) fn hit(&self, p: (f64, f64)) -> Option<ChromeTarget> {
+        [&self.toolbar.kept, &self.sidebar.kept, &self.titles.kept]
+            .into_iter()
+            .find_map(|k| k.surface.hit(p))
+            .and_then(|h| ChromeTarget::of(h.action))
+    }
+
+    /// What `p` is on.
+    pub(crate) fn at(&mut self, font: &mut FontCache, s: &ChromeShape<'_>, p: (f64, f64)) -> Option<ChromeTarget> {
+        self.ready(font, s);
+        self.hit(p)
+    }
+
+    /// The pointer moved to `p`: true when what is lit changed, which
+    /// is a picture to paint again and nothing to lay out.
+    pub(crate) fn pointer_move(&mut self, font: &mut FontCache, s: &ChromeShape<'_>, p: (f64, f64)) -> bool {
+        // the strips light nothing and are not told
+        self.toolbar.ready(font, s.layout);
+        self.sidebar.ready(font, s.layout, s.rows);
+        let toolbar = self.toolbar.kept.surface.pointer_move(p);
+        self.sidebar.kept.surface.pointer_move(p) | toolbar
+    }
+
+    /// The pointer left the window: nothing is lit.
+    pub(crate) fn pointer_leave(&mut self) -> bool {
+        let toolbar = self.toolbar.kept.surface.pointer_leave();
+        self.sidebar.kept.surface.pointer_leave() | toolbar
+    }
+
+    /// A press at `p`: each tree remembers what it landed on, and the
+    /// answer is what that is.
+    pub(crate) fn press(&mut self, font: &mut FontCache, s: &ChromeShape<'_>, p: (f64, f64)) -> Option<ChromeTarget> {
+        self.ready(font, s);
+        for k in [&mut self.toolbar.kept, &mut self.sidebar.kept, &mut self.titles.kept] {
+            k.surface.pointer_down(p);
+        }
+        self.hit(p)
+    }
+
+    /// The button let go at `p`, or, with `None`, somewhere no tree of
+    /// this window is: what was pressed, if it is also what `p` is on.
+    pub(crate) fn release(
+        &mut self,
+        font: &mut FontCache,
+        s: &ChromeShape<'_>,
+        p: Option<(f64, f64)>,
+    ) -> Option<ChromeTarget> {
+        self.ready(font, s);
+        let mut released = None;
+        for k in [&mut self.toolbar.kept, &mut self.sidebar.kept, &mut self.titles.kept] {
+            let action = match p {
+                Some(p) => k.surface.pointer_up(p),
+                None => {
+                    k.surface.pointer_cancel();
+                    None
+                }
+            };
+            released = released.or(action);
+        }
+        released.and_then(ChromeTarget::of)
+    }
 }
 
 fn paint_grid_seams(
