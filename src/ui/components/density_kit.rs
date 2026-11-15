@@ -87,8 +87,6 @@ pub(crate) struct Capture {
     pub(crate) panes: Vec<PaneArea>,
     /// Named places, for saying what an element is: `(name, edges)`.
     pub(crate) regions: Vec<(String, [f64; 4])>,
-    /// The window's layout, which is what a click is tested against.
-    pub(crate) layout: Option<Layout>,
     /// The frame as drawn, RGBA, when it was asked for with
     /// [`capture_pixels`]: `(bytes, width, height)`.
     pub(crate) pixels: Option<(Vec<u8>, u32, u32)>,
@@ -199,7 +197,6 @@ pub(crate) fn deliver(scene: &str, renderer: &MetalRenderer, wr: &crate::render_
         elems: elems_of(&renderer.frame_instances(wr)),
         panes,
         regions: regions_of(layout, n_panes),
-        layout: Some(layout.clone()),
         pixels: None,
     };
     CAPTURED.set(Some(capture));

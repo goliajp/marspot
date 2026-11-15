@@ -20,7 +20,8 @@ use crate::render::{SearchHitView, SearchOverlayView, SessionView, SidebarEntry}
 use crate::render_metal::{make_readback_texture, MetalRenderer, WindowRender};
 use crate::session::SessionState;
 use crate::snapshot_kit::{assert_snapshot_ssim, snapshot_mode_in, write_snapshot_png, UI_SNAPSHOT_DIR};
-use crate::ui::components::chrome_hover::ChromeHover;
+use crate::frame_build::chrome::ChromeShape;
+use crate::ui::components::chrome_target::ChromeTarget;
 use crate::ui::strings::{t, Msg};
 use crate::ui::components::context_menu_view::MenuRender;
 use crate::ui::components::{ContextMenu, MenuItem};
@@ -99,7 +100,7 @@ fn snapshot(
     (cols, rows): (usize, usize),
     panes: &[PaneSpec],
     focused: usize,
-    open: impl FnOnce(&mut MetalRenderer, &Layout),
+    open: impl FnOnce(&mut MetalRenderer, &mut WindowRender, &ChromeShape<'_>),
 ) {
     if !density_kit::capturing() && snapshot_mode_in(std::path::Path::new(UI_SNAPSHOT_DIR)).is_none() {
         return;
@@ -125,7 +126,7 @@ fn snapshot_on(
     (cols, rows): (usize, usize),
     panes: &[PaneSpec],
     focused: usize,
-    open: impl FnOnce(&mut MetalRenderer, &Layout),
+    open: impl FnOnce(&mut MetalRenderer, &mut WindowRender, &ChromeShape<'_>),
 ) {
     let name = &density_kit::scaled_name(&crate::snapshot_kit::themed(name));
     let (w, h) = density_kit::scaled_size(w, h);
@@ -178,7 +179,8 @@ fn snapshot_on(
     let sidebar: Vec<SidebarEntry> =
         panes.iter().map(|p| SidebarEntry { label: p.title, state: p.state }).collect();
     renderer.set_window_focused(true);
-    open(renderer, &layout);
+    let strips: &[SessionView] = &views;
+    open(renderer, wr, &ChromeShape { layout: &layout, rows: sidebar.len(), strips: &strips });
 
     // Twice: glyphs rasterised during the first frame land in the
     // atlas texture the second one samples.
@@ -209,21 +211,45 @@ fn four_panes() -> [PaneSpec; 4] {
     ]
 }
 
+/// A point on `t` in a window laid out as `l`: the middle of a button,
+/// the left of a row, well clear of its close button.
+pub(super) fn point_on(l: &Layout, t: ChromeTarget) -> (f64, f64) {
+    let mid = |r: crate::layout::Rect| (r.x + r.w * 0.5, r.y_top + r.h * 0.5);
+    let row_h = marspot_term::layout::sidebar_row_h();
+    match t {
+        ChromeTarget::Toolbar(i) => mid(l.toolbar_buttons()[i as usize]),
+        ChromeTarget::Add => mid(l.add_session_button_rect),
+        ChromeTarget::Close(i) => mid(l.close_session_rects[i]),
+        ChromeTarget::Row(i) => (l.sidebar_w * 0.25, l.top_inset + l.sidebar_top_pad_phys + (i as f64 + 0.5) * row_h),
+        ChromeTarget::Title(i) | ChromeTarget::Badge(i) => (l.cells[i].x + 4.0, l.cells[i].y_top + 1.0),
+    }
+}
+
+/// Put the pointer on `t`.
+fn hover(renderer: &mut MetalRenderer, wr: &mut WindowRender, shape: &ChromeShape<'_>, t: ChromeTarget) {
+    wr.chrome_pointer_move(renderer.font_mut(), shape, point_on(shape.layout, t));
+}
+
 /// The whole window: toolbar, sidebar with four panes, a two by two
 /// grid with title strips and badges, the second pane in use, the
 /// pointer in the fourth pane's sidebar row.
 #[test]
 pub(super) fn chrome_snapshot_window() {
-    snapshot("chrome_window", (1600, 1000), (2, 2), &four_panes(), 1, |renderer, _| {
-        renderer.set_hover_chrome_btn(Some(ChromeHover::Row(3)));
+    snapshot("chrome_window", (1600, 1000), (2, 2), &four_panes(), 1, |renderer, wr, shape| {
+        hover(renderer, wr, shape, ChromeTarget::Row(3));
     });
 }
 
 /// The window of `chrome_snapshot_window` with the pointer on `hover`,
 /// on a renderer that may have drawn it before at another scale.
-pub(super) fn window_on(renderer: &mut MetalRenderer, wr: &mut WindowRender, hover: Option<ChromeHover>) {
-    snapshot_on(renderer, wr, "chrome_window", (1600, 1000), (2, 2), &four_panes(), 1, |renderer, _| {
-        renderer.set_hover_chrome_btn(hover);
+pub(super) fn window_on(renderer: &mut MetalRenderer, wr: &mut WindowRender, on: Option<ChromeTarget>) {
+    snapshot_on(renderer, wr, "chrome_window", (1600, 1000), (2, 2), &four_panes(), 1, |renderer, wr, shape| {
+        match on {
+            Some(t) => hover(renderer, wr, shape, t),
+            None => {
+                wr.chrome_pointer_leave();
+            }
+        }
     });
 }
 
@@ -247,8 +273,8 @@ pub(super) fn chrome_snapshot_search() {
         }),
         ..pane("smix", "", SessionState::Active)
     }];
-    snapshot("chrome_search", (1200, 640), (1, 1), &panes, 0, |renderer, _| {
-        renderer.set_hover_chrome_btn(Some(ChromeHover::Add));
+    snapshot("chrome_search", (1200, 640), (1, 1), &panes, 0, |renderer, wr, shape| {
+        hover(renderer, wr, shape, ChromeTarget::Add);
     });
 }
 
@@ -257,8 +283,8 @@ pub(super) fn chrome_snapshot_search() {
 /// button is the one last hovered.
 #[test]
 pub(super) fn chrome_snapshot_menu() {
-    snapshot("chrome_menu", (1200, 760), (2, 2), &four_panes(), 0, |renderer, layout| {
-        open_menu(renderer, layout, Some(1));
+    snapshot("chrome_menu", (1200, 760), (2, 2), &four_panes(), 0, |renderer, wr, shape| {
+        open_menu(renderer, wr, shape, Some(1));
     });
 }
 
@@ -266,18 +292,24 @@ pub(super) fn chrome_snapshot_menu() {
 /// renderer of the caller's.
 pub(super) fn menu_on(renderer: &mut MetalRenderer, wr: &mut WindowRender, hovered: Option<usize>) -> MenuRender {
     let mut state = None;
-    snapshot_on(renderer, wr, "chrome_menu", (1200, 760), (2, 2), &four_panes(), 0, |renderer, layout| {
-        state = Some(open_menu(renderer, layout, hovered));
+    snapshot_on(renderer, wr, "chrome_menu", (1200, 760), (2, 2), &four_panes(), 0, |renderer, wr, shape| {
+        state = Some(open_menu(renderer, wr, shape, hovered));
     });
     state.expect("the scene was drawn")
 }
 
-fn open_menu(renderer: &mut MetalRenderer, layout: &Layout, hovered: Option<usize>) -> MenuRender {
+fn open_menu(
+    renderer: &mut MetalRenderer,
+    wr: &mut WindowRender,
+    shape: &ChromeShape<'_>,
+    hovered: Option<usize>,
+) -> MenuRender {
+    let layout = shape.layout;
     let row = |label: &str, hint: &str, enabled: bool| {
         let item = MenuItem::entry(label, 0).with_shortcut(hint);
         if enabled { item } else { item.disabled() }
     };
-    renderer.set_hover_chrome_btn(Some(ChromeHover::Toolbar(2)));
+    hover(renderer, wr, shape, ChromeTarget::Toolbar(2));
     let scale = crate::ui::chrome_scale();
     let anchor = (420.0 * scale, 150.0 * scale);
     let mut state = MenuRender::new(
@@ -312,8 +344,8 @@ pub(super) fn chrome_snapshot_close() {
         pane("smix", "P1 3f9c2a1e", SessionState::Active),
         pane("a-name-longer-than-the-pane-it-titles", "P2 77d0e4b2", SessionState::Idle),
     ];
-    snapshot("chrome_close", (800, 300), (2, 1), &panes, 0, |renderer, _| {
-        renderer.set_hover_chrome_btn(Some(ChromeHover::Close(1)));
+    snapshot("chrome_close", (800, 300), (2, 1), &panes, 0, |renderer, wr, shape| {
+        hover(renderer, wr, shape, ChromeTarget::Close(1));
     });
 }
 
@@ -323,7 +355,7 @@ pub(super) fn chrome_snapshot_close() {
 #[test]
 pub(super) fn chrome_snapshot_terminal() {
     let panes = [ansi_pane("colours"), ansi_pane("colours, not in use")];
-    snapshot("chrome_terminal", (1600, 900), (1, 2), &panes, 0, |_, _| {});
+    snapshot("chrome_terminal", (1600, 900), (1, 2), &panes, 0, |_, _, _| {});
 }
 
 crate::snapshot_kit::snapshots_in_other_themes! {

@@ -6,7 +6,6 @@ use crate::frame_alloc_tests::counted;
 use crate::glyph_atlas::GlyphAtlas;
 use crate::layout::Layout;
 use crate::render_metal::{new_atlas, system_default_device};
-use crate::ui::components::chrome_hover::ChromeHover;
 use crate::ui::components::density_kit::at_scale;
 use crate::ui::core::ViewPainter;
 use golia_ui_core::scene::{GlyphInstance, RectInstance, UiRectInstance};
@@ -68,8 +67,9 @@ pub(super) fn layout(stage: &Stage, (w, h): (f64, f64), scale: f64) -> Layout {
 }
 
 /// A frame in which nothing on the toolbar changed paints nothing and
-/// takes nothing from the heap; one in which a button lights repaints
-/// without an allocation once the buffers have grown.
+/// takes nothing from the heap; one in which a button lights under the
+/// pointer paints again, describes and lays out nothing, and takes
+/// nothing from the heap once the buffers have grown.
 #[test]
 fn toolbar_surface_frame() {
     at_scale(1.0, || {
@@ -79,19 +79,27 @@ fn toolbar_surface_frame() {
         let cell = (stage.font.cell_w as f32, stage.font.cell_h as f32, stage.font.ascent as f32);
         let mut surface = ToolbarSurface::default();
         let mut out: Frame = Default::default();
-        let rest = Toolbar::of(&l, [true, false, false, false, false], None, cell);
-        let lit = Toolbar::of(&l, rest.on, Some(ChromeHover::Toolbar(3)), cell);
-        for t in [rest, lit, rest, lit, rest] {
-            stage.draw(window, &mut out, &mut |p| surface.frame(p, &t));
+        let rest = Toolbar::of(&l, [true, false, false, false, false], cell);
+        let b = l.toolbar_buttons()[3];
+        let (on, off) = ((b.x + b.w * 0.5, b.y_top + b.h * 0.5), (900.0, 600.0));
+        for p in [off, on, off, on, off] {
+            surface.kept.surface.pointer_move(p);
+            stage.draw(window, &mut out, &mut |pa| surface.frame(pa, &rest));
         }
         let warm = surface.kept.surface.counters();
         let (n, _) = counted(|| stage.draw(window, &mut out, &mut |p| surface.frame(p, &rest)));
         assert_eq!(surface.kept.surface.counters(), warm, "a frame with nothing new ran a stage");
         assert_eq!(n, 0, "a frame with nothing new allocated {n} times");
         assert!(out.1.len() >= 5, "the toolbar has to have been painted");
-        let (n, _) = counted(|| stage.draw(window, &mut out, &mut |p| surface.frame(p, &lit)));
+        let rest_picture = out.clone();
+        let (n, _) = counted(|| {
+            assert!(surface.kept.surface.pointer_move(on), "the button under the pointer is lit");
+            stage.draw(window, &mut out, &mut |p| surface.frame(p, &rest))
+        });
         assert_eq!(n, 0, "a button lighting allocated {n} times");
-        assert_eq!(surface.kept.surface.counters().paint, warm.paint + 1);
+        let c = surface.kept.surface.counters();
+        assert_eq!((c.build, c.layout, c.paint), (warm.build, warm.layout, warm.paint + 1), "a hover is a paint");
+        assert_ne!(out, rest_picture, "and the button is drawn lit");
     });
 }
 
@@ -108,7 +116,7 @@ fn a_toolbar_kept_without_an_icon_is_painted_again_when_the_icon_arrives() {
         let cell = (stage.font.cell_w as f32, stage.font.cell_h as f32, stage.font.ascent as f32);
         let mut surface = ToolbarSurface::default();
         let mut out: Frame = Default::default();
-        let t = Toolbar::of(&l, [false; 5], None, cell);
+        let t = Toolbar::of(&l, [false; 5], cell);
         stage.draw(window, &mut out, &mut |p| surface.frame(p, &t));
         stage.draw(window, &mut out, &mut |p| surface.frame(p, &t));
         let before = surface.kept.surface.counters().paint;

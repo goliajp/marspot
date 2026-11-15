@@ -41,7 +41,8 @@ use marspot::ui::components::surface_stack::{
     self, Change, CloseBy, Key as SurfaceKey, KeyAction, Press, SurfaceKind, SurfaceStack,
 };
 use marspot::ui::components::panel_script::{Input as DevInput, Scene, Script as PanelScript};
-use marspot::ui::components::{chrome_hover::ChromeHover, PanelChrome, GRID_MAX, GRID_MIN};
+use marspot::ui::components::{PanelChrome, GRID_MAX, GRID_MIN};
+use marspot::ui::components::chrome_target::ChromeTarget;
 use marspot::ui::strings::{self, t, Arg, Msg};
 use marspot::session::SessionState;
 use marspot::session_registry::{
@@ -2955,12 +2956,6 @@ struct WindowState {
     /// Active drag, if any.  None while no drag in progress.
     layout_drag: Option<LayoutModalDrag>,
     sidebar_collapsed: bool,
-    /// What the pointer is on in the window's chrome — a toolbar
-    /// button, a sidebar row, its close button, the add button.
-    /// Updated on every `MouseMove`; the renderer lights that control.
-    /// Kept here (not on Layout) so mouse-move never rebuilds the grid
-    /// math.
-    hover_chrome_btn: Option<ChromeHover>,
     /// The process monitor's data while it is open; libproc is only
     /// walked while this is `Some`.
     process_panel: Option<ProcessPanelState>,
@@ -3062,7 +3057,6 @@ impl WindowState {
             card_slots: (0..(grid_cols * grid_rows)).collect(),
             layout_drag: None,
             sidebar_collapsed: true,
-            hover_chrome_btn: None,
             process_panel: None,
             cc_usage_modal: None,
             settings_modal_scroll: Default::default(),
@@ -3138,6 +3132,8 @@ mod frames;
 use frames::WindowSurfaces;
 #[path = "marspot-core/hover.rs"]
 mod hover;
+#[path = "marspot-core/chrome_input.rs"]
+mod chrome_input;
 #[path = "marspot-core/idle.rs"]
 mod idle;
 #[path = "marspot-core/shell_end.rs"]
@@ -4143,7 +4139,8 @@ impl CoreApp {
         // same request/response shape as GetSelectionText.  Checked
         // ahead of the link / region paths so `P<n>` never opens the
         // generic pane menu.
-        if let Some(i) = self.hit_test_pane_badge_prefix(wi, x_phys, y_phys) {
+        let on = self.chrome_at(wi, x_phys, y_phys);
+        if let Some(ChromeTarget::Badge(i)) = on {
             if let Some(sid) = win!(self, wi).panes.get(i).and_then(|p| p.shelld_session_id()) {
                 let payload = marspot::shell_proto::encode_pane_badge_menu_request(
                     sid, x_phys, y_phys,
@@ -4244,14 +4241,10 @@ impl CoreApp {
         win!(self, wi).needs_render = true;
     }
 
-    fn resolve_context_region(&self, wi: usize, x_phys: f64, y_phys: f64) -> ContextRegion {
+    fn resolve_context_region(&mut self, wi: usize, x_phys: f64, y_phys: f64) -> ContextRegion {
         // Sidebar row check first — wins over the cell-area hit when
         // both overlap (the sidebar overlays the title-strip band).
-        let row_phys = marspot_term::layout::sidebar_row_h();
-        let top_pad_phys = win!(self, wi).layout.top_inset + win!(self, wi).layout.sidebar_top_pad_phys;
-        if let Some(idx) = win!(self, wi).layout.hit_test_sidebar_row(
-            x_phys, y_phys, top_pad_phys, row_phys, win!(self, wi).panes.len(),
-        ) {
+        if let Some(idx) = self.chrome_at(wi, x_phys, y_phys).and_then(ChromeTarget::row) {
             return ContextRegion::SidebarSlot(idx);
         }
         if let Some(idx) = win!(self, wi).layout.hit_test(x_phys, y_phys) {
@@ -6000,12 +5993,6 @@ impl CoreApp {
         })
     }
 
-    /// Hit-test the right-side plugin badge's clickable prefix (text
-    /// before the first space).  Returns the pane index when a click
-    /// at (x_phys, y_phys) hits the underlined prefix; None
-    /// otherwise.  Mirrors the geometry the renderer uses in
-    /// `render_metal::build_instances` so a visual hit lines up with
-    /// the logical one.
     /// Why a right-click inside a badge-bearing title strip missed
     /// the badge — or `None` when it did not land in one at all.
     ///
@@ -6060,63 +6047,6 @@ impl CoreApp {
             ));
         }
         None
-    }
-
-    fn hit_test_pane_badge_prefix(
-        &self, wi: usize,
-        x_phys: f64,
-        y_phys: f64,
-    ) -> Option<usize> {
-        let (cell_w, _) = self.renderer.cell_dims();
-        let padding = win!(self, wi).layout.padding;
-        let title_h = win!(self, wi).layout.cell_title_h;
-        let cell_count = win!(self, wi).layout.cells.len();
-        for (i, p) in win!(self, wi).panes.iter().enumerate().take(cell_count) {
-            let sid = match p.shelld_session_id() {
-                Some(s) => s,
-                None => continue,
-            };
-            let badge = match self.pane_badges.get(&sid) {
-                Some(b) if !b.is_empty() => b,
-                _ => continue,
-            };
-            let prefix = match badge.split(' ').next() {
-                Some(p) if !p.is_empty() => p,
-                _ => continue,
-            };
-            let badge_chars = badge.chars().count() as f64;
-            let prefix_chars = prefix.chars().count() as f64;
-            let rect = &win!(self, wi).layout.cells[i];
-            let badge_x = rect.x + rect.w - padding - badge_chars * cell_w;
-            let prefix_lo = badge_x;
-            let prefix_hi = prefix_lo + prefix_chars * cell_w;
-            let y_lo = rect.y_top;
-            let y_hi = y_lo + title_h;
-            if x_phys >= prefix_lo
-                && x_phys < prefix_hi
-                && y_phys >= y_lo
-                && y_phys < y_hi
-            {
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    /// The toolbar button under `(x, y)` that opens a panel.
-    fn panel_button_at(&self, wi: usize, x: f64, y: f64) -> Option<SurfaceKind> {
-        let l = &win!(self, wi).layout;
-        if l.hit_test_layout_button(x, y) {
-            Some(SurfaceKind::Layout)
-        } else if l.hit_test_process_button(x, y) {
-            Some(SurfaceKind::Processes)
-        } else if l.hit_test_cc_button(x, y) {
-            Some(SurfaceKind::Accounts)
-        } else if l.hit_test_settings_button(x, y) {
-            Some(SurfaceKind::Settings)
-        } else {
-            None
-        }
     }
 
     /// A panel's toolbar button or shortcut.
@@ -6685,15 +6615,7 @@ impl CoreApp {
 
         self.hover_panels(wi, x_phys, y_phys);
 
-        let w = &win!(self, wi);
-        let new_hover = ChromeHover::at(&w.layout, w.panes.len(), x_phys, y_phys);
-        if new_hover != win!(self, wi).hover_chrome_btn {
-            win!(self, wi).hover_chrome_btn = new_hover;
-            // Published in `render`, not here: the renderer is shared,
-            // so pushing it at hit-test time drew window A's hover on
-            // window B's toolbar the next time B painted.
-            win!(self, wi).needs_render = true;
-        }
+        self.hover_chrome(wi, x_phys, y_phys);
     }
 
     fn mouse_down(&mut self, wi: usize, x_phys: f64, y_phys: f64, modifiers: Modifiers) {
@@ -6757,11 +6679,15 @@ impl CoreApp {
         }
 
         // A toolbar button that opens a panel toggles it, whatever is
-        // open.  Any other press while a panel is open is that panel's:
-        // the stack says whether it closes it, starts a drag or lands
-        // on its content, and it never reaches what is underneath.
-        if let Some(kind) = self.panel_button_at(wi, x_phys, y_phys) {
-            self.toggle_panel(wi, kind);
+        // open, when it is let go on.  Any other press while a panel is
+        // open is that panel's: the stack says whether it closes it,
+        // starts a drag or lands on its content, and it never reaches
+        // what is underneath.
+        let on = self.chrome_at(wi, x_phys, y_phys);
+        if let Some(ChromeTarget::Toolbar(i)) = on
+            && chrome_input::panel_of_button(i).is_some()
+        {
+            self.press_chrome(wi, x_phys, y_phys);
             return;
         }
         if let Some(kind) = win!(self, wi).panels.open() {
@@ -6784,59 +6710,21 @@ impl CoreApp {
             return;
         }
 
+        // The sidebar button, the add button, a close button and a
+        // badge's prefix act when they are let go on; a row and a strip
+        // act on the press, below.
+        if on.is_some() {
+            self.press_chrome(wi, x_phys, y_phys);
+        }
+        if on.is_some_and(ChromeTarget::acts_on_release) {
+            return;
+        }
+        let title_hit = match on {
+            Some(ChromeTarget::Title(i)) => Some(i),
+            _ => None,
+        };
+        let sidebar_hit = on.and_then(ChromeTarget::row);
         let layout = &win!(self, wi).layout;
-        let sidebar_btn_hit = layout.hit_test_sidebar_button(x_phys, y_phys);
-        let close_session_hit = layout.hit_test_close_session(x_phys, y_phys);
-        let add_session_hit = layout.hit_test_add_session_button(x_phys, y_phys);
-
-        if sidebar_btn_hit {
-            self.toggle_sidebar(wi);
-            return;
-        }
-
-        // Sidebar close-[×]: refuse to close the last session.
-        if let Some(idx) = close_session_hit {
-            // The last pane closes too — see `close_window_if_emptied`.
-            if idx < win!(self, wi).panes.len() {
-                self.close_session(wi, idx);
-                if wi < self.windows.len() {
-                    self.rebuild_layout(wi);
-                }
-            }
-            return;
-        }
-
-        // Sidebar [+] add-session.
-        if add_session_hit {
-            self.add_pane(wi);
-            return;
-        }
-
-        // Plugin badge prefix click: route to L1 (the plugin owns
-        // what the prefix means and what cycling it does).  Sits in
-        // the same title strip as title-edit; check here
-        // before title-edit so a click on `P<n>` doesn't drop the
-        // pane into rename mode.
-        if let Some(i) = self.hit_test_pane_badge_prefix(wi, x_phys, y_phys)
-            && let Some(sid) = win!(self, wi).panes.get(i).and_then(|p| p.shelld_session_id())
-            {
-                let payload = marspot::shell_proto::encode_pane_badge_clicked(sid);
-                self.pending_to_shell
-                    .push((MsgType::PaneBadgeClicked, payload));
-                return;
-            }
-
-        let layout = &win!(self, wi).layout;
-        let row_phys = marspot::layout::sidebar_row_h();
-        let top_pad_phys = layout.top_inset + layout.sidebar_top_pad_phys;
-        let title_hit = layout.hit_test_cell_title(x_phys, y_phys);
-        let sidebar_hit = layout.hit_test_sidebar_row(
-            x_phys,
-            y_phys,
-            top_pad_phys,
-            row_phys,
-            win!(self, wi).panes.len(),
-        );
         let cell_hit = layout.hit_test(x_phys, y_phys);
         let (cw, ch) = self.renderer.cell_dims();
         let cell_pos_hit = layout.hit_test_cell_pos(x_phys, y_phys, cw, ch);
@@ -7039,11 +6927,7 @@ impl CoreApp {
         // Target the pane under the drop point (body cells or its
         // sidebar row); a drop on chrome/padding goes to the focused
         // pane — dropping "at the terminal" should never be a no-op.
-        let row_phys = marspot_term::layout::sidebar_row_h();
-        let top_pad_phys = win!(self, wi).layout.top_inset + win!(self, wi).layout.sidebar_top_pad_phys;
-        let sidebar_hit = win!(self, wi).layout.hit_test_sidebar_row(
-            x_phys, y_phys, top_pad_phys, row_phys, win!(self, wi).panes.len(),
-        );
+        let sidebar_hit = self.chrome_at(wi, x_phys, y_phys).and_then(ChromeTarget::row);
         let idx = sidebar_hit
             .or(win!(self, wi).layout.hit_test(x_phys, y_phys))
             .filter(|i| *i < win!(self, wi).panes.len())
@@ -7192,6 +7076,10 @@ impl CoreApp {
     }
 
     fn mouse_up(&mut self, wi: usize, drop_window_id: u32, drop_x: f64, drop_y: f64) {
+        // a button of the chrome pressed and let go on
+        if self.release_chrome(wi, drop_window_id, drop_x, drop_y) {
+            return;
+        }
         // Release the button the program was told about, at whatever
         // cell the pointer is over now — or, if it left the pane, at
         // the one the press reported.
@@ -7890,10 +7778,6 @@ impl CoreApp {
         let shortcuts =
             (win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts)).then(|| self.shortcuts_render(wi));
         self.renderer.set_shortcuts_panel(shortcuts);
-        // Per-window, like every overlay below it: the renderer holds
-        // one copy and each window sets its own right before painting.
-        self.renderer
-            .set_hover_chrome_btn(win!(self, wi).hover_chrome_btn);
         // RFC-006 — this window's drop-preview ghost (usually None),
         // and the index of its pane mid-drag (dimmed by the renderer).
         self.renderer.set_drop_preview(win!(self, wi).drop_preview);
