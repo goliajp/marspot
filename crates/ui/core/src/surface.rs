@@ -197,6 +197,10 @@ impl<O: PaintOut> Surface<O> {
         self.interaction.pointer_up(&self.tree, &self.layout, p)
     }
 
+    pub fn pointer_cancel(&mut self) -> bool {
+        self.interaction.pointer_cancel()
+    }
+
     pub fn wheel(&mut self, p: (f64, f64), dy: f64) -> bool {
         self.interaction.wheel(&self.layout, p, dy)
     }

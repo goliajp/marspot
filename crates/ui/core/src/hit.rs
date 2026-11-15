@@ -103,7 +103,9 @@ pub fn hit_test(
     let walk = Walk { tree, layout, scroll, p: (p.0 - offset.0, p.1 - offset.1) };
     // what floats is on top: the last described first, then the rest
     let mut found = Found::Nothing;
-    for &f in layout.floats.iter().rev() {
+    // a pointer over none of them, as it mostly is, walks none of them
+    let floats = if layout.float_bounds.contains(walk.p) { &layout.floats[..] } else { &[] };
+    for &f in floats.iter().rev() {
         found = walk.node(f, 0.0, None);
         if !matches!(found, Found::Nothing) {
             break;
