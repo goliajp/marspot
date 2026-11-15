@@ -113,8 +113,8 @@ impl GridItem {
         }
     }
 
-    /// The ring's eight rects, in paint order — empty when this cell
-    /// is not focused.
+    /// The ring's eight rects, in paint order — none when this cell
+    /// is not focused.  Not collected: the ring is drawn every frame.
     ///
     /// Exposed separately because the ring has to be painted TWICE,
     /// into two different passes.  The BG-pipeline copy is the real
@@ -129,10 +129,8 @@ impl GridItem {
     /// SDF-based and antialiases its edges, which would normally be
     /// visible on a hard-edged ring; here it blends into the identical
     /// rect already sitting underneath it, so it is not.
-    pub fn ring_rects(&self) -> Vec<Rect> {
-        if !self.focused || self.outline.width <= 0.0 {
-            return Vec::new();
-        }
+    pub fn ring_rects(&self) -> impl Iterator<Item = Rect> {
+        let shown = if self.focused && self.outline.width > 0.0 { 8 } else { 0 };
         let r = self.rect;
         let t = self.outline.width;   // = base seam thickness
         let g = self.gutter;          // = grid gutter
@@ -149,7 +147,7 @@ impl GridItem {
         let bottom_y = if e.bottom { r.y_top + r.h - t    } else { r.y_top + r.h };
         let left_x   = if e.left   { r.x                  } else { r.x - g };
         let right_x  = if e.right  { r.x + r.w - t        } else { r.x + r.w };
-        vec![
+        [
             // 4 sides span the rect's perpendicular extent (cell.w/cell.h).
             Rect { x: r.x,     y_top: top_y,    w: r.w, h: t   },
             Rect { x: r.x,     y_top: bottom_y, w: r.w, h: t   },
@@ -161,6 +159,8 @@ impl GridItem {
             Rect { x: left_x,  y_top: bottom_y, w: t, h: t },
             Rect { x: right_x, y_top: bottom_y, w: t, h: t },
         ]
+        .into_iter()
+        .take(shown)
     }
 }
 
