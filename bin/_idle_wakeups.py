@@ -143,6 +143,7 @@ def snapshot(pattern):
             "cpu": abs_to_secs(r.user_time + r.system_time),
             "idle_wk": r.pkg_idle_wkups, "intr_wk": r.interrupt_wkups,
             "footprint": r.phys_footprint, "threads": threads(pid),
+            "instructions": r.instructions,
         }
     return snap
 
@@ -164,7 +165,7 @@ def reading(pattern, window):
     procs = []
     for pid in sorted(b):
         x, y = a[pid], b[pid]
-        d = {k: y[k] - x[k] for k in ("cpu", "idle_wk", "intr_wk", "ps_cpu")}
+        d = {k: y[k] - x[k] for k in ("cpu", "idle_wk", "intr_wk", "ps_cpu", "instructions")}
         if min(d.values()) < 0:
             broken(f"a counter of pid {pid} ran backwards")
         # ps counts in hundredths of a second; the two clocks must agree to that
@@ -180,6 +181,7 @@ def reading(pattern, window):
             "cpu_pct": round(100 * d["cpu"] / secs, 4),
             "intr_wakeups_per_sec": round(d["intr_wk"] / secs, 2),
             "idle_wakeups_per_sec": round(d["idle_wk"] / secs, 2),
+            "instructions": d["instructions"],
             "rss_kib": y["rss_kib"], "footprint_kib": y["footprint"] // 1024,
             "threads": th,
         })

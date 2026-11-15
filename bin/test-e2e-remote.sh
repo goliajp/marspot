@@ -15,6 +15,8 @@
 #   E2E_SUITE_TIMEOUT=1800 bin/test-e2e-remote.sh test-multi-window.sh
 #   HOST=other-mini bin/test-e2e-remote.sh
 #   E2E_ENV=NAME=value bin/test-e2e-remote.sh      # one more variable for every suite
+#   E2E_FEATURES=latency-trace bin/test-e2e-remote.sh measure-latency.sh
+#   REMOTE_NAME=my-tree bin/test-e2e-remote.sh     # a remote tree of its own
 #
 # The update suites sign their feed with a key generated for the run;
 # the build they test accepts it only with the `test-update-key` feature
@@ -176,17 +178,22 @@ trap 'rm -rf "$LOCK_LOCAL"' EXIT
 
 remote_sync "$HOST" --name "$REMOTE_NAME"
 
-echo "==> building release on $HOST"
-remote_tracked "source ~/.cargo/env && cd ~/$REMOTE_DIR && \
-  /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT bin/_bounded.sh $BUILD_TIMEOUT \
-  sh -c 'cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session \
-    && cargo build --release -p marspot-peer'" \
-  2>&1 | tail -2 || { echo "FAIL: release build on $HOST" >&2; exit 1; }
-# macOS assesses a freshly built executable on its first exec, for an
-# unbounded time on a busy host; pay that here, outside every suite's
-# stopwatch.
-ssh "$HOST" "cd ~/$REMOTE_DIR && for b in marspot-shell marspot-core marspot-session; do \
-  MARSPOT_NO_REDIRECT=1 target/release/\$b --version >/dev/null 2>&1; done" </dev/null || true
+# A measurement builds inside its own exclusive hold (bin/_build_then.sh):
+# built under a shared hold first, it would wait behind every queued
+# measurement and then queue again itself.
+if [[ ${E2E_LOCK:-heavy} != bench ]]; then
+  echo "==> building release on $HOST"
+  remote_tracked "source ~/.cargo/env && cd ~/$REMOTE_DIR && \
+    /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT bin/_bounded.sh $BUILD_TIMEOUT \
+    sh -c 'cargo build --release ${E2E_FEATURES:+--features $E2E_FEATURES} --bin marspot-shell --bin marspot-core --bin marspot-session \
+      && cargo build --release -p marspot-peer'" \
+    2>&1 | tail -2 || { echo "FAIL: release build on $HOST" >&2; exit 1; }
+  # macOS assesses a freshly built executable on its first exec, for an
+  # unbounded time on a busy host; pay that here, outside every suite's
+  # stopwatch.
+  ssh "$HOST" "cd ~/$REMOTE_DIR && for b in marspot-shell marspot-core marspot-session; do \
+    MARSPOT_NO_REDIRECT=1 target/release/\$b --version >/dev/null 2>&1; done" </dev/null || true
+fi
 
 # A measuring suite's knobs (`IDLE_*`) are set here and read there, and
 # so is anything listed in E2E_ENV ("K=V K=V", e.g. a soak's duration).
@@ -204,8 +211,10 @@ for suite in "${SUITES[@]}"; do
   echo "════ $suite on $HOST ════"
   if [[ ${E2E_LOCK:-heavy} == bench ]]; then
     lock="bench --max-wait $MAX_WAIT"
+    run="bin/_build_then.sh $BUILD_TIMEOUT $SUITE_TIMEOUT ${E2E_FEATURES:--} $suite"
   else
     lock="heavy --max-wait $MAX_WAIT"
+    run="bin/_bounded.sh $SUITE_TIMEOUT bin/$suite"
   fi
   # Short: the session sockets live under it and sun_path is 104 bytes.
   current_sd="/tmp/msp-e2e-$RUN_ID-$i"
@@ -214,7 +223,7 @@ for suite in "${SUITES[@]}"; do
   # created here so the sandbox helpers find it and give its sessions
   # ids of their own (see dev_seed_session_base)
   remote_gui "cd ~/$REMOTE_DIR && rm -rf $current_sd && mkdir -p $current_sd && env MARSPOT_STATE_DIR=$current_sd$fwd \
-    /usr/local/bin/bench-lock $lock bin/_bounded.sh $SUITE_TIMEOUT bin/$suite"
+    /usr/local/bin/bench-lock $lock $run"
   suite_rc=$?
   set -e
   secs=$(( $(date +%s) - start ))

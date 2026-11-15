@@ -144,7 +144,7 @@ impl Pump {
             never_rests: !signalled
                 || settings.is_err()
                 || std::env::vars_os().any(|(k, _)| {
-                    k.to_str().is_some_and(|k| k.starts_with("MARSPOT_DEV_") && k != "MARSPOT_DEV_SANDBOX")
+                    k.to_str().is_some_and(|k| k.starts_with("MARSPOT_DEV_") && k != "MARSPOT_DEV_SANDBOX" && k != super::dev_window::VAR)
                 }),
             _settings: settings.ok(),
         }

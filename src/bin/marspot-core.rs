@@ -31,7 +31,7 @@ use objc2_metal::MTLTexture;
 
 use marspot::grid_shm::{self, ENV_SHM_FD, GridShmReader};
 use marspot::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
-use marspot::iosurface::IOSurface;
+use marspot::latency_trace::{self as trace, Stage};
 use marspot::layout::Layout;
 use marspot::link_open::open_arg_for;
 use marspot::pane::{L3Conn, L3Spawn, Pane};
@@ -52,7 +52,7 @@ use marspot::shell_proto::{
     decode_preedit, decode_resize, decode_scroll, decode_selection_text, decode_surface_attach,
     decode_surface_attach_window, decode_window_chrome, decode_window_closed,
     decode_window_focus,
-    encode_caret_rect, encode_hello_ack, encode_pong, encode_surface_ready, mods_to_struct,
+    encode_hello_ack, encode_pong, mods_to_struct,
     wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD, ENV_SURFACE_HEIGHT,
     ENV_SURFACE_ID, ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
 };
@@ -482,6 +482,7 @@ mod sup_log_tests {
 #[cfg(test)]
 mod window_state_tests {
     use super::*;
+    use marspot::iosurface::IOSurface;
 
     pub(super) fn win(id: u32, panes: Vec<Pane>) -> WindowState {
         WindowState::new(id, panes, 0, 1, 1, 800.0, 600.0)
@@ -691,7 +692,8 @@ mod window_state_tests {
         );
         let pair_of = |app: &CoreApp, wi: usize| {
             let s = app.windows[wi].surfaces.as_ref().expect("attached");
-            (s.pair[0].id(), s.pair[1].id(), s.writing_idx)
+            let (f, b) = s.ids();
+            (f, b, s.writing_idx)
         };
         assert_eq!(pair_of(&app, 0), (a_f, a_b, 0));
         assert_eq!(pair_of(&app, 1), (b_f, b_b, 0));
@@ -707,7 +709,7 @@ mod window_state_tests {
         assert_eq!(app.windows[1].w_phys, 500.0);
 
         // …and neither does its buffer flip.
-        app.windows[1].surfaces.as_mut().unwrap().flip();
+        app.windows[1].surfaces.as_mut().unwrap().announce();
         assert_eq!(pair_of(&app, 0).2, 0, "peer's writing half flipped");
         assert_eq!(pair_of(&app, 1).2, 1);
 
@@ -715,6 +717,43 @@ mod window_state_tests {
         // race (the window closed first), not a reason to touch anyone.
         assert_eq!(app.attach_window_surfaces(99, a_f, a_b, 10.0, 10.0, 1.0), None);
         assert_eq!(pair_of(&app, 0), (a_f, a_b, 0));
+    }
+
+    /// A shell that shows the surfaces themselves has the one before
+    /// the frame just announced on the screen until it says otherwise,
+    /// and that is the surface the next frame would be drawn into.
+    #[test]
+    fn a_paced_window_draws_nothing_until_its_last_frame_is_reported_shown() {
+        let sandbox = sandbox_state_dir();
+        let mut app = app_with(&sandbox, vec![win(1, Vec::new()), win(2, Vec::new())]);
+        let a = [IOSurface::create(64, 64).expect("front"), IOSurface::create(64, 64).expect("back")];
+        let b = [IOSurface::create(64, 64).expect("front"), IOSurface::create(64, 64).expect("back")];
+        app.attach_window_surfaces(1, a[0].id(), a[1].id(), 64.0, 64.0, 1.0).expect("attached");
+        app.attach_window_surfaces(2, b[0].id(), b[1].id(), 64.0, 64.0, 1.0).expect("attached");
+
+        // a shell that never said it paces is never waited for
+        let first = app.windows[0].surfaces.as_mut().unwrap().announce();
+        assert_eq!(first, a[0].id());
+        assert!(!frames::waits(&app.windows[0]), "waited for a shell that reports nothing");
+
+        frames::pace();
+        let second = app.windows[0].surfaces.as_mut().unwrap().announce();
+        assert_eq!(second, a[1].id());
+        assert!(frames::waits(&app.windows[0]));
+        assert!(!frames::waits(&app.windows[1]), "one window's frame held another's");
+        // a report about a frame since replaced, or about another window
+        frames::shown(&mut app, 1, first);
+        frames::shown(&mut app, 2, second);
+        assert!(frames::waits(&app.windows[0]), "let go by a report that was not about its last frame");
+        // the pair it already has, attached again, is no new paint target
+        app.attach_window_surfaces(1, a[0].id(), a[1].id(), 64.0, 64.0, 1.0).expect("attached");
+        assert!(frames::waits(&app.windows[0]), "the same pair attached again cleared the wait");
+        frames::shown(&mut app, 1, second);
+        assert!(!frames::waits(&app.windows[0]));
+        // a new pair has never been on the screen
+        app.windows[0].surfaces.as_mut().unwrap().announce();
+        app.attach_window_surfaces(1, b[0].id(), b[1].id(), 64.0, 64.0, 1.0).expect("attached");
+        assert!(!frames::waits(&app.windows[0]));
     }
 
     /// The core exits for a restart only when every pane's session is
@@ -1978,6 +2017,11 @@ enum CoreEvent {
     /// Shell sent HELLO with its protocol version.  We reply with
     /// HELLO_ACK echoing the version we agree on.
     Hello(u32),
+    /// The shell shows our surfaces directly and reports each shown.
+    FramePace,
+    /// (window, surface): that surface is on the window and the one
+    /// before it has left the screen.
+    FrameShown(u32, u32),
     /// Shell sent a liveness probe.  We echo the nonce back via PONG.
     Ping(u32),
     /// The shell drew a toolbar icon this core asked for:
@@ -2227,6 +2271,7 @@ fn drop_preview_rect(rect: &marspot::layout::CellRect, zone: DropZone) -> (f64, 
 fn decode_frame(f: &Frame) -> Option<CoreEvent> {
     match f.msg_type {
         MsgType::KeyEvent => decode_key_event(&f.payload).ok().map(|(w, win)| {
+            trace::mark(Stage::CoreKeyRead, 0);
             let (e, m) = wire_to_event(w);
             CoreEvent::Key(e, m, win)
         }),
@@ -2319,6 +2364,10 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
             .ok()
             .map(|(text, win)| CoreEvent::Preedit(text, win)),
         MsgType::Hello => decode_hello(&f.payload).ok().map(CoreEvent::Hello),
+        MsgType::FramePace => Some(CoreEvent::FramePace),
+        MsgType::FrameShown => marspot::shell_proto::decode_frame_shown(&f.payload)
+            .ok()
+            .map(|(window, surface)| CoreEvent::FrameShown(window, surface)),
         MsgType::Ping => decode_ping(&f.payload).ok().map(CoreEvent::Ping),
         MsgType::IconMask => marspot::shell_proto::decode_icon_mask(&f.payload)
             .ok()
@@ -2366,6 +2415,7 @@ fn l3_reader_loop(
         match Frame::read_from(&mut stream) {
             Ok(Some(f)) => match f.msg_type {
                 MsgType::GridReady => {
+                    trace::mark(Stage::GridReady, session_id as u32);
                     if tx.send(CoreEvent::L3Ready).is_err() {
                         return;
                     }
@@ -2787,81 +2837,6 @@ impl PaneSessionState {
 /// What is NOT here (stays on `CoreApp`): anything keyed by session
 /// id, which travels with a pane across windows for free, and the
 /// renderer's shared resources.
-/// Where one window's frames land: the IOSurface pair L1 handed us
-/// for it, the Metal textures wrapping them, and which half the next
-/// frame writes into.
-///
-/// RFC-005 step 4d — this used to be three locals in `main()`, which
-/// is how "there is exactly one window" was encoded on the L2 side:
-/// a second window's `SurfaceAttach` overwrote the first window's
-/// pair, and from then on the first window's presenter sampled a
-/// surface nobody was painting into.  Windows are peers; each owns
-/// its own paint target.
-struct WindowSurfaces {
-    pair: [IOSurface; 2],
-    tex: [objc2::rc::Retained<ProtocolObject<dyn MTLTexture>>; 2],
-    /// The half the next render writes; flipped after each frame so
-    /// the shell only ever presents a surface the GPU has finished.
-    writing_idx: usize,
-}
-
-impl WindowSurfaces {
-    /// Look both ids up, retain them, and wrap them in textures.
-    /// `None` when either lookup or texture creation fails — the
-    /// caller keeps whatever pair the window already had, which is
-    /// the difference between a dropped frame and a black window.
-    fn attach(
-        front_id: u32,
-        back_id: u32,
-        device: &ProtocolObject<dyn objc2_metal::MTLDevice>,
-    ) -> Option<Self> {
-        let front = IOSurface::lookup(front_id)?;
-        let back = IOSurface::lookup(back_id)?;
-        front.increment_use();
-        back.increment_use();
-        let tex_f = front.make_metal_texture(device);
-        let tex_b = back.make_metal_texture(device);
-        match (tex_f, tex_b) {
-            (Ok(tf), Ok(tb)) => Some(Self {
-                pair: [front, back],
-                tex: [tf, tb],
-                writing_idx: 0,
-            }),
-            (tf, tb) => {
-                if let Err(e) = tf {
-                    lx_error!("core.attach.metal_texture_front_failed", &format!("{e:?}"));
-                }
-                if let Err(e) = tb {
-                    lx_error!("core.attach.metal_texture_back_failed", &format!("{e:?}"));
-                }
-                front.decrement_use();
-                back.decrement_use();
-                None
-            }
-        }
-    }
-
-    /// Balance the two `increment_use` calls `attach` made.  Called
-    /// when the pair is replaced by a fresh one and when the window
-    /// itself goes away.
-    fn release(&self) {
-        self.pair[0].decrement_use();
-        self.pair[1].decrement_use();
-    }
-
-    fn writing_tex(&self) -> objc2::rc::Retained<ProtocolObject<dyn MTLTexture>> {
-        self.tex[self.writing_idx].clone()
-    }
-
-    fn writing_surface_id(&self) -> u32 {
-        self.pair[self.writing_idx].id()
-    }
-
-    fn flip(&mut self) {
-        self.writing_idx = 1 - self.writing_idx;
-    }
-}
-
 struct WindowState {
     /// L1-allocated, monotonic.  Stable across a core swap because
     /// L1 replays one `SurfaceAttach` per window into the new core.
@@ -3158,6 +3133,9 @@ macro_rules! win {
     };
 }
 
+#[path = "marspot-core/frames.rs"]
+mod frames;
+use frames::WindowSurfaces;
 #[path = "marspot-core/hover.rs"]
 mod hover;
 #[path = "marspot-core/idle.rs"]
@@ -3166,6 +3144,8 @@ mod idle;
 mod shell_end;
 #[path = "marspot-core/keys.rs"]
 mod keys;
+#[path = "marspot-core/probe_args.rs"]
+mod probe_args;
 #[path = "marspot-core/reattach.rs"]
 mod reattach;
 use reattach::reattach_l3_pane;
@@ -5338,19 +5318,19 @@ impl CoreApp {
         scale: f64,
     ) -> Option<usize> {
         let wi = self.window_index(window_id)?;
-        let Some(fresh) = WindowSurfaces::attach(front_id, back_id, self.renderer.device())
-        else {
-            lx_warn!(
-                "core.attach.surface_lookup_nil",
-                "IOSurfaceLookup returned nil; keeping the previous pair",
-                window_id = window_id,
-                front_id = front_id,
-                back_id = back_id
-            );
-            return None;
-        };
-        if let Some(old) = win!(self, wi).surfaces.replace(fresh) {
-            old.release();
+        // the pair the window already has is no new paint target
+        if !win!(self, wi).surfaces.as_ref().is_some_and(|s| s.ids() == (front_id, back_id)) {
+            let Some(fresh) = WindowSurfaces::attach(front_id, back_id, self.renderer.device()) else {
+                lx_warn!(
+                    "core.attach.surface_lookup_nil",
+                    "IOSurfaceLookup returned nil; keeping the previous pair",
+                    window_id = window_id,
+                    front_id = front_id,
+                    back_id = back_id
+                );
+                return None;
+            };
+            win!(self, wi).surfaces = Some(fresh);
         }
         win!(self, wi).w_phys = w_phys;
         win!(self, wi).h_phys = h_phys;
@@ -5434,11 +5414,6 @@ impl CoreApp {
             // hand every window above it the geometry of its
             // neighbour.  L1 compacts its own list to match.
             self.forget_slot(gone.frame_index);
-        }
-        // Balance the `increment_use` from this window's last attach;
-        // without it the IOSurface pair leaks for the life of the core.
-        if let Some(s) = gone.surfaces.as_ref() {
-            s.release();
         }
         self.key_window = self.key_window.min(self.windows.len() - 1);
         lx_event!(
@@ -8496,15 +8471,7 @@ fn draw_icons(list: &str) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // `--version` answers before anything else touches the machine.
-    // The update path probes a freshly-staged binary with it for one
-    // reason: to make the kernel exec this file while the outgoing
-    // core is still on screen, so the Gatekeeper assessment is paid
-    // then instead of during the swap's blackout.  A probe that
-    // migrated state, opened the log, or read env would be a probe
-    // with side effects — so this arm comes first and does neither.
-    if args.first().map(String::as_str) == Some("--version") {
-        println!("{}", env!("MARSPOT_VERSION_CORE"));
+    if probe_args::answer(&args) {
         return;
     }
     // The shell's icon drawer: draw `symbol:point_px,...` to stdout and
@@ -8904,6 +8871,8 @@ fn main() {
 
     let wake = event_tx.clone();
     theme_follow::watch(move || drop(wake.send(CoreEvent::L3Ready)));
+    let wake = event_tx.clone();
+    app.renderer.set_frame_done(move || drop(wake.send(CoreEvent::L3Ready)));
     let start = Instant::now();
     let mut frame: u64 = 0;
     // Track when we last saw forward progress (a pump that delivered
@@ -8944,27 +8913,15 @@ fn main() {
             // cap, wake the loop in ≤ FRAME_MIN_INTERVAL to flush the
             // deferred frame.  The deadline is the soonest across the
             // dirty windows — one window's cap must not delay another's.
-            // A frame on the GPU has to be reaped by a poll — nothing
-            // sends us an event when it lands — so while one is in
-            // flight the loop wakes often enough to present it.  With
-            // no frame owed the wait is `idle_wait`: no deadline at all
+            // A window with a frame on the GPU sets no deadline: the
+            // frame's completion is an event (`set_frame_done`), and
+            // until it arrives the window cannot draw anyway.  With no
+            // frame owed the wait is `idle_wait`: no deadline at all
             // unless some work is pending on a clock.
-            const SETTLE_POLL: Duration = Duration::from_millis(1);
             let recv_timeout = app
                 .windows
                 .iter()
-                .filter(|w| w.needs_render || w.render.frame_in_flight())
-                .map(|w| {
-                    if w.render.frame_in_flight() {
-                        SETTLE_POLL
-                    } else {
-                        Duration::MAX
-                    }
-                })
-                .chain(
-                    app.windows
-                        .iter()
-                        .filter(|w| w.needs_render)
+                .filter(|w| w.needs_render && !w.render.frame_in_flight() && !frames::waits(w))
                 // One reading of the clock, not two.  The first cut
                 // asked `t.elapsed()` in the guard and again in the
                 // body, and time passes between them: an elapsed that
@@ -8973,11 +8930,10 @@ fn main() {
                 // panics on underflow.  It took twelve hours of logs
                 // to hit once — `overflow when subtracting durations`,
                 // straight through `main`, taking the window with it.
-                        .map(|w| match w.last_render_at {
-                            Some(t) => frame_min_interval.saturating_sub(t.elapsed()),
-                            None => Duration::ZERO,
-                        }),
-                )
+                .map(|w| match w.last_render_at {
+                    Some(t) => frame_min_interval.saturating_sub(t.elapsed()),
+                    None => Duration::ZERO,
+                })
                 .min()
                 .or_else(|| app.idle_wait());
             let recv_timeout = if app.any_prediction_pending() || app.dev_panels.is_some() {
@@ -8985,6 +8941,9 @@ fn main() {
             } else {
                 recv_timeout
             };
+            if recv_timeout.is_none() {
+                trace::flush();
+            }
             match recv_timeout.map_or_else(|| event_rx.recv().map_err(|_| RecvTimeoutError::Disconnected), |t| event_rx.recv_timeout(t)) {
                 Ok(ev) => Some(ev),
                 Err(RecvTimeoutError::Timeout) => None,
@@ -9089,6 +9048,7 @@ fn main() {
                     if let Some(wi) = app.window_index(win) {
                         app.key(wi, event, mods)
                     }
+                    trace::mark(Stage::CoreKeyHandled, 0);
                 }
                 CoreEvent::MouseDown(x, y, mods, win) => {
                     if let Some(wi) = app.focus_window(win) {
@@ -9366,6 +9326,11 @@ fn main() {
                 CoreEvent::Ping(nonce) => {
                     to_ack.push((MsgType::Pong, encode_pong(nonce)));
                 }
+                CoreEvent::FramePace => {
+                    frames::pace();
+                    to_ack.push((MsgType::FramePaceAck, Vec::new()));
+                }
+                CoreEvent::FrameShown(window, surface) => frames::shown(app, window, surface),
                 CoreEvent::IconMask(symbol, point_px, side, mask) => {
                     if marspot::ui::system::macos::icons::deliver(symbol, point_px, side, mask) {
                         for w in app.windows.iter_mut() {
@@ -9513,6 +9478,11 @@ fn main() {
             // names: this branch and the main render path can both run
             // in one iteration, and a breakdown listing "pump" twice
             // reads like double bookkeeping.
+            // its last frame is not yet off the screen: this one waits
+            if frames::waits(&win!(app, wi)) {
+                win!(app, wi).needs_render = true;
+                continue;
+            }
             watch.phase("attach-pump");
             app.pump_all();
             watch.phase("attach-render");
@@ -9523,19 +9493,14 @@ fn main() {
                 .expect("attach just installed a pair");
             let _ = app.render_blocking(wi, &tex);
             watch.phase("attach-post");
-            if let Some(s) = win!(app, wi).surfaces.as_mut() {
-                let ack = Frame::new(
-                    MsgType::SurfaceReady,
-                    encode_surface_ready(s.writing_surface_id()),
-                );
-                // Next render writes the other half.
-                s.flip();
-                send_to_shell(&control_writer, ack, "surface_ready");
-            }
+            frames::announce_attached(&mut app, wi, &control_writer);
         }
         watch.phase("pump");
+        let pump_t0 = if trace::enabled() { trace::now_ns() } else { 0 };
         let pumped = app.pump_all();
         if pumped > 0 {
+            trace::mark_at(Stage::PumpBegin, 0, pump_t0);
+            trace::mark(Stage::PumpEnd, 0);
             app.note_output();
             bytes_pumped_total = bytes_pumped_total.saturating_add(pumped as u64);
             last_progress = Instant::now();
@@ -9576,7 +9541,7 @@ fn main() {
             // reading, and the whole reason we no longer wait is to
             // spend this time on input instead.  `needs_render` stays
             // set, so the frame goes out as soon as the GPU is done.
-            if win!(app, wi).render.frame_in_flight() {
+            if win!(app, wi).render.frame_in_flight() || frames::waits(&win!(app, wi)) {
                 continue;
             }
             // A window with no paint target (stale ids at attach) is
@@ -9594,7 +9559,9 @@ fn main() {
             let render_t0 = Instant::now();
             win!(app, wi).last_render_at = Some(render_t0);
             watch.phase("render");
+            trace::mark(Stage::RenderBegin, wi as u32);
             let caret = app.render(wi, &tex);
+            frames::trace_committed(wi, app.renderer_split());
             watch.phase("post-render");
             // The frame is on the GPU, not finished.  Hold the caret
             // and let the poll below flip and announce it — the shell
@@ -9610,74 +9577,7 @@ fn main() {
             send_to_shell(&control_writer, Frame::new(MsgType::IconMaskWanted, payload), "icon_mask_wanted");
         }
 
-        // Frames that finished since the last pass: flip to them and
-        // tell the shell.  This is the half of the old blocking render
-        // that had to stay synchronous — it just no longer costs the
-        // main loop the GPU's queueing time.
-        for wi in 0..app.windows.len() {
-            if !win!(app, wi).render.settled() {
-                continue;
-            }
-            let caret = win!(app, wi).pending_caret.take();
-            let (surface_id, writing_idx) = {
-                let Some(s) = win!(app, wi).surfaces.as_mut() else { continue };
-                let ids = (s.writing_surface_id(), s.writing_idx);
-                // Flip: next render writes the other half.
-                s.flip();
-                ids
-            };
-            // Sampled per-frame DEBUG.  1/8 keeps a ~7-Hz heartbeat on
-            // a busy display (60 Hz cap) without flooding when the
-            // user runs `MARSPOT_LOG_CORE=debug` to investigate latency
-            // / dropped frames.  surface_id ties it to the IOSurface
-            // lifecycle on the shell side; dur_us is the actual GPU
-            // wait, the dominant time cost in a frame.
-            lx_debug_sampled!(
-                "render.frame",
-                8,
-                "frame rendered",
-                frame = frame,
-                window_id = win!(app, wi).window_id,
-                writing_idx = writing_idx,
-                surface_id = surface_id,
-                dur_us = win!(app, wi)
-                    .last_render_at
-                    .map(|t| t.elapsed().as_micros() as u64)
-                    .unwrap_or(0),
-                n_panes = win!(app, wi).panes.len(),
-                focused_idx = win!(app, wi).focused_idx
-            );
-            // Per-frame ack — the just-completed surface ID.  In v=2
-            // this replaces the empty-payload `FrameRendered` poke:
-            // shell uses the id to flip its presenter's `current_idx`,
-            // then presents.  Same one frame round-trip the old path
-            // had, but the present now samples a guaranteed-finished
-            // surface instead of racing the writing one.  The shell
-            // resolves which window an id belongs to by looking it up
-            // in its per-window pairs, so no window tag is needed.
-            let ack = Frame::new(MsgType::SurfaceReady, encode_surface_ready(surface_id));
-            send_to_shell(&control_writer, ack, "surface_ready");
-            // FrameRendered is the legacy v=1 wake.  A v=2 shell
-            // already woke on SurfaceReady, so this is redundant for
-            // a same-version shell.  An OLD shell paired with this
-            // NEW core (rare — possible after a botched silent
-            // update) only listens for FrameRendered, though, so we
-            // keep emitting it for compatibility.  No-op on the v=2
-            // shell side (handler just sets frame_pending again).
-            let fr = Frame::new(MsgType::FrameRendered, Vec::new());
-            send_to_shell(&control_writer, fr, "frame_rendered");
-            // Publish the focused-pane caret so the shell can anchor
-            // the IME candidate window.  Dedupe — an idle cursor must
-            // not stream identical frames at render cadence.
-            if win!(app, wi).last_caret_sent != Some(caret) {
-                win!(app, wi).last_caret_sent = Some(caret);
-                let f = Frame::new(
-                    MsgType::CaretRect,
-                    encode_caret_rect(caret, win!(app, wi).window_id),
-                );
-                send_to_shell(&control_writer, f, "caret_rect");
-            }
-        }
+        frames::announce_settled(&mut app, &control_writer, frame);
 
         if let Some(r) = watch.end() {
             // `render` being the slowest phase is where the trail used
