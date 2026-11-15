@@ -403,7 +403,7 @@ mod tests {
         let stale = born(51_000, 1);
         let p = Pane { started_ms: 61_000, ..pane(2, "/p", None) };
         let ts = loaded(&[(stale.as_str(), "/p")]);
-        assert_eq!(assign(&[p.clone()], &ts, &HashMap::new())[&2], Err(Unbound::NoThread));
+        assert_eq!(assign(std::slice::from_ref(&p), &ts, &HashMap::new())[&2], Err(Unbound::NoThread));
         // its own arrives: that one, and only that one
         let own = born(65_000, 2);
         let ts = loaded(&[(stale.as_str(), "/p"), (own.as_str(), "/p")]);
@@ -429,11 +429,11 @@ mod tests {
     fn nothing_is_guessed_where_the_title_will_say() {
         let ts = loaded(&[(N1, "/p")]);
         let p = Pane { title_expected: true, ..pane(1, "/p", None) };
-        assert_eq!(assign(&[p.clone()], &ts, &HashMap::new())[&1], Err(Unbound::AwaitingTitle));
+        assert_eq!(assign(std::slice::from_ref(&p), &ts, &HashMap::new())[&1], Err(Unbound::AwaitingTitle));
         let shown = Pane { title_thread: thread_in_title(&format!("p | {N1}")), ..p.clone() };
         assert_eq!(assign(&[shown], &ts, &HashMap::new())[&1], Ok(N1.into()));
         // a binding its process already has is not a guess
-        assert_eq!(assign(&[p.clone()], &ts, &HashMap::from([(1, N1.to_string())]))[&1], Ok(N1.into()));
+        assert_eq!(assign(std::slice::from_ref(&p), &ts, &HashMap::from([(1, N1.to_string())]))[&1], Ok(N1.into()));
         // nor is the thread its command line resumes
         assert_eq!(assign(&[Pane { argv_thread: Some(N1.into()), ..p }], &ts, &HashMap::new())[&1], Ok(N1.into()));
     }
@@ -445,7 +445,7 @@ mod tests {
         let left = born(51_000, 1);
         let ts = loaded(&[(left.as_str(), "/p")]);
         let p = Pane { started_ms: 61_000, title_thread: thread_in_title(&format!("p | {left}")), ..pane(1, "/p", None) };
-        assert_eq!(assign(&[p.clone()], &ts, &HashMap::new())[&1], Err(Unbound::AwaitingTitle));
+        assert_eq!(assign(std::slice::from_ref(&p), &ts, &HashMap::new())[&1], Err(Unbound::AwaitingTitle));
         // the process writes its own
         let own = born(65_000, 2);
         let ts = loaded(&[(left.as_str(), "/p"), (own.as_str(), "/p")]);
@@ -512,7 +512,7 @@ mod tests {
     fn nothing_is_paired_in_a_directory_another_codex_has_run_in() {
         let ts = loaded(&[(N1, "/p")]);
         let p = Pane { alone: false, ..pane(1, "/p", None) };
-        assert_eq!(assign(&[p.clone()], &ts, &HashMap::new())[&1], Err(Unbound::Shared));
+        assert_eq!(assign(std::slice::from_ref(&p), &ts, &HashMap::new())[&1], Err(Unbound::Shared));
         assert_eq!(assign(&[Pane { alone: true, ..p.clone() }], &ts, &HashMap::new())[&1], Ok(N1.into()));
         // a title settles it all the same
         let shown = Pane { title_thread: thread_in_title(&format!("p | {N1}")), ..p };
@@ -526,9 +526,9 @@ mod tests {
     fn a_pairing_is_given_up_when_a_second_thread_could_be_the_processs() {
         let cur = HashMap::from([(1, N1.to_string())]);
         let p = pane(1, "/p", None);
-        assert_eq!(assign(&[p.clone()], &loaded(&[(N1, "/p")]), &cur)[&1], Ok(N1.into()));
+        assert_eq!(assign(std::slice::from_ref(&p), &loaded(&[(N1, "/p")]), &cur)[&1], Ok(N1.into()));
         let two = loaded(&[(N1, "/p"), (N2, "/p")]);
-        assert_eq!(assign(&[p.clone()], &two, &cur)[&1], Err(Unbound::Ambiguous { panes: 1, threads: 2 }));
+        assert_eq!(assign(std::slice::from_ref(&p), &two, &cur)[&1], Err(Unbound::Ambiguous { panes: 1, threads: 2 }));
         // one older than the process is not its own, and changes nothing
         let late = Pane { started_ms: 70_000, ..p.clone() };
         let older = born(51_000, 9);
