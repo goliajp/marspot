@@ -20,6 +20,13 @@ use crate::ui::components::settings_view::SettingsRender;
 use crate::ui::components::shortcuts_view::ShortcutsRender;
 use crate::ui::core::view::ViewPainter;
 
+/// What a window keeps from one frame to the next: each pane's
+/// instances, and the chrome drawn from a tree.
+#[derive(Default)]
+pub(crate) struct FrameKeep {
+    pub(crate) panes: Vec<PaneInstanceCache>,
+}
+
 /// What `build_instances` measured about itself.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BuildStats {
@@ -75,7 +82,7 @@ pub(crate) fn build_instances(
     color_glyphs: &mut Vec<GlyphInstance>,
     dots: &mut Vec<CellInstance>,
     ui_rects: &mut Vec<UiRectInstance>,
-    pane_caches: &mut Vec<PaneInstanceCache>,
+    kept: &mut FrameKeep,
     overlay_cells: &mut Vec<CellInstance>,
     overlay_glyphs: &mut Vec<GlyphInstance>,
     overlay_ui_rects: &mut Vec<UiRectInstance>,
@@ -83,13 +90,13 @@ pub(crate) fn build_instances(
     build_frame(
         layout, views, sidebar, focused_idx, window_focused, chrome_hover, process_panel, cc_usage,
         form_panel, layout_modal_state, drop_preview, drag_source, context_menu_state, font, atlas,
-        color_atlas, cells, glyphs, color_glyphs, dots, ui_rects, pane_caches, overlay_cells,
+        color_atlas, cells, glyphs, color_glyphs, dots, ui_rects, kept, overlay_cells,
         overlay_glyphs, overlay_ui_rects, true,
     )
 }
 
 /// [`build_instances`], with a choice: with `inline_panes` off, each
-/// pane's instances stay in its slot of `pane_caches` and the lists
+/// pane's instances stay in its slot of `kept.panes` and the lists
 /// hold everything else, for a caller that draws a pane from buffers
 /// of its own.
 pub(crate) fn build_frame(
@@ -114,7 +121,7 @@ pub(crate) fn build_frame(
     color_glyphs: &mut Vec<GlyphInstance>,
     _dots: &mut Vec<CellInstance>,
     ui_rects: &mut Vec<UiRectInstance>,
-    pane_caches: &mut Vec<PaneInstanceCache>,
+    kept: &mut FrameKeep,
     overlay_cells: &mut Vec<CellInstance>,
     overlay_glyphs: &mut Vec<GlyphInstance>,
     overlay_ui_rects: &mut Vec<UiRectInstance>,
@@ -146,7 +153,7 @@ pub(crate) fn build_frame(
 
     let stats = push_panes(
         layout, views, window_focused, cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
-        font, atlas, color_atlas, cells, glyphs, color_glyphs, ui_rects, pane_caches, inline_panes,
+        font, atlas, color_atlas, cells, glyphs, color_glyphs, ui_rects, &mut kept.panes, inline_panes,
     );
 
     // Everything after the panes in the main layers goes through one

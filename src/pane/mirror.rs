@@ -193,7 +193,7 @@ mod tests {
             &mut color_glyphs,
             &mut Vec::new(),
             &mut Vec::new(),
-            &mut Vec::new(),
+            &mut crate::frame_build::frame::FrameKeep::default(),
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
