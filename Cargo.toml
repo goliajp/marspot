@@ -100,6 +100,10 @@ objc2 = "0.6"
 # gnustep / unstable flags we don't want.
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
+# The completion handler of an AppKit call is an Objective-C block, and
+# this is the crate objc2 builds blocks with; it is in the tree already
+# through objc2-app-kit, so writing our own block layout is unreasonable.
+block2 = "0.6"
 objc2-quartz-core = "0.3"
 objc2-metal = "0.3"
 core-text = "22.0"

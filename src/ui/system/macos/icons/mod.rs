@@ -79,6 +79,91 @@ fn mask_side(point_px: u32) -> u32 {
     2 * (point_px * 7).div_ceil(8)
 }
 
+/// Set by the shell on the core it starts: the core asks the shell for
+/// every mask instead of drawing it.  Drawing a system symbol registers
+/// the process with LaunchServices (measured on macOS 27.2.1: loading
+/// the image is enough), and a registered core can be given the
+/// sessions' coalition, or keep it on its dead record after it exits.
+/// The shell is the registered application anyway.  A core started by a
+/// shell from before this does not see it and draws its own.
+pub const FROM_SHELL_ENV: &str = "MARSPOT_ICONS_FROM_SHELL";
+
+fn from_shell() -> bool {
+    static FROM_SHELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FROM_SHELL.get_or_init(|| std::env::var_os(FROM_SHELL_ENV).is_some())
+}
+
+/// The masks the shell drew for this process, and the ones it is still
+/// to be asked for.
+struct Served {
+    masks: std::collections::VecDeque<((u16, u16), Vec<u8>)>,
+    asked: Vec<(u16, u16)>,
+    to_ask: Vec<(u16, u16)>,
+}
+
+/// Seven symbols at the few sizes the chrome uses; a bound all the
+/// same, oldest out first.
+const SERVED_MOST: usize = 64;
+
+static SERVED: std::sync::Mutex<Served> =
+    std::sync::Mutex::new(Served { masks: std::collections::VecDeque::new(), asked: Vec::new(), to_ask: Vec::new() });
+
+fn served() -> std::sync::MutexGuard<'static, Served> {
+    // nothing panics while holding it; a poisoned guard is as good
+    SERVED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Note `symbol` at `point_px` as wanted, once until it arrives.
+fn want(symbol: u16, point_px: u16) {
+    let mut s = served();
+    if !s.asked.contains(&(symbol, point_px)) {
+        s.asked.push((symbol, point_px));
+        s.to_ask.push((symbol, point_px));
+    }
+}
+
+/// The masks to ask the shell for since the last call: `(symbol,
+/// point_px)`.
+pub fn take_wanted() -> Vec<(u16, u16)> {
+    std::mem::take(&mut served().to_ask)
+}
+
+/// A mask the shell sent.  False, and nothing kept, when it is not one
+/// this process could have asked for: it crossed a process boundary.
+pub fn deliver(symbol: u16, point_px: u16, side: u16, mask: Vec<u8>) -> bool {
+    if symbol as usize >= Symbol::ALL.len()
+        || !(1..=MOST_POINT_PX).contains(&point_px)
+        || side as u32 != mask_side(point_px as u32)
+        || mask.len() != side as usize * side as usize
+    {
+        return false;
+    }
+    let mut s = served();
+    s.asked.retain(|k| *k != (symbol, point_px));
+    s.masks.retain(|(k, _)| *k != (symbol, point_px));
+    if s.masks.len() >= SERVED_MOST {
+        s.masks.pop_front();
+    }
+    s.masks.push_back(((symbol, point_px), mask));
+    true
+}
+
+/// The largest point size a mask is drawn at on request.
+const MOST_POINT_PX: u16 = 256;
+
+/// For the shell: draw `symbol` at `point_px` as the core asked;
+/// `(side, mask)`, or `None` for a request no core would make.
+pub fn draw_for_core(symbol: u16, point_px: u16) -> Option<(u16, Vec<u8>)> {
+    let symbol = *Symbol::ALL.get(symbol as usize)?;
+    if !(1..=MOST_POINT_PX).contains(&point_px) {
+        return None;
+    }
+    let side = mask_side(point_px as u32);
+    let mut mask = vec![0u8; (side * side) as usize];
+    raster::rasterise(symbol.name(), point_px as u32, side, &mut mask);
+    Some((side as u16, mask))
+}
+
 /// Have AppKit load the symbol set, on a thread of its own.
 ///
 /// The first symbol a process asks for costs it the set itself, a
@@ -88,6 +173,12 @@ fn mask_side(point_px: u32) -> u32 {
 pub fn warm() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
+        if from_shell() {
+            for symbol in Symbol::ALL {
+                want(symbol as u16, 13);
+            }
+            return;
+        }
         std::thread::spawn(|| {
             const POINT_PX: u32 = 13;
             let side = mask_side(POINT_PX);
@@ -109,8 +200,23 @@ pub fn paint(p: &mut ViewPainter, symbol: Symbol, rect: Rect, point_px: f64, col
     let side = mask_side(point_px);
     // one weight for the whole set, so the key is the symbol and its size
     let key = GlyphKey::new(SYMBOL_FONT_ID, symbol as u16, point_px as u16, 0, 0);
-    let Some(entry) = p.atlas.get_or_insert_custom_raster(key, side, side, 0, 1, |mask| {
-        raster::rasterise(symbol.name(), point_px, side, mask);
+    // drawn by the shell: until its mask is here the icon is left out,
+    // and the frame that follows its arrival has it
+    let shell_drew = if from_shell() && !p.atlas.has(&key) {
+        let found = served().masks.iter().find(|(k, _)| *k == (symbol as u16, point_px as u16)).map(|(_, m)| m.clone());
+        match found {
+            Some(mask) => Some(mask),
+            None => {
+                want(symbol as u16, point_px as u16);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let Some(entry) = p.atlas.get_or_insert_custom_raster(key, side, side, 0, 1, |mask| match &shell_drew {
+        Some(drawn) => mask.copy_from_slice(drawn),
+        None => raster::rasterise(symbol.name(), point_px, side, mask),
     }) else {
         return;
     };
@@ -130,6 +236,32 @@ pub fn paint(p: &mut ViewPainter, symbol: Symbol, rect: Rect, point_px: f64, col
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mask_from_the_shell_is_kept_only_when_it_is_one_that_could_be_asked_for() {
+        let side = mask_side(20) as u16;
+        let fits = vec![1u8; side as usize * side as usize];
+        assert!(!deliver(Symbol::ALL.len() as u16, 20, side, fits.clone()), "no such symbol");
+        assert!(!deliver(0, 0, side, fits.clone()), "no size");
+        assert!(!deliver(0, MOST_POINT_PX + 1, side, fits.clone()), "too large");
+        assert!(!deliver(0, 20, side + 2, fits.clone()), "a side the size does not have");
+        assert!(!deliver(0, 20, side, vec![1u8; 3]), "a mask of the wrong length");
+        want(1, 20);
+        want(1, 20);
+        assert_eq!(take_wanted().iter().filter(|k| **k == (1, 20)).count(), 1, "asked for once");
+        assert!(deliver(1, 20, side, fits));
+        want(1, 20);
+        assert!(take_wanted().contains(&(1, 20)), "asked for again once the one asked for has arrived");
+    }
+
+    #[test]
+    fn the_shell_draws_what_a_core_asks_for_and_nothing_else() {
+        let (side, mask) = draw_for_core(Symbol::Plus as u16, 26).expect("a mask");
+        assert_eq!(side as u32, mask_side(26));
+        assert!(mask.iter().any(|&a| a > 0));
+        assert!(draw_for_core(Symbol::ALL.len() as u16, 26).is_none());
+        assert!(draw_for_core(0, 0).is_none());
+    }
 
     fn mask(symbol: Symbol, point_px: u32) -> (Vec<u8>, usize) {
         let side = mask_side(point_px);

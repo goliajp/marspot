@@ -26,6 +26,9 @@ pub(crate) struct Peers {
     /// session cannot be told yet, so nobody takes a missing session
     /// for a finished one.
     pub all_known: bool,
+    /// The gemini panes that are not in `bound`: there, and with no
+    /// session anything could be sent to.
+    pub unbound: Vec<(u64, pidtree::ProcId)>,
 }
 
 static PEERS: Mutex<Option<Peers>> = Mutex::new(None);

@@ -296,17 +296,7 @@ R1B="$(wait_record "$P1" "$T1" 60)" \
 ok "the reopened Codex bound to its new thread $(cut -f3 <<<"$R1B"), not the one it left"
 round_trip "$P1" "$R1B" PEERBUS-TAG-TWO
 
-# ── 2. a second Codex in the same directory ───────────────────────
-send_once "$P2" "cd $SB/proj && codex"
-R2="$(wait_record "$P2" "" 60)" || fail "pane $P2's Codex never got an inbox"
-[[ "$(cut -f3 <<<"$R2")" != "$(cut -f3 <<<"$R1B")" ]] || fail "both panes were bound to one thread"
-ok "pane $P2 bound: $(cut -f1 <<<"$R2") thread $(cut -f3 <<<"$R2")"
-round_trip "$P2" "$R2" PEERBUS-TAG-THREE
-(( $(seen "$P1" PEERBUS-TAG-THREE) == 0 )) || fail "pane $P2's message also showed on pane $P1"
-(( $(seen "$P2" PEERBUS-TAG-TWO) == 0 )) || fail "pane $P1's message showed on pane $P2"
-ok "each message showed only on its own pane"
-
-# ── names: two Codex panes in one directory ───────────────────────
+# what a sender is answered, on the two paths a message takes
 mcp_send() { # sending thread, recipient, text → the tool's answer; fails when the tool reports an error
   python3 - "$SB/bin/marspot-peer" "$1" "$2" "$3" <<'PY'
 import json, subprocess, sys
@@ -333,6 +323,74 @@ PY
 }
 hook_to() { hook_field "$(hook_send "$1")" updatedInput.to; }
 hook_refusal() { hook_field "$(hook_send "$1")" permissionDecisionReason; }
+
+# ── 2. a second Codex in the same directory ───────────────────────
+# It is a process called codex before it is Codex, for as long as this
+# test holds it there: a slow start on a busy machine, made to last.
+# In that time the one loaded thread in its directory that no pane has
+# is the one pane 1 left.  That thread is not this pane's: the pane
+# gets no inbox, is in the pane table as a pane without one, and what
+# is sent to it, or to the name it shares, is refused and goes nowhere.
+mkdir -p "$SB/late"
+cat > "$SB/late.c" <<'EOF'
+#include <unistd.h>
+int main(int argc, char **argv) {
+    if (argc < 2) return 2;
+    while (access(argv[1], F_OK) != 0) usleep(100000);
+    char *codex[] = {"codex", NULL};
+    execvp("codex", codex);
+    return 127;
+}
+EOF
+cc -o "$SB/late/codex" "$SB/late.c" || fail "could not build the late starter"
+no_inbox() { # the names of the panes marspot's table lists without an inbox
+  python3 - "$REGISTRY" <<'PY'
+import glob, json, os, sys
+for p in glob.glob(os.path.join(sys.argv[1], ".marspot-panes-*.json")):
+    for e in json.load(open(p)).get("noInbox", []):
+        print(e["name"])
+PY
+}
+send_once "$P2" "cd $SB/proj && $SB/late/codex $SB/late/go"
+W2=""
+for (( i = 0; i < 240; i++ )); do
+  R2="$(record_of_pane "$P2")" \
+    && fail "pane $P2 was given an inbox before its Codex had opened a thread: bound to $(cut -f3 <<<"$R2") (pane $P1 left $T1)"
+  W2="$(no_inbox | head -1)"
+  [[ -n "$W2" ]] && break
+  sleep 0.25
+done
+[[ -n "$W2" ]] || fail "pane $P2, whose Codex has no thread yet, is not in the pane table as a pane without an inbox"
+N1B="$(cut -f1 <<<"$(wait_name "$P1" '^proj#[1-9][0-9]{3}$' 25)")"
+[[ -n "$N1B" && "$N1B" != "$W2" ]] || fail "pane $P1 does not show a full name of its own beside $W2: $(record_of_pane "$P1")"
+ok "pane $P2 has no inbox while its Codex has no thread, and is listed as $W2"
+T1B="$(cut -f3 <<<"$R1B")"
+out="$(hook_refusal "$W2")"
+grep -qF "$W2 has no inbox yet" <<<"$out" || fail "the hook's answer for $W2 does not say it has no inbox: $(hook_send "$W2")"
+out="$(mcp_send "$T1B" "$W2" PEERBUS-NO-INBOX)" && fail "the MCP tool sent to $W2, which has no inbox: $out"
+grep -qF "$W2 has no inbox yet" <<<"$out" || fail "the MCP refusal of $W2 does not say it has no inbox: $out"
+for to in proj codex:proj; do
+  out="$(hook_refusal "$to")"
+  grep -qF "2 panes are named \"$to\"" <<<"$out" && grep -qF "$N1B (codex)" <<<"$out" && grep -qF "$W2 (codex)" <<<"$out" \
+    || fail "the hook took $to for one pane while $W2 has no inbox: $(hook_send "$to")"
+  out="$(mcp_send "$T1B" "$to" PEERBUS-NO-INBOX)" && fail "the MCP tool sent to $to while $W2 has no inbox: $out"
+  grep -qF "2 panes are named \"$to\"" <<<"$out" || fail "the MCP refusal of $to does not name two panes: $out"
+done
+record_of_pane "$P2" >/dev/null && fail "pane $P2 was given an inbox while its Codex had no thread"
+(( $(seen "$P1" PEERBUS-NO-INBOX) == 0 )) || fail "a message for the pane without an inbox showed on pane $P1"
+ok "$W2 and the name it shares with $N1B are refused on both paths; nothing was delivered"
+
+: > "$SB/late/go"
+R2="$(wait_record "$P2" "" 60)" || fail "pane $P2's Codex never got an inbox"
+[[ "$(cut -f3 <<<"$R2")" != "$T1" ]] || fail "pane $P2 was bound to the thread pane $P1 left"
+[[ "$(cut -f3 <<<"$R2")" != "$(cut -f3 <<<"$R1B")" ]] || fail "both panes were bound to one thread"
+ok "pane $P2 bound: $(cut -f1 <<<"$R2") thread $(cut -f3 <<<"$R2")"
+round_trip "$P2" "$R2" PEERBUS-TAG-THREE
+(( $(seen "$P1" PEERBUS-TAG-THREE) == 0 )) || fail "pane $P2's message also showed on pane $P1"
+(( $(seen "$P2" PEERBUS-TAG-TWO) == 0 )) || fail "pane $P1's message showed on pane $P2"
+ok "each message showed only on its own pane"
+
+# ── names: two Codex panes in one directory ───────────────────────
 shows() { # pane, text, what
   local i
   for (( i = 0; i < 60; i++ )); do (( $(seen "$1" "$2") > 0 )) && return 0; sleep 0.5; done

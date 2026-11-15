@@ -2,6 +2,9 @@
 //! panel's controls and the context menu's rows, and forgetting all of
 //! it when the pointer is no longer over the window.
 
+use marspot::ui::components::context_menu_view::{MenuRender, MenuSurface};
+use marspot::ui::components::ContextMenuHit;
+
 use super::*;
 
 impl CoreApp {
@@ -22,22 +25,37 @@ impl CoreApp {
         if win!(self, wi).process_panel.is_some() {
             self.tree_panel_hover(wi, SurfaceKind::Processes, x_phys, y_phys);
         }
-        let w = &mut win!(self, wi);
-        // F3+9 — drive context menu hover highlight when open.
-        if let Some(state) = w.context_menu.as_mut() {
-            use marspot::ui::components::ContextMenu;
-            let menu = ContextMenu::layout(
-                w.layout.window_w, w.layout.window_h, w.scale,
-                state.anchor_x.px(), state.anchor_y.px(),
-                w.layout.top_inset,
-                &state.items,
-            );
-            let new_hover = menu.hover_index(&state.items, x_phys, y_phys);
-            if new_hover != state.hovered_idx {
-                state.hovered_idx = new_hover;
-                w.needs_render = true;
-            }
+        // the row of an open context menu the pointer is on
+        if self.with_menu(wi, |s| s.pointer_move(x_phys, y_phys)) == Some(true) {
+            win!(self, wi).needs_render = true;
         }
+    }
+
+    /// What a frame of the window's open context menu is drawn from.
+    pub(super) fn menu_render(&self, wi: usize) -> Option<MenuRender> {
+        let w = &win!(self, wi);
+        w.context_menu.as_ref().map(|m| MenuRender {
+            anchor_phys: (m.anchor_x.px(), m.anchor_y.px()),
+            top_inset: w.layout.top_inset,
+            items: m.items.clone(),
+            pointer: None,
+            surface: m.surface.clone(),
+        })
+    }
+
+    /// The open menu's surface, laid out as the next frame will show
+    /// it.  `None` with no menu open.
+    fn with_menu<T>(&mut self, wi: usize, f: impl FnOnce(&mut MenuSurface) -> T) -> Option<T> {
+        let menu = self.menu_render(wi)?;
+        let window = (win!(self, wi).layout.window_w, win!(self, wi).layout.window_h);
+        let mut s = menu.surface.borrow_mut();
+        s.lay_out(self.renderer.font_mut(), &menu, window);
+        Some(f(&mut s))
+    }
+
+    /// What a press at `(x, y)` lands on in the open menu.
+    pub(super) fn menu_press(&mut self, wi: usize, x: f64, y: f64) -> Option<ContextMenuHit> {
+        self.with_menu(wi, |s| s.press(x, y))
     }
 
     /// Forget everything the pointer was on in a window: its chrome,
@@ -54,7 +72,7 @@ impl CoreApp {
         if let Some(p) = w.process_panel.as_mut() {
             panel |= p.surface.borrow_mut().kept.surface.pointer_leave();
         }
-        let menu = w.context_menu.as_mut().is_some_and(|m| m.hovered_idx.take().is_some());
+        let menu = w.context_menu.as_ref().is_some_and(|m| m.surface.borrow_mut().kept.surface.pointer_leave());
         w.needs_render |= chrome || panel || menu;
         [chrome, panel, menu]
     }

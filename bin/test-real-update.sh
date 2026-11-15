@@ -125,8 +125,7 @@ EOF
 python3 -m http.server "$PORT" --bind 127.0.0.1 -d "$SERVE_DIR" >/dev/null 2>&1 &
 HTTP_PID=$!
 disown
-sleep 0.5
-curl -sf "http://127.0.0.1:$PORT/feed.json" >/dev/null \
+dev_wait_served "http://127.0.0.1:$PORT/feed.json" "$HTTP_PID" \
   || fail "feed server didn't come up on :$PORT"
 echo "[1/6] feed OK — signed tarball + feed.json served on :$PORT"
 

@@ -608,6 +608,12 @@ mod window_state_tests {
     /// the layout did not.
     pub(super) fn app_with(sandbox: &StateSandbox, windows: Vec<WindowState>) -> CoreApp {
         assert_sandboxed(sandbox);
+        app_in(sandbox.path(), windows)
+    }
+
+    /// `app_with` for a state root the test made some other way.
+    pub(super) fn app_in(root: &std::path::Path, windows: Vec<WindowState>) -> CoreApp {
+        assert!(marspot::state::state_file_path().starts_with(root), "state path is not in the test's root");
         let (event_tx, _rx) = mpsc::channel();
         CoreApp {
             renderer: MetalRenderer::new_headless().expect("headless renderer"),
@@ -711,9 +717,9 @@ mod window_state_tests {
         assert_eq!(pair_of(&app, 0), (a_f, a_b, 0));
     }
 
-    /// marspot quits when every shell is gone — "every", across all
-    /// windows.  A live pane in any window keeps the app up, however
-    /// long its window has been out of focus.
+    /// The core exits for a restart only when every pane's session is
+    /// lost, across all windows.  A live pane in any window keeps it
+    /// up, however long its window has been out of focus.
     #[test]
     fn the_app_exits_only_when_every_window_is_dead() {
         let sandbox = sandbox_state_dir();
@@ -1737,6 +1743,9 @@ mod boot_assembly_tests;
 #[cfg(test)]
 #[path = "marspot-core/real_pty_tests.rs"]
 mod real_pty_tests;
+#[cfg(test)]
+#[path = "marspot-core/shell_end_tests.rs"]
+mod shell_end_tests;
 
 #[cfg(test)]
 mod link_menu_tests {
@@ -1857,11 +1866,11 @@ struct CcUsageModalState {
 }
 
 struct ContextMenuState {
-    items: Vec<marspot::ui::components::MenuItem>,
+    items: std::rc::Rc<[marspot::ui::components::MenuItem]>,
     anchor_x: marspot::ui::Units,
     anchor_y: marspot::ui::Units,
     region: ContextRegion,
-    hovered_idx: Option<usize>,
+    surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::context_menu_view::MenuSurface>>,
     /// Set when the menu was opened on top of an actionable link
     /// (URL / file path).  `dispatch_context_action` reads this for
     /// the OpenLink / CopyLink actions before clearing the menu.
@@ -1971,6 +1980,9 @@ enum CoreEvent {
     Hello(u32),
     /// Shell sent a liveness probe.  We echo the nonce back via PONG.
     Ping(u32),
+    /// The shell drew a toolbar icon this core asked for:
+    /// `(symbol, point_px, side, mask)`.
+    IconMask(u16, u16, u16, Vec<u8>),
     /// Shell closed the control socket — supervisor will tear us down.
     Closed,
     /// An L3 session process published a new grid into
@@ -1985,6 +1997,8 @@ enum CoreEvent {
     /// before manifest v2 carried `control_stream_fd`, kernel races
     /// during dual-core swap, plain crashes, etc).
     L3ControlEof(u64),
+    /// A session said which grid region it publishes into.
+    L3Publishes(u64, Vec<u8>),
     /// A background reconnect finished.  `Some(stream)` swaps the
     /// pane's control onto it; `None` means every attempt failed and
     /// the pane stays on its dead stream.
@@ -2306,6 +2320,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
             .map(|(text, win)| CoreEvent::Preedit(text, win)),
         MsgType::Hello => decode_hello(&f.payload).ok().map(CoreEvent::Hello),
         MsgType::Ping => decode_ping(&f.payload).ok().map(CoreEvent::Ping),
+        MsgType::IconMask => marspot::shell_proto::decode_icon_mask(&f.payload)
+            .ok()
+            .map(|(symbol, point_px, side, mask)| CoreEvent::IconMask(symbol, point_px, side, mask)),
         _ => None,
     }
 }
@@ -2363,6 +2380,9 @@ fn l3_reader_loop(
                     if let Ok(text) = std::str::from_utf8(&f.payload) {
                         marspot::input::write_clipboard_text(text);
                     }
+                }
+                MsgType::SessionPublishes => {
+                    let _ = tx.send(CoreEvent::L3Publishes(session_id, f.payload));
                 }
                 // Reply to a Cmd-C `GetSelectionText`: hand it to whoever is
                 // blocked in `L3Conn::request_selection_text`.  A dropped
@@ -2499,17 +2519,11 @@ fn spawn_l3_with_cwd(
             format!("{live} live sessions >= hard cap {cap}"),
         ));
     }
-    // RFC-003 Amendment 7 step 3: L2 creates the region under the
-    // deterministic per-session name `/msp-s-<id>` so a post-swap L2
-    // can shm_open(name) and reattach to the surviving L3 instead of
-    // spawning a duplicate.  The L3 carries the name in entry.toml
-    // (via MARSPOT_SHM_NAME env) for that lookup.
-    let shm_name_c = grid_shm::session_shm_name(session_id);
-    let shm_name = shm_name_c
-        .to_str()
-        .map(|s| s.to_string())
-        .unwrap_or_default();
-    let region = grid_shm::create_region_named(cols, rows, &shm_name_c)?;
+    // Under a name, so a core started after this one can find the
+    // session's frames; the L3 repeats the name in entry.toml.
+    let regions = grid_shm::SessionRegions::for_session(session_id);
+    let shm_name = regions.grid_name().to_string_lossy().into_owned();
+    let region = regions.create(cols, rows)?;
     let region_raw = region.as_raw_fd();
 
     // CLOEXEC the shm fd we hold here so it can't leak into a sibling
@@ -2632,6 +2646,7 @@ fn spawn_l3_with_cwd(
         child,
         control,
         reader,
+        regions,
         selection_rx,
     })
 }
@@ -2740,62 +2755,6 @@ fn spawn_l3_pane_with_cwd(
 ) -> std::io::Result<Pane> {
     let spawn = spawn_l3_with_cwd(cols, rows, session_id, initial_cwd, event_tx)?;
     Ok(Pane::new_l3(L3Conn::new(spawn, session_id)))
-}
-
-/// RFC-003 Amendment 7 step 4: reattach to an L3 child that survived
-/// the previous L2's death.  Walks entry.toml → shm_open(name) +
-/// connect_with_handshake(socket).  Returns a Pane that drives the
-/// *existing* L3 process without forking a new one.
-///
-/// Returns Err on any failure (registry entry missing, shm name
-/// missing, shm gone, socket gone, handshake refused) — caller falls
-/// through to `spawn_l3_pane_with_cwd`.
-fn reattach_l3_pane(
-    session_id: u64,
-    event_tx: &Sender<CoreEvent>,
-) -> std::io::Result<Pane> {
-    let entry = marspot_term::session_registry::read_session_entry(session_id)?;
-    if entry.shm_name.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "no shm_name (legacy entry)",
-        ));
-    }
-    let shm_c = std::ffi::CString::new(entry.shm_name.clone())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e}")))?;
-    let shm_fd = grid_shm::open_region(&shm_c)?;
-    let reader = GridShmReader::from_fd(shm_fd.as_raw_fd())?;
-    // GridShmReader keeps its own mmap; once the fd is mapped we can
-    // drop the OwnedFd (kernel keeps the mapping alive).
-    drop(shm_fd);
-
-    // UDS connect + handshake — same wire as the spawn path.
-    // 4 s, explicitly — the effective budget this path had before the
-    // deadline was made single.  Reattach races a live L3 that may be
-    // mid-execv.
-    let control = marspot::uds_session_client::wait_and_connect(
-        session_id,
-        std::time::Duration::from_secs(4),
-    )?;
-    let reader_stream = control.try_clone()?;
-    let tx = event_tx.clone();
-    let (selection_tx, selection_rx) = std::sync::mpsc::channel::<(u32, String)>();
-    std::thread::spawn(move || l3_reader_loop(reader_stream, session_id, tx, selection_tx));
-
-    lx_event!(
-        "L3_REATTACHED",
-        "took over surviving L3 from previous L2 image",
-        session_id = session_id,
-        pid = entry.pid,
-        shm_name = entry.shm_name
-    );
-    Ok(Pane::new_l3(L3Conn::reattach(
-        entry.pid,
-        control,
-        reader,
-        selection_rx,
-        session_id,
-    )))
 }
 
 /// The full multi-pane UI state machine — `Marspot` (src/main.rs)
@@ -3203,8 +3162,13 @@ macro_rules! win {
 mod hover;
 #[path = "marspot-core/idle.rs"]
 mod idle;
+#[path = "marspot-core/shell_end.rs"]
+mod shell_end;
 #[path = "marspot-core/keys.rs"]
 mod keys;
+#[path = "marspot-core/reattach.rs"]
+mod reattach;
+use reattach::reattach_l3_pane;
 #[path = "marspot-core/tree_panels.rs"]
 mod tree_panels;
 use marspot::ui::components::layout_modal::Hover as LayoutAsk;
@@ -3310,9 +3274,8 @@ struct CoreApp {
     /// Sessions with a reconnect already in flight.  Without this, a
     /// burst of EOFs for one session would spawn a thread each.
     reconnecting: std::collections::HashSet<u64>,
-    /// True once every pane's session has exited — the loop exits
-    /// cleanly and the shell respawns a fresh core (which creates a
-    /// fresh session), mirroring "marspot quits when all shells die".
+    /// Every pane's session is lost (see `every_session_lost`): the
+    /// loop exits and L1 starts a core that resurrects them.
     all_exited: bool,
     /// True once a `SurfaceAttachWindow` has arrived.  From then on the
     /// legacy `SurfaceAttach` is ignored as its duplicate — the shell
@@ -4256,11 +4219,11 @@ impl CoreApp {
             return;
         }
         win!(self, wi).context_menu = Some(ContextMenuState {
-            items,
+            items: items.into(),
             anchor_x: marspot::ui::Units::from_px(x_phys),
             anchor_y: marspot::ui::Units::from_px(y_phys),
             region,
-            hovered_idx: None,
+            surface: Default::default(),
             link,
         });
         win!(self, wi).needs_render = true;
@@ -4295,7 +4258,7 @@ impl CoreApp {
             anchor_x: marspot::ui::Units::from_px(anchor_x),
             anchor_y: marspot::ui::Units::from_px(anchor_y),
             region: ContextRegion::PaneBadge(sid),
-            hovered_idx: None,
+            surface: Default::default(),
             link: None,
         });
         win!(self, wi).needs_render = true;
@@ -5057,11 +5020,15 @@ impl CoreApp {
             // L3 to update, and with another build staged it would
             // re-exec instead of ending
             let _ = marspot::session_signal::signal_session(id, libc::SIGHUP);
+            // the names it published under, so the kernel frees the
+            // pages once every holder has closed them
+            let regions = session_registry::read_session_entry(id)
+                .ok()
+                .and_then(|e| grid_shm::SessionRegions::of_entry(&e));
             let _ = session_registry::delete_session(id);
-            // Amendment 7 step 3: also drop the named shm region so
-            // the kernel actually frees the pages once every fd-holder
-            // closes.
-            grid_shm::delete_session_regions(&grid_shm::session_shm_name(id), id);
+            if let Some(regions) = regions {
+                regions.delete();
+            }
         }
         // F3+5 — drop cached cwd state so it can't leak past the pane.
         // The same id may eventually be reused; a fresh pane gets a
@@ -5551,7 +5518,7 @@ impl CoreApp {
             return;
         }
         let window_id = win!(self, wi).window_id;
-        if self.windows.len() == 1 {
+        if self.only_window_left(wi) {
             // The app is going away.  Drop the layout first: L1 tears
             // the core down moments after the request lands, and a
             // save racing that would restore an empty window.
@@ -6757,18 +6724,9 @@ impl CoreApp {
     fn mouse_down(&mut self, wi: usize, x_phys: f64, y_phys: f64, modifiers: Modifiers) {
         // F3+9 — when context menu is open, a left click first
         // dispatches an item / swallows on frame / closes-on-outside.
-        if win!(self, wi).context_menu.is_some() {
-            use marspot::ui::components::{ContextMenu, ContextMenuHit};
-            let (hit, region) = {
-                let state = win!(self, wi).context_menu.as_ref().unwrap();
-                let menu = ContextMenu::layout(
-                    win!(self, wi).layout.window_w, win!(self, wi).layout.window_h, win!(self, wi).scale,
-                    state.anchor_x.px(), state.anchor_y.px(),
-                    win!(self, wi).layout.top_inset,
-                    &state.items,
-                );
-                (menu.hit_test(&state.items, x_phys, y_phys), state.region)
-            };
+        if let Some(hit) = self.menu_press(wi, x_phys, y_phys) {
+            use marspot::ui::components::ContextMenuHit;
+            let region = win!(self, wi).context_menu.as_ref().unwrap().region;
             match hit {
                 ContextMenuHit::Item(idx) => {
                     let tag = win!(self, wi).context_menu.as_ref().unwrap()
@@ -6949,11 +6907,11 @@ impl CoreApp {
             if !items.is_empty() {
                 let region = self.resolve_context_region(wi, x_phys, y_phys);
                 win!(self, wi).context_menu = Some(ContextMenuState {
-                    items,
+                    items: items.into(),
                     anchor_x: marspot::ui::Units::from_px(x_phys),
                     anchor_y: marspot::ui::Units::from_px(y_phys),
                     region,
-                    hovered_idx: None,
+                    surface: Default::default(),
                     link: Some(link),
                 });
                 win!(self, wi).needs_render = true;
@@ -7788,15 +7746,8 @@ impl CoreApp {
                 self.sync_selection_tape(wi);
             }
         }
-        // The app exits when every pane of every window has exited —
-        // one window still holding a live shell keeps marspot up.
-        let has_panes = self.windows.iter().any(|w| !w.panes.is_empty());
-        let all_dead = self
-            .windows
-            .iter()
-            .flat_map(|w| w.panes.iter())
-            .all(|p| p.is_exited());
-        if has_panes && all_dead {
+        self.close_ended_panes();
+        if self.every_session_lost() {
             for p in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
                 p.pump();
             }
@@ -7964,7 +7915,6 @@ impl CoreApp {
         let shortcuts =
             (win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts)).then(|| self.shortcuts_render(wi));
         self.renderer.set_shortcuts_panel(shortcuts);
-        // F3+9 — publish ContextMenu render state every frame.
         // Per-window, like every overlay below it: the renderer holds
         // one copy and each window sets its own right before painting.
         self.renderer
@@ -7978,21 +7928,8 @@ impl CoreApp {
                 .map(|d| d.idx),
         );
 
-        self.renderer.set_context_menu(win!(self, wi).context_menu.as_ref().map(|state| {
-            use marspot::ui::components::context_menu_paint::{ContextMenuRender, ContextMenuRow};
-            ContextMenuRender {
-                scale: win!(self, wi).scale,
-                anchor_phys: (state.anchor_x.px(), state.anchor_y.px()),
-                top_inset: win!(self, wi).layout.top_inset,
-                items: state.items.iter().map(|it| ContextMenuRow {
-                    label: it.label.clone(),
-                    shortcut_hint: it.shortcut_hint.clone(),
-                    enabled: it.enabled,
-                    divider: it.divider,
-                }).collect(),
-                hovered_idx: state.hovered_idx,
-            }
-        }));
+        let menu = self.menu_render(wi);
+        self.renderer.set_context_menu(menu);
         // F3+3.0 / 3.3 — publish LayoutModal state every frame.
         // Per-slot titles built from card_slots → resolved title
         // chain (custom > cwd basename > ordinal).  Empty slot if
@@ -8285,11 +8222,11 @@ fn assemble_panes_at_boot(
                     continue;
                 }
                 Err(e) => {
-                    // Live-but-unreachable (shm wiped / UDS dead).
-                    // Identity is verified (A.2) so this SIGKILL
-                    // cannot hit a foreign process.  The dir is
-                    // KEPT and we fall through to resurrection —
-                    // the old path delete_session'd right here.
+                    // Live but it does not answer, or it cannot be
+                    // asked for a region that can be shown (see
+                    // `reattach_l3_pane`).  The process is verified
+                    // to be this session's (A.2), the dir is kept and
+                    // the session is started again in place.
                     lx_warn!(
                         "core.reattach.l3_failed",
                         &format!("{e} — SIGKILL verified L3, resurrect in place"),
@@ -8319,7 +8256,7 @@ fn assemble_panes_at_boot(
         if let Some(entry) = entry_by_id.get(&spawn_sid)
             && !entry.shm_name.is_empty()
                 && let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
-                    grid_shm::delete_session_regions(&c, spawn_sid);
+                    grid_shm::delete_session_regions(&c);
                 }
         // RFC-004 C.2 belt+braces — a resurrect dir still holds the
         // DEAD process's entry.toml; `wait_for_entry` would read it
@@ -8437,7 +8374,7 @@ fn assemble_panes_at_boot(
                 let _ = marspot::session_signal::signal_entry(entry, libc::SIGKILL);
                 if !entry.shm_name.is_empty()
                     && let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
-                        grid_shm::delete_session_regions(&c, id);
+                        grid_shm::delete_session_regions(&c);
                     }
             }
             match session_registry::retire_session_dir(id) {
@@ -8499,7 +8436,7 @@ fn assemble_panes_at_boot(
         if let Some(entry) = entry_by_id.get(&id)
             && !entry.shm_name.is_empty()
                 && let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
-                    grid_shm::delete_session_regions(&c, id);
+                    grid_shm::delete_session_regions(&c);
                 }
         match session_registry::retire_session_dir(id) {
             Ok(_) => retired += 1,
@@ -9287,6 +9224,11 @@ fn main() {
                         });
                     }
                 }
+                CoreEvent::L3Publishes(sid, payload) => {
+                    if let Some((wi, idx)) = app.find_pane_by_sid(sid) {
+                        win!(app, wi).panes[idx].session_mut().l3_session_publishes(&payload);
+                    }
+                }
                 CoreEvent::L3ControlReconnected(sid, stream) => {
                     app.reconnecting.remove(&sid);
                     let Some(new_control) = stream else {
@@ -9400,6 +9342,21 @@ fn main() {
                 CoreEvent::Ping(nonce) => {
                     to_ack.push((MsgType::Pong, encode_pong(nonce)));
                 }
+                CoreEvent::IconMask(symbol, point_px, side, mask) => {
+                    if marspot::ui::system::macos::icons::deliver(symbol, point_px, side, mask) {
+                        for w in app.windows.iter_mut() {
+                            w.needs_render = true;
+                        }
+                    } else {
+                        lx_warn!(
+                            "core.icon.refused",
+                            "an icon from the shell that was not asked for",
+                            symbol = symbol,
+                            point_px = point_px,
+                            side = side
+                        );
+                    }
+                }
                 CoreEvent::PaneBadge(sid, text) => {
                     app.set_pane_badge(sid, text);
                 }
@@ -9510,6 +9467,10 @@ fn main() {
         for (ty, payload) in app.pending_to_shell.drain(..) {
             send_to_shell(&control_writer, Frame::new(ty, payload), "pending_to_shell");
         }
+        for (symbol, point_px) in marspot::ui::system::macos::icons::take_wanted() {
+            let payload = marspot::shell_proto::encode_icon_mask_wanted(symbol, point_px);
+            send_to_shell(&control_writer, Frame::new(MsgType::IconMaskWanted, payload), "icon_mask_wanted");
+        }
         // Apply each window's freshly-attached pair.  Per window:
         // swap the paint target, re-lay out, render one frame into
         // slot 0 and ack `SurfaceReady` so the shell can install the
@@ -9558,7 +9519,7 @@ fn main() {
         if app.all_exited {
             lx_event!(
                 "CORE_EXIT",
-                "all sessions exited; exiting cleanly",
+                "every pane's session is gone and none ended; exiting for a new core to resurrect them",
                 frames = frame,
                 uptime_s = start.elapsed().as_secs(),
                 bytes_pumped = bytes_pumped_total,
@@ -9616,6 +9577,13 @@ fn main() {
             // must still only ever be pointed at a settled surface.
             win!(app, wi).pending_caret = caret;
             continue;
+        }
+
+        // icons the frames just built had no mask for: asked for now,
+        // not at the next wake, which may be a while off
+        for (symbol, point_px) in marspot::ui::system::macos::icons::take_wanted() {
+            let payload = marspot::shell_proto::encode_icon_mask_wanted(symbol, point_px);
+            send_to_shell(&control_writer, Frame::new(MsgType::IconMaskWanted, payload), "icon_mask_wanted");
         }
 
         // Frames that finished since the last pass: flip to them and

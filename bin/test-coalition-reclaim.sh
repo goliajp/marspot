@@ -42,7 +42,7 @@ said() { grep $'\t'"$1"$'\t' "$APPLOG" | tail -1 | grep -q $'\t'"pid=$2"; }
 give_away() {
   local i w
   rm -f "$MARSPOT_STATE_DIR/owner"; sleep 0.5
-  kill -9 "$L1"; sleep 1
+  sig -9 "$L1"; sleep 1
   [[ -z "$(dev_shell_pid)" ]] || { bad "could not make the state: a shell is running although nothing could start one"; return 1; }
   open -n -g -j -W "$APP" --args --ls-refresh 2>/dev/null; sleep 0.5
   rm -f "$SB/gui.pid"; ( echo 600 > "$SB/go" ) & w=$!
@@ -66,7 +66,7 @@ if give_away; then
   else bad "held: the app does not say that it waits for the program $GUI that has its coalition"; fi
 
   STATE="the program has exited"; echo; echo "── $STATE ──"
-  kill "$GUI" 2>/dev/null; sleep 4
+  sig -TERM "$GUI"; sleep 4
   check_one_record
   if said SHELL_COALITION_KEPT_BY_DEAD "$GUI"; then ok "kept: the app says the dead record of $GUI keeps the coalition"
   else bad "kept: the app does not say what became of the coalition when the program $GUI exited"; fi
@@ -83,6 +83,9 @@ if give_away; then
   [[ $L1 != "$before" ]] || bad "no new shell took the place of $before"
   reattached
   state "the app took the coalition back"; check_one_record
+  # the count of shells asked for in a row ends with one that was given it
+  [[ ! -e "$MARSPOT_STATE_DIR/owner.reseats" ]] && ok "the count of shells asked for in a row is gone" \
+    || bad "the count of shells asked for in a row is still on file: $(cat "$MARSPOT_STATE_DIR/owner.reseats")"
 fi
 
 echo

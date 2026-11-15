@@ -15,7 +15,7 @@ use crate::render_metal::{MetalRenderer, WindowRender};
 use crate::ui::components::chrome_hover::ChromeHover;
 use crate::ui::components::controls::StepperPart;
 use crate::ui::components::{layout_modal, process_panel};
-use crate::ui::components::{ContextMenu, ContextMenuHit, MenuItem};
+use crate::ui::components::ContextMenuHit;
 
 const SCALES: [f64; 2] = [1.0, 2.0];
 
@@ -246,31 +246,13 @@ fn a_context_menus_rows_are_hit_where_they_are_drawn() {
             (frame.expect("a frame"), state.expect("the menu was opened"))
         };
         let (rest, _) = frame(None);
-        let layout = rest.layout.clone().expect("the window's layout");
         // the rows that can be picked: the first is disabled, the
         // fourth a divider
         for row in [1, 2, 4, 5] {
             let (lit, state) = frame(Some(row));
             let (x, y) = lit_centre(&rest, &lit)
                 .unwrap_or_else(|| panic!("scale {scale}: nothing is drawn for the pointer on row {row}"));
-            let items: Vec<MenuItem> = state
-                .items
-                .iter()
-                .map(|i| MenuItem {
-                    label: i.label.clone(),
-                    shortcut_hint: i.shortcut_hint.clone(),
-                    enabled: i.enabled,
-                    divider: i.divider,
-                    action_tag: 0,
-                })
-                .collect();
-            let got = super::density_kit::at_scale(scale, || {
-                ContextMenu::layout(
-                    layout.window_w, layout.window_h, state.scale, state.anchor_phys.0, state.anchor_phys.1,
-                    state.top_inset, &items,
-                )
-                .hit_test(&items, x, y)
-            });
+            let got = state.surface.borrow_mut().press(x, y);
             assert_eq!(got, ContextMenuHit::Item(row), "scale {scale}: row {row} is drawn around ({x:.1}, {y:.1})");
         }
     }

@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "reattach_tests.rs"]
+mod reattach_tests;
 use marspot::state::{SavedPane, SavedWindowLayout};
 use marspot_term::session_registry::{
     self as reg, write_session_entry, SessionEntry,
@@ -102,7 +105,7 @@ impl Sandbox {
             root,
         }
     }
-    fn dir(&self) -> &std::path::Path {
+    pub(super) fn dir(&self) -> &std::path::Path {
         &self.root.0
     }
     pub(super) fn set(&mut self, key: &str, value: &str) {
@@ -139,6 +142,7 @@ fn dead_entry(id: u64) -> SessionEntry {
         shm_name: String::new(),
         shell_child_pid: 0,
         build: String::new(),
+        stamps_regions: false,
     }
 }
 

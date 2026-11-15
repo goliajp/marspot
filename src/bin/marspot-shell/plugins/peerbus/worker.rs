@@ -134,6 +134,16 @@ pub(crate) struct Worker {
     /// `bindings`.
     pub(super) gemini: HashMap<u64, super::gemini_bind::GeminiBinding>,
     pub(super) wants: Vec<Want>,
+    /// Each wanted pane's title since its process was first seen.
+    pub(super) titles: HashMap<u64, super::bind::TitleWatch<pidtree::ProcId>>,
+    /// The Codex processes there have been, in panes or not.
+    pub(super) codexes: super::others::Codexes,
+    /// Which processes are a gemini, for the gemini plugin's look.
+    pub(super) geminis: crate::plugins::beside::Kinds,
+    /// The gemini and the kimi panes whose session is not known: in
+    /// the pane table without an inbox (`names`).
+    pub(super) gemini_waiting: Vec<(u64, pidtree::ProcId)>,
+    pub(super) kimi_waiting: Vec<(u64, pidtree::ProcId)>,
     /// `(home, thread) → cwd`, None for a thread that is not a user's
     /// (see `bind::user_thread_cwd`).  Neither ever changes.
     pub(super) cwds: HashMap<(PathBuf, String), Option<String>>,
@@ -169,6 +179,11 @@ impl Worker {
             bindings: HashMap::new(),
             gemini: HashMap::new(),
             wants: Vec::new(),
+            titles: HashMap::new(),
+            codexes: Default::default(),
+            geminis: Default::default(),
+            gemini_waiting: Vec::new(),
+            kimi_waiting: Vec::new(),
             cwds: HashMap::new(),
             unbound: HashMap::new(),
             next_key: 1,
@@ -252,6 +267,9 @@ impl Worker {
                     }
                 }
                 Event::Names => {
+                    // who runs beside the panes is only known from
+                    // having looked while they were there
+                    self.look_at_processes(crate::observe::INTERVAL);
                     self.rename_pass();
                     self.names_passes += 1;
                     // a file the watch could not follow is still
