@@ -7,7 +7,8 @@ use std::sync::atomic::{Ordering, fence};
 
 use super::clusters::{ClusterTable, ClusterTableReader};
 use super::ident::{self, SessionRegions};
-use super::{HEADER_BYTES, Header, MAGIC, fits_capacity, region};
+use super::cells::FrameBuf;
+use super::{Header, MAGIC, fits_capacity, region};
 use crate::grid::Cell;
 
 /// Read a published frame's sequence and mode flags without mapping
@@ -111,17 +112,12 @@ unsafe fn read_frame(
 ) -> io::Result<Option<Frame>> {
     let h = base as *const Header;
     unsafe {
-        if std::ptr::read_volatile(&(*h).magic) != MAGIC
-            || std::ptr::read_volatile(&(*h).cell_size) as usize != std::mem::size_of::<Cell>()
-        {
+        if std::ptr::read_volatile(&(*h).magic) != MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "not a readable grid region"));
         }
     }
-    let src = unsafe { base.add(HEADER_BYTES) as *const Cell };
-    let mut cells: Vec<Cell> = Vec::new();
+    let mut buf = FrameBuf::default();
     let mut table = ClusterTable::default();
-    // same bounded retry as the reader: a writer that died mid-publish
-    // leaves seq odd for good
     for _ in 0..1024 {
         let s1 = unsafe { (*h).seq.load(Ordering::Acquire) };
         if s1 == 0 {
@@ -135,18 +131,19 @@ unsafe fn read_frame(
         let (cursor_col, cursor_row, view_offset) = unsafe {
             ((*h).cursor_col as u16, (*h).cursor_row as u16, (*h).view_offset as u16)
         };
-        let n = cols as usize * rows as usize;
-        cells.clear();
-        cells.reserve(n);
-        unsafe {
-            std::ptr::copy_nonoverlapping(src, cells.as_mut_ptr(), n);
-            cells.set_len(n);
+        // either layout, frame by frame: see `cells`
+        let cell_size = unsafe { std::ptr::read_volatile(&(*h).cell_size) };
+        if !unsafe { buf.copy_from(base, cols as usize * rows as usize, cell_size) } {
+            std::hint::spin_loop();
+            continue;
         }
         if let Some(r) = clusters {
             r.read_into(&mut table);
         }
         fence(Ordering::Acquire);
         if unsafe { (*h).seq.load(Ordering::Relaxed) } == s1 {
+            buf.settle();
+            let cells = if buf.is_packed { buf.expanded() } else { std::mem::take(&mut buf.wide) };
             let clusters = table.iter().map(|(c, r, t)| (c, r, t.to_string())).collect();
             return Ok(Some(Frame { cols, rows, cursor_col, cursor_row, view_offset, cells, clusters }));
         }
