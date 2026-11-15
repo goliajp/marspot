@@ -248,14 +248,24 @@ impl PtyReader {
                             carried.flood_over(&lending);
                         }
                         Gathered::Open { dry: false } => {
-                            turn.pass_if_spent();
                             // see `lend`: a pane flooding alone
                             let rated = carried.chunk(len, &lending);
                             #[cfg(test)]
                             if rated {
                                 tests::note_rated(lending.is_welcome(), turn.alone(), ECHO.expected());
                             }
-                            if rated && lending.is_welcome() && turn.alone() && turn.renew() && !ECHO.expected() {
+                            // A spent turn is renewed here when no pane
+                            // waits for it, and handed on only otherwise.
+                            // Handed on first, `renew` found no turn to
+                            // renew: a writer that never paused, with the
+                            // parser behind it, filled every chunk past a
+                            // turn's 2 ms and the pty was never lent.
+                            let may_lend = rated && lending.is_welcome() && turn.alone();
+                            let renewed = may_lend && turn.renew();
+                            if !may_lend {
+                                turn.pass_if_spent();
+                            }
+                            if renewed && !ECHO.expected() {
                                 lending.offer();
                                 // the loop looks again, now that the
                                 // pty is its to read
