@@ -72,6 +72,20 @@ impl Turn {
         }
     }
 
+    /// Hand a spent turn on and take the next one if no pane waits
+    /// for it.  `false` once the turn is another pane's.
+    pub(super) fn renew(&mut self) -> bool {
+        match &self.held {
+            Some((_, since)) if since.elapsed() < TURN => return true,
+            Some(_) => {}
+            None => return false,
+        }
+        self.pass();
+        self.held = self.leases.try_take().map(|lease| (lease, Instant::now()));
+        self.crowded |= self.held.is_none();
+        self.held.is_some()
+    }
+
     pub(super) fn pass_if_spent(&mut self) {
         if self.held.as_ref().is_some_and(|(_, since)| since.elapsed() >= TURN) {
             self.pass();
@@ -85,6 +99,25 @@ mod tests {
     use super::*;
 
     const KILOBYTE: usize = 1024;
+
+    /// A turn is kept until it is spent, then taken again when no
+    /// other pane wants it; a reader that never had one has none to
+    /// renew.
+    #[test]
+    fn a_spent_turn_is_renewed_when_nobody_waits_for_it() {
+        let path = lease::tests::lock_file("renew");
+        let mut turn = Turn::new(Leases::at(&path));
+        assert!(!turn.renew(), "no turn was ever taken");
+        turn.enter(KILOBYTE, || false);
+        let taken = turn.held.as_ref().expect("a free lease").1;
+        assert!(turn.renew());
+        assert_eq!(turn.held.as_ref().expect("the turn").1, taken, "a turn not yet spent was handed on");
+        std::thread::sleep(TURN);
+        assert!(turn.renew());
+        assert!(turn.held.as_ref().expect("the next turn").1 > taken);
+        assert!(turn.alone());
+        let _ = std::fs::remove_file(path);
+    }
 
     /// A flood asks again after a short read only while no other pane
     /// has been in its way, and finds that out afresh with each flood.

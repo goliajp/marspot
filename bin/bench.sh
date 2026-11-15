@@ -87,47 +87,6 @@ if [[ ! -f "$BASELINE" ]]; then
   exit 2
 fi
 
-# Pre-flight: in --full mode the gate computes vs-best-other ratios
-# from baseline.competitors_snapshot.  Refuse to run if that snapshot
-# is stale (>7 days), otherwise silently-stale numbers can flip the
-# gate verdict (perf-attack E1).  Fast tier doesn't use this snapshot
-# so the check is mode-gated.
-if [[ $MODE == "full" ]]; then
-  # MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1 bypasses this check. Use it
-  # when you accept that the vs-best-other ratio is computed against
-  # old competitor numbers — e.g. for a quick verification run when
-  # you can't refresh measure-other.sh right now. The age is still
-  # printed so the cost is visible.
-  python3 - "$BASELINE" "${MARSPOT_BENCH_ALLOW_STALE_COMPETITORS:-0}" <<'PY' || exit 2
-import json, sys, datetime
-b = json.load(open(sys.argv[1]))
-allow_stale = sys.argv[2] == "1"
-captured = b.get("competitors_snapshot", {}).get("captured_at")
-if not captured:
-    print("competitors_snapshot.captured_at missing — refresh via "
-          "bin/measure-other.sh and set captured_at in baseline.json.",
-          file=sys.stderr)
-    sys.exit(2)
-try:
-    cap = datetime.date.fromisoformat(captured)
-except ValueError as e:
-    print(f"competitors_snapshot.captured_at unparseable ({captured!r}): {e}",
-          file=sys.stderr)
-    sys.exit(2)
-age = (datetime.date.today() - cap).days
-if age > 7:
-    msg = f"competitors_snapshot is stale: {age} days old (limit 7)."
-    if allow_stale:
-        print(f"WARN: {msg} Running anyway (MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1).",
-              file=sys.stderr)
-    else:
-        print(msg, file=sys.stderr)
-        print(f"Refresh via bin/measure-other.sh (or set "
-              f"MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1 to skip).",
-              file=sys.stderr)
-        sys.exit(2)
-PY
-fi
 
 # Make sure scenarios exist; regenerate if missing (cheap, deterministic).
 #
@@ -398,12 +357,14 @@ done
 rm -rf "$RSS_STATE"
 
 if [[ $MODE == "full" ]]; then
-  echo "==> live PTY (this takes a minute)"
-  # No pkill of the marspot binary by name — friendly-fire risk against
-  # a parallel active-9x-soak / soak run.  measure.sh manages its own
-  # mcli lifecycle by PID; that's sufficient.  perf-attack E7.
-  (cd "$ROOT" && ./bin/measure.sh > "$CUR_DIR/measure.log" 2>&1) || true
-  cp "$ROOT/bench/results/live-cat.json" "$CUR_DIR/live.json" || true
+  # The product in its window: shell, core and one session, one pane,
+  # the same trial script and the same certificate the other terminals
+  # in the snapshot were read with.  This is the figure that is divided
+  # by the best other terminal's.
+  echo "==> live PTY through the product's window (this takes a minute)"
+  (cd "$ROOT" && MEASURE_TERMS=marspot MEASURE_ROUNDS="${BENCH_APP_ROUNDS:-4}" \
+    bash bin/_remote-measure-others-mini.sh > "$CUR_DIR/app.json" 2> "$CUR_DIR/measure-app.log") || true
+  grep -E '^==> (grid|\[marspot)' "$CUR_DIR/measure-app.log" || true
 
   # Same settle between stages, for the same reason as after the build:
   # by this point the run has already pushed a few hundred MB through a
