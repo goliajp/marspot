@@ -6,7 +6,7 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-use crate::idle_pages::{Given, WORTH_GIVING_BACK};
+use crate::idle_pages::{Given, KEPT, WORTH_GIVING_BACK};
 
 /// How long the writer leaves buffers queued in case more follow.
 ///
@@ -62,15 +62,12 @@ impl Buf {
     }
 
     /// Give back the pages a burst wrote, all but the first [`KEPT`]
-    /// bytes': a key's echo fits there and takes nothing back.
+    /// bytes.
     pub(super) fn give_back(&mut self) {
         self.given.give_back(&mut self.main, KEPT, self.high);
         self.high = 0;
     }
 }
-
-/// The start of a buffer whose pages are never given back.
-pub(super) const KEPT: usize = 16 * 1024;
 
 pub(super) enum Msg {
     /// A full buffer to append.  Returned to the free list afterwards.

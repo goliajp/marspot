@@ -5,15 +5,20 @@
 //! deadline after a read that filled far into a chunk, it gives back
 //! the pages of the chunk in its hand and of those queued back to it;
 //! a chunk the parser still holds then gives its own back as it is
-//! handed back, on the parse thread.  A chunk takes its pages back just
-//! before the next read into it.  A keystroke's echo fills a few bytes,
-//! so typing never gets here.
+//! handed back, on the parse thread.
+//!
+//! The first 16 KiB of each chunk keep their pages, and a chunk whose
+//! pages are given back is read into only that far: a keystroke's echo
+//! or a prompt fits, and takes nothing back.  A read that fills it is a
+//! flood starting, and the chunk takes the rest of its pages back for
+//! its next use.  Taking them back before every read, the first three
+//! keystrokes after a flood took back all three chunks for good.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 
-use marspot_term::idle_pages::WORTH_GIVING_BACK;
+use marspot_term::idle_pages::{KEPT, WORTH_GIVING_BACK};
 
 use super::{CHUNKS, Chunk};
 
@@ -21,14 +26,21 @@ impl Chunk {
     /// Give the pages back if a read filled far into this chunk.
     pub(super) fn give_back_if_far(&mut self) {
         if self.high >= WORTH_GIVING_BACK {
-            self.given.give_back(&mut self.buf, 0, self.high);
+            self.given.give_back(&mut self.buf, KEPT, self.high);
             self.high = 0;
         }
     }
 
-    /// Ready to be read into.
-    pub(super) fn take_back(&mut self) {
-        self.given.take_back(&mut self.buf);
+    /// How much of the chunk a read may fill.
+    pub(super) fn room(&self) -> usize {
+        self.given.room(self.buf.len())
+    }
+
+    /// A read filled what this chunk kept: it takes the rest back.
+    pub(super) fn take_back_if_full(&mut self) {
+        if self.given.is_given() && self.len >= self.room() {
+            self.given.take_back(&mut self.buf);
+        }
     }
 }
 
@@ -121,12 +133,16 @@ mod tests {
 
     /// After a flood, the chunks the reader holds give their pages back
     /// when it goes to sleep, the one the parser still holds when it is
-    /// handed back, and the next read takes back the pages it reads
-    /// into.
+    /// handed back; keystrokes' echoes after it take nothing back, and
+    /// the next flood takes them back.
     #[test]
-    fn a_flood_s_chunks_give_their_pages_back_and_the_next_read_takes_them_back() {
+    fn a_flood_s_chunks_give_their_pages_back_and_the_next_flood_takes_them_back() {
         const FLOOD: usize = 8_000_000;
-        let pty = spawn("head -c 8000000 /dev/zero | tr '\\0' a; sleep 5; for i in 1 2 3; do printf hello; sleep 0.3; done; sleep 30");
+        const NEXT: usize = 1_000_000;
+        let pty = spawn(
+            "head -c 8000000 /dev/zero | tr '\\0' a; sleep 5; for i in 1 2 3; do printf hello; sleep 0.3; done; \
+             sleep 0.5; head -c 1000000 /dev/zero | tr '\\0' b; sleep 30",
+        );
         let (tx, rx) = channel();
         let reader = PtyReader::spawn(1, Arc::clone(&pty), Arc::default(), tx, || {});
         let given = times_given_back();
@@ -173,7 +189,17 @@ mod tests {
             reader.recycle(chunk);
         }
         assert_eq!(after, b"hellohellohello");
-        assert!(times_taken_back() > taken, "read into a chunk whose pages were given back");
+        assert_eq!(times_taken_back(), taken, "a keystroke's echo took pages back");
+
+        let mut next = 0;
+        while next < NEXT {
+            let chunk = rx.recv_timeout(Duration::from_secs(30)).expect("the next flood stopped short");
+            assert!(chunk.bytes().iter().all(|&b| b == b'b'), "only what was written");
+            next += chunk.bytes().len();
+            reader.recycle(chunk);
+        }
+        assert_eq!(next, NEXT);
+        assert!(times_taken_back() > taken, "the next flood was read into what the chunks kept, and no more");
         reader.stop();
     }
 
