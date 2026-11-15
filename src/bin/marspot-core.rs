@@ -8477,6 +8477,22 @@ fn assemble_panes_at_boot(
     (panes, reattached_ids)
 }
 
+/// Each mask asked for in `list` (`symbol:point_px,...`), written to
+/// stdout as a length and an `IconMask` payload.
+fn draw_icons(list: &str) {
+    use std::io::Write;
+    let mut out = Vec::new();
+    for item in list.split(',') {
+        let Some((s, p)) = item.split_once(':') else { continue };
+        let (Ok(symbol), Ok(point_px)) = (s.parse::<u16>(), p.parse::<u16>()) else { continue };
+        let Some((side, mask)) = marspot::ui::system::macos::icons::draw_for_core(symbol, point_px) else { continue };
+        let payload = marspot::shell_proto::encode_icon_mask(symbol, point_px, side, &mask);
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&payload);
+    }
+    let _ = std::io::stdout().write_all(&out);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -8489,6 +8505,14 @@ fn main() {
     // with side effects — so this arm comes first and does neither.
     if args.first().map(String::as_str) == Some("--version") {
         println!("{}", env!("MARSPOT_VERSION_CORE"));
+        return;
+    }
+    // The shell's icon drawer: draw `symbol:point_px,...` to stdout and
+    // exit, touching nothing else.  Drawing a system symbol registers
+    // this process with LaunchServices, which a core that runs windows
+    // must not be; this one lives for the drawing only.
+    if args.first().map(String::as_str) == Some("--draw-icons") {
+        draw_icons(args.get(1).map(String::as_str).unwrap_or(""));
         return;
     }
 
