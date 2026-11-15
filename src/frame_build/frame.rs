@@ -309,13 +309,27 @@ fn paint_overlays(
     overlay_glyphs: &mut Vec<GlyphInstance>,
     overlay_ui_rects: &mut Vec<UiRectInstance>,
 ) {
+    // every overlay is painted into the overlay layers by one painter
+    macro_rules! overlay_painter {
+        () => {
+            ViewPainter {
+                cell_w, cell_h, ascent,
+                atlas_w: atlas_w_f, atlas_h: atlas_h_f,
+                window_w: layout.window_w, window_h: layout.window_h,
+                font, atlas,
+                cells: overlay_cells,
+                glyphs: overlay_glyphs,
+                ui_rects: overlay_ui_rects,
+            }
+        };
+    }
+
     // F3+1.8 — per-pane search overlay.  Painted via the same
     // overlay-scratch path as the modal — no filter, no in-cache
     // mixing, opaque BG by default via `ViewStyle`.  Position is
     // pane-local, sourced from the layout cell rect we already
     // walked to push the session's grid.
     {
-        use crate::ui::core::view::ViewPainter;
         use crate::ui::components::search_overlay::{
             paint_search_overlay, SearchOverlayParams,
         };
@@ -326,15 +340,7 @@ fn paint_overlays(
             let inner_y = rect.y_top as f32
                 + layout.cell_title_h as f32
                 + layout.padding as f32;
-            let mut painter = ViewPainter {
-                cell_w, cell_h, ascent,
-                atlas_w: atlas_w_f, atlas_h: atlas_h_f,
-                window_w: layout.window_w, window_h: layout.window_h,
-                font, atlas,
-                cells: overlay_cells,
-                glyphs: overlay_glyphs,
-                ui_rects: overlay_ui_rects,
-            };
+            let mut painter = overlay_painter!();
             paint_search_overlay(&mut painter, SearchOverlayParams {
                 overlay,
                 inner_x,
@@ -350,57 +356,25 @@ fn paint_overlays(
     // sites only see the painter; backdrop / frame / always-on-top
     // are configured up front and applied automatically.
     if let Some(panel) = process_panel {
-        let mut painter = crate::ui::core::view::ViewPainter {
-            cell_w, cell_h, ascent,
-            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
-            window_w: layout.window_w, window_h: layout.window_h,
-            font, atlas,
-            cells: overlay_cells,
-            glyphs: overlay_glyphs,
-            ui_rects: overlay_ui_rects,
-        };
+        let mut painter = overlay_painter!();
         panel.surface.borrow_mut().frame(&mut painter, panel);
     }
 
     // cc — `Cc` usage modal (Claude account windows).  Same overlay
     // + backdrop treatment as the process panel.
     if let Some(cc) = cc_usage {
-        let mut painter = crate::ui::core::view::ViewPainter {
-            cell_w, cell_h, ascent,
-            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
-            window_w: layout.window_w, window_h: layout.window_h,
-            font, atlas,
-            cells: overlay_cells,
-            glyphs: overlay_glyphs,
-            ui_rects: overlay_ui_rects,
-        };
+        let mut painter = overlay_painter!();
         cc.surface.borrow_mut().frame(&mut painter, cc, layout.top_inset);
     }
 
     // The settings panel.  Same overlay + backdrop treatment.
     if let Some(FormPanel::Settings(sp)) = form_panel {
-        let mut painter = crate::ui::core::view::ViewPainter {
-            cell_w, cell_h, ascent,
-            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
-            window_w: layout.window_w, window_h: layout.window_h,
-            font, atlas,
-            cells: overlay_cells,
-            glyphs: overlay_glyphs,
-            ui_rects: overlay_ui_rects,
-        };
+        let mut painter = overlay_painter!();
         sp.surface.borrow_mut().frame(&mut painter, sp, layout.top_inset);
     }
 
     if let Some(FormPanel::Shortcuts(panel)) = form_panel {
-        let mut painter = crate::ui::core::view::ViewPainter {
-            cell_w, cell_h, ascent,
-            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
-            window_w: layout.window_w, window_h: layout.window_h,
-            font, atlas,
-            cells: overlay_cells,
-            glyphs: overlay_glyphs,
-            ui_rects: overlay_ui_rects,
-        };
+        let mut painter = overlay_painter!();
         panel.surface.borrow_mut().frame(&mut painter, panel, layout.top_inset);
     }
 
@@ -408,29 +382,13 @@ fn paint_overlays(
     // scratches → renders on top of grid, modal-style backdrop dims
     // everything below the title strip.
     if let Some(modal_state) = layout_modal_state {
-        let mut painter = crate::ui::core::view::ViewPainter {
-            cell_w, cell_h, ascent,
-            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
-            window_w: layout.window_w, window_h: layout.window_h,
-            font, atlas,
-            cells: overlay_cells,
-            glyphs: overlay_glyphs,
-            ui_rects: overlay_ui_rects,
-        };
+        let mut painter = overlay_painter!();
         modal_state.surface.borrow_mut().frame(&mut painter, modal_state, layout.top_inset);
     }
 
     #[cfg(test)]
     if let Some(paint) = *TEST_OVERLAY.lock().unwrap_or_else(|e| e.into_inner()) {
-        paint(&mut crate::ui::core::view::ViewPainter {
-            cell_w, cell_h, ascent,
-            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
-            window_w: layout.window_w, window_h: layout.window_h,
-            font, atlas,
-            cells: overlay_cells,
-            glyphs: overlay_glyphs,
-            ui_rects: overlay_ui_rects,
-        });
+        paint(&mut overlay_painter!());
     }
 }
 
