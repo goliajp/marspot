@@ -32,6 +32,9 @@ pub mod grid_seams;
 pub mod grid;
 pub mod grid_item;
 pub mod sidebar;
+pub mod sidebar_view;
+#[cfg(test)]
+mod sidebar_view_tests;
 pub mod table;
 pub mod layout_modal;
 pub mod layout_view;
