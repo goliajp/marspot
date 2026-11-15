@@ -97,9 +97,9 @@ fn clusters_fed_as_bytes_come_back_after_the_session_restarts() {
     }
 }
 
-/// And a session that printed no clusters files nothing -- the sidecar
-/// of a plain-text pane stays at its header, which is what makes the
-/// common case free.
+/// And a session that printed no clusters files nothing for them: no
+/// line reads as having any, and nothing but the history's segments is
+/// made beside it.
 #[test]
 fn a_pane_of_plain_text_files_nothing() {
     let _env = env(90_002);
@@ -107,17 +107,16 @@ fn a_pane_of_plain_text_files_nothing() {
     for i in 0..60 {
         t.feed(format!("plain line {i}\r\n").as_bytes());
     }
+    let mut got = Vec::new();
+    for i in 0..t.grid().scrollback_len() {
+        t.grid().scrollback_clusters(i, &mut got);
+        assert!(got.is_empty(), "line {i} has clusters: {got:?}");
+    }
     drop(t);
     let dir = std::env::var("MARSPOT_STATE_DIR").unwrap();
-    let text = std::path::Path::new(&dir)
-        .join("sessions")
-        .join("90002")
-        .join("scrollback.bin.clustertext");
-    let len = std::fs::metadata(&text).map(|m| m.len()).unwrap_or(0);
-    assert_eq!(
-        len,
-        24,
-        "no clusters means no records, only the header: {} is {len} bytes",
-        text.display()
-    );
+    let session = std::path::Path::new(&dir).join("sessions").join("90002");
+    for e in std::fs::read_dir(&session).unwrap() {
+        let name = e.unwrap().file_name().to_string_lossy().into_owned();
+        assert!(!name.starts_with("scrollback.") || name.starts_with("scrollback.seg."), "{name} was made");
+    }
 }

@@ -1,5 +1,10 @@
 //! Files beside `scrollback.bin` holding things derived from its lines.
 //!
+//! Only read now: the history is kept in segments, which carry these as
+//! notes beside the lines (`file/notes.rs`).  A pane opened on files of
+//! the format before segments reads their sidecars as long as the files
+//! last; tests still write them, to have such files to read.
+//!
 //! The scrollback record format cannot carry per-line extras: its one
 //! spare byte is `wrapped`, whose readers decide on `body[0] != 0`, so
 //! a bit borrowed there reads as a wrapped line to any binary that
@@ -70,10 +75,8 @@ pub(super) struct LineExtras {
     pub(super) marks: Option<std::fs::File>,
     pub(super) cluster_slots: Option<std::fs::File>,
     pub(super) cluster_text: Option<std::fs::File>,
-    /// Where the next cluster blob goes.  Held rather than asked of
-    /// the filesystem: appending is on the scroll path, and the length
-    /// of a file we are the only writer of is not something to pay a
-    /// `stat` for per line.
+    /// Where the next cluster blob goes, for a test writing them.
+    #[cfg(test)]
     pub(super) cluster_text_len: u64,
 }
 
@@ -88,12 +91,14 @@ impl LineExtras {
             marks: None,
             cluster_slots: None,
             cluster_text: None,
+            #[cfg(test)]
             cluster_text_len: HEADER_BYTES,
         }
     }
 
     /// The writable set for a hot `.bin` of this epoch, each reset
     /// rather than read when it belongs to another generation.
+    #[cfg(test)]
     pub(super) fn open_hot(bin_path: &std::path::Path, epoch: u64) -> Self {
         let mut f = ALL
             .iter()
@@ -113,6 +118,7 @@ impl LineExtras {
     /// A file shorter than its own header is one `open_checked` just
     /// created; anything longer is this generation's records, since a
     /// file from another generation was reset rather than read.
+    #[cfg(test)]
     fn blob_end(&self) -> u64 {
         self.cluster_text
             .as_ref()
@@ -131,37 +137,27 @@ impl LineExtras {
         let mut f = ALL
             .iter()
             .map(|k| open_for_read(&path_for(bin_path, k.ext()), epoch, *k));
-        let mut out = Self {
+        Self {
             marks: f.next().flatten(),
             cluster_slots: f.next().flatten(),
             cluster_text: f.next().flatten(),
+            #[cfg(test)]
             cluster_text_len: HEADER_BYTES,
-        };
-        out.cluster_text_len = out.blob_end();
-        out
-    }
-
-    /// Delete every sidecar beside `bin_path`.
-    ///
-    /// For a `.bin` that is going away rather than being handed over.
-    /// Leaving them would be safe -- they state an epoch nothing will
-    /// match again -- but a directory full of files no reader will ever
-    /// accept is how a stale file gets mistaken for a live one later.
-    pub(super) fn remove_beside(bin_path: &std::path::Path) {
-        for k in ALL {
-            let _ = std::fs::remove_file(path_for(bin_path, k.ext()));
         }
     }
 
-    /// Move every sidecar of `from` to sit beside `to`, as the rotation
-    /// moves the `.bin` and `.idx` it describes.
-    ///
-    /// A rename that fails leaves that kind absent on the far side,
-    /// which reads as "no record" -- the same answer a fresh pane
-    /// gives, and the reason these are caches.
-    pub(super) fn rename_beside(from: &std::path::Path, to: &std::path::Path) {
-        for k in ALL {
-            let _ = std::fs::rename(path_for(from, k.ext()), path_for(to, k.ext()));
+    /// Every sidecar path beside `bin_path`, there or not.
+    pub(super) fn paths_beside(bin_path: &std::path::Path) -> Vec<std::path::PathBuf> {
+        ALL.iter().map(|k| path_for(bin_path, k.ext())).collect()
+    }
+
+    /// The mark filed against local line `local`, or none.
+    pub(super) fn read_mark(&self, local: u64) -> crate::grid::PromptMark {
+        use std::os::unix::fs::FileExt;
+        let mut b = [0u8; 2];
+        match &self.marks {
+            Some(f) if f.read_exact_at(&mut b, HEADER_BYTES + local * 2).is_ok() => crate::grid::PromptMark::from_bytes(b),
+            _ => crate::grid::PromptMark::None,
         }
     }
 }
@@ -172,6 +168,7 @@ impl LineExtras {
 ///
 /// Returns the file positioned by nothing in particular: callers
 /// address it by offset.
+#[cfg(test)]
 pub(super) fn open_checked(
     path: &std::path::Path,
     epoch: u64,

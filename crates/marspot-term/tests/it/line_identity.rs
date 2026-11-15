@@ -135,25 +135,18 @@ fn a_reflow_refuses_the_marks_of_the_width_before_it() {
     );
 }
 
-/// Path 2 -- quarantine. A pair whose header no longer validates is
-/// renamed aside and replaced, and the replacement carries a new epoch.
+/// Path 2 -- quarantine. A pair of the format before segments whose
+/// header does not validate is renamed aside, and the history that
+/// replaces it inherits nothing from it.
 #[test]
 fn a_quarantined_pair_leaves_its_marks_behind() {
     let d = Dir::new("quarantine");
-    {
-        let mut sb = d.open(8);
-        push_marked(&mut sb, 12, 8, 3, PromptMark::PromptStart);
-    }
-    // Break the magic so `open` rejects it the way a rollback would.
-    {
-        use std::os::unix::fs::FileExt;
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(d.bin())
-            .unwrap();
-        f.write_all_at(&[0, 0, 0, 0], 0).unwrap();
-    }
-    let sb = d.open(8);
+    let mut bin = vec![0u8; 32];
+    bin.extend_from_slice(&[9; 64]);
+    std::fs::write(d.bin(), &bin).unwrap();
+    std::fs::write(d.idx(), [32u64.to_le_bytes(), 48u64.to_le_bytes()].concat()).unwrap();
+    std::fs::write(d.0.join("scrollback.bin.marks"), [7u8; 64]).unwrap();
+    let mut sb = d.open(8);
     assert!(
         std::fs::read_dir(&d.0)
             .unwrap()
@@ -161,16 +154,13 @@ fn a_quarantined_pair_leaves_its_marks_behind() {
             .any(|e| e.file_name().to_string_lossy().contains(".corrupt-")),
         "the fixture has to actually trigger the quarantine"
     );
-    assert_eq!(
-        sb.prompt_at(3),
-        PromptMark::None,
-        "the fresh pair inherits nothing from the quarantined one"
-    );
+    push_marked(&mut sb, 6, 8, 5, PromptMark::PromptStart);
+    let marked: Vec<usize> = (0..sb.len()).filter(|i| sb.prompt_at(*i) != PromptMark::None).collect();
+    assert_eq!(marked, vec![5], "the fresh history inherits nothing from the quarantined pair");
 }
 
-/// Path 3 -- a crash-truncated tail. The epoch does not change: the
-/// lines that survived kept their numbers, so their marks are still
-/// theirs. The records past the new end are orphans no index reaches.
+/// Path 3 -- a crash-truncated tail.  The lines that survived kept their
+/// numbers, so their marks are still theirs.
 #[test]
 fn a_truncated_tail_keeps_the_marks_of_the_lines_that_survived() {
     let d = Dir::new("truncate");
@@ -181,15 +171,16 @@ fn a_truncated_tail_keeps_the_marks_of_the_lines_that_survived() {
         sb.push_line_with_wrapped(&row(b'z', 8), false);
         sb.mark_last_line(PromptMark::CommandEnd(Some(7)));
     }
-    // Chop the last few bytes off `.bin`, which is what a crash mid-write
-    // leaves: `open` trims the trailing partial record.
+    // The last line's index entry never written, which is what a crash
+    // between the records and the index leaves: that line is not one.
     {
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(d.bin())
-            .unwrap();
-        let len = f.metadata().unwrap().len();
-        f.set_len(len - 5).unwrap();
+        use std::os::unix::fs::FileExt;
+        let (lines, _) = marspot_term::scrollback::FileScrollback::on_disk(&d.bin(), &d.idx()).unwrap();
+        let seg = std::fs::OpenOptions::new().read(true).write(true).open(d.0.join("scrollback.seg.0")).unwrap();
+        let mut data = [0u8; 8];
+        seg.read_exact_at(&mut data, 16).unwrap();
+        let index_at = 64 + u64::from_le_bytes(data);
+        seg.write_all_at(&[0u8; 8], index_at + (lines - 1) * 8).unwrap();
     }
     let sb = d.open(8);
     assert_eq!(

@@ -1,5 +1,7 @@
-//! Path 4 of five: rotation hands the hot file over and starts a new
-//! one, so a line number means a different line afterwards.
+//! Path 4 of five: the history changes segments, and a mark goes with
+//! its line -- into the older segment, and out of the history with it
+//! when the budget lets that segment go -- never onto the line that has
+//! the same place in the new one.
 //!
 //! Alone in its own binary because it sets
 //! `MARSPOT_SCROLLBACK_HOT_CAP_MB`, and an env var is process-wide.
@@ -27,17 +29,17 @@ fn row(c: u8, cols: usize) -> Vec<marspot_term::grid::Cell> {
         .collect()
 }
 
-/// Path 4 -- rotation. The hot file is handed over whole and a fresh
-/// one takes its place with its own epoch, so the sidecar at the hot
-/// path does not carry over.
+/// Path 4 -- a segment change.  The marked line is in the older segment
+/// now, and still has its mark: a mark is in the segment beside its
+/// line, not in a file keyed by a position.
 #[test]
-fn a_rotation_starts_the_marks_over_with_the_file() {
+fn a_segment_change_keeps_the_marks_with_their_lines() {
     let dir = std::env::temp_dir().join(format!("marspot-lineid-rotate-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let bin = dir.join("scrollback.bin");
     let idx = dir.join("scrollback.idx");
-    // A tiny hot cap so a handful of lines forces the handover.
+    // The smallest segments there are, so a handful of lines changes them.
     let mut env = EnvGuard::new();
     env.set("MARSPOT_SCROLLBACK_HOT_CAP_MB", "0");
     let mut sb = Scrollback::file(bin, idx, 8, 8).unwrap();
@@ -59,16 +61,13 @@ fn a_rotation_starts_the_marks_over_with_the_file() {
     );
     assert_eq!(
         sb.prompt_at(1),
-        PromptMark::None,
-        "line 1 belongs to the file that was handed over"
+        PromptMark::PromptStart,
+        "line 1 went into the older segment with its mark"
     );
 }
 
-/// The hazard the previous test does not reach. After a rotation the
-/// old line 1 is in the cold tier, so asking for it answers "no mark"
-/// whatever the sidecar holds -- that test passes even when the
-/// sidecar is stale. This one asks about a line of the NEW file whose
-/// index within it is the same as the marked line's was.
+/// The hazard a mark keyed by position would have: a line of the NEW
+/// segment whose place in it is the marked line's place in the old.
 #[test]
 fn a_new_line_does_not_inherit_the_mark_at_its_index_in_the_old_file() {
     let dir = std::env::temp_dir().join(format!(
@@ -98,32 +97,27 @@ fn a_new_line_does_not_inherit_the_mark_at_its_index_in_the_old_file() {
     assert_ne!(sb.epoch(), before, "the fixture has to actually rotate");
 
     // Every line of the current history, asked one by one: none of them
-    // was marked except possibly the one that was, and that one is gone
-    // with its file.
+    // is marked but the one that was.
     let marked: Vec<usize> = (0..sb.len())
         .filter(|i| sb.prompt_at(*i) != PromptMark::None)
         .collect();
     assert_eq!(
         marked,
-        Vec::<usize>::new(),
-        "a line of the new file inherited the old file's mark at the same index"
+        vec![1],
+        "a line of the new segment inherited the old segment's mark at the same place"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// What the rename is for: after ONE handover, the marks of the lines
-/// that went with the file are still readable through the cold tier.
-///
-/// The two tests above use a cap of zero, which rotates on every push
-/// and so overwrites the cold pair immediately -- they say nothing
-/// about whether cold marks work. This one rotates once.
+/// A mark on a line some segments back, still inside the budget, is
+/// read from wherever that line is now.
 #[test]
 fn a_mark_in_the_cold_tier_is_still_read_after_one_handover() {
     let dir = std::env::temp_dir().join(format!("marspot-lineid-cold-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    // 1 MiB of hot file is about 30 000 8-column records, so one pass
-    // below hands the file over exactly once.
+    // full segments of 1 MiB, the first 128 KiB: 5 000 lines are in
+    // two segments, well inside the budget
     let mut env = EnvGuard::new();
     env.set("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1");
     let mut sb =
@@ -131,7 +125,7 @@ fn a_mark_in_the_cold_tier_is_still_read_after_one_handover() {
     let first_epoch = sb.epoch();
     let mut rotations = 0;
     let mut seen = first_epoch;
-    for i in 0..45_000 {
+    for i in 0..5_000 {
         sb.push_line_with_wrapped(&row(b'a' + (i % 26) as u8, 8), false);
         if i == 10 {
             sb.mark_last_line(PromptMark::CommandEnd(Some(42)));
@@ -142,26 +136,17 @@ fn a_mark_in_the_cold_tier_is_still_read_after_one_handover() {
         }
     }
     env.remove("MARSPOT_SCROLLBACK_HOT_CAP_MB");
-    assert_eq!(
-        rotations, 1,
-        "the fixture needs exactly one handover, or it is testing something else"
-    );
+    assert!(rotations >= 1, "the fixture has to change segments");
     assert_eq!(
         sb.prompt_at(10),
         PromptMark::CommandEnd(Some(42)),
-        "line 10 went into the cold tier and its mark went with it"
+        "line 10 is in an older segment and its mark went with it"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The same handover, for the cluster text: a line that went cold keeps
-/// what its cells said, because every sidecar of that `.bin` was renamed
-/// beside it rather than only the marks.
-///
-/// Worth its own test rather than trusting the shared rename, because
-/// the first version of the cold-tier mark test was green for the wrong
-/// reason -- with a cap of zero every line rotates immediately, so
-/// "no record" was the right answer whatever the code did.
+/// The same, for the cluster text: a line in an older segment keeps
+/// what its cells said.
 #[test]
 fn cluster_text_in_the_cold_tier_is_still_read_after_one_handover() {
     let dir = std::env::temp_dir().join(format!("marspot-clusters-cold-{}", std::process::id()));
@@ -175,7 +160,7 @@ fn cluster_text_in_the_cold_tier_is_still_read_after_one_handover() {
     let first_epoch = sb.epoch();
     let mut rotations = 0;
     let mut seen = first_epoch;
-    for i in 0..45_000 {
+    for i in 0..5_000 {
         sb.push_line_with_wrapped(&row(b'a' + (i % 26) as u8, 8), false);
         if i == 10 {
             sb.cluster_last_line(&[(3u16, flag.clone())]);
@@ -186,21 +171,17 @@ fn cluster_text_in_the_cold_tier_is_still_read_after_one_handover() {
         }
     }
     env.remove("MARSPOT_SCROLLBACK_HOT_CAP_MB");
-    assert_eq!(
-        rotations, 1,
-        "the fixture needs exactly one handover, or it is testing something else"
-    );
+    assert!(rotations >= 1, "the fixture has to change segments");
     let mut got = Vec::new();
     assert!(
         sb.clusters_at(10, &mut got),
-        "line 10 went into the cold tier and its cluster text went with it"
+        "line 10 is in an older segment and its cluster text went with it"
     );
     assert_eq!(got, vec![(3u16, flag)]);
-    // And a line of the new hot file does not pick it up at the index
-    // it had in the old one.
+    // And no other line picks it up.
     got.clear();
     assert!(
-        !sb.clusters_at(11_999, &mut got),
+        !sb.clusters_at(4_999, &mut got),
         "the last line never had a cluster"
     );
     let _ = std::fs::remove_dir_all(&dir);

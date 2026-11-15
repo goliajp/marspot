@@ -8,9 +8,11 @@
 //! while a build hammered the same disk, and the pane was frozen for all
 //! of it.  Size was never the problem; contention was.
 //!
-//! The same thread deletes the bytelog segments a rotation retires:
-//! giving one back takes the system 6 to 46 ms, which neither the
-//! parser nor a disk writer has.
+//! The same thread does the history files' work that nobody should
+//! wait for -- making the next segment and giving it its blocks,
+//! deleting one past the budget -- which takes the system up to tens of
+//! milliseconds now and then, and neither the parser nor a disk writer
+//! has that.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
@@ -21,7 +23,7 @@ enum Job {
     Snapshot(PathBuf, Vec<u8>),
     /// A snapshot somebody waits for.
     Awaited(PathBuf, Vec<u8>, SyncSender<()>),
-    Delete(PathBuf),
+    Run(marspot_term::async_writer::Job),
 }
 
 /// Queue handle for the snapshot writer thread.
@@ -30,14 +32,14 @@ enum Job {
 /// the newest snapshot: an older one of the same session has no value
 /// once a newer one exists.  That is also what bounds memory without a
 /// cap — the queue cannot outgrow the producer's 30 s cadence.  Every
-/// deletion queued is carried out.
+/// job queued is run, in order.
 pub struct SnapshotWriter {
     tx: Sender<Job>,
 }
 
 impl SnapshotWriter {
     /// Also tells the disk writers what this process does for them:
-    /// deletes on this thread, and a `wake` of the main loop when one
+    /// their file work on this thread, and a `wake` of the main loop when one
     /// of them was too busy to take the end of a burst and has room
     /// again -- the turn that follows hands it over.
     pub fn spawn(session_id: u64, wake: Sender<crate::SessionEvent>) -> Self {
@@ -55,9 +57,7 @@ impl SnapshotWriter {
                                 latest = Some((path, body));
                                 awaited = Some(written);
                             }
-                            Job::Delete(path) => {
-                                let _ = std::fs::remove_file(path);
-                            }
+                            Job::Run(job) => job(),
                         }
                     }
                     let Some((path, body)) = latest else { continue };
@@ -74,7 +74,7 @@ impl SnapshotWriter {
                 }
             })
             .expect("spawn l3-snapshot-writer thread");
-        marspot_term::async_writer::delete_with(Self::deleter(tx.clone()));
+        marspot_term::async_writer::behind_with(Self::runner(tx.clone()));
         let wake = std::sync::Mutex::new(wake);
         marspot_term::async_writer::retry_with(move || {
             let _ = wake.lock().unwrap_or_else(|p| p.into_inner()).send(crate::SessionEvent::Wake);
@@ -114,17 +114,25 @@ impl SnapshotWriter {
         }
     }
 
-    /// What deletes a file on the thread `tx` leads to.  With that
-    /// thread gone the file is deleted where the caller stands.
-    fn deleter(tx: Sender<Job>) -> impl Fn(PathBuf) + Send + Sync + 'static {
+    /// What runs a job on the thread `tx` leads to.  With that thread
+    /// gone the job runs where the caller stands.
+    fn runner(tx: Sender<Job>) -> impl Fn(marspot_term::async_writer::Job) + Send + Sync + 'static {
         let tx = std::sync::Mutex::new(tx);
-        move |path| {
+        move |job| {
             let tx = tx.lock().unwrap_or_else(|p| p.into_inner());
-            if let Err(e) = tx.send(Job::Delete(path)) {
-                let Job::Delete(path) = e.0 else { return };
-                let _ = std::fs::remove_file(path);
+            if let Err(e) = tx.send(Job::Run(job)) {
+                let Job::Run(job) = e.0 else { return };
+                job();
             }
         }
+    }
+
+    /// A job that deletes `path`, for the tests.
+    #[cfg(test)]
+    fn deleting(path: PathBuf) -> marspot_term::async_writer::Job {
+        Box::new(move || {
+            let _ = std::fs::remove_file(path);
+        })
     }
 }
 
@@ -132,8 +140,8 @@ impl SnapshotWriter {
 mod tests {
     use super::*;
 
-    /// A file handed to the deleter is gone soon after, whatever else
-    /// is queued, and the snapshot queued with it is written.
+    /// A job handed over is run soon after, whatever else is queued,
+    /// and the snapshot queued with it is written.
     #[test]
     fn a_file_handed_over_is_deleted_and_the_snapshot_still_written() {
         let dir = std::env::temp_dir().join(format!("marspot-snapshot-writer-{}", std::process::id()));
@@ -142,10 +150,10 @@ mod tests {
         std::fs::write(&doomed, b"x").unwrap();
         std::fs::write(&other, b"y").unwrap();
         let writer = SnapshotWriter::spawn(0, channel().0);
-        let delete = SnapshotWriter::deleter(writer.tx.clone());
-        delete(doomed.clone());
+        let run = SnapshotWriter::runner(writer.tx.clone());
+        run(SnapshotWriter::deleting(doomed.clone()));
         assert!(writer.send(state.clone(), b"body".to_vec()));
-        delete(other.clone());
+        run(SnapshotWriter::deleting(other.clone()));
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while doomed.exists() || other.exists() || std::fs::read(&state).ok().as_deref() != Some(b"body") {
@@ -178,7 +186,7 @@ mod tests {
         assert_eq!(periodic, b"periodic", "the thread was writing it");
         // everything queued has been worked off once this is gone
         std::fs::write(&sentinel, b"z").unwrap();
-        SnapshotWriter::deleter(writer.tx.clone())(sentinel.clone());
+        SnapshotWriter::runner(writer.tx.clone())(SnapshotWriter::deleting(sentinel.clone()));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while sentinel.exists() {
             assert!(std::time::Instant::now() < deadline, "the queue was not worked off");

@@ -1,120 +1,289 @@
-//! Per-session append-only byte log.
+//! Per-session byte log.
 //!
-//! Records every byte read from a session's PTY master.  Nothing in the
-//! running system reads it back — reattach restores from `state.bin`
-//! instead — so this is a write-only forensic record, kept for the
-//! "the scrollback is gone but the raw bytes survived" case that
-//! [`replay`] (and `examples/rebuild_scrollback_from_bytelog.rs`, the
-//! tool around it) exists to handle.
-//! Bounded by **rotation**, not by copying.  The live file is
-//! `bytelog`; once it passes `BYTELOG_SEGMENT_BYTES` it is renamed to
-//! `bytelog.1` (replacing the previous `.1`) and a fresh empty
-//! `bytelog` takes over.  Full history = `bytelog.1` then `bytelog`,
-//! concatenated in that order — see `segment_paths`.
+//! Records every byte read from a session's PTY master, for the "the
+//! scrollback is gone but the raw bytes survived" case that [`replay`]
+//! (and `examples/rebuild_scrollback_from_bytelog.rs`, the tool around
+//! it) exists to handle.  It is also read while the pane runs: how much
+//! has been logged is how L1 tells a pane that is talking from one that
+//! is silent and how a scripted op sees output arrive ([`stream_len`]),
+//! and the last bytes logged are what a screen is rebuilt from when no
+//! frame is published ([`tail`]).
 //!
-//! This used to compact instead: copy the newest 50 MiB through a
-//! 64 KiB buffer into a temp file and rename it over the original.
-//! That ran inline in `append`, which runs in the L3 main loop's
-//! `pump`, so crossing the cap froze the pane — measured in the field
-//! at 10+ seconds under IO contention, with the pane recovering on its
-//! own afterwards.  Rotation moves no data.  It was still 10 to 15 ms
-//! of that loop every 50 MiB while `append` did it itself -- waiting
-//! for the writer thread, then for the system to give back the segment
-//! the renaming replaced -- so `append` only asks for it now: the
-//! writer thread renames, and the replaced segment is deleted on yet
-//! another thread where the process has one (`.1.old` meanwhile).  It
-//! is also strictly better on retention: the old scheme dropped to
-//! exactly 50 MiB of history at every compaction, this one keeps
-//! between 50 and 100 MiB, for the same disk ceiling.
+//! Kept in segments (`crate::segment`), `bytelog.seg.<slot>` in the
+//! session's directory: 1 MiB, then twice as large each time up to 50
+//! MiB, made ready on a thread nobody waits for; once two of 50 MiB are
+//! in use the smaller ones are deleted and the older full one is used
+//! again whenever the newer is full -- 50 to 100 MiB of the newest
+//! bytes, as the rotating pair kept.  No byte written to it ever waits
+//! for a file to be created, renamed, deleted or grown.
 //!
-//! Disk location: `~/Library/Caches/marspot/sessions/<id>/bytelog`.
-//! Survives daemon restarts so reattach from a fresh process also gets
-//! prior history (or, post-RFC-003, the freshly spawned L3 with the
-//! same session id can rehydrate from its own past lifetime).
+//! A segment's header says where in the whole stream its first byte is,
+//! and, after every write, how far it has been written (`segment::END_AT`,
+//! stated by the writer thread once the bytes are in).  A segment used
+//! again starts over behind a new header whose written end is its start,
+//! so what an earlier use left there is never read.
 //!
-//! Originally lived inline in `marspot-shelld`; lifted to
-//! `marspot-term` so L3 (`marspot-session`) can own a bytelog directly
-//! without going through L4 (RFC-003).
+//! The files of the rotating pair (`bytelog.1`, then `bytelog`) are read
+//! where they are, as the oldest bytes, and deleted once two full
+//! segments are in use.
 
-use std::fs::OpenOptions;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::async_writer::{AsyncWriter, Files, Target};
 use crate::paths::sessions_dir;
+use crate::segment::{self, HEADER_BYTES, Header, Kind, Pending, Seg};
 
-/// Size at which the live segment rotates.  Two segments are kept, so
-/// this is half the on-disk ceiling.
+mod read;
+pub use read::{Piece, pieces, replay, stream_len, tail};
+
+/// Bytes of a full segment.  Two of them are the budget.
 pub const BYTELOG_SEGMENT_BYTES: u64 = 50 * 1024 * 1024;
 
-/// Total on-disk ceiling per session: the live segment plus one
-/// retired one.  100 MiB is generous — even a `cat /dev/urandom` run
-/// for several seconds doesn't fill it.
+/// Total on-disk ceiling per session.
 pub const BYTELOG_CAP_BYTES: u64 = 2 * BYTELOG_SEGMENT_BYTES;
+
+/// Bytes of a pane's first segment.
+const FIRST_SEGMENT_BYTES: u64 = 1024 * 1024;
 
 /// Handoff size to the writer thread.  64 KiB matches the pty reader's
 /// own buffer, so a busy pane hands over roughly one gathered batch at
 /// a time; an idle one hands over on flush.
 const BYTELOG_WRITE_BUF: usize = 64 * 1024;
 
+const STEM: &str = "bytelog";
+
 pub struct ByteLog {
-    path: PathBuf,
-    /// Appends go to a writer thread (see `async_writer`).  This used
-    /// to be a bare `File` written straight from `pump`, which meant
-    /// the thread that parses a pane's output also waited for its
-    /// disk: on a bulk `cat` that was 28 % of the parse thread's
-    /// samples, and removing the write entirely measured +13.5 %.
-    /// The bytes still all get written — just not on this thread.
-    file: crate::async_writer::AsyncWriter,
+    dir: PathBuf,
+    /// Appends go to a writer thread (see `async_writer`): the thread
+    /// that parses a pane's output does not wait for its disk.
+    file: AsyncWriter,
+    /// Files of the rotating pair, oldest first, until the budget passes
+    /// them.
+    legacy: Vec<PathBuf>,
+    /// Segments in use, oldest first; the last is written.
+    segs: Vec<Seg>,
+    /// Where the next byte goes in the last segment, and where its data
+    /// ends.
+    hot_pos: u64,
+    hot_end: u64,
+    /// Past this the next append asks for the next segment.
+    mark: u64,
+    /// Bytes logged in this process.
     bytes_written: u64,
-    /// Size at which the live segment is retired.
-    segment_bytes: u64,
+    next_serial: u64,
+    next_slot: u32,
+    full: u64,
+    spares: Vec<Seg>,
+    pending: Option<Arc<Pending>>,
+}
+
+fn header(data: u64) -> Header {
+    Header { kind: Kind::Bytelog, cell_abi: 0, data, index: 0, serial: 0, base: 0 }
+}
+
+/// Where segment `seg`'s written bytes end, as its header states it.
+pub(crate) fn written_end(seg: &Seg) -> u64 {
+    use std::os::unix::fs::FileExt;
+    let mut b = [0u8; 8];
+    let end = seg.file.read_exact_at(&mut b, segment::END_AT).map_or(HEADER_BYTES, |()| u64::from_le_bytes(b));
+    end.clamp(HEADER_BYTES, seg.hdr.file_bytes())
+}
+
+/// The files of the rotating pair in `dir`, oldest first.
+fn legacy_paths(dir: &Path) -> [PathBuf; 2] {
+    [dir.join("bytelog.1"), dir.join("bytelog")]
 }
 
 impl ByteLog {
     pub fn open(session_id: u64) -> io::Result<Self> {
-        let dir = sessions_dir().join(session_id.to_string());
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join("bytelog");
-        // a segment the last process was still deleting when it ended
-        let _ = std::fs::remove_file(crate::async_writer::doomed_path(&path.with_extension("1")));
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .read(true)
-            .open(&path)?;
-        let bytes_written = file.metadata()?.len();
-        let mut log = Self {
-            path,
-            file: crate::async_writer::AsyncWriter::new(file, BYTELOG_WRITE_BUF, 3),
-            bytes_written,
-            segment_bytes: BYTELOG_SEGMENT_BYTES,
-        };
-        // Logs written by the pre-rotation scheme can be up to the full
-        // 100 MiB ceiling in a single file.  Retire such a segment on
-        // open rather than letting it keep growing on top of its
-        // already-oversized self.  Costs one rename, and the oversized
-        // file is dropped at the next rotation, so the legacy shape
-        // heals within one segment's worth of output.
-        if log.bytes_written > BYTELOG_SEGMENT_BYTES {
-            let _ = log.rotate();
+        Self::open_in(&sessions_dir().join(session_id.to_string()), FIRST_SEGMENT_BYTES, BYTELOG_SEGMENT_BYTES)
+    }
+
+    fn open_in(dir: &Path, first: u64, full: u64) -> io::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        // a segment the rotating pair's last process was still deleting
+        let _ = std::fs::remove_file(dir.join("bytelog.1.old"));
+        let listing = segment::list(dir, STEM, Kind::Bytelog, 0)?;
+        for bad in &listing.bad {
+            let _ = std::fs::remove_file(bad);
         }
+        let mut next_slot = listing.used.iter().chain(&listing.spare).map(|s| s.slot + 1).max().unwrap_or(0);
+        let mut next_serial = listing.used.last().map_or(1, |s| s.hdr.serial + 1);
+        let mut segs = listing.used;
+        let full_at: Vec<usize> = segs.iter().enumerate().filter(|(_, s)| s.hdr.data == full).map(|(i, _)| i).collect();
+        let mut legacy: Vec<PathBuf> = legacy_paths(dir).into_iter().filter(|p| p.exists()).collect();
+        if full_at.len() >= 2 {
+            for old in segs.drain(..full_at[full_at.len() - 2]) {
+                let _ = std::fs::remove_file(&old.path);
+            }
+            for p in legacy.drain(..) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        let mut spares = listing.spare;
+        if segs.is_empty() {
+            let seg = match spares.iter().position(|s| s.hdr.data == first) {
+                Some(i) => spares.remove(i),
+                None => {
+                    next_slot += 1;
+                    segment::Prep::new(dir, STEM, next_slot - 1, header(first)).run()?
+                }
+            };
+            let base = legacy.iter().filter_map(|p| p.metadata().ok()).map(|m| m.len()).sum();
+            let hdr = seg.hdr.used(next_serial, base);
+            std::os::unix::fs::FileExt::write_all_at(&*seg.file, &hdr.encode(), 0)?;
+            next_serial += 1;
+            segs.push(Seg { hdr, ..seg });
+        }
+        let hot = segs.last().expect("a segment to write");
+        let hot_pos = written_end(hot);
+        let mut main = Target::at(Arc::clone(&hot.file), hot_pos);
+        main.publish = Some(segment::END_AT);
+        let hot_end = hot.hdr.index_at();
+        let mut log = Self {
+            dir: dir.to_path_buf(),
+            file: AsyncWriter::to(Files { main, side: None }, BYTELOG_WRITE_BUF, 3),
+            legacy,
+            segs,
+            hot_pos,
+            hot_end,
+            mark: 0,
+            bytes_written: 0,
+            next_serial,
+            next_slot,
+            full,
+            spares: Vec::new(),
+            pending: None,
+        };
+        let wanted = log.next_size();
+        for s in spares {
+            if Some(s.hdr.data) == wanted && log.spares.is_empty() {
+                log.spares.push(s);
+            } else {
+                let _ = std::fs::remove_file(&s.path);
+            }
+        }
+        log.set_mark();
         Ok(log)
     }
 
-    pub fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.file.write(bytes);
+    pub fn append(&mut self, mut bytes: &[u8]) -> io::Result<()> {
         self.bytes_written += bytes.len() as u64;
-        if self.bytes_written > self.segment_bytes {
-            // The writer thread retires the segment when it gets to
-            // this point of the stream, and this thread does not wait:
-            // waiting for what was queued, and for the segment before
-            // last to be freed, stopped the parser for milliseconds
-            // every 50 MiB of a flood.  If the writer cannot, the live
-            // segment grows by a segment more before it is asked again.
-            self.file.rotate(self.path.clone(), self.path.with_extension("1"));
-            self.bytes_written = 0;
+        while self.hot_pos + bytes.len() as u64 > self.mark {
+            let room = (self.hot_end - self.hot_pos) as usize;
+            self.at_mark();
+            if bytes.len() <= room {
+                break;
+            }
+            let (now, later) = bytes.split_at(room);
+            self.file.write(now);
+            self.hot_pos += room as u64;
+            bytes = later;
+            self.change();
         }
+        self.file.write(bytes);
+        self.hot_pos += bytes.len() as u64;
         Ok(())
+    }
+
+    /// The data bytes of the segment the next change takes, or `None`
+    /// when it uses the older full one again.
+    fn next_size(&self) -> Option<u64> {
+        let hot = self.segs.last().expect("a segment to write").hdr.data;
+        if hot < self.full {
+            return Some(segment::grown(hot, self.full));
+        }
+        (self.segs.iter().filter(|s| s.hdr.data == self.full).count() < 2).then_some(self.full)
+    }
+
+    fn set_mark(&mut self) {
+        let ask = self.pending.is_none()
+            && self.next_size().is_some_and(|data| !self.spares.iter().any(|s| s.hdr.data == data));
+        let data = self.hot_end - HEADER_BYTES;
+        self.mark = if ask { self.hot_end - segment::ask_ahead(data) } else { self.hot_end };
+    }
+
+    #[cold]
+    fn at_mark(&mut self) {
+        if self.pending.is_none()
+            && let Some(data) = self.next_size()
+            && !self.spares.iter().any(|s| s.hdr.data == data)
+        {
+            self.pending = Some(Pending::start(self.prep(data)));
+        }
+        self.set_mark();
+    }
+
+    fn prep(&mut self, data: u64) -> segment::Prep {
+        let slot = self.next_slot;
+        self.next_slot += 1;
+        segment::Prep::new(&self.dir, STEM, slot, header(data))
+    }
+
+    /// Go on in the next segment, waiting for it if it is not ready: the
+    /// bytes inside the budget are not given up for it.  A segment that
+    /// could not be made (a full disk) leaves the log going round in the
+    /// segments it has.
+    fn change(&mut self) {
+        let hot = self.segs.last().expect("a segment to write").hdr;
+        let stream_now = hot.base + (self.hot_pos - HEADER_BYTES);
+        let next = match self.next_size() {
+            None => Ok(None),
+            Some(data) => match self.spares.iter().position(|s| s.hdr.data == data) {
+                Some(i) => Ok(Some(self.spares.remove(i))),
+                None => {
+                    let pending = self.pending.take().unwrap_or_else(|| Pending::start(self.prep(data)));
+                    pending.take().unwrap_or_else(|| pending.wait()).map(Some)
+                }
+            },
+        };
+        let seg = match next {
+            Ok(Some(seg)) => seg,
+            Ok(None) => {
+                let i = self.segs.iter().position(|s| s.hdr.data == self.full).expect("two full segments");
+                self.segs.remove(i)
+            }
+            Err(e) => {
+                crate::lx_warn!("bytelog.segment.not_made", &format!("{e}"), dir = self.dir.display());
+                self.segs.remove(0)
+            }
+        };
+        let hdr = seg.hdr.used(self.next_serial, stream_now);
+        self.next_serial += 1;
+        let file = Arc::clone(&seg.file);
+        self.file.cut(move |files| {
+            let _ = std::os::unix::fs::FileExt::write_all_at(&*file, &hdr.encode(), 0);
+            let mut main = Target::at(file, HEADER_BYTES);
+            main.publish = Some(segment::END_AT);
+            files.main = main;
+        });
+        self.segs.push(Seg { hdr, ..seg });
+        self.hot_pos = HEADER_BYTES;
+        self.hot_end = hdr.index_at();
+        self.evict();
+        self.set_mark();
+    }
+
+    /// Once two full segments are in use, let go of everything older
+    /// than the older of them.
+    fn evict(&mut self) {
+        let full = self.full;
+        if self.segs.iter().filter(|s| s.hdr.data == full).count() < 2 {
+            return;
+        }
+        let keep_from = self.segs.iter().position(|s| s.hdr.data == full).expect("two full segments");
+        let gone: Vec<Seg> = self.segs.drain(..keep_from).collect();
+        let wanted = self.next_size();
+        let (keep, spare_gone): (Vec<Seg>, Vec<Seg>) =
+            std::mem::take(&mut self.spares).into_iter().partition(|s| Some(s.hdr.data) == wanted);
+        self.spares = keep;
+        let mut paths: Vec<PathBuf> = std::mem::take(&mut self.legacy);
+        paths.extend(gone.iter().chain(&spare_gone).map(|s| s.path.clone()));
+        if !paths.is_empty() {
+            segment::delete_behind(paths, (gone, spare_gone));
+        }
     }
 
     /// End of a burst: let the file catch up with what was appended.
@@ -123,428 +292,24 @@ impl ByteLog {
         self.file.hand_off();
     }
 
-    /// The log's segments, oldest first.  Concatenating these in order
-    /// reproduces the retained byte stream.  Missing files are omitted,
-    /// so a log that has never rotated yields just the live segment.
-    pub fn segment_paths(session_id: u64) -> Vec<PathBuf> {
-        let dir = sessions_dir().join(session_id.to_string());
-        [dir.join("bytelog.1"), dir.join("bytelog")]
-            .into_iter()
-            .filter(|p| p.exists())
-            .collect()
-    }
-
-    /// Make every appended byte visible to a reader of the segment
-    /// files.  Callers that are about to read the log back (replay
-    /// after a silent update) must call this first — the writer thread
-    /// is not otherwise synchronised with them.
+    /// Make every appended byte visible to a reader of the segments.
+    /// Callers that are about to read the log back (replay after a
+    /// silent update) must call this first — the writer thread is not
+    /// otherwise synchronised with them.
     pub fn flush(&mut self) {
         self.file.flush();
     }
 
+    /// Bytes appended by this process.
     pub fn bytes_written(&self) -> u64 {
         self.bytes_written
     }
 
-    pub fn path(&self) -> &std::path::Path {
-        &self.path
+    /// The session directory the log is kept in.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
-
-    /// Retire the live segment and start a fresh one.  Two syscalls,
-    /// no data movement — this is the whole point of the design.
-    fn rotate(&mut self) -> io::Result<()> {
-        // Everything queued belongs to the segment being retired.
-        self.file.flush();
-        let retired = self.path.with_extension("1");
-        // `rename` replaces an existing `.1` atomically, so the
-        // generation before last is dropped here.
-        std::fs::rename(&self.path, &retired)?;
-        // Fresh live segment.  The old fd pointed at the now-retired
-        // inode, so it has to be reopened, not reused.  `swap_file`
-        // drains what is still queued into the OLD file first, so the
-        // byte stream stays ordered across the boundary even though
-        // the producer never waited for it.
-        self.file.swap_file(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .read(true)
-                .open(&self.path)?,
-        );
-        self.bytes_written = 0;
-        Ok(())
-    }
-}
-
-/// Feed a log's segments, oldest first, through `term`'s parser: the
-/// same bytes in the same order the pane's L3 parsed them, so the grid
-/// and scrollback come out as they were, at `term`'s size.  Returns the
-/// number of bytes fed.
-///
-/// A segment that does not exist is skipped, so the list from
-/// [`ByteLog::segment_paths`] or a hand-built `[<log>.1, <log>]` both
-/// work.  Callers reading a live log flush it first.
-pub fn replay(segments: &[PathBuf], term: &mut crate::terminal::Terminal) -> io::Result<u64> {
-    use std::io::Read;
-    let mut buf = vec![0u8; 1 << 20];
-    let mut fed = 0u64;
-    for seg in segments {
-        let mut f = match std::fs::File::open(seg) {
-            Ok(f) => f,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
-        };
-        loop {
-            let n = f.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            term.feed(&buf[..n]);
-            fed += n as u64;
-        }
-    }
-    Ok(fed)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Read;
-    use std::time::Instant;
-
-    /// Read the log back from disk.  Appends go through a writer
-    /// thread, so a test that wants to see them must flush first —
-    /// same contract the recovery tooling follows.
-    fn read_all(session_id: u64) -> Vec<u8> {
-        let mut out = Vec::new();
-        for p in ByteLog::segment_paths(session_id) {
-            let mut f = std::fs::File::open(p).unwrap();
-            f.read_to_end(&mut out).unwrap();
-        }
-        out
-    }
-
-    /// Rotation must bound the log without moving data, and without
-    /// losing the byte stream's order across the segment boundary.
-    ///
-    /// The predecessor copied 50 MiB inline on the L3 main loop every
-    /// time the cap was crossed, which froze the pane for seconds.  The
-    /// timing assertion here is the guard against that regressing: a
-    /// rename cannot take 500 ms, a copy of this much data can.
-    #[test]
-    fn rotation_is_bounded_ordered_and_cheap() {
-        let _sandbox = crate::test_env::sandbox_state_dir();
-        let id = 7;
-        let mut log = ByteLog::open(id).unwrap();
-
-        // Write past the rotation point in recognisable chunks so the
-        // concatenated stream can be checked for order and gaps.
-        let chunk = 64 * 1024;
-        let n_chunks = (BYTELOG_SEGMENT_BYTES as usize / chunk) + 8;
-        // Time the ONE append that crosses the threshold, not the
-        // whole loop — that single call is where the old code did its
-        // 50 MiB copy, and where this one does a rename.
-        let mut trigger = std::time::Duration::ZERO;
-        for i in 0..n_chunks {
-            let mut buf = vec![b'.'; chunk];
-            let tag = format!("<{i}>");
-            buf[..tag.len()].copy_from_slice(tag.as_bytes());
-            let was_below = log.bytes_written() <= BYTELOG_SEGMENT_BYTES;
-            let t0 = Instant::now();
-            log.append(&buf).unwrap();
-            if was_below && log.bytes_written() < BYTELOG_SEGMENT_BYTES {
-                trigger = t0.elapsed();
-            }
-        }
-
-        // Appends go through a writer thread, so the on-disk sizes
-        // below are only meaningful once everything handed over has
-        // landed.  (This used to be implicit: the write was synchronous
-        // and the file was always current.)
-        log.flush();
-
-        // It rotated: a `.1` exists and the live segment restarted.
-        let seg = ByteLog::segment_paths(id);
-        assert_eq!(seg.len(), 2, "expected a retired segment plus a live one");
-        assert!(log.bytes_written() < BYTELOG_SEGMENT_BYTES);
-
-        // Disk stays under the ceiling.
-        let on_disk: u64 = seg.iter().map(|p| p.metadata().unwrap().len()).sum();
-        assert!(
-            on_disk <= BYTELOG_CAP_BYTES,
-            "on-disk {on_disk} exceeded cap {BYTELOG_CAP_BYTES}"
-        );
-
-        // The stream reads back in order with nothing missing: every
-        // chunk tag appears once, ascending, across the segment seam.
-        let all = read_all(id);
-        assert_eq!(all.len() as u64, on_disk);
-        let text = String::from_utf8_lossy(&all);
-        // One pass, not one per chunk.  Asking `find` for each tag in
-        // turn restarts at offset 0 every time — 808 scans of 50 MiB,
-        // which was 7.8 s of the suite's 41 s and all of it in the
-        // measuring, none in what is measured (2026-09-28).  The
-        // assertion is the same: each tag's FIRST position, in
-        // ascending chunk order, must ascend.
-        let mut first_at: Vec<Option<usize>> = vec![None; n_chunks];
-        let bytes = text.as_bytes();
-        for (at, _) in bytes.iter().enumerate().filter(|(_, b)| **b == b'<') {
-            let Some(close) = bytes[at + 1..].iter().position(|b| *b == b'>') else {
-                continue;
-            };
-            let Ok(n) = text[at + 1..at + 1 + close].parse::<usize>() else {
-                continue;
-            };
-            if let Some(slot) = first_at.get_mut(n) {
-                slot.get_or_insert(at);
-            }
-        }
-        let mut last = None;
-        for (i, at) in first_at.iter().enumerate() {
-            let Some(at) = *at else { continue };
-            if let Some(prev) = last {
-                assert!(at > prev, "chunk {i} out of order across the seam");
-            }
-            last = Some(at);
-        }
-        assert!(last.is_some(), "no chunk tags survived");
-
-        // The rotating append is a rename, not a copy.  Measured at
-        // well under a millisecond; 100 ms leaves three orders of
-        // magnitude of headroom while still being far below what
-        // moving 50 MiB costs even on a fast disk.
-        assert!(
-            trigger > std::time::Duration::ZERO,
-            "never observed the rotating append"
-        );
-        if crate::host_load::quiet_enough_to_time("the rotating bytelog append") {
-            assert!(
-                trigger.as_millis() < 100,
-                "the rotating append took {trigger:?} — data is being copied, not renamed"
-            );
-        }
-    }
-
-    /// The append that retires a segment returns while the writer
-    /// thread is stuck in a write, and the stream is whole across the
-    /// seam once the writer gets on.
-    #[test]
-    fn a_rotating_append_does_not_wait_for_the_writer() {
-        use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::fs::FileTypeExt;
-
-        let sandbox = crate::test_env::sandbox_state_dir();
-        let id = 13;
-        let dir = sandbox.path().join("sessions").join(id.to_string());
-        std::fs::create_dir_all(&dir).unwrap();
-        // a live segment that takes a pipe's worth and then blocks
-        // whoever writes to it, until somebody reads
-        let live = dir.join("bytelog");
-        let c_path = std::ffi::CString::new(live.as_os_str().as_bytes()).unwrap();
-        // SAFETY: a valid NUL-terminated path.
-        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
-        let mut log = ByteLog::open(id).unwrap();
-        log.segment_bytes = 100 * 1024;
-
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let appender = std::thread::spawn(move || {
-            log.append(&vec![b'a'; 64 * 1024]).unwrap();
-            // this one crosses the segment size
-            log.append(&vec![b'b'; 64 * 1024]).unwrap();
-            let _ = done_tx.send(());
-            log
-        });
-        assert!(
-            done_rx.recv_timeout(std::time::Duration::from_secs(20)).is_ok(),
-            "the append that retires a segment waited for the writer thread"
-        );
-        let mut log = appender.join().unwrap();
-
-        let mut retired = vec![0u8; 128 * 1024];
-        std::fs::File::open(&live).unwrap().read_exact(&mut retired).unwrap();
-        assert!(retired[..64 * 1024].iter().all(|&b| b == b'a'));
-        assert!(retired[64 * 1024..].iter().all(|&b| b == b'b'));
-
-        log.append(b"after").unwrap();
-        log.flush();
-        assert!(dir.join("bytelog.1").metadata().unwrap().file_type().is_fifo(), "the pipe was not retired");
-        assert_eq!(std::fs::read(&live).unwrap(), b"after");
-    }
-
-    /// Two segments are kept however often the log rotates: the one
-    /// before last is deleted, and so is one a dead process left behind.
-    #[test]
-    fn nothing_is_left_of_the_segment_before_last() {
-        let sandbox = crate::test_env::sandbox_state_dir();
-        let id = 14;
-        let dir = sandbox.path().join("sessions").join(id.to_string());
-        std::fs::create_dir_all(&dir).unwrap();
-        let doomed = dir.join("bytelog.1.old");
-        std::fs::write(&doomed, b"left behind").unwrap();
-
-        let mut log = ByteLog::open(id).unwrap();
-        assert!(!doomed.exists(), "what a dead process left was not deleted on open");
-        log.segment_bytes = 1024;
-        for part in *b"abcd" {
-            log.append(&vec![part; 1500]).unwrap();
-        }
-        log.append(b"e").unwrap();
-        log.flush();
-
-        let deadline = Instant::now() + std::time::Duration::from_secs(20);
-        while doomed.exists() {
-            assert!(Instant::now() < deadline, "the segment before last was never deleted");
-            std::thread::yield_now();
-        }
-        assert_eq!(std::fs::read(dir.join("bytelog.1")).unwrap(), vec![b'd'; 1500]);
-        assert_eq!(std::fs::read(dir.join("bytelog")).unwrap(), b"e");
-        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
-        assert_eq!(names.len(), 2, "{names:?}");
-    }
-
-    /// A legacy oversized log (written by the copy-compaction scheme,
-    /// which allowed a single file up to the full ceiling) is retired
-    /// on open instead of being grown further.
-    #[test]
-    fn legacy_oversized_segment_rotates_on_open() {
-        let sandbox = crate::test_env::sandbox_state_dir();
-        let dir = sandbox.path();
-        let id = 11;
-        let seg_dir = dir.join("sessions").join(id.to_string());
-        std::fs::create_dir_all(&seg_dir).unwrap();
-        // Sparse file just past the segment size — content doesn't
-        // matter here, only the length the open path measures.
-        let f = std::fs::File::create(seg_dir.join("bytelog")).unwrap();
-        f.set_len(BYTELOG_SEGMENT_BYTES + 1).unwrap();
-        drop(f);
-
-        let log = ByteLog::open(id).unwrap();
-        assert_eq!(log.bytes_written(), 0, "live segment should start fresh");
-        assert_eq!(
-            ByteLog::segment_paths(id).len(),
-            2,
-            "the oversized legacy file should have been retired to .1"
-        );
-    }
-
-    /// A log that has never rotated still reads back as one segment.
-    #[test]
-    fn single_segment_before_rotation() {
-        let _sandbox = crate::test_env::sandbox_state_dir();
-        let id = 9;
-        let mut log = ByteLog::open(id).unwrap();
-        log.append(b"hello ").unwrap();
-        log.append(b"world").unwrap();
-        log.flush();
-        assert_eq!(ByteLog::segment_paths(id).len(), 1);
-        assert_eq!(read_all(id), b"hello world");
-    }
-
-    /// What a pane's program printed: enough to scroll several screens
-    /// off the top, with colour, wide characters, a carriage-return
-    /// overwrite and a cursor move, so a replay that only gets plain
-    /// ASCII right still fails.
-    fn program_output() -> Vec<u8> {
-        let mut out = Vec::new();
-        for i in 0..120 {
-            out.extend_from_slice(
-                format!(
-                    "\x1b[3{}mline {i:03}\x1b[0m 漢字 ✓ {}\r\n",
-                    i % 8,
-                    "x".repeat(i % 37)
-                )
-                .as_bytes(),
-            );
-            if i % 17 == 0 {
-                out.extend_from_slice(b"overwritten\rOVER\r\n");
-            }
-        }
-        out.extend_from_slice(b"\x1b[3;5Hmid-screen\x1b[10;1Hprompt$ ");
-        out
-    }
-
-    fn assert_same_terminal(a: &crate::terminal::Terminal, b: &crate::terminal::Terminal) {
-        let (ga, gb) = (a.grid(), b.grid());
-        assert_eq!(
-            ga.scrollback_len(),
-            gb.scrollback_len(),
-            "scrollback length"
-        );
-        assert!(
-            ga.scrollback_len() > 50,
-            "the output scrolled well past one screen"
-        );
-        for i in 0..ga.scrollback_len() {
-            assert_eq!(
-                ga.scrollback_line(i),
-                gb.scrollback_line(i),
-                "scrollback line {i}"
-            );
-        }
-        for r in 0..ga.rows() {
-            for c in 0..ga.cols() {
-                assert_eq!(ga.cell(c, r), gb.cell(c, r), "cell ({c}, {r})");
-            }
-        }
-        assert_eq!(ga.cursor(), gb.cursor(), "cursor");
-    }
-
-    /// The bytes a pane parsed, logged as it parsed them, rebuild the
-    /// same grid and scrollback in a fresh terminal.  The live side is
-    /// fed in small odd-sized chunks, so escape sequences and UTF-8
-    /// characters straddle the chunk boundaries the way PTY reads cut
-    /// them; the replay reads in its own, much larger, chunks.
-    #[test]
-    fn a_replayed_log_rebuilds_the_same_screen_and_scrollback() {
-        let mut sandbox = crate::test_env::sandbox_state_dir();
-        sandbox.env.remove("MARSPOT_SESSION_ID");
-        let id = 21;
-        let mut log = ByteLog::open(id).unwrap();
-        let mut live = crate::terminal::Terminal::new(40, 10);
-        for chunk in program_output().chunks(7) {
-            live.feed(chunk);
-            log.append(chunk).unwrap();
-        }
-        log.flush();
-
-        let mut replayed = crate::terminal::Terminal::new(40, 10);
-        let fed = replay(&ByteLog::segment_paths(id), &mut replayed).unwrap();
-        assert_eq!(fed, program_output().len() as u64);
-        assert_same_terminal(&live, &replayed);
-    }
-
-    /// A rotated log replays the retired segment first.  Either order
-    /// feeds every byte; only one of them is the pane's history.
-    #[test]
-    fn a_rotated_log_replays_oldest_first() {
-        let mut sandbox = crate::test_env::sandbox_state_dir();
-        sandbox.env.remove("MARSPOT_SESSION_ID");
-        let id = 23;
-        let dir = sandbox.path().join("sessions").join(id.to_string());
-        std::fs::create_dir_all(&dir).unwrap();
-        let all = program_output();
-        let (older, newer) = all.split_at(all.len() / 2);
-        std::fs::write(dir.join("bytelog.1"), older).unwrap();
-        std::fs::write(dir.join("bytelog"), newer).unwrap();
-
-        let mut live = crate::terminal::Terminal::new(40, 10);
-        live.feed(&all);
-        let mut replayed = crate::terminal::Terminal::new(40, 10);
-        replay(&ByteLog::segment_paths(id), &mut replayed).unwrap();
-        assert_same_terminal(&live, &replayed);
-
-        // the tool's own list, built from the live segment's path
-        let mut by_path = crate::terminal::Terminal::new(40, 10);
-        let fed = replay(
-            &[
-                dir.join("bytelog.1"),
-                dir.join("bytelog"),
-                dir.join("bytelog.2"),
-            ],
-            &mut by_path,
-        )
-        .unwrap();
-        assert_eq!(fed, all.len() as u64, "a missing segment is skipped");
-        assert_same_terminal(&live, &by_path);
-    }
-}
+mod tests;
