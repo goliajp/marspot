@@ -242,7 +242,7 @@ parse_marker() {
     # (`cpr=,`) means the DSR read timed out — the terminal never
     # confirmed it consumed the corpus, so the elapsed time measures
     # the PTY buffer, not the terminal.  Drop it.
-    /^cpr=/ { certified = ($0 ~ /^cpr=[0-9]/); next }
+    /^cpr=/ { certified = ($0 ~ /^cpr=7,11$/); next }
     /^real/ {
       if (!certified) { next }
       certified = 0

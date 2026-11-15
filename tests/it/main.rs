@@ -3,6 +3,7 @@
 
 mod chrome_geometry;
 mod display_scale_ratchet;
+mod panels_are_trees;
 mod plugin_action_funnel;
 mod pointer_ownership;
 mod render_frame_allocations;

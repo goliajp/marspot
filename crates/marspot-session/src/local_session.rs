@@ -32,6 +32,7 @@ use marspot_term::terminal::Terminal;
 
 use crate::pty_reader::PtyReader;
 
+mod direct;
 mod pump;
 pub(crate) use pump::Pace;
 
@@ -692,6 +693,16 @@ mod tests {
         /// Repairs started so far, and whether one is pending.
         pub(crate) fn line_repairs(&self) -> (u64, bool) {
             (self.line.repairs(), self.line.pending())
+        }
+
+        /// The pty's master side and the shell's pid.
+        pub(crate) fn tty(&self) -> (std::os::fd::RawFd, libc::pid_t) {
+            (self.pty.raw_master(), self.shell_pgrp())
+        }
+
+        /// Hold Enter up for this long before the line guard looks.
+        pub(crate) fn enter_stalls(&mut self, stall: Option<Duration>) {
+            self.line.enter_stalls = stall;
         }
 
         /// The tty's input, output and local flags.

@@ -360,7 +360,10 @@ pub use marspot::pane_name::assign as assign_names;
 /// the peer plugin writes, by the pane's code.
 pub fn resolve_name(target: &str, panes: &[marspot::pane_name::PaneRef]) -> Result<u64, String> {
     let table = marspot_peer::panes::live(&marspot_peer::peers::live_entries());
-    marspot::pane_name::resolve(target, panes, |code| table.iter().find(|p| p.code == Some(code)).and_then(|p| p.agent.clone()))
+    // the agent of a pane whose session is known, as before the table
+    // also listed panes without an inbox
+    let agent_of = |code| table.iter().filter(|p| p.has_inbox()).find(|p| p.code == Some(code)).and_then(|p| p.agent.clone());
+    marspot::pane_name::resolve(target, panes, agent_of)
 }
 
 #[cfg(test)]

@@ -91,8 +91,8 @@ impl OpEnv for RealEnv {
         // header carries the flags.  Read-only, header-sized, and only
         // while an op is running.
         let entry = marspot_term::session_registry::read_session_entry(sid).ok()?;
-        let name = std::ffi::CString::new(entry.shm_name).ok()?;
-        marspot_term::grid_shm::peek(&name).ok()
+        let regions = marspot_term::grid_shm::SessionRegions::of_entry(&entry)?;
+        marspot_term::grid_shm::peek(&regions).ok()
     }
     fn pane_screen(&self, sid: u64) -> Option<String> {
         marspot::pane_read::screen(sid, 0).ok()

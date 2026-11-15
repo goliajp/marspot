@@ -104,9 +104,6 @@ if [[ "$HEALTH" == *"-1712"* ]] || [[ "$HEALTH" == *"timed out"* ]] || [[ "$HEAL
   echo "  2. cd ~/$REMOTE_DIR && bash bin/_remote-measure-others-mini.sh > /tmp/measured.json" >&2
   echo "  3. scp $HOST:/tmp/measured.json $OUT_DIR/measured.json" >&2
   echo "  4. Re-run this script with REMOTE_MEAS_JSON=$OUT_DIR/measured.json to merge into baseline." >&2
-  echo "" >&2
-  echo "Or skip the freshness gate for this run:" >&2
-  echo "  MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1 bin/bench-remote.sh --full" >&2
   exit 3
 fi
 
@@ -118,12 +115,34 @@ mkdir -p "$OUT_DIR"
 MEAS_JSON="${REMOTE_MEAS_JSON:-$OUT_DIR/measured.json}"
 
 if [[ -z "${REMOTE_MEAS_JSON:-}" ]]; then
-  echo "==> dispatching iTerm / Warp on $HOST (~1-2 min)"
+  echo "==> measuring on $HOST: the product built from this tree, and the other terminals"
   # Exclusive, like the gate: this is a measurement, and a competitor's
   # throughput read while the machine is busy is not a slower number,
-  # it is not a number.
-  ssh "$HOST" "cd ~/$REMOTE_DIR && /usr/local/bin/bench-lock bench --max-wait ${MARSPOT_BENCH_MAX_WAIT:-1200} bash bin/_remote-measure-others-mini.sh" \
-    </dev/null > "$MEAS_JSON"
+  # it is not a number.  The product's build runs inside the same lock
+  # hold, so nothing else gets between the build and the reading.
+  COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
+  [[ -z "$(git -C "$ROOT" status --porcelain)" ]] || COMMIT+="-dirty"
+  FWD="export MARSPOT_BENCH_COMMIT=$COMMIT; "
+  [[ -z "${MEASURE_TERMS:-}" ]] || FWD+="export MEASURE_TERMS=$(printf '%q' "$MEASURE_TERMS"); "
+  [[ -z "${MEASURE_ROUNDS:-}" ]] || FWD+="export MEASURE_ROUNDS=$(printf '%q' "$MEASURE_ROUNDS"); "
+  [[ -z "${MEASURE_MARKER_TIMEOUT_S:-}" ]] || FWD+="export MEASURE_MARKER_TIMEOUT_S=$(printf '%q' "$MEASURE_MARKER_TIMEOUT_S"); "
+  [[ -z "${MEASURE_WARP_VIA:-}" ]] || FWD+="export MEASURE_WARP_VIA=$(printf '%q' "$MEASURE_WARP_VIA"); "
+  INNER="source ~/.cargo/env; cd ~/$REMOTE_DIR && export CARGO_TARGET_DIR=\$HOME/$REMOTE_DIR/target; $FWD
+    /usr/local/bin/bench-lock bench --max-wait ${MARSPOT_BENCH_MAX_WAIT:-1200} \
+      caffeinate -dims bin/_bounded.sh ${MARSPOT_MEASURE_TIMEOUT:-3000} sh -c \
+      'cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session >&2 \
+        && exec bash bin/_remote-measure-others-mini.sh'"
+  # The whole run inside the console user's GUI session when the host
+  # allows it: every terminal, the product included, is then started
+  # the same way, and the AppleScript-driven ones are reachable.
+  GUI_UID="${GUI_UID:-501}"
+  if ssh "$HOST" "sudo -n launchctl asuser $GUI_UID /usr/bin/true" </dev/null 2>/dev/null; then
+    INNER="export MEASURE_METHOD='ssh, run inside the GUI session'; $INNER"
+    ssh "$HOST" "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /bin/bash -lc $(printf '%q' "$INNER")" \
+      </dev/null > "$MEAS_JSON"
+  else
+    ssh "$HOST" "$INNER" </dev/null > "$MEAS_JSON"
+  fi
 else
   echo "==> using pre-captured $MEAS_JSON (manual workflow)"
 fi
@@ -140,9 +159,8 @@ jq . "$MEAS_JSON"
 # A run that measured nothing must not look like a run that measured
 # everything. The merge below keeps terminals this run did not reach --
 # which is right when one driver times out, and a lie when they all do:
-# it stamps `captured_at` with today, and the gate's seven-day
-# freshness check then believes numbers from a fortnight ago were taken
-# this morning.
+# it stamps `captured_at` with today, and the gate then prints numbers
+# from a fortnight ago as read this morning.
 #
 # Happened on 2026-10-02: every driver's marker timed out, the script
 # exited 0, and the only change to the baseline was the date.
@@ -154,6 +172,11 @@ if [[ "${MEASURED_TERMS:-0}" -eq 0 ]]; then
   echo "    they need their Automation permission granted again on the" >&2
   echo "    bench host." >&2
   exit 4
+fi
+
+if [[ "${MEASURE_NO_MERGE:-}" == "1" ]]; then
+  echo "==> MEASURE_NO_MERGE=1: $BASELINE left as it was; the readings are in $MEAS_JSON"
+  exit 0
 fi
 
 # ---- merge into bench/baseline.json ----------------------------------
@@ -168,7 +191,12 @@ cs = baseline.setdefault("competitors_snapshot", {})
 # previously-recorded terminals not in this run (e.g. if warp
 # timed out, its old numbers stay rather than vanish silently).
 for term, scenarios in meas.items():
-    cs.setdefault(term, {}).update(scenarios)
+    # the per-round figures are kept; the raw trial times stay in the
+    # run's own measured.json
+    for rd in scenarios.get("rounds", []):
+        for k in [k for k in rd if k.endswith("_trials_s")]:
+            del rd[k]
+    cs[term] = scenarios
 cs["captured_at"] = datetime.date.today().isoformat()
 with open(tmp_path, "w") as f:
     json.dump(baseline, f, indent=2)

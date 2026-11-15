@@ -40,6 +40,7 @@ use marspot::shell_proto::{
 };
 
 mod banner;
+mod core_icons;
 mod launch;
 mod ls_records;
 mod cli_socket;
@@ -134,6 +135,8 @@ enum ShellInbox {
     /// L2 → L1: close this window (RFC-005 step 5 — its last pane was
     /// just moved out).  Runs the exact red-button path.
     WindowCloseRequest(u32),
+    /// The core wants a toolbar icon drawn: `(symbol, point_px)`.
+    IconMaskWanted(u16, u16),
 }
 
 /// How long after spawn we expect HELLO_ACK before declaring the core
@@ -767,6 +770,8 @@ struct ShellApp {
     pane_tables: pane_tables::PaneTables,
     /// Same shape as `pane_badge_rx` but for plugin-set pane titles.
     pane_title_rx: std::sync::mpsc::Receiver<plugins::host::PaneTitleUpdate>,
+    /// The core's toolbar icons, drawn by a short-lived drawer.
+    core_icons: core_icons::CoreIcons,
     /// Receiver for `begin_pane_session` requests.
     pane_session_begin_rx:
         std::sync::mpsc::Receiver<plugins::host::PaneSessionBeginRequest>,
@@ -1256,6 +1261,7 @@ impl ShellApp {
             pane_agent_tui_rx,
             pane_render_markup_rx,
             pane_title_rx,
+            core_icons: core_icons::CoreIcons::new(),
             pane_session_begin_rx,
             pty_op_rx,
             cli_rx,
@@ -1503,7 +1509,8 @@ impl ShellApp {
             .env(ENV_SURFACE_WIDTH, w_phys.to_string())
             .env(ENV_SURFACE_HEIGHT, h_phys.to_string())
             .env(ENV_SURFACE_SCALE, scale.to_string())
-            .env(ENV_CONTROL_FD, DEFAULT_CONTROL_FD.to_string());
+            .env(ENV_CONTROL_FD, DEFAULT_CONTROL_FD.to_string())
+            .env(marspot::ui::system::macos::icons::FROM_SHELL_ENV, "1");
         // SAFETY: pre_exec runs in the forked child between fork and
         // exec.  Only async-signal-safe libc calls are allowed; we
         // only use dup2/close/fcntl which are all on the AS-safe list.
@@ -2522,6 +2529,10 @@ impl ShellApp {
         while let Ok(upd) = self.pane_title_rx.try_recv() {
             self.pane_look.titles.declare(upd.shelld_session_id, upd.text);
         }
+        for (s, p, side, mask) in self.core_icons.drawn() {
+            self.send(MsgType::IconMask, marspot::shell_proto::encode_icon_mask(s, p, side, &mask));
+            self.draw_core_icons();
+        }
         self.flush_pane_decls();
 
         // Drain cc inject-input requests onto the active core's
@@ -2930,6 +2941,24 @@ impl ShellApp {
     /// the bug it guards against (over-released NSWindow) lives in
     /// what happens after `app::close_window`, so a paraphrase would
     /// not have caught it.
+    /// Whether a window other than `window_id` is still open.  Asked of
+    /// the shell's own list, which a close updates at once: the count
+    /// AppKit keeps drops only when the NSWindow is torn down, after
+    /// the dispatch, so two closes asked for together (a core that
+    /// empties two windows in one pump) both saw "more than one" and
+    /// the app stayed up with no window.
+    fn another_window_than(&self, window_id: u32) -> bool {
+        self.windows.iter().any(|w| w.window_id != window_id)
+    }
+
+    /// Have a drawer draw the icons the core is waiting for: the core's
+    /// own binary, run once for the batch.
+    fn draw_core_icons(&mut self) {
+        if let Ok(exe) = std::env::current_exe() {
+            self.core_icons.draw_waiting(self.binaries.resolve_runnable(&exe), &self.proxy);
+        }
+    }
+
     fn close_window_by_id(&mut self, window_id: u32, discard: bool) {
         // Tell the core first: it parks or discards the window while
         // the surfaces are still alive, so nothing renders into a
@@ -3265,6 +3294,12 @@ impl ShellApp {
                     self.restore_window(frame_index);
                 }
             }
+            ShellInbox::IconMaskWanted(symbol, point_px) => match self.core_icons.want(symbol, point_px) {
+                Some((s, p, side, mask)) => {
+                    self.send(MsgType::IconMask, marspot::shell_proto::encode_icon_mask(s, p, side, &mask))
+                }
+                None => self.draw_core_icons(),
+            },
             ShellInbox::WindowCloseRequest(window_id) => {
                 // The core asked because this window emptied out — its
                 // last pane was closed, or moved away.  Either way
@@ -3276,7 +3311,7 @@ impl ShellApp {
                 // the saved layout; drop the saved geometry to match,
                 // so the next launch opens a default window instead of
                 // reusing the frame of what was just dismantled.
-                if marspot::app::window_count() > 1 {
+                if self.another_window_than(window_id) {
                     // The core only asks when the window emptied out:
                     // its panes are gone for good, so its slot goes too.
                     self.close_window_by_id(window_id, true);
@@ -4516,11 +4551,12 @@ impl MarspotApp for ShellApp {
         // RFC-005 — closing one of several windows closes THAT window
         // and the panes it holds; only the last window closing is a
         // quit.  Cmd-Q is `quit_requested`, not this.
-        if marspot::app::window_count() > 1 {
+        let window_id = Self::event_window(ctx);
+        if self.another_window_than(window_id) {
             // The red button / Cmd-W: putting a window away, not
             // dismantling it.  Its slot is kept so the layout and
             // the geometry both come back on the next launch.
-            self.close_window_by_id(Self::event_window(ctx), false);
+            self.close_window_by_id(window_id, false);
             return;
         }
         self.quit(ctx);
@@ -4637,6 +4673,9 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
                             .ok()
                             .map(ShellInbox::WindowCloseRequest)
                     }
+                    MsgType::IconMaskWanted => marspot::shell_proto::decode_icon_mask_wanted(&frame.payload)
+                        .ok()
+                        .map(|(symbol, point_px)| ShellInbox::IconMaskWanted(symbol, point_px)),
                     // Unknown frames are ignored — keeps forward
                     // compatibility while the protocol grows.
                     _ => None,

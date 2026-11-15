@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.361"  # the shell that stays after a quit keeps no release poll, no CLI installer, and no process table
-core    = "0.12.491"  # a run of ASCII that ends inside its row skips the general loop
-session = "0.11.332"  # a reader queued for its turn stops when told, and panes that flood together take their turns in the order they asked
+shell   = "0.7.483"  # the core's icons are drawn by a short-lived drawer, so the shell never loads the symbol set
+core    = "0.12.511"  # a core run with --draw-icons draws the shell's batch of icons and exits
+session = "0.11.351"  # a reader queued for its turn stops when told, and panes that flood together read in the order they asked
