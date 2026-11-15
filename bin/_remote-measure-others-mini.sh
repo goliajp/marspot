@@ -31,14 +31,23 @@ TRIALS=3
 # PTY work — so per-cell contention is zero. This is what makes the
 # vs-best-other ratio fair: every cell is the terminal vs an idle box.
 # (cooldown between terminals lets caches / scheduler settle.)
-TERMS=(iterm warp ghostty terminal marspot)
+#
+# The marspot row is the product: marspot-shell, marspot-core and one
+# marspot-session, built from this tree, one window with one pane.
+# MEASURE_TERMS narrows the set (space separated) for an experiment.
+# shellcheck disable=SC2206
+TERMS=(${MEASURE_TERMS:-iterm warp ghostty terminal marspot})
+# The cycle is run this many times, so every terminal is read in every
+# round and a drift of the machine lands on all of them.  With three or
+# more rounds the first is a warm-up and is left out of the figure.
+ROUNDS=${MEASURE_ROUNDS:-3}
 # 4 scenarios × 3 trials × ~2 MB/s worst case = ~96 s budget; cap at
 # 120 s so a single-terminal failure (Warp keystroke mangle, paste
 # warning, frozen surface) doesn't hang the whole refresh for 10 min
 # of wait-loop dead time. Terminals that don't produce a marker by
 # then are skipped — their previous-day snapshot stays via per-
 # terminal merge in remote-measure-others.sh.
-MARKER_TIMEOUT_S=120
+MARKER_TIMEOUT_S=${MEASURE_MARKER_TIMEOUT_S:-120}
 # Seconds between one terminal's close and the next one's launch.
 # Lets mini cool: GPU thermal, scheduler-cached affinity, page-cache
 # warmth for /tmp scenarios. 3 s is empirically enough for variance
@@ -78,8 +87,11 @@ SSH_MODE=0
 if [[ -n "${SSH_CONNECTION:-}" ]]; then
   SSH_MODE=1
   uid="$(id -u)"
+  # into the GUI session, and back to this user: a terminal started as
+  # root is not the terminal anyone runs, and its files and processes
+  # are out of this script's reach afterwards
   if sudo -n launchctl asuser "$uid" /usr/bin/true 2>/dev/null; then
-    ASUSER="sudo -n launchctl asuser $uid"
+    ASUSER="sudo -n launchctl asuser $uid sudo -u $(id -un)"
   fi
   if [[ -z "$ASUSER" ]]; then
     echo "==> ssh mode: NOPASSWD launchctl asuser not configured — even Ghostty will fail. Add to /etc/sudoers.d/marspot-bench:" >&2
@@ -125,7 +137,9 @@ build_one_cmd() {
   # write_live_matrix_script (bin/_lib.sh) fixes both and hands every
   # terminal the same file to run.
   local marker=$1
-  local script="/tmp/marspot-live-matrix-$$.sh"
+  # one script per terminal and round: a slow terminal can still be
+  # reading its script when the next one's is written
+  local script="/tmp/marspot-live-matrix-$$-$2.sh"
   local paths=()
   local s
   for s in "${SCENARIOS[@]}"; do
@@ -242,16 +256,20 @@ cleanup() {
   # quit the app entirely so the process count returns to zero. If it
   # was running, we already closed only our windows above and leave the
   # rest of the user's session alone.
-  quit_app_if_we_spawned "iTerm"    "iTerm.app/Contents/MacOS"              "$PRE_ITERM"
-  quit_app_if_we_spawned "Terminal" "Terminal.app/Contents/MacOS/Terminal"  "$PRE_TERMINAL"
-  quit_app_if_we_spawned "Warp"     "Warp.app/Contents/MacOS/stable"        "$PRE_WARP"
-  quit_app_if_we_spawned "Ghostty"  "Ghostty.app/Contents/MacOS/ghostty"    "$PRE_GHOSTTY"
+  # Only for a terminal this run launched: one it never started is not
+  # its to quit.
+  local launched=" ${LAUNCHED_TERMS[*]:-} "
+  [[ $launched != *" iterm "* ]]    || quit_app_if_we_spawned "iTerm"    "iTerm.app/Contents/MacOS"              "$PRE_ITERM"
+  [[ $launched != *" terminal "* ]] || quit_app_if_we_spawned "Terminal" "Terminal.app/Contents/MacOS/Terminal"  "$PRE_TERMINAL"
+  [[ $launched != *" warp "* ]]     || quit_app_if_we_spawned "Warp"     "Warp.app/Contents/MacOS/stable"        "$PRE_WARP"
+  [[ $launched != *" ghostty "* ]]  || quit_app_if_we_spawned "Ghostty"  "Ghostty.app/Contents/MacOS/ghostty"    "$PRE_GHOSTTY"
 
-  # Always-clean residue: driver wrappers + scenario markers. Markers
-  # may be root-owned from a sudo-asuser-driven ghostty run; the rm
-  # falls through to sudo -n if NOPASSWD is configured, else best-
-  # effort plain rm.
-  rm -f /tmp/iterm-wrapper-* /tmp/terminal-wrapper-* /tmp/ghostty-wrapper-* /tmp/warp-wrapper-* 2>/dev/null || true
+  # the product, if a round was interrupted while it was up
+  bin/drivers/marspot.sh close-app >/dev/null 2>&1 || true
+
+  # Always-clean residue: driver wrappers + scenario markers.
+
+  rm -f /tmp/iterm-wrapper-* /tmp/terminal-wrapper-* /tmp/ghostty-wrapper-* /tmp/warp-wrapper-* /tmp/marspot-wrapper-* 2>/dev/null || true
   rm -f /tmp/marspot-live-matrix-*.sh 2>/dev/null || true
   # Same story as the processes: anything a root-spawned terminal wrote
   # (wrappers, markers) is root-owned, and /tmp is sticky — this shell
@@ -320,73 +338,113 @@ close_one() {
       fi
       ;;
     marspot)
-      # mcli exits when its single session finishes (wrapper ends with
-      # `exit`).  This is the backstop for a hung wrapper, and it stops
-      # only the instance the driver launched and recorded: other
-      # sessions run their own marspot and mcli on this host.
-      kill_app mcli || true
-      kill_app marspot || true
+      # The app quits when its one pane's shell exits.  This stops what
+      # is left of it, by the pids its own state dir recorded, and
+      # removes that state dir.
+      bin/drivers/marspot.sh close-app >&2 || true
       ;;
   esac
   return 0
 }
 
-# Single sequential cycle: launch → wait → close → cooldown. At any
-# moment exactly one terminal is doing PTY work, so per-cell CPU / IO
-# contention is zero. Every cell is the terminal vs an idle mini —
-# the only condition under which vs-best-other ratios are honest.
+# The grid every terminal that can be told its size opens with: the one
+# the product's window gives its pane.  Learned by asking, once.
+GRID_COLS=""
+GRID_ROWS=""
+probe_grid() {
+  local out="$SESSION_DIR/grid" probe="$SESSION_DIR/grid-probe.sh"
+  printf '#!/bin/sh\nstty size > %s.tmp < /dev/tty\nmv %s.tmp %s\n' "$out" "$out" "$out" > "$probe"
+  chmod 0755 "$probe"
+  # shellcheck disable=SC2086
+  $ASUSER bin/drivers/marspot.sh run-app "$probe" >&2 || return 0
+  local i
+  for ((i = 0; i < 100; i++)); do
+    [[ -s $out ]] && break
+    sleep 0.1
+  done
+  bin/drivers/marspot.sh close-app >&2 || true
+  if [[ -s $out ]]; then
+    read -r GRID_ROWS GRID_COLS < "$out"
+    echo "==> grid: ${GRID_COLS} columns x ${GRID_ROWS} rows (the product's pane)" >&2
+  else
+    echo "==> grid: the product did not report one; terminals open at their defaults" >&2
+  fi
+}
+case " ${TERMS[*]} " in
+  *" marspot "*) probe_grid ;;
+esac
+
+load1() { sysctl -n vm.loadavg | awk '{print $2}'; }
+TIMED_OUT=""
+
+# The product was built a moment ago inside this lock hold; let the
+# build's own load drain before the first reading.
+for ((i = 0; i < 18; i++)); do
+  awk -v l="$(load1)" 'BEGIN { exit !(l > 2.5) }' || break
+  sleep 10
+done
+echo "==> load1 $(load1) before the first round" >&2
+
+# Sequential cycles: launch → wait → close → cooldown, every terminal in
+# every round. At any moment exactly one terminal is doing PTY work, so
+# per-cell CPU / IO contention is zero.
+for ((round = 1; round <= ROUNDS; round++)); do
 for t in "${TERMS[@]}"; do
-  # Ghostty (via `sudo asuser`) and marspot (a direct binary) always
-  # work from ssh.  The AppleScript-driven three used to be skipped
-  # here on the assumption that an ssh session can never reach them —
-  # which is true only while the app is not already running in the
-  # user's GUI session.  Once it IS running, `osascript` from ssh
-  # reaches it fine (verified 2026-08-19: `tell application "iTerm" to
-  # count windows` answered from a plain ssh shell).  So ask instead of
-  # assuming: one cheap AppleEvent decides, and the skip message says
-  # what actually failed.
-  if [[ $SSH_MODE -eq 1 && "$t" != "ghostty" && "$t" != "marspot" ]]; then
+  # Ghostty and marspot are started through `sudo asuser` and always
+  # work from ssh.  The AppleScript-driven three are reachable only
+  # while the app is already running in the user's GUI session
+  # (verified 2026-08-19: `tell application "iTerm" to count windows`
+  # answered from a plain ssh shell).  So ask instead of assuming: one
+  # cheap AppleEvent decides, and the skip message says what failed.
+  if [[ $SSH_MODE -eq 1 && "$t" != "ghostty" && "$t" != "marspot" && "$t-${MEASURE_WARP_VIA:-}" != "warp-run-launch" ]]; then
     ae_app="$(applescript_name "$t")"
     if ! osascript -e "with timeout of 5 seconds" \
                    -e "tell application \"$ae_app\" to count windows" \
                    -e "end timeout" >/dev/null 2>&1; then
-      echo "==> [${t}] skip (ssh cannot reach it — open $ae_app on the bench host first)" >&2
+      echo "==> [${t} r${round}] skip (ssh cannot reach it — open $ae_app on the bench host first)" >&2
       continue
     fi
-    echo "==> [${t}] reachable over ssh (already running in the GUI session)" >&2
   fi
 
-  marker="/tmp/measure-${t}-all.txt"
-  rm -f "$marker" 2>/dev/null || sudo -n rm -f "$marker" 2>/dev/null || true
-  cmd="$(build_one_cmd "$marker")"
+  # A terminal that did not finish a round is not started again: what
+  # it was still doing when its window was closed runs into its next
+  # round (iTerm2's emoji trials take minutes each), and a driver that
+  # never produced a marker would cost its full timeout every round.
+  if [[ " $TIMED_OUT " == *" $t "* ]]; then
+    echo "==> [${t} r${round}] skip (did not finish an earlier round)" >&2
+    continue
+  fi
 
-  echo "==> [${t}] launch" >&2
+  marker="/tmp/measure-${t}-r${round}-all.txt"
+  rm -f "$marker" 2>/dev/null || sudo -n rm -f "$marker" 2>/dev/null || true
+  cmd="$(build_one_cmd "$marker" "${t}-r${round}")"
+
+  load_start="$(load1)"
+  echo "==> [${t} r${round}] launch (load1 ${load_start})" >&2
   launch_rc=0
+  wrapper=""
+  # shellcheck disable=SC2086
   case "$t" in
     iterm)    WIN_iterm="$(bin/drivers/iterm.sh run-tabs 1 "$cmd" 2>&1)" || launch_rc=$? ;;
-    warp)     bin/drivers/warp.sh run-single "$cmd" || launch_rc=$? ;;
-    ghostty)  $ASUSER bin/drivers/ghostty.sh run-single "$cmd" || launch_rc=$? ;;
+    warp)     $ASUSER bin/drivers/warp.sh "${MEASURE_WARP_VIA:-run-single}" "$cmd" || launch_rc=$? ;;
+    ghostty)  $ASUSER bin/drivers/ghostty.sh run-single "$cmd" $GRID_COLS $GRID_ROWS || launch_rc=$? ;;
     terminal) WIN_terminal="$(bin/drivers/terminal.sh run-single "$cmd" 2>&1)" || launch_rc=$? ;;
     marspot)
-      # marspot.sh expects an executable script as MARSPOT_SHELL —
-      # wrap the same command the GUI drivers got, so the test surface
-      # is bit-identical across all five terminals. The wrapper only
-      # invokes it; which shell the measurement itself runs under is
-      # the measurement script's own shebang.
+      # the pane's shell is a wrapper around the same command every
+      # other terminal got
       wrapper=$(mktemp /tmp/marspot-wrapper-XXXXXX)
       printf '#!/bin/bash\n%s\n' "$cmd" > "$wrapper"
       chmod 0755 "$wrapper"
-      bin/drivers/marspot.sh run-shell-mcli "$wrapper" || launch_rc=$?
+      $ASUSER bin/drivers/marspot.sh run-app "$wrapper" >&2 || launch_rc=$?
       ;;
   esac
 
   if (( launch_rc != 0 )); then
-    echo "==> [${t}] driver failed rc=$launch_rc — skipping" >&2
+    echo "==> [${t} r${round}] driver failed rc=$launch_rc — skipping" >&2
     continue
   fi
   LAUNCHED_TERMS+=("$t")
 
-  echo "==> [${t}] wait marker" >&2
   saw_done=0
   for _ in $(seq 1 "$MARKER_TIMEOUT_S"); do
     if [[ -s "$marker" ]] && grep -q '==ALL_DONE==' "$marker"; then
@@ -396,12 +454,15 @@ for t in "${TERMS[@]}"; do
     sleep 1
   done
   if (( saw_done == 0 )); then
-    echo "==> [${t}] marker not done after ${MARKER_TIMEOUT_S}s — moving on" >&2
+    echo "==> [${t} r${round}] marker not done after ${MARKER_TIMEOUT_S}s — moving on" >&2
+    TIMED_OUT+=" $t"
   fi
+  echo "load1 ${load_start} $(load1)" >> "$marker" 2>/dev/null || true
 
-  echo "==> [${t}] close" >&2
   close_one "$t"
+  [[ -z $wrapper ]] || rm -f "$wrapper"
   sleep "$COOLDOWN_S"
+done
 done
 
 # Note: window/process cleanup runs in the EXIT trap above so it
@@ -412,7 +473,8 @@ done
 # Parse markers → JSON on stdout. Markers may be root-owned (when the
 # surface ran under sudo asuser); they're mode 0644 world-readable so
 # this user-mode parse can still read them.
-LIVE_MIN_BYTES="$LIVE_MIN_BYTES" python3 - "${SCENARIOS[@]}" <<'PY'
+LIVE_MIN_BYTES="$LIVE_MIN_BYTES" LIVE_SENTINEL_CPR="$LIVE_SENTINEL_CPR" MEASURE_ROUNDS="$ROUNDS" \
+  python3 - "${SCENARIOS[@]}" <<'PY'
 import json, re, os, sys, datetime, subprocess, platform
 SCENARIOS = sys.argv[1:]
 # Internal driver / marker names use "iterm" (matches iterm.sh); the
@@ -424,8 +486,8 @@ TERM_TO_KEY = {"iterm": "iterm2"}
 
 # App bundle paths per terminal — used to probe version + bundle_id so
 # each refresh records what was measured against what build. Terminal.app
-# lives under /System/Applications/Utilities on macOS 13+. marspot has
-# no .app bundle; its version is probed separately via the binary.
+# lives under /System/Applications/Utilities on macOS 13+. marspot is
+# measured from the build tree; its version comes from its binaries.
 APP_PATH = {
     "iterm":    "/Applications/iTerm.app",
     "warp":     "/Applications/Warp.app",
@@ -444,38 +506,24 @@ def plist_read(plist, key):
 
 def probe_version(term):
     if term == "marspot":
-        # Source of truth for marspot version: git describe at build time
-        # (build.rs sets MARSPOT_GIT_SHA). Try the binary itself first.
-        bin_path = f"{ROOT}/target/release/marspot"
-        if os.path.exists(bin_path):
-            try:
-                out = subprocess.check_output(
-                    [bin_path, "--version"], text=True,
-                    stderr=subprocess.DEVNULL, timeout=3
-                ).strip()
-                if out:
-                    return out, "com.goliajp.marspot"
-            except Exception:
-                pass
-        # Fallback: cargo metadata package.version + git short sha.
-        try:
-            cargo = subprocess.check_output(
-                ["cargo", "metadata", "--no-deps", "--format-version=1"],
-                cwd=ROOT, text=True, stderr=subprocess.DEVNULL, timeout=5
-            )
-            import json as _json
-            data = _json.loads(cargo)
-            for pkg in data.get("packages", []):
-                if pkg.get("name") == "marspot":
-                    v = pkg.get("version", "?")
-                    sha = subprocess.check_output(
-                        ["git", "-C", ROOT, "rev-parse", "--short", "HEAD"],
-                        text=True, stderr=subprocess.DEVNULL, timeout=2
-                    ).strip()
-                    return f"{v} (git {sha})", "com.goliajp.marspot"
-        except Exception:
-            pass
-        return None, "com.goliajp.marspot"
+        # the three binaries that were just measured say what they are
+        lines = subprocess.run(
+            ["bin/drivers/marspot.sh", "app-version"], cwd=ROOT,
+            capture_output=True, text=True).stdout.split("\n")
+        m = re.match(r"marspot-shell (\S+) \(git (\S+) ", lines[0]) if lines else None
+        if not m or len(lines) < 3:
+            return None, "com.goliajp.marspot"
+        product = "?"
+        for line in open(f"{ROOT}/Cargo.toml"):
+            pm = re.match(r'version = "([^"]+)"', line)
+            if pm:
+                product = pm.group(1)
+                break
+        # the copy on the bench host has no repository; the triggering
+        # host says which commit it sent
+        commit = os.environ.get("MARSPOT_BENCH_COMMIT") or m.group(2)
+        return (f"{product} (shell {m.group(1)}, core {lines[1].strip()}, "
+                f"session {lines[2].strip()}, git {commit})"), "com.goliajp.marspot"
     p = APP_PATH.get(term)
     if not p: return None, None
     plist = f"{p}/Contents/Info.plist"
@@ -498,78 +546,121 @@ def probe_host():
         out["os"] = f"{prod} {ver} (build {build})"
     except Exception:
         out["os"] = "unknown"
-    # What else the machine was doing. These are absolute throughput
-    # numbers, and the published table says they were taken on an idle
-    # host -- so the condition has to travel with them rather than live
-    # in whoever remembers running it. Load only depresses a number, so
-    # a figure taken at load 6 is a floor for the same terminal idle.
-    try:
-        out["load1_at_capture"] = round(os.getloadavg()[0], 2)
-    except Exception:
-        pass
     return out
+
+def median(xs):
+    s = sorted(xs)
+    return s[len(s) // 2]
+
+def read_marker(path):
+    """One terminal, one round: seconds per certified trial by scenario,
+    the grid, the load at both ends, how many trials had no certificate."""
+    by_scn, grid, load, dropped = {}, None, None, 0
+    current, certified = None, False
+    for line in open(path, errors="replace"):
+        line = line.strip()
+        m = re.match(r"^==GRID== (\d+) (\d+)", line)
+        if m:
+            grid = f"{m.group(2)}x{m.group(1)}"
+            continue
+        m = re.match(r"^==SCN== (\S+)", line)
+        if m:
+            current = m.group(1)
+            continue
+        m = re.match(r"^load1 (\S+) (\S+)", line)
+        if m:
+            load = [float(m.group(1)), float(m.group(2))]
+            continue
+        # `cpr=<row>,<col>` is the terminal's reply to "where is the
+        # cursor", asked right after moving it to the sentinel position
+        # behind the corpus.  Only that position certifies the trial.
+        m = re.match(r"^cpr=(.*)$", line)
+        if m:
+            certified = m.group(1) == SENTINEL
+            dropped += 0 if certified else 1
+            continue
+        m = re.match(r"^real\s+(\S+)$", line)
+        if m and current and certified:
+            certified = False
+            by_scn.setdefault(current, []).append(float(m.group(1)))
+    return by_scn, grid, load, dropped
 
 ROOT = os.environ.get("PWD", os.getcwd())
 # Mirrors LIVE_MIN_BYTES in bin/_lib.sh — passed through the
 # environment by the shell half so the two cannot drift apart.
 LIVE_MIN_BYTES = int(os.environ.get("LIVE_MIN_BYTES", 32 * 1024 * 1024))
+SENTINEL = os.environ["LIVE_SENTINEL_CPR"]
+ROUNDS = int(os.environ["MEASURE_ROUNDS"])
+# a round taken above this 1-minute load is not a reading (the gate's
+# own ceiling)
+LOAD_MAX = float(os.environ.get("MARSPOT_BENCH_LOAD_MAX", "5.0"))
 today = datetime.date.today().isoformat()
 out = {"host": probe_host()}
+loads = []
 for t in TERMS:
-    marker = f"/tmp/measure-{t}-all.txt"
-    if not os.path.exists(marker):
-        continue
-    by_scn = {s: [] for s in SCENARIOS}
-    current = None
-    certified = False
-    for line in open(marker, errors="replace"):
-        m = re.match(r"^==SCN== (\S+)", line)
-        if m:
-            current = m.group(1)
+    rounds = []
+    grid = None
+    for r in range(1, ROUNDS + 1):
+        marker = f"/tmp/measure-{t}-r{r}-all.txt"
+        if not os.path.exists(marker):
             continue
-        # `cpr=<row>,<col>` is the terminal's DSR reply, written just
-        # before time's output.  Empty means the read timed out: the
-        # terminal never confirmed it consumed the corpus, so its
-        # elapsed time measures the PTY buffer.  Drop that trial.
-        m = re.match(r"^cpr=(.*)$", line.strip())
-        if m:
-            certified = bool(re.match(r"^\d", m.group(1)))
-            continue
-        m = re.match(r"^real\s+(.+)$", line.strip())
-        if m and current and current in by_scn and certified:
-            certified = False
-            s = m.group(1)
-            if "m" in s:
-                a, b = s.split("m", 1)
-                secs = int(a) * 60 + float(b.rstrip("s"))
-            else:
-                secs = float(s)
-            by_scn[current].append(int(secs * 1e9))
+        by_scn, g, load, dropped = read_marker(marker)
+        grid = g or grid
+        rd = {"round": r}
+        if load:
+            rd["load1"] = load
+            loads += load
+            if max(load) > LOAD_MAX:
+                rd["polluted"] = True
+        if dropped:
+            rd["uncertified_trials"] = dropped
+        if by_scn.get("overhead"):
+            rd["overhead_ms"] = round(median(by_scn["overhead"]) * 1000, 2)
+        for s in SCENARIOS:
+            vs = by_scn.get(s)
+            if not vs:
+                continue
+            # Bytes actually pushed = file size x the live repeat count
+            # the trial script used, NOT the file size.  Getting this
+            # wrong is how one afternoon produced a "419 MB/s"
+            # competitor reading that was really 105.
+            size = os.path.getsize(f"{ROOT}/bench/scenarios/{s}.bin")
+            reps = max(1, -(-LIVE_MIN_BYTES // size))
+            rd[f"{s}_MBps"] = round(size * reps / median(vs) / 1e6, 1)  # MB = 10^6 bytes
+            rd[f"{s}_trials_s"] = [round(v, 4) for v in vs]
+        rounds.append(rd)
     rec = {}
     version, bundle = probe_version(t)
     if version: rec["version"] = version
     if bundle:  rec["bundle_id"] = bundle
     rec["captured_at"] = today
     rec["unit"] = "MB/s"  # 10^6 bytes per second
-    rec["method"] = ("ssh→LaunchAgent (com.marspot.bench-trigger)"
+    rec["method"] = os.environ.get("MEASURE_METHOD") or (
+                     "ssh→LaunchAgent (com.marspot.bench-trigger)"
                      if os.environ.get("XPC_SERVICE_NAME", "").startswith("com.marspot")
+                     else "ssh, started in the GUI session" if os.environ.get("SSH_CONNECTION")
                      else "console / Screen Sharing")
-    for s, vs in by_scn.items():
-        if not vs:
-            continue
-        vs.sort()
-        med = vs[len(vs) // 2]
-        # Bytes actually pushed = file size x the live repeat count the
-        # trial script used, NOT the file size.  Getting this wrong is
-        # how one afternoon produced a "419 MB/s" competitor reading
-        # that was really 105.
-        size = os.path.getsize(f"{ROOT}/bench/scenarios/{s}.bin")
-        reps = max(1, -(-LIVE_MIN_BYTES // size))
-        bps = size * reps * 1_000_000_000 // med
-        rec[f"{s}_MBps"] = round(bps / 1e6, 1)  # MB = 10^6 bytes
+    if grid:
+        rec["grid"] = grid
+    # The figure: the median over the rounds of each round's median.
+    # The first of three or more rounds is a warm-up; a round taken
+    # under load is not a reading, unless that is all there is.
+    used = rounds[1:] if len(rounds) >= 3 else rounds
+    clean = [rd for rd in used if not rd.get("polluted")]
+    if not clean and used:
+        rec["polluted"] = True
+    for s in SCENARIOS:
+        vals = [rd[f"{s}_MBps"] for rd in (clean or used) if f"{s}_MBps" in rd]
+        if vals:
+            rec[f"{s}_MBps"] = median(vals)
+    rec["rounds"] = rounds
     # Only emit if we got at least one MBps measurement; metadata alone
     # isn't worth surfacing.
     if any(k.endswith("_MBps") for k in rec):
         out[TERM_TO_KEY.get(t, t)] = rec
+# What else the machine was doing travels with the numbers: load only
+# depresses a reading.
+if loads:
+    out["host"]["load1_at_capture"] = max(loads)
 print(json.dumps(out, indent=2))
 PY

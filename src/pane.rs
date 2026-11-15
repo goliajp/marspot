@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use crate::grid::{Cell, Grid};
 
 mod mirror;
+mod regions;
 use crate::grid_shm::{
     GridShmReader, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
     FLAG_ALT_SCREEN, FLAG_ALT_SCROLL, FLAG_MOUSE_ANY_MOTION, FLAG_MOUSE_DRAG,
@@ -597,18 +598,6 @@ impl PaneBackend {
         }
     }
 
-    /// Hot-swap an L3 pane's control stream (after a reader-loop EOF
-    /// → main loop reconnects).  No-op on non-L3 backends.
-    pub fn swap_l3_control(
-        &mut self,
-        new_control: UnixStream,
-        selection_rx: Receiver<(u32, String)>,
-    ) {
-        if let PaneBackend::L3(c) = self {
-            c.swap_control(new_control, selection_rx);
-        }
-    }
-
 
 
     /// Cmd-C on an L3 pane: ask the session process for the selection text
@@ -730,6 +719,7 @@ pub struct L3Spawn {
     pub child: Child,
     pub control: UnixStream,
     pub reader: GridShmReader,
+    pub regions: crate::grid_shm::SessionRegions,
     pub selection_rx: Receiver<(u32, String)>,
 }
 
@@ -861,6 +851,9 @@ pub struct L3Conn {
     /// Set once the child process has exited (observed by `poll`'s
     /// `try_wait`).  Read by `is_exited`/`state`, which are `&self`.
     exited: bool,
+    /// …and it exited because its shell ended on its own: an L3
+    /// removes its session dir then, and on no other exit.
+    shell_ended: bool,
     /// Scratch buffer for the snapshot cell copy — reused across polls
     /// so the per-frame read allocates zero.
     scratch: Vec<Cell>,
@@ -873,6 +866,12 @@ pub struct L3Conn {
     /// When attaching to this session's cluster region was last tried;
     /// an L3 from before clusters were published has none.
     clusters_tried_at: Option<Instant>,
+    /// Where `reader`'s region is and whose it has to be; the side
+    /// regions are found from it.
+    regions: crate::grid_shm::SessionRegions,
+    /// `reader` is on a region made for the session to move to, and
+    /// the session has not said it publishes there yet.
+    moving: bool,
     /// Reply channel for `GetSelectionText`: the control-socket reader
     /// thread routes each `SelectionText` frame here, and
     /// `request_selection_text` blocks on it (Cmd-C round-trip).  L3 owns
@@ -894,6 +893,7 @@ impl L3Conn {
         pid: i32,
         control: UnixStream,
         reader: GridShmReader,
+        regions: crate::grid_shm::SessionRegions,
         selection_rx: Receiver<(u32, String)>,
         session_id: u64,
     ) -> Self {
@@ -920,10 +920,13 @@ impl L3Conn {
             req_view_offset: 0,
             snap_scrollback_len: 0,
             exited: false,
+            shell_ended: false,
             scratch: Vec::new(),
             scratch_wrapped: Vec::new(),
             cluster_table: Default::default(),
             clusters_tried_at: None,
+            regions,
+            moving: false,
             selection_rx,
             selection_seq: 0,
         }
@@ -956,10 +959,13 @@ impl L3Conn {
             req_view_offset: 0,
             snap_scrollback_len: 0,
             exited: false,
+            shell_ended: false,
             scratch: Vec::new(),
             scratch_wrapped: Vec::new(),
             cluster_table: Default::default(),
             clusters_tried_at: None,
+            regions: spawn.regions,
+            moving: false,
             selection_rx: spawn.selection_rx,
             selection_seq: 0,
         }
@@ -991,15 +997,14 @@ impl L3Conn {
         // new one. `force_fill` so we re-read the new region even if its
         // first seq coincides with our last.
         let force_fill = false;
-        // Observe exit here (the only `&mut` entry point); `is_exited`
-        // and `state` are `&self` and just read the flag.  Crash isolation:
-        // an L3 dying (panic / kill / shell exit) is one session ending —
-        // log it once and leave the pane showing its last frame (state →
-        // Exited).  The process boundary means it can't take L2 or sibling
-        // L3s down; the container reaps the child via `L3Conn::Drop`.
+        // Observe exit here (the only `&mut` entry point).  An L3 that
+        // crashed leaves the pane frozen at its last frame; one whose
+        // shell ended has removed its dir before exiting, and the
+        // container closes the pane.
         if !self.exited
             && let Ok(Some(status)) = self.child.try_wait() {
                 self.exited = true;
+                self.shell_ended = !crate::session_registry::session_dir(self.session_id).exists();
                 eprintln!(
                     "[core] L3 session pid={} exited ({status}) — pane frozen at last frame, others unaffected",
                     self.child.id()
@@ -1027,34 +1032,6 @@ impl L3Conn {
         // frame.
         self.last_seq = seq;
         true
-    }
-
-    /// Replace this L3Conn's L2↔L3 control stream after a backend
-    /// reconnect (`l3_reader_loop` saw EOF, main loop ran
-    /// `wait_and_connect`, and now we hot-swap the write half so
-    /// subsequent `forward_key`/`forward_resize`/etc go through the
-    /// fresh stream).  Old stream's Drop closes the old fd.
-    /// Both halves move together, and that is the whole point.
-    ///
-    /// This used to swap only `control` (the write half).  The reader
-    /// half lives in a thread that owns the matching `selection_tx`, so
-    /// after a reconnect the old thread was gone — its sender dropped —
-    /// while `selection_rx` still pointed at that dead channel.
-    /// `request_selection_text` then got `Disconnected` immediately and
-    /// returned `None`, so **Cmd-C went permanently silent on that pane
-    /// after any silent-update reconnect**, with no log to say why.
-    /// `try_promote` (the swap path) always replaced both; this one
-    /// didn't, and the asymmetry is what made it a bug.
-    pub fn swap_control(
-        &mut self,
-        new_control: UnixStream,
-        selection_rx: Receiver<(u32, String)>,
-    ) {
-        // Dropping the old writer ends its thread; anything still queued
-        // for the dead socket goes with it, which is correct — those
-        // frames were addressed to an L3 that no longer exists.
-        self.control = new_control_writer(new_control);
-        self.selection_rx = selection_rx;
     }
 
     /// Forward a keystroke to the session process, which encodes it with
@@ -1247,30 +1224,11 @@ impl L3Conn {
 
 impl Drop for L3Conn {
     fn drop(&mut self) {
-        // RFC-003 §6 Amendment 12 — DO NOT kill the L3 child here.
-        //
-        // Pre-RFC-003 this Drop killed+reaped the child as "bounded
-        // teardown" because shelld owned the PTY and the L3 helper
-        // was disposable.  RFC-003 reversed that: L3 owns the PTY +
-        // shell, and L3 is the unit users care about preserving
-        // across an L2 lifetime.  Two cases:
-        //
-        //   * close_session (user clicked × on a pane): marspot-core
-        //     already SIGTERMed entry.pid + delete_session() BEFORE
-        //     dropping the pane.  Killing again here is redundant.
-        //   * L2 process exit (user Cmd-Q on marspot.app, supervisor
-        //     restart, panic, crash): this Drop runs on every L3Conn
-        //     during stack unwind.  Killing the child here destroys
-        //     every L3 along with L2 — meaning a single Cmd-Q wipes
-        //     the user's 9 active shells.  THAT is the "原来可以现在
-        //     不行" regression from L4 retirement.
-        //
-        // Instead, drop the file handles (control socket + shm
-        // reader) silently.  L3 sees the EOF, stays alive via
-        // Amendment 11 debug-2/3, and waits for the next L2 boot to
-        // shm_open + connect_with_handshake it (Amendment 7
-        // reattach).  launchd reaps the orphaned L3 if it ever
-        // exits later.
+        // Never kill the L3 child here (RFC-003 Amendment 12): a
+        // pane the user closed was already signalled and its dir
+        // deleted, and on L2's own exit the L3s must outlive it so
+        // the next core can reattach them.  Dropping the handles is
+        // all: the L3 sees EOF and waits for that core.
     }
 }
 
@@ -1751,6 +1709,11 @@ impl Pane {
     /// been pumped through the parser.
     pub fn is_exited(&self) -> bool {
         self.session.is_exited()
+    }
+
+    /// The pane's L3 exited because its shell ended, not in a crash.
+    pub fn shell_ended(&self) -> bool {
+        matches!(&self.session, PaneBackend::L3(c) if c.shell_ended)
     }
 
     /// The shelld session id behind this pane, when it has one. `None`
@@ -2253,6 +2216,7 @@ mod tests {
             std::process::id() as i32,
             control,
             reader,
+            crate::grid_shm::SessionRegions::for_session(1),
             selection_rx,
             1,
         );

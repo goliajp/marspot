@@ -40,7 +40,22 @@ OWN_SCRATCH=msp-one OWN_BUNDLE_ID=com.goliajp.marspot.e2e-one-record OWN_BUNDLE_
 source "$ROOT/bin/_ownership-lib.sh"
 
 OUTSIDE="$MARSPOT_STATE_DIR/binaries/current/marspot-shell"
-one() { state "$1"; check_one_record; }
+# the core draws no system symbol itself, so LaunchServices has no
+# record of it: a record would let it be given the sessions' coalition
+check_core_unlisted() {
+  local c
+  for c in $(dev_core_pids); do
+    if [[ -n "$(ls_record "$c")" ]]; then bad "the core $c has a LaunchServices record: $(ls_record "$c" | grep -o 'type="[A-Za-z]*"' | head -1)"
+    else ok "the core $c has no LaunchServices record"; fi
+  done
+}
+# and the icons it asked for were drawn for it, by a drawer that has
+# exited since
+check_icons_drawn() {
+  if (( $(count SHELL_ICONS_DRAWN) > 0 )); then ok "a drawer drew the core's icons: $(grep $'\tSHELL_ICONS_DRAWN\t' "$APPLOG" | tail -1 | grep -oE 'drawn=[0-9]+')"
+  else bad "no drawer drew the core's icons"; fi
+}
+one() { state "$1"; check_one_record; check_core_unlisted; check_icons_drawn; }
 answers() { local i; for (( i = 0; i < 150; i++ )); do L1="$(dev_shell_pid)"; [[ -n $L1 ]] && "$SHELL_BIN" --panes >/dev/null 2>&1 && return 0; sleep 0.2; done; return 1; }
 
 # The record of who answers, rewritten in place: what a session starts
@@ -180,7 +195,7 @@ STATE="S3"; echo; echo "── $STATE: sessions in two coalitions, one under a d
 had="$("$SHELL_BIN" --panes 2>/dev/null | awk 'NR>1 {print $1}' | sort -n | tr '\n' ' ')"
 rm -f "$MARSPOT_STATE_DIR/owner" "$MARSPOT_STATE_DIR"/sessions/*/guard
 sleep 0.5
-old="$L1"; kill -9 "$old"; sleep 1
+old="$L1"; sig -9 "$old"; sleep 1
 [[ -z "$(dev_shell_pid)" ]] || bad "a shell is running although nothing could start one"
 open_app --env MARSPOT_DEV_EXTRA_WINDOWS=1
 for (( i = 0; i < 100; i++ )); do
@@ -204,7 +219,7 @@ else
     for (( i = 0; i < 100; i++ )); do [[ -n "$(ls_record "$gui")" ]] && break; sleep 0.1; done
     sleep 0.7
     ls_coalition_pids "$gui" | grep -q -x "$S1" && given=1
-    kill "$gui" 2>/dev/null; sleep 1.5
+    sig -TERM "$gui"; sleep 1.5
     [[ -n $given ]] && break
     open -n -g -j -W "$APP" --args --ls-refresh 2>/dev/null; sleep 0.5
   done

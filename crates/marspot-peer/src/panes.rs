@@ -16,6 +16,14 @@
 //! The file names the marspot that wrote it.  A reader drops a table
 //! whose writer is gone, and an entry whose session is gone, so a quit
 //! or crashed marspot leaves no name pointing anywhere.
+//!
+//! A pane whose agent has no inbox, because which session it runs is
+//! not known yet, is in the table too, under `noInbox` and without a
+//! socket.  It is there to be told apart from, not to be written to:
+//! with it listed, the name two panes share stays a question for the
+//! sender, and its own full name is answered with why nothing can be
+//! sent.  A reader from before this key does not see these entries and
+//! reads the rest as it always has.
 
 use std::fs;
 use std::io;
@@ -27,15 +35,18 @@ use crate::registry::{self, Entry};
 use crate::resolve::Target;
 
 const PREFIX: &str = ".marspot-panes-";
+/// The table's key for panes whose agent has no inbox.
+const NO_INBOX: &str = "noInbox";
 
 /// One pane that runs exactly one agent session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pane {
     /// The pane's name, as marspot draws it.
     pub name: String,
-    /// The pid of the session's registry record.
+    /// The pid of the session's registry record; of the agent's own
+    /// process for a pane without an inbox.
     pub pid: i32,
-    /// The session's inbox socket.
+    /// The session's inbox socket; empty for a pane without one.
     pub socket: String,
     /// The pane's identity code and its directory's name; `base#code`
     /// is its full name.
@@ -46,6 +57,20 @@ pub struct Pane {
 }
 
 impl Pane {
+    /// Whether anything can be sent to the session in this pane.
+    pub fn has_inbox(&self) -> bool {
+        !self.socket.is_empty()
+    }
+
+    /// What a sender is told who names a pane without an inbox.
+    pub fn no_inbox_text(&self) -> String {
+        format!(
+            "{} has no inbox yet: marspot does not know for certain which {} session that pane runs, so nothing was sent. Try again later",
+            self.target().full_name(),
+            self.agent.as_deref().unwrap_or("agent")
+        )
+    }
+
     /// The pane as name resolution sees it.
     pub fn target(&self) -> Target<'_> {
         match (&self.base, self.code) {
@@ -73,53 +98,57 @@ pub struct Table {
 
 impl Table {
     fn to_json(&self) -> String {
-        let panes = self
-            .panes
-            .iter()
-            .map(|p| {
-                let mut v = obj([
-                    ("name", Value::from(p.name.as_str())),
-                    ("pid", Value::from(i64::from(p.pid))),
-                    ("socket", Value::from(p.socket.as_str())),
-                ]);
-                if let Some(code) = p.code {
-                    v.set("code", Value::from(i64::from(code)));
-                }
-                if let Some(base) = &p.base {
-                    v.set("base", Value::from(base.as_str()));
-                }
-                if let Some(agent) = &p.agent {
-                    v.set("agent", Value::from(agent.as_str()));
-                }
-                v
-            })
-            .collect();
-        obj([
+        let row = |p: &Pane| {
+            let mut v = obj([("name", Value::from(p.name.as_str())), ("pid", Value::from(i64::from(p.pid)))]);
+            if p.has_inbox() {
+                v.set("socket", Value::from(p.socket.as_str()));
+            }
+            if let Some(code) = p.code {
+                v.set("code", Value::from(i64::from(code)));
+            }
+            if let Some(base) = &p.base {
+                v.set("base", Value::from(base.as_str()));
+            }
+            if let Some(agent) = &p.agent {
+                v.set("agent", Value::from(agent.as_str()));
+            }
+            v
+        };
+        let (with, without): (Vec<&Pane>, Vec<&Pane>) = self.panes.iter().partition(|p| p.has_inbox());
+        let mut v = obj([
             ("owner", Value::from(self.owner.as_str())),
             ("pid", Value::from(i64::from(self.pid))),
             ("procStart", Value::from(self.proc_start.as_str())),
-            ("panes", Value::Arr(panes)),
-        ])
-        .to_json()
+            ("panes", Value::Arr(with.into_iter().map(row).collect())),
+        ]);
+        // its own key, and only when there is one: an earlier reader
+        // takes every entry of `panes` for a session with a socket
+        if !without.is_empty() {
+            v.set(NO_INBOX, Value::Arr(without.into_iter().map(row).collect()));
+        }
+        v.to_json()
     }
 
     fn parse(text: &str) -> Option<Table> {
         let v = json::parse(text).ok()?;
-        let panes = v
-            .get("panes")
-            .map_or(&[][..], Value::arr)
-            .iter()
-            .filter_map(|p| {
-                Some(Pane {
-                    name: p.str_at("name")?.to_string(),
-                    pid: i32::try_from(p.get("pid")?.i64()?).ok()?,
-                    socket: p.str_at("socket")?.to_string(),
-                    code: p.get("code").and_then(Value::i64).and_then(|c| u16::try_from(c).ok()),
-                    base: p.str_at("base").map(str::to_string),
-                    agent: p.str_at("agent").map(str::to_string),
+        let read = |key: &str, with_socket: bool| -> Vec<Pane> {
+            v.get(key)
+                .map_or(&[][..], Value::arr)
+                .iter()
+                .filter_map(|p| {
+                    Some(Pane {
+                        name: p.str_at("name")?.to_string(),
+                        pid: i32::try_from(p.get("pid")?.i64()?).ok()?,
+                        socket: if with_socket { p.str_at("socket")?.to_string() } else { String::new() },
+                        code: p.get("code").and_then(Value::i64).and_then(|c| u16::try_from(c).ok()),
+                        base: p.str_at("base").map(str::to_string),
+                        agent: p.str_at("agent").map(str::to_string),
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        };
+        let mut panes = read("panes", true);
+        panes.extend(read(NO_INBOX, false));
         Some(Table {
             owner: v.str_at("owner")?.to_string(),
             pid: i32::try_from(v.get("pid")?.i64()?).ok()?,
@@ -179,7 +208,13 @@ pub fn live(entries: &[Entry]) -> Vec<Pane> {
                 continue;
             }
             for p in t.panes {
-                let live = entries.iter().any(|e| e.pid == p.pid && e.socket.as_deref() == Some(p.socket.as_str()));
+                // a pane without an inbox has no record to be found by:
+                // it is there while its agent's process is
+                let live = if p.has_inbox() {
+                    entries.iter().any(|e| e.pid == p.pid && e.socket.as_deref() == Some(p.socket.as_str()))
+                } else {
+                    proc::lstart(p.pid).is_some()
+                };
                 if live && !out.contains(&p) {
                     out.push(p);
                 }
@@ -249,6 +284,47 @@ mod tests {
             .collect();
         assert_eq!(old_reader, vec![("spg#3381".to_string(), 7, "/tmp/cc-socks/7.sock".to_string())]);
         assert!(v.str_at("owner").is_some() && v.get("pid").is_some() && v.str_at("procStart").is_some());
+    }
+
+    fn waiting(name: &str, pid: i32) -> Pane {
+        Pane { socket: String::new(), code: Some(7359), base: Some("proj".into()), agent: Some("codex".into()), ..pane(name, pid) }
+    }
+
+    #[test]
+    fn a_pane_without_an_inbox_reads_back_as_one() {
+        let bound = Pane { code: Some(1807), base: Some("proj".into()), agent: Some("codex".into()), ..pane("proj#1807", 7) };
+        let t = Table { owner: "/o".into(), pid: 1, proc_start: "x".into(), panes: vec![bound.clone(), waiting("proj#7359", 8)] };
+        let back = Table::parse(&t.to_json()).unwrap();
+        assert_eq!(back, t);
+        assert!(back.panes[0].has_inbox() && !back.panes[1].has_inbox());
+        assert_eq!(
+            back.panes[1].no_inbox_text(),
+            "proj#7359 has no inbox yet: marspot does not know for certain which codex session that pane runs, so nothing was sent. Try again later"
+        );
+        // a table with no such pane is written as it always was
+        let plain = Table { panes: vec![bound], ..t };
+        assert!(!plain.to_json().contains(NO_INBOX));
+    }
+
+    /// The reader from before `noInbox`: every entry of `panes` with a
+    /// name, a pid and a socket, and nothing else of the file.  It
+    /// reads a table that lists a pane without an inbox exactly as it
+    /// reads one that does not.
+    #[test]
+    fn a_reader_from_before_panes_without_inboxes_reads_the_same_table() {
+        let bound = Pane { code: Some(1807), base: Some("proj".into()), agent: Some("codex".into()), ..pane("proj#1807", 7) };
+        let old_reader = |t: &Table| -> Vec<(String, i32, String)> {
+            let v = json::parse(&t.to_json()).unwrap();
+            v.get("panes")
+                .map_or(&[][..], Value::arr)
+                .iter()
+                .filter_map(|p| Some((p.str_at("name")?.to_string(), i32::try_from(p.get("pid")?.i64()?).ok()?, p.str_at("socket")?.to_string())))
+                .collect()
+        };
+        let without = Table { owner: "/o".into(), pid: 1, proc_start: "x".into(), panes: vec![bound.clone()] };
+        let with = Table { panes: vec![bound, waiting("proj#7359", 8)], ..without.clone() };
+        assert_eq!(old_reader(&with), old_reader(&without));
+        assert_eq!(old_reader(&with), vec![("proj#1807".to_string(), 7, "/tmp/cc-socks/7.sock".to_string())]);
     }
 
     #[test]

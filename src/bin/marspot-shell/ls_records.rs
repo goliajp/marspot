@@ -48,18 +48,28 @@ pub(crate) fn parse(text: &str) -> Vec<Record> {
             block.push('\n');
         }
     }
-    blocks
-        .iter()
-        .filter_map(|b| {
-            Some(Record {
-                pid: number(b, "pid = ")?,
-                dead: b.contains("(exited"),
-                bundle_id: quoted(b, "bundleID").map(str::to_string),
-                // on a line of its own: `relatedCoalitionIDs:` is not it
-                coalition: b.lines().find_map(|l| number(l.trim_start().strip_prefix("coalition:")?, "")),
-            })
-        })
-        .collect()
+    blocks.iter().filter_map(|b| record_of(b)).collect()
+}
+
+fn record_of(block: &str) -> Option<Record> {
+    Some(Record {
+        pid: number(block, "pid = ")?,
+        dead: block.contains("(exited"),
+        bundle_id: quoted(block, "bundleID").map(str::to_string),
+        // on a line of its own: `relatedCoalitionIDs:` is not it
+        coalition: block.lines().find_map(|l| number(l.trim_start().strip_prefix("coalition:")?, "")),
+    })
+}
+
+/// The record of one process, from `lsappinfo info`: the same text as
+/// one entry of the list, without its number.
+pub(crate) fn of_pid(pid: i32) -> Option<Record> {
+    let out = std::process::Command::new("/usr/bin/lsappinfo")
+        .args(["info", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    record_of(&String::from_utf8_lossy(&out.stdout)).filter(|r| r.pid == pid)
 }
 
 pub(crate) fn list() -> Vec<Record> {

@@ -47,7 +47,7 @@ use std::thread::JoinHandle;
 
 mod files;
 mod queue;
-pub use files::{delete_with, doomed_path};
+pub use files::{delete_with, doomed_path, retry_with};
 use files::{rotated, write_all_of};
 use queue::{Buf, Msg, Queue};
 
@@ -69,6 +69,12 @@ impl AsyncWriter {
     /// side file, and a process killed without a flush loses at most
     /// `cap * (depth + 1)`.
     pub fn new(file: std::fs::File, cap: usize, depth: usize) -> Self {
+        Self::woken_by(file, cap, depth, files::retry)
+    }
+
+    /// [`Self::new`], with what the writer thread calls once it has
+    /// written what made it refuse a [`Self::hand_off`].
+    fn woken_by(file: std::fs::File, cap: usize, depth: usize, retry: impl Fn() + Send + 'static) -> Self {
         let queue = Arc::new(Queue::new(depth));
         let (free_tx, free_rx) = sync_channel::<Buf>(depth + 2);
         // Seed the free list so the first few handoffs don't allocate.
@@ -123,6 +129,9 @@ impl AsyncWriter {
                         taken.wrote();
                     }
                     Self::append(&mut file, side.as_mut(), &mut run, &mut acks, &free_tx, &taken);
+                    if taken.settle() {
+                        retry();
+                    }
                 }
             })
             .expect("spawn async writer");
@@ -247,15 +256,21 @@ impl AsyncWriter {
     /// busy — and a queue that is full anyway hands the buffer back.
     /// Either refusal costs nothing: the bytes go with the next full
     /// buffer, which during the heavy output that makes the writer busy
-    /// is moments away.
+    /// is moments away.  When the output ends there instead, no buffer
+    /// follows: the writer calls what [`retry_with`] was given once it
+    /// has written what kept it busy, and the producer hands over
+    /// again.  Without that the last lines of a flood stayed in memory
+    /// until the pane next printed something.
     pub fn hand_off(&mut self) {
         if self.buf.is_empty() {
             self.queue.hurry();
             return;
         }
-        let Some(mut empty) = self.spare.take().or_else(|| self.free_rx.try_recv().ok()) else {
-            self.queue.hurry();
-            return;
+        let mut empty = match self.spare.take().or_else(|| self.free_rx.try_recv().ok()) {
+            Some(empty) => empty,
+            None if self.queue.owe() => return,
+            // the writer finished between the two looks
+            None => self.take_empty(),
         };
         empty.clear();
         let pending = std::mem::replace(&mut self.buf, empty);
@@ -447,6 +462,47 @@ mod tests {
         let mut got = Vec::new();
         std::fs::File::open(&path).unwrap().read_to_end(&mut got).unwrap();
         assert_eq!(got, want);
+        drop(w);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Output that ends on a refused hand-off is not left in memory:
+    /// the writer says when it has room, and the hand-off made then
+    /// goes through.  The file is a pipe nobody reads at first, so the
+    /// writer is busy with every buffer for as long as the test wants.
+    #[test]
+    fn a_hand_off_refused_by_a_busy_writer_is_asked_for_again() {
+        use std::os::unix::ffi::OsStrExt;
+        const CAP: usize = 256 * 1024;
+        let path = tmp("handoff-retry");
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0, "a pipe to write into");
+        let pipe = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let mut reader = std::fs::File::open(&path).unwrap();
+        let (asked_tx, asked) = std::sync::mpsc::channel();
+        let mut w = AsyncWriter::woken_by(pipe, CAP, 4, move || {
+            let _ = asked_tx.send(());
+        });
+        // more than the pipe holds, in both of the buffers there are
+        w.write(&[1u8; CAP]);
+        w.write(&[2u8; CAP]);
+        w.write(&[3u8; 100]);
+        w.hand_off();
+        assert_eq!(w.pending(), 100, "the writer holds every other buffer");
+        assert!(asked.try_recv().is_err(), "nothing was written yet");
+
+        let mut flood = vec![0u8; 2 * CAP];
+        reader.read_exact(&mut flood).unwrap();
+        assert!(flood[..CAP].iter().all(|&b| b == 1) && flood[CAP..].iter().all(|&b| b == 2));
+        asked
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the writer asks for the hand-off it refused");
+        w.hand_off();
+        assert_eq!(w.pending(), 0);
+        let mut tail = [0u8; 100];
+        reader.read_exact(&mut tail).unwrap();
+        assert_eq!(tail, [3u8; 100]);
+        assert!(asked.try_recv().is_err(), "asked once");
         drop(w);
         let _ = std::fs::remove_file(&path);
     }

@@ -24,10 +24,11 @@ use super::worker::WorkerCtx;
 /// only timely evidence there is, because the usage feed is collected
 /// behind what a session is actually spending.
 ///
-/// Three texts are matched, all read out of the CLI's own templates
+/// Four texts are matched, all read out of the CLI's own templates
 /// rather than guessed: the model-limit branch, the credits branch,
-/// and the account-window branch ("You've hit your session limit",
-/// "… weekly limit"), which names no model.
+/// the account-window branch ("You've hit your session limit",
+/// "… weekly limit"), which names no model, and a model's own cap in
+/// the account-window wording ("You've hit your Fable limit").
 /// Deliberately not `rate_limit` or `429`, which a loaded server
 /// produces too -- being overloaded is not being out of quota, and
 /// moving a pane for it costs a restart for nothing.
@@ -116,6 +117,9 @@ fn says_logged_out(line: &str) -> bool {
 /// The CLI's two templates put it in fixed places: "You've reached
 /// your Fable limit." and "Opus 5.5 requires usage credits.".
 fn refused_model(line: &str) -> String {
+    if let Some(name) = model_cap(line) {
+        return short_model(name);
+    }
     const LIMIT: &str = "You've reached your ";
     if let Some(i) = line.find(LIMIT) {
         let rest = &line[i + LIMIT.len()..];
@@ -139,7 +143,27 @@ fn says_out_of_quota(line: &str) -> bool {
     (line.contains("You've reached your") && line.contains("limit"))
         || line.contains("requires usage credits")
         || ACCOUNT_WINDOWS.iter().any(|w| line.contains(w))
+        || model_cap(line).is_some()
 }
+
+/// The model named in "You've hit your Fable limit · resets …", the
+/// wording a model's cap has had since 2026-11-13. Unread, every Fable
+/// refusal after that went unnoticed.
+///
+/// Only a model's name counts: the same opening is used for limits
+/// that do not shut the account out.
+fn model_cap(line: &str) -> Option<&str> {
+    const HIT: &str = "You've hit your ";
+    line.match_indices(HIT).find_map(|(i, _)| {
+        let rest = &line[i + HIT.len()..];
+        let name = &rest[..rest.find(" limit")?];
+        let lower = name.to_ascii_lowercase();
+        MODEL_FAMILIES.iter().any(|f| lower.starts_with(f)).then_some(name)
+    })
+}
+
+/// The model families a cap of its own can be named after.
+const MODEL_FAMILIES: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
 
 /// The account-wide windows, as the CLI words running out of them.
 ///
@@ -226,5 +250,31 @@ impl Refusal {
             return true;
         }
         model.is_some_and(|m| same_model(&m.to_ascii_lowercase(), &self.model))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Fable refusal as the CLI wrote it on 2026-11-14 (trimmed).
+    const FABLE_CAP: &str = concat!(
+        r#"{"parentUuid":"p","isSidechain":false,"type":"assistant","timestamp":"2026-11-14T00:50:01.266Z","#,
+        r#""message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","#,
+        r#""text":"You've hit your Fable limit · resets Nov 20 at 2pm (Asia/Tokyo)"}]},"#,
+        r#""apiError":"usage_limit_reached","error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429}"#,
+    );
+
+    #[test]
+    fn a_models_cap_in_the_account_window_wording_names_that_model() {
+        let r = last_quota_refusal(FABLE_CAP).expect("a Fable refusal");
+        assert_eq!(r.model, "fable");
+        assert_eq!(r.window, Window::Week);
+        assert_eq!(r.at, 1_794_617_401, "2026-11-14T00:50:01Z");
+        assert!(r.applies_to(Some("fable-5-2")) && !r.applies_to(Some("opus-5-5")));
+        for other in ["fast", "monthly spend"] {
+            let line = FABLE_CAP.replace("Fable limit", &format!("{other} limit"));
+            assert_eq!(last_quota_refusal(&line), None, "{other}");
+        }
     }
 }

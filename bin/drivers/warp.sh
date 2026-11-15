@@ -15,6 +15,10 @@
 #   bin/drivers/warp.sh run-single <cmd>
 #     Open a fresh Warp window, type <cmd>, hit return.
 #
+#   bin/drivers/warp.sh run-launch <cmd>
+#     Open a Warp window that runs <cmd>, through a launch
+#     configuration and the warp:// URL scheme.
+#
 #   bin/drivers/warp.sh paste-block <n> <cmd>
 #     Print a paste-ready block: open Warp, hit cmd-N <n-1> times,
 #     paste the block in each window.  Caller polls the marker.
@@ -54,6 +58,28 @@ tell application "System Events"
   keystroke return
 end tell
 APPLESCRIPT
+    ;;
+  run-launch)
+    # No keystrokes: a launch configuration names the command, and the
+    # app's own URL scheme opens it.  Reaches Warp from where System
+    # Events is not allowed to type (an ssh session).
+    user_cmd=${1:?cmd}; shift || true
+    wrapper=$(mktemp /tmp/warp-wrapper-XXXXXX)
+    printf '#!/bin/bash\n%s\n' "$user_cmd" > "$wrapper"
+    chmod 0755 "$wrapper"
+    conf_dir="$HOME/.warp/launch_configurations"
+    mkdir -p "$conf_dir"
+    cat > "$conf_dir/marspot-bench.yaml" <<YAML
+---
+name: marspot-bench
+windows:
+  - tabs:
+      - layout:
+          cwd: /tmp
+          commands:
+            - exec: $wrapper; exit
+YAML
+    open "warp://launch/marspot-bench.yaml"
     ;;
   paste-block)
     n=${1:?n}; shift

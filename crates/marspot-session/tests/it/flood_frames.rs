@@ -69,7 +69,17 @@ fn what_a_program_does_about_a_key_is_shown_while_it_floods() {
         assert!(Instant::now() < deadline, "the pane never flooded");
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(paste_mode(&s), Some(false));
+    // a read can find the writer mid-publish every time it looks while
+    // the flood runs; that frame is not an answer either way
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let first = loop {
+        if let Some(mode) = paste_mode(&s) {
+            break mode;
+        }
+        assert!(Instant::now() < deadline, "no frame could be read during the flood");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(!first, "bracketed paste was on before any key");
     for want in [true, false, true] {
         // long enough apart that no key rides on the one before it
         std::thread::sleep(Duration::from_millis(250));

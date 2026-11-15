@@ -92,7 +92,7 @@ if expect_resident "$residents"; then
   # not replace its image while it waits for that event
   updates=$(count SHELL_SELF_UPDATE); waits=$(count SHELL_UPDATE_WAITS)
   stage_shell
-  kill -USR1 "$L1"
+  sig -USR1 "$L1"
   wait_count SHELL_UPDATE_WAITS $((waits + 1)) 60 || bad "the resident shell did not note the staged shell"
   [[ "$(dev_shell_pid)" == "$keep" ]] && (( $(count SHELL_SELF_UPDATE) == updates )) || bad "the resident replaced its image while quit"
   state "shell staged while quit"
@@ -118,13 +118,13 @@ open(p, 'wb').write(b)
 PY
 codesign --force --sign - "$SB/session-other" 2>/dev/null && codesign -v "$SB/session-other" || die "could not sign the other session build"
 mv "$SB/session-other" "$MARSPOT_STATE_DIR/binaries/current/marspot-session"
-kill -TERM "$S1" "$S2"
+sig -TERM "$S1"; sig -TERM "$S2"
 wait_count L3_EXECV_RESUMED $((resumed + 2)) 60 || bad "the sessions did not move to the other build ($(( $(count L3_EXECV_RESUMED) - resumed )) of 2)"
 sleep 1
 state "sessions updated in place"
 
 core="$(dev_core_pids | head -1)"; boots=$(count CORE_BOOT)
-kill -9 "$core"
+sig -9 "$core"
 wait_count CORE_BOOT $((boots + 1)) 60 || bad "no core came back after the core was killed"
 for (( i = 0; i < 150; i++ )); do "$SHELL_BIN" --panes >/dev/null 2>&1 && break; sleep 0.2; done
 reattached
@@ -155,7 +155,7 @@ fi
 rm -f "$MARSPOT_STATE_DIR/owner"
 sleep 0.5
 old="$L1"; handovers=$(count SHELL_HANDOVER)
-kill -9 "$old"; sleep 1
+sig -9 "$old"; sleep 1
 if [[ -n "$(dev_shell_pid)" ]]; then bad "a shell is running although the record of who answers was removed"; fi
 open_app; reattached
 if (( $(count SHELL_HANDOVER) > handovers )); then ok "the shell that was opened outside the sessions' coalition handed over to one inside it"
@@ -218,7 +218,7 @@ if [[ -n $L1 ]]; then
   (( ${#kept[@]} == 2 )) || bad "expected the two sessions of the walk to be kept, found ${#kept[@]}"
   for (( i = 0; i < ${#kept[@]}; i++ )); do
     alive "$L1" || bad "the resident shell exited while a session was still kept"
-    kill -HUP "${kept[$i]}"; wait_gone "${kept[$i]}" 10 || bad "session ${kept[$i]} did not close"
+    sig -HUP "${kept[$i]}"; wait_gone "${kept[$i]}" 10 || bad "session ${kept[$i]} did not close"
   done
   if wait_gone "$L1" 10; then ok "the resident shell exited with the last session"
   else bad "the resident shell is still running with no session left"; fi
