@@ -33,6 +33,9 @@ pub mod grid;
 pub mod grid_item;
 pub mod sidebar;
 pub mod sidebar_view;
+pub mod title_strip_view;
+#[cfg(test)]
+mod title_strip_view_tests;
 #[cfg(test)]
 mod sidebar_view_tests;
 pub mod table;
