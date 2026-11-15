@@ -10,7 +10,8 @@ use crate::render::{SessionView, SidebarEntry};
 use crate::render_metal::{new_atlas, system_default_device};
 use crate::session::SessionState;
 use crate::terminal::Terminal;
-use crate::ui::components::chrome_hover::ChromeHover;
+use crate::frame_build::chrome::ChromeShape;
+use crate::ui::components::title_strip_view::BadgesOnly;
 use golia_ui_core::scene::{GlyphInstance, RectInstance, UiRectInstance};
 
 const NAMES: [(&str, &str); 9] = [
@@ -39,7 +40,7 @@ struct Lists {
 
 /// A warm frame takes nothing from the heap, whether nothing changed,
 /// a pane had output, the pointer moved onto another sidebar row, or a
-/// pane was renamed.
+/// pane was renamed; nor does the pointer moving over the chrome.
 #[test]
 fn a_whole_window_frame_allocates_nothing_once_warm() {
     let Ok(device) = system_default_device() else {
@@ -80,7 +81,13 @@ fn a_whole_window_frame_allocates_nothing_once_warm() {
             .collect();
         let mut keep = FrameKeep::default();
         let mut l = Lists::default();
-        let mut frame = |seq: u64, renamed: bool, hover: Option<ChromeHover>| {
+        let badges = |i: usize| NAMES[i].1;
+        let strips = BadgesOnly(NAMES.len(), badges);
+        let shape = ChromeShape { layout: &layout, rows: NAMES.len(), strips: &strips };
+        let row_h = marspot_term::layout::sidebar_row_h();
+        let row_at = |i: usize| (20.0, layout.top_inset + layout.sidebar_top_pad_phys + (i as f64 + 0.5) * row_h);
+        let mut frame = |seq: u64, renamed: bool, pointer: (f64, f64)| {
+            keep.chrome.pointer_move(&mut font, &shape, pointer);
             l.cells.clear();
             l.glyphs.clear();
             l.color_glyphs.clear();
@@ -110,7 +117,7 @@ fn a_whole_window_frame_allocates_nothing_once_warm() {
                 seq: if i == 4 { seq } else { 1 },
             });
             build_instances(
-                &layout, &views, &sidebar, 4, true, hover, None, None, None, None, None, None, None,
+                &layout, &views, &sidebar, 4, true, None, None, None, None, None, None, None,
                 &mut font, &mut atlas, &mut color_atlas,
                 &mut l.cells, &mut l.glyphs, &mut l.color_glyphs, &mut l.dots, &mut l.ui_rects,
                 &mut keep,
@@ -118,19 +125,32 @@ fn a_whole_window_frame_allocates_nothing_once_warm() {
             );
             l.glyphs.len()
         };
-        let lit = Some(ChromeHover::Row(6));
+        let (lit, off) = (row_at(6), (900.0, 600.0));
         // every picture once, so each kept buffer has grown to fit
-        for (seq, renamed, hover) in [(1, false, None), (2, false, lit), (3, true, None), (4, false, None)] {
-            frame(seq, renamed, hover);
+        for (seq, renamed, pointer) in [(1, false, off), (2, false, lit), (3, true, off), (4, false, off)] {
+            frame(seq, renamed, pointer);
         }
-        let (n, glyphs) = counted(|| frame(4, false, None));
+        let (n, glyphs) = counted(|| frame(4, false, off));
         assert!(glyphs > 100, "the window has to have been drawn: {glyphs} glyphs");
         assert_eq!(n, 0, "a frame with nothing new allocated {n} times");
-        for (what, seq, renamed, hover) in
-            [("output in a pane", 5, false, None), ("a row lit", 5, false, lit), ("a pane renamed", 5, true, lit)]
+        for (what, seq, renamed, pointer) in
+            [("output in a pane", 5, false, off), ("a row lit", 5, false, lit), ("a pane renamed", 5, true, lit)]
         {
-            let (n, _) = counted(|| frame(seq, renamed, hover));
+            let (n, _) = counted(|| frame(seq, renamed, pointer));
             assert_eq!(n, 0, "a frame after {what} allocated {n} times");
         }
+        // the pointer swept across every button, row and strip, and off
+        // them, with no frame in between
+        let sweep: Vec<(f64, f64)> =
+            (0..400).map(|k| ((k * 37 % 1800) as f64 + 0.5, (k * 53 % 1100) as f64 + 0.5)).collect();
+        let (n, lit_changes) = counted(|| {
+            let mut changes = 0;
+            for &p in &sweep {
+                changes += keep.chrome.pointer_move(&mut font, &shape, p) as u32;
+            }
+            changes
+        });
+        assert!(lit_changes > 10, "the sweep has to have crossed controls: {lit_changes}");
+        assert_eq!(n, 0, "moving the pointer over the chrome allocated {n} times");
     });
 }

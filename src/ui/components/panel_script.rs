@@ -489,18 +489,26 @@ mod tests {
     fn a_button_step_presses_the_button_the_toolbar_hit_tests() {
         let l = layout();
         let scene = Scene { layout: &l, chrome: None, cell: CELL };
-        let hits: [(SurfaceKind, fn(&Layout, f64, f64) -> bool); 4] = [
-            (SurfaceKind::Settings, Layout::hit_test_settings_button),
-            (SurfaceKind::Layout, Layout::hit_test_layout_button),
-            (SurfaceKind::Processes, Layout::hit_test_process_button),
-            (SurfaceKind::Accounts, Layout::hit_test_cc_button),
+        use crate::frame_build::chrome::{ChromeShape, ChromeSurfaces};
+        use crate::ui::components::chrome_target::ChromeTarget;
+        use crate::ui::components::title_strip_view::BadgesOnly;
+        let mut font = crate::font_cache::FontCache::build().expect("font");
+        let mut chrome = ChromeSurfaces::default();
+        let strips = BadgesOnly(0, |_| "");
+        let shape = ChromeShape { layout: &l, rows: 0, strips: &strips };
+        let hits = [
+            (SurfaceKind::Settings, 4),
+            (SurfaceKind::Layout, 1),
+            (SurfaceKind::Processes, 2),
+            (SurfaceKind::Accounts, 3),
         ];
-        for (kind, hit) in hits {
+        for (kind, button) in hits {
             let inputs = scene.resolve(Step::Button(kind)).unwrap();
             let [Input::Move(mx, my), Input::Down(x, y, mods), Input::Up(ux, uy)] = inputs[..] else {
                 panic!("{kind:?}: {inputs:?}");
             };
-            assert!(hit(&l, x, y) && !mods.shift, "{kind:?}");
+            let hit = chrome.at(&mut font, &shape, (x, y));
+            assert!(hit == Some(ChromeTarget::Toolbar(button)) && !mods.shift, "{kind:?}: {hit:?}");
             assert_eq!(((mx, my), (ux, uy)), ((x, y), (x, y)), "{kind:?}");
         }
     }

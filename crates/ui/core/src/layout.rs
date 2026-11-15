@@ -77,6 +77,12 @@ pub struct Layout {
     pub(crate) scroll: [ScrollExtent; SCROLL_SLOTS],
     /// The floating nodes, in the order they were described.
     pub(crate) floats: Vec<u32>,
+    /// The smallest rectangle round every floating node: a point
+    /// outside it is on none of them, nor on anything inside one.
+    pub(crate) float_bounds: Rect,
+    /// The smallest rectangle round the root and every floating node:
+    /// a point outside it is on nothing.
+    pub(crate) bounds: Rect,
 }
 
 impl Layout {
@@ -120,6 +126,8 @@ impl Layout {
         self.text.resize(n, TextBox::default());
         self.scroll = [ScrollExtent::default(); SCROLL_SLOTS];
         self.floats.clear();
+        self.float_bounds = Rect::default();
+        self.bounds = Rect::default();
         if n == 0 {
             return;
         }
@@ -134,6 +142,20 @@ impl Layout {
             let r = self.rects[f as usize];
             self.shift(tree, f, origin.0 + at.0 - r.x, origin.1 + at.1 - r.y);
         }
+        let mut bounds: Option<(f64, f64, f64, f64)> = None;
+        for &f in &floats {
+            let r = self.rects[f as usize];
+            // a float with no area is never hit, nor is anything in it
+            if r.is_empty() {
+                continue;
+            }
+            let b = bounds.get_or_insert((r.x, r.y, r.right(), r.bottom()));
+            *b = (b.0.min(r.x), b.1.min(r.y), b.2.max(r.right()), b.3.max(r.bottom()));
+        }
+        if let Some((x, y, right, bottom)) = bounds {
+            self.float_bounds = Rect::new(x, y, right - x, bottom - y);
+        }
+        self.bounds = union(self.rects[0], self.float_bounds);
         self.floats = floats;
     }
 
@@ -145,6 +167,18 @@ impl Layout {
         for r in self.rects[i as usize..end].iter_mut().chain(&mut self.inner[i as usize..end]) {
             r.x += dx;
             r.y += dy;
+        }
+    }
+}
+
+/// The smallest rectangle round both; an empty one adds nothing.
+fn union(a: Rect, b: Rect) -> Rect {
+    match (a.is_empty(), b.is_empty()) {
+        (true, _) => b,
+        (_, true) => a,
+        _ => {
+            let (x, y) = (a.x.min(b.x), a.y.min(b.y));
+            Rect::new(x, y, a.right().max(b.right()) - x, a.bottom().max(b.bottom()) - y)
         }
     }
 }

@@ -52,7 +52,8 @@ use crate::ui::components::cc_usage_modal::CcUsageRender;
 use crate::ui::components::settings_view::SettingsRender;
 use crate::ui::components::shortcuts_view::ShortcutsRender;
 use crate::ui::components::layout_view::LayoutModalRender;
-use crate::ui::components::{chrome_hover::ChromeHover, context_menu_view::MenuRender};
+use crate::ui::components::{chrome_target::ChromeTarget, context_menu_view::MenuRender};
+pub use crate::frame_build::chrome::ChromeShape;
 use crate::render::{SessionView, SidebarEntry};
 #[cfg(test)]
 use crate::render::HighlightSpan;
@@ -274,6 +275,45 @@ impl WindowRender {
         }
     }
 
+    /// What `p` is on in the window's chrome: its toolbar, sidebar
+    /// and title strips, laid out first as the next frame will draw
+    /// them if `shape` says they have moved since the last.
+    pub fn chrome_at(&mut self, font: &mut FontCache, shape: &ChromeShape<'_>, p: (f64, f64)) -> Option<ChromeTarget> {
+        self.kept.chrome.at(font, shape, p)
+    }
+
+    /// What `p` is on in the chrome as the window last laid it out.
+    pub fn chrome_hit_painted(&self, p: (f64, f64)) -> Option<ChromeTarget> {
+        self.kept.chrome.hit(p)
+    }
+
+    /// The pointer moved to `p` over the window: true when what lights
+    /// in the chrome changed, a frame to paint and nothing to lay out.
+    pub fn chrome_pointer_move(&mut self, font: &mut FontCache, shape: &ChromeShape<'_>, p: (f64, f64)) -> bool {
+        self.kept.chrome.pointer_move(font, shape, p)
+    }
+
+    /// The pointer is no longer over the window's chrome.
+    pub fn chrome_pointer_leave(&mut self) -> bool {
+        self.kept.chrome.pointer_leave()
+    }
+
+    /// A press at `p`, remembered for the release; what it is on.
+    pub fn chrome_press(&mut self, font: &mut FontCache, shape: &ChromeShape<'_>, p: (f64, f64)) -> Option<ChromeTarget> {
+        self.kept.chrome.press(font, shape, p)
+    }
+
+    /// The release at `p` (`None`: in another window or off every
+    /// window): the control pressed, if it is let go on.
+    pub fn chrome_release(
+        &mut self,
+        font: &mut FontCache,
+        shape: &ChromeShape<'_>,
+        p: Option<(f64, f64)>,
+    ) -> Option<ChromeTarget> {
+        self.kept.chrome.release(font, shape, p)
+    }
+
     /// Is a frame still on the GPU for this window?
     ///
     /// A caller that sees `true` must not start another frame — it
@@ -449,10 +489,6 @@ pub struct MetalRenderer {
     /// Window-level focus.  Mirror of the AppKit renderer's flag —
     /// drives whether the focused-session cursor is filled or hollow.
     window_focused: bool,
-    /// What the pointer is on in the window's chrome, if anything: a
-    /// toolbar button, a sidebar row or one of the sidebar's buttons.
-    /// The chrome is drawn with that control lit.
-    hover_chrome_btn: Option<ChromeHover>,
     /// F3+1.3 — process-tree panel render data.  `None` = panel
     /// closed (renderer paints nothing).  Pushed by L2 every frame
     /// while the panel is open; cheap because rows are typically
@@ -633,7 +669,6 @@ impl MetalRenderer {
             glyphs_scratch: Vec::new(),
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
-            hover_chrome_btn: None,
             process_panel: None, cc_usage: None, settings_panel: None, shortcuts_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None,
             last_render_split: RenderSplit::default(),
             top_inset_phys: 0.0,
@@ -699,7 +734,6 @@ impl MetalRenderer {
             glyphs_scratch: Vec::new(),
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
-            hover_chrome_btn: None,
             process_panel: None, cc_usage: None, settings_panel: None, shortcuts_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None,
             last_render_split: RenderSplit::default(),
             top_inset_phys: 0.0,
@@ -758,12 +792,6 @@ impl MetalRenderer {
 
     pub fn set_context_menu(&mut self, state: Option<MenuRender>) {
         self.context_menu_state = state;
-    }
-
-    /// What the pointer is on in the window's chrome; `None` clears.
-    /// Set per window right before it is painted.
-    pub fn set_hover_chrome_btn(&mut self, h: Option<ChromeHover>) {
-        self.hover_chrome_btn = h;
     }
 
     /// Reserve a top strip (physical pixels) above the grid so window
@@ -973,7 +1001,6 @@ impl MetalRenderer {
             ref mut overlay_color_glyphs_scratch,
             ref mut overlay_ui_rects_scratch,
             window_focused,
-            hover_chrome_btn,
             ref process_panel,
             ref cc_usage,
             ref settings_panel,
@@ -998,7 +1025,6 @@ impl MetalRenderer {
             sidebar,
             focused_idx,
             window_focused,
-            hover_chrome_btn,
             process_panel.as_ref(),
             cc_usage.as_ref(),
             FormPanel::open(settings_panel.as_ref(), shortcuts_panel.as_ref()),
@@ -1183,7 +1209,6 @@ impl MetalRenderer {
             ref mut overlay_color_glyphs_scratch,
             ref mut overlay_ui_rects_scratch,
             window_focused,
-            hover_chrome_btn,
             ref process_panel,
             ref cc_usage,
             ref settings_panel,
@@ -1209,7 +1234,6 @@ impl MetalRenderer {
             sidebar,
             focused_idx,
             window_focused,
-            hover_chrome_btn,
             process_panel.as_ref(),
             cc_usage.as_ref(),
             FormPanel::open(settings_panel.as_ref(), shortcuts_panel.as_ref()),
@@ -3645,7 +3669,7 @@ mod tests {
             &[],
             0,
             true,
-            None, None, None,
+            None, None,
             None, // settings panel
             None, None,
             Some(0), // this pane is being dragged
@@ -3866,7 +3890,7 @@ mod tests {
                 &[],
                 0,
                 true,
-                None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None,
                 &mut font,
                 &mut atlas,
                 &mut color_atlas,
@@ -4060,7 +4084,7 @@ mod tests {
             let mut glyphs: Vec<GlyphInstance> = Vec::new();
             build_instances(
                 &layout, std::slice::from_ref(v), &[], 0, true,
-                None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None,
                 &mut font, &mut atlas, &mut color_atlas,
                 &mut Vec::new(), &mut glyphs, &mut Vec::new(), &mut Vec::new(),
                 &mut Vec::new(), &mut crate::frame_build::frame::FrameKeep::default(),
@@ -4146,7 +4170,7 @@ mod tests {
         let mut overlay_ui: Vec<UiRectInstance> = Vec::new();
         build_instances(
             &layout, &views, &[], 0, true,
-            None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None,
             &mut font, &mut atlas, &mut color_atlas,
             // cells, glyphs, color_glyphs, _dots
             &mut Vec::new(), &mut Vec::new(), &mut Vec::new(), &mut Vec::new(),
@@ -4249,7 +4273,6 @@ mod tests {
             &[],
             0,
             true,
-            None,
             None,
             None,
             None,
@@ -4370,7 +4393,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -4446,7 +4468,6 @@ mod tests {
             &[],
             0,
             true,
-            None,
             None,
             None,
             None,
@@ -4582,7 +4603,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
                 &mut font,
                 &mut atlas,
                 &mut color_atlas,
@@ -4693,7 +4713,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -4772,7 +4791,6 @@ mod tests {
                 &[],
                 0,
                 true,
-                None,
                 None,
                 None,
                 None,

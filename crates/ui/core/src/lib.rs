@@ -29,7 +29,7 @@ pub mod text;
 pub mod tree;
 pub mod units;
 
-pub use action::{Action, NO_ITEM, Target, WidgetId};
+pub use action::{Action, NO_ITEM, SPOT, Target, WidgetId};
 pub use color::Rgba8;
 pub use geom::{Align, Rect, Size};
 pub use hit::{Hit, hit_test};

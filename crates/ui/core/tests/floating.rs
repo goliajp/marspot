@@ -191,6 +191,10 @@ fn a_node_takes_its_hover_fill_when_the_pointer_is_on_another_node_of_its_group(
         let leaves = s.output().ops.iter();
         leaves.filter_map(|op| if let Op::Leaf { state, .. } = op { Some(state.hovered) } else { None }).collect()
     };
+    let button_lit = |s: &Surface<Recording>| -> Vec<bool> {
+        let leaves = s.output().ops.iter();
+        leaves.filter_map(|op| if let Op::Leaf { state, .. } = op { Some(state.lit) } else { None }).collect()
+    };
     assert_eq!(fills(&s), [ROW, ROW]);
 
     // on the second row's button
@@ -198,11 +202,13 @@ fn a_node_takes_its_hover_fill_when_the_pointer_is_on_another_node_of_its_group(
     s.frame(&inputs(), &MEASURE, |_| panic!("a hover describes nothing"));
     assert_eq!(fills(&s), [ROW, ROW_LIT], "the row did not light with its button");
     assert_eq!(button_hovered(&s), [false, true]);
+    assert_eq!(button_lit(&s), [false, true], "a preset is told its group is lit");
 
     // on the first row, off its button: the button is not under the pointer
     assert!(s.pointer_move((100.0 + 20.0, 50.0 + 10.0)));
     s.frame(&inputs(), &MEASURE, |_| panic!("a hover describes nothing"));
     assert_eq!(fills(&s), [ROW_LIT, ROW]);
     assert_eq!(button_hovered(&s), [false, false], "a button lit with its row");
+    assert_eq!(button_lit(&s), [true, false], "and drawn lit with it, by its own preset");
     assert_eq!(s.counters().layout, 1, "lighting a row laid something out");
 }

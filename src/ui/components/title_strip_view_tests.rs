@@ -82,10 +82,12 @@ fn title_strip_surface_frame() {
         let badged = views(&term, &other, 4);
         let mut surface = TitleStripSurface::default();
         let mut out: Frame = Default::default();
+        let (rest, moved, badged): (&[SessionView], &[SessionView], &[SessionView]) = (&rest, &moved, &badged);
+        let cell_w = stage.font.cell_w;
         let frames = [
-            TitleStrips { layout: &l, views: &rest, window_focused: true },
-            TitleStrips { layout: &l, views: &moved, window_focused: true },
-            TitleStrips { layout: &l, views: &badged, window_focused: true },
+            TitleStrips { layout: &l, strips: &rest, window_focused: true, cell_w },
+            TitleStrips { layout: &l, strips: &moved, window_focused: true, cell_w },
+            TitleStrips { layout: &l, strips: &badged, window_focused: true, cell_w },
         ];
         for s in frames.iter().cycle().take(7) {
             stage.draw(window, &mut out, &mut |p| surface.frame(p, s));

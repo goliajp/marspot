@@ -8,7 +8,7 @@ pub mod cc_usage_layout;
 pub mod cc_usage_modal;
 pub mod cc_usage_paint;
 pub mod cc_usage_view;
-pub mod chrome_hover;
+pub mod chrome_target;
 pub mod controls;
 pub mod panel_chrome;
 pub mod panel_palette;
@@ -38,6 +38,8 @@ pub mod title_strip_view;
 mod title_strip_view_tests;
 #[cfg(test)]
 mod sidebar_view_tests;
+#[cfg(test)]
+mod chrome_hit_view_tests;
 pub mod table;
 pub mod layout_modal;
 pub mod layout_view;

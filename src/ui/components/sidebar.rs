@@ -71,16 +71,6 @@ pub(crate) fn close_look(can_close: bool, hot: bool) -> CloseLook {
     }
 }
 
-impl CloseLook {
-    pub(crate) fn of(n: u32) -> Self {
-        match n {
-            0 => CloseLook::Disabled,
-            1 => CloseLook::Hot,
-            _ => CloseLook::Rest,
-        }
-    }
-}
-
 /// The hover and selected fill of the row in `row`: short of the
 /// sidebar's edges.
 fn row_fill(row: Rect) -> Rect {
