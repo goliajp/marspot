@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.488"  # the two ways the shell replaces its own image live in a module of their own
-core    = "0.12.535"  # a grid takes in a frame of another grid's packed cells, and checks cells and values from outside
-session = "0.11.363"  # a grid takes in a frame of another grid's packed cells, and checks cells and values from outside
+shell   = "0.7.490"  # a core reads frames of eight-byte cells, and tells each session it does
+core    = "0.12.536"  # a core reads frames of eight-byte cells, and tells each session it does
+session = "0.11.364"  # a core reads frames of eight-byte cells, and tells each session it does

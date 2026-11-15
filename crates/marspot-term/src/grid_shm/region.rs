@@ -10,7 +10,7 @@ use super::{
     HEADER_BYTES, Header, MAGIC, MAX_CELLS, MAX_ROWS, VERSION, VERSION_MIN_COMPAT, capacity_bytes,
     fits_capacity, region_len, wrapped_offset,
 };
-use crate::grid::Cell;
+use super::cells::{CELL_SIZE_PACKED, CELL_SIZE_WIDE, VERSION_PACKED};
 
 /// Bytes of a region created by this build: the frame's capacity, then
 /// whose region it is. A region from a build before identities ends at
@@ -67,7 +67,7 @@ fn create(cols: u16, rows: u16, name: &CStr, owner: Option<Identity>) -> io::Res
         let h = base as *mut Header;
         (*h).magic = MAGIC;
         (*h).version = VERSION;
-        (*h).cell_size = std::mem::size_of::<Cell>() as u32;
+        (*h).cell_size = CELL_SIZE_WIDE;
         (*h).cols = cols as u32;
         (*h).rows = rows as u32;
         if let Some(owner) = owner {
@@ -193,10 +193,12 @@ pub(super) fn attach_and_maybe_upgrade(fd: RawFd) -> io::Result<Mapped> {
     let h = base as *const Header;
     let (magic, version, cell_size, cols, rows) =
         unsafe { ((*h).magic, (*h).version, (*h).cell_size, (*h).cols, (*h).rows) };
-    let bad = magic != MAGIC
-        || !(VERSION_MIN_COMPAT..=VERSION).contains(&version)
-        || cell_size != std::mem::size_of::<Cell>() as u32
-        || region_len(cols as u16, rows as u16) > capacity_bytes();
+    // eight-byte cells only ever come with the version that says so
+    let layout_ok = match version {
+        VERSION_PACKED => cell_size == CELL_SIZE_WIDE || cell_size == CELL_SIZE_PACKED,
+        v => (VERSION_MIN_COMPAT..=VERSION).contains(&v) && cell_size == CELL_SIZE_WIDE,
+    };
+    let bad = magic != MAGIC || !layout_ok || region_len(cols as u16, rows as u16) > capacity_bytes();
     if bad {
         unsafe {
             libc::munmap(base as *mut libc::c_void, len);

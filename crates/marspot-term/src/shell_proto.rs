@@ -578,6 +578,9 @@ pub enum MsgType {
     /// to a core that connects, by a new image of the session, and
     /// after a move.
     SessionPublishes = 121,
+    /// core → session: the frame layouts the core reads; see
+    /// `encode_frame_cells`.
+    SessionFrameCells = 122,
     /// L2 → L1: draw this toolbar icon for me.  `symbol u16,
     /// point_px u16`.  Sent only by a core started with
     /// `MARSPOT_ICONS_FROM_SHELL`: drawing a system symbol registers
@@ -671,12 +674,15 @@ impl MsgType {
             87 => MsgType::IconMask,
             120 => MsgType::SessionRepublish,
             121 => MsgType::SessionPublishes,
+            122 => MsgType::SessionFrameCells,
             200 => MsgType::Error,
             _ => return None,
         })
     }
 }
 
+mod handshake;
+pub use handshake::*;
 mod inject;
 pub use inject::{decode_inject_input, encode_inject_input};
 
@@ -1020,50 +1026,6 @@ fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<ReadEnd> 
 // Payload codecs — one encode/decode pair per MsgType.
 // All multibyte integers little-endian.
 // ───────────────────────────────────────────────────────────────────
-
-/// HELLO payload: protocol version the sender speaks (u32).
-pub fn encode_hello(version: u32) -> Vec<u8> {
-    version.to_le_bytes().to_vec()
-}
-pub fn decode_hello(payload: &[u8]) -> io::Result<u32> {
-    if payload.len() != 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "HELLO payload != 4 bytes",
-        ));
-    }
-    Ok(u32::from_le_bytes(payload[0..4].try_into().unwrap()))
-}
-
-/// HELLO_ACK: same shape as HELLO — version the receiver agrees on
-/// (echoed back, so the sender knows both sides are aligned).
-pub fn encode_hello_ack(version: u32) -> Vec<u8> {
-    version.to_le_bytes().to_vec()
-}
-pub fn decode_hello_ack(payload: &[u8]) -> io::Result<u32> {
-    decode_hello(payload)
-}
-
-/// PING / PONG payload: u32 LE nonce.  Shell rotates the nonce so it
-/// can ignore Pongs from a previous Ping that arrived after a timeout.
-pub fn encode_ping(nonce: u32) -> Vec<u8> {
-    nonce.to_le_bytes().to_vec()
-}
-pub fn decode_ping(payload: &[u8]) -> io::Result<u32> {
-    if payload.len() != 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "PING payload != 4 bytes",
-        ));
-    }
-    Ok(u32::from_le_bytes(payload[0..4].try_into().unwrap()))
-}
-pub fn encode_pong(nonce: u32) -> Vec<u8> {
-    nonce.to_le_bytes().to_vec()
-}
-pub fn decode_pong(payload: &[u8]) -> io::Result<u32> {
-    decode_ping(payload)
-}
 
 // ── KeyEvent ──
 //

@@ -46,7 +46,11 @@ mod hash;
 mod ident;
 mod names;
 mod peek;
+mod reader;
 mod region;
+pub mod cells;
+pub use cells::FrameBuf;
+pub use reader::GridShmReader;
 pub mod title;
 pub use clusters::{ClusterTable, ClusterTableReader, ClusterTableWriter};
 pub use ident::{Identity, SessionRegions, delete_session_regions};
@@ -207,14 +211,14 @@ impl GridSnapshot {
 /// checks against the (fixed) mapping size — the actual mapping is
 /// always [`capacity_bytes()`].
 fn region_len(cols: u16, rows: u16) -> usize {
-    HEADER_BYTES + cols as usize * rows as usize * std::mem::size_of::<Cell>() + rows as usize
+    HEADER_BYTES + cols as usize * rows as usize * cells::REGION_CELL_BYTES + rows as usize
 }
 
 /// Fixed offset from `base` to the per-row wrapped-flag array.  Sits
 /// AFTER the cell capacity (not after the live cell area) so the
 /// offset is independent of grid dims — no recomputation per publish.
 const fn wrapped_offset() -> usize {
-    HEADER_BYTES + MAX_CELLS * std::mem::size_of::<Cell>()
+    HEADER_BYTES + MAX_CELLS * cells::REGION_CELL_BYTES
 }
 
 /// Total mapped bytes for every region: header + the [`MAX_CELLS`]
@@ -569,226 +573,9 @@ impl Drop for GridShmWriter {
     }
 }
 
-/// Reader side (L2): maps a region published by a `GridShmWriter` and
-/// reads tear-free snapshots.
-pub struct GridShmReader {
-    base: *const u8,
-    len: usize,
-    cols: u16,
-    rows: u16,
-    clusters: Option<ClusterTableReader>,
-}
-
-unsafe impl Send for GridShmReader {}
-
-impl GridShmReader {
-    /// Map a region by its fd (inherited from the writer's process).
-    /// Validates magic / version / cell-size so a region from an
-    /// incompatible build is refused rather than misread.
-    ///
-    /// Forward-compat: a v2 region is upgraded to v3 in place (see
-    /// `attach_and_maybe_upgrade`).  Reader is conceptually
-    /// read-only, but maps RDWR so a single one-shot upgrade store
-    /// on first attach is safe.
-    pub fn from_fd(fd: RawFd) -> io::Result<Self> {
-        let region::Mapped { base, len, cols, rows } = attach_and_maybe_upgrade(fd)?;
-        Ok(Self {
-            base: base as *const u8,
-            len,
-            cols,
-            rows,
-            clusters: None,
-        })
-    }
-
-    /// Map the grid region `regions` names, when it is that session's.
-    pub fn open(regions: &SessionRegions) -> io::Result<Self> {
-        let fd = open_region(regions.grid_name())?;
-        let reader = Self::from_fd(fd.as_raw_fd())?;
-        regions.admit(reader.identity())?;
-        Ok(reader)
-    }
-
-    /// Whose region this says it is.
-    pub fn identity(&self) -> Option<Identity> {
-        region::ident_at(self.base as *mut u8, self.len).and_then(|at| unsafe { ident::read(at) })
-    }
-
-    /// Which of its session's regions this is -- see [`ident`].
-    pub fn serial(&self) -> Option<u64> {
-        region::ident_at(self.base as *mut u8, self.len).and_then(|at| unsafe { ident::read_serial(at) })
-    }
-
-    pub fn cols(&self) -> u16 {
-        self.cols
-    }
-    pub fn rows(&self) -> u16 {
-        self.rows
-    }
-
-    /// Current publish sequence, read once (Acquire). Strictly increases
-    /// by 2 per published frame, so a reader can cheaply skip a full
-    /// re-read when the seq is unchanged since its last snapshot — used
-    /// by L2 to avoid a spurious re-render when its 1 s heartbeat wakes
-    /// it but L3 published nothing new. An odd value means a write is in
-    /// flight; the caller treats that as "changed" and re-reads (`read`
-    /// then spins to a tear-free frame).
-    pub fn seq(&self) -> u64 {
-        unsafe { (*self.header()).seq.load(Ordering::Acquire) }
-    }
-
-    #[inline]
-    unsafe fn header(&self) -> *const Header {
-        self.base as *const Header
-    }
-
-    #[inline]
-    unsafe fn cells_ptr(&self) -> *const Cell {
-        unsafe { self.base.add(HEADER_BYTES) as *const Cell }
-    }
-
-    /// Per-row wrapped-flag array (read view) — mirrors the writer
-    /// layout at the fixed offset after the cell capacity.
-    #[inline]
-    unsafe fn wrapped_ptr(&self) -> *const u8 {
-        unsafe { self.base.add(wrapped_offset()) }
-    }
-
-    /// Read the latest published frame into `cells_out` + `wrapped_out`
-    /// (both resized to the frame's `cols*rows` and `rows`),  retrying
-    /// until a tear-free snapshot lands.  The dims come from the
-    /// header *per read*, so the snapshot tracks a live resize without
-    /// any remap.  Returns `None` only if the writer has never
-    /// published (seq still 0).
-    ///
-    /// `wrapped_out[r]` is the DECAWM continuation flag for viewport
-    /// row `r` — true means row `r` was wrapped onto from the row
-    /// above by an overflowing parser write.
-    pub fn read(
-        &self,
-        cells_out: &mut Vec<Cell>,
-        wrapped_out: &mut Vec<bool>,
-    ) -> Option<GridSnapshot> {
-        self.read_frame(cells_out, wrapped_out, None)
-    }
-
-    /// Read the text of each frame's clusters from now on -- see
-    /// [`clusters`].
-    pub fn attach_clusters(&mut self, table: ClusterTableReader) {
-        self.clusters = Some(table);
-    }
-
-    pub fn has_clusters(&self) -> bool {
-        self.clusters.is_some()
-    }
-
-    /// [`Self::read`], and the frame's cluster table into `table`,
-    /// both from the same publish. With no table attached `table` comes
-    /// back empty.
-    pub fn read_with_clusters(
-        &self,
-        cells_out: &mut Vec<Cell>,
-        wrapped_out: &mut Vec<bool>,
-        table: &mut ClusterTable,
-    ) -> Option<GridSnapshot> {
-        table.clear();
-        self.read_frame(cells_out, wrapped_out, Some(table))
-    }
-
-    fn read_frame(
-        &self,
-        cells_out: &mut Vec<Cell>,
-        wrapped_out: &mut Vec<bool>,
-        mut table: Option<&mut ClusterTable>,
-    ) -> Option<GridSnapshot> {
-        cells_out.clear();
-        wrapped_out.clear();
-        // Bounded spin: a single writer holds the odd window for the
-        // duration of one ~40 KiB copy, so a handful of retries always
-        // suffices in practice; cap to avoid an unbounded loop if a
-        // writer died mid-publish (seq stuck odd).
-        for _ in 0..1024 {
-            unsafe {
-                let h = self.header();
-                let s1 = (*h).seq.load(Ordering::Acquire);
-                if s1 == 0 {
-                    return None; // never published
-                }
-                if s1 & 1 != 0 {
-                    std::hint::spin_loop();
-                    continue; // writer mid-publish
-                }
-                // Dims ride in the header with the cells. Read them first
-                // and bound the copy by them: a torn read (writer resized
-                // between our seq check and here) could yield mismatched
-                // dims, so reject anything past the capacity cap *before*
-                // the copy — never read out of the mapping. The s1==s2
-                // recheck below then discards the torn frame entirely.
-                let cols = (*h).cols as u16;
-                let rows = (*h).rows as u16;
-                if cols == 0 || rows == 0 || !fits_capacity(cols, rows) {
-                    std::hint::spin_loop();
-                    continue;
-                }
-                let n = cols as usize * rows as usize;
-                let cursor_col = (*h).cursor_col as u16;
-                let cursor_row = (*h).cursor_row as u16;
-                let flags = (*h).flags;
-                let scroll_push_count = (*h).scroll_push_count;
-                let scrollback_len = (*h).scrollback_len;
-                let view_offset = (*h).view_offset as u16;
-
-                cells_out.set_len(0);
-                cells_out.reserve(n);
-                let cells = self.cells_ptr();
-                std::ptr::copy_nonoverlapping(cells, cells_out.as_mut_ptr(), n);
-                cells_out.set_len(n);
-
-                // Copy the per-row wrapped flags too, in the SAME
-                // seqlock critical section so cells + flags are paired
-                // to one publish.
-                wrapped_out.clear();
-                wrapped_out.reserve(rows as usize);
-                let wptr = self.wrapped_ptr();
-                for row in 0..rows {
-                    let flag = *wptr.add(row as usize) != 0;
-                    wrapped_out.push(flag);
-                }
-                if let (Some(r), Some(t)) = (self.clusters.as_ref(), table.as_deref_mut()) {
-                    r.read_into(t);
-                }
-
-                fence(Ordering::Acquire);
-                let s2 = (*h).seq.load(Ordering::Relaxed);
-                if s1 == s2 {
-                    return Some(GridSnapshot {
-                        cols,
-                        rows,
-                        cursor_col,
-                        cursor_row,
-                        flags,
-                        scroll_push_count,
-                        scrollback_len,
-                        view_offset,
-                    });
-                }
-                // Torn read — writer published mid-copy; retry.
-            }
-            std::hint::spin_loop();
-        }
-        None
-    }
-}
-
-impl Drop for GridShmReader {
-    fn drop(&mut self) {
-        if !self.base.is_null() {
-            unsafe {
-                libc::munmap(self.base as *mut libc::c_void, self.len);
-            }
-        }
-    }
-}
+#[cfg(test)]
+#[path = "grid_shm/cells_tests.rs"]
+mod cells_tests;
 
 #[cfg(test)]
 mod tests {
