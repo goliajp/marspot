@@ -4,7 +4,7 @@
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::Receiver;
 
-use super::{L3Conn, L3Process, L3Spawn, new_control_writer};
+use super::{L3Conn, L3Process, L3Spawn};
 use crate::grid::Grid;
 use crate::grid_shm::GridShmReader;
 
@@ -98,4 +98,21 @@ impl L3Conn {
             selection_seq: 0,
         }
     }
+}
+
+pub(super) fn new_control_writer(s: UnixStream) -> marspot_term::frame_writer::FrameWriter {
+    let w = marspot_term::frame_writer::FrameWriter::new("l2-l3-writer", s, marspot_term::frame_writer::cap::CONTROL_SOCKET);
+    say_frames_read(&w);
+    w
+}
+
+/// Tell the session which frames this core reads: first on every
+/// connection, and again to every new image of the session.  A session
+/// that does not know the message drops it and keeps writing what
+/// every core reads.
+pub(super) fn say_frames_read(w: &marspot_term::frame_writer::FrameWriter) {
+    let _ = w.send(crate::shell_proto::Frame::new(
+        crate::shell_proto::MsgType::SessionFrameCells,
+        crate::shell_proto::encode_frame_cells(crate::grid_shm::cells::VERSION_PACKED),
+    ));
 }

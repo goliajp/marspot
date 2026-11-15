@@ -686,18 +686,6 @@ impl L3Process {
     }
 }
 
-fn new_control_writer(s: UnixStream) -> marspot_term::frame_writer::FrameWriter {
-    let w = marspot_term::frame_writer::FrameWriter::new("l2-l3-writer", s, marspot_term::frame_writer::cap::CONTROL_SOCKET);
-    // first on every connection: the frames this core reads.  A session
-    // that does not know the message drops it and keeps writing what
-    // every core reads.
-    let _ = w.send(crate::shell_proto::Frame::new(
-        crate::shell_proto::MsgType::SessionFrameCells,
-        crate::shell_proto::encode_frame_cells(crate::grid_shm::cells::VERSION_PACKED),
-    ));
-    w
-}
-
 pub struct L3Conn {
     child: L3Process,
     /// Write half of the L2↔L3 control socket — forwards key events.

@@ -79,6 +79,16 @@ impl GridShmReader {
         unsafe { (*self.header()).seq.load(Ordering::Acquire) }
     }
 
+    /// The region's version and the layout of the frame in it now, as
+    /// the header says them: for tests and diagnostics, not for reading
+    /// a frame, which takes the layout under the seqlock.
+    pub fn layout(&self) -> (u32, u32) {
+        unsafe {
+            let h = self.header();
+            (std::ptr::read_volatile(&(*h).version), std::ptr::read_volatile(&(*h).cell_size))
+        }
+    }
+
     #[inline]
     unsafe fn header(&self) -> *const Header {
         self.base as *const Header

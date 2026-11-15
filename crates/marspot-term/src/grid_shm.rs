@@ -48,6 +48,7 @@ mod names;
 mod peek;
 mod reader;
 mod region;
+mod write_packed;
 pub mod cells;
 pub use cells::FrameBuf;
 pub use reader::GridShmReader;
@@ -250,6 +251,9 @@ pub struct GridShmWriter {
     /// so without dedupe L3 publishes ~30/s, L2 wakes + renders ~25/s,
     /// shows up as ~10 % idle CPU on a 9-pane window.
     last_publish_hash: u64,
+    /// The newest frame layout the reader said it reads (0: nothing
+    /// past twenty-byte cells, which every reader reads).
+    reader_frames: u32,
     /// Where the text of the frame's clusters goes, once attached.
     clusters: Option<ClusterTableWriter>,
     /// One scrollback row's clusters, refilled per row while a
@@ -295,6 +299,7 @@ impl GridShmWriter {
             // publish always proceeds.  Worst case (collision = 0): one
             // missed first frame; L2 sees the next change.
             last_publish_hash: 0,
+            reader_frames: 0,
             clusters: None,
             row_clusters: Vec::new(),
             title: None,
@@ -449,6 +454,8 @@ impl GridShmWriter {
     /// the publishes that actually change a cell survive, and the
     /// idle baseline drops toward zero.
     pub fn publish_if_changed(&mut self, grid: &Grid, view_offset: u16, flags: u32) -> bool {
+        // the layout is not in the digest: it changes with the view
+        // offset, which is, or with the reader, which resets the digest
         let h = compute_publish_hash(grid, view_offset, flags);
         if h == self.last_publish_hash {
             return false;
@@ -456,6 +463,30 @@ impl GridShmWriter {
         self.last_publish_hash = h;
         self.publish(grid, view_offset, flags);
         true
+    }
+
+    /// The newest frame layout the reader says it reads, or 0 for none
+    /// past twenty-byte cells: what a reader is taken to read until it
+    /// says, and again from the moment it goes.  A change shows in the
+    /// next publish, whatever else changed.
+    pub fn set_reader_frames(&mut self, version: u32) {
+        if version != self.reader_frames {
+            self.reader_frames = version;
+            self.last_publish_hash = 0;
+        }
+    }
+
+    /// What [`Self::set_reader_frames`] last said.
+    pub fn reader_frames(&self) -> u32 {
+        self.reader_frames
+    }
+
+    /// Whether a frame scrolled back `view_offset` goes out as eight-byte
+    /// cells: only to a reader that said it reads them, and only for the
+    /// live screen, whose cells the grid holds as they go out.  A view
+    /// into history is twenty-byte cells, as it always was.
+    fn packs(&self, view_offset: u16) -> bool {
+        self.reader_frames >= cells::VERSION_PACKED && view_offset == 0
     }
 
     /// Publish the grid's in-view window (`view_offset` rows up from the
@@ -506,6 +537,18 @@ impl GridShmWriter {
             (*h).scroll_push_count = grid.scroll_push_count();
             (*h).scrollback_len = grid.scrollback_len() as u32;
             (*h).view_offset = view_offset as u32;
+            // the frame's own layout; the version goes back to the one
+            // every reader takes as soon as a frame is twenty-byte cells
+            // again, so a reader from before eight-byte cells can attach
+            let packed = self.packs(view_offset);
+            (*h).version = if packed { cells::VERSION_PACKED } else { VERSION };
+            (*h).cell_size = if packed { cells::CELL_SIZE_PACKED } else { cells::CELL_SIZE_WIDE };
+            if packed {
+                self.write_packed(grid);
+                fence(Ordering::Release);
+                (*h).seq.store(s.wrapping_add(2), Ordering::Release);
+                return;
+            }
 
             // Cells: read the visible window straight into the region,
             // no intermediate allocation. The cluster table is written in
