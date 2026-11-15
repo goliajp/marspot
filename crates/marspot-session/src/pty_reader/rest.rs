@@ -126,19 +126,23 @@ mod tests {
     #[test]
     fn a_flood_s_chunks_give_their_pages_back_and_the_next_read_takes_them_back() {
         const FLOOD: usize = 8_000_000;
-        let pty = spawn("head -c 8000000 /dev/zero | tr '\\0' a; sleep 3; printf hello; sleep 30");
+        let pty = spawn("head -c 8000000 /dev/zero | tr '\\0' a; sleep 5; for i in 1 2 3; do printf hello; sleep 0.3; done; sleep 30");
         let (tx, rx) = channel();
         let reader = PtyReader::spawn(1, Arc::clone(&pty), Arc::default(), tx, || {});
         let given = times_given_back();
         let mut total = 0;
-        // a chunk the flood filled far stays with this "parser" until the
-        // reader has gone to sleep
+        // The last chunk the flood filled far stays with this "parser"
+        // until the reader has gone to sleep.  While one is out the
+        // reader never holds all its chunks, so it still owes a rest
+        // when the flood ends, however small the reads after it were.
         let mut held: Option<Chunk> = None;
         while total < FLOOD {
             let chunk = rx.recv_timeout(Duration::from_secs(30)).expect("the flood stopped short");
             total += chunk.bytes().len();
-            if held.is_none() && chunk.bytes().len() >= WORTH_GIVING_BACK {
-                held = Some(chunk);
+            if chunk.bytes().len() >= WORTH_GIVING_BACK {
+                if let Some(earlier) = held.replace(chunk) {
+                    reader.recycle(earlier);
+                }
             } else {
                 reader.recycle(chunk);
             }
@@ -159,11 +163,17 @@ mod tests {
         reader.recycle(held);
         assert_eq!(times_given_back(), settled + 1, "the chunk handed back after the flood kept its pages");
 
+        // Three reads go round the three chunks, so one of them goes
+        // into the chunk just handed back, whose pages are given back.
         let taken = times_taken_back();
-        let chunk = rx.recv_timeout(Duration::from_secs(30)).expect("no output after the flood");
-        assert_eq!(chunk.bytes(), b"hello");
+        let mut after = Vec::new();
+        while after.len() < 15 {
+            let chunk = rx.recv_timeout(Duration::from_secs(30)).expect("no output after the flood");
+            after.extend_from_slice(chunk.bytes());
+            reader.recycle(chunk);
+        }
+        assert_eq!(after, b"hellohellohello");
         assert!(times_taken_back() > taken, "read into a chunk whose pages were given back");
-        reader.recycle(chunk);
         reader.stop();
     }
 
