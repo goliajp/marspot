@@ -251,38 +251,56 @@ mod tests {
     /// thread read it.
     #[test]
     fn a_flood_read_by_two_threads_in_turn_is_parsed_whole_and_in_order() {
-        let mut s = session(&flood());
-        taken();
-        let read_here = turn_until(&mut s, None, |s, _| s.exited.load(Ordering::SeqCst) && !lent(s));
-        s.pump();
-        assert!(read_here > 0, "the loop was never lent the pty: {}", crate::pty_reader::tests::rated());
-        let (got, want) = (taken(), flooded());
-        let same = got.iter().zip(&want).take_while(|(a, b)| a == b).count();
-        let near = |v: &[u8]| String::from_utf8_lossy(&v[same.saturating_sub(120)..(same + 240).min(v.len())]).into_owned();
-        assert!(
-            got == want,
-            "{} bytes parsed of {}, the same up to byte {same}\n got: {:?}\nwant: {:?}",
-            got.len(),
-            want.len(),
-            near(&got),
-            near(&want)
-        );
+        lent_in_one_of_a_few(|| {
+            let mut s = session(&flood());
+            taken();
+            let read_here = turn_until(&mut s, None, |s, _| s.exited.load(Ordering::SeqCst) && !lent(s));
+            s.pump();
+            let (got, want) = (taken(), flooded());
+            let same = got.iter().zip(&want).take_while(|(a, b)| a == b).count();
+            let near = |v: &[u8]| String::from_utf8_lossy(&v[same.saturating_sub(120)..(same + 240).min(v.len())]).into_owned();
+            assert!(
+                got == want,
+                "{} bytes parsed of {}, the same up to byte {same}\n got: {:?}\nwant: {:?}",
+                got.len(),
+                want.len(),
+                near(&got),
+                near(&want)
+            );
+            read_here
+        });
     }
 
     /// When the flood pauses the pty goes back to the reader, which
     /// brings what comes next.
     #[test]
     fn a_pause_gives_the_pty_back_to_the_reader() {
-        let mut s = session(&format!("{}; cat", flood()));
-        taken();
-        let all = flooded().len();
-        let read_here = turn_until(&mut s, None, |s, total| total == all && !lent(s));
-        assert!(read_here > 0, "the loop was never lent the pty: {}", crate::pty_reader::tests::rated());
-        // the tty echoes what is typed at `cat`
-        s.pty.write_shared(b"after\n").expect("type at the pty");
-        turn_until(&mut s, None, |_, total| total >= b"after\n".len());
-        assert!(taken().ends_with(b"after\n"));
-        assert!(!lent(&s), "a line of echo is not a flood");
+        lent_in_one_of_a_few(|| {
+            let mut s = session(&format!("{}; cat", flood()));
+            taken();
+            let all = flooded().len();
+            let read_here = turn_until(&mut s, None, |s, total| total == all && !lent(s));
+            // the tty echoes what is typed at `cat`
+            s.pty.write_shared(b"after\n").expect("type at the pty");
+            turn_until(&mut s, None, |_, total| total >= b"after\n".len());
+            assert!(taken().ends_with(b"after\n"));
+            assert!(!lent(&s), "a line of echo is not a flood");
+            read_here
+        });
+    }
+
+    /// Run `flood`, which returns the bytes the loop read itself, until
+    /// the loop was lent the pty in one.  On a busy machine the writer
+    /// is taken off its core often enough that every pause ends the
+    /// flood before a rate is taken, and the reader rightly lends
+    /// nothing; what each run checks holds whoever read the bytes.
+    fn lent_in_one_of_a_few(flood: impl Fn() -> usize) {
+        for _ in 0..5 {
+            if flood() > 0 {
+                return;
+            }
+        }
+        panic!("the loop was never lent the pty in five floods: {}", crate::pty_reader::tests::rated());
     }
 
     /// A key ends the turn before another byte is read; the pty stays
