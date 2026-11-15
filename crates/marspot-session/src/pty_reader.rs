@@ -225,6 +225,10 @@ impl PtyReader {
                             turn.pass_if_spent();
                             // see `lend`: a pane flooding alone
                             let rated = carried.chunk(len, &lending);
+                            #[cfg(test)]
+                            if rated {
+                                tests::note_rated(lending.is_welcome(), turn.alone(), ECHO.expected());
+                            }
                             if rated && lending.is_welcome() && turn.alone() && turn.renew() && !ECHO.expected() {
                                 lending.offer();
                                 // the loop looks again, now that the
@@ -311,7 +315,25 @@ pub(crate) fn readable_before_stop(fd: RawFd, stop: &UnixStream) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    /// How the rates a flood's reader took came out, for a test that
+    /// finds the pty never lent: `(rates, not welcome, not alone, echo
+    /// expected)`.
+    static RATED: [std::sync::atomic::AtomicUsize; 4] = [const { std::sync::atomic::AtomicUsize::new(0) }; 4];
+
+    pub(crate) fn note_rated(welcome: bool, alone: bool, echo: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        RATED[0].fetch_add(1, Relaxed);
+        RATED[1].fetch_add(usize::from(!welcome), Relaxed);
+        RATED[2].fetch_add(usize::from(!alone), Relaxed);
+        RATED[3].fetch_add(usize::from(echo), Relaxed);
+    }
+
+    pub(crate) fn rated() -> String {
+        let n = |i: usize| RATED[i].load(std::sync::atomic::Ordering::Relaxed);
+        format!("{} rates: {} not welcome, {} not alone, {} with an echo expected", n(0), n(1), n(2), n(3))
+    }
+
     use super::gather::KERNEL_READ_BYTES;
     use super::*;
     use marspot_term::pty::{PtyConfig, TerminalSize};

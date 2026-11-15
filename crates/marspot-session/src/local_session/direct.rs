@@ -255,7 +255,7 @@ mod tests {
         taken();
         let read_here = turn_until(&mut s, None, |s, _| s.exited.load(Ordering::SeqCst) && !lent(s));
         s.pump();
-        assert!(read_here > 0, "the loop was never lent the pty");
+        assert!(read_here > 0, "the loop was never lent the pty: {}", crate::pty_reader::tests::rated());
         let (got, want) = (taken(), flooded());
         let same = got.iter().zip(&want).take_while(|(a, b)| a == b).count();
         let near = |v: &[u8]| String::from_utf8_lossy(&v[same.saturating_sub(120)..(same + 240).min(v.len())]).into_owned();
@@ -277,7 +277,7 @@ mod tests {
         taken();
         let all = flooded().len();
         let read_here = turn_until(&mut s, None, |s, total| total == all && !lent(s));
-        assert!(read_here > 0, "the loop was never lent the pty");
+        assert!(read_here > 0, "the loop was never lent the pty: {}", crate::pty_reader::tests::rated());
         // the tty echoes what is typed at `cat`
         s.pty.write_shared(b"after\n").expect("type at the pty");
         turn_until(&mut s, None, |_, total| total >= b"after\n".len());
