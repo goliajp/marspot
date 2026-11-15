@@ -1,5 +1,5 @@
 use super::*;
-use crate::grid::{CLUSTER_INDEX_BASE, Color, FLAG_CLUSTER, Grid};
+use crate::grid::{CLUSTER_INDEX_BASE, CellAttrs, Color, FLAG_CLUSTER, Grid};
 use crate::scrollback::format::encode_packed_with;
 
 fn next(s: &mut u64) -> u64 {

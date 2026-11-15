@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.488"  # the two ways the shell replaces its own image live in a module of their own
-core    = "0.12.532"  # a grid cell is eight bytes: a character and the number of its attributes
-session = "0.11.360"  # a grid cell is eight bytes: a character and the number of its attributes
+core    = "0.12.533"  # a colour change looks its number up in a few recent ones before the index
+session = "0.11.361"  # a colour change looks its number up in a few recent ones before the index
