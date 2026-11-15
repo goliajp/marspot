@@ -28,4 +28,4 @@
 
 shell   = "0.7.483"  # the core's icons are drawn by a short-lived drawer, so the shell never loads the symbol set
 core    = "0.12.511"  # a core run with --draw-icons draws the shell's batch of icons and exits
-session = "0.11.349"  # a pane flooding alone is read by the thread that parses, while that is the faster way
+session = "0.11.350"  # the loop gives a lent flood back only when it carried two rates of it in a row slower
