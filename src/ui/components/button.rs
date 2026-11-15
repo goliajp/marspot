@@ -57,8 +57,8 @@ impl ButtonStyle {
             border_color: palette::none(),
             border_width: 0.0,
             corner_radius: chrome::px(chrome::TOOLBAR_RADIUS) as f32,
-            padding_x: chrome::px(space::S4) as f32,
-            icon_gap: chrome::px(space::S4) as f32,
+            padding_x: chrome::px(space::S2) as f32,
+            icon_gap: chrome::px(space::S2) as f32,
             icon_size: chrome::px(chrome::TOOLBAR_ICON) as f32,
         }
     }
@@ -123,7 +123,7 @@ impl<'a> Button<'a> {
         let inner_right = (self.rect.x + self.rect.w) as f32 - self.style.padding_x;
         let inner_w = (inner_right - inner_x).max(0.0);
         let cy = self.rect.y_top as f32 + (self.rect.h as f32) * 0.5;
-        let icon_size = self.style.icon_size.min(self.rect.h as f32 - chrome::px(2.0) as f32).max(0.0);
+        let icon_size = self.style.icon_size.min(self.rect.h as f32 - chrome::px(1.0) as f32).max(0.0);
 
         match (&self.icon, self.icon_position, self.label) {
             (Some(icon), IconPosition::Only, _) | (Some(icon), _, None) => {

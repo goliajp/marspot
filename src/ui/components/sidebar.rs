@@ -175,7 +175,7 @@ mod tests {
     fn sidebar_rows_step_by_the_row_height_under_the_top_pad() {
         let sb = sidebar();
         assert_eq!(sb.row_rect(0).y_top, 64.0 + 38.0);
-        assert_eq!(sb.row_rect(3).y_top - sb.row_rect(0).y_top, 3.0 * chrome::SIDEBAR_ROW_H);
+        assert_eq!(sb.row_rect(3).y_top - sb.row_rect(0).y_top, 3.0 * chrome::px(chrome::SIDEBAR_ROW_H));
         assert_eq!(sb.row_rect(2).w, 200.0);
     }
 
@@ -183,8 +183,8 @@ mod tests {
     fn sidebar_row_fill_is_inset_from_both_edges() {
         let sb = sidebar();
         let (row, fill) = (sb.row_rect(1), sb.fill_rect(1));
-        assert_eq!(fill.x - row.x, chrome::SIDEBAR_ROW_INSET);
-        assert_eq!(row.x + row.w - (fill.x + fill.w), chrome::SIDEBAR_ROW_INSET);
+        assert_eq!(fill.x - row.x, chrome::px(chrome::SIDEBAR_ROW_INSET));
+        assert_eq!(row.x + row.w - (fill.x + fill.w), chrome::px(chrome::SIDEBAR_ROW_INSET));
         assert_eq!((fill.y_top, fill.h), (row.y_top, row.h));
     }
 

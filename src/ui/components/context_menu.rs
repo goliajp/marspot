@@ -72,14 +72,17 @@ pub struct ContextMenu {
     pub item_rects: Vec<Rect>,
 }
 
-// The menu's sizes are the spec's, in window units: multiplied by
-// `scale` in `layout` so the menu stays the same physical size at
-// every display density.
-use crate::ui::theme::spec::chrome::{
-    MENU_DIVIDER_H as DIVIDER_H_LOGICAL, MENU_MAX_W as MENU_MAX_W_LOGICAL,
-    MENU_MIN_W as MENU_MIN_W_LOGICAL, MENU_PAD_X as SIDE_PAD_LOGICAL, MENU_PAD_Y as TOP_PAD_LOGICAL,
-    MENU_PAD_Y as BOT_PAD_LOGICAL, MENU_ROW_H as ROW_H_LOGICAL,
-};
+// The menu's sizes are the spec's points, here in window units (two to
+// the point): multiplied by `scale` in `layout` so the menu stays the
+// same physical size at every display density.
+use crate::ui::theme::spec::chrome;
+const DIVIDER_H_LOGICAL: f64 = 2.0 * chrome::MENU_DIVIDER_H;
+const MENU_MAX_W_LOGICAL: f64 = 2.0 * chrome::MENU_MAX_W;
+const MENU_MIN_W_LOGICAL: f64 = 2.0 * chrome::MENU_MIN_W;
+const SIDE_PAD_LOGICAL: f64 = 2.0 * chrome::MENU_PAD_X;
+const TOP_PAD_LOGICAL: f64 = 2.0 * chrome::MENU_PAD_Y;
+const BOT_PAD_LOGICAL: f64 = 2.0 * chrome::MENU_PAD_Y;
+const ROW_H_LOGICAL: f64 = 2.0 * chrome::MENU_ROW_H;
 /// Margin from anchor point to menu edge — keeps the menu from
 /// covering the exact pixel under the cursor.
 const ANCHOR_OFFSET_LOGICAL: f64 = 2.0;
@@ -313,21 +316,20 @@ mod tests {
         assert!((m.frame.w - MENU_MAX_W_LOGICAL).abs() < 0.5);
     }
 
-    /// The menu has one unit of length, the window unit — half a panel
-    /// point — and its labels are in points: a row holds the same label, with the same
-    /// room around it, at every scale.
+    /// The menu is measured in points like its labels: a row holds the
+    /// same label, with the same room around it, at every scale.
     #[test]
-    fn a_menu_unit_is_a_window_unit_at_every_scale() {
+    fn a_menu_row_is_measured_in_points_at_every_scale() {
         use crate::ui::theme::spec::{self, chrome};
         for scale in [1.0, 2.0] {
             crate::ui::components::density_kit::at_scale(scale, || {
-                assert_eq!(chrome::px(1.0), crate::ui::chrome_scale());
-                assert_eq!(2.0 * chrome::px(1.0), spec::px(1.0), "two window units to the panel point");
+                assert_eq!(chrome::px(1.0), 2.0 * crate::ui::chrome_scale(), "two window units to the point");
+                assert_eq!(chrome::px(1.0), spec::px(1.0), "the chrome's point is the panels'");
                 let m = ContextMenu::layout(4000.0, 4000.0, crate::ui::chrome_scale(), 100.0, 100.0, 0.0, &sample_items());
                 assert_eq!(m.item_rects[0].h, chrome::px(chrome::MENU_ROW_H));
-                // a label's capitals, in points, against the row, in window units
+                // a label's capitals against the row, both in points
                 let cap = spec::px(crate::ui::theme::PanelText::Item.cap());
-                assert_eq!(m.item_rects[0].h / cap, chrome::MENU_ROW_H / (2.0 * crate::ui::theme::PanelText::Item.cap()));
+                assert_eq!(m.item_rects[0].h / cap, chrome::MENU_ROW_H / crate::ui::theme::PanelText::Item.cap());
             });
         }
     }

@@ -43,10 +43,10 @@ pub fn describe(ui: &mut Ui<'_>, frame: Rect, items: &[MenuItem]) {
             ui.group(ROWS, GroupKind::List, true, |ui| {
                 for (i, it) in items.iter().enumerate() {
                     if it.divider {
-                        ui.leaf(preset::MENU_DIVIDER, w, Length::Pt(chrome::MENU_DIVIDER_H * 0.5));
+                        ui.leaf(preset::MENU_DIVIDER, w, Length::Pt(chrome::MENU_DIVIDER_H));
                         continue;
                     }
-                    ui.leaf(preset::MENU_ROW, w, Length::Pt(chrome::MENU_ROW_H * 0.5))
+                    ui.leaf(preset::MENU_ROW, w, Length::Pt(chrome::MENU_ROW_H))
                         .label_with(|text| {
                             text.push_str(&it.label);
                             if !it.shortcut_hint.is_empty() {
@@ -61,7 +61,7 @@ pub fn describe(ui: &mut Ui<'_>, frame: Rect, items: &[MenuItem]) {
         })
         .width(w)
         .height(Length::Px(frame.h))
-        .padding(Edges { top: Length::Pt(chrome::MENU_PAD_Y * 0.5), right: none, bottom: none, left: none })
+        .padding(Edges { top: Length::Pt(chrome::MENU_PAD_Y), right: none, bottom: none, left: none })
         .leaf(preset::MENU_FRAME, [0, 0]);
     });
 }
