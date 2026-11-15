@@ -1,34 +1,36 @@
 //! The in-RAM scrollback ring.
 //!
 //! The variant a pane gets when it has no session id to hang a file
-//! off: a flat `Vec<Cell>` used as a fixed-capacity ring, so a long
-//! session's history costs a bounded amount of memory and nothing
-//! else.
+//! off, and the alternate screen's history: a bounded ring of lines,
+//! so a long session's history costs a bounded amount of memory and
+//! nothing else.
+//!
+//! A line is kept as the record the file variant writes for it --
+//! runs of cells that share their attributes, a byte a cell for plain
+//! text -- not as twenty bytes a cell.  It cannot be kept as the
+//! grid's own eight-byte cells: their attribute numbers belong to the
+//! grid's table, which gives numbers back once no cell on screen uses
+//! them.
 
-use super::format::new_epoch;
-use crate::grid::Cell;
+use super::file::ring::Ring;
+use super::format::{REC_PACKED, RowHint, encode_packed_with, new_epoch};
+use super::format_packed::{append_cells, encode_packed_cells};
+use crate::grid::{Cell, PackedCell, StyleTable};
 
-/// Fixed-capacity ring buffer over a flat `Vec<Cell>`.  This is
-/// the only `Scrollback` impl today; lifted out of `grid.rs` so the
-/// future disk-backed sibling can sit next to it.
+/// A bounded ring of encoded lines.
 ///
-/// ## Memory shape
-///
-/// `cells.capacity() == capacity * cols` after construction; the
-/// `Vec` is **not** populated up-front (lazy growth).  Once `len`
-/// reaches `capacity`, `push_line` overwrites the oldest entry in
-/// place — no more allocations after that point.
-///
-/// At 10 000 lines × 122 cols × 16 B/cell, the upper-bound is
-/// ~19 MiB per session.  Idle stays small because `push_line` is
-/// the only path that grows the buffer (lazy alloc landed in
-/// commit `ed074bd`).
+/// At most `capacity` lines, and so at most what `capacity` lines of
+/// twenty-byte cells took when lines were kept that way: a record is
+/// never longer than its cells as twenty bytes each plus three, and a
+/// line's buffer is only ever reused for a record no longer than one
+/// the ring held before.  A screen of plain text costs about a byte a
+/// cell.
 pub struct MemoryScrollback {
-    cells: Vec<Cell>,
+    ring: Ring,
     pub(super) capacity: usize,
     cols: usize,
-    head: usize,
-    len: usize,
+    /// The record being built, reused for every line.
+    scratch: Vec<u8>,
     /// The same idea as the file variant's, kept so that a consumer
     /// filing something against a line does not have to know which
     /// variant it is talking to.  In RAM it changes on construction
@@ -38,17 +40,12 @@ pub struct MemoryScrollback {
 
 impl MemoryScrollback {
     pub fn new(capacity: usize, cols: usize) -> Self {
-        let cells = if capacity == 0 || cols == 0 {
-            Vec::new()
-        } else {
-            Vec::with_capacity(capacity * cols)
-        };
         Self {
-            cells,
+            // bounded by its lines; see the type's comment
+            ring: Ring::with_bytes(capacity, usize::MAX),
             capacity,
             cols,
-            head: 0,
-            len: 0,
+            scratch: Vec::new(),
             epoch: new_epoch(),
         }
     }
@@ -57,98 +54,81 @@ impl MemoryScrollback {
         if self.capacity == 0 {
             return;
         }
-        // F3+3.5 — release-build runtime guard.  Same rationale as
-        // `Disk::push_line`: a width-mismatched source corrupts
-        // the cells Vec (growing phase) or panics on
-        // `copy_from_slice` (steady state).  Normalise to a one-
-        // shot scratch padded / truncated to `self.cols`.
-        if source.len() != self.cols {
-            let mut buf: Vec<Cell> = Vec::with_capacity(self.cols);
-            let n = source.len().min(self.cols);
-            buf.extend_from_slice(&source[..n]);
-            buf.resize(self.cols, Cell::default());
-            return self.push_line(&buf);
+        // wider than the ring's lines: the rest is cut, as it always was
+        let source = &source[..source.len().min(self.cols)];
+        let n = source.iter().rposition(|c| *c != Cell::default()).map_or(0, |i| i + 1);
+        let line = &source[..n];
+        self.scratch.clear();
+        self.scratch.extend_from_slice(&[0; 3]);
+        let packed = n > 0 && encode_packed_with(line, RowHint::NONE, &mut self.scratch);
+        if !packed {
+            self.scratch.extend_from_slice(Cell::slice_as_bytes(line));
         }
-
-        if self.len < self.capacity {
-            // Growing phase: extend onto the end.  After exactly
-            // `capacity` push_lines, `cells.len() == capacity * cols`
-            // and we're done growing.
-            self.cells.extend_from_slice(source);
-            self.len += 1;
-            return;
-        }
-
-        // Steady state: overwrite the oldest line.
-        let line = self.head;
-        self.head = (self.head + 1) % self.capacity;
-        let start = line * self.cols;
-        self.cells[start..start + self.cols].copy_from_slice(source);
+        self.keep(n, packed);
     }
 
-    /// [`Self::push_line`] for a row of the grid's own cells, expanded
-    /// straight into the ring.
-    pub fn push_packed(&mut self, source: &[crate::grid::PackedCell], styles: &crate::grid::StyleTable) {
+    /// [`Self::push_line`] for a row of the grid's own cells, encoded
+    /// straight from them.
+    pub fn push_packed(&mut self, source: &[PackedCell], styles: &StyleTable, hint: RowHint) {
         if self.capacity == 0 {
             return;
         }
-        let start = if self.len < self.capacity {
-            // reserved whole at construction: no reallocation
-            let start = self.cells.len();
-            self.cells.resize(start + self.cols, Cell::default());
-            self.len += 1;
-            start
-        } else {
-            let line = self.head;
-            self.head = (self.head + 1) % self.capacity;
-            line * self.cols
-        };
-        let row = &mut self.cells[start..start + self.cols];
-        let n = source.len().min(row.len());
-        for (dst, c) in row[..n].iter_mut().zip(source) {
-            *dst = c.expand(styles);
+        let source = &source[..source.len().min(self.cols)];
+        let n = source.iter().rposition(|c| *c != PackedCell::BLANK).map_or(0, |i| i + 1);
+        let line = &source[..n];
+        self.scratch.clear();
+        self.scratch.extend_from_slice(&[0; 3]);
+        let packed = n > 0 && encode_packed_cells(line, styles, hint, &mut self.scratch);
+        if !packed {
+            append_cells(line, styles, &mut self.scratch);
         }
-        row[n..].fill(Cell::default());
+        self.keep(n, packed);
+    }
+
+    /// The record in `scratch`, `cols` cells long, into the ring.
+    fn keep(&mut self, cols: usize, packed: bool) {
+        self.scratch[0] = if packed { REC_PACKED } else { 0 };
+        self.scratch[1..3].copy_from_slice(&(cols as u16).to_le_bytes());
+        self.ring.push(&self.scratch);
     }
 
     pub fn len(&self) -> usize {
-        self.len
+        self.ring.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.ring.len() == 0
     }
 
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
-    pub fn line(&self, idx: usize) -> Option<&[Cell]> {
-        if idx >= self.len {
+    /// Line `idx` (0 = oldest), `cols` cells wide.
+    pub fn line(&self, idx: usize) -> Option<Vec<Cell>> {
+        if idx >= self.ring.len() {
             return None;
         }
-        let line = (self.head + idx) % self.capacity;
-        let start = line * self.cols;
-        Some(&self.cells[start..start + self.cols])
+        Some(self.ring.with_row(idx, |row| {
+            let mut v = row[..row.len().min(self.cols)].to_vec();
+            v.resize(self.cols, Cell::default());
+            v
+        }))
     }
 
     pub fn cell_at(&self, line_idx: usize, col: usize) -> Option<Cell> {
-        let line = self.line(line_idx)?;
-        line.get(col).copied()
+        if line_idx >= self.ring.len() || col >= self.cols {
+            return None;
+        }
+        Some(self.ring.with_row(line_idx, |row| row.get(col).copied().unwrap_or_default()))
     }
 
     pub fn clear(&mut self) {
-        // Drop logical contents, keep allocated capacity so a
-        // post-clear scroll storm doesn't pay for re-allocation.
-        // Truncate the Vec because lazy-growth `push_line` extends
-        // from its end.
-        self.head = 0;
-        self.len = 0;
-        self.cells.clear();
+        self.ring.clear();
     }
 
     pub fn approx_bytes(&self) -> usize {
-        self.cells.capacity() * std::mem::size_of::<Cell>()
+        self.ring.bytes() + self.scratch.capacity()
     }
 }
 
@@ -185,9 +165,51 @@ mod tests {
         sb.push_line(&fill(b'a', 4));
         g.set_cell(0, 0, Cell::from('z'));
         let row = g.live_row_at_view(0, 0).unwrap();
-        sb.push_packed(&row[..2], g.styles());
+        sb.push_packed(&row[..2], g.styles(), RowHint::NONE);
         let line: String = sb.line(0).unwrap().iter().map(|c| c.ch).collect();
         assert_eq!(line, "z   ");
+    }
+
+    /// Plain text costs about a byte a cell; a line that changes
+    /// colour every cell costs no more than twenty bytes a cell did,
+    /// and the lines read back as they went in.
+    #[test]
+    fn a_line_costs_what_its_record_does() {
+        use crate::grid::{CellAttrs, Color};
+        let (cols, lines) = (80usize, if cfg!(miri) { 20 } else { 2000 });
+        let mut plain = MemoryScrollback::new(lines, cols);
+        for i in 0..lines {
+            plain.push_line(&fill(b'a' + (i % 26) as u8, cols));
+        }
+        assert_eq!(plain.len(), lines);
+        assert!(plain.approx_bytes() < lines * (cols + 64), "{} bytes", plain.approx_bytes());
+        assert_eq!(plain.line(lines - 1).unwrap(), fill(b'a' + ((lines - 1) % 26) as u8, cols));
+        // a short line costs its text, not its width
+        let mut short = MemoryScrollback::new(lines, cols);
+        let mut line = fill(b'x', 2);
+        line.resize(cols, Cell::default());
+        for _ in 0..lines {
+            short.push_line(&line);
+        }
+        assert!(short.approx_bytes() < lines * 48, "{} bytes", short.approx_bytes());
+        assert_eq!(short.line(0).unwrap(), line);
+        let mut rich = MemoryScrollback::new(lines, cols);
+        let row = |i: usize| -> Vec<Cell> {
+            (0..cols)
+                .map(|c| Cell {
+                    ch: 'x',
+                    attrs: CellAttrs { fg: Color::rgb(c as u8, i as u8, 7), ..Default::default() },
+                })
+                .collect()
+        };
+        for i in 0..lines {
+            rich.push_line(&row(i));
+        }
+        use crate::grid::CELL_MEM_BYTES;
+        let bound = lines * (cols * CELL_MEM_BYTES + 3) + 4 * cols * CELL_MEM_BYTES + 256;
+        assert!(rich.approx_bytes() <= bound, "{} bytes, bound {bound}", rich.approx_bytes());
+        let newest = rich.len() - 1;
+        assert_eq!(rich.line(newest).unwrap(), row(lines - 1));
     }
 
     #[test]

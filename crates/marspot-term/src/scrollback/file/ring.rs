@@ -26,8 +26,10 @@ use crate::grid::Cell;
 /// file like any line older than the ring.
 const MAX_BYTES: usize = 128 * 1024;
 
-pub(super) struct Ring {
+pub(in crate::scrollback) struct Ring {
     capacity: usize,
+    /// Bytes held before the oldest line gives way, besides `capacity`.
+    max_bytes: usize,
     /// One record body per line, oldest first: flags, columns, cells.
     /// The allocation of a line that leaves is the next line's.
     recs: VecDeque<Vec<u8>>,
@@ -42,8 +44,14 @@ pub(super) struct Ring {
 
 impl Ring {
     pub(super) fn new(capacity: usize) -> Self {
+        Self::with_bytes(capacity, MAX_BYTES)
+    }
+
+    /// A ring of at most `capacity` lines and `max_bytes` bytes.
+    pub(in crate::scrollback) fn with_bytes(capacity: usize, max_bytes: usize) -> Self {
         Self {
             capacity,
+            max_bytes,
             recs: VecDeque::with_capacity(capacity),
             bytes: 0,
             pushed: 0,
@@ -51,24 +59,27 @@ impl Ring {
         }
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub(in crate::scrollback) fn len(&self) -> usize {
         self.recs.len()
     }
 
     /// What the records held take, never more than [`MAX_BYTES`] unless
     /// one line alone is.
-    pub(super) fn bytes(&self) -> usize {
+    pub(in crate::scrollback) fn bytes(&self) -> usize {
         self.bytes
     }
 
     /// Add the newest line; `body` is its record without the length.
-    pub(super) fn push(&mut self, body: &[u8]) {
+    // inline: once the in-RAM history called it too it stopped being
+    // inlined into the file's push, 0.57 instructions a byte of ascii
+    #[inline(always)]
+    pub(in crate::scrollback) fn push(&mut self, body: &[u8]) {
         if self.capacity == 0 {
             return;
         }
         self.pushed += 1;
         let mut rec = Vec::new();
-        while self.recs.len() >= self.capacity || (!self.recs.is_empty() && self.bytes + body.len() > MAX_BYTES) {
+        while self.recs.len() >= self.capacity || (!self.recs.is_empty() && self.bytes + body.len() > self.max_bytes) {
             rec = self.recs.pop_front().expect("a line to make room");
             self.bytes -= rec.capacity();
         }
@@ -84,7 +95,7 @@ impl Ring {
         self.recs.push_back(rec);
     }
 
-    pub(super) fn clear(&mut self) {
+    pub(in crate::scrollback) fn clear(&mut self) {
         self.recs.clear();
         self.bytes = 0;
         self.row.borrow_mut().0 = None;
@@ -95,12 +106,12 @@ impl Ring {
         &self.recs[i]
     }
 
-    pub(super) fn wrapped(&self, i: usize) -> bool {
+    pub(in crate::scrollback) fn wrapped(&self, i: usize) -> bool {
         self.rec(i).first().is_some_and(|flags| flags & REC_WRAPPED != 0)
     }
 
     /// The cells of line `i`, without the blank ones it ended in.
-    pub(super) fn with_row<R>(&self, i: usize, read: impl FnOnce(&[Cell]) -> R) -> R {
+    pub(in crate::scrollback) fn with_row<R>(&self, i: usize, read: impl FnOnce(&[Cell]) -> R) -> R {
         let seq = self.pushed - (self.recs.len() - i) as u64;
         let mut row = self.row.borrow_mut();
         if row.0 != Some(seq) {

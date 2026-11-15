@@ -19,6 +19,9 @@ fn attr_bytes(cell: PackedCell, styles: &StyleTable) -> [u8; CELL_MEM_BYTES - 4]
 
 /// Append `line` to `out` as runs; `false`, with `out` as it was, when
 /// that would not be smaller than the cells.
+// inline: with the in-RAM history as a second caller it stopped being
+// inlined into the file's push, about 0.3 instructions a byte of ascii
+#[inline(always)]
 pub(crate) fn encode_packed_cells(
     line: &[PackedCell],
     styles: &StyleTable,

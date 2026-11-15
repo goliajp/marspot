@@ -164,7 +164,7 @@ impl Scrollback {
     ) -> usize {
         match self {
             Self::Memory(m) => {
-                m.push_packed(line, styles);
+                m.push_packed(line, styles, hint);
                 line.len()
             }
             Self::File(f) => f.push_packed_row(line, styles, wrapped, hint),
