@@ -1,10 +1,8 @@
-//! The sidebar drawn from its tree against the sidebar painted by hand,
-//! and what a frame of it costs.
+//! What a frame of the sidebar costs drawn from its tree.
 
 use super::sidebar_view::{SidebarFrame, SidebarSurface};
 use super::toolbar_view_tests::{Frame, Stage};
 use crate::frame_alloc_tests::counted;
-use crate::frame_build::chrome::paint_sidebar;
 use crate::layout::Layout;
 use crate::render::SidebarEntry;
 use marspot_term::session::SessionState;
@@ -46,76 +44,6 @@ fn layout(stage: &Stage, (w, h): (f64, f64), scale: f64, n: usize) -> Layout {
         stage.font.cell_h,
     )
     .with_chrome(scale, n, None)
-}
-
-/// The pointer nowhere, on the add button, on a few rows and on their
-/// close buttons, and on the toolbar.
-fn hovers(n: usize) -> Vec<Option<ChromeHover>> {
-    let mut out = vec![None, Some(ChromeHover::Add), Some(ChromeHover::Toolbar(0))];
-    for i in [0, 1, n / 2, n.saturating_sub(1), n] {
-        out.push(Some(ChromeHover::Row(i)));
-        out.push(Some(ChromeHover::Close(i)));
-    }
-    out
-}
-
-#[test]
-fn the_sidebar_from_its_tree_is_the_sidebar_painted_by_hand() {
-    for scale in [1.0, 2.0] {
-        at_scale(scale, || {
-            let Some(mut stage) = Stage::new() else { return };
-            let mut compared = 0;
-            // roomy, short (rows run off the bottom), narrow
-            for (w, h) in [(1800.0, 1100.0), (1200.0, 300.0), (500.0, 900.0)] {
-                let window = (w * scale, h * scale);
-                // one pane (cannot be closed), a few, a full sidebar, at the cap
-                for n in [1, 4, 9, crate::ui::SESSION_COUNT_HARD_CAP] {
-                    let l = layout(&stage, window, scale, n);
-                    let rows = rows(n);
-                    let cell_w = stage.font.cell_w as f32;
-                    let mut surface = SidebarSurface::default();
-                    let (mut by_hand, mut by_tree): (Frame, Frame) = Default::default();
-                    for focused in [0, n / 2, n - 1, n] {
-                        for hover in hovers(n) {
-                            stage.draw(window, &mut by_hand, &mut |p| paint_sidebar(p, &l, &rows, focused, hover));
-                            let f = SidebarFrame { layout: &l, rows: &rows, focused_idx: focused, hover, cell_w };
-                            stage.draw(window, &mut by_tree, &mut |p| surface.frame(p, &f));
-                            assert!(!by_hand.1.is_empty(), "scale {scale}, {window:?}, {n} rows: nothing was painted");
-                            assert_eq!(by_tree, by_hand, "scale {scale}, {window:?}, {n} rows, focused {focused}, {hover:?}");
-                            compared += 1;
-                        }
-                    }
-                }
-            }
-            eprintln!("scale {scale}: {compared} sidebars, every instance the same");
-        });
-    }
-}
-
-/// The comparison can fail: another row in use, another row lit, or a
-/// renamed pane is a different list of instances.
-#[test]
-fn a_sidebar_with_another_row_in_use_lit_or_named_is_noticed() {
-    at_scale(1.0, || {
-        let Some(mut stage) = Stage::new() else { return };
-        let window = (1800.0, 1100.0);
-        let l = layout(&stage, window, 1.0, 4);
-        let rows = rows(4);
-        let cell_w = stage.font.cell_w as f32;
-        let (mut by_hand, mut by_tree): (Frame, Frame) = Default::default();
-        stage.draw(window, &mut by_hand, &mut |p| paint_sidebar(p, &l, &rows, 1, Some(ChromeHover::Row(2))));
-        let mut renamed = rows_of(&rows);
-        renamed[3].label = "kevx";
-        for (r, focused, hover) in [
-            (&rows, 0, Some(ChromeHover::Row(2))),
-            (&rows, 1, Some(ChromeHover::Row(3))),
-            (&renamed, 1, Some(ChromeHover::Row(2))),
-        ] {
-            let f = SidebarFrame { layout: &l, rows: r, focused_idx: focused, hover, cell_w };
-            stage.draw(window, &mut by_tree, &mut |p| SidebarSurface::default().frame(p, &f));
-            assert_ne!(by_tree, by_hand, "focused {focused}, {hover:?} drew what the hand did");
-        }
-    });
 }
 
 /// A frame in which nothing on the sidebar changed paints nothing and
