@@ -11,15 +11,15 @@ use crate::ui::components::density_kit::at_scale;
 use crate::ui::core::ViewPainter;
 use golia_ui_core::scene::{GlyphInstance, RectInstance, UiRectInstance};
 
-type Frame = (Vec<RectInstance>, Vec<GlyphInstance>, Vec<UiRectInstance>);
+pub(super) type Frame = (Vec<RectInstance>, Vec<GlyphInstance>, Vec<UiRectInstance>);
 
-struct Stage {
-    font: FontCache,
-    atlas: GlyphAtlas,
+pub(super) struct Stage {
+    pub(super) font: FontCache,
+    pub(super) atlas: GlyphAtlas,
 }
 
 impl Stage {
-    fn new() -> Option<Self> {
+    pub(super) fn new() -> Option<Self> {
         let Ok(device) = system_default_device() else {
             eprintln!("SKIPPED: no Metal device");
             return None;
@@ -29,7 +29,7 @@ impl Stage {
         Some(Self { font, atlas })
     }
 
-    fn draw(&mut self, window: (f64, f64), into: &mut Frame, paint: &mut dyn FnMut(&mut ViewPainter<'_>)) {
+    pub(super) fn draw(&mut self, window: (f64, f64), into: &mut Frame, paint: &mut dyn FnMut(&mut ViewPainter<'_>)) {
         into.0.clear();
         into.1.clear();
         into.2.clear();
@@ -52,7 +52,7 @@ impl Stage {
     }
 }
 
-fn layout(stage: &Stage, (w, h): (f64, f64), scale: f64) -> Layout {
+pub(super) fn layout(stage: &Stage, (w, h): (f64, f64), scale: f64) -> Layout {
     Layout::build(
         w,
         h,

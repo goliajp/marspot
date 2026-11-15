@@ -6,7 +6,7 @@
 
 use marspot_term::layout::Layout;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChromeHover {
     /// A toolbar button, by its place in `Layout::toolbar_buttons`.
     Toolbar(u8),

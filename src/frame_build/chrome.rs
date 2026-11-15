@@ -16,7 +16,7 @@ use crate::ui::components::{
     Outline, SeamStyle, Sidebar,
 };
 use crate::ui::core::view::ViewPainter;
-use crate::ui::system::macos::icons::{self, Symbol};
+use crate::ui::system::macos::icons::Symbol;
 use crate::ui::theme::spec::chrome;
 use crate::ui::SESSION_COUNT_HARD_CAP;
 use crate::ui::components::toolbar_view::{Toolbar, ToolbarSurface};
@@ -154,7 +154,7 @@ fn paint_empty_seats(painter: &mut ViewPainter, layout: &Layout, n_views: usize)
     }
 }
 
-fn paint_sidebar(
+pub(crate) fn paint_sidebar(
     painter: &mut ViewPainter,
     layout: &Layout,
     sidebar: &[SidebarEntry],
@@ -164,33 +164,10 @@ fn paint_sidebar(
     if layout.sidebar_w <= 0.0 {
         return;
     }
-    // The add button: a ghost — its `+`, and a fill only under the
-    // pointer.  At the pane limit it is drawn disabled and a click on
-    // it does nothing.
     let add = layout.add_session_button_rect;
     if add.w > 0.0 {
         let full = layout.close_session_rects.len() >= SESSION_COUNT_HARD_CAP;
-        let hovered = hover == Some(ChromeHover::Add) && !full;
-        if hovered {
-            // As wide as a row's fill, so the two line up; the button
-            // itself is where the layout put it.
-            let fill = Rect {
-                x: chrome::px(chrome::SIDEBAR_ROW_INSET),
-                w: (layout.sidebar_w - 2.0 * chrome::px(chrome::SIDEBAR_ROW_INSET)).max(0.0),
-                ..add
-            };
-            painter.fill_rounded_rect(
-                fill, palette::chrome_hover(), chrome::px(chrome::SIDEBAR_ROW_RADIUS) as f32, (palette::none(), 0.0),
-            );
-        }
-        let fg = if full {
-            palette::disabled_fg()
-        } else if hovered {
-            palette::fg()
-        } else {
-            palette::chrome_icon()
-        };
-        icons::paint(painter, Symbol::Plus, add, chrome::px(chrome::SIDEBAR_ADD_ICON), fg);
+        crate::ui::components::sidebar::paint_add(painter, add, layout.sidebar_w, full, hover == Some(ChromeHover::Add));
     }
     Sidebar {
         rect: Rect {

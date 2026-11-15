@@ -55,6 +55,12 @@ pub const MENU_DIVIDER: u32 = 13;
 pub const TOOLBAR_SLOT: u32 = 14;
 /// The version label.  `data` is its x and baseline, as `f32` bits.
 pub const VERSION: u32 = 15;
+/// The sidebar's add button.  See `sidebar_view`.
+pub const SIDEBAR_ADD: u32 = 16;
+/// A sidebar row; its label is the pane's name, cut to fit.
+pub const SIDEBAR_ROW: u32 = 17;
+/// A sidebar row's close button.
+pub const SIDEBAR_CLOSE: u32 = 18;
 
 /// A segmented control whose segment `n` emits
 /// `Action { id: action, arg: n }`.
@@ -199,6 +205,9 @@ pub(super) fn paint(p: &mut ViewPainter, tag: u32, data: [u32; 2], label: &str, 
         MENU_DIVIDER => crate::ui::components::context_menu_view::paint_divider(p, rect),
         TOOLBAR_SLOT => crate::ui::components::toolbar_view::paint_button(p, rect, data),
         VERSION => crate::ui::components::toolbar_view::paint_version(p, data),
+        SIDEBAR_ADD => crate::ui::components::sidebar_view::paint_add(p, rect, data),
+        SIDEBAR_ROW => crate::ui::components::sidebar_view::paint_row(p, rect, label, data),
+        SIDEBAR_CLOSE => crate::ui::components::sidebar_view::paint_close(p, rect, data),
         _ => unreachable!("a node asked for preset {tag}, which nothing here draws"),
     }
 }
