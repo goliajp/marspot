@@ -248,14 +248,24 @@ impl PtyReader {
                             carried.flood_over(&lending);
                         }
                         Gathered::Open { dry: false } => {
-                            turn.pass_if_spent();
                             // see `lend`: a pane flooding alone
                             let rated = carried.chunk(len, &lending);
                             #[cfg(test)]
                             if rated {
                                 tests::note_rated(lending.is_welcome(), turn.alone(), ECHO.expected());
                             }
-                            if rated && lending.is_welcome() && turn.alone() && turn.renew() && !ECHO.expected() {
+                            // A spent turn is renewed here when no pane
+                            // waits for it, and handed on only otherwise.
+                            // Handed on first, `renew` found no turn to
+                            // renew: a writer that never paused, with the
+                            // parser behind it, filled every chunk past a
+                            // turn's 2 ms and the pty was never lent.
+                            let may_lend = rated && lending.is_welcome() && turn.alone();
+                            let renewed = may_lend && turn.renew();
+                            if !may_lend {
+                                turn.pass_if_spent();
+                            }
+                            if renewed && !ECHO.expected() {
                                 lending.offer();
                                 // the loop looks again, now that the
                                 // pty is its to read
@@ -365,9 +375,23 @@ pub(crate) mod tests {
         RATED[3].fetch_add(usize::from(echo), Relaxed);
     }
 
+    /// Floods this process's readers saw end.
+    static FLOODS_OVER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    pub(crate) fn note_flood_over() {
+        FLOODS_OVER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) fn rated() -> String {
         let n = |i: usize| RATED[i].load(std::sync::atomic::Ordering::Relaxed);
-        format!("{} rates: {} not welcome, {} not alone, {} with an echo expected", n(0), n(1), n(2), n(3))
+        format!(
+            "{} rates: {} not welcome, {} not alone, {} with an echo expected; {} floods ended",
+            n(0),
+            n(1),
+            n(2),
+            n(3),
+            FLOODS_OVER.load(std::sync::atomic::Ordering::Relaxed)
+        )
     }
 
     use super::gather::KERNEL_READ_BYTES;

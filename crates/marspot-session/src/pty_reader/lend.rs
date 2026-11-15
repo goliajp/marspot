@@ -112,6 +112,8 @@ impl Carried {
 
     /// The flood has ended: the next one is offered afresh.
     pub(super) fn flood_over(&mut self, lend: &Lend) {
+        #[cfg(test)]
+        super::tests::note_flood_over();
         self.restart();
         self.declined_for = 0;
         self.wait = DECLINED_FOR;

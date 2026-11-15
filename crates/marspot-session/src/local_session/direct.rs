@@ -133,7 +133,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::thread;
 
-    use marspot_term::pty::{Pty, PtyConfig, TerminalSize};
+    use marspot_term::pty::Pty;
     use marspot_term::terminal::Terminal;
 
     use crate::pty_reader::PtyReader;
@@ -141,28 +141,13 @@ mod tests {
     const COLS: u16 = 122;
     const LINES: usize = 120_000;
     const FRAME: Duration = Duration::from_millis(8);
-    const LONG: Duration = Duration::from_secs(60);
+    /// Under nextest's one-minute limit, so a wait that never ends says
+    /// why before the runner kills it.
+    const LONG: Duration = Duration::from_secs(45);
     const PAD: &str = "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// `LINES` numbered lines of 108 characters, thirteen megabytes in
-    /// all, written out by `cat`.  Not by `seq`: it formats line by line,
-    /// and on a machine running other tests it wrote slower than the
-    /// reader read, so no chunk ever came full and the output was never
-    /// a flood at all.  With the tty's output processing off: written in
-    /// large blocks, a newline the tty turns into CR LF sometimes comes
-    /// out as CR CR LF, and the bytes could not be compared one for one.
-    fn flood() -> String {
-        static FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-        let path = FILE.get_or_init(|| {
-            let path = std::env::temp_dir().join(format!("marspot-direct-flood-{}", std::process::id()));
-            std::fs::write(&path, (0..LINES).flat_map(|i| format!("{i:07} {PAD}\n").into_bytes()).collect::<Vec<u8>>())
-                .expect("write the flood");
-            path
-        });
-        format!("stty -opost; cat '{}'", path.display())
-    }
-
-    /// What the pty gives for [`flood`].
+    /// all.
     fn flooded() -> Vec<u8> {
         (0..LINES).flat_map(|i| format!("{i:07} {PAD}\n").into_bytes()).collect()
     }
@@ -171,25 +156,97 @@ mod tests {
         super::super::pump::TAKEN.take()
     }
 
-    const ENDLESS: &str = "yes 0123456789012345678901234567890123456789";
+    const ENDLESS: &[u8] = b"0123456789012345678901234567890123456789\n";
 
-    /// A session whose pane runs `script`, read by a reader of its own.
-    fn session(script: &str) -> LocalSession {
-        let pty = Arc::new(
-            Pty::spawn(PtyConfig {
-                program: "/bin/sh".into(),
-                args: vec!["-c".into(), script.into()],
-                size: TerminalSize { cols: COLS, rows: 24, pixel_width: 0, pixel_height: 0 },
-                argv0: None,
-                cwd: None,
-                ..Default::default()
-            })
-            .expect("spawn /bin/sh"),
-        );
+    /// What the pane is fed: bytes once, then the end of the pty or a
+    /// pty left open; or a line again and again.
+    enum Feed {
+        Once { bytes: Vec<u8>, then_open: bool },
+        Endless(&'static [u8]),
+    }
+
+    /// Writes a pane's output from a thread of this process, in place of
+    /// a program.
+    ///
+    /// What these tests check is what the loop does once a flood has the
+    /// pty lent to it, and while its output keeps coming.  A program in
+    /// the pane is a process the scheduler can take off its core: with
+    /// every core busy (load1 25-31 on mini) `cat` paused often enough
+    /// that no flood lasted the four megabytes the reader rates before
+    /// it lends -- rightly, a paused writer is not a flood -- and `yes`
+    /// never kept a lent pty full for the slice a key's answer is read
+    /// in.  The tests then waited out their minute.  This thread runs at
+    /// the user-interactive QoS, above any of that load, so the output
+    /// is as steady as the tests need it to be on any machine.  The
+    /// pty's own output processing is off: the bytes come out as they
+    /// were written.
+    struct Feeder {
+        slave: Option<std::os::fd::OwnedFd>,
+        stop: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl Drop for Feeder {
+        fn drop(&mut self) {
+            // the session, dropped first, closed the master: a write
+            // blocked on a full pty has failed by now
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+            drop(self.slave.take());
+        }
+    }
+
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+    }
+
+    /// A session whose pane is fed `feed`, read by a reader of its own.
+    /// The feeder is declared first by the caller, so it outlives the
+    /// session.
+    fn fed(feed: Feed) -> (Feeder, LocalSession) {
+        use std::io::Write;
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+        let (mut master, mut slave) = (0, 0);
+        let mut size = libc::winsize { ws_row: 24, ws_col: COLS, ws_xpixel: 0, ws_ypixel: 0 };
+        // SAFETY: openpty fills the two descriptors; no name or settings asked for.
+        assert_eq!(unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) }, 0);
+        // SAFETY: just opened, owned by nothing else.
+        let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+        // SAFETY: a termios read and written back on the slave just opened.
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(slave.as_raw_fd(), &mut t), 0);
+            t.c_oflag &= !libc::OPOST;
+            assert_eq!(libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &t), 0);
+        }
+        // the writer's own descriptor: closing it on its way out is the
+        // end of the pty unless the feeder keeps the other one open
+        // SAFETY: dup of a descriptor this function owns.
+        let mut out = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(libc::dup(slave.as_raw_fd())) });
+        let keep = matches!(feed, Feed::Once { then_open: true, .. }) || matches!(feed, Feed::Endless(_));
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            // SAFETY: sets this thread's own QoS.
+            assert_eq!(unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) }, 0);
+            match feed {
+                // an error is the session gone: nobody reads any more
+                Feed::Once { bytes, .. } => {
+                    let _ = out.write_all(&bytes);
+                }
+                Feed::Endless(line) => {
+                    while !stopping.load(Ordering::SeqCst) && out.write_all(line).is_ok() {}
+                }
+            }
+        });
+        let pty = Arc::new(Pty::from_raw_master(master, 0));
         let exited = Arc::new(AtomicBool::new(false));
         let (tx, rx) = crate::pty_reader::channel();
         let reader = PtyReader::spawn(1, Arc::clone(&pty), Arc::clone(&exited), tx, || {});
-        LocalSession {
+        let session = LocalSession {
             id: 1,
             pty,
             child_pid: 0,
@@ -210,7 +267,8 @@ mod tests {
             before_key: 0,
             cols: COLS,
             rows: 24,
-        }
+        };
+        (Feeder { slave: keep.then_some(slave), stop, thread: Some(thread) }, session)
     }
 
     fn pace(follow: Option<Follow>, key_waiting: &AtomicBool) -> Pace<'_> {
@@ -239,7 +297,11 @@ mod tests {
             if done(s, total) {
                 return READ_HERE.get() - before;
             }
-            assert!(Instant::now() < deadline, "the output stopped coming after {total} bytes");
+            assert!(
+                Instant::now() < deadline,
+                "what this waited for never came, after {total} bytes; {}",
+                crate::pty_reader::tests::rated()
+            );
             if !more {
                 thread::sleep(Duration::from_micros(200));
             }
@@ -251,8 +313,8 @@ mod tests {
     /// thread read it.
     #[test]
     fn a_flood_read_by_two_threads_in_turn_is_parsed_whole_and_in_order() {
-        lent_in_one_of_a_few(|| {
-            let mut s = session(&flood());
+        lent_on_the_way(|| {
+            let (_feeder, mut s) = fed(Feed::Once { bytes: flooded(), then_open: false });
             taken();
             let read_here = turn_until(&mut s, None, |s, _| s.exited.load(Ordering::SeqCst) && !lent(s));
             s.pump();
@@ -275,12 +337,12 @@ mod tests {
     /// brings what comes next.
     #[test]
     fn a_pause_gives_the_pty_back_to_the_reader() {
-        lent_in_one_of_a_few(|| {
-            let mut s = session(&format!("{}; cat", flood()));
+        lent_on_the_way(|| {
+            let (_feeder, mut s) = fed(Feed::Once { bytes: flooded(), then_open: true });
             taken();
             let all = flooded().len();
             let read_here = turn_until(&mut s, None, |s, total| total == all && !lent(s));
-            // the tty echoes what is typed at `cat`
+            // the tty echoes what is typed
             s.pty.write_shared(b"after\n").expect("type at the pty");
             turn_until(&mut s, None, |_, total| total >= b"after\n".len());
             assert!(taken().ends_with(b"after\n"));
@@ -289,18 +351,11 @@ mod tests {
         });
     }
 
-    /// Run `flood`, which returns the bytes the loop read itself, until
-    /// the loop was lent the pty in one.  On a busy machine the writer
-    /// is taken off its core often enough that every pause ends the
-    /// flood before a rate is taken, and the reader rightly lends
-    /// nothing; what each run checks holds whoever read the bytes.
-    fn lent_in_one_of_a_few(flood: impl Fn() -> usize) {
-        for _ in 0..5 {
-            if flood() > 0 {
-                return;
-            }
-        }
-        panic!("the loop was never lent the pty in five floods: {}", crate::pty_reader::tests::rated());
+    /// Run `flood`, which returns the bytes the loop read itself: what it
+    /// checks holds whoever read the bytes, and the loop must have read
+    /// some of them for it to say anything about the loop.
+    fn lent_on_the_way(flood: impl FnOnce() -> usize) {
+        assert!(flood() > 0, "the loop was never lent the pty: {}", crate::pty_reader::tests::rated());
     }
 
     /// A key ends the turn before another byte is read; the pty stays
@@ -308,7 +363,7 @@ mod tests {
     /// after every slice of output that may hold it.
     #[test]
     fn a_key_ends_the_turn_and_the_loop_reads_its_answer_a_slice_at_a_time() {
-        let mut s = session(ENDLESS);
+        let (_feeder, mut s) = fed(Feed::Endless(ENDLESS));
         turn_until(&mut s, None, |s, _| lent(s));
         let key = AtomicBool::new(true);
         let before = READ_HERE.get();
@@ -323,16 +378,21 @@ mod tests {
         assert!(lent(&s), "the pty went back to the reader at a key");
         assert_eq!(s.before_key, 0, "nothing was in the reader's hand or queued");
         let no_key = AtomicBool::new(false);
-        // a pump that found the pty dry for a moment -- the writer taken
-        // off its core on a slow runner -- read what there was; the
-        // slice is told by one that stopped with more to come
+        // a pump that found the pty dry for a moment read what there
+        // was, and one that ran out its turn -- this thread taken off
+        // its core for a frame on a busy machine -- what it got to; the
+        // slice is told by one that stopped inside its turn with more to
+        // come
         let deadline = Instant::now() + LONG;
         loop {
             let before = READ_HERE.get();
+            let started = Instant::now();
             let (n, more) = s.pump_within(pace(Some(Follow::Slice), &no_key));
+            let took = started.elapsed();
             assert_eq!(READ_HERE.get() - before, n, "the answer was not read by the loop");
-            if more {
-                assert!((SLICE_BYTES - SLICE_SLACK..=SLICE_BYTES).contains(&n), "{n} bytes before a frame could follow");
+            assert!(n <= SLICE_BYTES, "{n} bytes in a turn while an answer was awaited");
+            if more && took < FRAME {
+                assert!(n >= SLICE_BYTES - SLICE_SLACK, "{n} bytes before a frame could follow, in {took:?}");
                 break;
             }
             assert!(Instant::now() < deadline, "the output never came faster than the loop read it");
@@ -348,7 +408,7 @@ mod tests {
     /// next image expects it.
     #[test]
     fn a_reader_that_has_lent_its_pty_stops_when_told() {
-        let mut s = session(ENDLESS);
+        let (_feeder, mut s) = fed(Feed::Endless(ENDLESS));
         turn_until(&mut s, None, |s, _| lent(s));
         let lend = Arc::clone(s.reader.as_ref().expect("the reader").lend());
         let started = Instant::now();
@@ -364,7 +424,7 @@ mod tests {
     /// held output is the reader's to bring.
     #[test]
     fn a_held_pane_is_not_lent_its_pty() {
-        let mut s = session(ENDLESS);
+        let (_feeder, mut s) = fed(Feed::Endless(ENDLESS));
         s.hold_grid(true);
         let read_here = turn_until(&mut s, None, |_, total| total > 1 << 20);
         assert_eq!(read_here, 0, "the loop read the pty of a held pane");

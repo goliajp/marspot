@@ -85,6 +85,7 @@ fn become_image(exe: &std::path::Path, extra: &[(&str, &str)]) -> std::io::Error
     // an app outside the sessions' coalition
     crate::instance::carry_lock(&mut cmd);
     crate::reclaim::carry_look(&mut cmd);
+    crate::apple_events::mark(&mut cmd);
     let err = cmd.exec();
     crate::instance::keep_lock_here();
     err
