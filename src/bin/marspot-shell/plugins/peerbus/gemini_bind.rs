@@ -163,6 +163,7 @@ fn sweep(dir: &Path, bound: &HashSet<PathBuf>) {
 impl Worker {
     /// Bring the Gemini bindings in line with the panes.
     pub(super) fn apply_gemini(&mut self, peers: &Peers) {
+        self.gemini_waiting = peers.unbound.clone();
         self.apply_spooled(Agent::Gemini, peers, |p| class_of(&pidtree::proc_argv(p.gemini.pid).unwrap_or_default()));
     }
 
