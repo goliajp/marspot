@@ -50,6 +50,10 @@ pub struct FrameInstances<'a> {
 pub struct Built {
     pub bytes: usize,
     pub layers: usize,
+    /// With panes drawn from their own buffers: the layer their
+    /// rectangles go under, and the one their glyphs go under.
+    pub pane_rects: Option<usize>,
+    pub pane_glyphs: Option<usize>,
 }
 
 impl FrameInstances<'_> {
@@ -77,20 +81,28 @@ impl FrameInstances<'_> {
 /// allocates nothing. A layer with nothing in it is left out, and an
 /// empty run is never opened: a backend skips both anyway, and leaving
 /// them out keeps the padding they would have cost out of the slab.
+///
+/// With `panes_apart`, the frame's panes are drawn from buffers of
+/// their own, under the rest of their kind. The two layers they belong
+/// to are then opened even when the frame has nothing else for them,
+/// and named in what is returned.
 pub fn build(
     frame: &FrameInstances,
     clip: RectPx,
     slab: &mut Vec<u8>,
     layers: &mut [Layer; FRAME_LAYERS],
+    panes_apart: bool,
 ) -> Built {
     let need = frame.slab_bound();
     if slab.len() < need {
         slab.resize(need, 0);
     }
     let mut scene = Scene::new(&mut slab[..], &mut layers[..]);
+    let (mut pane_rects, mut pane_glyphs) = (None, None);
     {
         let f = frame;
-        if !f.cells.is_empty() || !f.dots.is_empty() {
+        if panes_apart || !f.cells.is_empty() || !f.dots.is_empty() {
+            pane_rects = panes_apart.then_some(scene.layers().len());
             if let Some(mut l) = scene.layer(clip, 0) {
                 if !f.cells.is_empty() {
                     l.rects().extend(f.cells);
@@ -105,7 +117,8 @@ pub fn build(
                 l.ui_rects().extend(f.ui_rects);
             }
         }
-        if !f.glyphs.is_empty() || !f.color_glyphs.is_empty() {
+        if panes_apart || !f.glyphs.is_empty() || !f.color_glyphs.is_empty() {
+            pane_glyphs = panes_apart.then_some(scene.layers().len());
             if let Some(mut l) = scene.layer(clip, 0) {
                 if !f.glyphs.is_empty() {
                     l.glyphs().extend(f.glyphs);
@@ -134,7 +147,7 @@ pub fn build(
     // The bound above is exact enough that this cannot happen; if it
     // ever does, the frame would go out missing its tail.
     debug_assert!(!scene.overflowed(), "the slab bound under-counted");
-    Built { bytes: scene.bytes().len(), layers: scene.layers().len() }
+    Built { bytes: scene.bytes().len(), layers: scene.layers().len(), pane_rects, pane_glyphs }
 }
 
 #[cfg(test)]
@@ -198,7 +211,7 @@ mod tests {
         };
         let mut slab = Vec::new();
         let mut layers = [Layer::default(); FRAME_LAYERS];
-        let built = build(&frame, CLIP, &mut slab, &mut layers);
+        let built = build(&frame, CLIP, &mut slab, &mut layers, false);
         assert_eq!(built.layers, 6);
 
         let counts: Vec<Vec<(Kind, u32)>> = layers[..built.layers]
@@ -234,7 +247,7 @@ mod tests {
         let frame = FrameInstances { cells: &cells, glyphs: &glyphs, ..empty() };
         let mut slab = Vec::new();
         let mut layers = [Layer::default(); FRAME_LAYERS];
-        let built = build(&frame, CLIP, &mut slab, &mut layers);
+        let built = build(&frame, CLIP, &mut slab, &mut layers, false);
         assert_eq!(built.layers, 2);
 
         let run = layers[1].runs[Kind::Glyph as usize];
@@ -254,11 +267,11 @@ mod tests {
     fn nothing_to_draw_is_nothing_in_the_scene() {
         let mut slab = Vec::new();
         let mut layers = [Layer::default(); FRAME_LAYERS];
-        assert_eq!(build(&empty(), CLIP, &mut slab, &mut layers), Built { bytes: 0, layers: 0 });
+        assert_eq!(build(&empty(), CLIP, &mut slab, &mut layers, false), Built { bytes: 0, layers: 0, pane_rects: None, pane_glyphs: None });
 
         let oglyphs = [glyph(1.0)];
         let only_overlay = FrameInstances { overlay_glyphs: &oglyphs, ..empty() };
-        let built = build(&only_overlay, CLIP, &mut slab, &mut layers);
+        let built = build(&only_overlay, CLIP, &mut slab, &mut layers, false);
         assert_eq!(built.layers, 1);
         assert_eq!(layers[0].runs[Kind::Glyph as usize].count, 1);
     }
@@ -272,11 +285,11 @@ mod tests {
         let frame = FrameInstances { cells: &cells, glyphs: &glyphs, ..empty() };
         let mut slab = Vec::new();
         let mut layers = [Layer::default(); FRAME_LAYERS];
-        build(&frame, CLIP, &mut slab, &mut layers);
+        build(&frame, CLIP, &mut slab, &mut layers, false);
         let (ptr, cap) = (slab.as_ptr(), slab.capacity());
         let smaller = FrameInstances { cells: &cells[..1000], glyphs: &glyphs, ..empty() };
-        build(&smaller, CLIP, &mut slab, &mut layers);
-        build(&frame, CLIP, &mut slab, &mut layers);
+        build(&smaller, CLIP, &mut slab, &mut layers, false);
+        build(&frame, CLIP, &mut slab, &mut layers, false);
         assert_eq!((slab.as_ptr(), slab.capacity()), (ptr, cap));
     }
 }

@@ -153,7 +153,7 @@ pub(super) fn snapshot_on(
     // atlas texture the second one samples.
     renderer.render_layout_to_texture(wr, &target, &layout, views, &[], 0);
     renderer.render_layout_to_texture(wr, &target, &layout, views, &[], 0);
-    if density_kit::deliver(name, renderer, &layout, 1) {
+    if density_kit::deliver(name, renderer, wr, &layout, 1) {
         return;
     }
     let mut rgba = renderer.read_target(&target).expect("readback");

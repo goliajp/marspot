@@ -26,6 +26,10 @@ pub(crate) struct BuildStats {
     pub(crate) panes_us: u64,
     pub(crate) rebuilt: u32,
     pub(crate) considered: u32,
+    /// Rows laid out again in the panes that were not left as they
+    /// were, and how many rows those panes have.
+    pub(crate) rows_rebuilt: u32,
+    pub(crate) rows_total: u32,
 }
 
 /// The settings panel or the shortcuts panel.  One slot for both:
@@ -69,12 +73,52 @@ pub(crate) fn build_instances(
     cells: &mut Vec<CellInstance>,
     glyphs: &mut Vec<GlyphInstance>,
     color_glyphs: &mut Vec<GlyphInstance>,
+    dots: &mut Vec<CellInstance>,
+    ui_rects: &mut Vec<UiRectInstance>,
+    pane_caches: &mut Vec<PaneInstanceCache>,
+    overlay_cells: &mut Vec<CellInstance>,
+    overlay_glyphs: &mut Vec<GlyphInstance>,
+    overlay_ui_rects: &mut Vec<UiRectInstance>,
+) -> BuildStats {
+    build_frame(
+        layout, views, sidebar, focused_idx, window_focused, chrome_hover, process_panel, cc_usage,
+        form_panel, layout_modal_state, drop_preview, drag_source, context_menu_state, font, atlas,
+        color_atlas, cells, glyphs, color_glyphs, dots, ui_rects, pane_caches, overlay_cells,
+        overlay_glyphs, overlay_ui_rects, true,
+    )
+}
+
+/// [`build_instances`], with a choice: with `inline_panes` off, each
+/// pane's instances stay in its slot of `pane_caches` and the lists
+/// hold everything else, for a caller that draws a pane from buffers
+/// of its own.
+pub(crate) fn build_frame(
+    layout: &Layout,
+    views: &[SessionView],
+    sidebar: &[SidebarEntry],
+    focused_idx: usize,
+    window_focused: bool,
+    chrome_hover: Option<ChromeHover>,
+    process_panel: Option<&ProcessPanelRender>,
+    cc_usage: Option<&CcUsageRender>,
+    form_panel: Option<FormPanel<'_>>,
+    layout_modal_state: Option<&LayoutModalRender>,
+    drop_preview: Option<((f64, f64, f64, f64), bool)>,
+    drag_source: Option<usize>,
+    context_menu_state: Option<&MenuRender>,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    color_atlas: &mut GlyphAtlas,
+    cells: &mut Vec<CellInstance>,
+    glyphs: &mut Vec<GlyphInstance>,
+    color_glyphs: &mut Vec<GlyphInstance>,
     _dots: &mut Vec<CellInstance>,
     ui_rects: &mut Vec<UiRectInstance>,
     pane_caches: &mut Vec<PaneInstanceCache>,
     overlay_cells: &mut Vec<CellInstance>,
     overlay_glyphs: &mut Vec<GlyphInstance>,
     overlay_ui_rects: &mut Vec<UiRectInstance>,
+    inline_panes: bool,
 ) -> BuildStats {
     let cell_w = font.cell_w as f32;
     let cell_h = font.cell_h as f32;
@@ -102,7 +146,7 @@ pub(crate) fn build_instances(
 
     let stats = push_panes(
         layout, views, window_focused, cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
-        font, atlas, color_atlas, cells, glyphs, color_glyphs, ui_rects, pane_caches,
+        font, atlas, color_atlas, cells, glyphs, color_glyphs, ui_rects, pane_caches, inline_panes,
     );
 
     // Everything after the panes in the main layers goes through one
