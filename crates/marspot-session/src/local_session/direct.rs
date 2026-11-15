@@ -144,14 +144,27 @@ mod tests {
     const LONG: Duration = Duration::from_secs(60);
     const PAD: &str = "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
-    /// `LINES` numbered lines of 108 characters, thirteen megabytes in all.
+    /// `LINES` numbered lines of 108 characters, thirteen megabytes in
+    /// all, written out by `cat`.  Not by `seq`: it formats line by line,
+    /// and on a machine running other tests it wrote slower than the
+    /// reader read, so no chunk ever came full and the output was never
+    /// a flood at all.  With the tty's output processing off: written in
+    /// large blocks, a newline the tty turns into CR LF sometimes comes
+    /// out as CR CR LF, and the bytes could not be compared one for one.
     fn flood() -> String {
-        format!("seq -f '%07.0f {PAD}' 0 {}", LINES - 1)
+        static FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let path = FILE.get_or_init(|| {
+            let path = std::env::temp_dir().join(format!("marspot-direct-flood-{}", std::process::id()));
+            std::fs::write(&path, (0..LINES).flat_map(|i| format!("{i:07} {PAD}\n").into_bytes()).collect::<Vec<u8>>())
+                .expect("write the flood");
+            path
+        });
+        format!("stty -opost; cat '{}'", path.display())
     }
 
     /// What the pty gives for [`flood`].
     fn flooded() -> Vec<u8> {
-        (0..LINES).flat_map(|i| format!("{i:07} {PAD}\r\n").into_bytes()).collect()
+        (0..LINES).flat_map(|i| format!("{i:07} {PAD}\n").into_bytes()).collect()
     }
 
     fn taken() -> Vec<u8> {
@@ -245,7 +258,15 @@ mod tests {
         assert!(read_here > 0, "the loop was never lent the pty");
         let (got, want) = (taken(), flooded());
         let same = got.iter().zip(&want).take_while(|(a, b)| a == b).count();
-        assert!(got == want, "{} bytes parsed of {}, the same up to byte {same}", got.len(), want.len());
+        let near = |v: &[u8]| String::from_utf8_lossy(&v[same.saturating_sub(120)..(same + 240).min(v.len())]).into_owned();
+        assert!(
+            got == want,
+            "{} bytes parsed of {}, the same up to byte {same}\n got: {:?}\nwant: {:?}",
+            got.len(),
+            want.len(),
+            near(&got),
+            near(&want)
+        );
     }
 
     /// When the flood pauses the pty goes back to the reader, which
@@ -259,8 +280,8 @@ mod tests {
         assert!(read_here > 0, "the loop was never lent the pty");
         // the tty echoes what is typed at `cat`
         s.pty.write_shared(b"after\n").expect("type at the pty");
-        turn_until(&mut s, None, |_, total| total >= b"after\r\n".len());
-        assert!(taken().ends_with(b"after\r\n"));
+        turn_until(&mut s, None, |_, total| total >= b"after\n".len());
+        assert!(taken().ends_with(b"after\n"));
         assert!(!lent(&s), "a line of echo is not a flood");
     }
 
