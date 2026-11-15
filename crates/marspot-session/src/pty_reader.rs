@@ -147,6 +147,14 @@ impl PtyReader {
     where
         W: Fn() + Send + 'static,
     {
+        Self::spawn_among(id, pty, exited, tx, wake, Leases::open())
+    }
+
+    /// [`Self::spawn`], taking its turns at bulk output from `leases`.
+    fn spawn_among<W>(id: u64, pty: Arc<Pty>, exited: Arc<AtomicBool>, tx: SyncSender<Chunk>, wake: W, leases: Leases) -> Self
+    where
+        W: Fn() + Send + 'static,
+    {
         let (stop, stop_rx) = UnixStream::pair().expect("a socket pair to stop the pty reader with");
         let stopping = Arc::new(AtomicBool::new(false));
         let unparsed = Arc::new(AtomicUsize::new(0));
@@ -165,8 +173,8 @@ impl PtyReader {
             .spawn(move || {
                 let master = pty.raw_master();
                 set_nonblocking(master, true);
-                let wakes = Wakes::new(master, stop_rx.as_raw_fd());
-                let mut turn = Turn::new(Leases::open());
+                let wakes = Wakes::new(master, stop_rx.as_raw_fd(), stop_seen);
+                let mut turn = Turn::new(leases);
                 let mut carried = Carried::new();
                 loop {
                     let mut chunk = match empties_rx.try_recv() {
@@ -182,7 +190,7 @@ impl PtyReader {
                             }
                         }
                     };
-                    if stop_seen.load(Ordering::SeqCst) {
+                    if wakes.stopping() {
                         break;
                     }
                     // until this chunk has something in it
@@ -274,9 +282,14 @@ impl PtyReader {
 
     /// Stop between two reads and wait for the thread.  A chunk it has
     /// read is queued; what it has not read stays in the PTY.
+    ///
+    /// A reader queued for its turn among flooding panes waits inside
+    /// `fcntl`, for up to 300 ms, and an update or a closing pane
+    /// waited that long with it: the queue is left as it is for a key.
     pub(crate) fn stop(self) {
         self.stopping.store(true, Ordering::SeqCst);
         let _ = (&self.stop).write_all(&[0]);
+        lease::hurry();
         // a reader waiting for a chunk wakes for this one
         let _ = self.empties.try_send(Chunk::from(Vec::new()));
         let _ = self.thread.join();
@@ -367,7 +380,7 @@ pub(crate) mod tests {
         let pty = spawn("yes 0123456789012345678901234567890123456789");
         let (_stop, stop_rx) = UnixStream::pair().expect("a socket pair");
         set_nonblocking(pty.raw_master(), true);
-        let wakes = Wakes::new(pty.raw_master(), stop_rx.as_raw_fd());
+        let wakes = Wakes::new(pty.raw_master(), stop_rx.as_raw_fd(), Arc::default());
         let parser_busy = AtomicUsize::new(1);
         let echo = Echo::later();
         let mut turn = Turn::new(Leases::open());
@@ -396,7 +409,7 @@ pub(crate) mod tests {
         let pty = spawn("yes 0123456789012345678901234567890123456789");
         let (_stop, stop_rx) = UnixStream::pair().expect("a socket pair");
         set_nonblocking(pty.raw_master(), true);
-        let wakes = Wakes::new(pty.raw_master(), stop_rx.as_raw_fd());
+        let wakes = Wakes::new(pty.raw_master(), stop_rx.as_raw_fd(), Arc::default());
         let parser_busy = AtomicUsize::new(1);
         let echo = Echo::always();
         let mut turn = Turn::new(Leases::open());
@@ -418,7 +431,7 @@ pub(crate) mod tests {
         let pty = spawn("yes 0123456789012345678901234567890123456789");
         let (_stop, stop_rx) = UnixStream::pair().expect("a socket pair");
         set_nonblocking(pty.raw_master(), true);
-        let wakes = Wakes::new(pty.raw_master(), stop_rx.as_raw_fd());
+        let wakes = Wakes::new(pty.raw_master(), stop_rx.as_raw_fd(), Arc::default());
         let parser_idle = AtomicUsize::new(0);
         let echo = Echo::always();
         let mut turn = Turn::new(Leases::open());
@@ -508,12 +521,68 @@ pub(crate) mod tests {
         let exited = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
         let reader = PtyReader::spawn(1, Arc::clone(&pty), exited, tx, || {});
-        let mut held = Vec::new();
-        while let Ok(chunk) = rx.recv_timeout(Duration::from_millis(500)) {
-            held.push(chunk);
-        }
-        assert_eq!(held.len(), CHUNKS, "every chunk is out and nothing more arrives");
+        // However long the program is kept from writing: the minute
+        // only tells a chunk that never comes from one not here yet.
+        let held: Vec<Chunk> =
+            (0..CHUNKS).map(|n| rx.recv_timeout(Duration::from_secs(60)).unwrap_or_else(|_| panic!("chunk {n} never came"))).collect();
+        // every chunk is out: a reader that read on would be late with
+        // the next on a busy machine, never early
+        assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "a chunk more than there are came");
+        drop(held);
         reader.stop();
+    }
+
+    /// A reader told to stop just before its flood queues for a turn,
+    /// where no signal reaches it yet, does not begin the wait.
+    #[test]
+    fn a_reader_told_to_stop_does_not_queue_for_a_turn() {
+        let path = lease::tests::lock_file("stop-early");
+        let mut turn = Turn::new(Leases::at(&path).patient());
+        // a flood that has used up a turn waits for its next one
+        turn.enter(KERNEL_READ_BYTES, || false);
+        turn.pass();
+        let other = lease::tests::holder(&path);
+        let pty = spawn("yes 0123456789012345678901234567890123456789");
+        let (_stop, stop_rx) = UnixStream::pair().expect("a socket pair");
+        set_nonblocking(pty.raw_master(), true);
+        let wakes = Wakes::new(pty.raw_master(), stop_rx.as_raw_fd(), Arc::new(AtomicBool::new(true)));
+        let parser_busy = AtomicUsize::new(1);
+        let mut buf = vec![0; READ_BUF_BYTES];
+        let Event::Data(there) = wakes.wait(None) else { panic!("the flood stopped") };
+        let started = Instant::now();
+        let (_, end) = gather(&pty, &mut buf, &wakes, &parser_busy, &mut turn, &Echo::new(), there);
+        assert!(matches!(end, Gathered::Stopped), "the reader went on reading");
+        assert!(started.elapsed() < lease::tests::LONG, "the reader waited for a turn nobody hands on");
+        lease::tests::release(other);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Stopping a reader that is queued for its turn ends the wait.
+    #[test]
+    fn a_queued_reader_stops_when_told() {
+        let path = lease::tests::lock_file("stop-queued");
+        let leases = Leases::at(&path).patient();
+        let other = lease::tests::holder(&path);
+        let pty = spawn("yes 0123456789012345678901234567890123456789");
+        let exited = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = channel();
+        let reader = PtyReader::spawn_among(1, Arc::clone(&pty), exited, tx, || {}, leases);
+        let deadline = Instant::now() + lease::tests::LONG / 2;
+        while !lease::tests::someone_queued() {
+            // the flood goes on for as long as its chunks come back
+            if let Ok(chunk) = rx.try_recv() {
+                reader.recycle(chunk);
+            }
+            assert!(Instant::now() < deadline, "the reader never queued for a turn");
+            thread::yield_now();
+        }
+        // most likely inside `fcntl` by now; right either way
+        thread::sleep(Duration::from_millis(20));
+        let started = Instant::now();
+        reader.stop();
+        assert!(started.elapsed() < lease::tests::LONG / 2, "the reader stopped when its wait for a turn ran out");
+        lease::tests::release(other);
+        let _ = std::fs::remove_file(path);
     }
 
     /// The image after an execv inherits the master; it gets it the way

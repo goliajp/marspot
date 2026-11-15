@@ -1,6 +1,8 @@
 //! What the pty reader sleeps on.
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub(super) enum Event {
@@ -16,10 +18,13 @@ pub(super) enum Event {
 pub(super) struct Wakes {
     kq: OwnedFd,
     stop: RawFd,
+    /// Raised before `stop` is written to: a reader waiting for
+    /// something other than this kqueue looks here.
+    stopping: Arc<AtomicBool>,
 }
 
 impl Wakes {
-    pub(super) fn new(master: RawFd, stop: RawFd) -> Self {
+    pub(super) fn new(master: RawFd, stop: RawFd, stopping: Arc<AtomicBool>) -> Self {
         let watch = |fd: RawFd| libc::kevent {
             ident: fd as usize,
             filter: libc::EVFILT_READ,
@@ -37,7 +42,12 @@ impl Wakes {
             libc::kevent(kq, changes.as_ptr(), 2, std::ptr::null_mut(), 0, std::ptr::null());
             OwnedFd::from_raw_fd(kq)
         };
-        Self { kq, stop }
+        Self { kq, stop, stopping }
+    }
+
+    /// The reader has been told to stop.
+    pub(super) fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
     }
 
     /// Until the PTY has something, `stop` has, or `timeout` has passed
