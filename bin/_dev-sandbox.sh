@@ -68,6 +68,17 @@ s.bind(("127.0.0.1", 0))
 print(s.getsockname()[1])'
 }
 
+# Returns once a suite's local server answers for URL.  A server takes
+# as long to start as the machine lets it: half a second was not enough
+# on a busy runner.  Fails when the server's process has gone, which is
+# what a port somebody else took looks like.
+dev_wait_served() { # url, server pid
+  until curl -sf --max-time 5 "$1" >/dev/null 2>&1; do
+    kill -0 "$2" 2>/dev/null || return 1
+    sleep 0.2
+  done
+}
+
 # A pasteboard of this run's own for the sandbox app's copy and paste.
 #
 # The general pasteboard is one per login session: a suite that put a
