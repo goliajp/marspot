@@ -69,6 +69,7 @@ DEFAULT_SUITES=(
   test-coalition-reclaim.sh
   test-reseat-bound.sh
   test-reopen-after-quit.sh
+  test-quit-after-update.sh
   test-cc-profile-switch.sh
   test-codex-profile-switch.sh
   test-codex-refresh.sh
