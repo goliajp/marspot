@@ -40,6 +40,7 @@ use marspot::shell_proto::{
 };
 
 mod banner;
+mod core_icons;
 mod launch;
 mod ls_records;
 mod cli_socket;
@@ -769,6 +770,8 @@ struct ShellApp {
     pane_tables: pane_tables::PaneTables,
     /// Same shape as `pane_badge_rx` but for plugin-set pane titles.
     pane_title_rx: std::sync::mpsc::Receiver<plugins::host::PaneTitleUpdate>,
+    /// The core's toolbar icons, drawn by a short-lived drawer.
+    core_icons: core_icons::CoreIcons,
     /// Receiver for `begin_pane_session` requests.
     pane_session_begin_rx:
         std::sync::mpsc::Receiver<plugins::host::PaneSessionBeginRequest>,
@@ -1258,6 +1261,7 @@ impl ShellApp {
             pane_agent_tui_rx,
             pane_render_markup_rx,
             pane_title_rx,
+            core_icons: core_icons::CoreIcons::new(),
             pane_session_begin_rx,
             pty_op_rx,
             cli_rx,
@@ -1507,8 +1511,6 @@ impl ShellApp {
             .env(ENV_SURFACE_SCALE, scale.to_string())
             .env(ENV_CONTROL_FD, DEFAULT_CONTROL_FD.to_string())
             .env(marspot::ui::system::macos::icons::FROM_SHELL_ENV, "1");
-        // the core asks this process for its icons from its first frame
-        marspot::ui::system::macos::icons::warm();
         // SAFETY: pre_exec runs in the forked child between fork and
         // exec.  Only async-signal-safe libc calls are allowed; we
         // only use dup2/close/fcntl which are all on the AS-safe list.
@@ -2527,6 +2529,10 @@ impl ShellApp {
         while let Ok(upd) = self.pane_title_rx.try_recv() {
             self.pane_look.titles.declare(upd.shelld_session_id, upd.text);
         }
+        for (s, p, side, mask) in self.core_icons.drawn() {
+            self.send(MsgType::IconMask, marspot::shell_proto::encode_icon_mask(s, p, side, &mask));
+            self.draw_core_icons();
+        }
         self.flush_pane_decls();
 
         // Drain cc inject-input requests onto the active core's
@@ -2945,6 +2951,14 @@ impl ShellApp {
         self.windows.iter().any(|w| w.window_id != window_id)
     }
 
+    /// Have a drawer draw the icons the core is waiting for: the core's
+    /// own binary, run once for the batch.
+    fn draw_core_icons(&mut self) {
+        if let Ok(exe) = std::env::current_exe() {
+            self.core_icons.draw_waiting(self.binaries.resolve_runnable(&exe), &self.proxy);
+        }
+    }
+
     fn close_window_by_id(&mut self, window_id: u32, discard: bool) {
         // Tell the core first: it parks or discards the window while
         // the surfaces are still alive, so nothing renders into a
@@ -3280,20 +3294,12 @@ impl ShellApp {
                     self.restore_window(frame_index);
                 }
             }
-            ShellInbox::IconMaskWanted(symbol, point_px) => {
-                match marspot::ui::system::macos::icons::draw_for_core(symbol, point_px) {
-                    Some((side, mask)) => self.send(
-                        MsgType::IconMask,
-                        marspot::shell_proto::encode_icon_mask(symbol, point_px, side, &mask),
-                    ),
-                    None => lx_warn!(
-                        "shell.icon.refused",
-                        "the core asked for an icon no core would ask for",
-                        symbol = symbol,
-                        point_px = point_px
-                    ),
+            ShellInbox::IconMaskWanted(symbol, point_px) => match self.core_icons.want(symbol, point_px) {
+                Some((s, p, side, mask)) => {
+                    self.send(MsgType::IconMask, marspot::shell_proto::encode_icon_mask(s, p, side, &mask))
                 }
-            }
+                None => self.draw_core_icons(),
+            },
             ShellInbox::WindowCloseRequest(window_id) => {
                 // The core asked because this window emptied out — its
                 // last pane was closed, or moved away.  Either way
