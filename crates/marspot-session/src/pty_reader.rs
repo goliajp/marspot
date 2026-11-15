@@ -33,12 +33,14 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use marspot_term::idle_pages::Given;
 use marspot_term::pty::Pty;
 
 mod echo;
 mod gather;
 mod lease;
 mod lend;
+mod rest;
 mod turn;
 mod wakes;
 use echo::Echo;
@@ -46,6 +48,7 @@ use gather::{Gathered, gather};
 use lease::Leases;
 use lend::Carried;
 pub(crate) use lend::Lend;
+use rest::Rest;
 use turn::Turn;
 use wakes::{Event, Wakes};
 
@@ -104,6 +107,10 @@ pub(crate) fn typed() {
 pub(crate) struct Chunk {
     buf: Vec<u8>,
     len: usize,
+    /// Most a read has filled since the buffer's pages were last given
+    /// back: see [`rest`].
+    high: usize,
+    given: Given,
 }
 
 impl Chunk {
@@ -115,7 +122,7 @@ impl Chunk {
 impl From<Vec<u8>> for Chunk {
     fn from(buf: Vec<u8>) -> Self {
         let len = buf.len();
-        Self { buf, len }
+        Self { buf, len, high: 0, given: Given::default() }
     }
 }
 
@@ -126,6 +133,8 @@ pub(crate) struct PtyReader {
     /// Chunks handed to the loop and not yet handed back.
     unparsed: Arc<AtomicUsize>,
     lend: Arc<Lend>,
+    /// See [`rest`].
+    resting: Arc<AtomicBool>,
     thread: JoinHandle<()>,
 }
 
@@ -162,12 +171,14 @@ impl PtyReader {
         let (empties, empties_rx) = mpsc::sync_channel::<Chunk>(CHUNKS + 1);
         for _ in 0..CHUNKS {
             // zeroed pages are not resident until a read lands in them
-            let _ = empties.try_send(Chunk { buf: vec![0; READ_BUF_BYTES], len: 0 });
+            let _ = empties.try_send(Chunk { len: 0, ..Chunk::from(vec![0; READ_BUF_BYTES]) });
         }
         let stop_seen = Arc::clone(&stopping);
         let in_flight = Arc::clone(&unparsed);
         let lend = Arc::new(Lend::new());
         let lending = Arc::clone(&lend);
+        let resting = Arc::new(AtomicBool::new(false));
+        let mut rest = Rest::new(Arc::clone(&resting));
         let thread = thread::Builder::new()
             .name(format!("l3-pty-reader-{id}"))
             .spawn(move || {
@@ -177,7 +188,7 @@ impl PtyReader {
                 let mut turn = Turn::new(leases);
                 let mut carried = Carried::new();
                 loop {
-                    let mut chunk = match empties_rx.try_recv() {
+                    let mut chunk = match rest.take().map_or_else(|| empties_rx.try_recv(), Ok) {
                         Ok(chunk) => chunk,
                         Err(TryRecvError::Disconnected) => break,
                         Err(TryRecvError::Empty) => {
@@ -197,7 +208,9 @@ impl PtyReader {
                     let end = loop {
                         // a flood that pauses this long is over, and
                         // its turn is not kept through the silence
-                        let there = match wakes.wait(turn.in_flood().then_some(TAIL_WAIT)) {
+                        let deadline = turn.in_flood().then_some(TAIL_WAIT);
+                        rest.before_wait(&mut chunk, &empties_rx, deadline.is_some());
+                        let there = match wakes.wait(deadline) {
                             Event::Stop => {
                                 chunk.len = 0;
                                 break Gathered::Stopped;
@@ -209,8 +222,11 @@ impl PtyReader {
                             }
                             Event::Data(there) => there,
                         };
+                        rest.woke();
+                        chunk.take_back();
                         let (len, end) = gather(&pty, &mut chunk.buf, &wakes, &in_flight, &mut turn, &ECHO, there);
                         chunk.len = len;
+                        rest.filled(&mut chunk);
                         if len > 0 || !matches!(end, Gathered::Open { .. }) {
                             break end;
                         }
@@ -261,7 +277,7 @@ impl PtyReader {
                 set_nonblocking(master, false);
             })
             .expect("spawn l3-pty-reader thread");
-        Self { stop, stopping, empties, unparsed, lend, thread }
+        Self { stop, stopping, empties, unparsed, lend, resting, thread }
     }
 
     /// The pty's loan to the loop: see [`lend`].
@@ -275,7 +291,12 @@ impl PtyReader {
     }
 
     /// Hand a parsed chunk back to be filled again.
-    pub(crate) fn recycle(&self, chunk: Chunk) {
+    /// Once output has stopped it gives its pages back first: see
+    /// [`rest`].
+    pub(crate) fn recycle(&self, mut chunk: Chunk) {
+        if self.resting.load(Ordering::SeqCst) {
+            chunk.give_back_if_far();
+        }
         self.unparsed.fetch_sub(1, Ordering::SeqCst);
         let _ = self.empties.try_send(chunk);
     }
@@ -352,7 +373,7 @@ pub(crate) mod tests {
     use marspot_term::pty::{PtyConfig, TerminalSize};
     use std::time::Instant;
 
-    fn spawn(script: &str) -> Arc<Pty> {
+    pub(super) fn spawn(script: &str) -> Arc<Pty> {
         Arc::new(
             Pty::spawn(PtyConfig {
                 program: "/bin/sh".into(),

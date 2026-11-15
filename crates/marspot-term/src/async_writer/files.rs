@@ -10,7 +10,7 @@ use super::{Files, Target};
 
 /// The writer thread: what `queue` hands out goes to `files`, until the
 /// producer is gone.
-pub(super) fn write_queued(mut files: Files, depth: usize, queue: &Queue, free_tx: &SyncSender<Buf>, retry: impl Fn()) {
+pub(super) fn write_queued(mut files: Files, depth: usize, queue: &Queue, retry: impl Fn()) {
     // buffers taken together and not yet written, and who waits to
     // hear that they have been
     let mut run: Vec<Buf> = Vec::with_capacity(depth);
@@ -24,13 +24,13 @@ pub(super) fn write_queued(mut files: Files, depth: usize, queue: &Queue, free_t
                     acks.push(ack);
                 }
                 Msg::Side(target) => {
-                    append(&mut files, &mut run, &mut acks, free_tx, queue);
+                    append(&mut files, &mut run, &mut acks, queue);
                     files.side = Some(target);
                     queue.wrote();
                 }
             }
         }
-        append(&mut files, &mut run, &mut acks, free_tx, queue);
+        append(&mut files, &mut run, &mut acks, queue);
         if queue.settle() {
             retry();
         }
@@ -46,7 +46,7 @@ pub(super) fn write_queued(mut files: Files, depth: usize, queue: &Queue, free_t
 /// is an index into them, and must never hold what they do not.  A
 /// buffer with a cut in it is written up to there, the cut is made, and
 /// the rest goes to the files as the cut left them.
-fn append(files: &mut Files, run: &mut Vec<Buf>, acks: &mut Vec<SyncSender<()>>, free_tx: &SyncSender<Buf>, queue: &Queue) {
+fn append(files: &mut Files, run: &mut Vec<Buf>, acks: &mut Vec<SyncSender<()>>, queue: &Queue) {
     // the first buffer not yet written whole, and how much of it is
     let (mut at, mut from) = (0, (0, 0));
     while let Some(i) = (at..run.len()).find(|&i| run[i].cut.is_some()) {
@@ -61,10 +61,7 @@ fn append(files: &mut Files, run: &mut Vec<Buf>, acks: &mut Vec<SyncSender<()>>,
     }
     for mut b in run.drain(..) {
         b.clear();
-        // Dropping the buffer when the free list is full is fine: it
-        // just means the next handoff allocates.  Never block here.
-        let _ = free_tx.try_send(b);
-        queue.wrote();
+        queue.wrote_back(b);
     }
     for ack in acks.drain(..) {
         let _ = ack.send(());
