@@ -26,6 +26,7 @@ use crate::ui::components::toolbar_view::{Toolbar, ToolbarSurface};
 pub(crate) struct ChromeSurfaces {
     pub(crate) toolbar: ToolbarSurface,
     pub(crate) sidebar: SidebarSurface,
+    pub(crate) titles: crate::ui::components::title_strip_view::TitleStripSurface,
 }
 
 /// What the chrome shows beyond where things are.

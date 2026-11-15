@@ -19,6 +19,7 @@ use crate::ui::components::process_panel::ProcessPanelRender;
 use crate::ui::components::settings_view::SettingsRender;
 use crate::ui::components::shortcuts_view::ShortcutsRender;
 use crate::ui::core::view::ViewPainter;
+use crate::ui::components::title_strip_view::TitleStrips;
 
 /// What a window keeps from one frame to the next: each pane's
 /// instances, and the chrome drawn from a tree.
@@ -182,6 +183,9 @@ pub(crate) fn build_frame(
             window_w: layout.window_w, window_h: layout.window_h,
             font, atlas, cells, glyphs, ui_rects,
         };
+        // after the panes' backgrounds, before the seams that cover
+        // the ends of each strip's line
+        kept.chrome.titles.frame(&mut painter, &TitleStrips { layout, views, window_focused });
         paint_chrome(
             &mut painter, layout, views.len(), sidebar, focused_idx, ChromeState { hover, on },
             overlay_ui_rects, &mut kept.chrome,
