@@ -4,161 +4,164 @@
 //! files, and files outlive the process that wrote them. Everything
 //! here has to survive a crash, a rollback to an older binary, and a
 //! reflow that re-cuts every line.
+//!
+//! The history is a handful of segments (`crate::segment`):
+//! `<stem>.seg.<slot>` beside the path it was opened with, each a
+//! 64-byte header, a record area and, at the end, an index of eight
+//! bytes a line -- the record's offset in the low half, the low half of
+//! the segment's use number in the high half.  The records are those of
+//! format v4 (see `format.rs`), plus notes: a command mark or the text
+//! of a line's clusters, written right after the line's record (see
+//! `notes.rs`).
+//!
+//! **The depth is a budget, not a mechanism**: two full segments of 128
+//! MiB of records each, the depth the hot and cold pair had.  A new pane
+//! starts with a segment of 1 MiB and each next one is twice as large
+//! until the full size; when the second full one comes into use the
+//! smaller ones are deleted, and from then on the older full one is
+//! used again in place whenever the newer is full.  Making a segment
+//! ready -- created, given its blocks, sized -- is done on a thread
+//! nobody waits for (`crate::async_writer::behind`), asked for well
+//! before it is needed.  The steady state makes no system call that
+//! creates, renames, deletes, grows or truncates a file.
+//!
+//! Files of format v2 to v4 (`scrollback.bin` / `.idx`, the cold pair
+//! and their sidecars) are read where they are, as the oldest history,
+//! and deleted once the budget passes them (`legacy.rs`).
 
 use super::format::*;
 use super::snapshot::FileSnapshot;
-
-// ─── File-backed scrollback (A1) ──────────────────────────────────
-//
-// Per-session persistent file pair living at
-// `paths::scrollback_bin_path(id) / scrollback_idx_path(id)`.  Format
-// is documented byte-for-byte below.
-//
-// Invariants:
-//   - `.bin` starts with a 32-byte header (magic / version / cell_abi
-//     / created_ns).  cell_abi must equal CELL_BYTES so a future
-//     Cell-encoding bump rejects mis-paired binaries cleanly.
-//   - `.idx` is a dense `[u64 LE byte_offset]` array PLUS a sentinel
-//     pointing at .bin EOF.  `len(idx) = N + 1` where N = lines in
-//     `.bin`.  `entry_0 = 32` always.
-//   - Most-recent `ram_capacity` lines live in a RAM ring, as the
-//     records the file gets.  Reads of these never touch the file.
-//     Reads of older lines `pread` directly.
-//   - Writer-side has a 64 KiB BufWriter; reader-side uses a separate
-//     fd opened read-only so reads never see partially-flushed bytes
-//     from the writer's buffer.  Recent lines are ALWAYS in the RAM
-//     ring, so any cell_at that misses the ring is for a line already
-//     fully written to disk — no consistency hazard.
-//   - No fsync.  Drop flushes the writer; a crash truncates the
-//     trailing partial record on next open (rec_len + 4 > file_len).
+use crate::segment::{HEADER_BYTES, Seg};
 
 pub struct FileScrollback {
-    bin_path: std::path::PathBuf,
-    idx_path: std::path::PathBuf,
+    /// The directory and stem of the segments.
+    dir: std::path::PathBuf,
+    stem: String,
     cols: usize,
     ram_capacity: usize,
-    // The writer of both files: the records, and paired with them the
-    // index entries of the same lines.  In a RefCell so cold reads
-    // (via `&self`-only cell_at) can flush it before reading the file
-    // via mmap/pread.  Without this, a line that aged out of the RAM
-    // ring but is still in the writer's buffer would not be visible to
-    // mmap, breaking the "ring miss ⇒ file hit" invariant.
+    /// The writer of the hot segment: records and notes at `hot_pos`,
+    /// index entries alongside.  In a RefCell so cold reads (via
+    /// `&self`-only cell_at) can flush it before reading the file: a
+    /// line that aged out of the RAM ring may still be in its buffer.
     bin: std::cell::RefCell<crate::async_writer::AsyncWriter>,
-    /// Separate read-only fd for cold reads.  Reads of recent lines
-    /// hit the RAM ring, so missing-from-file isn't observable.
-    bin_for_read: std::fs::File,
-    idx_for_read: std::fs::File,
-    // A2: mmap state for cold reads.  Pointer is NULL until first
-    // cold read forces an mmap.  Remap happens when a needed offset
-    // exceeds the current mapping length (file has grown since the
-    // last mmap).  Both fields wrapped in `Cell` so `cell_at(&self)`
-    // can update them on remap without taking `&mut self`.
-    bin_mmap_ptr: std::cell::Cell<*mut u8>,
-    bin_mmap_len: std::cell::Cell<usize>,
-    idx_mmap_ptr: std::cell::Cell<*mut u8>,
-    idx_mmap_len: std::cell::Cell<usize>,
-    /// Set true on every `push_line`, false after a successful
-    /// flush in the cold-read path.  Cheap "is the file consistent
-    /// for a cold read?" probe so we don't pay a syscall when the
-    /// user is just reading from the RAM ring.
+    /// Set by every push, cleared by the flush of a cold read.
     has_unflushed: std::cell::Cell<bool>,
     /// The newest `ram_capacity` lines, read without touching the file.
     ring: ring::Ring,
-    /// Total lines ever pushed since creation — no eviction in v1 so
-    /// this also equals scrollback length.
+    /// Lines ever pushed since the files were opened, including those
+    /// the budget has since let go: a line keeps its number.
     total_lines: u64,
-    /// Current `.bin` EOF (matches what's been written including
-    /// unflushed BufWriter bytes — used as the next record's offset).
-    bin_tail_offset: u64,
     /// Reused scratch buffer for record serialisation; zero alloc
     /// after the first push sizes it.
     scratch: Vec<u8>,
-
-    // F2+5 — hot/cold rotation state.
-    /// Path of the cold-tier `.bin` (derived from `bin_path` once at
-    /// open time; held so rotate doesn't have to recompute).
-    cold_bin_path: std::path::PathBuf,
-    /// Path of the cold-tier `.idx`.
-    cold_idx_path: std::path::PathBuf,
-    /// Read-only fd on the cold `.bin`, opened lazily when cold tier
-    /// is present (either from disk at startup or after an in-process
-    /// rotation).  None = no cold tier yet, OR cold was unreadable.
-    cold_bin_for_read: Option<std::fs::File>,
-    /// Read-only fd on the cold `.idx`.
-    cold_idx_for_read: Option<std::fs::File>,
-    /// First logical line_idx represented in the cold file (= 0 on
-    /// the first rotation in this process; bumps on subsequent
-    /// rotations because the new cold = previously-hot rows that
-    /// already had a non-zero `hot_first_line`).  Across L3 restart
-    /// this resets to 0 — line_idx is per-process, not persistent.
-    cold_first_line: u64,
-    /// Count of rows in the cold file.  cold_first_line + cold_total_lines
-    /// always equals hot_first_line (the boundary).
-    cold_total_lines: u64,
-    /// First logical line_idx whose row lives in the current hot file
-    /// (= 0 on fresh session, = total_lines at moment of last rotation).
-    /// Used by `cell_at` to translate logical → local hot file idx.
+    /// Files of the format before segments, oldest first, read-only.
+    legacy: Vec<legacy::Legacy>,
+    /// Segments in use, oldest first; the last is the hot one.
+    segs: Vec<tiers::SegTier>,
+    /// Where the next record goes in the hot segment, and how many lines
+    /// it holds.
+    hot_pos: u64,
+    hot_lines: u64,
+    /// The hot segment's first line.
     hot_first_line: u64,
-    /// Bytes threshold for hot file before rotation fires.  Read once
-    /// from the env at open; doesn't re-check on every push so a mid-
-    /// session env change is ignored.
-    hot_bytes_cap: u64,
-    /// Which run of line numbering this file's local line indices
-    /// belong to.  See [`new_epoch`].
+    /// Past either of these the next push stops to ask for the next
+    /// segment, or to change to it: two comparisons a line.
+    mark: u64,
+    line_mark: u64,
+    /// The use number the next segment change gives.
+    next_serial: u64,
+    /// The slot the next segment made is given.  Never one a file still
+    /// being deleted behind may have.
+    next_slot: u32,
+    /// Segment sizes.
+    sizes: Sizes,
+    /// Segments made ready and not used, kept for the next change.
+    spares: Vec<Seg>,
+    /// The next segment, being made ready.
+    pending: Option<std::sync::Arc<crate::segment::Pending>>,
+    /// Which run of line numbering the hot segment's lines belong to:
+    /// its use number.  Changes with every segment change, clear and
+    /// reflow.
     pub(super) epoch: u64,
-    /// Everything filed against the hot file's lines, keyed by line
-    /// index within it (`super::sidecar`): command marks, and the text
-    /// of clusters that have scrolled off.  A file that could not be
-    /// opened is absent rather than fatal -- these are caches, so the
-    /// pane keeps working without them and the next open rebuilds.
-    pub(super) extras: super::sidecar::LineExtras,
-    /// The same for the cold file's lines.  Read-only: nothing appends
-    /// to a file that has already been handed over.
-    pub(super) cold_extras: super::sidecar::LineExtras,
+    #[cfg(test)]
+    pub(super) hooks: Hooks,
 }
 
 // Raw mmap ptrs are private to this struct and the kernel takes care
 // of cross-thread coherence — `FileScrollback` itself is owned by a
 // single L3 process so there's no inter-process concurrent mutation
-// either.  Marker impls let the type cross thread boundaries when
-// embedded in `Scrollback` (which `Send` is naturally derived for).
+// either.
 unsafe impl Send for FileScrollback {}
+
+/// Record bytes of the first and of a full segment; each has an index
+/// an eighth of that.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Sizes {
+    pub(super) first: u64,
+    pub(super) full: u64,
+}
+
+impl Sizes {
+    /// 1 MiB growing to 128 MiB, or what `MARSPOT_SCROLLBACK_HOT_CAP_MB`
+    /// says a full segment is (0 is the smallest there is, for tests
+    /// that want every few lines to change segments).
+    pub(super) fn from_env() -> Self {
+        let full = hot_bytes_cap().max(4096);
+        Self { first: (full / 8).clamp(1024, 1 << 20), full }
+    }
+
+    pub(super) fn index_for(data: u64) -> u64 {
+        (data / 8).max(64) / 8 * 8
+    }
+}
+
+/// What a test stops or holds up.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct Hooks {
+    /// Steps of making a segment ready to do (`segment::STEPS`).
+    pub(super) prep_upto: Option<usize>,
+    /// Held by the preparation until the test lets it go.
+    pub(super) prep_gate: Option<std::sync::mpsc::Receiver<()>>,
+    /// The record bytes the next preparation asks for, in place of the
+    /// size it should have.
+    pub(super) prep_bytes: Option<u64>,
+    /// Files of the budget's eviction to delete before stopping.
+    pub(super) evict_upto: Option<usize>,
+    /// Steps of a clear to do (`write::CLEAR_STEPS`).
+    pub(super) clear_upto: Option<usize>,
+    /// Held by the writer thread right after it has written the header
+    /// of the next segment change, until the test lets it go.
+    pub(super) stall_after_change: Option<std::sync::mpsc::Receiver<()>>,
+}
 
 /// How much of the records is handed to the writer thread at once, and
 /// how many such buffers may be queued or being written.  The index
-/// entries of the records in a buffer travel with it, so the two files
+/// entries of the records in a buffer travel with it, so the two areas
 /// lose the same lines to a kill, and with the buffer being filled that
 /// is at most `BIN_BUF_BYTES * (BIN_DEPTH + 1)` of records.
 const BIN_BUF_BYTES: usize = 64 * 1024;
 const BIN_DEPTH: usize = 3;
 
+mod legacy;
+mod notes;
 mod open;
 mod read;
 mod ring;
+mod tiers;
 mod write;
 
 impl Drop for FileScrollback {
     fn drop(&mut self) {
-        use std::io::{Seek, SeekFrom};
-        // Flush BufWriters so any buffered bytes hit the page cache
-        // before our fds close.  No fsync.  Dense idx — no sentinel.
+        // Everything buffered reaches the page cache before the files
+        // close.  No fsync.  The mappings go with the tiers.
         self.bin.borrow_mut().flush();
-        // Unmap any active mmap regions.
-        let bp = self.bin_mmap_ptr.get();
-        let bl = self.bin_mmap_len.get();
-        if !bp.is_null() && bl > 0 {
-            unsafe {
-                libc::munmap(bp as *mut libc::c_void, bl);
-            }
-        }
-        let ip = self.idx_mmap_ptr.get();
-        let il = self.idx_mmap_len.get();
-        if !ip.is_null() && il > 0 {
-            unsafe {
-                libc::munmap(ip as *mut libc::c_void, il);
-            }
-        }
-        let _ = self.bin_for_read.seek(SeekFrom::Start(0));
-        let _ = self.idx_for_read.seek(SeekFrom::Start(0));
     }
 }
+
+#[cfg(test)]
+mod plan_tests;
+#[cfg(test)]
+mod plan_tests_late;
+#[cfg(test)]
+mod tests;

@@ -40,16 +40,45 @@
 //!   a claude spinner (≈60 bytes a second) look silent for twenty
 //!   minutes and a small first frame never arrive at all (2026-09-22).
 
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, sync_channel};
 use std::thread::JoinHandle;
 
 mod files;
 mod queue;
-pub use files::{delete_with, doomed_path, retry_with};
-use files::{rotated, write_all_of};
-use queue::{Buf, Msg, Queue};
+pub use files::{Job, behind, behind_with, retry_with};
+use queue::{Buf, Cut, Msg, Queue};
+
+/// What a writer thread writes to.
+pub struct Files {
+    pub main: Target,
+    /// Where the side bytes go, for a writer that has been given one.
+    pub side: Option<Target>,
+}
+
+/// One file a writer thread writes to, and where.
+pub struct Target {
+    pub file: Arc<std::fs::File>,
+    /// The offset the next bytes go to, moved on by every write; `None`
+    /// appends instead.
+    pub at: Option<u64>,
+    /// Where in the file the offset after each write is stated, as
+    /// eight bytes little-endian, once the write is done: how a reader
+    /// of a file that does not grow learns how much of it is written.
+    pub publish: Option<u64>,
+}
+
+impl Target {
+    /// Appending to `file`.
+    pub fn appending(file: std::fs::File) -> Self {
+        Self { file: Arc::new(file), at: None, publish: None }
+    }
+
+    /// Writing `file` from offset `at` on.
+    pub fn at(file: Arc<std::fs::File>, at: u64) -> Self {
+        Self { file, at: Some(at), publish: None }
+    }
+}
 
 pub struct AsyncWriter {
     queue: Arc<Queue>,
@@ -69,12 +98,17 @@ impl AsyncWriter {
     /// side file, and a process killed without a flush loses at most
     /// `cap * (depth + 1)`.
     pub fn new(file: std::fs::File, cap: usize, depth: usize) -> Self {
-        Self::woken_by(file, cap, depth, files::retry)
+        Self::to(Files { main: Target::appending(file), side: None }, cap, depth)
     }
 
-    /// [`Self::new`], with what the writer thread calls once it has
+    /// [`Self::new`], to `files` as they are given.
+    pub fn to(files: Files, cap: usize, depth: usize) -> Self {
+        Self::woken_by(files, cap, depth, files::retry)
+    }
+
+    /// [`Self::to`], with what the writer thread calls once it has
     /// written what made it refuse a [`Self::hand_off`].
-    fn woken_by(file: std::fs::File, cap: usize, depth: usize, retry: impl Fn() + Send + 'static) -> Self {
+    fn woken_by(files: Files, cap: usize, depth: usize, retry: impl Fn() + Send + 'static) -> Self {
         let queue = Arc::new(Queue::new(depth));
         let (free_tx, free_rx) = sync_channel::<Buf>(depth + 2);
         // Seed the free list so the first few handoffs don't allocate.
@@ -84,56 +118,7 @@ impl AsyncWriter {
         let taken = Arc::clone(&queue);
         let handle = std::thread::Builder::new()
             .name("marspot-async-writer".into())
-            .spawn(move || {
-                let mut file = file;
-                let mut side: Option<std::fs::File> = None;
-                // buffers taken together and not yet written, and who
-                // waits to hear that they have been
-                let mut run: Vec<Buf> = Vec::with_capacity(depth);
-                let mut acks: Vec<SyncSender<()>> = Vec::new();
-                while let Some(batch) = taken.take() {
-                    for msg in batch {
-                        let other = match msg {
-                            Msg::Data(b) => {
-                                run.push(b);
-                                continue;
-                            }
-                            Msg::Barrier(b, ack) => {
-                                run.push(b);
-                                acks.push(ack);
-                                continue;
-                            }
-                            other => other,
-                        };
-                        Self::append(&mut file, side.as_mut(), &mut run, &mut acks, &free_tx, &taken);
-                        match other {
-                            Msg::Truncate(len, ack) => {
-                                let _ = file.set_len(len);
-                                if let Some(side) = &side {
-                                    let _ = side.set_len(0);
-                                }
-                                let _ = ack.send(());
-                            }
-                            Msg::Side(f) => side = Some(f),
-                            Msg::Swap(new_file, ack) => {
-                                file = new_file;
-                                let _ = ack.send(());
-                            }
-                            Msg::Rotate { live, retired } => {
-                                if let Some(fresh) = rotated(&live, &retired) {
-                                    file = fresh;
-                                }
-                            }
-                            Msg::Data(_) | Msg::Barrier(..) => unreachable!("taken above"),
-                        }
-                        taken.wrote();
-                    }
-                    Self::append(&mut file, side.as_mut(), &mut run, &mut acks, &free_tx, &taken);
-                    if taken.settle() {
-                        retry();
-                    }
-                }
-            })
+            .spawn(move || files::write_queued(files, depth, &taken, &free_tx, retry))
             .expect("spawn async writer");
         Self {
             queue,
@@ -142,39 +127,6 @@ impl AsyncWriter {
             spare: None,
             cap,
             handle: Some(handle),
-        }
-    }
-
-    /// Append the buffers of `run` in one write to each file, hand them
-    /// back and answer `acks`.
-    ///
-    /// One write for all of them: an append is a system call and a
-    /// change to the file's size whatever it carries, and a flood that
-    /// was written a buffer at a time made thousands of them a second.
-    /// The main bytes go first: the side file is an index into them,
-    /// and must never hold what they do not.
-    fn append(
-        file: &mut std::fs::File,
-        side: Option<&mut std::fs::File>,
-        run: &mut Vec<Buf>,
-        acks: &mut Vec<SyncSender<()>>,
-        free_tx: &SyncSender<Buf>,
-        queue: &Queue,
-    ) {
-        write_all_of(file, run.iter().map(|b| b.main.as_slice()));
-        if let Some(side) = side {
-            write_all_of(side, run.iter().map(|b| b.side.as_slice()));
-        }
-        for mut b in run.drain(..) {
-            b.clear();
-            // Dropping the buffer when the free list is full is fine:
-            // it just means the next handoff allocates.  Never block
-            // here.
-            let _ = free_tx.try_send(b);
-            queue.wrote();
-        }
-        for ack in acks.drain(..) {
-            let _ = ack.send(());
         }
     }
 
@@ -187,7 +139,7 @@ impl AsyncWriter {
     /// one hand-over for both means the index on disk never points
     /// past the records and never lacks a record that is there.
     pub fn pair(&mut self, side: std::fs::File) {
-        self.queue.push(Msg::Side(side), true);
+        self.queue.push(Msg::Side(Target::appending(side)), true);
     }
 
     /// Bytes for the side file, handed over with the main bytes.  A
@@ -295,42 +247,26 @@ impl AsyncWriter {
         let _ = ack_rx.recv();
     }
 
-    /// Discard everything queued and cut the file to `len`.
-    pub fn truncate(&mut self, len: u64) {
-        // Anything still buffered belongs to the content being
-        // discarded — drop it rather than writing it past the new end.
-        self.buf.clear();
-        let (ack_tx, ack_rx) = sync_channel::<()>(0);
-        self.queue.push(Msg::Truncate(len, ack_tx), true);
-        let _ = ack_rx.recv();
-    }
-
-    /// Retire the file being written, which is at `live`, to `retired`
-    /// and go on in a fresh file at `live`, without waiting for either.
-    ///
-    /// What was written before this call ends up in the retired file
-    /// and what is written after it in the fresh one; a reader that
-    /// wants to see that calls [`Self::flush`] first.  When the
-    /// renaming fails the old file goes on being written.
-    pub fn rotate(&mut self, live: PathBuf, retired: PathBuf) {
-        if !self.buf.is_empty() {
-            self.hand_over();
-        }
-        self.queue.push(Msg::Rotate { live, retired }, true);
-    }
-
     /// Which thread writes.
     #[cfg(test)]
     pub(crate) fn thread_id(&self) -> std::thread::ThreadId {
         self.handle.as_ref().expect("a writer thread").thread().id()
     }
 
-    /// Flush, then continue appending to `new_file`.
-    pub fn swap_file(&mut self, new_file: std::fs::File) {
-        self.flush();
-        let (ack_tx, ack_rx) = sync_channel::<()>(0);
-        self.queue.push(Msg::Swap(new_file, ack_tx), true);
-        let _ = ack_rx.recv();
+    /// Have the writer thread run `then` on its files once it has
+    /// written everything written so far; what is written from here on
+    /// goes to the files as `then` leaves them.
+    ///
+    /// Nothing is handed over and nothing is waited for: the cut
+    /// travels in the buffer being filled, at the point it was made,
+    /// so a producer that changes files pays for it what it pays for a
+    /// write.
+    pub fn cut(&mut self, then: impl FnOnce(&mut Files) + Send + 'static) {
+        // one cut to a buffer
+        if self.buf.cut.is_some() {
+            self.hand_over();
+        }
+        self.buf.cut = Some(Cut { main_at: self.buf.main.len(), side_at: self.buf.side.len(), then: Box::new(then) });
     }
 }
 
@@ -382,41 +318,79 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Order across a rotation: bytes written before the swap belong to
-    /// the old file even though the producer never waited for them.
+    /// Order across a change of files: what was written before a cut is
+    /// in the files of before it, what was written after it in those it
+    /// made, main and side alike -- in one buffer, in buffers handed
+    /// over together, and with a second cut on the heels of the first.
     #[test]
-    fn a_swap_does_not_reorder_across_files() {
-        let a = tmp("swap-a");
-        let b = tmp("swap-b");
-        let fa = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&a)
-            .unwrap();
-        let mut w = AsyncWriter::new(fa, 1024, 4);
-        w.write(b"old");
-        let fb = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&b)
-            .unwrap();
-        w.swap_file(fb);
-        w.write(b"new");
+    fn a_cut_parts_what_was_written_before_it_from_what_comes_after() {
+        let open = |name: &str| {
+            let path = tmp(name);
+            (std::fs::OpenOptions::new().create(true).append(true).open(&path).unwrap(), path)
+        };
+        let read = |path: &std::path::Path| std::fs::read_to_string(path).unwrap();
+        let (main, main_path) = open("cut-main-0");
+        let (side, side_path) = open("cut-side-0");
+        let mut paths = vec![(main_path, side_path)];
+        // a buffer takes two or three of the writes below
+        let mut w = AsyncWriter::new(main, 64, 3);
+        w.pair(side);
+        let mut want = vec![(String::new(), String::new())];
+        for i in 0..40u32 {
+            // two cuts in a row now and then: the second finds the
+            // first still in the buffer
+            for _ in 0..(usize::from(i % 3 == 0) + usize::from(i % 12 == 0)) {
+                let n = paths.len();
+                let (main, main_path) = open(&format!("cut-main-{n}"));
+                let (side, side_path) = open(&format!("cut-side-{n}"));
+                paths.push((main_path, side_path));
+                want.push((String::new(), String::new()));
+                w.cut(move |files| {
+                    files.main = Target::appending(main);
+                    files.side = Some(Target::appending(side));
+                });
+            }
+            let (m, s) = (format!("m{i:03};"), format!("s{i};"));
+            w.write(m.as_bytes());
+            w.write_side(s.as_bytes());
+            let now = want.last_mut().unwrap();
+            now.0.push_str(&m);
+            now.1.push_str(&s);
+        }
         w.flush();
-        let mut sa = String::new();
-        std::fs::File::open(&a)
-            .unwrap()
-            .read_to_string(&mut sa)
-            .unwrap();
-        let mut sb = String::new();
-        std::fs::File::open(&b)
-            .unwrap()
-            .read_to_string(&mut sb)
-            .unwrap();
-        assert_eq!(sa, "old");
-        assert_eq!(sb, "new");
-        let _ = std::fs::remove_file(&a);
-        let _ = std::fs::remove_file(&b);
+        for (k, ((main_path, side_path), (main, side))) in paths.iter().zip(&want).enumerate() {
+            assert_eq!(&read(main_path), main, "main file {k}");
+            assert_eq!(&read(side_path), side, "side file {k}");
+            let _ = std::fs::remove_file(main_path);
+            let _ = std::fs::remove_file(side_path);
+        }
+    }
+
+    /// Writing at an offset puts the bytes there, one write after the
+    /// other, leaves what is around them alone, and states where it got
+    /// to where it was asked to.
+    #[test]
+    fn a_target_at_an_offset_is_written_in_place_and_says_how_far() {
+        let path = tmp("at");
+        std::fs::write(&path, vec![b'.'; 4096]).unwrap();
+        let file = Arc::new(std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap());
+        let mut main = Target::at(Arc::clone(&file), 100);
+        main.publish = Some(0);
+        let mut w = AsyncWriter::to(Files { main, side: None }, 16, 3);
+        for i in 0..50u8 {
+            w.write(&[b'a' + i % 26; 7]);
+        }
+        w.flush();
+        let got = std::fs::read(&path).unwrap();
+        assert_eq!(got.len(), 4096, "the file did not grow");
+        assert_eq!(u64::from_le_bytes(got[0..8].try_into().unwrap()), 100 + 350);
+        assert!(got[8..100].iter().all(|&b| b == b'.'));
+        for i in 0..50usize {
+            assert!(got[100 + i * 7..100 + i * 7 + 7].iter().all(|&b| b == b'a' + (i % 26) as u8), "write {i}");
+        }
+        assert!(got[450..].iter().all(|&b| b == b'.'));
+        drop(w);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A burst smaller than the buffer reaches the file without a flush
@@ -480,7 +454,7 @@ mod tests {
         let pipe = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
         let mut reader = std::fs::File::open(&path).unwrap();
         let (asked_tx, asked) = std::sync::mpsc::channel();
-        let mut w = AsyncWriter::woken_by(pipe, CAP, 4, move || {
+        let mut w = AsyncWriter::woken_by(Files { main: Target::appending(pipe), side: None }, CAP, 4, move || {
             let _ = asked_tx.send(());
         });
         // more than the pipe holds, in both of the buffers there are

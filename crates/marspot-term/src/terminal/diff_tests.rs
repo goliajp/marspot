@@ -306,22 +306,29 @@ fn the_history_files_come_out_byte_for_byte_the_same() {
             slow.grid().scrollback_flush_for_handoff();
             let lines = fast.grid().scrollback_len();
             drop((fast, slow));
-            // the index is offsets into this file and is not flushed
-            // by a handoff, so the records are what is compared
-            let mut a = std::fs::read(dir.join(format!("fast-{tag}.bin"))).expect("read");
-            let mut b = std::fs::read(dir.join(format!("slow-{tag}.bin"))).expect("read");
-            assert!(lines == 0 || a.len() > 32, "{name}: {lines} lines filed, none in the file");
-            // each file is stamped with when it was made and an epoch
-            // of its own
-            a[16..32].fill(0);
-            b[16..32].fill(0);
-            let at = a.iter().zip(&b).position(|(x, y)| x != y);
-            assert!(
-                a == b,
-                "{name}, {cols}x{rows}: the files differ, {} and {} bytes, first at {at:?}",
-                a.len(),
-                b.len()
-            );
+            // the segments of each, slot by slot: records, notes, index
+            let segments = |who: &str| -> Vec<Vec<u8>> {
+                let prefix = format!("{who}-{tag}.seg.");
+                let mut names: Vec<String> = std::fs::read_dir(dir.path())
+                    .expect("list")
+                    .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.starts_with(&prefix))
+                    .collect();
+                names.sort();
+                names.iter().map(|n| std::fs::read(dir.join(n)).expect("read")).collect()
+            };
+            let (a, b) = (segments("fast"), segments("slow"));
+            assert!(lines == 0 || !a.is_empty(), "{name}: {lines} lines filed, none in the files");
+            assert_eq!(a.len(), b.len(), "{name}, {cols}x{rows}: segment count");
+            for (k, (a, b)) in a.iter().zip(&b).enumerate() {
+                let at = a.iter().zip(b).position(|(x, y)| x != y);
+                assert!(
+                    a == b,
+                    "{name}, {cols}x{rows}: segment {k} differs, {} and {} bytes, first at {at:?}",
+                    a.len(),
+                    b.len()
+                );
+            }
         }
     }
 }

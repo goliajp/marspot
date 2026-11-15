@@ -2,7 +2,6 @@
 //! the two.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
@@ -23,20 +22,31 @@ const LINGER: Duration = Duration::from_millis(2);
 pub(super) struct Buf {
     pub(super) main: Vec<u8>,
     pub(super) side: Vec<u8>,
+    /// A change of files at a point of this buffer.
+    pub(super) cut: Option<Cut>,
+}
+
+/// What the writer does to its files once it has written a buffer up to
+/// `main_at` and `side_at`.
+pub(super) struct Cut {
+    pub(super) main_at: usize,
+    pub(super) side_at: usize,
+    pub(super) then: Box<dyn FnOnce(&mut super::Files) + Send>,
 }
 
 impl Buf {
     pub(super) fn sized(cap: usize) -> Self {
-        Self { main: Vec::with_capacity(cap), side: Vec::new() }
+        Self { main: Vec::with_capacity(cap), side: Vec::new(), cut: None }
     }
 
     pub(super) fn clear(&mut self) {
         self.main.clear();
         self.side.clear();
+        self.cut = None;
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        self.main.is_empty() && self.side.is_empty()
+        self.main.is_empty() && self.side.is_empty() && self.cut.is_none()
     }
 }
 
@@ -45,21 +55,9 @@ pub(super) enum Msg {
     Data(Buf),
     /// Append this, then acknowledge — the barrier `flush()` waits on.
     Barrier(Buf, SyncSender<()>),
-    /// Cut the file back to `len` and the side file to nothing (a
-    /// clear / restart).  Goes through the queue so it cannot race the
-    /// writes ahead of it.
-    Truncate(u64, SyncSender<()>),
     /// From here on a buffer's side bytes are appended to this file,
     /// after its main bytes.
-    Side(std::fs::File),
-    /// Replace the file being written (rotation).  Anything queued
-    /// ahead of it still lands in the old file, which is what makes a
-    /// rotation atomic from the producer's point of view.
-    Swap(std::fs::File, SyncSender<()>),
-    /// Rename the file being written from `live` to `retired` and go
-    /// on in a fresh file at `live`.  Nobody waits for it: the writer
-    /// does it when it gets here, after everything queued ahead.
-    Rotate { live: PathBuf, retired: PathBuf },
+    Side(super::Target),
 }
 
 /// What the producer and the writer thread share.

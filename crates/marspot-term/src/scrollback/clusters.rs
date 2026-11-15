@@ -1,5 +1,10 @@
 //! The cluster text of lines that have scrolled into the file.
 //!
+//! As the format before segments kept it: only read now, for files of
+//! that format (segments keep it as a note beside the line), and written
+//! by tests to have such files.  [`decode_into`] reads a note's payload,
+//! which has the same shape as one of these records.
+//!
 //! A cell on screen holds a pool index and the pool holds the text; a
 //! cell in the file holds the base codepoint instead, because that is
 //! what a binary without this feature reads out of the record and the
@@ -43,6 +48,7 @@ impl LineExtras {
     /// only written once its blob is on disk, so a half-written record
     /// reads as a line with no clusters rather than as a line with
     /// somebody else's.
+    #[cfg(test)]
     pub(super) fn put_clusters(&mut self, local: u64, clusters: &[(u16, String)]) {
         use std::os::unix::fs::FileExt;
         let (Some(slots), Some(text)) = (self.cluster_slots.as_ref(), self.cluster_text.as_ref())
@@ -106,7 +112,10 @@ impl LineExtras {
 /// line, and the harm of being wrong is bounded: the cells it does not
 /// cover read as their base codepoints, which is what they looked like
 /// before any of this existed.
-fn decode_into(blob: &[u8], out: &mut Vec<(u16, String)>) -> bool {
+pub(in crate::scrollback) fn decode_into(blob: &[u8], out: &mut Vec<(u16, String)>) -> bool {
+    if blob.len() < 2 {
+        return false;
+    }
     let count = u16::from_le_bytes(blob[0..2].try_into().unwrap()) as usize;
     let mut p = 2usize;
     let before = out.len();

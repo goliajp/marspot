@@ -60,6 +60,10 @@ pub(super) const FILE_REC_HEADER_BYTES: usize = 4 + 1 + 2; // rec_len + flags + 
 pub(super) const REC_WRAPPED: u8 = 1 << 0;
 /// Record flag: the body is runs, not cells.
 pub(super) const REC_PACKED: u8 = 1 << 1;
+/// Record flag: not a line but a note on the line before it (a command
+/// mark, a line's cluster text).  Only in segments, which no binary
+/// that predates them opens: see `file/notes.rs`.
+pub(super) const REC_NOTE: u8 = 1 << 2;
 /// A run's header: cell count, payload kind, the cells' attributes.
 const RUN_HEADER_BYTES: usize = 2 + 1 + RUN_ATTR_BYTES;
 const RUN_ATTR_BYTES: usize = crate::grid::CELL_MEM_BYTES - 4;
@@ -68,16 +72,9 @@ const RUN_BYTES: u8 = 0;
 /// Run payload: four bytes per cell, the cell's `ch` as stored.
 const RUN_SCALARS: u8 = 1;
 
-/// F2+5 — hot/cold scrollback rotation cap.  When `scrollback.bin`
-/// would exceed this many bytes, the writer flushes + closes, renames
-/// the current pair to `scrollback.cold.bin` / `scrollback.cold.idx`
-/// (overwriting any prior cold pair — that's the "delete" tier), and
-/// opens a fresh empty hot pair.  Older logical line indices stay
-/// addressable through the cold pair until the next rotation evicts
-/// it.  Tunable via `MARSPOT_SCROLLBACK_HOT_CAP_MB`; default 128 MB
-/// → per-pane disk budget ≤ 256 MB (hot + cold), 9 panes ≤ 2.3 GB
-/// total.  At F2+4 trim's ~400 B/row average that's ~330 k rows hot
-/// + 330 k rows cold = ~9 hrs busy claudecode history per pane.
+/// Record bytes of a full segment: two of them are the budget, 256 MB of
+/// records a pane, the depth the hot and cold pair of the format before
+/// segments had.  Tunable via `MARSPOT_SCROLLBACK_HOT_CAP_MB`.
 pub(super) const HOT_BYTES_CAP_DEFAULT: u64 = 128 * 1024 * 1024;
 
 pub(super) fn hot_bytes_cap() -> u64 {
@@ -97,32 +94,6 @@ pub(super) fn read_idx_at(idx: &std::fs::File, line_idx: u64) -> std::io::Result
     let mut buf = [0u8; 8];
     read_exact_at(idx, &mut buf, line_idx * 8)?;
     Ok(u64::from_le_bytes(buf))
-}
-
-pub(super) fn read_record_at(
-    bin: &std::fs::File,
-    offset: u64,
-) -> std::io::Result<(Vec<crate::grid::Cell>, bool)> {
-    let body = read_body_at(bin, offset)?;
-    if body.len() < 3 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "scrollback rec too short",
-        ));
-    }
-    let wrapped = body[0] & REC_WRAPPED != 0;
-    let cols = u16::from_le_bytes([body[1], body[2]]) as usize;
-    let cells = decode_record_cells(body[0], &body[3..], cols).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "scrollback rec at {offset}: {} cell bytes for {cols} cols is neither {V2_CELL_BYTES} nor {} per cell",
-                body.len() - 3,
-                crate::grid::CELL_MEM_BYTES
-            ),
-        )
-    })?;
-    Ok((cells, wrapped))
 }
 
 /// The record at `offset` without its length: flags, columns, cells.
@@ -356,41 +327,6 @@ fn decode_packed(mut body: &[u8], cols: usize) -> Option<Vec<crate::grid::Cell>>
     body.is_empty().then_some(cells)
 }
 
-/// Move an older file's header to the current version without touching
-/// a single record.
-///
-/// Eight bytes: version and cell_abi.  Written through its own
-/// non-append descriptor — a positional write on an `O_APPEND` fd is
-/// not guaranteed to land at the position asked for — and synced,
-/// because the next record appended is 20 bytes per cell and a v2
-/// header in front of it would be a lie on the next open.
-pub(super) fn upgrade_header_in_place(bin_path: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::FileExt;
-    let f = std::fs::OpenOptions::new().write(true).open(bin_path)?;
-    let mut patch = [0u8; 8];
-    patch[0..4].copy_from_slice(&FILE_VERSION.to_le_bytes());
-    patch[4..8].copy_from_slice(&(crate::grid::CELL_MEM_BYTES as u32).to_le_bytes());
-    f.write_all_at(&patch, 4)?;
-    f.sync_data()?;
-    crate::lx_info!(
-        "scrollback.upgraded_header",
-        "header moved to the current version in place; existing records stay as written",
-        bin = bin_path.display()
-    );
-    Ok(())
-}
-
-/// Put an epoch into a header that was written before the field meant
-/// anything.  Same shape as the v2 upgrade above: one 8-byte write at a
-/// fixed offset, no record touched.
-pub(super) fn stamp_epoch_in_place(bin_path: &std::path::Path, epoch: u64) -> std::io::Result<()> {
-    use std::os::unix::fs::FileExt;
-    let f = std::fs::OpenOptions::new().write(true).open(bin_path)?;
-    f.write_all_at(&epoch.to_le_bytes(), 24)?;
-    f.sync_data()?;
-    Ok(())
-}
-
 /// A value that changes whenever a local line index in this file stops
 /// meaning the line it used to mean.
 ///
@@ -418,20 +354,6 @@ pub(super) fn new_epoch() -> u64 {
     // The low bits of a nanosecond clock are the noisy ones, so the
     // counter goes in the top where it cannot be swallowed.
     ns ^ (SEQ.fetch_add(1, Ordering::Relaxed) << 48)
-}
-
-/// The epoch a `.bin` states, or `None` when it is not one of ours.
-/// Used to open a sidecar against a file this process did not open as
-/// its writer -- the cold tier.
-pub(super) fn read_epoch(bin_path: &std::path::Path) -> Option<u64> {
-    use std::os::unix::fs::FileExt;
-    let f = std::fs::File::open(bin_path).ok()?;
-    let mut hdr = [0u8; FILE_HEADER_BYTES as usize];
-    f.read_exact_at(&mut hdr, 0).ok()?;
-    if u32::from_le_bytes(hdr[0..4].try_into().unwrap()) != FILE_MAGIC {
-        return None;
-    }
-    Some(u64::from_le_bytes(hdr[24..32].try_into().unwrap()))
 }
 
 #[cfg(test)]

@@ -147,9 +147,10 @@ impl PaneStateTracker {
 
     /// Has this pane's PTY been silent long enough to call it quiet?
     ///
-    /// Read from the session's own bytelog: L3 appends every byte the
-    /// PTY produces, so its size is a running total of "how much has
-    /// this pane said".  One `stat` per pane per sweep.
+    /// Read from the session's own bytelog: L3 logs every byte the PTY
+    /// produces, and the log states how many it has logged, a running
+    /// total of "how much has this pane said".  A directory listing and
+    /// a header read per segment, per pane per sweep.
     ///
     /// This is the signal the transcript and the process table both
     /// miss.  Measured on this desktop over twelve seconds: a claude
@@ -159,10 +160,8 @@ impl PaneStateTracker {
     /// check, because a finished turn plus a long think leaves no new
     /// record, no child process and no measurable CPU.
     fn pty_quiet(&mut self, sid: u64, now: Instant) -> bool {
-        let path = marspot_term::paths::sessions_dir()
-            .join(sid.to_string())
-            .join("bytelog");
-        let size = std::fs::metadata(&path).map(|m| m.len());
+        let dir = marspot_term::paths::sessions_dir().join(sid.to_string());
+        let size = marspot_term::bytelog::stream_len(&dir);
         self.pty_quiet_with(sid, now, size)
     }
 

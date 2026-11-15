@@ -1,165 +1,26 @@
-//! Appending lines, and rotating when the hot file is full.
+//! Appending lines, and changing segments when the hot one is full.
 //!
 //! The write side runs on the parse thread, so what is here is the
-//! per-line cost of keeping history: no allocation per line, no
-//! fsync, and a rotation that hands the old pair over whole.
+//! per-line cost of keeping history: no allocation per line, no fsync,
+//! no system call -- a segment change is arithmetic and a cut in the
+//! writer's stream, and the segment it changes to was made ready
+//! elsewhere.
 
+use std::sync::Arc;
+
+use super::tiers::SegTier;
 use super::*;
+use crate::async_writer::Target;
+use crate::segment::{self, Pending};
+
+/// What a clear does to the files, in order.  The older segments are
+/// put out of use before the hot one, so that a clear cut short leaves
+/// the hot segment's lines or none -- never the older ones'.
+#[cfg(test)]
+pub(super) const CLEAR_STEPS: usize = 2;
 
 impl FileScrollback {
-    /// F2+5 — rotate the current hot pair into cold and reopen a
-    /// fresh hot pair.  Called by push_line when an incoming record
-    /// would push hot past `hot_bytes_cap`.  Any existing cold pair
-    /// is overwritten — that's the "delete" tier; once rotated past,
-    /// older history is unrecoverable.  RAM ring contents are
-    /// preserved (in-memory state is independent of the file).
-    fn rotate_to_cold(&mut self) -> std::io::Result<()> {
-        // Capture the count of rows about to leave hot for cold.
-        let hot_count_before = self.total_lines - self.hot_first_line;
-        if hot_count_before == 0 {
-            // Nothing to rotate (the very first push exceeded cap on
-            // an empty file — degenerate).  Just continue writing.
-            return Ok(());
-        }
-        // 1) Flush writer buffers so the rename captures complete data.
-        self.bin.borrow_mut().flush();
-        // 2) munmap any mmaps held on the hot files; their underlying
-        //    inode is about to change identity (rename → cold path,
-        //    then create fresh hot at the old path).  Reusing the old
-        //    mmap pointers would point at the renamed file, which is
-        //    now logically cold — not what cell_at wants for hot reads.
-        unsafe {
-            let bp = self.bin_mmap_ptr.get();
-            let bl = self.bin_mmap_len.get();
-            if !bp.is_null() && bl > 0 {
-                libc::munmap(bp as *mut _, bl);
-            }
-            self.bin_mmap_ptr.set(std::ptr::null_mut());
-            self.bin_mmap_len.set(0);
-            let ip = self.idx_mmap_ptr.get();
-            let il = self.idx_mmap_len.get();
-            if !ip.is_null() && il > 0 {
-                libc::munmap(ip as *mut _, il);
-            }
-            self.idx_mmap_ptr.set(std::ptr::null_mut());
-            self.idx_mmap_len.set(0);
-        }
-        // Drop the cold fds before rename overwrites their inodes.
-        self.cold_bin_for_read = None;
-        self.cold_idx_for_read = None;
-        // 3) Delete any stale cold pair (defence in depth: rename
-        //    on most filesystems would clobber, but be explicit).
-        let _ = std::fs::remove_file(&self.cold_bin_path);
-        let _ = std::fs::remove_file(&self.cold_idx_path);
-        // 4) Rename hot → cold.
-        std::fs::rename(&self.bin_path, &self.cold_bin_path)?;
-        std::fs::rename(&self.idx_path, &self.cold_idx_path)?;
-        // The sidecars describe the file that just became cold, and its
-        // epoch went with it, so they are still its sidecars.  Renaming
-        // keeps them readable for as long as the cold tier is; the next
-        // rotation overwrites them the way it overwrites the other two
-        // files.
-        super::super::sidecar::LineExtras::rename_beside(&self.bin_path, &self.cold_bin_path);
-        // Open them for reading now, with the epoch the handed-over
-        // file still carries -- `self.epoch` becomes the new file's
-        // further down.  Without this everything just rotated is
-        // unreadable until the pane is reopened.
-        self.cold_extras =
-            super::super::sidecar::LineExtras::open_cold_for_read(&self.cold_bin_path, self.epoch);
-        // 5) Reopen fresh hot pair.  The writer thread stays and is
-        //    given the new files: ending it and starting another, as
-        //    this used to, twice, was 0.9 ms of every rotation.
-        let bin_w = std::fs::OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .open(&self.bin_path)?;
-        let idx_w = std::fs::OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .open(&self.idx_path)?;
-        self.epoch = new_epoch();
-        {
-            let mut bin = self.bin.borrow_mut();
-            bin.swap_file(bin_w);
-            bin.pair(idx_w);
-            Self::write_header(&mut bin, self.epoch)?;
-            bin.flush();
-        }
-        // The sidecars are keyed by index WITHIN the hot file, and the
-        // new hot file starts those indices over.  Reopening against
-        // the new epoch resets them; without this, the new file's line
-        // 1 is handed what was filed against the old file's line 1, and
-        // a jump lands on it.  What belongs to the handed-over lines
-        // goes with their file -- `mark_at` already answers "no mark"
-        // for anything older than the current hot file.
-        self.extras = super::super::sidecar::LineExtras::open_hot(&self.bin_path, self.epoch);
-        // 6) Reinstall read fds for hot.
-        let bin_for_read = std::fs::OpenOptions::new()
-            .read(true)
-            .open(&self.bin_path)?;
-        let idx_for_read = std::fs::OpenOptions::new()
-            .read(true)
-            .open(&self.idx_path)?;
-        self.bin_for_read = bin_for_read;
-        self.idx_for_read = idx_for_read;
-        self.bin_tail_offset = FILE_HEADER_BYTES;
-        self.has_unflushed.set(false);
-        // 7) Open the (newly renamed) cold read fds.
-        self.cold_bin_for_read = std::fs::OpenOptions::new()
-            .read(true)
-            .open(&self.cold_bin_path)
-            .ok();
-        self.cold_idx_for_read = std::fs::OpenOptions::new()
-            .read(true)
-            .open(&self.cold_idx_path)
-            .ok();
-        // 8) Logical boundary bookkeeping.  Previous-hot's rows now
-        //    live in cold; bump cold_first_line to where they were
-        //    in logical-idx terms, and shift hot_first_line up so
-        //    the next push lands at total_lines (no gap).
-        self.cold_first_line = self.hot_first_line;
-        self.cold_total_lines = hot_count_before;
-        self.hot_first_line = self.total_lines;
-        Ok(())
-    }
-
     /// Append one line.  Hot path.
-    /// Record a mark against the line most recently pushed.
-    ///
-    /// Called only for the lines that carry one -- one per command,
-    /// against a stream that is millions of lines -- so the per-line
-    /// path pays nothing for the marks it does not have.
-    pub(in crate::scrollback) fn mark_last_line(&self, mark: crate::grid::PromptMark) {
-        use std::os::unix::fs::FileExt;
-        let Some(f) = self.extras.marks.as_ref() else {
-            return;
-        };
-        if self.total_lines == 0 || self.total_lines <= self.hot_first_line {
-            return;
-        }
-        let local = self.total_lines - 1 - self.hot_first_line;
-        let _ = f.write_all_at(
-            &mark.to_bytes(),
-            super::super::sidecar::HEADER_BYTES + local * 2,
-        );
-    }
-
-    /// File the clusters of the line most recently pushed.
-    ///
-    /// Called only for the lines that have any, so a stream of plain
-    /// text never reaches the sidecar at all -- the caller tests for
-    /// emptiness, because that test is one `is_empty` on the scroll
-    /// path and this is two writes.
-    pub(in crate::scrollback) fn cluster_last_line(&mut self, clusters: &[(u16, String)]) {
-        if self.total_lines == 0 || self.total_lines <= self.hot_first_line {
-            return;
-        }
-        let local = self.total_lines - 1 - self.hot_first_line;
-        self.extras.put_clusters(local, clusters);
-    }
-
     ///
     /// Returns the line's length without its trailing default cells.
     pub fn push_line(&mut self, line: &[crate::grid::Cell], wrapped: bool) -> usize {
@@ -168,22 +29,12 @@ impl FileScrollback {
 
     /// [`Self::push_line`], with what the caller knows of the row.
     pub fn push_row(&mut self, line: &[crate::grid::Cell], wrapped: bool, hint: RowHint) -> usize {
-        // F3+11.1 — trim trailing cells equal to `Cell::default()`
-        // before encoding.  This is pure disk-size optimisation; the
-        // semantic is unchanged from the dumb-store model: every
-        // push call produces exactly one record, with cols equal to
-        // the trimmed cell count (may be 0 for fully-default rows).
-        // Read path: cell_at returns None for col >= cols, which the
-        // viewport renderer maps to Cell::default() — visually
-        // identical to having stored the trailing default cells.
-        // Critical perf: a 200-col grid where claudecode TUI uses
-        // the first ~40 cols means 80% disk savings, and 80% of the
-        // Grid::resize reflow read volume.  Without this, resize on
-        // a session with megabytes of history takes seconds.
-        // Compared as three words, which for `Cell` is the same as
-        // `==`: the field-wise compare cost ~29 instructions a cell, a
-        // fifth of all the parse thread did on a wide pane of short
-        // lines, and a byte-slice compare becomes a `memcmp` call.
+        // Trailing cells equal to `Cell::default()` are not stored: a
+        // read past a record's columns is a blank, which looks the same,
+        // and a wide pane of short lines is mostly such cells.  Compared
+        // as three words, which for `Cell` is the same as `==`: the
+        // field-wise compare cost ~29 instructions a cell, a fifth of all
+        // the parse thread did on a wide pane of short lines.
         const N: usize = crate::grid::CELL_MEM_BYTES;
         fn words(c: &[u8; N]) -> (u64, u64, u32) {
             let (a, rest) = c.split_first_chunk::<8>().expect("20 bytes");
@@ -216,41 +67,21 @@ impl FileScrollback {
         if !packed {
             self.scratch.extend_from_slice(cell_bytes);
         }
-        let total_bytes = self.scratch.len();
+        let total_bytes = self.scratch.len() as u64;
         let rec_len = (total_bytes - 4) as u32;
-        let mut flags = 0;
-        if wrapped {
-            flags |= REC_WRAPPED;
-        }
-        if packed {
-            flags |= REC_PACKED;
-        }
+        let flags = if wrapped { REC_WRAPPED } else { 0 } | if packed { REC_PACKED } else { 0 };
         self.scratch[..4].copy_from_slice(&rec_len.to_le_bytes());
         self.scratch[4] = flags;
         self.scratch[5..7].copy_from_slice(&cols_u16.to_le_bytes());
 
-        // F2+5 — hot → cold rotation when the next record would
-        // overflow the cap.  Failure to rotate is a real I/O error
-        // (fs::rename ENOSPC etc.); panic rather than push past the
-        // cap silently.
-        if self.bin_tail_offset.saturating_add(total_bytes as u64) > self.hot_bytes_cap {
-            self.rotate_to_cold().expect("scrollback hot→cold rotation");
+        if self.hot_pos + total_bytes > self.mark || self.hot_lines >= self.line_mark {
+            self.at_mark(total_bytes);
         }
-        let rec_offset = self.bin_tail_offset;
-
-        // Bin first, then idx — `open()` recovers from the bin-
-        // BufWriter-ahead-of-idx case via the tail-truncate scan.
-        // I/O failure here = disk full / fs error; panic loudly so
-        // the user knows storage broke instead of silently losing
-        // history.
+        let entry = self.hot_pos | (self.epoch << 32);
         self.bin.borrow_mut().write(&self.scratch);
-        self.bin_tail_offset += total_bytes as u64;
-        // Both writers are buffered; `ensure_flushed` / handoff /
-        // Drop push them out in order (bin first) so the index never
-        // references bytes the data file does not have.  open()'s
-        // tail-truncate scan reconciles whatever an unclean kill
-        // left behind, as it always has.
-        self.bin.borrow_mut().write_side(&rec_offset.to_le_bytes());
+        self.bin.borrow_mut().write_side(&entry.to_le_bytes());
+        self.hot_pos += total_bytes;
+        self.hot_lines += 1;
         self.has_unflushed.set(true);
 
         self.ring.push(&self.scratch[4..]);
@@ -258,12 +89,193 @@ impl FileScrollback {
         trimmed_len
     }
 
+    /// Where the hot segment's record area ends.
+    pub(super) fn hot_data_end(&self) -> u64 {
+        self.segs.last().expect("a hot segment").seg.hdr.index_at()
+    }
+
+    fn hot_line_cap(&self) -> u64 {
+        self.segs.last().expect("a hot segment").seg.hdr.index / 8
+    }
+
+    /// The record bytes of the segment the next change takes, or `None`
+    /// when it uses the older full one again.
+    pub(super) fn next_size(&self) -> Option<u64> {
+        let hot = self.segs.last().expect("a hot segment").seg.hdr.data;
+        if hot < self.sizes.full {
+            return Some(segment::grown(hot, self.sizes.full));
+        }
+        let full = self.segs.iter().filter(|t| t.seg.hdr.data == self.sizes.full).count();
+        (full < 2).then_some(self.sizes.full)
+    }
+
+    /// Where the next push stops: where the next segment is asked for,
+    /// if it is still to be asked for, or else the end.
+    pub(super) fn set_marks(&mut self) {
+        let (end, cap) = (self.hot_data_end(), self.hot_line_cap());
+        let ask = self.next_size().is_some()
+            && self.pending.is_none()
+            && !self.spares.iter().any(|s| Some(s.hdr.data) == self.next_size());
+        if ask {
+            let data = end - HEADER_BYTES;
+            let ahead = segment::ask_ahead(data);
+            self.mark = end - ahead;
+            // the same share of the index
+            self.line_mark = cap - cap * ahead / data;
+        } else {
+            self.mark = end;
+            self.line_mark = cap;
+        }
+    }
+
+    /// The record about to be written takes the hot segment past a mark:
+    /// where its successor is asked for, or its end.
+    #[cold]
+    fn at_mark(&mut self, record_bytes: u64) {
+        if self.pending.is_none()
+            && let Some(data) = self.next_size()
+            && !self.spares.iter().any(|s| s.hdr.data == data)
+        {
+            self.pending = Some(Pending::start(self.prep(data)));
+        }
+        self.set_marks();
+        if self.hot_pos + record_bytes > self.hot_data_end() || self.hot_lines >= self.hot_line_cap() {
+            self.change();
+        }
+    }
+
+    fn prep(&mut self, data: u64) -> segment::Prep {
+        let slot = self.next_slot;
+        self.next_slot += 1;
+        #[allow(unused_mut)]
+        let mut prep = segment::Prep::new(&self.dir, &self.stem, slot, open::header(data, 0));
+        #[cfg(test)]
+        {
+            if let Some(bytes) = self.hooks.prep_bytes.take() {
+                prep.hdr.data = bytes;
+            }
+            prep.upto = self.hooks.prep_upto.unwrap_or(prep.upto);
+            prep.gate = self.hooks.prep_gate.take();
+        }
+        prep
+    }
+
+    /// Go on in the next segment: the older full one used again, or the
+    /// one made ready, waited for if it is not ready yet -- the history
+    /// inside the budget is not given up for it.  A segment that could
+    /// not be made (a full disk) leaves the history going round in the
+    /// segments it has.
+    fn change(&mut self) {
+        let next = match self.next_size() {
+            None => Ok(None),
+            Some(data) => match self.spares.iter().position(|s| s.hdr.data == data) {
+                Some(i) => Ok(Some(self.spares.remove(i))),
+                None => {
+                    let pending = match self.pending.take() {
+                        Some(p) => p,
+                        None => Pending::start(self.prep(data)),
+                    };
+                    pending.take().unwrap_or_else(|| pending.wait()).map(Some)
+                }
+            },
+        };
+        let reused = match next {
+            Ok(Some(seg)) => SegTier::new(seg, 0, 0, HEADER_BYTES),
+            Ok(None) => {
+                let i = self.segs.iter().position(|t| t.seg.hdr.data == self.sizes.full).expect("two full segments");
+                self.segs.remove(i)
+            }
+            Err(e) => {
+                crate::lx_warn!("scrollback.segment.not_made", &format!("{e}"), dir = self.dir.display());
+                // the hot segment itself when it is the only one
+                if self.segs.len() == 1 { self.retire_hot() } else { self.segs.remove(0) }
+            }
+        };
+        self.start_use(reused);
+        self.evict();
+    }
+
+    /// The hot segment stops being written: it keeps the lines it has.
+    fn seal_hot(&mut self) {
+        let (lines, end) = (self.hot_lines, self.hot_pos);
+        let hot = self.segs.last_mut().expect("a hot segment");
+        hot.lines = lines;
+        hot.used_end = end;
+    }
+
+    /// The hot segment, taken out of the history to be used again.
+    fn retire_hot(&mut self) -> SegTier {
+        self.segs.pop().expect("a hot segment")
+    }
+
+    /// Start a new use of `t` as the hot segment, from the next line on.
+    fn start_use(&mut self, mut t: SegTier) {
+        if self.segs.last().is_some() {
+            self.seal_hot();
+        }
+        let serial = self.next_serial;
+        self.next_serial += 1;
+        t.seg.hdr = t.seg.hdr.used(serial, 0);
+        t.first_line = self.total_lines;
+        t.lines = 0;
+        t.used_end = HEADER_BYTES;
+        let (file, hdr) = (Arc::clone(&t.seg.file), t.seg.hdr);
+        self.bin.borrow_mut().cut(move |files| {
+            let _ = std::os::unix::fs::FileExt::write_all_at(&*file, &hdr.encode(), 0);
+            files.main = Target::at(Arc::clone(&file), HEADER_BYTES);
+            files.side = Some(Target::at(file, hdr.index_at()));
+        });
+        #[cfg(test)]
+        if let Some(stall) = self.hooks.stall_after_change.take() {
+            self.bin.borrow_mut().cut(move |_| {
+                let _ = stall.recv();
+            });
+        }
+        self.segs.push(t);
+        self.hot_pos = HEADER_BYTES;
+        self.hot_lines = 0;
+        self.hot_first_line = self.total_lines;
+        self.epoch = serial;
+        self.set_marks();
+    }
+
+    /// Once two full segments are in use, let go of everything older
+    /// than the older of them, and of spares no change will take.
+    fn evict(&mut self) {
+        let full = self.sizes.full;
+        let Some(keep_from) = self.segs.iter().position(|t| t.seg.hdr.data == full) else { return };
+        if self.segs.iter().filter(|t| t.seg.hdr.data == full).count() < 2 {
+            return;
+        }
+        let gone: Vec<SegTier> = self.segs.drain(..keep_from).collect();
+        let legacy: Vec<legacy::Legacy> = std::mem::take(&mut self.legacy);
+        let wanted = self.next_size();
+        let (keep, spare_gone): (Vec<Seg>, Vec<Seg>) =
+            std::mem::take(&mut self.spares).into_iter().partition(|s| Some(s.hdr.data) == wanted);
+        self.spares = keep;
+        let mut paths: Vec<std::path::PathBuf> = gone.iter().map(|t| t.seg.path.clone()).collect();
+        paths.extend(spare_gone.iter().map(|s| s.path.clone()));
+        for l in &legacy {
+            paths.extend(l.paths());
+        }
+        if paths.is_empty() {
+            return;
+        }
+        #[cfg(test)]
+        if let Some(n) = self.hooks.evict_upto {
+            // the process dies part way through
+            for p in paths.iter().take(n) {
+                let _ = std::fs::remove_file(p);
+            }
+            std::mem::forget((gone, legacy, spare_gone));
+            return;
+        }
+        segment::delete_behind(paths, (gone, legacy, spare_gone));
+    }
+
     /// Cheap idempotent flush: a cold-read path calls this before
-    /// consulting mmap / pread so any line that aged out of the RAM
-    /// ring but still sits in the BufWriter user-space buffer is
-    /// fully visible on disk.  Called at most once per cold-read
-    /// burst because `has_unflushed` clears here and only `push_line`
-    /// re-sets it.
+    /// reading the hot segment, so any line that aged out of the RAM
+    /// ring but still sits in the writer's buffer is in the file.
     pub(super) fn ensure_flushed(&self) {
         if !self.has_unflushed.get() {
             return;
@@ -272,25 +284,16 @@ impl FileScrollback {
         self.has_unflushed.set(false);
     }
 
-    /// F3+10 — call before L3 `execv` (Drop won't run, so the
-    /// BufWriter tail would otherwise be lost — that's the original
-    /// execv-gap bug).  Same flush path as `Drop`, just exposed as a
-    /// public hook so `do_l3_execv_swap` can invoke it explicitly.
-    /// snapshot v3's index-based dedup makes this a safety net rather
-    /// than a strict correctness requirement (the snapshot already
-    /// carries the BufWriter tail in its RAM-ring section), but
-    /// flushing keeps the on-disk file in sync so cold reads of
-    /// recent rows hit the file directly instead of having to wait
-    /// for the next push_line to spill.
+    /// Call before L3 `execv`: Drop does not run, and lines whose index
+    /// stayed in a buffer are in no file the next image can find them
+    /// in.  Nothing else is unfinished: no file is being renamed.
     pub fn flush_for_handoff(&self) {
-        // The index goes with the records: lines whose index stayed in
-        // a buffer are in no file the next image can find them in.
         self.bin.borrow_mut().flush();
         self.has_unflushed.set(false);
     }
 
     /// End of a burst of output: hand what is buffered to the writer
-    /// threads, without waiting for them.
+    /// thread, without waiting for it.
     ///
     /// Without this a pane that printed a few hundred lines and went
     /// quiet would keep them in memory until a buffer filled -- for a
@@ -299,570 +302,64 @@ impl FileScrollback {
         self.bin.borrow_mut().hand_off();
     }
 
-    /// Ensure `self.bin_mmap_*` covers at least `needed_len` bytes.
-    /// First call mmaps the file; later calls remap when the file
-    /// has grown.  Called from cold-read paths after `ensure_flushed`
-    /// guarantees the kernel sees a consistent file.
-    pub(super) fn ensure_bin_mmap_covers(&self, needed_len: u64) -> std::io::Result<()> {
-        let cur_len = self.bin_mmap_len.get();
-        if cur_len as u64 >= needed_len && !self.bin_mmap_ptr.get().is_null() {
-            return Ok(());
-        }
-        // Remap to the file's current size (which may be larger than
-        // needed_len — that's fine, virtual reservation only).
-        let file_len = self.bin_for_read.metadata()?.len();
-        if file_len == 0 {
-            return Ok(());
-        }
-        // Unmap old if any.
-        let old_ptr = self.bin_mmap_ptr.get();
-        if !old_ptr.is_null() && cur_len > 0 {
-            unsafe {
-                libc::munmap(old_ptr as *mut libc::c_void, cur_len);
+    /// CSI 3 J: the user's explicit "wipe my history".  It reaches the
+    /// files, or `clear` and a restart resurrect everything.  The
+    /// bytelog is not touched: replaying it re-applies this very 3J.
+    ///
+    /// No file is truncated or deleted: the older segments get a header
+    /// that says they are unused, and are kept for the next changes; the
+    /// hot one starts a new use.  The files of the format before
+    /// segments are deleted.
+    pub fn clear(&mut self) {
+        self.ring.clear();
+        self.bin.borrow_mut().flush();
+        self.has_unflushed.set(false);
+        #[cfg(test)]
+        let upto = self.hooks.clear_upto.unwrap_or(CLEAR_STEPS);
+        #[cfg(not(test))]
+        let upto = 2;
+        for l in std::mem::take(&mut self.legacy) {
+            for p in l.paths() {
+                let _ = std::fs::remove_file(p);
             }
         }
-        // Map new.
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                file_len as libc::size_t,
-                libc::PROT_READ,
-                libc::MAP_PRIVATE,
-                std::os::unix::io::AsRawFd::as_raw_fd(&self.bin_for_read),
-                0,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            self.bin_mmap_ptr.set(std::ptr::null_mut());
-            self.bin_mmap_len.set(0);
-            return Err(std::io::Error::last_os_error());
+        let hot = self.retire_hot();
+        let older: Vec<SegTier> = std::mem::take(&mut self.segs);
+        for t in older {
+            let hdr = t.seg.hdr.used(0, 0);
+            let _ = std::os::unix::fs::FileExt::write_all_at(&*t.seg.file, &hdr.encode(), 0);
+            self.spares.push(Seg { hdr, ..t.seg });
         }
-        self.bin_mmap_ptr.set(ptr as *mut u8);
-        self.bin_mmap_len.set(file_len as usize);
-        Ok(())
+        if upto < 2 {
+            // the process dies here
+            self.segs.push(hot);
+            return;
+        }
+        self.total_lines = 0;
+        self.start_use(hot);
+        self.bin.borrow_mut().flush();
+        // spares beyond the one the next change takes are deleted
+        let wanted = self.next_size();
+        let mut kept = false;
+        let (keep, gone): (Vec<Seg>, Vec<Seg>) = std::mem::take(&mut self.spares).into_iter().partition(|s| {
+            let k = !kept && Some(s.hdr.data) == wanted;
+            kept |= k;
+            k
+        });
+        self.spares = keep;
+        if !gone.is_empty() {
+            segment::delete_behind(gone.iter().map(|s| s.path.clone()).collect(), gone);
+        }
+        self.set_marks();
     }
 
-    pub(super) fn ensure_idx_mmap_covers(&self, needed_len: u64) -> std::io::Result<()> {
-        let cur_len = self.idx_mmap_len.get();
-        if cur_len as u64 >= needed_len && !self.idx_mmap_ptr.get().is_null() {
-            return Ok(());
-        }
-        let file_len = self.idx_for_read.metadata()?.len();
-        if file_len == 0 {
-            return Ok(());
-        }
-        let old_ptr = self.idx_mmap_ptr.get();
-        if !old_ptr.is_null() && cur_len > 0 {
-            unsafe {
-                libc::munmap(old_ptr as *mut libc::c_void, cur_len);
-            }
-        }
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                file_len as libc::size_t,
-                libc::PROT_READ,
-                libc::MAP_PRIVATE,
-                std::os::unix::io::AsRawFd::as_raw_fd(&self.idx_for_read),
-                0,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            self.idx_mmap_ptr.set(std::ptr::null_mut());
-            self.idx_mmap_len.set(0);
-            return Err(std::io::Error::last_os_error());
-        }
-        self.idx_mmap_ptr.set(ptr as *mut u8);
-        self.idx_mmap_len.set(file_len as usize);
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::grid::Cell;
-    use crate::scrollback::Scrollback;
-    use crate::scrollback::format::FILE_HEADER_BYTES;
-    use crate::scrollback::testing::*;
-
-    /// An image that replaces itself runs no destructors: after the
-    /// flush every line is in both files, the index as well as the
-    /// data, however little of a buffer they filled.
-    #[test]
-    fn every_line_is_indexed_on_disk_before_a_handoff() {
-        let tmp = TmpDir::new("handoff-idx");
-        let cols = 8usize;
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("create");
-        // more than the ring holds, less than either buffer
-        for i in 0..1000usize {
-            sb.push_line(&fill(b'a' + (i % 26) as u8, cols), false);
-        }
-        sb.flush_for_handoff();
-        std::mem::forget(sb);
-        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("reopen");
-        assert_eq!(sb.len(), 1000);
-        assert_eq!(sb.cell_at(999, 0).map(|c| c.ch), Some((b'a' + (999 % 26) as u8) as char));
-        assert_eq!(sb.cell_at(0, 0).map(|c| c.ch), Some('a'));
-    }
-
-    /// Line `i` of a flood, saying which it is in its eight columns.
-    fn numbered(i: u64) -> Vec<Cell> {
-        format!("{:08}", i % 100_000_000).chars().map(|ch| Cell { ch, ..Default::default() }).collect()
-    }
-
-    fn number_of(line: &[Cell]) -> u64 {
-        line.iter().map(|c| c.ch).collect::<String>().parse().expect("a numbered line")
-    }
-
-    /// What `a_process_killed_mid_flood_loses_a_bounded_tail` runs in a
-    /// process of its own: lines into the files named by the
-    /// environment, as fast as they go, until it is killed.
-    #[test]
-    #[ignore = "run by a_process_killed_mid_flood_loses_a_bounded_tail"]
-    fn pushes_lines_until_killed() {
-        let Ok(dir) = std::env::var("MARSPOT_TEST_KILL_DIR") else { return };
-        let dir = std::path::PathBuf::from(dir);
-        let cols = 8usize;
-        let mut sb = FileScrollback::open(dir.join("sb.bin"), dir.join("sb.idx"), cols, 4).expect("create");
-        for i in 0u64..=u64::MAX {
-            sb.push_line(&numbered(i), false);
-            if i % 512 == 511 {
-                // how far it has certainly got
-                let _ = std::fs::write(dir.join("pushed"), (i + 1).to_string());
-            }
-        }
-    }
-
-    /// A process killed in the middle of a flood, with no flush and no
-    /// destructor: the files it leaves open cleanly, the lines in them
-    /// read back in order, and what is missing at the end is no more
-    /// than the buffers that may be in flight -- 256 KiB of records.
-    #[test]
-    fn a_process_killed_mid_flood_loses_a_bounded_tail() {
-        let tmp = TmpDir::new("killed");
-        let dir = tmp.bin().parent().expect("a directory").join(format!("killed-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "scrollback::file::write::tests::pushes_lines_until_killed", "--ignored", "--nocapture"])
-            .env("MARSPOT_TEST_KILL_DIR", &dir)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("run the pusher");
-        let pushed = || std::fs::read_to_string(dir.join("pushed")).ok().and_then(|s| s.parse::<u64>().ok());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        let mut certain = 0;
-        // well past every buffer and queue, several times over
-        while certain < 100_000 {
-            assert!(std::time::Instant::now() < deadline, "the pusher got to {certain} lines");
-            certain = certain.max(pushed().unwrap_or(0));
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        child.kill().expect("kill the pusher");
-        let _ = child.wait();
-        certain = certain.max(pushed().unwrap_or(0));
-
-        let cols = 8usize;
-        let sb = FileScrollback::open(dir.join("sb.bin"), dir.join("sb.idx"), cols, 4).expect("reopen after the kill");
-        // However far the pusher got before the kill reached it -- a
-        // quick one on a busy machine has rotated its files by then,
-        // and the oldest line kept is no longer the first it pushed --
-        // the lines kept are consecutive up to the last.
-        let first = number_of(&sb.read_line(0).expect("the oldest line reads back"));
-        let len = sb.len() as u64;
-        for i in [len / 3, len / 2, len - 1] {
-            let line = sb.read_line(i as usize).unwrap_or_else(|| panic!("line {i} of {len} reads back"));
-            assert_eq!(number_of(&line), (first + i) % 100_000_000, "line {i}");
-        }
-        let kept = first + len;
-        // a record of these lines: length, flags, columns, one run of eight
-        let record = (FILE_REC_HEADER_BYTES + 2 + 1 + 16 + cols) as u64;
-        let lost = certain.saturating_sub(kept);
-        assert!(
-            lost * record <= ((BIN_DEPTH + 1) * BIN_BUF_BYTES) as u64,
-            "{lost} of {certain} lines lost, {} bytes of records",
-            lost * record
-        );
-        drop(sb);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A few lines and then silence: they reach the files without a
-    /// flush and without the buffers filling.
-    #[test]
-    fn a_short_burst_reaches_the_files_once_handed_off() {
-        let tmp = TmpDir::new("burst-end");
-        let cols = 8usize;
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("create");
-        for _ in 0..3 {
-            sb.push_line(&fill(b'x', cols), false);
-        }
-        sb.hand_off();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let on_disk = |p: std::path::PathBuf| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-        while on_disk(tmp.idx()) < 3 * 8 || on_disk(tmp.bin()) <= FILE_HEADER_BYTES {
-            assert!(std::time::Instant::now() < deadline, "the burst never reached the files");
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        assert_eq!(on_disk(tmp.idx()), 3 * 8);
-    }
-
-    /// RFC-004 amendment — CSI 3 J reaches the persistent tier:
-    /// clear() truncates the hot pair (and drops cold), so a reopen
-    /// sees zero history, and pushes after clear persist normally.
-    #[test]
-    fn clear_truncates_persistent_file() {
-        let dir = std::env::temp_dir().join(format!("marspot-sb-clear-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("scrollback.bin");
-        let idx = dir.join("scrollback.idx");
-        let mut sb = Scrollback::file(bin.clone(), idx.clone(), 4, 8).expect("open");
-        for i in 0..20u32 {
-            sb.push_line_with_wrapped(&fill(b'a' + (i % 26) as u8, 4), false);
-        }
-        assert_eq!(sb.len(), 20);
-        sb.clear();
-        assert_eq!(sb.len(), 0, "cleared in-process");
-        // Post-clear pushes work and are the ONLY surviving content.
-        sb.push_line_with_wrapped(&fill(b'z', 4), false);
-        sb.flush_for_handoff();
-        assert_eq!(sb.len(), 1);
-        drop(sb);
-        let sb2 = Scrollback::file(bin, idx, 4, 8).expect("reopen");
-        assert_eq!(
-            sb2.len(),
-            1,
-            "reopen must see only post-clear content — clear must persist"
-        );
-        drop(sb2);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// F3+11.1 — push trims trailing default cells (perf:  80%+
-    /// disk savings on a TUI grid where most of the row is
-    /// padding).  Trim is purely a serialised-size optimisation:
-    /// the prefix decodes back at its original columns; trimmed-
-    /// tail columns decode as None which the viewport renderer
-    /// maps to Cell::default() (visually identical to having
-    /// stored them).
-    #[test]
-    fn push_line_trims_default_tail() {
-        use std::io::{Read, Seek, SeekFrom};
-        let tmp = TmpDir::new("trim-tail");
-        let cols = 200usize;
-        let prefix_len = 30usize;
-        let mut row = Vec::with_capacity(cols);
-        for i in 0..prefix_len {
-            row.push(Cell {
-                ch: (b'a' + (i % 26) as u8) as char,
-                ..Default::default()
-            });
-        }
-        for _ in prefix_len..cols {
-            row.push(Cell::default());
-        }
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("create");
-        sb.push_line(&row, false);
-        for _ in 0..6 {
-            sb.push_line(&fill(b'.', cols), false);
-        }
-        drop(sb);
-        let mut f = std::fs::File::open(tmp.bin()).expect("open bin");
-        f.seek(SeekFrom::Start(FILE_HEADER_BYTES)).unwrap();
-        let mut rec_len_buf = [0u8; 4];
-        f.read_exact(&mut rec_len_buf).unwrap();
-        let rec_len = u32::from_le_bytes(rec_len_buf) as usize;
-        // one run: count, kind, attributes, then a byte a cell
-        let expected_trimmed = 1 + 2 + (2 + 1 + 16) + prefix_len;
-        assert_eq!(
-            rec_len, expected_trimmed,
-            "first record should hold ONLY the prefix (trim default \
-             tail); got rec_len={rec_len}, expected={expected_trimmed}"
-        );
-        let sb2 = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("reopen");
-        for c in 0..prefix_len {
-            let want = (b'a' + (c % 26) as u8) as char;
-            assert_eq!(sb2.cell_at(0, c).unwrap().ch, want, "prefix col {c}");
-        }
-        // Trimmed-tail cells: cell_at returns None (the renderer's
-        // higher-level cell_at_view maps None → Cell::default()).
-        for c in prefix_len..cols {
-            assert!(
-                sb2.cell_at(0, c).is_none(),
-                "trimmed tail col {c} should be None (renderer fills \
-                 default), got Some"
-            );
-        }
-    }
-
-    /// The trim compares whole cells: a blank that differs from the
-    /// default in any one byte -- a background colour, a single flag,
-    /// the cluster bit -- is content and stays.
-    #[test]
-    fn push_line_keeps_a_tail_cell_that_differs_in_any_byte() {
-        use crate::grid::{CellAttrs, Color, FLAG_CLUSTER};
-        let blank = |attrs: CellAttrs| Cell { ch: ' ', attrs };
-        let tails = [
-            blank(CellAttrs { bg: Color::indexed(4), ..Default::default() }),
-            blank(CellAttrs { fg: Color::rgb(1, 2, 3), ..Default::default() }),
-            blank(CellAttrs { dim: true, ..Default::default() }),
-            blank(CellAttrs { _pad: [FLAG_CLUSTER, 0, 0], ..Default::default() }),
-            Cell { ch: '\0', ..Default::default() },
-        ];
-        let cols = 8usize;
-        let tmp = TmpDir::new("trim-any-byte");
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 64).expect("create");
-        for tail in tails {
-            let mut row = vec![Cell::default(); cols];
-            row[0] = Cell { ch: 'a', ..Default::default() };
-            row[5] = tail;
-            sb.push_line(&row, false);
-        }
-        drop(sb);
-        // a ring of one: every row but the last is read from its record
-        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 1).expect("reopen");
-        // presence, not value: a record read back drops the cluster bit
-        for i in 0..tails.len() - 1 {
-            assert!(sb.cell_at(i, 5).is_some(), "row {i}: the tail cell was trimmed");
-            assert_eq!(sb.cell_at(i, 6), None, "row {i}: the default cells after it were not");
-        }
-    }
-
-    /// A rotation hands the writer thread its new files: it does not
-    /// end that thread and start another.
-    #[test]
-    fn a_rotation_keeps_its_writer_thread() {
-        let tmp = TmpDir::new("rotate-thread");
-        let cols = 8usize;
-        let mut env = crate::test_env::EnvGuard::new();
-        env.set("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1");
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("create");
-        let writer = sb.bin.borrow().thread_id();
-        let row: Vec<Cell> = (0..cols).map(|_| Cell { ch: '.', ..Default::default() }).collect();
-        let (mut epoch, mut rotations) = (sb.epoch, 0);
-        // 34 bytes a record against a cap of 1 MB: three rotations
-        for _ in 0..100_000 {
-            sb.push_line(&row, false);
-            if sb.epoch != epoch {
-                (epoch, rotations) = (sb.epoch, rotations + 1);
-            }
-        }
-        assert!(rotations >= 2, "the fixture has to rotate twice, it did {rotations} times");
-        assert_eq!(sb.bin.borrow().thread_id(), writer, "a rotation started another writer thread");
-        assert_eq!(sb.cell_at(99_999, 0).map(|c| c.ch), Some('.'));
-        assert_eq!(sb.cell_at(99_999 - 20_000, 0).map(|c| c.ch), Some('.'), "a row of the cold file");
-    }
-
-    /// F2+5 — rotation: when hot exceeds cap, rename hot → cold and
-    /// open fresh hot.  Verify (a) cold files appear on disk,
-    /// (b) cell_at for early-pushed rows still works through the cold
-    /// tier, (c) cell_at for post-rotation rows works through hot,
-    /// (d) a second rotation drops the OLDEST cold (delete tier).
-    #[test]
-    fn rotation_writes_cold_and_keeps_old_rows_readable() {
-        let tmp = TmpDir::new("rotate");
-        let cols = 8usize;
-        // Each record is 4 + 1 + 2 + 19 + cols = 34 bytes.  The cap is
-        // read in MB, so the smallest one that rotates at all is 1 MB.
-        let mut env = crate::test_env::EnvGuard::new();
-        env.set("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1");
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4).expect("create");
-        // 1 MB / 34 B = ~30 800 rows before rotation.  Push 45 000
-        // distinct rows so at least one rotation happens.  Each row's
-        // first cell encodes its sequence number (mod 26) so we can
-        // verify the row's identity on read-back.
-        let total_push = 45_000usize;
-        for i in 0..total_push {
-            let mut row: Vec<Cell> = Vec::with_capacity(cols);
-            row.push(Cell {
-                ch: (b'A' + (i % 26) as u8) as char,
-                ..Default::default()
-            });
-            for _ in 1..cols {
-                row.push(Cell {
-                    ch: '.',
-                    ..Default::default()
-                });
-            }
-            sb.push_line(&row, false);
-        }
-        // Sanity: rotation must have happened.
-        let cold_bin = tmp.bin().with_extension("cold.bin");
-        let cold_idx_p = tmp.bin().with_extension("cold.idx");
-        // bin_path stem is "scrollback" so .cold.bin file ought to exist.
-        // (TmpDir::bin returns ".bin"; with_extension("cold.bin") yields
-        // ".cold.bin".)
-        assert!(
-            cold_bin.exists(),
-            "rotation should have produced a cold .bin at {:?}",
-            cold_bin
-        );
-        // The idx path was passed separately; we apply with_extension on
-        // it to derive its cold sibling.  Test helper paths align.
-        let cold_idx = tmp.idx().with_extension("cold.idx");
-        assert!(cold_idx.exists(), "cold .idx missing at {:?}", cold_idx);
-        let _ = cold_idx_p; // silence unused name
-        // (a) Earliest row (idx 0) should still resolve — comes from cold.
-        let got0 = sb
-            .cell_at(0, 0)
-            .expect("cell_at(0, 0) returned None — early row should be in cold");
-        assert_eq!(got0.ch, 'A', "cold row 0 first cell mismatch");
-        // (b) Latest row (idx total-1) should resolve — comes from hot.
-        let got_last = sb
-            .cell_at(total_push - 1, 0)
-            .expect("cell_at(last, 0) None — should be in hot");
-        let want_last = (b'A' + ((total_push - 1) % 26) as u8) as char;
-        assert_eq!(got_last.ch, want_last, "hot tail row mismatch");
-        // (c) Mid-range row: hopefully also reachable (either in cold's
-        // tail or hot's head depending on rotation point).  We just
-        // require it round-trips correctly.
-        let mid = total_push / 2;
-        let got_mid = sb
-            .cell_at(mid, 0)
-            .expect("cell_at(mid, 0) None — mid row should be reachable in hot or cold");
-        let want_mid = (b'A' + (mid % 26) as u8) as char;
-        assert_eq!(got_mid.ch, want_mid, "mid row mismatch");
-    }
-
-    /// A2: after a cold read mmaps the bin, subsequent pushes that
-    /// grow the file beyond the current mmap_len must trigger a
-    /// remap on the NEXT cold read.  Without remap, reading the
-    /// newly-cold lines would access unmapped memory or stale length.
-    #[test]
-    fn file_a2_mmap_remap_on_file_growth() {
-        let tmp = TmpDir::new("a2-remap");
-        let cols = 4usize;
-        let ram_capacity = 4;
-        let mut sb =
-            FileScrollback::open(tmp.bin(), tmp.idx(), cols, ram_capacity).expect("create");
-        // First batch: push 20 lines, cold-read to mmap them.
-        for i in 0..20 {
-            sb.push_line(&fill(b'a' + (i % 26) as u8, cols), false);
-        }
-        let first_old_idx = 5;
-        let _ = sb.cell_at(first_old_idx, 0); // triggers initial mmap
-        let mmap_len_first = sb.bin_mmap_len.get();
-        assert!(mmap_len_first > 0, "first mmap should be non-empty");
-        // Second batch: push another 50 lines so the file grows
-        // past mmap_len_first.
-        for i in 20..70 {
-            sb.push_line(&fill(b'a' + (i % 26) as u8, cols), false);
-        }
-        // Cold-read a line that landed in the second batch (now
-        // aged out of ring of 4).
-        let cold_after_growth = 30usize;
-        let want_ch = (b'a' + (cold_after_growth % 26) as u8) as char;
-        assert_eq!(
-            sb.cell_at(cold_after_growth, 0)
-                .expect("cell after growth")
-                .ch,
-            want_ch,
-            "remap on growth should let us read freshly-cold lines"
-        );
-        assert!(
-            sb.bin_mmap_len.get() > mmap_len_first,
-            "mmap should have remapped to cover new file size: was {}, now {}",
-            mmap_len_first,
-            sb.bin_mmap_len.get()
-        );
-    }
-
-    // ─── F3+10g: autotest harness for the bug classes that ate the
-    //         user's history.  Each test reproduces one specific
-    //         failure mode (torn write, resize duplication, past-EOF
-    //         orphans, trailing-blank navigability) without going
-    //         through the full marspot binary — these are the
-    //         scenarios the user can't reliably eyeball.  See
-    //         `[[project-scrollback-execv-gap]]` for the failure
-    //         catalogue.  ──────────────────────────────────────────
-
-    /// Torn write: BufWriter dropped without flush (the L3 self-execv
-    /// scenario where Drop never runs).  Previously this caused idx
-    /// to point past bin EOF after reopen → tolerant load surfaced
-    /// blank rows → user saw "history is gone".  After F3+10c's Pass
-    /// A, reopen drops past-EOF idx tail, every surfaced row decodes.
-    #[test]
-    fn file_torn_write_no_past_eof_orphans() {
-        let tmp = TmpDir::new("torn-write");
-        let cols = 8usize;
-
-        // Push enough lines that BufWriter is mid-buffer when we
-        // forget — 5000 × 8 cells writes ~170 KB to bin, well past
-        // the 64 KB BufWriter auto-flush boundary so several
-        // chunks have already hit disk and some tail is unflushed.
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 256).expect("create");
-        for i in 0..5000u32 {
-            let ch = b'a' + (i % 26) as u8;
-            sb.push_line(&fill(ch, cols), false);
-        }
-        let pushed = sb.len();
-        assert_eq!(pushed, 5000);
-
-        // SAFETY: leak the FileScrollback — `Drop` (which flushes
-        // BufWriters) never runs.  This is exactly what `libc::execv`
-        // does to the old L3 process image.  The fd handles leak too;
-        // tmp dir cleanup at the end of the test reclaims everything.
-        std::mem::forget(sb);
-
-        // Writes are handed to a writer thread, and `forget` does not
-        // stop it — it only skips the `Drop` that would have flushed.
-        // Give it a moment to drain what was already handed over, so
-        // this test measures the buffered tail that was lost rather
-        // than a race against a thread still writing.
-        //
-        // The real `execv` is harsher: it replaces the process image,
-        // so in-flight buffers die with the thread.  That is exactly
-        // why `flush_for_handoff` exists and why the L3 swap path
-        // calls it — this test covers the case where nothing flushed
-        // at all, which is the original execv-gap bug.
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        // Reopen.  Post-F3+10c, every surfaced row must decode to
-        // its expected character — no blank-by-tolerant-load rows
-        // leaking through.
-        let sb2 =
-            FileScrollback::open(tmp.bin(), tmp.idx(), cols, 256).expect("reopen after torn close");
-        let total = sb2.len();
-        assert!(total <= pushed, "reopen total {total} > pushed {pushed}");
-        // BufWriter auto-flush ensures a substantial prefix survived.
-        assert!(total >= 1500, "reopen total {total} suspiciously low");
-        for i in 0..total {
-            let line = sb2
-                .read_line(i)
-                .unwrap_or_else(|| panic!("row {i} should decode"));
-            assert_eq!(line.len(), cols, "row {i} width mismatch");
-            let expected = (b'a' + (i % 26) as u8) as char;
-            assert_eq!(
-                line[0].ch, expected,
-                "row {i} decoded as {:?}, expected {:?} \
-                 (would indicate past-EOF idx leaked as blank)",
-                line[0].ch, expected,
-            );
-        }
-    }
-
-    /// Round-trip: push N lines, drop cleanly, reopen, verify ALL
-    /// N decode to expected content.  Foundation correctness check
-    /// — any regression to the BufWriter / Drop / open() machinery
-    /// trips this first.
-    #[test]
-    fn file_clean_close_round_trips_all_rows() {
-        let tmp = TmpDir::new("clean-roundtrip");
-        let cols = 8usize;
-        {
-            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 32).expect("create");
-            for i in 0..500u32 {
-                sb.push_line(&fill(b'a' + (i % 26) as u8, cols), false);
-            }
-        } // <- clean Drop runs flush_for_handoff equivalent
-        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 32).expect("reopen");
-        assert_eq!(sb.len(), 500);
-        for i in 0..500 {
-            let line = sb.read_line(i).expect("row decodes");
-            assert_eq!(line.len(), cols);
-            let expected = (b'a' + (i as u32 % 26) as u8) as char;
-            assert_eq!(line[0].ch, expected, "row {i} content");
-        }
+    /// Reflow re-cuts every line at a new width: the history starts over
+    /// as a clear does, and the caller pushes the re-wrapped lines in.
+    /// Without that the files would hold duplicate records at every
+    /// width the pane was ever at.
+    pub(in crate::scrollback) fn reopen_at_cols(mut self, new_cols: usize) -> Result<Self, usize> {
+        self.clear();
+        self.cols = new_cols;
+        Ok(self)
     }
 }
