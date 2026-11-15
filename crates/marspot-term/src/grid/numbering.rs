@@ -2,7 +2,7 @@
 //! every write of a cell goes through here or through the lane, which
 //! takes its number from [`Grid::pen_id`].
 
-use super::{Cell, CellAttrs, Grid, PackedStyle, StoredCell, StyleTable};
+use super::{Cell, CellAttrs, Grid, PackedCell, PackedStyle, StyleTable};
 
 /// Cells looked at per step of a sweep.  A step is a few microseconds,
 /// far under the latency a keystroke's echo can notice.
@@ -47,6 +47,9 @@ impl Grid {
     /// The number the text lane writes for the pen's attributes, or
     /// `None` when cells are numbered by position and the lane has to
     /// leave the run to the per-character path.
+    ///
+    /// Good only until the grid's next write of anything else: a fill
+    /// can sweep the table or renumber the grid.
     #[inline(always)]
     pub fn pen_id(&mut self, attrs: &CellAttrs) -> Option<u32> {
         let p = PackedStyle::pack(attrs);
@@ -71,12 +74,15 @@ impl Grid {
         let mut attrs = cell.attrs;
         attrs._pad = [0; 3];
         let id = self.id_for(idx, &attrs);
-        self.cells[idx] = cell;
-        self.ids[idx] = id;
+        self.cells[idx] = PackedCell::from_cell(&cell, id);
     }
 
     /// Write `cell` over `range`.
     pub(super) fn fill(&mut self, range: std::ops::Range<usize>, cell: Cell) {
+        if cell == Cell::default() {
+            self.cells[range].fill(PackedCell::BLANK);
+            return;
+        }
         for idx in range {
             self.put(idx, cell);
         }
@@ -87,17 +93,20 @@ impl Grid {
         self.cells.copy_within(src..src + cols, dst);
         if self.styles.is_positional() {
             for i in 0..cols {
-                let id = self.ids[src + i];
-                let s = if id == 0 { PackedStyle::DEFAULT } else { self.styles.get(id) };
-                self.ids[dst + i] = self.styles.set_at(dst + i, s);
+                let c = self.cells[dst + i];
+                let id = c.style_id();
+                if id != 0 {
+                    let s = self.styles.get(id);
+                    self.cells[dst + i] = c.with_style(self.styles.set_at(dst + i, s));
+                }
             }
             return;
         }
-        self.ids.copy_within(src..src + cols, dst);
         if self.styles.is_marking() {
             // a row already looked at may be receiving the only copy of
             // a number from one not yet looked at
-            self.styles.mark_all(self.ids[dst..dst + cols].iter().copied());
+            let (cells, styles) = (&self.cells, &mut self.styles);
+            styles.mark_all(cells[dst..dst + cols].iter().map(|c| c.style_id()));
         }
     }
 
@@ -109,8 +118,7 @@ impl Grid {
         self.cols = cols;
         self.rows = rows;
         self.top_row = 0;
-        self.cells = vec![StoredCell::default(); n];
-        self.ids = vec![0; n];
+        self.cells = vec![PackedCell::BLANK; n];
         self.styles.resize(n);
         self.sweep_row = 0;
         for (idx, &c) in cells.iter().enumerate() {
@@ -124,8 +132,7 @@ impl Grid {
     pub fn clear_all(&mut self, fill: Cell) {
         self.styles.reset();
         self.sweep_row = 0;
-        self.ids.iter_mut().for_each(|id| *id = 0);
-        self.cells.iter_mut().for_each(|c| *c = StoredCell::default());
+        self.cells.fill(PackedCell::BLANK);
         if fill != Cell::default() {
             self.fill(0..self.cells.len(), fill);
         }
@@ -146,10 +153,10 @@ impl Grid {
         let rows = (SWEEP_CELLS_PER_STEP / cols).max(1);
         let from = self.sweep_row as usize;
         let to = (from + rows).min(self.rows as usize);
-        self.styles.mark_all(self.ids[from * cols..to * cols].iter().copied());
+        self.mark_cells(from * cols..to * cols);
         self.sweep_row = to as u16;
         if to == self.rows as usize {
-            self.styles.end_sweep();
+            self.end_sweep();
         }
     }
 
@@ -160,9 +167,22 @@ impl Grid {
             self.sweep_row = 0;
         }
         let cols = self.cols as usize;
-        let from = self.sweep_row as usize;
-        self.styles.mark_all(self.ids[from * cols..].iter().copied());
+        self.mark_cells(self.sweep_row as usize * cols..self.cells.len());
         self.sweep_row = self.rows;
+        self.end_sweep();
+    }
+
+    fn mark_cells(&mut self, range: std::ops::Range<usize>) {
+        let (cells, styles) = (&self.cells, &mut self.styles);
+        styles.mark_all(cells[range].iter().map(|c| c.style_id()));
+    }
+
+    fn end_sweep(&mut self) {
+        // every number a cell holds was marked: the sweep's whole claim
+        #[cfg(debug_assertions)]
+        for (idx, c) in self.cells.iter().enumerate() {
+            assert!(self.styles.is_marked(c.style_id()), "cell {idx} holds unmarked {}", c.style_id());
+        }
         self.styles.end_sweep();
     }
 
@@ -170,10 +190,11 @@ impl Grid {
     /// numbers even after a sweep.
     #[cold]
     fn go_positional(&mut self) {
-        let values: Vec<PackedStyle> = self.ids.iter().map(|&id| self.styles.get(id)).collect();
+        let values: Vec<PackedStyle> = self.cells.iter().map(|c| self.styles.get(c.style_id())).collect();
         self.styles.make_positional(self.cells.len());
         for (idx, s) in values.into_iter().enumerate() {
-            self.ids[idx] = self.styles.set_at(idx, s);
+            let id = self.styles.set_at(idx, s);
+            self.cells[idx] = self.cells[idx].with_style(id);
         }
     }
 
@@ -190,30 +211,28 @@ impl Grid {
         let mut shared = StyleTable::new(n);
         let mut ids = vec![0u32; n];
         for (idx, id) in ids.iter_mut().enumerate() {
-            let s = self.styles.get(self.ids[idx]);
+            let s = self.styles.get(self.cells[idx].style_id());
             match shared.intern(s) {
                 Some(new) if shared.used() as usize <= n / 4 + 1 => *id = new,
                 _ => return,
             }
         }
+        for (c, id) in self.cells.iter_mut().zip(ids) {
+            *c = c.with_style(id);
+        }
+        shared.succeed(&self.styles);
         self.styles = shared;
-        self.ids = ids;
         self.sweep_row = 0;
     }
 
-    /// Whether every cell's number names its own attributes, and
+    /// Whether every cell's number is one the table holds, and
     /// positional numbers sit where they belong.  For tests, fuzzing
     /// and debug builds.
     pub fn check_styles(&self) -> Result<(), String> {
-        for (idx, (c, &id)) in self.cells.iter().zip(&self.ids).enumerate() {
-            let mut a = c.attrs;
-            a._pad = [0; 3];
-            if (id as usize) >= self.styles.len() {
-                return Err(format!("cell {idx}: number {id} past the table"));
-            }
-            let held = self.styles.get(id);
-            if held != PackedStyle::pack(&a) {
-                return Err(format!("cell {idx}: number {id} holds {held:?}, the cell has {a:?}"));
+        for (idx, c) in self.cells.iter().enumerate() {
+            let id = c.style_id();
+            if !self.styles.holds(id) {
+                return Err(format!("cell {idx}: number {id} is not in the table"));
             }
             if self.styles.is_positional() && id != 0 && id as usize != idx + 1 {
                 return Err(format!("cell {idx}: positional number {id}"));

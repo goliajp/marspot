@@ -161,9 +161,26 @@ impl StyleTable {
         self.styles[id as usize]
     }
 
+    /// Whether `id` names a value: in range and not free.
+    pub fn holds(&self, id: u32) -> bool {
+        self.styles.get(id as usize).is_some_and(|s| s.0 & FREE == 0)
+    }
+
+    /// While sweeping: whether `id` has been marked, or is too new to
+    /// need it.
+    pub fn is_marked(&self, id: u32) -> bool {
+        id >= self.marks_upto || self.marks[id as usize / 64] & (1 << (id % 64)) != 0
+    }
+
     /// Moves whenever a number may have stopped meaning what it meant.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Take over from `old`: numbers handed out from here on must not
+    /// be mistaken for the ones `old` handed out.
+    pub(super) fn succeed(&mut self, old: &StyleTable) {
+        self.generation = old.generation + 1;
     }
 
     pub fn is_positional(&self) -> bool {

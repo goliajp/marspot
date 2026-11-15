@@ -14,7 +14,10 @@
 
 mod cell;
 mod numbering;
+mod packed;
+pub use packed::PackedCell;
 mod prompt;
+mod row_hash;
 pub use prompt::PromptMark;
 pub(crate) mod style;
 mod width;
@@ -24,7 +27,7 @@ pub use style::{PackedStyle, StyleTable};
 /// A cell as the grid stores it.  Readers outside the grid's own hot
 /// paths take [`Cell`] through [`Grid::cell`] and its siblings, so the
 /// storage can change without them.
-pub type StoredCell = Cell;
+pub type StoredCell = PackedCell;
 pub use width::{char_width, is_ambiguous_width, is_enclosed_alphanumeric};
 
 
@@ -111,16 +114,11 @@ pub struct Grid {
     /// Consecutive all-blank rows most recently filed into scrollback.
     /// Read only by the region path — see [`MAX_FILED_BLANK_RUN`].
     filed_blank_run: u16,
-    /// One row of `Cell::default()`, copied over a row that scrolls
-    /// off when nothing but the default background has to be filled.
-    blank: Vec<StoredCell>,
     /// Per physical row: where its default cells and its default
     /// attributes start.
     marks: Vec<RowMark>,
     /// The attribute sets the cells use, numbered.
     styles: StyleTable,
-    /// Per cell, the number of its attributes in `styles`.
-    ids: Vec<u32>,
     /// While `styles` sweeps: the next physical row to look at.
     sweep_row: u16,
 }
@@ -199,10 +197,8 @@ impl Grid {
             sb_clusters: std::collections::VecDeque::with_capacity(sb_capacity + 1),
             sb_prompt: std::collections::VecDeque::with_capacity(sb_capacity + 1),
             filed_blank_run: 0,
-            blank: vec![StoredCell::default(); cols as usize],
             marks: vec![RowMark::default(); rows as usize],
             styles: StyleTable::new(cols as usize * rows as usize),
-            ids: vec![0; cols as usize * rows as usize],
             sweep_row: 0,
         }
     }
@@ -221,7 +217,7 @@ impl Grid {
     /// only — scalar fields are negligible).  Per-MARSPOT_PROFILE_RSS
     /// sampling.
     pub fn approx_bytes(&self) -> usize {
-        self.cells.capacity() * std::mem::size_of::<Cell>()
+        self.cells.capacity() * std::mem::size_of::<StoredCell>() + self.styles.bytes()
     }
 
     /// Approximate resident bytes held by this grid's scrollback.
@@ -247,19 +243,13 @@ impl Grid {
         debug_assert!(col < self.cols && row < self.rows);
         let pr = self.phys_row(row);
         let idx = pr * self.cols as usize + col as usize;
-        #[cfg(debug_assertions)]
-        {
-            let mut a = self.cells[idx].attrs;
-            a._pad = [0; 3];
-            debug_assert_eq!(self.styles.get(self.ids[idx]), PackedStyle::pack(&a), "cell {idx}");
-        }
         self.expand(self.cells[idx])
     }
 
     /// A stored cell as a reader sees it.
     #[inline(always)]
     pub fn expand(&self, cell: StoredCell) -> Cell {
-        cell
+        cell.expand(&self.styles)
     }
 
 
@@ -330,7 +320,11 @@ impl Grid {
     /// index is stale, which a sweep can produce and which reads as
     /// the blank it will be overwritten with.
     pub fn cluster_text(&self, cell: &Cell) -> Option<&str> {
-        let idx = cell.cluster_index()?;
+        self.cluster_text_at(cell.cluster_index()?)
+    }
+
+    /// The text of pool entry `idx`, for a reader holding stored cells.
+    pub fn cluster_text_at(&self, idx: u32) -> Option<&str> {
         self.clusters.get(idx as usize).map(|s| &**s)
     }
 
@@ -415,12 +409,9 @@ impl Grid {
             if let Some(i) = c.cluster_index() {
                 match remap.get(i as usize).copied() {
                     Some(n) if n != u32::MAX => {
-                        c.ch = char::from_u32(n + CLUSTER_INDEX_BASE).unwrap_or(' ');
+                        *c = c.with_cluster_char(char::from_u32(n + CLUSTER_INDEX_BASE).unwrap_or(' '));
                     }
-                    _ => {
-                        c.attrs._pad[0] &= !FLAG_CLUSTER;
-                        c.ch = ' ';
-                    }
+                    _ => *c = c.with_char(' '),
                 }
             }
         }
@@ -498,8 +489,7 @@ impl Grid {
             if let Some(t) = text {
                 kept.push(((i - start) as u16, t));
             }
-            self.cells[i].ch = base;
-            self.cells[i].attrs._pad[0] &= !FLAG_CLUSTER;
+            self.cells[i] = self.cells[i].with_char(base);
         }
         kept
     }
@@ -897,7 +887,7 @@ impl Grid {
         let start = self.phys_row(row) * self.cols as usize;
         self.cells[start..start + self.cols as usize]
             .iter()
-            .all(|c| *c == Cell::default())
+            .all(|c| *c == PackedCell::BLANK)
     }
 
     /// Column-changing resize: gather → re-wrap → redistribute.
@@ -1075,7 +1065,6 @@ impl Grid {
         // longer exist.  See `clear_scrollback`'s sibling note.
         self.prompt = new_prompt;
         self.wrapped = new_wrapped;
-        self.blank = vec![StoredCell::default(); new_cols];
         self.cols = cols;
         self.rows = rows;
         self.top_row = 0;
