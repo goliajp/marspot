@@ -297,11 +297,10 @@ mod tests {
         let (_, more) = s.pump_within(pace(None, &key));
         assert!(more, "the flood was taken to be over");
         assert_eq!(READ_HERE.get(), before, "the turn went on reading with a key waiting");
-        // what the reader queued before it lent the pty is parsed
-        turn_until(&mut s, None, |s, _| s.reader.as_ref().is_some_and(|r| r.in_flight() == 0));
-        if !lent(&s) {
-            turn_until(&mut s, None, |s, _| lent(s));
-        }
+        // lent, and what the reader queued before it lent the pty
+        // parsed: on a busy machine the pty can come back to the reader
+        // and be lent again in between, with more queued
+        turn_until(&mut s, None, |s, _| lent(s) && s.reader.as_ref().is_some_and(|r| r.in_flight() == 0));
         s.typed();
         assert!(lent(&s), "the pty went back to the reader at a key");
         assert_eq!(s.before_key, 0, "nothing was in the reader's hand or queued");
