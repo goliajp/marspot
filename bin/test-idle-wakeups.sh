@@ -44,4 +44,27 @@ export IDLE_RESIDENT=1 IDLE_RESIDENT_BUDGET="${IDLE_RESIDENT_BUDGET:-0.4}"
 # the host's processes and the room their arguments are read into were
 # that megabyte.
 export IDLE_RESIDENT_FOOTPRINT_KIB="${IDLE_RESIDENT_FOOTPRINT_KIB:-17000}"
-exec "$ROOT/bin/measure-idle-marspot.sh"
+"$ROOT/bin/measure-idle-marspot.sh"
+rc=$?
+# The same budget with the window out of sight: nothing may run on a
+# clock for a window nobody can see either, and nothing waits on its
+# frames being shown.
+unset IDLE_RESIDENT
+for state in hidden minimised; do
+  echo "════ window $state ════"
+  IDLE_WINDOW_STATE=$state "$ROOT/bin/measure-idle-marspot.sh"
+  one=$?
+  # a failure outranks no reading, which outranks no verdict
+  for c in 1 2 3; do
+    if [[ $rc == "$c" || $one == "$c" ]]; then rc=$c; break; fi
+  done
+done
+# And what drawing costs in memory: nothing in the shell, the graphics
+# driver's pool in the core.
+echo "════ footprint while presenting ════"
+"$ROOT/bin/test-presenting-footprint.sh"
+one=$?
+for c in 1 2 3; do
+  if [[ $rc == "$c" || $one == "$c" ]]; then rc=$c; break; fi
+done
+exit "$rc"

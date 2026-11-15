@@ -25,12 +25,11 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 
-use marspot::{lx_debug, lx_debug_sampled, lx_error, lx_event, lx_info, lx_warn};
+use marspot::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
 use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
 use marspot::input::{MarspotKeyEvent, Modifiers};
-use marspot::iosurface::IOSurface;
 use marspot::shell_proto::{
-    decode_caret_rect, decode_hello_ack, decode_pong, decode_surface_ready, encode_file_drop,
+    encode_file_drop,
     encode_focus, encode_hello, encode_key_event, encode_mouse, encode_ping, encode_preedit,
     encode_scroll, encode_surface_attach, encode_surface_attach_window,
     encode_window_chrome, event_to_wire,
@@ -44,6 +43,9 @@ mod core_icons;
 mod launch;
 mod ls_records;
 mod cli_socket;
+mod control_reader;
+mod dev_window;
+mod frame_layer;
 mod identity;
 mod instance;
 mod observe;
@@ -54,19 +56,26 @@ mod pane_status;
 mod pane_tables;
 mod plugins;
 mod present;
+mod present_shaders;
 mod pump;
 mod receipts;
 mod reclaim;
 mod resident;
+#[cfg(feature = "latency-trace")]
+mod screen_check;
+mod shader_warm;
 mod sup_log;
 mod supervisor;
 mod supervisor_profile;
+mod surfaces;
 mod theme_follow;
 use banner::BannerKind;
+use control_reader::control_reader_loop;
 use launch::*;
 use plugins::host::ShellPluginHost;
 use plugins::PluginRegistry;
-use present::ShellPresenter;
+use frame_layer::FrameLayers;
+use surfaces::SurfacePair;
 use supervisor::{BinaryTree, ProbeVerdict, SupervisorState};
 
 const DEFAULT_TITLE: &str = "Marspot";
@@ -94,6 +103,7 @@ const REDRAW_INTERVAL_MS: u64 = 1_000;
 /// to the main thread.
 enum ShellInbox {
     SurfaceReady(u32),
+    FramePaceAck,
     HelloAck(u32),
     Pong(u32),
     /// Focused-pane caret rect from the core (view-local physical
@@ -277,6 +287,12 @@ struct CoreConn {
     control_rx: Receiver<ShellInbox>,
     /// True after this core has confirmed at least one HelloAck.
     hello_acked: bool,
+    /// The core answered `FramePace`: it waits for `FrameShown`, so its
+    /// surfaces go on the window as they are.  Settled by the HelloAck,
+    /// which such a core sends after that answer.
+    paced: bool,
+    /// Surfaces announced before the HelloAck said how to show them.
+    early_ready: Vec<u32>,
     /// When this core was spawned — drives the HELLO timeout.
     spawned_at: Instant,
     /// When to fire the next PING to this core.
@@ -328,76 +344,6 @@ impl CoreConn {
     }
 }
 
-/// PROTO_VERSION=2 double-buffer IOSurface pair.  The core alternates
-/// writing into `front` and `back`; after each render+wait it acks
-/// `SurfaceReady(id)`.  The shell never samples a surface the core is
-/// mid-writing — that race was the dominant flash source diagnosed
-/// 2026-06-15.  Owns IOSurface use-counts: dropping the pair via
-/// `release()` decrements both.
-struct SurfacePair {
-    front: IOSurface,
-    back: IOSurface,
-}
-
-impl SurfacePair {
-    /// Create both surfaces at the same dimensions and `increment_use`
-    /// on each so they survive past initial return.  `release()`
-    /// (drop-style helper) decrements them when the pair is retired.
-    fn create(w_px: usize, h_px: usize) -> Result<Self, String> {
-        let front = IOSurface::create(w_px, h_px)?;
-        front.increment_use();
-        let back = match IOSurface::create(w_px, h_px) {
-            Ok(s) => {
-                s.increment_use();
-                s
-            }
-            Err(e) => {
-                front.decrement_use();
-                return Err(e);
-            }
-        };
-        // IOSurface lifecycle is the load-bearing fact in every flash
-        // / black-window incident — surface it explicitly at DEBUG.
-        // pair create / set_pair / release / swap together let a future
-        // incident reconstruct exactly which surfaces a given frame was
-        // sampling.
-        lx_debug!(
-            "shell.surface.create_pair",
-            "IOSurface pair created",
-            front_id = front.id(),
-            back_id = back.id(),
-            w_px = w_px,
-            h_px = h_px
-        );
-        Ok(Self { front, back })
-    }
-
-    fn ids(&self) -> (u32, u32) {
-        (self.front.id(), self.back.id())
-    }
-
-    fn width(&self) -> usize {
-        self.front.width()
-    }
-
-    fn height(&self) -> usize {
-        self.front.height()
-    }
-
-    /// Drop reverse: decrement_use on both halves.  Pair is consumed
-    /// because both surfaces become invalid for the shell after this.
-    fn release(self) {
-        lx_debug!(
-            "shell.surface.release_pair",
-            "IOSurface pair released",
-            front_id = self.front.id(),
-            back_id = self.back.id()
-        );
-        self.front.decrement_use();
-        self.back.decrement_use();
-    }
-}
-
 /// Everything the shell owns on behalf of ONE native window.
 ///
 /// RFC-005 — these used to sit directly on `ShellApp`, which is how
@@ -421,8 +367,7 @@ struct ShellWindow {
     /// wrote over the closed window's geometry and inherited each
     /// other's on the next launch.
     frame_index: usize,
-    /// Currently-displayed IOSurface pair — the presenter samples
-    /// whichever half `current_idx` points at.
+    /// The pair the core is drawing: one half is on the window.
     surfaces: Option<SurfacePair>,
     /// Created in `resized` (or `restart_core`) and not yet promoted.
     /// Once the core confirms via `SurfaceReady(id)` matching either
@@ -430,7 +375,8 @@ struct ShellWindow {
     /// presenter swap to the ready id.  A later resize replaces the
     /// pending entry; the dropped one is abandoned (`release`).
     pending_surfaces: Option<SurfacePair>,
-    presenter: Option<ShellPresenter>,
+    /// What puts a surface on this window's view.
+    layers: Option<FrameLayers>,
     /// True after the core has confirmed at least one SurfaceReady for
     /// THIS window.  Until then `redraw` skips `present()` so the user
     /// sees the NSWindow's BG colour (the terminal's) instead of an
@@ -587,7 +533,7 @@ impl ShellWindow {
             frame_index,
             surfaces: None,
             pending_surfaces: None,
-            presenter: None,
+            layers: None,
             first_frame_ready: false,
             frame_pending: false,
             dev_close_after_paint: false,
@@ -1040,13 +986,16 @@ impl ShellApp {
     /// painting-less forever while its panes were adopted as orphans
     /// into the first one.  Replaying the attaches is what makes a core
     /// swap invisible with more than one window open.
-    fn announce_windows_to_new_core(&self, ctx: &MarspotAppCtx) {
+    fn announce_windows_to_new_core(&mut self, ctx: &MarspotAppCtx) {
         let scale = ctx.scale();
         let lights = ctx.traffic_lights_right_phys();
         for i in 1..self.windows.len() {
             let Some(s) = self.windows[i].surfaces.as_ref() else { continue };
-            let (f, b) = s.ids();
-            let (w, h) = (s.width() as f64, s.height() as f64);
+            let (w_px, h_px) = (s.width(), s.height());
+            // a pair of its own, as for the first window: the one on
+            // the screen is not the new core's to paint
+            let Ok((f, b)) = self.fresh_pending_pair(i, w_px, h_px) else { continue };
+            let (w, h) = (w_px as f64, h_px as f64);
             // Replay into a fresh core: `ctx` names one window, and
             // its cluster measurement stands in for the rest.  Every
             // window's next resize / attach carries its own.
@@ -1355,6 +1304,7 @@ impl ShellApp {
                 pid = pid
             );
             conn.shutdown();
+            frame_layer::set_core(None);
         } _ => {
             // No-op path is still worth logging — it tells us a
             // shutdown was requested when no core was live (race
@@ -1552,6 +1502,7 @@ impl ShellApp {
                 // Wrap the parent end as a UnixStream we can write
                 // frames to from any callback.
                 let stream = unsafe { UnixStream::from_raw_fd(parent_fd) };
+                frame_layer::set_core(stream.try_clone().ok());
                 let reader_stream = match stream.try_clone() {
                     Ok(s) => s,
                     Err(e) => {
@@ -1583,6 +1534,8 @@ impl ShellApp {
                     control_tx: Mutex::new(stream),
                     control_rx: rx,
                     hello_acked: false,
+                    paced: false,
+                    early_ready: Vec::new(),
                     spawned_at: now,
                     next_ping_at: now + PING_INTERVAL,
                     last_ping_nonce: 0,
@@ -1592,6 +1545,8 @@ impl ShellApp {
                 // Send HELLO on this core's own socket so it can echo
                 // HelloAck — this works whether the conn ends up active
                 // or pending.
+                // before the Hello: see `shell_proto::frame_pace`
+                conn.send(MsgType::FramePace, Vec::new());
                 conn.send(MsgType::Hello, encode_hello(PROTO_VERSION));
                 Some(conn)
             }
@@ -1699,9 +1654,7 @@ impl ShellApp {
                 shell: shell_candidate
                     .as_deref()
                     .map(marspot::binary_tree::can_start),
-                core: core_candidate
-                    .as_deref()
-                    .map(marspot::binary_tree::can_start),
+                core: core_candidate.as_deref().map(shader_warm::can_start_warmed),
             };
             let _ = tx.send(verdict);
         });
@@ -1806,20 +1759,19 @@ impl ShellApp {
         if !self.binaries.has_pending() {
             return false;
         }
-        // The core is spawned against the boot window's pair (its ids
-        // ride in on env).  Any further window announces itself to the
-        // fresh core with a `SurfaceAttachWindow` frame — RFC-005 step
-        // 4c, where more than one window can exist.
-        let (w_px, h_px, front_id, back_id) = match self.windows[0].surfaces.as_ref() {
-            Some(s) => {
-                let (f, b) = s.ids();
-                (s.width(), s.height(), f, b)
-            }
-            None => {
-                lx_warn!(
-                    "shell.apply_update.no_surface",
-                    "no displayed surface to swap onto"
-                );
+        // The core is spawned against a pair of its own for the boot
+        // window (its ids ride in on env); the pair on the window keeps
+        // showing the old core's last frame until the new core's first.
+        // Any further window announces itself to the fresh core with a
+        // `SurfaceAttachWindow` frame.
+        let Some((w_px, h_px)) = self.windows[0].surfaces.as_ref().map(|s| (s.width(), s.height())) else {
+            lx_warn!("shell.apply_update.no_surface", "no displayed surface to swap onto");
+            return false;
+        };
+        let (front_id, back_id) = match self.fresh_pending_pair(0, w_px, h_px) {
+            Ok(ids) => ids,
+            Err(e) => {
+                lx_warn!("shell.apply_update.no_surface", &e);
                 return false;
             }
         };
@@ -1847,10 +1799,6 @@ impl ShellApp {
         // make the ordering explicit).  shutdown_active blocks until
         // the active core process is reaped.
         self.shutdown_active("retiring active for single-core swap (UPDATE_SWAP)");
-        // Spawn the new active onto the SAME IOSurface pair.  L1 still
-        // holds a ref so the surfaces stay alive across the gap; the
-        // new core's IOSurfaceLookup at boot finds them.  No presenter
-        // handshake needed.
         // A fresh core knows nothing about the panes, so the memo of
         // what each pane has already been told has to go with the old
         // one -- see `ShellPluginHost::declared`.
@@ -2038,15 +1986,11 @@ impl ShellApp {
             return;
         }
         for w in self.windows.iter_mut() {
-            let Some(p) = w.presenter.as_mut() else { continue };
-            if let Err(e) = p.set_banner(want.map(|shown| shown.kind), scale) {
+            let Some(l) = w.layers.as_mut() else { continue };
+            if let Err(e) = l.set_banner(want.map(|shown| shown.kind), scale) {
                 lx_warn!("shell.set_banner_failed", &e.to_string());
                 return;
             }
-            // The banner is drawn by the presenter, so with no core
-            // frames coming (the core is what the banner is about) it
-            // shows only if this window is presented for it.
-            w.frame_pending = true;
         }
         self.banner_kind = want;
     }
@@ -2088,7 +2032,6 @@ impl ShellApp {
         }
         let Some(wi) = self.window_index(ctx.window_id()) else { return };
         if let Some(s) = self.windows[wi].surfaces.as_ref() {
-            let (front_id, back_id) = s.ids();
             let w_px = s.width();
             let h_px = s.height();
             let scale = ctx.scale();
@@ -2096,48 +2039,35 @@ impl ShellApp {
             // what each pane has already been told has to go with the old
             // one -- see `ShellPluginHost::declared`.
             self.plugin_host.forget_declarations();
-            self.active = self.spawn_core(front_id, back_id, w_px, h_px, scale);
+            // The new core is started on a pair of its own.  The one on
+            // the window is being read by the window server and keeps
+            // showing the old core's last frame until the new core's
+            // first: no black flash on a live crash, and nothing ever
+            // painted into a surface that is on the screen.
+            let (f, b) = match self.fresh_pending_pair(wi, w_px, h_px) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    lx_error!("shell.restart_handshake.pair_create_failed", &e);
+                    return;
+                }
+            };
+            self.active = self.spawn_core(f, b, w_px, h_px, scale);
             if self.active.is_some() {
                 self.record_core_boot();
                 self.announce_windows_to_new_core(ctx);
-            }
-            // A freshly spawned core attaches its env pair but never
-            // emits SurfaceReady spontaneously — drive it.  Initial boot
-            // gets the drive for free from the framework's post-`resumed`
-            // `resized` callback; a *restart* (crash / hang / boot-race
-            // recovery) doesn't.  Without the explicit drive the new
-            // core renders into the pair but `first_frame_ready` never
-            // flips, so `redraw`/`present` stay gated and the window is
-            // black until the user resizes.  We hand it a fresh pair via
-            // SurfaceAttach so the handshake mirrors the resize path; the
-            // old pair keeps showing its last frame until SurfaceReady
-            // for the new pair swaps it in (no black flash on a live
-            // crash).
-            if self.active.is_some() {
-                match SurfacePair::create(w_px, h_px) {
-                    Ok(pair) => {
-                        if let Some(stale) = self.windows[wi].pending_surfaces.take() {
-                            stale.release();
-                        }
-                        let (f, b) = pair.ids();
-                        self.windows[wi].pending_surfaces = Some(pair);
-                        self.send_surface_attach(
-                            ctx.window_id(),
-                            f,
-                            b,
-                            w_px as f64,
-                            h_px as f64,
-                            scale,
-                            ctx.traffic_lights_right_phys(),
-                        );
-                    }
-                    Err(e) => {
-                        lx_error!(
-                            "shell.restart_handshake.pair_create_failed",
-                            &e.to_string()
-                        );
-                    }
-                }
+                // A core from before frames were announced as they
+                // finish says nothing of the pair it was started on
+                // until it is attached; one that does announce them
+                // takes the same pair again as no change.
+                self.send_surface_attach(
+                    ctx.window_id(),
+                    f,
+                    b,
+                    w_px as f64,
+                    h_px as f64,
+                    scale,
+                    ctx.traffic_lights_right_phys(),
+                );
             }
         }
     }
@@ -2751,125 +2681,6 @@ impl ShellApp {
         }
     }
 
-    /// Honour a `SurfaceReady(id)` ack from the core.  Two cases:
-    ///
-    /// 1. **Steady-state per-frame ack** — id belongs to the *live*
-    ///    pair: the core just finished writing that half, the other
-    ///    half is now the "back".  Flip `current_idx` and present.
-    /// 2. **Pair handshake** — id belongs to the *pending* pair
-    ///    (resize / restart created a new pair, sent SurfaceAttach,
-    ///    core acked).  Install pending as the live pair, point the
-    ///    presenter at it, and flip to the acked id.
-    ///
-    /// IDs that don't match either are late acks for a retired pair
-    /// (replaced by a newer resize before the core got there) —
-    /// silently dropped.
-    fn on_surface_ready(&mut self, id: u32) {
-        // Surface ids are global, so the pair holding this one names
-        // its window — no window id is needed on the wire.
-        let Some(i) = self.window_index_of_surface(id) else {
-            lx_warn!(
-                "shell.surface_ready.id_unknown",
-                "SurfaceReady ignored — id belongs to no window's pair",
-                id = id
-            );
-            return;
-        };
-        let live_ids = self.windows[i].surfaces.as_ref().map(|p| p.ids());
-        let pending_ids = self.windows[i].pending_surfaces.as_ref().map(|p| p.ids());
-        let in_live = live_ids
-            .map(|(f, b)| f == id || b == id)
-            .unwrap_or(false);
-        let in_pending = pending_ids
-            .map(|(f, b)| f == id || b == id)
-            .unwrap_or(false);
-        if in_live && !in_pending {
-            // Per-frame ack: just point the presenter at the just-
-            // completed half.  Sampled (1/8 ≈ render.frame's cadence
-            // so the two streams sync at MARSPOT_LOG=debug) — the
-            // live-pair-swap path is the dominant rate on a busy
-            // display and would otherwise drown the log.
-            lx_debug_sampled!(
-                "shell.surface.swap",
-                8,
-                "per-frame SurfaceReady ack",
-                id = id
-            );
-            if let Some(p) = self.windows[i].presenter.as_mut()
-                && !p.swap_to_id(id) {
-                    // Presenter and shell pair-ids disagree — should
-                    // not happen, but log if it ever does.
-                    lx_warn!(
-                        "shell.presenter.swap_to_id_unknown",
-                        "presenter rejected SurfaceReady id",
-                        id = id
-                    );
-                    return;
-                }
-            // First-ever SurfaceReady on the boot pair flips the
-            // first_frame_ready gate so `redraw()` finally presents.
-            // Without this the gate stays false for the entire run
-            // (it only flipped on the legacy v=1 handshake path).
-            self.windows[i].first_frame_ready = true;
-            self.windows[i].frame_pending = true;
-            return;
-        }
-        if !in_pending {
-            lx_warn!(
-                "shell.surface_ready.id_unknown",
-                "SurfaceReady ignored — id does not match live or pending pair",
-                id = id,
-                live = format!("{live_ids:?}"),
-                pending = format!("{pending_ids:?}")
-            );
-            return;
-        }
-        // Handshake ack: install pending as live.
-        let new_pair = match self.windows[i].pending_surfaces.take() {
-            Some(p) => p,
-            None => return,
-        };
-        match self.windows[i].presenter.as_mut() {
-            Some(p) => {
-                if let Err(e) = p.set_pair(&new_pair.front, &new_pair.back) {
-                    lx_error!("shell.set_pair_failed", &e.to_string());
-                    new_pair.release();
-                    return;
-                }
-                // The acked id is the one the core just wrote — point at it.
-                p.swap_to_id(id);
-            }
-            None => {
-                // Silently skipping here is how the 2026-07-28 black
-                // window stayed invisible in the logs: the pair got
-                // installed, `pair_swapped` was logged, and nothing on
-                // screen ever changed.  Every window must have its
-                // presenter by the time its first frame is acked.
-                lx_error!(
-                    "shell.surface_ready.no_presenter",
-                    "pair acked but this window has no presenter — it will render black",
-                    window_id = self.windows[i].window_id,
-                    id = id
-                );
-            }
-        }
-        if let Some(old) = self.windows[i].surfaces.take() {
-            old.release();
-        }
-        lx_info!(
-            "shell.presenter.pair_swapped",
-            "presenter now displaying new pair",
-            window_id = self.windows[i].window_id,
-            front = new_pair.front.id(),
-            back = new_pair.back.id(),
-            acked = id
-        );
-        self.windows[i].surfaces = Some(new_pair);
-        self.windows[i].first_frame_ready = true;
-        self.windows[i].frame_pending = true;
-        self.dev_close_extra_if_armed(i);
-    }
-
     /// Put marspot away.
     ///
     /// **The running sessions are deliberately left alone.**  Quitting
@@ -3125,6 +2936,11 @@ impl ShellApp {
     fn handle_active_msg(&mut self, msg: ShellInbox, ctx: &MarspotAppCtx) {
         match msg {
             ShellInbox::SurfaceReady(id) => self.on_surface_ready(id),
+            ShellInbox::FramePaceAck => {
+                if let Some(c) = self.active.as_mut() {
+                    c.paced = true;
+                }
+            }
             ShellInbox::HelloAck(v) => {
                 if v == PROTO_VERSION {
                     if let Some(c) = self.active.as_mut() {
@@ -3157,6 +2973,7 @@ impl ShellApp {
                     // through here (boot, restart, update swap).
                     self.pane_look.core_replaced();
                     self.flush_pane_decls();
+                    self.show_early_frames();
                 } else {
                     lx_event!(
                         "HELLO_MISMATCH",
@@ -4128,26 +3945,12 @@ impl MarspotApp for ShellApp {
             }
         };
 
-        let presenter = match ShellPresenter::new(
-            ctx.ns_view(),
-            scale as f32,
-            &pair.front,
-            &pair.back,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                lx_error!("shell.resumed.presenter_new_failed", &e.to_string());
-                ctx.exit();
-                return;
-            }
-        };
-
         let (front_id, back_id) = pair.ids();
         // `resumed` fires for the boot window, which the app state
         // created before any callback could run.
         let wi = self.window_index(ctx.window_id()).unwrap_or(0);
         self.windows[wi].surfaces = Some(pair);
-        self.windows[wi].presenter = Some(presenter);
+        self.windows[wi].layers = Some(FrameLayers::new(ctx.ns_view(), ctx.window_id(), scale));
 
         self.active = self.spawn_core(front_id, back_id, w_px, h_px, scale);
         if self.active.is_some() {
@@ -4194,6 +3997,7 @@ impl MarspotApp for ShellApp {
         }
         self.poll_supervisor(ctx);
         self.settle_pump(knocked);
+        self.dev_pass();
         ctx.request_redraw();
     }
 
@@ -4225,6 +4029,7 @@ impl MarspotApp for ShellApp {
         let wire = event_to_wire(&event, mods);
         let w = Self::event_window(ctx);
         self.send(MsgType::KeyEvent, encode_key_event(&wire, w));
+        marspot::latency_trace::mark(marspot::latency_trace::Stage::KeySent, 0);
     }
 
     fn mouse_down(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64, mods: Modifiers) {
@@ -4366,16 +4171,13 @@ impl MarspotApp for ShellApp {
         }
         // Read the gate before taking `&mut` on the same window.
         let ready = self.windows[wi].first_frame_ready;
-        if let Some(p) = self.windows[wi].presenter.as_mut() {
-            p.set_drawable_size(w_phys, h_phys, scale);
-            // Present *synchronously* inside the resize callback so
-            // our drawable lands in the SAME CATransaction AppKit is
-            // about to commit for the window-bounds change.  Coupled
-            // with `setPresentsWithTransaction(true)` on the layer
-            // this gives Sublime-style frame-perfect resize — the
-            // window edge and the drawable contents move together,
-            // no inter-frame drift.
-            if ready {
+        if let Some(l) = self.windows[wi].layers.as_mut() {
+            l.resized(w_phys, h_phys, scale);
+            // A copying presenter draws *synchronously* inside the
+            // resize callback, so its drawable lands in the same
+            // CATransaction AppKit is about to commit for the new
+            // bounds: the window edge and the contents move together.
+            if ready && let Some(p) = l.copying() {
                 p.present();
             }
         }
@@ -4387,13 +4189,8 @@ impl MarspotApp for ShellApp {
         // SIGWINCH during a drag and lines wrap at the old column
         // count — what the user observed as "换行没跟上".
         let skipped = std::mem::take(&mut self.windows[wi].skipped_resizes);
-        match SurfacePair::create(w_px, h_px) {
-            Ok(pair) => {
-                if let Some(stale) = self.windows[wi].pending_surfaces.take() {
-                    stale.release();
-                }
-                let (f, b) = pair.ids();
-                self.windows[wi].pending_surfaces = Some(pair);
+        match self.fresh_pending_pair(wi, w_px, h_px) {
+            Ok((f, b)) => {
                 self.windows[wi].last_attached = Some(geom);
                 lx_info!(
                     "shell.resize.attached",
@@ -4478,34 +4275,14 @@ impl MarspotApp for ShellApp {
             .remove(&window_id)
             .unwrap_or_else(|| self.next_frame_index());
         let mut win = ShellWindow::new(window_id, slot);
-        // The presenter is what actually puts the IOSurface on the
-        // NSView — the boot window gets one in `resumed()`, and a
-        // window without one is a permanently black rectangle no
-        // matter how faithfully the core paints (2026-07-28 field
-        // report: Cmd-N opened exactly that).  Built against the pair
-        // we just created; the SurfaceReady promote re-points it at
-        // whichever half the core acks.
-        match ShellPresenter::new(
-            ctx.ns_view(),
-            scale as f32,
-            &pair.front,
-            &pair.back,
-        ) {
-            Ok(p) => {
-                win.presenter = Some(p);
-                lx_event!(
-                    "WINDOW_PRESENTER_READY",
-                    "presenter attached to the new window's view",
-                    window_id = window_id
-                );
-            }
-            Err(e) => {
-                lx_error!("shell.window.presenter_new_failed", &e.to_string());
-                pair.release();
-                marspot::app::close_window(window_id);
-                return;
-            }
-        }
+        // A window without this shows nothing, however faithfully the
+        // core paints (2026-07-28: Cmd-N opened a black rectangle).
+        win.layers = Some(FrameLayers::new(ctx.ns_view(), window_id, scale));
+        lx_event!(
+            "WINDOW_PRESENTER_READY",
+            "layers attached to the new window's view",
+            window_id = window_id
+        );
         win.pending_surfaces = Some(pair);
         // Seed the geometry cache from the window as it actually
         // opened.  `window-state.bin` is a list written whole on every
@@ -4563,135 +4340,7 @@ impl MarspotApp for ShellApp {
     }
 
     fn redraw(&mut self, _ctx: &MarspotAppCtx) {
-        // Present EVERY window that owes a frame, not the one this
-        // callback happens to be about.  All `proxy.wake()`s dispatch
-        // to the boot window by design ("a wake is about the process"),
-        // so a present step keyed to `ctx.window_id()` only ever ran
-        // for window 1 — a second window had core frames, an installed
-        // pair, even a presenter, and still showed black because
-        // nothing ever called its `present()` (2026-07-28, the black
-        // window's SECOND root cause).  Same class of bug as the L2
-        // render pass before step 4d: a per-window duty attached to
-        // one window.
-        for wi in 0..self.windows.len() {
-            // Hold off until the core has written real content into
-            // this window's pair.  Without this gate the user sees an
-            // uninitialised IOSurface for ~50-100 ms at startup, then
-            // a hard snap to content — a black-then-content flash.
-            if !self.windows[wi].first_frame_ready {
-                continue;
-            }
-            // Only when something new is pending — see the
-            // `frame_pending` field doc.  Every present makes
-            // WindowServer composite again, and sub-LSB alpha rounding
-            // reads as a faint background pulse.
-            if !self.windows[wi].frame_pending {
-                continue;
-            }
-            if let Some(p) = self.windows[wi].presenter.as_mut() {
-                if !p.present() {
-                    continue;
-                }
-                self.windows[wi].frame_pending = false;
-                let first = !self.windows[wi].presented;
-                self.windows[wi].presented = true;
-                // One INFO per window per boot: the present-side
-                // mirror of the core's WINDOW_FIRST_FRAME.  The chain
-                // "painted → pair installed → presenter exists" logged
-                // green twice while the screen stayed black; only the
-                // present itself is proof the pixels went up.
-                if first {
-                    lx_event!(
-                        "WINDOW_FIRST_PRESENT",
-                        "first present for this window",
-                        window_id = self.windows[wi].window_id
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: EventProxy) {
-    loop {
-        match Frame::read_from(&mut stream) {
-            // the core is gone: a pass finds that out now
-            Ok(None) => return proxy.wake(),
-            Ok(Some(frame)) => {
-                let msg = match frame.msg_type {
-                    MsgType::SurfaceReady => {
-                        decode_surface_ready(&frame.payload).ok().map(ShellInbox::SurfaceReady)
-                    }
-                    MsgType::HelloAck => {
-                        decode_hello_ack(&frame.payload).ok().map(ShellInbox::HelloAck)
-                    }
-                    MsgType::Pong => decode_pong(&frame.payload).ok().map(ShellInbox::Pong),
-                    MsgType::CaretRect => decode_caret_rect(&frame.payload)
-                        .ok()
-                        .map(|(rect, win)| ShellInbox::CaretRect(rect, win)),
-                    // Empty-payload wake: a fresh frame is in the IOSurface.
-                    // Mapping it to Some(..) is what makes `proxy.wake()`
-                    // fire below → user_event → present.
-                    MsgType::FrameRendered => Some(ShellInbox::FrameRendered),
-                    MsgType::PaneBadgeClicked => {
-                        marspot::shell_proto::decode_pane_badge_clicked(&frame.payload)
-                            .ok()
-                            .map(ShellInbox::PaneBadgeClicked)
-                    }
-                    MsgType::PaneFocused => {
-                        marspot::shell_proto::decode_pane_focused(&frame.payload)
-                            .ok()
-                            .map(ShellInbox::PaneFocused)
-                    }
-                    MsgType::PaneBadgeMenuRequest => {
-                        marspot::shell_proto::decode_pane_badge_menu_request(&frame.payload)
-                            .ok()
-                            .map(|(sid, x, y)| ShellInbox::PaneBadgeMenuRequest(sid, x, y))
-                    }
-                    MsgType::PaneBadgeMenuAction => {
-                        marspot::shell_proto::decode_pane_badge_menu_action(&frame.payload)
-                            .ok()
-                            .map(|(sid, tag)| ShellInbox::PaneBadgeMenuAction(sid, tag))
-                    }
-                    MsgType::PaneSessionKey => {
-                        marspot::shell_proto::decode_pane_session_key(&frame.payload)
-                            .ok()
-                            .map(|(sid, ev)| ShellInbox::PaneSessionKey(sid, ev))
-                    }
-                    MsgType::PaneSessionUserEscape => {
-                        marspot::shell_proto::decode_pane_session_user_escape(&frame.payload)
-                            .ok()
-                            .map(ShellInbox::PaneSessionUserEscape)
-                    }
-                    MsgType::WindowOpenRequest => {
-                        marspot::shell_proto::decode_window_open_request_at(&frame.payload)
-                            .ok()
-                            .map(|(idx, hint)| ShellInbox::WindowOpenRequest(idx, hint))
-                    }
-                    MsgType::WindowCloseRequest => {
-                        marspot::shell_proto::decode_window_close_request(&frame.payload)
-                            .ok()
-                            .map(ShellInbox::WindowCloseRequest)
-                    }
-                    MsgType::IconMaskWanted => marspot::shell_proto::decode_icon_mask_wanted(&frame.payload)
-                        .ok()
-                        .map(|(symbol, point_px)| ShellInbox::IconMaskWanted(symbol, point_px)),
-                    // Unknown frames are ignored — keeps forward
-                    // compatibility while the protocol grows.
-                    _ => None,
-                };
-                if let Some(m) = msg {
-                    if tx.send(m).is_err() {
-                        return;
-                    }
-                    proxy.wake();
-                }
-            }
-            Err(e) => {
-                lx_error!("shell.control_reader.error", &format!("{e}"));
-                return proxy.wake();
-            }
-        }
+        self.present_windows();
     }
 }
 

@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.483"  # the core's icons are drawn by a short-lived drawer, so the shell never loads the symbol set
-core    = "0.12.511"  # a core run with --draw-icons draws the shell's batch of icons and exits
+shell   = "0.7.484"  # the window shows the core's surface itself; the shell draws nothing
+core    = "0.12.512"  # one frame a display refresh, drawn when the last is reported shown
 session = "0.11.351"  # a reader queued for its turn stops when told, and panes that flood together read in the order they asked

@@ -108,6 +108,7 @@ pub mod glyph_atlas;
 pub mod input;
 pub mod keyboard_layout;
 pub mod link_open;
+pub mod latency_trace;
 pub mod link_probe;
 pub mod iosurface;
 #[cfg(test)]

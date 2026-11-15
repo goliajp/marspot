@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use marspot::lx_warn;
 use marspot_term::palette::{self, ThemeId};
-use objc2::rc::Retained;
 use objc2_app_kit::{
     NSAppearanceNameAccessibilityHighContrastAqua,
     NSAppearanceNameAccessibilityHighContrastDarkAqua, NSAppearanceNameAqua,
@@ -101,14 +100,13 @@ impl super::ShellApp {
         let bg = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0);
         let windows = NSApplication::sharedApplication(mtm).windows();
         for w in self.windows.iter_mut() {
-            let Some(p) = w.presenter.as_ref() else { continue };
-            crate::present::set_layer_background(&p.layer);
-            // The window this presenter draws into is the one whose
-            // content view carries its layer.
-            let ours = Retained::as_ptr(&p.layer) as *const std::ffi::c_void;
+            let Some(ours) = w.layers.as_ref() else { continue };
+            ours.follow_theme();
+            // The window these layers are on is the one whose content
+            // view carries their root.
             for window in windows.iter() {
                 let layer = window.contentView().and_then(|v| v.layer());
-                if layer.is_some_and(|l| Retained::as_ptr(&l) as *const std::ffi::c_void == ours) {
+                if layer.is_some_and(|l| ours.is(&l)) {
                     window.setBackgroundColor(Some(&bg));
                 }
             }
