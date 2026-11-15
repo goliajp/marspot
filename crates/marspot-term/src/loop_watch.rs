@@ -545,9 +545,13 @@ mod tests {
         assert!(settled >= 1, "begin did not wake the watchdog");
         sleep(Duration::from_millis(500));
         assert_eq!(looks(&w), settled, "the watchdog woke with no iteration running");
-        // and it is still on duty for the next one
+        // and it is still on duty for the next one: three looks, given
+        // up to two seconds on a runner that schedules the thread late
         w.begin();
-        sleep(Duration::from_millis(200));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while looks(&w) < settled + 3 && std::time::Instant::now() < deadline {
+            sleep(Duration::from_millis(20));
+        }
         assert!(looks(&w) >= settled + 3, "the watchdog did not poll a running iteration");
         let _ = w.end();
     }

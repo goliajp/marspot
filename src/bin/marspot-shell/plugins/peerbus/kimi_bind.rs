@@ -64,7 +64,9 @@ impl Worker {
                 .map(|p| gemini::Peer { sid: p.sid, gemini: p.kimi, session: p.session.clone(), cwd: p.cwd.clone() })
                 .collect(),
             all_known: peers.all_known,
+            unbound: Vec::new(),
         };
+        self.kimi_waiting = peers.unbound.clone();
         let class = |p: &gemini::Peer| peers.bound.iter().find(|k| k.sid == p.sid).map_or(Mode::Prompting, |k| k.class);
         self.apply_spooled(Agent::Kimi, &shaped, class);
         for p in &peers.bound {

@@ -25,20 +25,103 @@ pub(super) struct Pane {
     pub argv_thread: Option<String>,
     /// The start of the thread id the TUI's window title shows.
     pub title_thread: Option<String>,
+    /// The title has named something else since this process was first
+    /// seen: what it names now was written by this process.
+    pub title_moved: bool,
+    /// The home's configuration has the title show the thread id.
+    pub title_expected: bool,
+    /// When the Codex process started, in milliseconds since the epoch.
+    pub started_ms: u64,
+    /// No other Codex process, in a pane or not, has been seen with
+    /// this working directory since this one started.
+    pub alone: bool,
+}
+
+impl Pane {
+    /// The title is where this pane's thread is named.
+    fn speaks_by_title(&self) -> bool {
+        self.title_expected || self.title_thread.is_some()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Unbound {
-    /// No loaded thread in this pane's directory.
+    /// No loaded thread in this pane's directory that can be its own.
     NoThread,
     /// More than one candidate, and nothing that says which.
     Ambiguous { panes: usize, threads: usize },
+    /// Another Codex has run in this directory since this one started,
+    /// and a thread there could be either's.
+    Shared,
+    /// The title is where this pane's thread will be named, and it has
+    /// not named one this process is known to have written.
+    AwaitingTitle,
+}
+
+/// When a thread was created, in milliseconds since the epoch: Codex
+/// names a thread with a version 7 UUID, whose first 48 bits are that
+/// time (0.163.0: equal, to the millisecond, to the `timestamp` in the
+/// thread's own `session_meta`).  None for an id of any other kind,
+/// and such a thread is never guessed at.  The start of an id, as
+/// short as a title shows it, is enough.
+pub(super) fn created_ms(thread: &str) -> Option<u64> {
+    let b = thread.as_bytes();
+    if b.len() < 15 || b[8] != b'-' || b[13] != b'-' || b[14] != b'7' {
+        return None;
+    }
+    u64::from_str_radix(&[&thread[..8], &thread[9..13]].concat(), 16).ok()
+}
+
+/// Whether a `config.toml` has the TUI show the thread id in its
+/// window title (`[tui] terminal_title` listing `thread-id`).
+pub(super) fn title_shows_thread(config: &str) -> bool {
+    let mut table = String::new();
+    let mut value: Option<String> = None;
+    for line in config.lines() {
+        let body = line.trim();
+        if let Some(v) = &mut value {
+            v.push_str(body);
+        } else if body.starts_with('[') {
+            table = body.trim_matches(|c| c == '[' || c == ']' || c == ' ').to_string();
+        } else if let Some((key, rest)) = body.split_once('=') {
+            let key = key.trim();
+            if (table == "tui" && key == "terminal_title") || (table.is_empty() && key == "tui.terminal_title") {
+                value = Some(rest.to_string());
+            }
+        }
+        if let Some(v) = &value
+            && let Some(end) = v.find(']')
+        {
+            return v[..end].split(',').any(|item| item.trim_matches(|c| " [\"'".contains(c)) == "thread-id");
+        }
+    }
+    false
+}
+
+/// One pane's title, followed across the processes that run in it:
+/// whether it has named anything else since the present process was
+/// first seen.  What was there at first sight may be an earlier
+/// process's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct TitleWatch<P> {
+    process: P,
+    first: Option<String>,
+    pub moved: bool,
+}
+
+impl<P: PartialEq> TitleWatch<P> {
+    pub(super) fn seen(before: Option<Self>, process: P, title: &Option<String>) -> Self {
+        match before {
+            Some(w) if w.process == process => Self { moved: w.moved || w.first != *title, ..w },
+            _ => Self { process, first: title.clone(), moved: false },
+        }
+    }
 }
 
 /// Assign threads to panes.  `threads` maps each home to its loaded
-/// threads (id, cwd); `current` is the binding each pane already has,
-/// kept while its thread is still loaded in the same directory so a
-/// rescan never moves an inbox that is right.
+/// threads (id, cwd); `current` is the binding each pane's process
+/// already has, kept while its thread is still loaded in the same
+/// directory so a rescan never moves an inbox that is right.
 pub(super) fn assign(
     panes: &[Pane],
     threads: &HashMap<PathBuf, Vec<(String, String)>>,
@@ -55,8 +138,21 @@ pub(super) fn assign(
     // and whatever this pane was bound to before (`/resume` moves a TUI
     // to another thread).  It names a thread or nothing: a title naming
     // one that is not loaded leaves the pane unbound, never guessed at.
+    //
+    // A title is the pane's, not the process's: a Codex that was killed
+    // leaves its own behind, and the next one started in that pane is
+    // seen under it.  So a title counts once this process is known to
+    // have written it: it names a thread created after the process
+    // started, or the thread the command line resumes, or it has
+    // changed since the process was first seen.
     for p in panes {
         let Some(prefix) = &p.title_thread else { continue };
+        let own = created_ms(prefix).is_some_and(|c| c > p.started_ms)
+            || p.argv_thread.as_ref().is_some_and(|t| t.starts_with(prefix.as_str()))
+            || p.title_moved;
+        if !own {
+            continue;
+        }
         let named: Vec<&str> = threads.get(&p.home).map_or(Vec::new(), |ts| {
             ts.iter().map(|(id, _)| id.as_str()).filter(|id| id.starts_with(prefix.as_str())).collect()
         });
@@ -73,6 +169,7 @@ pub(super) fn assign(
     // Then other certain answers: a binding that still holds, then a
     // thread named on the command line.
     let by_title: Vec<u64> = out.keys().copied().collect();
+    let mut kept: Vec<&Pane> = Vec::new();
     for p in panes.iter().filter(|p| !by_title.contains(&p.sid)) {
         let cands: Vec<&str> =
             candidates(p).into_iter().filter(|t| !taken.iter().any(|(h, x)| *h == p.home && x == t)).collect();
@@ -81,21 +178,54 @@ pub(super) fn assign(
         if let Some(t) = keep.or(named) {
             taken.push((p.home.clone(), t.clone()));
             out.insert(p.sid, Ok(t.clone()));
+            if named != Some(t) && !p.speaks_by_title() {
+                kept.push(p);
+            }
         }
     }
-    // Then one pane, one thread left in a directory: that pair.
+    // What could be a process's own thread without anything saying so:
+    // one in its directory that nobody has, created after it started.
+    // A thread stays loaded for half an hour after its TUI has gone,
+    // so an older one is a past session.
+    let own_unclaimed = |p: &Pane, taken: &[(PathBuf, String)]| -> Vec<String> {
+        candidates(p)
+            .into_iter()
+            .filter(|t| !taken.iter().any(|(h, x)| *h == p.home && x == t))
+            .filter(|t| created_ms(t).is_some_and(|c| c > p.started_ms))
+            .map(str::to_string)
+            .collect()
+    };
+    // A pairing made without a title or a command line holds for as
+    // long as there is nothing else its process could be showing: a
+    // second thread it could have opened (`/new`) leaves it unknown
+    // which one that is.
+    for p in kept {
+        let others = own_unclaimed(p, &taken).len();
+        if others > 0
+            && let Some(Ok(mine)) = out.insert(p.sid, Err(Unbound::Ambiguous { panes: 1, threads: others + 1 }))
+        {
+            taken.retain(|(h, t)| !(*h == p.home && *t == mine));
+        }
+    }
+    // Then one pane, one such thread in a directory no other Codex has
+    // run in since the pane's started: that pair.  Where the title is
+    // to say which thread it is, nothing is paired before it has.
     let settled: Vec<u64> = out.keys().copied().collect();
     for p in panes.iter().filter(|p| !settled.contains(&p.sid)) {
-        let free: Vec<&str> =
-            candidates(p).into_iter().filter(|t| !taken.iter().any(|(h, x)| *h == p.home && x == t)).collect();
-        let rivals = panes
-            .iter()
-            .filter(|q| !settled.contains(&q.sid) && q.home == p.home && q.cwd == p.cwd)
-            .count();
-        let r = match (free.as_slice(), rivals) {
-            ([], _) => Err(Unbound::NoThread),
-            ([one], 1) => Ok(one.to_string()),
-            (many, n) => Err(Unbound::Ambiguous { panes: n, threads: many.len() }),
+        if p.speaks_by_title() {
+            out.insert(p.sid, Err(Unbound::AwaitingTitle));
+            continue;
+        }
+        let rivals =
+            panes.iter().filter(|q| q.sid != p.sid && !settled.contains(&q.sid) && q.home == p.home && q.cwd == p.cwd).count();
+        if !p.alone || rivals > 0 {
+            out.insert(p.sid, Err(Unbound::Shared));
+            continue;
+        }
+        let r = match own_unclaimed(p, &taken).as_slice() {
+            [] => Err(Unbound::NoThread),
+            [one] => Ok(one.clone()),
+            many => Err(Unbound::Ambiguous { panes: 1, threads: many.len() }),
         };
         if let Ok(t) = &r {
             taken.push((p.home.clone(), t.clone()));
@@ -233,8 +363,126 @@ mod tests {
     use super::*;
     use marspot_peer::json::parse;
 
+    // threads created after a process that started at 0
+    const N1: &str = "00000001-0000-7000-8000-000000000001";
+    const N2: &str = "00000001-0000-7000-8000-000000000002";
+    const N3: &str = "00000001-0000-7000-8000-000000000003";
+
     fn pane(sid: u64, cwd: &str, argv: Option<&str>) -> Pane {
-        Pane { sid, home: "/h".into(), cwd: cwd.into(), argv_thread: argv.map(str::to_string), title_thread: None }
+        Pane {
+            sid,
+            home: "/h".into(),
+            cwd: cwd.into(),
+            argv_thread: argv.map(str::to_string),
+            title_thread: None,
+            title_moved: false,
+            title_expected: false,
+            started_ms: 0,
+            alone: true,
+        }
+    }
+    /// A thread id created at `ms`.
+    fn born(ms: u64, n: u64) -> String {
+        format!("{:08x}-{:04x}-7000-8000-{n:012x}", ms >> 16, ms & 0xffff)
+    }
+
+    #[test]
+    fn a_thread_id_carries_when_it_was_created() {
+        // a thread of Codex 0.163.0 and the timestamp in its session_meta
+        assert_eq!(created_ms("01a1d6f4-d181-72f3-be32-8f81526d5bdf"), Some(1_794_607_731_073));
+        assert_eq!(created_ms("01a1d6f4-d181-72f3-be32-8f815"), Some(1_794_607_731_073), "as much as a title shows");
+        assert_eq!(created_ms(&born(1_794_607_731_073, 9)), Some(1_794_607_731_073));
+        assert_eq!(created_ms("01a1d6f4-d181-42f3-be32-8f81526d5bdf"), None, "a random UUID says nothing");
+        assert_eq!(created_ms("t1"), None);
+    }
+
+    /// A Codex quit ten seconds ago; its thread is still loaded.  The
+    /// one started now in the same directory has none of its own yet.
+    #[test]
+    fn one_pane_and_one_thread_older_than_its_process_stays_unbound() {
+        let stale = born(51_000, 1);
+        let p = Pane { started_ms: 61_000, ..pane(2, "/p", None) };
+        let ts = loaded(&[(stale.as_str(), "/p")]);
+        assert_eq!(assign(std::slice::from_ref(&p), &ts, &HashMap::new())[&2], Err(Unbound::NoThread));
+        // its own arrives: that one, and only that one
+        let own = born(65_000, 2);
+        let ts = loaded(&[(stale.as_str(), "/p"), (own.as_str(), "/p")]);
+        assert_eq!(assign(&[p], &ts, &HashMap::new())[&2], Ok(own));
+    }
+
+    #[test]
+    fn a_thread_is_a_processs_own_only_when_created_after_it_started() {
+        let t = born(5_000, 1);
+        let ts = loaded(&[(t.as_str(), "/p")]);
+        let at = |started_ms| assign(&[Pane { started_ms, ..pane(1, "/p", None) }], &ts, &HashMap::new())[&1].clone();
+        assert_eq!(at(4_999), Ok(t.clone()));
+        assert_eq!(at(5_000), Err(Unbound::NoThread), "the same millisecond is not after");
+        assert_eq!(at(5_001), Err(Unbound::NoThread));
+        // an id that carries no time is never guessed at
+        let ts = loaded(&[("0f0e0d0c-0b0a-4000-8000-000000000001", "/p")]);
+        assert_eq!(assign(&[pane(1, "/p", None)], &ts, &HashMap::new())[&1], Err(Unbound::NoThread));
+    }
+
+    /// Where the title is to show the thread, a pane waits for it,
+    /// however certain the pairing looks.
+    #[test]
+    fn nothing_is_guessed_where_the_title_will_say() {
+        let ts = loaded(&[(N1, "/p")]);
+        let p = Pane { title_expected: true, ..pane(1, "/p", None) };
+        assert_eq!(assign(std::slice::from_ref(&p), &ts, &HashMap::new())[&1], Err(Unbound::AwaitingTitle));
+        let shown = Pane { title_thread: thread_in_title(&format!("p | {N1}")), ..p.clone() };
+        assert_eq!(assign(&[shown], &ts, &HashMap::new())[&1], Ok(N1.into()));
+        // a binding its process already has is not a guess
+        assert_eq!(assign(std::slice::from_ref(&p), &ts, &HashMap::from([(1, N1.to_string())]))[&1], Ok(N1.into()));
+        // nor is the thread its command line resumes
+        assert_eq!(assign(&[Pane { argv_thread: Some(N1.into()), ..p }], &ts, &HashMap::new())[&1], Ok(N1.into()));
+    }
+
+    /// The title a killed Codex left in the pane names its thread, and
+    /// that thread is still loaded.
+    #[test]
+    fn a_title_left_by_an_earlier_process_is_not_this_ones() {
+        let left = born(51_000, 1);
+        let ts = loaded(&[(left.as_str(), "/p")]);
+        let p = Pane { started_ms: 61_000, title_thread: thread_in_title(&format!("p | {left}")), ..pane(1, "/p", None) };
+        assert_eq!(assign(std::slice::from_ref(&p), &ts, &HashMap::new())[&1], Err(Unbound::AwaitingTitle));
+        // the process writes its own
+        let own = born(65_000, 2);
+        let ts = loaded(&[(left.as_str(), "/p"), (own.as_str(), "/p")]);
+        let wrote = Pane { title_thread: thread_in_title(&format!("p | {own}")), title_moved: true, ..p.clone() };
+        assert_eq!(assign(&[wrote], &ts, &HashMap::new())[&1], Ok(own));
+        // and `/resume` back to the older one is then its own doing
+        let back = Pane { title_moved: true, ..p.clone() };
+        assert_eq!(assign(&[back], &ts, &HashMap::new())[&1], Ok(left.clone()));
+        // `codex resume <id>` shows an older thread from the start
+        let resumed = Pane { argv_thread: Some(left.clone()), ..p };
+        assert_eq!(assign(&[resumed], &ts, &HashMap::new())[&1], Ok(left));
+    }
+
+    #[test]
+    fn a_title_has_moved_once_it_differs_from_what_the_process_was_first_seen_under() {
+        let t = |s: &str| Some(s.to_string());
+        let w = TitleWatch::seen(None, 1, &t("a"));
+        assert!(!w.moved);
+        let w = TitleWatch::seen(Some(w), 1, &t("a"));
+        assert!(!w.moved, "the same title again");
+        let w = TitleWatch::seen(Some(w), 1, &None);
+        assert!(w.moved);
+        let w = TitleWatch::seen(Some(w), 1, &t("a"));
+        assert!(w.moved, "back to the first one is still this process's doing");
+        let w = TitleWatch::seen(Some(w), 2, &t("a"));
+        assert!(!w.moved, "another process starts under the title it found");
+    }
+
+    #[test]
+    fn the_title_setting_is_read_from_a_config() {
+        assert!(title_shows_thread("[tui]\nterminal_title = [\"activity\", \"thread-name\", \"project-name\", \"thread-id\"]\n"));
+        assert!(title_shows_thread("model = \"x\"\ntui.terminal_title = ['thread-id']\n[mcp_servers.marspot]\ncommand = \"p\"\n"));
+        assert!(title_shows_thread("[tui]\nterminal_title = [\n  \"project-name\",\n  \"thread-id\",\n]\n"));
+        assert!(!title_shows_thread("[tui]\nterminal_title = [\"project-name\"]\n"));
+        assert!(!title_shows_thread("[other]\nterminal_title = [\"thread-id\"]\n"));
+        assert!(!title_shows_thread("[tui]\nnotifications = [\"thread-id\"]\n"));
+        assert!(!title_shows_thread(""));
     }
     fn titled(sid: u64, cwd: &str, title: &str) -> Pane {
         Pane { title_thread: thread_in_title(title), ..pane(sid, cwd, None) }
@@ -245,41 +493,77 @@ mod tests {
 
     #[test]
     fn one_pane_one_thread_binds() {
-        let r = assign(&[pane(1, "/p", None)], &loaded(&[("t1", "/p"), ("t2", "/q")]), &HashMap::new());
-        assert_eq!(r[&1], Ok("t1".into()));
+        let r = assign(&[pane(1, "/p", None)], &loaded(&[(N1, "/p"), (N2, "/q")]), &HashMap::new());
+        assert_eq!(r[&1], Ok(N1.into()));
     }
 
     #[test]
     fn two_panes_in_one_directory_stay_unbound_without_ids() {
-        let ts = loaded(&[("t1", "/p"), ("t2", "/p")]);
+        let ts = loaded(&[(N1, "/p"), (N2, "/p")]);
         let r = assign(&[pane(1, "/p", None), pane(2, "/p", None)], &ts, &HashMap::new());
-        assert_eq!(r[&1], Err(Unbound::Ambiguous { panes: 2, threads: 2 }));
-        assert_eq!(r[&2], Err(Unbound::Ambiguous { panes: 2, threads: 2 }));
+        assert_eq!(r[&1], Err(Unbound::Shared));
+        assert_eq!(r[&2], Err(Unbound::Shared));
+    }
+
+    /// One thread in the directory, created after this pane's Codex
+    /// started, and nobody has it: it is still not this pane's when
+    /// another Codex has run there in the meantime, in a pane or not.
+    #[test]
+    fn nothing_is_paired_in_a_directory_another_codex_has_run_in() {
+        let ts = loaded(&[(N1, "/p")]);
+        let p = Pane { alone: false, ..pane(1, "/p", None) };
+        assert_eq!(assign(std::slice::from_ref(&p), &ts, &HashMap::new())[&1], Err(Unbound::Shared));
+        assert_eq!(assign(&[Pane { alone: true, ..p.clone() }], &ts, &HashMap::new())[&1], Ok(N1.into()));
+        // a title settles it all the same
+        let shown = Pane { title_thread: thread_in_title(&format!("p | {N1}")), ..p };
+        assert_eq!(assign(&[shown], &ts, &HashMap::new())[&1], Ok(N1.into()));
+    }
+
+    /// Paired while it was alone; then a second thread its process
+    /// could have opened appears.  Which one the TUI shows is no
+    /// longer known, and the pairing is not kept on a guess.
+    #[test]
+    fn a_pairing_is_given_up_when_a_second_thread_could_be_the_processs() {
+        let cur = HashMap::from([(1, N1.to_string())]);
+        let p = pane(1, "/p", None);
+        assert_eq!(assign(std::slice::from_ref(&p), &loaded(&[(N1, "/p")]), &cur)[&1], Ok(N1.into()));
+        let two = loaded(&[(N1, "/p"), (N2, "/p")]);
+        assert_eq!(assign(std::slice::from_ref(&p), &two, &cur)[&1], Err(Unbound::Ambiguous { panes: 1, threads: 2 }));
+        // one older than the process is not its own, and changes nothing
+        let late = Pane { started_ms: 70_000, ..p.clone() };
+        let older = born(51_000, 9);
+        let cur = HashMap::from([(1, born(80_000, 1))]);
+        let ts = loaded(&[(cur[&1].as_str(), "/p"), (older.as_str(), "/p")]);
+        assert_eq!(assign(&[late], &ts, &cur)[&1], Ok(cur[&1].clone()));
+        // a thread the command line names is kept whatever else is there
+        let cur = HashMap::from([(1, N1.to_string())]);
+        assert_eq!(assign(&[Pane { argv_thread: Some(N1.into()), ..p }], &two, &cur)[&1], Ok(N1.into()));
     }
 
     /// A stale loaded thread in the same directory must not be guessed
     /// at either.
     #[test]
     fn one_pane_two_threads_stays_unbound() {
-        let r = assign(&[pane(1, "/p", None)], &loaded(&[("t1", "/p"), ("t2", "/p")]), &HashMap::new());
+        let r = assign(&[pane(1, "/p", None)], &loaded(&[(N1, "/p"), (N2, "/p")]), &HashMap::new());
         assert_eq!(r[&1], Err(Unbound::Ambiguous { panes: 1, threads: 2 }));
     }
 
     #[test]
-    fn a_named_thread_settles_its_pane_and_frees_the_other() {
-        let ts = loaded(&[("t1", "/p"), ("t2", "/p")]);
-        let r = assign(&[pane(1, "/p", Some("t2")), pane(2, "/p", None)], &ts, &HashMap::new());
-        assert_eq!(r[&1], Ok("t2".into()));
-        assert_eq!(r[&2], Ok("t1".into()));
+    fn a_named_thread_settles_its_pane_and_not_the_other_in_its_directory() {
+        let ts = loaded(&[(N1, "/p"), (N2, "/p")]);
+        let other = Pane { alone: false, ..pane(2, "/p", None) };
+        let r = assign(&[pane(1, "/p", Some(N2)), other], &ts, &HashMap::new());
+        assert_eq!(r[&1], Ok(N2.into()));
+        assert_eq!(r[&2], Err(Unbound::Shared), "the thread left over is not the other pane's for being left over");
     }
 
     #[test]
     fn an_existing_binding_is_kept_and_dropped_when_its_thread_goes() {
-        let ts = loaded(&[("t1", "/p"), ("t2", "/p")]);
-        let cur = HashMap::from([(1, "t1".to_string())]);
-        assert_eq!(assign(&[pane(1, "/p", None)], &ts, &cur)[&1], Ok("t1".into()));
-        let gone = loaded(&[("t3", "/p")]);
-        assert_eq!(assign(&[pane(1, "/p", None)], &gone, &cur)[&1], Ok("t3".into()));
+        let ts = loaded(&[(N1, "/p"), (N2, "/q")]);
+        let cur = HashMap::from([(1, N1.to_string())]);
+        assert_eq!(assign(&[pane(1, "/p", None)], &ts, &cur)[&1], Ok(N1.into()));
+        let gone = loaded(&[(N3, "/p")]);
+        assert_eq!(assign(&[pane(1, "/p", None)], &gone, &cur)[&1], Ok(N3.into()));
         assert_eq!(assign(&[pane(1, "/p", None)], &loaded(&[]), &cur)[&1], Err(Unbound::NoThread));
     }
 

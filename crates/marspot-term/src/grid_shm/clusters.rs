@@ -6,8 +6,8 @@
 //! This region carries, for each cluster cell in view, its position and
 //! its text.
 //!
-//! It is a region of its own, named after the session and created by
-//! L3, rather than space added to the grid region: that region is sized
+//! It is a region of its own, named after the grid region and created
+//! by L3, rather than space added to the grid region: that region is sized
 //! by L2 when the pane opens and kept for the pane's life, so growing it
 //! would reach only panes opened after the upgrade.
 //!
@@ -17,6 +17,8 @@
 //! magic u32 | version u32 | count u32 | bytes u32 | overflow u32
 //! count × (col u16 | row u16 | len u16 | len bytes of UTF-8)
 //! ```
+//!
+//! The region ends with whose it is -- see [`super::ident`].
 //!
 //! ## Consistency
 //!
@@ -28,9 +30,12 @@
 //! A reader that finds no region, or one it does not recognise, reads
 //! no clusters -- which is what every reader saw before this existed.
 
-use std::ffi::CString;
+use std::ffi::CStr;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
+
+use super::ident::{self, Identity, SessionRegions};
+use super::names::Side;
 
 const MAGIC: u32 = 0x4d_53_43_31; // "MSC1"
 const VERSION: u32 = 1;
@@ -41,17 +46,8 @@ const ENTRY_HEAD: usize = 6;
 /// real output, 55 cells in forty million are clusters.
 pub const CAPACITY: usize = 64 * 1024;
 
-/// The region's name for session `id`. Under macOS's ~31-byte limit.
-pub fn region_name(id: u64) -> CString {
-    CString::new(format!("/msp-c-{id}")).expect("no interior NUL")
-}
-
-/// Remove session `id`'s region. Mappings already open stay valid until
-/// they are closed; nothing new can open it.
-pub fn delete(id: u64) {
-    let name = region_name(id);
-    unsafe { libc::shm_unlink(name.as_ptr()) };
-}
+/// Where the table ends and the region's identity begins.
+const TABLE_END: usize = CAPACITY - ident::BYTES;
 
 /// Writer side, owned by the session that publishes the grid.
 pub struct ClusterTableWriter {
@@ -71,49 +67,45 @@ pub struct ClusterTableWriter {
 unsafe impl Send for ClusterTableWriter {}
 
 impl ClusterTableWriter {
-    /// Create session `id`'s region, or take over the one a previous
-    /// image of the same session left behind.
-    pub fn open(id: u64) -> io::Result<Self> {
-        let name = region_name(id);
-        let fd = unsafe {
-            libc::shm_open(name.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o600)
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let size = region_size(&fd)?;
-        // macOS refuses to resize a shared memory object once it has a
-        // size, so a region from a previous image is taken as it is
-        if size == 0 {
-            if unsafe { libc::ftruncate(fd.as_raw_fd(), CAPACITY as libc::off_t) } != 0 {
-                return Err(io::Error::last_os_error());
+    /// Create `owner`'s region under `name`, or take over the one a
+    /// previous image of the same session left there.  A region of
+    /// another session under that name loses the name: its mappings
+    /// stay with whoever holds them.
+    pub fn open(name: &CStr, owner: Identity) -> io::Result<Self> {
+        let (fd, base) = super::ident::open_owned(name, CAPACITY, owner)?;
+        // a table already there is the last frame of this session's
+        // previous image, and stays until the next frame replaces it
+        let kept = unsafe { get_u32(base, 0) == MAGIC && get_u32(base, 4) == VERSION };
+        if !kept {
+            unsafe {
+                put_u32(base, 0, MAGIC);
+                put_u32(base, 4, VERSION);
+                put_u32(base, 8, 0);
+                put_u32(base, 12, 0);
+                put_u32(base, 16, 0);
             }
-        } else if size != CAPACITY {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "cluster region of another size"));
         }
-        let base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                CAPACITY,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd.as_raw_fd(),
-                0,
-            )
-        };
-        if base == libc::MAP_FAILED {
-            return Err(io::Error::last_os_error());
-        }
-        let base = base as *mut u8;
+        let last_count = unsafe { get_u32(base, 8) };
+        Ok(Self { _fd: fd, base, at: HEADER, count: 0, overflow: false, last_count })
+    }
+
+    /// The table in the region now: after [`Self::open`], what the
+    /// session's previous image published with its last frame.
+    pub fn table(&self) -> ClusterTable {
+        let mut out = ClusterTable::default();
+        unsafe { read_table(self.base, &mut out) };
+        out
+    }
+
+    /// Start from the table `old` holds: the session is leaving that
+    /// region for this one.  An image that came out of an update has
+    /// the screen's cluster cells and not their text, which is only in
+    /// the region its predecessor wrote.
+    pub(super) fn carry_from(&mut self, old: &Self) {
         unsafe {
-            put_u32(base, 0, MAGIC);
-            put_u32(base, 4, VERSION);
-            put_u32(base, 8, 0);
-            put_u32(base, 12, 0);
-            put_u32(base, 16, 0);
+            std::ptr::copy(old.base, self.base, TABLE_END);
+            self.last_count = get_u32(self.base, 8);
         }
-        Ok(Self { _fd: fd, base, at: HEADER, count: 0, overflow: false, last_count: 0 })
     }
 
     pub(super) fn begin(&mut self) {
@@ -127,7 +119,7 @@ impl ClusterTableWriter {
     /// would with no table.
     pub(super) fn push(&mut self, col: u16, row: u16, text: &str) {
         let len = text.len();
-        if self.overflow || len > u16::MAX as usize || self.at + ENTRY_HEAD + len > CAPACITY {
+        if self.overflow || len > u16::MAX as usize || self.at + ENTRY_HEAD + len > TABLE_END {
             self.overflow = true;
             return;
         }
@@ -165,29 +157,21 @@ pub struct ClusterTableReader {
 unsafe impl Send for ClusterTableReader {}
 
 impl ClusterTableReader {
-    /// Map session `id`'s region read-only. An error when there is none
-    /// -- an L3 from before this existed -- or it is not one this build
-    /// can read.
-    pub fn open(id: u64) -> io::Result<Self> {
-        let name = region_name(id);
-        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        if region_size(&fd)? != CAPACITY {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "cluster region of another size"));
-        }
-        let base = unsafe {
-            libc::mmap(std::ptr::null_mut(), CAPACITY, libc::PROT_READ, libc::MAP_SHARED, fd.as_raw_fd(), 0)
-        };
-        if base == libc::MAP_FAILED {
-            return Err(io::Error::last_os_error());
-        }
-        let base = base as *const u8;
+    /// Map the cluster region of the session `regions` names,
+    /// read-only. An error when there is none -- an L3 from before
+    /// this existed -- or it is not one this build can read, or it is
+    /// another session's.
+    pub fn open(regions: &SessionRegions) -> io::Result<Self> {
+        let name = regions
+            .side_name(Side::Clusters)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no cluster region for this grid region"))?;
+        let base = ident::map_readonly(&name, CAPACITY)?;
         let (magic, version) = unsafe { (get_u32(base, 0), get_u32(base, 4)) };
-        if magic != MAGIC || version != VERSION {
+        let ok = magic == MAGIC && version == VERSION;
+        let admitted = regions.admit(unsafe { ident::read(base.add(TABLE_END)) });
+        if !ok || admitted.is_err() {
             unsafe { libc::munmap(base as *mut libc::c_void, CAPACITY) };
+            admitted?;
             return Err(io::Error::new(io::ErrorKind::InvalidData, "not a cluster region this build reads"));
         }
         Ok(Self { base })
@@ -198,30 +182,36 @@ impl ClusterTableReader {
     /// run past the region or are not UTF-8 end the copy, since only a
     /// torn read produces them.
     pub fn read_into(&self, out: &mut ClusterTable) {
-        out.clear();
-        let (count, overflow) = unsafe { (get_u32(self.base, 8), get_u32(self.base, 16)) };
-        out.overflow = overflow != 0;
-        let mut at = HEADER;
-        for _ in 0..count {
-            if at + ENTRY_HEAD > CAPACITY {
-                break;
-            }
-            let (col, row, len) = unsafe {
-                (get_u16(self.base, at), get_u16(self.base, at + 2), get_u16(self.base, at + 4))
-            };
-            let start = at + ENTRY_HEAD;
-            if start + len as usize > CAPACITY {
-                break;
-            }
-            let text = unsafe { std::slice::from_raw_parts(self.base.add(start), len as usize) };
-            if std::str::from_utf8(text).is_err() {
-                break;
-            }
-            let from = out.bytes.len() as u32;
-            out.bytes.extend_from_slice(text);
-            out.entries.push((col, row, from, len));
-            at = start + len as usize;
+        unsafe { read_table(self.base, out) }
+    }
+}
+
+/// # Safety
+/// `base` maps a cluster region.
+unsafe fn read_table(base: *const u8, out: &mut ClusterTable) {
+    out.clear();
+    let (count, overflow) = unsafe { (get_u32(base, 8), get_u32(base, 16)) };
+    out.overflow = overflow != 0;
+    let mut at = HEADER;
+    for _ in 0..count {
+        if at + ENTRY_HEAD > CAPACITY {
+            break;
         }
+        let (col, row, len) = unsafe {
+            (get_u16(base, at), get_u16(base, at + 2), get_u16(base, at + 4))
+        };
+        let start = at + ENTRY_HEAD;
+        if start + len as usize > CAPACITY {
+            break;
+        }
+        let text = unsafe { std::slice::from_raw_parts(base.add(start), len as usize) };
+        if std::str::from_utf8(text).is_err() {
+            break;
+        }
+        let from = out.bytes.len() as u32;
+        out.bytes.extend_from_slice(text);
+        out.entries.push((col, row, from, len));
+        at = start + len as usize;
     }
 }
 
@@ -263,14 +253,6 @@ impl ClusterTable {
     }
 }
 
-fn region_size(fd: &OwnedFd) -> io::Result<usize> {
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(st.st_size as usize)
-}
-
 unsafe fn put_u32(base: *mut u8, at: usize, v: u32) {
     unsafe { std::ptr::write_unaligned(base.add(at) as *mut u32, v) }
 }
@@ -299,32 +281,33 @@ mod tests {
     const FAMILY: &str = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
     const ACCENT: &str = "e\u{301}";
 
-    /// A session id no other test or live pane uses.
-    fn test_id() -> u64 {
+    /// A session no other test or live pane uses.
+    fn test_regions() -> SessionRegions {
         static N: AtomicU64 = AtomicU64::new(0);
-        0xC1_0000_0000 + (std::process::id() as u64) * 1000 + N.fetch_add(1, Ordering::Relaxed)
+        let id = 0xC1_0000_0000 + (std::process::id() as u64) * 1000 + N.fetch_add(1, Ordering::Relaxed);
+        SessionRegions::new(super::super::session_shm_name(id), id, true)
     }
 
     struct Pair {
-        id: u64,
+        regions: SessionRegions,
         w: GridShmWriter,
         r: GridShmReader,
     }
 
     impl Drop for Pair {
         fn drop(&mut self) {
-            delete(self.id);
+            self.regions.delete();
         }
     }
 
     fn pair(cols: u16, rows: u16) -> Pair {
-        let id = test_id();
+        let regions = test_regions();
         let fd = create_region(cols, rows).unwrap();
         let mut r = GridShmReader::from_fd(fd.as_raw_fd()).unwrap();
         let mut w = GridShmWriter::from_fd(fd).unwrap();
-        w.attach_clusters(id);
-        r.attach_clusters(ClusterTableReader::open(id).unwrap());
-        Pair { id, w, r }
+        w.attach_side_regions(regions.grid_name(), regions.owner());
+        r.attach_clusters(ClusterTableReader::open(&regions).unwrap());
+        Pair { regions, w, r }
     }
 
     fn read(p: &Pair) -> Vec<(u16, u16, String)> {
@@ -384,18 +367,21 @@ mod tests {
 
     #[test]
     fn a_table_past_the_region_is_marked_overflowed() {
-        let id = test_id();
-        let mut w = ClusterTableWriter::open(id).unwrap();
-        let r = ClusterTableReader::open(id).unwrap();
+        let regions = test_regions();
+        let name = regions.side_name(Side::Clusters).unwrap();
+        let mut w = ClusterTableWriter::open(&name, regions.owner()).unwrap();
         let long = "e\u{301}".repeat(1000);
         w.begin();
         for i in 0..100 {
             w.push(i, 0, &long);
         }
         w.finish();
+        // opened after the overflow: the table stopped short of the
+        // region's identity
+        let r = ClusterTableReader::open(&regions);
+        regions.delete();
         let mut t = ClusterTable::default();
-        r.read_into(&mut t);
-        delete(id);
+        r.expect("the region is still the session's").read_into(&mut t);
         assert!(t.overflow);
         assert!(!t.is_empty());
         assert!(t.iter().all(|(_, _, s)| s == long));
@@ -403,16 +389,118 @@ mod tests {
 
     #[test]
     fn a_session_without_a_region_has_no_reader() {
-        assert!(ClusterTableReader::open(test_id()).is_err());
+        assert!(ClusterTableReader::open(&test_regions()).is_err());
     }
 
     #[test]
     fn a_new_image_of_the_same_session_takes_the_region_over() {
-        let id = test_id();
-        let first = ClusterTableWriter::open(id).unwrap();
+        let regions = test_regions();
+        let name = regions.side_name(Side::Clusters).unwrap();
+        let mut first = ClusterTableWriter::open(&name, regions.owner()).unwrap();
+        one_cluster(&mut first, FLAG);
         drop(first);
-        let again = ClusterTableWriter::open(id);
-        delete(id);
-        assert!(again.is_ok(), "{:?}", again.err());
+        let again = ClusterTableWriter::open(&name, regions.owner());
+        regions.delete();
+        let again = again.expect("the next image opens the region");
+        let kept: Vec<String> = again.table().iter().map(|(_, _, t)| t.to_string()).collect();
+        assert_eq!(kept, [FLAG], "the table the image before published is gone");
+    }
+
+    /// The same name asked for as another session's: what a reader
+    /// sees when a second app's session has put its region there.
+    fn as_another_session(regions: &SessionRegions) -> SessionRegions {
+        SessionRegions::new(regions.grid_name().to_owned(), regions.owner().session + 1, true)
+    }
+
+    fn one_cluster(w: &mut ClusterTableWriter, text: &str) {
+        w.begin();
+        w.push(0, 0, text);
+        w.finish();
+    }
+
+    fn clusters_of(r: &ClusterTableReader) -> Vec<String> {
+        let mut t = ClusterTable::default();
+        r.read_into(&mut t);
+        t.iter().map(|(_, _, s)| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_reader_refuses_the_region_of_another_session() {
+        let regions = test_regions();
+        let name = regions.side_name(Side::Clusters).unwrap();
+        let _w = ClusterTableWriter::open(&name, regions.owner()).unwrap();
+        let other = ClusterTableReader::open(&as_another_session(&regions));
+        let own = ClusterTableReader::open(&regions);
+        regions.delete();
+        assert!(other.is_err(), "another session's table was taken");
+        assert!(own.is_ok(), "{:?}", own.err());
+    }
+
+    #[test]
+    fn a_writer_does_not_write_into_the_region_of_another_session() {
+        let first = test_regions();
+        let second = as_another_session(&first);
+        let name = first.side_name(Side::Clusters).unwrap();
+        let mut w1 = ClusterTableWriter::open(&name, first.owner()).unwrap();
+        let r1 = ClusterTableReader::open(&first).unwrap();
+        one_cluster(&mut w1, FLAG);
+        // the second session arrives under the same name
+        let mut w2 = ClusterTableWriter::open(&name, second.owner()).unwrap();
+        one_cluster(&mut w2, FAMILY);
+        let r2 = ClusterTableReader::open(&second);
+        let late = ClusterTableReader::open(&first);
+        first.delete();
+        assert_eq!(clusters_of(&r1), [FLAG], "the first session's table was written by the second");
+        assert_eq!(clusters_of(&r2.expect("the second session's own region")), [FAMILY]);
+        assert!(late.is_err(), "the name is the second session's now");
+    }
+
+    #[test]
+    fn a_writer_that_leaves_one_region_for_another_takes_its_table_along() {
+        let from = test_regions();
+        let to = test_regions();
+        let mut old = ClusterTableWriter::open(&from.side_name(Side::Clusters).unwrap(), from.owner()).unwrap();
+        one_cluster(&mut old, FLAG);
+        let mut new = ClusterTableWriter::open(&to.side_name(Side::Clusters).unwrap(), to.owner()).unwrap();
+        new.carry_from(&old);
+        let r = ClusterTableReader::open(&to);
+        from.delete();
+        to.delete();
+        assert_eq!(clusters_of(&r.expect("the new region is still its owner's")), [FLAG]);
+        assert_eq!(new.last_count, 1);
+    }
+
+    /// A region as an L3 from before identities leaves it.
+    fn unstamped_region(name: &CStr) {
+        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600) };
+        assert!(fd >= 0, "{}", io::Error::last_os_error());
+        assert_eq!(unsafe { libc::ftruncate(fd, CAPACITY as libc::off_t) }, 0);
+        let base = unsafe {
+            libc::mmap(std::ptr::null_mut(), CAPACITY, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0)
+        } as *mut u8;
+        unsafe {
+            put_u32(base, 0, MAGIC);
+            put_u32(base, 4, VERSION);
+            libc::munmap(base as *mut libc::c_void, CAPACITY);
+            libc::close(fd);
+        }
+    }
+
+    #[test]
+    fn a_region_without_an_identity_is_read_only_for_a_session_that_writes_none() {
+        let regions = test_regions();
+        let name = regions.side_name(Side::Clusters).unwrap();
+        unstamped_region(&name);
+        let old_session = SessionRegions::new(regions.grid_name().to_owned(), regions.owner().session, false);
+        let from_old = ClusterTableReader::open(&old_session);
+        let from_new = ClusterTableReader::open(&regions);
+        // the session's next image takes the region over and signs it
+        let taken = ClusterTableWriter::open(&name, regions.owner());
+        let after = ClusterTableReader::open(&regions);
+        regions.delete();
+        assert!(from_old.is_ok(), "{:?}", from_old.err());
+        assert!(from_new.is_err(), "an unsigned region passed for a signing session's");
+        assert!(taken.is_ok(), "{:?}", taken.err());
+        assert!(after.is_ok(), "{:?}", after.err());
     }
 }

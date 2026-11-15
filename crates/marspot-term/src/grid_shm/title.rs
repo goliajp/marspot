@@ -4,7 +4,7 @@
 //! about itself -- a Codex TUI can put the id of the thread it shows
 //! there, which no other observable carries.
 //!
-//! A region of its own, named after the session and created by L3, for
+//! A region of its own, named after the grid region and created by L3, for
 //! the same reason as the cluster table: the grid region is sized by L2
 //! when the pane opens. A new image of the same session takes the
 //! region over without clearing it, so the title a program set before
@@ -17,12 +17,16 @@
 //! ```
 //!
 //! `seq` is odd while the writer is inside a write; a reader copies the
-//! text between two equal, even reads of it.
+//! text between two equal, even reads of it.  The region ends with
+//! whose it is -- see [`super::ident`].
 
-use std::ffi::CString;
+use std::ffi::CStr;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
+
+use super::ident::{self, Identity, SessionRegions};
+use super::names::Side;
 
 const MAGIC: u32 = 0x4d_53_54_31; // "MST1"
 const VERSION: u32 = 1;
@@ -31,17 +35,6 @@ const HEADER: usize = 16;
 /// Bytes in the region: one page. The terminal keeps at most 256
 /// characters of a title, at most 1 KiB of UTF-8.
 pub const CAPACITY: usize = 16 * 1024;
-
-/// The region's name for session `id`. Under macOS's ~31-byte limit.
-pub fn region_name(id: u64) -> CString {
-    CString::new(format!("/msp-t-{id}")).expect("no interior NUL")
-}
-
-/// Remove session `id`'s region.
-pub fn delete(id: u64) {
-    let name = region_name(id);
-    unsafe { libc::shm_unlink(name.as_ptr()) };
-}
 
 /// Writer side, owned by the session that publishes the grid.
 pub struct TitleWriter {
@@ -58,42 +51,30 @@ pub struct TitleWriter {
 unsafe impl Send for TitleWriter {}
 
 impl TitleWriter {
-    /// Create session `id`'s region, or take over the one a previous
-    /// image of the same session left behind.
-    pub fn open(id: u64) -> io::Result<Self> {
-        let name = region_name(id);
-        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o600) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let size = region_size(&fd)?;
-        if size == 0 {
-            if unsafe { libc::ftruncate(fd.as_raw_fd(), CAPACITY as libc::off_t) } != 0 {
-                return Err(io::Error::last_os_error());
-            }
-        } else if size != CAPACITY {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "title region of another size"));
-        }
-        let base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                CAPACITY,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd.as_raw_fd(),
-                0,
-            )
-        };
-        if base == libc::MAP_FAILED {
-            return Err(io::Error::last_os_error());
-        }
-        let base = base as *mut u8;
+    /// Create `owner`'s region under `name`, or take over the one a
+    /// previous image of the same session left there.
+    pub fn open(name: &CStr, owner: Identity) -> io::Result<Self> {
+        let (fd, base) = ident::open_owned(name, CAPACITY, owner)?;
         unsafe {
             std::ptr::write_unaligned(base as *mut u32, MAGIC);
             std::ptr::write_unaligned(base.add(4) as *mut u32, VERSION);
         }
         Ok(Self { _fd: fd, base, last: String::new() })
+    }
+
+    /// Start from the title `old` holds: the session is leaving that
+    /// region for this one, and the program's title is only there.
+    pub(super) fn carry_from(&mut self, old: &Self) {
+        self.last.clone_from(&old.last);
+        let seq = self.seq();
+        let s = seq.load(Ordering::Relaxed);
+        seq.store(s.wrapping_add(1) | 1, Ordering::Relaxed);
+        fence(Ordering::Release);
+        unsafe {
+            std::ptr::copy(old.base.add(12), self.base.add(12), CAPACITY - ident::BYTES - 12);
+        }
+        fence(Ordering::Release);
+        seq.store((s | 1).wrapping_add(1), Ordering::Release);
     }
 
     /// Publish `title` if it differs from the last one seen.
@@ -128,27 +109,22 @@ impl Drop for TitleWriter {
     }
 }
 
-/// Session `id`'s title. `Ok(None)` when it has no region -- an L3 from
-/// before titles were published -- or one this build does not read.
-pub fn read(id: u64) -> io::Result<Option<String>> {
-    let name = region_name(id);
-    let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
-    if fd < 0 {
-        let e = io::Error::last_os_error();
-        return if e.kind() == io::ErrorKind::NotFound { Ok(None) } else { Err(e) };
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    if region_size(&fd)? != CAPACITY {
+/// The title of the session `regions` names. `Ok(None)` when it has
+/// no region -- an L3 from before titles were published -- or one this
+/// build does not read, or the region there is another session's.
+pub fn read(regions: &SessionRegions) -> io::Result<Option<String>> {
+    let Some(name) = regions.side_name(Side::Title) else {
         return Ok(None);
-    }
-    let base = unsafe {
-        libc::mmap(std::ptr::null_mut(), CAPACITY, libc::PROT_READ, libc::MAP_SHARED, fd.as_raw_fd(), 0)
     };
-    if base == libc::MAP_FAILED {
-        return Err(io::Error::last_os_error());
-    }
-    let base = base as *const u8;
-    let out = unsafe { read_mapped(base) };
+    let base = match ident::map_readonly(&name, CAPACITY) {
+        Ok(base) => base,
+        Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::InvalidData) => {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+    let ours = regions.admit(unsafe { ident::read(base.add(CAPACITY - ident::BYTES)) }).is_ok();
+    let out = if ours { unsafe { read_mapped(base) } } else { None };
     unsafe { libc::munmap(base as *mut libc::c_void, CAPACITY) };
     Ok(out)
 }
@@ -181,51 +157,63 @@ unsafe fn read_mapped(base: *const u8) -> Option<String> {
     None
 }
 
-fn region_size(fd: &OwnedFd) -> io::Result<usize> {
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(st.st_size as usize)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn session_id() -> u64 {
-        // unique per test process and call, far from real session ids
+    /// A session no other test or live pane uses, and the name of
+    /// its title region.
+    fn session() -> (SessionRegions, std::ffi::CString, Identity) {
         static N: AtomicU32 = AtomicU32::new(0);
-        (u64::from(std::process::id()) << 20) | u64::from(N.fetch_add(1, Ordering::Relaxed)) | (1 << 62)
+        let id = (u64::from(std::process::id()) << 20) | u64::from(N.fetch_add(1, Ordering::Relaxed)) | (1 << 62);
+        let regions = SessionRegions::new(super::super::session_shm_name(id), id, true);
+        let (name, owner) = (regions.side_name(Side::Title).unwrap(), regions.owner());
+        (regions, name, owner)
     }
 
     #[test]
     fn a_title_round_trips_and_a_missing_region_reads_as_none() {
-        let id = session_id();
-        assert_eq!(read(id).unwrap(), None);
-        let mut w = TitleWriter::open(id).unwrap();
-        assert_eq!(read(id).unwrap().as_deref(), Some(""));
+        let (regions, name, owner) = session();
+        assert_eq!(read(&regions).unwrap(), None);
+        let mut w = TitleWriter::open(&name, owner).unwrap();
+        assert_eq!(read(&regions).unwrap().as_deref(), Some(""));
         w.update("⠋ marspot | 01a161ee-50e9-7b50-8ad6-4bcae...");
-        assert_eq!(read(id).unwrap().as_deref(), Some("⠋ marspot | 01a161ee-50e9-7b50-8ad6-4bcae..."));
+        assert_eq!(read(&regions).unwrap().as_deref(), Some("⠋ marspot | 01a161ee-50e9-7b50-8ad6-4bcae..."));
         w.update("marspot");
-        assert_eq!(read(id).unwrap().as_deref(), Some("marspot"));
-        delete(id);
-        assert_eq!(read(id).unwrap(), None);
+        assert_eq!(read(&regions).unwrap().as_deref(), Some("marspot"));
+        regions.delete();
+        assert_eq!(read(&regions).unwrap(), None);
+    }
+
+    #[test]
+    fn a_writer_that_leaves_one_region_for_another_takes_its_title_along() {
+        let (from, from_name, from_owner) = session();
+        let (to, to_name, to_owner) = session();
+        let mut old = TitleWriter::open(&from_name, from_owner).unwrap();
+        old.update("codex | 01a1");
+        let mut new = TitleWriter::open(&to_name, to_owner).unwrap();
+        new.carry_from(&old);
+        // the terminal's title has not changed, so nothing is written
+        new.update("codex | 01a1");
+        let got = read(&to);
+        from.delete();
+        to.delete();
+        assert_eq!(got.unwrap().as_deref(), Some("codex | 01a1"));
     }
 
     /// A new image of a session starts with an empty terminal title; the
     /// program's title stays until the program sets another.
     #[test]
     fn a_new_writer_keeps_the_title_until_the_terminal_sets_one() {
-        let id = session_id();
-        let mut old = TitleWriter::open(id).unwrap();
+        let (regions, name, owner) = session();
+        let mut old = TitleWriter::open(&name, owner).unwrap();
         old.update("codex | 01a1");
         drop(old);
-        let mut new = TitleWriter::open(id).unwrap();
+        let mut new = TitleWriter::open(&name, owner).unwrap();
         new.update("");
-        assert_eq!(read(id).unwrap().as_deref(), Some("codex | 01a1"));
+        assert_eq!(read(&regions).unwrap().as_deref(), Some("codex | 01a1"));
         new.update("codex | 01a2");
-        assert_eq!(read(id).unwrap().as_deref(), Some("codex | 01a2"));
-        delete(id);
+        assert_eq!(read(&regions).unwrap().as_deref(), Some("codex | 01a2"));
+        regions.delete();
     }
 }

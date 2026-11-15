@@ -71,6 +71,19 @@ pub(super) fn plan(claude_pids: &[i32], codex_panes: &[u64], pane_of: impl Fn(i3
     (claude.into_iter().filter(|(sid, _)| !crowded.contains(sid)).collect(), crowded)
 }
 
+/// The agent panes that have no inbox, as `(pane, the agent's pid,
+/// agent)`, from every pane an agent was seen in.  A pane that has a
+/// binding is not one of them, whatever a view a tick older says.
+pub(super) fn without_inbox(
+    seen: impl Iterator<Item = (u64, i32, &'static str)>,
+    bound: &HashSet<u64>,
+) -> Vec<(u64, i32, &'static str)> {
+    let mut out: Vec<(u64, i32, &'static str)> = seen.filter(|(sid, _, _)| !bound.contains(sid)).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 impl Worker {
     /// Bring every name in line with its pane: the table, and the Codex
     /// records.
@@ -86,7 +99,12 @@ impl Worker {
             }
         }
         let pids: Vec<i32> = claude.iter().map(|(p, _)| *p).collect();
-        let ours: Vec<u64> = self.bindings.keys().chain(self.gemini.keys()).copied().collect();
+        let bound: HashSet<u64> = self.bindings.keys().chain(self.gemini.keys()).copied().collect();
+        let codex = self.wants.iter().map(|w| (w.sid, w.codex.pid, "codex"));
+        let gemini = self.gemini_waiting.iter().map(|(sid, g)| (*sid, g.pid, "gemini"));
+        let kimi = self.kimi_waiting.iter().map(|(sid, k)| (*sid, k.pid, "kimi"));
+        let waiting = without_inbox(codex.chain(gemini).chain(kimi), &bound);
+        let ours: Vec<u64> = bound.iter().copied().chain(waiting.iter().map(|(sid, _, _)| *sid)).collect();
         let (named, crowded) = plan(&pids, &ours, |pid| look.pane_of(pid));
         for sid in &crowded {
             if self.crowded.insert(*sid) {
@@ -116,6 +134,14 @@ impl Worker {
             record.name = want.clone();
             record.name_since_ms = now;
             write_record(&dirs, record);
+        }
+        // an agent whose session is not known is there all the same:
+        // listed without an inbox, so the name it shares with a pane
+        // that has one is not taken for that pane
+        for (sid, pid, agent) in waiting {
+            if !crowded.contains(&sid) {
+                table.extend(look.entry(sid, pid, "", agent));
+            }
         }
         table.sort_by(|a, b| (&a.name, a.pid).cmp(&(&b.name, b.pid)));
         if table != self.pane_table {
@@ -152,5 +178,18 @@ mod tests {
         let (rename, crowded) = plan(&[10, 11, 20, 30, 99], &[2, 4], pane_of);
         assert_eq!(rename, vec![(3, 30)]);
         assert_eq!(crowded, HashSet::from([1, 2]));
+    }
+
+    /// Every pane an agent runs in is in the table: with an inbox when
+    /// its session is known, without one otherwise.
+    #[test]
+    fn an_agent_pane_without_a_binding_is_listed_without_an_inbox() {
+        let seen = [(1, 100, "codex"), (2, 200, "codex"), (3, 300, "gemini"), (4, 400, "kimi")];
+        let bound = HashSet::from([1, 3]);
+        assert_eq!(without_inbox(seen.into_iter(), &bound), vec![(2, 200, "codex"), (4, 400, "kimi")]);
+        // a pane with two agents and no binding counts twice, and so is crowded
+        let both = without_inbox([(5, 500, "codex"), (5, 501, "kimi")].into_iter(), &HashSet::new());
+        let (_, crowded) = plan(&[], &both.iter().map(|(sid, _, _)| *sid).collect::<Vec<_>>(), |_| None);
+        assert_eq!(crowded, HashSet::from([5]));
     }
 }

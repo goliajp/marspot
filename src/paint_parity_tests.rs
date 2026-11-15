@@ -34,6 +34,17 @@ pub(crate) fn render(paint: Paint) -> Option<Vec<u8>> {
 /// [`render`] for a frame of `W × H` pixels, built at the display
 /// scale in force.
 pub(crate) fn render_sized(paint: Paint, w: u32, h: u32) -> Option<Vec<u8>> {
+    render_with(Some(paint), w, h, |_, _| {})
+}
+
+/// [`render_sized`] with the renderer handed to `setup` before the
+/// frame is drawn, for what a frame shows that no overlay paints.
+pub(crate) fn render_with(
+    paint: Option<Paint>,
+    w: u32,
+    h: u32,
+    setup: impl FnOnce(&mut MetalRenderer, &Layout),
+) -> Option<Vec<u8>> {
     let mut renderer = match MetalRenderer::new_headless() {
         Ok(r) => r,
         Err(e) => {
@@ -65,7 +76,8 @@ pub(crate) fn render_sized(paint: Paint, w: u32, h: u32) -> Option<Vec<u8>> {
         search_overlay: None,
         seq: 1,
     };
-    *TEST_OVERLAY.lock().unwrap_or_else(|e| e.into_inner()) = Some(paint);
+    *TEST_OVERLAY.lock().unwrap_or_else(|e| e.into_inner()) = paint;
+    setup(&mut renderer, &layout);
     let mut wr = WindowRender::new();
     let views = std::slice::from_ref(&view);
     // twice: glyphs rasterised during the first frame land in the

@@ -22,6 +22,7 @@
 mod badge;
 mod hand_off;
 mod model;
+mod others;
 mod pane;
 mod peer;
 mod session;
@@ -39,6 +40,7 @@ use pane::{argv_facts, profile_of, profile_switch_op, root_from, ArgvFacts, Pane
 use session::{Asker, SessionIndex};
 
 pub(crate) use model::is_model;
+pub(crate) use others::look as look_at_processes;
 pub(crate) use pane::{config_dir, handoff_homes, launch, profile_dirs, profile_dirs_in};
 pub(crate) use peer::{peers, Peer, Peers};
 pub(crate) use session::{by_id as session_by_id, head_id as session_id_of};
@@ -280,20 +282,21 @@ impl Plugin for GeminiPlugin {
         let Some(user_home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
         let seen: Vec<Seen> = obs.sessions.iter().filter_map(|s| self.see(s, &user_home)).collect();
         let live: Vec<pidtree::ProcId> = seen.iter().map(|s| s.gemini).collect();
+        others::panes_started(live.iter().map(|g| g.start_us / 1000).min());
         self.sessions.retain(&live);
         self.starts.retain(&live);
         self.panes.retain(|sid, _| seen.iter().any(|s| s.sid == *sid));
-        let mut peers = Peers { bound: Vec::new(), all_known: true };
+        let mut peers = Peers { bound: Vec::new(), all_known: true, unbound: Vec::new() };
 
         for s in &seen {
             let cfg = config_dir(&s.root);
-            // The newest file in a directory belongs to one process.  Two
-            // that could each be its writer are both left unbound.
-            let lone = seen
-                .iter()
-                .filter(|o| o.args.session.is_none() && o.root == s.root && o.cwd == s.cwd)
-                .count()
-                == 1;
+            // The newest file in a directory belongs to one process: it
+            // is this one's only while no other gemini, in a pane or
+            // not, has been there under the same home since it started.
+            let lone = s
+                .cwd
+                .as_deref()
+                .is_some_and(|cwd| others::alone(s.gemini, &others::place(&s.root, cwd), s.gemini.start_us / 1000));
             let facts = s.cwd.as_deref().and_then(|cwd| {
                 self.sessions.facts(&Asker {
                     proc: s.gemini,
@@ -308,7 +311,10 @@ impl Plugin for GeminiPlugin {
                 (Some(f), Some(cwd)) => {
                     peers.bound.push(Peer { sid: s.sid, gemini: s.gemini, session: f.session.clone(), cwd: cwd.clone() });
                 }
-                _ => peers.all_known = false,
+                _ => {
+                    peers.all_known = false;
+                    peers.unbound.push((s.sid, s.gemini));
+                }
             }
             let profile = profile_of(&s.root);
             // What the process started with holds until its session file
