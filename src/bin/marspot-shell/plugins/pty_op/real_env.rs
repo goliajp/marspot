@@ -59,31 +59,15 @@ impl OpEnv for RealEnv {
         found.map(pidtree::ProcRow::id)
     }
     fn output_len(&self, sid: u64) -> u64 {
-        // L3 appends every byte the PTY produces to the session's
-        // bytelog, so its length is the cheapest "has anything been
-        // drawn" counter there is — one `stat`, and only while an op
+        // L3 logs every byte the PTY produces to the session's bytelog,
+        // which states how many it has logged: the cheapest "has
+        // anything been drawn" counter there is, read only while an op
         // is running.
-        marspot_term::paths::sessions_dir()
-            .join(sid.to_string())
-            .join("bytelog")
-            .metadata()
-            .map(|m| m.len())
-            .unwrap_or(0)
+        marspot_term::bytelog::stream_len(&marspot_term::paths::sessions_dir().join(sid.to_string())).unwrap_or(0)
     }
     fn output_tail(&self, sid: u64, bytes: usize) -> Vec<u8> {
-        use std::io::{Read, Seek, SeekFrom};
-        let path = marspot_term::paths::sessions_dir()
-            .join(sid.to_string())
-            .join("bytelog");
-        let Ok(mut f) = std::fs::File::open(&path) else { return Vec::new() };
-        let Ok(len) = f.metadata().map(|m| m.len()) else { return Vec::new() };
-        let from = len.saturating_sub(bytes as u64);
-        if f.seek(SeekFrom::Start(from)).is_err() {
-            return Vec::new();
-        }
-        let mut buf = Vec::with_capacity(bytes.min(len as usize));
-        let _ = f.take(bytes as u64).read_to_end(&mut buf);
-        buf
+        marspot_term::bytelog::tail(&marspot_term::paths::sessions_dir().join(sid.to_string()), bytes as u64)
+            .unwrap_or_default()
     }
     fn pane_modes(&self, sid: u64) -> Option<(u64, u32)> {
         // Same route as `output_len`: read what the session left on

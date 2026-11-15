@@ -414,7 +414,7 @@ mod testing {
     //! Shared fixtures.  Every test module under `scrollback` is a
     //! descendant of this one, so the temp-dir guard and the row
     //! builders exist once rather than per file.
-    use super::format::{FILE_HEADER_BYTES, FILE_MAGIC, read_exact_at};
+    use super::format::FILE_MAGIC;
     use super::*;
     use crate::grid::Cell;
 
@@ -490,13 +490,6 @@ mod testing {
         }
     }
 
-    pub(super) fn header_epoch(bin: &std::path::Path) -> u64 {
-        let f = std::fs::File::open(bin).expect("open bin");
-        let mut hdr = [0u8; FILE_HEADER_BYTES as usize];
-        read_exact_at(&f, &mut hdr, 0).expect("read header");
-        u64::from_le_bytes(hdr[24..32].try_into().unwrap())
-    }
-
     /// A row whose cells exercise every attribute and every colour kind,
     /// so a width or byte-order slip shows up as a wrong cell rather
     /// than slipping past on spaces.
@@ -565,12 +558,50 @@ mod testing {
         std::fs::write(idx, ib).unwrap();
     }
 
-    pub(super) fn header_version_and_abi(bin: &std::path::Path) -> (u32, u32) {
-        let b = std::fs::read(bin).unwrap();
-        (
-            u32::from_le_bytes(b[4..8].try_into().unwrap()),
-            u32::from_le_bytes(b[8..12].try_into().unwrap()),
-        )
+    /// Write a pair as a v3 or v4 build did, with `epoch` in its header:
+    /// 20-byte cells, and in v4 runs where they pack.  Independent of
+    /// the segment writer for the same reason as [`write_v2_pair`].
+    pub(super) fn write_legacy_pair(
+        bin: &std::path::Path,
+        idx: &std::path::Path,
+        version: u32,
+        rows: &[(Vec<Cell>, bool)],
+        epoch: u64,
+    ) {
+        use super::format::{REC_PACKED, encode_packed};
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(&FILE_MAGIC.to_le_bytes());
+        b.extend_from_slice(&version.to_le_bytes());
+        b.extend_from_slice(&(crate::grid::CELL_MEM_BYTES as u32).to_le_bytes());
+        b.extend_from_slice(&[0u8; 12]);
+        b.extend_from_slice(&epoch.to_le_bytes());
+        let mut ib: Vec<u8> = Vec::new();
+        for (row, wrapped) in rows {
+            ib.extend_from_slice(&(b.len() as u64).to_le_bytes());
+            let trimmed = row.iter().rposition(|c| *c != Cell::default()).map_or(0, |i| i + 1);
+            let line = &row[..trimmed];
+            let mut body = Vec::new();
+            let packed = version >= 4 && !line.is_empty() && encode_packed(line, &mut body);
+            if !packed {
+                body.clear();
+                body.extend_from_slice(Cell::slice_as_bytes(line));
+            }
+            b.extend_from_slice(&((3 + body.len()) as u32).to_le_bytes());
+            b.push(u8::from(*wrapped) | if packed { REC_PACKED } else { 0 });
+            b.extend_from_slice(&(trimmed as u16).to_le_bytes());
+            b.extend_from_slice(&body);
+        }
+        std::fs::write(bin, &b).unwrap();
+        std::fs::write(idx, ib).unwrap();
+    }
+
+    /// File a mark against local line `local` of the pair at `bin`, as
+    /// a build before segments did.
+    pub(super) fn mark_legacy(bin: &std::path::Path, epoch: u64, local: u64, mark: crate::grid::PromptMark) {
+        use std::os::unix::fs::FileExt;
+        let extras = super::sidecar::LineExtras::open_hot(bin, epoch);
+        let f = extras.marks.as_ref().expect("a marks sidecar");
+        f.write_all_at(&mark.to_bytes(), super::sidecar::HEADER_BYTES + local * 2).unwrap();
     }
 }
 
@@ -616,10 +647,10 @@ mod tests {
                 .any(|n| n.starts_with("scrollback.idx.corrupt-")),
             "idx not quarantined: {entries:?}"
         );
-        assert_eq!(
-            std::fs::metadata(&bin).unwrap().len(),
-            32,
-            "fresh bin must be header-only"
+        assert!(!bin.exists(), "nothing of the old format is made again");
+        assert!(
+            entries.iter().any(|n| n.starts_with("scrollback.seg.")),
+            "the fresh history is in segments: {entries:?}"
         );
         drop(sb);
         let _ = std::fs::remove_dir_all(&dir);
@@ -710,11 +741,9 @@ mod tests {
 
         sb.restart(12);
         assert_ne!(sb.epoch(), before, "index 0 now means a different line");
-        assert_eq!(
-            header_epoch(&tmp.bin()),
-            sb.epoch(),
-            "and the file says so too"
-        );
+        drop(sb);
+        let sb = Scrollback::file(tmp.bin(), tmp.idx(), 12, 4).expect("reopen");
+        assert_eq!(sb.len(), 0, "and the files say so too");
     }
 
     /// A4: snapshot v2 replay must write its scrollback section

@@ -39,12 +39,12 @@ pub const REPLAY_TAIL: u64 = 512 * 1024;
 /// `extra_lines` asks for that many lines of what has already scrolled
 /// off the top, which the replay still has: 0 gives the visible screen.
 pub fn screen_text(
-    bytelog: &std::path::Path,
+    session_dir: &std::path::Path,
     cols: u16,
     rows: u16,
     extra_lines: u16,
 ) -> std::io::Result<String> {
-    let bytes = tail(bytelog, REPLAY_TAIL)?;
+    let bytes = marspot_term::bytelog::tail(session_dir, REPLAY_TAIL)?;
     let mut term = Terminal::new(cols.max(1), rows.max(1));
     term.feed(&bytes);
     Ok(render(&term, extra_lines))
@@ -60,11 +60,11 @@ pub fn screen_text(
 /// *in* the box.  So the box is found from the cursor, dim cells in it
 /// are the program's, and every row of it is read, not just the first.
 pub fn composer_text(
-    bytelog: &std::path::Path,
+    session_dir: &std::path::Path,
     cols: u16,
     rows: u16,
 ) -> std::io::Result<Option<String>> {
-    let bytes = tail(bytelog, REPLAY_TAIL)?;
+    let bytes = marspot_term::bytelog::tail(session_dir, REPLAY_TAIL)?;
     let mut term = Terminal::new(cols.max(1), rows.max(1));
     term.feed(&bytes);
     Ok(composer_of(term.grid()))
@@ -223,7 +223,7 @@ fn joint(prev: &[Glyph], next: &[Glyph], cols: u16, codex: bool) -> &'static str
 /// `cols` x `rows`: what to show for a session that is running while
 /// no frame of it can be read.  Not exact for a full-screen program.
 pub fn replayed(sid: u64, cols: u16, rows: u16) -> std::io::Result<Terminal> {
-    let bytes = tail(&bytelog_of(sid), REPLAY_TAIL)?;
+    let bytes = marspot_term::bytelog::tail(&session_dir_of(sid), REPLAY_TAIL)?;
     let mut term = Terminal::new(cols.max(1), rows.max(1));
     term.feed(&bytes);
     Ok(term)
@@ -234,13 +234,13 @@ pub fn replayed(sid: u64, cols: u16, rows: u16) -> std::io::Result<Terminal> {
 pub fn screen(sid: u64, extra_lines: u16) -> std::io::Result<String> {
     let entry = marspot_term::session_registry::read_session_entry(sid)?;
     let Some(frame) = live_frame(&entry)? else {
-        return screen_text(&bytelog_of(sid), entry.cols, entry.rows, extra_lines);
+        return screen_text(&session_dir_of(sid), entry.cols, entry.rows, extra_lines);
     };
     let grid = grid_of(&frame);
     let mut out: Vec<String> = Vec::new();
     if extra_lines > 0 {
         // history is only in the record
-        let bytes = tail(&bytelog_of(sid), REPLAY_TAIL)?;
+        let bytes = marspot_term::bytelog::tail(&session_dir_of(sid), REPLAY_TAIL)?;
         let mut term = Terminal::new(entry.cols.max(1), entry.rows.max(1));
         term.feed(&bytes);
         let g = term.grid();
@@ -267,7 +267,7 @@ pub fn screen(sid: u64, extra_lines: u16) -> std::io::Result<String> {
 pub fn composer(sid: u64) -> std::io::Result<Option<String>> {
     let entry = marspot_term::session_registry::read_session_entry(sid)?;
     let Some(frame) = live_frame(&entry)? else {
-        return composer_text(&bytelog_of(sid), entry.cols, entry.rows);
+        return composer_text(&session_dir_of(sid), entry.cols, entry.rows);
     };
     Ok(composer_in_frame(&frame))
 }
@@ -306,8 +306,9 @@ fn live_frame(
     }
 }
 
-fn bytelog_of(sid: u64) -> std::path::PathBuf {
-    marspot_term::paths::sessions_dir().join(sid.to_string()).join("bytelog")
+/// Where pane `sid`'s byte log is kept.
+fn session_dir_of(sid: u64) -> std::path::PathBuf {
+    marspot_term::paths::sessions_dir().join(sid.to_string())
 }
 
 /// A grid holding the frame's cells and cursor, so the readers written
@@ -321,21 +322,6 @@ fn grid_of(frame: &marspot_term::grid_shm::Frame) -> marspot_term::grid::Grid {
     grid.mirror_clusters(frame.clusters.iter().map(|(c, r, t)| (*c, *r, t.as_str())));
     grid.set_cursor(frame.cursor_col, frame.cursor_row);
     grid
-}
-
-/// The last `n` bytes of a file, or all of it when it is shorter.
-fn tail(path: &std::path::Path, n: u64) -> std::io::Result<Vec<u8>> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path)?;
-    let len = f.metadata()?.len();
-    // Start at a byte boundary we chose, not one that splits a UTF-8
-    // sequence or an escape: the parser resynchronises within a few
-    // bytes either way, and the alternative — scanning backwards for a
-    // safe point — is work for no visible gain.
-    f.seek(SeekFrom::Start(len.saturating_sub(n)))?;
-    let mut buf = Vec::with_capacity(n.min(len) as usize);
-    f.read_to_end(&mut buf)?;
-    Ok(buf)
 }
 
 /// The grid as text: `extra_lines` of scrollback, then the screen,
@@ -409,13 +395,17 @@ fn row_text_of(
 mod tests {
     use super::*;
 
+    /// A session directory whose log holds `bytes`, in a file of the
+    /// rotating pair's format: what a reader finds for a pane whose L3
+    /// predates segments, and the bytes any log gives back.
     fn write(name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
             "marspot-read-{}-{name}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
-        std::fs::write(&p, bytes).unwrap();
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("bytelog"), bytes).unwrap();
         p
     }
 
@@ -433,7 +423,7 @@ mod tests {
         let text = screen_text(&p, 40, 6, 0).unwrap();
         assert_eq!(text, "AFTER REPAINT");
         assert!(!text.contains("first line"), "the erased frame is gone");
-        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_dir_all(p);
     }
 
     /// Blank rows below the content are not content.
@@ -441,7 +431,7 @@ mod tests {
     fn trailing_blank_rows_are_dropped() {
         let p = write("blanks", b"one\r\ntwo\r\n");
         assert_eq!(screen_text(&p, 20, 24, 0).unwrap(), "one\ntwo");
-        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_dir_all(p);
     }
 
     /// Asking for scrollback returns what scrolled off, oldest first,
@@ -465,7 +455,7 @@ mod tests {
         let six = with_history.find("line 6").unwrap();
         let ten = with_history.find("line 10").unwrap();
         assert!(six < ten, "history must come first: {with_history:?}");
-        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_dir_all(p);
     }
 
     /// A wide character occupies two cells; the second is a sentinel,
@@ -480,7 +470,7 @@ mod tests {
         let text = screen_text(&p, 40, 4, 0).unwrap();
         assert_eq!(text, "可以 /clear 了\n继续 autorun");
         assert!(!text.contains('\0'), "no sentinels in what a caller reads");
-        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_dir_all(p);
     }
 
     /// A pane that has said nothing reads as nothing — not an error.
@@ -488,7 +478,7 @@ mod tests {
     fn an_empty_pane_reads_as_empty() {
         let p = write("empty", b"");
         assert_eq!(screen_text(&p, 40, 10, 0).unwrap(), "");
-        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_dir_all(p);
     }
 
     /// A missing bytelog is an error the caller should see, not an
@@ -517,7 +507,7 @@ mod tests {
     fn composer_of(name: &str, bytes: &[u8]) -> Option<String> {
         let p = write(name, bytes);
         let got = composer_text(&p, 40, 10).unwrap();
-        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_dir_all(p);
         got
     }
 
@@ -614,7 +604,7 @@ mod tests {
     fn composer_at_73(name: &str, bytes: &[u8]) -> Option<String> {
         let p = write(name, bytes);
         let got = composer_text(&p, 73, 20).unwrap();
-        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_dir_all(p);
         got
     }
 
@@ -735,7 +725,7 @@ mod tests {
         let p = write("huge", &b);
         let text = screen_text(&p, 20, 4, 0).unwrap();
         assert_eq!(text, "the end");
-        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_dir_all(p);
     }
 
     /// A frame as the session would publish it, taken from a grid that

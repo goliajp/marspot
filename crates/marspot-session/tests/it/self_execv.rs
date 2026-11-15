@@ -31,7 +31,7 @@ pub(crate) fn id() -> u64 {
 /// `/var/folders`, and the session's socket inside it overflows the
 /// 104 bytes a socket path may have, so the L3 cannot bind and exits.
 pub(crate) struct Sandbox {
-    env: EnvGuard,
+    pub(crate) env: EnvGuard,
     dir: PathBuf,
 }
 
@@ -215,10 +215,15 @@ impl Link {
 /// signature and macOS will not exec it, so the copy is re-signed
 /// adhoc and verified before anything is signalled.
 pub(crate) fn stage(state: &Path, differ: bool) -> PathBuf {
+    stage_from(state, bin(), differ)
+}
+
+/// [`stage`], of the session binary at `src`.
+pub(crate) fn stage_from(state: &Path, src: &Path, differ: bool) -> PathBuf {
     let dir = state.join("binaries/current");
     std::fs::create_dir_all(&dir).unwrap();
     let dst = dir.join("marspot-session");
-    let mut bytes = std::fs::read(bin()).unwrap();
+    let mut bytes = std::fs::read(src).unwrap();
     if differ {
         let needle = marspot_term::MARSPOT_FP_TERM.as_bytes();
         let at = bytes
@@ -404,14 +409,19 @@ fn an_update_in_the_middle_of_a_flood_loses_no_line() {
     sandbox.env.set("SHELL", &script);
     let mut s = Session::spawn_with_id(bin(), COLS, ROWS, Some(id()));
     let pid = s.pid();
-    let history = |name: &str| std::fs::metadata(state.join(format!("sessions/{}/{name}", id()))).map(|m| m.len()).unwrap_or(0);
-    wait_for(20, "the flood to be well under way", || (history("bytelog") > 1 << 20).then_some(()));
+    let dir = state.join(format!("sessions/{}", id()));
+    let logged = || marspot_term::bytelog::stream_len(&dir).unwrap_or(0);
+    let filed = || {
+        marspot_term::scrollback::FileScrollback::on_disk(&dir.join("scrollback.bin"), &dir.join("scrollback.idx"))
+            .map_or(0, |(lines, _)| lines)
+    };
+    wait_for(20, "the flood to be well under way", || (logged() > 1 << 20).then_some(()));
 
     let staged = stage(&state, true).canonicalize().unwrap();
     let running = || marspot_term::platform::pid_exe_path(pid as i32).and_then(|p| p.canonicalize().ok());
     // lines filed before the old image was asked, and by the time the
     // new one is seen: the swap is between the two
-    let before_swap = history("scrollback.idx") as usize / 8;
+    let before_swap = filed() as usize;
     ask(&s, Ask::Frame);
     wait_for(30, "the pid to run the staged image", || {
         if let Some(st) = s.child.try_wait().unwrap() {
@@ -419,9 +429,9 @@ fn an_update_in_the_middle_of_a_flood_loses_no_line() {
         }
         (running().as_deref() == Some(staged.as_path())).then_some(())
     });
-    let after_swap = history("scrollback.idx") as usize / 8;
-    let at_swap = history("bytelog");
-    wait_for(20, "the flood to go on in the new image", || (history("bytelog") > at_swap + (1 << 18)).then_some(()));
+    let after_swap = filed() as usize;
+    let at_swap = logged();
+    wait_for(20, "the flood to go on in the new image", || (logged() > at_swap + (1 << 18)).then_some(()));
     std::fs::write(state.join("stop"), b"").unwrap();
 
     // the last number, on the row above the cursor, once nothing moves
@@ -439,21 +449,20 @@ fn an_update_in_the_middle_of_a_flood_loses_no_line() {
     });
     assert_eq!(lines % 10000, 0, "the program ends on a whole batch");
     // every line but the ones still on screen is in the history, once
-    let filed = lines - (ROWS as u64 - 1);
+    let lines_filed = lines - (ROWS as u64 - 1);
     // without another byte from the program: the end of a flood does
     // not wait in memory for the pane to print again
     wait_for_or(
         10,
         "every line in the index",
-        || (history("scrollback.idx") == filed * 8).then_some(()),
-        || format!(": {filed} filed, {} indexed", history("scrollback.idx") / 8),
+        || (filed() == lines_filed).then_some(()),
+        || format!(": {lines_filed} filed, {} indexed", filed()),
     );
     assert_eq!(count_in_log(&state, "L3_EXECV_INVOKE"), 1);
     s.kill();
     // The count would not show a line missing and another filed twice.
     // Where that could happen is at the swap: there, line n of the
     // history is the number n + 1.
-    let dir = state.join(format!("sessions/{}", id()));
     let filed_lines = marspot_term::scrollback::FileScrollback::open(
         dir.join("scrollback.bin"),
         dir.join("scrollback.idx"),
@@ -461,7 +470,7 @@ fn an_update_in_the_middle_of_a_flood_loses_no_line() {
         4,
     )
     .expect("the session's history opens");
-    let around_swap = before_swap.saturating_sub(1024)..(after_swap + 4096).min(filed as usize);
+    let around_swap = before_swap.saturating_sub(1024)..(after_swap + 4096).min(lines_filed as usize);
     assert!(around_swap.len() > 1024, "the swap is inside what is read back: {around_swap:?}");
     for at in around_swap {
         let text: String = filed_lines.read_line(at).expect("a filed line").iter().map(|c| c.ch).collect();
@@ -663,7 +672,7 @@ fn open_fds(pid: u32) -> usize {
     fewest
 }
 
-fn count_in_log(state: &Path, tag: &str) -> usize {
+pub(crate) fn count_in_log(state: &Path, tag: &str) -> usize {
     std::fs::read_to_string(state.join("logs/marspot.log"))
         .unwrap_or_default()
         .matches(tag)
