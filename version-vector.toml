@@ -28,4 +28,4 @@
 
 shell   = "0.7.486"  # the claude badge reads how young a pane is from its log's stated length
 core    = "0.12.525"  # the chrome's fingerprints are folded with the fast hash, not SipHash
-session = "0.11.352"  # history and byte log in fixed-size segments written in place: no file made, renamed, grown or deleted while output flows
+session = "0.11.353"  # a pane that has stopped printing gives its reader and disk-writer buffers' pages back
