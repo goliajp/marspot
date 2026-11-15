@@ -15,6 +15,7 @@
 mod cell;
 mod numbering;
 mod packed;
+mod packed_style;
 pub use packed::PackedCell;
 mod prompt;
 mod row_hash;
