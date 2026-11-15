@@ -32,6 +32,9 @@ pub(crate) struct Peers {
     /// one.  A kimi that has not been given its first prompt has no
     /// session and does not count against this.
     pub all_known: bool,
+    /// The kimi panes that are not in `bound`: there, and with no
+    /// session anything could be sent to.
+    pub unbound: Vec<(u64, pidtree::ProcId)>,
 }
 
 /// What is typed into an idle kimi pane that has mail waiting.  It

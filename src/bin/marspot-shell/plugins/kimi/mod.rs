@@ -31,6 +31,7 @@ use marspot_peer::registry::Status;
 
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_API_VERSION};
 use crate::observe::Proc;
+use crate::plugins::beside::{self, Beside};
 use crate::plugins::{handoff, pidtree, pty_op};
 use marspot::ui::strings::{self, Arg};
 
@@ -170,6 +171,14 @@ pub struct KimiPlugin {
     woken: HashSet<u64>,
     /// What is known against each account, and what was done about it.
     balance: balance::Balance,
+    /// Every kimi there has been, in a pane or not, by home and
+    /// directory.
+    beside: Beside,
+}
+
+/// What kimi keeps sessions apart by.
+fn place(home: &Path, cwd: &str) -> String {
+    format!("{}\n{cwd}", home.display())
 }
 
 impl KimiPlugin {
@@ -183,10 +192,11 @@ impl KimiPlugin {
             before: HashMap::new(),
             woken: HashSet::new(),
             balance: balance::Balance::default(),
+            beside: Beside::default(),
         }
     }
 
-    fn see(&mut self, host: &dyn PluginHost, s: &crate::observe::Session, user_home: &Path, crowded: &[(PathBuf, String)]) -> Option<u64> {
+    fn see(&mut self, host: &dyn PluginHost, s: &crate::observe::Session, user_home: &Path) -> Option<u64> {
         if s.entry.shell_child_pid <= 0 {
             return None;
         }
@@ -195,7 +205,9 @@ impl KimiPlugin {
         let home = home_from(self.env.value(&kimi.row, "KIMI_CODE_HOME"), user_home);
         let env_model = self.env.value(&kimi.row, "KIMI_MODEL_NAME").filter(|m| config::plain(m));
         let cwd = pidtree::proc_cwd(proc.pid).map(|c| c.to_string_lossy().into_owned());
-        let lone = cwd.as_ref().is_some_and(|c| crowded.iter().filter(|(h, d)| *h == home && d == c).count() == 1);
+        // the newest session in a directory is this kimi's only while no
+        // other kimi has been there, under the same home, since it started
+        let lone = cwd.as_ref().is_some_and(|c| self.beside.alone(proc, &place(&home, c), kimi.row.start_us / 1000));
         let started = SystemTime::UNIX_EPOCH + Duration::from_micros(kimi.row.start_us);
         let (session, facts) = match self.sessions.look(&Asker { proc, started, home: &home, cwd: cwd.as_deref(), lone }) {
             Some((id, facts)) => (Some(id), facts),
@@ -342,25 +354,28 @@ impl Plugin for KimiPlugin {
         let obs = crate::observe::shared().latest();
         self.env.prune(&obs);
         let Some(user_home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
-        // every kimi's home and directory, to tell the ones that share both
-        let mut crowded: Vec<(PathBuf, String)> = Vec::new();
-        for s in &obs.sessions {
-            if let Some(kimi) = agent_in(&s.descendants)
-                && let Some(cwd) = pidtree::proc_cwd(kimi.row.pid)
-            {
-                let home = home_from(self.env.value(&kimi.row, "KIMI_CODE_HOME"), &user_home);
-                crowded.push((home, cwd.to_string_lossy().into_owned()));
-            }
+        // every kimi on the machine, in a pane or not, with its home and
+        // directory, to tell the ones that have had both to themselves
+        let mut alive = Vec::new();
+        for row in obs.table.rows().iter().filter(|r| looks_like_kimi(r)) {
+            let home = home_from(self.env.value(row, "KIMI_CODE_HOME"), &user_home);
+            let cwd = pidtree::proc_cwd(row.pid).map(|c| c.to_string_lossy().into_owned());
+            alive.push((row.id(), cwd.map(|c| place(&home, &c))));
         }
-        let seen: Vec<u64> = obs.sessions.iter().filter_map(|s| self.see(host, s, &user_home, &crowded)).collect();
+        let oldest = obs.sessions.iter().filter_map(|s| agent_in(&s.descendants)).map(|k| k.row.start_us / 1000).min();
+        self.beside.note(alive, beside::now_ms(), oldest);
+        let seen: Vec<u64> = obs.sessions.iter().filter_map(|s| self.see(host, s, &user_home)).collect();
         self.sessions.retain(|id| obs.has(id));
         self.before.retain(|id, _| obs.has(*id));
         self.panes.retain(|sid, _| seen.contains(sid));
         let activity = self.panes.iter().map(|(sid, p)| (*sid, activity_of(p.facts.as_ref().map(|f| f.status)))).collect();
         *ACTIVITY.lock().unwrap() = Some(activity);
 
-        let mut peers = Peers { bound: Vec::new(), all_known: true };
+        let mut peers = Peers { bound: Vec::new(), all_known: true, unbound: Vec::new() };
         for (sid, p) in &self.panes {
+            if p.session.is_none() || p.cwd.is_none() {
+                peers.unbound.push((*sid, p.proc));
+            }
             match (&p.session, &p.cwd) {
                 (Some(session), Some(cwd)) => peers.bound.push(Peer {
                     sid: *sid,
@@ -377,6 +392,7 @@ impl Plugin for KimiPlugin {
             }
         }
         peers.bound.sort_by_key(|p| p.sid);
+        peers.unbound.sort_by_key(|(sid, _)| *sid);
         peer::publish(peers);
         self.keep_on_usable_accounts(host);
         self.wake(host);
@@ -478,5 +494,22 @@ mod tests {
         assert_eq!(shown_before_a_session(true, None, &home), s(Some("k3"), Some("high")));
         assert_eq!(shown_before_a_session(true, Some("mock"), &home), s(Some("mock"), None), "the environment's model comes first");
         assert_eq!(shown_before_a_session(false, None, &home), s(None, None), "its arguments may have named another model");
+    }
+
+    /// A kimi that is in no pane counts, and one under another home
+    /// keeps its own sessions.
+    #[test]
+    fn a_kimi_is_alone_only_while_no_other_shares_its_home_and_directory() {
+        let me = pidtree::ProcId { pid: 10, start_us: 60_000_000 };
+        let other = pidtree::ProcId { pid: 11, start_us: 61_000_000 };
+        let (home, elsewhere) = (Path::new("/h/.kimi-code"), Path::new("/h/.kimi-code-profile-2"));
+        let mut seen = Beside::default();
+        seen.note(vec![(me, Some(place(home, "/p"))), (other, Some(place(elsewhere, "/p")))], 62_000, Some(60_000));
+        assert!(seen.alone(me, &place(home, "/p"), 60_000));
+        seen.note(vec![(me, Some(place(home, "/p"))), (other, Some(place(home, "/p")))], 63_000, Some(60_000));
+        assert!(!seen.alone(me, &place(home, "/p"), 60_000));
+        // it exits; it was there after this one started
+        seen.note(vec![(me, Some(place(home, "/p")))], 64_000, Some(60_000));
+        assert!(!seen.alone(me, &place(home, "/p"), 60_000));
     }
 }
