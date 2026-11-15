@@ -783,10 +783,11 @@ mod tests {
         })
         .expect("spawn");
 
-        spin_until(&mut s, 1000, |s| s.is_exited());
+        // the reader marks the session exited and then fires the wake:
+        // on a slow runner a look in between sees the one and not yet
+        // the other
+        spin_until(&mut s, 5000, |s| s.is_exited() && woke.load(Ordering::Relaxed) >= 1);
         assert!(s.is_exited());
-        // EOF wake always fires; reader-thread chunks may add more.
-        assert!(woke.load(Ordering::Relaxed) >= 1);
     }
 
     #[test]
