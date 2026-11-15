@@ -32,12 +32,16 @@ fn fixture() -> Option<Fixture> {
 
 /// Lay the terminal's grid out into `caches`, as frame `seq`.
 fn lay(f: &mut Fixture, term: &Terminal, seq: u64, caches: &mut Vec<PaneInstanceCache>) -> BuildStats {
+    lay_titled(f, term, seq, "", caches)
+}
+
+fn lay_titled(f: &mut Fixture, term: &Terminal, seq: u64, title: &str, caches: &mut Vec<PaneInstanceCache>) -> BuildStats {
     let view = SessionView {
         grid: term.grid(),
         view_offset: 0,
         cursor_visible: true,
         focused: true,
-        title: "",
+        title,
         selection: None,
         ime_preedit: "",
         dormant: false,
@@ -213,4 +217,19 @@ fn the_frame_after_scrolling_keys_every_row_and_the_next_patches() {
     let stats = lay(&mut f, &term, 5, &mut patched);
     assert!((1..=2).contains(&stats.rows_rebuilt), "{} rows laid out for one character", stats.rows_rebuilt);
     same_as_from_nothing(&mut f, &term, 5, &patched, "after a patch");
+}
+
+/// A pane's title strip is the window's: renaming a pane, or a new
+/// badge, leaves the pane's own instances as they were.
+#[test]
+fn a_renamed_pane_is_left_as_it_was() {
+    let Some(mut f) = fixture() else { return };
+    let term = Terminal::new(40, 6);
+    let mut caches = Vec::new();
+    lay_titled(&mut f, &term, 1, "build", &mut caches);
+    lay_titled(&mut f, &term, 1, "build", &mut caches);
+    let stats = lay_titled(&mut f, &term, 1, "test", &mut caches);
+    assert_eq!((stats.considered, stats.rebuilt), (1, 0), "a new title laid the pane out again");
+    let stats = lay_titled(&mut f, &term, 2, "test", &mut caches);
+    assert_eq!(stats.rebuilt, 1, "new output has to lay the pane out again");
 }

@@ -16,9 +16,11 @@ use golia_ui_core::{Inputs, NoOut, Surface, Ui};
 
 /// What moves when glyph instances kept from an earlier frame may no
 /// longer point at their glyphs: the atlas was emptied, or one of its
-/// shelves was handed to other glyphs.
+/// shelves was handed to other glyphs.  Also when an icon the shell
+/// draws for this process arrives: a frame painted before it left the
+/// icon out.
 pub fn atlas_generation(atlas: &GlyphAtlas) -> u64 {
-    atlas.rebuild_count + atlas.evict_count
+    atlas.rebuild_count + atlas.evict_count + crate::ui::system::macos::icons::arrivals()
 }
 
 /// What moves when the words or the colours of the interface do.

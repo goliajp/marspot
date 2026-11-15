@@ -99,9 +99,9 @@ pub(crate) struct PaneMetrics {
     pub(crate) title_h: f32,
 }
 
-/// The pane's own background and its title strip: what is drawn
-/// before the grid.
-pub(crate) fn paint_head(rect: &CellRect, view: &SessionView, window_focused: bool, m: &PaneMetrics, o: &mut PaneOut) {
+/// The pane's own background: what is drawn before the grid.  Its
+/// title strip is the window's (`title_strip_view`).
+pub(crate) fn paint_head(rect: &CellRect, view: &SessionView, window_focused: bool, o: &mut PaneOut) {
     // The pane in use drops to the terminal's own black and the rest
     // stay at the window's surface: that drop is the focus indicator.
     let in_use = view.focused && window_focused;
@@ -110,10 +110,6 @@ pub(crate) fn paint_head(rect: &CellRect, view: &SessionView, window_focused: bo
         size: [rect.w as f32, rect.h as f32],
         color: rgba8_of_f32(palette::pane_bg(in_use)),
     });
-    paint_title_strip(
-        rect, view, in_use, m.cell_w, m.cell_h, m.ascent, m.atlas_w, m.atlas_h, o.font, o.atlas,
-        o.cells, o.glyphs, m.gutter, m.padding, m.title_h,
-    );
 }
 
 /// What is drawn over the grid, in order: selection, link underlines,

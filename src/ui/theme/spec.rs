@@ -327,6 +327,14 @@ mod tests {
             ("card::SEPARATOR_INSET", card::SEPARATOR_INSET),
             ("table::SELECTED_INSET", table::SELECTED_INSET),
             ("control::SEGMENT_GAP", control::SEGMENT_GAP),
+            ("control::KEYCAP_GAP", control::KEYCAP_GAP),
+        ];
+        for (name, v) in gaps {
+            assert!(space::LADDER.contains(&v), "{name} = {v} is not on the ladder");
+        }
+        // the chrome's gaps in window units, half a point, where the
+        // window's ladder was laid down
+        let chrome_gaps = [
             ("chrome::TOOLBAR_GAP", chrome::TOOLBAR_GAP),
             ("chrome::VERSION_PAD_RIGHT", chrome::VERSION_PAD_RIGHT),
             ("chrome::SIDEBAR_ROW_INSET", chrome::SIDEBAR_ROW_INSET),
@@ -338,10 +346,9 @@ mod tests {
             ("chrome::MENU_DIVIDER_H", chrome::MENU_DIVIDER_H),
             ("chrome::MENU_PAD_X", chrome::MENU_PAD_X),
             ("chrome::MENU_PAD_Y", chrome::MENU_PAD_Y),
-            ("control::KEYCAP_GAP", control::KEYCAP_GAP),
         ];
-        for (name, v) in gaps {
-            assert!(space::LADDER.contains(&v), "{name} = {v} is not on the ladder");
+        for (name, v) in chrome_gaps {
+            assert!(space::LADDER.contains(&(2.0 * v)), "{name} = {v} points is not on the ladder in window units");
         }
         // The check has to be able to fail: a value between two steps
         // is not on the ladder.
@@ -366,9 +373,9 @@ mod tests {
         const { assert!(control::TOGGLE_KNOB < control::TOGGLE_H) };
         // The window's chrome: what the layout crate defines is what
         // the spec names, and a control fits what holds it.
-        assert_eq!((chrome::TOOLBAR_BUTTON, chrome::TOOLBAR_GAP), (22.0, 6.0));
-        assert_eq!((chrome::SIDEBAR_ROW_H, chrome::TITLE_H), (22.0, 22.0));
-        assert_eq!((chrome::MENU_ROW_H, chrome::MENU_PAD_X, chrome::MENU_PAD_Y), (26.0, 12.0, 6.0));
+        assert_eq!((chrome::TOOLBAR_BUTTON, chrome::TOOLBAR_GAP), (11.0, 3.0));
+        assert_eq!((chrome::SIDEBAR_ROW_H, chrome::TITLE_H), (11.0, 11.0));
+        assert_eq!((chrome::MENU_ROW_H, chrome::MENU_PAD_X, chrome::MENU_PAD_Y), (13.0, 6.0, 3.0));
         const { assert!(chrome::TOOLBAR_ICON < chrome::TOOLBAR_BUTTON) };
         const { assert!(chrome::SIDEBAR_DOT < chrome::SIDEBAR_ROW_H) };
         // A row's fill is concentric with the menu's own corner.

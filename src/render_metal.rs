@@ -58,7 +58,7 @@ use crate::render::{SessionView, SidebarEntry};
 use crate::render::HighlightSpan;
 
 use crate::frame_build::frame::{build_frame, build_instances, FormPanel};
-use crate::frame_build::pane_cache::PaneInstanceCache;
+use crate::frame_build::frame::FrameKeep;
 use crate::frame_build::glyph_resolve::resolve_cell_glyph;
 
 /// One flat rectangle the GPU reads, which is the published one.
@@ -92,7 +92,7 @@ pub use golia_ui_core::scene::GlyphInstance;
 ///
 /// Two things genuinely cannot be shared, and they live here:
 ///
-/// * `pane_caches` is indexed by a window's pane order, so window A's
+/// * `kept.panes` is indexed by a window's pane order, so window A's
 ///   slot 0 and window B's slot 0 are different panes.
 /// * `clear_bg_required` answers "does *this* window still owe a full
 ///   clear", which a resize of some other window must not satisfy.
@@ -191,7 +191,7 @@ impl RenderSplit {
 }
 
 pub struct WindowRender {
-    pane_caches: Vec<PaneInstanceCache>,
+    kept: FrameKeep,
     /// Should the next render to an IOSurface target start with a
     /// hard Clear, or load the previous frame's pixels?  Clear is
     /// only ever needed when the SHAPE of what gets painted changes
@@ -266,7 +266,7 @@ impl WindowRender {
         // Starts true: a window has never been painted, so its first
         // frame owes a full clear.
         Self {
-            pane_caches: Vec::new(),
+            kept: FrameKeep::default(),
             clear_bg_required: true,
             in_flight: None,
             instance_pool: InstanceBufferPool::default(),
@@ -1014,7 +1014,7 @@ impl MetalRenderer {
             color_glyphs_scratch,
             dots_scratch,
             ui_rects_scratch,
-            &mut wr.pane_caches,
+            &mut wr.kept,
             overlay_cells_scratch,
             overlay_glyphs_scratch,
             overlay_ui_rects_scratch,
@@ -1225,7 +1225,7 @@ impl MetalRenderer {
             color_glyphs_scratch,
             dots_scratch,
             ui_rects_scratch,
-            &mut wr.pane_caches,
+            &mut wr.kept,
             overlay_cells_scratch,
             overlay_glyphs_scratch,
             overlay_ui_rects_scratch,
@@ -1277,7 +1277,7 @@ impl MetalRenderer {
             // and a window never has two frames in flight — so the
             // frame that last read these buffers has completed.
             Some(&mut wr.instance_pool),
-            Some(&mut wr.pane_caches[..]),
+            Some(&mut wr.kept.panes[..]),
             ui_slab,
         );
         let t_canvas0 = std::time::Instant::now();
@@ -3658,7 +3658,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
-            &mut Vec::new(),
+            &mut crate::frame_build::frame::FrameKeep::default(),
             &mut Vec::new(),
             &mut Vec::new(),
             &mut overlay_rects,
@@ -3875,7 +3875,7 @@ mod tests {
                 &mut Vec::new(),
                 &mut Vec::new(),
                 &mut Vec::new(),
-                &mut Vec::new(),
+                &mut crate::frame_build::frame::FrameKeep::default(),
                 &mut Vec::new(),
                 &mut Vec::new(),
                 &mut overlay_rects,
@@ -4063,7 +4063,7 @@ mod tests {
                 None, None, None, None, None, None, None, None,
                 &mut font, &mut atlas, &mut color_atlas,
                 &mut Vec::new(), &mut glyphs, &mut Vec::new(), &mut Vec::new(),
-                &mut Vec::new(), &mut Vec::new(),
+                &mut Vec::new(), &mut crate::frame_build::frame::FrameKeep::default(),
                 &mut Vec::new(), &mut Vec::new(), &mut Vec::new(),
             );
             glyphs
@@ -4151,7 +4151,7 @@ mod tests {
             // cells, glyphs, color_glyphs, _dots
             &mut Vec::new(), &mut Vec::new(), &mut Vec::new(), &mut Vec::new(),
             // ui_rects, pane_caches
-            &mut Vec::new(), &mut Vec::new(),
+            &mut Vec::new(), &mut crate::frame_build::frame::FrameKeep::default(),
             // overlay_cells, overlay_glyphs, overlay_ui_rects
             &mut Vec::new(), &mut Vec::new(), &mut overlay_ui,
         );
@@ -4265,7 +4265,7 @@ mod tests {
             &mut color_glyphs,
             &mut dots,
             &mut Vec::new(),
-            &mut Vec::new(),
+            &mut crate::frame_build::frame::FrameKeep::default(),
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
@@ -4379,7 +4379,7 @@ mod tests {
             &mut color_glyphs,
             &mut dots,
             &mut Vec::new(),
-            &mut Vec::new(),
+            &mut crate::frame_build::frame::FrameKeep::default(),
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
@@ -4462,7 +4462,7 @@ mod tests {
             &mut color_glyphs,
             &mut dots,
             &mut Vec::new(),
-            &mut Vec::new(),
+            &mut crate::frame_build::frame::FrameKeep::default(),
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
@@ -4591,7 +4591,7 @@ mod tests {
                 &mut color_glyphs,
                 &mut dots,
                 &mut Vec::new(),
-                &mut Vec::new(),
+                &mut crate::frame_build::frame::FrameKeep::default(),
                 &mut Vec::new(),
                 &mut Vec::new(),
                 &mut Vec::new(),
@@ -4702,7 +4702,7 @@ mod tests {
             &mut color_glyphs,
             &mut dots,
             &mut Vec::new(),
-            &mut Vec::new(),
+            &mut crate::frame_build::frame::FrameKeep::default(),
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
@@ -4788,7 +4788,7 @@ mod tests {
                 &mut color_glyphs,
                 &mut dots,
                 &mut Vec::new(),
-                &mut Vec::new(),
+                &mut crate::frame_build::frame::FrameKeep::default(),
                 &mut Vec::new(),
                 &mut Vec::new(),
                 &mut Vec::new(),
