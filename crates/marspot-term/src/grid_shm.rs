@@ -957,7 +957,7 @@ mod tests {
                 "torn frame: cell mix across a resize"
             );
             (first, snap.cols)
-        });
+        }, |seen| seen.iter().map(|r| r.1).collect::<std::collections::HashSet<_>>().len() > 1);
         stop.store(true, Ordering::Relaxed);
         writer_thread.join().unwrap();
         let sizes: std::collections::HashSet<u16> = reads.iter().map(|r| r.1).collect();
@@ -1053,49 +1053,80 @@ mod tests {
                 "torn frame: cell mix detected"
             );
             (first, 0)
-        });
+        }, |_| true);
         stop.store(true, Ordering::Relaxed);
         writer_thread.join().unwrap();
     }
 
-    /// Read until 50 000 frames have been checked by `check`, and
-    /// prove the reads raced the writer rather than ran after it.
+    /// Read frames while the writer publishes, check each with
+    /// `check`, and return the distinct results.
     ///
-    /// `published` counts the writer's publishes.  A torn-frame test
-    /// whose reads all landed on one frame, or all before the writer
-    /// started, would pass against a reader with no seqlock at all, so
-    /// the writer has to have published during the reads and the reads
-    /// have to have seen several rounds.  The deadline is what a writer
-    /// that never publishes would otherwise cost: forever.
+    /// A torn-frame test passes against a reader with no seqlock at all
+    /// if its reads never overlapped a publish, so what it waits for is
+    /// the race, not a count of frames: it reads until the writer has
+    /// published 1 000 times since the first read, the reads have seen
+    /// more than one round, and `enough` holds of what they saw -- and
+    /// until 50 000 frames were checked or 100 000 reads were made,
+    /// whichever comes first.
+    ///
+    /// Counting frames alone assumed the reader and the writer run at
+    /// set speeds.  The writer here publishes back to back, and a read
+    /// comes back empty whenever a publish began while it copied: on an
+    /// idle x86 runner with the writer on another core that was 98
+    /// reads in 100, and 50 000 frames were not read in 20 s.  With the
+    /// writer taken off its core instead, 50 000 frames were read in
+    /// 30 ms, all of one or two publishes.  An empty read is a race the
+    /// seqlock caught, which is the point.
+    ///
+    /// The clock bounds only a writer or reader that has stopped: no
+    /// publish for 20 s, or no end in 45 s.
     fn read_while_written(
         reader: &GridShmReader,
         published: &std::sync::atomic::AtomicU64,
         mut check: impl FnMut(&[Cell], &GridSnapshot) -> (char, u16),
-    ) -> Vec<(char, u16)> {
+        enough: impl Fn(&std::collections::HashSet<(char, u16)>) -> bool,
+    ) -> std::collections::HashSet<(char, u16)> {
         use std::sync::atomic::Ordering;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        use std::time::{Duration, Instant};
+        let started = Instant::now();
         let mut buf = Vec::new();
-        let mut seen = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let (mut frames, mut reads) = (0u32, 0u32);
         let mut first_at = None;
-        while seen.len() < 50_000 {
+        let (mut last, mut last_moved) = (published.load(Ordering::Relaxed), started);
+        let rounds = |seen: &std::collections::HashSet<(char, u16)>| {
+            seen.iter().map(|r| r.0).collect::<std::collections::HashSet<_>>().len()
+        };
+        loop {
+            let now_published = published.load(Ordering::Relaxed);
+            let during = first_at.map_or(0, |at| now_published - at);
+            if during >= 1_000 && (frames >= 50_000 || reads >= 100_000) && rounds(&seen) > 1 && enough(&seen) {
+                break;
+            }
+            if now_published != last {
+                (last, last_moved) = (now_published, Instant::now());
+            }
             assert!(
-                std::time::Instant::now() < deadline,
-                "{} frames read in 20 s, writer at {} publishes",
-                seen.len(),
-                published.load(Ordering::Relaxed)
+                last_moved.elapsed() < Duration::from_secs(20),
+                "the writer stopped publishing, at {now_published} publishes"
             );
+            assert!(
+                started.elapsed() < Duration::from_secs(45),
+                "{frames} frames in {reads} reads, {during} publishes during them, {} rounds seen",
+                rounds(&seen)
+            );
+            if now_published == 0 {
+                // nothing to read yet, and nothing proved by reading it
+                std::thread::yield_now();
+                continue;
+            }
+            reads += 1;
             if let Some(snap) = reader.read(&mut buf, &mut Vec::new()) {
-                first_at.get_or_insert_with(|| published.load(Ordering::Relaxed));
-                seen.push(check(&buf, &snap));
+                first_at.get_or_insert(now_published);
+                seen.insert(check(&buf, &snap));
+                frames += 1;
             }
         }
-        let during = published.load(Ordering::Relaxed) - first_at.unwrap_or(0);
-        assert!(during > 0, "the writer published nothing while the reads ran");
-        let rounds: std::collections::HashSet<char> = seen.iter().map(|r| r.0).collect();
-        assert!(
-            rounds.len() > 1,
-            "every read saw the same round: the reads never raced a publish"
-        );
         seen
     }
 }
