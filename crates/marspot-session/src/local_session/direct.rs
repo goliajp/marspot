@@ -323,11 +323,23 @@ mod tests {
         assert!(lent(&s), "the pty went back to the reader at a key");
         assert_eq!(s.before_key, 0, "nothing was in the reader's hand or queued");
         let no_key = AtomicBool::new(false);
-        let before = READ_HERE.get();
-        let (n, more) = s.pump_within(pace(Some(Follow::Slice), &no_key));
-        assert!(more);
-        assert_eq!(READ_HERE.get() - before, n, "the answer was not read by the loop");
-        assert!((SLICE_BYTES - SLICE_SLACK..=SLICE_BYTES).contains(&n), "{n} bytes before a frame could follow");
+        // a pump that found the pty dry for a moment -- the writer taken
+        // off its core on a slow runner -- read what there was; the
+        // slice is told by one that stopped with more to come
+        let deadline = Instant::now() + LONG;
+        loop {
+            let before = READ_HERE.get();
+            let (n, more) = s.pump_within(pace(Some(Follow::Slice), &no_key));
+            assert_eq!(READ_HERE.get() - before, n, "the answer was not read by the loop");
+            if more {
+                assert!((SLICE_BYTES - SLICE_SLACK..=SLICE_BYTES).contains(&n), "{n} bytes before a frame could follow");
+                break;
+            }
+            assert!(Instant::now() < deadline, "the output never came faster than the loop read it");
+            if !lent(&s) {
+                turn_until(&mut s, None, |s, _| lent(s) && s.reader.as_ref().is_some_and(|r| r.in_flight() == 0));
+            }
+        }
     }
 
     /// Stopping the reader while the loop has its pty -- before an
