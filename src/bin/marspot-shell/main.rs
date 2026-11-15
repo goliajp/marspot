@@ -38,6 +38,7 @@ use marspot::shell_proto::{
     ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
 };
 
+mod apple_events;
 mod banner;
 mod core_icons;
 mod launch;
@@ -1937,14 +1938,15 @@ impl ShellApp {
         // Hand the live window frame to the successor so its window
         // opens exactly in place (no jump back to the default rect).
         let (fx, fy, fw, fh) = window_frame_pt;
-        let err = std::process::Command::new(&target)
-            .arg0(arg0)
+        let mut cmd = std::process::Command::new(&target);
+        cmd.arg0(arg0)
             .args(args.iter().skip(1))
             .env("MARSPOT_NO_REDIRECT", "1")
             .env("MARSPOT_SHELL_SELF_UPDATE", "1")
             .env("MARSPOT_BUNDLE_DIR", &bundle_dir)
-            .env("MARSPOT_RESTORE_FRAME", format!("{fx},{fy},{fw},{fh}"))
-            .exec();
+            .env("MARSPOT_RESTORE_FRAME", format!("{fx},{fy},{fw},{fh}"));
+        apple_events::mark(&mut cmd);
+        let err = cmd.exec();
         // exec only returns on failure.
         lx_event!(
             "SHELL_UPDATE_FAIL",
@@ -1954,6 +1956,44 @@ impl ShellApp {
         );
         sup_log::log("SHELL_UPDATE_FAIL", &format!("exec: {err}"));
         false
+    }
+
+    /// Replace this image with itself, because appleeventsd lost its
+    /// registration in the last exec (see `apple_events`); `n` counts
+    /// such replacements in a row.  The window flashes as in an update.
+    fn replace_image_for_apple_events(&mut self, n: u32) {
+        use std::os::unix::process::CommandExt;
+        let target = match std::env::current_exe() {
+            Ok(t) => t,
+            Err(e) => return lx_warn!("shell.ae_check.no_exe", &e.to_string()),
+        };
+        lx_event!(
+            "SHELL_AE_REPLACE",
+            "replacing the image again so that it registers for Apple events",
+            replacement = n
+        );
+        let frame = self.windows.first().and_then(|w| w.last_saved_window).map(|(x, y, w, h, _)| (x, y, w, h));
+        self.shutdown_active("apple events re-registration execv prep");
+        for w in &mut self.windows {
+            if let Some(s) = w.surfaces.take() {
+                s.release();
+            }
+            if let Some(s) = w.pending_surfaces.take() {
+                s.release();
+            }
+        }
+        let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+        let mut cmd = std::process::Command::new(&target);
+        if let Some(arg0) = args.first() {
+            cmd.arg0(arg0);
+        }
+        cmd.args(args.iter().skip(1)).env("MARSPOT_NO_REDIRECT", "1");
+        if let Some((fx, fy, fw, fh)) = frame {
+            cmd.env("MARSPOT_RESTORE_FRAME", format!("{fx},{fy},{fw},{fh}"));
+        }
+        apple_events::mark_retry(&mut cmd, n);
+        let err = cmd.exec();
+        lx_error!("shell.ae_check.exec_failed", &format!("{err}"), target = target.display());
     }
 
     /// Resolve which banner (if any) the current shell state wants
@@ -2665,6 +2705,14 @@ impl ShellApp {
                     "SIGUSR1 ignored — supervisor not idle"
                 );
             }
+        }
+
+        // after an exec of this shell: whether it is registered for
+        // Apple events (one load per tick otherwise)
+        let windows = &self.windows;
+        if let Some(n) = apple_events::tick(|| windows.iter().any(|w| w.presented), &self.proxy) {
+            // returns only if the exec failed
+            self.replace_image_for_apple_events(n);
         }
 
         // 6. Recompute the banner once per tick (no-op if nothing changed).
@@ -4345,6 +4393,12 @@ impl MarspotApp for ShellApp {
 }
 
 fn main() {
+    // the child that checks the registration: one event and out
+    if std::env::args().nth(1).as_deref() == Some(apple_events::CHECK_ARG) {
+        std::process::exit(apple_events::check_main(std::env::args().nth(2).as_deref()));
+    }
+    // before anything else: AppKit must not register this image first
+    apple_events::settle_after_exec();
     // before anything reads or writes the state directory
     if std::env::args().nth(1).as_deref() == Some(identity::LS_REFRESH_ARG) {
         identity::ls_refresh_main();
@@ -4378,6 +4432,7 @@ fn main() {
     // component="shell"; idempotent across self-exec restarts.
     marspot::logx::init("shell");
     marspot_term::signals::log_fatal_senders("L1_SIGNAL");
+    apple_events::report();
 
     // Rollback subcommands dispatch BEFORE the redirect: when
     // current/ is broken, exec'ing into it would eat the command.
