@@ -6,6 +6,8 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
+use crate::idle_pages::{Given, KEPT, WORTH_GIVING_BACK};
+
 /// How long the writer leaves buffers queued in case more follow.
 ///
 /// Every buffer written as it arrived is a thread woken, and a flood
@@ -24,6 +26,10 @@ pub(super) struct Buf {
     pub(super) side: Vec<u8>,
     /// A change of files at a point of this buffer.
     pub(super) cut: Option<Cut>,
+    /// Furthest the main bytes have reached since the buffer's pages
+    /// were last given back.
+    pub(super) high: usize,
+    pub(super) given: Given,
 }
 
 /// What the writer does to its files once it has written a buffer up to
@@ -36,10 +42,11 @@ pub(super) struct Cut {
 
 impl Buf {
     pub(super) fn sized(cap: usize) -> Self {
-        Self { main: Vec::with_capacity(cap), side: Vec::new(), cut: None }
+        Self { main: Vec::with_capacity(cap), side: Vec::new(), cut: None, high: 0, given: Given::default() }
     }
 
     pub(super) fn clear(&mut self) {
+        self.high = self.high.max(self.main.len());
         self.main.clear();
         self.side.clear();
         self.cut = None;
@@ -47,6 +54,18 @@ impl Buf {
 
     pub(super) fn is_empty(&self) -> bool {
         self.main.is_empty() && self.side.is_empty() && self.cut.is_none()
+    }
+
+    /// An empty buffer that a burst wrote far into.
+    pub(super) fn worth_giving_back(&self) -> bool {
+        self.main.is_empty() && !self.given.is_given() && self.high >= WORTH_GIVING_BACK
+    }
+
+    /// Give back the pages a burst wrote, all but the first [`KEPT`]
+    /// bytes.
+    pub(super) fn give_back(&mut self) {
+        self.given.give_back(&mut self.main, KEPT, self.high);
+        self.high = 0;
     }
 }
 
@@ -68,6 +87,8 @@ pub(super) struct Queue {
     /// The producer waits here while `depth` buffers are in flight.
     room: Condvar,
     depth: usize,
+    /// Most buffers the free list keeps.
+    keep_free: usize,
 }
 
 #[derive(Default)]
@@ -83,11 +104,52 @@ struct State {
     /// A hand-over was refused while the writer was busy, and the
     /// producer has not been told that it can be made again.
     owed: bool,
+    /// Written buffers, for the producer to fill again.  Here rather
+    /// than in a channel so that the writer can give their pages back
+    /// once it has nothing to do.
+    free: Vec<Buf>,
 }
 
 impl Queue {
-    pub(super) fn new(depth: usize) -> Self {
-        Self { state: Mutex::new(State::default()), work: Condvar::new(), room: Condvar::new(), depth }
+    /// A queue for `depth` buffers in flight, with `seed` free ones of
+    /// `cap` bytes so that the first hand-overs allocate nothing.
+    pub(super) fn new(depth: usize, seed: usize, cap: usize) -> Self {
+        let keep_free = depth + 2;
+        let mut free = Vec::with_capacity(keep_free);
+        free.extend((0..seed.min(keep_free)).map(|_| Buf::sized(cap)));
+        let state = State { free, ..State::default() };
+        Self { state: Mutex::new(state), work: Condvar::new(), room: Condvar::new(), depth, keep_free }
+    }
+
+    /// A written buffer to fill again, if the writer has one.
+    pub(super) fn take_free(&self) -> Option<Buf> {
+        self.state.lock().expect("the writer queue").free.pop()
+    }
+
+    /// One of the taken messages is done with, and this is its buffer,
+    /// cleared.
+    pub(super) fn wrote_back(&self, buf: Buf) {
+        let mut st = self.state.lock().expect("the writer queue");
+        st.writing -= 1;
+        // more than the free list keeps is dropped once the lock is
+        // let go: the next hand-over allocates
+        let extra = if st.free.len() < self.keep_free {
+            st.free.push(buf);
+            None
+        } else {
+            Some(buf)
+        };
+        drop(st);
+        self.room.notify_one();
+        drop(extra);
+    }
+
+    /// Free buffers whose pages are given back, and free buffers that a
+    /// burst wrote far into and still have theirs.
+    #[cfg(test)]
+    pub(super) fn free_pages(&self) -> (usize, usize) {
+        let st = self.state.lock().expect("the writer queue");
+        (st.free.iter().filter(|b| b.given.is_given()).count(), st.free.iter().filter(|b| b.worth_giving_back()).count())
     }
 
     /// The producer is gone: the writer ends once it has written what
@@ -177,6 +239,18 @@ impl Queue {
                 st = guard;
                 lingering = !waited.timed_out();
             } else {
+                // Nothing to do and no deadline: output has stopped.
+                // What a burst wrote far into is given back, a buffer
+                // at a time, so that a producer starting again finds
+                // the rest of the free list there.
+                if let Some(i) = st.free.iter().position(Buf::worth_giving_back) {
+                    let mut buf = st.free.swap_remove(i);
+                    drop(st);
+                    buf.give_back();
+                    st = self.state.lock().expect("the writer queue");
+                    st.free.push(buf);
+                    continue;
+                }
                 st.idle = true;
                 st = self.work.wait(st).expect("the writer queue");
                 st.idle = false;

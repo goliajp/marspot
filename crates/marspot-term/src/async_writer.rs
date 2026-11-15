@@ -39,9 +39,16 @@
 //!   scripted op sees the first frame arrive.  Waiting for 64 KiB made
 //!   a claude spinner (≈60 bytes a second) look silent for twenty
 //!   minutes and a small first frame never arrive at all (2026-09-22).
+//! * **Idle buffers give their pages back.**  Once output has stopped,
+//!   the buffers a burst wrote far into keep their allocation but hand
+//!   their pages back to the system (see [`crate::idle_pages`]): the
+//!   writer does it for the free ones when it has nothing left to do,
+//!   the producer for the one it holds at the end of a burst.  The
+//!   first 16 KiB of each stay, so the next small burst takes nothing
+//!   back; the first write past them in a buffer takes the rest back.
 
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, sync_channel};
+use std::sync::mpsc::sync_channel;
 use std::thread::JoinHandle;
 
 mod files;
@@ -82,8 +89,10 @@ impl Target {
 
 pub struct AsyncWriter {
     queue: Arc<Queue>,
-    free_rx: Receiver<Buf>,
     buf: Buf,
+    /// How full `buf` may get before a write takes the slow path: `cap`,
+    /// or less while some of its pages are given back.
+    room: usize,
     /// An empty buffer a refused `hand_off` got back, kept for the next
     /// swap rather than freed — see [`AsyncWriter::hand_off`].
     spare: Option<Buf>,
@@ -109,24 +118,36 @@ impl AsyncWriter {
     /// [`Self::to`], with what the writer thread calls once it has
     /// written what made it refuse a [`Self::hand_off`].
     fn woken_by(files: Files, cap: usize, depth: usize, retry: impl Fn() + Send + 'static) -> Self {
-        let queue = Arc::new(Queue::new(depth));
-        let (free_tx, free_rx) = sync_channel::<Buf>(depth + 2);
-        // Seed the free list so the first few handoffs don't allocate.
-        for _ in 0..2 {
-            let _ = free_tx.try_send(Buf::sized(cap));
-        }
+        // two free buffers, so the first few hand-overs don't allocate
+        let queue = Arc::new(Queue::new(depth, 2, cap));
         let taken = Arc::clone(&queue);
         let handle = std::thread::Builder::new()
             .name("marspot-async-writer".into())
-            .spawn(move || files::write_queued(files, depth, &taken, &free_tx, retry))
+            .spawn(move || files::write_queued(files, depth, &taken, retry))
             .expect("spawn async writer");
         Self {
             queue,
-            free_rx,
             buf: Buf::sized(cap),
+            room: cap,
             spare: None,
             cap,
             handle: Some(handle),
+        }
+    }
+
+    /// Fill `buf` from here on; the one filled until now is returned.
+    fn swap_in(&mut self, buf: Buf) -> Buf {
+        self.room = buf.given.room(self.cap);
+        std::mem::replace(&mut self.buf, buf)
+    }
+
+    /// The end of a burst: the empty buffer held, if a burst wrote far
+    /// into it, gives its pages back, all but what the next small burst
+    /// needs.
+    fn rest(&mut self) {
+        if self.buf.worth_giving_back() {
+            self.buf.give_back();
+            self.room = self.buf.given.room(self.cap);
         }
     }
 
@@ -155,27 +176,28 @@ impl AsyncWriter {
 
     fn hand_over(&mut self) {
         let empty = self.take_empty();
-        let full = std::mem::replace(&mut self.buf, empty);
+        let full = self.swap_in(empty);
         self.queue.push(Msg::Data(full), false);
     }
 
+    /// An empty buffer to fill whole: the one a flood fills next, or one
+    /// a flush or a write too big for the rest of a buffer starts.
     fn take_empty(&mut self) -> Buf {
-        if let Some(b) = self.spare.take() {
-            return b;
-        }
-        match self.free_rx.try_recv() {
-            Ok(mut b) => {
+        let mut b = match self.spare.take().or_else(|| self.queue.take_free()) {
+            Some(mut b) => {
                 b.clear();
                 b
             }
-            Err(_) => Buf::sized(self.cap),
-        }
+            None => Buf::sized(self.cap),
+        };
+        b.given.take_back(&mut b.main);
+        b
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
         // one comparison for the write that stays inside the buffer:
         // the scrollback makes one of these for every line
-        if self.buf.main.len() + bytes.len() >= self.cap {
+        if self.buf.main.len() + bytes.len() >= self.room {
             return self.write_to_the_brim(bytes);
         }
         self.buf.main.extend_from_slice(bytes);
@@ -187,8 +209,19 @@ impl AsyncWriter {
     /// one it grew it past `cap`, for good: fed 16 KiB at a time a
     /// bytelog handed over 64 to 80 KiB, and each of its buffers ended
     /// up twice the size it was made with.
+    ///
+    /// A buffer whose pages are given back comes here at the first
+    /// write past what it kept, and takes them back.
     #[cold]
     fn write_to_the_brim(&mut self, bytes: &[u8]) {
+        if self.buf.given.is_given() {
+            self.buf.given.take_back(&mut self.buf.main);
+            self.room = self.cap;
+            if self.buf.main.len() + bytes.len() < self.cap {
+                self.buf.main.extend_from_slice(bytes);
+                return;
+            }
+        }
         if !self.buf.main.is_empty() && self.buf.main.len() + bytes.len() > self.cap {
             self.hand_over();
         }
@@ -213,22 +246,28 @@ impl AsyncWriter {
     /// has written what kept it busy, and the producer hands over
     /// again.  Without that the last lines of a flood stayed in memory
     /// until the pane next printed something.
+    ///
+    /// The buffer it swaps in keeps any pages it has given back: what
+    /// the next burst writes into it is likely small.
     pub fn hand_off(&mut self) {
         if self.buf.is_empty() {
             self.queue.hurry();
+            self.rest();
             return;
         }
-        let mut empty = match self.spare.take().or_else(|| self.free_rx.try_recv().ok()) {
+        let mut empty = match self.spare.take().or_else(|| self.queue.take_free()) {
             Some(empty) => empty,
             None if self.queue.owe() => return,
             // the writer finished between the two looks
             None => self.take_empty(),
         };
         empty.clear();
-        let pending = std::mem::replace(&mut self.buf, empty);
+        let pending = self.swap_in(empty);
         if let Err(Msg::Data(back)) = self.queue.try_push(Msg::Data(pending)) {
-            self.spare = Some(std::mem::replace(&mut self.buf, back));
+            self.spare = Some(self.swap_in(back));
+            return;
         }
+        self.rest();
     }
 
     /// Bytes handed over but not yet known to be on disk.  Callers that
@@ -242,7 +281,7 @@ impl AsyncWriter {
     pub fn flush(&mut self) {
         let (ack_tx, ack_rx) = sync_channel::<()>(0);
         let empty = self.take_empty();
-        let pending = std::mem::replace(&mut self.buf, empty);
+        let pending = self.swap_in(empty);
         self.queue.push(Msg::Barrier(pending, ack_tx), true);
         let _ = ack_rx.recv();
     }
@@ -281,6 +320,9 @@ impl Drop for AsyncWriter {
         }
     }
 }
+
+#[cfg(test)]
+mod idle_tests;
 
 #[cfg(test)]
 mod tests {
