@@ -223,9 +223,11 @@ impl PtyReader {
                             Event::Data(there) => there,
                         };
                         rest.woke();
-                        chunk.take_back();
-                        let (len, end) = gather(&pty, &mut chunk.buf, &wakes, &in_flight, &mut turn, &ECHO, there);
+                        let room = chunk.room();
+                        let (len, end) = gather(&pty, &mut chunk.buf[..room], &wakes, &in_flight, &mut turn, &ECHO, there);
                         chunk.len = len;
+                        debug_assert!(len <= chunk.room(), "read into pages given back");
+                        chunk.take_back_if_full();
                         rest.filled(&mut chunk);
                         if len > 0 || !matches!(end, Gathered::Open { .. }) {
                             break end;

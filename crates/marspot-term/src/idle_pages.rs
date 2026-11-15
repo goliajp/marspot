@@ -27,6 +27,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// bulk output gets here.
 pub const WORTH_GIVING_BACK: usize = 32 * 1024;
 
+/// The start of a buffer that keeps its pages: a key's echo, a prompt
+/// and the start of the next burst fit there and take nothing back.
+/// Without it, the first keystrokes after a flood took back a whole
+/// buffer each, and kept it.
+pub const KEPT: usize = 16 * 1024;
+
 /// The pages of one buffer that have been given back, if any.
 ///
 /// The buffer must not be reallocated, grown past its capacity or

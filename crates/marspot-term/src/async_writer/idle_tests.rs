@@ -2,9 +2,8 @@
 
 use std::time::{Duration, Instant};
 
-use super::queue::KEPT;
 use super::*;
-use crate::idle_pages::{times_given_back, times_taken_back};
+use crate::idle_pages::{KEPT, times_given_back, times_taken_back};
 
 const CAP: usize = 64 * 1024;
 
@@ -60,16 +59,23 @@ fn a_flood_s_free_buffers_give_their_pages_back_when_the_writer_is_idle() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Everything written, and in hand an empty buffer that a flood wrote
+/// to the brim -- as the one swapped in at the end of a flood is.  The
+/// one `flush` swaps in may be one the idle writer has already given
+/// back and so taken back clean, depending on how soon it went idle.
+fn holding_a_buffer_a_flood_filled(w: &mut AsyncWriter) {
+    w.flush();
+    assert!(!w.buf.given.is_given() && w.buf.is_empty());
+    w.buf.high = CAP;
+}
+
 /// The buffer the producer holds at the end of a burst gives its pages
 /// back, all but the start that a small burst needs.
 #[test]
 fn the_buffer_held_at_the_end_of_a_burst_gives_its_pages_back() {
     let (mut w, path) = writer("held");
     flood(&mut w, 0);
-    // everything written, and an empty buffer in hand that a flood
-    // wrote far into
-    w.flush();
-    assert!(!w.buf.given.is_given());
+    holding_a_buffer_a_flood_filled(&mut w);
     w.hand_off();
     assert!(w.buf.given.is_given(), "the end of a burst gave nothing back");
     assert!(w.room >= KEPT && w.room < CAP, "room {}", w.room);
@@ -83,7 +89,7 @@ fn the_buffer_held_at_the_end_of_a_burst_gives_its_pages_back() {
 fn a_write_past_what_was_kept_takes_the_pages_back_and_arrives_whole() {
     let (mut w, path) = writer("past");
     let mut at = flood(&mut w, 0);
-    w.flush();
+    holding_a_buffer_a_flood_filled(&mut w);
     w.hand_off();
     assert!(w.buf.given.is_given());
     let taken_before = times_taken_back();
