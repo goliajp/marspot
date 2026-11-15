@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.485"  # how long a pane's output log is, and its last bytes, are read through the log, not off a file's size
+shell   = "0.7.486"  # the claude badge reads how young a pane is from its log's stated length
 core    = "0.12.513"  # a pane's screen without a frame is rebuilt from its log through the log's reader
 session = "0.11.352"  # history and byte log in fixed-size segments written in place: no file made, renamed, grown or deleted while output flows
