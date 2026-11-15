@@ -38,6 +38,7 @@ use marspot::shell_proto::{
     ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
 };
 
+mod apple_events;
 mod banner;
 mod core_icons;
 mod launch;
@@ -61,6 +62,7 @@ mod pump;
 mod receipts;
 mod reclaim;
 mod resident;
+mod self_exec;
 #[cfg(feature = "latency-trace")]
 mod screen_check;
 mod shader_warm;
@@ -1853,109 +1855,6 @@ impl ShellApp {
         }
     }
 
-    /// Task C — shell self-update.  Detect a pending shell binary,
-    /// promote it into `current/`, and `execv` over ourselves so the
-    /// new shell binary takes over the same process slot.  The window
-    /// flashes closed → open in ~100 ms; the new shell reconnects to
-    /// shelld and reattaches the user's existing sessions so terminal
-    /// content survives.
-    ///
-    /// Returns `true` if exec was attempted (caller's stack is gone
-    /// past that point, but Rust can't express it).  Returns `false`
-    /// if no pending shell was found *or* if any prep step failed.
-    ///
-    /// Reached only after `start_probe(ProbeLayer::Shell, …)` came back
-    /// good, which is what makes the promotion safe: `exec` replaces
-    /// this process, so an image that cannot run means the app is
-    /// simply gone — no window, no log line (the redirect at the top of
-    /// `main` runs before `logx::init`), every live session orphaned.
-    /// That is exactly what happened on 2026-07-26, when an adhoc-signed
-    /// binary reached `pending/` and AMFI killed the successor.
-    fn finish_shell_self_update(&mut self, window_frame_pt: (f64, f64, f64, f64)) -> bool {
-        use std::os::unix::process::CommandExt;
-        let shell_tree = match supervisor::BinaryTree::for_shell() {
-            Ok(t) => t,
-            Err(_) => return false,
-        };
-        if !shell_tree.has_pending() {
-            return false;
-        }
-        lx_event!(
-            "SHELL_UPDATE_APPLY",
-            "applying pending shell self-update"
-        );
-        sup_log::log(
-            "SHELL_UPDATE_APPLY",
-            "promoting pending/marspot-shell → current/",
-        );
-        if let Err(e) = shell_tree.promote_pending() {
-            lx_event!(
-                "SHELL_UPDATE_FAIL",
-                "shell promote_pending failed",
-                error = format!("{e}")
-            );
-            sup_log::log("SHELL_UPDATE_FAIL", &format!("promote: {e}"));
-            return false;
-        }
-        // Tear down what we can pre-exec so the new shell starts
-        // fresh.  Core child gets killed; control socket is dropped;
-        // IOSurface is released.  Anything left would be inherited as
-        // dangling fds in the new process — clean now.
-        self.shutdown_active("shell self-update execv prep");
-        // Every window's surfaces, not just one: anything left behind
-        // is inherited by the new image as a dangling fd.
-        for w in &mut self.windows {
-            if let Some(s) = w.surfaces.take() {
-                s.release();
-            }
-            if let Some(s) = w.pending_surfaces.take() {
-                s.release();
-            }
-        }
-        let target = shell_tree.current();
-        if !target.exists() {
-            lx_event!(
-                "SHELL_UPDATE_FAIL",
-                "post-promote current/marspot-shell missing — aborting exec"
-            );
-            sup_log::log("SHELL_UPDATE_FAIL", "post-promote current missing");
-            return false;
-        }
-        let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-        let arg0 = args.first().cloned().unwrap_or_else(|| target.clone().into());
-        // Pass the bundle directory so the new shell can fall back
-        // there when looking for marspot-core (the updater might
-        // have staged only shell, not core).  Computed from our own
-        // `current_exe()` parent.
-        let bundle_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| std::path::PathBuf::from("/"));
-        // Pass a marker so the new shell logs SHELL_SELF_UPDATE on
-        // startup and so the redirect-loop guard doesn't fire (the
-        // new binary IS the one we want to run).
-        // Hand the live window frame to the successor so its window
-        // opens exactly in place (no jump back to the default rect).
-        let (fx, fy, fw, fh) = window_frame_pt;
-        let err = std::process::Command::new(&target)
-            .arg0(arg0)
-            .args(args.iter().skip(1))
-            .env("MARSPOT_NO_REDIRECT", "1")
-            .env("MARSPOT_SHELL_SELF_UPDATE", "1")
-            .env("MARSPOT_BUNDLE_DIR", &bundle_dir)
-            .env("MARSPOT_RESTORE_FRAME", format!("{fx},{fy},{fw},{fh}"))
-            .exec();
-        // exec only returns on failure.
-        lx_event!(
-            "SHELL_UPDATE_FAIL",
-            "exec into current/marspot-shell failed",
-            target = target.display(),
-            error = format!("{err}")
-        );
-        sup_log::log("SHELL_UPDATE_FAIL", &format!("exec: {err}"));
-        false
-    }
-
     /// Resolve which banner (if any) the current shell state wants
     /// to show, and push it into the presenter if it changed.
     ///
@@ -2665,6 +2564,14 @@ impl ShellApp {
                     "SIGUSR1 ignored — supervisor not idle"
                 );
             }
+        }
+
+        // after an exec of this shell: whether it is registered for
+        // Apple events (one load per tick otherwise)
+        let windows = &self.windows;
+        if let Some(n) = apple_events::tick(|| windows.iter().any(|w| w.presented), &self.proxy) {
+            // returns only if the exec failed
+            self.replace_image_for_apple_events(n);
         }
 
         // 6. Recompute the banner once per tick (no-op if nothing changed).
@@ -4345,6 +4252,12 @@ impl MarspotApp for ShellApp {
 }
 
 fn main() {
+    // the child that checks the registration: one event and out
+    if std::env::args().nth(1).as_deref() == Some(apple_events::CHECK_ARG) {
+        std::process::exit(apple_events::check_main(std::env::args().nth(2).as_deref()));
+    }
+    // before anything else: AppKit must not register this image first
+    apple_events::settle_after_exec();
     // before anything reads or writes the state directory
     if std::env::args().nth(1).as_deref() == Some(identity::LS_REFRESH_ARG) {
         identity::ls_refresh_main();
@@ -4378,6 +4291,7 @@ fn main() {
     // component="shell"; idempotent across self-exec restarts.
     marspot::logx::init("shell");
     marspot_term::signals::log_fatal_senders("L1_SIGNAL");
+    apple_events::report();
 
     // Rollback subcommands dispatch BEFORE the redirect: when
     // current/ is broken, exec'ing into it would eat the command.

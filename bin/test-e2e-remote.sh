@@ -15,6 +15,9 @@
 #   E2E_SUITE_TIMEOUT=1800 bin/test-e2e-remote.sh test-multi-window.sh
 #   HOST=other-mini bin/test-e2e-remote.sh
 #   E2E_ENV=NAME=value bin/test-e2e-remote.sh      # one more variable for every suite
+#   E2E_UNTIL=+40m bin/test-e2e-remote.sh          # how long each hold of the host's lock
+#                                                  # is expected to last, for whoever queues
+#                                                  # behind it (`bench-lock status`)
 #   E2E_FEATURES=latency-trace bin/test-e2e-remote.sh measure-latency.sh
 #   REMOTE_NAME=my-tree bin/test-e2e-remote.sh     # a remote tree of its own
 #
@@ -66,6 +69,7 @@ DEFAULT_SUITES=(
   test-coalition-reclaim.sh
   test-reseat-bound.sh
   test-reopen-after-quit.sh
+  test-quit-after-update.sh
   test-cc-profile-switch.sh
   test-codex-profile-switch.sh
   test-codex-refresh.sh
@@ -112,6 +116,9 @@ GUI_UID="${GUI_UID:-501}"
 SUITE_TIMEOUT="${E2E_SUITE_TIMEOUT:-900}"
 BUILD_TIMEOUT="${E2E_BUILD_TIMEOUT:-1800}"
 MAX_WAIT="${E2E_MAX_WAIT:-3600}"
+# what each hold of the lock says about itself in `bench-lock status`
+UNTIL=""
+[[ -n ${E2E_UNTIL:-} ]] && UNTIL="--until $(printf '%q' "$E2E_UNTIL marspot e2e $REMOTE_NAME")"
 RUN_ID="$(date +%H%M%S)$$"
 # Names the remote process group of whatever is running right now, so
 # an interrupted run can stop exactly that and nothing else.
@@ -184,7 +191,7 @@ remote_sync "$HOST" --name "$REMOTE_NAME"
 if [[ ${E2E_LOCK:-heavy} != bench ]]; then
   echo "==> building release on $HOST"
   remote_tracked "source ~/.cargo/env && cd ~/$REMOTE_DIR && \
-    /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT bin/_bounded.sh $BUILD_TIMEOUT \
+    /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT $UNTIL bin/_bounded.sh $BUILD_TIMEOUT \
     sh -c 'cargo build --release ${E2E_FEATURES:+--features $E2E_FEATURES} --bin marspot-shell --bin marspot-core --bin marspot-session \
       && cargo build --release -p marspot-peer'" \
     2>&1 | tail -2 || { echo "FAIL: release build on $HOST" >&2; exit 1; }
@@ -210,10 +217,10 @@ for suite in "${SUITES[@]}"; do
   echo
   echo "════ $suite on $HOST ════"
   if [[ ${E2E_LOCK:-heavy} == bench ]]; then
-    lock="bench --max-wait $MAX_WAIT"
+    lock="bench --max-wait $MAX_WAIT $UNTIL"
     run="bin/_build_then.sh $BUILD_TIMEOUT $SUITE_TIMEOUT ${E2E_FEATURES:--} $suite"
   else
-    lock="heavy --max-wait $MAX_WAIT"
+    lock="heavy --max-wait $MAX_WAIT $UNTIL"
     run="bin/_bounded.sh $SUITE_TIMEOUT bin/$suite"
   fi
   # Short: the session sockets live under it and sun_path is 104 bytes.
