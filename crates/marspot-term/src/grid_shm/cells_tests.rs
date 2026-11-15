@@ -191,7 +191,7 @@ fn a_published_frame_of_eight_byte_cells_is_the_screen() {
         for _ in 0..(cols as usize * rows as usize / 2) {
             let r = next(&mut s);
             // the widest palette changes colour every character
-            if r % 3 == 0 || palette > 1000 {
+            if r.is_multiple_of(3) || palette > 1000 {
                 let c = r % palette;
                 bytes.extend_from_slice(format!("\x1b[38;2;{};{};{}m", c >> 16 & 0xFF, c >> 8 & 0xFF, c & 0xFF).as_bytes());
             }
