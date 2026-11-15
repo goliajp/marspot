@@ -105,6 +105,7 @@ impl Carried {
     /// The flood has ended: the next one is offered afresh.
     pub(super) fn flood_over(&mut self, lend: &Lend) {
         self.restart();
+        self.declined_for = 0;
         self.wait = DECLINED_FOR;
         lend.declined.store(false, Ordering::SeqCst);
         lend.keep_for.store(KEPT_FOR, Ordering::Relaxed);
@@ -400,6 +401,8 @@ mod tests {
         assert!(!lend.carried_here(WINDOW, took(&lend, 90)));
         carried.flood_over(&lend);
         assert!(lend.is_welcome(), "the next flood is offered afresh");
+        assert!(!window(&mut carried, &lend), "the next flood's first chunk only starts the clock");
+        assert!(!window(&mut carried, &lend), "the next flood's first rate is of it getting under way");
         lend.offer();
         for verdict in 1..KEPT_FOR {
             assert!(lend.carried_here(WINDOW, took(&lend, 110)), "the next flood given back after {verdict} verdicts");
@@ -410,7 +413,7 @@ mod tests {
         for rates in 1..DECLINED_FOR {
             assert!(!window(&mut carried, &lend), "the next flood offered again after {rates} rates");
         }
-        assert!(window(&mut carried, &lend));
+        assert!(window(&mut carried, &lend), "the next flood waits as long as the first did");
     }
 
     /// A reader whose turn has gone to another pane asks for its pty
