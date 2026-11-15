@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.482"  # an agent pane without an inbox is in the pane table and refuses what is sent to it, plus the shell draws the core's icons
-core    = "0.12.510"  # the toolbar icons are drawn by the shell, so the core never registers with LaunchServices
+shell   = "0.7.483"  # the core's icons are drawn by a short-lived drawer, so the shell never loads the symbol set
+core    = "0.12.511"  # a core run with --draw-icons draws the shell's batch of icons and exits
 session = "0.11.348"  # a shell a living shell asked for is not counted with the starts of one that died
