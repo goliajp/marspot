@@ -63,7 +63,7 @@ impl Grid {
     pub fn set_cell(&mut self, col: u16, row: u16, cell: Cell) {
         debug_assert!(col < self.cols && row < self.rows);
         let pr = self.phys_row(row);
-        self.cells[pr * self.cols as usize + col as usize] = cell;
+        self.put(pr * self.cols as usize + col as usize, cell);
         let mark = &mut self.marks[pr];
         if col >= mark.end {
             mark.end = col + 1;
@@ -79,11 +79,18 @@ impl Grid {
     /// One ring-index resolve for a run of any length.
     // as a call it cost seventeen instructions a run of text
     #[inline(always)]
-    pub fn row_and_mark_mut(&mut self, row: u16) -> (&mut [StoredCell], &mut RowMark) {
+    pub fn row_and_mark_mut(&mut self, row: u16) -> (&mut [StoredCell], &mut [u32], &mut RowMark) {
         debug_assert!(row < self.rows);
         let pr = self.phys_row(row);
         let cols = self.cols as usize;
-        (&mut self.cells[pr * cols..(pr + 1) * cols], &mut self.marks[pr])
+        let range = pr * cols..(pr + 1) * cols;
+        (&mut self.cells[range.clone()], &mut self.ids[range], &mut self.marks[pr])
+    }
+
+    /// Every row was filled with `fill`.
+    pub(super) fn reset_row_marks_for_fill(&mut self, fill: Cell) {
+        let mark = RowMark::filled(fill, self.cols);
+        self.marks.iter_mut().for_each(|m| *m = mark);
     }
 
     /// Rows were rebuilt wholesale: nothing is known about them.
@@ -187,9 +194,11 @@ mod tests {
                     7 => g.set_cell(col, row, red),
                     8 => g.set_cell(col, row, Cell::default()),
                     9 => {
-                        let (cells, mark) = g.row_and_mark_mut(row);
-                        for c in &mut cells[..=col as usize] {
+                        let id = g.pen_id(&red.attrs).expect("shared numbering");
+                        let (cells, ids, mark) = g.row_and_mark_mut(row);
+                        for (c, i) in cells[..=col as usize].iter_mut().zip(&mut ids[..=col as usize]) {
                             *c = red;
+                            *i = id;
                         }
                         mark.end = mark.end.max(col + 1);
                         mark.plain_from = mark.plain_from.max(col + 1);
@@ -201,6 +210,7 @@ mod tests {
                     _ => g.resize(2 + (next(&mut s) % 40) as u16, rows),
                 }
                 assert!(g.row_marks_hold(), "after step {step} at {cols}x{rows}");
+                g.check_styles().unwrap_or_else(|e| panic!("after step {step}: {e}"));
             }
         }
     }

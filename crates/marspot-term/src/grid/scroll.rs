@@ -95,12 +95,11 @@ impl Grid {
                     }
                 } else {
                     self.cells[start..start + used].copy_from_slice(&self.blank[..used]);
+                    self.ids[start..start + used].iter_mut().for_each(|id| *id = 0);
                 }
                 self.marks[pr] = RowMark::default();
             } else {
-                for c in &mut self.cells[start..start + cols] {
-                    *c = fill;
-                }
+                self.fill(start..start + cols, fill);
                 self.marks[pr] = RowMark::unknown(self.cols);
             }
             self.top_row += 1;
@@ -219,8 +218,7 @@ impl Grid {
                 // Avoid `&mut` aliasing: copy via an intermediate Vec
                 // when src/dst overlap (they don't in this layout, but
                 // be defensive).
-                let row_data: Vec<Cell> = self.cells[src_start..src_start + cols].to_vec();
-                self.cells[dst_start..dst_start + cols].copy_from_slice(&row_data);
+                self.copy_cells(src_start, dst_start, cols);
                 self.marks[dst] = self.marks[src];
             }
             // Continuation flags travel with their rows.
@@ -255,9 +253,7 @@ impl Grid {
             // Blank the new bottom-of-region row.
             let bot_phys = self.phys_row(bot);
             self.wrapped[bot_phys] = false;
-            for c in &mut self.cells[bot_phys * cols..bot_phys * cols + cols] {
-                *c = fill;
-            }
+            self.fill(bot_phys * cols..bot_phys * cols + cols, fill);
             self.marks[bot_phys] = RowMark::filled(fill, self.cols);
         }
         // Mirror ring eviction, exactly as `scroll_up` does: the flags
@@ -293,15 +289,12 @@ impl Grid {
                 let dst = self.phys_row(r + 1);
                 let src_start = src * cols;
                 let dst_start = dst * cols;
-                let row_data: Vec<Cell> = self.cells[src_start..src_start + cols].to_vec();
-                self.cells[dst_start..dst_start + cols].copy_from_slice(&row_data);
+                self.copy_cells(src_start, dst_start, cols);
                 self.marks[dst] = self.marks[src];
             }
             // Blank the new top-of-region row.
             let top_phys = self.phys_row(top);
-            for c in &mut self.cells[top_phys * cols..top_phys * cols + cols] {
-                *c = fill;
-            }
+            self.fill(top_phys * cols..top_phys * cols + cols, fill);
             self.marks[top_phys] = RowMark::filled(fill, self.cols);
         }
     }

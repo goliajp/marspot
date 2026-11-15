@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.488"  # the two ways the shell replaces its own image live in a module of their own
-core    = "0.12.530"  # a cell is read through the grid and stored as a type of its own
-session = "0.11.358"  # a cell is read through the grid and stored as a type of its own
+core    = "0.12.531"  # a grid numbers its cells' attributes in a table of its own, beside the cells
+session = "0.11.359"  # a grid numbers its cells' attributes in a table of its own, beside the cells
