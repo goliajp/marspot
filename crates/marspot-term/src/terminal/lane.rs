@@ -121,9 +121,12 @@ fn write_chars(cells: &mut [StoredCell], bytes: &[u8]) {
 
 /// One cell per byte, each written whole.
 #[inline(never)]
-fn write_cells(cells: &mut [StoredCell], bytes: &[u8], attrs: CellAttrs) {
+fn write_cells(cells: &mut [StoredCell], ids: &mut [u32], bytes: &[u8], attrs: CellAttrs, id: u32) {
     for (cell, &b) in cells.iter_mut().zip(bytes) {
         *cell = Cell { ch: b as char, attrs };
+    }
+    for i in &mut ids[..cells.len().min(bytes.len())] {
+        *i = id;
     }
 }
 
@@ -192,6 +195,7 @@ impl<'a> Handler<'a> {
         if cols < 2 {
             return 0;
         }
+
         let rows = self.grid.rows();
         let printable = |b: &[u8]| {
             let n = printable_run_len(b);
@@ -223,6 +227,13 @@ impl<'a> Handler<'a> {
             let (_, row) = self.grid.cursor();
             self.wrap_to_next_row(row, rows);
         }
+        // the number the pen's attributes go into the row under, taken
+        // after the wrap, whose fill may have changed the numbering; a
+        // grid numbering its cells by position leaves coloured text to
+        // the per-character path
+        let Some(pen) = self.grid.pen_id(self.attrs) else {
+            return 0;
+        };
         let plain = self.attrs.is_default();
         // The shape most runs have: ASCII that ends inside the row,
         // with a control or the end of the input behind it.  Nothing
@@ -239,7 +250,7 @@ impl<'a> Handler<'a> {
             let ends = n == bytes.len() || bytes[n] < 0x20 || bytes[n] == 0x7F || (tags && bytes[n] == b'<');
             if n <= room && ends {
                 let to = col + n;
-                let (cells, mark) = self.grid.row_and_mark_mut(row);
+                let (cells, ids, mark) = self.grid.row_and_mark_mut(row);
                 if plain && col >= mark.end as usize {
                     if n < 8 {
                         // too short to be worth a call
@@ -250,7 +261,7 @@ impl<'a> Handler<'a> {
                         write_chars(&mut cells[col..to], bytes);
                     }
                 } else {
-                    write_cells(&mut cells[col..to], bytes, *self.attrs);
+                    write_cells(&mut cells[col..to], &mut ids[col..to], bytes, *self.attrs, pen);
                     if !plain && to > mark.plain_from as usize {
                         mark.plain_from = to as u16;
                     }
@@ -281,10 +292,23 @@ impl<'a> Handler<'a> {
         // one is kept decoded
         let (mut last_at, mut last_w, mut last_col) = (0usize, 0u8, 0u16);
         let mut last_wide = head;
+        let mut pen = pen;
+        // the row written before the last wrap, once there was one
+        let mut wrapped_from: Option<u16> = None;
         let row = loop {
             let (col0, row) = self.grid.cursor();
+            if let Some(prev) = wrapped_from {
+                // the wrap may have filled a row in a colour that swept
+                // the table or numbered the grid by position: the number
+                // taken before it is not the pen's any more
+                match self.grid.pen_id(&attrs) {
+                    Some(p) => pen = p,
+                    None if idx == 0 => return 0,
+                    None => break prev,
+                }
+            }
             let mut col = col0 as usize;
-            let (cells, mark) = self.grid.row_and_mark_mut(row);
+            let (cells, ids, mark) = self.grid.row_and_mark_mut(row);
             // from here on the row holds default cells, and under the
             // default attributes a default cell only needs its
             // character replaced
@@ -320,7 +344,7 @@ impl<'a> Handler<'a> {
                     if col >= fresh {
                         write_chars(&mut cells[col..col + m], rest);
                     } else {
-                        write_cells(&mut cells[col..col + m], rest, attrs);
+                        write_cells(&mut cells[col..col + m], &mut ids[col..col + m], rest, attrs, pen);
                     }
                     col += m;
                     idx += m;
@@ -336,6 +360,8 @@ impl<'a> Handler<'a> {
                     } else {
                         cells[col] = Cell { ch: c, attrs };
                         cells[col + 1] = Cell { ch: '\0', attrs };
+                        ids[col] = pen;
+                        ids[col + 1] = pen;
                     }
                     (last_at, last_w, last_col) = (idx, 2, col as u16);
                     last_wide = c;
@@ -369,7 +395,9 @@ impl<'a> Handler<'a> {
                 // the abandoned last column is marked as padding, not
                 // a space someone typed
                 cells[cols - 1] = Cell { ch: '\0', attrs };
+                ids[cols - 1] = pen;
             }
+            wrapped_from = Some(row);
             self.wrap_to_next_row(row, rows);
         };
         let (ch, w, col) = match last_w {

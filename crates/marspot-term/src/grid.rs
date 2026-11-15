@@ -13,8 +13,13 @@
 //! phase; it will live behind the same `Grid` interface.
 
 mod cell;
+mod numbering;
+mod prompt;
+pub use prompt::PromptMark;
+pub(crate) mod style;
 mod width;
 pub use cell::*;
+pub use style::{PackedStyle, StyleTable};
 
 /// A cell as the grid stores it.  Readers outside the grid's own hot
 /// paths take [`Cell`] through [`Grid::cell`] and its siblings, so the
@@ -29,70 +34,6 @@ pub use width::{char_width, is_ambiguous_width, is_enclosed_alphanumeric};
 pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 
 use crate::scrollback::Scrollback;
-
-/// Where a shell says one command's territory ends and the next
-/// begins, from `OSC 133`.
-///
-/// A shell that emits these turns a wall of output into a sequence of
-/// commands: where the prompt was, where what you typed began, where
-/// its output began, and what it exited with. Scrolling back to "the
-/// command before this one" needs nothing more than this, and without
-/// it there is nothing to scroll to -- a terminal cannot tell a prompt
-/// from any other line that happens to start with a glyph.
-///
-/// One byte a row, beside the wrap flag, and only for the rows a shell
-/// actually marked. It is not written to disk: the scrollback record
-/// has one byte for `wrapped` and a reader decides on `!= 0`, so a
-/// spare bit in it would read as a wrapped line to a binary that
-/// predates this -- the quiet kind of wrong. Persisting it waits for
-/// the sidecar in `20261001-line-identity.md`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum PromptMark {
-    #[default]
-    None,
-    /// `OSC 133 ; A` -- a prompt starts on this row.
-    PromptStart,
-    /// `OSC 133 ; B` -- the prompt ended; what follows is what the
-    /// person typed.
-    InputStart,
-    /// `OSC 133 ; C` -- the command was sent; what follows is its
-    /// output.
-    OutputStart,
-    /// `OSC 133 ; D ; <status>` -- the command finished. `None` when
-    /// the shell reported no status, which is different from zero.
-    CommandEnd(Option<u8>),
-}
-
-impl PromptMark {
-    /// Two bytes: what kind, then the exit status for the one kind
-    /// that carries one.  Fixed width so a file of these is addressed
-    /// by line index rather than scanned.
-    pub(crate) fn to_bytes(self) -> [u8; 2] {
-        match self {
-            Self::None => [0, 0],
-            Self::PromptStart => [1, 0],
-            Self::InputStart => [2, 0],
-            Self::OutputStart => [3, 0],
-            // "the shell did not say" and "the shell said zero" are
-            // different answers and get different encodings.
-            Self::CommandEnd(None) => [4, 0],
-            Self::CommandEnd(Some(s)) => [5, s],
-        }
-    }
-
-    /// An encoding this build does not know reads as no mark, which is
-    /// the same safe failure a missing sidecar gives.
-    pub(crate) fn from_bytes(b: [u8; 2]) -> Self {
-        match b[0] {
-            1 => Self::PromptStart,
-            2 => Self::InputStart,
-            3 => Self::OutputStart,
-            4 => Self::CommandEnd(None),
-            5 => Self::CommandEnd(Some(b[1])),
-            _ => Self::None,
-        }
-    }
-}
 
 pub struct Grid {
     cols: u16,
@@ -176,6 +117,12 @@ pub struct Grid {
     /// Per physical row: where its default cells and its default
     /// attributes start.
     marks: Vec<RowMark>,
+    /// The attribute sets the cells use, numbered.
+    styles: StyleTable,
+    /// Per cell, the number of its attributes in `styles`.
+    ids: Vec<u32>,
+    /// While `styles` sweeps: the next physical row to look at.
+    sweep_row: u16,
 }
 
 /// How many rows of chrome a TUI may reserve above its scrolling
@@ -254,6 +201,9 @@ impl Grid {
             filed_blank_run: 0,
             blank: vec![StoredCell::default(); cols as usize],
             marks: vec![RowMark::default(); rows as usize],
+            styles: StyleTable::new(cols as usize * rows as usize),
+            ids: vec![0; cols as usize * rows as usize],
+            sweep_row: 0,
         }
     }
 
@@ -296,7 +246,14 @@ impl Grid {
     pub fn cell(&self, col: u16, row: u16) -> Cell {
         debug_assert!(col < self.cols && row < self.rows);
         let pr = self.phys_row(row);
-        self.expand(self.cells[pr * self.cols as usize + col as usize])
+        let idx = pr * self.cols as usize + col as usize;
+        #[cfg(debug_assertions)]
+        {
+            let mut a = self.cells[idx].attrs;
+            a._pad = [0; 3];
+            debug_assert_eq!(self.styles.get(self.ids[idx]), PackedStyle::pack(&a), "cell {idx}");
+        }
+        self.expand(self.cells[idx])
     }
 
     /// A stored cell as a reader sees it.
@@ -305,11 +262,6 @@ impl Grid {
         cell
     }
 
-    /// A cell as the grid stores it.
-    #[inline(always)]
-    fn store(&mut self, cell: Cell) -> StoredCell {
-        cell
-    }
 
     /// Put a multi-codepoint cluster in the pool and hand back the
     /// cell that points at it.
@@ -888,17 +840,18 @@ impl Grid {
         if rows > self.rows {
             // Grow: append blank rows at the bottom.  De-rotate into a
             // fresh buffer so indexing stays simple.
-            let mut new_cells = vec![StoredCell::default(); cols * rows as usize];
+            let mut new_cells = vec![Cell::default(); cols * rows as usize];
             let mut new_wrapped = vec![false; rows as usize];
             let mut new_prompt = vec![PromptMark::None; rows as usize];
             for r in 0..self.rows {
-                let src = self.phys_row(r) * cols;
                 let dst = r as usize * cols;
-                new_cells[dst..dst + cols].copy_from_slice(&self.cells[src..src + cols]);
+                for c in 0..self.cols {
+                    new_cells[dst + c as usize] = self.cell(c, r);
+                }
                 new_wrapped[r as usize] = self.wrapped[self.phys_row(r)];
                 new_prompt[r as usize] = self.prompt[self.phys_row(r)];
             }
-            self.cells = new_cells;
+            self.replace_cells(self.cols, rows, &new_cells);
             self.wrapped = new_wrapped;
             self.prompt = new_prompt;
             self.rows = rows;
@@ -920,17 +873,18 @@ impl Grid {
             self.scroll_up(push, Cell::default());
             self.cursor_row = self.cursor_row.saturating_sub(push);
         }
-        let mut new_cells = vec![StoredCell::default(); cols * rows as usize];
+        let mut new_cells = vec![Cell::default(); cols * rows as usize];
         let mut new_wrapped = vec![false; rows as usize];
         let mut new_prompt = vec![PromptMark::None; rows as usize];
         for r in 0..rows {
-            let src = self.phys_row(r) * cols;
             let dst = r as usize * cols;
-            new_cells[dst..dst + cols].copy_from_slice(&self.cells[src..src + cols]);
+            for c in 0..self.cols {
+                new_cells[dst + c as usize] = self.cell(c, r);
+            }
             new_wrapped[r as usize] = self.wrapped[self.phys_row(r)];
             new_prompt[r as usize] = self.prompt[self.phys_row(r)];
         }
-        self.cells = new_cells;
+        self.replace_cells(self.cols, rows, &new_cells);
         self.wrapped = new_wrapped;
         self.prompt = new_prompt;
         self.rows = rows;
@@ -1102,24 +1056,21 @@ impl Grid {
         while self.sb_clusters.len() > self.scrollback.len() {
             self.sb_clusters.pop_front();
         }
-        let mut new_cells = vec![StoredCell::default(); new_cols * rows as usize];
+        let mut new_cells = vec![Cell::default(); new_cols * rows as usize];
         let mut new_wrapped = vec![false; rows as usize];
         let new_prompt = vec![PromptMark::None; rows as usize];
         for (r, (cells, cont)) in segs[live_start..].iter().enumerate() {
             let dst = r * new_cols;
-            for (to, &c) in new_cells[dst..dst + cells.len()].iter_mut().zip(cells) {
-                *to = self.store(c);
-            }
+            new_cells[dst..dst + cells.len()].copy_from_slice(cells);
             let pad = pad_cell(live_start + r, &segs);
             if pad.ch == '\0' {
-                let pad = self.store(pad);
                 for c in &mut new_cells[dst + cells.len()..dst + new_cols] {
                     *c = pad;
                 }
             }
             new_wrapped[r] = *cont;
         }
-        self.cells = new_cells;
+        self.replace_cells(cols, rows, &new_cells);
         // Reflow re-cut every line; the old marks named rows that no
         // longer exist.  See `clear_scrollback`'s sibling note.
         self.prompt = new_prompt;
