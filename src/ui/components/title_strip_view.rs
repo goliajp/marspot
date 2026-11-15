@@ -35,7 +35,7 @@ impl TitleStrips<'_> {
     /// Each strip's place, words and whether its pane is in use, folded
     /// with the layout's measures.
     fn fingerprint(&self) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut h = marspot_term::fast_hash::FxHasher::default();
         let l = self.layout;
         for (view, rect) in self.views.iter().zip(&l.cells) {
             view.title.hash(&mut h);

@@ -52,7 +52,7 @@ impl SidebarFrame<'_> {
     /// Everything the picture depends on, folded: the rows' names and
     /// states, where the layout puts them, which is in use and lit.
     fn fingerprint(&self) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut h = marspot_term::fast_hash::FxHasher::default();
         let l = self.layout;
         for r in self.rows {
             r.label.hash(&mut h);
