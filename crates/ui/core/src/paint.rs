@@ -29,6 +29,9 @@ pub struct WidgetState {
     /// Focused, and the focus is being shown.
     pub focused: bool,
     pub disabled: bool,
+    /// The pointer is on another node of this node's group (see
+    /// `Node::lit_group`), for a preset that lights with its group.
+    pub lit: bool,
     pub hovered_item: u32,
     pub pressed_item: u32,
     pub focused_item: u32,
@@ -40,6 +43,7 @@ impl WidgetState {
         pressed: false,
         focused: false,
         disabled: false,
+        lit: false,
         hovered_item: NO_ITEM,
         pressed_item: NO_ITEM,
         focused_item: NO_ITEM,
@@ -104,6 +108,7 @@ fn on_widget(t: Option<Target>, n: &Node) -> (bool, u32) {
 impl<O: PaintOut> Painter<'_, O> {
     fn widget_state(&self, n: &Node) -> WidgetState {
         let disabled = n.has(flag::DISABLED);
+        let lit = n.lit_group != 0 && n.lit_group == self.lit && !disabled;
         let (hovered, hovered_item) = on_widget(self.state.hovered, n);
         let (pressed, pressed_item) = on_widget(self.state.pressed, n);
         let (focused, focused_item) = on_widget(self.state.focused, n);
@@ -112,6 +117,7 @@ impl<O: PaintOut> Painter<'_, O> {
             pressed: pressed && !disabled,
             focused: focused && self.state.focus_visible,
             disabled,
+            lit,
             hovered_item,
             pressed_item,
             focused_item,
@@ -128,11 +134,10 @@ impl<O: PaintOut> Painter<'_, O> {
         let s = &n.style;
         let radius = s.radius.resolve(0.0, self.m);
 
-        let lit = n.lit_group != 0 && n.lit_group == self.lit && !ws.disabled;
         let fill = match (n.has(flag::ACTS), ws.pressed, ws.hovered) {
             (true, true, _) => s.fill_pressed.or(s.fill_hover).or(s.fill),
             (true, false, true) => s.fill_hover.or(s.fill),
-            _ if lit => s.fill_hover.or(s.fill),
+            _ if ws.lit => s.fill_hover.or(s.fill),
             _ => s.fill,
         };
         // a container half out of a scroll region keeps the part that is in

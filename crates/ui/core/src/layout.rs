@@ -77,6 +77,9 @@ pub struct Layout {
     pub(crate) scroll: [ScrollExtent; SCROLL_SLOTS],
     /// The floating nodes, in the order they were described.
     pub(crate) floats: Vec<u32>,
+    /// The smallest rectangle round every floating node: a point
+    /// outside it is on none of them, nor on anything inside one.
+    pub(crate) float_bounds: Rect,
 }
 
 impl Layout {
@@ -120,6 +123,7 @@ impl Layout {
         self.text.resize(n, TextBox::default());
         self.scroll = [ScrollExtent::default(); SCROLL_SLOTS];
         self.floats.clear();
+        self.float_bounds = Rect::default();
         if n == 0 {
             return;
         }
@@ -133,6 +137,15 @@ impl Layout {
             let at = tree.nodes[f as usize].float_at;
             let r = self.rects[f as usize];
             self.shift(tree, f, origin.0 + at.0 - r.x, origin.1 + at.1 - r.y);
+        }
+        let mut bounds: Option<(f64, f64, f64, f64)> = None;
+        for &f in &floats {
+            let r = self.rects[f as usize];
+            let b = bounds.get_or_insert((r.x, r.y, r.right(), r.bottom()));
+            *b = (b.0.min(r.x), b.1.min(r.y), b.2.max(r.right()), b.3.max(r.bottom()));
+        }
+        if let Some((x, y, right, bottom)) = bounds {
+            self.float_bounds = Rect::new(x, y, right - x, bottom - y);
         }
         self.floats = floats;
     }

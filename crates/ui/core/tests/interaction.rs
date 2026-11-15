@@ -213,6 +213,18 @@ fn a_press_that_slides_off_before_release_emits_nothing() {
 }
 
 #[test]
+fn a_cancelled_press_emits_nothing_and_forgets_the_press() {
+    let (tree, layout) = form();
+    let mut s = Interaction::default();
+    assert!(!s.pointer_cancel(), "nothing was held");
+    s.pointer_down(&tree, &layout, (50.0, 15.0));
+    let r = s.revision();
+    assert!(s.pointer_cancel());
+    assert_eq!((s.pressed, s.revision()), (None, r + 1));
+    assert_eq!(s.pointer_up(&tree, &layout, (50.0, 15.0)), None, "the release after it is no click");
+}
+
+#[test]
 fn a_disabled_widget_neither_hovers_nor_presses() {
     let (tree, layout) = form();
     let mut s = Interaction::default();

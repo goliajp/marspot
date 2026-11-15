@@ -118,6 +118,13 @@ impl Interaction {
         (held == Some(over)).then_some(action)
     }
 
+    /// Forget a press without acting on it: the release came where no
+    /// widget of this surface can be, such as another window.
+    pub fn pointer_cancel(&mut self) -> bool {
+        let held = self.pressed.take().is_some();
+        self.touch(held)
+    }
+
     /// Scroll the innermost region under `p` by `dy` device pixels,
     /// positive towards the end of the content.  True when it moved.
     pub fn wheel(&mut self, layout: &Layout, p: (f64, f64), dy: f64) -> bool {
