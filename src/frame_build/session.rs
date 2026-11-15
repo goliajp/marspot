@@ -11,7 +11,7 @@ use crate::layout::CellRect;
 use crate::render::SessionView;
 use crate::frame_build::color::rgba8_of_f32;
 use crate::ui::components::panel_palette as palette;
-use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance, UiRectInstance};
+use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance};
 use crate::frame_build::session_marks::*;
 
 /// What every part of a pane's drawing reads: the view, where its grid
@@ -84,47 +84,60 @@ pub(crate) struct PaneOut<'a> {
     pub(crate) color_glyphs: &'a mut Vec<GlyphInstance>,
 }
 
-/// One pane, laid out: its background, title strip, grid, selection,
-/// links, cursor and IME composition, in that order.
-pub(crate) fn push_session(
-    rect: &CellRect,
-    view: &SessionView,
-    window_focused: bool,
-    cell_w: f32,
-    cell_h: f32,
-    ascent: f32,
-    atlas_w: f32,
-    atlas_h: f32,
-    font: &mut FontCache,
-    atlas: &mut GlyphAtlas,
-    color_atlas: &mut GlyphAtlas,
-    cells: &mut Vec<CellInstance>,
-    glyphs: &mut Vec<GlyphInstance>,
-    color_glyphs: &mut Vec<GlyphInstance>,
-    _ui_rects: &mut Vec<UiRectInstance>,
-    gutter: f32,
-    padding: f32,
-    title_h: f32,
-    links: &mut LinkBufs,
-    colors: TermColors,
-) {
-    let (color_atlas_w, color_atlas_h) = color_atlas.dims();
-    let color_atlas_w = color_atlas_w as f32;
-    let color_atlas_h = color_atlas_h as f32;
+/// The measures every pane of a frame is laid out with.
+#[derive(Clone, Copy)]
+pub(crate) struct PaneMetrics {
+    pub(crate) cell_w: f32,
+    pub(crate) cell_h: f32,
+    pub(crate) ascent: f32,
+    pub(crate) atlas_w: f32,
+    pub(crate) atlas_h: f32,
+    pub(crate) color_atlas_w: f32,
+    pub(crate) color_atlas_h: f32,
+    pub(crate) gutter: f32,
+    pub(crate) padding: f32,
+    pub(crate) title_h: f32,
+}
+
+/// The pane's own background and its title strip: what is drawn
+/// before the grid.
+pub(crate) fn paint_head(rect: &CellRect, view: &SessionView, window_focused: bool, m: &PaneMetrics, o: &mut PaneOut) {
     // The pane in use drops to the terminal's own black and the rest
     // stay at the window's surface: that drop is the focus indicator.
     let in_use = view.focused && window_focused;
-    cells.push(CellInstance {
+    o.cells.push(CellInstance {
         origin: [rect.x as f32, rect.y_top as f32],
         size: [rect.w as f32, rect.h as f32],
         color: rgba8_of_f32(palette::pane_bg(in_use)),
     });
-
     paint_title_strip(
-        rect, view, in_use, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, cells, glyphs,
-        gutter, padding, title_h,
+        rect, view, in_use, m.cell_w, m.cell_h, m.ascent, m.atlas_w, m.atlas_h, o.font, o.atlas,
+        o.cells, o.glyphs, m.gutter, m.padding, m.title_h,
     );
+}
 
+/// What is drawn over the grid, in order: selection, link underlines,
+/// cursor and IME composition.
+pub(crate) fn paint_tail(g: &PaneGeom, o: &mut PaneOut) {
+    paint_selection(g, o);
+    paint_link_underlines(g, o);
+    paint_cursor_glyph(g, o);
+    paint_cursor(g, o);
+    paint_preedit(g, o);
+}
+
+/// Where a pane's grid sits and which of its cells something else
+/// covers.  Scans the visible grid for links into `links` on the way:
+/// the rows read them.
+pub(crate) fn pane_geom<'a>(
+    rect: &CellRect,
+    view: &'a SessionView<'a>,
+    window_focused: bool,
+    m: &PaneMetrics,
+    links: &'a mut LinkBufs,
+    colors: TermColors,
+) -> PaneGeom<'a> {
+    let PaneMetrics { cell_w, cell_h, ascent, atlas_w, atlas_h, color_atlas_w, color_atlas_h, padding, title_h, .. } = *m;
     let grid = view.grid;
     let cols = grid.cols() as usize;
     // Origin of the terminal content area — inside cell, below
@@ -220,8 +233,9 @@ pub(crate) fn push_session(
         &mut links.scratch,
         &mut links.out,
     );
+    let links: &'a LinkBufs = links;
 
-    let g = PaneGeom {
+    PaneGeom {
         view,
         grid,
         cols,
@@ -239,25 +253,13 @@ pub(crate) fn push_session(
         preedit_cells,
         links: &links.out,
         colors,
-    };
-    let mut o = PaneOut { font, atlas, color_atlas, cells, glyphs, color_glyphs };
-    paint_rows(&g, &mut o);
-    paint_selection(&g, &mut o);
-    paint_link_underlines(&g, &mut o);
-    paint_cursor_glyph(&g, &mut o);
-    paint_cursor(&g, &mut o);
-    paint_preedit(&g, &mut o);
-
-    let _ = gutter; // pane-internal layout doesn't use it any more
-
-    // The search overlay is not drawn here: `build_instances` paints
-    // it after the panes, so the per-pane instance cache stays purely
-    // grid content.
+    }
 }
 
-/// The grid, row by row: run-length backgrounds, search-hit highlights,
-/// glyphs and SGR underlines.
-pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
+/// One row of the grid: run-length backgrounds, search-hit highlights,
+/// glyphs and SGR underlines.  `row_clusters` is the caller's, reused
+/// from row to row.
+pub(crate) fn paint_row(g: &PaneGeom, o: &mut PaneOut, r: u16, row_clusters: &mut Vec<(u16, String)>) {
     let PaneGeom { view, grid, cols, cell_w, cell_h, ascent, atlas_w, atlas_h, color_atlas_w, color_atlas_h, inner_x, inner_y, window_focused, colors, .. } = *g;
     let default_bg = colors.default_bg();
     let font = &mut *o.font;
@@ -266,12 +268,10 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
     let cells = &mut *o.cells;
     let glyphs = &mut *o.glyphs;
     let color_glyphs = &mut *o.color_glyphs;
-    // One row's cluster text, refilled per row and reused across them.
     // A cell that has scrolled into history holds the base codepoint,
     // so what the cluster said is keyed by where it was -- one lookup
     // for the row, not one per cell per frame.
-    let mut row_clusters: Vec<(u16, String)> = Vec::new();
-    for r in 0..grid.rows() {
+    {
         let row_y = inner_y + (r as f32) * cell_h;
         let _baseline_y = row_y + ascent;
 
@@ -331,7 +331,7 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
         // Glyphs.  Skip the cursor cell when the cursor is solid —
         // we re-emit it after with BG colour so the glyph reads
         // inverted on the white cursor block (mirrors render.rs).
-        grid.row_clusters_at_view(view.view_offset, r, &mut row_clusters);
+        grid.row_clusters_at_view(view.view_offset, r, row_clusters);
         let row_has_hit = view.highlight_spans.iter().any(|s| s.view_row == r);
         let cursor = grid.cursor();
         let solid_cursor = view.view_offset == 0
@@ -363,7 +363,7 @@ pub(crate) fn paint_rows(g: &PaneGeom, o: &mut PaneOut) {
             // did, byte for byte.
             let cluster = grid
                 .cluster_text(&cell)
-                .or_else(|| marspot_term::grid::cluster_in_row(&row_clusters, c as u16));
+                .or_else(|| marspot_term::grid::cluster_in_row(row_clusters, c as u16));
             let (entry, is_color) = match cluster {
                 Some(text) => match resolve_cluster_glyph_routed(
                     atlas,

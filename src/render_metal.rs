@@ -32,24 +32,17 @@
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSView, NSViewLayerContentsPlacement};
-use objc2_foundation::{NSSize, NSString};
+use objc2_foundation::NSSize;
 use objc2_metal::{
-    MTLBlendFactor, MTLBlendOperation, MTLBlitCommandEncoder, MTLClearColor, MTLCommandBuffer,
-    MTLCommandBufferStatus,
-    MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary,
-    MTLLoadAction, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder,
-    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
-    MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerDescriptor, MTLSamplerMinMagFilter,
-    MTLSamplerState, MTLScissorRect, MTLStoreAction, MTLTexture,
+    MTLBlitCommandEncoder, MTLClearColor, MTLCommandBuffer, MTLCommandBufferStatus,
+    MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLoadAction,
+    MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLRenderPipelineState, MTLResourceOptions, MTLSamplerState, MTLStoreAction, MTLTexture,
 };
-use core_graphics::color_space::{kCGColorSpaceSRGB, CGColorSpace};
-use foreign_types::ForeignType;
 use objc2_app_kit::NSColor;
 use objc2_quartz_core::{kCAGravityTopLeft, CAMetalDrawable, CAMetalLayer};
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
-use objc2_metal::MTLBuffer;
 
 use crate::font_cache::FontCache;
 use crate::glyph_atlas::{GlyphAtlas, SlotMetrics};
@@ -64,7 +57,7 @@ use crate::render::{SessionView, SidebarEntry};
 #[cfg(test)]
 use crate::render::HighlightSpan;
 
-use crate::frame_build::frame::{build_instances, FormPanel};
+use crate::frame_build::frame::{build_frame, build_instances, FormPanel};
 use crate::frame_build::pane_cache::PaneInstanceCache;
 use crate::frame_build::glyph_resolve::resolve_cell_glyph;
 
@@ -135,6 +128,8 @@ pub struct RenderSplit {
     /// instance buffers, and how many bytes that was.
     pub instbuf_us: u64,
     pub instbuf_bytes: u64,
+    /// Bytes copied into this window's instance buffers for the frame.
+    pub upload_bytes: u64,
     /// The context menu's pass, encoded
     /// after the others.  Zero unless one of them is open — which is
     /// itself worth knowing when a frame goes long.
@@ -155,6 +150,10 @@ pub struct RenderSplit {
     /// which no timing on its own would reveal.
     pub panes_rebuilt: u32,
     pub panes_total: u32,
+    /// In the panes that were rebuilt: the rows laid out again, out
+    /// of how many those panes have.
+    pub rows_rebuilt: u32,
+    pub rows_total: u32,
     pub glyphs_rasterised: u32,
     /// Shelf evictions and whole-atlas rebuilds *during this frame*.
     /// Non-zero means the frame's own working set did not fit, so it
@@ -363,54 +362,6 @@ pub use golia_ui_core::scene::UiRectInstance;
 /// "more correct".
 const TARGET_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
 
-/// Tag a `CAMetalLayer`'s colour space as **sRGB** so ColorSync converts
-/// our sRGB-encoded terminal colours to the display correctly.
-///
-/// Terminal colours (ANSI + 38;2 truecolor) are sRGB by convention.  With
-/// NO tag (`nil`), a CAMetalLayer is treated as already-in-display-space —
-/// so on a wide-gamut panel the sRGB values are shown without sRGB→display
-/// conversion and over-saturate: Claude Code's coral orange came out
-/// pink/"水红".  Tagging **Display P3** over-saturates even harder (wider
-/// primaries → coral pinker still).  Tagging **sRGB** does the correct
-/// conversion and the coral stays orange, matching iTerm2.
-///
-/// **Every CAMetalLayer that reaches the screen MUST call this** — the
-/// standalone renderer's layer (below) AND the shell presenter's layer
-/// (`bin/marspot-shell/present.rs`).  They diverged once (presenter created
-/// without any tag → over-saturated colour in the installed app); routing
-/// both through this one helper keeps them from drifting again.  NB: the
-/// presenter only applies it on (re)launch — a silent core swap alone
-/// won't change the layer, so the shell must actually restart to pick up a
-/// colour-space change.
-pub fn pin_layer_colorspace(layer: &CAMetalLayer) {
-    // SAFETY: `kCGColorSpaceSRGB` is an extern static (reading it is
-    // `unsafe`); `setColorspace` is reached via raw `objc_msgSend`
-    // because the `colorspace` property isn't in the objc2-quartz-core
-    // binding yet AND objc2's macro runtime-checks the @encode type
-    // ("^{CGColorSpace=}") which doesn't match our `*mut c_void`
-    // (`^v`) cast.  Release ships fine because the check is debug-
-    // only; for dev (`bin/run.sh`) we go through the raw FFI path
-    // so debug builds boot too.
-    unsafe {
-        let cs = CGColorSpace::create_with_name(kCGColorSpaceSRGB).expect(
-            "CGColorSpaceCreateWithName(kCGColorSpaceSRGB) cannot fail on supported macOS",
-        );
-        let cs_ptr = cs.as_ptr() as *mut c_void;
-        let layer_ptr: *mut objc2::runtime::AnyObject =
-            (layer as *const CAMetalLayer as *mut CAMetalLayer).cast();
-        let sel = objc2::sel!(setColorspace:);
-        type Setter = unsafe extern "C" fn(
-            *mut objc2::runtime::AnyObject,
-            objc2::runtime::Sel,
-            *mut c_void,
-        );
-        let imp: Setter = std::mem::transmute(objc2::ffi::objc_msgSend as *const ());
-        imp(layer_ptr, sel, cs_ptr);
-    }
-}
-
-const SHADER_SRC: &str = include_str!("shaders/cells.metal");
-
 /// Metal-backed renderer.  Has the pipeline state for the BG pass
 /// (phase 3) but no FG pass yet — `render_cells_bg` is the entry
 /// point and `render_cells_bg_offscreen` is its testable cousin.
@@ -551,7 +502,13 @@ pub struct MetalRenderer {
     /// themselves and the LRU eviction path picks the oldest
     /// non-recent shelf instead of the legacy whole-atlas reset.
     frame_id: u64,
+    /// Handed to every frame left running on the GPU; Metal calls it
+    /// when the frame completes.  One block for the renderer's life,
+    /// so a frame allocates nothing for it.
+    frame_done: Option<FrameDone>,
 }
+
+type FrameDone = block2::RcBlock<dyn Fn(NonNull<ProtocolObject<dyn MTLCommandBuffer>>)>;
 
 impl MetalRenderer {
     /// Construct attached to a host `NSView` — replaces the view's
@@ -563,13 +520,9 @@ impl MetalRenderer {
         let queue = device
             .newCommandQueue()
             .ok_or_else(|| "MTLDevice.newCommandQueue returned nil".to_string())?;
-        let library = build_shader_library(&device)?;
-        let bg_pipeline = build_bg_pipeline(&device, &library)?;
-        let fg_pipeline = build_fg_pipeline(&device, &library)?;
-        let fg_color_pipeline = build_fg_color_pipeline(&device, &library)?;
+        let (bg_pipeline, fg_pipeline, fg_color_pipeline, dot_pipeline, scene_ui_pipeline) =
+            build_pipelines(&device)?;
         let fg_sampler = build_fg_sampler(&device)?;
-        let dot_pipeline = build_dot_pipeline(&device, &library)?;
-        let scene_ui_pipeline = build_scene_ui_pipeline(&device, &library)?;
         let font = FontCache::build()?;
         // 4096×4096 R8 atlas = 16 MiB (Phase 2 bump from 2048²).
         // Pre-bump 2048² fit ~6000 Menlo 13pt 2× glyphs; Phase 2
@@ -685,6 +638,7 @@ impl MetalRenderer {
             last_render_split: RenderSplit::default(),
             top_inset_phys: 0.0,
             frame_id: 0,
+            frame_done: None,
         })
     }
 
@@ -697,13 +651,9 @@ impl MetalRenderer {
         let queue = device
             .newCommandQueue()
             .ok_or_else(|| "MTLDevice.newCommandQueue returned nil".to_string())?;
-        let library = build_shader_library(&device)?;
-        let bg_pipeline = build_bg_pipeline(&device, &library)?;
-        let fg_pipeline = build_fg_pipeline(&device, &library)?;
-        let fg_color_pipeline = build_fg_color_pipeline(&device, &library)?;
+        let (bg_pipeline, fg_pipeline, fg_color_pipeline, dot_pipeline, scene_ui_pipeline) =
+            build_pipelines(&device)?;
         let fg_sampler = build_fg_sampler(&device)?;
-        let dot_pipeline = build_dot_pipeline(&device, &library)?;
-        let scene_ui_pipeline = build_scene_ui_pipeline(&device, &library)?;
         let font = FontCache::build()?;
         // 4096×4096 R8 atlas = 16 MiB (Phase 2 bump from 2048²).
         // Pre-bump 2048² fit ~6000 Menlo 13pt 2× glyphs; Phase 2
@@ -754,6 +704,7 @@ impl MetalRenderer {
             last_render_split: RenderSplit::default(),
             top_inset_phys: 0.0,
             frame_id: 0,
+            frame_done: None,
         })
     }
 
@@ -1084,15 +1035,17 @@ impl MetalRenderer {
         encode_passes(
             &cmd,
             &texture,
-            bg_pipeline,
-            dot_pipeline,
-            fg_pipeline,
-            fg_color_pipeline,
-            scene_ui_pipeline,
-            fg_sampler,
-            atlas_texture.texture(),
-            color_atlas_texture.texture(),
-            device,
+            &Drawing {
+                bg_pipeline,
+                dot_pipeline,
+                fg_pipeline,
+                fg_color_pipeline,
+                scene_ui_pipeline,
+                fg_sampler,
+                atlas_texture: atlas_texture.texture(),
+                color_atlas_texture: color_atlas_texture.texture(),
+                device,
+            },
             cells_scratch,
             dots_scratch,
             glyphs_scratch,
@@ -1103,12 +1056,10 @@ impl MetalRenderer {
             overlay_ui_rects_scratch,
             width_px as f32,
             height_px as f32,
-            // CAMetalLayer drawable, same process — no cross-process
-            // race possible.  Always Clear for the full hard-fill.
-            true,
             // This path waits only until *scheduled*, so the GPU may
             // still be reading last frame's instances — refilling in
             // place would race it.  Allocate per frame here.
+            None,
             None,
             ui_slab,
         );
@@ -1205,17 +1156,7 @@ impl MetalRenderer {
         // after this frame, subsequent IOSurface renders can Load until
         // something explicitly marks the flag again (resize, layout
         // change, etc.).
-        let clear_bg = wr.take_clear_required();
-        // Dev-only — flash investigation 2026-06-15.  At default Info
-        // level this is filtered out; flip MARSPOT_LOG=debug to see
-        // every IOSurface render's clear/load verdict.  Demote /
-        // remove once the C-path Load fix is confirmed working in
-        // the wild.
-        crate::lx_debug!(
-            "render.iosurf",
-            "encoding IOSurface frame",
-            clear_bg = clear_bg
-        );
+        let _ = wr.take_clear_required();
 
         let Self {
             ref device,
@@ -1262,7 +1203,7 @@ impl MetalRenderer {
         overlay_glyphs_scratch.clear();
         overlay_color_glyphs_scratch.clear();
         overlay_ui_rects_scratch.clear();
-        let build_stats = build_instances(
+        let build_stats = build_frame(
             layout,
             views,
             sidebar,
@@ -1288,6 +1229,7 @@ impl MetalRenderer {
             overlay_cells_scratch,
             overlay_glyphs_scratch,
             overlay_ui_rects_scratch,
+            false,
         );
 
         // Glyph work is charged to `build`: `build_instances` is what
@@ -1299,7 +1241,8 @@ impl MetalRenderer {
             .saturating_sub(evict0);
         let rebuilds = (atlas.rebuild_count + color_atlas.rebuild_count)
             .saturating_sub(rebuild0);
-        let _ = take_instance_buffer_cost(); // zero the accumulator
+        let _ = take_instance_buffer_cost(); // zero the accumulators
+        let _ = take_upload_bytes();
         let t_cmdbuf0 = std::time::Instant::now();
         let cmd = match queue.commandBuffer() {
             Some(c) => c,
@@ -1309,15 +1252,17 @@ impl MetalRenderer {
         encode_passes(
             &cmd,
             target,
-            bg_pipeline,
-            dot_pipeline,
-            fg_pipeline,
-            fg_color_pipeline,
-            scene_ui_pipeline,
-            fg_sampler,
-            atlas_texture.texture(),
-            color_atlas_texture.texture(),
-            device,
+            &Drawing {
+                bg_pipeline,
+                dot_pipeline,
+                fg_pipeline,
+                fg_color_pipeline,
+                scene_ui_pipeline,
+                fg_sampler,
+                atlas_texture: atlas_texture.texture(),
+                color_atlas_texture: color_atlas_texture.texture(),
+                device,
+            },
             cells_scratch,
             dots_scratch,
             glyphs_scratch,
@@ -1328,14 +1273,11 @@ impl MetalRenderer {
             overlay_ui_rects_scratch,
             width_px as f32,
             height_px as f32,
-            // IOSurface path — cross-process race-free only when Load
-            // is used in steady state.  Consume the flag set by
-            // `mark_bg_clear_required` (e.g. resize, layout change).
-            clear_bg,
             // Safe to refill in place: the pool is this window's own,
             // and a window never has two frames in flight — so the
             // frame that last read these buffers has completed.
             Some(&mut wr.instance_pool),
+            Some(&mut wr.pane_caches[..]),
             ui_slab,
         );
         let t_canvas0 = std::time::Instant::now();
@@ -1356,6 +1298,11 @@ impl MetalRenderer {
         }
         let t_commit0 = std::time::Instant::now();
         let (instbuf_us, instbuf_bytes) = take_instance_buffer_cost();
+        if let (false, Some(done)) = (block, self.frame_done.as_ref()) {
+            // SAFETY: a live block of the handler's signature; Metal
+            // retains it until it has been called
+            unsafe { cmd.addCompletedHandler(block2::RcBlock::as_ptr(done)) };
+        }
         cmd.commit();
         let t_gpu0 = std::time::Instant::now();
         // Blocking is for the bench harness, which wants the whole
@@ -1381,178 +1328,32 @@ impl MetalRenderer {
             encode_us: (t_canvas0 - t_encode0).as_micros() as u64,
             instbuf_us,
             instbuf_bytes,
+            upload_bytes: take_upload_bytes(),
             canvas_us: (t_commit0 - t_canvas0).as_micros() as u64,
             gpu_wait_us: (t_end - t_gpu0).as_micros() as u64,
             gpu_exec_us,
             build_panes_us: build_stats.panes_us,
             panes_rebuilt: build_stats.rebuilt,
             panes_total: build_stats.considered,
+            rows_rebuilt: build_stats.rows_rebuilt,
+            rows_total: build_stats.rows_total,
             glyphs_rasterised,
             evictions,
             rebuilds,
         };
     }
 
+    /// Have `wake` called, on a thread of Metal's, each time a frame
+    /// left running by `render_layout_to_texture_async` completes: the
+    /// caller's cue to ask `WindowRender::settled()`.
+    pub fn set_frame_done(&mut self, wake: impl Fn() + Send + Sync + 'static) {
+        self.frame_done = Some(block2::RcBlock::new(move |_: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| wake()));
+    }
+
     /// Where the last IOSurface frame spent its time.
     pub fn last_render_split(&self) -> RenderSplit {
         self.last_render_split
     }
-}
-
-/// Encode BG → dot → FG passes against `target`.  Shared by the live
-/// `render_layout` (drawable target) and the offscreen
-/// `render_layout_to_texture` (caller-provided target).  Pass order
-/// matters: BG paints opaquely (no blend); dot + FG are alpha-blended
-/// on top.
-#[allow(clippy::too_many_arguments)]
-fn encode_passes(
-    cmd: &ProtocolObject<dyn MTLCommandBuffer>,
-    target: &ProtocolObject<dyn MTLTexture>,
-    bg_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
-    dot_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
-    fg_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
-    fg_color_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
-    scene_ui_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
-    fg_sampler: &ProtocolObject<dyn MTLSamplerState>,
-    atlas_texture: &ProtocolObject<dyn MTLTexture>,
-    color_atlas_texture: &ProtocolObject<dyn MTLTexture>,
-    device: &ProtocolObject<dyn MTLDevice>,
-    cells: &[CellInstance],
-    dots: &[CellInstance],
-    glyphs: &[GlyphInstance],
-    color_glyphs: &[GlyphInstance],
-    ui_rects: &[UiRectInstance],
-    overlay_cells: &[CellInstance],
-    overlay_glyphs: &[GlyphInstance],
-    overlay_ui_rects: &[UiRectInstance],
-    viewport_w: f32,
-    viewport_h: f32,
-    // Clear-vs-Load for the BG pass.  `true` = hard Clear to SIDEBAR_BG
-    // (correct for first frame after attach, resize, layout-shape
-    // change, OR the same-process CAMetalLayer path that can never
-    // race a cross-process reader).  `false` = Load previous frame's
-    // pixels (used by the IOSurface path in steady state to eliminate
-    // the cross-process flash race documented on
-    // `MetalRenderer::clear_bg_required`).
-    clear_bg: bool,
-    // `Some` = refill persistent buffers (only sound on a path that
-    // ends in `waitUntilCompleted`); `None` = allocate per frame.
-    pool: Option<&mut InstanceBufferPool>,
-    // Reused across frames so encoding the rects allocates nothing in
-    // a steady state.
-    ui_slab: &mut Vec<u8>,
-) {
-    let mut pool = pool;
-    /// Slot `$slot`'s instances, from the pool when there is one.
-    macro_rules! inst {
-        ($slot:expr, $bytes:expr) => {{
-            let bytes = $bytes;
-            match &mut pool {
-                Some(p) => p.upload(device, $slot, bytes),
-                None => make_instance_buffer(device, bytes),
-            }
-        }};
-    }
-    let viewport: [f32; 2] = [viewport_w, viewport_h];
-    let viewport_ptr = NonNull::new(viewport.as_ptr() as *mut c_void).unwrap();
-    let viewport_len = std::mem::size_of::<[f32; 2]>();
-
-    // One pass for the whole frame. Clear to SIDEBAR_BG first: the
-    // chrome strip above the grid is not covered by any opaque cell,
-    // so it relies on the clear to reset every frame. (Load-by-default
-    // was tried once, 2126cda, and let the strip's antialiased glyphs
-    // accumulate over their own edges.) `clear_bg` is kept as the hook
-    // for a per-frame decision.
-    //
-    // The frame used to be eight passes, one per kind of instance, each
-    // loading the whole target and storing it again. It is now one
-    // scene: the same instances in one slab, in layers that keep the
-    // order the passes drew in -- see `frame_scene`.
-    let _ = clear_bg;
-    let mut layers = [golia_ui_core::scene::Layer::default(); crate::frame_scene::FRAME_LAYERS];
-    let frame = crate::frame_scene::FrameInstances {
-        cells,
-        dots,
-        ui_rects,
-        glyphs,
-        color_glyphs,
-        overlay_cells,
-        overlay_ui_rects,
-        overlay_glyphs,
-    };
-    let clip = golia_ui_core::units::RectPx::new(0.0, 0.0, viewport_w, viewport_h);
-    let built = crate::frame_scene::build(&frame, clip, ui_slab, &mut layers);
-    let slab_buffer = inst!(0, &ui_slab[..built.bytes]);
-
-    let pass = { MTLRenderPassDescriptor::new() };
-    unsafe {
-        let color = pass.colorAttachments().objectAtIndexedSubscript(0);
-        color.setTexture(Some(target));
-        color.setStoreAction(MTLStoreAction::Store);
-        color.setLoadAction(MTLLoadAction::Clear);
-        // The window's own surface, which the sidebar and the header
-        // never paint over.
-        color.setClearColor(clear_color(crate::ui::components::panel_palette::pane_bg(false)));
-    }
-    let enc = cmd.renderCommandEncoderWithDescriptor(&pass).expect("frame encoder");
-    unsafe { enc.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1) };
-    let Some(buf) = &slab_buffer else {
-        // Nothing in the scene: the clear is the frame.
-        enc.endEncoding();
-        return;
-    };
-    use golia_ui_core::scene::Kind;
-    let (tw, th) = (target.width(), target.height());
-    for layer in &layers[..built.layers] {
-        enc.setScissorRect(scissor_for(layer.clip, tw, th));
-        for kind in Kind::ALL {
-            let run = layer.runs[kind as usize];
-            if run.count == 0 {
-                continue;
-            }
-            let pipeline = match kind {
-                Kind::Rect => bg_pipeline,
-                Kind::Circle => dot_pipeline,
-                Kind::Glyph => fg_pipeline,
-                Kind::ColorGlyph => fg_color_pipeline,
-                Kind::UiRect => scene_ui_pipeline,
-                // nothing produces images yet, and there is no pipeline
-                Kind::Image => continue,
-            };
-            enc.setRenderPipelineState(pipeline);
-            unsafe {
-                enc.setVertexBuffer_offset_atIndex(Some(buf), run.offset as usize, 0);
-                match kind {
-                    Kind::Glyph => {
-                        enc.setFragmentTexture_atIndex(Some(atlas_texture), 0);
-                        enc.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
-                    }
-                    Kind::ColorGlyph => {
-                        enc.setFragmentTexture_atIndex(Some(color_atlas_texture), 0);
-                        enc.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
-                    }
-                    _ => {}
-                }
-                enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                    MTLPrimitiveType::Triangle,
-                    0,
-                    6,
-                    run.count as usize,
-                );
-            }
-        }
-    }
-    enc.endEncoding();
-}
-
-/// A layer's clip as Metal's scissor, held inside the target: Metal
-/// rejects a scissor that reaches past the attachment.
-fn scissor_for(clip: golia_ui_core::units::RectPx, tw: usize, th: usize) -> MTLScissorRect {
-    let x0 = (clip.x.max(0.0).floor() as usize).min(tw);
-    let y0 = (clip.y.max(0.0).floor() as usize).min(th);
-    let x1 = ((clip.x + clip.w).max(0.0).ceil() as usize).min(tw);
-    let y1 = ((clip.y + clip.h).max(0.0).ceil() as usize).min(th);
-    MTLScissorRect { x: x0, y: y0, width: x1.saturating_sub(x0), height: y1.saturating_sub(y0) }
 }
 
 /// Allocate a render-target MTLTexture.  Helper for tests + the
@@ -1697,29 +1498,6 @@ impl MetalRenderer {
 
 
 
-/// Build a Shared-storage MTLBuffer over `bytes`.  Returns `None`
-/// for an empty payload so the caller can skip the bind/draw.
-/// Microseconds spent in `newBufferWithBytes` and bytes handed to it,
-/// since the last `take_instance_buffer_cost`.
-///
-/// Every pass allocates a *fresh* `MTLBuffer` for its instances on
-/// every frame — several megabytes a frame across the passes — which
-/// is exactly what a per-frame hot path must not do.
-/// Whether that is what the real machine's 100–220 ms `encode` is
-/// made of, though, is a question for a number, not for a reading of
-/// the code: these two counters are that number.
-static INSTANCE_BUF_US: AtomicU64 = AtomicU64::new(0);
-static INSTANCE_BUF_BYTES: AtomicU64 = AtomicU64::new(0);
-
-/// Read and reset the allocation cost accumulated since the last call.
-pub fn take_instance_buffer_cost() -> (u64, u64) {
-    (
-        INSTANCE_BUF_US.swap(0, Ordering::Relaxed),
-        INSTANCE_BUF_BYTES.swap(0, Ordering::Relaxed),
-    )
-}
-
-
 /// The glyph atlas's texture: the half of the atlas that is Metal's.
 ///
 /// The atlas packs and evicts on the CPU and writes each new glyph
@@ -1808,313 +1586,6 @@ pub fn new_atlas(
     let texture = MetalAtlasTexture::new(device, width, height, color)?;
     let atlas = GlyphAtlas::new(texture.clone(), fonts)?;
     Ok((atlas, texture))
-}
-
-/// Instance buffers that outlive the frame that fills them.
-///
-/// Every pass used to hand its instances to `newBufferWithBytes`,
-/// which allocates a fresh `MTLBuffer` — a kernel round trip to wire
-/// memory and register it with the GPU driver.  On an idle machine
-/// that is 90 µs for 1.6 MB and invisible.  On a machine under real
-/// load it was measured at **83–289 ms for 1.0 MB** — a thousandfold
-/// stretch of one call, accounting for 99 % of nine out of twelve
-/// sampled stalls (2026-08-12, 13 panes, load ~7–10).  While it
-/// blocks, every pane is frozen and the supervisor's PONG deadline is
-/// running.
-///
-/// So the buffers are allocated once and refilled in place.
-/// `StorageModeShared` means `contents()` is CPU-writable, and the
-/// capacity only ever grows — rounded up to a power of two so growth
-/// stops happening after the first few frames.  Steady state performs
-/// no allocation at all, which is what is asked of a
-/// per-frame path in the first place.
-///
-/// **Safety contract**: refilling in place is only sound if the GPU is
-/// done with the previous frame's contents.  On the IOSurface path the
-/// pool belongs to one window (`WindowRender::instance_pool`) and a
-/// window never starts a second frame while its first is in flight, so
-/// it is.  It was one pool for every window back when each frame ended
-/// in `waitUntilCompleted`; once frames were left running, two windows
-/// painting at once overwrote each other's instances.  The live
-/// `CAMetalLayer` path only waits until *scheduled*, so it keeps
-/// allocating per frame and passes `None`.
-pub struct InstanceBufferPool {
-    slots: [Option<Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>>; INSTANCE_SLOTS],
-    caps: [usize; INSTANCE_SLOTS],
-}
-
-/// One slot: the IOSurface path uploads a frame as one scene slab.
-pub const INSTANCE_SLOTS: usize = 1;
-
-impl Default for InstanceBufferPool {
-    fn default() -> Self {
-        Self { slots: Default::default(), caps: [0; INSTANCE_SLOTS] }
-    }
-}
-
-impl InstanceBufferPool {
-    /// Copy `bytes` into slot `slot`, growing it if need be.
-    fn upload(
-        &mut self,
-        device: &ProtocolObject<dyn MTLDevice>,
-        slot: usize,
-        bytes: &[u8],
-    ) -> Option<Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>> {
-        if bytes.is_empty() || slot >= INSTANCE_SLOTS {
-            return None;
-        }
-        if self.caps[slot] < bytes.len() || self.slots[slot].is_none() {
-            // Round up so a grid that grows by one row does not
-            // reallocate — the allocation is the thing being avoided.
-            let cap = bytes.len().next_power_of_two().max(64 * 1024);
-            let t0 = std::time::Instant::now();
-            let buf =
-                device.newBufferWithLength_options(cap, MTLResourceOptions::StorageModeShared);
-            INSTANCE_BUF_US.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
-            INSTANCE_BUF_BYTES.fetch_add(cap as u64, Ordering::Relaxed);
-            self.slots[slot] = buf;
-            self.caps[slot] = if self.slots[slot].is_some() { cap } else { 0 };
-        }
-        let buf = self.slots[slot].as_ref()?;
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                buf.contents().as_ptr() as *mut u8,
-                bytes.len(),
-            );
-        }
-        Some(buf.clone())
-    }
-}
-
-fn make_instance_buffer(
-    device: &ProtocolObject<dyn MTLDevice>,
-    bytes: &[u8],
-) -> Option<Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>> {
-    if bytes.is_empty() {
-        return None;
-    }
-    let t0 = std::time::Instant::now();
-    let out = unsafe {
-        device.newBufferWithBytes_length_options(
-            NonNull::new(bytes.as_ptr() as *mut c_void).unwrap(),
-            bytes.len(),
-            MTLResourceOptions::StorageModeShared,
-        )
-    };
-    INSTANCE_BUF_US.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
-    INSTANCE_BUF_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-    out
-}
-
-/// Compile `cells.metal` once.  Both the BG and FG pipelines pull
-/// their entry-point functions out of the same library — the .metal
-/// file declares them side-by-side.
-fn build_shader_library(
-    device: &ProtocolObject<dyn MTLDevice>,
-) -> Result<Retained<ProtocolObject<dyn MTLLibrary>>, String> {
-    let src = NSString::from_str(SHADER_SRC);
-    device
-        .newLibraryWithSource_options_error(&src, None)
-        .map_err(|e| format!("MTLDevice.newLibraryWithSource error: {:?}", e))
-}
-
-fn pipeline_function(
-    library: &ProtocolObject<dyn MTLLibrary>,
-    name: &str,
-) -> Result<Retained<ProtocolObject<dyn objc2_metal::MTLFunction>>, String> {
-    let n = NSString::from_str(name);
-    library
-        .newFunctionWithName(&n)
-        .ok_or_else(|| format!("library has no function {name:?}"))
-}
-
-/// BG-pass pipeline.  No blending — opaque cells fill the whole quad.
-fn build_bg_pipeline(
-    device: &ProtocolObject<dyn MTLDevice>,
-    library: &ProtocolObject<dyn MTLLibrary>,
-) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
-    let vfn = pipeline_function(library, "bg_vertex")?;
-    let ffn = pipeline_function(library, "bg_fragment")?;
-
-    let descriptor = MTLRenderPipelineDescriptor::new();
-    descriptor.setVertexFunction(Some(&vfn));
-    descriptor.setFragmentFunction(Some(&ffn));
-    let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
-    attachment.setPixelFormat(TARGET_FORMAT);
-    // Alpha blending so translucent BG cells (e.g. the
-    // inactive-pane dim overlay pushed at the end of
-    // push_session) composite over the colour BG fills below
-    // them.  Opaque cells (alpha = 1.0) render identically
-    // either way — `src.a = 1` makes destination contribution
-    // zero, same as no blending.
-    attachment.setBlendingEnabled(true);
-    attachment.setRgbBlendOperation(MTLBlendOperation::Add);
-    attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
-    attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-    attachment.setSourceAlphaBlendFactor(MTLBlendFactor::SourceAlpha);
-    attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-    attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-
-    device
-        .newRenderPipelineStateWithDescriptor_error(&descriptor)
-        .map_err(|e| format!("newRenderPipelineState (BG) error: {:?}", e))
-}
-
-/// FG-pass pipeline.  Alpha blending on so the glyph's coverage
-/// composites onto whatever the BG pass painted underneath:
-///
-/// ```text
-/// final.rgb = src.rgb * src.a + dst.rgb * (1 - src.a)
-/// final.a   = src.a   * src.a + dst.a   * (1 - src.a)
-/// ```
-fn build_fg_pipeline(
-    device: &ProtocolObject<dyn MTLDevice>,
-    library: &ProtocolObject<dyn MTLLibrary>,
-) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
-    let vfn = pipeline_function(library, "fg_vertex")?;
-    let ffn = pipeline_function(library, "fg_fragment")?;
-
-    let descriptor = MTLRenderPipelineDescriptor::new();
-    descriptor.setVertexFunction(Some(&vfn));
-    descriptor.setFragmentFunction(Some(&ffn));
-    let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
-    attachment.setPixelFormat(TARGET_FORMAT);
-    attachment.setBlendingEnabled(true);
-    attachment.setRgbBlendOperation(MTLBlendOperation::Add);
-    attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
-    attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-    attachment.setSourceAlphaBlendFactor(MTLBlendFactor::SourceAlpha);
-    attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-    attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-
-    device
-        .newRenderPipelineStateWithDescriptor_error(&descriptor)
-        .map_err(|e| format!("newRenderPipelineState (FG) error: {:?}", e))
-}
-
-/// Colour-glyph FG pipeline.  Same `fg_vertex` as the mono path, but the
-/// `fg_fragment_color` fragment samples the BGRA colour atlas and outputs
-/// the texel directly (the emoji's own colours).  The texel is
-/// **premultiplied** (the rasteriser drew into a premultiplied-alpha
-/// context), so the blend uses source factor `One` rather than
-/// `SourceAlpha`:
-///
-/// ```text
-/// final.rgb = src.rgb * 1 + dst.rgb * (1 - src.a)
-/// ```
-fn build_fg_color_pipeline(
-    device: &ProtocolObject<dyn MTLDevice>,
-    library: &ProtocolObject<dyn MTLLibrary>,
-) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
-    let vfn = pipeline_function(library, "fg_vertex")?;
-    let ffn = pipeline_function(library, "fg_fragment_color")?;
-
-    let descriptor = MTLRenderPipelineDescriptor::new();
-    descriptor.setVertexFunction(Some(&vfn));
-    descriptor.setFragmentFunction(Some(&ffn));
-    let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
-    attachment.setPixelFormat(TARGET_FORMAT);
-    attachment.setBlendingEnabled(true);
-    attachment.setRgbBlendOperation(MTLBlendOperation::Add);
-    attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
-    attachment.setSourceRGBBlendFactor(MTLBlendFactor::One);
-    attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-    attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-    attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-
-    device
-        .newRenderPipelineStateWithDescriptor_error(&descriptor)
-        .map_err(|e| format!("newRenderPipelineState (FG colour) error: {:?}", e))
-}
-
-/// Dot-pass pipeline.  Same `CellInstance` input as BG, but the
-/// fragment shader smoothsteps to a circle inscribed in the quad.
-/// Alpha-blended (same equation as FG) so the AA edge composites
-/// cleanly over the underlying sidebar BG.
-fn build_dot_pipeline(
-    device: &ProtocolObject<dyn MTLDevice>,
-    library: &ProtocolObject<dyn MTLLibrary>,
-) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
-    let vfn = pipeline_function(library, "dot_vertex")?;
-    let ffn = pipeline_function(library, "dot_fragment")?;
-
-    let descriptor = MTLRenderPipelineDescriptor::new();
-    descriptor.setVertexFunction(Some(&vfn));
-    descriptor.setFragmentFunction(Some(&ffn));
-    let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
-    attachment.setPixelFormat(TARGET_FORMAT);
-    attachment.setBlendingEnabled(true);
-    attachment.setRgbBlendOperation(MTLBlendOperation::Add);
-    attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
-    attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-    attachment.setSourceAlphaBlendFactor(MTLBlendFactor::SourceAlpha);
-    attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-    attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-
-    device
-        .newRenderPipelineStateWithDescriptor_error(&descriptor)
-        .map_err(|e| format!("newRenderPipelineState (dot) error: {:?}", e))
-}
-
-
-fn build_scene_ui_pipeline(
-    device: &ProtocolObject<dyn MTLDevice>,
-    library: &ProtocolObject<dyn MTLLibrary>,
-) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
-    build_ui_pipeline_with(device, library, "scene_ui_rect_vertex")
-}
-
-
-fn build_ui_pipeline_with(
-    device: &ProtocolObject<dyn MTLDevice>,
-    library: &ProtocolObject<dyn MTLLibrary>,
-    vertex_fn: &str,
-) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
-    let vfn = pipeline_function(library, vertex_fn)?;
-    let ffn = pipeline_function(library, "ui_rect_fragment")?;
-
-    let descriptor = MTLRenderPipelineDescriptor::new();
-    descriptor.setVertexFunction(Some(&vfn));
-    descriptor.setFragmentFunction(Some(&ffn));
-    let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
-    attachment.setPixelFormat(TARGET_FORMAT);
-    attachment.setBlendingEnabled(true);
-    attachment.setRgbBlendOperation(MTLBlendOperation::Add);
-    attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
-    // `One`, not `SourceAlpha`: `ui_rect_fragment` composites its
-    // shadow/fill/border layers into PREMULTIPLIED form (it returns
-    // `rgb * a`), so the source contribution is already scaled and the
-    // blend must not scale it again.
-    //
-    // It used to be `SourceAlpha`, which applied alpha twice.  At
-    // a = 1.0 the two formulas agree, so every opaque surface looked
-    // correct and the bug hid; a 0.2-alpha fill rendered at an
-    // effective 0.04 and simply disappeared.  Measured before the fix:
-    // white at a = 0.5 over black read 64 instead of 128.  This is
-    // where "semi-transparent panels don't work, make them opaque"
-    // came from — it was never a taste constraint, it was this.
-    attachment.setSourceRGBBlendFactor(MTLBlendFactor::One);
-    attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-    attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-    attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-
-    device
-        .newRenderPipelineStateWithDescriptor_error(&descriptor)
-        .map_err(|e| format!("newRenderPipelineState (ui_rect) error: {:?}", e))
-}
-
-fn build_fg_sampler(
-    device: &ProtocolObject<dyn MTLDevice>,
-) -> Result<Retained<ProtocolObject<dyn MTLSamplerState>>, String> {
-    let descriptor = MTLSamplerDescriptor::new();
-    descriptor.setMinFilter(MTLSamplerMinMagFilter::Linear);
-    descriptor.setMagFilter(MTLSamplerMinMagFilter::Linear);
-    descriptor.setSAddressMode(MTLSamplerAddressMode::ClampToEdge);
-    descriptor.setTAddressMode(MTLSamplerAddressMode::ClampToEdge);
-    device
-        .newSamplerStateWithDescriptor(&descriptor)
-        .ok_or_else(|| "newSamplerStateWithDescriptor returned nil".to_string())
 }
 
 impl MetalRenderer {
@@ -2549,6 +2020,11 @@ impl MetalRenderer {
     }
 }
 
+mod colorspace;
+#[cfg(test)]
+mod pane_cache_tests;
+mod encode;
+pub mod pipelines;
 mod menu_pass;
 pub use menu_pass::MenuBuffers;
 #[cfg(test)]
@@ -2556,6 +2032,10 @@ mod sheet;
 
 #[cfg(test)]
 pub(crate) mod probe;
+use encode::{encode_passes, make_instance_buffer, take_upload_bytes, Drawing};
+pub use colorspace::pin_layer_colorspace;
+pub use encode::{take_instance_buffer_cost, InstanceBufferPool};
+use pipelines::{build_fg_sampler, build_pipelines};
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3827,80 +3307,12 @@ mod tests {
             &mut wr_b, &target_b, &layout_b, std::slice::from_ref(&view), &[], 0,
         );
 
-        let mut compared = 0;
-        for slot in 0..INSTANCE_SLOTS {
-            let (Some(a), Some(b)) =
-                (&wr_a.instance_pool.slots[slot], &wr_b.instance_pool.slots[slot])
-            else {
-                continue;
-            };
-            assert_ne!(
-                a.contents().as_ptr(),
-                b.contents().as_ptr(),
-                "slot {slot} is the same memory for both windows",
-            );
-            compared += 1;
+        let (a, b) = (wr_a.instance_pool.memory(), wr_b.instance_pool.memory());
+        assert!(!a.is_empty() && !b.is_empty(), "a window filled no buffer — nothing was compared");
+        for ptr in &a {
+            assert!(!b.contains(ptr), "both windows draw from the same memory");
         }
-        assert!(compared > 0, "no slot was filled by either window — nothing was compared");
     }
-
-    /// The pool has one job — never allocate twice for the same
-    /// shape — and one hazard: refilling a buffer the GPU might still
-    /// be reading.  The hazard is handled by only using it on the
-    /// path that waits for completion (see `InstanceBufferPool`);
-    /// this covers the job.
-    #[test]
-    fn the_instance_pool_grows_once_and_then_stops_allocating() {
-        let device = match system_default_device() {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("SKIPPED: no Metal device: {e}");
-                return;
-            }
-        };
-        let mut pool = InstanceBufferPool::default();
-        let _ = take_instance_buffer_cost();
-
-        // First upload allocates; capacity is rounded up, so a
-        // slightly larger second frame must NOT allocate again — that
-        // is the whole point, and a naive `cap < len` on an exact-fit
-        // buffer would reallocate on every frame that grew by a byte.
-        let small = vec![7u8; 1000];
-        let buf = pool.upload(&device, 0, &small).expect("first upload");
-        let (_, bytes_after_first) = take_instance_buffer_cost();
-        assert!(bytes_after_first > 0, "the first upload has to allocate");
-        // The bytes actually landed.
-        let got = unsafe {
-            std::slice::from_raw_parts(buf.contents().as_ptr() as *const u8, small.len())
-        };
-        assert_eq!(got, &small[..], "contents must be what we uploaded");
-
-        let bigger = vec![9u8; 60_000];
-        pool.upload(&device, 0, &bigger).expect("second upload");
-        let (_, bytes_after_second) = take_instance_buffer_cost();
-        assert_eq!(
-            bytes_after_second, 0,
-            "growth inside the rounded-up capacity must not reallocate",
-        );
-
-        // Past the capacity it must grow — silently truncating would
-        // corrupt the frame instead of costing an allocation.
-        let huge = vec![1u8; 300_000];
-        let buf = pool.upload(&device, 0, &huge).expect("third upload");
-        let (_, bytes_after_third) = take_instance_buffer_cost();
-        assert!(bytes_after_third >= huge.len() as u64, "must reallocate to fit");
-        let got = unsafe {
-            std::slice::from_raw_parts(buf.contents().as_ptr() as *const u8, huge.len())
-        };
-        assert_eq!(got.len(), huge.len());
-        assert!(got.iter().all(|&b| b == 1), "the whole payload must land");
-
-        // Empty input is not a buffer, and an out-of-range slot is
-        // refused rather than panicking.
-        assert!(pool.upload(&device, 0, &[]).is_none());
-        assert!(pool.upload(&device, INSTANCE_SLOTS, &small).is_none());
-    }
-
 
     /// The resolver hands back an atlas entry for a cluster, and
     /// caches it.
@@ -4151,6 +3563,11 @@ mod tests {
             .render_glyphs_fg_offscreen(64, 64, atlas_texture.texture(), &glyphs, (0.0, 0.0, 0.0, 1.0))
             .expect("fg offscreen");
         assert_eq!(bytes.len(), 64 * 64 * 4);
+        // A glyph's soft edge over an opaque target leaves it opaque:
+        // the window server composites the surface as it is.
+        let soft = bytes.chunks_exact(4).filter(|p| p[0] > 8 && p[0] < 247).count();
+        assert!(soft > 0, "no soft edge in the picture to judge by");
+        assert!(bytes.chunks_exact(4).all(|p| p[3] == 255), "alpha under one where a glyph's edge was blended");
 
         // Find at least one pixel inside the glyph's destination
         // rect that's substantially brighter than the cleared
