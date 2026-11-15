@@ -28,6 +28,7 @@ pub mod grid_links;
 pub mod logx;
 pub mod loop_watch;
 pub mod scrollback_search;
+pub(crate) mod segment;
 pub mod signals;
 pub mod unicode_data;
 

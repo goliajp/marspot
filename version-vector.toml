@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.484"  # the window shows the core's surface itself; the shell draws nothing
-core    = "0.12.512"  # one frame a display refresh, drawn when the last is reported shown
-session = "0.11.351"  # a reader queued for its turn stops when told, and panes that flood together read in the order they asked
+shell   = "0.7.486"  # the claude badge reads how young a pane is from its log's stated length
+core    = "0.12.513"  # a pane's screen without a frame is rebuilt from its log through the log's reader
+session = "0.11.352"  # history and byte log in fixed-size segments written in place: no file made, renamed, grown or deleted while output flows

@@ -392,12 +392,10 @@ impl WorkerCtx {
         /// replay is bounded by it, so frequent retries are bounded
         /// too.
         const YOUNG_BYTELOG: u64 = 256 * 1024;
-        let bytelog = marspot_term::paths::sessions_dir()
-            .join(sid.to_string())
-            .join("bytelog");
-        // One stat on the file we were going to read anyway.
-        let young = std::fs::metadata(&bytelog)
-            .map(|m| m.len() <= YOUNG_BYTELOG)
+        let dir = marspot_term::paths::sessions_dir().join(sid.to_string());
+        // How much the log holds, which the replay was going to read anyway.
+        let young = marspot_term::bytelog::stream_len(&dir)
+            .map(|n| n <= YOUNG_BYTELOG)
             .unwrap_or(false);
         let retry = if young { YOUNG_RETRY } else { BANNER_RETRY };
         let now = Instant::now();

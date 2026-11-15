@@ -405,18 +405,17 @@ fn main() {
     // Corroborate with something the timing cannot fake: how much the
     // session actually wrote to disk this run.  A throughput number
     // whose explanation is "the scrollback write" is only worth
-    // believing if the file grew.
+    // believing if the history grew.
     let sess_dir = sandbox.join("sessions").join(session_id.to_string());
-    let sz = |name: &str| {
-        std::fs::metadata(sess_dir.join(name))
-            .map(|m| m.len())
-            .unwrap_or(0)
-    };
+    let (lines, records) = marspot_term::scrollback::FileScrollback::on_disk(
+        &sess_dir.join("scrollback.bin"),
+        &sess_dir.join("scrollback.idx"),
+    )
+    .unwrap_or_default();
     eprintln!(
-        "witness: scrollback.bin={} bytelog={} state.bin={}",
-        sz("scrollback.bin"),
-        sz("bytelog"),
-        sz("state.bin")
+        "witness: scrollback.records={records} scrollback.lines={lines} bytelog={} state.bin={}",
+        marspot_term::bytelog::stream_len(&sess_dir).unwrap_or(0),
+        std::fs::metadata(sess_dir.join("state.bin")).map(|m| m.len()).unwrap_or(0)
     );
     #[cfg(target_os = "macos")]
     {

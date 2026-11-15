@@ -1,6 +1,6 @@
-//! Disaster-recovery tool: rebuild a session's on-disk scrollback
-//! (`scrollback.bin` + `scrollback.idx`) by replaying its append-only
-//! `bytelog` through the real parser → grid → FileScrollback pipeline.
+//! Disaster-recovery tool: rebuild a session's on-disk scrollback by
+//! replaying its bytelog through the real parser → grid →
+//! FileScrollback pipeline.
 //!
 //! Born 2026-07-03: a test run inside a marspot pane inherited
 //! MARSPOT_SESSION_ID and overwrote session 347's scrollback.bin with
@@ -13,12 +13,12 @@
 //! Usage:
 //!   cargo run --release -p marspot-term --example \
 //!     rebuild_scrollback_from_bytelog -- \
-//!     <bytelog-file> <staging-state-dir> <session-id> <cols> <rows> \
-//!
-//! `<bytelog-file>` names the LIVE segment; if a retired `<file>.1`
-//! sits next to it (the log rotates at 50 MiB) it is replayed first,
-//! so the recovered history spans both.
+//!     <session-dir> <staging-state-dir> <session-id> <cols> <rows> \
 //!     [dump-text-path] [state-bin-out]
+//!
+//! `<session-dir>` is the directory the log is kept in
+//! (`sessions/<id>/`): its segments and any files of the rotating pair
+//! that came before them are replayed oldest first.
 //!
 //! With the optional 7th arg, ALSO writes the replayed terminal's
 //! `serialize_snapshot()` (v4 — alt ring + final alt screen folded)
@@ -27,7 +27,7 @@
 //! the pane comes back showing the pre-crash screen with the folded
 //! content as scrollable history (RFC-004 crash recovery).
 //!
-//! Output lands in `<staging-state-dir>/sessions/<id>/scrollback.{bin,idx}`.
+//! Output lands in `<staging-state-dir>/sessions/<id>/`.
 //! With the optional 6th arg, ALSO writes a human-readable UTF-8 dump
 //! (every scrollback line + the final visible grid) to that path —
 //! for TUI-heavy sessions (claudecode, vim) almost nothing scrolls
@@ -35,8 +35,8 @@
 //! actually lives.
 //! ALWAYS point this at a staging dir, never the live state dir — the
 //! live L3 owns its files.  Swap protocol (proven on 347): SIGSTOP the
-//! L3 → freeze-copy its bytelog → replay here → rename the rebuilt
-//! pair into place → land any commit + `bin/install-local.sh` (new
+//! L3 → freeze-copy its session dir → replay here → move the rebuilt
+//! files into place → land any commit + `bin/install-local.sh` (new
 //! fingerprint → SIGTERM fan-out queues on the stopped L3) → SIGCONT
 //! → the L3 execv's and reopens the rebuilt files.  Wrap positions may
 //! differ from the original where the pane was resized mid-history
@@ -46,14 +46,14 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if !(6..=8).contains(&args.len()) {
         eprintln!(
-            "usage: {} <bytelog> <staging-state-dir> <session-id> <cols> <rows> [dump-text-path] [state-bin-out]",
+            "usage: {} <session-dir> <staging-state-dir> <session-id> <cols> <rows> [dump-text-path] [state-bin-out]",
             args[0]
         );
         std::process::exit(2);
     }
     let dump_text_path = args.get(6).cloned();
     let state_bin_out = args.get(7).cloned();
-    let bytelog_path = &args[1];
+    let log_dir = std::path::PathBuf::from(&args[1]);
     let staging_dir = &args[2];
     let session_id: u64 = args[3].parse().expect("session-id must be u64");
     let cols: u16 = args[4].parse().expect("cols must be u16");
@@ -80,28 +80,11 @@ fn main() {
         "Terminal did not land on the File scrollback variant — env routing broke"
     );
 
-    // The bytelog rotates: once the live segment passes its size limit
-    // it becomes `<path>.1` and a fresh `<path>` takes over.  Replaying
-    // only the file named on the command line therefore recovers just
-    // the newer half of the history — feed the retired segment first so
-    // the stream goes in chronological order, exactly as
-    // `ByteLog::segment_paths` orders it.
-    let retired = std::path::PathBuf::from(format!("{bytelog_path}.1"));
-    let mut segments: Vec<std::path::PathBuf> = Vec::new();
-    if retired.exists() {
-        segments.push(retired);
-    }
-    segments.push(std::path::PathBuf::from(bytelog_path));
-    let total: u64 = segments
-        .iter()
-        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
-        .sum();
-    eprintln!(
-        "  replaying {} segment(s), {total} bytes total",
-        segments.len()
-    );
+    let pieces = marspot_term::bytelog::pieces(&log_dir).expect("read the log's files");
+    let total: u64 = pieces.iter().map(|p| p.len()).sum();
+    eprintln!("  replaying {} piece(s), {total} bytes total", pieces.len());
     let started = std::time::Instant::now();
-    let fed = marspot_term::bytelog::replay(&segments, &mut term).expect("replay the bytelog");
+    let fed = marspot_term::bytelog::replay(&pieces, &mut term).expect("replay the bytelog");
     term.grid().scrollback_flush_for_handoff();
 
     let lines = term.grid().scrollback_len();

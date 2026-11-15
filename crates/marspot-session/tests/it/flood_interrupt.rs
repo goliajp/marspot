@@ -23,8 +23,7 @@ fn logged_bytes(state: &std::path::Path) -> u64 {
     };
     sessions
         .flatten()
-        .filter_map(|d| std::fs::metadata(d.path().join("bytelog")).ok())
-        .map(|m| m.len())
+        .filter_map(|d| marspot_term::bytelog::stream_len(&d.path()).ok())
         .sum()
 }
 

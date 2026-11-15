@@ -273,6 +273,33 @@ fn unreaped(pid: libc::pid_t) -> bool {
     r == 0
 }
 
+/// Leave in `session_dir` what a session binary from before history
+/// segments left there: a v4 scrollback pair holding `lines`, one line
+/// of plain text each, and `log` as the live file of the rotating byte
+/// log.  For a test of a pane whose session binary is replaced.
+pub fn write_history_before_segments(session_dir: &Path, lines: &[String], log: &[u8]) {
+    std::fs::create_dir_all(session_dir).expect("the session directory");
+    let mut bin: Vec<u8> = Vec::new();
+    bin.extend_from_slice(&0x5350_5301u32.to_le_bytes());
+    bin.extend_from_slice(&4u32.to_le_bytes());
+    bin.extend_from_slice(&(crate::grid::CELL_MEM_BYTES as u32).to_le_bytes());
+    bin.extend_from_slice(&[0u8; 12]);
+    bin.extend_from_slice(&1u64.to_le_bytes());
+    let mut idx: Vec<u8> = Vec::new();
+    for line in lines {
+        idx.extend_from_slice(&(bin.len() as u64).to_le_bytes());
+        let cells: Vec<crate::grid::Cell> = line.chars().map(|ch| crate::grid::Cell { ch, ..Default::default() }).collect();
+        let body = crate::grid::Cell::slice_as_bytes(&cells);
+        bin.extend_from_slice(&((3 + body.len()) as u32).to_le_bytes());
+        bin.push(0);
+        bin.extend_from_slice(&(cells.len() as u16).to_le_bytes());
+        bin.extend_from_slice(body);
+    }
+    std::fs::write(session_dir.join("scrollback.bin"), bin).expect("the old records");
+    std::fs::write(session_dir.join("scrollback.idx"), idx).expect("the old index");
+    std::fs::write(session_dir.join("bytelog"), log).expect("the old log");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
