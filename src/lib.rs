@@ -103,6 +103,8 @@ pub mod font_trait;
 pub mod frame_build;
 #[cfg(test)]
 mod frame_alloc_tests;
+#[cfg(test)]
+mod frame_alloc_window_tests;
 pub mod frame_scene;
 pub mod glyph_atlas;
 pub mod input;

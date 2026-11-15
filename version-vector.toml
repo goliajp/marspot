@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.486"  # the claude badge reads how young a pane is from its log's stated length
-core    = "0.12.523"  # the overlays of a frame are painted by one painter, written once
+core    = "0.12.524"  # a whole window's frame takes nothing from the heap once warm
 session = "0.11.352"  # history and byte log in fixed-size segments written in place: no file made, renamed, grown or deleted while output flows

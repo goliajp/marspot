@@ -27,6 +27,8 @@ pub(crate) struct ChromeSurfaces {
     pub(crate) toolbar: ToolbarSurface,
     pub(crate) sidebar: SidebarSurface,
     pub(crate) titles: crate::ui::components::title_strip_view::TitleStripSurface,
+    /// The panes' rectangles for the seams, refilled every frame.
+    seam_rects: Vec<Rect>,
 }
 
 /// What the chrome shows beyond where things are.
@@ -50,7 +52,7 @@ pub(crate) fn paint_chrome(
     overlay_ui_rects: &mut Vec<UiRectInstance>,
     surfaces: &mut ChromeSurfaces,
 ) {
-    paint_grid_seams(painter, layout, n_views, focused_idx, overlay_ui_rects);
+    paint_grid_seams(painter, layout, n_views, focused_idx, overlay_ui_rects, &mut surfaces.seam_rects);
     paint_empty_seats(painter, layout, n_views);
     let cell_w = painter.cell_w;
     surfaces.sidebar.frame(painter, &SidebarFrame { layout, rows: sidebar, focused_idx, hover: state.hover, cell_w });
@@ -65,6 +67,7 @@ fn paint_grid_seams(
     n_views: usize,
     focused_idx: usize,
     overlay_ui_rects: &mut Vec<UiRectInstance>,
+    pane_rects: &mut Vec<Rect>,
 ) {
     // Seams first, then the ring: both are plain fills in submission
     // order, after the pane backgrounds, so the ring replaces the seam
@@ -72,11 +75,10 @@ fn paint_grid_seams(
     if layout.gutter > 0.0 && !layout.cells.is_empty() {
         let seam_thickness = layout.gutter * chrome::SEAM_GUTTERS;
         let seam_style = SeamStyle { color: palette::seam(), thickness: seam_thickness };
-        let pane_rects: Vec<Rect> = layout.cells.iter().map(|c| Rect {
-            x: c.x, y_top: c.y_top, w: c.w, h: c.h,
-        }).collect();
+        pane_rects.clear();
+        pane_rects.extend(layout.cells.iter().map(|c| Rect { x: c.x, y_top: c.y_top, w: c.w, h: c.h }));
         GridSeams {
-            cells: &pane_rects,
+            cells: pane_rects,
             cols: layout.grid_cols,
             rows: layout.grid_rows,
             vertical: seam_style,
