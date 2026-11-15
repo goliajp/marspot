@@ -375,9 +375,23 @@ pub(crate) mod tests {
         RATED[3].fetch_add(usize::from(echo), Relaxed);
     }
 
+    /// Floods this process's readers saw end.
+    static FLOODS_OVER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    pub(crate) fn note_flood_over() {
+        FLOODS_OVER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) fn rated() -> String {
         let n = |i: usize| RATED[i].load(std::sync::atomic::Ordering::Relaxed);
-        format!("{} rates: {} not welcome, {} not alone, {} with an echo expected", n(0), n(1), n(2), n(3))
+        format!(
+            "{} rates: {} not welcome, {} not alone, {} with an echo expected; {} floods ended",
+            n(0),
+            n(1),
+            n(2),
+            n(3),
+            FLOODS_OVER.load(std::sync::atomic::Ordering::Relaxed)
+        )
     }
 
     use super::gather::KERNEL_READ_BYTES;
