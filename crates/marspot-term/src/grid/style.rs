@@ -231,6 +231,12 @@ impl StyleTable {
         self.positional
     }
 
+    /// Every slot by number, free ones included (those hold no value
+    /// [`PackedStyle::is_valid`] accepts): what a frame carries.
+    pub fn values(&self) -> &[PackedStyle] {
+        &self.styles
+    }
+
     /// Slots, used or free.
     pub fn len(&self) -> usize {
         self.styles.len()
