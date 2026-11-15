@@ -17,7 +17,11 @@ impl Grid {
     /// The number cell `idx` should carry for `attrs`.
     #[inline(always)]
     fn id_for(&mut self, idx: usize, attrs: &CellAttrs) -> u32 {
-        let p = PackedStyle::pack(attrs);
+        self.id_for_packed(idx, PackedStyle::pack(attrs))
+    }
+
+    #[inline(always)]
+    fn id_for_packed(&mut self, idx: usize, p: PackedStyle) -> u32 {
         if self.styles.is_positional() {
             return self.styles.set_at(idx, p);
         }
@@ -75,6 +79,41 @@ impl Grid {
         attrs._pad = [0; 3];
         let id = self.id_for(idx, &attrs);
         self.cells[idx] = PackedCell::from_cell(&cell, id);
+    }
+
+    /// Put a frame another grid published into this one: `cells` in
+    /// logical order, their numbers indexing `styles`, which are that
+    /// grid's.  Every number is looked up in this grid's own table --
+    /// once per number per frame, kept in `remap` -- so the two tables
+    /// never have to agree.  For a reader's mirror of a session's
+    /// screen; the cells are as checked as `FrameBuf` leaves them.
+    pub fn load_frame(&mut self, cells: &[PackedCell], styles: &[PackedStyle], remap: &mut Vec<u32>) {
+        debug_assert_eq!(cells.len(), self.cells.len());
+        self.top_row = 0;
+        remap.clear();
+        remap.resize(styles.len(), u32::MAX);
+        for (idx, &c) in cells.iter().enumerate().take(self.cells.len()) {
+            let theirs = c.style_id() as usize;
+            let ours = if theirs == 0 {
+                0
+            } else if self.styles.is_positional() {
+                self.styles.set_at(idx, styles[theirs])
+            } else if remap[theirs] != u32::MAX {
+                let id = remap[theirs];
+                // a number written while a sweep runs is marked as it
+                // is written, wherever the writer got it
+                if self.styles.is_marking() {
+                    self.styles.mark(id);
+                }
+                id
+            } else {
+                let id = self.id_for_packed(idx, styles[theirs]);
+                remap[theirs] = id;
+                id
+            };
+            self.cells[idx] = c.with_style(ours);
+        }
+        self.forget_row_marks();
     }
 
     /// Write `cell` over `range`.

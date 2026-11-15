@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.488"  # the two ways the shell replaces its own image live in a module of their own
-core    = "0.12.534"  # the in-RAM history keeps a line as its record, about a byte a cell for plain text
-session = "0.11.362"  # the in-RAM history keeps a line as its record, about a byte a cell for plain text
+core    = "0.12.535"  # a grid takes in a frame of another grid's packed cells, and checks cells and values from outside
+session = "0.11.363"  # a grid takes in a frame of another grid's packed cells, and checks cells and values from outside

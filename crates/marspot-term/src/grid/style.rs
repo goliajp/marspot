@@ -86,6 +86,21 @@ impl PackedStyle {
     pub fn is_default(self) -> bool {
         self.0 == 0
     }
+
+    /// Whether [`Self::pack`] can produce this value.  For values that
+    /// came from another process.
+    pub fn is_valid(self) -> bool {
+        // one colour as its four bytes: a tag of the three, and nothing
+        // in the bytes that tag does not use
+        let colour = |w: u32| match w & 0xFF {
+            0 => w >> 8 == 0,
+            1 => w >> 16 == 0,
+            2 => true,
+            _ => false,
+        };
+        let fg = self.0 as u32 & !(FLAGS_MASK as u32);
+        self.0 & FREE == 0 && colour(fg) && colour((self.0 >> 32) as u32)
+    }
 }
 
 /// Numbered attribute sets for one grid.
@@ -531,6 +546,7 @@ mod tests {
             let a = attrs_from(next(&mut s));
             let p = PackedStyle::pack(&a);
             assert_eq!(p.unpack(), a);
+            assert!(p.is_valid());
             let cell = crate::grid::Cell { ch: ' ', attrs: a };
             assert_eq!(&p.mem_bytes(false)[..], &crate::grid::Cell::slice_as_bytes(&[cell])[4..]);
             assert_eq!(p.0 & FREE, 0);
@@ -539,6 +555,23 @@ mod tests {
                 assert_eq!(prev, a, "two attribute sets share {p:?}");
             }
         }
+    }
+
+    /// Values no attribute set packs to are told apart from the rest.
+    #[test]
+    fn values_pack_cannot_make_are_refused() {
+        for bad in [
+            3u64,                    // a fourth colour tag
+            1 | 5 << 8 | 9 << 16,    // an indexed colour with a second byte
+            9 << 8,                  // the default colour with a payload
+            FREE,                    // a free slot's marker
+            1 << 34,                 // a bit between the background's tag and payload
+            3 << 32,                 // a fourth background tag
+            1 << 32 | 7 << 48,       // an indexed background with a second byte
+        ] {
+            assert!(!PackedStyle(bad).is_valid(), "{bad:#x}");
+        }
+        assert!(PackedStyle(2 | 0xFF_FFFF << 8 | 0x1F << 2).is_valid());
     }
 
     /// Against a map: numbers stay put while they are in use, a value

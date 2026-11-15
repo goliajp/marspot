@@ -20,6 +20,8 @@ pub struct PackedCell(u64);
 const CH_MASK: u64 = 0x1F_FFFF;
 const CLUSTER_BIT: u64 = 1 << 21;
 const STYLE_SHIFT: u32 = 32;
+/// Bits no cell has set: 22–31 and 56–63.
+const RESERVED: u64 = 0x3FF << 22 | 0xFF << 56;
 
 impl Default for PackedCell {
     fn default() -> Self {
@@ -119,5 +121,16 @@ impl PackedCell {
     #[inline(always)]
     pub const fn bits(self) -> u64 {
         self.0
+    }
+
+    /// The cell, if it is one a grid could hold with a table of `count`
+    /// values, else a blank.  For cells that came from another
+    /// process: the bits are not trusted until this has looked at them.
+    #[inline(always)]
+    pub fn checked(self, count: u32) -> PackedCell {
+        let ok = self.0 & RESERVED == 0
+            && self.style_id() < count
+            && char::from_u32(self.ch_bits()).is_some();
+        if ok { self } else { PackedCell::BLANK }
     }
 }
