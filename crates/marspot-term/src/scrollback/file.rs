@@ -147,7 +147,7 @@ mod legacy;
 mod notes;
 mod open;
 mod read;
-pub(super) mod ring;
+mod ring;
 mod tiers;
 mod write;
 
