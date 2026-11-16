@@ -17,8 +17,8 @@ fn screen(pane: &Pane) -> String {
 /// the core's loop does.
 fn pump(pane: &mut Pane, rx: &mpsc::Receiver<CoreEvent>) {
     while let Ok(ev) = rx.try_recv() {
-        if let CoreEvent::L3Publishes(_, payload) = ev {
-            pane.session_mut().l3_session_publishes(&payload);
+        if let CoreEvent::L3Says(_, frame) = ev {
+            pane.session_mut().l3_session_says(&frame);
         }
     }
     pane.pump();
