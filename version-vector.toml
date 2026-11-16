@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.490"  # a core reads frames of eight-byte cells, and tells each session it does
-core    = "0.12.548"  # a cluster in the default pen is written without the general cell path
-session = "0.11.377"  # a cluster in the default pen is written without the general cell path
+core    = "0.12.549"  # the text lane asks a coloured pen's number without re-checking for the default
+session = "0.11.378"  # the text lane asks a coloured pen's number without re-checking for the default

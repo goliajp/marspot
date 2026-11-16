@@ -56,12 +56,13 @@ impl Grid {
     ///
     /// Good only until the grid's next write of anything else: a fill
     /// can sweep the table or renumber the grid.
+    ///
+    /// The pen is not the default: [`CellAttrs::is_plain`] is false, so
+    /// it never packs to number 0's value.
     #[inline(always)]
     pub fn pen_id(&mut self, attrs: &CellAttrs) -> Option<u32> {
+        debug_assert!(!attrs.is_plain());
         let p = PackedStyle::pack(attrs);
-        if p.is_default() {
-            return Some(0);
-        }
         if self.styles.is_positional() {
             return None;
         }

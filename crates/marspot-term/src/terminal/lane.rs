@@ -229,9 +229,10 @@ impl<'a> Handler<'a> {
         // after the wrap, whose fill may have changed the numbering; a
         // grid numbering its cells by position leaves coloured text to
         // the per-character path
-        let plain = self.attrs.is_default();
-        // whether this row's marks keep its attribute numbers
-        let notes = self.grid.notes_styles();
+        let plain = self.attrs.is_plain();
+        // whether this row's marks keep its attribute numbers; a run in
+        // the default pen writes number 0, which needs no note
+        let notes = !plain && self.grid.notes_styles();
         let pen = if plain {
             0
         } else {
@@ -385,7 +386,7 @@ impl<'a> Handler<'a> {
             if !plain && to > mark.plain_from {
                 mark.plain_from = to;
             }
-            if notes && !plain {
+            if notes {
                 mark.styles.note(pen);
             }
             if wide {
