@@ -29,8 +29,8 @@ pub struct MemoryScrollback {
     cells: Vec<PackedCell>,
     /// Per line, the values its cells' numbers index from 1 (0 is the
     /// default); a plain line's is empty and allocates nothing.  For a
-    /// line kept as it was (`as_it_was`), the grid's numbers and their
-    /// values instead, in pairs: number, value, number, value.
+    /// line kept as it was (`as_it_was`), sixteen values instead, a
+    /// number's value at the number's low four bits.
     palettes: Vec<Vec<PackedStyle>>,
     /// Per line, whether its cells carry the grid's own numbers.
     as_it_was: Vec<bool>,
@@ -107,23 +107,28 @@ impl MemoryScrollback {
             return;
         }
         let slot = self.next_slot();
-        // a pair a number costs no more than the eight bytes a cell the
-        // palette may take
+        // sixteen values cost no more than the eight bytes a cell the
+        // palette may take, and the numbers must not share low bits
         let cols = self.cols;
-        let known = known.filter(|ids| !styles.is_positional() && 2 * ids.len() <= cols);
+        let known = known.filter(|ids| !styles.is_positional() && cols >= AS_IT_WAS && apart(ids));
         self.as_it_was[slot] = known.is_some();
         let (row, palette) = self.slot_mut(slot);
-        palette.clear();
         let n = source.len().min(row.len());
         if let Some(ids) = known {
             row[..n].copy_from_slice(&source[..n]);
             row[n..].fill(PackedCell::BLANK);
+            // what a slot held for a line before is never read: the
+            // cells carry no number but these
+            if palette.len() != AS_IT_WAS {
+                palette.clear();
+                palette.resize(AS_IT_WAS, PackedStyle::DEFAULT);
+            }
             for &id in ids {
-                palette.push(PackedStyle(id as u64));
-                palette.push(styles.value_or_default(id));
+                palette[id as usize % AS_IT_WAS] = styles.value_or_default(id);
             }
             return;
         }
+        palette.clear();
         // past `plain_from` every cell is in the default attributes:
         // number 0 in any table, copied as it is
         let plain_from = (hint.plain_from as usize).min(n);
@@ -163,8 +168,7 @@ impl MemoryScrollback {
         let mut attrs = if id == 0 {
             Default::default()
         } else if self.as_it_was[slot] {
-            let at = palette.chunks_exact(2).position(|p| p[0].0 == id as u64);
-            at.map(|i| palette[2 * i + 1].unpack()).unwrap_or_default()
+            palette[id % AS_IT_WAS].unpack()
         } else {
             palette[id - 1].unpack()
         };
@@ -213,6 +217,21 @@ impl MemoryScrollback {
         self.cells.capacity() * std::mem::size_of::<PackedCell>()
             + self.palettes.iter().map(|p| p.capacity() * 8).sum::<usize>()
     }
+}
+
+/// The values a line kept as it was carries, one for each value of a
+/// number's low four bits.
+const AS_IT_WAS: usize = 16;
+
+/// Whether no two of `ids` share their low four bits.
+fn apart(ids: &[u32]) -> bool {
+    let mut seen = 0u16;
+    ids.iter().all(|&id| {
+        let bit = 1u16 << (id as usize % AS_IT_WAS);
+        let fresh = seen & bit == 0;
+        seen |= bit;
+        fresh
+    })
 }
 
 /// `value`'s number in a line's palette, putting it in if the first
@@ -271,6 +290,34 @@ mod tests {
         sb.push_packed(&row[..2], g.styles(), RowHint::NONE, None);
         let line: String = sb.line(0).unwrap().iter().map(|c| c.ch).collect();
         assert_eq!(line, "z   ");
+    }
+
+    /// A row whose numbers the grid knows is kept as it was only when no
+    /// two of them share their low four bits; one where two do is
+    /// renumbered, and both read back in their own colours.
+    #[test]
+    fn numbers_sharing_low_bits_send_a_row_through_its_palette() {
+        use crate::grid::{CellAttrs, Color, Grid};
+        let mut g = Grid::new(80, 1);
+        let colour = |k: u8| Cell { ch: 'x', attrs: CellAttrs { fg: Color::rgb(k, 1, 2), ..Default::default() } };
+        // numbers 1 to 17, one a cell; the row's own two are 1 and 17
+        for k in 0..17u8 {
+            g.set_cell(k as u16, 0, colour(k));
+        }
+        let mut row: Vec<PackedCell> = g.live_row_at_view(0, 0).unwrap().to_vec();
+        let (a, b) = (row[0], row[16]);
+        assert_eq!((a.style_id(), b.style_id()), (1, 17));
+        row.iter_mut().for_each(|c| *c = PackedCell::BLANK);
+        row[0] = a;
+        row[1] = b;
+        let mut sb = MemoryScrollback::new(2, 80);
+        sb.push_packed(&row, g.styles(), RowHint::NONE, Some(&[1, 17]));
+        assert!(!sb.kept_as_it_was(0));
+        sb.push_packed(&row[..1], g.styles(), RowHint::NONE, Some(&[1]));
+        assert!(sb.kept_as_it_was(1));
+        let line = sb.line(0).unwrap();
+        assert_eq!((line[0], line[1]), (colour(0), colour(16)));
+        assert_eq!(sb.line(1).unwrap()[0], colour(0));
     }
 
     /// A line costs eight bytes a cell, and a line that changes colour
