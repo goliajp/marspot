@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use marspot_term::grid_shm::{
     FLAG_ALT_SCREEN, FLAG_ALT_SCROLL, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE,
-    FLAG_CURSOR_VISIBLE, FLAG_MOUSE_ANY_MOTION, FLAG_MOUSE_DRAG, FLAG_MOUSE_SGR,
+    FLAG_CURSOR_VISIBLE, FLAG_MOUSE_ANY_MOTION, FLAG_MOUSE_DRAG, FLAG_MOUSE_SGR, FLAG_POINTER_GATED,
     FLAG_MOUSE_TRACKING, GridShmWriter,
 };
 use marspot_term::loop_watch::LoopWatch;
@@ -286,6 +286,8 @@ fn publish(shm: &mut GridShmWriter, session: &SessionImpl, view_offset: u16) -> 
     if term.alt_scroll_mode() {
         flags |= FLAG_ALT_SCROLL;
     }
+    // this session checks pointer events against its own modes
+    flags |= FLAG_POINTER_GATED;
     // Clamp here too: L2 clamps against the scrollback_len it last saw, but
     // scrollback can shrink (alt-screen enter / reset) between L2's request
     // and this publish, so never hand the writer an out-of-range offset.

@@ -317,6 +317,11 @@ impl LocalSession {
         self.child_pid
     }
 
+    /// The pty's master side.
+    pub(crate) fn raw_master(&self) -> RawFd {
+        self.pty.raw_master()
+    }
+
     pub fn is_exited(&self) -> bool {
         self.exited.load(Ordering::SeqCst)
     }

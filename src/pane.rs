@@ -24,11 +24,12 @@ use std::time::{Duration, Instant};
 use crate::grid::{Cell, Grid};
 
 mod mirror;
+mod pointer;
 mod regions;
 use crate::grid_shm::{
     GridShmReader, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
     FLAG_ALT_SCREEN, FLAG_ALT_SCROLL, FLAG_MOUSE_ANY_MOTION, FLAG_MOUSE_DRAG,
-    FLAG_MOUSE_SGR, FLAG_MOUSE_TRACKING,
+    FLAG_MOUSE_SGR, FLAG_MOUSE_TRACKING, FLAG_POINTER_GATED,
 };
 use crate::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use crate::render::SessionView;
@@ -473,104 +474,6 @@ impl PaneBackend {
         }
     }
 
-    /// Send `n` arrow-key presses to the child.
-    ///
-    /// For a full-screen TUI that does NOT ask for mouse reporting,
-    /// this is the only way a wheel can reach it.  DECCKM decides the
-    /// encoding: an app-cursor-keys program expects `ESC O A`, and
-    /// sending it `ESC [ A` puts a stray `[` where it wanted a key.
-    pub fn l3_inject_arrows(&mut self, up: bool, n: u32) {
-        let app = matches!(self, PaneBackend::L3(c) if c.app_cursor_keys);
-        let seq: &[u8] = match (app, up) {
-            (true, true) => b"\x1bOA",
-            (true, false) => b"\x1bOB",
-            (false, true) => b"\x1b[A",
-            (false, false) => b"\x1b[B",
-        };
-        let mut buf = Vec::with_capacity(n as usize * seq.len());
-        for _ in 0..n {
-            buf.extend_from_slice(seq);
-        }
-        if let PaneBackend::L3(c) = self {
-            c.forward_inject_input(&buf);
-        }
-    }
-
-    /// Encode one mouse report and forward it to the L3 PTY.
-    ///
-    /// `button` is the VT button code before any offset: 0 left, 1
-    /// middle, 2 right, 64 wheel up, 65 wheel down.  `col` / `row` are
-    /// 1-based cell coordinates, the way both encodings want them.
-    ///
-    /// Two encodings, because a program gets whichever it asked for.
-    /// SGR (`?1006`) is the modern one and has no coordinate limit;
-    /// the X10 form packs each field into one byte at `+32`, which
-    /// stops working past column 223 — that is the encoding's own
-    /// ceiling, not a shortcut taken here.
-    fn encode_mouse(buf: &mut Vec<u8>, sgr: bool, button: u8, pressed: bool, col: u32, row: u32) {
-        if sgr {
-            let final_byte = if pressed { 'M' } else { 'm' };
-            buf.extend_from_slice(
-                format!("\x1b[<{button};{col};{row}{final_byte}").as_bytes(),
-            );
-        } else {
-            // X10 has no release code per button: every release is 3.
-            let b = if pressed { button } else { 3 };
-            buf.extend_from_slice(b"\x1b[M");
-            buf.push(b + 32);
-            buf.push((col.min(223) as u8) + 32);
-            buf.push((row.min(223) as u8) + 32);
-        }
-    }
-
-    /// The pointer moved, at the cell it moved to.
-    ///
-    /// `button` is the one being held, or 3 for none — which is what
-    /// both encodings use to mean "no button".  The motion bit (32) is
-    /// what tells the program this is travel rather than a press.
-    pub fn l3_inject_mouse_motion(&mut self, button: u8, col: u32, row: u32) {
-        let sgr = self.l3_mouse_sgr_active();
-        let mut buf = Vec::with_capacity(16);
-        Self::encode_mouse(&mut buf, sgr, button + 32, true, col, row);
-        if let PaneBackend::L3(c) = self {
-            c.forward_inject_input(&buf);
-        }
-    }
-
-    /// A button going down or coming up, at the cell the pointer is in.
-    ///
-    /// Reported the same way by every tracking mode a program can ask
-    /// for (`?1000`, `?1002`, `?1003`), so this needs no knowledge of
-    /// which one is on — unlike motion, which only two of them want
-    /// and which the shm flags cannot currently tell apart.
-    pub fn l3_inject_mouse_button(&mut self, button: u8, pressed: bool, col: u32, row: u32) {
-        let sgr = self.l3_mouse_sgr_active();
-        let mut buf = Vec::with_capacity(16);
-        Self::encode_mouse(&mut buf, sgr, button, pressed, col, row);
-        if let PaneBackend::L3(c) = self {
-            c.forward_inject_input(&buf);
-        }
-    }
-
-    /// Encode a wheel event(`button_64`=wheel up,`button_65`=down,
-    /// `n_ticks` 次)+ forward 到 L3 PTY via InjectInput.viewport
-    /// 中心当 mouse 位置兜底.SGR vs X11 legacy 由 `mouse_sgr_active`
-    /// 决定.cols/rows 由 caller 传(Pane 这层没存,layout 里有).
-    pub fn l3_inject_wheel(&mut self, button_64_or_65: u8, n_ticks: u32, cols: u16, rows: u16) {
-        let x = (cols.max(1) / 2 + 1) as u32;
-        let y = (rows.max(1) / 2 + 1) as u32;
-        let sgr = self.l3_mouse_sgr_active();
-        let mut buf = Vec::with_capacity(n_ticks as usize * 16);
-        for _ in 0..n_ticks {
-            // A wheel tick is a press with no release; the release
-            // form would read as a button coming up.
-            Self::encode_mouse(&mut buf, sgr, button_64_or_65, true, x, y);
-        }
-        if let PaneBackend::L3(c) = self {
-            c.forward_inject_input(&buf);
-        }
-    }
-
     pub fn l3_scrollback_len(&self) -> u16 {
         match self {
             PaneBackend::L3(c) => c.scrollback_len(),
@@ -831,6 +734,9 @@ pub struct L3Conn {
     mouse_drag_wanted: bool,
     /// …and for motion with no button at all (`?1003`).
     mouse_any_motion_wanted: bool,
+    /// The session checks pointer events against its own modes and
+    /// takes them as `PanePointerInput` — see `pane::pointer`.
+    pointer_gated: bool,
     /// Last shm publish seq we mirrored; lets `poll()` skip a re-fill
     /// when nothing changed (so L2's heartbeat doesn't force a render).
     last_seq: u64,
@@ -913,6 +819,7 @@ impl L3Conn {
             mouse_sgr_active: false,
             mouse_drag_wanted: false,
             mouse_any_motion_wanted: false,
+            pointer_gated: false,
             bracketed_paste: false,
             last_seq: 0,
             req_cols: cols,
@@ -952,6 +859,7 @@ impl L3Conn {
             mouse_sgr_active: false,
             mouse_drag_wanted: false,
             mouse_any_motion_wanted: false,
+            pointer_gated: false,
             bracketed_paste: false,
             last_seq: 0,
             req_cols: cols,
@@ -1026,6 +934,7 @@ impl L3Conn {
         self.mouse_any_motion_wanted = snap.flags & FLAG_MOUSE_ANY_MOTION != 0;
         self.alt_screen_active = snap.flags & FLAG_ALT_SCREEN != 0;
         self.alt_scroll_active = snap.flags & FLAG_ALT_SCROLL != 0;
+        self.pointer_gated = snap.flags & FLAG_POINTER_GATED != 0;
         self.snap_scrollback_len = snap.scrollback_len;
         // Re-read the seq after the copy: if L3 republished mid-fill,
         // leave it stale so the next poll re-reads rather than missing a
@@ -2246,79 +2155,5 @@ mod tests {
     fn vacant_slot_retains_its_session_id_when_pending() {
         let backend = PaneBackend::Vacant(VacantPane::new_pending(42, 80, 24));
         assert_eq!(backend.shelld_session_id(), Some(42));
-    }
-}
-
-#[cfg(test)]
-mod mouse_encoding_tests {
-    use super::PaneBackend;
-
-    fn sgr(button: u8, pressed: bool, col: u32, row: u32) -> String {
-        let mut b = Vec::new();
-        PaneBackend::encode_mouse(&mut b, true, button, pressed, col, row);
-        String::from_utf8(b).unwrap()
-    }
-
-    fn x10(button: u8, pressed: bool, col: u32, row: u32) -> Vec<u8> {
-        let mut b = Vec::new();
-        PaneBackend::encode_mouse(&mut b, false, button, pressed, col, row);
-        b
-    }
-
-    /// SGR says which button came up.  X10 cannot, and says 3.
-    ///
-    /// That difference is the whole reason a program asks for `?1006`,
-    /// and getting it backwards means a program either never sees the
-    /// release or thinks a different button was let go.
-    #[test]
-    fn a_release_is_encoded_the_way_each_form_can_say_it() {
-        assert_eq!(sgr(0, true, 12, 34), "\u{1b}[<0;12;34M");
-        assert_eq!(sgr(0, false, 12, 34), "\u{1b}[<0;12;34m");
-        assert_eq!(sgr(2, false, 1, 1), "\u{1b}[<2;1;1m");
-
-        assert_eq!(x10(0, true, 12, 34), b"\x1b[M\x20\x2c\x42".to_vec());
-        // 3 + 32 = 35 = b'#': any button, released.
-        assert_eq!(x10(0, false, 12, 34)[3], b'#');
-        assert_eq!(x10(2, false, 12, 34)[3], b'#', "X10 cannot name the button");
-    }
-
-    /// The X10 form runs out of room at column 223.
-    ///
-    /// It packs each coordinate into one byte at +32, so 223 is the
-    /// last column it can name.  Clamping is the encoding's ceiling,
-    /// not a decision taken here — but it has to be a clamp and not a
-    /// wrap, or column 224 would report as column 1.
-    #[test]
-    fn the_legacy_form_clamps_rather_than_wraps() {
-        let far = x10(0, true, 500, 500);
-        assert_eq!(far[4], 223 + 32);
-        assert_eq!(far[5], 223 + 32);
-        // And SGR, which has no such limit, says the real number.
-        assert_eq!(sgr(0, true, 500, 500), "\u{1b}[<0;500;500M");
-    }
-
-    /// Motion carries the 32 bit, and a held button rides under it.
-    ///
-    /// `?1002` reports travel while a button is held and `?1003`
-    /// reports all of it; the difference on the wire is which button
-    /// is named, with 3 meaning none.  Both encodings add 32 to say
-    /// this is travel rather than a press, which is why the legacy
-    /// byte lands at button + 64.
-    #[test]
-    fn motion_is_a_button_plus_the_motion_bit() {
-        // Left button (0) held while moving: the motion bit makes 32.
-        assert_eq!(sgr(32, true, 7, 9), "\u{1b}[<32;7;9M");
-        // No button (3) while moving: 35.
-        assert_eq!(sgr(35, true, 7, 9), "\u{1b}[<35;7;9M");
-        // X10 adds its own 32 on top of whatever it is handed.
-        assert_eq!(x10(32, true, 7, 9)[3], 64);
-        assert_eq!(x10(35, true, 7, 9)[3], 67);
-    }
-
-    /// A wheel tick is a press, never a release.
-    #[test]
-    fn a_wheel_tick_is_a_press() {
-        assert!(sgr(64, true, 5, 5).ends_with('M'));
-        assert_eq!(sgr(65, true, 5, 5), "\u{1b}[<65;5;5M");
     }
 }

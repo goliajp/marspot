@@ -557,6 +557,11 @@ pub enum MsgType {
     /// A frame says only this, and a second one is a no-op.  A session
     /// that understands it says so in its registry entry (`build`).
     SessionUpdate = 85,
+    /// L2 → L3: a pointer event for the pane's program, described
+    /// rather than encoded — see `shell_proto::pointer`.  Sent only to a
+    /// session whose frames carry `grid_shm::FLAG_POINTER_GATED`; an
+    /// older one gets the encoded bytes as `InjectInput`, as before.
+    PanePointerInput = 88,
     // ── frame pacing (90..=92), see `frame_pace` ──
     FramePace = 90,
     FramePaceAck = 91,
@@ -658,6 +663,7 @@ impl MsgType {
             83 => MsgType::PaneClipboardWrite,
             84 => MsgType::PaneTerminalFocus,
             85 => MsgType::SessionUpdate,
+            88 => MsgType::PanePointerInput,
             90 => MsgType::FramePace,
             91 => MsgType::FramePaceAck,
             92 => MsgType::FrameShown,
@@ -673,6 +679,9 @@ impl MsgType {
 
 mod inject;
 pub use inject::{decode_inject_input, encode_inject_input};
+
+mod pointer;
+pub use pointer::{PointerInput, PointerKind, decode_pane_pointer_input, encode_pane_pointer_input};
 
 // ─── B2: search wire encoders / decoders ───────────────────────────
 // Hand-rolled per D13 — no new bincode dep.  Lengths are bounded by

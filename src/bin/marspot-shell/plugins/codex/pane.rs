@@ -148,7 +148,7 @@ pub(super) fn profile_switch_op(pane: &PaneCodex, profile: u8, dir: &std::path::
                 pty_op::Step::terminate(pane.codex, libc::SIGTERM)
                     .escalate_after(Duration::from_secs(3), libc::SIGKILL),
             )
-            .step(pty_op::Step::send(line).named("resume"))
+            .shell_line(line, "resume")
             .step(
                 pty_op::Step::await_process(pane.shell_pid, looks_like_codex)
                     .timeout(Duration::from_secs(20)),
@@ -189,7 +189,7 @@ pub(super) fn refresh_op(
                 pty_op::Step::terminate(pane.codex, libc::SIGTERM)
                     .escalate_after(Duration::from_secs(3), libc::SIGKILL),
             )
-            .step(pty_op::Step::send(line).named("resume"))
+            .shell_line(line, "resume")
             .step(
                 pty_op::Step::await_quiet(Duration::from_millis(1500))
                     .after_bytes(2048)
