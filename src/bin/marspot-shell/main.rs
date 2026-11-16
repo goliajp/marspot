@@ -3115,7 +3115,8 @@ impl ShellApp {
     }
 
     /// Every pane in `obs` as `(session id, cwd, title)`.  The cwd is
-    /// read live off the pane's shell rather than taken from the
+    /// read live off the pane's foreground program (the shell when it is
+    /// in front) rather than taken from the
     /// registry: the registry's copy is from spawn time and says the
     /// launch directory for every pane that has since cd'd somewhere.
     /// Only a live session's shell is read: a dead one's pid may name
@@ -3125,7 +3126,7 @@ impl ShellApp {
             .iter()
             .map(|s| {
                 let e = &s.entry;
-                let cwd = s.shell.and_then(|id| marspot::pidtree::proc_cwd(id.pid));
+                let cwd = s.shell.and_then(|id| marspot::pidtree::pane_cwd(id.pid));
                 let cwd = cwd.map(|p| p.to_string_lossy().into_owned());
                 (e.id, cwd.unwrap_or_else(|| e.cwd.clone()), e.title.clone())
             })
