@@ -33,6 +33,7 @@ mod line_discipline;
 mod owner_watch;
 mod local_session;
 mod pane_env;
+mod pointer;
 mod publish_gate;
 mod pty_reader;
 mod shell_end;
@@ -222,6 +223,9 @@ enum SessionEvent {
     /// bracketed-paste wrap, no key encoding).  Used by the profile-
     /// cycle state machine to send `claude5 --resume <uuid>\r`.
     InjectInput(Vec<u8>),
+    /// L2's pointer event, written only if the program asked for it —
+    /// see `pointer`.
+    Pointer(marspot_term::shell_proto::PointerInput),
     /// The control socket to L2/core hit EOF — our core is gone (crash,
     /// hang-kill, or clean exit). A freshly-booted core re-attaches the
     /// shelld session (PTY + bytelog survive *in shelld*, kept alive with
@@ -1070,6 +1074,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         });
     }
     let snapshot_writer = SnapshotWriter::spawn(session.id(), ev_tx.clone());
+    let mut pointer_gate = pointer::Gate::new();
     // settings and reachability, by file events: see `upkeep`
     let mut upkeep = upkeep::Upkeep::new(session.id(), ev_tx.clone());
     loop {
@@ -1235,22 +1240,9 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 }
                 SessionEvent::InjectInput(bytes) => {
                     frames.typed(&mut session);
-                    // Raw write to PTY — no bracketed-paste, no key
-                    // encoding.  A dead PTY just means the shell exited
-                    // and we'll be torn down next, so that stays quiet;
-                    // a FULL queue is worth a line, because it means the
-                    // foreground process has stopped reading stdin and
-                    // the user's input is being dropped on the floor.
-                    if let Err(e) = session.write(&bytes)
-                        && e.kind() == std::io::ErrorKind::WouldBlock {
-                            lx_warn!(
-                                "l3.pty.write_dropped",
-                                &format!("{e}"),
-                                bytes = bytes.len(),
-                                backlog = session.pty_write_backlog()
-                            );
-                        }
+                    pointer::write_input(&mut session, &bytes);
                 }
+                SessionEvent::Pointer(ev) => pointer_gate.deliver(&mut session, &mut frames, &ev),
                 SessionEvent::Wake => {}
                 SessionEvent::CoreGone(core_gen) => {
                     // RFC-003 §6 Amendment 11 (debug-2 + debug-3 root

@@ -28,4 +28,4 @@
 
 shell   = "0.7.488"  # the two ways the shell replaces its own image live in a module of their own
 core    = "0.12.528"  # a node can have a spot, a column of rows is hit by arithmetic, and a pointer off a surface walks nothing
-session = "0.11.356"  # pointer events have a message of their own that says what the program must have asked for
+session = "0.11.357"  # a pointer event reaches the pty only if the program asked for it and holds the tty
