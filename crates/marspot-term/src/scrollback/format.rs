@@ -68,9 +68,9 @@ pub(super) const REC_NOTE: u8 = 1 << 2;
 const RUN_HEADER_BYTES: usize = 2 + 1 + RUN_ATTR_BYTES;
 const RUN_ATTR_BYTES: usize = crate::grid::CELL_MEM_BYTES - 4;
 /// Run payload: one byte per cell, each a character below 0x80.
-const RUN_BYTES: u8 = 0;
+pub(super) const RUN_BYTES: u8 = 0;
 /// Run payload: four bytes per cell, the cell's `ch` as stored.
-const RUN_SCALARS: u8 = 1;
+pub(super) const RUN_SCALARS: u8 = 1;
 
 /// Record bytes of a full segment: two of them are the budget, 256 MB of
 /// records a pane, the depth the hot and cold pair of the format before

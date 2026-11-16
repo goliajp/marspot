@@ -4,6 +4,7 @@
 //!   shm_probe title  <session dir>    print the published window title
 //!   shm_probe screen <session dir>    print the published frame, cluster text included
 //!   shm_probe unlink <session dir>    remove the grid region's name
+//!   shm_probe layout <session dir>    print the region's version and the frame's cell size
 //!
 //! `unlink` leaves the session and its mappings alone: it is what
 //! another program removing the name looks like to the app.
@@ -36,6 +37,13 @@ fn main() {
                 }
                 println!("{}", line.replace('\0', "").trim_end());
             }
+        }
+        "layout" => {
+            let fd = marspot_term::grid_shm::open_region(regions.grid_name()).expect("grid region");
+            let reader = marspot_term::grid_shm::GridShmReader::from_fd(std::os::fd::AsRawFd::as_raw_fd(&fd))
+                .expect("a region this build reads");
+            let (version, cell_size) = reader.layout();
+            println!("{version} {cell_size}");
         }
         "unlink" => {
             marspot_term::grid_shm::delete_region(regions.grid_name());

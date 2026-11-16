@@ -8,6 +8,13 @@
 # of these with the same session process, the same shell and its
 # screen.
 #
+# A new session writes frames of eight-byte cells, under a region
+# version no older reader attaches to, but only to a core that said it
+# reads them; to any other core, and the moment its core goes, it
+# writes the twenty-byte frames every build reads.  Each phase checks
+# which of the two the region holds, and an older reader shown a
+# region of eight-byte cells has to refuse it rather than misread it.
+#
 #   update    old app → new core over old sessions → the sessions move
 #             to the new build by their own execv → the core restarts
 #             → the core is rolled back to the old one, which reads a
@@ -97,6 +104,34 @@ frame_shows() {
   out=$("$PROBE" screen "$SD/sessions/$SID" 2>/dev/null)
   [[ $out == *"$1"* ]]
 }
+# The region's version and cell size, as this build reads them.
+layout_is() { # "version cell_size"
+  local i out
+  for (( i = 0; i < 50; i++ )); do
+    out=$("$PROBE" layout "$SD/sessions/$SID" 2>/dev/null)
+    [[ $out == "$1" ]] && return 0
+    sleep 0.2
+  done
+  echo "    the region says $out"
+  return 1
+}
+old_reader_refuses() {
+  ! "$OLD/examples/dump_row" "$SD/sessions/$SID" 40 >/dev/null 2>&1
+}
+WIDE="3 20" PACKED="4 8"
+# Type a line and wait for it in the frame as this build reads it.
+frames_keep_coming() { # how many frames
+  local i n=$1 tries
+  for (( i = 1; i <= n; i++ )); do
+    type_in_pane "$SD" "$SID" "echo FRAME-\$((200+$i))"
+    for (( tries = 0; tries < 50; tries++ )); do
+      [[ $("$NEW/examples/dump_row" "$SD/sessions/$SID" 40 2>/dev/null) == *"FRAME-$((200 + i))"* ]] && break
+      sleep 0.2
+    done
+    (( tries < 50 )) || return 1
+  done
+}
+
 new_readers_read_everything() {
   check "this build reads the frame" frame_shows MARK-M
   check "this build reads the cluster text" frame_shows "$FLAG"
@@ -130,6 +165,7 @@ swap_core "$SD" "$NEW/marspot-core"
 sleep 1
 same_pane
 check "the core took the session over" test "$(count "$SD" L3_REATTACHED)" -ge 1
+check "an old session writes twenty-byte frames to the new core" layout_is "$WIDE"
 check "the session was not moved or ended for it" test "$(count "$SD" L3_REHOUSE)" -eq 0
 check "no session was started again" lacks_log core.reattach.l3_failed
 check "the old session says nothing about identities" test -z "$(entry "$SD" "$SID" stamps_regions)"
@@ -149,13 +185,16 @@ check "the session kept its region" test "$(count "$SD" L3_REHOUSE)" -eq 0
 check "the title from before the update is still published" \
   test "$("$PROBE" title "$SD/sessions/$SID" 2>/dev/null)" = "$title_before"
 new_readers_read_everything
-check "the frames keep coming" frames_match_old_reader 1
+check "the new session writes the new core eight-byte frames" layout_is "$PACKED"
+check "the frames keep coming" frames_keep_coming 3
+check "an old reader refuses a region of eight-byte frames" old_reader_refuses
 
 echo "════ update: the new core restarts over new sessions ════"
 swap_core "$SD" "$NEW/marspot-core"
 sleep 1
 same_pane
 check "the session kept its region" test "$(count "$SD" L3_REHOUSE)" -eq 0
+check "the session writes the restarted core eight-byte frames" layout_is "$PACKED"
 new_readers_read_everything
 
 echo "════ update: the core is rolled back to the old one ════"
@@ -163,26 +202,33 @@ swap_core "$SD" "$OLD/marspot-core"
 sleep 1
 same_pane
 check "no session was started again" lacks_log core.reattach.l3_failed
+check "the session writes the old core twenty-byte frames" layout_is "$WIDE"
 check "the old reader takes every frame as this build does" frames_match_old_reader 5
 check "the old readers find the cluster text and title where they look" \
   test -n "$("$OLD/examples/shm_probe" title "$SD/sessions/$SID" 2>/dev/null)"
 
 echo "════ rollback: new app, then the old core over new sessions ════"
 start_app "$NEW"
+check "a new app's session writes eight-byte frames" layout_is "$PACKED"
+check "an old reader refuses them" old_reader_refuses
 swap_core "$SD" "$OLD/marspot-core"
 sleep 1
 same_pane
 check "no session was started again" lacks_log core.reattach.l3_failed
+check "the session writes the old core twenty-byte frames" layout_is "$WIDE"
+echo "  (moved to a region the old core made: $(count "$SD" L3_REHOUSE) times)"
 check "the old reader takes every frame as this build does" frames_match_old_reader 5
 check "the old readers find no title for the pane (the accepted cost)" \
   test -z "$("$OLD/examples/shm_probe" title "$SD/sessions/$SID" 2>/dev/null)"
 new_readers_read_everything
 
 echo "════ rollback: the core is the new one again ════"
+rehoused=$(count "$SD" L3_REHOUSE)
 swap_core "$SD" "$NEW/marspot-core"
 sleep 1
 same_pane
-check "the session kept its region" test "$(count "$SD" L3_REHOUSE)" -eq 0
+check "the session kept its region" test "$(count "$SD" L3_REHOUSE)" -eq "$rehoused"
+check "the session writes the new core eight-byte frames again" layout_is "$PACKED"
 new_readers_read_everything
 
 echo "════ rollback: the sessions go back to the old build ════"
@@ -194,6 +240,7 @@ sleep 1
 same_pane
 check "the session runs the old build" test -z "$(entry "$SD" "$SID" stamps_regions)"
 check "no session was started again" lacks_log core.reattach.l3_failed
+check "an old session writes the new core twenty-byte frames" layout_is "$WIDE"
 check "this build reads the frame" frame_shows MARK-M
 
 echo "════ lost: an old session without its region, a new session build staged ════"

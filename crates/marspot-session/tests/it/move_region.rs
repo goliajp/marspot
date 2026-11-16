@@ -19,20 +19,20 @@ use crate::support::{COLS, ROWS, Session};
 
 /// A region made for the session to move to, as the core makes one,
 /// and a reader on it.
-fn region_to_move_to() -> (SessionRegions, GridShmReader) {
+pub(crate) fn region_to_move_to() -> (SessionRegions, GridShmReader) {
     let regions = SessionRegions::for_session(id());
     let fd = regions.create(COLS, ROWS).expect("a new grid region");
     let reader = GridShmReader::from_fd(fd.as_raw_fd()).expect("a reader on it");
     (regions, reader)
 }
 
-fn ask_to_move(s: &Session, regions: &SessionRegions) {
+pub(crate) fn ask_to_move(s: &Session, regions: &SessionRegions) {
     s.send_frame(MsgType::SessionRepublish, regions.grid_name().to_bytes().to_vec());
 }
 
 /// Read what the session says it publishes into until it names the
 /// region with `serial`.
-fn await_arrival(s: &Session, serial: u64) {
+pub(crate) fn await_arrival(s: &Session, serial: u64) {
     wait_for(10, "the session to say it publishes into the new region", || {
         let f = s.await_frame(MsgType::SessionPublishes, 10);
         let said = u64::from_le_bytes(*f.payload.first_chunk::<8>().expect("a serial"));

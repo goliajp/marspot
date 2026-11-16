@@ -32,6 +32,14 @@ impl Terminal {
         if !a.row_marks_hold() || !b.row_marks_hold() {
             return Some("a row has a written cell past its bound".into());
         }
+        for (side, t) in [("bulk", self), ("reference", other)] {
+            let main = t.saved_main.as_ref().map(|m| &m.grid);
+            for g in std::iter::once(t.grid()).chain(main) {
+                if let Err(e) = g.check_styles() {
+                    return Some(format!("{side}: a cell's attribute number is wrong: {e}"));
+                }
+            }
+        }
         if self.pending_wrap != other.pending_wrap {
             return Some("deferred wrap".into());
         }

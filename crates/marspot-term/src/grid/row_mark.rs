@@ -10,7 +10,8 @@
 //! resets them, and anything that moves rows about either carries
 //! them along or gives them up for the full width.
 
-use super::{Cell, CellAttrs, Grid};
+use super::row_styles::RowStyles;
+use super::{Cell, CellAttrs, Grid, StoredCell};
 
 /// Upper bounds on where a row stops being interesting; never exact.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -22,12 +23,15 @@ pub struct RowMark {
     /// A character past 0x7F may be in the row.  A guess for whoever
     /// encodes the row, which is right either way.
     pub wide: bool,
+    /// The attribute numbers in the row, kept only by a grid whose
+    /// history is in RAM (see `row_styles`).
+    pub styles: RowStyles,
 }
 
 impl RowMark {
     /// A row about which nothing is known.
     pub(super) fn unknown(cols: u16) -> Self {
-        RowMark { end: cols, plain_from: cols, wide: false }
+        RowMark { end: cols, plain_from: cols, wide: false, styles: RowStyles::UNKNOWN }
     }
 
     /// A row every cell of which is `fill`.
@@ -50,6 +54,17 @@ impl CellAttrs {
     }
 }
 
+impl CellAttrs {
+    /// Whether these are the default attributes, whatever the flags in
+    /// the padding say: the colours and the five switches only.
+    #[inline(always)]
+    pub fn is_plain(&self) -> bool {
+        let words = self as *const CellAttrs as *const u64;
+        // SAFETY: as in `is_default`
+        unsafe { words.read_unaligned() | (words.add(1).read_unaligned() & 0xFF_FFFF_FFFF) == 0 }
+    }
+}
+
 impl Cell {
     /// Whether this is `Cell::default()`.
     #[inline(always)]
@@ -63,7 +78,18 @@ impl Grid {
     pub fn set_cell(&mut self, col: u16, row: u16, cell: Cell) {
         debug_assert!(col < self.cols && row < self.rows);
         let pr = self.phys_row(row);
-        self.cells[pr * self.cols as usize + col as usize] = cell;
+        let idx = pr * self.cols as usize + col as usize;
+        // the default attributes are number 0 in either numbering, and
+        // need no note
+        if cell.attrs.is_plain() {
+            self.cells[idx] = StoredCell::from_cell(&cell, 0);
+        } else {
+            self.put(idx, cell);
+            let id = self.cells[idx].style_id();
+            if self.notes_styles() {
+                self.marks[pr].styles.note(id);
+            }
+        }
         let mark = &mut self.marks[pr];
         if col >= mark.end {
             mark.end = col + 1;
@@ -74,16 +100,75 @@ impl Grid {
         mark.wide |= cell.ch as u32 >= 0x80;
     }
 
+    /// [`Self::set_cell`] for a character in the pen `attrs`, as the
+    /// per-character print path writes one: in the default attributes
+    /// it is stored as it is, with nothing to look up, check or note.
+    #[inline]
+    pub fn set_char(&mut self, col: u16, row: u16, ch: char, attrs: &CellAttrs) {
+        if !attrs.is_default() {
+            self.set_cell(col, row, Cell { ch, attrs: *attrs });
+            return;
+        }
+        debug_assert!(col < self.cols && row < self.rows);
+        let pr = self.phys_row(row);
+        self.cells[pr * self.cols as usize + col as usize] = StoredCell::new(ch, 0);
+        let mark = &mut self.marks[pr];
+        if col >= mark.end {
+            mark.end = col + 1;
+        }
+        mark.wide |= ch as u32 >= 0x80;
+    }
+
+    /// [`Self::set_cell`] for a cell the pool made for a cluster, in the
+    /// default pen: only the cluster flag sets it apart from the default.
+    #[inline]
+    pub fn set_plain_cluster(&mut self, col: u16, row: u16, cell: Cell) {
+        debug_assert!(col < self.cols && row < self.rows && cell.attrs.is_plain());
+        let pr = self.phys_row(row);
+        let stored = StoredCell::from_cell(&cell, 0);
+        self.cells[pr * self.cols as usize + col as usize] = stored;
+        let mark = &mut self.marks[pr];
+        if col >= mark.end {
+            mark.end = col + 1;
+        }
+        if col >= mark.plain_from && stored.run_key() != 0 {
+            mark.plain_from = col + 1;
+        }
+        mark.wide |= cell.ch as u32 >= 0x80;
+    }
+
     /// The whole of `row`, and its marks for the caller to keep: after
-    /// writing cells it must leave each bound at least where it wrote.
+    /// writing cells it must leave each bound at least where it wrote,
+    /// and, when [`Self::notes_styles`], note each attribute number it
+    /// wrote.
     /// One ring-index resolve for a run of any length.
     // as a call it cost seventeen instructions a run of text
     #[inline(always)]
-    pub fn row_and_mark_mut(&mut self, row: u16) -> (&mut [Cell], &mut RowMark) {
+    pub fn row_and_mark_mut(&mut self, row: u16) -> (&mut [StoredCell], &mut RowMark) {
         debug_assert!(row < self.rows);
         let pr = self.phys_row(row);
         let cols = self.cols as usize;
         (&mut self.cells[pr * cols..(pr + 1) * cols], &mut self.marks[pr])
+    }
+
+    /// Whether writes note the numbers each row holds; see
+    /// `row_styles`.  Not while numbering by position: a row moved to
+    /// another place takes that place's numbers.
+    #[inline(always)]
+    pub fn notes_styles(&self) -> bool {
+        self.notes_styles && !self.styles.is_positional()
+    }
+
+    /// The cells were renumbered: what the rows' marks say about their
+    /// numbers is not true any more.
+    pub(super) fn forget_row_styles(&mut self) {
+        self.marks.iter_mut().for_each(|m| m.styles = RowStyles::UNKNOWN);
+    }
+
+    /// Every row was filled with `fill`.
+    pub(super) fn reset_row_marks_for_fill(&mut self, fill: Cell) {
+        let mark = RowMark::filled(fill, self.cols);
+        self.marks.iter_mut().for_each(|m| *m = mark);
     }
 
     /// Rows were rebuilt wholesale: nothing is known about them.
@@ -103,8 +188,13 @@ impl Grid {
                 let (end, plain) = (mark.end as usize, mark.plain_from as usize);
                 end <= cols
                     && plain <= cols
-                    && row[end..].iter().all(|c| *c == Cell::default())
-                    && row[plain..].iter().all(|c| c.attrs == CellAttrs::default())
+                    && row[end..].iter().all(|c| *c == StoredCell::BLANK)
+                    && row[plain..].iter().all(|c| c.run_key() == 0)
+                    && (mark.wide || row.iter().all(|c| c.ch_bits() < 0x80))
+                    && (!self.notes_styles()
+                        || mark.styles.known().is_none_or(|ids| {
+                            row.iter().all(|c| c.style_id() == 0 || ids[c.style_id() as usize % ids.len()] == c.style_id())
+                        }))
             })
     }
 }
@@ -187,12 +277,14 @@ mod tests {
                     7 => g.set_cell(col, row, red),
                     8 => g.set_cell(col, row, Cell::default()),
                     9 => {
+                        let id = g.pen_id(&red.attrs).expect("shared numbering");
                         let (cells, mark) = g.row_and_mark_mut(row);
                         for c in &mut cells[..=col as usize] {
-                            *c = red;
+                            *c = crate::grid::PackedCell::new(' ', id);
                         }
                         mark.end = mark.end.max(col + 1);
                         mark.plain_from = mark.plain_from.max(col + 1);
+                        mark.styles.note(id);
                     }
                     10 | 11 => g.scroll_up(1, fill),
                     12 => g.scroll_up_region(row.min(1), rows - 1, 1, fill),
@@ -201,6 +293,7 @@ mod tests {
                     _ => g.resize(2 + (next(&mut s) % 40) as u16, rows),
                 }
                 assert!(g.row_marks_hold(), "after step {step} at {cols}x{rows}");
+                g.check_styles().unwrap_or_else(|e| panic!("after step {step}: {e}"));
             }
         }
     }

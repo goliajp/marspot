@@ -7,6 +7,7 @@ mod clusters_across_update;
 mod flood_frames;
 mod flood_interrupt;
 mod focus_reporting;
+mod frame_cells;
 mod history_upgrade;
 mod move_region;
 mod self_execv;
