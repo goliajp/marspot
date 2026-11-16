@@ -118,8 +118,10 @@ impl MemoryScrollback {
             row[..n].copy_from_slice(&source[..n]);
             row[n..].fill(PackedCell::BLANK);
             // what a slot held for a line before is never read: the
-            // cells carry no number but these
-            if palette.len() != AS_IT_WAS {
+            // cells carry no number but these; a plain line needs none
+            if ids.is_empty() {
+                palette.clear();
+            } else if palette.len() != AS_IT_WAS {
                 palette.clear();
                 palette.resize(AS_IT_WAS, PackedStyle::DEFAULT);
             }
@@ -318,6 +320,13 @@ mod tests {
         let line = sb.line(0).unwrap();
         assert_eq!((line[0], line[1]), (colour(0), colour(16)));
         assert_eq!(sb.line(1).unwrap()[0], colour(0));
+        // a plain row kept as it was carries no values
+        let mut plain = MemoryScrollback::new(4, 80);
+        for _ in 0..4 {
+            plain.push_packed(&[PackedCell::BLANK; 80], g.styles(), RowHint::NONE, Some(&[]));
+        }
+        assert!(plain.kept_as_it_was(3));
+        assert_eq!(plain.approx_bytes(), 4 * 80 * 8);
     }
 
     /// A line costs eight bytes a cell, and a line that changes colour

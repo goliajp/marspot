@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.490"  # a core reads frames of eight-byte cells, and tells each session it does
-core    = "0.12.544"  # a row the in-RAM history kept as it was reads a cell's colour without a search
-session = "0.11.373"  # a row the in-RAM history kept as it was reads a cell's colour without a search
+core    = "0.12.545"  # a plain row the in-RAM history keeps as it was carries no values
+session = "0.11.374"  # a plain row the in-RAM history keeps as it was carries no values
