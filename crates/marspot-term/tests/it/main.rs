@@ -21,6 +21,7 @@ mod predict_expiry;
 mod relative_moves_respect_margins;
 mod reset_end_to_end;
 mod response_storm;
+mod row_notes_by_position;
 mod saved_cursor_carries_the_charset;
 mod scrollback_display;
 mod semantic_prompts;
