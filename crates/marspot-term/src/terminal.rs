@@ -3982,7 +3982,11 @@ impl<'a> Handler<'a> {
             *self.cluster_buf = buf;
             cell
         };
-        self.grid.set_cell(col, row, cell);
+        if attrs.is_default() {
+            self.grid.set_plain_cluster(col, row, cell);
+        } else {
+            self.grid.set_cell(col, row, cell);
+        }
     }
 
     /// Draw `ch` as the first codepoint of a new cluster and remember

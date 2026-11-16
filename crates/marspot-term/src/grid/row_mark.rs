@@ -119,6 +119,24 @@ impl Grid {
         mark.wide |= ch as u32 >= 0x80;
     }
 
+    /// [`Self::set_cell`] for a cell the pool made for a cluster, in the
+    /// default pen: only the cluster flag sets it apart from the default.
+    #[inline]
+    pub fn set_plain_cluster(&mut self, col: u16, row: u16, cell: Cell) {
+        debug_assert!(col < self.cols && row < self.rows && cell.attrs.is_plain());
+        let pr = self.phys_row(row);
+        let stored = StoredCell::from_cell(&cell, 0);
+        self.cells[pr * self.cols as usize + col as usize] = stored;
+        let mark = &mut self.marks[pr];
+        if col >= mark.end {
+            mark.end = col + 1;
+        }
+        if col >= mark.plain_from && stored.run_key() != 0 {
+            mark.plain_from = col + 1;
+        }
+        mark.wide |= cell.ch as u32 >= 0x80;
+    }
+
     /// The whole of `row`, and its marks for the caller to keep: after
     /// writing cells it must leave each bound at least where it wrote,
     /// and, when [`Self::notes_styles`], note each attribute number it
