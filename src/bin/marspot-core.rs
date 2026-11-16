@@ -3645,7 +3645,8 @@ impl CoreApp {
     /// pending grid shape.  Called when the modal opens, when the
     /// user changes cols/rows in the modal (since the cell count
     /// changes), and on apply (after permuting).
-    /// Re-read one session's shell cwd into `pane_cwds`.  Returns
+    /// Re-read one session's working directory into `pane_cwds`: the
+    /// foreground program's, or the shell's when the shell is in front.  Returns
     /// `true` when the stored path actually changed — callers use that
     /// to decide whether a repaint is owed, so a sweep over N unchanged
     /// panes costs N syscalls and zero frames.
@@ -3657,14 +3658,14 @@ impl CoreApp {
     /// for that moment would be a worse lie than a slightly old one.
     fn resolve_pane_cwd(&mut self, sid: u64) -> bool {
         let cached_pid = self.shell_child_pids.get(&sid).copied();
-        let mut path = cached_pid.and_then(marspot::pidtree::proc_cwd);
+        let mut path = cached_pid.and_then(marspot::pidtree::pane_cwd);
         if path.is_none() {
             // Either no pid cached yet, or the cached one is gone
             // (shell replaced, L3 execv'd).  One entry.toml read, then
             // retry — and only cache the pid once it has resolved.
             self.shell_child_pids.remove(&sid);
             if let Some(pid) = read_shell_child_pid(sid) {
-                path = marspot::pidtree::proc_cwd(pid);
+                path = marspot::pidtree::pane_cwd(pid);
                 if path.is_some() {
                     self.shell_child_pids.insert(sid, pid);
                 }
