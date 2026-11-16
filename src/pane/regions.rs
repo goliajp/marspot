@@ -35,10 +35,15 @@ impl PaneBackend {
     }
 
     /// The pane's session said which grid region it publishes into --
-    /// see [`L3Conn::session_publishes`].  No-op on non-L3 backends.
-    pub fn l3_session_publishes(&mut self, payload: &[u8]) {
+    /// see [`L3Conn::session_publishes`] -- or that it reads which
+    /// frames this core reads.  No-op on non-L3 backends.
+    pub fn l3_session_says(&mut self, frame: &Frame) {
         if let PaneBackend::L3(c) = self {
-            c.session_publishes(payload);
+            match frame.msg_type {
+                MsgType::SessionPublishes => c.session_publishes(&frame.payload),
+                MsgType::SessionReadsFrameCells => say_frames_read(&c.control),
+                _ => {}
+            }
         }
     }
 }
@@ -150,9 +155,6 @@ impl L3Conn {
         let Some(serial) = payload.first_chunk::<8>().map(|b| u64::from_le_bytes(*b)) else {
             return;
         };
-        // a new image of the session says this first, and knows nothing
-        // of what this core reads until it is told again
-        say_frames_read(&self.control);
         let shown = self.reader.identity() == Some(self.regions.owner())
             && self.reader.serial() == Some(serial);
         if shown {
