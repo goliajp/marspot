@@ -100,6 +100,25 @@ impl Grid {
         mark.wide |= cell.ch as u32 >= 0x80;
     }
 
+    /// [`Self::set_cell`] for a character in the pen `attrs`, as the
+    /// per-character print path writes one: in the default attributes
+    /// it is stored as it is, with nothing to look up, check or note.
+    #[inline]
+    pub fn set_char(&mut self, col: u16, row: u16, ch: char, attrs: &CellAttrs) {
+        if !attrs.is_default() {
+            self.set_cell(col, row, Cell { ch, attrs: *attrs });
+            return;
+        }
+        debug_assert!(col < self.cols && row < self.rows);
+        let pr = self.phys_row(row);
+        self.cells[pr * self.cols as usize + col as usize] = StoredCell::new(ch, 0);
+        let mark = &mut self.marks[pr];
+        if col >= mark.end {
+            mark.end = col + 1;
+        }
+        mark.wide |= ch as u32 >= 0x80;
+    }
+
     /// The whole of `row`, and its marks for the caller to keep: after
     /// writing cells it must leave each bound at least where it wrote,
     /// and, when [`Self::notes_styles`], note each attribute number it
@@ -153,6 +172,7 @@ impl Grid {
                     && plain <= cols
                     && row[end..].iter().all(|c| *c == StoredCell::BLANK)
                     && row[plain..].iter().all(|c| c.run_key() == 0)
+                    && (mark.wide || row.iter().all(|c| c.ch_bits() < 0x80))
                     && (!self.notes_styles()
                         || mark.styles.known().is_none_or(|ids| {
                             row.iter().all(|c| c.style_id() == 0 || ids[c.style_id() as usize % ids.len()] == c.style_id())
