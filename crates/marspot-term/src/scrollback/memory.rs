@@ -5,32 +5,35 @@
 //! so a long session's history costs a bounded amount of memory and
 //! nothing else.
 //!
-//! A line is kept as the record the file variant writes for it --
-//! runs of cells that share their attributes, a byte a cell for plain
-//! text -- not as twenty bytes a cell.  It cannot be kept as the
-//! grid's own eight-byte cells: their attribute numbers belong to the
-//! grid's table, which gives numbers back once no cell on screen uses
-//! them.
+//! A line is kept as the grid's own eight-byte cells, but numbered
+//! against a palette of its own instead of the grid's table: the grid
+//! gives numbers back once no cell on screen uses them, and a line in
+//! history would then name somebody else's colour.  A plain line has
+//! an empty palette and goes in as one copy; a coloured one looks a
+//! value up once per run of cells in one colour.
 
-use super::file::ring::Ring;
-use super::format::{REC_PACKED, RowHint, encode_packed_with, new_epoch};
-use super::format_packed::{append_cells, encode_packed_cells};
-use crate::grid::{Cell, PackedCell, StyleTable};
+use super::format::{RowHint, new_epoch};
+use crate::grid::{Cell, PackedCell, PackedStyle, StyleTable};
 
-/// A bounded ring of encoded lines.
-///
-/// At most `capacity` lines, and so at most what `capacity` lines of
-/// twenty-byte cells took when lines were kept that way: a record is
-/// never longer than its cells as twenty bytes each plus three, and a
-/// line's buffer is only ever reused for a record no longer than one
-/// the ring held before.  A screen of plain text costs about a byte a
-/// cell.
+/// How far a line's palette is searched before a value goes in again:
+/// a line that changes colour every cell costs a value a cell rather
+/// than a search a cell.
+const PALETTE_SEARCH: usize = 32;
+
+/// A bounded ring of lines, `cols` eight-byte cells each: at most
+/// `capacity` lines, eight bytes a cell plus at most eight more for a
+/// line's palette, where lines of twenty-byte cells took twenty.
 pub struct MemoryScrollback {
-    ring: Ring,
+    /// Line after line, oldest at `head`; grown as lines come, up to
+    /// `capacity` lines, then reused.
+    cells: Vec<PackedCell>,
+    /// Per line, the values its cells' numbers index from 1 (0 is the
+    /// default); a plain line's is empty and allocates nothing.
+    palettes: Vec<Vec<PackedStyle>>,
     pub(super) capacity: usize,
     cols: usize,
-    /// The record being built, reused for every line.
-    scratch: Vec<u8>,
+    head: usize,
+    len: usize,
     /// The same idea as the file variant's, kept so that a consumer
     /// filing something against a line does not have to know which
     /// variant it is talking to.  In RAM it changes on construction
@@ -41,95 +44,156 @@ pub struct MemoryScrollback {
 impl MemoryScrollback {
     pub fn new(capacity: usize, cols: usize) -> Self {
         Self {
-            // bounded by its lines; see the type's comment
-            ring: Ring::with_bytes(capacity, usize::MAX),
+            cells: Vec::new(),
+            palettes: Vec::new(),
             capacity,
             cols,
-            scratch: Vec::new(),
+            head: 0,
+            len: 0,
             epoch: new_epoch(),
         }
+    }
+
+    /// Where the next line goes, as a line index; the oldest gives way
+    /// once the ring is full.
+    fn next_slot(&mut self) -> usize {
+        if self.len < self.capacity {
+            if self.cells.capacity() == 0 {
+                // one reservation for the whole ring, filled as it grows
+                self.cells.reserve_exact(self.capacity * self.cols);
+                self.palettes.reserve_exact(self.capacity);
+            }
+            self.cells.resize(self.cells.len() + self.cols, PackedCell::BLANK);
+            self.palettes.push(Vec::new());
+            self.len += 1;
+            return self.len - 1;
+        }
+        let slot = self.head;
+        self.head = (self.head + 1) % self.capacity;
+        slot
     }
 
     pub fn push_line(&mut self, source: &[Cell]) {
         if self.capacity == 0 {
             return;
         }
-        // wider than the ring's lines: the rest is cut, as it always was
-        let source = &source[..source.len().min(self.cols)];
-        let n = source.iter().rposition(|c| *c != Cell::default()).map_or(0, |i| i + 1);
-        let line = &source[..n];
-        self.scratch.clear();
-        self.scratch.extend_from_slice(&[0; 3]);
-        let packed = n > 0 && encode_packed_with(line, RowHint::NONE, &mut self.scratch);
-        if !packed {
-            self.scratch.extend_from_slice(Cell::slice_as_bytes(line));
+        let slot = self.next_slot();
+        let (row, palette) = self.slot_mut(slot);
+        palette.clear();
+        let n = source.len().min(row.len());
+        for (dst, c) in row[..n].iter_mut().zip(source) {
+            let mut attrs = c.attrs;
+            attrs._pad = [0; 3];
+            let local = local_number(palette, PackedStyle::pack(&attrs), n);
+            *dst = PackedCell::from_cell(c, local);
         }
-        self.keep(n, packed);
+        row[n..].fill(PackedCell::BLANK);
     }
 
-    /// [`Self::push_line`] for a row of the grid's own cells, encoded
-    /// straight from them.
+    /// [`Self::push_line`] for a row of the grid's own cells, numbered
+    /// against `styles`.
     pub fn push_packed(&mut self, source: &[PackedCell], styles: &StyleTable, hint: RowHint) {
         if self.capacity == 0 {
             return;
         }
-        let source = &source[..source.len().min(self.cols)];
-        let n = source.iter().rposition(|c| *c != PackedCell::BLANK).map_or(0, |i| i + 1);
-        let line = &source[..n];
-        self.scratch.clear();
-        self.scratch.extend_from_slice(&[0; 3]);
-        let packed = n > 0 && encode_packed_cells(line, styles, hint, &mut self.scratch);
-        if !packed {
-            append_cells(line, styles, &mut self.scratch);
+        let slot = self.next_slot();
+        let (row, palette) = self.slot_mut(slot);
+        palette.clear();
+        let n = source.len().min(row.len());
+        // past `plain_from` every cell is in the default attributes:
+        // number 0 in any table, copied as it is
+        let plain_from = (hint.plain_from as usize).min(n);
+        let (mut theirs, mut ours) = (0u32, 0u32);
+        for (dst, &c) in row[..plain_from].iter_mut().zip(source) {
+            let id = c.style_id();
+            if id != theirs {
+                theirs = id;
+                ours = if id == 0 { 0 } else { local_number(palette, styles.get(id), n) };
+            }
+            *dst = c.with_style(ours);
         }
-        self.keep(n, packed);
+        row[plain_from..n].copy_from_slice(&source[plain_from..n]);
+        row[n..].fill(PackedCell::BLANK);
     }
 
-    /// The record in `scratch`, `cols` cells long, into the ring.
-    fn keep(&mut self, cols: usize, packed: bool) {
-        self.scratch[0] = if packed { REC_PACKED } else { 0 };
-        self.scratch[1..3].copy_from_slice(&(cols as u16).to_le_bytes());
-        self.ring.push(&self.scratch);
+    fn slot_mut(&mut self, slot: usize) -> (&mut [PackedCell], &mut Vec<PackedStyle>) {
+        let at = slot * self.cols;
+        (&mut self.cells[at..at + self.cols], &mut self.palettes[slot])
     }
 
     pub fn len(&self) -> usize {
-        self.ring.len()
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.ring.len() == 0
+        self.len == 0
     }
 
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
+    fn expand(&self, slot: usize, c: PackedCell) -> Cell {
+        let id = c.style_id() as usize;
+        let mut attrs = if id == 0 { Default::default() } else { self.palettes[slot][id - 1].unpack() };
+        if c.is_cluster() {
+            attrs._pad[0] = crate::grid::FLAG_CLUSTER;
+        }
+        Cell { ch: c.ch(), attrs }
+    }
+
+    fn slot_of(&self, idx: usize) -> Option<usize> {
+        (idx < self.len).then(|| (self.head + idx) % self.capacity)
+    }
+
     /// Line `idx` (0 = oldest), `cols` cells wide.
     pub fn line(&self, idx: usize) -> Option<Vec<Cell>> {
-        if idx >= self.ring.len() {
-            return None;
-        }
-        Some(self.ring.with_row(idx, |row| {
-            let mut v = row[..row.len().min(self.cols)].to_vec();
-            v.resize(self.cols, Cell::default());
-            v
-        }))
+        let slot = self.slot_of(idx)?;
+        let row = &self.cells[slot * self.cols..(slot + 1) * self.cols];
+        Some(row.iter().map(|&c| self.expand(slot, c)).collect())
     }
 
     pub fn cell_at(&self, line_idx: usize, col: usize) -> Option<Cell> {
-        if line_idx >= self.ring.len() || col >= self.cols {
+        let slot = self.slot_of(line_idx)?;
+        if col >= self.cols {
             return None;
         }
-        Some(self.ring.with_row(line_idx, |row| row.get(col).copied().unwrap_or_default()))
+        Some(self.expand(slot, self.cells[slot * self.cols + col]))
     }
 
     pub fn clear(&mut self) {
-        self.ring.clear();
+        // the memory stays, so a scroll storm after a clear does not
+        // pay for it again
+        self.head = 0;
+        self.len = 0;
+        self.cells.clear();
+        self.palettes.clear();
     }
 
     pub fn approx_bytes(&self) -> usize {
-        self.ring.bytes() + self.scratch.capacity()
+        self.cells.capacity() * std::mem::size_of::<PackedCell>()
+            + self.palettes.iter().map(|p| p.capacity() * 8).sum::<usize>()
     }
+}
+
+/// `value`'s number in a line's palette, putting it in if the first
+/// [`PALETTE_SEARCH`] values do not have it.  A palette never holds
+/// more than `cells` values, one for each cell of its line, and grows
+/// no further than that.
+#[inline]
+fn local_number(palette: &mut Vec<PackedStyle>, value: PackedStyle, cells: usize) -> u32 {
+    if value.is_default() {
+        return 0;
+    }
+    if let Some(i) = palette.iter().take(PALETTE_SEARCH).position(|&p| p == value) {
+        return i as u32 + 1;
+    }
+    if palette.len() == palette.capacity() {
+        let want = (palette.capacity() * 2).max(4).min(cells);
+        palette.reserve_exact(want.saturating_sub(palette.len()).max(1));
+    }
+    palette.push(value);
+    palette.len() as u32
 }
 
 #[cfg(test)]
@@ -170,30 +234,21 @@ mod tests {
         assert_eq!(line, "z   ");
     }
 
-    /// Plain text costs about a byte a cell; a line that changes
-    /// colour every cell costs no more than twenty bytes a cell did,
-    /// and the lines read back as they went in.
+    /// A line costs eight bytes a cell, and a line that changes colour
+    /// every cell eight more for its palette: never the twenty a cell
+    /// lines took before.  Every line reads back as it went in, from
+    /// cells and from the grid's own cells alike.
     #[test]
-    fn a_line_costs_what_its_record_does() {
-        use crate::grid::{CellAttrs, Color};
+    fn a_line_costs_eight_bytes_a_cell_and_its_palette() {
+        use crate::grid::{CellAttrs, Color, Grid};
         let (cols, lines) = (80usize, if cfg!(miri) { 20 } else { 2000 });
         let mut plain = MemoryScrollback::new(lines, cols);
         for i in 0..lines {
             plain.push_line(&fill(b'a' + (i % 26) as u8, cols));
         }
         assert_eq!(plain.len(), lines);
-        assert!(plain.approx_bytes() < lines * (cols + 64), "{} bytes", plain.approx_bytes());
+        assert!(plain.approx_bytes() <= lines * cols * 8, "{} bytes", plain.approx_bytes());
         assert_eq!(plain.line(lines - 1).unwrap(), fill(b'a' + ((lines - 1) % 26) as u8, cols));
-        // a short line costs its text, not its width
-        let mut short = MemoryScrollback::new(lines, cols);
-        let mut line = fill(b'x', 2);
-        line.resize(cols, Cell::default());
-        for _ in 0..lines {
-            short.push_line(&line);
-        }
-        assert!(short.approx_bytes() < lines * 48, "{} bytes", short.approx_bytes());
-        assert_eq!(short.line(0).unwrap(), line);
-        let mut rich = MemoryScrollback::new(lines, cols);
         let row = |i: usize| -> Vec<Cell> {
             (0..cols)
                 .map(|c| Cell {
@@ -202,14 +257,26 @@ mod tests {
                 })
                 .collect()
         };
+        let mut rich = MemoryScrollback::new(lines, cols);
         for i in 0..lines {
             rich.push_line(&row(i));
         }
-        use crate::grid::CELL_MEM_BYTES;
-        let bound = lines * (cols * CELL_MEM_BYTES + 3) + 4 * cols * CELL_MEM_BYTES + 256;
-        assert!(rich.approx_bytes() <= bound, "{} bytes, bound {bound}", rich.approx_bytes());
-        let newest = rich.len() - 1;
-        assert_eq!(rich.line(newest).unwrap(), row(lines - 1));
+        assert!(rich.approx_bytes() <= lines * cols * 16, "{} bytes", rich.approx_bytes());
+        assert_eq!(rich.line(rich.len() - 1).unwrap(), row(lines - 1));
+        assert_eq!(rich.line(0).unwrap(), row(0));
+        // the grid's own cells, a few colours and runs of them
+        let mut g = Grid::new(cols as u16, 1);
+        let mut from_grid = MemoryScrollback::new(4, cols);
+        for (c, cell) in row(3).iter().enumerate() {
+            let mut cell = *cell;
+            cell.attrs.fg = Color::indexed((c / 7) as u8);
+            g.set_cell(c as u16, 0, cell);
+        }
+        let want: Vec<Cell> = (0..cols as u16).map(|c| g.cell(c, 0)).collect();
+        let hint = RowHint { plain_from: cols as u16, wide: false };
+        from_grid.push_packed(g.live_row_at_view(0, 0).unwrap(), g.styles(), hint);
+        assert_eq!(from_grid.line(0).unwrap(), want);
+        assert!(from_grid.palettes[0].len() <= cols.div_ceil(7));
     }
 
     #[test]
