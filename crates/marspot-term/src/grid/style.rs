@@ -122,6 +122,17 @@ impl StyleTable {
         self.styles[id as usize]
     }
 
+    /// The value behind `id`, or the default for a number that is free
+    /// now: for a row's list of numbers, which may name one no cell
+    /// holds any more.
+    #[inline]
+    pub fn value_or_default(&self, id: u32) -> PackedStyle {
+        match self.styles.get(id as usize) {
+            Some(s) if s.0 & FREE == 0 => *s,
+            _ => PackedStyle::DEFAULT,
+        }
+    }
+
     /// Whether `id` names a value: in range and not free.
     pub fn holds(&self, id: u32) -> bool {
         self.styles.get(id as usize).is_some_and(|s| s.0 & FREE == 0)

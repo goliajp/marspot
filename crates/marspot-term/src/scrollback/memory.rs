@@ -28,8 +28,12 @@ pub struct MemoryScrollback {
     /// `capacity` lines, then reused.
     cells: Vec<PackedCell>,
     /// Per line, the values its cells' numbers index from 1 (0 is the
-    /// default); a plain line's is empty and allocates nothing.
+    /// default); a plain line's is empty and allocates nothing.  For a
+    /// line kept as it was (`as_it_was`), the grid's numbers and their
+    /// values instead, in pairs: number, value, number, value.
     palettes: Vec<Vec<PackedStyle>>,
+    /// Per line, whether its cells carry the grid's own numbers.
+    as_it_was: Vec<bool>,
     pub(super) capacity: usize,
     cols: usize,
     head: usize,
@@ -46,6 +50,7 @@ impl MemoryScrollback {
         Self {
             cells: Vec::new(),
             palettes: Vec::new(),
+            as_it_was: Vec::new(),
             capacity,
             cols,
             head: 0,
@@ -62,9 +67,11 @@ impl MemoryScrollback {
                 // one reservation for the whole ring, filled as it grows
                 self.cells.reserve_exact(self.capacity * self.cols);
                 self.palettes.reserve_exact(self.capacity);
+                self.as_it_was.reserve_exact(self.capacity);
             }
             self.cells.resize(self.cells.len() + self.cols, PackedCell::BLANK);
             self.palettes.push(Vec::new());
+            self.as_it_was.push(false);
             self.len += 1;
             return self.len - 1;
         }
@@ -78,6 +85,7 @@ impl MemoryScrollback {
             return;
         }
         let slot = self.next_slot();
+        self.as_it_was[slot] = false;
         let (row, palette) = self.slot_mut(slot);
         palette.clear();
         let n = source.len().min(row.len());
@@ -91,15 +99,31 @@ impl MemoryScrollback {
     }
 
     /// [`Self::push_line`] for a row of the grid's own cells, numbered
-    /// against `styles`.
-    pub fn push_packed(&mut self, source: &[PackedCell], styles: &StyleTable, hint: RowHint) {
+    /// against `styles`.  `known` is every number the row holds, when
+    /// the grid knows them: the row then goes in as one copy, with
+    /// those numbers' values beside it.
+    pub fn push_packed(&mut self, source: &[PackedCell], styles: &StyleTable, hint: RowHint, known: Option<&[u32]>) {
         if self.capacity == 0 {
             return;
         }
         let slot = self.next_slot();
+        // a pair a number costs no more than the eight bytes a cell the
+        // palette may take
+        let cols = self.cols;
+        let known = known.filter(|ids| !styles.is_positional() && 2 * ids.len() <= cols);
+        self.as_it_was[slot] = known.is_some();
         let (row, palette) = self.slot_mut(slot);
         palette.clear();
         let n = source.len().min(row.len());
+        if let Some(ids) = known {
+            row[..n].copy_from_slice(&source[..n]);
+            row[n..].fill(PackedCell::BLANK);
+            for &id in ids {
+                palette.push(PackedStyle(id as u64));
+                palette.push(styles.value_or_default(id));
+            }
+            return;
+        }
         // past `plain_from` every cell is in the default attributes:
         // number 0 in any table, copied as it is
         let plain_from = (hint.plain_from as usize).min(n);
@@ -135,7 +159,15 @@ impl MemoryScrollback {
 
     fn expand(&self, slot: usize, c: PackedCell) -> Cell {
         let id = c.style_id() as usize;
-        let mut attrs = if id == 0 { Default::default() } else { self.palettes[slot][id - 1].unpack() };
+        let palette = &self.palettes[slot];
+        let mut attrs = if id == 0 {
+            Default::default()
+        } else if self.as_it_was[slot] {
+            let at = palette.chunks_exact(2).position(|p| p[0].0 == id as u64);
+            at.map(|i| palette[2 * i + 1].unpack()).unwrap_or_default()
+        } else {
+            palette[id - 1].unpack()
+        };
         if c.is_cluster() {
             attrs._pad[0] = crate::grid::FLAG_CLUSTER;
         }
@@ -168,6 +200,13 @@ impl MemoryScrollback {
         self.len = 0;
         self.cells.clear();
         self.palettes.clear();
+        self.as_it_was.clear();
+    }
+
+    /// Whether line `idx` was kept as the grid's own cells.
+    #[cfg(test)]
+    pub(crate) fn kept_as_it_was(&self, idx: usize) -> bool {
+        self.slot_of(idx).is_some_and(|slot| self.as_it_was[slot])
     }
 
     pub fn approx_bytes(&self) -> usize {
@@ -229,7 +268,7 @@ mod tests {
         sb.push_line(&fill(b'a', 4));
         g.set_cell(0, 0, Cell::from('z'));
         let row = g.live_row_at_view(0, 0).unwrap();
-        sb.push_packed(&row[..2], g.styles(), RowHint::NONE);
+        sb.push_packed(&row[..2], g.styles(), RowHint::NONE, None);
         let line: String = sb.line(0).unwrap().iter().map(|c| c.ch).collect();
         assert_eq!(line, "z   ");
     }
@@ -277,7 +316,7 @@ mod tests {
             for (c, cell) in row(i).iter().enumerate() {
                 g.set_cell(c as u16, 0, *cell);
             }
-            small.push_packed(g.live_row_at_view(0, 0).unwrap(), g.styles(), RowHint::NONE);
+            small.push_packed(g.live_row_at_view(0, 0).unwrap(), g.styles(), RowHint::NONE, None);
         }
         assert!(small.approx_bytes() <= 2 * cols * 16, "{} bytes", small.approx_bytes());
         assert_eq!(small.line(1).unwrap(), row(lines - 1));
@@ -291,7 +330,7 @@ mod tests {
         }
         let want: Vec<Cell> = (0..cols as u16).map(|c| g.cell(c, 0)).collect();
         let hint = RowHint { plain_from: cols as u16, wide: false };
-        from_grid.push_packed(g.live_row_at_view(0, 0).unwrap(), g.styles(), hint);
+        from_grid.push_packed(g.live_row_at_view(0, 0).unwrap(), g.styles(), hint, None);
         assert_eq!(from_grid.line(0).unwrap(), want);
         assert!(from_grid.palettes[0].len() <= cols.div_ceil(7));
     }

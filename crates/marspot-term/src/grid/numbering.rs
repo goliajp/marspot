@@ -15,12 +15,12 @@ impl Grid {
     }
 
     /// The number cell `idx` should carry for `attrs`.
-    #[inline(always)]
+    #[inline]
     fn id_for(&mut self, idx: usize, attrs: &CellAttrs) -> u32 {
         self.id_for_packed(idx, PackedStyle::pack(attrs))
     }
 
-    #[inline(always)]
+    #[inline]
     fn id_for_packed(&mut self, idx: usize, p: PackedStyle) -> u32 {
         if self.styles.is_positional() {
             return self.styles.set_at(idx, p);
@@ -73,8 +73,13 @@ impl Grid {
     }
 
     /// Write `cell` at storage index `idx`.
-    #[inline(always)]
+    #[inline]
     pub(super) fn put(&mut self, idx: usize, cell: Cell) {
+        // the default attributes are number 0 in either numbering
+        if cell.attrs.is_plain() {
+            self.cells[idx] = PackedCell::from_cell(&cell, 0);
+            return;
+        }
         let mut attrs = cell.attrs;
         attrs._pad = [0; 3];
         let id = self.id_for(idx, &attrs);
@@ -243,6 +248,7 @@ impl Grid {
             }
         }
         self.styles.make_positional(values);
+        self.forget_row_styles();
     }
 
     /// Go back to the shared way if the cells now use no more than a
@@ -269,6 +275,7 @@ impl Grid {
         }
         shared.succeed(&self.styles);
         self.styles = shared;
+        self.forget_row_styles();
         self.sweep_row = 0;
     }
 
