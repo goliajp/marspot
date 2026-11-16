@@ -12,9 +12,14 @@ fn a_cycle_checks_for_a_claude_right_before_typing() {
         .expect("cycle");
     let labels: Vec<&str> = op.steps.iter().map(|s| s.label).collect();
     let stop = labels.iter().position(|l| *l == "stop_background").expect("stop step");
-    let guard = labels.iter().position(|l| *l == "stop_if_process").expect("guard step");
+    let guard = labels.iter().rposition(|l| *l == "stop_if_process").expect("guard step");
     let resume = labels.iter().position(|l| *l == "resume").expect("resume step");
     assert!(stop < guard && guard + 1 == resume, "{labels:?}");
+    // and before the interrupt that empties the shell's line, which a
+    // claude that came back would get instead
+    let first = labels.iter().position(|l| *l == "stop_if_process").unwrap();
+    let clear = labels.iter().position(|l| *l == "clear_line").expect("the line is emptied");
+    assert!(stop < first && first + 1 == clear, "{labels:?}");
     assert!(matches!(op.steps[guard].kind, pty_op::StepKind::StopIfProcess { under: 4200, .. }));
 }
 

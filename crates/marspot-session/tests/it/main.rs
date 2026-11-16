@@ -11,3 +11,4 @@ mod history_upgrade;
 mod move_region;
 mod self_execv;
 mod signals_in_the_pane;
+mod stray_pointer;

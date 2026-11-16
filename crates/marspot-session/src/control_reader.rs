@@ -139,6 +139,14 @@ fn read_frames(mut reader: UnixStream, stop: &UnixStream, tx: Sender<SessionEven
                         crate::input::arrived();
                     }
                 }
+                MsgType::PanePointerInput => {
+                    if let Ok((_sid, ev)) =
+                        marspot_term::shell_proto::decode_pane_pointer_input(&f.payload)
+                        && tx.send(SessionEvent::Pointer(ev)).is_err()
+                    {
+                        break;
+                    }
+                }
                 MsgType::PaneTerminalFocus => {
                     if let Ok((_sid, focused)) =
                         marspot_term::shell_proto::decode_pane_terminal_focus(&f.payload)
