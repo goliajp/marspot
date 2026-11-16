@@ -144,6 +144,11 @@ pub const FLAG_ALT_SCREEN: u32 = 1 << 5;
 /// on this screen.  Published so L2 can route the wheel on the
 /// program's own statement rather than on a guess about its output.
 pub const FLAG_ALT_SCROLL: u32 = 1 << 6;
+/// The session takes pointer events as `MsgType::PanePointerInput` and
+/// checks them against its own modes before writing them.  Set on
+/// every frame of a session that does; an older one never sets it, and
+/// its core keeps sending encoded bytes.
+pub const FLAG_POINTER_GATED: u32 = 1 << 9;
 
 /// Shared-region header. `#[repr(C)]` for a stable cross-process
 /// layout. `seq` is first and accessed only atomically (the seqlock);
