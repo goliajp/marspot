@@ -28,4 +28,4 @@
 
 shell   = "0.7.490"  # a core reads frames of eight-byte cells, and tells each session it does
 core    = "0.12.549"  # the text lane asks a coloured pen's number without re-checking for the default
-session = "0.11.379"  # the control reader looks for a stop after every frame, a frame it does not know included
+session = "0.11.380"  # a session says it reads which frames its core reads, after each time it says where it publishes
