@@ -223,7 +223,7 @@ pub(super) fn profile_switch_op(
                 pty_op::Step::terminate(pane.worker, libc::SIGTERM)
                     .escalate_after(Duration::from_secs(3), libc::SIGKILL),
             )
-            .step(pty_op::Step::send(line).named("resume"))
+            .shell_line(line, "resume")
             .step(
                 pty_op::Step::await_process(pane.shell_pid, looks_like_gemini)
                     .timeout(Duration::from_secs(20)),
@@ -333,6 +333,8 @@ mod tests {
     fn line_of(op: &pty_op::PtyOp) -> String {
         op.steps
             .iter()
+            // the interrupt that empties the shell's line is not the line
+            .filter(|s| s.label != "clear_line")
             .filter_map(|s| match &s.kind {
                 pty_op::StepKind::Send(b) => Some(String::from_utf8_lossy(b).into_owned()),
                 _ => None,

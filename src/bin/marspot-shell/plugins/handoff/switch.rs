@@ -300,7 +300,7 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
                 Step::terminate(leaving.proc, libc::SIGTERM)
                     .escalate_after(Duration::from_secs(3), libc::SIGKILL),
             )
-            .step(Step::send(line).named("start_target"))
+            .shell_line(line, "start_target")
             // Counted from the moment the line is typed, not from when
             // the process shows up: an agent that paints its whole
             // first frame in the gap between the two would otherwise
