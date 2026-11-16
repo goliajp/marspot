@@ -9,11 +9,12 @@
 # screen.
 #
 # A new session writes frames of eight-byte cells, under a region
-# version no older reader attaches to, but only to a core that said it
-# reads them; to any other core, and the moment its core goes, it
-# writes the twenty-byte frames every build reads.  Each phase checks
-# which of the two the region holds, and an older reader shown a
-# region of eight-byte cells has to refuse it rather than misread it.
+# version no reader from before them attaches to, but only to a core
+# that said it reads them; to any other core, and the moment its core
+# goes, it writes the twenty-byte frames every build reads.  Each phase
+# checks which of the two the region holds, and an older reader shown a
+# region of eight-byte cells either reads it as this build does or, if
+# it is from before them, refuses it rather than misread it.
 #
 #   update    old app → new core over old sessions → the sessions move
 #             to the new build by their own execv → the core restarts
@@ -42,6 +43,16 @@
 # asked (`SessionRepublish`), so a pane whose region was lost keeps its
 # session even with nothing to update to.  The suite reads which kind
 # the older build is from its first session and checks for that.
+#
+# Which frames an older build's session writes, and which its core and
+# readers read, the suite reads from the older app's own pane before
+# anything new touches it: the region's version and cell size, as an
+# old session wrote them for the old core.  Eight-byte cells there mean
+# the old core asked for them, the old session writes them to a core
+# that asks, and the old readers read them; twenty-byte cells mean a
+# build from before them, whose readers refuse a region of eight-byte
+# cells.  A check that does not apply to the older build is printed as
+# `n/a` with the reason, and counted.
 #
 #   MARSPOT_OLD_BINS=<dir>   the older build: marspot-shell, -core and
 #                            -session, and examples/dump_row and
@@ -149,6 +160,39 @@ old_reader_refuses() {
   ! "$OLD/examples/dump_row" "$SD/sessions/$SID" 40 >/dev/null 2>&1
 }
 WIDE="3 20" PACKED="4 8"
+# the layout the older app's own pane settles on, set by the first phase
+OLD_LAYOUT="" OLD_CELLS=""
+cells_of() { # layout
+  case $1 in
+    "$WIDE") echo twenty-byte ;;
+    "$PACKED") echo eight-byte ;;
+    *) echo "unknown ($1)" ;;
+  esac
+}
+# The region's layout once the old session and the old core are done
+# saying what each reads: eight-byte cells come only after the core
+# asked, so the region is read until it shows them or the time is up.
+settled_layout() {
+  local i out=""
+  for (( i = 0; i < 25; i++ )); do
+    out=$("$PROBE" layout "$SD/sessions/$SID" 2>/dev/null)
+    [[ $out == "$PACKED" ]] && break
+    sleep 0.2
+  done
+  echo "$out"
+}
+# What an older reader does with a region of eight-byte cells: refuse
+# it, if the older build is from before them; else read it as this
+# build does.
+old_reader_on_packed() { # what the region is
+  if [[ $OLD_LAYOUT == "$PACKED" ]]; then
+    not_applicable "an old reader refuses $1" "the old build reads eight-byte cells"
+    check "the old reader takes $1 as this build does" frames_match_old_reader 3
+  else
+    check "an old reader refuses $1" old_reader_refuses
+    not_applicable "the old reader takes $1 as this build does" "the old build reads only twenty-byte cells"
+  fi
+}
 # Type a line and wait for it in the frame as this build reads it.
 frames_keep_coming() { # how many frames
   local i n=$1 tries
@@ -204,11 +248,16 @@ start_app "$OLD"
 check "the old session's entry names the old build" test "$(entry "$SD" "$SID" build)" = "$OLD_BUILD"
 OLD_STAMPS=$(entry "$SD" "$SID" stamps_regions)
 echo "  the old build $([[ -n $OLD_STAMPS ]] && echo stamps || echo "does not stamp") its regions"
+OLD_LAYOUT=$(settled_layout)
+[[ $OLD_LAYOUT == "$WIDE" || $OLD_LAYOUT == "$PACKED" ]] ||
+  die "the old app's pane publishes a region this build does not know: '$OLD_LAYOUT'"
+OLD_CELLS=$(cells_of "$OLD_LAYOUT")
+echo "  the old app's own pane holds $OLD_CELLS cells (region $OLD_LAYOUT)"
 swap_core "$SD" "$NEW/marspot-core"
 sleep 1
 same_pane
 check "the core took the session over" test "$(count "$SD" L3_REATTACHED)" -ge 1
-check "an old session writes twenty-byte frames to the new core" layout_is "$WIDE"
+check "an old session writes $OLD_CELLS frames to the new core" layout_is "$OLD_LAYOUT"
 check "the session was not moved or ended for it" test "$(count "$SD" L3_REHOUSE)" -eq 0
 check "no session was started again" lacks_log core.reattach.l3_failed
 check "the old session's word on identities is its build's" \
@@ -231,7 +280,7 @@ check "the title from before the update is still published" \
 new_readers_read_everything
 check "the new session writes the new core eight-byte frames" layout_is "$PACKED"
 check "the frames keep coming" frames_keep_coming 3
-check "an old reader refuses a region of eight-byte frames" old_reader_refuses
+old_reader_on_packed "a region the new session wrote eight-byte frames into"
 
 echo "════ update: the new core restarts over new sessions ════"
 swap_core "$SD" "$NEW/marspot-core"
@@ -246,7 +295,7 @@ swap_core "$SD" "$OLD/marspot-core"
 sleep 1
 same_pane
 check "no session was started again" lacks_log core.reattach.l3_failed
-check "the session writes the old core twenty-byte frames" layout_is "$WIDE"
+check "the session writes the old core $OLD_CELLS frames" layout_is "$OLD_LAYOUT"
 check "the old reader takes every frame as this build does" frames_match_old_reader 5
 check "the old readers find the cluster text and title where they look" \
   test -n "$("$OLD/examples/shm_probe" title "$SD/sessions/$SID" 2>/dev/null)"
@@ -254,18 +303,22 @@ check "the old readers find the cluster text and title where they look" \
 echo "════ rollback: new app, then the old core over new sessions ════"
 start_app "$NEW"
 check "a new app's session writes eight-byte frames" layout_is "$PACKED"
-check "an old reader refuses them" old_reader_refuses
+old_reader_on_packed "a new app's region of eight-byte frames"
 swap_core "$SD" "$OLD/marspot-core"
 sleep 1
 same_pane
 check "no session was started again" lacks_log core.reattach.l3_failed
-check "the session writes the old core twenty-byte frames" layout_is "$WIDE"
+check "the session writes the old core $OLD_CELLS frames" layout_is "$OLD_LAYOUT"
 echo "  (moved to a region the old core made: $(count "$SD" L3_REHOUSE) times)"
 check "the old reader takes every frame as this build does" frames_match_old_reader 5
 if [[ -n $OLD_STAMPS ]]; then
   check "the old readers find the title where this build puts it" \
     test -n "$("$OLD/examples/shm_probe" title "$SD/sessions/$SID" 2>/dev/null)"
+  not_applicable "the old readers find no title for the pane (the accepted cost)" \
+    "the old build names its side regions as this one does"
 else
+  not_applicable "the old readers find the title where this build puts it" \
+    "the old build is from before sessions stamped their regions"
   check "the old readers find no title for the pane (the accepted cost)" \
     test -z "$("$OLD/examples/shm_probe" title "$SD/sessions/$SID" 2>/dev/null)"
 fi
@@ -288,7 +341,7 @@ check "the session runs the old build" runs_build "$OLD_BUILD"
 sleep 1
 same_pane
 check "no session was started again" lacks_log core.reattach.l3_failed
-check "an old session writes the new core twenty-byte frames" layout_is "$WIDE"
+check "an old session writes the new core $OLD_CELLS frames" layout_is "$OLD_LAYOUT"
 check "this build reads the frame" frame_shows MARK-M
 
 echo "════ lost: an old session without its region, a new session build staged ════"
@@ -314,9 +367,20 @@ if [[ -n $OLD_STAMPS ]]; then
   check "the old session moved to a region made for it" test "$(count "$SD" L3_REHOUSED)" -ge 1
   same_pane
   check "no session was started again" lacks_log core.reattach.l3_failed
-  check "an old session writes the new core twenty-byte frames" layout_is "$WIDE"
+  check "an old session writes the new core $OLD_CELLS frames" layout_is "$OLD_LAYOUT"
+  why="the old session moves to a new region when asked"
+  not_applicable "the session was started again in its place" "$why"
+  not_applicable "the old session process is gone" "$why"
+  not_applicable "the pane has a session" "$why"
 else
   sleep 2
+  why="the old session cannot move to a new region"
+  for what in "the old session moved to a region made for it" \
+    "the session is the same process" "the session process is alive" "the pane's shell is alive" \
+    "the app reads the pane's text" "no session was started again" \
+    "an old session writes the new core $OLD_CELLS frames"; do
+    not_applicable "$what" "$why"
+  done
   check "the session was started again in its place" logged "$SD" core.reattach.l3_failed
   check "the old session process is gone" test "$(entry "$SD" "$SID" pid)" != "$PID"
   check "the pane has a session" alive "$(entry "$SD" "$SID" pid)"
@@ -395,7 +459,7 @@ if (( panes_failures > 0 )); then
   echo "  (reattach, move and update events of the last phase)"
   grep -E $'\t(L3_REATTACHED|L3_REHOUSE[D]?|L3_REPUBLISHED|L3_EXECV_INVOKE|L3_SWAP_ASK|core\.reattach[a-z_.0-9]*|l3\.republish[a-z_.0-9]*)\t' \
     "$(log_of "$SD")" | cut -c1-220 | sed 's/^/    /'
-  echo "FAIL: $panes_failures check(s)"
+  echo "FAIL: $panes_failures of $panes_checks check(s) ($panes_not_applicable not applicable to this old build)"
   exit 1
 fi
-echo "ALL PASS"
+echo "ALL PASS: $((panes_checks - panes_not_applicable)) checks passed, $panes_not_applicable not applicable to this old build, $panes_checks in all"
