@@ -2324,14 +2324,7 @@ impl<'a> Handler<'a> {
             // it isn't carrying real content) so resize reflow knows
             // it's wide-wrap padding, not a space the user typed.
             if self.grid.cell(cols - 1, row) == Cell::default() {
-                self.grid.set_cell(
-                    cols - 1,
-                    row,
-                    Cell {
-                        ch: '\0',
-                        attrs: *self.attrs,
-                    },
-                );
+                self.grid.set_char(cols - 1, row, '\0', self.attrs);
             }
             let bot = *self.scroll_bot;
             if row == bot {
@@ -2363,23 +2356,9 @@ impl<'a> Handler<'a> {
         // skips drawing its glyph (NUL is treated as blank), and the
         // lead glyph extends visually across both cells via its natural
         // advance width.
-        self.grid.set_cell(
-            col,
-            row,
-            Cell {
-                ch,
-                attrs: *self.attrs,
-            },
-        );
+        self.grid.set_char(col, row, ch, self.attrs);
         if w == 2 {
-            self.grid.set_cell(
-                col + 1,
-                row,
-                Cell {
-                    ch: '\0',
-                    attrs: *self.attrs,
-                },
-            );
+            self.grid.set_char(col + 1, row, '\0', self.attrs);
         }
 
         let next_col = col + w as u16;
@@ -4039,14 +4018,7 @@ impl<'a> Handler<'a> {
         if col + 1 >= cols {
             return;
         }
-        self.grid.set_cell(
-            col + 1,
-            row,
-            Cell {
-                ch: '\0',
-                attrs: *self.attrs,
-            },
-        );
+        self.grid.set_char(col + 1, row, '\0', self.attrs);
         if self.grid.cursor() == (col + 1, row) {
             self.grid.set_cursor(col + 2, row);
         }
