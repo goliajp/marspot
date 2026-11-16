@@ -2042,8 +2042,8 @@ enum CoreEvent {
     /// before manifest v2 carried `control_stream_fd`, kernel races
     /// during dual-core swap, plain crashes, etc).
     L3ControlEof(u64),
-    /// A session said which grid region it publishes into.
-    L3Publishes(u64, Vec<u8>),
+    /// A session said which grid region it publishes into, or which frames it reads.
+    L3Says(u64, Frame),
     /// A background reconnect finished.  `Some(stream)` swaps the
     /// pane's control onto it; `None` means every attempt failed and
     /// the pane stays on its dead stream.
@@ -2432,8 +2432,8 @@ fn l3_reader_loop(
                         marspot::input::write_clipboard_text(text);
                     }
                 }
-                MsgType::SessionPublishes => {
-                    let _ = tx.send(CoreEvent::L3Publishes(session_id, f.payload));
+                MsgType::SessionPublishes | MsgType::SessionReadsFrameCells => {
+                    let _ = tx.send(CoreEvent::L3Says(session_id, f));
                 }
                 // Reply to a Cmd-C `GetSelectionText`: hand it to whoever is
                 // blocked in `L3Conn::request_selection_text`.  A dropped
@@ -9092,9 +9092,9 @@ fn main() {
                         });
                     }
                 }
-                CoreEvent::L3Publishes(sid, payload) => {
+                CoreEvent::L3Says(sid, frame) => {
                     if let Some((wi, idx)) = app.find_pane_by_sid(sid) {
-                        win!(app, wi).panes[idx].session_mut().l3_session_publishes(&payload);
+                        win!(app, wi).panes[idx].session_mut().l3_session_says(&frame);
                     }
                 }
                 CoreEvent::L3ControlReconnected(sid, stream) => {

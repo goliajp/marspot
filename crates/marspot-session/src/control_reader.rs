@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 
 use marspot_term::shell_proto::{
     decode_frame_cells, decode_get_selection_text, decode_grid_resize, decode_grid_scroll, decode_key_event,
-    decode_paste, decode_search_cancel, decode_search_scrollback, wire_to_event, Frame, MsgType,
+    decode_paste, decode_search_cancel, decode_search_scrollback, wire_to_event, Frame, MsgType, Next,
 };
 
 use crate::SessionEvent;
@@ -67,8 +67,12 @@ fn read_frames(mut reader: UnixStream, stop: &UnixStream, tx: Sender<SessionEven
         if !crate::pty_reader::readable_before_stop(reader.as_raw_fd(), stop) {
             return;
         }
-        match Frame::read_from(&mut reader) {
-            Ok(Some(f)) => match f.msg_type {
+        // one frame per check: a frame of a type this image does not
+        // know is followed by none at all as often as not, and a
+        // reader blocked for the one after it never sees a stop
+        match Frame::read_next(&mut reader) {
+            Ok(Some(Next::Unknown(_))) => {}
+            Ok(Some(Next::Frame(f))) => match f.msg_type {
                 MsgType::KeyEvent => {
                     // The trailing window id is an L1↔L2 concern; a
                     // session belongs to a pane, and a pane does not
@@ -216,7 +220,7 @@ fn read_frames(mut reader: UnixStream, stop: &UnixStream, tx: Sender<SessionEven
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marspot_term::shell_proto::encode_inject_input;
+    use marspot_term::shell_proto::{MAGIC, encode_inject_input};
     use std::time::Duration;
 
     fn inject(text: &str) -> Frame {
@@ -245,6 +249,48 @@ mod tests {
         let f = Frame::read_from(&mut next_image).unwrap().expect("a frame");
         assert_eq!(f.msg_type, MsgType::InjectInput);
         assert_eq!(marspot_term::shell_proto::decode_inject_input(&f.payload).unwrap().1, b"two");
+    }
+
+    /// A frame this image does not know, and then nothing: a stop
+    /// still ends the reader.  An image that blocked for the frame
+    /// after the unknown one hung its update, for as long as the core
+    /// sent nothing else.
+    #[test]
+    fn a_reader_past_an_unknown_frame_still_stops() {
+        let (mut l2, l3) = UnixStream::pair().unwrap();
+        let queued = l3.try_clone().unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut readers = ControlReaders::new().unwrap();
+        readers.spawn(l3, tx, 0);
+
+        let mut unknown = MAGIC.to_le_bytes().to_vec();
+        unknown.extend_from_slice(&u32::MAX.to_le_bytes());
+        unknown.extend_from_slice(&4u32.to_le_bytes());
+        unknown.extend_from_slice(&[1, 2, 3, 4]);
+        l2.write_all(&unknown).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while unread(&queued) > 0 {
+            assert!(std::time::Instant::now() < deadline, "the reader never took the frame");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            readers.stop();
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "the reader blocked past the unknown frame and never saw the stop"
+        );
+        drop(l2);
+    }
+
+    fn unread(s: &UnixStream) -> libc::c_int {
+        let mut n: libc::c_int = 0;
+        // SAFETY: FIONREAD writes one int, on a socket the test owns.
+        unsafe { libc::ioctl(s.as_raw_fd(), libc::FIONREAD, &mut n) };
+        n
     }
 
     /// What is typed raises the flag the parser looks at between two

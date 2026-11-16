@@ -101,18 +101,85 @@ impl L3Conn {
 }
 
 pub(super) fn new_control_writer(s: UnixStream) -> marspot_term::frame_writer::FrameWriter {
-    let w = marspot_term::frame_writer::FrameWriter::new("l2-l3-writer", s, marspot_term::frame_writer::cap::CONTROL_SOCKET);
-    say_frames_read(&w);
-    w
+    marspot_term::frame_writer::FrameWriter::new("l2-l3-writer", s, marspot_term::frame_writer::cap::CONTROL_SOCKET)
 }
 
-/// Tell the session which frames this core reads: first on every
-/// connection, and again to every new image of the session.  A session
-/// that does not know the message drops it and keeps writing what
-/// every core reads.
+/// Tell the session which frames this core reads: only once it said it
+/// reads the message (`SessionReadsFrameCells`), which each image does
+/// on each connection.  A session from before the message would not
+/// read it: its control reader blocks for the frame after one of a
+/// type it does not know, past its check for an update, and the update
+/// hangs until the core sends something else.
 pub(super) fn say_frames_read(w: &marspot_term::frame_writer::FrameWriter) {
     let _ = w.send(crate::shell_proto::Frame::new(
         crate::shell_proto::MsgType::SessionFrameCells,
         crate::shell_proto::encode_frame_cells(crate::grid_shm::cells::VERSION_PACKED),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::PaneBackend;
+    use super::*;
+    use crate::grid_shm::{GridShmWriter, SessionRegions};
+    use crate::shell_proto::{Frame, MsgType, Next, encode_ping};
+    use std::time::Duration;
+
+    /// The types of what the core sent the session, up to a ping sent
+    /// after them: the core writes from a thread of its own.
+    fn sent(backend: &PaneBackend, session: &mut UnixStream) -> Vec<u32> {
+        let PaneBackend::L3(c) = backend else {
+            unreachable!()
+        };
+        c.control.send(Frame::new(MsgType::Ping, encode_ping(0)));
+        session
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut got = Vec::new();
+        loop {
+            match Frame::read_next(session)
+                .expect("a frame")
+                .expect("the core still there")
+            {
+                Next::Frame(f) if f.msg_type == MsgType::Ping => return got,
+                Next::Frame(f) => got.push(f.msg_type as u32),
+                Next::Unknown(t) => got.push(t),
+            }
+        }
+    }
+
+    /// 2026-11-16: a core told every session which frames it reads on
+    /// connecting, and again on each `SessionPublishes`; six sessions
+    /// from before the message hung their update in it.
+    #[test]
+    fn a_session_is_told_which_frames_the_core_reads_only_once_it_says_it_reads_that() {
+        const CELLS: u32 = MsgType::SessionFrameCells as u32;
+        let mut writer = GridShmWriter::create(20, 3).expect("shm region");
+        writer.publish(&Grid::new(20, 3), 0, 0);
+        // SAFETY: dup of an fd the writer holds open
+        let fd = unsafe { libc::dup(writer.fd()) };
+        assert!(fd >= 0, "dup of the shm fd");
+        let reader = GridShmReader::from_fd(fd).expect("shm reader");
+        let (control, mut session) = UnixStream::pair().expect("socketpair");
+        let (_tx, selection_rx) = std::sync::mpsc::channel();
+        let id = 0xFC_0000_0000 + std::process::id() as u64;
+        // our own pid: `reattach` never signals it
+        let mut conn = L3Conn::reattach(
+            std::process::id() as i32,
+            control,
+            reader,
+            SessionRegions::for_session(id),
+            selection_rx,
+            id,
+        );
+        assert!(conn.poll(), "the frame reaches the mirror");
+        let mut backend = PaneBackend::L3(conn);
+        assert!(
+            !sent(&backend, &mut session).contains(&CELLS),
+            "told on connecting"
+        );
+
+        backend.l3_session_says(&Frame::new(MsgType::SessionReadsFrameCells, Vec::new()));
+        assert_eq!(sent(&backend, &mut session), [CELLS]);
+    }
 }
