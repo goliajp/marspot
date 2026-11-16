@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.490"  # a core reads frames of eight-byte cells, and tells each session it does
+shell   = "0.7.491"  # a pane is named by where its foreground program works
 core    = "0.12.550"  # SessionFrameCells goes only to a session that said it reads it
 session = "0.11.380"  # a session says it reads which frames its core reads, after each time it says where it publishes
