@@ -29,7 +29,7 @@
 //! with a fresh code is backward compatible; changing an existing
 //! payload layout is a major bump.
 
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
 // ───────────────────────────────────────────────────────────────────
 // Environment variables — used during the brief window between
@@ -682,6 +682,8 @@ impl MsgType {
 }
 
 mod handshake;
+mod frame_read;
+pub use frame_read::Next;
 pub use handshake::*;
 mod inject;
 pub use inject::{decode_inject_input, encode_inject_input};
@@ -944,82 +946,6 @@ impl Frame {
         }
         Ok(HEADER_LEN + self.payload.len())
     }
-
-    /// Read one frame off `r`.  Forward-compatible: a frame whose
-    /// `msg_type` this build doesn't recognise (e.g. a new variant
-    /// added in a future release) is **silently skipped** — its
-    /// payload is consumed and the loop reads the next frame.  Magic /
-    /// length-cap / IO errors are still hard errors.
-    ///
-    /// This makes peer additions of new message types safe across
-    /// version skew: the old reader stays alive instead of erroring
-    /// and tearing down the control channel.  See RFC-003 §6
-    /// Amendment 14: that property is the foundation of the L3
-    /// silent self-update — a future L2 sending `RequestSelfUpdate`
-    /// at an L3 that lacks the variant must not be lethal.
-    pub fn read_from<R: Read>(r: &mut R) -> io::Result<Option<Self>> {
-        loop {
-            let mut header = [0u8; HEADER_LEN];
-            match read_exact_or_eof(r, &mut header)? {
-                ReadEnd::Eof => return Ok(None),
-                ReadEnd::Full => {}
-            }
-            let magic = u32::from_le_bytes(header[0..4].try_into().unwrap());
-            if magic != MAGIC {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("bad magic 0x{:08x}, expected 0x{:08x}", magic, MAGIC),
-                ));
-            }
-            let type_raw = u32::from_le_bytes(header[4..8].try_into().unwrap());
-            let len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
-            if len > MAX_PAYLOAD_LEN {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("payload len {} exceeds cap {}", len, MAX_PAYLOAD_LEN),
-                ));
-            }
-            let mut payload = vec![0u8; len];
-            if len > 0 {
-                r.read_exact(&mut payload)?;
-            }
-            match MsgType::from_u32(type_raw) {
-                Some(msg_type) => return Ok(Some(Frame { msg_type, payload })),
-                None => {
-                    // Forward-compat: drop unknown frames on the floor
-                    // and keep reading.  The control channel survives a
-                    // future peer that speaks a wider protocol.
-                    continue;
-                }
-            }
-        }
-    }
-}
-
-enum ReadEnd {
-    Full,
-    Eof,
-}
-
-fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<ReadEnd> {
-    let mut off = 0;
-    while off < buf.len() {
-        match r.read(&mut buf[off..]) {
-            Ok(0) => {
-                if off == 0 {
-                    return Ok(ReadEnd::Eof);
-                }
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "EOF mid-frame",
-                ));
-            }
-            Ok(n) => off += n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(ReadEnd::Full)
 }
 
 // ───────────────────────────────────────────────────────────────────
