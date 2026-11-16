@@ -14,8 +14,10 @@ impl Grid {
         &self.styles
     }
 
-    /// The number cell `idx` should carry for `attrs`.
-    #[inline]
+    /// The number cell `idx` should carry for `attrs`.  Kept out of
+    /// line: inlined, it made every writer of a cell too big to inline
+    /// in turn.
+    #[inline(never)]
     fn id_for(&mut self, idx: usize, attrs: &CellAttrs) -> u32 {
         self.id_for_packed(idx, PackedStyle::pack(attrs))
     }

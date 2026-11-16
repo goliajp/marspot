@@ -479,7 +479,7 @@ impl Grid {
         let mut out = Vec::with_capacity(rows);
         for r in 0..rows as u16 {
             let pr = self.phys_row(r);
-            let row_cells = self.cells[pr * cols..(pr + 1) * cols].iter().map(|&c| self.expand(c)).collect();
+            let row_cells = self.cells[pr * cols..(pr + 1) * cols].iter().map(|&c| self.expand_cold(c)).collect();
             let wrapped = self.wrapped[pr];
             out.push((row_cells, wrapped));
         }
@@ -593,6 +593,18 @@ impl Grid {
         self.reflow(cols, rows);
     }
 
+    /// [`Self::expand`] kept out of line, for the resize code: it reads
+    /// every cell once, and a copy of the expansion at each of its
+    /// sites cost kilobytes of binary for no speed anyone sees.
+    #[inline(never)]
+    fn expand_cold(&self, cell: StoredCell) -> Cell {
+        self.expand(cell)
+    }
+
+    fn cell_cold(&self, col: u16, row: u16) -> Cell {
+        self.expand_cold(self.cells[self.phys_row(row) * self.cols as usize + col as usize])
+    }
+
     /// Height-only resize: lossless by construction.
     fn resize_rows_only(&mut self, rows: u16) {
         let cols = self.cols as usize;
@@ -605,7 +617,7 @@ impl Grid {
             for r in 0..self.rows {
                 let dst = r as usize * cols;
                 for c in 0..self.cols {
-                    new_cells[dst + c as usize] = self.cell(c, r);
+                    new_cells[dst + c as usize] = self.cell_cold(c, r);
                 }
                 new_wrapped[r as usize] = self.wrapped[self.phys_row(r)];
                 new_prompt[r as usize] = self.prompt[self.phys_row(r)];
@@ -638,7 +650,7 @@ impl Grid {
         for r in 0..rows {
             let dst = r as usize * cols;
             for c in 0..self.cols {
-                new_cells[dst + c as usize] = self.cell(c, r);
+                new_cells[dst + c as usize] = self.cell_cold(c, r);
             }
             new_wrapped[r as usize] = self.wrapped[self.phys_row(r)];
             new_prompt[r as usize] = self.prompt[self.phys_row(r)];
@@ -699,7 +711,7 @@ impl Grid {
             }
             for r in 0..self.rows {
                 let start = self.phys_row(r) * old_cols;
-                let row = self.cells[start..start + old_cols].iter().map(|&c| self.expand(c)).collect();
+                let row = self.cells[start..start + old_cols].iter().map(|&c| self.expand_cold(c)).collect();
                 let wrapped = self.wrapped[self.phys_row(r)];
                 absorb(row, wrapped, &mut lines);
                 if r == self.cursor_row {

@@ -161,7 +161,7 @@ impl Scrollback {
         styles: &crate::grid::StyleTable,
         wrapped: bool,
         hint: RowHint,
-        known: Option<&[u32]>,
+        known: Option<&[u32; crate::grid::ROW_STYLES]>,
     ) -> usize {
         match self {
             Self::Memory(m) => {

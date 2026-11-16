@@ -7,44 +7,47 @@
 //! a grid whose history goes to a file does not, and leaves every row
 //! unknown.
 
-/// How many numbers a row keeps before it gives up knowing them: the
-/// rows of syntax-highlighted code have six to ten.
-pub const ROW_STYLES: usize = 8;
-const UNKNOWN: u8 = u8::MAX;
+/// Slots a row keeps numbers in, one for each value of a number's low
+/// four bits: the rows of syntax-highlighted code have six to ten
+/// numbers.
+pub const ROW_STYLES: usize = 16;
 
-/// The non-default attribute numbers written into a row since it was
-/// last blank; may hold numbers no cell has any more, never misses one
-/// a cell has.  `known` gives up once more than [`ROW_STYLES`] went in,
-/// or when something wrote the row without saying.
+/// The numbers a row's cells hold, each in the slot of its low four
+/// bits, 0 in an empty slot.  Two numbers for one slot, and the row is
+/// unknown until it is blank again: a note is then one compare and at
+/// most one store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct RowStyles {
-    ids: [u32; ROW_STYLES],
-    len: u8,
+    slots: [u32; ROW_STYLES],
+    unknown: bool,
 }
 
 impl RowStyles {
-    /// A row nothing is known about.
-    pub const UNKNOWN: RowStyles = RowStyles { ids: [0; ROW_STYLES], len: UNKNOWN };
+    pub const UNKNOWN: RowStyles = RowStyles { slots: [0; ROW_STYLES], unknown: true };
 
-    /// A cell of the row now holds `id`.
     #[inline(always)]
     pub fn note(&mut self, id: u32) {
-        let len = self.len as usize;
-        if id == 0 || len == UNKNOWN as usize || self.ids[..len].contains(&id) {
+        let slot = &mut self.slots[id as usize % ROW_STYLES];
+        if *slot == id {
             return;
         }
-        if len == ROW_STYLES {
-            self.len = UNKNOWN;
+        // number 0 is the default, in any slot it lands on
+        if id == 0 {
+            return;
+        }
+        if *slot == 0 {
+            *slot = id;
         } else {
-            self.ids[len] = id;
-            self.len += 1;
+            self.unknown = true;
         }
     }
 
-    /// The numbers, when they are known.
+    /// Every number the row holds, each in the slot of its low four
+    /// bits, 0 in the others; `None` when the row's writes said more
+    /// than that holds.
     #[inline(always)]
-    pub fn known(&self) -> Option<&[u32]> {
-        (self.len != UNKNOWN).then(|| &self.ids[..self.len as usize])
+    pub fn known(&self) -> Option<&[u32; ROW_STYLES]> {
+        (!self.unknown).then_some(&self.slots)
     }
 }
 
@@ -52,21 +55,26 @@ impl RowStyles {
 mod tests {
     use super::*;
 
+    fn held(s: &RowStyles) -> Option<Vec<u32>> {
+        s.known().map(|k| k.iter().copied().filter(|&id| id != 0).collect())
+    }
+
     #[test]
-    fn a_row_knows_its_numbers_until_too_many() {
+    fn a_row_knows_its_numbers_until_two_share_a_slot() {
         let mut s = RowStyles::default();
-        assert_eq!(s.known(), Some(&[][..]));
-        for id in [3, 0, 3, 5, 3] {
+        assert_eq!(held(&s), Some(vec![]));
+        for id in [3, 0, 3, 5, 3, 16] {
             s.note(id);
         }
-        assert_eq!(s.known(), Some(&[3, 5][..]));
-        for id in 10..10 + ROW_STYLES as u32 - 2 {
+        assert_eq!(held(&s), Some(vec![16, 3, 5]));
+        // one number for each slot still empty
+        for id in (32..48).filter(|id| ![0, 3, 5].contains(&(id % 16))) {
             s.note(id);
         }
-        assert_eq!(s.known().map(<[u32]>::len), Some(ROW_STYLES));
-        s.note(99);
-        assert_eq!(s.known(), None);
+        assert_eq!(held(&s).map(|v| v.len()), Some(ROW_STYLES));
+        s.note(19);
+        assert_eq!(held(&s), None, "19 and 3 share a slot");
         s.note(3);
-        assert_eq!(s.known(), None, "nothing is known again until the row is blank");
+        assert_eq!(held(&s), None, "nothing is known again until the row is blank");
     }
 }
