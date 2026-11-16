@@ -19,32 +19,42 @@ fn attr_bytes(cell: PackedCell, styles: &StyleTable) -> [u8; CELL_MEM_BYTES - 4]
 
 /// Append `line` to `out` as runs; `false`, with `out` as it was, when
 /// that would not be smaller than the cells.
+///
+/// `canon` is room for a copy of the row, used only when the grid
+/// numbers its cells by position.
 pub(crate) fn encode_packed_cells(
     line: &[PackedCell],
     styles: &StyleTable,
     hint: RowHint,
     out: &mut Vec<u8>,
+    canon: &mut Vec<PackedCell>,
 ) -> bool {
     if styles.is_positional() {
-        // numbers name positions: two cells in the same attributes
-        // carry different ones, so a run is decided by the values
-        let key = |c: PackedCell| styles.get(c.style_id()).0 << 1 | c.is_cluster() as u64;
-        return encode_runs(line, styles, hint, out, key);
+        canonical(line, styles, canon);
+        return encode_runs(canon, styles, hint, out);
     }
-    encode_runs(line, styles, hint, out, PackedCell::run_key)
+    encode_runs(line, styles, hint, out)
 }
 
-/// The encoder, with `key` deciding which neighbours share a run: equal
-/// keys exactly when equal attributes and cluster flags, and 0 for a
-/// plain cell.
+/// `line` with each cell that has the same attributes as the one before
+/// it given that cell's number: numbered by position, two neighbours in
+/// one colour carry different numbers, and a run is decided by numbers.
+#[cold]
+fn canonical(line: &[PackedCell], styles: &StyleTable, canon: &mut Vec<PackedCell>) {
+    canon.clear();
+    let mut prev = PackedCell::BLANK;
+    for &c in line {
+        let id = c.style_id();
+        let same = id != 0 && prev.style_id() != 0 && styles.get(id) == styles.get(prev.style_id());
+        prev = if same { c.with_style(prev.style_id()) } else { c };
+        canon.push(prev);
+    }
+}
+
+/// The encoder: a run ends where the number or the cluster flag
+/// changes.
 #[inline(always)]
-fn encode_runs(
-    line: &[PackedCell],
-    styles: &StyleTable,
-    hint: RowHint,
-    out: &mut Vec<u8>,
-    key_of: impl Fn(PackedCell) -> u64,
-) -> bool {
+fn encode_runs(line: &[PackedCell], styles: &StyleTable, hint: RowHint, out: &mut Vec<u8>) -> bool {
     let start = out.len();
     let raw_len = line.len() * CELL_MEM_BYTES;
     let plain_from = (hint.plain_from as usize).min(line.len());
@@ -52,9 +62,9 @@ fn encode_runs(
     let mut wide = hint.wide;
     let mut i = 0;
     while i < line.len() {
-        let key = key_of(line[i]);
+        let key = line[i].run_key();
         let mut n = 1;
-        while i + n < plain_from && key_of(line[i + n]) == key {
+        while i + n < plain_from && line[i + n].run_key() == key {
             n += 1;
         }
         if i + n >= plain_from && key == 0 {

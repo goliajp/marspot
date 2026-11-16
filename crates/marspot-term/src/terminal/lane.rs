@@ -230,6 +230,8 @@ impl<'a> Handler<'a> {
         // grid numbering its cells by position leaves coloured text to
         // the per-character path
         let plain = self.attrs.is_default();
+        // whether this row's marks keep its attribute numbers
+        let notes = self.grid.notes_styles();
         let pen = if plain {
             0
         } else {
@@ -268,6 +270,9 @@ impl<'a> Handler<'a> {
                     write_cells(&mut cells[col..to], bytes, pen);
                     if !plain && to > mark.plain_from as usize {
                         mark.plain_from = to as u16;
+                    }
+                    if notes {
+                        mark.styles.note(pen);
                     }
                 }
                 if to > mark.end as usize {
@@ -379,6 +384,9 @@ impl<'a> Handler<'a> {
             }
             if !plain && to > mark.plain_from {
                 mark.plain_from = to;
+            }
+            if notes && !plain {
+                mark.styles.note(pen);
             }
             if wide {
                 mark.wide = true;

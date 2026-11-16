@@ -85,7 +85,7 @@ impl FileScrollback {
         self.scratch.clear();
         self.scratch.extend_from_slice(&[0u8; FILE_REC_HEADER_BYTES]);
         let packed = !line.is_empty()
-            && crate::scrollback::format_packed::encode_packed_cells(line, styles, hint, &mut self.scratch);
+            && crate::scrollback::format_packed::encode_packed_cells(line, styles, hint, &mut self.scratch, &mut self.canon);
         if !packed {
             crate::scrollback::format_packed::append_cells(line, styles, &mut self.scratch);
         }

@@ -129,6 +129,7 @@ impl FileScrollback {
             ring,
             total_lines: hot_first_line + hot_lines,
             scratch: Vec::with_capacity(FILE_REC_HEADER_BYTES + cols.saturating_mul(crate::grid::CELL_MEM_BYTES)),
+            canon: Vec::new(),
             legacy,
             segs,
             hot_pos,

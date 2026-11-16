@@ -10,6 +10,7 @@
 //! resets them, and anything that moves rows about either carries
 //! them along or gives them up for the full width.
 
+use super::row_styles::RowStyles;
 use super::{Cell, CellAttrs, Grid, StoredCell};
 
 /// Upper bounds on where a row stops being interesting; never exact.
@@ -22,12 +23,15 @@ pub struct RowMark {
     /// A character past 0x7F may be in the row.  A guess for whoever
     /// encodes the row, which is right either way.
     pub wide: bool,
+    /// The attribute numbers in the row, kept only by a grid whose
+    /// history is in RAM (see `row_styles`).
+    pub styles: RowStyles,
 }
 
 impl RowMark {
     /// A row about which nothing is known.
     pub(super) fn unknown(cols: u16) -> Self {
-        RowMark { end: cols, plain_from: cols, wide: false }
+        RowMark { end: cols, plain_from: cols, wide: false, styles: RowStyles::UNKNOWN }
     }
 
     /// A row every cell of which is `fill`.
@@ -50,6 +54,17 @@ impl CellAttrs {
     }
 }
 
+impl CellAttrs {
+    /// Whether these are the default attributes, whatever the flags in
+    /// the padding say: the colours and the five switches only.
+    #[inline(always)]
+    pub fn is_plain(&self) -> bool {
+        let words = self as *const CellAttrs as *const u64;
+        // SAFETY: as in `is_default`
+        unsafe { words.read_unaligned() | (words.add(1).read_unaligned() & 0xFF_FFFF_FFFF) == 0 }
+    }
+}
+
 impl Cell {
     /// Whether this is `Cell::default()`.
     #[inline(always)]
@@ -63,8 +78,13 @@ impl Grid {
     pub fn set_cell(&mut self, col: u16, row: u16, cell: Cell) {
         debug_assert!(col < self.cols && row < self.rows);
         let pr = self.phys_row(row);
-        self.put(pr * self.cols as usize + col as usize, cell);
+        let idx = pr * self.cols as usize + col as usize;
+        self.put(idx, cell);
+        let id = self.cells[idx].style_id();
         let mark = &mut self.marks[pr];
+        if self.notes_styles {
+            mark.styles.note(id);
+        }
         if col >= mark.end {
             mark.end = col + 1;
         }
@@ -75,7 +95,9 @@ impl Grid {
     }
 
     /// The whole of `row`, and its marks for the caller to keep: after
-    /// writing cells it must leave each bound at least where it wrote.
+    /// writing cells it must leave each bound at least where it wrote,
+    /// and, when [`Self::notes_styles`], note each attribute number it
+    /// wrote.
     /// One ring-index resolve for a run of any length.
     // as a call it cost seventeen instructions a run of text
     #[inline(always)]
@@ -84,6 +106,19 @@ impl Grid {
         let pr = self.phys_row(row);
         let cols = self.cols as usize;
         (&mut self.cells[pr * cols..(pr + 1) * cols], &mut self.marks[pr])
+    }
+
+    /// Whether writes note the numbers each row holds; see
+    /// `row_styles`.
+    #[inline(always)]
+    pub fn notes_styles(&self) -> bool {
+        self.notes_styles
+    }
+
+    /// The cells were renumbered: what the rows' marks say about their
+    /// numbers is not true any more.
+    pub(super) fn forget_row_styles(&mut self) {
+        self.marks.iter_mut().for_each(|m| m.styles = RowStyles::UNKNOWN);
     }
 
     /// Every row was filled with `fill`.
@@ -111,6 +146,10 @@ impl Grid {
                     && plain <= cols
                     && row[end..].iter().all(|c| *c == StoredCell::BLANK)
                     && row[plain..].iter().all(|c| c.run_key() == 0)
+                    && (!self.notes_styles
+                        || mark.styles.known().is_none_or(|ids| {
+                            row.iter().all(|c| c.style_id() == 0 || ids.contains(&c.style_id()))
+                        }))
             })
     }
 }
@@ -200,6 +239,7 @@ mod tests {
                         }
                         mark.end = mark.end.max(col + 1);
                         mark.plain_from = mark.plain_from.max(col + 1);
+                        mark.styles.note(id);
                     }
                     10 | 11 => g.scroll_up(1, fill),
                     12 => g.scroll_up_region(row.min(1), rows - 1, 1, fill),

@@ -161,10 +161,11 @@ impl Scrollback {
         styles: &crate::grid::StyleTable,
         wrapped: bool,
         hint: RowHint,
+        known: Option<&[u32]>,
     ) -> usize {
         match self {
             Self::Memory(m) => {
-                m.push_packed(line, styles, hint);
+                m.push_packed(line, styles, hint, known);
                 line.len()
             }
             Self::File(f) => f.push_packed_row(line, styles, wrapped, hint),

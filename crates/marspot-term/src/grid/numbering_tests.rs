@@ -158,3 +158,29 @@ fn a_run_that_renumbers_the_grid_as_it_wraps_writes_the_rest_right() {
         assert_eq!(cell.attrs.bg, crate::grid::Color::indexed(1));
     }
 }
+
+/// A row whose numbers the grid knows goes into the in-RAM history as
+/// it is, with those numbers' values beside it; it reads back in the
+/// colours it had after the grid has given every one of its numbers
+/// to other colours.
+#[test]
+fn a_row_kept_as_it_was_keeps_its_colours_after_its_numbers_go() {
+    let mut t = Terminal::new(40, 3);
+    // a highlighted line: five colours in runs, written by the lane
+    t.feed(b"\x1b[31mred\x1b[0m \x1b[32mgreen\x1b[0m \x1b[33my\x1b[34mb\x1b[35mm\x1b[0m end\r\n");
+    let want: Vec<Cell> = (0..40).map(|c| t.grid().cell(c, 0)).collect();
+    t.feed(b"\r\n\r\n\r\n");
+    let g = t.grid();
+    assert_eq!(g.scrollback_line(0).expect("in history"), want);
+    let crate::scrollback::Scrollback::Memory(m) = &g.scrollback else { panic!("RAM history") };
+    assert!(m.kept_as_it_was(0), "a row of five known colours was renumbered");
+    // a few thousand other colours: sweeps give the five numbers back
+    // and hand them to others
+    let before = g.styles().generation();
+    for k in 0..if cfg!(miri) { 300u32 } else { 3000 } {
+        t.feed(format!("\x1b[38;5;{}m\x1b[48;2;{};{};9mx\x1b[0m", k % 256, k >> 8 & 0xFF, k & 0xFF).as_bytes());
+    }
+    assert!(t.grid().styles().generation() > before, "no number was given back");
+    assert_eq!(t.grid().scrollback_line(0).expect("in history"), want, "the history took other colours");
+    t.grid().check_styles().unwrap();
+}

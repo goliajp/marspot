@@ -60,7 +60,7 @@ impl Grid {
             // whatever was filed, nothing past the bound needs blanking
             let used = self
                 .scrollback
-                .push_row(&self.cells[start..start + filed], &self.styles, self.wrapped[pr], hint)
+                .push_row(&self.cells[start..start + filed], &self.styles, self.wrapped[pr], hint, row_mark.styles.known())
                 .min(end);
             let mark = std::mem::take(&mut self.prompt[pr]);
             // The mirrors exist for the in-RAM variant, where there is
@@ -185,8 +185,14 @@ impl Grid {
                         if blank { self.filed_blank_run.saturating_add(1) } else { 0 };
                     let row_clusters = self.degrade_clusters_in_row(start, cols);
                     let hint = RowHint { plain_from: self.marks[pr].plain_from, wide: self.marks[pr].wide };
-                    self.scrollback
-                        .push_row(&self.cells[start..start + cols], &self.styles, self.wrapped[pr], hint);
+                    let known = self.marks[pr].styles;
+                    self.scrollback.push_row(
+                        &self.cells[start..start + cols],
+                        &self.styles,
+                        self.wrapped[pr],
+                        hint,
+                        known.known(),
+                    );
                     let mark = std::mem::take(&mut self.prompt[pr]);
                     if !self.scrollback.keeps_wrapped_flags() {
                         self.sb_wrapped.push_back(self.wrapped[pr]);

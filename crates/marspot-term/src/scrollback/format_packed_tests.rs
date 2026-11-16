@@ -71,7 +71,7 @@ fn a_row_files_the_same_bytes_from_either_form() {
         ] {
             let (mut want, mut got) = (Vec::new(), Vec::new());
             let a = encode_packed_with(&row, hint, &mut want);
-            let b = encode_packed_cells(packed, g.styles(), hint, &mut got);
+            let b = encode_packed_cells(packed, g.styles(), hint, &mut got, &mut Vec::new());
             assert_eq!(a, b, "round {round}: packed or not");
             assert_eq!(want, got, "round {round}, {hint:?}");
         }
