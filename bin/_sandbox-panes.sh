@@ -10,16 +10,24 @@
 # The caller sets CLI to the marspot-shell binary used for --panes,
 # --send, --read and --trigger, and defines `die`.
 
-panes_failures=0
+panes_failures=0 panes_checks=0 panes_not_applicable=0
 check() { # description, command…
   local what=$1
   shift
+  panes_checks=$((panes_checks + 1))
   if "$@"; then
     echo "  ok    $what"
   else
     echo "  FAIL  $what"
     panes_failures=$((panes_failures + 1))
   fi
+}
+# A check this run does not make, and why: said and counted, so a
+# summary never hides one.
+not_applicable() { # description, reason
+  panes_checks=$((panes_checks + 1))
+  panes_not_applicable=$((panes_not_applicable + 1))
+  echo "  n/a   $1 ($2)"
 }
 
 in_sd() { # state dir, command…
