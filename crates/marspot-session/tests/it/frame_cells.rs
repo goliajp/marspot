@@ -105,3 +105,26 @@ fn a_session_that_moves_writes_its_reader_the_same_frames() {
     assert_eq!(layout, PACKED, "the move forgot what the reader reads");
     s.kill();
 }
+
+/// A session says it reads `SessionFrameCells` after each time it says
+/// where it publishes: to the core it starts with and to one that
+/// connects later.  A core tells only a session that said so.
+#[test]
+fn a_session_says_it_reads_which_frames_its_core_reads() {
+    let mut sandbox = Sandbox::new();
+    let mut s = start(&mut sandbox);
+    s.await_frame(MsgType::SessionPublishes, 10);
+    s.await_frame(MsgType::SessionReadsFrameCells, 10);
+    let link = support::reattach(&session_socket_path(id()), 10).expect("a reattach");
+    link.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    let mut r = &link;
+    let mut said = Vec::new();
+    while !said.contains(&MsgType::SessionReadsFrameCells) {
+        let f = Frame::read_from(&mut r).expect("a frame").expect("the session still there");
+        if matches!(f.msg_type, MsgType::SessionPublishes | MsgType::SessionReadsFrameCells) {
+            said.push(f.msg_type);
+        }
+    }
+    assert_eq!(said, [MsgType::SessionPublishes, MsgType::SessionReadsFrameCells]);
+    s.kill();
+}

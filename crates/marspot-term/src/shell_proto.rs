@@ -581,6 +581,13 @@ pub enum MsgType {
     /// core → session: the frame layouts the core reads; see
     /// `encode_frame_cells`.
     SessionFrameCells = 122,
+    /// session → core: this image reads `SessionFrameCells`.  Empty
+    /// payload; sent after every `SessionPublishes`.  A core says what
+    /// it reads only to a session that sent this: one from before the
+    /// message, told a type it does not know, blocks its control reader
+    /// for the next frame past its check for an update, and the update
+    /// hangs until the core sends something else.
+    SessionReadsFrameCells = 123,
     /// L2 → L1: draw this toolbar icon for me.  `symbol u16,
     /// point_px u16`.  Sent only by a core started with
     /// `MARSPOT_ICONS_FROM_SHELL`: drawing a system symbol registers
@@ -675,6 +682,7 @@ impl MsgType {
             120 => MsgType::SessionRepublish,
             121 => MsgType::SessionPublishes,
             122 => MsgType::SessionFrameCells,
+            123 => MsgType::SessionReadsFrameCells,
             200 => MsgType::Error,
             _ => return None,
         })
