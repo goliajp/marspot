@@ -29,9 +29,9 @@ fn print_red(s: &Session, stream: &UnixStream, word: &str) -> (u16, u16) {
     wait_for(10, &format!("{word} in red on the screen"), || {
         let (mut cells, mut wrapped) = (Vec::<Cell>::new(), Vec::new());
         s.reader.read(&mut cells, &mut wrapped)?;
-        let at = (0..ROWS).find_map(|r| {
+        let at = (0..ROWS).find(|&r| {
             let row: String = cells[r as usize * COLS as usize..][..word.len()].iter().map(|c| c.ch).collect();
-            (row == word).then_some(r)
+            row == word
         })?;
         let cell = cells[at as usize * COLS as usize];
         (cell.attrs.fg == Color::indexed(1)).then_some((0, at))
