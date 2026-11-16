@@ -264,6 +264,23 @@ mod tests {
         assert!(rich.approx_bytes() <= lines * cols * 16, "{} bytes", rich.approx_bytes());
         assert_eq!(rich.line(rich.len() - 1).unwrap(), row(lines - 1));
         assert_eq!(rich.line(0).unwrap(), row(0));
+        // a ring that reuses its lines over and over holds no more
+        let mut small = MemoryScrollback::new(2, cols);
+        for i in 0..lines {
+            small.push_line(&row(i));
+        }
+        assert!(small.approx_bytes() <= 2 * cols * 16, "{} bytes", small.approx_bytes());
+        assert_eq!(small.line(1).unwrap(), row(lines - 1));
+        let mut g = Grid::new(cols as u16, 1);
+        let mut small = MemoryScrollback::new(2, cols);
+        for i in 0..lines {
+            for (c, cell) in row(i).iter().enumerate() {
+                g.set_cell(c as u16, 0, *cell);
+            }
+            small.push_packed(g.live_row_at_view(0, 0).unwrap(), g.styles(), RowHint::NONE);
+        }
+        assert!(small.approx_bytes() <= 2 * cols * 16, "{} bytes", small.approx_bytes());
+        assert_eq!(small.line(1).unwrap(), row(lines - 1));
         // the grid's own cells, a few colours and runs of them
         let mut g = Grid::new(cols as u16, 1);
         let mut from_grid = MemoryScrollback::new(4, cols);
