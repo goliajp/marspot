@@ -7346,7 +7346,7 @@ impl CoreApp {
                         );
                         self.pane_wheel_open.insert(sid, open);
                     }
-                    win!(self, wi).panes[idx].session_mut().forward_inject_input(&buf);
+                    win!(self, wi).panes[idx].session_mut().forward_program_keys(&buf);
                     win!(self, wi).needs_render = true;
                     return;
                 }

@@ -370,8 +370,10 @@ fn a_click_reaches_the_program_on_a_real_pty() {
     }
     assert!(on, "shell never got as far as turning mouse tracking on");
 
-    // Read what the program receives, with the escapes shown.
-    pane.session_mut().forward_inject_input(b"cat -v\r");
+    // Read what the program receives, with the escapes shown.  Out
+    // of canonical mode: a tty that is reading lines is not one a
+    // report is written to.
+    pane.session_mut().forward_inject_input(b"stty -icanon; cat -v\r");
     std::thread::sleep(std::time::Duration::from_millis(400));
     for _ in 0..20 {
         pane.pump();
@@ -392,4 +394,69 @@ fn a_click_reaches_the_program_on_a_real_pty() {
     }
     let screen = pane.screen_rows().into_iter().map(|r| r.text).collect::<Vec<_>>().join("\n");
     panic!("the press and release never reached the program; screen was:\n{screen}");
+}
+
+/// 2026-11-15, across the real layers: the program turns reporting off
+/// and keeps reading, the core's copy of the modes still says on, and
+/// the pointer moves.  Nothing reaches the program.
+///
+/// The core's copy is kept stale on purpose by not pumping the pane
+/// after the program turned the modes off; the session's own frame is
+/// read straight from its region to know that it has.
+#[test]
+fn a_report_sent_on_the_cores_stale_modes_never_reaches_the_program() {
+    use marspot_term::grid_shm::{FLAG_MOUSE_TRACKING, SessionRegions, peek};
+    let mut sb = Sandbox::new();
+    let dir = sb.dir().to_path_buf();
+    let shell = marspot_term::test_env::shell_without_rc_files(&dir, "/bin/zsh");
+    sb.set("SHELL", shell.to_str().unwrap());
+    std::fs::write(
+        dir.join("prog"),
+        "#!/bin/sh\nstty raw -echo\n\
+         printf '\\033[?1000h\\033[?1002h\\033[?1003h\\033[?1006hPROG-ON'\n\
+         while [ ! -f go ]; do sleep 0.05; done\n\
+         printf '\\033[?1006l\\033[?1003l\\033[?1002l\\033[?1000lPROG-OFF'\n\
+         dd bs=1 count=1 of=got 2>/dev/null\nsleep 5\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(dir.join("prog"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let (tx, _rx) = mpsc::channel();
+    let sid = reg::allocate_next_session_id().unwrap();
+    let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, dir.to_str().unwrap(), &tx)
+        .expect("real L3 spawn (is marspot-session built?)");
+
+    let wait = |what: &str, mut done: Box<dyn FnMut() -> bool + '_>| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    // typed once: a second copy would sit in the queue the program reads
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    pane.session_mut().forward_inject_input(b"./prog\r");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !pane.session().l3_mouse_motion_wanted(false) {
+        assert!(std::time::Instant::now() < deadline, "the core never saw ?1003");
+        pane.pump();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    std::fs::write(dir.join("go"), b"").unwrap();
+    let regions = SessionRegions::of_entry(&reg::read_session_entry(sid).unwrap()).unwrap();
+    wait(
+        "the session never published reporting off",
+        Box::new(|| peek(&regions).is_ok_and(|(_, f)| f & FLAG_MOUSE_TRACKING == 0)),
+    );
+    assert!(pane.session().l3_mouse_motion_wanted(false), "the core's copy is stale");
+
+    let (cols, rows) = (pane.session().grid().cols(), pane.session().grid().rows());
+    pane.session_mut().l3_inject_mouse_motion(3, 3, 1);
+    pane.session_mut().l3_inject_mouse_motion(3, 4, 1);
+    pane.session_mut().l3_inject_mouse_button(0, true, 4, 1);
+    pane.session_mut().l3_inject_wheel(64, 2, cols, rows);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    pane.session_mut().forward_inject_input(b"Z");
+    let got = dir.join("got");
+    wait("the program never read", Box::new(|| std::fs::metadata(&got).is_ok_and(|m| m.len() >= 1)));
+    assert_eq!(std::fs::read(&got).unwrap(), b"Z", "the program read a report it had turned off");
 }
