@@ -13,7 +13,7 @@
 //! value up once per run of cells in one colour.
 
 use super::format::{RowHint, new_epoch};
-use crate::grid::{Cell, PackedCell, PackedStyle, StyleTable};
+use crate::grid::{Cell, PackedCell, PackedStyle, ROW_STYLES, StyleTable};
 
 /// How far a line's palette is searched before a value goes in again:
 /// a line that changes colour every cell costs a value a cell rather
@@ -99,18 +99,25 @@ impl MemoryScrollback {
     }
 
     /// [`Self::push_line`] for a row of the grid's own cells, numbered
-    /// against `styles`.  `known` is every number the row holds, when
-    /// the grid knows them: the row then goes in as one copy, with
-    /// those numbers' values beside it.
-    pub fn push_packed(&mut self, source: &[PackedCell], styles: &StyleTable, hint: RowHint, known: Option<&[u32]>) {
+    /// against `styles`.  `known` is every number the row holds, each
+    /// in the slot of its low four bits, when the grid knows them: the
+    /// row then goes in as one copy, with those numbers' values beside
+    /// it at the same slots.
+    pub fn push_packed(
+        &mut self,
+        source: &[PackedCell],
+        styles: &StyleTable,
+        hint: RowHint,
+        known: Option<&[u32; ROW_STYLES]>,
+    ) {
         if self.capacity == 0 {
             return;
         }
         let slot = self.next_slot();
         // sixteen values cost no more than the eight bytes a cell the
-        // palette may take, and the numbers must not share low bits
+        // palette may take
         let cols = self.cols;
-        let known = known.filter(|ids| !styles.is_positional() && cols >= AS_IT_WAS && apart(ids));
+        let known = known.filter(|_| !styles.is_positional() && cols >= ROW_STYLES);
         self.as_it_was[slot] = known.is_some();
         let (row, palette) = self.slot_mut(slot);
         let n = source.len().min(row.len());
@@ -119,14 +126,18 @@ impl MemoryScrollback {
             row[n..].fill(PackedCell::BLANK);
             // what a slot held for a line before is never read: the
             // cells carry no number but these; a plain line needs none
-            if ids.is_empty() {
+            if ids.iter().fold(0, |any, &id| any | id) == 0 {
                 palette.clear();
-            } else if palette.len() != AS_IT_WAS {
-                palette.clear();
-                palette.resize(AS_IT_WAS, PackedStyle::DEFAULT);
+                return;
             }
-            for &id in ids {
-                palette[id as usize % AS_IT_WAS] = styles.value_or_default(id);
+            if palette.len() != ROW_STYLES {
+                palette.clear();
+                palette.resize(ROW_STYLES, PackedStyle::DEFAULT);
+            }
+            for (value, &id) in palette.iter_mut().zip(ids) {
+                if id != 0 {
+                    *value = styles.value_or_default(id);
+                }
             }
             return;
         }
@@ -170,7 +181,7 @@ impl MemoryScrollback {
         let mut attrs = if id == 0 {
             Default::default()
         } else if self.as_it_was[slot] {
-            palette[id % AS_IT_WAS].unpack()
+            palette[id % ROW_STYLES].unpack()
         } else {
             palette[id - 1].unpack()
         };
@@ -219,21 +230,6 @@ impl MemoryScrollback {
         self.cells.capacity() * std::mem::size_of::<PackedCell>()
             + self.palettes.iter().map(|p| p.capacity() * 8).sum::<usize>()
     }
-}
-
-/// The values a line kept as it was carries, one for each value of a
-/// number's low four bits.
-const AS_IT_WAS: usize = 16;
-
-/// Whether no two of `ids` share their low four bits.
-fn apart(ids: &[u32]) -> bool {
-    let mut seen = 0u16;
-    ids.iter().all(|&id| {
-        let bit = 1u16 << (id as usize % AS_IT_WAS);
-        let fresh = seen & bit == 0;
-        seen |= bit;
-        fresh
-    })
 }
 
 /// `value`'s number in a line's palette, putting it in if the first
@@ -294,12 +290,12 @@ mod tests {
         assert_eq!(line, "z   ");
     }
 
-    /// A row whose numbers the grid knows is kept as it was only when no
-    /// two of them share their low four bits; one where two do is
-    /// renumbered, and both read back in their own colours.
+    /// A row whose numbers share their low four bits is not known, goes
+    /// through its palette, and reads back in its own colours; one whose
+    /// numbers do not is kept as it was; a plain one carries no values.
     #[test]
     fn numbers_sharing_low_bits_send_a_row_through_its_palette() {
-        use crate::grid::{CellAttrs, Color, Grid};
+        use crate::grid::{CellAttrs, Color, Grid, RowStyles};
         let mut g = Grid::new(80, 1);
         let colour = |k: u8| Cell { ch: 'x', attrs: CellAttrs { fg: Color::rgb(k, 1, 2), ..Default::default() } };
         // numbers 1 to 17, one a cell; the row's own two are 1 and 17
@@ -313,9 +309,14 @@ mod tests {
         row[0] = a;
         row[1] = b;
         let mut sb = MemoryScrollback::new(2, 80);
-        sb.push_packed(&row, g.styles(), RowHint::NONE, Some(&[1, 17]));
+        let (mut both, mut one) = (RowStyles::default(), RowStyles::default());
+        both.note(1);
+        both.note(17);
+        one.note(1);
+        assert!(both.known().is_none());
+        sb.push_packed(&row, g.styles(), RowHint::NONE, both.known());
         assert!(!sb.kept_as_it_was(0));
-        sb.push_packed(&row[..1], g.styles(), RowHint::NONE, Some(&[1]));
+        sb.push_packed(&row[..1], g.styles(), RowHint::NONE, one.known());
         assert!(sb.kept_as_it_was(1));
         let line = sb.line(0).unwrap();
         assert_eq!((line[0], line[1]), (colour(0), colour(16)));
@@ -323,7 +324,7 @@ mod tests {
         // a plain row kept as it was carries no values
         let mut plain = MemoryScrollback::new(4, 80);
         for _ in 0..4 {
-            plain.push_packed(&[PackedCell::BLANK; 80], g.styles(), RowHint::NONE, Some(&[]));
+            plain.push_packed(&[PackedCell::BLANK; 80], g.styles(), RowHint::NONE, RowStyles::default().known());
         }
         assert!(plain.kept_as_it_was(3));
         assert_eq!(plain.approx_bytes(), 4 * 80 * 8);

@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.490"  # a core reads frames of eight-byte cells, and tells each session it does
-core    = "0.12.545"  # a plain row the in-RAM history keeps as it was carries no values
-session = "0.11.374"  # a plain row the in-RAM history keeps as it was carries no values
+core    = "0.12.546"  # a row notes its attribute numbers in sixteen slots by their low bits
+session = "0.11.375"  # a row notes its attribute numbers in sixteen slots by their low bits

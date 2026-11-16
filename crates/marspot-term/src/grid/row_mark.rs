@@ -79,13 +79,18 @@ impl Grid {
         debug_assert!(col < self.cols && row < self.rows);
         let pr = self.phys_row(row);
         let idx = pr * self.cols as usize + col as usize;
-        self.put(idx, cell);
-        let notes = self.notes_styles();
-        let id = self.cells[idx].style_id();
-        let mark = &mut self.marks[pr];
-        if notes {
-            mark.styles.note(id);
+        // the default attributes are number 0 in either numbering, and
+        // need no note
+        if cell.attrs.is_plain() {
+            self.cells[idx] = StoredCell::from_cell(&cell, 0);
+        } else {
+            self.put(idx, cell);
+            let id = self.cells[idx].style_id();
+            if self.notes_styles() {
+                self.marks[pr].styles.note(id);
+            }
         }
+        let mark = &mut self.marks[pr];
         if col >= mark.end {
             mark.end = col + 1;
         }
@@ -150,7 +155,7 @@ impl Grid {
                     && row[plain..].iter().all(|c| c.run_key() == 0)
                     && (!self.notes_styles()
                         || mark.styles.known().is_none_or(|ids| {
-                            row.iter().all(|c| c.style_id() == 0 || ids.contains(&c.style_id()))
+                            row.iter().all(|c| c.style_id() == 0 || ids[c.style_id() as usize % ids.len()] == c.style_id())
                         }))
             })
     }
