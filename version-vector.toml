@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.488"  # the two ways the shell replaces its own image live in a module of their own
+shell   = "0.7.489"  # a command typed into a shell starts from an empty line
 core    = "0.12.529"  # pointer events go to a session that checks them as descriptions, not bytes
 session = "0.11.357"  # a pointer event reaches the pty only if the program asked for it and holds the tty

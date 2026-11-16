@@ -1720,8 +1720,7 @@ fn profile_cycle_op(
     Some(
         // Same guard as the reclaim's: a claude that replaced the one
         // taken down would get the resume line typed into its prompt.
-        op.step(pty_op::Step::stop_if_process(shell_pid, looks_like_claudecode))
-            .step(pty_op::Step::send(line).named("resume"))
+        op.shell_line_unless(line, "resume", pty_op::Step::stop_if_process(shell_pid, looks_like_claudecode))
             // Wait for the new claude to draw, exactly as the
             // reclamation does.  The hand-written version settled for a
             // flat 600 ms and unfroze onto whatever was there — fine for
@@ -4562,11 +4561,22 @@ mod tests {
             !session.is_awaiting_user(),
             "focusing a parked pane starts the restore"
         );
-        // Two ticks: one runs the "has it come back by itself?" check
-        // the focus unblocked, the next types.  The host's loop is what
-        // drives a script forward, one step per tick.
-        crate::plugins::PaneSession::on_tick(&mut session, &host_session);
-        crate::plugins::PaneSession::on_tick(&mut session, &host_session);
+        // The host's loop drives a script forward, one step per tick:
+        // the "has it come back by itself?" check, the interrupt that
+        // empties the shell's line, the wait for its fresh prompt, the
+        // line.  The prompt is seen in the pane's output, which a
+        // session logs and this test logs for it.
+        // under the state dir `TestHome` set
+        let mut log = marspot_term::bytelog::ByteLog::open(1).expect("a bytelog for the pane");
+        let mut shown = String::new();
+        poll_until("the resume line to be typed", || {
+            let out = drain_pty(master);
+            log.append(out.as_bytes()).unwrap();
+            log.flush();
+            shown.push_str(&out);
+            crate::plugins::PaneSession::on_tick(&mut session, &host_session);
+            String::from_utf8_lossy(&inject.sent.lock().unwrap()).contains("--resume")
+        });
         // A keystroke arriving mid-wake is swallowed rather than run
         // as a shell command.
         let handling = crate::plugins::PaneSession::on_user_key(
@@ -4590,6 +4600,8 @@ mod tests {
         // which differs between a dev build, the bundle and
         // `binaries/current`.
         let sent = String::from_utf8_lossy(&inject.sent.lock().unwrap()).into_owned();
+        // the interrupt that empties the shell's line comes first
+        let sent = sent.strip_prefix('\x03').unwrap_or_else(|| panic!("the line is emptied first: {sent:?}"));
         assert!(
             sent.starts_with(&format!(
                 "printf '\\033[H\\033[2J'; CLAUDE_CONFIG_DIR='{}' claude ",
@@ -4600,7 +4612,7 @@ mod tests {
         );
         assert!(sent.ends_with(&format!(" --resume {uuid}\r")), "{sent}");
         // It really reached the PTY: the shell echoes it back…
-        let mut echoed = String::new();
+        let mut echoed = shown;
         poll_until("the pane to echo the resume line", || {
             echoed.push_str(&drain_pty(master));
             echoed.contains("--resume")
@@ -4684,9 +4696,11 @@ mod tests {
             .iter()
             .position(|k| matches!(k, pty_op::StepKind::AwaitProcess { .. }))
             .expect("waits for claude to come back");
-        let quiet_at = kinds
+        // not the shell's fresh prompt, awaited before the line is typed
+        let quiet_at = op
+            .steps
             .iter()
-            .position(|k| matches!(k, pty_op::StepKind::AwaitQuiet { .. }))
+            .position(|s| matches!(s.kind, pty_op::StepKind::AwaitQuiet { .. }) && s.label != "fresh_prompt")
             .expect("waits for it to finish drawing");
         assert!(
             process_at < quiet_at,
@@ -5878,6 +5892,7 @@ mod tests {
             let bytes = op
                 .steps
                 .iter()
+                .filter(|s| s.label == "resume")
                 .find_map(|s| match &s.kind {
                     pty_op::StepKind::Send(b) => Some(b.clone()),
                     _ => None,

@@ -1,5 +1,58 @@
 //! Shell command lines typed into a pane on the user's behalf.
 
+use std::time::Duration;
+
+use super::pty_op::{PtyOp, Step};
+
+/// How long the shell's output must stop for before the line is typed
+/// after the interrupt: its new prompt has been drawn.
+const PROMPT_QUIET: Duration = Duration::from_millis(300);
+/// A shell that draws nothing this long after an interrupt is not one
+/// to type a command at.
+const PROMPT_WAIT: Duration = Duration::from_secs(5);
+
+impl PtyOp {
+    /// Type `line` into the pane's shell, on a line of its own.
+    ///
+    /// Whatever already sits on the shell's line runs with the command
+    /// when the return arrives.  On 2026-11-15 that was a run of mouse
+    /// reports typed in while claude exited, and zsh ran
+    /// `35;3;1M35;2;2M…; printf …` -- each `;` a command, and `3` and
+    /// `2` aliases for `cd -3` and `cd -2`.  So the line goes after an
+    /// interrupt:
+    ///
+    /// - the tty itself discards its unread input when it turns `^C`
+    ///   into SIGINT, whatever the shell or its keymap;
+    /// - the shell abandons its line and draws a new prompt;
+    /// - typing waits for that prompt, because input written before the
+    ///   shell has taken the signal can go with the line it abandons.
+    ///
+    /// Through the same input frame as every other typed byte, so an
+    /// older core or session between here and the pty does the same.
+    pub fn shell_line(self, line: Vec<u8>, label: &'static str) -> Self {
+        self.typed_after_interrupt(line, label, None)
+    }
+
+    /// [`shell_line`](Self::shell_line), stopping instead if `guard`
+    /// stops the run -- checked before the interrupt, which would reach
+    /// a program that is back, and again right before the line, since
+    /// one can come back while the prompt is awaited.
+    pub fn shell_line_unless(self, line: Vec<u8>, label: &'static str, guard: Step) -> Self {
+        self.step(guard.clone()).typed_after_interrupt(line, label, Some(guard))
+    }
+
+    fn typed_after_interrupt(self, line: Vec<u8>, label: &'static str, guard: Option<Step>) -> Self {
+        let op = self
+            .step(Step::send(b"\x03".to_vec()).named("clear_line"))
+            .step(Step::await_quiet(PROMPT_QUIET).timeout(PROMPT_WAIT).named("fresh_prompt"));
+        let op = match guard {
+            Some(g) => op.step(g),
+            None => op,
+        };
+        op.step(Step::send(line).named(label))
+    }
+}
+
 /// A shell command line built from parts that are checked, not hoped
 /// about.
 ///
@@ -181,3 +234,7 @@ pub fn shell_safe(s: &str) -> bool {
         && s.len() <= 512
         && !s.contains(['\'', '"', '\n', '\r', '\\', '$', '`', ';', '&', '|', '<', '>'])
 }
+
+#[cfg(test)]
+#[path = "pty_command_tests.rs"]
+mod tests;
