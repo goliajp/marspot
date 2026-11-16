@@ -27,5 +27,5 @@
 # `git diff` readability.
 
 shell   = "0.7.490"  # a core reads frames of eight-byte cells, and tells each session it does
-core    = "0.12.542"  # the in-RAM history keeps a row as it is when the grid knows its numbers
-session = "0.11.371"  # the in-RAM history keeps a row as it is when the grid knows its numbers
+core    = "0.12.543"  # a row's marks name no attribute numbers while the grid numbers by position
+session = "0.11.372"  # a row's marks name no attribute numbers while the grid numbers by position

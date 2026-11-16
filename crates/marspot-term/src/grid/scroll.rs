@@ -57,10 +57,11 @@ impl Grid {
             // handed the row without it; the ring wants full rows
             let filed = if self.scrollback.keeps_wrapped_flags() { end } else { cols };
             let hint = RowHint { plain_from: row_mark.plain_from, wide: row_mark.wide };
+            let known = if self.notes_styles() { row_mark.styles.known() } else { None };
             // whatever was filed, nothing past the bound needs blanking
             let used = self
                 .scrollback
-                .push_row(&self.cells[start..start + filed], &self.styles, self.wrapped[pr], hint, row_mark.styles.known())
+                .push_row(&self.cells[start..start + filed], &self.styles, self.wrapped[pr], hint, known)
                 .min(end);
             let mark = std::mem::take(&mut self.prompt[pr]);
             // The mirrors exist for the in-RAM variant, where there is
@@ -185,13 +186,14 @@ impl Grid {
                         if blank { self.filed_blank_run.saturating_add(1) } else { 0 };
                     let row_clusters = self.degrade_clusters_in_row(start, cols);
                     let hint = RowHint { plain_from: self.marks[pr].plain_from, wide: self.marks[pr].wide };
-                    let known = self.marks[pr].styles;
+                    let known =
+                        if self.notes_styles() { self.marks[pr].styles.known() } else { None };
                     self.scrollback.push_row(
                         &self.cells[start..start + cols],
                         &self.styles,
                         self.wrapped[pr],
                         hint,
-                        known.known(),
+                        known,
                     );
                     let mark = std::mem::take(&mut self.prompt[pr]);
                     if !self.scrollback.keeps_wrapped_flags() {

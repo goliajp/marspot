@@ -80,9 +80,10 @@ impl Grid {
         let pr = self.phys_row(row);
         let idx = pr * self.cols as usize + col as usize;
         self.put(idx, cell);
+        let notes = self.notes_styles();
         let id = self.cells[idx].style_id();
         let mark = &mut self.marks[pr];
-        if self.notes_styles {
+        if notes {
             mark.styles.note(id);
         }
         if col >= mark.end {
@@ -109,10 +110,11 @@ impl Grid {
     }
 
     /// Whether writes note the numbers each row holds; see
-    /// `row_styles`.
+    /// `row_styles`.  Not while numbering by position: a row moved to
+    /// another place takes that place's numbers.
     #[inline(always)]
     pub fn notes_styles(&self) -> bool {
-        self.notes_styles
+        self.notes_styles && !self.styles.is_positional()
     }
 
     /// The cells were renumbered: what the rows' marks say about their
@@ -146,7 +148,7 @@ impl Grid {
                     && plain <= cols
                     && row[end..].iter().all(|c| *c == StoredCell::BLANK)
                     && row[plain..].iter().all(|c| c.run_key() == 0)
-                    && (!self.notes_styles
+                    && (!self.notes_styles()
                         || mark.styles.known().is_none_or(|ids| {
                             row.iter().all(|c| c.style_id() == 0 || ids.contains(&c.style_id()))
                         }))
