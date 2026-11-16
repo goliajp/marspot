@@ -24,19 +24,19 @@ impl L3Conn {
                 self.reader.attach_clusters(r);
             }
         }
-        let snap = self.reader.read_with_clusters(
-            &mut self.scratch,
-            &mut self.scratch_wrapped,
-            &mut self.cluster_table,
-        )?;
+        let snap = self.reader.read_into(&mut self.frame, &mut self.scratch_wrapped, &mut self.cluster_table)?;
         // Reshape the mirror if L3's geometry changed under us.
         if self.grid.cols() != snap.cols || self.grid.rows() != snap.rows {
             self.grid = Grid::new(snap.cols, snap.rows);
         }
-        for row in 0..snap.rows {
-            let base = row as usize * snap.cols as usize;
-            for col in 0..snap.cols {
-                self.grid.set_cell(col, row, self.scratch[base + col as usize]);
+        if self.frame.is_packed {
+            self.grid.load_frame(&self.frame.packed, &self.frame.styles, &mut self.remap);
+        } else {
+            for row in 0..snap.rows {
+                let base = row as usize * snap.cols as usize;
+                for col in 0..snap.cols {
+                    self.grid.set_cell(col, row, self.frame.wide[base + col as usize]);
+                }
             }
         }
         // Per-row DECAWM continuation flags — without this the L2-side

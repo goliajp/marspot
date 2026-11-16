@@ -1,5 +1,6 @@
 use super::super::{GridShmReader, GridShmWriter, SessionRegions};
 use super::*;
+use crate::grid::Cell;
 
 /// A session no other test or live pane uses.
 fn test_regions(n: u64) -> SessionRegions {

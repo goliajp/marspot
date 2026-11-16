@@ -54,6 +54,8 @@ pub struct FileScrollback {
     /// Reused scratch buffer for record serialisation; zero alloc
     /// after the first push sizes it.
     scratch: Vec<u8>,
+    /// Room for a row numbered by position, renumbered by value.
+    canon: Vec<crate::grid::PackedCell>,
     /// Files of the format before segments, oldest first, read-only.
     legacy: Vec<legacy::Legacy>,
     /// Segments in use, oldest first; the last is the hot one.

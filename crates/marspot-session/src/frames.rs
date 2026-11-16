@@ -72,7 +72,9 @@ impl Frames {
 
     /// Publish through `shm` from now on; the writer it replaces
     /// comes back.
-    pub(crate) fn replace_shm(&mut self, shm: GridShmWriter) -> GridShmWriter {
+    pub(crate) fn replace_shm(&mut self, mut shm: GridShmWriter) -> GridShmWriter {
+        // the same reader, reading another region
+        shm.set_reader_frames(self.shm.reader_frames());
         std::mem::replace(&mut self.shm, shm)
     }
 
@@ -124,6 +126,14 @@ impl Frames {
             follow: self.flood_gate.follows(),
             key_waiting: crate::input::waiting(),
         }
+    }
+
+    /// The reader went away: the frame in the region goes back to
+    /// twenty-byte cells at once, past any gate, so that whichever
+    /// reader comes next attaches to it.
+    pub(crate) fn reader_gone(&mut self, session: &SessionImpl) {
+        self.shm.set_reader_frames(0);
+        publish(&mut self.shm, session, self.view_offset);
     }
 
     /// Publish the grid and, if connected to L2, poke it.

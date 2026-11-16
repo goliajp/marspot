@@ -14,7 +14,8 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::Receiver;
 
-use super::{L3Conn, PaneBackend, new_control_writer};
+use super::conn_new::{new_control_writer, say_frames_read};
+use super::{L3Conn, PaneBackend};
 use crate::grid::Grid;
 use crate::grid_shm::{ClusterTableReader, GridShmReader, SessionRegions};
 use crate::shell_proto::{Frame, MsgType};
@@ -149,6 +150,9 @@ impl L3Conn {
         let Some(serial) = payload.first_chunk::<8>().map(|b| u64::from_le_bytes(*b)) else {
             return;
         };
+        // a new image of the session says this first, and knows nothing
+        // of what this core reads until it is told again
+        say_frames_read(&self.control);
         let shown = self.reader.identity() == Some(self.regions.owner())
             && self.reader.serial() == Some(serial);
         if shown {

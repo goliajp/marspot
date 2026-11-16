@@ -153,13 +153,22 @@ impl Scrollback {
 
     /// [`Self::push_line_with_wrapped`], with what the grid knows of
     /// the row so that the file need not find it out cell by cell.
-    pub fn push_row(&mut self, line: &[Cell], wrapped: bool, hint: RowHint) -> usize {
+    ///
+    /// The row is the grid's own cells, read through its table.
+    pub fn push_row(
+        &mut self,
+        line: &[crate::grid::PackedCell],
+        styles: &crate::grid::StyleTable,
+        wrapped: bool,
+        hint: RowHint,
+        known: Option<&[u32; crate::grid::ROW_STYLES]>,
+    ) -> usize {
         match self {
             Self::Memory(m) => {
-                m.push_line(line);
+                m.push_packed(line, styles, hint, known);
                 line.len()
             }
-            Self::File(f) => f.push_row(line, wrapped, hint),
+            Self::File(f) => f.push_packed_row(line, styles, wrapped, hint),
         }
     }
 
@@ -403,6 +412,7 @@ pub use file::FileScrollback;
 
 mod clusters;
 mod format;
+mod format_packed;
 pub use format::RowHint;
 mod sidecar;
 

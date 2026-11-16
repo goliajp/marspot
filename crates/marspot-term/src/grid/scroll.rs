@@ -1,7 +1,7 @@
 //! Scrolling: the whole screen, which is what files rows into history,
 //! and a region inside it.
 
-use super::{Cell, Grid, MAX_FILED_BLANK_RUN, MAX_RESERVED_HEADER_ROWS, PromptMark, RowMark};
+use super::{Cell, Grid, PackedCell, MAX_FILED_BLANK_RUN, MAX_RESERVED_HEADER_ROWS, PromptMark, RowMark};
 use crate::scrollback::RowHint;
 
 impl Grid {
@@ -51,16 +51,17 @@ impl Grid {
             let row_mark = self.marks[pr];
             let end = row_mark.end as usize;
             debug_assert!(
-                self.cells[start + end..start + cols].iter().all(|c| *c == Cell::default())
+                self.cells[start + end..start + cols].iter().all(|c| *c == PackedCell::BLANK)
             );
             // the file variant drops a row's blank tail, so it is
             // handed the row without it; the ring wants full rows
             let filed = if self.scrollback.keeps_wrapped_flags() { end } else { cols };
             let hint = RowHint { plain_from: row_mark.plain_from, wide: row_mark.wide };
+            let known = if self.notes_styles() { row_mark.styles.known() } else { None };
             // whatever was filed, nothing past the bound needs blanking
             let used = self
                 .scrollback
-                .push_row(&self.cells[start..start + filed], self.wrapped[pr], hint)
+                .push_row(&self.cells[start..start + filed], &self.styles, self.wrapped[pr], hint, known)
                 .min(end);
             let mark = std::mem::take(&mut self.prompt[pr]);
             // The mirrors exist for the in-RAM variant, where there is
@@ -86,21 +87,11 @@ impl Grid {
             self.wrapped[pr] = false;
             if fill.is_default() {
                 // the cells past what the line used are default
-                // already, and the rest is one copy of a blank row
-                if row_mark.plain_from == 0 {
-                    // nothing in the row but characters ever differed
-                    // from a default cell
-                    for c in &mut self.cells[start..start + used] {
-                        c.ch = ' ';
-                    }
-                } else {
-                    self.cells[start..start + used].copy_from_slice(&self.blank[..used]);
-                }
+                // already, and a blank cell is one repeated word
+                self.cells[start..start + used].fill(PackedCell::BLANK);
                 self.marks[pr] = RowMark::default();
             } else {
-                for c in &mut self.cells[start..start + cols] {
-                    *c = fill;
-                }
+                self.fill(start..start + cols, fill);
                 self.marks[pr] = RowMark::unknown(self.cols);
             }
             self.top_row += 1;
@@ -185,7 +176,7 @@ impl Grid {
                 let start = pr * cols;
                 let blank = self.cells[start..start + cols]
                     .iter()
-                    .all(|c| c.ch == ' ' || c.ch == '\0');
+                    .all(|c| c.ch() == ' ' || c.ch() == '\0');
                 // A TUI scrolling an empty content area files nothing
                 // after the run gets long enough to be chrome rather
                 // than spacing — see `MAX_FILED_BLANK_RUN`.  The row
@@ -195,8 +186,15 @@ impl Grid {
                         if blank { self.filed_blank_run.saturating_add(1) } else { 0 };
                     let row_clusters = self.degrade_clusters_in_row(start, cols);
                     let hint = RowHint { plain_from: self.marks[pr].plain_from, wide: self.marks[pr].wide };
-                    self.scrollback
-                        .push_row(&self.cells[start..start + cols], self.wrapped[pr], hint);
+                    let known =
+                        if self.notes_styles() { self.marks[pr].styles.known() } else { None };
+                    self.scrollback.push_row(
+                        &self.cells[start..start + cols],
+                        &self.styles,
+                        self.wrapped[pr],
+                        hint,
+                        known,
+                    );
                     let mark = std::mem::take(&mut self.prompt[pr]);
                     if !self.scrollback.keeps_wrapped_flags() {
                         self.sb_wrapped.push_back(self.wrapped[pr]);
@@ -219,8 +217,7 @@ impl Grid {
                 // Avoid `&mut` aliasing: copy via an intermediate Vec
                 // when src/dst overlap (they don't in this layout, but
                 // be defensive).
-                let row_data: Vec<Cell> = self.cells[src_start..src_start + cols].to_vec();
-                self.cells[dst_start..dst_start + cols].copy_from_slice(&row_data);
+                self.copy_cells(src_start, dst_start, cols);
                 self.marks[dst] = self.marks[src];
             }
             // Continuation flags travel with their rows.
@@ -255,9 +252,7 @@ impl Grid {
             // Blank the new bottom-of-region row.
             let bot_phys = self.phys_row(bot);
             self.wrapped[bot_phys] = false;
-            for c in &mut self.cells[bot_phys * cols..bot_phys * cols + cols] {
-                *c = fill;
-            }
+            self.fill(bot_phys * cols..bot_phys * cols + cols, fill);
             self.marks[bot_phys] = RowMark::filled(fill, self.cols);
         }
         // Mirror ring eviction, exactly as `scroll_up` does: the flags
@@ -293,15 +288,12 @@ impl Grid {
                 let dst = self.phys_row(r + 1);
                 let src_start = src * cols;
                 let dst_start = dst * cols;
-                let row_data: Vec<Cell> = self.cells[src_start..src_start + cols].to_vec();
-                self.cells[dst_start..dst_start + cols].copy_from_slice(&row_data);
+                self.copy_cells(src_start, dst_start, cols);
                 self.marks[dst] = self.marks[src];
             }
             // Blank the new top-of-region row.
             let top_phys = self.phys_row(top);
-            for c in &mut self.cells[top_phys * cols..top_phys * cols + cols] {
-                *c = fill;
-            }
+            self.fill(top_phys * cols..top_phys * cols + cols, fill);
             self.marks[top_phys] = RowMark::filled(fill, self.cols);
         }
     }

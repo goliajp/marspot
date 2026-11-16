@@ -12,725 +12,32 @@
 //! O(1).  Disk-backed scrollback (truly unlimited history) is a later
 //! phase; it will live behind the same `Grid` interface.
 
-/// One grid cell.
-///
-/// `repr(C)` with no padding anywhere, down to the colour bytes: a row
-/// of cells is written to `scrollback.bin` as its own memory, one copy
-/// per line instead of an encode per cell.  That copy is only sound if
-/// every byte of a `Cell` is initialised, which is what the explicit
-/// `CellAttrs::_pad` and `Color`'s zeroed unused bytes are for.  The
-/// layout is asserted below so a field change fails the build rather
-/// than silently changing what goes to disk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(C)]
-pub struct Cell {
-    pub ch: char,
-    pub attrs: CellAttrs,
-}
+mod cell;
+mod numbering;
+mod packed;
+mod packed_style;
+pub use packed::PackedCell;
+mod prompt;
+mod row_hash;
+pub use prompt::PromptMark;
+pub(crate) mod style;
+mod width;
+pub use cell::*;
+pub use style::{PackedStyle, StyleTable};
 
-/// Bytes per cell on disk and in memory — they are the same thing.
-pub const CELL_MEM_BYTES: usize = 20;
+/// A cell as the grid stores it.  Readers outside the grid's own hot
+/// paths take [`Cell`] through [`Grid::cell`] and its siblings, so the
+/// storage can change without them.
+pub type StoredCell = PackedCell;
+pub use width::{char_width, is_ambiguous_width, is_enclosed_alphanumeric};
 
-/// `_pad[0]` bit: this cell's `ch` is an index into the grid's cluster
-/// pool, not a codepoint.
-///
-/// A grapheme cluster of more than one codepoint — `é` written as
-/// `e` + U+0301, a ZWJ family, a flag — used to lose everything after
-/// its base.  Measured over 180 MB of real pane output, 55 clusters in
-/// forty million are like this, so they go in a pool and the cell
-/// holds a pointer to it rather than every cell paying for the case.
-pub const FLAG_CLUSTER: u8 = 1 << 0;
-
-/// Where pool indices start inside `char`.
-///
-/// Not zero.  `'\0'` already means "the second cell of a wide glyph"
-/// here, and `' '` means blank, so an index that lands on one of them
-/// is read as that by any code checking `ch` without checking the
-/// flag — which is most of it, correctly, since before the pool there
-/// was nothing else `ch` could be.  Plane 15 is private use: 65 536
-/// slots, sixteen times the sweep threshold, and nothing in a real
-/// stream is ever compared against these values.
-pub const CLUSTER_INDEX_BASE: u32 = 0xF_0000;
-
-impl Cell {
-    /// Is this cell's `ch` a pool index rather than a character?
-    #[inline]
-    pub fn is_cluster(&self) -> bool {
-        self.attrs._pad[0] & FLAG_CLUSTER != 0
-    }
-
-    /// The pool index this cell points at, if it points at one.
-    #[inline]
-    pub fn cluster_index(&self) -> Option<u32> {
-        self.is_cluster()
-            .then(|| (self.ch as u32).checked_sub(CLUSTER_INDEX_BASE))
-            .flatten()
-    }
-}
-
-const _: () = {
-    assert!(std::mem::size_of::<Cell>() == CELL_MEM_BYTES);
-    assert!(std::mem::align_of::<Cell>() == 4);
-    assert!(std::mem::offset_of!(Cell, ch) == 0);
-    assert!(std::mem::offset_of!(Cell, attrs) == 4);
-    assert!(std::mem::size_of::<CellAttrs>() == 16);
-    assert!(std::mem::offset_of!(CellAttrs, fg) == 0);
-    assert!(std::mem::offset_of!(CellAttrs, bg) == 4);
-    assert!(std::mem::offset_of!(CellAttrs, bold) == 8);
-    assert!(std::mem::offset_of!(CellAttrs, italic) == 9);
-    assert!(std::mem::offset_of!(CellAttrs, underline) == 10);
-    assert!(std::mem::offset_of!(CellAttrs, reverse) == 11);
-    assert!(std::mem::offset_of!(CellAttrs, dim) == 12);
-    assert!(std::mem::offset_of!(CellAttrs, _pad) == 13);
-    assert!(std::mem::size_of::<Color>() == 4);
-    // The bytes are written native-endian; every build target is
-    // little-endian Apple Silicon.  A big-endian build must not read
-    // these files as if they matched.
-    assert!(cfg!(target_endian = "little"));
-};
-
-impl Cell {
-    /// A row of cells as the bytes they occupy.
-    ///
-    /// Every byte of a `Cell` is initialised: `char` and `bool` are
-    /// fully-valued, `Color` zeroes the bytes a variant does not use
-    /// (its constructors are the only way to make one), and
-    /// `CellAttrs` spells its trailing padding out as a field.
-    pub fn slice_as_bytes(cells: &[Cell]) -> &[u8] {
-        // SAFETY: `Cell` is `repr(C)`, 20 bytes, with no implicit
-        // padding (asserted above), and every field's bytes are
-        // initialised for any value that can be constructed — see the
-        // doc comment.  u8 has alignment 1 and the length is exact.
-        unsafe {
-            std::slice::from_raw_parts(cells.as_ptr() as *const u8, std::mem::size_of_val(cells))
-        }
-    }
-
-    /// Read one cell back from its bytes.
-    ///
-    /// The bytes come from a file, so they are not trusted: an invalid
-    /// `char` reads as a space, a bool byte is true for anything
-    /// non-zero, and an unknown colour reads as the default — the same
-    /// leniency the 13-byte decoder has always had.  Never a transmute.
-    pub fn from_mem_bytes(b: &[u8; CELL_MEM_BYTES]) -> Cell {
-        let ch = char::from_u32(u32::from_ne_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(' ');
-        Cell {
-            ch,
-            attrs: CellAttrs {
-                fg: Color::from_bytes([b[4], b[5], b[6], b[7]]),
-                bg: Color::from_bytes([b[8], b[9], b[10], b[11]]),
-                bold: b[12] != 0,
-                italic: b[13] != 0,
-                underline: b[14] != 0,
-                reverse: b[15] != 0,
-                dim: b[16] != 0,
-                _pad: [0; 3],
-            },
-        }
-    }
-}
-
-impl Default for Cell {
-    fn default() -> Self {
-        Cell {
-            ch: ' ',
-            attrs: CellAttrs::default(),
-        }
-    }
-}
-
-impl From<char> for Cell {
-    fn from(ch: char) -> Self {
-        Cell {
-            ch,
-            attrs: CellAttrs::default(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-#[repr(C)]
-pub struct CellAttrs {
-    pub fg: Color,
-    pub bg: Color,
-    pub bold: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub reverse: bool,
-    /// SGR 2 — half-intensity / faint. Renderer dims the resolved fg
-    /// (typical: multiply RGB by ~0.55). TUIs (claudecode tips column
-    /// divider, dimmed help text) use this for "secondary" content.
-    pub dim: bool,
-    /// Flags that are not SGR, then two bytes that are always zero.
-    ///
-    /// The zeroes are still load-bearing: they are why the struct has
-    /// no implicit padding and a `Cell` can go to disk as its own
-    /// bytes — see `Cell`.  The first byte was one of them until a
-    /// cluster needed somewhere to say it is a cluster; every value
-    /// ever written to disk has it zero, which is exactly what
-    /// `FLAG_CLUSTER` unset means.
-    ///
-    /// Public only because struct-update syntax (`..Default::default()`)
-    /// cannot fill a private field from another crate.
-    pub _pad: [u8; 3],
-}
-
-/// A cell colour: four bytes, tag then payload, unused bytes zero.
-///
-/// It was an enum (`Default` / `Indexed(u8)` / `Rgb(u8,u8,u8)`), and an
-/// enum's variants leave the bytes they do not use uninitialised — two
-/// of the three here.  That made a `Cell` impossible to hand to disk as
-/// bytes without reading uninitialised memory.  As a plain struct built
-/// only through the constructors below, the unused bytes are always
-/// zero, so equal colours are equal byte for byte and every byte is
-/// defined.  Matching goes through [`Color::kind`], which is still an
-/// exhaustive enum.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-#[repr(C)]
-pub struct Color {
-    tag: u8,
-    a: u8,
-    b: u8,
-    c: u8,
-}
-
-/// What a [`Color`] means, for matching.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ColorKind {
-    /// "Use the default foreground/background" — the renderer picks the
-    /// theme's default.  This is distinct from Indexed(0), which is the
-    /// palette's first color.
-    Default,
-    /// Indexed palette entry.  0–7 = standard, 8–15 = bright variants,
-    /// 16–255 = 256-color extended palette.
-    Indexed(u8),
-    /// Direct 24-bit color.
-    Rgb(u8, u8, u8),
-}
-
-impl Color {
-    const TAG_DEFAULT: u8 = 0;
-    const TAG_INDEXED: u8 = 1;
-    const TAG_RGB: u8 = 2;
-
-    pub const DEFAULT: Color = Color { tag: Self::TAG_DEFAULT, a: 0, b: 0, c: 0 };
-
-    pub const fn indexed(i: u8) -> Color {
-        Color { tag: Self::TAG_INDEXED, a: i, b: 0, c: 0 }
-    }
-
-    pub const fn rgb(r: u8, g: u8, b: u8) -> Color {
-        Color { tag: Self::TAG_RGB, a: r, b: g, c: b }
-    }
-
-    #[inline]
-    pub const fn kind(self) -> ColorKind {
-        match self.tag {
-            Self::TAG_INDEXED => ColorKind::Indexed(self.a),
-            Self::TAG_RGB => ColorKind::Rgb(self.a, self.b, self.c),
-            // Only the constructors make a `Color`, so this is
-            // `TAG_DEFAULT`; `from_bytes` maps anything else here too.
-            _ => ColorKind::Default,
-        }
-    }
-
-    /// From four stored bytes.  Canonicalises: an unknown tag is the
-    /// default colour, and bytes a variant does not use are dropped, so
-    /// the result always compares equal to the constructor's.
-    pub const fn from_bytes(b: [u8; 4]) -> Color {
-        match b[0] {
-            Self::TAG_INDEXED => Color::indexed(b[1]),
-            Self::TAG_RGB => Color::rgb(b[1], b[2], b[3]),
-            _ => Color::DEFAULT,
-        }
-    }
-}
-
-impl From<ColorKind> for Color {
-    fn from(k: ColorKind) -> Color {
-        match k {
-            ColorKind::Default => Color::DEFAULT,
-            ColorKind::Indexed(i) => Color::indexed(i),
-            ColorKind::Rgb(r, g, b) => Color::rgb(r, g, b),
-        }
-    }
-}
 
 /// Default scrollback capacity — 10 000 lines.  At 80 cols × ~12 bytes/cell
 /// this is ~9 MB per terminal pre-allocated.  Tunable via
 /// [`Grid::with_scrollback`].
 pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 
-/// East Asian Wide / Fullwidth / emoji cells occupy two grid columns.
-/// Anything else is one.
-///
-/// Two sources of "wide":
-/// 1. **East Asian Wide / Fullwidth** ranges — coarse range list of the
-///    common Unicode blocks (CJK ideographs, Hangul, fullwidth forms…)
-///    that have EastAsianWidth=W or F per UAX #11.
-/// 2. **Emoji_Presentation=Yes** — every codepoint whose default
-///    presentation is emoji, per UTS #51 emoji-data.txt.  This is the
-///    authoritative answer for "is this an emoji" and resolves the
-///    2026-06-15 user complaint: characters like ✅ (U+2705), ⭐
-///    (U+2B50), ❌ (U+274C) sit in `0x2000..0x2FFF` and are NOT in any
-///    East Asian Wide block, so the old logic gave them width 1 and the
-///    emoji font drew them at em-box width — clipping half the glyph.
-///    See [`crate::emoji_presentation`] for the generated lookup.
-///
-/// Not yet handled:
-/// - **VS15 (U+FE0E) / VS16 (U+FE0F)** — a text-default codepoint like
-///   ⚠ (U+26A0) followed by VS16 should become emoji (width 2).  This
-///   requires the parser to look ahead one codepoint and adjust width
-///   on-the-fly — separate from per-char width.
-/// - ZWJ sequences, regional indicators (flag pairs), modifier bases.
-///
-/// How much of the East-Asian Ambiguous table should be rendered at
-/// width 2.
-///
-/// Off by default, and that default is load-bearing: every other
-/// wcwidth in the stack (zsh, less, claudecode's Node `string-width`,
-/// Python's `wcwidth`) treats Ambiguous as **narrow**, so widening
-/// here makes marspot disagree with the program drawing the screen —
-/// a cumulative CUP offset, and the picture falls out of sync after a
-/// handful of edits.
-///
-/// The cost of the default is that a glyph designed for two cells is
-/// squeezed into one.  Measured 2026-08-08: PingFang's `①` has a
-/// 11.71 px ink box against a 7.20 px cell, so `rasterise_glyph`
-/// scale-to-fits it to 61 % — and because circled digits are square,
-/// the *width* is always the binding constraint.  No font fixes this:
-/// the narrowest `①` on this machine (STIXGeneral, 8.21 px) still
-/// lands at the same ~7.2 px on screen.  **Matching CJK size requires
-/// two cells; there is no other lever.**
-///
-/// Letting the glyph overflow into a blank neighbour
-/// (`may_overflow_cell` in the renderer) fixes the *isolated* case
-/// without any disagreement at all, and that is what the rest of the
-/// Ambiguous table gets.  But it cannot fix a **run**: in `①②③` every
-/// neighbour is itself a glyph, so there is nothing to borrow and the
-/// three come out at different sizes depending on what follows them.
-/// Uniform full size for N square glyphs in N one-cell slots is not
-/// available — they would overlap by 4.5 px each.  Two cells is the
-/// only way, and it is a disagreement by construction.
-///
-/// Widening the circled family was tried as the default on
-/// 2026-08-08 and **reverted the same hour**.  The prediction was that
-/// drift would be confined to lines *containing* `①` — annoying but
-/// bounded.  On a real screen it was not bounded: the disagreement
-/// moves the **wrap point**, so a paragraph that merely scrolled past
-/// a circled digit came back with stray characters stranded in the
-/// left margin and the input box drawn over itself.  A terminal that
-/// loses its wrapping is not trading a little alignment for a nicer
-/// glyph; it is broken.
-///
-/// `Bun.stringWidth('①')` is 1 — claudecode is a Bun binary and that
-/// is the function it uses — and agreeing with the program drawing
-/// the screen is worth more than any glyph size.  The isolated case
-/// is served instead by letting the glyph overflow a blank neighbour
-/// (`may_overflow_cell`), which costs no disagreement at all; a *run*
-/// of them stays small, and that is the price of a correct screen.
-///
-/// The circled half is a **setting** (`appearance.circled_wide`,
-/// off) rather than a constant, because which of the two hurts more —
-/// a run of unreadably small glyphs, or a wrap point that disagrees
-/// with the program drawing the screen — is genuinely the user's call.
-/// The panel writes its cost next to it.  The env var still overrides,
-/// and still adds the `1` level that no panel offers.
-///
-///   MARSPOT_AMBIGUOUS_WIDE=0        everything narrow
-///   MARSPOT_AMBIGUOUS_WIDE=circled  only ①②③ ❶❷❸ ⓪ … wide
-///   MARSPOT_AMBIGUOUS_WIDE=1        the whole Ambiguous table wide
-///
-/// One-shot OnceLock load: per-process env var read at first call,
-/// then a single relaxed branch on the hot path.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AmbiguousWide {
-    Off,
-    Circled,
-    All,
-}
-
-fn ambiguous_wide_mode() -> AmbiguousWide {
-    // The env override is read once — it names this process, this run,
-    // and cannot change under it.  The setting is read live, because
-    // the panel is allowed to change it while the terminal is open.
-    use std::sync::OnceLock;
-    static ENV: OnceLock<Option<AmbiguousWide>> = OnceLock::new();
-    let env = *ENV.get_or_init(|| match std::env::var("MARSPOT_AMBIGUOUS_WIDE") {
-        Ok(v) if v == "0" => Some(AmbiguousWide::Off),
-        Ok(v) if v.eq_ignore_ascii_case("circled") => Some(AmbiguousWide::Circled),
-        Ok(v) if !v.is_empty() => Some(AmbiguousWide::All),
-        _ => None,
-    });
-    if let Some(mode) = env {
-        return mode;
-    }
-    // The per-byte mirror, not `get()` — this runs once per parsed
-    // character and a lock here is a measurable parse regression.
-    if crate::settings::circled_wide() {
-        AmbiguousWide::Circled
-    } else {
-        AmbiguousWide::Off
-    }
-}
-
-/// The circled / enclosed alphanumerics, as one range test.
-///
-/// Deliberately wider than the Ambiguous table's own slice of them
-/// (`0x2460..=0x24E9`): `⓪` (U+24EA) and the parenthesised and
-/// double-circled tail through U+24FF are the same family and the same
-/// complaint, and the dingbat set `❶..➓` is drawn to the same metrics.
-pub fn is_enclosed_alphanumeric(cp: u32) -> bool {
-    matches!(cp, 0x2460..=0x24FF | 0x2776..=0x2793)
-}
-
-/// East Asian Ambiguous (EAW=A per UAX #11) — narrow in Western
-/// contexts, drawn wide by CJK fonts.
-///
-/// Public because it names exactly the population that gets *squeezed*:
-/// we render these at one cell (see [`ambiguous_wide_mode`]) while the
-/// font that owns the glyph designed it on a two-cell em square.  The
-/// renderer uses this set to decide which glyphs may overflow their
-/// cell rather than be scaled down to fit it.
-pub fn is_ambiguous_width(ch: char) -> bool {
-    let cp = ch as u32;
-    matches!(
-        cp,
-        0x00A1 | 0x00A4 | 0x00A7..=0x00A8 | 0x00AA | 0x00AD..=0x00AE
-        | 0x00B0..=0x00B4 | 0x00B6..=0x00BA | 0x00BC..=0x00BF
-        | 0x00C6 | 0x00D0 | 0x00D7..=0x00D8 | 0x00DE..=0x00E1 | 0x00E6
-        | 0x00E8..=0x00EA | 0x00EC..=0x00ED | 0x00F0 | 0x00F2..=0x00F3
-        | 0x00F7..=0x00FA | 0x00FC | 0x00FE | 0x0101 | 0x0111 | 0x0113
-        | 0x011B | 0x0126..=0x0127 | 0x012B | 0x0131..=0x0133
-        | 0x0138 | 0x013F..=0x0142 | 0x0144 | 0x0148..=0x014B
-        | 0x014D | 0x0152..=0x0153 | 0x0166..=0x0167 | 0x016B | 0x01CE
-        | 0x01D0 | 0x01D2 | 0x01D4 | 0x01D6 | 0x01D8 | 0x01DA | 0x01DC
-        | 0x0251 | 0x0261 | 0x02C4 | 0x02C7 | 0x02C9..=0x02CB | 0x02CD
-        | 0x02D0 | 0x02D8..=0x02DB | 0x02DD | 0x02DF
-        | 0x2010 | 0x2013..=0x2016 | 0x2018..=0x2019 | 0x201C..=0x201D
-        | 0x2020..=0x2022 | 0x2024..=0x2027 | 0x2030 | 0x2032..=0x2033
-        | 0x2035 | 0x203B | 0x203E | 0x2074 | 0x207F | 0x2081..=0x2084
-        | 0x20AC | 0x2103 | 0x2105 | 0x2109 | 0x2113 | 0x2116
-        | 0x2121..=0x2122 | 0x2126 | 0x212B | 0x2153..=0x2154
-        | 0x215B..=0x215E | 0x2160..=0x216B | 0x2170..=0x2179
-        | 0x2189
-        | 0x2190..=0x2199 | 0x21B8..=0x21B9 | 0x21D2 | 0x21D4 | 0x21E7
-        | 0x2200 | 0x2202..=0x2203 | 0x2207..=0x2208 | 0x220B
-        | 0x220F | 0x2211 | 0x2215 | 0x221A | 0x221D..=0x2220 | 0x2223
-        | 0x2225 | 0x2227..=0x222C | 0x222E | 0x2234..=0x2237
-        | 0x223C..=0x223D | 0x2248 | 0x224C | 0x2252 | 0x2260..=0x2261
-        | 0x2264..=0x2267 | 0x226A..=0x226B | 0x226E..=0x226F
-        | 0x2282..=0x2283 | 0x2286..=0x2287 | 0x2295 | 0x2299
-        | 0x22A5 | 0x22BF | 0x2312
-        | 0x2460..=0x24E9      // ← circled digits / letters (user report)
-        | 0x24EB..=0x24FF      // Enclosed Alphanumeric Supplement (tail)
-        // NB: 0x2500..0x259F (Box Drawing + Block Elements) intentionally
-        // OMITTED from the Ambiguous→Wide list.  UAX #11 categorises them
-        // as Ambiguous, but every terminal in the world (including iTerm2
-        // with "Ambiguous Characters are Double-Width" on) keeps them at
-        // width 1 — otherwise the horizontal char ─ (U+2500) can't tile
-        // edge-to-edge with the next ─ and tables / boxes / tmux dividers
-        // split apart.  marspot already self-rasterises this range
-        // (`box_drawing_arms`, `block_element_rects`) at exactly 1 cell;
-        // making it wide here would double-spend the slot and break the
-        // tiling.  User report 2026-06-15: "横线没连起来了".
-        | 0x25A0..=0x25A1 | 0x25A3..=0x25A9 | 0x25B2..=0x25B3
-        | 0x25B6..=0x25B7 | 0x25BC..=0x25BD | 0x25C0..=0x25C1
-        | 0x25C6..=0x25C8 | 0x25CB | 0x25CE..=0x25D1 | 0x25E2..=0x25E5
-        | 0x25EF | 0x2605..=0x2606 | 0x2609 | 0x260E..=0x260F
-        | 0x2614..=0x2615 | 0x261C | 0x261E | 0x2640 | 0x2642
-        | 0x2660..=0x2661 | 0x2663..=0x2665 | 0x2667..=0x266A
-        | 0x266C..=0x266D | 0x266F | 0x269E..=0x269F | 0x26BE..=0x26BF
-        | 0x26C4..=0x26CD | 0x26CF..=0x26E1 | 0x26E3 | 0x26E8..=0x26FF
-        | 0x273D | 0x2776..=0x277F | 0x2B56..=0x2B59
-        | 0x3248..=0x324F      // Enclosed CJK Letters and Months
-        | 0xE000..=0xF8FF      // Private Use Area
-        | 0xFFFD               // Replacement character
-        | 0x1F100..=0x1F10A    // Enclosed Alphanumeric Supplement
-        | 0x1F110..=0x1F12D
-        | 0x1F130..=0x1F169
-        | 0x1F170..=0x1F18D
-        | 0x1F18F..=0x1F190
-        | 0x1F19B..=0x1F1AC
-    )
-}
-
-pub fn char_width(ch: char) -> u8 {
-    let cp = ch as u32;
-    if cp == 0 {
-        // The trail half of a wide pair uses NUL as a sentinel; it has
-        // no inherent width of its own.
-        return 0;
-    }
-    let east_asian_wide = matches!(
-        cp,
-        0x1100..=0x115F        // Hangul Jamo
-        | 0x2E80..=0x303E      // CJK Radicals … CJK Symbols & Punctuation
-        | 0x3041..=0x33FF      // Hiragana, Katakana, …, CJK Compatibility
-        | 0x3400..=0x4DBF      // CJK Unified Ideographs Extension A
-        | 0x4E00..=0x9FFF      // CJK Unified Ideographs
-        | 0xA000..=0xA4CF      // Yi Syllables
-        | 0xAC00..=0xD7A3      // Hangul Syllables
-        | 0xF900..=0xFAFF      // CJK Compatibility Ideographs
-        | 0xFE30..=0xFE4F      // CJK Compatibility Forms
-        | 0xFF00..=0xFF60      // Halfwidth & Fullwidth Forms (fullwidth half)
-        | 0xFFE0..=0xFFE6      // Fullwidth Sign Forms
-        | 0x20000..=0x2FFFD    // CJK Extension B–F
-        | 0x30000..=0x3FFFD    // CJK Extension G–H
-    );
-    // East Asian Ambiguous (EAW=A per UAX #11): chars that are narrow
-    // in Western contexts but rendered wide in CJK fonts.  iTerm2
-    // exposes this as "Ambiguous Characters are Double-Width" (default
-    // ON when locale is CJK).  marspot is CJK-locale-first, so the
-    // default here is wide.
-    //
-    // The 2026-06-15 user report: circled digits like ① ② ③ (Enclosed
-    // Alphanumerics, U+2460-U+24FF) rendered "好小好小" because we
-    // squeezed a 2-cell-wide glyph into 1 cell — the rasteriser shrank
-    // it to fit.  Same fix lifts geometric shapes (▲ ●), misc symbols
-    // (☆ ★ ☀ ☁), and dingbats (✓ ✗) up to the right cell footprint.
-    // Computed INSIDE the `All` arm on purpose: `is_ambiguous_width` is
-    // a several-hundred-arm range match, and the other two modes never
-    // read it.  Hoisted out (as it was until 2026-08-18) every printable
-    // character paid for a table walk whose result the default mode
-    // throws away.
-    let ambiguous_wide = match ambiguous_wide_mode() {
-        AmbiguousWide::Off => false,
-        AmbiguousWide::Circled => is_enclosed_alphanumeric(cp),
-        AmbiguousWide::All => is_ambiguous_width(ch) || is_enclosed_alphanumeric(cp),
-    };
-    if east_asian_wide || ambiguous_wide || crate::emoji_presentation::has_emoji_presentation(cp) {
-        2
-    } else {
-        1
-    }
-}
-
-#[cfg(test)]
-mod char_width_tests {
-    use super::char_width;
-
-    #[test]
-    fn circled_digits_default_narrow() {
-        // U+2460..U+2473 = ① ② ③ … ⑳ (Enclosed Alphanumerics).
-        // EAW=A per UAX #11, which every other wcwidth calls narrow —
-        // measured, not assumed: `Bun.stringWidth('①')` is 1, and
-        // claudecode is a Bun binary.  Disagreeing was tried as the
-        // default and reverted within the hour: it moves the WRAP
-        // POINT, which strands characters in the left margin of any
-        // paragraph that scrolled past one.  See `ambiguous_wide_mode`.
-        assert_eq!(char_width('①'), 1);
-        assert_eq!(char_width('②'), 1);
-        assert_eq!(char_width('⑳'), 1);
-        assert_eq!(char_width('⓪'), 1);
-        assert_eq!(char_width('❶'), 1);
-    }
-
-    /// The `circled` middle setting acts on this set, so its extent is
-    /// the thing worth pinning — the mode itself is a one-shot
-    /// `OnceLock` and cannot be flipped inside a test process.
-    ///
-    /// Deliberately wider than the Ambiguous table's own slice
-    /// (`0x2460..=0x24E9`): `⓪` and the tail through U+24FF are the
-    /// same family and the same size complaint.
-    /// The width follows the setting, live.
-    ///
-    /// This is the one entry in the panel that changes the terminal's
-    /// *semantics* rather than its looks, so it is the one worth
-    /// pinning: the default must stay narrow (agreeing with every
-    /// other wcwidth), and turning it on must reach `char_width`
-    /// without a restart.
-    #[test]
-    fn the_circled_width_follows_the_setting() {
-        let mut env = crate::test_env::EnvGuard::new();
-        env.remove("MARSPOT_AMBIGUOUS_WIDE");
-
-        crate::settings::set_for_test(crate::settings::Settings::default());
-        assert_eq!(char_width('①'), 1, "default agrees with everyone else");
-
-        crate::settings::set_for_test(crate::settings::Settings {
-            appearance_circled_wide: true,
-            ..crate::settings::Settings::default()
-        });
-        assert_eq!(char_width('①'), 2, "the setting reaches char_width");
-        assert_eq!(char_width('⓪'), 2);
-        assert_eq!(char_width('❶'), 2);
-        // …and only that family.  The rest of the Ambiguous table
-        // stays in agreement, because only the circled one appears in
-        // runs where overflow cannot help.
-        assert_eq!(char_width('★'), 1);
-        assert_eq!(char_width('●'), 1);
-        assert_eq!(char_width('°'), 1);
-
-        crate::settings::set_for_test(crate::settings::Settings::default());
-        assert_eq!(char_width('①'), 1, "and back again, with nothing restarted");
-    }
-
-    #[test]
-    fn the_circled_set_covers_the_whole_family() {
-        use super::is_enclosed_alphanumeric as f;
-        for c in ['①', '⑳', 'Ⓐ', 'ⓐ', '⓪', '⓿', '❶', '➓'] {
-            assert!(
-                f(c as u32),
-                "{c} U+{:04X} must be in the circled set",
-                c as u32
-            );
-        }
-        // Neighbours that are NOT: the arrow below the block, the
-        // geometric shapes above it, and the box drawing that must
-        // stay in a mono font whatever happens.
-        for c in ['→', '★', '●', '─', '╭', '㉈'] {
-            assert!(!f(c as u32), "{c} U+{:04X} must stay out of it", c as u32);
-        }
-    }
-
-    #[test]
-    fn circled_letters_default_narrow() {
-        assert_eq!(char_width('Ⓐ'), 1); // U+24B6
-        assert_eq!(char_width('ⓐ'), 1); // U+24D0
-    }
-
-    #[test]
-    fn geometric_shapes_misc_default_narrow() {
-        // ★ ☆ ● ▲ ▼ — Ambiguous, and these stay narrow: they are in
-        // agreement with every other wcwidth, and the renderer's
-        // overflow-into-a-blank-neighbour path covers the isolated
-        // case without any disagreement at all.  Only the circled
-        // family, which shows up in runs, is worth the drift.
-        assert_eq!(char_width('★'), 1); // U+2605
-        assert_eq!(char_width('☆'), 1); // U+2606
-        assert_eq!(char_width('●'), 1); // U+25CF
-        assert_eq!(char_width('▲'), 1); // U+25B2
-        assert_eq!(char_width('▼'), 1); // U+25BC
-    }
-
-    #[test]
-    fn enclosed_cjk_letters_and_months_stay_wide() {
-        // U+3248..U+324F is inside the East Asian Wide range
-        // 0x3041..=0x33FF — the unconditional Wide check fires
-        // before the Ambiguous opt-in, so this stays width 2
-        // regardless of MARSPOT_AMBIGUOUS_WIDE.
-        assert_eq!(char_width('㉈'), 2);
-    }
-
-    #[test]
-    fn ascii_letters_stay_narrow() {
-        assert_eq!(char_width('a'), 1);
-        assert_eq!(char_width('A'), 1);
-        assert_eq!(char_width('1'), 1);
-        assert_eq!(char_width(' '), 1);
-    }
-
-    #[test]
-    fn cjk_ideographs_stay_wide() {
-        // Regression — the East Asian Wide path is unchanged.
-        assert_eq!(char_width('中'), 2);
-        assert_eq!(char_width('精'), 2);
-        assert_eq!(char_width('神'), 2);
-    }
-
-    #[test]
-    fn box_drawing_stays_narrow() {
-        // Regression for the 09:10 install hotfix.  ─ │ ┌ ┐ └ ┘ ├ ┤
-        // ┬ ┴ ┼ all MUST be width 1 even though UAX #11 marks them
-        // Ambiguous, otherwise tables / tmux dividers / claudecode's
-        // own box chrome split apart.
-        for ch in '\u{2500}'..='\u{257F}' {
-            assert_eq!(
-                char_width(ch),
-                1,
-                "box-drawing U+{:04X} must stay narrow",
-                ch as u32
-            );
-        }
-    }
-
-    #[test]
-    fn block_elements_stay_narrow() {
-        // Same reason — ▀ ▄ █ ▌ ▐ etc. tile edge-to-edge at width 1.
-        for ch in '\u{2580}'..='\u{259F}' {
-            assert_eq!(
-                char_width(ch),
-                1,
-                "block-element U+{:04X} must stay narrow",
-                ch as u32
-            );
-        }
-    }
-
-    #[test]
-    fn emoji_stays_wide() {
-        // Emoji presentation path still wins.
-        assert_eq!(char_width('⭐'), 2); // U+2B50
-        assert_eq!(char_width('✅'), 2); // U+2705
-    }
-}
-
 use crate::scrollback::Scrollback;
-
-/// Where a shell says one command's territory ends and the next
-/// begins, from `OSC 133`.
-///
-/// A shell that emits these turns a wall of output into a sequence of
-/// commands: where the prompt was, where what you typed began, where
-/// its output began, and what it exited with. Scrolling back to "the
-/// command before this one" needs nothing more than this, and without
-/// it there is nothing to scroll to -- a terminal cannot tell a prompt
-/// from any other line that happens to start with a glyph.
-///
-/// One byte a row, beside the wrap flag, and only for the rows a shell
-/// actually marked. It is not written to disk: the scrollback record
-/// has one byte for `wrapped` and a reader decides on `!= 0`, so a
-/// spare bit in it would read as a wrapped line to a binary that
-/// predates this -- the quiet kind of wrong. Persisting it waits for
-/// the sidecar in `20261001-line-identity.md`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum PromptMark {
-    #[default]
-    None,
-    /// `OSC 133 ; A` -- a prompt starts on this row.
-    PromptStart,
-    /// `OSC 133 ; B` -- the prompt ended; what follows is what the
-    /// person typed.
-    InputStart,
-    /// `OSC 133 ; C` -- the command was sent; what follows is its
-    /// output.
-    OutputStart,
-    /// `OSC 133 ; D ; <status>` -- the command finished. `None` when
-    /// the shell reported no status, which is different from zero.
-    CommandEnd(Option<u8>),
-}
-
-impl PromptMark {
-    /// Two bytes: what kind, then the exit status for the one kind
-    /// that carries one.  Fixed width so a file of these is addressed
-    /// by line index rather than scanned.
-    pub(crate) fn to_bytes(self) -> [u8; 2] {
-        match self {
-            Self::None => [0, 0],
-            Self::PromptStart => [1, 0],
-            Self::InputStart => [2, 0],
-            Self::OutputStart => [3, 0],
-            // "the shell did not say" and "the shell said zero" are
-            // different answers and get different encodings.
-            Self::CommandEnd(None) => [4, 0],
-            Self::CommandEnd(Some(s)) => [5, s],
-        }
-    }
-
-    /// An encoding this build does not know reads as no mark, which is
-    /// the same safe failure a missing sidecar gives.
-    pub(crate) fn from_bytes(b: [u8; 2]) -> Self {
-        match b[0] {
-            1 => Self::PromptStart,
-            2 => Self::InputStart,
-            3 => Self::OutputStart,
-            4 => Self::CommandEnd(None),
-            5 => Self::CommandEnd(Some(b[1])),
-            _ => Self::None,
-        }
-    }
-}
 
 pub struct Grid {
     cols: u16,
@@ -744,7 +51,7 @@ pub struct Grid {
     /// scrolls are by far the more frequent shape on real workloads
     /// (`cat large.log` triggers one scroll per line, hundreds of
     /// thousands of times for a 32 MB file).
-    cells: Vec<Cell>,
+    cells: Vec<StoredCell>,
     /// Grapheme clusters of more than one codepoint, pointed at by
     /// cells carrying `FLAG_CLUSTER`.
     ///
@@ -808,12 +115,17 @@ pub struct Grid {
     /// Consecutive all-blank rows most recently filed into scrollback.
     /// Read only by the region path — see [`MAX_FILED_BLANK_RUN`].
     filed_blank_run: u16,
-    /// One row of `Cell::default()`, copied over a row that scrolls
-    /// off when nothing but the default background has to be filled.
-    blank: Vec<Cell>,
     /// Per physical row: where its default cells and its default
     /// attributes start.
     marks: Vec<RowMark>,
+    /// The attribute sets the cells use, numbered.
+    styles: StyleTable,
+    /// While `styles` sweeps: the next physical row to look at.
+    sweep_row: u16,
+    /// Writes note which attribute numbers each row holds, in its
+    /// mark: only for history kept in RAM, which keeps a row as it is
+    /// when it knows them.
+    notes_styles: bool,
 }
 
 /// How many rows of chrome a TUI may reserve above its scrolling
@@ -844,7 +156,10 @@ const MAX_RESERVED_HEADER_ROWS: u16 = 1;
 const MAX_FILED_BLANK_RUN: u16 = 3;
 
 mod cluster_mirror;
+mod clusters;
 mod row_mark;
+mod row_styles;
+pub use row_styles::{ROW_STYLES, RowStyles};
 mod scroll;
 pub use cluster_mirror::{UNKNOWN_CLUSTER, cluster_in_row};
 pub use row_mark::RowMark;
@@ -868,12 +183,13 @@ impl Grid {
     /// check through the Grid API.
     pub fn with_scrollback_kind(cols: u16, rows: u16, scrollback: Scrollback) -> Self {
         assert!(cols > 0 && rows > 0, "grid dimensions must be positive");
-        let cells = vec![Cell::default(); cols as usize * rows as usize];
+        let cells = vec![StoredCell::default(); cols as usize * rows as usize];
         // Pre-size the flag mirror to the ring's capacity so the
         // per-scrolled-line push in `scroll_up` (per-byte-path hot
         // for `cat`) never reallocates.  1 byte per line — 10 KB at
         // the default 10 000-line scrollback.
         let sb_capacity = scrollback.capacity();
+        let notes_styles = !scrollback.is_persistent();
         Self {
             cols,
             rows,
@@ -890,8 +206,10 @@ impl Grid {
             sb_clusters: std::collections::VecDeque::with_capacity(sb_capacity + 1),
             sb_prompt: std::collections::VecDeque::with_capacity(sb_capacity + 1),
             filed_blank_run: 0,
-            blank: vec![Cell::default(); cols as usize],
             marks: vec![RowMark::default(); rows as usize],
+            styles: StyleTable::new(cols as usize * rows as usize),
+            sweep_row: 0,
+            notes_styles,
         }
     }
 
@@ -909,7 +227,7 @@ impl Grid {
     /// only — scalar fields are negligible).  Per-MARSPOT_PROFILE_RSS
     /// sampling.
     pub fn approx_bytes(&self) -> usize {
-        self.cells.capacity() * std::mem::size_of::<Cell>()
+        self.cells.capacity() * std::mem::size_of::<StoredCell>() + self.styles.bytes()
     }
 
     /// Approximate resident bytes held by this grid's scrollback.
@@ -934,249 +252,16 @@ impl Grid {
     pub fn cell(&self, col: u16, row: u16) -> Cell {
         debug_assert!(col < self.cols && row < self.rows);
         let pr = self.phys_row(row);
-        self.cells[pr * self.cols as usize + col as usize]
+        let idx = pr * self.cols as usize + col as usize;
+        self.expand(self.cells[idx])
     }
 
-    /// Put a multi-codepoint cluster in the pool and hand back the
-    /// cell that points at it.
-    ///
-    /// The caller writes that cell wherever the cluster goes.  Callers
-    /// with a single codepoint do not come here — they keep writing
-    /// `ch` directly, and their cells are byte-for-byte what they
-    /// always were.
-    pub fn cluster_cell(&mut self, cluster: &str, attrs: CellAttrs) -> Cell {
-        self.cluster_cell_reusing(None, cluster, attrs)
+    /// A stored cell as a reader sees it.
+    #[inline(always)]
+    pub fn expand(&self, cell: StoredCell) -> Cell {
+        cell.expand(&self.styles)
     }
 
-    /// The same, but told which entry the cell it is replacing used.
-    ///
-    /// A cluster is written again on every codepoint that joins it —
-    /// `e`, then `é`, then `é` with a second mark — and each write
-    /// used to push a new entry, so a seven-codepoint cluster
-    /// allocated six times and left five for the sweep.  Measured on a
-    /// stream that is 36% clusters: 47.9 MB/s before the pool existed,
-    /// 41.8 with a push per join.
-    ///
-    /// When the previous entry is the newest one, nobody else can be
-    /// pointing at it, so it is rewritten in place and the `String`
-    /// keeps its capacity.
-    pub fn cluster_cell_reusing(
-        &mut self,
-        prev: Option<u32>,
-        cluster: &str,
-        attrs: CellAttrs,
-    ) -> Cell {
-        debug_assert!(cluster.chars().count() > 1, "one codepoint needs no pool");
-        if let Some(i) = prev
-            && (i as usize) + 1 == self.clusters.len()
-        {
-            let slot = &mut self.clusters[i as usize];
-            slot.clear();
-            slot.push_str(cluster);
-            let mut attrs = attrs;
-            attrs._pad[0] |= FLAG_CLUSTER;
-            let ch = char::from_u32(i + CLUSTER_INDEX_BASE).expect("index was valid before");
-            return Cell { ch, attrs };
-        }
-        // An index has to be a valid `char` to live in `ch`.  The pool
-        // would have to hold a million clusters to reach the surrogate
-        // range, and the measurement says it holds tens; past that the
-        // cluster degrades to its base codepoint, which is exactly
-        // today's behaviour.
-        let idx = self.clusters.len();
-        let Some(as_char) = u32::try_from(idx)
-            .ok()
-            .and_then(|i| i.checked_add(CLUSTER_INDEX_BASE))
-            .and_then(char::from_u32)
-        else {
-            return Cell { ch: crate::grapheme::cluster_first_codepoint(cluster), attrs };
-        };
-        self.clusters.push(cluster.to_string());
-        let mut attrs = attrs;
-        attrs._pad[0] |= FLAG_CLUSTER;
-        Cell { ch: as_char, attrs }
-    }
-
-    /// What a cell says, as text.
-    ///
-    /// One codepoint for an ordinary cell; the whole cluster for one
-    /// that points into the pool.  Returns `None` for a cell whose
-    /// index is stale, which a sweep can produce and which reads as
-    /// the blank it will be overwritten with.
-    pub fn cluster_text(&self, cell: &Cell) -> Option<&str> {
-        let idx = cell.cluster_index()?;
-        self.clusters.get(idx as usize).map(|s| &**s)
-    }
-
-    /// The clusters on the row a viewport row is showing, appended to
-    /// `out`, which is cleared first.
-    ///
-    /// Asked once per row rather than once per cell, because that is
-    /// how the answer is stored: a scrollback line's clusters are one
-    /// record, and a file-backed pane fetches it with one read. A
-    /// per-cell question would be one read per cell per frame.
-    ///
-    /// Rows still on screen have nothing here -- their cells point into
-    /// the live pool and [`Self::cluster_text`] answers for them. So a
-    /// reader asks this per row, then asks the pool per cell, and
-    /// [`cluster_in_row`] for whatever the pool does not know.
-    ///
-    /// Same argument order as `cell_at_view`, and the same index
-    /// arithmetic, so the two cannot disagree about which row is meant.
-    pub fn row_clusters_at_view(
-        &self,
-        view_offset: u16,
-        viewport_row: u16,
-        out: &mut Vec<(u16, String)>,
-    ) -> bool {
-        out.clear();
-        let rows = self.rows() as usize;
-        let abs = view_offset as usize + (rows - 1 - viewport_row as usize);
-        if abs < rows {
-            return false;
-        }
-        let from_end = abs - rows;
-        let sb_len = self.scrollback_len();
-        if from_end >= sb_len {
-            return false;
-        }
-        let line = sb_len - 1 - from_end;
-        if self.scrollback.keeps_cluster_text() {
-            return self.scrollback.clusters_at(line, out);
-        }
-        let Some(row) = self.sb_clusters.get(line) else {
-            return false;
-        };
-        out.extend(row.iter().cloned());
-        !out.is_empty()
-    }
-
-    /// Drop pool entries no cell points at.
-    ///
-    /// Sweeping, not reference counting — see the field's own comment
-    /// for the measurement that decided it.  Indices move, so every
-    /// cell that survives is repointed here; a cell pointing past the
-    /// end afterwards is one this sweep could not see, and it reads as
-    /// blank rather than as somebody else's cluster.
-    pub fn sweep_clusters(&mut self) {
-        if self.clusters.is_empty() {
-            return;
-        }
-        let mut keep = vec![false; self.clusters.len()];
-        for c in &self.cells {
-            if let Some(i) = c.cluster_index()
-                && (i as usize) < keep.len()
-            {
-                keep[i as usize] = true;
-            }
-        }
-        let mut remap = vec![u32::MAX; self.clusters.len()];
-        let mut next = 0u32;
-        let mut kept: Vec<String> = Vec::new();
-        for (i, k) in keep.iter().enumerate() {
-            if *k {
-                remap[i] = next;
-                next += 1;
-                kept.push(std::mem::take(&mut self.clusters[i]));
-            }
-        }
-        // No early return when nothing was dropped: a cell can point
-        // past the end of the pool — a torn read, a format that moved
-        // — and it still has to be cleared.  Skipping the pass because
-        // the pool did not shrink left exactly that cell holding a
-        // flag with nothing behind it.
-        for c in &mut self.cells {
-            if let Some(i) = c.cluster_index() {
-                match remap.get(i as usize).copied() {
-                    Some(n) if n != u32::MAX => {
-                        c.ch = char::from_u32(n + CLUSTER_INDEX_BASE).unwrap_or(' ');
-                    }
-                    _ => {
-                        c.attrs._pad[0] &= !FLAG_CLUSTER;
-                        c.ch = ' ';
-                    }
-                }
-            }
-        }
-        self.clusters = kept;
-    }
-
-    /// How many clusters the pool is holding.  For the tests and for
-    /// anything that wants to know the grid is not growing.
-    pub fn cluster_pool_len(&self) -> usize {
-        self.clusters.len()
-    }
-
-    /// Turn any cluster cell in a row back into its base codepoint.
-    ///
-    /// Called just before a row is handed to scrollback, because a
-    /// scrollback row is stored as plain `Cell`s with nowhere to keep
-    /// a pool — an index in one would point into a pool that sweeps
-    /// without it, i.e. at whatever cluster later took that slot.
-    /// History therefore looks the way it did before the pool existed;
-    /// giving scrollback its own storage is a separate step.
-    ///
-    /// Free for a pane that never printed one: the pool is empty and
-    /// this is a single test.  Safe to mutate in place because the row
-    /// is on its way off the screen and will be overwritten by the
-    /// fill behind it.
-    /// Keep the cluster text of the line just pushed into scrollback.
-    ///
-    /// Where it goes depends on which scrollback this is, and the
-    /// difference is not a preference. The in-RAM variant has nowhere
-    /// but the grid, and the ring bounds the mirror. The file-backed
-    /// one has a sidecar, and must use it: its history outlives the
-    /// process, so a mirror could not answer for the lines written
-    /// before this one started -- and bounded by `scrollback.len()`,
-    /// which is the whole history, it would never be trimmed. Measured
-    /// before this existed: 2000 entries for 2000 lines, growing for as
-    /// long as the session runs.
-    ///
-    /// Must be called after the line itself is pushed: the sidecar
-    /// addresses it by its index in the file.
-    fn keep_row_clusters(&mut self, row_clusters: Vec<(u16, String)>) {
-        if !self.scrollback.keeps_cluster_text() {
-            self.sb_clusters.push_back(row_clusters);
-            return;
-        }
-        // Only lines that have some touch the sidecar; the test is one
-        // `is_empty` on the scroll path.
-        if !row_clusters.is_empty() {
-            self.scrollback.cluster_last_line(&row_clusters);
-        }
-    }
-
-    fn degrade_clusters_in_row(&mut self, start: usize, cols: usize) -> Vec<(u16, String)> {
-        if self.clusters.is_empty() {
-            return Vec::new();
-        }
-        let mut kept = Vec::new();
-        for i in start..start + cols {
-            let Some(idx) = self.cells[i].cluster_index() else { continue };
-            // Moved, not copied.  A pool entry has exactly one cell
-            // pointing at it — `cluster_cell` pushes one per call and
-            // the reuse path only ever rewrites the entry belonging to
-            // the cell it is replacing — and that cell is the one being
-            // degraded here, so nothing is left referring to it.
-            // Copying instead cost 34% on a cluster-heavy stream
-            // (39.6 -> 26.1 MB/s on mini), because a scrolled row full
-            // of clusters is a heap allocation per cluster on the
-            // scroll path.  The emptied slot is swept like any other.
-            let (base, text) = match self.clusters.get_mut(idx as usize) {
-                Some(c) => (
-                    crate::grapheme::cluster_first_codepoint(c),
-                    Some(std::mem::take(c)),
-                ),
-                None => (' ', None),
-            };
-            if let Some(t) = text {
-                kept.push(((i - start) as u16, t));
-            }
-            self.cells[i].ch = base;
-            self.cells[i].attrs._pad[0] &= !FLAG_CLUSTER;
-        }
-        kept
-    }
 
     /// Clamp-and-set the cursor.  Out-of-bounds values clamp to the last
     /// valid position; the cursor is always within `[0, cols) x [0, rows)`.
@@ -1346,7 +431,7 @@ impl Grid {
     /// grid's: one slice, for a reader that takes the whole row.  `None`
     /// for a row from the history, which [`Self::cell_at_view`] reads a
     /// cell at a time.
-    pub fn live_row_at_view(&self, view_offset: u16, viewport_row: u16) -> Option<&[Cell]> {
+    pub fn live_row_at_view(&self, view_offset: u16, viewport_row: u16) -> Option<&[StoredCell]> {
         let rows = self.rows() as usize;
         let abs = view_offset as usize + (rows - 1 - viewport_row as usize);
         if abs >= rows {
@@ -1394,7 +479,7 @@ impl Grid {
         let mut out = Vec::with_capacity(rows);
         for r in 0..rows as u16 {
             let pr = self.phys_row(r);
-            let row_cells = self.cells[pr * cols..(pr + 1) * cols].to_vec();
+            let row_cells = self.cells[pr * cols..(pr + 1) * cols].iter().map(|&c| self.expand_cold(c)).collect();
             let wrapped = self.wrapped[pr];
             out.push((row_cells, wrapped));
         }
@@ -1508,6 +593,18 @@ impl Grid {
         self.reflow(cols, rows);
     }
 
+    /// [`Self::expand`] kept out of line, for the resize code: it reads
+    /// every cell once, and a copy of the expansion at each of its
+    /// sites cost kilobytes of binary for no speed anyone sees.
+    #[inline(never)]
+    fn expand_cold(&self, cell: StoredCell) -> Cell {
+        self.expand(cell)
+    }
+
+    fn cell_cold(&self, col: u16, row: u16) -> Cell {
+        self.expand_cold(self.cells[self.phys_row(row) * self.cols as usize + col as usize])
+    }
+
     /// Height-only resize: lossless by construction.
     fn resize_rows_only(&mut self, rows: u16) {
         let cols = self.cols as usize;
@@ -1518,13 +615,14 @@ impl Grid {
             let mut new_wrapped = vec![false; rows as usize];
             let mut new_prompt = vec![PromptMark::None; rows as usize];
             for r in 0..self.rows {
-                let src = self.phys_row(r) * cols;
                 let dst = r as usize * cols;
-                new_cells[dst..dst + cols].copy_from_slice(&self.cells[src..src + cols]);
+                for c in 0..self.cols {
+                    new_cells[dst + c as usize] = self.cell_cold(c, r);
+                }
                 new_wrapped[r as usize] = self.wrapped[self.phys_row(r)];
                 new_prompt[r as usize] = self.prompt[self.phys_row(r)];
             }
-            self.cells = new_cells;
+            self.replace_cells(self.cols, rows, &new_cells);
             self.wrapped = new_wrapped;
             self.prompt = new_prompt;
             self.rows = rows;
@@ -1550,13 +648,14 @@ impl Grid {
         let mut new_wrapped = vec![false; rows as usize];
         let mut new_prompt = vec![PromptMark::None; rows as usize];
         for r in 0..rows {
-            let src = self.phys_row(r) * cols;
             let dst = r as usize * cols;
-            new_cells[dst..dst + cols].copy_from_slice(&self.cells[src..src + cols]);
+            for c in 0..self.cols {
+                new_cells[dst + c as usize] = self.cell_cold(c, r);
+            }
             new_wrapped[r as usize] = self.wrapped[self.phys_row(r)];
             new_prompt[r as usize] = self.prompt[self.phys_row(r)];
         }
-        self.cells = new_cells;
+        self.replace_cells(self.cols, rows, &new_cells);
         self.wrapped = new_wrapped;
         self.prompt = new_prompt;
         self.rows = rows;
@@ -1569,7 +668,7 @@ impl Grid {
         let start = self.phys_row(row) * self.cols as usize;
         self.cells[start..start + self.cols as usize]
             .iter()
-            .all(|c| *c == Cell::default())
+            .all(|c| *c == PackedCell::BLANK)
     }
 
     /// Column-changing resize: gather → re-wrap → redistribute.
@@ -1612,7 +711,7 @@ impl Grid {
             }
             for r in 0..self.rows {
                 let start = self.phys_row(r) * old_cols;
-                let row = self.cells[start..start + old_cols].to_vec();
+                let row = self.cells[start..start + old_cols].iter().map(|&c| self.expand_cold(c)).collect();
                 let wrapped = self.wrapped[self.phys_row(r)];
                 absorb(row, wrapped, &mut lines);
                 if r == self.cursor_row {
@@ -1742,12 +841,11 @@ impl Grid {
             }
             new_wrapped[r] = *cont;
         }
-        self.cells = new_cells;
+        self.replace_cells(cols, rows, &new_cells);
         // Reflow re-cut every line; the old marks named rows that no
         // longer exist.  See `clear_scrollback`'s sibling note.
         self.prompt = new_prompt;
         self.wrapped = new_wrapped;
-        self.blank = vec![Cell::default(); new_cols];
         self.cols = cols;
         self.rows = rows;
         self.top_row = 0;
@@ -2214,69 +1312,6 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod cell_bytes_tests {
-    use super::*;
-
-    /// A cell written as its own bytes reads back as the same cell,
-    /// for every colour kind and every attribute.
-    #[test]
-    fn a_cell_survives_its_own_bytes() {
-        let colors = [Color::DEFAULT, Color::indexed(0), Color::indexed(255), Color::rgb(1, 2, 3)];
-        let mut row = Vec::new();
-        for (i, fg) in colors.iter().enumerate() {
-            for bg in colors {
-                row.push(Cell {
-                    ch: ['x', '中', '😀', '\u{10FFFF}'][i],
-                    attrs: CellAttrs {
-                        fg: *fg,
-                        bg,
-                        bold: i % 2 == 0,
-                        italic: i % 2 == 1,
-                        underline: true,
-                        reverse: false,
-                        dim: i == 3,
-                        ..Default::default()
-                    },
-                });
-            }
-        }
-        let bytes = Cell::slice_as_bytes(&row);
-        assert_eq!(bytes.len(), row.len() * CELL_MEM_BYTES);
-        for (i, chunk) in bytes.chunks_exact(CELL_MEM_BYTES).enumerate() {
-            assert_eq!(Cell::from_mem_bytes(chunk.try_into().unwrap()), row[i], "cell {i}");
-        }
-    }
-
-    /// Bytes from a file are not trusted: nonsense reads as something
-    /// valid and canonical, never as an invalid char or bool.
-    #[test]
-    fn garbage_bytes_read_as_a_valid_cell() {
-        let mut b = [0xFFu8; CELL_MEM_BYTES];
-        // 0xFFFFFFFF is not a char; tag 0xFF is not a colour.
-        let c = Cell::from_mem_bytes(&b);
-        assert_eq!(c.ch, ' ');
-        assert_eq!(c.attrs.fg, Color::DEFAULT);
-        assert!(c.attrs.bold && c.attrs.dim);
-        assert_eq!(c.attrs._pad, [0; 3]);
-        // An Indexed colour with junk in the bytes it does not use
-        // still equals the canonical one.
-        b[4..8].copy_from_slice(&[1, 7, 99, 99]);
-        assert_eq!(Cell::from_mem_bytes(&b).attrs.fg, Color::indexed(7));
-    }
-
-    /// Equal colours are equal byte for byte — the property the disk
-    /// format leans on — because the constructors zero what a kind
-    /// does not use.
-    #[test]
-    fn colours_are_canonical() {
-        assert_eq!(Color::from_bytes([1, 7, 0, 0]), Color::indexed(7));
-        assert_eq!(Color::from_bytes([0, 9, 9, 9]), Color::DEFAULT);
-        assert_eq!(Color::from(ColorKind::Rgb(4, 5, 6)), Color::rgb(4, 5, 6));
-        assert_eq!(Color::rgb(4, 5, 6).kind(), ColorKind::Rgb(4, 5, 6));
-        assert_eq!(Color::default(), Color::DEFAULT);
-    }
-}
 
 #[cfg(test)]
 mod mirror_growth_tests {

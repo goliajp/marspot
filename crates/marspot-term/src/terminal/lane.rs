@@ -8,7 +8,7 @@
 
 use super::Handler;
 use super::wide_class::wide_at;
-use crate::grid::{Cell, CellAttrs};
+use crate::grid::StoredCell;
 use crate::parser::scan::printable_run_len;
 
 /// The fast-path class for `Handler::print`: codepoints that can
@@ -113,17 +113,18 @@ pub(super) fn fast_pict_width(ch: char) -> Option<u8> {
 // out of line: inside `feed` the loop competes for registers with
 // everything else the lane holds
 #[inline(never)]
-fn write_chars(cells: &mut [Cell], bytes: &[u8]) {
+fn write_chars(cells: &mut [StoredCell], bytes: &[u8]) {
+    // a default cell with its character replaced is the character alone
     for (cell, &b) in cells.iter_mut().zip(bytes) {
-        cell.ch = b as char;
+        *cell = StoredCell::byte(b, 0);
     }
 }
 
 /// One cell per byte, each written whole.
 #[inline(never)]
-fn write_cells(cells: &mut [Cell], bytes: &[u8], attrs: CellAttrs) {
+fn write_cells(cells: &mut [StoredCell], bytes: &[u8], id: u32) {
     for (cell, &b) in cells.iter_mut().zip(bytes) {
-        *cell = Cell { ch: b as char, attrs };
+        *cell = StoredCell::byte(b, id);
     }
 }
 
@@ -192,6 +193,7 @@ impl<'a> Handler<'a> {
         if cols < 2 {
             return 0;
         }
+
         let rows = self.grid.rows();
         let printable = |b: &[u8]| {
             let n = printable_run_len(b);
@@ -223,7 +225,23 @@ impl<'a> Handler<'a> {
             let (_, row) = self.grid.cursor();
             self.wrap_to_next_row(row, rows);
         }
-        let plain = self.attrs.is_default();
+        // the number the pen's attributes go into the row under, taken
+        // after the wrap, whose fill may have changed the numbering; a
+        // grid numbering its cells by position leaves coloured text to
+        // the per-character path
+        let plain = self.attrs.is_plain();
+        // whether this row's marks keep its attribute numbers; a run in
+        // the default pen writes number 0, which needs no note
+        let notes = !plain && self.grid.notes_styles();
+        let pen = if plain {
+            0
+        } else {
+            let Some(pen) = self.grid.pen_id(self.attrs) else {
+                return 0;
+            };
+            pen
+        };
+        debug_assert_eq!(self.grid.styles().get(pen), crate::grid::PackedStyle::pack(self.attrs));
         // The shape most runs have: ASCII that ends inside the row,
         // with a control or the end of the input behind it.  Nothing
         // of the general loop's state is needed for it.
@@ -244,15 +262,18 @@ impl<'a> Handler<'a> {
                     if n < 8 {
                         // too short to be worth a call
                         for (cell, &b) in cells[col..to].iter_mut().zip(bytes) {
-                            cell.ch = b as char;
+                            *cell = StoredCell::byte(b, 0);
                         }
                     } else {
                         write_chars(&mut cells[col..to], bytes);
                     }
                 } else {
-                    write_cells(&mut cells[col..to], bytes, *self.attrs);
+                    write_cells(&mut cells[col..to], bytes, pen);
                     if !plain && to > mark.plain_from as usize {
                         mark.plain_from = to as u16;
+                    }
+                    if notes {
+                        mark.styles.note(pen);
                     }
                 }
                 if to > mark.end as usize {
@@ -281,8 +302,24 @@ impl<'a> Handler<'a> {
         // one is kept decoded
         let (mut last_at, mut last_w, mut last_col) = (0usize, 0u8, 0u16);
         let mut last_wide = head;
+        let mut pen = pen;
+        // the row written before the last wrap, once there was one
+        let mut wrapped_from: Option<u16> = None;
         let row = loop {
             let (col0, row) = self.grid.cursor();
+            if let Some(prev) = wrapped_from.filter(|_| !plain) {
+                // the wrap may have filled a row in a colour that swept
+                // the table or numbered the grid by position: the number
+                // taken before it is not the pen's any more
+                match self.grid.pen_id(&attrs) {
+                    Some(p) => {
+                        debug_assert_eq!(self.grid.styles().get(p), crate::grid::PackedStyle::pack(&attrs));
+                        pen = p
+                    }
+                    None if idx == 0 => return 0,
+                    None => break prev,
+                }
+            }
             let mut col = col0 as usize;
             let (cells, mark) = self.grid.row_and_mark_mut(row);
             // from here on the row holds default cells, and under the
@@ -320,7 +357,7 @@ impl<'a> Handler<'a> {
                     if col >= fresh {
                         write_chars(&mut cells[col..col + m], rest);
                     } else {
-                        write_cells(&mut cells[col..col + m], rest, attrs);
+                        write_cells(&mut cells[col..col + m], rest, pen);
                     }
                     col += m;
                     idx += m;
@@ -330,13 +367,9 @@ impl<'a> Handler<'a> {
                         break if col == cols { 1 } else { 2 };
                     }
                     wide = true;
-                    if col >= fresh {
-                        cells[col].ch = c;
-                        cells[col + 1].ch = '\0';
-                    } else {
-                        cells[col] = Cell { ch: c, attrs };
-                        cells[col + 1] = Cell { ch: '\0', attrs };
-                    }
+                    // past `fresh` the pen is the default, number 0
+                    cells[col] = StoredCell::new(c, pen);
+                    cells[col + 1] = StoredCell::new('\0', pen);
                     (last_at, last_w, last_col) = (idx, 2, col as u16);
                     last_wide = c;
                     col += 2;
@@ -353,6 +386,9 @@ impl<'a> Handler<'a> {
             if !plain && to > mark.plain_from {
                 mark.plain_from = to;
             }
+            if notes {
+                mark.styles.note(pen);
+            }
             if wide {
                 mark.wide = true;
             }
@@ -365,11 +401,12 @@ impl<'a> Handler<'a> {
                 }
                 break row;
             }
-            if left == 2 && cells[cols - 1] == Cell::default() {
+            if left == 2 && cells[cols - 1] == StoredCell::BLANK {
                 // the abandoned last column is marked as padding, not
                 // a space someone typed
-                cells[cols - 1] = Cell { ch: '\0', attrs };
+                cells[cols - 1] = StoredCell::new('\0', pen);
             }
+            wrapped_from = Some(row);
             self.wrap_to_next_row(row, rows);
         };
         let (ch, w, col) = match last_w {

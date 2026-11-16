@@ -37,8 +37,7 @@ impl Grid {
     pub fn mirror_clusters<'a>(&mut self, entries: impl Iterator<Item = (u16, u16, &'a str)>) {
         for c in &mut self.cells {
             if c.is_cluster() {
-                c.ch = UNKNOWN_CLUSTER;
-                c.attrs._pad[0] &= !FLAG_CLUSTER;
+                *c = c.with_char(UNKNOWN_CLUSTER);
             }
         }
         let mut n = 0usize;
