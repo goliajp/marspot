@@ -72,8 +72,13 @@ pub trait OpEnv: Send {
     /// now names another process or none.
     fn signal(&self, id: ProcId, sig: i32) -> Result<(), SignalError>;
     fn pid_alive(&self, id: ProcId) -> bool;
-    /// A descendant of `under` matching `pred`, if any.
+    /// A descendant of `under` matching `pred`, if any, wherever it runs.
     fn find_descendant(&self, under: i32, pred: fn(&pidtree::ProcRow) -> bool) -> Option<ProcId>;
+    /// The program in front of shell `under`'s terminal, if it is a
+    /// job of that shell and matches `pred`.
+    fn find_in_front(&self, under: i32, pred: fn(&pidtree::ProcRow) -> bool) -> Option<ProcId>;
+    /// Who holds shell `shell`'s terminal right now.
+    fn front(&self, shell: i32) -> front::Front;
     /// Bytes this pane's PTY has produced, ever.  Monotone; only the
     /// differences matter.
     fn output_len(&self, sid: u64) -> u64;
@@ -135,8 +140,14 @@ pub enum StepKind {
     /// Named by `ProcId`, so a pid recycled since the decision is never
     /// signalled: the step then ends as already gone.
     Terminate { target: ProcId, signal: i32, escalate: Option<(Duration, i32)>, sent: bool },
-    /// Wait for a descendant of `under` to match.
+    /// Wait for the program in front of `under`'s terminal to match:
+    /// the program started at the shell's prompt, not one that some
+    /// other program in the pane started.
     AwaitProcess { under: i32, matching: fn(&pidtree::ProcRow) -> bool },
+    /// Wait for `shell` to hold its own terminal again; the run fails,
+    /// naming who holds it, if it does not by the deadline -- see
+    /// [`front`].
+    AwaitShell { shell: i32 },
     /// Finish the run early, successfully, if the process is already
     /// there.
     ///
@@ -147,8 +158,8 @@ pub enum StepKind {
     /// Typing then puts the command into the running program's prompt,
     /// where it sits as text the user has to delete.
     StopIfProcess { under: i32, matching: fn(&pidtree::ProcRow) -> bool },
-    /// From here on the run depends on the program `matching` under
-    /// `under` staying up: if that process exits, the run fails at
+    /// From here on the run depends on the program `matching`, in front
+    /// of `under`'s terminal, staying up: if that process exits, the run fails at
     /// once instead of waiting out whatever step it is in.
     ///
     /// A resume the program refuses (`No conversation found`) exits
@@ -371,12 +382,36 @@ pub struct Step {
     /// at a step whose only job was to hold the paste back until the
     /// CLI had painted.
     pub proceed_on_timeout: bool,
+    /// Bytes this step types are for this shell's line editor: they are
+    /// written only if the shell holds its terminal at that moment, and
+    /// the run fails instead -- see [`front`].
+    pub at_shell: Option<i32>,
     pub label: &'static str,
 }
 
 impl Step {
+    /// Type nothing unless `shell` holds its own terminal at the moment
+    /// of writing.  For bytes meant for a shell's line editor: written
+    /// into any other program they are its input.
+    pub fn at_shell(mut self, shell: i32) -> Self {
+        self.at_shell = Some(shell);
+        self
+    }
+    /// Wait for `shell` to hold its terminal; a program that still
+    /// holds it at the deadline ends the run.
+    pub fn await_shell(shell: i32) -> Self {
+        Self {
+            kind: StepKind::AwaitShell { shell },
+            // A shell takes its terminal back as soon as it has reaped
+            // the job that held it, which is milliseconds.
+            timeout: Some(Duration::from_secs(3)),
+            proceed_on_timeout: false,
+            at_shell: None,
+            label: "await_shell",
+        }
+    }
     pub fn settle(d: Duration) -> Self {
-        Self { kind: StepKind::Settle, timeout: Some(d), proceed_on_timeout: false, label: "settle" }
+        Self { kind: StepKind::Settle, timeout: Some(d), proceed_on_timeout: false, at_shell: None, label: "settle" }
     }
     /// Signal `target` and wait for it to leave the process table.
     pub fn terminate(target: ProcId, signal: i32) -> Self {
@@ -384,6 +419,7 @@ impl Step {
             kind: StepKind::Terminate { target, signal, escalate: None, sent: false },
             timeout: Some(Duration::from_secs(10)),
             proceed_on_timeout: false,
+            at_shell: None,
             label: "terminate",
         }
     }
@@ -401,6 +437,7 @@ impl Step {
             kind: StepKind::WatchProcess { under, matching },
             timeout: Some(Duration::from_secs(1)),
             proceed_on_timeout: false,
+            at_shell: None,
             label: "watch_process",
         }
     }
@@ -410,6 +447,7 @@ impl Step {
             kind: StepKind::StopIfProcess { under, matching },
             timeout: Some(Duration::from_secs(5)),
             proceed_on_timeout: false,
+            at_shell: None,
             label: "stop_if_process",
         }
     }
@@ -418,11 +456,12 @@ impl Step {
             kind: StepKind::AwaitProcess { under, matching },
             timeout: Some(Duration::from_secs(30)),
             proceed_on_timeout: false,
+            at_shell: None,
             label: "await_process",
         }
     }
     pub fn await_job(job: Arc<Job>) -> Self {
-        Self { kind: StepKind::AwaitJob(job), timeout: Some(Duration::from_secs(30)), proceed_on_timeout: false,
+        Self { kind: StepKind::AwaitJob(job), timeout: Some(Duration::from_secs(30)), proceed_on_timeout: false, at_shell: None,
             label: "await_job" }
     }
     /// Give back what `capture_composer` took, and stop if there was
@@ -432,6 +471,7 @@ impl Step {
             kind: StepKind::RestoreComposer(job),
             timeout: Some(Duration::from_secs(5)),
             proceed_on_timeout: false,
+            at_shell: None,
             label: "restore_composer",
         }
     }
@@ -442,6 +482,7 @@ impl Step {
             kind: StepKind::CaptureComposer { job, ours: None },
             timeout: Some(Duration::from_secs(5)),
             proceed_on_timeout: false,
+            at_shell: None,
             label: "capture_composer",
         }
     }
@@ -457,23 +498,23 @@ impl Step {
     }
 
     pub fn paste_job(job: Arc<Job>) -> Self {
-        Self { kind: StepKind::PasteJob(job), timeout: Some(Duration::from_secs(5)), proceed_on_timeout: false,
+        Self { kind: StepKind::PasteJob(job), timeout: Some(Duration::from_secs(5)), proceed_on_timeout: false, at_shell: None,
             label: "paste_job" }
     }
     pub fn call(f: CallFn) -> Self {
-        Self { kind: StepKind::Call(f), timeout: Some(Duration::from_secs(5)), proceed_on_timeout: false,
+        Self { kind: StepKind::Call(f), timeout: Some(Duration::from_secs(5)), proceed_on_timeout: false, at_shell: None,
             label: "call" }
     }
     pub fn await_user() -> Self {
-        Self { kind: StepKind::AwaitUser, timeout: None, proceed_on_timeout: false,
+        Self { kind: StepKind::AwaitUser, timeout: None, proceed_on_timeout: false, at_shell: None,
             label: "await_user" }
     }
     pub fn send(bytes: Vec<u8>) -> Self {
-        Self { kind: StepKind::Send(bytes), timeout: Some(Duration::from_secs(5)), proceed_on_timeout: false,
+        Self { kind: StepKind::Send(bytes), timeout: Some(Duration::from_secs(5)), proceed_on_timeout: false, at_shell: None,
             label: "send" }
     }
     pub fn paste(text: impl Into<String>) -> Self {
-        Self { kind: StepKind::Paste(text.into()), timeout: Some(Duration::from_secs(5)), proceed_on_timeout: false,
+        Self { kind: StepKind::Paste(text.into()), timeout: Some(Duration::from_secs(5)), proceed_on_timeout: false, at_shell: None,
             label: "paste" }
     }
     /// Wait for the program in the pane to take the terminal over.
@@ -486,6 +527,7 @@ impl Step {
             // of them.
             timeout: Some(Duration::from_secs(3)),
             proceed_on_timeout: false,
+            at_shell: None,
             label: "await_tui_ready",
         }
     }
@@ -499,6 +541,7 @@ impl Step {
             kind: StepKind::StopIfWaiting { needles },
             timeout: Some(Duration::from_secs(5)),
             proceed_on_timeout: false,
+            at_shell: None,
             label: "stop_if_waiting",
         }
     }
@@ -512,6 +555,7 @@ impl Step {
             kind: StepKind::Submit { line: line.into(), pasted: None },
             timeout: Some(submit_deadline()),
             proceed_on_timeout: false,
+            at_shell: None,
             label: "submit",
         }
     }
@@ -520,6 +564,7 @@ impl Step {
             kind: StepKind::AwaitQuiet { still, min_bytes: 0, or_composer: false },
             timeout: Some(Duration::from_secs(30)),
             proceed_on_timeout: false,
+            at_shell: None,
             label: "await_quiet",
         }
     }
@@ -1084,10 +1129,23 @@ impl OpRunner {
                 false
             }
             StepKind::AwaitProcess { under, matching } => {
-                self.env.find_descendant(under, matching).is_some()
+                self.env.find_in_front(under, matching).is_some()
             }
+            StepKind::AwaitShell { shell } => match self.env.front(shell).shell_or_why() {
+                Ok(()) => true,
+                // A program in front may be the one just taken down, on
+                // its way out (gemini's outer process outlives its
+                // worker by a moment), so it is waited out rather than
+                // failed at once; at the deadline, the run says who.
+                Err(err) if step.timeout.is_some_and(|t| elapsed >= t) => {
+                    host.log(LogLevel::Warn, &format!("{}.not_typed", self.op.name), &format!("pane {sid}: {err}"));
+                    self.finish(host, OpOutcome::Failed { step: self.at, label: step.label, err });
+                    true
+                }
+                Err(_) => false,
+            },
             StepKind::WatchProcess { under, matching } => {
-                match self.env.find_descendant(under, matching) {
+                match self.env.find_in_front(under, matching) {
                     Some(pid) => self.watched = Some(pid),
                     None => self.finish(
                         host,
@@ -1101,6 +1159,8 @@ impl OpRunner {
                 true
             }
             StepKind::StopIfProcess { under, matching } => {
+                // anywhere in the pane, in front or not: stopping is the
+                // side to err on, and a suspended one is still the pane's
                 if self.env.find_descendant(under, matching).is_some() {
                     host.log(
                         LogLevel::Info,
@@ -1244,6 +1304,15 @@ impl OpRunner {
                 // seconds and gave up on a pane that was already
                 // showing a full screen.
                 self.sent_len = Some(self.env.output_len(sid));
+                // last thing before the write: output having gone quiet
+                // says nothing about who will read these bytes
+                if let Some(shell) = step.at_shell
+                    && let Err(err) = self.env.front(shell).shell_or_why()
+                {
+                    host.log(LogLevel::Warn, &format!("{}.not_typed", self.op.name), &format!("pane {sid}: {err}"));
+                    self.finish(host, OpOutcome::Failed { step: self.at, label: step.label, err });
+                    return true;
+                }
                 if let Err(e) = self.env.io().send(sid, &bytes) {
                     self.finish(
                         host,
@@ -1825,6 +1894,7 @@ impl PaneSession for OpRunner {
     }
 }
 
+pub mod front;
 mod real_env;
 pub use real_env::RealEnv;
 #[cfg(test)]
@@ -2435,6 +2505,15 @@ mod tests {
         }
         fn find_descendant(&self, _under: i32, _pred: fn(&pidtree::ProcRow) -> bool) -> Option<ProcId> {
             self.state.present.lock().unwrap().first().map(|&pid| fid(pid))
+        }
+        // the processes these scripts start are the shell's jobs, in front
+        fn find_in_front(&self, under: i32, pred: fn(&pidtree::ProcRow) -> bool) -> Option<ProcId> {
+            self.find_descendant(under, pred)
+        }
+        // the shell under these scripts is a fiction that is always at
+        // its prompt; the real check is tested on real shells
+        fn front(&self, _shell: i32) -> front::Front {
+            front::Front::Shell
         }
         fn output_len(&self, _sid: u64) -> u64 {
             *self.state.out_len.lock().unwrap()
