@@ -1720,7 +1720,7 @@ fn profile_cycle_op(
     Some(
         // Same guard as the reclaim's: a claude that replaced the one
         // taken down would get the resume line typed into its prompt.
-        op.shell_line_unless(line, "resume", pty_op::Step::stop_if_process(shell_pid, looks_like_claudecode))
+        op.shell_line_unless(shell_pid, line, "resume", pty_op::Step::stop_if_process(shell_pid, looks_like_claudecode))
             // Wait for the new claude to draw, exactly as the
             // reclamation does.  The hand-written version settled for a
             // flat 600 ms and unfroze onto whatever was there — fine for
@@ -1778,7 +1778,7 @@ fn profile_cycle_op(
 /// discovered profile except the pane's current one.  Tag = the
 /// profile number (echoed back via `on_pane_badge_menu_action`).
 /// Pure so the row shape is unit-testable without a $HOME fixture.
-fn badge_menu_for(
+pub(crate) fn badge_menu_for(
     current: u8,
     profiles: &[u8],
 ) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
@@ -1787,7 +1787,7 @@ fn badge_menu_for(
         .copied()
         .filter(|&n| n != current)
         .map(|n| marspot::shell_proto::PaneBadgeMenuItem {
-            tag: n as u32,
+            tag: crate::plugins::handoff::profile_tag(crate::plugins::handoff::Agent::Claude, n),
             label: strings::text(Arg::SwitchToProfile(n)),
         })
         .collect()
@@ -1826,6 +1826,13 @@ pub(crate) fn looks_like_claudecode(d: &pidtree::ProcRow) -> bool {
     };
     let basename = argv0.rsplit('/').next().unwrap_or(argv0);
     basename == "claude"
+}
+
+/// The claude a pane is running, by the rule in
+/// [`Session::agent`](crate::observe::Session::agent): the program in
+/// front of the pane, and nothing a program there started.
+pub(crate) fn pane_claude(s: &crate::observe::Session) -> Option<&crate::observe::Proc> {
+    s.agent(|p| p.name() == "claude")
 }
 
 impl Default for ClaudecodePlugin {
@@ -2146,16 +2153,17 @@ impl Plugin for ClaudecodePlugin {
         shelld_session_id: u64,
         tag: u32,
     ) {
-        if let Some((to, n)) = crate::plugins::handoff::parse_tag(tag) {
-            if to != crate::plugins::handoff::Agent::Claude && self.last_meta.contains_key(&shelld_session_id) {
-                self.hand_off(host, shelld_session_id, to, n);
+        use crate::plugins::handoff::{self, Pick};
+        // every plugin hears every pick; only claude's own rows are read
+        let target = match handoff::parse_tag(handoff::Agent::Claude, tag) {
+            None => return,
+            Some(Pick::HandOff(to, n)) => {
+                if self.last_meta.contains_key(&shelld_session_id) {
+                    self.hand_off(host, shelld_session_id, to, n);
+                }
+                return;
             }
-            return;
-        }
-        // Tags this plugin assigns are profile numbers (fit in u8);
-        // anything else belongs to another plugin's rows.
-        let Ok(target) = u8::try_from(tag) else {
-            return;
+            Some(Pick::Profile(n)) => n,
         };
         let Some(meta) = self.last_meta.get(&shelld_session_id).cloned() else {
             host.log(
@@ -2805,12 +2813,12 @@ mod tests {
         };
 
         // Model not read yet: the pick is refused, nothing is started.
-        plugin.on_pane_badge_menu_action(&host, sid, 1);
+        plugin.on_pane_badge_menu_action(&host, sid, crate::plugins::handoff::profile_tag(crate::plugins::handoff::Agent::Claude, 1));
         assert_eq!(switches(&host), 0, "the model is not known yet");
         assert_eq!(host.submitted.lock().unwrap().len(), 1, "the badge says why");
 
         plugin.last_model.insert(sid, "opus-5-5".into());
-        plugin.on_pane_badge_menu_action(&host, sid, 1);
+        plugin.on_pane_badge_menu_action(&host, sid, crate::plugins::handoff::profile_tag(crate::plugins::handoff::Agent::Claude, 1));
         assert_eq!(switches(&host), 1, "the pick itself");
         assert!(
             host.sent.lock().unwrap().iter().any(|(_, l)| l.contains("--model 'claude-opus-5-5'")),
@@ -4067,9 +4075,9 @@ mod tests {
         assert_eq!(
             items
                 .iter()
-                .map(|i| (i.tag, i.label.as_str()))
+                .map(|i| (i.tag, i.label.clone()))
                 .collect::<Vec<_>>(),
-            vec![(1, "switch to P1"), (2, "switch to P2"), (3, "switch to P3")],
+            [1u8, 2, 3].map(|n| (crate::plugins::handoff::profile_tag(crate::plugins::handoff::Agent::Claude, n), format!("switch to P{n}"))).to_vec(),
         );
     }
 

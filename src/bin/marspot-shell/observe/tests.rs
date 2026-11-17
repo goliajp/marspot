@@ -33,6 +33,22 @@ pub(crate) fn entry(id: u64, pid: i32, shell: i32) -> SessionEntry {
     }
 }
 
+/// A live pane whose shell is pid 1, holding `procs`, with `front` the
+/// leader of its terminal's foreground group (0: the shell is in front).
+/// The leader's row is made to say so, as the kernel's does.
+pub(crate) fn session_with(mut procs: Vec<Proc>, front: i32) -> Session {
+    for p in &mut procs {
+        p.row.tty_fg_pgid = front;
+    }
+    Session {
+        entry: entry(1, 1, 1),
+        live: true,
+        shell: Some(ProcId { pid: 1, start_us: 1 }),
+        descendants: procs,
+        front_pgid: front,
+    }
+}
+
 fn argv_of(names: &'static [(i32, &'static str)]) -> impl FnMut(&ProcRow) -> Option<Arc<[String]>> {
     move |r| {
         names

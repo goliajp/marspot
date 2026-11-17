@@ -45,10 +45,11 @@ SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
 SESSION_BIN="$ROOT/target/release/marspot-session"
 
-# Badge-menu tags, as `handoff::switch::tag_for` builds them:
-# 0x4F48_0000 | agent << 8 | profile (claude = 1, codex = 2).
-TAG_TO_CLAUDE_P1=$(( 0x4F480000 | 1 << 8 | 1 ))
-TAG_TO_CODEX_P1=$(( 0x4F480000 | 2 << 8 | 1 ))
+# Badge-menu tags, as `handoff::handoff_tag` builds them:
+# 0x4F48_0000 | menu owner << 12 | target << 8 | profile (claude = 1,
+# codex = 2).  The owner is the agent whose badge the row is on.
+TAG_TO_CLAUDE_P1=$(( 0x4F480000 | 2 << 12 | 1 << 8 | 1 ))  # on codex's badge
+TAG_TO_CODEX_P1=$(( 0x4F480000 | 1 << 12 | 2 << 8 | 1 ))   # on claude's badge
 
 fail() {
   echo "FAIL: $*"

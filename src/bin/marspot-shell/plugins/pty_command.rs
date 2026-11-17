@@ -29,27 +29,37 @@ impl PtyOp {
     ///
     /// Through the same input frame as every other typed byte, so an
     /// older core or session between here and the pty does the same.
-    pub fn shell_line(self, line: Vec<u8>, label: &'static str) -> Self {
-        self.typed_after_interrupt(line, label, None)
+    ///
+    /// Both the interrupt and the line are for `shell` alone.  The run
+    /// waits for the shell to hold its terminal before the interrupt,
+    /// and ends without typing anything if another program holds it:
+    /// `^C` would interrupt that program, and the line would be its
+    /// input (2026-11-17: a codex resume line typed into claude, after
+    /// claude's own redraw passed for the shell's new prompt).  The
+    /// line is checked again at the moment it is written, since a
+    /// program can take the terminal while the prompt is awaited.
+    pub fn shell_line(self, shell: i32, line: Vec<u8>, label: &'static str) -> Self {
+        self.typed_after_interrupt(shell, line, label, None)
     }
 
     /// [`shell_line`](Self::shell_line), stopping instead if `guard`
     /// stops the run -- checked before the interrupt, which would reach
     /// a program that is back, and again right before the line, since
     /// one can come back while the prompt is awaited.
-    pub fn shell_line_unless(self, line: Vec<u8>, label: &'static str, guard: Step) -> Self {
-        self.step(guard.clone()).typed_after_interrupt(line, label, Some(guard))
+    pub fn shell_line_unless(self, shell: i32, line: Vec<u8>, label: &'static str, guard: Step) -> Self {
+        self.step(guard.clone()).typed_after_interrupt(shell, line, label, Some(guard))
     }
 
-    fn typed_after_interrupt(self, line: Vec<u8>, label: &'static str, guard: Option<Step>) -> Self {
+    fn typed_after_interrupt(self, shell: i32, line: Vec<u8>, label: &'static str, guard: Option<Step>) -> Self {
         let op = self
-            .step(Step::send(b"\x03".to_vec()).named("clear_line"))
+            .step(Step::await_shell(shell))
+            .step(Step::send(b"\x03".to_vec()).named("clear_line").at_shell(shell))
             .step(Step::await_quiet(PROMPT_QUIET).timeout(PROMPT_WAIT).named("fresh_prompt"));
         let op = match guard {
             Some(g) => op.step(g),
             None => op,
         };
-        op.step(Step::send(line).named(label))
+        op.step(Step::send(line).named(label).at_shell(shell))
     }
 }
 

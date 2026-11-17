@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use super::ledger::{self, Ledger, Side};
 use super::transcript::{self, Agent};
-use super::tags::tag_for;
+use super::tags::handoff_tag;
 use super::{carried, claude, codex as codex_history, gemini as gemini_history, history, kimi as kimi_history};
 use crate::plugins::pty_op::{self, PtyCommand, PtyOp, Step};
 use crate::plugins::{claudecode, codex, gemini, kimi, pidtree};
@@ -51,7 +51,7 @@ fn target_name(to: Agent, profile: u8) -> String {
 pub fn menu_rows(from: Agent) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
     let rows = |to: Agent| {
         profiles(to).into_iter().map(move |(n, _)| marspot::shell_proto::PaneBadgeMenuItem {
-            tag: tag_for(to, n),
+            tag: handoff_tag(from, to, n),
             label: strings::text(Arg::HandOffTo(&target_name(to, n))),
         })
     };
@@ -300,7 +300,7 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
                 Step::terminate(leaving.proc, libc::SIGTERM)
                     .escalate_after(Duration::from_secs(3), libc::SIGKILL),
             )
-            .shell_line(line, "start_target")
+            .shell_line(leaving.shell_pid, line, "start_target")
             // Counted from the moment the line is typed, not from when
             // the process shows up: an agent that paints its whole
             // first frame in the gap between the two would otherwise

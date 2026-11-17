@@ -19,8 +19,13 @@ fn a_cycle_checks_for_a_claude_right_before_typing() {
     // claude that came back would get instead
     let first = labels.iter().position(|l| *l == "stop_if_process").unwrap();
     let clear = labels.iter().position(|l| *l == "clear_line").expect("the line is emptied");
-    assert!(stop < first && first + 1 == clear, "{labels:?}");
+    assert!(stop < first && first + 2 == clear, "{labels:?}");
     assert!(matches!(op.steps[guard].kind, pty_op::StepKind::StopIfProcess { under: 4200, .. }));
+    // the interrupt waits for the shell to hold its terminal, and both
+    // it and the line reach nothing but that shell
+    assert!(matches!(op.steps[first + 1].kind, pty_op::StepKind::AwaitShell { shell: 4200 }), "{labels:?}");
+    assert_eq!(op.steps[clear].at_shell, Some(4200));
+    assert_eq!(op.steps[resume].at_shell, Some(4200));
 }
 
 /// The automatic move waits while claude has work of its own running,

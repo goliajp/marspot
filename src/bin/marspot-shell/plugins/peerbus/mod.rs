@@ -172,7 +172,7 @@ impl Plugin for PeerbusPlugin {
         let wants: Vec<Want> = obs
             .live()
             .filter_map(|s| {
-                let p = s.find("codex")?;
+                let p = crate::plugins::codex::pane_codex(s)?;
                 let title = marspot_term::grid_shm::SessionRegions::of_entry(&s.entry)
                     .and_then(|r| marspot_term::grid_shm::title::read(&r).ok().flatten());
                 Some(Want {
