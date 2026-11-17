@@ -33,9 +33,15 @@ ENTITLEMENTS="$(cd "$(dirname "$0")/.." && pwd)/assets/Marspot.entitlements"
 
 [[ -d "$APP" ]] || { echo "no such app bundle: $APP" >&2; exit 1; }
 
-if ! xcrun notarytool history --keychain-profile "$PROFILE" >/dev/null 2>&1; then
+# The reason is printed as the service gave it: a stored profile that
+# Apple refuses (an expired agreement answers 403) needs a different fix
+# from a profile that was never stored.
+if ! why="$(xcrun notarytool history --keychain-profile "$PROFILE" 2>&1 >/dev/null)"; then
   cat >&2 <<MSG
-==> no usable notary profile "$PROFILE".  Store it once with:
+==> notary profile "$PROFILE" is not usable:
+    ${why:-no reason given}
+
+If it was never stored, store it once with:
 
     xcrun notarytool store-credentials $PROFILE \\
       --apple-id <apple-id> --team-id KF79DRC524 \\
