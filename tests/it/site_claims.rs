@@ -323,9 +323,9 @@ fn the_guide_documents_only_flags_the_binary_takes() {
 
 /// The button and the small print have to agree.
 ///
-/// There is no signed build published, so the page says so and its
-/// first button sends people to the source instead. When the first
-/// release lands, both change together -- a `Download` button above a
+/// Before the first release the page said so and its
+/// first button sent people to the source instead. When it
+/// landed, both changed together -- a `Download` button above a
 /// line admitting there is nothing to download is the shape this
 /// catches.
 #[test]
