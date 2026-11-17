@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use super::ledger::{self, Ledger, Side};
 use super::transcript::{self, Agent};
-use super::tags::tag_for;
+use super::tags::handoff_tag;
 use super::{carried, claude, codex as codex_history, gemini as gemini_history, history, kimi as kimi_history};
 use crate::plugins::pty_op::{self, PtyCommand, PtyOp, Step};
 use crate::plugins::{claudecode, codex, gemini, kimi, pidtree};
@@ -51,7 +51,7 @@ fn target_name(to: Agent, profile: u8) -> String {
 pub fn menu_rows(from: Agent) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
     let rows = |to: Agent| {
         profiles(to).into_iter().map(move |(n, _)| marspot::shell_proto::PaneBadgeMenuItem {
-            tag: tag_for(to, n),
+            tag: handoff_tag(from, to, n),
             label: strings::text(Arg::HandOffTo(&target_name(to, n))),
         })
     };

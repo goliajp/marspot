@@ -17,5 +17,5 @@ mod transcript;
 pub use carried::remember_gemini_model;
 pub(crate) use resume::resume_word;
 pub use switch::{menu_rows, profiles, switch_op, Leaving};
-pub use tags::{parse_tag, tag_for};
+pub use tags::{parse_tag, profile_tag, Pick};
 pub use transcript::Agent;
