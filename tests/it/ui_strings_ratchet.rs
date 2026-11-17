@@ -84,6 +84,39 @@ fn production(text: &str) -> String {
     out
 }
 
+/// `files` without the test modules kept in files of their own: the
+/// ones a scanned file declares as `#[cfg(test)] mod name;`, with or
+/// without a `#[path]`.  What [`production`] does for an inline test
+/// module, done for one that was moved out of line.
+fn without_test_files(mut files: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut tests = Vec::new();
+    for (name, text) in &files {
+        let file = Path::new(name);
+        let dir = file.parent().unwrap_or(Path::new(""));
+        let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let children = if matches!(stem, "mod" | "main" | "lib") { dir.to_path_buf() } else { dir.join(stem) };
+        let (mut cfg_test, mut path) = (false, None);
+        for line in text.lines().map(str::trim) {
+            if line.starts_with("#[cfg(test)]") {
+                cfg_test = true;
+            } else if let Some(p) = line.strip_prefix("#[path = \"").and_then(|r| r.strip_suffix("\"]")) {
+                path = Some(dir.join(p));
+            } else if let Some(m) = line.strip_prefix("mod ").or_else(|| line.strip_prefix("pub(crate) mod "))
+                && let Some(m) = m.strip_suffix(';')
+                && cfg_test
+            {
+                let child = path.take().unwrap_or_else(|| children.join(format!("{m}.rs")));
+                tests.push(child.display().to_string());
+                cfg_test = false;
+            } else {
+                (cfg_test, path) = (false, None);
+            }
+        }
+    }
+    files.retain(|(name, _)| !tests.contains(name));
+    files
+}
+
 /// `line` up to a trailing comment, if it has one outside a string.
 fn code_of(line: &str) -> &str {
     let b = line.as_bytes();
@@ -268,6 +301,7 @@ fn nothing_hands_a_bare_literal_to_what_draws() {
         source("bin/marspot-shell/banner.rs"),
     ];
     sources(&root().join("bin/marspot-shell/plugins"), &mut files);
+    let files = without_test_files(files);
     assert!(files.len() >= 80, "only {} files were scanned", files.len());
 
     let mut found = Vec::new();
@@ -322,4 +356,22 @@ fn the_searches_can_fail() {
     assert!(!caught("op.badge(format!(\"→ P{profile}\"))"), "a glyph and an account number");
     assert!(!caught("Column { header: \"\", width: ColumnWidth::Px(w) }"));
     assert!(!caught("host.log(LogLevel::Warn, \"badge_menu.no_profiles\", \"nothing to switch\");"));
+}
+
+/// A test module moved out of line is left out like an inline one, and
+/// nothing else is.
+#[test]
+fn only_declared_test_files_are_left_out() {
+    let file = |name: &str, text: &str| (name.to_string(), text.to_string());
+    let kept = without_test_files(vec![
+        file("p/op.rs", "mod real;\n#[cfg(test)]\nmod tests;\n#[cfg(test)]\n#[path = \"op_more.rs\"]\nmod more;\n"),
+        file("p/op/real.rs", ""),
+        file("p/op/tests.rs", ""),
+        file("p/op_more.rs", ""),
+        file("p/x/mod.rs", "#[cfg(test)]\nmod t;\nmod u;\n"),
+        file("p/x/t.rs", ""),
+        file("p/x/u.rs", ""),
+    ]);
+    let names: Vec<&str> = kept.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["p/op.rs", "p/op/real.rs", "p/x/mod.rs", "p/x/u.rs"]);
 }
