@@ -59,22 +59,12 @@ pub fn looks_like_kimi(d: &pidtree::ProcRow) -> bool {
     d.comm == COMM
 }
 
-/// The kimi a pane is running.  One that runs under another agent is
-/// that agent's tool, not the pane's agent, and is left alone.
-fn agent_in(descendants: &[Proc]) -> Option<&Proc> {
-    let by_pid = |pid: i32| descendants.iter().find(|p| p.row.pid == pid);
-    let mut kimi = descendants.iter().find(|p| is_kimi(p))?;
-    let mut above = by_pid(kimi.row.ppid);
-    while let Some(p) = above {
-        if matches!(p.name(), "claude" | "codex") || crate::plugins::gemini::is_gemini(p) {
-            return None;
-        }
-        if is_kimi(p) {
-            kimi = p; // a kimi started from inside kimi: the outer one is the pane's
-        }
-        above = by_pid(p.row.ppid);
-    }
-    Some(kimi)
+/// The kimi a pane is running, by the rule in
+/// [`Session::agent`](crate::observe::Session::agent): the kimi in front
+/// of the pane.  One that runs under another program, an agent, another
+/// kimi or anything else, is that program's tool and is left alone.
+fn agent_in(s: &crate::observe::Session) -> Option<&Proc> {
+    s.agent(is_kimi)
 }
 
 /// What the shell's state machine is told for a session state.
@@ -200,7 +190,7 @@ impl KimiPlugin {
         if s.entry.shell_child_pid <= 0 {
             return None;
         }
-        let kimi = agent_in(&s.descendants)?;
+        let kimi = agent_in(s)?;
         let (sid, proc) = (s.entry.id, kimi.row.id());
         let home = home_from(self.env.value(&kimi.row, "KIMI_CODE_HOME"), user_home);
         let env_model = self.env.value(&kimi.row, "KIMI_MODEL_NAME").filter(|m| config::plain(m));
@@ -325,7 +315,7 @@ impl Plugin for KimiPlugin {
         let mut rows: Vec<_> = pane::profile_dirs()
             .iter()
             .map(|(n, _)| marspot::shell_proto::PaneBadgeMenuItem {
-                tag: handoff::tag_for(handoff::Agent::Kimi, *n),
+                tag: handoff::profile_tag(handoff::Agent::Kimi, *n),
                 label: strings::text(Arg::ProfileRow { n: *n, current: pane.profile == Some(*n) }),
             })
             .collect();
@@ -334,14 +324,18 @@ impl Plugin for KimiPlugin {
     }
 
     fn on_pane_badge_menu_action(&mut self, host: &dyn PluginHost, shelld_session_id: u64, tag: u32) {
-        // every plugin hears every pick; one on another agent's pane is not ours
+        // every plugin hears every pick; only kimi's own rows are read,
+        // and only on a pane that runs kimi
+        let Some(pick) = handoff::parse_tag(handoff::Agent::Kimi, tag) else { return };
         let Some(pane) = self.panes.get(&shelld_session_id).cloned() else {
             return;
         };
-        let Some((to, n)) = handoff::parse_tag(tag) else { return };
-        if to == handoff::Agent::Kimi && pane.profile == Some(n) {
-            return; // already there; a stale menu is not a request
-        }
+        // a move to another kimi profile is a handoff to kimi itself
+        let (to, n) = match pick {
+            handoff::Pick::Profile(n) if pane.profile == Some(n) => return, // a stale menu is not a request
+            handoff::Pick::Profile(n) => (handoff::Agent::Kimi, n),
+            handoff::Pick::HandOff(to, n) => (to, n),
+        };
         self.hand_off(host, shelld_session_id, &pane, to, n);
     }
 
@@ -362,7 +356,7 @@ impl Plugin for KimiPlugin {
             let cwd = pidtree::proc_cwd(row.pid).map(|c| c.to_string_lossy().into_owned());
             alive.push((row.id(), cwd.map(|c| place(&home, &c))));
         }
-        let oldest = obs.sessions.iter().filter_map(|s| agent_in(&s.descendants)).map(|k| k.row.start_us / 1000).min();
+        let oldest = obs.sessions.iter().filter_map(agent_in).map(|k| k.row.start_us / 1000).min();
         self.beside.note(alive, beside::now_ms(), oldest);
         let seen: Vec<u64> = obs.sessions.iter().filter_map(|s| self.see(host, s, &user_home)).collect();
         self.sessions.retain(|id| obs.has(id));
@@ -410,6 +404,7 @@ impl Plugin for KimiPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observe::tests::session_with;
     use std::sync::Arc;
 
     fn proc(pid: i32, ppid: i32, comm: &str, argv: &[&str]) -> Proc {
@@ -434,20 +429,39 @@ mod tests {
     /// arguments; the kernel's name for it is what stays.
     #[test]
     fn kimi_is_known_by_the_kernel_s_name_not_its_title() {
-        let procs = [proc(10, 1, "zsh", &["-zsh"]), proc(11, 10, "kimi", &["kimi-code", "", "", ""])];
-        assert_eq!(agent_in(&procs).map(|p| p.row.pid), Some(11));
-        let plain = [proc(11, 10, "kimi", &["kimi"])];
+        let titled = session_with(vec![proc(11, 1, "kimi", &["kimi-code", "", "", ""])], 11);
+        assert_eq!(agent_in(&titled).map(|p| p.row.pid), Some(11));
+        let plain = session_with(vec![proc(11, 1, "kimi", &["kimi"])], 11);
         assert_eq!(agent_in(&plain).map(|p| p.row.pid), Some(11));
-        let look_alike = [proc(11, 10, "node", &["kimi"]), proc(12, 10, "kimi-legacy", &["kimi"])];
-        assert!(agent_in(&look_alike).is_none());
+        for (comm, argv) in [("node", &["kimi"][..]), ("kimi-legacy", &["kimi"][..])] {
+            let look_alike = session_with(vec![proc(11, 1, comm, argv)], 11);
+            assert!(agent_in(&look_alike).is_none(), "{comm}");
+        }
     }
 
     #[test]
-    fn a_kimi_run_by_another_agent_is_not_the_pane_s_agent() {
-        for (comm, argv) in [("claude", &["claude"][..]), ("codex", &["codex"][..]), ("node", &["node", "/opt/homebrew/bin/gemini"][..])] {
-            let procs = [proc(10, 1, comm, argv), proc(11, 10, "zsh", &["/bin/zsh", "-c", "kimi -p hi"]), proc(12, 11, "kimi", &["kimi-code", "", ""])];
-            assert!(agent_in(&procs).is_none(), "{comm}");
+    fn a_kimi_run_by_another_program_is_not_the_pane_s_agent() {
+        for (comm, argv) in [
+            ("claude", &["claude"][..]),
+            ("codex", &["codex"][..]),
+            ("node", &["node", "/opt/homebrew/bin/gemini"][..]),
+            ("make", &["make"][..]),
+            ("kimi", &["kimi-code"][..]),
+        ] {
+            let procs = vec![
+                proc(10, 1, comm, argv),
+                proc(11, 10, "zsh", &["/bin/zsh", "-c", "kimi -p hi"]),
+                proc(12, 11, "kimi", &["kimi-code", "", ""]),
+            ];
+            let pane = session_with(procs, 10);
+            assert_ne!(agent_in(&pane).map(|p| p.row.pid), Some(12), "{comm}");
         }
+    }
+
+    #[test]
+    fn a_kimi_the_shell_has_put_aside_is_not_the_pane_s_agent() {
+        let pane = session_with(vec![proc(11, 1, "kimi", &["kimi"])], 0);
+        assert!(agent_in(&pane).is_none(), "suspended or in the background");
     }
 
     #[test]

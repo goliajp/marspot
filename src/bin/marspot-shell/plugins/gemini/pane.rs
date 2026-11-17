@@ -223,7 +223,7 @@ pub(super) fn profile_switch_op(
                 pty_op::Step::terminate(pane.worker, libc::SIGTERM)
                     .escalate_after(Duration::from_secs(3), libc::SIGKILL),
             )
-            .shell_line(line, "resume")
+            .shell_line(pane.shell_pid, line, "resume")
             .step(
                 pty_op::Step::await_process(pane.shell_pid, looks_like_gemini)
                     .timeout(Duration::from_secs(20)),

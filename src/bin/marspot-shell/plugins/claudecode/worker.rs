@@ -484,7 +484,7 @@ impl WorkerCtx {
         let mut facts: Vec<PaneFacts> = Vec::new();
         for s in obs.live() {
             sessions_seen.push(s.entry.id);
-            let Some(claude) = s.find("claude") else {
+            let Some(claude) = super::pane_claude(s) else {
                 continue;
             };
             // read per scan: unlike its environment, a process's cwd moves

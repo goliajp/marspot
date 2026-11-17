@@ -20,6 +20,10 @@ mod hand_off;
 mod refresh;
 mod rollout;
 mod update;
+#[cfg(test)]
+mod front_tests;
+#[cfg(test)]
+mod menu_tests;
 pub(crate) use update::{install as install_cli, installed_cli, path_with_local_bin, tail};
 
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata,
@@ -49,6 +53,13 @@ pub fn looks_like_codex(d: &pidtree::ProcRow) -> bool {
         return false;
     };
     argv0.rsplit('/').next().unwrap_or(argv0) == "codex"
+}
+
+/// The codex a pane is running, by the rule in
+/// [`Session::agent`](crate::observe::Session::agent): the program in
+/// front of the pane, and nothing a program there started.
+pub(crate) fn pane_codex(s: &crate::observe::Session) -> Option<&crate::observe::Proc> {
+    s.agent(|p| p.name() == "codex")
 }
 
 pub struct CodexPlugin {
@@ -147,11 +158,11 @@ impl Plugin for CodexPlugin {
         let current = pane.profile;
         let mut rows: Vec<_> = dirs.iter()
             .map(|(n, _)| marspot::shell_proto::PaneBadgeMenuItem {
-                // The tag IS the profile number, so a menu built from
-                // one directory listing and acted on against another
-                // (a profile created between the two) cannot pick the
-                // wrong row by index.
-                tag: *n as u32,
+                // The tag carries the profile number, so a menu built
+                // from one directory listing and acted on against
+                // another (a profile created between the two) cannot
+                // pick the wrong row by index.
+                tag: handoff::profile_tag(handoff::Agent::Codex, *n),
                 label: strings::text(Arg::ProfileRow { n: *n, current: current == Some(*n) }),
             })
             .collect();
@@ -165,14 +176,16 @@ impl Plugin for CodexPlugin {
         shelld_session_id: u64,
         tag: u32,
     ) {
-        if let Some((to, n)) = handoff::parse_tag(tag) {
-            if to != handoff::Agent::Codex && self.panes.contains_key(&shelld_session_id) {
-                self.hand_off(host, shelld_session_id, to, n);
+        // every plugin hears every pick; only codex's own rows are read
+        let profile = match handoff::parse_tag(handoff::Agent::Codex, tag) {
+            None => return,
+            Some(handoff::Pick::HandOff(to, n)) => {
+                if self.panes.contains_key(&shelld_session_id) {
+                    self.hand_off(host, shelld_session_id, to, n);
+                }
+                return;
             }
-            return;
-        }
-        let Ok(profile) = u8::try_from(tag) else {
-            return; // another plugin's row
+            Some(handoff::Pick::Profile(n)) => n,
         };
         let Some((_, dir)) = profile_dirs().into_iter().find(|(n, _)| *n == profile) else {
             // The profile went away between the menu opening and the
@@ -221,7 +234,7 @@ impl Plugin for CodexPlugin {
         if let Some(home) = codex_home() {
             self.follower.tick(&home);
         }
-        if self.last_badge.is_empty() && !obs.live().any(|s| s.find("codex").is_some()) {
+        if self.last_badge.is_empty() && !obs.live().any(|s| pane_codex(s).is_some()) {
             self.refresh_stale(host, &[]);
             return;
         }
@@ -243,7 +256,7 @@ impl Plugin for CodexPlugin {
             if shell <= 0 {
                 continue;
             }
-            let codex = s.find("codex");
+            let codex = pane_codex(s);
             let codex_id = codex.map(|p| p.row.id());
             let codex_pid = codex_id.map(|id| id.pid);
             let has_codex = codex_pid.is_some();

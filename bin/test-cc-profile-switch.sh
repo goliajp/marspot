@@ -286,7 +286,9 @@ wait_for "badge.changed.*sid=$SID badge=\"P1@opus-5-5.+medium\"" 30 \
 ok "the scan read the same model and effort"
 
 echo "==> picking profile 2 from the badge menu"
-echo "$SID 2" > "$MENU_FILE.tmp" && mv "$MENU_FILE.tmp" "$MENU_FILE"
+# the tag `handoff::profile_tag` gives claude's P2 row:
+# 0x4F48_0000 | owner << 12 | profile, claude = 1
+echo "$SID $(( 0x4F480000 | 1 << 12 | 2 ))" > "$MENU_FILE.tmp" && mv "$MENU_FILE.tmp" "$MENU_FILE"
 wait_for 'DEV_BADGE_MENU' 20 || fail "the seam never fired"
 
 # What the switch must do: end the running one, and bring the session

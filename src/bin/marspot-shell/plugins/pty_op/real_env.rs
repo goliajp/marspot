@@ -58,6 +58,12 @@ impl OpEnv for RealEnv {
         let found = obs.table.descendants(under).into_iter().find(|r| pred(r));
         found.map(pidtree::ProcRow::id)
     }
+    fn find_in_front(&self, under: i32, pred: fn(&pidtree::ProcRow) -> bool) -> Option<ProcId> {
+        super::front::program_in_front(under, pred)
+    }
+    fn front(&self, shell: i32) -> super::front::Front {
+        super::front::of(shell)
+    }
     fn output_len(&self, sid: u64) -> u64 {
         // L3 logs every byte the PTY produces to the session's bytelog,
         // which states how many it has logged: the cheapest "has

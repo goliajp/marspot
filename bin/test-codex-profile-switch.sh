@@ -209,7 +209,9 @@ ok "the plugin bound the pane to it"
 echo "==> picking profile 2 from the badge menu"
 # Renamed into place, so the tick that reads it cannot catch it
 # half-written — a plain `>` redirect once lost the pick that way.
-echo "$SID 2" > "$MENU_FILE.tmp" && mv "$MENU_FILE.tmp" "$MENU_FILE"
+# the tag `handoff::profile_tag` gives codex's P2 row:
+# 0x4F48_0000 | owner << 12 | profile, codex = 2
+echo "$SID $(( 0x4F480000 | 2 << 12 | 2 ))" > "$MENU_FILE.tmp" && mv "$MENU_FILE.tmp" "$MENU_FILE"
 wait_for 'DEV_BADGE_MENU' 20 || fail "the seam never fired"
 
 # What the switch must do: end the running one, and bring the session

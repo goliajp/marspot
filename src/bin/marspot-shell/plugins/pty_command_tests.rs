@@ -100,8 +100,8 @@ impl PtyIo for Io {
     }
 }
 
-/// The op's view of the real shell: its clock, its output; no process
-/// table, which the steps under test do not read.
+/// The op's view of the real shell: its clock, its output, and who
+/// holds its terminal, asked of the kernel as in production.
 struct Env {
     io: Arc<dyn PtyIo>,
     out: Arc<Mutex<Vec<u8>>>,
@@ -121,6 +121,12 @@ impl OpEnv for Env {
     }
     fn find_descendant(&self, _under: i32, _pred: fn(&pidtree::ProcRow) -> bool) -> Option<ProcId> {
         None
+    }
+    fn find_in_front(&self, under: i32, pred: fn(&pidtree::ProcRow) -> bool) -> Option<ProcId> {
+        crate::plugins::pty_op::front::program_in_front(under, pred)
+    }
+    fn front(&self, shell: i32) -> crate::plugins::pty_op::front::Front {
+        crate::plugins::pty_op::front::of(shell)
     }
     fn output_len(&self, _sid: u64) -> u64 {
         self.out.lock().unwrap().len() as u64
@@ -208,7 +214,7 @@ fn incident(program: &str, args: &[&str], setup: &str) {
         .to_bytes()
         .unwrap();
     let mark = shell.len();
-    let log = run(PtyOp::new("test.resume").shell_line(line, "resume"), &shell);
+    let log = run(PtyOp::new("test.resume").shell_line(shell.pty.child_pid(), line, "resume"), &shell);
     assert!(
         log.iter().any(|l| l.contains("Done")),
         "the op finished: {log:?}"
@@ -256,4 +262,47 @@ fn a_line_full_of_mouse_reports_does_not_run_with_the_command_in_bash() {
         &["--norc", "--noprofile", "-i"],
         "alias 1='cd {root}/a' 2='cd {root}/b' 3='cd {root}/c'; cd {root}/home; PS1='P> '",
     );
+}
+
+/// The 2026-11-17 incident: the pane's shell had a program in front of
+/// it when a command line for the shell was due, and the program's own
+/// redraw passed for the shell's new prompt.  Neither the interrupt nor
+/// the line may reach the program: it keeps running, it reads nothing,
+/// and the run ends saying who held the terminal.
+#[test]
+fn nothing_is_typed_while_another_program_holds_the_terminal() {
+    use crate::plugins::pty_op::front::{self, Front};
+    let tmp = marspot_term::test_env::sandbox_state_dir();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let got = root.join("got");
+    let shell = Shell::spawn("/bin/zsh", &["-f", "-i"], &root);
+    let pid = shell.pty.child_pid();
+    shell.type_in(b"PS1='P> '; echo SETUP-DONE\r");
+    shell.wait_for(0, "SETUP-DONE");
+    // a program that keeps whatever reaches it, and that ^C would end
+    shell.type_in(format!("/bin/cat > '{}'\r", got.display()).as_bytes());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !matches!(front::of(pid), Front::Program { ref comm, .. } if comm == "cat") {
+        assert!(Instant::now() < deadline, "cat never took the terminal: {:?}", front::of(pid));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let Front::Program { pid: cat, .. } = front::of(pid) else { unreachable!() };
+    let mark = shell.len();
+
+    let line = PtyCommand::new("/bin/echo").arg("TYPED-INTO-CAT").to_bytes().unwrap();
+    let log = run(PtyOp::new("test.resume").shell_line(pid, line, "resume"), &shell);
+
+    assert!(!log.iter().any(|l| l.contains("Done")), "the op must not finish as done: {log:?}");
+    assert!(
+        log.iter().any(|l| l.starts_with("test.resume.not_typed") && l.contains("(cat) holds the terminal")),
+        "the run says who held the terminal: {log:?}"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(front::of(pid), Front::Program { pid: cat, comm: "cat".into() }, "cat was not interrupted");
+    let echoed = shell.text()[mark..].to_string();
+    assert!(!echoed.contains("TYPED-INTO-CAT") && !echoed.contains("^C"), "the terminal echoed input: {echoed:?}");
+    // end cat with an end-of-file, then read what it was given
+    shell.type_in(b"\x04");
+    shell.wait_for(mark, "P> ");
+    assert_eq!(std::fs::read_to_string(&got).unwrap(), "", "cat was given input");
 }
