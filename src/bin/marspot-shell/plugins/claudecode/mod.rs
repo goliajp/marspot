@@ -1720,7 +1720,7 @@ fn profile_cycle_op(
     Some(
         // Same guard as the reclaim's: a claude that replaced the one
         // taken down would get the resume line typed into its prompt.
-        op.shell_line_unless(line, "resume", pty_op::Step::stop_if_process(shell_pid, looks_like_claudecode))
+        op.shell_line_unless(shell_pid, line, "resume", pty_op::Step::stop_if_process(shell_pid, looks_like_claudecode))
             // Wait for the new claude to draw, exactly as the
             // reclamation does.  The hand-written version settled for a
             // flat 600 ms and unfroze onto whatever was there — fine for

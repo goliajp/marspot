@@ -576,7 +576,7 @@ pub(super) fn reclaim_op(
             // `claude --resume …` into the running session's prompt,
             // where it sits as text they have to delete.  Seen on the
             // real machine, twice in one day.
-            .shell_line_unless(line, "resume", pty_op::Step::stop_if_process(shell_pid, looks_like_claudecode))
+            .shell_line_unless(shell_pid, line, "resume", pty_op::Step::stop_if_process(shell_pid, looks_like_claudecode))
             .step(pty_op::Step::await_process(shell_pid, looks_like_claudecode))
             .step(pty_op::Step::watch_process(shell_pid, looks_like_claudecode))
             .step(
