@@ -23,6 +23,10 @@ fn say(stream: &UnixStream, msg_type: MsgType, payload: Vec<u8>) {
 }
 
 /// Print `word` in red at the start of a line and wait to see it.
+///
+/// The row is the one where the word is red, not the first that starts
+/// with it: the prompt holds the host name, so the echo of the command
+/// can wrap with `word` at the start of a row too.
 fn print_red(s: &Session, stream: &UnixStream, word: &str) -> (u16, u16) {
     let cmd = format!("\u{15}printf '\\033[31m{word}\\033[0m\\n'\r");
     say(stream, MsgType::InjectInput, encode_inject_input(0, cmd.as_bytes()));
@@ -30,11 +34,10 @@ fn print_red(s: &Session, stream: &UnixStream, word: &str) -> (u16, u16) {
         let (mut cells, mut wrapped) = (Vec::<Cell>::new(), Vec::new());
         s.reader.read(&mut cells, &mut wrapped)?;
         let at = (0..ROWS).find(|&r| {
-            let row: String = cells[r as usize * COLS as usize..][..word.len()].iter().map(|c| c.ch).collect();
-            row == word
+            let row = &cells[r as usize * COLS as usize..][..word.len()];
+            row.iter().map(|c| c.ch).eq(word.chars()) && row[0].attrs.fg == Color::indexed(1)
         })?;
-        let cell = cells[at as usize * COLS as usize];
-        (cell.attrs.fg == Color::indexed(1)).then_some((0, at))
+        Some((0, at))
     })
 }
 
