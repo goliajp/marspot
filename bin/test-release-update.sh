@@ -42,6 +42,9 @@ TREE="$STATE/binaries"
 fail=0
 check() { if "${@:2}"; then echo "  ok    $1"; else echo "  FAIL  $1"; fail=1; fi; }
 ours() { ps -axww -E -o pid=,command= | grep -F "HOME=$FRESH" | grep -v grep; }
+# pid and executable path, tab-separated: the state directory's path has
+# a space in it, so a command line cannot be split on blanks
+procs() { for p in $(ours | awk '{print $1}'); do printf '%s\t%s\n' "$p" "$(ps -o comm= -p "$p")"; done; }
 
 cleanup() {
   [[ -n "${HTTP_PID:-}" ]] && kill "$HTTP_PID" 2>/dev/null
@@ -89,26 +92,34 @@ restarted() { [ "$(starts)" -ge 2 ] && [ "$(grep -c CORE_BOOT "$LOG")" -ge 2 ] &
 
 check "the installed copy boots" wait_for 60 booted
 PANE_BEFORE="$(ls "$STATE/sessions")"
-SESSION_BEFORE="$(ours | awk '$2 ~ /marspot-session$/ {print $1}' | head -1)"
+SESSION_BEFORE="$(procs | awk -F'\t' '$2 ~ /\/marspot-session$/ {print $1}' | head -1)"
 check "it finds, verifies and stages the release (30 s after start)" wait_for 150 staged
 # what leaving the window does; nobody is at this console to do it
 env -i HOME="$FRESH" PATH=/usr/bin:/bin "$APP/Contents/MacOS/marspot-shell" --trigger >/dev/null 2>&1
 check "it comes back up on the release" wait_for 300 restarted
 
-team() { codesign -dv "$1" 2>&1 | grep -q 'TeamIdentifier=KF79DRC524'; }
-runtime() { codesign -dv "$1" 2>&1 | grep -q 'flags=.*runtime'; }
-from_state() { ours | awk -v s="$1" '$2 ~ s"$" {print $2}' | grep -q "/binaries/"; }
+# read whole before matching: under pipefail, grep -q quitting early
+# hands codesign a SIGPIPE and fails the pipe on a match
+sig() { codesign -dv "$1" 2>&1; }
+team() { [[ "$(sig "$1")" == *TeamIdentifier=KF79DRC524* ]]; }
+runtime() { [[ "$(sig "$1")" =~ flags=[^[:space:]]*runtime ]]; }
+from_state() { [[ "$(procs | awk -F'\t' -v s="/$1" 'substr($2, length($2) - length(s) + 1) == s {print $2}')" == */binaries/* ]]; }
 same_pane() { [ "$(ls "$STATE/sessions")" == "$PANE_BEFORE" ] && kill -0 "$SESSION_BEFORE" 2>/dev/null; }
 no_panic() { ! grep -qi 'panic' "$LOG" "$FRESH/stdout.log"; }
-no_errors() { ! awk -F'\t' '$3=="ERROR"' "$LOG" | grep -q .; }
+no_errors() { [[ -z "$(awk -F'\t' '$3=="ERROR"' "$LOG")" ]]; }
 
 echo "==> what is running"
-ours | awk '{print "  " $1 "  " $2}' | sed "s|$FRESH|~|"
+procs | awk -F'\t' '{print "  " $1 "  " $2}' | sed "s|$FRESH|~|"
 check "shell process is still the one that was started" kill -0 $SHELL_PID
 check "core runs from the state directory" from_state marspot-core
 for b in marspot-shell marspot-core marspot-session; do
   check "$b in place carries the Developer ID" team "$TREE/current/$b"
   check "$b in place has the Hardened Runtime" runtime "$TREE/current/$b"
+done
+echo "==> what is in place"
+ls -la "$TREE/current" 2>&1 | sed 's/^/  /'
+for b in marspot-shell marspot-core marspot-session; do
+  echo "  $b: $(codesign -dv "$TREE/current/$b" 2>&1 | grep -E '^(Identifier|TeamIdentifier|CodeDirectory)' | tr '\n' ' ')"
 done
 check "the pane and its session process survived" same_pane
 check "no panic" no_panic
