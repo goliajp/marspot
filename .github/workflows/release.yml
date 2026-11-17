@@ -1,8 +1,8 @@
 name: release
 
-# Cut a release when a version tag is pushed.
-#
-#   git tag v0.4.1 && git push origin v0.4.1
+# Cut a release when a version tag is pushed, once the repository is
+# set up for it (see the job's condition); bin/publish-release.sh does
+# the same from a machine that holds the keys.
 #
 # Two artefacts come out, for two different audiences:
 #
@@ -64,6 +64,12 @@ env:
 
 jobs:
   release:
+    # Releases are cut on the machine that holds the keys
+    # (bin/publish-release.sh), and that creates the tag.  A tag only
+    # builds here once the secrets above exist and the repository
+    # variable RELEASE_FROM_CI says so; until then this is a rehearsal
+    # workflow and a tag is not a failed run.
+    if: github.event_name == 'workflow_dispatch' || vars.RELEASE_FROM_CI == '1'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7

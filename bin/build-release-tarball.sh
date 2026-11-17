@@ -24,6 +24,14 @@
 #                                                 # P-256 / SHA-256);
 #                                                 # key defaults to
 #                                                 # keys/marspot-update.sec
+#   bin/build-release-tarball.sh --codesign       # Developer ID +
+#                                                 # Hardened Runtime on
+#                                                 # each binary, then
+#                                                 # notarised: what an
+#                                                 # update puts in place
+#                                                 # is the same kind of
+#                                                 # binary the disk
+#                                                 # image carries
 
 set -euo pipefail
 
@@ -34,12 +42,16 @@ STRIP_BINS=0
 INCLUDE_MARSPOT=0
 SIGN=0
 SIGN_KEY="$ROOT/keys/marspot-update.sec"
+CODESIGN=0
+IDENTITY="${CODESIGN_IDENTITY:-Developer ID Application: GOLIA K.K. (KF79DRC524)}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-marspot}"
 
 while (( $# )); do
   case "$1" in
     --output)   OUTPUT="$2"; shift 2 ;;
     --strip)    STRIP_BINS=1; shift ;;
     --marspot)  INCLUDE_MARSPOT=1; shift ;;
+    --codesign) CODESIGN=1; shift ;;
     --sign)
       SIGN=1; shift
       # Optional key-path argument (anything not starting with -).
@@ -82,6 +94,26 @@ for b in "${bins[@]}"; do
   xattr -d com.apple.quarantine "$STAGE/$b" 2>/dev/null || true
   xattr -d com.apple.provenance  "$STAGE/$b" 2>/dev/null || true
 done
+
+# An updated binary runs from the state directory, outside the bundle.
+# Left with the linker's ad-hoc signature it is a different program to
+# the system than the one the disk image installed: its first run is
+# scanned, and what was granted to the app is not granted to it.  So it
+# gets the bundle's identity, and Apple is told about it.  A bare
+# executable cannot carry a stapled ticket; the notary service keeps
+# one, and the system asks for it.
+if (( CODESIGN )); then
+  for b in "${bins[@]}"; do
+    codesign -f -s "$IDENTITY" --options runtime --timestamp \
+      --entitlements "$ROOT/assets/Marspot.entitlements" "$STAGE/$b"
+  done
+  ( cd "$STAGE" && ditto -c -k . "$STAGE.zip" )
+  echo "==> notarising the update binaries (this waits for Apple)"
+  verdict="$(xcrun notarytool submit "$STAGE.zip" --keychain-profile "$NOTARY_PROFILE" --wait 2>&1)"
+  rm -f "$STAGE.zip"
+  [[ "$verdict" == *"status: Accepted"* ]] || { echo "$verdict" | tail -8 >&2; echo "ERROR: not notarised" >&2; exit 1; }
+  for b in "${bins[@]}"; do codesign -v --strict "$STAGE/$b"; done
+fi
 
 mkdir -p "$(dirname "$OUTPUT")"
 tar -czf "$OUTPUT" -C "$STAGE" "${bins[@]}"
