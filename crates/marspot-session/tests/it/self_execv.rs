@@ -147,8 +147,14 @@ pub(crate) fn echo_pid(tag: &str) -> Frame {
 pub(crate) fn read_echoed_pid(s: &Session, tag: &str) -> Option<i32> {
     let prefix = format!("{tag}=");
     let (rows, (col, row)) = s.try_screen_and_cursor(COLS, ROWS)?;
-    let at = rows.iter().position(|l| l.starts_with(&prefix))?;
-    (row as usize > at && col > 0).then(|| rows[at][prefix.len()..].trim().parse().expect("a pid"))
+    // the echo of the command can wrap with `tag=$$` at the start of a
+    // row, since the prompt holds the host name: the answer is the row
+    // with a number after the tag
+    let (at, pid) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(i, l)| Some((i, l.strip_prefix(&prefix)?.trim().parse().ok()?)))?;
+    (row as usize > at && col > 0).then_some(pid)
 }
 
 /// The test's connection to the session's socket, reopened the way L2

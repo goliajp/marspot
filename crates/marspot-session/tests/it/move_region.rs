@@ -52,7 +52,9 @@ fn a_session_asked_to_move_publishes_into_the_new_region_with_the_same_shell() {
     );
     wait_for(10, "the prompt after the title was set", || {
         let (rows, (col, row)) = s.try_screen_and_cursor(COLS, ROWS)?;
-        (col > 0 && rows.iter().take(row as usize).any(|l| l.contains("printf"))).then_some(())
+        // joined: the prompt holds the host name, so the command can
+        // wrap in the middle of `printf`
+        (col > 0 && rows[..row as usize].concat().contains("printf")).then_some(())
     });
     let screen_before = s.screen(COLS, ROWS);
 

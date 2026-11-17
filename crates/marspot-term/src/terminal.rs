@@ -1015,9 +1015,9 @@ impl Terminal {
         }
         let cols = self.grid.cols();
         let (col, row) = self.grid.cursor();
-        // Decline at-or-past the right edge — the wrap rule depends
-        // on DECAWM and we don't track it precisely.
-        if col >= cols {
+        // Decline in the last column and on a pending wrap: an echo
+        // consumed as a hit never reaches the parser to set or take it
+        if self.pending_wrap || col + 1 >= cols {
             return false;
         }
         let saved_cell = self.grid.cell(col, row);
@@ -7219,3 +7219,6 @@ mod predict_learning_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod predict_edge_tests;
