@@ -77,25 +77,16 @@ pub(crate) fn is_gemini(p: &Proc) -> bool {
     p.argv.as_deref().is_some_and(argv_is_gemini)
 }
 
-/// The gemini a pane is running: the one nearest the shell, and the one
-/// doing the work.
+/// The gemini a pane is running, and the process of it doing the work.
 ///
-/// gemini relaunches itself as a child of the same name, so a pane
-/// normally holds two; they are one agent, bound once.  A gemini that
-/// runs under claude or codex is that agent's tool, not the pane's
-/// agent, and is left alone; so is one that runs under kimi.
-fn agent_in(descendants: &[Proc]) -> Option<(&Proc, pidtree::ProcId)> {
-    let by_pid = |pid: i32| descendants.iter().find(|p| p.row.pid == pid);
-    let outer = descendants
-        .iter()
-        .find(|p| is_gemini(p) && !by_pid(p.row.ppid).is_some_and(is_gemini))?;
-    let mut above = by_pid(outer.row.ppid);
-    while let Some(p) = above {
-        if matches!(p.name(), "claude" | "codex") || p.row.comm == "kimi" {
-            return None;
-        }
-        above = by_pid(p.row.ppid);
-    }
+/// Bound by the rule in [`Session::agent`](crate::observe::Session::agent):
+/// the gemini in front of the pane.  One that runs under another
+/// program, an agent or not, is that program's tool and is left alone.
+/// gemini relaunches itself as a child of the same name, so the one in
+/// front normally has a second under it; they are one agent, bound once.
+fn agent_in(s: &crate::observe::Session) -> Option<(&Proc, pidtree::ProcId)> {
+    let outer = s.agent(is_gemini)?;
+    let descendants = &s.descendants;
     let mut worker = outer;
     while let Some(child) = descendants.iter().find(|p| p.row.ppid == worker.row.pid && is_gemini(p)) {
         worker = child;
@@ -148,7 +139,7 @@ impl GeminiPlugin {
         if shell_pid <= 0 {
             return None;
         }
-        let (outer, worker) = agent_in(&s.descendants)?;
+        let (outer, worker) = agent_in(s)?;
         // one read per process: its environment does not change
         let root = root_from(self.env.value(&outer.row, "GEMINI_CLI_HOME"), user_home);
         let cwd = pidtree::proc_cwd(outer.row.pid);
@@ -356,6 +347,7 @@ impl Plugin for GeminiPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observe::tests::session_with;
     use std::sync::Arc;
 
     fn proc(pid: i32, ppid: i32, argv: &[&str]) -> Proc {
@@ -424,28 +416,38 @@ mod tests {
             proc(11, 10, &["/opt/gem/bin/gemini", "/opt/gem/bin/gemini", "-m", "flash"]),
             proc(12, 11, &["/bin/zsh", "-c", "ls"]),
         ];
-        let (outer, worker) = agent_in(&procs).expect("one agent");
-        assert_eq!(outer.row.pid, 10, "bound to the one nearest the shell");
+        let pane = session_with(procs.to_vec(), 10);
+        let (outer, worker) = agent_in(&pane).expect("one agent");
+        assert_eq!(outer.row.pid, 10, "bound to the one in front");
         assert_eq!(worker.pid, 11, "and the child is the one that works");
 
         // listed child first: the order of the table is not the tree
-        let reversed = [procs[1].clone(), procs[0].clone()];
-        let (outer, worker) = agent_in(&reversed).expect("one agent");
+        let pane = session_with(vec![procs[1].clone(), procs[0].clone()], 10);
+        let (outer, worker) = agent_in(&pane).expect("one agent");
         assert_eq!((outer.row.pid, worker.pid), (10, 11));
 
-        let single = [proc(10, 1, &["node", "/opt/homebrew/bin/gemini"])];
-        let (outer, worker) = agent_in(&single).expect("one agent");
+        let pane = session_with(vec![proc(10, 1, &["node", "/opt/homebrew/bin/gemini"])], 10);
+        let (outer, worker) = agent_in(&pane).expect("one agent");
         assert_eq!((outer.row.pid, worker.pid), (10, 10), "no relaunch: one process is both");
     }
 
     #[test]
-    fn a_gemini_run_by_another_agent_is_not_the_pane_s_agent() {
-        let procs = [
-            proc(10, 1, &["claude"]),
-            proc(11, 10, &["/bin/zsh", "-c", "gemini -p hi"]),
-            proc(12, 11, &["/opt/gem/bin/gemini", "-p", "hi"]),
-        ];
-        assert!(agent_in(&procs).is_none());
-        assert!(agent_in(&[proc(10, 1, &["/bin/zsh"]), proc(11, 10, &["gemini-helper"])]).is_none());
+    fn a_gemini_run_by_another_program_is_not_the_pane_s_agent() {
+        for front in ["claude", "/usr/bin/make", "/bin/zsh"] {
+            let procs = vec![
+                proc(10, 1, &[front]),
+                proc(11, 10, &["/bin/zsh", "-c", "gemini -p hi"]),
+                proc(12, 11, &["/opt/gem/bin/gemini", "-p", "hi"]),
+            ];
+            assert!(agent_in(&session_with(procs, 10)).is_none(), "{front}");
+        }
+        let helper = vec![proc(10, 1, &["/bin/zsh"]), proc(11, 10, &["gemini-helper"])];
+        assert!(agent_in(&session_with(helper, 11)).is_none());
+    }
+
+    #[test]
+    fn a_gemini_the_shell_has_put_aside_is_not_the_pane_s_agent() {
+        let procs = vec![proc(10, 1, &["/opt/gem/bin/gemini"])];
+        assert!(agent_in(&session_with(procs, 0)).is_none(), "suspended or in the background");
     }
 }

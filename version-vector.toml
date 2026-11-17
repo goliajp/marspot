@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.492"  # a line for the shell is typed only while the shell holds its terminal
+shell   = "0.7.493"  # a pane's agent is the program in front of it, not one another program started
 core    = "0.12.551"  # a pane title follows the foreground program's directory
 session = "0.11.380"  # a session says it reads which frames its core reads, after each time it says where it publishes

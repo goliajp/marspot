@@ -1828,6 +1828,13 @@ pub(crate) fn looks_like_claudecode(d: &pidtree::ProcRow) -> bool {
     basename == "claude"
 }
 
+/// The claude a pane is running, by the rule in
+/// [`Session::agent`](crate::observe::Session::agent): the program in
+/// front of the pane, and nothing a program there started.
+pub(crate) fn pane_claude(s: &crate::observe::Session) -> Option<&crate::observe::Proc> {
+    s.agent(|p| p.name() == "claude")
+}
+
 impl Default for ClaudecodePlugin {
     fn default() -> Self {
         Self::new()

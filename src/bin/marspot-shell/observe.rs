@@ -78,12 +78,62 @@ pub struct Session {
     /// Everything under the shell, in discovery order.  Empty without
     /// a shell.
     pub descendants: Vec<Proc>,
+    /// The foreground process group of the pane's terminal when a job
+    /// holds it rather than the shell; 0 when the shell holds it or it
+    /// cannot be told.
+    pub front_pgid: i32,
 }
 
 impl Session {
-    /// The first descendant whose [`Proc::name`] is `name`.
+    /// The first descendant whose [`Proc::name`] is `name`, wherever it
+    /// runs in the pane.
+    ///
+    /// Only for asking whether a program is absent from the pane.  It
+    /// never answers "which program is this pane's": that is
+    /// [`Session::agent`].
     pub fn find(&self, name: &str) -> Option<&Proc> {
         self.descendants.iter().find(|p| p.name() == name)
+    }
+
+    /// The program in front of the pane: the leader of the terminal's
+    /// foreground process group, when that is a job of the pane's shell
+    /// and not the shell itself.
+    ///
+    /// The leader's own row has to name its group as its terminal's
+    /// foreground as well, so a group id that now belongs to some other
+    /// terminal's process is never taken for it.
+    pub fn front(&self) -> Option<&Proc> {
+        if self.front_pgid <= 0 {
+            return None;
+        }
+        self.descendants.iter().find(|p| {
+            p.row.pid == self.front_pgid && p.row.pgid == p.row.pid && p.row.tty_fg_pgid == p.row.pid
+        })
+    }
+
+    /// The pane's agent, when the program in front of the pane is one
+    /// that `is` recognises.
+    ///
+    /// The rule every agent plugin binds a pane by: an agent is the
+    /// pane's when it is the program the person started at the pane's
+    /// prompt and is talking to now, which is the leader of the
+    /// terminal's foreground process group.  An agent anywhere else in
+    /// the pane is not the pane's and gets no pane-level operation
+    /// (badge, profile switch, resume, peer name):
+    ///
+    /// - one started by the program in front, as a tool or a helper,
+    ///   whatever that program is.  On 2026-11-17 a claude ran `codex`
+    ///   as a tool, the codex plugin took the pane for its own, and a
+    ///   pick on claude's badge menu typed a codex resume line into
+    ///   claude;
+    /// - one in the background or suspended with `^Z`: the person is
+    ///   not talking to it, and the terminal is not its to be typed at.
+    ///
+    /// An agent that runs as several processes (gemini relaunches
+    /// itself as a child of the same name) is bound by its leader; the
+    /// rest of it is the plugin's to find under that leader.
+    pub fn agent(&self, is: impl Fn(&Proc) -> bool) -> Option<&Proc> {
+        self.front().filter(|p| is(p))
     }
 }
 
@@ -110,6 +160,10 @@ impl Observation {
                 let shell = (live && entry.shell_child_pid > 1)
                     .then(|| table.get(entry.shell_child_pid).map(ProcRow::id))
                     .flatten();
+                let front_pgid = shell
+                    .and_then(|id| table.get(id.pid))
+                    .filter(|r| r.tty_fg_pgid > 0 && r.tty_fg_pgid != r.pgid)
+                    .map_or(0, |r| r.tty_fg_pgid);
                 let descendants = match shell {
                     Some(id) => table
                         .descendants(id.pid)
@@ -118,7 +172,7 @@ impl Observation {
                         .collect(),
                     None => Vec::new(),
                 };
-                Session { entry, live, shell, descendants }
+                Session { entry, live, shell, descendants, front_pgid }
             })
             .collect();
         Observation { at, table, sessions }
