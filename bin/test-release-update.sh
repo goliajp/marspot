@@ -49,7 +49,7 @@ cleanup() {
     for p in $(ours | awk '{print $1}'); do kill -$sig "$p" 2>/dev/null; done
     sleep 2
   done
-  rm -rf "$REMOTE"
+  rm -rf "${REMOTE:?}"
 }
 trap cleanup EXIT
 
