@@ -210,9 +210,10 @@ impl Plugin for GeminiPlugin {
         let mut rows: Vec<_> = profile_dirs()
             .iter()
             .map(|(n, _)| marspot::shell_proto::PaneBadgeMenuItem {
-                // the tag IS the profile number, so a profile created
-                // between the menu and the click cannot shift the rows
-                tag: *n as u32,
+                // the tag carries the profile number, so a profile
+                // created between the menu and the click cannot shift
+                // the rows
+                tag: handoff::profile_tag(handoff::Agent::Gemini, *n),
                 label: strings::text(Arg::ProfileRow { n: *n, current: pane.profile == Some(*n) }),
             })
             .collect();
@@ -221,18 +222,17 @@ impl Plugin for GeminiPlugin {
     }
 
     fn on_pane_badge_menu_action(&mut self, host: &dyn PluginHost, shelld_session_id: u64, tag: u32) {
-        // every plugin hears every pick; one on another agent's pane is not ours
+        // every plugin hears every pick; only gemini's own rows are read,
+        // and only on a pane that runs gemini
+        let Some(pick) = handoff::parse_tag(handoff::Agent::Gemini, tag) else {
+            return;
+        };
         let Some(pane) = self.panes.get(&shelld_session_id).cloned() else {
             return;
         };
-        if let Some((to, n)) = handoff::parse_tag(tag) {
-            if to != handoff::Agent::Gemini {
-                self.hand_off(host, shelld_session_id, &pane, to, n);
-            }
-            return;
-        }
-        let Ok(profile) = u8::try_from(tag) else {
-            return;
+        let profile = match pick {
+            handoff::Pick::HandOff(to, n) => return self.hand_off(host, shelld_session_id, &pane, to, n),
+            handoff::Pick::Profile(n) => n,
         };
         if pane.profile == Some(profile) {
             return; // already there; a stale menu is not a request

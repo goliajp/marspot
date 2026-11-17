@@ -315,7 +315,7 @@ impl Plugin for KimiPlugin {
         let mut rows: Vec<_> = pane::profile_dirs()
             .iter()
             .map(|(n, _)| marspot::shell_proto::PaneBadgeMenuItem {
-                tag: handoff::tag_for(handoff::Agent::Kimi, *n),
+                tag: handoff::profile_tag(handoff::Agent::Kimi, *n),
                 label: strings::text(Arg::ProfileRow { n: *n, current: pane.profile == Some(*n) }),
             })
             .collect();
@@ -324,14 +324,18 @@ impl Plugin for KimiPlugin {
     }
 
     fn on_pane_badge_menu_action(&mut self, host: &dyn PluginHost, shelld_session_id: u64, tag: u32) {
-        // every plugin hears every pick; one on another agent's pane is not ours
+        // every plugin hears every pick; only kimi's own rows are read,
+        // and only on a pane that runs kimi
+        let Some(pick) = handoff::parse_tag(handoff::Agent::Kimi, tag) else { return };
         let Some(pane) = self.panes.get(&shelld_session_id).cloned() else {
             return;
         };
-        let Some((to, n)) = handoff::parse_tag(tag) else { return };
-        if to == handoff::Agent::Kimi && pane.profile == Some(n) {
-            return; // already there; a stale menu is not a request
-        }
+        // a move to another kimi profile is a handoff to kimi itself
+        let (to, n) = match pick {
+            handoff::Pick::Profile(n) if pane.profile == Some(n) => return, // a stale menu is not a request
+            handoff::Pick::Profile(n) => (handoff::Agent::Kimi, n),
+            handoff::Pick::HandOff(to, n) => (to, n),
+        };
         self.hand_off(host, shelld_session_id, &pane, to, n);
     }
 
