@@ -35,8 +35,8 @@ fn flood(w: &mut AsyncWriter, at: usize) -> usize {
 fn settled(w: &AsyncWriter) -> usize {
     let give_up = Instant::now() + Duration::from_secs(20);
     loop {
-        let (given, far) = w.queue.free_pages();
-        if far == 0 && given > 0 {
+        let (given, far, drained) = w.queue.free_pages();
+        if drained && far == 0 && given > 0 {
             return given;
         }
         assert!(Instant::now() < give_up, "the writer never gave back its free buffers: {given} given, {far} not");
@@ -51,7 +51,10 @@ fn a_flood_s_free_buffers_give_their_pages_back_when_the_writer_is_idle() {
     let (mut w, path) = writer("free");
     let given_before = times_given_back();
     flood(&mut w, 0);
-    w.hand_off();
+    // flush, not hand_off: a hand-off refused by a busy writer keeps the
+    // last buffer and an empty spare in the producer, leaving one free
+    // buffer instead of two on a loaded machine
+    w.flush();
     let given = settled(&w);
     assert!(given >= 2, "{given} free buffers given back");
     assert!(times_given_back() >= given_before + given);
