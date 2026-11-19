@@ -4,15 +4,19 @@
 use super::*;
 
 fn feed(home: &std::path::Path, tag: &str, p1: (&str, f64), p2: (&str, f64)) {
+    feed_renewing(home, tag, p1, 4102444800, p2);
+}
+
+fn feed_renewing(home: &std::path::Path, tag: &str, p1: (&str, f64), p1_renews: i64, p2: (&str, f64)) {
     fs::write(
         home.join(".local/state/devops/claude-usage.json"),
         format!(
             r#"{{"generated_at": "2026-11-06T00:00:00+00:00", "accounts": [
                {{"name":"A","email":"{tag}1@example","status":"{}","utilization_5h":null,
-                "utilization_7d":{},"reset_5h":null,"reset_7d":4102444800,"tier":"default_claude_max_20x"}},
+                "utilization_7d":{},"reset_5h":null,"reset_7d":{},"tier":"default_claude_max_20x"}},
                {{"name":"B","email":"{tag}2@example","status":"{}","utilization_5h":null,
                 "utilization_7d":{},"reset_5h":null,"reset_7d":4102444900,"tier":"default_claude_max_20x"}}]}}"#,
-            p1.0, p1.1, p2.0, p2.1
+            p1.0, p1.1, p1_renews, p2.0, p2.1
         ),
     )
     .unwrap();
@@ -59,6 +63,36 @@ fn a_busy_pane_is_told_once_when_its_account_is_one_step_from_out() {
     sweep(&mut plugin, &host, &mut result);
     assert_eq!(Arc::as_ptr(&plugin.heads_up[&sid].delivered), first, "once, not every pass");
     assert!(host.submitted.lock().unwrap().is_empty(), "telling it moves nothing");
+}
+
+/// The feed's renewal of one week moves by a second between reads,
+/// which is not a new week; an account that comes back and runs low
+/// again is told again.
+#[test]
+fn a_pane_is_told_once_per_running_low_not_once_per_read() {
+    off();
+    let home = quota_home("h1");
+    feed(&home, "h1", ("allowed", 0.99), ("allowed", 0.2));
+    let host = FakeHost::new(home.join("state"));
+    let sid = 94u64;
+    confirmed("u-94");
+    let mut plugin = stranded_plugin(pane_on_p1(&home, "u-94"), sid);
+    let mut result = scan_of(sid, CcActivity::Working);
+    sweep(&mut plugin, &host, &mut result);
+    let first = Arc::as_ptr(&plugin.heads_up.get(&sid).expect("told").delivered);
+
+    feed_renewing(&home, "h1", ("allowed", 0.99), 4102444799, ("allowed", 0.2));
+    sweep(&mut plugin, &host, &mut result);
+    assert_eq!(Arc::as_ptr(&plugin.heads_up[&sid].delivered), first, "a second earlier is the same week");
+
+    feed_renewing(&home, "h1", ("allowed", 0.30), 4102444799, ("allowed", 0.2));
+    sweep(&mut plugin, &host, &mut result);
+    assert!(!plugin.heads_up.contains_key(&sid), "the account came back");
+
+    feed(&home, "h1", ("allowed", 0.99), ("allowed", 0.2));
+    sweep(&mut plugin, &host, &mut result);
+    let again = plugin.heads_up.get(&sid).expect("told again when it runs low again");
+    assert_ne!(Arc::as_ptr(&again.delivered), first);
 }
 
 #[test]

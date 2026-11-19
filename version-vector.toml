@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.494"  # a badge-menu row is read only by the plugin whose menu it is in
+shell   = "0.7.495"  # a pane is warned once each time its account runs low
 core    = "0.12.552"  # a key typed into the last column is not shown before its echo
 session = "0.11.381"  # a key typed into the last column is not shown before its echo
