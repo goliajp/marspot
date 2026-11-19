@@ -228,7 +228,7 @@ pub struct ClaudecodePlugin {
     rebalanced: HashMap<u64, (Instant, u8)>,
     /// What was last logged about moving each resting pane.
     rebalance_said: HashMap<u64, String>,
-    /// Busy panes told their account was nearly out, so each is told once a week.
+    /// Busy panes told their account was nearly out, so each is told once each time its account runs low.
     heads_up: heads_up::Ledger,
     /// Panes left out of the sweep because their model or effort could not be
     /// confirmed, kept so the reason is logged once, not every pass.
