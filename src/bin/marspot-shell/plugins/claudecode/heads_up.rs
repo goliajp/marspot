@@ -33,6 +33,11 @@ const LAST_OF_FIVE_HOURS: f64 = 1.0 - quota::FIVE_HOUR_SPENT + 0.01;
 /// The feed's figures are two-decimal fractions; `1.0 - 0.99` is a hair
 /// over `0.01`.
 const EPS: f64 = 1e-9;
+/// The feed gives a week's renewal to the second, and two reads of one
+/// week can differ by that second: 23:59:59 one time, 00:00:00 the
+/// next. Weeks renew seven days apart, so renewals within a day of each
+/// other are the same week.
+const SAME_WEEK: u64 = 86_400;
 
 /// Is this account, for a pane on `model`, one step from refusing it?
 pub(in crate::plugins) fn nearly_out(room: &Room, model: Option<&str>) -> bool {
@@ -60,7 +65,7 @@ pub(in crate::plugins) struct Sent {
 
 impl Sent {
     pub(in crate::plugins) fn is_for(&self, profile: u8, week: i64) -> bool {
-        self.profile == profile && self.week == week
+        self.profile == profile && self.week.abs_diff(week) < SAME_WEEK
     }
     pub(super) fn landed_on(&self, profile: u8) -> bool {
         self.profile == profile && self.delivered.load(Ordering::Relaxed)
