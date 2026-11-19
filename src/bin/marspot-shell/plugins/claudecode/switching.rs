@@ -269,8 +269,8 @@ impl ClaudecodePlugin {
         }
     }
 
-    /// Tell a busy pane, once a week, that its account is one step from
-    /// refusing it -- while it can still answer -- when there is
+    /// Tell a busy pane, once each time its account runs low, that the
+    /// account is one step from refusing it -- while it can still answer -- when there is
     /// somewhere else for it to go.
     ///
     /// A resting pane is not told: moving it ends nothing, and the
@@ -286,6 +286,15 @@ impl ClaudecodePlugin {
         let model = result.new_models.get(&sid).map(String::as_str);
         let Some((_, room)) = rooms.iter().find(|(p, _)| *p == meta.profile_num) else { return };
         let week = room.reset_7d();
+        // the account came back, at a new five hours or a new week: the
+        // next time it nears out the pane is told again
+        if self.heads_up.get(&sid).is_some_and(|h| h.profile == meta.profile_num)
+            && *room != quota::Room::Unknown
+            && !room.refused_for(model)
+            && !heads_up::nearly_out(room, model)
+        {
+            self.heads_up.remove(&sid);
+        }
         if self.heads_up.get(&sid).is_some_and(|h| h.is_for(meta.profile_num, week))
             || !heads_up::nearly_out(room, model)
             || !rooms.iter().any(|(p, r)| *p != meta.profile_num && !r.refused_for(model) && *r != quota::Room::Unknown)
