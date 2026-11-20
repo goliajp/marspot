@@ -388,8 +388,11 @@ impl ClaudecodePlugin {
         if held.is_some() || dry {
             return false;
         }
-        // nothing interrupted, so nothing to carry on with
-        if self.start_profile_cycle_to(host, sid, meta.clone(), target, None, choice.clone()) {
+        // A resting pane had nothing interrupted, unless it was told
+        // its account was nearly out: it may have stopped for that.
+        let warned = self.heads_up.get(&sid).is_some_and(|h| h.landed_on(meta.profile_num));
+        let word = (why == rebalance::Why::RunningOut && warned).then(resume_word);
+        if self.start_profile_cycle_to(host, sid, meta.clone(), target, word, choice.clone()) {
             self.rebalanced.insert(sid, (Instant::now(), target));
             return true;
         }

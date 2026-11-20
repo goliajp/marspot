@@ -101,7 +101,7 @@ fn an_account_that_refused_a_pane_is_no_destination() {
         models_measured_at: 1_793_836_800,
         measured_at: 1_793_836_800,
     };
-    let feed = vec![(1u8, room(0.99, 4102444800)), (2u8, room(0.2, 4103049600))];
+    let feed = vec![(1u8, room(0.9, 4102444800)), (2u8, room(0.2, 4103049600))];
     let opus = Some("opus-5-5");
     let target = |seen: &mut seen::Seen| {
         let mut rooms = feed.clone();

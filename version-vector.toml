@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.495"  # a pane is warned once each time its account runs low
+shell   = "0.7.496"  # a pane leaves an account one step from out once it rests, and none is sent there
 core    = "0.12.552"  # a key typed into the last column is not shown before its echo
 session = "0.11.381"  # a key typed into the last column is not shown before its echo
