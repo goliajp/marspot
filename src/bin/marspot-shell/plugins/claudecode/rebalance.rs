@@ -17,6 +17,7 @@
 
 use std::time::Duration;
 
+use super::heads_up::nearly_out;
 use super::quota::{best_profile, needs_fable, Room};
 
 /// How much sooner the other account's week has to renew to be worth a
@@ -42,6 +43,10 @@ pub(super) enum Why {
     KeepsFable,
     /// The other account's week renews this many hours sooner.
     RenewsSooner { hours: i64 },
+    /// Its account is one step from refusing it. Left there, a pane
+    /// that has stopped holds its place until the account runs out,
+    /// which for an account few panes use can be hours.
+    RunningOut,
 }
 
 impl std::fmt::Display for Why {
@@ -49,6 +54,7 @@ impl std::fmt::Display for Why {
         match self {
             Why::KeepsFable => write!(f, "leaves Fable to the panes that need it"),
             Why::RenewsSooner { hours } => write!(f, "its week renews {hours}h sooner"),
+            Why::RunningOut => write!(f, "its account is one step from out"),
         }
     }
 }
@@ -67,8 +73,11 @@ pub(super) fn better_home(rooms: &[(u8, Room)], current: u8, model: Option<&str>
     let target = best_profile(rooms, current, model)?;
     let there = rooms.iter().find(|(p, _)| *p == target).map(|(_, r)| r)?;
     // a restart is paid for with a reading, not with a guess
-    if there.refused_for(model) || !there.known_for(model) {
+    if there.refused_for(model) || !there.known_for(model) || nearly_out(there, model) {
         return None;
+    }
+    if nearly_out(here, model) {
+        return Some((target, Why::RunningOut));
     }
     if !needs_fable(model) {
         match (here.fable_spent(), there.fable_spent()) {
@@ -209,6 +218,38 @@ mod tests {
 
     fn rooms_at(now: i64) -> Vec<(u8, Room)> {
         rooms_for(&[1, 2, 3, 4, 5, 6, 7, 8], &feed(), |p| Some(format!("p{p}")), now)
+    }
+
+    /// The feed at 2026-11-20 05:05 UTC, cut to three accounts. P3's
+    /// Fable is spent and its week is at 99%; an Opus pane was moved
+    /// onto it from P8 to leave P8's Fable alone, and five Opus panes
+    /// were told P3 was nearly out and stayed on it for hours.
+    #[test]
+    fn an_account_one_step_from_out_is_left_and_never_gone_to() {
+        let now = 1_795_158_300;
+        let row = |n: u8, status: &str, u7: f64, reset: i64, fable: f64| CcAccount {
+            name: format!("Claude {n}"),
+            email: format!("p{n}"),
+            status: status.into(),
+            util_5h: None,
+            util_7d: Some(u7),
+            reset_5h: None,
+            reset_7d: Some(reset),
+            model_limits: vec![CcModelLimit { label: "Fable".into(), util: Some(fable), reset: Some(reset) }],
+            collected_at: now - 5,
+            limits_as_of: None,
+            tier: "default_claude_max_20x".into(),
+        };
+        let feed = vec![
+            row(3, "rejected", 0.99, 1_795_323_599, 1.00),
+            row(5, "allowed", 0.00, 1_795_658_399, 0.00),
+            row(8, "allowed", 0.61, 1_795_582_799, 0.67),
+        ];
+        let rooms = rooms_for(&[3, 5, 8], &feed, |p| Some(format!("p{p}")), now);
+        let opus = Some("opus-5-5");
+        assert_eq!(better_home(&rooms, 8, opus), None, "not onto P3 to keep P8's Fable");
+        assert_eq!(best_profile(&rooms, 5, opus), Some(8), "P3 renews first but is one step from out");
+        assert_eq!(better_home(&rooms, 3, opus), Some((8, Why::RunningOut)));
     }
 
     /// Where every pane running that afternoon is sent.
