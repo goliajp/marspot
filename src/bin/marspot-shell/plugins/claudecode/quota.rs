@@ -293,6 +293,8 @@ pub(super) use super::rooms::rooms_for;
 /// after every account known to have room and before the refused: it
 /// may have a whole week or none, and trying it costs one move where
 /// staying costs a pane that cannot work.
+/// An account one step from refusing the pane comes after every
+/// account with more room, whatever its renewal.
 /// Refused accounts last, soonest to come back first, so a caller can
 /// tell "every account is out" from "nowhere else to go".
 ///
@@ -315,8 +317,12 @@ pub(in crate::plugins) fn best_profile(rooms: &[(u8, Room)], current: u8, model:
         // come back, and nothing else.
         let keeps_fable = |r: &Room| tier(r) == 0 && !needs_fable && r.fable_spent();
         let unread = |r: &Room| tier(r) == 0 && !r.known_for(model);
+        // one step from refusing: a pane sent there is moved again
+        // within the hour, or works on under a warning to wind down
+        let low = |r: &Room| tier(r) == 0 && super::heads_up::nearly_out(r, model);
         tier(&a.1)
             .cmp(&tier(&b.1))
+            .then_with(|| low(&a.1).cmp(&low(&b.1)))
             .then_with(|| unread(&a.1).cmp(&unread(&b.1)))
             .then_with(|| keeps_fable(&b.1).cmp(&keeps_fable(&a.1)))
             .then_with(|| {
