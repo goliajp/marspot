@@ -322,6 +322,20 @@ for bin_name, ceiling in baseline.get("binary_size_bytes_max", {}).items():
 
 _bench_latency.add_rows(baseline, cur_dir, mode, row, median, block_host)
 
+# ---- the shipped app in a window: 12 panes' memory ------------------------
+if mode == "full":
+    fp = l3_doc("footprint.json")
+    cfg = baseline.get("app_footprint_12_panes", {})
+    if fp is None:
+        host = {"invalid": "no reading: bin/measure-app-footprint.sh did not finish"}
+    else:
+        host = {"load1": {"start": fp["load1_start"], "max": fp["load1_max"], "end": fp["load1_end"]}}
+        if not fp["all_idle"]:
+            host["invalid"] = "a round was read before the processes went idle"
+    row("app footprint 12 panes", fp["sum_bytes"] / 1024 if fp else None, "KiB",
+        cfg.get("sum_KiB_max"), True, trials=[x / 1024 for x in (fp or {}).get("sum_bytes_samples", [])],
+        host=host)
+
 # ---- print ----------------------------------------------------------------
 VERDICT = {
     "pass": "✓ pass", "fail": "✗ FAIL", "unsure": "? UNSURE", "skip": "- skip",
