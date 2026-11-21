@@ -23,7 +23,7 @@ pub mod metric {
 
     /// Panel width: two columns, each wide enough for the longest
     /// command name and the widest pair of key caps on one row.
-    pub const PANEL_W: f64 = 640.0;
+    pub const PANEL_W: f64 = 720.0;
     /// Between the two columns of groups.
     pub const COLUMN_GAP: f64 = space::S24;
     /// A row's inset above and below its key caps.

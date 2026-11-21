@@ -35,7 +35,7 @@ pub mod metric {
 
     /// Panel width.  Sized for the longest cost line plus the widest
     /// control on the same row, with room to spare.
-    pub const PANEL_W: f64 = 440.0;
+    pub const PANEL_W: f64 = 480.0;
     /// The title line's height -- that of the tallest control, so
     /// every row in a card is the same height whatever it holds.  A
     /// card whose rows jump between two heights reads as broken.
