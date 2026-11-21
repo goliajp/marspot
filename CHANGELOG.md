@@ -4,6 +4,12 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.7.0
+
+- The settings panel is 480 points wide and the keyboard shortcuts
+  panel 720, the widths the other panels use. Before, they were 440
+  and 640, and the two read as narrower than the rest.
+
 ## 0.6.2
 
 - A Codex pane that answers a message from another session now has
