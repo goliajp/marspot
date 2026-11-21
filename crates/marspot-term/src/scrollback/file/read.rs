@@ -63,11 +63,6 @@ impl FileScrollback {
         self.with_body(idx as u64, |body| body.first().is_some_and(|f| f & REC_WRAPPED != 0)).unwrap_or(false)
     }
 
-    pub fn approx_bytes(&self) -> usize {
-        // what is held in process, not what is on disk
-        self.ring.bytes()
-    }
-
     /// A view of the history for the search worker: its own handles on
     /// the files, so it reads in parallel with the writer.  A segment
     /// the writer uses again while the search reads it answers "gone"

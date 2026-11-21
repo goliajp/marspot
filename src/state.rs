@@ -628,7 +628,7 @@ mod tests {
             "/Users/u/Library/Application Support/marspot/binaries/pending/marspot-shell",
             "/w/target/release/marspot-core",
             "/w/target/debug/build/marspot/0100c0c45907a006/out/marspot_core",
-            "/w/target/debug/mcli",
+            "/w/target/debug/marspot",
             "",
         ] {
             assert!(!is_cargo_test_executable(Path::new(shipped)), "{shipped}");

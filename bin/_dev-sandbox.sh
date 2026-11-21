@@ -153,8 +153,7 @@ mkdir() {
 }
 dev_seed_session_base
 
-# Write down a pid this script launched (a shell, a standalone marspot,
-# an mcli), so dev_kill_shell_core can find it again.  shell.pid alone
+# Write down a pid this script launched (a shell), so dev_kill_shell_core can find it again.  shell.pid alone
 # is not enough: each shell overwrites it, and an earlier one that is
 # still running would be lost.
 dev_record_pid() {
@@ -170,7 +169,7 @@ _dev_is_ours() {
   [[ $p =~ ^[0-9]+$ ]] || return 1
   comm=$(ps -o comm= -p "$p" 2>/dev/null) || return 1
   case "${comm##*/}" in
-    marspot|marspot-shell|marspot-core|marspot-session|mcli) ;;
+    marspot-shell|marspot-core|marspot-session) ;;
     *) return 1 ;;
   esac
   ps -ww -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' \
@@ -319,7 +318,7 @@ dev_kill_shell_core() {
   for p in $pids; do
     comm=$(ps -o comm= -p "$p" 2>/dev/null) || continue
     case "${comm##*/}" in
-      marspot|marspot-shell|marspot-core|mcli) upper+=("$p") ;;
+      marspot-shell|marspot-core) upper+=("$p") ;;
     esac
   done
   # kill(1) succeeds when any one pid took the signal, so `kill -0` over

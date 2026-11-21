@@ -32,10 +32,10 @@ source "$ROOT/bin/_lib.sh"
 terminal=${1:?usage: scrollback-1m.sh <terminal> <out-json>}
 out_json=${2:?usage: scrollback-1m.sh <terminal> <out-json>}
 
-# What process name to sample.  For marspot we sample mcli, since this
-# scenario uses the single-session binary (see dispatch).
+# What process name to sample.  For marspot: shell, core and the one
+# session of the bench sandbox (see pids_of in bin/_lib.sh).
 case "$terminal" in
-  marspot) sample_proc=mcli ;;
+  marspot) sample_proc=marspot ;;
   *)    sample_proc=$terminal ;;
 esac
 
@@ -104,11 +104,9 @@ WIN_IDS_FILE="$RUN_DIR/window-ids.txt"
 dispatch() {
   case "$terminal" in
     marspot)
-      # Use mcli (single-session) — marspot auto-spawns 9 and applies the
-      # same MARSPOT_SHELL to every one, which would push 9× the bytes.
+      # one window, one pane: the worker runs once
       kill_app marspot || true
-      kill_app mcli || true
-      "$ROOT/bin/drivers/marspot.sh" run-shell-mcli "$WORKER"
+      "$ROOT/bin/drivers/marspot.sh" run-app "$WORKER"
       ;;
     iterm)
       "$ROOT/bin/drivers/iterm.sh" run-windows 1 "$WORKER" > "$WIN_IDS_FILE"
@@ -184,7 +182,7 @@ post_kib=$(rss_total_kib "$sample_proc" || echo 0)
 disk_post_kib=$(du_kib "$disk_dir")
 
 case "$terminal" in
-  marspot) kill_app marspot || true; kill_app mcli || true ;;
+  marspot) kill_app marspot || true ;;
 esac
 
 # ---- aggregate --------------------------------------------------------

@@ -5,8 +5,7 @@
 //!
 //! The shape mirrors winit's `ApplicationHandler` (resumed → events
 //! → user_event) but on a smaller surface — only the events Marspot
-//! actually consumes.  Lives in the lib because both `marspot` and
-//! `mcli` use it.
+//! actually consumes.  `marspot-shell` is the one binary that runs it.
 //!
 //! ## Threading
 //!
@@ -83,9 +82,8 @@ pub trait MarspotApp: 'static {
     fn mouse_down(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64, modifiers: Modifiers);
 
     /// Right-mouse-down (AppKit `rightMouseDown:`).  Same coord
-    /// convention as `mouse_down`.  Default no-op so existing apps
-    /// (mcli / shell / snapshot) don't have to care — Marspot
-    /// itself overrides to drive the context menu.
+    /// convention as `mouse_down`.  Default no-op for apps that have
+    /// no context menu.
     ///
     /// Note: macOS converts Ctrl-Left-Click into rightMouseDown by
     /// default at the AppKit layer (`controlMouseClicksOpenMenus`
@@ -163,8 +161,7 @@ pub trait MarspotApp: 'static {
 
     /// IME preedit ("marked text") changed.  Empty string means the
     /// composition was committed or cancelled.  Apps that render an
-    /// inline preview override this; default is a no-op so mcli /
-    /// snapshot paths don't have to care.
+    /// inline preview override this; default is a no-op.
     fn ime_preedit_changed(&mut self, _ctx: &MarspotAppCtx, _text: &str) {}
 
     /// Fired when a previous `ctx.request_redraw()` is being honoured.
@@ -388,8 +385,7 @@ pub struct WindowAttrs {
     pub height_logical: f64,
     /// Window background (sRGB 0..1), painted from the first frame
     /// before any renderer attaches.  Shell passes terminal-black so
-    /// a core swap never flashes a lighter band; standalone marspot /
-    /// mcli pass the chrome panel tone.
+    /// a core swap never flashes a lighter band.
     pub bg: (f64, f64, f64),
     /// When `Some`, the window opens at exactly this frame (screen
     /// points, bottom-left origin — `window_frame_pt`'s output)

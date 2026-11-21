@@ -76,11 +76,10 @@ WIN_IDS_FILE="$RUN_DIR/window-ids.txt"
 dispatch() {
   case "$terminal" in
     marspot)
-      # marspot is the SUT and not the user's daily driver in this repo —
-      # killing it is fine.  Auto-spawns 9 sessions in 3×3 grid;
-      # MARSPOT_SHELL is per-session so all 9 run our worker.sh.
+      # the SUT runs in a sandbox of its own: N windows of one pane
+      # each, every pane's shell our worker.sh.
       kill_app marspot || true
-      "$ROOT/bin/drivers/marspot.sh" run-shell "$WORKER"
+      "$ROOT/bin/drivers/marspot.sh" run-app "$WORKER" "$N"
       ;;
     iterm)
       # Open 9 fresh windows; capture their window IDs so we can close

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Generate the bench scenario files used by `bin/measure.sh` and the marspot
+# Generate the bench scenario files used by the live measurements
+# (bin/measure-l3.sh, bin/_remote-measure-others-mini.sh) and the marspot
 # `--bench` modes.  Outputs go in `bench/scenarios/`.
 #
 # Re-run any time the scenario definitions change.  The files are

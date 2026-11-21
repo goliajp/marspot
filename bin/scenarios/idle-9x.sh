@@ -84,7 +84,7 @@ dispatch() {
   case "$terminal" in
     marspot)
       kill_app marspot || true
-      "$ROOT/bin/drivers/marspot.sh" run-shell "$WORKER"
+      "$ROOT/bin/drivers/marspot.sh" run-app "$WORKER" "$N"
       ;;
     iterm)
       "$ROOT/bin/drivers/iterm.sh" run-windows "$N" "$WORKER" > "$WIN_IDS_FILE"
@@ -162,7 +162,7 @@ while [[ $(date +%s) -lt $deadline ]]; do
 done
 trap - INT
 
-# Tear down our SUT (marspot / mcli) directly; close foreign-terminal
+# Tear down our SUT (marspot) directly; close foreign-terminal
 # bench windows by tracked id (the EXIT trap also runs cleanup_windows
 # in case we got interrupted before reaching here).
 case "$terminal" in

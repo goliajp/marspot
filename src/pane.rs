@@ -1,9 +1,9 @@
 //! Single-session pane — the unit of single-terminal behavior shared
 //! by every binary in this workspace.
 //!
-//! `mcli` holds exactly one `Pane`. `marspot` (the multi-session
-//! container) holds a `Vec<Pane>` plus a `Layout` that assigns cell
-//! rects and dispatches the focused pane. The deliberate consequence:
+//! `marspot-core` (the multi-session container) holds a `Vec<Pane>`
+//! per window plus a `Layout` that assigns cell rects and dispatches
+//! the focused pane. The deliberate consequence:
 //! any single-session feature — key handling, scroll-into-scrollback,
 //! resize-with-chrome-inset, future selection / vim mode / search /
 //! find — lands in `Pane` and is automatically picked up by every
@@ -45,11 +45,11 @@ use crate::tools::{search_bar::SearchBar, search_list::SearchList};
 use crate::terminal::Terminal;
 use crate::ui::strings::{self, t, Arg, Msg};
 
-/// One pane's backend: a locally forked PTY (the legacy / mcli /
-/// bench path) or a shelld-managed session (marspot's live-update
-/// path).  Same observable interface; the GUI / Pane don't need to
-/// branch on which is in use except where shelld-specific affordances
-/// (session id, reattach) come into play.
+/// One pane's backend: a locally forked PTY (the bench / test path)
+/// or an L3 `marspot-session` process (the shipped path).  Same
+/// observable interface; the GUI / Pane don't need to branch on which
+/// is in use except where L3-specific affordances (session id,
+/// reattach) come into play.
 //
 // The two variants differ by ~2 KB: `Local` carries the whole parser
 // and grid inline.  Boxing it would put a pointer chase on every PTY
@@ -579,28 +579,6 @@ impl PaneBackend {
         }
     }
 
-    /// Forward raw bytes into the terminal without going through the
-    /// PTY.  Only meaningful for the local backend (tmux-CC dispatch
-    /// path); shelld owns the byte stream end-to-end, so the
-    /// container doesn't get an extracted-payload entry point here.
-    /// Calling on a shelld backend is a no-op (callers can branch
-    /// before; this kept lenient to ease the transition).
-    pub fn feed_terminal(&mut self, bytes: &[u8]) {
-        match self {
-            PaneBackend::Local(s) => s.feed_terminal(bytes),
-            PaneBackend::L3(_) | PaneBackend::Vacant(_) => {}
-        }
-    }
-
-    /// Drain raw PTY bytes without feeding the terminal.  Same
-    /// lenience as `feed_terminal`: only the local backend has a
-    /// meaningful implementation.
-    pub fn drain_raw(&mut self) -> Vec<u8> {
-        match self {
-            PaneBackend::Local(s) => s.drain_raw(),
-            PaneBackend::L3(_) | PaneBackend::Vacant(_) => Vec::new(),
-        }
-    }
 }
 
 /// L2's handle on a per-session L3 process (`marspot-session`).
@@ -1306,8 +1284,7 @@ impl PaneSearch {
 }
 
 impl Pane {
-    /// Wrap an already-spawned local Session.  The legacy entry
-    /// point — mcli, bench, tests, and tmux-CC dispatch land here.
+    /// Wrap an already-spawned local Session (benches and tests).
     pub fn new(session: Session) -> Self {
         Self {
             session: PaneBackend::Local(session),
@@ -1579,9 +1556,7 @@ impl Pane {
     /// was sub-line or clamped at an edge.
     ///
     /// Sign / invert / accel multipliers live in the caller — Pane
-    /// only knows about rows and scrollback bounds. mcli and marspot
-    /// share this so both stay in lockstep on scrollback semantics
-    /// while keeping flexible window-level scroll-direction prefs.
+    /// only knows about rows and scrollback bounds.
     pub fn apply_scroll_lines(&mut self, delta: i32) -> bool {
         if delta == 0 {
             return false;
@@ -1803,8 +1778,7 @@ impl Pane {
     /// Build a `SessionView` snapshot for the renderer. `focused`
     /// tells the renderer whether to draw the cursor filled (active
     /// pane) or hollow (background pane); `title` is the chrome title
-    /// strip text (empty for mcli — it has no per-pane chrome above
-    /// the grid).
+    /// strip text (empty skips the strip).
     ///
     /// Non-focused panes render at `view_offset = 0` (live tail) so
     /// the layout reads "the focused pane shows whatever history I

@@ -82,12 +82,12 @@ child processes of the app and go when it does.
 cargo build --release
 ```
 
-Five binaries come out. Three of them are the terminal: `marspot-shell`
+Three of the binaries that come out are the terminal: `marspot-shell`
 owns the window and supervises, `marspot-core` draws, and one
 `marspot-session` runs per pane and owns that pane's pty — a pane that
-crashes takes nothing else with it. `mcli` is a single-session
-companion, and `marspot` is a single-process build of the same engine,
-useful for working on the renderer without the other two.
+crashes takes nothing else with it. `marspot-peer` carries messages
+between the agent sessions running in panes. `marspot` opens no window:
+it holds the headless benchmarks (`marspot --bench <mode>:<arg>`).
 
 ## Performance
 

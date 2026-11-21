@@ -37,7 +37,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 /// F2 — file-backed scrollback is on whenever a session id is present
-/// (L3 `marspot-session` process).  mcli / `--snapshot` / tests don't
+/// (L3 `marspot-session` process).  Benches / `--snapshot` / tests don't
 /// set `MARSPOT_SESSION_ID` and so fall through to in-RAM Memory.  The
 /// old `MARSPOT_FILE_SCROLLBACK` / `MARSPOT_DISK_SCROLLBACK` opt-out
 /// gates were removed after F1 soaked; both were no-ops for the live
@@ -565,7 +565,7 @@ impl Terminal {
         // ENOSPC) — those fall back to in-RAM Memory so the session
         // still boots, and the failure lands in marspot.log (the old
         // eprintln went to /dev/null: L3's stderr is nulled).
-        // Tests / mcli / --snapshot don't set the env and so go
+        // Tests / benches / --snapshot don't set the env and so go
         // straight to Memory.
         let scrollback = if let Some(sid) = file_scrollback_session_id() {
             match crate::scrollback::Scrollback::file(

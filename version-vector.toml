@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.498"  # a codex turn started by a peer message sends its answer back to the asker
-core    = "0.12.553"  # settings panel 480 pt wide, shortcuts panel 720 pt, on the width tiers
-session = "0.11.381"  # a key typed into the last column is not shown before its echo
+core    = "0.12.554"  # the single-process app, mcli and the tmux module are gone; marspot keeps only its headless tools
+session = "0.11.382"  # the tmux module and the legacy memory-estimate helpers are gone

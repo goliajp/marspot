@@ -100,7 +100,7 @@ cleanup_windows() {
 }
 
 case "$terminal" in
-  marspot)     sample_proc=mcli ;;
+  marspot)     sample_proc=marspot ;;
   *)        sample_proc=$terminal ;;
 esac
 baseline_kib=$(rss_total_kib "$sample_proc" || echo 0)
@@ -111,9 +111,9 @@ trap '{ cleanup_windows; rm -rf "$RUN_DIR"; restore_focus_to "$USER_APP"; } || t
 
 case "$terminal" in
   marspot)
-    # mcli (single-session) — vim drives the workload itself.
-    kill_app marspot || true; kill_app mcli || true
-    "$ROOT/bin/drivers/marspot.sh" run-shell-mcli "$WORKER"
+    # one window, one pane — vim drives the workload itself.
+    kill_app marspot || true
+    "$ROOT/bin/drivers/marspot.sh" run-app "$WORKER"
     ;;
   iterm)
     "$ROOT/bin/drivers/iterm.sh" run-windows 1 "$WORKER" > "$WIN_IDS_FILE"
@@ -141,7 +141,7 @@ post_kib=$(rss_total_kib "$sample_proc" || echo 0)
 [[ -z "$post_kib" ]] && post_kib=0
 
 case "$terminal" in
-  marspot) kill_app marspot || true; kill_app mcli || true ;;
+  marspot) kill_app marspot || true ;;
 esac
 
 # ---- aggregate -------------------------------------------------------

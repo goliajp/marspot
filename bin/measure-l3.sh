@@ -10,10 +10,9 @@
 #                                          scenario at once
 #                                          -> bench/results/l3-multi.json
 #
-# Why this exists: bin/measure.sh drives the standalone `mcli` binary (one
-# in-process session, no IPC/shm hop).  That is not the architecture the
-# product ships: every pane's bytes go through its own marspot-session
-# process (parser → grid → shm publish).
+# Why this exists: every pane's bytes go through its own marspot-session
+# process (parser → grid → shm publish), and that is the path a user's
+# throughput comes from.
 #
 # What it drives: the `l3_throughput` example spawns marspot-session
 # directly and feeds it the scenario.  The shell and the core are not on

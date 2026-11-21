@@ -378,8 +378,8 @@ impl LocalSession {
     /// L3 owns the pty in the shipped architecture, so if this does not
     /// happen here it does not happen at all — and until 2026-08-19 it
     /// did not.  The in-process path
-    /// (`marspot_term::session::Session::pump`, which is what mcli and
-    /// the bench harness drive) has always forwarded them, so every
+    /// (`marspot_term::session::Session::pump`, which is what the
+    /// bench harness drives) has always forwarded them, so every
     /// test and every measurement saw a terminal that answers while
     /// every real pane ran one that stays silent.
     ///

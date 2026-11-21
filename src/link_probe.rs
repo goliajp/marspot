@@ -280,7 +280,7 @@ pub fn install() {
 /// The oracle the render path should use.
 ///
 /// Falls back to the blocking [`FsOracle`] when nothing was installed
-/// — that is the right answer for one-shot callers (tests, `mcli`,
+/// — that is the right answer for one-shot callers (tests,
 /// `--snapshot`), which want a definite verdict on the first and only
 /// frame they will ever draw, and which are not a render loop.
 pub fn oracle() -> &'static dyn PathOracle {

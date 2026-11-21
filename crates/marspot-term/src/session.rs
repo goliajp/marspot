@@ -9,9 +9,7 @@
 //! The caller supplies a `wake` callback that the reader thread invokes
 //! whenever new bytes are available (or the child has exited).  The
 //! caller's event loop then calls [`Session::pump`] to drain those
-//! bytes through the parser into the grid.  This decoupling is what
-//! lets the same Session power both `marspot` (multi-terminal grid app)
-//! and `mcli` (single-terminal standalone app).
+//! bytes through the parser into the grid.
 
 use std::io;
 use std::os::raw::c_int;
@@ -29,10 +27,8 @@ use std::time::{Duration, Instant};
 /// open with a reverse-video `%`. Sources the user's real `.zshrc`
 /// first so their normal init still runs.
 ///
-/// Used to live in `marspot`'s `main.rs`; moved here so every binary
-/// that calls `Session::spawn` — current and future — picks up the
-/// same shell sanitisation automatically. `mcli` and `marspot` are
-/// in lockstep here as a result.
+/// Lives here so every binary that calls `Session::spawn` picks up
+/// the same shell sanitisation automatically.
 fn install_shell_zdot_shim() {
     let home = match std::env::var("HOME") {
         Ok(h) => h,
@@ -123,8 +119,7 @@ pub fn ensure_zdot_shim_for_external_shells() {
 }
 
 /// Idempotent gate around `install_shell_zdot_shim`. `Session::spawn`
-/// calls this so every binary in the workspace (mcli, marspot, future
-/// binaries) gets identical shell-init behavior without each having
+/// calls this so every binary in the workspace gets identical shell-init behavior without each having
 /// to remember to call it at main().
 fn ensure_shell_zdot_shim_installed() {
     static INSTALLED: OnceLock<()> = OnceLock::new();
@@ -476,10 +471,8 @@ impl Session {
     }
 
     /// Drain pending bytes from the reader thread *without* feeding
-    /// the terminal.  The caller takes responsibility for routing —
-    /// useful when something other than the VT parser owns the byte
-    /// stream first (e.g. tmux control mode, where `tmux::Parser`
-    /// extracts the per-pane output that then goes to `feed_terminal`).
+    /// the terminal.  The caller takes responsibility for the bytes —
+    /// the PTY drain bench reads them and drops them.
     pub fn drain_raw(&mut self) -> Vec<u8> {
         let mut out = Vec::new();
         while let Ok(chunk) = self.rx.try_recv() {
@@ -492,9 +485,7 @@ impl Session {
     }
 
     /// Feed bytes directly into this session's terminal, bypassing
-    /// the channel.  Companion to [`drain_raw`](Self::drain_raw):
-    /// after the caller's own parser has extracted the payload bytes
-    /// from a wire-format chunk, those bytes are handed back here.
+    /// the channel.
     pub fn feed_terminal(&mut self, bytes: &[u8]) {
         self.terminal.feed(bytes);
     }

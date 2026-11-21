@@ -95,6 +95,5 @@ pub mod session_state;
 pub mod settings;
 pub mod shell_proto;
 pub mod terminal;
-pub mod tmux;
 pub mod uds_session_client;
 pub mod updater;

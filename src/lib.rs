@@ -152,7 +152,5 @@ pub mod ui;
 /// the header centers on the same row, so the header reads as a single
 /// line rather than two stacked strips.
 ///
-/// Shared between binaries so a single-session consumer (mcli) gets
-/// the same window chrome as the multi-session container (marspot)
-/// automatically.  `Layout::build` takes it as `top_inset`.
+/// `Layout::build` takes it as `top_inset`.
 pub const HEADER_PT: f64 = 32.0;

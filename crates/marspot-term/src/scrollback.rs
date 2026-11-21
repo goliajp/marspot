@@ -45,7 +45,7 @@ pub enum Scrollback {
     /// hot read served from RAM ring, cold reads `pread()` the
     /// file.  Wrapped flag per line stored in the record (Grid's
     /// `sb_wrapped` mirror stays the in-RAM truth for the Memory
-    /// variant, which mcli / `--snapshot` / tests use).
+    /// variant, which benches / `--snapshot` / tests use).
     File(FileScrollback),
 }
 
@@ -373,16 +373,6 @@ impl Scrollback {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-
-    /// Approximate resident bytes held by this scrollback for the
-    /// MARSPOT_PROFILE_RSS sampler.  Memory variant: lazy-grown
-    /// `Vec<Cell>` capacity.  File variant: hot-RAM bytes + headroom.
-    pub fn approx_bytes(&self) -> usize {
-        match self {
-            Self::Memory(m) => m.approx_bytes(),
-            Self::File(f) => f.approx_bytes(),
-        }
     }
 
     /// Drop all content and re-init for a new column width.  Used

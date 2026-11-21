@@ -148,16 +148,6 @@ impl CoreTextFontTable {
         self.inner.read().unwrap_or_else(|e| e.into_inner()).by_name.get(key).copied()
     }
 
-    /// What the name dedup costs, the same way the rest of
-    /// `FontCache::approx_bytes` counts: bucket overhead as one extra
-    /// `usize` per slot, plus the names themselves.
-    pub fn approx_name_bytes(&self) -> usize {
-        let t = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        let entry = std::mem::size_of::<String>() + std::mem::size_of::<usize>();
-        t.by_name.capacity() * (entry + std::mem::size_of::<usize>())
-            + t.by_name.keys().map(|k| k.capacity()).sum::<usize>()
-    }
-
     /// How many fonts there are; ids run from 0 to this.
     pub fn len(&self) -> usize {
         self.inner.read().unwrap_or_else(|e| e.into_inner()).fonts.len()
@@ -776,23 +766,6 @@ impl FontCache {
         (self.cell_w, self.cell_h)
     }
 
-    /// Approximate resident bytes for instrumentation
-    /// (MARSPOT_PROFILE_RSS).  Counts the `(codepoint, style) → glyph`
-    /// HashMap and the FontRegistry's bookkeeping (Vec<CTFont>
-    /// pointer slots + by_name keys).  CTFont's underlying font data
-    /// lives in CoreText's heap and isn't counted here — it shows up
-    /// in the `other` bucket.  HashMap bucket overhead is approximated
-    /// as one extra `usize` per slot; same simplification as
-    /// `GlyphAtlas::approx_bytes`.
-    pub fn approx_bytes(&self) -> usize {
-        let char_entry =
-            std::mem::size_of::<(u32, u8)>() + std::mem::size_of::<(usize, CGGlyph)>();
-        let char_cache_bytes =
-            self.char_cache.capacity() * (char_entry + std::mem::size_of::<usize>());
-        let fonts_vec_bytes =
-            self.fonts.pt_size.capacity() * std::mem::size_of::<CTFont>();
-        char_cache_bytes + fonts_vec_bytes + self.fonts.fonts.approx_name_bytes()
-    }
 }
 
 pub fn lookup_glyph(font: &CTFont, ch: char) -> CGGlyph {

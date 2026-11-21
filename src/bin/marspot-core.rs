@@ -6,17 +6,12 @@
 //! attaches to shelld sessions, and processes input forwarded over
 //! the control socket.
 //!
-//! Feature parity with the standalone `marspot` binary's non-tmux
-//! mode: 9-grid (all `LayoutMode`s via the [layout] picker), sidebar
+//! Features: 9-grid (all `LayoutMode`s via the [layout] picker), sidebar
 //! with focus rows / close [×] / add [+], click-to-focus, per-pane
 //! scrollback scrolling, drag selection (linewise + Option-blockwise)
 //! with Cmd-C copy, cell-title editing, IME preedit rendering, and
 //! Cmd-B sidebar toggle.  The shared state shapes and pure logic
-//! live in `marspot::ui`; this file owns the socket-event plumbing
-//! the way src/main.rs owns the AppKit plumbing.
-//!
-//! Out of scope (standalone-only): tmux -CC mode, latency / RSS
-//! profiling instrumentation, --snapshot / --bench.
+//! live in `marspot::ui`; this file owns the socket-event plumbing.
 
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;

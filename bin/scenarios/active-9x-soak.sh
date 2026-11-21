@@ -108,7 +108,7 @@ dispatch() {
   case "$terminal" in
     marspot)
       kill_app marspot || true
-      "$ROOT/bin/drivers/marspot.sh" run-shell "$WORKER"
+      "$ROOT/bin/drivers/marspot.sh" run-app "$WORKER" "$N"
       ;;
     iterm)
       "$ROOT/bin/drivers/iterm.sh" run-windows "$N" "$WORKER" > "$WIN_IDS_FILE"
