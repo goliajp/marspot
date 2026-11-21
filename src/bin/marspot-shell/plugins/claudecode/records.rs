@@ -88,7 +88,9 @@ pub(super) fn background_session_holder(config_dir: &Path, uuid: &str) -> Option
             continue;
         }
         let Some(id) = record_holder(&path, pid) else { continue };
-        let idle = json_string_field(&body, "\"status\":\"").as_deref() == Some("idle");
+        // waiting is on a question or a permission: nothing in flight,
+        // and the question is in the transcript the pane resumes
+        let idle = matches!(json_string_field(&body, "\"status\":\"").as_deref(), Some("idle" | "waiting"));
         return Some(BackgroundHolder { id, idle });
     }
     None
