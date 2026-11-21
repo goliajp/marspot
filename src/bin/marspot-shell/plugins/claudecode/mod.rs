@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing god file: the claudecode plugin; to be split by concern; shrink on every touch
 //! marspot-claudecode plugin — first marspot plugin.
 //!
 //! ## What it does (M2)

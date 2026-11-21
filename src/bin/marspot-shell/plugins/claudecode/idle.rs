@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: idle reclamation evidence and the park and restore script; shrink on every touch
 //! When a pane's claude is reclaimed, and what it takes to bring it
 //! back.
 //!

@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the transcript scan and the worker thread it runs on; shrink on every touch
 //! The scan that feeds every tick, and the thread it runs on.
 //!
 //! Binding panes to claude sessions means reading transcripts off the

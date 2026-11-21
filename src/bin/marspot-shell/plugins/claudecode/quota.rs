@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: choosing the profile that has room left; shrink on every touch
 //! Which profile has room left.
 //!
 //! Eight accounts back the profiles on this machine, and their limits
