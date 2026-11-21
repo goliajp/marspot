@@ -96,6 +96,8 @@ mod tests {
         let line = format!("(cd '{}' && exec sleep 5)\n", dir.display());
         std::io::Write::write_all(&mut master, line.as_bytes()).unwrap();
         let in_front = wait_for(|| proc_row(pid).is_some_and(|r| r.tty_fg_pgid > 0 && r.tty_fg_pgid != r.pgid));
+        // the subshell is in front from its fork, before its `cd` has run
+        let _ = wait_for(|| pane_cwd(pid).as_deref() == Some(dir.as_path()));
         let seen = pane_cwd(pid);
         let shell_dir = proc_cwd(pid);
         let _ = sh.kill();
