@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing god file: the L2 renderer and input-dispatch process; to be split by concern; shrink on every touch
 //! marspot-core — the renderer + input-dispatch half of the
 //! silent-update split.
 //!

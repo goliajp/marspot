@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: font, fallback and colour resolution shared by the renderers; shrink on every touch
 //! Font + colour resolution shared across renderers.
 //!
 //! Both `render.rs` (AppKit/CGImage path) and `render_metal.rs` (CAMetalLayer

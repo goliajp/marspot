@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the window layout of sidebar and session cells; shrink on every touch
 //! Window layout: where each session and the sidebar live, in
 //! physical pixels.
 //!

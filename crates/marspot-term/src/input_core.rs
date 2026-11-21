@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the GUI-free key event to terminal bytes encoder; shrink on every touch
 //! Translate keyboard events into terminal bytes — the GUI-free half.
 //!
 //! Lives in `marspot-term` (no AppKit/Metal/CoreText) so the light

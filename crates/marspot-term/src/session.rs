@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: one terminal instance owning its PTY, reader thread and terminal state; shrink on every touch
 //! Session: one independent terminal instance.
 //!
 //! A Session owns its own PTY (and the child shell), its own Terminal

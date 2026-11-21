@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing god file: the Metal renderer; to be split by concern; shrink on every touch
 //! Metal-backed renderer (in progress).
 //!
 //! Replaces the AppKit/CGImage/setContents path (`render.rs`) with

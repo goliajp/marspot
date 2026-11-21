@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the headless developer tools binary; shrink on every touch
 //! The `marspot` binary: windowless developer tools.
 //!
 //! The product is `marspot-shell`, `marspot-core` and `marspot-session`;

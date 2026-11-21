@@ -1,3 +1,4 @@
+// CARVE-OUT: snapshot tests, one offscreen picture per panel compared with a committed PNG
 //! One offscreen picture per panel, compared with a committed PNG.
 //!
 //! The panels are meant to look like one program: same header,

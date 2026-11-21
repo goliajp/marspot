@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: glyph rasterising, packing, lookup and eviction; shrink on every touch
 //! Glyph atlas — packs rasterised glyphs into a texture the glyph pass
 //! samples, and looks them up by `(font_id, glyph_id)`.
 //!

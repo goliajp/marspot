@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: render data types and box-drawing helpers; shrink on every touch
 //! Render-layer data types + box-drawing helpers.
 //!
 //! This module used to host an AppKit/CGContext-based `Renderer`
