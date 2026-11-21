@@ -312,9 +312,12 @@ for label, name, block, key in (
             trials=xs, host=block_host(block))
 
 for bin_name, ceiling in baseline.get("binary_size_bytes_max", {}).items():
+    if bin_name.startswith("_"):
+        continue
     xs = samples(f"size-{bin_name}.txt", int)
-    if not bin_name.startswith("_") and xs:
-        row(f"size {bin_name}", xs[0], "bytes", ceiling, True, trials=xs, stat="exact")
+    # a ceiling with no reading is a check that did not run, not a pass
+    row(f"size {bin_name}", xs[0] if xs else None, "bytes", ceiling, True, trials=xs,
+        stat="exact", host=None if xs else {"invalid": f"no size reading for {bin_name}: not built?"})
 
 # ---- print ----------------------------------------------------------------
 VERDICT = {
