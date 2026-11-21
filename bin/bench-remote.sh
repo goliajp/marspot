@@ -217,9 +217,10 @@ ssh "$HOST" "
   # across a compile, which is the trade the global rule takes.
   # The pid file lives exactly as long as the run, so the cleanup never
   # signals a process group that has since been reused.
+  # The build half gets the same arguments: --full builds more.
   rc=0
   $LOCK_CMD caffeinate -dims bin/_bounded.sh $TIMEOUT sh -c \
-    './bin/bench.sh --build-only && exec ./bin/bench.sh --no-build $ARGS_Q' || rc=\$?
+    './bin/bench.sh --build-only $ARGS_Q && exec ./bin/bench.sh --no-build $ARGS_Q' || rc=\$?
   rm -f $REMOTE_PIDF
   exit \$rc
 " </dev/null

@@ -37,6 +37,7 @@ import sys
 sys.dont_write_bytecode = True  # no __pycache__ next to the scripts
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _bench_record  # noqa: E402
+import _bench_latency  # noqa: E402
 
 STALE_DAYS = 14
 
@@ -318,6 +319,8 @@ for bin_name, ceiling in baseline.get("binary_size_bytes_max", {}).items():
     # a ceiling with no reading is a check that did not run, not a pass
     row(f"size {bin_name}", xs[0] if xs else None, "bytes", ceiling, True, trials=xs,
         stat="exact", host=None if xs else {"invalid": f"no size reading for {bin_name}: not built?"})
+
+_bench_latency.add_rows(baseline, cur_dir, mode, row, median, block_host)
 
 # ---- print ----------------------------------------------------------------
 VERDICT = {
