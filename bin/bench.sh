@@ -414,6 +414,12 @@ fi
 # ---- gate evaluation ---------------------------------------------------
 
 # Verdicts, the table, the kept record and the history: bin/_bench_gate.py.
+# Its staleness rule is checked first: a gate that can no longer tell an
+# old competitor snapshot from a fresh one must not print a comparison.
+if [[ "$MODE" == "full" ]]; then
+  python3 "$ROOT/bin/_bench_gate.py" --self-test | tail -1
+  [[ ${PIPESTATUS[0]} -eq 0 ]] || { echo "bin/_bench_gate.py --self-test failed" >&2; exit 1; }
+fi
 set +e
 python3 "$ROOT/bin/_bench_gate.py" "$BASELINE" "$CUR_DIR" "$MODE" "$UPDATE" "$ROOT"
 PERF_RC=$?
