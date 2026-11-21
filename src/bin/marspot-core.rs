@@ -2863,11 +2863,9 @@ struct WindowState {
     /// It travels with the frame: announcing it before the surface is
     /// shown would point the IME at a position the user cannot see yet.
     pending_caret: Option<(f64, f64, f64, f64)>,
-    /// Has this window ever completed a frame?  Drives one INFO line
-    /// per window — "did this window ever paint" is the first question
-    /// asked of a black window, and the per-frame log is sampled 1-in-8
-    /// so a quiet window can leave no trace of painting at all.
-    painted_once: bool,
+    /// Its first frame, and its first frame showing every pane's own
+    /// output: one INFO line each (`frames::note_drawn`).
+    first_frames: frames::FirstFrames,
     /// The renderer state that cannot be shared with the other
     /// windows — this window's per-pane instance caches and its own
     /// "still owes a clear" flag.  Everything else the renderer holds
@@ -3021,7 +3019,7 @@ impl WindowState {
             surfaces: None,
             last_render_at: None,
             pending_caret: None,
-            painted_once: false,
+            first_frames: frames::FirstFrames::default(),
             render: marspot::render_metal::WindowRender::new(),
             layout: Layout::build(
                 w_phys,
@@ -7906,26 +7904,7 @@ impl CoreApp {
         // the order matters, because this reset runs after the frame
         // and would otherwise wipe the request for the next one.
         win!(self, wi).needs_render = fading;
-        // One INFO per window, the first time it paints.  Emitted here
-        // rather than in the render pass because the attach branch
-        // renders too — and that is precisely how the boot window gets
-        // its first frame after a core swap, so a check placed in the
-        // pass alone reports a perfectly healthy window as frozen.
-        if !win!(self, wi).painted_once {
-            win!(self, wi).painted_once = true;
-            let surface_id = win!(self, wi)
-                .surfaces
-                .as_ref()
-                .map(|s| s.writing_surface_id())
-                .unwrap_or(0);
-            lx_event!(
-                "WINDOW_FIRST_FRAME",
-                "window painted its first frame",
-                window_id = win!(self, wi).window_id,
-                surface_id = surface_id,
-                panes = win!(self, wi).panes.len()
-            );
-        }
+        frames::note_drawn(&mut win!(self, wi), cell_count);
 
         win!(self, wi).panes.get(focused).and_then(|pane| {
             let (col, row) = pane.session().ime_caret_cell()?;

@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.501"  # basic files over the size limit carry a carve-out marker
-core    = "0.12.557"  # basic files over the size limit carry a carve-out marker
+core    = "0.12.558"  # WINDOW_FIRST_CONTENT: the first frame showing every pane's output, once the shell reports it shown
 session = "0.11.384"  # basic files over the size limit carry a carve-out marker

@@ -322,6 +322,31 @@ for bin_name, ceiling in baseline.get("binary_size_bytes_max", {}).items():
 
 _bench_latency.add_rows(baseline, cur_dir, mode, row, median, block_host)
 
+# ---- the shipped app in a window: 12 panes' memory, time to first output ---
+if mode == "full":
+    fp = l3_doc("footprint.json")
+    cfg = baseline.get("app_footprint_12_panes", {})
+    if fp is None:
+        host = {"invalid": "no reading: bin/measure-app-footprint.sh did not finish"}
+    else:
+        host = {"load1": {"start": fp["load1_start"], "max": fp["load1_max"], "end": fp["load1_end"]}}
+        if not fp["all_idle"]:
+            host["invalid"] = "a round was read before the processes went idle"
+    row("app footprint 12 panes", fp["sum_bytes"] / 1024 if fp else None, "KiB",
+        cfg.get("sum_KiB_max"), True, trials=[x / 1024 for x in (fp or {}).get("sum_bytes_samples", [])],
+        host=host)
+    st = l3_doc("startup.json")
+    cfg = baseline.get("app_startup", {})
+    for kind in ("cold", "warm"):
+        e = (st or {}).get(kind)
+        host = ({"load1": {k: e[f"load1_{k}"] for k in ("start", "max", "end")}} if e else
+                {"invalid": "no reading: bin/measure-startup.sh did not finish"})
+        # a launch timed next to other work measures the work
+        if e and e["load1_max"] > _bench_record.LOAD_MAX:
+            host["invalid"] = f"load1 reached {e['load1_max']} (over {_bench_record.LOAD_MAX}) during the trials"
+        row(f"startup {kind}", e["ms"] if e else None, "ms", cfg.get(f"{kind}_ms_max"), True,
+            gating=cfg.get(f"{kind}_gated", False), trials=(e or {}).get("ms_samples"), host=host)
+
 # ---- print ----------------------------------------------------------------
 VERDICT = {
     "pass": "✓ pass", "fail": "✗ FAIL", "unsure": "? UNSURE", "skip": "- skip",
@@ -395,7 +420,8 @@ record.update({
     "mode": mode, "gate": status,
     "units": {"MB/s": "10^6 bytes per second", "insn/byte": "instructions retired per byte",
               "cycles/byte": "CPU cycles per byte", "µs": "microseconds, p99",
-              "KiB": "resident memory, 1024 bytes", "ratio": "marspot / best other terminal"},
+              "KiB": "resident memory, 1024 bytes", "ratio": "marspot / best other terminal",
+              "ms": "milliseconds, median of trials"},
     "load_max": _bench_record.LOAD_MAX, "foreign_cores_max": _bench_record.FOREIGN_MAX,
     "rows": rows,
 })

@@ -435,6 +435,24 @@ if [[ $MODE == "full" ]]; then
   cp -R "$CUR_DIR/latency" "$ROOT/bench/results/latency"
   cp "$CUR_DIR/measure-latency.log" "$CUR_DIR/latency.host" "$CUR_DIR/latency.rc" \
     "$ROOT/bench/results/latency/" 2>/dev/null || true
+
+  # The shipped app in a window: its memory with 12 panes open, and how
+  # long it takes to show a pane's output after launch.  A window needs
+  # the console session; a run that came in over ssh reaches it through
+  # launchctl asuser, as bin/_remote-measure-others-mini.sh does.
+  GUI=()
+  [[ -z ${SSH_CONNECTION:-} ]] || GUI=(sudo -n launchctl asuser "$(id -u)" sudo -u "$(id -un)")
+  for gauge in footprint:measure-app-footprint.sh:FP_OUT startup:measure-startup.sh:STARTUP_OUT; do
+    IFS=: read -r name script outvar <<<"$gauge"
+    sd="/tmp/msp-gauge-$$-$name"
+    echo "==> $script (a sandbox window)"
+    rm -rf "${sd:?}" && mkdir -p "$sd"
+    ${GUI[@]+"${GUI[@]}"} env MARSPOT_STATE_DIR="$sd" "$outvar=$CUR_DIR/$name.json" \
+      /bin/bash -l "$ROOT/bin/$script" > "$CUR_DIR/$name.log" 2>&1 || true
+    grep -E '^(footprint12|startup) |^    (round|trial) |FAIL' "$CUR_DIR/$name.log" || tail -5 "$CUR_DIR/$name.log"
+    "$ROOT/bin/kill-sandbox-marspot.sh" --state-dir "$sd" || true
+    rm -rf "${sd:?}"
+  done
 fi
 
 # ---- gate evaluation ---------------------------------------------------
