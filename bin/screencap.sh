@@ -19,14 +19,15 @@ OUT="${1:-$ROOT/build/screencap.png}"
 mkdir -p "$(dirname "$OUT")"
 
 # Locate the marspot window via CGWindowList. We pick the first onscreen window
-# whose owner name is "marspot" (case-insensitive).
+# whose owner is the product's window process (marspot-shell, or "marspot"
+# for an app bundle).
 read -r WID GX GY GW GH < <(swift - <<'SWIFT'
 import Cocoa
 let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
 let info = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] ?? []
 for w in info {
   let n = (w[kCGWindowOwnerName as String] as? String) ?? ""
-  if n.lowercased() == "marspot" {
+  if ["marspot", "marspot-shell"].contains(n.lowercased()) {
     let wid = w[kCGWindowNumber as String] ?? 0
     let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
     print("\(wid) \(b["X"] ?? 0) \(b["Y"] ?? 0) \(b["Width"] ?? 0) \(b["Height"] ?? 0)")

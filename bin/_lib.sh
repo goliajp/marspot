@@ -233,7 +233,7 @@ restore_focus_to() {
   local app=$1
   [[ -z "$app" ]] && return 0
   # Skip if the app is one of our bench targets — those need to come
-  # to front for typing-latency / scenarios that drive keystrokes.
+  # to front for the scenarios that drive keystrokes.
   case "$app" in
     iTerm2|iTerm|Terminal|Warp|stable|marspot|marspot-shell) return 0 ;;
   esac

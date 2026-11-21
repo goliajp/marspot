@@ -26,24 +26,12 @@ for arg in "$@"; do
   esac
 done
 
-# Stop the instance a previous run.sh launched, so the old window
-# disappears immediately instead of lingering through the build.  Only
-# that one: its pid is in the sandbox, and it is checked to still be a
-# marspot of this sandbox before anything is sent to it.
-RUN_PID_FILE="$MARSPOT_STATE_DIR/run.pid"
-if [[ -f $RUN_PID_FILE ]]; then
-  prev=$(cat "$RUN_PID_FILE")
-  if _dev_is_ours "$prev"; then
-    echo "==> stopping the previous run.sh instance (pid $prev)"
-    kill -TERM "$prev" 2>/dev/null || true
-    for _ in $(seq 1 20); do
-      kill -0 "$prev" 2>/dev/null || break
-      sleep 0.1
-    done
-    kill -KILL "$prev" 2>/dev/null || true
-  fi
-  rm -f "$RUN_PID_FILE"
-fi
+# Stop what a previous run.sh started in this sandbox -- shell, core and
+# the sessions -- so the old window goes away during the build.  Only
+# processes of this sandbox are touched (dev_kill_shell_core checks each
+# pid's binary and state dir).
+dev_kill_shell_core || true
+rm -f "$MARSPOT_STATE_DIR/run.pid"
 
 mkdir -p build
 LOG="build/last-build.log"
@@ -61,27 +49,30 @@ TARGET_DIR="$(cargo metadata --no-deps --format-version 1 2>/dev/null \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])' \
   2>/dev/null)"
 TARGET_DIR="${TARGET_DIR:-target}"
-BIN="$TARGET_DIR/$PROFILE/marspot"
-if [ ! -x "$BIN" ]; then
-  echo "error: binary not found at $BIN" >&2
-  exit 1
-fi
-echo "==> launching $BIN"
-# Fully detach stdio so the child outlives this script.  Without redirecting,
-# closing the script's stdin/out/err can take marspot down with it on macOS.
-# nohup additionally ignores SIGHUP for safety.
-nohup "$BIN" > /dev/null 2>&1 < /dev/null &
+BIN_DIR="$TARGET_DIR/$PROFILE"
+for b in marspot-shell marspot-core marspot-session; do
+  if [ ! -x "$BIN_DIR/$b" ]; then
+    echo "error: binary not found at $BIN_DIR/$b" >&2
+    exit 1
+  fi
+done
+echo "==> launching $BIN_DIR/marspot-shell (core and sessions from $BIN_DIR)"
+# The product's three processes: the shell owns the window and starts
+# the core, the core starts one session per pane.  Fully detach stdio so
+# the shell outlives this script; nohup also ignores SIGHUP.
+MARSPOT_CORE_BIN="$BIN_DIR/marspot-core" MARSPOT_SESSION_BIN="$BIN_DIR/marspot-session" \
+  nohup "$BIN_DIR/marspot-shell" > /dev/null 2>&1 < /dev/null &
 pid=$!
 disown
 mkdir -p "$MARSPOT_STATE_DIR"
-echo "$pid" > "$RUN_PID_FILE"
+echo "$pid" > "$MARSPOT_STATE_DIR/run.pid"
 dev_record_pid "$pid"
 
-# Return once the process is up, so callers chaining on run.sh don't
-# race it.  Up to ~2s.
+# Return once the shell is up, so callers chaining on run.sh don't race
+# it.  Up to ~2s.
 for _ in $(seq 1 40); do
   _dev_is_ours "$pid" && exit 0
   sleep 0.05
 done
-echo "warn: marspot (pid $pid) is not running 2s after launch" >&2
+echo "warn: marspot-shell (pid $pid) is not running 2s after launch" >&2
 exit 1
