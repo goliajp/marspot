@@ -4,6 +4,12 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.6.2
+
+- A Codex pane that answers a message from another session now has
+  that answer sent back to the session that asked. Before, Codex
+  answered in its own pane only, and the asker never heard back.
+
 ## 0.6.1
 
 Fixes for panes that switch between accounts when quota runs out.
