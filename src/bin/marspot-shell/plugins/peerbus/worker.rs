@@ -120,6 +120,8 @@ pub(super) struct Binding {
     /// Idle subscriptions: (reply address, subscription msg_id).
     pub(super) subs: Vec<(String, String)>,
     pub(super) last_delivered: Option<Instant>,
+    /// Askers owed the answer of the turn their message started.
+    pub(super) replies: super::reply::Replies,
 }
 
 pub(crate) struct Worker {
@@ -363,9 +365,36 @@ impl Worker {
                 let Some(sid) = thread.and_then(|t| self.find(home, &t)) else { return };
                 let turn = params.and_then(|p| p.at(&["turn", "id"])).and_then(Value::str).map(str::to_string);
                 let b = self.bindings.get_mut(&sid).expect("found above");
+                if method == "turn/completed" {
+                    if let Some(t) = &turn {
+                        let owed = b.replies.completed(t);
+                        self.answer(sid, owed);
+                    }
+                }
+                let b = self.bindings.get_mut(&sid).expect("found above");
                 b.active_turn = if method == "turn/started" { turn } else { None };
             }
+            "item/completed" => {
+                let Some(sid) = thread.and_then(|t| self.find(home, &t)) else { return };
+                let (Some(turn), Some(item)) = (params.and_then(|p| p.str_at("turnId")), params.and_then(|p| p.get("item"))) else {
+                    return;
+                };
+                self.bindings.get_mut(&sid).expect("found above").replies.item(turn, item);
+            }
             _ => {}
+        }
+    }
+
+    /// Send each asker the answer the turn gave, as this session.
+    fn answer(&self, sid: u64, owed: Vec<(super::reply::Asker, String)>) {
+        let Some(b) = self.bindings.get(&sid) else { return };
+        let from = format!("uds:{}", b.inbox.path.display());
+        let header = marspot_peer::envelope::Header { from: from.clone(), from_name: Some(b.record.name.clone()), from_mode: Some(b.class) };
+        for (asker, answer) in owed {
+            let content = marspot_peer::envelope::encode(&header, &super::reply::body(&answer));
+            let line = marspot_peer::frame::user_line(&content, &from, Priority::Next, &marspot_peer::rand::uuid_v4());
+            deliver::send_line(&b.inbox.relay, &asker.reply_to, &line);
+            lx_info!("peerbus.answer_relayed", "the turn's answer went back to the asker", sid = sid, to = asker.reply_to);
         }
     }
 
@@ -398,12 +427,22 @@ impl Worker {
         let (home, thread) = (b.home.clone(), b.thread.clone());
         let steer_turn = b.active_turn.clone().filter(|_| frame.priority == Priority::Now && b.subscribed);
         let id = frame.msg_id.clone().unwrap_or_else(marspot_peer::rand::uuid_v4);
-        let (result, via) = self.hand_over(&home, &thread, a.text, steer_turn, id);
+        let asker = reply_to.clone().map(|reply_to| super::reply::Asker {
+            reply_to,
+            name: marspot_peer::envelope::parse(&frame.content).and_then(|e| e.from_name),
+        });
+        let (result, via) = self.hand_over(&home, &thread, a.text, steer_turn.clone(), id.clone());
         match &result {
             Ok(_) => {
                 lx_info!("peerbus.deliver", "queued for the codex session", sid = sid, via = via, peer_pid = peer_pid.unwrap_or(0));
                 if let Some(b) = self.bindings.get_mut(&sid) {
                     b.last_delivered = Some(Instant::now());
+                    // the answer can only be followed on a subscribed thread
+                    match (asker, steer_turn) {
+                        (Some(asker), Some(turn)) if via == "turn/steer" => b.replies.steered(&turn, asker),
+                        (Some(asker), _) if b.subscribed => b.replies.queued(id, asker),
+                        _ => {}
+                    }
                 }
             }
             Err(e) => {

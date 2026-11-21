@@ -26,6 +26,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.497"  # a move resumes the session a conversation was continued in, not the one it left
+shell   = "0.7.498"  # a codex turn started by a peer message sends its answer back to the asker
 core    = "0.12.552"  # a key typed into the last column is not shown before its echo
 session = "0.11.381"  # a key typed into the last column is not shown before its echo

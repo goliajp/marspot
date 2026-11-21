@@ -288,6 +288,7 @@ impl Worker {
             rate: Rate::default(),
             subs: Vec::new(),
             last_delivered: None,
+            replies: Default::default(),
         };
         self.bindings.insert(p.sid, b);
         Ok(())
