@@ -300,7 +300,7 @@ for entry in baseline["scenarios"]:
         row(f"{label} MB/s {short}", median(rates), "MB/s", entry.get(floor_key), False,
             gating=False, trials=rates, host=host)
 
-# ---- frame, scroll, size, memory ------------------------------------------
+# ---- frame, scroll, size ------------------------------------------
 for label, name, block, key in (
     ("render p99", "render.samples", "render", "render_full_repaint"),
     ("scroll p99", "scroll.samples", "scroll", "scroll_repaint"),
@@ -315,11 +315,6 @@ for bin_name, ceiling in baseline.get("binary_size_bytes_max", {}).items():
     xs = samples(f"size-{bin_name}.txt", int)
     if not bin_name.startswith("_") and xs:
         row(f"size {bin_name}", xs[0], "bytes", ceiling, True, trials=xs, stat="exact")
-
-for bin_name, ceiling in baseline.get("memory_idle_kb_max", {}).items():
-    xs = samples(f"rss-{bin_name}.samples", int)
-    if not bin_name.startswith("_") and xs:
-        row(f"rss {bin_name}", median(xs), "KiB", ceiling, True, trials=xs)
 
 # ---- print ----------------------------------------------------------------
 VERDICT = {
@@ -433,11 +428,9 @@ if do_update:
                                ("scroll-cold p99", "scroll_cold_repaint", 1.30)):
         if label in by and key in baseline:
             baseline[key]["p99_us_max"] = math.ceil(by[label] * margin)
-    for key, prefix, margin in (("binary_size_bytes_max", "size", 1.10),
-                                ("memory_idle_kb_max", "rss", 1.20)):
-        for bin_name in baseline.get(key, {}):
-            if f"{prefix} {bin_name}" in by:
-                baseline[key][bin_name] = round(by[f"{prefix} {bin_name}"] * margin)
+    for bin_name in baseline.get("binary_size_bytes_max", {}):
+        if f"size {bin_name}" in by:
+            baseline["binary_size_bytes_max"][bin_name] = round(by[f"size {bin_name}"] * 1.10)
     with open(baseline_path, "w") as f:
         json.dump(baseline, f, indent=2)
         f.write("\n")

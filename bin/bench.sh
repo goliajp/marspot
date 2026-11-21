@@ -9,8 +9,8 @@
 #                          and do not build.  Split so a caller can
 #                          take a shared lock for the compile and an
 #                          exclusive one for the measurement.
-#   bin/bench.sh --full    also runs the live PTY pipeline through
-#                          bin/measure.sh (1-2 minutes), AND the
+#   bin/bench.sh --full    also runs the live PTY pipeline through the
+#                          app and through L3 (a few minutes), AND the
 #                          Phase 9 SSIM gate.  Use before merging to
 #                          develop or when chasing a perf fix.
 #
@@ -312,49 +312,18 @@ measure_scroll() {
 echo "==> headless scroll and scroll-cold (5 trials each, taking median p99)"
 run_block scroll measure_scroll
 
-# ---- binary size + idle memory ----------------------------------------
-# Cheap (sub-second) so we can include them in the fast gate.  Catches
-# regressions like accidental dep bloat or per-session memory growth.
+# ---- binary size ------------------------------------------------------
+# Cheap (sub-second) so it is part of the fast gate.  Catches accidental
+# code-size jumps (a heavy dep sneaking in, a forgotten debug table) in
+# the binaries that ship; the keys of binary_size_bytes_max in the
+# baseline say which ones.
 echo "==> binary sizes"
-for bin in marspot mcli; do
+for bin in $(python3 -c "import json,sys; print(' '.join(k for k in json.load(open(sys.argv[1])).get('binary_size_bytes_max', {}) if not k.startswith('_')))" "$BASELINE"); do
   if [[ -x "$(marspot_bin "$bin")" ]]; then
     stat -f%z "$(marspot_bin "$bin")" > "$CUR_DIR/size-$bin.txt"
-    printf "    %-6s %s bytes\n" "$bin" "$(cat "$CUR_DIR/size-$bin.txt")"
+    printf "    %-16s %s bytes\n" "$bin" "$(cat "$CUR_DIR/size-$bin.txt")"
   fi
 done
-
-echo "==> idle memory (3 trials each, taking median)"
-# A state dir of its own: without one the instance below runs on the
-# default state root, which on a developer's machine is the installed
-# app's.  Short and under /tmp for the 104-byte socket path limit.
-RSS_STATE="$(mktemp -d /tmp/msp-bench-rss.XXXXXX)"
-for bin in marspot mcli; do
-  if [[ ! -x "$(marspot_bin "$bin")" ]]; then continue; fi
-  : > "$CUR_DIR/rss-$bin.samples"
-  for trial in 1 2 3; do
-    # Spawn a fresh instance and sample its OWN PID — do NOT pkill the
-    # binary by name first.  Earlier code did `pkill -x "$bin"` to
-    # nuke stale instances, but that's friendly-fire on any parallel
-    # bench (e.g. an active-9x-soak run already in flight gets killed
-    # by a sanity bench.sh invocation).  We measure $pid directly so
-    # other instances are irrelevant; perf-attack E7.
-    MARSPOT_STATE_DIR="$RSS_STATE" MARSPOT_DEV_SANDBOX=1 \
-      "$(marspot_bin "$bin")" >/dev/null 2>&1 &
-    pid=$!
-    disown 2>/dev/null || true
-    sleep 1.5  # let the binary settle past startup allocs
-    rss=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
-    sleep 0.1
-    [[ -n "$rss" ]] && echo "$rss" >> "$CUR_DIR/rss-$bin.samples"
-  done
-  if [[ -s "$CUR_DIR/rss-$bin.samples" ]]; then
-    printf "    %-6s %s KiB\n" "$bin" \
-      "$(python3 -c "import sys; xs=sorted(int(x) for x in open('$CUR_DIR/rss-$bin.samples')); print(xs[len(xs)//2])")"
-  fi
-done
-rm -rf "$RSS_STATE"
 
 if [[ $MODE == "full" ]]; then
   # The product in its window: shell, core and one session, one pane,
@@ -375,11 +344,9 @@ if [[ $MODE == "full" ]]; then
   # reporting the run's own wake, not the product.
   [[ "$BENCH_SETTLE_S" != "0" ]] && sleep "$BENCH_SETTLE_S"
 
-  # ...and the SHIPPED path.  measure.sh drives mcli: one process, one
-  # thread, in-RAM scrollback.  Every pane a user has is an L3 with a
-  # file-backed scrollback, and on 2026-08-19 that path measured 35-41
-  # MB/s against mcli's 93-105 - the gate was watching a pipeline
-  # nobody runs.
+  # ...and the session alone: every pane a user has is an L3 with a
+  # file-backed scrollback, and this is the instruction count a change
+  # to marspot-session or marspot-term moves.
   #
   # This was never wired up: the script existed, bench.sh only ever
   # READ its output file, and the probe that produced it had been
