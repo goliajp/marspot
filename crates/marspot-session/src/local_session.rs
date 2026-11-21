@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the in-process session owning PTY, shell child, parser and bytelog; shrink on every touch
 //! `LocalSession` — RFC-003 step 1b.
 //!
 //! A per-session abstraction that owns the PTY master, shell child,

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.498"  # a codex turn started by a peer message sends its answer back to the asker
-core    = "0.12.554"  # the single-process app, mcli and the tmux module are gone; marspot keeps only its headless tools
-session = "0.11.382"  # the tmux module and the legacy memory-estimate helpers are gone
+shell   = "0.7.499"  # infra files over the size limit carry a carve-out marker
+core    = "0.12.555"  # infra files over the size limit carry a carve-out marker
+session = "0.11.383"  # infra files over the size limit carry a carve-out marker

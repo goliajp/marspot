@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the cross-process grid framebuffer over shared memory, writer and reader together; shrink on every touch
 //! Cross-process grid framebuffer over POSIX shared memory (target #4).
 //!
 //! L3 (`marspot-session`) publishes the in-view window of its `Grid`

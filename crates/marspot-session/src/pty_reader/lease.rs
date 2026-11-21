@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the machine-wide limit on panes reading bulk output at once; shrink on every touch
 //! How many panes read bulk output at the same moment, machine-wide.
 //!
 //! A pty on macOS hands over one kilobyte at a time: the writing

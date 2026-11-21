@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the L1 process and session observer and its published view; shrink on every touch
 //! One view of the processes and sessions L1 watches.
 //!
 //! Every consumer in L1 that asks "which panes exist, what runs in

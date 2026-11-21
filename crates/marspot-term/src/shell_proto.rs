@@ -1,3 +1,4 @@
+// CARVE-OUT: the shell <-> core wire protocol kept in one file so both sides read one definition; shrink on every touch
 //! Shell ↔ core wire protocol.
 //!
 //! Two channels carry traffic between the marspot-shell outer process

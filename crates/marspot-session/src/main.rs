@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing god file: the L3 per-session process and its main loop; shrink on every touch
 //! marspot-session — the per-session L3 process (target #4).
 //!
 //! Runs ONE terminal session's parser/terminal half and nothing else:

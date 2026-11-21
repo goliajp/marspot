@@ -1,3 +1,4 @@
+// CARVE-OUT: end-to-end test of an L3 replaced under its pane by its own execv
 //! A pane's L3 replaced under it by its own execv, end to end.
 //!
 //! The real `marspot-session` binary, a real shell on its PTY, and the

@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: scripted pane operations (freeze, signal, retype, settle, watchdog) as one skeleton; shrink on every touch
 //! Scripted PTY operations — the infrastructure under "do something to
 //! a pane on the user's behalf".
 //!
