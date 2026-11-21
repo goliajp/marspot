@@ -31,6 +31,7 @@ mod lifecycle;
 mod names;
 mod others;
 mod records;
+mod reply;
 #[cfg(test)]
 mod live_tests;
 mod worker;
