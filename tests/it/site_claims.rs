@@ -38,8 +38,20 @@ fn measured() -> HashMap<(String, String), f64> {
         .nth(1)
         .expect("baseline has a competitors_snapshot");
     let mut terminal = String::new();
+    // the per-round readings sit in a `"rounds": [ … ]` array under each
+    // terminal; the figure the page quotes is the one beside it
+    let mut in_rounds = 0usize;
     for line in snapshot.lines() {
         let t = line.trim();
+        if in_rounds > 0 {
+            in_rounds += t.matches('[').count();
+            in_rounds -= t.matches(']').count();
+            continue;
+        }
+        if t.starts_with("\"rounds\": [") {
+            in_rounds = t.matches('[').count() - t.matches(']').count();
+            continue;
+        }
         // `"ghostty": {`
         if let Some(name) = t.strip_suffix(": {").and_then(|s| s.strip_prefix('"')) {
             terminal = name.trim_end_matches('"').to_string();
