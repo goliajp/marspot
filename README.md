@@ -91,17 +91,18 @@ useful for working on the renderer without the other two.
 
 ## Performance
 
-Measured 2026-10-16 on a Mac mini at load 2.7 (M-series, macOS 27.0.1),
-every terminal driven through its own GUI in one sequential cycle so each
-measurement is that terminal against the same machine in the same state.
-Throughput of `cat`-ing a prepared byte stream, MB/s, higher is better:
+Measured 2026-11-22 on a Mac mini at load 1.6 to 2.5 (M-series, macOS
+27.2.1), every terminal driven through its own GUI, four rounds each; the
+first round is a warm-up and each number is the median of the other
+three. Throughput of `cat`-ing a prepared byte stream, MB/s, higher is
+better:
 
-| stream | marspot | Ghostty 1.3.1 | iTerm2 3.7.5 | Terminal 2.15 |
+| stream | marspot | Ghostty 1.4.0 | iTerm2 3.7.9 | Terminal 2.15 |
 |---|---:|---:|---:|---:|
-| ASCII | **128.0** | 90.0 | 84.9 | 36.2 |
-| mixed | **127.0** | 86.2 | 22.6 | 35.8 |
-| CJK | **131.3** | 109.4 | 9.5 | 35.8 |
-| emoji | **120.2** | 101.7 | 0.4 | 39.5 |
+| ASCII | **302.7** | 282.2 | 81.8 | 38.5 |
+| mixed | **268.6** | 255.5 | 21.6 | 37.3 |
+| CJK | **289.3** | 269.1 | 9.5 | 36.0 |
+| emoji | **297.2** | 279.1 | 0.4 | 39.7 |
 
 Read that table with its limits in mind, which are real:
 
@@ -109,9 +110,11 @@ Read that table with its limits in mind, which are real:
   It says nothing about frame rate or input latency. A terminal that
   coalesces frames does less drawing work here, and that is a
   legitimate design choice rather than cheating.
-- One run, one machine, one day. Run-to-run repeatability has not been
-  established, and three of the four numbers landing on exactly 128.0
-  says the timer's resolution is the limiting factor at these speeds.
+- One machine, one day. Between rounds neither marspot nor Ghostty
+  moved by more than about 2 %, and on every stream marspot's slowest
+  round was faster than Ghostty's fastest. marspot and Ghostty ran in
+  windows of the same 99 by 35 cells; iTerm2 and Terminal opened at
+  their own default sizes.
 
 The harness is in `bench/` and `bin/bench.sh`. A benchmark you cannot
 re-run is a marketing claim, so the intent is that you re-run it.
