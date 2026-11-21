@@ -7,7 +7,8 @@ use marspot_term::frame_writer::FrameWriter;
 
 use super::{send_to_shell, CoreApp, WindowState};
 use marspot::iosurface::IOSurface;
-use marspot::lx_error;
+use marspot::pane::Pane;
+use marspot::{lx_error, lx_event};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLDevice, MTLTexture};
@@ -94,13 +95,89 @@ pub(super) fn waits(w: &WindowState) -> bool {
 /// report naming any other surface than the one last announced is
 /// about a frame since replaced, and changes nothing.
 pub(super) fn shown(app: &mut CoreApp, window_id: u32, surface: u32) {
-    let Some(s) = app.windows.iter_mut().find(|w| w.window_id == window_id).and_then(|w| w.surfaces.as_mut()) else {
+    let Some(w) = app.windows.iter_mut().find(|w| w.window_id == window_id) else {
         return;
     };
+    let Some(s) = w.surfaces.as_mut() else { return };
     if s.unshown == Some(surface) {
         s.unshown = None;
         trace::mark(Stage::FrameShown, 0);
+        // a paced window draws nothing new until its last frame is
+        // shown, so the first report after the content frame was drawn
+        // is about that frame or a later one
+        if w.first_frames.content == Content::Drawn {
+            w.first_frames.content = Content::Shown;
+            lx_event!(
+                "WINDOW_FIRST_CONTENT",
+                "first frame with every pane's own output is on the screen",
+                window_id = window_id,
+                surface_id = surface,
+                panes = w.panes.len()
+            );
+        }
     }
+}
+
+/// How far a window has got towards showing its panes' output.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Content {
+    #[default]
+    Waiting,
+    Drawn,
+    Shown,
+}
+
+#[derive(Default)]
+pub(super) struct FirstFrames {
+    painted: bool,
+    content: Content,
+    /// frames drawn while still waiting for every pane's output
+    waited: u32,
+}
+
+/// A window whose panes show nothing for this many frames (a program
+/// that cleared its screen and printed nothing) stops being checked:
+/// the check reads every cell of every pane.
+const CONTENT_WAIT_FRAMES: u32 = 600;
+
+/// After window `w` drew a frame whose first `cells` panes are on
+/// screen.  Called from the frame itself rather than the render pass
+/// because the attach branch renders too, and that is how the boot
+/// window gets its first frame after a core swap: a check placed in the
+/// pass alone reports a healthy window as frozen.
+pub(super) fn note_drawn(w: &mut WindowState, cells: usize) {
+    if !w.first_frames.painted {
+        w.first_frames.painted = true;
+        lx_event!(
+            "WINDOW_FIRST_FRAME",
+            "window painted its first frame",
+            window_id = w.window_id,
+            surface_id = w.surfaces.as_ref().map(|s| s.writing_surface_id()).unwrap_or(0),
+            panes = w.panes.len()
+        );
+    }
+    let f = &mut w.first_frames;
+    if f.content == Content::Waiting {
+        if shows_output(&w.panes[..cells.min(w.panes.len())]) {
+            f.content = Content::Drawn;
+        } else {
+            f.waited += 1;
+            if f.waited >= CONTENT_WAIT_FRAMES {
+                f.content = Content::Shown;
+            }
+        }
+    }
+}
+
+/// Every pane on screen is a live session that has put text in its
+/// grid; a pane still starting shows a placeholder message, not output.
+fn shows_output(panes: &[Pane]) -> bool {
+    let mut live = panes.iter().filter(|p| !p.is_dormant()).peekable();
+    live.peek().is_some()
+        && live.all(|p| {
+            let g = p.session().grid();
+            p.is_l3() && (0..g.rows()).any(|r| (0..g.cols()).any(|c| !matches!(g.cell(c, r).ch, ' ' | '\0')))
+        })
 }
 
 /// Window `wi` was handed a pair and drew its first frame into it:
