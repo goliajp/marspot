@@ -436,13 +436,13 @@ if [[ $MODE == "full" ]]; then
   cp "$CUR_DIR/measure-latency.log" "$CUR_DIR/latency.host" "$CUR_DIR/latency.rc" \
     "$ROOT/bench/results/latency/" 2>/dev/null || true
 
-  # The shipped app in a window: its memory with 12 panes open.  A
-  # window needs the console session; a run that came in over ssh
-  # reaches it through launchctl asuser, as
-  # bin/_remote-measure-others-mini.sh does.
+  # The shipped app in a window: its memory with 12 panes open, and how
+  # long it takes to show a pane's output after launch.  A window needs
+  # the console session; a run that came in over ssh reaches it through
+  # launchctl asuser, as bin/_remote-measure-others-mini.sh does.
   GUI=()
   [[ -z ${SSH_CONNECTION:-} ]] || GUI=(sudo -n launchctl asuser "$(id -u)" sudo -u "$(id -un)")
-  for gauge in footprint:measure-app-footprint.sh:FP_OUT; do
+  for gauge in footprint:measure-app-footprint.sh:FP_OUT startup:measure-startup.sh:STARTUP_OUT; do
     IFS=: read -r name script outvar <<<"$gauge"
     sd="/tmp/msp-gauge-$$-$name"
     echo "==> $script (a sandbox window)"

@@ -461,5 +461,12 @@
   "app_footprint_12_panes": {
     "_comment": "Summed phys_footprint of marspot-shell + marspot-core + all 12 marspot-session processes, one window of 4 x 3 panes, each pane printing 40 lines and sitting at a /bin/sh prompt, read once all 12 pane shells run, a frame is on screen and the processes together use under 0.02 of a core over 2 s (bin/measure-app-footprint.sh, run by bin/bench.sh --full inside the console session).  The gate judges the median of the rounds in KiB.  Ceiling from mini 2026-11-22, two runs, 8 rounds: 88710368 to 89152688 bytes (about 84.6 to 85.0 MiB: shell 22.6-22.9, core 38.1-38.3, sessions 1.95-2.05 MiB each, 23.8-24.1 together).  Worst 89152688 B = 87063 KiB, x 1.05 = 91417 KiB.  The rounds agree within 0.5 %, so 5 % is about 4.3 MiB: a session growing by a third of a MiB, or the shell or core by a tenth of itself, trips it.",
     "sum_KiB_max": 91417
+  },
+  "app_startup": {
+    "_comment": "Milliseconds from exec of marspot-shell (sandbox, the shipped three processes, one window of one pane) to the core's WINDOW_FIRST_CONTENT: the shell reported shown the first frame in which the pane shows what its shell printed (bin/measure-startup.sh, run by bin/bench.sh --full in the console session).  cold = first launch of copies signed again ad hoc under a fresh identifier (new inode, new code hash); warm = the same copies launched again right after; the gate judges the median of the trials.  Mini 2026-11-22, two runs: cold 250 163 180 168 163 (median 168, load1 about 2) and 181 156 175 164 160 176 178 (median 175, load1 4-7); warm 144 157 163 147 168 (157) and 179 164 158 157 170 163 171 (164).  Of the time, about 65 ms is before the core is spawned and 35-50 ms is the session's boot.  Cold and warm differ by about 10 ms, inside the spread of either: on mini a never-seen code hash costs nothing measurable at first exec, so the cold row does not yet show a first-launch cost of its own.  Both gate: run medians agreed within 5 % with the host at load 2 and at load 7, so a ceiling of the worst median x 1.5 (cold 175 -> 263, warm 164 -> 246) leaves the host's noise far below the line and still catches a startup that grows by half.",
+    "cold_ms_max": 263,
+    "cold_gated": true,
+    "warm_ms_max": 246,
+    "warm_gated": true
   }
 }
