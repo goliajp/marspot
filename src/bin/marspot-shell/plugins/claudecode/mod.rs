@@ -37,6 +37,7 @@ mod transcript;
 mod profiles;
 mod argv;
 mod records;
+mod continued;
 mod wake;
 
 use transcript::{activity_of, has_conversation, parse_session_id, tail_last_message_type};
@@ -1420,6 +1421,27 @@ impl ClaudecodePlugin {
             let msg = format!("pane {shelld_sid}: pid {} is not that claude any more; not cycling", meta.claude.pid);
             host.log(LogLevel::Warn, "cycle.pid_no_longer_claude", &msg);
             return false;
+        }
+        // The conversation may have gone on in another session since the
+        // pane bound this one -- sent to the background, or forked; the
+        // old id would bring back the conversation as it was then.
+        let mut meta = meta;
+        if let Some(proj) = meta.project_dir.as_deref() {
+            let config = meta.config_dir.clone().map_or_else(
+                || PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude"),
+                PathBuf::from,
+            );
+            let transcripts = config.join("projects").join(encode_project_dir(std::path::Path::new(proj)));
+            let latest = continued::latest(&transcripts, &meta.uuid);
+            if latest != meta.uuid {
+                host.log(
+                    LogLevel::Info,
+                    "cycle.continued",
+                    &format!("pane {shelld_sid}: uuid={} was continued in {latest}; resuming that", meta.uuid),
+                );
+                meta.uuid = latest;
+                meta.has_transcript = true;
+            }
         }
         // Before the signal, not after it.  This cycle kills first and
         // resumes second, so a resume the CLI was always going to
