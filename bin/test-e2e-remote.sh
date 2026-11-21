@@ -88,7 +88,7 @@ DEFAULT_SUITES=(
 # bin/measure-idle-marspot.sh: 1 is over budget, 2 the instrument
 # failing, 3 a host too busy to read.
 is_measurement() {
-  [[ $1 == test-idle-wakeups.sh || $1 == measure-idle-marspot.sh ]]
+  [[ $1 == test-idle-wakeups.sh || $1 == measure-idle-marspot.sh || $1 == test-awake-cost.sh ]]
 }
 
 # One tool does the copying, for every session and every repo: it takes
@@ -207,6 +207,10 @@ fi
 fwd=""
 while IFS= read -r kv; do fwd+=" $(printf '%q' "$kv")"; done < <(env | grep -E '^IDLE_[A-Z_]+=' || true)
 for kv in ${E2E_ENV:-}; do fwd+=" $(printf '%q' "$kv")"; done
+# the remote copy has no .git; a suite that records readings names the commit by this
+commit="$(git -C "$ROOT" rev-parse --short=8 HEAD)"
+[[ -n $(git -C "$ROOT" status --porcelain) ]] && commit+="-dirty"
+fwd+=" E2E_COMMIT=$commit"
 
 rc=0
 unmeasured=0
@@ -235,6 +239,12 @@ for suite in "${SUITES[@]}"; do
   set -e
   secs=$(( $(date +%s) - start ))
   reap_sandbox "$current_sd"
+  # a suite that records readings leaves them in the remote tree, which
+  # nothing else copies back
+  if [[ $suite == test-awake-cost.sh ]]; then
+    mkdir -p "$ROOT/bench/results"
+    scp -q "${HOST}:${REMOTE_DIR}/bench/results/awake-cost-*.json" "$ROOT/bench/results/" </dev/null || true
+  fi
   if (( suite_rc == 0 )); then
     ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
     results+=("PASS  ${secs}s  $suite")

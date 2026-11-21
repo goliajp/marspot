@@ -21,7 +21,9 @@
 #                           instead of the one `ps` window
 #   IDLE_WAKEUP_BUDGET      with IDLE_READINGS: fail when any window's
 #                           wake-ups per second, summed, are over this
-#   IDLE_MEMORY             also print `footprint` of every process
+#   IDLE_JSON               with IDLE_READINGS: also write the readings,
+#                           per process, to this file
+#   IDLE_MEMORY            also print `footprint` of every process
 #   IDLE_RESIDENT           also quit with the sessions kept and measure
 #                           the shell that stays; IDLE_RESIDENT_BUDGET is
 #                           its wake-ups per second, and
@@ -142,7 +144,7 @@ sleep "$SETTLE"
 
 if [[ -n ${IDLE_READINGS:-} ]]; then
   "$ROOT/bin/_idle_wakeups.py" --label "marspot-dev $N panes${IDLE_WINDOW_STATE:+, window $IDLE_WINDOW_STATE}" --window "$WINDOW" \
-    --readings "$IDLE_READINGS" ${IDLE_WAKEUP_BUDGET:+--budget "$IDLE_WAKEUP_BUDGET"} \
+    --readings "$IDLE_READINGS" ${IDLE_WAKEUP_BUDGET:+--budget "$IDLE_WAKEUP_BUDGET"} ${IDLE_JSON:+--json "$IDLE_JSON"} \
     --pattern "$ROOT/target/(debug|release)/marspot(-shell|-core|-session)?( |\$)"
   rc=$?
   echo "    lock: $(/usr/local/bin/bench-lock status 2>/dev/null | grep -c waiting) waiting"
