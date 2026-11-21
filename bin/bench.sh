@@ -10,8 +10,9 @@
 #                          take a shared lock for the compile and an
 #                          exclusive one for the measurement.
 #   bin/bench.sh --full    also runs the live PTY pipeline through the
-#                          app and through L3 (a few minutes), AND the
-#                          Phase 9 SSIM gate.  Use before merging to
+#                          app and through L3, the key-to-frame latency
+#                          of one pane (a few minutes), AND the Phase 9
+#                          SSIM gate.  Use before merging to
 #                          develop or when chasing a perf fix.
 #
 #   bin/bench.sh --ssim    add Phase 9 visual-regression SSIM gate
@@ -111,6 +112,26 @@ done
 if (( DO_BUILD )); then
   echo "==> building marspot (release)"
   ( cd "$ROOT" && cargo build --release 2>&1 | tail -3 )
+fi
+
+# ---- key-to-frame latency: the timed build ------------------------------
+# The time from a key press to the frame that shows it can only be read
+# from a `latency-trace` build: the key script that presses keys in a
+# window nobody sits at exists only there, so neither a plain build nor
+# the `seen` scene (which is that same script plus window captures) can
+# read it.  Only the shell and the core carry the feature; the session
+# is the shipped binary itself (its package has no such feature).  With
+# MARSPOT_LATENCY_TRACE unset the feature costs one relaxed atomic load
+# per mark; set, a mark is a clock read and 16 bytes into a buffer
+# under an uncontended lock, written out only while the process idles.
+# Its own target dir, so the shipped build next to it stays untouched.
+LAT_TARGET="$(_mars_target_dir)/latency-trace"
+if (( DO_BUILD )) && [[ $MODE == full ]]; then
+  echo "==> building marspot-shell and marspot-core with latency-trace"
+  _lat_t0=$(date +%s)
+  ( cd "$ROOT" && CARGO_TARGET_DIR="$LAT_TARGET" cargo build --release --features latency-trace \
+      --bin marspot-shell --bin marspot-core 2>&1 | tail -3 )
+  echo "    took $(( $(date +%s) - _lat_t0 ))s"
 fi
 if (( ! DO_MEASURE )); then
   exit 0
@@ -376,6 +397,44 @@ if [[ $MODE == "full" ]]; then
     tail -3 "$CUR_DIR/measure-l3-multi.log"
     cp "$ROOT/bench/results/l3-multi.json" "$CUR_DIR/l3-multi.json" || true
   fi
+
+  # ---- key-to-frame latency: the measurement ----------------------------
+  # One pane in one window, LAT_GATE_ROUNDS sandbox apps one after
+  # another, each typing 200 keys (bin/measure-latency.sh, scene type-1).
+  # Read from the key event's timestamp to the shell's present call
+  # returning: the frame is in the layer then, and the window server
+  # shows it at the next composite.  The `seen` scene's window captures
+  # would add that last step, but they load the window server while the
+  # frame is on its way, so they are not the latency of the product.
+  # Windows need the GUI login session; over ssh that is reached through
+  # `launchctl asuser`, as for the product's window above.
+  measure_key_latency() {
+    local sd="/tmp/msp-lat-$$" dir="$CUR_DIR/lat-bins" gui=() b rc=0
+    rm -rf "${CUR_DIR:?}/latency" && mkdir -p "$dir" "$CUR_DIR/latency"
+    for b in marspot-shell marspot-core; do ln -sf "$LAT_TARGET/release/$b" "$dir/$b"; done
+    ln -sf "$(marspot_bin marspot-session)" "$dir/marspot-session"
+    [[ -n ${SSH_CONNECTION:-} ]] && gui=(sudo -n launchctl asuser "$(id -u)" sudo -u "$(id -un)")
+    rm -rf "${sd:?}" && mkdir -p "$sd"
+    ${gui[@]+"${gui[@]}"} /bin/bash -c "cd $(printf '%q' "$ROOT") && env MARSPOT_STATE_DIR=$sd \
+      LAT_SIDES=ship=$dir LAT_SCENES=type-1 LAT_ROUNDS=${LAT_GATE_ROUNDS:-4} LAT_OUT=$CUR_DIR/latency \
+      bin/_bounded.sh 900 bin/measure-latency.sh" > "$CUR_DIR/measure-latency.log" 2>&1 || rc=$?
+    # a run that stopped part way leaves fewer reports: the rows read this
+    echo "${rc:-0} ${LAT_GATE_ROUNDS:-4}" > "$CUR_DIR/latency.rc"
+    "$ROOT/bin/kill-sandbox-marspot.sh" --state-dir "$sd" >/dev/null 2>&1 || true
+    rm -rf "${sd:?}"
+  }
+  # the rows can fail and can refuse a broken run, checked before minutes are spent measuring
+  python3 "$ROOT/bin/_bench_latency.py" --self-test > "$CUR_DIR/latency-selftest.txt" \
+    || { cat "$CUR_DIR/latency-selftest.txt"; echo "bin/_bench_latency.py --self-test failed" >&2; exit 1; }
+  tail -1 "$CUR_DIR/latency-selftest.txt"
+  echo "==> key press to frame, one pane (${LAT_GATE_ROUNDS:-4} runs of 200 keys)"
+  run_block latency measure_key_latency
+  grep -E '^(== |FAIL)' "$CUR_DIR/measure-latency.log" | sed 's/^/    /' || true
+  # kept with the run's results, so the verdict can be read again later
+  rm -rf "$ROOT/bench/results/latency"
+  cp -R "$CUR_DIR/latency" "$ROOT/bench/results/latency"
+  cp "$CUR_DIR/measure-latency.log" "$CUR_DIR/latency.host" "$CUR_DIR/latency.rc" \
+    "$ROOT/bench/results/latency/" 2>/dev/null || true
 fi
 
 # ---- gate evaluation ---------------------------------------------------
