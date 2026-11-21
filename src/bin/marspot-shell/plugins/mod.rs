@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the plugin system framework; shrink on every touch
 //! marspot plugin system — see RFC-001.
 //!
 //! ## Design

@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: reading a codex pane's model from codex's rollout and config files; shrink on every touch
 //! What model a codex pane is running, read off codex's own files.
 //!
 //! Two sources, in this order: the session's rollout (JSONL, appended

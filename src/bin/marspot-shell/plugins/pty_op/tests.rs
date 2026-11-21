@@ -1,3 +1,4 @@
+// CARVE-OUT: test module for pty_op, scenarios against a fake process table and clock
 use super::*;
 use std::sync::Mutex;
 

@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing god file: the VT event to grid mutation handler; to be split by concern; shrink on every touch
 //! Terminal emulator: bridges parsed VT events to grid mutations.
 //!
 //! `Terminal` owns a `Grid` (screen state) and a `Parser` (byte→event

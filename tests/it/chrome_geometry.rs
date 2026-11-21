@@ -1,3 +1,4 @@
+// CARVE-OUT: integration test recording the rects the direct-draw chrome produces
 //! The rects the direct-draw chrome produces, written down.
 //!
 //! S3-09 moves sixteen components off direct drawing and onto the

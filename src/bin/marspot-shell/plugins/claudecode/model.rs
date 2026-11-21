@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the model badge text and the three sources it is read from; shrink on every touch
 //! What a pane's badge says about the model, and where that is read
 //! from.
 //!

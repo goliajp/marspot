@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the PTY reader thread and its measured hand-off policy; shrink on every touch
 //! The thread that reads a pane's PTY output for the main loop.
 //!
 //! macOS hands back at most 1024 bytes per `read` of a pty master,

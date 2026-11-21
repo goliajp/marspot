@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the wrap-aware cancellable scrollback search engine; shrink on every touch
 //! Wrap-aware, cancellable substring search over a persistent
 //! `scrollback.bin` (or any `Scrollback`).  B1 of the pane upgrade
 //! rollout.

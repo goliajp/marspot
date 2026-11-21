@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the pre-window launch path and the guards around its redirect; shrink on every touch
 //! The binary's front door: what happens before there is a window.
 //!
 //! A bundle launch redirects into `binaries/current/`, and that hand-off

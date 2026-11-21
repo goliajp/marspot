@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the AppKit window and event loop bridge; shrink on every touch
 //! Marspot's AppKit-direct window + event loop.
 //!
 //! Replaces winit.  We talk to NSApplication / NSWindow / NSView

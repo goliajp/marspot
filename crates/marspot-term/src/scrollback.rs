@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: both scrollback backends (memory ring, disk mmap ring) behind one enum; shrink on every touch
 //! Scrollback storage for terminal lines that have scrolled off the
 //! visible grid.
 //!

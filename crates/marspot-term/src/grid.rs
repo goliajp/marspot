@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the cell grid and bounded scrollback; shrink on every touch
 //! Terminal cell grid + bounded scrollback.
 //!
 //! `Grid` is a passive container: a rectangle of `Cell`s, a cursor position,

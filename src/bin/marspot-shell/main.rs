@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing god file: the L1 window owner, supervisor and self-update path in one place; to be split by concern; shrink on every touch
 //! marspot-shell — the outer process.
 //!
 //! Owns the NSWindow + NSApp event loop and a CAMetalLayer that

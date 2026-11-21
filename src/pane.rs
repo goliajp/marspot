@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing god file: single-session pane behaviour shared by every binary; shrink on every touch
 //! Single-session pane — the unit of single-terminal behavior shared
 //! by every binary in this workspace.
 //!

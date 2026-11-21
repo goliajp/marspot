@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the single PluginHost implementation over shell-side state; shrink on every touch
 //! `PluginHost` impl backed by shell-side state.
 //!
 //! `ShellPluginHost` is the single object plugins see.  It owns `Arc`s

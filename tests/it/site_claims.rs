@@ -1,3 +1,4 @@
+// CARVE-OUT: integration test checking the figures on the website against the measured numbers
 //! The numbers on the website are the numbers that were measured.
 //!
 //! A marketing page and a benchmark drift apart quietly: the page is

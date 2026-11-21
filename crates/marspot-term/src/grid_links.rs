@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the grid to linkify adapter; shrink on every touch
 //! Grid → marspot-linkify adapter (steel tier).
 //!
 //! The actual detection engine lives in the `marspot-linkify` stone

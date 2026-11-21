@@ -1,3 +1,4 @@
+// CARVE-OUT: pre-existing file: the agent usage feeds with their purpose-built JSON scanner; shrink on every touch
 //! cc — agent usage feeds for the toolbar `Cc` modal.
 //!
 //! The devops side drops a small JSON snapshot per provider —
