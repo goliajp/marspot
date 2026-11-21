@@ -2,6 +2,16 @@
 """The verdict half of bin/bench.sh.
 
   _bench_gate.py <baseline.json> <cur-dir> <fast|full> <update 0|1> <root>
+  _bench_gate.py --self-test
+
+The vs-best rows divide the product by the best other terminal in
+`competitors_snapshot`.  A snapshot older than STALE_DAYS makes those
+rows INCONCLUSIVE: a competitor reading from weeks ago is not a
+comparison with the competitor as it is (Ghostty 1.3.1 to 1.4.0 moved
+about 2.5x).  MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1 judges them
+anyway, and the table says it did.  `--self-test` runs the gate on a
+fabricated run twice, with the snapshot dated today and 15 days ago,
+and checks that only the second makes the vs-best rows inconclusive.
 
 Reads what bench.sh measured into <cur-dir>, judges it against the
 baseline, prints the table, writes bench/results/gate-record.json and
@@ -27,6 +37,65 @@ import sys
 sys.dont_write_bytecode = True  # no __pycache__ next to the scripts
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _bench_record  # noqa: E402
+
+STALE_DAYS = 14
+
+
+def self_test():
+    """The staleness rule can fail and can pass: same run, two dates."""
+    import datetime
+    import shutil
+    import subprocess
+    import tempfile
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = json.load(open(os.path.join(here, "..", "bench", "baseline.json")))
+    work = tempfile.mkdtemp(prefix="marspot-gate-selftest-")
+    try:
+        cur = os.path.join(work, "cur")
+        os.makedirs(cur)
+        sids = [e["id"] for e in src["scenarios"] if "mars_vs_best_other_min" in e]
+        rd = {f"{sid}_MBps": 100.0 for sid in sids}
+        rd["load1"] = [1.0]
+        json.dump({"marspot": {"rounds": [dict(rd), dict(rd), dict(rd)]}},
+                  open(os.path.join(cur, "app.json"), "w"))
+        env = {k: v for k, v in os.environ.items() if k != "MARSPOT_BENCH_ALLOW_STALE_COMPETITORS"}
+        env["MARSPOT_BENCH_HISTORY_DIR"] = os.path.join(work, "history")
+        seen = {}
+        for label, age in (("fresh", 0), ("stale", STALE_DAYS + 1)):
+            b = json.loads(json.dumps(src))
+            day = datetime.date.today() - datetime.timedelta(days=age)
+            b["competitors_snapshot"]["captured_at"] = day.isoformat()
+            bp = os.path.join(work, f"baseline-{label}.json")
+            json.dump(b, open(bp, "w"))
+            root = os.path.join(work, f"root-{label}")
+            os.makedirs(root)
+            out = subprocess.run([sys.executable, os.path.abspath(__file__), bp, cur, "full", "0", root],
+                                 env=env, capture_output=True, text=True).stdout
+            vs = [l for l in out.splitlines() if l.startswith("vs-best ")]
+            seen[label] = (vs, out)
+        ok = True
+        fresh, stale = seen["fresh"][0], seen["stale"][0]
+        if len(stale) != len(sids) or len(fresh) != len(sids):
+            print(f"SELF-TEST FAIL: expected {len(sids)} vs-best rows, got {len(fresh)} / {len(stale)}")
+            print(seen["stale"][1][-2000:])
+            ok = False
+        if any("INCONCLUSIVE" in l for l in fresh):
+            print("SELF-TEST FAIL: a snapshot dated today made a vs-best row inconclusive")
+            ok = False
+        if not stale or not all("INCONCLUSIVE" in l for l in stale):
+            print(f"SELF-TEST FAIL: a snapshot {STALE_DAYS + 1} days old left a vs-best row judged")
+            ok = False
+        for l in stale:
+            print(l)
+        print("SELF-TEST PASS" if ok else "SELF-TEST FAIL")
+        return 0 if ok else 1
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+if sys.argv[1:] == ["--self-test"]:
+    sys.exit(self_test())
 
 baseline_path, cur_dir, mode, update_str, root = sys.argv[1:6]
 do_update = update_str == "1"
@@ -162,6 +231,19 @@ if mode == "full":
         host["invalid"] = "the product produced no reading"
     elif not used:
         host["invalid"] = "every round was taken above the load ceiling"
+    import datetime
+    snap_day = baseline["competitors_snapshot"].get("captured_at")
+    try:
+        snap_age = (datetime.date.today() - datetime.date.fromisoformat(snap_day)).days
+    except (TypeError, ValueError):
+        snap_age = None
+    allow_stale = os.environ.get("MARSPOT_BENCH_ALLOW_STALE_COMPETITORS") == "1"
+    stale = None
+    if snap_age is None:
+        stale = f"the competitor snapshot has no readable captured_at ({snap_day!r})"
+    elif snap_age > STALE_DAYS:
+        stale = (f"the competitor snapshot is {snap_age} days old (> {STALE_DAYS}); "
+                 f"re-measure the others with bin/remote-measure-others.sh")
     for entry in baseline["scenarios"]:
         sid = entry["id"]
         if "mars_vs_best_other_min" not in entry:
@@ -172,10 +254,14 @@ if mode == "full":
         row(f"app MB/s {short}", rate, "MB/s", entry.get("mars_live_MBps_min"), False,
             gating=False, trials=per_round, host=host)
         other = best_other_mbps(sid)
-        row(f"vs-best {short}", rate / other if rate and other > 0 else None, "ratio",
-            entry["mars_vs_best_other_min"], False, gating=False,
-            trials=[x / other for x in per_round] if other > 0 else [], host=host,
-            note=None if rate else "the product produced no certified reading")
+        r = row(f"vs-best {short}", rate / other if rate and other > 0 else None, "ratio",
+                entry["mars_vs_best_other_min"], False, gating=False,
+                trials=[x / other for x in per_round] if other > 0 else [], host=host,
+                note=None if rate else "the product produced no certified reading")
+        if stale and allow_stale:
+            r["note"] = f"{stale}; judged anyway (MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1)"
+        elif stale and r["verdict"] not in ("invalid", "skip"):
+            r.update(verdict="inconclusive", note=stale)
 
 # ---- nine sessions absorbing the same scenario at once -------------------
 multi = l3_doc("l3-multi.json") if mode == "full" else None
@@ -239,6 +325,7 @@ for bin_name, ceiling in baseline.get("memory_idle_kb_max", {}).items():
 VERDICT = {
     "pass": "✓ pass", "fail": "✗ FAIL", "unsure": "? UNSURE", "skip": "- skip",
     "invalid": "! INVALID", "info": "  (not gated)", "below": "  below (not gated)",
+    "inconclusive": "? INCONCLUSIVE",
 }
 
 
@@ -264,7 +351,8 @@ for r in rows:
     span = f"{fmt(min(t), u)}-{fmt(max(t), u)}" if len(t) > 1 else ""
     ld = r["load1"] or {}
     load = "/".join("-" if ld.get(k) is None else f"{ld[k]:.1f}" for k in ("start", "max", "end"))
-    tail = f"  {r['note']}" if r["verdict"] in ("invalid", "skip") and r.get("note") else ""
+    tail = f"  {r['note']}" if (r["verdict"] in ("invalid", "skip", "inconclusive")
+                                or r["metric"].startswith("vs-best ")) and r.get("note") else ""
     print(f"{r['metric']:<26} {fmt(r['value'], u):>10} {u:<11} {limit:>12} {span:>19} "
           f"{load:>15}   {VERDICT[r['verdict']]}{tail}")
 print()
@@ -289,7 +377,11 @@ if n_below:
     print(f"{n_below} wall-clock reading(s) are below their floor; they do not gate.")
 vs = [r for r in rows if r["metric"].startswith("vs-best ")]
 if vs:
-    read_on = baseline["competitors_snapshot"].get("captured_at", "an unknown day")
+    cs = baseline["competitors_snapshot"]
+    read_on = cs.get("captured_at", "an unknown day")
+    versions = ", ".join(f"{n} {v['version']}" for n, v in cs.items()
+                         if isinstance(v, dict) and n not in ("host", "marspot") and v.get("version"))
+    read_on = f"{read_on}: {versions}" if versions else read_on
     print(f"PRODUCT vs BEST OTHER TERMINAL (rounds min-max; the others were read on {read_on}): " + ",  ".join(
         f"{r['metric'].removeprefix('vs-best ')} "
         + ("no reading" if r.get("value") is None else
