@@ -1,25 +1,27 @@
-# Three-layer version vector (RFC-003: L4 shelld retired).  THE
-# marspot version is the L2 (core) version — that's what the title
-# bar displays and what users mean when they ask "what version of
-# marspot are you on?". L1 and L3 each carry their own semver, bumped
-# only when their specific code surface changes.
+# Build numbers of the three layers (RFC-003: L4 shelld retired).
 #
-# Canonical layer numbering (used everywhere — code, logs, docs):
+# The product version -- what the title bar, the About panel, a disk
+# image's name and the updater show -- is `[package] version` in
+# Cargo.toml, and it moves only through `bin/bump-version.sh`.  The
+# numbers below are not it: each is a build number of one binary,
+# bumped on every commit that changes that binary's source:
+# `bin/install-local.sh` stages only the layers whose number moved, and
+# the logs say which build of each layer is running.
+#
+# Canonical layer numbering (used everywhere -- code, logs, docs):
 #
 #   L1 = marspot-shell    NSWindow owner / supervisor state machine /
 #                         banner / probation logic / shell self-update
-#                         path. Stable wrapper; bump rarely.
+#                         path.
 #
-#   L2 = marspot-core     THE marspot version. Renderer (Metal), UI
-#                         dispatch, layout, session bootstrap, control-
-#                         socket protocol driving, registry-based L3
-#                         spawn + reattach (RFC-003). Bump on every
-#                         user-visible release.
+#   L2 = marspot-core     Renderer (Metal), UI dispatch, layout,
+#                         session bootstrap, control-socket protocol
+#                         driving, registry-based L3 spawn + reattach
+#                         (RFC-003).
 #
 #   L3 = marspot-session  Per-pane terminal engine + PTY owner: parser,
 #                         grid, scrollback, shm publish, UDS control
-#                         surface, bytelog.  Bump when in-process
-#                         terminal mechanics or the L2↔L3 wire change.
+#                         surface, bytelog.
 #
 # Bump protocol: bump the version below and put a one-line subject on
 # the same line.  The full why/how belongs in the commit message.  Do

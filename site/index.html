@@ -276,12 +276,16 @@
     </p>
     <ul class="plain">
       <li>Combining marks, emoji built from several code points, and flags survive
-          scrolling back, but not a restart: the cluster is kept beside the row in
-          memory, while the row itself goes to disk holding the base character.</li>
-      <li>Fonts, themes and key bindings are not configurable yet — the keys listed
-          above are the keys.</li>
-      <li>No hyperlink, working-directory or prompt escape sequences
-          (<span class="mono">OSC 8 / 7 / 133</span>).  <span class="mono">OSC 52</span>
+          scrolling back and a restart, but not a change of window width: the lines
+          already in history are re-cut to the new width from what is on disk, and a
+          re-cut line shows each such cluster as its base character.</li>
+      <li>Fonts, font size and key bindings are not configurable yet — the keys
+          listed above are the keys. The theme (dark, light, high contrast) and the
+          language are.</li>
+      <li>No hyperlink or working-directory escape sequences
+          (<span class="mono">OSC 8 / 7</span>). Prompt marks
+          (<span class="mono">OSC 133</span>) are read and kept with the history, but
+          nothing uses them yet.  <span class="mono">OSC 52</span>
           puts text on the clipboard — yanking in vim over ssh reaches your Mac —
           but reading it back is refused, because answering hands any program that
           can write to the pty whatever you last copied.</li>

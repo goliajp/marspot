@@ -176,10 +176,9 @@ fn a_gap_that_closed_comes_off_the_page() {
     t2.feed(b"\x1b]52;c;aGVsbG8=\x07");
     assert_eq!(t2.take_osc_clipboard().as_deref(), Some("hello"), "OSC 52 stopped working");
 
-    // Clusters keep their shape on screen now, so neither document
-    // may still say a cell holds one code point — but both must still
-    // say what scrolling back loses, which is true until scrollback
-    // has storage of its own.
+    // Clusters keep their shape on screen and in the history file now,
+    // so neither document may still say a cell holds one code point or
+    // that a restart loses one.
     let mut t3 = Terminal::new(20, 3);
     t3.feed("e\u{301}".as_bytes());
     let c3 = t3.grid().cell(0, 0);
@@ -191,11 +190,8 @@ fn a_gap_that_closed_comes_off_the_page() {
             "a cluster keeps its shape now; {what} still says a cell holds one code point"
         );
         assert!(
-            text.contains("survive
-          scrolling back, but not a restart")
-                || text.contains("survive scrolling
-  back, but not a restart"),
-            "{what} stopped saying that a restart loses the cluster"
+            !text.contains("but not a restart"),
+            "a cluster survives a restart now; {what} still says it does not"
         );
         assert!(
             !text.contains("tabs are not implemented")
@@ -644,5 +640,189 @@ mod guide_behaviour {
              notarisation were verified 2026-10-01; what is missing is a decision \
              and, for CI, its secrets"
         );
+    }
+}
+
+/// Every entry under the README's "Known gaps" is checked here against
+/// the terminal, one test an entry: the gap must still be there for the
+/// README (and the page, which carries the same list) to keep saying
+/// so, and the README must say what the test finds.  When one of these
+/// fails because the gap closed, the entry comes off both documents.
+mod known_gaps {
+    use super::{README, SITE};
+    use marspot::terminal::Terminal;
+
+    /// The README's section, so a phrase elsewhere does not count.
+    fn gaps() -> &'static str {
+        let from = README.find("## Known gaps").expect("the README has a Known gaps section");
+        let rest = &README[from..];
+        let to = rest[3..].find("\n## ").map(|i| i + 3).unwrap_or(rest.len());
+        &rest[..to]
+    }
+
+    fn says(phrase: &str) {
+        let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat(gaps()).contains(phrase), "Known gaps no longer says {phrase:?}");
+    }
+
+    fn the_page_says(phrase: &str) {
+        let flat = SITE.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains(phrase), "the page no longer says {phrase:?}");
+    }
+
+    struct Dir(std::path::PathBuf);
+    impl Dir {
+        fn new(label: &str) -> Self {
+            let p = std::env::temp_dir()
+                .join(format!("marspot-known-gaps-{label}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn open(&self) -> marspot::scrollback::Scrollback {
+            marspot::scrollback::Scrollback::file(
+                self.0.join("scrollback.bin"),
+                self.0.join("scrollback.idx"),
+                20,
+                4,
+            )
+            .unwrap()
+        }
+    }
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The cluster text of column 0 anywhere in history, read the way
+    /// the renderer reads it.
+    fn history_cluster(g: &marspot::grid::Grid) -> Option<String> {
+        let mut row = Vec::new();
+        for off in 1..=g.scrollback_len() as u16 {
+            for r in 0..g.rows() {
+                let cell = g.cell_at_view(off, 0, r);
+                g.row_clusters_at_view(off, r, &mut row);
+                if let Some(t) =
+                    g.cluster_text(&cell).or_else(|| marspot::grid::cluster_in_row(&row, 0))
+                {
+                    return Some(t.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_cluster_survives_a_restart_but_not_a_width_change() {
+        use marspot::grid::{Cell, CellAttrs, Grid};
+        says("survive scrolling back and a restart, but not a change of window width");
+        the_page_says("survive scrolling back and a restart, but not a change of window width");
+
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let d = Dir::new("cluster");
+        {
+            let mut g = Grid::with_scrollback_kind(20, 3, d.open());
+            let cell = g.cluster_cell(family, CellAttrs::default());
+            g.set_cell(0, 0, cell);
+            for _ in 0..8 {
+                g.scroll_up(1, Cell::default());
+            }
+        }
+        // a new grid over the same files is what a restarted pane is
+        let mut g = Grid::with_scrollback_kind(20, 3, d.open());
+        assert_eq!(history_cluster(&g).as_deref(), Some(family), "a restart lost the cluster");
+        g.resize(16, 3);
+        assert_eq!(
+            history_cluster(&g),
+            None,
+            "a width change kept the cluster; take this entry off the README and the page"
+        );
+    }
+
+    #[test]
+    fn osc_8_and_7_are_not_read_133_is_kept_52_is_write_only() {
+        says("No OSC 8 (hyperlinks) or OSC 7 (working directory");
+        says("OSC 133 prompt marks are read and kept with the history, but nothing uses them yet");
+        says("reading it back is refused on purpose");
+        the_page_says("OSC 8 / 7");
+
+        // OSC 8: the text shows, and no link comes with it
+        let mut t = Terminal::new(40, 3);
+        t.feed(b"\x1b]8;;https://example.com/\x1b\\here\x1b]8;;\x1b\\");
+        let row: String = (0..4).map(|c| t.grid().cell(c, 0).ch).collect();
+        assert_eq!(row, "here");
+        let links = marspot::grid_links::scan_visible_links(t.grid(), 0, Default::default());
+        assert!(links.is_empty(), "OSC 8 made a link; take it off the README and the page");
+
+        // and the dispatcher has no arm for either number
+        const TERMINAL: &str = include_str!("../../crates/marspot-term/src/terminal.rs");
+        let dispatch = TERMINAL
+            .split("fn osc_dispatch")
+            .nth(1)
+            .expect("terminal.rs has osc_dispatch")
+            .split("\n    fn ")
+            .next()
+            .unwrap();
+        assert!(dispatch.contains("Some(133)"), "the probe no longer reads the dispatcher");
+        for n in ["Some(8)", "Some(7)", "Some(8 |", "| 8)", "Some(7 |", "| 7)"] {
+            assert!(!dispatch.contains(n), "osc_dispatch handles {n} now; update the README");
+        }
+
+        // OSC 7: nothing is kept and nothing answers
+        let mut t = Terminal::new(40, 3);
+        t.feed(b"\x1b]7;file://host/tmp\x07");
+        assert!(t.take_response().is_empty());
+        assert_eq!(t.osc_title(), "", "OSC 7 must not land anywhere else either");
+
+        // OSC 133: the mark is on the row, and still there once the row
+        // has scrolled into history
+        let mut t = Terminal::new(20, 3);
+        t.feed(b"\x1b]133;A\x07$ ");
+        assert_eq!(t.grid().row_prompt(0), marspot::grid::PromptMark::PromptStart);
+        t.feed(b"\r\n\r\n\r\n\r\n");
+        assert_eq!(t.grid().scrollback_prompt(0), marspot::grid::PromptMark::PromptStart);
+
+        // OSC 52: written, never read back
+        let mut t = Terminal::new(20, 3);
+        t.feed(b"\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(t.take_osc_clipboard().as_deref(), Some("hello"));
+        t.feed(b"\x1b]52;c;?\x07");
+        assert!(t.take_response().is_empty(), "OSC 52 answered a read");
+    }
+
+    #[test]
+    fn term_is_the_borrowed_xterm_256color() {
+        says("There is no terminfo entry of its own. `TERM` is set to `xterm-256color`");
+        const PANE: &str = include_str!("../../crates/marspot-session/src/local_session.rs");
+        assert!(
+            PANE.contains("set_var(\"TERM\", \"xterm-256color\")"),
+            "a pane's TERM is no longer xterm-256color; the README entry is out of date"
+        );
+    }
+
+    #[test]
+    fn theme_and_language_are_settings_fonts_and_keys_are_not() {
+        says("The settings panel offers the theme (dark, light, high contrast), the language");
+        says("Fonts, font size and key bindings are not configurable yet");
+        let keys = marspot::settings::render(&marspot::settings::Settings::default(), "");
+        for k in ["appearance.theme", "appearance.language"] {
+            assert!(keys.contains(k), "settings.toml has no {k}");
+        }
+        let names: Vec<&str> = keys
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .filter_map(|l| l.split(" = ").next())
+            .collect();
+        assert!(names.len() >= 5, "read no keys out of settings.toml: {names:?}");
+        for n in &names {
+            assert!(
+                !n.contains("font") && !n.contains("key"),
+                "settings.toml has {n}; the README entry is out of date"
+            );
+        }
+        let themes: Vec<&str> =
+            marspot::palette::ThemeId::ALL.iter().map(|t| t.as_str()).collect();
+        assert_eq!(themes.len(), 3, "the README names three themes: {themes:?}");
     }
 }
