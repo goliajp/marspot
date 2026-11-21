@@ -127,9 +127,9 @@ build_one_cmd() {
   #
   #   - byte count.  A single pass of an 8 MiB scenario does not keep
   #     `cat` blocked long enough to measure a fast terminal at all;
-  #     bin/measure.sh had already moved to LIVE_MIN_BYTES and this
-  #     script had not, so the two sides of the comparison were pushing
-  #     different amounts of data.
+  #     the marspot-side script of the time had already moved to
+  #     LIVE_MIN_BYTES and this script had not, so the two sides of
+  #     the comparison were pushing different amounts of data.
   #   - certification.  `cat` returning proves the bytes reached the
   #     PTY, not that the terminal processed them; a terminal that
   #     drops under pressure finishes early and wins.

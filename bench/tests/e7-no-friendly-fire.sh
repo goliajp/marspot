@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# bench/tests/e7-no-friendly-fire.sh — no script kills marspot / mcli by name.
+# bench/tests/e7-no-friendly-fire.sh — no script kills marspot binaries by name.
 #
 # Asserts that no script under bin/ kills our binaries by name or by
 # command line (`pkill`, `killall`).  By-name killing is friendly fire:
-# the runners are shared, and other sessions run their own marspot,
-# mcli and sandbox shells there.  A sanity bench.sh during a 30-min
+# the runners are shared, and other sessions run their own marspot
+# and sandbox shells there.  A sanity bench.sh during a 30-min
 # --extended run once killed the soak's binary at t=41 s (2026-05-05)
 # and turned the rest of the run into zero-RSS rows that passed the
 # drift gate.  Scripts stop the pids they recorded instead (kill_app,
@@ -19,13 +19,13 @@ cd "$(git rev-parse --show-toplevel)"
 
 fail=0
 
-echo "==> E7: no by-name kill of marspot/mcli in any script"
+echo "==> E7: no by-name kill of marspot binaries in any script"
 
 for f in bin/*.sh bin/*/*.sh; do
   [[ -f "$f" ]] || continue
   [[ $f == bin/install-remote.sh ]] && continue
   # Exclude comment lines — those may document past behaviour
-  matches=$(grep -nE '(pkill|killall)[^#]*(marspot|mcli|SESSION_BIN|SHELL_BIN|CORE_BIN|DEV_TARGET|\$bin)' "$f" 2>/dev/null \
+  matches=$(grep -nE '(pkill|killall)[^#]*(marspot|SESSION_BIN|SHELL_BIN|CORE_BIN|DEV_TARGET|\$bin)' "$f" 2>/dev/null \
     | grep -vE '^[0-9]+:[[:space:]]*#')
   if [[ -n "$matches" ]]; then
     echo "  ✗ $f kills by name:"
@@ -36,9 +36,9 @@ done
 
 echo
 if [[ $fail -eq 0 ]]; then
-  echo "PASS: no script kills marspot/mcli by name"
+  echo "PASS: no script kills marspot binaries by name"
   exit 0
 else
-  echo "FAIL: a script would kill other sessions' marspot/mcli instances"
+  echo "FAIL: a script would kill other sessions' marspot instances"
   exit 1
 fi

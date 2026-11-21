@@ -7,7 +7,7 @@
 //! (result list, highlight overlay, Cmd+F intercept) lands in C3-C5.
 //! Tools live under `src/` rather than `crates/marspot-term/`
 //! because they integrate
-//! with L2's per-pane state machinery and aren't reusable in `mcli`.
+//! with L2's per-pane state machinery.
 
 pub mod search_bar;
 pub mod search_list;

@@ -1,10 +1,8 @@
 //! Production-path bulk-cat throughput: shell → core → **L3**.
 //!
-//! `bin/measure.sh` drives `mcli`, where the parser and the renderer
-//! share one process and one thread.  That is not the architecture the
-//! product ships: since 2026-06-13 every pane is its own
-//! `marspot-session` (L3) that owns the pty and publishes into shm,
-//! and the number a user actually experiences comes from that path.
+//! Since 2026-06-13 every pane is its own `marspot-session` (L3) that
+//! owns the pty and publishes into shm, and the number a user actually
+//! experiences comes from that path.
 //!
 //! This probe measures it headlessly: spawn one L3 in a sandbox the
 //! way a core does -- its grid region and control socket inherited --
@@ -301,8 +299,8 @@ fn main() {
         .env("MARSPOT_SHM_FD", region.as_raw_fd().to_string())
         // `SHELL`, not `MARSPOT_SHELL`: an L3 spawns `$SHELL` directly
         // (local_session.rs) and never consults the MARSPOT_SHELL
-        // override that `marspot_term::session::Session` — the path
-        // mcli and the L2 in-process backend take — honours.  Pointing
+        // override that `marspot_term::session::Session` — the
+        // in-process path — honours.  Pointing
         // MARSPOT_SHELL at the trial script leaves the session sitting
         // in an interactive zsh waiting for input, which looks exactly
         // like a slow terminal until the probe times out.

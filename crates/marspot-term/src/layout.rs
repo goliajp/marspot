@@ -628,9 +628,9 @@ impl Layout {
     /// row)` inside that cell's terminal grid, return the physical-pixel
     /// rect that one character cell occupies in view-local top-left
     /// coordinates (y-down — same space the renderer paints in).
-    /// Returns `None` when `cell_idx` is out of range.  Both
-    /// `MarspotApp` and `mcli` use this to publish the focused caret
-    /// to the IME (`MarspotAppCtx::set_caret_rect_phys`).
+    /// Returns `None` when `cell_idx` is out of range.  Used to
+    /// publish the focused caret to the IME
+    /// (`MarspotAppCtx::set_caret_rect_phys`).
     pub fn caret_view_phys_rect(
         &self,
         cell_idx: usize,

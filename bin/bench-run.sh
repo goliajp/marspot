@@ -39,20 +39,15 @@ source "$ROOT/bin/_lib.sh"
 
 # ---- defaults ----------------------------------------------------------
 
-# typing-latency is intentionally NOT in the default scenarios.  It
-# unavoidably steals focus to drive keystrokes (System Events is a
-# global event source), and a default `/benchmark` shouldn't surprise
-# the user mid-work.  Opt in with `--scenarios typing-latency` or
-# `--include-typing-latency`.
+# Key-to-frame latency is not a scenario here: bin/measure-latency.sh
+# measures it on the shipped processes.
 DEFAULT_SCENARIOS=(multi-session-9x scrollback-1m idle-9x vim-jump htop-60s active-9x-soak)
-ALL_SCENARIOS=(multi-session-9x scrollback-1m idle-9x vim-jump htop-60s active-9x-soak typing-latency)
 ALL_TERMINALS=(marspot iterm terminal warp)
 
 SCENARIOS=("${DEFAULT_SCENARIOS[@]}")
 TERMINALS=("${ALL_TERMINALS[@]}")
 QUICK=0
 EXTENDED=0
-INCLUDE_TYPING=0
 
 while (( $# > 0 )); do
   case "$1" in
@@ -69,9 +64,6 @@ while (( $# > 0 )); do
       shift ;;
     --extended)
       EXTENDED=1
-      shift ;;
-    --include-typing-latency)
-      INCLUDE_TYPING=1
       shift ;;
     -h|--help)
       sed -n '2,32p' "$0"; exit 0 ;;
@@ -112,19 +104,11 @@ echo
 
 # ---- helpers -----------------------------------------------------------
 
-# If the user explicitly asked for typing-latency (via --include or
-# --scenarios), put it back in the matrix.
-if (( INCLUDE_TYPING )); then
-  SCENARIOS+=(typing-latency)
-fi
-
 # Whether `scenario` supports `terminal`.  Warp is paste-mode for almost
-# everything; typing-latency is marspot-only by construction.
+# everything.
 supports() {
   local scenario=$1 terminal=$2
   case "$scenario:$terminal" in
-    typing-latency:marspot)             return 0 ;;
-    typing-latency:*)                return 1 ;;
     multi-session-9x:warp)           return 1 ;;  # paste-mode unreliable for 9-up
     scrollback-1m:warp)              return 1 ;;  # paste-mode + we don't auto-close
     idle-9x:warp)                    return 1 ;;
@@ -145,7 +129,6 @@ scenario_args() {
       else echo ""
       fi ;;
     htop-60s)        (( QUICK )) && echo "--quick" || echo "" ;;
-    typing-latency)  (( QUICK )) && echo 50 || echo 200 ;;
     *)               echo "" ;;
   esac
 }
@@ -226,7 +209,6 @@ HEADLINE_METRICS = {
     "vim-jump":         ["wall_s", "rss_post_delta_KiB"],
     "htop-60s":         ["cpu_pct_mean", "cpu_pct_max", "rss_delta_max_KiB"],
     "active-9x-soak":   ["rss_drift_ratio_q4_over_q1", "cpu_drift_ratio_q4_over_q1", "cpu_pct_mean"],
-    "typing-latency":   ["input_latency_us_p50", "input_latency_us_p95", "input_latency_us_p99"],
 }
 
 with open(timeseries_path, "a") as f:

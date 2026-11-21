@@ -19,14 +19,14 @@
 #                 MARSPOT_BENCH_TIMEOUT seconds (default 5400); cargo
 #                 sweep --time 30 prunes stale target/ artefacts
 #   - terminating: trap on EXIT/INT/TERM kills the remote process group,
-#                  and with it the bench's own marspot/mcli children
+#                  and with it the bench's own marspot children
 #   - retrievable: bench/results/ rsync'd back to bench/remote-runs/<ts>/
 #
 # The remote shell pid is captured into $REMOTE_PIDF; SSH-spawned shells
 # are session/PG leaders so $$ == PGID, which lets `kill -- -PGID` collect
-# every descendant including the bench.sh subshells and mcli children.
-# Nothing is killed by name: other sessions run their own marspot and
-# mcli on the same host.
+# every descendant including the bench.sh subshells and marspot children.
+# Nothing is killed by name: other sessions run their own marspot on the
+# same host.
 
 set -euo pipefail
 

@@ -57,6 +57,7 @@ impl Ring {
 
     /// What the records held take, never more than [`MAX_BYTES`] unless
     /// one line alone is.
+    #[cfg(test)]
     pub(super) fn bytes(&self) -> usize {
         self.bytes
     }

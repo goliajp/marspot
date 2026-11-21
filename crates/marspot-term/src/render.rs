@@ -1,10 +1,9 @@
 //! Render-layer data types + box-drawing helpers.
 //!
 //! This module used to host an AppKit/CGContext-based `Renderer`
-//! alongside the Metal one in `render_metal.rs`. After mcli migrated
-//! to Metal (everyone now goes through `MetalRenderer`), the AppKit
-//! renderer was removed — what remains here is the bits both binaries
-//! still share:
+//! alongside the Metal one in `render_metal.rs`.  Everything now goes
+//! through `MetalRenderer` and the AppKit renderer was removed — what
+//! remains here is the shared part:
 //!
 //! - `SessionView`, `SidebarEntry` — the data types `MetalRenderer`
 //!   consumes (the caller bundles a Grid + a few flags so the
@@ -106,7 +105,7 @@ pub struct SessionView<'a> {
     pub focused: bool,
     /// Short label drawn in the title strip at the top of the
     /// cell.  Empty string skips the strip entirely (useful for
-    /// snapshot / mcli single-session rendering).
+    /// snapshot rendering).
     pub title: &'a str,
     /// Optional text selection for this session.  Coords are
     /// viewport-local (caller has already projected absolute rows
@@ -201,7 +200,7 @@ pub struct SessionView<'a> {
     /// circuit per-pane instance rebuilds.  Caller (`Pane::as_view`)
     /// supplies a monotonic-ish counter that bumps whenever the
     /// underlying grid / view state would change the rendered
-    /// output.  `0` (default for tests / mcli) disables caching
+    /// output.  `0` (default for tests) disables caching
     /// for that pane.
     pub seq: u64,
 }

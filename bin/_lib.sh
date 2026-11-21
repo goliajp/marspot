@@ -128,34 +128,11 @@ rss_kib() {
   ps -o rss= -p "$1" 2>/dev/null | tr -d ' '
 }
 
-# What this bench run launched of our own binaries (marspot, mcli) is
-# written down here, one pid per line, and pids_of / kill_app answer
-# from it: another checkout's bench, or someone's own marspot, may be
-# running on the same host, and a lookup by name would measure or kill
-# theirs too.  Exported, so the scenarios and drivers a run starts add
-# to the same list.
-export MARSPOT_BENCH_PIDS="${MARSPOT_BENCH_PIDS:-/tmp/marspot-bench-pids.$$}"
-
-# bench_record_pid <pid> — the caller just launched `pid`
-bench_record_pid() {
-  echo "$1" >> "$MARSPOT_BENCH_PIDS"
-}
-
-# _bench_pids <name> → the recorded pids still running binary `name`
-_bench_pids() {
-  local p comm
-  [[ -f $MARSPOT_BENCH_PIDS ]] || return 0
-  while read -r p; do
-    [[ $p =~ ^[0-9]+$ ]] || continue
-    comm=$(ps -o comm= -p "$p" 2>/dev/null) || continue
-    if [[ ${comm##*/} == "$1" ]]; then echo "$p"; fi
-  done < "$MARSPOT_BENCH_PIDS"
-  return 0
-}
-
 # pids_of <terminal-name> → newline-separated list of matching pids.
-# marspot and mcli: only the ones this run launched (see above).  The
-# other terminals are whole apps the bench drives, matched by name.
+# marspot: shell, core and sessions of the bench sandbox that
+# `bin/drivers/marspot.sh run-app` started (its own state dir, so never
+# anyone else's marspot).  The other terminals are whole apps the bench
+# drives, matched by name.
 # macOS quirks:
 #   - pgrep -x doesn't match because comm is the full path on macOS,
 #     not the basename — `pgrep -x iTerm2` returns nothing even when
@@ -168,7 +145,7 @@ pids_of() {
   #   warp     → stable    (Warp's binary name; verified via ps -axo comm)
   #   terminal → Terminal  (Terminal.app)
   case "$1" in
-    marspot|mcli) _bench_pids "$1" ;;
+    marspot)  "$ROOT/bin/drivers/marspot.sh" app-pids 2>/dev/null || true ;;
     iterm)    pgrep -al '^iTerm2$'   2>/dev/null | awk '{print $1}' ;;
     warp)     pgrep -al '^stable$'   2>/dev/null | awk '{print $1}' ;;
     terminal) pgrep -al '^Terminal$' 2>/dev/null | awk '{print $1}' ;;
@@ -207,34 +184,14 @@ json_emit_kv() {
 }
 
 # kill_app <name>
-# Stops the marspot / mcli instances this bench run launched (see
-# MARSPOT_BENCH_PIDS above), and no others.  For iterm2 / warp /
-# terminal.app, use close_bench_windows below to close ONLY the windows
-# we opened, leaving the user's work alone.
+# marspot: stops the bench sandbox `bin/drivers/marspot.sh run-app`
+# started and removes its state dir; no other marspot is touched.  For
+# iterm2 / warp / terminal.app, use close_bench_windows below to close
+# ONLY the windows we opened, leaving the user's work alone.
 kill_app() {
   case "$1" in
-    marspot|mcli)
-      local pids p i keep=""
-      pids=$(_bench_pids "$1")
-      [[ -n $pids ]] || return 0
-      # shellcheck disable=SC2086
-      kill -TERM $pids 2>/dev/null || true
-      for ((i = 0; i < 30; i++)); do
-        # shellcheck disable=SC2086
-        kill -0 $pids 2>/dev/null || break
-        sleep 0.1
-      done
-      # shellcheck disable=SC2086
-      kill -KILL $pids 2>/dev/null || true
-      # keep the list to what is still running, so it stays small
-      while read -r p; do
-        if kill -0 "$p" 2>/dev/null; then keep+="$p"$'\n'; fi
-      done < "$MARSPOT_BENCH_PIDS"
-      if [[ -n $keep ]]; then
-        printf '%s' "$keep" > "$MARSPOT_BENCH_PIDS"
-      else
-        rm -f "$MARSPOT_BENCH_PIDS"
-      fi
+    marspot)
+      "$ROOT/bin/drivers/marspot.sh" close-app >/dev/null 2>&1 || true
       ;;
     *)
       echo "kill_app: refusing to quit '$1' — bench must not destroy user state." >&2
@@ -278,7 +235,7 @@ restore_focus_to() {
   # Skip if the app is one of our bench targets — those need to come
   # to front for typing-latency / scenarios that drive keystrokes.
   case "$app" in
-    iTerm2|iTerm|Terminal|Warp|stable|marspot|mcli) return 0 ;;
+    iTerm2|iTerm|Terminal|Warp|stable|marspot|marspot-shell) return 0 ;;
   esac
   osascript -e "tell application \"System Events\" to set frontmost of first process whose name is \"$app\" to true" \
     >/dev/null 2>&1 || true
@@ -297,8 +254,8 @@ restore_focus_to() {
 # and it lies WORSE the faster the terminal is — the wrong bias for
 # this repo.
 #
-# Every live consumer (bin/measure.sh for marspot, bin/measure-other.sh
-# for the competitors) cat's each scenario as many times as it takes to
+# Every live consumer (bin/_remote-measure-others-mini.sh for the
+# product and the competitors, bin/measure-other.sh for a manual run) cat's each scenario as many times as it takes to
 # clear this bar, so both sides of a cross-terminal comparison push the
 # same number of bytes.  The scenario FILES keep their original sizes:
 # `--bench parse` feeds bytes directly with no PTY in the loop, so the

@@ -51,10 +51,9 @@ type_complexity = "allow"
 [features]
 # Offscreen panel screenshots — `marspot --snapshot out.png --panel X`.
 #
-# A development tool, and off by default because the shipped binary
-# should not carry it: the PNG encoder plus the snapshot path is ~17 KB,
-# which is most of the headroom the size gate leaves, and nothing a user
-# runs ever calls it.  Build it when you need to look at a panel:
+# A development tool, and off by default: the PNG encoder plus the
+# snapshot path is ~17 KB that the gate's headless benches in the same
+# binary have no use for.  Build it when you need to look at a panel:
 #
 #     cargo build --features snapshot --bin marspot
 snapshot = []
@@ -63,10 +62,10 @@ snapshot = []
 # pty-feed:<corpus>`, plus the reader-thread read/gather counters they
 # report.
 #
-# Same reasoning as `snapshot`: these answer "where does the live
-# pipeline's time go", which is a question for whoever is working on
-# it, not for the shipped binary — and the size gate's headroom is
-# measured in kilobytes.  Build them when decomposing:
+# Off by default: these answer "where does the live pipeline's time
+# go", which is a question for whoever is working on it, and the
+# reader-thread counters they turn on in marspot-term must not reach
+# the shipped binaries.  Build them when decomposing:
 #
 #     cargo build --features bench-pty --bin marspot
 bench-pty = ["marspot-term/bench-pty"]
@@ -123,8 +122,8 @@ foreign-types = "0.5"
 png = "0.18"
 
 [profile.release]
-# Fat LTO matters now that we split into a lib + multiple bins (marspot,
-# mcli): the render and parser hot paths cross the lib↔bin boundary
+# Fat LTO matters now that we split into a lib + multiple bins: the
+# render and parser hot paths cross the lib↔bin boundary
 # every frame, and `thin` LTO leaves them un-inlined.  Measured
 # regression on `bin/bench.sh` jumping from ~1 ms to ~20 ms p99
 # render with `thin` after the split; `fat` recovers it.

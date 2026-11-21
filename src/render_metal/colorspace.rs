@@ -17,11 +17,11 @@ use objc2_quartz_core::CAMetalLayer;
 /// primaries → coral pinker still).  Tagging **sRGB** does the correct
 /// conversion and the coral stays orange, matching iTerm2.
 ///
-/// **Every CAMetalLayer that reaches the screen MUST call this** — the
-/// standalone renderer's layer (below) AND the shell presenter's layer
-/// (`bin/marspot-shell/present.rs`).  They diverged once (presenter created
-/// without any tag → over-saturated colour in the installed app); routing
-/// both through this one helper keeps them from drifting again.  NB: the
+/// **Every CAMetalLayer that reaches the screen MUST call this** — today
+/// that is the shell presenter's layer (`bin/marspot-shell/present.rs`).
+/// Two layers once diverged (one created without any tag → over-saturated
+/// colour in the installed app); routing every layer through this one
+/// helper keeps them from drifting again.  NB: the
 /// presenter only applies it on (re)launch — a silent core swap alone
 /// won't change the layer, so the shell must actually restart to pick up a
 /// colour-space change.

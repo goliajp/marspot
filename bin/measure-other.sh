@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cross-terminal companion to bin/measure.sh.
+# Cross-terminal companion to bin/measure-l3.sh.
 #
 # AppleScript-driven launching of iTerm2 / Warp / Terminal.app is too
 # fragile for benching (AppleEvent timeouts, profile-specific shell
@@ -22,8 +22,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCENARIOS_DIR="$ROOT/bench/scenarios"
 RESULTS_DIR="$ROOT/bench/results"
-# LIVE_MIN_BYTES / live_repeat / live_cat_args — the same live-sizing
-# rule bin/measure.sh applies to marspot, so both sides of the
+# LIVE_MIN_BYTES / live_repeat / live_cat_args — the live-sizing rule
+# every marspot live measurement applies, so both sides of the
 # comparison push the same number of bytes.
 source "$ROOT/bin/_lib.sh"
 mkdir -p "$RESULTS_DIR"

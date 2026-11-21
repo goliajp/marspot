@@ -213,9 +213,8 @@ pub(super) struct Drawing<'a> {
     pub(super) device: &'a ProtocolObject<dyn MTLDevice>,
 }
 
-/// Encode the whole frame against `target` in one pass.  Shared by the
-/// live `render_layout` (drawable target) and the offscreen
-/// `render_layout_to_texture` (caller-provided target).
+/// Encode the whole frame against `target` in one pass, for the
+/// offscreen `render_layout_to_texture` paths (caller-provided target).
 ///
 /// With `panes`, each pane's instances are drawn from its own buffers
 /// rather than from the frame's lists, which then hold everything

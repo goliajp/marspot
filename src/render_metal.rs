@@ -31,16 +31,12 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_app_kit::{NSView, NSViewLayerContentsPlacement};
-use objc2_foundation::NSSize;
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLClearColor, MTLCommandBuffer, MTLCommandBufferStatus,
     MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLoadAction,
     MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
     MTLRenderPipelineState, MTLResourceOptions, MTLSamplerState, MTLStoreAction, MTLTexture,
 };
-use objc2_app_kit::NSColor;
-use objc2_quartz_core::{kCAGravityTopLeft, CAMetalDrawable, CAMetalLayer};
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
@@ -58,7 +54,9 @@ use crate::render::{SessionView, SidebarEntry};
 #[cfg(test)]
 use crate::render::HighlightSpan;
 
-use crate::frame_build::frame::{build_frame, build_instances, FormPanel};
+use crate::frame_build::frame::{build_frame, FormPanel};
+#[cfg(test)]
+use crate::frame_build::frame::build_instances;
 use crate::frame_build::frame::FrameKeep;
 use crate::frame_build::glyph_resolve::resolve_cell_glyph;
 
@@ -207,9 +205,7 @@ pub struct WindowRender {
     /// what surfaces in the wild as "all 9 panes' contents momentarily
     /// disappear to background and reappear, no clear trigger,
     /// frequent" (the marspot flash bug, 2026-06-15).  Defaulting to
-    /// Load eliminates the bg-only intermediate state.  The same-
-    /// process CAMetalLayer path (`render_layout`, mcli/standalone)
-    /// always Clears — there's no cross-process race there.
+    /// Load eliminates the bg-only intermediate state.
     ///
     /// The flag itself now lives on `WindowRender`: it answers "does
     /// this window still owe a clear", and one window's resize must
@@ -411,9 +407,6 @@ pub struct MetalRenderer {
     /// Command submission queue.  One per renderer is fine; Apple's
     /// guidance says queues are heavyweight and should be reused.
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    /// The CAMetalLayer attached to the host NSView.  `None` in headless
-    /// mode (used by tests / benches that don't need a window).
-    layer: Option<Retained<CAMetalLayer>>,
     /// Drawable size in physical pixels.  Updated lazily in `resize`.
     width_px: f64,
     height_px: f64,
@@ -461,7 +454,7 @@ pub struct MetalRenderer {
     atlas_texture: std::rc::Rc<MetalAtlasTexture>,
     color_atlas_texture: std::rc::Rc<MetalAtlasTexture>,
     /// Per-frame instance scratch.  Reset at the start of each
-    /// `render_layout` so per-frame allocations stay zero in the
+    /// render so per-frame allocations stay zero in the
     /// steady state.
     cells_scratch: Vec<CellInstance>,
     glyphs_scratch: Vec<GlyphInstance>,
@@ -526,18 +519,6 @@ pub struct MetalRenderer {
     overlay_glyphs_scratch: Vec<GlyphInstance>,
     overlay_color_glyphs_scratch: Vec<GlyphInstance>,
     overlay_ui_rects_scratch: Vec<UiRectInstance>,
-    /// Top inset in physical pixels — reserved for window chrome
-    /// (macOS traffic-light buttons). Single-session callers (mcli)
-    /// set this once at `resumed`; the convenience `render(view)`
-    /// path forwards it into Layout::build's `top_inset` parameter.
-    /// Multi-session callers build their own Layout and ignore this.
-    top_inset_phys: f64,
-    /// Phase 6 — monotonically-increasing frame stamp.  Bumped at the
-    /// start of `render_layout` and forwarded into both atlases'
-    /// `begin_frame(...)` so cache hits during the frame mark
-    /// themselves and the LRU eviction path picks the oldest
-    /// non-recent shelf instead of the legacy whole-atlas reset.
-    frame_id: u64,
     /// Handed to every frame left running on the GPU; Metal calls it
     /// when the frame completes.  One block for the renderer's life,
     /// so a frame allocates nothing for it.
@@ -547,136 +528,6 @@ pub struct MetalRenderer {
 type FrameDone = block2::RcBlock<dyn Fn(NonNull<ProtocolObject<dyn MTLCommandBuffer>>)>;
 
 impl MetalRenderer {
-    /// Construct attached to a host `NSView` — replaces the view's
-    /// CALayer with a CAMetalLayer.  Failures (no Metal-capable GPU,
-    /// no command queue) bubble up as `Err` strings; caller decides
-    /// whether to fall back to the AppKit renderer or refuse to start.
-    pub fn new(view: &NSView, scale: f32) -> Result<Self, String> {
-        let device = system_default_device()?;
-        let queue = device
-            .newCommandQueue()
-            .ok_or_else(|| "MTLDevice.newCommandQueue returned nil".to_string())?;
-        let (bg_pipeline, fg_pipeline, fg_color_pipeline, dot_pipeline, scene_ui_pipeline) =
-            build_pipelines(&device)?;
-        let fg_sampler = build_fg_sampler(&device)?;
-        let font = FontCache::build()?;
-        // 4096×4096 R8 atlas = 16 MiB (Phase 2 bump from 2048²).
-        // Pre-bump 2048² fit ~6000 Menlo 13pt 2× glyphs; Phase 2
-        // multiplexes the atlas across pt-sizes (PTY 12 + chrome 13 +
-        // future variable-weight faces) so each `size_q` bucket
-        // consumes its own working set, and Phase 4 will further ×4
-        // for sub-pixel positioning buckets — 16 MiB pre-pays for both
-        // without forcing rebuilds in steady state.  Still bounded:
-        // `get_or_rasterize` does an atomic rebuild on full so the
-        // user never sees silently-blank cells.
-        let (atlas, atlas_texture) = new_atlas(&device, 4096, 4096, false, font.font_table())?;
-        // 1024×1024 BGRA8 colour atlas = 4 MiB.  Holds full-colour emoji
-        // (~cell-sized slots) — a small working set, so 1024² is ample
-        // and keeps the colour path's footprint to 4 MiB.  Same shelf
-        // packer + atomic-rebuild-on-full bound as the mono atlas.
-        let (color_atlas, color_atlas_texture) = new_atlas(&device, 1024, 1024, true, font.font_table())?;
-
-        let layer = { CAMetalLayer::new() };
-        unsafe {
-            layer.setDevice(Some(&device));
-            layer.setPixelFormat(TARGET_FORMAT);
-            // framebufferOnly = true: drawables can only be render
-            // targets, not sample sources.  Cheaper and we don't need
-            // to read pixels back during compositing.
-            layer.setFramebufferOnly(true);
-            layer.setContentsScale(scale as f64);
-            // Glitchless live-resize recipe (from
-            // `metal-live-resize` / Tristan Hume's 2019 post +
-            // empirical work in the shell/core split that drove
-            // marspot to Sublime-grade resize smoothness):
-            //
-            //   1. contentsGravity = topLeft — pin stale frames at
-            //      top-left of the layer; default `resize` would
-            //      stretch the previous drawable into the new
-            //      bounds as a smeary wobble until our next present
-            //      lands.
-            //   2. setGeometryFlipped(true) — `MarspotView` is
-            //      isFlipped=true (top-left origin); without this
-            //      the layer's coord system is bottom-left and
-            //      `topLeft` gravity actually pins to the *bottom*
-            //      of the layer for those few frames, which reads
-            //      as content jumping up/down when dragging the
-            //      bottom edge of the window.
-            //   3. setPresentsWithTransaction(true) — drawable is
-            //      handed to the next CATransaction (same one
-            //      AppKit uses for bounds changes during a live
-            //      resize), so window bounds and pixels land in the
-            //      same frame.  Caller must do
-            //      cmd.commit() + waitUntilScheduled() +
-            //      drawable.present() instead of
-            //      cmd.presentDrawable() — the live `render_layout`
-            //      path below honours this.
-            layer.setContentsGravity(kCAGravityTopLeft);
-            layer.setGeometryFlipped(true);
-            layer.setPresentsWithTransaction(true);
-            layer.setOpaque(true);
-            // Tag layer colour space (Display P3, shared helper — see
-            // pin_layer_colorspace; the shell presenter calls the same one).
-            pin_layer_colorspace(&layer);
-        }
-
-        view.setWantsLayer(true);
-        {
-            // NSView's own resize-time content placement.  AppKit's
-            // path takes over for the brief moment between the
-            // window-bounds change and our next present; default
-            // `ScaleAxesIndependently` stretches old contents into
-            // the new bounds, `TopLeft` mirrors the layer-side
-            // gravity so the two compositing paths agree.
-            view.setLayerContentsPlacement(NSViewLayerContentsPlacement::TopLeft);
-            view.setLayer(Some(&layer));
-            // Window BG = terminal BG so the gap between resize +
-            // first repaint reads as the same colour, not the system
-            // window BG.  Mirrors the AppKit renderer.
-            if let Some(window) = view.window() {
-                let (r, g, b) = marspot_term::palette::current().bg;
-                let bg = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0);
-                window.setBackgroundColor(Some(&bg));
-            }
-        }
-
-        Ok(Self {
-            fonts_built_at_scale: crate::ui::chrome_scale(),
-            device,
-            queue,
-            layer: Some(layer),
-            width_px: 0.0,
-            height_px: 0.0,
-            bg_pipeline,
-            fg_pipeline,
-            fg_color_pipeline,
-            fg_sampler,
-            dot_pipeline,
-            scene_ui_pipeline,
-            font,
-            atlas,
-            color_atlas,
-            atlas_texture,
-            color_atlas_texture,
-            cells_scratch: Vec::new(),
-            dots_scratch: Vec::new(),
-            ui_rects_scratch: Vec::new(),
-            ui_slab: Vec::new(),
-            overlay_cells_scratch: Vec::new(),
-            overlay_glyphs_scratch: Vec::new(),
-            overlay_color_glyphs_scratch: Vec::new(),
-            overlay_ui_rects_scratch: Vec::new(),
-            glyphs_scratch: Vec::new(),
-            color_glyphs_scratch: Vec::new(),
-            window_focused: true,
-            process_panel: None, cc_usage: None, settings_panel: None, shortcuts_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None,
-            last_render_split: RenderSplit::default(),
-            top_inset_phys: 0.0,
-            frame_id: 0,
-            frame_done: None,
-        })
-    }
-
     /// Construct without a view — for unit tests, benches, or a future
     /// offscreen render path.  There is no drawable, but
     /// `render_cells_bg_offscreen` works end-to-end against a
@@ -709,7 +560,6 @@ impl MetalRenderer {
             fonts_built_at_scale: crate::ui::chrome_scale(),
             device,
             queue,
-            layer: None,
             width_px: 0.0,
             height_px: 0.0,
             bg_pipeline,
@@ -736,8 +586,6 @@ impl MetalRenderer {
             window_focused: true,
             process_panel: None, cc_usage: None, settings_panel: None, shortcuts_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None,
             last_render_split: RenderSplit::default(),
-            top_inset_phys: 0.0,
-            frame_id: 0,
             frame_done: None,
         })
     }
@@ -794,46 +642,6 @@ impl MetalRenderer {
         self.context_menu_state = state;
     }
 
-    /// Reserve a top strip (physical pixels) above the grid so window
-    /// chrome (traffic lights, focused-session status) doesn't paint
-    /// over terminal content. Single-session callers (mcli) set this
-    /// once at `resumed` from `HEADER_PT * scale`. Multi-session
-    /// callers build their own Layout with `top_inset` baked in and
-    /// don't touch this field.
-    pub fn set_top_inset(&mut self, phys: f64) {
-        self.top_inset_phys = phys;
-    }
-
-    /// Top inset in physical pixels currently in effect.
-    pub fn top_inset_phys(&self) -> f64 {
-        self.top_inset_phys
-    }
-
-    /// Single-session convenience render — builds a 1×1 Layout with
-    /// the current viewport + top inset, then dispatches to
-    /// `render_layout`. mcli uses this so it doesn't have to know
-    /// about Layout / sidebars.
-    pub fn render(&mut self, wr: &mut WindowRender, view: SessionView) {
-        if self.layer.is_none() {
-            return;
-        }
-        if self.width_px < 1.0 || self.height_px < 1.0 {
-            return;
-        }
-        let layout = Layout::build(
-            self.width_px,
-            self.height_px,
-            0.0,                 // sidebar_w
-            self.top_inset_phys, // top_inset
-            0.0,                 // gutter
-            1,                   // cols
-            1,                   // rows
-            self.font.cell_w,
-            self.font.cell_h,
-        );
-        self.render_layout(wr, &layout, std::slice::from_ref(&view), &[], 0);
-    }
-
     pub fn cell_dims(&self) -> (f64, f64) {
         self.font.cell_dims()
     }
@@ -871,61 +679,6 @@ impl MetalRenderer {
         &mut self.font
     }
 
-    /// Caret rect for a single-session render (mcli's path).  Builds
-    /// the same 1×1 Layout `render()` uses, then asks the layout where
-    /// the focused session's `(col, row)` maps in view-local physical
-    /// pixels (top-left, y-down).  Marspot's main loop has a real
-    /// multi-cell `Layout` and calls `Layout::caret_view_phys_rect`
-    /// directly; the geometry is shared in `Layout` so both binaries
-    /// stay in sync.  Returns `None` only when the viewport hasn't
-    /// been sized yet.
-    ///
-    /// Not gated on `view.cursor_visible`: an app that hides the
-    /// cursor while it works still has an insertion point, and the
-    /// IME candidate window has to anchor to it (see
-    /// `PaneBackend::ime_caret_cell`).
-    pub fn focused_caret_view_phys_rect(
-        &self,
-        view: &SessionView,
-    ) -> Option<(f64, f64, f64, f64)> {
-        if self.width_px < 1.0 || self.height_px < 1.0 {
-            return None;
-        }
-        let layout = Layout::build(
-            self.width_px,
-            self.height_px,
-            0.0,
-            self.top_inset_phys,
-            0.0,
-            1,
-            1,
-            self.font.cell_w,
-            self.font.cell_h,
-        );
-        let (col, row) = view.grid.cursor();
-        layout.caret_view_phys_rect(0, col, row, self.font.cell_w, self.font.cell_h)
-    }
-
-    pub fn atlas_approx_bytes(&self) -> usize {
-        self.atlas.approx_bytes()
-    }
-
-    pub fn fontcache_approx_bytes(&self) -> usize {
-        self.font.approx_bytes()
-    }
-
-    /// Bytes held in this renderer's per-frame scratch buffers.  The
-    /// pipeline-state / sampler / queue handles are CFRetain'd Apple
-    /// objects whose footprint lives in CoreGraphics / Metal heaps;
-    /// not counted here.  Per-frame `MTLBuffer`s are constructed and
-    /// dropped each frame via `make_buffer_from_bytes` so they don't
-    /// live in this struct.
-    pub fn metal_buffers_approx_bytes(&self) -> usize {
-        self.cells_scratch.capacity() * std::mem::size_of::<CellInstance>()
-            + self.glyphs_scratch.capacity() * std::mem::size_of::<GlyphInstance>()
-            + self.dots_scratch.capacity() * std::mem::size_of::<CellInstance>()
-    }
-
     /// Update the drawable size after a host-window resize.  Cheap on
     /// no-op (same dims).
     pub fn resize(&mut self, width_px: f64, height_px: f64) {
@@ -936,9 +689,6 @@ impl MetalRenderer {
         }
         self.width_px = width_px;
         self.height_px = height_px;
-        if let Some(layer) = &self.layer {
-            layer.setDrawableSize(NSSize { width: width_px, height: height_px });
-        }
     }
 
     /// Chrome font metrics: (cell_w, cell_h, ascent) in physical
@@ -947,187 +697,12 @@ impl MetalRenderer {
         (self.font.cell_w as f32, self.font.cell_h as f32, self.font.ascent as f32)
     }
 
-    /// Phase 5b live render — same call shape as
-    /// `crate::render::Renderer::render_layout`.  Walks each session's
-    /// grid + scrollback, emits BG cell instances + FG glyph
-    /// instances, then runs both passes against the next CAMetalLayer
-    /// drawable and presents.  No-op in headless mode.
-    pub fn render_layout(
-        &mut self,
-        wr: &mut WindowRender,
-        layout: &Layout,
-        views: &[SessionView],
-        sidebar: &[SidebarEntry],
-        focused_idx: usize,
-    ) {
-        if self.layer.is_none() {
-            return;
-        }
-        if self.width_px < 1.0 || self.height_px < 1.0 {
-            return;
-        }
-        // Phase 6 — stamp the frame so atlases can LRU-touch entries
-        // they serve this render.
-        self.frame_id = self.frame_id.wrapping_add(1);
-        let frame_id = self.frame_id;
-        self.atlas.begin_frame(frame_id);
-        self.color_atlas.begin_frame(frame_id);
-
-        // Disjoint borrow so build_instances can mutate font + atlas
-        // + scratch while we still hold &references to the GPU bits.
-        let Self {
-            ref device,
-            ref queue,
-            ref layer,
-            ref bg_pipeline,
-            ref fg_pipeline,
-            ref fg_color_pipeline,
-            ref fg_sampler,
-            ref dot_pipeline,
-            ref scene_ui_pipeline,
-            ref mut font,
-            ref mut atlas,
-            ref mut color_atlas,
-            ref atlas_texture,
-            ref color_atlas_texture,
-            ref mut cells_scratch,
-            ref mut glyphs_scratch,
-            ref mut color_glyphs_scratch,
-            ref mut dots_scratch,
-            ref mut ui_rects_scratch,
-            ref mut ui_slab,
-            ref mut overlay_cells_scratch,
-            ref mut overlay_glyphs_scratch,
-            ref mut overlay_color_glyphs_scratch,
-            ref mut overlay_ui_rects_scratch,
-            window_focused,
-            ref process_panel,
-            ref cc_usage,
-            ref settings_panel,
-            ref shortcuts_panel,
-            width_px,
-            height_px,
-            ..
-        } = *self;
-
-        cells_scratch.clear();
-        glyphs_scratch.clear();
-        color_glyphs_scratch.clear();
-        dots_scratch.clear();
-        ui_rects_scratch.clear();
-        overlay_cells_scratch.clear();
-        overlay_glyphs_scratch.clear();
-        overlay_color_glyphs_scratch.clear();
-        overlay_ui_rects_scratch.clear();
-        build_instances(
-            layout,
-            views,
-            sidebar,
-            focused_idx,
-            window_focused,
-            process_panel.as_ref(),
-            cc_usage.as_ref(),
-            FormPanel::open(settings_panel.as_ref(), shortcuts_panel.as_ref()),
-            self.layout_modal_state.as_ref(),
-            self.drop_preview,
-            self.drag_source,
-            self.context_menu_state.as_ref(),
-            font,
-            atlas,
-            color_atlas,
-            cells_scratch,
-            glyphs_scratch,
-            color_glyphs_scratch,
-            dots_scratch,
-            ui_rects_scratch,
-            &mut wr.kept,
-            overlay_cells_scratch,
-            overlay_glyphs_scratch,
-            overlay_ui_rects_scratch,
-        );
-
-        let layer = layer.as_ref().unwrap();
-        let drawable = match layer.nextDrawable() {
-            Some(d) => d,
-            None => return,
-        };
-        let texture = { drawable.texture() };
-
-        let cmd = match queue.commandBuffer() {
-            Some(c) => c,
-            None => return,
-        };
-
-        encode_passes(
-            &cmd,
-            &texture,
-            &Drawing {
-                bg_pipeline,
-                dot_pipeline,
-                fg_pipeline,
-                fg_color_pipeline,
-                scene_ui_pipeline,
-                fg_sampler,
-                atlas_texture: atlas_texture.texture(),
-                color_atlas_texture: color_atlas_texture.texture(),
-                device,
-            },
-            cells_scratch,
-            dots_scratch,
-            glyphs_scratch,
-            color_glyphs_scratch,
-            ui_rects_scratch,
-            overlay_cells_scratch,
-            overlay_glyphs_scratch,
-            overlay_ui_rects_scratch,
-            width_px as f32,
-            height_px as f32,
-            // This path waits only until *scheduled*, so the GPU may
-            // still be reading last frame's instances — refilling in
-            // place would race it.  Allocate per frame here.
-            None,
-            None,
-            ui_slab,
-        );
-
-        let viewport_px = [width_px as f32, height_px as f32];
-
-        // The context menu goes over the finished frame, in a pass of
-        // its own: see `menu_pass`.
-        if let Some(menu) = self.context_menu_state.as_ref() {
-            menu_pass::encode_menu(
-                &mut menu.surface.borrow_mut(),
-                &texture,
-                &cmd,
-                scene_ui_pipeline,
-                fg_pipeline,
-                fg_sampler,
-                atlas_texture.texture(),
-                device,
-                &viewport_px,
-            );
-        }
-
-        // `presentsWithTransaction = true` path (set up in `new`):
-        // commit + waitUntilScheduled + drawable.present() so the
-        // drawable lands in the next CATransaction alongside any
-        // pending window-bounds change.
-        cmd.commit();
-        cmd.waitUntilScheduled();
-        use objc2_metal::MTLDrawable;
-        let mtl_drawable: &ProtocolObject<dyn objc2_metal::MTLDrawable> =
-            ProtocolObject::from_ref(&*drawable);
-        mtl_drawable.present();
-    }
-
-    /// Bench / test variant of `render_layout`.  Encodes the BG + FG
-    /// passes against `target` (any Render-Target MTLTexture) and
-    /// blocks on `waitUntilCompleted` so the caller can time the
-    /// full GPU round-trip without racing the next frame.
+    /// Encodes the BG + FG passes against `target` (any Render-Target
+    /// MTLTexture) and blocks on `waitUntilCompleted` so the caller can
+    /// time the full GPU round-trip without racing the next frame.
     ///
-    /// Use case: `--bench metal-render` headless harness in main.rs
-    /// — same per-frame work as the live path but no CAMetalLayer /
-    /// drawable / present.
+    /// Use case: the `--bench metal-render` headless harness of the
+    /// `marspot` dev binary.
     pub fn render_layout_to_texture(
         &mut self,
         wr: &mut WindowRender,
@@ -3458,7 +3033,7 @@ mod tests {
     fn headless_renderer_constructs() {
         match MetalRenderer::new_headless() {
             Ok(r) => {
-                assert!(r.layer.is_none());
+                assert_eq!((r.width_px, r.height_px), (0.0, 0.0));
             }
             Err(e) => {
                 eprintln!("skipping: no Metal device on this host ({e})");

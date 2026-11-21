@@ -853,25 +853,6 @@ impl GlyphAtlas {
         self.cache.len()
     }
 
-    /// Approximate resident bytes for instrumentation
-    /// (MARSPOT_PROFILE_RSS).  Texture is reported at its full
-    /// `width * height * bytes-per-pixel` footprint (the backend keeps a
-    /// CPU mirror of it), and
-    /// the cache + shelves are reported at their `Vec`/`HashMap`
-    /// capacities.  HashMap bucket overhead beyond the (key, value)
-    /// pair size is approximated as one extra `usize` per bucket — a
-    /// rough but stable proxy that lets slope analysis catch a leak
-    /// in this subsystem without needing exact `std::collections`
-    /// internals.
-    pub fn approx_bytes(&self) -> usize {
-        let texture_bytes = self.width as usize * self.height as usize * self.bpp as usize;
-        let entry_bytes =
-            std::mem::size_of::<GlyphKey>() + std::mem::size_of::<AtlasEntry>();
-        let cache_bytes =
-            self.cache.capacity() * (entry_bytes + std::mem::size_of::<usize>());
-        let shelves_bytes = self.shelves.capacity() * std::mem::size_of::<Shelf>();
-        texture_bytes + cache_bytes + shelves_bytes
-    }
 }
 
 /// Per-render-context slot geometry.  Same for every glyph at a

@@ -60,7 +60,9 @@ impl<'a> FormPanel<'a> {
 
 /// Lay out one frame -- every pane, the chrome around them, and the
 /// overlays on top -- into scratch vecs the caller keeps from frame to
-/// frame.
+/// frame, every pane's instances inline.  The tests' entry point; the
+/// renderer calls [`build_frame`].
+#[cfg(test)]
 pub(crate) fn build_instances(
     layout: &Layout,
     views: &[SessionView],
@@ -95,7 +97,7 @@ pub(crate) fn build_instances(
     )
 }
 
-/// [`build_instances`], with a choice: with `inline_panes` off, each
+/// Lay out one frame, with a choice: with `inline_panes` off, each
 /// pane's instances stay in its slot of `kept.panes` and the lists
 /// hold everything else, for a caller that draws a pane from buffers
 /// of its own.

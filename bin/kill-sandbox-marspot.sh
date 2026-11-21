@@ -32,7 +32,7 @@ fi
 CONFIRM="${1:-}"
 found=()
 
-for p in $(pgrep -x marspot-shell; pgrep -x marspot-core; pgrep -x marspot-session; pgrep -x marspot; pgrep -x mcli); do
+for p in $(pgrep -x marspot-shell; pgrep -x marspot-core; pgrep -x marspot-session); do
   sd=$(ps -ww -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' | grep '^MARSPOT_STATE_DIR=' | head -1)
   # Unset  → the installed app.  Leave it alone, always.
   [[ -z "$sd" ]] && continue

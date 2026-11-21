@@ -223,21 +223,6 @@ impl Grid {
         (self.cursor_col, self.cursor_row)
     }
 
-    /// Approximate resident bytes for the live grid (cell storage
-    /// only — scalar fields are negligible).  Per-MARSPOT_PROFILE_RSS
-    /// sampling.
-    pub fn approx_bytes(&self) -> usize {
-        self.cells.capacity() * std::mem::size_of::<StoredCell>() + self.styles.bytes()
-    }
-
-    /// Approximate resident bytes held by this grid's scrollback.
-    /// Memory variant: lazy-grown `Vec<Cell>` capacity.  Disk
-    /// variant: bytes-worth of lines actually written (not the full
-    /// mmap reservation) — see `Scrollback::approx_bytes` for why.
-    pub fn scrollback_approx_bytes(&self) -> usize {
-        self.scrollback.approx_bytes()
-    }
-
     /// Translate a logical row to its physical index in `cells`.
     #[inline]
     fn phys_row(&self, logical: u16) -> usize {

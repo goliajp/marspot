@@ -26,7 +26,7 @@ set -euo pipefail
 # --test-threads=1 because soak tests measure whole-process resources
 # (fd count, RSS) and would race each other.
 #
-# End-to-end process soak (mcli + glyph atlas + Metal + AppKit) lives
+# End-to-end process soak (shell + core + sessions, Metal, AppKit) lives
 # elsewhere: `bin/scenarios/idle-9x.sh marspot <out> --extended` (30 min
 # CPU + RSS drift) and the `active-9x-soak` scenario in
 # `bin/bench-run.sh --extended`.  Those need a GUI session and are
