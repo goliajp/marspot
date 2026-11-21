@@ -6,9 +6,11 @@ open and run coding agents in most of them.
 Metal for drawing, AppKit through Rust bindings, one process per pane.
 No Swift, no Xcode project — `cargo build` produces the whole thing.
 
-> **Status: pre-1.0.** It is used daily by its authors and is not yet
-> packaged for anyone else. Expect missing terminal features (see
-> [Known gaps](#known-gaps)) and no upgrade path between builds.
+> **Status: 0.6, pre-1.0.** Signed and notarised builds are on the
+> [releases page](https://github.com/goliajp/marspot/releases/latest);
+> an installed copy checks there and updates itself in place, and the
+> panes keep running through the update. Expect missing terminal
+> features (see [Known gaps](#known-gaps)).
 
 ## Why another terminal
 
@@ -148,21 +150,26 @@ The same commands are in the menu bar, and ⌘/ lists them in the app. Closing a
 Honest list, because you will hit these in the first hour:
 
 - Combining marks, ZWJ emoji and flag sequences survive scrolling
-  back, but not a restart: the cluster is kept beside the row in
-  memory, while the row itself goes to disk holding the base
+  back and a restart, but not a change of window width: the lines
+  already in history are re-cut to the new width from what is on
+  disk, and a re-cut line shows each such cluster as its base
   character.
-- No OSC 8 (hyperlinks), OSC 7 (working directory) or OSC 133 (prompt
-  marks).  OSC 52 puts text on the clipboard; reading it back is
-  refused on purpose, because answering hands any program that can
-  write to the pty whatever you last copied.
+- No OSC 8 (hyperlinks) or OSC 7 (working directory; the pane's
+  directory is read from its process instead). OSC 133 prompt marks
+  are read and kept with the history, but nothing uses them yet:
+  there is no key to jump to the previous command. OSC 52 puts text
+  on the clipboard; reading it back is refused on purpose, because
+  answering hands any program that can write to the pty whatever you
+  last copied.
 - There is no terminfo entry of its own. `TERM` is set to
   `xterm-256color`, whose entry claims a few capabilities not yet
   implemented — an entry of our own waits on an answer for what a
   remote host should use over ssh, because an entry nothing can look
   up is worse than borrowing one that is close.
-- The preferences window exposes a handful of settings. Fonts, themes
-  and key bindings are not configurable yet — the keys listed above
-  are the keys.
+- The settings panel offers the theme (dark, light, high contrast),
+  the language and a handful of behaviours. Fonts, font size and key
+  bindings are not configurable yet — the keys listed above are the
+  keys.
 
 ## Licence
 
