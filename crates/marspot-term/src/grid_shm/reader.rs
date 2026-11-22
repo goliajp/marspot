@@ -221,7 +221,7 @@ impl GridShmReader {
                     wrapped_out.push(flag);
                 }
                 if let (Some(r), Some(t)) = (self.clusters.as_ref(), table.as_deref_mut()) {
-                    r.read_into(t);
+                    r.read_frame_into(t, s1);
                 }
 
                 fence(Ordering::Acquire);

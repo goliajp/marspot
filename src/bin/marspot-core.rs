@@ -376,9 +376,7 @@ impl LinkContext {
 /// default mail client picks it up.
 ///
 /// **Regression-gate**: this is the contract behind the "click a URL,
-/// get a panel" feature (`src/bin/marspot-core.rs:3282` for the
-/// left-click entry; `mouse_right_down` line 1297 for the right-click
-/// entry).  The tail of the click chain is:
+/// get a panel" feature.  The tail of the click chain is:
 ///
 ///   AppKit `(rightM|m)ouseDown:` → L1 shell → MsgType wire → L2
 ///   `CoreApp::mouse_(right_)down` → `hit_test_link_at_xy` (`grid_links::scan_visible_links`)
@@ -5856,14 +5854,14 @@ impl CoreApp {
         // see `Pane::render_view_offset`.
         let view_offset = pane.render_view_offset(focused);
         let grid = pane.session().grid();
-        // cc-mode: claudecode renders URLs / paths to a fixed inner
-        // width and hard-newlines with a hanging indent.  Tell the
-        // link scanner so it merges the continuation into one
-        // logical token.  See `grid_links::ScanOpts::cc_mode`.
-        // Same answer the render pass uses — see the `agent_tui`
-        // comment there.  A hit-test that disagreed with what was
-        // drawn would underline one span and click another.
-        // Same answer the render pass reaches — see there.
+        // a link the program declared (OSC 8) wins over one found by its shape
+        if let Some(link) = marspot::osc8::link_at(grid, view_offset, col, row) {
+            return Some(link);
+        }
+        // cc-mode: claudecode hard-newlines URLs / paths with a hanging
+        // indent; see `grid_links::ScanOpts::cc_mode`.  Same answer the
+        // render pass uses (see `agent_tui` there): a hit-test that
+        // disagreed would underline one span and click another.
         let cc_mode = match pane
             .shelld_session_id()
             .and_then(|sid| self.pane_agent_tui.get(&sid))

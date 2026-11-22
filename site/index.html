@@ -273,15 +273,19 @@
       hit in the first hour, listed because finding them yourself is worse.
     </p>
     <ul class="plain">
-      <li>Combining marks, emoji built from several code points, and flags survive
-          scrolling back and a restart, but not a change of window width: the lines
-          already in history are re-cut to the new width from what is on disk, and a
-          re-cut line shows each such cluster as its base character.</li>
+      <li>Combining marks, emoji built from several code points, flags, and
+          <span class="mono">OSC 8</span> links survive scrolling back and a restart,
+          but not a change of window width: the lines already in history are re-cut
+          to the new width from what is on disk, and a re-cut line shows each such
+          cluster as its base character and each link as plain text.</li>
       <li>Fonts, font size and key bindings are not configurable yet — the keys
           listed above are the keys. The theme (dark, light, high contrast) and the
           language are.</li>
-      <li>No hyperlink or working-directory escape sequences
-          (<span class="mono">OSC 8 / 7</span>). Prompt marks
+      <li><span class="mono">OSC 8</span> links open only http, https, file and mailto
+          targets; a link to anything else is shown as plain text, on purpose, because
+          the target comes from whatever program writes to the pty.</li>
+      <li>No working-directory escape sequence (<span class="mono">OSC 7</span>).
+          Prompt marks
           (<span class="mono">OSC 133</span>) are read and kept with the history, but
           nothing uses them yet.  <span class="mono">OSC 52</span>
           puts text on the clipboard — yanking in vim over ssh reaches your Mac —

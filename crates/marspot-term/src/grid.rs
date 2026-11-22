@@ -107,6 +107,11 @@ pub struct Grid {
     /// has none: real output measured 55 multi-codepoint clusters in
     /// forty million, so the `Vec` is empty and costs a pointer.
     sb_clusters: std::collections::VecDeque<Vec<(u16, String)>>,
+    /// The URIs of the OSC 8 links cells point at; see `links`.
+    links: links::LinkPool,
+    /// The links of rows that left the screen, for history kept in
+    /// RAM; parallel to `sb_clusters` and trimmed with it.
+    sb_links: std::collections::VecDeque<Vec<RowLink>>,
     /// Command boundaries for the rows on screen, by physical row.
     /// See [`PromptMark`].
     prompt: Vec<PromptMark>,
@@ -158,6 +163,9 @@ const MAX_FILED_BLANK_RUN: u16 = 3;
 
 mod cluster_mirror;
 mod clusters;
+mod history;
+mod links;
+pub use links::{LINK_POOL_MAX, RowExtras, RowLink, strip_links};
 mod row_mark;
 mod row_styles;
 pub use row_styles::{ROW_STYLES, RowStyles};
@@ -205,6 +213,8 @@ impl Grid {
             prompt: vec![PromptMark::None; rows as usize],
             sb_wrapped: std::collections::VecDeque::with_capacity(sb_capacity + 1),
             sb_clusters: std::collections::VecDeque::with_capacity(sb_capacity + 1),
+            links: Default::default(),
+            sb_links: std::collections::VecDeque::with_capacity(sb_capacity + 1),
             sb_prompt: std::collections::VecDeque::with_capacity(sb_capacity + 1),
             filed_blank_run: 0,
             marks: vec![RowMark::default(); rows as usize],
@@ -482,76 +492,6 @@ impl Grid {
     pub fn scrollback_line(&self, idx: usize) -> Option<Vec<Cell>> {
         self.scrollback.line_to_vec(idx)
     }
-    /// RFC-002 §8: contiguous range from scrollback for shelld
-    /// `GetScrollbackPage` responses.  Returns each line paired
-    /// with its autowrap-continuation flag (`true` = this line was
-    /// produced by the parser when the previous line filled the
-    /// width and overflowed onto a fresh row, NOT a logical
-    /// newline).  Without that flag the receiver's later
-    /// `Grid::resize` reflow can't tell logical lines from
-    /// hard-wrapped ones and ends up truncating wide content to
-    /// the narrowest width the grid ever saw.
-    pub fn scrollback_read_page(&self, start: usize, count: usize) -> Vec<(Vec<Cell>, bool)> {
-        let cells = self.scrollback.read_lines(start, count);
-        let sb_len = self.scrollback.len();
-        cells
-            .into_iter()
-            .enumerate()
-            .map(|(i, row)| {
-                // read_lines returns oldest-first; mirror that into
-                // sb_wrapped which is indexed the same way.
-                let idx = start + i;
-                // Through `scrollback_wrapped`, not the mirror: for a
-                // file-backed pane the mirror only holds what this
-                // process pushed, so every line written before it
-                // started answered "not a continuation" -- and a page
-                // of those reflows as truncated content on the
-                // receiving side.
-                let wrapped = idx < sb_len && self.scrollback_wrapped(idx);
-                (row, wrapped)
-            })
-            .collect()
-    }
-
-    /// RFC-002 §8 (step 8c): push a historic line into the tail of
-    /// scrollback.  The line must be **older than any line currently
-    /// in scrollback** — callers append history in chronological
-    /// order before live data has had a chance to scroll anything
-    /// off the visible grid.  Once live data starts evicting rows
-    /// into scrollback, calling this would corrupt ordering (history
-    /// would appear to be newer than already-scrolled-off live
-    /// output).  Caller polices the invariant; this is a thin
-    /// pass-through.
-    ///
-    /// `wrapped` is the line's autowrap-continuation flag from the
-    /// source (L4 master grid).  Storing it parallel to the cells
-    /// is what lets the eventual `reflow` recover the original
-    /// logical lines when the user resizes the window — without
-    /// it, every historic row looks like a hard newline and a
-    /// shrink → grow round trip leaves long lines permanently
-    /// chopped.
-    pub fn push_historic_scrollback_line(&mut self, line: &[Cell], wrapped: bool) {
-        // Go through the wrapped-aware path so the File variant
-        // persists the flag in its record; Memory/Disk variants drop
-        // the flag (their truth lives in `sb_wrapped` below).
-        self.scrollback.push_line_with_wrapped(line, wrapped);
-        self.sb_wrapped.push_back(wrapped);
-        self.keep_row_clusters(Vec::new());
-        while self.sb_wrapped.len() > self.scrollback.len() {
-            self.sb_wrapped.pop_front();
-            self.sb_prompt.pop_front();
-        }
-        while self.sb_clusters.len() > self.scrollback.len() {
-            self.sb_clusters.pop_front();
-        }
-    }
-    pub fn clear_scrollback(&mut self) {
-        self.scrollback.clear();
-        self.sb_wrapped.clear();
-        self.sb_clusters.clear();
-        self.sb_prompt.clear();
-    }
-
     /// Resize the visible grid **without losing content**.
     ///
     /// Rows-only change: cells and scrollback are preserved verbatim.
@@ -792,6 +732,7 @@ impl Grid {
         self.scrollback.restart(new_cols);
         self.sb_wrapped.clear();
         self.sb_clusters.clear();
+        self.sb_links.clear();
         // Reflow re-cuts every logical line, so a mark that said "a
         // prompt starts here" is about a row that no longer exists.
         // Dropped rather than guessed at: a mark on the wrong line is
@@ -800,19 +741,20 @@ impl Grid {
         for (i, (cells, cont)) in segs[..live_start].iter().enumerate() {
             let mut row = cells.clone();
             row.resize(new_cols, pad_cell(i, &segs));
+            // history keeps no link ids: they point into a pool it
+            // does not have
+            strip_links(&mut row);
             // Wrapped-aware push so File variant records keep the
             // reflow-derived continuation flag.
             self.scrollback.push_line_with_wrapped(&row, *cont);
             self.sb_wrapped.push_back(*cont);
-            self.keep_row_clusters(Vec::new());
+            self.keep_row_extras(Vec::new(), Vec::new());
         }
         while self.sb_wrapped.len() > self.scrollback.len() {
             self.sb_wrapped.pop_front();
             self.sb_prompt.pop_front();
         }
-        while self.sb_clusters.len() > self.scrollback.len() {
-            self.sb_clusters.pop_front();
-        }
+        self.trim_extras_mirrors();
         let mut new_cells = vec![Cell::default(); new_cols * rows as usize];
         let mut new_wrapped = vec![false; rows as usize];
         let new_prompt = vec![PromptMark::None; rows as usize];

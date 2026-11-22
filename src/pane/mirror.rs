@@ -48,6 +48,8 @@ impl L3Conn {
         }
         // The cells carry L3's pool indices; this pool is the mirror's.
         self.grid.mirror_clusters(self.cluster_table.iter());
+        // The cells carry no link ids at all; the links come beside them.
+        self.grid.mirror_links(self.cluster_table.links());
         self.grid.set_cursor(snap.cursor_col, snap.cursor_row);
         Some(snap)
     }
@@ -105,6 +107,31 @@ mod tests {
         regions(id).delete();
         assert_eq!(conn.grid.cluster_text(&flag), Some(FLAG));
         assert_eq!(conn.grid.cluster_text(&family), Some(FAMILY));
+    }
+
+    /// The click path in L2 reads the mirror: a link L3 published has
+    /// to resolve there to the URI the program declared, and nowhere
+    /// past its text.
+    #[test]
+    fn osc8_a_link_l3_published_opens_its_uri_from_the_mirror() {
+        let id = session_id() + 4;
+        let mut writer = GridShmWriter::create(20, 3).expect("shm region");
+        publish_clusters(&mut writer, id);
+        let mut term = Terminal::new(20, 3);
+        term.feed(b"\x1b]8;;https://example.com\x1b\\Click me\x1b]8;;\x1b\\\n");
+        writer.publish(term.grid(), 0, 0);
+
+        let mut conn = conn_on(&writer, id);
+        assert!(conn.poll());
+        let on = crate::osc8::link_at(&conn.grid, 0, 2, 0);
+        let past = crate::osc8::link_at(&conn.grid, 0, 8, 0);
+        regions(id).delete();
+        let link = on.expect("the mirror holds the link");
+        let target = link.target.as_deref().unwrap_or(&link.text);
+        assert_eq!(crate::link_open::open_arg_for(link.kind, target).as_deref(), Some("https://example.com"));
+        assert!(past.is_none());
+        let text: String = (0..8).map(|c| conn.grid.cell(c, 0).ch).collect();
+        assert_eq!(text, "Click me");
     }
 
     /// An L3 from before clusters were published sends cells whose

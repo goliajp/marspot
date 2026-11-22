@@ -103,6 +103,7 @@ impl Terminal {
             grid: &mut self.grid,
             saved_main: &mut self.saved_main,
             attrs: &mut self.attrs,
+            osc8: &mut self.osc8,
             saved_cursor: &mut self.saved_cursor,
             parked_saved_cursor: &mut self.parked_saved_cursor,
             scroll_top: &mut self.scroll_top,

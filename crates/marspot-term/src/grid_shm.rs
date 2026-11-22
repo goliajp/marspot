@@ -45,6 +45,8 @@ use crate::grid::{Cell, Grid};
 pub mod clusters;
 mod hash;
 mod ident;
+mod links;
+mod side;
 mod names;
 mod peek;
 mod reader;
@@ -260,6 +262,8 @@ pub struct GridShmWriter {
     /// One scrollback row's clusters, refilled per row while a
     /// scrolled view is published.
     row_clusters: Vec<(u16, String)>,
+    /// The same for links, reused from row to row.
+    row_links: Vec<crate::grid::RowLink>,
     /// Where the window title goes, once attached.
     title: Option<TitleWriter>,
 }
@@ -303,6 +307,7 @@ impl GridShmWriter {
             reader_frames: 0,
             clusters: None,
             row_clusters: Vec::new(),
+            row_links: Vec::new(),
             title: None,
         })
     }
@@ -334,70 +339,6 @@ impl GridShmWriter {
     /// first publish, the last frame of the session's previous image.
     pub fn published_view_offset(&self) -> u32 {
         unsafe { (*self.header()).view_offset }
-    }
-
-    /// The cluster table in the region beside the grid: until the
-    /// first frame is published, what the session's previous image
-    /// published with its last one.
-    pub fn published_clusters(&self) -> Option<ClusterTable> {
-        self.clusters.as_ref().map(ClusterTableWriter::table)
-    }
-
-    /// Take over the side regions `left` publishes through: this
-    /// writer replaces it, and [`Self::attach_side_regions`] then
-    /// carries what they hold to wherever this one publishes.
-    pub fn inherit_side_regions(&mut self, left: &mut Self) {
-        self.clusters = left.clusters.take();
-        self.title = left.title.take();
-    }
-
-    /// Publish the text of each frame's clusters and the window title
-    /// from now on, in the regions named after the grid region `grid`
-    /// -- see [`clusters`] and [`title`].  What it published beside the
-    /// region it is leaving goes along.  Without the first a reader
-    /// draws a cluster cell's pool index and nothing reads the second,
-    /// so a failure is logged and the session runs without.
-    pub fn attach_side_regions(&mut self, grid: &std::ffi::CStr, owner: Identity) {
-        use names::{Side, side_name};
-        // what this writer published beside the region it is leaving
-        let (left_clusters, left_title) = (self.clusters.take(), self.title.take());
-        let Some((clusters, title)) = side_name(grid, Side::Clusters).zip(side_name(grid, Side::Title))
-        else {
-            return;
-        };
-        match ClusterTableWriter::open(&clusters, owner) {
-            Ok(mut w) => {
-                if let Some(left) = &left_clusters {
-                    w.carry_from(left);
-                }
-                self.clusters = Some(w);
-                self.last_publish_hash = 0;
-            }
-            Err(e) => crate::lx_warn!(
-                "grid_shm.clusters.open_failed",
-                &format!("{e}"),
-                session_id = owner.session
-            ),
-        }
-        match TitleWriter::open(&title, owner) {
-            Ok(mut w) => {
-                if let Some(left) = &left_title {
-                    w.carry_from(left);
-                }
-                self.title = Some(w);
-            }
-            Err(e) => {
-                crate::lx_warn!("grid_shm.title.open_failed", &format!("{e}"), session_id = owner.session)
-            }
-        }
-    }
-
-    /// Publish `title` when it changed. Apart from the frame: a title
-    /// can change while every cell stays the same.
-    pub fn publish_title(&mut self, title: &str) {
-        if let Some(t) = self.title.as_mut() {
-            t.update(title);
-        }
     }
 
     /// The shm fd, for passing to a child (e.g. inherited by L2/L3).
@@ -545,7 +486,7 @@ impl GridShmWriter {
             (*h).version = if packed { cells::VERSION_PACKED } else { VERSION };
             (*h).cell_size = if packed { cells::CELL_SIZE_PACKED } else { cells::CELL_SIZE_WIDE };
             if packed {
-                self.write_packed(grid);
+                self.write_packed(grid, s.wrapping_add(2));
                 fence(Ordering::Release);
                 (*h).seq.store(s.wrapping_add(2), Ordering::Release);
                 return;
@@ -556,8 +497,9 @@ impl GridShmWriter {
             // the same pass and under the same odd seq; a grid with an
             // empty pool and no history in view has none to write.
             let cells = self.cells_ptr();
+            let links = grid.link_pool_len() > 0 || view_offset > 0;
             let mut table = self.clusters.as_mut().filter(|t| {
-                grid.cluster_pool_len() > 0 || view_offset > 0 || t.last_count > 0
+                grid.cluster_pool_len() > 0 || links || t.last_count > 0
             });
             if let Some(t) = table.as_mut() {
                 t.begin();
@@ -573,9 +515,22 @@ impl GridShmWriter {
                         t.push(*col, row, text);
                     }
                 }
+                if let Some(t) = table.as_mut()
+                    && links
+                    && grid.row_links_at_view(view_offset, row, &mut self.row_links)
+                {
+                    for (c0, c1, uri) in &self.row_links {
+                        t.push_link(row, *c0, *c1, uri);
+                    }
+                }
                 let row_base = row as usize * cols as usize;
                 for col in 0..cols {
-                    let cell = grid.cell_at_view(view_offset, col, row);
+                    let mut cell = grid.cell_at_view(view_offset, col, row);
+                    // a link id is a number in this grid's pool; the
+                    // links went into the table above
+                    if cell.attrs.link_id() != 0 {
+                        cell.attrs.set_link_id(0);
+                    }
                     std::ptr::write(cells.add(row_base + col as usize), cell);
                     if let Some(t) = table.as_mut()
                         && cell.is_cluster()
@@ -586,7 +541,7 @@ impl GridShmWriter {
                 }
             }
             if let Some(t) = table {
-                t.finish();
+                t.finish(s.wrapping_add(2));
             }
             // Per-row DECAWM wrapped flags — one byte per viewport row
             // at the fixed wrapped offset.  L2's link scanner depends

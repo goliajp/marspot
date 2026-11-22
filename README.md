@@ -152,13 +152,17 @@ The same commands are in the menu bar, and ⌘/ lists them in the app. Closing a
 
 Honest list, because you will hit these in the first hour:
 
-- Combining marks, ZWJ emoji and flag sequences survive scrolling
-  back and a restart, but not a change of window width: the lines
-  already in history are re-cut to the new width from what is on
-  disk, and a re-cut line shows each such cluster as its base
-  character.
-- No OSC 8 (hyperlinks) or OSC 7 (working directory; the pane's
-  directory is read from its process instead). OSC 133 prompt marks
+- Combining marks, ZWJ emoji and flag sequences, and OSC 8 links,
+  survive scrolling back and a restart, but not a change of window
+  width: the lines already in history are re-cut to the new width
+  from what is on disk, and a re-cut line shows each such cluster as
+  its base character and each link as plain text.
+- OSC 8 links open only `http`, `https`, `file` and `mailto` targets.
+  A link to anything else is shown as plain text, on purpose: the
+  target comes from whatever program writes to the pty, and opening
+  it hands it to whichever app claims the scheme.
+- No OSC 7 (working directory; the pane's directory is read from its
+  process instead). OSC 133 prompt marks
   are read and kept with the history, but nothing uses them yet:
   there is no key to jump to the previous command. OSC 52 puts text
   on the clipboard; reading it back is refused on purpose, because

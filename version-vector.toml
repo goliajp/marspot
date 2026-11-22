@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.502"  # PaneAwake from the core is kept for the supervisor and knocks the pump
-core    = "0.12.559"  # passes each session's PaneAwake on to the shell
-session = "0.11.385"  # PaneAwake: output after a quiet spell (at most 1/s) and foreground changes
+core    = "0.12.560"  # OSC 8 links: a click on one opens what the program declared
+session = "0.11.386"  # OSC 8 links: kept per cell, filed with history, published beside the frame
