@@ -68,6 +68,12 @@ impl Sent {
     pub(in crate::plugins) fn landed_on(&self, profile: u8) -> bool {
         self.profile == profile && self.delivered.load(Ordering::Relaxed)
     }
+    /// The account it was about came back, at a new five hours or a new
+    /// week: the record is dropped, so the next time it nears out the
+    /// pane is told again and a later move does not count as told.
+    pub(in crate::plugins) fn renewed_on(&self, profile: u8, room: &Room, model: Option<&str>) -> bool {
+        self.profile == profile && *room != Room::Unknown && !room.refused_for(model) && !nearly_out(room, model)
+    }
 }
 
 /// Every pane told, by session, kept on disk so a restart of the shell
@@ -249,6 +255,16 @@ mod tests {
             models_measured_at: 0,
             measured_at: 0,
         }
+    }
+
+    #[test]
+    fn a_told_record_is_renewed_only_when_its_account_has_room_again() {
+        let sent = Sent { profile: 2, week: 1000, delivered: Arc::new(AtomicBool::new(true)) };
+        assert!(sent.renewed_on(2, &room("allowed", 0.1, 0.5, None), None));
+        assert!(!sent.renewed_on(3, &room("allowed", 0.1, 0.5, None), None), "another account");
+        assert!(!sent.renewed_on(2, &room("allowed", 0.0, 0.99, None), None), "still nearly out");
+        assert!(!sent.renewed_on(2, &room("rejected", 0.0, 1.0, None), None), "out");
+        assert!(!sent.renewed_on(2, &Room::Unknown, None), "not read");
     }
 
     #[test]

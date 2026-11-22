@@ -140,6 +140,9 @@ impl KimiPlugin {
         let Some((_, here)) = rooms.iter().find(|(n, _)| *n == current) else { return };
         let status = pane.facts.as_ref().map(|f| f.status);
         let on_its_way = |t: &Tally| t.moved.filter(|(at, to)| *to != current && at.elapsed() < LANDING).map(|(_, to)| to);
+        if b.told.get(&sid).is_some_and(|h| h.renewed_on(current, here, None)) {
+            b.told.remove(&sid);
+        }
         if !here.refused_for(None) {
             if b.tallies.get(&sid).is_some_and(|t| on_its_way(t).is_none()) {
                 b.tallies.remove(&sid);

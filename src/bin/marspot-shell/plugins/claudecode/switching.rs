@@ -292,11 +292,7 @@ impl ClaudecodePlugin {
         let week = room.reset_7d();
         // the account came back, at a new five hours or a new week: the
         // next time it nears out the pane is told again
-        if self.heads_up.get(&sid).is_some_and(|h| h.profile == meta.profile_num)
-            && *room != quota::Room::Unknown
-            && !room.refused_for(model)
-            && !heads_up::nearly_out(room, model)
-        {
+        if self.heads_up.get(&sid).is_some_and(|h| h.renewed_on(meta.profile_num, room, model)) {
             self.heads_up.remove(&sid);
         }
         if self.heads_up.get(&sid).is_some_and(|h| h.is_for(meta.profile_num, week))
