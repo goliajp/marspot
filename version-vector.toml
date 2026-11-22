@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.542"  # cc: move the model reading tests out of the claudecode plugin's mod.rs
+shell   = "0.7.543"  # cc: move the session binding tests out of the claudecode plugin's mod.rs
 core    = "0.12.598"  # basic: name what terminal.rs still holds in its carve-out marker
 session = "0.11.406"  # basic: name what terminal.rs still holds in its carve-out marker
