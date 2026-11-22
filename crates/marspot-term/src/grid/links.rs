@@ -10,7 +10,7 @@
 //! it: in the file's notes for a file-backed pane, in `sb_links` for one
 //! kept in RAM.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasher, RandomState};
 
 use super::{Cell, Grid};
@@ -55,6 +55,73 @@ pub(super) struct LinkPool {
 impl LinkPool {
     fn key(&self, uri: &str) -> u64 {
         self.hasher.hash_one(uri)
+    }
+}
+
+/// The links of lines in history kept in RAM, by line, 0 = oldest,
+/// and those of the row being filed.
+///
+/// Empty until a line with a link is filed, and emptied again once the
+/// last such line has left the ring: a row without links then costs the
+/// scroll path two length tests, not a push and a pop per line.  While
+/// it holds anything it is parallel to the ring, its back the newest
+/// line.
+#[derive(Default)]
+pub(super) struct LinkHistory {
+    rows: VecDeque<Vec<RowLink>>,
+    /// How many of `rows` hold a link.
+    live: usize,
+    /// The links of the row on its way into history, between its ids
+    /// being cleared and the line being pushed.
+    filing: Vec<RowLink>,
+}
+
+impl LinkHistory {
+    /// Whether filing a line has anything to do here.
+    #[inline(always)]
+    fn busy(&self) -> bool {
+        !self.filing.is_empty() || !self.rows.is_empty()
+    }
+
+    /// The line just filed, `ring_len` being the ring's length with it.
+    fn push(&mut self, links: Vec<RowLink>, ring_len: usize) {
+        if self.rows.is_empty() {
+            if links.is_empty() {
+                return;
+            }
+            // the lines already in the ring have none
+            self.rows.resize_with(ring_len.saturating_sub(1), Vec::new);
+        }
+        self.live += !links.is_empty() as usize;
+        self.rows.push_back(links);
+    }
+
+    #[inline(always)]
+    fn trim(&mut self, len: usize) {
+        if self.rows.len() > len {
+            self.trim_cold(len);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn trim_cold(&mut self, len: usize) {
+        while self.rows.len() > len {
+            if self.rows.pop_front().is_some_and(|r| !r.is_empty()) {
+                self.live -= 1;
+            }
+        }
+        if self.live == 0 {
+            self.rows = VecDeque::new();
+        }
+    }
+
+    pub(super) fn clear(&mut self) {
+        *self = LinkHistory::default();
+    }
+
+    fn get(&self, line: usize) -> Option<&Vec<RowLink>> {
+        self.rows.get(line)
     }
 }
 
@@ -203,28 +270,36 @@ impl Grid {
     }
 
     /// Clear a row's cluster indices and link ids on its way into
-    /// history, handing back what they said.  One row in millions has
-    /// either, so the tests are made here and the calls only for it.
+    /// history, handing back its clusters and holding its links for
+    /// [`Self::keep_row_extras`].  One row in millions has either, so
+    /// the tests are made here and the calls only for it.  `LINKS`
+    /// false is for a caller that has seen [`Self::links_idle`].
     #[inline(always)]
-    pub(super) fn degrade_row_extras(&mut self, start: usize, cols: usize) -> (Vec<(u16, String)>, Vec<RowLink>) {
+    pub(super) fn degrade_row_extras<const LINKS: bool>(&mut self, start: usize, cols: usize) -> Vec<(u16, String)> {
         let clusters = if self.clusters.is_empty() { Vec::new() } else { self.degrade_clusters_in_row(start, cols) };
-        let links = if self.links.uris.is_empty() || !self.marks[start / cols].links {
-            Vec::new()
-        } else {
-            self.degrade_links_in_row(start, cols)
-        };
-        (clusters, links)
+        if LINKS && !self.links.uris.is_empty() {
+            self.take_row_links(start, cols);
+        }
+        clusters
     }
 
-    /// Keep what [`Self::degrade_row_extras`] handed back, for the line
-    /// just pushed into scrollback.
+    #[cold]
+    #[inline(never)]
+    fn take_row_links(&mut self, start: usize, cols: usize) {
+        if self.marks[start / cols].links {
+            self.sb_links.filing = self.degrade_links_in_row(start, cols);
+        }
+    }
+
+    /// Keep what [`Self::degrade_row_extras`] cleared, for the line just
+    /// pushed into scrollback.
     #[inline(always)]
-    pub(super) fn keep_row_extras(&mut self, clusters: Vec<(u16, String)>, links: Vec<RowLink>) {
+    pub(super) fn keep_row_extras<const LINKS: bool>(&mut self, clusters: Vec<(u16, String)>) {
         if !clusters.is_empty() || !self.scrollback.keeps_cluster_text() {
             self.keep_row_clusters(clusters);
         }
-        if !links.is_empty() || !self.scrollback.keeps_link_text() {
-            self.keep_row_links(links);
+        if LINKS && self.sb_links.busy() {
+            self.keep_row_links();
         }
     }
 
@@ -232,24 +307,35 @@ impl Grid {
     /// this grid's scrollback keeps them.  Must be called after the
     /// line itself is pushed: the file addresses a note by the line it
     /// follows.  For the in-RAM variant it must be called for every
-    /// line, empty or not, so `sb_links` stays parallel to the ring.
-    fn keep_row_links(&mut self, links: Vec<RowLink>) {
+    /// line while `sb_links` holds any, so it stays parallel to the ring.
+    #[cold]
+    #[inline(never)]
+    fn keep_row_links(&mut self) {
+        let links = std::mem::take(&mut self.sb_links.filing);
         if !self.scrollback.keeps_link_text() {
-            self.sb_links.push_back(links);
+            self.sb_links.push(links, self.scrollback.len());
         } else if !links.is_empty() {
             self.scrollback.link_last_line(&links);
         }
     }
 
     /// Trim the in-RAM mirrors of history to what the ring holds.
-    pub(super) fn trim_extras_mirrors(&mut self) {
+    #[inline(always)]
+    pub(super) fn trim_extras_mirrors<const LINKS: bool>(&mut self) {
         let len = self.scrollback.len();
         while self.sb_clusters.len() > len {
             self.sb_clusters.pop_front();
         }
-        while self.sb_links.len() > len {
-            self.sb_links.pop_front();
+        if LINKS {
+            self.sb_links.trim(len);
         }
+    }
+
+    /// Whether no link is in the pool and none is kept in RAM history:
+    /// rows can then be filed without looking for any.
+    #[inline(always)]
+    pub(super) fn links_idle(&self) -> bool {
+        self.links.uris.is_empty() && !self.sb_links.busy()
     }
 
     /// The links on the row a viewport row is showing, into `out`,

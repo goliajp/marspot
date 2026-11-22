@@ -108,6 +108,7 @@ impl Terminal {
             grid: &mut self.grid,
             saved_main: &mut self.saved_main,
             attrs: &mut self.attrs,
+            link: self.osc8.id,
             osc8: &mut self.osc8,
             saved_cursor: &mut self.saved_cursor,
             parked_saved_cursor: &mut self.parked_saved_cursor,

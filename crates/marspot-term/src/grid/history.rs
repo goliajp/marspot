@@ -57,12 +57,12 @@ impl Grid {
         // the flag (their truth lives in `sb_wrapped` below).
         self.scrollback.push_line_with_wrapped(line, wrapped);
         self.sb_wrapped.push_back(wrapped);
-        self.keep_row_extras(Vec::new(), Vec::new());
+        self.keep_row_extras::<true>(Vec::new());
         while self.sb_wrapped.len() > self.scrollback.len() {
             self.sb_wrapped.pop_front();
             self.sb_prompt.pop_front();
         }
-        self.trim_extras_mirrors();
+        self.trim_extras_mirrors::<true>();
     }
     pub fn clear_scrollback(&mut self) {
         self.scrollback.clear();
