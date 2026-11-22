@@ -27,7 +27,8 @@
 
 use std::io::{self, Cursor, Read};
 
-use super::{CELL_BYTES, SNAPSHOT_SCROLLBACK_LINE_CAP, Terminal, read_u16, read_u32};
+use super::Terminal;
+use super::snapshot_wire::{CELL_BYTES, SNAPSHOT_SCROLLBACK_LINE_CAP, read_u16, read_u32};
 use crate::grid::{CLUSTER_INDEX_BASE, Cell, Grid};
 
 const MAGIC: u32 = 0x4d53_434c; // "MSCL"

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.514"  # test that no agent plugin claims another agent's child
-core    = "0.12.585"  # a window beeps at most once per 250 ms
-session = "0.11.393"  # the session tells the core when its pane rang the bell
+shell   = "0.7.527"  # basic: name what terminal.rs still holds in its carve-out marker
+core    = "0.12.598"  # basic: name what terminal.rs still holds in its carve-out marker
+session = "0.11.406"  # basic: name what terminal.rs still holds in its carve-out marker
