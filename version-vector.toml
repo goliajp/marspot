@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.524"  # basic: move CSI parameters and SGR out of terminal.rs
-core    = "0.12.595"  # basic: move CSI parameters and SGR out of terminal.rs
-session = "0.11.403"  # basic: move CSI parameters and SGR out of terminal.rs
+shell   = "0.7.525"  # basic: move the u-tag and cluster print path out of terminal.rs
+core    = "0.12.596"  # basic: move the u-tag and cluster print path out of terminal.rs
+session = "0.11.404"  # basic: move the u-tag and cluster print path out of terminal.rs
