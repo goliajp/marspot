@@ -4,6 +4,18 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.8.0
+
+- Links a program marks with OSC 8 can be clicked. A marked link wins
+  over one guessed from the text's shape. Only http, https, file and
+  mailto targets open; a file link must point at this machine.
+- A program ringing the bell (BEL) makes the system alert sound. A
+  window sounds at most once every 250 ms, so a stream of bells does
+  not turn into a stream of sounds. Before, BEL made no sound.
+- A pane scrolled back into its history shows a scroll bar on its
+  right edge. Drag it, or click beside it, to move through the
+  history. It is not drawn while the pane shows the latest output.
+
 ## 0.7.0
 
 - The settings panel is 480 points wide and the keyboard shortcuts
