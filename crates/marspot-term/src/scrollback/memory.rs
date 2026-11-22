@@ -90,9 +90,8 @@ impl MemoryScrollback {
         palette.clear();
         let n = source.len().min(row.len());
         for (dst, c) in row[..n].iter_mut().zip(source) {
-            let mut attrs = c.attrs;
-            attrs._pad = [0; 3];
-            let local = local_number(palette, PackedStyle::pack(&attrs), n);
+            // packing keeps SGR 8 and 5, not the cluster flag or link id
+            let local = local_number(palette, PackedStyle::pack(&c.attrs), n);
             *dst = PackedCell::from_cell(c, local);
         }
         row[n..].fill(PackedCell::BLANK);
@@ -186,7 +185,7 @@ impl MemoryScrollback {
             palette[id - 1].unpack()
         };
         if c.is_cluster() {
-            attrs._pad[0] = crate::grid::FLAG_CLUSTER;
+            attrs._pad[0] |= crate::grid::FLAG_CLUSTER;
         }
         Cell { ch: c.ch(), attrs }
     }

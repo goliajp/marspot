@@ -42,6 +42,31 @@ pub struct Identity {
     pub session: u64,
 }
 
+impl super::GridShmWriter {
+    /// Say whose region this is, for a reader that asks; a region
+    /// its creator signed for `owner` is left as it is.  False for a
+    /// region from a build that left no room for it.
+    pub fn stamp(&mut self, owner: Identity) -> bool {
+        let Some(at) = super::region::ident_at(self.base, self.len) else {
+            return false;
+        };
+        if unsafe { read(at) } != Some(owner) {
+            unsafe { stamp(at, owner, new_serial()) };
+        }
+        true
+    }
+
+    /// Whose region this says it is.
+    pub fn identity(&self) -> Option<Identity> {
+        super::region::ident_at(self.base, self.len).and_then(|at| unsafe { read(at) })
+    }
+
+    /// Which of its session's regions this is -- see this module.
+    pub fn serial(&self) -> Option<u64> {
+        super::region::ident_at(self.base, self.len).and_then(|at| unsafe { read_serial(at) })
+    }
+}
+
 impl Identity {
     /// Session `id` of the state directory this process runs under.
     pub fn of_session(id: u64) -> Self {

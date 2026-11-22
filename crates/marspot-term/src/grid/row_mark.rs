@@ -58,13 +58,14 @@ impl CellAttrs {
 }
 
 impl CellAttrs {
-    /// Whether these are the default attributes, whatever the flags in
-    /// the padding say: the colours and the five switches only.
+    /// Whether these are the default attributes, whatever the cluster
+    /// flag and the link id say: the colours, the five switches and
+    /// SGR 8 and 5.
     #[inline(always)]
     pub fn is_plain(&self) -> bool {
         let words = self as *const CellAttrs as *const u64;
         // SAFETY: as in `is_default`
-        unsafe { words.read_unaligned() | (words.add(1).read_unaligned() & 0xFF_FFFF_FFFF) == 0 }
+        unsafe { words.read_unaligned() | (words.add(1).read_unaligned() & 0x06FF_FFFF_FFFF) == 0 }
     }
 }
 

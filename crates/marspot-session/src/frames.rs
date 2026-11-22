@@ -298,6 +298,7 @@ fn publish(shm: &mut GridShmWriter, session: &SessionImpl, view_offset: u16) -> 
     }
     // this session checks pointer events against its own modes
     flags |= FLAG_POINTER_GATED;
+    shm.publish_screen_modes(term.screen_modes());
     // Clamp here too: L2 clamps against the scrollback_len it last saw, but
     // scrollback can shrink (alt-screen enter / reset) between L2's request
     // and this publish, so never hand the writer an out-of-range offset.

@@ -327,7 +327,7 @@ mod tests {
             "the next command runs on a clean line:\n{}",
             screen(&s)
         );
-        assert!(!screen(&s).contains("62;1;6;22c"), "{}", screen(&s));
+        assert!(!screen(&s).contains("[?1;2c"), "{}", screen(&s));
     }
 
     #[test]
@@ -335,12 +335,12 @@ mod tests {
         let _env = test_pane_env("/bin/zsh");
         let mut s = shell(0xF2);
         s.write(
-            b"sh -c 'stty raw -echo; printf \"\\033[c\"; r=$(dd bs=13 count=1 2>/dev/null); \
+            b"sh -c 'stty raw -echo; printf \"\\033[c\"; r=$(dd bs=7 count=1 2>/dev/null); \
               stty sane; printf \"GOT%s\\n\" \"$(printf %s \"$r\" | tr -d \"\\033\")\"'\r",
         )
         .unwrap();
         assert!(
-            pump_until(&mut s, |s| screen(s).contains("GOT[?62;1;6;22c")),
+            pump_until(&mut s, |s| screen(s).contains("GOT[?1;2c")),
             "the program read its reply:\n{}",
             screen(&s)
         );

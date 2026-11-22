@@ -181,9 +181,9 @@ impl<'a> Handler<'a> {
         // with G0 on the special graphics set the bytes are not the
         // characters to write, and under IRM each one has to push the
         // rest of the line along first
-        // and inside an OSC 8 link each cell carries the link's id,
-        // which the per-character path writes
-        if *self.g0_graphics || *self.insert_mode || self.link != 0 {
+        // inside an OSC 8 link each cell carries the link's id, and with
+        // DECAWM off a run stops at the edge: the per-character path's
+        if *self.g0_graphics || *self.insert_mode || self.link != 0 || !self.modes.autowrap {
             return 0;
         }
         // a tag being recognised owns every character until it is

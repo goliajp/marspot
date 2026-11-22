@@ -51,6 +51,7 @@ mod names;
 mod peek;
 mod reader;
 mod region;
+mod shown;
 mod write_packed;
 pub mod cells;
 pub use cells::FrameBuf;
@@ -264,6 +265,7 @@ pub struct GridShmWriter {
     row_clusters: Vec<(u16, String)>,
     /// Where the window title goes, once attached.
     title: Option<TitleWriter>,
+    shown: shown::Shown,
 }
 
 // The raw pointer is into a private mmap this struct solely owns; it is
@@ -306,30 +308,8 @@ impl GridShmWriter {
             clusters: None,
             row_clusters: Vec::new(),
             title: None,
+            shown: shown::Shown::default(),
         })
-    }
-
-    /// Say whose region this is, for a reader that asks; a region
-    /// its creator signed for `owner` is left as it is.  False for a
-    /// region from a build that left no room for it.
-    pub fn stamp(&mut self, owner: Identity) -> bool {
-        let Some(at) = region::ident_at(self.base, self.len) else {
-            return false;
-        };
-        if unsafe { ident::read(at) } != Some(owner) {
-            unsafe { ident::stamp(at, owner, ident::new_serial()) };
-        }
-        true
-    }
-
-    /// Whose region this says it is.
-    pub fn identity(&self) -> Option<Identity> {
-        region::ident_at(self.base, self.len).and_then(|at| unsafe { ident::read(at) })
-    }
-
-    /// Which of its session's regions this is -- see [`ident`].
-    pub fn serial(&self) -> Option<u64> {
-        region::ident_at(self.base, self.len).and_then(|at| unsafe { ident::read_serial(at) })
     }
 
     /// How far back the frame in the region is scrolled: until the
@@ -395,7 +375,7 @@ impl GridShmWriter {
     pub fn publish_if_changed(&mut self, grid: &Grid, view_offset: u16, flags: u32) -> bool {
         // the layout is not in the digest: it changes with the view
         // offset, which is, or with the reader, which resets the digest
-        let h = compute_publish_hash(grid, view_offset, flags);
+        let h = compute_publish_hash(grid, view_offset, flags) ^ self.shown.salt();
         if h == self.last_publish_hash {
             return false;
         }
@@ -425,7 +405,7 @@ impl GridShmWriter {
     /// live screen, whose cells the grid holds as they go out.  A view
     /// into history is twenty-byte cells, as it always was.
     fn packs(&self, view_offset: u16) -> bool {
-        self.reader_frames >= cells::VERSION_PACKED && view_offset == 0
+        self.reader_frames >= cells::VERSION_PACKED && view_offset == 0 && !self.shown.reverse
     }
 
     /// Publish the grid's in-view window (`view_offset` rows up from the
@@ -502,29 +482,17 @@ impl GridShmWriter {
                 t.begin();
             }
             for row in 0..rows {
-                // history rows keep their cluster text per row, not in
-                // the pool
-                if let Some(t) = table.as_mut()
-                    && view_offset > 0
-                    && grid.row_clusters_at_view(view_offset, row, &mut self.row_clusters)
-                {
-                    for (col, text) in &self.row_clusters {
-                        t.push(*col, row, text);
-                    }
-                }
-                if let Some(t) = table.as_mut()
-                    && links
-                {
-                    grid.each_link_at_view(view_offset, row, |c0, c1, uri| t.push_link(row, c0, c1, uri));
-                }
                 let row_base = row as usize * cols as usize;
+                let mut concealed = false;
                 for col in 0..cols {
                     let mut cell = grid.cell_at_view(view_offset, col, row);
                     // a link id is a number in this grid's pool; the
-                    // links went into the table above
+                    // links go into the table below
                     if cell.attrs.link_id() != 0 {
                         cell.attrs.set_link_id(0);
                     }
+                    concealed |= cell.attrs.invisible();
+                    self.shown.cell(&mut cell);
                     std::ptr::write(cells.add(row_base + col as usize), cell);
                     if let Some(t) = table.as_mut()
                         && cell.is_cluster()
@@ -532,6 +500,25 @@ impl GridShmWriter {
                     {
                         t.push(col, row, text);
                     }
+                }
+                // what rides beside a concealed cell is concealed with it
+                let hidden = |c: u16| concealed && grid.cell_at_view(view_offset, c, row).attrs.invisible();
+                // history rows keep their cluster text per row, not in
+                // the pool
+                if let Some(t) = table.as_mut()
+                    && view_offset > 0
+                    && grid.row_clusters_at_view(view_offset, row, &mut self.row_clusters)
+                {
+                    for (col, text) in self.row_clusters.iter().filter(|(c, _)| !hidden(*c)) {
+                        t.push(*col, row, text);
+                    }
+                }
+                if let Some(t) = table.as_mut()
+                    && links
+                {
+                    grid.each_link_at_view(view_offset, row, |c0, c1, uri| {
+                        shown::push_link(t, row, c0, c1, uri, hidden);
+                    });
                 }
             }
             if let Some(t) = table {
