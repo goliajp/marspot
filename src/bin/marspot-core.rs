@@ -2038,7 +2038,7 @@ enum CoreEvent {
     /// before manifest v2 carried `control_stream_fd`, kernel races
     /// during dual-core swap, plain crashes, etc).
     L3ControlEof(u64),
-    /// A session said which grid region it publishes into, or which frames it reads.
+    /// A session said which grid region it publishes into, which frames it reads, or that its pane woke.
     L3Says(u64, Frame),
     /// A background reconnect finished.  `Some(stream)` swaps the
     /// pane's control onto it; `None` means every attempt failed and
@@ -2428,22 +2428,18 @@ fn l3_reader_loop(
                         marspot::input::write_clipboard_text(text);
                     }
                 }
-                MsgType::SessionPublishes | MsgType::SessionReadsFrameCells => {
+                MsgType::SessionPublishes | MsgType::SessionReadsFrameCells | MsgType::PaneAwake => {
                     let _ = tx.send(CoreEvent::L3Says(session_id, f));
                 }
-                // Reply to a Cmd-C `GetSelectionText`: hand it to whoever is
-                // blocked in `L3Conn::request_selection_text`.  A dropped
-                // receiver (request already timed out) is fine — ignore.
+                // Reply to a Cmd-C `GetSelectionText`, for whoever waits in
+                // `L3Conn::request_selection_text`; its seq lets the waiter
+                // discard a late reply to a request that timed out.
                 MsgType::SelectionText => {
-                    // `(seq, text)` — the seq lets the waiter discard a late
-                    // reply from an earlier, timed-out request.
                     if let Ok(reply) = decode_selection_text(&f.payload) {
                         let _ = selection_tx.send(reply);
                     }
                 }
-                // C5 — L3 search worker delivered a batch.  Stale
-                // qid is dropped by the pane's SearchList in
-                // `apply_results` (D15 last-write-wins).
+                // a stale qid is dropped by the pane's `apply_results`
                 MsgType::SearchResults => {
                     if let Ok((qid, has_more, total_seen, hits)) =
                         marspot::shell_proto::decode_search_results(&f.payload)
@@ -2457,10 +2453,6 @@ fn l3_reader_loop(
                         ));
                     }
                 }
-                // F3+3.6 — old PaneCwd MsgType arm retired; cwd is
-                // now pulled via proc_pidinfo on LayoutModal open.
-                // Any stale PaneCwd frame from a not-yet-upgraded L3
-                // falls into the silent-skip path below.
                 _ => {}
             },
             Ok(None) | Err(_) => {
@@ -9066,6 +9058,13 @@ fn main() {
                             }
                             let _ = tx.send(CoreEvent::L3ControlReconnected(sid, got));
                         });
+                    }
+                }
+                // the shell's, under the id of the connection it came on
+                CoreEvent::L3Says(sid, frame) if frame.msg_type == MsgType::PaneAwake => {
+                    if let Ok(said) = marspot::shell_proto::decode_pane_awake(&frame.payload) {
+                        let said = marspot::shell_proto::PaneAwake { session_id: sid, ..said };
+                        app.pending_to_shell.push((MsgType::PaneAwake, marspot::shell_proto::encode_pane_awake(&said)));
                     }
                 }
                 CoreEvent::L3Says(sid, frame) => {

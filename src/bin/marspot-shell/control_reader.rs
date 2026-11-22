@@ -13,6 +13,8 @@ use marspot::shell_proto::{
 
 use crate::ShellInbox;
 
+pub(crate) mod pane_wakes;
+
 pub(crate) fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: EventProxy) {
     loop {
         match Frame::read_from(&mut stream) {
@@ -79,6 +81,15 @@ pub(crate) fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>
                     MsgType::IconMaskWanted => marspot::shell_proto::decode_icon_mask_wanted(&frame.payload)
                         .ok()
                         .map(|(symbol, point_px)| ShellInbox::IconMaskWanted(symbol, point_px)),
+                    // kept where the supervisor reads it, not queued:
+                    // a pane that prints reports every second
+                    MsgType::PaneAwake => {
+                        if let Ok(a) = marspot::shell_proto::decode_pane_awake(&frame.payload) {
+                            pane_wakes::record(&a);
+                            crate::pump::knock();
+                        }
+                        None
+                    }
                     // Unknown frames are ignored — keeps forward
                     // compatibility while the protocol grows.
                     _ => None,

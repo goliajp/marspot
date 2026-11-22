@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.501"  # basic files over the size limit carry a carve-out marker
-core    = "0.12.558"  # WINDOW_FIRST_CONTENT: the first frame showing every pane's output, once the shell reports it shown
-session = "0.11.384"  # basic files over the size limit carry a carve-out marker
+shell   = "0.7.502"  # PaneAwake from the core is kept for the supervisor and knocks the pump
+core    = "0.12.559"  # passes each session's PaneAwake on to the shell
+session = "0.11.385"  # PaneAwake: output after a quiet spell (at most 1/s) and foreground changes
