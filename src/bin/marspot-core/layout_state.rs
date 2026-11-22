@@ -150,11 +150,8 @@ impl CoreApp {
             let was = std::mem::replace(&mut self.terminal_focus, now);
             for (sid, focused) in [(was, false), (now, true)] {
                 let Some(sid) = sid else { continue };
-                for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
-                    if pane.session().l3_session_id() == Some(sid) {
-                        pane.session_mut().forward_pane_terminal_focus(focused);
-                        break;
-                    }
+                if let Some(pane) = self.pane_by_sid_mut(sid) {
+                    pane.session_mut().forward_pane_terminal_focus(focused);
                 }
             }
         }

@@ -61,14 +61,18 @@ impl CoreApp {
             Ok(false) => {}
             Err(e) => lx_error!("core.promote.swap_failed", &format!("{e}")),
         }
-        let asked = marspot::session_signal::ask_all_to_update(
-            self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()),
-        );
+        let asked = self.ask_every_l3_to_update();
         lx_event!(
             "L3_SWAP_FANOUT",
             "asked every L3 not on current/marspot-session to move to it",
             n_asked = asked
         );
+    }
+
+    /// Ask every live L3, drawn or not, to move to the staged build.
+    /// Returns how many were asked.
+    pub(super) fn ask_every_l3_to_update(&mut self) -> usize {
+        marspot::session_signal::ask_all_to_update(self.panes_mut())
     }
 
     /// Terminate `panes[idx]` and keep all parallel state in sync.

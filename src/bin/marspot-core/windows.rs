@@ -21,7 +21,7 @@ impl CoreApp {
         // the window before the restore queue gets a look: the user
         // just asked for this window, a boot leftover did not.
         if let Some(sid) = self.pending_move_sid.take()
-            && let Some((from_wi, idx)) = self.find_pane_by_sid(sid) {
+            && let Some((from_wi, idx)) = self.find_window_pane_by_sid(sid) {
                 // RFC-006 §3 — same dormant-placeholder rule as an
                 // in-window move: the source layout holds still.
                 let (pc, pr) = {
@@ -247,8 +247,8 @@ impl CoreApp {
     /// result (spawn finished, control reconnected, search hits) has
     /// to find it wherever it is.  Searching only the key window meant
     /// those results were silently dropped whenever the user had
-    /// focused a different window in the meantime.
-    pub(super) fn find_pane_by_sid(&self, sid: u64) -> Option<(usize, usize)> {
+    /// focused a different window in the meantime.  Windows only; `pane_by_sid_mut` also finds shadows.
+    pub(super) fn find_window_pane_by_sid(&self, sid: u64) -> Option<(usize, usize)> {
         self.windows.iter().enumerate().find_map(|(wi, w)| {
             w.panes
                 .iter()
@@ -272,7 +272,7 @@ impl CoreApp {
     /// whichever window the user happened to be looking at — and leave
     /// the one that actually changed stale.
     pub(super) fn mark_sid_window_dirty(&mut self, sid: u64) {
-        if let Some((wi, _)) = self.find_pane_by_sid(sid) {
+        if let Some((wi, _)) = self.find_window_pane_by_sid(sid) {
             win!(self, wi).needs_render = true;
         }
     }
