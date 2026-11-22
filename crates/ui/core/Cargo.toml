@@ -1,6 +1,7 @@
 [package]
 name = "golia-ui-core"
 version = "0.1.0"
+publish = false
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Platform-agnostic core of a zero-dependency Rust GUI: units, colour, and the scene a backend draws."
