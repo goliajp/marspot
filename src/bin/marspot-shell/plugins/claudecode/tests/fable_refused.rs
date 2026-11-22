@@ -173,6 +173,57 @@ fn with_fable_spent_everywhere_a_refused_pane_stays_and_says_so_once() {
     assert_eq!(lines[0].0, "quota.fable_nowhere", "{lines:?}");
 }
 
+/// Background work runs when the refusal is read: the move ends it,
+/// and the session hears both what to start again and that the rest
+/// was ended.
+#[test]
+fn a_fable_move_that_ends_background_work_says_both() {
+    let home = quota_home("fable-work");
+    feed(&home, "fable-work", 0.5, 0.1);
+    rebalance(marspot::settings::Rebalance::Off);
+    confirmed("u-85");
+    let host = FakeHost::new(home.join("state"));
+    let sid = 85u64;
+    let mut plugin = stranded_plugin(pane_on_p1(&home, "u-85"), sid);
+
+    let mut refused = agent_refused_fable(sid);
+    refused.new_vetoes.insert(sid, (true, false));
+    sweep(&mut plugin, &host, &mut refused);
+    let sent = host.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(plugin.fable_need.word(sid, 1, 2), None, "told once");
+    let said = &sent[0].1;
+    assert!(said.contains("重新启动这个子代理"), "{said:?}");
+    assert!(said.contains("后台任务和后台子代理已经被结束了"), "{said:?}");
+    assert!(said.find("Design RFC") < said.find("后台任务和后台子代理"), "{said:?}");
+}
+
+/// The feed has nothing on P1, so only the refusal can say it is out:
+/// a background agent's refusal of Fable is enough for a marked pane.
+#[test]
+fn an_agent_refusal_moves_a_marked_pane_off_an_account_the_feed_does_not_know() {
+    let home = quota_home("fable-unknown");
+    fs::write(
+        home.join(".local/state/devops/claude-usage.json"),
+        r#"{"generated_at": "2026-11-20T00:00:00+00:00", "accounts": [
+           {"name":"B","email":"fable-unknown2@example","status":"allowed","utilization_5h":null,
+            "utilization_7d":0.3,"reset_5h":null,"reset_7d":4102444900,"tier":"default_claude_max_20x",
+            "collected_at":"2026-11-20T00:00:00+00:00",
+            "model_limits":[{"label":"Fable","utilization":0.1,"reset":4102444900}]}]}"#,
+    )
+    .unwrap();
+    rebalance(marspot::settings::Rebalance::Off);
+    confirmed("u-86");
+    let host = FakeHost::new(home.join("state"));
+    let sid = 86u64;
+    let mut plugin = stranded_plugin(pane_on_p1(&home, "u-86"), sid);
+
+    sweep(&mut plugin, &host, &mut agent_refused_fable(sid));
+    let sent = host.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "{:?}", lines_about(&host, sid));
+    assert!(sent[0].1.contains(".claude-profile-2"), "{:?}", sent[0].1);
+}
+
 /// A shell restart, as after a silent update, keeps the mark: the pane
 /// still counts as one that needs Fable.
 #[test]
@@ -192,4 +243,29 @@ fn a_fable_mark_survives_the_shell_restarting() {
     again.load_fable_need(&host);
     assert!(again.fable_need.marked(sid));
     assert_eq!(again.fable_need.word(sid, 1, 2), None, "it was told before the restart");
+}
+
+/// Moved to P2 for its refusal and told; later the feed reads P2's
+/// Fable spent. The next move is for the feed, not a refusal.
+#[test]
+fn a_marked_pane_moved_again_for_the_feed_does_not_say_it_was_refused() {
+    let home = quota_home("fable-feed");
+    feed(&home, "fable-feed", 0.1, 1.0);
+    rebalance(marspot::settings::Rebalance::Off);
+    confirmed("u-88");
+    let host = FakeHost::new(home.join("state"));
+    let sid = 88u64;
+    let mut on_p2 = pane_on_p1(&home, "u-88");
+    on_p2.profile_num = 2;
+    on_p2.config_dir = Some(home.join(".claude-profile-2").to_string_lossy().into_owned());
+    let mut plugin = stranded_plugin(on_p2, sid);
+    plugin.fable_need.note(sid, &Ask { at: now() - 600, agent: None }, now() - 600);
+    plugin.fable_need.told(sid);
+
+    sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::AwaitingUser));
+    let lines = lines_about(&host, sid);
+    let moving: Vec<_> = lines.iter().filter(|(e, _)| e == "quota.moving").collect();
+    assert_eq!(moving.len(), 1, "{lines:?}");
+    assert!(moving[0].1.contains("usage feed shows its Fable spent"), "{lines:?}");
+    assert!(!moving[0].1.contains("refused"), "{lines:?}");
 }

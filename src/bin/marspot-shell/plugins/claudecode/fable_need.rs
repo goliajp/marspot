@@ -6,7 +6,7 @@
 //! cap. Nothing about the pane says so in advance; the refusal does.
 //! Rebalance had been moving such Opus panes onto accounts whose Fable
 //! was spent, to leave Fable to the panes that need it, and on
-//! 2026-11-23 a session on P6 had a background agent refused with
+//! 2026-11-22 a session on P6 had a background agent refused with
 //! "You've hit your Fable limit" and its work stopped there.
 //!
 //! Once refused, the session is judged as a Fable pane: it is moved at

@@ -76,8 +76,16 @@ impl ClaudecodePlugin {
             let model = result.new_models.get(&sid).map(String::as_str);
             if marked && !quota::needs_fable(model) { Some(fable_need::FABLE) } else { model }
         };
-        let out_for = |meta: &BindMeta, model: Option<&str>| -> bool {
+        // Judged as Fable, its background agents' refusal of Fable
+        // under this claude is its own: the account may read Unknown,
+        // and then only a refusal says it is out.
+        let out_for = |sid: u64, meta: &BindMeta, model: Option<&str>| -> bool {
+            let agent = result
+                .agent_refused
+                .get(&sid)
+                .filter(|r| quota::needs_fable(model) && quota::needs_fable(Some(&r.model)));
             is_out(meta.profile_num, model, meta.refused_at.as_ref())
+                || agent.is_some_and(|r| is_out(meta.profile_num, model, Some(r)))
         };
         // Forget what was tried for a pane that is out of trouble —
         // but not for one that is merely between bindings.  A cycle
@@ -94,7 +102,7 @@ impl ClaudecodePlugin {
                 return false;
             }
             match result.new_meta.get(sid) {
-                Some(m) => out_for(m, judged(*sid, marks.marked(*sid))),
+                Some(m) => out_for(*sid, m, judged(*sid, marks.marked(*sid))),
                 None => true,
             }
         });
@@ -139,9 +147,9 @@ impl ClaudecodePlugin {
             let as_judged = judged(sid, marked);
             // out only for want of the Fable it was refused: the move
             // answers that refusal, and the session hears about it
-            let for_fable = as_judged != model.as_deref() && !out_for(&meta, model.as_deref());
-            if !out_for(&meta, as_judged) {
-                self.heads_up_if_due(host, sid, &rooms, &meta, result);
+            let for_fable = as_judged != model.as_deref() && !out_for(sid, &meta, model.as_deref());
+            if !out_for(sid, &meta, as_judged) {
+                self.heads_up_if_due(host, sid, &rooms, &meta, result, as_judged);
                 if mode != marspot::settings::Rebalance::Off
                     && self.rebalance(host, sid, &rooms, &meta, result, as_judged, &choice, in_flight, mode, rebalanced_this_pass)
                 {
@@ -262,14 +270,20 @@ impl ClaudecodePlugin {
                 }
             }
             quota::Move::To(target) => {
-                let because = if judged.for_fable { ": it was refused Fable" } else { "" };
+                let fable_word = judged.for_fable.then(|| self.fable_need.word(sid, meta.profile_num, target)).flatten();
+                let told_fable = fable_word.is_some();
+                // told once per refusal: moved again with nothing new
+                // refused, it goes for what the feed reads
+                let because = match (judged.for_fable, told_fable) {
+                    (true, true) => ": it was refused Fable",
+                    (true, false) => ": the usage feed shows its Fable spent",
+                    (false, _) => "",
+                };
                 host.log(
                     LogLevel::Info,
                     "quota.moving",
                     &format!("sid={sid} P{} → P{target}{because}", meta.profile_num),
                 );
-                let fable_word = judged.for_fable.then(|| self.fable_need.word(sid, meta.profile_num, target)).flatten();
-                let told_fable = fable_word.is_some();
                 // the move ends what runs under claude; the session is
                 // told, or it waits on background shells that are gone.
                 // A pane moved for the Fable it was refused hears which
@@ -307,8 +321,9 @@ impl ClaudecodePlugin {
         rooms: &[(u8, quota::Room)],
         meta: &BindMeta,
         result: &ScanResult,
+        // what the pane is judged as: a pane refused Fable as Fable
+        model: Option<&str>,
     ) {
-        let model = result.new_models.get(&sid).map(String::as_str);
         let Some((_, room)) = rooms.iter().find(|(p, _)| *p == meta.profile_num) else { return };
         let week = room.reset_7d();
         // the account came back, at a new five hours or a new week: the
