@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.526"  # basic: move Terminal::new out of terminal.rs
-core    = "0.12.597"  # basic: move Terminal::new out of terminal.rs
-session = "0.11.405"  # basic: move Terminal::new out of terminal.rs
+shell   = "0.7.527"  # basic: name what terminal.rs still holds in its carve-out marker
+core    = "0.12.598"  # basic: name what terminal.rs still holds in its carve-out marker
+session = "0.11.406"  # basic: name what terminal.rs still holds in its carve-out marker
