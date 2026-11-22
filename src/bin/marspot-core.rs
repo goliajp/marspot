@@ -29,7 +29,6 @@ use marspot::grid_shm::{self, ENV_SHM_FD, GridShmReader};
 use marspot::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use marspot::latency_trace::{self as trace, Stage};
 use marspot::layout::Layout;
-use marspot::link_open::open_arg_for;
 use marspot::pane::{L3Conn, L3Spawn, Pane};
 use marspot::render::{SessionView, SidebarEntry};
 use marspot::render_metal::MetalRenderer;
@@ -66,53 +65,6 @@ use marspot::HEADER_PT;
 /// to the real cell rect immediately).
 const INITIAL_COLS: u16 = 40;
 const INITIAL_ROWS: u16 = 12;
-
-/// Hand `arg` off to macOS `open(1)` so the system routes it to the
-/// right helper: URL → default browser, directory → Finder, file →
-/// default app for the file's UTI.  Fire and forget; we don't wait
-/// on the child.  Stderr inherited so a malformed arg surfaces in
-/// marspot.log via the usual stderr pipe instead of vanishing.
-fn spawn_open(arg: &str) {
-    spawn_open_with(arg, false)
-}
-
-/// `reveal` shows the file selected in its folder instead of opening it.
-fn spawn_open_with(arg: &str, reveal: bool) {
-    // `spawn` only reports that the process could not START.  When
-    // `open(1)` itself fails — the usual reason being a path that no
-    // longer exists — it exits non-zero and prints to a stderr nobody
-    // reads, so a click that does nothing leaves no trace at all.  A
-    // link is only drawn after linkify stats the path, so a miss here
-    // means the file moved between the frame and the click; say so.
-    if !arg.starts_with("http://")
-        && !arg.starts_with("https://")
-        && !arg.starts_with("mailto:")
-        && std::fs::symlink_metadata(arg).is_err()
-    {
-        lx_warn!(
-            "core.link_open_missing",
-            "link target is gone — the pane still shows it because \
-             nothing has redrawn that row since",
-            arg = arg
-        );
-    }
-    let mut cmd = std::process::Command::new("/usr/bin/open");
-    if reveal {
-        cmd.arg("-R");
-    }
-    if let Err(e) = cmd
-        .arg(arg)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .spawn()
-    {
-        lx_warn!(
-            "core.link_open_failed",
-            &format!("{e}"),
-            arg = arg
-        );
-    }
-}
 
 /// `install-local.sh`'s `sup_log` shells out to
 /// `marspot-core --log-event <tag> <detail>` so supervisor-side
@@ -344,79 +296,6 @@ impl ContextMenuAction {
             _ => None,
         }
     }
-}
-
-/// Owned snapshot of the URL/path the menu was opened on.  Lives on
-/// `ContextMenuState` so the dispatcher can pull it after the menu
-/// has been cleared.  Kept tiny — the kind drives label wording, the
-/// text drives Open + Copy actions.
-#[derive(Debug, Clone)]
-struct LinkContext {
-    text: String,
-    /// What the span NAMES, when that is not what it shows — a
-    /// relative path is drawn `src/main.rs` and means
-    /// `<cwd>/src/main.rs`.  Open and Copy act on this; the label and
-    /// the underline stay with the text.
-    target: Option<String>,
-    kind: marspot::grid_links::LinkKind,
-}
-
-impl LinkContext {
-    /// The string Open and Copy operate on.
-    fn actionable(&self) -> &str {
-        self.target.as_deref().unwrap_or(&self.text)
-    }
-}
-
-/// Build the right-click menu items shown when the user clicks (left
-/// or right) on an underlined URL / file-path / email span.  Returns
-/// Copy + Open entries (Copy on top — primary intent in a terminal
-/// context is "grab this URL/path/address", not "launch the app").
-/// Email routes through `/usr/bin/open mailto:…` so the system's
-/// default mail client picks it up.
-///
-/// **Regression-gate**: this is the contract behind the "click a URL,
-/// get a panel" feature.  The tail of the click chain is:
-///
-///   AppKit `(rightM|m)ouseDown:` → L1 shell → MsgType wire → L2
-///   `CoreApp::mouse_(right_)down` → `hit_test_link_at_xy` (`grid_links::scan_visible_links`)
-///   → `link_menu_items_for` → `ContextMenuState` set → renderer
-///   `set_context_menu` → ContextMenu paint over grid.
-///
-/// User noted a transient regression of this feature on 2026-06-25
-/// without a root cause; the unit tests below pin the contract on
-/// each LinkKind so a future drift surfaces at `cargo nextest`.
-fn link_menu_items_for(
-    link: &LinkContext,
-) -> Vec<marspot::ui::components::MenuItem> {
-    use marspot::grid_links::LinkKind;
-    use marspot::ui::components::MenuItem;
-    // UUID is copy-only (nothing sensible to `open(1)`); every other
-    // kind surfaces both Copy and Open.
-    if link.kind == LinkKind::Uuid {
-        return vec![MenuItem::entry(
-            t(Msg::LinkCopyUuid),
-            ContextMenuAction::CopyLink.tag(),
-        )];
-    }
-    let (open_label, copy_label) = match link.kind {
-        LinkKind::Url => (Msg::LinkOpenUrl, Msg::LinkCopyUrl),
-        LinkKind::File => (Msg::LinkOpenFile, Msg::LinkCopyPath),
-        LinkKind::Email => (Msg::LinkSendEmail, Msg::LinkCopyEmail),
-        LinkKind::Ip => (Msg::LinkOpenInBrowser, Msg::LinkCopyIp),
-        LinkKind::Uuid => unreachable!("handled above"),
-    };
-    let mut items = vec![
-        MenuItem::entry(t(copy_label), ContextMenuAction::CopyLink.tag()),
-        MenuItem::entry(t(open_label), ContextMenuAction::OpenLink.tag()),
-    ];
-    if link.kind == LinkKind::File {
-        items.push(MenuItem::entry(
-            t(Msg::LinkRevealFile),
-            ContextMenuAction::RevealLink.tag(),
-        ));
-    }
-    items
 }
 
 /// RFC-004 B.5 — boot-assembly integration tests.  Each test runs in
@@ -1781,114 +1660,6 @@ mod real_pty_tests;
 #[path = "marspot-core/shell_end_tests.rs"]
 mod shell_end_tests;
 
-#[cfg(test)]
-mod link_menu_tests {
-    use super::*;
-    use marspot::grid_links::LinkKind;
-
-    fn ctx(kind: LinkKind) -> LinkContext {
-        LinkContext { text: "https://example.com".into(), target: None, kind }
-    }
-
-    #[test]
-    fn url_yields_copy_then_open() {
-        let items = link_menu_items_for(&ctx(LinkKind::Url));
-        assert_eq!(items.len(), 2, "URL must surface Copy + Open");
-        assert_eq!(items[0].label, "Copy URL");
-        assert_eq!(items[0].action_tag, ContextMenuAction::CopyLink.tag());
-        assert_eq!(items[1].label, "Open URL");
-        assert_eq!(items[1].action_tag, ContextMenuAction::OpenLink.tag());
-    }
-
-    /// A `~/…` file link must reach `open(1)` already expanded.
-    ///
-    /// `open(1)` does no shell expansion — handed `~/x`, it looks for a
-    /// directory literally named `~` under its cwd and reports the file
-    /// missing.  linkify DOES expand `~` for its existence check, so
-    /// such links underlined normally and then did nothing when
-    /// clicked (2026-08-21 report).  Nothing surfaced the failure
-    /// either: `spawn` succeeds as long as the process starts.
-    #[test]
-    fn a_tilde_file_link_is_expanded_before_open() {
-        let home = std::env::var("HOME").expect("HOME");
-        let arg = open_arg_for(marspot::grid_links::LinkKind::File, "~/Downloads/x.pdf")
-            .expect("file links have an open action");
-        assert!(
-            !arg.contains('~'),
-            "open(1) gets no shell: `~` must already be gone, got {arg:?}"
-        );
-        assert_eq!(arg, format!("{home}/Downloads/x.pdf"));
-
-        // An absolute path is passed through untouched.
-        let abs = open_arg_for(marspot::grid_links::LinkKind::File, "/tmp/y.log").unwrap();
-        assert_eq!(abs, "/tmp/y.log");
-    }
-
-    #[test]
-    fn file_yields_copy_path_then_open_file() {
-        let items = link_menu_items_for(&ctx(LinkKind::File));
-        assert_eq!(items.len(), 3, "File must surface Copy + Open + Reveal");
-        assert_eq!(items[0].label, "Copy path");
-        assert_eq!(items[1].label, "Open file");
-        assert_eq!(items[2].label, "Open containing folder");
-        assert_eq!(items[2].action_tag, ContextMenuAction::RevealLink.tag());
-    }
-
-    #[test]
-    fn email_yields_copy_email_then_send_email() {
-        let items = link_menu_items_for(&ctx(LinkKind::Email));
-        assert_eq!(items.len(), 2, "Email must surface Copy + Send");
-        assert_eq!(items[0].label, "Copy email");
-        assert_eq!(items[0].action_tag, ContextMenuAction::CopyLink.tag());
-        assert_eq!(items[1].label, "Send email");
-        assert_eq!(items[1].action_tag, ContextMenuAction::OpenLink.tag());
-    }
-
-    /// Belt-and-braces: a NEW LinkKind variant (e.g. a future
-    /// `Anchor` for HTTP fragment links) must not silently produce
-    /// an empty menu without an explicit `return Vec::new()` — the
-    /// `match` above is non-exhaustive-by-design and a new variant
-    /// would force a compile-time decision.  This test fails to
-    /// compile (not just fails to pass) if the variant is missed —
-    /// listing each known variant pins the surface.
-    #[test]
-    fn every_known_linkkind_is_handled() {
-        for kind in [
-            LinkKind::Url,
-            LinkKind::File,
-            LinkKind::Email,
-            LinkKind::Ip,
-            LinkKind::Uuid,
-        ] {
-            let items = link_menu_items_for(&ctx(kind));
-            let expected = match kind {
-                LinkKind::Uuid => 1, // copy-only
-                LinkKind::File => 3,
-                _ => 2,
-            };
-            assert_eq!(items.len(), expected, "{kind:?}");
-        }
-    }
-
-    #[test]
-    fn ip_yields_copy_ip_then_open_in_browser() {
-        let items = link_menu_items_for(&ctx(LinkKind::Ip));
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].label, "Copy IP");
-        assert_eq!(items[0].action_tag, ContextMenuAction::CopyLink.tag());
-        assert_eq!(items[1].label, "Open in browser");
-        assert_eq!(items[1].action_tag, ContextMenuAction::OpenLink.tag());
-    }
-
-    #[test]
-    fn uuid_yields_copy_only() {
-        let items = link_menu_items_for(&ctx(LinkKind::Uuid));
-        assert_eq!(items.len(), 1, "UUID must be copy-only");
-        assert_eq!(items[0].label, "Copy UUID");
-        assert_eq!(items[0].action_tag, ContextMenuAction::CopyLink.tag());
-    }
-}
-
 /// cc — state behind the toolbar `Cc` (Claude usage) modal.
 struct CcUsageModalState {
     /// Parsed feed; `None` = file missing/unreadable (modal shows a
@@ -3116,6 +2887,9 @@ mod frames;
 use frames::WindowSurfaces;
 #[path = "marspot-core/hover.rs"]
 mod hover;
+#[path = "marspot-core/link_menu.rs"]
+mod link_menu;
+use link_menu::{link_menu_items_for, LinkContext};
 #[path = "marspot-core/chrome_input.rs"]
 mod chrome_input;
 #[path = "marspot-core/idle.rs"]
@@ -4865,17 +4639,12 @@ impl CoreApp {
             }
             ContextMenuAction::OpenLink => {
                 if let Some(link) = link_snapshot.as_ref() {
-                    let arg = open_arg_for(link.kind, link.actionable());
-                    if let Some(a) = arg {
-                        spawn_open(&a);
-                    }
+                    link_menu::open(link, false);
                 }
             }
             ContextMenuAction::RevealLink => {
                 if let Some(link) = link_snapshot.as_ref() {
-                    if let Some(a) = open_arg_for(link.kind, link.actionable()) {
-                        spawn_open_with(&a, true);
-                    }
+                    link_menu::open(link, true);
                 }
             }
             ContextMenuAction::CopyLink => {
@@ -5847,7 +5616,7 @@ impl CoreApp {
         idx: usize,
         col: u16,
         row: u16,
-    ) -> Option<marspot::grid_links::LinkRange> {
+    ) -> Option<(marspot::grid_links::LinkRange, bool)> {
         let focused = win!(self, wi).focused_idx == idx;
         let pane = win!(self, wi).panes.get(idx)?;
         // The offset the RENDERER used, not the pane's logical one —
@@ -5856,7 +5625,7 @@ impl CoreApp {
         let grid = pane.session().grid();
         // a link the program declared (OSC 8) wins over one found by its shape
         if let Some(link) = marspot::osc8::link_at(grid, view_offset, col, row) {
-            return Some(link);
+            return Some((link, true));
         }
         // cc-mode: claudecode hard-newlines URLs / paths with a hanging
         // indent; see `grid_links::ScanOpts::cc_mode`.  Same answer the
@@ -5901,9 +5670,10 @@ impl CoreApp {
             opts,
             marspot::link_probe::oracle(),
         );
-        links.into_iter().find(|link| {
-            link.row == row && col >= link.col_start && col <= link.col_end
-        })
+        links
+            .into_iter()
+            .find(|link| link.row == row && col >= link.col_start && col <= link.col_end)
+            .map(|link| (link, false))
     }
 
     /// Why a right-click that landed on painted link text produced no
@@ -5970,12 +5740,8 @@ impl CoreApp {
     ) -> Option<LinkContext> {
         let (cw, ch) = self.renderer.cell_dims();
         let (idx, col, row) = win!(self, wi).layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)?;
-        let link = self.hit_test_pane_link(wi, idx, col, row)?;
-        Some(LinkContext {
-            text: link.text,
-            target: link.target,
-            kind: link.kind,
-        })
+        let (link, declared) = self.hit_test_pane_link(wi, idx, col, row)?;
+        Some(LinkContext { text: link.text, target: link.target, kind: link.kind, declared })
     }
 
     /// Why a right-click inside a badge-bearing title strip missed
