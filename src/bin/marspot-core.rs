@@ -2913,6 +2913,8 @@ mod theme_follow;
 mod bell;
 #[path = "marspot-core/scrollbar_input.rs"]
 mod scrollbar_input;
+#[path = "marspot-core/dev_drive.rs"]
+mod dev_drive;
 #[path = "marspot-core/layout_state.rs"]
 mod layout_state;
 #[path = "marspot-core/pane_forward.rs"]
@@ -3109,146 +3111,6 @@ struct CoreApp {
 }
 
 impl CoreApp {
-    /// Dev seam (`MARSPOT_DEV_DRAG`) — see the call site.
-    ///
-    /// Waits until the windows the ending needs have panes laid out
-    /// (restored panes land off-loop, seconds after boot), then plays
-    /// the event sequence L1 would send for a real drag, in the order
-    /// the event loop routes it: press on the title of window 0's first
-    /// pane, move past the slop, move over the target, release.  Nothing
-    /// below `mouse_down` / `mouse_drag` / `mouse_up` is bypassed — the
-    /// ghost, the drop resolution and the landing are the production
-    /// ones.
-    fn dev_drive_drag(&mut self) {
-        let Some((ending, at)) = self.dev_drag else { return };
-        if Instant::now() < at {
-            return;
-        }
-        let needed = match ending {
-            DevDrag::SplitRight => 2,
-            DevDrag::NewWindow => 1,
-        };
-        let laid_out = |app: &Self, wi: usize| {
-            !win!(app, wi).panes.is_empty() && !win!(app, wi).layout.cells.is_empty()
-        };
-        if self.windows.len() < needed || !(0..needed).all(|wi| laid_out(self, wi)) {
-            return;
-        }
-        self.dev_drag = None;
-
-        let src = win!(self, 0).layout.cells[0];
-        let press = (src.x + src.w / 2.0, src.y_top + win!(self, 0).layout.cell_title_h / 2.0);
-        let from_id = win!(self, 0).window_id;
-        let (drop_id, drop) = match ending {
-            DevDrag::SplitRight => {
-                let dst = win!(self, 1).layout.cells[0];
-                // Inside the right band, clear of the window edge.
-                (win!(self, 1).window_id, (dst.x + dst.w - 8.0, dst.y_top + dst.h / 2.0))
-            }
-            // Window id 0 is "no marspot window under the pointer"; the
-            // point is in screen space, where the new window is placed.
-            DevDrag::NewWindow => (0, (640.0, 480.0)),
-        };
-        lx_event!(
-            "DEV_DRAG",
-            "driving a pane drag (dev seam)",
-            ending = format!("{ending:?}"),
-            from_window = from_id,
-            drop_window = drop_id,
-            windows_before = self.windows.len() as u32
-        );
-
-        let Some(wi) = self.focus_window(from_id) else { return };
-        self.drag_window = Some(from_id);
-        self.mouse_down(wi, press.0, press.1, Modifiers::default());
-        let past_slop = press.0 + 2.0 * PANE_DRAG_SLOP * marspot::ui::chrome_scale();
-        self.mouse_drag(wi, past_slop, press.1, from_id, past_slop, press.1);
-        self.mouse_drag(wi, drop.0, drop.1, drop_id, drop.0, drop.1);
-        lx_event!(
-            "DEV_DRAG_HOVER",
-            "ghost resolved before release",
-            target = format!("{:?}", self.drop_target),
-            drag_active = self.pane_drag.is_some_and(|d| d.active) as u32
-        );
-        if let Some(wi) = self.drag_target(from_id) {
-            self.mouse_up(wi, drop_id, drop.0, drop.1);
-        }
-        self.drag_window = None;
-        lx_event!(
-            "DEV_DRAG_DONE",
-            "pane drag released (dev seam)",
-            windows_after = self.windows.len() as u32
-        );
-    }
-
-    /// Dev seam (`MARSPOT_DEV_OPEN_SETTINGS`) — see the call site.
-    fn dev_drive_open_settings(&mut self) {
-        match self.dev_open_settings_at {
-            Some(t) if Instant::now() >= t => {}
-            _ => return,
-        }
-        self.dev_open_settings_at = None;
-        let wi = self.key_window.min(self.windows.len().saturating_sub(1));
-        self.toggle_panel(wi, SurfaceKind::Settings);
-    }
-
-    /// Dev seam (`MARSPOT_DEV_PANELS`): queues the next step of the
-    /// script as the events the window would have sent for it, so they
-    /// are routed and handled like any others.
-    fn dev_drive_panels(&mut self) {
-        let now = Instant::now();
-        if !self.dev_panels.as_ref().is_some_and(|s| s.due(now)) {
-            return;
-        }
-        let wi = self.key_window.min(self.windows.len().saturating_sub(1));
-        let top = win!(self, wi).layout.top_inset;
-        let chrome =
-            win!(self, wi).panels.open().map(|k| PanelChrome::new(self.panel_frame(wi, k), top));
-        let cell = self.renderer.cell_dims();
-        let w = &win!(self, wi);
-        let id = w.window_id;
-        let Some(script) = self.dev_panels.as_mut() else { return };
-        for input in script.play(now, &Scene { layout: &w.layout, chrome, cell }) {
-            let _ = self.event_tx.send(match input {
-                DevInput::Move(x, y) => CoreEvent::MouseMove(x, y, id),
-                DevInput::Down(x, y, mods) => CoreEvent::MouseDown(x, y, mods, id),
-                DevInput::Drag(x, y) => CoreEvent::MouseDrag(x, y, id, id, x, y),
-                DevInput::Up(x, y) => CoreEvent::MouseUp(id, id, x, y),
-                DevInput::Scroll(dy) => CoreEvent::Scroll(dy, true, id),
-                DevInput::Key(event, mods) => CoreEvent::Key(event, mods, id),
-            });
-        }
-        if script.finished() {
-            self.dev_panels = None;
-        }
-    }
-
-    /// Dev seam (`MARSPOT_DEV_CLOSE_PANES=n`) — see the call site.
-    fn dev_drive_close_panes(&mut self) {
-        if self.dev_close_panes == 0 {
-            return;
-        }
-        match self.dev_close_panes_at {
-            Some(t) if Instant::now() < t => return,
-            _ => {}
-        }
-        self.dev_close_panes -= 1;
-        self.dev_close_panes_at = Some(Instant::now() + Duration::from_secs(1));
-        let wi = self.key_window.min(self.windows.len().saturating_sub(1));
-        let idx = win!(self, wi).focused_idx;
-        lx_event!(
-            "DEV_CLOSE_PANE",
-            "closing a pane (dev seam)",
-            window_id = win!(self, wi).window_id,
-            pane_idx = idx as u32,
-            remaining = self.dev_close_panes as u32
-        );
-        self.close_session(wi, idx);
-        if wi < self.windows.len() {
-            self.rebuild_layout(wi);
-        }
-    }
-
     /// Close the gap a discarded window left: everything above it
     /// moves down one.  Mirrored by `ShellApp::forget_slot`, which
     /// does the same to `window-state.bin` — the two lists are paired
