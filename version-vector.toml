@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.555"  # a told pane switched by hand is told to go on, not to stay idle
+shell   = "0.7.556"  # a told kimi pane is asked to go on with its task after the switch
 core    = "0.12.615"  # drop render_metal.rs's carve-out marker
 session = "0.11.406"  # basic: name what terminal.rs still holds in its carve-out marker

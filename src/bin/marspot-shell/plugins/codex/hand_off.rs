@@ -23,6 +23,8 @@ impl CodexPlugin {
             home,
             session_id: argv_thread_id(pid),
             cwd: pidtree::proc_cwd(pid).map(|c| c.to_string_lossy().into_owned()),
+            // codex panes are not sent the heads-up
+            go_on: false,
         };
         host.log(LogLevel::Info, "handoff.start", &format!("pane {sid} codex → {} P{n}: {leaving:?}", to.key()));
         let Some(op) = handoff::switch_op(sid, leaving, to, n, dir) else {

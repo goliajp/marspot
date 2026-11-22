@@ -326,8 +326,8 @@ mod tests {
     fn the_heads_up_asks_to_keep_working_and_never_to_wrap_up() {
         let said = body(1, true);
         assert!(said.contains("P1"));
-        assert!(said.contains("切换完成后"), "a claude pane is told after the move: {said}");
-        assert!(!body(1, false).contains("切换完成后"), "a kimi pane is not promised what it is not sent");
+        assert!(said.contains("切换完成后"), "claude and kimi panes are told after the move: {said}");
+        assert!(!body(1, false).contains("切换完成后"), "a pane is not promised what it is not sent");
         assert!(body(1, false).contains("照常继续"));
         assert!(said.contains("照常继续"));
         assert!(said.contains("随时"), "a switch may come at any moment: {said}");

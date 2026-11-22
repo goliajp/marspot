@@ -72,6 +72,10 @@ pub struct Leaving {
     /// codex's is found on the job thread — see [`history_of`]).
     pub session_id: Option<String>,
     pub cwd: Option<String>,
+    /// The pane was told its account was nearly out and to keep
+    /// working, so the receiver is asked to go on with the task rather
+    /// than to wait for an instruction.
+    pub go_on: bool,
 }
 
 /// Where the leaving agent's history is.  May read file tails, so it
@@ -235,7 +239,7 @@ fn prepare_in(
     let doc = ledger::doc_path(dir, sid);
     ledger::write_atomic(&doc, transcript::render(&x, continuing, switch).as_bytes())
         .map_err(|e| format!("{}: {e}", doc.display()))?;
-    Ok(Outcome { message: Some(transcript::message(leaving.agent, &doc, continuing, switch)), next })
+    Ok(Outcome { message: Some(transcript::message(leaving.agent, &doc, continuing, switch, leaving.go_on)), next })
 }
 
 /// How long reading the history may take.  A 1.1 GB rollout is real;
@@ -355,6 +359,7 @@ mod tests {
             home: home.clone(),
             session_id: Some(ID.into()),
             cwd: Some("/w/a".into()),
+            go_on: false,
         };
         let dir = tmp("switch-kimi-ledger");
         let o = prepare_in(7, &dir, &leaving, Agent::Claude, None, &Ledger::default(), history_of(&leaving), &switched()).unwrap();
@@ -368,6 +373,37 @@ mod tests {
         let line = s(command(Agent::Kimi, Path::new("/Users/x/.kimi-code-profile-2"), Some(ID), None).unwrap());
         assert!(line.contains("KIMI_CODE_HOME='/Users/x/.kimi-code-profile-2'") && line.ends_with(&format!(" kimi --session {ID}\r")), "{line}");
         assert_eq!(target_name(Agent::Kimi, 0), "kimi");
+    }
+
+    /// A kimi pane told its account was nearly out, moved to another
+    /// kimi account: the new session is asked to go on, and one that
+    /// was not told is asked to wait, as before.
+    #[test]
+    fn a_told_kimi_pane_is_asked_to_go_on_on_the_new_account() {
+        use kimi::fixture::{session, ID, STOP_HOOK};
+        let home = tmp("switch-kimi-told");
+        session(&home, ID, STOP_HOOK, None);
+        let leaving = |go_on| Leaving {
+            agent: Agent::Kimi,
+            proc: marspot::pidtree::ProcId { pid: 1, start_us: 1 },
+            shell_pid: 1,
+            home: home.clone(),
+            session_id: Some(ID.into()),
+            cwd: Some("/w/a".into()),
+            go_on,
+        };
+        let said = |go_on| {
+            let l = leaving(go_on);
+            let dir = tmp("switch-kimi-told-ledger");
+            prepare_in(7, &dir, &l, Agent::Kimi, None, &Ledger::default(), history_of(&l), &switched())
+                .unwrap()
+                .message
+                .expect("kimi's turn is handed over")
+        };
+        let told = said(true);
+        assert!(told.contains("go on with the task") && !told.contains("Do not run commands"), "{told}");
+        let untold = said(false);
+        assert!(untold.contains("wait for my next instruction") && untold.contains("Do not run commands"), "{untold}");
     }
 
     #[test]
@@ -413,6 +449,7 @@ mod tests {
             home: home.to_path_buf(),
             session_id: Some(uuid.into()),
             cwd: None,
+            go_on: false,
         }
     }
 
@@ -493,6 +530,7 @@ mod tests {
             home: home.to_path_buf(),
             session_id: None,
             cwd: Some("/w/a".into()),
+            go_on: false,
         };
 
         let home = tmp("switch-codex-meta");
@@ -555,6 +593,7 @@ mod tests {
             home: home.clone(),
             session_id: session.map(str::to_string),
             cwd: Some(cwd.into()),
+            go_on: false,
         };
         assert_eq!(history_of(&leaving(None, "/w/a")), None, "no session named, none guessed");
         assert_eq!(history_of(&leaving(Some(id), "/w/other")), None);

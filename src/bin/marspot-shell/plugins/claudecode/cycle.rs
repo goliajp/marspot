@@ -299,6 +299,7 @@ impl ClaudecodePlugin {
             home: config_dir_or_default(meta.config_dir.as_deref()),
             session_id: Some(meta.uuid.clone()),
             cwd: None,
+            go_on: self.heads_up.get(&sid).is_some_and(|h| h.landed_on(meta.profile_num)),
         };
         host.log(LogLevel::Info, "handoff.start", &format!("pane {sid} claude → {} P{n}: {leaving:?}", to.key()));
         let Some(op) = handoff::switch_op(sid, leaving, to, n, dir) else {

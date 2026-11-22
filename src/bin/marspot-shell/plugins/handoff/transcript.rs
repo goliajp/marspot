@@ -164,12 +164,23 @@ pub fn render(x: &Extract, continuing: bool, switch: &Switch) -> String {
 
 /// The message typed into the receiving agent: one line, the substance
 /// is in the document.
-pub fn message(from: Agent, doc: &std::path::Path, continuing: bool, switch: &Switch) -> String {
+///
+/// `go_on`: the pane was told its account was nearly out and to keep
+/// working until the switch, so the receiver takes the task up again
+/// instead of waiting; a task that was done, or was waiting for an
+/// answer, still waits.
+pub fn message(from: Agent, doc: &std::path::Path, continuing: bool, switch: &Switch, go_on: bool) -> String {
     let src = from.display();
+    let then = if go_on {
+        "then go on with the task that was in progress before the switch; the pane was moved because its \
+         account ran low, not to stop the work. If that task was finished or was waiting for my answer, \
+         tell me in a few sentences where things stand and wait for me."
+    } else {
+        "tell me in a few sentences where things stand, then wait for my next instruction. \
+         Do not run commands or change files until I ask."
+    };
     format!(
-        "{MARKER} I just switched this pane from {src} to you; {src} {}. {} is in {}. Read it, \
-         tell me in a few sentences where things stand, then wait for my next instruction. \
-         Do not run commands or change files until I ask.",
+        "{MARKER} I just switched this pane from {src} to you; {src} {}. {} is in {}. Read it, {then}",
         if switch.stopped { "has been stopped" } else { "may still be running, the file says why" },
         if continuing { "What happened there since you left" } else { "The conversation so far" },
         doc.display()
@@ -202,7 +213,7 @@ mod tests {
         let doc = render(&extract(vec![turn("go", "done")]), false, &unsure);
         assert!(doc.contains("could not be confirmed stopped"), "{doc}");
         assert!(!doc.contains("only agent in this pane"), "{doc}");
-        let m = message(Agent::Codex, std::path::Path::new("/d.md"), false, &unsure);
+        let m = message(Agent::Codex, std::path::Path::new("/d.md"), false, &unsure, false);
         assert!(m.contains("may still be running"), "{m}");
     }
 
@@ -250,9 +261,23 @@ mod tests {
 
     #[test]
     fn the_message_is_marked_and_says_to_wait() {
-        let m = message(Agent::Codex, std::path::Path::new("/s/handoff/7.md"), true, &switched());
+        let m = message(Agent::Codex, std::path::Path::new("/s/handoff/7.md"), true, &switched(), false);
         assert!(m.starts_with(MARKER));
         assert!(m.contains("/s/handoff/7.md") && m.contains("codex") && m.contains("wait"));
+        assert!(!m.contains('\n'), "one line: it is typed into a TUI's input box");
+    }
+
+    /// A pane told to keep working until the switch is asked to go on
+    /// with its task after it, unless the task was done or waited for
+    /// an answer.
+    #[test]
+    fn a_pane_told_to_keep_working_is_asked_to_go_on_after_the_switch() {
+        let m = message(Agent::Kimi, std::path::Path::new("/s/handoff/7.md"), false, &switched(), true);
+        assert!(m.starts_with(MARKER) && m.contains("/s/handoff/7.md"), "{m}");
+        assert!(m.contains("go on with the task that was in progress before the switch"), "{m}");
+        assert!(m.contains("waiting for my answer") && m.contains("wait for me"), "{m}");
+        assert!(!m.contains("Do not run commands"), "{m}");
+        assert!(!m.contains("wait for my next instruction"), "{m}");
         assert!(!m.contains('\n'), "one line: it is typed into a TUI's input box");
     }
 }
