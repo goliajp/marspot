@@ -67,6 +67,14 @@ pub struct Parsed {
 const MAX_NAME: usize = 80;
 
 pub fn encode(h: &Header, body: &str) -> String {
+    encode_from_plugin(h, None, body)
+}
+
+/// `encode`, naming the part of the sender that wrote the message in
+/// `from-plugin`.  Claude Code's matcher and every marspot parser have
+/// read that attribute from the start; a new attribute instead would
+/// make all of them reject the header.
+pub fn encode_from_plugin(h: &Header, plugin: Option<&str>, body: &str) -> String {
     let mut out = String::with_capacity(body.len() + 160);
     out.push('<');
     out.push_str(TAG);
@@ -78,6 +86,9 @@ pub fn encode(h: &Header, body: &str) -> String {
     }
     if let Some(mode) = h.from_mode {
         push_attr(&mut out, "from-mode", mode.as_str());
+    }
+    if let Some(plugin) = plugin.map(clean_name).filter(|p| !p.is_empty()) {
+        push_attr(&mut out, "from-plugin", &plugin);
     }
     out.push_str(">\n");
     out.push_str(&escape_body(body));
@@ -301,6 +312,66 @@ mod tests {
         assert!(parse("<cross-session-message from-mode=\"bypass\" from=\"uds:/x.sock\">\nb\n</cross-session-message>").is_none());
         assert!(parse("<cross-session-message from-mode=\"root\">\nb\n</cross-session-message>").is_none());
         assert!(parse("plain text").is_none());
+    }
+
+    #[test]
+    fn from_plugin_round_trips_after_from_mode() {
+        let text = encode_from_plugin(&header(), Some("marspot-relay\""), "b");
+        assert!(text.ends_with(" from-mode=\"bypass\" from-plugin=\"marspot-relay\">\nb\n</cross-session-message>"), "{text}");
+        let p = parse(&text).unwrap();
+        assert_eq!(p.from_plugin.as_deref(), Some("marspot-relay"));
+        assert_eq!(p.from_mode, Some(Mode::Bypass));
+        assert_eq!(encode_from_plugin(&header(), Some("\"<>"), "b"), encode(&header(), "b"), "nothing left to name");
+    }
+
+    /// `parse` as released in v0.6.2, verbatim: what an older app does
+    /// with an envelope this build writes.
+    fn parse_v062(content: &str) -> Option<Parsed> {
+        let mut rest = content.strip_prefix('<')?.strip_prefix(TAG)?;
+        let mut attr = |name: &str, ok: &dyn Fn(&str) -> bool| -> Option<Option<String>> {
+            let Some(after) = rest.strip_prefix(' ').and_then(|r| r.strip_prefix(name)).and_then(|r| r.strip_prefix("=\""))
+            else {
+                return Some(None);
+            };
+            let end = after.find('"')?;
+            let value = &after[..end];
+            if !ok(value) {
+                return None;
+            }
+            rest = &after[end + 1..];
+            Some(Some(value.to_string()))
+        };
+        let text = |v: &str| !v.is_empty() && !v.contains(['<', '>', '\n', '\r']);
+        let from = attr("from", &is_address)?;
+        let from_session = attr("from-session", &|v: &str| {
+            (1..=80).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })?;
+        let hop_chain = attr("hop-chain", &|v: &str| {
+            v.split(',').all(|h| h.len() == 24 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        })?
+        .map(|v| v.split(',').map(str::to_string).collect());
+        let from_name = attr("from-name", &text)?;
+        let from_mode = attr("from-mode", &|v: &str| Mode::parse(v).is_some())?.and_then(|v| Mode::parse(&v));
+        let from_plugin = attr("from-plugin", &text)?;
+        let body = rest.strip_prefix(">\n")?.strip_suffix(&format!("\n</{TAG}>"))?;
+        Some(Parsed { from, from_session, hop_chain, from_name, from_mode, from_plugin, body: body.to_string() })
+    }
+
+    /// An older app admits a message by the sender's class it parses
+    /// out of the header; a header it cannot parse arrives classless
+    /// and is refused, so the marked envelope must parse there whole.
+    #[test]
+    fn an_older_app_reads_an_envelope_naming_its_plugin() {
+        let text = encode_from_plugin(&header(), Some("marspot-relay"), "(Relayed)\n\nok");
+        let old = parse_v062(&text).expect("v0.6.2 parses it");
+        assert_eq!(old, parse(&text).unwrap());
+        assert_eq!(old.from_mode, Some(Mode::Bypass));
+        assert_eq!(old.from.as_deref(), Some("uds:/tmp/cc-socks/42-0a1b2c3d.sock"));
+        assert_eq!(old.from_plugin.as_deref(), Some("marspot-relay"));
+        assert_eq!(old.body, "(Relayed)\n\nok");
+        // an attribute it does not know makes it reject the whole header
+        let unknown = text.replace(" from-plugin=", " relayed=\"1\" from-plugin=");
+        assert!(parse_v062(&unknown).is_none());
     }
 
     #[test]
