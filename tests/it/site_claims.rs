@@ -197,6 +197,10 @@ fn a_gap_that_closed_comes_off_the_page() {
     let c3 = t3.grid().cell(0, 0);
     assert_eq!(t3.grid().cluster_text(&c3), Some("e\u{301}"), "clusters stopped working");
 
+    let mut t4 = Terminal::new(20, 3);
+    t4.feed(b"\x07");
+    assert!(t4.take_bell(), "BEL stopped ringing");
+
     for (what, text) in [("the page", SITE), ("the README", README)] {
         assert!(
             !text.contains("One cell holds one code point"),
@@ -221,6 +225,7 @@ fn a_gap_that_closed_comes_off_the_page() {
                 && !text.contains("OSC 8 (hyperlinks), OSC 52"),
             "OSC 52 works; {what} still lists it as missing"
         );
+        assert!(!text.contains("BEL makes no sound"), "BEL rings; {what} still says it makes no sound");
     }
 }
 

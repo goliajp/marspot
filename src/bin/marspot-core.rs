@@ -2186,12 +2186,10 @@ fn l3_reader_loop(
                         return;
                     }
                 }
-                // OSC 52 — a program in this pane asked for text to go
-                // on the clipboard.  L3 has no AppKit, so it travels
-                // here.  Written straight from the reader thread: the
-                // pasteboard is a system-wide object with its own
-                // lock, not window state, and routing it through the
-                // event loop would make a yank wait on a redraw.
+                MsgType::PaneBell => bell::ring(),
+                // OSC 52: L3 has no AppKit, so a clipboard write lands here and
+                // is written from the reader thread (the pasteboard has its own
+                // lock; the event loop would make a yank wait on a redraw)
                 MsgType::PaneClipboardWrite => {
                     if let Ok(text) = std::str::from_utf8(&f.payload) {
                         marspot::input::write_clipboard_text(text);
@@ -2910,6 +2908,8 @@ use marspot::ui::components::process_panel::Hover as ProcessAsk;
 use marspot::ui::components::{layout_view, process_view};
 #[path = "marspot-core/theme_follow.rs"]
 mod theme_follow;
+#[path = "marspot-core/bell.rs"]
+mod bell;
 
 struct CoreApp {
     renderer: MetalRenderer,
