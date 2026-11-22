@@ -140,6 +140,7 @@ impl Terminal {
             g0_graphics: &mut self.g0_graphics,
             origin_mode: &mut self.origin_mode,
             insert_mode: &mut self.insert_mode,
+            modes: &mut self.screen_modes,
             cluster_buf: &mut self.cluster_buf,
             cluster_fast: &mut self.cluster_fast,
             cluster_anchor: &mut self.cluster_anchor,

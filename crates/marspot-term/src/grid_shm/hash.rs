@@ -57,7 +57,8 @@ fn hash_cell_attrs(a: &crate::grid::CellAttrs) -> u64 {
         | ((a.italic as u64) << 1)
         | ((a.underline as u64) << 2)
         | ((a.reverse as u64) << 3)
-        | ((a.dim as u64) << 4);
+        | ((a.dim as u64) << 4)
+        | ((a.invisible() as u64) << 5);
     bools
         .wrapping_add(hash_color(&a.fg) << 8)
         .wrapping_add(hash_color(&a.bg) << 32)

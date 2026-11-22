@@ -28,4 +28,5 @@ mod scrollback_display;
 mod semantic_prompts;
 mod sgr_subparams_end_to_end;
 mod tabs_end_to_end;
+mod terminfo;
 mod update_key_gate;

@@ -546,15 +546,15 @@ fn vt220_seq(num: u16, mods: Modifiers) -> Cow<'static, [u8]> {
     }
 }
 
-/// F1-F4 encoder: classic VT100 SS3 form (`ESC O P/Q/R/S`).  Modifiers
-/// fall back to CSI form `ESC [ 1 ; <m> P/Q/R/S` per xterm
-/// modifyFunctionKeys=2.
-fn fkey14_seq(letter: u8, mods: Modifiers) -> Cow<'static, [u8]> {
-    let m = encode_mods(mods);
-    if m == 1 {
-        Cow::Owned(vec![0x1b, b'O', letter])
+/// Home / End: `ESC O H` / `ESC O F` under DECCKM, the CSI form with a
+/// modifier, and otherwise ^A / ^E, readline's line start and end,
+/// which is what zsh / bash / fish and every Cocoa text view expect
+/// from a bare press at a prompt that never asked for DECCKM.
+fn home_end(letter: u8, bare: &'static [u8], mods: Modifiers, decckm: bool) -> Cow<'static, [u8]> {
+    if decckm || encode_mods(mods) != 1 {
+        cursor_seq(letter, mods, decckm)
     } else {
-        Cow::Owned(format!("\x1b[1;{}{}", m, letter as char).into_bytes())
+        Cow::Borrowed(bare)
     }
 }
 
@@ -585,38 +585,19 @@ fn encode_named_key(n: NamedKey, mods: Modifiers, cursor_key_app_mode: bool) -> 
         ArrowDown => cursor_seq(b'B', mods, cursor_key_app_mode),
         ArrowRight => cursor_seq(b'C', mods, cursor_key_app_mode),
         ArrowLeft => cursor_seq(b'D', mods, cursor_key_app_mode),
-        // Home / End — readline-style by default.  Bare Home → ^A,
-        // bare End → ^E, which is what zsh / bash / fish / readline
-        // and every macOS Cocoa text view do at line-edit time.
-        // Modifier-bearing presses (Shift-Home for selection in TUI
-        // editors, Ctrl-Home to top-of-buffer, etc.) keep the CSI
-        // form so they round-trip through xterm-aware apps.
-        Home => {
-            let m = encode_mods(mods);
-            if m == 1 {
-                Cow::Borrowed(b"\x01")
-            } else {
-                Cow::Owned(format!("\x1b[1;{}H", m).into_bytes())
-            }
-        }
-        End => {
-            let m = encode_mods(mods);
-            if m == 1 {
-                Cow::Borrowed(b"\x05")
-            } else {
-                Cow::Owned(format!("\x1b[1;{}F", m).into_bytes())
-            }
-        }
+        Home => home_end(b'H', b"\x01", mods, cursor_key_app_mode),
+        End => home_end(b'F', b"\x05", mods, cursor_key_app_mode),
         Insert => vt220_seq(2, mods),
         Delete => vt220_seq(3, mods),
         PageUp => vt220_seq(5, mods),
         PageDown => vt220_seq(6, mods),
-        // F1-F4: VT100 SS3 form; F5-F12: VT220 numbered.  The gap
+        // F1-F4: VT100 SS3 form, which takes a modifier the way the
+        // cursor keys do; F5-F12: VT220 numbered.  The gap
         // between F4 (=ESC OS) and F5 (=ESC [15~) is historical xterm.
-        F1 => fkey14_seq(b'P', mods),
-        F2 => fkey14_seq(b'Q', mods),
-        F3 => fkey14_seq(b'R', mods),
-        F4 => fkey14_seq(b'S', mods),
+        F1 => cursor_seq(b'P', mods, true),
+        F2 => cursor_seq(b'Q', mods, true),
+        F3 => cursor_seq(b'R', mods, true),
+        F4 => cursor_seq(b'S', mods, true),
         F5 => vt220_seq(15, mods),
         F6 => vt220_seq(17, mods),
         F7 => vt220_seq(18, mods),

@@ -116,10 +116,10 @@ enum Expect {
 /// both sat below an early return that made them dead, each with a
 /// comment above it describing the answer it was not sending.
 const PROBES: &[(&str, &[u8], Expect)] = &[
-    ("DA1", b"\x1b[c", Expect::Exact(b"\x1b[?62;1;6;22c")),
-    ("DA1 with explicit 0", b"\x1b[0c", Expect::Exact(b"\x1b[?62;1;6;22c")),
+    ("DA1", b"\x1b[c", Expect::Exact(b"\x1b[?1;2c")),
+    ("DA1 with explicit 0", b"\x1b[0c", Expect::Exact(b"\x1b[?1;2c")),
     ("DA2", b"\x1b[>c", Expect::Exact(b"\x1b[>41;330;0c")),
-    ("DECID", b"\x1bZ", Expect::Exact(b"\x1b[?62;1;6;22c")),
+    ("DECID", b"\x1bZ", Expect::Exact(b"\x1b[?1;2c")),
     ("DSR status", b"\x1b[5n", Expect::Exact(b"\x1b[0n")),
     ("CPR", b"\x1b[6n", Expect::Exact(b"\x1b[1;1R")),
     ("DECXCPR", b"\x1b[?6n", Expect::Exact(b"\x1b[?1;1;1R")),
@@ -210,16 +210,15 @@ fn decrqm_reports_the_mode_it_was_just_given() {
 }
 
 #[test]
-fn decrqm_is_honest_about_the_mode_with_no_switch() {
-    // 3 = permanently set.  Wrap cannot be turned off here, and saying
-    // so is more useful to a program than claiming not to know.
-    //
-    // Origin mode used to be answered 4, permanently reset, which was
-    // true of a terminal that had no origin mode.  It has one now, so
-    // it answers with its state like every other mode that moves.
+fn decrqm_answers_wrap_and_origin_mode_with_their_state() {
+    // Wrap and origin mode used to be answered 3 and 4, permanently
+    // set and reset, which was true of a terminal that had no switch
+    // for them.  Both have one now, so they answer with their state.
     let mut t = Terminal::new(40, 4);
     t.feed(b"\x1b[?7$p\x1b[?6$p");
-    assert_eq!(t.take_response(), b"\x1b[?7;3$y\x1b[?6;2$y");
+    assert_eq!(t.take_response(), b"\x1b[?7;1$y\x1b[?6;2$y");
+    t.feed(b"\x1b[?7l\x1b[?7$p");
+    assert_eq!(t.take_response(), b"\x1b[?7;2$y");
 
     t.feed(b"\x1b[?6h\x1b[?6$p");
     assert_eq!(t.take_response(), b"\x1b[?6;1$y");

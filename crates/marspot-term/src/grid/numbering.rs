@@ -83,9 +83,9 @@ impl Grid {
             self.cells[idx] = PackedCell::from_cell(&cell, 0);
             return;
         }
-        let mut attrs = cell.attrs;
-        attrs._pad = [0; 3];
-        let id = self.id_for(idx, &attrs);
+        // packing keeps SGR 8 and 5 and leaves out the cluster flag and
+        // the link id, which the cell carries itself
+        let id = self.id_for(idx, &cell.attrs);
         self.cells[idx] = PackedCell::from_cell(&cell, id);
     }
 

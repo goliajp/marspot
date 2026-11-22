@@ -127,31 +127,46 @@ impl Handler<'_> {
                     *self.osc_clipboard = Some(text);
                 }
             }
-            // OSC 4 — one or more palette entries: `4 ; n ; ? ; n ; ?`.
-            // vim and tmux read these to decide what they can draw
-            // with, and a terminal that stays quiet is read as one
-            // with no palette to speak of.  Answered per pair, in the
-            // same order asked, so a batched query is unambiguous.
+            // OSC 4 — one or more palette entries: `4 ; n ; ? ; n ; ?`
+            // asks, `4 ; n ; rgb:…` sets.  vim and tmux read these to
+            // decide what they can draw with, and a terminal that stays
+            // quiet is read as one with no palette to speak of.  Answered
+            // per pair, in the same order asked, so a batched query is
+            // unambiguous.  A set entry stands over the theme's until
+            // OSC 104 or a reset takes it back.
             Some(4) => {
                 let mut reply = String::new();
                 let mut fields = rest.split(|&b| b == b';');
                 while let (Some(idx), Some(val)) = (fields.next(), fields.next()) {
-                    if val != b"?" {
-                        // Setting a palette entry, not asking about
-                        // one.  The palette is the theme's, so this
-                        // is declined by not answering it.
-                        continue;
-                    }
                     let Some(i) = std::str::from_utf8(idx).ok().and_then(|s| s.parse::<u8>().ok())
                     else {
                         continue;
                     };
-                    let c = crate::palette::current().indexed(i);
+                    if val != b"?" {
+                        if let Some(rgb) = super::modes::parse_color_spec(val) {
+                            self.modes.palette.set(i, rgb);
+                        }
+                        continue;
+                    }
+                    let c = match self.modes.palette.get(i) {
+                        Some(rgb) => crate::palette::unit(rgb),
+                        None => crate::palette::current().indexed(i),
+                    };
                     reply.push_str(&format!("\x1b]4;{i};{}\x07", crate::palette::xterm_rgb(c)));
                 }
                 if !reply.is_empty() {
                     self.pending_response.extend_from_slice(reply.as_bytes());
                     self.record_response("OSC-PALETTE");
+                }
+            }
+            // OSC 104 — back to the theme's colour: the entries named,
+            // or every entry when none is.
+            Some(104) => {
+                if rest.is_empty() {
+                    self.modes.palette.reset_all();
+                }
+                for i in rest.split(|&b| b == b';').filter_map(|f| std::str::from_utf8(f).ok()?.parse::<u8>().ok()) {
+                    self.modes.palette.reset(i);
                 }
             }
             // OSC 12 — the cursor's colour.  Same shape as 10 and 11,

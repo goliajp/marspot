@@ -70,7 +70,7 @@ impl PackedCell {
     pub fn expand(self, styles: &StyleTable) -> Cell {
         let mut attrs = styles.get(self.style_id()).unpack();
         if self.is_cluster() {
-            attrs._pad[0] = FLAG_CLUSTER;
+            attrs._pad[0] |= FLAG_CLUSTER;
         }
         if self.0 & LINK_MASK != 0 {
             attrs.set_link_id(self.link_id());

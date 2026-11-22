@@ -29,6 +29,16 @@ pub const CELL_MEM_BYTES: usize = 20;
 /// holds a pointer to it rather than every cell paying for the case.
 pub const FLAG_CLUSTER: u8 = 1 << 0;
 
+/// `_pad[0]` bit: SGR 8, the cell is written but not shown.  Lives in
+/// a grid and its history only; a published frame carries the cell as
+/// a blank in its colours, and copying reads the grid, so the text is
+/// still there to copy.
+pub const FLAG_INVISIBLE: u8 = 1 << 1;
+
+/// `_pad[0]` bit: SGR 5.  Kept so it reads back and survives a
+/// snapshot; drawn steady, since a blinking cell needs a timer.
+pub const FLAG_BLINK: u8 = 1 << 2;
+
 /// Where pool indices start inside `char`.
 ///
 /// Not zero.  `'\0'` already means "the second cell of a wide glyph"
@@ -57,6 +67,27 @@ impl Cell {
 }
 
 impl CellAttrs {
+    /// SGR 8 — see [`FLAG_INVISIBLE`].
+    #[inline(always)]
+    pub fn invisible(&self) -> bool {
+        self._pad[0] & FLAG_INVISIBLE != 0
+    }
+
+    #[inline(always)]
+    pub fn set_invisible(&mut self, on: bool) {
+        self._pad[0] = self._pad[0] & !FLAG_INVISIBLE | if on { FLAG_INVISIBLE } else { 0 };
+    }
+
+    #[inline(always)]
+    pub fn blink(&self) -> bool {
+        self._pad[0] & FLAG_BLINK != 0
+    }
+
+    #[inline(always)]
+    pub fn set_blink(&mut self, on: bool) {
+        self._pad[0] = self._pad[0] & !FLAG_BLINK | if on { FLAG_BLINK } else { 0 };
+    }
+
     /// The OSC 8 link this cell belongs to in its grid's pool, 0 for none.
     #[inline(always)]
     pub fn link_id(&self) -> u16 {
@@ -132,7 +163,7 @@ impl Cell {
                 underline: b[14] != 0,
                 reverse: b[15] != 0,
                 dim: b[16] != 0,
-                _pad: [0; 3],
+                _pad: [b[17] & (FLAG_INVISIBLE | FLAG_BLINK), 0, 0],
             },
         }
     }
@@ -323,7 +354,9 @@ mod cell_bytes_tests {
         assert_eq!(c.ch, ' ');
         assert_eq!(c.attrs.fg, Color::DEFAULT);
         assert!(c.attrs.bold && c.attrs.dim);
-        assert_eq!(c.attrs._pad, [0; 3]);
+        // of the padding only SGR 8 and 5 are kept: the cluster flag
+        // and the link id never mean anything on disk
+        assert_eq!(c.attrs._pad, [FLAG_INVISIBLE | FLAG_BLINK, 0, 0]);
         // An Indexed colour with junk in the bytes it does not use
         // still equals the canonical one.
         b[4..8].copy_from_slice(&[1, 7, 99, 99]);

@@ -19,6 +19,8 @@ use erase::{blank_with, erase_in_display, erase_in_line, fill_range};
 #[cfg(test)]
 mod diff_tests;
 mod lane;
+mod modes;
+pub use modes::{PaletteOverrides, ScreenModes};
 mod osc;
 pub(crate) use osc::Osc8;
 mod reference;
@@ -119,12 +121,11 @@ pub enum MouseTrackingMode {
 const CLUSTER_POOL_SWEEP_AT: usize = 4096;
 
 
-/// What marspot answers DA1 (and DECID) with: VT220-class with
-/// selective attributes — 1 = 132-column mode, 6 = selective erase,
-/// 22 = colour text, the same shape xterm reports.  A program that
-/// gets no answer stalls on its capability probe and then falls back
-/// to a degraded rendering path.
-const DA1_REPLY: &[u8] = b"\x1b[?62;1;6;22c";
+/// What marspot answers DA1 (and DECID) with: a VT100 with advanced
+/// video, the answer the borrowed `xterm-256color` entry declares as
+/// `u8` to its `u9` query.  A program that gets no answer stalls on its
+/// capability probe and then falls back to a degraded rendering path.
+const DA1_REPLY: &[u8] = b"\x1b[?1;2c";
 
 /// Responses inside the rolling 100 ms window that count as a storm.
 const RESPONSE_BURST_AT: usize = 5;
@@ -330,6 +331,8 @@ pub struct Terminal {
     /// IRM (`CSI 4 h`).  While set, a printed glyph pushes the rest of
     /// the line right instead of overwriting.
     insert_mode: bool,
+    /// See [`ScreenModes`].
+    screen_modes: ScreenModes,
     /// Rollbacks in a row.  A program that draws its own input
     /// somewhere else — codex, and any full-screen TUI that skips the
     /// alternate screen — never confirms a prediction, so the guess
@@ -624,6 +627,7 @@ impl Terminal {
             g0_graphics: false,
             origin_mode: false,
             insert_mode: false,
+            screen_modes: ScreenModes::default(),
             predict_misses: 0,
             predict_declined: 0,
             predictions: VecDeque::new(),
@@ -656,6 +660,11 @@ impl Terminal {
 
     pub fn cursor_visible(&self) -> bool {
         self.cursor_visible
+    }
+
+    /// See [`ScreenModes`].
+    pub fn screen_modes(&self) -> &ScreenModes {
+        &self.screen_modes
     }
 
     /// Kitty keyboard flags in force on the active screen — what the
@@ -835,6 +844,9 @@ impl Terminal {
         // open is the same thing.
         self.attrs = CellAttrs::default();
         self.osc8 = Osc8::default();
+        // the keypad, wrapping and a reversed screen are the program's too
+        let m = &mut self.screen_modes;
+        (m.keypad_app, m.autowrap, m.reverse_screen) = (false, true, false);
     }
 
     /// Take whatever a program asked to put on the clipboard.
@@ -1192,22 +1204,14 @@ impl Terminal {
         };
         out.extend_from_slice(&st.to_le_bytes());
         out.extend_from_slice(&sb.to_le_bytes());
-        let mut modes: u32 = 0;
-        if self.cursor_key_application_mode {
-            modes |= 1 << 0;
-        }
-        if self.bracketed_paste_mode {
-            modes |= 1 << 1;
-        }
-        if self.cursor_visible {
-            modes |= 1 << 2;
-        }
-        if self.pending_wrap {
-            modes |= 1 << 3;
-        }
-        if self.saved_main.is_some() {
-            modes |= 1 << 4;
-        }
+        // bits 0-4: DECCKM, bracketed paste, DECTCEM, pending wrap,
+        // on the alternate screen; bits 15-19 are `ScreenModes::to_bits`
+        let mut modes = self.cursor_key_application_mode as u32
+            | (self.bracketed_paste_mode as u32) << 1
+            | (self.cursor_visible as u32) << 2
+            | (self.pending_wrap as u32) << 3
+            | (self.saved_main.is_some() as u32) << 4
+            | self.screen_modes.to_bits();
         // bits 5-6 = mouse_tracking_mode(0/1/2/3),bit 7 = SGR.
         // 0.6.66 起加,跨 execv 保留 DECSET 1000/1002/1003/1006 状态.
         // 之前老 image 跨 execv 不带这些 bits → 新 image 默认 Off,
@@ -1529,13 +1533,7 @@ impl Terminal {
         let want_cells = cols as usize * rows as usize;
         let mut cells = Vec::with_capacity(want_cells);
         for _ in 0..want_cells {
-            let ch_u = read_u32(&mut cur)?;
-            let cell_attrs = read_attrs(&mut cur)?;
-            let ch = char::from_u32(ch_u).unwrap_or(' ');
-            cells.push(Cell {
-                ch,
-                attrs: cell_attrs,
-            });
+            cells.push(read_cell(&mut cur)?);
         }
         // v2 trailing scrollback section: parsed *before* committing
         // anything to live state so a corrupt scrollback rejects the
@@ -1585,13 +1583,7 @@ impl Terminal {
                 }
                 let mut line = Vec::with_capacity(line_cols);
                 for _ in 0..line_cols {
-                    let ch_u = read_u32(&mut cur)?;
-                    let cell_attrs = read_attrs(&mut cur)?;
-                    let ch = char::from_u32(ch_u).unwrap_or(' ');
-                    line.push(Cell {
-                        ch,
-                        attrs: cell_attrs,
-                    });
+                    line.push(read_cell(&mut cur)?);
                 }
                 out.push((line, wrapped));
             }
@@ -1641,24 +1633,14 @@ impl Terminal {
                     }
                     let mut line = Vec::with_capacity(line_cols);
                     for _ in 0..line_cols {
-                        let ch_u = read_u32(&mut cur)?;
-                        let cell_attrs = read_attrs(&mut cur)?;
-                        line.push(Cell {
-                            ch: char::from_u32(ch_u).unwrap_or(' '),
-                            attrs: cell_attrs,
-                        });
+                        line.push(read_cell(&mut cur)?);
                     }
                     ring.push((line, wrapped));
                 }
                 let want = a_cols as usize * a_rows as usize;
                 let mut cells = Vec::with_capacity(want);
                 for _ in 0..want {
-                    let ch_u = read_u32(&mut cur)?;
-                    let cell_attrs = read_attrs(&mut cur)?;
-                    cells.push(Cell {
-                        ch: char::from_u32(ch_u).unwrap_or(' '),
-                        attrs: cell_attrs,
-                    });
+                    cells.push(read_cell(&mut cur)?);
                 }
                 alt_live = Some(AltLive {
                     cols: a_cols,
@@ -1696,13 +1678,7 @@ impl Terminal {
                     }
                     let mut line = Vec::with_capacity(line_cols);
                     for _ in 0..line_cols {
-                        let ch_u = read_u32(&mut cur)?;
-                        let cell_attrs = read_attrs(&mut cur)?;
-                        let ch = char::from_u32(ch_u).unwrap_or(' ');
-                        line.push(Cell {
-                            ch,
-                            attrs: cell_attrs,
-                        });
+                        line.push(read_cell(&mut cur)?);
                     }
                     out.push((line, wrapped));
                 }
@@ -1743,6 +1719,7 @@ impl Terminal {
         self.g0_graphics = (modes & (1 << 10)) != 0;
         self.origin_mode = (modes & (1 << 12)) != 0;
         self.insert_mode = (modes & (1 << 14)) != 0;
+        self.screen_modes = ScreenModes::from_bits(modes, std::mem::take(&mut self.screen_modes.palette));
         // Bit 4 (in_alt_screen) is informational for the wire format
         // but not actionable here — apply_snapshot replaces the
         // current grid; alt-mode save state is regenerated on the
@@ -2023,8 +2000,13 @@ pub fn deserialize_attrs_pub(buf: &[u8]) -> CellAttrs {
         dim: (flags & (1 << 4)) != 0,
         fg: decode_color(fg_kind, fg_payload).unwrap_or(Color::DEFAULT),
         bg: decode_color(bg_kind, bg_payload).unwrap_or(Color::DEFAULT),
-        _pad: [0; 3],
+        _pad: [unshown_flags(flags), 0, 0],
     }
+}
+
+/// SGR 8 and 5 from bits 5-6 of a serialised attribute set.
+fn unshown_flags(flags: u8) -> u8 {
+    ((flags >> 5 & 1) * crate::grid::FLAG_INVISIBLE) | ((flags >> 6 & 1) * crate::grid::FLAG_BLINK)
 }
 
 fn serialize_attrs(a: CellAttrs) -> [u8; ATTRS_BYTES] {
@@ -2043,6 +2025,12 @@ fn serialize_attrs(a: CellAttrs) -> [u8; ATTRS_BYTES] {
     }
     if a.dim {
         flags |= 1 << 4;
+    }
+    if a.invisible() {
+        flags |= 1 << 5;
+    }
+    if a.blink() {
+        flags |= 1 << 6;
     }
     let (fg_kind, fg_payload) = encode_color(a.fg);
     let (bg_kind, bg_payload) = encode_color(a.bg);
@@ -2077,6 +2065,12 @@ fn decode_color(kind: u8, payload: [u8; 3]) -> io::Result<Color> {
     })
 }
 
+/// One snapshot cell: its character, then its attributes.
+fn read_cell(cur: &mut Cursor<&[u8]>) -> io::Result<Cell> {
+    let ch = char::from_u32(read_u32(cur)?).unwrap_or(' ');
+    Ok(Cell { ch, attrs: read_attrs(cur)? })
+}
+
 fn read_attrs(cur: &mut Cursor<&[u8]>) -> io::Result<CellAttrs> {
     let mut buf = [0u8; ATTRS_BYTES];
     use std::io::Read;
@@ -2094,7 +2088,7 @@ fn read_attrs(cur: &mut Cursor<&[u8]>) -> io::Result<CellAttrs> {
         dim: (flags & (1 << 4)) != 0,
         fg: decode_color(fg_kind, fg_payload)?,
         bg: decode_color(bg_kind, bg_payload)?,
-        _pad: [0; 3],
+        _pad: [unshown_flags(flags), 0, 0],
     })
 }
 
@@ -2177,6 +2171,7 @@ struct Handler<'a> {
     origin_mode: &'a mut bool,
     /// See `Terminal::insert_mode`.
     insert_mode: &'a mut bool,
+    modes: &'a mut ScreenModes,
     cluster_buf: &'a mut String,
     /// See `Terminal::cluster_fast`.
     cluster_fast: &'a mut Option<(char, u8)>,
@@ -2327,8 +2322,11 @@ impl<'a> Handler<'a> {
         let (mut col, mut row) = self.grid.cursor();
 
         // A wide glyph at the last column can't fit. Wrap first, then
-        // write at the start of the new row.
-        if w == 2 && col + 1 >= cols {
+        // write at the start of the new row; with DECAWM off it takes
+        // the last two columns instead.
+        if w == 2 && col + 1 >= cols && !self.modes.autowrap {
+            col = cols.saturating_sub(2);
+        } else if w == 2 && col + 1 >= cols {
             // The abandoned last column gets a NUL pad sentinel (when
             // it isn't carrying real content) so resize reflow knows
             // it's wide-wrap padding, not a space the user typed.
@@ -2381,7 +2379,7 @@ impl<'a> Handler<'a> {
             // the flag and wrap, any non-print op clears it without
             // advancing.
             self.grid.set_cursor(cols - 1, row);
-            *self.pending_wrap = true;
+            *self.pending_wrap = self.modes.autowrap;
         }
         (col, row)
     }
@@ -2713,6 +2711,8 @@ impl<'a> Handler<'a> {
         *self.scroll_bot = self.grid.rows().saturating_sub(1);
         *self.origin_mode = false;
         *self.insert_mode = false;
+        self.modes.autowrap = true;
+        self.modes.keypad_app = false;
     }
 
     /// RIS — reset to initial state (`ESC c`).  What `reset` sends.
@@ -2738,6 +2738,11 @@ impl<'a> Handler<'a> {
         self.grid.set_cursor(0, 0);
         *self.tabs = crate::tabs::TabStops::new(cols);
         *self.g0_graphics = false;
+        // the palette keeps its generation moving, so a frame writer
+        // never takes the reset table for one it already published
+        let palette = std::mem::take(&mut self.modes.palette);
+        *self.modes = ScreenModes { palette, ..ScreenModes::default() };
+        self.modes.palette.reset_all();
         self.osc_title.clear();
         self.close_link();
     }
@@ -2750,160 +2755,6 @@ impl<'a> Handler<'a> {
             self.grid.set_cursor(saved.cursor.0, saved.cursor.1);
             *self.kitty_keyboard = saved.kitty_keyboard;
             self.relink();
-        }
-    }
-
-    /// What DECRQM reports for `mode`: 0 not recognised, 1 set,
-    /// 2 reset, 3 permanently set, 4 permanently reset.
-    ///
-    /// Mirrors `dec_mode` arm for arm — a mode this terminal acts on
-    /// answers with its real state, and one it does not answers 0 so
-    /// the program stays on whatever it does without us.  The one
-    /// permanent answer is the honest one for the mode marspot has no
-    /// switch for: wrap is always on.
-    fn dec_mode_report(&self, mode: u16) -> u16 {
-        let on = |b: bool| if b { 1 } else { 2 };
-        match mode {
-            1 => on(*self.cursor_key_app_mode),
-            6 => on(*self.origin_mode),
-            // DECAWM — always on: there is no code path that stops a
-            // glyph in the last column from wrapping.
-            7 => 3,
-            25 => on(*self.cursor_visible),
-            47 | 1047 | 1049 => on(self.saved_main.is_some()),
-            1000 => on(*self.mouse_tracking_mode == MouseTrackingMode::X11),
-            1002 => on(*self.mouse_tracking_mode == MouseTrackingMode::ButtonEvent),
-            1003 => on(*self.mouse_tracking_mode == MouseTrackingMode::AnyEvent),
-            1004 => on(*self.focus_reporting),
-            1006 => on(*self.mouse_sgr_encoding),
-            1007 => on(*self.alt_scroll),
-            2004 => on(*self.bracketed_paste),
-            2026 => on(*self.sync_output),
-            _ => 0,
-        }
-    }
-
-    fn dec_mode(&mut self, mode: u16, set: bool) {
-        match mode {
-            // DECCKM — cursor keys send `ESC O X` in app mode, `ESC [ X`
-            // otherwise. Read by the input layer for arrow encoding.
-            1 => *self.cursor_key_app_mode = set,
-            // DECOM.  Changing it homes the cursor, to the top margin
-            // when it is on, because a program that switches addressing
-            // modes and then draws has to start from a row both it and
-            // the terminal agree on.
-            6 => {
-                *self.origin_mode = set;
-                self.cursor_to_origin();
-            }
-            // DECCOLM — see `column_mode_reset`; set and reset do the
-            // same thing here, because the difference between them is
-            // the column count we do not own.
-            3 => self.column_mode_reset(),
-            // DECTCEM — cursor visibility.
-            25 => *self.cursor_visible = set,
-            // smcup/rmcup — alt screen + save/restore cursor.  ?1047
-            // and ?47 are older variants; we accept them as aliases.
-            // `?1049` is `?1047` plus `?1048`: the cursor is saved
-            // before the switch and restored after coming back, which
-            // is what lets a TUI leave the shell's prompt where it was
-            // and printing the charset it had.  `?1047` and the older
-            // `?47` switch buffers only; a program using those does
-            // its own DECSC when it wants one.
-            1049 => {
-                if set {
-                    self.save_cursor();
-                    self.enter_alt_screen();
-                } else {
-                    self.exit_alt_screen();
-                    self.restore_cursor();
-                }
-            }
-            1047 | 47 => {
-                if set {
-                    self.enter_alt_screen();
-                } else {
-                    self.exit_alt_screen();
-                }
-            }
-            // `?1048` is DECSC and DECRC by another spelling.
-            1048 => {
-                if set {
-                    self.save_cursor();
-                } else {
-                    self.restore_cursor();
-                }
-            }
-            // DECSET ?2004 — bracketed paste. When set, the input
-            // layer wraps Cmd-V paste in `\e[200~ ... \e[201~` so apps
-            // can distinguish paste from interactive typing. Read via
-            // `Terminal::bracketed_paste_mode()`.
-            2004 => *self.bracketed_paste = set,
-            // DECSET ?1004 — focus reporting.  Turning it OFF also
-            // forgets what was last reported, so a program that turns
-            // it back on is told the current state rather than being
-            // held to a stale one.
-            1004 => {
-                *self.focus_reporting = set;
-                if !set {
-                    *self.focus_reported = None;
-                }
-            }
-            // Accept silently — these modes have no rendering side
-            // effect we model, but apps want them to "succeed" rather
-            // than no-op silently. Listed explicitly so future audits
-            // see them.
-            //   1000 / 1002 / 1003 / 1006 / 1015 — mouse reporting modes
-            //   1004                — focus reporting in/out events
-            //   2031                — color scheme update notifications
-            // 1000 / 1002 / 1003 — mouse reporting modes:claudecode 等
-            // TUI 进 alt-screen 后 set 这些 + 1006(SGR encoding),期望
-            // marspot 收到 wheel/click 后 encode 成 escape sequence 写
-            // 回 PTY.之前(commit 176e4f4 extract 起)全部 stub 成
-            // no-op,wheel 在 claudecode 内永远滚不动是这个根因.
-            1000 => {
-                *self.mouse_tracking_mode = if set {
-                    MouseTrackingMode::X11
-                } else {
-                    MouseTrackingMode::Off
-                }
-            }
-            1002 => {
-                *self.mouse_tracking_mode = if set {
-                    MouseTrackingMode::ButtonEvent
-                } else {
-                    MouseTrackingMode::Off
-                }
-            }
-            1003 => {
-                *self.mouse_tracking_mode = if set {
-                    MouseTrackingMode::AnyEvent
-                } else {
-                    MouseTrackingMode::Off
-                }
-            }
-            1006 => *self.mouse_sgr_encoding = set,
-            // DEC 1007 — alternate scroll: the wheel is the arrow
-            // keys on this screen.  See `Terminal::alt_scroll`.
-            1007 => *self.alt_scroll = set,
-            // DEC 2026 — synchronized output.  `h` opens a batch, `l`
-            // closes it; the presenter holds frames in between so a
-            // half-drawn screen is never shown.  See
-            // `Terminal::sync_output`.
-            2026 => {
-                *self.sync_output = set;
-                if set {
-                    *self.uses_sync_output = true;
-                }
-            }
-            // 1015 / 1004 / 2031 — silently accept but no-op.
-            // 2031 (colour-scheme change notification) is accepted and
-            // not reported on yet.  The palette does change with the
-            // theme; a program that wants the new colours asks again
-            // with OSC 10 / 11 / 4 / 12 and is answered from the
-            // palette then in force.
-            1015 | 2031 => {}
-            _ => {} // unhandled DEC private mode — silently skip
         }
     }
 }
@@ -2979,8 +2830,8 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 let to = self.tabs.next(col, 1);
                 self.grid.set_cursor(to, row);
             }
-            0x07 => {} // BEL — visible bell deferred
-            _ => {}    // unknown C0 control: ignore for now
+            // BEL makes no sound and shows nothing
+            _ => {} // unknown C0 control: ignore for now
         }
     }
 
@@ -3038,11 +2889,18 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 self.pending_response.extend_from_slice(DA1_REPLY);
                 self.record_response("DECID");
             }
-            // DECKPAM (=) / DECKPNM (>) — application / normal keypad
-            // mode. Same input-encoding category as DECCKM; accept
-            // silently for now (the keypad-specific keys we encode
-            // don't yet distinguish modes).
-            b'=' | b'>' => {}
+            // DECKPAM (=) / DECKPNM (>) — application / normal keypad.
+            b'=' | b'>' if intermediates.is_empty() => self.modes.keypad_app = byte == b'=',
+            // HP memory lock / unlock, as xterm does them: the rows
+            // above the cursor stop scrolling by becoming the part of
+            // the screen above the top margin.
+            b'l' if intermediates.is_empty() => {
+                let (_, row) = self.grid.cursor();
+                if row < *self.scroll_bot {
+                    *self.scroll_top = row;
+                }
+            }
+            b'm' if intermediates.is_empty() => *self.scroll_top = 0,
             // ESC ( <c> — designate G0.  `0` is DEC Special Graphics,
             // which is how a great many TUIs draw their boxes; every
             // other variant is one of the national ASCII sets, and
@@ -3550,15 +3408,12 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 let n = param(params, 0, 1);
                 self.region_scroll_down(n);
             }
+            // MC — media copy.  There is no printer: every form is
+            // accepted and ignored, and what a program meant for the
+            // printer stays on the screen.
+            b'i' => {}
             b'c' if intermediates.is_empty() => {
-                // DA — Primary Device Attributes. App is asking "who
-                // are you?". We report VT220-class with selective
-                // attributes: ?62 = VT220-class, 1 = 132-column mode,
-                // 2 = printer port (we lie, harmless), 6 = selective
-                // erase, 9 = national replacement charset, 22 = colour
-                // text — picks up the same shape xterm reports.
-                // Without this response apps stall on capability probe
-                // and fall back to degraded rendering paths.
+                // DA — Primary Device Attributes; see `DA1_REPLY`.
                 self.pending_response.extend_from_slice(DA1_REPLY);
                 self.record_response("DA1");
             }
@@ -4007,7 +3862,9 @@ fn apply_sgr(attrs: &mut CellAttrs, params: &[u16], subs: &[bool]) {
             2 => attrs.dim = true,
             3 => attrs.italic = true,
             4 => attrs.underline = true,
+            5 => attrs.set_blink(true),
             7 => attrs.reverse = true,
+            8 => attrs.set_invisible(true),
             // SGR 22 is "normal intensity" — clears BOTH bold and dim
             // per ECMA-48, not just bold. TUIs (claudecode dim spans)
             // emit `2 ... 22` pairs and expect 22 to fully restore.
@@ -4017,7 +3874,9 @@ fn apply_sgr(attrs: &mut CellAttrs, params: &[u16], subs: &[bool]) {
             }
             23 => attrs.italic = false,
             24 => attrs.underline = false,
+            25 => attrs.set_blink(false),
             27 => attrs.reverse = false,
+            28 => attrs.set_invisible(false),
             // Standard 8-color foreground.
             n @ 30..=37 => attrs.fg = Color::indexed((n - 30) as u8),
             // Extended foreground: 38;5;n (256-color) or 38;2;r;g;b (RGB).
@@ -5221,7 +5080,7 @@ mod tests {
         let mut t = Terminal::new(20, 5);
         t.feed(b"\x1b[c");
         let resp = t.take_response();
-        assert_eq!(resp, b"\x1b[?62;1;6;22c");
+        assert_eq!(resp, b"\x1b[?1;2c");
         // Second take should return empty (state was consumed).
         let resp2 = t.take_response();
         assert!(resp2.is_empty());
@@ -5300,11 +5159,7 @@ mod tests {
         // the parser dispatches independently.
         t.feed(b"\x1b[c\x1b[c\x1b[c\x1b[c\x1b[c");
         let resp = t.take_response();
-        // Each response is `\e[?62;1;6;22c` = 13 bytes.  5 × 13 = 65.
-        assert_eq!(resp.len(), 65, "expected 5 concatenated DA1 responses");
-        // Sanity-check the start + end mark are present.
-        assert!(resp.starts_with(b"\x1b[?62;1;6;22c"));
-        assert!(resp.ends_with(b"\x1b[?62;1;6;22c"));
+        assert_eq!(resp, b"\x1b[?1;2c".repeat(5), "expected 5 concatenated DA1 responses");
     }
 
     #[test]

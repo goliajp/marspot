@@ -156,6 +156,36 @@ mod tests {
         "https://example.com".to_string()
     }
 
+    /// SGR 8 text goes out blank, and so does what rides beside it in
+    /// the table: its link, and its cluster text, on the live screen
+    /// in either layout and in history.
+    #[test]
+    fn osc8_concealed_cells_publish_no_link_and_no_cluster_text() {
+        for (packed, history) in [(false, false), (true, false), (false, true)] {
+            let mut p = pair(20, 2, packed);
+            let mut t = Terminal::new(20, 2);
+            t.feed(b"\x1b]8;;https://example.com\x1b\\ab\x1b[8mcd\x1b[28mef\x1b]8;;\x1b\\ \x1b[8m");
+            t.feed("e\u{301}\x1b[28mo\u{301}".as_bytes());
+            let off = if history {
+                t.feed(b"\r\nb\r\nc\r\nd");
+                t.grid().scrollback_len() as u16
+            } else {
+                0
+            };
+            p.w.publish_screen_modes(t.screen_modes());
+            p.w.publish(t.grid(), off, 0);
+            let (mut cells, mut wrapped, mut table) = (Vec::new(), Vec::new(), ClusterTable::default());
+            p.r.read_with_clusters(&mut cells, &mut wrapped, &mut table).unwrap();
+            let links: Vec<_> = table.links().map(|(r, a, b, u)| (r, a, b, u.to_string())).collect();
+            let clusters: Vec<_> = table.iter().map(|(c, r, s)| (c, r, s.to_string())).collect();
+            let text: String = cells[..6].iter().map(|c| c.ch).collect();
+            let case = format!("packed={packed} history={history}");
+            assert_eq!(links, vec![(0, 0, 1, uri()), (0, 4, 5, uri())], "{case}");
+            assert_eq!(clusters, vec![(8, 0, "o\u{301}".to_string())], "{case}");
+            assert_eq!(text, "ab  ef", "{case}");
+        }
+    }
+
     #[test]
     fn osc8_the_links_on_screen_reach_the_reader_in_either_frame_layout() {
         for packed in [false, true] {

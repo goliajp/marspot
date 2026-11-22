@@ -300,3 +300,15 @@ fn a_shell_that_execs_a_shell_is_still_the_shell() {
     // bash's own line editor in raw mode, at the shell's pid
     assert!(settles(&mut s, b"/bin/zsh", false), "bash at the zsh pid");
 }
+
+/// `kmous` of the borrowed `xterm-256color` entry is what a mouse
+/// report starts with; the rest of the entry is checked against the
+/// engine in marspot-term's `terminfo` tests.
+#[test]
+fn terminfo_kmous_is_how_a_report_starts() {
+    let entry = include_str!("../../marspot-term/tests/data/xterm-256color.terminfo");
+    let kmous = entry.lines().find_map(|l| l.trim().strip_prefix("kmous=")).expect("kmous");
+    assert_eq!(kmous, "\\E[M,");
+    let r = bytes(&ev(PointerKind::Press, 0, 1), &modes(MouseTrackingMode::X11, false)).unwrap();
+    assert_eq!(r, b"\x1b[M\x20\x23\x21");
+}

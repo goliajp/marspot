@@ -169,10 +169,16 @@ Honest list, because you will hit these in the first hour:
   answering hands any program that can write to the pty whatever you
   last copied.
 - There is no terminfo entry of its own. `TERM` is set to
-  `xterm-256color`, whose entry claims a few capabilities not yet
-  implemented — an entry of our own waits on an answer for what a
-  remote host should use over ssh, because an entry nothing can look
-  up is worse than borrowing one that is close.
+  `xterm-256color`, and every standard capability of that entry is
+  tested against marspot (the extended ones, such as the cursor
+  shape or the modified-key strings, are not), with these
+  exceptions: Backspace sends DEL (0x7f) rather than the entry's ^H,
+  as every macOS terminal does; BEL makes no sound; no key sends the
+  keypad's Begin (`kb2`), since a Mac keypad has no NumLock; the
+  keypad's Enter sends Return, not `ESC O M`, because zsh binds
+  nothing to that at the prompt; and the printer sequences are
+  ignored, since there is no printer, so what a program prints stays
+  on screen. Blinking text (SGR 5) is drawn steady.
 - The settings panel offers the theme (dark, light, high contrast),
   the language and a handful of behaviours. Fonts, font size and key
   bindings are not configurable yet — the keys listed above are the
