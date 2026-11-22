@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.582"  # move the supervisor's deadlines and crash budget out of the shell's main.rs
+shell   = "0.7.583"  # move ShellInbox next to the control socket reader that fills it
 core    = "0.12.615"  # drop render_metal.rs's carve-out marker
 session = "0.11.406"  # basic: name what terminal.rs still holds in its carve-out marker

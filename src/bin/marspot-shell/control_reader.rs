@@ -11,7 +11,55 @@ use marspot::shell_proto::{
     decode_caret_rect, decode_hello_ack, decode_pong, decode_surface_ready, Frame, MsgType,
 };
 
-use crate::ShellInbox;
+/// Frames the reader thread parses off the control socket and hands
+/// to the main thread.
+pub(crate) enum ShellInbox {
+    SurfaceReady(u32),
+    FramePaceAck,
+    HelloAck(u32),
+    Pong(u32),
+    /// Focused-pane caret rect from the core (view-local physical
+    /// pixels), forwarded to AppKit so the IME candidate window
+    /// anchors under the caret.
+    /// Caret rect plus the window it belongs to — the shell parks the
+    /// IME candidate panel against that window.
+    CaretRect(Option<(f64, f64, f64, f64)>, u32),
+    /// Core rendered a fresh frame into the IOSurface — present it.  Carries
+    /// nothing; its arrival (via the reader's `proxy.wake()`) drives the
+    /// per-frame present, replacing the blind ~60 fps redraw timer.
+    FrameRendered,
+    /// L2 → L1: user clicked the active prefix of a pane badge on the
+    /// pane backing this shelld session.  Dispatched to every loaded
+    /// plugin so whichever set the badge can react (claudecode → cycle
+    /// the next profile and rerun `claudeN --resume <uuid>`).
+    PaneBadgeClicked(u64),
+    /// core → shell: the user's focus moved to this pane.
+    PaneFocused(u64),
+    /// L2 → L1: user right-clicked the badge prefix — collect menu
+    /// rows from the plugins and reply with a `PaneBadgeMenu` frame.
+    /// `(sid, anchor_x, anchor_y)`; the anchor is echoed back so the
+    /// exchange is stateless.
+    PaneBadgeMenuRequest(u64, f64, f64),
+    /// L2 → L1: user picked a badge-menu row.  `(sid, tag)` where
+    /// `tag` is the plugin-assigned id from the menu frame.
+    PaneBadgeMenuAction(u64, u32),
+    /// L2 → L1: a keystroke arrived on a pane held by a LOCK_KEYS
+    /// PaneSession.  Routed to the matching session's on_user_key.
+    PaneSessionKey(u64, marspot::shell_proto::WireKeyEvent),
+    /// L2 → L1: user pressed Esc 3× in 5 s; force-end the session
+    /// regardless of plugin opinion.
+    PaneSessionUserEscape(u64),
+    /// L2 → L1: reopen a window the last session had, restoring its
+    /// geometry from this entry of `window-state.bin`.  RFC-005 step
+    /// 6b — the core knows how many windows the user had, L1 owns the
+    /// windows themselves, so the core asks.
+    WindowOpenRequest(u32, Option<(f64, f64)>),
+    /// L2 → L1: close this window (RFC-005 step 5 — its last pane was
+    /// just moved out).  Runs the exact red-button path.
+    WindowCloseRequest(u32),
+    /// The core wants a toolbar icon drawn: `(symbol, point_px)`.
+    IconMaskWanted(u16, u16),
+}
 
 pub(crate) mod pane_wakes;
 
