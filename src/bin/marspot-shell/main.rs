@@ -828,18 +828,6 @@ impl ShellApp {
         }
     }
 
-    /// Step every pane's state machine (gated to
-    /// `pane_status::SWEEP_INTERVAL` inside the tracker), publish the
-    /// result for plugins, and log the committed transitions.
-    /// How long between two prefetch wakes.
-    ///
-    /// One claude starting is a fork, an exec and a transcript read;
-    /// sixteen of them together is a stall on the machine the user just
-    /// came back to.  A second apart spreads a full window over the
-    /// time it takes to read one pane, which is the window that matters
-    /// — by the third click the third pane is already up.
-    const WAKE_STAGGER: Duration = Duration::from_millis(1_000);
-
 }
 
 /// Fold this process's live window frames into the list already on
