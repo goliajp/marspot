@@ -138,6 +138,7 @@ impl Terminal {
             tabs: &mut self.tabs,
             osc_clipboard: &mut self.osc_clipboard,
             bell: &mut self.bell,
+            command_end: &mut self.command_end,
             g0_graphics: &mut self.g0_graphics,
             origin_mode: &mut self.origin_mode,
             insert_mode: &mut self.insert_mode,

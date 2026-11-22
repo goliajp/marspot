@@ -304,6 +304,8 @@ pub struct Terminal {
     osc_clipboard: Option<String>,
     /// A bare BEL arrived since the last `take_bell`.
     bell: bool,
+    /// How many `OSC 133 ; D` have arrived, and the latest ones' statuses.
+    command_end: osc::CommandEnds,
     /// G0 is the DEC Special Graphics set, selected by `ESC ( 0`.
     g0_graphics: bool,
     /// DECOM (`?6`).  While set, row addressing counts from the top
@@ -465,13 +467,6 @@ impl Terminal {
     pub fn feed(&mut self, bytes: &[u8]) {
         self.feed_with(bytes, true);
     }
-
-    /// Current snapshot generation.  Bumped at the end of every non-
-    /// empty `feed()` call.  RFC-002 step 6 / step 8 compare it
-    /// against a `last_pushed_generation` to decide whether to push.
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
 }
 
 struct Handler<'a> {
@@ -521,6 +516,7 @@ struct Handler<'a> {
     tabs: &'a mut crate::tabs::TabStops,
     osc_clipboard: &'a mut Option<String>,
     bell: &'a mut bool,
+    command_end: &'a mut osc::CommandEnds,
     g0_graphics: &'a mut bool,
     /// See `Terminal::origin_mode`.
     origin_mode: &'a mut bool,

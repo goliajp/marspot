@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.587"  # pane-control frame payloads (types 130-143) in marspot-term; nothing sends them yet
-core    = "0.12.619"  # forward PaneType / PaneWatch to sessions that read them, answer the rest, send PaneControlCaps
-session = "0.11.408"  # pane-control frame payloads (types 130-143) in marspot-term; nothing sends them yet
+shell   = "0.7.589"  # marspot-term Terminal keeps the latest eight command ends by number
+core    = "0.12.621"  # marspot-term Terminal keeps the latest eight command ends by number
+session = "0.11.410"  # text watches skip what was on the grid before their position, read the byte stream first; typing answers restarting

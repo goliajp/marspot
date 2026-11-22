@@ -188,6 +188,7 @@ impl LocalSession {
         TAKEN.with_borrow_mut(|taken| taken.extend_from_slice(bytes));
         // The bytelog is written whether or not the picture is
         // held: everything that reads it must see the pane talk.
+        self.out.took(bytes);
         if let Some(b) = self.bytelog.as_mut() {
             let _ = b.append(bytes);
         }
@@ -248,6 +249,7 @@ mod tests {
             child_pid: 0,
             terminal: Terminal::new(80, 24),
             bytelog: None,
+            out: Default::default(),
             rx,
             reader: None,
             writer: super::super::PtyWriter::new("l3-pty-writer-1", std::io::sink(), marspot_term::frame_writer::cap::PTY),

@@ -11,6 +11,35 @@ use crate::lx_debug;
 /// because nothing tells the user which half.
 const OSC52_MAX: usize = 64 * 1024;
 
+/// Command ends (`OSC 133 ; D`) kept by number, so that a reader
+/// between two feeds can ask for the first one after the last it saw:
+/// a shell's own hook can print a second end, with its own status,
+/// right behind the one a command printed.
+const ENDS_KEPT: usize = 8;
+
+#[derive(Default)]
+pub(super) struct CommandEnds {
+    count: u64,
+    statuses: [Option<u8>; ENDS_KEPT],
+}
+
+impl CommandEnds {
+    fn push(&mut self, status: Option<u8>) {
+        self.statuses[(self.count % ENDS_KEPT as u64) as usize] = status;
+        self.count += 1;
+    }
+
+    pub(super) fn latest(&self) -> (u64, Option<u8>) {
+        (self.count, self.status(self.count).flatten())
+    }
+
+    /// The status of end number `n` (from 1), if it is still kept.
+    pub(super) fn status(&self, n: u64) -> Option<Option<u8>> {
+        let kept = n >= 1 && n <= self.count && self.count - n < ENDS_KEPT as u64;
+        kept.then(|| self.statuses[((n - 1) % ENDS_KEPT as u64) as usize])
+    }
+}
+
 /// The OSC 8 link the pen is writing, if one is open.
 ///
 /// The id is into the current grid's pool; the URI is kept beside it so
@@ -93,6 +122,7 @@ impl Handler<'_> {
                             .next()
                             .filter(|p| !p.is_empty() && !p.contains('='))
                             .and_then(|p| p.parse::<u8>().ok());
+                        self.command_end.push(status);
                         crate::grid::PromptMark::CommandEnd(status)
                     }
                     _ => return,

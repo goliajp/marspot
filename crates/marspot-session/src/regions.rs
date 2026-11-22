@@ -177,13 +177,15 @@ pub(crate) fn republish(
 
 /// Tell the core which grid region this session publishes into: its
 /// serial, then its name.  A core that shows another one asks for a
-/// move.  Then that this image reads which frames the core reads.
+/// move.  Then that this image reads which frames the core reads, and
+/// that it answers `PaneType` and `PaneWatch`.
 pub(crate) fn announce(shm: &GridShmWriter, poke: Option<&mut ControlWriter>) {
     if let (Some(w), Some(serial)) = (poke, shm.serial()) {
         let mut payload = serial.to_le_bytes().to_vec();
         payload.extend_from_slice(std::env::var(ENV_SHM_NAME).unwrap_or_default().as_bytes());
         let _ = w.send(Frame::new(MsgType::SessionPublishes, payload));
         let _ = w.send(Frame::new(MsgType::SessionReadsFrameCells, Vec::new()));
+        let _ = w.send(Frame::new(MsgType::SessionReadsPaneControl, Vec::new()));
     }
 }
 

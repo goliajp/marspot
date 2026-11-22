@@ -110,6 +110,7 @@ impl Terminal {
             tabs: crate::tabs::TabStops::new(cols),
             osc_clipboard: None,
             bell: false,
+            command_end: Default::default(),
             g0_graphics: false,
             origin_mode: false,
             insert_mode: false,

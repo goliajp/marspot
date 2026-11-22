@@ -13,10 +13,12 @@ use std::thread::JoinHandle;
 
 use marspot_term::shell_proto::{
     decode_frame_cells, decode_get_selection_text, decode_grid_resize, decode_grid_scroll, decode_key_event,
-    decode_paste, decode_search_cancel, decode_search_scrollback, wire_to_event, Frame, MsgType, Next,
+    decode_pane_type, decode_pane_watch, decode_paste, decode_search_cancel, decode_search_scrollback,
+    wire_to_event, Frame, MsgType, Next,
 };
 
 use crate::SessionEvent;
+use crate::pane_ctl::Request;
 
 /// Every control reader of this image, and the means to stop them.
 pub(crate) struct ControlReaders {
@@ -197,6 +199,21 @@ fn read_frames(mut reader: UnixStream, stop: &UnixStream, tx: Sender<SessionEven
                 MsgType::SessionFrameCells => {
                     let version = decode_frame_cells(&f.payload).unwrap_or(0);
                     if tx.send(SessionEvent::FrameCells(generation, version)).is_err() {
+                        break;
+                    }
+                }
+                MsgType::PaneType => {
+                    if let Ok(t) = decode_pane_type(&f.payload) {
+                        if tx.send(SessionEvent::PaneControl(Request::Type(t))).is_err() {
+                            break;
+                        }
+                        crate::input::arrived();
+                    }
+                }
+                MsgType::PaneWatch => {
+                    if let Ok(w) = decode_pane_watch(&f.payload)
+                        && tx.send(SessionEvent::PaneControl(Request::Watch(w))).is_err()
+                    {
                         break;
                     }
                 }

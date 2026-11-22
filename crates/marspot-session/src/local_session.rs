@@ -34,7 +34,11 @@ use marspot_term::terminal::Terminal;
 use crate::pty_reader::PtyReader;
 
 mod direct;
+mod position;
+mod pty_chunk;
 mod pump;
+use pty_chunk::PtyWriter;
+pub(crate) use pty_chunk::Written;
 pub(crate) use pump::Pace;
 
 /// How recently we have to have seen PTY output to count as "active".
@@ -46,62 +50,6 @@ const ACTIVE_WINDOW: Duration = Duration::from_secs(2);
 /// that does not read its stdin never takes it; the rest is lost.
 const HANDOFF_INPUT_WAIT: Duration = Duration::from_millis(200);
 
-/// Write half of the PTY, owned by a dedicated thread.
-///
-/// **Why this exists.**  `write(2)` on a PTY master blocks once the
-/// tty's input buffer fills, and it fills whenever the foreground
-/// process stops reading stdin.  Calling it from the L3 main loop —
-/// which is what we used to do — parks that whole loop: no PTY output
-/// gets pumped, no control frames get served, no snapshot gets taken,
-/// for as long as the child stays busy.  Symptom: one pane goes
-/// completely unresponsive for minutes and then recovers on its own,
-/// while every other pane (a separate L3 process) stays fine.
-///
-/// Moving the write behind a thread that is *allowed* to block gives
-/// the main loop a non-blocking `write()` and keeps idle CPU at zero
-/// (the thread parks in `recv`, not a spin loop).  It mirrors the
-/// reader-thread half that has always been here.
-/// One chunk of bytes bound for the PTY.
-///
-/// The short-write retry loop lives here rather than in the queue: a
-/// tty whose buffer is nearly full accepts a partial write, and the
-/// original code discarded `write`'s return value entirely, silently
-/// losing the tail of anything it didn't accept.
-struct PtyChunk {
-    pty: Arc<Pty>,
-    bytes: Vec<u8>,
-}
-
-impl marspot_term::frame_writer::Queued for PtyChunk {
-    fn queued_len(&self) -> usize {
-        self.bytes.len()
-    }
-    fn write_all_to(&self, _sink: &mut dyn io::Write) -> io::Result<()> {
-        // The destination is the PTY master this chunk carries, not the
-        // sink — `Pty` is fd-shared rather than `Write`-shaped.
-        let mut off = 0;
-        while off < self.bytes.len() {
-            match self.pty.write_shared(&self.bytes[off..]) {
-                Ok(0) => break,
-                Ok(n) => off += n,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                // the reader keeps the master non-blocking; a full tty
-                // input queue is waited out here, on the writer thread
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    let mut p = libc::pollfd { fd: self.pty.raw_master(), events: libc::POLLOUT, revents: 0 };
-                    // SAFETY: one valid pollfd for the master this chunk's Pty owns.
-                    unsafe { libc::poll(&mut p, 1, 100) };
-                }
-                // Dead fd (child gone).  Abandon this chunk; the session
-                // tears down through the normal exit path.
-                Err(_) => break,
-            }
-        }
-        Ok(())
-    }
-}
-
-type PtyWriter = marspot_term::frame_writer::BoundedWriter<PtyChunk>;
 
 
 pub struct LocalSession {
@@ -114,6 +62,7 @@ pub struct LocalSession {
     child_pid: i32,
     terminal: Terminal,
     bytelog: Option<ByteLog>,
+    out: position::Output,
     rx: Receiver<crate::pty_reader::Chunk>,
     /// Fills `rx`.  `None` only in tests that drive `rx` themselves.
     reader: Option<PtyReader>,
@@ -292,6 +241,7 @@ impl LocalSession {
             child_pid,
             terminal: Terminal::new(cols, rows),
             bytelog,
+            out: position::Output::default(),
             rx,
             reader,
             writer,
@@ -405,7 +355,7 @@ impl LocalSession {
         // is ours already
         let empty_before = !self.replies.is_watching()
             && crate::reply_guard::queue_was_empty(master, self.writer.backlog() == 0);
-        if self.enqueue(&response).is_ok() {
+        if self.enqueue(&response, None).is_ok() {
             self.replies.wrote_replies(master, self.shell_pgrp(), response.len(), empty_before);
         }
     }
@@ -444,49 +394,6 @@ impl LocalSession {
     /// Is the grid currently held?
     pub fn is_holding(&self) -> bool {
         self.hold
-    }
-
-    /// Queue `bytes` for the PTY.  Never blocks — see `PtyWriter`.
-    ///
-    /// `Ok(n)` means queued, not delivered; the only ordering promise
-    /// is FIFO, which is all the callers (keystrokes, paste, injected
-    /// input) need.  `WouldBlock` means the child has not read its
-    /// stdin for long enough to fill the queue and the input was
-    /// dropped — callers log it rather than retrying, since retrying
-    /// into a full queue just drops again.
-    pub fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.is_empty() {
-            return Ok(0);
-        }
-        self.replies.wrote_other();
-        let queued = self.enqueue(bytes);
-        self.line.wrote_input(self.pty.raw_master(), self.shell_pgrp(), bytes);
-        queued
-    }
-
-    fn enqueue(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        // The cap check lives in `BoundedWriter::send` — duplicating it
-        // here is how the two could drift apart.
-        let chunk = PtyChunk { pty: Arc::clone(&self.pty), bytes: bytes.to_vec() };
-        if !self.writer.send(chunk) {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                format!(
-                    "pty write queue full ({} B pending, {} B dropped so far) \
-                     or writer gone — the foreground process is not reading stdin",
-                    self.writer.backlog(),
-                    self.writer.dropped_bytes(),
-                ),
-            ));
-        }
-        Ok(bytes.len())
-    }
-
-    /// Bytes queued for the PTY but not yet accepted by it.  Non-zero
-    /// for more than a moment means the foreground process is not
-    /// reading its stdin.
-    pub fn pty_write_backlog(&self) -> usize {
-        self.writer.backlog()
     }
 
     /// Resize the terminal + PTY.  TIOCSWINSZ delivers SIGWINCH so
@@ -553,6 +460,7 @@ impl LocalSession {
         cols: u16,
         rows: u16,
         terminal: Terminal,
+        pos: u64,
         wake: W,
     ) -> io::Result<Self>
     where
@@ -578,6 +486,7 @@ impl LocalSession {
             child_pid,
             terminal,
             bytelog,
+            out: position::Output::resumed(pos),
             rx,
             reader,
             writer,
@@ -954,6 +863,7 @@ mod tests {
             child_pid: 0,
             terminal: Terminal::new(80, 24),
             bytelog: None,
+            out: Default::default(),
             rx: { let (_t, r) = mpsc::channel(); r },
             reader: None,
             writer: PtyWriter::new("l3-pty-writer-1", io::sink(), marspot_term::frame_writer::cap::PTY),
@@ -1023,6 +933,7 @@ mod tests {
             child_pid: 0,
             terminal: Terminal::new(80, 24),
             bytelog: None,
+            out: Default::default(),
             rx,
             reader: None,
             writer: PtyWriter::new("l3-pty-writer-1", io::sink(), marspot_term::frame_writer::cap::PTY),
@@ -1076,6 +987,7 @@ mod tests {
             child_pid: 0,
             terminal: Terminal::new(80, 24),
             bytelog: None,
+            out: Default::default(),
             rx: { let (_t, r) = mpsc::channel(); r },
             reader: None,
             writer: PtyWriter::new("l3-pty-writer-2", io::sink(), marspot_term::frame_writer::cap::PTY),
@@ -1140,6 +1052,7 @@ mod tests {
             child_pid: 0,
             terminal: Terminal::new(80, 24),
             bytelog: None,
+            out: Default::default(),
             rx: { let (_t, r) = mpsc::channel(); r },
             reader: None,
             writer: PtyWriter::new("l3-pty-writer-0", io::sink(), marspot_term::frame_writer::cap::PTY),

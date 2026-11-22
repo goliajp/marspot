@@ -35,8 +35,8 @@ leak-timeout = { period = "5s", result = "fail" }
 # not a looser budget — it is that they do not share.
 #
 # `threads-required = "num-cpus"` makes nextest hold the whole runner
-# for one of them at a time.  There are three, each well under a
-# second, so the suite pays for it in milliseconds.
+# for one of them at a time.  There are four, each a few seconds at
+# most, so the suite pays for it in seconds.
 [[profile.default.overrides]]
-filter = 'test(b1_perf_1mb_first_64_hits_under_20ms) + test(b3_perf_1mb_first_64_hits_under_50ms) + test(the_blank_test_is_cheap_on_a_screen_with_content)'
+filter = 'test(b1_perf_1mb_first_64_hits_under_20ms) + test(b3_perf_1mb_first_64_hits_under_50ms) + test(the_blank_test_is_cheap_on_a_screen_with_content) + test(watch_pending_text_keeps_the_parse_within_five_percent)'
 threads-required = "num-cpus"
