@@ -391,7 +391,7 @@ impl Worker {
         let from = format!("uds:{}", b.inbox.path.display());
         let header = marspot_peer::envelope::Header { from: from.clone(), from_name: Some(b.record.name.clone()), from_mode: Some(b.class) };
         for (asker, answer) in owed {
-            let content = marspot_peer::envelope::encode(&header, &super::reply::body(&answer));
+            let content = super::reply::envelope(&header, &answer);
             let line = marspot_peer::frame::user_line(&content, &from, Priority::Next, &marspot_peer::rand::uuid_v4());
             deliver::send_line(&b.inbox.relay, &asker.reply_to, &line);
             lx_info!("peerbus.answer_relayed", "the turn's answer went back to the asker", sid = sid, to = asker.reply_to);
