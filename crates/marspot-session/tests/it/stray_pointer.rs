@@ -73,6 +73,29 @@ impl Pane {
         }
     }
 
+    /// The screen once the shell has run `print AT:$PWD` and drawn its
+    /// next prompt: the `AT:/` output followed by a later `P>`.  Waits
+    /// for the prompt, not for any particular directory, so a shell that
+    /// moved or ran residue still gets here and the assertion shows it.
+    fn screen_after_at(&self) -> String {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let screen = self.screen();
+            // a long path wraps
+            let unwrapped = screen.replace('\n', "");
+            if let Some(i) = unwrapped.rfind("AT:/")
+                && unwrapped[i..].contains("P>")
+            {
+                return screen;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "never showed a prompt after the AT: line:\n{screen}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn pointer(&self, kind: PointerKind, button: u8, count: u16) {
         let ev = PointerInput {
             kind,
@@ -236,9 +259,7 @@ fn reports_do_not_reach_a_shell_at_its_prompt_even_with_the_modes_on() {
     p.stray_reports();
     std::thread::sleep(Duration::from_millis(500));
     p.type_in("\rprint AT:$PWD\r");
-    p.wait_screen("AT:/");
-    let screen = p.screen();
-    // a long path wraps
+    let screen = p.screen_after_at();
     let unwrapped = screen.replace('\n', "");
     assert!(
         unwrapped.contains(&format!("AT:{d}/homeP>")),
@@ -261,8 +282,7 @@ fn wheel_arrows_do_not_reach_a_shell_at_its_prompt_even_on_the_alt_screen() {
     p.pointer(PointerKind::Arrows, 64, 2);
     std::thread::sleep(Duration::from_millis(500));
     p.type_in("\rprint AT:$PWD\r");
-    p.wait_screen("AT:/");
-    let screen = p.screen();
+    let screen = p.screen_after_at();
     assert_eq!(
         screen.matches("MARK-ONE").count(),
         0,
