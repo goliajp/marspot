@@ -59,6 +59,13 @@ pub trait PtyIo: Send + Sync {
     /// bytes, so the `CSI ? 1002 l` a clean exit would have sent never
     /// arrives and the shell underneath inherits mouse tracking.
     fn reset_mouse_reporting(&self, sid: u64) -> std::io::Result<()>;
+    /// Either kind of typing; what [`OpRunner::type_into`] calls.
+    fn write(&self, sid: u64, what: Typed<'_>) -> std::io::Result<()> {
+        match what {
+            Typed::Bytes(b) => self.send(sid, b),
+            Typed::Paste(t) => self.paste(sid, t),
+        }
+    }
 }
 
 /// Everything a running op needs from the world.
@@ -932,6 +939,8 @@ pub struct OpRunner {
     drew: bool,
     /// The process [`StepKind::WatchProcess`] tied the run to.
     watched: Option<ProcId>,
+    /// The program [`StepKind::AwaitProcess`] last found.
+    awaited: Option<ProcId>,
     /// `(when, output length)` every [`SAMPLE_EVERY`] while an
     /// `or_composer` wait runs; at most [`SAMPLES_KEPT`].
     samples: std::collections::VecDeque<(SystemTime, u64)>,
@@ -971,6 +980,7 @@ impl OpRunner {
             still_since: now,
             drew: false,
             watched: None,
+            awaited: None,
             samples: std::collections::VecDeque::new(),
             finished: None,
             ready_saw: None,
@@ -1130,7 +1140,8 @@ impl OpRunner {
                 false
             }
             StepKind::AwaitProcess { under, matching } => {
-                self.env.find_in_front(under, matching).is_some()
+                self.awaited = self.env.find_in_front(under, matching);
+                self.awaited.is_some()
             }
             StepKind::AwaitShell { shell } => match self.env.front(shell).shell_or_why() {
                 Ok(()) => true,
@@ -1305,20 +1316,8 @@ impl OpRunner {
                 // seconds and gave up on a pane that was already
                 // showing a full screen.
                 self.sent_len = Some(self.env.output_len(sid));
-                // last thing before the write: output having gone quiet
-                // says nothing about who will read these bytes
-                if let Some(shell) = step.at_shell
-                    && let Err(err) = self.env.front(shell).shell_or_why()
-                {
-                    host.log(LogLevel::Warn, &format!("{}.not_typed", self.op.name), &format!("pane {sid}: {err}"));
+                if let Err(err) = self.type_into(host, Typed::Bytes(&bytes)) {
                     self.finish(host, OpOutcome::Failed { step: self.at, label: step.label, err });
-                    return true;
-                }
-                if let Err(e) = self.env.io().send(sid, &bytes) {
-                    self.finish(
-                        host,
-                        OpOutcome::Failed { step: self.at, label: step.label, err: e.to_string() },
-                    );
                 }
                 true
             }
@@ -1399,11 +1398,8 @@ impl OpRunner {
                         &format!("{}.paste", self.op.name),
                         &format!("sid={sid} bytes={} bracketed={bracketed}", bytes.len()),
                     );
-                    if let Err(e) = self.env.io().send(sid, &bytes) {
-                        self.finish(
-                            host,
-                            OpOutcome::Failed { step: self.at, label: step.label, err: e.to_string() },
-                        );
+                    if let Err(err) = self.type_into(host, Typed::Bytes(&bytes)) {
+                        self.finish(host, OpOutcome::Failed { step: self.at, label: step.label, err });
                         return true;
                     }
                     if let Some(StepKind::Submit { pasted, .. }) =
@@ -1498,9 +1494,12 @@ impl OpRunner {
                         &format!("{}.again", self.op.name),
                         &format!("sid={sid} the return became a newline; sending another"),
                     );
-                    if self.env.io().send(sid, b"\r").is_ok()
-                        && let Some(StepKind::Submit { pasted: Some(p), .. }) =
-                            self.op.steps.get_mut(self.at).map(|s| &mut s.kind)
+                    if let Err(err) = self.type_into(host, Typed::Bytes(b"\r")) {
+                        self.finish(host, OpOutcome::Failed { step: self.at, label: step.label, err });
+                        return true;
+                    }
+                    if let Some(StepKind::Submit { pasted: Some(p), .. }) =
+                        self.op.steps.get_mut(self.at).map(|s| &mut s.kind)
                     {
                         p.returned_at = Some(now);
                         p.returns += 1;
@@ -1556,11 +1555,8 @@ impl OpRunner {
                         waited.as_millis()
                     ),
                 );
-                if let Err(e) = self.env.io().send(sid, b"\r") {
-                    self.finish(
-                        host,
-                        OpOutcome::Failed { step: self.at, label: step.label, err: e.to_string() },
-                    );
+                if let Err(err) = self.type_into(host, Typed::Bytes(b"\r")) {
+                    self.finish(host, OpOutcome::Failed { step: self.at, label: step.label, err });
                     return true;
                 }
                 if let Some(StepKind::Submit { pasted: Some(p), .. }) =
@@ -1655,8 +1651,8 @@ impl OpRunner {
             &format!("{}.paste", self.op.name),
             &format!("sid={sid} bytes={}", text.len()),
         );
-        if let Err(e) = self.env.io().paste(sid, text) {
-            self.finish(host, OpOutcome::Failed { step: self.at, label, err: e.to_string() });
+        if let Err(err) = self.type_into(host, Typed::Paste(text)) {
+            self.finish(host, OpOutcome::Failed { step: self.at, label, err });
         }
     }
 
@@ -1897,6 +1893,8 @@ impl PaneSession for OpRunner {
 
 pub mod front;
 mod real_env;
+mod typing;
+pub use typing::Typed;
 pub use real_env::RealEnv;
 #[cfg(test)]
 mod never_ran_tests;

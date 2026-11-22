@@ -9,6 +9,8 @@
 //!   and for Codex as an MCP server.
 //! - `relay`: the process that stands for a Codex session on the inbox
 //!   sockets.
+//! - `inbox`: the one place a frame is written into a session's inbox,
+//!   after checking the session that owns it is still the same process.
 //! - `panes`, `resolve`, `claude_hook`: marspot's pane names, which
 //!   pane a recipient string means, and the Claude Code hooks that let
 //!   a Claude session address peers by them.
@@ -20,6 +22,7 @@ pub mod claude_hook;
 pub mod envelope;
 pub mod frame;
 pub mod gemini_hook;
+pub mod inbox;
 pub mod json;
 pub mod kimi_hook;
 pub mod mcp;

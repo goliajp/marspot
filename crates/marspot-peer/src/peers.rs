@@ -8,10 +8,6 @@
 //! reply address and nothing is sent: an anonymous message could not
 //! be answered and could not say who it is from.
 
-use std::io::Write;
-use std::os::unix::net::UnixStream;
-use std::time::Duration;
-
 use crate::envelope::{self, Header, Mode};
 use crate::frame::{self, Priority};
 use crate::panes::{self, Pane};
@@ -160,9 +156,7 @@ fn write_line(relay: Option<&str>, target: &str, name: &str, line: &str) -> Resu
     if let Some(r) = relay {
         return crate::relay::send_via(r, target, line).map_err(|e| format!("cannot reach {name}: {e}"));
     }
-    let mut s = UnixStream::connect(target).map_err(|e| format!("cannot reach {name}: {e}"))?;
-    let _ = s.set_write_timeout(Some(Duration::from_secs(10)));
-    s.write_all(line.as_bytes()).map_err(|e| format!("cannot write to {name}: {e}"))
+    crate::inbox::write(target, line).map_err(|e| format!("cannot reach {name}: {e}"))
 }
 
 /// What a session is called here: its pane's name when it is in a

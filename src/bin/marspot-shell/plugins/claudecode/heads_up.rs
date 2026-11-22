@@ -10,13 +10,10 @@
 //! into the composer, so what the person is typing is not touched.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::ops::{Deref, DerefMut};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use marspot_peer::envelope::{self, Header, Mode};
 use marspot_peer::frame::{self, Priority};
@@ -173,12 +170,6 @@ fn frame_line(inbox: &str, body: &str) -> String {
     frame::user_line(&envelope::encode(&header, body), &from, Priority::Next, &marspot_peer::rand::uuid_v4())
 }
 
-fn deliver(inbox: &str, line: &str) -> std::io::Result<()> {
-    let mut s = UnixStream::connect(inbox)?;
-    s.set_write_timeout(Some(Duration::from_secs(5)))?;
-    s.write_all(line.as_bytes())
-}
-
 /// The inbox of the claude with this pid, from the sessions registry.
 fn inbox_of(claude_pid: i32) -> Option<String> {
     marspot_peer::peers::live_entries().into_iter().find(|e| e.pid == claude_pid && !e.ours)?.socket
@@ -200,7 +191,7 @@ pub(in crate::plugins) fn send_to(
     std::thread::spawn(move || {
         let outcome = match inbox() {
             None => "the session has no inbox".to_string(),
-            Some(inbox) => match deliver(&inbox, &frame_line(&inbox, &body(profile))) {
+            Some(inbox) => match marspot_peer::inbox::write(&inbox, &frame_line(&inbox, &body(profile))) {
                 Ok(()) => {
                     delivered.store(true, Ordering::Relaxed);
                     "delivered".to_string()
@@ -252,7 +243,13 @@ mod tests {
         let inbox = dir.join("1.sock");
         let listener = UnixListener::bind(&inbox).unwrap();
         let inbox = inbox.display().to_string();
-        deliver(&inbox, &frame_line(&inbox, &body(8))).unwrap();
+        let me = std::process::id() as i32;
+        let rec = format!(
+            "{{\"pid\":{me},\"procStart\":\"{}\",\"messagingSocketPath\":\"{inbox}\"}}",
+            marspot_peer::proc::lstart(me).unwrap()
+        );
+        std::fs::write(dir.join(format!("{me}.json")), rec).unwrap();
+        marspot_peer::inbox::write_in(&[dir.clone()], &inbox, &frame_line(&inbox, &body(8))).unwrap();
         let (conn, _) = listener.accept().unwrap();
         let mut line = String::new();
         BufReader::new(conn).read_line(&mut line).unwrap();
