@@ -184,24 +184,14 @@ pub fn key_event_to_bytes(
                     // paste from interactive typing. Apps like Claude
                     // Code TUI rely on this — without it, each pasted
                     // CJK char is treated as a separate keystroke and
-                    // the app auto-inserts spaces between them. We
-                    // also sanitise: strip any nested 201~ in the
-                    // payload (xterm-spec defence — a pasted screen
-                    // dump could otherwise inject an end-of-paste
-                    // marker and exit bracketed mode early).
+                    // the app auto-inserts spaces between them. Markers
+                    // inside the text are dropped first: a pasted
+                    // `\e[201~` would otherwise end the paste early and
+                    // the rest would arrive as typed keys.
                     let body = text.into_bytes();
                     if modes.bracketed_paste {
-                        // Naive concat (no end-marker stripping). xterm
-                        // spec recommends defending against pasted
-                        // `\e[201~` injecting an early end-of-paste,
-                        // but claudecode / shell paste content almost
-                        // never contains this 6-byte sequence verbatim
-                        // — if it ever does we can add a streaming
-                        // filter then.
-                        let mut out = Vec::with_capacity(body.len() + 12);
-                        out.extend_from_slice(b"\x1b[200~");
-                        out.extend_from_slice(&body);
-                        out.extend_from_slice(b"\x1b[201~");
+                        let mut out = Vec::new();
+                        crate::paste::bracketed_paste(&body, &mut out);
                         return Some(Cow::Owned(out));
                     }
                     return Some(Cow::Owned(body));
@@ -896,6 +886,18 @@ mod tests {
         // Bracketed-paste mode wraps in \e[200~ ... \e[201~.
         let out = key_event_to_bytes(&ev, mods, TermModes { bracketed_paste: true, ..TermModes::default() }, || Some("hi".to_string())).unwrap();
         assert_eq!(&*out, b"\x1b[200~hi\x1b[201~");
+    }
+
+    #[test]
+    fn cmd_v_paste_drops_end_marker_in_clipboard() {
+        let ev = pressed(LogicalKey::Char('v'), Some("v"));
+        let mods = Modifiers {
+            super_: true,
+            ..Default::default()
+        };
+        let modes = TermModes { bracketed_paste: true, ..TermModes::default() };
+        let out = key_event_to_bytes(&ev, mods, modes, || Some("a\x1b[201~b\x1b[20\x1b[201~1~c".to_string())).unwrap();
+        assert_eq!(&*out, b"\x1b[200~abc\x1b[201~");
     }
 
     #[test]
