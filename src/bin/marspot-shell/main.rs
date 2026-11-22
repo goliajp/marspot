@@ -1,4 +1,4 @@
-// CARVE-OUT: holds the ShellApp state, the supervisor's constants and inbox, and main(), whose ~390-line launch sequence keeps it over the limit; shrink on every touch
+// CARVE-OUT: holds the module list, the window and redraw constants, and main(), whose ~390-line launch sequence keeps it over the limit; shrink on every touch
 //! marspot-shell — the outer process.
 //!
 //! Owns the NSWindow + NSApp event loop and a CAMetalLayer that
