@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.532"  # cc: move dormant pane bookkeeping out of the claudecode plugin's mod.rs
+shell   = "0.7.533"  # cc: move the profile cycle and hand-off out of the claudecode plugin's mod.rs
 core    = "0.12.598"  # basic: name what terminal.rs still holds in its carve-out marker
 session = "0.11.406"  # basic: name what terminal.rs still holds in its carve-out marker
