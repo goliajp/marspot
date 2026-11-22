@@ -1,6 +1,7 @@
 //! The integration tests, in one binary so a change relinks one test executable instead of twenty-seven.
 
 mod alignment_and_column_mode;
+mod bell;
 mod cluster_cells;
 mod cluster_history;
 mod cluster_history_through_the_parser;

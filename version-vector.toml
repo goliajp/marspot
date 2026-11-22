@@ -30,4 +30,4 @@
 
 shell   = "0.7.514"  # test that no agent plugin claims another agent's child
 core    = "0.12.567"  # the text lane takes its open cluster byte without string push
-session = "0.11.391"  # the text lane takes its open cluster byte without string push
+session = "0.11.392"  # the terminal records a bare BEL for whoever rings it
