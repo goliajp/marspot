@@ -106,30 +106,38 @@ fn gemini_started_by_claude_in_front_is_not_claimed_by_gemini() {
 #[test]
 fn kimi_started_by_gemini_in_front_is_not_claimed_by_kimi() {
     // kimi is told by the kernel's name for the process, the file name
-    // of its executable, so the child runs a copy of sleep named kimi;
-    // a copy keeps the system's signature and is killed on exec unless
-    // it is signed again
+    // of its executable, so the child is this test binary under a hard
+    // link named kimi, run for `a_child_named_kimi_waits` only.  a
+    // re-signed copy of a system binary is killed on exec on some
+    // machines (SIGILL on the GitHub macos-15 runner)
     struct Scratch(std::path::PathBuf);
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
-    let dir = Scratch(std::env::temp_dir().join(format!("marspot-agent-front-{}", std::process::id())));
+    let exe = std::env::current_exe().unwrap();
+    let dir = Scratch(exe.parent().unwrap().join(format!("agent-front-{}", std::process::id())));
     std::fs::create_dir_all(&dir.0).unwrap();
     let bin = dir.0.join("kimi");
-    std::fs::copy("/bin/sleep", &bin).unwrap();
-    let signed = std::process::Command::new("/usr/bin/codesign").arg("--force").args(["-s", "-"]).arg(&bin).output().unwrap();
-    assert!(signed.status.success(), "{}", String::from_utf8_lossy(&signed.stderr));
-    // the first exec of a freshly signed file waits on the system's
-    // assessment of it, which on a ci runner outlasts the wait below
-    let first = std::process::Command::new(&bin).arg("0").status().unwrap();
-    assert!(first.success(), "the copy named kimi did not run: {first:?}");
+    std::fs::hard_link(&exe, &bin).unwrap();
     let claimed = claim_with_a_child_in_front(
-        &format!("(exec -a gemini /bin/bash -c '{} 30 & wait')", bin.display()),
+        &format!(
+            "(exec -a gemini /bin/bash -c 'MARSPOT_FRONT_CHILD=1 {} --exact plugins::agent_front_tests::a_child_named_kimi_waits & wait')",
+            bin.display()
+        ),
         gemini,
         |p| p.row.comm == "kimi",
         kimi,
     );
     assert_eq!(claimed, None);
+}
+
+/// The child of the test above: waits to be killed when it is that
+/// child, returns at once when the suite runs it
+#[test]
+fn a_child_named_kimi_waits() {
+    if std::env::var_os("MARSPOT_FRONT_CHILD").is_some() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
 }
