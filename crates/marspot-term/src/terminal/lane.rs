@@ -288,9 +288,14 @@ impl<'a> Handler<'a> {
                     self.grid.set_cursor((cols - 1) as u16, row);
                     *self.pending_wrap = true;
                 }
-                let ch = bytes[n - 1] as char;
+                let last = bytes[n - 1];
+                let ch = last as char;
                 self.cluster_buf.clear();
-                self.cluster_buf.push(ch);
+                // the run is printable ASCII: its last byte is a whole
+                // character, pushed without `String::push`'s encoder,
+                // which LLVM may leave out of line here
+                // SAFETY: a byte below 0x80 is valid UTF-8 on its own
+                unsafe { self.cluster_buf.as_mut_vec().push(last) };
                 *self.cluster_fast = Some((ch, 1));
                 *self.cluster_anchor = Some(((to - 1) as u16, row, 1));
                 *self.seg_synced = false;

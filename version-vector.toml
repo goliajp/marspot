@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.511"  # an op types into its pane through one exit that checks the reader
-core    = "0.12.566"  # reflow carries cluster text through a width change
-session = "0.11.390"  # every standard capability of the borrowed xterm-256color entry holds
+shell   = "0.7.512"  # the text lane takes its open cluster byte without string push
+core    = "0.12.567"  # the text lane takes its open cluster byte without string push
+session = "0.11.391"  # the text lane takes its open cluster byte without string push
