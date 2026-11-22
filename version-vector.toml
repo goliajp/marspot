@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.568"  # move the supervisor's periodic check out of the shell's main.rs
+shell   = "0.7.569"  # move quit, the redraw pump start and icon drawing out of the shell's main.rs
 core    = "0.12.615"  # drop render_metal.rs's carve-out marker
 session = "0.11.406"  # basic: name what terminal.rs still holds in its carve-out marker
