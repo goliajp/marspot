@@ -249,7 +249,7 @@ mod tests {
             marspot_peer::proc::lstart(me).unwrap()
         );
         std::fs::write(dir.join(format!("{me}.json")), rec).unwrap();
-        marspot_peer::inbox::write_in(&[dir.clone()], &inbox, &frame_line(&inbox, &body(8))).unwrap();
+        marspot_peer::inbox::write_in(std::slice::from_ref(&dir), &inbox, &frame_line(&inbox, &body(8))).unwrap();
         let (conn, _) = listener.accept().unwrap();
         let mut line = String::new();
         BufReader::new(conn).read_line(&mut line).unwrap();
