@@ -58,6 +58,8 @@ pub mod pty_op;
 pub mod pty_command;
 pub mod skills;
 mod ticks;
+#[cfg(test)]
+mod agent_front_tests;
 pub use ticks::TickDue;
 // F3+1 — pidtree moved to marspot lib (`src/pidtree.rs`) so L2 (marspot-core)
 // can use the same libproc walker for the process-tree panel.  Re-export under

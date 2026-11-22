@@ -7,8 +7,11 @@
 //! renamed.  The Codex, Gemini and Kimi records are marspot's own, so
 //! they carry the pane's name too.
 //!
-//! A pane running two agents (one started inside the other) would give
-//! both the same name, so such a pane is left out of the table.
+//! A Claude session is a pane's only when it is the pane's agent, the
+//! program in front of the pane; one started by another program in the
+//! pane is that program's tool and gets no name.  A pane still counted
+//! twice would give both the same name, so such a pane is left out of
+//! the table.
 
 use std::collections::{HashMap, HashSet};
 
@@ -24,18 +27,24 @@ pub(super) struct Panes {
     pub names: HashMap<u64, String>,
     /// Pane id → its directory's name and its code.
     ids: HashMap<u64, (String, Option<u16>)>,
-    /// Pane id → every process under its shell.
-    pub pids: HashMap<u64, HashSet<i32>>,
+    /// The claude in front of a pane → that pane.
+    claude: HashMap<i32, u64>,
 }
 
 impl Panes {
     pub fn look() -> Panes {
-        let obs = crate::observe::shared().latest();
-        let refs = crate::ShellApp::pane_refs_in(&obs);
+        Panes::of(&crate::observe::shared().latest())
+    }
+
+    fn of(obs: &crate::observe::Observation) -> Panes {
+        let refs = crate::ShellApp::pane_refs_in(obs);
         let names = marspot::pane_name::assign(&refs).into_iter().collect();
         let ids = refs.into_iter().map(|p| (p.sid, (marspot::pane_name::base_name(&p.cwd), p.code))).collect();
-        let pids = obs.live().map(|s| (s.entry.id, s.descendants.iter().map(|p| p.row.id().pid).collect())).collect();
-        Panes { names, ids, pids }
+        let claude = obs
+            .live()
+            .filter_map(|s| crate::plugins::claudecode::pane_claude(s).map(|p| (p.row.pid, s.entry.id)))
+            .collect();
+        Panes { names, ids, claude }
     }
 
     /// The table entry for the session `pid` in pane `sid`.
@@ -51,8 +60,9 @@ impl Panes {
         })
     }
 
+    /// The pane whose agent is the claude `pid`.
     fn pane_of(&self, pid: i32) -> Option<u64> {
-        self.pids.iter().find(|(_, ps)| ps.contains(&pid)).map(|(sid, _)| *sid)
+        self.claude.get(&pid).copied()
     }
 }
 
@@ -178,6 +188,45 @@ mod tests {
         let (rename, crowded) = plan(&[10, 11, 20, 30, 99], &[2, 4], pane_of);
         assert_eq!(rename, vec![(3, 30)]);
         assert_eq!(crowded, HashSet::from([1, 2]));
+    }
+
+    /// A claude that the claude in front of the pane started is not
+    /// the pane's, and does not crowd it.
+    #[test]
+    fn only_the_claude_in_front_is_named_for_the_pane() {
+        use crate::plugins::pty_op::front::tests::{shell_on_a_pty, wait_for};
+        let (mut sh, mut m) = shell_on_a_pty();
+        let shell = sh.id() as i32;
+        let line = b"(exec -a claude /bin/bash -c '(exec -a claude /bin/sleep 30) & wait')\n";
+        std::io::Write::write_all(&mut m, line).unwrap();
+        let look = || {
+            crate::observe::Observation::from_parts(
+                std::time::Instant::now(),
+                marspot::pidtree::ProcTable::take(),
+                vec![(crate::observe::tests::entry(1, 1, shell), true)],
+                |r| marspot::pidtree::proc_argv(r.pid).map(std::sync::Arc::<[String]>::from),
+            )
+        };
+        let claudes = |obs: &crate::observe::Observation| -> Vec<i32> {
+            let s = obs.session(1).expect("the pane is in the observation");
+            s.descendants.iter().filter(|p| p.name() == "claude").map(|p| p.row.pid).collect()
+        };
+        let ready = wait_for(|| claudes(&look()).len() == 2 && Panes::of(&look()).claude.len() == 1);
+        let obs = look();
+        let both = claudes(&obs);
+        let panes = Panes::of(&obs);
+        let started: Vec<i32> = obs.session(1).unwrap().descendants.iter().map(|p| p.row.pid).collect();
+        let _ = sh.kill();
+        let _ = sh.wait();
+        for pid in started {
+            let _ = marspot::pidtree::kill_pid(pid, libc::SIGKILL);
+        }
+        assert!(ready, "the claude in front never showed up with a claude under it");
+        let named: Vec<Option<u64>> = both.iter().map(|&pid| panes.pane_of(pid)).collect();
+        assert_eq!(named.iter().filter(|n| **n == Some(1)).count(), 1, "{named:?}");
+        let (rename, crowded) = plan(&both, &[], |pid| panes.pane_of(pid));
+        assert_eq!(rename.len(), 1);
+        assert!(crowded.is_empty());
     }
 
     /// Every pane an agent runs in is in the table: with an inbox when

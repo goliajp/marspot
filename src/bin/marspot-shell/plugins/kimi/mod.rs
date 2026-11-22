@@ -63,7 +63,7 @@ pub fn looks_like_kimi(d: &pidtree::ProcRow) -> bool {
 /// [`Session::agent`](crate::observe::Session::agent): the kimi in front
 /// of the pane.  One that runs under another program, an agent, another
 /// kimi or anything else, is that program's tool and is left alone.
-fn agent_in(s: &crate::observe::Session) -> Option<&Proc> {
+pub(super) fn agent_in(s: &crate::observe::Session) -> Option<&Proc> {
     s.agent(is_kimi)
 }
 
