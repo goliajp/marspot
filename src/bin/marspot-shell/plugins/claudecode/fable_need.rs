@@ -15,7 +15,7 @@
 //! such an account to save Fable for others.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::quota::{needs_fable, Refusal, Room};
 use super::{BindMeta, ClaudecodePlugin, ScanResult};
@@ -55,34 +55,43 @@ pub(super) fn ask_of(own: Option<&Refusal>, agent: Option<&Refusal>, agent_name:
 }
 
 /// The panes marked as needing Fable. Bounded by the panes.
+///
+/// Persisted (`fable_need.tsv`): an L1 self-update starts a new
+/// process, and a mark lost there sends the pane back to an account
+/// without Fable on the next rebalance.
 #[derive(Debug, Default)]
 pub(super) struct Marks {
     by_pane: HashMap<u64, Mark>,
+    dirty: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct Mark {
     ask: Ask,
-    since: Instant,
+    /// Unix seconds when the pane was marked.
+    since: i64,
     /// The session has been told about this refusal, with the move
     /// that answered it.
     told: bool,
 }
 
 impl Marks {
-    /// Take in a refusal seen in `sid`; true when it is newer than the
-    /// one the pane is already marked for.
-    pub(super) fn note(&mut self, sid: u64, ask: &Ask) -> bool {
+    /// Take in a refusal seen in `sid` at `now`; true when it is newer
+    /// than the one the pane is already marked for.
+    pub(super) fn note(&mut self, sid: u64, ask: &Ask, now: i64) -> bool {
         if self.by_pane.get(&sid).is_some_and(|m| m.ask.at >= ask.at) {
             return false;
         }
-        self.by_pane.insert(sid, Mark { ask: ask.clone(), since: Instant::now(), told: false });
+        self.by_pane.insert(sid, Mark { ask: ask.clone(), since: now, told: false });
+        self.dirty = true;
         true
     }
 
     /// Forget panes that are gone, and marks older than `MARK_FOR`.
-    pub(super) fn retain(&mut self, live: &[u64]) {
-        self.by_pane.retain(|sid, m| live.contains(sid) && m.since.elapsed() < MARK_FOR);
+    pub(super) fn retain(&mut self, live: &[u64], now: i64) {
+        let before = self.by_pane.len();
+        self.by_pane.retain(|sid, m| live.contains(sid) && now - m.since < MARK_FOR.as_secs() as i64);
+        self.dirty |= self.by_pane.len() != before;
     }
 
     /// Is this pane to be judged as a Fable pane, whatever its model?
@@ -109,8 +118,58 @@ impl Marks {
     /// The session has been told, with a move that started.
     pub(super) fn told(&mut self, sid: u64) {
         if let Some(m) = self.by_pane.get_mut(&sid) {
+            self.dirty |= !m.told;
             m.told = true;
         }
+    }
+
+    /// One line per pane, for the file that carries the marks across a
+    /// restart; None when nothing changed since the last call.
+    ///
+    /// `sid  since  at  told  own|agent  [description]`: the
+    /// description goes last, as the record holds it, escaped, so it
+    /// has no tab or newline of its own.
+    pub(super) fn changed(&mut self) -> Option<String> {
+        if !std::mem::take(&mut self.dirty) {
+            return None;
+        }
+        let mut lines: Vec<String> = self
+            .by_pane
+            .iter()
+            .map(|(sid, m)| {
+                let who = m.ask.agent.as_deref().map_or("own".to_string(), |a| format!("agent\t{a}"));
+                format!("{sid}\t{}\t{}\t{}\t{who}\n", m.since, m.ask.at, u8::from(m.told))
+            })
+            .collect();
+        lines.sort();
+        Some(lines.concat())
+    }
+
+    /// What `changed` wrote, without marks older than `MARK_FOR` at
+    /// `now`. A line that does not read is dropped.
+    pub(super) fn decode(text: &str, now: i64) -> Self {
+        let mut marks = Self::default();
+        for line in text.lines() {
+            let f: Vec<&str> = line.splitn(6, '\t').collect();
+            let (Some(sid), Some(since), Some(at)) = (
+                f.first().and_then(|s| s.parse::<u64>().ok()),
+                f.get(1).and_then(|s| s.parse::<i64>().ok()),
+                f.get(2).and_then(|s| s.parse::<i64>().ok()),
+            ) else {
+                continue;
+            };
+            let agent = match (f.get(4), f.get(5)) {
+                (Some(&"own"), _) => None,
+                (Some(&"agent"), name) => Some(name.unwrap_or(&"").to_string()),
+                _ => continue,
+            };
+            if now - since >= MARK_FOR.as_secs() as i64 {
+                continue;
+            }
+            let told = f.get(3) == Some(&"1");
+            marks.by_pane.insert(sid, Mark { ask: Ask { at, agent }, since, told });
+        }
+        marks
     }
 }
 
@@ -159,6 +218,73 @@ impl ClaudecodePlugin {
         {
             host.log(LogLevel::Info, "quota.refused", &format!("P{} refused {} at {}", meta.profile_num, r.model, r.at));
         }
-        self.fable_need.note(sid, ask);
+        self.fable_need.note(sid, ask, super::rooms::unix_now());
+    }
+
+    pub(super) fn load_fable_need(&mut self, host: &dyn PluginHost) {
+        let Ok(dir) = host.state_dir() else { return };
+        if let Ok(text) = std::fs::read_to_string(dir.join(FILE)) {
+            self.fable_need = Marks::decode(&text, super::rooms::unix_now());
+        }
+    }
+
+    pub(super) fn persist_fable_need(&mut self, host: &dyn PluginHost) {
+        let Some(text) = self.fable_need.changed() else { return };
+        let Ok(dir) = host.state_dir() else { return };
+        if let Err(e) = std::fs::write(dir.join(FILE), text) {
+            host.log(LogLevel::Warn, "quota.fable_need_persist_failed", &format!("{e}"));
+        }
+    }
+}
+
+const FILE: &str = "fable_need.tsv";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: i64 = 1_795_374_223;
+
+    fn agent(name: &str) -> Ask {
+        Ask { at: NOW, agent: Some(name.into()) }
+    }
+
+    #[test]
+    fn a_mark_lasts_twelve_hours_and_ends_with_its_pane() {
+        let mut marks = Marks::default();
+        assert!(marks.note(1, &agent("a"), NOW));
+        assert!(marks.note(2, &Ask { at: NOW, agent: None }, NOW));
+        assert!(!marks.note(1, &agent("a"), NOW + 5), "the same refusal again");
+
+        marks.retain(&[1, 2], NOW + MARK_FOR.as_secs() as i64 - 1);
+        assert!(marks.marked(1) && marks.marked(2));
+
+        // pane 2 closed
+        marks.retain(&[1], NOW + 60);
+        assert!(marks.marked(1) && !marks.marked(2));
+
+        marks.retain(&[1], NOW + MARK_FOR.as_secs() as i64);
+        assert!(!marks.marked(1), "twelve hours on");
+    }
+
+    #[test]
+    fn marks_survive_being_written_and_read() {
+        let mut marks = Marks::default();
+        marks.note(7, &agent(r#"Design RFC: \"shadow\" subpanes"#), NOW);
+        marks.note(8, &Ask { at: NOW - 30, agent: None }, NOW);
+        marks.note(9, &agent(""), NOW - 100);
+        marks.told(7);
+        let text = marks.changed().expect("changed");
+        assert_eq!(marks.changed(), None, "nothing new since");
+
+        let back = Marks::decode(&text, NOW + 60);
+        assert_eq!(back.by_pane, marks.by_pane);
+        assert_eq!(back.word(7, 1, 2), None, "pane 7 was told");
+        assert!(back.word(9, 1, 2).is_some_and(|w| w.contains("一个后台子代理")));
+
+        // read back after twelve hours: gone
+        let late = Marks::decode(&text, NOW - 100 + MARK_FOR.as_secs() as i64);
+        assert!(late.marked(7) && late.marked(8) && !late.marked(9));
+        assert!(Marks::decode("x\ty\n7\t1\t2\t0\tsomeone\n", NOW).by_pane.is_empty());
     }
 }

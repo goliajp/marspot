@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.560"  # read an agent's refusal only from its notice's status and summary
+shell   = "0.7.561"  # keep the needs-fable mark across a shell restart
 core    = "0.12.615"  # drop render_metal.rs's carve-out marker
 session = "0.11.406"  # basic: name what terminal.rs still holds in its carve-out marker

@@ -29,6 +29,7 @@ impl Plugin for ClaudecodePlugin {
         self.load_dormant(host);
         self.load_heads_up(host);
         self.load_refused(host);
+        self.load_fable_need(host);
         // Resolve ~/.claude/projects.  Without HOME there's nothing
         // to do — disable cleanly via a soft Err.
         let home = std::env::var_os("HOME").ok_or_else(|| {

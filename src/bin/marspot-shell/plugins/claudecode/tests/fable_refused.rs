@@ -144,7 +144,7 @@ fn a_pane_refused_fable_is_not_moved_off_to_leave_fable_to_others() {
     let lines = lines_about(&host, sid);
     assert!(lines.iter().any(|(_, l)| l.contains("leaves Fable to the panes that need it")), "{lines:?}");
 
-    plugin.fable_need.note(sid, &Ask { at: now(), agent: None });
+    plugin.fable_need.note(sid, &Ask { at: now(), agent: None }, now());
     host.logged.lock().unwrap().clear();
     sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::AwaitingUser));
     assert!(lines_about(&host, sid).is_empty(), "{:?}", lines_about(&host, sid));
@@ -171,4 +171,25 @@ fn with_fable_spent_everywhere_a_refused_pane_stays_and_says_so_once() {
     let lines = lines_about(&host, sid);
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert_eq!(lines[0].0, "quota.fable_nowhere", "{lines:?}");
+}
+
+/// A shell restart, as after a silent update, keeps the mark: the pane
+/// still counts as one that needs Fable.
+#[test]
+fn a_fable_mark_survives_the_shell_restarting() {
+    let home = quota_home("fable-reload");
+    feed(&home, "fable-reload", 0.5, 0.1);
+    rebalance(marspot::settings::Rebalance::Off);
+    confirmed("u-87");
+    let host = FakeHost::new(home.join("state"));
+    let sid = 87u64;
+    let mut plugin = stranded_plugin(pane_on_p1(&home, "u-87"), sid);
+    sweep(&mut plugin, &host, &mut agent_refused_fable(sid));
+    assert!(plugin.fable_need.marked(sid));
+
+    let mut again = stranded_plugin(pane_on_p1(&home, "u-87"), sid);
+    assert!(!again.fable_need.marked(sid));
+    again.load_fable_need(&host);
+    assert!(again.fable_need.marked(sid));
+    assert_eq!(again.fable_need.word(sid, 1, 2), None, "it was told before the restart");
 }

@@ -87,7 +87,7 @@ impl ClaudecodePlugin {
         // fact that a move is already on its way, and the next pass
         // starts a second one on top of the first (seen on pane 442,
         // 2026-09-29: three cycles in 40 seconds).
-        self.fable_need.retain(&result.sessions_seen);
+        self.fable_need.retain(&result.sessions_seen, rooms::unix_now());
         let marks = &self.fable_need;
         self.stranded.retain(|sid, _| {
             if !result.sessions_seen.contains(sid) {
@@ -168,6 +168,7 @@ impl ClaudecodePlugin {
             self.move_off_refused(host, sid, &rooms, meta, result, choice, Judged { model, for_fable });
         }
         self.persist_heads_up(host);
+        self.persist_fable_need(host);
     }
 
     pub(super) fn load_heads_up(&mut self, host: &dyn PluginHost) {
